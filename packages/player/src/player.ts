@@ -27,6 +27,7 @@ import { frameDurationMs, getModel, type ConsoleModel } from "./models.js";
 import { ReplayRecorder, ReplaySource, hashCart, randomSeed, type Replay } from "./replay.js";
 import { seedCartridge, prependLuaCode, readCartCode, appendLuaCode, rewriteLuaCode } from "./cartseed.js";
 import { MouseLook } from "./mouseLook.js";
+import { GyroLook } from "./gyroLook.js";
 import { STICK_OPTIN_WORD, STICK_WORD, packLookGain, packSticks, stickChannel } from "./sticks.js";
 import { POINTER_CLICKS, PointerInput, writePointer } from "./pointer.js";
 import {
@@ -36,6 +37,8 @@ import {
   applyLookSettings,
   lookAccelerationBoost,
   lookGains,
+  dragLean,
+  gyroLean,
   lookProfileFor,
   mouseLean,
   rumbleEffect,
@@ -146,6 +149,8 @@ export class Player {
   private pointer?: PointerInput;
   /** Mouse look (C4): captures the mouse on a click when the player has it on. */
   private mouse?: MouseLook;
+  /** Gyro aim (C4b): read only while the player has it on, on a touch device. */
+  private gyro?: GyroLook;
   /** Where the pointer is written (the debug block's offset from pmem), when the cart has UI documents. */
   private pointerOffset: number | null = null;
   /** The cart reads analog sticks (it opted in via cartbox.stick). */
@@ -281,12 +286,43 @@ export class Player {
     return held;
   }
 
-  /** The mouse's movement since the last tick, as look (C4). */
+  /**
+   * The look that isn't a stick's, before each tick: the mouse's movement
+   * (C4), a drag on the touch pad's look zone and the device's turning (C4b).
+   */
   private feedMouse(): void {
-    if (!this.mouse) return;
-    const [dx, dy] = this.mouse.take();
-    const [x, y] = this.inputEnabled && !this.replaySource ? mouseLean(dx, dy) : [0, 0];
-    this.gamepad.setMouseLook(x, y);
+    const live = this.inputEnabled && !this.replaySource;
+    if (this.mouse) {
+      const [dx, dy] = this.mouse.take();
+      const [x, y] = live ? mouseLean(dx, dy) : [0, 0];
+      this.gamepad.setMouseLook(x, y);
+    }
+    const drag = this.touch?.takeDrag();
+    if (drag) {
+      const short = Math.min(this.view.innerWidth || 1, this.view.innerHeight || 1);
+      const [x, y] = live ? dragLean(drag[0], drag[1], short) : [0, 0];
+      this.gamepad.setStick(1, x, y);
+    }
+    this.feedGyro(live);
+  }
+
+  private feedGyro(live: boolean): void {
+    const mode = this.controlSettings.gyroAim ?? "off";
+    if (mode === "off" || !this.touch) {
+      if (this.gyro) {
+        this.gyro.destroy();
+        this.gyro = undefined;
+        this.gamepad.setGyroLook(0, 0);
+      }
+      return;
+    }
+    this.gyro ??= new GyroLook(this.view);
+    // "zoomed": only while the game's "zoom" action is on (held, or toggled on).
+    const zoom = this.actions.findIndex((a) => a.name === "zoom");
+    const on = mode === "always" || (zoom >= 0 && ((this.lastActions >>> zoom) & 1) === 1);
+    const rate = live && on ? this.gyro.latest() : null;
+    const [x, y] = rate ? gyroLean(rate, this.view.screen?.orientation?.angle ?? 0) : [0, 0];
+    this.gamepad.setGyroLook(x, y);
   }
 
   /** Play a rumble the cart asked for (cartbox.rumble, C3), under the player's vibration settings. */
@@ -1340,8 +1376,9 @@ export class Player {
       return;
     }
     const axes = live ? applyLookSettings(this.gamepad.axes, look, false) : ([0, 0, 0, 0] as const);
-    // Look acceleration is a stick's: the mouse turns as far as it moves.
-    this.lookHeldTicks = device === "mouse" ? 0 : stepLookAcceleration(this.lookHeldTicks, axes[2], axes[3]);
+    // Look acceleration is a stick's: the mouse, a drag and the gyro turn as far as they move.
+    const stick = device === "controller" || (device === "touch" && this.controlSettings.touchLookMode !== "drag");
+    this.lookHeldTicks = stick ? stepLookAcceleration(this.lookHeldTicks, axes[2], axes[3]) : 0;
     words[STICK_WORD] = packSticks(axes);
     // A replay feeds no sticks, so its gains are the plain ones.
     const boost = live ? lookAccelerationBoost(this.lookHeldTicks, this.controlSettings.lookAcceleration) : 1;
@@ -1422,6 +1459,7 @@ export class Player {
     this.keyboard?.destroy();
     this.touch?.destroy();
     this.mouse?.destroy();
+    this.gyro?.destroy();
     this.pointer?.destroy();
     this.runtime?.channel.destroy();
     this.runtime = null;

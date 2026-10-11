@@ -1,15 +1,20 @@
 /**
  * Every device its own (CONTROLLER_SETTINGS_ROADMAP.md C4): the device doing
- * the looking brings its own sensitivity and curve, the mouse's movement
- * becomes look, and saved settings from before load as they played.
+ * the looking brings its own sensitivity and curve, the mouse's movement, a
+ * drag on the touch pad and the device's turning (C4b) become look, and saved
+ * settings from before load as they played.
  */
 import { describe, expect, it } from "vitest";
 
 import {
   DEFAULT_CONTROL_SETTINGS,
   DEFAULT_MOUSE_LOOK,
+  DRAG_FULL_LEAN,
+  GYRO_FULL_DEG_PER_S,
   MOUSE_FULL_LEAN_PX,
   applyLookSettings,
+  dragLean,
+  gyroLean,
   lookProfileFor,
   mouseLean,
   parseControlSettings,
@@ -75,5 +80,60 @@ describe("mouse look", () => {
     state.setStick(1, 0.3, 0);
     expect(state.lookDevice).toBe("touch");
     expect(state.axes[2]).toBe(0.3);
+  });
+});
+
+describe("drag to look", () => {
+  it("turns a tick's drag into lean by the screen's size", () => {
+    const short = 800;
+    const full = short * DRAG_FULL_LEAN;
+    expect(dragLean(full / 2, -full, short)).toEqual([0.5, -1]);
+    expect(dragLean(full * 10, 0, short)).toEqual([1, 0]);
+  });
+});
+
+describe("gyro aim", () => {
+  const full = GYRO_FULL_DEG_PER_S;
+
+  it("looks right when the device turns right and up when its top tilts away, held upright", () => {
+    // Upright: turning right is a negative turn about the device's y (gamma);
+    // tilting its top away, a positive turn about its x (beta).
+    expect(gyroLean({ beta: 0, gamma: -full / 2 }, 0)).toEqual([0.5, 0]);
+    expect(gyroLean({ beta: full, gamma: 0 }, 0)).toEqual([0, -1]); // up is −y
+  });
+
+  it("keeps those directions with the device on its side", () => {
+    // Turned a quarter anticlockwise (angle 90), the device's x points up the screen.
+    const [x, y] = gyroLean({ beta: -full / 2, gamma: 0 }, 90);
+    expect(x).toBeCloseTo(0.5, 5);
+    expect(y).toBeCloseTo(0, 5);
+    const [x2, y2] = gyroLean({ beta: 0, gamma: -full / 2 }, 90); // its −y is the screen's right: a tilt back
+    expect(x2).toBeCloseTo(0, 5);
+    expect(y2).toBeCloseTo(-0.5, 5);
+    const [x3] = gyroLean({ beta: full / 2, gamma: 0 }, 270);
+    expect(x3).toBeCloseTo(0.5, 5);
+  });
+
+  it("reads a hand's tremor as still", () => {
+    expect(gyroLean({ beta: 2, gamma: -2 }, 0)).toEqual([0, 0]);
+    expect(gyroLean({ beta: null, gamma: null }, 0)).toEqual([0, 0]);
+  });
+
+  it("looks with its own profile while it turns", () => {
+    const settings = parseControlSettings({ lookSensitivity: 1, gyroLook: { sensitivity: 2, curve: "precision" }, gyroAim: "zoomed" });
+    expect(settings.gyroAim).toBe("zoomed");
+    const gyro = lookProfileFor(settings, "gyro");
+    expect([gyro.lookSensitivity, gyro.lookCurve]).toEqual([2, "precision"]);
+    const state = new GamepadState();
+    state.setPad(0, [0, 0, 0.1, 0]);
+    state.setGyroLook(0.4, 0);
+    expect(state.lookDevice).toBe("gyro");
+    expect(state.axes[2]).toBe(0.4);
+  });
+
+  it("is off, with the touch pad looking by its stick and its move stick fixed, by default", () => {
+    const old = parseControlSettings({ lookSensitivity: 1 });
+    expect([old.gyroAim, old.touchLookMode, old.floatingStick]).toEqual(["off", "stick", false]);
+    expect(parseControlSettings({ lookSensitivity: 1, gyroAim: "sometimes", touchLookMode: "tilt" })).toMatchObject({ gyroAim: "off", touchLookMode: "stick" });
   });
 });

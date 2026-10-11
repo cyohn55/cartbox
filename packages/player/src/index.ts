@@ -471,6 +471,10 @@ export {
   stepLookAcceleration,
   AIM_ASSISTS,
   DEFAULT_MOUSE_LOOK,
+  GYRO_AIMS,
+  TOUCH_LOOK_MODES,
+  dragLean,
+  gyroLean,
   MOUSE_FULL_LEAN_PX,
   lookProfileFor,
   mouseLean,
@@ -482,7 +486,8 @@ export {
   readPad,
   standardizePad,
 } from "./controls.js";
-export type { AimAssist, LookDevice, LookProfile, ControlSettings, ControlTarget, PadButton, PadSnapshot, ResponseCurve, RumbleEffect, StickDeadZones, StickLayout } from "./controls.js";
+export type { AimAssist, GyroAim, TouchLookMode, LookDevice, LookProfile, ControlSettings, ControlTarget, PadButton, PadSnapshot, ResponseCurve, RumbleEffect, StickDeadZones, StickLayout } from "./controls.js";
+export { askMotionPermission } from "./gyroLook.js";
 export { GamepadInput } from "./input.js";
 
 // Physics (ENGINE_ROADMAP.md, Phase 2): the session that runs a cart's bodies,

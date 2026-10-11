@@ -21,12 +21,15 @@ import {
   DEFAULT_STICK_DEAD_ZONES,
   DEFAULT_TRIGGER_THRESHOLD,
   PAD_BUTTONS,
+  GYRO_AIMS,
   RESPONSE_CURVES,
   STICK_LAYOUTS,
+  askMotionPermission,
   standardizePad,
   type AimAssist,
   type ControlSettings,
   type ControlTarget,
+  type GyroAim,
   type LookProfile,
   type PadButton,
   type ResponseCurve,
@@ -133,6 +136,7 @@ export function StartMenu(props: StartMenuProps) {
   const [tab, setTab] = useState<Tab>("controls");
   const [listening, setListening] = useState<ConsoleButton | null>(null);
   const [listeningAction, setListeningAction] = useState<string | null>(null);
+  const [gyroDenied, setGyroDenied] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
   const controls = settings.controls;
   const setControls = (patch: Partial<typeof controls>) => onChange({ ...settings, controls: { ...controls, ...patch } });
@@ -387,12 +391,55 @@ export function StartMenu(props: StartMenuProps) {
           {tab === "touch" && (
             <>
               <h3 style={styles.h3}>Look (touch)</h3>
+              <Row label="Look with">
+                <select
+                  aria-label="Touch look"
+                  style={styles.select}
+                  value={controls.touchLookMode ?? "stick"}
+                  onChange={(event) => setControls({ touchLookMode: event.target.value === "drag" ? "drag" : "stick" })}
+                >
+                  <option value="stick">The right stick</option>
+                  <option value="drag">A drag anywhere on the right of the screen</option>
+                </select>
+              </Row>
               <LookProfileRows
                 device="Touch"
                 profile={controls.touchLook ?? DEFAULT_TOUCH_LOOK}
                 onChange={(touchLook) => setControls({ touchLook })}
               />
+              <h3 style={styles.h3}>Gyro aim</h3>
+              <Row label="Turn the device to aim">
+                <select
+                  aria-label="Gyro aim"
+                  style={styles.select}
+                  value={controls.gyroAim ?? "off"}
+                  onChange={(event) => {
+                    const gyroAim = event.target.value as GyroAim;
+                    setControls({ gyroAim });
+                    // iOS sends motion only once the page asks, from a tap like this one.
+                    if (gyroAim !== "off") void askMotionPermission().then((ok) => !ok && setGyroDenied(true));
+                  }}
+                >
+                  {GYRO_AIMS.map((g) => (
+                    <option key={g} value={g}>
+                      {g === "off" ? "Off" : g === "always" ? "Always" : "Only while zoomed"}
+                    </option>
+                  ))}
+                </select>
+              </Row>
+              {gyroDenied && <p style={styles.note}>This browser didn&apos;t allow motion, so gyro aim can&apos;t read the device turning.</p>}
+              <LookProfileRows
+                device="Gyro"
+                profile={controls.gyroLook ?? DEFAULT_TOUCH_LOOK}
+                onChange={(gyroLook) => setControls({ gyroLook })}
+              />
+              <p style={styles.note}>On a phone or tablet: turn it left or right to turn, tilt it to aim up or down, with the sticks as well.</p>
+
               <h3 style={styles.h3}>On-screen pad</h3>
+              <Row label="Floating move stick">
+                <Toggle on={controls.floatingStick ?? false} onChange={(floatingStick) => setControls({ floatingStick })} />
+              </Row>
+              <p style={styles.note}>The move stick comes to wherever your thumb lands on the left of the screen.</p>
               <Row label={`Touch controls size  ${pct(controls.touchScale)}`}>
                 <Slider label="Touch controls size" min={0.7} max={1.4} step={0.05} value={controls.touchScale} onChange={(touchScale) => setControls({ touchScale })} />
               </Row>
@@ -404,7 +451,15 @@ export function StartMenu(props: StartMenuProps) {
                   type="button"
                   className="cbx-btn"
                   onClick={() =>
-                    setControls({ touchScale: DEFAULT_CONTROL_SETTINGS.touchScale, touchOpacity: DEFAULT_CONTROL_SETTINGS.touchOpacity, touchLook: DEFAULT_TOUCH_LOOK })
+                    setControls({
+                      touchScale: DEFAULT_CONTROL_SETTINGS.touchScale,
+                      touchOpacity: DEFAULT_CONTROL_SETTINGS.touchOpacity,
+                      touchLook: DEFAULT_TOUCH_LOOK,
+                      touchLookMode: "stick",
+                      floatingStick: false,
+                      gyroAim: "off",
+                      gyroLook: DEFAULT_TOUCH_LOOK,
+                    })
                   }
                 >
                   Reset touch controls
