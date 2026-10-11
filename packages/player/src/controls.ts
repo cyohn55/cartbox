@@ -65,6 +65,26 @@ export const STICK_LAYOUTS: readonly StickLayout[] = ["default", "southpaw", "le
 export type AimAssist = "off" | "standard" | "strong";
 export const AIM_ASSISTS: readonly AimAssist[] = ["off", "standard", "strong"];
 
+/** The devices that can look, each with its own look profile (C4). */
+export type LookDevice = "controller" | "touch" | "mouse";
+
+/**
+ * A device's own look tuning (C4): its sensitivity per axis and response
+ * curve. The controller's are the top-level settings; inversion, zoom
+ * sensitivity, look acceleration and aim assist are the player's, shared.
+ */
+export interface LookProfile {
+  readonly sensitivity: number;
+  readonly sensitivityY: number;
+  readonly curve: ResponseCurve;
+}
+
+/**
+ * The mouse starts on Responsive: a game that eases its stick turn (as
+ * Lockout does, by lean²) then turns in step with the mouse.
+ */
+export const DEFAULT_MOUSE_LOOK: LookProfile = { sensitivity: 1, sensitivityY: 1, curve: "responsive" };
+
 export interface ControlSettings {
   /** Invert the look vertical axis (push up to aim down). */
   readonly invertY: boolean;
@@ -92,6 +112,11 @@ export interface ControlSettings {
    * reads its look gain can turn faster than full lean, so only there.
    */
   readonly lookAcceleration?: number;
+  /** The touch pad's look stick, tuned apart from a controller's (C4; absent: the controller's, as before). */
+  readonly touchLook?: LookProfile;
+  /** Mouse look (C4): click the game to capture the mouse, and it looks; its own tuning. */
+  readonly mouseLook?: LookProfile;
+  readonly mouseCapture?: boolean;
   /** How much the game helps aim (C3). */
   readonly aimAssist?: AimAssist;
   /** Input actions (by name) that toggle on a press instead of acting while held (C3). */
@@ -166,6 +191,9 @@ export const DEFAULT_CONTROL_SETTINGS: ControlSettings = {
   stickLayout: "default",
   zoomSensitivity: 1,
   lookAcceleration: 0,
+  touchLook: { sensitivity: 1, sensitivityY: 1, curve: "standard" },
+  mouseLook: DEFAULT_MOUSE_LOOK,
+  mouseCapture: false,
   aimAssist: "standard",
   actionToggles: [],
   vibration: true,
@@ -205,6 +233,13 @@ export function parseControlSettings(value: unknown, defaults: ControlSettings =
     if (entries.length > 0) keyBindings = Object.fromEntries(entries);
   }
   const lookSensitivity = num(raw.lookSensitivity, 0.25, 3, defaults.lookSensitivity);
+  const curveOf = (v: unknown, fallback: ResponseCurve): ResponseCurve => ((RESPONSE_CURVES as readonly unknown[]).includes(v) ? (v as ResponseCurve) : fallback);
+  const profile = (v: unknown, fallback: LookProfile): LookProfile => {
+    if (typeof v !== "object" || v === null) return fallback;
+    const p = v as Record<string, unknown>;
+    const sensitivity = num(p.sensitivity, 0.25, 3, fallback.sensitivity);
+    return { sensitivity, sensitivityY: num(p.sensitivityY, 0.25, 3, p.sensitivity !== undefined ? sensitivity : fallback.sensitivityY), curve: curveOf(p.curve, fallback.curve) };
+  };
   const deadZones = (v: unknown, fallback: StickDeadZones | undefined): StickDeadZones => {
     const base = fallback ?? DEFAULT_STICK_DEAD_ZONES;
     if (typeof v !== "object" || v === null) return base;
@@ -217,18 +252,24 @@ export function parseControlSettings(value: unknown, defaults: ControlSettings =
       maxInput: Math.max(radial + 0.1, num(z.maxInput, 0.5, 1, base.maxInput)),
     };
   };
+  const lookSensitivityY =
+    raw.lookSensitivityY !== undefined
+      ? num(raw.lookSensitivityY, 0.25, 3, defaults.lookSensitivityY ?? lookSensitivity)
+      : raw.lookSensitivity !== undefined
+        ? lookSensitivity
+        : (defaults.lookSensitivityY ?? lookSensitivity);
+  const lookCurve = curveOf(raw.lookCurve, defaults.lookCurve ?? "standard");
   return {
     invertY: typeof raw.invertY === "boolean" ? raw.invertY : defaults.invertY,
     invertX: typeof raw.invertX === "boolean" ? raw.invertX : (defaults.invertX ?? false),
     lookSensitivity,
     // Saved before there were two: vertical follows horizontal.
-    lookSensitivityY:
-      raw.lookSensitivityY !== undefined
-        ? num(raw.lookSensitivityY, 0.25, 3, defaults.lookSensitivityY ?? lookSensitivity)
-        : raw.lookSensitivity !== undefined
-          ? lookSensitivity
-          : (defaults.lookSensitivityY ?? lookSensitivity),
-    lookCurve: (RESPONSE_CURVES as readonly unknown[]).includes(raw.lookCurve) ? (raw.lookCurve as ResponseCurve) : (defaults.lookCurve ?? "standard"),
+    lookSensitivityY,
+    lookCurve,
+    // Saved before touch had its own: the controller's, as it played.
+    touchLook: profile(raw.touchLook, raw.touchLook === undefined && raw.lookSensitivity !== undefined ? { sensitivity: lookSensitivity, sensitivityY: lookSensitivityY, curve: lookCurve } : (defaults.touchLook ?? { sensitivity: 1, sensitivityY: 1, curve: "standard" })),
+    mouseLook: profile(raw.mouseLook, defaults.mouseLook ?? DEFAULT_MOUSE_LOOK),
+    mouseCapture: typeof raw.mouseCapture === "boolean" ? raw.mouseCapture : (defaults.mouseCapture ?? false),
     leftStick: deadZones(raw.leftStick, defaults.leftStick),
     rightStick: deadZones(raw.rightStick, defaults.rightStick),
     stickLayout: (STICK_LAYOUTS as readonly unknown[]).includes(raw.stickLayout) ? (raw.stickLayout as StickLayout) : (defaults.stickLayout ?? "default"),
@@ -328,6 +369,24 @@ export function lookGains(
     y: (settings.lookSensitivityY ?? settings.lookSensitivity) * boost,
     zoom: settings.zoomSensitivity ?? 1,
   };
+}
+
+/**
+ * The look settings for the device doing the looking (C4): its own
+ * sensitivity and curve over the player's shared inversion and zoom.
+ */
+export function lookProfileFor(settings: ControlSettings, device: LookDevice): ControlSettings {
+  const own = device === "touch" ? settings.touchLook : device === "mouse" ? (settings.mouseLook ?? DEFAULT_MOUSE_LOOK) : undefined;
+  if (!own) return settings;
+  return { ...settings, lookSensitivity: own.sensitivity, lookSensitivityY: own.sensitivityY, lookCurve: own.curve };
+}
+
+/** How far the mouse moves in a tick (px) for full lean (C4), before sensitivity. */
+export const MOUSE_FULL_LEAN_PX = 12;
+
+/** A tick's mouse movement as look-stick lean (each −1..1). */
+export function mouseLean(dx: number, dy: number, fullPx = MOUSE_FULL_LEAN_PX): [number, number] {
+  return [clamp(dx / fullPx, -1, 1), clamp(dy / fullPx, -1, 1)];
 }
 
 /** The aim assist level a cart reads (0 off, 1 standard, 2 strong). */

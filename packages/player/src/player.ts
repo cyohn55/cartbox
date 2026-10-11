@@ -26,6 +26,7 @@ import { GamepadInput, GamepadState, KeyboardInput, TouchInput, hasTouchSupport 
 import { frameDurationMs, getModel, type ConsoleModel } from "./models.js";
 import { ReplayRecorder, ReplaySource, hashCart, randomSeed, type Replay } from "./replay.js";
 import { seedCartridge, prependLuaCode, readCartCode, appendLuaCode, rewriteLuaCode } from "./cartseed.js";
+import { MouseLook } from "./mouseLook.js";
 import { STICK_OPTIN_WORD, STICK_WORD, packLookGain, packSticks, stickChannel } from "./sticks.js";
 import { POINTER_CLICKS, PointerInput, writePointer } from "./pointer.js";
 import {
@@ -35,6 +36,8 @@ import {
   applyLookSettings,
   lookAccelerationBoost,
   lookGains,
+  lookProfileFor,
+  mouseLean,
   rumbleEffect,
   stepLookAcceleration,
   toggleMask,
@@ -141,6 +144,8 @@ export class Player {
   private touch?: TouchInput;
   /** The pointer over the screen, for the cart's UI documents (pointer.ts). */
   private pointer?: PointerInput;
+  /** Mouse look (C4): captures the mouse on a click when the player has it on. */
+  private mouse?: MouseLook;
   /** Where the pointer is written (the debug block's offset from pmem), when the cart has UI documents. */
   private pointerOffset: number | null = null;
   /** The cart reads analog sticks (it opted in via cartbox.stick). */
@@ -244,6 +249,7 @@ export class Player {
   /** Apply new control settings at once (see PlayerHandle.setControlSettings). */
   setControlSettings(settings: ControlSettings): void {
     this.controlSettings = settings;
+    if (!settings.mouseCapture) this.mouse?.release();
     this.touch?.applySettings(settings);
     this.rebindActions();
   }
@@ -266,11 +272,21 @@ export class Player {
    */
   private heldActions(): number {
     if (this.actions.length === 0) return 0;
-    const raw = actionMask(this.actions, { keys: this.keyboard?.held ?? NO_HELD, pad: this.controllerInput?.pressed ?? NO_HELD, buttons: this.gamepad.value });
+    const keys = this.keyboard?.held ?? NO_HELD;
+    const mouse = this.mouse?.held ?? NO_HELD;
+    const raw = actionMask(this.actions, { keys: mouse.size > 0 ? new Set([...keys, ...mouse]) : keys, pad: this.controllerInput?.pressed ?? NO_HELD, buttons: this.gamepad.value });
     const { held, latched } = applyActionToggles(raw, this.rawActions, this.latchedActions, toggleMask(this.actions, this.controlSettings.actionToggles));
     this.rawActions = raw;
     this.latchedActions = latched;
     return held;
+  }
+
+  /** The mouse's movement since the last tick, as look (C4). */
+  private feedMouse(): void {
+    if (!this.mouse) return;
+    const [dx, dy] = this.mouse.take();
+    const [x, y] = this.inputEnabled && !this.replaySource ? mouseLean(dx, dy) : [0, 0];
+    this.gamepad.setMouseLook(x, y);
   }
 
   /** Play a rumble the cart asked for (cartbox.rumble, C3), under the player's vibration settings. */
@@ -286,6 +302,7 @@ export class Player {
   /** Let the game see input (true) or hold it neutral (false) — e.g. under a menu. */
   setInputEnabled(enabled: boolean): void {
     this.inputEnabled = enabled;
+    if (!enabled) this.mouse?.release(); // under a menu, the mouse is a pointer again
   }
 
   /** Master volume, 0..1. */
@@ -648,6 +665,7 @@ export class Player {
       this.keyboard = new KeyboardInput(this.view, this.gamepad, () => this.controlSettings.keyBindings, onStart, () => this.actionKeys);
       // A physical controller (Xbox 360 / any standard-mapping gamepad), read each frame.
       this.controllerInput = new GamepadInput(this.view.navigator, this.gamepad, () => this.controlSettings, onStart, () => this.actionPad);
+      this.mouse = new MouseLook(this.container, () => this.controlSettings.mouseCapture === true && this.inputEnabled);
     }
     if (shouldUseTouch(scheme, this.view)) {
       this.touch = new TouchInput(this.container, this.gamepad, onStart);
@@ -833,6 +851,7 @@ export class Player {
     };
     // In playback the mask comes from the replay; otherwise from live input. The
     // console buttons are its low 8 bits, the input actions (EP15) the bits above.
+    this.feedMouse();
     const input = (this.replaySource ? this.replaySource.maskForFrame(this.tickFrame) : this.inputEnabled ? this.gamepad.value | (this.heldActions() << 8) : 0) >>> 0;
     const mask = input & 0xff;
     this.feedActions(input >>> 8);
@@ -1313,17 +1332,21 @@ export class Player {
       this.touch?.setAnalog(true);
     }
     const live = !this.replaySource && this.inputEnabled;
+    // The device looking this tick brings its own look profile (C4).
+    const device = this.gamepad.lookDevice;
+    const look = lookProfileFor(this.controlSettings, device);
     if (channel !== "gain") {
-      words[STICK_WORD] = live ? packSticks(applyLookSettings(this.gamepad.axes, this.controlSettings)) : 0;
+      words[STICK_WORD] = live ? packSticks(applyLookSettings(this.gamepad.axes, look)) : 0;
       return;
     }
-    const axes = live ? applyLookSettings(this.gamepad.axes, this.controlSettings, false) : ([0, 0, 0, 0] as const);
-    this.lookHeldTicks = stepLookAcceleration(this.lookHeldTicks, axes[2], axes[3]);
+    const axes = live ? applyLookSettings(this.gamepad.axes, look, false) : ([0, 0, 0, 0] as const);
+    // Look acceleration is a stick's: the mouse turns as far as it moves.
+    this.lookHeldTicks = device === "mouse" ? 0 : stepLookAcceleration(this.lookHeldTicks, axes[2], axes[3]);
     words[STICK_WORD] = packSticks(axes);
     // A replay feeds no sticks, so its gains are the plain ones.
     const boost = live ? lookAccelerationBoost(this.lookHeldTicks, this.controlSettings.lookAcceleration) : 1;
     const assist = aimAssistLevel(this.controlSettings.aimAssist);
-    words[STICK_OPTIN_WORD] = live ? packLookGain({ ...lookGains(this.controlSettings, boost), assist }) : packLookGain({ x: 1, y: 1, zoom: 1, assist });
+    words[STICK_OPTIN_WORD] = live ? packLookGain({ ...lookGains(look, boost), assist }) : packLookGain({ x: 1, y: 1, zoom: 1, assist });
   }
 
   /** Save data (EP15b): hand a save the cart made this tick to the host. */
@@ -1398,6 +1421,7 @@ export class Player {
     this.view.cancelAnimationFrame(this.frameHandle);
     this.keyboard?.destroy();
     this.touch?.destroy();
+    this.mouse?.destroy();
     this.pointer?.destroy();
     this.runtime?.channel.destroy();
     this.runtime = null;

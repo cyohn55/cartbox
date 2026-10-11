@@ -7,7 +7,7 @@
 
 import { ConsoleButton } from "./types.js";
 import { stickDirections } from "./sticks.js";
-import { DEFAULT_KEY_BINDINGS, START_KEYS, readPad, type ControlSettings, type PadSnapshot, type RumbleEffect } from "./controls.js";
+import { DEFAULT_KEY_BINDINGS, START_KEYS, readPad, type ControlSettings, type LookDevice, type PadSnapshot, type RumbleEffect } from "./controls.js";
 
 /**
  * Default keyboard layout, matching TIC-80 conventions: arrows for the D-pad,
@@ -41,9 +41,11 @@ export class GamepadState {
   /** The on-screen sticks and a controller's sticks, kept apart and merged on read. */
   private readonly touchAxes: [number, number, number, number] = [0, 0, 0, 0];
   private readonly padAxes: [number, number, number, number] = [0, 0, 0, 0];
+  /** The mouse's look this tick (C4): look only, as lean. */
+  private readonly mouseLook: [number, number] = [0, 0];
 
   /** Analog sticks: left x, left y, right x, right y, each −1..1 (y down-positive) —
-   *  per stick, whichever source (touch or controller) is leaning further. */
+   *  per stick, whichever source (touch, controller or mouse) is leaning further. */
   get axes(): [number, number, number, number] {
     const out: [number, number, number, number] = [0, 0, 0, 0];
     for (const i of [0, 2]) {
@@ -53,7 +55,23 @@ export class GamepadState {
       out[i] = src[i]!;
       out[i + 1] = src[i + 1]!;
     }
+    if (this.lookDevice === "mouse") [out[2], out[3]] = this.mouseLook;
     return out;
+  }
+
+  /** Which device the look stick's reading comes from this tick (C4), so its own look profile applies. */
+  get lookDevice(): LookDevice {
+    const t = Math.hypot(this.touchAxes[2], this.touchAxes[3]);
+    const p = Math.hypot(this.padAxes[2], this.padAxes[3]);
+    const m = Math.hypot(this.mouseLook[0], this.mouseLook[1]);
+    if (m > 0 && m >= t && m >= p) return "mouse";
+    return p > t ? "controller" : "touch";
+  }
+
+  /** The mouse's look this tick (see mouseLean), replaced each tick. */
+  setMouseLook(x: number, y: number): void {
+    this.mouseLook[0] = x;
+    this.mouseLook[1] = y;
   }
 
   /** A controller's state this frame: its pressed console buttons and sticks. */
@@ -92,6 +110,7 @@ export class GamepadState {
     this.padMask = 0;
     this.touchAxes.fill(0);
     this.padAxes.fill(0);
+    this.mouseLook.fill(0);
   }
 }
 

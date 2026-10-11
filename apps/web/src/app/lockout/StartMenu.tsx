@@ -17,6 +17,7 @@ import {
   AIM_ASSISTS,
   ConsoleButton,
   DEFAULT_CONTROL_SETTINGS,
+  DEFAULT_MOUSE_LOOK,
   DEFAULT_STICK_DEAD_ZONES,
   DEFAULT_TRIGGER_THRESHOLD,
   PAD_BUTTONS,
@@ -26,6 +27,7 @@ import {
   type AimAssist,
   type ControlSettings,
   type ControlTarget,
+  type LookProfile,
   type PadButton,
   type ResponseCurve,
   type StickDeadZones,
@@ -45,9 +47,10 @@ import {
 } from "@/lib/gameSettings";
 import { StickPreview } from "./StickPreview";
 
-type Tab = "controls" | "touch" | "buttons" | "audio" | "display";
-const TABS: readonly Tab[] = ["controls", "touch", "buttons", "audio", "display"];
-const TAB_LABELS: Record<Tab, string> = { controls: "Controls", touch: "Touch", buttons: "Button mapping", audio: "Audio", display: "Display" };
+type Tab = "controls" | "touch" | "mouse" | "buttons" | "audio" | "display";
+const TABS: readonly Tab[] = ["controls", "touch", "mouse", "buttons", "audio", "display"];
+const TAB_LABELS: Record<Tab, string> = { controls: "Controls", touch: "Touch", mouse: "Mouse", buttons: "Button mapping", audio: "Audio", display: "Display" };
+const DEFAULT_TOUCH_LOOK: LookProfile = { sensitivity: 1, sensitivityY: 1, curve: "standard" };
 
 const CURVE_LABELS: Record<ResponseCurve, string> = {
   standard: "Standard — as the stick leans",
@@ -212,7 +215,7 @@ export function StartMenu(props: StartMenuProps) {
         <div style={styles.body}>
           {tab === "controls" && (
             <>
-              <h3 style={styles.h3}>Look</h3>
+              <h3 style={styles.h3}>Look (controller)</h3>
               <Row label={`Horizontal sensitivity  ×${controls.lookSensitivity.toFixed(2)}`}>
                 <Slider label="Horizontal sensitivity" min={0.25} max={3} step={0.05} value={controls.lookSensitivity} onChange={(lookSensitivity) => setControls({ lookSensitivity })} />
               </Row>
@@ -284,7 +287,7 @@ export function StartMenu(props: StartMenuProps) {
                 {props.lookGain
                   ? "Sensitivity sets how fast you turn and look, past the game's usual top speed. Zoom sensitivity applies while zoomed. Look acceleration speeds turning up when the stick is held at full lean (0 is off)."
                   : "Sensitivity above ×1 reaches the game's top turn speed with less lean. This game doesn't read zoom sensitivity or look acceleration."}{" "}
-                The look settings apply to the on-screen pad&apos;s look stick too.
+                Touch and the mouse have their own sensitivity and curve (their tabs); inversion, zoom sensitivity and aim assist are shared.
               </p>
 
               <h3 style={styles.h3}>Controller sticks</h3>
@@ -383,6 +386,13 @@ export function StartMenu(props: StartMenuProps) {
 
           {tab === "touch" && (
             <>
+              <h3 style={styles.h3}>Look (touch)</h3>
+              <LookProfileRows
+                device="Touch"
+                profile={controls.touchLook ?? DEFAULT_TOUCH_LOOK}
+                onChange={(touchLook) => setControls({ touchLook })}
+              />
+              <h3 style={styles.h3}>On-screen pad</h3>
               <Row label={`Touch controls size  ${pct(controls.touchScale)}`}>
                 <Slider label="Touch controls size" min={0.7} max={1.4} step={0.05} value={controls.touchScale} onChange={(touchScale) => setControls({ touchScale })} />
               </Row>
@@ -393,9 +403,30 @@ export function StartMenu(props: StartMenuProps) {
                 <button
                   type="button"
                   className="cbx-btn"
-                  onClick={() => setControls({ touchScale: DEFAULT_CONTROL_SETTINGS.touchScale, touchOpacity: DEFAULT_CONTROL_SETTINGS.touchOpacity })}
+                  onClick={() =>
+                    setControls({ touchScale: DEFAULT_CONTROL_SETTINGS.touchScale, touchOpacity: DEFAULT_CONTROL_SETTINGS.touchOpacity, touchLook: DEFAULT_TOUCH_LOOK })
+                  }
                 >
                   Reset touch controls
+                </button>
+              </Row>
+            </>
+          )}
+
+          {tab === "mouse" && (
+            <>
+              <Row label="Mouse look">
+                <Toggle on={controls.mouseCapture ?? false} onChange={(mouseCapture) => setControls({ mouseCapture })} />
+              </Row>
+              <p style={styles.note}>
+                Click the game to capture the mouse: it turns and aims, left click fires and right click zooms (both rebindable under Button
+                mapping). Esc lets it go.
+              </p>
+              <LookProfileRows device="Mouse" profile={controls.mouseLook ?? DEFAULT_MOUSE_LOOK} onChange={(mouseLook) => setControls({ mouseLook })} />
+              <p style={styles.note}>Responsive suits a mouse: the view turns in step with it.</p>
+              <Row label="">
+                <button type="button" className="cbx-btn" onClick={() => setControls({ mouseCapture: false, mouseLook: DEFAULT_MOUSE_LOOK })}>
+                  Reset mouse
                 </button>
               </Row>
             </>
@@ -629,6 +660,34 @@ export function StartMenu(props: StartMenuProps) {
         </div>
       </div>
     </div>
+  );
+}
+
+/** One device's look sensitivity (both axes) and response curve (C4). */
+function LookProfileRows({ device, profile, onChange }: { device: string; profile: LookProfile; onChange: (profile: LookProfile) => void }) {
+  return (
+    <>
+      <Row label={`${device} horizontal sensitivity  ×${profile.sensitivity.toFixed(2)}`}>
+        <Slider label={`${device} horizontal sensitivity`} min={0.25} max={3} step={0.05} value={profile.sensitivity} onChange={(sensitivity) => onChange({ ...profile, sensitivity })} />
+      </Row>
+      <Row label={`${device} vertical sensitivity  ×${profile.sensitivityY.toFixed(2)}`}>
+        <Slider label={`${device} vertical sensitivity`} min={0.25} max={3} step={0.05} value={profile.sensitivityY} onChange={(sensitivityY) => onChange({ ...profile, sensitivityY })} />
+      </Row>
+      <Row label={`${device} response curve`}>
+        <select
+          aria-label={`${device} response curve`}
+          style={styles.select}
+          value={profile.curve}
+          onChange={(event) => onChange({ ...profile, curve: event.target.value as ResponseCurve })}
+        >
+          {RESPONSE_CURVES.map((c) => (
+            <option key={c} value={c}>
+              {CURVE_LABELS[c]}
+            </option>
+          ))}
+        </select>
+      </Row>
+    </>
   );
 }
 

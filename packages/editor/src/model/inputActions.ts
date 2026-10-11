@@ -142,6 +142,9 @@ const KEY_NAMES: Readonly<Record<string, string>> = {
   Equal: "=",
   Backquote: "`",
   Backslash: "\\",
+  Mouse0: "Left click",
+  Mouse1: "Middle click",
+  Mouse2: "Right click",
 };
 
 /** A key code as a person reads it: "KeyG" → "G", "Digit1" → "1", "ShiftLeft" → "Shift". */

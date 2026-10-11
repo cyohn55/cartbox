@@ -32,7 +32,7 @@ the Start menu (`apps/web/src/app/lockout/StartMenu.tsx`) edits them.
   always on (C3 makes it a setting).
 - **Zoom:** held, never toggled (C3 lets any action toggle).
 - **No vibration** (C3 adds it).
-- **No mouse look and no gyro.**
+- **No mouse look and no gyro** (C4a adds the mouse; C4b gyro).
 
 ## Inspiration
 
@@ -203,17 +203,44 @@ the Start menu (`apps/web/src/app/lockout/StartMenu.tsx`) edits them.
       asks for a rumble when it fires. `scripts/verify-controller-settings.mjs`
       sets zoom to toggle, then plays a match with a fake controller and
       checks that firing plays a `dual-rumble` on it.
-- [ ] **C4. Every device its own.**
-  - **Device profiles:** the look settings (sensitivity, curve, dead zones) are
-    kept separately for a controller and for touch. Each device's input is
-    shaped by its own before the two merge.
-  - **Touch:**
-    - look by dragging anywhere on the right of the screen;
-    - its own look sensitivity;
-    - a fixed or floating move stick (one that appears where the thumb lands).
+- [x] **C4a. Every device its own: profiles and the mouse.**
+  - **Device profiles:** the look settings (sensitivity, curve) are kept
+    separately for a controller, for touch and for the mouse. Each device's
+    input is shaped by its own before it reaches the game.
   - **Mouse look on a computer:** click to capture the pointer, and the mouse
     turns and pitches through the look-gain channel, with its own sensitivity
-    and invert.
+    and curve.
+  - **Done.**
+    - **Profiles:** `touchLook` and `mouseLook` each hold a sensitivity per
+      axis and a curve; the controller's are the top-level settings.
+      Inversion, zoom sensitivity, look acceleration and aim assist stay the
+      player's, shared. `GamepadState.lookDevice` says which device is
+      looking this tick: whichever leans further, with the mouse winning
+      while it moves. `feedSticks` shapes the look with that device's profile
+      (`lookProfileFor`) and sends its gains. A save from before loads with
+      touch looking exactly as the controller did. Dead zones stay per
+      physical stick (C1), so they are already the controller's alone.
+    - **The mouse:** `MouseLook` (`mouseLook.ts`) captures the pointer on a
+      click when the player has mouse look on; that click doesn't also
+      fire. While captured, each tick's movement becomes look lean at 12 px
+      per tick for full lean (`mouseLean`), and the buttons become keys
+      (`Mouse0` left, `Mouse1` middle, `Mouse2` right) that any input action
+      can bind. Lockout binds left click to fire and right click to zoom.
+      The mouse profile starts on Responsive (√lean), so a game that eases
+      its turn by lean², as Lockout does, turns in step with the mouse. Look
+      acceleration is a stick's and never applies to the mouse. The menu,
+      Esc and turning mouse look off all let the mouse go.
+    - **The menu:** a Mouse tab (mouse look, its sensitivity per axis and
+      curve) and a Look section on the Touch tab.
+    - **Tests:** `Unit Tests/device-look.test.ts` (profiles, old saves, mouse
+      lean, which device looks);
+      `scripts/verify-controller-settings.mjs` turns mouse look on, checks
+      that a click captures the mouse (pointer lock faked, as headless has
+      none) and that a left click fires in a Lockout match.
+- [ ] **C4b. Touch and gyro.**
+  - **Touch:**
+    - look by dragging anywhere on the right of the screen;
+    - a fixed or floating move stick (one that appears where the thumb lands).
   - **Gyro aim on phones and tablets:** turning the device aims, always or
     only while zoomed. It has its own sensitivity, and asks the motion
     permission iOS needs.

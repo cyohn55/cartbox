@@ -5500,6 +5500,7 @@ var PAD_BUTTONS = [
 var RESPONSE_CURVES = ["standard", "dynamic", "precision", "responsive"];
 var STICK_LAYOUTS = ["default", "southpaw", "legacy", "legacySouthpaw"];
 var AIM_ASSISTS = ["off", "standard", "strong"];
+var DEFAULT_MOUSE_LOOK = { sensitivity: 1, sensitivityY: 1, curve: "responsive" };
 var DEFAULT_PAD_BINDINGS = {
   A: 4 /* A */,
   B: 5 /* B */,
@@ -5543,6 +5544,9 @@ var DEFAULT_CONTROL_SETTINGS = {
   stickLayout: "default",
   zoomSensitivity: 1,
   lookAcceleration: 0,
+  touchLook: { sensitivity: 1, sensitivityY: 1, curve: "standard" },
+  mouseLook: DEFAULT_MOUSE_LOOK,
+  mouseCapture: false,
   aimAssist: "standard",
   actionToggles: [],
   vibration: true,
@@ -5575,6 +5579,13 @@ function parseControlSettings(value, defaults = DEFAULT_CONTROL_SETTINGS) {
     if (entries.length > 0) keyBindings = Object.fromEntries(entries);
   }
   const lookSensitivity = num3(raw.lookSensitivity, 0.25, 3, defaults.lookSensitivity);
+  const curveOf = (v, fallback) => RESPONSE_CURVES.includes(v) ? v : fallback;
+  const profile = (v, fallback) => {
+    if (typeof v !== "object" || v === null) return fallback;
+    const p = v;
+    const sensitivity = num3(p.sensitivity, 0.25, 3, fallback.sensitivity);
+    return { sensitivity, sensitivityY: num3(p.sensitivityY, 0.25, 3, p.sensitivity !== void 0 ? sensitivity : fallback.sensitivityY), curve: curveOf(p.curve, fallback.curve) };
+  };
   const deadZones = (v, fallback) => {
     const base = fallback ?? DEFAULT_STICK_DEAD_ZONES;
     if (typeof v !== "object" || v === null) return base;
@@ -5587,13 +5598,19 @@ function parseControlSettings(value, defaults = DEFAULT_CONTROL_SETTINGS) {
       maxInput: Math.max(radial + 0.1, num3(z.maxInput, 0.5, 1, base.maxInput))
     };
   };
+  const lookSensitivityY = raw.lookSensitivityY !== void 0 ? num3(raw.lookSensitivityY, 0.25, 3, defaults.lookSensitivityY ?? lookSensitivity) : raw.lookSensitivity !== void 0 ? lookSensitivity : defaults.lookSensitivityY ?? lookSensitivity;
+  const lookCurve = curveOf(raw.lookCurve, defaults.lookCurve ?? "standard");
   return {
     invertY: typeof raw.invertY === "boolean" ? raw.invertY : defaults.invertY,
     invertX: typeof raw.invertX === "boolean" ? raw.invertX : defaults.invertX ?? false,
     lookSensitivity,
     // Saved before there were two: vertical follows horizontal.
-    lookSensitivityY: raw.lookSensitivityY !== void 0 ? num3(raw.lookSensitivityY, 0.25, 3, defaults.lookSensitivityY ?? lookSensitivity) : raw.lookSensitivity !== void 0 ? lookSensitivity : defaults.lookSensitivityY ?? lookSensitivity,
-    lookCurve: RESPONSE_CURVES.includes(raw.lookCurve) ? raw.lookCurve : defaults.lookCurve ?? "standard",
+    lookSensitivityY,
+    lookCurve,
+    // Saved before touch had its own: the controller's, as it played.
+    touchLook: profile(raw.touchLook, raw.touchLook === void 0 && raw.lookSensitivity !== void 0 ? { sensitivity: lookSensitivity, sensitivityY: lookSensitivityY, curve: lookCurve } : defaults.touchLook ?? { sensitivity: 1, sensitivityY: 1, curve: "standard" }),
+    mouseLook: profile(raw.mouseLook, defaults.mouseLook ?? DEFAULT_MOUSE_LOOK),
+    mouseCapture: typeof raw.mouseCapture === "boolean" ? raw.mouseCapture : defaults.mouseCapture ?? false,
     leftStick: deadZones(raw.leftStick, defaults.leftStick),
     rightStick: deadZones(raw.rightStick, defaults.rightStick),
     stickLayout: STICK_LAYOUTS.includes(raw.stickLayout) ? raw.stickLayout : defaults.stickLayout ?? "default",
@@ -5657,6 +5674,15 @@ function lookGains(settings, boost = 1) {
     y: (settings.lookSensitivityY ?? settings.lookSensitivity) * boost,
     zoom: settings.zoomSensitivity ?? 1
   };
+}
+function lookProfileFor(settings, device) {
+  const own = device === "touch" ? settings.touchLook : device === "mouse" ? settings.mouseLook ?? DEFAULT_MOUSE_LOOK : void 0;
+  if (!own) return settings;
+  return { ...settings, lookSensitivity: own.sensitivity, lookSensitivityY: own.sensitivityY, lookCurve: own.curve };
+}
+var MOUSE_FULL_LEAN_PX = 12;
+function mouseLean(dx, dy, fullPx = MOUSE_FULL_LEAN_PX) {
+  return [clamp(dx / fullPx, -1, 1), clamp(dy / fullPx, -1, 1)];
 }
 function aimAssistLevel(assist) {
   const i = AIM_ASSISTS.indexOf(assist ?? "standard");
@@ -5784,9 +5810,11 @@ var GamepadState = class {
     /** The on-screen sticks and a controller's sticks, kept apart and merged on read. */
     this.touchAxes = [0, 0, 0, 0];
     this.padAxes = [0, 0, 0, 0];
+    /** The mouse's look this tick (C4): look only, as lean. */
+    this.mouseLook = [0, 0];
   }
   /** Analog sticks: left x, left y, right x, right y, each −1..1 (y down-positive) —
-   *  per stick, whichever source (touch or controller) is leaning further. */
+   *  per stick, whichever source (touch, controller or mouse) is leaning further. */
   get axes() {
     const out = [0, 0, 0, 0];
     for (const i of [0, 2]) {
@@ -5796,7 +5824,21 @@ var GamepadState = class {
       out[i] = src[i];
       out[i + 1] = src[i + 1];
     }
+    if (this.lookDevice === "mouse") [out[2], out[3]] = this.mouseLook;
     return out;
+  }
+  /** Which device the look stick's reading comes from this tick (C4), so its own look profile applies. */
+  get lookDevice() {
+    const t = Math.hypot(this.touchAxes[2], this.touchAxes[3]);
+    const p = Math.hypot(this.padAxes[2], this.padAxes[3]);
+    const m = Math.hypot(this.mouseLook[0], this.mouseLook[1]);
+    if (m > 0 && m >= t && m >= p) return "mouse";
+    return p > t ? "controller" : "touch";
+  }
+  /** The mouse's look this tick (see mouseLean), replaced each tick. */
+  setMouseLook(x, y) {
+    this.mouseLook[0] = x;
+    this.mouseLook[1] = y;
   }
   /** A controller's state this frame: its pressed console buttons and sticks. */
   setPad(mask, axes) {
@@ -5829,6 +5871,7 @@ var GamepadState = class {
     this.padMask = 0;
     this.touchAxes.fill(0);
     this.padAxes.fill(0);
+    this.mouseLook.fill(0);
   }
 };
 var KeyboardInput = class {
@@ -6280,6 +6323,84 @@ function parseReplay(json) {
   }
   return candidate;
 }
+
+// src/mouseLook.ts
+var NO_KEYS2 = /* @__PURE__ */ new Set();
+var MouseLook = class {
+  constructor(container, enabled) {
+    this.container = container;
+    this.enabled = enabled;
+    this.dx = 0;
+    this.dy = 0;
+    this.buttons = /* @__PURE__ */ new Set();
+    this.onDown = (event) => {
+      if (!this.enabled()) return;
+      if (!this.captured) {
+        if (event.button !== 0) return;
+        try {
+          const request = this.container.requestPointerLock?.();
+          if (request instanceof Promise) request.catch(() => void 0);
+        } catch {
+        }
+        return;
+      }
+      event.preventDefault();
+      this.buttons.add(`Mouse${event.button}`);
+    };
+    this.onUp = (event) => {
+      this.buttons.delete(`Mouse${event.button}`);
+    };
+    this.onMove = (event) => {
+      if (!this.captured) return;
+      this.dx += event.movementX || 0;
+      this.dy += event.movementY || 0;
+    };
+    this.onLockChange = () => {
+      if (!this.captured) {
+        this.buttons.clear();
+        this.dx = 0;
+        this.dy = 0;
+      }
+    };
+    this.onContextMenu = (event) => {
+      if (this.captured) event.preventDefault();
+    };
+    this.doc = container.ownerDocument;
+    container.addEventListener("mousedown", this.onDown, true);
+    this.doc.addEventListener("mouseup", this.onUp, true);
+    this.doc.addEventListener("mousemove", this.onMove, true);
+    this.doc.addEventListener("pointerlockchange", this.onLockChange);
+    container.addEventListener("contextmenu", this.onContextMenu);
+  }
+  /** Whether the mouse is captured by this game. */
+  get captured() {
+    return this.doc.pointerLockElement === this.container;
+  }
+  /** The mouse buttons held while captured, as keys ("Mouse0" …) for input actions. */
+  get held() {
+    return this.buttons.size > 0 ? this.buttons : NO_KEYS2;
+  }
+  /** The movement since the last tick (px), cleared. */
+  take() {
+    const out = [this.dx, this.dy];
+    this.dx = 0;
+    this.dy = 0;
+    return out;
+  }
+  /** Let the mouse go (under a menu, or when mouse look is turned off). */
+  release() {
+    if (this.captured) this.doc.exitPointerLock?.();
+    this.onLockChange();
+  }
+  destroy() {
+    this.release();
+    this.container.removeEventListener("mousedown", this.onDown, true);
+    this.doc.removeEventListener("mouseup", this.onUp, true);
+    this.doc.removeEventListener("mousemove", this.onMove, true);
+    this.doc.removeEventListener("pointerlockchange", this.onLockChange);
+    this.container.removeEventListener("contextmenu", this.onContextMenu);
+  }
+};
 
 // src/sdk.ts
 var CARTBOX_SDK_LUA = `local _MB = 119
@@ -17960,6 +18081,7 @@ var Player = class {
   /** Apply new control settings at once (see PlayerHandle.setControlSettings). */
   setControlSettings(settings) {
     this.controlSettings = settings;
+    if (!settings.mouseCapture) this.mouse?.release();
     this.touch?.applySettings(settings);
     this.rebindActions();
   }
@@ -17976,11 +18098,20 @@ var Player = class {
    */
   heldActions() {
     if (this.actions.length === 0) return 0;
-    const raw = actionMask(this.actions, { keys: this.keyboard?.held ?? NO_HELD, pad: this.controllerInput?.pressed ?? NO_HELD, buttons: this.gamepad.value });
+    const keys = this.keyboard?.held ?? NO_HELD;
+    const mouse = this.mouse?.held ?? NO_HELD;
+    const raw = actionMask(this.actions, { keys: mouse.size > 0 ? /* @__PURE__ */ new Set([...keys, ...mouse]) : keys, pad: this.controllerInput?.pressed ?? NO_HELD, buttons: this.gamepad.value });
     const { held, latched } = applyActionToggles(raw, this.rawActions, this.latchedActions, toggleMask(this.actions, this.controlSettings.actionToggles));
     this.rawActions = raw;
     this.latchedActions = latched;
     return held;
+  }
+  /** The mouse's movement since the last tick, as look (C4). */
+  feedMouse() {
+    if (!this.mouse) return;
+    const [dx, dy] = this.mouse.take();
+    const [x, y] = this.inputEnabled && !this.replaySource ? mouseLean(dx, dy) : [0, 0];
+    this.gamepad.setMouseLook(x, y);
   }
   /** Play a rumble the cart asked for (cartbox.rumble, C3), under the player's vibration settings. */
   rumble(strength, ms) {
@@ -17993,6 +18124,7 @@ var Player = class {
   /** Let the game see input (true) or hold it neutral (false) — e.g. under a menu. */
   setInputEnabled(enabled) {
     this.inputEnabled = enabled;
+    if (!enabled) this.mouse?.release();
   }
   /** Master volume, 0..1. */
   setVolume(volume) {
@@ -18258,6 +18390,7 @@ var Player = class {
     if (scheme !== "touch") {
       this.keyboard = new KeyboardInput(this.view, this.gamepad, () => this.controlSettings.keyBindings, onStart, () => this.actionKeys);
       this.controllerInput = new GamepadInput(this.view.navigator, this.gamepad, () => this.controlSettings, onStart, () => this.actionPad);
+      this.mouse = new MouseLook(this.container, () => this.controlSettings.mouseCapture === true && this.inputEnabled);
     }
     if (shouldUseTouch(scheme, this.view)) {
       this.touch = new TouchInput(this.container, this.gamepad, onStart);
@@ -18386,6 +18519,7 @@ var Player = class {
       profiler.add(section, now - mark);
       mark = now;
     };
+    this.feedMouse();
     const input = (this.replaySource ? this.replaySource.maskForFrame(this.tickFrame) : this.inputEnabled ? this.gamepad.value | this.heldActions() << 8 : 0) >>> 0;
     const mask = input & 255;
     this.feedActions(input >>> 8);
@@ -18799,16 +18933,18 @@ var Player = class {
       this.touch?.setAnalog(true);
     }
     const live = !this.replaySource && this.inputEnabled;
+    const device = this.gamepad.lookDevice;
+    const look = lookProfileFor(this.controlSettings, device);
     if (channel !== "gain") {
-      words[STICK_WORD] = live ? packSticks(applyLookSettings(this.gamepad.axes, this.controlSettings)) : 0;
+      words[STICK_WORD] = live ? packSticks(applyLookSettings(this.gamepad.axes, look)) : 0;
       return;
     }
-    const axes = live ? applyLookSettings(this.gamepad.axes, this.controlSettings, false) : [0, 0, 0, 0];
-    this.lookHeldTicks = stepLookAcceleration(this.lookHeldTicks, axes[2], axes[3]);
+    const axes = live ? applyLookSettings(this.gamepad.axes, look, false) : [0, 0, 0, 0];
+    this.lookHeldTicks = device === "mouse" ? 0 : stepLookAcceleration(this.lookHeldTicks, axes[2], axes[3]);
     words[STICK_WORD] = packSticks(axes);
     const boost = live ? lookAccelerationBoost(this.lookHeldTicks, this.controlSettings.lookAcceleration) : 1;
     const assist = aimAssistLevel(this.controlSettings.aimAssist);
-    words[STICK_OPTIN_WORD] = live ? packLookGain({ ...lookGains(this.controlSettings, boost), assist }) : packLookGain({ x: 1, y: 1, zoom: 1, assist });
+    words[STICK_OPTIN_WORD] = live ? packLookGain({ ...lookGains(look, boost), assist }) : packLookGain({ x: 1, y: 1, zoom: 1, assist });
   }
   /** Save data (EP15b): hand a save the cart made this tick to the host. */
   pollSave() {
@@ -18869,6 +19005,7 @@ var Player = class {
     this.view.cancelAnimationFrame(this.frameHandle);
     this.keyboard?.destroy();
     this.touch?.destroy();
+    this.mouse?.destroy();
     this.pointer?.destroy();
     this.runtime?.channel.destroy();
     this.runtime = null;
@@ -20442,6 +20579,7 @@ export {
   DEFAULT_KEY_BINDINGS,
   DEFAULT_LIGHT,
   DEFAULT_MODEL_ID,
+  DEFAULT_MOUSE_LOOK,
   DEFAULT_PAD_BINDINGS,
   DEFAULT_STICK_DEAD_ZONES,
   DEFAULT_TRIGGER_THRESHOLD,
@@ -20489,6 +20627,7 @@ export {
   MIN_LUT_SIZE,
   MIN_PYRAMID_DIMENSION,
   MODELS,
+  MOUSE_FULL_LEAN_PX,
   MemoryNetHub,
   MeshOverlaySurface,
   NET_MODE_CLIENT,
@@ -20650,9 +20789,11 @@ export {
   lookAccelerationBoost,
   lookGains,
   lookLut,
+  lookProfileFor,
   lutStrip,
   makeShadowTexture,
   mount,
+  mouseLean,
   nearestDirection,
   netSendInterval,
   normalBasis3x3,
