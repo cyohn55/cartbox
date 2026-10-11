@@ -4,7 +4,8 @@
  * stick picture reading it, the stick layout and a dead zone changed from the
  * menu, what the game receives following them, and the settings kept; and
  * (C2) sensitivity reaching Lockout as a turn speed, not a pre-scaled stick;
- * and (C3) zoom set to toggle, and the controller rumbling when Lockout fires.
+ * (C3) zoom set to toggle, and the controller rumbling when Lockout fires;
+ * and (C4) mouse look: a click captures the mouse, and a left click fires.
  *
  *   CBX_BASE_URL=http://localhost:3000 node scripts/verify-controller-settings.mjs
  *
@@ -52,6 +53,18 @@ await page.addInitScript(() => {
     pad.timestamp += 1;
   };
   navigator.getGamepads = () => [pad, null, null, null];
+  // Pointer lock as a browser grants it (headless has none to give).
+  let locked = null;
+  const lock = (element) => {
+    locked = element;
+    document.dispatchEvent(new Event("pointerlockchange"));
+  };
+  Object.defineProperty(Document.prototype, "pointerLockElement", { get: () => locked, configurable: true });
+  Element.prototype.requestPointerLock = function () {
+    lock(this);
+    return Promise.resolve();
+  };
+  Document.prototype.exitPointerLock = () => lock(null);
 });
 const setPad = (axes, lt, rt) => page.evaluate(([a, l, r]) => window.__setPad(a, l, r), [axes, lt, rt]);
 const receives = async () => (await page.getByText(/The game receives/).textContent()).replace(/\s+/g, " ").trim();
@@ -132,6 +145,16 @@ await page.getByLabel("zoom: hold or toggle").selectOption("toggle");
 const toggles = await page.evaluate(() => JSON.parse(localStorage.getItem("cartbox:settings:lockout") ?? "{}").controls?.actionToggles ?? []);
 check("zoom can be set to toggle, and it is kept", JSON.stringify(toggles) === '["zoom"]', JSON.stringify(toggles));
 
+// Mouse look has its own tab and tuning.
+await page.getByRole("tab", { name: "Mouse" }).click();
+await page.getByRole("button", { name: "Off" }).first().click();
+const mouseSaved = await page.evaluate(() => JSON.parse(localStorage.getItem("cartbox:settings:lockout") ?? "{}").controls ?? {});
+check("mouse look can be turned on, Responsive by default", mouseSaved.mouseCapture === true && (await page.getByLabel("Mouse response curve").inputValue()) === "responsive");
+check(
+  "touch has its own look tuning",
+  await page.getByRole("tab", { name: "Touch" }).click().then(() => page.getByRole("slider", { name: "Touch horizontal sensitivity" }).count()) === 1,
+);
+
 // Reset puts back the look, sticks and triggers.
 await page.getByRole("tab", { name: "Controls" }).click();
 await page.getByRole("button", { name: /Reset look, sticks/ }).click();
@@ -146,9 +169,29 @@ let rumbles = [];
 for (let i = 0; Date.now() < end && rumbles.length === 0; i += 1) {
   await page.evaluate((on) => window.__press(0, on), i % 2 === 0);
   await page.waitForTimeout(250);
-  rumbles = await page.evaluate(() => window.__rumbles);
+  rumbles = (await page.evaluate(() => window.__rumbles)).filter((r) => r.duration < 160); // not a hit taken
 }
 check("firing in Lockout rumbles the controller", rumbles.length > 0 && rumbles[0].type === "dual-rumble" && rumbles[0].strongMagnitude > 0, JSON.stringify(rumbles[0] ?? null));
+
+// Mouse look: a click captures the mouse (and doesn't fire); then a left click fires.
+await page.evaluate(() => window.__press(0, false)); // let go of the controller's A: fire is a press
+await page.evaluate(() => (window.__rumbles = []));
+await page.waitForTimeout(1500);
+await page.evaluate(() => (window.__rumbles = []));
+await page.mouse.click(640, 450);
+check("a click captures the mouse", await page.evaluate(() => document.pointerLockElement !== null));
+const mouseEnd = Date.now() + 30000;
+let fired = [];
+while (Date.now() < mouseEnd && fired.length === 0) {
+  await page.mouse.down();
+  await page.waitForTimeout(200);
+  await page.mouse.up();
+  await page.waitForTimeout(200);
+  // A shot's rumble (50 or 90 ms) or a melee's (120 ms); a hit taken from a bot rumbles 160 ms.
+  fired = (await page.evaluate(() => window.__rumbles)).filter((r) => r.duration < 160);
+}
+check("a left click fires (Mouse0 is Lockout's fire)", fired.length > 0, JSON.stringify(fired[0] ?? null));
+await page.keyboard.press("Escape");
 
 await browser.close();
 const failed = results.filter((r) => !r.ok).length;

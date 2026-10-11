@@ -2709,11 +2709,11 @@ export const LOCKOUT_COMPONENTS: readonly ComponentDef[] = [{ name: "Pickup", co
  * The double-tapped X grenade and the held-X zoom stay for the 8-button pad.
  */
 export const LOCKOUT_INPUT_ACTIONS: readonly InputAction[] = [
-  { name: "fire", keys: [], pad: [], buttons: [4] },
+  { name: "fire", keys: ["Mouse0"], pad: [], buttons: [4] },
   { name: "jump", keys: ["Space"], pad: [], buttons: [5] },
   { name: "swap", keys: ["Tab"], pad: [], buttons: [7] },
   { name: "grenade", keys: ["KeyG", "KeyQ"], pad: ["LT"], buttons: [] },
-  { name: "zoom", keys: ["ShiftLeft"], pad: ["RS"], buttons: [] },
+  { name: "zoom", keys: ["ShiftLeft", "Mouse2"], pad: ["RS"], buttons: [] },
 ];
 
 /** A spent brass casing (H10), about 4 cm long, lying along Z. */
