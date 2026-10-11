@@ -141,12 +141,75 @@ editor uses them. If a future Safari reports barrel roll as the pointer's
   - **Against main without this item,** the pinch, the touch bar and the
     two-finger undo fail. The pinch actually shrank the model, from 5.2% to
     3.7%, as the two fingers fought as one drag.
-- [ ] **T2. Painting on a tablet.**
+- [x] **T2. Painting on a tablet.**
   - **Pencil:** the sprite pixel canvas, the map canvas and the texture
     painter's UV view take the Pencil as the brush, with fingers panning and
     pinch-zooming, and palm rejection.
   - **Pressure:** scales the texture painter in the UV view as on the model.
   - **Long press:** picks a colour (the eyedropper).
+
+  *Done:*
+  - **The canvases:** the sprite pixel canvas (Assets), the Voxel tab's
+    sprite pad, the 2D map canvas and the UV view all take their input
+    through the T1 recogniser, so:
+    - the Pencil (or a mouse) is the brush;
+    - one finger draws until a Pencil is used, then navigates;
+    - a resting palm is ignored.
+  - **Navigation:**
+    - **Sprites:** two fingers scroll the panel, and a pinch zooms within
+      the zoom slider's range.
+    - **Map:** two fingers scroll the map, and a pinch steps through its
+      S, M, L and XL zooms, one step per 25% of spread.
+    - **UV view:** it now zooms (1× to 8×) inside a square that scrolls. A
+      pinch keeps the point between the fingers in place, and two fingers
+      pan.
+  - **Cancelled strokes:** a stroke that a second finger turns into a
+    gesture is put back.
+    - **Sprites and the pad:** only the pixels the stroke changed are
+      rewritten, because writing a pixel through the material surface
+      re-stamps its material channels.
+    - **Map:** each cell (or, on the pixels layer, each tile) is recorded
+      the first time the stroke touches it. A stroke on a large map costs
+      what it paints, not the map's size. Mouse strokes and fills skip the
+      record.
+  - **Long press:**
+    - **Sprite canvas:** picks the colour, as Alt and the picker do.
+    - **Map:** picks the colour on the pixels layer and the tile, as the
+      brush, on the tiles layer.
+    - **UV view:** picks the layer's colour or value (a new `pick` on the
+      texture paint state).
+    - **Sprite pad:** erases, as its right-click does.
+  - **Pressure in the UV view** came with T1.
+
+  *Tests:* `scripts/verify-editor-tablet-paint.mjs` drives an iPad-sized
+  headless Chromium with real touch and pen events. All 14 checks pass.
+  - **Sprites:**
+    - one finger draws before a Pencil is used, and draws nothing after;
+    - a stroke turned into a two-finger gesture is put back exactly;
+    - a long press picks the painted colour;
+    - spreading two fingers zooms 360 → 1440 px;
+    - a Pencil stroke paints under a moving palm, and the palm paints
+      nothing.
+  - **Map:**
+    - a cancelled stroke is put back;
+    - a Pencil stroke paints under a palm;
+    - a pinch steps the zoom (20480 → 30720 px);
+    - two fingers scroll it.
+  - **UV view:**
+    - a Pencil stroke paints;
+    - a long press picks the painted, blended colour (#cead89, which the
+      view shows there);
+    - a pinch zooms 236 → 400 px.
+
+  **Against T1 without this item,** 10 of the 14 fail. A cancelled stroke
+  stays painted, long presses pick nothing, pinches and two-finger pans do
+  nothing, and once a Pencil is used fingers still draw. The palm, too,
+  paints.
+
+  The map runs in a GPU-less Chromium: the starter cart's map is
+  1280 × 720 tiles, and that canvas crashes SwiftShader (on main as well).
+  At the L and XL zooms it is wider than a canvas can be, so it draws
+  blank. T4 should cap the zoom for large maps.
 - [ ] **T3. The other views on a tablet.**
   - **Pinch zoom and two-finger navigation:** the Scene viewport, 3D map,
     voxel editor, scene play view, node graphs (graph, shader, script),
@@ -155,7 +218,9 @@ editor uses them. If a future Safari reports barrel roll as the pointer's
 - [ ] **T4. Layout for touch.**
   - **Sizing:** under `(pointer: coarse)`, buttons, list rows, sliders and
     rails at 44 px targets.
-  - **Panels:** collapse to fit an iPad in portrait.
+  - **Panels:** collapse to fit an iPad in portrait. Already at an iPad's
+    1180 px landscape width, the Mesh tab's Edit modes overflow the rail
+    (Paint is clipped), and a large map's widest zooms exceed a canvas.
   - **Canvases:** no page zoom, text selection or callouts.
   - **Keys:** an on-screen equivalent for each remaining keyboard-only
     action, listed in the shortcut help.

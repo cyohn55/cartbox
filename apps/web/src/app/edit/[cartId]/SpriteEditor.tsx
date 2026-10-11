@@ -1130,6 +1130,7 @@ export function SpriteEditor({
           fillShape={fillShape}
           version={version}
           zoom={zoom}
+          onZoom={(factor) => setZoom((z) => Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, z * factor)))}
           onEdit={bump}
           onHover={setHover}
           onPickValue={setActiveValue}

@@ -13,12 +13,13 @@
  * PNG when the stroke ends.
  */
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 
 import {
   PAINT_LAYERS,
   blankLayer,
   encodePaintImage,
+  layerValue,
   materialFor,
   packIslands,
   paintImageFrom,
@@ -26,6 +27,7 @@ import {
   paintTexels,
   patchMaterial,
   pickIsland,
+  texelOf,
   transformIsland,
   unwrapPrimitive,
   uvIslands,
@@ -37,7 +39,8 @@ import {
 } from "@cartbox/editor";
 
 import { decodeImage } from "@/lib/meshImport";
-import { pressureBrush, samplePointer, strokePressure, type PressureMode } from "@/lib/tabletInput";
+import { pressureBrush, strokePressure, type PressureMode } from "@/lib/tabletInput";
+import { useGestures } from "@/lib/useTabletGestures";
 import styles from "./editor.module.css";
 import { RailGroup, RailHint, RangeControl, SegmentedControl } from "./railControls";
 
@@ -82,6 +85,8 @@ export interface TexturePaint {
   endStroke: () => void;
   /** The stroke is abandoned (a second finger made it a gesture): its texels are put back. */
   cancelStroke: () => void;
+  /** The eyedropper (a long press, TABLET_EDITOR_ROADMAP.md T2): take the layer's colour or value at a UV. */
+  pick: (uv: readonly [number, number]) => void;
 }
 
 /**
@@ -166,6 +171,16 @@ export function useTexturePaint(mesh: MeshAsset | null, set: string | null, onCo
     before.current = null;
     dirty.current = false;
   }, [target]);
+  const pick = useCallback(
+    (uv: readonly [number, number]) => {
+      if (!target) return;
+      const [x, y] = texelOf(target.image, uv);
+      const v = layerValue(target.image, layer, x, y);
+      if (layer === "roughness" || layer === "metal" || layer === "teamMask") setValue(v[0]!);
+      else setColor([v[0]!, v[1]!, v[2]!]);
+    },
+    [target, layer],
+  );
   const endStroke = useCallback(() => {
     before.current = null;
     if (!mesh || !target || !dirty.current) return;
@@ -197,6 +212,7 @@ export function useTexturePaint(mesh: MeshAsset | null, set: string | null, onCo
     dab,
     endStroke,
     cancelStroke,
+    pick,
   };
 }
 
@@ -256,34 +272,49 @@ function UvView({ mesh, paint, tool, island, onIsland, onEdit }: { mesh: MeshAss
     }
   }, [p, paint.target, paint.version, islands, island, drag]);
 
-  const uvAt = (event: React.PointerEvent<HTMLCanvasElement>): [number, number] => {
-    const rect = event.currentTarget.getBoundingClientRect();
-    return [(event.clientX - rect.left) / rect.width, 1 - (event.clientY - rect.top) / rect.height];
+  const uvAt = (x: number, y: number, el: Element): [number, number] => {
+    const rect = el.getBoundingClientRect();
+    return [(x - rect.left) / rect.width, 1 - (y - rect.top) / rect.height];
   };
-  return (
-    <canvas
-      ref={canvasRef}
-      role="img"
-      aria-label={tool === "paint" ? "UV view — drag to paint the layer" : "UV view — click an island to pick it, drag to move it"}
-      style={{ width: "100%", aspectRatio: "1", borderRadius: 6, touchAction: "none", cursor: tool === "paint" ? "crosshair" : "move", imageRendering: "pixelated" }}
-      onPointerDown={(event) => {
+
+  // Zoom (TABLET_EDITOR_ROADMAP.md T2): the canvas grows inside a square
+  // that scrolls, and a pinch keeps the point between the fingers in place.
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const [zoom, setZoom] = useState(1);
+  const anchor = useRef<{ x: number; y: number; factor: number } | null>(null);
+  useLayoutEffect(() => {
+    const box = scrollRef.current;
+    const a = anchor.current;
+    anchor.current = null;
+    if (!box || !a) return;
+    const rect = box.getBoundingClientRect();
+    const [lx, ly] = [a.x - rect.left, a.y - rect.top];
+    box.scrollLeft = (box.scrollLeft + lx) * a.factor - lx;
+    box.scrollTop = (box.scrollTop + ly) * a.factor - ly;
+  }, [zoom]);
+
+  // Through the tablet layer: the Pencil (or a mouse, or one finger until a
+  // Pencil is used) paints or drags islands; two fingers pan and pinch; a
+  // long press while painting is the eyedropper.
+  const gestures = useGestures<HTMLCanvasElement>(
+    {
+      onToolDown: (s, el) => {
         if (!p?.uvs) return;
-        event.currentTarget.setPointerCapture(event.pointerId);
-        const uv = uvAt(event);
+        const uv = uvAt(s.x, s.y, el);
         if (tool === "paint") {
           painting.current = true;
-          paint.dab(uv, strokePressure(samplePointer(event.nativeEvent)));
+          paint.dab(uv, strokePressure(s));
           return;
         }
         const k = pickIsland(p, islands, uv);
         onIsland(k);
         if (k >= 0) setDrag({ from: uv, to: uv });
-      }}
-      onPointerMove={(event) => {
-        if (tool === "paint" && painting.current) paint.dab(uvAt(event), strokePressure(samplePointer(event.nativeEvent)));
-        else if (drag) setDrag({ ...drag, to: uvAt(event) });
-      }}
-      onPointerUp={() => {
+      },
+      onToolMove: (s, el) => {
+        if (tool === "paint" && painting.current) paint.dab(uvAt(s.x, s.y, el), strokePressure(s));
+        else if (drag) setDrag({ ...drag, to: uvAt(s.x, s.y, el) });
+      },
+      onToolUp: () => {
         if (tool === "paint") {
           if (painting.current) paint.endStroke();
           painting.current = false;
@@ -294,8 +325,35 @@ function UvView({ mesh, paint, tool, island, onIsland, onEdit }: { mesh: MeshAss
           onEdit(withPrimitive(mesh, paint.primitive, transformIsland(p, k, { kind: "move", offset: [drag.to[0] - drag.from[0], drag.to[1] - drag.from[1]] })));
         }
         setDrag(null);
-      }}
-    />
+      },
+      onToolCancel: () => {
+        if (painting.current) paint.cancelStroke();
+        painting.current = false;
+        setDrag(null);
+      },
+      onPan: (dx, dy) => scrollRef.current?.scrollBy(-dx, -dy),
+      onZoom: (factor, x, y) => {
+        const next = Math.min(8, Math.max(1, zoom * factor));
+        if (next === zoom) return;
+        anchor.current = { x, y, factor: next / zoom };
+        setZoom(next);
+      },
+      onLongPress: (s, el) => {
+        if (tool === "paint" && p?.uvs) paint.pick(uvAt(s.x, s.y, el));
+      },
+    },
+    { drag: "pan" },
+  );
+  return (
+    <div ref={scrollRef} style={{ width: "100%", aspectRatio: "1", overflow: "auto", borderRadius: 6 }}>
+      <canvas
+        ref={canvasRef}
+        role="img"
+        aria-label={tool === "paint" ? "UV view — drag or draw with the Pencil to paint the layer; long-press to pick its colour; pinch to zoom" : "UV view — click an island to pick it, drag to move it"}
+        style={{ display: "block", width: `${zoom * 100}%`, aspectRatio: "1", touchAction: "none", cursor: tool === "paint" ? "crosshair" : "move", imageRendering: "pixelated" }}
+        {...gestures}
+      />
+    </div>
   );
 }
 

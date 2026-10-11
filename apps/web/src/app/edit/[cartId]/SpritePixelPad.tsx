@@ -16,6 +16,9 @@
 import { useCallback, useEffect, useRef } from "react";
 import type { SpritePage, SpriteSheet } from "@cartbox/editor";
 
+import type { PointerSample } from "@/lib/tabletInput";
+import { scrollableParent, useGestures } from "@/lib/useTabletGestures";
+
 import styles from "./editor.module.css";
 
 /** On-screen size of the pad, in CSS pixels. */
@@ -66,31 +69,68 @@ export function SpritePixelPad({
   }, [redraw, version]);
 
   /** The sprite pixel under the pointer, or null when outside the pad. */
-  const pixelFromEvent = (event: React.PointerEvent): { x: number; y: number } | null => {
+  const pixelFromEvent = (event: PointerSample): { x: number; y: number } | null => {
     const canvas = canvasRef.current;
     if (!canvas) return null;
     const rect = canvas.getBoundingClientRect();
-    const x = Math.floor(((event.clientX - rect.left) / rect.width) * sheet.tileSize);
-    const y = Math.floor(((event.clientY - rect.top) / rect.height) * sheet.tileSize);
+    const x = Math.floor(((event.x - rect.left) / rect.width) * sheet.tileSize);
+    const y = Math.floor(((event.y - rect.top) / rect.height) * sheet.tileSize);
     if (x < 0 || y < 0 || x >= sheet.tileSize || y >= sheet.tileSize) return null;
     return { x, y };
   };
 
-  const paint = (event: React.PointerEvent) => {
+  const paint = (event: PointerSample, erase = erasing.current) => {
     const target = pixelFromEvent(event);
     if (!target) return;
-    sheet.setPixel(page, tile, target.x, target.y, erasing.current ? 0 : colorIndex);
+    sheet.setPixel(page, tile, target.x, target.y, erase ? 0 : colorIndex);
     redraw();
     onEdit();
   };
 
-  const handleDown = (event: React.PointerEvent) => {
-    event.preventDefault();
-    painting.current = true;
-    erasing.current = event.button === 2;
-    (event.target as HTMLElement).setPointerCapture(event.pointerId);
-    paint(event);
+  // The sprite before the stroke under way, to put back if a second finger
+  // turns it into a gesture (TABLET_EDITOR_ROADMAP.md T2).
+  const before = useRef<number[] | null>(null);
+  const restore = () => {
+    const saved = before.current;
+    before.current = null;
+    painting.current = false;
+    if (!saved) return;
+    let i = 0;
+    for (let y = 0; y < sheet.tileSize; y += 1)
+      for (let x = 0; x < sheet.tileSize; x += 1) {
+        const was = saved[i++]!;
+        if (sheet.getPixel(page, tile, x, y) !== was) sheet.setPixel(page, tile, x, y, was);
+      }
+    redraw();
+    onEdit();
   };
+
+  // Through the tablet layer: the Pencil, a mouse or (until a Pencil is used)
+  // one finger paints; a long press erases, as a right-click does; fingers
+  // that navigate scroll the panel.
+  const gestures = useGestures<HTMLCanvasElement>(
+    {
+      onToolDown: (s) => {
+        painting.current = true;
+        erasing.current = s.button === 2;
+        const saved: number[] = [];
+        for (let y = 0; y < sheet.tileSize; y += 1) for (let x = 0; x < sheet.tileSize; x += 1) saved.push(sheet.getPixel(page, tile, x, y));
+        before.current = saved;
+        paint(s);
+      },
+      onToolMove: (s) => {
+        if (painting.current) paint(s);
+      },
+      onToolUp: () => {
+        painting.current = false;
+        before.current = null;
+      },
+      onToolCancel: restore,
+      onPan: (dx, dy, el) => scrollableParent(el)?.scrollBy(-dx, -dy),
+      onLongPress: (s) => paint(s, true),
+    },
+    { drag: "pan" },
+  );
 
   return (
     <div>
@@ -115,22 +155,13 @@ export function SpritePixelPad({
         ref={canvasRef}
         className={styles.pixelPad}
         style={{ width: PAD_SIZE, height: PAD_SIZE }}
-        onPointerDown={handleDown}
-        onPointerMove={(event) => {
-          if (painting.current) paint(event);
-        }}
-        onPointerUp={() => {
-          painting.current = false;
-        }}
-        onPointerCancel={() => {
-          painting.current = false;
-        }}
+        {...gestures}
         onContextMenu={(event) => event.preventDefault()}
         role="img"
         aria-label={`Sprite ${tile} pixels`}
       />
       <p className={styles.pickerHint}>
-        Click to paint with the selected colour, right-click to erase. Edits land on the sprite itself, so the
+        Click or draw with the Pencil to paint with the selected colour; right-click or long-press to erase. Edits land on the sprite itself, so the
         sculpt&apos;s skin and the Sprites tab update together.
       </p>
     </div>
