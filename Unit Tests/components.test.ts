@@ -284,13 +284,18 @@ describe("Lockout", () => {
     const sc = parseMeshScene(lockoutMeshSidecar())!;
     expect(sc.components).toEqual(LOCKOUT_COMPONENTS);
     expect(componentCallbacks(LOCKOUT_COMPONENTS[0]!.code)).toEqual(["start", "update"]);
-    const pickups = sc.instances.slice(14, 19);
-    expect(pickups.map((i) => i.name)).toEqual(["pickup sniper", "pickup br", "pickup shotgun", "pickup sword", "pickup smg"]);
+    // One for every weapon a pad turns through (LOCKOUT_ARSENAL_ROADMAP.md A1), each pad's first first.
+    const first = sc.instances.findIndex((i) => i.name.startsWith("pickup "));
+    const pickups = sc.instances.filter((i) => i.name.startsWith("pickup "));
+    expect(sc.instances.slice(first, first + pickups.length)).toEqual(pickups);
+    expect(pickups.map((i) => i.name)).toEqual(
+      ["sniper", "beamrifle", "br", "dmr", "carbine", "needlerifle", "shotgun", "mauler", "sword", "smg", "ar", "plasmarifle", "needler", "spiker", "plasmapistol"].map((w) => `pickup ${w}`),
+    );
     pickups.forEach((p, k) => {
       expect(p.components).toEqual([{ name: "Pickup", fields: { slot: k + 1 } }]);
       expect(p.mesh.primitives.some((q) => q.material.name === "glove" || q.material.name === "sleeve")).toBe(false);
     });
-    expect(LOCKOUT_CODE).toContain("function pickup_ready(i)");
+    expect(LOCKOUT_CODE).toContain("function pickup_ready(k)");
   });
 });
 
@@ -319,7 +324,9 @@ describe.skipIf(!existsSync(ENGINE))("Lockout pickups (real engine)", () => {
       mod._cbx_tick(h, buttons);
       channel.afterTick(block());
     };
-    const pickups = () => [14, 15, 16, 17, 18].map((i) => channel.placements().get(i) ?? null);
+    const first = sc.instances.findIndex((i) => i.name.startsWith("pickup "));
+    const count = sc.instances.filter((i) => i.name.startsWith("pickup ")).length;
+    const pickups = () => Array.from({ length: count }, (_, k) => channel.placements().get(first + k) ?? null);
     const scaleOf = (m: ArrayLike<number>) => Math.hypot(m[0]!, m[1]!, m[2]!);
     for (let i = 0; i < 3; i += 1) tick();
     expect(pickups().every((m) => m !== null && scaleOf(m) === 0)).toBe(true);
@@ -334,7 +341,7 @@ describe.skipIf(!existsSync(ENGINE))("Lockout pickups (real engine)", () => {
       if (!up.includes(k)) return expect(scaleOf(m)).toBe(0);
       expect(scaleOf(m)).toBeCloseTo(1, 2);
       // Over its pad: where the scene put it, give or take the bob.
-      const home = sc.instances[14 + k]!.model;
+      const home = sc.instances[first + k]!.model;
       expect(m[12]!).toBeCloseTo(home[12]!, 2);
       expect(m[14]!).toBeCloseTo(home[14]!, 2);
       expect(Math.abs(m[13]! - home[13]!)).toBeLessThanOrEqual(0.062);

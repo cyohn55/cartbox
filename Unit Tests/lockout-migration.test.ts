@@ -16,10 +16,22 @@ import { lockoutParty } from "./helpers/lockoutRoom";
 // pmem 117: net mode (bits 0-1), my slot (2-4), in a match (5), the ball's
 // carrier's slot or 15 (6-9), blue's and red's team scores (10-17, 18-25);
 // 118: the scores of slots 0-3, a byte each.
+//
+// These engines load no mesh sidecar, so there is no navmesh and the bots stand
+// where they spawn. The host hands a ball loose for two seconds to its first bot
+// standing in slots 0-3, as that bot would have walked over and picked it up.
 const PROBE = `;(function()
-local _T = TIC
+local _T, loose = TIC, 0
 function TIC()
   _T()
+  if phase == "play" and MODE.obj == "ball" and NETMODE == 2 then
+    loose = ball.live and loose + 1 or 0
+    if loose > 120 then
+      for _,o in ipairs(bots) do
+        if not o.dead and not o.remote and o.ns <= 3 then ball.carrier, ball.live, loose = o, false, 0; break end
+      end
+    end
+  end
   local carrier = 15
   if phase == "play" and MODE.obj == "ball" and ball and ball.carrier then carrier = ball.carrier.ns end
   pmem(117, (NETMODE & 3) | ((MYSLOT & 7) << 2) | ((phase == "play" and 1 or 0) << 5) | ((carrier & 15) << 6)

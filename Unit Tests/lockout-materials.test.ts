@@ -147,7 +147,7 @@ describe("the Lockout materials", () => {
     expect(distinct.size).toBeGreaterThan(12);
   });
 
-  it("stays compact: the whole sidecar (arena + light map + soldier + 6 weapons + textures) under ~1.5 MB", () => {
+  it("stays compact: the whole sidecar (arena + light map + soldier + the arsenal + textures) inside its budget", () => {
     // The baked light map (one 512² PNG, stored once however many primitives
     // share it) and its second UV set add ~130 KB; this bound keeps a cart save
     // well inside a request body limit.
@@ -158,10 +158,12 @@ describe("the Lockout materials", () => {
     // since the Spartans' armour sets and the Forerunner kit's prefabs (I13,
     // I14), 1.8 MB since the kit's baked occlusion and relief maps (I15), 1.9 MB
     // since the arena's walls became kit panels (I16, even with the map's
-    // normals now rebuilt rather than stored): a sidecar over 512 KB is
+    // normals now rebuilt rather than stored), 2.4 MB since the arsenal's first
+    // ten weapons (LOCKOUT_ARSENAL_ROADMAP.md A1: a viewmodel each, and a
+    // Pickup for each weapon a pad turns through): a sidecar over 512 KB is
     // offloaded to object storage anyway, and this keeps a save well inside the
     // 4.5 MB request body limit.
-    expect(lockoutMeshSidecar().length).toBeLessThan(1_900_000);
+    expect(lockoutMeshSidecar().length).toBeLessThan(2_400_000);
   });
 
   it("ships a cold grade: bloom, contrast, cool split tone, vignette", () => {

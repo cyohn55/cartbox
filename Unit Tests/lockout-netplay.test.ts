@@ -22,12 +22,25 @@ const ENGINE = path.resolve(__dirname, "../packages/engine/dist/xbox360/engine.j
 // scores of slots 0-3 to pmem 117, and to pmem 118 the kill count (bits 0-15),
 // the ball carrier's slot (16-19) and everyone's scores summed (20-31) — words
 // the netplay channel leaves free.
+//
+// These engines load no mesh sidecar, so there is no navmesh and the bots stand
+// where they spawn: a loose ball would wait for a lucky respawn on top of it. In
+// Oddball the host's probe hands a ball loose for two seconds to its first bot
+// standing, as that bot would have walked over and picked it up.
 const PROBE = `
 local _rk = register_kill
 function register_kill(k, v, h) KILLS = (KILLS or 0) + 1; return _rk(k, v, h) end
-local _T = TIC
+local _T, loose = TIC, 0
 function TIC()
   _T()
+  if phase=="play" and MODE.obj=="ball" and NETMODE==2 then
+    loose = ball.live and loose + 1 or 0
+    if loose > 120 then
+      for _,o in ipairs(bots) do
+        if not o.dead and not o.remote then ball.carrier, ball.live, loose = o, false, 0; break end
+      end
+    end
+  end
   if phase=="play" and p then
     local s = {}
     local total = 0

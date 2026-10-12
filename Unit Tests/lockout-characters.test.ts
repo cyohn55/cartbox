@@ -65,24 +65,29 @@ describe("the Lockout soldiers and weapons", () => {
 
   it("orders instances as map, 7 bots, one viewmodel per weapon, the pad pickups, the Holograms' bodies, then the left hand's guns", () => {
     const ids = sidecar.meshes.map((m) => m.id);
-    expect(ids).toHaveLength(23);
     expect(ids[0]).toBe("lockout-map");
     expect(ids.slice(1, 8)).toEqual([1, 2, 3, 4, 5, 6, 7].map((i) => `bot-${i}`));
-    expect(ids.slice(8, 14)).toEqual(LOCKOUT_VIEWMODELS.map((w) => `viewmodel-${w}`));
-    expect(ids.slice(14, 19)).toEqual([1, 2, 3, 4, 5].map((i) => `pickup-${i}`));
-    expect(ids.slice(19, 21)).toEqual(["hologram-1", "hologram-2"]); // (E3, unseen at rest scale till placed)
-    expect(ids.slice(21)).toEqual(["viewmodel-smg-left", "viewmodel-magnum-left"]); // (E5: the right's models, drawn mirrored)
+    const vms = 8 + LOCKOUT_VIEWMODELS.length;
+    expect(ids.slice(8, vms)).toEqual(LOCKOUT_VIEWMODELS.map((w) => `viewmodel-${w}`));
+    // A Pickup for every weapon each pad turns through (A1): the sixteen weapons but the Magnum.
+    const pickups = ids.filter((id) => id.startsWith("pickup-")).length;
+    expect(pickups).toBe(LOCKOUT_VIEWMODELS.length - 1);
+    expect(ids.slice(vms, vms + pickups)).toEqual(Array.from({ length: pickups }, (_, i) => `pickup-${i + 1}`));
+    expect(ids.slice(vms + pickups, vms + pickups + 2)).toEqual(["hologram-1", "hologram-2"]); // (E3, unseen at rest scale till placed)
+    // (E5, A1: every one-hander's right-hand model, drawn mirrored)
+    expect(ids.slice(vms + pickups + 2)).toEqual(["smg", "magnum", "plasmapistol", "plasmarifle", "needler", "spiker", "mauler"].map((w) => `viewmodel-${w}-left`));
     const shared = (id: string) => sidecar.meshes.find((m) => m.id === id)!.mesh;
-    expect(shared("viewmodel-smg-left")).toBe(shared("viewmodel-smg"));
+    expect(shared("viewmodel-needler-left")).toBe(shared("viewmodel-needler"));
     // …then the four plasma grenades held in reserve (I10), the eight Drop Walls (E3), four each of
     // the Power Drain, its field, the Regenerator and its field (E4), and the mountains last.
     const scene = parseMeshScene(lockoutMeshSidecar())!;
-    expect(scene.instances.slice(23, 27).map((i) => i.name)).toEqual(["plasma grenade 1", "plasma grenade 2", "plasma grenade 3", "plasma grenade 4"]);
-    expect(scene.instances.slice(27, 35).every((i) => i.name.startsWith("drop wall"))).toBe(true);
-    expect(scene.instances.slice(35, 51).map((i) => i.name.replace(/ \d+$/, ""))).toEqual(
-      ["power drain", "drain field", "regenerator", "regen field"].flatMap((n) => [n, n, n, n]),
+    const n = ids.length;
+    expect(scene.instances.slice(n, n + 4).map((i) => i.name)).toEqual(["plasma grenade 1", "plasma grenade 2", "plasma grenade 3", "plasma grenade 4"]);
+    expect(scene.instances.slice(n + 4, n + 12).every((i) => i.name.startsWith("drop wall"))).toBe(true);
+    expect(scene.instances.slice(n + 12, n + 28).map((i) => i.name.replace(/ \d+$/, ""))).toEqual(
+      ["power drain", "drain field", "regenerator", "regen field"].flatMap((k) => [k, k, k, k]),
     );
-    expect(scene.instances.findIndex((i) => i.terrain)).toBe(51);
+    expect(scene.instances.findIndex((i) => i.terrain)).toBe(n + 28);
   });
 
   it("shares one tintable, skinned soldier across all 7 bots, stored once, each with the state machine", () => {
