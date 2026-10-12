@@ -63,9 +63,10 @@ describe("a sidecar and a cart for any map", () => {
     expect(ARENA_MAPS[0]!.id).toBe("lockout");
     expect(arenaMap("nowhere").id).toBe("lockout");
     expect(arenaMap("lockout").sidecar()).toBe(lockoutMeshSidecar());
-    // One map so far: the demo's code is the editor's (no map choice to offer).
-    expect(arenaMapCode("lockout")).toBe(LOCKOUT_CODE);
+    // The editor's Lockout knows only itself (it has no page to load another);
+    // the demo's knows every map, so its menu offers them.
     expect(LOCKOUT_CODE).toContain('MAPS = { "Lockout" }');
+    expect(arenaMapCode("lockout")).toContain(`MAPS = { ${ARENA_MAPS.map((m) => JSON.stringify(m.name)).join(", ")} }`);
   });
 
   it("builds another map's sidecar from the shared assets, its Pickups over its own pads", () => {

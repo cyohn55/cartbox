@@ -50,13 +50,15 @@ export interface RoomOptions {
   readonly hostProbe?: string;
   /** Lua appended to the guest's cart only (after `probe`). */
   readonly guestProbe?: string;
+  /** The cart's code (Lockout's by default; another map's, B8). */
+  readonly code?: string;
 }
 
 /** A host and a guest in one room, a match of the host's choosing under way. */
 export async function lockoutRoom(probe: string, options: RoomOptions | number = {}) {
-  const { downs = 0, link, hostProbe = "", guestProbe = "" } = typeof options === "number" ? { downs: options } : options;
+  const { downs = 0, link, hostProbe = "", guestProbe = "", code = LOCKOUT_CODE } = typeof options === "number" ? { downs: options } : options;
   const cart = (extra: string) =>
-    codeChunks(new TextEncoder().encode(`${CARTBOX_SDK_LUA}\n${actionsSdkLua(LOCKOUT_INPUT_ACTIONS, RAM_LAYOUTS.xbox360)}\n${LOCKOUT_CODE}\n${probe}\n${extra}`));
+    codeChunks(new TextEncoder().encode(`${CARTBOX_SDK_LUA}\n${actionsSdkLua(LOCKOUT_INPUT_ACTIONS, RAM_LAYOUTS.xbox360)}\n${code}\n${probe}\n${extra}`));
   let clock = 0;
   const lab = link ? new SimulatedNetHub(link, 7) : null;
   const memory = lab ? null : new MemoryNetHub();

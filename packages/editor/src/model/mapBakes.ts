@@ -11,6 +11,9 @@
 import { bytesToBase64 } from "./base64";
 import { encodeLightProbes, type LightProbeGrid } from "./lightProbes";
 import { layoutFingerprint, type LightmapLayout } from "./lightmap";
+import { BEAVER_LIGHTMAP } from "./beaverCreekLightmap.generated";
+import { BEAVER_PROBES } from "./beaverCreekProbes.generated";
+import { bakeBeaverLightmap, bakeBeaverProbes, beaverMapLayout } from "./beaverCreekSeed";
 import { LOCKOUT_LIGHTMAP } from "./lockoutLightmap.generated";
 import { LOCKOUT_PROBES } from "./lockoutProbes.generated";
 import { bakeLockoutKit, bakeLockoutLightmap, bakeLockoutProbes, lockoutKitBakeCurrent, lockoutMapLayout } from "./lockoutSeed";
@@ -61,6 +64,18 @@ export const MAP_BAKES: Readonly<Record<string, MapBakes>> = {
       lightmap: { path: "packages/editor/src/model/lockoutLightmap.generated.ts", constant: "LOCKOUT_LIGHTMAP" },
       probes: { path: "packages/editor/src/model/lockoutProbes.generated.ts", constant: "LOCKOUT_PROBES" },
       kit: { path: "packages/editor/src/model/lockoutKitMaps.generated.ts", constant: "LOCKOUT_KIT_MAPS" },
+    },
+  },
+  beaver: {
+    id: "beaver",
+    name: "Beaver Creek",
+    layout: beaverMapLayout,
+    bakeLightmap: bakeBeaverLightmap,
+    bakeProbes: bakeBeaverProbes,
+    stored: { lightmap: BEAVER_LIGHTMAP.fingerprint, probes: BEAVER_PROBES.probes ? BEAVER_PROBES.fingerprint : null },
+    files: {
+      lightmap: { path: "packages/editor/src/model/beaverCreekLightmap.generated.ts", constant: "BEAVER_LIGHTMAP" },
+      probes: { path: "packages/editor/src/model/beaverCreekProbes.generated.ts", constant: "BEAVER_PROBES" },
     },
   },
 };

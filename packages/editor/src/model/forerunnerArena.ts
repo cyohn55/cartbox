@@ -93,6 +93,16 @@ export interface ArenaMap {
   readonly markers: readonly ArenaMarker[];
   /** Walkable ground (B3): terrain soldiers stand on, shots strike and bots walk over (absent: boxes only). */
   readonly ground?: ArenaGround;
+  /** Teleporters (B8): a soldier stepping onto one's pad is taken to its far end. */
+  readonly teleporters?: readonly ArenaTeleporter[];
+}
+
+/** A one-way teleporter (BEAVER_CREEK_ROADMAP.md B8): its pad's feet position, where it sends you, and which way you face there. */
+export interface ArenaTeleporter {
+  readonly from: ArenaPoint;
+  readonly to: ArenaPoint;
+  /** Facing on arrival (radians: 0 along +z, π/2 along +x). */
+  readonly yaw: number;
 }
 
 /**
@@ -230,6 +240,7 @@ export function arenaLua(map: ArenaMap): string {
     `local DEATH_Y = ${n2(map.deathY)}`,
     // (globals: the chunk is near Lua's 200 locals)
     ...(map.ground ? groundLua(map.ground) : ["HF = nil"]),
+    `TP = {${(map.teleporters ?? []).map((t) => [...t.from, ...t.to, t.yaw].map(n2).join(",")).join(",")}}`,
   ].join("\n");
 }
 
