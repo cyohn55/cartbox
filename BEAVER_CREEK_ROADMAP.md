@@ -127,7 +127,7 @@ From memory of Battle Creek and Beaver Creek. The linked model can't be opened f
       - a guest asking for its host's map, and joining when they match;
       - the hello catch-up.
 
-- [ ] **B3. Collision from the map's own geometry** (L11).
+- [x] **B3. Collision from the map's own geometry** (L11).
   - A map's collision is its own layer: boxes, ramps and walkable terrain.
   - Terrain gets collision in the cart (a heightfield the soldier stands and walks on) and goes into the bot navmesh.
   - Deployables (Drop Wall and the rest) learn the heights a canyon needs. Today they are limited to ±25.6 m.
@@ -139,6 +139,24 @@ From memory of Battle Creek and Beaver Creek. The linked model can't be opened f
     - the map is under budget.
   - *Lockout:* passes the validator.
   - *Tests:* the validator flags each failure on purpose-broken maps, and a soldier walks up a terrain slope.
+  - **Done, in part.**
+    - **Walkable ground.** `ArenaMap.ground` is heights on a grid (`arenaGround`, `groundHeight`), with NaN for holes. The cart gets it as `HF`. `ground_at` and `ground_ray` make soldiers stand and land on it. Slopes of up to about 50° are walked up, and steeper ones stop a soldier like a wall. Shots, sight lines and grenades all meet it.
+    - **Bots and ragdolls.** The bots' navmesh is baked over the ground as well as the boxes (`arenaNavMesh`). `groundBoxes` stands coarse boxes in for the ground, for ragdolls and debris.
+    - **The validator.** `validateArenaMap` reports:
+      - a spawn with no floor, or one inside a collider;
+      - a spawn, destination, hill, ball or pad that can't be reached from the first spawn;
+      - any of them near the death plane;
+      - a position beyond what the net state carries (±320 m across, ±25 m up, the Drop Wall's limit, which a canyon fits);
+      - a sidecar over budget.
+    - Lockout passes it.
+    - **Not yet:**
+      - The collision isn't yet a layer authored in the editor; that comes with B4.
+      - Nothing checks for visible geometry standing proud of the collision.
+    - *Tests:* `Unit Tests/arena-ground.test.ts`:
+      - the ground's heights, holes and triangles, and its Lua;
+      - the navmesh climbing the slope and not the cliff;
+      - the validator passing Lockout and a hillside, and flagging six purpose-broken maps;
+      - on the real engine, a soldier walking up the slope and stopped by the cliff, a sight line blocked by the ground, and a shot straight down striking it.
 
 - [ ] **B4. Maps made by hand.** A map can be built in the editor, in Blender, or both, and played in the demo.
   - **Its model:** a scene of meshes, terrain, foliage, water, lights and sky, imported as GLB from Blender (`BLENDER_WORKFLOW.md` gains a maps chapter) or modelled with L15–L17's tools.

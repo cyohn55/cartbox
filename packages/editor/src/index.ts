@@ -106,6 +106,7 @@ export {
   LOCKOUT_MAP,
   lockoutCode,
 } from "./model/lockoutSeed";
+export { arenaNavMesh, validateArenaMap, type ArenaIssue, type ArenaIssueKind, type ArenaValidateOptions } from "./model/arenaValidate";
 export { ARENA_MAPS, arenaMap, arenaMapCartridge, arenaMapCode, type ArenaMapEntry } from "./model/arenaMaps";
 export { MAP_BAKES, MAP_BAKE_PARTS, bakeMapKitSource, bakeMapLightmapSource, bakeMapProbesSource, mapBakeStatus, type MapBakeFile, type MapBakePart, type MapBakes } from "./model/mapBakes";
 export {
@@ -115,6 +116,11 @@ export {
   arenaFlight,
   arenaLua,
   arenaPads,
+  arenaGround,
+  groundBoxes,
+  groundHeight,
+  groundTriangles,
+  type ArenaGround,
   flightSteps,
   forerunnerBuilder,
   type ArenaBox,

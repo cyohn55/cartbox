@@ -4009,6 +4009,47 @@ local function edge(k, held) local was = prev[k]; prev[k] = held; return held an
 local function clamp(v,a,b) if v<a then return a elseif v>b then return b else return v end end
 local function d3(ax,ay,az,bx,by,bz) return math.sqrt((ax-bx)^2+(ay-by)^2+(az-bz)^2) end
 
+-- Walkable ground (BEAVER_CREEK_ROADMAP.md B3): the map's terrain as heights
+-- on a grid (HF, written with the map's tables), bilinear between samples;
+-- nil off it or over a hole. Soldiers stand on it, shots strike it.
+function ground_at(x, z)
+  if not HF then return nil end
+  local fx, fz = (x - HF_X0)/HF_S, (z - HF_Z0)/HF_S
+  if fx < 0 or fz < 0 or fx >= HF_N - 1 or fz >= HF_N - 1 then return nil end
+  local i, j = math.floor(fx), math.floor(fz)
+  local u, v = fx - i, fz - j
+  local k = j*HF_N + i + 1
+  local a, b, c, d = HF[k], HF[k+1], HF[k+HF_N], HF[k+HF_N+1]
+  if a < -900 or b < -900 or c < -900 or d < -900 then return nil end
+  return (a*(1-u) + b*u)*(1-v) + (c*(1-u) + d*u)*v
+end
+-- Where a segment from A to B first goes under the ground: t (0..1) and the
+-- ground's normal there; nil if it never does. Marched in half-cells across
+-- and half metres up or down, then narrowed down; a segment wholly above the
+-- highest ground is skipped.
+function ground_ray(x0,y0,z0, x1,y1,z1)
+  if not HF or (y0 > HF_TOP and y1 > HF_TOP) then return nil end
+  local dx, dy, dz = x1-x0, y1-y0, z1-z0
+  local n = math.max(1, math.ceil(math.sqrt(dx*dx + dz*dz) / (HF_S*0.5)), math.ceil(math.abs(dy) / 0.5))
+  local function under(t) local g = ground_at(x0+dx*t, z0+dz*t); return g ~= nil and y0+dy*t < g end
+  local prev = 0
+  for k = 1, n do
+    local t = k/n
+    if under(t) then
+      local lo, hi = prev, t
+      for _ = 1, 6 do local m = (lo+hi)/2; if under(m) then hi = m else lo = m end end
+      local x, z, e = x0+dx*hi, z0+dz*hi, HF_S*0.5
+      local g = ground_at(x, z) or 0
+      local gx = (ground_at(x+e, z) or g) - (ground_at(x-e, z) or g)
+      local gz = (ground_at(x, z+e) or g) - (ground_at(x, z-e) or g)
+      local m = math.sqrt(gx*gx + 4*e*e + gz*gz)
+      return hi, -gx/m, 2*e/m, -gz/m
+    end
+    prev = t
+  end
+  return nil
+end
+
 -- Segment vs every solid collider: true if the shot from A to B hits a wall
 -- before maxt (world units). Slab test per box, nearest hit kept -- this is
 -- what stops shots (yours and the bots') passing through the Forerunner walls.
@@ -4037,6 +4078,9 @@ function seg_blocked(x0,y0,z0, x1,y1,z1, maxt, solid)
     end
     if ok and tmin>0.02 and tmin*1.0 < (maxt or 1) then return true end
   end
+  -- (and the ground: B3)
+  local gt = HF and ground_ray(x0,y0,z0, x1,y1,z1)
+  if gt and gt > 0.02 and gt < (maxt or 1) then return true end
   return false
 end
 
@@ -4064,12 +4108,17 @@ function seg_first(x0,y0,z0, x1,y1,z1, solid)
     end
     if ok and tmin>0.02 and axis>0 and (best==nil or tmin<best) then best=tmin; bn=axis end
   end
+  -- The ground nearer than any box (B3): its own normal.
+  local gt, gnx, gny, gnz = nil, 0, 1, 0
+  if HF then gt, gnx, gny, gnz = ground_ray(x0,y0,z0, x1,y1,z1) end
+  if gt and gt > 0.02 and (best == nil or gt < best) then best, bn = gt, 0 end
   -- A Drop Wall nearer than the arena's (E3): its face toward the start.
   if not solid and DEPLOY[1] then
     local wt, wl, side = wall_cross(x0,y0,z0, x1,y1,z1)
     if wt and wt > 0.02 and (not best or wt < best) then return wt, math.sin(wl.yaw)*side, 0, math.cos(wl.yaw)*side end
   end
   if not best then return nil end
+  if bn == 0 then return best, gnx, gny, gnz end
   local n = {0,0,0}
   n[bn] = d[bn] > 0 and -1 or 1
   return best, n[1], n[2], n[3]
@@ -4136,6 +4185,13 @@ local function move_axis(e, ax, d)
       end
     end
   end
+  -- The ground (B3): a slope of up to about 50 degrees is walked up (a rise
+  -- of a step or less, no steeper than 1.2 to 1); steeper, and it's a wall.
+  local g = HF and ground_at(e.x, e.z)
+  if g and g > feet then
+    if g - feet <= math.min(STEP, math.abs(d)*1.2 + 0.02) then e.y = g
+    elseif ax == "x" then e.x = e.x - d else e.z = e.z - d end
+  end
 end
 
 local function move_vertical(e)
@@ -4151,6 +4207,9 @@ local function move_vertical(e)
       elseif e.vy>0 and head>y0 and feet<y0 then e.y=y0-PH; e.vy=0 end
     end
   end
+  -- Landing on the ground (B3), from above or sunk a little into a slope.
+  local g = HF and ground_at(e.x, e.z)
+  if g and e.vy <= 0 and e.y < g and e.y > g - 1.2 then e.y = g; e.vy = 0; e.grounded = true end
   if e.y < DEATH_Y then fell(e) end   -- off the arena
 end
 
@@ -5220,6 +5279,9 @@ local function update_grenades()
           g.y=COL[b+5]; g.vy=-g.vy*0.4; g.vx=g.vx*0.6; g.vz=g.vz*0.6
         end
       end
+      -- (and off the ground: B3)
+      local gh = HF and ground_at(g.x, g.z)
+      if gh and g.y < gh and g.vy < 0 then g.y = gh; g.vy = -g.vy*0.4; g.vx = g.vx*0.6; g.vz = g.vz*0.6 end
       local o = (not g.replica) and stick(g) or nil
       if o then
         g.stuck = o; g.ox, g.oy, g.oz = g.x - o.x, g.y - o.y, g.z - o.z
