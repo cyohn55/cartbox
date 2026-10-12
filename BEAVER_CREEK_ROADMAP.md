@@ -238,6 +238,18 @@ Each item lands in all three renderers (WebGL2, WebGPU, and the software referen
   - A grade and a sky for a clear midday valley.
   - In the editor, the lighting panel gains the cascade and contact-shadow controls.
   - *Tests:* parity; cascade transitions without seams; performance within each quality tier's budget.
+  - **Soft sun shadows and seamless cascades: done.**
+    - A lighting rig takes `softShadows`. Its sun's shadow map is then filtered over a 4×4 neighbourhood instead of 2×2 (`ShadowInput.soft`; `shadow2.y` = 2 on the GPU), for the wide penumbrae of daylight.
+    - The near cascade no longer switches to the main map at a hard line. Past `NEAR_CASCADE_BLEND` (0.8 of its extent) a fragment's shadow fades to the main map's, reaching it at `NEAR_CASCADE_EDGE`, so there is no seam.
+    - The same code runs in the software rasteriser and both scene shaders. WebGL2 matches the software frame on the cascade scene, soft and 2×2.
+    - The lighting panel's **Shadows** gains **Soft**. Beaver Creek uses soft shadows, and a breeze down the creek for its plants.
+    - *Tests:* `shadowCascade.test.ts` (the fade is monotonic and seamless; soft widens the penumbra; a rig with `softShadows` builds a soft map); `webgl-parity.test.ts` (the soft cascade).
+  - **Left:**
+    - contact shadows under small props;
+    - SSAO tuned for foliage;
+    - a third cascade, if the canyon needs one once it is dressed (B9);
+    - a midday grade and sky for the valley (with B9's art pass).
+    - Sun shafts already stream through any gap, foliage crowns included (`applySunShafts`).
 
 ## Phase C: Beaver Creek
 

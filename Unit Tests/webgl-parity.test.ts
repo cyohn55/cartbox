@@ -318,6 +318,15 @@ describe.skipIf(!chromiumPath)("WebGL2 parity in a real browser", () => {
     }
   });
 
+  it("filters soft 4×4 sun shadows and fades between cascades like the software rasteriser (B7)", async () => {
+    const result = await run("cascadeSoft");
+    expect(result.drawn).toBeGreaterThan(100);
+    if (exact) {
+      expect(result.coverage, JSON.stringify(result.diffs)).toBe(0);
+      expect(result.maxDelta).toBeLessThanOrEqual(4);
+    }
+  });
+
   it("casts spot and point light shadows like the software rasteriser", async () => {
     const result = await run("localShadows");
     expect(result.drawn).toBeGreaterThan(100);

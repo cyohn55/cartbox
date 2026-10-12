@@ -542,6 +542,7 @@ export {
   type ShadowInput,
   shadowVisibility,
   sunShadowVisibility,
+  NEAR_CASCADE_BLEND,
   NEAR_CASCADE_EDGE,
   type ShadowCascade,
   type RenderShadowMapOptions,

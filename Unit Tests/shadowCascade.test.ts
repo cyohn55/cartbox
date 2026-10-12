@@ -8,7 +8,9 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  NEAR_CASCADE_BLEND,
   NEAR_CASCADE_EDGE,
+  shadowVisibility,
   buildSceneShadow,
   cameraPositionFromView,
   composeModelMatrix,
@@ -44,6 +46,48 @@ describe("choosing a map", () => {
     expect(sunShadowVisibility(shadow, 0, 0, 0.5, edge, 0, 0, 1)).toBe(1); // main map: lit
     expect(sunShadowVisibility(shadow, 0, 0, 0.5, 5, 0, 5, 1)).toBe(1);
     expect(sunShadowVisibility({ ...shadow, near: null }, 0, 0, 0.5, 0, 0, 0, 1)).toBe(1);
+  });
+  it("fades from the near map to the main one toward the near map's edge, leaving no seam (B7)", () => {
+    const at = (x: number) => sunShadowVisibility(shadow, 0, 0, 0.5, x, 0, 0, 1);
+    // World x maps to the near map's NDC as x / 2 here.
+    expect(at(2 * NEAR_CASCADE_BLEND)).toBe(0); // still the near map's alone
+    expect(at(2 * ((NEAR_CASCADE_BLEND + NEAR_CASCADE_EDGE) / 2))).toBeCloseTo(0.5, 6); // halfway through the fade
+    expect(at(2 * NEAR_CASCADE_EDGE - 1e-4)).toBeCloseTo(1, 2); // all but the main map's at the edge
+    let last = -1;
+    for (let x = 0; x < 2 * NEAR_CASCADE_EDGE; x += 0.01) {
+      const v = at(x);
+      expect(v).toBeGreaterThanOrEqual(last - 1e-12);
+      last = v;
+    }
+  });
+});
+
+describe("soft shadows (B7)", () => {
+  // A 16² map: the left half at depth −1 (an occluder over everything), the right half clear.
+  const depth = new Float32Array(16 * 16);
+  for (let y = 0; y < 16; y += 1) for (let x = 0; x < 16; x += 1) depth[y * 16 + x] = x < 8 ? -1 : 1;
+  const map: ShadowInput = { lightViewProj: new Float64Array(16), depth, size: 16, bias: 0 };
+  const across = (s: ShadowInput) => Array.from({ length: 9 }, (_, i) => shadowVisibility(s, (i - 4) / 16, 0, 0.5, 1));
+
+  it("widens the penumbra from one texel to four", () => {
+    const hard = across(map);
+    const pcf = across({ ...map, pcf: true });
+    const soft = across({ ...map, pcf: true, soft: true });
+    const partial = (vs: number[]) => vs.filter((v) => v > 0 && v < 1).length;
+    expect(partial(hard)).toBe(0);
+    expect(partial(soft)).toBeGreaterThan(partial(pcf));
+    // Every filter agrees far from the edge.
+    for (const vs of [hard, pcf, soft]) {
+      expect(vs[0]).toBe(0);
+      expect(vs[8]).toBe(1);
+    }
+  });
+
+  it("is what a lighting rig with softShadows builds", () => {
+    const built = buildSceneShadow(scene().instances, patchSceneLighting(lighting, { softShadows: true }), [0, 0, 0], 10, { size: 32, depth: new Float32Array(32 * 32) });
+    expect(built?.pcf).toBe(true);
+    expect(built?.soft).toBe(true);
+    expect(buildSceneShadow(scene().instances, lighting, [0, 0, 0], 10, { size: 32, depth: new Float32Array(32 * 32) })?.soft).toBeUndefined();
   });
 });
 

@@ -538,6 +538,11 @@ export interface ShadowInput {
    *  shadow edges instead of one hard texel. Default false. */
   readonly pcf?: boolean;
   /**
+   * With {@link pcf}: average a 4×4 neighbourhood instead (B7), for the soft,
+   * wide penumbrae of a daylight sun. Default false.
+   */
+  readonly soft?: boolean;
+  /**
    * The texels of `depth` that changed since the previous frame's map in this
    * same array (movers' shadows, old and new). A GPU renderer that uploaded the
    * array before re-uploads just this; absent or null means all of it may have
@@ -564,6 +569,17 @@ export interface ShadowCascade {
 
 /** How far into the near cascade (in its NDC) a fragment must be to use it; past that the main map takes over. */
 export const NEAR_CASCADE_EDGE = 0.95;
+/**
+ * Past this far into the near cascade (B7) a fragment's shadow fades from the
+ * near map's to the main map's, reaching it at {@link NEAR_CASCADE_EDGE}, so
+ * the switch between them leaves no seam.
+ */
+export const NEAR_CASCADE_BLEND = 0.8;
+
+/** A shadow's filter: 0 one texel, 1 a 2×2 neighbourhood, 2 a 4×4 one (B7). */
+function shadowTaps(shadow: ShadowInput): number {
+  return shadow.pcf === true ? (shadow.soft === true ? 2 : 1) : 0;
+}
 
 /**
  * The sun's shadow at a fragment (EP8b): from the near cascade when the
@@ -577,8 +593,13 @@ export function sunShadowVisibility(shadow: ShadowInput, lx: number, ly: number,
     const nx = m[0]! * wx + m[4]! * wy + m[8]! * wz + m[12]!;
     const ny = m[1]! * wx + m[5]! * wy + m[9]! * wz + m[13]!;
     const nz = m[2]! * wx + m[6]! * wy + m[10]! * wz + m[14]!;
-    if (Math.abs(nx) < NEAR_CASCADE_EDGE && Math.abs(ny) < NEAR_CASCADE_EDGE && Math.abs(nz) <= 1) {
-      return shadowTest(near.depth, shadow.size, near.bias, near.slopeBias, shadow.strength ?? 1, shadow.pcf === true, nx, ny, nz, cosToLight);
+    const reach = Math.max(Math.abs(nx), Math.abs(ny));
+    if (reach < NEAR_CASCADE_EDGE && Math.abs(nz) <= 1) {
+      const v = shadowTest(near.depth, shadow.size, near.bias, near.slopeBias, shadow.strength ?? 1, shadowTaps(shadow), nx, ny, nz, cosToLight);
+      if (reach <= NEAR_CASCADE_BLEND) return v;
+      // Fading to the main map toward the cascade's edge (B7).
+      const w = (reach - NEAR_CASCADE_BLEND) / (NEAR_CASCADE_EDGE - NEAR_CASCADE_BLEND);
+      return v + (shadowVisibility(shadow, lx, ly, lz, cosToLight) - v) * w;
     }
   }
   return shadowVisibility(shadow, lx, ly, lz, cosToLight);
@@ -591,11 +612,11 @@ export function sunShadowVisibility(shadow: ShadowInput, lx: number, ly: number,
  * (drives the slope-scaled bias). Mirrors `shadowFactor` in the WGSL renderer.
  */
 export function shadowVisibility(shadow: ShadowInput, lx: number, ly: number, lz: number, cosToLight: number): number {
-  return shadowTest(shadow.depth, shadow.size, shadow.bias ?? 0.003, shadow.slopeBias ?? 0, shadow.strength ?? 1, shadow.pcf === true, lx, ly, lz, cosToLight);
+  return shadowTest(shadow.depth, shadow.size, shadow.bias ?? 0.003, shadow.slopeBias ?? 0, shadow.strength ?? 1, shadowTaps(shadow), lx, ly, lz, cosToLight);
 }
 
 /** {@link shadowVisibility} over one map's depth, size and biases. */
-function shadowTest(depth: Float32Array, size: number, bias0: number, slope: number, strength: number, pcf: boolean, lx: number, ly: number, lz: number, cosToLight: number): number {
+function shadowTest(depth: Float32Array, size: number, bias0: number, slope: number, strength: number, taps: number, lx: number, ly: number, lz: number, cosToLight: number): number {
   const sx = (lx * 0.5 + 0.5) * size;
   const sy = (1 - (ly * 0.5 + 0.5)) * size;
   if (!(sx >= 0 && sx < size && sy >= 0 && sy < size && lz >= -1 && lz <= 1)) return 1;
@@ -609,9 +630,15 @@ function shadowTest(depth: Float32Array, size: number, bias0: number, slope: num
     const ty = Math.min(size - 1, Math.max(0, Math.floor(fy)));
     return lz - bias > depth[ty * size + tx]! ? 0 : 1;
   };
-  if (!pcf) return test(sx, sy) ? 1 : 1 - strength;
-  const lit = (test(sx - 0.5, sy - 0.5) + test(sx + 0.5, sy - 0.5) + test(sx - 0.5, sy + 0.5) + test(sx + 0.5, sy + 0.5)) / 4;
-  return 1 - strength * (1 - lit);
+  if (taps === 0) return test(sx, sy) ? 1 : 1 - strength;
+  if (taps === 1) {
+    const lit = (test(sx - 0.5, sy - 0.5) + test(sx + 0.5, sy - 0.5) + test(sx - 0.5, sy + 0.5) + test(sx + 0.5, sy + 0.5)) / 4;
+    return 1 - strength * (1 - lit);
+  }
+  // Soft (B7): a 4×4 neighbourhood, texel-spaced round the point.
+  let lit = 0;
+  for (let j = -1.5; j <= 1.5; j += 1) for (let i = -1.5; i <= 1.5; i += 1) lit += test(sx + i, sy + j);
+  return 1 - strength * (1 - lit / 16);
 }
 
 /** A vertex after transforms: view-space z (for clipping) + clip-space + attributes. */

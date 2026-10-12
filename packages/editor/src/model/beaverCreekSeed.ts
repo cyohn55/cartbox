@@ -326,6 +326,9 @@ export const BEAVER_LIGHTING: SceneLighting = {
   ...LOCKOUT_LIGHTING,
   lights: LOCKOUT_LIGHTING.lights.filter((l) => l.kind === "directional"),
   fog: { color: [0.72, 0.82, 0.92], density: 0.008, start: 24, max: 0.28, glow: { color: [1, 0.92, 0.78], strength: 0.25 } },
+  // Daylight in a canyon (B7): soft sun shadows, and a breeze down the creek for its plants (B6).
+  softShadows: true,
+  wind: { direction: Math.PI / 2, strength: 0.45, gust: 0.5 },
   probes: [
     { name: "blue base", position: [-25, 1.6, 0], min: [-31, 0, -6], max: [-19, 3.4, 6] },
     { name: "red base", position: [25, 1.6, 0], min: [19, 0, -6], max: [31, 3.4, 6] },

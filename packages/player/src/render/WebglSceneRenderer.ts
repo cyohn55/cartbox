@@ -64,6 +64,7 @@ import {
   LOCAL_SHADOW_GRID,
   LOCAL_SHADOW_TILE,
   MAX_LOCAL_SHADOW_TILES,
+  NEAR_CASCADE_BLEND,
   NEAR_CASCADE_EDGE,
   CLUSTER_INDEX_CAP,
   CLUSTER_X,
@@ -484,9 +485,17 @@ float shadowAt(vec3 ndc, float bias0, float slope, float ox, float cosL) {
     if (shadowTap(sx, sy, z, ox) < 0.5) { return 1.0 - u.shadow.w; }
     return 1.0;
   }
-  float lit = (shadowTap(sx - 0.5, sy - 0.5, z, ox) + shadowTap(sx + 0.5, sy - 0.5, z, ox)
-             + shadowTap(sx - 0.5, sy + 0.5, z, ox) + shadowTap(sx + 0.5, sy + 0.5, z, ox)) * 0.25;
-  return 1.0 - u.shadow.w * (1.0 - lit);
+  if (u.shadow2.y < 1.5) {
+    float lit = (shadowTap(sx - 0.5, sy - 0.5, z, ox) + shadowTap(sx + 0.5, sy - 0.5, z, ox)
+               + shadowTap(sx - 0.5, sy + 0.5, z, ox) + shadowTap(sx + 0.5, sy + 0.5, z, ox)) * 0.25;
+    return 1.0 - u.shadow.w * (1.0 - lit);
+  }
+  // Soft (B7): a 4×4 neighbourhood, texel-spaced round the point.
+  float lit = 0.0;
+  for (int j = 0; j < 4; j++) {
+    for (int i = 0; i < 4; i++) { lit += shadowTap(sx + float(i) - 1.5, sy + float(j) - 1.5, z, ox); }
+  }
+  return 1.0 - u.shadow.w * (1.0 - lit / 16.0);
 }
 // The near shadow cascade (EP8b): world→light-clip, and (1 when present, bias, slope bias).
 uniform mat4 nearShadowMvp;
@@ -495,16 +504,20 @@ uniform vec4 nearShadow;
 // point sits well inside it, else the main map.
 float shadowFactor(vec4 lightClip, vec3 worldPos, float cosL) {
   if (u.shadow.x < 0.5) { return 1.0; }
+  vec3 ndc = lightClip.xyz / lightClip.w;
+  bool inMain = !(ndc.x < -1.0 || ndc.x > 1.0 || ndc.y < -1.0 || ndc.y > 1.0 || ndc.z < -1.0 || ndc.z > 1.0);
   if (nearShadow.x > 0.5) {
     vec3 n = (nearShadowMvp * vec4(worldPos, 1.0)).xyz;
-    if (abs(n.x) < ${NEAR_CASCADE_EDGE} && abs(n.y) < ${NEAR_CASCADE_EDGE} && abs(n.z) <= 1.0) {
-      return shadowAt(n, nearShadow.y, nearShadow.z, u.shadow.y, cosL);
+    float m = max(abs(n.x), abs(n.y));
+    if (m < ${NEAR_CASCADE_EDGE} && abs(n.z) <= 1.0) {
+      float v = shadowAt(n, nearShadow.y, nearShadow.z, u.shadow.y, cosL);
+      if (m <= ${NEAR_CASCADE_BLEND}) { return v; }
+      // Fading to the main map toward the cascade's edge (B7).
+      float mv = inMain ? shadowAt(ndc, u.shadow.z, u.shadow2.x, 0.0, cosL) : 1.0;
+      return v + (mv - v) * ((m - ${NEAR_CASCADE_BLEND}) / (${NEAR_CASCADE_EDGE} - ${NEAR_CASCADE_BLEND}));
     }
   }
-  vec3 ndc = lightClip.xyz / lightClip.w;
-  if (ndc.x < -1.0 || ndc.x > 1.0 || ndc.y < -1.0 || ndc.y > 1.0 || ndc.z < -1.0 || ndc.z > 1.0) {
-    return 1.0;
-  }
+  if (!inMain) { return 1.0; }
   return shadowAt(ndc, u.shadow.z, u.shadow2.x, 0.0, cosL);
 }
 vec3 envGradient(float y) {
@@ -1355,7 +1368,7 @@ export class WebglSceneRenderer implements SceneRenderer {
     if (near) this.nearShadowMvp.set(near.lightViewProj);
     this.nearShadow.set(near ? [1, near.bias, near.slopeBias, 0] : [0, 0, 0, 0]);
     const shadowParams = shadow
-      ? { size: shadow.size, bias: shadow.bias ?? 0.003, strength: shadow.strength ?? 1, slopeBias: shadow.slopeBias ?? 0, pcf: shadow.pcf ?? false }
+      ? { size: shadow.size, bias: shadow.bias ?? 0.003, strength: shadow.strength ?? 1, slopeBias: shadow.slopeBias ?? 0, pcf: shadow.pcf ?? false, soft: shadow.soft ?? false }
       : null;
     this.uploadEnv(draw.environment?.map ?? null);
     this.uploadProbes(draw.environment?.probes ?? null);
