@@ -1385,7 +1385,11 @@ declare const AIM_ASSISTS: readonly AimAssist[];
 type LookDevice = "controller" | "touch" | "mouse" | "gyro";
 /** The touch pad's controls a player can move and resize (see TouchLayout). */
 declare const TOUCH_CONTROL_IDS: readonly ["leftStick", "rightStick", "A", "B", "X", "Y", "Start"];
-type TouchControlId = (typeof TOUCH_CONTROL_IDS)[number];
+/**
+ * A touch control: one of the pad's own, or the button for one of the game's
+ * input actions no face button carries ("act:<name>", see TouchInput).
+ */
+type TouchControlId = (typeof TOUCH_CONTROL_IDS)[number] | `act:${string}`;
 /**
  * Where a player put one touch control: its centre as a share of the game's
  * width (x) and height (y), 0..1 from the top left, and its size as a

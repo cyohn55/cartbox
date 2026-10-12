@@ -5501,13 +5501,15 @@ var RESPONSE_CURVES = ["standard", "dynamic", "precision", "responsive"];
 var STICK_LAYOUTS = ["default", "southpaw", "legacy", "legacySouthpaw"];
 var AIM_ASSISTS = ["off", "standard", "strong"];
 var TOUCH_CONTROL_IDS = ["leftStick", "rightStick", "A", "B", "X", "Y", "Start"];
+var ACTION_CONTROL = /^act:[A-Za-z0-9_]{1,24}$/;
 var TOUCH_CONTROL_MIN_SIZE = 0.5;
 var TOUCH_CONTROL_MAX_SIZE = 2;
 function parseTouchLayout(value) {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return {};
   const raw = value;
   const out = {};
-  for (const id of TOUCH_CONTROL_IDS) {
+  const ids = [...TOUCH_CONTROL_IDS, ...Object.keys(raw).filter((k) => ACTION_CONTROL.test(k))];
+  for (const id of ids) {
     const p = raw[id];
     if (typeof p !== "object" || p === null) continue;
     const { x, y, size } = p;
@@ -6002,6 +6004,7 @@ function hasTouchSupport(maxTouchPoints, coarsePointer) {
 }
 var FACE_SIZE = "clamp(40px, 8vmin, 68px)";
 var STICK_SIZE = "clamp(110px, 24vmin, 190px)";
+var controlName = (id) => id.startsWith("act:") ? `${id.slice(4)} button` : CONTROL_NAMES[id];
 var CONTROL_NAMES = {
   leftStick: "Left stick",
   rightStick: "Right stick",
@@ -6041,6 +6044,9 @@ var TouchInput = class {
     /** The player's layout (the controls they moved), and the pad's overall size. */
     this.layout = {};
     this.touchScale = 1;
+    /** The game's input actions no face button carries, each with its own button (see setActionButtons), and those held. */
+    this.actionNames = [];
+    this.actionHeldSet = /* @__PURE__ */ new Set();
     /** Set while the layout is being edited (see editLayout). */
     this.editing = null;
     const doc = container.ownerDocument;
@@ -6274,7 +6280,7 @@ var TouchInput = class {
       return b;
     };
     const describe = () => {
-      hint.textContent = selected ? `${CONTROL_NAMES[selected]}: drag to move \xB7 ${Math.round((this.layout[selected]?.size ?? 1) * 100)}% size` : "Drag a stick or button to move it. Tap one to resize it.";
+      hint.textContent = selected ? `${controlName(selected)}: drag to move \xB7 ${Math.round((this.layout[selected]?.size ?? 1) * 100)}% size` : "Drag a stick or button to move it. Tap one to resize it.";
       for (const [id, { el }] of this.controls) {
         el.style.outline = id === selected ? "3px solid rgba(92,208,255,0.95)" : "2px dashed rgba(255,255,255,0.75)";
         el.style.outlineOffset = "3px";
@@ -6373,6 +6379,85 @@ var TouchInput = class {
   /** Close the layout editor as if cancelled (a menu opened over it, say). */
   cancelLayoutEdit() {
     this.editing?.finish(null);
+  }
+  /**
+   * A button for each of the game's input actions that no face button
+   * carries (a grenade, a zoom, a piece of equipment): a column above the
+   * face buttons, each movable in the layout editor like any control. Its
+   * actions held now are {@link heldActions}.
+   */
+  setActionButtons(names) {
+    if (names.join("\n") === this.actionNames.join("\n")) return;
+    for (const old of this.actionNames) {
+      const id = `act:${old}`;
+      this.controls.get(id)?.el.remove();
+      this.controls.delete(id);
+    }
+    this.actionHeldSet.clear();
+    this.actionNames = [...names];
+    const doc = this.root.ownerDocument;
+    names.forEach((name, i) => {
+      const id = `act:${name}`;
+      const el = doc.createElement("button");
+      el.type = "button";
+      el.setAttribute("data-cbx-action", name);
+      el.setAttribute("aria-label", `${name} button`);
+      el.textContent = name.toUpperCase().slice(0, 10);
+      Object.assign(el.style, {
+        position: "absolute",
+        height: `calc(${FACE_SIZE} * 0.72)`,
+        minWidth: `calc(${FACE_SIZE} * 1.5)`,
+        padding: "0 10px",
+        pointerEvents: "auto",
+        touchAction: "none",
+        webkitTouchCallout: "none",
+        webkitTapHighlightColor: "transparent",
+        borderRadius: "999px",
+        border: "2px solid rgba(255,255,255,0.45)",
+        background: "rgba(20,26,40,0.45)",
+        color: "rgba(255,255,255,0.92)",
+        font: "700 clamp(10px, 2.2vmin, 14px)/1 system-ui, sans-serif",
+        letterSpacing: "0.5px",
+        cursor: "pointer"
+      });
+      const home = { right: "3%", bottom: `calc(4% + 3 * ${FACE_SIZE} + 20px + ${i} * (${FACE_SIZE} * 0.72 + 8px))` };
+      const held = /* @__PURE__ */ new Set();
+      const setVisual = (down) => {
+        el.style.background = down ? "rgba(92,208,255,0.55)" : "rgba(20,26,40,0.45)";
+      };
+      el.addEventListener("pointerdown", (event) => {
+        event.preventDefault();
+        held.add(event.pointerId);
+        try {
+          el.setPointerCapture(event.pointerId);
+        } catch {
+        }
+        this.actionHeldSet.add(name);
+        setVisual(true);
+      });
+      const release = (event) => {
+        if (!held.delete(event.pointerId) || held.size > 0) return;
+        this.actionHeldSet.delete(name);
+        setVisual(false);
+      };
+      el.addEventListener("pointerup", release);
+      el.addEventListener("pointercancel", release);
+      el.addEventListener("lostpointercapture", release);
+      el.addEventListener("contextmenu", (event) => event.preventDefault());
+      this.letGoes.push(() => {
+        if (held.size === 0) return;
+        held.clear();
+        this.actionHeldSet.delete(name);
+        setVisual(false);
+      });
+      this.pad.appendChild(el);
+      this.controls.set(id, { el, inFace: false, home });
+      this.place(id);
+    });
+  }
+  /** The game's input actions whose touch buttons are held now (see setActionButtons). */
+  get heldActions() {
+    return this.actionHeldSet;
   }
   /** Show the right stick (or the drag zone): the cart reads analog sticks. */
   setAnalog(on) {
@@ -18567,6 +18652,7 @@ var Player = class {
     this.actions = reboundActions(this.options.actions ?? [], this.controlSettings.actionBindings);
     this.actionKeys = new Set(this.actions.flatMap((a) => a.keys));
     this.actionPad = new Set(this.actions.flatMap((a) => a.pad));
+    this.touch?.setActionButtons(this.actions.filter((a) => a.buttons.length === 0).map((a) => a.name));
   }
   /**
    * The actions held now (bit i = action i), from every device, with the ones
@@ -18577,7 +18663,9 @@ var Player = class {
     if (this.actions.length === 0) return 0;
     const keys = this.keyboard?.held ?? NO_HELD;
     const mouse = this.mouse?.held ?? NO_HELD;
-    const raw = actionMask(this.actions, { keys: mouse.size > 0 ? /* @__PURE__ */ new Set([...keys, ...mouse]) : keys, pad: this.controllerInput?.pressed ?? NO_HELD, buttons: this.gamepad.value });
+    let raw = actionMask(this.actions, { keys: mouse.size > 0 ? /* @__PURE__ */ new Set([...keys, ...mouse]) : keys, pad: this.controllerInput?.pressed ?? NO_HELD, buttons: this.gamepad.value });
+    const touched = this.touch?.heldActions;
+    if (touched && touched.size > 0) this.actions.forEach((a, i) => raw |= touched.has(a.name) ? 1 << i : 0);
     const { held, latched } = applyActionToggles(raw, this.rawActions, this.latchedActions, toggleMask(this.actions, this.controlSettings.actionToggles));
     this.rawActions = raw;
     this.latchedActions = latched;
@@ -18916,6 +19004,7 @@ var Player = class {
     if (shouldUseTouch(scheme, this.view)) {
       this.touch = new TouchInput(this.container, this.gamepad, onStart);
       this.touch.applySettings(this.controlSettings);
+      this.touch.setActionButtons(this.actions.filter((a) => a.buttons.length === 0).map((a) => a.name));
     }
     this.pointer = new PointerInput(this.container, this.model);
   }
