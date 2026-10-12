@@ -200,7 +200,7 @@ Each item lands in all three renderers (WebGL2, WebGPU, and the software referen
 
 ## Phase C: Beaver Creek
 
-- [ ] **B8. The blockout: Beaver Creek plays.**
+- [x] **B8. The blockout: Beaver Creek plays.**
   - The layout above as an `ArenaMap`: collision (boxes, ramps, terrain), team and FFA spawns, bot destinations and power positions, hills, the ball spawn and the death plane.
   - Weapon pads where Halo's are, rotating through the full sandbox.
   - **Teleporters:** new to the cart, so they work in any map's markup, are replicated online and are used by bots.
@@ -212,6 +212,35 @@ Each item lands in all three renderers (WebGL2, WebGPU, and the software referen
     - a teleporter carries a soldier, and a bot uses one;
     - an 8-player online match on the network lab stays in sync;
     - the HD and Modern cores match frame for frame.
+  - **Done, in grey box.**
+    - `beaverCreekSeed.ts` holds `BEAVER_MAP` and `BEAVER_SCENE`, and Beaver Creek is the second entry in `ARENA_MAPS`, so `/lockout?map=beaver`, the lobby's picker and the title menu all reach it.
+    - **The canyon** is 66 m by 32 m, its walls and floor on B3's ground. The creek bed is 1 m down, wadeable, crossing the middle and coming out of the rock under the ledges. The ledges are 3 m up along both walls, with a 4 m ramp near each end.
+    - **The arch** spans the creek 3.5 m up, on piers on the banks, with rock steps up at each end.
+    - **The bases** have two storeys: a ground floor with doors to the front and both sides, and an inside ramp up to an open roof behind a waist-high parapet. Red's half is blue's turned about the centre.
+    - **Teleporters** are new to the cart (`ArenaMap.teleporters`, `teleport()` in every soldier's moves, so a guest predicts its own and the host agrees). Bots use them as they walk over a pad. Each base's roof sends you to the ledge beside the other base.
+    - **Nine pads:**
+      - Sniper Rifle (and Beam Rifle) on each roof.
+      - Automatics on each ground floor.
+      - Precision rifles on each bank.
+      - Rocket Launcher, Fuel Rod Gun and Spartan Laser on the creek bed under the arch.
+      - Sword and Gravity Hammer on one ledge, the shotguns on the other.
+
+      Together they offer the whole sandbox, as Lockout's do.
+    - **Markup:** five spawns a team in and round its base, and four more on the ledges for Free for All. Thirty bot destinations with six power positions, six hills, and the ball on the arch.
+    - **Lighting:** its own light map and probes, baked through B1 (29 s) with the canyon's terrain as an occluder. Lockout's sun and sky, no arena lamps.
+    - **Size:** the sidecar is 1.84 MB.
+    - **Departures from the layout to confirm:**
+      - The upper storey is the open roof, not a floor with a window.
+      - There is no cave yet: B3's ground has no overhangs, so a cave needs boxes, in B9.
+      - The HD-and-Modern-core comparison and the 8-player lab run aren't part of these tests yet.
+    - *Tests:* `Unit Tests/beaver-creek.test.ts`:
+      - the validator passes, and the sidecar is under budget;
+      - the camera's centre matches the player's bounds;
+      - the pads carry the whole sandbox;
+      - all seven game types play on the real engine as the player prepares the cart, with bots walking the navmesh, alive and inside the canyon;
+      - a minute of Free for All has kills (26);
+      - a teleporter carries a soldier and a bot;
+      - an online Free for All keeps the guest on the host's map and both browsers counting the same kills.
 
 - [ ] **B9. The art pass: Beaver Creek looks the part.**
   - Terrain sculpted and painted: grass, mud, wet stone, rock walls.

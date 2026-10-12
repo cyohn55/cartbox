@@ -738,7 +738,7 @@ const UV = 1 / TILE_WORLD;
 
 type V3 = readonly [number, number, number];
 
-function boxesPrimitive(boxes: Box[], material: MeshPrimitive["material"], fixedRepeat?: number): MeshPrimitive {
+export function boxesPrimitive(boxes: Box[], material: MeshPrimitive["material"], fixedRepeat?: number): MeshPrimitive {
   const s: Streams = newStreams();
   for (const [cx, cy, cz, hx, hy, hz] of boxes) {
     const r = fixedRepeat ?? Math.max(1, Math.round((Math.max(hx, hy, hz) * 2) / TILE_WORLD));
@@ -1235,13 +1235,13 @@ function litMapMesh(): MeshAsset {
 }
 
 /** A mesh stored without normals, for one whose faces own their corners (renderers rebuild the same flat normals). */
-function withoutNormals(mesh: MeshAsset): MeshAsset {
+export function withoutNormals(mesh: MeshAsset): MeshAsset {
   return { ...mesh, primitives: mesh.primitives.map((p) => ({ ...p, normals: null })) };
 }
 
 const IDENTITY = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1] as const;
 /** Toward the sun (matches the lighting rig's key light): high noon, about 52° up (I8). */
-const LOCKOUT_KEY_DIRECTION: readonly [number, number, number] = [0.42, 0.8, -0.46];
+export const LOCKOUT_KEY_DIRECTION: readonly [number, number, number] = [0.42, 0.8, -0.46];
 
 // --- The mountains ------------------------------------------------------------
 // Lockout hangs in a gorge high in an icy range: sheer cliffs drop from all
@@ -3737,6 +3737,30 @@ export function arenaMeshSidecar(scene: ArenaScene): string {
   });
 }
 
+/**
+ * A map's scene centre as the player bounds its scene (B8), which the cart's
+ * mesh camera must orbit: the map's mesh, the soldiers resting at the
+ * origin, and the weapons floating over its pads.
+ */
+export function arenaSceneCenter(map: ArenaMap, mesh: MeshAsset): ArenaPoint {
+  const lo = [Infinity, Infinity, Infinity];
+  const hi = [-Infinity, -Infinity, -Infinity];
+  const add = (b: ReturnType<typeof meshBounds>, dx: number, dy: number, dz: number) => {
+    if (!b) return;
+    [dx, dy, dz].forEach((d, a) => {
+      lo[a] = Math.min(lo[a]!, b.min[a]! + d);
+      hi[a] = Math.max(hi[a]!, b.max[a]! + d);
+    });
+  };
+  add(meshBounds(mesh), 0, 0, 0);
+  add(meshBounds(soldierMesh()), 0, 0, 0);
+  for (const { pad, weapon } of arenaInstances(map).pickups) {
+    const [cx, cy, cz, , hy] = map.markers[pad]!.box;
+    add(meshBounds(pickupMesh(weapon)), cx, cy + hy + 0.32, cz);
+  }
+  return [(lo[0]! + hi[0]!) / 2, (lo[1]! + hi[1]!) / 2, (lo[2]! + hi[2]!) / 2];
+}
+
 /** Lockout as an arena scene (B2). */
 export const LOCKOUT_SCENE: ArenaScene = {
   id: "lockout",
@@ -4228,6 +4252,26 @@ local function move_soldier(e, fwd, right, yaw, jump, eqh, eqp, pitch)
   eq_move(e, eqh, eqp, jump, pitch or 0)
   move_vertical(e)
   e.air = not e.grounded
+  teleport(e)
+end
+
+-- Teleporters (BEAVER_CREEK_ROADMAP.md B8): a soldier stepping onto a pad
+-- (TP, from the map: pad, far end, facing) is taken to its far end, facing
+-- on, with a flash at both; then the pads ignore it for a second and a half.
+-- Part of a soldier's moves, so a guest predicts its own and the host agrees.
+function teleport(e)
+  if (e.tp_cd or 0) > 0 then e.tp_cd = e.tp_cd - 1 return false end
+  for k = 1, #TP, 7 do
+    if math.abs(e.x - TP[k]) < 0.8 and math.abs(e.z - TP[k+2]) < 0.8 and math.abs(e.y - TP[k+1]) < 1 then
+      cartbox.burst("repulse", e.x, e.y + 1, e.z, 0, 1, 0, 0.6)
+      e.x, e.y, e.z, e.vy, e.kx, e.kz = TP[k+3], TP[k+4], TP[k+5], 0, 0, 0
+      e.ay, e.face, e.tp_cd = TP[k+6], TP[k+6], 90
+      cartbox.burst("repulse", e.x, e.y + 1, e.z, 0, 1, 0, 0.6)
+      cartbox.sound("grapple", e.x, e.y + 1, e.z, 0.8, 0.6)
+      return true
+    end
+  end
+  return false
 end
 
 -- Equipment that moves its wearer, part of every soldier's moves (L7: the
@@ -5629,6 +5673,8 @@ local function think_bot(o)
   else
     if not o.agent then nav_place(o) end
     o.moving = nav_follow(o)
+    -- (a bot walks over a teleporter's pad like anyone: its agent starts again at the far end, B8)
+    if TP[1] and teleport(o) then nav_drop(o); nav_place(o) end
     if o.eq == "jetpack" then o.fuel = math.min(EQUIP.jetpack.fuel, (o.fuel or 0) + EQUIP.jetpack.refill) end
     eq_recharge(o)
   end

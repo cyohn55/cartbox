@@ -7,6 +7,7 @@
  */
 
 import type { ArenaPoint } from "./forerunnerArena";
+import { BEAVER_SCENE, beaverCenter } from "./beaverCreekSeed";
 import {
   LOCKOUT_CENTER_X,
   LOCKOUT_CENTER_Y,
@@ -14,10 +15,13 @@ import {
   LOCKOUT_FX,
   LOCKOUT_SCENE,
   lockoutCartridge,
+  arenaMeshSidecar,
   lockoutCode,
   lockoutMeshSidecar,
   type ArenaScene,
 } from "./lockoutSeed";
+
+let beaverSidecar: string | null = null;
 
 export interface ArenaMapEntry {
   readonly id: string;
@@ -42,6 +46,15 @@ export const ARENA_MAPS: readonly ArenaMapEntry[] = [
     center: () => [LOCKOUT_CENTER_X, LOCKOUT_CENTER_Y, LOCKOUT_CENTER_Z],
     title: "LOCKOUT ARENA",
     sidecar: lockoutMeshSidecar,
+    fx: LOCKOUT_FX,
+  },
+  {
+    id: "beaver",
+    name: "Beaver Creek",
+    scene: BEAVER_SCENE,
+    center: beaverCenter,
+    title: "BEAVER CREEK",
+    sidecar: () => (beaverSidecar ??= arenaMeshSidecar(BEAVER_SCENE)),
     fx: LOCKOUT_FX,
   },
 ];
