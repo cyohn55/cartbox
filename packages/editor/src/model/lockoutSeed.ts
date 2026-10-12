@@ -969,6 +969,10 @@ export const LOCKOUT_EFFECTS: readonly ParticleEffect[] = [
   { ...particlePreset("trail", "tracer"), count: 12, life: 0.09, lifeJitter: 0.3, speed: 0.05, drag: 6, size: 0.035, sizeEnd: 0.012, color: [1, 0.92, 0.65], colorEnd: [1, 0.55, 0.2], glow: 4 },
   // A Jetpack's thrust (LOCKOUT_EQUIPMENT_ROADMAP.md E1): short hot flames straight down from the pack.
   { ...particlePreset("sparks", "jetflame"), count: 8, life: 0.16, speed: 4.5, spread: 0.18, gravity: 0, drag: 3, size: 0.09, sizeEnd: 0.02, color: [1, 0.85, 0.45], colorEnd: [1, 0.3, 0.05], glow: 4, stretch: 0.5 },
+  // The Covenant's rounds (A1): a plasma bolt's green-blue streak, a needle's pink one, a beam's violet line.
+  { ...particlePreset("trail", "bolt"), count: 12, life: 0.12, lifeJitter: 0.3, speed: 0.05, drag: 6, size: 0.06, sizeEnd: 0.02, color: [0.55, 1, 0.6], colorEnd: [0.2, 0.6, 1], glow: 4 },
+  { ...particlePreset("trail", "needle"), count: 10, life: 0.14, lifeJitter: 0.3, speed: 0.05, drag: 6, size: 0.04, sizeEnd: 0.012, color: [1, 0.55, 0.9], colorEnd: [0.8, 0.2, 1], glow: 4 },
+  { ...particlePreset("trail", "beam"), count: 18, life: 0.2, lifeJitter: 0.2, speed: 0.02, drag: 6, size: 0.03, sizeEnd: 0.03, color: [0.9, 0.6, 1], colorEnd: [0.5, 0.3, 1], glow: 5 },
   // The Grappleshot's line (E2): a taut cyan streak from the hand to where it holds, laid again while it pulls.
   { ...particlePreset("trail", "grapple"), count: 16, life: 0.12, lifeJitter: 0.2, speed: 0.05, drag: 6, size: 0.03, sizeEnd: 0.02, color: [0.6, 0.95, 1], colorEnd: [0.2, 0.6, 1], glow: 3 },
   // The Repulsor's blast (E2): a cone of pale force thrown out ahead.
@@ -1577,6 +1581,24 @@ export const LOCKOUT_STRINGS: StringTable = {
     { key: "weapon.sniper", text: { en: "Sniper Rifle", es: "Rifle de precision" } },
     { key: "weapon.magnum", text: { en: "Magnum", es: "Magnum" } },
     { key: "weapon.sword", text: { en: "Energy Sword", es: "Espada de energia" } },
+    { key: "weapon.ar", text: { en: "Assault Rifle", es: "Fusil de asalto" } },
+    { key: "weapon.dmr", text: { en: "DMR", es: "DMR" } },
+    { key: "weapon.carbine", text: { en: "Covenant Carbine", es: "Carabina covenant" } },
+    { key: "weapon.needlerifle", text: { en: "Needle Rifle", es: "Rifle de agujas" } },
+    { key: "weapon.beamrifle", text: { en: "Beam Rifle", es: "Rifle de haz" } },
+    { key: "weapon.plasmapistol", text: { en: "Plasma Pistol", es: "Pistola de plasma" } },
+    { key: "weapon.plasmarifle", text: { en: "Plasma Rifle", es: "Rifle de plasma" } },
+    { key: "weapon.needler", text: { en: "Needler", es: "Aguijoneador" } },
+    { key: "weapon.spiker", text: { en: "Spiker", es: "Clavador" } },
+    { key: "weapon.mauler", text: { en: "Mauler", es: "Triturador" } },
+    { key: "msg.supercombine", text: { en: "Supercombine!", es: "Supercombinacion!" } },
+    { key: "loadout.assault", text: { en: "Assault", es: "Asalto" } },
+    { key: "loadout.covenant", text: { en: "Covenant", es: "Covenant" } },
+    { key: "loadout.dualplasma", text: { en: "Dual Plasma Rifles", es: "Dos rifles de plasma" } },
+    { key: "loadout.dualneedler", text: { en: "Dual Needlers", es: "Dos aguijoneadores" } },
+    { key: "loadout.dualspiker", text: { en: "Dual Spikers", es: "Dos clavadores" } },
+    { key: "loadout.dualmauler", text: { en: "Dual Maulers", es: "Dos trituradores" } },
+    { key: "loadout.ppsmg", text: { en: "Plasma Pistol + SMG", es: "Pistola de plasma + Subfusil" } },
     { key: "msg.ball", text: { en: "You have the ball", es: "Tienes la bola" } },
     { key: "msg.hill", text: { en: "Hill moved", es: "La colina se movio" } },
     { key: "msg.jugg", text: { en: "JUGGERNAUT", es: "COLOSO" } },
@@ -1625,6 +1647,14 @@ export const LOCKOUT_STRINGS: StringTable = {
 
 const gun = (id: string, synth: SynthPreset): SceneSound => ({ name: `fire_${id}`, source: { kind: "synth", synth }, bus: "sfx", volume: 0.8, range: [6, 90] });
 const vox = (name: string, text: string): SceneSound => ({ name, source: { kind: "speech", text }, bus: "voice", volume: 1 });
+/** An alien gun's report (A1): a falling square-wave zap over a hiss. */
+const zap = (id: string, freq: readonly [number, number], length: number): SceneSound => ({
+  name: `fire_${id}`,
+  source: { kind: "synth", synth: { duration: length + 0.06, voices: [{ wave: "square", freq, cutoff: [5000, 900], attack: 0.002, decay: length, volume: 0.5 }, { wave: "noise", cutoff: [7000, 1500], attack: 0.001, decay: length * 0.5, volume: 0.35 }] } },
+  bus: "sfx",
+  volume: 0.75,
+  range: [6, 80],
+});
 export const LOCKOUT_AUDIO: SceneAudio = {
   buses: [
     { name: "sfx", volume: 0.9 },
@@ -1638,6 +1668,17 @@ export const LOCKOUT_AUDIO: SceneAudio = {
     gun("sniper", "sniper"),
     gun("magnum", "pistol"),
     gun("sword", "swing"),
+    // A1: the rest of the rifles, and the Covenant's and the Brutes' guns.
+    gun("ar", "smg"),
+    gun("dmr", "rifle"),
+    gun("beamrifle", "laser"),
+    gun("mauler", "shotgun"),
+    zap("carbine", [700, 160], 0.22),
+    zap("needlerifle", [1800, 900], 0.16),
+    zap("plasmapistol", [1100, 260], 0.18),
+    zap("plasmarifle", [900, 300], 0.12),
+    zap("needler", [2400, 1400], 0.1),
+    zap("spiker", [520, 140], 0.12),
     { name: "blast", source: { kind: "synth", synth: "explosion" }, bus: "sfx", volume: 1, range: [8, 120] },
     // A Jetpack's roar (E1): a low rush of noise, laid one over the next while it thrusts.
     { name: "jet", source: { kind: "synth", synth: { duration: 0.32, voices: [{ wave: "noise", cutoff: [1600, 500], attack: 0.04, decay: 0.26, volume: 0.8 }] } }, bus: "sfx", volume: 0.7, range: [5, 60] },
@@ -2288,7 +2329,7 @@ function windowed(t: number, a: number, b: number): number {
  */
 function viewmodelClips(id: WeaponId, bones: readonly { parent: number; at: P3 }[]): AnimationClip[] {
   const TAU = Math.PI * 2;
-  const heavy = id === "sniper" || id === "shotgun";
+  const heavy = id === "sniper" || id === "shotgun" || id === "beamrifle" || id === "mauler";
   const idle = rigClip("idle", 3.2, 9, bones, (t) => ({
     rot: { [VM.root]: pitchYaw(Math.sin(t * TAU) * 0.012, Math.sin(t * TAU + 1.3) * 0.01) },
     move: { [VM.root]: [Math.sin(t * TAU + 1.3) * 0.003, Math.sin(t * TAU * 2) * 0.003, 0] },
@@ -2319,7 +2360,7 @@ function viewmodelClips(id: WeaponId, bones: readonly { parent: number; at: P3 }
     const flourish = rigClip("reload", 0.8, 13, bones, (t) => ({ rot: { [VM.weapon]: pitchYaw(0, 0, Math.sin(t * Math.PI) * 0.6) } }));
     return [idle, run, swing("fire"), swing("melee"), flourish, ready];
   }
-  const kick = heavy ? 1.6 : id === "smg" ? 0.5 : 1;
+  const kick = heavy ? 1.6 : id === "smg" || id === "ar" || id === "plasmarifle" || id === "needler" || id === "spiker" ? 0.5 : 1;
   const fire = rigClip("fire", heavy ? 0.32 : 0.18, 9, bones, (t) => {
     const k = pulse(t, 0.15) * kick;
     return { rot: { [VM.weapon]: pitchYaw(-k * 0.07, 0, k * 0.02) }, move: { [VM.root]: [0, k * 0.008, -k * 0.035] } };
@@ -2482,16 +2523,44 @@ function fieldMesh(name: string, look: PlasmaLook): MeshAsset {
   return withoutUnusedUvs({ name, primitives: [toPrimitive(bubble, plasmaMaterial(name, look))] });
 }
 
-/** The guns that dual wield (E5), whose left-hand viewmodels follow the Holograms. */
-const LOCKOUT_DUAL_WIELD = ["smg", "magnum"] as const;
+/** The guns that dual wield (E5, A1), whose left-hand viewmodels follow the Holograms. */
+const LOCKOUT_DUAL_WIELD = ["smg", "magnum", "plasmapistol", "plasmarifle", "needler", "spiker", "mauler"] as const;
+
+/**
+ * What each pad carries (A1), in turn: the first at the start of a match,
+ * the next once that's taken, and round again. Each weapon on a pad has its
+ * own Pickup instance there; the Pickup component shows the one that's up.
+ */
+const PAD_ROTATIONS: readonly (readonly WeaponId[])[] = [
+  ["sniper", "beamrifle"], // the sniper tower
+  ["br", "dmr", "carbine", "needlerifle"], // atop the BR structure
+  ["shotgun", "mauler"], // the shotgun nook
+  ["sword"], // the bottom-mid pit
+  ["smg", "ar", "plasmarifle", "needler", "spiker", "plasmapistol"], // the central walkway
+];
+/** Every (pad, weapon) a Pickup instance shows, in instance order. */
+const PICKUP_ENTRIES = PAD_ROTATIONS.flatMap((ws, pad) => ws.map((weapon) => ({ pad, weapon })));
 
 /** Holograms (E3) drawn at once: soldier instances after the pickups. */
 const LOCKOUT_HOLOGRAMS = 2;
-const HOLOGRAM_INSTANCE = 1 + BOT_COUNT + 6 + MARKERS.length;
 
-/** Weapon ids, in the order their viewmodel instances follow the bots in the sidecar. */
-export const LOCKOUT_VIEWMODELS = ["br", "smg", "shotgun", "sniper", "magnum", "sword"] as const;
+/**
+ * Lockout's arsenal (LOCKOUT_ARSENAL_ROADMAP.md), in the order its viewmodel
+ * instances follow the bots in the sidecar -- and each weapon's index in the
+ * net state and the shot events (5 bits: up to 32).
+ */
+export const LOCKOUT_VIEWMODELS = [
+  "br", "smg", "shotgun", "sniper", "magnum", "sword",
+  // A1: the rifles, and the guns that dual wield
+  "ar", "dmr", "carbine", "needlerifle", "beamrifle", "plasmapistol", "plasmarifle", "needler", "spiker", "mauler",
+] as const;
 type WeaponId = (typeof LOCKOUT_VIEWMODELS)[number];
+/** The first viewmodel's instance (after the map and the bots). */
+const VIEWMODEL_INSTANCE = 1 + BOT_COUNT;
+/** The first pad's Pickup (after the viewmodels), the Holograms' bodies, and the left hands' guns. */
+const FIRST_PICKUP = VIEWMODEL_INSTANCE + LOCKOUT_VIEWMODELS.length;
+const HOLOGRAM_INSTANCE = FIRST_PICKUP + PICKUP_ENTRIES.length;
+const LEFT_INSTANCE = HOLOGRAM_INSTANCE + LOCKOUT_HOLOGRAMS;
 
 /**
  * A first-person weapon viewmodel: origin at the firing hand, barrel along +Z,
@@ -2507,6 +2576,9 @@ function viewmodelMesh(id: WeaponId): MeshAsset {
   const glove = newStreams();
   const sleeve = newStreams();
   const dark = newStreams();
+  // The Covenant's lacquered alloy and the Brutes' black iron (A1).
+  const shell = newStreams();
+  const iron = newStreams();
   // A gloved hand wrapped round a grip: palm, three finger segments and a
   // thumb, with an armoured sleeve running back out of frame.
   const rightHand = (x: number, y: number, z: number) => {
@@ -2626,6 +2698,121 @@ function viewmodelMesh(id: WeaponId): MeshAsset {
     block(glow, 0, 0.07, 0.19, 0.003, 0.004, 0.003); // front sight dot
     triggerGuard(-0.02, 0.02, 0.07);
     rightHand(0, -0.05, -0.01);
+  } else if (id === "ar") {
+    // A bullpup assault rifle: long shroud, a lit round counter on top, magazine behind the grip.
+    block(poly, 0, 0.0, 0.06, 0.036, 0.048, 0.24, 0.012); // body
+    block(metal, 0, 0.052, 0.02, 0.03, 0.01, 0.2); // top cover
+    block(dark, 0, 0.066, -0.02, 0.022, 0.006, 0.05); // counter bezel
+    block(glow, 0, 0.073, -0.02, 0.016, 0.002, 0.035); // the round counter
+    limb(accent, [0, 0.01, 0.3], [0, 0.01, 0.44], 0.03, 0.028, 1.4); // shroud
+    for (let v = 0; v < 3; v += 1) block(dark, 0.029, 0.01, 0.33 + v * 0.04, 0.003, 0.012, 0.012); // vents
+    limb(metal, [0, 0.015, 0.44], [0, 0.015, 0.52], 0.011); // barrel
+    block(dark, 0, 0.015, 0.522, 0.006, 0.006, 0.002);
+    limb(poly, [0, -0.04, -0.09], [0, -0.16, -0.12], 0.02, 0.024, 1.5); // magazine
+    ridges(0.022, -0.07, -0.1, 4, 0.02);
+    limb(poly, [0, -0.04, 0.06], [0, -0.12, 0.04], 0.018, 0.02, 1.3); // grip
+    triggerGuard(-0.04, 0.09, 0.15);
+    block(poly, 0, -0.005, -0.19, 0.034, 0.045, 0.012, 0.01); // butt
+    rightHand(0, -0.09, 0.05);
+    leftHand(-0.01, -0.02, 0.36);
+  } else if (id === "dmr") {
+    // A long designated marksman rifle: fluted barrel, scope, magazine ahead of the grip.
+    block(poly, 0, 0, 0.02, 0.032, 0.044, 0.18, 0.012); // receiver
+    block(metal, 0, 0.048, 0.02, 0.026, 0.008, 0.17); // top rail
+    limb(accent, [0, 0.01, 0.2], [0, 0.01, 0.42], 0.03, 0.026, 1.3); // handguard
+    limb(metal, [0, 0.02, 0.42], [0, 0.02, 0.66], 0.012); // barrel
+    for (let f = 0; f < 3; f += 1) block(dark, 0.012, 0.02, 0.46 + f * 0.06, 0.002, 0.004, 0.022); // fluting
+    block(metal, 0, 0.02, 0.67, 0.016, 0.016, 0.02, 0.006); // brake
+    limb(metal, [0, 0.095, -0.04], [0, 0.095, 0.14], 0.024, 0.026); // scope
+    block(metal, 0, 0.062, 0.0, 0.012, 0.016, 0.01); // mounts
+    block(metal, 0, 0.062, 0.1, 0.012, 0.016, 0.01);
+    block(glow, 0, 0.095, 0.142, 0.018, 0.018, 0.003); // lens
+    block(dark, 0, 0.095, -0.042, 0.016, 0.016, 0.003); // eyepiece
+    limb(poly, [0, -0.04, 0.1], [0, -0.17, 0.12], 0.02, 0.024, 1.6); // magazine
+    limb(poly, [0, -0.03, -0.02], [0, -0.12, -0.05], 0.018, 0.02, 1.3); // grip
+    triggerGuard(-0.04, 0.0, 0.06);
+    limb(poly, [0, -0.01, -0.16], [0, -0.06, -0.34], 0.03, 0.038, 1.6); // stock
+    rightHand(0, -0.09, -0.03);
+    leftHand(-0.01, -0.02, 0.32);
+  } else if (id === "carbine") {
+    // A Covenant carbine: a long curved shell, green cells down its flank, a slim scope.
+    limb(shell, [0, 0.0, -0.22], [0, 0.03, 0.2], 0.045, 0.035, 1.6); // rear body
+    limb(shell, [0, 0.03, 0.2], [0, 0.0, 0.56], 0.03, 0.016, 1.8); // the long nose
+    block(shell, 0, -0.04, 0.12, 0.016, 0.03, 0.1, 0.01); // keel
+    for (let c = 0; c < 4; c += 1) block(glow, 0.03, 0.02, -0.12 + c * 0.07, 0.004, 0.012, 0.022); // radiation cells
+    limb(metal, [0, 0.085, -0.04], [0, 0.085, 0.14], 0.016, 0.02); // scope
+    block(glow, 0, 0.085, 0.142, 0.012, 0.012, 0.003);
+    block(dark, 0, 0.085, -0.042, 0.012, 0.012, 0.003);
+    limb(shell, [0, -0.04, -0.12], [0, -0.13, -0.14], 0.018, 0.02, 1.3); // grip
+    rightHand(0, -0.1, -0.12);
+    leftHand(-0.01, -0.03, 0.2);
+  } else if (id === "needlerifle") {
+    // A Covenant needle rifle: a slender shell, a pink crystal magazine riding on top.
+    limb(shell, [0, 0.0, -0.2], [0, 0.015, 0.3], 0.04, 0.03, 1.6); // body
+    limb(shell, [0, 0.015, 0.3], [0, 0.0, 0.6], 0.022, 0.012, 1.5); // nose
+    for (let c = 0; c < 5; c += 1) limb(glow, [0, 0.05, -0.08 + c * 0.04], [0, 0.085, -0.06 + c * 0.04], 0.008, 0.002, 1); // crystal needles
+    block(shell, 0, -0.045, 0.15, 0.014, 0.025, 0.08, 0.01); // keel
+    limb(metal, [0, 0.09, 0.14], [0, 0.09, 0.28], 0.014, 0.016); // scope
+    block(glow, 0, 0.09, 0.282, 0.01, 0.01, 0.003);
+    limb(shell, [0, -0.04, -0.1], [0, -0.13, -0.12], 0.018, 0.02, 1.3); // grip
+    rightHand(0, -0.1, -0.1);
+    leftHand(-0.01, -0.03, 0.22);
+  } else if (id === "beamrifle") {
+    // A Covenant beam rifle: two long split prongs, a scope between them, a glowing heart.
+    block(shell, 0, 0, -0.05, 0.035, 0.045, 0.17, 0.012); // body
+    for (const side of [-1, 1]) limb(shell, [side * 0.018, 0.0, 0.1], [side * 0.012, 0.01, 0.78], 0.018, 0.01, 1.4); // the prongs
+    limb(glow, [0, 0.005, 0.1], [0, 0.008, 0.7], 0.004); // the beam's channel
+    block(glow, 0, 0.02, -0.02, 0.012, 0.012, 0.04); // heart
+    limb(metal, [0, 0.09, -0.08], [0, 0.09, 0.12], 0.022, 0.024); // scope
+    block(glow, 0, 0.09, 0.122, 0.016, 0.016, 0.003);
+    block(dark, 0, 0.09, -0.082, 0.016, 0.016, 0.003);
+    limb(shell, [0, -0.04, -0.06], [0, -0.13, -0.08], 0.018, 0.02, 1.3); // grip
+    limb(shell, [0, -0.01, -0.22], [0, -0.06, -0.36], 0.026, 0.034, 1.6); // stock
+    rightHand(0, -0.1, -0.06);
+    leftHand(-0.01, -0.03, 0.26);
+  } else if (id === "plasmapistol") {
+    // A Covenant plasma pistol: a curved claw of a shell round a green coil, the grip under it.
+    limb(shell, [0, 0.02, -0.04], [0, 0.03, 0.14], 0.04, 0.03, 1.3); // body
+    limb(shell, [0, 0.03, 0.14], [0, 0.0, 0.2], 0.03, 0.012, 1.4); // the hooked nose
+    block(glow, 0, 0.05, 0.06, 0.012, 0.01, 0.05); // coil
+    block(glow, 0, 0.02, 0.205, 0.01, 0.01, 0.004); // emitter
+    limb(shell, [0, -0.01, 0.0], [0, -0.1, -0.03], 0.02, 0.022, 1.3); // grip
+    limb(shell, [0, -0.02, 0.05], [0, -0.07, 0.03], 0.006); // trigger guard spur
+    rightHand(0, -0.06, -0.01);
+  } else if (id === "plasmarifle") {
+    // A Covenant plasma rifle: a forked emitter like a beetle's jaws, the shell over the hand.
+    block(shell, 0, 0.02, 0.04, 0.038, 0.04, 0.12, 0.014); // body
+    for (const side of [-1, 1]) limb(shell, [side * 0.03, 0.02, 0.14], [side * 0.022, 0.03, 0.3], 0.018, 0.008, 1.4); // the jaws
+    block(glow, 0, 0.025, 0.2, 0.01, 0.01, 0.05); // the bolt's channel between them
+    block(glow, 0.036, 0.04, 0.02, 0.003, 0.012, 0.04); // heat vents
+    limb(shell, [0, -0.02, -0.02], [0, -0.11, -0.04], 0.02, 0.022, 1.3); // grip
+    rightHand(0, -0.07, -0.02);
+  } else if (id === "needler") {
+    // A needler: a stubby shell bristling with pink crystal needles.
+    limb(shell, [0, 0.0, -0.06], [0, 0.02, 0.16], 0.045, 0.03, 1.2); // body
+    for (let r = 0; r < 3; r += 1) {
+      for (const side of [-1, 0, 1]) limb(glow, [side * 0.02, 0.04, -0.02 + r * 0.05], [side * 0.03, 0.1, 0.0 + r * 0.05], 0.009, 0.001, 1); // needles
+    }
+    block(glow, 0, 0.01, 0.17, 0.012, 0.012, 0.004); // muzzle
+    limb(shell, [0, -0.03, -0.02], [0, -0.11, -0.04], 0.02, 0.022, 1.3); // grip
+    rightHand(0, -0.07, -0.02);
+  } else if (id === "spiker") {
+    // A Brute spiker: black iron, two barrels, a pair of blades slung under them.
+    block(iron, 0, 0.02, 0.06, 0.03, 0.035, 0.12, 0.008); // body
+    for (const side of [-1, 1]) limb(iron, [side * 0.014, 0.03, 0.16], [side * 0.014, 0.03, 0.28], 0.009); // barrels
+    for (const side of [-1, 1]) limb(metal, [side * 0.022, -0.02, 0.1], [side * 0.012, -0.05, 0.34], 0.01, 0.002, 0.3); // blades
+    block(glow, 0, 0.058, 0.04, 0.008, 0.005, 0.05); // the heat stripe
+    limb(iron, [0, -0.01, -0.02], [0, -0.11, -0.05], 0.02, 0.022, 1.3); // grip
+    rightHand(0, -0.07, -0.03);
+  } else if (id === "mauler") {
+    // A Brute mauler: a one-handed shotgun, a fat barrel, a blade under the muzzle.
+    block(iron, 0, 0.01, 0.04, 0.034, 0.042, 0.1, 0.01); // body
+    limb(iron, [0, 0.02, 0.12], [0, 0.02, 0.26], 0.026, 0.024); // the fat barrel
+    block(dark, 0, 0.02, 0.262, 0.016, 0.016, 0.003);
+    limb(metal, [0, -0.03, 0.14], [0, -0.07, 0.3], 0.012, 0.002, 0.3); // blade
+    block(glow, 0.035, 0.03, 0.02, 0.003, 0.008, 0.03); // shell count
+    limb(iron, [0, -0.02, -0.02], [0, -0.11, -0.05], 0.02, 0.022, 1.3); // grip
+    rightHand(0, -0.07, -0.03);
   } else {
     // An original energy blade: a curved hilt and two glowing, tapering prongs.
     limb(metal, [0, -0.1, -0.02], [0, 0.02, 0.02], 0.03, 0.028, 1.4); // hilt
@@ -2642,6 +2829,17 @@ function viewmodelMesh(id: WeaponId): MeshAsset {
     rightHand(0, -0.05, 0.0);
   }
   const glowColor: readonly [number, number, number, number] = id === "sword" ? [0.45, 0.85, 1, 1] : [0.3, 0.9, 1, 1];
+  // Each family's light (A1): UNSC cyan, Covenant green, needles pink, Brute orange.
+  const glowEmit: [number, number, number] =
+    id === "needler" || id === "needlerifle"
+      ? [2.2, 0.5, 1.6]
+      : id === "carbine" || id === "plasmapistol"
+        ? [0.6, 2.2, 0.5]
+        : id === "plasmarifle" || id === "beamrifle"
+          ? [0.6, 1.2, 2.4]
+          : id === "spiker" || id === "mauler"
+            ? [2.4, 0.9, 0.2]
+            : [0.5, 1.6, 1.9];
   // Skinned (I9), every part rigidly: the left hand's on its bone, the rest on the weapon's.
   const toPrimitive = (st: Streams, material: Mat): MeshPrimitive => {
     const n = st.positions.length / 3;
@@ -2666,6 +2864,9 @@ function viewmodelMesh(id: WeaponId): MeshAsset {
     toPrimitive(gloveL, gloveMat),
     toPrimitive(sleeveL, sleeveMat),
     toPrimitive(dark, { name: "recess", baseColorFactor: [0.05, 0.05, 0.06, 1], baseColorImage: null, metallicFactor: 0.3, roughnessFactor: 0.7 }),
+    // The Covenant's iridescent violet alloy, the Brutes' black iron (A1).
+    toPrimitive(shell, { name: "covenant", baseColorFactor: [0.34, 0.24, 0.52, 1], baseColorImage: null, metallicFactor: 0.75, roughnessFactor: 0.22, anisotropy: 0.3 }),
+    toPrimitive(iron, { name: "iron", baseColorFactor: [0.18, 0.16, 0.15, 1], baseColorImage: null, metallicFactor: 0.85, roughnessFactor: 0.5 }),
   ];
   if (glow.indices.length > 0) {
     primitives.push(
@@ -2674,7 +2875,7 @@ function viewmodelMesh(id: WeaponId): MeshAsset {
         glow,
         id === "sword"
           ? plasmaMaterial("plasma")
-          : { name: "glow", baseColorFactor: glowColor, baseColorImage: null, metallicFactor: 0, roughnessFactor: 0.4, emissiveFactor: [0.5, 1.6, 1.9] },
+          : { name: "glow", baseColorFactor: glowColor, baseColorImage: null, metallicFactor: 0, roughnessFactor: 0.4, emissiveFactor: glowEmit },
       ),
     );
   }
@@ -3249,7 +3450,7 @@ export const LOCKOUT_INTRO: SceneTimeline = {
 let meshSidecar: string | null = null;
 
 /** The weapons a killed soldier drops (the sword vanishes with its wielder). */
-const LOCKOUT_DROPPED = ["br", "smg", "shotgun", "sniper", "magnum"] as const;
+const LOCKOUT_DROPPED = LOCKOUT_VIEWMODELS.filter((id) => id !== "sword");
 
 /**
  * Lockout's debris (HALO2_STYLE_ROADMAP.md H10): spent casings that ring off the
@@ -3296,30 +3497,32 @@ export function lockoutMeshSidecar(): string {
       const variant = LOCKOUT_BOT_VARIANTS[(i - 1) % LOCKOUT_BOT_VARIANTS.length];
       meshes.push({ id: `bot-${i}`, name: `bot ${i}`, mesh: soldier, ...(variant ? { variant } : {}), ...soldierLods, animator: LOCKOUT_SOLDIER_ANIMATOR, transform: identity });
     }
-    // Instances 8..13: one first-person viewmodel per weapon, at rest scale.
+    // From instance 8: one first-person viewmodel per weapon, at rest scale
+    // (its lighter levels are for the weapon dropped far off: its debris).
     for (const id of LOCKOUT_VIEWMODELS) {
       const model = viewmodelMesh(id);
       meshes.push({ id: `viewmodel-${id}`, name: `viewmodel ${id}`, mesh: serializeMeshAsset(model), ...lodsOf(model), animator: LOCKOUT_VIEWMODEL_ANIMATOR, transform: rest });
     }
-    // Instances 14..18 (EP14): the weapon over each spawn pad, which its Pickup
-    // component turns, bobs and hides while the pad recharges.
-    MARKERS.forEach(([cx, cy, cz, , hy], i) => {
-      const id = MARKER_WEAPONS[i]!;
+    // The weapons over the spawn pads (EP14): one for each weapon a pad turns
+    // through (A1), which its Pickup component turns, bobs, and hides while
+    // the pad recharges or carries another of its weapons.
+    PICKUP_ENTRIES.forEach(({ pad, weapon }, i) => {
+      const [cx, cy, cz, , hy] = MARKERS[pad]!;
       meshes.push({
         id: `pickup-${i + 1}`,
-        name: `pickup ${id}`,
-        mesh: serializeMeshAsset(pickupMesh(id)),
+        name: `pickup ${weapon}`,
+        mesh: serializeMeshAsset(pickupMesh(weapon)),
         transform: { position: [cx, cy + hy + 0.32, cz], rotation: [0, 0, 0], scale: [1, 1, 1] },
         components: [{ name: "Pickup", fields: { slot: i + 1 } }],
       });
     });
-    // Instances 19..20 (E3): Holograms, copies of the soldier at rest scale
+    // Then (E3): Holograms, copies of the soldier at rest scale
     // (unseen) until the cart places one where a decoy runs.
     for (let i = 1; i <= LOCKOUT_HOLOGRAMS; i += 1) {
       meshes.push({ id: `hologram-${i}`, name: `hologram ${i}`, mesh: soldier, ...soldierLods, animator: LOCKOUT_SOLDIER_ANIMATOR, transform: rest });
     }
-    // Instances 21..22 (E5): the left hand's SMG and Magnum when dual wielding,
-    // the right hand's models (stored once) drawn mirrored.
+    // Then (E5, A1): the left hand's gun when dual wielding, each one-hander's
+    // right-hand model (stored once) drawn mirrored.
     for (const id of LOCKOUT_DUAL_WIELD) {
       // (no lighter levels: a gun in hand is never far off)
       const { lods: _lods, ...right } = meshes.find((m) => m.id === `viewmodel-${id}`)!;
@@ -3415,6 +3618,21 @@ local W = {
   sniper  = { name="Sniper Rifle",  dmg=80, cool=44, rng=150,hs=3.0, mag=4,  pel=1, spr=0.0,  auto=false, reserve=12, zoom=true },
   magnum  = { name="Magnum",        dmg=20, cool=13, rng=42, hs=2.0, mag=12, pel=1, spr=0.012,auto=false, reserve=48, dual=true },
   sword   = { name="Energy Sword",  dmg=220,cool=20, rng=3.2,hs=1.0, mag=99, pel=1, spr=0.0,  auto=false, reserve=0, melee=true },
+  -- A1 (LOCKOUT_ARSENAL_ROADMAP.md): the rest of the rifles, and the guns
+  -- that dual wield. fx: the streak a round leaves; vsh/vhp: plasma's bias
+  -- against shields and against health; combine/cdmg: needles that go off
+  -- together, and for how much; home: the needler's wider lock; ocharge: a
+  -- plasma pistol held that long overcharges, its bolt stripping shields.
+  ar          = { name="Assault Rifle",    dmg=6,  cool=3,  rng=30, hs=1.2, mag=32, pel=1, spr=0.06, auto=true,  reserve=160 },
+  dmr         = { name="DMR",              dmg=24, cool=12, rng=72, hs=2.0, mag=15, pel=1, spr=0.008,auto=false, reserve=45, zoom=true },
+  carbine     = { name="Covenant Carbine", dmg=14, cool=7,  rng=60, hs=1.8, mag=18, pel=1, spr=0.015,auto=false, reserve=54, zoom=true, fx="bolt" },
+  needlerifle = { name="Needle Rifle",     dmg=17, cool=9,  rng=62, hs=1.8, mag=21, pel=1, spr=0.012,auto=false, reserve=63, zoom=true, fx="needle", combine=3, cdmg=45 },
+  beamrifle   = { name="Beam Rifle",       dmg=75, cool=34, rng=150,hs=3.0, mag=12, pel=1, spr=0.0,  auto=false, reserve=12, zoom=true, fx="beam" },
+  plasmapistol= { name="Plasma Pistol",    dmg=8,  cool=9,  rng=34, hs=1.0, mag=80, pel=1, spr=0.02, auto=false, reserve=0, fx="bolt", vsh=2.0, vhp=0.5, ocharge=45, dual=true },
+  plasmarifle = { name="Plasma Rifle",     dmg=7,  cool=5,  rng=34, hs=1.0, mag=90, pel=1, spr=0.04, auto=true,  reserve=0, fx="bolt", vsh=1.5, vhp=0.7, dual=true },
+  needler     = { name="Needler",          dmg=6,  cool=5,  rng=30, hs=1.0, mag=24, pel=1, spr=0.05, auto=true,  reserve=72, fx="needle", combine=7, cdmg=70, home=0.5, dual=true },
+  spiker      = { name="Spiker",           dmg=8,  cool=4,  rng=28, hs=1.1, mag=40, pel=1, spr=0.05, auto=true,  reserve=120, dual=true },
+  mauler      = { name="Mauler",           dmg=9,  cool=20, rng=10, hs=1.0, mag=5,  pel=5, spr=0.16, auto=false, reserve=20, dual=true },
 }
 
 -- Equipment (LOCKOUT_EQUIPMENT_ROADMAP.md): one slot, used with the
@@ -3469,9 +3687,23 @@ LOADOUTS = {
   { key="dualsmg", name="Dual SMGs", g1="smg", d1="smg", g2="br" },
   { key="dualmag", name="Dual Magnums", g1="magnum", d1="magnum", g2="br" },
   { key="smgmag", name="SMG + Magnum", g1="smg", d1="magnum", g2="br" },
+  -- A1: Halo 3's start, the Covenant's, and pairs of the new one-handers.
+  { key="assault", name="Assault", g1="ar", g2="magnum" },
+  { key="covenant", name="Covenant", g1="carbine", g2="plasmapistol" },
+  { key="dualplasma", name="Dual Plasma Rifles", g1="plasmarifle", d1="plasmarifle", g2="br" },
+  { key="dualneedler", name="Dual Needlers", g1="needler", d1="needler", g2="br" },
+  { key="dualspiker", name="Dual Spikers", g1="spiker", d1="spiker", g2="br" },
+  { key="dualmauler", name="Dual Maulers", g1="mauler", d1="mauler", g2="br" },
+  { key="ppsmg", name="Plasma Pistol + SMG", g1="smg", d1="plasmapistol", g2="br" },
 }
 -- The left hand's viewmodels (E5): the right's models, mirrored.
-VM_LEFT = { smg = ${HOLOGRAM_INSTANCE + LOCKOUT_HOLOGRAMS}, magnum = ${HOLOGRAM_INSTANCE + LOCKOUT_HOLOGRAMS + 1} }
+VM_LEFT = { ${LOCKOUT_DUAL_WIELD.map((id, i) => `${id} = ${LEFT_INSTANCE + i}`).join(", ")} }
+-- The pads' rotations (A1): what each carries in turn; each Pickup instance's
+-- pad and weapon; how far round each pad has come (pad_rot, synced by the
+-- pickup events).
+PAD_ROT = { ${PAD_ROTATIONS.map((r) => `{ ${r.map((id) => `"${id}"`).join(", ")} }`).join(", ")} }
+PICKUPS = { ${PICKUP_ENTRIES.map((e) => `{ pad = ${e.pad + 1}, w = "${e.weapon}" }`).join(", ")} }
+pad_rot = {}
 for _, lo in ipairs(LOADOUTS) do lo.en = lo.name end
 for _, d in pairs(EQUIP) do d.en = d.name end
 loadout_pick = 1
@@ -3479,13 +3711,13 @@ loadout_pick = 1
 -- Game types. teams/shields/radar toggle the rules; obj names the objective
 -- ("slayer" = kills); target is the score that ends the match.
 local MODES = {
-  ffa    = { name="Free for All",  obj="slayer", teams=false, shields=true,  radar=true,  start="br",     target=15, weapons={br=true,smg=true,shotgun=true,sniper=true,sword=true} },
-  slayer = { name="Team Slayer",   obj="slayer", teams=true,  shields=true,  radar=true,  start="br",     target=40, weapons={br=true,smg=true,shotgun=true,sniper=true,sword=true} },
+  ffa    = { name="Free for All",  obj="slayer", teams=false, shields=true,  radar=true,  start="br",     target=15, weapons=true },
+  slayer = { name="Team Slayer",   obj="slayer", teams=true,  shields=true,  radar=true,  start="br",     target=40, weapons=true },
   swat   = { name="SWAT",          obj="slayer", teams=true,  shields=false, radar=false, start="br",     target=40, weapons={}, fixed=true },
   snipe  = { name="Team Snipers",  obj="slayer", teams=true,  shields=true,  radar=false, start="sniper", target=25, weapons={}, fixed=true },
-  ball   = { name="Oddball",       obj="ball",   teams=false, shields=true,  radar=true,  start="magnum", target=100,weapons={br=true,smg=true,shotgun=true,sniper=true,sword=true} },
-  koth   = { name="King of the Hill",obj="hill", teams=false, shields=true,  radar=true,  start="br",     target=100,weapons={br=true,smg=true,shotgun=true,sniper=true,sword=true} },
-  jugg   = { name="Juggernaut",    obj="jugg",   teams=false, shields=true,  radar=true,  start="magnum", target=15, weapons={br=true,shotgun=true,sniper=true,sword=true} },
+  ball   = { name="Oddball",       obj="ball",   teams=false, shields=true,  radar=true,  start="magnum", target=100,weapons=true },
+  koth   = { name="King of the Hill",obj="hill", teams=false, shields=true,  radar=true,  start="br",     target=100,weapons=true },
+  jugg   = { name="Juggernaut",    obj="jugg",   teams=false, shields=true,  radar=true,  start="magnum", target=15, weapons=true },
 }
 local MODE_KEYS = {"ffa","slayer","swat","snipe","ball","koth","jugg"}
 
@@ -3531,7 +3763,7 @@ local tick = 0
 -- First-person arms (I9): each weapon's viewmodel instance, whose state machine
 -- plays the motion -- the cart only says what happened (fire, reload, melee,
 -- ready) and how fast the player is moving.
-local WIDX = { br=8, smg=9, shotgun=10, sniper=11, magnum=12, sword=13 }
+local WIDX = { ${LOCKOUT_VIEWMODELS.map((id, i) => `${id}=${VIEWMODEL_INSTANCE + i}`).join(", ")} }
 local vm_speed = {}
 local function vm(name)
   local idx = WIDX[p.slot==1 and p.g1 or p.g2]
@@ -3858,8 +4090,11 @@ end
 local NETMODE, MYSLOT, HUMANS = 0, 0, 0     -- 0 offline / 1 client / 2 host
 -- The host's slot: slots stick (L8), so after a host leaves it needn't be 0.
 local HOSTSLOT = 0
-local WLIST = {"br","smg","shotgun","sniper","magnum","sword"}
+local WLIST = { ${LOCKOUT_VIEWMODELS.map((id) => `"${id}"`).join(", ")} }
 local WIDX_OF = {}; for i,id in ipairs(WLIST) do WIDX_OF[id]=i-1 end
+-- A weapon's index in a shot or a swing (A1): its low 3 bits at bit 7, its top 2 at bit 13.
+function wid_bits(wid) local i = WIDX_OF[wid] or 0; return ((i & 7) << 7) | (((i >> 3) & 3) << 13) end
+function ev_wid(a) return WLIST[(((a >> 7) & 7) | (((a >> 13) & 3) << 3)) + 1] or "br" end
 -- (Event kinds and impact kinds sit in tables, not a local each: the cart is
 -- near Lua's 200 locals a chunk.)
 -- (EQUIP, kind 1, was HIT: never sent -- a hit is a verdict, L6.)
@@ -3899,10 +4134,12 @@ local function vy13(v) v = math.floor(v*2000 + 0.5); if v > 4095 then v = 4095 e
 local function net_pack(e)
   local wid = (e == p) and (p.slot==1 and p.g1 or p.g2) or (e.g1 or "br")
   local w0 = u16(e.x*100) | (u16(e.z*100) << 16)
-  local w1 = u16(e.y*100) | (u16(wrap_angle(e == p and e.ay or (e.face or 0))*10000) << 16)
+  -- (facing in 1/2500 rad, 14 bits; the weapon's index's top two bits above it: A1)
+  local widx = WIDX_OF[wid] or 0
+  local w1 = u16(e.y*100) | ((math.floor(wrap_angle(e == p and e.ay or (e.face or 0))*2500 + 0.5) & 0x3fff) << 16) | (((widx >> 3) & 3) << 30)
   local hp = math.max(0, math.min(127, math.floor(e.hp or 0)))
   local sh = math.max(0, math.min(127, math.floor((e.sh or 0)/2)))
-  local w2 = hp | (sh << 7) | ((WIDX_OF[wid] or 0) << 14) | ((e.dead and 1 or 0) << 17)
+  local w2 = hp | (sh << 7) | ((widx & 7) << 14) | ((e.dead and 1 or 0) << 17)
     | ((e.moving and 1 or 0) << 18) | ((e.team=="red" and 1 or 0) << 19) | (((e.ack or 0) & 255) << 20)
     | (((e.jetting or e.hooked) and 1 or 0) << 28) | (((e.eq and EQUIP[e.eq].id) or 0) << 29)
   local air = (e == p) and not e.grounded or (e ~= p and e.air)
@@ -3957,8 +4194,10 @@ local function net_snap(o, stamp, w0, w1, w2, w3)
   if n > 0 and snaps[n].t >= stamp then return end
   local pitch = w3 & 0xff
   if pitch >= 128 then pitch = pitch - 256 end
-  snaps[n+1] = { t=stamp, x=s16(w0)/100, z=s16(w0 >> 16)/100, y=s16(w1)/100, face=s16(w1 >> 16)/10000,
-    pitch=pitch/100, life=(w3 >> 15) & 3, w2=w2, w3=w3 }
+  local face = (w1 >> 16) & 0x3fff
+  if face >= 8192 then face = face - 16384 end
+  snaps[n+1] = { t=stamp, x=s16(w0)/100, z=s16(w0 >> 16)/100, y=s16(w1)/100, face=face/2500,
+    pitch=pitch/100, life=(w3 >> 15) & 3, w2=w2, w3=w3, wh=(w1 >> 30) & 3 }
   if n + 1 > SNAPS then table.remove(snaps, 1) end
 end
 
@@ -3990,7 +4229,7 @@ local function net_sample(o, rt)
   -- A soldier the host has killed stays dead until it respawns, whatever it says.
   if o.killed_life ~= nil and a.life ~= o.killed_life then o.killed_life = nil end
   o.dead = ((w2 >> 17) & 1) == 1 or o.killed_life ~= nil
-  o.g1 = WLIST[((w2 >> 14) & 7) + 1] or "br"
+  o.g1 = WLIST[(((w2 >> 14) & 7) | ((a.wh or 0) << 3)) + 1] or "br"
   o.moving = ((w2 >> 18) & 1) == 1
   -- (its equipment at work: a Jetpack thrusting, a grapple's line out)
   local act = ((w2 >> 28) & 1) == 1
@@ -4028,9 +4267,10 @@ local function unpack_dir(b)
 end
 
 -- A round's flight (L5): a streak from the muzzle to wherever it stopped.
-local function tracer(x, y, z, fx, fy, fz, dist)
+local function tracer(x, y, z, fx, fy, fz, dist, kind)
   local len = math.min(dist, 90) - 0.6
-  if len > 0.4 then cartbox.burst("tracer", x+fx*0.6, y+fy*0.6, z+fz*0.6, fx*len, fy*len, fz*len) end
+  -- (kind: the weapon's own streak -- a plasma bolt, a needle, a beam: A1)
+  if len > 0.4 then cartbox.burst(kind or "tracer", x+fx*0.6, y+fy*0.6, z+fz*0.6, fx*len, fy*len, fz*len) end
 end
 
 -- Tell the others about a shot this browser fired (its player's, or a bot's
@@ -4039,16 +4279,17 @@ end
 local function net_shot(e, wid, fx, fy, fz, dist, impact, left)
   if NETMODE == 0 then return end
   -- (bit 12: from the left hand, dual wielding -- E5)
-  cartbox.netsend(EV.SHOT | ((e.ns & 7) << 4) | ((WIDX_OF[wid] or 0) << 7) | ((impact & 3) << 10) | ((left and 1 or 0) << 12)
+  cartbox.netsend(EV.SHOT | ((e.ns & 7) << 4) | wid_bits(wid) | ((impact & 3) << 10) | ((left and 1 or 0) << 12)
     | (math.max(0, math.min(65535, math.floor(dist*100))) << 16), pack_dir(fx, fy, fz))
 end
 -- ... a melee swing (a sword's lunge among them), facing yaw ...
 local function net_melee(e, wid, yaw)
-  if NETMODE ~= 0 then cartbox.netsend(EV.MELEE | ((e.ns & 7) << 4) | ((WIDX_OF[wid] or 0) << 7), u16(wrap_angle(yaw)*10000)) end
+  if NETMODE ~= 0 then cartbox.netsend(EV.MELEE | ((e.ns & 7) << 4) | wid_bits(wid), u16(wrap_angle(yaw)*10000)) end
 end
 -- ... and a weapon taken from a pad (0-based), so every browser empties it.
 function net_pickup(e, pad)
-  if NETMODE ~= 0 then cartbox.netsend(EV.PICKUP | ((e.ns & 7) << 4) | ((pad & 63) << 7), 0) end
+  -- (and how far round the pad has come now: A1)
+  if NETMODE ~= 0 then cartbox.netsend(EV.PICKUP | ((e.ns & 7) << 4) | ((pad & 63) << 7) | (((pad_rot[pad + 1] or 0) & 7) << 13), 0) end
 end
 -- The others' shots, swings and throws wait here to be shown in step with
 -- where their owners are drawn (see net_fx_run); a grenade's start point
@@ -4087,6 +4328,31 @@ function damage(target, dmg, attacker, head)
   if target.hp <= 0 then kill_ent(attacker, target, head) end
 end
 
+-- A weapon's round landing (A1), where hits are judged: plasma's bias
+-- against shields or health, an overcharged bolt stripping shields, and
+-- needles that go off together once enough are in.
+function weapon_hit(target, dmg, w, attacker, head, over)
+  if not target or target.dead or NETMODE == 1 then return end
+  if over and w.ocharge then
+    if (target.sh or 0) > 0 then dmg = target.sh + 4 end
+  elseif (target.sh or 0) > 0 then dmg = dmg*(w.vsh or 1)
+  else dmg = dmg*(w.vhp or 1) end
+  if w.combine then
+    local c = target.needles
+    if not c or c.by ~= attacker or c.w ~= w or tick - c.t > 150 then c = { by = attacker, w = w, n = 0, t = tick } end
+    c.n, c.t = c.n + 1, tick
+    target.needles = c
+    if c.n >= w.combine then
+      target.needles = nil
+      dmg = dmg + w.cdmg
+      cartbox.burst("plasmablast", target.x, target.y + 1.1, target.z, 0, 1, 0, 0.6)
+      cartbox.sound("repulse", target.x, target.y + 1, target.z, 0.8, 1.5)
+      if attacker == p then say(T("msg.supercombine", "Supercombine!"), 9) end
+    end
+  end
+  damage(target, dmg, attacker, head)
+end
+
 -- A full shared-clock time from its low 16 bits (ms), near now.
 local function full_ms(now, t16) return now - ((now - t16) & 0xffff) end
 
@@ -4121,13 +4387,14 @@ local function host_judge(sh, shot, a, b, now, origin)
   local w = W[wid]
   -- (a left hand's shot, dual wielding, keeps its own clock and rounds: E5)
   local hand = ((b >> 28) & 1) == 1 and "fired_ms_l" or "fired_ms"
+  local over = ((b >> 29) & 1) == 1 and w.ocharge ~= nil   -- (an overcharged bolt: A1)
   local ok = shot ~= nil and not sh.dead
   if ok and sh[hand] and fire - sh[hand] < (melee and 18 or w.cool)*1000/60 - 40 then ok = false end
   if ok and not melee then
     sh.ammo = sh.ammo or {}
     local key = hand == "fired_ms_l" and wid.."_l" or wid
     local left = sh.ammo[key] or ((w.mag or 0) + (w.reserve or 0))
-    if left <= 0 then ok = false else sh.ammo[key] = left - 1 end
+    if left <= 0 then ok = false else sh.ammo[key] = left - (over and 10 or 1) end
   end
   if not ok then sh.rejected = (sh.rejected or 0) + 1; verdict(sh, seq, false); return end
   sh[hand] = fire
@@ -4171,7 +4438,7 @@ local function host_judge(sh, shot, a, b, now, origin)
     if best then
       local head = bhy > boy + 1.5
       local dmg = w.dmg * (head and w.hs or 1)
-      damage(best, dmg, sh, head)
+      weapon_hit(best, dmg, w, sh, head, over)
       total = total + dmg
       if not first then first, fhead = best, head end
     else shot_wall(ex, ey, ez, fx, fy, fz, w.rng, w.dmg) end
@@ -4182,13 +4449,13 @@ end
 -- A guest sends its shot or swing to the host to be judged (L6): when it
 -- fired, how far behind it drew the others, its spread's seed, whom it swung
 -- at, and whether it thinks it hit.
-local function net_aim(melee, seed, target, predicted, left)
+local function net_aim(melee, seed, target, predicted, left, over)
   if NETMODE ~= 1 then return end
   local now, lag = cartbox.netclock()
   -- Numbered by the input it was fired on (L7), for the host to fire it from there.
   local seq = (p.in_seq or 0) & 255
   cartbox.netsend(EV.AIM | ((p.ns & 7) << 4) | ((melee and 1 or 0) << 7) | (math.min(255, math.floor((lag + INTERP)/4 + 0.5)) << 8) | ((now & 0xffff) << 16),
-    seq | ((seed & 0xffff) << 8) | (((target or 0) & 7) << 24) | ((predicted and 1 or 0) << 27) | ((left and 1 or 0) << 28))
+    seq | ((seed & 0xffff) << 8) | (((target or 0) & 7) << 24) | ((predicted and 1 or 0) << 27) | ((left and 1 or 0) << 28) | ((over and 1 or 0) << 29))
   return seq
 end
 
@@ -4367,9 +4634,15 @@ local function net_receive()
     elseif kind == EV.EQUIP then net_equip(a, ev[2], src, host)
     elseif kind == EV.PICKUP then
       local pad = (a >> 7) & 63
-      -- (a pad still empty when someone joined comes with what's left of its wait: L8)
-      mtimer[pad + 1] = ((a >> 16) & 0xffff) > 0 and ((a >> 16) & 0xffff) or 540
-      if NETMODE == 2 and src and src.ammo then src.ammo[MW[pad + 1]] = nil end   -- a full load of what it took
+      -- (a pad still empty when someone joined comes with what's left of its wait, plus one: L8)
+      local wait = (a >> 16) & 0xffff
+      mtimer[pad + 1] = wait > 0 and (wait - 1) or 540
+      -- (and how far round its weapons it has come: A1)
+      local r = PAD_ROT[pad + 1]
+      local rot = (a >> 13) & 7
+      pad_rot[pad + 1] = rot
+      local took = r and r[(rot - 1) % #r + 1] or MW[pad + 1]
+      if NETMODE == 2 and src and src.ammo then src.ammo[took] = nil; src.ammo[took.."_l"] = nil end   -- a full load of what it took
     elseif kind == EV.NADE then nade_from[from*16 + ((a >> 7) & 15)] = { s16(a >> 16)/100, s16(ev[2])/100, s16(ev[2] >> 16)/100 }
     elseif kind == EV.INPUT then
       if NETMODE == 2 and src and src.remote and src.human then
@@ -4388,7 +4661,7 @@ local function net_receive()
       end
     elseif kind >= EV.SHOT and kind <= EV.STICK then
       if NETMODE == 2 and src and (kind == EV.SHOT or kind == EV.MELEE) then
-        src.last_shot = { wid = WLIST[((a >> 7) & 7) + 1] or "br", dir = ev[2] }
+        src.last_shot = { wid = ev_wid(a), dir = ev[2] }
         -- what the host's copy of a guest is doing, for the others to see (L7)
         if kind == EV.SHOT then src.fired_t = tick else src.melee_t, src.swing = tick, true end
       end
@@ -4451,8 +4724,10 @@ function net_catch_up()
   for k in pairs(sent_team) do sent_team[k] = nil end
   net_objective_publish(true)
   for i = 1, #MRK // 3 do
-    if (mtimer[i] or 0) > 0 then
-      cartbox.netsend(EV.PICKUP | ((MYSLOT & 7) << 4) | (((i - 1) & 63) << 7) | ((math.floor(mtimer[i]) & 0xffff) << 16), 0)
+    -- (each pad's wait, plus one so a wait of nothing still says so, and how far round it is: A1)
+    if (mtimer[i] or 0) > 0 or (pad_rot[i] or 0) > 0 then
+      cartbox.netsend(EV.PICKUP | ((MYSLOT & 7) << 4) | (((i - 1) & 63) << 7) | (((pad_rot[i] or 0) & 7) << 13)
+        | ((math.min(65535, math.floor(mtimer[i] or 0) + 1)) << 16), 0)
     end
   end
 end
@@ -4493,7 +4768,7 @@ end
 
 -- Nearest live enemy inside the player's forward yaw cone AND with clear line of
 -- sight, for auto-aim (no manual pitch on an 8-button pad). Returns bot,distance.
-local function auto_target()
+local function auto_target(cone)
   local best, bd = nil, 1e9
   local ex,ey,ez = p.x, p.y+EYE, p.z
   for _, o in ipairs(bots) do
@@ -4504,7 +4779,7 @@ local function auto_target()
         local ang = math.atan(dx, dz) - p.ay
         while ang > math.pi do ang = ang - 2*math.pi end
         while ang < -math.pi do ang = ang + 2*math.pi end
-        if math.abs(ang) < 0.28 and m < bd and not seg_blocked(ex,ey,ez, o.x,o.y+1.2,o.z, 1) then
+        if math.abs(ang) < (cone or 0.28) and m < bd and not seg_blocked(ex,ey,ez, o.x,o.y+1.2,o.z, 1) then
           best, bd = o, m
         end
       end
@@ -4679,7 +4954,7 @@ local function net_fx_run()
     local e = ent_by_slot(from)
     if e and e ~= p then
       if kind == EV.SHOT then
-        local wid = WLIST[((a >> 7) & 7) + 1] or "br"
+        local wid = ev_wid(a)
         local w, impact, dist = W[wid], (a >> 10) & 3, ((a >> 16) & 0xffff)/100
         local fx, fy, fz = unpack_dir(b)
         local x, y, z = e.x, e.y + EYE, e.z
@@ -4687,9 +4962,9 @@ local function net_fx_run()
         if ((a >> 12) & 1) == 1 then x, z = x + fz*0.35, z - fx*0.35 end
         e.muzzle = 3
         cartbox.sound("fire_"..wid, x, y, z, 1, 0.94 + math.random()*0.12)
-        tracer(x, y, z, fx, fy, fz, dist)
+        tracer(x, y, z, fx, fy, fz, dist, w.fx)
         for _ = 2, math.min(w.pel or 1, 4) do   -- a shotgun's fan, near enough
-          tracer(x, y, z, fx + (math.random()-0.5)*w.spr, fy, fz + (math.random()-0.5)*w.spr, dist)
+          tracer(x, y, z, fx + (math.random()-0.5)*w.spr, fy, fz + (math.random()-0.5)*w.spr, dist, w.fx)
         end
         if impact == IMPACT.WALL then wall_sparks(x, y, z, fx, fy, fz, dist + 0.3)
         elseif impact == IMPACT.SHIELD then cartbox.burst("shield", x+fx*dist, y+fy*dist, z+fz*dist, -fx, -fy, -fz, 0.8) end
@@ -4728,14 +5003,14 @@ local function eject_casing(x, y, z, fx, fz)
     rx*1.7 + fx*0.2 + (math.random()-0.5)*0.5, 1.5 + math.random()*0.7, rz*1.7 + fz*0.2 + (math.random()-0.5)*0.5)
 end
 
-local function player_fire(left)
+local function player_fire(left, over)
   if p.dead or (left and (p.cool2 or 0) > 0) or (not left and p.cool > 0) then return end
   -- (left: the left hand's gun, dual wielding, on its own clock and magazine: E5)
   local wid = left and p.d1 or (p.slot==1 and p.g1 or p.g2)
   local w = W[wid]
   local ammo = left and p.ad or (p.slot==1 and p.a1 or p.a2)
   -- auto-melee when an enemy is right in front
-  local aim,ad = auto_target()
+  local aim,ad = auto_target(w.home)   -- (the needler's lock is wider: A1)
   if aim and ad < 2.4 and not left then
     p.cool=18; flash=3; vm("melee"); p.melee_t = tick
     cartbox.rumble(0.8, 120)
@@ -4774,7 +5049,10 @@ local function player_fire(left)
   flash = 4; p.fired_t = tick
   cartbox.rumble(w.pel > 1 and 0.55 or 0.3, w.pel > 1 and 90 or 50)
   cartbox.sound("fire_"..wid,nil,nil,nil,0.7,0.96+math.random()*0.08)
-  if left then p.ad = p.ad - 1 elseif p.slot==1 then p.a1=p.a1-1 else p.a2=p.a2-1 end
+  -- (an overcharged bolt costs ten: A1)
+  local cost = over and math.min(10, ammo) or 1
+  if left then p.ad = p.ad - cost elseif p.slot==1 then p.a1=p.a1-cost else p.a2=p.a2-cost end
+  if over then cartbox.sound("fire_"..wid,nil,nil,nil,1,0.6) end
   local ex,ey,ez = p.x, p.y+EYE, p.z
   do local fx,_,fz = forward(); eject_casing(ex + fx*0.35, ey - 0.16, ez + fz*0.35, fx, fz) end
   shot.t=3; shot.x=ex; shot.y=ey; shot.z=ez
@@ -4820,7 +5098,7 @@ local function player_fire(left)
       local head = best._hy and best._hy>best.y+1.5
       if head then dmg=dmg*w.hs end
       local shielded = (best.sh or 0) > 0
-      damage(best, dmg, p, head)
+      weapon_hit(best, dmg, w, p, head, over)
       shield_hit(best, best._hy, ex,ey,ez)
       dist, impact = bt, shielded and IMPACT.SHIELD or IMPACT.BODY
       hit = true
@@ -4829,20 +5107,26 @@ local function player_fire(left)
       impact = dist < w.rng and IMPACT.WALL or IMPACT.NONE
       shot_wall(ex,ey,ez, fx,fy,fz, w.rng, w.dmg)
     end
-    tracer(ex, ey - 0.12, ez, fx, fy, fz, dist)
+    tracer(ex, ey - 0.12, ez, fx, fy, fz, dist, w.fx)
     if k == 1 then net_shot(p, wid, bx, by, bz, dist, impact, left) end
   end
   -- Online a guest's shot goes to the host to be judged; its hit marker shows
   -- at once as its guess, until the host says (L6).
-  local seq = net_aim(false, seed, 0, hit, left)
+  local seq = net_aim(false, seed, 0, hit, left, over)
   if hit then hitmark = { t = 14, seq = seq, state = seq and 0 or 1 } end
 end
 
 -- Whether spawn pad i's weapon is there to take: the Pickup component (EP14)
 -- shows the weapon floating over the pad only then.
-function pickup_ready(i)
-  return phase == "play" and MODE.weapons[MW[i]] and (mtimer[i] or 0) == 0
+-- (k: a Pickup instance's entry in PICKUPS, A1 -- shown only while its pad carries its weapon)
+function pickup_ready(k)
+  local e = PICKUPS[k]
+  return e ~= nil and phase == "play" and weapon_ok(e.w) and pad_weapon(e.pad) == e.w and (mtimer[e.pad] or 0) == 0
 end
+-- What pad i carries now; whether the game type allows a weapon; a pad's weapon taken (A1).
+function pad_weapon(i) local r = PAD_ROT[i]; if not r then return MW[i] end; return r[(pad_rot[i] or 0) % #r + 1] end
+function weapon_ok(id) return id ~= nil and (MODE.weapons == true or (type(MODE.weapons) == "table" and MODE.weapons[id] == true)) end
+function pad_taken(i) local r = PAD_ROT[i]; pad_rot[i] = ((pad_rot[i] or 0) + 1) % (r and #r or 1) end
 
 -- The pads' respawn clocks run every tick, whoever is alive, so every browser
 -- has each pad back at the same moment (L5: a pickup empties it everywhere).
@@ -4852,7 +5136,7 @@ end
 
 local function try_pickups()
   for i=0,(#MRK//3)-1 do
-    local id=MW[i+1]; local legal=MODE.weapons[id]
+    local id=pad_weapon(i+1); local legal=weapon_ok(id)
     if legal and mtimer[i+1]==0 then
       local mx,my,mz=MRK[i*3+1],MRK[i*3+2],MRK[i*3+3]
       if math.abs(p.x-mx)<1.4 and math.abs(p.z-mz)<1.6 and math.abs((p.y+1)-my)<2.0 then
@@ -4868,7 +5152,7 @@ local function try_pickups()
           give(p,1,id); p.slot=1; p.d1 = nil; vm("ready")
           say(T("msg.pickup","Picked up "..W[id].name,W[id].name),12)
         end
-        mtimer[i+1]=540; net_pickup(p, i)
+        mtimer[i+1]=540; pad_taken(i+1); net_pickup(p, i)
       end
     end
   end
@@ -4961,11 +5245,11 @@ end
 -- A bot that walks over a live weapon marker takes the weapon.
 local function bot_pickups(o)
   for i=0,(#MRK//3)-1 do
-    local id=MW[i+1]
-    if MODE.weapons[id] and (mtimer[i+1] or 0)==0 and o.g1 ~= id then
+    local id=pad_weapon(i+1)
+    if weapon_ok(id) and (mtimer[i+1] or 0)==0 and o.g1 ~= id then
       local mx,my,mz=MRK[i*3+1],MRK[i*3+2],MRK[i*3+3]
       if math.abs(o.x-mx)<1.4 and math.abs(o.z-mz)<1.6 and math.abs((o.y+1)-my)<2.0 then
-        o.g1=id; mtimer[i+1]=540; net_pickup(o, i)
+        o.g1=id; mtimer[i+1]=540; pad_taken(i+1); net_pickup(o, i)
       end
     end
   end
@@ -5038,7 +5322,7 @@ local function think_bot(o)
         local fm = math.sqrt(fx*fx+fy*fy+fz*fz)
         fx,fy,fz = fx/fm, fy/fm, fz/fm
         local d = wall_sparks(ox,oy,oz, fx,fy,fz, fm, not near)
-        if near then tracer(ox,oy,oz, fx,fy,fz, d) end
+        if near then tracer(ox,oy,oz, fx,fy,fz, d, w.fx) end
         net_shot(o, o.g1 or "br", fx,fy,fz, d, IMPACT.WALL)
         shot_wall(ox,oy,oz, fx,fy,fz, fm, (w.dmg or 12) * (w.pel or 1) * 0.6)
       elseif tg.holo then
@@ -5048,7 +5332,7 @@ local function think_bot(o)
         local head = math.random() < 0.12
         if head then dmg = dmg*(w.hs or 1.5) end
         local shielded = (tg.sh or 0) > 0
-        damage(tg, dmg, o, head)
+        weapon_hit(tg, dmg, w, o, head)
         if not w.melee then
           local hy = tg.y + (head and 1.6 or 1.1)
           shield_hit(tg, hy, ox,oy,oz)
@@ -5056,7 +5340,7 @@ local function think_bot(o)
           local fm = math.sqrt(fx*fx+fy*fy+fz*fz)
           if fm > 0.01 then
             fx,fy,fz = fx/fm, fy/fm, fz/fm
-            if near then tracer(ox,oy,oz, fx,fy,fz, fm) end
+            if near then tracer(ox,oy,oz, fx,fy,fz, fm, w.fx) end
             net_shot(o, o.g1 or "br", fx,fy,fz, fm, shielded and IMPACT.SHIELD or IMPACT.BODY)
           end
         end
@@ -5067,15 +5351,20 @@ local function think_bot(o)
         if fm > 0.01 then
           fx,fy,fz = fx/fm, fy/fm, fz/fm
           local d = wall_sparks(ox,oy,oz, fx,fy,fz, w.rng or 40, not near)
-          if near then tracer(ox,oy,oz, fx,fy,fz, d) end
+          if near then tracer(ox,oy,oz, fx,fy,fz, d, w.fx) end
           net_shot(o, o.g1 or "br", fx,fy,fz, d, d < (w.rng or 40) and IMPACT.WALL or IMPACT.NONE)
         end
       end
     end
     -- Close the distance when out of range; in range, strafe -- a step to one
     -- side of the line to the target every second or so -- so a fight isn't two
-    -- statues trading shots.
-    if m > (w.rng or 40)*0.7 or w.melee then
+    -- statues trading shots. (In Oddball a loose ball near enough comes first,
+    -- fight or no: a long gun would otherwise keep a bot trading shots forever.
+    -- Only a ball on its own level: one on the floor below a deck would send it
+    -- to the point of the deck right above, where it would stand for good.)
+    if MODE.obj=="ball" and ball.live and math.abs((o.y+1)-ball.y) < 1.5 and d3(o.x,o.y,o.z, ball.x,ball.y,ball.z) < 15 then
+      if (tick + o.id*5) % 15 == 0 then nav_goto(o, ball.x, ball.y-0.4, ball.z, BOT_FIGHT) end
+    elseif m > (w.rng or 40)*0.7 or w.melee then
       if (tick + o.id*5) % 15 == 0 then nav_goto(o, tg.x, tg.y, tg.z, BOT_FIGHT) end
     elseif (tick + o.id*11) % 60 == 0 or o.arrived then
       local side = (math.random() < 0.5) and -1 or 1
@@ -5088,7 +5377,7 @@ local function think_bot(o)
     -- now and then go and grab a weapon from a marker.
     if o.arrived or (tick + (o.id or 0)*23) % 150 == 0 then
       local k = math.random(1, #MRK // 3)
-      if math.random() < 0.2 and MODE.weapons[MW[k]] then
+      if math.random() < 0.2 and weapon_ok(pad_weapon(k)) then
         nav_goto(o, MRK[k*3-2], MRK[k*3-1]-0.4, MRK[k*3])
       else
         nav_goto(o, bot_goal(o))
@@ -5622,6 +5911,7 @@ local function start_match(key)
   MODE = MODES[key]; team.blue,team.red,winner = 0,0,""
   for _,g in ipairs(grenades) do if g.obj then cartbox.despawn(g.obj) end end
   deploy_clear()
+  pad_rot = {}
   tick=0; feed={}; grenades={}; announce.t=0
   for i=1,(#MRK//3) do mtimer[i]=0 end
   p = { ay=0, ap=0, vy=0, cool=0, score=0, deaths=0, slot=1, team="blue", dead=false, respawn=0, nade=2, tag="You", streak=0 }
@@ -5785,6 +6075,14 @@ local function play_input()
   end
   local firing = cur.auto and cartbox.action("fire") or cartbox.actionp("fire")
   if firing then player_fire() end
+  -- A plasma pistol held overcharges, and lets the charged bolt go when let go (A1).
+  if cur.ocharge and not p.dead then
+    if cartbox.action("fire") then p.charge = (p.charge or 0) + 1
+    else
+      if (p.charge or 0) >= cur.ocharge then p.cool = 0; player_fire(false, true) end
+      p.charge = 0
+    end
+  end
 end
 
 -- ---------------------------------------------------------------------------

@@ -158,8 +158,12 @@ describe.skipIf(!existsSync(LOCKOUT_ENGINE))("what a remote Spartan is doing (tw
     expect(guestAir).toBeGreaterThan(100);
     expect(Math.abs(jumps(hostSide) - jumps(guestSide))).toBeLessThanOrEqual(1);
     expect(Math.abs(hostSide.filter(air).length - guestAir)).toBeLessThan(guestAir * 0.1);
-    // Its shots: the host sees it firing, with a flash at the muzzle.
-    expect(hostSide.filter(firing).length).toBeGreaterThan(50);
+    // Its shots: the host sees each burst of firing the guest had, with a flash
+    // at the muzzle. (Counted in bursts: how long each lasts is the gun's -- the
+    // pads hand out the whole arsenal since LOCKOUT_ARSENAL_ROADMAP.md A1.)
+    const bursts = (side: number[]) => side.filter((w, f) => f > 0 && firing(w) && !firing(side[f - 1]!)).length;
+    expect(bursts(guestSide)).toBeGreaterThan(3);
+    expect(Math.abs(bursts(hostSide) - bursts(guestSide))).toBeLessThanOrEqual(1);
     expect(hostSide.filter((w) => (w >> 10) & 1).length).toBeGreaterThan(5);
   }, 300_000);
 });

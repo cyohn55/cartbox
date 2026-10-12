@@ -48,12 +48,13 @@ describe("the Lockout arena starter", () => {
   it("parses into a drawable scene: the map plus 7 bot instances", () => {
     const scene = parseMeshScene(lockoutMeshSidecar())!;
     expect(scene).not.toBeNull();
-    // map + 7 bots + 6 weapon viewmodels + 5 pad pickups + 2 Holograms' bodies + 2 left-hand guns
-    // + 4 plasma grenades (I10), 8 Drop Walls (E3) and 16 drains, regenerators and their
-    // fields (E4) in reserve, then the mountains' blocks
-    expect(scene.instances.slice(0, 51).every((i) => !i.terrain)).toBe(true);
-    expect(scene.instances.length - 51).toBeGreaterThan(20);
-    expect(scene.instances.slice(51).every((i) => i.terrain && i.parent === 0)).toBe(true);
+    // map + 7 bots + a viewmodel per weapon + a Pickup per pad weapon + 2 Holograms' bodies +
+    // the left-hand guns, then 4 plasma grenades (I10), 8 Drop Walls (E3) and 16 drains,
+    // regenerators and their fields (E4) in reserve, then the mountains' blocks
+    const placed = JSON.parse(lockoutMeshSidecar()).meshes.length + 4 + 8 + 16;
+    expect(scene.instances.slice(0, placed).every((i) => !i.terrain)).toBe(true);
+    expect(scene.instances.length - placed).toBeGreaterThan(20);
+    expect(scene.instances.slice(placed).every((i) => i.terrain && i.parent === 0)).toBe(true);
     expect(scene.bounds.radius).toBeGreaterThan(0);
   });
 
@@ -144,10 +145,12 @@ describe("the Lockout arena starter", () => {
     // since the Spartans' armour sets and the Forerunner kit's prefabs (I13,
     // I14), 1.8 MB since the kit's baked occlusion and relief maps (I15), 1.9 MB
     // since the arena's walls became kit panels (I16, even with the map's
-    // normals now rebuilt rather than stored): a sidecar over 512 KB is
+    // normals now rebuilt rather than stored), 2.4 MB since the arsenal's first
+    // ten weapons (LOCKOUT_ARSENAL_ROADMAP.md A1: a viewmodel each, and a
+    // Pickup for each weapon a pad turns through): a sidecar over 512 KB is
     // offloaded to object storage anyway, and this keeps a save well inside the
     // 4.5 MB request body limit.
-    expect(lockoutMeshSidecar().length).toBeLessThan(1_900_000);
+    expect(lockoutMeshSidecar().length).toBeLessThan(2_400_000);
     // Bloom on the energy trim, via the starter's post-FX stack.
     const fx = parsePostFxSettings(resolveStarter("lockout").fx)!;
     expect(fx.enabled.bloom).toBe(true);
