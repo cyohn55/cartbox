@@ -3262,7 +3262,7 @@ export function lockoutMeshSidecar(): string {
       });
     });
     // Instances 19..20 (E3): Holograms, copies of the soldier at rest scale
-    // (unseen) until the cart poses one where a decoy runs.
+    // (unseen) until the cart places one where a decoy runs.
     for (let i = 1; i <= LOCKOUT_HOLOGRAMS; i += 1) {
       meshes.push({ id: `hologram-${i}`, name: `hologram ${i}`, mesh: soldier, ...soldierLods, animator: LOCKOUT_SOLDIER_ANIMATOR, transform: rest });
     }
@@ -5237,7 +5237,7 @@ function deploy_gone(d, tell)
   d.dead = true
   for i, o in ipairs(DEPLOY) do if o == d then table.remove(DEPLOY, i) break end end
   if d.obj then cartbox.despawn(d.obj); d.obj = nil end
-  if d.idx then cartbox.set(d.idx, "speed", 0) end
+  if d.idx then cartbox.set(d.idx, "speed", 0); cartbox.place(d.idx); cartbox.look(d.idx, 0, false) end
   cartbox.burst("shield", d.x, d.y + 1.1, d.z, 0, 1, 0, 2)
   cartbox.sound("repulse", d.x, d.y + 1, d.z, 0.5, 2)
   if tell and NETMODE ~= 0 and (d.holo or NETMODE == 2) and d.owner.ns then
@@ -5264,12 +5264,18 @@ function deploy_tick()
 end
 
 -- A wall's glow, a hologram's body: the owner's armour, running, the
--- shimmer of a hologram about to fade in its last half second.
+-- shimmer of a hologram about to fade in its last half second. (Placed, not
+-- posed: the seven bots and the viewmodel fill a frame's eight poses; a
+-- placement stands, and cartbox.look gives it the owner's tint.)
 function deploy_draw()
   for _, d in ipairs(DEPLOY) do
     if d.holo and d.idx then
-      cartbox.meshpose(d.idx, d.x, d.y, d.z, d.yaw, 0, 0, 1000, 0, armor_tint(d.owner))
-      if not d.ran then d.ran = true; cartbox.set(d.idx, "speed", 1); cartbox.set(d.idx, "grounded", true); cartbox.set(d.idx, "dead", false) end
+      cartbox.place(d.idx, d.x, d.y, d.z, d.yaw, 0, 0, 1)
+      if not d.ran then
+        d.ran = true
+        cartbox.look(d.idx, armor_tint(d.owner), false)
+        cartbox.set(d.idx, "speed", 1); cartbox.set(d.idx, "grounded", true); cartbox.set(d.idx, "dead", false)
+      end
       cartbox.shield(d.idx, 0, d.life - d.t < 30 and 1 or 0, 0)
     elseif d.kind == "wall" then
       cartbox.light3d(d.x, d.y + 1.1, d.z, 4, 80, 150, 255, 1.4)

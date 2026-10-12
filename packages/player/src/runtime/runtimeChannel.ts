@@ -53,6 +53,7 @@ import {
   PHYS_OP_MIX,
   PHYS_OP_PLACE,
   PHYS_OP_UNPLACE,
+  PHYS_OP_LOOK,
   PHYS_OP_UI_LIST,
   PHYS_OP_UI_NUM,
   PHYS_OP_UI_SHOW,
@@ -138,6 +139,12 @@ const transform = (m: Mat4, p: Vec3): [number, number, number] => [
   m[2]! * p[0] + m[6]! * p[1] + m[10]! * p[2] + m[14]!,
 ];
 
+/** How a placed object looks (cartbox.look): a tint palette index (0 none), and whether it's drawn over the whole scene. */
+export interface ObjectLook {
+  readonly tint: number;
+  readonly front: boolean;
+}
+
 export class RuntimeChannel {
   /** Spawned copies: root object index → the root's world matrix. */
   private readonly active = new Map<number, Mat4>();
@@ -169,6 +176,7 @@ export class RuntimeChannel {
   private sounds: SoundCommand[] = [];
   /** Standing shield effects (cartbox.shield): object → flare, shimmer, camo. */
   private readonly shieldStates = new Map<number, ShieldState>();
+  private readonly lookStates = new Map<number, ObjectLook>();
   /**
    * Ragdolls (H9): object → the limp body, built from its pose the next time it
    * is skinned after cartbox.ragdoll (until then null, with the shove to give it).
@@ -279,10 +287,16 @@ export class RuntimeChannel {
       } else if (cmd.op === PHYS_OP_MIX) this.sounds.push({ kind: "mix", bus: cmd.a, volume: cmd.v[0]! });
       else if (cmd.op === PHYS_OP_PLACE) {
         const object = cmd.a & 0xffff;
-        const s = ((cmd.a >>> 16) & 0x7fff) / 256;
+        const s = (((cmd.a >>> 16) & 0x7fff) / 256) * ((cmd.a >>> 31) & 1 ? -1 : 1);
         const [x, y, z, yaw, pitch, roll] = cmd.v;
         if (object < this.scene.instances.length) this.placed.set(object, composeModelMatrix([x!, y!, z!], [pitch! * DEG, yaw! * DEG, roll! * DEG], [s, s, s]));
       } else if (cmd.op === PHYS_OP_UNPLACE) this.placed.delete(cmd.a);
+      else if (cmd.op === PHYS_OP_LOOK) {
+        const object = cmd.a & 0xffff;
+        const key = (cmd.a >>> 16) & 0x1f;
+        if (key === 0) this.lookStates.delete(object);
+        else if (object < this.scene.instances.length) this.lookStates.set(object, { tint: key & 15, front: (key & 16) !== 0 });
+      }
       else if (cmd.op === PHYS_OP_DEBRIS) {
         if (this.debris.length < MAX_BURSTS_QUEUED)
           this.debris.push({ debris: cmd.a & 0xff, at: [cmd.v[0]!, cmd.v[1]!, cmd.v[2]!], velocity: [cmd.v[3]!, cmd.v[4]!, cmd.v[5]!], scale: ((cmd.a >>> 8) & 0xffff) / 16 });
@@ -359,6 +373,11 @@ export class RuntimeChannel {
     const state: ShieldState = { flare: unit(v[0]), shimmer: unit(v[1]), camo: unit(v[2]) };
     if (state.flare === 0 && state.shimmer === 0 && state.camo === 0) this.shieldStates.delete(object);
     else this.shieldStates.set(object, state);
+  }
+
+  /** The standing looks (cartbox.look: object → tint and front layer), for objects placed rather than posed. */
+  looks(): ReadonlyMap<number, ObjectLook> {
+    return this.lookStates;
   }
 
   /** The standing shield effects (object → state); the renderer draws them on the object and everything under it. */

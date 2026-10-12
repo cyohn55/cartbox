@@ -436,6 +436,7 @@ var PHYS_OP_UI_SHOW = 36;
 var PHYS_OP_UI_NUM = 37;
 var PHYS_OP_UI_TEXT = 38;
 var PHYS_OP_UI_LIST = 39;
+var PHYS_OP_LOOK = 40;
 function physicsBlockAddress(layout) {
   return layout.ramSize - PHYS_BLOCK_BYTES;
 }
@@ -5342,7 +5343,9 @@ function decodeMeshPoses(words) {
       front: (indexWord & MESH_POSE_FRONT) !== 0,
       position: [pos(words[base + 1] ?? 0), pos(words[base + 2] ?? 0), pos(words[base + 3] ?? 0)],
       rotation: [angle(words[base + 4] ?? 0), angle(words[base + 5] ?? 0), angle(words[base + 6] ?? 0)],
-      scale: (words[base + 7] ?? 0) / MESH_CAM_DIST_SCALE
+      // Signed: a negative scale mirrors the instance through its middle (a
+      // cart turns it the right way up with half a turn of pitch).
+      scale: ((words[base + 7] ?? 0) | 0) / MESH_CAM_DIST_SCALE
     });
   }
   return poses;
@@ -7363,6 +7366,7 @@ cartbox = {
   actionlabel = function() return "" end,
   -- Placing objects (EP14): live once the scene has the runtime.
   place = function() end,
+  look = function() end,
   -- Components (EP14): replaced when any object has one.
   component = function() return nil end,
   -- Localisation (EP19b): replaced when the cart has a string table.
@@ -9196,8 +9200,18 @@ function PLACE_CALLS() {
     local i = _obj(o)
     if i == nil or i > 65535 then return end
     if x == nil then return _cmd(${PHYS_OP_UNPLACE}, i) end
-    local s = math.max(0, math.min(32767, math.floor((scale or 1) * 256 + 0.5)))
+    local sc = scale or 1
+    local s = math.max(0, math.min(32767, math.floor(math.abs(sc) * 256 + 0.5)))
+    if sc < 0 then s = s | 0x8000 end   -- (mirrored through its middle)
     return _cmd(${PHYS_OP_PLACE}, i | (s << 16), x, y or 0, z or 0, yaw or 0, pitch or 0, roll or 0)
+  end
+  local _look = {}
+  cartbox.look = function(o, tint, front)
+    local i = _obj(o)
+    if i == nil or i > 65535 then return end
+    local key = (math.floor(tint or 0) & 15) | (((front and front ~= 0) and 1 or 0) << 4)
+    if _look[i] == key then return end -- it stands: send changes only
+    if _cmd(${PHYS_OP_LOOK}, i | (key << 16)) then _look[i] = key end
   end
 `;
 }
@@ -9854,6 +9868,7 @@ var RuntimeChannel = class {
     this.sounds = [];
     /** Standing shield effects (cartbox.shield): object → flare, shimmer, camo. */
     this.shieldStates = /* @__PURE__ */ new Map();
+    this.lookStates = /* @__PURE__ */ new Map();
     /**
      * Ragdolls (H9): object → the limp body, built from its pose the next time it
      * is skinned after cartbox.ragdoll (until then null, with the shove to give it).
@@ -9953,11 +9968,16 @@ var RuntimeChannel = class {
       } else if (cmd.op === PHYS_OP_MIX) this.sounds.push({ kind: "mix", bus: cmd.a, volume: cmd.v[0] });
       else if (cmd.op === PHYS_OP_PLACE) {
         const object = cmd.a & 65535;
-        const s = (cmd.a >>> 16 & 32767) / 256;
+        const s = (cmd.a >>> 16 & 32767) / 256 * (cmd.a >>> 31 & 1 ? -1 : 1);
         const [x, y, z, yaw, pitch, roll] = cmd.v;
         if (object < this.scene.instances.length) this.placed.set(object, composeModelMatrix3([x, y, z], [pitch * DEG, yaw * DEG, roll * DEG], [s, s, s]));
       } else if (cmd.op === PHYS_OP_UNPLACE) this.placed.delete(cmd.a);
-      else if (cmd.op === PHYS_OP_DEBRIS) {
+      else if (cmd.op === PHYS_OP_LOOK) {
+        const object = cmd.a & 65535;
+        const key = cmd.a >>> 16 & 31;
+        if (key === 0) this.lookStates.delete(object);
+        else if (object < this.scene.instances.length) this.lookStates.set(object, { tint: key & 15, front: (key & 16) !== 0 });
+      } else if (cmd.op === PHYS_OP_DEBRIS) {
         if (this.debris.length < MAX_BURSTS_QUEUED)
           this.debris.push({ debris: cmd.a & 255, at: [cmd.v[0], cmd.v[1], cmd.v[2]], velocity: [cmd.v[3], cmd.v[4], cmd.v[5]], scale: (cmd.a >>> 8 & 65535) / 16 });
       } else if (cmd.op >= PHYS_OP_UI_SHOW && cmd.op <= PHYS_OP_UI_LIST) this.holoCommand(cmd);
@@ -10026,6 +10046,10 @@ var RuntimeChannel = class {
     const state = { flare: unit(v[0]), shimmer: unit(v[1]), camo: unit(v[2]) };
     if (state.flare === 0 && state.shimmer === 0 && state.camo === 0) this.shieldStates.delete(object);
     else this.shieldStates.set(object, state);
+  }
+  /** The standing looks (cartbox.look: object → tint and front layer), for objects placed rather than posed. */
+  looks() {
+    return this.lookStates;
   }
   /** The standing shield effects (object → state); the renderer draws them on the object and everything under it. */
   shields() {
@@ -11578,6 +11602,8 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
     this.bodies = /* @__PURE__ */ new Map();
     /** Shield effects (H11): object index → the surface effect it and everything under it wear (see setShields). */
     this.effects = /* @__PURE__ */ new Map();
+    /** How placed objects look (cartbox.look): tint and front layer, as a pose would say (see setLooks). */
+    this.looks = /* @__PURE__ */ new Map();
     this.shieldCache = /* @__PURE__ */ new Map();
     /** Spawned prefab copies: root object index → the root's world matrix (see setSpawned). */
     this.spawned = /* @__PURE__ */ new Map();
@@ -11660,6 +11686,13 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
    * flare, shimmer, camo). Each is drawn on the object and everything under it,
    * as a surface effect over its PBR materials (see shieldEffect).
    */
+  /**
+   * Set how placed objects look (cartbox.look: object → tint, front layer) --
+   * what a pose would say, for an object the cart placed instead (EP14).
+   */
+  setLooks(looks) {
+    this.looks = looks;
+  }
   setShields(shields) {
     if (shields.size === 0 && this.effects.size === 0) return;
     const effects = /* @__PURE__ */ new Map();
@@ -12288,13 +12321,13 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
    * only part of the shadow map that has to be redrawn each frame.
    */
   posedInstances() {
-    if (this.poses.length === 0 && this.bodies.size === 0 && this.spawned.size === 0 && this.animated.size === 0 && this.effects.size === 0) {
+    if (this.poses.length === 0 && this.bodies.size === 0 && this.spawned.size === 0 && this.animated.size === 0 && this.effects.size === 0 && this.looks.size === 0) {
       this.lastPlacement = null;
       this.lastFront = [];
       return { main: this.unpooled, front: [], moved: [] };
     }
     if (this.hierarchy) return this.posedHierarchy(this.hierarchy);
-    if (this.bodies.size > 0 || this.spawned.size > 0 || this.animated.size > 0 || this.effects.size > 0 || this.unpooled !== this.instances) {
+    if (this.bodies.size > 0 || this.spawned.size > 0 || this.animated.size > 0 || this.effects.size > 0 || this.looks.size > 0 || this.unpooled !== this.instances) {
       this.flat ?? (this.flat = {
         parents: this.instances.map(() => -1),
         children: this.instances.map(() => []),
@@ -12359,7 +12392,8 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
       const poolRoot = this.pooledRoot[i] ?? -1;
       const reserved = poolRoot >= 0 && !this.spawned.has(poolRoot);
       const spawnAt = poolRoot === i ? this.spawned.get(i) : void 0;
-      const moved2 = Boolean(pose) || Boolean(up?.moved) || Boolean(body) || Boolean(spawnAt) || this.animated.has(i);
+      const look = this.looks.get(i);
+      const moved2 = Boolean(pose) || Boolean(up?.moved) || Boolean(body) || Boolean(spawnAt) || this.animated.has(i) || Boolean(look);
       let model = this.instances[i].model;
       if (moved2) {
         const base = body ?? spawnAt ?? (up ? multiplyMat43(up.model, h.locals[i]) : h.locals[i]);
@@ -12369,7 +12403,7 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
         model,
         moved: moved2,
         hidden: reserved || this.inactive.has(i) || Boolean(pose?.hidden) || Boolean(up?.hidden),
-        front: Boolean(pose?.front) || Boolean(up?.front),
+        front: Boolean(pose?.front) || Boolean(look?.front) || Boolean(up?.front),
         // A shield effect covers the object and everything under it (its weapon, say).
         effect: this.effects.get(i) ?? up?.effect ?? null
       };
@@ -12397,7 +12431,7 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
       const source = frame > 0 && frames && frames.length > 0 ? frames[(frame - 1) % frames.length] : this.atDetail(i, authored);
       const instance = {
         ...source,
-        ...pose?.tint ? this.tintedLook(source, pose.tint) : {},
+        ...pose?.tint || this.looks.get(i)?.tint ? this.tintedLook(source, pose?.tint || this.looks.get(i)?.tint) : {},
         model: s.model,
         ...s.effect ? { effect: s.effect } : {}
       };
@@ -12578,7 +12612,8 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
    * anything ever posed in front is out too.
    */
   staticShadowKey() {
-    for (const i of this.withChildren(this.poses.filter((p) => p.front).map((p) => p.index))) this.everFront.add(i);
+    const fronts = [...this.poses.filter((p) => p.front).map((p) => p.index), ...[...this.looks].filter(([, l]) => l.front).map(([i]) => i)];
+    for (const i of this.withChildren(fronts)) this.everFront.add(i);
     return `${this.poses.filter((p) => !p.front).map((p) => p.index).sort((a, b) => a - b).join(",")}|${[...this.everFront].sort((a, b) => a - b).join(",")}|${[...this.bodies.keys()].join(",")}|${[...this.live.keys()].join(",")}|${this.inactiveKey}`;
   }
   /** Everything that casts and never moves: what the static shadow maps hold. */
@@ -19480,6 +19515,7 @@ var Player = class {
           this.meshSurface.setBodyOverrides(scripted.size > 0 || put.size > 0 ? new Map([...bodies ?? [], ...put, ...scripted]) : bodies ?? NO_OVERRIDES);
           this.meshSurface.setSpawned(this.runtime.channel.spawned());
           this.meshSurface.setShields(this.runtime.channel.shields());
+          this.meshSurface.setLooks(this.runtime.channel.looks());
           const placed = this.runtime.channel.needsWorld() ? this.meshSurface.currentPlacements() : null;
           this.meshSurface.setSkinning(placed ? this.runtime.channel.skinning((o) => placed[o] ?? null) : this.runtime.channel.skinning());
         }

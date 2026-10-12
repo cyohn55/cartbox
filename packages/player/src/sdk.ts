@@ -409,6 +409,7 @@ cartbox = {
   actionlabel = function() return "" end,
   -- Placing objects (EP14): live once the scene has the runtime.
   place = function() end,
+  look = function() end,
   -- Components (EP14): replaced when any object has one.
   component = function() return nil end,
   -- Localisation (EP19b): replaced when the cart has a string table.
