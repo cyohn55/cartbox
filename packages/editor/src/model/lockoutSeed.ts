@@ -98,7 +98,7 @@ type Box = ArenaBox;
 const TEX = 256;
 
 /** A painted surface sample: colour 0..255, height 0..1, PBR terms 0..1. */
-interface Surf {
+export interface Surf {
   r: number;
   g: number;
   b: number;
@@ -134,7 +134,8 @@ function tnoise(px: number, py: number, cells: number, seed: number): number {
   return a + (b - a) * sx + (c - a) * sy + (a - b - c + d) * sx * sy;
 }
 
-function tfbm(px: number, py: number, cells: number, seed: number, octaves = 4): number {
+/** Tileable fractal noise over a 256-space texture (`cells` lattice cells across its first octave). */
+export function tfbm(px: number, py: number, cells: number, seed: number, octaves = 4): number {
   let sum = 0;
   let amp = 0.5;
   let norm = 0;
@@ -147,7 +148,7 @@ function tfbm(px: number, py: number, cells: number, seed: number, octaves = 4):
 }
 
 const wrap = (v: number): number => ((v % TEX) + TEX) % TEX;
-const clampByte = (v: number): number => Math.max(0, Math.min(255, Math.round(v)));
+export const clampByte = (v: number): number => Math.max(0, Math.min(255, Math.round(v)));
 
 /** Distance (px) from `v` to the nearest of `lines` on a wrapped axis. */
 function seamDistance(v: number, lines: readonly number[]): number {
@@ -447,7 +448,7 @@ function rockSurface(x: number, y: number): Surf {
 }
 
 /** A small surface baked to just albedo + normal (landscape: no metal, no glow). */
-function bakeLandscape(surface: (x: number, y: number) => Surf, strength: number, size: number): { albedo: EncodedImage; normal: EncodedImage } {
+export function bakeLandscape(surface: (x: number, y: number) => Surf, strength: number, size: number): { albedo: EncodedImage; normal: EncodedImage } {
   const k = TEX / size; // sample the 256-space painters at this size, still tiling
   const at = (x: number, y: number): Surf => surface((((x % size) + size) % size) * k, (((y % size) + size) % size) * k);
   const albedo = new Uint8ClampedArray(size * size * 4);
