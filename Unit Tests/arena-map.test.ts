@@ -40,8 +40,9 @@ describe("Lockout as an arena map", () => {
     // Hashes of the lines as they stood before the map became data.
     expect(sha(table(LOCKOUT_CODE, "COL"))).toBe("fcbe139eea0492de");
     expect(sha(table(LOCKOUT_CODE, "SPN"))).toBe("2e91c25189221891");
-    expect(sha(table(LOCKOUT_CODE, "MRK"))).toBe("1e7416c2bdad3d87");
-    expect(sha(table(LOCKOUT_CODE, "MW"))).toBe("7f4e5eec43323bf0");
+    // (Then the heavy weapons' pad on the arena floor, LOCKOUT_ARSENAL_ROADMAP.md A2, after the five.)
+    expect(sha(table(LOCKOUT_CODE, "MRK").replace(",5.50,0.40,-2.00}", "}"))).toBe("1e7416c2bdad3d87");
+    expect(sha(table(LOCKOUT_CODE, "MW").replace(',"rocket"}', "}"))).toBe("7f4e5eec43323bf0");
     expect(sha(table(LOCKOUT_CODE, "ROAM"))).toBe("94d67f7f20b2c6a4");
     expect(sha(table(LOCKOUT_CODE, "POWER"))).toBe("c7636255f34a2258");
     // And the hills, ball and death plane it had written into its code.

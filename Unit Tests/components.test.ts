@@ -284,12 +284,19 @@ describe("Lockout", () => {
     const sc = parseMeshScene(lockoutMeshSidecar())!;
     expect(sc.components).toEqual(LOCKOUT_COMPONENTS);
     expect(componentCallbacks(LOCKOUT_COMPONENTS[0]!.code)).toEqual(["start", "update"]);
-    // One for every weapon a pad turns through (LOCKOUT_ARSENAL_ROADMAP.md A1), each pad's first first.
+    // One for every weapon a pad turns through (LOCKOUT_ARSENAL_ROADMAP.md A1, A2), each pad's first first.
     const first = sc.instances.findIndex((i) => i.name.startsWith("pickup "));
     const pickups = sc.instances.filter((i) => i.name.startsWith("pickup "));
     expect(sc.instances.slice(first, first + pickups.length)).toEqual(pickups);
     expect(pickups.map((i) => i.name)).toEqual(
-      ["sniper", "beamrifle", "br", "dmr", "carbine", "needlerifle", "shotgun", "mauler", "sword", "smg", "ar", "plasmarifle", "needler", "spiker", "plasmapistol"].map((w) => `pickup ${w}`),
+      [
+        ...["sniper", "beamrifle", "splaser"],
+        ...["br", "dmr", "carbine", "needlerifle"],
+        ...["shotgun", "mauler", "bruteshot", "concussion"],
+        ...["sword", "hammer"],
+        ...["smg", "ar", "plasmarifle", "needler", "spiker", "plasmapistol"],
+        ...["rocket", "fuelrod"],
+      ].map((w) => `pickup ${w}`),
     );
     pickups.forEach((p, k) => {
       expect(p.components).toEqual([{ name: "Pickup", fields: { slot: k + 1 } }]);

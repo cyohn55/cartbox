@@ -47,7 +47,7 @@ All designs are original homages, modelled in code like the rest of Lockout.
     - Online, the weapon index is 5 bits, each pad's rotation travels with its pickup and with a newcomer's catch-up, and the host judges overcharge and supercombine.
     - In Oddball, a bot with a fight on goes for a loose ball within 15 m on its own level.
     - Tests: `Unit Tests/lockout-arsenal.test.ts`. The mesh sidecar budget is raised to 2.4 MB.
-- [ ] **A2. The heavy weapons.**
+- [x] **A2. The heavy weapons.**
   - Rocket Launcher.
   - Spartan Laser (charges, then fires).
   - Fuel Rod Gun.
@@ -55,6 +55,26 @@ All designs are original homages, modelled in code like the rest of Lockout.
   - Concussion Rifle (throws what it hits).
   - Gravity Hammer (smashes and throws everyone in front).
   - **Pads:** these join the rotations, and a new pad on the arena floor carries the heaviest.
+  - **Done.**
+    - Six weapons join `LOCKOUT_VIEWMODELS`, each with its own viewmodel, report and streak (a rocket's smoky exhaust, the laser's red line). The hammer is held and swung like the sword.
+    - **Explosive rounds** (`blast`, `bdmg`, `knock` in `W`) go off a step short of where they stop, through `blast_at`. Damage falls off from the heart to the edge, nothing solid may stand between, and the blast throws soldiers from it. The firer is hurt too, except by the hammer (`safe`).
+    - Every browser shows the fireball from the shot event. Hurt is judged where hits are: offline, or on the host, which replays a guest's round to where it stopped.
+    - The stats, as a blast's damage at its heart and its radius:
+      - **Rocket Launcher:** 80 direct plus 140 within 4 m, so one rocket kills a full-shielded soldier. Two rounds, four spare.
+      - **Fuel Rod Gun:** 75 within 2.6 m.
+      - **Brute Shot:** 50 within 2.2 m.
+      - **Concussion Rifle:** 30 within 2.8 m, and a hard throw.
+      - **Gravity Hammer:** a swing whose smash at its wielder's feet ahead does 150 within 3.2 m and throws everyone in it.
+    - The **Spartan Laser** fires only after its trigger is held for a second, whining as it charges. Let go early and the charge is lost. One beam (210) kills. Bots charge it too.
+    - **Bots** fire them all, but never an explosive into their own blast.
+    - **Pads:**
+      - The sniper tower adds the Spartan Laser.
+      - The shotgun nook adds the Brute Shot and the Concussion Rifle.
+      - The sword pit adds the Gravity Hammer.
+      - A sixth pad, out on the arena floor, turns between the Rocket Launcher and the Fuel Rod Gun.
+    - **Rounds no longer pass through walls close by.** A round's first 5 m are traced on their own (`ray_first`): the arena's ray test skips the first 2% of its segment, which at a 90 m range let a shot through anything within 1.8 m.
+    - The arena's light map and light probes are re-baked for the new pad (`npm run bake:lockout`, `bake:lockout-probes`). A scene may define 32 kinds of debris, up from 16, so every weapon but the sword can still be dropped.
+    - Tests: `Unit Tests/lockout-arsenal.test.ts`. The mesh sidecar budget is raised to 2.8 MB (it is about 2.7 MB).
 
 ## Not in this roadmap
 

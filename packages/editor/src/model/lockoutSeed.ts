@@ -638,8 +638,9 @@ const MARKERS: Box[] = [
   [-9, 2.6, 6, 0.28, 0.4, 0.28], // Shotgun — in the nook
   [0, 1.1, 0, 0.28, 0.4, 0.28], // Sword — the bottom-mid pit
   [0, 4.05, 0, 0.28, 0.4, 0.28], // SMG — on the central walkway
+  [5.5, 0.4, -2, 0.28, 0.4, 0.28], // Rocket Launcher — out on the arena floor (A2)
 ];
-const MARKER_WEAPONS = ["sniper", "br", "shotgun", "sword", "smg"] as const;
+const MARKER_WEAPONS = ["sniper", "br", "shotgun", "sword", "smg", "rocket"] as const;
 
 // Every spawn stands in open space: the player's collider (radius 0.55, height
 // 1.7) must not start inside a tower tier, or the view opens inside a wall.
@@ -973,6 +974,9 @@ export const LOCKOUT_EFFECTS: readonly ParticleEffect[] = [
   { ...particlePreset("trail", "bolt"), count: 12, life: 0.12, lifeJitter: 0.3, speed: 0.05, drag: 6, size: 0.06, sizeEnd: 0.02, color: [0.55, 1, 0.6], colorEnd: [0.2, 0.6, 1], glow: 4 },
   { ...particlePreset("trail", "needle"), count: 10, life: 0.14, lifeJitter: 0.3, speed: 0.05, drag: 6, size: 0.04, sizeEnd: 0.012, color: [1, 0.55, 0.9], colorEnd: [0.8, 0.2, 1], glow: 4 },
   { ...particlePreset("trail", "beam"), count: 18, life: 0.2, lifeJitter: 0.2, speed: 0.02, drag: 6, size: 0.03, sizeEnd: 0.03, color: [0.9, 0.6, 1], colorEnd: [0.5, 0.3, 1], glow: 5 },
+  // The heavy weapons' (A2): a rocket's smoky exhaust, the Spartan Laser's red line.
+  { ...particlePreset("trail", "rocket"), count: 22, life: 0.5, lifeJitter: 0.4, speed: 0.3, drag: 3, size: 0.08, sizeEnd: 0.22, color: [1, 0.7, 0.35], colorEnd: [0.45, 0.45, 0.48], glow: 1 },
+  { ...particlePreset("trail", "laser"), count: 20, life: 0.3, lifeJitter: 0.2, speed: 0.02, drag: 6, size: 0.05, sizeEnd: 0.04, color: [1, 0.35, 0.25], colorEnd: [1, 0.1, 0.05], glow: 6 },
   // The Grappleshot's line (E2): a taut cyan streak from the hand to where it holds, laid again while it pulls.
   { ...particlePreset("trail", "grapple"), count: 16, life: 0.12, lifeJitter: 0.2, speed: 0.05, drag: 6, size: 0.03, sizeEnd: 0.02, color: [0.6, 0.95, 1], colorEnd: [0.2, 0.6, 1], glow: 3 },
   // The Repulsor's blast (E2): a cone of pale force thrown out ahead.
@@ -1592,6 +1596,12 @@ export const LOCKOUT_STRINGS: StringTable = {
     { key: "weapon.spiker", text: { en: "Spiker", es: "Clavador" } },
     { key: "weapon.mauler", text: { en: "Mauler", es: "Triturador" } },
     { key: "msg.supercombine", text: { en: "Supercombine!", es: "Supercombinacion!" } },
+    { key: "weapon.rocket", text: { en: "Rocket Launcher", es: "Lanzacohetes" } },
+    { key: "weapon.splaser", text: { en: "Spartan Laser", es: "Laser Spartan" } },
+    { key: "weapon.fuelrod", text: { en: "Fuel Rod Gun", es: "Canon de combustible" } },
+    { key: "weapon.bruteshot", text: { en: "Brute Shot", es: "Lanzagranadas Brute" } },
+    { key: "weapon.concussion", text: { en: "Concussion Rifle", es: "Rifle de conmocion" } },
+    { key: "weapon.hammer", text: { en: "Gravity Hammer", es: "Martillo gravitatorio" } },
     { key: "loadout.assault", text: { en: "Assault", es: "Asalto" } },
     { key: "loadout.covenant", text: { en: "Covenant", es: "Covenant" } },
     { key: "loadout.dualplasma", text: { en: "Dual Plasma Rifles", es: "Dos rifles de plasma" } },
@@ -1679,6 +1689,16 @@ export const LOCKOUT_AUDIO: SceneAudio = {
     zap("plasmarifle", [900, 300], 0.12),
     zap("needler", [2400, 1400], 0.1),
     zap("spiker", [520, 140], 0.12),
+    // A2: the heavy weapons -- a rocket's whoosh, the laser's crack, plasma's
+    // heavier reports, a grenade launcher's thump, the hammer's swing; and the
+    // laser's rising whine while it charges.
+    { name: "fire_rocket", source: { kind: "synth", synth: { duration: 0.6, voices: [{ wave: "noise", cutoff: [5000, 400], attack: 0.01, decay: 0.55, volume: 0.9 }, { wave: "sine", freq: [140, 50], attack: 0.003, decay: 0.3, volume: 0.8 }] } }, bus: "sfx", volume: 0.9, range: [8, 100] },
+    gun("splaser", "laser"),
+    zap("fuelrod", [420, 90], 0.32),
+    gun("bruteshot", "shotgun"),
+    zap("concussion", [260, 70], 0.3),
+    gun("hammer", "swing"),
+    { name: "charge", source: { kind: "synth", synth: { duration: 1.0, voices: [{ wave: "square", freq: [200, 1400], cutoff: [1200, 6000], attack: 0.6, decay: 0.4, volume: 0.35 }] } }, bus: "sfx", volume: 0.6, range: [6, 70] },
     { name: "blast", source: { kind: "synth", synth: "explosion" }, bus: "sfx", volume: 1, range: [8, 120] },
     // A Jetpack's roar (E1): a low rush of noise, laid one over the next while it thrusts.
     { name: "jet", source: { kind: "synth", synth: { duration: 0.32, voices: [{ wave: "noise", cutoff: [1600, 500], attack: 0.04, decay: 0.26, volume: 0.8 }] } }, bus: "sfx", volume: 0.7, range: [5, 60] },
@@ -2329,7 +2349,7 @@ function windowed(t: number, a: number, b: number): number {
  */
 function viewmodelClips(id: WeaponId, bones: readonly { parent: number; at: P3 }[]): AnimationClip[] {
   const TAU = Math.PI * 2;
-  const heavy = id === "sniper" || id === "shotgun" || id === "beamrifle" || id === "mauler";
+  const heavy = id === "sniper" || id === "shotgun" || id === "beamrifle" || id === "mauler" || A2_HEAVY.has(id);
   const idle = rigClip("idle", 3.2, 9, bones, (t) => ({
     rot: { [VM.root]: pitchYaw(Math.sin(t * TAU) * 0.012, Math.sin(t * TAU + 1.3) * 0.01) },
     move: { [VM.root]: [Math.sin(t * TAU + 1.3) * 0.003, Math.sin(t * TAU * 2) * 0.003, 0] },
@@ -2345,7 +2365,7 @@ function viewmodelClips(id: WeaponId, bones: readonly { parent: number; at: P3 }
     const down = (1 - t) * (1 - t);
     return { rot: { [VM.root]: pitchYaw(down * 0.7, down * -0.2) }, move: { [VM.root]: [0, -down * 0.22, -down * 0.08] } };
   });
-  if (id === "sword") {
+  if (id === "sword" || id === "hammer") {
     // One swing serves the attack and the melee: wound back to the right, then
     // across to the left and down, the blade leading.
     const swing = (name: string) =>
@@ -2532,11 +2552,12 @@ const LOCKOUT_DUAL_WIELD = ["smg", "magnum", "plasmapistol", "plasmarifle", "nee
  * own Pickup instance there; the Pickup component shows the one that's up.
  */
 const PAD_ROTATIONS: readonly (readonly WeaponId[])[] = [
-  ["sniper", "beamrifle"], // the sniper tower
+  ["sniper", "beamrifle", "splaser"], // the sniper tower
   ["br", "dmr", "carbine", "needlerifle"], // atop the BR structure
-  ["shotgun", "mauler"], // the shotgun nook
-  ["sword"], // the bottom-mid pit
+  ["shotgun", "mauler", "bruteshot", "concussion"], // the shotgun nook
+  ["sword", "hammer"], // the bottom-mid pit
   ["smg", "ar", "plasmarifle", "needler", "spiker", "plasmapistol"], // the central walkway
+  ["rocket", "fuelrod"], // the arena floor (A2)
 ];
 /** Every (pad, weapon) a Pickup instance shows, in instance order. */
 const PICKUP_ENTRIES = PAD_ROTATIONS.flatMap((ws, pad) => ws.map((weapon) => ({ pad, weapon })));
@@ -2553,8 +2574,12 @@ export const LOCKOUT_VIEWMODELS = [
   "br", "smg", "shotgun", "sniper", "magnum", "sword",
   // A1: the rifles, and the guns that dual wield
   "ar", "dmr", "carbine", "needlerifle", "beamrifle", "plasmapistol", "plasmarifle", "needler", "spiker", "mauler",
+  // A2: the heavy weapons
+  "rocket", "splaser", "fuelrod", "bruteshot", "concussion", "hammer",
 ] as const;
 type WeaponId = (typeof LOCKOUT_VIEWMODELS)[number];
+/** The heavy weapons (A2): a slow, heavy kick, and a long reload. */
+const A2_HEAVY: ReadonlySet<WeaponId> = new Set(["rocket", "splaser", "fuelrod", "bruteshot", "concussion", "hammer"]);
 /** The first viewmodel's instance (after the map and the bots). */
 const VIEWMODEL_INSTANCE = 1 + BOT_COUNT;
 /** The first pad's Pickup (after the viewmodels), the Holograms' bodies, and the left hands' guns. */
@@ -2813,6 +2838,78 @@ function viewmodelMesh(id: WeaponId): MeshAsset {
     block(glow, 0.035, 0.03, 0.02, 0.003, 0.008, 0.03); // shell count
     limb(iron, [0, -0.02, -0.02], [0, -0.11, -0.05], 0.02, 0.022, 1.3); // grip
     rightHand(0, -0.07, -0.03);
+  } else if (id === "rocket") {
+    // A twin-tube rocket launcher on the shoulder: two fat tubes, a sight box to the left, a lit tip.
+    for (const side of [-1, 1]) {
+      limb(poly, [side * 0.045, 0.06, -0.42], [side * 0.045, 0.06, 0.5], 0.05, 0.05, 1.8); // tube
+      block(dark, side * 0.045, 0.06, 0.505, 0.036, 0.036, 0.004); // its bore
+      block(dark, side * 0.045, 0.06, -0.425, 0.036, 0.036, 0.004); // its venturi
+    }
+    for (const z of [-0.3, 0.05, 0.38]) block(metal, 0, 0.06, z, 0.1, 0.056, 0.016, 0.008); // bands round both tubes
+    block(metal, -0.1, 0.1, 0.05, 0.022, 0.03, 0.08, 0.008); // sight box
+    block(glow, -0.1, 0.1, 0.132, 0.014, 0.018, 0.003); // its lens
+    block(accent, 0, 0.12, -0.1, 0.012, 0.008, 0.18); // top rail
+    block(glow, 0.1, 0.06, 0.48, 0.004, 0.012, 0.012); // warning light
+    limb(poly, [0, -0.0, -0.05], [0, -0.1, -0.07], 0.02, 0.022, 1.3); // grip
+    limb(poly, [0, 0.0, 0.25], [0, -0.09, 0.24], 0.018, 0.02, 1.3); // fore grip
+    triggerGuard(-0.005, -0.02, 0.03);
+    rightHand(0, -0.06, -0.06);
+    leftHand(-0.01, -0.06, 0.24);
+  } else if (id === "splaser") {
+    // A Spartan laser: a long angular housing, a lens at its mouth, a red charge strip down its side.
+    block(poly, 0, 0.03, 0.08, 0.05, 0.06, 0.38, 0.016); // housing
+    block(metal, 0, 0.095, 0.02, 0.04, 0.01, 0.3); // top plate
+    limb(metal, [0, 0.03, 0.46], [0, 0.03, 0.56], 0.04, 0.034); // lens collar
+    block(glow, 0, 0.03, 0.562, 0.03, 0.03, 0.004); // the lens
+    for (let c = 0; c < 6; c += 1) block(glow, 0.051, 0.05, -0.18 + c * 0.07, 0.003, 0.012, 0.026); // the charge strip
+    block(metal, 0, 0.13, 0.0, 0.016, 0.02, 0.07, 0.006); // sight
+    block(glow, 0, 0.13, 0.072, 0.01, 0.012, 0.003);
+    limb(poly, [0, -0.03, -0.02], [0, -0.13, -0.05], 0.02, 0.022, 1.4); // grip
+    limb(poly, [0, -0.03, 0.28], [0, -0.12, 0.27], 0.018, 0.02, 1.3); // fore grip
+    triggerGuard(-0.03, 0.0, 0.05);
+    rightHand(0, -0.1, -0.04);
+    leftHand(-0.01, -0.08, 0.27);
+  } else if (id === "fuelrod") {
+    // A Covenant fuel rod gun: a heavy hooked shell over the shoulder, its rod glowing green.
+    limb(shell, [0, 0.04, -0.34], [0, 0.06, 0.2], 0.06, 0.05, 1.5); // body
+    limb(shell, [0, 0.06, 0.2], [0, 0.02, 0.44], 0.045, 0.02, 1.6); // the hooked nose
+    limb(glow, [0.0, 0.1, -0.22], [0.0, 0.11, 0.12], 0.016); // the fuel rod, in its window
+    block(glow, 0, 0.03, 0.445, 0.016, 0.016, 0.004); // the muzzle
+    for (const side of [-1, 1]) limb(shell, [side * 0.06, 0.0, -0.1], [side * 0.05, -0.04, 0.2], 0.012, 0.008, 1.2); // fins
+    limb(shell, [0, -0.02, -0.06], [0, -0.12, -0.08], 0.02, 0.022, 1.3); // grip
+    rightHand(0, -0.08, -0.07);
+    leftHand(-0.01, -0.02, 0.24);
+  } else if (id === "bruteshot") {
+    // A Brute shot: a black iron launcher, a drum under it, and a great blade along its belly.
+    block(iron, 0, 0.02, 0.06, 0.04, 0.05, 0.22, 0.012); // body
+    limb(iron, [0, 0.03, 0.28], [0, 0.03, 0.42], 0.032, 0.03); // barrel
+    block(dark, 0, 0.03, 0.422, 0.02, 0.02, 0.003);
+    limb(iron, [0, -0.04, 0.0], [0, -0.04, 0.14], 0.045, 0.045, 1); // the drum
+    limb(metal, [0, -0.07, 0.16], [0, -0.14, 0.5], 0.016, 0.002, 0.25); // the blade
+    block(glow, 0.041, 0.04, 0.0, 0.003, 0.01, 0.06); // heat stripe
+    limb(iron, [0, -0.02, -0.12], [0, -0.12, -0.15], 0.02, 0.022, 1.3); // grip
+    rightHand(0, -0.09, -0.13);
+    leftHand(-0.01, -0.03, 0.3);
+  } else if (id === "concussion") {
+    // A Covenant concussion rifle: a long split shell, a blue charge at its heart, a squat muzzle.
+    block(shell, 0, 0.02, -0.04, 0.042, 0.05, 0.2, 0.014); // body
+    for (const side of [-1, 1]) limb(shell, [side * 0.024, 0.02, 0.14], [side * 0.02, 0.03, 0.46], 0.022, 0.012, 1.4); // prongs
+    limb(glow, [0, 0.025, 0.12], [0, 0.03, 0.4], 0.01, 0.006); // the charge between them
+    block(glow, 0, 0.075, -0.06, 0.02, 0.006, 0.06); // the heart
+    limb(shell, [0, -0.04, -0.06], [0, -0.13, -0.08], 0.018, 0.02, 1.3); // grip
+    limb(shell, [0, -0.01, -0.24], [0, -0.05, -0.36], 0.028, 0.034, 1.5); // stock
+    rightHand(0, -0.1, -0.07);
+    leftHand(-0.01, -0.03, 0.24);
+  } else if (id === "hammer") {
+    // A gravity hammer: a long iron haft, a great head with a blade on its back, the gravity drive glowing.
+    limb(iron, [0, -0.16, -0.04], [0, 0.34, 0.12], 0.018); // haft
+    for (let g = 0; g < 4; g += 1) block(dark, 0, -0.12 + g * 0.05, -0.03 + g * 0.016, 0.02, 0.008, 0.02); // grip wraps
+    block(iron, 0, 0.36, 0.14, 0.12, 0.07, 0.07, 0.02); // the head
+    block(glow, 0.122, 0.36, 0.14, 0.004, 0.04, 0.04); // the drive's face
+    block(glow, -0.122, 0.36, 0.14, 0.004, 0.03, 0.03);
+    limb(metal, [-0.12, 0.38, 0.14], [-0.24, 0.42, 0.12], 0.04, 0.002, 0.3); // the blade on its back
+    limb(iron, [0, 0.43, 0.15], [0, 0.5, 0.17], 0.016, 0.004); // spike
+    rightHand(0, -0.08, -0.03);
   } else {
     // An original energy blade: a curved hilt and two glowing, tapering prongs.
     limb(metal, [0, -0.1, -0.02], [0, 0.02, 0.02], 0.03, 0.028, 1.4); // hilt
@@ -2837,9 +2934,15 @@ function viewmodelMesh(id: WeaponId): MeshAsset {
         ? [0.6, 2.2, 0.5]
         : id === "plasmarifle" || id === "beamrifle"
           ? [0.6, 1.2, 2.4]
-          : id === "spiker" || id === "mauler"
+          : id === "spiker" || id === "mauler" || id === "bruteshot" || id === "hammer"
             ? [2.4, 0.9, 0.2]
-            : [0.5, 1.6, 1.9];
+            : id === "rocket" || id === "splaser"
+              ? [2.6, 0.35, 0.2]
+              : id === "fuelrod"
+                ? [0.7, 2.6, 0.4]
+                : id === "concussion"
+                  ? [0.6, 1.2, 2.4]
+                  : [0.5, 1.6, 1.9];
   // Skinned (I9), every part rigidly: the left hand's on its bone, the rest on the weapon's.
   const toPrimitive = (st: Streams, material: Mat): MeshPrimitive => {
     const n = st.positions.length / 3;
@@ -3633,6 +3736,16 @@ local W = {
   needler     = { name="Needler",          dmg=6,  cool=5,  rng=30, hs=1.0, mag=24, pel=1, spr=0.05, auto=true,  reserve=72, fx="needle", combine=7, cdmg=70, home=0.5, dual=true },
   spiker      = { name="Spiker",           dmg=8,  cool=4,  rng=28, hs=1.1, mag=40, pel=1, spr=0.05, auto=true,  reserve=120, dual=true },
   mauler      = { name="Mauler",           dmg=9,  cool=20, rng=10, hs=1.0, mag=5,  pel=5, spr=0.16, auto=false, reserve=20, dual=true },
+  -- A2: the heavy weapons. blast/bdmg/knock: where the round lands it goes
+  -- off, hurting everyone within blast m (bdmg at the heart, falling off to
+  -- nothing at the edge) and throwing them; safe: not its wielder. charge:
+  -- held that long before it fires. smash: a melee weapon that swings, not stabs.
+  rocket      = { name="Rocket Launcher",  dmg=80, cool=50, rng=90, hs=1.0, mag=2,  pel=1, spr=0.0,  auto=false, reserve=4,  fx="rocket", blast=4.0, bdmg=140, knock=0.35, zoom=true },
+  splaser     = { name="Spartan Laser",    dmg=210,cool=60, rng=150,hs=1.0, mag=5,  pel=1, spr=0.0,  auto=false, reserve=0,  fx="laser", charge=60, zoom=true },
+  fuelrod     = { name="Fuel Rod Gun",     dmg=20, cool=16, rng=70, hs=1.0, mag=5,  pel=1, spr=0.01, auto=false, reserve=15, fx="bolt", blast=2.6, bdmg=75, knock=0.2 },
+  bruteshot   = { name="Brute Shot",       dmg=25, cool=18, rng=60, hs=1.0, mag=6,  pel=1, spr=0.01, auto=false, reserve=18, blast=2.2, bdmg=50, knock=0.3 },
+  concussion  = { name="Concussion Rifle", dmg=15, cool=20, rng=60, hs=1.0, mag=6,  pel=1, spr=0.01, auto=false, reserve=18, fx="bolt", blast=2.8, bdmg=30, knock=0.5 },
+  hammer      = { name="Gravity Hammer",   dmg=60, cool=40, rng=3.2,hs=1.0, mag=99, pel=1, spr=0.0,  auto=false, reserve=0, melee=true, smash=true, blast=3.2, bdmg=150, knock=0.55, safe=true },
 }
 
 -- Equipment (LOCKOUT_EQUIPMENT_ROADMAP.md): one slot, used with the
@@ -3852,15 +3965,29 @@ end
 
 -- Sparks where a shot from (x0,y0,z0) along (fx,fy,fz) strikes a wall within rng.
 -- Returns how far the round got (rng when it hit nothing); quiet, it only measures.
+-- How far a round along (fx,fy,fz) from (x0,y0,z0) goes before the arena
+-- stops it (or nil), and the face's normal. seg_first skips the first 2% of
+-- its segment, so the first 5 m are looked at on their own: a wall or deck
+-- close by, at long range, isn't passed through (A2: a rocket at one's feet).
+function ray_first(x0,y0,z0, fx,fy,fz, rng)
+  local near = math.min(rng, 5)
+  local t,nx,ny,nz = seg_first(x0,y0,z0, x0+fx*near, y0+fy*near, z0+fz*near)
+  if t then return t*near, nx,ny,nz end
+  if rng <= near then return nil end
+  t,nx,ny,nz = seg_first(x0,y0,z0, x0+fx*rng, y0+fy*rng, z0+fz*rng)
+  if t then return t*rng, nx,ny,nz end
+  return nil
+end
+
 local function wall_sparks(x0,y0,z0, fx,fy,fz, rng, quiet)
-  local t,nx,ny,nz = seg_first(x0,y0,z0, x0+fx*rng, y0+fy*rng, z0+fz*rng)
-  if not t then return rng end
+  local d,nx,ny,nz = ray_first(x0,y0,z0, fx,fy,fz, rng)
+  if not d then return rng end
   if not quiet then
-    local hx,hy,hz = x0+fx*rng*t, y0+fy*rng*t, z0+fz*rng*t
+    local hx,hy,hz = x0+fx*d, y0+fy*d, z0+fz*d
     cartbox.burst("spark", hx+nx*0.03, hy+ny*0.03, hz+nz*0.03, nx,ny,nz)
     cartbox.decal("pock", hx, hy, hz, nx,ny,nz)
   end
-  return rng*t
+  return d
 end
 
 -- Now and then the wind lifts snow off a high ledge near the player.
@@ -4328,6 +4455,56 @@ function damage(target, dmg, attacker, head)
   if target.hp <= 0 then kill_ent(attacker, target, head) end
 end
 
+-- A heavy round going off (A2) at (x,y,z): the fireball, smoke and soot
+-- wherever it's seen (show), and -- where hits are judged, offline or the host
+-- (hurt) -- damage to everyone in the blast with nothing solid between, falling
+-- off from bdmg at the heart to nothing at its edge, the wielder of a safe
+-- weapon spared; and a throw away from the heart.
+function blast_at(x, y, z, w, by, show, hurt)
+  if show then
+    if w.smash then
+      cartbox.sound("repulse", x, y, z, 1, 0.7)
+      cartbox.burst("repulse", x, y + 0.2, z, 0, 1, 0, 1.2)
+    else
+      flash = math.max(flash, 2)
+      cartbox.sound("blast", x, y, z, w.blast >= 3.5 and 1.4 or 1, w.blast >= 3.5 and 1 or 1.25)
+      cartbox.burst(w.fx == "bolt" and "plasmablast" or "blast", x, y, z, 0, 1, 0, w.blast/4)
+      cartbox.burst("smoke", x, y + 0.1, z, 0, 1, 0)
+    end
+    local t, nx, ny, nz = seg_first(x, y + 0.3, z, x, y - 3, z)
+    if t then cartbox.decal("burn", x, y + 0.3 - 3.3*t, z, nx, ny, nz) end
+  end
+  if not hurt or NETMODE == 1 then return end
+  for _, o in ipairs(all_players()) do
+    if o and not o.dead and not (w.safe and o == by) then
+      local m = d3(x, y, z, o.x, o.y + 1, o.z)
+      if m < w.blast and not seg_blocked(x, y, z, o.x, o.y + 1, o.z, 1, true) then
+        local f = 1 - m/w.blast
+        damage(o, w.bdmg*f, by, false)
+        if w.knock and not o.dead then
+          local dx, dz = o.x - x, o.z - z
+          local dm = math.max(0.3, math.sqrt(dx*dx + dz*dz))
+          eq_knock(o, dx/dm*w.knock*f, dz/dm*w.knock*f, 0.12 + 0.18*f)
+        end
+      end
+    end
+  end
+end
+
+-- Where a heavy round goes off (A2), and blast_at's arguments for it: a step
+-- short of where it stopped (so a wall doesn't shelter what's in front of
+-- it), or for a hammer the deck at its wielder's feet ahead. Shown here, and
+-- hurting where hits are judged (unless hurt is false: the host shows a
+-- guest's when its shot event comes, and judges it on its aim).
+function blast_point(w, by, ex, ey, ez, fx, fy, fz, dist, hurt)
+  if w.smash then
+    local h = math.max(0.01, math.sqrt(fx*fx + fz*fz))
+    return by.x + fx/h*1.6, by.y + 0.6, by.z + fz/h*1.6, w, by, hurt ~= 2, hurt ~= false
+  end
+  local d = math.max(0.5, math.min(dist, w.rng) - 0.3)
+  return ex + fx*d, ey + fy*d, ez + fz*d, w, by, hurt ~= 2, hurt ~= false
+end
+
 -- A weapon's round landing (A1), where hits are judged: plasma's bias
 -- against shields or health, an overcharged bolt stripping shields, and
 -- needles that go off together once enough are in.
@@ -4442,6 +4619,13 @@ local function host_judge(sh, shot, a, b, now, origin)
       total = total + dmg
       if not first then first, fhead = best, head end
     else shot_wall(ex, ey, ez, fx, fy, fz, w.rng, w.dmg) end
+    -- (a heavy round goes off where it stopped, judged here; its fireball was shown on its shot event: A2)
+    if w.blast and k == 1 then
+      local d = best and bt or w.rng
+      if not best then d = ray_first(ex, ey, ez, fx, fy, fz, w.rng) or w.rng end
+      local qx, qy, qz = blast_point(w, { x = ex, y = ey - EYE, z = ez }, ex, ey, ez, fx, fy, fz, d)
+      blast_at(qx, qy, qz, w, sh, false, true)
+    end
   end
   verdict(sh, seq, first ~= nil, first, fhead, total)
 end
@@ -4962,7 +5146,8 @@ local function net_fx_run()
         if ((a >> 12) & 1) == 1 then x, z = x + fz*0.35, z - fx*0.35 end
         e.muzzle = 3
         cartbox.sound("fire_"..wid, x, y, z, 1, 0.94 + math.random()*0.12)
-        tracer(x, y, z, fx, fy, fz, dist, w.fx)
+        if not w.smash then tracer(x, y, z, fx, fy, fz, dist, w.fx) end
+        if w.blast then blast_at(blast_point(w, e, x, y, z, fx, fy, fz, dist, false)) end   -- (seen here; hurt where judged: A2)
         for _ = 2, math.min(w.pel or 1, 4) do   -- a shotgun's fan, near enough
           tracer(x, y, z, fx + (math.random()-0.5)*w.spr, fy, fz + (math.random()-0.5)*w.spr, dist, w.fx)
         end
@@ -5011,7 +5196,7 @@ local function player_fire(left, over)
   local ammo = left and p.ad or (p.slot==1 and p.a1 or p.a2)
   -- auto-melee when an enemy is right in front
   local aim,ad = auto_target(w.home)   -- (the needler's lock is wider: A1)
-  if aim and ad < 2.4 and not left then
+  if aim and ad < 2.4 and not left and not w.smash then   -- (a hammer swings as it is: A2)
     p.cool=18; flash=3; vm("melee"); p.melee_t = tick
     cartbox.rumble(0.8, 120)
     cartbox.sound("fire_sword",nil,nil,nil,1,0.9+math.random()*0.2)
@@ -5107,8 +5292,9 @@ local function player_fire(left, over)
       impact = dist < w.rng and IMPACT.WALL or IMPACT.NONE
       shot_wall(ex,ey,ez, fx,fy,fz, w.rng, w.dmg)
     end
-    tracer(ex, ey - 0.12, ez, fx, fy, fz, dist, w.fx)
+    if not w.smash then tracer(ex, ey - 0.12, ez, fx, fy, fz, dist, w.fx) end
     if k == 1 then net_shot(p, wid, bx, by, bz, dist, impact, left) end
+    if w.blast and k == 1 then blast_at(blast_point(w, p, ex, ey, ez, fx, fy, fz, dist)) end
   end
   -- Online a guest's shot goes to the host to be judged; its hit marker shows
   -- at once as its guess, until the host says (L6).
@@ -5303,9 +5489,10 @@ local function think_bot(o)
     bot_repulse(o, tg, m)
     bot_deploy(o, tg, m)
     o.cool=(o.cool or 0)-1
-    if m < (w.rng or 40) and o.cool<=0 then
-      o.cool = (w.cool or 10) + math.random(0,6)
-      cartbox.sound("fire_"..(w.melee and "sword" or (o.g1 or "br")),o.x,o.y+1.3,o.z,1,0.92+math.random()*0.16)
+    -- (an explosive isn't fired into its own blast, and a laser charges first: A2)
+    if m < (w.rng or 40) and o.cool<=0 and not (w.blast and not w.safe and m < w.blast*1.1) then
+      o.cool = (w.cool or 10) + (w.charge or 0) + math.random(0,6)
+      cartbox.sound("fire_"..((w.melee and not w.smash) and "sword" or (o.g1 or "br")),o.x,o.y+1.3,o.z,1,0.92+math.random()*0.16)
       o.fired_t = tick
       if w.melee or m < 1.8 then o.swing = true; o.melee_t = tick; net_melee(o, o.g1 or "br", o.face) end   -- up close: the armour swings (I11)
       if not w.melee and m > 0.01 and d3(o.x,o.y,o.z, p.x,p.y,p.z) < 25 then eject_casing(o.x + dx/m*0.3, o.y + 1.3, o.z + dz/m*0.3, dx/m, dz/m) end
@@ -5325,6 +5512,7 @@ local function think_bot(o)
         if near then tracer(ox,oy,oz, fx,fy,fz, d, w.fx) end
         net_shot(o, o.g1 or "br", fx,fy,fz, d, IMPACT.WALL)
         shot_wall(ox,oy,oz, fx,fy,fz, fm, (w.dmg or 12) * (w.pel or 1) * 0.6)
+        if w.blast then blast_at(blast_point(w, o, ox,oy,oz, fx,fy,fz, d)) end
       elseif tg.holo then
         if math.random() < acc then deploy_gone(tg, true); o.target = nil end   -- a Hologram: popped
       elseif math.random() < acc then
@@ -5342,6 +5530,7 @@ local function think_bot(o)
             fx,fy,fz = fx/fm, fy/fm, fz/fm
             if near then tracer(ox,oy,oz, fx,fy,fz, fm, w.fx) end
             net_shot(o, o.g1 or "br", fx,fy,fz, fm, shielded and IMPACT.SHIELD or IMPACT.BODY)
+            if w.blast then blast_at(blast_point(w, o, ox,oy,oz, fx,fy,fz, fm + 0.3)) end
           end
         end
       elseif not w.melee then
@@ -5353,7 +5542,14 @@ local function think_bot(o)
           local d = wall_sparks(ox,oy,oz, fx,fy,fz, w.rng or 40, not near)
           if near then tracer(ox,oy,oz, fx,fy,fz, d, w.fx) end
           net_shot(o, o.g1 or "br", fx,fy,fz, d, d < (w.rng or 40) and IMPACT.WALL or IMPACT.NONE)
+          if w.blast then blast_at(blast_point(w, o, ox,oy,oz, fx,fy,fz, d)) end
         end
+      end
+      -- A hammer comes down whether its swing found anyone or not (A2).
+      if w.smash then
+        local fx, fz = math.sin(o.face), math.cos(o.face)
+        net_shot(o, o.g1, fx, 0, fz, 1, IMPACT.NONE)
+        blast_at(blast_point(w, o, ox,oy,oz, fx, 0, fz, 1))
       end
     end
     -- Close the distance when out of range; in range, strafe -- a step to one
@@ -6073,8 +6269,17 @@ local function play_input()
     local lw = W[p.d1]
     if (lw.auto and cartbox.action("grenade")) or cartbox.actionp("grenade") then player_fire(true) end
   end
-  local firing = cur.auto and cartbox.action("fire") or cartbox.actionp("fire")
+  local firing = not cur.charge and (cur.auto and cartbox.action("fire") or cartbox.actionp("fire"))
   if firing then player_fire() end
+  -- A Spartan Laser held charges, whining, and fires once charged; let go
+  -- early and the charge is lost (A2).
+  if cur.charge and not p.dead then
+    if cartbox.action("fire") and p.cool <= 0 then
+      if (p.charge or 0) == 0 then cartbox.sound("charge", nil, nil, nil, 0.8) end
+      p.charge = (p.charge or 0) + 1
+      if p.charge >= cur.charge then p.charge = 0; player_fire() end
+    else p.charge = 0 end
+  end
   -- A plasma pistol held overcharges, and lets the charged bolt go when let go (A1).
   if cur.ocharge and not p.dead then
     if cartbox.action("fire") then p.charge = (p.charge or 0) + 1
@@ -6130,7 +6335,7 @@ local function pose_viewmodel(wid)
   -- Where the gun is held; its sway, bob, kick, reload and swing are the arms'
   -- own animation (I9), played by the viewmodel's state machine.
   local fwd, rgt, up = 0.4, 0.19, -0.235
-  if wid=="sword" then fwd, rgt, up = 0.3, 0.13, -0.24 end
+  if wid=="sword" or wid=="hammer" then fwd, rgt, up = 0.3, 0.13, -0.24 end
   if wid=="magnum" then rgt = rgt - 0.03; fwd = fwd - 0.03 end
   local ex, ey, ez = p.x, p.y+EYE, p.z
   local px = ex + fx*fwd + rx*rgt + ux*up

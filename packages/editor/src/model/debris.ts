@@ -27,7 +27,8 @@ export interface DebrisDef {
   readonly max: number;
 }
 
-export const MAX_DEBRIS_DEFS = 16;
+/** Definitions in a scene: 32 (Lockout throws casings and every weapon but the sword it drops: LOCKOUT_ARSENAL_ROADMAP.md A2). */
+export const MAX_DEBRIS_DEFS = 32;
 /** The most copies of one definition alive at once. */
 export const MAX_DEBRIS_PER_DEF = 64;
 
