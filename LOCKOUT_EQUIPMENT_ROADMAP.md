@@ -74,13 +74,41 @@ A **loadout** picker chooses what a player spawns with: weapons, a second gun to
 
       `scripts/verify-touch-layout.mjs` checks that the action buttons show and move.
 
-- [ ] **E2. The Grappleshot and the Repulsor (Infinite).**
+- [x] **E2. The Grappleshot and the Repulsor (Infinite).**
   - **Grappleshot:** fires a line along the aim; if it meets a surface within 25 m, it pulls the soldier there. Jump lets go. 3 charges, recharging.
   - **Repulsor:**
-    - A blast in front that throws enemies and grenades back.
+    - A blast in front that throws enemies back.
     - Against a wall close ahead, it throws the user away instead.
     - Recharges over 10 s.
-  - **Bots** grapple to power positions and repulse close enemies.
+  - **Bots** grapple up to targets and repulse close enemies.
+  - **Done.**
+    - **Loadouts:** Grappleshot (BR, Magnum) and Repulsor (SMG, Magnum) join Standard and Jetpack.
+    - **Charges** (`eq_recharge`): the Grappleshot has 3, one back every 7 s; the Repulsor has 1, back in 10 s. The visor shows the count after the name, and the next charge's recharge on the arc the Jetpack's fuel uses.
+    - **The Grappleshot** (`grapple`, in `move_soldier`):
+      - A press casts a line from the eye along the aim. It costs a charge only if it meets a surface within 25 m.
+      - While it holds, it pulls at 0.42 a tick toward the point (walls still stop the soldier).
+      - It lets go on arrival, on a stall, after 2 s, on a jump or on another press. The pull carries on as a swing, with a hop.
+    - **The Repulsor** (`repulse`):
+      - A wall or the floor within 2.5 m along the aim throws its wearer back off it (aimed at the feet, it's a launch).
+      - Every soldier within 6 m, in a 60° cone ahead and in sight, is thrown away and up.
+      - A throw is a sideways speed that dies away (`kx`/`kz`, run in `eq_move`), faster on the ground.
+      - Grenades fly on as thrown: every browser flies a grenade from its one throw, and a mid-air push would split them.
+    - **Online:**
+      - **The guest's aim.** A guest's pitch is rounded as it's sent before it moves, so a grapple goes where the host will cast it.
+      - **What the guest keeps.** A guest keeps its fall and its equipment's state with each input (`EQ_KEEP`). A replay starts from those (quietly, `EQ_QUIET`: no effects or events twice).
+      - **One event kind.** `EV.EQUIP` (kind 1, the never-sent `EV.HIT`) carries three things: a grapple's line, a blast (for others to draw), and a throw.
+      - **Throws.** Throws are the host's to apply. It throws its copy of a guest after the last input it applied, at the very speed it sends. The guest throws itself after that same input and replays its inputs since (`guest_knock`), the view eased as for a correction.
+      - **The net state** carries the grapple's line being out, on the Jetpack's "jetting" bit.
+    - **Bots:**
+      - A bot with a Grappleshot, a charge and a target over 2.5 m above it (or 16–24 m off) casts at the floor at the target's feet. It leaves its agent to ride the line (`bot_swing`), and takes its agent up again once it's down and still.
+      - A thrown bot does the same.
+      - A bot with a Repulsor blasts an enemy within 4 m.
+    - **Tests** (`Unit Tests/lockout-equipment.test.ts`):
+      - A grapple pulls the player 4 m up a wall to within 0.55 m of where it held, and its charge comes back.
+      - A bot grapples 3.7 m up and lands back on its agent.
+      - A blast throws a bot from 3 m to 6 m and back onto its agent.
+      - Aimed at the feet, a blast launches its wearer 2 m up.
+      - Online, the host pulls a guest the very path the guest predicts (4 ticks later, to the centimetre), and a guest the host's blast throws throws itself the host's way to the centimetre, with one correction.
 - [ ] **E3. The Drop Wall (Infinite) and the Hologram (Reach).**
   - **Drop Wall:**
     - An energy wall set down in front.
