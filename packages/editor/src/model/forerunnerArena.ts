@@ -91,6 +91,82 @@ export interface ArenaMap {
   /** Fall below this height and you die. */
   readonly deathY: number;
   readonly markers: readonly ArenaMarker[];
+  /** Walkable ground (B3): terrain soldiers stand on, shots strike and bots walk over (absent: boxes only). */
+  readonly ground?: ArenaGround;
+}
+
+/**
+ * Walkable ground (BEAVER_CREEK_ROADMAP.md B3): heights on a square grid,
+ * `n` × `n` samples `step` apart from (x0, z0), row by row along z. A sample
+ * of NaN is a hole (a cave mouth, say): there the ground isn't there at all.
+ * Between samples the height is bilinear, the same in the cart as here.
+ */
+export interface ArenaGround {
+  readonly x0: number;
+  readonly z0: number;
+  readonly step: number;
+  readonly n: number;
+  readonly heights: readonly number[];
+}
+
+/** Sample a height function over a grid into ground. */
+export function arenaGround(x0: number, z0: number, step: number, n: number, height: (x: number, z: number) => number): ArenaGround {
+  const heights: number[] = [];
+  for (let j = 0; j < n; j += 1) for (let i = 0; i < n; i += 1) heights.push(height(x0 + i * step, z0 + j * step));
+  return { x0, z0, step, n, heights };
+}
+
+/** The ground's height at (x, z), or null off it or over a hole. */
+export function groundHeight(g: ArenaGround, x: number, z: number): number | null {
+  const fx = (x - g.x0) / g.step;
+  const fz = (z - g.z0) / g.step;
+  if (!(fx >= 0 && fz >= 0 && fx < g.n - 1 && fz < g.n - 1)) return null;
+  const i = Math.floor(fx);
+  const j = Math.floor(fz);
+  const u = fx - i;
+  const v = fz - j;
+  const k = j * g.n + i;
+  const a = g.heights[k]!, b = g.heights[k + 1]!, c = g.heights[k + g.n]!, d = g.heights[k + g.n + 1]!;
+  if (![a, b, c, d].every(Number.isFinite)) return null;
+  return (a * (1 - u) + b * u) * (1 - v) + (c * (1 - u) + d * u) * v;
+}
+
+/** The ground as triangles (x, y, z per corner), two a cell, holes left out: what bots' navmesh is baked over. */
+export function groundTriangles(g: ArenaGround): Float32Array {
+  const out: number[] = [];
+  const at = (i: number, j: number) => [g.x0 + i * g.step, g.heights[j * g.n + i]!, g.z0 + j * g.step];
+  for (let j = 0; j < g.n - 1; j += 1) {
+    for (let i = 0; i < g.n - 1; i += 1) {
+      const a = at(i, j), b = at(i + 1, j), c = at(i, j + 1), d = at(i + 1, j + 1);
+      if (![a[1], b[1], c[1], d[1]].every((h) => Number.isFinite(h))) continue;
+      out.push(...a, ...c, ...b, ...b, ...c, ...d);
+    }
+  }
+  return new Float32Array(out);
+}
+
+/**
+ * Coarse boxes standing in for the ground, for what collides only with
+ * boxes (ragdolls, debris): one a `cell`-sized patch, its top the patch's
+ * mean height, a metre deep.
+ */
+export function groundBoxes(g: ArenaGround, cell = 2.5): ArenaBox[] {
+  const span = g.step * (g.n - 1);
+  const k = Math.max(1, Math.round(span / cell));
+  const size = span / k;
+  const out: ArenaBox[] = [];
+  for (let j = 0; j < k; j += 1) {
+    for (let i = 0; i < k; i += 1) {
+      const cx = g.x0 + (i + 0.5) * size;
+      const cz = g.z0 + (j + 0.5) * size;
+      const hs = [-0.35, 0, 0.35].flatMap((dx) => [-0.35, 0, 0.35].map((dz) => groundHeight(g, cx + dx * size, cz + dz * size)));
+      const ok = hs.filter((h): h is number => h !== null);
+      if (ok.length < 5) continue;
+      const top = ok.reduce((a, b) => a + b, 0) / ok.length;
+      out.push([cx, top - 0.5, cz, size / 2, 0.5, size / 2]);
+    }
+  }
+  return out;
 }
 
 /** One flight's steps, each a collider box (the cart's step-up climbs the ~0.5 m risers). */
@@ -152,7 +228,18 @@ export function arenaLua(map: ArenaMap): string {
     `local HILLS = {${map.hills.map((h) => `{${h.map(n2).join(",")}}`).join(",")}}`,
     `local BALL = {${map.ball.map(n2).join(",")}}`,
     `local DEATH_Y = ${n2(map.deathY)}`,
+    // (globals: the chunk is near Lua's 200 locals)
+    ...(map.ground ? groundLua(map.ground) : ["HF = nil"]),
   ].join("\n");
+}
+
+/** The ground as the cart's `HF` table and its grid (B3; holes as -999). */
+function groundLua(g: ArenaGround): string[] {
+  const top = Math.max(...g.heights.filter(Number.isFinite));
+  return [
+    `HF = {${g.heights.map((h) => (Number.isFinite(h) ? n2(h) : "-999")).join(",")}}`,
+    `HF_N, HF_X0, HF_Z0, HF_S, HF_TOP = ${g.n}, ${n2(g.x0)}, ${n2(g.z0)}, ${n2(g.step)}, ${n2(top)}`,
+  ];
 }
 
 // --- The Forerunner kit's arena builders ------------------------------------
