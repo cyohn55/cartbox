@@ -969,6 +969,10 @@ export const LOCKOUT_EFFECTS: readonly ParticleEffect[] = [
   { ...particlePreset("trail", "tracer"), count: 12, life: 0.09, lifeJitter: 0.3, speed: 0.05, drag: 6, size: 0.035, sizeEnd: 0.012, color: [1, 0.92, 0.65], colorEnd: [1, 0.55, 0.2], glow: 4 },
   // A Jetpack's thrust (LOCKOUT_EQUIPMENT_ROADMAP.md E1): short hot flames straight down from the pack.
   { ...particlePreset("sparks", "jetflame"), count: 8, life: 0.16, speed: 4.5, spread: 0.18, gravity: 0, drag: 3, size: 0.09, sizeEnd: 0.02, color: [1, 0.85, 0.45], colorEnd: [1, 0.3, 0.05], glow: 4, stretch: 0.5 },
+  // The Grappleshot's line (E2): a taut cyan streak from the hand to where it holds, laid again while it pulls.
+  { ...particlePreset("trail", "grapple"), count: 16, life: 0.12, lifeJitter: 0.2, speed: 0.05, drag: 6, size: 0.03, sizeEnd: 0.02, color: [0.6, 0.95, 1], colorEnd: [0.2, 0.6, 1], glow: 3 },
+  // The Repulsor's blast (E2): a cone of pale force thrown out ahead.
+  { ...particlePreset("plasma", "repulse"), count: 36, speed: 7, spread: 0.5, life: 0.25, drag: 4, size: 0.12, sizeEnd: 0.3, color: [0.85, 0.95, 1], colorEnd: [0.3, 0.6, 1], glow: 2 },
 ];
 
 /**
@@ -1517,7 +1521,7 @@ export const LOCKOUT_UI: UiDocument[] = [
       { id: "weapon", kind: "text", anchor: [1, 1], pivot: [1, 1], offset: [-48, -28], size: [400, 14], text: "{weaponname}", textSize: 13, align: "right" },
       { id: "grenade", kind: "text", anchor: [1, 0], pivot: [1, 0], offset: [-92, 40], size: [200, 16], text: "@hud.frag", textSize: 14, align: "right", rgb: [0.5, 0.75, 1] },
       { id: "grenades", kind: "text", anchor: [1, 0], pivot: [1, 0], offset: [-48, 36], size: [36, 22], text: "{nades}", textSize: 22, align: "right", rgb: [0.5, 0.75, 1] },
-      // Equipment (LOCKOUT_EQUIPMENT_ROADMAP.md): what's in the slot, and the Jetpack's fuel round the reticle's left.
+      // Equipment (LOCKOUT_EQUIPMENT_ROADMAP.md): what's in the slot (and its charges), and the Jetpack's fuel or the next charge round the reticle's left.
       { id: "equipment", kind: "text", anchor: [1, 0], pivot: [1, 0], offset: [-48, 64], size: [240, 16], text: "{eqname}", textSize: 14, align: "right", rgb: [1, 0.78, 0.4] },
       { id: "fuel", kind: "arc", anchor: [0.5, 0.5], pivot: [0.5, 0.5], offset: [0, 0], size: [150, 150], start: -150, sweep: 80, thickness: 4, segments: 6, value: "eqf", visible: "eqbar", rgb: [1, 0.7, 0.3] },
     ],
@@ -1597,6 +1601,10 @@ export const LOCKOUT_STRINGS: StringTable = {
     { key: "loadout.standard", text: { en: "Standard", es: "Estandar" } },
     { key: "loadout.jetpack", text: { en: "Jetpack", es: "Mochila propulsora" } },
     { key: "equip.jetpack", text: { en: "Jetpack", es: "Mochila propulsora" } },
+    { key: "loadout.grapple", text: { en: "Grappleshot", es: "Gancho" } },
+    { key: "loadout.repulsor", text: { en: "Repulsor", es: "Repulsor" } },
+    { key: "equip.grappleshot", text: { en: "Grappleshot", es: "Gancho" } },
+    { key: "equip.repulsor", text: { en: "Repulsor", es: "Repulsor" } },
   ],
 };
 
@@ -1618,6 +1626,9 @@ export const LOCKOUT_AUDIO: SceneAudio = {
     { name: "blast", source: { kind: "synth", synth: "explosion" }, bus: "sfx", volume: 1, range: [8, 120] },
     // A Jetpack's roar (E1): a low rush of noise, laid one over the next while it thrusts.
     { name: "jet", source: { kind: "synth", synth: { duration: 0.32, voices: [{ wave: "noise", cutoff: [1600, 500], attack: 0.04, decay: 0.26, volume: 0.8 }] } }, bus: "sfx", volume: 0.7, range: [5, 60] },
+    // The Grappleshot's zip and the Repulsor's thump (E2).
+    { name: "grapple", source: { kind: "synth", synth: { duration: 0.24, voices: [{ wave: "square", freq: [380, 1500], cutoff: [3000, 1200], attack: 0.005, decay: 0.2, volume: 0.45 }, { wave: "noise", cutoff: [5000, 2000], attack: 0.002, decay: 0.08, volume: 0.4 }] } }, bus: "sfx", volume: 0.7, range: [5, 60] },
+    { name: "repulse", source: { kind: "synth", synth: { duration: 0.5, voices: [{ wave: "sine", freq: [180, 45], attack: 0.005, decay: 0.42, volume: 1 }, { wave: "noise", cutoff: [2400, 300], attack: 0.004, decay: 0.3, volume: 0.6 }] } }, bus: "sfx", volume: 0.9, range: [6, 80] },
     { name: "wind", source: { kind: "synth", synth: "wind" }, bus: "ambience", volume: 1, loop: true },
     vox("v2", "Double kill"),
     vox("v3", "Triple kill"),
@@ -3320,14 +3331,26 @@ local W = {
 -- top speed, fuel in ticks of thrust, refilled on the ground.
 EQUIP = {
   jetpack = { id=1, name="Jetpack", fuel=150, lift=0.05, top=0.12, refill=1.5 },
+  -- The Grappleshot (E2): a line along the aim to a surface within range,
+  -- that pulls its wearer there; 3 charges, one back every 7 s.
+  grappleshot = { id=2, name="Grappleshot", charges=3, recharge=420, range=25, pull=0.42 },
+  -- The Repulsor (E2): a blast ahead that throws soldiers back -- or, against
+  -- a wall close ahead, its wearer away from it; one charge, back in 10 s.
+  repulsor = { id=3, name="Repulsor", charges=1, recharge=600, range=6, push=0.45, self=0.55 },
 }
-EQUIP_IDS = { "jetpack" }   -- by id (the net state and a guest's input carry the id)
+EQUIP_IDS = { "jetpack", "grappleshot", "repulsor" }   -- by id (the net state and a guest's input carry the id)
+-- What a guest keeps of its own soldier with each input it predicts (E2), to
+-- take up again when it replays them: its fall and its equipment's state.
+EQ_KEEP = { "vy", "grounded", "fuel", "charges", "rc", "kx", "kz", "hx", "hy", "hz", "ht", "hb", "hs", "hvx", "hvz" }
+EQ_QUIET = false   -- a guest's replay: moves again, shows nothing
 -- Loadouts: what a player spawns with. Standard is the game type's weapon
 -- and a Magnum, kept through a life as always; the others are given at every
 -- spawn. SWAT and Team Snipers keep their fixed weapons (MODE.fixed).
 LOADOUTS = {
   { key="standard", name="Standard" },
   { key="jetpack",  name="Jetpack",  g1="br", g2="magnum", eq="jetpack" },
+  { key="grapple",  name="Grappleshot", g1="br", g2="magnum", eq="grappleshot" },
+  { key="repulsor", name="Repulsor", g1="smg", g2="magnum", eq="repulsor" },
 }
 for _, lo in ipairs(LOADOUTS) do lo.en = lo.name end
 for _, d in pairs(EQUIP) do d.en = d.name end
@@ -3532,7 +3555,7 @@ end
 -- (-1..1, by its facing), its facing, and a jump. The host moves every
 -- Spartan with it -- a guest's from the inputs it sends -- and a guest
 -- predicts its own with the very same steps.
-local function move_soldier(e, fwd, right, yaw, jump, eqh, eqp)
+local function move_soldier(e, fwd, right, yaw, jump, eqh, eqp, pitch)
   e.ay, e.face = yaw, yaw
   local sy, cy = math.sin(yaw), math.cos(yaw)
   local mvx, mvz = fwd*sy - right*cy, fwd*cy + right*sy
@@ -3540,7 +3563,7 @@ local function move_soldier(e, fwd, right, yaw, jump, eqh, eqp)
   e.moving = mm > 0
   if mm > 0 then local sp = MOVE*math.min(1, mm); move_axis(e, "x", mvx/mm*sp); move_axis(e, "z", mvz/mm*sp) end
   if jump and e.grounded then e.vy = JUMP; e.grounded = false end
-  eq_move(e, eqh, eqp)
+  eq_move(e, eqh, eqp, jump, pitch or 0)
   move_vertical(e)
   e.air = not e.grounded
 end
@@ -3548,14 +3571,73 @@ end
 -- Equipment that moves its wearer, part of every soldier's moves (L7: the
 -- host moves a guest with it from its inputs, and the guest predicts the
 -- same). The Jetpack: held, it lifts toward its top speed while fuel lasts;
--- let go on the ground, the fuel refills.
-function eq_move(e, held, pressed)
-  e.jetting = false
+-- let go on the ground, the fuel refills. The Grappleshot and the Repulsor
+-- (E2), on a press: grapple and repulse. Then a knockback's sideways speed
+-- (a Repulsor's, or a grapple's pull let go), dying away -- faster on the ground.
+function eq_move(e, held, pressed, jump, pitch)
+  e.jetting, e.hooked = false, false
+  eq_recharge(e)
   if e.eq == "jetpack" then
     local d = EQUIP.jetpack
     if held and (e.fuel or 0) > 0 then
       e.vy = math.min(e.vy + d.lift, d.top); e.fuel = e.fuel - 1; e.jetting = true
     elseif not held and e.grounded then e.fuel = math.min(d.fuel, (e.fuel or 0) + d.refill) end   -- (let go to refill)
+  elseif e.eq == "grappleshot" then grapple(e, pressed, jump, pitch)
+  elseif e.eq == "repulsor" and pressed and (e.charges or 0) > 0 then
+    e.charges = e.charges - 1; repulse(e, pitch)
+  end
+  local kx, kz = e.kx or 0, e.kz or 0
+  if kx ~= 0 or kz ~= 0 then
+    move_axis(e, "x", kx); move_axis(e, "z", kz)
+    local f = e.grounded and 0.78 or 0.97
+    kx, kz = kx*f, kz*f
+    if kx*kx + kz*kz < 1e-4 then kx, kz = 0, 0 end
+    e.kx, e.kz = kx, kz
+  end
+end
+-- A charge back each recharge's worth of ticks, while short of full.
+function eq_recharge(e)
+  local d = e.eq and EQUIP[e.eq]
+  if d and d.charges and (e.charges or 0) < d.charges then
+    e.rc = (e.rc or 0) + 1
+    if e.rc >= d.recharge then e.rc, e.charges = 0, (e.charges or 0) + 1 end
+  end
+end
+
+-- The Grappleshot (E2). Pressed with a charge and no line out: a line along
+-- the aim, from the eye; if it meets a surface within range it holds there,
+-- and costs a charge. While it holds it pulls its wearer toward it (walls
+-- still stop them), and lets go on arrival, on a stall, after 2 s, on a jump
+-- or on another press -- the pull carried on as a swing, with a hop up.
+function grapple(e, pressed, jump, pitch)
+  local d = EQUIP.grappleshot
+  if e.ht then
+    e.ht = e.ht + 1
+    local dx, dy, dz = e.hx - e.x, e.hy - (e.y + 0.6), e.hz - e.z
+    local m = math.sqrt(dx*dx + dy*dy + dz*dz)
+    if m < (e.hb or 1e9) - 0.02 then e.hb, e.hs = m, 0 else e.hs = (e.hs or 0) + 1 end
+    if m < 0.9 or e.hs > 10 or e.ht > 120 or pressed or (jump and e.ht > 8) then
+      e.ht = nil
+      e.kx, e.kz = (e.hvx or 0)*0.7, (e.hvz or 0)*0.7
+      e.vy = math.max(e.vy, jump and JUMP*0.7 or 0.12)
+      return
+    end
+    local sp = math.min(d.pull, m)
+    local vx, vz = dx/m*sp, dz/m*sp
+    move_axis(e, "x", vx); move_axis(e, "z", vz)
+    e.vy = dy/m*sp + GRAV        -- (move_vertical takes its gravity back off)
+    e.hvx, e.hvz, e.hooked = vx, vz, true
+  elseif pressed and (e.charges or 0) > 0 then
+    local cp = math.cos(pitch)
+    local fx, fy, fz = cp*math.sin(e.ay), math.sin(pitch), cp*math.cos(e.ay)
+    local x0, y0, z0 = e.x, e.y + EYE, e.z
+    local t = seg_first(x0, y0, z0, x0 + fx*d.range, y0 + fy*d.range, z0 + fz*d.range)
+    if t then
+      e.charges = e.charges - 1
+      e.hx, e.hy, e.hz, e.ht, e.hb, e.hs = x0 + fx*d.range*t, y0 + fy*d.range*t, z0 + fz*d.range*t, 0, nil, 0
+      e.hvx, e.hvz, e.kx, e.kz = 0, 0, 0, 0
+    end
+    eq_fx(e, "grapple", (t or 1)*d.range, fx, fy, fz, pitch)
   end
 end
 
@@ -3609,8 +3691,13 @@ function eq_on_spawn(who)
     who.eq = (loadout_now().eq and math.random() < 0.5) and EQUIP_IDS[math.random(1, #EQUIP_IDS)] or nil
     who.flying = false
   end
-  local d = who.eq and EQUIP[who.eq]
-  who.fuel, who.jetting = d and d.fuel or 0, false
+  eq_fill(who)
+end
+-- A piece of equipment as it comes: full, nothing out, nothing thrown.
+function eq_fill(e)
+  local d = e.eq and EQUIP[e.eq]
+  e.fuel, e.jetting, e.hooked, e.ht = d and d.fuel or 0, false, false, nil
+  e.charges, e.rc, e.kx, e.kz = d and d.charges or 0, 0, 0, 0
 end
 
 function enemy_of(a, o)
@@ -3633,7 +3720,8 @@ local WLIST = {"br","smg","shotgun","sniper","magnum","sword"}
 local WIDX_OF = {}; for i,id in ipairs(WLIST) do WIDX_OF[id]=i-1 end
 -- (Event kinds and impact kinds sit in tables, not a local each: the cart is
 -- near Lua's 200 locals a chunk.)
-local EV = { HIT=1, KILL=2, OBJ=3, SCORE=4 }
+-- (EQUIP, kind 1, was HIT: never sent -- a hit is a verdict, L6.)
+local EV = { EQUIP=1, KILL=2, OBJ=3, SCORE=4 }
 -- The fight everyone sees (L5): shots, melee swings, grenades (thrown in two
 -- halves: where from, then which way; and where one sticks) and pickups.
 EV.SHOT, EV.MELEE, EV.NADE, EV.NADE2, EV.STICK, EV.PICKUP = 5, 6, 7, 8, 9, 10
@@ -3674,7 +3762,7 @@ local function net_pack(e)
   local sh = math.max(0, math.min(127, math.floor((e.sh or 0)/2)))
   local w2 = hp | (sh << 7) | ((WIDX_OF[wid] or 0) << 14) | ((e.dead and 1 or 0) << 17)
     | ((e.moving and 1 or 0) << 18) | ((e.team=="red" and 1 or 0) << 19) | (((e.ack or 0) & 255) << 20)
-    | ((e.jetting and 1 or 0) << 28) | (((e.eq and EQUIP[e.eq].id) or 0) << 29)
+    | (((e.jetting or e.hooked) and 1 or 0) << 28) | (((e.eq and EQUIP[e.eq].id) or 0) << 29)
   local air = (e == p) and not e.grounded or (e ~= p and e.air)
   local w3 = s8((e == p and e.ap or (e.pitch or 0))*100) | ((air and 1 or 0) << 8) | ((e.crouch and 1 or 0) << 9)
     | ((recent(e.fired_t, 6) and 1 or 0) << 10) | ((recent(e.reload_t, 40) and 1 or 0) << 11)
@@ -3762,7 +3850,10 @@ local function net_sample(o, rt)
   o.dead = ((w2 >> 17) & 1) == 1 or o.killed_life ~= nil
   o.g1 = WLIST[((w2 >> 14) & 7) + 1] or "br"
   o.moving = ((w2 >> 18) & 1) == 1
-  o.jetting, o.eq = ((w2 >> 28) & 1) == 1, EQUIP_IDS[(w2 >> 29) & 7]
+  -- (its equipment at work: a Jetpack thrusting, a grapple's line out)
+  local act = ((w2 >> 28) & 1) == 1
+  o.eq = EQUIP_IDS[(w2 >> 29) & 7]
+  o.jetting, o.hooked = act and o.eq == "jetpack", act and o.eq == "grappleshot"
   o.air, o.crouch = ((w3 >> 8) & 1) == 1, ((w3 >> 9) & 1) == 1
   o.reloading, o.nade = ((w3 >> 11) & 1) == 1, (w3 >> 13) & 3
   -- Its moves, on their rising edges: a melee swing, a flinch for each hit it
@@ -4009,9 +4100,11 @@ local function net_reconcile()
   local vy = (w3 >> 19) & 0x1fff
   if vy >= 4096 then vy = vy - 8192 end
   p.x, p.y, p.z, p.vy, p.grounded = x, y, z, vy/2000, ((w3 >> 8) & 1) == 0
-  -- (its equipment's state as it stood after that input)
-  if guess and guess.seq == ack and guess.fuel then p.fuel = guess.fuel end
-  for _, i in ipairs(pend) do move_soldier(p, i.fwd, i.right, i.yaw, i.jump, i.eqh, i.eqp); i.x, i.y, i.z, i.fuel = p.x, p.y, p.z, p.fuel end
+  -- (its equipment's state as it stood after that input; the fall is the host's)
+  if guess and guess.seq == ack and guess.st then eq_restore(p, guess.st, true) end
+  EQ_QUIET = true
+  for _, i in ipairs(pend) do move_soldier(p, i.fwd, i.right, i.yaw, i.jump, i.eqh, i.eqp, i.pitch); i.x, i.y, i.z, i.st = p.x, p.y, p.z, eq_state(p) end
+  EQ_QUIET = false
   if not respawned then p.corrections = (p.corrections or 0) + 1 end
   local dx, dy, dz = ox - p.x, oy - p.y, oz - p.z
   if dx*dx + dy*dy + dz*dz < 9 and not respawned then p.vox, p.voy, p.voz = p.vox + dx, p.voy + dy, p.voz + dz
@@ -4037,8 +4130,8 @@ local function host_drive()
         local i = table.remove(q, 1)
         -- (its equipment as its inputs say: a new piece comes full)
         local eq = EQUIP_IDS[i.eqid]
-        if eq ~= o.eq then o.eq = eq; o.fuel = eq and EQUIP[eq].fuel or 0 end
-        if not o.dead then move_soldier(o, i.fwd, i.right, i.yaw, i.jump, i.eqh, i.eqp); o.pitch = i.pitch end
+        if eq ~= o.eq then o.eq = eq; eq_fill(o) end
+        if not o.dead then move_soldier(o, i.fwd, i.right, i.yaw, i.jump, i.eqh, i.eqp, i.pitch); o.pitch = i.pitch end
         o.firing = recent(o.fired_t, 6)
         o.ack = i.seq
         o.seqpos[i.seq] = { o.x, o.y, o.z }
@@ -4125,6 +4218,7 @@ local function net_receive()
       if host and from == MYSLOT and p then p.x, p.y, p.z, p.vy = s16(a >> 16)/100, s16(ev[2])/100, s16(ev[2] >> 16)/100, 0 end
     elseif sender ~= from and not host then
       -- not its own to send
+    elseif kind == EV.EQUIP then net_equip(a, ev[2], src)
     elseif kind == EV.PICKUP then
       local pad = (a >> 7) & 63
       -- (a pad still empty when someone joined comes with what's left of its wait: L8)
@@ -4708,6 +4802,7 @@ local function think_bot(o)
     if not o.agent then nav_place(o) end
     o.moving = nav_follow(o)
     if o.eq == "jetpack" then o.fuel = math.min(EQUIP.jetpack.fuel, (o.fuel or 0) + EQUIP.jetpack.refill) end
+    eq_recharge(o)
   end
   -- Pick a target a few times a second: the nearest enemy in line of sight --
   -- the player, another human, or another bot. Bots fight each other now.
@@ -4730,6 +4825,7 @@ local function think_bot(o)
     local m = math.sqrt(dx*dx+dz*dz)
     o.face = math.atan(dx,dz)
     o.pitch = math.atan((tg.y + 1.2) - (o.y + EYE), math.max(0.01, m))
+    bot_repulse(o, tg, m)
     o.cool=(o.cool or 0)-1
     if m < (w.rng or 40) and o.cool<=0 then
       o.cool = (w.cool or 10) + math.random(0,6)
@@ -4808,13 +4904,16 @@ end
 -- target (or where it was going) and drifts toward it, and takes up its agent
 -- again once it lands. Starts when a target stands well above it, near.
 function bot_take_off(o, tg)
-  if o.eq ~= "jetpack" or o.flying or not tg or (o.fuel or 0) < 90 then return end
+  if o.flying or not tg then return end
+  if o.eq == "grappleshot" then return bot_grapple(o, tg) end
+  if o.eq ~= "jetpack" or (o.fuel or 0) < 90 then return end
   local dx, dz = tg.x - o.x, tg.z - o.z
   if tg.y > o.y + 2.5 and dx*dx + dz*dz < 14*14 then
     nav_drop(o); o.flying, o.vy, o.grounded, o.fly_to = true, 0, true, { tg.x, tg.y, tg.z }
   end
 end
 function bot_fly(o)
+  if not o.fly_to then return bot_swing(o) end
   local to = o.fly_to
   local dx, dz = to[1] - o.x, to[3] - o.z
   local m = math.sqrt(dx*dx + dz*dz)
@@ -4824,6 +4923,160 @@ function bot_fly(o)
   if o.target then o.face = face end   -- still facing whoever it's fighting
   if o.y >= to[2] + 0.5 then o.landing = true end
   if o.grounded and (o.landing or (o.fuel or 0) <= 0) then o.flying, o.landing, o.jetting = false, nil, false; nav_place(o) end
+end
+
+-- A bot on a grapple's line or thrown by a Repulsor (E2): no steering of its
+-- own till it's down and still, then it takes up its agent again.
+function bot_swing(o)
+  local face = o.face
+  move_soldier(o, 0, 0, o.gyaw or o.face or 0, false, false, o.gfire, o.gpitch or 0)
+  o.gfire = false
+  if o.target then o.face = face end
+  if o.grounded and not o.ht and (o.kx or 0)^2 + (o.kz or 0)^2 < 4e-4 then o.flying, o.gyaw = false, nil; nav_place(o) end
+end
+-- A bot with a Grappleshot grapples to a target well above it or far off:
+-- a line at the floor at its feet, now and then while it has a charge.
+function bot_grapple(o, tg)
+  local dx, dy, dz = tg.x - o.x, tg.y - o.y, tg.z - o.z
+  local h = math.sqrt(dx*dx + dz*dz)
+  if (o.charges or 0) > 0 and (dy > 2.5 or h > 16) and h < 24 and (tick + (o.id or 0)*13) % 40 == 0 then
+    nav_drop(o); o.flying, o.fly_to, o.vy, o.grounded = true, nil, 0, true
+    o.gyaw, o.gpitch, o.gfire = math.atan(dx, dz), math.atan(dy - 0.3 - EYE, math.max(0.01, h)), true
+  end
+end
+-- A bot with a Repulsor throws back an enemy that's come too close.
+function bot_repulse(o, tg, m)
+  if o.eq == "repulsor" and (o.charges or 0) > 0 and m < 4 and math.abs(tg.y - o.y) < 2 then
+    o.charges, o.ay = o.charges - 1, o.face
+    repulse(o, 0)
+  end
+end
+
+-- The Repulsor (E2): a blast along the aim. Against a wall (or the floor)
+-- close ahead it throws its wearer back off it; and it throws every soldier
+-- within range in front of it away, applied where that soldier's moves are
+-- decided -- the host's, offline this browser's (eq_knock). A bot on its
+-- agent only blasts.
+function repulse(e, pitch)
+  local d = EQUIP.repulsor
+  local cp = math.cos(pitch)
+  local fx, fy, fz = cp*math.sin(e.ay), math.sin(pitch), cp*math.cos(e.ay)
+  local x0, y0, z0 = e.x, e.y + EYE, e.z
+  if not e.agent and seg_first(x0, y0, z0, x0 + fx*2.5, y0 + fy*2.5, z0 + fz*2.5) then
+    e.kx, e.kz = (e.kx or 0) - fx*d.self, (e.kz or 0) - fz*d.self
+    e.vy, e.grounded = math.max(e.vy or 0, -fy*d.self*0.6 + 0.08), false
+  end
+  eq_fx(e, "repulse", 0, fx, fy, fz, pitch)
+  if NETMODE == 1 or EQ_QUIET then return end   -- (a guest's blast is the host's to apply)
+  for _, o in ipairs(all_players()) do
+    if o and o ~= e and not o.dead then
+      local dx, dz = o.x - e.x, o.z - e.z
+      local m = math.sqrt(dx*dx + dz*dz)
+      if m > 0.01 and m < d.range and math.abs(o.y - e.y) < 2.5 and (dx*fx + dz*fz)/(m*math.max(0.05, cp)) > 0.5
+        and not seg_blocked(e.x, e.y + 1.2, e.z, o.x, o.y + 1.2, o.z, 1) then
+        local k = d.push*(1 - m/(d.range + 1))
+        eq_knock(o, dx/m*k, dz/m*k, 0.16)
+      end
+    end
+  end
+end
+-- A soldier thrown (E2), where its moves are decided: a bot leaves its agent
+-- till it lands; a guest is thrown on the host after the last input the host
+-- applied, and told so, to throw itself there too (guest_knock).
+function eq_knock(o, kx, kz, vy)
+  local guest = NETMODE == 2 and o.human and o.remote
+  if guest then kx, kz, vy = sb(s8(kx*100))/100, sb(s8(kz*100))/100, sb(s8(vy*200))/200 end   -- (as it's sent)
+  o.kx, o.kz = (o.kx or 0) + kx, (o.kz or 0) + kz
+  o.vy, o.grounded = math.max(o.vy or 0, vy), false
+  if o ~= p and not o.human then nav_drop(o); o.flying, o.fly_to, o.gyaw = true, nil, nil end
+  if guest then
+    cartbox.netsend(EV.EQUIP | ((o.ns & 7) << 4) | (2 << 7) | (((o.ack or 0) & 255) << 16), s8(kx*100) | (s8(kz*100) << 8) | (s8(vy*200) << 16))
+  end
+end
+-- A guest thrown (E2): the host threw it after applying its input number seq,
+-- so it throws itself there too -- from where it stood after that input --
+-- and replays its inputs since, the view eased over as for a correction.
+function guest_knock(seq, kx, kz, vy)
+  local pend = p.pending or {}
+  local from, at = nil, 0
+  for j, i in ipairs(pend) do if i.seq == seq then from, at = i, j end end
+  if not from and p.acked and p.acked.seq == seq then from = p.acked end
+  local ox, oy, oz = p.x, p.y, p.z
+  if from and from.st then p.x, p.y, p.z = from.x, from.y, from.z; eq_restore(p, from.st) end
+  p.kx, p.kz = (p.kx or 0) + kx, (p.kz or 0) + kz
+  p.vy, p.grounded = math.max(p.vy or 0, vy), false
+  if from and from.st then
+    from.st = eq_state(p)
+    EQ_QUIET = true
+    for j = at + 1, #pend do
+      local i = pend[j]
+      move_soldier(p, i.fwd, i.right, i.yaw, i.jump, i.eqh, i.eqp, i.pitch); i.x, i.y, i.z, i.st = p.x, p.y, p.z, eq_state(p)
+    end
+    EQ_QUIET = false
+  end
+  local dx, dy, dz = ox - p.x, oy - p.y, oz - p.z
+  if dx*dx + dy*dy + dz*dz < 9 then p.vox, p.voy, p.voz = (p.vox or 0) + dx, (p.voy or 0) + dy, (p.voz or 0) + dz end
+end
+-- What a guest keeps with each input (EQ_KEEP), and takes up again.
+function eq_state(e) local s = {}; for _, k in ipairs(EQ_KEEP) do s[k] = e[k] end; return s end
+function eq_restore(e, s, keep_fall)
+  for _, k in ipairs(EQ_KEEP) do if not (keep_fall and (k == "vy" or k == "grounded")) then e[k] = s[k] end end
+end
+
+-- What a piece of equipment shows when it's used (E2): drawn by the browser
+-- that moved the soldier (not again in a guest's replay), and sent to the
+-- others by the soldier's own browser -- the host's for its bots. (The host
+-- moves a guest's soldier itself, so draws that one from its own copy.)
+-- A grapple: kind 0, where its line went (x in the first word, y and z in the
+-- second); a blast: kind 1, its yaw and pitch.
+function eq_fx(e, kind, len, fx, fy, fz, pitch)
+  if EQ_QUIET then return end
+  eq_show(e, kind, fx, fy, fz, len)
+  if NETMODE == 0 or (NETMODE == 2 and e.human and e.remote) then return end
+  if kind == "grapple" then
+    local x0, y0, z0 = e.x, e.y + EYE, e.z
+    cartbox.netsend(EV.EQUIP | ((e.ns & 7) << 4) | (u16((x0 + fx*len)*100) << 16), u16((y0 + fy*len)*100) | (u16((z0 + fz*len)*100) << 16))
+  else
+    cartbox.netsend(EV.EQUIP | ((e.ns & 7) << 4) | (1 << 7), u16(wrap_angle(e.ay)*10000) | (s8(pitch*100) << 16))
+  end
+end
+function eq_show(e, kind, fx, fy, fz, len)
+  local x, y, z = e.x, e.y + EYE - 0.25, e.z
+  if kind == "grapple" then
+    cartbox.burst("grapple", x, y, z, fx*len, fy*len, fz*len)
+    cartbox.sound("grapple", x, y, z, 0.9, 0.95 + math.random()*0.1)
+  else
+    cartbox.burst("repulse", x + fx*0.7, y + fy*0.7, z + fz*0.7, fx, fy, fz)
+    cartbox.light3d(x + fx*1.2, y + fy*1.2, z + fz*1.2, 6, 150, 210, 255, 3)
+    cartbox.sound("repulse", x, y, z, 1, 0.95 + math.random()*0.1)
+  end
+end
+-- Another's equipment, told (E2): a grapple's line or a blast to draw from
+-- where this browser sees them; or, from the host, this guest thrown.
+function net_equip(a, b, o)
+  local sub = (a >> 7) & 7
+  if sub == 2 then
+    if NETMODE == 1 and o == p and p and not p.dead then guest_knock((a >> 16) & 255, sb(b)/100, sb(b >> 8)/100, sb(b >> 16)/200) end
+    return
+  end
+  if not o or o == p or o.dead or NETMODE == 2 then return end   -- (the host draws its own copies)
+  if sub == 0 then
+    local hx, hy, hz = s16(a >> 16)/100, s16(b)/100, s16(b >> 16)/100
+    local dx, dy, dz = hx - o.x, hy - (o.y + EYE), hz - o.z
+    local m = math.sqrt(dx*dx + dy*dy + dz*dz)
+    o.hx, o.hy, o.hz = hx, hy, hz   -- (where its line holds, drawn while the net state says so)
+    if m > 0.01 then eq_show(o, "grapple", dx/m, dy/m, dz/m, m) end
+  elseif sub == 1 then
+    local yaw, pitch = s16(b)/10000, sb(b >> 16)/100
+    local cp = math.cos(pitch)
+    eq_show(o, "repulse", cp*math.sin(yaw), math.sin(pitch), cp*math.cos(yaw), 0)
+  end
+end
+-- A grapple's line, held: laid again from the hand while it pulls.
+function hook_fx(e)
+  if not e.hooked or e.dead or not e.hx or tick % 3 ~= 0 then return end
+  local x, y, z = e.x, e.y + 1.25, e.z
+  cartbox.burst("grapple", x, y, z, e.hx - x, e.hy - y, e.hz - z)
 end
 
 -- Players can't walk through the bots (or the other humans' stand-ins): push
@@ -5061,12 +5314,13 @@ local function play_input()
   local eqp = cartbox.actionp("equipment") and not p.dead
   fwd, right = sb(s8(fwd*127))/127, sb(s8(right*127))/127
   local yaw = s16(u16(wrap_angle(p.ay)*10000))/10000
-  if not p.dead then move_soldier(p, fwd, right, yaw, jump, eqh, eqp) end
+  local pitch = sb(s8(p.ap*100))/100   -- (as sent: a grapple goes where the host will send it)
+  if not p.dead then move_soldier(p, fwd, right, yaw, jump, eqh, eqp, pitch) end
   if NETMODE == 1 then
     p.in_seq = ((p.in_seq or 0) + 1) & 255
     p.pending = p.pending or {}
     if not p.dead then
-      p.pending[#p.pending+1] = { seq = p.in_seq, fwd = fwd, right = right, yaw = yaw, jump = jump, eqh = eqh, eqp = eqp, x = p.x, y = p.y, z = p.z, fuel = p.fuel }
+      p.pending[#p.pending+1] = { seq = p.in_seq, fwd = fwd, right = right, yaw = yaw, pitch = pitch, jump = jump, eqh = eqh, eqp = eqp, x = p.x, y = p.y, z = p.z, st = eq_state(p) }
       if #p.pending > 120 then table.remove(p.pending, 1) end
     end
     cartbox.netsend(input_word(p, p.in_seq, fwd, right, yaw, p.ap, jump, eqh, eqp))
@@ -5182,11 +5436,12 @@ local function draw_hud()
   local res=p.slot==1 and p.r1 or p.r2
   U.set("rounds", cur.melee and "" or tostring(ammo)); U.set("reserve", cur.melee and "" or tostring(res))
   U.set("weaponname", string.upper(cur.name)); U.set("nades", p.nade or 0)
-  -- Equipment (E1): its name, and the Jetpack's fuel as an arc by the reticle.
+  -- Equipment (E1): its name (and charges), and the Jetpack's fuel -- or the
+  -- next charge's recharge (E2) -- as an arc by the reticle.
   local d = p.eq and EQUIP[p.eq]
-  U.set("eqname", d and string.upper(d.name) or "")
-  U.set("eqbar", d ~= nil and d.fuel ~= nil and not p.dead)
-  U.set("eqf", d and d.fuel and (p.fuel or 0) / d.fuel or 0)
+  U.set("eqname", d and (string.upper(d.name)..(d.charges and "  "..(p.charges or 0) or "")) or "")
+  U.set("eqbar", d ~= nil and not p.dead and (d.fuel ~= nil or (p.charges or 0) < (d.charges or 0)))
+  U.set("eqf", d and (d.fuel and (p.fuel or 0) / d.fuel or d.charges and (p.rc or 0) / d.recharge) or 0)
   -- Dead: the next life's loadout, swap to change it.
   U.set("loadout", (p.dead and not MODE.fixed) and T("hud.loadout", "Next life: "..loadout_now().name.."   (swap to change)", loadout_now().name) or nil)
   U.set("radar", MODE.radar and not p.dead)
@@ -5574,8 +5829,8 @@ function TIC()
       if not o.dead then cartbox.light3d(o.x + math.sin(o.face or 0)*0.7, o.y + 1.3, o.z + math.cos(o.face or 0)*0.7, 2.5, 255, 210, 140, 1.8) end
     end
   end
-  jet_fx(p, p.ay)
-  for _,o in ipairs(bots) do if not o.dead then jet_fx(o, o.face or 0) end end
+  jet_fx(p, p.ay); hook_fx(p)
+  for _,o in ipairs(bots) do if not o.dead then jet_fx(o, o.face or 0); hook_fx(o) end end
   if MODE.obj=="ball" then cartbox.light3d(ball.x, ball.y+0.6, ball.z, 5, 90,220,255, 3.2) end
   if MODE.obj=="hill" then cartbox.light3d(hill.x, hill.y+1.2, hill.z, 5.5, 120,255,150, 3.4) end
 

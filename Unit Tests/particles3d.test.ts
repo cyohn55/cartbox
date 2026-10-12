@@ -249,7 +249,7 @@ describe("Lockout", () => {
   it("ships its effects and fires them from the cart", () => {
     const names = LOCKOUT_EFFECTS.map((e) => e.name);
     // The plasma grenade's burst joined them (I10), then every round's tracer (L5).
-    expect(names).toEqual(["spark", "shield", "blast", "smoke", "slash", "drift", "plasmablast", "tracer", "jetflame"]);
+    expect(names).toEqual(["spark", "shield", "blast", "smoke", "slash", "drift", "plasmablast", "tracer", "jetflame", "grapple", "repulse"]);
     expect(parseMeshScene(lockoutMeshSidecar())!.effects!.map((e) => e.name)).toEqual(names);
     for (const n of names) expect(LOCKOUT_CODE).toContain(`"${n}"`);
     expect(LOCKOUT_CODE).toContain("cartbox.burst(");
