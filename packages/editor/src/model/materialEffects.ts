@@ -9,7 +9,7 @@
  */
 
 import type { EncodedImage, MeshMaterial } from "./MeshAsset";
-import { readMaterialGraph } from "./materialGraph";
+import { readMaterialGraph, valueNoise } from "./materialGraph";
 import { encodeRgbaPng } from "./png";
 
 /** Detail tiles per base UV unit when a material doesn't say. */
@@ -23,7 +23,7 @@ export const DETAIL_FAR = 12;
 
 type SurfaceEffects = Pick<
   MeshMaterial,
-  "detailScale" | "detailStrength" | "emissiveScroll" | "emissivePulse" | "rim" | "reflectivity" | "reflectionMask" | "blendColor" | "blendRoughness" | "alphaMode" | "alphaCutoff" | "softDepth" | "refraction" | "distortion" | "graph"
+  "detailScale" | "detailStrength" | "emissiveScroll" | "emissivePulse" | "rim" | "reflectivity" | "reflectionMask" | "blendColor" | "blendRoughness" | "alphaMode" | "alphaCutoff" | "softDepth" | "refraction" | "distortion" | "water" | "graph"
 >;
 
 const finite = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v);
@@ -56,6 +56,10 @@ export function readSurfaceEffects(raw: Record<string, unknown> | object): Surfa
   if (finite(r.softDepth) && r.softDepth > 0) out.softDepth = Math.min(r.softDepth, 100);
   if (finite(r.refraction) && r.refraction > 0) out.refraction = clamp(r.refraction, 0, 1);
   if (finite(r.distortion) && r.distortion > 0) out.distortion = clamp(r.distortion, 0, 1);
+  const water = r.water as Record<string, unknown> | undefined;
+  if (water && typeof water === "object" && finite(water.strength) && water.strength > 0 && finite(water.scale) && finite(water.speed) && finite(water.flow)) {
+    out.water = { strength: clamp(water.strength, 0, 2), scale: clamp(water.scale, 0.05, 8), speed: clamp(water.speed, 0, 4), flow: clamp(water.flow, -Math.PI, Math.PI) };
+  }
   const graph = readMaterialGraph(r.graph);
   if (graph) out.graph = graph;
   return out;
@@ -78,6 +82,58 @@ export function emissiveAnimation(material: MeshMaterial, time: number): { offse
   const pulse = material.emissivePulse;
   const gain = pulse ? 1 - pulse.depth * (0.5 - 0.5 * Math.cos(2 * Math.PI * pulse.rate * time)) : 1;
   return { offset, gain };
+}
+
+// --- Water (BEAVER_CREEK_ROADMAP.md B5) -----------------------------------------------------
+
+/** How far (in ripple cells) a water layer drifts before it fades out and restarts. */
+export const WATER_PERIOD = 32;
+/** The finite-difference step the ripples' slope is measured over, in ripple cells. */
+export const WATER_STEP = 0.2;
+/** How steep a ripple of strength 1 is (its slope per unit of the noise's gradient). */
+export const WATER_TILT = 0.5;
+
+/** Whether a material has moving water. */
+export function materialHasWater(material: Pick<MeshMaterial, "water">): boolean {
+  return material.water !== undefined && material.water.strength > 0;
+}
+
+/**
+ * A water material's uniform at `time` seconds: [strength, scale, phase, flow],
+ * the phase being how far through its {@link WATER_PERIOD} the first layer has
+ * drifted (0..1) — wrapped here, in double precision, so a GPU's float32 never
+ * sees a large time. Zeros when the material has no water.
+ */
+export function waterUniform(material: Pick<MeshMaterial, "water">, time: number): [number, number, number, number] {
+  const w = material.water;
+  if (!w || !(w.strength > 0)) return [0, 0, 0, 0];
+  const t = (time * w.speed) / WATER_PERIOD;
+  return [w.strength, w.scale, t - Math.floor(t), w.flow];
+}
+
+/**
+ * The tilt water adds to a surface's normal at world point (x, z), from its
+ * {@link waterUniform}: two drifting layers of ripples, each two octaves of
+ * value noise, crossfaded so one restarts while the other is at full strength
+ * (a flow map's trick: the ripples drift forever without a jump). The result
+ * is added to the normal, which is then renormalised; the scene shaders'
+ * `waterTilt` is this, term for term.
+ */
+export function waterTilt(uniform: readonly [number, number, number, number], x: number, z: number): [number, number] {
+  const [strength, scale, a, flow] = uniform;
+  if (!(strength > 0)) return [0, 0];
+  const dx = Math.cos(flow);
+  const dz = Math.sin(flow);
+  const qx = x * scale;
+  const qz = z * scale;
+  const layer = (px: number, pz: number, phase: number): number =>
+    valueNoise(px + dx * phase, pz + dz * phase, 0) + 0.5 * valueNoise(2.1 * px - dz * phase * 0.7, 2.1 * pz + dx * phase * 0.7, 7);
+  const b = a + 0.5 - Math.floor(a + 0.5);
+  const wa = 1 - Math.abs(1 - 2 * a);
+  const height = (px: number, pz: number): number => layer(px, pz, a * WATER_PERIOD) * wa + layer(px + 53, pz + 17, b * WATER_PERIOD) * (1 - wa);
+  const h = height(qx, qz);
+  const k = (-strength * WATER_TILT) / WATER_STEP;
+  return [(height(qx + WATER_STEP, qz) - h) * k, (height(qx, qz + WATER_STEP) - h) * k];
 }
 
 /** How much of the detail map shows at a view depth: 1 up close, fading to 0 by {@link DETAIL_FAR}. */

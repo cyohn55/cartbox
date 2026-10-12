@@ -259,6 +259,23 @@ describe.skipIf(!chromiumPath)("WebGL2 parity in a real browser", () => {
     expect(changed).toBeGreaterThan(30);
   }, 60_000);
 
+  it("ripples water, bending the creek bed and breaking up reflections, like the software rasteriser (B5)", async () => {
+    const result = await run("water");
+    expect(result.drawn).toBeGreaterThan(400);
+    if (exact) {
+      expect(result.coverage, JSON.stringify(result.diffs)).toBe(0);
+      // The ripples' noise is float32 on the GPU and float64 on the CPU; a
+      // bent lookup on a stripe's edge can round the other way.
+      expect(result.far, JSON.stringify(result.diffs)).toBeLessThanOrEqual(result.drawn * 0.03);
+    }
+    const rippled = await antialiasedFrame("water");
+    const still = await antialiasedFrame("waterStill");
+    expect(rippled.error).toBe(0);
+    let changed = 0;
+    for (let i = 0; i < rippled.out.length; i += 4) if (Math.abs(rippled.out[i]! - still.out[i]!) + Math.abs(rippled.out[i + 2]! - still.out[i + 2]!) > 20) changed += 1;
+    expect(changed).toBeGreaterThan(30);
+  }, 60_000);
+
   it("shades forty point lights and four spots through the light clusters like the software rasteriser", async () => {
     const result = await run("manyLights");
     expect(result.drawn).toBeGreaterThan(100);

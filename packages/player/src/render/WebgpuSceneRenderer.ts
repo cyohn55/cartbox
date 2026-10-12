@@ -102,6 +102,10 @@ import {
   buildLightClusters,
   orderLights,
   graphNoiseSource,
+  WATER_PERIOD,
+  WATER_STEP,
+  WATER_TILT,
+  waterUniform,
   graphShaderCode,
   multiplyMat4,
   type CompiledGraph,
@@ -302,6 +306,7 @@ struct Uniforms {
   refract0: vec4<f32>,  // x = bend, y = warp, z = silhouette distortion, w = 1 when the draw refracts (I5)
   refract1: vec4<f32>,  // xyz = camera right (world), w = frame height (px)
   refract2: vec4<f32>,  // xyz = camera up (world)
+  water0: vec4<f32>,    // x = ripple strength (0 = still), y = ripples per metre, z = drift phase, w = flow direction (B5)
 };
 
 // A Modern-tier light (see packLights): d0 = dir/pos + kind, d1 = colour +
@@ -784,6 +789,24 @@ fn vs(
 }
 
 ${graphNoiseSource("wgsl")}
+// --- Water (BEAVER_CREEK_ROADMAP.md B5): waterTilt in materialEffects.ts, term for term ---
+fn waterLayer(p: vec2<f32>, phase: f32, d: vec2<f32>) -> f32 {
+  return gNoise1(vec3<f32>(p.x + d.x * phase, p.y + d.y * phase, 0.0)) + 0.5 * gNoise1(vec3<f32>(2.1 * p.x - d.y * phase * 0.7, 2.1 * p.y + d.x * phase * 0.7, 7.0));
+}
+fn waterHeight(q: vec2<f32>, d: vec2<f32>) -> f32 {
+  let a = u.water0.z;
+  let wa = 1.0 - abs(1.0 - 2.0 * a);
+  return waterLayer(q, a * ${WATER_PERIOD.toFixed(1)}, d) * wa + waterLayer(q + vec2<f32>(53.0, 17.0), fract(a + 0.5) * ${WATER_PERIOD.toFixed(1)}, d) * (1.0 - wa);
+}
+// N tilted by the ripples at world point wp (N itself when the draw has no water).
+fn waterNormal(N: vec3<f32>, wp: vec3<f32>) -> vec3<f32> {
+  if (u.water0.x <= 0.0) { return N; }
+  let d = vec2<f32>(cos(u.water0.w), sin(u.water0.w));
+  let q = wp.xz * u.water0.y;
+  let h = waterHeight(q, d);
+  let k = -u.water0.x * ${(WATER_TILT / WATER_STEP).toFixed(4)};
+  return normalize(N + vec3<f32>((waterHeight(q + vec2<f32>(${WATER_STEP.toFixed(4)}, 0.0), d) - h) * k, 0.0, (waterHeight(q + vec2<f32>(0.0, ${WATER_STEP.toFixed(4)}), d) - h) * k));
+}
 // --- Refraction (HALO_INFINITE_STYLE_ROADMAP.md I5; refraction.ts) ---
 // The offset in pixels at a fragment with geometric normal N (facing the
 // viewer) at world point P — refractionOffset, term for term.
@@ -880,6 +903,7 @@ ${g.base}
     // expected; the fantasy path below stays byte-identical.
     var N = normalize(in.normal);
     if (dot(N, u.view.xyz) < 0.0) { N = -N; } // two-sided: flip toward the viewer
+    N = waterNormal(N, in.worldPos);
     var metallic = u.pbr.x;
     var rough = u.pbr.y;
     var reflectK = u.surface0.z;
@@ -1039,7 +1063,7 @@ ${wgslDisplay("without")}
     // Refraction (I5): what's behind is the opaque scene, bent.
     if (camoSeen.a > 0.5) { return vec4<f32>(camoSeen.rgb, 1.0); }
     if (u.refract0.w > 0.5) {
-      let rn = facingNormal(in.normal);
+      let rn = waterNormal(facingNormal(in.normal), in.worldPos);
       let b = behindColour(in.pos.xy, in.pos.z, refractOffset(rn, in.worldPos));
       if (b.a > 0.5) { return finishRefracted(shaded, colour.a, b.rgb, rn); }
     }
@@ -1795,6 +1819,7 @@ export class WebgpuSceneRenderer implements SceneRenderer {
         layers: resolveLayers(entry.primitive.material, entry.textures.relief !== null),
         refraction: entry.refract ? resolveRefraction(entry.primitive.material, effectActive(entry.effect) ? entry.effect : null) : null,
         camera,
+        water: waterUniform(entry.primitive.material, draw.time ?? 0),
       });
     });
     this.device.queue.writeBuffer(this.uniformBuffer, 0, this.uniformData, 0, draws.length * UNIFORM_FLOATS);

@@ -20,6 +20,7 @@ import {
   effectActive,
   emissiveAnimation,
   materialHasLayers,
+  materialHasWater,
   materialRefracts,
   spotCone,
   fogIsVolumetric,
@@ -86,9 +87,12 @@ import {
  *                                    w = 1 when the draw refracts (I5; refraction.ts)
  * 816  refract1   vec4<f32>    16   xyz = the camera's right (world), w = frame height (px)
  * 832  refract2   vec4<f32>    16   xyz = the camera's up (world)
+ * 848  water0     vec4<f32>    16   x = ripple strength (0 = still), y = ripples per metre,
+ *                                    z = drift phase (0..1), w = flow direction (B5;
+ *                                    waterUniform in materialEffects.ts)
  * ```
  *
- * 848 bytes used, padded to a 1024-byte stride (a 256-byte multiple a dynamic
+ * 864 bytes used, padded to a 1024-byte stride (a 256-byte multiple a dynamic
  * uniform offset can address), so one buffer still holds every draw in a
  * frame — uniforms are written per batch, not per copy, so the stride costs
  * little. The metallic-roughness inputs and the environment carry the Modern
@@ -103,7 +107,7 @@ export const UNIFORM_STRIDE = 1024;
  * bind group layout's `minBindingSize` must be: it makes a WGSL struct that
  * grows past what this module writes fail at pipeline creation.
  */
-export const UNIFORM_BYTES_USED = 848;
+export const UNIFORM_BYTES_USED = 864;
 /** The same stride counted in float32s, which is how `writeBuffer` sizes it. */
 export const UNIFORM_FLOATS = UNIFORM_STRIDE / 4;
 
@@ -223,6 +227,7 @@ const OFFSET_LAYER1 = 196;
 const OFFSET_REFRACT0 = 200;
 const OFFSET_REFRACT1 = 204;
 const OFFSET_REFRACT2 = 208;
+const OFFSET_WATER0 = 212;
 
 /** The rasteriser's defaults, restated so an unlit draw shades identically. */
 export const DEFAULT_LIGHT: readonly [number, number, number] = [0.4, 0.8, 0.6];
@@ -302,6 +307,8 @@ export interface PbrMaterial {
   /** …and refraction (I5). */
   readonly refraction?: number;
   readonly distortion?: number;
+  /** …and moving water (B5). */
+  readonly water?: MeshMaterial["water"];
 }
 
 /**
@@ -326,7 +333,8 @@ export function resolvePbr(
     (emissiveFactor !== undefined && (emissiveFactor[0]! > 0 || emissiveFactor[1]! > 0 || emissiveFactor[2]! > 0)) ||
     material.graph !== undefined ||
     materialHasLayers(material) ||
-    materialRefracts(material);
+    materialRefracts(material) ||
+    materialHasWater(material);
   return {
     isPbr,
     metallic: material.metallicFactor ?? 1,
@@ -454,6 +462,8 @@ export interface InstanceUniform {
    * meets the opaque scene, and the projection terms that read depth back as distance.
    */
   readonly soft?: { readonly distance: number; readonly linear: readonly [number, number] };
+  /** Moving water (B5): the material's waterUniform this frame, or null/omitted for none. */
+  readonly water?: readonly [number, number, number, number] | null;
 }
 
 /**
@@ -685,6 +695,12 @@ export function writeInstanceUniform(target: Float32Array, index: number, unifor
   target[base + OFFSET_REFRACT2 + 1] = camera ? camera.up[1] : 0;
   target[base + OFFSET_REFRACT2 + 2] = camera ? camera.up[2] : 0;
   target[base + OFFSET_REFRACT2 + 3] = 0;
+
+  const water = uniform.water ?? null;
+  target[base + OFFSET_WATER0] = water ? water[0] : 0;
+  target[base + OFFSET_WATER0 + 1] = water ? water[1] : 0;
+  target[base + OFFSET_WATER0 + 2] = water ? water[2] : 0;
+  target[base + OFFSET_WATER0 + 3] = water ? water[3] : 0;
 }
 
 /** The camera's right and up in world space (the view's first two rows) and the frame's height, for refraction (I5). */

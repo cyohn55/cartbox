@@ -1,4 +1,4 @@
-import { MeshSceneInstance, MeshAsset, Mat4, ScenePropValue, PhysicsSpec, AnimatorSpec, AttachedComponent, SceneLighting, PhysicsWorldSettings, SceneTimeline, SceneLevel, NavMesh, Terrain, SceneStreaming, ParticleEffect, DecalDef, DecalMark, RagdollBox, DebrisDef, LodChain, SceneAudio, ComponentDef, StreamGroup, JointKind, JointSpec, ActionRebind, DecodedTexture, ColorFilter, AccessibilitySettings, EncodedImage, UiDocument, InputAction, StringTable, EnvironmentLight, ShadowInput, ToneMap, SceneLight, LocalShadows, SceneFog, RasterStyle, ResolvedLayers, ResolvedRefraction, SurfaceEffect, AnimatorOp, NavGraph, AnimationCue } from '@cartbox/editor';
+import { MeshSceneInstance, MeshAsset, Mat4, ScenePropValue, PhysicsSpec, AnimatorSpec, AttachedComponent, SceneLighting, PhysicsWorldSettings, SceneTimeline, SceneLevel, NavMesh, Terrain, SceneStreaming, ParticleEffect, DecalDef, DecalMark, RagdollBox, DebrisDef, LodChain, SceneAudio, ComponentDef, StreamGroup, JointKind, JointSpec, ActionRebind, DecodedTexture, ColorFilter, AccessibilitySettings, EncodedImage, UiDocument, InputAction, StringTable, EnvironmentLight, ShadowInput, ToneMap, SceneLight, LocalShadows, SceneFog, RasterStyle, MeshMaterial, ResolvedLayers, ResolvedRefraction, SurfaceEffect, AnimatorOp, NavGraph, AnimationCue } from '@cartbox/editor';
 
 /**
  * The runtime mesh scene: the cart's mesh sidecar resolved into placed instances
@@ -4437,9 +4437,12 @@ declare class WebgpuSceneRenderer implements SceneRenderer {
  *                                    w = 1 when the draw refracts (I5; refraction.ts)
  * 816  refract1   vec4<f32>    16   xyz = the camera's right (world), w = frame height (px)
  * 832  refract2   vec4<f32>    16   xyz = the camera's up (world)
+ * 848  water0     vec4<f32>    16   x = ripple strength (0 = still), y = ripples per metre,
+ *                                    z = drift phase (0..1), w = flow direction (B5;
+ *                                    waterUniform in materialEffects.ts)
  * ```
  *
- * 848 bytes used, padded to a 1024-byte stride (a 256-byte multiple a dynamic
+ * 864 bytes used, padded to a 1024-byte stride (a 256-byte multiple a dynamic
  * uniform offset can address), so one buffer still holds every draw in a
  * frame — uniforms are written per batch, not per copy, so the stride costs
  * little. The metallic-roughness inputs and the environment carry the Modern
@@ -4454,7 +4457,7 @@ declare const UNIFORM_STRIDE = 1024;
  * bind group layout's `minBindingSize` must be: it makes a WGSL struct that
  * grows past what this module writes fail at pipeline creation.
  */
-declare const UNIFORM_BYTES_USED = 848;
+declare const UNIFORM_BYTES_USED = 864;
 /** The same stride counted in float32s, which is how `writeBuffer` sizes it. */
 declare const UNIFORM_FLOATS: number;
 /**
@@ -4543,6 +4546,8 @@ interface PbrMaterial {
     /** …and refraction (I5). */
     readonly refraction?: number;
     readonly distortion?: number;
+    /** …and moving water (B5). */
+    readonly water?: MeshMaterial["water"];
 }
 /**
  * Resolve a draw's PBR inputs, matching `buildPbrFrag`. `hasMr`/`hasOcc`/`hasEmis`
@@ -4658,6 +4663,8 @@ interface InstanceUniform {
         readonly distance: number;
         readonly linear: readonly [number, number];
     };
+    /** Moving water (B5): the material's waterUniform this frame, or null/omitted for none. */
+    readonly water?: readonly [number, number, number, number] | null;
 }
 /**
  * Floats per instance in the transform storage buffer (GPU instancing): the WGSL
