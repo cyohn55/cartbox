@@ -49,8 +49,11 @@ export interface ArenaSpawn {
   readonly team?: ArenaTeam;
 }
 
-/** The weapons a marker can hold (the cart's weapon ids). */
-export type ArenaWeapon = "br" | "smg" | "shotgun" | "sniper" | "magnum" | "sword";
+/** The weapons a marker can hold (the cart's weapon ids, with LOCKOUT_ARSENAL_ROADMAP.md's A1 and A2). */
+export type ArenaWeapon =
+  | "br" | "smg" | "shotgun" | "sniper" | "magnum" | "sword"
+  | "ar" | "dmr" | "carbine" | "needlerifle" | "beamrifle" | "plasmapistol" | "plasmarifle" | "needler" | "spiker" | "mauler"
+  | "rocket" | "splaser" | "fuelrod" | "bruteshot" | "concussion" | "hammer";
 
 export interface ArenaMarker {
   /** The marker's box (a cyan-lit plinth; the weapon floats over it). */

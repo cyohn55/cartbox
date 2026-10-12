@@ -69,7 +69,7 @@ describe("the Lockout soldiers and weapons", () => {
     expect(ids.slice(1, 8)).toEqual([1, 2, 3, 4, 5, 6, 7].map((i) => `bot-${i}`));
     const vms = 8 + LOCKOUT_VIEWMODELS.length;
     expect(ids.slice(8, vms)).toEqual(LOCKOUT_VIEWMODELS.map((w) => `viewmodel-${w}`));
-    // A Pickup for every weapon each pad turns through (A1): the sixteen weapons but the Magnum.
+    // A Pickup for every weapon each pad turns through (A1, A2): every weapon but the Magnum.
     const pickups = ids.filter((id) => id.startsWith("pickup-")).length;
     expect(pickups).toBe(LOCKOUT_VIEWMODELS.length - 1);
     expect(ids.slice(vms, vms + pickups)).toEqual(Array.from({ length: pickups }, (_, i) => `pickup-${i + 1}`));

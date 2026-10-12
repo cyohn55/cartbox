@@ -6,6 +6,12 @@
  * supercombine; the pads turn through their weapons. Online, a weapon past
  * the first eight travels in the net state, and so does how far round each
  * pad has come.
+ *
+ * A2: the heavy weapons go off where their rounds land, the firer's own feet
+ * included; a rocket kills outright; the Spartan Laser fires only once
+ * charged; the Concussion Rifle throws; the Gravity Hammer smashes all round
+ * and spares its wielder; bots fire them too; and online the host judges a
+ * guest's blast.
  */
 
 import { existsSync } from "node:fs";
@@ -75,7 +81,7 @@ end)()`;
  * says otherwise; the player holding `gun` and aimed at its chest. pmem 117:
  * the bot's health (low byte) and shield (next byte); 118: the player's rounds.
  */
-const TARGET = (gun: string, d: number, extra = "") => `;(function()
+const TARGET = (gun: string, d: number, extra = "", out = "p.slot == 1 and (p.a1 or 0) or (p.a2 or 0)") => `;(function()
 local _T, n, placed = TIC, 0, false
 function TIC()
   _T()
@@ -103,7 +109,7 @@ function TIC()
     end
     ${extra}
     pmem(117, (math.max(0, math.floor(o.hp)) & 255) | ((math.max(0, math.floor(o.sh or 0)) & 255) << 8) | ((placed and 1 or 0) << 16) | ((o.dead and 1 or 0) << 17))
-    pmem(118, p.slot == 1 and (p.a1 or 0) or (p.a2 or 0))
+    pmem(118, ${out})
   end
 end
 end)()`;
@@ -116,7 +122,7 @@ describe.skipIf(!ENGINE_OK)("A1: the dual wielders and the rifles", () => {
   const A1 = ["ar", "dmr", "carbine", "needlerifle", "beamrifle", "plasmapistol", "plasmarifle", "needler", "spiker", "mauler"];
 
   it("knows every weapon, in the order of its viewmodels", () => {
-    expect(LOCKOUT_VIEWMODELS.slice(6)).toEqual(A1);
+    expect(LOCKOUT_VIEWMODELS.slice(6, 16)).toEqual(A1);
     expect(LOCKOUT_VIEWMODELS.length).toBeLessThanOrEqual(32); // (5 bits in the net state)
   });
 
@@ -214,10 +220,13 @@ function TIC()
     if n == 3 then give(p, 1, "br") end
     if n == 5 or n == 700 then p.x, p.y, p.z, p.vy = MRK[13], MRK[14] - 1, MRK[15], 0 end
     if n == 6 or n == 701 then p.x, p.z = p.x + 4, p.z end
-    local up = 0
-    for k, e in ipairs(PICKUPS) do if pickup_ready(k) and e.pad == 5 then up = up + 1 end end
-    pmem(117, (pad_rot[5] or 0) | (up << 4) | ((WIDX_OF and 0 or 0)))
-    pmem(118, (p.g1 == "smg" and 1 or 0) | ((p.g1 == "ar" and 1 or 0) << 1) | ((pickup_ready(11) and 1 or 0) << 2))
+    local up, ar = 0, 0
+    for k, e in ipairs(PICKUPS) do
+      if pickup_ready(k) and e.pad == 5 then up = up + 1 end
+      if e.w == "ar" then ar = k end
+    end
+    pmem(117, (pad_rot[5] or 0) | (up << 4))
+    pmem(118, (p.g1 == "smg" and 1 or 0) | ((p.g1 == "ar" and 1 or 0) << 1) | ((pickup_ready(ar) and 1 or 0) << 2))
   end
 end
 end)()`);
@@ -273,5 +282,168 @@ end)()`;
     expect(g & 15).toBe(1); // ...and the guest's with it
     // The host's facing as the guest sees it, to the 1/2500 rad the net state carries now.
     expect(Math.abs((g >> 9) / 1000 - (h >> 4) / 1000)).toBeLessThan(0.002);
+  }, 300_000);
+});
+
+describe.skipIf(!ENGINE_OK)("A2: the heavy weapons", () => {
+  const A2 = ["rocket", "splaser", "fuelrod", "bruteshot", "concussion", "hammer"];
+  /** The player's own health (low byte) and shield (next), for pmem 118. */
+  const SELF = "(math.max(0, math.floor(p.hp)) & 255) | ((math.max(0, math.floor(p.sh or 0)) & 255) << 8)";
+  const dealt = (w: number) => ((w >> 17) & 1 ? 200 : 200 - hp(w) - sh(w));
+
+  it("knows every heavy weapon, after A1's", () => {
+    expect(LOCKOUT_VIEWMODELS.slice(16)).toEqual(A2);
+  });
+
+  it("fires every heavy weapon at a soldier ahead, and wounds it", async () => {
+    const hurt: Record<string, number> = {};
+    for (const gun of A2) {
+      const g = await offline(TARGET(gun, gun === "hammer" ? 2.5 : 8));
+      for (let i = 0; i < 4; i += 1) g.tick();
+      const rounds0 = g.probe()[1];
+      // (held for a second and a half: the Spartan Laser fires once charged)
+      for (let i = 0; i < 90; i += 1) g.tick(ACT.fire!);
+      const [w, rounds] = g.probe();
+      hurt[gun] = dealt(w);
+      expect(rounds, gun).toBeLessThan(rounds0);
+    }
+    console.log(`A2: damage from one shot or swing: ${JSON.stringify(hurt)}`);
+    for (const gun of A2) expect(hurt[gun], gun).toBeGreaterThan(20);
+  }, 180_000);
+
+  it("kills a full-shielded soldier with one rocket, and spares the firer 8 m off", async () => {
+    const g = await offline(TARGET("rocket", 8, "", SELF));
+    for (let i = 0; i < 4; i += 1) g.tick();
+    g.tick(ACT.fire!);
+    for (let i = 0; i < 4; i += 1) g.tick();
+    const [w, self] = g.probe();
+    expect((w >> 17) & 1).toBe(1);
+    expect(self & 255).toBe(100);
+    expect((self >> 8) & 255).toBe(100);
+  }, 60_000);
+
+  it("blasts the firer too: a rocket into the deck at its own feet", async () => {
+    // (the target bot is out of the way: no lock pulls the shot up)
+    const g = await offline(TARGET("rocket", 8, "o.dead, o.y = true, -60; p.ap = -1.45", SELF));
+    for (let i = 0; i < 4; i += 1) g.tick();
+    g.tick(ACT.fire!);
+    for (let i = 0; i < 4; i += 1) g.tick();
+    const self = g.probe()[1];
+    expect((self >> 8) & 255).toBe(0); // its shield gone
+    expect(self & 255).toBeLessThan(100); // and hurt through it, or dead
+  }, 60_000);
+
+  it("fires the Spartan Laser only once charged: a tap does nothing", async () => {
+    const g = await offline(TARGET("splaser", 10));
+    for (let i = 0; i < 4; i += 1) g.tick();
+    const rounds0 = g.probe()[1];
+    for (let i = 0; i < 20; i += 1) g.tick(i < 10 ? ACT.fire! : 0); // a tap, and let go
+    expect(g.probe()[1]).toBe(rounds0);
+    expect(dealt(g.probe()[0])).toBe(0);
+    for (let i = 0; i < 59; i += 1) g.tick(ACT.fire!);
+    expect(g.probe()[1]).toBe(rounds0); // still charging...
+    g.tick(ACT.fire!);
+    g.tick();
+    expect(g.probe()[1]).toBe(rounds0 - 1); // ...and fired, a second in
+    expect((g.probe()[0] >> 17) & 1).toBe(1); // one beam kills
+  }, 60_000);
+
+  it("throws what the Concussion Rifle hits", async () => {
+    const away = "math.floor(math.sqrt((o.x - p.x)^2 + (o.z - p.z)^2)*100)";
+    const g = await offline(TARGET("concussion", 6, "", away));
+    for (let i = 0; i < 4; i += 1) g.tick();
+    const d0 = g.probe()[1] / 100;
+    g.tick(ACT.fire!);
+    for (let i = 0; i < 30; i += 1) g.tick();
+    const d1 = g.probe()[1] / 100;
+    console.log(`A2: concussion: ${d0.toFixed(2)} m -> ${d1.toFixed(2)} m`);
+    expect(d1).toBeGreaterThan(d0 + 0.5);
+  }, 60_000);
+
+  it("smashes with the Gravity Hammer, and spares its wielder", async () => {
+    const g = await offline(TARGET("hammer", 2.5, "", SELF));
+    for (let i = 0; i < 4; i += 1) g.tick();
+    g.tick(ACT.fire!);
+    for (let i = 0; i < 4; i += 1) g.tick();
+    const [w, self] = g.probe();
+    expect(dealt(w)).toBeGreaterThan(120);
+    expect(self).toBe(100 | (100 << 8));
+  }, 60_000);
+
+  it("lets bots fire them too", async () => {
+    // The first bot, 2.5 m ahead (a hammer) or 8 m (a rocket), left to fight the player.
+    for (const [gun, d] of [["hammer", 2.5], ["rocket", 8]] as const) {
+      const g = await offline(`;(function()
+local _T, n, placed = TIC, 0, false
+function TIC()
+  _T()
+  if phase == "play" and p then
+    n = n + 1
+    local o = bots[1]
+    if n == 3 then
+      for i = 0, 31 do
+        local yaw = i*math.pi/16
+        local fx, fz = math.sin(yaw), math.cos(yaw)
+        local ok = not placed and not seg_first(p.x, p.y + 1.2, p.z, p.x + fx*(${d}+1), p.y + 1.2, p.z + fz*(${d}+1), true)
+        for k = 1, ${Math.ceil(d)} do ok = ok and seg_first(p.x + fx*k, p.y + 0.5, p.z + fz*k, p.x + fx*k, p.y - 0.5, p.z + fz*k, true) end
+        if ok then
+          placed = true
+          nav_drop(o); o.x, o.y, o.z, o.dead, o.hp, o.sh, o.respawn, o.vy = p.x + fx*${d}, p.y, p.z + fz*${d}, false, 100, 100, 0, 0
+        end
+      end
+    end
+    if placed then o.g1 = "${gun}"; p.hp, p.sh = math.max(p.hp, 1), p.sh end
+    pmem(117, placed and 1 or 0)
+    pmem(118, ${SELF} | ((p.dead and 1 or 0) << 16) | (math.min(255, HURT or 0) << 17))
+  end
+end
+local _d = damage
+function damage(t, dmg, by, head) if t == p and by == bots[1] then HURT = (HURT or 0) + math.floor(dmg) end; return _d(t, dmg, by, head) end
+end)()`);
+      for (let i = 0; i < 600; i += 1) g.tick();
+      expect(g.probe()[0] & 1, gun).toBe(1);
+      const hurtBy = g.probe()[1] >>> 17;
+      console.log(`A2: a bot with the ${gun} dealt the player ${hurtBy}`);
+      expect(hurtBy, gun).toBeGreaterThan(20);
+    }
+  }, 120_000);
+});
+
+describe.skipIf(!existsSync(LOCKOUT_ENGINE))("A2 online (two engines, one room)", () => {
+  it("has the host judge a guest's rocket: the blast at the guest's feet hurts the guest", async () => {
+    const hostProbe = `;(function()
+local _T = TIC
+function TIC()
+  _T()
+  if phase == "play" and NETMODE == 2 then
+    for _,o in ipairs(bots) do if not o.human then o.dead, o.respawn, o.x, o.y, o.z = true, 1e9, 0, -60, 0 end end
+    local g = ent_by_slot(1)
+    if g then pmem(117, (math.max(0, math.floor(g.hp)) & 255) | ((math.max(0, math.floor(g.sh or 0)) & 255) << 8) | ((g.dead and 1 or 0) << 16)) end
+  end
+end
+end)()`;
+    const guestProbe = `;(function()
+local _T, n = TIC, 0
+function TIC()
+  _T()
+  if phase == "play" and p then
+    n = n + 1
+    if n == 60 then give(p, 1, "rocket"); p.slot, p.cool = 1, 0 end
+    if n >= 60 then p.ap, p.manualpitch = -1.45, true end
+    if n == 90 then player_fire() end
+    pmem(117, n)
+  end
+end
+end)()`;
+    const { host, guest, both } = await lockoutRoom("", { guestProbe, hostProbe });
+    for (let f = 0; f < 60; f += 1) both(0, 0);
+    const before = host.probe()[0];
+    expect(before & 0xffff).toBe(100 | (100 << 8)); // the guest, whole, as the host has it
+    for (let f = 0; f < 120; f += 1) both(0, 0);
+    expect(guest.probe()[0]).toBeGreaterThan(90); // (it fired)
+    const after = host.probe()[0];
+    console.log(`A2 online: the guest as the host has it: ${JSON.stringify({ before: [hp(before), sh(before)], after: [hp(after), sh(after), (after >> 16) & 1] })}`);
+    expect((after >> 16) & 1 || sh(after) < 100).toBeTruthy();
+    expect((after >> 16) & 1 || hp(after) + sh(after) < 150).toBeTruthy();
   }, 300_000);
 });

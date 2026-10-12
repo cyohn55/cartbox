@@ -160,10 +160,11 @@ describe("the Lockout materials", () => {
     // since the arena's walls became kit panels (I16, even with the map's
     // normals now rebuilt rather than stored), 2.4 MB since the arsenal's first
     // ten weapons (LOCKOUT_ARSENAL_ROADMAP.md A1: a viewmodel each, and a
-    // Pickup for each weapon a pad turns through): a sidecar over 512 KB is
+    // Pickup for each weapon a pad turns through), 2.8 MB with the heavy
+    // weapons and their pad (A2): a sidecar over 512 KB is
     // offloaded to object storage anyway, and this keeps a save well inside the
     // 4.5 MB request body limit.
-    expect(lockoutMeshSidecar().length).toBeLessThan(2_400_000);
+    expect(lockoutMeshSidecar().length).toBeLessThan(2_800_000);
   });
 
   it("ships a cold grade: bloom, contrast, cool split tone, vignette", () => {
