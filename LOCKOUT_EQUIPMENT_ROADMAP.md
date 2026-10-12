@@ -132,7 +132,7 @@ A **loadout** picker chooses what a player spawns with: weapons, a second gun to
         - It soaks the round's damage (`shot_wall`), where damage is judged: offline, or on the host.
         - The host says when it breaks (kind 4), and every browser takes it down.
         - It runs out after 10 s on its own.
-    - **The Hologram** is a soldier instance (two at once: instances 19 and 20, at rest scale until posed), in its owner's armour and running.
+    - **The Hologram** is a soldier instance (two at once: instances 19 and 20, at rest scale until placed — `cartbox.place`, with the new `cartbox.look` for its owner's armour, since the seven bots and the viewmodel fill a frame's eight poses), in its owner's armour and running.
       - **How it runs:** the way its owner faced, for 6 s, through the very moves a soldier makes, so it runs the same path in every browser. It fades in its last half second, and is gone if it runs off the edge.
       - **What it fools:** bots take an enemy's Hologram for a target and fire on it.
       - **Popping it:** a hit from a bot or a player pops it, hurting nobody. Whoever popped it tells the rest.

@@ -430,7 +430,9 @@ export function decodeMeshPoses(words: Uint32Array): MailboxMeshPose[] {
       front: (indexWord & MESH_POSE_FRONT) !== 0,
       position: [pos(words[base + 1] ?? 0), pos(words[base + 2] ?? 0), pos(words[base + 3] ?? 0)],
       rotation: [angle(words[base + 4] ?? 0), angle(words[base + 5] ?? 0), angle(words[base + 6] ?? 0)],
-      scale: (words[base + 7] ?? 0) / MESH_CAM_DIST_SCALE,
+      // Signed: a negative scale mirrors the instance through its middle (a
+      // cart turns it the right way up with half a turn of pitch).
+      scale: ((words[base + 7] ?? 0) | 0) / MESH_CAM_DIST_SCALE,
     });
   }
   return poses;

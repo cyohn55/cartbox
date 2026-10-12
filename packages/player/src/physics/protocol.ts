@@ -290,8 +290,9 @@ export const PHYS_OP_SOUND_LOOP = 32;
 export const PHYS_OP_MIX = 33;
 /**
  * Put an object somewhere in the world and leave it there (cartbox.place,
- * EP14): a = the object | (scale × 256) << 16 (scale 0 hides it); v0..v2 =
- * where, v3..v5 = yaw, pitch, roll (radians).
+ * EP14): a = the object | (|scale| × 256) << 16 (scale 0 hides it), bit 31 set
+ * for a negative scale (mirrored through its middle); v0..v2 = where, v3..v5 =
+ * yaw, pitch, roll (radians).
  */
 export const PHYS_OP_PLACE = 34;
 /** Send a placed object back to where the scene put it: a = the object. */
@@ -307,6 +308,13 @@ export const PHYS_OP_UI_SHOW = 36;
 export const PHYS_OP_UI_NUM = 37;
 export const PHYS_OP_UI_TEXT = 38;
 export const PHYS_OP_UI_LIST = 39;
+/**
+ * How an object looks, standing until changed (cartbox.look): a = the object |
+ * (tint palette index, 0 = none) << 16 | front << 20 -- what a pose's tint and
+ * front say, for an object placed rather than posed (poses are 8 a frame;
+ * placements and looks have no such cap).
+ */
+export const PHYS_OP_LOOK = 40;
 
 /** Where the physics block starts in Lua's RAM space for a model. */
 export function physicsBlockAddress(layout: RamLayout): number {
