@@ -23,7 +23,7 @@ export const DETAIL_FAR = 12;
 
 type SurfaceEffects = Pick<
   MeshMaterial,
-  "detailScale" | "detailStrength" | "emissiveScroll" | "emissivePulse" | "rim" | "reflectivity" | "reflectionMask" | "blendColor" | "blendRoughness" | "alphaMode" | "alphaCutoff" | "softDepth" | "refraction" | "distortion" | "water" | "graph"
+  "detailScale" | "detailStrength" | "emissiveScroll" | "emissivePulse" | "rim" | "reflectivity" | "reflectionMask" | "blendColor" | "blendRoughness" | "alphaMode" | "alphaCutoff" | "softDepth" | "refraction" | "distortion" | "water" | "triplanar" | "blendSharpness" | "graph"
 >;
 
 const finite = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v);
@@ -60,6 +60,8 @@ export function readSurfaceEffects(raw: Record<string, unknown> | object): Surfa
   if (water && typeof water === "object" && finite(water.strength) && water.strength > 0 && finite(water.scale) && finite(water.speed) && finite(water.flow)) {
     out.water = { strength: clamp(water.strength, 0, 2), scale: clamp(water.scale, 0.05, 8), speed: clamp(water.speed, 0, 4), flow: clamp(water.flow, -Math.PI, Math.PI) };
   }
+  if (finite(r.triplanar) && r.triplanar > 0) out.triplanar = clamp(r.triplanar, 0.05, 1000);
+  if (finite(r.blendSharpness) && r.blendSharpness > 0) out.blendSharpness = clamp(r.blendSharpness, 0, 1);
   const graph = readMaterialGraph(r.graph);
   if (graph) out.graph = graph;
   return out;
@@ -134,6 +136,60 @@ export function waterTilt(uniform: readonly [number, number, number, number], x:
   const h = height(qx, qz);
   const k = (-strength * WATER_TILT) / WATER_STEP;
   return [(height(qx + WATER_STEP, qz) - h) * k, (height(qx, qz + WATER_STEP) - h) * k];
+}
+
+// --- Living terrain (BEAVER_CREEK_ROADMAP.md B6) --------------------------------------------
+
+/** How sharply triplanar mapping favours the axis a surface faces (the power its normal's components are raised to). */
+export const TRIPLANAR_POWER = 4;
+
+/**
+ * Triplanar weights for a normal: how much each axis's projection shows (x
+ * from the side, y from above, z from the front), summing to 1. A normal along
+ * an axis gives that axis alone, so flat ground is pure top-down mapping.
+ */
+export function triplanarWeights(nx: number, ny: number, nz: number): [number, number, number] {
+  const l = Math.hypot(nx, ny, nz) || 1;
+  // Squared twice (the TRIPLANAR_POWER), as the shaders do it.
+  const ax = (nx / l) * (nx / l);
+  const ay = (ny / l) * (ny / l);
+  const az = (nz / l) * (nz / l);
+  const wx = ax * ax;
+  const wy = ay * ay;
+  const wz = az * az;
+  const s = wx + wy + wz || 1;
+  return [wx / s, wy / s, wz / s];
+}
+
+/**
+ * The three projections' UVs at point (x, y, z) in the mesh's space, one
+ * repeat every `repeat` units: from the side (z, y), from above (x, z) — the
+ * same as a terrain's planar UVs — and from the front (x, y).
+ */
+export function triplanarUvs(x: number, y: number, z: number, repeat: number): [[number, number], [number, number], [number, number]] {
+  const k = 1 / repeat;
+  return [
+    [z * k, y * k],
+    [x * k, z * k],
+    [x * k, y * k],
+  ];
+}
+
+/** Rec. 601 luma of a colour (0..1 channels): the "height" a height blend compares. */
+export function blendHeightOf(r: number, g: number, b: number): number {
+  return 0.299 * r + 0.587 * g + 0.114 * b;
+}
+
+/**
+ * A height-blended weight: the vertex weight `w` of the second surface, moved
+ * toward whichever of the two is higher (lighter) here and sharpened, by
+ * `sharpness` (0 = `w` unchanged, 1 = a tight edge). `base` and `blend` are
+ * the two surfaces' heights (0..1).
+ */
+export function heightBlend(w: number, base: number, blend: number, sharpness: number): number {
+  if (!(sharpness > 0)) return w;
+  const width = 1 - 0.9 * sharpness;
+  return clamp((w - 0.5 + 0.5 * sharpness * (blend - base)) / width + 0.5, 0, 1);
 }
 
 /** How much of the detail map shows at a view depth: 1 up close, fading to 0 by {@link DETAIL_FAR}. */

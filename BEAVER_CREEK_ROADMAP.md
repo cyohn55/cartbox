@@ -203,6 +203,16 @@ Each item lands in all three renderers (WebGL2, WebGPU, and the software referen
   - New presets for creek-bank plants: tall grass, reeds, ferns, broadleaf and pine trees, mossy boulders.
   - The editor's foliage panel gains the wind controls and the presets.
   - *Tests:* parity; sway is zero at the root and grows with height; triplanar matches planar on flat ground.
+  - **Triplanar and height-blended terrain: done.**
+    - A material takes `triplanar` (a repeat, in the mesh's own units). Its base colour and blend maps are then projected from the three axes in the mesh's space and mixed by the normal (each component squared twice). Flat ground looks exactly as planar mapping draws it.
+    - A material takes `blendSharpness` (0..1). Where a second surface blends in per vertex, the lighter of the two pokes through first and the edge tightens (`heightBlend`).
+    - A terrain takes `triplanar: true` and `blend.sharpness`. `terrainMesh` hands the terrain's tile to every layer's material, and the sharpness to its blended pairs.
+    - In the shaders: `triMap`, `blendHeightOf` and `heightBlend` in GLSL and WGSL, an object-space position varying, and a `terrain0` uniform at byte 864 (880 bytes used).
+      - In WebGL2, Chromium matches the software frame on a cliff scene: 3 of 3,072 pixels differ, one of them on an edge.
+    - The terrain panel gains **Triplanar cliffs** and **Layer edges**. Beaver Creek's canyon uses both (its grey box has no textures yet; B9 adds them).
+    - Projections and weights are in the mesh's space, but the weights use the world normal. A terrain under a *rotated* parent would weigh its projections slightly off. None is rotated today.
+    - *Tests:* `terrain-triplanar.test.ts` (the weights, the top projection equal to planar UVs, height blending, the fields' round trip, the packing, a cliff that unstretches while flat ground is unchanged); `webgl-parity.test.ts` (the cliff).
+  - Wind, foliage cards and the creek-bank presets: next.
 
 - [ ] **B7. Infinite-style daylight.**
   - Soft shadows with more than one cascade, sized for a canyon.

@@ -109,6 +109,7 @@ import {
   PROBE_FLOATS,
   resolveLight,
   resolvePbr,
+  resolveMapping,
   viewDirection,
   writeInstanceTransform,
   writeInstanceUniform,
@@ -202,6 +203,7 @@ layout(std140) uniform Uniforms {
   vec4 refract1; // xyz = camera right (world), w = frame height (px)
   vec4 refract2; // xyz = camera up (world)
   vec4 water0;   // x = ripple strength (0 = still), y = ripples per metre, z = drift phase, w = flow direction (B5)
+  vec4 terrain0; // x = triplanar repeat (0 = UVs), y = height-blend sharpness (B6)
 } u;
 `;
 
@@ -231,6 +233,7 @@ centroid out vec2 vUv2;
 out vec4 vLightClip;
 out vec3 vWorldPos;
 out float vEyeDepth;
+out vec3 vObjPos;
 void main() {
   InstanceXf t = xf[gl_InstanceID];
   vec4 p = t.mvp * vec4(position, 1.0);
@@ -241,6 +244,7 @@ void main() {
   vLightClip = t.lightMvp * vec4(position, 1.0);
   vWorldPos = (t.model * vec4(position, 1.0)).xyz;
   vEyeDepth = p.w;
+  vObjPos = position;
   // Flip Y so the framebuffer's first row is the image's top row (see the file comment).
   gl_Position = vec4(p.x, -p.y, p.z, p.w);
 }
@@ -380,6 +384,7 @@ in float vBw;
 in vec4 vLightClip;
 in vec3 vWorldPos;
 in float vEyeDepth;
+in vec3 vObjPos;
 ${reflect ? "layout(location = 0) out vec4 outColor;\nlayout(location = 1) out vec4 outReflect;\nlayout(location = 2) out vec4 outEnv;" : "out vec4 outColor;"}
 
 // Optical depth of a fog layer thinning above base (fogLayerDepth in skyDome.ts).
@@ -740,6 +745,21 @@ vec3 lightTerm(Light lgt, vec3 P, vec3 N, vec3 V, float ndv, float a2, float k, 
   return lit;
 }
 ${graphNoiseSource("glsl")}
+// --- Living terrain (BEAVER_CREEK_ROADMAP.md B6): sampleTriplanar and heightBlend, term for term ---
+// A map by the UVs, or by triplanar projection in the mesh's space off the geometric normal.
+vec4 triMap(sampler2D s, vec2 uv) {
+  if (u.terrain0.x <= 0.0) { return sampleMap(s, uv); }
+  vec3 n = normalize(vNormal);
+  vec3 a = n * n;
+  vec3 w = a * a;
+  w = w / max(w.x + w.y + w.z, 1e-30);
+  vec3 p = vObjPos * (1.0 / u.terrain0.x);
+  return sampleMap(s, vec2(p.z, 1.0 - p.y)) * w.x + sampleMap(s, vec2(p.x, 1.0 - p.z)) * w.y + sampleMap(s, vec2(p.x, 1.0 - p.y)) * w.z;
+}
+float blendHeightOf(vec3 c) { return 0.299 * c.r + 0.587 * c.g + 0.114 * c.b; }
+float heightBlend(float w, float base, float blend, float s) {
+  return clamp((w - 0.5 + 0.5 * s * (blend - base)) / (1.0 - 0.9 * s) + 0.5, 0.0, 1.0);
+}
 // --- Water (BEAVER_CREEK_ROADMAP.md B5): waterTilt in materialEffects.ts, term for term ---
 float waterLayer(vec2 p, float phase, vec2 d) {
   return gNoise1(vec3(p.x + d.x * phase, p.y + d.y * phase, 0.0)) + 0.5 * gNoise1(vec3(2.1 * p.x - d.y * phase * 0.7, 2.1 * p.y + d.x * phase * 0.7, 7.0));
@@ -822,7 +842,7 @@ ${reflect ? "  outReflect = vec4(0.0);\n  outEnv = vec4(0.0);\n" : ""}  // The s
   vec2 uv = vec2(puv.x, 1.0 - puv.y);
   vec4 colour = u.base;
   if (u.texflags.x > 0.5) {
-    colour = colour * sampleMap(tex, uv);
+    colour = colour * triMap(tex, uv);
   }
 ${g.base}
   // Soft edges (EP6b): a see-through surface fades out as it meets the opaque
@@ -857,7 +877,14 @@ ${g.base}
       metallic = metallic * mr.b;
       if (u.surface0.w > 0.5) { reflectK = reflectK * mr.a; }
     }
-    if (u.surface1.z > 0.5 && u.surface3.w >= 0.0) { rough = mix(rough, u.surface3.w, vBw); }
+    // The blend surface (H4), its weight moved by the two surfaces' heights (B6).
+    float bwt = vBw;
+    vec3 bc = u.surface3.rgb;
+    if (u.surface1.z > 0.5) {
+      if (u.surface1.w > 0.5) { bc = bc * triMap(blendTex, uv).rgb; }
+      if (u.terrain0.y > 0.0) { bwt = heightBlend(vBw, blendHeightOf(colour.rgb), blendHeightOf(bc), u.terrain0.y); }
+    }
+    if (u.surface1.z > 0.5 && u.surface3.w >= 0.0) { rough = mix(rough, u.surface3.w, bwt); }
 ${g.pbr}
     rough = clamp(rough, 0.045, 1.0);
     float ao = 1.0;
@@ -878,11 +905,7 @@ ${g.pbr}
       }
     }
     vec3 albedo = colour.rgb;
-    if (u.surface1.z > 0.5) {
-      vec3 bc = u.surface3.rgb;
-      if (u.surface1.w > 0.5) { bc = bc * sampleMap(blendTex, uv).rgb; }
-      albedo = mix(albedo, bc, vBw);
-    }
+    if (u.surface1.z > 0.5) { albedo = mix(albedo, bc, bwt); }
     float dk = u.surface0.y * clamp((${DETAIL_FAR.toFixed(4)} - vEyeDepth) / ${(DETAIL_FAR - DETAIL_NEAR).toFixed(4)}, 0.0, 1.0);
     if (dk > 0.0) {
       vec3 detail = sampleMap(detailTex, vec2(puv.x * u.surface0.x, 1.0 - puv.y * u.surface0.x)).rgb;
@@ -1376,6 +1399,7 @@ export class WebglSceneRenderer implements SceneRenderer {
         refraction: batch.refract && refractOk ? resolveRefraction(batch.primitive.material, effectActive(batch.effect) ? batch.effect : null) : null,
         camera,
         water: waterUniform(batch.primitive.material, draw.time ?? 0),
+        mapping: resolveMapping(batch.primitive.material),
       });
     });
     for (const chunk of chunks) {

@@ -138,6 +138,7 @@ import {
   PROBE_FLOATS,
   resolveLight,
   resolvePbr,
+  resolveMapping,
   unpadRows,
   viewDirection,
   writeInstanceUniform,
@@ -307,6 +308,7 @@ struct Uniforms {
   refract1: vec4<f32>,  // xyz = camera right (world), w = frame height (px)
   refract2: vec4<f32>,  // xyz = camera up (world)
   water0: vec4<f32>,    // x = ripple strength (0 = still), y = ripples per metre, z = drift phase, w = flow direction (B5)
+  terrain0: vec4<f32>,  // x = triplanar repeat (0 = UVs), y = height-blend sharpness (B6)
 };
 
 // A Modern-tier light (see packLights): d0 = dir/pos + kind, d1 = colour +
@@ -452,6 +454,7 @@ struct VSOut {
   @location(4) eyeDepth: f32,
   @location(5) @interpolate(perspective, centroid) uv2: vec2<f32>,
   @location(6) bw: f32,
+  @location(7) objPos: vec3<f32>,
 };
 
 // Directional shadow test, mirroring rasterizeTriangle in meshRasterizer.ts:
@@ -785,10 +788,26 @@ fn vs(
   out.lightClip = t.lightMvp * vec4<f32>(position, 1.0);
   out.worldPos = (t.model * vec4<f32>(position, 1.0)).xyz;
   out.eyeDepth = out.pos.w; // clip w = view depth, for distance fog
+  out.objPos = position;
   return out;
 }
 
 ${graphNoiseSource("wgsl")}
+// --- Living terrain (BEAVER_CREEK_ROADMAP.md B6): sampleTriplanar and heightBlend, term for term ---
+// A map by the UVs, or by triplanar projection in the mesh's space off the geometric normal.
+fn triMap(t: texture_2d<f32>, uv: vec2<f32>, normal: vec3<f32>, objPos: vec3<f32>) -> vec4<f32> {
+  if (u.terrain0.x <= 0.0) { return textureSample(t, samp, uv); }
+  let n = normalize(normal);
+  let a = n * n;
+  var w = a * a;
+  w = w / max(w.x + w.y + w.z, 1e-30);
+  let p = objPos * (1.0 / u.terrain0.x);
+  return textureSample(t, samp, vec2<f32>(p.z, 1.0 - p.y)) * w.x + textureSample(t, samp, vec2<f32>(p.x, 1.0 - p.z)) * w.y + textureSample(t, samp, vec2<f32>(p.x, 1.0 - p.y)) * w.z;
+}
+fn blendHeightOf(c: vec3<f32>) -> f32 { return 0.299 * c.r + 0.587 * c.g + 0.114 * c.b; }
+fn heightBlend(w: f32, base: f32, blend: f32, s: f32) -> f32 {
+  return clamp((w - 0.5 + 0.5 * s * (blend - base)) / (1.0 - 0.9 * s) + 0.5, 0.0, 1.0);
+}
 // --- Water (BEAVER_CREEK_ROADMAP.md B5): waterTilt in materialEffects.ts, term for term ---
 fn waterLayer(p: vec2<f32>, phase: f32, d: vec2<f32>) -> f32 {
   return gNoise1(vec3<f32>(p.x + d.x * phase, p.y + d.y * phase, 0.0)) + 0.5 * gNoise1(vec3<f32>(2.1 * p.x - d.y * phase * 0.7, 2.1 * p.y + d.x * phase * 0.7, 7.0));
@@ -872,7 +891,7 @@ fn fs(in: VSOut) -> @location(0) vec4<f32> {
 
   var colour = u.base;
   if (u.texflags.x > 0.5) {
-    colour = colour * textureSample(tex, samp, uv);
+    colour = colour * triMap(tex, uv, in.normal, in.objPos);
   }
 ${g.base}
   // The CPU path skips a texel whose combined alpha is below 1/255 rather than
@@ -914,7 +933,15 @@ ${g.base}
       if (u.surface0.w > 0.5) { reflectK = reflectK * mr.a; } // the reflection mask
     }
     // The blend surface's roughness, by the vertex weight (surface3.w < 0 keeps).
-    if (u.surface1.z > 0.5 && u.surface3.w >= 0.0) { rough = mix(rough, u.surface3.w, in.bw); }
+    // The blend surface (H4), its weight moved by the two surfaces' heights (B6).
+    let blendTexel = triMap(blendTex, uv, in.normal, in.objPos).rgb;
+    var bwt = in.bw;
+    var bc = u.surface3.rgb;
+    if (u.surface1.z > 0.5) {
+      if (u.surface1.w > 0.5) { bc = bc * blendTexel; }
+      if (u.terrain0.y > 0.0) { bwt = heightBlend(in.bw, blendHeightOf(colour.rgb), blendHeightOf(bc), u.terrain0.y); }
+    }
+    if (u.surface1.z > 0.5 && u.surface3.w >= 0.0) { rough = mix(rough, u.surface3.w, bwt); }
 ${g.pbr}
     rough = clamp(rough, 0.045, 1.0); // a perfectly-smooth NDF blows up
     var ao = 1.0;
@@ -933,13 +960,8 @@ ${g.pbr}
       }
     }
     var albedo = colour.rgb;
-    // A second surface blended in by the vertex weight (snow drifting over rock).
-    let blendTexel = textureSample(blendTex, samp, uv).rgb;
-    if (u.surface1.z > 0.5) {
-      var bc = u.surface3.rgb;
-      if (u.surface1.w > 0.5) { bc = bc * blendTexel; }
-      albedo = mix(albedo, bc, in.bw);
-    }
+    // A second surface blended in by the (height-blended) vertex weight (snow drifting over rock).
+    if (u.surface1.z > 0.5) { albedo = mix(albedo, bc, bwt); }
     // A detail map, tiled finely and blended in up close (mid-grey neutral),
     // fading with eye depth — mirrors the software path.
     let dk = u.surface0.y * clamp((${DETAIL_FAR.toFixed(4)} - in.eyeDepth) / ${(DETAIL_FAR - DETAIL_NEAR).toFixed(4)}, 0.0, 1.0);
@@ -1820,6 +1842,7 @@ export class WebgpuSceneRenderer implements SceneRenderer {
         refraction: entry.refract ? resolveRefraction(entry.primitive.material, effectActive(entry.effect) ? entry.effect : null) : null,
         camera,
         water: waterUniform(entry.primitive.material, draw.time ?? 0),
+        mapping: resolveMapping(entry.primitive.material),
       });
     });
     this.device.queue.writeBuffer(this.uniformBuffer, 0, this.uniformData, 0, draws.length * UNIFORM_FLOATS);

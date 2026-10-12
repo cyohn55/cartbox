@@ -276,6 +276,15 @@ describe.skipIf(!chromiumPath)("WebGL2 parity in a real browser", () => {
     expect(changed).toBeGreaterThan(30);
   }, 60_000);
 
+  it("maps a cliff triplanar and height-blends its foot like the software rasteriser (B6)", async () => {
+    const result = await run("cliff");
+    expect(result.drawn).toBeGreaterThan(2000);
+    if (exact) {
+      expect(result.coverage, JSON.stringify(result.diffs)).toBe(0);
+      expect(result.far, JSON.stringify(result.diffs)).toBeLessThanOrEqual(result.drawn * 0.02);
+    }
+  }, 60_000);
+
   it("shades forty point lights and four spots through the light clusters like the software rasteriser", async () => {
     const result = await run("manyLights");
     expect(result.drawn).toBeGreaterThan(100);

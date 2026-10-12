@@ -129,6 +129,23 @@ export function TerrainPanel({
             })}
           </div>
 
+          <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, marginTop: 10 }} title="Project each layer's texture from all three axes, so steep cliffs aren't streaked by a texture laid flat from above (flat ground looks the same)">
+            <input type="checkbox" checked={Boolean(terrain.triplanar)} onChange={(event) => onChange(replaceTerrain(sidecar, { ...terrain, triplanar: event.target.checked || undefined }))} />
+            Triplanar cliffs
+          </label>
+          {terrain.blend && (
+            <RangeControl
+              label="Layer edges"
+              min={0}
+              max={1}
+              step={0.05}
+              value={terrain.blend.sharpness ?? 0}
+              onChange={(sharpness) => onChange(replaceTerrain(sidecar, { ...terrain, blend: { ...terrain.blend!, sharpness: sharpness > 0 ? sharpness : undefined } }))}
+              ariaLabel="Layer edge sharpness"
+              display={terrain.blend.sharpness ? `${Math.round(terrain.blend.sharpness * 100)}% by height` : "even fade"}
+            />
+          )}
+
           <FoliageSection sidecar={sidecar} onChange={onChange} terrainId={terrain.id} edit={edit} onEdit={(next) => onEdit({ ...next, id })} />
 
           <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, marginTop: 10 }} title="Draw this terrain (and its foliage) once into the sky from the play space, instead of as geometry: far mountains and forests for nothing per frame">

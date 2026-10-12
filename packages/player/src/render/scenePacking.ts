@@ -90,9 +90,11 @@ import {
  * 848  water0     vec4<f32>    16   x = ripple strength (0 = still), y = ripples per metre,
  *                                    z = drift phase (0..1), w = flow direction (B5;
  *                                    waterUniform in materialEffects.ts)
+ * 864  terrain0   vec4<f32>    16   x = triplanar repeat (0 = UV mapping), y = height-blend
+ *                                    sharpness (0 = an even mix) (B6)
  * ```
  *
- * 864 bytes used, padded to a 1024-byte stride (a 256-byte multiple a dynamic
+ * 880 bytes used, padded to a 1024-byte stride (a 256-byte multiple a dynamic
  * uniform offset can address), so one buffer still holds every draw in a
  * frame — uniforms are written per batch, not per copy, so the stride costs
  * little. The metallic-roughness inputs and the environment carry the Modern
@@ -107,7 +109,7 @@ export const UNIFORM_STRIDE = 1024;
  * bind group layout's `minBindingSize` must be: it makes a WGSL struct that
  * grows past what this module writes fail at pipeline creation.
  */
-export const UNIFORM_BYTES_USED = 864;
+export const UNIFORM_BYTES_USED = 880;
 /** The same stride counted in float32s, which is how `writeBuffer` sizes it. */
 export const UNIFORM_FLOATS = UNIFORM_STRIDE / 4;
 
@@ -228,6 +230,7 @@ const OFFSET_REFRACT0 = 200;
 const OFFSET_REFRACT1 = 204;
 const OFFSET_REFRACT2 = 208;
 const OFFSET_WATER0 = 212;
+const OFFSET_TERRAIN0 = 216;
 
 /** The rasteriser's defaults, restated so an unlit draw shades identically. */
 export const DEFAULT_LIGHT: readonly [number, number, number] = [0.4, 0.8, 0.6];
@@ -464,6 +467,21 @@ export interface InstanceUniform {
   readonly soft?: { readonly distance: number; readonly linear: readonly [number, number] };
   /** Moving water (B5): the material's waterUniform this frame, or null/omitted for none. */
   readonly water?: readonly [number, number, number, number] | null;
+  /** Triplanar mapping and height blending (B6), from {@link resolveMapping}, or null/omitted for neither. */
+  readonly mapping?: ResolvedMapping | null;
+}
+
+/** A draw's triplanar repeat (0 = UV mapping) and height-blend sharpness (0 = an even mix) (B6). */
+export interface ResolvedMapping {
+  readonly triplanar: number;
+  readonly blendSharpness: number;
+}
+
+/** Resolve a material's mapping as the software rasteriser does (null when it uses neither). */
+export function resolveMapping(material: Pick<MeshMaterial, "triplanar" | "blendSharpness">): ResolvedMapping | null {
+  const triplanar = material.triplanar && material.triplanar > 0 ? material.triplanar : 0;
+  const blendSharpness = material.blendSharpness && material.blendSharpness > 0 ? Math.min(1, material.blendSharpness) : 0;
+  return triplanar > 0 || blendSharpness > 0 ? { triplanar, blendSharpness } : null;
 }
 
 /**
@@ -701,6 +719,12 @@ export function writeInstanceUniform(target: Float32Array, index: number, unifor
   target[base + OFFSET_WATER0 + 1] = water ? water[1] : 0;
   target[base + OFFSET_WATER0 + 2] = water ? water[2] : 0;
   target[base + OFFSET_WATER0 + 3] = water ? water[3] : 0;
+
+  const mapping = uniform.mapping ?? null;
+  target[base + OFFSET_TERRAIN0] = mapping ? mapping.triplanar : 0;
+  target[base + OFFSET_TERRAIN0 + 1] = mapping ? mapping.blendSharpness : 0;
+  target[base + OFFSET_TERRAIN0 + 2] = 0;
+  target[base + OFFSET_TERRAIN0 + 3] = 0;
 }
 
 /** The camera's right and up in world space (the view's first two rows) and the frame's height, for refraction (I5). */

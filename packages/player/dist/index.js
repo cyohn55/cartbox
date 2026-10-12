@@ -13469,7 +13469,7 @@ import {
   fogIsVolumetric
 } from "@cartbox/editor";
 var UNIFORM_STRIDE = 1024;
-var UNIFORM_BYTES_USED = 864;
+var UNIFORM_BYTES_USED = 880;
 var UNIFORM_FLOATS = UNIFORM_STRIDE / 4;
 var LIGHT_FLOATS = 16;
 var PROBE_FLOATS = 16;
@@ -13550,6 +13550,7 @@ var OFFSET_REFRACT0 = 200;
 var OFFSET_REFRACT1 = 204;
 var OFFSET_REFRACT2 = 208;
 var OFFSET_WATER0 = 212;
+var OFFSET_TERRAIN0 = 216;
 var DEFAULT_LIGHT = [0.4, 0.8, 0.6];
 var DEFAULT_AMBIENT2 = 0.35;
 function resolveLight(direction, ambient) {
@@ -13598,6 +13599,11 @@ function resolveSurface(material, time, hasDetail, hasMr, blend = { weights: fal
     rimPower: rim?.power ?? 1,
     blend: blend.weights ? { color: material.blendColor ?? [1, 1, 1], roughness: material.blendRoughness ?? null, textured: blend.textured } : null
   };
+}
+function resolveMapping(material) {
+  const triplanar = material.triplanar && material.triplanar > 0 ? material.triplanar : 0;
+  const blendSharpness = material.blendSharpness && material.blendSharpness > 0 ? Math.min(1, material.blendSharpness) : 0;
+  return triplanar > 0 || blendSharpness > 0 ? { triplanar, blendSharpness } : null;
 }
 var INSTANCE_FLOATS = 60;
 function writeInstanceTransform(target, index, transform3, base = index * INSTANCE_FLOATS) {
@@ -13778,6 +13784,11 @@ function writeInstanceUniform(target, index, uniform) {
   target[base + OFFSET_WATER0 + 1] = water ? water[1] : 0;
   target[base + OFFSET_WATER0 + 2] = water ? water[2] : 0;
   target[base + OFFSET_WATER0 + 3] = water ? water[3] : 0;
+  const mapping = uniform.mapping ?? null;
+  target[base + OFFSET_TERRAIN0] = mapping ? mapping.triplanar : 0;
+  target[base + OFFSET_TERRAIN0 + 1] = mapping ? mapping.blendSharpness : 0;
+  target[base + OFFSET_TERRAIN0 + 2] = 0;
+  target[base + OFFSET_TERRAIN0 + 3] = 0;
 }
 function refractionCamera(view, height) {
   return { right: [view[0], view[4], view[8]], up: [view[1], view[5], view[9]], height };
@@ -14574,6 +14585,7 @@ layout(std140) uniform Uniforms {
   vec4 refract1; // xyz = camera right (world), w = frame height (px)
   vec4 refract2; // xyz = camera up (world)
   vec4 water0;   // x = ripple strength (0 = still), y = ripples per metre, z = drift phase, w = flow direction (B5)
+  vec4 terrain0; // x = triplanar repeat (0 = UVs), y = height-blend sharpness (B6)
 } u;
 `
 );
@@ -14605,6 +14617,7 @@ centroid out vec2 vUv2;
 out vec4 vLightClip;
 out vec3 vWorldPos;
 out float vEyeDepth;
+out vec3 vObjPos;
 void main() {
   InstanceXf t = xf[gl_InstanceID];
   vec4 p = t.mvp * vec4(position, 1.0);
@@ -14615,6 +14628,7 @@ void main() {
   vLightClip = t.lightMvp * vec4(position, 1.0);
   vWorldPos = (t.model * vec4(position, 1.0)).xyz;
   vEyeDepth = p.w;
+  vObjPos = position;
   // Flip Y so the framebuffer's first row is the image's top row (see the file comment).
   gl_Position = vec4(p.x, -p.y, p.z, p.w);
 }
@@ -14748,6 +14762,7 @@ in float vBw;
 in vec4 vLightClip;
 in vec3 vWorldPos;
 in float vEyeDepth;
+in vec3 vObjPos;
 ${reflect ? "layout(location = 0) out vec4 outColor;\nlayout(location = 1) out vec4 outReflect;\nlayout(location = 2) out vec4 outEnv;" : "out vec4 outColor;"}
 
 // Optical depth of a fog layer thinning above base (fogLayerDepth in skyDome.ts).
@@ -15108,6 +15123,21 @@ vec3 lightTerm(Light lgt, vec3 P, vec3 N, vec3 V, float ndv, float a2, float k, 
   return lit;
 }
 ${graphNoiseSource("glsl")}
+// --- Living terrain (BEAVER_CREEK_ROADMAP.md B6): sampleTriplanar and heightBlend, term for term ---
+// A map by the UVs, or by triplanar projection in the mesh's space off the geometric normal.
+vec4 triMap(sampler2D s, vec2 uv) {
+  if (u.terrain0.x <= 0.0) { return sampleMap(s, uv); }
+  vec3 n = normalize(vNormal);
+  vec3 a = n * n;
+  vec3 w = a * a;
+  w = w / max(w.x + w.y + w.z, 1e-30);
+  vec3 p = vObjPos * (1.0 / u.terrain0.x);
+  return sampleMap(s, vec2(p.z, 1.0 - p.y)) * w.x + sampleMap(s, vec2(p.x, 1.0 - p.z)) * w.y + sampleMap(s, vec2(p.x, 1.0 - p.y)) * w.z;
+}
+float blendHeightOf(vec3 c) { return 0.299 * c.r + 0.587 * c.g + 0.114 * c.b; }
+float heightBlend(float w, float base, float blend, float s) {
+  return clamp((w - 0.5 + 0.5 * s * (blend - base)) / (1.0 - 0.9 * s) + 0.5, 0.0, 1.0);
+}
 // --- Water (BEAVER_CREEK_ROADMAP.md B5): waterTilt in materialEffects.ts, term for term ---
 float waterLayer(vec2 p, float phase, vec2 d) {
   return gNoise1(vec3(p.x + d.x * phase, p.y + d.y * phase, 0.0)) + 0.5 * gNoise1(vec3(2.1 * p.x - d.y * phase * 0.7, 2.1 * p.y + d.x * phase * 0.7, 7.0));
@@ -15190,7 +15220,7 @@ ${reflect ? "  outReflect = vec4(0.0);\n  outEnv = vec4(0.0);\n" : ""}  // The s
   vec2 uv = vec2(puv.x, 1.0 - puv.y);
   vec4 colour = u.base;
   if (u.texflags.x > 0.5) {
-    colour = colour * sampleMap(tex, uv);
+    colour = colour * triMap(tex, uv);
   }
 ${g.base}
   // Soft edges (EP6b): a see-through surface fades out as it meets the opaque
@@ -15225,7 +15255,14 @@ ${g.base}
       metallic = metallic * mr.b;
       if (u.surface0.w > 0.5) { reflectK = reflectK * mr.a; }
     }
-    if (u.surface1.z > 0.5 && u.surface3.w >= 0.0) { rough = mix(rough, u.surface3.w, vBw); }
+    // The blend surface (H4), its weight moved by the two surfaces' heights (B6).
+    float bwt = vBw;
+    vec3 bc = u.surface3.rgb;
+    if (u.surface1.z > 0.5) {
+      if (u.surface1.w > 0.5) { bc = bc * triMap(blendTex, uv).rgb; }
+      if (u.terrain0.y > 0.0) { bwt = heightBlend(vBw, blendHeightOf(colour.rgb), blendHeightOf(bc), u.terrain0.y); }
+    }
+    if (u.surface1.z > 0.5 && u.surface3.w >= 0.0) { rough = mix(rough, u.surface3.w, bwt); }
 ${g.pbr}
     rough = clamp(rough, 0.045, 1.0);
     float ao = 1.0;
@@ -15246,11 +15283,7 @@ ${g.pbr}
       }
     }
     vec3 albedo = colour.rgb;
-    if (u.surface1.z > 0.5) {
-      vec3 bc = u.surface3.rgb;
-      if (u.surface1.w > 0.5) { bc = bc * sampleMap(blendTex, uv).rgb; }
-      albedo = mix(albedo, bc, vBw);
-    }
+    if (u.surface1.z > 0.5) { albedo = mix(albedo, bc, bwt); }
     float dk = u.surface0.y * clamp((${DETAIL_FAR.toFixed(4)} - vEyeDepth) / ${(DETAIL_FAR - DETAIL_NEAR).toFixed(4)}, 0.0, 1.0);
     if (dk > 0.0) {
       vec3 detail = sampleMap(detailTex, vec2(puv.x * u.surface0.x, 1.0 - puv.y * u.surface0.x)).rgb;
@@ -15727,7 +15760,8 @@ var WebglSceneRenderer = class _WebglSceneRenderer {
         // Refraction (I5), where the context can pack the opaque scene for it to read.
         refraction: batch.refract && refractOk ? resolveRefraction2(batch.primitive.material, effectActive3(batch.effect) ? batch.effect : null) : null,
         camera,
-        water: waterUniform(batch.primitive.material, draw.time ?? 0)
+        water: waterUniform(batch.primitive.material, draw.time ?? 0),
+        mapping: resolveMapping(batch.primitive.material)
       });
     });
     for (const chunk of chunks2) {
@@ -16709,6 +16743,7 @@ struct Uniforms {
   refract1: vec4<f32>,  // xyz = camera right (world), w = frame height (px)
   refract2: vec4<f32>,  // xyz = camera up (world)
   water0: vec4<f32>,    // x = ripple strength (0 = still), y = ripples per metre, z = drift phase, w = flow direction (B5)
+  terrain0: vec4<f32>,  // x = triplanar repeat (0 = UVs), y = height-blend sharpness (B6)
 };
 
 // A Modern-tier light (see packLights): d0 = dir/pos + kind, d1 = colour +
@@ -16854,6 +16889,7 @@ struct VSOut {
   @location(4) eyeDepth: f32,
   @location(5) @interpolate(perspective, centroid) uv2: vec2<f32>,
   @location(6) bw: f32,
+  @location(7) objPos: vec3<f32>,
 };
 
 // Directional shadow test, mirroring rasterizeTriangle in meshRasterizer.ts:
@@ -17187,10 +17223,26 @@ fn vs(
   out.lightClip = t.lightMvp * vec4<f32>(position, 1.0);
   out.worldPos = (t.model * vec4<f32>(position, 1.0)).xyz;
   out.eyeDepth = out.pos.w; // clip w = view depth, for distance fog
+  out.objPos = position;
   return out;
 }
 
 ${graphNoiseSource2("wgsl")}
+// --- Living terrain (BEAVER_CREEK_ROADMAP.md B6): sampleTriplanar and heightBlend, term for term ---
+// A map by the UVs, or by triplanar projection in the mesh's space off the geometric normal.
+fn triMap(t: texture_2d<f32>, uv: vec2<f32>, normal: vec3<f32>, objPos: vec3<f32>) -> vec4<f32> {
+  if (u.terrain0.x <= 0.0) { return textureSample(t, samp, uv); }
+  let n = normalize(normal);
+  let a = n * n;
+  var w = a * a;
+  w = w / max(w.x + w.y + w.z, 1e-30);
+  let p = objPos * (1.0 / u.terrain0.x);
+  return textureSample(t, samp, vec2<f32>(p.z, 1.0 - p.y)) * w.x + textureSample(t, samp, vec2<f32>(p.x, 1.0 - p.z)) * w.y + textureSample(t, samp, vec2<f32>(p.x, 1.0 - p.y)) * w.z;
+}
+fn blendHeightOf(c: vec3<f32>) -> f32 { return 0.299 * c.r + 0.587 * c.g + 0.114 * c.b; }
+fn heightBlend(w: f32, base: f32, blend: f32, s: f32) -> f32 {
+  return clamp((w - 0.5 + 0.5 * s * (blend - base)) / (1.0 - 0.9 * s) + 0.5, 0.0, 1.0);
+}
 // --- Water (BEAVER_CREEK_ROADMAP.md B5): waterTilt in materialEffects.ts, term for term ---
 fn waterLayer(p: vec2<f32>, phase: f32, d: vec2<f32>) -> f32 {
   return gNoise1(vec3<f32>(p.x + d.x * phase, p.y + d.y * phase, 0.0)) + 0.5 * gNoise1(vec3<f32>(2.1 * p.x - d.y * phase * 0.7, 2.1 * p.y + d.x * phase * 0.7, 7.0));
@@ -17274,7 +17326,7 @@ fn fs(in: VSOut) -> @location(0) vec4<f32> {
 
   var colour = u.base;
   if (u.texflags.x > 0.5) {
-    colour = colour * textureSample(tex, samp, uv);
+    colour = colour * triMap(tex, uv, in.normal, in.objPos);
   }
 ${g.base}
   // The CPU path skips a texel whose combined alpha is below 1/255 rather than
@@ -17316,7 +17368,15 @@ ${g.base}
       if (u.surface0.w > 0.5) { reflectK = reflectK * mr.a; } // the reflection mask
     }
     // The blend surface's roughness, by the vertex weight (surface3.w < 0 keeps).
-    if (u.surface1.z > 0.5 && u.surface3.w >= 0.0) { rough = mix(rough, u.surface3.w, in.bw); }
+    // The blend surface (H4), its weight moved by the two surfaces' heights (B6).
+    let blendTexel = triMap(blendTex, uv, in.normal, in.objPos).rgb;
+    var bwt = in.bw;
+    var bc = u.surface3.rgb;
+    if (u.surface1.z > 0.5) {
+      if (u.surface1.w > 0.5) { bc = bc * blendTexel; }
+      if (u.terrain0.y > 0.0) { bwt = heightBlend(in.bw, blendHeightOf(colour.rgb), blendHeightOf(bc), u.terrain0.y); }
+    }
+    if (u.surface1.z > 0.5 && u.surface3.w >= 0.0) { rough = mix(rough, u.surface3.w, bwt); }
 ${g.pbr}
     rough = clamp(rough, 0.045, 1.0); // a perfectly-smooth NDF blows up
     var ao = 1.0;
@@ -17335,13 +17395,8 @@ ${g.pbr}
       }
     }
     var albedo = colour.rgb;
-    // A second surface blended in by the vertex weight (snow drifting over rock).
-    let blendTexel = textureSample(blendTex, samp, uv).rgb;
-    if (u.surface1.z > 0.5) {
-      var bc = u.surface3.rgb;
-      if (u.surface1.w > 0.5) { bc = bc * blendTexel; }
-      albedo = mix(albedo, bc, in.bw);
-    }
+    // A second surface blended in by the (height-blended) vertex weight (snow drifting over rock).
+    if (u.surface1.z > 0.5) { albedo = mix(albedo, bc, bwt); }
     // A detail map, tiled finely and blended in up close (mid-grey neutral),
     // fading with eye depth \u2014 mirrors the software path.
     let dk = u.surface0.y * clamp((${DETAIL_FAR2.toFixed(4)} - in.eyeDepth) / ${(DETAIL_FAR2 - DETAIL_NEAR2).toFixed(4)}, 0.0, 1.0);
@@ -18083,7 +18138,8 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
         layers: resolveLayers2(entry.primitive.material, entry.textures.relief !== null),
         refraction: entry.refract ? resolveRefraction3(entry.primitive.material, effectActive4(entry.effect) ? entry.effect : null) : null,
         camera,
-        water: waterUniform2(entry.primitive.material, draw.time ?? 0)
+        water: waterUniform2(entry.primitive.material, draw.time ?? 0),
+        mapping: resolveMapping(entry.primitive.material)
       });
     });
     this.device.queue.writeBuffer(this.uniformBuffer, 0, this.uniformData, 0, draws.length * UNIFORM_FLOATS);
@@ -21553,6 +21609,7 @@ export {
   renderSceneBackdrop,
   resolveButton,
   resolveLight,
+  resolveMapping,
   resolvePbr,
   resolveQuality,
   resolveSceneLayers,
