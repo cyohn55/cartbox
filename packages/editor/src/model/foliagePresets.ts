@@ -106,18 +106,67 @@ export function pineMesh(): MeshAsset {
   return { name: "pine", primitives: [...wood.primitives, ...needles.primitives] };
 }
 
-export type FoliagePreset = "boulder" | "drift" | "grass" | "pine";
+/** Reeds: a clump of tall, thin, two-sided blades fanning out, for a creek's edge. About a metre tall. */
+export function reedsMesh(seed = 5): MeshAsset {
+  const random = foliageRandom(seed);
+  const tris: [V3, V3, V3][] = [];
+  for (let k = 0; k < 7; k += 1) {
+    const a = random() * Math.PI * 2;
+    const h = 0.7 + random() * 0.45;
+    const w = 0.025;
+    const lean = 0.08 + random() * 0.12;
+    const bx = Math.cos(a) * 0.08, bz = Math.sin(a) * 0.08;
+    const l: V3 = [bx - Math.sin(a) * w, 0, bz + Math.cos(a) * w];
+    const r: V3 = [bx + Math.sin(a) * w, 0, bz - Math.cos(a) * w];
+    const tip: V3 = [bx + Math.cos(a) * lean, h, bz + Math.sin(a) * lean];
+    tris.push([l, r, tip], [r, l, tip]);
+  }
+  return faceted("reeds", mat("reeds", [0.42, 0.5, 0.24], 0.9), tris);
+}
+
+/** A broadleaf tree: a short trunk under a lumpy crown of three overlapping boulders' worth of leaves. About four units tall. */
+export function broadleafMesh(seed = 11): MeshAsset {
+  const sides = 6;
+  const ring = (y: number, r: number): V3[] => Array.from({ length: sides }, (_, i) => [Math.cos((i / sides) * Math.PI * 2) * r, y, Math.sin((i / sides) * Math.PI * 2) * r]);
+  const trunk: [V3, V3, V3][] = [];
+  const t0 = ring(0, 0.16), t1 = ring(1.8, 0.1);
+  for (let i = 0; i < sides; i += 1) {
+    const j = (i + 1) % sides;
+    trunk.push([t0[i]!, t1[i]!, t1[j]!], [t0[i]!, t1[j]!, t0[j]!]);
+  }
+  const random = foliageRandom(seed);
+  const leaves: [V3, V3, V3][] = [];
+  for (const [cx, cy, cz, s] of [[0, 2.7, 0, 3], [0.6, 2.3, 0.3, 2.2], [-0.5, 2.4, -0.4, 2.3]] as const) {
+    const blob = boulderMesh(Math.floor(random() * 1000), [0, 0, 0]).primitives[0]!.positions;
+    for (let i = 0; i < blob.length; i += 9) {
+      const p = (k: number): V3 => [cx + blob[i + k * 3]! * s, cy + blob[i + k * 3 + 1]! * s, cz + blob[i + k * 3 + 2]! * s];
+      leaves.push([p(0), p(1), p(2)]);
+    }
+  }
+  const wood = faceted("broadleaf", mat("bark", [0.32, 0.25, 0.18], 0.9), trunk);
+  const crown = faceted("broadleaf", mat("leaves", [0.24, 0.38, 0.16], 0.8), leaves);
+  return { name: "broadleaf", primitives: [...wood.primitives, ...crown.primitives] };
+}
+
+export type FoliagePreset = "boulder" | "drift" | "grass" | "reeds" | "pine" | "broadleaf";
+
+/** Every preset, in the order the editor offers them. */
+export const FOLIAGE_PRESETS: readonly FoliagePreset[] = ["boulder", "drift", "grass", "reeds", "pine", "broadleaf"];
 
 /** A preset's mesh and the layer settings it suits. */
-export function foliagePreset(kind: FoliagePreset): { mesh: MeshAsset; settings: Pick<FoliageLayer, "density" | "scale" | "align" | "sink" | "cull"> } {
+export function foliagePreset(kind: FoliagePreset): { mesh: MeshAsset; settings: Pick<FoliageLayer, "density" | "scale" | "align" | "sink" | "cull" | "wind"> } {
   switch (kind) {
     case "boulder":
       return { mesh: boulderMesh(), settings: { density: 2, scale: [0.6, 2.4], align: 0.8, sink: 0.12, cull: 160 } };
     case "drift":
       return { mesh: driftMesh(), settings: { density: 1.5, scale: [1, 2.6], align: 1, sink: 0.04, cull: 140 } };
     case "grass":
-      return { mesh: grassMesh(), settings: { density: 60, scale: [0.6, 1.3], align: 0.7, sink: 0, cull: 40 } };
+      return { mesh: grassMesh(), settings: { density: 60, scale: [0.6, 1.3], align: 0.7, sink: 0, cull: 40, wind: 3 } };
+    case "reeds":
+      return { mesh: reedsMesh(), settings: { density: 30, scale: [0.7, 1.4], align: 0.3, sink: 0, cull: 50, wind: 4 } };
     case "pine":
-      return { mesh: pineMesh(), settings: { density: 1, scale: [0.8, 1.8], align: 0, sink: 0.1, cull: 220 } };
+      return { mesh: pineMesh(), settings: { density: 1, scale: [0.8, 1.8], align: 0, sink: 0.1, cull: 220, wind: 0.5 } };
+    case "broadleaf":
+      return { mesh: broadleafMesh(), settings: { density: 0.6, scale: [0.8, 1.5], align: 0, sink: 0.1, cull: 240, wind: 0.7 } };
   }
 }

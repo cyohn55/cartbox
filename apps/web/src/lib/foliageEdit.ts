@@ -37,7 +37,7 @@ export function addFoliage(sidecar: MeshSidecar, terrainId: string, source: { pr
   const id = newId(sidecar);
   let mesh: string;
   let name: string;
-  let settings: Pick<FoliageLayer, "density" | "scale" | "align" | "sink" | "cull">;
+  let settings: Pick<FoliageLayer, "density" | "scale" | "align" | "sink" | "cull" | "wind">;
   if ("preset" in source) {
     const preset = foliagePreset(source.preset);
     mesh = serializeMeshAsset(preset.mesh);

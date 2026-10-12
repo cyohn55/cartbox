@@ -1039,6 +1039,7 @@ export class MeshOverlaySurface implements DisplaySurface {
             localShadows: local?.shadows ?? null,
             shadow,
             fog: lighting.fog ?? null,
+            wind: lighting.wind ?? null,
           }
         : {}),
       // Animated emissive runs on the frame clock (60 per second), so it

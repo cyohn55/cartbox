@@ -32,6 +32,7 @@ import { EFFECT_RIM_POWER, bandAmount, camoThreshold, effectActive, type Surface
 /** The fog for one frame, with the eye it is seen from (height fog and volumes trace from it). */
 type FrameFog = SceneFog & { readonly eye: readonly [number, number, number] };
 import { LIGHTMAP_RANGE } from "../model/lightmap";
+import { windOffset, windUniform, type SceneWind } from "../model/wind";
 import { DEFAULT_DETAIL_SCALE, DEFAULT_DETAIL_STRENGTH, blendHeightOf, detailFade, emissiveAnimation, heightBlend, materialHasWater, triplanarUvs, triplanarWeights, waterTilt, waterUniform } from "../model/materialEffects";
 import { compiledGraphOf, evaluateGraph, graphRegisters, type CompiledGraph, type GraphContext } from "../model/materialGraph";
 import { EFFECT_DISTORT_POWER, materialRefracts, refractionOffset, refracts, resolveRefraction, type ResolvedRefraction } from "./refraction";
@@ -1107,6 +1108,8 @@ export interface RenderMeshSceneOptions {
   /** Distance fog over PBR materials (Modern tier), applied after tone mapping.
    *  Absent, output is byte-identical. See {@link SceneFog}. */
   readonly fog?: SceneFog | null;
+  /** The scene's wind (B6): it sways primitives that carry {@link MeshPrimitive.sway}. Absent is still air. */
+  readonly wind?: SceneWind | null;
 }
 
 /**
@@ -1133,6 +1136,7 @@ export function renderMeshScene(instances: readonly MeshSceneInstance[], options
   const fog: FrameFog | null = options.fog ? { ...options.fog, eye: cameraPositionFromView(view) } : null;
   const style = options.style ?? DEFAULT_RASTER_STYLE;
   const time = options.time ?? 0;
+  const wind = options.wind ? windUniform(options.wind, time) : null;
   const viewProj = multiply(projection, view);
 
   depth.fill(Infinity);
@@ -1175,7 +1179,7 @@ export function renderMeshScene(instances: readonly MeshSceneInstance[], options
     const mrTextures = instance.mrTextures ?? null;
     const occlusionTextures = instance.occlusionTextures ?? null;
     const emissiveTextures = instance.emissiveTextures ?? null;
-    const extras: PrimitiveExtras = { lightmap: instance.lightmapTextures ?? null, detail: instance.detailTextures ?? null, blend: instance.blendTextures ?? null, relief: instance.reliefTextures ?? null, time, effect: instance.effect ?? null };
+    const extras: PrimitiveExtras = { lightmap: instance.lightmapTextures ?? null, detail: instance.detailTextures ?? null, blend: instance.blendTextures ?? null, relief: instance.reliefTextures ?? null, time, effect: instance.effect ?? null, wind };
     const lightMvp = shadow ? multiply(shadow.lightViewProj, instance.model) : null;
     if (style.zBuffer) {
       drawMesh(instance.mesh, mvp, modelView, instance.model, normalBasis, width, height, out, depth, textures, normalTextures, materialTextures, mrTextures, occlusionTextures, emissiveTextures, extras, light, viewDir, ambient, environment, lightMvp, shadow, tonemap, ssao, lights, style, fog, deferred, localShadows);
@@ -1697,6 +1701,8 @@ interface PrimitiveExtras {
   readonly relief?: readonly (DecodedTexture | null)[] | null;
   readonly time?: number;
   readonly effect?: SurfaceEffect | null;
+  /** The frame's wind (B6), its {@link windUniform}, or null for still air. */
+  readonly wind?: readonly [number, number, number, number] | null;
 }
 
 /**
@@ -1954,6 +1960,9 @@ function eachTriangle(
     const lightmap = primitive.uvs2 ? (extras?.lightmap?.[primitiveIndex] ?? null) : null;
     const uvs2 = lightmap ? primitive.uvs2! : null;
     const blendWeights = primitive.blend ?? null;
+    // Wind (B6): a vertex that sways moves sideways in the mesh's space before anything else.
+    const sway = primitive.sway && extras?.wind && (extras.wind[0] !== 0 || extras.wind[1] !== 0) ? primitive.sway : null;
+    const windU = sway ? extras!.wind! : null;
     const texture = textures?.[primitiveIndex] ?? null;
     const normalTexture = normalTextures?.[primitiveIndex] ?? null;
     const materialTexture = materialTextures?.[primitiveIndex] ?? null;
@@ -2023,9 +2032,14 @@ function eachTriangle(
     };
 
     const project = (i: number): Vertex => {
-      const x = positions[i * 3]!;
+      let x = positions[i * 3]!;
       const y = positions[i * 3 + 1]!;
-      const z = positions[i * 3 + 2]!;
+      let z = positions[i * 3 + 2]!;
+      if (sway) {
+        const [dx, dz] = windOffset(windU!, x, z, sway[i]!);
+        x += dx;
+        z += dz;
+      }
       // View-space z (for near-plane clipping) from the model-view matrix.
       const viewZ = modelView[2]! * x + modelView[6]! * y + modelView[10]! * z + modelView[14]!;
       const cx = mvp[0]! * x + mvp[4]! * y + mvp[8]! * z + mvp[12]!;

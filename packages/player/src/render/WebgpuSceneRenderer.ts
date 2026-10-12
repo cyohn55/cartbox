@@ -106,6 +106,7 @@ import {
   WATER_STEP,
   WATER_TILT,
   waterUniform,
+  windUniform,
   graphShaderCode,
   multiplyMat4,
   type CompiledGraph,
@@ -309,6 +310,7 @@ struct Uniforms {
   refract2: vec4<f32>,  // xyz = camera up (world)
   water0: vec4<f32>,    // x = ripple strength (0 = still), y = ripples per metre, z = drift phase, w = flow direction (B5)
   terrain0: vec4<f32>,  // x = triplanar repeat (0 = UVs), y = height-blend sharpness (B6)
+  wind0: vec4<f32>,     // xy = wind x, z × strength, z = phase (0..1), w = gust (B6)
 };
 
 // A Modern-tier light (see packLights): d0 = dir/pos + kind, d1 = colour +
@@ -770,25 +772,38 @@ fn aces(x: f32) -> f32 {
 }
 
 @vertex
+// Wind (B6): windOffset in wind.ts, term for term — how far a vertex at (x, z) in its
+// mesh's space, bending sway metres per unit of wind, moves this frame.
+fn windOffset(p: vec2<f32>, sway: f32) -> vec2<f32> {
+  if (sway <= 0.0 || (u.wind0.x == 0.0 && u.wind0.y == 0.0)) { return vec2<f32>(0.0); }
+  let t = u.wind0.z;
+  let s = 0.5 + 0.35 * sin(6.283185307179586 * 8.0 * t + 0.7 * (p.x + p.y)) + 0.15 * sin(6.283185307179586 * 24.0 * t + 1.9 * p.x - 1.3 * p.y);
+  let g = 1.0 + u.wind0.w * (0.5 + 0.5 * sin(6.283185307179586 * t + 0.05 * (p.x + p.y)));
+  return u.wind0.xy * (sway * s * g);
+}
 fn vs(
   @location(0) position: vec3<f32>,
   @location(1) normal: vec3<f32>,
   @location(2) uv: vec2<f32>,
   @location(3) uv2: vec2<f32>,
   @location(4) bw: f32,
+  @location(5) sway: f32,
   @builtin(instance_index) instance: u32,
 ) -> VSOut {
   var out: VSOut;
   let t = xf[instance];
-  out.pos = t.mvp * vec4<f32>(position, 1.0);
+  var pos = position;
+  let bend = windOffset(position.xz, sway);
+  pos = vec3<f32>(pos.x + bend.x, pos.y, pos.z + bend.y);
+  out.pos = t.mvp * vec4<f32>(pos, 1.0);
   out.normal = t.nrm * normal;
   out.uv = uv;
   out.uv2 = uv2;
   out.bw = bw;
-  out.lightClip = t.lightMvp * vec4<f32>(position, 1.0);
-  out.worldPos = (t.model * vec4<f32>(position, 1.0)).xyz;
+  out.lightClip = t.lightMvp * vec4<f32>(pos, 1.0);
+  out.worldPos = (t.model * vec4<f32>(pos, 1.0)).xyz;
   out.eyeDepth = out.pos.w; // clip w = view depth, for distance fog
-  out.objPos = position;
+  out.objPos = pos;
   return out;
 }
 
@@ -1414,14 +1429,15 @@ export class WebgpuSceneRenderer implements SceneRenderer {
             entryPoint: "vs",
             buffers: [
               {
-                // Interleaved position(3) + normal(3) + uv(2) + light-map uv(2).
-                arrayStride: 44,
+                // Interleaved position(3) + normal(3) + uv(2) + light-map uv(2) + blend weight(1) + sway(1).
+                arrayStride: 48,
                 attributes: [
                   { shaderLocation: 0, offset: 0, format: "float32x3" },
                   { shaderLocation: 1, offset: 12, format: "float32x3" },
                   { shaderLocation: 2, offset: 24, format: "float32x2" },
                   { shaderLocation: 3, offset: 32, format: "float32x2" },
                   { shaderLocation: 4, offset: 40, format: "float32" },
+                  { shaderLocation: 5, offset: 44, format: "float32" },
                 ],
               },
             ],
@@ -1843,6 +1859,7 @@ export class WebgpuSceneRenderer implements SceneRenderer {
         camera,
         water: waterUniform(entry.primitive.material, draw.time ?? 0),
         mapping: resolveMapping(entry.primitive.material),
+        wind: entry.primitive.sway ? windUniform(draw.wind, draw.time ?? 0) : null,
       });
     });
     this.device.queue.writeBuffer(this.uniformBuffer, 0, this.uniformData, 0, draws.length * UNIFORM_FLOATS);
@@ -2232,7 +2249,7 @@ export class WebgpuSceneRenderer implements SceneRenderer {
         const gpu = cached[i];
         if (!primitive.dynamic || !gpu || gpu.revision === primitive.dynamic.revision) return;
         const normals = primitive.normals ?? computeSmoothNormals(primitive.positions, primitive.indices);
-        this.device.queue.writeBuffer(gpu.vertexBuffer, 0, interleaveVertices(primitive.positions, normals, primitive.uvs, primitive.uvs2 ?? null, primitive.blend ?? null));
+        this.device.queue.writeBuffer(gpu.vertexBuffer, 0, interleaveVertices(primitive.positions, normals, primitive.uvs, primitive.uvs2 ?? null, primitive.blend ?? null, primitive.sway ?? null));
         gpu.revision = primitive.dynamic.revision;
       });
       return cached;
@@ -2240,7 +2257,7 @@ export class WebgpuSceneRenderer implements SceneRenderer {
 
     const uploaded = mesh.primitives.map((primitive) => {
       const normals = primitive.normals ?? computeSmoothNormals(primitive.positions, primitive.indices);
-      const vertices = interleaveVertices(primitive.positions, normals, primitive.uvs, primitive.uvs2 ?? null, primitive.blend ?? null);
+      const vertices = interleaveVertices(primitive.positions, normals, primitive.uvs, primitive.uvs2 ?? null, primitive.blend ?? null, primitive.sway ?? null);
       const vertexBuffer = this.device.createBuffer({
         size: Math.max(40, vertices.byteLength),
         usage: 0x20 | 0x08, // VERTEX | COPY_DST

@@ -76,6 +76,7 @@ import {
   WATER_STEP,
   WATER_TILT,
   waterUniform,
+  windUniform,
   graphShaderCode,
   multiplyMat4,
   type CompiledGraph,
@@ -204,6 +205,7 @@ layout(std140) uniform Uniforms {
   vec4 refract2; // xyz = camera up (world)
   vec4 water0;   // x = ripple strength (0 = still), y = ripples per metre, z = drift phase, w = flow direction (B5)
   vec4 terrain0; // x = triplanar repeat (0 = UVs), y = height-blend sharpness (B6)
+  vec4 wind0;    // xy = wind x, z × strength, z = phase (0..1), w = gust (B6)
 } u;
 `;
 
@@ -225,6 +227,7 @@ layout(location = 1) in vec3 normal;
 layout(location = 2) in vec2 uv;
 layout(location = 3) in vec2 uv2;
 layout(location = 4) in float bw;
+layout(location = 5) in float sway;
 out float vBw;
 out vec3 vNormal;
 // Centroid (I1): a multisampled edge pixel samples its textures inside the triangle, not past its edge.
@@ -234,17 +237,28 @@ out vec4 vLightClip;
 out vec3 vWorldPos;
 out float vEyeDepth;
 out vec3 vObjPos;
+// Wind (B6): windOffset in wind.ts, term for term — how far a vertex at (x, z) in its
+// mesh's space, bending sway metres per unit of wind, moves this frame.
+vec2 windOffset(vec2 p, float sway) {
+  if (sway <= 0.0 || (u.wind0.x == 0.0 && u.wind0.y == 0.0)) { return vec2(0.0); }
+  float t = u.wind0.z;
+  float s = 0.5 + 0.35 * sin(6.283185307179586 * 8.0 * t + 0.7 * (p.x + p.y)) + 0.15 * sin(6.283185307179586 * 24.0 * t + 1.9 * p.x - 1.3 * p.y);
+  float g = 1.0 + u.wind0.w * (0.5 + 0.5 * sin(6.283185307179586 * t + 0.05 * (p.x + p.y)));
+  return u.wind0.xy * (sway * s * g);
+}
 void main() {
   InstanceXf t = xf[gl_InstanceID];
-  vec4 p = t.mvp * vec4(position, 1.0);
+  vec3 pos = position;
+  pos.xz += windOffset(position.xz, sway);
+  vec4 p = t.mvp * vec4(pos, 1.0);
   vNormal = t.nrm * normal;
   vUv = uv;
   vUv2 = uv2;
   vBw = bw;
-  vLightClip = t.lightMvp * vec4(position, 1.0);
-  vWorldPos = (t.model * vec4(position, 1.0)).xyz;
+  vLightClip = t.lightMvp * vec4(pos, 1.0);
+  vWorldPos = (t.model * vec4(pos, 1.0)).xyz;
   vEyeDepth = p.w;
-  vObjPos = position;
+  vObjPos = pos;
   // Flip Y so the framebuffer's first row is the image's top row (see the file comment).
   gl_Position = vec4(p.x, -p.y, p.z, p.w);
 }
@@ -1400,6 +1414,7 @@ export class WebglSceneRenderer implements SceneRenderer {
         camera,
         water: waterUniform(batch.primitive.material, draw.time ?? 0),
         mapping: resolveMapping(batch.primitive.material),
+        wind: batch.primitive.sway ? windUniform(draw.wind, draw.time ?? 0) : null,
       });
     });
     for (const chunk of chunks) {
@@ -2205,7 +2220,7 @@ export class WebglSceneRenderer implements SceneRenderer {
         if (!primitive.dynamic || !g || g.revision === primitive.dynamic.revision) return;
         const normals = primitive.normals ?? computeSmoothNormals(primitive.positions, primitive.indices);
         gl.bindBuffer(gl.ARRAY_BUFFER, g.vertexBuffer);
-        gl.bufferSubData(gl.ARRAY_BUFFER, 0, interleaveVertices(primitive.positions, normals, primitive.uvs, primitive.uvs2 ?? null, primitive.blend ?? null));
+        gl.bufferSubData(gl.ARRAY_BUFFER, 0, interleaveVertices(primitive.positions, normals, primitive.uvs, primitive.uvs2 ?? null, primitive.blend ?? null, primitive.sway ?? null));
         g.revision = primitive.dynamic.revision;
       });
       return cached;
@@ -2216,8 +2231,8 @@ export class WebglSceneRenderer implements SceneRenderer {
       gl.bindVertexArray(vao);
       const vertexBuffer = gl.createBuffer();
       gl.bindBuffer(gl.ARRAY_BUFFER, vertexBuffer);
-      gl.bufferData(gl.ARRAY_BUFFER, interleaveVertices(primitive.positions, normals, primitive.uvs, primitive.uvs2 ?? null, primitive.blend ?? null), primitive.dynamic ? gl.DYNAMIC_DRAW : gl.STATIC_DRAW);
-      // Interleaved position(3) + normal(3) + uv(2) + light-map uv(2) + blend weight(1), as the WebGPU vertex layout.
+      gl.bufferData(gl.ARRAY_BUFFER, interleaveVertices(primitive.positions, normals, primitive.uvs, primitive.uvs2 ?? null, primitive.blend ?? null, primitive.sway ?? null), primitive.dynamic ? gl.DYNAMIC_DRAW : gl.STATIC_DRAW);
+      // Interleaved position(3) + normal(3) + uv(2) + light-map uv(2) + blend weight(1) + sway(1), as the WebGPU vertex layout.
       const stride = VERTEX_FLOATS * 4;
       gl.enableVertexAttribArray(0);
       gl.vertexAttribPointer(0, 3, gl.FLOAT, false, stride, 0);
@@ -2229,6 +2244,8 @@ export class WebglSceneRenderer implements SceneRenderer {
       gl.vertexAttribPointer(3, 2, gl.FLOAT, false, stride, 32);
       gl.enableVertexAttribArray(4);
       gl.vertexAttribPointer(4, 1, gl.FLOAT, false, stride, 40);
+      gl.enableVertexAttribArray(5);
+      gl.vertexAttribPointer(5, 1, gl.FLOAT, false, stride, 44);
       const indexBuffer = gl.createBuffer();
       gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, indexBuffer);
       gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, primitive.indices, gl.STATIC_DRAW);

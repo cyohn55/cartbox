@@ -16,6 +16,7 @@
  * multiple lights, tone mapping, and shadows (see AAA_TIER_ROADMAP.md).
  */
 
+import { parseWind, type SceneWind } from "./wind";
 import { decodeLightProbes, type LightProbeGrid, type StoredLightProbes } from "./lightProbes";
 import {
   orthographicMatrix,
@@ -64,6 +65,8 @@ export interface SceneLighting {
   readonly sky?: ProceduralSky | null;
   /** Optional distance fog over PBR geometry. Null = no fog. */
   readonly fog?: SceneFog | null;
+  /** The scene's wind (B6; see wind.ts): it sways foliage. Absent = still air. */
+  readonly wind?: SceneWind | null;
   /**
    * Reflection probes (see reflectionProbes.ts): shiny surfaces inside a
    * probe's box reflect the scene around it rather than the sky.
@@ -158,6 +161,7 @@ export function parseSceneLighting(raw: unknown): SceneLighting | null {
   // Only present when authored, so a rig without a dome/fog round-trips unchanged.
   const sky = parseSky(record.sky);
   const fog = parseFog(record.fog);
+  const wind = parseWind(record.wind);
   const probes = parseReflectionProbes(record.probes);
   const shafts = parseShafts(record.shafts);
   // Kept only when it decodes: a bad grid is dropped, never half-used.
@@ -182,6 +186,7 @@ export function parseSceneLighting(raw: unknown): SceneLighting | null {
     lights,
     ...(sky ? { sky } : {}),
     ...(fog ? { fog } : {}),
+    ...(wind ? { wind } : {}),
     ...(probes.length > 0 ? { probes } : {}),
     ...(shafts ? { shafts } : {}),
     ...(lightProbes ? { lightProbes } : {}),
@@ -439,7 +444,7 @@ export function defaultSunShafts(): SunShafts {
 /** Patch the top-level scalar/flag fields (ambient, exposure, tonemap, shadows). */
 export function patchSceneLighting(
   lighting: SceneLighting,
-  patch: Partial<Pick<SceneLighting, "ambient" | "exposure" | "tonemap" | "shadows">>,
+  patch: Partial<Pick<SceneLighting, "ambient" | "exposure" | "tonemap" | "shadows" | "wind">>,
 ): SceneLighting {
   return { ...lighting, ...patch };
 }

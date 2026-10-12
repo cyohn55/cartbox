@@ -212,7 +212,23 @@ Each item lands in all three renderers (WebGL2, WebGPU, and the software referen
     - The terrain panel gains **Triplanar cliffs** and **Layer edges**. Beaver Creek's canyon uses both (its grey box has no textures yet; B9 adds them).
     - Projections and weights are in the mesh's space, but the weights use the world normal. A terrain under a *rotated* parent would weigh its projections slightly off. None is rotated today.
     - *Tests:* `terrain-triplanar.test.ts` (the weights, the top projection equal to planar UVs, height blending, the fields' round trip, the packing, a cliff that unstretches while flat ground is unchanged); `webgl-parity.test.ts` (the cliff).
-  - Wind, foliage cards and the creek-bank presets: next.
+  - **Wind: done.**
+    - A scene's lighting takes `wind: { direction, strength, gust }` (`wind.ts`). A primitive takes a per-vertex `sway`: metres it bends per unit of wind, zero at the root.
+    - A vertex moves sideways in its mesh's space, downwind and back. It has a slow sway, a quicker flutter, and a gust every 16 s, varied across the ground.
+    - The phase is wrapped on the CPU, and the period is exact, so the motion never jumps.
+    - In the renderers:
+      - The software rasteriser moves vertices by `windOffset`.
+      - Both scene shaders run the same `windOffset` in their vertex stage, from a `wind0` uniform at byte 880 (896 bytes used) and a 12th vertex float (stride 48).
+      - In WebGL2, Chromium matches the software frame on a meadow of grass and reeds.
+    - A foliage layer takes `wind` (its flexibility, 0..4). `foliageBlocks` gives each merged vertex its sway by its height above its copy's root, at the copy's size.
+    - Presets:
+      - Grass (3) and pines (0.5) now sway.
+      - New **reeds** (4) and **broadleaf** trees (0.7) are added for the creek banks.
+      - Boulders and drifts stay stiff.
+    - The lighting panel gains **Wind** (strength, gusts, direction). Each foliage layer gains **Sway**.
+    - Shadow maps are drawn on the CPU from still geometry, so shadows don't sway. The editor's viewport draws a still frame; wind moves in play.
+    - *Tests:* `wind.test.ts` (reading, phase wrapping, leaning downwind within bounds, the period, sway by height, the layer's stored flexibility, the packing, a frame that sways and moves while stiff plants never do); `webgl-parity.test.ts` (the meadow).
+  - **Left:** alpha-tested foliage cards (grass blades and pine needles, with a far LOD), ferns and mossy boulders.
 
 - [ ] **B7. Infinite-style daylight.**
   - Soft shadows with more than one cascade, sized for a canyon.

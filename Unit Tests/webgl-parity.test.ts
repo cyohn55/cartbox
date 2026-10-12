@@ -285,6 +285,21 @@ describe.skipIf(!chromiumPath)("WebGL2 parity in a real browser", () => {
     }
   }, 60_000);
 
+  it("sways grass and reeds in the wind like the software rasteriser (B6)", async () => {
+    const result = await run("wind");
+    expect(result.drawn).toBeGreaterThan(1000);
+    if (exact) {
+      // The sway's sines are float32 on the GPU: a blade's edge can land a pixel over.
+      expect(result.far, JSON.stringify(result.diffs)).toBeLessThanOrEqual(result.drawn * 0.02);
+    }
+    const swaying = await antialiasedFrame("wind");
+    const still = await antialiasedFrame("windStill");
+    expect(swaying.error).toBe(0);
+    let changed = 0;
+    for (let i = 0; i < swaying.out.length; i += 4) if (Math.abs(swaying.out[i]! - still.out[i]!) + Math.abs(swaying.out[i + 1]! - still.out[i + 1]!) > 20) changed += 1;
+    expect(changed).toBeGreaterThan(30);
+  }, 60_000);
+
   it("shades forty point lights and four spots through the light clusters like the software rasteriser", async () => {
     const result = await run("manyLights");
     expect(result.drawn).toBeGreaterThan(100);

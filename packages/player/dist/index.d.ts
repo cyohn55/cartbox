@@ -1,4 +1,4 @@
-import { MeshSceneInstance, MeshAsset, Mat4, ScenePropValue, PhysicsSpec, AnimatorSpec, AttachedComponent, SceneLighting, PhysicsWorldSettings, SceneTimeline, SceneLevel, NavMesh, Terrain, SceneStreaming, ParticleEffect, DecalDef, DecalMark, RagdollBox, DebrisDef, LodChain, SceneAudio, ComponentDef, StreamGroup, JointKind, JointSpec, ActionRebind, DecodedTexture, ColorFilter, AccessibilitySettings, EncodedImage, UiDocument, InputAction, StringTable, EnvironmentLight, ShadowInput, ToneMap, SceneLight, LocalShadows, SceneFog, RasterStyle, MeshMaterial, ResolvedLayers, ResolvedRefraction, SurfaceEffect, AnimatorOp, NavGraph, AnimationCue } from '@cartbox/editor';
+import { MeshSceneInstance, MeshAsset, Mat4, ScenePropValue, PhysicsSpec, AnimatorSpec, AttachedComponent, SceneLighting, PhysicsWorldSettings, SceneTimeline, SceneLevel, NavMesh, Terrain, SceneStreaming, ParticleEffect, DecalDef, DecalMark, RagdollBox, DebrisDef, LodChain, SceneAudio, ComponentDef, StreamGroup, JointKind, JointSpec, ActionRebind, DecodedTexture, ColorFilter, AccessibilitySettings, EncodedImage, UiDocument, InputAction, StringTable, EnvironmentLight, ShadowInput, ToneMap, SceneLight, LocalShadows, SceneFog, SceneWind, RasterStyle, MeshMaterial, ResolvedLayers, ResolvedRefraction, SurfaceEffect, AnimatorOp, NavGraph, AnimationCue } from '@cartbox/editor';
 
 /**
  * The runtime mesh scene: the cart's mesh sidecar resolved into placed instances
@@ -3707,6 +3707,8 @@ interface SceneDraw {
     readonly fog?: SceneFog | null;
     /** Seconds since the scene started, for animated emissive (scroll and pulse). */
     readonly time?: number;
+    /** The scene's wind (B6): it sways primitives that carry per-vertex sway. Omitted is still air. */
+    readonly wind?: SceneWind | null;
     /**
      * Skip instances whose world AABB is entirely outside the camera frustum. A
      * correct cull is output-identical, so it is a pure perf win; default off.
@@ -4442,9 +4444,11 @@ declare class WebgpuSceneRenderer implements SceneRenderer {
  *                                    waterUniform in materialEffects.ts)
  * 864  terrain0   vec4<f32>    16   x = triplanar repeat (0 = UV mapping), y = height-blend
  *                                    sharpness (0 = an even mix) (B6)
+ * 880  wind0      vec4<f32>    16   xy = the wind's x and z × strength, z = its phase (0..1),
+ *                                    w = gust (B6; windUniform in wind.ts)
  * ```
  *
- * 880 bytes used, padded to a 1024-byte stride (a 256-byte multiple a dynamic
+ * 896 bytes used, padded to a 1024-byte stride (a 256-byte multiple a dynamic
  * uniform offset can address), so one buffer still holds every draw in a
  * frame — uniforms are written per batch, not per copy, so the stride costs
  * little. The metallic-roughness inputs and the environment carry the Modern
@@ -4459,7 +4463,7 @@ declare const UNIFORM_STRIDE = 1024;
  * bind group layout's `minBindingSize` must be: it makes a WGSL struct that
  * grows past what this module writes fail at pipeline creation.
  */
-declare const UNIFORM_BYTES_USED = 880;
+declare const UNIFORM_BYTES_USED = 896;
 /** The same stride counted in float32s, which is how `writeBuffer` sizes it. */
 declare const UNIFORM_FLOATS: number;
 /**
@@ -4669,6 +4673,8 @@ interface InstanceUniform {
     readonly water?: readonly [number, number, number, number] | null;
     /** Triplanar mapping and height blending (B6), from {@link resolveMapping}, or null/omitted for neither. */
     readonly mapping?: ResolvedMapping | null;
+    /** The frame's wind (B6): its windUniform, or null/omitted for still air. */
+    readonly wind?: readonly [number, number, number, number] | null;
 }
 /** A draw's triplanar repeat (0 = UV mapping) and height-blend sharpness (0 = an even mix) (B6). */
 interface ResolvedMapping {
@@ -4707,15 +4713,15 @@ declare function writeInstanceTransform(target: Float32Array, index: number, tra
  * every normal, which reads as bad lighting rather than as a layout bug.
  */
 declare function writeInstanceUniform(target: Float32Array, index: number, uniform: InstanceUniform): void;
-/** Floats per vertex in the interleaved buffer: position(3) + normal(3) + uv(2) + light-map uv(2) + blend weight(1). */
-declare const VERTEX_FLOATS = 11;
+/** Floats per vertex in the interleaved buffer: position(3) + normal(3) + uv(2) + light-map uv(2) + blend weight(1) + sway(1). */
+declare const VERTEX_FLOATS = 12;
 /**
  * Interleave the separate attribute streams into the single buffer the pipeline
- * declares (arrayStride 44). A primitive with no UVs (or no light-map UVs, or no blend weights) gets
+ * declares (arrayStride 48). A primitive with no UVs (or no light-map UVs, blend weights or sway) gets
  * zeros, which is what the software path effectively uses — and the shader
  * ignores them anyway because the matching texture flag is off.
  */
-declare function interleaveVertices(positions: Float32Array, normals: Float32Array, uvs: Float32Array | null, uvs2?: Float32Array | null, blend?: Float32Array | null): Float32Array;
+declare function interleaveVertices(positions: Float32Array, normals: Float32Array, uvs: Float32Array | null, uvs2?: Float32Array | null, blend?: Float32Array | null, sway?: Float32Array | null): Float32Array;
 /**
  * Strip WebGPU's row padding from a mapped readback.
  *

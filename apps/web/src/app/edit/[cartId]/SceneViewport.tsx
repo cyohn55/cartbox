@@ -584,6 +584,7 @@ export function SceneViewport({ sidecar, onSidecarChange, selectedIds, onSelectI
               localShadows: localShadows?.shadows ?? null,
               shadow: shadowMap,
               fog: fogOn ? (lighting.fog ?? null) : null,
+              wind: lighting.wind ?? null,
             }
           : {}),
       };

@@ -11425,6 +11425,7 @@ var SoftwareSceneRenderer = class {
       localShadows: draw.localShadows,
       fog: draw.fog,
       time: draw.time,
+      wind: draw.wind,
       style: this.style
     });
   }
@@ -12179,7 +12180,8 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
         lights,
         localShadows: local?.shadows ?? null,
         shadow,
-        fog: lighting.fog ?? null
+        fog: lighting.fog ?? null,
+        wind: lighting.wind ?? null
       } : {},
       // Animated emissive runs on the frame clock (60 per second), so it
       // steps with the game rather than the wall clock.
@@ -13445,6 +13447,7 @@ import {
   WATER_STEP,
   WATER_TILT,
   waterUniform,
+  windUniform,
   graphShaderCode,
   multiplyMat4 as multiplyMat45
 } from "@cartbox/editor";
@@ -13469,7 +13472,7 @@ import {
   fogIsVolumetric
 } from "@cartbox/editor";
 var UNIFORM_STRIDE = 1024;
-var UNIFORM_BYTES_USED = 880;
+var UNIFORM_BYTES_USED = 896;
 var UNIFORM_FLOATS = UNIFORM_STRIDE / 4;
 var LIGHT_FLOATS = 16;
 var PROBE_FLOATS = 16;
@@ -13551,6 +13554,7 @@ var OFFSET_REFRACT1 = 204;
 var OFFSET_REFRACT2 = 208;
 var OFFSET_WATER0 = 212;
 var OFFSET_TERRAIN0 = 216;
+var OFFSET_WIND0 = 220;
 var DEFAULT_LIGHT = [0.4, 0.8, 0.6];
 var DEFAULT_AMBIENT2 = 0.35;
 function resolveLight(direction, ambient) {
@@ -13789,12 +13793,17 @@ function writeInstanceUniform(target, index, uniform) {
   target[base + OFFSET_TERRAIN0 + 1] = mapping ? mapping.blendSharpness : 0;
   target[base + OFFSET_TERRAIN0 + 2] = 0;
   target[base + OFFSET_TERRAIN0 + 3] = 0;
+  const wind = uniform.wind ?? null;
+  target[base + OFFSET_WIND0] = wind ? wind[0] : 0;
+  target[base + OFFSET_WIND0 + 1] = wind ? wind[1] : 0;
+  target[base + OFFSET_WIND0 + 2] = wind ? wind[2] : 0;
+  target[base + OFFSET_WIND0 + 3] = wind ? wind[3] : 0;
 }
 function refractionCamera(view, height) {
   return { right: [view[0], view[4], view[8]], up: [view[1], view[5], view[9]], height };
 }
-var VERTEX_FLOATS = 11;
-function interleaveVertices(positions, normals, uvs, uvs2 = null, blend = null) {
+var VERTEX_FLOATS = 12;
+function interleaveVertices(positions, normals, uvs, uvs2 = null, blend = null, sway2 = null) {
   const count = Math.floor(positions.length / 3);
   const out = new Float32Array(count * VERTEX_FLOATS);
   for (let i = 0; i < count; i += 1) {
@@ -13810,6 +13819,7 @@ function interleaveVertices(positions, normals, uvs, uvs2 = null, blend = null) 
     out[to + 8] = uvs2 ? uvs2[i * 2] ?? 0 : 0;
     out[to + 9] = uvs2 ? uvs2[i * 2 + 1] ?? 0 : 0;
     out[to + 10] = blend ? blend[i] ?? 0 : 0;
+    out[to + 11] = sway2 ? sway2[i] ?? 0 : 0;
   }
   return out;
 }
@@ -14586,6 +14596,7 @@ layout(std140) uniform Uniforms {
   vec4 refract2; // xyz = camera up (world)
   vec4 water0;   // x = ripple strength (0 = still), y = ripples per metre, z = drift phase, w = flow direction (B5)
   vec4 terrain0; // x = triplanar repeat (0 = UVs), y = height-blend sharpness (B6)
+  vec4 wind0;    // xy = wind x, z \xD7 strength, z = phase (0..1), w = gust (B6)
 } u;
 `
 );
@@ -14609,6 +14620,7 @@ layout(location = 1) in vec3 normal;
 layout(location = 2) in vec2 uv;
 layout(location = 3) in vec2 uv2;
 layout(location = 4) in float bw;
+layout(location = 5) in float sway;
 out float vBw;
 out vec3 vNormal;
 // Centroid (I1): a multisampled edge pixel samples its textures inside the triangle, not past its edge.
@@ -14618,17 +14630,28 @@ out vec4 vLightClip;
 out vec3 vWorldPos;
 out float vEyeDepth;
 out vec3 vObjPos;
+// Wind (B6): windOffset in wind.ts, term for term \u2014 how far a vertex at (x, z) in its
+// mesh's space, bending sway metres per unit of wind, moves this frame.
+vec2 windOffset(vec2 p, float sway) {
+  if (sway <= 0.0 || (u.wind0.x == 0.0 && u.wind0.y == 0.0)) { return vec2(0.0); }
+  float t = u.wind0.z;
+  float s = 0.5 + 0.35 * sin(6.283185307179586 * 8.0 * t + 0.7 * (p.x + p.y)) + 0.15 * sin(6.283185307179586 * 24.0 * t + 1.9 * p.x - 1.3 * p.y);
+  float g = 1.0 + u.wind0.w * (0.5 + 0.5 * sin(6.283185307179586 * t + 0.05 * (p.x + p.y)));
+  return u.wind0.xy * (sway * s * g);
+}
 void main() {
   InstanceXf t = xf[gl_InstanceID];
-  vec4 p = t.mvp * vec4(position, 1.0);
+  vec3 pos = position;
+  pos.xz += windOffset(position.xz, sway);
+  vec4 p = t.mvp * vec4(pos, 1.0);
   vNormal = t.nrm * normal;
   vUv = uv;
   vUv2 = uv2;
   vBw = bw;
-  vLightClip = t.lightMvp * vec4(position, 1.0);
-  vWorldPos = (t.model * vec4(position, 1.0)).xyz;
+  vLightClip = t.lightMvp * vec4(pos, 1.0);
+  vWorldPos = (t.model * vec4(pos, 1.0)).xyz;
   vEyeDepth = p.w;
-  vObjPos = position;
+  vObjPos = pos;
   // Flip Y so the framebuffer's first row is the image's top row (see the file comment).
   gl_Position = vec4(p.x, -p.y, p.z, p.w);
 }
@@ -15761,7 +15784,8 @@ var WebglSceneRenderer = class _WebglSceneRenderer {
         refraction: batch.refract && refractOk ? resolveRefraction2(batch.primitive.material, effectActive3(batch.effect) ? batch.effect : null) : null,
         camera,
         water: waterUniform(batch.primitive.material, draw.time ?? 0),
-        mapping: resolveMapping(batch.primitive.material)
+        mapping: resolveMapping(batch.primitive.material),
+        wind: batch.primitive.sway ? windUniform(draw.wind, draw.time ?? 0) : null
       });
     });
     for (const chunk of chunks2) {
@@ -16441,7 +16465,7 @@ var WebglSceneRenderer = class _WebglSceneRenderer {
         if (!primitive.dynamic || !g || g.revision === primitive.dynamic.revision) return;
         const normals = primitive.normals ?? computeSmoothNormals(primitive.positions, primitive.indices);
         gl.bindBuffer(gl.ARRAY_BUFFER, g.vertexBuffer);
-        gl.bufferSubData(gl.ARRAY_BUFFER, 0, interleaveVertices(primitive.positions, normals, primitive.uvs, primitive.uvs2 ?? null, primitive.blend ?? null));
+        gl.bufferSubData(gl.ARRAY_BUFFER, 0, interleaveVertices(primitive.positions, normals, primitive.uvs, primitive.uvs2 ?? null, primitive.blend ?? null, primitive.sway ?? null));
         g.revision = primitive.dynamic.revision;
       });
       return cached;
@@ -16452,7 +16476,7 @@ var WebglSceneRenderer = class _WebglSceneRenderer {
       gl.bindVertexArray(vao);
       const vertexBuffer = gl.createBuffer();
       gl.bindBuffer(gl.ARRAY_BUFFER, vertexBuffer);
-      gl.bufferData(gl.ARRAY_BUFFER, interleaveVertices(primitive.positions, normals, primitive.uvs, primitive.uvs2 ?? null, primitive.blend ?? null), primitive.dynamic ? gl.DYNAMIC_DRAW : gl.STATIC_DRAW);
+      gl.bufferData(gl.ARRAY_BUFFER, interleaveVertices(primitive.positions, normals, primitive.uvs, primitive.uvs2 ?? null, primitive.blend ?? null, primitive.sway ?? null), primitive.dynamic ? gl.DYNAMIC_DRAW : gl.STATIC_DRAW);
       const stride = VERTEX_FLOATS * 4;
       gl.enableVertexAttribArray(0);
       gl.vertexAttribPointer(0, 3, gl.FLOAT, false, stride, 0);
@@ -16464,6 +16488,8 @@ var WebglSceneRenderer = class _WebglSceneRenderer {
       gl.vertexAttribPointer(3, 2, gl.FLOAT, false, stride, 32);
       gl.enableVertexAttribArray(4);
       gl.vertexAttribPointer(4, 1, gl.FLOAT, false, stride, 40);
+      gl.enableVertexAttribArray(5);
+      gl.vertexAttribPointer(5, 1, gl.FLOAT, false, stride, 44);
       const indexBuffer = gl.createBuffer();
       gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, indexBuffer);
       gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, primitive.indices, gl.STATIC_DRAW);
@@ -16608,6 +16634,7 @@ import {
   WATER_STEP as WATER_STEP2,
   WATER_TILT as WATER_TILT2,
   waterUniform as waterUniform2,
+  windUniform as windUniform2,
   graphShaderCode as graphShaderCode2,
   multiplyMat4 as multiplyMat46
 } from "@cartbox/editor";
@@ -16744,6 +16771,7 @@ struct Uniforms {
   refract2: vec4<f32>,  // xyz = camera up (world)
   water0: vec4<f32>,    // x = ripple strength (0 = still), y = ripples per metre, z = drift phase, w = flow direction (B5)
   terrain0: vec4<f32>,  // x = triplanar repeat (0 = UVs), y = height-blend sharpness (B6)
+  wind0: vec4<f32>,     // xy = wind x, z \xD7 strength, z = phase (0..1), w = gust (B6)
 };
 
 // A Modern-tier light (see packLights): d0 = dir/pos + kind, d1 = colour +
@@ -17205,25 +17233,38 @@ fn aces(x: f32) -> f32 {
 }
 
 @vertex
+// Wind (B6): windOffset in wind.ts, term for term \u2014 how far a vertex at (x, z) in its
+// mesh's space, bending sway metres per unit of wind, moves this frame.
+fn windOffset(p: vec2<f32>, sway: f32) -> vec2<f32> {
+  if (sway <= 0.0 || (u.wind0.x == 0.0 && u.wind0.y == 0.0)) { return vec2<f32>(0.0); }
+  let t = u.wind0.z;
+  let s = 0.5 + 0.35 * sin(6.283185307179586 * 8.0 * t + 0.7 * (p.x + p.y)) + 0.15 * sin(6.283185307179586 * 24.0 * t + 1.9 * p.x - 1.3 * p.y);
+  let g = 1.0 + u.wind0.w * (0.5 + 0.5 * sin(6.283185307179586 * t + 0.05 * (p.x + p.y)));
+  return u.wind0.xy * (sway * s * g);
+}
 fn vs(
   @location(0) position: vec3<f32>,
   @location(1) normal: vec3<f32>,
   @location(2) uv: vec2<f32>,
   @location(3) uv2: vec2<f32>,
   @location(4) bw: f32,
+  @location(5) sway: f32,
   @builtin(instance_index) instance: u32,
 ) -> VSOut {
   var out: VSOut;
   let t = xf[instance];
-  out.pos = t.mvp * vec4<f32>(position, 1.0);
+  var pos = position;
+  let bend = windOffset(position.xz, sway);
+  pos = vec3<f32>(pos.x + bend.x, pos.y, pos.z + bend.y);
+  out.pos = t.mvp * vec4<f32>(pos, 1.0);
   out.normal = t.nrm * normal;
   out.uv = uv;
   out.uv2 = uv2;
   out.bw = bw;
-  out.lightClip = t.lightMvp * vec4<f32>(position, 1.0);
-  out.worldPos = (t.model * vec4<f32>(position, 1.0)).xyz;
+  out.lightClip = t.lightMvp * vec4<f32>(pos, 1.0);
+  out.worldPos = (t.model * vec4<f32>(pos, 1.0)).xyz;
   out.eyeDepth = out.pos.w; // clip w = view depth, for distance fog
-  out.objPos = position;
+  out.objPos = pos;
   return out;
 }
 
@@ -17767,14 +17808,15 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
             entryPoint: "vs",
             buffers: [
               {
-                // Interleaved position(3) + normal(3) + uv(2) + light-map uv(2).
-                arrayStride: 44,
+                // Interleaved position(3) + normal(3) + uv(2) + light-map uv(2) + blend weight(1) + sway(1).
+                arrayStride: 48,
                 attributes: [
                   { shaderLocation: 0, offset: 0, format: "float32x3" },
                   { shaderLocation: 1, offset: 12, format: "float32x3" },
                   { shaderLocation: 2, offset: 24, format: "float32x2" },
                   { shaderLocation: 3, offset: 32, format: "float32x2" },
-                  { shaderLocation: 4, offset: 40, format: "float32" }
+                  { shaderLocation: 4, offset: 40, format: "float32" },
+                  { shaderLocation: 5, offset: 44, format: "float32" }
                 ]
               }
             ]
@@ -18139,7 +18181,8 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
         refraction: entry.refract ? resolveRefraction3(entry.primitive.material, effectActive4(entry.effect) ? entry.effect : null) : null,
         camera,
         water: waterUniform2(entry.primitive.material, draw.time ?? 0),
-        mapping: resolveMapping(entry.primitive.material)
+        mapping: resolveMapping(entry.primitive.material),
+        wind: entry.primitive.sway ? windUniform2(draw.wind, draw.time ?? 0) : null
       });
     });
     this.device.queue.writeBuffer(this.uniformBuffer, 0, this.uniformData, 0, draws.length * UNIFORM_FLOATS);
@@ -18480,14 +18523,14 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
         const gpu = cached[i];
         if (!primitive.dynamic || !gpu || gpu.revision === primitive.dynamic.revision) return;
         const normals = primitive.normals ?? computeSmoothNormals2(primitive.positions, primitive.indices);
-        this.device.queue.writeBuffer(gpu.vertexBuffer, 0, interleaveVertices(primitive.positions, normals, primitive.uvs, primitive.uvs2 ?? null, primitive.blend ?? null));
+        this.device.queue.writeBuffer(gpu.vertexBuffer, 0, interleaveVertices(primitive.positions, normals, primitive.uvs, primitive.uvs2 ?? null, primitive.blend ?? null, primitive.sway ?? null));
         gpu.revision = primitive.dynamic.revision;
       });
       return cached;
     }
     const uploaded = mesh.primitives.map((primitive) => {
       const normals = primitive.normals ?? computeSmoothNormals2(primitive.positions, primitive.indices);
-      const vertices = interleaveVertices(primitive.positions, normals, primitive.uvs, primitive.uvs2 ?? null, primitive.blend ?? null);
+      const vertices = interleaveVertices(primitive.positions, normals, primitive.uvs, primitive.uvs2 ?? null, primitive.blend ?? null, primitive.sway ?? null);
       const vertexBuffer = this.device.createBuffer({
         size: Math.max(40, vertices.byteLength),
         usage: 32 | 8

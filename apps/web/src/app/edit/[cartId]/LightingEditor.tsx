@@ -25,6 +25,7 @@ import {
   defaultProceduralSky,
   defaultSceneFog,
   defaultSceneLighting,
+  DEFAULT_WIND,
   defaultSunShafts,
   infiniteDaylightLighting,
   INFINITE_TINTS,
@@ -166,6 +167,7 @@ export function LightingEditor({ lighting, onChange }: LightingEditorProps) {
 
       <SkyDomeControls lighting={lighting} onChange={onChange} />
       <FogControls lighting={lighting} onChange={onChange} />
+      <WindControls lighting={lighting} onChange={onChange} />
       <ShaftControls lighting={lighting} onChange={onChange} />
       <ProbeControls lighting={lighting} onChange={onChange} />
       <TintControls lighting={lighting} onChange={onChange} />
@@ -679,6 +681,34 @@ function CloudLayerControls({ sky, patch }: { sky: ProceduralSky; patch: (next: 
           </div>
         );
       })}
+    </>
+  );
+}
+
+/** The scene's wind (B6): it sways foliage layers that have Sway set (Terrain panel). */
+function WindControls({ lighting, onChange }: LightingEditorProps & { lighting: SceneLighting }) {
+  const wind = lighting.wind ?? null;
+  const patch = (next: Partial<NonNullable<SceneLighting["wind"]>>) => wind && onChange(patchSceneLighting(lighting, { wind: { ...wind, ...next } }));
+  const degrees = wind ? Math.round((wind.direction * 180) / Math.PI) : 0;
+  return (
+    <>
+      <SegmentedControl
+        label="Wind"
+        ariaLabel="Wind"
+        selected={wind ? "on" : "off"}
+        onSelect={(id) => onChange(patchSceneLighting(lighting, { wind: id === "on" ? (wind ?? DEFAULT_WIND) : null }))}
+        options={[
+          { id: "off", label: "Still" },
+          { id: "on", label: "Breeze" },
+        ]}
+      />
+      {wind && (
+        <>
+          <RangeControl label="Strength" nested min={0} max={2} step={0.05} value={wind.strength} ariaLabel="Wind strength" display={wind.strength.toFixed(2)} onChange={(strength) => patch({ strength })} />
+          <RangeControl label="Gusts" nested min={0} max={1} step={0.05} value={wind.gust} ariaLabel="Wind gusts" display={`${Math.round(wind.gust * 100)}%`} onChange={(gust) => patch({ gust })} />
+          <RangeControl label="Direction" nested min={-180} max={180} step={5} value={degrees} ariaLabel="Wind direction" display={`${degrees}°`} onChange={(deg) => patch({ direction: (deg * Math.PI) / 180 })} />
+        </>
+      )}
     </>
   );
 }

@@ -29,6 +29,7 @@ import {
   renderGeometryBuffers,
   renderMeshScene,
   type MeshSceneInstance,
+  type SceneWind,
 } from "@cartbox/editor";
 import type { EnvironmentLight, LocalShadows, Mat4, RasterStyle, SceneFog, SceneLight, ShadowInput, ToneMap } from "@cartbox/editor";
 
@@ -129,6 +130,8 @@ export interface SceneDraw {
   readonly fog?: SceneFog | null;
   /** Seconds since the scene started, for animated emissive (scroll and pulse). */
   readonly time?: number;
+  /** The scene's wind (B6): it sways primitives that carry per-vertex sway. Omitted is still air. */
+  readonly wind?: SceneWind | null;
   /**
    * Skip instances whose world AABB is entirely outside the camera frustum. A
    * correct cull is output-identical, so it is a pure perf win; default off.
@@ -242,6 +245,7 @@ export class SoftwareSceneRenderer implements SceneRenderer {
       localShadows: draw.localShadows,
       fog: draw.fog,
       time: draw.time,
+      wind: draw.wind,
       style: this.style,
     });
   }
