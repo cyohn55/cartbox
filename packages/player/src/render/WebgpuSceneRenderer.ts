@@ -93,6 +93,7 @@ import {
   LOCAL_SHADOW_GRID,
   LOCAL_SHADOW_TILE,
   MAX_LOCAL_SHADOW_TILES,
+  NEAR_CASCADE_BLEND,
   NEAR_CASCADE_EDGE,
   CLUSTER_CELLS,
   CLUSTER_INDEX_CAP,
@@ -488,24 +489,37 @@ fn shadowAt(ndc: vec3<f32>, bias0: f32, slope: f32, ox: f32, cosL: f32) -> f32 {
     if (shadowTap(sx, sy, z, ox) < 0.5) { return 1.0 - u.shadow.w; }
     return 1.0;
   }
-  let lit = (shadowTap(sx - 0.5, sy - 0.5, z, ox) + shadowTap(sx + 0.5, sy - 0.5, z, ox)
-           + shadowTap(sx - 0.5, sy + 0.5, z, ox) + shadowTap(sx + 0.5, sy + 0.5, z, ox)) * 0.25;
-  return 1.0 - u.shadow.w * (1.0 - lit);
+  if (u.shadow2.y < 1.5) {
+    let lit = (shadowTap(sx - 0.5, sy - 0.5, z, ox) + shadowTap(sx + 0.5, sy - 0.5, z, ox)
+             + shadowTap(sx - 0.5, sy + 0.5, z, ox) + shadowTap(sx + 0.5, sy + 0.5, z, ox)) * 0.25;
+    return 1.0 - u.shadow.w * (1.0 - lit);
+  }
+  // Soft (B7): a 4×4 neighbourhood, texel-spaced round the point.
+  var lit = 0.0;
+  for (var j = 0; j < 4; j = j + 1) {
+    for (var i = 0; i < 4; i = i + 1) { lit = lit + shadowTap(sx + f32(i) - 1.5, sy + f32(j) - 1.5, z, ox); }
+  }
+  return 1.0 - u.shadow.w * (1.0 - lit / 16.0);
 }
 // The sun's shadow (mirrors sunShadowVisibility): the near cascade (EP8b) when
 // the point sits well inside it, else the main map.
 fn shadowFactor(lightClip: vec4<f32>, worldPos: vec3<f32>, cosL: f32) -> f32 {
   if (u.shadow.x < 0.5) { return 1.0; }
+  let ndc = lightClip.xyz / lightClip.w;
+  let inMain = !(ndc.x < -1.0 || ndc.x > 1.0 || ndc.y < -1.0 || ndc.y > 1.0 || ndc.z < -1.0 || ndc.z > 1.0);
   if (frame.nearShadow.x > 0.5) {
     let n = (frame.nearMvp * vec4<f32>(worldPos, 1.0)).xyz;
-    if (abs(n.x) < ${NEAR_CASCADE_EDGE} && abs(n.y) < ${NEAR_CASCADE_EDGE} && abs(n.z) <= 1.0) {
-      return shadowAt(n, frame.nearShadow.y, frame.nearShadow.z, u.shadow.y, cosL);
+    let m = max(abs(n.x), abs(n.y));
+    if (m < ${NEAR_CASCADE_EDGE} && abs(n.z) <= 1.0) {
+      let v = shadowAt(n, frame.nearShadow.y, frame.nearShadow.z, u.shadow.y, cosL);
+      if (m <= ${NEAR_CASCADE_BLEND}) { return v; }
+      // Fading to the main map toward the cascade's edge (B7).
+      var mv = 1.0;
+      if (inMain) { mv = shadowAt(ndc, u.shadow.z, u.shadow2.x, 0.0, cosL); }
+      return v + (mv - v) * ((m - ${NEAR_CASCADE_BLEND}) / (${NEAR_CASCADE_EDGE} - ${NEAR_CASCADE_BLEND}));
     }
   }
-  let ndc = lightClip.xyz / lightClip.w;
-  if (ndc.x < -1.0 || ndc.x > 1.0 || ndc.y < -1.0 || ndc.y > 1.0 || ndc.z < -1.0 || ndc.z > 1.0) {
-    return 1.0;
-  }
+  if (!inMain) { return 1.0; }
   return shadowAt(ndc, u.shadow.z, u.shadow2.x, 0.0, cosL);
 }
 
@@ -1784,7 +1798,7 @@ export class WebgpuSceneRenderer implements SceneRenderer {
       }
     }
     const shadowParams = shadow
-      ? { size: shadow.size, bias: shadow.bias ?? 0.003, strength: shadow.strength ?? 1, slopeBias: shadow.slopeBias ?? 0, pcf: shadow.pcf ?? false }
+      ? { size: shadow.size, bias: shadow.bias ?? 0.003, strength: shadow.strength ?? 1, slopeBias: shadow.slopeBias ?? 0, pcf: shadow.pcf ?? false, soft: shadow.soft ?? false }
       : null;
 
     // Env map: uploaded once per distinct decoded panorama; the uniform's

@@ -13435,6 +13435,7 @@ import {
   LOCAL_SHADOW_GRID,
   LOCAL_SHADOW_TILE,
   MAX_LOCAL_SHADOW_TILES,
+  NEAR_CASCADE_BLEND,
   NEAR_CASCADE_EDGE,
   CLUSTER_INDEX_CAP,
   CLUSTER_X,
@@ -13731,7 +13732,7 @@ function writeInstanceUniform(target, index, uniform) {
     target[o + 7] = v ? v.falloff : 0;
   }
   target[base + OFFSET_SHADOW2] = shadow ? shadow.slopeBias ?? 0 : 0;
-  target[base + OFFSET_SHADOW2 + 1] = shadow && shadow.pcf ? 1 : 0;
+  target[base + OFFSET_SHADOW2 + 1] = shadow && shadow.pcf ? shadow.soft ? 2 : 1 : 0;
   target[base + OFFSET_SHADOW2 + 2] = uniform.soft?.linear[0] ?? 0;
   target[base + OFFSET_SHADOW2 + 3] = uniform.soft?.linear[1] ?? 0;
   target[base + OFFSET_SURFACE0] = surface.detailScale;
@@ -14871,9 +14872,17 @@ float shadowAt(vec3 ndc, float bias0, float slope, float ox, float cosL) {
     if (shadowTap(sx, sy, z, ox) < 0.5) { return 1.0 - u.shadow.w; }
     return 1.0;
   }
-  float lit = (shadowTap(sx - 0.5, sy - 0.5, z, ox) + shadowTap(sx + 0.5, sy - 0.5, z, ox)
-             + shadowTap(sx - 0.5, sy + 0.5, z, ox) + shadowTap(sx + 0.5, sy + 0.5, z, ox)) * 0.25;
-  return 1.0 - u.shadow.w * (1.0 - lit);
+  if (u.shadow2.y < 1.5) {
+    float lit = (shadowTap(sx - 0.5, sy - 0.5, z, ox) + shadowTap(sx + 0.5, sy - 0.5, z, ox)
+               + shadowTap(sx - 0.5, sy + 0.5, z, ox) + shadowTap(sx + 0.5, sy + 0.5, z, ox)) * 0.25;
+    return 1.0 - u.shadow.w * (1.0 - lit);
+  }
+  // Soft (B7): a 4\xD74 neighbourhood, texel-spaced round the point.
+  float lit = 0.0;
+  for (int j = 0; j < 4; j++) {
+    for (int i = 0; i < 4; i++) { lit += shadowTap(sx + float(i) - 1.5, sy + float(j) - 1.5, z, ox); }
+  }
+  return 1.0 - u.shadow.w * (1.0 - lit / 16.0);
 }
 // The near shadow cascade (EP8b): world\u2192light-clip, and (1 when present, bias, slope bias).
 uniform mat4 nearShadowMvp;
@@ -14882,16 +14891,20 @@ uniform vec4 nearShadow;
 // point sits well inside it, else the main map.
 float shadowFactor(vec4 lightClip, vec3 worldPos, float cosL) {
   if (u.shadow.x < 0.5) { return 1.0; }
+  vec3 ndc = lightClip.xyz / lightClip.w;
+  bool inMain = !(ndc.x < -1.0 || ndc.x > 1.0 || ndc.y < -1.0 || ndc.y > 1.0 || ndc.z < -1.0 || ndc.z > 1.0);
   if (nearShadow.x > 0.5) {
     vec3 n = (nearShadowMvp * vec4(worldPos, 1.0)).xyz;
-    if (abs(n.x) < ${NEAR_CASCADE_EDGE} && abs(n.y) < ${NEAR_CASCADE_EDGE} && abs(n.z) <= 1.0) {
-      return shadowAt(n, nearShadow.y, nearShadow.z, u.shadow.y, cosL);
+    float m = max(abs(n.x), abs(n.y));
+    if (m < ${NEAR_CASCADE_EDGE} && abs(n.z) <= 1.0) {
+      float v = shadowAt(n, nearShadow.y, nearShadow.z, u.shadow.y, cosL);
+      if (m <= ${NEAR_CASCADE_BLEND}) { return v; }
+      // Fading to the main map toward the cascade's edge (B7).
+      float mv = inMain ? shadowAt(ndc, u.shadow.z, u.shadow2.x, 0.0, cosL) : 1.0;
+      return v + (mv - v) * ((m - ${NEAR_CASCADE_BLEND}) / (${NEAR_CASCADE_EDGE} - ${NEAR_CASCADE_BLEND}));
     }
   }
-  vec3 ndc = lightClip.xyz / lightClip.w;
-  if (ndc.x < -1.0 || ndc.x > 1.0 || ndc.y < -1.0 || ndc.y > 1.0 || ndc.z < -1.0 || ndc.z > 1.0) {
-    return 1.0;
-  }
+  if (!inMain) { return 1.0; }
   return shadowAt(ndc, u.shadow.z, u.shadow2.x, 0.0, cosL);
 }
 vec3 envGradient(float y) {
@@ -15730,7 +15743,7 @@ var WebglSceneRenderer = class _WebglSceneRenderer {
     const near = shadow?.near ?? null;
     if (near) this.nearShadowMvp.set(near.lightViewProj);
     this.nearShadow.set(near ? [1, near.bias, near.slopeBias, 0] : [0, 0, 0, 0]);
-    const shadowParams = shadow ? { size: shadow.size, bias: shadow.bias ?? 3e-3, strength: shadow.strength ?? 1, slopeBias: shadow.slopeBias ?? 0, pcf: shadow.pcf ?? false } : null;
+    const shadowParams = shadow ? { size: shadow.size, bias: shadow.bias ?? 3e-3, strength: shadow.strength ?? 1, slopeBias: shadow.slopeBias ?? 0, pcf: shadow.pcf ?? false, soft: shadow.soft ?? false } : null;
     this.uploadEnv(draw.environment?.map ?? null);
     this.uploadProbes(draw.environment?.probes ?? null);
     const ssao = draw.ssao ?? null;
@@ -16621,6 +16634,7 @@ import {
   LOCAL_SHADOW_GRID as LOCAL_SHADOW_GRID2,
   LOCAL_SHADOW_TILE as LOCAL_SHADOW_TILE2,
   MAX_LOCAL_SHADOW_TILES as MAX_LOCAL_SHADOW_TILES2,
+  NEAR_CASCADE_BLEND as NEAR_CASCADE_BLEND2,
   NEAR_CASCADE_EDGE as NEAR_CASCADE_EDGE2,
   CLUSTER_CELLS,
   CLUSTER_INDEX_CAP as CLUSTER_INDEX_CAP2,
@@ -16949,24 +16963,37 @@ fn shadowAt(ndc: vec3<f32>, bias0: f32, slope: f32, ox: f32, cosL: f32) -> f32 {
     if (shadowTap(sx, sy, z, ox) < 0.5) { return 1.0 - u.shadow.w; }
     return 1.0;
   }
-  let lit = (shadowTap(sx - 0.5, sy - 0.5, z, ox) + shadowTap(sx + 0.5, sy - 0.5, z, ox)
-           + shadowTap(sx - 0.5, sy + 0.5, z, ox) + shadowTap(sx + 0.5, sy + 0.5, z, ox)) * 0.25;
-  return 1.0 - u.shadow.w * (1.0 - lit);
+  if (u.shadow2.y < 1.5) {
+    let lit = (shadowTap(sx - 0.5, sy - 0.5, z, ox) + shadowTap(sx + 0.5, sy - 0.5, z, ox)
+             + shadowTap(sx - 0.5, sy + 0.5, z, ox) + shadowTap(sx + 0.5, sy + 0.5, z, ox)) * 0.25;
+    return 1.0 - u.shadow.w * (1.0 - lit);
+  }
+  // Soft (B7): a 4\xD74 neighbourhood, texel-spaced round the point.
+  var lit = 0.0;
+  for (var j = 0; j < 4; j = j + 1) {
+    for (var i = 0; i < 4; i = i + 1) { lit = lit + shadowTap(sx + f32(i) - 1.5, sy + f32(j) - 1.5, z, ox); }
+  }
+  return 1.0 - u.shadow.w * (1.0 - lit / 16.0);
 }
 // The sun's shadow (mirrors sunShadowVisibility): the near cascade (EP8b) when
 // the point sits well inside it, else the main map.
 fn shadowFactor(lightClip: vec4<f32>, worldPos: vec3<f32>, cosL: f32) -> f32 {
   if (u.shadow.x < 0.5) { return 1.0; }
+  let ndc = lightClip.xyz / lightClip.w;
+  let inMain = !(ndc.x < -1.0 || ndc.x > 1.0 || ndc.y < -1.0 || ndc.y > 1.0 || ndc.z < -1.0 || ndc.z > 1.0);
   if (frame.nearShadow.x > 0.5) {
     let n = (frame.nearMvp * vec4<f32>(worldPos, 1.0)).xyz;
-    if (abs(n.x) < ${NEAR_CASCADE_EDGE2} && abs(n.y) < ${NEAR_CASCADE_EDGE2} && abs(n.z) <= 1.0) {
-      return shadowAt(n, frame.nearShadow.y, frame.nearShadow.z, u.shadow.y, cosL);
+    let m = max(abs(n.x), abs(n.y));
+    if (m < ${NEAR_CASCADE_EDGE2} && abs(n.z) <= 1.0) {
+      let v = shadowAt(n, frame.nearShadow.y, frame.nearShadow.z, u.shadow.y, cosL);
+      if (m <= ${NEAR_CASCADE_BLEND2}) { return v; }
+      // Fading to the main map toward the cascade's edge (B7).
+      var mv = 1.0;
+      if (inMain) { mv = shadowAt(ndc, u.shadow.z, u.shadow2.x, 0.0, cosL); }
+      return v + (mv - v) * ((m - ${NEAR_CASCADE_BLEND2}) / (${NEAR_CASCADE_EDGE2} - ${NEAR_CASCADE_BLEND2}));
     }
   }
-  let ndc = lightClip.xyz / lightClip.w;
-  if (ndc.x < -1.0 || ndc.x > 1.0 || ndc.y < -1.0 || ndc.y > 1.0 || ndc.z < -1.0 || ndc.z > 1.0) {
-    return 1.0;
-  }
+  if (!inMain) { return 1.0; }
   return shadowAt(ndc, u.shadow.z, u.shadow2.x, 0.0, cosL);
 }
 
@@ -18120,7 +18147,7 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
         this.shadowUploaded = shadow.depth;
       }
     }
-    const shadowParams = shadow ? { size: shadow.size, bias: shadow.bias ?? 3e-3, strength: shadow.strength ?? 1, slopeBias: shadow.slopeBias ?? 0, pcf: shadow.pcf ?? false } : null;
+    const shadowParams = shadow ? { size: shadow.size, bias: shadow.bias ?? 3e-3, strength: shadow.strength ?? 1, slopeBias: shadow.slopeBias ?? 0, pcf: shadow.pcf ?? false, soft: shadow.soft ?? false } : null;
     this.ensureEnvTexture(draw.environment?.map ?? null);
     this.ensureProbes(draw.environment?.probes ?? null);
     const ssao = draw.ssao ?? null;

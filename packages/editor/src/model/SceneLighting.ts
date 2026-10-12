@@ -67,6 +67,8 @@ export interface SceneLighting {
   readonly fog?: SceneFog | null;
   /** The scene's wind (B6; see wind.ts): it sways foliage. Absent = still air. */
   readonly wind?: SceneWind | null;
+  /** Soft sun shadows (B7): 4×4-filtered penumbrae instead of 2×2. Absent = 2×2. */
+  readonly softShadows?: boolean;
   /**
    * Reflection probes (see reflectionProbes.ts): shiny surfaces inside a
    * probe's box reflect the scene around it rather than the sky.
@@ -187,6 +189,7 @@ export function parseSceneLighting(raw: unknown): SceneLighting | null {
     ...(sky ? { sky } : {}),
     ...(fog ? { fog } : {}),
     ...(wind ? { wind } : {}),
+    ...(record.softShadows === true ? { softShadows: true } : {}),
     ...(probes.length > 0 ? { probes } : {}),
     ...(shafts ? { shafts } : {}),
     ...(lightProbes ? { lightProbes } : {}),
@@ -444,7 +447,7 @@ export function defaultSunShafts(): SunShafts {
 /** Patch the top-level scalar/flag fields (ambient, exposure, tonemap, shadows). */
 export function patchSceneLighting(
   lighting: SceneLighting,
-  patch: Partial<Pick<SceneLighting, "ambient" | "exposure" | "tonemap" | "shadows" | "wind">>,
+  patch: Partial<Pick<SceneLighting, "ambient" | "exposure" | "tonemap" | "shadows" | "wind" | "softShadows">>,
 ): SceneLighting {
   return { ...lighting, ...patch };
 }
@@ -579,5 +582,5 @@ export function buildSceneShadow(
   // depth, so when `reach` deepens the light's range the bias shrinks with it:
   // the same world distance, and thin casters (the walkway) still shadow.
   const depthScale = (radius * 4) / (dist + radius * 2);
-  return { ...map, bias: 0.003 * depthScale, slopeBias: SHADOW_SLOPE_BIAS * depthScale, pcf: true };
+  return { ...map, bias: 0.003 * depthScale, slopeBias: SHADOW_SLOPE_BIAS * depthScale, pcf: true, ...(lighting.softShadows ? { soft: true } : {}) };
 }

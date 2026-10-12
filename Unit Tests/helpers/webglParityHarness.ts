@@ -218,6 +218,7 @@ function scenes(): Record<string, Scene> {
     shadow: shadowScene(true),
     shadowFantasy: shadowScene(false),
     cascade: cascadeScene(),
+    cascadeSoft: cascadeScene(true),
     fog: {
       instances: [{ mesh: floor(4, 0), model: composeModelMatrix([0, 0, 0], [0, 0, 0], [1, 1, 1]) }],
       draw: () => ({ ...lit(), fog: { color: [0.6, 0.7, 0.8], density: 0.2, start: 2, max: 0.9 } }),
@@ -245,19 +246,19 @@ function shadowScene(pbr: boolean): Scene {
  * The near shadow cascade (EP8b): a coarse main map over the whole floor and a
  * sharp near one over the middle, where the occluder's shadow edge falls.
  */
-function cascadeShadow(instances: MeshSceneInstance[]): SceneDraw["shadow"] {
+function cascadeShadow(instances: MeshSceneInstance[], soft = false): SceneDraw["shadow"] {
   const lightView = viewMatrix([0, 10, 0], [0, 0, 0], [0, 0, -1]);
   const far = renderShadowMap(instances, { lightView, lightProjection: orthographicMatrix(-6, 6, -6, 6, 0.1, 20), size: 64, depth: new Float32Array(64 * 64) });
   const near = renderShadowMap(instances, { lightView, lightProjection: orthographicMatrix(-2, 2, -2, 2, 0.1, 20), size: 64, depth: new Float32Array(64 * 64) });
-  return { ...far, pcf: true, near: { lightViewProj: near.lightViewProj, depth: near.depth, bias: 0.002, slopeBias: 0 } };
+  return { ...far, pcf: true, ...(soft ? { soft: true } : {}), near: { lightViewProj: near.lightViewProj, depth: near.depth, bias: 0.002, slopeBias: 0 } };
 }
 
-function cascadeScene(): Scene {
+function cascadeScene(soft = false): Scene {
   const instances: MeshSceneInstance[] = [
     { mesh: floor(5, 0), model: composeModelMatrix([0, 0, 0], [0, 0, 0], [1, 1, 1]) },
     { mesh: floor(1.2, 3), model: composeModelMatrix([0, 0, 0], [0, 0, 0], [1, 1, 1]) },
   ];
-  const shadow = cascadeShadow(instances);
+  const shadow = cascadeShadow(instances, soft);
   return { instances, draw: () => ({ ...baseDraw(), view: viewMatrix([0, 7, 8], [0, 0, 0]), lightDirection: [0, 1, 0], shadow }) };
 }
 

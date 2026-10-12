@@ -434,6 +434,8 @@ export interface InstanceUniform {
     readonly slopeBias?: number;
     /** 2x2 percentage-closer filtering. */
     readonly pcf?: boolean;
+    /** With pcf, a 4×4 neighbourhood instead of 2×2 (B7). */
+    readonly soft?: boolean;
   } | null;
   /** HDR tone-map exposure, or null to write the shaded colour straight through. */
   readonly tonemap: { readonly exposure: number } | null;
@@ -662,7 +664,7 @@ export function writeInstanceUniform(target: Float32Array, index: number, unifor
   }
 
   target[base + OFFSET_SHADOW2] = shadow ? shadow.slopeBias ?? 0 : 0;
-  target[base + OFFSET_SHADOW2 + 1] = shadow && shadow.pcf ? 1 : 0;
+  target[base + OFFSET_SHADOW2 + 1] = shadow && shadow.pcf ? (shadow.soft ? 2 : 1) : 0;
   target[base + OFFSET_SHADOW2 + 2] = uniform.soft?.linear[0] ?? 0;
   target[base + OFFSET_SHADOW2 + 3] = uniform.soft?.linear[1] ?? 0;
 

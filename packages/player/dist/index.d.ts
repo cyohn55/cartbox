@@ -4623,6 +4623,8 @@ interface InstanceUniform {
         readonly slopeBias?: number;
         /** 2x2 percentage-closer filtering. */
         readonly pcf?: boolean;
+        /** With pcf, a 4×4 neighbourhood instead of 2×2 (B7). */
+        readonly soft?: boolean;
     } | null;
     /** HDR tone-map exposure, or null to write the shaded colour straight through. */
     readonly tonemap: {

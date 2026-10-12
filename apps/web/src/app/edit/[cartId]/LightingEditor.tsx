@@ -211,11 +211,12 @@ export function LightingEditor({ lighting, onChange }: LightingEditorProps) {
       <SegmentedControl
         label="Shadows"
         ariaLabel="Shadows"
-        selected={lighting.shadows ? "on" : "off"}
-        onSelect={(id) => onChange(patchSceneLighting(lighting, { shadows: id === "on" }))}
+        selected={lighting.shadows ? (lighting.softShadows ? "soft" : "on") : "off"}
+        onSelect={(id) => onChange(patchSceneLighting(lighting, { shadows: id !== "off", softShadows: id === "soft" ? true : undefined }))}
         options={[
           { id: "off", label: "Off" },
           { id: "on", label: "On" },
+          { id: "soft", label: "Soft", hint: "Wide, soft penumbrae for a daylight sun (16 shadow-map taps a pixel instead of 4)" },
         ]}
       />
 
