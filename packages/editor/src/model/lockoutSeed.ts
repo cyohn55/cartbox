@@ -1175,7 +1175,7 @@ function mapMesh(): MeshAsset {
 // The arena ships with a baked light map (lightmap.ts): sky visibility and one
 // bounce of sun, so its corners, the walkway's underside and the pit darken and
 // the snow lifts the walls beside it. The bake runs offline (npm run
-// bake:lockout) and is stored as a PNG in lockoutLightmap.generated.ts; the
+// bake:map lockout) and is stored as a PNG in lockoutLightmap.generated.ts; the
 // layout is recomputed here (cheap and deterministic) and must match the one the
 // stored bake was made for, which its fingerprint checks.
 
@@ -3265,7 +3265,7 @@ function kitFingerprint(mesh: MeshAsset): string {
   return (h >>> 0).toString(16);
 }
 
-/** Bake the kit's maps (the offline step `npm run bake:lockout-kit` stores). */
+/** Bake the kit's maps (the offline step `npm run bake:map lockout kit` stores). */
 export function bakeLockoutKit(): Record<string, { fingerprint: string; occlusion: string; relief: string }> {
   const out: Record<string, { fingerprint: string; occlusion: string; relief: string }> = {};
   for (const [name, mesh] of Object.entries(kitBakeTargets())) {

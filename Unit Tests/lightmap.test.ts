@@ -285,7 +285,7 @@ describe("rasteriser light map", () => {
 
 describe("Lockout's baked light map", () => {
   it("was baked for the arena as it is now (fingerprint matches the layout)", () => {
-    // If this fails, the arena's geometry changed: run `npm run bake:lockout`.
+    // If this fails, the arena's geometry changed: run `npm run bake:map lockout`.
     expect(LOCKOUT_LIGHTMAP.fingerprint).toBe(layoutFingerprint(lockoutMapLayout()));
   });
 
