@@ -9,7 +9,7 @@ import type { QualityChoice, QualityLevel } from "./quality.js";
  */
 
 import type { NetSession } from "./net/NetSession.js";
-import type { ControlSettings } from "./controls.js";
+import type { ControlSettings, TouchLayout } from "./controls.js";
 import type { ModelId } from "./models.js";
 import type { Replay } from "./replay.js";
 import type { MailboxEvent, MailboxMeshCamera } from "./mailbox.js";
@@ -331,6 +331,15 @@ export interface PlayerHandle {
   setAccessibility(settings: AccessibilitySettings): void;
   /** Play in the first of these languages the cart has, from the next tick (the cart's own setlanguage holds until then). */
   setLanguages(preferred: readonly string[]): void;
+  /** Whether the on-screen touch pad is up (its layout can be edited). */
+  readonly touchControls: boolean;
+  /**
+   * Let the player drag the touch pad's sticks and buttons where they like and
+   * resize them; resolves with the layout they saved (already in use; keep it
+   * in their ControlSettings.touchLayout), or null if they cancelled or there
+   * is no touch pad.
+   */
+  editTouchLayout(): Promise<TouchLayout | null>;
   /** Hold the game's input neutral (false) while a host menu is open over it, or restore it. */
   setInputEnabled(enabled: boolean): void;
   /**

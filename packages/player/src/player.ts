@@ -45,6 +45,7 @@ import {
   stepLookAcceleration,
   toggleMask,
   type ControlSettings,
+  type TouchLayout,
 } from "./controls.js";
 import { injectSdk } from "./sdk.js";
 import { componentsSdkLua } from "./componentsSdk.js";
@@ -333,6 +334,23 @@ export class Player {
     if (this.controllerInput?.connected) this.controllerInput.rumble(effect);
     // A phone or tablet has one motor, on or off: buzz it for the strong ones.
     else if (this.touch && effect.strongMagnitude >= 0.5) this.view.navigator?.vibrate?.(effect.duration);
+  }
+
+  /** Whether the on-screen touch pad is up (so its layout can be edited). */
+  get hasTouchControls(): boolean {
+    return Boolean(this.touch);
+  }
+
+  /**
+   * Let the player move and resize the touch pad's sticks and buttons (see
+   * TouchInput.editLayout): resolves with the layout they saved, now in use,
+   * or null when they cancelled or there's no touch pad.
+   */
+  async editTouchLayout(): Promise<TouchLayout | null> {
+    if (!this.touch) return null;
+    const layout = await this.touch.editLayout();
+    if (layout) this.controlSettings = { ...this.controlSettings, touchLayout: layout };
+    return layout;
   }
 
   /** Let the game see input (true) or hold it neutral (false) — e.g. under a menu. */

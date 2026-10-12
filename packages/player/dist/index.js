@@ -5500,6 +5500,30 @@ var PAD_BUTTONS = [
 var RESPONSE_CURVES = ["standard", "dynamic", "precision", "responsive"];
 var STICK_LAYOUTS = ["default", "southpaw", "legacy", "legacySouthpaw"];
 var AIM_ASSISTS = ["off", "standard", "strong"];
+var TOUCH_CONTROL_IDS = ["leftStick", "rightStick", "A", "B", "X", "Y", "Start"];
+var TOUCH_CONTROL_MIN_SIZE = 0.5;
+var TOUCH_CONTROL_MAX_SIZE = 2;
+function parseTouchLayout(value) {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return {};
+  const raw = value;
+  const out = {};
+  for (const id of TOUCH_CONTROL_IDS) {
+    const p = raw[id];
+    if (typeof p !== "object" || p === null) continue;
+    const { x, y, size } = p;
+    if (typeof x !== "number" || typeof y !== "number" || !Number.isFinite(x) || !Number.isFinite(y)) continue;
+    out[id] = {
+      x: clamp(x, 0, 1),
+      y: clamp(y, 0, 1),
+      size: typeof size === "number" && Number.isFinite(size) ? clamp(size, TOUCH_CONTROL_MIN_SIZE, TOUCH_CONTROL_MAX_SIZE) : 1
+    };
+  }
+  return out;
+}
+function placeWithin(x, y, halfW, halfH) {
+  const keep = (v, half) => half >= 0.5 ? 0.5 : clamp(v, half, 1 - half);
+  return [keep(x, halfW), keep(y, halfH)];
+}
 var TOUCH_LOOK_MODES = ["stick", "drag"];
 var GYRO_AIMS = ["off", "always", "zoomed"];
 var DEFAULT_MOUSE_LOOK = { sensitivity: 1, sensitivityY: 1, curve: "responsive" };
@@ -5551,6 +5575,7 @@ var DEFAULT_CONTROL_SETTINGS = {
   mouseCapture: false,
   touchLookMode: "stick",
   floatingStick: false,
+  touchLayout: {},
   gyroAim: "off",
   gyroLook: { sensitivity: 1, sensitivityY: 1, curve: "standard" },
   aimAssist: "standard",
@@ -5619,6 +5644,7 @@ function parseControlSettings(value, defaults = DEFAULT_CONTROL_SETTINGS) {
     mouseCapture: typeof raw.mouseCapture === "boolean" ? raw.mouseCapture : defaults.mouseCapture ?? false,
     touchLookMode: TOUCH_LOOK_MODES.includes(raw.touchLookMode) ? raw.touchLookMode : defaults.touchLookMode ?? "stick",
     floatingStick: typeof raw.floatingStick === "boolean" ? raw.floatingStick : defaults.floatingStick ?? false,
+    touchLayout: raw.touchLayout !== void 0 ? parseTouchLayout(raw.touchLayout) : defaults.touchLayout ?? {},
     gyroAim: GYRO_AIMS.includes(raw.gyroAim) ? raw.gyroAim : defaults.gyroAim ?? "off",
     gyroLook: profile(raw.gyroLook, defaults.gyroLook ?? { sensitivity: 1, sensitivityY: 1, curve: "standard" }),
     leftStick: deadZones(raw.leftStick, defaults.leftStick),
@@ -5976,6 +6002,15 @@ function hasTouchSupport(maxTouchPoints, coarsePointer) {
 }
 var FACE_SIZE = "clamp(40px, 8vmin, 68px)";
 var STICK_SIZE = "clamp(110px, 24vmin, 190px)";
+var CONTROL_NAMES = {
+  leftStick: "Left stick",
+  rightStick: "Right stick",
+  A: "A button",
+  B: "B button",
+  X: "X button",
+  Y: "Y button",
+  Start: "Start"
+};
 function stickVector(dx, dy, radius, deadZone = 0.12) {
   const r = Math.max(1, radius);
   let x = dx / r;
@@ -6002,6 +6037,12 @@ var TouchInput = class {
      */
     this.letGoes = [];
     this.unlisten = [];
+    this.controls = /* @__PURE__ */ new Map();
+    /** The player's layout (the controls they moved), and the pad's overall size. */
+    this.layout = {};
+    this.touchScale = 1;
+    /** Set while the layout is being edited (see editLayout). */
+    this.editing = null;
     const doc = container.ownerDocument;
     const view = doc.defaultView;
     if (view && view.getComputedStyle(container).position === "static") {
@@ -6025,7 +6066,7 @@ var TouchInput = class {
     this.pad = doc.createElement("div");
     Object.assign(this.pad.style, { position: "absolute", inset: "0", pointerEvents: "none", transformOrigin: "50% 100%" });
     this.root.appendChild(this.pad);
-    const face = doc.createElement("div");
+    const face = this.face = doc.createElement("div");
     Object.assign(face.style, {
       position: "absolute",
       bottom: "4%",
@@ -6036,14 +6077,21 @@ var TouchInput = class {
       gap: "4px"
     });
     this.pad.appendChild(face);
-    for (const control of TOUCH_LAYOUT) face.appendChild(this.createButton(doc, control, state));
+    for (const control of TOUCH_LAYOUT) {
+      const button = this.createButton(doc, control, state);
+      face.appendChild(button);
+      this.controls.set(ConsoleButton[control.button], { el: button, inFace: true, home: {} });
+    }
     this.moveZone = this.createZone(doc, { left: "0", top: "30%", width: "45%", bottom: "0" }, "Move (touch anywhere here)");
     this.lookZone = this.createZone(doc, { right: "0", top: "12%", width: "50%", bottom: "0" }, "Look (drag here)");
     const leftPlace = { left: "4%", bottom: "6%" };
+    const rightPlace = { right: `calc(3% + 3 * ${FACE_SIZE} + 8px + 3vmin)`, bottom: "6%" };
     const left = this.createStick(doc, state, 0, leftPlace);
-    this.rightStick = this.createStick(doc, state, 1, { right: `calc(3% + 3 * ${FACE_SIZE} + 8px + 3vmin)`, bottom: "6%" }).base;
+    this.rightStick = this.createStick(doc, state, 1, rightPlace).base;
     this.rightStick.style.display = "none";
-    this.wireMoveZone(left, leftPlace);
+    this.controls.set("leftStick", { el: left.base, inFace: false, home: leftPlace });
+    this.controls.set("rightStick", { el: this.rightStick, inFace: false, home: rightPlace });
+    this.wireMoveZone(left);
     this.wireLookZone();
     if (onStart) {
       const start = doc.createElement("button");
@@ -6051,11 +6099,11 @@ var TouchInput = class {
       start.setAttribute("data-cbx-button", "Start");
       start.setAttribute("aria-label", "Start (menu)");
       start.textContent = "\u2261 START";
+      const startPlace = { top: "2%", left: "50%", transform: "translateX(-50%)" };
+      this.controls.set("Start", { el: start, inFace: false, home: startPlace });
       Object.assign(start.style, {
         position: "absolute",
-        top: "2%",
-        left: "50%",
-        transform: "translateX(-50%)",
+        ...startPlace,
         pointerEvents: "auto",
         touchAction: "none",
         padding: "6px 14px",
@@ -6108,17 +6156,223 @@ var TouchInput = class {
       view?.removeEventListener("pagehide", letGoAll);
     });
   }
-  /** Apply the player's touch settings: overall opacity and size of the pad, how it looks, and a floating move stick. */
+  /**
+   * Apply the player's touch settings: overall opacity and size of the pad,
+   * where they moved its controls, how it looks, and a floating move stick.
+   */
   applySettings(settings) {
     this.pad.style.opacity = String(settings.touchOpacity);
-    for (const child of Array.from(this.pad.children)) {
-      if (child.getAttribute("data-cbx-button") === "Start" || child.hasAttribute("data-cbx-zone")) continue;
-      child.style.scale = String(settings.touchScale);
-      child.style.transformOrigin = child.style.left ? "0% 100%" : "100% 100%";
-    }
+    this.touchScale = settings.touchScale;
+    Object.assign(this.face.style, { scale: String(settings.touchScale), transformOrigin: "100% 100%" });
+    if (!this.editing) this.layout = settings.touchLayout ?? {};
+    this.placeAll();
     this.lookMode = settings.touchLookMode ?? "stick";
     this.moveZone.style.display = settings.floatingStick ? "block" : "none";
     this.showLook();
+  }
+  /**
+   * Put a control where the player moved it (its centre at their spot, at
+   * their size), or back where it usually sits: a face button in the
+   * diamond, a stick or Start at its corner, growing from its own corner.
+   */
+  place(id) {
+    const control = this.controls.get(id);
+    if (!control) return;
+    const { el, inFace, home } = control;
+    const s = el.style;
+    const spot = this.layout[id];
+    const base = id === "Start" ? 1 : this.touchScale;
+    if (spot) {
+      if (el.parentElement !== this.pad) this.pad.appendChild(el);
+      Object.assign(s, {
+        position: "absolute",
+        left: `${(spot.x * 100).toFixed(3)}%`,
+        top: `${(spot.y * 100).toFixed(3)}%`,
+        right: "auto",
+        bottom: "auto",
+        transform: "",
+        translate: "-50% -50%",
+        transformOrigin: "50% 50%",
+        scale: String(base * spot.size)
+      });
+      if (inFace) Object.assign(s, { width: FACE_SIZE, height: FACE_SIZE });
+      return;
+    }
+    if (inFace && el.parentElement !== this.face) this.face.appendChild(el);
+    Object.assign(s, { left: "", top: "", right: "", bottom: "", transform: "", translate: "" });
+    if (inFace) Object.assign(s, { position: "", width: "", height: "", scale: "", transformOrigin: "" });
+    else Object.assign(s, { position: "absolute", ...home, scale: id === "Start" ? "" : String(base), transformOrigin: s.left ? "0% 100%" : "100% 100%" });
+  }
+  placeAll() {
+    for (const id of this.controls.keys()) this.place(id);
+  }
+  /**
+   * Let the player move and resize the pad's controls (and the right stick,
+   * shown while they do): drag one to move it, pick one and make it smaller
+   * or bigger, reset them all. Resolves with the new layout on Save, or null
+   * on Cancel (when the old layout comes back). The game's controls take no
+   * input meanwhile: an edit layer lies over them.
+   */
+  editLayout() {
+    if (this.editing) return Promise.resolve(null);
+    const doc = this.root.ownerDocument;
+    const before = this.layout;
+    for (const letGo of this.letGoes) letGo();
+    this.rightStick.style.display = "block";
+    let selected = null;
+    const layer = doc.createElement("div");
+    layer.setAttribute("data-cbx-layout-editor", "");
+    layer.setAttribute("aria-label", "Touch layout editor");
+    Object.assign(layer.style, {
+      position: "absolute",
+      inset: "0",
+      zIndex: "10",
+      pointerEvents: "auto",
+      touchAction: "none",
+      background: "rgba(6,8,14,0.35)"
+    });
+    const bar = doc.createElement("div");
+    Object.assign(bar.style, {
+      position: "absolute",
+      top: "38%",
+      left: "50%",
+      translate: "-50% -50%",
+      display: "flex",
+      flexWrap: "wrap",
+      justifyContent: "center",
+      alignItems: "center",
+      gap: "8px",
+      maxWidth: "min(92%, 560px)",
+      padding: "10px 12px",
+      borderRadius: "14px",
+      background: "rgba(20,26,40,0.88)",
+      border: "1px solid rgba(255,255,255,0.3)",
+      color: "rgba(255,255,255,0.92)",
+      font: "600 13px/1.3 system-ui, sans-serif"
+    });
+    const hint = doc.createElement("span");
+    hint.style.flex = "1 1 100%";
+    hint.style.textAlign = "center";
+    const tool = (label, aria, onTap) => {
+      const b = doc.createElement("button");
+      b.type = "button";
+      b.textContent = label;
+      b.setAttribute("aria-label", aria);
+      Object.assign(b.style, {
+        minWidth: "44px",
+        minHeight: "40px",
+        padding: "6px 12px",
+        borderRadius: "10px",
+        border: "1px solid rgba(255,255,255,0.45)",
+        background: "rgba(255,255,255,0.08)",
+        color: "inherit",
+        font: "inherit",
+        touchAction: "manipulation"
+      });
+      b.addEventListener("click", onTap);
+      bar.appendChild(b);
+      return b;
+    };
+    const describe = () => {
+      hint.textContent = selected ? `${CONTROL_NAMES[selected]}: drag to move \xB7 ${Math.round((this.layout[selected]?.size ?? 1) * 100)}% size` : "Drag a stick or button to move it. Tap one to resize it.";
+      for (const [id, { el }] of this.controls) {
+        el.style.outline = id === selected ? "3px solid rgba(92,208,255,0.95)" : "2px dashed rgba(255,255,255,0.75)";
+        el.style.outlineOffset = "3px";
+      }
+    };
+    const spotOf = (id) => {
+      const own = this.layout[id];
+      if (own) return own;
+      const frame = this.root.getBoundingClientRect();
+      const r = this.controls.get(id).el.getBoundingClientRect();
+      return { x: (r.left + r.width / 2 - frame.left) / (frame.width || 1), y: (r.top + r.height / 2 - frame.top) / (frame.height || 1), size: 1 };
+    };
+    const resize = (step) => {
+      if (!selected) return;
+      const spot = spotOf(selected);
+      const size = Math.round(Math.min(TOUCH_CONTROL_MAX_SIZE, Math.max(TOUCH_CONTROL_MIN_SIZE, spot.size + step)) * 10) / 10;
+      this.layout = { ...this.layout, [selected]: { ...spot, size } };
+      this.place(selected);
+      describe();
+    };
+    bar.appendChild(hint);
+    tool("\u2212", "Smaller", () => resize(-0.1));
+    tool("+", "Bigger", () => resize(0.1));
+    tool("Reset", "Reset layout", () => {
+      this.layout = {};
+      this.placeAll();
+      describe();
+    });
+    const barSpots = ["38%", "16%", "80%"];
+    let barSpot = 0;
+    tool("\u21C5", "Move this bar", () => {
+      barSpot = (barSpot + 1) % barSpots.length;
+      bar.style.top = barSpots[barSpot];
+    });
+    tool("Cancel", "Cancel layout", () => this.editing?.finish(null));
+    const save = tool("Save", "Save layout", () => this.editing?.finish(this.layout));
+    save.style.background = "rgba(92,208,255,0.85)";
+    save.style.color = "#08101c";
+    bar.addEventListener("pointerdown", (event) => event.stopPropagation());
+    layer.appendChild(bar);
+    let drag = null;
+    layer.addEventListener("pointerdown", (event) => {
+      event.preventDefault();
+      const hit = [...this.controls].reverse().find(([, { el }]) => {
+        if (el.style.display === "none") return false;
+        const r2 = el.getBoundingClientRect();
+        return event.clientX >= r2.left && event.clientX <= r2.right && event.clientY >= r2.top && event.clientY <= r2.bottom;
+      });
+      selected = hit ? hit[0] : null;
+      describe();
+      if (!hit) return;
+      const r = hit[1].el.getBoundingClientRect();
+      drag = { id: hit[0], pointer: event.pointerId, dx: event.clientX - (r.left + r.width / 2), dy: event.clientY - (r.top + r.height / 2) };
+      Object.assign(bar.style, { opacity: "0.15", pointerEvents: "none" });
+      try {
+        layer.setPointerCapture(event.pointerId);
+      } catch {
+      }
+    });
+    layer.addEventListener("pointermove", (event) => {
+      if (!drag || event.pointerId !== drag.pointer) return;
+      const frame = this.root.getBoundingClientRect();
+      const r = this.controls.get(drag.id).el.getBoundingClientRect();
+      const w = frame.width || 1;
+      const h = frame.height || 1;
+      const [x, y] = placeWithin((event.clientX - drag.dx - frame.left) / w, (event.clientY - drag.dy - frame.top) / h, r.width / 2 / w, r.height / 2 / h);
+      this.layout = { ...this.layout, [drag.id]: { x, y, size: this.layout[drag.id]?.size ?? 1 } };
+      this.place(drag.id);
+    });
+    const endDrag = (event) => {
+      if (drag && event.pointerId === drag.pointer) {
+        drag = null;
+        Object.assign(bar.style, { opacity: "", pointerEvents: "" });
+        describe();
+      }
+    };
+    layer.addEventListener("pointerup", endDrag);
+    layer.addEventListener("pointercancel", endDrag);
+    layer.addEventListener("contextmenu", (event) => event.preventDefault());
+    this.root.appendChild(layer);
+    describe();
+    return new Promise((resolve) => {
+      this.editing = {
+        finish: (layout) => {
+          this.editing = null;
+          layer.remove();
+          for (const { el } of this.controls.values()) Object.assign(el.style, { outline: "", outlineOffset: "" });
+          if (layout === null) this.layout = before;
+          this.placeAll();
+          this.showLook();
+          resolve(layout === null ? null : { ...layout });
+        }
+      };
+    });
+  }
+  /** Close the layout editor as if cancelled (a menu opened over it, say). */
+  cancelLayoutEdit() {
+    this.editing?.finish(null);
   }
   /** Show the right stick (or the drag zone): the cart reads analog sticks. */
   setAnalog(on) {
@@ -6191,14 +6445,20 @@ var TouchInput = class {
     });
   }
   /** A floating move stick: a touch in the zone brings the stick to the thumb, and it goes home on release. */
-  wireMoveZone(stick, home) {
+  wireMoveZone(stick) {
     this.moveZone.addEventListener("pointerdown", (event) => {
       const frame = this.root.getBoundingClientRect();
-      const half = stick.base.getBoundingClientRect().width / 2 || 1;
-      Object.assign(stick.base.style, { left: `${event.clientX - frame.left - half}px`, top: `${event.clientY - frame.top - half}px`, bottom: "auto" });
+      Object.assign(stick.base.style, {
+        left: `${event.clientX - frame.left}px`,
+        top: `${event.clientY - frame.top}px`,
+        right: "auto",
+        bottom: "auto",
+        translate: "-50% -50%",
+        transformOrigin: "50% 50%"
+      });
       stick.grab(event, this.moveZone);
     });
-    stick.base.addEventListener("cbx-stick-release", () => Object.assign(stick.base.style, { top: "", ...home }));
+    stick.base.addEventListener("cbx-stick-release", () => this.place("leftStick"));
   }
   /**
    * A virtual thumbstick: a ring you press anywhere in, and a knob that follows
@@ -6349,6 +6609,7 @@ var TouchInput = class {
     return element;
   }
   destroy() {
+    this.editing?.finish(null);
     for (const off of this.unlisten) off();
     this.root.remove();
     this.restorePosition?.();
@@ -18366,6 +18627,21 @@ var Player = class {
     if (this.controllerInput?.connected) this.controllerInput.rumble(effect);
     else if (this.touch && effect.strongMagnitude >= 0.5) this.view.navigator?.vibrate?.(effect.duration);
   }
+  /** Whether the on-screen touch pad is up (so its layout can be edited). */
+  get hasTouchControls() {
+    return Boolean(this.touch);
+  }
+  /**
+   * Let the player move and resize the touch pad's sticks and buttons (see
+   * TouchInput.editLayout): resolves with the layout they saved, now in use,
+   * or null when they cancelled or there's no touch pad.
+   */
+  async editTouchLayout() {
+    if (!this.touch) return null;
+    const layout = await this.touch.editLayout();
+    if (layout) this.controlSettings = { ...this.controlSettings, touchLayout: layout };
+    return layout;
+  }
   /** Let the game see input (true) or hold it neutral (false) — e.g. under a menu. */
   setInputEnabled(enabled) {
     this.inputEnabled = enabled;
@@ -20784,6 +21060,10 @@ function mount(container, options) {
     setAccessibility: (settings) => player.setAccessibility(settings),
     setLanguages: (preferred) => player.setLanguages(preferred),
     setInputEnabled: (enabled) => player.setInputEnabled(enabled),
+    get touchControls() {
+      return player.hasTouchControls;
+    },
+    editTouchLayout: () => player.editTouchLayout(),
     inspect: () => player.inspect(),
     setQuality: (choice) => player.setQuality(choice),
     supplyTextures: (textures) => player.supplyTextures(textures),
@@ -20923,6 +21203,7 @@ export {
   SwitchableTransport,
   TILT_SHIFT_FEATHER,
   TINT_PALETTE,
+  TOUCH_CONTROL_IDS,
   TOUCH_LOOK_MODES,
   UNIFORM_BYTES_USED,
   UNIFORM_FLOATS,
@@ -21064,11 +21345,13 @@ export {
   parsePostFxSettings,
   parseReplay,
   parseScene,
+  parseTouchLayout,
   parseWorldScene,
   physicsBlockAddress,
   physicsSdkLua,
   physicsSlots,
   physicsStateHash,
+  placeWithin,
   playLanguage,
   prehazeLayers,
   prependLuaCode,
