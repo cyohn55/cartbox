@@ -744,3 +744,157 @@ end)()`;
     expect(host.probe()[0]).toBe(guest.probe()[0]); // 90 ticks into its run, at the same spot
   }, 300_000);
 });
+
+describe.skipIf(!existsSync(path.join(DIST, "xbox360/engine.js")))("E4: the Power Drain and the Regenerator", () => {
+  it("throws a Power Drain that lands and strips the shields of a soldier near it, not of the thrower out of reach", async () => {
+    const g = await offline(`loadout_pick = 7
+QUIET_KEEP = 1
+${BOT_AHEAD}
+;(function()
+local _T, n, placed, landed = TIC, 0, false, nil
+function TIC()
+  _T()
+  if phase == "play" and p then
+    n = n + 1
+    local o = bots[1]
+    if n == 3 then placed = bot_ahead(o, 6) end
+    if placed then p.ay = math.atan(o.x - p.x, o.z - p.z); o.cool = 1e9; o.respawn = 1e9 end   -- (it holds its fire)
+    local d = DEPLOY[1]
+    if d and not d.flying and not landed then landed = math.sqrt((d.x - p.x)^2 + (d.z - p.z)^2) end
+    pmem(117, (math.floor(o.sh or 0) & 255) | ((math.floor(p.sh or 0) & 255) << 8) | ((placed and 1 or 0) << 16) | ((d and 1 or 0) << 17) | ((d and d.flying and 1 or 0) << 18))
+    pmem(118, landed and math.floor(landed*100) or 0)
+  end
+end
+end)()`);
+    for (let i = 0; i < 4; i += 1) g.tick(0);
+    expect((g.probe()[0] >> 16) & 1).toBe(1);
+    expect(g.probe()[0] & 255).toBe(100);
+    g.tick(0, ACT.equipment!);
+    expect((g.probe()[0] >> 17) & 3).toBe(3); // thrown, in flight
+    for (let i = 0; i < 80; i += 1) g.tick(0);
+    const [w, landed] = g.probe();
+    console.log(`E4: the drain landed ${(landed / 100).toFixed(2)} m out; the bot's shield ${w & 255}, the thrower's ${(w >> 8) & 255}`);
+    expect(landed / 100).toBeGreaterThan(3);
+    expect(w & 255).toBe(0); // stripped
+    expect((w >> 8) & 255).toBe(100); // out of reach: untouched
+    for (let i = 0; i < 240; i += 1) g.tick(0);
+    expect((g.probe()[0] >> 17) & 1).toBe(0); // pulsed out after 4 s
+  }, 60_000);
+
+  it("sets a Regenerator down that fills the shields of whoever's in it, held off the recharge they'd wait for", async () => {
+    const g = await offline(`loadout_pick = 8
+;(function()
+local _T, n, out = TIC, 0, false
+function TIC()
+  _T()
+  if phase == "play" and p then
+    n = n + 1
+    if n == 3 then p.sh = 0 end
+    p.calm = 0   -- (no recharge of its own: only the regenerator's)
+    if n == 200 then p.sh = 0; out = true; p.x, p.z = p.x + 9, p.z end
+    pmem(117, (math.floor(p.sh or 0) & 255) | ((DEPLOY[1] and 1 or 0) << 8) | ((out and 1 or 0) << 9))
+  end
+end
+end)()`);
+    for (let i = 0; i < 4; i += 1) g.tick(0);
+    expect(g.probe()[0] & 255).toBe(0);
+    g.tick(0, ACT.equipment!);
+    expect((g.probe()[0] >> 8) & 1).toBe(1);
+    for (let i = 0; i < 70; i += 1) g.tick(0);
+    expect(g.probe()[0] & 255).toBe(100); // filled in about a second
+    while (!((g.probe()[0] >> 9) & 1)) g.tick(0);
+    for (let i = 0; i < 60; i += 1) g.tick(0);
+    expect(g.probe()[0] & 255).toBe(0); // out of it, nothing
+  }, 60_000);
+});
+
+describe.skipIf(!existsSync(LOCKOUT_ENGINE))("E4 online: a guest's Regenerator and Power Drain (two engines, one room)", () => {
+  const hostQuiet = `for _,o in ipairs(bots) do if not o.human then o.dead, o.respawn, o.x, o.y, o.z = true, 1e9, 0, -60, 0 end end`;
+  const press = (n: number) => `local _ap, n = cartbox.actionp, 0
+cartbox.actionp = function(name) if name == "equipment" then return phase == "play" and n == ${n} end return _ap(name) end`;
+
+  it("fills a guest's shield on the host from the guest's Regenerator, and the guest sees it full", async () => {
+    const guestProbe = `loadout_pick = 8
+;(function()
+${press(160)}
+local _T = TIC
+function TIC()
+  if phase == "play" then n = n + 1 end
+  _T()
+  if phase == "play" and p then pmem(117, math.floor(p.sh or 0) | ((n > 150 and 1 or 0) << 8) | ((n > 230 and 1 or 0) << 9)); pmem(118, n) end
+end
+end)()`;
+    const hostProbe = `;(function()
+local _T, k = TIC, 0
+function TIC()
+  _T()
+  if phase == "play" and NETMODE == 2 then
+    ${hostQuiet}
+    k = k + 1
+    for _,o in ipairs(bots) do if o.human then
+      if k == 60 then o.sh = 0 end
+      o.calm = 0   -- (its own recharge held off: only the regenerator's)
+      pmem(117, math.floor(o.sh or 0) | (((DEPLOY[1] and DEPLOY[1].kind == "regen") and 1 or 0) << 8))
+    end end
+  end
+end
+end)()`;
+    const { host, guest, both } = await lockoutRoom("", { guestProbe, hostProbe });
+    let emptied = false;
+    for (let f = 0; f < 600 && !((guest.probe()[0] >> 9) & 1); f += 1) {
+      both(0, 0);
+      if (((guest.probe()[0] >> 8) & 1) && (guest.probe()[0] & 255) === 0) emptied = true;
+    }
+    for (let f = 0; f < 30; f += 1) both(0, 0);
+    console.log(`E4: the guest's shield, emptied by the host (${emptied}), filled to ${guest.probe()[0] & 255} by its Regenerator (the host's ${host.probe()[0] & 255})`);
+    expect(emptied).toBe(true);
+    expect((host.probe()[0] >> 8) & 1).toBe(1); // the host has the guest's regenerator
+    expect(host.probe()[0] & 255).toBe(100);
+    expect(guest.probe()[0] & 255).toBe(100);
+  }, 300_000);
+
+  it("lands a guest's Power Drain on the host where it lands for the guest", async () => {
+    const guestProbe = `loadout_pick = 7
+;(function()
+${press(120)}
+local _T, at, aim = TIC, nil, nil
+function TIC()
+  if phase == "play" then n = n + 1 end
+  _T()
+  if phase == "play" and p then
+    -- (facing open, floored deck, so it lands on it)
+    if n == 100 then
+      for i = 0, 63 do
+        local yaw = i*math.pi/32
+        local fx, fz = math.sin(yaw), math.cos(yaw)
+        local ok = not seg_first(p.x, p.y + 1.2, p.z, p.x + fx*9, p.y + 1.2, p.z + fz*9, true)
+        for k = 1, 8 do ok = ok and seg_first(p.x + fx*k, p.y + 0.5, p.z + fz*k, p.x + fx*k, p.y - 0.5, p.z + fz*k, true) end
+        if ok then aim = yaw end
+      end
+    end
+    if aim then p.ay = aim end
+    local d = DEPLOY[1]
+    if d and not d.flying and not at then at = (math.floor(d.x*100 + 0.5) & 0xffff) | ((math.floor(d.z*100 + 0.5) & 0xffff) << 16) end
+    pmem(117, at or 0); pmem(118, at and 1 or 0)
+  end
+end
+end)()`;
+    const hostProbe = `;(function()
+local _T, at = TIC, nil
+function TIC()
+  _T()
+  if phase == "play" and NETMODE == 2 then
+    ${hostQuiet}
+    local d = DEPLOY[1]
+    if d and not d.flying and not at then at = (math.floor(d.x*100 + 0.5) & 0xffff) | ((math.floor(d.z*100 + 0.5) & 0xffff) << 16) end
+    pmem(117, at or 0); pmem(118, at and 1 or 0)
+  end
+end
+end)()`;
+    const { host, guest, both } = await lockoutRoom("", { guestProbe, hostProbe });
+    for (let f = 0; f < 400; f += 1) both(0, 0);
+    expect(guest.probe()[1]).toBe(1);
+    expect(host.probe()[1]).toBe(1);
+    expect(host.probe()[0]).toBe(guest.probe()[0]);
+  }, 300_000);
+});

@@ -1609,6 +1609,10 @@ export const LOCKOUT_STRINGS: StringTable = {
     { key: "loadout.hologram", text: { en: "Hologram", es: "Holograma" } },
     { key: "equip.dropwall", text: { en: "Drop Wall", es: "Muro desplegable" } },
     { key: "equip.hologram", text: { en: "Hologram", es: "Holograma" } },
+    { key: "loadout.powerdrain", text: { en: "Power Drain", es: "Drenaje de energia" } },
+    { key: "loadout.regenerator", text: { en: "Regenerator", es: "Regenerador" } },
+    { key: "equip.powerdrain", text: { en: "Power Drain", es: "Drenaje de energia" } },
+    { key: "equip.regenerator", text: { en: "Regenerator", es: "Regenerador" } },
   ],
 };
 
@@ -2426,11 +2430,49 @@ function plasmaGrenadeMesh(): MeshAsset {
  * wide and 2.2 m tall, standing on the deck where it's set down, its faces
  * toward and away from its owner.
  */
-const BARRIER: PlasmaLook = { core: [0.35, 0.75, 1.6], edge: [0.08, 0.3, 1.9], falloff: 0.8, boil: 0.25, scale: 6 };
+// (see-through face on, as Infinite's: the fight behind it shows)
+const BARRIER: PlasmaLook = { core: [0.35, 0.75, 1.6], edge: [0.08, 0.3, 1.9], falloff: 0.8, boil: 0.25, scale: 6, alpha: [0.38, 0.7] };
 function dropWallMesh(): MeshAsset {
   const panel = newStreams();
   pushBox(panel, [0, 1.1, 0], [1.6, 1.1, 0.04], 1);
   return withoutUnusedUvs({ name: "drop-wall", primitives: [toPrimitive(panel, plasmaMaterial("barrier", BARRIER))] });
+}
+
+/**
+ * The Power Drain and the Regenerator (E4): a device the size of a grenade
+ * (the drain a violet charge in a dark cage, the regenerator a green one atop
+ * a squat pylon), and the field each throws round itself -- a bubble of
+ * radius 1, scaled to its reach, faint face on and bright at its rim.
+ */
+const DRAIN_CHARGE: PlasmaLook = { core: [1.6, 0.7, 2.6], edge: [0.5, 0.08, 2], falloff: 1.1, boil: 0.5, scale: 30 };
+const REGEN_CHARGE: PlasmaLook = { core: [0.8, 2.6, 1.2], edge: [0.08, 1.6, 0.4], falloff: 1.1, boil: 0.4, scale: 30 };
+const DRAIN_FIELD: PlasmaLook = { core: [0.25, 0.06, 0.45], edge: [0.9, 0.25, 2.2], falloff: 1.6, boil: 0.45, scale: 3, alpha: [0.05, 0.5] };
+const REGEN_FIELD: PlasmaLook = { core: [0.06, 0.3, 0.12], edge: [0.3, 2, 0.7], falloff: 1.6, boil: 0.3, scale: 3, alpha: [0.04, 0.45] };
+const DEVICE_METAL = { name: "device", baseColorFactor: [0.12, 0.13, 0.17, 1] as [number, number, number, number], baseColorImage: null, metallicFactor: 0.8, roughnessFactor: 0.35 };
+function powerDrainMesh(): MeshAsset {
+  const core = newStreams();
+  const cage = newStreams();
+  sphere(core, [0, 0.16, 0], 0.11, 6, 10);
+  for (let k = 0; k < 3; k += 1) {
+    const a = (k / 3) * Math.PI * 2;
+    const [x, z] = [Math.cos(a), Math.sin(a)];
+    limb(cage, [x * 0.08, 0, z * 0.08], [x * 0.07, 0.3, z * 0.07], 0.014, 0.006);
+  }
+  limb(cage, [0, 0, 0], [0, 0.05, 0], 0.08, 0.06);
+  return withoutUnusedUvs({ name: "power-drain", primitives: [toPrimitive(core, plasmaMaterial("drain", DRAIN_CHARGE)), toPrimitive(cage, DEVICE_METAL)] });
+}
+function regeneratorMesh(): MeshAsset {
+  const core = newStreams();
+  const body = newStreams();
+  limb(body, [0, 0, 0], [0, 0.32, 0], 0.13, 0.08);
+  limb(body, [0, 0.32, 0], [0, 0.36, 0], 0.1, 0.1);
+  sphere(core, [0, 0.47, 0], 0.1, 6, 10);
+  return withoutUnusedUvs({ name: "regenerator", primitives: [toPrimitive(core, plasmaMaterial("regen", REGEN_CHARGE)), toPrimitive(body, DEVICE_METAL)] });
+}
+function fieldMesh(name: string, look: PlasmaLook): MeshAsset {
+  const bubble = newStreams();
+  sphere(bubble, [0, 0, 0], 1, 8, 14);
+  return withoutUnusedUvs({ name, primitives: [toPrimitive(bubble, plasmaMaterial(name, look))] });
 }
 
 /** Holograms (E3) drawn at once: soldier instances after the pickups. */
@@ -3288,6 +3330,11 @@ export function lockoutMeshSidecar(): string {
         { id: "prefab-plasma", name: "plasma grenade", pool: 4, nodes: [{ key: "root", name: "plasma grenade", mesh: serializeMeshAsset(plasmaGrenadeMesh()), transform: identity }] },
         // Drop Walls (E3): one a player at most, so eight held in reserve.
         { id: "prefab-dropwall", name: "drop wall", pool: 8, nodes: [{ key: "root", name: "drop wall", mesh: serializeMeshAsset(dropWallMesh()), transform: identity }] },
+        // Power Drains and Regenerators (E4), and the fields they throw round themselves: four of each in reserve.
+        { id: "prefab-drain", name: "power drain", pool: 4, nodes: [{ key: "root", name: "power drain", mesh: serializeMeshAsset(powerDrainMesh()), transform: identity }] },
+        { id: "prefab-drainfield", name: "drain field", pool: 4, nodes: [{ key: "root", name: "drain field", mesh: serializeMeshAsset(fieldMesh("drain-field", DRAIN_FIELD)), transform: identity }] },
+        { id: "prefab-regen", name: "regenerator", pool: 4, nodes: [{ key: "root", name: "regenerator", mesh: serializeMeshAsset(regeneratorMesh()), transform: identity }] },
+        { id: "prefab-regenfield", name: "regen field", pool: 4, nodes: [{ key: "root", name: "regen field", mesh: serializeMeshAsset(fieldMesh("regen-field", REGEN_FIELD)), transform: identity }] },
         // The Forerunner kit (I14): pieces for the editor's kit snapping, never spawned.
         ...forerunnerKitPrefabs(identity),
       ],
@@ -3370,11 +3417,18 @@ EQUIP = {
   -- The Hologram (E3): a copy of its wearer that runs the way they aim for
   -- 6 s, drawing fire; a hit pops it. Back in 12 s.
   hologram = { id=5, name="Hologram", charges=1, recharge=720, life=360 },
+  -- The Power Drain (Halo 3, E4): thrown; once down it pulses for 4 s,
+  -- stripping the shields of everyone within 5 m -- its thrower too. 15 s back.
+  powerdrain = { id=6, name="Power Drain", charges=1, recharge=900, life=240, radius=5, strip=4 },
+  -- The Regenerator (Halo 3, E4): set down, it recharges the shields of
+  -- everyone within 5 m for 10 s, whatever hit them last. 20 s back.
+  regenerator = { id=7, name="Regenerator", charges=1, recharge=1200, life=600, radius=5 },
 }
-EQUIP_IDS = { "jetpack", "grappleshot", "repulsor", "dropwall", "hologram" }
+EQUIP_IDS = { "jetpack", "grappleshot", "repulsor", "dropwall", "hologram", "powerdrain", "regenerator" }
+DEPLOY_OF = { dropwall = "wall", hologram = "holo", powerdrain = "drain", regenerator = "regen" }   -- what each sets down
 -- What's been set down (E3): walls and holograms, everyone's, in this browser.
 DEPLOY = {}
-DEPLOY_KINDS = { "wall", "holo" }   -- (a deploy event's kind, from 0)
+DEPLOY_KINDS = { "wall", "holo", "drain", "regen" }   -- (a deploy event's kind, from 0)
 HOLO_IDX = { ${HOLOGRAM_INSTANCE}, ${HOLOGRAM_INSTANCE + 1} }   -- the soldier instances holograms are drawn with   -- by id (the net state and a guest's input carry the id)
 -- What a guest keeps of its own soldier with each input it predicts (E2), to
 -- take up again when it replays them: its fall and its equipment's state.
@@ -3390,6 +3444,8 @@ LOADOUTS = {
   { key="repulsor", name="Repulsor", g1="smg", g2="magnum", eq="repulsor" },
   { key="dropwall", name="Drop Wall", g1="br", g2="magnum", eq="dropwall" },
   { key="hologram", name="Hologram", g1="br", g2="smg", eq="hologram" },
+  { key="powerdrain", name="Power Drain", g1="smg", g2="magnum", eq="powerdrain" },
+  { key="regenerator", name="Regenerator", g1="br", g2="shotgun", eq="regenerator" },
 }
 for _, lo in ipairs(LOADOUTS) do lo.en = lo.name end
 for _, d in pairs(EQUIP) do d.en = d.name end
@@ -3631,8 +3687,8 @@ function eq_move(e, held, pressed, jump, pitch)
   elseif e.eq == "grappleshot" then grapple(e, pressed, jump, pitch)
   elseif e.eq == "repulsor" and pressed and (e.charges or 0) > 0 then
     e.charges = e.charges - 1; repulse(e, pitch)
-  elseif (e.eq == "dropwall" or e.eq == "hologram") and pressed and (e.charges or 0) > 0 then
-    e.charges = e.charges - 1; deploy(e, e.eq == "dropwall" and "wall" or "holo")
+  elseif DEPLOY_OF[e.eq] and pressed and (e.charges or 0) > 0 then
+    e.charges = e.charges - 1; deploy(e, DEPLOY_OF[e.eq])
   end
   local kx, kz = e.kx or 0, e.kz or 0
   if kx ~= 0 or kz ~= 0 then
@@ -5188,19 +5244,24 @@ function deploy_at(xw, b)
 end
 
 -- e sets one down: a wall 1.6 m ahead, square to its facing; a hologram
--- where it stands, to run the way it faces. (Not in a guest's replay, and the
--- host leaves a guest's to the guest, who tells it.)
+-- where it stands, to run the way it faces; a Power Drain from its hand, to
+-- be thrown the way it faces; a Regenerator at its feet, a step ahead. (Not
+-- in a guest's replay, and the host leaves a guest's to the guest, who tells it.)
 function deploy(e, kind)
   if EQ_QUIET or (NETMODE == 2 and e.human and e.remote) then return end
   local yaw = e.ay or e.face or 0
-  local x, z = e.x, e.z
-  if kind == "wall" then x, z = x + math.sin(yaw)*1.6, z + math.cos(yaw)*1.6 end
-  local xw, b = deploy_words(x, e.y, z, yaw)
+  local x, y, z = e.x, e.y, e.z
+  local ahead = (kind == "wall" and 1.6) or (kind == "drain" and 0.4) or (kind == "regen" and 0.8) or 0
+  x, z = x + math.sin(yaw)*ahead, z + math.cos(yaw)*ahead
+  if kind == "drain" then y = y + 1.3 end
+  local xw, b = deploy_words(x, y, z, yaw)
   local qx, qy, qz, qyaw = deploy_at(xw, b)
   e.deploy_n = ((e.deploy_n or 0) + 1) & 7
   deploy_add(e, kind, e.deploy_n, qx, qy, qz, qyaw)
   if NETMODE ~= 0 then
-    cartbox.netsend(EV.EQUIP | ((e.ns & 7) << 4) | (3 << 7) | ((e.deploy_n & 7) << 10) | ((kind == "holo" and 1 or 0) << 13) | (xw << 16), b)
+    local kn = 0
+    for i, k in ipairs(DEPLOY_KINDS) do if k == kind then kn = i - 1 end end
+    cartbox.netsend(EV.EQUIP | ((e.ns & 7) << 4) | (3 << 7) | ((e.deploy_n & 7) << 10) | (kn << 13) | (xw << 16), b)
   end
 end
 
@@ -5214,6 +5275,15 @@ function deploy_add(owner, kind, id, x, y, z, yaw)
     d.hp, d.life = q.hp, q.life
     d.obj = cartbox.spawn("drop wall", x, y, z, yaw, 0, 0)
     cartbox.sound("repulse", x, y + 1, z, 0.6, 1.6)
+  elseif kind == "drain" then
+    -- thrown: in flight (up to 1.5 s) till it lands, then it pulses its life out
+    d.flying, d.life, d.vx, d.vz, d.vy, d.grounded = true, 90, math.sin(yaw)*0.34, math.cos(yaw)*0.34, 0.15, false
+    d.obj = cartbox.spawn("power drain", x, y, z, yaw, 0, 0)
+  elseif kind == "regen" then
+    d.life, d.vy, d.grounded = EQUIP.regenerator.life, 0, false
+    d.obj = cartbox.spawn("regenerator", x, y, z, yaw, 0, 0)
+    d.field = cartbox.spawn("regen field", x, y + 0.4, z, 0, 0, 0)
+    cartbox.sound("repulse", x, y + 0.5, z, 0.5, 1.3)
   else
     d.holo, d.life, d.vy, d.grounded = true, EQUIP.hologram.life, 0, true
     for _, i in ipairs(HOLO_IDX) do
@@ -5237,6 +5307,7 @@ function deploy_gone(d, tell)
   d.dead = true
   for i, o in ipairs(DEPLOY) do if o == d then table.remove(DEPLOY, i) break end end
   if d.obj then cartbox.despawn(d.obj); d.obj = nil end
+  if d.field then cartbox.despawn(d.field); d.field = nil end
   if d.idx then cartbox.set(d.idx, "speed", 0); cartbox.place(d.idx); cartbox.look(d.idx, 0, false) end
   cartbox.burst("shield", d.x, d.y + 1.1, d.z, 0, 1, 0, 2)
   cartbox.sound("repulse", d.x, d.y + 1, d.z, 0.5, 2)
@@ -5246,7 +5317,12 @@ function deploy_gone(d, tell)
 end
 
 function deploy_clear()
-  for i = #DEPLOY, 1, -1 do local d = DEPLOY[i]; if d.obj then cartbox.despawn(d.obj) end; DEPLOY[i] = nil end
+  for i = #DEPLOY, 1, -1 do
+    local d = DEPLOY[i]
+    if d.obj then cartbox.despawn(d.obj) end
+    if d.field then cartbox.despawn(d.field) end
+    DEPLOY[i] = nil
+  end
 end
 
 -- Every tick: walls and holograms run out; a hologram runs on the way it was
@@ -5255,11 +5331,22 @@ function deploy_tick()
   for i = #DEPLOY, 1, -1 do
     local d = DEPLOY[i]
     d.t = d.t + 1
-    if d.t > d.life then deploy_gone(d, false)
-    elseif d.holo then
-      move_axis(d, "x", math.sin(d.yaw)*MOVE); move_axis(d, "z", math.cos(d.yaw)*MOVE)
+    if d.flying and (d.grounded or d.t > d.life) then
+      -- a Power Drain down: it starts to pulse
+      d.flying, d.t, d.life = false, 0, EQUIP.powerdrain.life
+      d.field = cartbox.spawn("drain field", d.x, d.y + 0.2, d.z, 0, 0, 0)
+      cartbox.sound("repulse", d.x, d.y + 0.5, d.z, 0.7, 0.7)
+    elseif d.t > d.life then deploy_gone(d, false)
+    elseif d.holo or d.flying or (d.kind == "regen" and not d.grounded) then
+      -- (a hologram runs; a drain flies; a regenerator settles on the deck)
+      local vx, vz = (d.holo and math.sin(d.yaw)*MOVE) or d.vx or 0, (d.holo and math.cos(d.yaw)*MOVE) or d.vz or 0
+      if vx ~= 0 then move_axis(d, "x", vx) end
+      if vz ~= 0 then move_axis(d, "z", vz) end
       if d.y + d.vy - GRAV < DEATH_Y + 2 then deploy_gone(d, false) else move_vertical(d) end
+      if d.obj and not d.dead then cartbox.place(d.obj, d.x, d.y, d.z, d.yaw + d.t*(d.flying and 0.3 or 0), 0, 0, 1) end
+      if d.field and not d.dead then cartbox.place(d.field, d.x, d.y + 0.4, d.z, 0, 0, 0, EQUIP.regenerator.radius) end
     end
+    if not d.dead and not d.flying and (d.kind == "drain" or d.kind == "regen") then field_apply(d) end
   end
 end
 
@@ -5279,6 +5366,32 @@ function deploy_draw()
       cartbox.shield(d.idx, 0, d.life - d.t < 30 and 1 or 0, 0)
     elseif d.kind == "wall" then
       cartbox.light3d(d.x, d.y + 1.1, d.z, 4, 80, 150, 255, 1.4)
+    elseif d.kind == "drain" and not d.flying then
+      -- its field pulses out to its reach and back, four times a second-and-a-half
+      local r = EQUIP.powerdrain.radius*(0.82 + 0.18*math.abs(math.sin(d.t*0.07)))
+      if d.field then cartbox.place(d.field, d.x, d.y + 0.2, d.z, d.t*0.02, 0, 0, r) end
+      cartbox.light3d(d.x, d.y + 0.6, d.z, 6, 170, 80, 255, 2)
+    elseif d.kind == "regen" then
+      cartbox.light3d(d.x, d.y + 0.8, d.z, 6, 90, 255, 140, 1.8)
+    end
+  end
+end
+
+-- A field at work (E4), where shields are judged (offline, the host): the
+-- drain strips the shields of everyone within reach (and holds their
+-- recharge off); the regenerator fills them, whatever hit them last.
+function field_apply(d)
+  if NETMODE == 1 or not MODE.shields then return end
+  local q = d.kind == "drain" and EQUIP.powerdrain or EQUIP.regenerator
+  for _, o in ipairs(all_players()) do
+    if o and not o.dead and d3(o.x, o.y + 0.9, o.z, d.x, d.y + 0.3, d.z) < q.radius then
+      if d.kind == "drain" then
+        if (o.sh or 0) > 0 then o.sh = math.max(0, o.sh - q.strip); o.flare = 1 end
+        o.calm = 0
+      else
+        local cap = o.jugg and 200 or 100
+        if (o.sh or 0) < cap then o.sh = math.min(cap, (o.sh or 0) + cap/60) end
+      end
     end
   end
 end
@@ -5327,6 +5440,13 @@ function bot_deploy(o, tg, m)
   elseif o.eq == "hologram" and m > 8 and math.random() < 1/150 then
     o.charges, o.ay = o.charges - 1, o.face + (math.random() < 0.5 and -0.7 or 0.7)
     deploy(o, "holo")
+  elseif o.eq == "powerdrain" and m > 4 and m < 9 and (tg.sh or 0) > 50 then
+    -- (a drain lobbed at a shielded enemy a few steps off)
+    o.charges, o.ay = o.charges - 1, o.face
+    deploy(o, "drain")
+  elseif o.eq == "regenerator" and (o.sh or 0) < 40 and m > 5 then
+    o.charges, o.ay = o.charges - 1, o.face
+    deploy(o, "regen")
   end
 end
 

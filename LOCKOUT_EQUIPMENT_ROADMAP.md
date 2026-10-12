@@ -145,9 +145,32 @@ A **loadout** picker chooses what a player spawns with: weapons, a second gun to
       - The player's shot pops an enemy's Hologram.
       - Online: a guest's wall stands on the host at the same spot, stops the host's shots, and when the host breaks it, it goes on the guest too.
       - Online: a guest's Hologram runs on the host to the same spot.
-- [ ] **E4. The Power Drain and the Regenerator (Halo 3).**
+- [x] **E4. The Power Drain and the Regenerator (Halo 3).**
   - **Power Drain:** a device that's thrown and lands. It pulses for 4 s, stripping the shields of everyone near it, its thrower included.
   - **Regenerator:** a device set down that recharges everyone's shields within 5 m for 10 s, and holds off damage-free recharge waits.
+  - **Done.**
+    - **Loadouts:**
+      - Power Drain: SMG, Magnum. Back in 15 s.
+      - Regenerator: BR, Shotgun. Back in 20 s.
+    - **How they're set down:** both are set down like E3's (`DEPLOY`, `EV.EQUIP` kinds 3 and 4; kinds 2 and 3 of a deploy).
+      - A drain leaves the hand and flies the way its thrower faces, through the moves a soldier makes, so it lands on the same spot in every browser. That's about 6 m on open deck.
+      - A regenerator settles on the deck a step ahead.
+    - **Their effect** (`field_apply`, judged offline or on the host; a guest sees its shield in the net state):
+      - A landed drain strips 4 shield points a tick from everyone within 5 m, its thrower included, and holds their recharge off.
+      - A regenerator fills shields within 5 m in a second, whatever hit them last.
+    - **How they look:**
+      - A violet charge in a dark cage, and a green one atop a squat pylon.
+      - Each throws a field round itself: a plasma bubble, faint face on and bright at its rim. The drain's pulses.
+      - These are four new prefabs, four of each held in reserve, kept light enough to hold the sidecar under its 1.9 MB budget.
+    - **The Drop Wall:** its plasma is now see-through face on. `PlasmaLook` gained an optional `alpha`.
+    - **Bots:**
+      - They lob a drain at a shielded enemy 4–9 m off.
+      - They set a regenerator down when their own shield runs low, out of melee.
+    - **Tests:**
+      - A drain lands 5.8 m out and strips a bot beside it to nothing, while its thrower, out of reach, keeps a full shield. It pulses out after 4 s.
+      - A regenerator fills the player's emptied shield in about a second, with its own recharge held off. Out of it, nothing.
+      - Online, a guest's regenerator fills the shield the host emptied, on the host and so on the guest.
+      - Online, a guest's drain lands on the host at the very spot it lands for the guest.
 - [ ] **E5. Dual wielding (Halo 2/3).**
   - **What dual-wields:** the SMG and the Magnum, in matching or mixed pairs, from a loadout or by picking a second one-handed gun off a pad while holding swap.
   - **Firing:** the right gun on fire, the left on the grenade action. No grenades while dual wielding.
