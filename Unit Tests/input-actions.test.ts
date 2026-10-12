@@ -267,7 +267,7 @@ describe("editor sidecar", () => {
 describe("Lockout", () => {
   it("binds fire, jump, swap, grenade and zoom, keeping each one's console button, and its code reads them", () => {
     expect(readSidecarActions(lockoutMeshSidecar())).toEqual(LOCKOUT_INPUT_ACTIONS);
-    expect(LOCKOUT_INPUT_ACTIONS.map((a) => a.name)).toEqual(["fire", "jump", "swap", "grenade", "zoom"]);
+    expect(LOCKOUT_INPUT_ACTIONS.map((a) => a.name)).toEqual(["fire", "jump", "swap", "grenade", "zoom", "equipment"]);
     expect(LOCKOUT_INPUT_ACTIONS.find((a) => a.name === "jump")!.keys).toContain("Space");
     for (const call of ['cartbox.actionp("grenade")', 'cartbox.action("jump")', 'cartbox.actionp("swap")', 'cartbox.action("zoom")', 'cartbox.action("fire")']) expect(LOCKOUT_CODE).toContain(call);
   });

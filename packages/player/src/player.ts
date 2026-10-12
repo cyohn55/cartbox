@@ -265,6 +265,8 @@ export class Player {
     this.actions = reboundActions(this.options.actions ?? [], this.controlSettings.actionBindings);
     this.actionKeys = new Set(this.actions.flatMap((a) => a.keys));
     this.actionPad = new Set(this.actions.flatMap((a) => a.pad));
+    // On a touchscreen, a button for each action no face button carries.
+    this.touch?.setActionButtons(this.actions.filter((a) => a.buttons.length === 0).map((a) => a.name));
   }
 
   /** The actions' controls held last tick, and the toggled actions now on (C3). */
@@ -280,7 +282,9 @@ export class Player {
     if (this.actions.length === 0) return 0;
     const keys = this.keyboard?.held ?? NO_HELD;
     const mouse = this.mouse?.held ?? NO_HELD;
-    const raw = actionMask(this.actions, { keys: mouse.size > 0 ? new Set([...keys, ...mouse]) : keys, pad: this.controllerInput?.pressed ?? NO_HELD, buttons: this.gamepad.value });
+    let raw = actionMask(this.actions, { keys: mouse.size > 0 ? new Set([...keys, ...mouse]) : keys, pad: this.controllerInput?.pressed ?? NO_HELD, buttons: this.gamepad.value });
+    const touched = this.touch?.heldActions;
+    if (touched && touched.size > 0) this.actions.forEach((a, i) => (raw |= touched.has(a.name) ? 1 << i : 0));
     const { held, latched } = applyActionToggles(raw, this.rawActions, this.latchedActions, toggleMask(this.actions, this.controlSettings.actionToggles));
     this.rawActions = raw;
     this.latchedActions = latched;
@@ -724,6 +728,7 @@ export class Player {
     if (shouldUseTouch(scheme, this.view)) {
       this.touch = new TouchInput(this.container, this.gamepad, onStart);
       this.touch.applySettings(this.controlSettings);
+      this.touch.setActionButtons(this.actions.filter((a) => a.buttons.length === 0).map((a) => a.name));
     }
     this.pointer = new PointerInput(this.container, this.model);
   }

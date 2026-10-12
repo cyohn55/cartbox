@@ -18,6 +18,7 @@ import {
   type LookDevice,
   type PadSnapshot,
   type RumbleEffect,
+  TOUCH_CONTROL_IDS,
   type TouchControlId,
   type TouchLayout,
   type TouchLookMode,
@@ -251,8 +252,11 @@ export function hasTouchSupport(maxTouchPoints: number, coarsePointer: boolean):
 const FACE_SIZE = "clamp(40px, 8vmin, 68px)";
 const STICK_SIZE = "clamp(110px, 24vmin, 190px)";
 
-/** How the layout editor names each control. */
-const CONTROL_NAMES: Record<TouchControlId, string> = {
+const controlName = (id: TouchControlId): string =>
+  id.startsWith("act:") ? `${id.slice(4)} button` : CONTROL_NAMES[id as (typeof TOUCH_CONTROL_IDS)[number]];
+
+/** How the layout editor names each control (an action's button by its action). */
+const CONTROL_NAMES: Record<(typeof TOUCH_CONTROL_IDS)[number], string> = {
   leftStick: "Left stick",
   rightStick: "Right stick",
   A: "A button",
@@ -314,6 +318,9 @@ export class TouchInput {
   /** The player's layout (the controls they moved), and the pad's overall size. */
   private layout: TouchLayout = {};
   private touchScale = 1;
+  /** The game's input actions no face button carries, each with its own button (see setActionButtons), and those held. */
+  private actionNames: readonly string[] = [];
+  private readonly actionHeldSet = new Set<string>();
   /** Set while the layout is being edited (see editLayout). */
   private editing: { readonly finish: (layout: TouchLayout | null) => void } | null = null;
 
@@ -574,7 +581,7 @@ export class TouchInput {
     };
     const describe = () => {
       hint.textContent = selected
-        ? `${CONTROL_NAMES[selected]}: drag to move · ${Math.round((this.layout[selected]?.size ?? 1) * 100)}% size`
+        ? `${controlName(selected)}: drag to move · ${Math.round((this.layout[selected]?.size ?? 1) * 100)}% size`
         : "Drag a stick or button to move it. Tap one to resize it.";
       for (const [id, { el }] of this.controls) {
         el.style.outline = id === selected ? "3px solid rgba(92,208,255,0.95)" : "2px dashed rgba(255,255,255,0.75)";
@@ -682,6 +689,89 @@ export class TouchInput {
   /** Close the layout editor as if cancelled (a menu opened over it, say). */
   cancelLayoutEdit(): void {
     this.editing?.finish(null);
+  }
+
+  /**
+   * A button for each of the game's input actions that no face button
+   * carries (a grenade, a zoom, a piece of equipment): a column above the
+   * face buttons, each movable in the layout editor like any control. Its
+   * actions held now are {@link heldActions}.
+   */
+  setActionButtons(names: readonly string[]): void {
+    if (names.join("\n") === this.actionNames.join("\n")) return;
+    for (const old of this.actionNames) {
+      const id = `act:${old}` as const;
+      this.controls.get(id)?.el.remove();
+      this.controls.delete(id);
+    }
+    this.actionHeldSet.clear();
+    this.actionNames = [...names];
+    const doc = this.root.ownerDocument;
+    names.forEach((name, i) => {
+      const id = `act:${name}` as const;
+      const el = doc.createElement("button");
+      el.type = "button";
+      el.setAttribute("data-cbx-action", name);
+      el.setAttribute("aria-label", `${name} button`);
+      el.textContent = name.toUpperCase().slice(0, 10);
+      Object.assign(el.style, {
+        position: "absolute",
+        height: `calc(${FACE_SIZE} * 0.72)`,
+        minWidth: `calc(${FACE_SIZE} * 1.5)`,
+        padding: "0 10px",
+        pointerEvents: "auto",
+        touchAction: "none",
+        webkitTouchCallout: "none",
+        webkitTapHighlightColor: "transparent",
+        borderRadius: "999px",
+        border: "2px solid rgba(255,255,255,0.45)",
+        background: "rgba(20,26,40,0.45)",
+        color: "rgba(255,255,255,0.92)",
+        font: "700 clamp(10px, 2.2vmin, 14px)/1 system-ui, sans-serif",
+        letterSpacing: "0.5px",
+        cursor: "pointer",
+      } as Partial<CSSStyleDeclaration>);
+      // A column above the face buttons, the first nearest them.
+      const home = { right: "3%", bottom: `calc(4% + 3 * ${FACE_SIZE} + 20px + ${i} * (${FACE_SIZE} * 0.72 + 8px))` };
+      const held = new Set<number>();
+      const setVisual = (down: boolean) => {
+        el.style.background = down ? "rgba(92,208,255,0.55)" : "rgba(20,26,40,0.45)";
+      };
+      el.addEventListener("pointerdown", (event) => {
+        event.preventDefault();
+        held.add(event.pointerId);
+        try {
+          el.setPointerCapture(event.pointerId);
+        } catch {
+          // Synthetic/unsupported pointers: the plain press still works.
+        }
+        this.actionHeldSet.add(name);
+        setVisual(true);
+      });
+      const release = (event: PointerEvent) => {
+        if (!held.delete(event.pointerId) || held.size > 0) return;
+        this.actionHeldSet.delete(name);
+        setVisual(false);
+      };
+      el.addEventListener("pointerup", release);
+      el.addEventListener("pointercancel", release);
+      el.addEventListener("lostpointercapture", release);
+      el.addEventListener("contextmenu", (event) => event.preventDefault());
+      this.letGoes.push(() => {
+        if (held.size === 0) return;
+        held.clear();
+        this.actionHeldSet.delete(name);
+        setVisual(false);
+      });
+      this.pad.appendChild(el);
+      this.controls.set(id, { el, inFace: false, home });
+      this.place(id);
+    });
+  }
+
+  /** The game's input actions whose touch buttons are held now (see setActionButtons). */
+  get heldActions(): ReadonlySet<string> {
+    return this.actionHeldSet;
   }
 
   /** Show the right stick (or the drag zone): the cart reads analog sticks. */

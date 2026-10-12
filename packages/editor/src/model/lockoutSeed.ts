@@ -967,6 +967,8 @@ export const LOCKOUT_EFFECTS: readonly ParticleEffect[] = [
   // from the muzzle to where it stopped, gone in a tenth of a second — every
   // shot in the arena, whoever fired it.
   { ...particlePreset("trail", "tracer"), count: 12, life: 0.09, lifeJitter: 0.3, speed: 0.05, drag: 6, size: 0.035, sizeEnd: 0.012, color: [1, 0.92, 0.65], colorEnd: [1, 0.55, 0.2], glow: 4 },
+  // A Jetpack's thrust (LOCKOUT_EQUIPMENT_ROADMAP.md E1): short hot flames straight down from the pack.
+  { ...particlePreset("sparks", "jetflame"), count: 8, life: 0.16, speed: 4.5, spread: 0.18, gravity: 0, drag: 3, size: 0.09, sizeEnd: 0.02, color: [1, 0.85, 0.45], colorEnd: [1, 0.3, 0.05], glow: 4, stretch: 0.5 },
 ];
 
 /**
@@ -1493,6 +1495,7 @@ export const LOCKOUT_UI: UiDocument[] = [
       { id: "feed", kind: "list", anchor: [0, 0], pivot: [0, 0], offset: [872, 165], size: [400, 132], row: 22, value: "feed", color: 12, scale: 1, small: true },
       txt("announce", 540, 150, 700, 18, "{announce}", 12, 3, { tint: "announcec", visible: "announce" }),
       txt("respawn", 520, 330, 400, 18, "@hud.respawn", 6, 3, { visible: "dead" }),
+      txt("loadout", 440, 380, 560, 12, "{loadout}", 9, 2, { visible: "loadout" }),
     ],
   },
   // The visor's display (HALO_INFINITE_STYLE_ROADMAP.md I12): drawn by the
@@ -1514,6 +1517,9 @@ export const LOCKOUT_UI: UiDocument[] = [
       { id: "weapon", kind: "text", anchor: [1, 1], pivot: [1, 1], offset: [-48, -28], size: [400, 14], text: "{weaponname}", textSize: 13, align: "right" },
       { id: "grenade", kind: "text", anchor: [1, 0], pivot: [1, 0], offset: [-92, 40], size: [200, 16], text: "@hud.frag", textSize: 14, align: "right", rgb: [0.5, 0.75, 1] },
       { id: "grenades", kind: "text", anchor: [1, 0], pivot: [1, 0], offset: [-48, 36], size: [36, 22], text: "{nades}", textSize: 22, align: "right", rgb: [0.5, 0.75, 1] },
+      // Equipment (LOCKOUT_EQUIPMENT_ROADMAP.md): what's in the slot, and the Jetpack's fuel round the reticle's left.
+      { id: "equipment", kind: "text", anchor: [1, 0], pivot: [1, 0], offset: [-48, 64], size: [240, 16], text: "{eqname}", textSize: 14, align: "right", rgb: [1, 0.78, 0.4] },
+      { id: "fuel", kind: "arc", anchor: [0.5, 0.5], pivot: [0.5, 0.5], offset: [0, 0], size: [150, 150], start: -150, sweep: 80, thickness: 4, segments: 6, value: "eqf", visible: "eqbar", rgb: [1, 0.7, 0.3] },
     ],
   },
   {
@@ -1526,6 +1532,7 @@ export const LOCKOUT_UI: UiDocument[] = [
       txt("fire", 300, 612, 900, 6, "@menu.fire", 13, 1),
       txt("pad", 260, 640, 1000, 6, "@menu.pad", 13, 1),
       txt("career", 330, 676, 800, 6, "{career}", 9, 1),
+      txt("loadout", 330, 516, 800, 6, "{loadoutline}", 9, 1),
     ],
   },
 ];
@@ -1546,7 +1553,7 @@ export const LOCKOUT_STRINGS: StringTable = {
     { key: "menu.keys", text: { en: "Up/Down choose . Z (or A) select . Start: controls, audio & more", es: "Arriba/Abajo elige . Z (o A) acepta . Start: controles, audio y mas" } },
     { key: "menu.move", text: { en: "Move Up/Down . Turn Left/Right . hold A strafe . dbl-tap A grenade", es: "Mover Arriba/Abajo . Girar Izq/Der . manten A lateral . doble A granada" } },
     { key: "menu.fire", text: { en: "Z fire (auto-melee close) . X/Space jump . S/Tab swap . G/Q grenade . sniper: Shift (or hold A) to zoom", es: "Z dispara (cuerpo a cuerpo de cerca) . X/Espacio salta . S/Tab cambia . G/Q granada . francotirador: Shift (o manten A) apunta" } },
-    { key: "menu.pad", text: { en: "Touch/controller: left stick moves . right stick aims . A fire . B jump . X zoom/grenade . Y swap . LT grenade", es: "Tactil/mando: stick izq mueve . stick der apunta . A dispara . B salta . X zoom/granada . Y cambia . LT granada" } },
+    { key: "menu.pad", text: { en: "Touch/controller: left stick moves . right stick aims . A fire . B jump . Y swap . LT grenade . RB equipment . E on a keyboard", es: "Tactil/mando: stick izq mueve . stick der apunta . A dispara . B salta . Y cambia . LT granada . RB equipo . E en teclado" } },
     { key: "menu.top", text: { en: "Matchmaking finds players online . or play the game types below vs 7 bots", es: "Partida en linea busca jugadores . o juega estos modos contra 7 bots" } },
     { key: "menu.matchmaking", text: { en: "Matchmaking (online)", es: "Partida en linea" } },
     { key: "mode.ffa", text: { en: "Free for All", es: "Todos contra todos" } },
@@ -1584,6 +1591,12 @@ export const LOCKOUT_STRINGS: StringTable = {
     { key: "status.huntjugg", text: { en: "Hunt the Juggernaut  ", es: "Caza al Coloso  " } },
     { key: "status.score", text: { en: "Score {1}   Deaths {2}   /{3}", es: "Puntos {1}   Muertes {2}   /{3}" } },
     { key: "hud.motion", text: { en: "MOTION", es: "RADAR" } },
+    // Loadouts and equipment (LOCKOUT_EQUIPMENT_ROADMAP.md).
+    { key: "menu.loadout", text: { en: "Loadout: {1}   < Left / Right >", es: "Equipo: {1}   < Izq / Der >" } },
+    { key: "hud.loadout", text: { en: "Next life: {1}   (swap to change)", es: "Proxima vida: {1}   (cambiar arma para elegir)" } },
+    { key: "loadout.standard", text: { en: "Standard", es: "Estandar" } },
+    { key: "loadout.jetpack", text: { en: "Jetpack", es: "Mochila propulsora" } },
+    { key: "equip.jetpack", text: { en: "Jetpack", es: "Mochila propulsora" } },
   ],
 };
 
@@ -1603,6 +1616,8 @@ export const LOCKOUT_AUDIO: SceneAudio = {
     gun("magnum", "pistol"),
     gun("sword", "swing"),
     { name: "blast", source: { kind: "synth", synth: "explosion" }, bus: "sfx", volume: 1, range: [8, 120] },
+    // A Jetpack's roar (E1): a low rush of noise, laid one over the next while it thrusts.
+    { name: "jet", source: { kind: "synth", synth: { duration: 0.32, voices: [{ wave: "noise", cutoff: [1600, 500], attack: 0.04, decay: 0.26, volume: 0.8 }] } }, bus: "sfx", volume: 0.7, range: [5, 60] },
     { name: "wind", source: { kind: "synth", synth: "wind" }, bus: "ambience", volume: 1, loop: true },
     vox("v2", "Double kill"),
     vox("v3", "Triple kill"),
@@ -2714,6 +2729,8 @@ export const LOCKOUT_INPUT_ACTIONS: readonly InputAction[] = [
   { name: "swap", keys: ["Tab"], pad: [], buttons: [7] },
   { name: "grenade", keys: ["KeyG", "KeyQ"], pad: ["LT"], buttons: [] },
   { name: "zoom", keys: ["ShiftLeft", "Mouse2"], pad: ["RS"], buttons: [] },
+  // Equipment (LOCKOUT_EQUIPMENT_ROADMAP.md): E, RB, or its touch button.
+  { name: "equipment", keys: ["KeyE"], pad: ["RB"], buttons: [] },
 ];
 
 /** A spent brass casing (H10), about 4 cm long, lying along Z. */
@@ -3297,13 +3314,32 @@ local W = {
   sword   = { name="Energy Sword",  dmg=220,cool=20, rng=3.2,hs=1.0, mag=99, pel=1, spr=0.0,  auto=false, reserve=0, melee=true },
 }
 
+-- Equipment (LOCKOUT_EQUIPMENT_ROADMAP.md): one slot, used with the
+-- equipment action (E, RB, or its touch button). Globals, not locals: the
+-- chunk is near Lua's 200. The Jetpack (E1): hold to rise -- lift a tick,
+-- top speed, fuel in ticks of thrust, refilled on the ground.
+EQUIP = {
+  jetpack = { id=1, name="Jetpack", fuel=150, lift=0.05, top=0.12, refill=1.5 },
+}
+EQUIP_IDS = { "jetpack" }   -- by id (the net state and a guest's input carry the id)
+-- Loadouts: what a player spawns with. Standard is the game type's weapon
+-- and a Magnum, kept through a life as always; the others are given at every
+-- spawn. SWAT and Team Snipers keep their fixed weapons (MODE.fixed).
+LOADOUTS = {
+  { key="standard", name="Standard" },
+  { key="jetpack",  name="Jetpack",  g1="br", g2="magnum", eq="jetpack" },
+}
+for _, lo in ipairs(LOADOUTS) do lo.en = lo.name end
+for _, d in pairs(EQUIP) do d.en = d.name end
+loadout_pick = 1
+
 -- Game types. teams/shields/radar toggle the rules; obj names the objective
 -- ("slayer" = kills); target is the score that ends the match.
 local MODES = {
   ffa    = { name="Free for All",  obj="slayer", teams=false, shields=true,  radar=true,  start="br",     target=15, weapons={br=true,smg=true,shotgun=true,sniper=true,sword=true} },
   slayer = { name="Team Slayer",   obj="slayer", teams=true,  shields=true,  radar=true,  start="br",     target=40, weapons={br=true,smg=true,shotgun=true,sniper=true,sword=true} },
-  swat   = { name="SWAT",          obj="slayer", teams=true,  shields=false, radar=false, start="br",     target=40, weapons={} },
-  snipe  = { name="Team Snipers",  obj="slayer", teams=true,  shields=true,  radar=false, start="sniper", target=25, weapons={} },
+  swat   = { name="SWAT",          obj="slayer", teams=true,  shields=false, radar=false, start="br",     target=40, weapons={}, fixed=true },
+  snipe  = { name="Team Snipers",  obj="slayer", teams=true,  shields=true,  radar=false, start="sniper", target=25, weapons={}, fixed=true },
   ball   = { name="Oddball",       obj="ball",   teams=false, shields=true,  radar=true,  start="magnum", target=100,weapons={br=true,smg=true,shotgun=true,sniper=true,sword=true} },
   koth   = { name="King of the Hill",obj="hill", teams=false, shields=true,  radar=true,  start="br",     target=100,weapons={br=true,smg=true,shotgun=true,sniper=true,sword=true} },
   jugg   = { name="Juggernaut",    obj="jugg",   teams=false, shields=true,  radar=true,  start="magnum", target=15, weapons={br=true,shotgun=true,sniper=true,sword=true} },
@@ -3323,6 +3359,8 @@ for id, w in pairs(W) do w.en = w.name end
 local function relabel()
   for k, m in pairs(MODES) do m.name = T("mode."..k, m.en) end
   for id, w in pairs(W) do w.name = T("weapon."..id, w.en) end
+  for _, lo in ipairs(LOADOUTS) do lo.name = T("loadout."..lo.key, lo.en) end
+  for k, d in pairs(EQUIP) do d.name = T("equip."..k, d.en) end
 end
 relabel()
 
@@ -3494,7 +3532,7 @@ end
 -- (-1..1, by its facing), its facing, and a jump. The host moves every
 -- Spartan with it -- a guest's from the inputs it sends -- and a guest
 -- predicts its own with the very same steps.
-local function move_soldier(e, fwd, right, yaw, jump)
+local function move_soldier(e, fwd, right, yaw, jump, eqh, eqp)
   e.ay, e.face = yaw, yaw
   local sy, cy = math.sin(yaw), math.cos(yaw)
   local mvx, mvz = fwd*sy - right*cy, fwd*cy + right*sy
@@ -3502,9 +3540,25 @@ local function move_soldier(e, fwd, right, yaw, jump)
   e.moving = mm > 0
   if mm > 0 then local sp = MOVE*math.min(1, mm); move_axis(e, "x", mvx/mm*sp); move_axis(e, "z", mvz/mm*sp) end
   if jump and e.grounded then e.vy = JUMP; e.grounded = false end
+  eq_move(e, eqh, eqp)
   move_vertical(e)
   e.air = not e.grounded
 end
+
+-- Equipment that moves its wearer, part of every soldier's moves (L7: the
+-- host moves a guest with it from its inputs, and the guest predicts the
+-- same). The Jetpack: held, it lifts toward its top speed while fuel lasts;
+-- let go on the ground, the fuel refills.
+function eq_move(e, held, pressed)
+  e.jetting = false
+  if e.eq == "jetpack" then
+    local d = EQUIP.jetpack
+    if held and (e.fuel or 0) > 0 then
+      e.vy = math.min(e.vy + d.lift, d.top); e.fuel = e.fuel - 1; e.jetting = true
+    elseif not held and e.grounded then e.fuel = math.min(d.fuel, (e.fuel or 0) + d.refill) end   -- (let go to refill)
+  end
+end
+
 
 -- Spawns on the team's own spawns in team games, if the map has any (SPT), else anywhere.
 local TEAM_SPAWNS = { blue={}, red={} }
@@ -3520,6 +3574,7 @@ function respawn(who)
   who.vy=0; who.hp=100; who.sh = MODE.shields and 100 or 0
   who.dead=false; who.respawn=0
   who.life = ((who.life or 0) + 1) & 3   -- a new life: others snap to it rather than slide
+  if p then eq_on_spawn(who) end
 end
 
 -- Shields recharge, Halo-style: after 4 s without a hit they refill over 2 s.
@@ -3533,6 +3588,30 @@ local function recharge(o)
 end
 
 local function give(who, slot, id) who["g"..slot]=id; who["a"..slot]=W[id].mag; who["r"..slot]=W[id].reserve or 0 end
+
+-- The loadout a spawn gives: the pick, unless the game type fixes the weapons.
+function loadout_now()
+  if MODE.fixed then return LOADOUTS[1] end
+  return LOADOUTS[loadout_pick] or LOADOUTS[1]
+end
+
+-- A spawn's equipment (and, but for Standard, its weapons): the player's
+-- loadout; a bot this browser runs, a piece of its own at random -- but only
+-- when this browser's player (online, the host's) took equipment: a Standard
+-- match is Lockout as it always was. (A guest's copy on the host carries what
+-- the guest's inputs say: host_drive.)
+function eq_on_spawn(who)
+  if who == p then
+    local lo = loadout_now()
+    if lo.g1 then give(p, 1, lo.g1); give(p, 2, lo.g2 or "magnum"); p.slot = 1 end
+    p.eq = lo.eq
+  elseif not who.remote then
+    who.eq = (loadout_now().eq and math.random() < 0.5) and EQUIP_IDS[math.random(1, #EQUIP_IDS)] or nil
+    who.flying = false
+  end
+  local d = who.eq and EQUIP[who.eq]
+  who.fuel, who.jetting = d and d.fuel or 0, false
+end
 
 function enemy_of(a, o)
   if MODE.obj=="jugg" then return a.jugg ~= o.jugg end  -- everyone vs the juggernaut
@@ -3595,6 +3674,7 @@ local function net_pack(e)
   local sh = math.max(0, math.min(127, math.floor((e.sh or 0)/2)))
   local w2 = hp | (sh << 7) | ((WIDX_OF[wid] or 0) << 14) | ((e.dead and 1 or 0) << 17)
     | ((e.moving and 1 or 0) << 18) | ((e.team=="red" and 1 or 0) << 19) | (((e.ack or 0) & 255) << 20)
+    | ((e.jetting and 1 or 0) << 28) | (((e.eq and EQUIP[e.eq].id) or 0) << 29)
   local air = (e == p) and not e.grounded or (e ~= p and e.air)
   local w3 = s8((e == p and e.ap or (e.pitch or 0))*100) | ((air and 1 or 0) << 8) | ((e.crouch and 1 or 0) << 9)
     | ((recent(e.fired_t, 6) and 1 or 0) << 10) | ((recent(e.reload_t, 40) and 1 or 0) << 11)
@@ -3682,6 +3762,7 @@ local function net_sample(o, rt)
   o.dead = ((w2 >> 17) & 1) == 1 or o.killed_life ~= nil
   o.g1 = WLIST[((w2 >> 14) & 7) + 1] or "br"
   o.moving = ((w2 >> 18) & 1) == 1
+  o.jetting, o.eq = ((w2 >> 28) & 1) == 1, EQUIP_IDS[(w2 >> 29) & 7]
   o.air, o.crouch = ((w3 >> 8) & 1) == 1, ((w3 >> 9) & 1) == 1
   o.reloading, o.nade = ((w3 >> 11) & 1) == 1, (w3 >> 13) & 3
   -- Its moves, on their rising edges: a melee swing, a flinch for each hit it
@@ -3885,9 +3966,10 @@ end
 
 -- Inputs (L7). A guest's for one tick: forward and right by its facing (in
 -- 127ths), its facing (1e-4 rad) and pitch, a jump, and its number.
-local function input_word(e, seq, fwd, right, yaw, pitch, jump)
+local function input_word(e, seq, fwd, right, yaw, pitch, jump, eqh, eqp)
   return EV.INPUT | ((e.ns & 7) << 4) | ((jump and 1 or 0) << 7) | ((seq & 255) << 8) | (s8(fwd*127) << 16) | (s8(right*127) << 24),
     u16(wrap_angle(yaw)*10000) | (s8(pitch*100) << 16)
+      | ((((e.eq and EQUIP[e.eq].id) or 0) & 7) << 24) | ((eqh and 1 or 0) << 27) | ((eqp and 1 or 0) << 28)
 end
 
 -- A guest keeps its own soldier where the host says (L7). The host's state for
@@ -3911,6 +3993,7 @@ local function net_reconcile()
   -- would, but nothing it predicted was wrong.
   local respawned = life ~= ((p.life or 0) & 3)
   p.life = life
+  if respawned then eq_on_spawn(p) end   -- the host respawned it: its loadout again
   p.dead = ((w2 >> 17) & 1) == 1   -- dead or alive, as the host has it
   if p.dead then return end
   local pend = p.pending
@@ -3926,7 +4009,9 @@ local function net_reconcile()
   local vy = (w3 >> 19) & 0x1fff
   if vy >= 4096 then vy = vy - 8192 end
   p.x, p.y, p.z, p.vy, p.grounded = x, y, z, vy/2000, ((w3 >> 8) & 1) == 0
-  for _, i in ipairs(pend) do move_soldier(p, i.fwd, i.right, i.yaw, i.jump); i.x, i.y, i.z = p.x, p.y, p.z end
+  -- (its equipment's state as it stood after that input)
+  if guess and guess.seq == ack and guess.fuel then p.fuel = guess.fuel end
+  for _, i in ipairs(pend) do move_soldier(p, i.fwd, i.right, i.yaw, i.jump, i.eqh, i.eqp); i.x, i.y, i.z, i.fuel = p.x, p.y, p.z, p.fuel end
   if not respawned then p.corrections = (p.corrections or 0) + 1 end
   local dx, dy, dz = ox - p.x, oy - p.y, oz - p.z
   if dx*dx + dy*dy + dz*dz < 9 and not respawned then p.vox, p.voy, p.voz = p.vox + dx, p.voy + dy, p.voz + dz
@@ -3950,7 +4035,10 @@ local function host_drive()
       end
       for _ = 1, (#q > 4 and 2) or (#q > 0 and 1) or 0 do
         local i = table.remove(q, 1)
-        if not o.dead then move_soldier(o, i.fwd, i.right, i.yaw, i.jump); o.pitch = i.pitch end
+        -- (its equipment as its inputs say: a new piece comes full)
+        local eq = EQUIP_IDS[i.eqid]
+        if eq ~= o.eq then o.eq = eq; o.fuel = eq and EQUIP[eq].fuel or 0 end
+        if not o.dead then move_soldier(o, i.fwd, i.right, i.yaw, i.jump, i.eqh, i.eqp); o.pitch = i.pitch end
         o.firing = recent(o.fired_t, 6)
         o.ack = i.seq
         o.seqpos[i.seq] = { o.x, o.y, o.z }
@@ -4049,7 +4137,7 @@ local function net_receive()
         local b = ev[2]
         if #src.inq < 120 then
           src.inq[#src.inq+1] = { seq = (a >> 8) & 255, jump = ((a >> 7) & 1) == 1, fwd = sb(a >> 16)/127, right = sb(a >> 24)/127,
-            yaw = s16(b)/10000, pitch = sb(b >> 16)/100 }
+            yaw = s16(b)/10000, pitch = sb(b >> 16)/100, eqid = (b >> 24) & 7, eqh = ((b >> 27) & 1) == 1, eqp = ((b >> 28) & 1) == 1 }
         end
       end
     elseif kind == EV.AIM then
@@ -4613,8 +4701,14 @@ local function think_bot(o)
     if o.respawn<=0 then respawn(o); nav_place(o) end
     return
   end
-  if not o.agent then nav_place(o) end
-  o.moving = nav_follow(o)
+  -- A bot with a Jetpack flies up to a target above it (off the navmesh while it does).
+  if o.flying then
+    bot_fly(o)
+  else
+    if not o.agent then nav_place(o) end
+    o.moving = nav_follow(o)
+    if o.eq == "jetpack" then o.fuel = math.min(EQUIP.jetpack.fuel, (o.fuel or 0) + EQUIP.jetpack.refill) end
+  end
   -- Pick a target a few times a second: the nearest enemy in line of sight --
   -- the player, another human, or another bot. Bots fight each other now.
   if (tick + (o.id or 0)*7) % 10 == 0 then
@@ -4629,6 +4723,7 @@ local function think_bot(o)
   end
   local tg = o.target
   if tg and tg.dead then tg = nil; o.target = nil end
+  if tg then bot_take_off(o, tg) end
   local w = W[o.g1 or "br"]
   if tg then
     local dx,dz = tg.x-o.x, tg.z-o.z
@@ -4709,6 +4804,28 @@ local function think_bot(o)
   bot_pickups(o)
 end
 
+-- A bot's Jetpack flight (E1): it leaves its agent, thrusts up while below its
+-- target (or where it was going) and drifts toward it, and takes up its agent
+-- again once it lands. Starts when a target stands well above it, near.
+function bot_take_off(o, tg)
+  if o.eq ~= "jetpack" or o.flying or not tg or (o.fuel or 0) < 90 then return end
+  local dx, dz = tg.x - o.x, tg.z - o.z
+  if tg.y > o.y + 2.5 and dx*dx + dz*dz < 14*14 then
+    nav_drop(o); o.flying, o.vy, o.grounded, o.fly_to = true, 0, true, { tg.x, tg.y, tg.z }
+  end
+end
+function bot_fly(o)
+  local to = o.fly_to
+  local dx, dz = to[1] - o.x, to[3] - o.z
+  local m = math.sqrt(dx*dx + dz*dz)
+  local yaw = (m > 0.01) and math.atan(dx, dz) or (o.face or 0)
+  local face = o.face
+  move_soldier(o, m > 0.6 and 1 or 0, 0, yaw, false, o.y < to[2] + 1 and not o.landing, false)
+  if o.target then o.face = face end   -- still facing whoever it's fighting
+  if o.y >= to[2] + 0.5 then o.landing = true end
+  if o.grounded and (o.landing or (o.fuel or 0) <= 0) then o.flying, o.landing, o.jetting = false, nil, false; nav_place(o) end
+end
+
 -- Players can't walk through the bots (or the other humans' stand-ins): push
 -- the local player back out of any body it overlaps, respecting the walls.
 local function push_from_bots()
@@ -4780,6 +4897,15 @@ function record_match(w)
   career.deaths = (career.deaths or 0) + (p.deaths or 0)
   cartbox.save(career)
 end
+-- Step the loadout pick (wrapping), and keep it with the career.
+function loadout_step(d)
+  loadout_pick = (loadout_pick - 1 + d) % #LOADOUTS + 1
+  career.loadout = LOADOUTS[loadout_pick].key
+  cartbox.save(career)
+end
+-- The career's loadout, when there is one.
+for i, lo in ipairs(LOADOUTS) do if lo.key == career.loadout then loadout_pick = i end end
+
 function career_line()
   if not career.matches then return "" end
   return "Career: "..career.matches.." match"..(career.matches==1 and "" or "es").." . "..(career.wins or 0).." won . "..(career.kills or 0).." kills . "..(career.deaths or 0).." deaths"
@@ -4801,7 +4927,7 @@ local function start_match(key)
   tick=0; feed={}; grenades={}; announce.t=0
   for i=1,(#MRK//3) do mtimer[i]=0 end
   p = { ay=0, ap=0, vy=0, cool=0, score=0, deaths=0, slot=1, team="blue", dead=false, respawn=0, nade=2, tag="You", streak=0 }
-  respawn(p); give(p,1,MODE.start); give(p,2,"magnum")
+  give(p,1,MODE.start); give(p,2,"magnum"); respawn(p)
   bots = {}
   for i=1,NBOT do
     -- Teams alternate by slot (even slots blue, odd red), so a room of any
@@ -4930,18 +5056,24 @@ local function play_input()
   -- this soldier -- online a guest's is its prediction, and goes to the host
   -- with its number, to be applied there and acknowledged (L7).
   local jump = cartbox.action("jump") and not p.dead
+  -- The equipment button (LOCKOUT_EQUIPMENT_ROADMAP.md): held and pressed.
+  local eqh = cartbox.action("equipment") and not p.dead
+  local eqp = cartbox.actionp("equipment") and not p.dead
   fwd, right = sb(s8(fwd*127))/127, sb(s8(right*127))/127
   local yaw = s16(u16(wrap_angle(p.ay)*10000))/10000
-  if not p.dead then move_soldier(p, fwd, right, yaw, jump) end
+  if not p.dead then move_soldier(p, fwd, right, yaw, jump, eqh, eqp) end
   if NETMODE == 1 then
     p.in_seq = ((p.in_seq or 0) + 1) & 255
     p.pending = p.pending or {}
     if not p.dead then
-      p.pending[#p.pending+1] = { seq = p.in_seq, fwd = fwd, right = right, yaw = yaw, jump = jump, x = p.x, y = p.y, z = p.z }
+      p.pending[#p.pending+1] = { seq = p.in_seq, fwd = fwd, right = right, yaw = yaw, jump = jump, eqh = eqh, eqp = eqp, x = p.x, y = p.y, z = p.z, fuel = p.fuel }
       if #p.pending > 120 then table.remove(p.pending, 1) end
     end
-    cartbox.netsend(input_word(p, p.in_seq, fwd, right, yaw, p.ap, jump))
+    cartbox.netsend(input_word(p, p.in_seq, fwd, right, yaw, p.ap, jump, eqh, eqp))
   end
+  -- Dead, waiting to respawn: swap picks the next life's loadout (a
+  -- deliberate press -- a stick still held from the fight doesn't change it).
+  if p.dead and not MODE.fixed and cartbox.actionp("swap") then loadout_step(1) end
   if cartbox.actionp("swap") then p.slot=(p.slot==1) and 2 or 1; vm("ready") end
   local cur=W[p.slot==1 and p.g1 or p.g2]
   p.zoom = cur.zoom and (cartbox.action("zoom") or (aheld and not lstick and not (btn(0) or btn(1) or btn(2) or btn(3))))
@@ -4957,6 +5089,16 @@ local function sky()
   rect(0, 360, 1280, 360, 3)
   -- a few Forerunner stars up high
   for i=1,40 do local sx=(i*131)%1280; local sy=(i*71)%180; pix(sx,sy,12) end
+end
+
+-- A Jetpack's thrust: flames down from the pack on its back, a glow under
+-- the wearer and the roar of it -- for whoever is jetting, near enough to see.
+function jet_fx(e, face)
+  if not e.jetting or e.dead then return end
+  local bx, bz = e.x - math.sin(face)*0.28, e.z - math.cos(face)*0.28
+  if tick % 2 == 0 then cartbox.burst("jetflame", bx, e.y + 1.05, bz, 0, -1, 0) end
+  cartbox.light3d(bx, e.y + 0.6, bz, 3, 255, 150, 60, 2.2)
+  if tick % 12 == 0 then cartbox.sound("jet", bx, e.y + 1, bz, 0.8, 0.95 + math.random()*0.1) end
 end
 
 -- First-person weapon: a real 3D viewmodel. Each weapon is its own mesh
@@ -5040,6 +5182,13 @@ local function draw_hud()
   local res=p.slot==1 and p.r1 or p.r2
   U.set("rounds", cur.melee and "" or tostring(ammo)); U.set("reserve", cur.melee and "" or tostring(res))
   U.set("weaponname", string.upper(cur.name)); U.set("nades", p.nade or 0)
+  -- Equipment (E1): its name, and the Jetpack's fuel as an arc by the reticle.
+  local d = p.eq and EQUIP[p.eq]
+  U.set("eqname", d and string.upper(d.name) or "")
+  U.set("eqbar", d ~= nil and d.fuel ~= nil and not p.dead)
+  U.set("eqf", d and d.fuel and (p.fuel or 0) / d.fuel or 0)
+  -- Dead: the next life's loadout, swap to change it.
+  U.set("loadout", (p.dead and not MODE.fixed) and T("hud.loadout", "Next life: "..loadout_now().name.."   (swap to change)", loadout_now().name) or nil)
   U.set("radar", MODE.radar and not p.dead)
   if MODE.radar then U.set("blips", tracker_blips()) end
   local st
@@ -5329,6 +5478,10 @@ function title_screen()
     U.set("menutop",T("menu.host","ONLINE  --  you are the host  --  "..humans.." player"..(humans==1 and "" or "s").." + "..(8-humans).." bots",humans,8-humans)); U.set("menutopc",9)
   else U.set("menutop",T("menu.top","Matchmaking finds players online . or play the game types below vs 7 bots")); U.set("menutopc",13) end
   U.set("career", career_line())
+  -- The loadout to spawn with (Left/Right), for the game types that allow one.
+  if edge("lo_l", btn(2)) then loadout_step(-1) end
+  if edge("lo_r", btn(3)) then loadout_step(1) end
+  U.set("loadoutline", T("menu.loadout", "Loadout: "..LOADOUTS[loadout_pick].name.."   < Left / Right >", LOADOUTS[loadout_pick].name))
   U.show("menu")
   local id
   if U.shown("menu") then
@@ -5421,6 +5574,8 @@ function TIC()
       if not o.dead then cartbox.light3d(o.x + math.sin(o.face or 0)*0.7, o.y + 1.3, o.z + math.cos(o.face or 0)*0.7, 2.5, 255, 210, 140, 1.8) end
     end
   end
+  jet_fx(p, p.ay)
+  for _,o in ipairs(bots) do if not o.dead then jet_fx(o, o.face or 0) end end
   if MODE.obj=="ball" then cartbox.light3d(ball.x, ball.y+0.6, ball.z, 5, 90,220,255, 3.2) end
   if MODE.obj=="hill" then cartbox.light3d(hill.x, hill.y+1.2, hill.z, 5.5, 120,255,150, 3.4) end
 

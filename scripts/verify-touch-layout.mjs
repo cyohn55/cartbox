@@ -76,6 +76,10 @@ await play();
 const aHome = await centre(A);
 const yHome = await centre(Y);
 
+// 0. The game's actions with no face button get buttons of their own (LOCKOUT_EQUIPMENT_ROADMAP.md E1).
+const actionButtons = await page.locator("[data-cbx-action]").evaluateAll((els) => els.map((e) => e.getAttribute("data-cbx-action")));
+check("the actions no face button carries get touch buttons", JSON.stringify(actionButtons) === JSON.stringify(["grenade", "zoom", "equipment"]), JSON.stringify(actionButtons));
+
 // 1. Move A and the left stick, and make A bigger.
 await openEditor();
 check("the editor opens over the game, the menu out of the way", (await page.getByRole("dialog", { name: "Start menu" }).count()) === 0);
@@ -84,6 +88,8 @@ await page.getByRole("button", { name: "Bigger" }).click();
 await page.getByRole("button", { name: "Bigger" }).click();
 const left0 = await centre(LEFT);
 await drag([left0.x, left0.y], [560, 260]);
+const eqHome = await centre('[data-cbx-action="equipment"]');
+await drag([eqHome.x, eqHome.y], [180, 120]);
 await page.screenshot({ path: `${OUT}/touch-layout-editing.png` });
 await page.getByRole("button", { name: "Save layout" }).click();
 check("saving brings the menu back on its Touch tab", (await page.getByRole("tab", { name: "Touch" }).getAttribute("aria-selected")) === "true");
@@ -98,6 +104,8 @@ await page.getByRole("button", { name: "Resume" }).click();
 // 2. Play with them where they were put.
 const aNow = await centre(A);
 check("A sits where it was dragged", near(aNow, [300, 150]), JSON.stringify(aNow));
+check("the equipment button sits where it was dragged", near(await centre('[data-cbx-action="equipment"]'), [180, 120]));
+check("…and the layout keeps it", Boolean(layout["act:equipment"]));
 check("…at its new size", Math.abs(aNow.w / aHome.w - 1.2) < 0.05, `${aHome.w.toFixed(1)} → ${aNow.w.toFixed(1)}`);
 check("a touch there presses A", await page.evaluate(() => document.elementFromPoint(300, 150)?.closest("[data-cbx-button]")?.getAttribute("data-cbx-button") === "A"));
 const leftNow = await centre(LEFT);

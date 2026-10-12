@@ -70,7 +70,13 @@ export type LookDevice = "controller" | "touch" | "mouse" | "gyro";
 
 /** The touch pad's controls a player can move and resize (see TouchLayout). */
 export const TOUCH_CONTROL_IDS = ["leftStick", "rightStick", "A", "B", "X", "Y", "Start"] as const;
-export type TouchControlId = (typeof TOUCH_CONTROL_IDS)[number];
+/**
+ * A touch control: one of the pad's own, or the button for one of the game's
+ * input actions no face button carries ("act:<name>", see TouchInput).
+ */
+export type TouchControlId = (typeof TOUCH_CONTROL_IDS)[number] | `act:${string}`;
+/** An action button's control id. */
+export const ACTION_CONTROL = /^act:[A-Za-z0-9_]{1,24}$/;
 
 /**
  * Where a player put one touch control: its centre as a share of the game's
@@ -94,7 +100,8 @@ export function parseTouchLayout(value: unknown): TouchLayout {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return {};
   const raw = value as Record<string, unknown>;
   const out: Partial<Record<TouchControlId, TouchPlacement>> = {};
-  for (const id of TOUCH_CONTROL_IDS) {
+  const ids: TouchControlId[] = [...TOUCH_CONTROL_IDS, ...Object.keys(raw).filter((k): k is `act:${string}` => ACTION_CONTROL.test(k))];
+  for (const id of ids) {
     const p = raw[id];
     if (typeof p !== "object" || p === null) continue;
     const { x, y, size } = p as Record<string, unknown>;
