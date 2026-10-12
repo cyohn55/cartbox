@@ -65,6 +65,9 @@ interface MaterialEditorProps {
   set?: string | null;
 }
 
+/** Ripples a material starts with (B5): gentle, about one and a half per metre, drifting slowly along +X. */
+const DEFAULT_WATER = { strength: 0.35, scale: 1.5, speed: 0.6, flow: 0 } as const;
+
 /** Clamp a channel to 0..1 and quantise to a byte, matching an 8-bit colour input. */
 function toHex(rgb: readonly [number, number, number]): string {
   const byte = (v: number) => Math.max(0, Math.min(255, Math.round(v * 255)));
@@ -300,6 +303,53 @@ export function MaterialEditor({ mesh, onChange, set = null }: MaterialEditorPro
           />
         </>
       )}
+      <RangeControl
+        label="Ripples"
+        min={0}
+        max={2}
+        step={0.05}
+        value={material.water?.strength ?? 0}
+        ariaLabel="Ripples"
+        display={material.water ? material.water.strength.toFixed(2) : "still"}
+        onChange={(value) => patch({ water: value > 0 ? { ...(material.water ?? DEFAULT_WATER), strength: value } : undefined })}
+      />
+      {material.water && (
+        <>
+          <RangeControl
+            label="Ripple size"
+            nested
+            min={0.05}
+            max={8}
+            step={0.05}
+            value={material.water.scale}
+            ariaLabel="Ripples per metre"
+            display={`${material.water.scale.toFixed(2)} per m`}
+            onChange={(value) => patch({ water: { ...material.water!, scale: value } })}
+          />
+          <RangeControl
+            label="Flow speed"
+            nested
+            min={0}
+            max={4}
+            step={0.05}
+            value={material.water.speed}
+            ariaLabel="Flow speed"
+            display={material.water.speed ? material.water.speed.toFixed(2) : "none"}
+            onChange={(value) => patch({ water: { ...material.water!, speed: value } })}
+          />
+          <RangeControl
+            label="Flow direction"
+            nested
+            min={-180}
+            max={180}
+            step={5}
+            value={Math.round((material.water.flow * 180) / Math.PI)}
+            ariaLabel="Flow direction"
+            display={`${Math.round((material.water.flow * 180) / Math.PI)}°`}
+            onChange={(value) => patch({ water: { ...material.water!, flow: (value * Math.PI) / 180 } })}
+          />
+        </>
+      )}
       <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
         <button
           type="button"
@@ -312,8 +362,8 @@ export function MaterialEditor({ mesh, onChange, set = null }: MaterialEditorPro
         <button
           type="button"
           className={styles.toolBtn}
-          title="Deep blue-green, smooth, mostly opaque, fading out at the shore"
-          onClick={() => patch({ alphaMode: "blend", alphaCutoff: undefined, softDepth: 0.6, baseColorFactor: [0.1, 0.38, 0.5, 0.7], metallicFactor: 0, roughnessFactor: 0.08, reflectivity: 1.2 })}
+          title="Deep blue-green, rippling and flowing, mostly opaque, bending what's under it and fading out at the shore"
+          onClick={() => patch({ alphaMode: "blend", alphaCutoff: undefined, softDepth: 0.6, baseColorFactor: [0.1, 0.38, 0.5, 0.7], metallicFactor: 0, roughnessFactor: 0.08, reflectivity: 1.2, refraction: 0.3, water: DEFAULT_WATER })}
         >
           Water
         </button>

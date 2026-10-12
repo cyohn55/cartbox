@@ -20,6 +20,7 @@ import { SoftwareSceneRenderer, type SceneDraw } from "../../packages/player/src
 import { graphInstances } from "./graphScenes";
 import { LAYER_ENVIRONMENT, LAYER_LIGHTS, layerInstances } from "./layerScenes";
 import { REFRACTION_TIME, refractionInstances, straightInstances } from "./refractionScenes";
+import { WATER_ENVIRONMENT, WATER_TIME, waterInstances } from "./waterScenes";
 import { localShadowRig } from "./localShadowScene";
 import { manyLights } from "./manyLights";
 import { probeRig } from "./probeScene";
@@ -179,6 +180,14 @@ function scenes(): Record<string, Scene> {
     // and the same without their bend (to see that the bend happened).
     refraction: { instances: refractionInstances(quad), draw: () => ({ ...baseDraw(), background: [20, 20, 30, 255] as [number, number, number, number], time: REFRACTION_TIME }) },
     refractionStraight: { instances: straightInstances(quad), draw: () => ({ ...baseDraw(), background: [20, 20, 30, 255] as [number, number, number, number], time: REFRACTION_TIME }) },
+    water: {
+      instances: waterInstances(quad),
+      draw: () => ({ ...baseDraw(), view: viewMatrix([0, 2.6, 2.4], [0, -0.3, 0]), background: [20, 20, 30, 255] as [number, number, number, number], environment: WATER_ENVIRONMENT, time: WATER_TIME }),
+    },
+    waterStill: {
+      instances: waterInstances(quad, null),
+      draw: () => ({ ...baseDraw(), view: viewMatrix([0, 2.6, 2.4], [0, -0.3, 0]), background: [20, 20, 30, 255] as [number, number, number, number], environment: WATER_ENVIRONMENT, time: WATER_TIME }),
+    },
     // Shield effects (H11): rim, glow and bands within rounding, and the camo dither dropping the very same pixels.
     effects: {
       instances: [

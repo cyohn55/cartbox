@@ -640,7 +640,13 @@ export {
   builtinDetailGrain,
   detailFade,
   emissiveAnimation,
+  materialHasWater,
   readSurfaceEffects,
+  WATER_PERIOD,
+  WATER_STEP,
+  WATER_TILT,
+  waterTilt,
+  waterUniform,
 } from "./model/materialEffects";
 export {
   CAMO_BEND,

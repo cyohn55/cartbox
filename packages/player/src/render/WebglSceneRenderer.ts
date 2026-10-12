@@ -72,6 +72,10 @@ import {
   buildLightClusters,
   orderLights,
   graphNoiseSource,
+  WATER_PERIOD,
+  WATER_STEP,
+  WATER_TILT,
+  waterUniform,
   graphShaderCode,
   multiplyMat4,
   type CompiledGraph,
@@ -197,6 +201,7 @@ layout(std140) uniform Uniforms {
   vec4 refract0; // x = bend, y = warp, z = silhouette distortion, w = 1 when the draw refracts (I5)
   vec4 refract1; // xyz = camera right (world), w = frame height (px)
   vec4 refract2; // xyz = camera up (world)
+  vec4 water0;   // x = ripple strength (0 = still), y = ripples per metre, z = drift phase, w = flow direction (B5)
 } u;
 `;
 
@@ -735,6 +740,24 @@ vec3 lightTerm(Light lgt, vec3 P, vec3 N, vec3 V, float ndv, float a2, float k, 
   return lit;
 }
 ${graphNoiseSource("glsl")}
+// --- Water (BEAVER_CREEK_ROADMAP.md B5): waterTilt in materialEffects.ts, term for term ---
+float waterLayer(vec2 p, float phase, vec2 d) {
+  return gNoise1(vec3(p.x + d.x * phase, p.y + d.y * phase, 0.0)) + 0.5 * gNoise1(vec3(2.1 * p.x - d.y * phase * 0.7, 2.1 * p.y + d.x * phase * 0.7, 7.0));
+}
+float waterHeight(vec2 q, vec2 d) {
+  float a = u.water0.z;
+  float wa = 1.0 - abs(1.0 - 2.0 * a);
+  return waterLayer(q, a * ${WATER_PERIOD.toFixed(1)}, d) * wa + waterLayer(q + vec2(53.0, 17.0), fract(a + 0.5) * ${WATER_PERIOD.toFixed(1)}, d) * (1.0 - wa);
+}
+// N tilted by the ripples at world point wp (N itself when the draw has no water).
+vec3 waterNormal(vec3 N, vec3 wp) {
+  if (u.water0.x <= 0.0) { return N; }
+  vec2 d = vec2(cos(u.water0.w), sin(u.water0.w));
+  vec2 q = wp.xz * u.water0.y;
+  float h = waterHeight(q, d);
+  float k = -u.water0.x * ${(WATER_TILT / WATER_STEP).toFixed(4)};
+  return normalize(N + vec3((waterHeight(q + vec2(${WATER_STEP.toFixed(4)}, 0.0), d) - h) * k, 0.0, (waterHeight(q + vec2(0.0, ${WATER_STEP.toFixed(4)}), d) - h) * k));
+}
 // --- Refraction (HALO_INFINITE_STYLE_ROADMAP.md I5; refraction.ts) ---
 // The offset in pixels at a fragment with geometric normal N (facing the
 // viewer) at world point P — refractionOffset, term for term.
@@ -824,6 +847,7 @@ ${g.base}
     }
     vec3 N = normalize(vNormal);
     if (dot(N, u.view.xyz) < 0.0) { N = -N; }
+    N = waterNormal(N, vWorldPos);
     float metallic = u.pbr.x;
     float rough = u.pbr.y;
     float reflectK = u.surface0.z;
@@ -978,7 +1002,7 @@ ${glslDisplay("without")}
     if (camoSeen.a > 0.5) {
       outColor = vec4(camoSeen.rgb, 1.0);
     } else if (u.refract0.w > 0.5) {
-      vec3 rn = facingNormal(vNormal);
+      vec3 rn = waterNormal(facingNormal(vNormal), vWorldPos);
       vec4 b = behindColour(gl_FragCoord.xy, gl_FragCoord.z, refractOffset(rn, vWorldPos));
       if (b.a > 0.5) { outColor = finishRefracted(shaded, colour.a, b.rgb, rn); }
     }
@@ -1351,6 +1375,7 @@ export class WebglSceneRenderer implements SceneRenderer {
         // Refraction (I5), where the context can pack the opaque scene for it to read.
         refraction: batch.refract && refractOk ? resolveRefraction(batch.primitive.material, effectActive(batch.effect) ? batch.effect : null) : null,
         camera,
+        water: waterUniform(batch.primitive.material, draw.time ?? 0),
       });
     });
     for (const chunk of chunks) {

@@ -229,7 +229,19 @@ function beaverMesh(): MeshAsset {
       boxesPrimitive([...BEAVER_SOLIDS.slice(0, BLUE_BASE.length * 2), ...steps.slice(0, stepsInBases())], material("base-concrete", [0.56, 0.57, 0.6], 0.75)),
       boxesPrimitive([...ARCH, ...steps.slice(stepsInBases())], material("rock", [0.42, 0.4, 0.37], 0.9)),
       boxesPrimitive([...BEAVER_MARKERS.map((m) => m.box), ...teleporterPads], glow, 1),
-      boxesPrimitive([water], material("creek-water", [0.16, 0.3, 0.34], 0.06, { alphaMode: "blend", baseColorFactor: [0.16, 0.3, 0.34, 0.55] }), 1),
+      // The creek (B5): rippling, flowing down the canyon (+Z), bending the bed beneath it.
+      boxesPrimitive(
+        [water],
+        material("creek-water", [0.16, 0.3, 0.34], 0.06, {
+          alphaMode: "blend",
+          baseColorFactor: [0.16, 0.3, 0.34, 0.55],
+          reflectivity: 1.3,
+          refraction: 0.3,
+          softDepth: 0.35,
+          water: { strength: 0.35, scale: 1.2, speed: 0.7, flow: Math.PI / 2 },
+        }),
+        1,
+      ),
     ],
   };
 }

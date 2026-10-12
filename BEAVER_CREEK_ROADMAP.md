@@ -59,7 +59,7 @@ Beaver Creek replaces the Forerunner outpost L12 imagined.
 - decals, particles and trails.
 
 It has none of the following, all of which an outdoor Infinite map leans on:
-- **water;**
+- **water** (B5 has since added moving water);
 - **wind sway** for grass and trees;
 - **triplanar** rock on steep terrain;
 - **walkable terrain.**
@@ -180,6 +180,21 @@ Each item lands in all three renderers (WebGL2, WebGPU, and the software referen
     - small ripples where soldiers wade and rounds land (decal-driven).
   - In the editor, a water body is drawn as a polygon over terrain at a height, with its flow direction and colours.
   - *Tests:* renderer parity on a water scene; the flow moves; the depth tint deepens with depth.
+  - **Done, in part.**
+    - A material takes `water: { strength, scale, speed, flow }` (`materialEffects.ts`). Ripples in world space tilt the surface's normal, so its reflections break up and its refraction wobbles what's beneath.
+      - They are procedural, not normal maps: two drifting layers of two-octave value noise, crossfaded so one restarts while the other is at full strength. The ripples drift forever without a jump.
+      - The drift phase is wrapped on the CPU, so a GPU's float32 never sees a large time.
+    - The same maths runs in all three renderers: `waterTilt` in the software rasteriser, and `waterNormal` in the GLSL and WGSL scene shaders, through a new `water0` uniform at byte 848 (864 bytes used).
+      - In WebGL2, Chromium matches the software frame to within 1/255 on every pixel.
+    - Water joins the existing pieces: refraction (I5) bends the bed, the soft edge (EP6b) fades it out at the shore, and PBR's Fresnel reflects the sky and probes.
+    - The editor's material panel gains **Ripples**, **Ripple size**, **Flow speed** and **Flow direction**. Its **Water** preset now ripples, flows and refracts.
+    - Beaver Creek's creek ripples and flows down the canyon (+Z).
+    - *Tests:* `water.test.ts` (the field, the ripples' continuity across a restart, the packing, a frame that ripples and moves); `webgl-parity.test.ts` (a creek bed under refracting water, and a pool).
+    - **Left:**
+      - a depth tint (colour, not just alpha, by depth);
+      - foam at the shore;
+      - ripples where soldiers wade and rounds land;
+      - water bodies drawn as polygons in the editor (with B4).
 
 - [ ] **B6. Living terrain and foliage.**
   - Terrain layers take **triplanar** projection on steep slopes, so cliffs aren't stretched, and **height-blended** transitions (rock pokes through grass at the right places).

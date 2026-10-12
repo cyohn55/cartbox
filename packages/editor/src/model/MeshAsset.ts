@@ -225,6 +225,15 @@ export interface MeshMaterial {
   readonly refraction?: number;
   /** How strongly the view behind shimmers with drifting noise, 0..1 (heat haze, plasma). */
   readonly distortion?: number;
+  // --- Water (BEAVER_CREEK_ROADMAP.md B5; see materialEffects.ts) ---
+  /**
+   * A moving water surface: ripples, in world space, that tilt the normal so
+   * reflections and refraction wobble as the water flows. `strength` is how
+   * steep the ripples are (0..2; absent or 0 is still), `scale` how many per
+   * metre (0.05..8), `speed` how fast they drift (0..4), and `flow` the
+   * direction they drift, radians about +Y from +X (a creek's current).
+   */
+  readonly water?: { readonly strength: number; readonly scale: number; readonly speed: number; readonly flow: number };
   // --- Transparency (ENGINE_PARITY_ROADMAP.md EP6), glTF's alphaMode plus additive ---
   /**
    * How the surface's alpha (base colour factor × texture) is used. Absent is
@@ -500,6 +509,7 @@ export interface SerializedMaterial {
   softDepth?: number;
   refraction?: number;
   distortion?: number;
+  water?: { strength: number; scale: number; speed: number; flow: number };
   graph?: MaterialGraph;
 }
 interface SerializedPrimitive {

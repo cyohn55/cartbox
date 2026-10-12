@@ -32,7 +32,7 @@ import { EFFECT_RIM_POWER, bandAmount, camoThreshold, effectActive, type Surface
 /** The fog for one frame, with the eye it is seen from (height fog and volumes trace from it). */
 type FrameFog = SceneFog & { readonly eye: readonly [number, number, number] };
 import { LIGHTMAP_RANGE } from "../model/lightmap";
-import { DEFAULT_DETAIL_SCALE, DEFAULT_DETAIL_STRENGTH, detailFade, emissiveAnimation } from "../model/materialEffects";
+import { DEFAULT_DETAIL_SCALE, DEFAULT_DETAIL_STRENGTH, detailFade, emissiveAnimation, materialHasWater, waterTilt, waterUniform } from "../model/materialEffects";
 import { compiledGraphOf, evaluateGraph, graphRegisters, type CompiledGraph, type GraphContext } from "../model/materialGraph";
 import { EFFECT_DISTORT_POWER, materialRefracts, refractionOffset, refracts, resolveRefraction, type ResolvedRefraction } from "./refraction";
 import { CLEARCOAT_F0, anisotropicD, curvatureOf, materialHasLayers, parallaxRate, parallaxUv, resolveLayers, uvGradients, type ResolvedLayers } from "../model/materialLayers";
@@ -461,7 +461,8 @@ function buildPbrFrag(
     material.graph !== undefined ||
     relief !== null ||
     materialHasLayers(material) ||
-    materialRefracts(material);
+    materialRefracts(material) ||
+    materialHasWater(material);
   if (!isPbr) return null;
   const { offset, gain } = emissiveAnimation(material, time);
   const e = emissiveFactor ?? [0, 0, 0];
@@ -503,6 +504,7 @@ function buildPbrFrag(
     layers: resolveLayers(material, relief !== null),
     refraction,
     refracting: refracts(refraction),
+    water: materialHasWater(material) ? waterUniform(material, time) : null,
   };
 }
 
@@ -1635,6 +1637,8 @@ interface PbrFrag {
   /** How it bends what's behind it (I5), and whether it does at all — then it draws after the opaque scene. */
   readonly refraction: ResolvedRefraction;
   readonly refracting: boolean;
+  /** Moving water (B5): its {@link waterUniform} this frame, or null for none. */
+  readonly water: readonly [number, number, number, number] | null;
 }
 
 /**
@@ -2463,6 +2467,16 @@ function rasterizeTriangle(
           Ny = -Ny;
           Nz = -Nz;
         }
+        // Moving water (B5): ripples tilt the normal, in world space.
+        const ripple = pbr.water ? waterTilt(pbr.water, pw0 * a.wx + pw1 * b.wx + pw2 * c.wx, pw0 * a.wz + pw1 * b.wz + pw2 * c.wz) : null;
+        if (ripple) {
+          Nx += ripple[0];
+          Nz += ripple[1];
+          const rl = Math.hypot(Nx, Ny, Nz) || 1;
+          Nx /= rl;
+          Ny /= rl;
+          Nz /= rl;
+        }
         let metallic = pbr.metallic;
         let rough = pbr.roughness;
         let reflect = pbr.reflect;
@@ -2518,9 +2532,17 @@ function rasterizeTriangle(
         const cc = layers.clearcoat;
         const glen = Math.hypot(gnx, gny, gnz) || 1;
         const gflip = gnx * viewDir[0] + gny * viewDir[1] + gnz * viewDir[2] < 0 ? -glen : glen;
-        const Cx = gnx / gflip;
-        const Cy = gny / gflip;
-        const Cz = gnz / gflip;
+        let Cx = gnx / gflip;
+        let Cy = gny / gflip;
+        let Cz = gnz / gflip;
+        if (ripple) {
+          Cx += ripple[0];
+          Cz += ripple[1];
+          const rl = Math.hypot(Cx, Cy, Cz) || 1;
+          Cx /= rl;
+          Cy /= rl;
+          Cz /= rl;
+        }
         const ndvC = Math.max(1e-4, Cx * viewDir[0] + Cy * viewDir[1] + Cz * viewDir[2]);
         let ar = r / 255;
         let ag = g / 255;
