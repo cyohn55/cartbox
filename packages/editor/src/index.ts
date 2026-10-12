@@ -105,10 +105,42 @@ export {
   LOCKOUT_CENTER_Z,
   LOCKOUT_MAP,
   lockoutCode,
+  arenaPickupInstances,
+  ARENA_FIRST_PICKUP,
+  type ArenaInstance,
 } from "./model/lockoutSeed";
+export {
+  ARENA_ACTOR_LABELS,
+  ARENA_WEAPONS,
+  addArenaActor,
+  arenaActor,
+  arenaActorId,
+  arenaActors,
+  arenaCollisionBoxes,
+  duplicateArenaActors,
+  isArenaActorId,
+  moveArenaActor,
+  parseArenaActorId,
+  readArenaMap,
+  removeArenaActors,
+  resizeArenaActor,
+  sameArenaCollision,
+  sameArenaMap,
+  setArenaGround,
+  setDestinationPower,
+  setPadWeapons,
+  setSpawnTeam,
+  setTeleporterYaw,
+  storeArenaMap,
+  type ArenaActor,
+  type ArenaActorKind,
+  type PlaceableArenaKind,
+  type StoredArenaMap,
+} from "./model/arenaEdit";
+export { ARENA_CODE_KEYS, arenaCodeLines, isArenaCode, patchArenaCode, type ArenaCodePatch } from "./model/arenaCode";
 export { arenaNavMesh, validateArenaMap, type ArenaIssue, type ArenaIssueKind, type ArenaValidateOptions } from "./model/arenaValidate";
 export { BEAVER_GROUND, BEAVER_LIGHTING, BEAVER_MAP, BEAVER_SCENE, beaverCenter, beaverFoliage, beaverNavMesh, beaverTerrain } from "./model/beaverCreekSeed";
-export { ARENA_MAPS, arenaMap, arenaMapCartridge, arenaMapCode, type ArenaMapEntry } from "./model/arenaMaps";
+export { ARENA_MAPS, arenaMap, arenaMapCartridge, arenaMapCode, arenaMapCodeFor, type ArenaMapEntry } from "./model/arenaMaps";
 export { MAP_BAKES, MAP_BAKE_PARTS, bakeMapKitSource, bakeMapLightmapSource, bakeMapProbesSource, mapBakeStatus, type MapBakeFile, type MapBakePart, type MapBakes } from "./model/mapBakes";
 export {
   ARENA_TILE_WORLD,

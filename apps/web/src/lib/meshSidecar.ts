@@ -84,7 +84,11 @@ import {
   type SceneTimeline,
   type SceneLevel,
   type ScenePropValue,
+  readArenaMap,
+  storeArenaMap,
+  type ArenaMap,
 } from "@cartbox/editor";
+import { readBookmarks, type CameraBookmark } from "./cameraBookmarks";
 
 /** The envelope version; bumped on any schema change (2 added the lighting rig). */
 export const MESH_SIDECAR_VERSION = 2;
@@ -227,6 +231,15 @@ export interface MeshSidecar {
   readonly actions?: readonly InputAction[];
   /** The string table cartbox.text and UI `@key` texts read (see strings.ts in @cartbox/editor). */
   readonly strings?: StringTable;
+  /**
+   * An arena map's markup (EP21): its colliders, spawns, pads, hills, bot
+   * destinations, teleporters, ground and death plane, which the scene view
+   * shows as actors and the cart's tables are written from (arenaEdit.ts in
+   * @cartbox/editor). Absent on carts that aren't arena maps.
+   */
+  readonly arena?: ArenaMap;
+  /** The scene view's camera bookmarks (EP26), slots 1–9. */
+  readonly bookmarks?: readonly CameraBookmark[];
 }
 
 /** The identity transform a freshly imported mesh gets. */
@@ -251,7 +264,7 @@ export function newMeshId(): string {
  */
 export function encodeMeshSidecar(sidecar: MeshSidecar): string | null {
   const prefabs = sidecar.prefabs ?? [];
-  if (sidecar.meshes.length === 0 && !sidecar.lighting && prefabs.length === 0 && (sidecar.timelines?.length ?? 0) === 0 && (sidecar.levels?.length ?? 0) === 0 && (sidecar.terrains?.length ?? 0) === 0 && (sidecar.audio?.sounds.length ?? 0) === 0 && (sidecar.ui?.length ?? 0) === 0 && (sidecar.components?.length ?? 0) === 0 && (sidecar.actions?.length ?? 0) === 0 && !sidecar.strings) return null;
+  if (sidecar.meshes.length === 0 && !sidecar.lighting && prefabs.length === 0 && (sidecar.timelines?.length ?? 0) === 0 && (sidecar.levels?.length ?? 0) === 0 && (sidecar.terrains?.length ?? 0) === 0 && (sidecar.audio?.sounds.length ?? 0) === 0 && (sidecar.ui?.length ?? 0) === 0 && (sidecar.components?.length ?? 0) === 0 && (sidecar.actions?.length ?? 0) === 0 && !sidecar.strings && !sidecar.arena) return null;
   // Repeated meshes (and animation frames) are stored once in a shared library,
   // shared between placed entries and prefab nodes (a prefab's copies repeat its meshes).
   const nodes = prefabs.flatMap((prefab) => prefab.nodes);
@@ -289,6 +302,8 @@ export function encodeMeshSidecar(sidecar: MeshSidecar): string | null {
     ...(sidecar.components && sidecar.components.length > 0 ? { components: sidecar.components } : {}),
     ...(sidecar.actions && sidecar.actions.length > 0 ? { actions: sidecar.actions } : {}),
     ...(sidecar.strings ? { strings: sidecar.strings } : {}),
+    ...(sidecar.arena ? { arena: storeArenaMap(sidecar.arena) } : {}),
+    ...(sidecar.bookmarks && sidecar.bookmarks.length > 0 ? { bookmarks: sidecar.bookmarks } : {}),
   });
 }
 
@@ -398,6 +413,9 @@ export function decodeMeshSidecar(raw: string | null | undefined): MeshSidecar {
   const ui = parseUiDocuments((parsed as { ui?: unknown }).ui);
   const actions = parseInputActions((parsed as { actions?: unknown }).actions);
   const strings = parseStringTable((parsed as { strings?: unknown }).strings);
+  // The markup is all or nothing (half a map plays wrong): a malformed one is dropped whole.
+  const arena = readArenaMap((parsed as { arena?: unknown }).arena);
+  const bookmarks = readBookmarks((parsed as { bookmarks?: unknown }).bookmarks);
   const placed = linked.map((entry) => (entry.level && !levelIds.has(entry.level) ? withoutLevel(entry) : entry));
   return {
     version: MESH_SIDECAR_VERSION,
@@ -423,7 +441,23 @@ export function decodeMeshSidecar(raw: string | null | undefined): MeshSidecar {
     ...(componentDefs.length > 0 ? { components: componentDefs } : {}),
     ...(actions.length > 0 ? { actions } : {}),
     ...(strings ? { strings } : {}),
+    ...(arena ? { arena } : {}),
+    ...(bookmarks.length > 0 ? { bookmarks } : {}),
   };
+}
+
+/** Replace the scene's arena markup (null removes it). */
+export function setMeshArena(sidecar: MeshSidecar, arena: ArenaMap | null): MeshSidecar {
+  const { arena: _old, ...rest } = sidecar;
+  void _old;
+  return arena ? { ...rest, arena } : rest;
+}
+
+/** Replace the scene view's camera bookmarks. */
+export function setMeshBookmarks(sidecar: MeshSidecar, bookmarks: readonly CameraBookmark[]): MeshSidecar {
+  const { bookmarks: _old, ...rest } = sidecar;
+  void _old;
+  return bookmarks.length > 0 ? { ...rest, bookmarks } : rest;
 }
 
 /** Replace the cart's string table (null removes it). */

@@ -75,6 +75,7 @@ import {
   type ArenaPoint,
   type ArenaWeapon,
 } from "./forerunnerArena";
+import { storeArenaMap } from "./arenaEdit";
 
 /** An axis-aligned box: centre (cx,cy,cz) and half-extents (hx,hy,hz). */
 type Box = ArenaBox;
@@ -3599,8 +3600,11 @@ export interface ArenaScene {
   };
 }
 
+/** How far a Pickup floats over its pad's top. */
+const PICKUP_LIFT = 0.32;
+
 /** A sidecar instance as the arena writes it. */
-type ArenaInstance = { id: string; name: string; mesh: string; variant?: string; lods?: StoredLods; animator?: unknown; transform: unknown; components?: unknown };
+export type ArenaInstance = { id: string; name: string; mesh: string; variant?: string; lods?: StoredLods; animator?: unknown; transform: unknown; components?: unknown };
 
 const IDENTITY_TRANSFORM = { position: [0, 0, 0], rotation: [0, 0, 0], scale: [1, 1, 1] };
 
@@ -3692,7 +3696,6 @@ function buildSharedAssets() {
 export function arenaMeshSidecar(scene: ArenaScene): string {
   const shared = arenaSharedAssets();
   const own = scene.parts();
-  const lay = arenaInstances(scene.map);
   const meshes: ArenaInstance[] = [
     // Stored without normals: every face of the arena owns its corners, so every renderer
     // rebuilds the same flat normals from the triangles (as for the soldier, I11; I16's panels made it worth it).
@@ -3700,20 +3703,7 @@ export function arenaMeshSidecar(scene: ArenaScene): string {
     ...shared.bots,
     ...shared.viewmodels,
   ];
-  // The weapons over the spawn pads (EP14): one for each weapon a pad turns
-  // through (A1), which its Pickup component turns, bobs, and hides while
-  // the pad recharges or carries another of its weapons.
-  lay.pickups.forEach(({ pad, weapon }, i) => {
-    const [cx, cy, cz, , hy] = scene.map.markers[pad]!.box;
-    meshes.push({
-      id: `pickup-${i + 1}`,
-      name: `pickup ${weapon}`,
-      mesh: shared.pickup(weapon),
-      transform: { position: [cx, cy + hy + 0.32, cz], rotation: [0, 0, 0], scale: [1, 1, 1] },
-      components: [{ name: "Pickup", fields: { slot: i + 1 } }],
-    });
-  });
-  meshes.push(...shared.holograms, ...shared.lefts);
+  meshes.push(...arenaPickupInstances(scene.map), ...shared.holograms, ...shared.lefts);
   const packed = packMeshLibrary(meshes);
   return JSON.stringify({
     version: 2,
@@ -3735,8 +3725,34 @@ export function arenaMeshSidecar(scene: ArenaScene): string {
     components: LOCKOUT_COMPONENTS,
     actions: LOCKOUT_INPUT_ACTIONS,
     strings: LOCKOUT_STRINGS,
+    // The map's markup (EP21, B4): what the cart's tables are written from, so the editor can open and change it.
+    arena: storeArenaMap(scene.map),
   });
 }
+
+/**
+ * The weapons over a map's pads (EP14): one Pickup for each weapon a pad
+ * turns through (A1), which its Pickup component turns, bobs, and hides while
+ * the pad recharges or carries another of its weapons. In the sidecar they
+ * follow the viewmodels (see arenaInstances), and the cart's PICKUPS table
+ * names them in this order.
+ */
+export function arenaPickupInstances(map: ArenaMap): ArenaInstance[] {
+  const shared = arenaSharedAssets();
+  return arenaInstances(map).pickups.map(({ pad, weapon }, i) => {
+    const [cx, cy, cz, , hy] = map.markers[pad]!.box;
+    return {
+      id: `pickup-${i + 1}`,
+      name: `pickup ${weapon}`,
+      mesh: shared.pickup(weapon),
+      transform: { position: [cx, cy + hy + PICKUP_LIFT, cz], rotation: [0, 0, 0], scale: [1, 1, 1] },
+      components: [{ name: "Pickup", fields: { slot: i + 1 } }],
+    };
+  });
+}
+
+/** Where a Pickup's instance index starts in an arena sidecar (after the map, the bots and the viewmodels). */
+export const ARENA_FIRST_PICKUP = VIEWMODEL_INSTANCE + LOCKOUT_VIEWMODELS.length;
 
 /**
  * A map's scene centre as the player bounds its scene (B8), which the cart's
@@ -3757,7 +3773,7 @@ export function arenaSceneCenter(map: ArenaMap, mesh: MeshAsset): ArenaPoint {
   add(meshBounds(soldierMesh()), 0, 0, 0);
   for (const { pad, weapon } of arenaInstances(map).pickups) {
     const [cx, cy, cz, , hy] = map.markers[pad]!.box;
-    add(meshBounds(pickupMesh(weapon)), cx, cy + hy + 0.32, cz);
+    add(meshBounds(pickupMesh(weapon)), cx, cy + hy + PICKUP_LIFT, cz);
   }
   return [(lo[0]! + hi[0]!) / 2, (lo[1]! + hi[1]!) / 2, (lo[2]! + hi[2]!) / 2];
 }
@@ -7110,8 +7126,13 @@ const hexRgb = (hex: string): [number, number, number] => [
 ];
 
 export function seedLockoutCart(engine: CartEngine): void {
+  seedArenaCart(engine, LOCKOUT_CODE);
+}
+
+/** Seed an arena cart: the arena code on some map (lockoutCode), and Lockout's palette. */
+export function seedArenaCart(engine: CartEngine, code: string): void {
   engine.setLanguage("lua");
-  engine.setCode(LOCKOUT_CODE);
+  engine.setCode(code);
   for (const [index, hex] of LOCKOUT_PALETTE) engine.setPaletteColor(index, ...hexRgb(hex));
 }
 

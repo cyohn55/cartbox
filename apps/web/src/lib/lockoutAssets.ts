@@ -4,15 +4,18 @@
  * of the ones it builds in code, so a model edited (or re-imported from
  * Blender) and saved in the editor plays in /lockout.
  *
- * Only the assets travel — the arena, lighting, sounds and code stay the
- * demo's own — and each only when it keeps the contract the cart relies on
+ * The assets travel each only when it keeps the contract the cart relies on
  * (the same joints, clips and material sets; see meshReplace.ts). An object
- * whose replacement breaks it keeps the demo's model, and says why.
+ * whose replacement breaks it keeps the demo's model, and says why. The
+ * arena's model, lighting and sounds stay the demo's own; its markup (spawns,
+ * pads, teleporters, collision) travels too, when it was edited (EP25:
+ * {@link lockoutMarkup}).
  */
 
-import { deserializeMeshAsset } from "@cartbox/editor";
+import { arenaMap, arenaMapCodeFor, deserializeMeshAsset, sameArenaCollision, sameArenaMap } from "@cartbox/editor";
 
-import { decodeMeshSidecar, encodeMeshSidecar, type MeshSidecar } from "./meshSidecar";
+import { arenaSceneCentre, checkArenaMap, rebuildArenaNavigation, relayArenaPickups } from "./arenaBuild";
+import { decodeMeshSidecar, encodeMeshSidecar, setMeshArena, setMeshNavMesh, type MeshSidecar } from "./meshSidecar";
 import { assetContract, contractKept, describeContract } from "./meshReplace";
 
 /** Lockout's editable assets, by object id: its bots, first-person viewmodels (each hand's), pickups and Holograms' bodies. */
@@ -91,4 +94,37 @@ export function lockoutSidecarWithAssets(baseJson: string, savedJson: string | n
   const overlay = overlayLockoutAssets(decodeMeshSidecar(baseJson), decodeMeshSidecar(savedJson));
   if (overlay.replaced.length === 0) return { json: baseJson, overlay };
   return { json: encodeMeshSidecar(overlay.sidecar) ?? baseJson, overlay };
+}
+
+/**
+ * A saved cart's map markup in the demo (ENGINE_PARITY_ROADMAP.md EP25, B4):
+ * when the cart saved in the editor carries markup for this map that differs
+ * from the shipped map's -- a spawn moved, a pad's weapons changed, a
+ * teleporter added -- the demo plays it: its Pickups laid out for its pads,
+ * its bots on a navmesh for its collision, and the arena code written for it.
+ */
+export interface LockoutMarkup {
+  /** The scene to play, with the markup's Pickups (and navmesh, when its collision changed). */
+  readonly json: string;
+  /** The cart's code, on the edited markup. */
+  readonly code: string;
+  /** Problems Map Check finds with it (it still plays). */
+  readonly issues: readonly string[];
+}
+
+/** The demo's map `mapId` with `saved`'s markup, or null when the saved cart has none for this map or it is the shipped map's. */
+export function lockoutMarkup(mapId: string, sceneJson: string, saved: MeshSidecar | null): LockoutMarkup | null {
+  const entry = arenaMap(mapId);
+  const markup = saved?.arena;
+  if (!markup || markup.id !== entry.id || sameArenaMap(markup, entry.scene.map)) return null;
+  let scene = setMeshArena(decodeMeshSidecar(sceneJson), markup);
+  if (!sameArenaCollision(markup, entry.scene.map)) {
+    // The editor's own navmesh when it was rebuilt there, else one baked now.
+    scene = saved.navmesh ? setMeshNavMesh(scene, saved.navmesh) : rebuildArenaNavigation(scene);
+  }
+  scene = relayArenaPickups(scene, markup).sidecar;
+  const centre = arenaSceneCentre(scene);
+  const json = encodeMeshSidecar(scene);
+  if (!centre || !json) return null;
+  return { json, code: arenaMapCodeFor(entry.id, markup, centre), issues: checkArenaMap(scene).map((i) => i.message) };
 }

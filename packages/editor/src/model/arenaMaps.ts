@@ -6,7 +6,7 @@
  * carries the map, so a guest follows its host's.
  */
 
-import type { ArenaPoint } from "./forerunnerArena";
+import type { ArenaMap, ArenaPoint } from "./forerunnerArena";
 import { BEAVER_SCENE, beaverCenter } from "./beaverCreekSeed";
 import {
   LOCKOUT_CENTER_X,
@@ -76,6 +76,23 @@ export function arenaMapCode(id: string): string {
     );
   }
   return codes.get(entry.id)!;
+}
+
+/**
+ * A map's cart code with its markup edited (ENGINE_PARITY_ROADMAP.md EP25):
+ * the arena code on `map` in place of the map's own, its camera orbiting
+ * `center` (the edited scene's bounds' centre, which moves with its Pickups),
+ * still knowing every map's name and its own place among them.
+ */
+export function arenaMapCodeFor(id: string, map: ArenaMap, center: ArenaPoint): string {
+  const entry = arenaMap(id);
+  return lockoutCode(map, center, { maps: ARENA_MAPS.map((m) => m.name), mapIndex: ARENA_MAPS.indexOf(entry), title: entry.title });
+}
+
+/** A map's code for an editor starter: the map alone, as Lockout's starter is (no menu choice of maps in a cart of one's own). */
+export function arenaStarterCode(id: string): string {
+  const entry = arenaMap(id);
+  return lockoutCode(entry.scene.map, entry.center(), { title: entry.title });
 }
 
 /**

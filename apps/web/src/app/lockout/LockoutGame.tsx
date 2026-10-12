@@ -13,7 +13,8 @@
  * online the match keeps going underneath.
  *
  * `?assets=<cart id>` plays a Lockout cart saved in the editor in this browser
- * with its own Spartans, viewmodels and pickups (L13; see lockoutAssets.ts).
+ * with its own Spartans, viewmodels and pickups (L13; see lockoutAssets.ts),
+ * and its own markup for the map when it edited it (EP25).
  *
  * `?map=<id>` picks the map (BEAVER_CREEK_ROADMAP.md B2; see arenaMaps.ts).
  * Only that map's sidecar loads. The title menu's map choice asks this page
@@ -33,7 +34,7 @@ import {
   type NetRoomStatus,
   type PlayerHandle,
 } from "@cartbox/player";
-import { ARENA_MAPS, LOCKOUT_INPUT_ACTIONS, LOCKOUT_STRINGS, arenaMap, arenaMapCartridge } from "@cartbox/editor";
+import { ARENA_MAPS, LOCKOUT_INPUT_ACTIONS, LOCKOUT_STRINGS, arenaMap, arenaMapCartridge, lockoutCartridge } from "@cartbox/editor";
 import { preferredLanguages, readPlayerPrefs, writePlayerPrefs, type PlayerPrefs } from "@/lib/accessibilityPrefs";
 
 import { DIRECT_CORE_URL, ENGINE_URL_BY_MODEL } from "@/lib/consoleModel";
@@ -45,7 +46,8 @@ import { browserStorage, readLocalSave, saveKey, writeLocalSave } from "@/lib/sa
 import { basePath } from "@/lib/staticSite";
 import { fetchStandaloneParts, standaloneHtml, standaloneZip, type StandaloneGame } from "@/lib/standaloneExport";
 import { loadCartDraft } from "@/lib/localCartStore";
-import { lockoutSidecarWithAssets, type LockoutAssetOverlay } from "@/lib/lockoutAssets";
+import { lockoutMarkup, lockoutSidecarWithAssets, type LockoutAssetOverlay } from "@/lib/lockoutAssets";
+import { decodeMeshSidecar } from "@/lib/meshSidecar";
 import { perfLine } from "@/lib/perfReadout";
 
 /** Where Lockout keeps its career record (it has no cart row, so it stays in this browser). */
@@ -76,10 +78,28 @@ function assetsCartId(): string | null {
   return id && /^[\w-]{1,64}$/.test(id) ? id : null;
 }
 
-/** A map's scene, with the `?assets=` cart's saved Spartans, viewmodels and pickups laid in. */
-function lockoutScene(mapId: string): { json: string; overlay: LockoutAssetOverlay | null } {
+/** The saved markup's scene and code, built once per map and saved cart (it re-lays Pickups and measures the scene). */
+let markupMemo: { key: string; saved: string; markup: ReturnType<typeof lockoutMarkup> } | null = null;
+function markupFor(mapId: string, sceneJson: string, savedJson: string): ReturnType<typeof lockoutMarkup> {
+  if (markupMemo?.key !== mapId || markupMemo.saved !== savedJson) {
+    markupMemo = { key: mapId, saved: savedJson, markup: lockoutMarkup(mapId, sceneJson, decodeMeshSidecar(savedJson)) };
+  }
+  return markupMemo.markup;
+}
+
+/**
+ * A map's scene and cart, with the `?assets=` cart's saved Spartans, viewmodels
+ * and pickups laid in, and its edited markup when it has some for this map
+ * (EP25): then `cart` is the arena code written for it, and `edited` lists
+ * what Map Check found.
+ */
+function lockoutScene(mapId: string, boot = ""): { json: string; cart: Uint8Array; overlay: LockoutAssetOverlay | null; edited: readonly string[] | null } {
   const id = assetsCartId();
-  return lockoutSidecarWithAssets(arenaMap(mapId).sidecar(), id ? (loadCartDraft(id)?.sidecars.mesh ?? null) : null);
+  const savedJson = id ? (loadCartDraft(id)?.sidecars.mesh ?? null) : null;
+  const withAssets = lockoutSidecarWithAssets(arenaMap(mapId).sidecar(), savedJson);
+  const markup = savedJson ? markupFor(mapId, withAssets.json, savedJson) : null;
+  if (!markup) return { ...withAssets, cart: arenaMapCartridge(mapId, boot), edited: null };
+  return { json: markup.json, cart: lockoutCartridge(boot ? `${markup.code}\n${boot}` : markup.code), overlay: withAssets.overlay, edited: markup.issues };
 }
 
 export function LockoutGame() {
@@ -110,7 +130,7 @@ export function LockoutGame() {
   const [menuHint, setMenuHint] = useState(false);
   const online = onlineRoomsAvailable();
   /** The `?assets=` cart's assets: what was laid in, and what kept the demo's model (L13). */
-  const [assets, setAssets] = useState<{ cart: string; overlay: LockoutAssetOverlay | null } | null>(null);
+  const [assets, setAssets] = useState<{ cart: string; overlay: LockoutAssetOverlay | null; edited: readonly string[] | null } | null>(null);
   /** The map to play (`?map=`, B2): the game is mounted on it, and again on another when the cart asks. */
   const [mapId, setMapId] = useState<string>(ARENA_MAPS[0]!.id);
   const mapRef = useRef(mapId);
@@ -124,7 +144,10 @@ export function LockoutGame() {
     const assetsCart = assetsCartId();
     const map = urlMapId();
     setMapId(map);
-    if (assetsCart) setAssets({ cart: assetsCart, overlay: lockoutScene(map).overlay });
+    if (assetsCart) {
+      const scene = lockoutScene(map);
+      setAssets({ cart: assetsCart, overlay: scene.overlay, edited: scene.edited });
+    }
     const onFs = () => setIsFullscreen(Boolean(fullscreenElement()));
     document.addEventListener("fullscreenchange", onFs);
     document.addEventListener("webkitfullscreenchange", onFs);
@@ -251,8 +274,7 @@ export function LockoutGame() {
     async (session: NetSession, map: string, boot: string) => {
       const stage = stageRef.current;
       if (!stage) return;
-      const bytes = arenaMapCartridge(map, boot);
-      const scene = lockoutScene(map).json;
+      const { cart: bytes, json: scene } = lockoutScene(map, boot);
       const cartUrl = URL.createObjectURL(new Blob([bytes.buffer as ArrayBuffer], { type: "application/octet-stream" }));
       const current = settingsRef.current;
       handleRef.current = mount(stage, {
@@ -328,7 +350,9 @@ export function LockoutGame() {
         sessionRef.current = session;
         session.onStatus(setRoom);
         await session.connect();
-        matchmakerRef.current = await createMatchmaker("lockout", switcher, session, (status) => setMm(status));
+        // An edited map (EP25) plays rules strangers' browsers don't have: no public matchmaking on it.
+        if (lockoutScene(mapRef.current).edited) setMm({ code: MM_FAILED, room: null });
+        else matchmakerRef.current = await createMatchmaker("lockout", switcher, session, (status) => setMm(status));
         if (roomCode) {
           await switcher.use(await roomTransport("lockout", roomCode));
           setPrivateRoom(roomCode);
@@ -513,6 +537,10 @@ export function LockoutGame() {
                   ? "The saved cart's Spartans, weapons and pickups are the demo's own."
                   : `Playing your edited assets from the saved cart: ${assets.overlay.replaced.length} object${assets.overlay.replaced.length === 1 ? "" : "s"}.`}
               {assets.overlay?.refused.map((r) => ` ${r.id} keeps the demo's model: ${r.reason}`).join("")}
+              {assets.edited &&
+                ` Playing the saved cart's edited ${arenaMap(mapId).name} markup (its spawns, pads, teleporters and collision). It plays offline and in rooms with tabs of this browser; matchmaking is off, since other players' browsers don't have it.${
+                  assets.edited.length > 0 ? ` Map Check: ${assets.edited.join("; ")}.` : ""
+                }`}
             </p>
           )}
           {phase.kind === "error" && (

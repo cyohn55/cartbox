@@ -14,7 +14,8 @@ import { seedPlatformerCart, PLATFORMER_COLLISION } from "./platformerSeed";
 import { seedPs1Cart, PS1_MESH_SIDECAR, PS1_ASSETS_SIDECAR } from "./ps1Seed";
 import { seedN64Cart, N64_MESH_SIDECAR, N64_ASSETS_SIDECAR } from "./n64Seed";
 import { seedXbox360Cart, XBOX360_MESH_SIDECAR, XBOX360_ASSETS_SIDECAR } from "./xbox360Seed";
-import { seedLockoutCart, lockoutMeshSidecar, LOCKOUT_FX } from "./lockoutSeed";
+import { seedArenaCart, seedLockoutCart, lockoutMeshSidecar, LOCKOUT_FX } from "./lockoutSeed";
+import { arenaMap, arenaStarterCode } from "./arenaMaps";
 
 /** Applies starter content to a cart's engine, in place. */
 type SeedFunction = (engine: CartEngine) => void;
@@ -116,6 +117,16 @@ export const CART_STARTERS: readonly [CartStarter, ...CartStarter[]] = [
     // cart is actually opened (see lockoutMeshSidecar).
     get mesh() {
       return lockoutMeshSidecar();
+    },
+    fx: LOCKOUT_FX,
+  },
+  {
+    id: "beaver",
+    label: "Beaver Creek",
+    description: "Lockout's second map — a creek canyon with two bases, an arch and teleporters, its markup editable in the scene view.",
+    seed: (engine) => seedArenaCart(engine, arenaStarterCode("beaver")),
+    get mesh() {
+      return arenaMap("beaver").sidecar();
     },
     fx: LOCKOUT_FX,
   },
