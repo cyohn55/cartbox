@@ -67,10 +67,10 @@ describe("collecting assets", () => {
     expect(filterAssets(assets, "effect", "wood")).toEqual([]);
   });
 
-  it("collects the Lockout starter's assets: the soldier mesh shared by its seven bots", () => {
+  it("collects the Lockout starter's assets: the soldier mesh shared by its seven bots and two Holograms", () => {
     const sc = decodeMeshSidecar(lockoutMeshSidecar());
     const assets = collectAssets(sc);
-    expect(assets.some((a) => a.kind === "mesh" && a.objects.length === 7)).toBe(true);
+    expect(assets.some((a) => a.kind === "mesh" && a.objects.length === 9)).toBe(true);
     expect(assets.some((a) => a.kind === "prefab" && a.name === "casing")).toBe(true);
     expect(assets.some((a) => a.kind === "debris" && a.name === "drop_br")).toBe(true);
   });

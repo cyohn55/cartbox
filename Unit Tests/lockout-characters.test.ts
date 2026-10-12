@@ -63,17 +63,19 @@ describe("the Lockout soldiers and weapons", () => {
     meshes: { id: string; mesh: string; transform: { scale: number[] } }[];
   };
 
-  it("orders instances as map, 7 bots, one viewmodel per weapon, then the pad pickups", () => {
+  it("orders instances as map, 7 bots, one viewmodel per weapon, the pad pickups, then the Holograms' bodies", () => {
     const ids = sidecar.meshes.map((m) => m.id);
-    expect(ids).toHaveLength(19);
+    expect(ids).toHaveLength(21);
     expect(ids[0]).toBe("lockout-map");
     expect(ids.slice(1, 8)).toEqual([1, 2, 3, 4, 5, 6, 7].map((i) => `bot-${i}`));
     expect(ids.slice(8, 14)).toEqual(LOCKOUT_VIEWMODELS.map((w) => `viewmodel-${w}`));
-    expect(ids.slice(14)).toEqual([1, 2, 3, 4, 5].map((i) => `pickup-${i}`));
-    // …then the four plasma grenades held in reserve (I10), and the mountains last.
+    expect(ids.slice(14, 19)).toEqual([1, 2, 3, 4, 5].map((i) => `pickup-${i}`));
+    expect(ids.slice(19)).toEqual(["hologram-1", "hologram-2"]); // (E3, unseen at rest scale till posed)
+    // …then the four plasma grenades held in reserve (I10), the eight Drop Walls (E3), and the mountains last.
     const scene = parseMeshScene(lockoutMeshSidecar())!;
-    expect(scene.instances.slice(19, 23).map((i) => i.name)).toEqual(["plasma grenade 1", "plasma grenade 2", "plasma grenade 3", "plasma grenade 4"]);
-    expect(scene.instances.findIndex((i) => i.terrain)).toBe(23);
+    expect(scene.instances.slice(21, 25).map((i) => i.name)).toEqual(["plasma grenade 1", "plasma grenade 2", "plasma grenade 3", "plasma grenade 4"]);
+    expect(scene.instances.slice(25, 33).every((i) => i.name.startsWith("drop wall"))).toBe(true);
+    expect(scene.instances.findIndex((i) => i.terrain)).toBe(33);
   });
 
   it("shares one tintable, skinned soldier across all 7 bots, stored once, each with the state machine", () => {
