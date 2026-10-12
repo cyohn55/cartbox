@@ -67,11 +67,13 @@ import {
   arenaColliders,
   arenaFlight,
   arenaLua,
+  arenaPads,
   forerunnerBuilder,
   type ArenaBox,
   type ArenaFlight,
   type ArenaMap,
   type ArenaPoint,
+  type ArenaWeapon,
 } from "./forerunnerArena";
 
 /** An axis-aligned box: centre (cx,cy,cz) and half-extents (hx,hy,hz). */
@@ -640,7 +642,19 @@ const MARKERS: Box[] = [
   [0, 4.05, 0, 0.28, 0.4, 0.28], // SMG — on the central walkway
   [5.5, 0.4, -2, 0.28, 0.4, 0.28], // Rocket Launcher — out on the arena floor (A2)
 ];
-const MARKER_WEAPONS = ["sniper", "br", "shotgun", "sword", "smg", "rocket"] as const;
+/**
+ * What each pad carries (A1), in turn: the first at the start of a match,
+ * the next once that's taken, and round again. Each weapon on a pad has its
+ * own Pickup instance there; the Pickup component shows the one that's up.
+ */
+const MARKER_ROTATIONS: readonly (readonly ArenaWeapon[])[] = [
+  ["sniper", "beamrifle", "splaser"], // the sniper tower
+  ["br", "dmr", "carbine", "needlerifle"], // atop the BR structure
+  ["shotgun", "mauler", "bruteshot", "concussion"], // the shotgun nook
+  ["sword", "hammer"], // the bottom-mid pit
+  ["smg", "ar", "plasmarifle", "needler", "spiker", "plasmapistol"], // the central walkway
+  ["rocket", "fuelrod"], // the arena floor (A2)
+];
 
 // Every spawn stands in open space: the player's collider (radius 0.55, height
 // 1.7) must not start inside a tower tier, or the view opens inside a wall.
@@ -709,7 +723,7 @@ export const LOCKOUT_MAP: ArenaMap = {
   hills: [[0, 3.65, 0], [-6.7, 7.0, -8.6], [9.6, 4.0, 7.2], [0, 0.7, 0], [-9, 2.2, 6]],
   ball: [0, 1.1, 0],
   deathY: -6,
-  markers: MARKERS.map((box, i) => ({ box, weapon: MARKER_WEAPONS[i]! })),
+  markers: MARKERS.map((box, i) => ({ box, weapon: MARKER_ROTATIONS[i]![0]!, rotation: MARKER_ROTATIONS[i]! })),
 };
 
 
@@ -1652,6 +1666,7 @@ export const LOCKOUT_STRINGS: StringTable = {
     { key: "loadout.dualmag", text: { en: "Dual Magnums", es: "Dos Magnum" } },
     { key: "loadout.smgmag", text: { en: "SMG + Magnum", es: "Subfusil + Magnum" } },
     { key: "msg.dual", text: { en: "Dual wielding {1}", es: "Doble arma: {1}" } },
+    { key: "menu.map", text: { en: "Map: {1}   (next: {2})", es: "Mapa: {1}   (siguiente: {2})" } },
   ],
 };
 
@@ -2546,22 +2561,6 @@ function fieldMesh(name: string, look: PlasmaLook): MeshAsset {
 /** The guns that dual wield (E5, A1), whose left-hand viewmodels follow the Holograms. */
 const LOCKOUT_DUAL_WIELD = ["smg", "magnum", "plasmapistol", "plasmarifle", "needler", "spiker", "mauler"] as const;
 
-/**
- * What each pad carries (A1), in turn: the first at the start of a match,
- * the next once that's taken, and round again. Each weapon on a pad has its
- * own Pickup instance there; the Pickup component shows the one that's up.
- */
-const PAD_ROTATIONS: readonly (readonly WeaponId[])[] = [
-  ["sniper", "beamrifle", "splaser"], // the sniper tower
-  ["br", "dmr", "carbine", "needlerifle"], // atop the BR structure
-  ["shotgun", "mauler", "bruteshot", "concussion"], // the shotgun nook
-  ["sword", "hammer"], // the bottom-mid pit
-  ["smg", "ar", "plasmarifle", "needler", "spiker", "plasmapistol"], // the central walkway
-  ["rocket", "fuelrod"], // the arena floor (A2)
-];
-/** Every (pad, weapon) a Pickup instance shows, in instance order. */
-const PICKUP_ENTRIES = PAD_ROTATIONS.flatMap((ws, pad) => ws.map((weapon) => ({ pad, weapon })));
-
 /** Holograms (E3) drawn at once: soldier instances after the pickups. */
 const LOCKOUT_HOLOGRAMS = 2;
 
@@ -2582,10 +2581,20 @@ type WeaponId = (typeof LOCKOUT_VIEWMODELS)[number];
 const A2_HEAVY: ReadonlySet<WeaponId> = new Set(["rocket", "splaser", "fuelrod", "bruteshot", "concussion", "hammer"]);
 /** The first viewmodel's instance (after the map and the bots). */
 const VIEWMODEL_INSTANCE = 1 + BOT_COUNT;
-/** The first pad's Pickup (after the viewmodels), the Holograms' bodies, and the left hands' guns. */
-const FIRST_PICKUP = VIEWMODEL_INSTANCE + LOCKOUT_VIEWMODELS.length;
-const HOLOGRAM_INSTANCE = FIRST_PICKUP + PICKUP_ENTRIES.length;
-const LEFT_INSTANCE = HOLOGRAM_INSTANCE + LOCKOUT_HOLOGRAMS;
+
+/**
+ * Where a map's instances fall in its sidecar (BEAVER_CREEK_ROADMAP.md B2):
+ * the map (0), the bots, the viewmodels, then a Pickup for every (pad,
+ * weapon) the map's pads turn through, the Holograms' bodies, and the left
+ * hands' guns. Only the Pickups vary with the map, so the rest follow them.
+ */
+function arenaInstances(map: ArenaMap) {
+  const pads = arenaPads(map);
+  const pickups = pads.flatMap((ws, pad) => ws.map((weapon) => ({ pad, weapon: weapon as WeaponId })));
+  const firstPickup = VIEWMODEL_INSTANCE + LOCKOUT_VIEWMODELS.length;
+  const hologram = firstPickup + pickups.length;
+  return { pads, pickups, firstPickup, hologram, left: hologram + LOCKOUT_HOLOGRAMS };
+}
 
 /**
  * A first-person weapon viewmodel: origin at the firing hand, barrel along +Z,
@@ -3566,112 +3575,195 @@ export const LOCKOUT_DEBRIS = [
 ];
 
 /**
+ * What one map brings to its sidecar (BEAVER_CREEK_ROADMAP.md B2): its own
+ * geometry, lighting, navmesh, terrains, intro, decals, foliage and sound.
+ * Everything else -- the Spartans, the weapons, the equipment, the effects,
+ * the UI -- is the arena's shared assets, the same for every map.
+ */
+export interface ArenaScene {
+  readonly id: string;
+  readonly name: string;
+  readonly map: ArenaMap;
+  readonly parts: () => {
+    /** The visible map (lit, when its light map is current), instance 0. */
+    readonly mesh: MeshAsset;
+    readonly lighting: unknown;
+    readonly navmesh: NavMesh;
+    readonly terrains: readonly Terrain[];
+    readonly timelines: readonly unknown[];
+    readonly ragdollColliders: unknown;
+    readonly decalMarks: unknown;
+    readonly foliage: unknown;
+    readonly audio: unknown;
+  };
+}
+
+/** A sidecar instance as the arena writes it. */
+type ArenaInstance = { id: string; name: string; mesh: string; variant?: string; lods?: StoredLods; animator?: unknown; transform: unknown; components?: unknown };
+
+const IDENTITY_TRANSFORM = { position: [0, 0, 0], rotation: [0, 0, 0], scale: [1, 1, 1] };
+
+let sharedAssets: ReturnType<typeof buildSharedAssets> | null = null;
+
+/** The arena's shared assets, built once however many maps use them. */
+function arenaSharedAssets() {
+  sharedAssets ??= buildSharedAssets();
+  return sharedAssets;
+}
+
+function buildSharedAssets() {
+  const identity = IDENTITY_TRANSFORM;
+  const rest = { position: [0, 0, 0], rotation: [0, 0, 0], scale: [VIEWMODEL_REST_SCALE, VIEWMODEL_REST_SCALE, VIEWMODEL_REST_SCALE] };
+  // One skinned soldier mesh (tinted per bot at runtime, animated per bot by
+  // its state machine), stored once in the sidecar's shared library however
+  // many bots use it.
+  const soldierAsset = soldierMesh();
+  // Stored without normals: its plates' faces share no corners, so every
+  // renderer rebuilds the same flat normals from the triangles (I11).
+  const storedSoldier: MeshAsset = { ...soldierAsset, primitives: soldierAsset.primitives.map((p) => ({ ...p, normals: null })) };
+  const soldier = serializeMeshAsset(storedSoldier);
+  // LODs (EP9b): lighter levels for soldiers across the arena and for weapons
+  // dropped far off, each stored once in the library however many use it.
+  const lodsOf = (mesh: MeshAsset): { lods?: StoredLods } => {
+    const chain = generateLods(mesh);
+    return chain ? { lods: encodeLods(mesh, chain) } : {};
+  };
+  // Simplified with its normals, but fingerprinted as stored, so the levels fit the soldier that loads.
+  const soldierChain = generateLods(soldierAsset);
+  const soldierLods = soldierChain ? { lods: encodeLods(storedSoldier, soldierChain) } : {};
+  const bots: ArenaInstance[] = [];
+  for (let i = 1; i <= BOT_COUNT; i += 1) {
+    const variant = LOCKOUT_BOT_VARIANTS[(i - 1) % LOCKOUT_BOT_VARIANTS.length];
+    bots.push({ id: `bot-${i}`, name: `bot ${i}`, mesh: soldier, ...(variant ? { variant } : {}), ...soldierLods, animator: LOCKOUT_SOLDIER_ANIMATOR, transform: identity });
+  }
+  // One first-person viewmodel per weapon, at rest scale (its lighter levels
+  // are for the weapon dropped far off: its debris).
+  const viewmodels: ArenaInstance[] = LOCKOUT_VIEWMODELS.map((id) => {
+    const model = viewmodelMesh(id);
+    return { id: `viewmodel-${id}`, name: `viewmodel ${id}`, mesh: serializeMeshAsset(model), ...lodsOf(model), animator: LOCKOUT_VIEWMODEL_ANIMATOR, transform: rest };
+  });
+  // The weapons floating over the pads, without hands (placed per map).
+  const pickupMeshes = new Map<WeaponId, string>();
+  const pickup = (id: WeaponId) => {
+    if (!pickupMeshes.has(id)) pickupMeshes.set(id, serializeMeshAsset(pickupMesh(id)));
+    return pickupMeshes.get(id)!;
+  };
+  // Holograms (E3): copies of the soldier at rest scale (unseen) until the cart places one where a decoy runs.
+  const holograms: ArenaInstance[] = [];
+  for (let i = 1; i <= LOCKOUT_HOLOGRAMS; i += 1) {
+    holograms.push({ id: `hologram-${i}`, name: `hologram ${i}`, mesh: soldier, ...soldierLods, animator: LOCKOUT_SOLDIER_ANIMATOR, transform: rest });
+  }
+  // The left hand's gun when dual wielding (E5, A1): each one-hander's
+  // right-hand model (stored once) drawn mirrored; no lighter levels (a gun
+  // in hand is never far off).
+  const lefts: ArenaInstance[] = LOCKOUT_DUAL_WIELD.map((id) => {
+    const { lods: _lods, ...right } = viewmodels.find((m) => m.id === `viewmodel-${id}`)!;
+    void _lods;
+    return { ...right, id: `viewmodel-${id}-left`, name: `viewmodel ${id} (left hand)` };
+  });
+  const prefabs = [
+    // Cosmetic debris (H10): the casing's look lives in a prefab, whose mesh
+    // never sits in the level (no copies held in reserve: nothing spawns it);
+    // dropped weapons wear the first-person models, minus the hands.
+    { id: "prefab-casing", name: "casing", pool: 0, nodes: [{ key: "root", name: "casing", mesh: serializeMeshAsset(casingMesh()), transform: identity }] },
+    // Plasma grenades in flight (I10): four copies held in reserve, spawned on a throw.
+    { id: "prefab-plasma", name: "plasma grenade", pool: 4, nodes: [{ key: "root", name: "plasma grenade", mesh: serializeMeshAsset(plasmaGrenadeMesh()), transform: identity }] },
+    // Drop Walls (E3): one a player at most, so eight held in reserve.
+    { id: "prefab-dropwall", name: "drop wall", pool: 8, nodes: [{ key: "root", name: "drop wall", mesh: serializeMeshAsset(dropWallMesh()), transform: identity }] },
+    // Power Drains and Regenerators (E4), and the fields they throw round themselves: four of each in reserve.
+    { id: "prefab-drain", name: "power drain", pool: 4, nodes: [{ key: "root", name: "power drain", mesh: serializeMeshAsset(powerDrainMesh()), transform: identity }] },
+    { id: "prefab-drainfield", name: "drain field", pool: 4, nodes: [{ key: "root", name: "drain field", mesh: serializeMeshAsset(fieldMesh("drain-field", DRAIN_FIELD)), transform: identity }] },
+    { id: "prefab-regen", name: "regenerator", pool: 4, nodes: [{ key: "root", name: "regenerator", mesh: serializeMeshAsset(regeneratorMesh()), transform: identity }] },
+    { id: "prefab-regenfield", name: "regen field", pool: 4, nodes: [{ key: "root", name: "regen field", mesh: serializeMeshAsset(fieldMesh("regen-field", REGEN_FIELD)), transform: identity }] },
+    // The Forerunner kit (I14): pieces for the editor's kit snapping, never spawned.
+    ...forerunnerKitPrefabs(identity),
+  ];
+  return { bots, viewmodels, pickup, holograms, lefts, prefabs };
+}
+
+/**
+ * A map's mesh sidecar (B2): the map at instance 0, then the shared bots and
+ * viewmodels, the map's own Pickups over its pads, the Holograms and the left
+ * hands' guns (in {@link arenaInstances}' order, which the cart's code is
+ * written for), with the map's lighting, navmesh and terrains and the
+ * arena's shared effects, prefabs, debris, sounds and UI.
+ */
+export function arenaMeshSidecar(scene: ArenaScene): string {
+  const shared = arenaSharedAssets();
+  const own = scene.parts();
+  const lay = arenaInstances(scene.map);
+  const meshes: ArenaInstance[] = [
+    // Stored without normals: every face of the arena owns its corners, so every renderer
+    // rebuilds the same flat normals from the triangles (as for the soldier, I11; I16's panels made it worth it).
+    { id: `${scene.id}-map`, name: `${scene.name} arena`, mesh: serializeMeshAsset(withoutNormals(own.mesh)), transform: IDENTITY_TRANSFORM },
+    ...shared.bots,
+    ...shared.viewmodels,
+  ];
+  // The weapons over the spawn pads (EP14): one for each weapon a pad turns
+  // through (A1), which its Pickup component turns, bobs, and hides while
+  // the pad recharges or carries another of its weapons.
+  lay.pickups.forEach(({ pad, weapon }, i) => {
+    const [cx, cy, cz, , hy] = scene.map.markers[pad]!.box;
+    meshes.push({
+      id: `pickup-${i + 1}`,
+      name: `pickup ${weapon}`,
+      mesh: shared.pickup(weapon),
+      transform: { position: [cx, cy + hy + 0.32, cz], rotation: [0, 0, 0], scale: [1, 1, 1] },
+      components: [{ name: "Pickup", fields: { slot: i + 1 } }],
+    });
+  });
+  meshes.push(...shared.holograms, ...shared.lefts);
+  const packed = packMeshLibrary(meshes);
+  return JSON.stringify({
+    version: 2,
+    meshes: packed.entries,
+    library: packed.library,
+    lighting: own.lighting,
+    navmesh: serializeNavMesh(own.navmesh),
+    terrains: own.terrains.map(serializeTerrain),
+    timelines: own.timelines,
+    effects: LOCKOUT_EFFECTS,
+    decals: LOCKOUT_DECALS,
+    ragdollColliders: own.ragdollColliders,
+    prefabs: shared.prefabs,
+    debris: LOCKOUT_DEBRIS,
+    decalMarks: own.decalMarks,
+    foliage: own.foliage,
+    audio: own.audio,
+    ui: LOCKOUT_UI,
+    components: LOCKOUT_COMPONENTS,
+    actions: LOCKOUT_INPUT_ACTIONS,
+    strings: LOCKOUT_STRINGS,
+  });
+}
+
+/** Lockout as an arena scene (B2). */
+export const LOCKOUT_SCENE: ArenaScene = {
+  id: "lockout",
+  name: "Lockout",
+  get map() {
+    return LOCKOUT_MAP;
+  },
+  parts: () => ({
+    mesh: litMapMesh(),
+    // The baked light probes (EP9) light the soldiers as they cross shade and bounce.
+    lighting: { ...LOCKOUT_LIGHTING, ...(lockoutProbes() ? { lightProbes: lockoutProbes() } : {}) },
+    navmesh: lockoutNavMesh(),
+    terrains: [lockoutTerrain(), lockoutVista()],
+    timelines: [LOCKOUT_INTRO],
+    ragdollColliders: LOCKOUT_RAGDOLL_COLLIDERS,
+    decalMarks: LOCKOUT_DECAL_MARKS,
+    foliage: lockoutFoliage(),
+    audio: LOCKOUT_AUDIO,
+  }),
+};
+
+/**
  * The arena's mesh sidecar (map + 7 bots + the lighting rig), built on first
  * call and memoised — it carries the baked textures, see {@link lockoutTextures}.
  */
 export function lockoutMeshSidecar(): string {
-  if (meshSidecar === null) {
-    const identity = { position: [0, 0, 0], rotation: [0, 0, 0], scale: [1, 1, 1] };
-    const rest = { position: [0, 0, 0], rotation: [0, 0, 0], scale: [VIEWMODEL_REST_SCALE, VIEWMODEL_REST_SCALE, VIEWMODEL_REST_SCALE] };
-    // One skinned soldier mesh (tinted per bot at runtime, animated per bot by
-    // its state machine), stored once in the sidecar's shared library however
-    // many bots use it.
-    const soldierAsset = soldierMesh();
-    // Stored without normals: its plates' faces share no corners, so every
-    // renderer rebuilds the same flat normals from the triangles (I11).
-    const storedSoldier: MeshAsset = { ...soldierAsset, primitives: soldierAsset.primitives.map((p) => ({ ...p, normals: null })) };
-    const soldier = serializeMeshAsset(storedSoldier);
-    // LODs (EP9b): lighter levels for soldiers across the arena and for weapons
-    // dropped far off, each stored once in the library however many use it.
-    const lodsOf = (mesh: MeshAsset): { lods?: StoredLods } => {
-      const chain = generateLods(mesh);
-      return chain ? { lods: encodeLods(mesh, chain) } : {};
-    };
-    // Simplified with its normals, but fingerprinted as stored, so the levels fit the soldier that loads.
-    const soldierChain = generateLods(soldierAsset);
-    const soldierLods = soldierChain ? { lods: encodeLods(storedSoldier, soldierChain) } : {};
-    const meshes: { id: string; name: string; mesh: string; variant?: string; lods?: StoredLods; animator?: unknown; transform: unknown; components?: unknown }[] = [
-      // Stored without normals: every face of the arena owns its corners, so every renderer
-      // rebuilds the same flat normals from the triangles (as for the soldier, I11; I16's panels made it worth it).
-      { id: "lockout-map", name: "Lockout arena", mesh: serializeMeshAsset(withoutNormals(litMapMesh())), transform: identity },
-    ];
-    // Instances 1..7: the bots.
-    for (let i = 1; i <= BOT_COUNT; i += 1) {
-      const variant = LOCKOUT_BOT_VARIANTS[(i - 1) % LOCKOUT_BOT_VARIANTS.length];
-      meshes.push({ id: `bot-${i}`, name: `bot ${i}`, mesh: soldier, ...(variant ? { variant } : {}), ...soldierLods, animator: LOCKOUT_SOLDIER_ANIMATOR, transform: identity });
-    }
-    // From instance 8: one first-person viewmodel per weapon, at rest scale
-    // (its lighter levels are for the weapon dropped far off: its debris).
-    for (const id of LOCKOUT_VIEWMODELS) {
-      const model = viewmodelMesh(id);
-      meshes.push({ id: `viewmodel-${id}`, name: `viewmodel ${id}`, mesh: serializeMeshAsset(model), ...lodsOf(model), animator: LOCKOUT_VIEWMODEL_ANIMATOR, transform: rest });
-    }
-    // The weapons over the spawn pads (EP14): one for each weapon a pad turns
-    // through (A1), which its Pickup component turns, bobs, and hides while
-    // the pad recharges or carries another of its weapons.
-    PICKUP_ENTRIES.forEach(({ pad, weapon }, i) => {
-      const [cx, cy, cz, , hy] = MARKERS[pad]!;
-      meshes.push({
-        id: `pickup-${i + 1}`,
-        name: `pickup ${weapon}`,
-        mesh: serializeMeshAsset(pickupMesh(weapon)),
-        transform: { position: [cx, cy + hy + 0.32, cz], rotation: [0, 0, 0], scale: [1, 1, 1] },
-        components: [{ name: "Pickup", fields: { slot: i + 1 } }],
-      });
-    });
-    // Then (E3): Holograms, copies of the soldier at rest scale
-    // (unseen) until the cart places one where a decoy runs.
-    for (let i = 1; i <= LOCKOUT_HOLOGRAMS; i += 1) {
-      meshes.push({ id: `hologram-${i}`, name: `hologram ${i}`, mesh: soldier, ...soldierLods, animator: LOCKOUT_SOLDIER_ANIMATOR, transform: rest });
-    }
-    // Then (E5, A1): the left hand's gun when dual wielding, each one-hander's
-    // right-hand model (stored once) drawn mirrored.
-    for (const id of LOCKOUT_DUAL_WIELD) {
-      // (no lighter levels: a gun in hand is never far off)
-      const { lods: _lods, ...right } = meshes.find((m) => m.id === `viewmodel-${id}`)!;
-      void _lods;
-      meshes.push({ ...right, id: `viewmodel-${id}-left`, name: `viewmodel ${id} (left hand)` });
-    }
-    const packed = packMeshLibrary(meshes);
-    meshSidecar = JSON.stringify({
-      version: 2,
-      meshes: packed.entries,
-      library: packed.library,
-      // The baked light probes (EP9) light the soldiers as they cross shade and bounce.
-      lighting: { ...LOCKOUT_LIGHTING, ...(lockoutProbes() ? { lightProbes: lockoutProbes() } : {}) },
-      navmesh: serializeNavMesh(lockoutNavMesh()),
-      terrains: [serializeTerrain(lockoutTerrain()), serializeTerrain(lockoutVista())],
-      timelines: [LOCKOUT_INTRO],
-      effects: LOCKOUT_EFFECTS,
-      decals: LOCKOUT_DECALS,
-      ragdollColliders: LOCKOUT_RAGDOLL_COLLIDERS,
-      // Cosmetic debris (H10): the casing's look lives in a prefab, whose mesh
-      // never sits in the level (no copies held in reserve: nothing spawns it);
-      // dropped weapons wear the first-person models, minus the hands.
-      prefabs: [
-        { id: "prefab-casing", name: "casing", pool: 0, nodes: [{ key: "root", name: "casing", mesh: serializeMeshAsset(casingMesh()), transform: identity }] },
-        // Plasma grenades in flight (I10): four copies held in reserve, spawned on a throw.
-        { id: "prefab-plasma", name: "plasma grenade", pool: 4, nodes: [{ key: "root", name: "plasma grenade", mesh: serializeMeshAsset(plasmaGrenadeMesh()), transform: identity }] },
-        // Drop Walls (E3): one a player at most, so eight held in reserve.
-        { id: "prefab-dropwall", name: "drop wall", pool: 8, nodes: [{ key: "root", name: "drop wall", mesh: serializeMeshAsset(dropWallMesh()), transform: identity }] },
-        // Power Drains and Regenerators (E4), and the fields they throw round themselves: four of each in reserve.
-        { id: "prefab-drain", name: "power drain", pool: 4, nodes: [{ key: "root", name: "power drain", mesh: serializeMeshAsset(powerDrainMesh()), transform: identity }] },
-        { id: "prefab-drainfield", name: "drain field", pool: 4, nodes: [{ key: "root", name: "drain field", mesh: serializeMeshAsset(fieldMesh("drain-field", DRAIN_FIELD)), transform: identity }] },
-        { id: "prefab-regen", name: "regenerator", pool: 4, nodes: [{ key: "root", name: "regenerator", mesh: serializeMeshAsset(regeneratorMesh()), transform: identity }] },
-        { id: "prefab-regenfield", name: "regen field", pool: 4, nodes: [{ key: "root", name: "regen field", mesh: serializeMeshAsset(fieldMesh("regen-field", REGEN_FIELD)), transform: identity }] },
-        // The Forerunner kit (I14): pieces for the editor's kit snapping, never spawned.
-        ...forerunnerKitPrefabs(identity),
-      ],
-      debris: LOCKOUT_DEBRIS,
-      decalMarks: LOCKOUT_DECAL_MARKS,
-      foliage: lockoutFoliage(),
-      audio: LOCKOUT_AUDIO,
-      ui: LOCKOUT_UI,
-      components: LOCKOUT_COMPONENTS,
-      actions: LOCKOUT_INPUT_ACTIONS,
-      strings: LOCKOUT_STRINGS,
-    });
-  }
+  meshSidecar ??= arenaMeshSidecar(LOCKOUT_SCENE);
   return meshSidecar;
 }
 
@@ -3689,7 +3781,20 @@ export const LOCKOUT_SCENE_TRIANGLES = (() => {
  * The arena cart's code, playing `map` (its tables written by arenaLua) with
  * the camera offset from `center`, the scene's centre the mesh camera orbits.
  */
-export function lockoutCode(map: ArenaMap, center: ArenaPoint): string {
+export interface ArenaCodeOptions {
+  /** Every map the menu offers, by name, in the order of their index (the host's match word carries it: B2). */
+  readonly maps?: readonly string[];
+  /** This map's place among them (0-based). */
+  readonly mapIndex?: number;
+  /** The title screen's heading (the map's name, in capitals, by default). */
+  readonly title?: string;
+}
+
+export function lockoutCode(map: ArenaMap, center: ArenaPoint, options: ArenaCodeOptions = {}): string {
+  const lay = arenaInstances(map);
+  const maps = options.maps ?? [map.name];
+  const mapIndex = options.mapIndex ?? 0;
+  const lua = (t: string) => JSON.stringify(t);
   return `-- title:  Lockout arena
 -- author: you
 -- desc:   A vertical Forerunner-arena FPS homage -- you + 7 bots, 7 game types, Xbox 360 core
@@ -3709,6 +3814,13 @@ local CENTER_Y = ${center[1].toFixed(4)}
 local CENTER_Z = ${center[2].toFixed(4)}
 ${arenaLua(map)}
 local NBOT = ${BOT_COUNT}
+-- The maps this cart knows (BEAVER_CREEK_ROADMAP.md B2), and which it plays
+-- (1-based): the title menu offers the others, asking the page to load one
+-- (REQ_MAP), and the host's match word carries it, so guests follow the host.
+MAPS = { ${maps.map(lua).join(", ")} }
+MAP_INDEX = ${mapIndex + 1}
+MAP_NAME = MAPS[MAP_INDEX]
+MAP_TITLE = ${lua(options.title ?? map.name.toUpperCase())}
 
 -- ---------------------------------------------------------------------------
 -- Weapon sandbox. dmg per shot, cool = frames between shots, rng world units,
@@ -3778,7 +3890,7 @@ DEPLOY_OF = { dropwall = "wall", hologram = "holo", powerdrain = "drain", regene
 -- What's been set down (E3): walls and holograms, everyone's, in this browser.
 DEPLOY = {}
 DEPLOY_KINDS = { "wall", "holo", "drain", "regen" }   -- (a deploy event's kind, from 0)
-HOLO_IDX = { ${HOLOGRAM_INSTANCE}, ${HOLOGRAM_INSTANCE + 1} }   -- the soldier instances holograms are drawn with   -- by id (the net state and a guest's input carry the id)
+HOLO_IDX = { ${lay.hologram}, ${lay.hologram + 1} }   -- the soldier instances holograms are drawn with   -- by id (the net state and a guest's input carry the id)
 -- What a guest keeps of its own soldier with each input it predicts (E2), to
 -- take up again when it replays them: its fall and its equipment's state.
 EQ_KEEP = { "vy", "grounded", "fuel", "charges", "rc", "kx", "kz", "hx", "hy", "hz", "ht", "hb", "hs", "hvx", "hvz" }
@@ -3810,12 +3922,12 @@ LOADOUTS = {
   { key="ppsmg", name="Plasma Pistol + SMG", g1="smg", d1="plasmapistol", g2="br" },
 }
 -- The left hand's viewmodels (E5): the right's models, mirrored.
-VM_LEFT = { ${LOCKOUT_DUAL_WIELD.map((id, i) => `${id} = ${LEFT_INSTANCE + i}`).join(", ")} }
+VM_LEFT = { ${LOCKOUT_DUAL_WIELD.map((id, i) => `${id} = ${lay.left + i}`).join(", ")} }
 -- The pads' rotations (A1): what each carries in turn; each Pickup instance's
 -- pad and weapon; how far round each pad has come (pad_rot, synced by the
 -- pickup events).
-PAD_ROT = { ${PAD_ROTATIONS.map((r) => `{ ${r.map((id) => `"${id}"`).join(", ")} }`).join(", ")} }
-PICKUPS = { ${PICKUP_ENTRIES.map((e) => `{ pad = ${e.pad + 1}, w = "${e.weapon}" }`).join(", ")} }
+PAD_ROT = { ${lay.pads.map((r) => `{ ${r.map((id) => `"${id}"`).join(", ")} }`).join(", ")} }
+PICKUPS = { ${lay.pickups.map((e) => `{ pad = ${e.pad + 1}, w = "${e.weapon}" }`).join(", ")} }
 pad_rot = {}
 for _, lo in ipairs(LOADOUTS) do lo.en = lo.name end
 for _, d in pairs(EQUIP) do d.en = d.name end
@@ -5754,6 +5866,9 @@ function net_equip(a, b, o, host)
     local d = deploy_find(ent_by_slot((a >> 13) & 7), (a >> 10) & 7)
     if d and (d.holo or host) then deploy_gone(d, false) end
     return
+  elseif sub == 5 then   -- a guest's hello (B2): mid-match, the host catches it up
+    if NETMODE == 2 and phase == "play" then net_catch_up() end
+    return
   end
   if sub == 2 then
     if NETMODE == 1 and o == p and p and not p.dead then guest_knock((a >> 16) & 255, sb(b)/100, sb(b >> 8)/100, sb(b >> 16)/200) end
@@ -6154,7 +6269,7 @@ function play_intro()
   local bar = math.floor(64 * (cartbox.timelinevalue("letterbox") or 1))
   rect(0, 0, 1280, bar, 5)
   rect(0, 720 - bar, 1280, bar, 5)
-  print("LOCKOUT", 40, 18, 12, false, 3, true)
+  print(string.upper(MAP_NAME), 40, 18, 12, false, 3, true)
   print(MODE.name or "", 40, 676, 9, false, 2, true)
   print("Z to skip", 1110, 680, 13, false, 1, true)
   return true
@@ -6564,11 +6679,22 @@ end
 ONLINE_KEYS = {"ffa","slayer","swat","snipe","ball","koth","jugg"}
 
 -- The host's shared match word: bit 0 a match is on, bits 1-3 the game type,
--- bits 4+ a match number (so guests join each new match exactly once).
+-- bits 4-7 its map (1-based; 0 before a host has said: B2), bits 8+ a match
+-- number (so guests join each new match exactly once).
 function net_match_word()
   local idx = 0
   for i,k in ipairs(ONLINE_KEYS) do if MODES[k] == MODE then idx = i-1 end end
-  return ((phase=="play") and 1 or 0) | (idx << 1) | ((net_match_id & 0xffff) << 4)
+  return ((phase=="play") and 1 or 0) | (idx << 1) | ((MAP_INDEX & 15) << 4) | ((net_match_id & 0xffff) << 8)
+end
+
+-- A guest on another map than its host's asks the page for the host's (B2):
+-- the page loads it, keeping the room, and the guest follows from there. True
+-- while it waits (nothing of the host's match is joined on the wrong map).
+function net_map_follow(word)
+  local hm = (word >> 4) & 15
+  if NETMODE ~= 1 or hm == 0 or hm == MAP_INDEX or not MAPS[hm] then return false end
+  if not MAP_ASKED then MAP_ASKED = true; cartbox.request(REQ_MAP, hm - 1) end
+  return true
 end
 
 -- In a match, a guest follows the host: the host's next match starts here too,
@@ -6576,7 +6702,8 @@ end
 local function net_follow_host()
   if NETMODE ~= 1 then return end
   local _, _, _, word = cartbox.net()
-  local id = word >> 4
+  local id = word >> 8
+  if net_map_follow(word) then return end
   if (word & 1) == 1 and id ~= net_seen_match then
     net_seen_match = id
     start_match(ONLINE_KEYS[((word >> 1) & 7) + 1] or "ffa")
@@ -6594,8 +6721,12 @@ function net_menu_sync()
   MYSLOT = (mode ~= 0) and myslot or 0
   if was == 1 and NETMODE == 2 then net_match_id = net_seen_match end   -- took over as host
   if NETMODE == 2 then cartbox.netmatch(net_match_word()) end
-  if NETMODE == 1 and (word & 1) == 1 and (word >> 4) ~= net_seen_match then
-    net_seen_match = word >> 4
+  -- (a guest says hello once it's in the room, so a host mid-match catches it
+  -- up even when it was already there: a guest that loaded the host's map, B2)
+  if NETMODE == 1 and not HELLO_SENT then HELLO_SENT = true; cartbox.netsend(EV.EQUIP | ((MYSLOT & 7) << 4) | (5 << 7), 0) end
+  if net_map_follow(word) then return end
+  if NETMODE == 1 and (word & 1) == 1 and (word >> 8) ~= net_seen_match then
+    net_seen_match = word >> 8
     start_match(ONLINE_KEYS[((word >> 1) & 7) + 1] or "ffa")
   end
   -- In the lobby: don't draw me in anyone's arena (unless a match just started).
@@ -6607,6 +6738,7 @@ end
 -- you can play against bots; a playlist pick; the search; and, in a matchmade
 -- room, a lobby that starts the next match on its own.
 local REQ_MATCHMAKE, REQ_CANCEL = 1, 2           -- cartbox.request kinds the page answers
+REQ_MAP = 3                                     -- (and: load map n, 0-based -- B2)
 local MM_FAILED = 3                             -- net() status: the page couldn't matchmake
 local mm_mode, mm_page, mm_pick, mm_start_at = nil, nil, 1, nil
 local MM_LOBBY_TICKS = 900                      -- a matchmade lobby waits 15s for players
@@ -6706,6 +6838,14 @@ function title_screen()
   local keys = (NETMODE == 2) and ONLINE_KEYS or MODE_KEYS
   local items = {}
   for _,k in ipairs(keys) do items[#items+1] = MODES[k].name end
+  -- The map (B2): choosing it loads the next one.
+  local map_item = nil
+  if #MAPS > 1 then
+    items[#items+1] = T("menu.map", "Map: "..MAP_NAME.."   (next: "..MAPS[MAP_INDEX % #MAPS + 1]..")", MAP_NAME, MAPS[MAP_INDEX % #MAPS + 1])
+    map_item = #items
+    -- (just loaded by choosing it: the cursor stays on it, to step on again)
+    if MAP_SWITCHED then MAP_SWITCHED = nil; sel = map_item end
+  end
   if NETMODE == 0 then items[#items+1] = T("menu.matchmaking", "Matchmaking (online)") end
   local n=#items
   if sel > n then sel = 1 end
@@ -6735,6 +6875,7 @@ function title_screen()
   local go, go2 = edge("go", btn(4)), edge("go2", btn(5))
   if id=="modes" or go or go2 then
     if NETMODE == 0 and sel == n then mm_page, mm_pick = "playlist", 1
+    elseif sel == map_item then cartbox.request(REQ_MAP, MAP_INDEX % #MAPS)
     else start_match(keys[sel]) end
   end
 end
@@ -6749,7 +6890,7 @@ function TIC()
     hide_scene()
     cartbox.hud(0)  -- 2D-only screen: draw the menu normally, not as a HUD over meshes
     sky()
-    print("LOCKOUT ARENA",452,96,12,false,3,true)
+    print(MAP_TITLE,452,96,12,false,3,true)
     title_screen()
     return
   end
@@ -6836,7 +6977,8 @@ end
 }
 
 /** Lockout's cart code: the arena code playing Lockout, its camera centred on the arena's mesh. */
-export const LOCKOUT_CODE = lockoutCode(LOCKOUT_MAP, CENTER);
+/** Lockout's code on its own (the editor's starter; the demo's maps come from arenaMaps.ts). */
+export const LOCKOUT_CODE = lockoutCode(LOCKOUT_MAP, CENTER, { title: "LOCKOUT ARENA" });
 
 /** Seed a fresh cart with the Lockout arena code and a cool Forerunner palette. */
 /** Lockout's palette over the default Sweetie-16: index → hex. */

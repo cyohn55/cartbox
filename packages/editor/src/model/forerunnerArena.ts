@@ -58,7 +58,18 @@ export type ArenaWeapon =
 export interface ArenaMarker {
   /** The marker's box (a cyan-lit plinth; the weapon floats over it). */
   readonly box: ArenaBox;
+  /** What it carries at a match's start. */
   readonly weapon: ArenaWeapon;
+  /**
+   * What it turns through as its weapon is taken (LOCKOUT_ARSENAL_ROADMAP.md
+   * A1), starting with `weapon`. Absent: it always carries `weapon`.
+   */
+  readonly rotation?: readonly ArenaWeapon[];
+}
+
+/** Each marker's weapons, in the order its pad turns through them (A1). */
+export function arenaPads(map: ArenaMap): readonly (readonly ArenaWeapon[])[] {
+  return map.markers.map((m) => (m.rotation && m.rotation.length > 0 ? m.rotation : [m.weapon]));
 }
 
 /** Everything an arena cart's code needs to play a map. */

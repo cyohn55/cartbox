@@ -63,6 +63,10 @@ export {
   lockoutCartridge,
   LOCKOUT_CODE,
   lockoutMeshSidecar,
+  arenaMeshSidecar,
+  LOCKOUT_SCENE,
+  type ArenaScene,
+  type ArenaCodeOptions,
   LOCKOUT_FX,
   LOCKOUT_VIEWMODELS,
   LOCKOUT_SOLDIER_ANIMATOR,
@@ -102,6 +106,7 @@ export {
   LOCKOUT_MAP,
   lockoutCode,
 } from "./model/lockoutSeed";
+export { ARENA_MAPS, arenaMap, arenaMapCartridge, arenaMapCode, type ArenaMapEntry } from "./model/arenaMaps";
 export { MAP_BAKES, MAP_BAKE_PARTS, bakeMapKitSource, bakeMapLightmapSource, bakeMapProbesSource, mapBakeStatus, type MapBakeFile, type MapBakePart, type MapBakes } from "./model/mapBakes";
 export {
   ARENA_TILE_WORLD,
@@ -109,6 +114,7 @@ export {
   arenaColliders,
   arenaFlight,
   arenaLua,
+  arenaPads,
   flightSteps,
   forerunnerBuilder,
   type ArenaBox,

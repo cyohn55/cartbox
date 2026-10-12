@@ -109,6 +109,23 @@ From memory of Battle Creek and Beaver Creek. The linked model can't be opened f
   - The page loads only the chosen map's sidecar.
   - *Lockout:* plays as before, from its own sidecar plus the pack. A match holds one map's data plus the pack, never two maps.
   - *Tests:* each map loads with the pack; both stay under budget; a guest loads the host's map.
+  - **Done, in part.**
+    - **Per-map sidecars and carts.** `arenaMeshSidecar(scene)` builds any map's sidecar. The shared assets (soldier, viewmodels, Pickup meshes, Holograms, left-hand guns, prefabs, effects, decals, debris, UI, actions, strings) are built once however many maps use them. Each map (`ArenaScene`) brings its own mesh, lighting, navmesh, terrains, intro, ragdoll colliders, decal marks, foliage and sound. Lockout's sidecar is unchanged apart from one new menu string.
+    - **Pads from the map.** A marker carries its pad's `rotation`. The Pickups, their placement, and the cart's `PAD_ROT`, `PICKUPS`, `HOLO_IDX` and `VM_LEFT` all follow the map (`arenaInstances`).
+    - **The registry.** `arenaMaps.ts` holds `ARENA_MAPS`, with `arenaMapCode` and `arenaMapCartridge`. A map's code knows every map's name and its own index.
+    - **In the cart:**
+      - With more than one map, the title menu offers "Map: X (next: Y)". Choosing it asks the page to load the next map (`REQ_MAP`), and the cursor stays on it afterwards.
+      - The host's match word carries its map (bits 4–7), with the match number moved to bits 8 and up. A guest on another map asks for the host's instead of joining its match there.
+      - A guest says hello once it is in a room, and a host mid-match catches it up. This covers a guest that reloaded to follow its host.
+    - **The page.** `/lockout?map=<id>` loads only that map. It answers `REQ_MAP` by mounting the game again on the new map in the same netplay session, and the lobby gets a map picker once there are two maps. The offline download exports the chosen map.
+    - **Not yet:**
+      - A separate shared pack, stored once. Each map's sidecar still carries the shared assets, but a match loads only one map.
+      - Matchmaking playlists that rotate maps. A matchmade room plays its host's map.
+    - *Tests:* `Unit Tests/arena-maps.test.ts`, on the real engine and online:
+      - another map's sidecar and cart;
+      - the menu's map request;
+      - a guest asking for its host's map, and joining when they match;
+      - the hello catch-up.
 
 - [ ] **B3. Collision from the map's own geometry** (L11).
   - A map's collision is its own layer: boxes, ramps and walkable terrain.
