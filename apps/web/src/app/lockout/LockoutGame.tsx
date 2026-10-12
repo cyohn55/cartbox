@@ -14,6 +14,11 @@
  *
  * `?assets=<cart id>` plays a Lockout cart saved in the editor in this browser
  * with its own Spartans, viewmodels and pickups (L13; see lockoutAssets.ts).
+ *
+ * `?map=<id>` picks the map (BEAVER_CREEK_ROADMAP.md B2; see arenaMaps.ts).
+ * Only that map's sidecar loads. The title menu's map choice asks this page
+ * (REQ_MAP) to load another, and so does a guest whose host plays another:
+ * the game is mounted again on the new map, in the same netplay session.
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -28,7 +33,7 @@ import {
   type NetRoomStatus,
   type PlayerHandle,
 } from "@cartbox/player";
-import { LOCKOUT_FX, LOCKOUT_INPUT_ACTIONS, LOCKOUT_STRINGS, lockoutCartridge, lockoutMeshSidecar } from "@cartbox/editor";
+import { ARENA_MAPS, LOCKOUT_INPUT_ACTIONS, LOCKOUT_STRINGS, arenaMap, arenaMapCartridge } from "@cartbox/editor";
 import { preferredLanguages, readPlayerPrefs, writePlayerPrefs, type PlayerPrefs } from "@/lib/accessibilityPrefs";
 
 import { DIRECT_CORE_URL, ENGINE_URL_BY_MODEL } from "@/lib/consoleModel";
@@ -49,10 +54,18 @@ const LOCKOUT_SAVE_KEY = saveKey("lockout");
 /** cartbox.request kinds the Lockout cart sends. */
 const REQ_MATCHMAKE = 1;
 const REQ_CANCEL = 2;
+const REQ_MAP = 3;
 
-/** Lockout as a standalone export (EP18): plays against bots with no server. */
-function lockoutStandalone(): StandaloneGame {
-  return { title: "Lockout", cartId: "lockout", modelId: "xbox360", cart: lockoutCartridge(), postFx: LOCKOUT_FX, mesh: lockoutMeshSidecar() };
+/** A map as a standalone export (EP18): plays against bots with no server. */
+function lockoutStandalone(mapId: string): StandaloneGame {
+  const map = arenaMap(mapId);
+  const title = map.id === "lockout" ? "Lockout" : `Lockout: ${map.name}`;
+  return { title, cartId: map.id === "lockout" ? "lockout" : `lockout-${map.id}`, modelId: "xbox360", cart: arenaMapCartridge(map.id), postFx: map.fx, mesh: map.sidecar() };
+}
+
+/** The map `?map=` names (Lockout when none, or one it doesn't know). */
+function urlMapId(): string {
+  return arenaMap(new URLSearchParams(window.location.search).get("map")).id;
 }
 
 type Phase = { kind: "lobby" } | { kind: "playing" } | { kind: "error"; message: string };
@@ -63,10 +76,10 @@ function assetsCartId(): string | null {
   return id && /^[\w-]{1,64}$/.test(id) ? id : null;
 }
 
-/** The demo's scene, with the `?assets=` cart's saved Spartans, viewmodels and pickups laid in. */
-function lockoutScene(): { json: string; overlay: LockoutAssetOverlay | null } {
+/** A map's scene, with the `?assets=` cart's saved Spartans, viewmodels and pickups laid in. */
+function lockoutScene(mapId: string): { json: string; overlay: LockoutAssetOverlay | null } {
   const id = assetsCartId();
-  return lockoutSidecarWithAssets(lockoutMeshSidecar(), id ? (loadCartDraft(id)?.sidecars.mesh ?? null) : null);
+  return lockoutSidecarWithAssets(arenaMap(mapId).sidecar(), id ? (loadCartDraft(id)?.sidecars.mesh ?? null) : null);
 }
 
 export function LockoutGame() {
@@ -98,6 +111,10 @@ export function LockoutGame() {
   const online = onlineRoomsAvailable();
   /** The `?assets=` cart's assets: what was laid in, and what kept the demo's model (L13). */
   const [assets, setAssets] = useState<{ cart: string; overlay: LockoutAssetOverlay | null } | null>(null);
+  /** The map to play (`?map=`, B2): the game is mounted on it, and again on another when the cart asks. */
+  const [mapId, setMapId] = useState<string>(ARENA_MAPS[0]!.id);
+  const mapRef = useRef(mapId);
+  mapRef.current = mapId;
 
   // Stored settings (after hydration), and a shared link (?room=CODE) pre-filling the join box.
   useEffect(() => {
@@ -105,7 +122,9 @@ export function LockoutGame() {
     const linked = parseRoomCode(new URLSearchParams(window.location.search).get("room"));
     if (linked) setJoinCode(linked);
     const assetsCart = assetsCartId();
-    if (assetsCart) setAssets({ cart: assetsCart, overlay: lockoutScene().overlay });
+    const map = urlMapId();
+    setMapId(map);
+    if (assetsCart) setAssets({ cart: assetsCart, overlay: lockoutScene(map).overlay });
     const onFs = () => setIsFullscreen(Boolean(fullscreenElement()));
     document.addEventListener("fullscreenchange", onFs);
     document.addEventListener("webkitfullscreenchange", onFs);
@@ -209,13 +228,93 @@ export function LockoutGame() {
     setMenuOpen(true);
   };
 
+  /** Mounts the game on another map, in the same netplay session (the cart's REQ_MAP: B2). */
+  const switchMapRef = useRef<(id: string) => void>(() => {});
   const onCartRequest = useCallback((event: MailboxEvent) => {
     if (event.kind !== "request") return;
+    if (event.id === REQ_MAP) {
+      const next = ARENA_MAPS[event.value];
+      if (next) switchMapRef.current(next.id);
+      return;
+    }
     const matchmaker = matchmakerRef.current;
     if (!matchmaker) return;
     if (event.id === REQ_MATCHMAKE) void matchmaker.search(event.value === 0 ? "any" : event.value - 1);
     if (event.id === REQ_CANCEL) void matchmaker.cancel();
   }, []);
+
+  /**
+   * Mounts the game on `map` in `session`, into the stage already shown, with
+   * `boot` appended to its code for this load.
+   */
+  const mountGame = useCallback(
+    async (session: NetSession, map: string, boot: string) => {
+      const stage = stageRef.current;
+      if (!stage) return;
+      const bytes = arenaMapCartridge(map, boot);
+      const scene = lockoutScene(map).json;
+      const cartUrl = URL.createObjectURL(new Blob([bytes.buffer as ArrayBuffer], { type: "application/octet-stream" }));
+      const current = settingsRef.current;
+      handleRef.current = mount(stage, {
+        cartUrl,
+        engineUrl: ENGINE_URL_BY_MODEL.xbox360,
+        // ?core=direct tries Lockout on the dedicated Modern core (EP20b).
+        ...(new URLSearchParams(window.location.search).get("core") === "direct" ? { core: "direct" as const, directCoreUrl: DIRECT_CORE_URL } : {}),
+        modelId: "xbox360",
+        autostart: true,
+        record: false,
+        controls: "auto",
+        scale: "fit",
+        // No 2D relight: the arena's 3D rig lights it (and its objectives glow
+        // through cartbox.light3d), and skipping the 2D lighting layer spares
+        // every frame a material capture and a full-screen relight pass.
+        postFx: parsePostFxSettings(arenaMap(map).fx) ?? undefined,
+        mesh: parseMeshScene(scene) ?? undefined,
+        ui: readSidecarUi(scene),
+        actions: readSidecarActions(scene),
+        // Its string table in the player's language, and their accessibility settings (EP19b).
+        strings: LOCKOUT_STRINGS,
+        languages: preferredLanguages(prefsRef.current),
+        accessibility: prefsRef.current,
+        // The career record (EP15b), kept in this browser.
+        saveData: readLocalSave(browserStorage(), LOCKOUT_SAVE_KEY)?.data ?? null,
+        onSave: (data) => writeLocalSave(browserStorage(), LOCKOUT_SAVE_KEY, data, new Date().toISOString()),
+        netplay: session,
+        controlSettings: current.controls,
+        volume: current.muted ? 0 : current.volume,
+        quality: current.quality,
+        onStart: () => openMenu(!menuOpenRef.current),
+        onEvent: onCartRequest,
+        onFrame: () => {
+          framesRef.current += 1;
+        },
+        onReady: () => URL.revokeObjectURL(cartUrl),
+        onError: (error) => {
+          teardown();
+          setPhase({ kind: "error", message: error.message });
+        },
+      });
+    },
+    [teardown, openMenu, onCartRequest],
+  );
+
+  // The cart asked for another map (its menu, or a guest following its host):
+  // mount the game again on it, keeping the room (B2).
+  switchMapRef.current = (id: string) => {
+    const session = sessionRef.current;
+    if (!session || id === mapRef.current) return;
+    handleRef.current?.destroy();
+    handleRef.current = null;
+    mapRef.current = id;
+    setMapId(id);
+    const url = new URL(window.location.href);
+    url.searchParams.set("map", id);
+    window.history.replaceState(null, "", url);
+    mountGame(session, id, "MAP_SWITCHED = true").catch((error: unknown) => {
+      teardown();
+      setPhase({ kind: "error", message: error instanceof Error ? error.message : String(error) });
+    });
+  };
 
   const start = useCallback(
     async (roomCode: string | null) => {
@@ -240,58 +339,14 @@ export function LockoutGame() {
         // Show the stage before mounting, so the player sizes to it.
         setPhase({ kind: "playing" });
         await new Promise((resolve) => requestAnimationFrame(resolve));
-        const stage = stageRef.current;
-        if (!stage) return;
-        const bytes = lockoutCartridge();
-        const scene = lockoutScene().json;
-        const cartUrl = URL.createObjectURL(new Blob([bytes.buffer as ArrayBuffer], { type: "application/octet-stream" }));
-        const current = settingsRef.current;
-        handleRef.current = mount(stage, {
-          cartUrl,
-          engineUrl: ENGINE_URL_BY_MODEL.xbox360,
-          // ?core=direct tries Lockout on the dedicated Modern core (EP20b).
-          ...(new URLSearchParams(window.location.search).get("core") === "direct" ? { core: "direct" as const, directCoreUrl: DIRECT_CORE_URL } : {}),
-          modelId: "xbox360",
-          autostart: true,
-          record: false,
-          controls: "auto",
-          scale: "fit",
-          // No 2D relight: the arena's 3D rig lights it (and its objectives glow
-          // through cartbox.light3d), and skipping the 2D lighting layer spares
-          // every frame a material capture and a full-screen relight pass.
-          postFx: parsePostFxSettings(LOCKOUT_FX) ?? undefined,
-          mesh: parseMeshScene(scene) ?? undefined,
-          ui: readSidecarUi(scene),
-          actions: readSidecarActions(scene),
-          // Its string table in the player's language, and their accessibility settings (EP19b).
-          strings: LOCKOUT_STRINGS,
-          languages: preferredLanguages(prefsRef.current),
-          accessibility: prefsRef.current,
-          // The career record (EP15b), kept in this browser.
-          saveData: readLocalSave(browserStorage(), LOCKOUT_SAVE_KEY)?.data ?? null,
-          onSave: (data) => writeLocalSave(browserStorage(), LOCKOUT_SAVE_KEY, data, new Date().toISOString()),
-          netplay: session,
-          controlSettings: current.controls,
-          volume: current.muted ? 0 : current.volume,
-          quality: current.quality,
-          onStart: () => openMenu(!menuOpenRef.current),
-          onEvent: onCartRequest,
-          onFrame: () => {
-            framesRef.current += 1;
-          },
-          onReady: () => URL.revokeObjectURL(cartUrl),
-          onError: (error) => {
-            teardown();
-            setPhase({ kind: "error", message: error.message });
-          },
-        });
+        await mountGame(session, mapRef.current, "");
       } catch (error) {
         teardown();
         void exitFullscreen();
         setPhase({ kind: "error", message: error instanceof Error ? error.message : String(error) });
       }
     },
-    [teardown, openMenu, onCartRequest],
+    [teardown, mountGame],
   );
 
   /** Leave the online room (matchmade or private); the game drops back to its title screen. */
@@ -344,7 +399,7 @@ export function LockoutGame() {
   const downloadOffline = async (format: "html" | "zip") => {
     setExporting(format);
     try {
-      const game = lockoutStandalone();
+      const game = lockoutStandalone(mapRef.current);
       const parts = await fetchStandaloneParts(game, { engineUrl: ENGINE_URL_BY_MODEL.xbox360, basePath });
       const file =
         format === "html"
@@ -372,6 +427,28 @@ export function LockoutGame() {
             </button>
             <span style={{ color: "var(--muted)" }}>Title screen: game types vs bots, and Matchmaking to play people online.</span>
           </div>
+          {ARENA_MAPS.length > 1 && (
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 10, alignItems: "center" }} role="radiogroup" aria-label="Map">
+              <span style={{ color: "var(--muted)" }}>Map:</span>
+              {ARENA_MAPS.map((m) => (
+                <button
+                  key={m.id}
+                  type="button"
+                  role="radio"
+                  aria-checked={m.id === mapId}
+                  className={m.id === mapId ? "cbx-btn cbx-btn-accent" : "cbx-btn"}
+                  onClick={() => {
+                    setMapId(m.id);
+                    const url = new URL(window.location.href);
+                    url.searchParams.set("map", m.id);
+                    window.history.replaceState(null, "", url);
+                  }}
+                >
+                  {m.name}
+                </button>
+              ))}
+            </div>
+          )}
           <div style={{ display: "flex", flexWrap: "wrap", gap: 10, alignItems: "center" }}>
             <span style={{ color: "var(--muted)" }}>Private room:</span>
             <button type="button" className="cbx-btn" onClick={() => void start(newRoomCode())}>
