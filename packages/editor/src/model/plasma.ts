@@ -26,6 +26,8 @@ export interface PlasmaLook {
   readonly boil: number;
   /** World-space size of the boiling (noise cells per unit). */
   readonly scale: number;
+  /** How opaque it is face-on and at the silhouette (default thick at the heart, thin at the edge: [0.95, 0.2]); a shield bubble turns it round. */
+  readonly alpha?: readonly [number, number];
 }
 
 /** A sword's plasma: a white-hot heart, electric blue at the edges. */
@@ -55,8 +57,8 @@ export function plasmaGraph(look: PlasmaLook = PLASMA_BLADE): MaterialGraph {
       { id: "flicker", op: "mix", inputs: { a: "dim", b: "bright", t: "noise" }, x: 780, y: 330 },
       { id: "glow", op: "multiply", inputs: { a: "colour", b: "flicker" }, x: 980, y: 160 },
       // Thick at the heart, thin at the silhouette.
-      { id: "solid", op: "constant", params: { value: k(0.95) }, x: 220, y: 480 },
-      { id: "thin", op: "constant", params: { value: k(0.2) }, x: 220, y: 550 },
+      { id: "solid", op: "constant", params: { value: k(look.alpha?.[0] ?? 0.95) }, x: 220, y: 480 },
+      { id: "thin", op: "constant", params: { value: k(look.alpha?.[1] ?? 0.2) }, x: 220, y: 550 },
       { id: "alpha", op: "mix", inputs: { a: "solid", b: "thin", t: "fresnel" }, x: 420, y: 500 },
     ],
     outputs: { emissive: "glow", alpha: "alpha" },

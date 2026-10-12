@@ -49,10 +49,11 @@ describe("the Lockout arena starter", () => {
     const scene = parseMeshScene(lockoutMeshSidecar())!;
     expect(scene).not.toBeNull();
     // map + 7 bots + 6 weapon viewmodels + 5 pad pickups + 2 Holograms' bodies
-    // + 4 plasma grenades (I10) and 8 Drop Walls (E3) in reserve, then the mountains' blocks
-    expect(scene.instances.slice(0, 33).every((i) => !i.terrain)).toBe(true);
-    expect(scene.instances.length - 33).toBeGreaterThan(20);
-    expect(scene.instances.slice(33).every((i) => i.terrain && i.parent === 0)).toBe(true);
+    // + 4 plasma grenades (I10), 8 Drop Walls (E3) and 16 drains, regenerators and their
+    // fields (E4) in reserve, then the mountains' blocks
+    expect(scene.instances.slice(0, 49).every((i) => !i.terrain)).toBe(true);
+    expect(scene.instances.length - 49).toBeGreaterThan(20);
+    expect(scene.instances.slice(49).every((i) => i.terrain && i.parent === 0)).toBe(true);
     expect(scene.bounds.radius).toBeGreaterThan(0);
   });
 
