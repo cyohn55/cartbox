@@ -15,9 +15,20 @@ import { deserializeMeshAsset } from "@cartbox/editor";
 import { decodeMeshSidecar, encodeMeshSidecar, type MeshSidecar } from "./meshSidecar";
 import { assetContract, contractKept, describeContract } from "./meshReplace";
 
-/** Lockout's editable assets, by object id: its bots, first-person viewmodels, pickups and Holograms' bodies. */
+/** Lockout's editable assets, by object id: its bots, first-person viewmodels (each hand's), pickups and Holograms' bodies. */
 export function isLockoutAsset(id: string): boolean {
-  return /^(bot-\d+|viewmodel-[a-z]+|pickup-\d+|hologram-\d+)$/.test(id);
+  return /^(bot-\d+|viewmodel-[a-z]+(-left)?|pickup-\d+|hologram-\d+)$/.test(id);
+}
+
+/**
+ * What a saved cart's asset stands in for one it doesn't have (it was saved
+ * before the demo had it): a Hologram wears its first bot's Spartan; a left
+ * hand's gun, its right hand's.
+ */
+function standIn(id: string): string | null {
+  if (id.startsWith("hologram-")) return "bot-1";
+  if (id.endsWith("-left")) return id.slice(0, -"-left".length);
+  return null;
 }
 
 /** Whether a sidecar is a Lockout cart's (it has Lockout's assets), so the editor can offer to play it in the demo. */
@@ -39,8 +50,8 @@ export function overlayLockoutAssets(base: MeshSidecar, saved: MeshSidecar): Loc
   const replaced: string[] = [];
   const refused: { id: string; reason: string }[] = [];
   const meshes = base.meshes.map((entry) => {
-    // (a Hologram wears the Spartan: a cart saved before it had them lends it its first bot's)
-    const theirs = isLockoutAsset(entry.id) ? (byId.get(entry.id) ?? (entry.id.startsWith("hologram-") ? byId.get("bot-1") : undefined)) : undefined;
+    const stand = standIn(entry.id);
+    const theirs = isLockoutAsset(entry.id) ? (byId.get(entry.id) ?? (stand ? byId.get(stand) : undefined)) : undefined;
     if (!theirs) return entry;
     const sameMesh = theirs.mesh === entry.mesh;
     const sameLook = theirs.variant === entry.variant && JSON.stringify(theirs.animator ?? null) === JSON.stringify(entry.animator ?? null);

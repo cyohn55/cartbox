@@ -171,10 +171,34 @@ A **loadout** picker chooses what a player spawns with: weapons, a second gun to
       - A regenerator fills the player's emptied shield in about a second, with its own recharge held off. Out of it, nothing.
       - Online, a guest's regenerator fills the shield the host emptied, on the host and so on the guest.
       - Online, a guest's drain lands on the host at the very spot it lands for the guest.
-- [ ] **E5. Dual wielding (Halo 2/3).**
-  - **What dual-wields:** the SMG and the Magnum, in matching or mixed pairs, from a loadout or by picking a second one-handed gun off a pad while holding swap.
+- [x] **E5. Dual wielding (Halo 2/3).**
+  - **What dual-wields:** the SMG and the Magnum, in matching or mixed pairs, from a loadout or by picking a second one-handed gun off a pad while holding zoom.
   - **Firing:** the right gun on fire, the left on the grenade action. No grenades while dual wielding.
-  - **Drawing it:** a mirrored left-hand viewmodel; others see it in the net state.
+  - **Drawing it:** a mirrored left-hand viewmodel; others see which hand fired.
+  - **Done.**
+    - **Loadouts:** Dual SMGs, Dual Magnums, and SMG + Magnum, each with a Battle Rifle in the second slot.
+    - **The left hand** is the first slot's second gun (`d1`), with its own magazine, reserve and clock (`ad`, `rd`, `cool2`; `give_left`).
+      - It fires on the grenade action, held for the SMG and pressed for the Magnum, and reloads itself when empty.
+      - While both guns are in hand, the grenade action throws nothing.
+      - Swapping to the second slot puts both away; swapping back brings both out.
+    - **From a pad:**
+      - Holding zoom over a pad with a one-hander, while a one-hander is in hand, takes the pad's gun into the left hand. Zoom, not swap: swap changes weapons the moment it's pressed.
+      - Without zoom, the pad's gun replaces the pair, as before.
+      - Over the right gun's own pad, both are topped up.
+    - **Online:**
+      - A left-hand shot carries a bit in `EV.SHOT`, so the others draw its tracer from the left, and a bit in `EV.AIM`.
+      - The host judges each hand on its own clock and its own rounds (`fired_ms_l`, `<gun>_l`), so two guns firing at once are never mistaken for one firing too fast.
+    - **Drawing it:**
+      - The left hand's gun is the right's viewmodel, stored once (instances 21 and 22, the SMG's and the Magnum's), placed as far left as the right is right.
+      - It's mirrored by a negative scale with half a turn of pitch: `cartbox.place` now takes a negative scale, and a pose's scale decodes signed.
+      - It's drawn on the front layer in the player's armour (`cartbox.look`), since a frame's eight poses are the bots' and the right hand's. It has no lighter levels, which keeps the sidecar under its 1.9 MB budget, with the E4 fields trimmed a little.
+    - **The visor** shows the left gun's rounds left of the right's, and both guns' names.
+    - **Saved carts** whose viewmodels were edited put the right hand's model in the left hand too, when they were saved before it existed.
+    - **Tests:**
+      - Dual SMGs: the left gun is placed mirrored, on the front layer, 0.38 m from the right. The grenade action fires it and throws nothing; fire fires the right. On the Battle Rifle, the left gun is put away and the grenade action throws.
+      - Holding zoom over the SMG's pad with a Magnum in hand takes the SMG into the left hand; without zoom, it replaces the Magnum.
+      - Online, a guest firing both Magnums at once has all 14 shots taken by the host, 7 a hand, none rejected.
+      - `Unit Tests/place-look.test.ts`: a negative scale places an object mirrored at its size, and a look's tint and front layer stand until changed.
 
 ## Not in this roadmap
 

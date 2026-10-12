@@ -1517,6 +1517,9 @@ export const LOCKOUT_UI: UiDocument[] = [
       { id: "tracker", kind: "radar", anchor: [0, 1], pivot: [0, 1], offset: [36, -44], size: [210, 210], value: "blips", visible: "radar", thickness: 2 },
       { id: "motion", kind: "text", anchor: [0, 1], pivot: [0, 1], offset: [36, -22], size: [210, 12], text: "@hud.motion", textSize: 11, align: "center", visible: "radar", rgb: [0.6, 0.85, 1] },
       { id: "rounds", kind: "text", anchor: [1, 1], pivot: [1, 1], offset: [-48, -92], size: [240, 46], text: "{rounds}", textSize: 46, align: "right" },
+      // Dual wielding (LOCKOUT_EQUIPMENT_ROADMAP.md E5): the left hand's rounds, left of the right's.
+      { id: "lrounds", kind: "text", anchor: [1, 1], pivot: [1, 1], offset: [-300, -92], size: [160, 46], text: "{lrounds}", textSize: 46, align: "right" },
+      { id: "lreserve", kind: "text", anchor: [1, 1], pivot: [1, 1], offset: [-300, -60], size: [160, 14], text: "{lreserve}", textSize: 14, align: "right", rgb: [0.7, 0.9, 1] },
       { id: "reserve", kind: "text", anchor: [1, 1], pivot: [1, 1], offset: [-48, -60], size: [240, 14], text: "{reserve}", textSize: 14, align: "right", rgb: [0.7, 0.9, 1] },
       { id: "weapon", kind: "text", anchor: [1, 1], pivot: [1, 1], offset: [-48, -28], size: [400, 14], text: "{weaponname}", textSize: 13, align: "right" },
       { id: "grenade", kind: "text", anchor: [1, 0], pivot: [1, 0], offset: [-92, 40], size: [200, 16], text: "@hud.frag", textSize: 14, align: "right", rgb: [0.5, 0.75, 1] },
@@ -1613,6 +1616,10 @@ export const LOCKOUT_STRINGS: StringTable = {
     { key: "loadout.regenerator", text: { en: "Regenerator", es: "Regenerador" } },
     { key: "equip.powerdrain", text: { en: "Power Drain", es: "Drenaje de energia" } },
     { key: "equip.regenerator", text: { en: "Regenerator", es: "Regenerador" } },
+    { key: "loadout.dualsmg", text: { en: "Dual SMGs", es: "Dos subfusiles" } },
+    { key: "loadout.dualmag", text: { en: "Dual Magnums", es: "Dos Magnum" } },
+    { key: "loadout.smgmag", text: { en: "SMG + Magnum", es: "Subfusil + Magnum" } },
+    { key: "msg.dual", text: { en: "Dual wielding {1}", es: "Doble arma: {1}" } },
   ],
 };
 
@@ -2471,9 +2478,12 @@ function regeneratorMesh(): MeshAsset {
 }
 function fieldMesh(name: string, look: PlasmaLook): MeshAsset {
   const bubble = newStreams();
-  sphere(bubble, [0, 0, 0], 1, 8, 14);
+  sphere(bubble, [0, 0, 0], 1, 8, 12);
   return withoutUnusedUvs({ name, primitives: [toPrimitive(bubble, plasmaMaterial(name, look))] });
 }
+
+/** The guns that dual wield (E5), whose left-hand viewmodels follow the Holograms. */
+const LOCKOUT_DUAL_WIELD = ["smg", "magnum"] as const;
 
 /** Holograms (E3) drawn at once: soldier instances after the pickups. */
 const LOCKOUT_HOLOGRAMS = 2;
@@ -3308,6 +3318,14 @@ export function lockoutMeshSidecar(): string {
     for (let i = 1; i <= LOCKOUT_HOLOGRAMS; i += 1) {
       meshes.push({ id: `hologram-${i}`, name: `hologram ${i}`, mesh: soldier, ...soldierLods, animator: LOCKOUT_SOLDIER_ANIMATOR, transform: rest });
     }
+    // Instances 21..22 (E5): the left hand's SMG and Magnum when dual wielding,
+    // the right hand's models (stored once) drawn mirrored.
+    for (const id of LOCKOUT_DUAL_WIELD) {
+      // (no lighter levels: a gun in hand is never far off)
+      const { lods: _lods, ...right } = meshes.find((m) => m.id === `viewmodel-${id}`)!;
+      void _lods;
+      meshes.push({ ...right, id: `viewmodel-${id}-left`, name: `viewmodel ${id} (left hand)` });
+    }
     const packed = packMeshLibrary(meshes);
     meshSidecar = JSON.stringify({
       version: 2,
@@ -3392,10 +3410,10 @@ local NBOT = ${BOT_COUNT}
 -- fire, reserve = spare rounds. A Forerunner homage sandbox, not Halo's numbers.
 local W = {
   br      = { name="Battle Rifle",  dmg=17, cool=9,  rng=64, hs=1.7, mag=36, pel=1, spr=0.02, auto=false, reserve=108 },
-  smg     = { name="SMG",           dmg=7,  cool=3,  rng=26, hs=1.2, mag=60, pel=1, spr=0.05, auto=true,  reserve=180 },
+  smg     = { name="SMG",           dmg=7,  cool=3,  rng=26, hs=1.2, mag=60, pel=1, spr=0.05, auto=true,  reserve=180, dual=true },
   shotgun = { name="Shotgun",       dmg=12, cool=22, rng=12, hs=1.0, mag=6,  pel=8, spr=0.14, auto=false, reserve=24 },
   sniper  = { name="Sniper Rifle",  dmg=80, cool=44, rng=150,hs=3.0, mag=4,  pel=1, spr=0.0,  auto=false, reserve=12, zoom=true },
-  magnum  = { name="Magnum",        dmg=20, cool=13, rng=42, hs=2.0, mag=12, pel=1, spr=0.012,auto=false, reserve=48 },
+  magnum  = { name="Magnum",        dmg=20, cool=13, rng=42, hs=2.0, mag=12, pel=1, spr=0.012,auto=false, reserve=48, dual=true },
   sword   = { name="Energy Sword",  dmg=220,cool=20, rng=3.2,hs=1.0, mag=99, pel=1, spr=0.0,  auto=false, reserve=0, melee=true },
 }
 
@@ -3446,7 +3464,14 @@ LOADOUTS = {
   { key="hologram", name="Hologram", g1="br", g2="smg", eq="hologram" },
   { key="powerdrain", name="Power Drain", g1="smg", g2="magnum", eq="powerdrain" },
   { key="regenerator", name="Regenerator", g1="br", g2="shotgun", eq="regenerator" },
+  -- Dual wielding (E5): a one-handed gun in each hand in the first slot (d1:
+  -- the left's), a Battle Rifle in the second.
+  { key="dualsmg", name="Dual SMGs", g1="smg", d1="smg", g2="br" },
+  { key="dualmag", name="Dual Magnums", g1="magnum", d1="magnum", g2="br" },
+  { key="smgmag", name="SMG + Magnum", g1="smg", d1="magnum", g2="br" },
 }
+-- The left hand's viewmodels (E5): the right's models, mirrored.
+VM_LEFT = { smg = ${HOLOGRAM_INSTANCE + LOCKOUT_HOLOGRAMS}, magnum = ${HOLOGRAM_INSTANCE + LOCKOUT_HOLOGRAMS + 1} }
 for _, lo in ipairs(LOADOUTS) do lo.en = lo.name end
 for _, d in pairs(EQUIP) do d.en = d.name end
 loadout_pick = 1
@@ -3510,6 +3535,11 @@ local WIDX = { br=8, smg=9, shotgun=10, sniper=11, magnum=12, sword=13 }
 local vm_speed = {}
 local function vm(name)
   local idx = WIDX[p.slot==1 and p.g1 or p.g2]
+  if idx then cartbox.trigger(idx, name) end
+end
+-- ... and the left hand's, dual wielding (E5).
+function vm_left(name)
+  local idx = p.d1 and VM_LEFT[p.d1]
   if idx then cartbox.trigger(idx, name) end
 end
 local ball = { x=0,y=0,z=0, carrier=nil, live=false }
@@ -3790,6 +3820,7 @@ function eq_on_spawn(who)
   if who == p then
     local lo = loadout_now()
     if lo.g1 then give(p, 1, lo.g1); give(p, 2, lo.g2 or "magnum"); p.slot = 1 end
+    give_left(p, lo.d1)
     p.eq = lo.eq
   elseif not who.remote then
     who.eq = (loadout_now().eq and math.random() < 0.5) and EQUIP_IDS[math.random(1, #EQUIP_IDS)] or nil
@@ -3797,6 +3828,13 @@ function eq_on_spawn(who)
   end
   eq_fill(who)
 end
+-- A gun into the left hand (E5) -- or none -- full; it fires on its own clock.
+function give_left(who, id)
+  who.d1, who.ad, who.rd, who.cool2 = id, id and W[id].mag or 0, id and (W[id].reserve or 0) or 0, 0
+end
+-- Dual wielding now: the first slot in hand, a gun in each.
+function dual_now(e) return e.slot == 1 and e.d1 ~= nil end
+
 -- A piece of equipment as it comes: full, nothing out, nothing thrown.
 function eq_fill(e)
   local d = e.eq and EQUIP[e.eq]
@@ -3998,9 +4036,10 @@ end
 -- Tell the others about a shot this browser fired (its player's, or a bot's
 -- as host): which way, how far it went and what it hit. They draw it from
 -- where they see the shooter.
-local function net_shot(e, wid, fx, fy, fz, dist, impact)
+local function net_shot(e, wid, fx, fy, fz, dist, impact, left)
   if NETMODE == 0 then return end
-  cartbox.netsend(EV.SHOT | ((e.ns & 7) << 4) | ((WIDX_OF[wid] or 0) << 7) | ((impact & 3) << 10)
+  -- (bit 12: from the left hand, dual wielding -- E5)
+  cartbox.netsend(EV.SHOT | ((e.ns & 7) << 4) | ((WIDX_OF[wid] or 0) << 7) | ((impact & 3) << 10) | ((left and 1 or 0) << 12)
     | (math.max(0, math.min(65535, math.floor(dist*100))) << 16), pack_dir(fx, fy, fz))
 end
 -- ... a melee swing (a sword's lunge among them), facing yaw ...
@@ -4080,15 +4119,18 @@ local function host_judge(sh, shot, a, b, now, origin)
   local seq, seed, aimed = b & 0xff, (b >> 8) & 0xffff, (b >> 24) & 7
   local wid = shot and shot.wid or "br"
   local w = W[wid]
+  -- (a left hand's shot, dual wielding, keeps its own clock and rounds: E5)
+  local hand = ((b >> 28) & 1) == 1 and "fired_ms_l" or "fired_ms"
   local ok = shot ~= nil and not sh.dead
-  if ok and sh.fired_ms and fire - sh.fired_ms < (melee and 18 or w.cool)*1000/60 - 40 then ok = false end
+  if ok and sh[hand] and fire - sh[hand] < (melee and 18 or w.cool)*1000/60 - 40 then ok = false end
   if ok and not melee then
     sh.ammo = sh.ammo or {}
-    local left = sh.ammo[wid] or ((w.mag or 0) + (w.reserve or 0))
-    if left <= 0 then ok = false else sh.ammo[wid] = left - 1 end
+    local key = hand == "fired_ms_l" and wid.."_l" or wid
+    local left = sh.ammo[key] or ((w.mag or 0) + (w.reserve or 0))
+    if left <= 0 then ok = false else sh.ammo[key] = left - 1 end
   end
   if not ok then sh.rejected = (sh.rejected or 0) + 1; verdict(sh, seq, false); return end
-  sh.fired_ms = fire
+  sh[hand] = fire
   local ex, ey, ez = hist_at(sh, fire)
   if origin then ex, ey, ez = origin[1], origin[2], origin[3] end
   if melee then
@@ -4140,13 +4182,13 @@ end
 -- A guest sends its shot or swing to the host to be judged (L6): when it
 -- fired, how far behind it drew the others, its spread's seed, whom it swung
 -- at, and whether it thinks it hit.
-local function net_aim(melee, seed, target, predicted)
+local function net_aim(melee, seed, target, predicted, left)
   if NETMODE ~= 1 then return end
   local now, lag = cartbox.netclock()
   -- Numbered by the input it was fired on (L7), for the host to fire it from there.
   local seq = (p.in_seq or 0) & 255
   cartbox.netsend(EV.AIM | ((p.ns & 7) << 4) | ((melee and 1 or 0) << 7) | (math.min(255, math.floor((lag + INTERP)/4 + 0.5)) << 8) | ((now & 0xffff) << 16),
-    seq | ((seed & 0xffff) << 8) | (((target or 0) & 7) << 24) | ((predicted and 1 or 0) << 27))
+    seq | ((seed & 0xffff) << 8) | (((target or 0) & 7) << 24) | ((predicted and 1 or 0) << 27) | ((left and 1 or 0) << 28))
   return seq
 end
 
@@ -4641,6 +4683,8 @@ local function net_fx_run()
         local w, impact, dist = W[wid], (a >> 10) & 3, ((a >> 16) & 0xffff)/100
         local fx, fy, fz = unpack_dir(b)
         local x, y, z = e.x, e.y + EYE, e.z
+        -- (from the left hand, dual wielding: its tracer starts left of the right's, E5)
+        if ((a >> 12) & 1) == 1 then x, z = x + fz*0.35, z - fx*0.35 end
         e.muzzle = 3
         cartbox.sound("fire_"..wid, x, y, z, 1, 0.94 + math.random()*0.12)
         tracer(x, y, z, fx, fy, fz, dist)
@@ -4684,14 +4728,15 @@ local function eject_casing(x, y, z, fx, fz)
     rx*1.7 + fx*0.2 + (math.random()-0.5)*0.5, 1.5 + math.random()*0.7, rz*1.7 + fz*0.2 + (math.random()-0.5)*0.5)
 end
 
-local function player_fire()
-  if p.cool>0 or p.dead then return end
-  local wid = p.slot==1 and p.g1 or p.g2
+local function player_fire(left)
+  if p.dead or (left and (p.cool2 or 0) > 0) or (not left and p.cool > 0) then return end
+  -- (left: the left hand's gun, dual wielding, on its own clock and magazine: E5)
+  local wid = left and p.d1 or (p.slot==1 and p.g1 or p.g2)
   local w = W[wid]
-  local ammo = p.slot==1 and p.a1 or p.a2
+  local ammo = left and p.ad or (p.slot==1 and p.a1 or p.a2)
   -- auto-melee when an enemy is right in front
   local aim,ad = auto_target()
-  if aim and ad < 2.4 then
+  if aim and ad < 2.4 and not left then
     p.cool=18; flash=3; vm("melee"); p.melee_t = tick
     cartbox.rumble(0.8, 120)
     cartbox.sound("fire_sword",nil,nil,nil,1,0.9+math.random()*0.2)
@@ -4707,6 +4752,14 @@ local function player_fire()
     end
     return
   end
+  if ammo<=0 and left then
+    if (p.rd or 0) > 0 then
+      local take = math.min(w.mag, p.rd)
+      p.ad, p.rd, p.cool2 = take, p.rd - take, 40
+      vm_left("reload"); p.reload_t = tick
+    end
+    return
+  end
   if ammo<=0 then
     -- reload from reserve, else fall back to the magnum
     local res = p.slot==1 and p.r1 or p.r2
@@ -4717,10 +4770,11 @@ local function player_fire()
     end
     p.slot=(p.slot==1) and 2 or 1; vm("ready"); return
   end
-  p.cool = w.cool; flash = 4; vm("fire"); p.fired_t = tick
+  if left then p.cool2 = w.cool; vm_left("fire") else p.cool = w.cool; vm("fire") end
+  flash = 4; p.fired_t = tick
   cartbox.rumble(w.pel > 1 and 0.55 or 0.3, w.pel > 1 and 90 or 50)
   cartbox.sound("fire_"..wid,nil,nil,nil,0.7,0.96+math.random()*0.08)
-  if p.slot==1 then p.a1=p.a1-1 else p.a2=p.a2-1 end
+  if left then p.ad = p.ad - 1 elseif p.slot==1 then p.a1=p.a1-1 else p.a2=p.a2-1 end
   local ex,ey,ez = p.x, p.y+EYE, p.z
   do local fx,_,fz = forward(); eject_casing(ex + fx*0.35, ey - 0.16, ez + fz*0.35, fx, fz) end
   shot.t=3; shot.x=ex; shot.y=ey; shot.z=ez
@@ -4776,11 +4830,11 @@ local function player_fire()
       shot_wall(ex,ey,ez, fx,fy,fz, w.rng, w.dmg)
     end
     tracer(ex, ey - 0.12, ez, fx, fy, fz, dist)
-    if k == 1 then net_shot(p, wid, bx, by, bz, dist, impact) end
+    if k == 1 then net_shot(p, wid, bx, by, bz, dist, impact, left) end
   end
   -- Online a guest's shot goes to the host to be judged; its hit marker shows
   -- at once as its guess, until the host says (L6).
-  local seq = net_aim(false, seed, 0, hit)
+  local seq = net_aim(false, seed, 0, hit, left)
   if hit then hitmark = { t = 14, seq = seq, state = seq and 0 or 1 } end
 end
 
@@ -4802,7 +4856,19 @@ local function try_pickups()
     if legal and mtimer[i+1]==0 then
       local mx,my,mz=MRK[i*3+1],MRK[i*3+2],MRK[i*3+3]
       if math.abs(p.x-mx)<1.4 and math.abs(p.z-mz)<1.6 and math.abs((p.y+1)-my)<2.0 then
-        give(p,1,id); p.slot=1; vm("ready"); mtimer[i+1]=540; net_pickup(p, i); say(T("msg.pickup","Picked up "..W[id].name,W[id].name),12)
+        if p.d1 and id == p.g1 then
+          -- (dual wielding and over the pad of the right hand's gun: both topped up)
+          give(p,1,id); give_left(p, p.d1); vm("ready")
+          say(T("msg.pickup","Picked up "..W[id].name,W[id].name),12)
+        elseif W[id].dual and cartbox.action("zoom") and p.slot == 1 and W[p.g1].dual and not p.d1 then
+          -- (holding zoom on a pad: a second one-hander into the left hand, E5)
+          give_left(p, id); vm_left("ready")
+          say(T("msg.dual", "Dual wielding "..W[id].name, W[id].name), 12)
+        else
+          give(p,1,id); p.slot=1; p.d1 = nil; vm("ready")
+          say(T("msg.pickup","Picked up "..W[id].name,W[id].name),12)
+        end
+        mtimer[i+1]=540; net_pickup(p, i)
       end
     end
   end
@@ -5612,12 +5678,13 @@ end
 local function play_input()
   local aheld = btn(6)
   if edge("a", aheld) then
-    if tick-(p.lastA or -99) < 14 and not p.dead then local fx,fy,fz=forward(); throw_grenade(p,fx,fy,fz) end
+    if tick-(p.lastA or -99) < 14 and not p.dead and not dual_now(p) then local fx,fy,fz=forward(); throw_grenade(p,fx,fy,fz) end
     p.lastA=tick
   end
   -- Input actions (EP15): fire, jump, swap, grenade and zoom, each on its console
   -- button plus its own keys and controller buttons (see the Input tab).
-  if cartbox.actionp("grenade") and not p.dead then local fx,fy,fz=forward(); throw_grenade(p,fx,fy,fz) end
+  -- (dual wielding, the grenade action fires the left hand's gun instead: E5)
+  if cartbox.actionp("grenade") and not p.dead and not dual_now(p) then local fx,fy,fz=forward(); throw_grenade(p,fx,fy,fz) end
   -- Facing yaw ay looks along (sin ay, cos ay); the screen's right is then
   -- (-cos ay, sin ay) — the same right the held weapon is placed with — so
   -- turning right *decreases* ay.
@@ -5707,10 +5774,15 @@ local function play_input()
   -- Dead, waiting to respawn: swap picks the next life's loadout (a
   -- deliberate press -- a stick still held from the fight doesn't change it).
   if p.dead and not MODE.fixed and cartbox.actionp("swap") then loadout_step(1) end
-  if cartbox.actionp("swap") then p.slot=(p.slot==1) and 2 or 1; vm("ready") end
+  if cartbox.actionp("swap") then p.slot=(p.slot==1) and 2 or 1; vm("ready"); if dual_now(p) then vm_left("ready") end end
   local cur=W[p.slot==1 and p.g1 or p.g2]
   p.zoom = cur.zoom and (cartbox.action("zoom") or (aheld and not lstick and not (btn(0) or btn(1) or btn(2) or btn(3))))
   if p.cool>0 then p.cool=p.cool-1 end
+  if (p.cool2 or 0) > 0 then p.cool2 = p.cool2 - 1 end
+  if dual_now(p) then
+    local lw = W[p.d1]
+    if (lw.auto and cartbox.action("grenade")) or cartbox.actionp("grenade") then player_fire(true) end
+  end
   local firing = cur.auto and cartbox.action("fire") or cartbox.actionp("fire")
   if firing then player_fire() end
 end
@@ -5770,6 +5842,33 @@ local function pose_viewmodel(wid)
   cartbox.meshpose(idx, px*WS, py*WS, pz*WS, p.ay, -p.ap, 0, WS, 0, armor_tint(p), true)
 end
 
+-- Dual wielding (E5): the left hand's gun, the right's model mirrored -- as
+-- far left as the right is right, and flipped across its own width (a
+-- negative scale turns it inside out through its middle; half a turn about
+-- its width puts it the right way up, leaving it mirrored left to right).
+-- Placed, not posed (a frame's eight poses are the bots' and the right
+-- hand's), on the front layer in the player's armour (cartbox.look); put
+-- back out of sight when it's not in hand.
+LEFT_SHOWN = {}
+function pose_left_gun()
+  local lidx = (not p.dead and not p.zoom and dual_now(p)) and VM_LEFT[p.d1] or nil
+  for _, i in pairs(VM_LEFT) do
+    if i ~= lidx and LEFT_SHOWN[i] then LEFT_SHOWN[i] = nil; cartbox.place(i); cartbox.look(i, 0, false) end
+  end
+  if not lidx then return end
+  local s, c = math.sin(p.ay), math.cos(p.ay)
+  local cp, sp = math.cos(p.ap), math.sin(p.ap)
+  local fx, fy, fz = cp*s, sp, cp*c
+  local rx, rz = -c, s
+  local ux, uy, uz = -s*sp, cp, -c*sp
+  local fwd, lr, up = 0.4, 0.19, -0.235
+  if p.d1 == "magnum" then lr = lr - 0.03; fwd = fwd - 0.03 end
+  local ex, ey, ez = p.x, p.y + EYE, p.z
+  cartbox.place(lidx, ex + fx*fwd - rx*lr + ux*up, ey + fy*fwd + uy*up, ez + fz*fwd - rz*lr + uz*up, p.ay, -p.ap + math.pi, 0, -1)
+  cartbox.look(lidx, armor_tint(p), true)
+  LEFT_SHOWN[lidx] = true
+end
+
 -- The muzzle flash stays a 2D HUD flare, drawn where the barrel sits on screen.
 local function draw_muzzle_flash(cur)
   if flash<=0 or cur.melee then return end
@@ -5814,7 +5913,10 @@ local function draw_hud()
   local ammo=p.slot==1 and p.a1 or p.a2
   local res=p.slot==1 and p.r1 or p.r2
   U.set("rounds", cur.melee and "" or tostring(ammo)); U.set("reserve", cur.melee and "" or tostring(res))
-  U.set("weaponname", string.upper(cur.name)); U.set("nades", p.nade or 0)
+  -- Dual wielding (E5): the left hand's rounds too, and both guns' names.
+  local dual = dual_now(p)
+  U.set("lrounds", dual and tostring(p.ad or 0) or ""); U.set("lreserve", dual and tostring(p.rd or 0) or "")
+  U.set("weaponname", dual and string.upper(W[p.d1].name.."  +  "..cur.name) or string.upper(cur.name)); U.set("nades", p.nade or 0)
   -- Equipment (E1): its name (and charges), and the Jetpack's fuel -- or the
   -- next charge's recharge (E2) -- as an arc by the reticle.
   local d = p.eq and EQUIP[p.eq]
@@ -6219,6 +6321,7 @@ function TIC()
   deploy_draw()
   local cur_id = p.slot==1 and p.g1 or p.g2
   pose_viewmodel(cur_id)
+  pose_left_gun()
   drive_camera()
   cartbox.hud(1)  -- composite this 2D frame as a HUD over the 3D arena
 
