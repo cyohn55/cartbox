@@ -190,6 +190,24 @@ describe("WebgpuSceneRenderer pipeline setup", () => {
     expect(uniform.buffer.minBindingSize).toBe(UNIFORM_BYTES_USED);
   });
 
+  it("marks exactly its entry points as @vertex and @fragment (a stage attribute on any other function fails to compile)", async () => {
+    const { device, log } = fakeDevice();
+    await WebgpuSceneRenderer.create(device, WIDTH, HEIGHT);
+    expect(log.pipelines.length).toBeGreaterThan(0);
+    for (const pipeline of log.pipelines) {
+      for (const [stage, attribute] of [["vertex", "@vertex"], ["fragment", "@fragment"]] as const) {
+        const entry = pipeline[stage];
+        if (!entry) continue;
+        // The function each stage attribute is attached to, past any comments between them.
+        const code = (entry.module.code as string).replace(/\/\/[^\n]*/g, "");
+        const marked = [...code.matchAll(new RegExp(`${attribute}\\s*fn\\s+(\\w+)`, "g"))].map((m) => m[1]);
+        const attributes = code.split(attribute).length - 1;
+        expect(marked.length, `every ${attribute} is directly on a function`).toBe(attributes);
+        expect(marked, `${attribute} marks the pipeline's entry point`).toContain(entry.entryPoint);
+      }
+    }
+  });
+
   it("declares a vertex layout matching the packed stride", async () => {
     const { device, log } = fakeDevice();
     await WebgpuSceneRenderer.create(device, WIDTH, HEIGHT);
@@ -204,6 +222,14 @@ describe("WebgpuSceneRenderer pipeline setup", () => {
       [4, 40, "float32"], // blend weight
       [5, 44, "float32"], // sway (B6)
     ]);
+  });
+
+  it("declines a device whose shader compiler reports an error, so the factory falls back to WebGL2", async () => {
+    const { device } = fakeDevice();
+    const rejecting = { ...device, createShaderModule: (desc: any) => ({ code: desc.code, getCompilationInfo: async () => ({ messages: [{ type: "error", message: "missing entry point IO attribute" }] }) }) };
+    expect(await WebgpuSceneRenderer.create(rejecting, WIDTH, HEIGHT)).toBeNull();
+    const warning = { ...device, createShaderModule: (desc: any) => ({ code: desc.code, getCompilationInfo: async () => ({ messages: [{ type: "warning", message: "unused" }] }) }) };
+    expect(await WebgpuSceneRenderer.create(warning, WIDTH, HEIGHT)).not.toBeNull();
   });
 
   it("renders to a linear target, never an sRGB one", async () => {

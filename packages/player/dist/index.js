@@ -17259,7 +17259,6 @@ fn aces(x: f32) -> f32 {
   return clamp((v * (2.51 * v + 0.03)) / (v * (2.43 * v + 0.59) + 0.14), 0.0, 1.0);
 }
 
-@vertex
 // Wind (B6): windOffset in wind.ts, term for term \u2014 how far a vertex at (x, z) in its
 // mesh's space, bending sway metres per unit of wind, moves this frame.
 fn windOffset(p: vec2<f32>, sway: f32) -> vec2<f32> {
@@ -17269,6 +17268,7 @@ fn windOffset(p: vec2<f32>, sway: f32) -> vec2<f32> {
   let g = 1.0 + u.wind0.w * (0.5 + 0.5 * sin(6.283185307179586 * t + 0.05 * (p.x + p.y)));
   return u.wind0.xy * (sway * s * g);
 }
+@vertex
 fn vs(
   @location(0) position: vec3<f32>,
   @location(1) normal: vec3<f32>,
@@ -17872,6 +17872,8 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
         };
       };
       const pipeline = pipelinesFor(sceneShader());
+      const compiled = await device.createShaderModule({ code: sceneShader() }).getCompilationInfo?.();
+      if (compiled?.messages?.some((m) => m.type === "error")) return null;
       const colourTexture = device.createTexture({
         size: { width, height },
         format: "rgba8unorm",
