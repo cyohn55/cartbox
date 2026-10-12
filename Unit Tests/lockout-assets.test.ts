@@ -100,6 +100,13 @@ describe("the demo with a saved cart's assets", () => {
     expect(entry(overlay.sidecar, "hologram-2").mesh).toBe(entry(saved, "bot-1").mesh);
   });
 
+  it("puts a saved cart's right-hand gun in the left hand too, when it was saved before it had one", () => {
+    const right = decodeMeshSidecar(lockoutMeshSidecar()).meshes.find((m) => m.id === "viewmodel-smg")!;
+    const older = { ...base, meshes: base.meshes.filter((m) => !m.id.endsWith("-left")).map((m) => (m.id === "viewmodel-smg" ? { ...m, mesh: right.mesh + " " } : m)) };
+    const overlay = overlayLockoutAssets(base, older);
+    expect(entry(overlay.sidecar, "viewmodel-smg-left").mesh).toBe(entry(overlay.sidecar, "viewmodel-smg").mesh);
+  });
+
   it("keeps its own model for an asset whose replacement breaks the contract, saying why", () => {
     const saved = replaceModel(base, "bot-1", brokenRig(soldier)).sidecar;
     const overlay = overlayLockoutAssets(base, saved);

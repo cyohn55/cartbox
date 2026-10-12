@@ -26,6 +26,7 @@ import {
   actionsSdkLua,
   codeChunks,
   createConsole,
+  decodeMeshPoses,
   getModel,
   injectSdk,
   inputBlockAddress,
@@ -82,7 +83,7 @@ end)()`;
   tick(1 << 4); // Free for All
   for (let i = 0; i < 40; i += 1) tick(i % 2 ? 1 << 4 : 0); // past the intro
   for (let i = 0; i < 3; i += 1) tick(0);
-  return { tick, probe: probeWords };
+  return { tick, probe: probeWords, poses: () => decodeMeshPoses(console.readMailbox()) };
 }
 
 // The player's height (cm, low half) and fuel (high half), and whether it's jetting (pmem 118).
@@ -896,5 +897,135 @@ end)()`;
     expect(guest.probe()[1]).toBe(1);
     expect(host.probe()[1]).toBe(1);
     expect(host.probe()[0]).toBe(guest.probe()[0]);
+  }, 300_000);
+});
+
+describe.skipIf(!existsSync(path.join(DIST, "xbox360/engine.js")))("E5: dual wielding", () => {
+  // The player's guns and rounds: right (a1), left (ad), grenades, slot.
+  // ... and where the left hand's SMG was last placed (pmem 118: cm across, cm deep),
+  // mirrored, on the front layer (bits 26..28 of 117), as it's put back (bit 29).
+  const GUNS = `;(function()
+local _pl, _lk = cartbox.place, cartbox.look
+local at, look, gone = nil, nil, false
+cartbox.place = function(o, x, y, z, yaw, pitch, roll, sc)
+  if o == VM_LEFT.smg then if x then at, gone = { x, z, sc }, false else at, gone = nil, true end end
+  return _pl(o, x, y, z, yaw, pitch, roll, sc)
+end
+cartbox.look = function(o, t, f) if o == VM_LEFT.smg then look = f end return _lk(o, t, f) end
+local _T = TIC
+function TIC()
+  _T()
+  if phase == "play" and p then
+    pmem(117, (p.a1 or 0) | ((p.ad or 0) << 8) | ((p.nade or 0) << 16) | ((p.slot or 1) << 20) | ((p.d1 and 1 or 0) << 24) | ((p.g1 == "smg" and 1 or 0) << 25)
+      | ((at and 1 or 0) << 26) | (((at and at[3] < 0) and 1 or 0) << 27) | ((look and 1 or 0) << 28) | ((gone and 1 or 0) << 29))
+    pmem(118, at and ((math.floor(at[1]*100 + 0.5) & 0xffff) | ((math.floor(at[2]*100 + 0.5) & 0xffff) << 16)) or 0)
+  end
+end
+end)()`;
+
+  it("spawns Dual SMGs with a mirrored left-hand gun that the grenade action fires, and no grenades thrown", async () => {
+    const g = await offline(`loadout_pick = 9\n${GUNS}`);
+    const [w0] = g.probe();
+    expect((w0 >> 24) & 3).toBe(3); // an SMG in each hand
+    expect(w0 & 255).toBe(60);
+    expect((w0 >> 8) & 255).toBe(60);
+    // The right hand's gun posed on the front layer; the left's placed beside it, mirrored, in front too.
+    const right = g.poses().find((q) => q.front)!;
+    expect(right.scale).toBeGreaterThan(0);
+    expect((w0 >> 26) & 7).toBe(7);
+    const [, lxz] = g.probe();
+    const apart = Math.hypot(s16(lxz) - right.position[0] / 1000, s16(lxz >>> 16) - right.position[2] / 1000);
+    expect(apart).toBeCloseTo(0.38, 1); // as far left as the right is right
+    // The grenade action fires the left gun; the right stays full, nothing thrown.
+    for (let i = 0; i < 20; i += 1) g.tick(0, ACT.grenade!);
+    const [w1] = g.probe();
+    expect(w1 & 255).toBe(60);
+    expect((w1 >> 8) & 255).toBeLessThan(60);
+    expect((w1 >> 16) & 15).toBe(2);
+    // Fire fires the right.
+    for (let i = 0; i < 20; i += 1) g.tick(0, ACT.fire!);
+    expect(g.probe()[0] & 255).toBeLessThan(60);
+    // Swapped to the Battle Rifle: one gun in hand, and the grenade action throws.
+    g.tick(0, ACT.swap!);
+    g.tick(0);
+    expect((g.probe()[0] >> 29) & 1).toBe(1); // the left hand's gun put back out of sight
+    g.tick(0, ACT.grenade!);
+    g.tick(0);
+    expect((g.probe()[0] >> 16) & 15).toBe(1);
+  }, 60_000);
+
+  it("takes a second one-hander off a pad into the left hand while zoom is held, and replaces the gun without it", async () => {
+    // A Magnum in hand, put on the SMG's pad as the test starts holding a button.
+    const onPad = `${GUNS}
+;(function()
+local _T, put = TIC, false
+function TIC()
+  _T()
+  if phase == "play" and p then
+    if not put and (cartbox.action("zoom") or cartbox.action("equipment")) then
+      put = true
+      give(p, 1, "magnum"); p.slot, p.d1 = 1, nil
+      for i = 1, #MW do if MW[i] == "smg" then p.x, p.y, p.z, p.vy = MRK[i*3-2], MRK[i*3-1] - 1, MRK[i*3], 0 end end
+    end
+
+  end
+end
+end)()`;
+    const held = await offline(onPad);
+    for (let i = 0; i < 4; i += 1) held.tick(0, ACT.zoom!);
+    const [h] = held.probe();
+    expect((h >> 24) & 1).toBe(1); // the SMG into the left hand
+    expect((h >> 25) & 1).toBe(0); // the Magnum still in the right
+    const plain = await offline(onPad);
+    plain.tick(0, ACT.equipment!); // (Standard: nothing in the slot; it only starts the probe)
+    for (let i = 0; i < 4; i += 1) plain.tick(0);
+    const [q] = plain.probe();
+    expect((q >> 24) & 1).toBe(0);
+    expect((q >> 25) & 1).toBe(1); // the SMG in place of the Magnum
+  }, 60_000);
+});
+
+describe.skipIf(!existsSync(LOCKOUT_ENGINE))("E5 online: a guest's two guns judged by the host (two engines, one room)", () => {
+  it("judges each hand's shots on its own clock and magazine, rejecting none", async () => {
+    const hostQuiet = `for _,o in ipairs(bots) do if not o.human then o.dead, o.respawn, o.x, o.y, o.z = true, 1e9, 0, -60, 0 end end`;
+    // The guest holds both triggers of its Dual Magnums for two seconds from its 120th tick.
+    const guestProbe = `loadout_pick = 10
+;(function()
+local _a, _ap, n = cartbox.action, cartbox.actionp, 0
+local on = function() return phase == "play" and n > 120 and n < 240 end
+cartbox.action = function(name) if name == "fire" or name == "grenade" then return on() end return _a(name) end
+cartbox.actionp = function(name) if name == "fire" or name == "grenade" then return on() and n % 16 == 0 end return _ap(name) end
+local _T = TIC
+function TIC()
+  if phase == "play" then n = n + 1 end
+  _T()
+  if phase == "play" and p then pmem(117, (p.a1 or 0) | ((p.ad or 0) << 8)) end
+end
+end)()`;
+    const hostProbe = `;(function()
+local _T = TIC
+function TIC()
+  _T()
+  if phase == "play" and NETMODE == 2 then
+    ${hostQuiet}
+    for _,o in ipairs(bots) do if o.human then
+      local am = o.ammo or {}
+      local full = W.magnum.mag + W.magnum.reserve
+      pmem(117, (full - (am.magnum or full)) | ((full - (am.magnum_l or full)) << 8) | ((o.rejected or 0) << 16))
+    end end
+  end
+end
+end)()`;
+    const { host, guest, both } = await lockoutRoom("", { guestProbe, hostProbe });
+    for (let f = 0; f < 420; f += 1) both(0, 0);
+    const [g] = guest.probe();
+    const [h] = host.probe();
+    const right = 12 - (g & 255), left = 12 - ((g >> 8) & 255);
+    console.log(`E5: the guest fired ${right} right and ${left} left; the host took ${h & 255} and ${(h >> 8) & 255}, rejecting ${h >>> 16}`);
+    expect(right).toBeGreaterThan(3);
+    expect(left).toBeGreaterThan(3);
+    expect(h & 255).toBe(right);
+    expect((h >> 8) & 255).toBe(left);
+    expect(h >>> 16).toBe(0);
   }, 300_000);
 });

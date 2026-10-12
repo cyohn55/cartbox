@@ -63,23 +63,26 @@ describe("the Lockout soldiers and weapons", () => {
     meshes: { id: string; mesh: string; transform: { scale: number[] } }[];
   };
 
-  it("orders instances as map, 7 bots, one viewmodel per weapon, the pad pickups, then the Holograms' bodies", () => {
+  it("orders instances as map, 7 bots, one viewmodel per weapon, the pad pickups, the Holograms' bodies, then the left hand's guns", () => {
     const ids = sidecar.meshes.map((m) => m.id);
-    expect(ids).toHaveLength(21);
+    expect(ids).toHaveLength(23);
     expect(ids[0]).toBe("lockout-map");
     expect(ids.slice(1, 8)).toEqual([1, 2, 3, 4, 5, 6, 7].map((i) => `bot-${i}`));
     expect(ids.slice(8, 14)).toEqual(LOCKOUT_VIEWMODELS.map((w) => `viewmodel-${w}`));
     expect(ids.slice(14, 19)).toEqual([1, 2, 3, 4, 5].map((i) => `pickup-${i}`));
-    expect(ids.slice(19)).toEqual(["hologram-1", "hologram-2"]); // (E3, unseen at rest scale till posed)
+    expect(ids.slice(19, 21)).toEqual(["hologram-1", "hologram-2"]); // (E3, unseen at rest scale till placed)
+    expect(ids.slice(21)).toEqual(["viewmodel-smg-left", "viewmodel-magnum-left"]); // (E5: the right's models, drawn mirrored)
+    const shared = (id: string) => sidecar.meshes.find((m) => m.id === id)!.mesh;
+    expect(shared("viewmodel-smg-left")).toBe(shared("viewmodel-smg"));
     // …then the four plasma grenades held in reserve (I10), the eight Drop Walls (E3), four each of
     // the Power Drain, its field, the Regenerator and its field (E4), and the mountains last.
     const scene = parseMeshScene(lockoutMeshSidecar())!;
-    expect(scene.instances.slice(21, 25).map((i) => i.name)).toEqual(["plasma grenade 1", "plasma grenade 2", "plasma grenade 3", "plasma grenade 4"]);
-    expect(scene.instances.slice(25, 33).every((i) => i.name.startsWith("drop wall"))).toBe(true);
-    expect(scene.instances.slice(33, 49).map((i) => i.name.replace(/ \d+$/, ""))).toEqual(
+    expect(scene.instances.slice(23, 27).map((i) => i.name)).toEqual(["plasma grenade 1", "plasma grenade 2", "plasma grenade 3", "plasma grenade 4"]);
+    expect(scene.instances.slice(27, 35).every((i) => i.name.startsWith("drop wall"))).toBe(true);
+    expect(scene.instances.slice(35, 51).map((i) => i.name.replace(/ \d+$/, ""))).toEqual(
       ["power drain", "drain field", "regenerator", "regen field"].flatMap((n) => [n, n, n, n]),
     );
-    expect(scene.instances.findIndex((i) => i.terrain)).toBe(49);
+    expect(scene.instances.findIndex((i) => i.terrain)).toBe(51);
   });
 
   it("shares one tintable, skinned soldier across all 7 bots, stored once, each with the state machine", () => {
