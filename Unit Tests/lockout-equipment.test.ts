@@ -120,7 +120,7 @@ describe.skipIf(!existsSync(path.join(DIST, "xbox360/engine.js")))("E1: loadouts
     // On the ground the fuel refills.
     for (let i = 0; i < 120; i += 1) g.tick(0);
     expect(g.probe()[0] >>> 16).toBe(150);
-  });
+  }, 60_000); // (the first loads the engine: slow on a busy CI runner)
 
   it("picks the loadout on the title screen with Left/Right, and cycles the next life's with swap while dead", async () => {
     const RIGHT = 1 << 3;
@@ -152,7 +152,7 @@ end)()`);
     expect((d.probe()[1] >> 4) & 15).toBe(2);
     for (let i = 0; i < 120 && (d.probe()[1] >> 8) & 1; i += 1) d.tick(0);
     expect(d.probe()[1] & 2).toBe(2); // the next life wears the Jetpack
-  });
+  }, 60_000);
 
   it("leaves a Standard spawn as it always was: nothing in the slot, the button does nothing", async () => {
     const g = await offline(HEIGHT);
@@ -160,7 +160,7 @@ end)()`);
     expect(b0 & 2).toBe(0);
     for (let i = 0; i < 45; i += 1) g.tick(0, ACT.equipment!);
     expect(Math.abs(s16(g.probe()[0]) - s16(a0))).toBeLessThan(0.01);
-  });
+  }, 60_000);
 });
 
 describe.skipIf(!existsSync(LOCKOUT_ENGINE))("E1 online: a guest's Jetpack (two engines, one room)", () => {
@@ -272,7 +272,7 @@ end)()`);
     expect((g.probe()[0] >>> 21) & 1).toBe(0); // let go
     for (let i = 0; i < 420; i += 1) g.tick(0);
     expect(charges(g.probe()[0])).toBe(3); // back in 7 s
-  });
+  }, 60_000);
 
   it("grapples a bot up to a target well above it, and puts it back on its agent once it's down", async () => {
     const g = await offline(`loadout_pick = 3
@@ -309,7 +309,7 @@ end)()`);
     console.log(`E2: a bot grappled up ${(top / 100).toFixed(2)} m`);
     expect(top / 100).toBeGreaterThan(2);
     expect((w >> 2) & 3).toBe(2); // down, and on its agent again
-  });
+  }, 60_000);
 
   it("throws a soldier in front of a Repulsor away, and a bot takes its agent up again once it's down", async () => {
     const g = await offline(`loadout_pick = 4
@@ -354,7 +354,7 @@ end)()`);
     expect(far - before).toBeGreaterThan(2);
     for (let i = 0; i < 60; i += 1) g.tick(0);
     expect((g.probe()[0] >>> 16) & 3).toBe(2); // down: on its agent again
-  });
+  }, 60_000);
 
   it("throws its wearer off the floor it's aimed at", async () => {
     const g = await offline(`loadout_pick = 4
@@ -378,7 +378,7 @@ end)()`);
     console.log(`E2: a Repulsor at the feet threw its wearer ${top.toFixed(2)} m up and ${far.toFixed(2)} m back`);
     expect(top).toBeGreaterThan(1.2);
     expect(far).toBeGreaterThan(0.8);
-  });
+  }, 60_000);
 });
 
 describe.skipIf(!existsSync(LOCKOUT_ENGINE))("E2 online: a guest's grapple, and a guest thrown (two engines, one room)", () => {
