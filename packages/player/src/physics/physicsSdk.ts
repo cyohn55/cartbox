@@ -29,6 +29,11 @@
  *   cartbox.place(obj, x, y, z, yaw, pitch, roll, scale)   put it there (world space;
  *                                     scale 0 hides it) and leave it until placed again
  *   cartbox.place(obj)                send it back to where the scene put it
+ *   cartbox.place(obj, ..., -scale)   a negative scale mirrors it through its middle (half a
+ *                                     turn of pitch then mirrors it left to right)
+ *   cartbox.look(obj, tint, front)    how a placed object looks, until changed: a tint
+ *                                     (palette index, 0 none), and drawn over the whole scene
+ *                                     (front) -- a pose's tint and front, with no cap a frame
  *                                     (both -> true once queued; nil before the host runs)
  *
  * Spawning prefab copies (when the cart has prefabs) rides the same block:
@@ -117,6 +122,7 @@ import {
   PHYS_OP_MIX,
   PHYS_OP_PLACE,
   PHYS_OP_UNPLACE,
+  PHYS_OP_LOOK,
   PHYS_OP_SOUND,
   PHYS_OP_SOUND_LOOP,
   PHYS_OP_SHIELD,
@@ -560,8 +566,18 @@ function PLACE_CALLS(): string {
     local i = _obj(o)
     if i == nil or i > 65535 then return end
     if x == nil then return _cmd(${PHYS_OP_UNPLACE}, i) end
-    local s = math.max(0, math.min(32767, math.floor((scale or 1) * 256 + 0.5)))
+    local sc = scale or 1
+    local s = math.max(0, math.min(32767, math.floor(math.abs(sc) * 256 + 0.5)))
+    if sc < 0 then s = s | 0x8000 end   -- (mirrored through its middle)
     return _cmd(${PHYS_OP_PLACE}, i | (s << 16), x, y or 0, z or 0, yaw or 0, pitch or 0, roll or 0)
+  end
+  local _look = {}
+  cartbox.look = function(o, tint, front)
+    local i = _obj(o)
+    if i == nil or i > 65535 then return end
+    local key = (math.floor(tint or 0) & 15) | (((front and front ~= 0) and 1 or 0) << 4)
+    if _look[i] == key then return end -- it stands: send changes only
+    if _cmd(${PHYS_OP_LOOK}, i | (key << 16)) then _look[i] = key end
   end
 `;
 }

@@ -368,6 +368,8 @@ export class MeshOverlaySurface implements DisplaySurface {
   private bodies: ReadonlyMap<number, Mat4> = new Map();
   /** Shield effects (H11): object index → the surface effect it and everything under it wear (see setShields). */
   private effects: ReadonlyMap<number, SurfaceEffect> = new Map();
+  /** How placed objects look (cartbox.look): tint and front layer, as a pose would say (see setLooks). */
+  private looks: ReadonlyMap<number, { readonly tint: number; readonly front: boolean }> = new Map();
   private readonly shieldCache = new Map<number, { flare: number; shimmer: number; camo: number; effect: SurfaceEffect | null }>();
   /** Spawned prefab copies: root object index → the root's world matrix (see setSpawned). */
   private spawned: ReadonlyMap<number, Mat4> = new Map();
@@ -459,6 +461,14 @@ export class MeshOverlaySurface implements DisplaySurface {
    * flare, shimmer, camo). Each is drawn on the object and everything under it,
    * as a surface effect over its PBR materials (see shieldEffect).
    */
+  /**
+   * Set how placed objects look (cartbox.look: object → tint, front layer) --
+   * what a pose would say, for an object the cart placed instead (EP14).
+   */
+  setLooks(looks: ReadonlyMap<number, { readonly tint: number; readonly front: boolean }>): void {
+    this.looks = looks;
+  }
+
   setShields(shields: ReadonlyMap<number, { readonly flare: number; readonly shimmer: number; readonly camo: number }>): void {
     if (shields.size === 0 && this.effects.size === 0) return;
     const effects = new Map<number, SurfaceEffect>();
@@ -1208,13 +1218,13 @@ export class MeshOverlaySurface implements DisplaySurface {
     front: readonly MeshSceneInstance[];
     moved: readonly MeshSceneInstance[];
   } {
-    if (this.poses.length === 0 && this.bodies.size === 0 && this.spawned.size === 0 && this.animated.size === 0 && this.effects.size === 0) {
+    if (this.poses.length === 0 && this.bodies.size === 0 && this.spawned.size === 0 && this.animated.size === 0 && this.effects.size === 0 && this.looks.size === 0) {
       this.lastPlacement = null;
       this.lastFront = [];
       return { main: this.unpooled, front: [], moved: [] };
     }
     if (this.hierarchy) return this.posedHierarchy(this.hierarchy);
-    if (this.bodies.size > 0 || this.spawned.size > 0 || this.animated.size > 0 || this.effects.size > 0 || this.unpooled !== this.instances) {
+    if (this.bodies.size > 0 || this.spawned.size > 0 || this.animated.size > 0 || this.effects.size > 0 || this.looks.size > 0 || this.unpooled !== this.instances) {
       this.flat ??= {
         parents: this.instances.map(() => -1),
         children: this.instances.map(() => []),
@@ -1286,7 +1296,8 @@ export class MeshOverlaySurface implements DisplaySurface {
       const poolRoot = this.pooledRoot[i] ?? -1;
       const reserved = poolRoot >= 0 && !this.spawned.has(poolRoot);
       const spawnAt = poolRoot === i ? this.spawned.get(i) : undefined;
-      const moved = Boolean(pose) || Boolean(up?.moved) || Boolean(body) || Boolean(spawnAt) || this.animated.has(i);
+      const look = this.looks.get(i);
+      const moved = Boolean(pose) || Boolean(up?.moved) || Boolean(body) || Boolean(spawnAt) || this.animated.has(i) || Boolean(look);
       let model = this.instances[i]!.model;
       if (moved) {
         // A physics body is placed in world space; a spawned root where it was
@@ -1298,7 +1309,7 @@ export class MeshOverlaySurface implements DisplaySurface {
         model,
         moved,
         hidden: reserved || this.inactive.has(i) || Boolean(pose?.hidden) || Boolean(up?.hidden),
-        front: Boolean(pose?.front) || Boolean(up?.front),
+        front: Boolean(pose?.front) || Boolean(look?.front) || Boolean(up?.front),
         // A shield effect covers the object and everything under it (its weapon, say).
         effect: this.effects.get(i) ?? up?.effect ?? null,
       };
@@ -1326,7 +1337,7 @@ export class MeshOverlaySurface implements DisplaySurface {
       const source: TexturedMesh = frame > 0 && frames && frames.length > 0 ? frames[(frame - 1) % frames.length]! : this.atDetail(i, authored);
       const instance: MeshSceneInstance = {
         ...source,
-        ...(pose?.tint ? this.tintedLook(source, pose.tint) : {}),
+        ...(pose?.tint || this.looks.get(i)?.tint ? this.tintedLook(source, (pose?.tint || this.looks.get(i)?.tint)!) : {}),
         model: s.model,
         ...(s.effect ? { effect: s.effect } : {}),
       };
@@ -1544,7 +1555,8 @@ export class MeshOverlaySurface implements DisplaySurface {
    * anything ever posed in front is out too.
    */
   private staticShadowKey(): string {
-    for (const i of this.withChildren(this.poses.filter((p) => p.front).map((p) => p.index))) this.everFront.add(i);
+    const fronts = [...this.poses.filter((p) => p.front).map((p) => p.index), ...[...this.looks].filter(([, l]) => l.front).map(([i]) => i)];
+    for (const i of this.withChildren(fronts)) this.everFront.add(i);
     return `${this.poses
       .filter((p) => !p.front)
       .map((p) => p.index)

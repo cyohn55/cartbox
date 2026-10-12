@@ -19,7 +19,8 @@ import { isLockoutAsset, isLockoutSidecar, lockoutSidecarWithAssets, overlayLock
 const base: MeshSidecar = decodeMeshSidecar(lockoutMeshSidecar());
 const entry = (s: MeshSidecar, id: string) => s.meshes.find((m) => m.id === id)!;
 const soldier: MeshAsset = deserializeMeshAsset(entry(base, "bot-1").mesh);
-const bots = base.meshes.filter((m) => /^bot-\d+$/.test(m.id)).map((m) => m.id);
+// Every copy of the soldier: the bots and the Holograms' bodies (LOCKOUT_EQUIPMENT_ROADMAP.md E3).
+const bots = base.meshes.filter((m) => /^(bot|hologram)-\d+$/.test(m.id)).map((m) => m.id);
 
 /** The soldier with every position pushed out 5% (a bulkier Spartan), as an edit in Blender might leave it. */
 function bulkier(mesh: MeshAsset): MeshAsset {
@@ -89,6 +90,14 @@ describe("the demo with a saved cart's assets", () => {
     expect(overlay.refused).toEqual([]);
     expect(entry(overlay.sidecar, "bot-5").mesh).toBe(entry(saved, "bot-5").mesh);
     expect(entry(overlay.sidecar, "lockout-map")).toEqual(entry(base, "lockout-map"));
+  });
+
+  it("dresses the Holograms in a saved cart's Spartan when it was saved before it had them", () => {
+    const saved = replaceModel(base, "bot-1", bulkier(soldier)).sidecar;
+    const older = { ...saved, meshes: saved.meshes.filter((m) => !m.id.startsWith("hologram-")) };
+    const overlay = overlayLockoutAssets(base, older);
+    expect([...overlay.replaced].sort()).toEqual([...bots].sort());
+    expect(entry(overlay.sidecar, "hologram-2").mesh).toBe(entry(saved, "bot-1").mesh);
   });
 
   it("keeps its own model for an asset whose replacement breaks the contract, saying why", () => {

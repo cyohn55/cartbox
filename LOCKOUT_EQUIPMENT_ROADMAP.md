@@ -109,11 +109,42 @@ A **loadout** picker chooses what a player spawns with: weapons, a second gun to
       - A blast throws a bot from 3 m to 6 m and back onto its agent.
       - Aimed at the feet, a blast launches its wearer 2 m up.
       - Online, the host pulls a guest the very path the guest predicts (4 ticks later, to the centimetre), and a guest the host's blast throws throws itself the host's way to the centimetre, with one correction.
-- [ ] **E3. The Drop Wall (Infinite) and the Hologram (Reach).**
+- [x] **E3. The Drop Wall (Infinite) and the Hologram (Reach).**
   - **Drop Wall:**
     - An energy wall set down in front.
     - It stops shots both ways (every hit test, the host's included), soaks 150 damage, and lasts 10 s.
   - **Hologram:** a copy of the user that runs where they aim for 6 s. Bots fire on it, and a hit pops it.
+  - **Done.**
+    - **Loadouts:**
+      - Drop Wall: BR, Magnum. One charge, back in 15 s.
+      - Hologram: BR, SMG. One charge, back in 12 s.
+    - **What's been set down** lives in `DEPLOY`, everyone's, in every browser:
+      - The soldier's own browser sets one down (`deploy`); the host does so for its bots.
+      - It tells the others with `EV.EQUIP` kind 3: what, its number, where (to the centimetre across and 5 cm up) and its facing (a 64th of a turn). The owner keeps the same rounded spot, so every browser's copy stands in the same place.
+      - It's not done in a guest's replay. The host leaves a guest's to the guest, who tells it.
+      - One of each a soldier at most.
+    - **The Drop Wall** is a 3.2 m × 2.2 m panel of blue plasma (the `drop wall` prefab, eight in reserve), 1.6 m ahead, square to the facing.
+      - **What it stops:**
+        - `seg_blocked` and `seg_first` see it (`wall_cross`), so it stops every shot: the player's, a guest's as the host judges it, and the sparks.
+        - The bots still see through it, and their rounds strike it.
+        - Movement, grapples and Repulsor launches pass through (`solid` tests).
+      - **Damage:**
+        - It soaks the round's damage (`shot_wall`), where damage is judged: offline, or on the host.
+        - The host says when it breaks (kind 4), and every browser takes it down.
+        - It runs out after 10 s on its own.
+    - **The Hologram** is a soldier instance (two at once: instances 19 and 20, at rest scale until placed — `cartbox.place`, with the new `cartbox.look` for its owner's armour, since the seven bots and the viewmodel fill a frame's eight poses), in its owner's armour and running.
+      - **How it runs:** the way its owner faced, for 6 s, through the very moves a soldier makes, so it runs the same path in every browser. It fades in its last half second, and is gone if it runs off the edge.
+      - **What it fools:** bots take an enemy's Hologram for a target and fire on it.
+      - **Popping it:** a hit from a bot or a player pops it, hurting nobody. Whoever popped it tells the rest.
+    - **Bots** set a wall down between them and whoever broke their shield. Now and then they send a Hologram off to one side of a fight.
+    - **Saved Spartans** dress the Holograms too. A cart saved before they existed lends them its first bot's model.
+    - **Grenades** pass through a Drop Wall, flying as thrown in every browser.
+    - **Tests** (`Unit Tests/lockout-equipment.test.ts`):
+      - A wall takes all of a bot's rounds meant for the player (143 soaked over 171 ticks), breaks, and then the rounds reach the player.
+      - A bot goes for a Hologram and pops it.
+      - The player's shot pops an enemy's Hologram.
+      - Online: a guest's wall stands on the host at the same spot, stops the host's shots, and when the host breaks it, it goes on the guest too.
+      - Online: a guest's Hologram runs on the host to the same spot.
 - [ ] **E4. The Power Drain and the Regenerator (Halo 3).**
   - **Power Drain:** a device that's thrown and lands. It pulses for 4 s, stripping the shields of everyone near it, its thrower included.
   - **Regenerator:** a device set down that recharges everyone's shields within 5 m for 10 s, and holds off damage-free recharge waits.

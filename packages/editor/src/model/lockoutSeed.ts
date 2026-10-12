@@ -1605,6 +1605,10 @@ export const LOCKOUT_STRINGS: StringTable = {
     { key: "loadout.repulsor", text: { en: "Repulsor", es: "Repulsor" } },
     { key: "equip.grappleshot", text: { en: "Grappleshot", es: "Gancho" } },
     { key: "equip.repulsor", text: { en: "Repulsor", es: "Repulsor" } },
+    { key: "loadout.dropwall", text: { en: "Drop Wall", es: "Muro desplegable" } },
+    { key: "loadout.hologram", text: { en: "Hologram", es: "Holograma" } },
+    { key: "equip.dropwall", text: { en: "Drop Wall", es: "Muro desplegable" } },
+    { key: "equip.hologram", text: { en: "Hologram", es: "Holograma" } },
   ],
 };
 
@@ -2416,6 +2420,22 @@ function plasmaGrenadeMesh(): MeshAsset {
     trails: [{ from: [0, -0.04, 0], to: [0, 0.04, 0], life: 0.22, color: [0.35, 0.6, 1], intensity: 2, minSpeed: 2 }],
   };
 }
+
+/**
+ * A Drop Wall (LOCKOUT_EQUIPMENT_ROADMAP.md E3): a panel of blue energy 3.2 m
+ * wide and 2.2 m tall, standing on the deck where it's set down, its faces
+ * toward and away from its owner.
+ */
+const BARRIER: PlasmaLook = { core: [0.35, 0.75, 1.6], edge: [0.08, 0.3, 1.9], falloff: 0.8, boil: 0.25, scale: 6 };
+function dropWallMesh(): MeshAsset {
+  const panel = newStreams();
+  pushBox(panel, [0, 1.1, 0], [1.6, 1.1, 0.04], 1);
+  return withoutUnusedUvs({ name: "drop-wall", primitives: [toPrimitive(panel, plasmaMaterial("barrier", BARRIER))] });
+}
+
+/** Holograms (E3) drawn at once: soldier instances after the pickups. */
+const LOCKOUT_HOLOGRAMS = 2;
+const HOLOGRAM_INSTANCE = 1 + BOT_COUNT + 6 + MARKERS.length;
 
 /** Weapon ids, in the order their viewmodel instances follow the bots in the sidecar. */
 export const LOCKOUT_VIEWMODELS = ["br", "smg", "shotgun", "sniper", "magnum", "sword"] as const;
@@ -3241,6 +3261,11 @@ export function lockoutMeshSidecar(): string {
         components: [{ name: "Pickup", fields: { slot: i + 1 } }],
       });
     });
+    // Instances 19..20 (E3): Holograms, copies of the soldier at rest scale
+    // (unseen) until the cart places one where a decoy runs.
+    for (let i = 1; i <= LOCKOUT_HOLOGRAMS; i += 1) {
+      meshes.push({ id: `hologram-${i}`, name: `hologram ${i}`, mesh: soldier, ...soldierLods, animator: LOCKOUT_SOLDIER_ANIMATOR, transform: rest });
+    }
     const packed = packMeshLibrary(meshes);
     meshSidecar = JSON.stringify({
       version: 2,
@@ -3261,6 +3286,8 @@ export function lockoutMeshSidecar(): string {
         { id: "prefab-casing", name: "casing", pool: 0, nodes: [{ key: "root", name: "casing", mesh: serializeMeshAsset(casingMesh()), transform: identity }] },
         // Plasma grenades in flight (I10): four copies held in reserve, spawned on a throw.
         { id: "prefab-plasma", name: "plasma grenade", pool: 4, nodes: [{ key: "root", name: "plasma grenade", mesh: serializeMeshAsset(plasmaGrenadeMesh()), transform: identity }] },
+        // Drop Walls (E3): one a player at most, so eight held in reserve.
+        { id: "prefab-dropwall", name: "drop wall", pool: 8, nodes: [{ key: "root", name: "drop wall", mesh: serializeMeshAsset(dropWallMesh()), transform: identity }] },
         // The Forerunner kit (I14): pieces for the editor's kit snapping, never spawned.
         ...forerunnerKitPrefabs(identity),
       ],
@@ -3337,8 +3364,18 @@ EQUIP = {
   -- The Repulsor (E2): a blast ahead that throws soldiers back -- or, against
   -- a wall close ahead, its wearer away from it; one charge, back in 10 s.
   repulsor = { id=3, name="Repulsor", charges=1, recharge=600, range=6, push=0.45, self=0.55 },
+  -- The Drop Wall (E3): an energy wall set down ahead that stops shots both
+  -- ways, soaks 150 damage and lasts 10 s; back in 15 s.
+  dropwall = { id=4, name="Drop Wall", charges=1, recharge=900, hp=150, life=600, half=1.6, tall=2.2 },
+  -- The Hologram (E3): a copy of its wearer that runs the way they aim for
+  -- 6 s, drawing fire; a hit pops it. Back in 12 s.
+  hologram = { id=5, name="Hologram", charges=1, recharge=720, life=360 },
 }
-EQUIP_IDS = { "jetpack", "grappleshot", "repulsor" }   -- by id (the net state and a guest's input carry the id)
+EQUIP_IDS = { "jetpack", "grappleshot", "repulsor", "dropwall", "hologram" }
+-- What's been set down (E3): walls and holograms, everyone's, in this browser.
+DEPLOY = {}
+DEPLOY_KINDS = { "wall", "holo" }   -- (a deploy event's kind, from 0)
+HOLO_IDX = { ${HOLOGRAM_INSTANCE}, ${HOLOGRAM_INSTANCE + 1} }   -- the soldier instances holograms are drawn with   -- by id (the net state and a guest's input carry the id)
 -- What a guest keeps of its own soldier with each input it predicts (E2), to
 -- take up again when it replays them: its fall and its equipment's state.
 EQ_KEEP = { "vy", "grounded", "fuel", "charges", "rc", "kx", "kz", "hx", "hy", "hz", "ht", "hb", "hs", "hvx", "hvz" }
@@ -3351,6 +3388,8 @@ LOADOUTS = {
   { key="jetpack",  name="Jetpack",  g1="br", g2="magnum", eq="jetpack" },
   { key="grapple",  name="Grappleshot", g1="br", g2="magnum", eq="grappleshot" },
   { key="repulsor", name="Repulsor", g1="smg", g2="magnum", eq="repulsor" },
+  { key="dropwall", name="Drop Wall", g1="br", g2="magnum", eq="dropwall" },
+  { key="hologram", name="Hologram", g1="br", g2="smg", eq="hologram" },
 }
 for _, lo in ipairs(LOADOUTS) do lo.en = lo.name end
 for _, d in pairs(EQUIP) do d.en = d.name end
@@ -3430,7 +3469,9 @@ local function d3(ax,ay,az,bx,by,bz) return math.sqrt((ax-bx)^2+(ay-by)^2+(az-bz
 -- Segment vs every solid collider: true if the shot from A to B hits a wall
 -- before maxt (world units). Slab test per box, nearest hit kept -- this is
 -- what stops shots (yours and the bots') passing through the Forerunner walls.
-function seg_blocked(x0,y0,z0, x1,y1,z1, maxt)
+function seg_blocked(x0,y0,z0, x1,y1,z1, maxt, solid)
+  -- (a Drop Wall stops shots too, E3 -- not what only the arena's walls should)
+  if not solid and DEPLOY[1] then local wt = wall_cross(x0,y0,z0, x1,y1,z1); if wt and wt > 0.02 and wt < (maxt or 1) then return true end end
   local dx,dy,dz = x1-x0, y1-y0, z1-z0
   for i=0,ncol()-1 do
     local b=i*6
@@ -3458,7 +3499,7 @@ end
 
 -- The first wall a segment from A to B strikes: t (0..1 along it) and the face's
 -- normal -- where a shot's sparks fly from (nil when it strikes nothing).
-function seg_first(x0,y0,z0, x1,y1,z1)
+function seg_first(x0,y0,z0, x1,y1,z1, solid)
   local d = {x1-x0, y1-y0, z1-z0}
   local o = {x0, y0, z0}
   local best, bn = nil, nil
@@ -3479,6 +3520,11 @@ function seg_first(x0,y0,z0, x1,y1,z1)
       end
     end
     if ok and tmin>0.02 and axis>0 and (best==nil or tmin<best) then best=tmin; bn=axis end
+  end
+  -- A Drop Wall nearer than the arena's (E3): its face toward the start.
+  if not solid and DEPLOY[1] then
+    local wt, wl, side = wall_cross(x0,y0,z0, x1,y1,z1)
+    if wt and wt > 0.02 and (not best or wt < best) then return wt, math.sin(wl.yaw)*side, 0, math.cos(wl.yaw)*side end
   end
   if not best then return nil end
   local n = {0,0,0}
@@ -3585,6 +3631,8 @@ function eq_move(e, held, pressed, jump, pitch)
   elseif e.eq == "grappleshot" then grapple(e, pressed, jump, pitch)
   elseif e.eq == "repulsor" and pressed and (e.charges or 0) > 0 then
     e.charges = e.charges - 1; repulse(e, pitch)
+  elseif (e.eq == "dropwall" or e.eq == "hologram") and pressed and (e.charges or 0) > 0 then
+    e.charges = e.charges - 1; deploy(e, e.eq == "dropwall" and "wall" or "holo")
   end
   local kx, kz = e.kx or 0, e.kz or 0
   if kx ~= 0 or kz ~= 0 then
@@ -3631,7 +3679,7 @@ function grapple(e, pressed, jump, pitch)
     local cp = math.cos(pitch)
     local fx, fy, fz = cp*math.sin(e.ay), math.sin(pitch), cp*math.cos(e.ay)
     local x0, y0, z0 = e.x, e.y + EYE, e.z
-    local t = seg_first(x0, y0, z0, x0 + fx*d.range, y0 + fy*d.range, z0 + fz*d.range)
+    local t = seg_first(x0, y0, z0, x0 + fx*d.range, y0 + fy*d.range, z0 + fz*d.range, true)
     if t then
       e.charges = e.charges - 1
       e.hx, e.hy, e.hz, e.ht, e.hb, e.hs = x0 + fx*d.range*t, y0 + fy*d.range*t, z0 + fz*d.range*t, 0, nil, 0
@@ -4028,7 +4076,7 @@ local function host_judge(sh, shot, a, b, now, origin)
       damage(best, dmg, sh, head)
       total = total + dmg
       if not first then first, fhead = best, head end
-    end
+    else shot_wall(ex, ey, ez, fx, fy, fz, w.rng, w.dmg) end
   end
   verdict(sh, seq, first ~= nil, first, fhead, total)
 end
@@ -4218,7 +4266,7 @@ local function net_receive()
       if host and from == MYSLOT and p then p.x, p.y, p.z, p.vy = s16(a >> 16)/100, s16(ev[2])/100, s16(ev[2] >> 16)/100, 0 end
     elseif sender ~= from and not host then
       -- not its own to send
-    elseif kind == EV.EQUIP then net_equip(a, ev[2], src)
+    elseif kind == EV.EQUIP then net_equip(a, ev[2], src, host)
     elseif kind == EV.PICKUP then
       local pad = (a >> 7) & 63
       -- (a pad still empty when someone joined comes with what's left of its wait: L8)
@@ -4643,8 +4691,21 @@ local function player_fire()
         end
       end
     end
+    -- A Hologram (E3) in the way, nearer than anyone: popped, nobody hurt.
+    for _, d in ipairs(DEPLOY) do
+      if d.holo and d.owner ~= p and not d.dead then
+        local t=(d.x-ex)*fx+(d.y+1.2-ey)*fy+(d.z-ez)*fz
+        if t>0.4 and t<w.rng and t<bt then
+          local hx,hy,hz=ex+fx*t, ey+fy*t, ez+fz*t
+          if math.sqrt((d.x-hx)^2+(d.y+1.2-hy)^2+(d.z-hz)^2)<0.9 and not seg_blocked(ex,ey,ez, hx,hy,hz, 1) then best,bt=d,t end
+        end
+      end
+    end
     local dist, impact
-    if best then
+    if best and best.holo then
+      deploy_gone(best, true)
+      dist, impact = bt, IMPACT.BODY
+    elseif best then
       local dmg=w.dmg
       local head = best._hy and best._hy>best.y+1.5
       if head then dmg=dmg*w.hs end
@@ -4656,6 +4717,7 @@ local function player_fire()
     else
       dist = wall_sparks(ex,ey,ez, fx,fy,fz, w.rng)
       impact = dist < w.rng and IMPACT.WALL or IMPACT.NONE
+      shot_wall(ex,ey,ez, fx,fy,fz, w.rng, w.dmg)
     end
     tracer(ex, ey - 0.12, ez, fx, fy, fz, dist)
     if k == 1 then net_shot(p, wid, bx, by, bz, dist, impact) end
@@ -4812,7 +4874,14 @@ local function think_bot(o)
     for _,e in ipairs(all_players()) do
       if e ~= o and e and not e.dead and enemy_of(o, e) then
         local m = d3(o.x,o.y,o.z, e.x,e.y,e.z)
-        if m < bd and not seg_blocked(o.x,o.y+1.4,o.z, e.x,e.y+1.4,e.z, 1) then o.target, bd = e, m end
+        if m < bd and not seg_blocked(o.x,o.y+1.4,o.z, e.x,e.y+1.4,e.z, 1, true) then o.target, bd = e, m end
+      end
+    end
+    -- (an enemy's Hologram draws fire like the real thing, E3)
+    for _,d in ipairs(DEPLOY) do
+      if d.holo and not d.dead and d.owner ~= o and enemy_of(o, d) then
+        local m = d3(o.x,o.y,o.z, d.x,d.y,d.z)
+        if m < bd and not seg_blocked(o.x,o.y+1.4,o.z, d.x,d.y+1.4,d.z, 1, true) then o.target, bd = d, m end
       end
     end
   end
@@ -4826,6 +4895,7 @@ local function think_bot(o)
     o.face = math.atan(dx,dz)
     o.pitch = math.atan((tg.y + 1.2) - (o.y + EYE), math.max(0.01, m))
     bot_repulse(o, tg, m)
+    bot_deploy(o, tg, m)
     o.cool=(o.cool or 0)-1
     if m < (w.rng or 40) and o.cool<=0 then
       o.cool = (w.cool or 10) + math.random(0,6)
@@ -4839,7 +4909,19 @@ local function think_bot(o)
       -- sent to the others (L5) whether it hits or flies past.
       local ox,oy,oz = o.x, o.y+1.4, o.z
       local near = d3(ox,oy,oz, p.x,p.y,p.z) < 40
-      if math.random() < acc then
+      -- A Drop Wall between them takes the round (E3).
+      local wt = DEPLOY[1] and not w.melee and wall_cross(ox,oy,oz, tg.x,tg.y+1.2,tg.z)
+      if wt then
+        local fx,fy,fz = tg.x-ox, tg.y+1.2-oy, tg.z-oz
+        local fm = math.sqrt(fx*fx+fy*fy+fz*fz)
+        fx,fy,fz = fx/fm, fy/fm, fz/fm
+        local d = wall_sparks(ox,oy,oz, fx,fy,fz, fm, not near)
+        if near then tracer(ox,oy,oz, fx,fy,fz, d) end
+        net_shot(o, o.g1 or "br", fx,fy,fz, d, IMPACT.WALL)
+        shot_wall(ox,oy,oz, fx,fy,fz, fm, (w.dmg or 12) * (w.pel or 1) * 0.6)
+      elseif tg.holo then
+        if math.random() < acc then deploy_gone(tg, true); o.target = nil end   -- a Hologram: popped
+      elseif math.random() < acc then
         local dmg = (w.dmg or 12) * (w.pel or 1) * 0.6
         local head = math.random() < 0.12
         if head then dmg = dmg*(w.hs or 1.5) end
@@ -4962,7 +5044,7 @@ function repulse(e, pitch)
   local cp = math.cos(pitch)
   local fx, fy, fz = cp*math.sin(e.ay), math.sin(pitch), cp*math.cos(e.ay)
   local x0, y0, z0 = e.x, e.y + EYE, e.z
-  if not e.agent and seg_first(x0, y0, z0, x0 + fx*2.5, y0 + fy*2.5, z0 + fz*2.5) then
+  if not e.agent and seg_first(x0, y0, z0, x0 + fx*2.5, y0 + fy*2.5, z0 + fz*2.5, true) then
     e.kx, e.kz = (e.kx or 0) - fx*d.self, (e.kz or 0) - fz*d.self
     e.vy, e.grounded = math.max(e.vy or 0, -fy*d.self*0.6 + 0.08), false
   end
@@ -5053,8 +5135,19 @@ function eq_show(e, kind, fx, fy, fz, len)
 end
 -- Another's equipment, told (E2): a grapple's line or a blast to draw from
 -- where this browser sees them; or, from the host, this guest thrown.
-function net_equip(a, b, o)
+function net_equip(a, b, o, host)
   local sub = (a >> 7) & 7
+  if sub == 3 then   -- set down (E3): kind, id, where, facing
+    if o and o ~= p then
+      local x, y, z, yaw = deploy_at(a >> 16, b)
+      deploy_add(o, DEPLOY_KINDS[((a >> 13) & 7) + 1], (a >> 10) & 7, x, y, z, yaw)
+    end
+    return
+  elseif sub == 4 then   -- gone (E3): a wall broken (the host's word), a hologram popped (anyone's)
+    local d = deploy_find(ent_by_slot((a >> 13) & 7), (a >> 10) & 7)
+    if d and (d.holo or host) then deploy_gone(d, false) end
+    return
+  end
   if sub == 2 then
     if NETMODE == 1 and o == p and p and not p.dead then guest_knock((a >> 16) & 255, sb(b)/100, sb(b >> 8)/100, sb(b >> 16)/200) end
     return
@@ -5072,6 +5165,171 @@ function net_equip(a, b, o)
     eq_show(o, "repulse", cp*math.sin(yaw), math.sin(pitch), cp*math.cos(yaw), 0)
   end
 end
+-- ---------------------------------------------------------------------------
+-- Set down (LOCKOUT_EQUIPMENT_ROADMAP.md E3): Drop Walls and Holograms. Each
+-- browser holds everyone's (DEPLOY). The soldier's own browser sets one down
+-- -- the host's for its bots -- and tells the others where (EV.EQUIP kind 3:
+-- what, its number, x in the first word; z, y and facing in the second); a
+-- wall's health is the host's to keep, and the host says when one breaks
+-- (kind 4); a hologram pops for whoever's shot finds it first.
+
+-- Where and which way, as an event carries it: centimetres across, 5 cm up,
+-- a 64th of a turn.
+function deploy_words(x, y, z, yaw)
+  local q = math.floor(wrap_angle(yaw)/(2*math.pi)*64 + 0.5) & 63
+  return u16(x*100), u16(z*100) | ((math.floor(y*20 + 0.5) & 0x3ff) << 16) | (q << 26)
+end
+function deploy_at(xw, b)
+  local yq = (b >> 16) & 0x3ff
+  if yq >= 512 then yq = yq - 1024 end
+  local q = (b >> 26) & 63
+  if q >= 32 then q = q - 64 end
+  return s16(xw)/100, yq/20, s16(b)/100, q/64*2*math.pi
+end
+
+-- e sets one down: a wall 1.6 m ahead, square to its facing; a hologram
+-- where it stands, to run the way it faces. (Not in a guest's replay, and the
+-- host leaves a guest's to the guest, who tells it.)
+function deploy(e, kind)
+  if EQ_QUIET or (NETMODE == 2 and e.human and e.remote) then return end
+  local yaw = e.ay or e.face or 0
+  local x, z = e.x, e.z
+  if kind == "wall" then x, z = x + math.sin(yaw)*1.6, z + math.cos(yaw)*1.6 end
+  local xw, b = deploy_words(x, e.y, z, yaw)
+  local qx, qy, qz, qyaw = deploy_at(xw, b)
+  e.deploy_n = ((e.deploy_n or 0) + 1) & 7
+  deploy_add(e, kind, e.deploy_n, qx, qy, qz, qyaw)
+  if NETMODE ~= 0 then
+    cartbox.netsend(EV.EQUIP | ((e.ns & 7) << 4) | (3 << 7) | ((e.deploy_n & 7) << 10) | ((kind == "holo" and 1 or 0) << 13) | (xw << 16), b)
+  end
+end
+
+function deploy_add(owner, kind, id, x, y, z, yaw)
+  if not kind or deploy_find(owner, id) then return end
+  -- (one of each a soldier at most: a new one takes the old one's place)
+  for _, d in ipairs(DEPLOY) do if d.owner == owner and d.kind == kind then deploy_gone(d, false) end end
+  local d = { kind = kind, owner = owner, id = id, x = x, y = y, z = z, yaw = yaw, t = 0, team = owner.team, jugg = owner.jugg }
+  if kind == "wall" then
+    local q = EQUIP.dropwall
+    d.hp, d.life = q.hp, q.life
+    d.obj = cartbox.spawn("drop wall", x, y, z, yaw, 0, 0)
+    cartbox.sound("repulse", x, y + 1, z, 0.6, 1.6)
+  else
+    d.holo, d.life, d.vy, d.grounded = true, EQUIP.hologram.life, 0, true
+    for _, i in ipairs(HOLO_IDX) do
+      local used = false
+      for _, o in ipairs(DEPLOY) do if o.idx == i then used = true end end
+      if not used and not d.idx then d.idx = i end
+    end
+  end
+  DEPLOY[#DEPLOY+1] = d
+end
+
+function deploy_find(owner, id)
+  if not owner then return nil end
+  for _, d in ipairs(DEPLOY) do if d.owner == owner and d.id == id then return d end end
+end
+
+-- Gone: broken, popped or run out. tell: this browser decided it, so the
+-- others hear (a wall's end online only from the host).
+function deploy_gone(d, tell)
+  if d.dead then return end
+  d.dead = true
+  for i, o in ipairs(DEPLOY) do if o == d then table.remove(DEPLOY, i) break end end
+  if d.obj then cartbox.despawn(d.obj); d.obj = nil end
+  if d.idx then cartbox.set(d.idx, "speed", 0); cartbox.place(d.idx); cartbox.look(d.idx, 0, false) end
+  cartbox.burst("shield", d.x, d.y + 1.1, d.z, 0, 1, 0, 2)
+  cartbox.sound("repulse", d.x, d.y + 1, d.z, 0.5, 2)
+  if tell and NETMODE ~= 0 and (d.holo or NETMODE == 2) and d.owner.ns then
+    cartbox.netsend(EV.EQUIP | ((MYSLOT & 7) << 4) | (4 << 7) | ((d.id & 7) << 10) | ((d.owner.ns & 7) << 13), 0)
+  end
+end
+
+function deploy_clear()
+  for i = #DEPLOY, 1, -1 do local d = DEPLOY[i]; if d.obj then cartbox.despawn(d.obj) end; DEPLOY[i] = nil end
+end
+
+-- Every tick: walls and holograms run out; a hologram runs on the way it was
+-- set, through the same moves a soldier makes (every browser the same).
+function deploy_tick()
+  for i = #DEPLOY, 1, -1 do
+    local d = DEPLOY[i]
+    d.t = d.t + 1
+    if d.t > d.life then deploy_gone(d, false)
+    elseif d.holo then
+      move_axis(d, "x", math.sin(d.yaw)*MOVE); move_axis(d, "z", math.cos(d.yaw)*MOVE)
+      if d.y + d.vy - GRAV < DEATH_Y + 2 then deploy_gone(d, false) else move_vertical(d) end
+    end
+  end
+end
+
+-- A wall's glow, a hologram's body: the owner's armour, running, the
+-- shimmer of a hologram about to fade in its last half second. (Placed, not
+-- posed: the seven bots and the viewmodel fill a frame's eight poses; a
+-- placement stands, and cartbox.look gives it the owner's tint.)
+function deploy_draw()
+  for _, d in ipairs(DEPLOY) do
+    if d.holo and d.idx then
+      cartbox.place(d.idx, d.x, d.y, d.z, d.yaw, 0, 0, 1)
+      if not d.ran then
+        d.ran = true
+        cartbox.look(d.idx, armor_tint(d.owner), false)
+        cartbox.set(d.idx, "speed", 1); cartbox.set(d.idx, "grounded", true); cartbox.set(d.idx, "dead", false)
+      end
+      cartbox.shield(d.idx, 0, d.life - d.t < 30 and 1 or 0, 0)
+    elseif d.kind == "wall" then
+      cartbox.light3d(d.x, d.y + 1.1, d.z, 4, 80, 150, 255, 1.4)
+    end
+  end
+end
+
+-- The first Drop Wall a segment crosses: t along it, the wall, and which side
+-- the segment came from (1: the side it faces).
+function wall_cross(x0,y0,z0, x1,y1,z1)
+  local best, bw, bs = nil, nil, 1
+  for _, d in ipairs(DEPLOY) do
+    if d.kind == "wall" then
+      local q = EQUIP.dropwall
+      local nx, nz = math.sin(d.yaw), math.cos(d.yaw)
+      local a0 = (x0 - d.x)*nx + (z0 - d.z)*nz
+      local a1 = (x1 - d.x)*nx + (z1 - d.z)*nz
+      if (a0 > 0) ~= (a1 > 0) then
+        local t = a0 / (a0 - a1)
+        local hx, hy, hz = x0 + (x1-x0)*t, y0 + (y1-y0)*t, z0 + (z1-z0)*t
+        local along = (hx - d.x)*nz - (hz - d.z)*nx
+        if math.abs(along) < q.half and hy > d.y and hy < d.y + q.tall and (not best or t < best) then best, bw, bs = t, d, a0 > 0 and 1 or -1 end
+      end
+    end
+  end
+  return best, bw, bs
+end
+
+-- A round along (fx,fy,fz) from (x,y,z), as far as rng, that meets a Drop Wall
+-- before the arena's: the wall soaks dmg -- where walls are judged (offline,
+-- the host) -- and flares where it's struck.
+function shot_wall(x, y, z, fx, fy, fz, rng, dmg)
+  if not DEPLOY[1] then return end
+  local wt, wl = wall_cross(x, y, z, x + fx*rng, y + fy*rng, z + fz*rng)
+  if not wt or seg_blocked(x, y, z, x + fx*rng*wt, y + fy*rng*wt, z + fz*rng*wt, 1, true) then return end
+  cartbox.burst("shield", x + fx*rng*wt, y + fy*rng*wt, z + fz*rng*wt, -fx, -fy, -fz, 0.6)
+  if NETMODE == 1 then return end
+  wl.hp = wl.hp - dmg
+  if wl.hp <= 0 then deploy_gone(wl, true) end
+end
+
+-- A bot's Drop Wall goes down between it and whoever's broken its shield; its
+-- Hologram runs off to one side of the fight now and then.
+function bot_deploy(o, tg, m)
+  if (o.charges or 0) <= 0 or tg.holo then return end
+  if o.eq == "dropwall" and (o.sh or 0) <= 0 and m < 30 then
+    o.charges, o.ay = o.charges - 1, o.face
+    deploy(o, "wall")
+  elseif o.eq == "hologram" and m > 8 and math.random() < 1/150 then
+    o.charges, o.ay = o.charges - 1, o.face + (math.random() < 0.5 and -0.7 or 0.7)
+    deploy(o, "holo")
+  end
+end
+
 -- A grapple's line, held: laid again from the hand while it pulls.
 function hook_fx(e)
   if not e.hooked or e.dead or not e.hx or tick % 3 ~= 0 then return end
@@ -5177,6 +5435,7 @@ end
 local function start_match(key)
   MODE = MODES[key]; team.blue,team.red,winner = 0,0,""
   for _,g in ipairs(grenades) do if g.obj then cartbox.despawn(g.obj) end end
+  deploy_clear()
   tick=0; feed={}; grenades={}; announce.t=0
   for i=1,(#MRK//3) do mtimer[i]=0 end
   p = { ay=0, ap=0, vy=0, cool=0, score=0, deaths=0, slot=1, team="blue", dead=false, respawn=0, nade=2, tag="You", streak=0 }
@@ -5804,6 +6063,7 @@ function TIC()
   for _,o in ipairs(bots) do think_bot(o) end
   recharge(p); for _,o in ipairs(bots) do recharge(o) end
   update_grenades()
+  deploy_tick()
   ledge_snow()
   update_objective()
   local w=reached_target(); if w then winner=w; phase="over"; record_match(w) end
@@ -5836,6 +6096,7 @@ function TIC()
 
   cartbox.clearposes()
   for i=1,NBOT do animate_bot(i, bots[i]) end
+  deploy_draw()
   local cur_id = p.slot==1 and p.g1 or p.g2
   pose_viewmodel(cur_id)
   drive_camera()

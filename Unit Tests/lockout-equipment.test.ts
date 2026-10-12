@@ -510,3 +510,237 @@ end)()`;
     expect(corrections).toBeLessThan(3);
   }, 300_000);
 });
+
+// The first bot, put `dist` m ahead of the player on clear, floored ground,
+// the player facing it (a global function, for the probes).
+const BOT_AHEAD = `;(function()
+function bot_ahead(o, dist)
+  for i = 0, 31 do
+    local yaw = i*math.pi/16
+    local fx, fz = math.sin(yaw), math.cos(yaw)
+    local ok = not seg_first(p.x, p.y + 1.2, p.z, p.x + fx*(dist+1), p.y + 1.2, p.z + fz*(dist+1), true)
+    for k = 1, math.floor(dist) do ok = ok and seg_first(p.x + fx*k, p.y + 0.5, p.z + fz*k, p.x + fx*k, p.y - 0.5, p.z + fz*k, true) end
+    if ok then
+      p.ay, p.ap, p.manualpitch = yaw, 0, true
+      nav_drop(o); o.x, o.y, o.z, o.dead, o.hp, o.sh, o.respawn, o.vy, o.eq = p.x + fx*dist, p.y, p.z + fz*dist, false, 100, 100, 0, 0, nil
+      nav_place(o)
+      return true
+    end
+  end
+end
+end)()`;
+
+describe.skipIf(!existsSync(path.join(DIST, "xbox360/engine.js")))("E3: the Drop Wall and the Hologram", () => {
+  it("sets a Drop Wall down that takes a bot's rounds meant for the player, until it breaks", async () => {
+    const g = await offline(`loadout_pick = 5
+QUIET_KEEP = 1
+${BOT_AHEAD}
+;(function()
+local _T, n, placed = TIC, 0, false
+function TIC()
+  _T()
+  if phase == "play" and p then
+    n = n + 1
+    local o = bots[1]
+    if n == 3 then placed = bot_ahead(o, 9) end
+    if placed then p.ay = math.atan(o.x - p.x, o.z - p.z) end
+    p.hp, p.calm = math.max(p.hp, 1), 0   -- (kept alive, its shield never recharging)
+    local wl = DEPLOY[1]
+    pmem(117, (math.floor(p.hp + (p.sh or 0)) & 0xffff) | ((wl and 1 or 0) << 16) | ((wl and math.max(0, math.floor(wl.hp)) or 0) << 17) | ((placed and 1 or 0) << 25))
+    pmem(118, wl and (wall_cross(o.x, o.y + 1.4, o.z, p.x, p.y + 1.2, p.z) and 1 or 0) or 0)
+  end
+end
+end)()`);
+    for (let i = 0; i < 4; i += 1) g.tick(0);
+    expect((g.probe()[0] >>> 25) & 1).toBe(1);
+    g.tick(0, ACT.equipment!);
+    const [w0, between] = g.probe();
+    expect((w0 >>> 16) & 1).toBe(1); // a wall
+    expect(between).toBe(1); // ... between them
+    const life0 = w0 & 0xffff;
+    let soaked = 0;
+    let broke = -1;
+    for (let i = 0; i < 560 && broke < 0; i += 1) {
+      g.tick(0);
+      const w = g.probe()[0];
+      if ((w >>> 16) & 1) soaked = 150 - ((w >>> 17) & 255);
+      else broke = i;
+    }
+    const life1 = g.probe()[0] & 0xffff;
+    console.log(`E3: the wall soaked ${soaked} and broke after ${broke} ticks; the player went ${life0} -> ${life1} meanwhile`);
+    expect(broke).toBeGreaterThan(0); // broken by the bot's rounds, before its 10 s ran out
+    expect(life1).toBe(life0); // none of them reached the player
+    for (let i = 0; i < 240; i += 1) g.tick(0);
+    expect(g.probe()[0] & 0xffff).toBeLessThan(life0); // with it gone, they do
+  }, 60_000);
+
+  it("sends a Hologram running the way the player faces, which a bot fires on and pops", async () => {
+    const g = await offline(`loadout_pick = 6
+QUIET_KEEP = 1
+${BOT_AHEAD}
+;(function()
+local _T, n, placed, h, x0, z0, ran, fooled = TIC, 0, false, nil, 0, 0, 0, false
+function TIC()
+  _T()
+  if phase == "play" and p then
+    n = n + 1
+    local o = bots[1]
+    if n == 3 then placed = bot_ahead(o, 14); x0, z0 = p.x, p.z end
+    if n < 6 then p.ay = math.atan(o.x - p.x, o.z - p.z) + 0.5 end   -- (off to one side of the bot)
+    p.hp = math.max(p.hp, 1)
+    if DEPLOY[1] then h = DEPLOY[1]; ran = math.max(ran, math.sqrt((h.x - x0)^2 + (h.z - z0)^2)) end
+    if o.target and o.target.holo then fooled = true end
+    pmem(117, ((h and 1 or 0)) | ((DEPLOY[1] and 1 or 0) << 1) | ((fooled and 1 or 0) << 2) | ((placed and 1 or 0) << 3) | ((h and math.min(h.t, 4095) or 0) << 4))
+    pmem(118, math.floor(ran*100) & 0xffff)
+  end
+end
+end)()`);
+    for (let i = 0; i < 6; i += 1) g.tick(0);
+    expect((g.probe()[0] >> 3) & 1).toBe(1);
+    g.tick(0, ACT.equipment!);
+    expect(g.probe()[0] & 3).toBe(3); // set down
+    let gone = -1;
+    for (let i = 0; i < 400 && gone < 0; i += 1) {
+      g.tick(0);
+      if (!((g.probe()[0] >> 1) & 1)) gone = i;
+    }
+    const [w, ran] = g.probe();
+    console.log(`E3: the hologram ran ${(ran / 100).toFixed(2)} m and was popped after ${w >> 4} ticks (of 360)`);
+    expect(ran / 100).toBeGreaterThan(1);
+    expect((w >> 2) & 1).toBe(1); // the bot went for it
+    expect(w >> 4).toBeLessThan(360); // popped, not run out
+  }, 60_000);
+
+  it("pops an enemy's Hologram with the player's shot", async () => {
+    const g = await offline(`${BOT_AHEAD}
+;(function()
+local _T, n, popped = TIC, 0, false
+function TIC()
+  _T()
+  if phase == "play" and p then
+    n = n + 1
+    if n == 3 then
+      local o = bots[1]
+      if bot_ahead(o, 10) then o.ay = math.atan(p.x - o.x, p.z - o.z) + math.pi; deploy(o, "holo") end
+    end
+    local h = DEPLOY[1]
+    if h then
+      local dx, dy, dz = h.x - p.x, (h.y + 1.2) - (p.y + 1.5), h.z - p.z
+      p.ay, p.ap, p.manualpitch = math.atan(dx, dz), math.atan(dy, math.sqrt(dx*dx + dz*dz)), true
+    end
+    pmem(117, (h and 1 or 0) | ((n > 3 and not h) and 2 or 0))
+  end
+end
+end)()`);
+    for (let i = 0; i < 4; i += 1) g.tick(0);
+    expect(g.probe()[0] & 1).toBe(1);
+    for (let i = 0; i < 60 && g.probe()[0] & 1; i += 1) g.tick(0, ACT.fire!);
+    expect(g.probe()[0] & 3).toBe(2); // popped
+  }, 60_000);
+});
+
+describe.skipIf(!existsSync(LOCKOUT_ENGINE))("E3 online: a guest's Drop Wall and Hologram (two engines, one room)", () => {
+  const hostQuiet = `for _,o in ipairs(bots) do if not o.human then o.dead, o.respawn, o.x, o.y, o.z = true, 1e9, 0, -60, 0 end end`;
+  const press = (n: number) => `local _ap, n = cartbox.actionp, 0
+cartbox.actionp = function(name) if name == "equipment" then return phase == "play" and n == ${n} end return _ap(name) end`;
+
+  it("sets a guest's wall down on the host where the guest did, stops the host's shots with it, and breaks it everywhere", async () => {
+    const guestProbe = `loadout_pick = 5
+;(function()
+${press(120)}
+local _T = TIC
+function TIC()
+  if phase == "play" then n = n + 1 end
+  _T()
+  if phase == "play" and p then
+    local d = DEPLOY[1]
+    pmem(117, d and ((math.floor(d.x*100 + 0.5) & 0xffff) | ((math.floor(d.z*100 + 0.5) & 0xffff) << 16)) or 0)
+    pmem(118, (d and 1 or 0) | ((n > 130) and 2 or 0))
+  end
+end
+end)()`;
+    const hostProbe = `;(function()
+local _T, seen, blocked = TIC, 0, false
+function TIC()
+  _T()
+  if phase == "play" and NETMODE == 2 then
+    ${hostQuiet}
+    local d = DEPLOY[1]
+    if d then
+      seen = seen + 1
+      local nx, nz = math.sin(d.yaw), math.cos(d.yaw)
+      -- a round from 3 m before it to 3 m behind it, chest high: stopped
+      blocked = seg_blocked(d.x - nx*3, d.y + 1.2, d.z - nz*3, d.x + nx*3, d.y + 1.2, d.z + nz*3, 1)
+      if seen == 60 then shot_wall(d.x - nx*3, d.y + 1.2, d.z - nz*3, nx, 0, nz, 6, 200) end
+    end
+    pmem(117, d and ((math.floor(d.x*100 + 0.5) & 0xffff) | ((math.floor(d.z*100 + 0.5) & 0xffff) << 16)) or 0)
+    pmem(118, (d and 1 or 0) | ((blocked and 1 or 0) << 1) | ((d and d.owner and d.owner.human and 1 or 0) << 2) | ((seen > 0) and 8 or 0))
+  end
+end
+end)()`;
+    const { host, guest, both } = await lockoutRoom("", { guestProbe, hostProbe });
+    let match = false, blocked = false, owner = false;
+    for (let f = 0; f < 300; f += 1) {
+      both(0, 0);
+      const [g0, g1] = guest.probe();
+      const [h0, h1] = host.probe();
+      if (g1 & 1 && h1 & 1) {
+        match = g0 === h0;
+        if (h1 & 2) blocked = true;
+        if (h1 & 4) owner = true;
+      }
+    }
+    const [, g1] = guest.probe();
+    const [, h1] = host.probe();
+    console.log(`E3: the guest's wall stood at the same spot on the host (${match}), stopped its shots (${blocked}), and broke on both (${!(g1 & 1) && !(h1 & 1)})`);
+    expect(match).toBe(true);
+    expect(owner).toBe(true);
+    expect(blocked).toBe(true);
+    expect(h1 & 8).toBe(8); // the host had it ...
+    expect(h1 & 1).toBe(0); // ... and broke it
+    expect(g1 & 3).toBe(2); // and the guest's went with it
+  }, 300_000);
+
+  it("runs a guest's Hologram on the host the same way", async () => {
+    const guestProbe = `loadout_pick = 6
+;(function()
+${press(120)}
+local _T, aim = TIC, nil
+function TIC()
+  if phase == "play" then n = n + 1 end
+  _T()
+  if phase == "play" and p then
+    local d = DEPLOY[1]
+    -- (facing a run of open, floored deck, so it doesn't run off the edge)
+    if n == 100 then
+      for i = 0, 63 do
+        local yaw = i*math.pi/32
+        local fx, fz = math.sin(yaw), math.cos(yaw)
+        local ok = not seg_first(p.x, p.y + 1.2, p.z, p.x + fx*15, p.y + 1.2, p.z + fz*15, true)
+        for k = 1, 14 do ok = ok and seg_first(p.x + fx*k, p.y + 0.5, p.z + fz*k, p.x + fx*k, p.y - 0.5, p.z + fz*k, true) end
+        if ok then aim = yaw end
+      end
+    end
+    if aim then p.ay = aim end
+    if d and d.t == 90 then pmem(117, (math.floor(d.x*100 + 0.5) & 0xffff) | ((math.floor(d.z*100 + 0.5) & 0xffff) << 16)); pmem(118, 1) end
+  end
+end
+end)()`;
+    const hostProbe = `;(function()
+local _T = TIC
+function TIC()
+  _T()
+  if phase == "play" and NETMODE == 2 then
+    ${hostQuiet}
+    local d = DEPLOY[1]
+    if d and d.t == 90 then pmem(117, (math.floor(d.x*100 + 0.5) & 0xffff) | ((math.floor(d.z*100 + 0.5) & 0xffff) << 16)); pmem(118, d.holo and 1 or 0) end
+  end
+end
+end)()`;
+    const { host, guest, both } = await lockoutRoom("", { guestProbe, hostProbe });
+    for (let f = 0; f < 450; f += 1) both(0, 0);
+    expect(guest.probe()[1]).toBe(1);
+    expect(host.probe()[1]).toBe(1);
+    expect(host.probe()[0]).toBe(guest.probe()[0]); // 90 ticks into its run, at the same spot
+  }, 300_000);
+});

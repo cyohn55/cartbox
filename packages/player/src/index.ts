@@ -520,7 +520,7 @@ export {
 } from "./physics/physicsSession.js";
 export { physicsSdkLua, runtimeSdkLua, sceneNeedsRuntime } from "./physics/physicsSdk.js";
 export { deterministicBackend, physicsStateHash } from "./physics/deterministic.js";
-export { RuntimeChannel } from "./runtime/runtimeChannel.js";
+export { RuntimeChannel, type ObjectLook } from "./runtime/runtimeChannel.js";
 export { AgentCrowd } from "./nav/agentCrowd.js";
 export {
   QUALITY_LEVELS,
