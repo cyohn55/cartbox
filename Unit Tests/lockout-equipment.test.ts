@@ -120,7 +120,7 @@ describe.skipIf(!existsSync(path.join(DIST, "xbox360/engine.js")))("E1: loadouts
     // On the ground the fuel refills.
     for (let i = 0; i < 120; i += 1) g.tick(0);
     expect(g.probe()[0] >>> 16).toBe(150);
-  });
+  }, 60_000); // (the first loads the engine: slow on a busy CI runner)
 
   it("picks the loadout on the title screen with Left/Right, and cycles the next life's with swap while dead", async () => {
     const RIGHT = 1 << 3;
@@ -152,7 +152,7 @@ end)()`);
     expect((d.probe()[1] >> 4) & 15).toBe(2);
     for (let i = 0; i < 120 && (d.probe()[1] >> 8) & 1; i += 1) d.tick(0);
     expect(d.probe()[1] & 2).toBe(2); // the next life wears the Jetpack
-  });
+  }, 60_000);
 
   it("leaves a Standard spawn as it always was: nothing in the slot, the button does nothing", async () => {
     const g = await offline(HEIGHT);
@@ -160,7 +160,7 @@ end)()`);
     expect(b0 & 2).toBe(0);
     for (let i = 0; i < 45; i += 1) g.tick(0, ACT.equipment!);
     expect(Math.abs(s16(g.probe()[0]) - s16(a0))).toBeLessThan(0.01);
-  });
+  }, 60_000);
 });
 
 describe.skipIf(!existsSync(LOCKOUT_ENGINE))("E1 online: a guest's Jetpack (two engines, one room)", () => {
