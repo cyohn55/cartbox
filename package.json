@@ -12,9 +12,10 @@
   "scripts": {
     "bootstrap": "bash scripts/bootstrap-local.sh",
     "build:player": "npm run build --workspace packages/player",
-    "bake:lockout": "BAKE_LOCKOUT=1 vitest run \"Unit Tests/lockout-lightmap-bake.test.ts\"",
-    "bake:lockout-probes": "BAKE_LOCKOUT_PROBES=1 vitest run \"Unit Tests/lockout-probes-bake.test.ts\"",
-    "bake:lockout-kit": "BAKE_LOCKOUT_KIT=1 vitest run \"Unit Tests/lockout-kit-bake.test.ts\"",
+    "bake:map": "node scripts/bake-map.mjs",
+    "bake:lockout": "node scripts/bake-map.mjs lockout lightmap",
+    "bake:lockout-probes": "node scripts/bake-map.mjs lockout probes",
+    "bake:lockout-kit": "node scripts/bake-map.mjs lockout kit",
     "check:dist": "node scripts/check-player-dist.mjs",
     "desktop:dev": "npm run tauri:dev --workspace apps/desktop",
     "dev": "npm run dev --workspace apps/web",

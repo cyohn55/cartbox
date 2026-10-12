@@ -295,7 +295,7 @@ describe("Lockout's Forerunner kit (I14)", () => {
 describe("the Forerunner kit's baked maps (I15)", () => {
   it("are current, and dress the kit in worn alloy: polished rims, grime in the seams", async () => {
     const { FORERUNNER_WORN, lockoutKitBakeCurrent, lockoutMeshSidecar } = await import("@cartbox/editor");
-    // The stored bake still fits each piece (re-run `npm run bake:lockout-kit` after changing the kit).
+    // The stored bake still fits each piece (re-run `npm run bake:map lockout kit` after changing the kit).
     expect(lockoutKitBakeCurrent()).toEqual({ wall: true, pillar: true, floor: true });
     const sidecar = decodeMeshSidecar(lockoutMeshSidecar());
     for (const id of ["kit-wall", "kit-pillar", "kit-floor"]) {

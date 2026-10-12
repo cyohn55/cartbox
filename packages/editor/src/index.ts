@@ -102,6 +102,7 @@ export {
   LOCKOUT_MAP,
   lockoutCode,
 } from "./model/lockoutSeed";
+export { MAP_BAKES, MAP_BAKE_PARTS, bakeMapKitSource, bakeMapLightmapSource, bakeMapProbesSource, mapBakeStatus, type MapBakeFile, type MapBakePart, type MapBakes } from "./model/mapBakes";
 export {
   ARENA_TILE_WORLD,
   arenaCenter,

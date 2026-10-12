@@ -481,6 +481,8 @@ I16 panels are re-made inline over hand-placed collision boxes.
 
 ## Phase C — A second map
 
+*Continued in [`BEAVER_CREEK_ROADMAP.md`](BEAVER_CREEK_ROADMAP.md): L9 is its B1, L10 its B2, L11 its B3, and L12 its B8 and B9, with Beaver Creek as the second map.*
+
 - [ ] **L9. Bakes that know their map.** One `bake:map <id>` command bakes
       a map's light map, probes and kit maps into that map's own generated
       files. A stale bake fails CI, for every map, instead of silently
