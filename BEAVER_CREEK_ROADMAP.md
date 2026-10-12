@@ -303,6 +303,22 @@ Each item lands in all three renderers (WebGL2, WebGPU, and the software referen
   - Its own bakes through B1.
   - *Acceptance:* a short report in this item counting what the map needed of its own against what it reused, with bake times and sidecar size.
   - *Tests:* the map is under budget; the bakes are current; parity.
+  - **B9a, the canyon dressed: done.**
+    - The terrain is textured: meadow grass (mottled, with worn earth) on the flats and banded sandstone on the walls. Each is a 128² PNG baked in code (`grassSurface`, `sandstoneSurface`), mapped triplanar (B6) so the strata run level along the cliffs.
+    - Plants (`beaverFoliage`):
+      - **Meadow grass** over the floor and ledges, and **reeds** along the creek's banks. Both are low, so they hide no one, and both sway in the canyon's breeze.
+      - The grass and reeds are painted copies placed in code, clear of the bases, the weapon pads, the arch and the water.
+      - **Broadleaf trees** and **pines** are filled by rules on the rims, out of play. **Boulders** are filled on the walls.
+    - None of the plants collide; anything tall stands only where play doesn't go.
+    - The sidecar grows to about 2.1 MB, of its 2.8 MB budget.
+    - *Tests:* `beaver-creek.test.ts` (the textures are triplanar; no grass or reed stands in the water, a base or on a pad; trees only on the rims; the sidecar stores the five layers within budget).
+  - **Left:**
+    - the bases rebuilt from the Forerunner kit;
+    - the cave;
+    - the vista beyond the rim;
+    - mud and wet stone at the creek's edge;
+    - the midday grade (B7);
+    - the B9 report.
 
 ## Phase D: Spartans
 

@@ -40,7 +40,10 @@ import type { MeshAsset, MeshPrimitive } from "./MeshAsset";
 import { base64ToBytes } from "./base64";
 import { BEAVER_LIGHTMAP } from "./beaverCreekLightmap.generated";
 import { BEAVER_PROBES } from "./beaverCreekProbes.generated";
-import { LOCKOUT_AUDIO, LOCKOUT_KEY_DIRECTION, LOCKOUT_LIGHTING, LOCKOUT_NAV_AGENT, arenaSceneCenter, boxesPrimitive, type ArenaScene } from "./lockoutSeed";
+import { LOCKOUT_AUDIO, LOCKOUT_KEY_DIRECTION, LOCKOUT_LIGHTING, LOCKOUT_NAV_AGENT, arenaSceneCenter, bakeLandscape, boxesPrimitive, clampByte, tfbm, type ArenaScene, type Surf } from "./lockoutSeed";
+import { foliageRandom, serializeFoliage, type FoliageCopy, type FoliageLayer, type SerializedFoliage } from "./foliage";
+import { foliagePreset } from "./foliagePresets";
+import { serializeMeshAsset, type EncodedImage } from "./MeshAsset";
 import { arenaNavMesh } from "./arenaValidate";
 import type { NavMesh } from "./navmesh";
 import type { SceneLighting } from "./SceneLighting";
@@ -264,9 +267,10 @@ export function beaverTerrain(): Terrain {
     size: [g.step * (g.n - 1), g.step * (g.n - 1)],
     samples: g.n,
     heights: Float32Array.from(g.heights),
+    // Textured (B9): meadow grass on the flats, banded sandstone on the walls (mapped triplanar).
     layers: [
-      { material: material("terrain-grass", [0.3, 0.42, 0.22], 0.9), up: [0.8, 1] },
-      { material: material("terrain-rock", [0.42, 0.4, 0.37], 0.92) },
+      { material: { ...material("terrain-grass", [1, 1, 1], 0.9), baseColorImage: beaverTextures().grass }, up: [0.8, 1] },
+      { material: { ...material("terrain-rock", [1, 1, 1], 0.92), baseColorImage: beaverTextures().rock } },
     ],
     tile: 6,
     parent: "beaver-map",
@@ -276,6 +280,102 @@ export function beaverTerrain(): Terrain {
     castShadows: true,
   };
   return terrain;
+}
+
+// --- The art pass (BEAVER_CREEK_ROADMAP.md B9) --------------------------------
+
+/** Meadow grass: greens, mottled, with worn patches of earth showing through. */
+function grassSurface(x: number, y: number): Surf {
+  const blades = tfbm(x, y, 64, 211, 2);
+  const tufts = tfbm(x, y, 12, 213, 3);
+  const earth = Math.max(0, Math.min(1, (tfbm(x, y, 4, 217, 3) - 0.58) * 6));
+  const g = 0.75 + (blades - 0.5) * 0.5 + (tufts - 0.5) * 0.35;
+  const r = (70 * g) * (1 - earth) + 118 * earth;
+  const gg = (108 * g) * (1 - earth) + 98 * earth;
+  const b = (46 * g) * (1 - earth) + 70 * earth;
+  return { r: clampByte(r), g: clampByte(gg), b: clampByte(b), h: tufts, rough: 0.9, metal: 0, emis: 0 };
+}
+
+/** Canyon sandstone: warm, in horizontal strata (texture V is height on a cliff, B6), weathered and streaked. */
+function sandstoneSurface(x: number, y: number): Surf {
+  const warp = tfbm(x, y, 4, 223, 3) * 22;
+  const strata = Math.sin(((y + warp) / 256) * Math.PI * 2 * 7) * 0.5 + 0.5;
+  const fine = Math.sin(((y + warp * 0.6) / 256) * Math.PI * 2 * 23) * 0.5 + 0.5;
+  const grain = tfbm(x, y, 32, 227, 3);
+  const v = 0.78 + (strata - 0.5) * 0.28 + (fine - 0.5) * 0.08 + (grain - 0.5) * 0.3;
+  return { r: clampByte(168 * v), g: clampByte(146 * v), b: clampByte(118 * v), h: strata * 0.6 + grain * 0.4, rough: 0.92, metal: 0, emis: 0 };
+}
+
+let textures: { grass: EncodedImage; rock: EncodedImage } | null = null;
+
+/** The canyon's two terrain textures, baked once on first use (albedo only: 128² each). */
+function beaverTextures(): { grass: EncodedImage; rock: EncodedImage } {
+  textures ??= { grass: bakeLandscape(grassSurface, 1, 128).albedo, rock: bakeLandscape(sandstoneSurface, 1, 128).albedo };
+  return textures;
+}
+
+/** The bases' footprints (both teams'), the weapon pads and the creek's water, which no plant may stand in. */
+function plantFree(x: number, z: number): boolean {
+  if (Math.abs(x) < 4.6 && Math.abs(z) < 11.2) return true; // in the water
+  if (Math.abs(x) > 18.6 && Math.abs(x) < 31.4 && Math.abs(z) < 6.4) return true; // inside or against a base
+  if (ARCH.some(([cx, , cz, hx, , hz]) => Math.abs(x - cx) < hx + 0.5 && Math.abs(z - cz) < hz + 0.5)) return true;
+  return BEAVER_MARKERS.some((m) => Math.abs(x - m.box[0]) < 1.4 && Math.abs(z - m.box[2]) < 1.4);
+}
+
+/**
+ * Plants scattered where `ok` says over the canyon floor, `count` tries from
+ * `seed`, as copies in the terrain's space (deterministic: the same on every load).
+ */
+function scatter(seed: number, count: number, ok: (x: number, z: number, y: number) => boolean, scale: readonly [number, number]): FoliageCopy[] {
+  const random = foliageRandom(seed);
+  const g = BEAVER_GROUND;
+  const out: FoliageCopy[] = [];
+  for (let i = 0; i < count; i += 1) {
+    const x = -32.5 + random() * 65;
+    const z = -15.5 + random() * 31;
+    const yaw = random() * Math.PI * 2;
+    const size = scale[0] + random() * (scale[1] - scale[0]);
+    const y = groundHeight(g, x, z);
+    if (y === null || plantFree(x, z) || !ok(x, z, y)) continue;
+    // Flat enough: the ground a pace either side within 0.3 m.
+    const flat = [[0.6, 0], [-0.6, 0], [0, 0.6], [0, -0.6]].every(([dx, dz]) => Math.abs((groundHeight(g, x + dx!, z + dz!) ?? y) - y) < 0.3);
+    if (!flat) continue;
+    out.push({ x: x - g.x0, z: z - g.z0, yaw, scale: size });
+  }
+  return out;
+}
+
+/**
+ * Beaver Creek's plants (B9; foliage.ts): meadow grass over the floor and
+ * ledges, reeds along the creek's banks — both low, so they hide no one —
+ * and, out of play on the canyon's rims, broadleaf trees, pines and boulders
+ * that frame it. Grass and reeds are painted copies (placed here, in code,
+ * clear of the bases, pads and water); the rims are filled by rules.
+ */
+export function beaverFoliage(): { layer: FoliageLayer; mesh: MeshAsset }[] {
+  const terrainId = "beaver-canyon";
+  const preset = (kind: Parameters<typeof foliagePreset>[0]) => foliagePreset(kind);
+  const grass = preset("grass");
+  const reeds = preset("reeds");
+  const broadleaf = preset("broadleaf");
+  const pine = preset("pine");
+  const boulder = preset("boulder");
+  const g = BEAVER_GROUND;
+  const size = g.step * (g.n - 1);
+  const rim: [number, number] = [10.5, 14];
+  return [
+    { mesh: grass.mesh, layer: { id: "beaver-grass", name: "Meadow grass", terrain: terrainId, ...grass.settings, cull: 45, copies: scatter(31, 2600, (_x, _z, y) => y > -0.1 && y < 3.2, [0.7, 1.3]) } },
+    { mesh: reeds.mesh, layer: { id: "beaver-reeds", name: "Reeds", terrain: terrainId, ...reeds.settings, copies: scatter(37, 4200, (x, z, y) => Math.abs(x) > 4.6 && Math.abs(x) < 6.2 && Math.abs(z) < 11 && y < 0.2, [0.8, 1.3]) } },
+    { mesh: broadleaf.mesh, layer: { id: "beaver-trees", name: "Broadleaf trees", terrain: terrainId, ...broadleaf.settings, density: 1.2, copies: [], fill: { seed: 41, up: [0.9, 1], height: rim, clear: [size / 2, size / 2, 17] } } },
+    { mesh: pine.mesh, layer: { id: "beaver-pines", name: "Pines", terrain: terrainId, ...pine.settings, density: 0.8, copies: [], fill: { seed: 43, up: [0.9, 1], height: rim, clear: [size / 2, size / 2, 17] } } },
+    { mesh: boulder.mesh, layer: { id: "beaver-boulders", name: "Boulders", terrain: terrainId, ...boulder.settings, density: 1.5, copies: [], fill: { seed: 47, up: [0.3, 0.85], height: [4, 13] } } },
+  ];
+}
+
+/** The plants as the sidecar stores them. */
+function beaverFoliageStored(): SerializedFoliage[] {
+  const t = beaverTerrain();
+  return beaverFoliage().map(({ layer, mesh }) => serializeFoliage(t, layer, serializeMeshAsset(mesh)));
 }
 
 let layout: LightmapLayout | null = null;
@@ -392,7 +492,7 @@ export const BEAVER_SCENE: ArenaScene = {
     timelines: [BEAVER_INTRO],
     ragdollColliders: beaverRagdollColliders(),
     decalMarks: [],
-    foliage: [],
+    foliage: beaverFoliageStored(),
     audio: LOCKOUT_AUDIO,
   }),
 };

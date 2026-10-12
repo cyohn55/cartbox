@@ -13,6 +13,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   ARENA_MAPS,
+  BEAVER_GROUND,
   BEAVER_MAP,
   DEFAULT_ACCESSIBILITY,
   LOCKOUT_STRINGS,
@@ -22,7 +23,9 @@ import {
   arenaMapCode,
   arenaPads,
   beaverCenter,
+  beaverFoliage,
   beaverNavMesh,
+  beaverTerrain,
   validateArenaMap,
 } from "@cartbox/editor";
 import {
@@ -156,6 +159,41 @@ function TIC()
   if p then pmem(118, (math.floor(p.x*100 + 5000) & 0xffff) | ((math.floor(p.z*100 + 5000) & 0xffff) << 16)) end
 end
 end)()`;
+
+describe("Beaver Creek, dressed (B9)", () => {
+  it("textures its canyon: grass on the flats and sandstone on the walls, mapped triplanar", () => {
+    const t = beaverTerrain();
+    expect(t.triplanar).toBe(true);
+    expect(t.layers.map((l) => l.material.baseColorImage?.mime)).toEqual(["image/png", "image/png"]);
+  });
+
+  it("grows grass and reeds clear of the bases, the pads and the water, and trees only out of play", () => {
+    const layers = beaverFoliage();
+    const g = BEAVER_GROUND;
+    const byId = Object.fromEntries(layers.map(({ layer }) => [layer.id, layer]));
+    expect(byId["beaver-grass"]!.copies.length).toBeGreaterThan(300);
+    expect(byId["beaver-reeds"]!.copies.length).toBeGreaterThan(40);
+    const pads = BEAVER_MAP.markers.map((m) => m.box);
+    for (const id of ["beaver-grass", "beaver-reeds"]) {
+      for (const c of byId[id]!.copies) {
+        const x = c.x + g.x0;
+        const z = c.z + g.z0;
+        expect(Math.abs(x) < 4.6 && Math.abs(z) < 11.2, `${id} in the water at ${x}, ${z}`).toBe(false);
+        expect(Math.abs(x) > 18.6 && Math.abs(x) < 31.4 && Math.abs(z) < 6.4, `${id} in a base at ${x}, ${z}`).toBe(false);
+        expect(pads.some((b) => Math.abs(x - b[0]) < 1.4 && Math.abs(z - b[2]) < 1.4), `${id} on a pad at ${x}, ${z}`).toBe(false);
+      }
+    }
+    // Low plants only where play goes; trees and boulders are filled on the rims and walls by rules.
+    expect(byId["beaver-grass"]!.wind).toBeGreaterThan(0);
+    for (const id of ["beaver-trees", "beaver-pines"]) expect(byId[id]!.fill?.height?.[0]).toBeGreaterThan(10);
+  });
+
+  it("stores them in its sidecar, still within budget", () => {
+    const stored = JSON.parse(arenaMap("beaver").sidecar()) as { foliage?: unknown[] };
+    expect(stored.foliage?.length).toBe(5);
+    expect(arenaMap("beaver").sidecar().length).toBeLessThan(2_800_000);
+  });
+});
 
 describe.skipIf(!existsSync(ENGINE))("Beaver Creek on the real engine, as the player runs it", () => {
   it("plays every game type, its bots alive and in the canyon", async () => {
