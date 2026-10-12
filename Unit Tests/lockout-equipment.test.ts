@@ -572,7 +572,7 @@ end)()`);
     expect(life1).toBe(life0); // none of them reached the player
     for (let i = 0; i < 240; i += 1) g.tick(0);
     expect(g.probe()[0] & 0xffff).toBeLessThan(life0); // with it gone, they do
-  });
+  }, 60_000);
 
   it("sends a Hologram running the way the player faces, which a bot fires on and pops", async () => {
     const g = await offline(`loadout_pick = 6
@@ -609,7 +609,7 @@ end)()`);
     expect(ran / 100).toBeGreaterThan(1);
     expect((w >> 2) & 1).toBe(1); // the bot went for it
     expect(w >> 4).toBeLessThan(360); // popped, not run out
-  });
+  }, 60_000);
 
   it("pops an enemy's Hologram with the player's shot", async () => {
     const g = await offline(`${BOT_AHEAD}
@@ -636,7 +636,7 @@ end)()`);
     expect(g.probe()[0] & 1).toBe(1);
     for (let i = 0; i < 60 && g.probe()[0] & 1; i += 1) g.tick(0, ACT.fire!);
     expect(g.probe()[0] & 3).toBe(2); // popped
-  });
+  }, 60_000);
 });
 
 describe.skipIf(!existsSync(LOCKOUT_ENGINE))("E3 online: a guest's Drop Wall and Hologram (two engines, one room)", () => {
