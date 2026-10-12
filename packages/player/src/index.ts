@@ -430,6 +430,10 @@ export function mount(container: HTMLElement, options: PlayerOptions): PlayerHan
     setAccessibility: (settings) => player.setAccessibility(settings),
     setLanguages: (preferred) => player.setLanguages(preferred),
     setInputEnabled: (enabled) => player.setInputEnabled(enabled),
+    get touchControls(): boolean {
+      return player.hasTouchControls;
+    },
+    editTouchLayout: () => player.editTouchLayout(),
     inspect: () => player.inspect(),
     setQuality: (choice) => player.setQuality(choice),
     supplyTextures: (textures) => player.supplyTextures(textures),
@@ -470,6 +474,9 @@ export {
   lookAccelerationBoost,
   stepLookAcceleration,
   AIM_ASSISTS,
+  TOUCH_CONTROL_IDS,
+  parseTouchLayout,
+  placeWithin,
   DEFAULT_MOUSE_LOOK,
   GYRO_AIMS,
   TOUCH_LOOK_MODES,
@@ -486,7 +493,7 @@ export {
   readPad,
   standardizePad,
 } from "./controls.js";
-export type { AimAssist, GyroAim, TouchLookMode, LookDevice, LookProfile, ControlSettings, ControlTarget, PadButton, PadSnapshot, ResponseCurve, RumbleEffect, StickDeadZones, StickLayout } from "./controls.js";
+export type { TouchControlId, TouchLayout, TouchPlacement, AimAssist, GyroAim, TouchLookMode, LookDevice, LookProfile, ControlSettings, ControlTarget, PadButton, PadSnapshot, ResponseCurve, RumbleEffect, StickDeadZones, StickLayout } from "./controls.js";
 export { askMotionPermission } from "./gyroLook.js";
 export { GamepadInput } from "./input.js";
 

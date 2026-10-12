@@ -35,7 +35,7 @@ import { DIRECT_CORE_URL, ENGINE_URL_BY_MODEL } from "@/lib/consoleModel";
 import { newRoomCode, onlineRoomsAvailable, parseRoomCode, roomTransport } from "@/lib/netplayTransport";
 import { MM_FAILED, MM_SEARCHING, createMatchmaker, type Matchmaker } from "@/lib/matchmaking";
 import { LOCKOUT_ACTIONS, loadGameSettings, saveGameSettings, type GameSettings } from "@/lib/gameSettings";
-import { StartMenu } from "./StartMenu";
+import { StartMenu, type Tab as MenuTab } from "./StartMenu";
 import { browserStorage, readLocalSave, saveKey, writeLocalSave } from "@/lib/saveData";
 import { basePath } from "@/lib/staticSite";
 import { fetchStandaloneParts, standaloneHtml, standaloneZip, type StandaloneGame } from "@/lib/standaloneExport";
@@ -84,6 +84,8 @@ export function LockoutGame() {
   const [joinCode, setJoinCode] = useState("");
   const [copied, setCopied] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
+  /** The Start menu tab to open on next (the Touch tab, back from moving the touch controls). */
+  const [menuTab, setMenuTab] = useState<MenuTab | undefined>(undefined);
   const [settings, setSettings] = useState<GameSettings>(() => loadGameSettings("lockout", null));
   const settingsRef = useRef(settings);
   settingsRef.current = settings;
@@ -175,6 +177,7 @@ export function LockoutGame() {
     const handle = handleRef.current;
     setMenuOpen(open);
     if (open) setMenuHint(false);
+    else setMenuTab(undefined); // the next opening starts on the first tab again
     if (!handle) return;
     if (inRoom()) handle.setInputEnabled(!open);
     else if (open) handle.pause();
@@ -189,6 +192,21 @@ export function LockoutGame() {
     handleRef.current?.setControlSettings(next.controls);
     handleRef.current?.setVolume(next.muted ? 0 : next.volume);
     handleRef.current?.setQuality(next.quality);
+  };
+
+  /**
+   * Move and resize the touch pad's controls: the menu steps aside (the game
+   * stays paused, or online its input held), the player arranges the pad and
+   * saves, and the menu comes back on its Touch tab.
+   */
+  const editTouchLayout = async () => {
+    const handle = handleRef.current;
+    if (!handle) return;
+    setMenuOpen(false);
+    const layout = await handle.editTouchLayout();
+    if (layout) applySettings({ ...settingsRef.current, controls: { ...settingsRef.current.controls, touchLayout: layout } });
+    setMenuTab("touch");
+    setMenuOpen(true);
   };
 
   const onCartRequest = useCallback((event: MailboxEvent) => {
@@ -480,6 +498,8 @@ export function LockoutGame() {
             prefs={prefs}
             onPrefsChange={changePrefs}
             languages={LOCKOUT_STRINGS.languages}
+            initialTab={menuTab}
+            onEditTouchLayout={handleRef.current?.touchControls ? () => void editTouchLayout() : undefined}
           />
         )}
       </div>

@@ -50,7 +50,7 @@ import {
 } from "@/lib/gameSettings";
 import { StickPreview } from "./StickPreview";
 
-type Tab = "controls" | "touch" | "mouse" | "buttons" | "audio" | "display";
+export type Tab = "controls" | "touch" | "mouse" | "buttons" | "audio" | "display";
 const TABS: readonly Tab[] = ["controls", "touch", "mouse", "buttons", "audio", "display"];
 const TAB_LABELS: Record<Tab, string> = { controls: "Controls", touch: "Touch", mouse: "Mouse", buttons: "Button mapping", audio: "Audio", display: "Display" };
 const DEFAULT_TOUCH_LOOK: LookProfile = { sensitivity: 1, sensitivityY: 1, curve: "standard" };
@@ -123,6 +123,10 @@ export interface StartMenuProps {
    * faster than full lean, and zoom sensitivity and look acceleration apply.
    */
   lookGain?: boolean;
+  /** The tab to open on (the Touch tab, coming back from moving the touch controls). */
+  initialTab?: Tab;
+  /** Move and resize the on-screen pad's sticks and buttons (shown when the game has a touch pad). */
+  onEditTouchLayout?: () => void;
 }
 
 const PAD_LABELS: Record<PadButton, string> = {
@@ -133,7 +137,7 @@ const PAD_LABELS: Record<PadButton, string> = {
 
 export function StartMenu(props: StartMenuProps) {
   const { settings, onChange, actions } = props;
-  const [tab, setTab] = useState<Tab>("controls");
+  const [tab, setTab] = useState<Tab>(props.initialTab ?? "controls");
   const [listening, setListening] = useState<ConsoleButton | null>(null);
   const [listeningAction, setListeningAction] = useState<string | null>(null);
   const [gyroDenied, setGyroDenied] = useState(false);
@@ -436,6 +440,21 @@ export function StartMenu(props: StartMenuProps) {
               <p style={styles.note}>On a phone or tablet: turn it left or right to turn, tilt it to aim up or down, with the sticks as well.</p>
 
               <h3 style={styles.h3}>On-screen pad</h3>
+              {props.onEditTouchLayout && (
+                <>
+                  <Row label="Stick and button positions">
+                    <button type="button" className="cbx-btn" onClick={props.onEditTouchLayout}>
+                      Move &amp; resize
+                    </button>
+                    {Object.keys(controls.touchLayout ?? {}).length > 0 && (
+                      <button type="button" className="cbx-btn" onClick={() => setControls({ touchLayout: {} })}>
+                        Reset positions
+                      </button>
+                    )}
+                  </Row>
+                  <p style={styles.note}>Drag the sticks and buttons to where your thumbs want them, make any bigger or smaller, then Save.</p>
+                </>
+              )}
               <Row label="Floating move stick">
                 <Toggle on={controls.floatingStick ?? false} onChange={(floatingStick) => setControls({ floatingStick })} />
               </Row>
@@ -457,6 +476,7 @@ export function StartMenu(props: StartMenuProps) {
                       touchLook: DEFAULT_TOUCH_LOOK,
                       touchLookMode: "stick",
                       floatingStick: false,
+                      touchLayout: {},
                       gyroAim: "off",
                       gyroLook: DEFAULT_TOUCH_LOOK,
                     })

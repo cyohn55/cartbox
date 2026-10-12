@@ -68,6 +68,56 @@ export const AIM_ASSISTS: readonly AimAssist[] = ["off", "standard", "strong"];
 /** The devices that can look, each with its own look profile (C4). */
 export type LookDevice = "controller" | "touch" | "mouse" | "gyro";
 
+/** The touch pad's controls a player can move and resize (see TouchLayout). */
+export const TOUCH_CONTROL_IDS = ["leftStick", "rightStick", "A", "B", "X", "Y", "Start"] as const;
+export type TouchControlId = (typeof TOUCH_CONTROL_IDS)[number];
+
+/**
+ * Where a player put one touch control: its centre as a share of the game's
+ * width (x) and height (y), 0..1 from the top left, and its size as a
+ * multiple of its usual size (0.5..2, on top of the pad's overall size).
+ */
+export interface TouchPlacement {
+  readonly x: number;
+  readonly y: number;
+  readonly size: number;
+}
+
+/** The player's own touch layout: the controls they moved (the rest stay where they were). */
+export type TouchLayout = Readonly<Partial<Record<TouchControlId, TouchPlacement>>>;
+
+export const TOUCH_CONTROL_MIN_SIZE = 0.5;
+export const TOUCH_CONTROL_MAX_SIZE = 2;
+
+/** A stored touch layout, keeping only known controls with sane placements. */
+export function parseTouchLayout(value: unknown): TouchLayout {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return {};
+  const raw = value as Record<string, unknown>;
+  const out: Partial<Record<TouchControlId, TouchPlacement>> = {};
+  for (const id of TOUCH_CONTROL_IDS) {
+    const p = raw[id];
+    if (typeof p !== "object" || p === null) continue;
+    const { x, y, size } = p as Record<string, unknown>;
+    if (typeof x !== "number" || typeof y !== "number" || !Number.isFinite(x) || !Number.isFinite(y)) continue;
+    out[id] = {
+      x: clamp(x, 0, 1),
+      y: clamp(y, 0, 1),
+      size: typeof size === "number" && Number.isFinite(size) ? clamp(size, TOUCH_CONTROL_MIN_SIZE, TOUCH_CONTROL_MAX_SIZE) : 1,
+    };
+  }
+  return out;
+}
+
+/**
+ * A control's centre (shares of the game area) kept so the whole control
+ * stays on screen: `halfW` and `halfH` are half its size as shares too.
+ * A control bigger than the area sits in the middle.
+ */
+export function placeWithin(x: number, y: number, halfW: number, halfH: number): [number, number] {
+  const keep = (v: number, half: number) => (half >= 0.5 ? 0.5 : clamp(v, half, 1 - half));
+  return [keep(x, halfW), keep(y, halfH)];
+}
+
 /** How the touch pad looks (C4b): its right stick, or a drag anywhere on the right of the screen. */
 export type TouchLookMode = "stick" | "drag";
 export const TOUCH_LOOK_MODES: readonly TouchLookMode[] = ["stick", "drag"];
@@ -128,6 +178,8 @@ export interface ControlSettings {
   /** How the touch pad looks, and whether its move stick floats to where the thumb lands (C4b). */
   readonly touchLookMode?: TouchLookMode;
   readonly floatingStick?: boolean;
+  /** Where the player moved the touch pad's sticks and buttons, and how big they made them. */
+  readonly touchLayout?: TouchLayout;
   /** Gyro aim on a phone or tablet (C4b), and its own look tuning. */
   readonly gyroAim?: GyroAim;
   readonly gyroLook?: LookProfile;
@@ -210,6 +262,7 @@ export const DEFAULT_CONTROL_SETTINGS: ControlSettings = {
   mouseCapture: false,
   touchLookMode: "stick",
   floatingStick: false,
+  touchLayout: {},
   gyroAim: "off",
   gyroLook: { sensitivity: 1, sensitivityY: 1, curve: "standard" },
   aimAssist: "standard",
@@ -290,6 +343,7 @@ export function parseControlSettings(value: unknown, defaults: ControlSettings =
     mouseCapture: typeof raw.mouseCapture === "boolean" ? raw.mouseCapture : (defaults.mouseCapture ?? false),
     touchLookMode: (TOUCH_LOOK_MODES as readonly unknown[]).includes(raw.touchLookMode) ? (raw.touchLookMode as TouchLookMode) : (defaults.touchLookMode ?? "stick"),
     floatingStick: typeof raw.floatingStick === "boolean" ? raw.floatingStick : (defaults.floatingStick ?? false),
+    touchLayout: raw.touchLayout !== undefined ? parseTouchLayout(raw.touchLayout) : (defaults.touchLayout ?? {}),
     gyroAim: (GYRO_AIMS as readonly unknown[]).includes(raw.gyroAim) ? (raw.gyroAim as GyroAim) : (defaults.gyroAim ?? "off"),
     gyroLook: profile(raw.gyroLook, defaults.gyroLook ?? { sensitivity: 1, sensitivityY: 1, curve: "standard" }),
     leftStick: deadZones(raw.leftStick, defaults.leftStick),
