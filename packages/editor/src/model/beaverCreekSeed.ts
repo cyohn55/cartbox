@@ -253,7 +253,7 @@ function stepsInBases(): number {
 
 let terrain: Terrain | null = null;
 
-/** The canyon's terrain: the same heights the cart stands soldiers on, grass on the flats, rock on the walls. */
+/** The canyon's terrain: the same heights the cart stands soldiers on, grass on the flats, rock on the walls (mapped triplanar). */
 export function beaverTerrain(): Terrain {
   if (terrain) return terrain;
   const g = BEAVER_GROUND;
@@ -270,7 +270,9 @@ export function beaverTerrain(): Terrain {
     ],
     tile: 6,
     parent: "beaver-map",
-    blend: { up: 0.12, height: 1, noise: 0.5 },
+    // Rock juts through the grass at the walls' feet, and the walls aren't streaked (B6).
+    blend: { up: 0.12, height: 1, noise: 0.5, sharpness: 0.5 },
+    triplanar: true,
     castShadows: true,
   };
   return terrain;

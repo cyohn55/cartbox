@@ -234,6 +234,22 @@ export interface MeshMaterial {
    * direction they drift, radians about +Y from +X (a creek's current).
    */
   readonly water?: { readonly strength: number; readonly scale: number; readonly speed: number; readonly flow: number };
+  // --- Living terrain (BEAVER_CREEK_ROADMAP.md B6; see materialEffects.ts) ---
+  /**
+   * Triplanar mapping: the base colour and blend maps are projected from the
+   * three axes in the mesh's own space, one repeat every this many units, and
+   * mixed by the surface's normal — so a cliff isn't streaked by a texture
+   * laid flat from above. Flat ground looks exactly as planar mapping
+   * (U = x, V = z, over the same repeat) would. Absent or 0 is off.
+   */
+  readonly triplanar?: number;
+  /**
+   * Height-blended transitions (0..1): where a second surface is blended in
+   * per vertex, the lighter of the two (its "height") pokes through first and
+   * the edge tightens, so rock juts through grass and snow fills the
+   * hollows rather than both fading evenly. Absent or 0 is an even mix.
+   */
+  readonly blendSharpness?: number;
   // --- Transparency (ENGINE_PARITY_ROADMAP.md EP6), glTF's alphaMode plus additive ---
   /**
    * How the surface's alpha (base colour factor × texture) is used. Absent is
@@ -269,6 +285,12 @@ export interface MeshPrimitive {
   readonly blend?: Float32Array;
   /** Per-vertex texture coordinates (`u,v`), or null when untextured. */
   readonly uvs: Float32Array | null;
+  /**
+   * Per-vertex sway (B6; see wind.ts): how far each vertex bends in the
+   * scene's wind, metres per unit of wind — zero at a plant's root, more toward
+   * its tip. Absent is stiff. Built when a scene loads (foliage), not stored.
+   */
+  readonly sway?: Float32Array;
   /** Triangle vertex indices (three per triangle) into the attribute streams. */
   readonly indices: Uint32Array;
   readonly material: MeshMaterial;
@@ -510,6 +532,8 @@ export interface SerializedMaterial {
   refraction?: number;
   distortion?: number;
   water?: { strength: number; scale: number; speed: number; flow: number };
+  triplanar?: number;
+  blendSharpness?: number;
   graph?: MaterialGraph;
 }
 interface SerializedPrimitive {

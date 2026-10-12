@@ -10,7 +10,7 @@
 
 import { useState } from "react";
 
-import { MAX_VISTA_HAZE, foliageRandom, layerCopies, type FoliageLayer, type FoliagePreset } from "@cartbox/editor";
+import { FOLIAGE_PRESETS, MAX_VISTA_HAZE, foliageRandom, layerCopies, type FoliageLayer, type FoliagePreset } from "@cartbox/editor";
 
 import { addFoliage, foliageOn, removeFoliage, replaceFoliage } from "@/lib/foliageEdit";
 import { type MeshSidecar } from "@/lib/meshSidecar";
@@ -129,6 +129,23 @@ export function TerrainPanel({
             })}
           </div>
 
+          <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, marginTop: 10 }} title="Project each layer's texture from all three axes, so steep cliffs aren't streaked by a texture laid flat from above (flat ground looks the same)">
+            <input type="checkbox" checked={Boolean(terrain.triplanar)} onChange={(event) => onChange(replaceTerrain(sidecar, { ...terrain, triplanar: event.target.checked || undefined }))} />
+            Triplanar cliffs
+          </label>
+          {terrain.blend && (
+            <RangeControl
+              label="Layer edges"
+              min={0}
+              max={1}
+              step={0.05}
+              value={terrain.blend.sharpness ?? 0}
+              onChange={(sharpness) => onChange(replaceTerrain(sidecar, { ...terrain, blend: { ...terrain.blend!, sharpness: sharpness > 0 ? sharpness : undefined } }))}
+              ariaLabel="Layer edge sharpness"
+              display={terrain.blend.sharpness ? `${Math.round(terrain.blend.sharpness * 100)}% by height` : "even fade"}
+            />
+          )}
+
           <FoliageSection sidecar={sidecar} onChange={onChange} terrainId={terrain.id} edit={edit} onEdit={(next) => onEdit({ ...next, id })} />
 
           <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, marginTop: 10 }} title="Draw this terrain (and its foliage) once into the sky from the play space, instead of as geometry: far mountains and forests for nothing per frame">
@@ -184,7 +201,7 @@ export function TerrainPanel({
   );
 }
 
-const PRESETS: readonly FoliagePreset[] = ["boulder", "drift", "grass", "pine"];
+const PRESETS: readonly FoliagePreset[] = FOLIAGE_PRESETS;
 
 /**
  * Foliage on the terrain (EP11): its layers — paint or erase each with the
@@ -247,6 +264,7 @@ function FoliageSection({
                   <RangeControl label="Largest" nested min={0.1} max={5} step={0.05} value={layer.scale[1]} onChange={(v) => set(found, { scale: [Math.min(v, layer.scale[0]), v] })} ariaLabel={`${layer.name} largest size`} display={`×${layer.scale[1].toFixed(2)}`} />
                   <RangeControl label="Follow slope" nested min={0} max={1} step={0.05} value={layer.align} onChange={(align) => set(found, { align })} ariaLabel={`${layer.name} slope alignment`} display={`${Math.round(layer.align * 100)}%`} />
                   <RangeControl label="Draw distance" nested min={10} max={600} step={10} value={layer.cull} onChange={(cull) => set(found, { cull })} ariaLabel={`${layer.name} draw distance`} display={`${layer.cull} m`} />
+                  <RangeControl label="Sway" nested min={0} max={4} step={0.1} value={layer.wind ?? 0} onChange={(wind) => set(found, { wind: wind > 0 ? wind : undefined })} ariaLabel={`${layer.name} sway in the wind`} display={layer.wind ? layer.wind.toFixed(1) : "stiff"} />
                   <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, marginTop: 6 }}>
                     <input
                       type="checkbox"

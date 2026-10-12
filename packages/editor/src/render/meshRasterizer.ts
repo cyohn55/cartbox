@@ -32,7 +32,8 @@ import { EFFECT_RIM_POWER, bandAmount, camoThreshold, effectActive, type Surface
 /** The fog for one frame, with the eye it is seen from (height fog and volumes trace from it). */
 type FrameFog = SceneFog & { readonly eye: readonly [number, number, number] };
 import { LIGHTMAP_RANGE } from "../model/lightmap";
-import { DEFAULT_DETAIL_SCALE, DEFAULT_DETAIL_STRENGTH, detailFade, emissiveAnimation, materialHasWater, waterTilt, waterUniform } from "../model/materialEffects";
+import { windOffset, windUniform, type SceneWind } from "../model/wind";
+import { DEFAULT_DETAIL_SCALE, DEFAULT_DETAIL_STRENGTH, blendHeightOf, detailFade, emissiveAnimation, heightBlend, materialHasWater, triplanarUvs, triplanarWeights, waterTilt, waterUniform } from "../model/materialEffects";
 import { compiledGraphOf, evaluateGraph, graphRegisters, type CompiledGraph, type GraphContext } from "../model/materialGraph";
 import { EFFECT_DISTORT_POWER, materialRefracts, refractionOffset, refracts, resolveRefraction, type ResolvedRefraction } from "./refraction";
 import { CLEARCOAT_F0, anisotropicD, curvatureOf, materialHasLayers, parallaxRate, parallaxUv, resolveLayers, uvGradients, type ResolvedLayers } from "../model/materialLayers";
@@ -638,6 +639,10 @@ interface Vertex {
   wx: number;
   wy: number;
   wz: number;
+  // Position in the mesh's own space, for triplanar mapping (B6).
+  ox: number;
+  oy: number;
+  oz: number;
 }
 
 const NEAR = 0.05;
@@ -662,6 +667,9 @@ function lerpVertex(a: Vertex, b: Vertex, t: number): Vertex {
     wx: mix(a.wx, b.wx),
     wy: mix(a.wy, b.wy),
     wz: mix(a.wz, b.wz),
+    ox: mix(a.ox, b.ox),
+    oy: mix(a.oy, b.oy),
+    oz: mix(a.oz, b.oz),
   };
 }
 
@@ -1100,6 +1108,8 @@ export interface RenderMeshSceneOptions {
   /** Distance fog over PBR materials (Modern tier), applied after tone mapping.
    *  Absent, output is byte-identical. See {@link SceneFog}. */
   readonly fog?: SceneFog | null;
+  /** The scene's wind (B6): it sways primitives that carry {@link MeshPrimitive.sway}. Absent is still air. */
+  readonly wind?: SceneWind | null;
 }
 
 /**
@@ -1126,6 +1136,7 @@ export function renderMeshScene(instances: readonly MeshSceneInstance[], options
   const fog: FrameFog | null = options.fog ? { ...options.fog, eye: cameraPositionFromView(view) } : null;
   const style = options.style ?? DEFAULT_RASTER_STYLE;
   const time = options.time ?? 0;
+  const wind = options.wind ? windUniform(options.wind, time) : null;
   const viewProj = multiply(projection, view);
 
   depth.fill(Infinity);
@@ -1168,7 +1179,7 @@ export function renderMeshScene(instances: readonly MeshSceneInstance[], options
     const mrTextures = instance.mrTextures ?? null;
     const occlusionTextures = instance.occlusionTextures ?? null;
     const emissiveTextures = instance.emissiveTextures ?? null;
-    const extras: PrimitiveExtras = { lightmap: instance.lightmapTextures ?? null, detail: instance.detailTextures ?? null, blend: instance.blendTextures ?? null, relief: instance.reliefTextures ?? null, time, effect: instance.effect ?? null };
+    const extras: PrimitiveExtras = { lightmap: instance.lightmapTextures ?? null, detail: instance.detailTextures ?? null, blend: instance.blendTextures ?? null, relief: instance.reliefTextures ?? null, time, effect: instance.effect ?? null, wind };
     const lightMvp = shadow ? multiply(shadow.lightViewProj, instance.model) : null;
     if (style.zBuffer) {
       drawMesh(instance.mesh, mvp, modelView, instance.model, normalBasis, width, height, out, depth, textures, normalTextures, materialTextures, mrTextures, occlusionTextures, emissiveTextures, extras, light, viewDir, ambient, environment, lightMvp, shadow, tonemap, ssao, lights, style, fog, deferred, localShadows);
@@ -1218,6 +1229,7 @@ export function renderMeshScene(instances: readonly MeshSceneInstance[], options
         localShadows,
         triangle.grads,
         behind,
+        triangle.mapping,
       );
     }
   }
@@ -1689,6 +1701,8 @@ interface PrimitiveExtras {
   readonly relief?: readonly (DecodedTexture | null)[] | null;
   readonly time?: number;
   readonly effect?: SurfaceEffect | null;
+  /** The frame's wind (B6), its {@link windUniform}, or null for still air. */
+  readonly wind?: readonly [number, number, number, number] | null;
 }
 
 /**
@@ -1800,6 +1814,41 @@ interface PendingTriangle {
   readonly viewDepth: number;
   /** The world gradients of u and v across the triangle (I4: parallax and anisotropy), or null when unneeded. */
   readonly grads: TriangleGrads | null;
+  /** Triplanar mapping and height blending (B6), or null for neither. */
+  readonly mapping: SurfaceMapping | null;
+}
+
+/** How a material's maps are laid on it (B6): triplanar (its repeat, 0 = off) and height-blended (0 = an even mix). */
+interface SurfaceMapping {
+  readonly triplanar: number;
+  readonly blendSharpness: number;
+}
+
+function mappingOf(material: MeshAsset["primitives"][number]["material"]): SurfaceMapping | null {
+  const triplanar = material.triplanar && material.triplanar > 0 ? material.triplanar : 0;
+  const blendSharpness = material.blendSharpness && material.blendSharpness > 0 ? Math.min(1, material.blendSharpness) : 0;
+  return triplanar > 0 || blendSharpness > 0 ? { triplanar, blendSharpness } : null;
+}
+
+/**
+ * A map sampled by triplanar projection (B6) at mesh-space point (ox, oy, oz)
+ * with normal (nx, ny, nz): the three axes' samples mixed by
+ * {@link triplanarWeights}, as the shaders' `triMap` does.
+ */
+function sampleTriplanar(texture: DecodedTexture, ox: number, oy: number, oz: number, nx: number, ny: number, nz: number, repeat: number, filtering: RasterStyle["textureFiltering"]): [number, number, number, number] {
+  const weights = triplanarWeights(nx, ny, nz);
+  const uvs = triplanarUvs(ox, oy, oz, repeat);
+  const out: [number, number, number, number] = [0, 0, 0, 0];
+  for (let k = 0; k < 3; k += 1) {
+    const w = weights[k]!;
+    if (w <= 0) continue;
+    const s = sampleTexture(texture, uvs[k]![0], uvs[k]![1], filtering);
+    out[0] += s[0] * w;
+    out[1] += s[1] * w;
+    out[2] += s[2] * w;
+    out[3] += s[3] * w;
+  }
+  return out;
 }
 
 /** A triangle's world-space UV gradients (see {@link uvGradients}). */
@@ -1911,6 +1960,9 @@ function eachTriangle(
     const lightmap = primitive.uvs2 ? (extras?.lightmap?.[primitiveIndex] ?? null) : null;
     const uvs2 = lightmap ? primitive.uvs2! : null;
     const blendWeights = primitive.blend ?? null;
+    // Wind (B6): a vertex that sways moves sideways in the mesh's space before anything else.
+    const sway = primitive.sway && extras?.wind && (extras.wind[0] !== 0 || extras.wind[1] !== 0) ? primitive.sway : null;
+    const windU = sway ? extras!.wind! : null;
     const texture = textures?.[primitiveIndex] ?? null;
     const normalTexture = normalTextures?.[primitiveIndex] ?? null;
     const materialTexture = materialTextures?.[primitiveIndex] ?? null;
@@ -1980,9 +2032,14 @@ function eachTriangle(
     };
 
     const project = (i: number): Vertex => {
-      const x = positions[i * 3]!;
+      let x = positions[i * 3]!;
       const y = positions[i * 3 + 1]!;
-      const z = positions[i * 3 + 2]!;
+      let z = positions[i * 3 + 2]!;
+      if (sway) {
+        const [dx, dz] = windOffset(windU!, x, z, sway[i]!);
+        x += dx;
+        z += dz;
+      }
       // View-space z (for near-plane clipping) from the model-view matrix.
       const viewZ = modelView[2]! * x + modelView[6]! * y + modelView[10]! * z + modelView[14]!;
       const cx = mvp[0]! * x + mvp[4]! * y + mvp[8]! * z + mvp[12]!;
@@ -2021,11 +2078,15 @@ function eachTriangle(
         wx: model[0]! * x + model[4]! * y + model[8]! * z + model[12]!,
         wy: model[1]! * x + model[5]! * y + model[9]! * z + model[13]!,
         wz: model[2]! * x + model[6]! * y + model[10]! * z + model[14]!,
+        ox: x,
+        oy: y,
+        oz: z,
       };
     };
 
     const base: readonly [number, number, number, number] = [baseR, baseG, baseB, baseA];
     const alpha = alphaStateOf(primitive.material);
+    const mapping = mappingOf(primitive.material);
 
     for (let t = 0; t < indices.length; t += 3) {
       const i0 = indices[t]!;
@@ -2040,7 +2101,7 @@ function eachTriangle(
         const a = clipped[c]!;
         const b = clipped[c + 1]!;
         const cc = clipped[c + 2]!;
-        emit({ a, b, c: cc, texture, normalTexture, tangent, materialTexture, pbr, base, alpha, viewDepth: (a.viewZ + b.viewZ + cc.viewZ) / 3, grads });
+        emit({ a, b, c: cc, texture, normalTexture, tangent, materialTexture, pbr, base, alpha, viewDepth: (a.viewZ + b.viewZ + cc.viewZ) / 3, grads, mapping });
       }
     }
   });
@@ -2126,6 +2187,8 @@ function drawMesh(
         null,
         localShadows,
         triangle.grads,
+        null,
+        triangle.mapping,
       );
     },
   );
@@ -2165,7 +2228,13 @@ function rasterizeTriangle(
   grads: TriangleGrads | null = null,
   /** The opaque scene, for refraction (I5); null when nothing refracts. */
   behind: Behind | null = null,
+  /** Triplanar mapping and height blending (B6), or null for neither. */
+  mapping: SurfaceMapping | null = null,
 ): void {
+  const triplanar = mapping?.triplanar ?? 0;
+  // A map's texel here: by the UVs, or by triplanar projection off the geometric normal.
+  const sampleMapAt = (tex: DecodedTexture, u: number, v: number, ox: number, oy: number, oz: number, nx: number, ny: number, nz: number): readonly [number, number, number, number] =>
+    triplanar > 0 ? sampleTriplanar(tex, ox, oy, oz, nx, ny, nz, triplanar, style.textureFiltering) : sampleTexture(tex, u, v, style.textureFiltering);
   const refraction = behind && pbr?.refracting ? pbr.refraction : null;
   // Where a refracting fragment looks (I5), by its geometric normal facing the camera.
   const seen = (x: number, y: number, z: number, nx: number, ny: number, nz: number, wx: number, wy: number, wz: number): number => {
@@ -2367,7 +2436,7 @@ function rasterizeTriangle(
       if (texture) {
         const u = tu;
         const v = tv;
-        const [tr, tg, tb, ta] = sampleTexture(texture, u, v, style.textureFiltering);
+        const [tr, tg, tb, ta] = sampleMapAt(texture, u, v, pw0 * a.ox + pw1 * b.ox + pw2 * c.ox, pw0 * a.oy + pw1 * b.oy + pw2 * c.oy, pw0 * a.oz + pw1 * b.oz + pw2 * c.oz, gnx, gny, gnz);
         r = (r * tr) / 255;
         g = (g * tg) / 255;
         bl = (bl * tb) / 255;
@@ -2480,7 +2549,20 @@ function rasterizeTriangle(
         let metallic = pbr.metallic;
         let rough = pbr.roughness;
         let reflect = pbr.reflect;
-        const bw = pbr.blend ? pw0 * a.bw + pw1 * b.bw + pw2 * c.bw : 0;
+        let bw = pbr.blend ? pw0 * a.bw + pw1 * b.bw + pw2 * c.bw : 0;
+        // The blend surface's colour here, and the weight moved by the two surfaces' heights (B6).
+        let blendR = 0;
+        let blendG = 0;
+        let blendB = 0;
+        if (pbr.blend) {
+          const [tr, tg, tb] = pbr.blend.tex
+            ? sampleMapAt(pbr.blend.tex, u, v, pw0 * a.ox + pw1 * b.ox + pw2 * c.ox, pw0 * a.oy + pw1 * b.oy + pw2 * c.oy, pw0 * a.oz + pw1 * b.oz + pw2 * c.oz, gnx, gny, gnz)
+            : [255, 255, 255];
+          blendR = pbr.blend.color[0] * (tr / 255);
+          blendG = pbr.blend.color[1] * (tg / 255);
+          blendB = pbr.blend.color[2] * (tb / 255);
+          if (mapping && mapping.blendSharpness > 0) bw = heightBlend(bw, blendHeightOf(r / 255, g / 255, bl / 255), blendHeightOf(blendR, blendG, blendB), mapping.blendSharpness);
+        }
         if (pbr.mr) {
           const [, mg, mb, ma] = sampleTexture(pbr.mr, u, v, style.textureFiltering);
           rough *= mg / 255;
@@ -2549,10 +2631,9 @@ function rasterizeTriangle(
         let ab = bl / 255;
         // A second surface blended in by the vertex weight (snow over rock).
         if (pbr.blend && bw > 0) {
-          const [tr, tg, tb] = pbr.blend.tex ? sampleTexture(pbr.blend.tex, u, v, style.textureFiltering) : [255, 255, 255];
-          ar += (pbr.blend.color[0] * (tr / 255) - ar) * bw;
-          ag += (pbr.blend.color[1] * (tg / 255) - ag) * bw;
-          ab += (pbr.blend.color[2] * (tb / 255) - ab) * bw;
+          ar += (blendR - ar) * bw;
+          ag += (blendG - ag) * bw;
+          ab += (blendB - ab) * bw;
         }
         // A detail map, tiled finely and blended into the albedo up close
         // (mid-grey is neutral); it fades out with view depth.

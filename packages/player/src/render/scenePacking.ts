@@ -90,9 +90,13 @@ import {
  * 848  water0     vec4<f32>    16   x = ripple strength (0 = still), y = ripples per metre,
  *                                    z = drift phase (0..1), w = flow direction (B5;
  *                                    waterUniform in materialEffects.ts)
+ * 864  terrain0   vec4<f32>    16   x = triplanar repeat (0 = UV mapping), y = height-blend
+ *                                    sharpness (0 = an even mix) (B6)
+ * 880  wind0      vec4<f32>    16   xy = the wind's x and z × strength, z = its phase (0..1),
+ *                                    w = gust (B6; windUniform in wind.ts)
  * ```
  *
- * 864 bytes used, padded to a 1024-byte stride (a 256-byte multiple a dynamic
+ * 896 bytes used, padded to a 1024-byte stride (a 256-byte multiple a dynamic
  * uniform offset can address), so one buffer still holds every draw in a
  * frame — uniforms are written per batch, not per copy, so the stride costs
  * little. The metallic-roughness inputs and the environment carry the Modern
@@ -107,7 +111,7 @@ export const UNIFORM_STRIDE = 1024;
  * bind group layout's `minBindingSize` must be: it makes a WGSL struct that
  * grows past what this module writes fail at pipeline creation.
  */
-export const UNIFORM_BYTES_USED = 864;
+export const UNIFORM_BYTES_USED = 896;
 /** The same stride counted in float32s, which is how `writeBuffer` sizes it. */
 export const UNIFORM_FLOATS = UNIFORM_STRIDE / 4;
 
@@ -228,6 +232,8 @@ const OFFSET_REFRACT0 = 200;
 const OFFSET_REFRACT1 = 204;
 const OFFSET_REFRACT2 = 208;
 const OFFSET_WATER0 = 212;
+const OFFSET_TERRAIN0 = 216;
+const OFFSET_WIND0 = 220;
 
 /** The rasteriser's defaults, restated so an unlit draw shades identically. */
 export const DEFAULT_LIGHT: readonly [number, number, number] = [0.4, 0.8, 0.6];
@@ -464,6 +470,23 @@ export interface InstanceUniform {
   readonly soft?: { readonly distance: number; readonly linear: readonly [number, number] };
   /** Moving water (B5): the material's waterUniform this frame, or null/omitted for none. */
   readonly water?: readonly [number, number, number, number] | null;
+  /** Triplanar mapping and height blending (B6), from {@link resolveMapping}, or null/omitted for neither. */
+  readonly mapping?: ResolvedMapping | null;
+  /** The frame's wind (B6): its windUniform, or null/omitted for still air. */
+  readonly wind?: readonly [number, number, number, number] | null;
+}
+
+/** A draw's triplanar repeat (0 = UV mapping) and height-blend sharpness (0 = an even mix) (B6). */
+export interface ResolvedMapping {
+  readonly triplanar: number;
+  readonly blendSharpness: number;
+}
+
+/** Resolve a material's mapping as the software rasteriser does (null when it uses neither). */
+export function resolveMapping(material: Pick<MeshMaterial, "triplanar" | "blendSharpness">): ResolvedMapping | null {
+  const triplanar = material.triplanar && material.triplanar > 0 ? material.triplanar : 0;
+  const blendSharpness = material.blendSharpness && material.blendSharpness > 0 ? Math.min(1, material.blendSharpness) : 0;
+  return triplanar > 0 || blendSharpness > 0 ? { triplanar, blendSharpness } : null;
 }
 
 /**
@@ -701,6 +724,18 @@ export function writeInstanceUniform(target: Float32Array, index: number, unifor
   target[base + OFFSET_WATER0 + 1] = water ? water[1] : 0;
   target[base + OFFSET_WATER0 + 2] = water ? water[2] : 0;
   target[base + OFFSET_WATER0 + 3] = water ? water[3] : 0;
+
+  const mapping = uniform.mapping ?? null;
+  target[base + OFFSET_TERRAIN0] = mapping ? mapping.triplanar : 0;
+  target[base + OFFSET_TERRAIN0 + 1] = mapping ? mapping.blendSharpness : 0;
+  target[base + OFFSET_TERRAIN0 + 2] = 0;
+  target[base + OFFSET_TERRAIN0 + 3] = 0;
+
+  const wind = uniform.wind ?? null;
+  target[base + OFFSET_WIND0] = wind ? wind[0] : 0;
+  target[base + OFFSET_WIND0 + 1] = wind ? wind[1] : 0;
+  target[base + OFFSET_WIND0 + 2] = wind ? wind[2] : 0;
+  target[base + OFFSET_WIND0 + 3] = wind ? wind[3] : 0;
 }
 
 /** The camera's right and up in world space (the view's first two rows) and the frame's height, for refraction (I5). */
@@ -708,12 +743,12 @@ export function refractionCamera(view: Mat4, height: number): NonNullable<Instan
   return { right: [view[0]!, view[4]!, view[8]!], up: [view[1]!, view[5]!, view[9]!], height };
 }
 
-/** Floats per vertex in the interleaved buffer: position(3) + normal(3) + uv(2) + light-map uv(2) + blend weight(1). */
-export const VERTEX_FLOATS = 11;
+/** Floats per vertex in the interleaved buffer: position(3) + normal(3) + uv(2) + light-map uv(2) + blend weight(1) + sway(1). */
+export const VERTEX_FLOATS = 12;
 
 /**
  * Interleave the separate attribute streams into the single buffer the pipeline
- * declares (arrayStride 44). A primitive with no UVs (or no light-map UVs, or no blend weights) gets
+ * declares (arrayStride 48). A primitive with no UVs (or no light-map UVs, blend weights or sway) gets
  * zeros, which is what the software path effectively uses — and the shader
  * ignores them anyway because the matching texture flag is off.
  */
@@ -723,6 +758,7 @@ export function interleaveVertices(
   uvs: Float32Array | null,
   uvs2: Float32Array | null = null,
   blend: Float32Array | null = null,
+  sway: Float32Array | null = null,
 ): Float32Array {
   const count = Math.floor(positions.length / 3);
   const out = new Float32Array(count * VERTEX_FLOATS);
@@ -739,6 +775,7 @@ export function interleaveVertices(
     out[to + 8] = uvs2 ? (uvs2[i * 2] ?? 0) : 0;
     out[to + 9] = uvs2 ? (uvs2[i * 2 + 1] ?? 0) : 0;
     out[to + 10] = blend ? (blend[i] ?? 0) : 0;
+    out[to + 11] = sway ? (sway[i] ?? 0) : 0;
   }
   return out;
 }

@@ -353,7 +353,7 @@ export {
   type FoliageLayer,
   type SerializedFoliage,
 } from "./model/foliage";
-export { boulderMesh, driftMesh, foliagePreset, grassMesh, pineMesh, type FoliagePreset } from "./model/foliagePresets";
+export { FOLIAGE_PRESETS, boulderMesh, broadleafMesh, driftMesh, foliagePreset, grassMesh, pineMesh, reedsMesh, type FoliagePreset } from "./model/foliagePresets";
 export {
   DEFAULT_BUSES,
   MAX_EMITTERS,
@@ -640,8 +640,13 @@ export {
   builtinDetailGrain,
   detailFade,
   emissiveAnimation,
+  blendHeightOf,
+  heightBlend,
   materialHasWater,
   readSurfaceEffects,
+  TRIPLANAR_POWER,
+  triplanarUvs,
+  triplanarWeights,
   WATER_PERIOD,
   WATER_STEP,
   WATER_TILT,
@@ -836,6 +841,7 @@ export {
   type SkyRing,
 } from "./render/skyLayers";
 export { MAX_SKY_PANORAMA_CHARS } from "./model/SceneLighting";
+export { DEFAULT_WIND, WIND_PERIOD, foliageSway, parseWind, windOffset, windUniform, type SceneWind } from "./model/wind";
 export {
   bakeSkyPanorama,
   downsamplePanorama,

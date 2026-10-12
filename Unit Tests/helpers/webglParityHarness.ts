@@ -21,6 +21,8 @@ import { graphInstances } from "./graphScenes";
 import { LAYER_ENVIRONMENT, LAYER_LIGHTS, layerInstances } from "./layerScenes";
 import { REFRACTION_TIME, refractionInstances, straightInstances } from "./refractionScenes";
 import { WATER_ENVIRONMENT, WATER_TIME, waterInstances } from "./waterScenes";
+import { CLIFF_EYE, CLIFF_TARGET, cliffInstances } from "./terrainScenes";
+import { WIND, WIND_EYE, WIND_TARGET, WIND_TIME, windInstances } from "./windScenes";
 import { localShadowRig } from "./localShadowScene";
 import { manyLights } from "./manyLights";
 import { probeRig } from "./probeScene";
@@ -183,6 +185,18 @@ function scenes(): Record<string, Scene> {
     water: {
       instances: waterInstances(quad),
       draw: () => ({ ...baseDraw(), view: viewMatrix([0, 2.6, 2.4], [0, -0.3, 0]), background: [20, 20, 30, 255] as [number, number, number, number], environment: WATER_ENVIRONMENT, time: WATER_TIME }),
+    },
+    cliff: {
+      instances: cliffInstances({ triplanar: true, sharpness: 0.8 }),
+      draw: () => ({ ...baseDraw(), view: viewMatrix(CLIFF_EYE, CLIFF_TARGET), background: [20, 20, 30, 255] as [number, number, number, number], lightDirection: [0.3, 0.8, -0.5] as [number, number, number] }),
+    },
+    wind: {
+      instances: windInstances(),
+      draw: () => ({ ...baseDraw(), view: viewMatrix(WIND_EYE, WIND_TARGET), background: [20, 20, 30, 255] as [number, number, number, number], lightDirection: [0.3, 0.8, -0.5] as [number, number, number], wind: WIND, time: WIND_TIME }),
+    },
+    windStill: {
+      instances: windInstances(),
+      draw: () => ({ ...baseDraw(), view: viewMatrix(WIND_EYE, WIND_TARGET), background: [20, 20, 30, 255] as [number, number, number, number], lightDirection: [0.3, 0.8, -0.5] as [number, number, number], time: WIND_TIME }),
     },
     waterStill: {
       instances: waterInstances(quad, null),

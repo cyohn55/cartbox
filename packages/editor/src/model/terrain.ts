@@ -61,7 +61,15 @@ export interface Terrain {
    * vertex, and `noise` (0..1) wanders the edge so it reads as drifts and
    * scoured ridges rather than a contour line. Absent = hard edges.
    */
-  readonly blend?: { readonly up: number; readonly height: number; readonly noise?: number };
+  readonly blend?: { readonly up: number; readonly height: number; readonly noise?: number; readonly sharpness?: number };
+  /**
+   * Triplanar mapping (BEAVER_CREEK_ROADMAP.md B6): every layer's colour is
+   * projected from the three axes over the same {@link tile}, so cliffs aren't
+   * streaked by a texture laid flat from above. Flat ground looks the same.
+   * (`blend.sharpness`, 0..1, height-blends the layers' edges likewise: see
+   * MeshMaterial.blendSharpness.)
+   */
+  readonly triplanar?: boolean;
   /** Let the terrain cast into the play space's shadow map (its cliffs shade the deck at a low sun). */
   readonly castShadows?: boolean;
   /**
@@ -238,6 +246,8 @@ export function terrainMesh(t: Terrain, stride = 1, cells?: readonly [number, nu
     ...(pair ? { blend: [], pair } : {}),
   });
   const out: Bucket[] = t.layers.map((l) => bucket(l.material));
+  // Triplanar (B6): each layer's material projects its maps over the terrain's tile.
+  const mapped = (material: MeshMaterial): MeshMaterial => (t.triplanar ? { ...material, triplanar: tile } : material);
   const pairs = new Map<string, number>();
   const pairBucket = (a: number, b: number): number => {
     const key = `${a},${b}`;
@@ -245,6 +255,7 @@ export function terrainMesh(t: Terrain, stride = 1, cells?: readonly [number, nu
     if (index === undefined) {
       const A = t.layers[a]!.material;
       const B = t.layers[b]!.material;
+      const sharpness = t.blend?.sharpness ?? 0;
       index = out.length;
       out.push(
         bucket(
@@ -254,6 +265,7 @@ export function terrainMesh(t: Terrain, stride = 1, cells?: readonly [number, nu
             blendImage: B.baseColorImage ?? null,
             blendColor: [B.baseColorFactor[0], B.baseColorFactor[1], B.baseColorFactor[2]],
             blendRoughness: B.roughnessFactor ?? 1,
+            ...(sharpness > 0 ? { blendSharpness: sharpness } : {}),
           },
           [a, b],
         ),
@@ -398,7 +410,7 @@ export function terrainMesh(t: Terrain, stride = 1, cells?: readonly [number, nu
       normals: new Float32Array(o.normals),
       uvs: new Float32Array(o.uvs),
       indices: new Uint32Array(o.indices),
-      material: o.material,
+      material: mapped(o.material),
       ...(o.blend ? { blend: new Float32Array(o.blend) } : {}),
     });
   }
@@ -456,7 +468,8 @@ export interface SerializedTerrain {
   floor?: number;
   tile?: number;
   parent?: string;
-  blend?: { up: number; height: number; noise?: number };
+  blend?: { up: number; height: number; noise?: number; sharpness?: number };
+  triplanar?: boolean;
   castShadows?: boolean;
   /** The splat map's bytes, base64 (see {@link Terrain.paint}). */
   paint?: string;
@@ -479,7 +492,8 @@ export function serializeTerrain(t: Terrain): SerializedTerrain {
     ...(t.floor !== undefined ? { floor: t.floor } : {}),
     ...(t.tile !== undefined ? { tile: t.tile } : {}),
     ...(t.parent ? { parent: t.parent } : {}),
-    ...(t.blend ? { blend: { up: t.blend.up, height: t.blend.height, ...(t.blend.noise !== undefined ? { noise: t.blend.noise } : {}) } } : {}),
+    ...(t.blend ? { blend: { up: t.blend.up, height: t.blend.height, ...(t.blend.noise !== undefined ? { noise: t.blend.noise } : {}), ...(t.blend.sharpness ? { sharpness: t.blend.sharpness } : {}) } } : {}),
+    ...(t.triplanar ? { triplanar: true } : {}),
     ...(t.castShadows ? { castShadows: true } : {}),
     ...(t.paint && t.paint.length === t.samples * t.samples * t.layers.length ? { paint: bytesToBase64(t.paint) } : {}),
     ...(t.holes && t.holes.some((v) => v !== 0) ? { holes: packBits(t.holes) } : {}),
@@ -560,6 +574,7 @@ export function readTerrain(value: unknown): Terrain | null {
     ...(finite(r.tile) && r.tile > 0 ? { tile: r.tile } : {}),
     ...(typeof r.parent === "string" && r.parent ? { parent: r.parent } : {}),
     ...readBlend(r.blend),
+    ...(r.triplanar === true ? { triplanar: true } : {}),
     ...(r.castShadows === true ? { castShadows: true } : {}),
     ...readPaint(r.paint, n * n * layers.length),
     ...(typeof r.holes === "string" && unpackBits(r.holes, (n - 1) * (n - 1)) ? { holes: unpackBits(r.holes, (n - 1) * (n - 1))! } : {}),
@@ -582,6 +597,7 @@ function readBlend(value: unknown): { blend?: Terrain["blend"] } {
       up: Math.max(0, Math.min(1, b.up)),
       height: Math.max(0, Math.min(100, b.height)),
       ...(finite(b.noise) ? { noise: Math.max(0, Math.min(1, b.noise)) } : {}),
+      ...(finite(b.sharpness) && b.sharpness > 0 ? { sharpness: Math.min(1, b.sharpness) } : {}),
     },
   };
 }

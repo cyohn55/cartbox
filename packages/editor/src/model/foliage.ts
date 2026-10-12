@@ -18,6 +18,7 @@
 import { base64ToBytes, bytesToBase64 } from "./base64";
 import type { MeshAsset, MeshPrimitive } from "./MeshAsset";
 import { terrainHeight, type Terrain } from "./terrain";
+import { foliageSway } from "./wind";
 
 /** One copy, in its terrain's space: x and z from the grid's corner, a turn about up (radians), and a size. */
 export interface FoliageCopy {
@@ -57,6 +58,11 @@ export interface FoliageLayer {
   readonly copies: readonly FoliageCopy[];
   /** Copies filled in by rules, on top of the painted ones. */
   readonly fill?: FoliageFill;
+  /**
+   * How freely the copies sway in the scene's wind (B6; see wind.ts), 0..4:
+   * grass 3, reeds 4, a pine 0.5. Absent or 0 is stiff (rocks, drifts).
+   */
+  readonly wind?: number;
 }
 
 /** The most copies a layer holds (painted and filled together). */
@@ -222,6 +228,9 @@ export function foliageBlocks(t: Terrain, layer: FoliageLayer, mesh: MeshAsset, 
       const positions = new Float32Array(vertices * 3 * matrices.length);
       const normals = p.normals ? new Float32Array(vertices * 3 * matrices.length) : null;
       const uvs = p.uvs ? new Float32Array(vertices * 2 * matrices.length) : null;
+      // Wind (B6): each vertex bends by its height above its copy's root, at the copy's size.
+      const flex = layer.wind && layer.wind > 0 ? layer.wind : 0;
+      const sway = flex > 0 ? new Float32Array(vertices * matrices.length) : null;
       const indices = new Uint32Array(p.indices.length * matrices.length);
       matrices.forEach((m, k) => {
         const base = k * vertices;
@@ -240,10 +249,14 @@ export function foliageBlocks(t: Terrain, layer: FoliageLayer, mesh: MeshAsset, 
             normals.set([tx / l, ty / l, tz / l], (base + v) * 3);
           }
         }
+        if (sway) {
+          const size = Math.hypot(m[4]!, m[5]!, m[6]!);
+          for (let v = 0; v < vertices; v += 1) sway[base + v] = foliageSway(p.positions[v * 3 + 1]! * size, flex);
+        }
         if (uvs && p.uvs) uvs.set(p.uvs, base * 2);
         for (let i = 0; i < p.indices.length; i += 1) indices[k * p.indices.length + i] = p.indices[i]! + base;
       });
-      return { positions, normals, uvs, indices, material: p.material };
+      return { positions, normals, uvs, indices, material: p.material, ...(sway ? { sway } : {}) };
     });
     out.push({
       mesh: { name: layer.name, primitives },
@@ -269,6 +282,7 @@ export interface SerializedFoliage {
   /** Painted copies, six bytes each (base64): x and z as 16-bit fractions of the terrain, yaw and scale as bytes. */
   copies?: string;
   fill?: { seed: number; up?: [number, number]; height?: [number, number]; clear?: [number, number, number] };
+  wind?: number;
 }
 
 /** Pack painted copies: x and z to 1/65535 of the terrain's size, yaw to 1/256 of a turn, scale within the layer's range to 1/255. */
@@ -318,6 +332,7 @@ export function serializeFoliage(t: Pick<Terrain, "size">, layer: FoliageLayer, 
     sink: layer.sink,
     cull: layer.cull,
     ...(layer.copies.length > 0 ? { copies: packFoliageCopies(t, layer) } : {}),
+    ...(layer.wind && layer.wind > 0 ? { wind: layer.wind } : {}),
     ...(layer.fill
       ? {
           fill: {
@@ -366,6 +381,7 @@ export function readFoliage(value: unknown, terrains: readonly Pick<Terrain, "id
       cull: finite(r.cull) ? Math.max(1, Math.min(10000, r.cull)) : 120,
       copies,
       ...(fill ? { fill } : {}),
+      ...(finite(r.wind) && r.wind > 0 ? { wind: Math.min(4, r.wind) } : {}),
     },
   };
 }
