@@ -643,6 +643,19 @@ export {
 export { bakeImpostor, type BakedImpostor } from "./render/impostor";
 export { KIT_PIECES, PARAMETRIC_KINDS, PARAMETRIC_SHAPES, buildKitPiece, buildParametric, defaultParametric, kitMaterial, readParametric, rebuildParametric, type KitPiece, type KitStyle, type ParametricKind, type ParametricParam, type ParametricShape } from "./model/shapeGenerators";
 export { boxSolid, brushSolid, csg, cylinderSolid, wedgeSolid, type BrushShape, type CsgMatrix, type CsgOp } from "./model/csg";
+export {
+  DEFAULT_AUTO_EXPOSURE,
+  adaptExposure,
+  blendPostVolumes,
+  frameLuminance,
+  postVolumeReach,
+  readAutoExposure,
+  readPostVolumes,
+  volumeWeight,
+  type AutoExposure,
+  type PostBlend,
+  type PostVolume,
+} from "./model/postVolumes";
 export type { LodChain } from "./render/meshRasterizer";
 export { aabbOccluded, occlusionCull, type OcclusionInput } from "./render/occlusion";
 export {
@@ -671,6 +684,8 @@ export {
   setSceneSky,
   setSceneFog,
   setSceneProbes,
+  setScenePostVolumes,
+  setSceneAutoExposure,
   type SceneLighting,
   type SceneEnvironment,
 } from "./model/SceneLighting";

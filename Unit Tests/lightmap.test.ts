@@ -160,6 +160,40 @@ describe("light-map bake", () => {
     expect(under(sun)).toBeGreaterThan(under(rgba) + 5);
   });
 
+  it("leaves one bounce exactly as before", () => {
+    const opts = { rays: 32, distance: 6, sun: [0.6, 0.8, 0] as [number, number, number], bounce: 1 };
+    const plain = bakeLightmap(layout, [{ mesh: layout.mesh, model: IDENTITY }], opts);
+    const one = bakeLightmap(layout, [{ mesh: layout.mesh, model: IDENTITY }], { ...opts, bounces: 1 });
+    expect(Buffer.from(one).equals(Buffer.from(plain))).toBe(true);
+  });
+
+  it("fills shade with more bounces, deterministically", () => {
+    const opts = { rays: 24, distance: 6, sun: [0.6, 0.8, 0] as [number, number, number], bounce: 1 };
+    const one = bakeLightmap(layout, [{ mesh: layout.mesh, model: IDENTITY }], opts);
+    const two = bakeLightmap(layout, [{ mesh: layout.mesh, model: IDENTITY }], { ...opts, bounces: 2 });
+    const three = bakeLightmap(layout, [{ mesh: layout.mesh, model: IDENTITY }], { ...opts, bounces: 3 });
+    // Deep under the roof: the light the roof's underside and the floor pass on.
+    const deep = (map: Uint8ClampedArray) => faceLight(layout, map, -3, 0);
+    expect(deep(two)).toBeGreaterThan(deep(one) + 4);
+    expect(deep(three)).toBeGreaterThanOrEqual(deep(two));
+    // Open floor in the sun sees nothing to bounce off: barely changed.
+    expect(Math.abs(faceLight(layout, two, 3.5, 3.5) - faceLight(layout, one, 3.5, 3.5))).toBeLessThanOrEqual(6);
+    const again = bakeLightmap(layout, [{ mesh: layout.mesh, model: IDENTITY }], { ...opts, bounces: 2 });
+    expect(Buffer.from(again).equals(Buffer.from(two))).toBe(true);
+  });
+
+  it("bleeds a surface's colour into the shade it lights", () => {
+    const red: Material = { ...GREY, name: "red", baseColorFactor: [0.9, 0.1, 0.1, 1] };
+    const room = { name: "room", primitives: [...box([-4, -0.2, -4], [4, 0, 4], red).primitives, ...box([-4, 1, -4], [0, 1.2, 4]).primitives] };
+    const lay = layoutLightmap(room, IDENTITY, { density: 3 });
+    const map = bakeLightmap(lay, [{ mesh: lay.mesh, model: IDENTITY }], { rays: 24, distance: 6, sun: [0.6, 0.8, 0], bounce: 1, bounces: 2 });
+    // The roof's underside, lit by the red floor: red over blue.
+    // faceLight reads the red channel; read blue by moving it into red.
+    const blueAsRed = map.map((v, i) => (i % 4 === 0 ? map[i + 2]! : v));
+    const under = { r: faceLight(lay, map, -0.5, 0, 1, false), b: faceLight(lay, blueAsRed, -0.5, 0, 1, false) };
+    expect(under.r).toBeGreaterThan(under.b + 10);
+  });
+
   it("reports progress up to done", () => {
     const seen: number[] = [];
     bakeLightmap(layoutLightmap(box([0, 0, 0], [1, 1, 1]), IDENTITY, { density: 2 }), [], { rays: 4 }, (d) => seen.push(d));

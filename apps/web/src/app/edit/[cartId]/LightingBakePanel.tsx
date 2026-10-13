@@ -18,6 +18,7 @@ export function LightingBakePanel({ sidecar, onChange }: { sidecar: MeshSidecar;
   const [density, setDensity] = useState(4);
   const [rays, setRays] = useState(48);
   const [distance, setDistance] = useState(7);
+  const [bounces, setBounces] = useState(1);
   const [probeSpacing, setProbeSpacing] = useState(2.5);
   const [progress, setProgress] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -26,7 +27,7 @@ export function LightingBakePanel({ sidecar, onChange }: { sidecar: MeshSidecar;
     setError(null);
     setProgress(0);
     try {
-      onChange(await bakeSceneLighting(sidecar, { density, rays, distance, probeSpacing }, setProgress));
+      onChange(await bakeSceneLighting(sidecar, { density, rays, distance, probeSpacing, bounces }, setProgress));
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -38,6 +39,17 @@ export function LightingBakePanel({ sidecar, onChange }: { sidecar: MeshSidecar;
     <RailGroup label="Baked lighting" advanced>
       <RangeControl label="Detail" nested min={1} max={12} step={1} value={density} onChange={setDensity} ariaLabel="Light map texels per unit" display={`${density}/unit`} />
       <RangeControl label="Quality" nested min={16} max={128} step={16} value={rays} onChange={setRays} ariaLabel="Light bake rays per texel" display={`${rays} rays`} />
+      <RangeControl
+        label="Bounces"
+        nested
+        min={1}
+        max={3}
+        step={1}
+        value={bounces}
+        onChange={setBounces}
+        ariaLabel="Light bake bounces"
+        display={bounces === 1 ? "1 (fast)" : bounces === 2 ? "2 (slower)" : "3 (much slower)"}
+      />
       <RangeControl label="Shade reach" nested min={1} max={20} step={0.5} value={distance} onChange={setDistance} ariaLabel="Light bake shade distance" display={distance.toFixed(1)} />
       <RangeControl label="Light probes" nested min={0} max={8} step={0.5} value={probeSpacing} onChange={setProbeSpacing} ariaLabel="Light probe spacing" display={probeSpacing > 0 ? `every ${probeSpacing.toFixed(1)}` : "none"} />
       <div style={{ display: "flex", gap: 6, marginTop: 6 }}>

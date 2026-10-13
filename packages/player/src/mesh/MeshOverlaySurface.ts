@@ -53,6 +53,10 @@ import {
   sceneLightingKeyDirection,
   vistaBounds,
   sceneLightingTonemap,
+  adaptExposure,
+  blendPostVolumes,
+  frameLuminance,
+  postVolumeReach,
   withDescendants,
   type DecodedTexture,
   type EncodedImage,
@@ -87,9 +91,10 @@ import {
 import { bounceLightsFor, bounceSignature, withCartSun, type CartSun } from "./dynamicLights.js";
 import type { DisplaySurface } from "../display.js";
 import type { ScreenSun } from "../fx/PostFxSurface.js";
+import type { PostVolumeFx } from "../fx/postVolumeFx.js";
 import { SoftwareSceneRenderer, type SceneRenderer } from "../render/sceneRenderer.js";
 import type { MailboxMeshCamera, MailboxMeshPose, WorldLight } from "../mailbox.js";
-import type { LocalShadowTile, LocalShadows, ShadowCascade, ShadowInput, SceneLight, SceneLighting, VistaLayer } from "@cartbox/editor";
+import type { LocalShadowTile, LocalShadows, PostBlend, ShadowCascade, ShadowInput, SceneLight, SceneLighting, ToneMap, VistaLayer } from "@cartbox/editor";
 import type { MeshInstance, MeshScene, SceneVista } from "./meshScene.js";
 import { QUALITY_PRESETS, type QualitySettings } from "../quality.js";
 import { buildOrbitCamera, orbitPitchAboveTerrain } from "./meshScene.js";
@@ -99,6 +104,10 @@ import { estimateSceneBytes, type Profiler, type RenderStats } from "../debug/pr
 const RAD_TO_DEG = 180 / Math.PI;
 /** How far the sun's reported visibility moves toward this frame's each frame. */
 const SUN_EASE = 0.35;
+/** No post volumes: no change to the picture. */
+const NO_POST: PostBlend = { exposure: 0 };
+/** Frames between eye-adaptation measurements. */
+const ADAPT_EVERY = 4;
 /** Dynamic bounce (I17): probe faces traced per frame while the transfer is found, and frames between relights. */
 const BOUNCE_FACES_PER_FRAME = 150;
 const BOUNCE_EVERY = 4;
@@ -310,6 +319,14 @@ export class MeshOverlaySurface implements DisplaySurface {
    * unblocked, for the post-FX glare and lens flare (H8); null without a sky dome.
    */
   onSun: ((sun: ScreenSun | null) => void) | null = null;
+  /**
+   * Told what the post volumes around the camera make of the grade, bloom and
+   * fog (P6) whenever that changes; null when the camera leaves them all.
+   */
+  onPost: ((post: PostVolumeFx | null) => void) | null = null;
+  private postKey = "";
+  /** The eye's adaptation (stops), when the rig has auto-exposure. */
+  private adapted = 0;
   /** The sun's eased visibility and last place on screen (0..1). */
   private sunSeen = 0;
   private sunAt: { x: number; y: number } = { x: 0.5, y: 0.5 };
@@ -959,6 +976,11 @@ export class MeshOverlaySurface implements DisplaySurface {
     const lighting = this.frameLighting();
     this.stepBounce(lighting);
     this.followSun(lighting);
+    // Post volumes round the camera (P6): exposure goes to the tone map, the rest to the post stack.
+    const post = lighting?.postVolumes && this.eye ? blendPostVolumes(lighting.postVolumes, this.eye) : NO_POST;
+    if (this.onPost) this.reportPost(lighting, post);
+    if (!lighting?.autoExposure) this.adapted = 0;
+    const tonemap = lighting ? this.frameTonemap(lighting, post) : null;
     let mark = profiler ? performance.now() : 0;
     const shadow = lighting ? this.buildShadow(instances, moved, lighting) : null;
     if (profiler) {
@@ -1034,7 +1056,7 @@ export class MeshOverlaySurface implements DisplaySurface {
             ambient: lighting.ambient,
             lightDirection: sceneLightingKeyDirection(lighting),
             environment: this.environment,
-            tonemap: sceneLightingTonemap(lighting),
+            tonemap,
             lights,
             localShadows: local?.shadows ?? null,
             shadow,
@@ -1049,6 +1071,12 @@ export class MeshOverlaySurface implements DisplaySurface {
     // Where the sun is and how much of it shows, for the glare and lens flare —
     // measured before the shafts brighten the sky round it.
     if (this.onSun) this.reportSun(out, width, height, camera.view, camera.projection, skyBackdrop ? lighting?.sky ?? null : null);
+    // Eye adaptation: every few frames, ease toward the exposure that brings
+    // what the camera sees to mid-grey (the volumes' own stops taken back out).
+    if (lighting?.autoExposure && tonemap && this.frame % ADAPT_EVERY === 0) {
+      const measured = frameLuminance(out, width, height) / 2 ** post.exposure;
+      this.adapted = adaptExposure(this.adapted, measured, lighting.autoExposure, ADAPT_EVERY / 60);
+    }
     // Sun shafts: open sky near the sun streaks through the gaps in the scene.
     // Drawn before the held weapon, which sits in front of the light.
     if (skyBackdrop && lighting?.shafts && lighting.sky && this.skyCache) {
@@ -1086,7 +1114,7 @@ export class MeshOverlaySurface implements DisplaySurface {
               ambient: lighting.ambient,
               lightDirection: sceneLightingKeyDirection(lighting),
               environment: this.environment,
-              tonemap: sceneLightingTonemap(lighting),
+              tonemap,
               lights,
             }
           : {}),
@@ -1122,6 +1150,37 @@ export class MeshOverlaySurface implements DisplaySurface {
       this.unrefracted.set(mesh, plain);
     }
     return { ...instance, mesh: plain };
+  }
+
+  /** The rig's tone map with the volumes' and the eye's stops applied (null without tone mapping). */
+  private frameTonemap(lighting: SceneLighting, post: PostBlend): ToneMap | null {
+    const base = sceneLightingTonemap(lighting);
+    const stops = post.exposure + this.adapted;
+    return base && stops !== 0 ? { exposure: base.exposure * 2 ** stops } : base;
+  }
+
+  /** Report the volumes' grade, bloom and fog to {@link onPost} when they change. */
+  private reportPost(lighting: SceneLighting | null, post: PostBlend): void {
+    const volumes = lighting?.postVolumes;
+    const eye = this.eye;
+    const fx: PostVolumeFx | null =
+      volumes && eye
+        ? {
+            ...(post.brightness !== undefined ? { brightness: post.brightness } : {}),
+            ...(post.contrast !== undefined ? { contrast: post.contrast } : {}),
+            ...(post.saturation !== undefined ? { saturation: post.saturation } : {}),
+            ...(post.bloom !== undefined ? { bloom: post.bloom } : {}),
+            bloomReach: postVolumeReach(volumes, eye, "bloom"),
+            ...(post.fog !== undefined ? { fog: post.fog } : {}),
+            fogReach: postVolumeReach(volumes, eye, "fog"),
+          }
+        : null;
+    const live = fx && (fx.brightness !== undefined || fx.contrast !== undefined || fx.saturation !== undefined || fx.bloomReach > 0 || fx.fogReach > 0) ? fx : null;
+    // Rounded, so a camera drifting inside a volume doesn't re-send the same look every frame.
+    const key = live ? JSON.stringify(live, (_k, v: unknown) => (typeof v === "number" ? Math.round(v * 200) / 200 : v)) : "";
+    if (key === this.postKey) return;
+    this.postKey = key;
+    this.onPost?.(live);
   }
 
   /** Report the sun to {@link onSun}: its place on screen and its eased visibility. */

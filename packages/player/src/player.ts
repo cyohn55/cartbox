@@ -16,6 +16,7 @@ import { CanvasSurface, type DisplaySurface } from "./display.js";
 import { LitCanvasSurface } from "./lighting/LitCanvasSurface.js";
 import { PostFxSurface } from "./fx/PostFxSurface.js";
 import { anyPostFxEnabled, type PostFxSettings } from "./fx/postfx.js";
+import { applyPostVolumes, type PostVolumeFx } from "./fx/postVolumeFx.js";
 import { QUALITY_PRESETS, QualityGovernor, applyQualityToPostFx, browserDeviceHints, resolveQuality, type QualityChoice, type QualityLevel, type QualitySettings } from "./quality.js";
 import { createConsole, instantiateEngineModule, loadEngineModule, type ConsoleInstance } from "./engine.js";
 import { createDirectConsole, directCoreModel, type DirectConsole } from "./directConsole.js";
@@ -140,6 +141,9 @@ export class Player {
   private qualityChoice: QualityChoice | undefined;
   private readonly qualityGovernor = new QualityGovernor();
   private basePostFx?: PostFxSettings;
+  /** The animation's post-FX values this frame, and the post volumes' look (P6). */
+  private animPostFx: Record<string, number> | null = null;
+  private volumePost: PostVolumeFx | null = null;
   private anim?: AnimSpec;
   /** Presented-frame clock for animation, kept in lockstep with the scene backdrop. */
   private presentFrame = 0;
@@ -673,6 +677,12 @@ export class Player {
         if (fx) this.postFxSurface = fx;
         // The lens flare follows the 3D scene's sun and fades as geometry covers it (H8).
         if (fx && this.meshSurface) this.meshSurface.onSun = (sun) => fx.setSun(sun);
+        // Post volumes round the camera fold into the stack (P6).
+        if (fx && this.meshSurface)
+          this.meshSurface.onPost = (post) => {
+            this.volumePost = post;
+            this.showPostFx();
+          };
         this.surface = fx ?? (await makeBaseSurface(this.container));
       } else {
         this.surface = await makeBaseSurface(this.container);
@@ -1011,7 +1021,14 @@ export class Player {
   private applyQuality(settings: QualitySettings): void {
     this.qualitySettings = settings;
     this.meshSurface?.setQuality(this.qualitySettings);
-    if (this.postFxSurface && this.basePostFx) this.postFxSurface.setSettings(applyQualityToPostFx(this.basePostFx, this.qualitySettings));
+    this.showPostFx();
+  }
+
+  /** Show the cart's post-FX: its settings, the animation's values over them, then the post volumes round the camera. */
+  private showPostFx(): void {
+    if (!this.postFxSurface || !this.basePostFx) return;
+    const base = this.animPostFx ? { ...this.basePostFx, values: { ...this.basePostFx.values, ...this.animPostFx } } : this.basePostFx;
+    this.postFxSurface.setSettings(applyQualityToPostFx(applyPostVolumes(base, this.volumePost), this.qualitySettings));
   }
 
   /**
@@ -1364,9 +1381,8 @@ export class Player {
     this.foregroundSurface?.setPlacements(state.placements);
 
     if (this.postFxSurface && this.basePostFx && Object.keys(state.postfx).length > 0) {
-      this.postFxSurface.setSettings(
-        applyQualityToPostFx({ ...this.basePostFx, values: { ...this.basePostFx.values, ...state.postfx } }, this.qualitySettings),
-      );
+      this.animPostFx = state.postfx;
+      this.showPostFx();
     }
   }
 

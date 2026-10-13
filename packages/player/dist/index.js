@@ -4503,6 +4503,33 @@ var PostFxSurface = class _PostFxSurface {
   }
 };
 
+// src/fx/postVolumeFx.ts
+function applyPostVolumes(base, post) {
+  if (!post) return base;
+  const values = { ...base.values };
+  const enabled = { ...base.enabled };
+  let changed = false;
+  for (const key of ["brightness", "contrast", "saturation"]) {
+    const v = post[key];
+    if (v === void 0 || v === 1) continue;
+    const k = paramKey("grade", key);
+    values[k] = (enabled.grade ? values[k] ?? 1 : 1) * v;
+    enabled.grade = true;
+    changed = true;
+  }
+  const mix = (effect, param, value, reach) => {
+    if (value === void 0 || !(reach > 0)) return;
+    const k = paramKey(effect, param);
+    const own = enabled[effect] ? values[k] ?? 0 : 0;
+    values[k] = own * (1 - reach) + value;
+    enabled[effect] = true;
+    changed = true;
+  };
+  mix("bloom", "strength", post.bloom, post.bloomReach);
+  mix("fog", "density", post.fog, post.fogReach);
+  return changed ? { ...base, enabled, values } : base;
+}
+
 // src/quality.ts
 var QUALITY_LEVELS = ["low", "medium", "high"];
 var QUALITY_PRESETS = {
@@ -11214,6 +11241,10 @@ import {
   sceneLightingKeyDirection,
   vistaBounds,
   sceneLightingTonemap,
+  adaptExposure,
+  blendPostVolumes,
+  frameLuminance,
+  postVolumeReach,
   withDescendants,
   bakeCloudLayer,
   base64ToBytes as base64ToBytes2,
@@ -11491,6 +11522,8 @@ function capsConstrainScene(caps) {
 // src/mesh/MeshOverlaySurface.ts
 var RAD_TO_DEG = 180 / Math.PI;
 var SUN_EASE = 0.35;
+var NO_POST = { exposure: 0 };
+var ADAPT_EVERY = 4;
 var BOUNCE_FACES_PER_FRAME = 150;
 var BOUNCE_EVERY = 4;
 var FIRST_PERSON_NEAR = 0.05;
@@ -11589,6 +11622,14 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
      * unblocked, for the post-FX glare and lens flare (H8); null without a sky dome.
      */
     this.onSun = null;
+    /**
+     * Told what the post volumes around the camera make of the grade, bloom and
+     * fog (P6) whenever that changes; null when the camera leaves them all.
+     */
+    this.onPost = null;
+    this.postKey = "";
+    /** The eye's adaptation (stops), when the rig has auto-exposure. */
+    this.adapted = 0;
     /** The sun's eased visibility and last place on screen (0..1). */
     this.sunSeen = 0;
     this.sunAt = { x: 0.5, y: 0.5 };
@@ -12137,6 +12178,10 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
     const lighting = this.frameLighting();
     this.stepBounce(lighting);
     this.followSun(lighting);
+    const post = lighting?.postVolumes && this.eye ? blendPostVolumes(lighting.postVolumes, this.eye) : NO_POST;
+    if (this.onPost) this.reportPost(lighting, post);
+    if (!lighting?.autoExposure) this.adapted = 0;
+    const tonemap = lighting ? this.frameTonemap(lighting, post) : null;
     let mark = profiler ? performance.now() : 0;
     const shadow = lighting ? this.buildShadow(instances, moved, lighting) : null;
     if (profiler) {
@@ -12203,7 +12248,7 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
         ambient: lighting.ambient,
         lightDirection: sceneLightingKeyDirection(lighting),
         environment: this.environment,
-        tonemap: sceneLightingTonemap(lighting),
+        tonemap,
         lights,
         localShadows: local?.shadows ?? null,
         shadow,
@@ -12215,6 +12260,10 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
       time: this.frame / 60
     });
     if (this.onSun) this.reportSun(out, width, height, camera.view, camera.projection, skyBackdrop ? lighting?.sky ?? null : null);
+    if (lighting?.autoExposure && tonemap && this.frame % ADAPT_EVERY === 0) {
+      const measured = frameLuminance(out, width, height) / 2 ** post.exposure;
+      this.adapted = adaptExposure(this.adapted, measured, lighting.autoExposure, ADAPT_EVERY / 60);
+    }
     if (skyBackdrop && lighting?.shafts && lighting.sky && this.skyCache) {
       const sun = sunScreenPosition(lighting.sky.sunDirection, camera.view, camera.projection, width, height);
       if (sun) {
@@ -12244,7 +12293,7 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
           ambient: lighting.ambient,
           lightDirection: sceneLightingKeyDirection(lighting),
           environment: this.environment,
-          tonemap: sceneLightingTonemap(lighting),
+          tonemap,
           lights
         } : {},
         time: this.frame / 60
@@ -12274,6 +12323,31 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
       this.unrefracted.set(mesh, plain);
     }
     return { ...instance, mesh: plain };
+  }
+  /** The rig's tone map with the volumes' and the eye's stops applied (null without tone mapping). */
+  frameTonemap(lighting, post) {
+    const base = sceneLightingTonemap(lighting);
+    const stops = post.exposure + this.adapted;
+    return base && stops !== 0 ? { exposure: base.exposure * 2 ** stops } : base;
+  }
+  /** Report the volumes' grade, bloom and fog to {@link onPost} when they change. */
+  reportPost(lighting, post) {
+    const volumes = lighting?.postVolumes;
+    const eye = this.eye;
+    const fx = volumes && eye ? {
+      ...post.brightness !== void 0 ? { brightness: post.brightness } : {},
+      ...post.contrast !== void 0 ? { contrast: post.contrast } : {},
+      ...post.saturation !== void 0 ? { saturation: post.saturation } : {},
+      ...post.bloom !== void 0 ? { bloom: post.bloom } : {},
+      bloomReach: postVolumeReach(volumes, eye, "bloom"),
+      ...post.fog !== void 0 ? { fog: post.fog } : {},
+      fogReach: postVolumeReach(volumes, eye, "fog")
+    } : null;
+    const live = fx && (fx.brightness !== void 0 || fx.contrast !== void 0 || fx.saturation !== void 0 || fx.bloomReach > 0 || fx.fogReach > 0) ? fx : null;
+    const key = live ? JSON.stringify(live, (_k, v) => typeof v === "number" ? Math.round(v * 200) / 200 : v) : "";
+    if (key === this.postKey) return;
+    this.postKey = key;
+    this.onPost?.(live);
   }
   /** Report the sun to {@link onSun}: its place on screen and its eased visibility. */
   reportSun(out, width, height, view, projection, sky) {
@@ -18936,6 +19010,9 @@ var Player = class {
     /** The graphics preset in effect (resolved from the quality option once the renderer is known). */
     this.qualitySettings = QUALITY_PRESETS.high;
     this.qualityGovernor = new QualityGovernor();
+    /** The animation's post-FX values this frame, and the post volumes' look (P6). */
+    this.animPostFx = null;
+    this.volumePost = null;
     /** Presented-frame clock for animation, kept in lockstep with the scene backdrop. */
     this.presentFrame = 0;
     /** Where the pointer is written (the debug block's offset from pmem), when the cart has UI documents. */
@@ -19379,6 +19456,11 @@ var Player = class {
         const fx = await PostFxSurface.create(this.container, scale, this.model, shownFx, makeBaseSurface);
         if (fx) this.postFxSurface = fx;
         if (fx && this.meshSurface) this.meshSurface.onSun = (sun) => fx.setSun(sun);
+        if (fx && this.meshSurface)
+          this.meshSurface.onPost = (post) => {
+            this.volumePost = post;
+            this.showPostFx();
+          };
         this.surface = fx ?? await makeBaseSurface(this.container);
       } else {
         this.surface = await makeBaseSurface(this.container);
@@ -19636,7 +19718,13 @@ var Player = class {
   applyQuality(settings) {
     this.qualitySettings = settings;
     this.meshSurface?.setQuality(this.qualitySettings);
-    if (this.postFxSurface && this.basePostFx) this.postFxSurface.setSettings(applyQualityToPostFx(this.basePostFx, this.qualitySettings));
+    this.showPostFx();
+  }
+  /** Show the cart's post-FX: its settings, the animation's values over them, then the post volumes round the camera. */
+  showPostFx() {
+    if (!this.postFxSurface || !this.basePostFx) return;
+    const base = this.animPostFx ? { ...this.basePostFx, values: { ...this.basePostFx.values, ...this.animPostFx } } : this.basePostFx;
+    this.postFxSurface.setSettings(applyQualityToPostFx(applyPostVolumes(base, this.volumePost), this.qualitySettings));
   }
   /**
    * "auto" by measurement: a 3D scene whose frames keep coming slower than
@@ -19935,9 +20023,8 @@ var Player = class {
     }
     this.foregroundSurface?.setPlacements(state.placements);
     if (this.postFxSurface && this.basePostFx && Object.keys(state.postfx).length > 0) {
-      this.postFxSurface.setSettings(
-        applyQualityToPostFx({ ...this.basePostFx, values: { ...this.basePostFx.values, ...state.postfx } }, this.qualitySettings)
-      );
+      this.animPostFx = state.postfx;
+      this.showPostFx();
     }
   }
   renderSingleFrame() {

@@ -5876,6 +5876,27 @@ declare class ParticleOverlaySurface implements DisplaySurface {
 }
 
 /**
+ * The post volumes around the camera (EDITOR_PRO_ROADMAP.md P6), applied to
+ * the cart's post-FX stack. The scene's mesh surface reports what the volumes
+ * make of the picture ({@link PostVolumeFx}); this folds it into the cart's own
+ * settings: the grade multiplies the cart's grade (a volume's 0.8 saturation
+ * takes the cart's 1.1 to 0.88), and bloom and fog mix from the cart's values
+ * toward the volume's by how far into it the camera is. Exposure isn't here:
+ * the scene renderer's tone map takes that.
+ */
+
+interface PostVolumeFx {
+    readonly brightness?: number;
+    readonly contrast?: number;
+    readonly saturation?: number;
+    /** Bloom and fog as the volumes blend them, and how far they reach the camera (0..1). */
+    readonly bloom?: number;
+    readonly bloomReach: number;
+    readonly fog?: number;
+    readonly fogReach: number;
+}
+
+/**
  * MeshOverlaySurface — a display surface that rasterises a cart's declared 3D
  * mesh scene over each presented frame, then hands off to an inner surface. This
  * is Phase 2 of the mesh asset feature: the runtime has no GPU triangle path, so
@@ -5992,6 +6013,14 @@ declare class MeshOverlaySurface implements DisplaySurface {
      * unblocked, for the post-FX glare and lens flare (H8); null without a sky dome.
      */
     onSun: ((sun: ScreenSun | null) => void) | null;
+    /**
+     * Told what the post volumes around the camera make of the grade, bloom and
+     * fog (P6) whenever that changes; null when the camera leaves them all.
+     */
+    onPost: ((post: PostVolumeFx | null) => void) | null;
+    private postKey;
+    /** The eye's adaptation (stops), when the rig has auto-exposure. */
+    private adapted;
     /** The sun's eased visibility and last place on screen (0..1). */
     private sunSeen;
     private sunAt;
@@ -6201,6 +6230,10 @@ declare class MeshOverlaySurface implements DisplaySurface {
     blit(rgba: Uint8Array): void;
     /** A front-layer instance as a GPU front renderer draws it: its mesh without refraction (the same instance when it has none). */
     private withoutRefraction;
+    /** The rig's tone map with the volumes' and the eye's stops applied (null without tone mapping). */
+    private frameTonemap;
+    /** Report the volumes' grade, bloom and fog to {@link onPost} when they change. */
+    private reportPost;
     /** Report the sun to {@link onSun}: its place on screen and its eased visibility. */
     private reportSun;
     /**
