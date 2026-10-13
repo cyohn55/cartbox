@@ -64,6 +64,7 @@ export {
   LOCKOUT_CODE,
   lockoutMeshSidecar,
   arenaMeshSidecar,
+  savedArenaSidecar,
   LOCKOUT_SCENE,
   type ArenaScene,
   type ArenaCodeOptions,
@@ -106,12 +107,32 @@ export {
   LOCKOUT_MAP,
   lockoutCode,
 } from "./model/lockoutSeed";
+export {
+  ARENA_LIMITS,
+  MARKUP_LABELS,
+  addMarkup,
+  colliderFromBounds,
+  emptyArenaMap,
+  groundFromTerrain,
+  markupOverlays,
+  placeMarkup,
+  readArenaMap,
+  removeMarkup,
+  resizeMarkup,
+  setPower,
+  writeArenaMap,
+  type MarkupKind,
+  type MarkupOverlay,
+  type MarkupRef,
+  type StoredArenaMap,
+} from "./model/arenaMarkup";
 export { arenaNavMesh, validateArenaMap, type ArenaIssue, type ArenaIssueKind, type ArenaValidateOptions } from "./model/arenaValidate";
 export { BEAVER_GROUND, BEAVER_LIGHTING, BEAVER_MAP, BEAVER_SCENE, beaverCenter, beaverFoliage, beaverNavMesh, beaverTerrain } from "./model/beaverCreekSeed";
 export { ARENA_MAPS, arenaMap, arenaMapCartridge, arenaMapCode, type ArenaMapEntry } from "./model/arenaMaps";
 export { MAP_BAKES, MAP_BAKE_PARTS, bakeMapKitSource, bakeMapLightmapSource, bakeMapProbesSource, mapBakeStatus, type MapBakeFile, type MapBakePart, type MapBakes } from "./model/mapBakes";
 export {
   ARENA_TILE_WORLD,
+  ARENA_WEAPONS,
   arenaCenter,
   arenaColliders,
   arenaFlight,

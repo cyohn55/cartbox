@@ -62,6 +62,7 @@ import { MODELS, createSceneRenderer, type SceneDraw, type SceneRenderer } from 
 import { readMeshEntry, setMeshTransform, type MeshSidecar } from "@/lib/meshSidecar";
 import { brushRing, terrainRayHit } from "@/lib/terrainEdit";
 import type { SplineOverlay } from "@/lib/splineEdit";
+import type { MarkupOverlay, MarkupRef } from "@cartbox/editor";
 import { decodeMeshTextures } from "@/lib/meshImport";
 import { type Vec3 } from "@/lib/scenePick";
 import {
@@ -173,6 +174,13 @@ interface SceneViewportProps {
   onTerrainStroke?: (id: string, x: number, z: number, start: boolean) => void;
   /** Splines to draw over the scene (P3): each curve as a line, its points as dots. */
   splines?: readonly SplineOverlay[];
+  /** An arena's markup to draw over the scene (P7), the selected piece highlighted. */
+  markup?: readonly MarkupOverlay[];
+  selectedMarkup?: MarkupRef | null;
+  /** Placing markup: a click puts it where the cursor meets the scene (instead of selecting). */
+  onPlace?: ((at: Vec3) => void) | null;
+  /** A click on a marker selects it. */
+  onPickMarkup?: (ref: MarkupRef) => void;
 }
 
 /** A decoded mesh + its base-colour textures, rebuilt only when the geometry set changes. */
@@ -214,6 +222,13 @@ function sphereAround(list: readonly MeshSceneInstance[]): { center: Vec3; radiu
   };
 }
 
+/** A box's twelve edges, as pairs of corner indices (bit 0 x, bit 1 y, bit 2 z). */
+const BOX_EDGES: readonly (readonly [number, number])[] = [
+  [0, 1], [2, 3], [4, 5], [6, 7],
+  [0, 2], [1, 3], [4, 6], [5, 7],
+  [0, 4], [1, 5], [2, 6], [3, 7],
+];
+
 /** Project a world point to canvas pixels, or null when behind the camera. */
 function project(viewProj: Mat4, p: Vec3, width: number, height: number): [number, number] | null {
   const cw = viewProj[3]! * p[0] + viewProj[7]! * p[1] + viewProj[11]! * p[2] + viewProj[15]!;
@@ -235,8 +250,10 @@ function frameSize(cssW: number, cssH: number, dpr: number, budget: number): { w
 
 const NO_IDS: ReadonlySet<string> = new Set();
 const NO_SPLINES: readonly SplineOverlay[] = [];
+const NO_MARKUP: readonly MarkupOverlay[] = [];
+const sameRef = (a: MarkupRef | null | undefined, b: MarkupRef) => Boolean(a && a.kind === b.kind && a.index === b.index);
 
-export function SceneViewport({ sidecar, onSidecarChange, selectedIds, onSelectIds, hidden = NO_IDS, locked = NO_IDS, onKey, previewCamera, previewLocals, onView, onDropAsset, terrainBrush = null, onTerrainStroke, splines = NO_SPLINES }: SceneViewportProps) {
+export function SceneViewport({ sidecar, onSidecarChange, selectedIds, onSelectIds, hidden = NO_IDS, locked = NO_IDS, onKey, previewCamera, previewLocals, onView, onDropAsset, terrainBrush = null, onTerrainStroke, splines = NO_SPLINES, markup = NO_MARKUP, selectedMarkup = null, onPlace = null, onPickMarkup }: SceneViewportProps) {
   const selectedId = selectedIds.at(-1) ?? null;
   const containerRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -511,7 +528,7 @@ export function SceneViewport({ sidecar, onSidecarChange, selectedIds, onSelectI
   );
 
   // Anything drawn changing redraws.
-  useEffect(markDirty, [markDirty, instances, terrainInstances, shadow, sidecar.lighting, showFog, selectedIds, locked, previewCamera, size, renderer, mode, space, terrainBrush, splines]);
+  useEffect(markDirty, [markDirty, instances, terrainInstances, shadow, sidecar.lighting, showFog, selectedIds, locked, previewCamera, size, renderer, mode, space, terrainBrush, splines, markup, selectedMarkup]);
 
   // --- Drawing ------------------------------------------------------------------
 
@@ -519,8 +536,8 @@ export function SceneViewport({ sidecar, onSidecarChange, selectedIds, onSelectI
   const sceneCanvas = useMemo(() => (typeof document === "undefined" ? null : document.createElement("canvas")), []);
 
   // Everything the frame loop reads, refreshed every render.
-  const live = useRef({ instances, splines, terrainInstances, terrains, terrainBrush, shadow, local, lighting: sidecar.lighting, showFog, selectedId, selectedIds, locked, previewCamera, reach, renderer, size, buffers, mode, space, cssSize });
-  live.current = { instances, splines, terrainInstances, terrains, terrainBrush, shadow, local, lighting: sidecar.lighting, showFog, selectedId, selectedIds, locked, previewCamera, reach, renderer, size, buffers, mode, space, cssSize };
+  const live = useRef({ instances, splines, markup, selectedMarkup, terrainInstances, terrains, terrainBrush, shadow, local, lighting: sidecar.lighting, showFog, selectedId, selectedIds, locked, previewCamera, reach, renderer, size, buffers, mode, space, cssSize });
+  live.current = { instances, splines, markup, selectedMarkup, terrainInstances, terrains, terrainBrush, shadow, local, lighting: sidecar.lighting, showFog, selectedId, selectedIds, locked, previewCamera, reach, renderer, size, buffers, mode, space, cssSize };
   /** The box select being dragged, in canvas pixels. */
   const marquee = useRef<{ x0: number; y0: number; x1: number; y1: number } | null>(null);
 
@@ -696,6 +713,52 @@ export function SceneViewport({ sidecar, onSidecarChange, selectedIds, onSelectI
             context.fill();
             context.stroke();
           }
+        }
+        context.restore();
+      }
+
+      // An arena's markup (P7): boxes as wireframes, points as dots, teleporters linked to their exits.
+      if (!preview && live.current.markup.length > 0) {
+        context.save();
+        const scale = Math.max(1, s.width / (css?.w ?? s.width));
+        const at = (q: readonly number[]) => project(viewProj, [q[0]!, q[1]!, q[2]!], s.width, s.height);
+        context.font = `${Math.round(11 * scale)}px sans-serif`;
+        for (const m of live.current.markup) {
+          const chosen = sameRef(live.current.selectedMarkup, m.ref);
+          context.strokeStyle = chosen ? "#ffffff" : m.color;
+          context.fillStyle = m.color;
+          context.lineWidth = scale * (chosen ? 2.5 : 1.25);
+          if (m.box) {
+            const [cx, cy, cz, hx, hy, hz] = m.box;
+            const corner = (c: number) => at([cx + (c & 1 ? hx : -hx), cy + (c & 2 ? hy : -hy), cz + (c & 4 ? hz : -hz)]);
+            context.beginPath();
+            for (const [a, b] of BOX_EDGES) {
+              const pa = corner(a), pb = corner(b);
+              if (!pa || !pb) continue;
+              context.moveTo(pa[0], pa[1]);
+              context.lineTo(pb[0], pb[1]);
+            }
+            context.stroke();
+          }
+          if (m.link) {
+            const pa = at(m.link[0]), pb = at(m.link[1]);
+            if (pa && pb) {
+              context.setLineDash([6 * scale, 4 * scale]);
+              context.beginPath();
+              context.moveTo(pa[0], pa[1]);
+              context.lineTo(pb[0], pb[1]);
+              context.stroke();
+              context.setLineDash([]);
+            }
+          }
+          if (m.ref.kind === "collider") continue;
+          const p = at([m.at[0], m.at[1] + 0.05, m.at[2]]);
+          if (!p) continue;
+          context.beginPath();
+          context.arc(p[0], p[1], scale * (chosen ? 6 : 4.5), 0, Math.PI * 2);
+          context.fill();
+          context.stroke();
+          if (m.label) context.fillText(m.label, p[0] + 7 * scale, p[1] - 6 * scale);
         }
         context.restore();
       }
@@ -959,6 +1022,48 @@ export function SceneViewport({ sidecar, onSidecarChange, selectedIds, onSelectI
     setCamera(orbit(cam, -dx * ORBIT_SPEED, dy * ORBIT_SPEED));
   };
 
+  /** Where a placement lands: the nearer of the first mesh and terrain under the cursor, else the ground (y = 0). */
+  const placePoint = (event: { clientX: number; clientY: number }, el: HTMLCanvasElement): Vec3 | null => {
+    const cam = cameraRef.current;
+    if (!cam) return null;
+    const { ndc } = pointerAt(event, el);
+    const ray = viewportRay(cam, aspect, ndc[0], ndc[1]);
+    let best: { t: number; point: Vec3 } | null = raycastMeshes(ray, pickable().map((i) => ({ key: i.id, mesh: i.mesh, model: i.model })));
+    terrains.forEach((entry, k) => {
+      const inst = terrainInstances[k];
+      const hit = inst ? terrainRayHit(entry.terrain, inst.model, ray) : null;
+      if (!hit) return;
+      const d = hit.world.map((v, a) => v - ray.origin[a]!);
+      const t = Math.hypot(d[0]!, d[1]!, d[2]!) / Math.max(1e-9, Math.hypot(ray.dir[0], ray.dir[1], ray.dir[2]));
+      if (!best || t < best.t) best = { t, point: hit.world };
+    });
+    if (best) return (best as { point: Vec3 }).point;
+    if (Math.abs(ray.dir[1]) > 1e-6) {
+      const t = -ray.origin[1] / ray.dir[1];
+      if (t > 0) return [ray.origin[0] + ray.dir[0] * t, 0, ray.origin[2] + ray.dir[2] * t];
+    }
+    return null;
+  };
+
+  /** The marker under the cursor (within a few pixels of its dot), or null. */
+  const markupUnder = (event: { clientX: number; clientY: number }, el: HTMLCanvasElement): MarkupRef | null => {
+    const cam = cameraRef.current;
+    if (!cam || !size || markup.length === 0) return null;
+    const { canvas, rect } = pointerAt(event, el);
+    const planes = clipPlanes(cam, reach.center, reach.radius);
+    const { viewProj } = cameraMatrices(cam, size.width / size.height, planes.near, planes.far);
+    const reachPx = 9 * (el.width / rect.width);
+    let best: { ref: MarkupRef; d: number } | null = null;
+    for (const m of markup) {
+      if (m.ref.kind === "collider") continue;
+      const p = project(viewProj, [m.at[0], m.at[1] + 0.05, m.at[2]], el.width, el.height);
+      if (!p) continue;
+      const d = Math.hypot(p[0] - canvas[0], p[1] - canvas[1]);
+      if (d < reachPx && (!best || d < best.d)) best = { ref: m.ref, d };
+    }
+    return best?.ref ?? null;
+  };
+
   /** The objects that can be picked here: drawn (not hidden) and not locked. */
   const pickable = () => instances.filter((i) => !locked.has(i.id));
 
@@ -994,6 +1099,18 @@ export function SceneViewport({ sidecar, onSidecarChange, selectedIds, onSelectI
       return;
     }
     if (!state || state.moved || state.kind !== "tool" || !cam) return;
+    // Placing arena markup (P7): the click puts it on the scene.
+    if (onPlace) {
+      const at = placePoint(event, event.currentTarget);
+      if (at) onPlace(at);
+      return;
+    }
+    // A click on a marker selects it.
+    const marker = markupUnder(event, event.currentTarget);
+    if (marker && onPickMarkup) {
+      onPickMarkup(marker);
+      return;
+    }
     // A click: pick the mesh whose triangles are under the cursor.
     const { ndc } = pointerAt(event, event.currentTarget);
     const ray = viewportRay(cam, aspect, ndc[0], ndc[1]);
@@ -1212,7 +1329,7 @@ export function SceneViewport({ sidecar, onSidecarChange, selectedIds, onSelectI
           onContextMenu={(event) => event.preventDefault()}
           onDragOver={onDragOver}
           onDrop={onDrop}
-          style={{ position: "absolute", inset: 0, width: "100%", height: "100%", touchAction: "none", cursor: terrainBrush ? "crosshair" : mode === "orbit" ? "grab" : "crosshair", outline: "none" }}
+          style={{ position: "absolute", inset: 0, width: "100%", height: "100%", touchAction: "none", cursor: terrainBrush || onPlace ? "crosshair" : mode === "orbit" ? "grab" : "crosshair", outline: "none" }}
           role="img"
           aria-label="3D scene — click or tap to select; drag to orbit or transform; right-drag with WASD to fly; middle- or Shift-drag to pan; wheel to dolly; F frames the selection. On a tablet: two fingers orbit, three pan, pinch to dolly"
         />

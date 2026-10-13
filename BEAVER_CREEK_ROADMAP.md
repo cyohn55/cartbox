@@ -166,6 +166,7 @@ From memory of Battle Creek and Beaver Creek. The linked model can't be opened f
   - **Play:** `/lockout?map=<cart>` plays a saved cart's map with the shared pack, offline and online. A guest receives the host's map.
   - *Beaver Creek:* its collision and markup open in the editor. Moving a pad or a spawn there and playing the result moves it in the game.
   - *Tests:* a map authored only through the editor's model (no code) passes the validator, and its bots reach every pad and hill.
+  - **Mostly done by EDITOR_PRO_ROADMAP.md P7.** The editor's Arena panel marks up and checks a map, and `/lockout?map=cart:<id>` plays it offline against bots. Two pieces are still open: online play, where a guest receives the host's map, and dragging markers with the gizmo.
 
 ## Phase B: outdoor visual quality (editor and renderer)
 

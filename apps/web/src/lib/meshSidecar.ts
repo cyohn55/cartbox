@@ -85,6 +85,9 @@ import {
   type ParametricShape,
   readSplines,
   type Spline,
+  readArenaMap,
+  writeArenaMap,
+  type StoredArenaMap,
   worldMatrices,
   type MeshAsset,
   type AnimatorSpec,
@@ -243,6 +246,8 @@ export interface MeshSidecar {
   readonly materials?: MaterialLibrary;
   /** Rivers, paths and walls laid along curves (see splines.ts in @cartbox/editor); absent or empty = none. */
   readonly splines?: readonly Spline[];
+  /** The scene's arena map: gameplay markup and collision (see arenaMarkup.ts in @cartbox/editor); absent = not an arena. */
+  readonly arena?: StoredArenaMap;
 }
 
 /** The identity transform a freshly imported mesh gets. */
@@ -267,7 +272,7 @@ export function newMeshId(): string {
  */
 export function encodeMeshSidecar(sidecar: MeshSidecar): string | null {
   const prefabs = sidecar.prefabs ?? [];
-  if (sidecar.meshes.length === 0 && !sidecar.lighting && prefabs.length === 0 && (sidecar.timelines?.length ?? 0) === 0 && (sidecar.levels?.length ?? 0) === 0 && (sidecar.terrains?.length ?? 0) === 0 && (sidecar.audio?.sounds.length ?? 0) === 0 && (sidecar.ui?.length ?? 0) === 0 && (sidecar.components?.length ?? 0) === 0 && (sidecar.actions?.length ?? 0) === 0 && !sidecar.strings && (sidecar.materials?.length ?? 0) === 0 && (sidecar.splines?.length ?? 0) === 0) return null;
+  if (sidecar.meshes.length === 0 && !sidecar.lighting && prefabs.length === 0 && (sidecar.timelines?.length ?? 0) === 0 && (sidecar.levels?.length ?? 0) === 0 && (sidecar.terrains?.length ?? 0) === 0 && (sidecar.audio?.sounds.length ?? 0) === 0 && (sidecar.ui?.length ?? 0) === 0 && (sidecar.components?.length ?? 0) === 0 && (sidecar.actions?.length ?? 0) === 0 && !sidecar.strings && (sidecar.materials?.length ?? 0) === 0 && (sidecar.splines?.length ?? 0) === 0 && !sidecar.arena) return null;
   // Repeated meshes (and animation frames) are stored once in a shared library,
   // shared between placed entries and prefab nodes (a prefab's copies repeat its meshes).
   const nodes = prefabs.flatMap((prefab) => prefab.nodes);
@@ -307,6 +312,7 @@ export function encodeMeshSidecar(sidecar: MeshSidecar): string | null {
     ...(sidecar.strings ? { strings: sidecar.strings } : {}),
     ...(sidecar.materials && sidecar.materials.length > 0 ? { materials: sidecar.materials.map((m) => ({ id: m.id, material: serializeMaterial(m.material) })) } : {}),
     ...(sidecar.splines && sidecar.splines.length > 0 ? { splines: sidecar.splines } : {}),
+    ...(sidecar.arena ? { arena: sidecar.arena } : {}),
   });
 }
 
@@ -439,6 +445,7 @@ export function decodeMeshSidecar(raw: string | null | undefined): MeshSidecar {
   const strings = parseStringTable((parsed as { strings?: unknown }).strings);
   const materials = readMaterialLibrary((parsed as { materials?: unknown }).materials);
   const splines = readSplines((parsed as { splines?: unknown }).splines);
+  const arena = readArenaMap((parsed as { arena?: unknown }).arena);
   const placed = linked.map((entry) => (entry.level && !levelIds.has(entry.level) ? withoutLevel(entry) : entry));
   return {
     version: MESH_SIDECAR_VERSION,
@@ -466,6 +473,7 @@ export function decodeMeshSidecar(raw: string | null | undefined): MeshSidecar {
     ...(strings ? { strings } : {}),
     ...(materials.length > 0 ? { materials } : {}),
     ...(splines.length > 0 ? { splines } : {}),
+    ...(arena ? { arena: writeArenaMap(arena) } : {}),
   };
 }
 

@@ -94,6 +94,9 @@ import { addSplinePoint, splineOverlays } from "@/lib/splineEdit";
 import { findFoliage, replaceFoliage } from "@/lib/foliageEdit";
 import { INITIAL_TERRAIN_EDIT, TerrainPanel, type TerrainEditState } from "./TerrainPanel";
 import { KitPanel } from "./KitPanel";
+import { ArenaPanel, INITIAL_ARENA_EDIT, type ArenaEditState } from "./ArenaPanel";
+import { addMarkup, markupOverlays, placeMarkup } from "@cartbox/editor";
+import { setSidecarArena, sidecarArena } from "@/lib/arenaEdit";
 import { SoundsPanel } from "./SoundsPanel";
 import { ComponentScriptsPanel, ComponentsInspector } from "./ComponentsPanel";
 import { clickSelection, copyPayload, duplicateEntries, pasteEntries, removeEntries, withSubtrees } from "@/lib/sceneSelection";
@@ -277,6 +280,21 @@ export function MeshEditor({ sidecar, onSidecarChange, code, onStartPlay, modern
   const [terrainEdit, setTerrainEdit] = useState<TerrainEditState>(INITIAL_TERRAIN_EDIT);
   /** The splines' curves and points, drawn over the scene view (P3). */
   const splineLines = useMemo(() => splineOverlays(sidecar), [sidecar]);
+  // The level editor (P7): what a click places, the selected marker, and the markup drawn over the scene.
+  const [arenaEdit, setArenaEdit] = useState<ArenaEditState>(INITIAL_ARENA_EDIT);
+  const arena = useMemo(() => sidecarArena(sidecar), [sidecar]);
+  const arenaMarkup = useMemo(() => (arena ? markupOverlays(arena, arenaEdit.showColliders) : []), [arena, arenaEdit.showColliders]);
+  const onArenaPlace = (at: readonly [number, number, number]) => {
+    if (!arena || !arenaEdit.placing) return;
+    if (arenaEdit.selected) {
+      // Moving the selected marker: it goes there, and stays selected.
+      onSidecarChange(setSidecarArena(sidecar, placeMarkup(arena, { kind: arenaEdit.placing, index: arenaEdit.selected.index }, at)));
+      setArenaEdit({ ...arenaEdit, placing: null, selected: { kind: arenaEdit.placing === "exit" ? "teleporter" : arenaEdit.placing, index: arenaEdit.selected.index } });
+      return;
+    }
+    // Placing new markup: keep placing more of the same until the button is clicked off.
+    onSidecarChange(setSidecarArena(sidecar, addMarkup(arena, arenaEdit.placing, at).map));
+  };
   const onTerrainEdit = (next: TerrainEditState) => {
     setTerrainEdit(next);
     if (next.tool) setView("scene"); // brushing happens in the scene view
@@ -1241,6 +1259,7 @@ export function MeshEditor({ sidecar, onSidecarChange, code, onStartPlay, modern
 
         <TerrainPanel sidecar={sidecar} onChange={onSidecarChange} edit={terrainEdit} onEdit={onTerrainEdit} />
         <KitPanel sidecar={sidecar} onChange={onSidecarChange} selectedId={selectedId} onSelect={setSelectedId} />
+        <ArenaPanel sidecar={sidecar} onChange={onSidecarChange} edit={arenaEdit} onEdit={setArenaEdit} selectedIds={selection} cartId={cartId} />
       </aside>
 
       {/* Centre: preview — the selected mesh alone, or the whole composed scene — over the content browser */}
@@ -1262,6 +1281,10 @@ export function MeshEditor({ sidecar, onSidecarChange, code, onStartPlay, modern
           terrainBrush={terrainEdit.tool && terrainEdit.id ? { id: terrainEdit.id, radius: terrainEdit.radius } : null}
           onTerrainStroke={onTerrainStroke}
           splines={splineLines}
+          markup={arenaMarkup}
+          selectedMarkup={arenaEdit.selected}
+          onPlace={arena && arenaEdit.placing ? onArenaPlace : null}
+          onPickMarkup={(ref) => setArenaEdit({ ...arenaEdit, selected: ref.kind === "exit" ? { kind: "teleporter", index: ref.index } : ref, placing: null })}
           onDropAsset={(data, at) => {
             try {
               const asset = JSON.parse(data) as { kind?: unknown; key?: unknown };

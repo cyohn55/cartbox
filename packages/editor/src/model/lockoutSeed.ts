@@ -62,6 +62,8 @@ import { LOCKOUT_LIGHTMAP } from "./lockoutLightmap.generated";
 import { LOCKOUT_PROBES } from "./lockoutProbes.generated";
 import { planProbeGrid, type LightProbeGrid, type StoredLightProbes } from "./lightProbes";
 import { SWEETIE_16 } from "./palette";
+import { writeArenaMap } from "./arenaMarkup";
+import { arenaNavMesh } from "./arenaValidate";
 import {
   ARENA_TILE_WORLD,
   arenaColliders,
@@ -69,6 +71,7 @@ import {
   arenaLua,
   arenaPads,
   forerunnerBuilder,
+  groundBoxes,
   type ArenaBox,
   type ArenaFlight,
   type ArenaMap,
@@ -3735,6 +3738,53 @@ export function arenaMeshSidecar(scene: ArenaScene): string {
     components: LOCKOUT_COMPONENTS,
     actions: LOCKOUT_INPUT_ACTIONS,
     strings: LOCKOUT_STRINGS,
+    // The map's markup and collision (P7), so the editor opens it as an arena map.
+    arena: writeArenaMap(scene.map),
+  });
+}
+
+/**
+ * A saved map's instance 0: one triangle shrunk to a point, so nothing shows
+ * but the instance is kept (the cart's code counts its bots, viewmodels and
+ * pickups from it).
+ */
+const SAVED_MAP_STUB: MeshAsset = {
+  name: "arena",
+  primitives: [
+    {
+      positions: new Float32Array(9),
+      normals: null,
+      uvs: null,
+      indices: Uint32Array.from([0, 1, 2]),
+      material: { name: "arena", baseColorFactor: [0, 0, 0, 0], baseColorImage: null, metallicFactor: 0, roughnessFactor: 1, alphaMode: "blend" },
+    },
+  ],
+};
+
+/**
+ * A saved arena map's scaffold (EDITOR_PRO_ROADMAP.md P7): the arena's
+ * shared assets laid out as the cart's code expects them -- an empty map at
+ * instance 0, the bots, the viewmodels, a Pickup over each of the map's pads,
+ * the Holograms and the left hands -- with a navmesh baked over its colliders
+ * and ground and ragdoll colliders from them. The saved scene's own objects,
+ * lighting and terrains go in after (see savedArena.ts in the web app).
+ */
+export function savedArenaSidecar(map: ArenaMap): string {
+  return arenaMeshSidecar({
+    id: "saved",
+    name: map.name,
+    map,
+    parts: () => ({
+      mesh: SAVED_MAP_STUB,
+      lighting: null,
+      navmesh: arenaNavMesh(map, LOCKOUT_NAV_AGENT),
+      terrains: [],
+      timelines: [],
+      ragdollColliders: [...arenaColliders(map), ...(map.ground ? groundBoxes(map.ground, 4) : [])],
+      decalMarks: null,
+      foliage: null,
+      audio: null,
+    }),
   });
 }
 
@@ -4235,7 +4285,10 @@ local function move_vertical(e)
   -- Landing on the ground (B3), from above or sunk a little into a slope.
   local g = HF and ground_at(e.x, e.z)
   if g and e.vy <= 0 and e.y < g and e.y > g - 1.2 then e.y = g; e.vy = 0; e.grounded = true end
-  if e.y < DEATH_Y then fell(e) end   -- off the arena
+  if e.y < DEATH_Y then fell(e) return end   -- off the arena
+  for k = 1, #KILL, 6 do   -- a kill volume (P7)
+    if e.x > KILL[k] and e.x < KILL[k+3] and e.z > KILL[k+2] and e.z < KILL[k+5] and e.y + PH > KILL[k+1] and e.y < KILL[k+4] then fell(e) return end
+  end
 end
 
 -- One tick of a soldier's own movement from its input (L7): forward and right

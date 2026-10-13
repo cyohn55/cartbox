@@ -19,6 +19,9 @@
  * Only that map's sidecar loads. The title menu's map choice asks this page
  * (REQ_MAP) to load another, and so does a guest whose host plays another:
  * the game is mounted again on the new map, in the same netplay session.
+ *
+ * `?map=cart:<cart id>` plays an arena map marked up in the editor and saved
+ * in this browser (EDITOR_PRO_ROADMAP.md P7; see savedArena.ts), against bots.
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -33,7 +36,7 @@ import {
   type NetRoomStatus,
   type PlayerHandle,
 } from "@cartbox/player";
-import { ARENA_MAPS, LOCKOUT_INPUT_ACTIONS, LOCKOUT_STRINGS, arenaMap, arenaMapCartridge } from "@cartbox/editor";
+import { ARENA_MAPS, LOCKOUT_INPUT_ACTIONS, LOCKOUT_STRINGS, arenaMap, arenaMapCartridge, lockoutCartridge } from "@cartbox/editor";
 import { preferredLanguages, readPlayerPrefs, writePlayerPrefs, type PlayerPrefs } from "@/lib/accessibilityPrefs";
 
 import { DIRECT_CORE_URL, ENGINE_URL_BY_MODEL } from "@/lib/consoleModel";
@@ -47,6 +50,7 @@ import { fetchStandaloneParts, standaloneHtml, standaloneZip, type StandaloneGam
 import { loadCartDraft } from "@/lib/localCartStore";
 import { lockoutSidecarWithAssets, type LockoutAssetOverlay } from "@/lib/lockoutAssets";
 import { perfLine } from "@/lib/perfReadout";
+import { playableArena } from "@/lib/savedArena";
 
 /** Where Lockout keeps its career record (it has no cart row, so it stays in this browser). */
 const LOCKOUT_SAVE_KEY = saveKey("lockout");
@@ -56,16 +60,51 @@ const REQ_MATCHMAKE = 1;
 const REQ_CANCEL = 2;
 const REQ_MAP = 3;
 
+/** A saved arena's map id (`cart:<cart id>`, P7), or null for one of the shipped maps. */
+function savedCartId(mapId: string): string | null {
+  const m = /^cart:([\w-]{1,64})$/.exec(mapId);
+  return m ? m[1]! : null;
+}
+
+const savedGames = new Map<string, { json: string; cart: (boot: string) => Uint8Array; name: string }>();
+
+/** A saved arena, made playable once per load (its navmesh bakes); throws, with why, when it can't be. */
+function savedGame(cartId: string): { json: string; cart: (boot: string) => Uint8Array; name: string } {
+  const known = savedGames.get(cartId);
+  if (known) return known;
+  const made = playableArena(loadCartDraft(cartId)?.sidecars.mesh);
+  if ("problem" in made) throw new Error(made.problem);
+  const scene = parseMeshScene(made.json);
+  if (!scene) throw new Error("That arena's scene doesn't load.");
+  const code = made.code(scene.bounds.center);
+  const game = { json: made.json, cart: (boot: string) => lockoutCartridge(boot ? `${code}\n${boot}` : code), name: made.map.name };
+  savedGames.set(cartId, game);
+  return game;
+}
+
+/** A map's cartridge, with `boot` appended (a shipped map's, or a saved arena's). */
+function mapCartridge(mapId: string, boot: string): Uint8Array {
+  const saved = savedCartId(mapId);
+  return saved ? savedGame(saved).cart(boot) : arenaMapCartridge(mapId, boot);
+}
+
 /** A map as a standalone export (EP18): plays against bots with no server. */
 function lockoutStandalone(mapId: string): StandaloneGame {
+  const saved = savedCartId(mapId);
+  if (saved) {
+    const game = savedGame(saved);
+    return { title: `Lockout: ${game.name}`, cartId: `lockout-${saved}`, modelId: "xbox360", cart: game.cart(""), postFx: ARENA_MAPS[0]!.fx, mesh: game.json };
+  }
   const map = arenaMap(mapId);
   const title = map.id === "lockout" ? "Lockout" : `Lockout: ${map.name}`;
   return { title, cartId: map.id === "lockout" ? "lockout" : `lockout-${map.id}`, modelId: "xbox360", cart: arenaMapCartridge(map.id), postFx: map.fx, mesh: map.sidecar() };
 }
 
-/** The map `?map=` names (Lockout when none, or one it doesn't know). */
+/** The map `?map=` names (Lockout when none, or one it doesn't know; a saved arena as `cart:<id>`). */
 function urlMapId(): string {
-  return arenaMap(new URLSearchParams(window.location.search).get("map")).id;
+  const raw = new URLSearchParams(window.location.search).get("map");
+  if (raw && savedCartId(raw)) return raw;
+  return arenaMap(raw).id;
 }
 
 type Phase = { kind: "lobby" } | { kind: "playing" } | { kind: "error"; message: string };
@@ -78,6 +117,8 @@ function assetsCartId(): string | null {
 
 /** A map's scene, with the `?assets=` cart's saved Spartans, viewmodels and pickups laid in. */
 function lockoutScene(mapId: string): { json: string; overlay: LockoutAssetOverlay | null } {
+  const saved = savedCartId(mapId);
+  if (saved) return { json: savedGame(saved).json, overlay: null };
   const id = assetsCartId();
   return lockoutSidecarWithAssets(arenaMap(mapId).sidecar(), id ? (loadCartDraft(id)?.sidecars.mesh ?? null) : null);
 }
@@ -124,7 +165,7 @@ export function LockoutGame() {
     const assetsCart = assetsCartId();
     const map = urlMapId();
     setMapId(map);
-    if (assetsCart) setAssets({ cart: assetsCart, overlay: lockoutScene(map).overlay });
+    if (assetsCart && !savedCartId(map)) setAssets({ cart: assetsCart, overlay: lockoutScene(map).overlay });
     const onFs = () => setIsFullscreen(Boolean(fullscreenElement()));
     document.addEventListener("fullscreenchange", onFs);
     document.addEventListener("webkitfullscreenchange", onFs);
@@ -251,7 +292,7 @@ export function LockoutGame() {
     async (session: NetSession, map: string, boot: string) => {
       const stage = stageRef.current;
       if (!stage) return;
-      const bytes = arenaMapCartridge(map, boot);
+      const bytes = mapCartridge(map, boot);
       const scene = lockoutScene(map).json;
       const cartUrl = URL.createObjectURL(new Blob([bytes.buffer as ArrayBuffer], { type: "application/octet-stream" }));
       const current = settingsRef.current;
@@ -268,7 +309,7 @@ export function LockoutGame() {
         // No 2D relight: the arena's 3D rig lights it (and its objectives glow
         // through cartbox.light3d), and skipping the 2D lighting layer spares
         // every frame a material capture and a full-screen relight pass.
-        postFx: parsePostFxSettings(arenaMap(map).fx) ?? undefined,
+        postFx: parsePostFxSettings(savedCartId(map) ? ARENA_MAPS[0]!.fx : arenaMap(map).fx) ?? undefined,
         mesh: parseMeshScene(scene) ?? undefined,
         ui: readSidecarUi(scene),
         actions: readSidecarActions(scene),
@@ -427,7 +468,12 @@ export function LockoutGame() {
             </button>
             <span style={{ color: "var(--muted)" }}>Title screen: game types vs bots, and Matchmaking to play people online.</span>
           </div>
-          {ARENA_MAPS.length > 1 && (
+          {savedCartId(mapId) && (
+            <span style={{ color: "var(--muted)" }}>
+              Map: the arena saved in cart {savedCartId(mapId)} in this browser (against bots: online, guests would load their own map).
+            </span>
+          )}
+          {ARENA_MAPS.length > 1 && !savedCartId(mapId) && (
             <div style={{ display: "flex", flexWrap: "wrap", gap: 10, alignItems: "center" }} role="radiogroup" aria-label="Map">
               <span style={{ color: "var(--muted)" }}>Map:</span>
               {ARENA_MAPS.map((m) => (

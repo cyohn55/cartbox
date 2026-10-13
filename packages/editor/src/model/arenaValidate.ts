@@ -21,7 +21,7 @@ export function arenaNavMesh(map: ArenaMap, agent: Partial<NavAgent>, cell = 0.2
   return bakeNavMesh(all, { cell, agent });
 }
 
-export type ArenaIssueKind = "spawn-floor" | "spawn-solid" | "unreachable" | "death-plane" | "out-of-range" | "over-budget";
+export type ArenaIssueKind = "no-spawns" | "spawn-floor" | "spawn-solid" | "unreachable" | "death-plane" | "kill-volume" | "out-of-range" | "over-budget";
 
 export interface ArenaIssue {
   readonly kind: ArenaIssueKind;
@@ -30,7 +30,8 @@ export interface ArenaIssue {
 }
 
 export interface ArenaValidateOptions {
-  readonly navmesh: NavMesh;
+  /** The bots' navmesh: with it, every place is checked reachable from the first spawn (absent: that check is skipped). */
+  readonly navmesh?: NavMesh;
   /** The soldier's radius and height (the cart's PR and PH). */
   readonly body?: { readonly radius: number; readonly height: number };
   /** The map's sidecar size and its budget, in characters. */
@@ -62,6 +63,7 @@ export function validateArenaMap(map: ArenaMap, options: ArenaValidateOptions): 
   const inside = (x: number, y: number, z: number): boolean =>
     boxes.some(([cx, cy, cz, hx, hy, hz]) => Math.abs(x - cx) < hx + body.radius && Math.abs(z - cz) < hz + body.radius && y + 0.1 < cy + hy && y + body.height > cy - hy);
 
+  if (map.spawns.length === 0) issues.push({ kind: "no-spawns", message: "the map has no spawns" });
   map.spawns.forEach((s, i) => {
     const [x, y, z] = s.at;
     if (floorUnder(x, y, z) === null) issues.push({ kind: "spawn-floor", message: `spawn ${i + 1} at ${fmt(s.at)} has no floor under it`, at: s.at });
@@ -81,15 +83,17 @@ export function validateArenaMap(map: ArenaMap, options: ArenaValidateOptions): 
   for (const p of places) {
     const [x, y, z] = p.at;
     if (y < map.deathY + 1) issues.push({ kind: "death-plane", message: `${p.name} at ${fmt(p.at)} is within a metre of the death plane (${map.deathY})`, at: p.at });
+    const kill = (map.kills ?? []).findIndex(([cx, cy, cz, hx, hy, hz]) => Math.abs(x - cx) < hx && Math.abs(z - cz) < hz && y + body.height > cy - hy && y < cy + hy);
+    if (kill >= 0) issues.push({ kind: "kill-volume", message: `${p.name} at ${fmt(p.at)} is inside kill volume ${kill + 1}`, at: p.at });
     if (Math.abs(x) > NET_SPAN || Math.abs(z) > NET_SPAN || Math.abs(y) > NET_HEIGHT) {
       issues.push({ kind: "out-of-range", message: `${p.name} at ${fmt(p.at)} is beyond what the net state carries (±${NET_SPAN} m across, ±${NET_HEIGHT} m up)`, at: p.at });
     }
   }
 
   // Reachable from the first spawn, over the bots' navmesh.
-  const graph = new NavGraph(options.navmesh);
+  const graph = options.navmesh ? new NavGraph(options.navmesh) : null;
   const from = map.spawns[0]?.at;
-  if (from) {
+  if (from && graph) {
     for (const p of places.slice(1)) {
       const reach = graph.nearest(p.at[0], p.at[1] + 0.05, p.at[2], 1.5) >= 0 && graph.findPath(from, p.at) !== null;
       if (!reach) issues.push({ kind: "unreachable", message: `${p.name} at ${fmt(p.at)} can't be reached from spawn 1`, at: p.at });
