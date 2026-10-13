@@ -157,8 +157,37 @@ export function useEditorHistory({
     return { bytes, bank: bankRef.current, sidecars: sidecarsRef.current, hash: hashBytes(bytes) };
   }, []);
 
-  const commit = useCallback(() => {
+  /**
+   * A pointer is down (a drag, a stroke): its edits are one gesture however
+   * slowly its frames come, so nothing is committed until it lifts. Without
+   * this, a drag whose frames take longer than the idle gap (a big scene on a
+   * slow GPU) split into several undo steps.
+   */
+  const pointerHeldRef = useRef(false);
+  useEffect(() => {
+    const down = () => {
+      pointerHeldRef.current = true;
+    };
+    const up = () => {
+      pointerHeldRef.current = false;
+    };
+    window.addEventListener("pointerdown", down, true);
+    window.addEventListener("pointerup", up, true);
+    window.addEventListener("pointercancel", up, true);
+    return () => {
+      window.removeEventListener("pointerdown", down, true);
+      window.removeEventListener("pointerup", up, true);
+      window.removeEventListener("pointercancel", up, true);
+    };
+  }, []);
+
+  const commit = useCallback(function commitNow(force = false) {
     timerRef.current = null;
+    if (!force && pointerHeldRef.current) {
+      // Still mid-gesture: look again once the idle gap has passed.
+      timerRef.current = setTimeout(commitNow, COALESCE_MS);
+      return;
+    }
     const history = historyRef.current;
     const snapshot = capture();
     if (!history || !snapshot) return;
@@ -171,7 +200,7 @@ export function useEditorHistory({
   const notify = useCallback(() => {
     if (applyingRef.current || !runnableRef.current) return;
     if (timerRef.current) clearTimeout(timerRef.current);
-    timerRef.current = setTimeout(commit, COALESCE_MS);
+    timerRef.current = setTimeout(() => commit(), COALESCE_MS);
   }, [commit]);
 
   // The proxy is stable per engine: `notify` never changes identity, so the
@@ -213,7 +242,7 @@ export function useEditorHistory({
   const flushPending = useCallback(() => {
     if (!timerRef.current) return;
     clearTimeout(timerRef.current);
-    commit();
+    commit(true);
   }, [commit]);
 
   const undo = useCallback(() => {

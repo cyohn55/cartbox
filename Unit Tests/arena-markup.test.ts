@@ -81,6 +81,7 @@ import {
   writeInputSettings,
 } from "@cartbox/player";
 
+import { arenaActorsInRect, arenaFloorBelow, groundLines, iconPoint, navmeshPoints, pickArenaActor, pivotOnFloor, rayBox, visibleArenaActors } from "@/lib/arenaOverlay";
 import { arenaSceneCentre, buildArenaToGame, checkArenaMap, rebuildArenaNavigation, relayArenaPickups } from "@/lib/arenaBuild";
 import { bookmarkIn, bookmarkSlot, readBookmarks, setBookmark } from "@/lib/cameraBookmarks";
 import { lockoutMarkup } from "@/lib/lockoutAssets";
@@ -184,6 +185,74 @@ describe("markup as actors", () => {
     expect(setTeleporterYaw(BEAVER_MAP, 1, 1.5).teleporters![1]!.yaw).toBe(1.5);
   });
 });
+
+describe("actors in the scene view", () => {
+  /** A top-down projection: a metre is ten pixels, x to the right and z down, centred on (500, 500). */
+  const topDown = (p: readonly [number, number, number]) => [500 + p[0] * 10, 500 + p[2] * 10] as const;
+
+  it("shows markup with Gameplay and colliders and steps with Collision", () => {
+    const gameplay = visibleArenaActors(LOCKOUT_MAP, { gameplay: true, collision: false, navigation: false });
+    expect(gameplay.some((a) => a.kind === "solid" || a.kind === "flight")).toBe(false);
+    expect(gameplay.filter((a) => a.kind === "spawn")).toHaveLength(LOCKOUT_MAP.spawns.length);
+    const collision = visibleArenaActors(LOCKOUT_MAP, { gameplay: false, collision: true, navigation: false });
+    expect(collision.every((a) => a.kind === "solid" || a.kind === "flight")).toBe(true);
+    expect(collision).toHaveLength(LOCKOUT_MAP.solids.length + LOCKOUT_MAP.flights.length);
+  });
+
+  it("picks the nearest icon under the cursor, else the collider the ray enters first", () => {
+    const actors = visibleArenaActors(BEAVER_MAP, { gameplay: true, collision: true, navigation: false });
+    // An actor with nothing else within a metre of it, seen from above.
+    const lone = actors.find((a) => a.kind !== "solid" && a.kind !== "flight" && actors.every((b) => b === a || Math.hypot(b.at[0] - a.at[0], b.at[2] - a.at[2]) > 1))!;
+    expect(pickArenaActor(actors, topDown, [topDown(lone.at)[0] + 2, topDown(lone.at)[1]], 6)).toBe(lone.id);
+    // The ball floats on the arch right over the rocket pad: seen from the side, it is the one under the cursor.
+    const ball = actors.find((a) => a.kind === "ball")!;
+    const front = (p: readonly [number, number, number]) => [500 + p[0] * 10, 500 - p[1] * 10] as const;
+    expect(pickArenaActor(actors.filter((a) => a.kind === "ball" || a.kind === "pad"), front, front(ball.at), 6)).toBe(ball.id);
+    // A spawn is picked by its icon at its chest, not its feet.
+    const spawn = actors.find((a) => a.kind === "spawn")!;
+    const side = (p: readonly [number, number, number]) => [500 + p[0] * 10, 500 - p[1] * 10] as const;
+    expect(pickArenaActor([spawn], side, side(iconPoint(spawn)), 4)).toBe(spawn.id);
+    // Nothing within reach and no ray: nothing.
+    expect(pickArenaActor(actors, topDown, [-999, -999], 6)).toBeNull();
+    // A ray straight down onto a collider's middle finds it.
+    const solid = actors.find((a) => a.kind === "solid")!;
+    const ray = { origin: [solid.at[0], 100, solid.at[2]] as const, dir: [0, -1, 0] as const };
+    const onlySolids = actors.filter((a) => a.kind === "solid");
+    expect(pickArenaActor(onlySolids, topDown, [-999, -999], 6, ray)).not.toBeNull();
+    expect(rayBox(ray, [0, 0, 0], [1, 1, 1])).toBeNull();
+    expect(rayBox({ origin: [0.5, 5, 0.5], dir: [0, -1, 0] }, [0, 0, 0], [1, 1, 1])).toBeCloseTo(4);
+  });
+
+  it("box-selects the actors whose icons fall inside", () => {
+    const actors = visibleArenaActors(BEAVER_MAP, DEFAULTS);
+    const inside = arenaActorsInRect(actors, topDown, { x0: 500, y0: 0, x1: 2000, y1: 2000 });
+    expect(inside.length).toBeGreaterThan(0);
+    expect(inside.every((id) => arenaActor(BEAVER_MAP, id)!.at[0] >= 0)).toBe(true);
+  });
+
+  it("finds the floor under a point, and stands a box on it", () => {
+    // Blue's first spawn stands on its base's ground floor, under the roof (3.4 m).
+    const [x, y, z] = BEAVER_MAP.spawns[0]!.at;
+    expect(arenaFloorBelow(BEAVER_MAP, x, y, z, 0.05)).toBeCloseTo(y, 1);
+    expect(arenaFloorBelow(BEAVER_MAP, x, y + 5, z, 0)).toBeCloseTo(3.4, 1);
+    expect(arenaFloorBelow({ ...BEAVER_MAP, ground: undefined, solids: [] }, 999, 0, 999)).toBeNull();
+    const pad = arenaActor(BEAVER_MAP, "arena:pad:0")!;
+    expect(pivotOnFloor(pad, 2)).toEqual([pad.at[0], 2 + pad.half![1], pad.at[2]]);
+  });
+
+  it("draws the ground's grid and the navmesh's floors", () => {
+    expect(groundLines(LOCKOUT_MAP, 2)).toEqual([]);
+    const lines = groundLines(BEAVER_MAP, 4);
+    expect(lines.length).toBeGreaterThan(100);
+    const sidecar = decodeMeshSidecar(arenaMap("beaver").sidecar());
+    const nav = readNavMesh(sidecar.navmesh)!;
+    const all = navmeshPoints(nav, 1);
+    expect(all).toHaveLength(nav.heights.length);
+    expect(navmeshPoints(nav, 2).length).toBeLessThan(all.length / 2);
+  });
+});
+
+const DEFAULTS = { gameplay: true, collision: false, navigation: false } as const;
 
 describe("markup in a sidecar", () => {
   it("round-trips both maps, ground holes and all, to the centimetre", () => {

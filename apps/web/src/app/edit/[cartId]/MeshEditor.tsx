@@ -68,6 +68,10 @@ import {
   type DecodedTexture,
   type FoliageLayer,
   type Terrain,
+  arenaActor,
+  duplicateArenaActors,
+  isArenaActorId,
+  removeArenaActors,
 } from "@cartbox/editor";
 
 import {
@@ -82,6 +86,7 @@ import {
   readMeshEntry,
   type MeshSidecar,
   type MeshTransform,
+  setMeshArena,
 } from "@/lib/meshSidecar";
 import { withAutoLods, withEditedGeometry } from "@/lib/meshLods";
 import { describeContract, replaceModel, replacementContract } from "@/lib/meshReplace";
@@ -118,6 +123,7 @@ import { LightingEditor } from "./LightingEditor";
 import { TimelinePanel, type TimelinePreview } from "./TimelinePanel";
 import type { ViewpointKey } from "./SceneViewport";
 import { SceneViewport } from "./SceneViewport";
+import { ArenaActorInspector, GameplayPanel } from "./GameplayPanel";
 import { LevelPicker, LevelsPanel } from "./LevelsPanel";
 import { NavigationPanel } from "./NavigationPanel";
 import { LightingBakePanel } from "./LightingBakePanel";
@@ -268,7 +274,14 @@ export function MeshEditor({ sidecar, onSidecarChange, code, onStartPlay, modern
   const [textures, setTextures] = useState<(DecodedTexture | null)[] | null>(null);
   const [libraryOpen, setLibraryOpen] = useState(false);
   /** "solo" previews the selected mesh alone; "scene" composes every instance. */
-  const [view, setView] = useState<"solo" | "scene">("solo");
+  // An arena map opens on its whole scene, where its markup is.
+  const [view, setView] = useState<"solo" | "scene">(sidecar.arena ? "scene" : "solo");
+  /** Map Check's (or the outliner's) "show me": a point the scene view frames. */
+  const [focus, setFocus] = useState<{ at: readonly [number, number, number]; n: number } | null>(null);
+  const focusOn = useCallback((at: readonly [number, number, number]) => {
+    setView("scene");
+    setFocus((f) => ({ at, n: (f?.n ?? 0) + 1 }));
+  }, []);
   /** The Terrain panel's tool and brush (EP10); a tool up turns the scene view's left button into a brush. */
   const [terrainEdit, setTerrainEdit] = useState<TerrainEditState>(INITIAL_TERRAIN_EDIT);
   const onTerrainEdit = (next: TerrainEditState) => {
@@ -340,10 +353,11 @@ export function MeshEditor({ sidecar, onSidecarChange, code, onStartPlay, modern
   }, []);
 
   // Keep the selection valid as the list changes: drop ids that are gone (an
-  // emptied selection falls back to the first object, as before).
+  // emptied selection falls back to the first object, as before). Gameplay
+  // actors (EP22) are kept while the markup still has them.
   useEffect(() => {
     const ids = new Set(sidecar.meshes.map((m) => m.id));
-    const kept = selection.filter((id) => ids.has(id));
+    const kept = selection.filter((id) => ids.has(id) || (isArenaActorId(id) && !!sidecar.arena && arenaActor(sidecar.arena, id) !== null));
     if (kept.length === selection.length && (kept.length > 0 || sidecar.meshes.length === 0)) return;
     setSelection(kept.length > 0 ? kept : sidecar.meshes[0] ? [sidecar.meshes[0].id] : []);
   }, [sidecar, selection]);
@@ -364,6 +378,21 @@ export function MeshEditor({ sidecar, onSidecarChange, code, onStartPlay, modern
   const sceneCommand = useCallback(
     async (command: SceneCommand) => {
       if (command === "selectAll") return setSelection(sidecar.meshes.filter((m) => !hidden.has(m.id) && !locked.has(m.id)).map((m) => m.id));
+      // Gameplay actors (EP22) duplicate and delete in the map's markup; the meshes selected with them as usual.
+      const actorIds = selection.filter(isArenaActorId);
+      if (actorIds.length > 0 && sidecar.arena && (command === "duplicate" || command === "delete")) {
+        const meshIds = selection.filter((id) => !isArenaActorId(id));
+        if (command === "duplicate") {
+          const copy = duplicateArenaActors(sidecar.arena, actorIds);
+          const meshes = meshIds.length > 0 ? duplicateEntries(sidecar, meshIds) : { sidecar, ids: [] as string[] };
+          onSidecarChange(setMeshArena(meshes.sidecar, copy.map));
+          setSelection([...meshes.ids, ...copy.ids]);
+        } else {
+          onSidecarChange(setMeshArena(meshIds.length > 0 ? removeEntries(sidecar, meshIds) : sidecar, removeArenaActors(sidecar.arena, actorIds)));
+          setSelection([]);
+        }
+        return;
+      }
       if (command === "deselect") return setSelection([]);
       if (command === "unhideAll") {
         setHidden(new Set());
@@ -1203,6 +1232,21 @@ export function MeshEditor({ sidecar, onSidecarChange, code, onStartPlay, modern
           {note && <RailHint>{note}</RailHint>}
         </RailGroup>
 
+        {/* An arena map's actors come first: its markup is what a level designer works on. */}
+        <GameplayPanel
+          sidecar={sidecar}
+          onSidecarChange={onSidecarChange}
+          selectedIds={selection}
+          onSelectIds={(ids) => {
+            setSelection(ids);
+            if (ids.some(isArenaActorId)) setView("scene");
+          }}
+          viewTarget={sceneView?.target ?? null}
+          onFocus={focusOn}
+          code={code}
+          cartId={cartId}
+        />
+
         <HierarchyPanel
           sidecar={sidecar}
           selectedIds={selection}
@@ -1238,6 +1282,7 @@ export function MeshEditor({ sidecar, onSidecarChange, code, onStartPlay, modern
           onView={setSceneView}
           terrainBrush={terrainEdit.tool && terrainEdit.id ? { id: terrainEdit.id, radius: terrainEdit.radius } : null}
           onTerrainStroke={onTerrainStroke}
+          focus={focus}
           onDropAsset={(data, at) => {
             try {
               const asset = JSON.parse(data) as { kind?: unknown; key?: unknown };
@@ -1551,6 +1596,14 @@ export function MeshEditor({ sidecar, onSidecarChange, code, onStartPlay, modern
               </div>
             </RailGroup>
           </>
+        ) : selectedId && isArenaActorId(selectedId) ? (
+          <ArenaActorInspector
+            sidecar={sidecar}
+            onSidecarChange={onSidecarChange}
+            id={selectedId}
+            onRemove={() => void sceneCommand("delete")}
+            onDuplicate={() => void sceneCommand("duplicate")}
+          />
         ) : (
           <RailHint>Import a 3D model to preview and place it.</RailHint>
         )}

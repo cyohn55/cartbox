@@ -1030,3 +1030,106 @@ preview.
         - Lua 5.3's `math.random`.
       - **CI:** the core's workflow runs the comparison against each fresh
         build.
+
+## Phase F — Level design
+
+**The review that started it.** Phases A–E gave the Mesh tab Unity's and
+Unreal's tools for *objects*: a GPU viewport, gizmos, selection, a content
+browser, play in the editor. A level designer's work was still missing. In
+Unreal a map is laid out with placeable gameplay actors (Player Starts,
+Target Points, Blocking Volumes, trigger and kill volumes), seen through the
+viewport's Show menu (Collision, Navigation), checked with Map Check and
+built with Build; in Unity the same work is empty GameObjects with gizmo
+icons, the Physics and Navigation debug views and the console's warnings.
+In Cartbox none of it existed: every spawn, weapon pad, hill, bot
+destination, teleporter, collider and the death plane of Lockout and Beaver
+Creek lived in tables written in code (`ArenaMap`), so moving a spawn meant
+editing TypeScript and running a bake. That was also BEAVER_CREEK_ROADMAP.md's
+open B4, "maps made by hand".
+
+So this phase makes a map's markup editable in the scene view, and applies it
+to both maps. Every item is tested against Lockout and Beaver Creek, and
+`scripts/verify-level-design.mjs` drives the whole flow in a browser.
+
+- [x] **EP21. Markup as scene data.** A map's markup is stored in its sidecar
+      (`arena`), read back strictly (all or nothing: half a map plays wrong),
+      heights to the centimetre the cart reads and ground holes as null.
+      *Done:*
+      - `arenaEdit.ts` addresses every spawn, pad, hill, destination,
+        teleporter end, collider, flight, the ball and the death plane as an
+        actor (`arena:<kind>:<index>`), sharing the scene's selection with
+        meshes. Pure functions move, resize, add, duplicate and remove them
+        (removing a destination renumbers the power positions; either end
+        removes a teleporter), and set a spawn's team, a pad's weapons in
+        turn, a power position and a teleporter's facing.
+      - Both maps' sidecars carry their markup (`arenaMeshSidecar`), so
+        `/edit/new?starter=lockout` and the new **`?starter=beaver`** open
+        with it. Beaver Creek is linked from the home page.
+- [x] **EP22. Gameplay actors in the viewport.** Unreal's sprites and Place
+      Actors panel. *Done:*
+      - The scene view draws every actor: spawns as standing figures in their
+        team's colour, pads as cyan plinths, hills as rings, destinations as
+        dots (power positions starred), the ball, teleporters as rings joined
+        to their exits by dashed arcs, the death plane's outline. Labels name
+        them on request.
+      - Click an icon to select it (icons are picked before meshes), Shift and
+        Ctrl add and toggle, a box select takes actors too. The move gizmo
+        drags them (with snapping, as meshes), scale sizes colliders and pads,
+        End drops them onto the floor a soldier would stand on, F frames them,
+        Delete and Ctrl+D remove and duplicate them, and every edit undoes.
+      - The left rail's **Gameplay** panel (above the hierarchy) is the
+        outliner (actors by kind; double-click shows one) and Place Actors:
+        a spawn of either team or any, a weapon pad, a hill, a destination, a
+        teleporter, a collider, set down on the floor where the view looks.
+      - The right rail's Details for an actor: its position and size, a
+        spawn's team, a pad's weapons in the order it turns through them, a
+        destination's power flag, a teleporter's facing on arrival.
+- [x] **EP23. Show flags.** *Done:* Show → **Gameplay**, **Collision**
+      (colliders, steps and the ground's grid in wireframe; colliders are
+      picked and moved only while it's on) and **Navigation** (the bots'
+      walkable floors as points), and **Labels**.
+- [x] **EP24. Map Check and navigation.** *Done:* **Map Check** runs B3's
+      validator over the navmesh the bots will actually walk and lists each
+      problem; a click selects the actor and frames it. **Rebuild
+      navigation** bakes the navmesh from the markup's collision, and the
+      panel says when the collision has changed since. **Ground from
+      terrain** samples a terrain sculpted with the existing brushes into
+      walkable ground.
+- [x] **EP25. Build, and play the result.** *Done:*
+      - **Build** rewrites only the cart's map lines (`arenaCode.ts`: every
+        table a map writes is one line of its code), lays the Pickups out
+        again for the edited pads (a weapon the scene already floated keeps
+        its model), and measures the camera's centre as the runtime frames
+        the scene (`parseMeshScene`). The author's other code is untouched; an
+        unedited map builds to exactly the code it already has.
+      - `/lockout?map=<id>&assets=<cart>` plays a saved cart's edited markup
+        in the demo (the Gameplay panel links to it). Public matchmaking is
+        off on an edited map, since other players' browsers don't have it.
+- [x] **EP26. Camera bookmarks.** Unreal's Ctrl+1–9. *Done:* Shift+1–9
+      keeps the view in the cart (browsers reserve Ctrl+digit for tabs, so
+      Ctrl works only where it gets through), 1–9 returns to it.
+
+**Found and fixed on the way.** A gizmo drag could split into several undo
+steps when its frames took longer than the history's 400 ms idle gap (a big
+scene on a slow GPU): history now waits for the pointer to lift, so a drag is
+one step. This applies to every drag and stroke in the editor.
+
+**Tests.** `Unit Tests/arena-markup.test.ts`: the actors of both maps, every
+edit, the strict round trip, the code patch (none for an unedited map, the
+right line for an edit, ground's line coming and going), the Pickups' layout,
+the camera's centre against the runtime's, Map Check, a navmesh rebuilt for a
+new platform, the overlay's picking and floors, bookmarks, the demo's saved
+markup — and, on the real engine, a teleporter added to Beaver Creek through
+the markup carrying a soldier, and a pad's new weapon in the cart.
+
+**Not yet.**
+- Spawns have no facing in the cart's data, so actors don't rotate; a
+  teleporter's facing is a Details field.
+- Steps (flights) move and duplicate but aren't placed or resized from the
+  panel.
+- Online, an edited map isn't sent to guests: it plays offline and in rooms
+  between tabs of the same browser.
+- Hide and lock apply to meshes, not actors.
+- Map Check's reachability, like B3's validator, snaps a place to the nearest
+  walkable floor within 1.5 m across, so a pad high over a reachable floor can
+  pass.

@@ -166,6 +166,16 @@ From memory of Battle Creek and Beaver Creek. The linked model can't be opened f
   - **Play:** `/lockout?map=<cart>` plays a saved cart's map with the shared pack, offline and online. A guest receives the host's map.
   - *Beaver Creek:* its collision and markup open in the editor. Moving a pad or a spawn there and playing the result moves it in the game.
   - *Tests:* a map authored only through the editor's model (no code) passes the validator, and its bots reach every pad and hill.
+  - **Done, in part** (ENGINE_PARITY_ROADMAP.md Phase F, EP21–EP26).
+    - **Markup and collision in the editor.** Both maps' sidecars carry their markup, and `?starter=beaver` opens Beaver Creek in the editor. Every spawn, pad, hill, destination, teleporter end, collider, flight, the ball and the death plane is an actor in the scene view: picked, dragged with the gizmo, sized, dropped to the floor, added from Place Actors, duplicated and deleted, with Details for teams, pad weapons, power positions and teleporter facing. Show → Collision and Navigation draw the collision and the bots' floors.
+    - **Validation.** Map Check runs the validator and frames each problem; Rebuild navigation bakes the bots' navmesh from the collision; Ground from terrain samples a sculpted terrain into walkable ground.
+    - **Play.** Build rewrites the cart's map lines and lays out the Pickups. `/lockout?map=<id>&assets=<cart>` plays a saved cart's edited markup.
+    - *Beaver Creek:* moving a pad or spawn there and playing the result moves it in the game (the real-engine test adds a teleporter and changes a pad's weapon).
+    - **Not yet:**
+      - a map whose model comes from Blender (`BLENDER_WORKFLOW.md`'s maps chapter), and collision generated from walkable faces;
+      - water bodies drawn as polygons;
+      - a guest receiving the host's edited map online (matchmaking is off on an edited map);
+      - `/lockout?map=<cart>` for a map that isn't one of the shipped ones.
 
 ## Phase B: outdoor visual quality (editor and renderer)
 

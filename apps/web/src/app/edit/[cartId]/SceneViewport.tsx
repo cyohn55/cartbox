@@ -55,10 +55,30 @@ import {
   type LodChain,
   decodeLods,
   type Terrain,
+  arenaActor,
+  isArenaActorId,
+  moveArenaActor,
+  readNavMesh,
+  removeArenaActors,
+  resizeArenaActor,
+  type ArenaMap,
 } from "@cartbox/editor";
 import { MODELS, createSceneRenderer, type SceneDraw, type SceneRenderer } from "@cartbox/player";
 
-import { readMeshEntry, setMeshTransform, type MeshSidecar } from "@/lib/meshSidecar";
+import { readMeshEntry, setMeshArena, setMeshBookmarks, setMeshTransform, type MeshSidecar } from "@/lib/meshSidecar";
+import {
+  DEFAULT_SHOW_FLAGS,
+  arenaActorsInRect,
+  arenaFloorBelow,
+  groundLines,
+  iconPoint,
+  navmeshPoints,
+  pickArenaActor,
+  pivotOnFloor,
+  visibleArenaActors,
+  type ArenaShowFlags,
+} from "@/lib/arenaOverlay";
+import { bookmarkIn, bookmarkSlot, setBookmark } from "@/lib/cameraBookmarks";
 import { brushRing, terrainRayHit } from "@/lib/terrainEdit";
 import { decodeMeshTextures } from "@/lib/meshImport";
 import { type Vec3 } from "@/lib/scenePick";
@@ -110,6 +130,7 @@ import {
 import styles from "./editor.module.css";
 import { ASSET_DRAG_TYPE } from "./ContentBrowser";
 import { SegmentedControl } from "./railControls";
+import { drawArena } from "./arenaDraw";
 
 const ORBIT_SPEED = 0.008; // radians per pixel
 const LOOK_SPEED = 0.005;
@@ -169,6 +190,8 @@ interface SceneViewportProps {
   terrainBrush?: { readonly id: string; readonly radius: number } | null;
   /** Each point a brush stroke passes over, in the terrain's own space; `start` on the stroke's first. */
   onTerrainStroke?: (id: string, x: number, z: number, start: boolean) => void;
+  /** Frame the view on a point (Map Check's "show me"): a new `n` frames it again. */
+  focus?: { readonly at: Vec3; readonly n: number } | null;
 }
 
 /** A decoded mesh + its base-colour textures, rebuilt only when the geometry set changes. */
@@ -231,7 +254,13 @@ function frameSize(cssW: number, cssH: number, dpr: number, budget: number): { w
 
 const NO_IDS: ReadonlySet<string> = new Set();
 
-export function SceneViewport({ sidecar, onSidecarChange, selectedIds, onSelectIds, hidden = NO_IDS, locked = NO_IDS, onKey, previewCamera, previewLocals, onView, onDropAsset, terrainBrush = null, onTerrainStroke }: SceneViewportProps) {
+/** A gameplay actor's world matrix: where its gizmo sits (actors have no rotation or scale of their own). */
+function actorWorld(map: ArenaMap | null | undefined, id: string): Mat4 | null {
+  const actor = map ? arenaActor(map, id) : null;
+  return actor ? composeModelMatrix(actor.at, [0, 0, 0], [1, 1, 1]) : null;
+}
+
+export function SceneViewport({ sidecar, onSidecarChange, selectedIds, onSelectIds, hidden = NO_IDS, locked = NO_IDS, onKey, previewCamera, previewLocals, onView, onDropAsset, terrainBrush = null, onTerrainStroke, focus = null }: SceneViewportProps) {
   const selectedId = selectedIds.at(-1) ?? null;
   const containerRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -249,6 +278,16 @@ export function SceneViewport({ sidecar, onSidecarChange, selectedIds, onSelectI
   const [snapOn, setSnapOn] = useState(false);
   const [kitOn, setKitOn] = useState(false);
   const [steps, setSteps] = useState<SnapSteps>({ move: 0.5, rotate: 15, scale: 0.1 });
+  /** The Show menu (EP23): the map's markup, its collision, its bots' navigation; and the actors' names. */
+  const [flags, setFlags] = useState<ArenaShowFlags>(DEFAULT_SHOW_FLAGS);
+  const [labels, setLabels] = useState(false);
+  const arena = sidecar.arena ?? null;
+  const actors = useMemo(() => (arena ? visibleArenaActors(arena, flags) : []), [arena, flags]);
+  const groundSegments = useMemo(() => (arena && flags.collision ? groundLines(arena, Math.max(1, Math.round(2 / (arena.ground?.step ?? 1)))) : []), [arena, flags.collision]);
+  const navPoints = useMemo(() => {
+    const nav = flags.navigation ? readNavMesh(sidecar.navmesh) : null;
+    return nav ? navmeshPoints(nav, Math.max(1, Math.round(0.5 / nav.cell))) : [];
+  }, [sidecar.navmesh, flags.navigation]);
   /** The handle under the cursor (highlighted), and the one being dragged. */
   const hover = useRef<Handle | null>(null);
   const active = useRef<Handle | null>(null);
@@ -486,10 +525,21 @@ export function SceneViewport({ sidecar, onSidecarChange, selectedIds, onSelectI
   const frameSelection = useCallback(() => {
     const cam = cameraRef.current;
     if (!cam) return;
+    const actor = arena && selectedId && isArenaActorId(selectedId) ? arenaActor(arena, selectedId) : null;
+    if (actor) {
+      const radius = actor.half ? Math.max(1.5, Math.hypot(...actor.half) * 1.5) : 2.5;
+      return setCamera(frame(cam, iconPoint(actor) as Vec3, radius, aspect));
+    }
     const selected = instances.find((i) => i.id === selectedId);
     const sphere = (selected && sphereAround([selected])) ?? bounds;
     setCamera(frame(cam, sphere.center, sphere.radius, aspect));
-  }, [instances, selectedId, bounds, aspect, setCamera]);
+  }, [instances, selectedId, bounds, aspect, setCamera, arena]);
+  // Map Check's "show me": frame the point it names.
+  useEffect(() => {
+    const cam = cameraRef.current;
+    if (focus && cam) setCamera(frame(cam, focus.at, 3, aspect));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [focus?.n]);
   const frameAll = useCallback(() => {
     const cam = cameraRef.current;
     if (cam) setCamera(frame(cam, bounds.center, bounds.radius, aspect));
@@ -505,7 +555,7 @@ export function SceneViewport({ sidecar, onSidecarChange, selectedIds, onSelectI
   );
 
   // Anything drawn changing redraws.
-  useEffect(markDirty, [markDirty, instances, terrainInstances, shadow, sidecar.lighting, showFog, selectedIds, locked, previewCamera, size, renderer, mode, space, terrainBrush]);
+  useEffect(markDirty, [markDirty, instances, terrainInstances, shadow, sidecar.lighting, showFog, selectedIds, locked, previewCamera, size, renderer, mode, space, terrainBrush, arena, actors, groundSegments, navPoints, labels]);
 
   // --- Drawing ------------------------------------------------------------------
 
@@ -513,8 +563,8 @@ export function SceneViewport({ sidecar, onSidecarChange, selectedIds, onSelectI
   const sceneCanvas = useMemo(() => (typeof document === "undefined" ? null : document.createElement("canvas")), []);
 
   // Everything the frame loop reads, refreshed every render.
-  const live = useRef({ instances, terrainInstances, terrains, terrainBrush, shadow, local, lighting: sidecar.lighting, showFog, selectedId, selectedIds, locked, previewCamera, reach, renderer, size, buffers, mode, space, cssSize });
-  live.current = { instances, terrainInstances, terrains, terrainBrush, shadow, local, lighting: sidecar.lighting, showFog, selectedId, selectedIds, locked, previewCamera, reach, renderer, size, buffers, mode, space, cssSize };
+  const live = useRef({ instances, terrainInstances, terrains, terrainBrush, shadow, local, lighting: sidecar.lighting, showFog, selectedId, selectedIds, locked, previewCamera, reach, renderer, size, buffers, mode, space, cssSize, arena, actors, flags, groundSegments, navPoints, labels });
+  live.current = { instances, terrainInstances, terrains, terrainBrush, shadow, local, lighting: sidecar.lighting, showFog, selectedId, selectedIds, locked, previewCamera, reach, renderer, size, buffers, mode, space, cssSize, arena, actors, flags, groundSegments, navPoints, labels };
   /** The box select being dragged, in canvas pixels. */
   const marquee = useRef<{ x0: number; y0: number; x1: number; y1: number } | null>(null);
 
@@ -624,13 +674,28 @@ export function SceneViewport({ sidecar, onSidecarChange, selectedIds, onSelectI
       if (!preview) drawGrid(context, cam, viewProj, s.width, s.height);
       context.drawImage(sceneCanvas, 0, 0);
       for (const other of objects) if (other.id !== sel && sels.includes(other.id)) drawSelection(context, viewProj, other, s.width, s.height, false);
+      // The map's markup, collision and navigation (EP22–EP23), over the scene.
+      const markup = live.current;
+      if (markup.arena && !preview) {
+        drawArena(context, {
+          map: markup.arena,
+          actors: markup.actors,
+          flags: markup.flags,
+          selected: new Set(sels),
+          project: (p) => project(viewProj, p, s.width, s.height),
+          pixel: s.width / (css?.w ?? s.width),
+          groundSegments: markup.groundSegments,
+          navPoints: markup.navPoints,
+          labels: markup.labels,
+        });
+      }
       const selected = objects.find((i) => i.id === sel);
-      if (selected) {
-        drawSelection(context, viewProj, selected, s.width, s.height, true);
-        if (!preview && tool !== "orbit" && css && !lockedIds.has(selected.id)) {
-          const frameNow = gizmoAt(cam, selected.model, tool, axesSpace, css.h);
-          drawGizmo(context, tool, frameNow, (p) => project(viewProj, p, s.width, s.height), hover.current, active.current, s.width / css.w);
-        }
+      const selectedActor = sel && isArenaActorId(sel) && markup.arena ? arenaActor(markup.arena, sel) : null;
+      const gizmoWorld = selected ? selected.model : selectedActor && actorGizmo(selectedActor.half !== undefined, tool) ? composeModelMatrix(selectedActor.at, [0, 0, 0], [1, 1, 1]) : null;
+      if (selected) drawSelection(context, viewProj, selected, s.width, s.height, true);
+      if (gizmoWorld && sel && !preview && tool !== "orbit" && css && !lockedIds.has(sel)) {
+        const frameNow = gizmoAt(cam, gizmoWorld, tool, axesSpace, css.h);
+        drawGizmo(context, tool, frameNow, (p) => project(viewProj, p, s.width, s.height), hover.current, active.current, s.width / css.w);
       }
 
       // The terrain brush's rim, on the ground under the cursor.
@@ -739,6 +804,11 @@ export function SceneViewport({ sidecar, onSidecarChange, selectedIds, onSelectI
 
   /** A selected object as a gizmo drag sees it (null when it's gone or locked). */
   const moving = (id: string): Moving | null => {
+    if (isArenaActorId(id)) {
+      const actor = arena ? arenaActor(arena, id) : null;
+      if (!actor) return null;
+      return { id, start: { position: [...actor.at], rotation: [0, 0, 0], scale: actor.half ? [...actor.half] : [1, 1, 1] }, startWorld: [...actor.at], parentWorld: null };
+    }
     const entry = sidecar.meshes.find((m) => m.id === id);
     const placed = placement.get(id);
     if (!entry || !placed || locked.has(id)) return null;
@@ -751,10 +821,32 @@ export function SceneViewport({ sidecar, onSidecarChange, selectedIds, onSelectI
     };
   };
 
+  /** Put objects and actors where a drag (or its undoing) leaves them: meshes by transform, actors by pivot (and size, for boxes). */
+  const applyPlaced = (placed: ReadonlyMap<string, Transform>, resize: boolean) => {
+    let next = sidecar;
+    let map = next.arena ?? null;
+    for (const [id, t] of placed) {
+      if (isArenaActorId(id)) {
+        if (!map) continue;
+        map = moveArenaActor(map, id, [t.position[0], t.position[1], t.position[2]]);
+        if (resize) map = resizeArenaActor(map, id, [t.scale[0], t.scale[1], t.scale[2]]);
+      } else next = setMeshTransform(next, id, { position: [...t.position], rotation: [...t.rotation], scale: [...t.scale] });
+    }
+    if (map && map !== sidecar.arena) next = setMeshArena(next, map);
+    if (placed.size > 0) onSidecarChange(next);
+  };
+
   /** The gizmo handle under a pointer, or null (no gizmo: the view tool, a timeline camera, nothing selected, a locked primary). */
   const handleUnder = (event: { clientX: number; clientY: number }, el: HTMLCanvasElement): { handle: Handle; frame: GizmoFrame; origin: [number, number] } | null => {
     const cam = cameraRef.current;
-    const world = selectedId && !locked.has(selectedId) && !hidden.has(selectedId) ? placement.get(selectedId)?.world : undefined;
+    const actor = selectedId && isArenaActorId(selectedId) && arena ? arenaActor(arena, selectedId) : null;
+    const world = actor
+      ? actorGizmo(actor.half !== undefined, mode)
+        ? actorWorld(arena, actor.id)
+        : undefined
+      : selectedId && !locked.has(selectedId) && !hidden.has(selectedId)
+        ? placement.get(selectedId)?.world
+        : undefined;
     if (!cam || !world || mode === "orbit" || previewCamera || !size) return null;
     const { canvas, rect } = pointerAt(event, el);
     const frameNow = gizmoAt(cam, world, mode, space, rect.height);
@@ -804,7 +896,7 @@ export function SceneViewport({ sidecar, onSidecarChange, selectedIds, onSelectI
         const { canvas, ndc } = pointerAt(event, event.currentTarget);
         active.current = grabbed.handle;
         markDirty();
-        const group = selectionRoots(sidecar, selectedIds)
+        const group = [...selectionRoots(sidecar, selectedIds), ...selectedIds.filter(isArenaActorId)]
           .map(moving)
           .filter((m): m is Moving => m !== null);
         drag.current = {
@@ -887,9 +979,7 @@ export function SceneViewport({ sidecar, onSidecarChange, selectedIds, onSelectI
         const f = next.map((v, k) => v / (g.primary.start.scale[k] || 1));
         for (const m of g.group) placed.set(m.id, { ...m.start, scale: m.id === g.primary.id ? next : [m.start.scale[0] * f[0]!, m.start.scale[1] * f[1]!, m.start.scale[2] * f[2]!] });
       }
-      let next = sidecar;
-      for (const [id, t] of placed) next = setMeshTransform(next, id, { position: [...t.position], rotation: [...t.rotation], scale: [...t.scale] });
-      if (placed.size > 0) onSidecarChange(next);
+      applyPlaced(placed, mode === "scale");
       return;
     }
     if (state.kind === "tool" && mode !== "orbit") {
@@ -947,7 +1037,7 @@ export function SceneViewport({ sidecar, onSidecarChange, selectedIds, onSelectI
         const b = worldAabb(i.mesh, i.model);
         return b ? [{ id: i.id, min: b.min as Vec3, max: b.max as Vec3 }] : [];
       });
-      const inside = boxSelect(objects, box, (p) => project(viewProj, p, el.width, el.height));
+      const inside = [...boxSelect(objects, box, (p) => project(viewProj, p, el.width, el.height)), ...arenaActorsInRect(actors, (p) => project(viewProj, p as Vec3, el.width, el.height), box)];
       const mods = state.additive ?? { toggle: false, add: false };
       if (mods.toggle) onSelectIds([...selectedIds.filter((id) => !inside.includes(id)), ...inside.filter((id) => !selectedIds.includes(id))]);
       else if (mods.add) onSelectIds([...selectedIds.filter((id) => !inside.includes(id)), ...inside]);
@@ -956,9 +1046,17 @@ export function SceneViewport({ sidecar, onSidecarChange, selectedIds, onSelectI
     }
     if (!state || state.moved || state.kind !== "tool" || !cam) return;
     // A click: pick the mesh whose triangles are under the cursor.
-    const { ndc } = pointerAt(event, event.currentTarget);
+    const { ndc, canvas, rect } = pointerAt(event, event.currentTarget);
     const ray = viewportRay(cam, aspect, ndc[0], ndc[1]);
-    const hit = raycastMeshes(ray, pickable().map((i) => ({ key: i.id, mesh: i.mesh, model: i.model })))?.key ?? null;
+    // Actors' icons sit over the scene, so they are picked first (EP22).
+    const el = event.currentTarget;
+    let hit: string | null = null;
+    if (actors.length > 0 && size) {
+      const planes = clipPlanes(cam, reach.center, reach.radius);
+      const { viewProj } = cameraMatrices(cam, size.width / size.height, planes.near, planes.far);
+      hit = pickArenaActor(actors, (p) => project(viewProj, p as Vec3, el.width, el.height), canvas, 10 * (el.width / rect.width), ray);
+    }
+    hit ??= raycastMeshes(ray, pickable().map((i) => ({ key: i.id, mesh: i.mesh, model: i.model })))?.key ?? null;
     onSelectIds(clickSelection(selectedIds, hit, state.additive ?? {}));
   };
 
@@ -972,11 +1070,7 @@ export function SceneViewport({ sidecar, onSidecarChange, selectedIds, onSelectI
       flying.current = false;
       keys.current.clear();
     }
-    if (state?.kind === "gizmo" && state.gizmo && state.moved) {
-      let next = sidecar;
-      for (const m of state.gizmo.group) next = setMeshTransform(next, m.id, { position: [...m.start.position], rotation: [...m.start.rotation], scale: [...m.start.scale] });
-      onSidecarChange(next);
-    }
+    if (state?.kind === "gizmo" && state.gizmo && state.moved) applyPlaced(new Map(state.gizmo.group.map((m) => [m.id, m.start])), true);
     markDirty();
   };
 
@@ -987,8 +1081,20 @@ export function SceneViewport({ sidecar, onSidecarChange, selectedIds, onSelectI
 
   /** Drop each selected object onto whatever is beneath it (other meshes, the terrain, or the ground). */
   const dropToSurface = useCallback(() => {
+    // Actors land on the floor a soldier would (the map's collision), each on what's below it but itself.
+    let map = arena;
+    for (const id of selectedIds.filter(isArenaActorId)) {
+      const actor = map ? arenaActor(map, id) : null;
+      if (!map || !actor || actor.kind === "death" || actor.kind === "flight") continue;
+      const feet = actor.at[1] - (actor.half?.[1] ?? 0);
+      const floor = arenaFloorBelow(actor.kind === "solid" ? removeArenaActors(map, [id]) : map, actor.at[0], feet, actor.at[2], 0.05);
+      if (floor !== null) map = moveArenaActor(map, id, pivotOnFloor(actor, floor));
+    }
     const roots = selectionRoots(sidecar, selectedIds).filter((id) => !locked.has(id) && !hidden.has(id));
-    if (roots.length === 0) return;
+    if (roots.length === 0) {
+      if (map && map !== arena) onSidecarChange(setMeshArena(sidecar, map));
+      return;
+    }
     const ground =
       terrains.length > 0 && showTerrain
         ? (x: number, z: number) => {
@@ -1004,7 +1110,7 @@ export function SceneViewport({ sidecar, onSidecarChange, selectedIds, onSelectI
     // The selection and everything under it move together, so none of it is a surface to land on.
     const ignore = new Set(withSubtrees(sidecar, roots));
     const surfaces = [...instances.map((i) => ({ key: i.id, mesh: i.mesh, model: i.model })), ...terrainInstances.map((t, k) => ({ key: `terrain:${k}`, mesh: t.mesh, model: t.model }))];
-    let next = sidecar;
+    let next = map && map !== arena ? setMeshArena(sidecar, map) : sidecar;
     for (const id of roots) {
       const entry = sidecar.meshes.find((m) => m.id === id);
       const target = instances.find((i) => i.id === id);
@@ -1016,12 +1122,25 @@ export function SceneViewport({ sidecar, onSidecarChange, selectedIds, onSelectI
       next = setMeshTransform(next, id, { ...entry.transform, position: localPositionFor(world, placement.get(id)?.parentWorld ?? null) });
     }
     if (next !== sidecar) onSidecarChange(next);
-  }, [selectedIds, sidecar, instances, locked, hidden, terrains, terrainInstances, showTerrain, placement, onSidecarChange]);
+  }, [selectedIds, sidecar, instances, locked, hidden, terrains, terrainInstances, showTerrain, placement, onSidecarChange, arena]);
 
   const onKeyDown = (event: React.KeyboardEvent<HTMLCanvasElement>) => {
     const key = event.key.toLowerCase();
     if (flying.current && ["w", "a", "s", "d", "q", "e", "shift"].includes(key)) {
       keys.current.add(key);
+      event.preventDefault();
+      return;
+    }
+    // Camera bookmarks (EP26): Shift (or Ctrl, where the browser lets it through) and a digit keeps the view; the digit recalls it.
+    const slot = bookmarkSlot(event);
+    if (slot !== null && !event.altKey) {
+      const cam = cameraRef.current;
+      if (event.shiftKey || event.ctrlKey || event.metaKey) {
+        if (cam) onSidecarChange(setMeshBookmarks(sidecar, setBookmark(sidecar.bookmarks ?? [], slot, cam)));
+      } else {
+        const kept = bookmarkIn(sidecar.bookmarks ?? [], slot);
+        if (kept) setCamera(kept);
+      }
       event.preventDefault();
       return;
     }
@@ -1195,10 +1314,43 @@ export function SceneViewport({ sidecar, onSidecarChange, selectedIds, onSelectI
             <span className={styles.hudLabel}>Fog</span>
           </label>
         )}
+        {(arena || sidecar.navmesh) && (
+          <span className={styles.hudItem} role="group" aria-label="Show">
+            <span className={styles.hudLabel}>Show</span>
+            {arena && (
+              <label style={{ cursor: "pointer", display: "inline-flex", gap: 3, alignItems: "center" }} title="The map's markup: spawns, pads, hills, destinations, teleporters, the ball and the death plane">
+                <input type="checkbox" aria-label="Show gameplay" checked={flags.gameplay} onChange={(event) => setFlags({ ...flags, gameplay: event.target.checked })} />
+                Gameplay
+              </label>
+            )}
+            {arena && (
+              <label style={{ cursor: "pointer", display: "inline-flex", gap: 3, alignItems: "center" }} title="What players and shots collide with: colliders, steps and ground (pick and move colliders while it's on)">
+                <input type="checkbox" aria-label="Show collision" checked={flags.collision} onChange={(event) => setFlags({ ...flags, collision: event.target.checked })} />
+                Collision
+              </label>
+            )}
+            {sidecar.navmesh && (
+              <label style={{ cursor: "pointer", display: "inline-flex", gap: 3, alignItems: "center" }} title="Where bots can walk: the navmesh's floors">
+                <input type="checkbox" aria-label="Show navigation" checked={flags.navigation} onChange={(event) => setFlags({ ...flags, navigation: event.target.checked })} />
+                Navigation
+              </label>
+            )}
+            {arena && (
+              <label style={{ cursor: "pointer", display: "inline-flex", gap: 3, alignItems: "center" }} title="Name each actor beside its icon">
+                <input type="checkbox" aria-label="Show labels" checked={labels} onChange={(event) => setLabels(event.target.checked)} />
+                Labels
+              </label>
+            )}
+          </span>
+        )}
+        <span className={styles.hudItem} title="Camera bookmarks: Shift+1–9 keeps the view, 1–9 goes back to it">
+          <span className={styles.hudLabel}>Views</span>
+          <span className={`${styles.hudValue} data`}>{(sidecar.bookmarks ?? []).map((b) => b.slot).join(" ") || "Shift+1–9"}</span>
+        </span>
         <span className={styles.hudItem}>
           <span className={styles.hudLabel}>Selected</span>
           <span className={`${styles.hudValue} data`} style={{ maxWidth: 160, overflow: "hidden", textOverflow: "ellipsis" }}>
-            {selectedIds.length > 1 ? `${selectedIds.length} objects` : selectedId ? (sidecar.meshes.find((m) => m.id === selectedId)?.name ?? "—") : "none"}
+            {selectedIds.length > 1 ? `${selectedIds.length} objects` : selectedId ? (sidecar.meshes.find((m) => m.id === selectedId)?.name ?? (arena && arenaActor(arena, selectedId)?.name) ?? "—") : "none"}
           </span>
         </span>
         {stats && (
@@ -1223,6 +1375,11 @@ function gizmoAt(camera: ViewportCamera, world: Mat4, tool: Exclude<Mode, "orbit
   const { forward } = cameraAxes(camera);
   const depth = (world[12]! - camera.position[0]) * forward[0] + (world[13]! - camera.position[1]) * forward[1] + (world[14]! - camera.position[2]) * forward[2];
   return gizmoFrame(world, tool, space, unitsPerPixel(camera, depth, cssHeight) * GIZMO_PIXELS);
+}
+
+/** Whether an actor gets a gizmo under a tool: every actor moves; boxes (colliders, pads) also scale; none rotate. */
+function actorGizmo(isBox: boolean, tool: Mode): boolean {
+  return tool === "move" || (tool === "scale" && isBox);
 }
 
 const AXIS_COLOURS = ["#ff5a5a", "#5aff7a", "#5a9bff"];
