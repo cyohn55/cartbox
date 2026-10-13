@@ -48,6 +48,40 @@ export interface ContentAsset {
   readonly image?: EncodedImage;
   /** A material's base colour (0..1). */
   readonly color?: readonly [number, number, number];
+  /** Tags the creator gave it (EDITOR_PRO_ROADMAP.md P8), for search: "rock", "forerunner", "hero"… */
+  readonly tags?: readonly string[];
+}
+
+/** An asset's place in the scene's tag table. */
+export const assetTagKey = (asset: Pick<ContentAsset, "kind" | "key">): string => `${asset.kind}:${asset.key}`;
+
+/** Tags as stored: lower case, letters, digits and dashes, at most 12 of 24 characters each. */
+export function cleanTags(tags: readonly string[]): string[] {
+  const out: string[] = [];
+  for (const raw of tags) {
+    const tag = raw.trim().toLowerCase().replace(/^#/, "").replace(/[^a-z0-9-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 24);
+    if (tag && !out.includes(tag)) out.push(tag);
+    if (out.length >= 12) break;
+  }
+  return out;
+}
+
+/** Give an asset its tags (none removes its entry). */
+export function setAssetTags(sidecar: MeshSidecar, asset: Pick<ContentAsset, "kind" | "key">, tags: readonly string[]): MeshSidecar {
+  const clean = cleanTags(tags);
+  const { [assetTagKey(asset)]: _old, ...rest } = sidecar.assetTags ?? {};
+  void _old;
+  const next = clean.length > 0 ? { ...rest, [assetTagKey(asset)]: clean } : rest;
+  const { assetTags: _all, ...without } = sidecar;
+  void _all;
+  return Object.keys(next).length > 0 ? { ...without, assetTags: next } : without;
+}
+
+/** Every tag in use, most used first. */
+export function tagsInUse(assets: readonly ContentAsset[]): string[] {
+  const counts = new Map<string, number>();
+  for (const a of assets) for (const t of a.tags ?? []) counts.set(t, (counts.get(t) ?? 0) + 1);
+  return [...counts.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0])).map(([t]) => t);
 }
 
 /** FNV-1a over a string: a short stable key for a mesh payload. */
@@ -159,13 +193,26 @@ export function collectAssets(sidecar: MeshSidecar): ContentAsset[] {
     out.push({ kind: "debris", key: def.name, name: def.name, detail: `from ${def.source}`, objects: sources });
   }
   const order = new Map(ASSET_KINDS.map((k, i) => [k.kind, i]));
-  return out.sort((a, b) => order.get(a.kind)! - order.get(b.kind)! || a.name.localeCompare(b.name));
+  const tags = sidecar.assetTags ?? {};
+  return out
+    .map((a) => (tags[assetTagKey(a)]?.length ? { ...a, tags: tags[assetTagKey(a)] } : a))
+    .sort((a, b) => order.get(a.kind)! - order.get(b.kind)! || a.name.localeCompare(b.name));
 }
 
-/** The assets of a kind (or every kind) whose name or detail contains the query (any case). */
+/**
+ * The assets of a kind (or every kind) the query finds: each `#tag` word must
+ * be one of its tags, and the rest must be in its name, detail or a tag (any case).
+ */
 export function filterAssets(assets: readonly ContentAsset[], kind: AssetKind | "all", query: string): ContentAsset[] {
-  const q = query.trim().toLowerCase();
-  return assets.filter((a) => (kind === "all" || a.kind === kind) && (!q || a.name.toLowerCase().includes(q) || a.detail.toLowerCase().includes(q)));
+  const words = query.trim().toLowerCase().split(/\s+/).filter(Boolean);
+  const wanted = words.filter((w) => w.startsWith("#") && w.length > 1).map((w) => w.slice(1));
+  const q = words.filter((w) => !w.startsWith("#")).join(" ");
+  return assets.filter((a) => {
+    if (kind !== "all" && a.kind !== kind) return false;
+    const tags = a.tags ?? [];
+    if (!wanted.every((t) => tags.includes(t))) return false;
+    return !q || a.name.toLowerCase().includes(q) || a.detail.toLowerCase().includes(q) || tags.some((t) => t.includes(q));
+  });
 }
 
 /** Escape a string for a regular expression. */

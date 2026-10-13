@@ -95,6 +95,9 @@ import { findFoliage, replaceFoliage } from "@/lib/foliageEdit";
 import { INITIAL_TERRAIN_EDIT, TerrainPanel, type TerrainEditState } from "./TerrainPanel";
 import { KitPanel } from "./KitPanel";
 import { ArenaPanel, INITIAL_ARENA_EDIT, type ArenaEditState } from "./ArenaPanel";
+import { BudgetPanel, storedBudgetDevice } from "./BudgetPanel";
+import { sceneLoadOf } from "@/lib/sceneBudget";
+import type { BudgetDevice } from "@cartbox/editor";
 import { addMarkup, markupOverlays, placeMarkup } from "@cartbox/editor";
 import { setSidecarArena, sidecarArena } from "@/lib/arenaEdit";
 import { SoundsPanel } from "./SoundsPanel";
@@ -282,6 +285,10 @@ export function MeshEditor({ sidecar, onSidecarChange, code, onStartPlay, modern
   const splineLines = useMemo(() => splineOverlays(sidecar), [sidecar]);
   // The level editor (P7): what a click places, the selected marker, and the markup drawn over the scene.
   const [arenaEdit, setArenaEdit] = useState<ArenaEditState>(INITIAL_ARENA_EDIT);
+  // Per-device budgets (P8): the device checked against, and the scene's texture memory for the readout.
+  const [budgetDevice, setBudgetDevice] = useState<BudgetDevice>("iphone");
+  useEffect(() => setBudgetDevice(storedBudgetDevice()), []);
+  const sceneTextureBytes = useMemo(() => sceneLoadOf(sidecar).textureBytes, [sidecar]);
   const arena = useMemo(() => sidecarArena(sidecar), [sidecar]);
   const arenaMarkup = useMemo(() => (arena ? markupOverlays(arena, arenaEdit.showColliders) : []), [arena, arenaEdit.showColliders]);
   const onArenaPlace = (at: readonly [number, number, number]) => {
@@ -1260,6 +1267,7 @@ export function MeshEditor({ sidecar, onSidecarChange, code, onStartPlay, modern
         <TerrainPanel sidecar={sidecar} onChange={onSidecarChange} edit={terrainEdit} onEdit={onTerrainEdit} />
         <KitPanel sidecar={sidecar} onChange={onSidecarChange} selectedId={selectedId} onSelect={setSelectedId} />
         <ArenaPanel sidecar={sidecar} onChange={onSidecarChange} edit={arenaEdit} onEdit={setArenaEdit} selectedIds={selection} cartId={cartId} />
+        <BudgetPanel sidecar={sidecar} device={budgetDevice} onDevice={setBudgetDevice} />
       </aside>
 
       {/* Centre: preview — the selected mesh alone, or the whole composed scene — over the content browser */}
@@ -1282,6 +1290,8 @@ export function MeshEditor({ sidecar, onSidecarChange, code, onStartPlay, modern
           onTerrainStroke={onTerrainStroke}
           splines={splineLines}
           markup={arenaMarkup}
+          budget={budgetDevice}
+          textureBytes={sceneTextureBytes}
           selectedMarkup={arenaEdit.selected}
           onPlace={arena && arenaEdit.placing ? onArenaPlace : null}
           onPickMarkup={(ref) => setArenaEdit({ ...arenaEdit, selected: ref.kind === "exit" ? { kind: "teleporter", index: ref.index } : ref, placing: null })}

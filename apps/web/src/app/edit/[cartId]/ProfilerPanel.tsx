@@ -7,7 +7,12 @@
  * debug/profiler.ts in @cartbox/player) a couple of times a second.
  */
 
+import { useState } from "react";
+
+import { BUDGET_DEVICES, DEVICE_BUDGETS, checkBudget, type BudgetDevice } from "@cartbox/editor";
 import type { ProfileSection, ProfileSnapshot } from "@cartbox/player";
+
+import { storeBudgetDevice, storedBudgetDevice } from "./BudgetPanel";
 
 import { formatBytes } from "./assetUploads";
 import { PARTS, budgetBar } from "./profilerView";
@@ -22,6 +27,7 @@ const ms = (v: number) => (v < 0.05 ? "0" : v < 10 ? v.toFixed(2) : v.toFixed(1)
 const count = (v: number) => (v >= 10_000 ? `${(v / 1000).toFixed(v >= 100_000 ? 0 : 1)}k` : String(Math.round(v)));
 
 export function ProfilerPanel({ profile, budgetMs }: { profile: ProfileSnapshot | null; budgetMs: number }) {
+  const [device, setDevice] = useState<BudgetDevice>(() => (typeof window === "undefined" ? "iphone" : storedBudgetDevice()));
   if (!profile || profile.frames === 0) {
     return (
       <aside aria-label="Profiler" style={panelStyle}>
@@ -77,6 +83,37 @@ export function ProfilerPanel({ profile, budgetMs }: { profile: ProfileSnapshot 
         </Group>
       )}
 
+      {render && (
+        <Group title="Device budget">
+          <select
+            aria-label="Budget device"
+            value={device}
+            onChange={(e) => {
+              const d = e.target.value as BudgetDevice;
+              storeBudgetDevice(d);
+              setDevice(d);
+            }}
+          >
+            {BUDGET_DEVICES.map((d) => (
+              <option key={d} value={d}>
+                {DEVICE_BUDGETS[d].label}
+              </option>
+            ))}
+          </select>
+          {checkBudget(
+            {
+              triangles: render.triangles,
+              drawCalls: render.drawCalls,
+              ...(profile.memory.sceneParts ? { textureBytes: profile.memory.sceneParts.textures, meshBytes: profile.memory.sceneParts.meshes } : {}),
+            },
+            device,
+          ).map((line) => (
+            <Stat key={line.key} label={line.label} value={line.text} hint={line.over ? `Over the ${DEVICE_BUDGETS[device].label}'s budget` : undefined} warn={line.over} />
+          ))}
+          <span style={{ opacity: 0.6 }}>Frame time is this machine&apos;s; the budget there is {ms(DEVICE_BUDGETS[device].frameMs)} ms.</span>
+        </Group>
+      )}
+
       <Group title="Memory">
         <Stat label="Engine" value={formatBytes(profile.memory.wasm)} hint="The console's WebAssembly memory" />
         {profile.memory.scene !== null && <Stat label="3D scene" value={`~${formatBytes(profile.memory.scene)}`} hint="Geometry, textures and render targets (estimated)" />}
@@ -121,9 +158,9 @@ function Group({ title, children }: { title: string; children: React.ReactNode }
   );
 }
 
-function Stat({ label, value, hint }: { label: string; value: string; hint?: string }) {
+function Stat({ label, value, hint, warn }: { label: string; value: string; hint?: string; warn?: boolean }) {
   return (
-    <div title={hint} style={{ display: "flex", justifyContent: "space-between" }}>
+    <div title={hint} style={{ display: "flex", justifyContent: "space-between", color: warn ? "#ff8a8a" : undefined }}>
       <span>{label}</span>
       <span className="data">{value}</span>
     </div>

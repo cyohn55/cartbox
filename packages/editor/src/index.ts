@@ -677,6 +677,21 @@ export {
   type PostBlend,
   type PostVolume,
 } from "./model/postVolumes";
+export {
+  BUDGET_DEVICES,
+  DEVICE_BUDGETS,
+  checkBudget,
+  formatBudgetValue,
+  imageSize,
+  overBudget,
+  smallestFit,
+  textureGpuBytes,
+  type BudgetDevice,
+  type BudgetKey,
+  type BudgetLine,
+  type DeviceBudget,
+  type SceneLoad,
+} from "./model/deviceBudgets";
 export type { LodChain } from "./render/meshRasterizer";
 export { aabbOccluded, occlusionCull, type OcclusionInput } from "./render/occlusion";
 export {
@@ -820,6 +835,8 @@ export {
   encodeLodLevel,
   encodeLods,
   generateLods,
+  lodDeviation,
+  lodErrorBudget,
   meshFingerprint,
   pruneSmallParts,
   readStoredLods,

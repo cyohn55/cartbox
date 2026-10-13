@@ -10493,6 +10493,28 @@ function estimateSceneBytes(instances, width, height) {
   }
   return bytes;
 }
+var TEXTURE_SETS = ["textures", "normalTextures", "materialTextures", "mrTextures", "occlusionTextures", "emissiveTextures", "lightmapTextures"];
+function estimateSceneMemory(instances, width, height) {
+  const meshes = /* @__PURE__ */ new Set();
+  const textures = /* @__PURE__ */ new Set();
+  let meshBytes = 0;
+  let textureBytes = 0;
+  for (const instance of instances) {
+    if (!meshes.has(instance.mesh)) {
+      meshes.add(instance.mesh);
+      for (const p of instance.mesh.primitives) meshBytes += p.positions.length / 3 * 32 + p.indices.length * 4;
+    }
+    for (const set of TEXTURE_SETS) {
+      for (const texture of instance[set] ?? []) {
+        if (texture && !textures.has(texture)) {
+          textures.add(texture);
+          textureBytes += Math.round(texture.width * texture.height * 4 * 4 / 3);
+        }
+      }
+    }
+  }
+  return { textures: textureBytes, meshes: meshBytes, targets: width * height * 8 };
+}
 
 // src/flagsSdk.ts
 function parseFlagsField(value) {
@@ -12145,6 +12167,10 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
   /** Bytes the scene keeps for drawing (geometry, textures, targets), estimated. */
   sceneBytes() {
     return estimateSceneBytes(this.instances, this.width, this.height);
+  }
+  /** The scene's memory by kind (every texture map with mips, meshes, targets), for the per-device budgets (P8). */
+  sceneMemory() {
+    return estimateSceneMemory(this.instances, this.width, this.height);
   }
   blit(rgba) {
     const started = performance.now();
@@ -19611,7 +19637,8 @@ var Player = class {
       memory: {
         wasm: this.console?.memoryBytes() ?? 0,
         jsHeap: typeof heap === "number" ? heap : null,
-        scene: this.meshSurface ? this.meshSurface.sceneBytes() : null
+        scene: this.meshSurface ? this.meshSurface.sceneBytes() : null,
+        sceneParts: this.meshSurface ? this.meshSurface.sceneMemory() : null
       },
       net
     };
@@ -21885,6 +21912,7 @@ export {
   encodeNetMessage,
   errorStack,
   estimateSceneBytes,
+  estimateSceneMemory,
   evaluate,
   extractScore,
   extractUnlocks,

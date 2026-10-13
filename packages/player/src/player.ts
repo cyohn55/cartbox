@@ -900,6 +900,7 @@ export class Player {
         wasm: this.console?.memoryBytes() ?? 0,
         jsHeap: typeof heap === "number" ? heap : null,
         scene: this.meshSurface ? this.meshSurface.sceneBytes() : null,
+        sceneParts: this.meshSurface ? this.meshSurface.sceneMemory() : null,
       },
       net,
     };

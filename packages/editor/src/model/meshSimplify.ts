@@ -468,6 +468,83 @@ export function generateLods(mesh: MeshAsset, levels = LOD_LEVELS): { meshes: Me
   return meshes.length > 0 ? { meshes, distances } : null;
 }
 
+/** The squared distance from point p to triangle abc (Ericson, Real-Time Collision Detection 5.1.5). */
+function pointTriangle2(px: number, py: number, pz: number, a: ArrayLike<number>, ia: number, ib: number, ic: number): number {
+  const ax = a[ia]!, ay = a[ia + 1]!, az = a[ia + 2]!;
+  const abx = a[ib]! - ax, aby = a[ib + 1]! - ay, abz = a[ib + 2]! - az;
+  const acx = a[ic]! - ax, acy = a[ic + 1]! - ay, acz = a[ic + 2]! - az;
+  const apx = px - ax, apy = py - ay, apz = pz - az;
+  const d1 = abx * apx + aby * apy + abz * apz, d2 = acx * apx + acy * apy + acz * apz;
+  const at = (u: number, v: number) => {
+    const qx = ax + abx * u + acx * v - px, qy = ay + aby * u + acy * v - py, qz = az + abz * u + acz * v - pz;
+    return qx * qx + qy * qy + qz * qz;
+  };
+  if (d1 <= 0 && d2 <= 0) return at(0, 0);
+  const bpx = px - a[ib]!, bpy = py - a[ib + 1]!, bpz = pz - a[ib + 2]!;
+  const d3 = abx * bpx + aby * bpy + abz * bpz, d4 = acx * bpx + acy * bpy + acz * bpz;
+  if (d3 >= 0 && d4 <= d3) return at(1, 0);
+  const vc = d1 * d4 - d3 * d2;
+  if (vc <= 0 && d1 >= 0 && d3 <= 0) return at(d1 / (d1 - d3), 0);
+  const cpx = px - a[ic]!, cpy = py - a[ic + 1]!, cpz = pz - a[ic + 2]!;
+  const d5 = abx * cpx + aby * cpy + abz * cpz, d6 = acx * cpx + acy * cpy + acz * cpz;
+  if (d6 >= 0 && d5 <= d6) return at(0, 1);
+  const vb = d5 * d2 - d1 * d6;
+  if (vb <= 0 && d2 >= 0 && d6 <= 0) return at(0, d2 / (d2 - d6));
+  const va = d3 * d6 - d5 * d4;
+  if (va <= 0 && d4 - d3 >= 0 && d5 - d6 >= 0) {
+    const w = (d4 - d3) / (d4 - d3 + (d5 - d6));
+    return at(1 - w, w);
+  }
+  const denom = 1 / (va + vb + vc);
+  return at(vb * denom, vc * denom);
+}
+
+/**
+ * How far a level of detail strays from the mesh it was made from
+ * (EDITOR_PRO_ROADMAP.md P8): the largest distance from a point of the base
+ * mesh's surface — its vertices, a sample of at most `samples` of them, and
+ * its triangles' centres — to the level's surface (one-sided Hausdorff
+ * distance; the level's own vertices all lie on the base, as collapses only
+ * move a vertex onto another). Parts the level dropped as too small count
+ * too. Same units as the mesh.
+ */
+export function lodDeviation(base: MeshAsset, level: MeshAsset, samples = 2048): number {
+  const tris: { pos: ArrayLike<number>; idx: ArrayLike<number> }[] = level.primitives.map((p) => ({ pos: p.positions, idx: p.indices }));
+  const levelTris = tris.reduce((n, t) => n + t.idx.length / 3, 0);
+  if (levelTris === 0) return meshRadius(base) * 2;
+  // Points of the base: every vertex and triangle centre, thinned to keep the cost in hand.
+  const points: number[] = [];
+  for (const p of base.primitives) {
+    for (let i = 0; i < p.positions.length; i += 3) points.push(p.positions[i]!, p.positions[i + 1]!, p.positions[i + 2]!);
+    for (let t = 0; t < p.indices.length; t += 3) {
+      const a = p.indices[t]! * 3, b = p.indices[t + 1]! * 3, c = p.indices[t + 2]! * 3;
+      points.push((p.positions[a]! + p.positions[b]! + p.positions[c]!) / 3, (p.positions[a + 1]! + p.positions[b + 1]! + p.positions[c + 1]!) / 3, (p.positions[a + 2]! + p.positions[b + 2]! + p.positions[c + 2]!) / 3);
+    }
+  }
+  const count = points.length / 3;
+  const budget = Math.max(64, Math.min(samples, Math.floor(40_000_000 / levelTris)));
+  const stride = Math.max(1, Math.floor(count / budget));
+  let worst = 0;
+  for (let k = 0; k < count; k += stride) {
+    const px = points[k * 3]!, py = points[k * 3 + 1]!, pz = points[k * 3 + 2]!;
+    let best = Infinity;
+    for (const { pos, idx } of tris) {
+      for (let t = 0; t < idx.length && best > worst; t += 3) {
+        const d = pointTriangle2(px, py, pz, pos, idx[t]! * 3, idx[t + 1]! * 3, idx[t + 2]! * 3);
+        if (d < best) best = d;
+      }
+    }
+    // A point already within the worst so far can't raise it (the loop stopped early).
+    if (best > worst) worst = best;
+  }
+  return Math.sqrt(worst);
+}
+
+/** The deviation a default level may have (its error, a share of the mesh's radius), for the editor's readout and the tests. */
+export function lodErrorBudget(mesh: MeshAsset, level: number, levels = LOD_LEVELS): number {
+  return (levels[level]?.error ?? 0) * meshRadius(mesh);
+}
+
 /** Set on a stored level's first word when its indices are 16-bit (every primitive under 65,536 vertices). */
 const NARROW = 0x80000000;
 

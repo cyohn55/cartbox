@@ -6,7 +6,7 @@
  * stores them once), and an import big enough to need them gets them unasked.
  */
 
-import { decodeLods, encodeLods, generateLods, triangleCountOf, type MeshAsset } from "@cartbox/editor";
+import { decodeLods, encodeLods, generateLods, lodDeviation, triangleCountOf, type MeshAsset } from "@cartbox/editor";
 
 import { readMeshEntry, setMeshAsset, type MeshSidecar, type MeshSidecarEntry } from "./meshSidecar";
 
@@ -32,6 +32,23 @@ export function lodSummary(entry: MeshSidecarEntry): LodSummary | null {
   // Levels that no longer fit (made from the mesh before an edit) are skipped by the renderer.
   if (!chain) return { triangles: [triangleCountOf(mesh)], distances: entry.lods.distances, stale: true };
   return { triangles: [mesh, ...chain.meshes].map(triangleCountOf), distances: chain.distances, stale: false };
+}
+
+/**
+ * How far each of an object's levels strays from its full model (P8), in the
+ * model's units: the largest distance from the model's surface to the level's,
+ * sampled. Null without current LODs.
+ */
+export function lodDeviations(entry: MeshSidecarEntry, samples = 512): number[] | null {
+  if (!entry.lods) return null;
+  let mesh;
+  try {
+    mesh = readMeshEntry(entry);
+  } catch {
+    return null;
+  }
+  const chain = decodeLods(mesh, entry.lods);
+  return chain ? chain.meshes.map((level) => lodDeviation(mesh, level, samples)) : null;
 }
 
 /** The entries that place the same model as `id` (itself included). */
