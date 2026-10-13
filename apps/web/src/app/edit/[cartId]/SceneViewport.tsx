@@ -60,6 +60,7 @@ import { MODELS, createSceneRenderer, type SceneDraw, type SceneRenderer } from 
 
 import { readMeshEntry, setMeshTransform, type MeshSidecar } from "@/lib/meshSidecar";
 import { brushRing, terrainRayHit } from "@/lib/terrainEdit";
+import type { SplineOverlay } from "@/lib/splineEdit";
 import { decodeMeshTextures } from "@/lib/meshImport";
 import { type Vec3 } from "@/lib/scenePick";
 import {
@@ -169,6 +170,8 @@ interface SceneViewportProps {
   terrainBrush?: { readonly id: string; readonly radius: number } | null;
   /** Each point a brush stroke passes over, in the terrain's own space; `start` on the stroke's first. */
   onTerrainStroke?: (id: string, x: number, z: number, start: boolean) => void;
+  /** Splines to draw over the scene (P3): each curve as a line, its points as dots. */
+  splines?: readonly SplineOverlay[];
 }
 
 /** A decoded mesh + its base-colour textures, rebuilt only when the geometry set changes. */
@@ -230,8 +233,9 @@ function frameSize(cssW: number, cssH: number, dpr: number, budget: number): { w
 }
 
 const NO_IDS: ReadonlySet<string> = new Set();
+const NO_SPLINES: readonly SplineOverlay[] = [];
 
-export function SceneViewport({ sidecar, onSidecarChange, selectedIds, onSelectIds, hidden = NO_IDS, locked = NO_IDS, onKey, previewCamera, previewLocals, onView, onDropAsset, terrainBrush = null, onTerrainStroke }: SceneViewportProps) {
+export function SceneViewport({ sidecar, onSidecarChange, selectedIds, onSelectIds, hidden = NO_IDS, locked = NO_IDS, onKey, previewCamera, previewLocals, onView, onDropAsset, terrainBrush = null, onTerrainStroke, splines = NO_SPLINES }: SceneViewportProps) {
   const selectedId = selectedIds.at(-1) ?? null;
   const containerRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -505,7 +509,7 @@ export function SceneViewport({ sidecar, onSidecarChange, selectedIds, onSelectI
   );
 
   // Anything drawn changing redraws.
-  useEffect(markDirty, [markDirty, instances, terrainInstances, shadow, sidecar.lighting, showFog, selectedIds, locked, previewCamera, size, renderer, mode, space, terrainBrush]);
+  useEffect(markDirty, [markDirty, instances, terrainInstances, shadow, sidecar.lighting, showFog, selectedIds, locked, previewCamera, size, renderer, mode, space, terrainBrush, splines]);
 
   // --- Drawing ------------------------------------------------------------------
 
@@ -513,8 +517,8 @@ export function SceneViewport({ sidecar, onSidecarChange, selectedIds, onSelectI
   const sceneCanvas = useMemo(() => (typeof document === "undefined" ? null : document.createElement("canvas")), []);
 
   // Everything the frame loop reads, refreshed every render.
-  const live = useRef({ instances, terrainInstances, terrains, terrainBrush, shadow, local, lighting: sidecar.lighting, showFog, selectedId, selectedIds, locked, previewCamera, reach, renderer, size, buffers, mode, space, cssSize });
-  live.current = { instances, terrainInstances, terrains, terrainBrush, shadow, local, lighting: sidecar.lighting, showFog, selectedId, selectedIds, locked, previewCamera, reach, renderer, size, buffers, mode, space, cssSize };
+  const live = useRef({ instances, splines, terrainInstances, terrains, terrainBrush, shadow, local, lighting: sidecar.lighting, showFog, selectedId, selectedIds, locked, previewCamera, reach, renderer, size, buffers, mode, space, cssSize });
+  live.current = { instances, splines, terrainInstances, terrains, terrainBrush, shadow, local, lighting: sidecar.lighting, showFog, selectedId, selectedIds, locked, previewCamera, reach, renderer, size, buffers, mode, space, cssSize };
   /** The box select being dragged, in canvas pixels. */
   const marquee = useRef<{ x0: number; y0: number; x1: number; y1: number } | null>(null);
 
@@ -659,6 +663,39 @@ export function SceneViewport({ sidecar, onSidecarChange, selectedIds, onSelectI
           context.stroke();
           context.restore();
         }
+      }
+
+      // Splines (P3): each curve a line just above it, each point a dot.
+      if (!preview && live.current.splines.length > 0) {
+        context.save();
+        const scale = Math.max(1, s.width / (css?.w ?? s.width));
+        for (const line of live.current.splines) {
+          context.strokeStyle = "#6be0ff";
+          context.lineWidth = scale * 2;
+          context.beginPath();
+          let pen = false;
+          for (const q of line.curve) {
+            const p = project(viewProj, [q[0], q[1] + 0.1, q[2]], s.width, s.height);
+            if (!p) {
+              pen = false;
+              continue;
+            }
+            if (pen) context.lineTo(p[0], p[1]);
+            else context.moveTo(p[0], p[1]);
+            pen = true;
+          }
+          context.stroke();
+          context.fillStyle = "#ffffff";
+          for (const q of line.points) {
+            const p = project(viewProj, [q[0], q[1] + 0.1, q[2]], s.width, s.height);
+            if (!p) continue;
+            context.beginPath();
+            context.arc(p[0], p[1], scale * 4, 0, Math.PI * 2);
+            context.fill();
+            context.stroke();
+          }
+        }
+        context.restore();
       }
 
       const box = marquee.current;

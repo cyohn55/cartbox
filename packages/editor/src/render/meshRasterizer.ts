@@ -33,7 +33,7 @@ import { EFFECT_RIM_POWER, bandAmount, camoThreshold, effectActive, type Surface
 type FrameFog = SceneFog & { readonly eye: readonly [number, number, number] };
 import { LIGHTMAP_RANGE } from "../model/lightmap";
 import { windOffset, windUniform, type SceneWind } from "../model/wind";
-import { DEFAULT_DETAIL_SCALE, DEFAULT_DETAIL_STRENGTH, FAR_TILE_SCALE, blendHeightOf, detailFade, emissiveAnimation, farTileBlend, heightBlend, macroGain, macroUniform, materialHasWater, triplanarUvs, triplanarWeights, waterTilt, waterUniform } from "../model/materialEffects";
+import { DEFAULT_DETAIL_SCALE, DEFAULT_DETAIL_STRENGTH, FAR_TILE_SCALE, blendHeightOf, detailFade, emissiveAnimation, farTileBlend, heightBlend, macroGain, macroUniform, materialHasWater, triplanarUvs, triplanarWeights, waterAlong, waterTilt, waterTiltAlong, waterUniform } from "../model/materialEffects";
 import { compiledGraphOf, evaluateGraph, graphRegisters, type CompiledGraph, type GraphContext } from "../model/materialGraph";
 import { EFFECT_DISTORT_POWER, materialRefracts, refractionOffset, refracts, resolveRefraction, type ResolvedRefraction } from "./refraction";
 import { CLEARCOAT_F0, anisotropicD, curvatureOf, materialHasLayers, parallaxRate, parallaxUv, resolveLayers, uvGradients, type ResolvedLayers } from "../model/materialLayers";
@@ -506,6 +506,7 @@ function buildPbrFrag(
     refraction,
     refracting: refracts(refraction),
     water: materialHasWater(material) ? waterUniform(material, time) : null,
+    waterAlong: waterAlong(material),
   };
 }
 
@@ -1678,6 +1679,8 @@ interface PbrFrag {
   readonly refracting: boolean;
   /** Moving water (B5): its {@link waterUniform} this frame, or null for none. */
   readonly water: readonly [number, number, number, number] | null;
+  /** The water's ripples flow along the UVs (P3), not the world's X and Z. */
+  readonly waterAlong: boolean;
 }
 
 /**
@@ -2016,7 +2019,7 @@ function eachTriangle(
     );
     const [baseR, baseG, baseB, baseA] = primitive.material.baseColorFactor;
     // The parallax march and anisotropy need the triangle's UV gradients (I4).
-    const needsGrads = pbr !== null && (pbr.layers.parallaxDepth > 0 || pbr.layers.anisotropy !== 0);
+    const needsGrads = pbr !== null && (pbr.layers.parallaxDepth > 0 || pbr.layers.anisotropy !== 0 || pbr.waterAlong);
     const triangleGrads = (i0: number, i1: number, i2: number): TriangleGrads | null => {
       if (!uvs) return null;
       const edge = (i: number): [number, number, number] => {
@@ -2593,11 +2596,19 @@ function rasterizeTriangle(
           Ny = -Ny;
           Nz = -Nz;
         }
-        // Moving water (B5): ripples tilt the normal, in world space.
-        const ripple = pbr.water ? waterTilt(pbr.water, pw0 * a.wx + pw1 * b.wx + pw2 * c.wx, pw0 * a.wz + pw1 * b.wz + pw2 * c.wz) : null;
+        // Moving water (B5): ripples tilt the normal, in world space — or, flowing
+        // along the UVs (P3), in UV space turned into the world by its gradients.
+        const ripple: readonly [number, number, number] | null = pbr.water
+          ? pbr.waterAlong
+            ? grads
+              ? waterTiltAlong(pbr.water, tu, tv, grads.gu, grads.gv)
+              : null
+            : ((t) => [t[0], 0, t[1]] as const)(waterTilt(pbr.water, pw0 * a.wx + pw1 * b.wx + pw2 * c.wx, pw0 * a.wz + pw1 * b.wz + pw2 * c.wz))
+          : null;
         if (ripple) {
           Nx += ripple[0];
-          Nz += ripple[1];
+          Ny += ripple[1];
+          Nz += ripple[2];
           const rl = Math.hypot(Nx, Ny, Nz) || 1;
           Nx /= rl;
           Ny /= rl;
@@ -2676,7 +2687,8 @@ function rasterizeTriangle(
         let Cz = gnz / gflip;
         if (ripple) {
           Cx += ripple[0];
-          Cz += ripple[1];
+          Cy += ripple[1];
+          Cz += ripple[2];
           const rl = Math.hypot(Cx, Cy, Cz) || 1;
           Cx /= rl;
           Cy /= rl;

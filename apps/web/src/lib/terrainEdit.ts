@@ -38,6 +38,7 @@ export type TerrainTool =
   | { readonly kind: "stamp"; readonly stamp: StampKind }
   | { readonly kind: "erode"; readonly erosion: "hydraulic" | "thermal" }
   | { readonly kind: "ramp" }
+  | { readonly kind: "spline"; readonly id: string }
   | { readonly kind: "paint"; readonly layer: number }
   | { readonly kind: "hole"; readonly fill: boolean }
   | { readonly kind: "foliage"; readonly layer: string; readonly erase: boolean };

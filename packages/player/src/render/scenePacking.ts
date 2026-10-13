@@ -97,7 +97,8 @@ import {
  * 880  wind0      vec4<f32>    16   xy = the wind's x and z × strength, z = its phase (0..1),
  *                                    w = gust (B6; windUniform in wind.ts)
  * 896  maps0      vec4<f32>    16   x = 1 when a tangent-space normal map is bound (P1a),
- *                                    y = distance-tiling distance (0 = off) (P2b; farTileBlend)
+ *                                    y = distance-tiling distance (0 = off) (P2b; farTileBlend),
+ *                                    z = 1 when the water flows along the UVs (P3; waterTiltAlong)
  * ```
  *
  * 912 bytes used, padded to a 1024-byte stride (a 256-byte multiple a dynamic
@@ -477,6 +478,8 @@ export interface InstanceUniform {
   readonly soft?: { readonly distance: number; readonly linear: readonly [number, number] };
   /** Moving water (B5): the material's waterUniform this frame, or null/omitted for none. */
   readonly water?: readonly [number, number, number, number] | null;
+  /** The water's ripples flow along the UVs (EDITOR_PRO_ROADMAP.md P3), not the world's X and Z. */
+  readonly waterAlong?: boolean;
   /** Triplanar mapping and height blending (B6), from {@link resolveMapping}, or null/omitted for neither. */
   readonly mapping?: ResolvedMapping | null;
   /** The frame's wind (B6): its windUniform, or null/omitted for still air. */
@@ -756,7 +759,7 @@ export function writeInstanceUniform(target: Float32Array, index: number, unifor
 
   target[base + OFFSET_MAPS0] = uniform.hasNormalMap ? 1 : 0;
   target[base + OFFSET_MAPS0 + 1] = mapping?.farTile ?? 0;
-  target[base + OFFSET_MAPS0 + 2] = 0;
+  target[base + OFFSET_MAPS0 + 2] = uniform.waterAlong ? 1 : 0;
   target[base + OFFSET_MAPS0 + 3] = 0;
 }
 
