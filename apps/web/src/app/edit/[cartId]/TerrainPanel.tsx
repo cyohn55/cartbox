@@ -8,9 +8,22 @@
  * @cartbox/editor and terrainEdit.ts.
  */
 
-import { useState } from "react";
+import { useRef, useState } from "react";
 
-import { FOLIAGE_PRESETS, MAX_VISTA_HAZE, foliageRandom, layerCopies, type FoliageLayer, type FoliagePreset } from "@cartbox/editor";
+import {
+  FOLIAGE_PRESETS,
+  MAX_EROSION_DROPLETS,
+  MAX_VISTA_HAZE,
+  exportHeightmap,
+  foliageRandom,
+  hydraulicErosion,
+  importHeightmap,
+  layerCopies,
+  thermalErosion,
+  type FoliageLayer,
+  type FoliagePreset,
+  type Terrain,
+} from "@cartbox/editor";
 
 import { addFoliage, foliageOn, removeFoliage, replaceFoliage } from "@/lib/foliageEdit";
 import { type MeshSidecar } from "@/lib/meshSidecar";
@@ -99,6 +112,19 @@ export function TerrainPanel({
             {toolButton({ kind: "hole", fill: false }, "Cut hole", "◌", "Cut the ground away (a cave mouth, a pit)")}
             {toolButton({ kind: "hole", fill: true }, "Fill hole", "●", "Put cut ground back")}
           </div>
+          <div className={styles.toolGroup} style={{ marginTop: 6 }}>
+            {toolButton({ kind: "stamp", stamp: "hills" }, "Hills", "◠", "Press rolling hills into the ground")}
+            {toolButton({ kind: "stamp", stamp: "ridges" }, "Ridges", "⋀", "Press sharp ridges and crests into the ground")}
+            {toolButton({ kind: "stamp", stamp: "terraces" }, "Terraces", "☰", "Step the ground into flat treads and short risers, like layered sandstone")}
+            {toolButton({ kind: "ramp" }, "Ramp", "◢", "Drag from one spot to another: a smooth incline between their heights, the brush's width")}
+          </div>
+          <div className={styles.toolGroup} style={{ marginTop: 6 }}>
+            {toolButton({ kind: "erode", erosion: "hydraulic" }, "Rain", "☂", "Erode with rain: gullies down the slopes, silt at their feet")}
+            {toolButton({ kind: "erode", erosion: "thermal" }, "Weather", "⛰", "Let over-steep ground slump into scree")}
+          </div>
+          {edit.tool?.kind === "stamp" && edit.tool.stamp === "terraces" && (
+            <RangeControl label="Step" nested min={0.25} max={10} step={0.25} value={edit.step ?? 2} onChange={(step) => onEdit({ ...edit, id, step })} ariaLabel="Terrace step height" display={`${(edit.step ?? 2).toFixed(2)} m`} />
+          )}
           <RangeControl label="Brush size" nested min={0.5} max={Math.max(2, Math.min(terrain.size[0], terrain.size[1]) / 3)} step={0.25} value={edit.radius} onChange={(radius) => onEdit({ ...edit, id, radius })} ariaLabel="Brush radius" display={`${edit.radius.toFixed(2)} m`} />
           <RangeControl label="Strength" nested min={0.05} max={1} step={0.05} value={edit.strength} onChange={(strength) => onEdit({ ...edit, id, strength })} ariaLabel="Brush strength" display={`${Math.round(edit.strength * 100)}%`} />
 
@@ -159,6 +185,8 @@ export function TerrainPanel({
             </>
           )}
 
+          <LandscapePasses terrain={terrain} onTerrain={(next) => onChange(replaceTerrain(sidecar, next))} />
+
           <div style={{ display: "flex", gap: 6, marginTop: 8, flexWrap: "wrap" }}>
             {terrain.paint && (
               <button type="button" className="cbx-btn" onClick={() => onChange(replaceTerrain(sidecar, { ...terrain, paint: undefined }))} title="Forget the painting: the layers follow their slope and height rules again">
@@ -208,6 +236,79 @@ const PRESETS: readonly FoliagePreset[] = FOLIAGE_PRESETS;
  * brush, fill it across the ground by slope and height, and set its density,
  * size, slope alignment and draw distance.
  */
+/**
+ * Whole-terrain passes (P2a): rain and weathering over all the ground, and
+ * the heights out to and in from a 16-bit heightmap PNG (World Machine,
+ * Gaea, a DEM). Each pass is one undo step.
+ */
+function LandscapePasses({ terrain, onTerrain }: { terrain: Terrain; onTerrain: (next: Terrain) => void }) {
+  const [droplets, setDroplets] = useState(40_000);
+  const [talus, setTalus] = useState(35);
+  const [seed, setSeed] = useState(1);
+  const [range, setRange] = useState(Math.round(Math.min(terrain.size[0], terrain.size[1]) / 4));
+  const [problem, setProblem] = useState<string | null>(null);
+  const fileRef = useRef<HTMLInputElement>(null);
+  const exportMap = () => {
+    const { png } = exportHeightmap(terrain);
+    const url = URL.createObjectURL(new Blob([png.slice().buffer as ArrayBuffer], { type: "image/png" }));
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `${terrain.name || "terrain"}-heightmap.png`;
+    link.click();
+    URL.revokeObjectURL(url);
+  };
+  return (
+    <>
+      <div style={{ fontSize: 11, opacity: 0.7, marginTop: 8 }}>Whole landscape</div>
+      <RangeControl label="Raindrops" nested min={1000} max={MAX_EROSION_DROPLETS} step={1000} value={droplets} onChange={setDroplets} ariaLabel="Raindrops for erosion" display={`${Math.round(droplets / 1000)}k`} />
+      <RangeControl label="Repose" nested min={15} max={60} step={1} value={talus} onChange={setTalus} ariaLabel="Steepest slope that stands" display={`${talus}°`} />
+      <div style={{ display: "flex", gap: 6, marginTop: 4, flexWrap: "wrap" }}>
+        <button
+          type="button"
+          className="cbx-btn"
+          title="Run that many raindrops over all the ground (each run a new pattern)"
+          onClick={() => {
+            onTerrain(hydraulicErosion(terrain, { droplets, seed }));
+            setSeed(seed + 1);
+          }}
+        >
+          Rain on it all
+        </button>
+        <button type="button" className="cbx-btn" title="Slump every slope steeper than the repose angle" onClick={() => onTerrain(thermalErosion(terrain, { iterations: 40, talus }))}>
+          Weather it all
+        </button>
+      </div>
+      <RangeControl label="Import height" nested min={1} max={500} step={1} value={range} onChange={setRange} ariaLabel="Height of white in an imported heightmap" display={`${range} m`} />
+      <div style={{ display: "flex", gap: 6, marginTop: 4, flexWrap: "wrap" }}>
+        <button type="button" className="cbx-btn" title="Save the heights as a 16-bit greyscale PNG (it remembers its own height range)" onClick={exportMap}>
+          Export heightmap
+        </button>
+        <button type="button" className="cbx-btn" title="Load heights from a greyscale PNG (8 or 16 bits): black is the ground's base, white the import height" onClick={() => fileRef.current?.click()}>
+          Import heightmap…
+        </button>
+        <input
+          ref={fileRef}
+          type="file"
+          accept="image/png"
+          hidden
+          onChange={async (event) => {
+            const file = event.target.files?.[0];
+            event.target.value = "";
+            if (!file) return;
+            try {
+              onTerrain(await importHeightmap(terrain, new Uint8Array(await file.arrayBuffer()), [0, range]));
+              setProblem(null);
+            } catch (error) {
+              setProblem(error instanceof Error ? error.message : "That file couldn't be read");
+            }
+          }}
+        />
+      </div>
+      {problem && <RailHint>{problem}</RailHint>}
+    </>
+  );
+}
+
 function FoliageSection({
   sidecar,
   onChange,

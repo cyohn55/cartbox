@@ -8,6 +8,7 @@
 
 import {
   cutTerrainHoles,
+  hydraulicErosion,
   invertAffine,
   newTerrain,
   paintTerrain,
@@ -15,18 +16,28 @@ import {
   readTerrain,
   sculptTerrain,
   serializeTerrain,
+  stampTerrain,
   terrainHeight,
+  thermalErosion,
   type Mat4,
   type SculptTool,
+  type StampKind,
   type Terrain,
   type TerrainBrush,
 } from "@cartbox/editor";
 
 import type { MeshSidecar } from "./meshSidecar";
 
-/** What a stroke does: sculpt the ground, paint a layer, cut (or fill) holes, or paint (or erase) a foliage layer. */
+/**
+ * What a stroke does: sculpt the ground, press a stamp, erode it, lay a ramp
+ * (from where the stroke starts to where it is), paint a layer, cut (or fill)
+ * holes, or paint (or erase) a foliage layer.
+ */
 export type TerrainTool =
   | { readonly kind: "sculpt"; readonly op: SculptTool }
+  | { readonly kind: "stamp"; readonly stamp: StampKind }
+  | { readonly kind: "erode"; readonly erosion: "hydraulic" | "thermal" }
+  | { readonly kind: "ramp" }
   | { readonly kind: "paint"; readonly layer: number }
   | { readonly kind: "hole"; readonly fill: boolean }
   | { readonly kind: "foliage"; readonly layer: string; readonly erase: boolean };
@@ -35,6 +46,8 @@ export type TerrainTool =
 export interface TerrainBrushSettings {
   readonly radius: number;
   readonly strength: number;
+  /** The terrace stamp's step height (world units; absent = 2). */
+  readonly step?: number;
 }
 
 /** A new terrain's id (unique on the sidecar). */
@@ -73,9 +86,28 @@ export function findTerrain(sidecar: MeshSidecar, id: string): Terrain | null {
   return stored ? readTerrain(stored) : null;
 }
 
-/** One dab of a tool that changes the ground (foliage tools leave it be). `level` is the flatten height (terrain space) the stroke holds. */
-export function applyTerrainTool(t: Terrain, tool: TerrainTool, brush: TerrainBrush, level?: number): Terrain {
+/** A dab's own seed, fixed by where it lands (so the same stroke erodes the same way). */
+function dabSeed(brush: TerrainBrush): number {
+  return (Math.imul(Math.round(brush.x * 16), 73856093) ^ Math.imul(Math.round(brush.z * 16), 19349663)) >>> 0;
+}
+
+/** Rain droplets per dab of the erosion brush: about one per cell under it. */
+export function dabDroplets(t: Terrain, radius: number): number {
+  const cell = t.size[0] / (t.samples - 1);
+  return Math.max(16, Math.min(4000, Math.round((Math.PI * radius * radius) / (cell * cell))));
+}
+
+/**
+ * One dab of a tool that changes the ground (foliage tools, and the ramp,
+ * which the stroke lays whole, leave it be). `level` is the flatten height
+ * (terrain space) the stroke holds; `step` the terrace stamp's step.
+ */
+export function applyTerrainTool(t: Terrain, tool: TerrainTool, brush: TerrainBrush, level?: number, step?: number): Terrain {
   if (tool.kind === "sculpt") return sculptTerrain(t, tool.op, brush, level);
+  if (tool.kind === "stamp") return stampTerrain(t, { kind: tool.stamp, ...(step !== undefined ? { step } : {}) }, brush);
+  if (tool.kind === "erode") {
+    return tool.erosion === "hydraulic" ? hydraulicErosion(t, { droplets: dabDroplets(t, brush.radius), seed: dabSeed(brush) }, brush) : thermalErosion(t, { iterations: 3, talus: 33 }, brush);
+  }
   if (tool.kind === "paint") return paintTerrain(t, tool.layer, brush);
   if (tool.kind === "hole") return cutTerrainHoles(t, brush, tool.fill);
   return t;

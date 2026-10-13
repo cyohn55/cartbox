@@ -86,6 +86,14 @@ Next to Unity and Unreal, it lacks the following:
     - macro variation, so a tile doesn't repeat across a valley;
     - distance blending.
   - *Tests:* erosion conserves material and is deterministic; an import/export round trip; auto-material weights.
+  - **P2a: done.** Sculpting tools beyond raise, lower, smooth, flatten and noise (`landscapeTools.ts`).
+    - **Hydraulic erosion.** Rain droplets (Beyer's model) run downhill with a little inertia, carry sediment by speed, water and drop, and fill pits they run into. A droplet's leftover sediment settles where it stops, so ground is moved but never made or lost. The droplets work in cell units, so they behave the same at any size or resolution. The same seed gives the same valley.
+    - **Thermal erosion.** Ground steeper than the angle of repose slumps onto its lower neighbours. Each pass reads the heights from before it, so the result doesn't depend on the order of the samples. It also conserves ground.
+    - **Brushes.** Rain and Weather as brushes, which erode only the brushed patch. Hills, Ridges (ridged fractal) and Terraces (flat treads with eased risers, with an adjustable step) as stamps. A Ramp drawn by dragging from one spot to another, between their heights, the brush's width, laid afresh over the ground as it was.
+    - **Whole landscape.** "Rain on it all" (up to 200k droplets) and "Weather it all" (an adjustable repose angle).
+    - **Heightmaps.** Export writes a 16-bit greyscale PNG that carries its own height range in a `tEXt` chunk. Import reads 8- or 16-bit grey or colour PNGs, resampled to the grid: a Cartbox file at its own range, anything else from black to the chosen height.
+    - **Undo.** Every pass is a single undo step, as sculpting already is.
+    - *Tests:* `landscape-tools.test.ts` (conservation and determinism of both erosions, region-only erosion, stamps and terraces, the ramp's profile, the 16-bit round trip within one step of 65535, 8-bit colour import, rejecting a non-PNG).
 - [ ] **P3. Splines.**
   - Editable splines (Catmull-Rom, with per-point width and height).
   - A **river** spline:
