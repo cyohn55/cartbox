@@ -63,7 +63,7 @@ export {
 } from "./debug/debugBlock.js";
 export type { DebugStep, ErrorFrame, PauseInfo, TraceLine } from "./debug/debugBlock.js";
 export { breakableLine, effectiveBreakpoints, instrumentLua, tokenizeLua } from "./debug/instrument.js";
-export { PROFILE_SECTIONS, PROFILE_WINDOW, Profiler, estimateSceneBytes } from "./debug/profiler.js";
+export { PROFILE_SECTIONS, PROFILE_WINDOW, Profiler, estimateSceneBytes, estimateSceneMemory, type SceneMemory } from "./debug/profiler.js";
 export type { ProfileSection, ProfileSnapshot, RenderStats, SectionStats } from "./debug/profiler.js";
 
 // Platform event mailbox (P2) + the cartbox SDK.

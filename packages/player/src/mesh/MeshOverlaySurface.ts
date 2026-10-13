@@ -99,7 +99,7 @@ import type { MeshInstance, MeshScene, SceneVista } from "./meshScene.js";
 import { QUALITY_PRESETS, type QualitySettings } from "../quality.js";
 import { buildOrbitCamera, orbitPitchAboveTerrain } from "./meshScene.js";
 import { sceneColliders } from "./sceneColliders.js";
-import { estimateSceneBytes, type Profiler, type RenderStats } from "../debug/profiler.js";
+import { estimateSceneBytes, estimateSceneMemory, type Profiler, type RenderStats, type SceneMemory } from "../debug/profiler.js";
 
 const RAD_TO_DEG = 180 / Math.PI;
 /** How far the sun's reported visibility moves toward this frame's each frame. */
@@ -929,6 +929,11 @@ export class MeshOverlaySurface implements DisplaySurface {
   /** Bytes the scene keeps for drawing (geometry, textures, targets), estimated. */
   sceneBytes(): number {
     return estimateSceneBytes(this.instances, this.width, this.height);
+  }
+
+  /** The scene's memory by kind (every texture map with mips, meshes, targets), for the per-device budgets (P8). */
+  sceneMemory(): SceneMemory {
+    return estimateSceneMemory(this.instances, this.width, this.height);
   }
 
   blit(rgba: Uint8Array): void {

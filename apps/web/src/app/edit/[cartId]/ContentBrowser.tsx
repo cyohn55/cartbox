@@ -14,7 +14,7 @@ import { useEffect, useMemo, useState } from "react";
 
 import { deserializeMeshAsset, meshBounds, renderMesh, type MeshAsset } from "@cartbox/editor";
 
-import { ASSET_KINDS, codeReferences, collectAssets, filterAssets, renamable, renameAsset, renameInCode, sceneReferences, type AssetKind, type ContentAsset } from "@/lib/contentBrowser";
+import { ASSET_KINDS, codeReferences, collectAssets, filterAssets, renamable, renameAsset, renameInCode, sceneReferences, setAssetTags, tagsInUse, type AssetKind, type ContentAsset } from "@/lib/contentBrowser";
 import { decodeMeshTextures } from "@/lib/meshImport";
 import type { MeshSidecar } from "@/lib/meshSidecar";
 import styles from "./editor.module.css";
@@ -146,8 +146,10 @@ export function ContentBrowser({
 
   const doRename = () => {
     if (!selected) return;
-    const next = renameAsset(sidecar, selected, rename);
+    let next = renameAsset(sidecar, selected, rename);
     if (next === sidecar) return;
+    // Its tags follow it to its new name (a prefab keeps its key).
+    if (selected.tags?.length && selected.kind !== "prefab") next = setAssetTags(setAssetTags(next, selected, []), { kind: selected.kind, key: rename.trim() }, selected.tags);
     onSidecarChange(next);
     if (code && renameCode) {
       const updated = renameInCode(code.getText(), selected.name, rename.trim());
@@ -166,12 +168,31 @@ export function ContentBrowser({
           <input
             type="search"
             aria-label="Search assets"
-            placeholder="Search assets"
+            placeholder="Search assets (#tag)"
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             style={{ flex: "0 1 260px", padding: "4px 8px", borderRadius: 6 }}
           />
         )}
+        {open &&
+          tagsInUse(assets)
+            .slice(0, 8)
+            .map((tag) => {
+              const on = query.split(/\s+/).includes(`#${tag}`);
+              return (
+                <button
+                  key={tag}
+                  type="button"
+                  className={styles.toolBtn}
+                  aria-pressed={on}
+                  title={on ? `Stop filtering by #${tag}` : `Show only assets tagged #${tag}`}
+                  onClick={() => setQuery(on ? query.split(/\s+/).filter((w) => w !== `#${tag}`).join(" ") : `${query.trim()} #${tag}`.trim())}
+                  style={{ fontSize: 11, padding: "2px 6px" }}
+                >
+                  #{tag}
+                </button>
+              );
+            })}
       </div>
       {open && (
         <div style={{ display: "flex", flex: 1, minHeight: 0, gap: 8, padding: "0 12px 10px" }}>
@@ -234,6 +255,21 @@ export function ContentBrowser({
                 {GLYPHS[selected.kind]} {selected.name}
               </div>
               <div style={{ opacity: 0.7 }}>{selected.detail}</div>
+              <input
+                key={`${selectedKey}:${(selected.tags ?? []).join(",")}`}
+                type="text"
+                aria-label="Asset tags"
+                placeholder="Tags: rock, forerunner…"
+                defaultValue={(selected.tags ?? []).join(", ")}
+                onBlur={(e) => {
+                  const tags = e.target.value.split(/[\s,]+/).filter(Boolean);
+                  if (tags.join(",") !== (selected.tags ?? []).join(",")) onSidecarChange(setAssetTags(sidecar, selected, tags));
+                }}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") (e.target as HTMLInputElement).blur();
+                }}
+                style={{ padding: "3px 6px", borderRadius: 6 }}
+              />
               {(selected.kind === "mesh" || selected.kind === "prefab") && (
                 <button type="button" className={styles.toolBtn} onClick={() => onPlace(selected)} title="Place it where the scene view is looking (or drag it into the view)">
                   Place in scene

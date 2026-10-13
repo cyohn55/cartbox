@@ -8,7 +8,7 @@
  * cartbox.tagged and cartbox.prop.
  */
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
 import {
   DEFAULT_PHYSICS_SPEC,
@@ -57,7 +57,7 @@ import {
   unlinkPrefab,
 } from "@/lib/meshPrefabs";
 import { addMeshClip, renameMeshClip, retargetClip, retimeClip, reverseClip, setMeshClip, trimClip } from "@cartbox/editor";
-import { clearEntryLods, generateEntryLods, lodSummary } from "@/lib/meshLods";
+import { clearEntryLods, generateEntryLods, lodDeviations, lodSummary } from "@/lib/meshLods";
 import styles from "./editor.module.css";
 import { RailGroup, RailHint, RangeControl } from "./railControls";
 
@@ -947,6 +947,8 @@ export function LodPanel({
 }) {
   const [note, setNote] = useState<string | null>(null);
   const summary = lodSummary(entry);
+  // How far each level strays from the full model (P8): measured once per model and levels.
+  const deviations = useMemo(() => lodDeviations(entry), [entry]);
   const copies = sidecar.meshes.filter((m) => m.mesh === entry.mesh).length;
   const generate = () => {
     const { sidecar: next, made } = generateEntryLods(sidecar, entry.id);
@@ -960,6 +962,7 @@ export function LodPanel({
           {summary.triangles.map((t, i) => (
             <span key={i} style={{ display: "block" }}>
               {i === 0 ? "Full" : `LOD ${i}`}: {t.toLocaleString()} triangles{i === 0 ? "" : ` from ${summary.distances[i - 1]!.toFixed(1)} m`}
+              {i > 0 && deviations?.[i - 1] !== undefined && ` · strays ≤ ${(deviations[i - 1]! * 100).toFixed(deviations[i - 1]! < 0.1 ? 1 : 0)} cm`}
             </span>
           ))}
         </RailHint>

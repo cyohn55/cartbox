@@ -62,7 +62,7 @@ import { MODELS, createSceneRenderer, type SceneDraw, type SceneRenderer } from 
 import { readMeshEntry, setMeshTransform, type MeshSidecar } from "@/lib/meshSidecar";
 import { brushRing, terrainRayHit } from "@/lib/terrainEdit";
 import type { SplineOverlay } from "@/lib/splineEdit";
-import type { MarkupOverlay, MarkupRef } from "@cartbox/editor";
+import { DEVICE_BUDGETS, formatBudgetValue, type BudgetDevice, type MarkupOverlay, type MarkupRef } from "@cartbox/editor";
 import { decodeMeshTextures } from "@/lib/meshImport";
 import { type Vec3 } from "@/lib/scenePick";
 import {
@@ -181,6 +181,9 @@ interface SceneViewportProps {
   onPlace?: ((at: Vec3) => void) | null;
   /** A click on a marker selects it. */
   onPickMarkup?: (ref: MarkupRef) => void;
+  /** The device whose budget the readout checks each frame against (P8), and the scene's texture memory. */
+  budget?: BudgetDevice | null;
+  textureBytes?: number | null;
 }
 
 /** A decoded mesh + its base-colour textures, rebuilt only when the geometry set changes. */
@@ -251,9 +254,11 @@ function frameSize(cssW: number, cssH: number, dpr: number, budget: number): { w
 const NO_IDS: ReadonlySet<string> = new Set();
 const NO_SPLINES: readonly SplineOverlay[] = [];
 const NO_MARKUP: readonly MarkupOverlay[] = [];
+/** A readout value over the device's budget. */
+const OVER: React.CSSProperties = { color: "#ff6b6b", fontWeight: 650 };
 const sameRef = (a: MarkupRef | null | undefined, b: MarkupRef) => Boolean(a && a.kind === b.kind && a.index === b.index);
 
-export function SceneViewport({ sidecar, onSidecarChange, selectedIds, onSelectIds, hidden = NO_IDS, locked = NO_IDS, onKey, previewCamera, previewLocals, onView, onDropAsset, terrainBrush = null, onTerrainStroke, splines = NO_SPLINES, markup = NO_MARKUP, selectedMarkup = null, onPlace = null, onPickMarkup }: SceneViewportProps) {
+export function SceneViewport({ sidecar, onSidecarChange, selectedIds, onSelectIds, hidden = NO_IDS, locked = NO_IDS, onKey, previewCamera, previewLocals, onView, onDropAsset, terrainBrush = null, onTerrainStroke, splines = NO_SPLINES, markup = NO_MARKUP, selectedMarkup = null, onPlace = null, onPickMarkup, budget = null, textureBytes = null }: SceneViewportProps) {
   const selectedId = selectedIds.at(-1) ?? null;
   const containerRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -1361,7 +1366,16 @@ export function SceneViewport({ sidecar, onSidecarChange, selectedIds, onSelectI
           <span className={styles.hudItem} aria-label="Viewport stats">
             <span className={styles.hudLabel}>{stats.backend === "webgpu" ? "WebGPU" : stats.backend === "webgl2" ? "WebGL2" : "Software"}</span>
             <span className={`${styles.hudValue} data`}>
-              {stats.width}×{stats.height} · {stats.ms.toFixed(1)} ms · {stats.drawCalls} draws · {Math.round(stats.triangles).toLocaleString()} tris
+              {stats.width}×{stats.height} · {stats.ms.toFixed(1)} ms ·{" "}
+              <span style={budget && stats.drawCalls > DEVICE_BUDGETS[budget].drawCalls ? OVER : undefined}>{stats.drawCalls} draws</span> ·{" "}
+              <span style={budget && stats.triangles > DEVICE_BUDGETS[budget].triangles ? OVER : undefined}>{Math.round(stats.triangles).toLocaleString()} tris</span>
+              {textureBytes !== null && (
+                <>
+                  {" "}
+                  · <span style={budget && textureBytes > DEVICE_BUDGETS[budget].textureBytes ? OVER : undefined}>{formatBudgetValue("textureBytes", textureBytes)} textures</span>
+                </>
+              )}
+              {budget && <> · vs {DEVICE_BUDGETS[budget].label}</>}
             </span>
           </span>
         )}

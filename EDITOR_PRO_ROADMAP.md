@@ -226,12 +226,44 @@ Next to Unity and Unreal, it lacks the following:
       - kill volumes in the Lua, and on the real engine (stepping in kills, stepping beside doesn't);
       - colliders from objects and ground from a terrain;
       - a saved arena laid out as the cart expects.
-- [ ] **P8. Profiler and content browser.**
+- [x] **P8. Profiler and content browser.**
   - Per-device budgets (iPhone, iPad, desktop).
   - A live overlay: draw calls, triangles, texture memory and frame time.
   - A content browser with thumbnails, search and tags.
   - **Automatic LODs** (quadric simplification).
   - *Tests:* the budgets flag an over-budget scene; LOD error bounds.
+  - **P8: done.** This builds on the profiler (Phase 5), the content browser (EP4) and quadric LODs (EP9b) that were already there (`deviceBudgets.ts`, `sceneBudget.ts`, `BudgetPanel.tsx`, the profiler panel, the viewport readout, the content browser and the LOD panel).
+    - **Per-device budgets.** iPhone, iPad and desktop each have limits on:
+      - triangles and draw calls a frame;
+      - texture and mesh memory;
+      - frame time (30 fps on a phone, 60 elsewhere);
+      - download size.
+
+      `checkBudget` gives each known line with its share of the limit and whether it's over, and `smallestFit` names the smallest device a scene fits.
+    - **The scene's load as stored** (`sceneLoadOf`):
+      - triangles and draw calls at full detail, per copy, with terrain chunks counted;
+      - mesh memory, each model counted once;
+      - texture memory, each image counted once, sized from its PNG, JPEG or KTX2 header and taken as RGBA8 with mips;
+      - the download.
+
+      The Mesh tab's Budgets panel shows each line as a bar, red when over, for the chosen device. The device choice is remembered in this browser.
+    - **The live overlay:**
+      - The viewport readout turns draws and triangles red when a frame goes over the chosen device's budget, and adds the scene's texture memory.
+      - The playtest profiler gains a "Device budget" group: what the frame drew and the scene's texture and mesh memory against the device's limits. The player now splits scene memory by kind (`estimateSceneMemory`), counting every texture map with mips.
+    - **The content browser:**
+      - Thumbnails and search were already there.
+      - Assets now carry tags, stored on the scene. Search takes `#tag` words, and the most-used tags show as one-click filters. Tags follow an asset when it is renamed.
+    - **LOD error bounds:**
+      - `lodDeviation` measures how far a level strays from its model: a one-sided Hausdorff distance from the model's vertices and face centres to the level.
+      - `lodErrorBudget` gives the level's allowance.
+      - The LOD panel shows each level's deviation in centimetres.
+      - The default levels stray about a tenth of their budget on a sphere and on rolling ground.
+    - *Tests:* `profiler-budgets.test.ts`:
+      - the budgets flag a heavy scene on a phone and not on a desktop, and devices are ordered on every line;
+      - header sizes for PNG, JPEG and KTX2;
+      - the stored load and the player's memory split;
+      - deviation is zero for a mesh against itself, catches a dropped half, and every default level stays within its budget;
+      - tags round-trip and filter.
 - [ ] **P9. Beaver Creek, rebuilt with the editor.**
   - Every capability above is used:
     - the canyon is sculpted and eroded;

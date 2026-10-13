@@ -53,6 +53,8 @@ export interface ProfileSnapshot {
     readonly jsHeap: number | null;
     /** The 3D scene's geometry, textures and render targets (an estimate), when it has one. */
     readonly scene: number | null;
+    /** The same split (EDITOR_PRO_ROADMAP.md P8): every texture map, the meshes, the targets. */
+    readonly sceneParts?: SceneMemory | null;
   };
   /** Multiplayer traffic, bytes per second over the window, when the cart is online. */
   readonly net: { readonly sentPerSecond: number; readonly receivedPerSecond: number; readonly sent: number; readonly received: number } | null;
@@ -145,4 +147,47 @@ export function estimateSceneBytes(
     }
   }
   return bytes;
+}
+
+/** A 3D scene's GPU memory by kind (bytes, estimated). */
+export interface SceneMemory {
+  readonly textures: number;
+  readonly meshes: number;
+  readonly targets: number;
+}
+
+/** The texture sets an instance may draw with: base colour and every other map. */
+const TEXTURE_SETS = ["textures", "normalTextures", "materialTextures", "mrTextures", "occlusionTextures", "emissiveTextures", "lightmapTextures"] as const;
+
+type TextureSet = readonly ({ readonly width: number; readonly height: number } | null | undefined)[] | undefined;
+
+/**
+ * A 3D scene's GPU memory by kind (P8), for the per-device budgets: each
+ * mesh's vertices and indices once (as {@link estimateSceneBytes}), each
+ * texture of every map once as RGBA8 with its mips, and the targets.
+ */
+export function estimateSceneMemory(
+  instances: readonly ({ readonly mesh: { readonly primitives: readonly { readonly positions: ArrayLike<number>; readonly indices: ArrayLike<number> }[] } } & Partial<Record<(typeof TEXTURE_SETS)[number], TextureSet>>)[],
+  width: number,
+  height: number,
+): SceneMemory {
+  const meshes = new Set<object>();
+  const textures = new Set<object>();
+  let meshBytes = 0;
+  let textureBytes = 0;
+  for (const instance of instances) {
+    if (!meshes.has(instance.mesh)) {
+      meshes.add(instance.mesh);
+      for (const p of instance.mesh.primitives) meshBytes += (p.positions.length / 3) * 32 + p.indices.length * 4;
+    }
+    for (const set of TEXTURE_SETS) {
+      for (const texture of instance[set] ?? []) {
+        if (texture && !textures.has(texture)) {
+          textures.add(texture);
+          textureBytes += Math.round((texture.width * texture.height * 4 * 4) / 3);
+        }
+      }
+    }
+  }
+  return { textures: textureBytes, meshes: meshBytes, targets: width * height * 8 };
 }
