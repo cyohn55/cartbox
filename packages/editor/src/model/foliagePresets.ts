@@ -5,8 +5,10 @@
  * a few dozen triangles each, since a layer draws thousands of them.
  */
 
-import type { MeshAsset, MeshMaterial } from "./MeshAsset";
-import { foliageRandom, type FoliageLayer } from "./foliage";
+import { withGeneratedMaps, type EncodedImage, type MeshAsset, type MeshMaterial } from "./MeshAsset";
+import { foliageRandom, type FoliageFill, type FoliageLayer } from "./foliage";
+import { valueNoise } from "./materialGraph";
+import { encodeRgbaPng } from "./png";
 
 type V3 = readonly [number, number, number];
 
@@ -148,13 +150,158 @@ export function broadleafMesh(seed = 11): MeshAsset {
   return { name: "broadleaf", primitives: [...wood.primitives, ...crown.primitives] };
 }
 
-export type FoliagePreset = "boulder" | "drift" | "grass" | "reeds" | "pine" | "broadleaf";
+// --- Placement kit (EDITOR_PRO_ROADMAP.md P4) ----------------------------------------------
+
+/**
+ * A cliff rock: a slab of stone, wider than tall and longer than wide, its
+ * faces broken by noise into chips and ledges (a twice-subdivided
+ * icosahedron, displaced, faceted). Mapped with the rock generator (P1c),
+ * projected triplanar in its own space, so every copy shows strata and
+ * cracks without UVs. About a unit long.
+ */
+export function cliffRockMesh(seed = 4): MeshAsset {
+  const t = (1 + Math.sqrt(5)) / 2;
+  let verts: V3[] = [
+    [-1, t, 0], [1, t, 0], [-1, -t, 0], [1, -t, 0], [0, -1, t], [0, 1, t], [0, -1, -t], [0, 1, -t], [t, 0, -1], [t, 0, 1], [-t, 0, -1], [-t, 0, 1],
+  ].map(([x, y, z]) => {
+    const l = Math.hypot(x!, y!, z!);
+    return [x! / l, y! / l, z! / l] as V3;
+  });
+  let faces: [number, number, number][] = [
+    [0, 11, 5], [0, 5, 1], [0, 1, 7], [0, 7, 10], [0, 10, 11], [1, 5, 9], [5, 11, 4], [11, 10, 2], [10, 7, 6], [7, 1, 8],
+    [3, 9, 4], [3, 4, 2], [3, 2, 6], [3, 6, 8], [3, 8, 9], [4, 9, 5], [2, 4, 11], [6, 2, 10], [8, 6, 7], [9, 8, 1],
+  ];
+  // Subdivide twice, each new corner pushed out onto the sphere.
+  for (let level = 0; level < 2; level += 1) {
+    const mid = new Map<string, number>();
+    const at = (a: number, b: number): number => {
+      const key = a < b ? `${a},${b}` : `${b},${a}`;
+      let k = mid.get(key);
+      if (k === undefined) {
+        const p = verts[a]!, q = verts[b]!;
+        const m: V3 = [(p[0] + q[0]) / 2, (p[1] + q[1]) / 2, (p[2] + q[2]) / 2];
+        const l = Math.hypot(m[0], m[1], m[2]);
+        k = verts.length;
+        verts = [...verts, [m[0] / l, m[1] / l, m[2] / l]];
+        mid.set(key, k);
+      }
+      return k;
+    };
+    faces = faces.flatMap(([a, b, c]) => {
+      const ab = at(a, b), bc = at(b, c), ca = at(c, a);
+      return [[a, ab, ca], [b, bc, ab], [c, ca, bc], [ab, bc, ca]] as [number, number, number][];
+    });
+  }
+  const shaped = verts.map(([x, y, z]) => {
+    // Broad lumps and fine chips, then squashed into a slab; the base flattened to sit.
+    const n = valueNoise(x * 1.6 + seed, y * 1.6, z * 1.6, 2) * 0.35 + valueNoise(x * 5 + seed * 3, y * 5, z * 5, 1) * 0.12;
+    const r = 0.78 + n;
+    return [x * r * 0.7, Math.max(-0.12, y * r * 0.32), z * r * 0.45] as V3;
+  });
+  const material = withGeneratedMaps({
+    name: "cliff-rock",
+    baseColorFactor: [1, 1, 1, 1],
+    baseColorImage: null,
+    metallicFactor: 1,
+    roughnessFactor: 1,
+    generator: { kind: "rock", seed, scale: 1, tint: [0.95, 0.9, 0.85], size: 128 },
+    triplanar: 0.6,
+  });
+  return faceted("cliff rock", material, faces.map(([a, b, c]) => [shaped[a]!, shaped[b]!, shaped[c]!] as const));
+}
+
+let blades: EncodedImage | null = null;
+
+/** The grass card's texture: a dozen tapering blades, green to straw at their tips, cut out by alpha. Shared, so stored once. */
+export function grassCardTexture(): EncodedImage {
+  if (blades) return blades;
+  const w = 64, h = 64;
+  const rgba = new Uint8ClampedArray(w * h * 4);
+  const random = foliageRandom(23);
+  for (let b = 0; b < 14; b += 1) {
+    const root = 3 + random() * (w - 6);
+    const lean = (random() - 0.5) * 18;
+    const tall = 0.55 + random() * 0.45;
+    const thick = 1.4 + random() * 1.4;
+    for (let y = 0; y < h; y += 1) {
+      const up = 1 - y / (h - 1); // 0 at the root (bottom row), 1 at the top
+      if (up > tall) continue;
+      const f = up / tall;
+      const cx = root + lean * f * f;
+      const half = thick * (1 - f * 0.85);
+      for (let x = Math.floor(cx - half - 1); x <= Math.ceil(cx + half + 1); x += 1) {
+        if (x < 0 || x >= w) continue;
+        const cover = Math.max(0, Math.min(1, half + 0.5 - Math.abs(x + 0.5 - cx)));
+        if (cover <= 0) continue;
+        const o = (y * w + x) * 4;
+        const shade = 0.75 + valueNoise(x * 0.3, y * 0.2, b, 1) * 0.35;
+        // Green at the root, drying toward the tip.
+        const r = (0.28 + 0.3 * f) * shade, g = (0.48 + 0.12 * f) * shade, bl = (0.16 + 0.06 * f) * shade;
+        if (cover * 255 > rgba[o + 3]!) rgba.set([r * 255, g * 255, bl * 255, cover * 255], o);
+      }
+    }
+  }
+  blades = { mime: "image/png", bytes: encodeRgbaPng(rgba, w, h, { compress: true }) };
+  return blades;
+}
+
+/**
+ * Grass cards: three crossed quads (both faces each) carrying a texture of a
+ * dozen blades, cut out by alpha (mask mode) — far more blades for the
+ * triangles than modelled tufts. Normals point up, so the cards light like
+ * the ground they grow from rather than flashing as they turn. Half a unit
+ * tall.
+ */
+export function grassCardMesh(): MeshAsset {
+  const positions: number[] = [];
+  const uvs: number[] = [];
+  const indices: number[] = [];
+  const half = 0.3, tall = 0.5;
+  for (let k = 0; k < 3; k += 1) {
+    const a = (k / 3) * Math.PI;
+    const dx = Math.cos(a) * half, dz = Math.sin(a) * half;
+    for (const face of [0, 1]) {
+      const o = positions.length / 3;
+      positions.push(-dx, 0, -dz, dx, 0, dz, dx, tall, dz, -dx, tall, -dz);
+      uvs.push(0, 1, 1, 1, 1, 0, 0, 0);
+      if (face === 0) indices.push(o, o + 1, o + 2, o, o + 2, o + 3);
+      else indices.push(o, o + 2, o + 1, o, o + 3, o + 2);
+    }
+  }
+  const count = positions.length / 3;
+  const normals = new Float32Array(count * 3);
+  for (let v = 0; v < count; v += 1) normals[v * 3 + 1] = 1;
+  const material: MeshMaterial = {
+    name: "grass-cards",
+    baseColorFactor: [1, 1, 1, 1],
+    baseColorImage: grassCardTexture(),
+    metallicFactor: 0,
+    roughnessFactor: 0.95,
+    alphaMode: "mask",
+    alphaCutoff: 0.5,
+  };
+  return { name: "grass cards", primitives: [{ positions: Float32Array.from(positions), normals, uvs: Float32Array.from(uvs), indices: Uint32Array.from(indices), material }] };
+}
+
+export type FoliagePreset = "boulder" | "drift" | "grass" | "reeds" | "pine" | "broadleaf" | "cliffRocks" | "grassCards";
 
 /** Every preset, in the order the editor offers them. */
-export const FOLIAGE_PRESETS: readonly FoliagePreset[] = ["boulder", "drift", "grass", "reeds", "pine", "broadleaf"];
+export const FOLIAGE_PRESETS: readonly FoliagePreset[] = ["boulder", "drift", "grass", "reeds", "pine", "broadleaf", "cliffRocks", "grassCards"];
+
+/** Each preset's name as the editor shows it (and a new layer is called). */
+export const FOLIAGE_PRESET_LABELS: Readonly<Record<FoliagePreset, string>> = {
+  boulder: "boulders",
+  drift: "snow drifts",
+  grass: "grass",
+  reeds: "reeds",
+  pine: "pines",
+  broadleaf: "broadleaf trees",
+  cliffRocks: "cliff rocks",
+  grassCards: "grass cards",
+};
 
 /** A preset's mesh and the layer settings it suits. */
-export function foliagePreset(kind: FoliagePreset): { mesh: MeshAsset; settings: Pick<FoliageLayer, "density" | "scale" | "align" | "sink" | "cull" | "wind"> } {
+export function foliagePreset(kind: FoliagePreset): { mesh: MeshAsset; settings: Pick<FoliageLayer, "density" | "scale" | "align" | "sink" | "cull" | "wind">; fill?: Omit<FoliageFill, "seed"> } {
   switch (kind) {
     case "boulder":
       return { mesh: boulderMesh(), settings: { density: 2, scale: [0.6, 2.4], align: 0.8, sink: 0.12, cull: 160 } };
@@ -166,6 +313,11 @@ export function foliagePreset(kind: FoliagePreset): { mesh: MeshAsset; settings:
       return { mesh: reedsMesh(), settings: { density: 30, scale: [0.7, 1.4], align: 0.3, sink: 0, cull: 50, wind: 4 } };
     case "pine":
       return { mesh: pineMesh(), settings: { density: 1, scale: [0.8, 1.8], align: 0, sink: 0.1, cull: 220, wind: 0.5 } };
+    case "cliffRocks":
+      // Only on the steep faces, lying along them and half sunk, so they read as the cliff breaking up.
+      return { mesh: cliffRockMesh(), settings: { density: 3, scale: [1.2, 3.4], align: 1, sink: 0.3, cull: 200 }, fill: { up: [0.2, 0.8] } };
+    case "grassCards":
+      return { mesh: grassCardMesh(), settings: { density: 45, scale: [0.7, 1.4], align: 0.6, sink: 0, cull: 45, wind: 3 } };
     case "broadleaf":
       return { mesh: broadleafMesh(), settings: { density: 0.6, scale: [0.8, 1.5], align: 0, sink: 0.1, cull: 240, wind: 0.7 } };
   }

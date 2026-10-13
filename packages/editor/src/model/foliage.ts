@@ -17,7 +17,9 @@
 
 import { base64ToBytes, bytesToBase64 } from "./base64";
 import type { MeshAsset, MeshPrimitive } from "./MeshAsset";
-import { terrainHeight, type Terrain } from "./terrain";
+import { terrainCurvature, terrainHeight, type Terrain } from "./terrain";
+import { valueNoise } from "./materialGraph";
+import { nearestOnSpline, sampleSpline, type Spline, type SplineSample } from "./splines";
 import { foliageSway } from "./wind";
 
 /** One copy, in its terrain's space: x and z from the grid's corner, a turn about up (radians), and a size. */
@@ -37,6 +39,28 @@ export interface FoliageFill {
   readonly height?: readonly [number, number];
   /** Keep this circle clear (terrain space x, z and a radius): the play space, a path. */
   readonly clear?: readonly [number, number, number];
+  // --- Placement rules (EDITOR_PRO_ROADMAP.md P4) ---
+  /** More circles to keep clear (terrain space x, z, radius): bases, pads, lanes. */
+  readonly keepOut?: readonly (readonly [number, number, number])[];
+  /** The ground's curvature, [min, max] in metres (see terrainCurvature): hollows positive, crests negative. Absent = any. */
+  readonly curvature?: readonly [number, number];
+  /**
+   * Grow in patches rather than evenly: broad noise `scale` world units across
+   * decides where, `cover` (0..1) the share of the ground the patches cover,
+   * their edges thinning out rather than stopping at a line.
+   */
+  readonly patches?: { readonly scale: number; readonly cover: number };
+  /**
+   * Stand only within a range of distance (world units) from the edge of these
+   * splines (by id; see splines.ts): reeds within 3 m of a river's water, trees
+   * kept 4 m off a path ([4, 1e9]). The splines come in the fill's context.
+   */
+  readonly near?: { readonly splines: readonly string[]; readonly within: readonly [number, number] };
+}
+
+/** What a fill may read beyond its terrain: the scene's splines, for its `near` rule. */
+export interface FoliageContext {
+  readonly splines?: readonly Spline[];
 }
 
 export interface FoliageLayer {
@@ -63,6 +87,13 @@ export interface FoliageLayer {
    * grass 3, reeds 4, a pine 0.5. Absent or 0 is stiff (rocks, drifts).
    */
   readonly wind?: number;
+  /**
+   * Impostors (EDITOR_PRO_ROADMAP.md P4; see render/impostor.ts): past
+   * `distance` from the camera, a block of copies draws as cards carrying
+   * pictures of the mesh (`mesh`, serialized, baked in the editor) instead of
+   * the mesh itself — a forest edge for a few triangles a tree.
+   */
+  readonly impostor?: { readonly distance: number; readonly mesh: string };
 }
 
 /** The most copies a layer holds (painted and filled together). */
@@ -96,15 +127,42 @@ export function groundAt(t: Terrain, x: number, z: number): { y: number; normal:
   return { y, normal: [nx / len, 1 / len, nz / len] };
 }
 
-/** Whether a fill's rules let a copy stand at (x, z). */
-function allowed(t: Terrain, fill: FoliageFill, x: number, z: number): boolean {
+/** How softly a patch's edge thins out, in the noise's own units. */
+const PATCH_EDGE = 0.08;
+
+/**
+ * Whether a fill's rules let a copy stand at (x, z); `chance` (0..1, drawn by
+ * the caller) decides where a patch's edge thins out. `near` is the sampled
+ * splines of the fill's `near` rule (empty: the rule is ignored).
+ */
+function allowed(t: Terrain, fill: FoliageFill, x: number, z: number, chance: number, near: readonly (readonly SplineSample[])[]): boolean {
   if (fill.clear && Math.hypot(x - fill.clear[0], z - fill.clear[1]) < fill.clear[2]) return false;
+  if (fill.keepOut?.some(([cx, cz, r]) => Math.hypot(x - cx, z - cz) < r)) return false;
+  if (fill.patches) {
+    const n = valueNoise((t.origin[0] + x) / fill.patches.scale, 0.5, (t.origin[2] + z) / fill.patches.scale, 3);
+    // The noise sits mostly within 0.25..0.75: cover maps onto that band.
+    const edge = 0.75 - 0.5 * Math.max(0, Math.min(1, fill.patches.cover));
+    const keep = Math.max(0, Math.min(1, (n - edge) / PATCH_EDGE + 0.5));
+    if (chance >= keep) return false;
+  }
   const g = groundAt(t, x, z);
   if (!g) return false;
   if (t.floor !== undefined && t.origin[1] + g.y < t.floor) return false;
   if (fill.up && (g.normal[1] < fill.up[0] || g.normal[1] > fill.up[1])) return false;
   const h = t.origin[1] + g.y;
   if (fill.height && (h < fill.height[0] || h > fill.height[1])) return false;
+  if (fill.curvature) {
+    const c = terrainCurvature(t, Math.round((x / t.size[0]) * (t.samples - 1)), Math.round((z / t.size[1]) * (t.samples - 1)));
+    if (c < fill.curvature[0] || c > fill.curvature[1]) return false;
+  }
+  if (fill.near && near.length > 0) {
+    let best = Infinity;
+    for (const samples of near) {
+      const hit = nearestOnSpline(samples, t.origin[0] + x, t.origin[2] + z);
+      if (hit) best = Math.min(best, Math.abs(hit.side) - hit.width / 2);
+    }
+    if (best < fill.near.within[0] || best > fill.near.within[1]) return false;
+  }
   return true;
 }
 
@@ -113,8 +171,11 @@ function allowed(t: Terrain, fill: FoliageFill, x: number, z: number): boolean {
  * candidate per cell, so they never clump), each kept where the rules allow.
  * The same seed always gives the same copies.
  */
-export function fillCopies(t: Terrain, layer: Pick<FoliageLayer, "density" | "scale">, fill: FoliageFill, limit = MAX_FOLIAGE_COPIES): FoliageCopy[] {
+export function fillCopies(t: Terrain, layer: Pick<FoliageLayer, "density" | "scale">, fill: FoliageFill, limit = MAX_FOLIAGE_COPIES, context: FoliageContext = {}): FoliageCopy[] {
   if (!(layer.density > 0)) return [];
+  const near = fill.near ? (context.splines ?? []).filter((s) => fill.near!.splines.includes(s.id)).map((s) => sampleSpline(s, 1)) : [];
+  // Patches thin out at their edges by a second stream, so the copies' places don't shift with them.
+  const chance = foliageRandom(fill.seed ^ 0x5bd1e995);
   const spacing = Math.sqrt(100 / layer.density);
   const nx = Math.max(1, Math.floor(t.size[0] / spacing));
   const nz = Math.max(1, Math.floor(t.size[1] / spacing));
@@ -126,17 +187,17 @@ export function fillCopies(t: Terrain, layer: Pick<FoliageLayer, "density" | "sc
       const z = (j + random()) * (t.size[1] / nz);
       const yaw = random() * Math.PI * 2;
       const scale = layer.scale[0] + (layer.scale[1] - layer.scale[0]) * random();
-      if (allowed(t, fill, x, z)) out.push({ x, z, yaw, scale });
+      if (allowed(t, fill, x, z, chance(), near)) out.push({ x, z, yaw, scale });
     }
   }
   return out;
 }
 
 /** Every copy of a layer: painted, then filled, up to the cap. */
-export function layerCopies(t: Terrain, layer: FoliageLayer): FoliageCopy[] {
+export function layerCopies(t: Terrain, layer: FoliageLayer, context: FoliageContext = {}): FoliageCopy[] {
   const painted = layer.copies.slice(0, MAX_FOLIAGE_COPIES);
   if (!layer.fill) return painted;
-  return [...painted, ...fillCopies(t, layer, layer.fill, MAX_FOLIAGE_COPIES - painted.length)];
+  return [...painted, ...fillCopies(t, layer, layer.fill, MAX_FOLIAGE_COPIES - painted.length, context)];
 }
 
 /**
@@ -281,8 +342,18 @@ export interface SerializedFoliage {
   cull: number;
   /** Painted copies, six bytes each (base64): x and z as 16-bit fractions of the terrain, yaw and scale as bytes. */
   copies?: string;
-  fill?: { seed: number; up?: [number, number]; height?: [number, number]; clear?: [number, number, number] };
+  fill?: {
+    seed: number;
+    up?: [number, number];
+    height?: [number, number];
+    clear?: [number, number, number];
+    keepOut?: [number, number, number][];
+    curvature?: [number, number];
+    patches?: { scale: number; cover: number };
+    near?: { splines: string[]; within: [number, number] };
+  };
   wind?: number;
+  impostor?: { distance: number; mesh: string };
 }
 
 /** Pack painted copies: x and z to 1/65535 of the terrain's size, yaw to 1/256 of a turn, scale within the layer's range to 1/255. */
@@ -333,6 +404,7 @@ export function serializeFoliage(t: Pick<Terrain, "size">, layer: FoliageLayer, 
     cull: layer.cull,
     ...(layer.copies.length > 0 ? { copies: packFoliageCopies(t, layer) } : {}),
     ...(layer.wind && layer.wind > 0 ? { wind: layer.wind } : {}),
+    ...(layer.impostor ? { impostor: { distance: layer.impostor.distance, mesh: layer.impostor.mesh } } : {}),
     ...(layer.fill
       ? {
           fill: {
@@ -340,6 +412,10 @@ export function serializeFoliage(t: Pick<Terrain, "size">, layer: FoliageLayer, 
             ...(layer.fill.up ? { up: [layer.fill.up[0], layer.fill.up[1]] as [number, number] } : {}),
             ...(layer.fill.height ? { height: [layer.fill.height[0], layer.fill.height[1]] as [number, number] } : {}),
             ...(layer.fill.clear ? { clear: [layer.fill.clear[0], layer.fill.clear[1], layer.fill.clear[2]] as [number, number, number] } : {}),
+            ...(layer.fill.keepOut && layer.fill.keepOut.length > 0 ? { keepOut: layer.fill.keepOut.map((c) => [c[0], c[1], c[2]] as [number, number, number]) } : {}),
+            ...(layer.fill.curvature ? { curvature: [layer.fill.curvature[0], layer.fill.curvature[1]] as [number, number] } : {}),
+            ...(layer.fill.patches ? { patches: { scale: layer.fill.patches.scale, cover: layer.fill.patches.cover } } : {}),
+            ...(layer.fill.near ? { near: { splines: [...layer.fill.near.splines], within: [layer.fill.near.within[0], layer.fill.near.within[1]] as [number, number] } } : {}),
           },
         }
       : {}),
@@ -348,6 +424,13 @@ export function serializeFoliage(t: Pick<Terrain, "size">, layer: FoliageLayer, 
 
 const finite = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v);
 const pair = (v: unknown): [number, number] | undefined => (Array.isArray(v) && v.length === 2 && finite(v[0]) && finite(v[1]) ? [v[0], v[1]] : undefined);
+
+/** A stored impostor: its switch distance and its mesh (kept as stored; the reader decodes it). */
+function readImpostor(value: unknown): { distance: number; mesh: string } | null {
+  const r = value as { distance?: unknown; mesh?: unknown } | null;
+  if (!r || typeof r !== "object" || !finite(r.distance) || typeof r.mesh !== "string" || !r.mesh) return null;
+  return { distance: Math.max(1, Math.min(10000, r.distance)), mesh: r.mesh };
+}
 
 /**
  * Read a stored layer over its terrain (null when it's malformed): the layer,
@@ -366,7 +449,27 @@ export function readFoliage(value: unknown, terrains: readonly Pick<Terrain, "id
   if (r.fill && typeof r.fill === "object") {
     const f = r.fill as Record<string, unknown>;
     const clear = Array.isArray(f.clear) && f.clear.length === 3 && f.clear.every(finite) ? ([f.clear[0], f.clear[1], f.clear[2]] as [number, number, number]) : undefined;
-    if (finite(f.seed)) fill = { seed: Math.floor(f.seed), ...(pair(f.up) ? { up: pair(f.up)! } : {}), ...(pair(f.height) ? { height: pair(f.height)! } : {}), ...(clear ? { clear } : {}) };
+    const keepOut = Array.isArray(f.keepOut)
+      ? f.keepOut.slice(0, 64).filter((c): c is [number, number, number] => Array.isArray(c) && c.length === 3 && c.every(finite)).map((c) => [c[0], c[1], Math.max(0, c[2])] as [number, number, number])
+      : [];
+    const p = f.patches as Record<string, unknown> | undefined;
+    const patches = p && typeof p === "object" && finite(p.scale) && finite(p.cover) ? { scale: Math.max(0.5, Math.min(10000, p.scale)), cover: Math.max(0, Math.min(1, p.cover)) } : undefined;
+    const n = f.near as Record<string, unknown> | undefined;
+    const near =
+      n && typeof n === "object" && Array.isArray(n.splines) && pair(n.within)
+        ? { splines: n.splines.filter((x): x is string => typeof x === "string").slice(0, 16), within: pair(n.within)! }
+        : undefined;
+    if (finite(f.seed))
+      fill = {
+        seed: Math.floor(f.seed),
+        ...(pair(f.up) ? { up: pair(f.up)! } : {}),
+        ...(pair(f.height) ? { height: pair(f.height)! } : {}),
+        ...(clear ? { clear } : {}),
+        ...(keepOut.length > 0 ? { keepOut } : {}),
+        ...(pair(f.curvature) ? { curvature: pair(f.curvature)! } : {}),
+        ...(patches ? { patches } : {}),
+        ...(near && near.splines.length > 0 ? { near } : {}),
+      };
   }
   return {
     mesh: r.mesh,
@@ -382,6 +485,7 @@ export function readFoliage(value: unknown, terrains: readonly Pick<Terrain, "id
       copies,
       ...(fill ? { fill } : {}),
       ...(finite(r.wind) && r.wind > 0 ? { wind: Math.min(4, r.wind) } : {}),
+      ...(readImpostor(r.impostor) ? { impostor: readImpostor(r.impostor)! } : {}),
     },
   };
 }

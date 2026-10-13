@@ -124,12 +124,26 @@ Next to Unity and Unreal, it lacks the following:
     - **Applying.** What a spline makes is an ordinary scene object tagged with its id; applying again replaces it, and deleting the spline removes it.
     - **Parity.** An S-bend river matches the software frame on WebGL2, and on WebGPU over Dawn, 30 of 30. Its ripples are strong enough to change a quarter of the river's pixels, so the parity check would catch a GPU that ignored them.
     - *Tests:* `splines.test.ts` (the curve through its points and evenly sampled; nearest point and side; the carve's bed, edge and banks, built-up banks, wet-bank paint; the water ribbon's UVs and up-facing winding; the foam's UVs; the along-UV tilt is the world tilt turned by the gradients; the path's tread, shoulders and paint; the bent wall; storage; placing points; applying a river and a wall).
-- [ ] **P4. Procedural placement.**
+- [x] **P4. Procedural placement.**
   - Scatter **volumes**, with rules (slope, height, distance to splines, density maps) and exclusion zones.
   - **Cliff rocks** placed along steep slopes.
   - **Alpha-tested cards** for grass blades and needles.
   - **Impostors**: baked billboards for distant trees, cross-faded with LOD.
   - *Tests:* the rules and exclusions hold; impostor views; density and budget.
+  - **P4: done.** Scatter rules, a placement kit, and impostors (`foliage.ts`, `foliagePresets.ts`, `render/impostor.ts`, the foliage section of the terrain panel).
+    - **Scatter rules.** A foliage fill gains four rules, beside its slope and height ranges (now with a gentlest slope as well as a steepest), all stored and deterministic:
+      - **keep-out** circles (bases, pads, lanes);
+      - **curvature**: only in hollows, or only on crests;
+      - **patches**: broad noise picks where a layer grows, to a share of cover, thinning out at the edges rather than stopping at a line;
+      - **distance from a spline's edge**: reeds within 3 m of a river's water, trees kept off a path.
+    - **Spline context.** Fills read the scene's splines in the editor and the player alike, and the scene view re-fills when a spline changes.
+    - **Cliff rocks.** A slab-shaped, noise-chipped rock, mapped with the P1c rock generator projected triplanar. Its preset fills only steep faces, lying along them half sunk.
+    - **Grass cards.** Three crossed, two-faced quads carrying a procedural blade texture, cut out by alpha, with normals up so they light like the ground.
+    - **Impostors: the bake.** The editor bakes a layer's mesh into impostors: four orthographic views (both sides along each axis) in one atlas, rendered with the materials turned emissive-only so the pictures are unlit. Each card's UVs are its corners projected through the camera that drew its view.
+    - **Impostors: storage.** The cards are stored with the layer (a few kilobytes).
+    - **Impostors: in the player.** The player emits them as far blocks beside the full ones, with a swap distance measured to each block's centre. So a block draws its full copies nearer than the distance and its cards beyond it, never both and never neither.
+    - **Not cross-faded.** The swap is a hard switch at block level; a dithered cross-fade would need the renderers' help. The editor's scene view always shows the full copies.
+    - *Tests:* `placement.test.ts` (keep-out, hollows and crests, patch cover and determinism, distance from a spline, storage; the cliff rock's shape, material and preset fill; the grass cards' cut-out; the impostor's views, cards and atlas; the player's near and far blocks trading places, the far ones a fraction of the triangles).
 - [ ] **P5. Modular kit and generators.**
   - **Parametric prefabs** (Blueprint-lite): typed parameters drive a generator.
   - Arch, stair, ramp and pillar generators.
