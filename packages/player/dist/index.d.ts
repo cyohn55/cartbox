@@ -3999,7 +3999,9 @@ declare class WebglSceneRenderer implements SceneRenderer {
     private shadowCascades;
     private nearUploaded;
     /** The cell table and index list as integer textures, made on first use. */
-    private clusterTextures;
+    private clusterTexture;
+    /** Staging for the cluster texture's rows: the table's, padded to whole rows, then the index list's as (index, 0) pairs. */
+    private clusterStaging;
     /** The per-frame uniforms a program needs (probes, clusters), set when it's put to use. */
     private frameUniforms;
     /** The light-probe grid (EP9): its uniforms, its 3D texture, and the grid it holds. */
@@ -4020,7 +4022,7 @@ declare class WebglSceneRenderer implements SceneRenderer {
     private localAtlas;
     /** Upload a frame's shadow tiles into the atlas, and bind it (a blank stands in when there are none). */
     private uploadLocalShadows;
-    /** Upload a frame's cells (only the index rows in use), and bind both textures. */
+    /** Upload a frame's cells (the table, and only the index rows in use) and bind the cluster texture. */
     private uploadClusters;
     /** Programs by material graph (EP7), linked on first use. */
     private readonly graphPrograms;
@@ -4446,9 +4448,10 @@ declare class WebgpuSceneRenderer implements SceneRenderer {
  *                                    sharpness (0 = an even mix) (B6)
  * 880  wind0      vec4<f32>    16   xy = the wind's x and z × strength, z = its phase (0..1),
  *                                    w = gust (B6; windUniform in wind.ts)
+ * 896  maps0      vec4<f32>    16   x = 1 when a tangent-space normal map is bound (P1a)
  * ```
  *
- * 896 bytes used, padded to a 1024-byte stride (a 256-byte multiple a dynamic
+ * 912 bytes used, padded to a 1024-byte stride (a 256-byte multiple a dynamic
  * uniform offset can address), so one buffer still holds every draw in a
  * frame — uniforms are written per batch, not per copy, so the stride costs
  * little. The metallic-roughness inputs and the environment carry the Modern
@@ -4463,7 +4466,7 @@ declare const UNIFORM_STRIDE = 1024;
  * bind group layout's `minBindingSize` must be: it makes a WGSL struct that
  * grows past what this module writes fail at pipeline creation.
  */
-declare const UNIFORM_BYTES_USED = 896;
+declare const UNIFORM_BYTES_USED = 912;
 /** The same stride counted in float32s, which is how `writeBuffer` sizes it. */
 declare const UNIFORM_FLOATS: number;
 /**
@@ -4677,6 +4680,8 @@ interface InstanceUniform {
     readonly mapping?: ResolvedMapping | null;
     /** The frame's wind (B6): its windUniform, or null/omitted for still air. */
     readonly wind?: readonly [number, number, number, number] | null;
+    /** A tangent-space normal map is bound (EDITOR_PRO_ROADMAP.md P1a). */
+    readonly hasNormalMap?: boolean;
 }
 /** A draw's triplanar repeat (0 = UV mapping) and height-blend sharpness (0 = an even mix) (B6). */
 interface ResolvedMapping {

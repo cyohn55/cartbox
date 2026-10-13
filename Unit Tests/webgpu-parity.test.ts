@@ -58,6 +58,10 @@ import { manyLights } from "./helpers/manyLights";
 import { probeRig } from "./helpers/probeScene";
 import { expectTemporal, temporalReport, type GpuRenderer } from "./helpers/temporalScene";
 import { expectReflections, reflectionReport } from "./helpers/reflectionScene";
+import { WATER_ENVIRONMENT, WATER_TIME, waterInstances } from "./helpers/waterScenes";
+import { CLIFF_EYE, CLIFF_TARGET, cliffInstances } from "./helpers/terrainScenes";
+import { WIND, WIND_EYE, WIND_TARGET, WIND_TIME, windInstances } from "./helpers/windScenes";
+import { NORMAL_ENVIRONMENT, NORMAL_LIGHT, normalMapInstances } from "./helpers/normalMapScenes";
 
 
 const W = 64;
@@ -469,7 +473,7 @@ describe.skipIf(!device)("WebGPU parity on a real device", () => {
       expect(far, name).toBeLessThanOrEqual(drawn * 0.03);
       renderer.dispose();
     }
-  });
+  }, 60_000);
 
   it("bends what's behind glass, heat haze, camo and a shield's edge like the software rasteriser (I5)", async () => {
     const mat = (m: Record<string, unknown>) => {
@@ -515,6 +519,45 @@ describe.skipIf(!device)("WebGPU parity on a real device", () => {
     for (let i = 0; i < bent.length; i += 4) if (Math.abs(bent[i]! - straight[i]!) + Math.abs(bent[i + 2]! - straight[i + 2]!) > 30) changed += 1;
     expect(changed).toBeGreaterThan(30);
   }, 60_000);
+
+  it("matches the software rasteriser on water, triplanar cliffs, wind and normal maps (B5, B6, P1a)", async () => {
+    const mat = (m: Record<string, unknown>) => {
+      const q = quad();
+      return { ...q, primitives: [{ ...q.primitives[0]!, material: { ...q.primitives[0]!.material, ...m } }] };
+    };
+    const scenes: [string, MeshSceneInstance[], () => SceneDraw, number][] = [
+      ["water", waterInstances(mat), () => ({ ...draw(), view: viewMatrix([0, 2.6, 2.4], [0, -0.3, 0]), background: [20, 20, 30, 255], environment: WATER_ENVIRONMENT, time: WATER_TIME }), 0.03],
+      ["cliff", cliffInstances({ triplanar: true, sharpness: 0.8 }), () => ({ ...draw(), view: viewMatrix(CLIFF_EYE, CLIFF_TARGET), background: [20, 20, 30, 255], lightDirection: [0.3, 0.8, -0.5] }), 0.02],
+      ["wind", windInstances(), () => ({ ...draw(), view: viewMatrix(WIND_EYE, WIND_TARGET), background: [20, 20, 30, 255], lightDirection: [0.3, 0.8, -0.5], wind: WIND, time: WIND_TIME }), 0.03],
+      ["normal maps", normalMapInstances(mat), () => ({ ...draw(), lightDirection: NORMAL_LIGHT, environment: NORMAL_ENVIRONMENT }), 0.02],
+    ];
+    for (const [name, instances, frame, share] of scenes) {
+      const renderer = (await WebgpuSceneRenderer.create(device, W, H))!;
+      expect(renderer, name).not.toBeNull();
+      renderer.render(instances, frame());
+      for (let attempt = 0; attempt < 20; attempt += 1) {
+        await new Promise((resolve) => setTimeout(resolve, 50));
+        device.tick?.();
+      }
+      const gpu = frame();
+      renderer.render(instances, gpu);
+      renderer.dispose();
+      const software = frame();
+      new SoftwareSceneRenderer().render(instances, software);
+      let drawn = 0;
+      let far = 0;
+      for (let p = 0; p < W * H; p += 1) {
+        if (software.out[p * 4]! + software.out[p * 4 + 1]! + software.out[p * 4 + 2]! > 0) drawn += 1;
+        let worst = 0;
+        for (let c = 0; c < 3; c += 1) worst = Math.max(worst, Math.abs(gpu.out[p * 4 + c]! - software.out[p * 4 + c]!));
+        if (worst > 8) far += 1;
+      }
+      expect(drawn, name).toBeGreaterThan(300);
+      // Float32 noise, sines and screen derivatives on the GPU against float64 on
+      // the CPU: a pixel on a blade's or a stripe's edge can land the other way.
+      expect(far, name).toBeLessThanOrEqual(drawn * share);
+    }
+  }, 120_000);
 
   it("matches the software rasteriser on image-based lighting (within float tolerance)", async () => {
     // The environment replaces flat ambient with directional irradiance +

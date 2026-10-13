@@ -13473,7 +13473,7 @@ import {
   fogIsVolumetric
 } from "@cartbox/editor";
 var UNIFORM_STRIDE = 1024;
-var UNIFORM_BYTES_USED = 896;
+var UNIFORM_BYTES_USED = 912;
 var UNIFORM_FLOATS = UNIFORM_STRIDE / 4;
 var LIGHT_FLOATS = 16;
 var PROBE_FLOATS = 16;
@@ -13556,6 +13556,7 @@ var OFFSET_REFRACT2 = 208;
 var OFFSET_WATER0 = 212;
 var OFFSET_TERRAIN0 = 216;
 var OFFSET_WIND0 = 220;
+var OFFSET_MAPS0 = 224;
 var DEFAULT_LIGHT = [0.4, 0.8, 0.6];
 var DEFAULT_AMBIENT2 = 0.35;
 function resolveLight(direction, ambient) {
@@ -13799,6 +13800,10 @@ function writeInstanceUniform(target, index, uniform) {
   target[base + OFFSET_WIND0 + 1] = wind ? wind[1] : 0;
   target[base + OFFSET_WIND0 + 2] = wind ? wind[2] : 0;
   target[base + OFFSET_WIND0 + 3] = wind ? wind[3] : 0;
+  target[base + OFFSET_MAPS0] = uniform.hasNormalMap ? 1 : 0;
+  target[base + OFFSET_MAPS0 + 1] = 0;
+  target[base + OFFSET_MAPS0 + 2] = 0;
+  target[base + OFFSET_MAPS0 + 3] = 0;
 }
 function refractionCamera(view, height) {
   return { right: [view[0], view[4], view[8]], up: [view[1], view[5], view[9]], height };
@@ -13938,7 +13943,8 @@ function batchInstances(instances, geometryOf, eye = [0, 0, 0]) {
         lm: primitive.uvs2 ? instance.lightmapTextures?.[index] ?? null : null,
         detail: instance.detailTextures?.[index] ?? null,
         blend: primitive.blend ? instance.blendTextures?.[index] ?? null : null,
-        relief: instance.reliefTextures?.[index] ?? null
+        relief: instance.reliefTextures?.[index] ?? null,
+        normal: primitive.uvs ? instance.normalTextures?.[index] ?? null : null
       };
       const effect = instance.effect ?? null;
       const alpha = alphaCode(primitive.material.alphaMode);
@@ -14534,8 +14540,9 @@ var UNIT_PROBES = 8;
 var UNIT_DETAIL = 9;
 var UNIT_BLEND = 10;
 var UNIT_SCENE_DEPTH = 11;
-var UNIT_CLUSTER_TABLE = 12;
-var UNIT_CLUSTER_INDEX = 13;
+var UNIT_CLUSTER = 12;
+var UNIT_NORMAL = 13;
+var CLUSTER_TABLE_ROWS = Math.ceil(CLUSTER_X * CLUSTER_Y * CLUSTER_Z / 1024);
 var UNIT_LOCAL_SHADOWS = 14;
 var UNIT_PROBE_GRID = 15;
 var SCENE_PACK_GLSL = (
@@ -14598,6 +14605,7 @@ layout(std140) uniform Uniforms {
   vec4 water0;   // x = ripple strength (0 = still), y = ripples per metre, z = drift phase, w = flow direction (B5)
   vec4 terrain0; // x = triplanar repeat (0 = UVs), y = height-blend sharpness (B6)
   vec4 wind0;    // xy = wind x, z \xD7 strength, z = phase (0..1), w = gust (B6)
+  vec4 maps0;    // x = 1 when a normal map is bound (P1a)
 } u;
 `
 );
@@ -14689,7 +14697,7 @@ function graphSites(graph) {
   float gRough = -1.0;
   vec3 gEmis = vec3(-1.0);
   {
-    vec3 gN = normalize(vNormal);
+    vec3 gN = normalize(sNrm);
     if (dot(gN, u.view.xyz) < 0.0) { gN = -gN; }
     // The relief's curvature for wear masks (I4): occTex's B, \u22121..1.
     float gCurv = u.layer1.z > 0.5 ? sampleMap(occTex, uv).b * 2.0 - 1.0 : 0.0;
@@ -14756,8 +14764,7 @@ struct Light {
 // Clustered lights (EP8): per cell (offset, count) in an RG32UI table
 // (x = tile, y = slice), the indices in an R32UI list 1024 wide; params = tile
 // size (px), near plane, slice scale; info.x = global lights, info.y = 1 when cells are built.
-uniform highp usampler2D clusterTable;
-uniform highp usampler2D clusterIndex;
+uniform highp usampler2D clusterData;
 uniform vec4 clusterParams;
 uniform vec4 clusterInfo;
 layout(std140) uniform Lights {
@@ -14777,6 +14784,7 @@ uniform sampler2D lmTex;
 uniform sampler2D probeAtlas;
 uniform sampler2D detailTex;
 uniform sampler2D blendTex;
+uniform sampler2D nrmTex;
 uniform highp sampler2D sceneDepth;
 uniform vec4 probeData[${MAX_REFLECTION_PROBES2 * 4}];
 in vec3 vNormal;
@@ -15078,6 +15086,9 @@ float anisoD(float rough, float aniso, float toh, float boh, float ndh) {
 // This fragment's anisotropy frame (set in main, read by lightTerm).
 float aniso = 0.0;
 vec3 aT = vec3(0.0);
+// The clearcoat's normal and N\xB7V (P1a): the geometric normal, which the coat lies over the bumps with.
+vec3 coatN = vec3(0.0, 0.0, 1.0);
+float coatNdv = 1.0;
 vec3 aB = vec3(0.0);
 // The clearcoat's lobe for one light (coatLobe): x = its radiance factor, y = the Fresnel dimming the base.
 vec2 coatTerm(vec3 N, float ndv, vec3 Ld, vec3 H, float vdh) {
@@ -15153,7 +15164,7 @@ vec3 lightTerm(Light lgt, vec3 P, vec3 N, vec3 V, float ndv, float a2, float k, 
   vec3 lit = (kdm * (vec3(1.0) - FL) * albedo + FL * specL) * lgt.d1.rgb * w;
   if (u.layer0.x > 0.0) {
     // The clearcoat's own highlight, over a base its Fresnel dims (I4).
-    vec2 c = coatTerm(N, ndv, Ld, Hl, vdhL);
+    vec2 c = coatTerm(coatN, coatNdv, Ld, Hl, vdhL);
     return lit * (1.0 - c.y) + c.x * lgt.d1.rgb * (lgt.d1.w * atten * occl);
   }
   return lit;
@@ -15254,6 +15265,25 @@ ${reflect ? "  outReflect = vec4(0.0);\n  outEnv = vec4(0.0);\n" : ""}  // The s
     puv = parallaxUv(vUv, -vec2(dot(pgu, u.view.xyz), dot(pgv, u.view.xyz)) / pv, u.layer0.w);
   }
   vec2 uv = vec2(puv.x, 1.0 - puv.y);
+  // Normal mapping (EDITOR_PRO_ROADMAP.md P1a): the tangent-space normal map in
+  // the triangle's tangent frame \u2014 worldTangent's (dP/du, Lengyel), here from the
+  // screen derivatives \u2014 as the software rasteriser does. sNrm is what lights the
+  // surface; the clearcoat, refraction and shadow bias keep the geometric normal.
+  vec3 sNrm = vNormal;
+  if (u.maps0.x > 0.5) {
+    vec3 tn = sampleMap(nrmTex, uv).rgb * 2.0 - 1.0;
+    float det = duv1.x * duv2.y - duv2.x * duv1.y;
+    if (abs(det) > 1e-20) {
+      vec3 Ng = normalize(vNormal);
+      vec3 T = (dp1 * duv2.y - dp2 * duv1.y) / det;
+      T = T - Ng * dot(T, Ng);
+      float tl = length(T);
+      if (tl > 1e-6) {
+        T = T / tl;
+        sNrm = normalize(T * tn.x + cross(Ng, T) * tn.y + Ng * tn.z);
+      }
+    }
+  }
   vec4 colour = u.base;
   if (u.texflags.x > 0.5) {
     colour = colour * triMap(tex, uv);
@@ -15279,9 +15309,11 @@ ${g.base}
       if (u.refract0.w > 0.5) { camoSeen = behindColour(gl_FragCoord.xy, gl_FragCoord.z, refractOffset(facingNormal(vNormal), vWorldPos)); }
       if (camoSeen.a < 0.5) { discard; }
     }
-    vec3 N = normalize(vNormal);
+    vec3 N = normalize(sNrm);
     if (dot(N, u.view.xyz) < 0.0) { N = -N; }
     N = waterNormal(N, vWorldPos);
+    coatN = waterNormal(facingNormal(vNormal), vWorldPos);
+    coatNdv = max(1e-4, dot(coatN, u.view.xyz));
     float metallic = u.pbr.x;
     float rough = u.pbr.y;
     float reflectK = u.surface0.z;
@@ -15371,8 +15403,8 @@ ${reflect ? "    vec3 envSpec = vec3(0.0);\n    vec3 envSeen = vec3(0.0);\n" : "
 ${reflect ? "      envSpec = pref * f0 * reflectK * ao;\n      envSeen = pref;\n" : ""}      // The clearcoat (I4) reflects the room sharply about its own normal, and
       // what it reflects the base beneath no longer receives.
       if (u.layer0.x > 0.0) {
-        vec3 prefC = envReflect(vWorldPos, 2.0 * ndv * N - V, u.layer0.y);
-        coatV = u.layer0.x * (${CLEARCOAT_F0} + (1.0 - ${CLEARCOAT_F0}) * pow(1.0 - ndv, 5.0));
+        vec3 prefC = envReflect(vWorldPos, 2.0 * coatNdv * coatN - V, u.layer0.y);
+        coatV = u.layer0.x * (${CLEARCOAT_F0} + (1.0 - ${CLEARCOAT_F0}) * pow(1.0 - coatNdv, 5.0));
         amb = amb * (1.0 - coatV) + coatV * prefC * reflectK * ao;
 ${reflect ? "        envSpec = envSpec * (1.0 - coatV) + coatV * prefC * reflectK * ao;\n" : ""}      }
     } else {
@@ -15403,17 +15435,18 @@ ${reflect ? "    // What the light map, probes and SSAO did to the fill, they do
       if (clusterInfo.y > 0.5 && vEyeDepth >= clusterParams.z) {
         ivec2 tile = min(ivec2(gl_FragCoord.xy / clusterParams.xy), ivec2(${CLUSTER_X - 1}, ${CLUSTER_Y - 1}));
         int slice = min(int(log(vEyeDepth / clusterParams.z) * clusterParams.w), ${CLUSTER_Z - 1});
-        uvec2 cell = texelFetch(clusterTable, ivec2(tile.y * ${CLUSTER_X} + tile.x, slice), 0).xy;
+        int ci = slice * ${CLUSTER_X * CLUSTER_Y} + tile.y * ${CLUSTER_X} + tile.x;
+        uvec2 cell = texelFetch(clusterData, ivec2(ci % 1024, ci / 1024), 0).xy;
         for (uint j = 0u; j < cell.y; j++) {
           uint n = cell.x + j;
-          int li = int(texelFetch(clusterIndex, ivec2(int(n % 1024u), int(n / 1024u)), 0).x);
+          int li = int(texelFetch(clusterData, ivec2(int(n % 1024u), ${CLUSTER_TABLE_ROWS} + int(n / 1024u)), 0).x);
           direct += lightTerm(lights[li], vWorldPos, N, V, ndv, a2, k, f0, kdm, albedo, sf);
         }
       }
       lit = direct + amb + emis;
     } else if (u.layer0.x > 0.0) {
       // The clearcoat's own highlight, over a base its Fresnel dims (I4).
-      vec2 c = coatTerm(N, ndv, L, H, vdh);
+      vec2 c = coatTerm(coatN, coatNdv, L, H, vdh);
       lit = ((kdm * (vec3(1.0) - F) * albedo + F * specD) * ndl * (1.0 - c.y) + vec3(c.x)) * sf + amb + emis;
     } else {
       lit = (kdm * (vec3(1.0) - F) * albedo + F * specD) * ndl * sf + amb + emis;
@@ -15450,7 +15483,7 @@ ${reflect ? "    if (u.pbr.w > 1.5) { outReflect = vec4(0.0, 0.0, 0.0, outColor.
   }
 
   // Fantasy path: two-sided Lambert on the un-renormalised normal, as the software rasteriser does.
-  float nl = abs(dot(vNormal, u.light.xyz));
+  float nl = abs(dot(sNrm, u.light.xyz));
   float shade = u.light.w + (1.0 - u.light.w) * nl * shadowFactor(vLightClip, vWorldPos, abs(dot(normalize(vNormal), u.light.xyz)));
   outColor = finishAlpha(colour.rgb * shade, colour.a);
 ${reflect ? "  if (u.pbr.w > 1.5) { outReflect = vec4(0.0, 0.0, 0.0, outColor.a); outEnv = outReflect; }\n" : ""}}
@@ -15480,8 +15513,8 @@ function buildProgram2(gl, nearest, graph, reflect = false) {
     ["detailTex", UNIT_DETAIL],
     ["blendTex", UNIT_BLEND],
     ["sceneDepth", UNIT_SCENE_DEPTH],
-    ["clusterTable", UNIT_CLUSTER_TABLE],
-    ["clusterIndex", UNIT_CLUSTER_INDEX],
+    ["clusterData", UNIT_CLUSTER],
+    ["nrmTex", UNIT_NORMAL],
     ["localAtlas", UNIT_LOCAL_SHADOWS],
     ["probeGrid", UNIT_PROBE_GRID]
   ];
@@ -15566,7 +15599,9 @@ var WebglSceneRenderer = class _WebglSceneRenderer {
     this.shadowCascades = 1;
     this.nearUploaded = null;
     /** The cell table and index list as integer textures, made on first use. */
-    this.clusterTextures = null;
+    this.clusterTexture = null;
+    /** Staging for the cluster texture's rows: the table's, padded to whole rows, then the index list's as (index, 0) pairs. */
+    this.clusterStaging = null;
     /** The light-probe grid (EP9): its uniforms, its 3D texture, and the grid it holds. */
     this.probeGridMin = new Float32Array(4);
     this.probeGridScale = new Float32Array(4);
@@ -15798,6 +15833,7 @@ var WebglSceneRenderer = class _WebglSceneRenderer {
         camera,
         water: waterUniform(batch.primitive.material, draw.time ?? 0),
         mapping: resolveMapping(batch.primitive.material),
+        hasNormalMap: batch.textures.normal !== null,
         wind: batch.primitive.sway ? windUniform(draw.wind, draw.time ?? 0) : null
       });
     });
@@ -15844,6 +15880,7 @@ var WebglSceneRenderer = class _WebglSceneRenderer {
     gl.bindSampler(UNIT_LM, this.sampler);
     gl.bindSampler(UNIT_DETAIL, this.sampler);
     gl.bindSampler(UNIT_BLEND, this.sampler);
+    gl.bindSampler(UNIT_NORMAL, this.sampler);
     this.bindTexture(UNIT_SCENE_DEPTH, this.blankFloat);
     gl.bindSampler(UNIT_SCENE_DEPTH, null);
     const soft = batches.some((batch) => softEdges(batch.primitive.material, batch.alpha, draw.projection) !== void 0);
@@ -15897,6 +15934,7 @@ var WebglSceneRenderer = class _WebglSceneRenderer {
           this.bindTexture(UNIT_LM, this.textureFor(batch.textures.lm));
           this.bindTexture(UNIT_DETAIL, this.textureFor(batch.textures.detail));
           this.bindTexture(UNIT_BLEND, this.textureFor(batch.textures.blend));
+          this.bindTexture(UNIT_NORMAL, this.textureFor(batch.textures.normal));
           bound = batch.textures;
         }
         gl.bindVertexArray(batch.geometry.vao);
@@ -16008,34 +16046,32 @@ var WebglSceneRenderer = class _WebglSceneRenderer {
     this.bindTexture(UNIT_LOCAL_SHADOWS, this.localAtlas ?? this.blankFloat);
     gl.bindSampler(UNIT_LOCAL_SHADOWS, null);
   }
-  /** Upload a frame's cells (only the index rows in use), and bind both textures. */
+  /** Upload a frame's cells (the table, and only the index rows in use) and bind the cluster texture. */
   uploadClusters(clusters) {
     const gl = this.gl;
-    if (!this.clusterTextures) {
-      const make = (internal, w, h) => {
-        const texture = gl.createTexture();
-        gl.activeTexture(gl.TEXTURE0 + UNIT_CLUSTER_TABLE);
-        gl.bindTexture(gl.TEXTURE_2D, texture);
-        gl.texStorage2D(gl.TEXTURE_2D, 1, internal, w, h);
-        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
-        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
-        return texture;
-      };
-      this.clusterTextures = { table: make(gl.RG32UI, CLUSTER_X * CLUSTER_Y, CLUSTER_Z), index: make(gl.R32UI, 1024, CLUSTER_INDEX_CAP / 1024) };
+    if (!this.clusterTexture) {
+      this.clusterTexture = gl.createTexture();
+      gl.activeTexture(gl.TEXTURE0 + UNIT_CLUSTER);
+      gl.bindTexture(gl.TEXTURE_2D, this.clusterTexture);
+      gl.texStorage2D(gl.TEXTURE_2D, 1, gl.RG32UI, 1024, CLUSTER_TABLE_ROWS + CLUSTER_INDEX_CAP / 1024);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+      this.clusterStaging = new Uint32Array(1024 * 2 * (CLUSTER_TABLE_ROWS + CLUSTER_INDEX_CAP / 1024));
     }
     if (clusters) {
-      this.bindTexture(UNIT_CLUSTER_TABLE, this.clusterTextures.table);
-      gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, CLUSTER_X * CLUSTER_Y, CLUSTER_Z, gl.RG_INTEGER, gl.UNSIGNED_INT, clusters.table);
       const rows = Math.ceil(clusters.used / 1024);
-      if (rows > 0) {
-        this.bindTexture(UNIT_CLUSTER_INDEX, this.clusterTextures.index);
-        gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, 1024, rows, gl.RED_INTEGER, gl.UNSIGNED_INT, clusters.indices.subarray(0, rows * 1024));
+      const staging = this.clusterStaging;
+      staging.set(clusters.table.subarray(0, CLUSTER_X * CLUSTER_Y * CLUSTER_Z * 2), 0);
+      const base = CLUSTER_TABLE_ROWS * 1024 * 2;
+      for (let i = 0; i < rows * 1024; i += 1) {
+        staging[base + i * 2] = clusters.indices[i] ?? 0;
+        staging[base + i * 2 + 1] = 0;
       }
+      this.bindTexture(UNIT_CLUSTER, this.clusterTexture);
+      gl.texSubImage2D(gl.TEXTURE_2D, 0, 0, 0, 1024, CLUSTER_TABLE_ROWS + rows, gl.RG_INTEGER, gl.UNSIGNED_INT, staging.subarray(0, (CLUSTER_TABLE_ROWS + rows) * 1024 * 2));
     }
-    this.bindTexture(UNIT_CLUSTER_TABLE, this.clusterTextures.table);
-    this.bindTexture(UNIT_CLUSTER_INDEX, this.clusterTextures.index);
-    gl.bindSampler(UNIT_CLUSTER_TABLE, null);
-    gl.bindSampler(UNIT_CLUSTER_INDEX, null);
+    this.bindTexture(UNIT_CLUSTER, this.clusterTexture);
+    gl.bindSampler(UNIT_CLUSTER, null);
   }
   /** The program a material draws with: the plain one, or its graph's variant. */
   programOf(material, reflect = false) {
@@ -16541,9 +16577,8 @@ var WebglSceneRenderer = class _WebglSceneRenderer {
       if (this.localAtlas) gl.deleteTexture(this.localAtlas);
       if (this.gridTexture) gl.deleteTexture(this.gridTexture);
       if (this.gridBlank) gl.deleteTexture(this.gridBlank);
-      if (this.clusterTextures) {
-        gl.deleteTexture(this.clusterTextures.table);
-        gl.deleteTexture(this.clusterTextures.index);
+      if (this.clusterTexture) {
+        gl.deleteTexture(this.clusterTexture);
       }
       if (this.reflections) {
         for (const t of this.reflections.textures) gl.deleteTexture(t);
@@ -16687,7 +16722,7 @@ function graphSites2(graph) {
   var gRough = -1.0;
   var gEmis = vec3<f32>(-1.0);
   {
-    var gN = normalize(in.normal);
+    var gN = normalize(sNrm);
     if (dot(gN, u.view.xyz) < 0.0) { gN = -gN; }
     // The relief's curvature for wear masks (I4): occTex's B, \u22121..1.
     let gCurv = select(0.0, textureSample(occTex, samp, uv).b * 2.0 - 1.0, u.layer1.z > 0.5);
@@ -16786,6 +16821,7 @@ struct Uniforms {
   water0: vec4<f32>,    // x = ripple strength (0 = still), y = ripples per metre, z = drift phase, w = flow direction (B5)
   terrain0: vec4<f32>,  // x = triplanar repeat (0 = UVs), y = height-blend sharpness (B6)
   wind0: vec4<f32>,     // xy = wind x, z \xD7 strength, z = phase (0..1), w = gust (B6)
+  maps0: vec4<f32>,     // x = 1 when a normal map is bound (P1a)
 };
 
 // A Modern-tier light (see packLights): d0 = dir/pos + kind, d1 = colour +
@@ -16863,6 +16899,7 @@ struct Probe {
 @group(0) @binding(14) var detailTex: texture_2d<f32>;
 // The blend surface's map (terrain snow over rock), mixed by the vertex weight.
 @group(0) @binding(15) var blendTex: texture_2d<f32>;
+@group(0) @binding(16) var nrmTex: texture_2d<f32>;
 // The opaque pass's depth (EP6b), read by the see-through pass for soft edges;
 // the opaque pass binds a blank in its place.
 @group(1) @binding(0) var sceneDepth: texture_depth_2d;
@@ -17167,6 +17204,9 @@ fn anisoD(rough: f32, aniso: f32, toh: f32, boh: f32, ndh: f32) -> f32 {
 var<private> aniso: f32;
 var<private> aT: vec3<f32>;
 var<private> aB: vec3<f32>;
+// The clearcoat's normal and N\xB7V (P1a): the geometric normal, which the coat lies over the bumps with.
+var<private> coatN: vec3<f32>;
+var<private> coatNdv: f32;
 // The clearcoat's lobe for one light (coatLobe): x = its radiance factor, y = the Fresnel dimming the base.
 fn coatTerm(N: vec3<f32>, ndv: f32, Ld: vec3<f32>, H: vec3<f32>, vdh: f32) -> vec2<f32> {
   let rc = u.layer0.y;
@@ -17242,7 +17282,7 @@ fn lightTerm(lgt: Light, P: vec3<f32>, N: vec3<f32>, V: vec3<f32>, ndv: f32, a2:
   let lit = (kdm * (vec3<f32>(1.0) - FL) * albedo + FL * specL) * lgt.d1.rgb * w;
   if (u.layer0.x > 0.0) {
     // The clearcoat's own highlight, over a base its Fresnel dims (I4).
-    let c = coatTerm(N, ndv, Ld, Hl, vdhL);
+    let c = coatTerm(coatN, coatNdv, Ld, Hl, vdhL);
     return lit * (1.0 - c.y) + c.x * lgt.d1.rgb * (lgt.d1.w * atten * occl);
   }
   return lit;
@@ -17391,6 +17431,25 @@ fn fs(in: VSOut) -> @location(0) vec4<f32> {
   }
   // glTF's V origin is top-left, so flip; the sampler wraps and (per era) filters.
   let uv = vec2<f32>(puv.x, 1.0 - puv.y);
+  // Normal mapping (EDITOR_PRO_ROADMAP.md P1a): the tangent-space normal map in
+  // the triangle's tangent frame \u2014 worldTangent's (dP/du, Lengyel), here from the
+  // screen derivatives \u2014 as the software rasteriser does. sNrm is what lights the
+  // surface; the clearcoat, refraction and shadow bias keep the geometric normal.
+  var sNrm = in.normal;
+  let tnSample = textureSample(nrmTex, samp, uv).rgb * 2.0 - 1.0;
+  if (u.maps0.x > 0.5) {
+    let det = duv1.x * duv2.y - duv2.x * duv1.y;
+    if (abs(det) > 1e-20) {
+      let Ng = normalize(in.normal);
+      var T = (dp1 * duv2.y - dp2 * duv1.y) / det;
+      T = T - Ng * dot(T, Ng);
+      let tl = length(T);
+      if (tl > 1e-6) {
+        T = T / tl;
+        sNrm = normalize(T * tnSample.x + cross(Ng, T) * tnSample.y + Ng * tnSample.z);
+      }
+    }
+  }
 
   var colour = u.base;
   if (u.texflags.x > 0.5) {
@@ -17423,9 +17482,11 @@ ${g.base}
     // term, in the engine's non-linear byte space (a linear/HDR pipeline is a
     // later phase). Small float32-vs-float64 differences from pow/GGX are
     // expected; the fantasy path below stays byte-identical.
-    var N = normalize(in.normal);
+    var N = normalize(sNrm);
     if (dot(N, u.view.xyz) < 0.0) { N = -N; } // two-sided: flip toward the viewer
     N = waterNormal(N, in.worldPos);
+    coatN = waterNormal(facingNormal(in.normal), in.worldPos);
+    coatNdv = max(1e-4, dot(coatN, u.view.xyz));
     var metallic = u.pbr.x;
     var rough = u.pbr.y;
     var reflectK = u.surface0.z;
@@ -17517,8 +17578,8 @@ ${reflect ? "    var envSpec = vec3<f32>(0.0);\n    var envSeen = vec3<f32>(0.0)
 ${reflect ? "      envSpec = pref * f0 * reflectK * ao;\n      envSeen = pref;\n" : ""}      // The clearcoat (I4) reflects the room sharply about its own normal, and
       // what it reflects the base beneath no longer receives.
       if (u.layer0.x > 0.0) {
-        let prefC = envReflect(in.worldPos, 2.0 * ndv * N - V, u.layer0.y);
-        coatV = u.layer0.x * (${CLEARCOAT_F02} + (1.0 - ${CLEARCOAT_F02}) * pow(1.0 - ndv, 5.0));
+        let prefC = envReflect(in.worldPos, 2.0 * coatNdv * coatN - V, u.layer0.y);
+        coatV = u.layer0.x * (${CLEARCOAT_F02} + (1.0 - ${CLEARCOAT_F02}) * pow(1.0 - coatNdv, 5.0));
         amb = amb * (1.0 - coatV) + coatV * prefC * reflectK * ao;
 ${reflect ? "        envSpec = envSpec * (1.0 - coatV) + coatV * prefC * reflectK * ao;\n" : ""}      }
     } else {
@@ -17562,7 +17623,7 @@ ${reflect ? "    // What the light map, probes and SSAO did to the fill, they do
       lit = direct + amb + emis;
     } else if (u.layer0.x > 0.0) {
       // The clearcoat's own highlight, over a base its Fresnel dims (I4).
-      let c = coatTerm(N, ndv, L, H, vdh);
+      let c = coatTerm(coatN, coatNdv, L, H, vdh);
       lit = ((kdm * (vec3<f32>(1.0) - F) * albedo + F * specD) * ndl * (1.0 - c.y) + vec3<f32>(c.x)) * sf + amb + emis;
     } else {
       lit = (kdm * (vec3<f32>(1.0) - F) * albedo + F * specD) * ndl * sf + amb + emis;
@@ -17603,7 +17664,7 @@ ${wgslDisplay("without")}
   // is deliberately NOT renormalised \u2014 the software rasteriser interpolates and
   // dots without normalising, and parity with it is the contract here. Both
   // therefore skew identically under non-uniform scale.
-  let nl = abs(dot(in.normal, u.light.xyz));
+  let nl = abs(dot(sNrm, u.light.xyz));
   let shade = u.light.w + (1.0 - u.light.w) * nl * shadowFactor(in.lightClip, in.worldPos, abs(dot(normalize(in.normal), u.light.xyz)));
   return finishAlpha(colour.rgb * shade, colour.a);
 }
@@ -17806,7 +17867,9 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
           { binding: 13, visibility: SHADER_STAGE_FRAGMENT, buffer: { type: "read-only-storage" } },
           // The detail map, and the blend surface's map.
           { binding: 14, visibility: SHADER_STAGE_FRAGMENT, texture: { sampleType: "float" } },
-          { binding: 15, visibility: SHADER_STAGE_FRAGMENT, texture: { sampleType: "float" } }
+          { binding: 15, visibility: SHADER_STAGE_FRAGMENT, texture: { sampleType: "float" } },
+          // The tangent-space normal map (P1a).
+          { binding: 16, visibility: SHADER_STAGE_FRAGMENT, texture: { sampleType: "float" } }
         ]
       });
       const depthEntries = (multisampled) => [
@@ -18211,6 +18274,7 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
         camera,
         water: waterUniform2(entry.primitive.material, draw.time ?? 0),
         mapping: resolveMapping(entry.primitive.material),
+        hasNormalMap: entry.textures.normal !== null,
         wind: entry.primitive.sway ? windUniform2(draw.wind, draw.time ?? 0) : null
       });
     });
@@ -18585,7 +18649,7 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
   /** The bind group for one primitive, rebuilt if any of its textures changed. */
   bindGroupFor(primitive, textures) {
     const cached = this.bindGroups.get(primitive);
-    if (cached && cached.source.base === textures.base && cached.source.mr === textures.mr && cached.source.occ === textures.occ && cached.source.emis === textures.emis && cached.source.lm === textures.lm && cached.source.detail === textures.detail && cached.source.blend === textures.blend) {
+    if (cached && cached.source.base === textures.base && cached.source.mr === textures.mr && cached.source.occ === textures.occ && cached.source.emis === textures.emis && cached.source.lm === textures.lm && cached.source.detail === textures.detail && cached.source.blend === textures.blend && cached.source.normal === textures.normal) {
       return cached.group;
     }
     const view = (texture) => (texture ? this.uploadTexture(texture) : this.blankTexture).createView();
@@ -18617,7 +18681,8 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
         { binding: 13, resource: { buffer: this.probeBuffer } },
         // The detail map (or the 1x1 white blank; the uniform gates it).
         { binding: 14, resource: view(textures.detail) },
-        { binding: 15, resource: view(textures.blend) }
+        { binding: 15, resource: view(textures.blend) },
+        { binding: 16, resource: view(textures.normal) }
       ]
     });
     this.bindGroups.set(primitive, { group, source: { ...textures } });

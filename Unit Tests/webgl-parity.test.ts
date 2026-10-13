@@ -300,6 +300,21 @@ describe.skipIf(!chromiumPath)("WebGL2 parity in a real browser", () => {
     expect(changed).toBeGreaterThan(30);
   }, 60_000);
 
+  it("shades with normal maps like the software rasteriser: metal, matte and under a clearcoat (P1a)", async () => {
+    const result = await run("normalMaps");
+    expect(result.drawn).toBeGreaterThan(500);
+    if (exact) {
+      expect(result.coverage, JSON.stringify(result.diffs)).toBe(0);
+      expect(result.far, JSON.stringify(result.diffs)).toBeLessThanOrEqual(result.drawn * 0.02);
+    }
+    const bumpy = await antialiasedFrame("normalMaps");
+    const flat = await antialiasedFrame("normalMapsFlat");
+    expect(bumpy.error).toBe(0);
+    let changed = 0;
+    for (let i = 0; i < bumpy.out.length; i += 4) if (Math.abs(bumpy.out[i]! - flat.out[i]!) + Math.abs(bumpy.out[i + 1]! - flat.out[i + 1]!) > 20) changed += 1;
+    expect(changed).toBeGreaterThan(100);
+  }, 60_000);
+
   it("shades forty point lights and four spots through the light clusters like the software rasteriser", async () => {
     const result = await run("manyLights");
     expect(result.drawn).toBeGreaterThan(100);

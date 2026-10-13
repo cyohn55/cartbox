@@ -23,6 +23,7 @@ import { REFRACTION_TIME, refractionInstances, straightInstances } from "./refra
 import { WATER_ENVIRONMENT, WATER_TIME, waterInstances } from "./waterScenes";
 import { CLIFF_EYE, CLIFF_TARGET, cliffInstances } from "./terrainScenes";
 import { WIND, WIND_EYE, WIND_TARGET, WIND_TIME, windInstances } from "./windScenes";
+import { NORMAL_ENVIRONMENT, NORMAL_LIGHT, normalMapInstances } from "./normalMapScenes";
 import { localShadowRig } from "./localShadowScene";
 import { manyLights } from "./manyLights";
 import { probeRig } from "./probeScene";
@@ -198,6 +199,8 @@ function scenes(): Record<string, Scene> {
       instances: windInstances(),
       draw: () => ({ ...baseDraw(), view: viewMatrix(WIND_EYE, WIND_TARGET), background: [20, 20, 30, 255] as [number, number, number, number], lightDirection: [0.3, 0.8, -0.5] as [number, number, number], time: WIND_TIME }),
     },
+    normalMaps: { instances: normalMapInstances(quad), draw: () => ({ ...baseDraw(), lightDirection: NORMAL_LIGHT, environment: NORMAL_ENVIRONMENT }) },
+    normalMapsFlat: { instances: normalMapInstances(quad, false), draw: () => ({ ...baseDraw(), lightDirection: NORMAL_LIGHT, environment: NORMAL_ENVIRONMENT }) },
     waterStill: {
       instances: waterInstances(quad, null),
       draw: () => ({ ...baseDraw(), view: viewMatrix([0, 2.6, 2.4], [0, -0.3, 0]), background: [20, 20, 30, 255] as [number, number, number, number], environment: WATER_ENVIRONMENT, time: WATER_TIME }),

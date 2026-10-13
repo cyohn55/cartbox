@@ -94,9 +94,10 @@ import {
  *                                    sharpness (0 = an even mix) (B6)
  * 880  wind0      vec4<f32>    16   xy = the wind's x and z × strength, z = its phase (0..1),
  *                                    w = gust (B6; windUniform in wind.ts)
+ * 896  maps0      vec4<f32>    16   x = 1 when a tangent-space normal map is bound (P1a)
  * ```
  *
- * 896 bytes used, padded to a 1024-byte stride (a 256-byte multiple a dynamic
+ * 912 bytes used, padded to a 1024-byte stride (a 256-byte multiple a dynamic
  * uniform offset can address), so one buffer still holds every draw in a
  * frame — uniforms are written per batch, not per copy, so the stride costs
  * little. The metallic-roughness inputs and the environment carry the Modern
@@ -111,7 +112,7 @@ export const UNIFORM_STRIDE = 1024;
  * bind group layout's `minBindingSize` must be: it makes a WGSL struct that
  * grows past what this module writes fail at pipeline creation.
  */
-export const UNIFORM_BYTES_USED = 896;
+export const UNIFORM_BYTES_USED = 912;
 /** The same stride counted in float32s, which is how `writeBuffer` sizes it. */
 export const UNIFORM_FLOATS = UNIFORM_STRIDE / 4;
 
@@ -234,6 +235,7 @@ const OFFSET_REFRACT2 = 208;
 const OFFSET_WATER0 = 212;
 const OFFSET_TERRAIN0 = 216;
 const OFFSET_WIND0 = 220;
+const OFFSET_MAPS0 = 224;
 
 /** The rasteriser's defaults, restated so an unlit draw shades identically. */
 export const DEFAULT_LIGHT: readonly [number, number, number] = [0.4, 0.8, 0.6];
@@ -476,6 +478,8 @@ export interface InstanceUniform {
   readonly mapping?: ResolvedMapping | null;
   /** The frame's wind (B6): its windUniform, or null/omitted for still air. */
   readonly wind?: readonly [number, number, number, number] | null;
+  /** A tangent-space normal map is bound (EDITOR_PRO_ROADMAP.md P1a). */
+  readonly hasNormalMap?: boolean;
 }
 
 /** A draw's triplanar repeat (0 = UV mapping) and height-blend sharpness (0 = an even mix) (B6). */
@@ -738,6 +742,11 @@ export function writeInstanceUniform(target: Float32Array, index: number, unifor
   target[base + OFFSET_WIND0 + 1] = wind ? wind[1] : 0;
   target[base + OFFSET_WIND0 + 2] = wind ? wind[2] : 0;
   target[base + OFFSET_WIND0 + 3] = wind ? wind[3] : 0;
+
+  target[base + OFFSET_MAPS0] = uniform.hasNormalMap ? 1 : 0;
+  target[base + OFFSET_MAPS0 + 1] = 0;
+  target[base + OFFSET_MAPS0 + 2] = 0;
+  target[base + OFFSET_MAPS0 + 3] = 0;
 }
 
 /** The camera's right and up in world space (the view's first two rows) and the frame's height, for refraction (I5). */

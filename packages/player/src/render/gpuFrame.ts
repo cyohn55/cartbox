@@ -103,6 +103,8 @@ export interface PrimitiveTextures {
   blend: DecodedTexture | null;
   /** The relief map (I4), or null — bound inside {@link occ}, kept here so a draw knows it has one. */
   relief: DecodedTexture | null;
+  /** The tangent-space normal map (P1a), or null (a primitive without UVs has no tangent frame for one). */
+  normal: DecodedTexture | null;
 }
 
 export function sameTextures(a: PrimitiveTextures, b: PrimitiveTextures): boolean {
@@ -210,6 +212,7 @@ export function batchInstances<G extends { indexCount: number }>(
         detail: instance.detailTextures?.[index] ?? null,
         blend: primitive.blend ? (instance.blendTextures?.[index] ?? null) : null,
         relief: instance.reliefTextures?.[index] ?? null,
+        normal: primitive.uvs ? (instance.normalTextures?.[index] ?? null) : null,
       };
       const effect = instance.effect ?? null;
       const alpha = alphaCode(primitive.material.alphaMode);

@@ -202,7 +202,7 @@ function graphSites(graph: CompiledGraph | null): { fns: string; base: string; p
   var gRough = -1.0;
   var gEmis = vec3<f32>(-1.0);
   {
-    var gN = normalize(in.normal);
+    var gN = normalize(sNrm);
     if (dot(gN, u.view.xyz) < 0.0) { gN = -gN; }
     // The relief's curvature for wear masks (I4): occTex's B, −1..1.
     let gCurv = select(0.0, textureSample(occTex, samp, uv).b * 2.0 - 1.0, u.layer1.z > 0.5);
@@ -312,6 +312,7 @@ struct Uniforms {
   water0: vec4<f32>,    // x = ripple strength (0 = still), y = ripples per metre, z = drift phase, w = flow direction (B5)
   terrain0: vec4<f32>,  // x = triplanar repeat (0 = UVs), y = height-blend sharpness (B6)
   wind0: vec4<f32>,     // xy = wind x, z × strength, z = phase (0..1), w = gust (B6)
+  maps0: vec4<f32>,     // x = 1 when a normal map is bound (P1a)
 };
 
 // A Modern-tier light (see packLights): d0 = dir/pos + kind, d1 = colour +
@@ -389,6 +390,7 @@ struct Probe {
 @group(0) @binding(14) var detailTex: texture_2d<f32>;
 // The blend surface's map (terrain snow over rock), mixed by the vertex weight.
 @group(0) @binding(15) var blendTex: texture_2d<f32>;
+@group(0) @binding(16) var nrmTex: texture_2d<f32>;
 // The opaque pass's depth (EP6b), read by the see-through pass for soft edges;
 // the opaque pass binds a blank in its place.
 @group(1) @binding(0) var sceneDepth: texture_depth_2d;
@@ -693,6 +695,9 @@ fn anisoD(rough: f32, aniso: f32, toh: f32, boh: f32, ndh: f32) -> f32 {
 var<private> aniso: f32;
 var<private> aT: vec3<f32>;
 var<private> aB: vec3<f32>;
+// The clearcoat's normal and N·V (P1a): the geometric normal, which the coat lies over the bumps with.
+var<private> coatN: vec3<f32>;
+var<private> coatNdv: f32;
 // The clearcoat's lobe for one light (coatLobe): x = its radiance factor, y = the Fresnel dimming the base.
 fn coatTerm(N: vec3<f32>, ndv: f32, Ld: vec3<f32>, H: vec3<f32>, vdh: f32) -> vec2<f32> {
   let rc = u.layer0.y;
@@ -768,7 +773,7 @@ fn lightTerm(lgt: Light, P: vec3<f32>, N: vec3<f32>, V: vec3<f32>, ndv: f32, a2:
   let lit = (kdm * (vec3<f32>(1.0) - FL) * albedo + FL * specL) * lgt.d1.rgb * w;
   if (u.layer0.x > 0.0) {
     // The clearcoat's own highlight, over a base its Fresnel dims (I4).
-    let c = coatTerm(N, ndv, Ld, Hl, vdhL);
+    let c = coatTerm(coatN, coatNdv, Ld, Hl, vdhL);
     return lit * (1.0 - c.y) + c.x * lgt.d1.rgb * (lgt.d1.w * atten * occl);
   }
   return lit;
@@ -917,6 +922,25 @@ fn fs(in: VSOut) -> @location(0) vec4<f32> {
   }
   // glTF's V origin is top-left, so flip; the sampler wraps and (per era) filters.
   let uv = vec2<f32>(puv.x, 1.0 - puv.y);
+  // Normal mapping (EDITOR_PRO_ROADMAP.md P1a): the tangent-space normal map in
+  // the triangle's tangent frame — worldTangent's (dP/du, Lengyel), here from the
+  // screen derivatives — as the software rasteriser does. sNrm is what lights the
+  // surface; the clearcoat, refraction and shadow bias keep the geometric normal.
+  var sNrm = in.normal;
+  let tnSample = textureSample(nrmTex, samp, uv).rgb * 2.0 - 1.0;
+  if (u.maps0.x > 0.5) {
+    let det = duv1.x * duv2.y - duv2.x * duv1.y;
+    if (abs(det) > 1e-20) {
+      let Ng = normalize(in.normal);
+      var T = (dp1 * duv2.y - dp2 * duv1.y) / det;
+      T = T - Ng * dot(T, Ng);
+      let tl = length(T);
+      if (tl > 1e-6) {
+        T = T / tl;
+        sNrm = normalize(T * tnSample.x + cross(Ng, T) * tnSample.y + Ng * tnSample.z);
+      }
+    }
+  }
 
   var colour = u.base;
   if (u.texflags.x > 0.5) {
@@ -949,9 +973,11 @@ ${g.base}
     // term, in the engine's non-linear byte space (a linear/HDR pipeline is a
     // later phase). Small float32-vs-float64 differences from pow/GGX are
     // expected; the fantasy path below stays byte-identical.
-    var N = normalize(in.normal);
+    var N = normalize(sNrm);
     if (dot(N, u.view.xyz) < 0.0) { N = -N; } // two-sided: flip toward the viewer
     N = waterNormal(N, in.worldPos);
+    coatN = waterNormal(facingNormal(in.normal), in.worldPos);
+    coatNdv = max(1e-4, dot(coatN, u.view.xyz));
     var metallic = u.pbr.x;
     var rough = u.pbr.y;
     var reflectK = u.surface0.z;
@@ -1043,8 +1069,8 @@ ${reflect ? "    var envSpec = vec3<f32>(0.0);\n    var envSeen = vec3<f32>(0.0)
 ${reflect ? "      envSpec = pref * f0 * reflectK * ao;\n      envSeen = pref;\n" : ""}      // The clearcoat (I4) reflects the room sharply about its own normal, and
       // what it reflects the base beneath no longer receives.
       if (u.layer0.x > 0.0) {
-        let prefC = envReflect(in.worldPos, 2.0 * ndv * N - V, u.layer0.y);
-        coatV = u.layer0.x * (${CLEARCOAT_F0} + (1.0 - ${CLEARCOAT_F0}) * pow(1.0 - ndv, 5.0));
+        let prefC = envReflect(in.worldPos, 2.0 * coatNdv * coatN - V, u.layer0.y);
+        coatV = u.layer0.x * (${CLEARCOAT_F0} + (1.0 - ${CLEARCOAT_F0}) * pow(1.0 - coatNdv, 5.0));
         amb = amb * (1.0 - coatV) + coatV * prefC * reflectK * ao;
 ${reflect ? "        envSpec = envSpec * (1.0 - coatV) + coatV * prefC * reflectK * ao;\n" : ""}      }
     } else {
@@ -1088,7 +1114,7 @@ ${reflect ? "    // What the light map, probes and SSAO did to the fill, they do
       lit = direct + amb + emis;
     } else if (u.layer0.x > 0.0) {
       // The clearcoat's own highlight, over a base its Fresnel dims (I4).
-      let c = coatTerm(N, ndv, L, H, vdh);
+      let c = coatTerm(coatN, coatNdv, L, H, vdh);
       lit = ((kdm * (vec3<f32>(1.0) - F) * albedo + F * specD) * ndl * (1.0 - c.y) + vec3<f32>(c.x)) * sf + amb + emis;
     } else {
       lit = (kdm * (vec3<f32>(1.0) - F) * albedo + F * specD) * ndl * sf + amb + emis;
@@ -1126,7 +1152,7 @@ ${wgslDisplay("without")}
   // is deliberately NOT renormalised — the software rasteriser interpolates and
   // dots without normalising, and parity with it is the contract here. Both
   // therefore skew identically under non-uniform scale.
-  let nl = abs(dot(in.normal, u.light.xyz));
+  let nl = abs(dot(sNrm, u.light.xyz));
   let shade = u.light.w + (1.0 - u.light.w) * nl * shadowFactor(in.lightClip, in.worldPos, abs(dot(normalize(in.normal), u.light.xyz)));
   return finishAlpha(colour.rgb * shade, colour.a);
 }
@@ -1181,6 +1207,7 @@ interface CachedBindGroup {
     lm: DecodedTexture | null;
     detail: DecodedTexture | null;
     blend: DecodedTexture | null;
+    normal: DecodedTexture | null;
   };
 }
 
@@ -1405,6 +1432,8 @@ export class WebgpuSceneRenderer implements SceneRenderer {
           // The detail map, and the blend surface's map.
           { binding: 14, visibility: SHADER_STAGE_FRAGMENT, texture: { sampleType: "float" } },
           { binding: 15, visibility: SHADER_STAGE_FRAGMENT, texture: { sampleType: "float" } },
+          // The tangent-space normal map (P1a).
+          { binding: 16, visibility: SHADER_STAGE_FRAGMENT, texture: { sampleType: "float" } },
         ],
       });
 
@@ -1878,6 +1907,7 @@ export class WebgpuSceneRenderer implements SceneRenderer {
         camera,
         water: waterUniform(entry.primitive.material, draw.time ?? 0),
         mapping: resolveMapping(entry.primitive.material),
+        hasNormalMap: entry.textures.normal !== null,
         wind: entry.primitive.sway ? windUniform(draw.wind, draw.time ?? 0) : null,
       });
     });
@@ -2312,7 +2342,8 @@ export class WebgpuSceneRenderer implements SceneRenderer {
       cached.source.emis === textures.emis &&
       cached.source.lm === textures.lm &&
       cached.source.detail === textures.detail &&
-      cached.source.blend === textures.blend
+      cached.source.blend === textures.blend &&
+      cached.source.normal === textures.normal
     ) {
       return cached.group;
     }
@@ -2348,6 +2379,7 @@ export class WebgpuSceneRenderer implements SceneRenderer {
         // The detail map (or the 1x1 white blank; the uniform gates it).
         { binding: 14, resource: view(textures.detail) },
         { binding: 15, resource: view(textures.blend) },
+        { binding: 16, resource: view(textures.normal) },
       ],
     });
     this.bindGroups.set(primitive, { group, source: { ...textures } });
