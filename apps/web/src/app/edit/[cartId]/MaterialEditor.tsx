@@ -32,8 +32,20 @@ import {
   withGeneratedMaps,
   type GeneratorKind,
   type TextureGenerator,
+  INSTANCE_FIELDS,
+  MAX_LIBRARY_MATERIALS,
+  addLibraryMaterial,
   addMaterialSet,
+  applyToParent,
+  detachInstance,
+  instanceOf,
+  libraryMaterial,
   materialFor,
+  replaceMaterial,
+  revertOverride,
+  setLibraryMaterial,
+  trackOverrides,
+  type MaterialLibrary,
   patchMaterial,
   removeMaterialSet,
   renameMaterialSet,
@@ -67,6 +79,14 @@ interface MaterialEditorProps {
   onChange: (mesh: MeshAsset, wear?: string | null) => void;
   /** The material set being edited (the one the selected copy wears), or null for the mesh's own materials. */
   set?: string | null;
+  /** The cart's material library (P1b): parents a part's material can be an instance of. */
+  library?: MaterialLibrary;
+  /**
+   * Called with the next library and this mesh after a library edit (a new
+   * parent, a part made an instance, an override pushed up), as one change:
+   * every other instance of an edited parent is resolved again from it.
+   */
+  onLibraryChange?: (library: MaterialLibrary, mesh: MeshAsset) => void;
 }
 
 /** Ripples a material starts with (B5): gentle, about one and a half per metre, drifting slowly along +X. */
@@ -85,7 +105,7 @@ function fromHex(hex: string): [number, number, number] {
   return [parseInt(m[1]!, 16) / 255, parseInt(m[2]!, 16) / 255, parseInt(m[3]!, 16) / 255];
 }
 
-export function MaterialEditor({ mesh, onChange, set = null }: MaterialEditorProps) {
+export function MaterialEditor({ mesh, onChange, set = null, library = [], onLibraryChange }: MaterialEditorProps) {
   const [primitiveIndex, setPrimitiveIndex] = useState(0);
   const [graphOpen, setGraphOpen] = useState(false);
   const [setName, setSetName] = useState("");
@@ -96,7 +116,15 @@ export function MaterialEditor({ mesh, onChange, set = null }: MaterialEditorPro
   const material = primitive ? materialFor(mesh, index, editing) : null;
   if (!primitive || !material) return null;
 
-  const patch = (change: Partial<MeshMaterial>) => onChange(patchMaterial(mesh, index, change, editing));
+  // An edit of an instance's field makes that field its own (an override), so the parent's later edits leave it.
+  const edited = (next: MeshAsset): MeshAsset => {
+    const after = materialFor(next, index, editing);
+    if (!after?.instance) return next;
+    const tracked = trackOverrides(material, after);
+    return tracked === after ? next : patchMaterial(next, index, { instance: tracked.instance }, editing);
+  };
+  const patch = (change: Partial<MeshMaterial>) => onChange(edited(patchMaterial(mesh, index, change, editing)));
+  const setOwn = (next: MeshMaterial) => replaceMaterial(mesh, index, next, editing);
 
   const [br, bg, bb, ba] = material.baseColorFactor;
   const emissive = material.emissiveFactor ?? [0, 0, 0];
@@ -179,6 +207,16 @@ export function MaterialEditor({ mesh, onChange, set = null }: MaterialEditorPro
           selected={index}
           onSelect={setPrimitiveIndex}
           options={mesh.primitives.map((p, i) => ({ id: i, label: p.material.name || `#${i + 1}`, hint: p.material.name }))}
+        />
+      )}
+
+      {onLibraryChange && (
+        <LibraryLink
+          material={material}
+          library={library}
+          onDetach={() => onChange(setOwn(detachInstance(material)))}
+          onLibrary={(next, own) => onLibraryChange(next, setOwn(own))}
+          onOwn={(own) => onChange(setOwn(own))}
         />
       )}
 
@@ -440,7 +478,7 @@ export function MaterialEditor({ mesh, onChange, set = null }: MaterialEditorPro
       />
 
       <GeneratedMaps material={material} patch={patch} />
-      <MaterialMaps material={material} onImage={(slot, image) => onChange(setMaterialImage(mesh, index, slot, image, editing))} />
+      <MaterialMaps material={material} onImage={(slot, image) => onChange(edited(setMaterialImage(mesh, index, slot, image, editing)))} />
 
       <SurfaceEffects material={material} patch={patch} />
       <MaterialLayers material={material} patch={patch} onWear={() => setGraphOpen(true)} />
@@ -468,6 +506,119 @@ const DEFAULT_GENERATOR: TextureGenerator = { kind: "rock", seed: 1, scale: 1, t
  * again when the scene loads. "Keep the maps" detaches them (stored as images,
  * free to paint over).
  */
+/**
+ * A part's link to the cart's material library (P1b): make the material a
+ * library parent, or an instance of one; see and revert its overrides, push
+ * them up to the parent, or cut it loose.
+ */
+function LibraryLink({
+  material,
+  library,
+  onDetach,
+  onLibrary,
+  onOwn,
+}: {
+  material: MeshMaterial;
+  library: MaterialLibrary;
+  onDetach: () => void;
+  onLibrary: (library: MaterialLibrary, material: MeshMaterial) => void;
+  onOwn: (material: MeshMaterial) => void;
+}) {
+  const link = material.instance;
+  const parent = link ? libraryMaterial(library, link.of) : null;
+  const labels = new Map<string, string>(INSTANCE_FIELDS);
+  return (
+    <>
+      <div className={`${styles.groupLabel} ${styles.railSubLabel}`}>Library</div>
+      <select
+        aria-label="Library material this part is an instance of"
+        value={link?.of ?? ""}
+        onChange={(event) => {
+          const id = event.target.value;
+          const chosen = id ? libraryMaterial(library, id) : null;
+          if (!id) onDetach();
+          else if (chosen) onOwn(instanceOf(material, id, chosen));
+        }}
+        style={{ width: "100%", padding: "4px 6px", borderRadius: 6, marginBottom: 6 }}
+      >
+        <option value="">Its own material</option>
+        {library.map((m) => (
+          <option key={m.id} value={m.id}>
+            Instance of {m.material.name || m.id}
+          </option>
+        ))}
+      </select>
+      <div style={{ display: "flex", gap: 4, flexWrap: "wrap", marginBottom: 6 }}>
+        {!link && (
+          <button
+            type="button"
+            className={styles.toolBtn}
+            disabled={library.length >= MAX_LIBRARY_MATERIALS}
+            title="Put this material in the cart's library, and make this part its first instance"
+            onClick={() => {
+              const added = addLibraryMaterial(library, material);
+              if (added) onLibrary(added.library, added.material);
+            }}
+          >
+            Add to library
+          </button>
+        )}
+        {link && parent && (
+          <button
+            type="button"
+            className={styles.toolBtn}
+            disabled={link.overrides.length === 0}
+            title={`Give “${parent.name}” this part's overrides; every instance of it that doesn't override them changes too`}
+            onClick={() => {
+              const pushed = applyToParent(library, material);
+              onLibrary(pushed.library, pushed.material);
+            }}
+          >
+            Apply to parent
+          </button>
+        )}
+        {link && (
+          <button type="button" className={styles.toolBtn} title="Keep these values, and stop following the parent" onClick={onDetach}>
+            Detach
+          </button>
+        )}
+        {link && parent && (
+          <button
+            type="button"
+            className={styles.toolBtn}
+            title={`Take “${parent.name}” out of the library; its instances keep their values`}
+            onClick={() => onLibrary(setLibraryMaterial(library, link.of, null), detachInstance(material))}
+          >
+            Remove parent
+          </button>
+        )}
+      </div>
+      {link && parent && (
+        <RailHint>
+          {link.overrides.length === 0 ? (
+            <>Every field comes from “{parent.name}”. Change one here to override it.</>
+          ) : (
+            <>
+              Overrides:{" "}
+              {link.overrides.map((field) => (
+                <button
+                  key={field}
+                  type="button"
+                  className={styles.toolBtn}
+                  title={`Put ${labels.get(field) ?? field} back to the parent's`}
+                  onClick={() => onOwn(revertOverride(material, field, parent))}
+                >
+                  {labels.get(field) ?? field} ↺
+                </button>
+              ))}
+            </>
+          )}
+        </RailHint>
+      )}
+    </>
+  );
+}
+
 function GeneratedMaps({ material, patch }: { material: MeshMaterial; patch: (change: Partial<MeshMaterial>) => void }) {
   const g = material.generator ?? null;
   const set = (next: TextureGenerator) => {

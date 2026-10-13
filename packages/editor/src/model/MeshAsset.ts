@@ -25,6 +25,7 @@
 
 import { bytesToBase64, base64ToBytes } from "./base64";
 import { generateTextures, isGeneratedImage, readGenerator, type TextureGenerator } from "./textureGenerators";
+import { readInstanceLink, type MaterialInstanceLink } from "./materialInstanceLink";
 import { readSurfaceEffects, writeSurfaceEffects } from "./materialEffects";
 import { readMaterialLayers, writeMaterialLayers } from "./materialLayers";
 import type { MaterialGraph } from "./materialGraph";
@@ -243,6 +244,14 @@ export interface MeshMaterial {
    * maps it bakes are left out when the material is saved.
    */
   readonly generator?: TextureGenerator;
+  // --- Material instances (EDITOR_PRO_ROADMAP.md P1b; see materialInstances.ts) ---
+  /**
+   * This material is an instance of a parent in the cart's material library:
+   * the editor fills every field it doesn't override from the parent, and
+   * fills them again whenever the parent changes. The fields are kept here
+   * too, so nothing but the editor needs the library.
+   */
+  readonly instance?: MaterialInstanceLink;
   // --- Living terrain (BEAVER_CREEK_ROADMAP.md B6; see materialEffects.ts) ---
   /**
    * Triplanar mapping: the base colour and blend maps are projected from the
@@ -545,6 +554,7 @@ export interface SerializedMaterial {
   blendSharpness?: number;
   generator?: { kind: string; seed: number; scale: number; tint: [number, number, number]; size: number };
   graph?: MaterialGraph;
+  instance?: { of: string; overrides: string[] };
 }
 interface SerializedPrimitive {
   positions: string;
@@ -865,6 +875,7 @@ export function serializeMaterial(material: MeshMaterial, table?: ImageTable): S
     ...(material.blendImage ? { blendImage: serializeImage(material.blendImage, "blendImage", table) } : {}),
     ...(own(material.reliefImage) ? { reliefImage: serializeImage(material.reliefImage, "reliefImage", table) } : {}),
     ...(material.generator ? { generator: { kind: material.generator.kind, seed: material.generator.seed, scale: material.generator.scale, tint: [material.generator.tint[0], material.generator.tint[1], material.generator.tint[2]], size: material.generator.size } } : {}),
+    ...(material.instance ? { instance: { of: material.instance.of, overrides: [...material.instance.overrides] } } : {}),
     ...writeSurfaceEffects(material),
     ...writeMaterialLayers(material),
   };
@@ -874,8 +885,10 @@ export function serializeMaterial(material: MeshMaterial, table?: ImageTable): S
 export function deserializeMaterial(value: unknown, table?: ImageTable): MeshMaterial {
   const material = (value && typeof value === "object" ? value : { name: "default", baseColorFactor: [1, 1, 1, 1], image: null }) as SerializedMaterial;
   const generator = readGenerator(material.generator);
+  const instance = readInstanceLink(material.instance);
   return withGeneratedMaps({
     ...(generator ? { generator } : {}),
+    ...(instance ? { instance } : {}),
     name: typeof material.name === "string" ? material.name : "default",
     baseColorFactor: toColor(material.baseColorFactor),
     baseColorImage: deserializeImage(material.image, "image", table),

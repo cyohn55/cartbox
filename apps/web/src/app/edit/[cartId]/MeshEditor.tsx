@@ -77,6 +77,7 @@ import {
   removeMesh,
   renameMesh,
   setMeshAsset,
+  setMaterialLibrary,
   setMeshLighting,
   setMeshTransform,
   readMeshEntry,
@@ -1470,6 +1471,11 @@ export function MeshEditor({ sidecar, onSidecarChange, code, onStartPlay, modern
                   // A material edit, and (making or picking a set) the copy putting that set on, as one change.
                   const edited = next === meshAsset ? sidecar : setMeshAsset(sidecar, selectedEntry.id, next);
                   onSidecarChange(wear === undefined ? edited : setMeshVariant(edited, selectedEntry.id, wear));
+                }}
+                library={sidecar.materials ?? []}
+                onLibraryChange={(library, next) => {
+                  // This part's edit first, then every other instance of an edited parent follows it.
+                  onSidecarChange(setMaterialLibrary(setMeshAsset(sidecar, selectedEntry.id, next), library));
                 }}
               />
             )}

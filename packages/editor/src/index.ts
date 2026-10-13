@@ -844,6 +844,29 @@ export {
 } from "./render/skyLayers";
 export { MAX_SKY_PANORAMA_CHARS } from "./model/SceneLighting";
 export { GENERATOR_KINDS, generateTextures, generatorKey, isGeneratedImage, readGenerator, type GeneratedMaps, type GeneratorKind, type TextureGenerator } from "./model/textureGenerators";
+export {
+  INSTANCE_FIELDS,
+  MAX_LIBRARY_MATERIALS,
+  addLibraryMaterial,
+  applyToParent,
+  detachInstance,
+  instanceCounts,
+  instanceOf,
+  isInstanceField,
+  libraryId,
+  libraryMaterial,
+  mayInstance,
+  readInstanceLink,
+  resolveInstance,
+  resolveMeshInstances,
+  revertOverride,
+  setLibraryMaterial,
+  trackOverrides,
+  type InstanceField,
+  type LibraryMaterial,
+  type MaterialInstanceLink,
+  type MaterialLibrary,
+} from "./model/materialInstances";
 export { DEFAULT_WIND, WIND_PERIOD, foliageSway, parseWind, windOffset, windUniform, type SceneWind } from "./model/wind";
 export {
   bakeSkyPanorama,
@@ -1400,6 +1423,7 @@ export {
   addMaterialSet,
   materialFor,
   patchMaterial,
+  replaceMaterial,
   removeMaterialSet,
   renameMaterialSet,
   resetSetMaterial,
