@@ -36,6 +36,11 @@ import {
   removeSceneLight,
   setSceneFog,
   setSceneProbes,
+  setSceneAutoExposure,
+  setScenePostVolumes,
+  DEFAULT_AUTO_EXPOSURE,
+  type AutoExposure,
+  type PostVolume,
   reflectionProbeAt,
   MAX_REFLECTION_PROBES,
   setSceneSky,
@@ -170,6 +175,7 @@ export function LightingEditor({ lighting, onChange }: LightingEditorProps) {
       <WindControls lighting={lighting} onChange={onChange} />
       <ShaftControls lighting={lighting} onChange={onChange} />
       <ProbeControls lighting={lighting} onChange={onChange} />
+      <PostVolumeControls lighting={lighting} onChange={onChange} />
       <TintControls lighting={lighting} onChange={onChange} />
 
       <RangeControl
@@ -207,6 +213,7 @@ export function LightingEditor({ lighting, onChange }: LightingEditorProps) {
           onChange={(exposure) => onChange(patchSceneLighting(lighting, { exposure }))}
         />
       )}
+      {lighting.tonemap && <AutoExposureControls lighting={lighting} onChange={onChange} />}
 
       <SegmentedControl
         label="Shadows"
@@ -1013,6 +1020,146 @@ function ProbeControls({ lighting, onChange }: LightingEditorProps & { lighting:
       <RailHint>
         Shiny surfaces inside a probe&apos;s box reflect the scene around the capture point instead of the sky. Fit the box to the room. Up to{" "}
         {MAX_REFLECTION_PROBES}; the smallest box wins where they overlap.
+      </RailHint>
+    </>
+  );
+}
+
+/** Eye adaptation (P6): the exposure follows what the camera sees, as Unreal's auto-exposure. */
+function AutoExposureControls({ lighting, onChange }: LightingEditorProps & { lighting: SceneLighting }) {
+  const ae = lighting.autoExposure ?? null;
+  const patch = (next: Partial<AutoExposure>) => ae && onChange(setSceneAutoExposure(lighting, { ...ae, ...next }));
+  return (
+    <>
+      <SegmentedControl
+        label="Eye adaptation"
+        ariaLabel="Eye adaptation"
+        selected={ae ? "on" : "off"}
+        onSelect={(id) => onChange(setSceneAutoExposure(lighting, id === "on" ? (ae ?? DEFAULT_AUTO_EXPOSURE) : null))}
+        options={[
+          { id: "off", label: "Fixed" },
+          { id: "on", label: "Adapts" },
+        ]}
+      />
+      {ae && (
+        <>
+          <RangeControl label="Darkest" nested min={-6} max={0} step={0.25} value={ae.min} ariaLabel="Eye adaptation darkest" display={`${ae.min.toFixed(2)} stops`} onChange={(min) => patch({ min })} />
+          <RangeControl label="Brightest" nested min={0} max={6} step={0.25} value={ae.max} ariaLabel="Eye adaptation brightest" display={`+${ae.max.toFixed(2)} stops`} onChange={(max) => patch({ max })} />
+          <RangeControl label="Into the dark" nested min={0.1} max={6} step={0.1} value={ae.up} ariaLabel="Eye adaptation brightening speed" display={`${ae.up.toFixed(1)} stops/s`} onChange={(up) => patch({ up })} />
+          <RangeControl label="Into the light" nested min={0.1} max={10} step={0.1} value={ae.down} ariaLabel="Eye adaptation darkening speed" display={`${ae.down.toFixed(1)} stops/s`} onChange={(down) => patch({ down })} />
+          <RangeControl label="Mid-grey" nested min={0.05} max={0.5} step={0.01} value={ae.key} ariaLabel="Eye adaptation mid-grey" display={ae.key.toFixed(2)} onChange={(key) => patch({ key })} />
+          <RailHint>Stepping into a dark base brightens the view over a second or so; stepping back into the sun darkens it faster, as eyes do.</RailHint>
+        </>
+      )}
+    </>
+  );
+}
+
+/** The overrides a post volume may set, with their ranges and neutral values. */
+const POST_FIELDS: readonly { readonly key: "exposure" | "brightness" | "contrast" | "saturation" | "bloom" | "fog"; readonly label: string; readonly min: number; readonly max: number; readonly step: number; readonly neutral: number }[] = [
+  { key: "exposure", label: "Exposure (stops)", min: -4, max: 4, step: 0.1, neutral: 0 },
+  { key: "brightness", label: "Brightness", min: 0.5, max: 1.5, step: 0.01, neutral: 1 },
+  { key: "contrast", label: "Contrast", min: 0.5, max: 1.5, step: 0.01, neutral: 1 },
+  { key: "saturation", label: "Saturation", min: 0, max: 2, step: 0.01, neutral: 1 },
+  { key: "bloom", label: "Bloom", min: 0, max: 1.5, step: 0.01, neutral: 0.6 },
+  { key: "fog", label: "Fog density", min: 0, max: 1, step: 0.01, neutral: 0.35 },
+];
+
+/**
+ * Post-process volumes (P6), after Unreal's: a box that changes the exposure,
+ * grade, bloom and fog while the camera is in it, fading over its blend
+ * distance outside — a dim, cool interior; a hazy canyon floor.
+ */
+function PostVolumeControls({ lighting, onChange }: LightingEditorProps & { lighting: SceneLighting }) {
+  const volumes = lighting.postVolumes ?? [];
+  const set = (next: readonly PostVolume[]) => onChange(setScenePostVolumes(lighting, next));
+  const patch = (index: number, next: Partial<PostVolume>) => set(volumes.map((v, i) => (i === index ? { ...v, ...next } : v)));
+  const unset = (index: number, key: (typeof POST_FIELDS)[number]["key"]) =>
+    set(
+      volumes.map((v, i) => {
+        if (i !== index) return v;
+        const copy = { ...v };
+        delete copy[key];
+        return copy;
+      }),
+    );
+  return (
+    <>
+      <div className={`${styles.groupLabel} ${styles.railSubLabel}`}>Post volumes</div>
+      {volumes.map((volume, index) => (
+        <div key={volume.id} style={{ marginBottom: 10 }}>
+          <div className={styles.rangeRow} style={{ marginBottom: 4 }}>
+            <input
+              type="text"
+              value={volume.name}
+              aria-label={`Post volume ${index + 1} name`}
+              onChange={(e) => patch(index, { name: e.target.value.slice(0, 64) })}
+              style={{ flex: 1, minWidth: 0, padding: "4px 6px", borderRadius: 6 }}
+            />
+            <button type="button" className={styles.toolBtn} aria-label={`Remove post volume ${index + 1}`} onClick={() => set(volumes.filter((_, i) => i !== index))}>
+              ✕
+            </button>
+          </div>
+          <VectorRow label="Centre" value={volume.center} step={0.5} onChange={(center) => patch(index, { center })} />
+          <VectorRow label="Size" value={volume.size} step={0.5} onChange={(size) => patch(index, { size: [Math.max(0.1, size[0]), Math.max(0.1, size[1]), Math.max(0.1, size[2])] })} />
+          <RangeControl label="Blend" nested min={0} max={20} step={0.5} value={volume.blend} ariaLabel={`${volume.name} blend distance`} display={`${volume.blend.toFixed(1)} m`} onChange={(blend) => patch(index, { blend })} />
+          <RangeControl label="Priority" nested min={-10} max={10} step={1} value={volume.priority ?? 0} ariaLabel={`${volume.name} priority`} display={`${volume.priority ?? 0}`} onChange={(priority) => patch(index, { priority })} />
+          {POST_FIELDS.map((f) =>
+            volume[f.key] === undefined ? null : (
+              <div key={f.key} className={styles.rangeRow}>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <RangeControl
+                    label={f.label}
+                    nested
+                    min={f.min}
+                    max={f.max}
+                    step={f.step}
+                    value={volume[f.key]!}
+                    ariaLabel={`${volume.name} ${f.label}`}
+                    display={volume[f.key]!.toFixed(2)}
+                    onChange={(value) => patch(index, { [f.key]: value })}
+                  />
+                </div>
+                <button type="button" className={styles.toolBtn} aria-label={`Stop ${volume.name} setting ${f.label}`} onClick={() => unset(index, f.key)}>
+                  ✕
+                </button>
+              </div>
+            ),
+          )}
+          <select
+            aria-label={`${volume.name}: set another value`}
+            value=""
+            onChange={(e) => {
+              const f = POST_FIELDS.find((x) => x.key === e.target.value);
+              if (f) patch(index, { [f.key]: f.neutral });
+            }}
+            style={{ width: "100%" }}
+          >
+            <option value="">Set…</option>
+            {POST_FIELDS.filter((f) => volume[f.key] === undefined).map((f) => (
+              <option key={f.key} value={f.key}>
+                {f.label}
+              </option>
+            ))}
+          </select>
+        </div>
+      ))}
+      <button
+        type="button"
+        className={styles.toolBtn}
+        disabled={volumes.length >= 64}
+        onClick={() =>
+          set([...volumes, { id: `pv${Date.now().toString(36)}`, name: `volume ${volumes.length + 1}`, center: [0, 2, 0], size: [8, 4, 8], blend: 2, exposure: -0.5, saturation: 0.85 }])
+        }
+      >
+        <span className={styles.toolGlyph} aria-hidden>
+          ▣
+        </span>
+        Add post volume
+      </button>
+      <RailHint>
+        While the camera is inside a box (and fading over its blend distance outside), it changes how the picture is finished. Exposure needs tone mapping on;
+        the grade, bloom and fog need the cart&apos;s post-FX stack. Where boxes overlap, higher priority wins.
       </RailHint>
     </>
   );

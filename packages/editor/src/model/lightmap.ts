@@ -391,6 +391,30 @@ export interface LightBakeOptions {
   readonly bounce?: number;
   /** Darkens creases harder (>1) or softer (<1) (default 1.2). */
   readonly contrast?: number;
+  /**
+   * How many times light bounces (1..3, default 1). One is sunlight off the
+   * surfaces a texel sees. Two adds light those surfaces get in turn — the sky
+   * and sunlit surfaces they see — so shaded corners of a sunlit room fill
+   * with coloured light rather than going black (Lightmass's indirect
+   * bounces). Each extra bounce traces a few rays from every surface a texel's
+   * rays hit, so it costs several times the bake.
+   */
+  readonly bounces?: number;
+}
+
+/** Rays traced from a surface hit at each extra bounce (the second, the third). */
+const BOUNCE_RAYS = [0, 0, 4, 2] as const;
+
+/** Per-bake state for the extra bounces: their count, and scratch for each depth's traces. */
+interface Bounces {
+  readonly count: number;
+  readonly scratch: Float64Array[];
+  readonly gather: Float64Array[];
+}
+
+function bouncesOf(options: LightBakeOptions): Bounces {
+  const count = Math.max(1, Math.min(3, Math.round(options.bounces ?? 1)));
+  return { count, scratch: [0, 1, 2, 3].map(() => new Float64Array(2)), gather: [0, 1, 2, 3].map(() => new Float64Array(3)) };
 }
 
 /** A pseudo-random 0..1 from an integer (deterministic bakes). */
@@ -411,6 +435,7 @@ export function bakeLightmap(layout: LightmapLayout, occluders: readonly Occlude
   const bounce = options.bounce ?? 0.9;
   const contrast = options.contrast ?? 1.2;
   const sun = options.sun ? normalize([...options.sun] as V3) : null;
+  const extra = bouncesOf(options);
   const bvh = buildBvh(occluders);
   const { size, model } = layout;
   const value = new Float32Array(size * size * 3);
@@ -463,7 +488,7 @@ export function bakeLightmap(layout: LightmapLayout, occluders: readonly Occlude
           // Trust the authored normals (renderers draw both faces, so winding
           // says nothing about which way a surface faces).
           const n = normalize([0, 1, 2].map((a) => N[0]![a]! * w0 + N[1]![a]! * w1 + N[2]![a]! * w2) as V3);
-          shadeTexel(bvh, pos, n, rays, sq, reach, sun, bounce, hit, i, shade);
+          shadeTexel(bvh, pos, n, rays, sq, reach, sun, bounce, hit, i, shade, extra);
           const vis = Math.pow(shade[0]!, contrast);
           value[i * 3] = vis + shade[1]!;
           value[i * 3 + 1] = vis + shade[2]!;
@@ -495,7 +520,8 @@ export function bakeLightmap(layout: LightmapLayout, occluders: readonly Occlude
  * Sky visibility and bounced sunlight at one surface point, into `out`:
  * [visibility 0..1, bounce R, G, B].
  */
-function shadeTexel(b: Bvh, pos: V3, n: V3, rays: number, sq: number, reach: number, sun: V3 | null, bounce: number, hit: Float64Array, seed: number, out: Float64Array): void {
+function shadeTexel(b: Bvh, pos: V3, n: V3, rays: number, sq: number, reach: number, sun: V3 | null, bounce: number, hit: Float64Array, seed: number, out: Float64Array, extra?: Bounces): void {
+  const more = extra && extra.count > 1 && bounce > 0 ? extra : null;
   // Tangent frame about n.
   const ref: V3 = Math.abs(n[1]) < 0.9 ? [0, 1, 0] : [1, 0, 0];
   const tx = normalize(cross(ref, n));
@@ -511,19 +537,28 @@ function shadeTexel(b: Bvh, pos: V3, n: V3, rays: number, sq: number, reach: num
     const rad = Math.sqrt(Math.min(1, sv));
     const lx = Math.cos(phi) * rad, ly = Math.sin(phi) * rad, lz = Math.sqrt(Math.max(0, 1 - sv));
     const d: V3 = [tx[0] * lx + ty[0] * ly + n[0] * lz, tx[1] * lx + ty[1] * ly + n[1] * lz, tx[2] * lx + ty[2] * ly + n[2] * lz];
-    const t = trace(b, origin, d, reach, hit, !sun);
+    const t = trace(b, origin, d, reach, hit, !sun && !more);
     if (t < 0) {
       open += 1;
       continue;
     }
     // Occluded, but falloff with distance: far blockers shade less.
     open += Math.min(1, (hit[0]! / reach) ** 2) * 0.6;
-    if (!sun || bounce <= 0) continue;
+    if ((!sun && !more) || bounce <= 0) continue;
     const hn: V3 = [b.nrm[t * 3]!, b.nrm[t * 3 + 1]!, b.nrm[t * 3 + 2]!];
     const facing = dot(hn, d) < 0 ? hn : ([-hn[0], -hn[1], -hn[2]] as V3);
+    const hp: V3 = [origin[0] + d[0] * hit[0]! + facing[0] * 0.01, origin[1] + d[1] * hit[0]! + facing[1] * 0.01, origin[2] + d[2] * hit[0]! + facing[2] * 0.01];
+    if (more) {
+      // The light the surface hit gets from the sky and from what it sees in turn.
+      const g = more.gather[2]!;
+      gatherLight(b, hp, facing, 2, reach, sun, bounce, more, seed * 131 + r, g);
+      br += b.col[t * 3]! * g[0]! * bounce;
+      bg += b.col[t * 3 + 1]! * g[1]! * bounce;
+      bb += b.col[t * 3 + 2]! * g[2]! * bounce;
+    }
+    if (!sun) continue;
     const ndl = dot(facing, sun);
     if (ndl <= 0) continue;
-    const hp: V3 = [origin[0] + d[0] * hit[0]! + facing[0] * 0.01, origin[1] + d[1] * hit[0]! + facing[1] * 0.01, origin[2] + d[2] * hit[0]! + facing[2] * 0.01];
     if (trace(b, hp, sun, 200, hit.subarray(1), true) >= 0) continue; // the bounce surface is in shadow
     const k = ndl * bounce;
     br += b.col[t * 3]! * k;
@@ -534,6 +569,59 @@ function shadeTexel(b: Bvh, pos: V3, n: V3, rays: number, sq: number, reach: num
   out[1] = br / rays;
   out[2] = bg / rays;
   out[3] = bb / rays;
+}
+
+/**
+ * The light reaching surface point `p` (normal `n`) from a few rays, for the
+ * extra bounces: open sky counts 1 (as a texel's own sky does), and a surface
+ * hit brings back its colour times the sun on it and — while bounces remain —
+ * the light it gathers in turn. Into `out` as RGB.
+ */
+function gatherLight(b: Bvh, p: V3, n: V3, depth: number, reach: number, sun: V3 | null, bounce: number, more: Bounces, seed: number, out: Float64Array): void {
+  const rays = BOUNCE_RAYS[depth] ?? 0;
+  out[0] = out[1] = out[2] = 0;
+  if (rays === 0) return;
+  const ref: V3 = Math.abs(n[1]) < 0.9 ? [0, 1, 0] : [1, 0, 0];
+  const tx = normalize(cross(ref, n));
+  const ty = cross(n, tx);
+  const hit = more.scratch[depth]!;
+  let r = 0, g = 0, bl = 0;
+  for (let j = 0; j < rays; j += 1) {
+    const su = (j + hash01(seed * 7 + j * 13 + depth)) / rays;
+    const sv = hash01(seed * 11 + j * 29 + depth * 3);
+    const phi = 2 * Math.PI * su;
+    const rad = Math.sqrt(sv);
+    const lx = Math.cos(phi) * rad, ly = Math.sin(phi) * rad, lz = Math.sqrt(Math.max(0, 1 - sv));
+    const d: V3 = [tx[0] * lx + ty[0] * ly + n[0] * lz, tx[1] * lx + ty[1] * ly + n[1] * lz, tx[2] * lx + ty[2] * ly + n[2] * lz];
+    const t = trace(b, p, d, reach, hit, false);
+    if (t < 0) {
+      r += 1;
+      g += 1;
+      bl += 1;
+      continue;
+    }
+    const hn: V3 = [b.nrm[t * 3]!, b.nrm[t * 3 + 1]!, b.nrm[t * 3 + 2]!];
+    const facing = dot(hn, d) < 0 ? hn : ([-hn[0], -hn[1], -hn[2]] as V3);
+    const hp: V3 = [p[0] + d[0] * hit[0]! + facing[0] * 0.01, p[1] + d[1] * hit[0]! + facing[1] * 0.01, p[2] + d[2] * hit[0]! + facing[2] * 0.01];
+    let lr = 0, lg = 0, lb = 0;
+    if (sun) {
+      const ndl = dot(facing, sun);
+      if (ndl > 0 && trace(b, hp, sun, 200, hit.subarray(1), true) < 0) lr = lg = lb = ndl;
+    }
+    if (depth < more.count) {
+      const inner = more.gather[depth + 1]!;
+      gatherLight(b, hp, facing, depth + 1, reach, sun, bounce, more, seed * 131 + j, inner);
+      lr += inner[0]! * bounce;
+      lg += inner[1]! * bounce;
+      lb += inner[2]! * bounce;
+    }
+    r += b.col[t * 3]! * lr * bounce;
+    g += b.col[t * 3 + 1]! * lg * bounce;
+    bl += b.col[t * 3 + 2]! * lb * bounce;
+  }
+  out[0] = r / rays;
+  out[1] = g / rays;
+  out[2] = bl / rays;
 }
 
 /**
@@ -555,6 +643,7 @@ export function bakeLightProbes(
   const bounce = options.bounce ?? 0.9;
   const contrast = options.contrast ?? 1.2;
   const sun = options.sun ? normalize([...options.sun] as V3) : null;
+  const extra = bouncesOf(options);
   const bvh = buildBvh(occluders);
   const [cx, cy, cz] = counts;
   const values = new Float32Array(cx * cy * cz * 18);
@@ -568,7 +657,7 @@ export function bakeLightProbes(
         const probe = (z * cy + y) * cx + x;
         const pos = probePosition(grid, x, y, z) as V3;
         PROBE_FACES.forEach((face, f) => {
-          shadeTexel(bvh, pos, face as V3, rays, sq, reach, sun, bounce, hit, probe * 6 + f, shade);
+          shadeTexel(bvh, pos, face as V3, rays, sq, reach, sun, bounce, hit, probe * 6 + f, shade, extra);
           const vis = Math.pow(shade[0]!, contrast);
           const o = (probe * 6 + f) * 3;
           values[o] = Math.min(LIGHTMAP_RANGE, vis + shade[1]!);

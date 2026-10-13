@@ -33,6 +33,8 @@ export interface SceneLightBakeOptions {
   readonly rays?: number;
   /** How far shade reaches, world units (default 7). */
   readonly distance?: number;
+  /** Light bounces, 1..3 (default 1): more fill shade with the light around it, at several times the bake. */
+  readonly bounces?: number;
 }
 
 /** The still objects of a scene, as the runtime places them: id, mesh and world matrix. */
@@ -72,7 +74,7 @@ export async function bakeSceneLighting(sidecar: MeshSidecar, options: SceneLigh
   for (let i = 0; i < still.length; i += 1) {
     const object = still[i]!;
     const layout = layoutLightmap(object.mesh, object.model, { density: options.density ?? 4 });
-    const rgba = bakeLightmap(layout, occluders, { rays: options.rays ?? 48, distance: options.distance ?? 7, sun }, (d) => progress?.(((i + d) / still.length) * share));
+    const rgba = bakeLightmap(layout, occluders, { rays: options.rays ?? 48, distance: options.distance ?? 7, sun, bounces: options.bounces ?? 1 }, (d) => progress?.(((i + d) / still.length) * share));
     next = setMeshAsset(next, object.id, withLightmap(layout, rgba));
     progress?.(((i + 1) / still.length) * share);
     await new Promise((resolve) => setTimeout(resolve, 0));
@@ -83,7 +85,7 @@ export async function bakeSceneLighting(sidecar: MeshSidecar, options: SceneLigh
     const min: [number, number, number] = [box.min[0] - 1, box.min[1], box.min[2] - 1];
     const max: [number, number, number] = [box.max[0] + 1, box.max[1] + 2, box.max[2] + 1];
     const counts = planProbeGrid(min, max, options.probeSpacing ?? 2.5);
-    const grid = bakeLightProbes(min, max, counts, occluders, { rays: options.rays ?? 48, distance: options.distance ?? 7, sun }, (d) => progress?.(share + d * (1 - share)));
+    const grid = bakeLightProbes(min, max, counts, occluders, { rays: options.rays ?? 48, distance: options.distance ?? 7, sun, bounces: options.bounces ?? 1 }, (d) => progress?.(share + d * (1 - share)));
     // With the sun it was baked under, so the player can relight the bounce as lights move (I17).
     const bake = sun ? { sun, distance: options.distance ?? 7, bounce: 0.9 } : undefined;
     next = { ...next, lighting: { ...next.lighting, lightProbes: encodeLightProbes(grid, bake) } };

@@ -18,6 +18,7 @@
 
 import { parseWind, type SceneWind } from "./wind";
 import { decodeLightProbes, type LightProbeGrid, type StoredLightProbes } from "./lightProbes";
+import { readAutoExposure, readPostVolumes, type AutoExposure, type PostVolume } from "./postVolumes";
 import {
   orthographicMatrix,
   renderShadowMap,
@@ -92,6 +93,14 @@ export interface SceneLighting {
    * colours saturated to hold up in it. Absent = the built-in palette.
    */
   readonly tints?: readonly (readonly [number, number, number] | null)[];
+  /**
+   * Post-process volumes (EDITOR_PRO_ROADMAP.md P6): boxes that change the
+   * exposure, grade, bloom and fog while the camera is in (or near) them.
+   * They apply with tone mapping on. Absent = none.
+   */
+  readonly postVolumes?: readonly PostVolume[];
+  /** Eye adaptation: the exposure follows what the camera sees. Absent = a fixed exposure. */
+  readonly autoExposure?: AutoExposure | null;
 }
 
 /** Entries a rig's tint list may hold: the palette's 15 colours after the unused 0. */
@@ -173,6 +182,8 @@ export function parseSceneLighting(raw: unknown): SceneLighting | null {
     ? record.lights.map(parseLight).filter((l): l is SceneLight => l !== null)
     : base.lights;
   const tints = parseTints(record.tints);
+  const postVolumes = readPostVolumes(record.postVolumes);
+  const autoExposure = readAutoExposure(record.autoExposure);
 
   return {
     environment: {
@@ -194,6 +205,8 @@ export function parseSceneLighting(raw: unknown): SceneLighting | null {
     ...(shafts ? { shafts } : {}),
     ...(lightProbes ? { lightProbes } : {}),
     ...(tints ? { tints } : {}),
+    ...(postVolumes.length > 0 ? { postVolumes } : {}),
+    ...(autoExposure ? { autoExposure } : {}),
   };
 }
 
@@ -472,6 +485,18 @@ export function setSceneShafts(lighting: SceneLighting, shafts: SunShafts | null
 export function setSceneProbes(lighting: SceneLighting, probes: readonly ReflectionProbe[]): SceneLighting {
   const { probes: _old, ...rest } = lighting;
   return probes.length > 0 ? { ...rest, probes } : rest;
+}
+
+/** Replace the post volumes (an empty list removes them). */
+export function setScenePostVolumes(lighting: SceneLighting, postVolumes: readonly PostVolume[]): SceneLighting {
+  const { postVolumes: _old, ...rest } = lighting;
+  return postVolumes.length > 0 ? { ...rest, postVolumes } : rest;
+}
+
+/** Turn eye adaptation on (with its settings) or off (null). */
+export function setSceneAutoExposure(lighting: SceneLighting, autoExposure: AutoExposure | null): SceneLighting {
+  const { autoExposure: _old, ...rest } = lighting;
+  return autoExposure ? { ...rest, autoExposure } : rest;
 }
 
 /** Patch the environment (skybox) gradient. */
