@@ -27,7 +27,11 @@ import { useState } from "react";
 
 import {
   DEFAULT_CLEARCOAT_ROUGHNESS,
+  GENERATOR_KINDS,
   MATERIAL_IMAGE_SLOTS,
+  withGeneratedMaps,
+  type GeneratorKind,
+  type TextureGenerator,
   addMaterialSet,
   materialFor,
   patchMaterial,
@@ -435,6 +439,7 @@ export function MaterialEditor({ mesh, onChange, set = null }: MaterialEditorPro
         style={{ width: 40, height: 32, padding: 0, border: "none", background: "none", borderRadius: 6 }}
       />
 
+      <GeneratedMaps material={material} patch={patch} />
       <MaterialMaps material={material} onImage={(slot, image) => onChange(setMaterialImage(mesh, index, slot, image, editing))} />
 
       <SurfaceEffects material={material} patch={patch} />
@@ -453,6 +458,70 @@ const kib = (image: EncodedImage) => (image.bytes.length > 0 ? `${image.mime.rep
  * in it, or clear it. Painting into the base colour, metal/roughness,
  * emissive and team-colour slots is the Paint mode's.
  */
+/** A new recipe's starting point. */
+const DEFAULT_GENERATOR: TextureGenerator = { kind: "rock", seed: 1, scale: 1, tint: [1, 1, 1], size: 256 };
+
+/**
+ * Texture generators (EDITOR_PRO_ROADMAP.md P1c): pick a procedural surface and
+ * its seed, density, tint and size, and its albedo, normal, roughness and
+ * relief maps fill the material. Only the recipe is saved; the maps are baked
+ * again when the scene loads. "Keep the maps" detaches them (stored as images,
+ * free to paint over).
+ */
+function GeneratedMaps({ material, patch }: { material: MeshMaterial; patch: (change: Partial<MeshMaterial>) => void }) {
+  const g = material.generator ?? null;
+  const set = (next: TextureGenerator) => {
+    const made = withGeneratedMaps({ ...material, generator: next }, true);
+    patch({ generator: next, baseColorImage: made.baseColorImage, normalImage: made.normalImage, metallicRoughnessImage: made.metallicRoughnessImage, reliefImage: made.reliefImage, ...(material.metallicFactor === undefined ? { metallicFactor: 1 } : {}), ...(material.roughnessFactor === undefined ? { roughnessFactor: 1 } : {}) });
+  };
+  const hex = (c: readonly [number, number, number]) => `#${c.map((v) => Math.round(Math.max(0, Math.min(1, v)) * 255).toString(16).padStart(2, "0")).join("")}`;
+  return (
+    <details style={{ fontSize: 12, margin: "8px 0" }} open={Boolean(g)}>
+      <summary className={styles.groupLabel}>Generate maps</summary>
+      <div style={{ display: "grid", gap: 4, marginTop: 6 }}>
+        <select
+          aria-label="Generated surface"
+          value={g?.kind ?? ""}
+          onChange={(event) => (event.target.value ? set({ ...(g ?? DEFAULT_GENERATOR), kind: event.target.value as GeneratorKind }) : patch({ generator: undefined, baseColorImage: null, normalImage: null, metallicRoughnessImage: null, reliefImage: null }))}
+          style={{ width: "100%", padding: "4px 6px", borderRadius: 6 }}
+        >
+          <option value="">None (maps of its own)</option>
+          {GENERATOR_KINDS.map((k) => (
+            <option key={k.kind} value={k.kind} title={k.hint}>
+              {k.label}
+            </option>
+          ))}
+        </select>
+        {g && (
+          <>
+            <RangeControl label="Density" nested min={0.5} max={8} step={0.25} value={g.scale} ariaLabel="Generated features per tile" display={`×${g.scale.toFixed(2)}`} onChange={(scale) => set({ ...g, scale })} />
+            <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+              <label style={{ display: "flex", alignItems: "center", gap: 4 }}>
+                Tint
+                <input type="color" aria-label="Generated tint" value={hex(g.tint)} onChange={(event) => set({ ...g, tint: fromHex(event.target.value) })} style={{ width: 28, height: 22, padding: 0, border: "none", background: "none" }} />
+              </label>
+              <select aria-label="Generated map size" value={g.size} onChange={(event) => set({ ...g, size: Number(event.target.value) })} style={{ padding: "2px 4px", borderRadius: 6 }}>
+                {[64, 128, 256, 512].map((n) => (
+                  <option key={n} value={n}>
+                    {n}²
+                  </option>
+                ))}
+              </select>
+              <button type="button" className={styles.toolBtn} title="Another variation of the same surface" onClick={() => set({ ...g, seed: g.seed + 1 })}>
+                Reseed
+              </button>
+              <button type="button" className={styles.toolBtn} title="Keep these maps as images (stored with the scene, free to paint over) and drop the recipe" onClick={() => patch({ generator: undefined })}>
+                Keep the maps
+              </button>
+            </div>
+            <RailHint>{GENERATOR_KINDS.find((k) => k.kind === g.kind)?.hint}. Only the recipe is saved; the maps bake when the scene loads.</RailHint>
+          </>
+        )}
+      </div>
+    </details>
+  );
+}
+
 function MaterialMaps({ material, onImage }: { material: MeshMaterial; onImage: (slot: MaterialImageSlot, image: EncodedImage | null) => void }) {
   const [error, setError] = useState<string | null>(null);
   const upload = async (slot: MaterialImageSlot, file: File | undefined) => {

@@ -63,6 +63,12 @@ Next to Unity and Unreal, it lacks the following:
     - **The uniform.** A new `maps0` uniform at byte 896 flags the map (912 bytes used).
     - **Parity.** WebGL2 matches the software frame on the normal-map scene pixel for pixel. On Dawn over lavapipe, WebGPU passes 29 of 29: the new normal-map scene, and also water, triplanar cliffs and wind, which had only been checked in WebGL2 before.
     - *Tests:* `normal-maps.test.ts` (packing, batching, the 16-unit budget, a frame lit by bevels while a flat map changes nothing); `webgl-parity.test.ts`; `webgpu-parity.test.ts`.
+  - **P1c: done.** A material can carry a **generator recipe**: kind, seed, density, tint and size (64 to 512).
+    - **The kinds.** Rock, cliff, grass, dirt, mud, sand, worn stone and Forerunner metal (`textureGenerators.ts`). Each bakes four maps: albedo, a tangent-space normal map, metallic-roughness (G roughness, B metal) and relief (height and curvature, so the I4 wear inputs work).
+    - **Tiling.** Every noise is periodic on the tile (value noise, fractal noise and cellular noise wrap their lattice), so the maps repeat without a seam. A test holds each kind's wrap seam to no rougher than its roughest interior column or row; it caught sand's slanted ripples, which did not wrap.
+    - **Stored once.** A material saves only the recipe; the maps are regenerated on load and memoised by recipe, so materials that share one share the images. Painted or imported maps in any slot are kept, and "Keep the maps" detaches the recipe so the maps can be painted.
+    - **Editor.** The material panel's Generated maps section picks the kind, density, tint and size, and reseeds.
+    - *Tests:* `texture-generators.test.ts` (sizes, determinism, seeds, tiling, normal and metal channels, defensive reading, the recipe-only round trip, kept maps).
 - [ ] **P2. Landscape tools.**
   - Hydraulic and thermal erosion.
   - Noise and terrace stamps.

@@ -24,6 +24,7 @@
  */
 
 import { bytesToBase64, base64ToBytes } from "./base64";
+import { generateTextures, isGeneratedImage, readGenerator, type TextureGenerator } from "./textureGenerators";
 import { readSurfaceEffects, writeSurfaceEffects } from "./materialEffects";
 import { readMaterialLayers, writeMaterialLayers } from "./materialLayers";
 import type { MaterialGraph } from "./materialGraph";
@@ -234,6 +235,14 @@ export interface MeshMaterial {
    * direction they drift, radians about +Y from +X (a creek's current).
    */
   readonly water?: { readonly strength: number; readonly scale: number; readonly speed: number; readonly flow: number };
+  // --- Texture generators (EDITOR_PRO_ROADMAP.md P1c; see textureGenerators.ts) ---
+  /**
+   * A procedural surface (rock, cliff strata, grass, mud, worn stone,
+   * Forerunner metal…) that fills the base colour, normal, metallic-roughness
+   * and relief maps when the material loads. Only the recipe is stored: the
+   * maps it bakes are left out when the material is saved.
+   */
+  readonly generator?: TextureGenerator;
   // --- Living terrain (BEAVER_CREEK_ROADMAP.md B6; see materialEffects.ts) ---
   /**
    * Triplanar mapping: the base colour and blend maps are projected from the
@@ -534,6 +543,7 @@ export interface SerializedMaterial {
   water?: { strength: number; scale: number; speed: number; flow: number };
   triplanar?: number;
   blendSharpness?: number;
+  generator?: { kind: string; seed: number; scale: number; tint: [number, number, number]; size: number };
   graph?: MaterialGraph;
 }
 interface SerializedPrimitive {
@@ -832,13 +842,15 @@ function toTextureSprite(value: unknown): SpriteTextureRef | null {
 
 /** Encode a material (with its images) to the stored form — shared with the terrain codec. */
 export function serializeMaterial(material: MeshMaterial, table?: ImageTable): SerializedMaterial {
+  // A generator's maps are baked again on load (P1c): store the recipe, not them.
+  const own = (image: EncodedImage | null | undefined) => (material.generator && isGeneratedImage(image) ? null : image);
   return {
     name: material.name,
     baseColorFactor: [...material.baseColorFactor],
-    image: serializeImage(material.baseColorImage, "image", table),
-    normalImage: serializeImage(material.normalImage, "normalImage", table),
+    image: serializeImage(own(material.baseColorImage), "image", table),
+    normalImage: serializeImage(own(material.normalImage), "normalImage", table),
     materialImage: serializeImage(material.materialImage, "materialImage", table),
-    metallicRoughnessImage: serializeImage(material.metallicRoughnessImage, "metallicRoughnessImage", table),
+    metallicRoughnessImage: serializeImage(own(material.metallicRoughnessImage), "metallicRoughnessImage", table),
     occlusionImage: serializeImage(material.occlusionImage, "occlusionImage", table),
     emissiveImage: serializeImage(material.emissiveImage, "emissiveImage", table),
     ...(material.lightmapImage ? { lightmapImage: serializeImage(material.lightmapImage, "lightmapImage", table) } : {}),
@@ -851,7 +863,8 @@ export function serializeMaterial(material: MeshMaterial, table?: ImageTable): S
     ...(material.tintMaskImage ? { tintMaskImage: serializeImage(material.tintMaskImage, "tintMaskImage", table) } : {}),
     ...(material.detailImage ? { detailImage: serializeImage(material.detailImage, "detailImage", table) } : {}),
     ...(material.blendImage ? { blendImage: serializeImage(material.blendImage, "blendImage", table) } : {}),
-    ...(material.reliefImage ? { reliefImage: serializeImage(material.reliefImage, "reliefImage", table) } : {}),
+    ...(own(material.reliefImage) ? { reliefImage: serializeImage(material.reliefImage, "reliefImage", table) } : {}),
+    ...(material.generator ? { generator: { kind: material.generator.kind, seed: material.generator.seed, scale: material.generator.scale, tint: [material.generator.tint[0], material.generator.tint[1], material.generator.tint[2]], size: material.generator.size } } : {}),
     ...writeSurfaceEffects(material),
     ...writeMaterialLayers(material),
   };
@@ -860,7 +873,9 @@ export function serializeMaterial(material: MeshMaterial, table?: ImageTable): S
 /** Decode a stored material defensively (anything missing falls back to the default). */
 export function deserializeMaterial(value: unknown, table?: ImageTable): MeshMaterial {
   const material = (value && typeof value === "object" ? value : { name: "default", baseColorFactor: [1, 1, 1, 1], image: null }) as SerializedMaterial;
-  return {
+  const generator = readGenerator(material.generator);
+  return withGeneratedMaps({
+    ...(generator ? { generator } : {}),
     name: typeof material.name === "string" ? material.name : "default",
     baseColorFactor: toColor(material.baseColorFactor),
     baseColorImage: deserializeImage(material.image, "image", table),
@@ -882,6 +897,25 @@ export function deserializeMaterial(value: unknown, table?: ImageTable): MeshMat
     ...(material.reliefImage ? { reliefImage: deserializeImage(material.reliefImage, "reliefImage", table) } : {}),
     ...readSurfaceEffects(material),
     ...readMaterialLayers(material),
+  });
+}
+
+/**
+ * A material's generator (P1c) put to work: its maps baked (memoised) into
+ * every slot it fills that holds nothing else — or, with `replace`, into every
+ * one of them (the editor, when a creator picks a new recipe).
+ */
+export function withGeneratedMaps(material: MeshMaterial, replace = false): MeshMaterial {
+  const g = material.generator;
+  if (!g) return material;
+  const maps = generateTextures(g);
+  const pick = (current: EncodedImage | null | undefined, made: EncodedImage) => (replace || !current ? made : current);
+  return {
+    ...material,
+    baseColorImage: pick(material.baseColorImage, maps.albedo),
+    normalImage: pick(material.normalImage, maps.normal),
+    metallicRoughnessImage: pick(material.metallicRoughnessImage, maps.metallicRoughness),
+    reliefImage: pick(material.reliefImage, maps.relief),
   };
 }
 

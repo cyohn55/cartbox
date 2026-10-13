@@ -238,6 +238,7 @@ export {
   deserializeMeshAsset,
   serializeMaterial,
   deserializeMaterial,
+  withGeneratedMaps,
   type SerializedMaterial,
   defaultMaterial,
   updateMeshMaterial,
@@ -842,6 +843,7 @@ export {
   type SkyRing,
 } from "./render/skyLayers";
 export { MAX_SKY_PANORAMA_CHARS } from "./model/SceneLighting";
+export { GENERATOR_KINDS, generateTextures, generatorKey, isGeneratedImage, readGenerator, type GeneratedMaps, type GeneratorKind, type TextureGenerator } from "./model/textureGenerators";
 export { DEFAULT_WIND, WIND_PERIOD, foliageSway, parseWind, windOffset, windUniform, type SceneWind } from "./model/wind";
 export {
   bakeSkyPanorama,
