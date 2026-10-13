@@ -66,6 +66,17 @@ export function patchMaterial(mesh: MeshAsset, primitive: number, patch: Partial
   return { ...mesh, variants: mesh.variants!.map((v, i) => (i === k ? { ...v, materials } : v)) };
 }
 
+/** One part's material replaced whole (fields it lacks are gone, not kept) — its own (no set), or a set's. */
+export function replaceMaterial(mesh: MeshAsset, primitive: number, material: MeshMaterial, set?: string | null): MeshAsset {
+  if (primitive < 0 || primitive >= mesh.primitives.length) return mesh;
+  if (!set) return { ...mesh, primitives: mesh.primitives.map((p, i) => (i === primitive ? { ...p, material } : p)) };
+  const k = mesh.variants?.findIndex((v) => v.name === set) ?? -1;
+  if (k < 0) return mesh;
+  const variant = mesh.variants![k]!;
+  const materials = mesh.primitives.map((_, i) => (i === primitive ? material : (variant.materials[i] ?? null)));
+  return { ...mesh, variants: mesh.variants!.map((v, i) => (i === k ? { ...v, materials } : v)) };
+}
+
 /** An image put in (or, with null, taken out of) a slot of a part's material. */
 export function setMaterialImage(mesh: MeshAsset, primitive: number, slot: MaterialImageSlot, image: EncodedImage | null, set?: string | null): MeshAsset {
   return patchMaterial(mesh, primitive, { [slot]: image } as Partial<MeshMaterial>, set);

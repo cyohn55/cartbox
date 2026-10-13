@@ -45,7 +45,7 @@ Next to Unity and Unreal, it lacks the following:
 
 ## Tracks
 
-- [ ] **P1. Materials.**
+- [x] **P1. Materials.**
   - **P1a.** Normal maps on the GPU:
     - a tangent frame from screen derivatives (the same per-triangle frame the software path uses);
     - the material's normal and occlusion maps in both shaders;
@@ -63,6 +63,18 @@ Next to Unity and Unreal, it lacks the following:
     - **The uniform.** A new `maps0` uniform at byte 896 flags the map (912 bytes used).
     - **Parity.** WebGL2 matches the software frame on the normal-map scene pixel for pixel. On Dawn over lavapipe, WebGPU passes 29 of 29: the new normal-map scene, and also water, triplanar cliffs and wind, which had only been checked in WebGL2 before.
     - *Tests:* `normal-maps.test.ts` (packing, batching, the 16-unit budget, a frame lit by bevels while a flat map changes nothing); `webgl-parity.test.ts`; `webgpu-parity.test.ts`.
+  - **P1c: done.** A material can carry a **generator recipe**: kind, seed, density, tint and size (64 to 512).
+    - **The kinds.** Rock, cliff, grass, dirt, mud, sand, worn stone and Forerunner metal (`textureGenerators.ts`). Each bakes four maps: albedo, a tangent-space normal map, metallic-roughness (G roughness, B metal) and relief (height and curvature, so the I4 wear inputs work).
+    - **Tiling.** Every noise is periodic on the tile (value noise, fractal noise and cellular noise wrap their lattice), so the maps repeat without a seam. A test holds each kind's wrap seam to no rougher than its roughest interior column or row; it caught sand's slanted ripples, which did not wrap.
+    - **Stored once.** A material saves only the recipe; the maps are regenerated on load and memoised by recipe, so materials that share one share the images. Painted or imported maps in any slot are kept, and "Keep the maps" detaches the recipe so the maps can be painted.
+    - **Editor.** The material panel's Generated maps section picks the kind, density, tint and size, and reseeds.
+    - *Tests:* `texture-generators.test.ts` (sizes, determinism, seeds, tiling, normal and metal channels, defensive reading, the recipe-only round trip, kept maps).
+  - **P1b: done.** The cart keeps a **material library** of parents (in the mesh sidecar). A part's material can be an instance of one (`materialInstances.ts`).
+    - **Inheritance.** An instance takes every field from its parent except the ones it overrides. Its name, light map and sprite link are always its own. Overriding the generator bakes the generated slots again from the instance's own recipe.
+    - **Editing.** Changing any field of an instance in the material panel makes it an override, listed under the Library picker with a revert button each. "Apply to parent" pushes the overrides up; "Detach" keeps the values and stops following.
+    - **Propagation.** Editing or removing a parent resolves again every instance of it: placed meshes, their animation frames and LODs, prefab nodes and foliage layers. A mesh holding no instance of that parent is not even decoded. Removing a parent leaves its instances with their values.
+    - **Storage.** Each instance also keeps its resolved fields, so the player and every other reader of a mesh need no library; generated maps are stored as recipes, so the copies are small.
+    - *Tests:* `material-instances.test.ts` (inheritance, overrides, generator overrides, apply and detach, the link's codec, the library's round trip, propagation that spares overrides and other parents).
 - [ ] **P2. Landscape tools.**
   - Hydraulic and thermal erosion.
   - Noise and terrace stamps.

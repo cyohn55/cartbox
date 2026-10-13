@@ -75,6 +75,12 @@ import {
   type StoredLods,
   resolveMeshRef,
   serializeMeshAsset,
+  serializeMaterial,
+  deserializeMaterial,
+  mayInstance,
+  resolveMeshInstances,
+  MAX_LIBRARY_MATERIALS,
+  type MaterialLibrary,
   worldMatrices,
   type MeshAsset,
   type AnimatorSpec,
@@ -227,6 +233,8 @@ export interface MeshSidecar {
   readonly actions?: readonly InputAction[];
   /** The string table cartbox.text and UI `@key` texts read (see strings.ts in @cartbox/editor). */
   readonly strings?: StringTable;
+  /** Parent materials that mesh materials are instances of (see materialInstances.ts in @cartbox/editor); absent or empty = none. */
+  readonly materials?: MaterialLibrary;
 }
 
 /** The identity transform a freshly imported mesh gets. */
@@ -251,7 +259,7 @@ export function newMeshId(): string {
  */
 export function encodeMeshSidecar(sidecar: MeshSidecar): string | null {
   const prefabs = sidecar.prefabs ?? [];
-  if (sidecar.meshes.length === 0 && !sidecar.lighting && prefabs.length === 0 && (sidecar.timelines?.length ?? 0) === 0 && (sidecar.levels?.length ?? 0) === 0 && (sidecar.terrains?.length ?? 0) === 0 && (sidecar.audio?.sounds.length ?? 0) === 0 && (sidecar.ui?.length ?? 0) === 0 && (sidecar.components?.length ?? 0) === 0 && (sidecar.actions?.length ?? 0) === 0 && !sidecar.strings) return null;
+  if (sidecar.meshes.length === 0 && !sidecar.lighting && prefabs.length === 0 && (sidecar.timelines?.length ?? 0) === 0 && (sidecar.levels?.length ?? 0) === 0 && (sidecar.terrains?.length ?? 0) === 0 && (sidecar.audio?.sounds.length ?? 0) === 0 && (sidecar.ui?.length ?? 0) === 0 && (sidecar.components?.length ?? 0) === 0 && (sidecar.actions?.length ?? 0) === 0 && !sidecar.strings && (sidecar.materials?.length ?? 0) === 0) return null;
   // Repeated meshes (and animation frames) are stored once in a shared library,
   // shared between placed entries and prefab nodes (a prefab's copies repeat its meshes).
   const nodes = prefabs.flatMap((prefab) => prefab.nodes);
@@ -289,7 +297,28 @@ export function encodeMeshSidecar(sidecar: MeshSidecar): string | null {
     ...(sidecar.components && sidecar.components.length > 0 ? { components: sidecar.components } : {}),
     ...(sidecar.actions && sidecar.actions.length > 0 ? { actions: sidecar.actions } : {}),
     ...(sidecar.strings ? { strings: sidecar.strings } : {}),
+    ...(sidecar.materials && sidecar.materials.length > 0 ? { materials: sidecar.materials.map((m) => ({ id: m.id, material: serializeMaterial(m.material) })) } : {}),
   });
+}
+
+/** Read a stored material library defensively: malformed and repeated parents dropped. */
+function readMaterialLibrary(value: unknown): MaterialLibrary {
+  if (!Array.isArray(value)) return [];
+  const seen = new Set<string>();
+  const out: { id: string; material: ReturnType<typeof deserializeMaterial> }[] = [];
+  for (const raw of value.slice(0, MAX_LIBRARY_MATERIALS)) {
+    const r = raw as { id?: unknown; material?: unknown };
+    if (typeof r?.id !== "string" || !r.id || r.id.length > 64 || seen.has(r.id) || !r.material || typeof r.material !== "object") continue;
+    try {
+      const { instance: _instance, ...material } = deserializeMaterial(r.material);
+      void _instance; // a parent is never itself an instance
+      out.push({ id: r.id, material });
+      seen.add(r.id);
+    } catch {
+      // A parent whose images fail to decode is dropped; its instances keep their values.
+    }
+  }
+  return out;
 }
 
 function isFiniteTriple(value: unknown): value is [number, number, number] {
@@ -398,6 +427,7 @@ export function decodeMeshSidecar(raw: string | null | undefined): MeshSidecar {
   const ui = parseUiDocuments((parsed as { ui?: unknown }).ui);
   const actions = parseInputActions((parsed as { actions?: unknown }).actions);
   const strings = parseStringTable((parsed as { strings?: unknown }).strings);
+  const materials = readMaterialLibrary((parsed as { materials?: unknown }).materials);
   const placed = linked.map((entry) => (entry.level && !levelIds.has(entry.level) ? withoutLevel(entry) : entry));
   return {
     version: MESH_SIDECAR_VERSION,
@@ -423,6 +453,49 @@ export function decodeMeshSidecar(raw: string | null | undefined): MeshSidecar {
     ...(componentDefs.length > 0 ? { components: componentDefs } : {}),
     ...(actions.length > 0 ? { actions } : {}),
     ...(strings ? { strings } : {}),
+    ...(materials.length > 0 ? { materials } : {}),
+  };
+}
+
+/**
+ * Replace the cart's material library, and resolve again every instance of a
+ * parent that changed or went (EDITOR_PRO_ROADMAP.md P1b) — in placed meshes,
+ * their animation frames and LODs, prefab nodes and foliage layers alike. An
+ * instance whose parent was removed keeps its values and is cut loose.
+ */
+export function setMaterialLibrary(sidecar: MeshSidecar, materials: MaterialLibrary): MeshSidecar {
+  const before = new Map((sidecar.materials ?? []).map((m) => [m.id, m.material]));
+  const after = new Map(materials.map((m) => [m.id, m.material]));
+  const changed = [...before.keys()].filter((id) => before.get(id) !== after.get(id));
+  const { materials: _drop, ...rest } = sidecar;
+  void _drop;
+  const next: MeshSidecar = { ...rest, ...(materials.length > 0 ? { materials } : {}) };
+  if (changed.length === 0) return next;
+  // Each distinct mesh string is resolved once, however many entries share it.
+  const done = new Map<string, string>();
+  const remap = (mesh: string): string => {
+    if (!changed.some((id) => mayInstance(mesh, id))) return mesh;
+    let out = done.get(mesh);
+    if (out === undefined) {
+      const asset = deserializeMeshAsset(mesh);
+      const resolved = resolveMeshInstances(asset, materials);
+      out = resolved === asset ? mesh : serializeMeshAsset(resolved);
+      done.set(mesh, out);
+    }
+    return out;
+  };
+  const remapLods = (lods: StoredLods | undefined) => (lods ? { ...lods, levels: lods.levels.map(remap) } : undefined);
+  const withMeshes = <T extends { readonly mesh: string; readonly frames?: readonly string[]; readonly lods?: StoredLods }>(item: T): T => ({
+    ...item,
+    mesh: remap(item.mesh),
+    ...(item.frames ? { frames: item.frames.map(remap) } : {}),
+    ...(item.lods ? { lods: remapLods(item.lods) } : {}),
+  });
+  return {
+    ...next,
+    meshes: next.meshes.map(withMeshes),
+    ...(next.prefabs ? { prefabs: next.prefabs.map((prefab) => ({ ...prefab, nodes: prefab.nodes.map(withMeshes) })) } : {}),
+    ...(next.foliage ? { foliage: next.foliage.map((layer) => ({ ...layer, mesh: remap(layer.mesh) })) } : {}),
   };
 }
 
