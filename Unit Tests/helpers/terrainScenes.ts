@@ -16,7 +16,11 @@ export function rockTexture(): DecodedTexture {
 }
 
 /** The cliff: flat grass, a near-vertical face 2.4 m high, a flat rock top. */
-export function cliffTerrain(options: { triplanar?: boolean; sharpness?: number } = {}): Terrain {
+/** P2b's landscape-material settings the cliff's layers take with `landscape`: broad patches a metre across, distance tiling from 1.5 m out to 6 m. */
+export const CLIFF_LANDSCAPE = { macro: { scale: 1, strength: 0.4 }, farTile: 6 } as const;
+
+export function cliffTerrain(options: { triplanar?: boolean; sharpness?: number; landscape?: boolean } = {}): Terrain {
+  const extra = options.landscape ? CLIFF_LANDSCAPE : {};
   const n = 17;
   const heights = new Float32Array(n * n);
   for (let j = 0; j < n; j += 1) for (let i = 0; i < n; i += 1) heights[j * n + i] = j < 7 ? 0 : j > 9 ? 2.4 : ((j - 7) / 3) * 2.4;
@@ -29,8 +33,8 @@ export function cliffTerrain(options: { triplanar?: boolean; sharpness?: number 
     heights,
     tile: 0.5,
     layers: [
-      { material: { name: "grass", baseColorFactor: [0.55, 0.8, 0.4, 1], baseColorImage: null, metallicFactor: 0, roughnessFactor: 0.9 }, up: [0.75, 1], height: [-10, 0.5] },
-      { material: { name: "rock", baseColorFactor: [0.85, 0.8, 0.75, 1], baseColorImage: null, metallicFactor: 0, roughnessFactor: 0.7 } },
+      { material: { name: "grass", baseColorFactor: [0.55, 0.8, 0.4, 1], baseColorImage: null, metallicFactor: 0, roughnessFactor: 0.9, ...extra }, up: [0.75, 1], height: [-10, 0.5] },
+      { material: { name: "rock", baseColorFactor: [0.85, 0.8, 0.75, 1], baseColorImage: null, metallicFactor: 0, roughnessFactor: 0.7, ...extra } },
     ],
     blend: { up: 0.3, height: 0.4, ...(options.sharpness ? { sharpness: options.sharpness } : {}) },
     ...(options.triplanar ? { triplanar: true } : {}),
@@ -38,7 +42,7 @@ export function cliffTerrain(options: { triplanar?: boolean; sharpness?: number 
 }
 
 /** The cliff as scene instances: each primitive's base and blend maps picked by its layers' names. */
-export function cliffInstances(options: { triplanar?: boolean; sharpness?: number } = {}): MeshSceneInstance[] {
+export function cliffInstances(options: { triplanar?: boolean; sharpness?: number; landscape?: boolean } = {}): MeshSceneInstance[] {
   const mesh = terrainMesh(cliffTerrain(options));
   const maps: Record<string, DecodedTexture> = { grass: checkerTexture(), rock: rockTexture() };
   const names = mesh.primitives.map((p) => p.material.name.split("+"));

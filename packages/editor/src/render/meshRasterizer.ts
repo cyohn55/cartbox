@@ -33,7 +33,7 @@ import { EFFECT_RIM_POWER, bandAmount, camoThreshold, effectActive, type Surface
 type FrameFog = SceneFog & { readonly eye: readonly [number, number, number] };
 import { LIGHTMAP_RANGE } from "../model/lightmap";
 import { windOffset, windUniform, type SceneWind } from "../model/wind";
-import { DEFAULT_DETAIL_SCALE, DEFAULT_DETAIL_STRENGTH, blendHeightOf, detailFade, emissiveAnimation, heightBlend, materialHasWater, triplanarUvs, triplanarWeights, waterTilt, waterUniform } from "../model/materialEffects";
+import { DEFAULT_DETAIL_SCALE, DEFAULT_DETAIL_STRENGTH, FAR_TILE_SCALE, blendHeightOf, detailFade, emissiveAnimation, farTileBlend, heightBlend, macroGain, macroUniform, materialHasWater, triplanarUvs, triplanarWeights, waterTilt, waterUniform } from "../model/materialEffects";
 import { compiledGraphOf, evaluateGraph, graphRegisters, type CompiledGraph, type GraphContext } from "../model/materialGraph";
 import { EFFECT_DISTORT_POWER, materialRefracts, refractionOffset, refracts, resolveRefraction, type ResolvedRefraction } from "./refraction";
 import { CLEARCOAT_F0, anisotropicD, curvatureOf, materialHasLayers, parallaxRate, parallaxUv, resolveLayers, uvGradients, type ResolvedLayers } from "../model/materialLayers";
@@ -1845,16 +1845,24 @@ interface PendingTriangle {
   readonly mapping: SurfaceMapping | null;
 }
 
-/** How a material's maps are laid on it (B6): triplanar (its repeat, 0 = off) and height-blended (0 = an even mix). */
+/**
+ * How a material's maps are laid on it: triplanar (its repeat, 0 = off) and
+ * height-blended (0 = an even mix) (B6); macro variation ([strength, 1 / scale])
+ * and distance tiling (the distance, 0 = off) (P2b).
+ */
 interface SurfaceMapping {
   readonly triplanar: number;
   readonly blendSharpness: number;
+  readonly macro: readonly [number, number];
+  readonly farTile: number;
 }
 
 function mappingOf(material: MeshAsset["primitives"][number]["material"]): SurfaceMapping | null {
   const triplanar = material.triplanar && material.triplanar > 0 ? material.triplanar : 0;
   const blendSharpness = material.blendSharpness && material.blendSharpness > 0 ? Math.min(1, material.blendSharpness) : 0;
-  return triplanar > 0 || blendSharpness > 0 ? { triplanar, blendSharpness } : null;
+  const macro = macroUniform(material);
+  const farTile = material.farTile && material.farTile > 0 ? material.farTile : 0;
+  return triplanar > 0 || blendSharpness > 0 || macro[0] > 0 || farTile > 0 ? { triplanar, blendSharpness, macro, farTile } : null;
 }
 
 /**
@@ -2463,11 +2471,33 @@ function rasterizeTriangle(
       if (texture) {
         const u = tu;
         const v = tv;
-        const [tr, tg, tb, ta] = sampleMapAt(texture, u, v, pw0 * a.ox + pw1 * b.ox + pw2 * c.ox, pw0 * a.oy + pw1 * b.oy + pw2 * c.oy, pw0 * a.oz + pw1 * b.oz + pw2 * c.oz, gnx, gny, gnz);
+        const ox = pw0 * a.ox + pw1 * b.ox + pw2 * c.ox;
+        const oy = pw0 * a.oy + pw1 * b.oy + pw2 * c.oy;
+        const oz = pw0 * a.oz + pw1 * b.oz + pw2 * c.oz;
+        let [tr, tg, tb, ta] = sampleMapAt(texture, u, v, ox, oy, oz, gnx, gny, gnz);
+        // Distance tiling (P2b): far off, the map blends to itself tiled four times larger.
+        const far = mapping && mapping.farTile > 0 ? farTileBlend(pw0 * a.clip[3] + pw1 * b.clip[3] + pw2 * c.clip[3], mapping.farTile) : 0;
+        if (far > 0) {
+          const [fr, fg, fb, fa] =
+            triplanar > 0
+              ? sampleTriplanar(texture, ox, oy, oz, gnx, gny, gnz, triplanar / FAR_TILE_SCALE, style.textureFiltering)
+              : sampleTexture(texture, u * FAR_TILE_SCALE, v * FAR_TILE_SCALE, style.textureFiltering);
+          tr += (fr - tr) * far;
+          tg += (fg - tg) * far;
+          tb += (fb - tb) * far;
+          ta += (fa - ta) * far;
+        }
         r = (r * tr) / 255;
         g = (g * tg) / 255;
         bl = (bl * tb) / 255;
         al = (al * ta) / 255;
+      }
+      // Macro variation (P2b): broad lighter and darker patches over the whole surface.
+      if (mapping && mapping.macro[0] > 0) {
+        const k = macroGain(mapping.macro[0], mapping.macro[1], pw0 * a.ox + pw1 * b.ox + pw2 * c.ox, pw0 * a.oy + pw1 * b.oy + pw2 * c.oy, pw0 * a.oz + pw1 * b.oz + pw2 * c.oz);
+        r *= k;
+        g *= k;
+        bl *= k;
       }
       // The material graph's outputs (EP7): base colour and alpha now, the
       // rest where the PBR terms are worked out below. -1 = not driven.

@@ -268,6 +268,20 @@ export interface MeshMaterial {
    * hollows rather than both fading evenly. Absent or 0 is an even mix.
    */
   readonly blendSharpness?: number;
+  // --- Landscape materials (EDITOR_PRO_ROADMAP.md P2b; see materialEffects.ts) ---
+  /**
+   * Macro variation: the base colour drifts lighter and darker in broad,
+   * soft patches `scale` units across (in the mesh's own space), by up to
+   * `strength` (0..1), so a tiled texture doesn't repeat visibly across a
+   * valley. Absent is none.
+   */
+  readonly macro?: { readonly scale: number; readonly strength: number };
+  /**
+   * Distance tiling: from a quarter of this view distance (world units) out to
+   * it, the base map blends to itself tiled four times larger, so far ground
+   * shows broad shapes rather than a fine repeating grid. Absent or 0 is off.
+   */
+  readonly farTile?: number;
   // --- Transparency (ENGINE_PARITY_ROADMAP.md EP6), glTF's alphaMode plus additive ---
   /**
    * How the surface's alpha (base colour factor × texture) is used. Absent is

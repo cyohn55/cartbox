@@ -11,7 +11,7 @@
  */
 
 import type { MeshMaterial } from "./MeshAsset";
-import { MAX_TERRAIN_SAMPLES, MIN_TERRAIN_SAMPLES, paintedWeights, terrainHeight, terrainLayerWeights, terrainHole, type Terrain } from "./terrain";
+import { MAX_TERRAIN_SAMPLES, MIN_TERRAIN_SAMPLES, paintedWeights, terrainCurvature, terrainHeight, terrainLayerWeights, terrainHole, type Terrain } from "./terrain";
 
 /** A dab of the brush: where (terrain space, x and z), how wide, and how hard (0..1). */
 export interface TerrainBrush {
@@ -133,7 +133,7 @@ export function bakeTerrainPaint(t: Terrain): Uint8Array {
     for (let i = 0; i < n; i += 1) {
       const nx = -(h(i + 1, j) - h(i - 1, j)) / (2 * dx);
       const nz = -(h(i, j + 1) - h(i, j - 1)) / (2 * dz);
-      out.set(toBytes(terrainLayerWeights(t, 1 / Math.hypot(nx, 1, nz), t.origin[1] + h(i, j))), (j * n + i) * L);
+      out.set(toBytes(terrainLayerWeights(t, 1 / Math.hypot(nx, 1, nz), t.origin[1] + h(i, j), 0, terrainCurvature(t, i, j))), (j * n + i) * L);
     }
   }
   return out;

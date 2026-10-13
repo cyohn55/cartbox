@@ -65,6 +65,8 @@ import {
   DEFAULT_RASTER_STYLE,
   DETAIL_FAR,
   DETAIL_NEAR,
+  FAR_TILE_SCALE,
+  MACRO_OCTAVES,
   ANISOTROPY_MIN_ALPHA,
   CLEARCOAT_F0,
   PARALLAX_MIN_NDV,
@@ -838,6 +840,24 @@ fn triMap(t: texture_2d<f32>, uv: vec2<f32>, normal: vec3<f32>, objPos: vec3<f32
   let p = objPos * (1.0 / u.terrain0.x);
   return textureSample(t, samp, vec2<f32>(p.z, 1.0 - p.y)) * w.x + textureSample(t, samp, vec2<f32>(p.x, 1.0 - p.z)) * w.y + textureSample(t, samp, vec2<f32>(p.x, 1.0 - p.y)) * w.z;
 }
+// --- Landscape materials (EDITOR_PRO_ROADMAP.md P2b): farTileBlend and macroGain, term for term ---
+// The base map tiled ${1 / FAR_TILE_SCALE}× larger, by the raw UVs or triplanar projection.
+fn triMapFar(t: texture_2d<f32>, p0: vec2<f32>, normal: vec3<f32>, objPos: vec3<f32>) -> vec4<f32> {
+  if (u.terrain0.x <= 0.0) { return textureSample(t, samp, vec2<f32>(p0.x * ${FAR_TILE_SCALE.toFixed(4)}, 1.0 - p0.y * ${FAR_TILE_SCALE.toFixed(4)})); }
+  let n = normalize(normal);
+  let a = n * n;
+  var w = a * a;
+  w = w / max(w.x + w.y + w.z, 1e-30);
+  let p = objPos * (1.0 / (u.terrain0.x / ${FAR_TILE_SCALE.toFixed(4)}));
+  return textureSample(t, samp, vec2<f32>(p.z, 1.0 - p.y)) * w.x + textureSample(t, samp, vec2<f32>(p.x, 1.0 - p.z)) * w.y + textureSample(t, samp, vec2<f32>(p.x, 1.0 - p.y)) * w.z;
+}
+fn farTileBlend(depth: f32, distance: f32) -> f32 {
+  let t = clamp((depth - distance * 0.25) / (distance * 0.75), 0.0, 1.0);
+  return t * t * (3.0 - 2.0 * t);
+}
+fn macroGain(p: vec3<f32>) -> f32 {
+  return 1.0 + u.terrain0.z * (2.0 * gNoise(p * u.terrain0.w, ${MACRO_OCTAVES}) - 1.0);
+}
 fn blendHeightOf(c: vec3<f32>) -> f32 { return 0.299 * c.r + 0.587 * c.g + 0.114 * c.b; }
 fn heightBlend(w: f32, base: f32, blend: f32, s: f32) -> f32 {
   return clamp((w - 0.5 + 0.5 * s * (blend - base)) / (1.0 - 0.9 * s) + 0.5, 0.0, 1.0);
@@ -944,8 +964,13 @@ fn fs(in: VSOut) -> @location(0) vec4<f32> {
 
   var colour = u.base;
   if (u.texflags.x > 0.5) {
-    colour = colour * triMap(tex, uv, in.normal, in.objPos);
+    var texel = triMap(tex, uv, in.normal, in.objPos);
+    // Distance tiling (P2b): far off, the map blends to itself tiled larger.
+    if (u.maps0.y > 0.0) { texel = mix(texel, triMapFar(tex, puv, in.normal, in.objPos), farTileBlend(in.eyeDepth, u.maps0.y)); }
+    colour = colour * texel;
   }
+  // Macro variation (P2b): broad lighter and darker patches over the whole surface.
+  if (u.terrain0.z > 0.0) { colour = vec4<f32>(colour.rgb * macroGain(in.objPos), colour.a); }
 ${g.base}
   // The CPU path skips a texel whose combined alpha is below 1/255 rather than
   // blending it, so this is a discard and not an alpha-blend state.

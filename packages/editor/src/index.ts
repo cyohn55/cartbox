@@ -314,6 +314,8 @@ export {
   terrainHeight,
   terrainMesh,
   terrainLayerWeights,
+  terrainCurvature,
+  CURVATURE_BLEND,
   paintedWeights,
   terrainHole,
   type SerializedTerrain,
@@ -669,6 +671,11 @@ export {
   WATER_TILT,
   waterTilt,
   waterUniform,
+  FAR_TILE_SCALE,
+  MACRO_OCTAVES,
+  farTileBlend,
+  macroGain,
+  macroUniform,
 } from "./model/materialEffects";
 export {
   CAMO_BEND,

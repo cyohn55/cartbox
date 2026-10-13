@@ -22,6 +22,7 @@ import {
   thermalErosion,
   type FoliageLayer,
   type FoliagePreset,
+  type MeshMaterial,
   type Terrain,
 } from "@cartbox/editor";
 
@@ -46,6 +47,26 @@ const SCULPT: readonly { readonly op: "raise" | "lower" | "smooth" | "flatten" |
   { op: "flatten", label: "Flatten", glyph: "▬", hint: "Level the ground to the height where the stroke starts" },
   { op: "noise", label: "Noise", glyph: "⁂", hint: "Roughen the ground with bumps" },
 ];
+
+/** The curvature rules a layer can take (metres; see terrainCurvature): anywhere, hollows, crests. */
+const CURVATURE_CHOICES = { any: undefined, hollows: [0.02, 1000], crests: [-1000, -0.02] } as const satisfies Record<string, readonly [number, number] | undefined>;
+
+function curvatureChoice(range: readonly [number, number] | undefined): keyof typeof CURVATURE_CHOICES {
+  if (!range) return "any";
+  return range[0] >= 0 ? "hollows" : "crests";
+}
+
+/** Every layer's material patched alike (P2b: macro variation and distance tiling for the whole landscape); undefined removes a field. */
+function withLayerMaterials(terrain: Terrain, patch: Pick<MeshMaterial, "macro" | "farTile">): Terrain {
+  return {
+    ...terrain,
+    layers: terrain.layers.map((l) => {
+      const material: Record<string, unknown> = { ...l.material, ...patch };
+      for (const key of Object.keys(patch) as (keyof typeof patch)[]) if (patch[key] === undefined) delete material[key];
+      return { ...l, material: material as unknown as MeshMaterial };
+    }),
+  };
+}
 
 /** A new vista's haze: a third of the sky shows through ground a kilometre out. */
 const DEFAULT_VISTA_HAZE = 0.35;
@@ -150,11 +171,53 @@ export function TerrainPanel({
                     {layer.material.name}
                     {layer.paintOnly ? " (painted only)" : ""}
                   </button>
+                  {k < terrain.layers.length - 1 && !layer.paintOnly && (
+                    <select
+                      aria-label={`Where ${layer.material.name} grows by the ground's shape`}
+                      title="Where the ground's shape lets this layer show: anywhere, only in hollows and gullies, or only on ridges and crests"
+                      value={curvatureChoice(layer.curvature)}
+                      onChange={(event) => {
+                        const curvature = CURVATURE_CHOICES[event.target.value as keyof typeof CURVATURE_CHOICES];
+                        const layers = terrain.layers.map((l, i) => {
+                          if (i !== k) return l;
+                          const { curvature: _old, ...rest } = l;
+                          void _old;
+                          return curvature ? { ...rest, curvature } : rest;
+                        });
+                        onChange(replaceTerrain(sidecar, { ...terrain, layers }));
+                      }}
+                      style={{ fontSize: 11 }}
+                    >
+                      <option value="any">anywhere</option>
+                      <option value="hollows">hollows</option>
+                      <option value="crests">crests</option>
+                    </select>
+                  )}
                 </div>
               );
             })}
           </div>
 
+          <RangeControl
+            label="Macro variation"
+            min={0}
+            max={0.6}
+            step={0.02}
+            value={terrain.layers[0]?.material.macro?.strength ?? 0}
+            onChange={(strength) => onChange(replaceTerrain(sidecar, withLayerMaterials(terrain, { macro: strength > 0 ? { scale: terrain.layers[0]?.material.macro?.scale ?? Math.max(8, terrain.size[0] / 8), strength } : undefined })))}
+            ariaLabel="Macro variation across every layer"
+            display={terrain.layers[0]?.material.macro ? `±${Math.round(terrain.layers[0].material.macro.strength * 100)}%` : "off"}
+          />
+          <RangeControl
+            label="Distance tiling"
+            min={0}
+            max={600}
+            step={10}
+            value={terrain.layers[0]?.material.farTile ?? 0}
+            onChange={(farTile) => onChange(replaceTerrain(sidecar, withLayerMaterials(terrain, { farTile: farTile > 0 ? farTile : undefined })))}
+            ariaLabel="Distance at which every layer's texture tiles four times larger"
+            display={terrain.layers[0]?.material.farTile ? `4× larger by ${terrain.layers[0].material.farTile} m` : "off"}
+          />
           <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, marginTop: 10 }} title="Project each layer's texture from all three axes, so steep cliffs aren't streaked by a texture laid flat from above (flat ground looks the same)">
             <input type="checkbox" checked={Boolean(terrain.triplanar)} onChange={(event) => onChange(replaceTerrain(sidecar, { ...terrain, triplanar: event.target.checked || undefined }))} />
             Triplanar cliffs

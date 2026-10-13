@@ -28,6 +28,12 @@ export interface TerrainLayer {
   readonly up?: readonly [number, number];
   /** World height of the triangle's centre, [min, max]. Absent = any. */
   readonly height?: readonly [number, number];
+  /**
+   * The ground's curvature, [min, max] in metres (EDITOR_PRO_ROADMAP.md P2b; see
+   * {@link terrainCurvature}): positive in hollows and gullies, negative on
+   * ridges and crests — sand in the creases, bare rock on the crests. Absent = any.
+   */
+  readonly curvature?: readonly [number, number];
   /** Shown only where painted (EP10): the rules never pick it (paths, scorch marks). */
   readonly paintOnly?: boolean;
 }
@@ -139,11 +145,28 @@ function within(v: number, range: readonly [number, number] | undefined, w: numb
   return low * high;
 }
 
+/** How softly a layer's curvature bounds blend when the terrain blends (metres either side). */
+export const CURVATURE_BLEND = 0.05;
+
+/**
+ * The ground's curvature at grid sample (i, j), in metres: how far the mean of
+ * its four neighbours lies above it — positive in a hollow, negative on a
+ * crest, 0 on a plane however steep. Edges read as their nearest inner sample.
+ */
+export function terrainCurvature(t: Terrain, i: number, j: number): number {
+  const n = t.samples;
+  if (n < 3) return 0;
+  const ci = Math.max(1, Math.min(n - 2, i));
+  const cj = Math.max(1, Math.min(n - 2, j));
+  const h = (a: number, b: number) => t.heights[b * n + a]!;
+  return (h(ci - 1, cj) + h(ci + 1, cj) + h(ci, cj - 1) + h(ci, cj + 1)) / 4 - h(ci, cj);
+}
+
 /**
  * Each layer's weight at a point, first match winning softly: a layer takes
  * its membership of what the layers before it left, the last takes the rest.
  */
-export function terrainLayerWeights(t: Terrain, up: number, height: number, jitter = 0): number[] {
+export function terrainLayerWeights(t: Terrain, up: number, height: number, jitter = 0, curvature = 0): number[] {
   const b = t.blend;
   const wu = b ? Math.max(0, b.up) : 0;
   const wh = b ? Math.max(0, b.height) : 0;
@@ -156,7 +179,7 @@ export function terrainLayerWeights(t: Terrain, up: number, height: number, jitt
       out.push(rest);
       return;
     }
-    const w = l.paintOnly ? 0 : rest * within(u, l.up, wu, [0, 1]) * within(h, l.height, wh);
+    const w = l.paintOnly ? 0 : rest * within(u, l.up, wu, [0, 1]) * within(h, l.height, wh) * within(curvature, l.curvature, b ? CURVATURE_BLEND : 0);
     out.push(w);
     rest -= w;
   });
@@ -197,12 +220,13 @@ export function paintedWeights(t: Terrain, i: number, j: number): number[] | nul
   return Array.from({ length: L }, (_, k) => t.paint![o + k]! / sum);
 }
 
-function layerFor(layers: readonly TerrainLayer[], up: number, height: number): number {
+function layerFor(layers: readonly TerrainLayer[], up: number, height: number, curvature = 0): number {
   for (let i = 0; i < layers.length - 1; i += 1) {
     const l = layers[i]!;
     if (l.paintOnly) continue;
     if (l.up && (up < l.up[0] || up > l.up[1])) continue;
     if (l.height && (height < l.height[0] || height > l.height[1])) continue;
+    if (l.curvature && (curvature < l.curvature[0] || curvature > l.curvature[1])) continue;
     return i;
   }
   return layers.length - 1;
@@ -274,6 +298,8 @@ export function terrainMesh(t: Terrain, stride = 1, cells?: readonly [number, nu
     }
     return index;
   };
+  // Curvature is worked out only when a layer asks for it.
+  const curved = t.layers.some((l) => l.curvature);
   // Per-vertex layer weights (blend mode only), cached by grid index.
   const weightCache = new Map<number, number[]>();
   const vertexNormalY = (i: number, j: number): number => {
@@ -293,7 +319,7 @@ export function terrainMesh(t: Terrain, stride = 1, cells?: readonly [number, nu
     if (!w) {
       const x = t.origin[0] + i * dx;
       const z = t.origin[2] + j * dz;
-      w = terrainLayerWeights(t, vertexNormalY(i, j), t.origin[1] + h(i, j), (t.blend?.noise ?? 0) * edgeNoise(x, z));
+      w = terrainLayerWeights(t, vertexNormalY(i, j), t.origin[1] + h(i, j), (t.blend?.noise ?? 0) * edgeNoise(x, z), curved ? terrainCurvature(t, i, j) : 0);
       weightCache.set(key, w);
     }
     return w;
@@ -344,7 +370,8 @@ export function terrainMesh(t: Terrain, stride = 1, cells?: readonly [number, nu
     const vx = pc[0]! - pa[0]!, vy = pc[1]! - pa[1]!, vz = pc[2]! - pa[2]!;
     const ny = uz * vx - ux * vz;
     const len = Math.hypot(uy * vz - uz * vy, ny, ux * vy - uy * vx) || 1;
-    const layer = t.blend || t.paint ? blendBucket(a, b, c) : layerFor(t.layers, ny / len, t.origin[1] + (pa[1]! + pb[1]! + pc[1]!) / 3);
+    const curve = curved ? (terrainCurvature(t, a[0], a[1]) + terrainCurvature(t, b[0], b[1]) + terrainCurvature(t, c[0], c[1])) / 3 : 0;
+    const layer = t.blend || t.paint ? blendBucket(a, b, c) : layerFor(t.layers, ny / len, t.origin[1] + (pa[1]! + pb[1]! + pc[1]!) / 3, curve);
     out[layer]!.indices.push(vertex(layer, a[0], a[1]), vertex(layer, b[0], b[1]), vertex(layer, c[0], c[1]));
     if (skirt > 0) {
       for (const [p, q, r] of [[a, b, c], [b, c, a], [c, a, b]] as const) if (onEdge(p, q)) hang(layer, p, q, r);
@@ -488,7 +515,7 @@ export function serializeTerrain(t: Terrain): SerializedTerrain {
     size: [...t.size],
     samples: t.samples,
     heights: bytesToBase64(new Uint8Array(q.buffer)),
-    layers: t.layers.map((l) => ({ material: serializeMaterial(l.material), ...(l.up ? { up: [...l.up] } : {}), ...(l.height ? { height: [...l.height] } : {}), ...(l.paintOnly ? { paintOnly: true } : {}) })),
+    layers: t.layers.map((l) => ({ material: serializeMaterial(l.material), ...(l.up ? { up: [...l.up] } : {}), ...(l.height ? { height: [...l.height] } : {}), ...(l.curvature ? { curvature: [...l.curvature] } : {}), ...(l.paintOnly ? { paintOnly: true } : {}) })),
     ...(t.floor !== undefined ? { floor: t.floor } : {}),
     ...(t.tile !== undefined ? { tile: t.tile } : {}),
     ...(t.parent ? { parent: t.parent } : {}),
@@ -557,10 +584,11 @@ export function readTerrain(value: unknown): Terrain | null {
   const heights = new Float32Array(n * n);
   for (let i = 0; i < heights.length; i += 1) heights[i] = view.getInt16(i * 2, true) * HEIGHT_STEP;
   const layers: TerrainLayer[] = r.layers.slice(0, MAX_TERRAIN_LAYERS).map((raw) => {
-    const l = (raw ?? {}) as { material?: unknown; up?: unknown; height?: unknown; paintOnly?: unknown };
+    const l = (raw ?? {}) as { material?: unknown; up?: unknown; height?: unknown; curvature?: unknown; paintOnly?: unknown };
     const up = pair(l.up);
     const height = pair(l.height);
-    return { material: deserializeMaterial(l.material), ...(up ? { up } : {}), ...(height ? { height } : {}), ...(l.paintOnly === true ? { paintOnly: true } : {}) };
+    const curvature = pair(l.curvature);
+    return { material: deserializeMaterial(l.material), ...(up ? { up } : {}), ...(height ? { height } : {}), ...(curvature ? { curvature } : {}), ...(l.paintOnly === true ? { paintOnly: true } : {}) };
   });
   return {
     id: typeof r.id === "string" ? r.id : "terrain",
