@@ -520,7 +520,7 @@ describe.skipIf(!device)("WebGPU parity on a real device", () => {
     expect(changed).toBeGreaterThan(30);
   }, 60_000);
 
-  it("matches the software rasteriser on water, triplanar cliffs, wind and normal maps (B5, B6, P1a)", async () => {
+  it("matches the software rasteriser on water, triplanar cliffs, wind, normal maps and landscape materials (B5, B6, P1a, P2b)", async () => {
     const mat = (m: Record<string, unknown>) => {
       const q = quad();
       return { ...q, primitives: [{ ...q.primitives[0]!, material: { ...q.primitives[0]!.material, ...m } }] };
@@ -528,6 +528,7 @@ describe.skipIf(!device)("WebGPU parity on a real device", () => {
     const scenes: [string, MeshSceneInstance[], () => SceneDraw, number][] = [
       ["water", waterInstances(mat), () => ({ ...draw(), view: viewMatrix([0, 2.6, 2.4], [0, -0.3, 0]), background: [20, 20, 30, 255], environment: WATER_ENVIRONMENT, time: WATER_TIME }), 0.03],
       ["cliff", cliffInstances({ triplanar: true, sharpness: 0.8 }), () => ({ ...draw(), view: viewMatrix(CLIFF_EYE, CLIFF_TARGET), background: [20, 20, 30, 255], lightDirection: [0.3, 0.8, -0.5] }), 0.02],
+      ["landscape cliff", cliffInstances({ triplanar: true, sharpness: 0.8, landscape: true }), () => ({ ...draw(), view: viewMatrix(CLIFF_EYE, CLIFF_TARGET), background: [20, 20, 30, 255], lightDirection: [0.3, 0.8, -0.5] }), 0.02],
       ["wind", windInstances(), () => ({ ...draw(), view: viewMatrix(WIND_EYE, WIND_TARGET), background: [20, 20, 30, 255], lightDirection: [0.3, 0.8, -0.5], wind: WIND, time: WIND_TIME }), 0.03],
       ["normal maps", normalMapInstances(mat), () => ({ ...draw(), lightDirection: NORMAL_LIGHT, environment: NORMAL_ENVIRONMENT }), 0.02],
     ];

@@ -75,7 +75,7 @@ Next to Unity and Unreal, it lacks the following:
     - **Propagation.** Editing or removing a parent resolves again every instance of it: placed meshes, their animation frames and LODs, prefab nodes and foliage layers. A mesh holding no instance of that parent is not even decoded. Removing a parent leaves its instances with their values.
     - **Storage.** Each instance also keeps its resolved fields, so the player and every other reader of a mesh need no library; generated maps are stored as recipes, so the copies are small.
     - *Tests:* `material-instances.test.ts` (inheritance, overrides, generator overrides, apply and detach, the link's codec, the library's round trip, propagation that spares overrides and other parents).
-- [ ] **P2. Landscape tools.**
+- [x] **P2. Landscape tools.**
   - Hydraulic and thermal erosion.
   - Noise and terrace stamps.
   - Flatten and ramp brushes, with undo.
@@ -86,6 +86,23 @@ Next to Unity and Unreal, it lacks the following:
     - macro variation, so a tile doesn't repeat across a valley;
     - distance blending.
   - *Tests:* erosion conserves material and is deterministic; an import/export round trip; auto-material weights.
+  - **P2a: done.** Sculpting tools beyond raise, lower, smooth, flatten and noise (`landscapeTools.ts`).
+    - **Hydraulic erosion.** Rain droplets (Beyer's model) run downhill with a little inertia, carry sediment by speed, water and drop, and fill pits they run into. A droplet's leftover sediment settles where it stops, so ground is moved but never made or lost. The droplets work in cell units, so they behave the same at any size or resolution. The same seed gives the same valley.
+    - **Thermal erosion.** Ground steeper than the angle of repose slumps onto its lower neighbours. Each pass reads the heights from before it, so the result doesn't depend on the order of the samples. It also conserves ground.
+    - **Brushes.** Rain and Weather as brushes, which erode only the brushed patch. Hills, Ridges (ridged fractal) and Terraces (flat treads with eased risers, with an adjustable step) as stamps. A Ramp drawn by dragging from one spot to another, between their heights, the brush's width, laid afresh over the ground as it was.
+    - **Whole landscape.** "Rain on it all" (up to 200k droplets) and "Weather it all" (an adjustable repose angle).
+    - **Heightmaps.** Export writes a 16-bit greyscale PNG that carries its own height range in a `tEXt` chunk. Import reads 8- or 16-bit grey or colour PNGs, resampled to the grid: a Cartbox file at its own range, anything else from black to the chosen height.
+    - **Undo.** Every pass is a single undo step, as sculpting already is.
+    - *Tests:* `landscape-tools.test.ts` (conservation and determinism of both erosions, region-only erosion, stamps and terraces, the ramp's profile, the 16-bit round trip within one step of 65535, 8-bit colour import, rejecting a non-PNG).
+  - **P2b: done.** An auto-material for terrain, in all three renderers.
+    - **Curvature rule.** A terrain layer can ask for hollows or for crests, alongside its slope and height rules: sand in the creases, bare rock on the ridges. The curvature is the mean of a sample's four neighbours minus its own height. It is 0 on any plane however steep, and blends softly when the terrain blends.
+    - **Macro variation.** On any material: the base colour drifts lighter and darker in broad patches (strength and patch size), from the shaders' shared, bit-exact value noise in the mesh's own space. A tiled texture no longer repeats visibly across a valley.
+    - **Distance tiling.** On any material: from a quarter of a set distance out to it, the base map blends to itself tiled four times larger, by UVs or triplanar alike.
+    - **Per-layer normal maps.** These come from P1a: a layer's material can carry one.
+    - **Uniforms.** The packing grows by nothing: the free lanes `terrain0.zw` (macro strength, 1 / scale) and `maps0.y` (tiling distance).
+    - **Editor.** The terrain panel sets each layer's "anywhere / hollows / crests", and macro variation and distance tiling for every layer at once. The material panel's new Landscape block sets them per material.
+    - **Parity.** A landscape cliff scene (triplanar, height-blended, macro-varied, distance-tiled) matches the software frame on WebGL2. It passes on WebGPU over Dawn too, 29 of 29.
+    - *Tests:* `landscape-materials.test.ts` (curvature, hard and soft layer picks, storage, clamping, packing lanes, the gain's bounds, the blend's curve, a changed software frame); `webgl-parity.test.ts`; `webgpu-parity.test.ts`.
 - [ ] **P3. Splines.**
   - Editable splines (Catmull-Rom, with per-point width and height).
   - A **river** spline:

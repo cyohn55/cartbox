@@ -737,8 +737,33 @@ function SurfaceEffects({ material, patch }: { material: MeshMaterial; patch: (c
   const setPulse = (next: { rate: number; depth: number }) => patch({ emissivePulse: next.rate > 0 && next.depth > 0 ? next : undefined });
   const setScroll = (next: [number, number]) => patch({ emissiveScroll: next[0] !== 0 || next[1] !== 0 ? next : undefined });
   const setRim = (next: { color: readonly [number, number, number]; power: number; strength: number }) => patch({ rim: next.strength > 0 ? next : undefined });
+  const macro = material.macro ?? { scale: 20, strength: 0 };
   return (
     <>
+      <div className={`${styles.groupLabel} ${styles.railSubLabel}`}>Landscape</div>
+      <RangeControl
+        label="Macro variation"
+        min={0}
+        max={0.6}
+        step={0.02}
+        value={macro.strength}
+        onChange={(strength) => patch({ macro: strength > 0 ? { ...macro, strength } : undefined })}
+        ariaLabel="Macro variation strength"
+        display={macro.strength > 0 ? `±${Math.round(macro.strength * 100)}%` : "off"}
+      />
+      {macro.strength > 0 && (
+        <RangeControl label="Patch size" nested min={1} max={200} step={1} value={macro.scale} onChange={(scale) => patch({ macro: { ...macro, scale } })} ariaLabel="Macro variation patch size" display={`${macro.scale} m`} />
+      )}
+      <RangeControl
+        label="Distance tiling"
+        min={0}
+        max={400}
+        step={5}
+        value={material.farTile ?? 0}
+        onChange={(farTile) => patch({ farTile: farTile > 0 ? farTile : undefined })}
+        ariaLabel="Distance at which the texture tiles four times larger"
+        display={material.farTile ? `4× larger by ${material.farTile} m` : "off"}
+      />
       <div className={`${styles.groupLabel} ${styles.railSubLabel}`}>Detail grain</div>
       <SegmentedControl
         label="Detail"

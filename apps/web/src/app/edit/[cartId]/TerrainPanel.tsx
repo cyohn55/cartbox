@@ -8,9 +8,23 @@
  * @cartbox/editor and terrainEdit.ts.
  */
 
-import { useState } from "react";
+import { useRef, useState } from "react";
 
-import { FOLIAGE_PRESETS, MAX_VISTA_HAZE, foliageRandom, layerCopies, type FoliageLayer, type FoliagePreset } from "@cartbox/editor";
+import {
+  FOLIAGE_PRESETS,
+  MAX_EROSION_DROPLETS,
+  MAX_VISTA_HAZE,
+  exportHeightmap,
+  foliageRandom,
+  hydraulicErosion,
+  importHeightmap,
+  layerCopies,
+  thermalErosion,
+  type FoliageLayer,
+  type FoliagePreset,
+  type MeshMaterial,
+  type Terrain,
+} from "@cartbox/editor";
 
 import { addFoliage, foliageOn, removeFoliage, replaceFoliage } from "@/lib/foliageEdit";
 import { type MeshSidecar } from "@/lib/meshSidecar";
@@ -33,6 +47,26 @@ const SCULPT: readonly { readonly op: "raise" | "lower" | "smooth" | "flatten" |
   { op: "flatten", label: "Flatten", glyph: "▬", hint: "Level the ground to the height where the stroke starts" },
   { op: "noise", label: "Noise", glyph: "⁂", hint: "Roughen the ground with bumps" },
 ];
+
+/** The curvature rules a layer can take (metres; see terrainCurvature): anywhere, hollows, crests. */
+const CURVATURE_CHOICES = { any: undefined, hollows: [0.02, 1000], crests: [-1000, -0.02] } as const satisfies Record<string, readonly [number, number] | undefined>;
+
+function curvatureChoice(range: readonly [number, number] | undefined): keyof typeof CURVATURE_CHOICES {
+  if (!range) return "any";
+  return range[0] >= 0 ? "hollows" : "crests";
+}
+
+/** Every layer's material patched alike (P2b: macro variation and distance tiling for the whole landscape); undefined removes a field. */
+function withLayerMaterials(terrain: Terrain, patch: Pick<MeshMaterial, "macro" | "farTile">): Terrain {
+  return {
+    ...terrain,
+    layers: terrain.layers.map((l) => {
+      const material: Record<string, unknown> = { ...l.material, ...patch };
+      for (const key of Object.keys(patch) as (keyof typeof patch)[]) if (patch[key] === undefined) delete material[key];
+      return { ...l, material: material as unknown as MeshMaterial };
+    }),
+  };
+}
 
 /** A new vista's haze: a third of the sky shows through ground a kilometre out. */
 const DEFAULT_VISTA_HAZE = 0.35;
@@ -99,6 +133,19 @@ export function TerrainPanel({
             {toolButton({ kind: "hole", fill: false }, "Cut hole", "◌", "Cut the ground away (a cave mouth, a pit)")}
             {toolButton({ kind: "hole", fill: true }, "Fill hole", "●", "Put cut ground back")}
           </div>
+          <div className={styles.toolGroup} style={{ marginTop: 6 }}>
+            {toolButton({ kind: "stamp", stamp: "hills" }, "Hills", "◠", "Press rolling hills into the ground")}
+            {toolButton({ kind: "stamp", stamp: "ridges" }, "Ridges", "⋀", "Press sharp ridges and crests into the ground")}
+            {toolButton({ kind: "stamp", stamp: "terraces" }, "Terraces", "☰", "Step the ground into flat treads and short risers, like layered sandstone")}
+            {toolButton({ kind: "ramp" }, "Ramp", "◢", "Drag from one spot to another: a smooth incline between their heights, the brush's width")}
+          </div>
+          <div className={styles.toolGroup} style={{ marginTop: 6 }}>
+            {toolButton({ kind: "erode", erosion: "hydraulic" }, "Rain", "☂", "Erode with rain: gullies down the slopes, silt at their feet")}
+            {toolButton({ kind: "erode", erosion: "thermal" }, "Weather", "⛰", "Let over-steep ground slump into scree")}
+          </div>
+          {edit.tool?.kind === "stamp" && edit.tool.stamp === "terraces" && (
+            <RangeControl label="Step" nested min={0.25} max={10} step={0.25} value={edit.step ?? 2} onChange={(step) => onEdit({ ...edit, id, step })} ariaLabel="Terrace step height" display={`${(edit.step ?? 2).toFixed(2)} m`} />
+          )}
           <RangeControl label="Brush size" nested min={0.5} max={Math.max(2, Math.min(terrain.size[0], terrain.size[1]) / 3)} step={0.25} value={edit.radius} onChange={(radius) => onEdit({ ...edit, id, radius })} ariaLabel="Brush radius" display={`${edit.radius.toFixed(2)} m`} />
           <RangeControl label="Strength" nested min={0.05} max={1} step={0.05} value={edit.strength} onChange={(strength) => onEdit({ ...edit, id, strength })} ariaLabel="Brush strength" display={`${Math.round(edit.strength * 100)}%`} />
 
@@ -124,11 +171,53 @@ export function TerrainPanel({
                     {layer.material.name}
                     {layer.paintOnly ? " (painted only)" : ""}
                   </button>
+                  {k < terrain.layers.length - 1 && !layer.paintOnly && (
+                    <select
+                      aria-label={`Where ${layer.material.name} grows by the ground's shape`}
+                      title="Where the ground's shape lets this layer show: anywhere, only in hollows and gullies, or only on ridges and crests"
+                      value={curvatureChoice(layer.curvature)}
+                      onChange={(event) => {
+                        const curvature = CURVATURE_CHOICES[event.target.value as keyof typeof CURVATURE_CHOICES];
+                        const layers = terrain.layers.map((l, i) => {
+                          if (i !== k) return l;
+                          const { curvature: _old, ...rest } = l;
+                          void _old;
+                          return curvature ? { ...rest, curvature } : rest;
+                        });
+                        onChange(replaceTerrain(sidecar, { ...terrain, layers }));
+                      }}
+                      style={{ fontSize: 11 }}
+                    >
+                      <option value="any">anywhere</option>
+                      <option value="hollows">hollows</option>
+                      <option value="crests">crests</option>
+                    </select>
+                  )}
                 </div>
               );
             })}
           </div>
 
+          <RangeControl
+            label="Macro variation"
+            min={0}
+            max={0.6}
+            step={0.02}
+            value={terrain.layers[0]?.material.macro?.strength ?? 0}
+            onChange={(strength) => onChange(replaceTerrain(sidecar, withLayerMaterials(terrain, { macro: strength > 0 ? { scale: terrain.layers[0]?.material.macro?.scale ?? Math.max(8, terrain.size[0] / 8), strength } : undefined })))}
+            ariaLabel="Macro variation across every layer"
+            display={terrain.layers[0]?.material.macro ? `±${Math.round(terrain.layers[0].material.macro.strength * 100)}%` : "off"}
+          />
+          <RangeControl
+            label="Distance tiling"
+            min={0}
+            max={600}
+            step={10}
+            value={terrain.layers[0]?.material.farTile ?? 0}
+            onChange={(farTile) => onChange(replaceTerrain(sidecar, withLayerMaterials(terrain, { farTile: farTile > 0 ? farTile : undefined })))}
+            ariaLabel="Distance at which every layer's texture tiles four times larger"
+            display={terrain.layers[0]?.material.farTile ? `4× larger by ${terrain.layers[0].material.farTile} m` : "off"}
+          />
           <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, marginTop: 10 }} title="Project each layer's texture from all three axes, so steep cliffs aren't streaked by a texture laid flat from above (flat ground looks the same)">
             <input type="checkbox" checked={Boolean(terrain.triplanar)} onChange={(event) => onChange(replaceTerrain(sidecar, { ...terrain, triplanar: event.target.checked || undefined }))} />
             Triplanar cliffs
@@ -158,6 +247,8 @@ export function TerrainPanel({
               <RailHint>Needs the sky dome (Lighting). Seen from the play space's centre; nothing stands on it or collides with it, so keep it beyond where anyone can go.</RailHint>
             </>
           )}
+
+          <LandscapePasses terrain={terrain} onTerrain={(next) => onChange(replaceTerrain(sidecar, next))} />
 
           <div style={{ display: "flex", gap: 6, marginTop: 8, flexWrap: "wrap" }}>
             {terrain.paint && (
@@ -208,6 +299,79 @@ const PRESETS: readonly FoliagePreset[] = FOLIAGE_PRESETS;
  * brush, fill it across the ground by slope and height, and set its density,
  * size, slope alignment and draw distance.
  */
+/**
+ * Whole-terrain passes (P2a): rain and weathering over all the ground, and
+ * the heights out to and in from a 16-bit heightmap PNG (World Machine,
+ * Gaea, a DEM). Each pass is one undo step.
+ */
+function LandscapePasses({ terrain, onTerrain }: { terrain: Terrain; onTerrain: (next: Terrain) => void }) {
+  const [droplets, setDroplets] = useState(40_000);
+  const [talus, setTalus] = useState(35);
+  const [seed, setSeed] = useState(1);
+  const [range, setRange] = useState(Math.round(Math.min(terrain.size[0], terrain.size[1]) / 4));
+  const [problem, setProblem] = useState<string | null>(null);
+  const fileRef = useRef<HTMLInputElement>(null);
+  const exportMap = () => {
+    const { png } = exportHeightmap(terrain);
+    const url = URL.createObjectURL(new Blob([png.slice().buffer as ArrayBuffer], { type: "image/png" }));
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `${terrain.name || "terrain"}-heightmap.png`;
+    link.click();
+    URL.revokeObjectURL(url);
+  };
+  return (
+    <>
+      <div style={{ fontSize: 11, opacity: 0.7, marginTop: 8 }}>Whole landscape</div>
+      <RangeControl label="Raindrops" nested min={1000} max={MAX_EROSION_DROPLETS} step={1000} value={droplets} onChange={setDroplets} ariaLabel="Raindrops for erosion" display={`${Math.round(droplets / 1000)}k`} />
+      <RangeControl label="Repose" nested min={15} max={60} step={1} value={talus} onChange={setTalus} ariaLabel="Steepest slope that stands" display={`${talus}°`} />
+      <div style={{ display: "flex", gap: 6, marginTop: 4, flexWrap: "wrap" }}>
+        <button
+          type="button"
+          className="cbx-btn"
+          title="Run that many raindrops over all the ground (each run a new pattern)"
+          onClick={() => {
+            onTerrain(hydraulicErosion(terrain, { droplets, seed }));
+            setSeed(seed + 1);
+          }}
+        >
+          Rain on it all
+        </button>
+        <button type="button" className="cbx-btn" title="Slump every slope steeper than the repose angle" onClick={() => onTerrain(thermalErosion(terrain, { iterations: 40, talus }))}>
+          Weather it all
+        </button>
+      </div>
+      <RangeControl label="Import height" nested min={1} max={500} step={1} value={range} onChange={setRange} ariaLabel="Height of white in an imported heightmap" display={`${range} m`} />
+      <div style={{ display: "flex", gap: 6, marginTop: 4, flexWrap: "wrap" }}>
+        <button type="button" className="cbx-btn" title="Save the heights as a 16-bit greyscale PNG (it remembers its own height range)" onClick={exportMap}>
+          Export heightmap
+        </button>
+        <button type="button" className="cbx-btn" title="Load heights from a greyscale PNG (8 or 16 bits): black is the ground's base, white the import height" onClick={() => fileRef.current?.click()}>
+          Import heightmap…
+        </button>
+        <input
+          ref={fileRef}
+          type="file"
+          accept="image/png"
+          hidden
+          onChange={async (event) => {
+            const file = event.target.files?.[0];
+            event.target.value = "";
+            if (!file) return;
+            try {
+              onTerrain(await importHeightmap(terrain, new Uint8Array(await file.arrayBuffer()), [0, range]));
+              setProblem(null);
+            } catch (error) {
+              setProblem(error instanceof Error ? error.message : "That file couldn't be read");
+            }
+          }}
+        />
+      </div>
+      {problem && <RailHint>{problem}</RailHint>}
+    </>
+  );
+}
+
 function FoliageSection({
   sidecar,
   onChange,

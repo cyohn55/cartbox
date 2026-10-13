@@ -285,6 +285,23 @@ describe.skipIf(!chromiumPath)("WebGL2 parity in a real browser", () => {
     }
   }, 60_000);
 
+  it("varies a cliff's colour in broad patches and tiles it larger far off like the software rasteriser (P2b)", async () => {
+    const result = await run("cliffLandscape");
+    expect(result.drawn).toBeGreaterThan(2000);
+    if (exact) {
+      expect(result.coverage, JSON.stringify(result.diffs)).toBe(0);
+      // Float32 noise on the GPU: a patch's edge can land a level over.
+      expect(result.far, JSON.stringify(result.diffs)).toBeLessThanOrEqual(result.drawn * 0.02);
+    }
+    // And it changes the picture.
+    const varied = await antialiasedFrame("cliffLandscape");
+    const plain = await antialiasedFrame("cliff");
+    expect(varied.error).toBe(0);
+    let changed = 0;
+    for (let i = 0; i < varied.out.length; i += 4) if (Math.abs(varied.out[i]! - plain.out[i]!) + Math.abs(varied.out[i + 1]! - plain.out[i + 1]!) > 20) changed += 1;
+    expect(changed).toBeGreaterThan(200);
+  }, 60_000);
+
   it("sways grass and reeds in the wind like the software rasteriser (B6)", async () => {
     const result = await run("wind");
     expect(result.drawn).toBeGreaterThan(1000);

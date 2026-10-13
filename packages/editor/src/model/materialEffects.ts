@@ -23,7 +23,7 @@ export const DETAIL_FAR = 12;
 
 type SurfaceEffects = Pick<
   MeshMaterial,
-  "detailScale" | "detailStrength" | "emissiveScroll" | "emissivePulse" | "rim" | "reflectivity" | "reflectionMask" | "blendColor" | "blendRoughness" | "alphaMode" | "alphaCutoff" | "softDepth" | "refraction" | "distortion" | "water" | "triplanar" | "blendSharpness" | "graph"
+  "detailScale" | "detailStrength" | "emissiveScroll" | "emissivePulse" | "rim" | "reflectivity" | "reflectionMask" | "blendColor" | "blendRoughness" | "alphaMode" | "alphaCutoff" | "softDepth" | "refraction" | "distortion" | "water" | "triplanar" | "blendSharpness" | "macro" | "farTile" | "graph"
 >;
 
 const finite = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v);
@@ -62,6 +62,11 @@ export function readSurfaceEffects(raw: Record<string, unknown> | object): Surfa
   }
   if (finite(r.triplanar) && r.triplanar > 0) out.triplanar = clamp(r.triplanar, 0.05, 1000);
   if (finite(r.blendSharpness) && r.blendSharpness > 0) out.blendSharpness = clamp(r.blendSharpness, 0, 1);
+  const macro = r.macro as Record<string, unknown> | undefined;
+  if (macro && typeof macro === "object" && finite(macro.scale) && finite(macro.strength) && macro.strength > 0) {
+    out.macro = { scale: clamp(macro.scale, 0.5, 10000), strength: clamp(macro.strength, 0, 1) };
+  }
+  if (finite(r.farTile) && r.farTile > 0) out.farTile = clamp(r.farTile, 1, 100000);
   const graph = readMaterialGraph(r.graph);
   if (graph) out.graph = graph;
   return out;
@@ -190,6 +195,32 @@ export function heightBlend(w: number, base: number, blend: number, sharpness: n
   if (!(sharpness > 0)) return w;
   const width = 1 - 0.9 * sharpness;
   return clamp((w - 0.5 + 0.5 * sharpness * (blend - base)) / width + 0.5, 0, 1);
+}
+
+// --- Landscape materials (EDITOR_PRO_ROADMAP.md P2b) -----------------------------------------
+
+/** Octaves of the macro variation's noise. */
+export const MACRO_OCTAVES = 2;
+/** How much coarser the far tiling is (the base map at this share of its repeat). */
+export const FAR_TILE_SCALE = 0.25;
+
+/** A material's macro variation as the shaders take it: [strength, 1 / scale], zeros when off. */
+export function macroUniform(material: Pick<MeshMaterial, "macro">): [number, number] {
+  const m = material.macro;
+  return m && m.strength > 0 && m.scale > 0 ? [m.strength, 1 / m.scale] : [0, 0];
+}
+
+/** The macro variation's gain at mesh-space point (x, y, z): 1 ± strength in broad patches; the shaders' `macroGain`, term for term. */
+export function macroGain(strength: number, invScale: number, x: number, y: number, z: number): number {
+  if (!(strength > 0)) return 1;
+  return 1 + strength * (2 * valueNoise(x * invScale, y * invScale, z * invScale, MACRO_OCTAVES) - 1);
+}
+
+/** How far the far tiling has taken over at a view depth, 0..1: smoothly from a quarter of `distance` to it. */
+export function farTileBlend(depth: number, distance: number): number {
+  if (!(distance > 0)) return 0;
+  const t = clamp((depth - distance * 0.25) / (distance * 0.75), 0, 1);
+  return t * t * (3 - 2 * t);
 }
 
 /** How much of the detail map shows at a view depth: 1 up close, fading to 0 by {@link DETAIL_FAR}. */

@@ -314,6 +314,8 @@ export {
   terrainHeight,
   terrainMesh,
   terrainLayerWeights,
+  terrainCurvature,
+  CURVATURE_BLEND,
   paintedWeights,
   terrainHole,
   type SerializedTerrain,
@@ -333,6 +335,21 @@ export {
   type SculptTool,
   type TerrainBrush,
 } from "./model/terrainBrush";
+export {
+  HEIGHTMAP_RANGE_KEY,
+  MAX_EROSION_DROPLETS,
+  exportHeightmap,
+  hydraulicErosion,
+  importHeightmap,
+  rampTerrain,
+  stampTerrain,
+  terraceHeight,
+  thermalErosion,
+  type HydraulicErosion,
+  type Stamp,
+  type StampKind,
+  type ThermalErosion,
+} from "./model/landscapeTools";
 export {
   FOLIAGE_BLOCK,
   MAX_FOLIAGE_COPIES,
@@ -654,6 +671,11 @@ export {
   WATER_TILT,
   waterTilt,
   waterUniform,
+  FAR_TILE_SCALE,
+  MACRO_OCTAVES,
+  farTileBlend,
+  macroGain,
+  macroUniform,
 } from "./model/materialEffects";
 export {
   CAMO_BEND,
@@ -1036,7 +1058,7 @@ export {
   type VoxelMeshOptions,
 } from "./render/voxelMesh";
 export { voxelGridToMeshAsset, type VoxelToMeshOptions } from "./model/voxelToMesh";
-export { crc32, deflateFixed, encodeRgbaPng } from "./model/png";
+export { crc32, decodePngSamples, deflateFixed, encodeGray16Png, encodeRgbaPng, type PngSamples } from "./model/png";
 export { bytesToBase64, base64ToBytes } from "./model/base64";
 export {
   MESH_LIBRARY_REF,

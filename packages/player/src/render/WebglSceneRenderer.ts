@@ -35,6 +35,8 @@ import {
   DEFAULT_RASTER_STYLE,
   DETAIL_FAR,
   DETAIL_NEAR,
+  FAR_TILE_SCALE,
+  MACRO_OCTAVES,
   ANISOTROPY_MIN_ALPHA,
   CLEARCOAT_F0,
   PARALLAX_MIN_NDV,
@@ -795,6 +797,24 @@ vec4 triMap(sampler2D s, vec2 uv) {
   vec3 p = vObjPos * (1.0 / u.terrain0.x);
   return sampleMap(s, vec2(p.z, 1.0 - p.y)) * w.x + sampleMap(s, vec2(p.x, 1.0 - p.z)) * w.y + sampleMap(s, vec2(p.x, 1.0 - p.y)) * w.z;
 }
+// --- Landscape materials (EDITOR_PRO_ROADMAP.md P2b): farTileBlend and macroGain, term for term ---
+// The base map tiled ${1 / FAR_TILE_SCALE}× larger, by the raw UVs or triplanar projection.
+vec4 triMapFar(sampler2D s, vec2 p0) {
+  if (u.terrain0.x <= 0.0) { return sampleMap(s, vec2(p0.x * ${FAR_TILE_SCALE.toFixed(4)}, 1.0 - p0.y * ${FAR_TILE_SCALE.toFixed(4)})); }
+  vec3 n = normalize(vNormal);
+  vec3 a = n * n;
+  vec3 w = a * a;
+  w = w / max(w.x + w.y + w.z, 1e-30);
+  vec3 p = vObjPos * (1.0 / (u.terrain0.x / ${FAR_TILE_SCALE.toFixed(4)}));
+  return sampleMap(s, vec2(p.z, 1.0 - p.y)) * w.x + sampleMap(s, vec2(p.x, 1.0 - p.z)) * w.y + sampleMap(s, vec2(p.x, 1.0 - p.y)) * w.z;
+}
+float farTileBlend(float depth, float distance) {
+  float t = clamp((depth - distance * 0.25) / (distance * 0.75), 0.0, 1.0);
+  return t * t * (3.0 - 2.0 * t);
+}
+float macroGain(vec3 p) {
+  return 1.0 + u.terrain0.z * (2.0 * gNoise(p * u.terrain0.w, ${MACRO_OCTAVES}) - 1.0);
+}
 float blendHeightOf(vec3 c) { return 0.299 * c.r + 0.587 * c.g + 0.114 * c.b; }
 float heightBlend(float w, float base, float blend, float s) {
   return clamp((w - 0.5 + 0.5 * s * (blend - base)) / (1.0 - 0.9 * s) + 0.5, 0.0, 1.0);
@@ -900,8 +920,13 @@ ${reflect ? "  outReflect = vec4(0.0);\n  outEnv = vec4(0.0);\n" : ""}  // The s
   }
   vec4 colour = u.base;
   if (u.texflags.x > 0.5) {
-    colour = colour * triMap(tex, uv);
+    vec4 texel = triMap(tex, uv);
+    // Distance tiling (P2b): far off, the map blends to itself tiled larger.
+    if (u.maps0.y > 0.0) { texel = mix(texel, triMapFar(tex, puv), farTileBlend(vEyeDepth, u.maps0.y)); }
+    colour = colour * texel;
   }
+  // Macro variation (P2b): broad lighter and darker patches over the whole surface.
+  if (u.terrain0.z > 0.0) { colour.rgb = colour.rgb * macroGain(vObjPos); }
 ${g.base}
   // Soft edges (EP6b): a see-through surface fades out as it meets the opaque
   // scene behind it — both depths read back as view distance (shadow2.zw).

@@ -59,6 +59,7 @@ import {
   sceneLightingEnvironment,
   sceneLightingKeyDirection,
   sceneLightingTonemap,
+  rampTerrain,
   terrainHeight,
   eraseFoliage,
   paintFoliage,
@@ -277,7 +278,7 @@ export function MeshEditor({ sidecar, onSidecarChange, code, onStartPlay, modern
     if (next.tool) setView("scene"); // brushing happens in the scene view
   };
   /** The stroke in progress: the terrain as it's been brushed so far, the last dab, and the level a flatten holds. */
-  const strokeRef = useRef<{ terrain: Terrain; last: readonly [number, number] | null; level?: number } | null>(null);
+  const strokeRef = useRef<{ terrain: Terrain; last: readonly [number, number] | null; level?: number; from?: readonly [number, number] } | null>(null);
   /** A foliage stroke in progress: the layer as painted so far, its mesh, the terrain it grows on, the last dab, and a seed per dab. */
   const foliageStrokeRef = useRef<{ layer: FoliageLayer; mesh: string; terrain: Terrain; last: readonly [number, number] | null; seed: number } | null>(null);
   const onTerrainStroke = (id: string, x: number, z: number, start: boolean) => {
@@ -304,6 +305,17 @@ export function MeshEditor({ sidecar, onSidecarChange, code, onStartPlay, modern
       onSidecarChange(replaceFoliage(sidecar, layer, f.mesh));
       return;
     }
+    if (tool.kind === "ramp") {
+      // A ramp runs from where the stroke started to the cursor, laid afresh over the ground as it was.
+      if (start || !strokeRef.current || strokeRef.current.terrain.id !== id || !strokeRef.current.from) {
+        const t = findTerrain(sidecar, id);
+        if (t) strokeRef.current = { terrain: t, last: null, from: [x, z] };
+        return;
+      }
+      const { terrain: ground, from } = strokeRef.current;
+      onSidecarChange(replaceTerrain(sidecar, rampTerrain(ground, from, [x, z], radius * 1.2, { edge: radius * 0.4 })));
+      return;
+    }
     if (start || !strokeRef.current || strokeRef.current.terrain.id !== id) {
       const t = findTerrain(sidecar, id);
       if (!t) return;
@@ -317,7 +329,7 @@ export function MeshEditor({ sidecar, onSidecarChange, code, onStartPlay, modern
     // strength: a pass with a sculpt brush at half strength lifts about a sixth of its radius.
     const share = tool.kind === "hole" ? 1 : tool.kind === "paint" ? DAB_SPACING : 0.5;
     let t = stroke.terrain;
-    for (const [dx, dz] of dabs) t = applyTerrainTool(t, tool, { x: dx, z: dz, radius, strength: strength * share }, stroke.level);
+    for (const [dx, dz] of dabs) t = applyTerrainTool(t, tool, { x: dx, z: dz, radius, strength: strength * share }, stroke.level, terrainEdit.step);
     stroke.terrain = t;
     stroke.last = last;
     onSidecarChange(replaceTerrain(sidecar, t));

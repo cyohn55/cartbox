@@ -191,6 +191,10 @@ function scenes(): Record<string, Scene> {
       instances: cliffInstances({ triplanar: true, sharpness: 0.8 }),
       draw: () => ({ ...baseDraw(), view: viewMatrix(CLIFF_EYE, CLIFF_TARGET), background: [20, 20, 30, 255] as [number, number, number, number], lightDirection: [0.3, 0.8, -0.5] as [number, number, number] }),
     },
+    cliffLandscape: {
+      instances: cliffInstances({ triplanar: true, sharpness: 0.8, landscape: true }),
+      draw: () => ({ ...baseDraw(), view: viewMatrix(CLIFF_EYE, CLIFF_TARGET), background: [20, 20, 30, 255] as [number, number, number, number], lightDirection: [0.3, 0.8, -0.5] as [number, number, number] }),
+    },
     wind: {
       instances: windInstances(),
       draw: () => ({ ...baseDraw(), view: viewMatrix(WIND_EYE, WIND_TARGET), background: [20, 20, 30, 255] as [number, number, number, number], lightDirection: [0.3, 0.8, -0.5] as [number, number, number], wind: WIND, time: WIND_TIME }),

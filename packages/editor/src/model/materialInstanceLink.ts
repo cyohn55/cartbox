@@ -50,6 +50,8 @@ export const INSTANCE_FIELDS = [
   ["generator", "Generated maps"],
   ["triplanar", "Triplanar"],
   ["blendSharpness", "Height blend"],
+  ["macro", "Macro variation"],
+  ["farTile", "Distance tiling"],
   ["alphaMode", "Alpha mode"],
   ["alphaCutoff", "Alpha cutoff"],
   ["softDepth", "Soft edges"],

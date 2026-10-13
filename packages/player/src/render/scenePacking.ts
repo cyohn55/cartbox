@@ -20,6 +20,7 @@ import {
   effectActive,
   emissiveAnimation,
   materialHasLayers,
+  macroUniform,
   materialHasWater,
   materialRefracts,
   spotCone,
@@ -91,10 +92,12 @@ import {
  *                                    z = drift phase (0..1), w = flow direction (B5;
  *                                    waterUniform in materialEffects.ts)
  * 864  terrain0   vec4<f32>    16   x = triplanar repeat (0 = UV mapping), y = height-blend
- *                                    sharpness (0 = an even mix) (B6)
+ *                                    sharpness (0 = an even mix) (B6), z = macro variation
+ *                                    strength, w = 1 / its scale (P2b; macroUniform)
  * 880  wind0      vec4<f32>    16   xy = the wind's x and z × strength, z = its phase (0..1),
  *                                    w = gust (B6; windUniform in wind.ts)
- * 896  maps0      vec4<f32>    16   x = 1 when a tangent-space normal map is bound (P1a)
+ * 896  maps0      vec4<f32>    16   x = 1 when a tangent-space normal map is bound (P1a),
+ *                                    y = distance-tiling distance (0 = off) (P2b; farTileBlend)
  * ```
  *
  * 912 bytes used, padded to a 1024-byte stride (a 256-byte multiple a dynamic
@@ -482,17 +485,25 @@ export interface InstanceUniform {
   readonly hasNormalMap?: boolean;
 }
 
-/** A draw's triplanar repeat (0 = UV mapping) and height-blend sharpness (0 = an even mix) (B6). */
+/**
+ * A draw's triplanar repeat (0 = UV mapping) and height-blend sharpness (0 = an
+ * even mix) (B6); its macro variation ([strength, 1 / scale]) and distance
+ * tiling (0 = off) (P2b).
+ */
 export interface ResolvedMapping {
   readonly triplanar: number;
   readonly blendSharpness: number;
+  readonly macro?: readonly [number, number];
+  readonly farTile?: number;
 }
 
-/** Resolve a material's mapping as the software rasteriser does (null when it uses neither). */
-export function resolveMapping(material: Pick<MeshMaterial, "triplanar" | "blendSharpness">): ResolvedMapping | null {
+/** Resolve a material's mapping as the software rasteriser does (null when it uses none of it). */
+export function resolveMapping(material: Pick<MeshMaterial, "triplanar" | "blendSharpness" | "macro" | "farTile">): ResolvedMapping | null {
   const triplanar = material.triplanar && material.triplanar > 0 ? material.triplanar : 0;
   const blendSharpness = material.blendSharpness && material.blendSharpness > 0 ? Math.min(1, material.blendSharpness) : 0;
-  return triplanar > 0 || blendSharpness > 0 ? { triplanar, blendSharpness } : null;
+  const macro = macroUniform(material);
+  const farTile = material.farTile && material.farTile > 0 ? material.farTile : 0;
+  return triplanar > 0 || blendSharpness > 0 || macro[0] > 0 || farTile > 0 ? { triplanar, blendSharpness, macro, farTile } : null;
 }
 
 /**
@@ -734,8 +745,8 @@ export function writeInstanceUniform(target: Float32Array, index: number, unifor
   const mapping = uniform.mapping ?? null;
   target[base + OFFSET_TERRAIN0] = mapping ? mapping.triplanar : 0;
   target[base + OFFSET_TERRAIN0 + 1] = mapping ? mapping.blendSharpness : 0;
-  target[base + OFFSET_TERRAIN0 + 2] = 0;
-  target[base + OFFSET_TERRAIN0 + 3] = 0;
+  target[base + OFFSET_TERRAIN0 + 2] = mapping?.macro ? mapping.macro[0] : 0;
+  target[base + OFFSET_TERRAIN0 + 3] = mapping?.macro ? mapping.macro[1] : 0;
 
   const wind = uniform.wind ?? null;
   target[base + OFFSET_WIND0] = wind ? wind[0] : 0;
@@ -744,7 +755,7 @@ export function writeInstanceUniform(target: Float32Array, index: number, unifor
   target[base + OFFSET_WIND0 + 3] = wind ? wind[3] : 0;
 
   target[base + OFFSET_MAPS0] = uniform.hasNormalMap ? 1 : 0;
-  target[base + OFFSET_MAPS0 + 1] = 0;
+  target[base + OFFSET_MAPS0 + 1] = mapping?.farTile ?? 0;
   target[base + OFFSET_MAPS0 + 2] = 0;
   target[base + OFFSET_MAPS0 + 3] = 0;
 }

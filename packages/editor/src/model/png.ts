@@ -284,3 +284,126 @@ export function encodeRgbaPng(
   }
   return out;
 }
+
+/** Join byte arrays end to end. */
+function concat(parts: readonly Uint8Array[]): Uint8Array {
+  const out = new Uint8Array(parts.reduce((n, p) => n + p.length, 0));
+  let o = 0;
+  for (const p of parts) {
+    out.set(p, o);
+    o += p.length;
+  }
+  return out;
+}
+
+const PNG_SIGNATURE = Uint8Array.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+
+/**
+ * Encode 16-bit greyscale samples (`width*height`, row by row) as a PNG, each
+ * row Up-filtered (heightfields change slowly from row to row), with optional
+ * Latin-1 `tEXt` entries (a heightmap's height range, say).
+ */
+export function encodeGray16Png(values: Uint16Array, width: number, height: number, text: Readonly<Record<string, string>> = {}): Uint8Array {
+  const stride = width * 2;
+  const raw = new Uint8Array(height * (stride + 1));
+  let prev: Uint8Array | null = null;
+  const row = new Uint8Array(stride);
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      const v = values[y * width + x]!;
+      row[x * 2] = v >>> 8;
+      row[x * 2 + 1] = v & 0xff;
+    }
+    const o = y * (stride + 1);
+    raw[o] = prev ? 2 : 0;
+    for (let b = 0; b < stride; b += 1) raw[o + 1 + b] = (row[b]! - (prev ? prev[b]! : 0)) & 0xff;
+    prev = Uint8Array.from(row);
+  }
+  const ihdr = new Uint8Array(13);
+  const view = new DataView(ihdr.buffer);
+  view.setUint32(0, width);
+  view.setUint32(4, height);
+  ihdr[8] = 16; // bit depth
+  ihdr[9] = 0; // colour type: greyscale
+  const texts = Object.entries(text).map(([key, value]) => chunk("tEXt", Uint8Array.from(`${key}\0${value}`, (c) => c.charCodeAt(0) & 0xff)));
+  return concat([PNG_SIGNATURE, chunk("IHDR", ihdr), ...texts, chunk("IDAT", zlibDeflate(raw)), chunk("IEND", new Uint8Array(0))]);
+}
+
+/** A decoded PNG's first channel as 0..1 samples, plus its `tEXt` entries. */
+export interface PngSamples {
+  readonly width: number;
+  readonly height: number;
+  /** The first channel (grey, or red) of each pixel, row by row, 0..1. */
+  readonly values: Float32Array;
+  readonly text: Readonly<Record<string, string>>;
+}
+
+async function zlibInflate(bytes: Uint8Array): Promise<Uint8Array> {
+  const stream = new DecompressionStream("deflate");
+  const writer = stream.writable.getWriter();
+  void writer.write(bytes.slice());
+  void writer.close();
+  const reader = stream.readable.getReader();
+  const chunks: Uint8Array[] = [];
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    chunks.push(value);
+  }
+  return concat(chunks);
+}
+
+/**
+ * Decode a non-interlaced PNG of 8 or 16 bits per channel (greyscale, grey +
+ * alpha, RGB or RGBA) to its first channel — what a heightmap needs. Throws
+ * on anything else (palettes, interlacing, low bit depths) or a damaged file.
+ */
+export async function decodePngSamples(bytes: Uint8Array): Promise<PngSamples> {
+  if (bytes.length < 8 || PNG_SIGNATURE.some((b, i) => bytes[i] !== b)) throw new Error("Not a PNG file");
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  let width = 0, height = 0, depth = 0, type = -1, interlace = 0;
+  const idat: Uint8Array[] = [];
+  const text: Record<string, string> = {};
+  for (let o = 8; o + 8 <= bytes.length; ) {
+    const length = view.getUint32(o);
+    const name = String.fromCharCode(bytes[o + 4]!, bytes[o + 5]!, bytes[o + 6]!, bytes[o + 7]!);
+    const data = bytes.subarray(o + 8, o + 8 + length);
+    if (data.length !== length) throw new Error("Truncated PNG");
+    if (name === "IHDR") {
+      width = view.getUint32(o + 8);
+      height = view.getUint32(o + 12);
+      depth = data[8]!;
+      type = data[9]!;
+      interlace = data[12]!;
+    } else if (name === "IDAT") idat.push(data);
+    else if (name === "tEXt") {
+      const zero = data.indexOf(0);
+      if (zero > 0) text[String.fromCharCode(...data.subarray(0, zero))] = String.fromCharCode(...data.subarray(zero + 1));
+    } else if (name === "IEND") break;
+    o += 12 + length;
+  }
+  const channels = type === 0 ? 1 : type === 4 ? 2 : type === 2 ? 3 : type === 6 ? 4 : 0;
+  if (!channels || (depth !== 8 && depth !== 16) || interlace !== 0) throw new Error("Unsupported PNG (needs 8 or 16 bits, not palette or interlaced)");
+  if (!(width > 0 && height > 0) || width * height > 4096 * 4096) throw new Error("PNG too large");
+  const bpp = channels * (depth / 8);
+  const stride = width * bpp;
+  const raw = await zlibInflate(concat(idat));
+  if (raw.length < height * (stride + 1)) throw new Error("Truncated PNG data");
+  const cur = new Uint8Array(stride);
+  const prev = new Uint8Array(stride);
+  const values = new Float32Array(width * height);
+  for (let y = 0; y < height; y += 1) {
+    const o = y * (stride + 1);
+    const filter = raw[o]!;
+    for (let x = 0; x < stride; x += 1) {
+      const a = x >= bpp ? cur[x - bpp]! : 0;
+      const b = prev[x]!;
+      const c = x >= bpp ? prev[x - bpp]! : 0;
+      const r = raw[o + 1 + x]!;
+      cur[x] = (r + (filter === 0 ? 0 : filter === 1 ? a : filter === 2 ? b : filter === 3 ? (a + b) >> 1 : paeth(a, b, c))) & 0xff;
+    }
+    for (let x = 0; x < width; x += 1) values[y * width + x] = depth === 16 ? ((cur[x * bpp]! << 8) | cur[x * bpp + 1]!) / 65535 : cur[x * bpp]! / 255;
+    prev.set(cur);
+  }
+  return { width, height, values, text };
+}
