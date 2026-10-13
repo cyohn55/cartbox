@@ -13450,6 +13450,7 @@ import {
   WATER_STEP,
   WATER_TILT,
   waterUniform,
+  waterAlong,
   windUniform,
   graphShaderCode,
   multiplyMat4 as multiplyMat45
@@ -13807,7 +13808,7 @@ function writeInstanceUniform(target, index, uniform) {
   target[base + OFFSET_WIND0 + 3] = wind ? wind[3] : 0;
   target[base + OFFSET_MAPS0] = uniform.hasNormalMap ? 1 : 0;
   target[base + OFFSET_MAPS0 + 1] = mapping?.farTile ?? 0;
-  target[base + OFFSET_MAPS0 + 2] = 0;
+  target[base + OFFSET_MAPS0 + 2] = uniform.waterAlong ? 1 : 0;
   target[base + OFFSET_MAPS0 + 3] = 0;
 }
 function refractionCamera(view, height) {
@@ -15217,10 +15218,27 @@ float waterHeight(vec2 q, vec2 d) {
   float wa = 1.0 - abs(1.0 - 2.0 * a);
   return waterLayer(q, a * ${WATER_PERIOD.toFixed(1)}, d) * wa + waterLayer(q + vec2(53.0, 17.0), fract(a + 0.5) * ${WATER_PERIOD.toFixed(1)}, d) * (1.0 - wa);
 }
-// N tilted by the ripples at world point wp (N itself when the draw has no water).
+// Water flowing along the UVs (EDITOR_PRO_ROADMAP.md P3): the fragment's UVs and
+// their world gradients, set in main before any waterNormal.
+vec2 wUv;
+vec3 wGu;
+vec3 wGv;
+// N tilted by the ripples at world point wp (N itself when the draw has no water) \u2014
+// or, flowing along the UVs, at wUv, turned into the world by wGu and wGv (waterTiltAlong).
 vec3 waterNormal(vec3 N, vec3 wp) {
   if (u.water0.x <= 0.0) { return N; }
   vec2 d = vec2(cos(u.water0.w), sin(u.water0.w));
+  if (u.maps0.z > 0.5) {
+    float lu = length(wGu);
+    float lv = length(wGv);
+    if (lu <= 0.0 || lv <= 0.0) { return N; }
+    vec2 qa = wUv * u.water0.y;
+    float ha = waterHeight(qa, d);
+    float ka = -u.water0.x * ${(WATER_TILT / WATER_STEP).toFixed(4)};
+    float su = (waterHeight(qa + vec2(${WATER_STEP.toFixed(4)}, 0.0), d) - ha) * ka;
+    float sv = (waterHeight(qa + vec2(0.0, ${WATER_STEP.toFixed(4)}), d) - ha) * ka;
+    return normalize(N + su * wGu / lu + sv * wGv / lv);
+  }
   vec2 q = wp.xz * u.water0.y;
   float h = waterHeight(q, d);
   float k = -u.water0.x * ${(WATER_TILT / WATER_STEP).toFixed(4)};
@@ -15288,6 +15306,10 @@ ${reflect ? "  outReflect = vec4(0.0);\n  outEnv = vec4(0.0);\n" : ""}  // The s
     puv = parallaxUv(vUv, -vec2(dot(pgu, u.view.xyz), dot(pgv, u.view.xyz)) / pv, u.layer0.w);
   }
   vec2 uv = vec2(puv.x, 1.0 - puv.y);
+  wUv = puv;
+  wGu = vec3(0.0);
+  wGv = vec3(0.0);
+  if (u.maps0.z > 0.5) { uvGrads(normalize(vNormal), dp1, dp2, duv1, duv2, wGu, wGv); }
   // Normal mapping (EDITOR_PRO_ROADMAP.md P1a): the tangent-space normal map in
   // the triangle's tangent frame \u2014 worldTangent's (dP/du, Lengyel), here from the
   // screen derivatives \u2014 as the software rasteriser does. sNrm is what lights the
@@ -15860,6 +15882,7 @@ var WebglSceneRenderer = class _WebglSceneRenderer {
         refraction: batch.refract && refractOk ? resolveRefraction2(batch.primitive.material, effectActive3(batch.effect) ? batch.effect : null) : null,
         camera,
         water: waterUniform(batch.primitive.material, draw.time ?? 0),
+        waterAlong: waterAlong(batch.primitive.material),
         mapping: resolveMapping(batch.primitive.material),
         hasNormalMap: batch.textures.normal !== null,
         wind: batch.primitive.sway ? windUniform(draw.wind, draw.time ?? 0) : null
@@ -16713,6 +16736,7 @@ import {
   WATER_STEP as WATER_STEP2,
   WATER_TILT as WATER_TILT2,
   waterUniform as waterUniform2,
+  waterAlong as waterAlong2,
   windUniform as windUniform2,
   graphShaderCode as graphShaderCode2,
   multiplyMat4 as multiplyMat46
@@ -17408,10 +17432,27 @@ fn waterHeight(q: vec2<f32>, d: vec2<f32>) -> f32 {
   let wa = 1.0 - abs(1.0 - 2.0 * a);
   return waterLayer(q, a * ${WATER_PERIOD2.toFixed(1)}, d) * wa + waterLayer(q + vec2<f32>(53.0, 17.0), fract(a + 0.5) * ${WATER_PERIOD2.toFixed(1)}, d) * (1.0 - wa);
 }
-// N tilted by the ripples at world point wp (N itself when the draw has no water).
+// Water flowing along the UVs (EDITOR_PRO_ROADMAP.md P3): the fragment's UVs and
+// their world gradients, set in fs before any waterNormal.
+var<private> wUv: vec2<f32>;
+var<private> wGu: vec3<f32>;
+var<private> wGv: vec3<f32>;
+// N tilted by the ripples at world point wp (N itself when the draw has no water) \u2014
+// or, flowing along the UVs, at wUv, turned into the world by wGu and wGv (waterTiltAlong).
 fn waterNormal(N: vec3<f32>, wp: vec3<f32>) -> vec3<f32> {
   if (u.water0.x <= 0.0) { return N; }
   let d = vec2<f32>(cos(u.water0.w), sin(u.water0.w));
+  if (u.maps0.z > 0.5) {
+    let lu = length(wGu);
+    let lv = length(wGv);
+    if (lu <= 0.0 || lv <= 0.0) { return N; }
+    let qa = wUv * u.water0.y;
+    let ha = waterHeight(qa, d);
+    let ka = -u.water0.x * ${(WATER_TILT2 / WATER_STEP2).toFixed(4)};
+    let su = (waterHeight(qa + vec2<f32>(${WATER_STEP2.toFixed(4)}, 0.0), d) - ha) * ka;
+    let sv = (waterHeight(qa + vec2<f32>(0.0, ${WATER_STEP2.toFixed(4)}), d) - ha) * ka;
+    return normalize(N + su * wGu / lu + sv * wGv / lv);
+  }
   let q = wp.xz * u.water0.y;
   let h = waterHeight(q, d);
   let k = -u.water0.x * ${(WATER_TILT2 / WATER_STEP2).toFixed(4)};
@@ -17479,6 +17520,14 @@ fn fs(in: VSOut) -> @location(0) vec4<f32> {
   }
   // glTF's V origin is top-left, so flip; the sampler wraps and (per era) filters.
   let uv = vec2<f32>(puv.x, 1.0 - puv.y);
+  wUv = puv;
+  wGu = vec3<f32>(0.0);
+  wGv = vec3<f32>(0.0);
+  if (u.maps0.z > 0.5) {
+    let wg = uvGrads(normalize(in.normal), dp1, dp2, duv1, duv2);
+    wGu = wg.gu;
+    wGv = wg.gv;
+  }
   // Normal mapping (EDITOR_PRO_ROADMAP.md P1a): the tangent-space normal map in
   // the triangle's tangent frame \u2014 worldTangent's (dP/du, Lengyel), here from the
   // screen derivatives \u2014 as the software rasteriser does. sNrm is what lights the
@@ -18326,6 +18375,7 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
         refraction: entry.refract ? resolveRefraction3(entry.primitive.material, effectActive4(entry.effect) ? entry.effect : null) : null,
         camera,
         water: waterUniform2(entry.primitive.material, draw.time ?? 0),
+        waterAlong: waterAlong2(entry.primitive.material),
         mapping: resolveMapping(entry.primitive.material),
         hasNormalMap: entry.textures.normal !== null,
         wind: entry.primitive.sway ? windUniform2(draw.wind, draw.time ?? 0) : null
