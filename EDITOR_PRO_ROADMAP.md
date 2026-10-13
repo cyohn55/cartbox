@@ -179,7 +179,7 @@ Next to Unity and Unreal, it lacks the following:
     - **Already there before P6:** sky occlusion and one coloured bounce of sunlight, from H1.
     - **Not yet: contact shadows and foliage SSAO.** Both are screen-space passes that need the frame's depth. The GPU renderers read back colour only, so they need a depth prepass in WGSL and GLSL first. Until then, the near shadow cascade carries small-scale contact.
     - *Tests:* `post-volumes.test.ts` (weights fade smoothly and are hard with no blend; priority wins in either order; the luminance measure; adaptation converges, moves at its own speeds and stays in its limits; storage round-trips and is absent when unset; the player's merge). `lightmap.test.ts` (one bounce unchanged; more bounces fill shade deterministically; colour bleeds).
-- [ ] **P7. Level editor** (completes B4).
+- [x] **P7. Level editor** (completes B4).
   - Arena maps are authored in the editor:
     - an **outliner** and multi-select;
     - gizmos with grid and angle snap;
@@ -189,6 +189,43 @@ Next to Unity and Unreal, it lacks the following:
   - **Play-in-editor** runs the arena with bots.
   - Lockout and Beaver Creek round-trip as saved maps, and `/lockout?map=<cart>` plays a saved map.
   - *Tests:* the shipped maps round-trip byte for byte; the validator's messages; play-in-editor starts a match.
+  - **P7: done.** Arena maps are authored in the Mesh tab's Arena panel (`arenaMarkup.ts`, `arenaEdit.ts`, `savedArena.ts`, `ArenaPanel.tsx`).
+    - **Storage.** An arena map is JSON on the scene's sidecar (`arena`), read defensively within limits.
+      - Lockout and Beaver Creek round-trip exactly and play the same Lua.
+      - Their sidecars now carry their markup, so a cart started from the Lockout starter opens as an arena map.
+    - **Markup by clicking.** Pick spawn, weapon pad, hill, ball, teleporter, kill volume, bot destination or collider, then click the scene. It lands where the cursor meets a mesh or terrain, or else the ground.
+      - The markup is drawn over the scene: dots and labels, boxes as wireframes, teleporters dashed to their exits.
+      - Click a marker to select it. You can then set:
+        - a spawn's team;
+        - a pad's weapon and rotation;
+        - a destination's power flag;
+        - a teleporter's arrival facing;
+        - a box's size.
+      - Move a marker by clicking where it goes, or remove it.
+    - **Kill volumes** are new to the cart. The `KILL` table works like the death plane: step in and you die.
+    - **The collision layer:**
+      - colliders fitted round the selected objects;
+      - walkable ground taken from a terrain at a chosen spacing;
+      - flights of steps carried with the map;
+      - the death height.
+    - **The validator runs live.** It checks spawn floors, spawns inside walls, the death plane, kill volumes, net range and a missing spawn.
+      - Check routes bakes the bots' navmesh and adds reachability from spawn 1.
+      - The validator's navmesh is now optional, and it gains the `no-spawns` and `kill-volume` kinds.
+    - **Play-in-editor.** "Play this arena with bots" opens `/lockout?map=cart:<id>`, which plays the copy saved in this browser.
+      - Its scene is the arena's scaffold (`savedArenaSidecar`): a stub at instance 0, the bots, viewmodels, a pickup over each pad's weapons, the Holograms and the left hands. The navmesh and ragdoll colliders come from the map.
+      - The saved scene's objects, lighting, terrains, foliage and splines follow, along with its edited Spartans and weapons where they keep the contract.
+      - Its code is the arena code on that map, with the camera about the scene's bounds.
+    - **Already there:** the outliner, multi-select, box select, and gizmos with grid and angle snap and kit snap.
+    - **Not yet:**
+      - Markers move by clicking rather than with the gizmo.
+      - A saved arena plays offline against bots. Online, guests would load their own map.
+    - *Tests:* `arena-editor.test.ts`:
+      - storage: round-trips and defensive reading;
+      - the panel's edits;
+      - the live and route checks;
+      - kill volumes in the Lua, and on the real engine (stepping in kills, stepping beside doesn't);
+      - colliders from objects and ground from a terrain;
+      - a saved arena laid out as the cart expects.
 - [ ] **P8. Profiler and content browser.**
   - Per-device budgets (iPhone, iPad, desktop).
   - A live overlay: draw calls, triangles, texture memory and frame time.

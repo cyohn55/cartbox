@@ -55,6 +55,16 @@ export type ArenaWeapon =
   | "ar" | "dmr" | "carbine" | "needlerifle" | "beamrifle" | "plasmapistol" | "plasmarifle" | "needler" | "spiker" | "mauler"
   | "rocket" | "splaser" | "fuelrod" | "bruteshot" | "concussion" | "hammer";
 
+/** Every weapon a marker can hold, for reading stored maps and the editor's pickers. */
+export const ARENA_WEAPONS = [
+  "br", "smg", "shotgun", "sniper", "magnum", "sword",
+  "ar", "dmr", "carbine", "needlerifle", "beamrifle", "plasmapistol", "plasmarifle", "needler", "spiker", "mauler",
+  "rocket", "splaser", "fuelrod", "bruteshot", "concussion", "hammer",
+] as const satisfies readonly ArenaWeapon[];
+// Every weapon listed: a weapon added to the type but not here fails to compile.
+const _allWeapons: Exclude<ArenaWeapon, (typeof ARENA_WEAPONS)[number]> extends never ? true : never = true;
+void _allWeapons;
+
 export interface ArenaMarker {
   /** The marker's box (a cyan-lit plinth; the weapon floats over it). */
   readonly box: ArenaBox;
@@ -95,6 +105,8 @@ export interface ArenaMap {
   readonly ground?: ArenaGround;
   /** Teleporters (B8): a soldier stepping onto one's pad is taken to its far end. */
   readonly teleporters?: readonly ArenaTeleporter[];
+  /** Kill volumes (EDITOR_PRO_ROADMAP.md P7): step into one and you die, as below the death plane. */
+  readonly kills?: readonly ArenaBox[];
 }
 
 /** A one-way teleporter (BEAVER_CREEK_ROADMAP.md B8): its pad's feet position, where it sends you, and which way you face there. */
@@ -217,7 +229,8 @@ const n2 = (v: number) => v.toFixed(2);
  * - `SPN`: spawn feet positions (three each), and `SPT` their teams (0 any, 1 blue, 2 red);
  * - `MRK` and `MW`: the weapon markers' centres and weapons;
  * - `ROAM` and `POWER`: bot destinations and the power positions among them;
- * - `HILLS`, `BALL` and `DEATH_Y`.
+ * - `HILLS`, `BALL` and `DEATH_Y`;
+ * - `HF` (the ground), `TP` (teleporters) and `KILL` (kill volumes, min/max corners).
  */
 export function arenaLua(map: ArenaMap): string {
   const col = arenaColliders(map).flatMap(([cx, cy, cz, hx, hy, hz]) => [cx - hx, cy - hy, cz - hz, cx + hx, cy + hy, cz + hz]);
@@ -241,6 +254,7 @@ export function arenaLua(map: ArenaMap): string {
     // (globals: the chunk is near Lua's 200 locals)
     ...(map.ground ? groundLua(map.ground) : ["HF = nil"]),
     `TP = {${(map.teleporters ?? []).map((t) => [...t.from, ...t.to, t.yaw].map(n2).join(",")).join(",")}}`,
+    `KILL = {${(map.kills ?? []).flatMap(([cx, cy, cz, hx, hy, hz]) => [cx - hx, cy - hy, cz - hz, cx + hx, cy + hy, cz + hz]).map(n2).join(",")}}`,
   ].join("\n");
 }
 
