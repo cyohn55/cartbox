@@ -93,6 +93,7 @@ import { DAB_SPACING, applyTerrainTool, findTerrain, replaceTerrain, strokeDabs 
 import { addSplinePoint, splineOverlays } from "@/lib/splineEdit";
 import { findFoliage, replaceFoliage } from "@/lib/foliageEdit";
 import { INITIAL_TERRAIN_EDIT, TerrainPanel, type TerrainEditState } from "./TerrainPanel";
+import { KitPanel } from "./KitPanel";
 import { SoundsPanel } from "./SoundsPanel";
 import { ComponentScriptsPanel, ComponentsInspector } from "./ComponentsPanel";
 import { clickSelection, copyPayload, duplicateEntries, pasteEntries, removeEntries, withSubtrees } from "@/lib/sceneSelection";
@@ -1239,6 +1240,7 @@ export function MeshEditor({ sidecar, onSidecarChange, code, onStartPlay, modern
         <PrefabLibrary sidecar={sidecar} onChange={onSidecarChange} onPlaced={setSelectedId} />
 
         <TerrainPanel sidecar={sidecar} onChange={onSidecarChange} edit={terrainEdit} onEdit={onTerrainEdit} />
+        <KitPanel sidecar={sidecar} onChange={onSidecarChange} selectedId={selectedId} onSelect={setSelectedId} />
       </aside>
 
       {/* Centre: preview — the selected mesh alone, or the whole composed scene — over the content browser */}

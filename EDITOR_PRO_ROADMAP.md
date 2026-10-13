@@ -144,12 +144,24 @@ Next to Unity and Unreal, it lacks the following:
     - **Impostors: in the player.** The player emits them as far blocks beside the full ones, with a swap distance measured to each block's centre. So a block draws its full copies nearer than the distance and its cards beyond it, never both and never neither.
     - **Not cross-faded.** The swap is a hard switch at block level; a dithered cross-fade would need the renderers' help. The editor's scene view always shows the full copies.
     - *Tests:* `placement.test.ts` (keep-out, hollows and crests, patch cover and determinism, distance from a spline, storage; the cliff rock's shape, material and preset fill; the grass cards' cut-out; the impostor's views, cards and atlas; the player's near and far blocks trading places, the far ones a fraction of the triangles).
-- [ ] **P5. Modular kit and generators.**
+- [x] **P5. Modular kit and generators.**
   - **Parametric prefabs** (Blueprint-lite): typed parameters drive a generator.
   - Arch, stair, ramp and pillar generators.
   - A Halo-style **stone and Forerunner kit**: slabs, trims, columns, bridges and base shells, with baked occlusion and curvature.
   - **CSG** brushes (add and subtract boxes, cylinders and wedges) to cut doorways, windows and a cave, producing clean meshes.
   - *Tests:* CSG is watertight; generators are deterministic; the kit snaps.
+  - **P5: done.** Parametric shapes, the stone and Forerunner kit, and CSG (`csg.ts`, `shapeGenerators.ts`, `kitEdit.ts`, the Kit and CSG panel).
+    - **CSG: the booleans.** Union, subtract and intersect, by BSP trees (Evan Wallace's csg.js algorithm, made iterative so deep trees don't overflow). Normals and UVs are carried through every split. The faces a cut leaves take the target's material, so a doorway looks carved.
+    - **CSG: closed output.** The result is mended so it is a closed solid: T-junctions are put into the edges they lie on, positions are snapped, and identical materials stay one primitive. Each polygon is fanned from a true corner, which keeps zero-area slivers to a minimum.
+    - **CSG: brushes.** Box, cylinder and wedge, placed in the scene as see-through objects.
+    - **CSG in the editor.** Any object can be cut, joined or intersected with any other where they stand in the world. The panel says when a result isn't fully closed. That can happen when booleans are chained on a curved solid; a single boolean is always closed.
+    - **Parametric shapes (Blueprint-lite).** Slab, stairs, ramp, arch, pillar, and wall with a doorway and a window. Each has typed, clamped parameters stored on the scene object, and is rebuilt as a parameter changes, keeping the materials the creator gave its parts.
+      - Every shape is a closed solid at every parameter's default and limits.
+      - Stairs are built straight from their faces rather than by booleans.
+      - The pillar joins its base and capital first, then the shaft.
+    - **The kit.** Twelve pieces: stone slab, block, wall with doorway, arch, bridge arch, stairs, ramp and column; Forerunner panel, trim, pillar and gateway. Each is a parametric shape in a P1c-generated material (worn stone with macro variation, or Forerunner metal with a clearcoat), projected triplanar so any size keeps the same texel density. The pieces snap edge to edge (I14's kit snapping).
+    - **Not yet: baked occlusion.** The kit pieces don't yet carry baked occlusion and curvature maps; the triplanar generator maps carry their relief.
+    - *Tests:* `kit-csg.test.ts` (each boolean closed and of the right volume; cut faces in the target's material; determinism; every shape closed at every limit; shapes standing on the ground at their size; defensive reading; rebuilding keeps materials; every kit piece closed and textured; snapping; the panel's edits — a kit piece remembering and rebuilding its shape through storage, a world-space cut removing its brush, a moved target missing the cut).
 - [ ] **P6. Lighting and post.**
   - **Post-process volumes**: grade, exposure, fog and bloom per area, blended at the edges.
   - **Auto-exposure**: eye adaptation, for stepping from a dark base into the sunlit canyon.

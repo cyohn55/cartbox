@@ -81,6 +81,8 @@ import {
   resolveMeshInstances,
   MAX_LIBRARY_MATERIALS,
   type MaterialLibrary,
+  readParametric,
+  type ParametricShape,
   readSplines,
   type Spline,
   worldMatrices,
@@ -142,6 +144,8 @@ export interface MeshSidecarEntry {
   readonly alwaysLoaded?: true;
   /** Components attached to this object, with its field values (see components.ts in @cartbox/editor). */
   readonly components?: readonly AttachedComponent[];
+  /** A parametric shape (P5; see shapeGenerators.ts in @cartbox/editor): its mesh is built from these parameters, and rebuilt when they change. */
+  readonly shape?: ParametricShape;
 }
 
 /**
@@ -404,6 +408,7 @@ export function decodeMeshSidecar(raw: string | null | undefined): MeshSidecar {
       ...(typeof record.level === "string" && record.level ? { level: record.level } : {}),
       ...(record.alwaysLoaded === true ? { alwaysLoaded: true as const } : {}),
       ...(attached(record.components).length > 0 ? { components: attached(record.components) } : {}),
+      ...(readParametric((record as { shape?: unknown }).shape) ? { shape: readParametric((record as { shape?: unknown }).shape)! } : {}),
     });
   }
   const lighting = parseSceneLighting((parsed as { lighting?: unknown }).lighting);
