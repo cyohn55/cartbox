@@ -4445,10 +4445,12 @@ declare class WebgpuSceneRenderer implements SceneRenderer {
  *                                    z = drift phase (0..1), w = flow direction (B5;
  *                                    waterUniform in materialEffects.ts)
  * 864  terrain0   vec4<f32>    16   x = triplanar repeat (0 = UV mapping), y = height-blend
- *                                    sharpness (0 = an even mix) (B6)
+ *                                    sharpness (0 = an even mix) (B6), z = macro variation
+ *                                    strength, w = 1 / its scale (P2b; macroUniform)
  * 880  wind0      vec4<f32>    16   xy = the wind's x and z × strength, z = its phase (0..1),
  *                                    w = gust (B6; windUniform in wind.ts)
- * 896  maps0      vec4<f32>    16   x = 1 when a tangent-space normal map is bound (P1a)
+ * 896  maps0      vec4<f32>    16   x = 1 when a tangent-space normal map is bound (P1a),
+ *                                    y = distance-tiling distance (0 = off) (P2b; farTileBlend)
  * ```
  *
  * 912 bytes used, padded to a 1024-byte stride (a 256-byte multiple a dynamic
@@ -4683,13 +4685,19 @@ interface InstanceUniform {
     /** A tangent-space normal map is bound (EDITOR_PRO_ROADMAP.md P1a). */
     readonly hasNormalMap?: boolean;
 }
-/** A draw's triplanar repeat (0 = UV mapping) and height-blend sharpness (0 = an even mix) (B6). */
+/**
+ * A draw's triplanar repeat (0 = UV mapping) and height-blend sharpness (0 = an
+ * even mix) (B6); its macro variation ([strength, 1 / scale]) and distance
+ * tiling (0 = off) (P2b).
+ */
 interface ResolvedMapping {
     readonly triplanar: number;
     readonly blendSharpness: number;
+    readonly macro?: readonly [number, number];
+    readonly farTile?: number;
 }
-/** Resolve a material's mapping as the software rasteriser does (null when it uses neither). */
-declare function resolveMapping(material: Pick<MeshMaterial, "triplanar" | "blendSharpness">): ResolvedMapping | null;
+/** Resolve a material's mapping as the software rasteriser does (null when it uses none of it). */
+declare function resolveMapping(material: Pick<MeshMaterial, "triplanar" | "blendSharpness" | "macro" | "farTile">): ResolvedMapping | null;
 /**
  * Floats per instance in the transform storage buffer (GPU instancing): the WGSL
  * `InstanceXf` struct — mvp, lightMvp and model (mat4x4 each) then the normal

@@ -103,7 +103,7 @@ describe("the fields", () => {
 describe("on the GPU", () => {
   it("resolves as the rasteriser does and packs at byte 864", () => {
     expect(resolveMapping({})).toBeNull();
-    expect(resolveMapping({ triplanar: 2, blendSharpness: 1.5 })).toEqual({ triplanar: 2, blendSharpness: 1 });
+    expect(resolveMapping({ triplanar: 2, blendSharpness: 1.5 })).toEqual({ triplanar: 2, blendSharpness: 1, macro: [0, 0], farTile: 0 });
     const target = new Float32Array(UNIFORM_FLOATS).fill(-7);
     const identity = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1];
     const uniform = {

@@ -13408,6 +13408,8 @@ import {
   DEFAULT_RASTER_STYLE as DEFAULT_RASTER_STYLE2,
   DETAIL_FAR,
   DETAIL_NEAR,
+  FAR_TILE_SCALE,
+  MACRO_OCTAVES,
   ANISOTROPY_MIN_ALPHA,
   CLEARCOAT_F0,
   PARALLAX_MIN_NDV,
@@ -13467,6 +13469,7 @@ import {
   effectActive,
   emissiveAnimation,
   materialHasLayers,
+  macroUniform,
   materialHasWater,
   materialRefracts,
   spotCone,
@@ -13609,7 +13612,9 @@ function resolveSurface(material, time, hasDetail, hasMr, blend = { weights: fal
 function resolveMapping(material) {
   const triplanar = material.triplanar && material.triplanar > 0 ? material.triplanar : 0;
   const blendSharpness = material.blendSharpness && material.blendSharpness > 0 ? Math.min(1, material.blendSharpness) : 0;
-  return triplanar > 0 || blendSharpness > 0 ? { triplanar, blendSharpness } : null;
+  const macro = macroUniform(material);
+  const farTile = material.farTile && material.farTile > 0 ? material.farTile : 0;
+  return triplanar > 0 || blendSharpness > 0 || macro[0] > 0 || farTile > 0 ? { triplanar, blendSharpness, macro, farTile } : null;
 }
 var INSTANCE_FLOATS = 60;
 function writeInstanceTransform(target, index, transform3, base = index * INSTANCE_FLOATS) {
@@ -13793,15 +13798,15 @@ function writeInstanceUniform(target, index, uniform) {
   const mapping = uniform.mapping ?? null;
   target[base + OFFSET_TERRAIN0] = mapping ? mapping.triplanar : 0;
   target[base + OFFSET_TERRAIN0 + 1] = mapping ? mapping.blendSharpness : 0;
-  target[base + OFFSET_TERRAIN0 + 2] = 0;
-  target[base + OFFSET_TERRAIN0 + 3] = 0;
+  target[base + OFFSET_TERRAIN0 + 2] = mapping?.macro ? mapping.macro[0] : 0;
+  target[base + OFFSET_TERRAIN0 + 3] = mapping?.macro ? mapping.macro[1] : 0;
   const wind = uniform.wind ?? null;
   target[base + OFFSET_WIND0] = wind ? wind[0] : 0;
   target[base + OFFSET_WIND0 + 1] = wind ? wind[1] : 0;
   target[base + OFFSET_WIND0 + 2] = wind ? wind[2] : 0;
   target[base + OFFSET_WIND0 + 3] = wind ? wind[3] : 0;
   target[base + OFFSET_MAPS0] = uniform.hasNormalMap ? 1 : 0;
-  target[base + OFFSET_MAPS0 + 1] = 0;
+  target[base + OFFSET_MAPS0 + 1] = mapping?.farTile ?? 0;
   target[base + OFFSET_MAPS0 + 2] = 0;
   target[base + OFFSET_MAPS0 + 3] = 0;
 }
@@ -15181,6 +15186,24 @@ vec4 triMap(sampler2D s, vec2 uv) {
   vec3 p = vObjPos * (1.0 / u.terrain0.x);
   return sampleMap(s, vec2(p.z, 1.0 - p.y)) * w.x + sampleMap(s, vec2(p.x, 1.0 - p.z)) * w.y + sampleMap(s, vec2(p.x, 1.0 - p.y)) * w.z;
 }
+// --- Landscape materials (EDITOR_PRO_ROADMAP.md P2b): farTileBlend and macroGain, term for term ---
+// The base map tiled ${1 / FAR_TILE_SCALE}\xD7 larger, by the raw UVs or triplanar projection.
+vec4 triMapFar(sampler2D s, vec2 p0) {
+  if (u.terrain0.x <= 0.0) { return sampleMap(s, vec2(p0.x * ${FAR_TILE_SCALE.toFixed(4)}, 1.0 - p0.y * ${FAR_TILE_SCALE.toFixed(4)})); }
+  vec3 n = normalize(vNormal);
+  vec3 a = n * n;
+  vec3 w = a * a;
+  w = w / max(w.x + w.y + w.z, 1e-30);
+  vec3 p = vObjPos * (1.0 / (u.terrain0.x / ${FAR_TILE_SCALE.toFixed(4)}));
+  return sampleMap(s, vec2(p.z, 1.0 - p.y)) * w.x + sampleMap(s, vec2(p.x, 1.0 - p.z)) * w.y + sampleMap(s, vec2(p.x, 1.0 - p.y)) * w.z;
+}
+float farTileBlend(float depth, float distance) {
+  float t = clamp((depth - distance * 0.25) / (distance * 0.75), 0.0, 1.0);
+  return t * t * (3.0 - 2.0 * t);
+}
+float macroGain(vec3 p) {
+  return 1.0 + u.terrain0.z * (2.0 * gNoise(p * u.terrain0.w, ${MACRO_OCTAVES}) - 1.0);
+}
 float blendHeightOf(vec3 c) { return 0.299 * c.r + 0.587 * c.g + 0.114 * c.b; }
 float heightBlend(float w, float base, float blend, float s) {
   return clamp((w - 0.5 + 0.5 * s * (blend - base)) / (1.0 - 0.9 * s) + 0.5, 0.0, 1.0);
@@ -15286,8 +15309,13 @@ ${reflect ? "  outReflect = vec4(0.0);\n  outEnv = vec4(0.0);\n" : ""}  // The s
   }
   vec4 colour = u.base;
   if (u.texflags.x > 0.5) {
-    colour = colour * triMap(tex, uv);
+    vec4 texel = triMap(tex, uv);
+    // Distance tiling (P2b): far off, the map blends to itself tiled larger.
+    if (u.maps0.y > 0.0) { texel = mix(texel, triMapFar(tex, puv), farTileBlend(vEyeDepth, u.maps0.y)); }
+    colour = colour * texel;
   }
+  // Macro variation (P2b): broad lighter and darker patches over the whole surface.
+  if (u.terrain0.z > 0.0) { colour.rgb = colour.rgb * macroGain(vObjPos); }
 ${g.base}
   // Soft edges (EP6b): a see-through surface fades out as it meets the opaque
   // scene behind it \u2014 both depths read back as view distance (shadow2.zw).
@@ -16642,6 +16670,8 @@ import {
   DEFAULT_RASTER_STYLE as DEFAULT_RASTER_STYLE3,
   DETAIL_FAR as DETAIL_FAR2,
   DETAIL_NEAR as DETAIL_NEAR2,
+  FAR_TILE_SCALE as FAR_TILE_SCALE2,
+  MACRO_OCTAVES as MACRO_OCTAVES2,
   ANISOTROPY_MIN_ALPHA as ANISOTROPY_MIN_ALPHA2,
   CLEARCOAT_F0 as CLEARCOAT_F02,
   PARALLAX_MIN_NDV as PARALLAX_MIN_NDV2,
@@ -17347,6 +17377,24 @@ fn triMap(t: texture_2d<f32>, uv: vec2<f32>, normal: vec3<f32>, objPos: vec3<f32
   let p = objPos * (1.0 / u.terrain0.x);
   return textureSample(t, samp, vec2<f32>(p.z, 1.0 - p.y)) * w.x + textureSample(t, samp, vec2<f32>(p.x, 1.0 - p.z)) * w.y + textureSample(t, samp, vec2<f32>(p.x, 1.0 - p.y)) * w.z;
 }
+// --- Landscape materials (EDITOR_PRO_ROADMAP.md P2b): farTileBlend and macroGain, term for term ---
+// The base map tiled ${1 / FAR_TILE_SCALE2}\xD7 larger, by the raw UVs or triplanar projection.
+fn triMapFar(t: texture_2d<f32>, p0: vec2<f32>, normal: vec3<f32>, objPos: vec3<f32>) -> vec4<f32> {
+  if (u.terrain0.x <= 0.0) { return textureSample(t, samp, vec2<f32>(p0.x * ${FAR_TILE_SCALE2.toFixed(4)}, 1.0 - p0.y * ${FAR_TILE_SCALE2.toFixed(4)})); }
+  let n = normalize(normal);
+  let a = n * n;
+  var w = a * a;
+  w = w / max(w.x + w.y + w.z, 1e-30);
+  let p = objPos * (1.0 / (u.terrain0.x / ${FAR_TILE_SCALE2.toFixed(4)}));
+  return textureSample(t, samp, vec2<f32>(p.z, 1.0 - p.y)) * w.x + textureSample(t, samp, vec2<f32>(p.x, 1.0 - p.z)) * w.y + textureSample(t, samp, vec2<f32>(p.x, 1.0 - p.y)) * w.z;
+}
+fn farTileBlend(depth: f32, distance: f32) -> f32 {
+  let t = clamp((depth - distance * 0.25) / (distance * 0.75), 0.0, 1.0);
+  return t * t * (3.0 - 2.0 * t);
+}
+fn macroGain(p: vec3<f32>) -> f32 {
+  return 1.0 + u.terrain0.z * (2.0 * gNoise(p * u.terrain0.w, ${MACRO_OCTAVES2}) - 1.0);
+}
 fn blendHeightOf(c: vec3<f32>) -> f32 { return 0.299 * c.r + 0.587 * c.g + 0.114 * c.b; }
 fn heightBlend(w: f32, base: f32, blend: f32, s: f32) -> f32 {
   return clamp((w - 0.5 + 0.5 * s * (blend - base)) / (1.0 - 0.9 * s) + 0.5, 0.0, 1.0);
@@ -17453,8 +17501,13 @@ fn fs(in: VSOut) -> @location(0) vec4<f32> {
 
   var colour = u.base;
   if (u.texflags.x > 0.5) {
-    colour = colour * triMap(tex, uv, in.normal, in.objPos);
+    var texel = triMap(tex, uv, in.normal, in.objPos);
+    // Distance tiling (P2b): far off, the map blends to itself tiled larger.
+    if (u.maps0.y > 0.0) { texel = mix(texel, triMapFar(tex, puv, in.normal, in.objPos), farTileBlend(in.eyeDepth, u.maps0.y)); }
+    colour = colour * texel;
   }
+  // Macro variation (P2b): broad lighter and darker patches over the whole surface.
+  if (u.terrain0.z > 0.0) { colour = vec4<f32>(colour.rgb * macroGain(in.objPos), colour.a); }
 ${g.base}
   // The CPU path skips a texel whose combined alpha is below 1/255 rather than
   // blending it, so this is a discard and not an alpha-blend state.
