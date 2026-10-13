@@ -4,7 +4,8 @@
  * settings, and storing what a brush paints. See foliage.ts in @cartbox/editor.
  */
 
-import { foliagePreset, readFoliage, serializeFoliage, serializeMeshAsset, type FoliageLayer, type FoliagePreset } from "@cartbox/editor";
+import { FOLIAGE_PRESET_LABELS, bakeImpostor, deserializeMeshAsset, foliagePreset, readFoliage, serializeFoliage, serializeMeshAsset, type FoliageLayer, type FoliagePreset, type MeshAsset } from "@cartbox/editor";
+import { decodeMeshTextures } from "./meshImport";
 
 import { setMeshFoliage, type MeshSidecar } from "./meshSidecar";
 
@@ -38,11 +39,14 @@ export function addFoliage(sidecar: MeshSidecar, terrainId: string, source: { pr
   let mesh: string;
   let name: string;
   let settings: Pick<FoliageLayer, "density" | "scale" | "align" | "sink" | "cull" | "wind">;
+  let fill: FoliageLayer["fill"];
   if ("preset" in source) {
     const preset = foliagePreset(source.preset);
     mesh = serializeMeshAsset(preset.mesh);
-    name = source.preset;
+    name = FOLIAGE_PRESET_LABELS[source.preset];
     settings = preset.settings;
+    // A preset that grows by rules (cliff rocks on the steep faces) starts filled.
+    if (preset.fill) fill = { seed: Math.floor(Math.random() * 1e6), ...preset.fill };
   } else {
     const entry = sidecar.meshes.find((m) => m.id === source.from);
     if (!entry) return null;
@@ -50,7 +54,7 @@ export function addFoliage(sidecar: MeshSidecar, terrainId: string, source: { pr
     name = entry.name;
     settings = { density: 2, scale: [0.8, 1.2], align: 0.5, sink: 0, cull: 150 };
   }
-  const layer: FoliageLayer = { id, name, terrain: terrainId, ...settings, copies: [] };
+  const layer: FoliageLayer = { id, name, terrain: terrainId, ...settings, copies: [], ...(fill ? { fill } : {}) };
   return { sidecar: setMeshFoliage(sidecar, [...(sidecar.foliage ?? []), serializeFoliage(terrain, layer, mesh)]), id };
 }
 
@@ -60,6 +64,22 @@ export function replaceFoliage(sidecar: MeshSidecar, layer: FoliageLayer, mesh: 
   if (!terrain) return sidecar;
   const stored = serializeFoliage(terrain, layer, mesh);
   return setMeshFoliage(sidecar, (sidecar.foliage ?? []).map((f) => (f.id === layer.id ? stored : f)));
+}
+
+/**
+ * Bake a layer's mesh into impostor cards (P4; see render/impostor.ts in
+ * @cartbox/editor), its base-colour maps decoded first: the cards' mesh,
+ * serialized, or null for a mesh with no extent.
+ */
+export async function bakeFoliageImpostor(mesh: string): Promise<string | null> {
+  let asset: MeshAsset;
+  try {
+    asset = deserializeMeshAsset(mesh);
+  } catch {
+    return null;
+  }
+  const baked = bakeImpostor(asset, await decodeMeshTextures(asset));
+  return baked ? serializeMeshAsset(baked.mesh) : null;
 }
 
 export function removeFoliage(sidecar: MeshSidecar, id: string): MeshSidecar {

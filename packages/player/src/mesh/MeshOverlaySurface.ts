@@ -1458,7 +1458,10 @@ export class MeshOverlaySurface implements DisplaySurface {
     const cx = m[0]! * x + m[4]! * y + m[8]! * z + m[12]!;
     const cy = m[1]! * x + m[5]! * y + m[9]! * z + m[13]!;
     const cz = m[2]! * x + m[6]! * y + m[10]! * z + m[14]!;
-    return Math.hypot(cx - this.eye[0], cy - this.eye[1], cz - this.eye[2]) - f.radius < f.cull * this.quality.terrainDetail;
+    const d = Math.hypot(cx - this.eye[0], cy - this.eye[1], cz - this.eye[2]);
+    // A layer with impostors (P4): full copies nearer than the swap distance, their cards from there out.
+    if (f.swap && (d >= f.swap.distance * this.quality.terrainDetail) !== f.swap.far) return false;
+    return d - f.radius < f.cull * this.quality.terrainDetail;
   }
 
   /** Each terrain block's world bounds, measured on first use. */

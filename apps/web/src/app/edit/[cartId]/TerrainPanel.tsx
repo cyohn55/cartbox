@@ -12,6 +12,7 @@ import { useRef, useState } from "react";
 
 import {
   FOLIAGE_PRESETS,
+  FOLIAGE_PRESET_LABELS,
   MAX_EROSION_DROPLETS,
   MAX_VISTA_HAZE,
   exportHeightmap,
@@ -20,13 +21,15 @@ import {
   importHeightmap,
   layerCopies,
   thermalErosion,
+  type FoliageFill,
   type FoliageLayer,
   type FoliagePreset,
+  type Spline,
   type MeshMaterial,
   type Terrain,
 } from "@cartbox/editor";
 
-import { addFoliage, foliageOn, removeFoliage, replaceFoliage } from "@/lib/foliageEdit";
+import { addFoliage, bakeFoliageImpostor, foliageOn, removeFoliage, replaceFoliage } from "@/lib/foliageEdit";
 import { type MeshSidecar } from "@/lib/meshSidecar";
 import { addTerrain, findTerrain, removeTerrain, replaceTerrain, type TerrainBrushSettings, type TerrainTool } from "@/lib/terrainEdit";
 import styles from "./editor.module.css";
@@ -67,6 +70,84 @@ function withLayerMaterials(terrain: Terrain, patch: Pick<MeshMaterial, "macro" 
       return { ...l, material: material as unknown as MeshMaterial };
     }),
   };
+}
+
+/**
+ * A fill's placement rules beyond slope (P4): the gentlest slope it grows on,
+ * hollows or crests, patches, and a distance range from splines' edges.
+ */
+function FillRules({ layer, splines, onFill }: { layer: FoliageLayer; splines: readonly Spline[]; onFill: (fill: FoliageFill) => void }) {
+  const fill = layer.fill!;
+  const deg = (up: number) => Math.round((Math.acos(Math.max(0, Math.min(1, up))) * 180) / Math.PI);
+  const without = <K extends keyof FoliageFill>(key: K): FoliageFill => {
+    const { [key]: _gone, ...rest } = fill;
+    void _gone;
+    return rest as FoliageFill;
+  };
+  const gentlest = deg(fill.up?.[1] ?? 1);
+  return (
+    <>
+      <RangeControl
+        label="Gentlest slope"
+        nested
+        min={0}
+        max={89}
+        step={1}
+        value={gentlest}
+        onChange={(d) => onFill({ ...fill, up: [fill.up?.[0] ?? 0, Math.cos((d * Math.PI) / 180)] })}
+        ariaLabel={`${layer.name} gentlest slope`}
+        display={gentlest === 0 ? "flat ground too" : `${gentlest}° and steeper`}
+      />
+      <select
+        aria-label={`Where ${layer.name} grows by the ground's shape`}
+        value={!fill.curvature ? "any" : fill.curvature[0] >= 0 ? "hollows" : "crests"}
+        onChange={(event) => {
+          const v = event.target.value;
+          onFill(v === "any" ? without("curvature") : { ...fill, curvature: v === "hollows" ? [0.02, 1000] : [-1000, -0.02] });
+        }}
+        style={{ fontSize: 11, marginTop: 4 }}
+      >
+        <option value="any">Any shape of ground</option>
+        <option value="hollows">Only in hollows and gullies</option>
+        <option value="crests">Only on ridges and crests</option>
+      </select>
+      <RangeControl
+        label="Patches"
+        nested
+        min={0}
+        max={1}
+        step={0.05}
+        value={fill.patches?.cover ?? 0}
+        onChange={(cover) => onFill(cover > 0 ? { ...fill, patches: { scale: fill.patches?.scale ?? 12, cover } } : without("patches"))}
+        ariaLabel={`${layer.name} patch cover`}
+        display={fill.patches ? `${Math.round(fill.patches.cover * 100)}% covered` : "even"}
+      />
+      {fill.patches && (
+        <RangeControl label="Patch size" nested min={1} max={100} step={1} value={fill.patches.scale} onChange={(scale) => onFill({ ...fill, patches: { ...fill.patches!, scale } })} ariaLabel={`${layer.name} patch size`} display={`${fill.patches.scale} m`} />
+      )}
+      {splines.length > 0 && (
+        <select
+          aria-label={`Spline ${layer.name} keeps near`}
+          value={fill.near?.splines[0] ?? ""}
+          onChange={(event) => onFill(event.target.value ? { ...fill, near: { splines: [event.target.value], within: fill.near?.within ?? [0, 3] } } : without("near"))}
+          style={{ fontSize: 11, marginTop: 4 }}
+        >
+          <option value="">Anywhere along splines</option>
+          {splines.map((sp) => (
+            <option key={sp.id} value={sp.id}>
+              By {sp.name}
+            </option>
+          ))}
+        </select>
+      )}
+      {fill.near && (
+        <>
+          <RangeControl label="From its edge" nested min={-10} max={50} step={0.5} value={fill.near.within[0]} onChange={(lo) => onFill({ ...fill, near: { ...fill.near!, within: [lo, Math.max(lo, fill.near!.within[1])] } })} ariaLabel={`${layer.name} nearest to the spline`} display={`${fill.near.within[0]} m`} />
+          <RangeControl label="Out to" nested min={-10} max={200} step={0.5} value={Math.min(200, fill.near.within[1])} onChange={(hi) => onFill({ ...fill, near: { ...fill.near!, within: [Math.min(hi, fill.near!.within[0]), hi >= 200 ? 1e9 : hi] } })} ariaLabel={`${layer.name} farthest from the spline`} display={fill.near.within[1] >= 1e9 ? "any distance" : `${fill.near.within[1]} m`} />
+        </>
+      )}
+    </>
+  );
 }
 
 /** A new vista's haze: a third of the sky shows through ground a kilometre out. */
@@ -432,6 +513,25 @@ function FoliageSection({
                   <RangeControl label="Follow slope" nested min={0} max={1} step={0.05} value={layer.align} onChange={(align) => set(found, { align })} ariaLabel={`${layer.name} slope alignment`} display={`${Math.round(layer.align * 100)}%`} />
                   <RangeControl label="Draw distance" nested min={10} max={600} step={10} value={layer.cull} onChange={(cull) => set(found, { cull })} ariaLabel={`${layer.name} draw distance`} display={`${layer.cull} m`} />
                   <RangeControl label="Sway" nested min={0} max={4} step={0.1} value={layer.wind ?? 0} onChange={(wind) => set(found, { wind: wind > 0 ? wind : undefined })} ariaLabel={`${layer.name} sway in the wind`} display={layer.wind ? layer.wind.toFixed(1) : "stiff"} />
+                  <RangeControl
+                    label="Impostors"
+                    nested
+                    min={0}
+                    max={Math.max(20, Math.round(layer.cull))}
+                    step={5}
+                    value={layer.impostor?.distance ?? 0}
+                    onChange={async (distance) => {
+                      if (!(distance > 0)) {
+                        set(found, { impostor: undefined });
+                        return;
+                      }
+                      // Bake the cards once; moving the distance afterwards keeps them.
+                      const mesh = layer.impostor?.mesh ?? (await bakeFoliageImpostor(found.mesh));
+                      if (mesh) set(found, { impostor: { distance, mesh } });
+                    }}
+                    ariaLabel={`${layer.name} impostor distance`}
+                    display={layer.impostor ? `cards past ${layer.impostor.distance} m` : "off"}
+                  />
                   <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, marginTop: 6 }}>
                     <input
                       type="checkbox"
@@ -443,6 +543,7 @@ function FoliageSection({
                   {layer.fill && (
                     <>
                       <RangeControl label="Steepest slope" nested min={0} max={90} step={1} value={Math.round((Math.acos(Math.max(0, Math.min(1, layer.fill.up?.[0] ?? 0))) * 180) / Math.PI)} onChange={(deg) => set(found, { fill: { ...layer.fill!, up: [Math.cos((deg * Math.PI) / 180), 1] } })} ariaLabel={`${layer.name} steepest slope`} display={`${Math.round((Math.acos(Math.max(0, Math.min(1, layer.fill.up?.[0] ?? 0))) * 180) / Math.PI)}°`} />
+                      <FillRules layer={layer} splines={sidecar.splines ?? []} onFill={(fill) => set(found, { fill })} />
                       <button type="button" className="cbx-btn" onClick={() => set(found, { fill: { ...layer.fill!, seed: layer.fill!.seed + 1 } })} title="Scatter the filled copies differently">
                         Reseed
                       </button>
@@ -475,7 +576,7 @@ function FoliageSection({
         <select aria-label="New foliage mesh" value={source} onChange={(event) => setSource(event.target.value)} style={{ flex: 1, minWidth: 0 }}>
           {PRESETS.map((p) => (
             <option key={p} value={`preset:${p}`}>
-              {p}
+              {FOLIAGE_PRESET_LABELS[p]}
             </option>
           ))}
           {sidecar.meshes.map((m) => (
@@ -496,5 +597,5 @@ function FoliageSection({
 function layerCopiesCount(sidecar: MeshSidecar, found: { layer: FoliageLayer }): number {
   if (!found.layer.fill) return found.layer.copies.length;
   const terrain = findTerrain(sidecar, found.layer.terrain);
-  return terrain ? layerCopies(terrain, found.layer).length : found.layer.copies.length;
+  return terrain ? layerCopies(terrain, found.layer, { splines: sidecar.splines ?? [] }).length : found.layer.copies.length;
 }

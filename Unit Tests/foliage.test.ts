@@ -165,7 +165,7 @@ describe("the editor and the runtime", () => {
     const a = addFoliage(sc, made.id, { preset: "boulder" })!;
     const b = addFoliage(a.sidecar, made.id, { from: sc.meshes[0]!.id })!;
     sc = b.sidecar;
-    expect(foliageOn(sc, made.id).map((f) => f.layer.name)).toEqual(["boulder", "tree"]);
+    expect(foliageOn(sc, made.id).map((f) => f.layer.name)).toEqual(["boulders", "tree"]);
     // Paint a few copies, store, read back.
     const found = findFoliage(sc, a.id)!;
     const painted = paintFoliage(findTerrain(sc, made.id)!, found.layer, { x: 32, z: 32, radius: 8, strength: 1 }, 4);

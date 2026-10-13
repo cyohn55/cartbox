@@ -74,6 +74,15 @@ interface MeshInstance extends MeshSceneInstance {
         readonly cull: number;
         readonly center: readonly [number, number, number];
         readonly radius: number;
+        /**
+         * A layer with impostors (P4): the block draws only nearer than `distance`
+         * (to its centre) — or, with `far`, only from there out: the full copies
+         * and their impostors trade places, never both, never neither.
+         */
+        readonly swap?: {
+            readonly distance: number;
+            readonly far: boolean;
+        };
     };
     /** The components attached to this object (EP14), each with its field values; absent when none. */
     readonly components?: readonly AttachedComponent[];

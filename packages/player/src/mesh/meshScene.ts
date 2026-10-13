@@ -49,6 +49,8 @@ import {
   decodeLods,
   applyMeshVariant,
   foliageBlocks,
+  layerCopies,
+  readSplines,
   readFoliage,
   parseSceneAudio,
   type SceneAudio,
@@ -128,7 +130,17 @@ export interface MeshInstance extends MeshSceneInstance {
    * the camera (to the edge of its bounds — `center` and `radius`, in the
    * instance's space) it isn't drawn.
    */
-  readonly foliage?: { readonly cull: number; readonly center: readonly [number, number, number]; readonly radius: number };
+  readonly foliage?: {
+    readonly cull: number;
+    readonly center: readonly [number, number, number];
+    readonly radius: number;
+    /**
+     * A layer with impostors (P4): the block draws only nearer than `distance`
+     * (to its centre) — or, with `far`, only from there out: the full copies
+     * and their impostors trade places, never both, never neither.
+     */
+    readonly swap?: { readonly distance: number; readonly far: boolean };
+  };
   /** The components attached to this object (EP14), each with its field values; absent when none. */
   readonly components?: readonly AttachedComponent[];
 }
@@ -480,6 +492,8 @@ export function parseMeshScene(raw: string | null | undefined): MeshScene | null
   // Foliage (EP11): each layer's copies, set on its terrain and merged into
   // blocks, drawn as landscape (no framing, no shadow map) and culled by distance.
   const storedFoliage = (parsed as { foliage?: unknown }).foliage;
+  // Fills may keep near (or away from) the scene's splines (P4).
+  const placement = { splines: readSplines((parsed as { splines?: unknown }).splines) };
   if (Array.isArray(storedFoliage)) {
     for (const raw of storedFoliage) {
       const read = readFoliage(raw, allTerrains);
@@ -493,10 +507,35 @@ export function parseMeshScene(raw: string | null | undefined): MeshScene | null
       const vista = vistas.get(t.id);
       if (vista) {
         // On a vista, the copies go into the sky with their ground (a forest edge).
-        for (const block of foliageBlocks(t, read.layer, mesh)) vista.parts.push({ mesh: block.mesh, model });
+        for (const block of foliageBlocks(t, read.layer, mesh, layerCopies(t, read.layer, placement))) vista.parts.push({ mesh: block.mesh, model });
         continue;
       }
-      foliageBlocks(t, read.layer, mesh).forEach((block, k) => {
+      const copies = layerCopies(t, read.layer, placement);
+      // Impostors (P4): the same copies again as cards, drawn where the full ones stop.
+      let cards: MeshAsset | null = null;
+      if (read.layer.impostor) {
+        const text = resolveMeshRef(read.layer.impostor.mesh, library);
+        cards = text ? load(text) : null;
+      }
+      const swap = cards ? read.layer.impostor!.distance : 0;
+      if (cards) {
+        foliageBlocks(t, { ...read.layer, wind: 0 }, cards, copies).forEach((block, k) => {
+          instances.push({
+            mesh: block.mesh,
+            model,
+            local: identity,
+            parent,
+            id: `foliage:${read.layer.id}:far:${k}`,
+            name: `${read.layer.name} (far)`,
+            tags: [],
+            props: {},
+            physics: null,
+            terrain: true,
+            foliage: { cull: read.layer.cull, center: block.center, radius: block.radius, swap: { distance: swap, far: true } },
+          });
+        });
+      }
+      foliageBlocks(t, read.layer, mesh, copies).forEach((block, k) => {
         instances.push({
           mesh: block.mesh,
           model,
@@ -510,7 +549,7 @@ export function parseMeshScene(raw: string | null | undefined): MeshScene | null
           terrain: true,
           // On a terrain that casts, its foliage casts too (boulders shade the snow).
           ...(t.castShadows ? { casts: true as const } : {}),
-          foliage: { cull: read.layer.cull, center: block.center, radius: block.radius },
+          foliage: { cull: read.layer.cull, center: block.center, radius: block.radius, ...(cards ? { swap: { distance: swap, far: false } } : {}) },
         });
       });
     }

@@ -7613,6 +7613,8 @@ import {
   decodeLods,
   applyMeshVariant,
   foliageBlocks,
+  layerCopies,
+  readSplines,
   readFoliage,
   parseSceneAudio,
   parseParticleEffects,
@@ -7838,6 +7840,7 @@ function parseMeshScene(raw) {
     }
   }
   const storedFoliage = parsed.foliage;
+  const placement = { splines: readSplines(parsed.splines) };
   if (Array.isArray(storedFoliage)) {
     for (const raw2 of storedFoliage) {
       const read = readFoliage(raw2, allTerrains);
@@ -7850,10 +7853,34 @@ function parseMeshScene(raw) {
       const model = parent >= 0 ? instances[parent].model : identity;
       const vista = vistas.get(t.id);
       if (vista) {
-        for (const block of foliageBlocks(t, read.layer, mesh)) vista.parts.push({ mesh: block.mesh, model });
+        for (const block of foliageBlocks(t, read.layer, mesh, layerCopies(t, read.layer, placement))) vista.parts.push({ mesh: block.mesh, model });
         continue;
       }
-      foliageBlocks(t, read.layer, mesh).forEach((block, k) => {
+      const copies = layerCopies(t, read.layer, placement);
+      let cards = null;
+      if (read.layer.impostor) {
+        const text2 = resolveMeshRef(read.layer.impostor.mesh, library);
+        cards = text2 ? load(text2) : null;
+      }
+      const swap = cards ? read.layer.impostor.distance : 0;
+      if (cards) {
+        foliageBlocks(t, { ...read.layer, wind: 0 }, cards, copies).forEach((block, k) => {
+          instances.push({
+            mesh: block.mesh,
+            model,
+            local: identity,
+            parent,
+            id: `foliage:${read.layer.id}:far:${k}`,
+            name: `${read.layer.name} (far)`,
+            tags: [],
+            props: {},
+            physics: null,
+            terrain: true,
+            foliage: { cull: read.layer.cull, center: block.center, radius: block.radius, swap: { distance: swap, far: true } }
+          });
+        });
+      }
+      foliageBlocks(t, read.layer, mesh, copies).forEach((block, k) => {
         instances.push({
           mesh: block.mesh,
           model,
@@ -7867,7 +7894,7 @@ function parseMeshScene(raw) {
           terrain: true,
           // On a terrain that casts, its foliage casts too (boulders shade the snow).
           ...t.castShadows ? { casts: true } : {},
-          foliage: { cull: read.layer.cull, center: block.center, radius: block.radius }
+          foliage: { cull: read.layer.cull, center: block.center, radius: block.radius, ...cards ? { swap: { distance: swap, far: false } } : {} }
         });
       });
     }
@@ -12532,7 +12559,9 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
     const cx = m[0] * x + m[4] * y + m[8] * z + m[12];
     const cy = m[1] * x + m[5] * y + m[9] * z + m[13];
     const cz = m[2] * x + m[6] * y + m[10] * z + m[14];
-    return Math.hypot(cx - this.eye[0], cy - this.eye[1], cz - this.eye[2]) - f2.radius < f2.cull * this.quality.terrainDetail;
+    const d = Math.hypot(cx - this.eye[0], cy - this.eye[1], cz - this.eye[2]);
+    if (f2.swap && d >= f2.swap.distance * this.quality.terrainDetail !== f2.swap.far) return false;
+    return d - f2.radius < f2.cull * this.quality.terrainDetail;
   }
   /**
    * A terrain block at the detail its distance from the eye calls for: full

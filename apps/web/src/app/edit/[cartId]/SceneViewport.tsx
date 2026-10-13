@@ -39,6 +39,7 @@ import {
   readTerrain,
   readFoliage,
   foliageBlocks,
+  layerCopies,
   deserializeMeshAsset,
   sceneLightingEnvironment,
   sceneLightingKeyDirection,
@@ -291,7 +292,8 @@ export function SceneViewport({ sidecar, onSidecarChange, selectedIds, onSelectI
   const [showFog, setShowFog] = useState(true);
   const [terrains, setTerrains] = useState<PreviewTerrain[]>([]);
   // Everything about the terrains (a brush stroke changes their heights, paint and holes).
-  const terrainSignature = useMemo(() => JSON.stringify([sidecar.terrains ?? [], sidecar.foliage ?? []]), [sidecar.terrains, sidecar.foliage]);
+  // Splines too: a fill may keep near (or clear of) them (P4).
+  const terrainSignature = useMemo(() => JSON.stringify([sidecar.terrains ?? [], sidecar.foliage ?? [], sidecar.splines ?? []]), [sidecar.terrains, sidecar.foliage, sidecar.splines]);
   /** Foliage (EP11): each layer's merged blocks, drawn with the terrain they grow on. */
   const [foliage, setFoliage] = useState<{ readonly terrainId: string; readonly mesh: MeshAsset; readonly textures: (DecodedTexture | null)[] }[]>([]);
   useEffect(() => {
@@ -317,7 +319,7 @@ export function SceneViewport({ sidecar, onSidecarChange, selectedIds, onSelectI
           continue;
         }
         const textures = await decodeMeshTextures(mesh);
-        for (const block of foliageBlocks(terrain, read.layer, mesh)) plants.push({ terrainId: terrain.id, mesh: block.mesh, textures });
+        for (const block of foliageBlocks(terrain, read.layer, mesh, layerCopies(terrain, read.layer, { splines: sidecar.splines ?? [] }))) plants.push({ terrainId: terrain.id, mesh: block.mesh, textures });
       }
       if (!cancelled) {
         setTerrains(next);

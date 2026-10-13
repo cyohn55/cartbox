@@ -387,10 +387,11 @@ export {
   type FoliageBlock,
   type FoliageCopy,
   type FoliageFill,
+  type FoliageContext,
   type FoliageLayer,
   type SerializedFoliage,
 } from "./model/foliage";
-export { FOLIAGE_PRESETS, boulderMesh, broadleafMesh, driftMesh, foliagePreset, grassMesh, pineMesh, reedsMesh, type FoliagePreset } from "./model/foliagePresets";
+export { FOLIAGE_PRESETS, FOLIAGE_PRESET_LABELS, boulderMesh, broadleafMesh, cliffRockMesh, driftMesh, foliagePreset, grassCardMesh, grassCardTexture, grassMesh, pineMesh, reedsMesh, type FoliagePreset } from "./model/foliagePresets";
 export {
   DEFAULT_BUSES,
   MAX_EMITTERS,
@@ -639,6 +640,7 @@ export {
   resolveLodMesh,
   applyLods,
 } from "./render/lod";
+export { bakeImpostor, type BakedImpostor } from "./render/impostor";
 export type { LodChain } from "./render/meshRasterizer";
 export { aabbOccluded, occlusionCull, type OcclusionInput } from "./render/occlusion";
 export {
