@@ -31,6 +31,7 @@ import { type MeshSidecar } from "@/lib/meshSidecar";
 import { addTerrain, findTerrain, removeTerrain, replaceTerrain, type TerrainBrushSettings, type TerrainTool } from "@/lib/terrainEdit";
 import styles from "./editor.module.css";
 import { RailGroup, RailHint, RangeControl } from "./railControls";
+import { SplinePanel } from "./SplinePanel";
 
 /** What the Terrain panel has up: which terrain, which tool (null = select objects as usual), and the brush. */
 export interface TerrainEditState extends TerrainBrushSettings {
@@ -236,6 +237,8 @@ export function TerrainPanel({
           )}
 
           <FoliageSection sidecar={sidecar} onChange={onChange} terrainId={terrain.id} edit={edit} onEdit={(next) => onEdit({ ...next, id })} />
+
+          <SplinePanel sidecar={sidecar} onChange={onChange} edit={{ ...edit, id }} onEdit={onEdit} />
 
           <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, marginTop: 10 }} title="Draw this terrain (and its foliage) once into the sky from the play space, instead of as geometry: far mountains and forests for nothing per frame">
             <input type="checkbox" checked={Boolean(terrain.vista)} onChange={(event) => onChange(replaceTerrain(sidecar, { ...terrain, vista: event.target.checked ? { haze: DEFAULT_VISTA_HAZE } : undefined }))} />

@@ -90,6 +90,7 @@ import { describeContract, replaceModel, replacementContract } from "@/lib/meshR
 import { isLockoutSidecar } from "@/lib/lockoutAssets";
 import { basePath } from "@/lib/staticSite";
 import { DAB_SPACING, applyTerrainTool, findTerrain, replaceTerrain, strokeDabs } from "@/lib/terrainEdit";
+import { addSplinePoint, splineOverlays } from "@/lib/splineEdit";
 import { findFoliage, replaceFoliage } from "@/lib/foliageEdit";
 import { INITIAL_TERRAIN_EDIT, TerrainPanel, type TerrainEditState } from "./TerrainPanel";
 import { SoundsPanel } from "./SoundsPanel";
@@ -273,6 +274,8 @@ export function MeshEditor({ sidecar, onSidecarChange, code, onStartPlay, modern
   const [view, setView] = useState<"solo" | "scene">("solo");
   /** The Terrain panel's tool and brush (EP10); a tool up turns the scene view's left button into a brush. */
   const [terrainEdit, setTerrainEdit] = useState<TerrainEditState>(INITIAL_TERRAIN_EDIT);
+  /** The splines' curves and points, drawn over the scene view (P3). */
+  const splineLines = useMemo(() => splineOverlays(sidecar), [sidecar]);
   const onTerrainEdit = (next: TerrainEditState) => {
     setTerrainEdit(next);
     if (next.tool) setView("scene"); // brushing happens in the scene view
@@ -303,6 +306,11 @@ export function MeshEditor({ sidecar, onSidecarChange, code, onStartPlay, modern
       f.layer = layer;
       f.last = last;
       onSidecarChange(replaceFoliage(sidecar, layer, f.mesh));
+      return;
+    }
+    if (tool.kind === "spline") {
+      // Placing a spline's points (P3): each click on the ground puts one down.
+      if (start) onSidecarChange(addSplinePoint(sidecar, tool.id, id, x, z));
       return;
     }
     if (tool.kind === "ramp") {
@@ -1251,6 +1259,7 @@ export function MeshEditor({ sidecar, onSidecarChange, code, onStartPlay, modern
           onView={setSceneView}
           terrainBrush={terrainEdit.tool && terrainEdit.id ? { id: terrainEdit.id, radius: terrainEdit.radius } : null}
           onTerrainStroke={onTerrainStroke}
+          splines={splineLines}
           onDropAsset={(data, at) => {
             try {
               const asset = JSON.parse(data) as { kind?: unknown; key?: unknown };

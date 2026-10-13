@@ -60,6 +60,7 @@ import { expectTemporal, temporalReport, type GpuRenderer } from "./helpers/temp
 import { expectReflections, reflectionReport } from "./helpers/reflectionScene";
 import { WATER_ENVIRONMENT, WATER_TIME, waterInstances } from "./helpers/waterScenes";
 import { CLIFF_EYE, CLIFF_TARGET, cliffInstances } from "./helpers/terrainScenes";
+import { RIVER_EYE, RIVER_TARGET, riverInstances } from "./helpers/riverScenes";
 import { WIND, WIND_EYE, WIND_TARGET, WIND_TIME, windInstances } from "./helpers/windScenes";
 import { NORMAL_ENVIRONMENT, NORMAL_LIGHT, normalMapInstances } from "./helpers/normalMapScenes";
 
@@ -520,7 +521,7 @@ describe.skipIf(!device)("WebGPU parity on a real device", () => {
     expect(changed).toBeGreaterThan(30);
   }, 60_000);
 
-  it("matches the software rasteriser on water, triplanar cliffs, wind, normal maps and landscape materials (B5, B6, P1a, P2b)", async () => {
+  it("matches the software rasteriser on water, triplanar cliffs, wind, normal maps and landscape materials and rivers (B5, B6, P1a, P2b, P3)", async () => {
     const mat = (m: Record<string, unknown>) => {
       const q = quad();
       return { ...q, primitives: [{ ...q.primitives[0]!, material: { ...q.primitives[0]!.material, ...m } }] };
@@ -529,6 +530,7 @@ describe.skipIf(!device)("WebGPU parity on a real device", () => {
       ["water", waterInstances(mat), () => ({ ...draw(), view: viewMatrix([0, 2.6, 2.4], [0, -0.3, 0]), background: [20, 20, 30, 255], environment: WATER_ENVIRONMENT, time: WATER_TIME }), 0.03],
       ["cliff", cliffInstances({ triplanar: true, sharpness: 0.8 }), () => ({ ...draw(), view: viewMatrix(CLIFF_EYE, CLIFF_TARGET), background: [20, 20, 30, 255], lightDirection: [0.3, 0.8, -0.5] }), 0.02],
       ["landscape cliff", cliffInstances({ triplanar: true, sharpness: 0.8, landscape: true }), () => ({ ...draw(), view: viewMatrix(CLIFF_EYE, CLIFF_TARGET), background: [20, 20, 30, 255], lightDirection: [0.3, 0.8, -0.5] }), 0.02],
+      ["river", riverInstances(true), () => ({ ...draw(), view: viewMatrix(RIVER_EYE, RIVER_TARGET), background: [20, 20, 30, 255], environment: WATER_ENVIRONMENT, time: WATER_TIME }), 0.03],
       ["wind", windInstances(), () => ({ ...draw(), view: viewMatrix(WIND_EYE, WIND_TARGET), background: [20, 20, 30, 255], lightDirection: [0.3, 0.8, -0.5], wind: WIND, time: WIND_TIME }), 0.03],
       ["normal maps", normalMapInstances(mat), () => ({ ...draw(), lightDirection: NORMAL_LIGHT, environment: NORMAL_ENVIRONMENT }), 0.02],
     ];

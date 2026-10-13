@@ -285,6 +285,23 @@ describe.skipIf(!chromiumPath)("WebGL2 parity in a real browser", () => {
     }
   }, 60_000);
 
+  it("flows a river spline's ripples along its course like the software rasteriser (P3)", async () => {
+    const result = await run("river");
+    expect(result.drawn).toBeGreaterThan(2000);
+    if (exact) {
+      expect(result.coverage, JSON.stringify(result.diffs)).toBe(0);
+      // Float32 noise and screen derivatives on the GPU: a ripple's edge can land a level over.
+      expect(result.far, JSON.stringify(result.diffs)).toBeLessThanOrEqual(result.drawn * 0.03);
+    }
+    // Along the river is not the same as across the world.
+    const along = await antialiasedFrame("river");
+    const world = await antialiasedFrame("riverWorld");
+    expect(along.error).toBe(0);
+    let changed = 0;
+    for (let i = 0; i < along.out.length; i += 4) if (Math.abs(along.out[i]! - world.out[i]!) + Math.abs(along.out[i + 2]! - world.out[i + 2]!) > 20) changed += 1;
+    expect(changed).toBeGreaterThan(200);
+  }, 60_000);
+
   it("varies a cliff's colour in broad patches and tiles it larger far off like the software rasteriser (P2b)", async () => {
     const result = await run("cliffLandscape");
     expect(result.drawn).toBeGreaterThan(2000);

@@ -79,6 +79,7 @@ import {
   WATER_STEP,
   WATER_TILT,
   waterUniform,
+  waterAlong,
   windUniform,
   graphShaderCode,
   multiplyMat4,
@@ -828,10 +829,27 @@ float waterHeight(vec2 q, vec2 d) {
   float wa = 1.0 - abs(1.0 - 2.0 * a);
   return waterLayer(q, a * ${WATER_PERIOD.toFixed(1)}, d) * wa + waterLayer(q + vec2(53.0, 17.0), fract(a + 0.5) * ${WATER_PERIOD.toFixed(1)}, d) * (1.0 - wa);
 }
-// N tilted by the ripples at world point wp (N itself when the draw has no water).
+// Water flowing along the UVs (EDITOR_PRO_ROADMAP.md P3): the fragment's UVs and
+// their world gradients, set in main before any waterNormal.
+vec2 wUv;
+vec3 wGu;
+vec3 wGv;
+// N tilted by the ripples at world point wp (N itself when the draw has no water) —
+// or, flowing along the UVs, at wUv, turned into the world by wGu and wGv (waterTiltAlong).
 vec3 waterNormal(vec3 N, vec3 wp) {
   if (u.water0.x <= 0.0) { return N; }
   vec2 d = vec2(cos(u.water0.w), sin(u.water0.w));
+  if (u.maps0.z > 0.5) {
+    float lu = length(wGu);
+    float lv = length(wGv);
+    if (lu <= 0.0 || lv <= 0.0) { return N; }
+    vec2 qa = wUv * u.water0.y;
+    float ha = waterHeight(qa, d);
+    float ka = -u.water0.x * ${(WATER_TILT / WATER_STEP).toFixed(4)};
+    float su = (waterHeight(qa + vec2(${WATER_STEP.toFixed(4)}, 0.0), d) - ha) * ka;
+    float sv = (waterHeight(qa + vec2(0.0, ${WATER_STEP.toFixed(4)}), d) - ha) * ka;
+    return normalize(N + su * wGu / lu + sv * wGv / lv);
+  }
   vec2 q = wp.xz * u.water0.y;
   float h = waterHeight(q, d);
   float k = -u.water0.x * ${(WATER_TILT / WATER_STEP).toFixed(4)};
@@ -899,6 +917,10 @@ ${reflect ? "  outReflect = vec4(0.0);\n  outEnv = vec4(0.0);\n" : ""}  // The s
     puv = parallaxUv(vUv, -vec2(dot(pgu, u.view.xyz), dot(pgv, u.view.xyz)) / pv, u.layer0.w);
   }
   vec2 uv = vec2(puv.x, 1.0 - puv.y);
+  wUv = puv;
+  wGu = vec3(0.0);
+  wGv = vec3(0.0);
+  if (u.maps0.z > 0.5) { uvGrads(normalize(vNormal), dp1, dp2, duv1, duv2, wGu, wGv); }
   // Normal mapping (EDITOR_PRO_ROADMAP.md P1a): the tangent-space normal map in
   // the triangle's tangent frame — worldTangent's (dP/du, Lengyel), here from the
   // screen derivatives — as the software rasteriser does. sNrm is what lights the
@@ -1485,6 +1507,7 @@ export class WebglSceneRenderer implements SceneRenderer {
         refraction: batch.refract && refractOk ? resolveRefraction(batch.primitive.material, effectActive(batch.effect) ? batch.effect : null) : null,
         camera,
         water: waterUniform(batch.primitive.material, draw.time ?? 0),
+        waterAlong: waterAlong(batch.primitive.material),
         mapping: resolveMapping(batch.primitive.material),
         hasNormalMap: batch.textures.normal !== null,
         wind: batch.primitive.sway ? windUniform(draw.wind, draw.time ?? 0) : null,

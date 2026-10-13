@@ -58,7 +58,7 @@ export function readSurfaceEffects(raw: Record<string, unknown> | object): Surfa
   if (finite(r.distortion) && r.distortion > 0) out.distortion = clamp(r.distortion, 0, 1);
   const water = r.water as Record<string, unknown> | undefined;
   if (water && typeof water === "object" && finite(water.strength) && water.strength > 0 && finite(water.scale) && finite(water.speed) && finite(water.flow)) {
-    out.water = { strength: clamp(water.strength, 0, 2), scale: clamp(water.scale, 0.05, 8), speed: clamp(water.speed, 0, 4), flow: clamp(water.flow, -Math.PI, Math.PI) };
+    out.water = { strength: clamp(water.strength, 0, 2), scale: clamp(water.scale, 0.05, 8), speed: clamp(water.speed, 0, 4), flow: clamp(water.flow, -Math.PI, Math.PI), ...(water.along === true ? { along: true } : {}) };
   }
   if (finite(r.triplanar) && r.triplanar > 0) out.triplanar = clamp(r.triplanar, 0.05, 1000);
   if (finite(r.blendSharpness) && r.blendSharpness > 0) out.blendSharpness = clamp(r.blendSharpness, 0, 1);
@@ -127,6 +127,31 @@ export function waterUniform(material: Pick<MeshMaterial, "water">, time: number
  * `waterTilt` is this, term for term.
  */
 export function waterTilt(uniform: readonly [number, number, number, number], x: number, z: number): [number, number] {
+  return rippleSlope(uniform, x, z);
+}
+
+/**
+ * The tilt of water that flows along its UVs (P3; {@link MeshMaterial.water}'s
+ * `along`): the same ripples as {@link waterTilt}, laid in UV space at (u, v),
+ * turned into the world by the surface's UV gradients `gu` and `gv` (each
+ * normalised: the world direction U, or V, increases). The shaders'
+ * `waterNormal`, term for term, when the draw's water flows along.
+ */
+export function waterTiltAlong(uniform: readonly [number, number, number, number], u: number, v: number, gu: readonly [number, number, number], gv: readonly [number, number, number]): [number, number, number] {
+  const [su, sv] = rippleSlope(uniform, u, v);
+  const lu = Math.hypot(gu[0], gu[1], gu[2]);
+  const lv = Math.hypot(gv[0], gv[1], gv[2]);
+  if (!(lu > 0) || !(lv > 0)) return [0, 0, 0];
+  return [(su * gu[0]) / lu + (sv * gv[0]) / lv, (su * gu[1]) / lu + (sv * gv[1]) / lv, (su * gu[2]) / lu + (sv * gv[2]) / lv];
+}
+
+/** Whether a material's water flows along its UVs. */
+export function waterAlong(material: Pick<MeshMaterial, "water">): boolean {
+  return materialHasWater(material) && material.water!.along === true;
+}
+
+/** The ripples' slope at (x, z) of their plane: two drifting, crossfaded layers (see {@link waterTilt}). */
+function rippleSlope(uniform: readonly [number, number, number, number], x: number, z: number): [number, number] {
   const [strength, scale, a, flow] = uniform;
   if (!(strength > 0)) return [0, 0];
   const dx = Math.cos(flow);

@@ -103,7 +103,7 @@ Next to Unity and Unreal, it lacks the following:
     - **Editor.** The terrain panel sets each layer's "anywhere / hollows / crests", and macro variation and distance tiling for every layer at once. The material panel's new Landscape block sets them per material.
     - **Parity.** A landscape cliff scene (triplanar, height-blended, macro-varied, distance-tiled) matches the software frame on WebGL2. It passes on WebGPU over Dawn too, 29 of 29.
     - *Tests:* `landscape-materials.test.ts` (curvature, hard and soft layer picks, storage, clamping, packing lanes, the gain's bounds, the blend's curve, a changed software frame); `webgl-parity.test.ts`; `webgpu-parity.test.ts`.
-- [ ] **P3. Splines.**
+- [x] **P3. Splines.**
   - Editable splines (Catmull-Rom, with per-point width and height).
   - A **river** spline:
     - carves its bed and banks into the terrain;
@@ -112,6 +112,18 @@ Next to Unity and Unreal, it lacks the following:
   - A **path** spline that flattens and paints the ground.
   - **Spline meshes** (walls, fences, rock ledges) bent along a spline.
   - *Tests:* the carve matches the spline profile; flow follows the tangent; spline mesh deformation.
+  - **P3: done.** Splines (`splines.ts`, `splineEdit.ts`, the terrain panel's Splines section).
+    - **The curve.** Centripetal Catmull–Rom through the placed points, so there are no cusps or loops however unevenly the points are spaced. It is sampled evenly by arc length, with a horizontal frame and widths eased between points.
+    - **Placing points.** Click the ground in the scene view to place a point; whichever end is nearer grows. Each point's x, y, z and width can be edited in the panel. The scene view draws every curve and its points.
+    - **River: the carve.** Across its width the ground takes a cross-section: a flat bed `depth` below the water, rising to the water's edge. Across its banks the ground eases back to what it was, lowering high ground and building up low ground so the water is held. A layer can be painted on the banks (wet mud).
+    - **River: the water.** A ribbon a little wider than the river, its UVs in metres across and along. The water flows along its UVs (a new `water.along`): the ripples are worked out in UV space, then turned into the world by the surface's UV gradients. So the current follows every bend, with no seams, in all three renderers. The uniform's free lane `maps0.z` flags it.
+    - **River: the foam.** A strip of procedural, tileable foam along each edge.
+    - **Bends tighter than the river is wide.** The inner edge is held inside the bend's radius rather than folding back.
+    - **Path.** Levels the tread to the spline's height, eases the shoulders, and can paint a layer.
+    - **Wall.** Bends any scene object along the spline, repeated end to end and stretched so a whole number of copies fits. Its sideways scale follows the width.
+    - **Applying.** What a spline makes is an ordinary scene object tagged with its id; applying again replaces it, and deleting the spline removes it.
+    - **Parity.** An S-bend river matches the software frame on WebGL2, and on WebGPU over Dawn, 30 of 30. Its ripples are strong enough to change a quarter of the river's pixels, so the parity check would catch a GPU that ignored them.
+    - *Tests:* `splines.test.ts` (the curve through its points and evenly sampled; nearest point and side; the carve's bed, edge and banks, built-up banks, wet-bank paint; the water ribbon's UVs and up-facing winding; the foam's UVs; the along-UV tilt is the world tilt turned by the gradients; the path's tread, shoulders and paint; the bent wall; storage; placing points; applying a river and a wall).
 - [ ] **P4. Procedural placement.**
   - Scatter **volumes**, with rules (slope, height, distance to splines, density maps) and exclusion zones.
   - **Cliff rocks** placed along steep slopes.

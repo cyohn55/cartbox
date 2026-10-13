@@ -235,7 +235,18 @@ export interface MeshMaterial {
    * metre (0.05..8), `speed` how fast they drift (0..4), and `flow` the
    * direction they drift, radians about +Y from +X (a creek's current).
    */
-  readonly water?: { readonly strength: number; readonly scale: number; readonly speed: number; readonly flow: number };
+  readonly water?: {
+    readonly strength: number;
+    readonly scale: number;
+    readonly speed: number;
+    readonly flow: number;
+    /**
+     * Ripples in the surface's UV space instead of the world's (EDITOR_PRO_ROADMAP.md
+     * P3): with UVs in metres, U across and V along, `flow` π/2 drifts them along
+     * V — down a river spline's course, round every bend.
+     */
+    readonly along?: boolean;
+  };
   // --- Texture generators (EDITOR_PRO_ROADMAP.md P1c; see textureGenerators.ts) ---
   /**
    * A procedural surface (rock, cliff strata, grass, mud, worn stone,

@@ -22,6 +22,7 @@ import { LAYER_ENVIRONMENT, LAYER_LIGHTS, layerInstances } from "./layerScenes";
 import { REFRACTION_TIME, refractionInstances, straightInstances } from "./refractionScenes";
 import { WATER_ENVIRONMENT, WATER_TIME, waterInstances } from "./waterScenes";
 import { CLIFF_EYE, CLIFF_TARGET, cliffInstances } from "./terrainScenes";
+import { RIVER_EYE, RIVER_TARGET, riverInstances } from "./riverScenes";
 import { WIND, WIND_EYE, WIND_TARGET, WIND_TIME, windInstances } from "./windScenes";
 import { NORMAL_ENVIRONMENT, NORMAL_LIGHT, normalMapInstances } from "./normalMapScenes";
 import { localShadowRig } from "./localShadowScene";
@@ -190,6 +191,14 @@ function scenes(): Record<string, Scene> {
     cliff: {
       instances: cliffInstances({ triplanar: true, sharpness: 0.8 }),
       draw: () => ({ ...baseDraw(), view: viewMatrix(CLIFF_EYE, CLIFF_TARGET), background: [20, 20, 30, 255] as [number, number, number, number], lightDirection: [0.3, 0.8, -0.5] as [number, number, number] }),
+    },
+    river: {
+      instances: riverInstances(true),
+      draw: () => ({ ...baseDraw(), view: viewMatrix(RIVER_EYE, RIVER_TARGET), background: [20, 20, 30, 255] as [number, number, number, number], environment: WATER_ENVIRONMENT, time: WATER_TIME }),
+    },
+    riverWorld: {
+      instances: riverInstances(false),
+      draw: () => ({ ...baseDraw(), view: viewMatrix(RIVER_EYE, RIVER_TARGET), background: [20, 20, 30, 255] as [number, number, number, number], environment: WATER_ENVIRONMENT, time: WATER_TIME }),
     },
     cliffLandscape: {
       instances: cliffInstances({ triplanar: true, sharpness: 0.8, landscape: true }),
