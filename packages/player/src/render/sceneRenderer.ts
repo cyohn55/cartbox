@@ -220,6 +220,13 @@ export interface SceneRenderer {
   renderToTexture?(instances: readonly MeshSceneInstance[], draw: GpuSceneDraw): unknown;
   /** The GPU device a {@link renderToTexture} texture belongs to, so a compositor can share it. */
   readonly gpuDevice?: unknown;
+  /**
+   * The block-compressed formats this renderer uploads a texture's
+   * {@link DecodedTexture.gpu} chain in, preferred first (AAA_FIDELITY_ROADMAP.md
+   * F1a): what a KTX2 texture should transcode to for it. Empty or absent, it
+   * samples RGBA only.
+   */
+  readonly textureFormats?: readonly string[];
   dispose(): void;
   /** What the last frame drew, for the profiler (see debug/profiler.ts). */
   readonly lastFrameStats?: RenderStats;
@@ -317,6 +324,10 @@ export class CappedSceneRenderer implements SceneRenderer {
 
   get gpuDevice(): unknown {
     return this.inner.gpuDevice;
+  }
+
+  get textureFormats(): readonly string[] | undefined {
+    return this.inner.textureFormats;
   }
 
   get renderToTexture(): SceneRenderer["renderToTexture"] {

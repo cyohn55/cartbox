@@ -44,6 +44,21 @@ export interface DecodedTexture {
   readonly width: number;
   readonly height: number;
   readonly data: Uint8ClampedArray;
+  /**
+   * The same texture in a GPU's own block-compressed format, with its mip chain
+   * (AAA_FIDELITY_ROADMAP.md F1a): what a KTX2 file transcodes to when the
+   * renderer says which formats its device samples. A renderer that can take
+   * it uploads it instead of `data`, a quarter the memory or less; every other
+   * path (the software rasteriser, CPU passes) reads `data`.
+   */
+  readonly gpu?: CompressedTexture;
+}
+
+/** A block-compressed texture: a WebGPU format and its levels, largest first (see DecodedTexture.gpu). */
+export interface CompressedTexture {
+  /** A WebGPU texture format: "bc7-rgba-unorm", "astc-4x4-unorm" or "etc2-rgba8unorm". */
+  readonly format: string;
+  readonly levels: readonly { readonly width: number; readonly height: number; readonly data: Uint8Array }[];
 }
 
 /** An orbit camera framing the mesh: angles around it and a distance from centre. */

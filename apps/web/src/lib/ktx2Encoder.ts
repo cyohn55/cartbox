@@ -58,8 +58,10 @@ export function encodeKtx2(basis: any, texture: DecodedTexture, kind: TextureKin
   const encoder = new basis.BasisEncoder();
   try {
     encoder.setCreateKTX2File(true);
-    // One level: every renderer here builds its own mips from the RGBA it samples.
-    encoder.setMipGen(false);
+    // The whole mip chain (F1a): a renderer that samples the GPU's own compressed
+    // formats can't make a compressed texture's mips, so they ride in the file.
+    // The RGBA paths read only the top level.
+    encoder.setMipGen(true);
     const colour = kind === "color";
     encoder.setKTX2AndBasisSRGBTransferFunc(colour);
     encoder.setPerceptual(colour);
@@ -68,14 +70,18 @@ export function encodeKtx2(basis: any, texture: DecodedTexture, kind: TextureKin
       encoder.setQualityLevel(KTX2_COLOR_QUALITY);
     } else {
       encoder.setUASTC(true);
-      if (kind === "normal") encoder.setNormalMapPreset();
+      if (kind === "normal") {
+        encoder.setNormalMapPreset();
+        // Each level's normals averaged, then set back to unit length.
+        encoder.setMipRenormalize?.(true);
+      }
       encoder.setRDOUASTC(true);
       encoder.setKTX2UASTCSupercompression(true);
     }
     const rgba = new Uint8Array(texture.data.buffer, texture.data.byteOffset, width * height * 4);
     if (encoder.setSliceSourceImage(0, rgba, width, height, 0) === false) return null;
-    // Room for the worst case: uncompressed, plus the file's header.
-    const out = new Uint8Array(width * height * 4 + 64 * 1024);
+    // Room for the worst case: uncompressed with its mips (a third more), plus the file's header.
+    const out = new Uint8Array(Math.ceil((width * height * 4 * 4) / 3) + 64 * 1024);
     const length: number = encoder.encode(out);
     return length > 0 ? out.slice(0, length) : null;
   } catch {

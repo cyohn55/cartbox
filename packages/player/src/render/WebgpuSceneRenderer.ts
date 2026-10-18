@@ -127,7 +127,8 @@ import { SoftwareSceneRenderer, applyScenePasses, type FrameState, type GpuScene
 import { webgpuCanHonour } from "./renderCaps.js";
 import { batchInstances, compositeFrame, presentFrame, softEdges, type PrimitiveTextures } from "./gpuFrame.js";
 import { FrameGraph, GraphTimer, TransientPool, type FrameResource, type PassContext } from "./frameGraph.js";
-import { MAX_ANISOTROPY, MipmapGenerator, coverageMips, hasTransparency, mipLevelCount } from "./mipmaps.js";
+import { MAX_ANISOTROPY, MipmapGenerator, coverageMips, hasTransparency, mipLevelCount, uploadCompressed } from "./mipmaps.js";
+import { compressedFormatsFor } from "../lighting/webgpuDevice.js";
 import { TEMPORAL_SHARPEN_WGSL, TemporalState, temporalShaderWgsl } from "./temporal.js";
 import { reflectionShaderWgsl, reflectionUniforms } from "./reflections.js";
 import type { RenderStats } from "../debug/profiler.js";
@@ -1467,6 +1468,8 @@ export class WebgpuSceneRenderer implements SceneRenderer {
   private readonly colourTextures = new WeakMap<DecodedTexture, any>();
   /** Draws a texture's mip chain on the GPU (F1a). */
   private readonly mipmaps: MipmapGenerator;
+  /** The block-compressed formats this renderer uploads a texture's `gpu` chain in, preferred first (F1a). */
+  readonly textureFormats: readonly string[];
   // Not readonly: a resized uniform buffer invalidates every cached group at
   // once, and WeakMap has no clear(), so the map itself is replaced.
   private bindGroups = new WeakMap<MeshPrimitive, CachedBindGroup>();
@@ -1581,6 +1584,8 @@ export class WebgpuSceneRenderer implements SceneRenderer {
     this.ssaoBound = blankShadow; // the 1x1 r32float blank until an AO buffer arrives
     this.timer = GraphTimer.create(device);
     this.mipmaps = new MipmapGenerator(device);
+    // Compressed textures need mips (F1a): the GPU can't make a compressed texture's.
+    this.textureFormats = mips ? compressedFormatsFor(device) : [];
     this.transients = new TransientPool(device);
   }
 
@@ -2933,12 +2938,21 @@ export class WebgpuSceneRenderer implements SceneRenderer {
    * A colour map with see-through texels (a cut-out's, say a grass card's) is
    * mipped on the CPU instead, keeping its coverage: averaged alpha would
    * otherwise fall under the cutoff, and foliage would thin away with distance.
+   * A texture that carries a chain in a block-compressed format this device
+   * samples (a KTX2 one, F1a) uploads that instead: a quarter of the memory,
+   * its mips the encoder's. A cut-out keeps the RGBA path for its coverage.
    */
   private uploadTexture(source: DecodedTexture, colour = false): any {
     const cache = this.mips && colour ? this.colourTextures : this.textures;
     const cached = cache.get(source);
     if (cached) return cached;
 
+    const compressed = this.mips && source.gpu && this.textureFormats.includes(source.gpu.format) && !(colour && hasTransparency(source)) ? source.gpu : null;
+    if (compressed) {
+      const texture = uploadCompressed(this.device, source.width, source.height, compressed);
+      cache.set(source, texture);
+      return texture;
+    }
     const levels = this.mips ? mipLevelCount(source.width, source.height) : 1;
     const texture = this.device.createTexture({
       size: { width: source.width, height: source.height },

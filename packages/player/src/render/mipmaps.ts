@@ -214,3 +214,23 @@ export function coverageMips(source: DecodedTexture, cutoff = COVERAGE_CUTOFF): 
   }
   return out;
 }
+
+/**
+ * A texture in a 4×4 block-compressed format (BC7, ASTC 4×4, ETC2 RGBA: 16
+ * bytes a block), its chain uploaded level by level. Each level's copy covers
+ * whole blocks, its physical size; the texture's own size is the top level's.
+ */
+export function uploadCompressed(device: any, width: number, height: number, chain: { readonly format: string; readonly levels: readonly { readonly width: number; readonly height: number; readonly data: Uint8Array }[] }): any {
+  const texture = device.createTexture({
+    size: { width, height },
+    format: chain.format,
+    mipLevelCount: chain.levels.length,
+    usage: 0x04 | 0x02, // TEXTURE_BINDING | COPY_DST
+  });
+  chain.levels.forEach((level, mipLevel) => {
+    const blocksWide = Math.ceil(level.width / 4);
+    const blocksHigh = Math.ceil(level.height / 4);
+    device.queue.writeTexture({ texture, mipLevel }, level.data, { bytesPerRow: blocksWide * 16, rowsPerImage: blocksHigh * 4 }, { width: blocksWide * 4, height: blocksHigh * 4 });
+  });
+  return texture;
+}

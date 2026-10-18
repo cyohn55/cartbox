@@ -247,6 +247,20 @@ Everything else depends on this track. It contains no visible "feature", but its
       - The coarsest levels of a cut-out have too few texels to hold its coverage exactly, so the farthest cards round to more or less covered.
       - Mips cost texture memory a third more until compression lands.
       - F1a-2 transcodes KTX2 to BC7/ASTC/ETC2 with its mips kept, and F1a-3 ships Beaver Creek's textures compressed for the 4× memory exit.
+  - **F1a-2, KTX2 to the GPU's own formats: done.**
+    - **The encoder writes the whole mip chain** (`setMipGen(true)`, renormalised for normal maps). The GPU can't make a compressed texture's mips, so they ride in the file, about a third larger.
+    - **The transcoder** (`ktx2Decoder.ts`) still gives every path the RGBA top level. Given a renderer's `gpuFormats`, it also transcodes the whole chain into the first one it can (`DecodedTexture.gpu`): BC7 on desktop, ASTC 4×4 on Apple and mobile, ETC2 the fallback. That is a byte a texel, a quarter of RGBA's.
+      - A file without its full chain, or not a whole number of 4×4 blocks, keeps the RGBA path, where the renderer makes the mips.
+    - **The device and renderer.** The device requests `texture-compression-bc`, `-astc` and `-etc2` where the adapter has them. The `aaa` renderer advertises the formats (`SceneRenderer.textureFormats`), the mesh overlay passes them to its KTX2 decoder, and the upload takes the compressed chain level by level.
+      - A cut-out colour map keeps the RGBA path, for its coverage-preserving mips.
+    - **The memory estimate** counts a compressed texture's own bytes (`textureMemory`).
+    - *Tests:* `ktx2-native.test.ts` covers:
+      - transcoding to each format, with sizes per level;
+      - no chain without formats, for an unknown format, or for a file without mips;
+      - the memory estimate under a third of RGBA-with-mips;
+      - the device's format order;
+      - on Dawn, the BC7 chain uploaded as `bc7-rgba-unorm` and drawn within BC7's error of the RGBA path (mean under 6 levels).
+    - *Left for later:* BC5/BC4 for two- and one-channel maps need the shaders to rebuild the missing channels (a normal's z), so every map is BC7, ASTC or ETC2 for now.
 - [ ] **F1b. Texture streaming.** Mip streaming driven by GPU feedback: a sampler-feedback-style pass that records the mip each material wanted, under a texture-memory budget per scalability level, with residency in the profiler. It also covers texture arrays, or bindless where available, so materials stop competing for 16 bind slots.
 - [ ] **F1c. BRDF upgrade.**
   - Multiscatter GGX energy compensation (Kulla-Conty, or Fdez-Agüera's LUT).

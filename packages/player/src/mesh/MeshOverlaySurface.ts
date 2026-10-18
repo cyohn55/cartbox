@@ -187,8 +187,12 @@ export interface GpuPresentTarget {
   readonly stats: PresentStats;
 }
 
-/** Loads a KTX2 → RGBA decoder (see {@link MeshOverlayOptions.ktx2}). */
-export type Ktx2DecoderLoader = () => Promise<(bytes: Uint8Array) => DecodedTexture | null>;
+/**
+ * Loads a KTX2 → RGBA decoder (see {@link MeshOverlayOptions.ktx2}). Given
+ * `gpuFormats`, the decoder also transcodes into the first of them it can
+ * (F1a; see DecodedTexture.gpu).
+ */
+export type Ktx2DecoderLoader = () => Promise<(bytes: Uint8Array, options?: { readonly gpuFormats?: readonly string[] }) => DecodedTexture | null>;
 
 /** A rectangle of shadow-map texels. */
 interface TexelRect {
@@ -676,10 +680,12 @@ export class MeshOverlaySurface implements DisplaySurface {
     // frames) that share a model share its MeshAsset, so they share its maps.
     const decoded = new Map<MeshAsset, Promise<TexturedMesh>>();
     // The KTX2 decoder is fetched at most once, and only if some texture needs it.
-    let ktx2: Promise<((bytes: Uint8Array) => DecodedTexture | null) | null> | null = null;
+    let ktx2: Promise<Awaited<ReturnType<Ktx2DecoderLoader>> | null> | null = null;
+    // A renderer that samples compressed formats (F1a) gets each KTX2 texture in one of them too.
+    const gpuFormats = renderer.textureFormats ?? [];
     const decodeKtx2 = (bytes: Uint8Array) => {
       ktx2 ??= options.ktx2 ? options.ktx2().catch(() => null) : Promise.resolve(null);
-      return ktx2.then((decode) => (decode ? decode(bytes) : null));
+      return ktx2.then((decode) => (decode ? decode(bytes, gpuFormats.length > 0 ? { gpuFormats } : undefined) : null));
     };
     const images = new Map<EncodedImage, Promise<DecodedTexture | null>>();
     const texture = (mesh: MeshAsset): Promise<TexturedMesh> => {

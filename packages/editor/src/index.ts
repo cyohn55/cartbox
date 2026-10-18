@@ -587,6 +587,7 @@ export {
   type MeshSceneInstance,
   type RenderMeshSceneOptions,
   type DecodedTexture,
+  type CompressedTexture,
   type OrbitCamera,
   type RenderMeshOptions,
   DEFAULT_RASTER_STYLE,

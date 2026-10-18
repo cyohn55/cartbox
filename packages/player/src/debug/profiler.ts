@@ -161,12 +161,22 @@ export interface SceneMemory {
 /** The texture sets an instance may draw with: base colour and every other map. */
 const TEXTURE_SETS = ["textures", "normalTextures", "materialTextures", "mrTextures", "occlusionTextures", "emissiveTextures", "lightmapTextures"] as const;
 
-type TextureSet = readonly ({ readonly width: number; readonly height: number } | null | undefined)[] | undefined;
+type TextureSet = readonly ({ readonly width: number; readonly height: number; readonly gpu?: { readonly levels: readonly { readonly data: { readonly byteLength: number } }[] } } | null | undefined)[] | undefined;
+
+/**
+ * A texture's bytes on the GPU: its block-compressed chain when it carries one
+ * (F1a; DecodedTexture.gpu), else RGBA8 with its mips.
+ */
+export function textureMemory(texture: { readonly width: number; readonly height: number; readonly gpu?: { readonly levels: readonly { readonly data: { readonly byteLength: number } }[] } }): number {
+  if (texture.gpu) return texture.gpu.levels.reduce((sum, level) => sum + level.data.byteLength, 0);
+  return Math.round((texture.width * texture.height * 4 * 4) / 3);
+}
 
 /**
  * A 3D scene's GPU memory by kind (P8), for the per-device budgets: each
  * mesh's vertices and indices once (as {@link estimateSceneBytes}), each
- * texture of every map once as RGBA8 with its mips, and the targets.
+ * texture of every map once ({@link textureMemory}: compressed, or RGBA8
+ * with its mips), and the targets.
  */
 export function estimateSceneMemory(
   instances: readonly ({ readonly mesh: { readonly primitives: readonly { readonly positions: ArrayLike<number>; readonly indices: ArrayLike<number> }[] } } & Partial<Record<(typeof TEXTURE_SETS)[number], TextureSet>>)[],
@@ -186,7 +196,7 @@ export function estimateSceneMemory(
       for (const texture of instance[set] ?? []) {
         if (texture && !textures.has(texture)) {
           textures.add(texture);
-          textureBytes += Math.round((texture.width * texture.height * 4 * 4) / 3);
+          textureBytes += textureMemory(texture);
         }
       }
     }
