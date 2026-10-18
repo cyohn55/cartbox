@@ -4735,6 +4735,10 @@ declare class WebgpuSceneRenderer implements SceneRenderer {
      */
     private envTexture;
     private envMapSource;
+    /** The linear variant's environment (F3a): its prefiltered cube (a 1×1 black cube without one), SH, and what they were built from. */
+    private ibl;
+    private iblKey;
+    private iblSh;
     /** The SSAO buffer: a lazily-created width×height r32float upload target, and
      *  what binding 8 currently references (that upload, or the 1x1 blank). */
     private ssaoTexture;
@@ -4793,6 +4797,12 @@ declare class WebgpuSceneRenderer implements SceneRenderer {
      * groups (binding 7 moved).
      */
     private ensureEnvTexture;
+    /**
+     * The linear variant's environment (F3a): its panorama (or gradient) in
+     * linear light, prefiltered into the cube at binding 7 and projected into the
+     * SH the frame carries, rebuilt only when what it's made of changes.
+     */
+    private ensureIbl;
     /** The same for the reflection-probe atlas (binding 12), plus the boxes (binding 13). */
     private ensureProbes;
     /** A one-off rgba8unorm upload of a decoded image. */
