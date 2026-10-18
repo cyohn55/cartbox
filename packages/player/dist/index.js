@@ -294,7 +294,8 @@ var RAM_LAYOUTS = {
   ps1: ERA,
   n64: ERA,
   xbox360: HD,
-  modern: HD
+  modern: HD,
+  aaa: HD
 };
 var PHYS_BLOCK_BYTES = 8192;
 var PHYS_MAGIC = 1213219395;
@@ -4731,6 +4732,10 @@ var MODERN_RASTER_CAPS = {
   temporal: true,
   reflections: true
 };
+var AAA_RASTER_CAPS = {
+  ...MODERN_RASTER_CAPS,
+  gpuPresent: true
+};
 var MODELS = {
   classic: {
     id: "classic",
@@ -4936,6 +4941,24 @@ var MODELS = {
     renderCaps: MODERN_RASTER_CAPS,
     // 8GB — this tier's whole premise is that storage is no longer the constraint;
     // real photoreal scenes need room for compressed meshes + PBR texture sets.
+    assetBudgetBytes: 8 * 1024 * 1024 * 1024
+  },
+  aaa: {
+    id: "aaa",
+    label: "AAA (WebGPU)",
+    kind: "poly3d",
+    // Modern's 1080p frame and core for now: native resolution is F0d.
+    width: 1920,
+    height: 1080,
+    pixelBytes: 4,
+    fps: 60,
+    audioChannels: 8,
+    sampleRate: 48e3,
+    paletteSize: 256,
+    cartSizeBytes: 8 * 1024 * 1024,
+    engineUrl: "/engine/xbox360/engine.js",
+    inputs: ["gamepad", "keyboard", "mouse"],
+    renderCaps: AAA_RASTER_CAPS,
     assetBudgetBytes: 8 * 1024 * 1024 * 1024
   }
 };
@@ -5388,7 +5411,7 @@ function hashEventId(id) {
 
 // src/directConsole.ts
 function directCoreModel(model) {
-  return model.id === "modern" || model.id === "xbox360";
+  return model.id === "modern" || model.id === "aaa" || model.id === "xbox360";
 }
 function createDirectConsole(module, model, layout = RAM_LAYOUTS[model.id], sampleRate = model.sampleRate) {
   let commands = [];

@@ -30,6 +30,9 @@ export const SELECTABLE_MODEL_IDS: readonly ConsoleModelId[] = [
   // a stub today: it runs on the 360 core binary until a dedicated Modern core
   // lands, so authoring a cart on it always boots.
   "modern",
+  // The AAA tier (AAA_FIDELITY_ROADMAP.md): Modern presented from the GPU,
+  // WebGPU-only by design, and playing as Modern where there is no WebGPU.
+  "aaa",
 ];
 
 export function resolveModelId(value: string | null | undefined): ConsoleModelId {
@@ -50,6 +53,7 @@ const MODEL_BADGES: Record<ConsoleModelId, string> = {
   n64: "N64",
   xbox360: "XBOX 360",
   modern: "MODERN",
+  aaa: "AAA",
 };
 
 export function modelBadge(value: string | null | undefined): string {
@@ -90,6 +94,10 @@ export const ENGINE_URL_BY_MODEL: Record<ConsoleModelId, string> = {
   // Modern (AAA) tier stub: reuse the 360 core (its framebuffer scales) until a
   // dedicated Modern core with the PBR/WebGPU path lands. See AAA_TIER_ROADMAP.md.
   modern: withBasePath(
+    process.env.NEXT_PUBLIC_MODERN_ENGINE_URL ?? "/engine/xbox360/engine.js",
+  ),
+  // The AAA tier runs Modern's core; what differs is how its frame reaches the screen.
+  aaa: withBasePath(
     process.env.NEXT_PUBLIC_MODERN_ENGINE_URL ?? "/engine/xbox360/engine.js",
   ),
 };

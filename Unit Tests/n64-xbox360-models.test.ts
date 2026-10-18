@@ -94,11 +94,11 @@ describe("the Xbox 360 model", () => {
     // fixed-spec guarantee (see render-caps.test.ts) for no gain. It flips the
     // day the shader pipeline lands; until then no shipping model grants it.
     expect(xbox360.renderCaps.programmableShaders).toBe(false);
-    // The Modern (AAA) tier is the one model that grants programmable shaders —
-    // its whole premise is a PBR/WebGPU pipeline (AAA_TIER_ROADMAP.md). No
-    // fantasy/era model does.
+    // The Modern tier and the AAA tier built on it are the models that grant
+    // programmable shaders — their premise is a PBR/WebGPU pipeline
+    // (AAA_TIER_ROADMAP.md, AAA_FIDELITY_ROADMAP.md). No fantasy/era model does.
     const withShaders = Object.values(MODELS).filter((m) => m.renderCaps.programmableShaders);
-    expect(withShaders.map((m) => m.id)).toEqual(["modern"]);
+    expect(withShaders.map((m) => m.id)).toEqual(["modern", "aaa"]);
   });
 
   it("lifts the per-frame budgets the era models enforce", () => {
@@ -144,12 +144,12 @@ describe("the Modern (AAA) tier", () => {
 });
 
 describe("the era models as a family", () => {
-  it("are the triangle-scene models (three fantasy eras + the Modern tier)", () => {
+  it("are the triangle-scene models (three fantasy eras, the Modern tier and AAA)", () => {
     const poly = Object.values(MODELS)
       .filter((m) => m.kind === "poly3d")
       .map((m) => m.id)
       .sort();
-    expect(poly).toEqual(["modern", "n64", "ps1", "xbox360"]);
+    expect(poly).toEqual(["aaa", "modern", "n64", "ps1", "xbox360"]);
   });
 
   it("leave the 2D models on the stock software caps", () => {

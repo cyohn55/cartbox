@@ -33,6 +33,7 @@ export const ENGINE_TRANSFER_BYTES: Readonly<Record<ConsoleModelId, number>> = {
   n64: 422_915,
   xbox360: 422_860,
   modern: 422_860,
+  aaa: 422_860,
 };
 
 /** Gzipped Rapier builds (the WASM is inlined in the module), checked by a test. */

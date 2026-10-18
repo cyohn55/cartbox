@@ -34,6 +34,7 @@ describe("console model registry", () => {
 
   it("registers every model the family declares", () => {
     expect(Object.keys(CONSOLE_MODELS).sort()).toEqual([
+      "aaa",
       "classic",
       "modern",
       "n64",
