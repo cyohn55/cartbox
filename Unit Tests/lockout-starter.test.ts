@@ -20,8 +20,11 @@ import {
   LOCKOUT_CENTER_X,
   LOCKOUT_CENTER_Y,
   LOCKOUT_CENTER_Z,
+  arenaMap,
+  arenaMapCode,
   deserializeMeshAsset,
   resolveStarter,
+  type CartEngine,
 } from "@cartbox/editor";
 import { MODELS, parseMeshScene, parsePostFxSettings } from "@cartbox/player";
 
@@ -196,5 +199,28 @@ describe("the Lockout arena starter", () => {
     expect(LOCKOUT_CODE).toContain("auto-melee"); // point-blank melee
     expect(LOCKOUT_CODE).toContain("tracker_blips"); // radar / motion tracker
     expect(LOCKOUT_CODE).toContain("register_kill"); // sprees + multikills + kill feed
+  });
+});
+
+describe("the Beaver Creek starter", () => {
+  it("opens the second map in the editor: its code, its scene and Lockout's post-FX, on the Xbox 360 model", () => {
+    const starter = resolveStarter("beaver");
+    expect(starter.id).toBe("beaver");
+    expect(resolveStarterId("beaver")).toBe("beaver");
+    expect(modelForStarter("beaver")).toBe("xbox360");
+    // The same sidecar /lockout?map=beaver plays, so the camera's centre matches its code.
+    expect(starter.mesh).toBe(arenaMap("beaver").sidecar());
+    expect(starter.fx).toEqual(resolveStarter("lockout").fx);
+    const seeded: { language?: string; code?: string; colors: number } = { colors: 0 };
+    const engine = {
+      setLanguage: (l: string) => void (seeded.language = l),
+      setCode: (c: string) => void (seeded.code = c),
+      setPaletteColor: () => void (seeded.colors += 1),
+    } as unknown as CartEngine;
+    starter.seed(engine);
+    expect(seeded.language).toBe("lua");
+    expect(seeded.code).toBe(arenaMapCode("beaver"));
+    expect(seeded.code).toContain("BEAVER CREEK");
+    expect(seeded.colors).toBeGreaterThan(0);
   });
 });

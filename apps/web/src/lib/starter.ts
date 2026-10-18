@@ -7,7 +7,7 @@
  */
 
 /** Starter ids a fresh cart can open on. Must stay in sync with CART_STARTERS. */
-const SELECTABLE_STARTER_IDS = ["demo", "parallax", "platformer", "ps1", "n64", "xbox360", "lockout"] as const;
+const SELECTABLE_STARTER_IDS = ["demo", "parallax", "platformer", "ps1", "n64", "xbox360", "lockout", "beaver"] as const;
 
 export type StarterId = (typeof SELECTABLE_STARTER_IDS)[number];
 
@@ -36,6 +36,7 @@ export function modelForStarter(starterId: string | null | undefined): string | 
     n64: "n64",
     xbox360: "xbox360",
     lockout: "xbox360",
+    beaver: "xbox360",
   };
   return starterId ? (perStarter[starterId] ?? null) : null;
 }

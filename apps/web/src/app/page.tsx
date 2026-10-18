@@ -53,6 +53,11 @@ export default function HomePage() {
         </Link>
       </p>
       <p>
+        <Link href="/edit/new?model=xbox360&starter=beaver">
+          Open Beaver Creek in the editor — its canyon, creek, bases and lighting →
+        </Link>
+      </p>
+      <p>
         <Link href="/edit/new?starter=parallax">Create a parallax scene — three scrolling map layers →</Link>
       </p>
       <p>

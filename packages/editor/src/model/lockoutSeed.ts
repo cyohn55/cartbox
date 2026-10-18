@@ -7169,10 +7169,15 @@ const hexRgb = (hex: string): [number, number, number] => [
   parseInt(hex.slice(5, 7), 16),
 ];
 
-export function seedLockoutCart(engine: CartEngine): void {
+/** Seed a fresh cart with arena code (Lockout's, or the same code on another map) and the arena's palette. */
+export function seedArenaCart(engine: CartEngine, code: string = LOCKOUT_CODE): void {
   engine.setLanguage("lua");
-  engine.setCode(LOCKOUT_CODE);
+  engine.setCode(code);
   for (const [index, hex] of LOCKOUT_PALETTE) engine.setPaletteColor(index, ...hexRgb(hex));
+}
+
+export function seedLockoutCart(engine: CartEngine): void {
+  seedArenaCart(engine, LOCKOUT_CODE);
 }
 
 /**
