@@ -126,7 +126,7 @@ import {
 import { SoftwareSceneRenderer, applyScenePasses, type FrameState, type GpuSceneDraw, type SceneDraw, type SceneRenderer } from "./sceneRenderer.js";
 import { webgpuCanHonour } from "./renderCaps.js";
 import { batchInstances, compositeFrame, presentFrame, softEdges, type PrimitiveTextures } from "./gpuFrame.js";
-import { WebgpuPassTimer } from "./gpuTimer.js";
+import { FrameGraph, GraphTimer, TransientPool, type FrameResource, type PassContext } from "./frameGraph.js";
 import { TEMPORAL_SHARPEN_WGSL, TemporalState, temporalShaderWgsl } from "./temporal.js";
 import { reflectionShaderWgsl, reflectionUniforms } from "./reflections.js";
 import type { RenderStats } from "../debug/profiler.js";
@@ -1377,7 +1377,10 @@ export class WebgpuSceneRenderer implements SceneRenderer {
 
   /** What the last submitted frame drew (for the profiler and tests); GPU time when the device can time it. */
   lastFrameStats: RenderStats = { drawCalls: 0, instances: 0, triangles: 0, gpuMs: null };
-  private readonly timer: WebgpuPassTimer | null;
+  /** Per-pass GPU times (F0c), when the device can time them. */
+  private readonly timer: GraphTimer | null;
+  /** The frame graph's transient textures, kept from frame to frame. */
+  private readonly transients: TransientPool;
 
   private constructor(
     private readonly device: any,
@@ -1424,7 +1427,8 @@ export class WebgpuSceneRenderer implements SceneRenderer {
     this.envTexture = blankTexture; // the 1x1 white stands in until a map is bound
     this.probeTexture = blankTexture;
     this.ssaoBound = blankShadow; // the 1x1 r32float blank until an AO buffer arrives
-    this.timer = WebgpuPassTimer.create(device);
+    this.timer = GraphTimer.create(device);
+    this.transients = new TransientPool(device);
   }
 
   /**
@@ -2057,7 +2061,13 @@ export class WebgpuSceneRenderer implements SceneRenderer {
     this.device.queue.writeBuffer(this.instanceBuffer, 0, this.instanceData, 0, instanceCount * INSTANCE_FLOATS);
     let triangles = 0;
     for (const entry of draws) triangles += (entry.geometry.indexCount / 3) * entry.models.length;
-    this.lastFrameStats = { drawCalls: draws.length, instances: instanceCount, triangles, gpuMs: this.timer?.lastMs ?? null };
+    this.lastFrameStats = {
+      drawCalls: draws.length,
+      instances: instanceCount,
+      triangles,
+      gpuMs: this.timer?.lastMs ?? null,
+      ...(this.timer && this.timer.lastPasses.length > 0 ? { passes: this.timer.lastPasses } : {}),
+    };
 
     // Soft edges (EP6b) need the opaque depth readable, so a frame that has
     // any draws its see-through batches in a second pass, with the depth
@@ -2067,25 +2077,16 @@ export class WebgpuSceneRenderer implements SceneRenderer {
     const refract = draws.some((entry) => entry.refract);
     const split = refract || draws.some((entry) => softEdges(entry.primitive.material, entry.alpha, draw.projection) !== undefined);
     const firstSeeThrough = split ? draws.findIndex((entry) => entry.alpha >= 2 || entry.refract) : -1;
-    const encoder = this.device.createCommandEncoder();
-    // Anti-aliased (I1): draw into the multisampled targets and resolve into the read-back texture as the last pass ends.
+    const seeThrough = firstSeeThrough >= 0;
+    // Anti-aliased (I1): draw into multisampled targets and resolve into the colour texture as the last scene pass ends.
     const msaa = draw.antialias === true ? this.ensureMsaa() : null;
-    // Reflections (I3): the two reflection targets beside the colour, multisampled with it.
-    const gbuffer = draw.reflections === true ? this.ensureReflectionTargets(msaa !== null) : null;
-    const reflectionAttachments = (load: boolean, last: boolean) =>
-      gbuffer
-        ? gbuffer.targets.map((target) => ({
-            view: (msaa ? target.ms : target.texture).createView(),
-            ...(load ? { loadOp: "load" } : { loadOp: "clear", clearValue: { r: 0, g: 0, b: 0, a: 0 } }),
-            ...(msaa && last ? { resolveTarget: target.texture.createView(), storeOp: "discard" } : { storeOp: "store" }),
-          }))
-        : [];
+    const reflections = draw.reflections === true ? this.ensureReflections() : null;
     const drawRange = (pass: any, from: number, to: number, depthGroup: any) => {
       pass.setBindGroup(1, depthGroup);
       let bound: any = null;
       for (let index = from; index < to; index += 1) {
         const entry = draws[index]!;
-        const set = this.pipelinesOf(entry.primitive.material, msaa ? MSAA_SAMPLES : 1, gbuffer !== null);
+        const set = this.pipelinesOf(entry.primitive.material, msaa ? MSAA_SAMPLES : 1, reflections !== null);
         // A refracting draw covers what it bends (premultiplied, alpha 1), or blends or adds as usual where it bends nothing.
         const wanted = entry.refract ? set.blend : entry.alpha === 3 ? set.add : entry.alpha === 2 ? set.blend : set.opaque;
         if (wanted !== bound) {
@@ -2098,70 +2099,100 @@ export class WebgpuSceneRenderer implements SceneRenderer {
         pass.drawIndexed(entry.geometry.indexCount, entry.models.length, 0, 0, entry.first);
       }
     };
-    const opaqueEnd = firstSeeThrough >= 0 ? firstSeeThrough : draws.length;
-    const colourView = (msaa ? msaa.colour : this.colourTexture).createView();
-    const depthView = (msaa ? msaa.depth : this.depthTexture).createView();
-    const groups = msaa ? msaa.groups : this.depthGroups;
-    // The pass that ends the frame resolves the samples (and need not keep them).
-    const ending = (last: boolean) => (msaa && last ? { resolveTarget: this.colourTexture.createView(), storeOp: "discard" } : { storeOp: "store" });
-    const pass = encoder.beginRenderPass({
-      colorAttachments: [
-        {
-          view: colourView,
-          // Transparent black: every untouched pixel reads as "nothing drawn",
-          // which is what lets the composite leave the cart's frame showing.
-          clearValue: { r: 0, g: 0, b: 0, a: 0 },
-          loadOp: "clear",
-          ...ending(firstSeeThrough < 0),
-          // An anti-aliased frame that refracts resolves the opaque scene for the see-through pass to read.
-          ...(msaa && refract && firstSeeThrough >= 0 ? { resolveTarget: this.depthGroups.behind.createView() } : {}),
-        },
-        ...reflectionAttachments(false, firstSeeThrough < 0),
-      ],
-      depthStencilAttachment: {
-        view: depthView,
-        depthClearValue: 1,
-        depthLoadOp: "clear",
-        depthStoreOp: "store",
-      },
-      ...(this.timer ? { timestampWrites: this.timer.writes(firstSeeThrough >= 0 ? "begin" : "both") } : {}),
-    });
-    drawRange(pass, 0, opaqueEnd, groups.blank);
-    pass.end();
-    if (refract && firstSeeThrough >= 0 && !msaa) {
-      encoder.copyTextureToTexture({ texture: this.colourTexture }, { texture: this.depthGroups.behind }, { width: this.width, height: this.height });
-    }
-    if (firstSeeThrough >= 0) {
-      const seeThrough = encoder.beginRenderPass({
-        colorAttachments: [{ view: colourView, loadOp: "load", ...ending(true) }, ...reflectionAttachments(true, true)],
-        depthStencilAttachment: { view: depthView, depthReadOnly: true },
-        ...(this.timer ? { timestampWrites: this.timer.writes("end") } : {}),
-      });
-      drawRange(seeThrough, firstSeeThrough, draws.length, groups.scene);
-      seeThrough.end();
-    }
-    if (gbuffer) this.encodeReflections(encoder, gbuffer, temporal ? temporal.projection : draw.projection, msaa ? msaa.depth : this.depthTexture, msaa !== null);
-    if (temporal) this.encodeTemporal(encoder, temporal.uniforms, msaa ? msaa.depth : this.depthTexture, msaa !== null);
-    this.timer?.resolve(encoder);
 
-    if (!readback) {
-      this.device.queue.submit([encoder.finish()]);
-      this.timer?.read();
-      return;
+    // The frame as a graph (AAA_FIDELITY_ROADMAP.md F0c): each pass names the
+    // textures it reads and writes; the graph keeps the passes the frame's
+    // outputs need, makes the transient targets (and reuses them frame to
+    // frame), and times every pass.
+    const graph = new FrameGraph();
+    const size = { width: this.width, height: this.height };
+    const colour = graph.importTexture("colour", this.colourTexture);
+    // The depth stays the renderer's own: the see-through pass's bind groups sample it.
+    const depth = graph.importTexture("depth", msaa ? msaa.depth : this.depthTexture);
+    const msColour = msaa ? graph.createTexture("colour.msaa", { format: this.colourFormat, ...size, sampleCount: MSAA_SAMPLES }) : null;
+    // Reflections (I3): the ray and environment targets beside the colour, and their multisampled twins.
+    const rays = reflections ? ["reflect.ray", "reflect.env"].map((name) => graph.createTexture(name, { format: "rgba16float", ...size })) : [];
+    const raysMs = msaa ? rays.map((ray) => graph.createTexture(`${ray.name}.msaa`, { format: "rgba16float", ...size, sampleCount: MSAA_SAMPLES })) : [];
+    // Refraction (I5) reads the opaque scene's colour, copied (or resolved) between the two scene passes.
+    const behind = refract && seeThrough ? graph.importTexture("behind", this.depthGroups.behind) : null;
+    const groups = msaa ? msaa.groups : this.depthGroups;
+    const target = msColour ?? colour;
+    const rayTargets = msaa ? raysMs : rays;
+    const opaqueEnd = seeThrough ? firstSeeThrough : draws.length;
+
+    const scenePass = (name: string, from: number, to: number, load: boolean, last: boolean) =>
+      graph.addPass(name, "render", (pass) => {
+        // The pass that ends the scene resolves the samples (and need not keep them).
+        const resolving = msaa !== null && last;
+        // An anti-aliased frame that refracts resolves the opaque scene for the see-through pass to read.
+        const resolveBehind = msaa !== null && behind !== null && !load;
+        for (const t of [target, ...rayTargets]) {
+          if (load) pass.read(t, "attachment");
+          pass.write(t);
+        }
+        if (resolving) for (const t of [colour, ...rays]) pass.write(t);
+        if (resolveBehind) pass.write(behind!);
+        if (load) pass.read(depth, "attachment");
+        else pass.write(depth);
+        return (ctx) => {
+          const attachment = (t: FrameResource, resolved: FrameResource | null) => ({
+            view: ctx.texture(t).createView(),
+            // Transparent black: every untouched pixel reads as "nothing drawn",
+            // which is what lets the composite leave the cart's frame showing.
+            ...(load ? { loadOp: "load" } : { loadOp: "clear", clearValue: { r: 0, g: 0, b: 0, a: 0 } }),
+            ...(resolved ? { resolveTarget: ctx.texture(resolved).createView(), storeOp: "discard" } : { storeOp: "store" }),
+          });
+          const encoded = ctx.encoder.beginRenderPass({
+            colorAttachments: [
+              { ...attachment(target, resolving ? colour : null), ...(resolveBehind ? { resolveTarget: ctx.texture(behind!).createView() } : {}) },
+              ...rayTargets.map((t, k) => attachment(t, resolving ? rays[k]! : null)),
+            ],
+            depthStencilAttachment: load
+              ? { view: ctx.texture(depth).createView(), depthReadOnly: true }
+              : { view: ctx.texture(depth).createView(), depthClearValue: 1, depthLoadOp: "clear", depthStoreOp: "store" },
+            ...ctx.timing,
+          });
+          drawRange(encoded, from, to, load ? groups.scene : groups.blank);
+          encoded.end();
+        };
+      });
+
+    scenePass("opaque", 0, opaqueEnd, false, !seeThrough);
+    if (behind && !msaa) {
+      graph.addPass("behind", "transfer", (pass) => {
+        pass.read(colour, "copySrc");
+        pass.write(behind, "copyDst");
+        return (ctx) => ctx.encoder.copyTextureToTexture({ texture: ctx.texture(colour) }, { texture: ctx.texture(behind) }, size);
+      });
     }
+    if (seeThrough) scenePass("see-through", firstSeeThrough, draws.length, true, true);
+    if (reflections) this.addReflections(graph, reflections, colour, depth, rays, temporal ? temporal.projection : draw.projection, msaa !== null);
+    if (temporal) this.addTemporal(graph, temporal.uniforms, colour, depth, msaa !== null);
+
+    const slot = readback ? this.readback.find((entry) => !entry.busy) : undefined;
+    if (slot) {
+      graph.addPass("readback", "transfer", (pass) => {
+        pass.read(colour, "copySrc");
+        pass.keep();
+        return (ctx) =>
+          ctx.encoder.copyTextureToBuffer(
+            { texture: ctx.texture(colour) },
+            { buffer: slot.buffer, bytesPerRow: this.bytesPerRow, rowsPerImage: this.height },
+            size,
+          );
+      });
+    }
+
+    const encoder = this.device.createCommandEncoder();
+    graph.run(encoder, this.transients, this.timer);
+    this.device.queue.submit([encoder.finish()]);
+    this.timer?.read();
+    if (!readback) return;
     this.submitted += 1;
-    const slot = this.readback.find((entry) => !entry.busy);
     if (slot) {
       slot.busy = true;
       slot.seq = this.submitted;
       this.readSeq = this.submitted;
-      encoder.copyTextureToBuffer(
-        { texture: this.colourTexture },
-        { buffer: slot.buffer, bytesPerRow: this.bytesPerRow, rowsPerImage: this.height },
-        { width: this.width, height: this.height },
-      );
-      this.device.queue.submit([encoder.finish()]);
-      this.timer?.read();
       void this.drain(slot);
     }
   }
@@ -2176,30 +2207,16 @@ export class WebgpuSceneRenderer implements SceneRenderer {
     this.device.queue.submit([encoder.finish()]);
   }
 
-  /**
-   * The reflection targets (I3): reflect and env, each single-sampled (read by
-   * the pass) with a multisampled twin for an anti-aliased frame; the pass's
-   * output, copied back over the colour; its uniforms and pipelines. Made on
-   * first use.
-   */
-  private gbuffer: { targets: { texture: any; ms: any }[]; output: any; uniforms: any; data: Float32Array<ArrayBuffer>; pipelines: [any, any] } | null = null;
+  /** The reflection pass's uniforms and pipelines (I3), made on first use; its targets are the frame graph's. */
+  private reflections: { uniforms: any; data: Float32Array<ArrayBuffer>; pipelines: [any, any] } | null = null;
 
-  private ensureReflectionTargets(multisampled: boolean): NonNullable<WebgpuSceneRenderer["gbuffer"]> {
-    const device = this.device;
-    const size = { width: this.width, height: this.height };
-    if (!this.gbuffer) {
-      this.gbuffer = {
-        targets: [0, 1].map(() => ({ texture: device.createTexture({ size, format: "rgba16float", usage: 0x10 | 0x04 }), ms: null })), // RENDER_ATTACHMENT | TEXTURE_BINDING
-        output: device.createTexture({ size, format: this.colourFormat, usage: 0x10 | 0x01 }), // RENDER_ATTACHMENT | COPY_SRC
-        uniforms: device.createBuffer({ size: 160, usage: 0x40 | 0x08 }), // UNIFORM | COPY_DST
-        data: new Float32Array(40),
-        pipelines: [null, null],
-      };
-    }
-    if (multisampled) {
-      for (const target of this.gbuffer.targets) target.ms ??= device.createTexture({ size, format: "rgba16float", sampleCount: MSAA_SAMPLES, usage: 0x10 });
-    }
-    return this.gbuffer;
+  private ensureReflections(): NonNullable<WebgpuSceneRenderer["reflections"]> {
+    this.reflections ??= {
+      uniforms: this.device.createBuffer({ size: 160, usage: 0x40 | 0x08 }), // UNIFORM | COPY_DST
+      data: new Float32Array(40),
+      pipelines: [null, null],
+    };
+    return this.reflections;
   }
 
   /**
@@ -2207,27 +2224,51 @@ export class WebgpuSceneRenderer implements SceneRenderer {
    * the pass reads the frame, its depth and the reflection targets and writes
    * the reflected frame, which is copied back over the colour.
    */
-  private encodeReflections(encoder: any, gbuffer: NonNullable<WebgpuSceneRenderer["gbuffer"]>, projection: Mat4, depth: any, multisampled: boolean): void {
+  private addReflections(
+    graph: FrameGraph,
+    reflections: NonNullable<WebgpuSceneRenderer["reflections"]>,
+    colour: FrameResource,
+    depth: FrameResource,
+    rays: readonly FrameResource[],
+    projection: Mat4,
+    multisampled: boolean,
+  ): void {
     const device = this.device;
     const k = multisampled ? 1 : 0;
-    gbuffer.pipelines[k] ??= fullScreenPipeline(device, reflectionShaderWgsl(multisampled, this.hdr), "reflectPass", this.colourFormat);
-    const pipeline = gbuffer.pipelines[k];
-    device.queue.writeBuffer(gbuffer.uniforms, 0, reflectionUniforms(projection, "ndc", gbuffer.data));
-    const pass = encoder.beginRenderPass({ colorAttachments: [{ view: gbuffer.output.createView(), clearValue: { r: 0, g: 0, b: 0, a: 0 }, loadOp: "clear", storeOp: "store" }] });
-    pass.setPipeline(pipeline);
-    pass.setBindGroup(0, device.createBindGroup({
-      layout: pipeline.getBindGroupLayout(0),
-      entries: [
-        { binding: 0, resource: { buffer: gbuffer.uniforms } },
-        { binding: 1, resource: this.colourTexture.createView() },
-        { binding: 2, resource: depth.createView() },
-        { binding: 3, resource: gbuffer.targets[0]!.texture.createView() },
-        { binding: 4, resource: gbuffer.targets[1]!.texture.createView() },
-      ],
-    }));
-    pass.draw(3);
-    pass.end();
-    encoder.copyTextureToTexture({ texture: gbuffer.output }, { texture: this.colourTexture }, { width: this.width, height: this.height });
+    reflections.pipelines[k] ??= fullScreenPipeline(device, reflectionShaderWgsl(multisampled, this.hdr), "reflectPass", this.colourFormat);
+    const pipeline = reflections.pipelines[k];
+    const out = graph.createTexture("reflect.out", { format: this.colourFormat, width: this.width, height: this.height });
+    graph.addPass("reflections", "render", (pass) => {
+      pass.read(colour);
+      pass.read(depth);
+      for (const ray of rays) pass.read(ray);
+      pass.write(out);
+      return (ctx) => {
+        device.queue.writeBuffer(reflections.uniforms, 0, reflectionUniforms(projection, "ndc", reflections.data));
+        const encoded = ctx.encoder.beginRenderPass({
+          colorAttachments: [{ view: ctx.texture(out).createView(), clearValue: { r: 0, g: 0, b: 0, a: 0 }, loadOp: "clear", storeOp: "store" }],
+          ...ctx.timing,
+        });
+        encoded.setPipeline(pipeline);
+        encoded.setBindGroup(0, device.createBindGroup({
+          layout: pipeline.getBindGroupLayout(0),
+          entries: [
+            { binding: 0, resource: { buffer: reflections.uniforms } },
+            { binding: 1, resource: ctx.texture(colour).createView() },
+            { binding: 2, resource: ctx.texture(depth).createView() },
+            { binding: 3, resource: ctx.texture(rays[0]!).createView() },
+            { binding: 4, resource: ctx.texture(rays[1]!).createView() },
+          ],
+        }));
+        encoded.draw(3);
+        encoded.end();
+      };
+    });
+    graph.addPass("reflections.copy", "transfer", (pass) => {
+      pass.read(out, "copySrc");
+      pass.write(colour, "copyDst");
+      return (ctx) => ctx.encoder.copyTextureToTexture({ texture: ctx.texture(out) }, { texture: ctx.texture(colour) }, { width: this.width, height: this.height });
+    });
   }
 
   private readonly temporalState = new TemporalState("ndc");
@@ -2240,9 +2281,10 @@ export class WebgpuSceneRenderer implements SceneRenderer {
 
   /**
    * Resolve the frame into the history and sharpen it back into the colour
-   * texture that is read back (HALO_INFINITE_STYLE_ROADMAP.md I2).
+   * texture that is read back (HALO_INFINITE_STYLE_ROADMAP.md I2). The two
+   * history images outlive the frame, so the graph imports them.
    */
-  private encodeTemporal(encoder: any, uniforms: Float32Array, depth: any, multisampled: boolean): void {
+  private addTemporal(graph: FrameGraph, uniforms: Float32Array, colour: FrameResource, depth: FrameResource, multisampled: boolean): void {
     const device = this.device;
     if (!this.taa) {
       const size = { width: this.width, height: this.height };
@@ -2260,48 +2302,64 @@ export class WebgpuSceneRenderer implements SceneRenderer {
     // The resolve reads the frame's depth: plain, or a multisampled frame's first sample.
     const k = multisampled ? 1 : 0;
     taa.resolve[k] ??= fullScreenPipeline(device, temporalShaderWgsl(multisampled), "resolve", "rgba16float");
-    device.queue.writeBuffer(taa.uniforms, 0, uniforms);
-    const read = taa.history[taa.index];
-    const write = taa.history[1 - taa.index];
+    const read = graph.importTexture("taa.history", taa.history[taa.index]);
+    const write = graph.importTexture("taa.next", taa.history[1 - taa.index]);
     taa.index = 1 - taa.index;
-    const fullScreen = (pipeline: any, target: any, entries: any[]) => {
-      const pass = encoder.beginRenderPass({ colorAttachments: [{ view: target.createView(), clearValue: { r: 0, g: 0, b: 0, a: 0 }, loadOp: "clear", storeOp: "store" }] });
-      pass.setPipeline(pipeline);
-      pass.setBindGroup(0, device.createBindGroup({ layout: pipeline.getBindGroupLayout(0), entries }));
-      pass.draw(3);
-      pass.end();
+    const fullScreen = (ctx: PassContext, pipeline: any, target: FrameResource, entries: any[]) => {
+      const encoded = ctx.encoder.beginRenderPass({
+        colorAttachments: [{ view: ctx.texture(target).createView(), clearValue: { r: 0, g: 0, b: 0, a: 0 }, loadOp: "clear", storeOp: "store" }],
+        ...ctx.timing,
+      });
+      encoded.setPipeline(pipeline);
+      encoded.setBindGroup(0, device.createBindGroup({ layout: pipeline.getBindGroupLayout(0), entries }));
+      encoded.draw(3);
+      encoded.end();
     };
-    fullScreen(taa.resolve[k], write, [
-      { binding: 0, resource: { buffer: taa.uniforms } },
-      { binding: 1, resource: this.colourTexture.createView() },
-      { binding: 2, resource: read.createView() },
-      { binding: 3, resource: taa.sampler },
-      { binding: 4, resource: depth.createView() },
-    ]);
-    fullScreen(taa.sharpen, this.colourTexture, [
-      { binding: 0, resource: { buffer: taa.uniforms } },
-      { binding: 1, resource: write.createView() },
-    ]);
+    graph.addPass("taa.resolve", "render", (pass) => {
+      pass.read(colour);
+      pass.read(read);
+      pass.read(depth);
+      pass.write(write);
+      return (ctx) => {
+        device.queue.writeBuffer(taa.uniforms, 0, uniforms);
+        fullScreen(ctx, taa.resolve[k], write, [
+          { binding: 0, resource: { buffer: taa.uniforms } },
+          { binding: 1, resource: ctx.texture(colour).createView() },
+          { binding: 2, resource: ctx.texture(read).createView() },
+          { binding: 3, resource: taa.sampler },
+          { binding: 4, resource: ctx.texture(depth).createView() },
+        ]);
+      };
+    });
+    graph.addPass("taa.sharpen", "render", (pass) => {
+      pass.read(write);
+      pass.write(colour);
+      return (ctx) =>
+        fullScreen(ctx, taa.sharpen, colour, [
+          { binding: 0, resource: { buffer: taa.uniforms } },
+          { binding: 1, resource: ctx.texture(write).createView() },
+        ]);
+    });
   }
 
   /** Pipeline variants (material graph, sample count, reflection targets), built on first use. */
   private readonly variants = new Map<string, PipelineSet>();
 
   /**
-   * The multisampled targets and pipelines an anti-aliased frame draws with
-   * (HALO_INFINITE_STYLE_ROADMAP.md I1): made on first use, so a renderer that
-   * never anti-aliases pays nothing for them.
+   * The multisampled depth an anti-aliased frame draws with
+   * (HALO_INFINITE_STYLE_ROADMAP.md I1), and the bind groups that sample it:
+   * made on first use, so a renderer that never anti-aliases pays nothing for
+   * them. Its colour is a frame-graph transient.
    */
-  private msaa: { colour: any; depth: any; blank: any; groups: { blank: any; scene: any } } | null = null;
+  private msaa: { depth: any; blank: any; groups: { blank: any; scene: any } } | null = null;
 
   private ensureMsaa(): NonNullable<WebgpuSceneRenderer["msaa"]> {
     if (!this.msaa) {
       const size = { width: this.width, height: this.height };
-      const colour = this.device.createTexture({ size, format: this.colourFormat, sampleCount: MSAA_SAMPLES, usage: 0x10 }); // RENDER_ATTACHMENT
       const depth = this.device.createTexture({ size, format: "depth24plus", sampleCount: MSAA_SAMPLES, usage: 0x10 | 0x04 }); // + TEXTURE_BINDING (soft edges)
       const blank = this.device.createTexture({ size: { width: 1, height: 1 }, format: "depth24plus", sampleCount: MSAA_SAMPLES, usage: 0x10 | 0x04 });
       const groups = this.depthGroups;
-      this.msaa = { colour, depth, blank, groups: groups.makeGroupsMs(groups.atlas, groups.probes, blank, depth) };
+      this.msaa = { depth, blank, groups: groups.makeGroupsMs(groups.atlas, groups.probes, blank, depth) };
     }
     return this.msaa;
   }
@@ -2571,18 +2629,11 @@ export class WebgpuSceneRenderer implements SceneRenderer {
     destroySafely(this.colourTexture);
     destroySafely(this.depthTexture);
     if (this.msaa) {
-      destroySafely(this.msaa.colour);
       destroySafely(this.msaa.depth);
       destroySafely(this.msaa.blank);
     }
-    if (this.gbuffer) {
-      for (const target of this.gbuffer.targets) {
-        destroySafely(target.texture);
-        destroySafely(target.ms);
-      }
-      destroySafely(this.gbuffer.output);
-      destroySafely(this.gbuffer.uniforms);
-    }
+    if (this.reflections) destroySafely(this.reflections.uniforms);
+    this.transients.destroy();
     if (this.taa) {
       destroySafely(this.taa.history[0]);
       destroySafely(this.taa.history[1]);

@@ -27,8 +27,10 @@ export interface RenderStats {
   readonly drawCalls: number;
   readonly instances: number;
   readonly triangles: number;
-  /** GPU time of the scene pass, when the browser can time it (else null). */
+  /** GPU time of the frame's passes, when the browser can time it (else null). */
   readonly gpuMs: number | null;
+  /** Each pass's GPU time (AAA_FIDELITY_ROADMAP.md F0c), on a renderer that times them one by one. */
+  readonly passes?: readonly { readonly name: string; readonly ms: number }[];
 }
 
 export interface SectionStats {
