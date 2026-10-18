@@ -47,6 +47,8 @@ export async function createSceneRenderer(
   caps: RenderCaps,
   deviceProvider: DeviceProvider = getWebgpuDevice,
   glProvider?: GlContextProvider,
+  /** `hdr`: a WebGPU renderer shades in linear light and keeps its frames on the GPU (F0b); the other backends ignore it. */
+  options: { readonly hdr?: boolean } = {},
 ): Promise<SceneRenderer> {
   // The model's era decides how to rasterise, and therefore which backends are
   // even eligible: WebGPU declines a style it cannot reproduce (see
@@ -56,7 +58,7 @@ export async function createSceneRenderer(
 
   const device = await deviceProvider();
   let renderer: SceneRenderer | null = null;
-  if (device) renderer = await WebgpuSceneRenderer.create(device, width, height, style);
+  if (device) renderer = await WebgpuSceneRenderer.create(device, width, height, style, options);
   renderer ??= WebglSceneRenderer.create(width, height, style, glProvider);
   renderer ??= new SoftwareSceneRenderer(style);
 

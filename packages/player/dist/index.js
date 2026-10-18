@@ -4734,7 +4734,8 @@ var MODERN_RASTER_CAPS = {
 };
 var AAA_RASTER_CAPS = {
   ...MODERN_RASTER_CAPS,
-  gpuPresent: true
+  gpuPresent: true,
+  linearHdr: true
 };
 var MODELS = {
   classic: {
@@ -12450,6 +12451,8 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
       hud: this.hud ? rgba : null,
       hudKey: HUD_TRANSPARENT_SUM,
       holo,
+      // A linear frame is tone-mapped as it is presented (F0b); a byte-space one already was.
+      tonemap: job.tonemap,
       measure: adapting || flare ? { luminance: adapting, sun: flare ? sun : null } : null
     });
     this.takeGpuMeasurements(gpu.stats, lighting, job.post, adapting, sky !== null, sun);
@@ -14524,7 +14527,7 @@ function reflectionUniforms(projection, depth, out = new Float32Array(SSR_UNIFOR
   out.set([SSR_MAX_ROUGHNESS, 0, 0, 0], 36);
   return out;
 }
-function reflectionShaderWgsl(multisampled) {
+function reflectionShaderWgsl(multisampled, hdr = false) {
   return (
     /* wgsl */
     `
@@ -14615,7 +14618,7 @@ fn reflectPass(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
     * (1.0 - smoothstep(0.15, 0.55, R.z));
   let seen = textureLoad(colour, hit, 0).rgb;
   let env = textureLoad(envMap, p, 0).rgb;
-  return vec4<f32>(clamp(c.rgb + confidence * (w * seen - env), vec3<f32>(0.0), vec3<f32>(1.0)), c.a);
+  return vec4<f32>(${hdr ? "max(c.rgb + confidence * (w * seen - env), vec3<f32>(0.0))" : "clamp(c.rgb + confidence * (w * seen - env), vec3<f32>(0.0), vec3<f32>(1.0))"}, c.a);
 }
 `
   );
@@ -17071,7 +17074,36 @@ var MSAA_SAMPLES = 4;
 function multisampledDepthShader(code) {
   return code.replace("var sceneDepth: texture_depth_2d;", "var sceneDepth: texture_depth_multisampled_2d;");
 }
-function wgslDisplay(v) {
+function wgslDisplay(v, hdr = false) {
+  if (hdr) {
+    return (
+      /* wgsl */
+      `    if (u.fogParams.x > 0.5) {
+      let d = max(0.0, in.eyeDepth - u.fogParams.y);
+      var f = min(u.fogParams.z, 1.0 - exp(-d * u.fog.w));
+      var fc = toLinear(u.fog.rgb);
+      if (u.fogParams.w > 0.5) {
+        let c = u.fogCam.xyz;
+        let ray = in.worldPos - c;
+        let len = length(ray);
+        var tau = fogLayer(u.fogHeight.x, u.fogHeight.z, u.fogHeight.y, c.y, ray.y, len, 0.0, 1.0);
+        let vc = i32(u.fogCam.w + 0.5);
+        for (var i = 0; i < vc; i = i + 1) {
+          let a = u.fogVol[i * 2];
+          let b = u.fogVol[i * 2 + 1];
+          let span = fogBox(a.xyz, b.xyz, c, ray);
+          if (span.y > span.x) { tau = tau + fogLayer(a.w, b.w, a.y, c.y, ray.y, len, span.x, span.y); }
+        }
+        f = 1.0 - (1.0 - f) * exp(-tau);
+        if (u.fogHeight.w > 0.0) {
+          let cosv = max(0.0, dot(ray, u.light.xyz) / (max(len, 1e-6) * max(length(u.light.xyz), 1e-6)));
+          fc = fc + toLinear(u.fogGlow.rgb) * (u.fogHeight.w * pow(cosv, ${FOG_GLOW_POWER2.toFixed(1)}));
+        }
+      }
+      ${v} = mix(max(${v}, vec3<f32>(0.0)), fc, f);
+    }`
+    );
+  }
   return (
     /* wgsl */
     `    if (u.tonemap.x > 0.5) {
@@ -17107,7 +17139,7 @@ function wgslDisplay(v) {
     }`
   );
 }
-function sceneShader(graph = null, reflect = false) {
+function sceneShader(graph = null, reflect = false, hdr = false) {
   const g = graphSites2(graph);
   const code = (
     /* wgsl */
@@ -17373,7 +17405,7 @@ fn envGradient(y: f32) -> vec3<f32> {
   var c: vec3<f32>;
   if (t >= 0.0) { c = mix(u.envHorizon.xyz, u.envSky.xyz, t); }
   else { c = mix(u.envHorizon.xyz, u.envGround.xyz, -t); }
-  return c * u.envHorizon.w; // .w = intensity
+  return toLinear(c) * u.envHorizon.w; // .w = intensity
 }
 // Sample the environment along a full direction: an equirectangular map when one
 // is bound (envMeta.w), else the analytic gradient (Y only). Mirrors
@@ -17387,7 +17419,7 @@ fn envColorDir(dir: vec3<f32>) -> vec3<f32> {
   let wx = uCoord - floor(uCoord);
   let tx = i32(clamp(floor(wx * dims.x), 0.0, dims.x - 1.0));
   let ty = i32(clamp(floor(vCoord * dims.y), 0.0, dims.y - 1.0));
-  return textureLoad(envMap, vec2<i32>(tx, ty), 0).rgb * u.envHorizon.w;
+  return toLinear(textureLoad(envMap, vec2<i32>(tx, ty), 0).rgb) * u.envHorizon.w;
 }
 // Probe i's panorama along a direction, nearest \u2014 mirrors sampleProbe.
 fn probeSample(i: i32, dir: vec3<f32>) -> vec3<f32> {
@@ -17398,7 +17430,7 @@ fn probeSample(i: i32, dir: vec3<f32>) -> vec3<f32> {
   let h = floor(dims.x * 0.5);
   let tx = i32(clamp(floor((uCoord - floor(uCoord)) * dims.x), 0.0, dims.x - 1.0));
   let ty = i32(clamp(floor(vCoord * h), 0.0, h - 1.0) + f32(i) * h);
-  return textureLoad(probeAtlas, vec2<i32>(tx, ty), 0).rgb * ${PROBE_RANGE2.toFixed(4)};
+  return toLinear(textureLoad(probeAtlas, vec2<i32>(tx, ty), 0).rgb * ${PROBE_RANGE2.toFixed(4)});
 }
 // The 2\xD72 ordered-dither matrix [[0, 2], [3, 1]], and the crawling camo threshold (surfaceEffect.ts).
 fn bayer2(x: i32, y: i32) -> f32 {
@@ -17609,18 +17641,24 @@ fn lightTerm(lgt: Light, P: vec3<f32>, N: vec3<f32>, V: vec3<f32>, ndv: f32, a2:
   if (lgt.d0.w < 0.5) { occl = sf; }
   else if (lgt.d2.w >= 0.0 && frame.localShadow.x > 0.5) { occl = localShadow(i32(lgt.d2.w + 0.5), lgt, P, ndlL); }
   let w = lgt.d1.w * atten * ndlL * occl;
-  let lit = (kdm * (vec3<f32>(1.0) - FL) * albedo + FL * specL) * lgt.d1.rgb * w;
+  let lit = (kdm * (vec3<f32>(1.0) - FL) * albedo + FL * specL) * toLinear(lgt.d1.rgb) * w;
   if (u.layer0.x > 0.0) {
     // The clearcoat's own highlight, over a base its Fresnel dims (I4).
     let c = coatTerm(coatN, coatNdv, Ld, Hl, vdhL);
-    return lit * (1.0 - c.y) + c.x * lgt.d1.rgb * (lgt.d1.w * atten * occl);
+    return lit * (1.0 - c.y) + c.x * toLinear(lgt.d1.rgb) * (lgt.d1.w * atten * occl);
   }
   return lit;
 }
 
 fn envAverage() -> vec3<f32> {
-  if (u.envMeta.w > 0.5) { return u.envMeta.xyz * u.envHorizon.w; }
-  return (u.envSky.xyz + u.envHorizon.xyz + u.envGround.xyz) / 3.0 * u.envHorizon.w;
+  if (u.envMeta.w > 0.5) { return toLinear(u.envMeta.xyz) * u.envHorizon.w; }
+  return toLinear((u.envSky.xyz + u.envHorizon.xyz + u.envGround.xyz) / 3.0) * u.envHorizon.w;
+}
+// Authored colour (byte space) into the light it stands for: the sRGB curve in
+// the linear HDR variant (F0b), and nothing in the byte variant, whose shading
+// stays in the space it was authored in.
+fn toLinear(c: vec3<f32>) -> vec3<f32> {
+${hdr ? "  let v = max(c, vec3<f32>(0.0));\n  return select(pow((v + vec3<f32>(0.055)) / 1.055, vec3<f32>(2.4)), v / 12.92, v <= vec3<f32>(0.04045));" : "  return c;"}
 }
 // ACES filmic tone map (Narkowicz), per channel, mirroring acesFilmic in
 // meshRasterizer.ts. Applied only to the Modern-tier PBR radiance.
@@ -17909,6 +17947,8 @@ ${g.pbr}
     let dk = u.surface0.y * clamp((${DETAIL_FAR2.toFixed(4)} - in.eyeDepth) / ${(DETAIL_FAR2 - DETAIL_NEAR2).toFixed(4)}, 0.0, 1.0);
     let detail = textureSample(detailTex, samp, vec2<f32>(puv.x * u.surface0.x, 1.0 - puv.y * u.surface0.x)).rgb;
     if (dk > 0.0) { albedo = albedo * (vec3<f32>(1.0) + dk * (2.0 * detail - vec3<f32>(1.0))); }
+    // The material's colour, built in authored space, into light (F0b's linear variant).
+    albedo = toLinear(albedo);
     let L = u.light.xyz;
     let V = u.view.xyz;
     let H = normalize(L + V);
@@ -17935,6 +17975,7 @@ ${g.pbr}
       emis = ef * es;
     }
 ${g.emis}
+    emis = toLinear(emis);
     // Ambient / image-based lighting, mirroring the software rasteriser: with an
     // environment, a diffuse irradiance along N + a specular reflection along R
     // blurred toward the average by roughness; without one, the flat ambient.
@@ -17961,7 +18002,7 @@ ${reflect ? "      envSpec = pref * f0 * reflectK * ao;\n      envSeen = pref;\n
         amb = amb * (1.0 - coatV) + coatV * prefC * reflectK * ao;
 ${reflect ? "        envSpec = envSpec * (1.0 - coatV) + coatV * prefC * reflectK * ao;\n" : ""}      }
     } else {
-      amb = vec3<f32>(u.light.w) * albedo * ao;
+      amb = toLinear(vec3<f32>(u.light.w)) * albedo * ao;
     }
 ${reflect ? "    let ambRaw = amb;\n" : ""}    // A baked light map (the second UV set) scales the sky/ambient fill by how
     // much of it reaches this point, bounce included \u2014 mirroring the CPU path.
@@ -18007,22 +18048,24 @@ ${reflect ? "    // What the light map, probes and SSAO did to the fill, they do
       lit = (kdm * (vec3<f32>(1.0) - F) * albedo + F * specD) * ndl * sf + amb + emis;
     }
     // A fresnel rim, light at grazing angles (zero when the material has none).
-    lit = lit + u.surface2.rgb * pow(1.0 - ndv, u.surface2.w);
+    lit = lit + toLinear(u.surface2.rgb) * pow(1.0 - ndv, u.surface2.w);
     // A surface effect's glow, and its bands climbing the body (zero without one).
     let band = pow(0.5 + 0.5 * sin(in.worldPos.y * ${EFFECT_BAND_FREQUENCY2.toFixed(1)} - u.effect1.w * ${EFFECT_BAND_SPEED2.toFixed(1)}), ${EFFECT_BAND_POWER2.toFixed(1)});
-    lit = lit + u.effect0.rgb + u.effect1.rgb * band;
+    lit = lit + toLinear(u.effect0.rgb) + toLinear(u.effect1.rgb) * band;
     // HDR: expose + ACES roll-off, or write the linear colour straight through.
     var shaded = lit;
-${wgslDisplay("shaded")}${reflect ? (
+${wgslDisplay("shaded", hdr)}${reflect ? (
       /* wgsl */
       `
     // Reflections (I3): the same without the environment's reflection, so the pass can take it away.
     var without = lit - envSpec;
-${wgslDisplay("without")}
-    let contribution = max(clamp(shaded, vec3<f32>(0.0), vec3<f32>(1.0)) - clamp(without, vec3<f32>(0.0), vec3<f32>(1.0)), vec3<f32>(0.0));
+${wgslDisplay("without", hdr)}
+${hdr ? `    // Linear light (F0b): what the reflection adds, and what it sees, unclamped.
+    let contribution = max(shaded - without, vec3<f32>(0.0));
+    let seen = max(envSeen, vec3<f32>(0.0));` : `    let contribution = max(clamp(shaded, vec3<f32>(0.0), vec3<f32>(1.0)) - clamp(without, vec3<f32>(0.0), vec3<f32>(1.0)), vec3<f32>(0.0));
     var seen = envSeen;
     if (u.tonemap.x > 0.5) { seen = vec3<f32>(aces(seen.r * u.tonemap.y), aces(seen.g * u.tonemap.y), aces(seen.b * u.tonemap.y)); }
-    seen = clamp(seen, vec3<f32>(0.0), vec3<f32>(1.0));
+    seen = clamp(seen, vec3<f32>(0.0), vec3<f32>(1.0));`}
     let weight = (f0 * (1.0 - coatV) + vec3<f32>(coatV)) * reflectK * ao * occl;
     reflectOut = vec4<f32>(clamp(select(weight, contribution / max(seen, vec3<f32>(1e-3)), seen > vec3<f32>(0.02)), vec3<f32>(0.0), vec3<f32>(1.0)), mix(rough, u.layer0.y, u.layer0.x));
     envOut = vec4<f32>(contribution, 1.0);`
@@ -18044,7 +18087,7 @@ ${wgslDisplay("without")}
   // therefore skew identically under non-uniform scale.
   let nl = abs(dot(sNrm, u.light.xyz));
   let shade = u.light.w + (1.0 - u.light.w) * nl * shadowFactor(in.lightClip, in.worldPos, abs(dot(normalize(in.normal), u.light.xyz)));
-  return finishAlpha(colour.rgb * shade, colour.a);
+  return finishAlpha(toLinear(colour.rgb) * shade, colour.a);
 }
 `
   );
@@ -18073,7 +18116,7 @@ fn fs(in: VSOut) -> SceneOut {
 `;
 }
 var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
-  constructor(device, width, height, pipeline, pipelinesFor, bindGroupLayout, colourTexture, depthTexture, depthGroups, sampler, blankTexture, blankShadow, readback, bytesPerRow, style) {
+  constructor(device, width, height, pipeline, pipelinesFor, bindGroupLayout, colourTexture, depthTexture, depthGroups, sampler, blankTexture, blankShadow, readback, bytesPerRow, style, hdr = false) {
     this.device = device;
     this.width = width;
     this.height = height;
@@ -18088,6 +18131,7 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     this.blankShadow = blankShadow;
     this.readback = readback;
     this.bytesPerRow = bytesPerRow;
+    this.hdr = hdr;
     this.backend = "webgpu";
     this.meshes = /* @__PURE__ */ new WeakMap();
     this.textures = /* @__PURE__ */ new WeakMap();
@@ -18210,7 +18254,9 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
    * the factory falls back to software rather than the caller seeing an
    * exception mid-frame.
    */
-  static async create(device, width, height, style = DEFAULT_RASTER_STYLE3) {
+  static async create(device, width, height, style = DEFAULT_RASTER_STYLE3, options = {}) {
+    const hdr = options.hdr === true;
+    const colourFormat = hdr ? "rgba16float" : "rgba8unorm";
     if (!webgpuCanHonour(style)) return null;
     try {
       const bindGroupLayout = device.createBindGroupLayout({
@@ -18297,7 +18343,7 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
             // conversion here would show up as the GPU path looking washed out.
             // A frame with reflections (I3) writes the two reflection targets too, blended as the colour is.
             targets: [
-              blend ? { format: "rgba8unorm", blend } : { format: "rgba8unorm" },
+              blend ? { format: colourFormat, blend } : { format: colourFormat },
               ...reflect ? [0, 1].map(() => blend ? { format: "rgba16float", blend } : { format: "rgba16float" }) : []
             ]
           },
@@ -18312,12 +18358,12 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
           add: pipelineFor({ color: { srcFactor: "one", dstFactor: "one", operation: "add" }, alpha: { srcFactor: "zero", dstFactor: "one", operation: "add" } }, false)
         };
       };
-      const pipeline = pipelinesFor(sceneShader());
-      const compiled = await device.createShaderModule({ code: sceneShader() }).getCompilationInfo?.();
+      const pipeline = pipelinesFor(sceneShader(null, false, hdr));
+      const compiled = await device.createShaderModule({ code: sceneShader(null, false, hdr) }).getCompilationInfo?.();
       if (compiled?.messages?.some((m) => m.type === "error")) return null;
       const colourTexture = device.createTexture({
         size: { width, height },
-        format: "rgba8unorm",
+        format: colourFormat,
         usage: 16 | 1 | 4 | 2
         // RENDER_ATTACHMENT | COPY_SRC | TEXTURE_BINDING (the temporal resolve reads it) | COPY_DST (reflections land in it)
       });
@@ -18343,8 +18389,8 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
       const shadowTiles = device.createBuffer({ size: MAX_LOCAL_SHADOW_TILES2 * 80, usage: 128 | 8 });
       const atlasBlank = device.createTexture({ size: { width: 1, height: 1 }, format: "r32float", usage: 4 | 2 });
       const probesBlank = device.createTexture({ size: { width: 1, height: 1, depthOrArrayLayers: 1 }, dimension: "3d", format: "rgba32float", usage: 4 | 2 });
-      const behind = device.createTexture({ size: { width, height }, format: "rgba8unorm", usage: 4 | 2 | 16 });
-      const behindBlank = device.createTexture({ size: { width: 1, height: 1 }, format: "rgba8unorm", usage: 4 | 2 });
+      const behind = device.createTexture({ size: { width, height }, format: colourFormat, usage: 4 | 2 | 16 });
+      const behindBlank = device.createTexture({ size: { width: 1, height: 1 }, format: colourFormat, usage: 4 | 2 });
       const makeGroups = (atlas, probes) => {
         const shared = [
           { binding: 1, resource: { buffer: clusterBuffers.table } },
@@ -18443,7 +18489,8 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
         blankShadow,
         readback,
         bytesPerRow,
-        style
+        style,
+        hdr
       );
     } catch {
       return null;
@@ -18513,6 +18560,10 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
   }
   render(instances, draw) {
     if (this.destroyed) return;
+    if (this.hdr) {
+      this.software.render(applyScenePasses(instances, draw), draw);
+      return;
+    }
     const visible = applyScenePasses(instances, draw);
     presentFrame(this.latest, visible, draw, this.software);
     if (!this.readback.some((slot) => !slot.busy)) {
@@ -18532,6 +18583,10 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
   }
   get gpuDevice() {
     return this.device;
+  }
+  /** The colour targets' format: half-float in the linear HDR variant. */
+  get colourFormat() {
+    return this.hdr ? "rgba16float" : "rgba8unorm";
   }
   /**
    * Draw the frame and leave it on the GPU (AAA_FIDELITY_ROADMAP.md F0a): the
@@ -18794,7 +18849,7 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
       this.gbuffer = {
         targets: [0, 1].map(() => ({ texture: device.createTexture({ size, format: "rgba16float", usage: 16 | 4 }), ms: null })),
         // RENDER_ATTACHMENT | TEXTURE_BINDING
-        output: device.createTexture({ size, format: "rgba8unorm", usage: 16 | 1 }),
+        output: device.createTexture({ size, format: this.colourFormat, usage: 16 | 1 }),
         // RENDER_ATTACHMENT | COPY_SRC
         uniforms: device.createBuffer({ size: 160, usage: 64 | 8 }),
         // UNIFORM | COPY_DST
@@ -18816,7 +18871,7 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     var _a;
     const device = this.device;
     const k = multisampled ? 1 : 0;
-    (_a = gbuffer.pipelines)[k] ?? (_a[k] = fullScreenPipeline(device, reflectionShaderWgsl(multisampled), "reflectPass", "rgba8unorm"));
+    (_a = gbuffer.pipelines)[k] ?? (_a[k] = fullScreenPipeline(device, reflectionShaderWgsl(multisampled, this.hdr), "reflectPass", this.colourFormat));
     const pipeline = gbuffer.pipelines[k];
     device.queue.writeBuffer(gbuffer.uniforms, 0, reflectionUniforms(projection, "ndc", gbuffer.data));
     const pass = encoder.beginRenderPass({ colorAttachments: [{ view: gbuffer.output.createView(), clearValue: { r: 0, g: 0, b: 0, a: 0 }, loadOp: "clear", storeOp: "store" }] });
@@ -18852,7 +18907,7 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
         // UNIFORM | COPY_DST
         sampler: device.createSampler({ magFilter: "linear", minFilter: "linear", addressModeU: "clamp-to-edge", addressModeV: "clamp-to-edge" }),
         resolve: [null, null],
-        sharpen: fullScreenPipeline(device, TEMPORAL_SHARPEN_WGSL, "sharpen", "rgba8unorm")
+        sharpen: fullScreenPipeline(device, TEMPORAL_SHARPEN_WGSL, "sharpen", this.colourFormat)
       };
     }
     const taa = this.taa;
@@ -18884,7 +18939,7 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
   ensureMsaa() {
     if (!this.msaa) {
       const size = { width: this.width, height: this.height };
-      const colour = this.device.createTexture({ size, format: "rgba8unorm", sampleCount: MSAA_SAMPLES, usage: 16 });
+      const colour = this.device.createTexture({ size, format: this.colourFormat, sampleCount: MSAA_SAMPLES, usage: 16 });
       const depth = this.device.createTexture({ size, format: "depth24plus", sampleCount: MSAA_SAMPLES, usage: 16 | 4 });
       const blank = this.device.createTexture({ size: { width: 1, height: 1 }, format: "depth24plus", sampleCount: MSAA_SAMPLES, usage: 16 | 4 });
       const groups = this.depthGroups;
@@ -18903,7 +18958,7 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     const key = `${graph?.key ?? ""}|${samples}|${reflect ? 1 : 0}`;
     let set = this.variants.get(key);
     if (!set) {
-      set = this.pipelinesFor(sceneShader(graph, reflect), samples, reflect);
+      set = this.pipelinesFor(sceneShader(graph, reflect, this.hdr), samples, reflect);
       this.variants.set(key, set);
     }
     return set;
@@ -19188,11 +19243,11 @@ function destroySafely(resource) {
 }
 
 // src/render/createSceneRenderer.ts
-async function createSceneRenderer(width, height, caps, deviceProvider = getWebgpuDevice, glProvider) {
+async function createSceneRenderer(width, height, caps, deviceProvider = getWebgpuDevice, glProvider, options = {}) {
   const style = rasterStyleFor(caps);
   const device = await deviceProvider();
   let renderer = null;
-  if (device) renderer = await WebgpuSceneRenderer.create(device, width, height, style);
+  if (device) renderer = await WebgpuSceneRenderer.create(device, width, height, style, options);
   renderer ?? (renderer = WebglSceneRenderer.create(width, height, style, glProvider));
   renderer ?? (renderer = new SoftwareSceneRenderer(style));
   return capsConstrainScene(caps) ? new CappedSceneRenderer(renderer, caps) : renderer;
@@ -19728,7 +19783,7 @@ var USAGE2 = {
 var STAGE_FRAGMENT2 = 2;
 var STAGE_COMPUTE = 4;
 var SKY_UNIFORM_FLOATS = 4 * (6 + 2 * MAX_CLOUD_LAYERS);
-function packSkyUniforms(sky, width, height, out = new Float32Array(SKY_UNIFORM_FLOATS)) {
+function packSkyUniforms(sky, width, height, out = new Float32Array(SKY_UNIFORM_FLOATS), hdr = false) {
   const v = sky.view;
   const p = sky.projection;
   const layers = Math.min(MAX_CLOUD_LAYERS, sky.clouds.length);
@@ -19739,7 +19794,7 @@ function packSkyUniforms(sky, width, height, out = new Float32Array(SKY_UNIFORM_
   const sl = sun ? Math.hypot(sun.direction[0], sun.direction[1], sun.direction[2]) || 1 : 1;
   out.set(sun ? [sun.direction[0] / sl, sun.direction[1] / sl, sun.direction[2] / sl, 1] : [0, 0, 0, 0], 12);
   out.set(sun ? [sun.color[0], sun.color[1], sun.color[2], sky.time] : [0, 0, 0, sky.time], 16);
-  out.set([width, height, 0, 0], 20);
+  out.set([width, height, hdr ? 1 : 0, 0], 20);
   for (let i = 0; i < MAX_CLOUD_LAYERS; i += 1) {
     const layer = i < layers ? sky.clouds[i].layer : null;
     out.set(layer ? [layer.scale, layer.wind[0], layer.wind[1], layer.opacity] : [0, 0, 0, 0], 24 + i * 4);
@@ -19752,18 +19807,18 @@ function shaftGrid(width, height) {
   return { step, width: Math.ceil(width / step), height: Math.ceil(height / step) };
 }
 var SHAFT_UNIFORM_FLOATS = 16;
-function packShaftUniforms(sun, shafts, color, width, height, out = new Float32Array(SHAFT_UNIFORM_FLOATS)) {
+function packShaftUniforms(sun, shafts, color, width, height, out = new Float32Array(SHAFT_UNIFORM_FLOATS), hdr = false) {
   const grid = shaftGrid(width, height);
   const reach = Math.max(0.05, Math.min(1, shafts.length)) * Math.hypot(grid.width, grid.height);
   out.set([sun.x, sun.y, Math.hypot(width, height), grid.step], 0);
   out.set([width, height, grid.width, grid.height], 4);
   out.set([sun.x / grid.step - 0.5, sun.y / grid.step - 0.5, reach, shafts.strength], 8);
-  out.set([color[0], color[1], color[2], 0], 12);
+  out.set([color[0], color[1], color[2], hdr ? 1 : 0], 12);
   return out;
 }
 var BASE_KIND = { colour: 0, sky: 1, frame: 2 };
-var COMPOSE_UNIFORM_FLOATS = 20;
-function packComposeUniforms(frame, width, height, out = new Float32Array(COMPOSE_UNIFORM_FLOATS)) {
+var COMPOSE_UNIFORM_FLOATS = 24;
+function packComposeUniforms(frame, width, height, out = new Float32Array(COMPOSE_UNIFORM_FLOATS), hdr = false) {
   const shafts = frame.base.kind === "sky" && frame.shafts && frame.shafts.shafts.strength > 0 ? frame.shafts : null;
   const grid = shaftGrid(width, height);
   out.set([BASE_KIND[frame.base.kind], frame.scene ? 1 : 0, shafts ? 1 : 0, frame.front ? 1 : 0], 0);
@@ -19772,10 +19827,11 @@ function packComposeUniforms(frame, width, height, out = new Float32Array(COMPOS
   out.set([bg[0] / 255, bg[1] / 255, bg[2] / 255, bg[3] / 255], 8);
   out.set(shafts ? [shafts.color[0], shafts.color[1], shafts.color[2], 0] : [0, 0, 0, 0], 12);
   out.set([1 / (grid.step * grid.width), 1 / (grid.step * grid.height), 0, 0], 16);
+  out.set([hdr ? 1 : 0, hdr && frame.tonemap ? 1 : 0, frame.tonemap?.exposure ?? 1, 0], 20);
   return out;
 }
-var MEASURE_UNIFORM_FLOATS = 12;
-function packMeasureUniforms(frame, width, height, out = new Float32Array(MEASURE_UNIFORM_FLOATS)) {
+var MEASURE_UNIFORM_FLOATS = 16;
+function packMeasureUniforms(frame, width, height, out = new Float32Array(MEASURE_UNIFORM_FLOATS), hdr = false) {
   const m = frame.measure;
   const step = Math.max(1, Math.floor(Math.sqrt(width * height / 1024)));
   out.set([width, height, step, BASE_KIND[frame.base.kind] + (m?.luminance ? 0 : 8) + (frame.scene ? 0 : 16)], 0);
@@ -19783,8 +19839,26 @@ function packMeasureUniforms(frame, width, height, out = new Float32Array(MEASUR
   out.set([bg[0] / 255, bg[1] / 255, bg[2] / 255, bg[3] / 255], 4);
   const sun = m?.sun ?? null;
   out.set([sun?.x ?? 0, sun?.y ?? 0, Math.max(1.5, height * 0.012), sun ? 1 : 0], 8);
+  out.set([hdr ? 1 : 0, hdr ? frame.tonemap?.exposure ?? 1 : 1, 0, 0], 12);
   return out;
 }
+var SRGB_WGSL = (
+  /* wgsl */
+  `
+fn toLinear(c: vec3f) -> vec3f {
+  let v = max(c, vec3f(0.0));
+  return select(pow((v + vec3f(0.055)) / 1.055, vec3f(2.4)), v / 12.92, v <= vec3f(0.04045));
+}
+fn toSrgb(c: vec3f) -> vec3f {
+  let v = clamp(c, vec3f(0.0), vec3f(1.0));
+  return select(1.055 * pow(v, vec3f(1.0 / 2.4)) - vec3f(0.055), v * 12.92, v <= vec3f(0.0031308));
+}
+fn acesFilmic(x: vec3f) -> vec3f {
+  let v = max(x, vec3f(0.0));
+  return clamp((v * (2.51 * v + 0.03)) / (v * (2.43 * v + 0.59) + 0.14), vec3f(0.0), vec3f(1.0));
+}
+`
+);
 var FULLSCREEN_VS2 = (
   /* wgsl */
   `
@@ -19814,6 +19888,7 @@ struct Sky {
 @group(0) @binding(3) var clouds: texture_2d_array<f32>;
 @group(0) @binding(4) var cloudSampler: sampler;
 ${FULLSCREEN_VS2}
+${SRGB_WGSL}
 fn broadGlow(c: f32) -> f32 {
   if (c <= 0.0) { return 0.0; }
   let c2 = c * c;
@@ -19863,6 +19938,8 @@ fn coreGlow(c: f32) -> f32 {
       rgb = clamp(rgb, vec3f(0.0), vec3f(1.0));
     }
   }
+  // A linear frame (F0b) takes the painted sky as the light it shows.
+  if (s.size.z > 0.5) { rgb = toLinear(rgb); }
   return vec4f(rgb, 1.0);
 }
 `
@@ -19886,6 +19963,7 @@ ${SHAFT_STRUCT}
 @group(0) @binding(1) var scene: texture_2d<f32>;
 @group(0) @binding(2) var skyTex: texture_2d<f32>;
 ${FULLSCREEN_VS2}
+${SRGB_WGSL}
 @fragment fn mask(@builtin(position) pos: vec4f) -> @location(0) vec4f {
   let cell = floor(pos.xy);
   let step = u.sun.w;
@@ -19893,7 +19971,9 @@ ${FULLSCREEN_VS2}
   let y = min(u.size.y - 1.0, floor(cell.y * step + step / 2.0));
   let at = vec2i(i32(x), i32(y));
   if (any(textureLoad(scene, at, 0) != vec4f(0.0))) { return vec4f(0.0); }
-  let sky = textureLoad(skyTex, at, 0).rgb;
+  var sky = textureLoad(skyTex, at, 0).rgb;
+  // The source is the sky as it shows: a linear frame's is encoded back first.
+  if (u.color.w > 0.5) { sky = toSrgb(sky); }
   let lum = dot(sky, vec3f(0.2126, 0.7152, 0.0722));
   let bright = max(0.0, lum - 0.55) / 0.45;
   let near = max(0.0, 1.0 - distance(vec2f(x, y), u.sun.xy) / (u.sun.z * 0.35));
@@ -19936,6 +20016,7 @@ struct Compose {
   background: vec4f,
   shaftColor: vec4f,
   shaftScale: vec4f,
+  hdr: vec4f,
 };
 @group(0) @binding(0) var<uniform> u: Compose;
 @group(0) @binding(1) var baseTex: texture_2d<f32>;
@@ -19946,25 +20027,42 @@ struct Compose {
 @group(0) @binding(6) var hud: texture_2d<f32>;
 @group(0) @binding(7) var holo: texture_2d<f32>;
 ${FULLSCREEN_VS2}
+${SRGB_WGSL}
 fn over(top: vec4f, under: vec4f) -> vec4f {
   return vec4f(top.rgb + under.rgb * (1.0 - top.a), top.a + under.a * (1.0 - top.a));
 }
+// Byte space clamps every layer to the displayable range; linear light (F0b) only to zero.
+fn keep(c: vec4f) -> vec4f {
+  if (u.hdr.x > 0.5) { return max(c, vec4f(0.0)); }
+  return clamp(c, vec4f(0.0), vec4f(1.0));
+}
 @fragment fn compose(@builtin(position) pos: vec4f) -> @location(0) vec4f {
   let p = vec2i(floor(pos.xy));
+  let hdr = u.hdr.x > 0.5;
   var c = u.background;
   if (u.layers.x > 0.5) { c = textureLoad(baseTex, p, 0); }
+  // A linear frame decodes a base that was authored in display space (the sky is linear already).
+  if (hdr && u.layers.x != 1.0) { c = vec4f(toLinear(c.rgb), c.a); }
   var open = true;
   if (u.layers.y > 0.5) {
     let s = textureLoad(scene, p, 0);
     open = all(s == vec4f(0.0));
-    c = clamp(over(s, c), vec4f(0.0), vec4f(1.0));
+    c = keep(over(s, c));
   }
   var v = textureSampleLevel(light, lightSampler, pos.xy * u.shaftScale.xy, 0.0).r;
   if (u.layers.z > 0.5) {
     if (open) { v = v * u.layers2.w; }
-    c = vec4f(min(vec3f(1.0), c.rgb + u.shaftColor.rgb * v), c.a);
+    if (hdr) { c = vec4f(c.rgb + toLinear(u.shaftColor.rgb) * v, c.a); }
+    else { c = vec4f(min(vec3f(1.0), c.rgb + u.shaftColor.rgb * v), c.a); }
   }
-  if (u.layers.w > 0.5) { c = clamp(over(textureLoad(front, p, 0), c), vec4f(0.0), vec4f(1.0)); }
+  if (u.layers.w > 0.5) { c = keep(over(textureLoad(front, p, 0), c)); }
+  // The linear frame is tone-mapped once, whole, and encoded for the display;
+  // the HUD and holo UI are drawn in display space over it.
+  if (hdr) {
+    var mapped = clamp(c.rgb, vec3f(0.0), vec3f(1.0));
+    if (u.hdr.y > 0.5) { mapped = acesFilmic(c.rgb * u.hdr.z); }
+    c = vec4f(toSrgb(mapped), clamp(c.a, 0.0, 1.0));
+  }
   if (u.layers2.x > 0.5) {
     let h = textureLoad(hud, p, 0);
     let b = round(h.rgb * 255.0);
@@ -19982,6 +20080,7 @@ struct Measure {
   size: vec4f,
   background: vec4f,
   sun: vec4f,
+  hdr: vec4f,
 };
 @group(0) @binding(0) var<uniform> u: Measure;
 @group(0) @binding(1) var baseTex: texture_2d<f32>;
@@ -19989,6 +20088,7 @@ struct Measure {
 @group(0) @binding(3) var<storage, read_write> result: array<f32, 4>;
 var<workgroup> sums: array<f32, 256>;
 var<workgroup> counts: array<f32, 256>;
+${SRGB_WGSL}
 fn linear(c: f32) -> f32 {
   let b = round(c * 255.0) / 255.0;
   if (b <= 0.04045) { return b / 12.92; }
@@ -19997,9 +20097,12 @@ fn linear(c: f32) -> f32 {
 fn composite(p: vec2i, kind: i32, hasScene: bool) -> vec4f {
   var c = u.background;
   if (kind > 0) { c = textureLoad(baseTex, p, 0); }
+  let hdr = u.hdr.x > 0.5;
+  if (hdr && kind != 1) { c = vec4f(toLinear(c.rgb), c.a); }
   if (hasScene) {
     let s = textureLoad(scene, p, 0);
-    c = clamp(vec4f(s.rgb + c.rgb * (1.0 - s.a), s.a + c.a * (1.0 - s.a)), vec4f(0.0), vec4f(1.0));
+    c = vec4f(s.rgb + c.rgb * (1.0 - s.a), s.a + c.a * (1.0 - s.a));
+    if (hdr) { c = max(c, vec4f(0.0)); } else { c = clamp(c, vec4f(0.0), vec4f(1.0)); }
   }
   return c;
 }
@@ -20026,8 +20129,10 @@ fn openSky(x: f32, y: f32) -> f32 {
       let x = first + f32(i % gw) * step;
       let y = first + f32(i / gw) * step;
       let c = composite(vec2i(i32(x), i32(y)), kind, hasScene);
-      if (round(c.a * 255.0) == 0.0) { continue; }
-      let l = 0.2126 * linear(c.r) + 0.7152 * linear(c.g) + 0.0722 * linear(c.b);
+      if (round(clamp(c.a, 0.0, 1.0) * 255.0) == 0.0) { continue; }
+      var l = 0.2126 * linear(c.r) + 0.7152 * linear(c.g) + 0.0722 * linear(c.b);
+      // Linear light (F0b): its luminance as exposed, before the tone map.
+      if (u.hdr.x > 0.5) { l = dot(c.rgb, vec3f(0.2126, 0.7152, 0.0722)) * u.hdr.y; }
       sum = sum + log(max(1e-4, l));
       count = count + 1.0;
     }
@@ -20066,7 +20171,7 @@ fn openSky(x: f32, y: f32) -> f32 {
 `
 );
 var GpuPresenter = class {
-  constructor(device, width, height) {
+  constructor(device, width, height, options = {}) {
     this.device = device;
     this.width = width;
     this.height = height;
@@ -20087,6 +20192,7 @@ var GpuPresenter = class {
     this.cloudTexture = null;
     this.latestStats = { luminance: null, luminanceSeq: 0, sunVisible: null, seq: 0 };
     this.destroyed = false;
+    this.hdr = options.hdr === true;
     this.blank = device.createTexture({ size: { width: 1, height: 1 }, format: "rgba8unorm", usage: USAGE2.textureBinding | USAGE2.copyDst });
     device.queue.writeTexture({ texture: this.blank }, new Uint8Array(4), { bytesPerRow: 4 }, { width: 1, height: 1 });
     const sampler = (u, v) => device.createSampler({ magFilter: "linear", minFilter: "linear", addressModeU: u, addressModeV: v });
@@ -20122,9 +20228,10 @@ var GpuPresenter = class {
     const sky = frame.base.kind === "sky" ? frame.base.sky : null;
     const shafts = sky && frame.shafts && frame.shafts.shafts.strength > 0 ? frame.shafts : null;
     if (sky) {
-      this.skyTarget ?? (this.skyTarget = this.target("rgba8unorm", this.width, this.height));
-      device.queue.writeBuffer(this.uniforms.sky, 0, packSkyUniforms(sky, this.width, this.height, this.data.sky));
-      this.fullScreen(encoder, "sky", "rgba8unorm", SKY_WGSL, this.skyTarget, [
+      const skyFormat = this.hdr ? "rgba16float" : "rgba8unorm";
+      this.skyTarget ?? (this.skyTarget = this.target(skyFormat, this.width, this.height));
+      device.queue.writeBuffer(this.uniforms.sky, 0, packSkyUniforms(sky, this.width, this.height, this.data.sky, this.hdr));
+      this.fullScreen(encoder, "sky", skyFormat, SKY_WGSL, this.skyTarget, [
         { binding: 0, resource: { buffer: this.uniforms.sky } },
         { binding: 1, resource: this.panoramaFor(sky.map).createView() },
         { binding: 2, resource: this.linear.wrapU },
@@ -20138,7 +20245,7 @@ var GpuPresenter = class {
     if (shafts) {
       const grid = shaftGrid(this.width, this.height);
       this.shaftTargets ?? (this.shaftTargets = { mask: this.target("r16float", grid.width, grid.height), light: this.target("r16float", grid.width, grid.height) });
-      device.queue.writeBuffer(this.uniforms.shaft, 0, packShaftUniforms(shafts.sun, shafts.shafts, shafts.color, this.width, this.height, this.data.shaft));
+      device.queue.writeBuffer(this.uniforms.shaft, 0, packShaftUniforms(shafts.sun, shafts.shafts, shafts.color, this.width, this.height, this.data.shaft, this.hdr));
       this.fullScreen(encoder, "mask", "r16float", SHAFT_MASK_WGSL, this.shaftTargets.mask, [
         { binding: 0, resource: { buffer: this.uniforms.shaft } },
         { binding: 1, resource: scene.createView() },
@@ -20152,7 +20259,7 @@ var GpuPresenter = class {
     }
     const post = frame.post ?? null;
     if (post) this.composed ?? (this.composed = this.target("rgba8unorm", this.width, this.height));
-    device.queue.writeBuffer(this.uniforms.compose, 0, packComposeUniforms(frame, this.width, this.height, this.data.compose));
+    device.queue.writeBuffer(this.uniforms.compose, 0, packComposeUniforms(frame, this.width, this.height, this.data.compose, this.hdr));
     this.fullScreen(encoder, "compose", post ? "rgba8unorm" : format, COMPOSE_WGSL, post ? this.composed : target, [
       { binding: 0, resource: { buffer: this.uniforms.compose } },
       { binding: 1, resource: base.createView() },
@@ -20169,7 +20276,7 @@ var GpuPresenter = class {
     }
     const measure = frame.measure && (frame.measure.luminance || frame.measure.sun) && !this.measured.busy ? frame.measure : null;
     if (measure) {
-      device.queue.writeBuffer(this.uniforms.measure, 0, packMeasureUniforms(frame, this.width, this.height, this.data.measure));
+      device.queue.writeBuffer(this.uniforms.measure, 0, packMeasureUniforms(frame, this.width, this.height, this.data.measure, this.hdr));
       const pipeline = this.pipeline("measure", "", MEASURE_WGSL);
       const pass = encoder.beginComputePass();
       pass.setPipeline(pipeline);
@@ -20328,7 +20435,7 @@ var GpuCanvasSurface = class _GpuCanvasSurface {
    * WebGPU canvas context): the caller then mounts the 2D canvas, and the
    * frame takes the byte path.
    */
-  static create(container, scaleMode, model, device) {
+  static create(container, scaleMode, model, device, options = {}) {
     try {
       const canvas = container.ownerDocument.createElement("canvas");
       canvas.width = model.width;
@@ -20341,7 +20448,7 @@ var GpuCanvasSurface = class _GpuCanvasSurface {
       if (!context || !gpu) return null;
       const format = gpu.getPreferredCanvasFormat?.() ?? "bgra8unorm";
       context.configure({ device, format, alphaMode: "opaque" });
-      return new _GpuCanvasSurface(container, scaleMode, model, canvas, context, format, new GpuPresenter(device, model.width, model.height));
+      return new _GpuCanvasSurface(container, scaleMode, model, canvas, context, format, new GpuPresenter(device, model.width, model.height, options));
     } catch {
       return null;
     }
@@ -20761,15 +20868,17 @@ var Player = class {
         };
       }
       const particles = this.options.particles;
-      if (mesh || world && this.cartSource) {
-        this.sceneRenderer = await createSceneRenderer(
-          this.model.width,
-          this.model.height,
-          this.model.renderCaps
-        );
+      const wantsGpuPresent = (this.options.gpuPresent ?? this.model.renderCaps.gpuPresent === true) && Boolean(mesh) && !this.options.lighting && !(particles && particles.emitters.length > 0) && !(world && this.cartSource) && !(wantsForeground && this.cartSource) && !(scene && backdrop);
+      let hdr = wantsGpuPresent && (this.options.linearHdr ?? this.model.renderCaps.linearHdr === true);
+      const makeRenderer = () => createSceneRenderer(this.model.width, this.model.height, this.model.renderCaps, void 0, void 0, { hdr });
+      if (mesh || world && this.cartSource) this.sceneRenderer = await makeRenderer();
+      const presentFromGpu = wantsGpuPresent && this.sceneRenderer?.backend === "webgpu" && Boolean(this.sceneRenderer.renderToTexture);
+      const gpuCanvas = presentFromGpu ? GpuCanvasSurface.create(this.container, scale, this.model, this.sceneRenderer.gpuDevice, { hdr }) : null;
+      if (hdr && !gpuCanvas && this.sceneRenderer) {
+        this.sceneRenderer.dispose();
+        hdr = false;
+        this.sceneRenderer = await makeRenderer();
       }
-      const presentFromGpu = (this.options.gpuPresent ?? this.model.renderCaps.gpuPresent === true) && Boolean(mesh) && !this.options.lighting && !(particles && particles.emitters.length > 0) && !(world && this.cartSource) && !(wantsForeground && this.cartSource) && !(scene && backdrop) && this.sceneRenderer?.backend === "webgpu" && Boolean(this.sceneRenderer.renderToTexture);
-      const gpuCanvas = presentFromGpu ? GpuCanvasSurface.create(this.container, scale, this.model, this.sceneRenderer.gpuDevice) : null;
       const makeBaseSurface = async (target) => {
         let surface = gpuCanvas ? gpuCanvas : this.options.lighting ? this.litSurface = await LitCanvasSurface.create(target, scale, this.model, this.options.lighting) : new CanvasSurface(target, scale, this.model);
         if (particles && particles.emitters.length > 0) {
@@ -20790,7 +20899,7 @@ var Player = class {
               temporal: this.model.renderCaps.temporal === true,
               reflections: this.model.renderCaps.reflections === true,
               // A held weapon draws on the GPU too, when the scene does.
-              ...this.sceneRenderer && this.sceneRenderer.backend !== "software" ? { createFrontRenderer: () => createSceneRenderer(this.model.width, this.model.height, this.model.renderCaps) } : {},
+              ...this.sceneRenderer && this.sceneRenderer.backend !== "software" ? { createFrontRenderer: makeRenderer } : {},
               ...gpuCanvas ? { presenter: gpuCanvas } : {}
             }
           );

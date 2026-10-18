@@ -55,7 +55,7 @@ export function reflectionUniforms(projection: Mat4, depth: DepthStorage, out: F
 }
 
 /** The reflection pass's WGSL. `multisampled` reads a multisampled depth (its first sample). */
-export function reflectionShaderWgsl(multisampled: boolean): string {
+export function reflectionShaderWgsl(multisampled: boolean, hdr = false): string {
   return /* wgsl */ `
 struct Ssr { proj: mat4x4<f32>, invProj: mat4x4<f32>, params: vec4<f32>, params2: vec4<f32> };
 @group(0) @binding(0) var<uniform> ssr: Ssr;
@@ -144,7 +144,7 @@ fn reflectPass(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
     * (1.0 - smoothstep(0.15, 0.55, R.z));
   let seen = textureLoad(colour, hit, 0).rgb;
   let env = textureLoad(envMap, p, 0).rgb;
-  return vec4<f32>(clamp(c.rgb + confidence * (w * seen - env), vec3<f32>(0.0), vec3<f32>(1.0)), c.a);
+  return vec4<f32>(${hdr ? "max(c.rgb + confidence * (w * seen - env), vec3<f32>(0.0))" : "clamp(c.rgb + confidence * (w * seen - env), vec3<f32>(0.0), vec3<f32>(1.0))"}, c.a);
 }
 `;
 }

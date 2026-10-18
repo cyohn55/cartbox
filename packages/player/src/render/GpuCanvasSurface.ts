@@ -52,7 +52,7 @@ export class GpuCanvasSurface implements DisplaySurface {
    * WebGPU canvas context): the caller then mounts the 2D canvas, and the
    * frame takes the byte path.
    */
-  static create(container: HTMLElement, scaleMode: ScaleMode, model: ConsoleModel, device: any): GpuCanvasSurface | null {
+  static create(container: HTMLElement, scaleMode: ScaleMode, model: ConsoleModel, device: any, options: { readonly hdr?: boolean } = {}): GpuCanvasSurface | null {
     try {
       const canvas = container.ownerDocument.createElement("canvas");
       canvas.width = model.width;
@@ -65,7 +65,7 @@ export class GpuCanvasSurface implements DisplaySurface {
       if (!context || !gpu) return null;
       const format: string = gpu.getPreferredCanvasFormat?.() ?? "bgra8unorm";
       context.configure({ device, format, alphaMode: "opaque" });
-      return new GpuCanvasSurface(container, scaleMode, model, canvas, context, format, new GpuPresenter(device, model.width, model.height));
+      return new GpuCanvasSurface(container, scaleMode, model, canvas, context, format, new GpuPresenter(device, model.width, model.height, options));
     } catch {
       return null;
     }

@@ -553,28 +553,30 @@ export class Player {
       // Built once, only when something 3D is actually declared, so a plain 2D
       // cart never touches WebGPU. `createSceneRenderer` always resolves — it
       // falls back to the software rasteriser rather than returning null.
-      if (mesh || (world && this.cartSource)) {
-        this.sceneRenderer = await createSceneRenderer(
-          this.model.width,
-          this.model.height,
-          this.model.renderCaps,
-        );
-      }
       // A frame presented from the GPU (F0a): the scene, sky, HUD and post-FX all
       // run on the renderer's device, into a WebGPU canvas. Only with nothing
       // CPU-drawn between the scene and the screen; otherwise, or without a
       // WebGPU canvas, the byte path as before.
-      const presentFromGpu =
+      const wantsGpuPresent =
         (this.options.gpuPresent ?? this.model.renderCaps.gpuPresent === true) &&
         Boolean(mesh) &&
         !this.options.lighting &&
         !(particles && particles.emitters.length > 0) &&
         !(world && this.cartSource) &&
         !(wantsForeground && this.cartSource) &&
-        !(scene && backdrop) &&
-        this.sceneRenderer?.backend === "webgpu" &&
-        Boolean(this.sceneRenderer.renderToTexture);
-      const gpuCanvas = presentFromGpu ? GpuCanvasSurface.create(this.container, scale, this.model, this.sceneRenderer!.gpuDevice) : null;
+        !(scene && backdrop);
+      // …in linear light, tone-mapped once as it is presented (F0b), where the tier asks.
+      let hdr = wantsGpuPresent && (this.options.linearHdr ?? this.model.renderCaps.linearHdr === true);
+      const makeRenderer = () => createSceneRenderer(this.model.width, this.model.height, this.model.renderCaps, undefined, undefined, { hdr });
+      if (mesh || (world && this.cartSource)) this.sceneRenderer = await makeRenderer();
+      const presentFromGpu = wantsGpuPresent && this.sceneRenderer?.backend === "webgpu" && Boolean(this.sceneRenderer.renderToTexture);
+      const gpuCanvas = presentFromGpu ? GpuCanvasSurface.create(this.container, scale, this.model, this.sceneRenderer!.gpuDevice, { hdr }) : null;
+      // No WebGPU canvas after all: the byte path, whose renderer reads its frames back in 8 bits.
+      if (hdr && !gpuCanvas && this.sceneRenderer) {
+        this.sceneRenderer.dispose();
+        hdr = false;
+        this.sceneRenderer = await makeRenderer();
+      }
       // The base surface renders the cart (optionally relit). With an active FX
       // stack it draws offscreen and PostFxSurface presents it through the
       // effect chain; if FX can't run (no WebGL), the base surface mounts
@@ -614,7 +616,7 @@ export class Player {
               reflections: this.model.renderCaps.reflections === true,
               // A held weapon draws on the GPU too, when the scene does.
               ...(this.sceneRenderer && this.sceneRenderer.backend !== "software"
-                ? { createFrontRenderer: () => createSceneRenderer(this.model.width, this.model.height, this.model.renderCaps) }
+                ? { createFrontRenderer: makeRenderer }
                 : {}),
               ...(gpuCanvas ? { presenter: gpuCanvas } : {}),
             },

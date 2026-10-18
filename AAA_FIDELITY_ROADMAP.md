@@ -134,6 +134,19 @@ Everything else depends on this track. It contains no visible "feature", but its
   - All lighting runs in linear space, and blending happens in linear HDR. One tone map sits at the end of the frame.
   - Lights, sky and emissive take **physical units**: lux for the sun, candela or lumens for punctual lights, nits for emissive, EV100 for exposure. Editor conversion keeps existing scenes looking the same.
   - The fantasy tiers keep their byte space, pinned by their existing parity tests.
+  - **F0b-1, linear HDR: done.** On the `aaa` tier (`RenderCaps.linearHdr`, or the `linearHdr` player option on a GPU-presented scene), the scene renders in linear HDR. Physical light units are still to come (F0b-2).
+    - **The scene target is `rgba16float`.** That covers the colour, MSAA, SSR, reflection and TAA targets, and the held weapon.
+    - **Authored colour is decoded from sRGB in the shader.** This covers albedo, emissive, light and rim colours, the ambient floor, the environment gradient, the environment map, reflection probes and effect tints. Light maps, light probes and AO stay as they are, because they are factors rather than colours.
+    - **Lighting and blending run in linear space, with no clamp.** Fog mixes in linear, and the shader's own tone map is skipped. Nothing is clamped until the end, so a highlight above 1 survives to the tone map.
+    - **The tone map runs once, in the presenter.** The scene, sky, shafts and weapon blend in linear. The scene's ACES tone map and exposure then apply, and the result is encoded to sRGB. The cart's HUD and the holo layer are composited after that, unmapped. Eye adaptation measures the linear, exposed frame.
+    - **What changes on screen.** Half-lit surfaces read brighter and saturated colours stay richer, which is what linear lighting should do. An existing scene therefore looks different on `aaa` than on Modern; F0b-2's unit conversion is where it gets calibrated. Unlit colour, an untone-mapped sky and the HUD come out as they did.
+    - **Where it applies.** It is on only where the frame is GPU-presented. A page without a WebGPU canvas rebuilds the renderer in byte space, and so do the fantasy tiers. Try it with `/lockout?hdr=1`.
+    - *Tests:* `gpu-present.test.ts` (Dawn), new "linear HDR" suite:
+      - unlit HDR matches the byte path within 2 levels;
+      - a half-lit surface comes out at `srgb(lin(c)·0.5)`;
+      - ACES with exposure maps as expected, and the HUD after it stays unmapped;
+      - the measured luminance is linear × exposure;
+      - an untone-mapped sky matches the byte sky.
 - [ ] **F0c. Frame graph.**
   - A declarative pass graph with transient, aliased resources, replacing the hand-ordered passes of `WebgpuSceneRenderer`.
   - It produces a depth prepass and a thin G-buffer of normal, roughness and material ID.

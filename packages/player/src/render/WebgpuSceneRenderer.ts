@@ -232,9 +232,38 @@ export function multisampledDepthShader(code: string): string {
 
 /**
  * The Modern path's tone map and fog, applied to the WGSL variable `v` in
- * place (display space, mirroring applyFog in skyDome.ts).
+ * place (display space, mirroring applyFog in skyDome.ts). In the linear HDR
+ * variant (AAA_FIDELITY_ROADMAP.md F0b) there is no tone map here — the
+ * presenter tone-maps the whole frame once — and the fog mixes in linear light,
+ * unclamped.
  */
-function wgslDisplay(v: string): string {
+function wgslDisplay(v: string, hdr = false): string {
+  if (hdr) {
+    return /* wgsl */ `    if (u.fogParams.x > 0.5) {
+      let d = max(0.0, in.eyeDepth - u.fogParams.y);
+      var f = min(u.fogParams.z, 1.0 - exp(-d * u.fog.w));
+      var fc = toLinear(u.fog.rgb);
+      if (u.fogParams.w > 0.5) {
+        let c = u.fogCam.xyz;
+        let ray = in.worldPos - c;
+        let len = length(ray);
+        var tau = fogLayer(u.fogHeight.x, u.fogHeight.z, u.fogHeight.y, c.y, ray.y, len, 0.0, 1.0);
+        let vc = i32(u.fogCam.w + 0.5);
+        for (var i = 0; i < vc; i = i + 1) {
+          let a = u.fogVol[i * 2];
+          let b = u.fogVol[i * 2 + 1];
+          let span = fogBox(a.xyz, b.xyz, c, ray);
+          if (span.y > span.x) { tau = tau + fogLayer(a.w, b.w, a.y, c.y, ray.y, len, span.x, span.y); }
+        }
+        f = 1.0 - (1.0 - f) * exp(-tau);
+        if (u.fogHeight.w > 0.0) {
+          let cosv = max(0.0, dot(ray, u.light.xyz) / (max(len, 1e-6) * max(length(u.light.xyz), 1e-6)));
+          fc = fc + toLinear(u.fogGlow.rgb) * (u.fogHeight.w * pow(cosv, ${FOG_GLOW_POWER.toFixed(1)}));
+        }
+      }
+      ${v} = mix(max(${v}, vec3<f32>(0.0)), fc, f);
+    }`;
+  }
   return /* wgsl */ `    if (u.tonemap.x > 0.5) {
       let e = u.tonemap.y;
       ${v} = vec3<f32>(aces(${v}.r * e), aces(${v}.g * e), aces(${v}.b * e));
@@ -273,7 +302,7 @@ function wgslDisplay(v: string): string {
  * reflection targets a frame with screen-space reflections writes beside the
  * colour (see reflections.ts); the colour itself is the same.
  */
-export function sceneShader(graph: CompiledGraph | null = null, reflect = false): string {
+export function sceneShader(graph: CompiledGraph | null = null, reflect = false, hdr = false): string {
   const g = graphSites(graph);
   const code = /* wgsl */ `
 struct Uniforms {
@@ -537,7 +566,7 @@ fn envGradient(y: f32) -> vec3<f32> {
   var c: vec3<f32>;
   if (t >= 0.0) { c = mix(u.envHorizon.xyz, u.envSky.xyz, t); }
   else { c = mix(u.envHorizon.xyz, u.envGround.xyz, -t); }
-  return c * u.envHorizon.w; // .w = intensity
+  return toLinear(c) * u.envHorizon.w; // .w = intensity
 }
 // Sample the environment along a full direction: an equirectangular map when one
 // is bound (envMeta.w), else the analytic gradient (Y only). Mirrors
@@ -551,7 +580,7 @@ fn envColorDir(dir: vec3<f32>) -> vec3<f32> {
   let wx = uCoord - floor(uCoord);
   let tx = i32(clamp(floor(wx * dims.x), 0.0, dims.x - 1.0));
   let ty = i32(clamp(floor(vCoord * dims.y), 0.0, dims.y - 1.0));
-  return textureLoad(envMap, vec2<i32>(tx, ty), 0).rgb * u.envHorizon.w;
+  return toLinear(textureLoad(envMap, vec2<i32>(tx, ty), 0).rgb) * u.envHorizon.w;
 }
 // Probe i's panorama along a direction, nearest — mirrors sampleProbe.
 fn probeSample(i: i32, dir: vec3<f32>) -> vec3<f32> {
@@ -562,7 +591,7 @@ fn probeSample(i: i32, dir: vec3<f32>) -> vec3<f32> {
   let h = floor(dims.x * 0.5);
   let tx = i32(clamp(floor((uCoord - floor(uCoord)) * dims.x), 0.0, dims.x - 1.0));
   let ty = i32(clamp(floor(vCoord * h), 0.0, h - 1.0) + f32(i) * h);
-  return textureLoad(probeAtlas, vec2<i32>(tx, ty), 0).rgb * ${PROBE_RANGE.toFixed(4)};
+  return toLinear(textureLoad(probeAtlas, vec2<i32>(tx, ty), 0).rgb * ${PROBE_RANGE.toFixed(4)});
 }
 // The 2×2 ordered-dither matrix [[0, 2], [3, 1]], and the crawling camo threshold (surfaceEffect.ts).
 fn bayer2(x: i32, y: i32) -> f32 {
@@ -773,18 +802,24 @@ fn lightTerm(lgt: Light, P: vec3<f32>, N: vec3<f32>, V: vec3<f32>, ndv: f32, a2:
   if (lgt.d0.w < 0.5) { occl = sf; }
   else if (lgt.d2.w >= 0.0 && frame.localShadow.x > 0.5) { occl = localShadow(i32(lgt.d2.w + 0.5), lgt, P, ndlL); }
   let w = lgt.d1.w * atten * ndlL * occl;
-  let lit = (kdm * (vec3<f32>(1.0) - FL) * albedo + FL * specL) * lgt.d1.rgb * w;
+  let lit = (kdm * (vec3<f32>(1.0) - FL) * albedo + FL * specL) * toLinear(lgt.d1.rgb) * w;
   if (u.layer0.x > 0.0) {
     // The clearcoat's own highlight, over a base its Fresnel dims (I4).
     let c = coatTerm(coatN, coatNdv, Ld, Hl, vdhL);
-    return lit * (1.0 - c.y) + c.x * lgt.d1.rgb * (lgt.d1.w * atten * occl);
+    return lit * (1.0 - c.y) + c.x * toLinear(lgt.d1.rgb) * (lgt.d1.w * atten * occl);
   }
   return lit;
 }
 
 fn envAverage() -> vec3<f32> {
-  if (u.envMeta.w > 0.5) { return u.envMeta.xyz * u.envHorizon.w; }
-  return (u.envSky.xyz + u.envHorizon.xyz + u.envGround.xyz) / 3.0 * u.envHorizon.w;
+  if (u.envMeta.w > 0.5) { return toLinear(u.envMeta.xyz) * u.envHorizon.w; }
+  return toLinear((u.envSky.xyz + u.envHorizon.xyz + u.envGround.xyz) / 3.0) * u.envHorizon.w;
+}
+// Authored colour (byte space) into the light it stands for: the sRGB curve in
+// the linear HDR variant (F0b), and nothing in the byte variant, whose shading
+// stays in the space it was authored in.
+fn toLinear(c: vec3<f32>) -> vec3<f32> {
+${hdr ? "  let v = max(c, vec3<f32>(0.0));\n  return select(pow((v + vec3<f32>(0.055)) / 1.055, vec3<f32>(2.4)), v / 12.92, v <= vec3<f32>(0.04045));" : "  return c;"}
 }
 // ACES filmic tone map (Narkowicz), per channel, mirroring acesFilmic in
 // meshRasterizer.ts. Applied only to the Modern-tier PBR radiance.
@@ -1073,6 +1108,8 @@ ${g.pbr}
     let dk = u.surface0.y * clamp((${DETAIL_FAR.toFixed(4)} - in.eyeDepth) / ${(DETAIL_FAR - DETAIL_NEAR).toFixed(4)}, 0.0, 1.0);
     let detail = textureSample(detailTex, samp, vec2<f32>(puv.x * u.surface0.x, 1.0 - puv.y * u.surface0.x)).rgb;
     if (dk > 0.0) { albedo = albedo * (vec3<f32>(1.0) + dk * (2.0 * detail - vec3<f32>(1.0))); }
+    // The material's colour, built in authored space, into light (F0b's linear variant).
+    albedo = toLinear(albedo);
     let L = u.light.xyz;
     let V = u.view.xyz;
     let H = normalize(L + V);
@@ -1099,6 +1136,7 @@ ${g.pbr}
       emis = ef * es;
     }
 ${g.emis}
+    emis = toLinear(emis);
     // Ambient / image-based lighting, mirroring the software rasteriser: with an
     // environment, a diffuse irradiance along N + a specular reflection along R
     // blurred toward the average by roughness; without one, the flat ambient.
@@ -1125,7 +1163,7 @@ ${reflect ? "      envSpec = pref * f0 * reflectK * ao;\n      envSeen = pref;\n
         amb = amb * (1.0 - coatV) + coatV * prefC * reflectK * ao;
 ${reflect ? "        envSpec = envSpec * (1.0 - coatV) + coatV * prefC * reflectK * ao;\n" : ""}      }
     } else {
-      amb = vec3<f32>(u.light.w) * albedo * ao;
+      amb = toLinear(vec3<f32>(u.light.w)) * albedo * ao;
     }
 ${reflect ? "    let ambRaw = amb;\n" : ""}    // A baked light map (the second UV set) scales the sky/ambient fill by how
     // much of it reaches this point, bounce included — mirroring the CPU path.
@@ -1171,20 +1209,24 @@ ${reflect ? "    // What the light map, probes and SSAO did to the fill, they do
       lit = (kdm * (vec3<f32>(1.0) - F) * albedo + F * specD) * ndl * sf + amb + emis;
     }
     // A fresnel rim, light at grazing angles (zero when the material has none).
-    lit = lit + u.surface2.rgb * pow(1.0 - ndv, u.surface2.w);
+    lit = lit + toLinear(u.surface2.rgb) * pow(1.0 - ndv, u.surface2.w);
     // A surface effect's glow, and its bands climbing the body (zero without one).
     let band = pow(0.5 + 0.5 * sin(in.worldPos.y * ${EFFECT_BAND_FREQUENCY.toFixed(1)} - u.effect1.w * ${EFFECT_BAND_SPEED.toFixed(1)}), ${EFFECT_BAND_POWER.toFixed(1)});
-    lit = lit + u.effect0.rgb + u.effect1.rgb * band;
+    lit = lit + toLinear(u.effect0.rgb) + toLinear(u.effect1.rgb) * band;
     // HDR: expose + ACES roll-off, or write the linear colour straight through.
     var shaded = lit;
-${wgslDisplay("shaded")}${reflect ? /* wgsl */ `
+${wgslDisplay("shaded", hdr)}${reflect ? /* wgsl */ `
     // Reflections (I3): the same without the environment's reflection, so the pass can take it away.
     var without = lit - envSpec;
-${wgslDisplay("without")}
-    let contribution = max(clamp(shaded, vec3<f32>(0.0), vec3<f32>(1.0)) - clamp(without, vec3<f32>(0.0), vec3<f32>(1.0)), vec3<f32>(0.0));
+${wgslDisplay("without", hdr)}
+${hdr
+  ? `    // Linear light (F0b): what the reflection adds, and what it sees, unclamped.
+    let contribution = max(shaded - without, vec3<f32>(0.0));
+    let seen = max(envSeen, vec3<f32>(0.0));`
+  : `    let contribution = max(clamp(shaded, vec3<f32>(0.0), vec3<f32>(1.0)) - clamp(without, vec3<f32>(0.0), vec3<f32>(1.0)), vec3<f32>(0.0));
     var seen = envSeen;
     if (u.tonemap.x > 0.5) { seen = vec3<f32>(aces(seen.r * u.tonemap.y), aces(seen.g * u.tonemap.y), aces(seen.b * u.tonemap.y)); }
-    seen = clamp(seen, vec3<f32>(0.0), vec3<f32>(1.0));
+    seen = clamp(seen, vec3<f32>(0.0), vec3<f32>(1.0));`}
     let weight = (f0 * (1.0 - coatV) + vec3<f32>(coatV)) * reflectK * ao * occl;
     reflectOut = vec4<f32>(clamp(select(weight, contribution / max(seen, vec3<f32>(1e-3)), seen > vec3<f32>(0.02)), vec3<f32>(0.0), vec3<f32>(1.0)), mix(rough, u.layer0.y, u.layer0.x));
     envOut = vec4<f32>(contribution, 1.0);` : ""}
@@ -1205,7 +1247,7 @@ ${wgslDisplay("without")}
   // therefore skew identically under non-uniform scale.
   let nl = abs(dot(sNrm, u.light.xyz));
   let shade = u.light.w + (1.0 - u.light.w) * nl * shadowFactor(in.lightClip, in.worldPos, abs(dot(normalize(in.normal), u.light.xyz)));
-  return finishAlpha(colour.rgb * shade, colour.a);
+  return finishAlpha(toLinear(colour.rgb) * shade, colour.a);
 }
 `;
   return reflect ? withReflectionTargets(code) : code;
@@ -1368,6 +1410,8 @@ export class WebgpuSceneRenderer implements SceneRenderer {
     private readonly readback: { buffer: any; busy: boolean; seq?: number }[],
     private readonly bytesPerRow: number,
     style: RasterStyle,
+    /** Linear HDR (F0b): half-float targets, frames kept on the GPU (renderToTexture) and never read back. */
+    readonly hdr = false,
   ) {
     // The warm-up rasteriser must draw the same era as the GPU it stands in for.
     this.software = new SoftwareSceneRenderer(style);
@@ -1436,7 +1480,11 @@ export class WebgpuSceneRenderer implements SceneRenderer {
     width: number,
     height: number,
     style: RasterStyle = DEFAULT_RASTER_STYLE,
+    /** `hdr`: shade in linear light into half-float targets, for a GPU-presented frame (F0b; no readback). */
+    options: { readonly hdr?: boolean } = {},
   ): Promise<WebgpuSceneRenderer | null> {
+    const hdr = options.hdr === true;
+    const colourFormat = hdr ? "rgba16float" : "rgba8unorm";
     // Refuse a style this path cannot reproduce, so the factory falls back to
     // the software rasteriser rather than rendering a console model with the
     // wrong era's rules. See `webgpuCanHonour` for why these three are hard.
@@ -1544,7 +1592,7 @@ export class WebgpuSceneRenderer implements SceneRenderer {
             // conversion here would show up as the GPU path looking washed out.
             // A frame with reflections (I3) writes the two reflection targets too, blended as the colour is.
             targets: [
-              blend ? { format: "rgba8unorm", blend } : { format: "rgba8unorm" },
+              blend ? { format: colourFormat, blend } : { format: colourFormat },
               ...(reflect ? [0, 1].map(() => (blend ? { format: "rgba16float", blend } : { format: "rgba16float" })) : []),
             ],
           },
@@ -1559,16 +1607,16 @@ export class WebgpuSceneRenderer implements SceneRenderer {
           add: pipelineFor({ color: { srcFactor: "one", dstFactor: "one", operation: "add" }, alpha: { srcFactor: "zero", dstFactor: "one", operation: "add" } }, false),
         };
       };
-      const pipeline = pipelinesFor(sceneShader());
+      const pipeline = pipelinesFor(sceneShader(null, false, hdr));
       // A shader the device rejects doesn't throw: its pipelines draw nothing
       // and only the sky (drawn apart from them) shows. So ask, and decline the
       // device when it reports an error — the factory then falls back to WebGL2.
-      const compiled = await device.createShaderModule({ code: sceneShader() }).getCompilationInfo?.();
+      const compiled = await device.createShaderModule({ code: sceneShader(null, false, hdr) }).getCompilationInfo?.();
       if (compiled?.messages?.some((m: { type?: string }) => m.type === "error")) return null;
 
       const colourTexture = device.createTexture({
         size: { width, height },
-        format: "rgba8unorm",
+        format: colourFormat,
         usage: 0x10 | 0x01 | 0x04 | 0x02, // RENDER_ATTACHMENT | COPY_SRC | TEXTURE_BINDING (the temporal resolve reads it) | COPY_DST (reflections land in it)
       });
       const depthTexture = device.createTexture({
@@ -1592,8 +1640,8 @@ export class WebgpuSceneRenderer implements SceneRenderer {
       const probesBlank = device.createTexture({ size: { width: 1, height: 1, depthOrArrayLayers: 1 }, dimension: "3d", format: "rgba32float", usage: 0x04 | 0x02 });
       // Refraction (I5): the opaque scene's colour, copied (or resolved) into this as the
       // see-through pass begins; a 1×1 blank stands in for it in the opaque pass.
-      const behind = device.createTexture({ size: { width, height }, format: "rgba8unorm", usage: 0x04 | 0x02 | 0x10 }); // TEXTURE_BINDING | COPY_DST | RENDER_ATTACHMENT (a resolve target)
-      const behindBlank = device.createTexture({ size: { width: 1, height: 1 }, format: "rgba8unorm", usage: 0x04 | 0x02 });
+      const behind = device.createTexture({ size: { width, height }, format: colourFormat, usage: 0x04 | 0x02 | 0x10 }); // TEXTURE_BINDING | COPY_DST | RENDER_ATTACHMENT (a resolve target)
+      const behindBlank = device.createTexture({ size: { width: 1, height: 1 }, format: colourFormat, usage: 0x04 | 0x02 });
       const makeGroups = (atlas: any, probes: any) => {
         const shared = [
           { binding: 1, resource: { buffer: clusterBuffers.table } },
@@ -1701,6 +1749,7 @@ export class WebgpuSceneRenderer implements SceneRenderer {
         readback,
         bytesPerRow,
         style,
+        hdr,
       );
     } catch {
       return null;
@@ -1773,6 +1822,11 @@ export class WebgpuSceneRenderer implements SceneRenderer {
 
   render(instances: readonly MeshSceneInstance[], draw: SceneDraw): void {
     if (this.destroyed) return;
+    // A linear HDR renderer keeps its frames on the GPU (renderToTexture); it has no bytes to read back.
+    if (this.hdr) {
+      this.software.render(applyScenePasses(instances, draw), draw);
+      return;
+    }
 
     // LOD-select + frustum-cull once, so both the CPU warm-up and the GPU submit
     // draw the same visible set. A correct cull is output-identical.
@@ -1809,6 +1863,11 @@ export class WebgpuSceneRenderer implements SceneRenderer {
 
   get gpuDevice(): any {
     return this.device;
+  }
+
+  /** The colour targets' format: half-float in the linear HDR variant. */
+  private get colourFormat(): string {
+    return this.hdr ? "rgba16float" : "rgba8unorm";
   }
 
   /**
@@ -2126,7 +2185,7 @@ export class WebgpuSceneRenderer implements SceneRenderer {
     if (!this.gbuffer) {
       this.gbuffer = {
         targets: [0, 1].map(() => ({ texture: device.createTexture({ size, format: "rgba16float", usage: 0x10 | 0x04 }), ms: null })), // RENDER_ATTACHMENT | TEXTURE_BINDING
-        output: device.createTexture({ size, format: "rgba8unorm", usage: 0x10 | 0x01 }), // RENDER_ATTACHMENT | COPY_SRC
+        output: device.createTexture({ size, format: this.colourFormat, usage: 0x10 | 0x01 }), // RENDER_ATTACHMENT | COPY_SRC
         uniforms: device.createBuffer({ size: 160, usage: 0x40 | 0x08 }), // UNIFORM | COPY_DST
         data: new Float32Array(40),
         pipelines: [null, null],
@@ -2146,7 +2205,7 @@ export class WebgpuSceneRenderer implements SceneRenderer {
   private encodeReflections(encoder: any, gbuffer: NonNullable<WebgpuSceneRenderer["gbuffer"]>, projection: Mat4, depth: any, multisampled: boolean): void {
     const device = this.device;
     const k = multisampled ? 1 : 0;
-    gbuffer.pipelines[k] ??= fullScreenPipeline(device, reflectionShaderWgsl(multisampled), "reflectPass", "rgba8unorm");
+    gbuffer.pipelines[k] ??= fullScreenPipeline(device, reflectionShaderWgsl(multisampled, this.hdr), "reflectPass", this.colourFormat);
     const pipeline = gbuffer.pipelines[k];
     device.queue.writeBuffer(gbuffer.uniforms, 0, reflectionUniforms(projection, "ndc", gbuffer.data));
     const pass = encoder.beginRenderPass({ colorAttachments: [{ view: gbuffer.output.createView(), clearValue: { r: 0, g: 0, b: 0, a: 0 }, loadOp: "clear", storeOp: "store" }] });
@@ -2189,7 +2248,7 @@ export class WebgpuSceneRenderer implements SceneRenderer {
         uniforms: device.createBuffer({ size: uniforms.byteLength, usage: 0x40 | 0x08 }), // UNIFORM | COPY_DST
         sampler: device.createSampler({ magFilter: "linear", minFilter: "linear", addressModeU: "clamp-to-edge", addressModeV: "clamp-to-edge" }),
         resolve: [null, null],
-        sharpen: fullScreenPipeline(device, TEMPORAL_SHARPEN_WGSL, "sharpen", "rgba8unorm"),
+        sharpen: fullScreenPipeline(device, TEMPORAL_SHARPEN_WGSL, "sharpen", this.colourFormat),
       };
     }
     const taa = this.taa;
@@ -2233,7 +2292,7 @@ export class WebgpuSceneRenderer implements SceneRenderer {
   private ensureMsaa(): NonNullable<WebgpuSceneRenderer["msaa"]> {
     if (!this.msaa) {
       const size = { width: this.width, height: this.height };
-      const colour = this.device.createTexture({ size, format: "rgba8unorm", sampleCount: MSAA_SAMPLES, usage: 0x10 }); // RENDER_ATTACHMENT
+      const colour = this.device.createTexture({ size, format: this.colourFormat, sampleCount: MSAA_SAMPLES, usage: 0x10 }); // RENDER_ATTACHMENT
       const depth = this.device.createTexture({ size, format: "depth24plus", sampleCount: MSAA_SAMPLES, usage: 0x10 | 0x04 }); // + TEXTURE_BINDING (soft edges)
       const blank = this.device.createTexture({ size: { width: 1, height: 1 }, format: "depth24plus", sampleCount: MSAA_SAMPLES, usage: 0x10 | 0x04 });
       const groups = this.depthGroups;
@@ -2253,7 +2312,7 @@ export class WebgpuSceneRenderer implements SceneRenderer {
     const key = `${graph?.key ?? ""}|${samples}|${reflect ? 1 : 0}`;
     let set = this.variants.get(key);
     if (!set) {
-      set = this.pipelinesFor(sceneShader(graph, reflect), samples, reflect);
+      set = this.pipelinesFor(sceneShader(graph, reflect, this.hdr), samples, reflect);
       this.variants.set(key, set);
     }
     return set;
