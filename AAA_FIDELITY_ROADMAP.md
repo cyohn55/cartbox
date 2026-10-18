@@ -171,6 +171,23 @@ Everything else depends on this track. It contains no visible "feature", but its
   - It produces a **velocity buffer**, with per-object motion that includes skinned and animated vertices.
   - Every pass is timed. Rendering is still forward+ for material flexibility; screen-space effects read the prepass buffers.
   - This also unblocks P6's deferred contact shadows and foliage SSAO.
+  - **F0c-1, the frame graph: done.** `render/frameGraph.ts`: a frame is built each time as passes and the textures they read and write. Compiling it is pure, with no device needed, so it is tested on its own.
+    - **It culls.** It keeps a pass that writes an imported texture (one that outlives the frame) or is marked kept, and anything those passes need. The rest never encode.
+    - **It allocates.** A transient lives from the first kept pass that uses it to the last. Its usage flags come from how the passes use it. Transients of the same shape whose lives don't overlap share one texture. A pool keeps them across frames, so a steady frame creates nothing and an idle one is destroyed after 120 frames.
+    - **It times.** Every kept render and compute pass gets its own timestamps (`GraphTimer`) when the device has `timestamp-query`. `RenderStats.passes` carries them, and the editor's profiler lists them under "GPU frame".
+    - **WebGPU frames go through it.** `WebgpuSceneRenderer` builds every frame as a graph, with no change to what it draws:
+      - opaque;
+      - the copy behind refraction;
+      - see-through;
+      - reflections and their copy back;
+      - the TAA resolve and sharpen;
+      - the readback.
+      - The MSAA colour and the reflection targets (with their multisampled twins) are now transients. The textures cached bind groups sample (the depth, the refraction copy and the TAA history) stay imported.
+    - *Tests:*
+      - `frame-graph.test.ts` (pure): culling, order, lifetimes and aliasing, usage, declaration errors, the pool and the timestamp arithmetic.
+      - On Dawn: an aliased frame encodes correctly, and the scene renderer names and times its passes and makes no new transients on a steady frame.
+      - The WebGPU parity suites (MSAA, TAA, reflections, refraction, see-through) are unchanged and pass.
+    - *Next:* F0c-2 adds the depth prepass and the thin G-buffer; F0c-3 adds the velocity buffer.
 - [ ] **F0d. The `aaa` tier.**
   - A console model on the dedicated Modern core (`packages/modern-core`, ENGINE_PARITY EP20b: a Lua 5.4 VM with direct engine calls and no command cap). `MODELS.modern` still points its `engineUrl` at the 360 core, and the tier ends that placeholder.
   - It renders at native device resolution × DPR, with dynamic resolution driven by the GPU frame time, and gives the 2D layer a scaled presentation.

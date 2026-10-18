@@ -2102,8 +2102,13 @@ interface RenderStats {
     readonly drawCalls: number;
     readonly instances: number;
     readonly triangles: number;
-    /** GPU time of the scene pass, when the browser can time it (else null). */
+    /** GPU time of the frame's passes, when the browser can time it (else null). */
     readonly gpuMs: number | null;
+    /** Each pass's GPU time (AAA_FIDELITY_ROADMAP.md F0c), on a renderer that times them one by one. */
+    readonly passes?: readonly {
+        readonly name: string;
+        readonly ms: number;
+    }[];
 }
 interface SectionStats {
     /** Average milliseconds per frame over the window. */
@@ -4678,7 +4683,10 @@ declare class WebgpuSceneRenderer implements SceneRenderer {
     private instanceData;
     /** What the last submitted frame drew (for the profiler and tests); GPU time when the device can time it. */
     lastFrameStats: RenderStats;
+    /** Per-pass GPU times (F0c), when the device can time them. */
     private readonly timer;
+    /** The frame graph's transient textures, kept from frame to frame. */
+    private readonly transients;
     private constructor();
     /**
      * Point the SSAO slot at a width×height r32float upload of `ao` (created once,
@@ -4737,20 +4745,15 @@ declare class WebgpuSceneRenderer implements SceneRenderer {
     private submit;
     /** Clear the colour texture to transparent black (a GPU-kept frame with nothing in it). */
     private clearColour;
-    /**
-     * The reflection targets (I3): reflect and env, each single-sampled (read by
-     * the pass) with a multisampled twin for an anti-aliased frame; the pass's
-     * output, copied back over the colour; its uniforms and pipelines. Made on
-     * first use.
-     */
-    private gbuffer;
-    private ensureReflectionTargets;
+    /** The reflection pass's uniforms and pipelines (I3), made on first use; its targets are the frame graph's. */
+    private reflections;
+    private ensureReflections;
     /**
      * Swap on-screen reflections in for the probes' (HALO_INFINITE_STYLE_ROADMAP.md I3):
      * the pass reads the frame, its depth and the reflection targets and writes
      * the reflected frame, which is copied back over the colour.
      */
-    private encodeReflections;
+    private addReflections;
     private readonly temporalState;
     /**
      * The temporal resolve's resources (I2): two history images (one read, one
@@ -4760,15 +4763,17 @@ declare class WebgpuSceneRenderer implements SceneRenderer {
     private taa;
     /**
      * Resolve the frame into the history and sharpen it back into the colour
-     * texture that is read back (HALO_INFINITE_STYLE_ROADMAP.md I2).
+     * texture that is read back (HALO_INFINITE_STYLE_ROADMAP.md I2). The two
+     * history images outlive the frame, so the graph imports them.
      */
-    private encodeTemporal;
+    private addTemporal;
     /** Pipeline variants (material graph, sample count, reflection targets), built on first use. */
     private readonly variants;
     /**
-     * The multisampled targets and pipelines an anti-aliased frame draws with
-     * (HALO_INFINITE_STYLE_ROADMAP.md I1): made on first use, so a renderer that
-     * never anti-aliases pays nothing for them.
+     * The multisampled depth an anti-aliased frame draws with
+     * (HALO_INFINITE_STYLE_ROADMAP.md I1), and the bind groups that sample it:
+     * made on first use, so a renderer that never anti-aliases pays nothing for
+     * them. Its colour is a frame-graph transient.
      */
     private msaa;
     private ensureMsaa;

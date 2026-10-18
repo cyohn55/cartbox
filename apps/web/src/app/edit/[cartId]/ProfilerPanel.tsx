@@ -76,10 +76,11 @@ export function ProfilerPanel({ profile, budgetMs }: { profile: ProfileSnapshot 
           <Stat label="Objects" value={count(render.instances)} />
           <Stat label="Triangles" value={count(render.triangles)} />
           <Stat
-            label="Scene pass"
+            label="GPU frame"
             value={render.gpuMs !== null ? `${ms(render.gpuMs)} ms` : render.backend === "software" ? "on the CPU" : "not timed here"}
             hint={render.gpuMs === null && render.backend !== "software" ? "This browser doesn't let pages time the GPU" : undefined}
           />
+          {render.passes?.map((pass) => <Stat key={pass.name} label={`· ${pass.name}`} value={`${ms(pass.ms)} ms`} />)}
         </Group>
       )}
 
