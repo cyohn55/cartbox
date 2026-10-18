@@ -11312,6 +11312,7 @@ import {
   base64ToBytes as base64ToBytes2,
   decodeRadianceHdr,
   hdrToTexture,
+  resampleHdr,
   isRadiance,
   panoramaWithClouds,
   panoramaWithSun,
@@ -11924,7 +11925,7 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
         const baked = await bakeSceneSky(lighting.sky, lighting, environment, this.vistas, next.bounds.center);
         skyMap = baked.map;
         clouds = baked.clouds;
-        environment = { ...environment, map: baked.reflections, average: computeEnvironmentAverage(baked.reflections) };
+        environment = { ...environment, map: baked.reflections, average: computeEnvironmentAverage(baked.reflections), ...baked.hdr ? { hdr: baked.hdr } : {} };
         this.skyReflections = { small: baked.small, sun: sunKey(skySun(lighting.sky)) };
       } else {
         this.skyReflections = null;
@@ -12019,7 +12020,7 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
       const baked = await bakeSceneSky(lighting.sky, lighting, environment, vistas, scene.bounds.center);
       skyMap = baked.map;
       clouds = baked.clouds;
-      environment = { ...environment, map: baked.reflections, average: computeEnvironmentAverage(baked.reflections) };
+      environment = { ...environment, map: baked.reflections, average: computeEnvironmentAverage(baked.reflections), ...baked.hdr ? { hdr: baked.hdr } : {} };
       reflections = { small: baked.small, sun: sunKey(skySun(lighting.sky)) };
     }
     const surface = new _MeshOverlaySurface(inner, width, height, scene, instances, frames, renderer, skyMap, environment, options);
@@ -13096,12 +13097,14 @@ function vistaSignature(vistas) {
 }
 async function bakeSceneSky(sky, lighting, environment, vistas, eye) {
   let imported = null;
+  let hdrLight = null;
   if (sky.panorama) {
     try {
       const bytes = base64ToBytes2(sky.panorama.data);
       if (isRadiance(sky.panorama.mime)) {
         const hdr = decodeRadianceHdr(bytes);
         imported = hdr ? hdrToTexture(hdr, sky.panorama.exposure) : null;
+        hdrLight = hdr ? resampleHdr(hdr, SKY_PANORAMA_WIDTH / SKY_IBL_DOWNSAMPLE, SKY_PANORAMA_HEIGHT / SKY_IBL_DOWNSAMPLE, sky.panorama.yaw, sky.panorama.exposure) : null;
       } else {
         imported = await decodeTexture(sky.panorama.mime, bytes);
       }
@@ -13135,7 +13138,7 @@ async function bakeSceneSky(sky, lighting, environment, vistas, eye) {
   }
   const clouds = (sky.cloudLayers ?? []).map(bakeCloudLayer);
   const small = downsamplePanorama(map, SKY_IBL_DOWNSAMPLE);
-  return { map, small, reflections: skyReflectionsWith(small, skySun(sky), clouds), clouds };
+  return { map, small, reflections: skyReflectionsWith(small, skySun(sky), clouds), clouds, hdr: hdrLight };
 }
 function skyReflectionsWith(small, sun, clouds) {
   return panoramaWithClouds(panoramaWithSun(small, sun, SKY_IBL_SUN_SAMPLES), clouds, 0);
@@ -17593,10 +17596,17 @@ var GRADIENT_WIDTH = 128;
 var GRADIENT_HEIGHT = 64;
 var srgbToLinear = (c) => c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4;
 function environmentKey(env) {
+  if (env.hdr) return [env.hdr, env.intensity];
   return env.map ? [env.map, env.intensity] : [...env.sky, ...env.horizon, ...env.ground, env.intensity];
 }
 function environmentPanorama(env) {
   const intensity = env.intensity;
+  if (env.hdr) {
+    const { width, height, data } = env.hdr;
+    const out2 = new Float32Array(width * height * 4);
+    for (let i = 0; i < width * height; i += 1) out2.set([data[i * 3] * intensity, data[i * 3 + 1] * intensity, data[i * 3 + 2] * intensity, 1], i * 4);
+    return { width, height, data: out2 };
+  }
   if (env.map) {
     const { width, height, data } = env.map;
     const out2 = new Float32Array(width * height * 4);

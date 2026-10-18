@@ -11,8 +11,9 @@
  * hemisphere.
  *
  * - **The source** is the environment in linear light ({@link environmentPanorama}):
- *   its panorama, or its sky/horizon/ground gradient, decoded and scaled by
- *   its intensity as the shader's `envColorDir` does.
+ *   an imported HDR sky's own radiance, else its panorama, or its
+ *   sky/horizon/ground gradient, decoded and scaled by its intensity as the
+ *   shader's `envColorDir` does.
  * - **The cube** is drawn from it in compute, each mip level the GGX lobe of
  *   its roughness (level / (levels − 1)) importance-sampled around the
  *   direction, with mip-filtered samples (Křivánek and Colbert) from the
@@ -48,16 +49,24 @@ const srgbToLinear = (c: number) => (c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1
 
 /** What an environment's IBL depends on: its gradient and intensity, or the identity of its map. */
 export function environmentKey(env: EnvironmentLight): unknown[] {
+  if (env.hdr) return [env.hdr, env.intensity];
   return env.map ? [env.map, env.intensity] : [...env.sky, ...env.horizon, ...env.ground, env.intensity];
 }
 
 /**
- * The environment as the linear shader sees it: its panorama, or its gradient
- * by a direction's height (envGradient), each decoded from authored colour and
+ * The environment as the linear shader sees it: its HDR light when it has one
+ * (an imported `.hdr` sky, F3a), else its panorama, or its gradient by a
+ * direction's height (envGradient), each decoded from authored colour; all
  * scaled by the intensity.
  */
 export function environmentPanorama(env: EnvironmentLight): LinearPanorama {
   const intensity = env.intensity;
+  if (env.hdr) {
+    const { width, height, data } = env.hdr;
+    const out = new Float32Array(width * height * 4);
+    for (let i = 0; i < width * height; i += 1) out.set([data[i * 3]! * intensity, data[i * 3 + 1]! * intensity, data[i * 3 + 2]! * intensity, 1], i * 4);
+    return { width, height, data: out };
+  }
   if (env.map) {
     const { width, height, data } = env.map;
     const out = new Float32Array(width * height * 4);

@@ -61,6 +61,7 @@ import {
   type DecodedTexture,
   type EncodedImage,
   type EnvironmentLight,
+  type HdrImage,
   type LiveSkinnedMesh,
   type LodChain,
   type Mat4,
@@ -73,6 +74,7 @@ import {
   base64ToBytes,
   decodeRadianceHdr,
   hdrToTexture,
+  resampleHdr,
   isRadiance,
   panoramaWithClouds,
   panoramaWithSun,
@@ -601,7 +603,7 @@ export class MeshOverlaySurface implements DisplaySurface {
         const baked = await bakeSceneSky(lighting.sky, lighting, environment, this.vistas, next.bounds.center);
         skyMap = baked.map;
         clouds = baked.clouds;
-        environment = { ...environment, map: baked.reflections, average: computeEnvironmentAverage(baked.reflections) };
+        environment = { ...environment, map: baked.reflections, average: computeEnvironmentAverage(baked.reflections), ...(baked.hdr ? { hdr: baked.hdr } : {}) };
         this.skyReflections = { small: baked.small, sun: sunKey(skySun(lighting.sky)) };
       } else {
         this.skyReflections = null;
@@ -721,7 +723,7 @@ export class MeshOverlaySurface implements DisplaySurface {
       const baked = await bakeSceneSky(lighting.sky, lighting, environment, vistas, scene.bounds.center);
       skyMap = baked.map;
       clouds = baked.clouds;
-      environment = { ...environment, map: baked.reflections, average: computeEnvironmentAverage(baked.reflections) };
+      environment = { ...environment, map: baked.reflections, average: computeEnvironmentAverage(baked.reflections), ...(baked.hdr ? { hdr: baked.hdr } : {}) };
       reflections = { small: baked.small, sun: sunKey(skySun(lighting.sky)) };
     }
     const surface = new MeshOverlaySurface(inner, width, height, scene, instances, frames, renderer, skyMap, environment, options);
@@ -2037,14 +2039,17 @@ async function bakeSceneSky(
   environment: EnvironmentLight,
   vistas: readonly VistaLayer[],
   eye: readonly [number, number, number],
-): Promise<{ map: DecodedTexture; small: DecodedTexture; reflections: DecodedTexture; clouds: BakedCloudLayer[] }> {
+): Promise<{ map: DecodedTexture; small: DecodedTexture; reflections: DecodedTexture; clouds: BakedCloudLayer[]; hdr: HdrImage | null }> {
   let imported: DecodedTexture | null = null;
+  // An imported HDR sky's own light, beyond 8 bits, at the reflections' size: the AAA tier's IBL (F3a).
+  let hdrLight: HdrImage | null = null;
   if (sky.panorama) {
     try {
       const bytes = base64ToBytes(sky.panorama.data);
       if (isRadiance(sky.panorama.mime)) {
         const hdr = decodeRadianceHdr(bytes);
         imported = hdr ? hdrToTexture(hdr, sky.panorama.exposure) : null;
+        hdrLight = hdr ? resampleHdr(hdr, SKY_PANORAMA_WIDTH / SKY_IBL_DOWNSAMPLE, SKY_PANORAMA_HEIGHT / SKY_IBL_DOWNSAMPLE, sky.panorama.yaw, sky.panorama.exposure) : null;
       } else {
         imported = await decodeTexture(sky.panorama.mime, bytes);
       }
@@ -2083,7 +2088,7 @@ async function bakeSceneSky(
   }
   const clouds = (sky.cloudLayers ?? []).map(bakeCloudLayer);
   const small = downsamplePanorama(map, SKY_IBL_DOWNSAMPLE);
-  return { map, small, reflections: skyReflectionsWith(small, skySun(sky), clouds), clouds };
+  return { map, small, reflections: skyReflectionsWith(small, skySun(sky), clouds), clouds, hdr: hdrLight };
 }
 
 /** The reflections' copy of the sky: its small sun layer with `sun`'s glow drawn in, and the clouds laid over it at rest. */

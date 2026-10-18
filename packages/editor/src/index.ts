@@ -952,6 +952,8 @@ export {
   cloudPlane,
   decodeRadianceHdr,
   hdrToTexture,
+  resampleHdr,
+  HDR_SKY_LIGHT_MAX,
   overClouds,
   prepareSkyObjects,
   resamplePanorama,

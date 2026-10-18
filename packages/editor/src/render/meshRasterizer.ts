@@ -291,6 +291,13 @@ export interface EnvironmentLight {
   /** The map's mean radiance (0..1, pre-intensity); required with `map`. */
   readonly average?: readonly [number, number, number] | null;
   /**
+   * The environment's light in linear radiance, beyond 8 bits (an imported
+   * `.hdr` sky, exposed; RGB floats, equirectangular as `map`). Only the AAA
+   * tier's image-based lighting reads it (AAA_FIDELITY_ROADMAP.md F3a), in
+   * place of `map`; every other path keeps `map`.
+   */
+  readonly hdr?: { readonly width: number; readonly height: number; readonly data: Float32Array } | null;
+  /**
    * Baked reflection probes (HALO2_STYLE_ROADMAP.md, H2): inside a probe's box,
    * specular reflections come from its box-projected panorama instead of the
    * sky. Diffuse light still comes from the environment.
