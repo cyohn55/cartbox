@@ -18,10 +18,14 @@ import { LOCKOUT_LIGHTMAP } from "./lockoutLightmap.generated";
 import { LOCKOUT_PROBES } from "./lockoutProbes.generated";
 import { bakeLockoutKit, bakeLockoutLightmap, bakeLockoutProbes, lockoutKitBakeCurrent, lockoutMapLayout } from "./lockoutSeed";
 import { encodeRgbaPng } from "./png";
+import { compressedImagesCurrent, type CompressedImageTable } from "./compressedImages";
+import { BEAVER_SCENE } from "./beaverCreekSeed";
+import { arenaMeshSidecar } from "./lockoutSeed";
+import { BEAVER_TEXTURES } from "./beaverCreekTextures.generated";
 
 /** The parts of a map that bake. */
-export type MapBakePart = "lightmap" | "probes" | "kit";
-export const MAP_BAKE_PARTS: readonly MapBakePart[] = ["lightmap", "probes", "kit"];
+export type MapBakePart = "lightmap" | "probes" | "kit" | "textures";
+export const MAP_BAKE_PARTS: readonly MapBakePart[] = ["lightmap", "probes", "kit", "textures"];
 
 /** A generated file a bake writes: its path from the repository root, and the constant it exports. */
 export interface MapBakeFile {
@@ -41,13 +45,20 @@ export interface MapBakes {
   readonly bakeProbes: (progress?: (done: number) => void) => LightProbeGrid;
   /** Bake the map's own kit pieces, by name (absent: the map has no kit of its own). */
   readonly bakeKit?: () => Record<string, { fingerprint: string; occlusion: string; relief: string }>;
+  /**
+   * The map's sidecar as built, before its baked KTX2 images are attached: what
+   * the texture bake reads (F1a; absent: the map's textures aren't baked).
+   */
+  readonly sidecar?: () => string;
   /** The stored bakes' fingerprints, and whether each stored kit piece still fits its piece. */
   readonly stored: {
     readonly lightmap: string;
     readonly probes: string | null;
     readonly kit?: () => Record<string, boolean>;
+    /** The baked KTX2 images (see compressedImages.ts). */
+    readonly textures?: CompressedImageTable;
   };
-  readonly files: { readonly lightmap: MapBakeFile; readonly probes: MapBakeFile; readonly kit?: MapBakeFile };
+  readonly files: { readonly lightmap: MapBakeFile; readonly probes: MapBakeFile; readonly kit?: MapBakeFile; readonly textures?: MapBakeFile };
 }
 
 /** Every map that bakes, by id. */
@@ -72,10 +83,12 @@ export const MAP_BAKES: Readonly<Record<string, MapBakes>> = {
     layout: beaverMapLayout,
     bakeLightmap: bakeBeaverLightmap,
     bakeProbes: bakeBeaverProbes,
-    stored: { lightmap: BEAVER_LIGHTMAP.fingerprint, probes: BEAVER_PROBES.probes ? BEAVER_PROBES.fingerprint : null },
+    sidecar: () => arenaMeshSidecar(BEAVER_SCENE),
+    stored: { lightmap: BEAVER_LIGHTMAP.fingerprint, probes: BEAVER_PROBES.probes ? BEAVER_PROBES.fingerprint : null, textures: BEAVER_TEXTURES },
     files: {
       lightmap: { path: "packages/editor/src/model/beaverCreekLightmap.generated.ts", constant: "BEAVER_LIGHTMAP" },
       probes: { path: "packages/editor/src/model/beaverCreekProbes.generated.ts", constant: "BEAVER_PROBES" },
+      textures: { path: "packages/editor/src/model/beaverCreekTextures.generated.ts", constant: "BEAVER_TEXTURES" },
     },
   },
 };
@@ -86,7 +99,8 @@ export function mapBakeStatus(id: string): Record<MapBakePart, boolean> {
   if (!map) throw new Error(`No map "${id}" bakes (known: ${Object.keys(MAP_BAKES).join(", ")})`);
   const fingerprint = layoutFingerprint(map.layout());
   const kit = map.stored.kit ? Object.values(map.stored.kit()).every(Boolean) : true;
-  return { lightmap: map.stored.lightmap === fingerprint, probes: map.stored.probes === fingerprint, kit };
+  const textures = map.sidecar && map.stored.textures ? compressedImagesCurrent(map.sidecar(), map.stored.textures) : true;
+  return { lightmap: map.stored.lightmap === fingerprint, probes: map.stored.probes === fingerprint, kit, textures };
 }
 
 const header = (id: string, what: string) =>
@@ -123,6 +137,24 @@ export function bakeMapKitSource(id: string): string | null {
     .map(([name, m]) => `  ${name}: {\n    fingerprint: ${JSON.stringify(m.fingerprint)},\n    occlusion: ${JSON.stringify(m.occlusion)},\n    relief: ${JSON.stringify(m.relief)},\n  },`)
     .join("\n");
   return `${header(id, `${map.name}'s kit: each piece's baked occlusion and\n// relief maps (see textureBake.ts), with the fingerprint of the laid-out mesh each was baked for.`)}export const ${map.files.kit.constant}: Readonly<Record<string, { readonly fingerprint: string; readonly occlusion: string; readonly relief: string }>> = {
+${body}
+};
+`;
+}
+
+/**
+ * A map's baked textures' generated file (F1a), from the KTX2 the bake encoded
+ * for each image (base64, `""` for one left uncompressed). The encoding itself
+ * needs the Basis encoder, which only the bake (map-bake.test.ts) loads.
+ */
+export function bakeMapTexturesSource(id: string, table: CompressedImageTable): string | null {
+  const map = MAP_BAKES[id]!;
+  if (!map.files.textures) return null;
+  const body = Object.entries(table)
+    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+    .map(([key, ktx2]) => `  ${JSON.stringify(key)}: ${JSON.stringify(ktx2)},`)
+    .join("\n");
+  return `${header(id, `${map.name}'s images as KTX2\n// (see compressedImages.ts), keyed by each image's bytes; "" for one left uncompressed.`)}export const ${map.files.textures.constant}: Readonly<Record<string, string>> = {
 ${body}
 };
 `;

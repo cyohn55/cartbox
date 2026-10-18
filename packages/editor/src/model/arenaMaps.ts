@@ -8,6 +8,8 @@
 
 import type { ArenaPoint } from "./forerunnerArena";
 import { BEAVER_SCENE, beaverCenter } from "./beaverCreekSeed";
+import { BEAVER_TEXTURES } from "./beaverCreekTextures.generated";
+import { withCompressedImages } from "./compressedImages";
 import {
   LOCKOUT_CENTER_X,
   LOCKOUT_CENTER_Y,
@@ -54,7 +56,8 @@ export const ARENA_MAPS: readonly ArenaMapEntry[] = [
     scene: BEAVER_SCENE,
     center: beaverCenter,
     title: "BEAVER CREEK",
-    sidecar: () => (beaverSidecar ??= arenaMeshSidecar(BEAVER_SCENE)),
+    // With its images' baked KTX2 beside their PNGs, for a renderer that samples compressed formats (F1a).
+    sidecar: () => (beaverSidecar ??= withCompressedImages(arenaMeshSidecar(BEAVER_SCENE), BEAVER_TEXTURES)),
     fx: LOCKOUT_FX,
   },
 ];

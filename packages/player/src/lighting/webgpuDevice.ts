@@ -15,14 +15,15 @@ export const TEXTURE_COMPRESSION_FEATURES = ["texture-compression-bc", "texture-
 /**
  * The compressed formats (F1a) a KTX2 file should transcode to for `device`,
  * preferred first: BC7 on desktop, ASTC 4×4 on Apple and mobile, ETC2 the
- * fallback. Empty without any of the features.
+ * fallback, each family with its half-byte opaque form (BC1, ETC2 RGB) where
+ * it has one. Empty without any of the features.
  */
 export function compressedFormatsFor(device: any): string[] {
   const has = (feature: string) => device?.features?.has?.(feature) === true;
   return [
-    ...(has("texture-compression-bc") ? ["bc7-rgba-unorm"] : []),
+    ...(has("texture-compression-bc") ? ["bc7-rgba-unorm", "bc1-rgba-unorm"] : []),
     ...(has("texture-compression-astc") ? ["astc-4x4-unorm"] : []),
-    ...(has("texture-compression-etc2") ? ["etc2-rgba8unorm"] : []),
+    ...(has("texture-compression-etc2") ? ["etc2-rgba8unorm", "etc2-rgb8unorm"] : []),
   ];
 }
 

@@ -2802,9 +2802,9 @@ var TEXTURE_COMPRESSION_FEATURES = ["texture-compression-bc", "texture-compressi
 function compressedFormatsFor(device) {
   const has = (feature) => device?.features?.has?.(feature) === true;
   return [
-    ...has("texture-compression-bc") ? ["bc7-rgba-unorm"] : [],
+    ...has("texture-compression-bc") ? ["bc7-rgba-unorm", "bc1-rgba-unorm"] : [],
     ...has("texture-compression-astc") ? ["astc-4x4-unorm"] : [],
-    ...has("texture-compression-etc2") ? ["etc2-rgba8unorm"] : []
+    ...has("texture-compression-etc2") ? ["etc2-rgba8unorm", "etc2-rgb8unorm"] : []
   ];
 }
 function getWebgpuDevice() {
@@ -11779,6 +11779,8 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
     this.profiler = null;
     /** Decodes a KTX2 texture (loading the decoder on first use); set by create. */
     this.decodeKtx2 = async () => null;
+    /** The renderer samples compressed formats, so baked KTX2 images decode in place of their PNGs (F1a). */
+    this.compressedTextures = false;
     this.maskCache = /* @__PURE__ */ new WeakMap();
     /** The camera's eye this frame (terrain blocks pick their detail by distance from it). */
     this.eye = null;
@@ -11895,7 +11897,7 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
         moved = true;
       }
       if (meshSignature(a.mesh) !== meshSignature(b.mesh)) {
-        const textured = await decodeMeshTextures(b.mesh, this.decodeKtx2 ?? void 0);
+        const textured = await decodeMeshTextures(b.mesh, this.decodeKtx2 ?? void 0, void 0, this.compressedTextures);
         const skinned = isSkinned2(b.mesh) ? createLiveSkinnedMesh(b.mesh) : null;
         if (skinned) this.live.set(i, skinned);
         else this.live.delete(i);
@@ -11991,7 +11993,7 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
     const texture = (mesh) => {
       let entry = decoded.get(mesh);
       if (!entry) {
-        entry = decodeMeshTextures(mesh, decodeKtx2, images);
+        entry = decodeMeshTextures(mesh, decodeKtx2, images, gpuFormats.length > 0);
         decoded.set(mesh, entry);
       }
       return entry;
@@ -12032,6 +12034,7 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
       if (instance.foliage) surface.foliage.set(instances[i].mesh, instance.foliage);
     });
     surface.decodeKtx2 = decodeKtx2;
+    surface.compressedTextures = gpuFormats.length > 0;
     if (scene.effects && scene.effects.length > 0) surface.particles = new ParticleSystem(scene.effects);
     if (scene.decals && scene.decals.length > 0) surface.decals = new DecalSystem(scene.decals, scene.decalMarks ?? []);
     if (scene.debris && scene.debrisMeshes && scene.debris.length > 0) {
@@ -12080,7 +12083,7 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
     const texture = (mesh) => {
       let entry = decoded.get(mesh);
       if (!entry) {
-        entry = decodeMeshTextures(mesh, this.decodeKtx2);
+        entry = decodeMeshTextures(mesh, this.decodeKtx2, void 0, this.compressedTextures);
         decoded.set(mesh, entry);
       }
       return entry;
@@ -13141,8 +13144,9 @@ function sunKey(sun) {
   const l = Math.hypot(sun.direction[0], sun.direction[1], sun.direction[2]) || 1;
   return `${sun.direction.map((v) => Math.round(v / l * 100)).join(",")}:${sun.color.map((v) => Math.round(v * 50)).join(",")}`;
 }
-async function decodeMeshTextures(mesh, decodeKtx2, cache = /* @__PURE__ */ new Map()) {
-  const decode = (image) => image.mime === "image/ktx2" ? decodeKtx2(image.bytes) : decodeTexture(image.mime, image.bytes);
+async function decodeMeshTextures(mesh, decodeKtx2, cache = /* @__PURE__ */ new Map(), compressed = false) {
+  const plain = (image) => image.mime === "image/ktx2" ? decodeKtx2(image.bytes) : decodeTexture(image.mime, image.bytes);
+  const decode = (image) => compressed && image.ktx2 ? decodeKtx2(image.ktx2).then((texture) => texture ? image.ktx2Relief ? { ...texture, packedWithRelief: true } : texture : plain(image)) : plain(image);
   const each = (pick) => Promise.all(
     mesh.primitives.map((primitive) => {
       const image = pick(primitive.material);
@@ -14207,7 +14211,7 @@ function sameTextures(a, b) {
 var NO_OCCLUSION = {};
 var withRelief = /* @__PURE__ */ new WeakMap();
 function occlusionWithRelief(occ, relief) {
-  if (!relief) return occ;
+  if (!relief || occ?.packedWithRelief) return occ;
   let byOcc = withRelief.get(relief);
   if (!byOcc) withRelief.set(relief, byOcc = /* @__PURE__ */ new WeakMap());
   const key = occ ?? NO_OCCLUSION;
@@ -17445,6 +17449,9 @@ function coverageMips(source, cutoff = COVERAGE_CUTOFF) {
   }
   return out;
 }
+function blockBytes(format) {
+  return format === "bc1-rgba-unorm" || format === "etc2-rgb8unorm" ? 8 : 16;
+}
 function uploadCompressed(device, width, height, chain) {
   const texture = device.createTexture({
     size: { width, height },
@@ -17456,7 +17463,7 @@ function uploadCompressed(device, width, height, chain) {
   chain.levels.forEach((level, mipLevel) => {
     const blocksWide = Math.ceil(level.width / 4);
     const blocksHigh = Math.ceil(level.height / 4);
-    device.queue.writeTexture({ texture, mipLevel }, level.data, { bytesPerRow: blocksWide * 16, rowsPerImage: blocksHigh * 4 }, { width: blocksWide * 4, height: blocksHigh * 4 });
+    device.queue.writeTexture({ texture, mipLevel }, level.data, { bytesPerRow: blocksWide * blockBytes(chain.format), rowsPerImage: blocksHigh * 4 }, { width: blocksWide * 4, height: blocksHigh * 4 });
   });
   return texture;
 }

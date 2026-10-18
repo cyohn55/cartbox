@@ -6666,6 +6666,8 @@ declare class MeshOverlaySurface implements DisplaySurface {
     static create(inner: DisplaySurface, width: number, height: number, scene: MeshScene, renderer?: SceneRenderer, options?: MeshOverlayOptions): Promise<MeshOverlaySurface>;
     /** Decodes a KTX2 texture (loading the decoder on first use); set by create. */
     private decodeKtx2;
+    /** The renderer samples compressed formats, so baked KTX2 images decode in place of their PNGs (F1a). */
+    private compressedTextures;
     /**
      * Swap streamed textures in (see sceneStreaming.ts in @cartbox/editor): every
      * texture placeholder whose `ref` is in `images` is decoded and takes the

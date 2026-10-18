@@ -52,11 +52,13 @@ export interface DecodedTexture {
    * path (the software rasteriser, CPU passes) reads `data`.
    */
   readonly gpu?: CompressedTexture;
+  /** An occlusion map that is already packed with its relief map (a baked one, F1a): used as it is. */
+  readonly packedWithRelief?: boolean;
 }
 
 /** A block-compressed texture: a WebGPU format and its levels, largest first (see DecodedTexture.gpu). */
 export interface CompressedTexture {
-  /** A WebGPU texture format: "bc7-rgba-unorm", "astc-4x4-unorm" or "etc2-rgba8unorm". */
+  /** A WebGPU texture format: "bc7-rgba-unorm", "bc1-rgba-unorm", "astc-4x4-unorm", "etc2-rgba8unorm" or "etc2-rgb8unorm". */
   readonly format: string;
   readonly levels: readonly { readonly width: number; readonly height: number; readonly data: Uint8Array }[];
 }

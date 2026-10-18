@@ -10,8 +10,8 @@ import { MAP_BAKES, layoutFingerprint, mapBakeStatus } from "@cartbox/editor";
 
 describe("every map's bakes", () => {
   for (const id of Object.keys(MAP_BAKES)) {
-    it(`${id}: the light map, the probes and the kit maps are current`, () => {
-      expect(mapBakeStatus(id), `stale bake: run \`npm run bake:map ${id}\``).toEqual({ lightmap: true, probes: true, kit: true });
+    it(`${id}: the light map, the probes, the kit maps and the compressed textures are current`, () => {
+      expect(mapBakeStatus(id), `stale bake: run \`npm run bake:map ${id}\``).toEqual({ lightmap: true, probes: true, kit: true, textures: true });
     });
   }
 

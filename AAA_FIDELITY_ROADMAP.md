@@ -261,6 +261,21 @@ Everything else depends on this track. It contains no visible "feature", but its
       - the device's format order;
       - on Dawn, the BC7 chain uploaded as `bc7-rgba-unorm` and drawn within BC7's error of the RGBA path (mean under 6 levels).
     - *Left for later:* BC5/BC4 for two- and one-channel maps need the shaders to rebuild the missing channels (a normal's z), so every map is BC7, ASTC or ETC2 for now.
+  - **F1a-3, Beaver Creek compressed: done.**
+    - **Half a byte a texel.** An opaque ETC1S texture (colour, a light map) now transcodes to the GPU's half-byte forms where the device has them: BC1 on desktop, ETC2 RGB on mobile. Data maps (UASTC) and anything with alpha keep a byte a texel.
+    - **A texture bake** (`npm run bake:map <id> textures`). It encodes each image of a map's sidecar to KTX2 with its mips into a generated table (`beaverCreekTextures.generated.ts`), keyed by the image's bytes.
+      - Each occlusion map is baked packed with its relief, as the player packs them at load (I4). That occlusion image carries the packed KTX2 (`ktx2Relief`) and decodes straight to the packed texture.
+      - A cut-out's colour map is left as it is, for its coverage-preserving mips.
+      - `map-bakes.test.ts` fails when the table no longer matches the sidecar's images.
+    - **The sidecar** gives each baked image its KTX2 beside its PNG (`EncodedImage.ktx2`). Only a renderer that samples compressed formats decodes it; every fantasy tier still decodes the PNG, so Beaver Creek looks as it did there. The Lockout page now passes the KTX2 transcoder, which loads only when a texture needs it.
+    - **What it saves.** Beaver Creek's textures were 1.57 MB as one-level RGBA before F1a, and 2.10 MB as RGBA with mips. They are now **448 KB**: the light map and terrain in BC1, the packed occlusion maps in BC7, and the cut-outs in RGBA with coverage mips. That is **4.7×** less than the same textures mipped, the like-for-like (no shimmer needs the mips), and **3.5×** less than the one-level RGBA they were before.
+    - *Tests:*
+      - `beaver-texture-memory.test.ts` measures that drop.
+      - `ktx2-native.test.ts` checks the half-byte formats: opaque ETC1S goes to BC1 or ETC2 RGB, while data and alpha keep BC7.
+      - In Chromium, Beaver Creek's light map and terrain upload as BC1, with no errors.
+    - *Left for F1a:*
+      - The four cut-out textures, about 175 KB of the 448, stay RGBA. Compressing them needs alpha-to-coverage (or coverage-preserving mips the encoder can't make), and that would take the measure past 4× against the one-level baseline too.
+      - The N64 model's true trilinear filtering needs the software rasteriser's own mips.
 - [ ] **F1b. Texture streaming.** Mip streaming driven by GPU feedback: a sampler-feedback-style pass that records the mip each material wanted, under a texture-memory budget per scalability level, with residency in the profiler. It also covers texture arrays, or bindless where available, so materials stop competing for 16 bind slots.
 - [ ] **F1c. BRDF upgrade.**
   - Multiscatter GGX energy compensation (Kulla-Conty, or Fdez-Agüera's LUT).

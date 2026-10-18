@@ -572,7 +572,7 @@ export class MeshOverlaySurface implements DisplaySurface {
       }
       if (meshSignature(a.mesh) !== meshSignature(b.mesh)) {
         // New geometry or materials: decode its textures and draw it from the next frame.
-        const textured = await decodeMeshTextures(b.mesh, this.decodeKtx2 ?? undefined);
+        const textured = await decodeMeshTextures(b.mesh, this.decodeKtx2 ?? undefined, undefined, this.compressedTextures);
         const skinned = isSkinned(b.mesh) ? createLiveSkinnedMesh(b.mesh) : null;
         if (skinned) this.live.set(i, skinned);
         else this.live.delete(i);
@@ -691,7 +691,7 @@ export class MeshOverlaySurface implements DisplaySurface {
     const texture = (mesh: MeshAsset): Promise<TexturedMesh> => {
       let entry = decoded.get(mesh);
       if (!entry) {
-        entry = decodeMeshTextures(mesh, decodeKtx2, images);
+        entry = decodeMeshTextures(mesh, decodeKtx2, images, gpuFormats.length > 0);
         decoded.set(mesh, entry);
       }
       return entry;
@@ -736,6 +736,7 @@ export class MeshOverlaySurface implements DisplaySurface {
       if (instance.foliage) surface.foliage.set(instances[i]!.mesh, instance.foliage);
     });
     surface.decodeKtx2 = decodeKtx2;
+    surface.compressedTextures = gpuFormats.length > 0;
     // 3D particle effects the cart fires with cartbox.burst.
     if (scene.effects && scene.effects.length > 0) surface.particles = new ParticleSystem(scene.effects);
     // Decals: the cart's marks and the scene's permanent ones.
@@ -778,6 +779,8 @@ export class MeshOverlaySurface implements DisplaySurface {
 
   /** Decodes a KTX2 texture (loading the decoder on first use); set by create. */
   private decodeKtx2: (bytes: Uint8Array) => Promise<DecodedTexture | null> = async () => null;
+  /** The renderer samples compressed formats, so baked KTX2 images decode in place of their PNGs (F1a). */
+  private compressedTextures = false;
 
   /**
    * Swap streamed textures in (see sceneStreaming.ts in @cartbox/editor): every
@@ -799,7 +802,7 @@ export class MeshOverlaySurface implements DisplaySurface {
     const texture = (mesh: MeshAsset): Promise<TexturedMesh> => {
       let entry = decoded.get(mesh);
       if (!entry) {
-        entry = decodeMeshTextures(mesh, this.decodeKtx2);
+        entry = decodeMeshTextures(mesh, this.decodeKtx2, undefined, this.compressedTextures);
         decoded.set(mesh, entry);
       }
       return entry;
@@ -2103,8 +2106,14 @@ async function decodeMeshTextures(
   decodeKtx2: (bytes: Uint8Array) => Promise<DecodedTexture | null>,
   // One decode an image, however many slots and primitives use it (a packed occlusion/roughness/metal map fills two).
   cache: Map<EncodedImage, Promise<DecodedTexture | null>> = new Map(),
+  /** The renderer samples compressed formats (F1a): an image's baked KTX2 is decoded in place of its PNG. */
+  compressed = false,
 ): Promise<TexturedMesh> {
-  const decode = (image: EncodedImage) => (image.mime === "image/ktx2" ? decodeKtx2(image.bytes) : decodeTexture(image.mime, image.bytes));
+  const plain = (image: EncodedImage) => (image.mime === "image/ktx2" ? decodeKtx2(image.bytes) : decodeTexture(image.mime, image.bytes));
+  const decode = (image: EncodedImage) =>
+    compressed && image.ktx2
+      ? decodeKtx2(image.ktx2).then((texture) => (texture ? (image.ktx2Relief ? { ...texture, packedWithRelief: true } : texture) : plain(image)))
+      : plain(image);
   const each = (pick: (m: MeshAsset["primitives"][number]["material"]) => EncodedImage | null | undefined) =>
     Promise.all(
       mesh.primitives.map((primitive) => {
