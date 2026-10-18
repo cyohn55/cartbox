@@ -13758,7 +13758,7 @@ import {
   fogIsVolumetric
 } from "@cartbox/editor";
 var UNIFORM_STRIDE = 1024;
-var UNIFORM_BYTES_USED = 912;
+var UNIFORM_BYTES_USED = 944;
 var UNIFORM_FLOATS = UNIFORM_STRIDE / 4;
 var LIGHT_FLOATS = 16;
 var PROBE_FLOATS = 16;
@@ -13843,6 +13843,8 @@ var OFFSET_WATER0 = 212;
 var OFFSET_TERRAIN0 = 216;
 var OFFSET_WIND0 = 220;
 var OFFSET_MAPS0 = 224;
+var OFFSET_WIND1 = 228;
+var OFFSET_MOTION0 = 232;
 var DEFAULT_LIGHT = [0.4, 0.8, 0.6];
 var DEFAULT_AMBIENT2 = 0.35;
 function resolveLight(direction, ambient) {
@@ -14092,6 +14094,12 @@ function writeInstanceUniform(target, index, uniform) {
   target[base + OFFSET_MAPS0 + 1] = mapping?.farTile ?? 0;
   target[base + OFFSET_MAPS0 + 2] = uniform.waterAlong ? 1 : 0;
   target[base + OFFSET_MAPS0 + 3] = uniform.materialId ?? 0;
+  const before = uniform.windBefore ?? null;
+  for (let k = 0; k < 4; k += 1) target[base + OFFSET_WIND1 + k] = before ? before[k] : 0;
+  target[base + OFFSET_MOTION0] = uniform.motionBase ?? 0;
+  target[base + OFFSET_MOTION0 + 1] = 0;
+  target[base + OFFSET_MOTION0 + 2] = 0;
+  target[base + OFFSET_MOTION0 + 3] = 0;
 }
 function refractionCamera(view, height) {
   return { right: [view[0], view[4], view[8]], up: [view[1], view[5], view[9]], height };
@@ -17249,6 +17257,7 @@ function timesFromStamps(passes, stamps) {
 
 // src/render/WebgpuSceneRenderer.ts
 var GBUFFER_FORMAT = "rgba16float";
+var VELOCITY_FORMAT = "rg16float";
 var FRAME_BYTES = 176;
 var READBACK_BUFFERS2 = 3;
 var SHADER_STAGE_VERTEX = 1;
@@ -17413,6 +17422,8 @@ struct Uniforms {
   terrain0: vec4<f32>,  // x = triplanar repeat (0 = UVs), y = height-blend sharpness (B6)
   wind0: vec4<f32>,     // xy = wind x, z \xD7 strength, z = phase (0..1), w = gust (B6)
   maps0: vec4<f32>,     // x = 1 when a normal map is bound (P1a)
+  wind1: vec4<f32>,     // the previous frame's wind0, for motion vectors (F0c)
+  motion0: vec4<f32>,   // x = where this frame's motion transforms start in xf (F0c)
 };
 
 // A Modern-tier light (see packLights): d0 = dir/pos + kind, d1 = colour +
@@ -17904,13 +17915,14 @@ fn aces(x: f32) -> f32 {
 
 // Wind (B6): windOffset in wind.ts, term for term \u2014 how far a vertex at (x, z) in its
 // mesh's space, bending sway metres per unit of wind, moves this frame.
-fn windOffset(p: vec2<f32>, sway: f32) -> vec2<f32> {
-  if (sway <= 0.0 || (u.wind0.x == 0.0 && u.wind0.y == 0.0)) { return vec2<f32>(0.0); }
-  let t = u.wind0.z;
+fn windOffsetIn(w: vec4<f32>, p: vec2<f32>, sway: f32) -> vec2<f32> {
+  if (sway <= 0.0 || (w.x == 0.0 && w.y == 0.0)) { return vec2<f32>(0.0); }
+  let t = w.z;
   let s = 0.5 + 0.35 * sin(6.283185307179586 * 8.0 * t + 0.7 * (p.x + p.y)) + 0.15 * sin(6.283185307179586 * 24.0 * t + 1.9 * p.x - 1.3 * p.y);
-  let g = 1.0 + u.wind0.w * (0.5 + 0.5 * sin(6.283185307179586 * t + 0.05 * (p.x + p.y)));
-  return u.wind0.xy * (sway * s * g);
+  let g = 1.0 + w.w * (0.5 + 0.5 * sin(6.283185307179586 * t + 0.05 * (p.x + p.y)));
+  return w.xy * (sway * s * g);
 }
+fn windOffset(p: vec2<f32>, sway: f32) -> vec2<f32> { return windOffsetIn(u.wind0, p, sway); }
 @vertex
 fn vs(
   @location(0) position: vec3<f32>,
@@ -17921,6 +17933,9 @@ fn vs(
   @location(5) sway: f32,
   @builtin(instance_index) instance: u32,
 ) -> VSOut {
+  return vertexOf(position, normal, uv, uv2, bw, sway, instance);
+}
+fn vertexOf(position: vec3<f32>, normal: vec3<f32>, uv: vec2<f32>, uv2: vec2<f32>, bw: f32, sway: f32, instance: u32) -> VSOut {
   var out: VSOut;
   let t = xf[instance];
   var pos = position;
@@ -18332,13 +18347,65 @@ fn octEncode(n: vec3<f32>) -> vec2<f32> {
   if (n.z >= 0.0) { return p; }
   return (vec2<f32>(1.0) - abs(p.yx)) * select(vec2<f32>(-1.0), vec2<f32>(1.0), p >= vec2<f32>(0.0));
 }
+// The prepass's vertex stage: the scene's own (vertexOf, so the depth is the
+// same), plus where the vertex is on screen now and was last frame, from this
+// frame's motion transforms (xf from u.motion0.x: mvp = now, lightMvp = then,
+// both unjittered) and the vertex's previous position (a skinned mesh's last
+// vertices; its current ones otherwise) bent by the previous frame's wind.
+struct PrepassIn {
+  @builtin(position) @invariant pos: vec4<f32>,
+  @location(0) normal: vec3<f32>,
+  @location(1) @interpolate(perspective, centroid) uv: vec2<f32>,
+  @location(2) lightClip: vec4<f32>,
+  @location(3) worldPos: vec3<f32>,
+  @location(4) eyeDepth: f32,
+  @location(5) @interpolate(perspective, centroid) uv2: vec2<f32>,
+  @location(6) bw: f32,
+  @location(7) objPos: vec3<f32>,
+  @location(8) clipNow: vec4<f32>,
+  @location(9) clipThen: vec4<f32>,
+};
+@vertex
+fn vs_prepass(
+  @location(0) position: vec3<f32>,
+  @location(1) normal: vec3<f32>,
+  @location(2) uv: vec2<f32>,
+  @location(3) uv2: vec2<f32>,
+  @location(4) bw: f32,
+  @location(5) sway: f32,
+  @location(6) before: vec3<f32>,
+  @builtin(instance_index) instance: u32,
+) -> PrepassIn {
+  let v = vertexOf(position, normal, uv, uv2, bw, sway, instance);
+  var out: PrepassIn;
+  out.pos = v.pos;
+  out.normal = v.normal;
+  out.uv = v.uv;
+  out.lightClip = v.lightClip;
+  out.worldPos = v.worldPos;
+  out.eyeDepth = v.eyeDepth;
+  out.uv2 = v.uv2;
+  out.bw = v.bw;
+  out.objPos = v.objPos;
+  let m = xf[u32(u.motion0.x) + instance];
+  let then = windOffsetIn(u.wind1, before.xz, sway);
+  out.clipNow = m.mvp * vec4<f32>(v.objPos, 1.0);
+  out.clipThen = m.lightMvp * vec4<f32>(before.x + then.x, before.y, before.z + then.y, 1.0);
+  return out;
+}
+struct PrepassTargets {
+  @location(0) gbuffer: vec4<f32>,
+  @location(1) velocity: vec2<f32>,
+};
 // The prepass draws what the opaque pipeline draws, and drops exactly the
 // pixels fs drops (the cut-out, the near-transparent, Active Camo's screen
 // door), so the depth it leaves is the depth the opaque pass would. It writes
 // the G-buffer: xy = the octahedral world normal facing the viewer (normal
-// mapped), z = roughness, w = the material's ID (0 where nothing drew).
+// mapped), z = roughness, w = the material's ID (0 where nothing drew); and
+// the velocity buffer: how far the surface moved on screen since last frame,
+// in UV units (x right, y down), so a pixel's last position is uv \u2212 velocity.
 @fragment
-fn fs_prepass(in: VSOut) -> @location(0) vec4<f32> {
+fn fs_prepass(in: PrepassIn) -> PrepassTargets {
   let dp1 = dpdx(in.worldPos);
   let dp2 = dpdy(in.worldPos);
   let duv1 = dpdx(in.uv);
@@ -18382,7 +18449,11 @@ ${g.base}
   if (dot(n, u.view.xyz) < 0.0) { n = -n; }
   var rough = u.pbr.y;
   if (u.texflags.y > 0.5) { rough = rough * mr.g; }
-${graph ? "  if (gRough >= 0.0) { rough = gRough; }\n" : ""}  return vec4<f32>(octEncode(n), clamp(rough, 0.0, 1.0), u.maps0.w);
+${graph ? "  if (gRough >= 0.0) { rough = gRough; }\n" : ""}  var velocity = vec2<f32>(0.0);
+  if (in.clipNow.w > 0.0 && in.clipThen.w > 0.0) {
+    velocity = (in.clipNow.xy / in.clipNow.w - in.clipThen.xy / in.clipThen.w) * vec2<f32>(0.5, -0.5);
+  }
+  return PrepassTargets(vec4<f32>(octEncode(n), clamp(rough, 0.0, 1.0), u.maps0.w), velocity);
 }
 `
   );
@@ -18410,6 +18481,7 @@ fn fs(in: VSOut) -> SceneOut {
 }
 `;
 }
+var IDENTITY_BASIS = [1, 0, 0, 0, 1, 0, 0, 0, 1];
 var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
   constructor(device, width, height, pipeline, pipelinesFor, bindGroupLayout, colourTexture, depthTexture, depthGroups, sampler, blankTexture, blankShadow, readback, bytesPerRow, style, hdr = false) {
     this.device = device;
@@ -18469,8 +18541,18 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     this.lastFrameStats = { drawCalls: 0, instances: 0, triangles: 0, gpuMs: null };
     /** The thin G-buffer (F0c), made on the first frame with a prepass. */
     this.gbuffer = null;
+    /** The velocity buffer (F0c), made with the G-buffer. */
+    this.velocity = null;
     /** What the last frame's prepass left, or null when it had none. */
     this.prepassed = null;
+    /** Frames submitted (a skinned mesh's previous vertices are this frame's when it moved in it). */
+    this.frameIndex = 0;
+    /** Last frame's unjittered view-projection and wind, for motion vectors (F0c). */
+    this.lastViewProj = null;
+    this.lastWind = null;
+    /** Each mesh's copies' models last frame, in order, and this frame's matches: model → last frame's. */
+    this.lastModels = /* @__PURE__ */ new Map();
+    this.motion = /* @__PURE__ */ new Map();
     /** The reflection pass's uniforms and pipelines (I3), made on first use; its targets are the frame graph's. */
     this.reflections = null;
     this.temporalState = new TemporalState("ndc");
@@ -18615,7 +18697,7 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
           ...multisampled ? { multisample: { count: samples } } : {},
           vertex: {
             module,
-            entryPoint: "vs",
+            entryPoint: gbuffer ? "vs_prepass" : "vs",
             buffers: [
               {
                 // Interleaved position(3) + normal(3) + uv(2) + light-map uv(2) + blend weight(1) + sway(1).
@@ -18628,7 +18710,9 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
                   { shaderLocation: 4, offset: 40, format: "float32" },
                   { shaderLocation: 5, offset: 44, format: "float32" }
                 ]
-              }
+              },
+              // The prepass's velocity (F0c): the same layout's positions, from last frame's vertices.
+              ...gbuffer ? [{ arrayStride: 48, attributes: [{ shaderLocation: 6, offset: 0, format: "float32x3" }] }] : []
             ]
           },
           fragment: {
@@ -18639,7 +18723,7 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
             // conversion here would show up as the GPU path looking washed out.
             // A frame with reflections (I3) writes the two reflection targets too, blended as the colour is.
             // The depth prepass (F0c) writes only the G-buffer.
-            targets: gbuffer ? [{ format: GBUFFER_FORMAT }] : [
+            targets: gbuffer ? [{ format: GBUFFER_FORMAT }, { format: VELOCITY_FORMAT }] : [
               blend ? { format: colourFormat, blend } : { format: colourFormat },
               ...reflect ? [0, 1].map(() => blend ? { format: "rgba16float", blend } : { format: "rgba16float" }) : []
             ]
@@ -18863,6 +18947,7 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
       this.software.render(applyScenePasses(instances, draw), draw);
       return;
     }
+    if (draw.prepass === true) this.matchMotion(instances);
     const visible = applyScenePasses(instances, draw);
     presentFrame(this.latest, visible, draw, this.software);
     if (!this.readback.some((slot) => !slot.busy)) {
@@ -18896,6 +18981,7 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
    */
   renderToTexture(instances, draw) {
     if (this.destroyed) return null;
+    if (draw.prepass === true) this.matchMotion(instances);
     const visible = applyScenePasses(instances, draw);
     try {
       this.submit(visible, draw, false);
@@ -18915,6 +19001,8 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     const temporal = draw.temporal === true ? this.temporalState.begin(draw.view, draw.projection, this.width, this.height) : null;
     if (!temporal) this.temporalState.reset();
     const viewProj = multiplyMat46(temporal ? temporal.projection : draw.projection, draw.view);
+    this.frameIndex += 1;
+    const prepass = draw.prepass === true;
     const { batches: draws, instanceCount } = batchInstances(instances, (mesh) => this.uploadMesh(mesh), cameraPositionFromView3(draw.view));
     if (draws.length === 0) {
       this.prepassed = null;
@@ -18922,7 +19010,7 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
       return;
     }
     this.ensureUniformCapacity(draws.length);
-    this.ensureInstanceCapacity(instanceCount);
+    this.ensureInstanceCapacity(prepass ? instanceCount * 2 : instanceCount);
     const light = resolveLight(draw.lightDirection, draw.ambient);
     const viewDir = viewDirection(draw.view);
     const eye = cameraPositionFromView3(draw.view);
@@ -18983,6 +19071,10 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
       if (id === void 0) materialIds.set(material, id = materialIds.size + 1);
       return id;
     };
+    const viewProjNow = multiplyMat46(draw.projection, draw.view);
+    const viewProjThen = this.lastViewProj ?? viewProjNow;
+    const windNow = windUniform2(draw.wind, draw.time ?? 0);
+    const windThen = this.lastWind ?? windNow;
     let next = 0;
     draws.forEach((entry, index) => {
       entry.first = next;
@@ -18993,6 +19085,14 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
           model: model2,
           normalBasis: normalBasis3x3(model2)
         });
+        if (prepass) {
+          writeInstanceTransform(this.instanceData, instanceCount + next, {
+            mvp: multiplyMat46(viewProjNow, model2),
+            lightMvp: multiplyMat46(viewProjThen, this.motion.get(model2) ?? model2),
+            model: model2,
+            normalBasis: IDENTITY_BASIS
+          });
+        }
         next += 1;
       }
       const model = entry.models[0];
@@ -19038,12 +19138,16 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
         waterAlong: waterAlong2(entry.primitive.material),
         mapping: resolveMapping(entry.primitive.material),
         hasNormalMap: entry.textures.normal !== null,
-        wind: entry.primitive.sway ? windUniform2(draw.wind, draw.time ?? 0) : null,
-        materialId: materialId(entry.primitive.material)
+        wind: entry.primitive.sway ? windNow : null,
+        materialId: materialId(entry.primitive.material),
+        windBefore: entry.primitive.sway ? windThen : null,
+        motionBase: prepass ? instanceCount : 0
       });
     });
     this.device.queue.writeBuffer(this.uniformBuffer, 0, this.uniformData, 0, draws.length * UNIFORM_FLOATS);
-    this.device.queue.writeBuffer(this.instanceBuffer, 0, this.instanceData, 0, instanceCount * INSTANCE_FLOATS);
+    this.device.queue.writeBuffer(this.instanceBuffer, 0, this.instanceData, 0, (prepass ? 2 : 1) * instanceCount * INSTANCE_FLOATS);
+    this.lastViewProj = viewProjNow;
+    this.lastWind = windNow;
     let triangles = 0;
     for (const entry of draws) triangles += entry.geometry.indexCount / 3 * entry.models.length;
     this.lastFrameStats = {
@@ -19059,7 +19163,6 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     const seeThrough = firstSeeThrough >= 0;
     const msaa = draw.antialias === true ? this.ensureMsaa() : null;
     const reflections = draw.reflections === true ? this.ensureReflections() : null;
-    const prepass = draw.prepass === true;
     const drawRange = (pass, from, to, depthGroup) => {
       pass.setBindGroup(1, depthGroup);
       let bound = null;
@@ -19090,6 +19193,8 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
         }
         pass.setBindGroup(0, this.bindGroupFor(entry.primitive, entry.textures), [index * UNIFORM_STRIDE]);
         pass.setVertexBuffer(0, entry.geometry.vertexBuffer);
+        const moved = entry.geometry.previousBuffer && entry.geometry.movedFrame === this.frameIndex;
+        pass.setVertexBuffer(1, moved ? entry.geometry.previousBuffer : entry.geometry.vertexBuffer);
         pass.setIndexBuffer(entry.geometry.indexBuffer, "uint32");
         pass.drawIndexed(entry.geometry.indexCount, entry.models.length, 0, 0, entry.first);
       }
@@ -19107,22 +19212,25 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     const rayTargets = msaa ? raysMs : rays;
     const opaqueEnd = seeThrough ? firstSeeThrough : draws.length;
     const gbuffer = prepass ? graph.importTexture("gbuffer", this.ensureGbuffer()) : null;
+    const velocity = prepass ? graph.importTexture("velocity", this.ensureVelocity()) : null;
     const gbufferMs = gbuffer && msaa ? graph.createTexture("gbuffer.msaa", { format: GBUFFER_FORMAT, ...size, sampleCount: MSAA_SAMPLES }) : null;
-    if (gbuffer) {
+    const velocityMs = velocity && msaa ? graph.createTexture("velocity.msaa", { format: VELOCITY_FORMAT, ...size, sampleCount: MSAA_SAMPLES }) : null;
+    if (gbuffer && velocity) {
       graph.addPass("prepass", "render", (pass) => {
         pass.write(depth);
-        pass.write(gbufferMs ?? gbuffer);
-        if (gbufferMs) pass.write(gbuffer);
+        for (const [drawn, resolved] of [[gbufferMs, gbuffer], [velocityMs, velocity]]) {
+          pass.write(drawn ?? resolved);
+          if (drawn) pass.write(resolved);
+        }
         return (ctx) => {
+          const target2 = (drawn, resolved) => ({
+            view: ctx.texture(drawn ?? resolved).createView(),
+            clearValue: { r: 0, g: 0, b: 0, a: 0 },
+            loadOp: "clear",
+            ...drawn ? { resolveTarget: ctx.texture(resolved).createView(), storeOp: "discard" } : { storeOp: "store" }
+          });
           const encoded = ctx.encoder.beginRenderPass({
-            colorAttachments: [
-              {
-                view: ctx.texture(gbufferMs ?? gbuffer).createView(),
-                clearValue: { r: 0, g: 0, b: 0, a: 0 },
-                loadOp: "clear",
-                ...gbufferMs ? { resolveTarget: ctx.texture(gbuffer).createView(), storeOp: "discard" } : { storeOp: "store" }
-              }
-            ],
+            colorAttachments: [target2(gbufferMs, gbuffer), target2(velocityMs, velocity)],
             depthStencilAttachment: { view: ctx.texture(depth).createView(), depthClearValue: 1, depthLoadOp: "clear", depthStoreOp: "store" },
             ...ctx.timing
           });
@@ -19131,7 +19239,7 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
         };
       });
     }
-    this.prepassed = prepass ? { depth: msaa ? msaa.depth : this.depthTexture, gbuffer: this.gbuffer, multisampled: msaa !== null } : null;
+    this.prepassed = prepass ? { depth: msaa ? msaa.depth : this.depthTexture, gbuffer: this.gbuffer, velocity: this.velocity, multisampled: msaa !== null } : null;
     const scenePass = (name, from, to, load, last) => graph.addPass(name, "render", (pass) => {
       const resolving = msaa !== null && last;
       const resolveBehind = msaa !== null && behind !== null && !load;
@@ -19212,13 +19320,39 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     this.gbuffer ?? (this.gbuffer = this.device.createTexture({ size: { width: this.width, height: this.height }, format: GBUFFER_FORMAT, usage: 16 | 4 | 1 }));
     return this.gbuffer;
   }
+  ensureVelocity() {
+    this.velocity ?? (this.velocity = this.device.createTexture({ size: { width: this.width, height: this.height }, format: VELOCITY_FORMAT, usage: 16 | 4 | 1 }));
+    return this.velocity;
+  }
+  /**
+   * Where each instance was last frame (F0c): its `previousModel`, or else the
+   * model of the copy of its mesh (its LOD chain's first) at the same place
+   * among that mesh's copies last frame. Matched before culling, so a copy
+   * leaving the view doesn't shift the rest. A copy with no match hasn't moved.
+   */
+  matchMotion(instances) {
+    const models = /* @__PURE__ */ new Map();
+    const motion = /* @__PURE__ */ new Map();
+    for (const instance of instances) {
+      const key = instance.lod?.meshes[0] ?? instance.mesh;
+      let list = models.get(key);
+      if (!list) models.set(key, list = []);
+      const previous = instance.previousModel ?? this.lastModels.get(key)?.[list.length];
+      if (previous) motion.set(instance.model, previous);
+      list.push(instance.model);
+    }
+    this.lastModels = models;
+    this.motion = motion;
+  }
   /**
    * The last frame's depth prepass (AAA_FIDELITY_ROADMAP.md F0c), for
    * screen-space effects: its depth (multisampled in an anti-aliased frame)
    * and the thin G-buffer, an rgba16float of xy = octahedral world normal
    * facing the viewer, z = roughness and w = material ID (0 where nothing
    * opaque drew). Null when the frame had no prepass. Both hold until the next
-   * frame.
+   * frame. The velocity buffer (rg16float) is how far each opaque pixel moved
+   * on screen since last frame, in UV units (x right, y down; 0 where nothing
+   * drew), from the camera's motion, each object's and each skinned vertex's.
    */
   get prepassTargets() {
     return this.prepassed;
@@ -19488,8 +19622,14 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
         const gpu = cached[i];
         if (!primitive.dynamic || !gpu || gpu.revision === primitive.dynamic.revision) return;
         const normals = primitive.normals ?? computeSmoothNormals2(primitive.positions, primitive.indices);
-        this.device.queue.writeBuffer(gpu.vertexBuffer, 0, interleaveVertices(primitive.positions, normals, primitive.uvs, primitive.uvs2 ?? null, primitive.blend ?? null, primitive.sway ?? null));
+        const vertices = interleaveVertices(primitive.positions, normals, primitive.uvs, primitive.uvs2 ?? null, primitive.blend ?? null, primitive.sway ?? null);
+        gpu.previousBuffer ?? (gpu.previousBuffer = this.device.createBuffer({ size: Math.max(40, vertices.byteLength), usage: 32 | 8 }));
+        const encoder = this.device.createCommandEncoder();
+        encoder.copyBufferToBuffer(gpu.vertexBuffer, 0, gpu.previousBuffer, 0, Math.max(40, vertices.byteLength));
+        this.device.queue.submit([encoder.finish()]);
+        this.device.queue.writeBuffer(gpu.vertexBuffer, 0, vertices);
         gpu.revision = primitive.dynamic.revision;
+        gpu.movedFrame = this.frameIndex;
       });
       return cached;
     }
@@ -19498,8 +19638,9 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
       const vertices = interleaveVertices(primitive.positions, normals, primitive.uvs, primitive.uvs2 ?? null, primitive.blend ?? null, primitive.sway ?? null);
       const vertexBuffer = this.device.createBuffer({
         size: Math.max(40, vertices.byteLength),
-        usage: 32 | 8
-        // VERTEX | COPY_DST
+        // A dynamic one is also copied from, to keep its last vertices (F0c).
+        usage: 32 | 8 | (primitive.dynamic ? 4 : 0)
+        // VERTEX | COPY_DST (| COPY_SRC)
       });
       this.device.queue.writeBuffer(vertexBuffer, 0, vertices);
       const indexBuffer = this.device.createBuffer({
@@ -19592,6 +19733,7 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     }
     if (this.reflections) destroySafely(this.reflections.uniforms);
     destroySafely(this.gbuffer);
+    destroySafely(this.velocity);
     this.transients.destroy();
     if (this.taa) {
       destroySafely(this.taa.history[0]);

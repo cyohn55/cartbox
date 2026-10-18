@@ -11,7 +11,7 @@ import { describe, expect, it } from "vitest";
 
 import { FrameGraph, GraphTimer, TransientPool, slotKey, timesFromStamps, type TextureDesc } from "../packages/player/src/render/frameGraph";
 import { WebgpuSceneRenderer, type SceneDraw } from "@cartbox/player";
-import { composeModelMatrix, projectionMatrix, viewMatrix, type MeshAsset, type MeshSceneInstance } from "@cartbox/editor";
+import { composeModelMatrix, multiplyMat4, projectionMatrix, viewMatrix, type MeshAsset, type MeshSceneInstance } from "@cartbox/editor";
 
 const RGBA: TextureDesc = { format: "rgba16float", width: 8, height: 8 };
 const noop = () => () => {};
@@ -257,7 +257,8 @@ async function readPixel(texture: any): Promise<number[]> {
   return out;
 }
 
-describe.skipIf(!device)("on a real device", () => {
+// Each builds a renderer and pumps Dawn for frames: allow them the time a busy machine takes.
+describe.skipIf(!device)("on a real device", { timeout: 60_000 }, () => {
   it("encodes an aliased frame correctly: two transients in one texture, each copied out before the next", async () => {
     const make = () => device.createTexture({ size: { width: 4, height: 4 }, format: "rgba8unorm", usage: 0x10 | 0x01 | 0x02 });
     const outs = [make(), make()];
@@ -434,11 +435,127 @@ describe.skipIf(!device)("on a real device", () => {
       renderer.dispose();
     }
   });
+
+  it("writes the velocity buffer: the camera's motion, an object's, a skinned vertex's, and nothing from the jitter", async () => {
+    const W = 64;
+    const H = 48;
+    const projection = projectionMatrix(Math.PI / 3, W / H, 0.1, 50);
+    const plane = (positions: Float32Array, dynamic?: { revision: number }): MeshAsset =>
+      ({
+        name: "q",
+        primitives: [
+          {
+            positions,
+            normals: Float32Array.from([0, 0, 1, 0, 0, 1, 0, 0, 1, 0, 0, 1]),
+            uvs: Float32Array.from([0, 0, 1, 0, 1, 1, 0, 1]),
+            indices: Uint32Array.from([0, 1, 2, 0, 2, 3]),
+            material: { name: "m", baseColorFactor: [0.8, 0.5, 0.3, 1], baseColorImage: null, metallicFactor: 0, roughnessFactor: 0.6 },
+            ...(dynamic ? { dynamic } : {}),
+          },
+        ],
+      }) as unknown as MeshAsset;
+    const square = () => Float32Array.from([-1, -1, 0, 1, -1, 0, 1, 1, 0, -1, 1, 0]);
+    const draw = (eye: [number, number, number], extra: Record<string, unknown> = {}): SceneDraw =>
+      ({
+        width: W,
+        height: H,
+        out: new Uint8ClampedArray(W * H * 4),
+        depth: new Float32Array(W * H),
+        background: [0, 0, 0, 255],
+        view: viewMatrix(eye, [eye[0], eye[1], 0]),
+        projection,
+        lightDirection: [0.3, 0.6, 1],
+        ambient: 0.3,
+        prepass: true,
+        ...extra,
+      }) as unknown as SceneDraw;
+    /** Where world point p is on screen (UV, y down) through `view`. */
+    const uvOf = (eye: [number, number, number], p: [number, number, number]) => {
+      const vp = multiplyMat4(projection, viewMatrix(eye, [eye[0], eye[1], 0]));
+      const x = vp[0]! * p[0] + vp[4]! * p[1] + vp[8]! * p[2] + vp[12]!;
+      const y = vp[1]! * p[0] + vp[5]! * p[1] + vp[9]! * p[2] + vp[13]!;
+      const w = vp[3]! * p[0] + vp[7]! * p[1] + vp[11]! * p[2] + vp[15]!;
+      return [0.5 + (0.5 * x) / w, 0.5 - (0.5 * y) / w];
+    };
+    /** Draw two frames and read the velocity where world point p is now. */
+    const velocityAt = async (
+      frames: readonly { instances: MeshSceneInstance[]; draw: SceneDraw; before?: () => void }[],
+      p: [number, number, number],
+      eye: [number, number, number],
+    ) => {
+      const renderer = (await WebgpuSceneRenderer.create(device, W, H))!;
+      for (const frame of frames) {
+        frame.before?.();
+        renderer.render(frame.instances, frame.draw);
+        await until(() => false, 10);
+      }
+      const v = await readHalf(renderer.prepassTargets!.velocity, W, H, 2);
+      const [u, w] = uvOf(eye, p);
+      const i = (Math.floor(w! * H) * W + Math.floor(u! * W)) * 2;
+      const corner = [v[0]!, v[1]!];
+      renderer.dispose();
+      return { v: [v[i]!, v[i + 1]!], corner };
+    };
+    const at = (x: number) => composeModelMatrix([x, 0, 0], [0, 0, 0], [0.8, 0.8, 1]);
+    const mesh = plane(square());
+    const one = (model: number[], extra: Partial<MeshSceneInstance> = {}): MeshSceneInstance[] => [{ mesh, model, textures: null, ...extra } as MeshSceneInstance];
+    const eye: [number, number, number] = [0, 0, 4];
+
+    // Still: no velocity, and none where nothing drew.
+    const still = await velocityAt([{ instances: one(at(0)), draw: draw(eye) }, { instances: one(at(0)), draw: draw(eye) }], [0, 0, 0], eye);
+    expect(Math.hypot(still.v[0]!, still.v[1]!)).toBeLessThan(1e-3);
+    expect(still.corner).toEqual([0, 0]);
+
+    // The camera steps right: the surface moves left on screen by what the projection says.
+    const moved: [number, number, number] = [0.2, 0, 4];
+    const pan = await velocityAt([{ instances: one(at(0)), draw: draw(eye) }, { instances: one(at(0)), draw: draw(moved) }], [0.1, 0, 0], moved);
+    const panExpect = [uvOf(moved, [0.1, 0, 0])[0]! - uvOf(eye, [0.1, 0, 0])[0]!, 0];
+    expect(panExpect[0]).toBeLessThan(-0.01);
+    expect(pan.v[0]).toBeCloseTo(panExpect[0]!, 3);
+    expect(pan.v[1]).toBeCloseTo(0, 3);
+
+    // The object moves right by 0.3: given as its previous model, or matched to last frame's copy.
+    const shift = uvOf(eye, [0.3, 0, 0])[0]! - uvOf(eye, [0, 0, 0])[0]!;
+    const told = await velocityAt([{ instances: one(at(0.3), { previousModel: at(0) }), draw: draw(eye) }], [0.3, 0, 0], eye);
+    expect(told.v[0]).toBeCloseTo(shift, 3);
+    const matched = await velocityAt([{ instances: one(at(0)), draw: draw(eye) }, { instances: one(at(0.3)), draw: draw(eye) }], [0.3, 0, 0], eye);
+    expect(matched.v[0]).toBeCloseTo(shift, 3);
+
+    // A skinned (dynamic) mesh: its vertices move 0.3 right between frames, its model doesn't.
+    const positions = square();
+    const dynamic = { revision: 0 };
+    const skinned = plane(positions, dynamic);
+    const skinnedOne: MeshSceneInstance[] = [{ mesh: skinned, model: composeModelMatrix([0, 0, 0], [0, 0, 0], [1, 1, 1]), textures: null } as MeshSceneInstance];
+    const bend = await velocityAt(
+      [
+        { instances: skinnedOne, draw: draw(eye) },
+        {
+          instances: [{ ...skinnedOne[0]!, model: composeModelMatrix([0, 0, 0], [0, 0, 0], [1, 1, 1]) }],
+          draw: draw(eye),
+          before: () => {
+            for (let k = 0; k < positions.length; k += 3) positions[k] = positions[k]! + 0.3;
+            dynamic.revision += 1;
+          },
+        },
+      ],
+      [0.3, 0, 0],
+      eye,
+    );
+    expect(bend.v[0]).toBeCloseTo(shift, 3);
+
+    // Temporal anti-aliasing jitters the projection every frame; the velocity leaves it out.
+    const jittered = await velocityAt(
+      [0, 1, 2].map(() => ({ instances: one(at(0)), draw: draw(eye, { temporal: true }) })),
+      [0, 0, 0],
+      eye,
+    );
+    expect(Math.hypot(jittered.v[0]!, jittered.v[1]!)).toBeLessThan(1e-3);
+  });
 });
 
-/** Read an rgba16float texture back as floats. */
-async function readHalf(texture: any, width: number, height: number): Promise<Float32Array> {
-  const bytesPerRow = Math.ceil((width * 8) / 256) * 256;
+/** Read a half-float texture (`channels` 4 for rgba16float, 2 for rg16float) back as floats. */
+async function readHalf(texture: any, width: number, height: number, channels = 4): Promise<Float32Array> {
+  const bytesPerRow = Math.ceil((width * channels * 2) / 256) * 256;
   const buffer = device.createBuffer({ size: bytesPerRow * height, usage: 0x01 | 0x08 }); // MAP_READ | COPY_DST
   const encoder = device.createCommandEncoder();
   encoder.copyTextureToBuffer({ texture }, { buffer, bytesPerRow, rowsPerImage: height }, { width, height });
@@ -449,9 +566,9 @@ async function readHalf(texture: any, width: number, height: number): Promise<Fl
   const halves = new Uint16Array(buffer.getMappedRange().slice(0));
   buffer.unmap();
   buffer.destroy();
-  const out = new Float32Array(width * height * 4);
+  const out = new Float32Array(width * height * channels);
   for (let y = 0; y < height; y += 1) {
-    for (let i = 0; i < width * 4; i += 1) out[y * width * 4 + i] = halfToFloat(halves[(y * bytesPerRow) / 2 + i]!);
+    for (let i = 0; i < width * channels; i += 1) out[y * width * channels + i] = halfToFloat(halves[(y * bytesPerRow) / 2 + i]!);
   }
   return out;
 }

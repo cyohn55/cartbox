@@ -165,7 +165,7 @@ Everything else depends on this track. It contains no visible "feature", but its
     - *Tests:*
       - `physical-light-units.test.ts`: the calibration and its round trips, the falloff and its window, the switch keeping brightness, the packed flag, and the rig's units and falloff surviving a save.
       - `webgpu-parity.test.ts` and `webgl-parity.test.ts` now include inverse-square point and spot lights, matching the software rasteriser.
-- [ ] **F0c. Frame graph.**
+- [x] **F0c. Frame graph.**
   - A declarative pass graph with transient, aliased resources, replacing the hand-ordered passes of `WebgpuSceneRenderer`.
   - It produces a depth prepass and a thin G-buffer of normal, roughness and material ID.
   - It produces a **velocity buffer**, with per-object motion that includes skinned and animated vertices.
@@ -199,7 +199,20 @@ Everything else depends on this track. It contains no visible "feature", but its
     - *Tests:*
       - `webgpu-parity.test.ts` now runs its whole real-device suite a second time with the prepass on, and every comparison with the software rasteriser holds unchanged. That covers cut-outs, Active Camo, material graphs, parallax, normal maps, refraction, see-through, soft edges, lights, shadows and probes.
       - `frame-graph.test.ts` reads the G-buffer back for a plain and an anti-aliased frame: each quad's normal, roughness and ID, nothing in the corner, nothing for a see-through quad, and the prepass running first.
-    - *Next:* F0c-3 adds the velocity buffer.
+  - **F0c-3, the velocity buffer: done.** With this, F0c is complete. The prepass also writes an rg16float velocity buffer (`prepassTargets.velocity`): how far each opaque pixel moved on screen since last frame, in UV units (x right, y down), so its last position is uv − velocity.
+    - **The camera.** This frame's and last frame's view-projection, both without the TAA jitter, so a still scene under TAA reads still.
+    - **Each object.** Its `previousModel` when the caller gives one. Otherwise it is matched to last frame's copy of the same mesh (its LOD chain's first) at the same place among that mesh's copies, before culling so a copy leaving the view doesn't shift the rest. An object with no match reads as not having moved.
+    - **Each skinned or animated vertex.** A dynamic mesh copies its vertices to a second buffer before each upload, and the prepass reads last frame's positions from it.
+    - **Wind-swayed foliage.** It bends by last frame's wind.
+    - **How it is drawn.** The motion transforms ride after the frame's transforms in the instance buffer (`motion0.x`); the previous wind is `wind1`. A `vs_prepass` vertex stage wraps the scene's own vertex function, so the depth stays the same.
+    - *Tests:* `frame-graph.test.ts` on Dawn checks:
+      - a still scene reads zero, and so does an empty pixel;
+      - a camera pan reads the velocity the projection predicts;
+      - an object moved 0.3, with its previous model given or matched to last frame's copy, reads its projected shift;
+      - a dynamic mesh whose vertices moved reads the same;
+      - a jittered TAA frame reads zero.
+      - The parity suite passes with the prepass on, and Chromium creates the targets and pipelines without errors.
+    - *Left for later:* F4a's TAA reprojects with it; until then nothing reads it. Particles and debris that come and go can mismatch for a frame (they read as having moved from another copy's place), and the TAA's rejection will handle that.
 - [ ] **F0d. The `aaa` tier.**
   - A console model on the dedicated Modern core (`packages/modern-core`, ENGINE_PARITY EP20b: a Lua 5.4 VM with direct engine calls and no command cap). `MODELS.modern` still points its `engineUrl` at the 360 core, and the tier ends that placeholder.
   - It renders at native device resolution × DPR, with dynamic resolution driven by the GPU frame time, and gives the 2D layer a scaled presentation.
