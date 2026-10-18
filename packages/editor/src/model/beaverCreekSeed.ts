@@ -48,6 +48,15 @@ import { arenaNavMesh } from "./arenaValidate";
 import type { NavMesh } from "./navmesh";
 import type { SceneLighting } from "./SceneLighting";
 import { terrainMesh, type Terrain } from "./terrain";
+import { boxSolid, csg, solidFromFaces } from "./csg";
+import { buildParametric, kitMaterial } from "./shapeGenerators";
+import { riverFoam, riverFoamMaterial, riverSurface, riverWaterMaterial, type Spline } from "./splines";
+import { hydraulicErosion, thermalErosion } from "./landscapeTools";
+import { generateTextures } from "./textureGenerators";
+import { withGeneratedMaps, type MeshMaterial } from "./MeshAsset";
+import type { MaterialLibrary } from "./materialInstances";
+import type { InstanceField } from "./materialInstanceLink";
+import { bakeImpostor } from "../render/impostor";
 import type { SceneTimeline } from "./timeline";
 
 const IDENTITY = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1] as const;
@@ -209,7 +218,12 @@ export const BEAVER_MAP: ArenaMap = {
   teleporters: BEAVER_TELEPORTERS,
 };
 
-// --- The grey box ----------------------------------------------------------
+// --- The map, built with the editor's tools (EDITOR_PRO_ROADMAP.md P9) ------
+// Everything here is visual: the collision above is untouched, so the map
+// plays exactly as before. The bases are worn stone shells cut by CSG with
+// Forerunner pillars, trim and team lights from the kit; the arch is rock cut
+// by CSG; the creek is a river spline's flowing water and foam; the
+// materials are instances of a small library of generated sets.
 
 const material = (name: string, color: readonly [number, number, number], roughness: number, extra: Partial<MeshPrimitive["material"]> = {}): MeshPrimitive["material"] => ({
   name,
@@ -220,31 +234,197 @@ const material = (name: string, color: readonly [number, number, number], roughn
   ...extra,
 });
 
-/** The map in grey box: bases, arch, steps, the pads and teleporters glowing, and the creek's water. */
+/** A parent material in the scene's library, and an instance of it (overriding `overrides`). */
+const instance = (parentId: string, parent: MeshMaterial, name: string, overrides: Partial<MeshMaterial> = {}): MeshMaterial => ({
+  ...parent,
+  ...overrides,
+  name,
+  instance: { of: parentId, overrides: Object.keys(overrides) as InstanceField[] },
+});
+
+let library: { library: MaterialLibrary; stone: MeshMaterial; metal: MeshMaterial; rock: MeshMaterial; blue: MeshMaterial; red: MeshMaterial } | null = null;
+
+/**
+ * The map's material library (P1b): worn stone and Forerunner metal from the
+ * kit, canyon rock and team light as parents, and the instances the map
+ * wears — the bases' stone, the arch's rock with a broader macro variation,
+ * and blue and red lights that override only their colour.
+ */
+function beaverMaterials() {
+  if (library) return library;
+  const stone = { ...kitMaterial("stone"), name: "beaver-stone" };
+  const metal = { ...kitMaterial("forerunner"), name: "beaver-metal" };
+  const rock = withGeneratedMaps({
+    name: "beaver-rock",
+    baseColorFactor: [1, 1, 1, 1],
+    baseColorImage: null,
+    metallicFactor: 1,
+    roughnessFactor: 1,
+    generator: { kind: "rock", seed: 9, scale: 1.5, tint: [0.86, 0.8, 0.7], size: 256 },
+    triplanar: 3,
+    macro: { scale: 5, strength: 0.2 },
+  });
+  const light = material("beaver-light", [0.9, 0.95, 1], 0.4, { emissiveFactor: [1.2, 1.4, 1.6] });
+  library = {
+    library: [
+      { id: "beaver-stone", material: stone },
+      { id: "beaver-metal", material: metal },
+      { id: "beaver-rock", material: rock },
+      { id: "beaver-light", material: light },
+    ],
+    stone: instance("beaver-stone", stone, "base-stone"),
+    metal: instance("beaver-metal", metal, "base-metal"),
+    rock: instance("beaver-rock", rock, "arch-rock", { macro: { scale: 8, strength: 0.28 } }),
+    blue: instance("beaver-light", light, "blue-light", { baseColorFactor: [0.35, 0.6, 1, 1], emissiveFactor: [0.5, 1.1, 2.6] }),
+    red: instance("beaver-light", light, "red-light", { baseColorFactor: [1, 0.4, 0.3, 1], emissiveFactor: [2.6, 0.7, 0.45] }),
+  };
+  return library;
+}
+
+/** Move a mesh, or turn it half round the centre as red's half is blue's. */
+function placeMesh(mesh: MeshAsset, dx: number, dy: number, dz: number, turn = false): MeshAsset {
+  const k = turn ? -1 : 1;
+  return {
+    ...mesh,
+    primitives: mesh.primitives.map((p) => {
+      const positions = new Float32Array(p.positions.length);
+      const normals = p.normals ? new Float32Array(p.normals.length) : null;
+      for (let i = 0; i < p.positions.length; i += 3) {
+        positions[i] = k * (p.positions[i]! + dx);
+        positions[i + 1] = p.positions[i + 1]! + dy;
+        positions[i + 2] = k * (p.positions[i + 2]! + dz);
+        if (normals && p.normals) {
+          normals[i] = k * p.normals[i]!;
+          normals[i + 1] = p.normals[i + 1]!;
+          normals[i + 2] = k * p.normals[i + 2]!;
+        }
+      }
+      return { ...p, positions, normals };
+    }),
+  };
+}
+
+/** Primitives joined into one of `material` (UVs and normals filled in where a part has none). */
+function joinPrimitives(parts: readonly MeshPrimitive[], mat: MeshMaterial): MeshPrimitive {
+  const positions: number[] = [];
+  const normals: number[] = [];
+  const uvs: number[] = [];
+  const indices: number[] = [];
+  for (const p of parts) {
+    const base = positions.length / 3;
+    const count = p.positions.length / 3;
+    for (let i = 0; i < p.positions.length; i += 1) positions.push(p.positions[i]!);
+    for (let v = 0; v < count; v += 1) {
+      normals.push(p.normals ? p.normals[v * 3]! : 0, p.normals ? p.normals[v * 3 + 1]! : 1, p.normals ? p.normals[v * 3 + 2]! : 0);
+      uvs.push(p.uvs ? p.uvs[v * 2]! : 0, p.uvs ? p.uvs[v * 2 + 1]! : 0);
+    }
+    for (let i = 0; i < p.indices.length; i += 1) indices.push(p.indices[i]! + base);
+  }
+  return { positions: Float32Array.from(positions), normals: Float32Array.from(normals), uvs: Float32Array.from(uvs), indices: Uint32Array.from(indices), material: mat };
+}
+
+/** Every primitive of these meshes, of whatever material, as parts to join. */
+const partsOf = (...meshes: MeshAsset[]): MeshPrimitive[] => meshes.flatMap((m) => m.primitives);
+
+/**
+ * A base's shell (blue's): one block of worn stone, hollowed and cut by CSG
+ * for its doors — the same walls the cart collides with, as one clean solid.
+ */
+function baseShell(stone: MeshMaterial): MeshAsset {
+  // The block, x -31..-19, 3.4 m tall, z -6..6 (centred at the origin, placed after).
+  let shell = boxSolid([12, ROOF, 12], stone);
+  const cut = (size: readonly [number, number, number], at: readonly [number, number, number]) => {
+    shell = csg(shell, boxSolid(size, stone), "subtract", { bModel: [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, at[0], at[1], at[2], 1] });
+  };
+  // Hollow (open to the roof slab above), then the side doors (x -25..-23) and the wide front door (z -2..2), 2.4 m high.
+  cut([11, ROOF + 1, 11], [0, 0, 0]);
+  cut([2, 2.5, 1.2], [1, -ROOF / 2 + 1.2, 5.75]);
+  cut([2, 2.5, 1.2], [1, -ROOF / 2 + 1.2, -5.75]);
+  cut([1.2, 2.5, 4], [5.75, -ROOF / 2 + 1.2, 0]);
+  return placeMesh(shell, -25, ROOF / 2, 0);
+}
+
+/** A base's Forerunner dressing (blue's): pillars at its corners and a trim band under the parapet. */
+function baseDressing(metal: MeshMaterial): MeshAsset[] {
+  const pillar = buildParametric({ kind: "pillar", params: { radius: 0.36, height: ROOF + 0.9, sides: 6, plinth: 0.22 } }, metal);
+  const corners: [number, number][] = [[-31, -6], [-31, 6], [-19, -6], [-19, 6]];
+  const trim: ArenaBox[] = [
+    [-18.92, ROOF - 0.12, 0, 0.08, 0.14, 6.1],
+    [-31.08, ROOF - 0.12, 0, 0.08, 0.14, 6.1],
+    [-25, ROOF - 0.12, 6.08, 6.1, 0.14, 0.08],
+    [-25, ROOF - 0.12, -6.08, 6.1, 0.14, 0.08],
+  ];
+  return [...corners.map(([x, z]) => placeMesh(pillar, x, 0, z)), { name: "trim", primitives: [boxesPrimitive(trim, metal, 1)] }];
+}
+
+/** A base's team lights (blue's): strips over its doors. */
+const BASE_LIGHTS: ArenaBox[] = [
+  [-18.9, 2.55, 0, 0.04, 0.05, 1.7],
+  [-24, 2.55, 6.04, 0.9, 0.05, 0.04],
+  [-24, 2.55, -6.04, 0.9, 0.05, 0.04],
+];
+
+/**
+ * The arch over the creek: a block of canyon rock with its opening cut by CSG
+ * — a rounded-square head (a superellipse) whose crown meets the span the
+ * cart stands soldiers on, and piers where the cart's piers are.
+ */
+function archRock(rock: MeshMaterial): MeshAsset {
+  const block = boxSolid([12, 3.5, 3], rock);
+  // The opening, in the block's space (its floor at y = -1.75): 10 m wide, 3.1 m high at the crown.
+  const a = 5, b = 3.1, power = 4, n = 24, floor = -1.75;
+  const outline: [number, number][] = [[a, floor - 0.2]];
+  for (let k = 0; k <= n; k += 1) {
+    const x = a - (2 * a * k) / n;
+    outline.push([x, floor + b * Math.pow(Math.max(0, 1 - Math.pow(Math.abs(x / a), power)), 1 / power)]);
+  }
+  outline.push([-a, floor - 0.2]);
+  const front = outline.map(([x, y]) => [x, y, 2] as [number, number, number]);
+  const back = outline.map(([x, y]) => [x, y, -2] as [number, number, number]).reverse();
+  const sides = outline.map(([x0, y0], i) => {
+    const [x1, y1] = outline[(i + 1) % outline.length]!;
+    const ex = x1 - x0, ey = y1 - y0;
+    return { points: [[x0, y0, 2], [x1, y1, 2], [x1, y1, -2], [x0, y0, -2]] as [number, number, number][], out: [ey, -ex, 0] as [number, number, number] };
+  });
+  const opening = solidFromFaces("opening", rock, [{ points: front, out: [0, 0, 1] }, { points: back, out: [0, 0, -1] }, ...sides]);
+  return placeMesh(csg(block, opening, "subtract"), 0, 1.75, 0);
+}
+
+/** The creek as a river spline (P3): down the middle of its bed, under the arch, from one ledge to the other. */
+export const BEAVER_CREEK_SPLINE: Spline = {
+  id: "beaver-creek",
+  name: "Creek",
+  kind: "river",
+  terrain: "beaver-canyon",
+  depth: 0.55,
+  points: [-11.4, -7, -3, 0, 3, 7, 11.4].map((z) => ({ p: [Math.sin(z * 0.42) * 0.35, WATER, z] as const, width: 7.4 })),
+};
+
+/** The map: bases, arch, steps, pads and teleporters, and the creek's water and foam. */
 function beaverMesh(): MeshAsset {
+  const m = beaverMaterials();
   const steps = BEAVER_FLIGHTS.flatMap((f) => arenaColliders({ solids: [], flights: [f] }));
   const glow = material("energy", [0.3, 0.9, 1], 0.4, { emissiveFactor: [0.5, 1.6, 1.9] });
   const teleporterPads: ArenaBox[] = BEAVER_TELEPORTERS.map(({ from: [x, y, z] }) => [x, y + 0.05, z, 0.8, 0.05, 0.8]);
-  const water: ArenaBox = [0, WATER - 0.02, 0, 4.5, 0.02, 11];
+  // The roof slabs and parapets (blue's), as the cart has them.
+  const roof: ArenaBox[] = [...BLUE_BASE.slice(10), [-25, 0.015, 0, 5.5, 0.015, 5.5]]; // and a stone floor
+  const blueStone = [baseShell(m.stone), { name: "roof", primitives: [boxesPrimitive([...roof, ...steps.slice(0, stepsInBases() / 2)], m.stone)] }];
+  const redStone = blueStone.map((mesh) => placeMesh(mesh, 0, 0, 0, true));
+  // (The base flights are each other's turn: blue's steps are the first half.)
+  const dressing = baseDressing(m.metal);
+  const water = riverSurface(BEAVER_CREEK_SPLINE, riverWaterMaterial());
+  const foam = riverFoam(BEAVER_CREEK_SPLINE, riverFoamMaterial());
   return {
     name: "beaver-creek",
     primitives: [
-      boxesPrimitive([...BEAVER_SOLIDS.slice(0, BLUE_BASE.length * 2), ...steps.slice(0, stepsInBases())], material("base-concrete", [0.56, 0.57, 0.6], 0.75)),
-      boxesPrimitive([...ARCH, ...steps.slice(stepsInBases())], material("rock", [0.42, 0.4, 0.37], 0.9)),
-      boxesPrimitive([...BEAVER_MARKERS.map((m) => m.box), ...teleporterPads], glow, 1),
-      // The creek (B5): rippling, flowing down the canyon (+Z), bending the bed beneath it.
-      boxesPrimitive(
-        [water],
-        material("creek-water", [0.16, 0.3, 0.34], 0.06, {
-          alphaMode: "blend",
-          baseColorFactor: [0.16, 0.3, 0.34, 0.55],
-          reflectivity: 1.3,
-          refraction: 0.3,
-          softDepth: 0.35,
-          water: { strength: 0.35, scale: 1.2, speed: 0.7, flow: Math.PI / 2 },
-        }),
-        1,
-      ),
+      joinPrimitives(partsOf(...blueStone, ...redStone), m.stone),
+      joinPrimitives(partsOf(...dressing, ...dressing.map((d) => placeMesh(d, 0, 0, 0, true))), m.metal),
+      boxesPrimitive(BASE_LIGHTS, m.blue, 1),
+      boxesPrimitive(BASE_LIGHTS.map(turnBox), m.red, 1),
+      joinPrimitives([...archRock(m.rock).primitives, boxesPrimitive(steps.slice(stepsInBases()), m.rock)], m.rock),
+      boxesPrimitive([...BEAVER_MARKERS.map((mk) => mk.box), ...teleporterPads], glow, 1),
+      ...(water ? [water] : []),
+      ...(foam ? [foam] : []),
     ],
   };
 }
@@ -254,31 +434,117 @@ function stepsInBases(): number {
   return BEAVER_FLIGHTS.slice(0, 2).reduce((n, f) => n + arenaColliders({ solids: [], flights: [f] }).length, 0);
 }
 
+// --- The canyon (P2's landscape tools) ------------------------------------------
+
+/**
+ * The canyon's terrain grid: 96 m square, reaching past the walls to the
+ * rims, at the cart's own metre (so inside play its samples are the cart's
+ * ground exactly, and it draws in 36 chunks).
+ */
+const CANYON = { x0: -48, z0: -48, size: 96, samples: 97 };
+/** Inside these the terrain is exactly the ground the cart stands soldiers on. */
+const PLAY_X = 32;
+const PLAY_Z = 15;
+
+/** A smooth hash noise in 0..1 (value noise, cosine-eased), and its sum over octaves. */
+function valueNoise(x: number, z: number, seed: number): number {
+  const h = (i: number, j: number) => {
+    let v = Math.imul(i ^ Math.imul(seed, 0x27d4eb2d), 0x85ebca6b) ^ Math.imul(j, 0xc2b2ae35);
+    v = Math.imul(v ^ (v >>> 15), 0x2c1b3c6d);
+    return ((v ^ (v >>> 13)) >>> 0) / 4294967296;
+  };
+  const i = Math.floor(x), j = Math.floor(z);
+  const fx = x - i, fz = z - j;
+  const u = (1 - Math.cos(fx * Math.PI)) / 2, v = (1 - Math.cos(fz * Math.PI)) / 2;
+  const a = h(i, j) + (h(i + 1, j) - h(i, j)) * u;
+  const b = h(i, j + 1) + (h(i + 1, j + 1) - h(i, j + 1)) * u;
+  return a + (b - a) * v;
+}
+function fbm(x: number, z: number, seed: number, octaves = 4): number {
+  let sum = 0, amp = 0.5, norm = 0, f = 1;
+  for (let o = 0; o < octaves; o += 1) {
+    sum += valueNoise(x * f, z * f, seed + o * 17) * amp;
+    norm += amp;
+    amp *= 0.5;
+    f *= 2.03;
+  }
+  return sum / norm;
+}
+
+/** How far a point lies outside the play space (0 or less inside it). */
+const outside = (x: number, z: number): number => Math.max(Math.abs(x) - PLAY_X, Math.abs(z) - PLAY_Z);
+
+/**
+ * The canyon before erosion: inside the play space, the cart's ground; beyond
+ * it, walls of rock rising steeply from the ground at its edge to rims 14–20 m
+ * up, broken by noise into buttresses and gullies, rolling hills beyond.
+ */
+function canyonSculpt(x: number, z: number): number {
+  const d = outside(x, z);
+  if (d <= 0) return groundHeight(BEAVER_GROUND, x, z) ?? 0;
+  const foot = groundHeight(BEAVER_GROUND, Math.max(-PLAY_X, Math.min(PLAY_X, x)), Math.max(-PLAY_Z, Math.min(PLAY_Z, z))) ?? 0;
+  // The creek's gorge: north and south the walls fall away to a notch the water comes out of (and the intro flies down).
+  const gorge = Math.abs(z) > PLAY_Z ? 0.7 * Math.exp(-((x / 9) ** 2)) : 0;
+  const rim = (12.5 + fbm(x * 0.05, z * 0.05, 61) * 10 + Math.max(0, d - 10) * 0.15) * (1 - gorge);
+  // Steep near the play space, buttressed along it (the wall's foot wanders in and out a little).
+  const wander = (fbm(x * 0.12, z * 0.12, 67) - 0.5) * 2.2;
+  const t = 1 - Math.exp(-Math.max(0, d + wander * Math.min(1, d / 2)) / 2.1);
+  const jag = (fbm(x * 0.32, z * 0.32, 71) - 0.5) * 3 * Math.min(1, d / 2.5);
+  // Strata: the wall steps back in ledges a metre or two apart.
+  const raw = foot + (rim - foot) * t;
+  const strata = raw + (Math.round(raw / 1.7) * 1.7 - raw) * 0.35 * Math.min(1, d / 3);
+  return strata + jag;
+}
+
 let terrain: Terrain | null = null;
 
-/** The canyon's terrain: the same heights the cart stands soldiers on, grass on the flats, rock on the walls (mapped triplanar). */
+/**
+ * The canyon's terrain (P2): sculpted, then eroded by water and by slumping,
+ * and the play space put back exactly as the cart has it. Grass on the flats,
+ * wet mud along the creek, banded rock on the walls (all triplanar).
+ */
 export function beaverTerrain(): Terrain {
   if (terrain) return terrain;
-  const g = BEAVER_GROUND;
-  terrain = {
+  const { x0, z0, size, samples } = CANYON;
+  const step = size / (samples - 1);
+  const heights = new Float32Array(samples * samples);
+  for (let j = 0; j < samples; j += 1) for (let i = 0; i < samples; i += 1) heights[j * samples + i] = canyonSculpt(x0 + i * step, z0 + j * step);
+  const t = beaverTextures();
+  let shaped: Terrain = {
     id: "beaver-canyon",
     name: "Canyon",
-    origin: [g.x0, 0, g.z0],
-    size: [g.step * (g.n - 1), g.step * (g.n - 1)],
-    samples: g.n,
-    heights: Float32Array.from(g.heights),
-    // Textured (B9): meadow grass on the flats, banded sandstone on the walls (mapped triplanar).
+    origin: [x0, 0, z0],
+    size: [size, size],
+    samples,
+    heights,
     layers: [
-      { material: { ...material("terrain-grass", [1, 1, 1], 0.9), baseColorImage: beaverTextures().grass }, up: [0.8, 1] },
-      { material: { ...material("terrain-rock", [1, 1, 1], 0.92), baseColorImage: beaverTextures().rock } },
+      // Wet mud and stone down the creek's bed and banks.
+      { material: { ...material("terrain-mud", [1, 1, 1], 0.55), baseColorImage: t.mud }, height: [-3, -0.32] },
+      { material: { ...material("terrain-grass", [1, 1, 1], 0.9), baseColorImage: t.grass }, up: [0.8, 1] },
+      { material: { ...material("terrain-rock", [1, 1, 1], 0.92), baseColorImage: t.rock } },
     ],
     tile: 6,
     parent: "beaver-map",
-    // Rock juts through the grass at the walls' feet, and the walls aren't streaked (B6).
     blend: { up: 0.12, height: 1, noise: 0.5, sharpness: 0.5 },
     triplanar: true,
     castShadows: true,
   };
+  // Water carves gullies down the walls; loose rock slumps to its angle of repose.
+  shaped = hydraulicErosion(shaped, { droplets: 14000, seed: 59, capacity: 5, erode: 0.35, deposit: 0.2, lifetime: 45 });
+  shaped = thermalErosion(shaped, { iterations: 12, talus: 52, rate: 0.4 });
+  // The play space as the cart has it, the walls' first metre eased back into it.
+  const eroded = shaped.heights;
+  const out = new Float32Array(samples * samples);
+  for (let j = 0; j < samples; j += 1) {
+    for (let i = 0; i < samples; i += 1) {
+      const x = x0 + i * step, z = z0 + j * step;
+      const d = outside(x, z);
+      const k = j * samples + i;
+      const w = d <= 0 ? 0 : Math.min(1, d / 1.2);
+      out[k] = heights[k]! + (eroded[k]! - heights[k]!) * w;
+    }
+  }
+  terrain = { ...shaped, heights: out };
   return terrain;
 }
 
@@ -306,11 +572,15 @@ function sandstoneSurface(x: number, y: number): Surf {
   return { r: clampByte(168 * v), g: clampByte(146 * v), b: clampByte(118 * v), h: strata * 0.6 + grain * 0.4, rough: 0.92, metal: 0, emis: 0 };
 }
 
-let textures: { grass: EncodedImage; rock: EncodedImage } | null = null;
+let textures: { grass: EncodedImage; rock: EncodedImage; mud: EncodedImage } | null = null;
 
-/** The canyon's two terrain textures, baked once on first use (albedo only: 128² each). */
-function beaverTextures(): { grass: EncodedImage; rock: EncodedImage } {
-  textures ??= { grass: bakeLandscape(grassSurface, 1, 128).albedo, rock: bakeLandscape(sandstoneSurface, 1, 128).albedo };
+/** The canyon's terrain textures, baked once on first use (albedo only: 128² each; the mud from P1c's generator). */
+function beaverTextures(): { grass: EncodedImage; rock: EncodedImage; mud: EncodedImage } {
+  textures ??= {
+    grass: bakeLandscape(grassSurface, 1, 128).albedo,
+    rock: bakeLandscape(sandstoneSurface, 1, 128).albedo,
+    mud: generateTextures({ kind: "mud", seed: 13, scale: 2, tint: [0.92, 0.88, 0.8], size: 128 }).albedo,
+  };
   return textures;
 }
 
@@ -340,7 +610,7 @@ function scatter(seed: number, count: number, ok: (x: number, z: number, y: numb
     // Flat enough: the ground a pace either side within 0.3 m.
     const flat = [[0.6, 0], [-0.6, 0], [0, 0.6], [0, -0.6]].every(([dx, dz]) => Math.abs((groundHeight(g, x + dx!, z + dz!) ?? y) - y) < 0.3);
     if (!flat) continue;
-    out.push({ x: x - g.x0, z: z - g.z0, yaw, scale: size });
+    out.push({ x: x - CANYON.x0, z: z - CANYON.z0, yaw, scale: size });
   }
   return out;
 }
@@ -354,22 +624,30 @@ function scatter(seed: number, count: number, ok: (x: number, z: number, y: numb
  */
 export function beaverFoliage(): { layer: FoliageLayer; mesh: MeshAsset }[] {
   const terrainId = "beaver-canyon";
-  const preset = (kind: Parameters<typeof foliagePreset>[0]) => foliagePreset(kind);
-  const grass = preset("grass");
-  const reeds = preset("reeds");
-  const broadleaf = preset("broadleaf");
-  const pine = preset("pine");
-  const boulder = preset("boulder");
-  const g = BEAVER_GROUND;
-  const size = g.step * (g.n - 1);
-  const rim: [number, number] = [10.5, 14];
+  const grass = foliagePreset("grassCards");
+  const reeds = foliagePreset("reeds");
+  const broadleaf = foliagePreset("broadleaf");
+  const pine = foliagePreset("pine");
+  const boulder = foliagePreset("boulder");
+  const cliff = foliagePreset("cliffRocks");
+  const half = CANYON.size / 2;
+  // The rims (P4's fill rules): trees on the level ground above the walls, drawn as impostors past 32 m.
+  const rim: [number, number] = [12.5, 30];
   return [
-    { mesh: grass.mesh, layer: { id: "beaver-grass", name: "Meadow grass", terrain: terrainId, ...grass.settings, cull: 45, copies: scatter(31, 2600, (_x, _z, y) => y > -0.1 && y < 3.2, [0.7, 1.3]) } },
+    { mesh: grass.mesh, layer: { id: "beaver-grass", name: "Meadow grass", terrain: terrainId, ...grass.settings, scale: [0.6, 1.1], cull: 45, copies: scatter(31, 3200, (_x, _z, y) => y > -0.1 && y < 3.2, [0.6, 1.1]) } },
     { mesh: reeds.mesh, layer: { id: "beaver-reeds", name: "Reeds", terrain: terrainId, ...reeds.settings, copies: scatter(37, 4200, (x, z, y) => Math.abs(x) > 4.6 && Math.abs(x) < 6.2 && Math.abs(z) < 11 && y < 0.2, [0.8, 1.3]) } },
-    { mesh: broadleaf.mesh, layer: { id: "beaver-trees", name: "Broadleaf trees", terrain: terrainId, ...broadleaf.settings, density: 1.2, copies: [], fill: { seed: 41, up: [0.9, 1], height: rim, clear: [size / 2, size / 2, 17] } } },
-    { mesh: pine.mesh, layer: { id: "beaver-pines", name: "Pines", terrain: terrainId, ...pine.settings, density: 0.8, copies: [], fill: { seed: 43, up: [0.9, 1], height: rim, clear: [size / 2, size / 2, 17] } } },
-    { mesh: boulder.mesh, layer: { id: "beaver-boulders", name: "Boulders", terrain: terrainId, ...boulder.settings, density: 1.5, copies: [], fill: { seed: 47, up: [0.3, 0.85], height: [4, 13] } } },
+    { mesh: broadleaf.mesh, layer: { id: "beaver-trees", name: "Broadleaf trees", terrain: terrainId, ...broadleaf.settings, density: 1.4, copies: [], fill: { seed: 41, up: [0.88, 1], height: rim, clear: [half, half, 17], patches: { scale: 22, cover: 0.65 } }, ...impostorOf(broadleaf.mesh) } },
+    { mesh: pine.mesh, layer: { id: "beaver-pines", name: "Pines", terrain: terrainId, ...pine.settings, density: 1, copies: [], fill: { seed: 43, up: [0.85, 1], height: rim, clear: [half, half, 17], patches: { scale: 18, cover: 0.55 } }, ...impostorOf(pine.mesh) } },
+    { mesh: boulder.mesh, layer: { id: "beaver-boulders", name: "Boulders", terrain: terrainId, ...boulder.settings, density: 1.2, copies: [], fill: { seed: 47, up: [0.55, 0.9], height: [3.5, 16] } } },
+    // Rock breaking out of the walls (P4's cliff rocks), on the steep faces only.
+    { mesh: cliff.mesh, layer: { id: "beaver-cliff-rocks", name: "Cliff rocks", terrain: terrainId, ...cliff.settings, density: 3, copies: [], fill: { seed: 53, up: [0.08, 0.8], height: [3.4, 24] } } },
   ];
+}
+
+/** A tree's impostor (P4): two crossed cards baked from it, drawn in its place past 32 m. */
+function impostorOf(mesh: MeshAsset): { impostor?: { distance: number; mesh: string } } {
+  const baked = bakeImpostor(mesh);
+  return baked ? { impostor: { distance: 32, mesh: serializeMeshAsset(baked.mesh) } } : {};
 }
 
 /** The plants as the sidecar stores them. */
@@ -386,7 +664,8 @@ export function beaverMapLayout(): LightmapLayout {
   return layout;
 }
 
-const BAKE = { rays: 64, distance: 9, sun: LOCKOUT_KEY_DIRECTION, bounce: 0.9, contrast: 1.2 };
+// Two bounces (P6): the shade under the arch and in the bases fills with light off the grass and stone.
+const BAKE = { rays: 64, distance: 9, sun: LOCKOUT_KEY_DIRECTION, bounce: 0.9, contrast: 1.2, bounces: 2 };
 
 /** The canyon's terrain as an occluder: its walls shade the bases. */
 const occluders = () => [
@@ -424,7 +703,12 @@ export function beaverCenter(): ArenaPoint {
 /** Daylight down a green canyon: Lockout's sun and sky, its own probes, no arena lamps. */
 export const BEAVER_LIGHTING: SceneLighting = {
   ...LOCKOUT_LIGHTING,
-  lights: LOCKOUT_LIGHTING.lights.filter((l) => l.kind === "directional"),
+  lights: [
+    ...LOCKOUT_LIGHTING.lights.filter((l) => l.kind === "directional"),
+    // A warm lamp under each base's roof, so the ground floor reads in the shade (P9).
+    { kind: "point", position: [-25, 2.9, 0], color: [1, 0.88, 0.72], intensity: 3.2, range: 10 },
+    { kind: "point", position: [25, 2.9, 0], color: [1, 0.88, 0.72], intensity: 3.2, range: 10 },
+  ],
   fog: { color: [0.72, 0.82, 0.92], density: 0.008, start: 24, max: 0.28, glow: { color: [1, 0.92, 0.78], strength: 0.25 } },
   // Daylight in a canyon (B7): soft sun shadows, and a breeze down the creek for its plants (B6).
   softShadows: true,
@@ -434,6 +718,13 @@ export const BEAVER_LIGHTING: SceneLighting = {
     { name: "red base", position: [25, 1.6, 0], min: [19, 0, -6], max: [31, 3.4, 6] },
     { name: "canyon", position: [0, 4, 0], min: [-34, -2, -17], max: [34, 14, 17] },
   ],
+  // P6: inside a base the view cools and steadies (a post volume each), and the eye adapts stepping in and out.
+  postVolumes: [
+    { id: "blue-base", name: "Blue base", center: [-25, 1.7, 0], size: [11.5, 3.4, 11.5], blend: 1.5, exposure: 0.9, saturation: 0.92, contrast: 1.04 },
+    { id: "red-base", name: "Red base", center: [25, 1.7, 0], size: [11.5, 3.4, 11.5], blend: 1.5, exposure: 0.9, saturation: 0.92, contrast: 1.04 },
+    { id: "creek", name: "Under the arch", center: [0, 0.6, 0], size: [9, 2.6, 3], blend: 2, saturation: 1.08 },
+  ],
+  autoExposure: { min: -0.5, max: 1.5, up: 1.4, down: 3, key: 0.2 },
 };
 
 /** The intro: down the creek from the north ledge, over the arch, to blue's base. */
@@ -494,6 +785,8 @@ export const BEAVER_SCENE: ArenaScene = {
     decalMarks: [],
     foliage: beaverFoliageStored(),
     audio: LOCKOUT_AUDIO,
+    materials: beaverMaterials().library,
+    splines: [BEAVER_CREEK_SPLINE],
   }),
 };
 

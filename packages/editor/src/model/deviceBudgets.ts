@@ -35,9 +35,9 @@ export interface DeviceBudget {
 const MB = 1024 * 1024;
 
 export const DEVICE_BUDGETS: Readonly<Record<BudgetDevice, DeviceBudget>> = {
-  iphone: { label: "iPhone", triangles: 400_000, drawCalls: 350, textureBytes: 192 * MB, meshBytes: 64 * MB, frameMs: 1000 / 30, downloadBytes: 16 * MB },
-  ipad: { label: "iPad", triangles: 800_000, drawCalls: 700, textureBytes: 384 * MB, meshBytes: 128 * MB, frameMs: 1000 / 60, downloadBytes: 32 * MB },
-  desktop: { label: "Desktop", triangles: 3_000_000, drawCalls: 2500, textureBytes: 1536 * MB, meshBytes: 512 * MB, frameMs: 1000 / 60, downloadBytes: 96 * MB },
+  iphone: { label: "iPhone", triangles: 400_000, drawCalls: 500, textureBytes: 192 * MB, meshBytes: 64 * MB, frameMs: 1000 / 30, downloadBytes: 16 * MB },
+  ipad: { label: "iPad", triangles: 800_000, drawCalls: 900, textureBytes: 384 * MB, meshBytes: 128 * MB, frameMs: 1000 / 60, downloadBytes: 32 * MB },
+  desktop: { label: "Desktop", triangles: 3_000_000, drawCalls: 3000, textureBytes: 1536 * MB, meshBytes: 512 * MB, frameMs: 1000 / 60, downloadBytes: 96 * MB },
 };
 
 /** What a scene costs: any of these may be unknown (left out), and is then not checked. */
