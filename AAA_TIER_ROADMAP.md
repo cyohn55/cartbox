@@ -1,7 +1,16 @@
 # AAA Tier Roadmap — photoreal + fantasy console, one web editor
 
 **Status:** living document. Update the checkboxes and "Status" lines as phases land.
-**Owner:** engine/editor team. **Last updated:** 2026-09-20.
+**Owner:** engine/editor team. **Last updated:** 2026-10-18.
+
+> **Superseded for graphics by `AAA_FIDELITY_ROADMAP.md`** (October 2026). That
+> roadmap audits the renderer as it stands and plans the path to current-gen
+> fidelity: a GPU-resident linear HDR frame, then textures, shadows, GI,
+> temporal image quality, atmosphere, geometry at scale, characters, VFX and the
+> asset pipeline. This file's open items are tracked there: the tier on the
+> dedicated Modern core (F0d; the core itself landed as ENGINE_PARITY EP20b),
+> the true HDR environment (F3a), sRGB-linear colour (F0b), mipmaps (F1a) and
+> streaming (F6d).
 
 ## The vision
 
@@ -187,8 +196,9 @@ a GPU-side shadow depth pass, and cascades remain.
       memory region (a separate design). Verified with
       `meshRasterizerLights.test.ts`, `packLights` packing tests, and a tolerant
       device parity case.
-- [ ] **Tiled / clustered light binning** — a perf optimisation for *hundreds* of
-      lights (the forward loop above already lifts the cap functionally). Deferred.
+- [x] **Tiled / clustered light binning** — 16×9×24 clusters built on the CPU
+      (`lightClusters.ts`), at most 64 lights a cell. GPU clustering is
+      `AAA_FIDELITY_ROADMAP.md` F0e.
 
 **Status:** Phase 4's capabilities are complete on both backends — HDR ACES tone
 mapping + exposure, SSAO, and unbounded multi-light forward shading. Remaining
@@ -196,8 +206,11 @@ are refinements/perf: full sRGB-linear + true-HDR colour, SSAO noise/blur, and
 tiled/clustered light binning.
 
 ### Phase 5 — "Runs well on the web" asset pipeline
-- [ ] glTF import with Draco / meshopt geometry compression
-- [ ] KTX2 / Basis texture compression + mipmaps
+- [x] glTF import with Draco / meshopt geometry compression (decoded on
+      import, `gltfCompression.ts`)
+- [ ] KTX2 / Basis texture compression + mipmaps — KTX2 is encoded on import
+      and transcoded to RGBA on load, one mip; native GPU formats and mip chains
+      are `AAA_FIDELITY_ROADMAP.md` F1a
 - [x] **Frustum culling** — `cullInstances` drops instances whose world AABB is
       entirely outside the camera frustum (Gribb–Hartmann planes from the
       view-projection, positive-vertex AABB test). Output-identical, so it is a
@@ -214,8 +227,8 @@ tiled/clustered light binning.
       geometry): a footprint over any background pixel or any surface at/behind
       the instance is kept. Opt-in via `SceneDraw.occlude` (it costs the pre-pass);
       runs last, on the post-cull set. Verified with `meshRasterizerOcclusion.test.ts`.
-- [ ] GPU instancing — batch repeated-mesh draws (WebGPU-only; a uniform-binding
-      refactor, validated in-browser). Deferred.
+- [x] GPU instancing — copies sharing a primitive and textures draw as one
+      `drawIndexed` on WebGPU (storage-buffer transforms), 64 a draw on WebGL2.
 - [ ] Streaming for large scenes
 
 ### Phase 6 — 3D authoring UX (largest scope)
