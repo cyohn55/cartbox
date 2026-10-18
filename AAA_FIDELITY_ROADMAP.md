@@ -106,12 +106,29 @@ These shape the designs below and should not be rediscovered mid-phase.
 
 Everything else depends on this track. It contains no visible "feature", but its exit criterion is visible: Lockout and Beaver Creek render at native resolution and look *better* with no new content, because linear lighting and correct blending alone change the image.
 
-- [ ] **F0a. Present from the GPU.**
+- [x] **F0a. Present from the GPU.**
   - On the `aaa` tier, the scene renders to the canvas through the WebGPU swapchain, with no readback.
   - The cart's 2D framebuffer becomes a texture composited on the GPU (the HUD and the TIC-80 layer), keyed exactly as `MeshOverlaySurface` keys it today.
   - The sky dome, sun shafts and vista backdrop move from CPU painting to GPU passes.
   - The overlay decorator chain (lighting layer, post-FX stack) gains a GPU-texture path, so a decorator consumes a texture rather than bytes.
   - *Exit:* zero `mapAsync` per frame on `aaa`, and the 1–2-frame overlay lag gone.
+  - **F0a: done.** The `aaa` tier (a model of its own, WebGPU-only; without WebGPU it plays as Modern) presents its 3D frame from the GPU. The frame never comes back to the CPU.
+    - **The scene and the held weapon.** Both renderers draw into textures (`renderToTexture`) instead of reading back.
+    - **The presenter** (`render/gpuPresent.ts`, on the renderer's own device) runs the CPU's per-frame work as GPU passes:
+      - the sky dome, its sun's glow and drifting clouds, a ray a pixel;
+      - the sun shafts' mask and gather;
+      - the composite: scene over base, shafts, weapon, the cart's frame keyed on top as a HUD, then the holo UI as a premultiplied layer;
+      - the eye-adaptation luminance and the sun's visibility, reduced in one compute workgroup. That reduction is the only readback left: sixteen bytes, asynchronously.
+    - **The post stack moved too.** It was pulled forward from F4e, because sampling a WebGPU canvas from the WebGL1 post pass is a fragile cross-API copy every frame. `fx/gpuPostFx.ts` is the WebGL pass and its dual-Kawase bloom pyramid in WGSL, effect for effect.
+    - **On the page.** A GPU-presented page creates no WebGL context at all. Lockout and Beaver Creek can be tried on the path with `/lockout?present=gpu`; the `gpuPresent` player option opts any mesh scene in.
+    - *Tests:*
+      - `gpu-present.test.ts` (Dawn): the kept texture is the readback byte for byte; the sky matches the CPU backdrop ray for ray (within 2 levels); the full composite with shafts, HUD and holo is within half a level of the byte path on average, and so are the measurements; the post stack runs in the presenter.
+      - `gpu-postfx.test.ts` (Chromium): the WGSL stack against the WebGL pass is within 1 level on Lockout's stack, and identical with every effect on.
+    - *Left for later:*
+      - The cart's frame and the holo layer are still CPU-drawn and uploaded each frame; F0e retires the uploads where nothing changed.
+      - The frame is still 8-bit and display-referred (F0b), at the model's 1080p (F0d).
+      - The path applies only with nothing CPU-drawn between the scene and the screen. 2D relighting, weather, the HD-2D world, sprite backdrops and foreground placements keep the byte path.
+      - This container's headless Chromium renders WebGPU to textures but doesn't display a WebGPU canvas. So the in-browser check here read the canvas's texture back through a test hook. Showing on a real screen still wants a look on a real device.
 - [ ] **F0b. Linear HDR colour.**
   - The scene target becomes `rgba16float`, and albedo and emissive textures are sampled as sRGB.
   - All lighting runs in linear space, and blending happens in linear HDR. One tone map sits at the end of the frame.
@@ -222,7 +239,7 @@ Everything else depends on this track. It contains no visible "feature", but its
   - Grading in log or ACEScct space, and LUTs applied in the right space.
   - **HDR display output** where the browser supports it (WebGPU canvas `toneMapping: "extended"`).
   - Bloom from the HDR buffer (an energy-conserving mip-chain bloom, with lens dirt), replacing the threshold on the clipped LDR read-back.
-- [ ] **F4e. Post on the GPU frame graph.** The WebGL1 single-pass post stack (`PostFxPass.ts`) becomes frame-graph passes at full precision. Every existing effect (CRT, dither, grain, aberration, flare and the rest) is kept, so the fantasy-tier looks still work on `aaa`.
+- [ ] **F4e. Post on the GPU frame graph.** (Partly ahead of time: F0a ported the stack to WGSL for GPU-presented frames; what remains is running it on the HDR frame graph of F0b/F0c.) The WebGL1 single-pass post stack (`PostFxPass.ts`) becomes frame-graph passes at full precision. Every existing effect (CRT, dither, grain, aberration, flare and the rest) is kept, so the fantasy-tier looks still work on `aaa`.
 
 ### F5. Atmosphere, weather and water
 

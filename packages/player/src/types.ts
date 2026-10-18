@@ -152,6 +152,15 @@ export interface PlayerOptions {
    */
   quality?: QualityChoice;
   /**
+   * Present the 3D frame from the GPU (AAA_FIDELITY_ROADMAP.md F0a), or not.
+   * Defaults to the model's `gpuPresent` render cap (the AAA tier). It applies
+   * only where it can: WebGPU, a mesh scene, and no CPU-drawn layers between
+   * the scene and the screen (2D lighting, weather, the HD-2D world, sprite
+   * backdrops or foreground placements); anywhere else the frame takes the
+   * byte path as before.
+   */
+  gpuPresent?: boolean;
+  /**
    * Control settings (aim inversion, look sensitivity, controller and keyboard
    * bindings, touch pad size/opacity). Change them live with
    * {@link PlayerHandle.setControlSettings}. Defaults: DEFAULT_CONTROL_SETTINGS.

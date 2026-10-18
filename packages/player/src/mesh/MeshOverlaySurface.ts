@@ -92,7 +92,8 @@ import { bounceLightsFor, bounceSignature, withCartSun, type CartSun } from "./d
 import type { DisplaySurface } from "../display.js";
 import type { ScreenSun } from "../fx/PostFxSurface.js";
 import type { PostVolumeFx } from "../fx/postVolumeFx.js";
-import { SoftwareSceneRenderer, type SceneRenderer } from "../render/sceneRenderer.js";
+import { SoftwareSceneRenderer, type GpuSceneDraw, type SceneRenderer } from "../render/sceneRenderer.js";
+import type { PresentFrame, PresentSky, PresentStats } from "../render/gpuPresent.js";
 import type { MailboxMeshCamera, MailboxMeshPose, WorldLight } from "../mailbox.js";
 import type { LocalShadowTile, LocalShadows, PostBlend, ShadowCascade, ShadowInput, SceneLight, SceneLighting, ToneMap, VistaLayer } from "@cartbox/editor";
 import type { MeshInstance, MeshScene, SceneVista } from "./meshScene.js";
@@ -167,6 +168,21 @@ export interface MeshOverlayOptions {
    * milliseconds a frame. The surface owns (and disposes) what it makes.
    */
   readonly createFrontRenderer?: () => Promise<SceneRenderer>;
+  /**
+   * Present the frame from the GPU (AAA_FIDELITY_ROADMAP.md F0a): when given,
+   * and the renderer can keep its frame on the GPU, the scene and the held
+   * weapon render to textures and this composites them with the sky, the sun
+   * shafts, the cart's frame and the holo UI straight to the screen, instead
+   * of reading the scene back and finishing the frame on the CPU. The inner
+   * surface is not blitted then: this is the base surface it would have shown.
+   */
+  readonly presenter?: GpuPresentTarget;
+}
+
+/** Where a GPU-presented frame goes (a {@link GpuCanvasSurface}): it composites and shows a frame, and reports what it measured. */
+export interface GpuPresentTarget {
+  present(frame: PresentFrame): void;
+  readonly stats: PresentStats;
 }
 
 /** Loads a KTX2 → RGBA decoder (see {@link MeshOverlayOptions.ktx2}). */
@@ -408,7 +424,11 @@ export class MeshOverlaySurface implements DisplaySurface {
   /** Each object's world matrix as last drawn (null = hidden), or null when nothing moved. */
   private lastPlacement: (Mat4 | null)[] | null = null;
   /** Draws the cart's shown holo UI documents over the finished frame (I12; set by the player). */
-  private holo: ((out: Uint8ClampedArray, width: number, height: number, time: number) => void) | null = null;
+  private holo: ((out: Uint8ClampedArray, width: number, height: number, time: number, premultiplied?: boolean) => boolean | void) | null = null;
+  /** The holo UI's own layer on a GPU-presented frame (premultiplied, cleared each frame). */
+  private holoLayer: Uint8ClampedArray | null = null;
+  /** The presenter's measurements last taken in: luminance's reading, and the frame eye adaptation last stepped on. */
+  private gpuSeen = { luminanceSeq: 0, adaptedAt: 0 };
   /** Which objects drew on the front layer last frame (where their trails go). */
   private lastFront: boolean[] = [];
   /** Swing trails (I10): the objects whose meshes leave them, and the ribbons they've swept. */
@@ -604,7 +624,7 @@ export class MeshOverlaySurface implements DisplaySurface {
   }
 
   /** Draw holo UI documents over every frame with `draw` (null: none). */
-  setHolo(draw: ((out: Uint8ClampedArray, width: number, height: number, time: number) => void) | null): void {
+  setHolo(draw: ((out: Uint8ClampedArray, width: number, height: number, time: number, premultiplied?: boolean) => boolean | void) | null): void {
     this.holo = draw;
   }
 
@@ -939,10 +959,14 @@ export class MeshOverlaySurface implements DisplaySurface {
   blit(rgba: Uint8Array): void {
     const started = performance.now();
     const profiler = this.profiler;
+    // A GPU-presented frame (F0a) composites on the GPU: nothing to copy here.
+    const gpu = this.gpuTarget();
     // Default (third-person): copy the cart frame in, then composite the meshes on
     // top (background null shows the cart where no mesh drew). HUD mode inverts it:
     // render the 3D over an opaque sky, then lay the cart's 2D frame on top as a HUD.
-    if (this.hud) {
+    if (gpu) {
+      // The cart's frame is uploaded as it is, below.
+    } else if (this.hud) {
       if (!this.hudFrame) this.hudFrame = new Uint8ClampedArray(this.width * this.height * 4);
       this.hudFrame.set(rgba);
     } else {
@@ -1001,7 +1025,7 @@ export class MeshOverlaySurface implements DisplaySurface {
     // composite the meshes over it (background null) — backend-agnostic, since
     // both renderers leave untouched pixels alone.
     const skyBackdrop = this.hud && this.skyMap !== null;
-    if (skyBackdrop) this.paintSky(out, width, height, camera.view, camera.projection, target ? 1 : (this.quality.skyScale ?? SKY_BACKDROP_SCALE), lighting?.sky ? skySun(lighting.sky) : null);
+    if (skyBackdrop && !gpu) this.paintSky(out, width, height, camera.view, camera.projection, target ? 1 : (this.quality.skyScale ?? SKY_BACKDROP_SCALE), lighting?.sky ? skySun(lighting.sky) : null);
     if (profiler) {
       const now = performance.now();
       profiler.add("sky", now - mark);
@@ -1041,6 +1065,24 @@ export class MeshOverlaySurface implements DisplaySurface {
     }
     // Anti-aliasing (I1): the model's cap and the graphics quality must both allow it.
     const antialias = this.options.antialias === true && this.quality.antialias === true;
+    if (gpu) {
+      this.presentOnGpu(gpu, rgba, {
+        drawn,
+        frontDrawn,
+        camera,
+        skyBackdrop,
+        lighting,
+        post,
+        tonemap,
+        lights,
+        local: local?.shadows ?? null,
+        shadow,
+        antialias,
+      });
+      if (profiler) profiler.add("scene", performance.now() - mark);
+      this.frame += 1;
+      return;
+    }
     this.renderer.render(drawn, {
       width,
       height,
@@ -1095,16 +1137,7 @@ export class MeshOverlaySurface implements DisplaySurface {
     // buffer, so it sits over everything and never clips into a wall. It is a
     // handful of triangles, so the software rasteriser draws it on any backend.
     if (frontDrawn.length > 0) {
-      if (!this.frontRequested && this.options.createFrontRenderer) {
-        this.frontRequested = true;
-        this.options
-          .createFrontRenderer()
-          .then((renderer) => {
-            if (this.destroyed || renderer.backend === "software") renderer.dispose();
-            else this.frontRenderer = renderer;
-          })
-          .catch(() => {});
-      }
+      this.requestFrontRenderer();
       const onGpu = this.frontRenderer.backend !== "software";
       this.frontRenderer.render(onGpu ? frontDrawn.map((i) => this.withoutRefraction(i)) : frontDrawn, {
         width,
@@ -1140,6 +1173,135 @@ export class MeshOverlaySurface implements DisplaySurface {
     this.frame += 1; // advance in lockstep with the run loop's present cadence
     this.inner.blit(this.presented);
     this.pace(performance.now() - started);
+  }
+
+  /** The GPU presenter this frame goes to, when there is one and the renderer can keep its frame on the GPU (F0a). */
+  private gpuTarget(): GpuPresentTarget | null {
+    const presenter = this.options.presenter;
+    return presenter && this.renderer.backend === "webgpu" && this.renderer.renderToTexture ? presenter : null;
+  }
+
+  /**
+   * Finish a frame on the GPU (AAA_FIDELITY_ROADMAP.md F0a): the scene and the
+   * held weapon render to textures, and the presenter composites them with the
+   * sky, its shafts, the cart's frame (beneath, or keyed on top as a HUD) and
+   * the holo UI. The lens flare's visibility and eye adaptation read what the
+   * presenter measured a frame or two ago, as the byte path measures the bytes.
+   */
+  private presentOnGpu(
+    gpu: GpuPresentTarget,
+    rgba: Uint8Array,
+    job: {
+      readonly drawn: readonly MeshSceneInstance[];
+      readonly frontDrawn: readonly MeshSceneInstance[];
+      readonly camera: { readonly view: Mat4; readonly projection: Mat4 };
+      readonly skyBackdrop: boolean;
+      readonly lighting: SceneLighting | null;
+      readonly post: PostBlend;
+      readonly tonemap: ToneMap | null;
+      readonly lights: readonly SceneLight[] | undefined;
+      readonly local: LocalShadows | null;
+      readonly shadow: ShadowInput | null;
+      readonly antialias: boolean;
+    },
+  ): void {
+    const { camera, lighting } = job;
+    const width = this.width;
+    const height = this.height;
+    const time = this.frame / 60;
+    const lit = lighting
+      ? {
+          ambient: lighting.ambient,
+          lightDirection: sceneLightingKeyDirection(lighting),
+          environment: this.environment,
+          tonemap: job.tonemap,
+          lights: job.lights,
+        }
+      : {};
+    const draw: GpuSceneDraw = {
+      width,
+      height,
+      view: camera.view,
+      projection: camera.projection,
+      lod: true,
+      antialias: job.antialias,
+      temporal: this.options.temporal === true && this.quality.temporal === true,
+      reflections: this.options.reflections === true && this.quality.reflections === true,
+      ...(lighting ? { ...lit, localShadows: job.local, shadow: job.shadow, fog: lighting.fog ?? null, wind: lighting.wind ?? null } : {}),
+      time,
+    };
+    const scene = this.renderer.renderToTexture!(job.drawn, draw) ?? null;
+    // The held weapon on its own GPU renderer, made the first time it shows (until then it isn't drawn).
+    let front: unknown = null;
+    if (job.frontDrawn.length > 0) {
+      this.requestFrontRenderer();
+      if (this.frontRenderer.renderToTexture) {
+        front = this.frontRenderer.renderToTexture(
+          job.frontDrawn.map((i) => this.withoutRefraction(i)),
+          { width, height, view: camera.view, projection: camera.projection, ...lit, time },
+        ) ?? null;
+      }
+    }
+    const sky: PresentSky | null =
+      job.skyBackdrop && this.skyMap
+        ? { map: this.skyMap, view: camera.view, projection: camera.projection, sun: lighting?.sky ? skySun(lighting.sky) : null, clouds: this.skyClouds, time }
+        : null;
+    const sun = sky && lighting?.sky ? sunScreenPosition(lighting.sky.sunDirection, camera.view, camera.projection, width, height) : null;
+    let holo: Uint8ClampedArray | null = null;
+    if (this.holo) {
+      if (this.holoLayer?.length !== width * height * 4) this.holoLayer = new Uint8ClampedArray(width * height * 4);
+      this.holoLayer.fill(0);
+      // A draw that says it showed nothing (false) leaves the layer out.
+      if (this.holo(this.holoLayer, width, height, time, true) !== false) holo = this.holoLayer;
+    }
+    const adapting = Boolean(lighting?.autoExposure && job.tonemap);
+    const flare = this.onSun !== null && sky !== null;
+    gpu.present({
+      base: sky ? { kind: "sky", sky } : this.hud ? { kind: "colour", rgba: HUD_SKY } : { kind: "frame", rgba },
+      scene,
+      shafts: sky && sun && lighting?.shafts && lighting.sky ? { sun, color: lighting.sky.sunColor, shafts: lighting.shafts } : null,
+      front,
+      hud: this.hud ? rgba : null,
+      hudKey: HUD_TRANSPARENT_SUM,
+      holo,
+      measure: adapting || flare ? { luminance: adapting, sun: flare ? sun : null } : null,
+    });
+    this.takeGpuMeasurements(gpu.stats, lighting, job.post, adapting, sky !== null, sun);
+  }
+
+  /** The presenter's newest measurements into the lens flare and eye adaptation (the byte path's reportSun and frameLuminance). */
+  private takeGpuMeasurements(stats: PresentStats, lighting: SceneLighting | null, post: PostBlend, adapting: boolean, sky: boolean, sun: { x: number; y: number } | null): void {
+    if (this.onSun) {
+      if (!sky) {
+        this.sunSeen = 0;
+        this.onSun(null);
+      } else {
+        const target = sun ? (stats.sunVisible ?? 0) : 0;
+        if (sun) this.sunAt = { x: sun.x / this.width, y: sun.y / this.height };
+        this.sunSeen += (target - this.sunSeen) * SUN_EASE;
+        if (this.sunSeen < 1e-3) this.sunSeen = 0;
+        this.onSun({ x: this.sunAt.x, y: this.sunAt.y, visible: this.sunSeen });
+      }
+    }
+    if (adapting && lighting?.autoExposure && stats.luminance !== null && stats.luminanceSeq !== this.gpuSeen.luminanceSeq) {
+      // Each new reading steps the adaptation by the frames since the last.
+      const frames = Math.max(1, this.frame - this.gpuSeen.adaptedAt);
+      this.adapted = adaptExposure(this.adapted, stats.luminance / 2 ** post.exposure, lighting.autoExposure, frames / 60);
+      this.gpuSeen = { luminanceSeq: stats.luminanceSeq, adaptedAt: this.frame };
+    }
+  }
+
+  /** Ask for the GPU front renderer once (see MeshOverlayOptions.createFrontRenderer). */
+  private requestFrontRenderer(): void {
+    if (this.frontRequested || !this.options.createFrontRenderer) return;
+    this.frontRequested = true;
+    this.options
+      .createFrontRenderer()
+      .then((renderer) => {
+        if (this.destroyed || renderer.backend === "software") renderer.dispose();
+        else this.frontRenderer = renderer;
+      })
+      .catch(() => {});
   }
 
   /** A front-layer instance as a GPU front renderer draws it: its mesh without refraction (the same instance when it has none). */

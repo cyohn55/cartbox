@@ -137,7 +137,20 @@ export {
   rasterStyleFor,
   webgpuCanHonour,
 } from "./render/renderCaps.js";
-export type { FrameState, SceneDraw, SceneRenderer } from "./render/sceneRenderer.js";
+export type { FrameState, GpuSceneDraw, SceneDraw, SceneRenderer } from "./render/sceneRenderer.js";
+// Presenting the 3D frame from the GPU (AAA_FIDELITY_ROADMAP.md F0a).
+export {
+  COMPOSE_UNIFORM_FLOATS,
+  GpuPresenter,
+  SKY_UNIFORM_FLOATS,
+  packComposeUniforms,
+  packMeasureUniforms,
+  packShaftUniforms,
+  packSkyUniforms,
+  shaftGrid,
+} from "./render/gpuPresent.js";
+export type { PresentBase, PresentFrame, PresentSky, PresentStats } from "./render/gpuPresent.js";
+export { GpuCanvasSurface } from "./render/GpuCanvasSurface.js";
 export { createSceneRenderer } from "./render/createSceneRenderer.js";
 export { WebgpuSceneRenderer } from "./render/WebgpuSceneRenderer.js";
 export { WEBGL_INSTANCES_PER_DRAW, WEBGL_MAX_LIGHTS, WebglSceneRenderer, type GlContextProvider } from "./render/WebglSceneRenderer.js";

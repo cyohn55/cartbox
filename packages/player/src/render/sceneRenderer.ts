@@ -146,6 +146,13 @@ export interface SceneDraw {
   readonly occlude?: boolean;
 }
 
+/**
+ * A frame drawn to stay on the GPU (AAA_FIDELITY_ROADMAP.md F0a): a
+ * {@link SceneDraw} without the CPU framebuffer, depth scratch or background,
+ * which the GPU compositor supplies instead.
+ */
+export type GpuSceneDraw = Omit<SceneDraw, "out" | "depth" | "background">;
+
 /** Draws placed 3D instances into a framebuffer. */
 
 /** Apply the scene-level selection passes a draw requests (LOD, cull, occlusion). */
@@ -196,6 +203,16 @@ export interface SceneRenderer {
   settle?(draw: SceneDraw): FrameState;
   /** False while a GPU renderer has no finished frame to show yet (just built); absent for one that always has. */
   readonly ready?: boolean;
+  /**
+   * WebGPU only (AAA_FIDELITY_ROADMAP.md F0a): draw the frame and leave it on
+   * the GPU, returning the texture that holds it — premultiplied RGBA8, alpha 0
+   * wherever nothing drew, as the readback would have composited — with no
+   * readback. Valid until the next render; null when the frame could not be
+   * drawn. Absent on the renderers that have no GPU texture to give.
+   */
+  renderToTexture?(instances: readonly MeshSceneInstance[], draw: GpuSceneDraw): unknown;
+  /** The GPU device a {@link renderToTexture} texture belongs to, so a compositor can share it. */
+  readonly gpuDevice?: unknown;
   dispose(): void;
   /** What the last frame drew, for the profiler (see debug/profiler.ts). */
   readonly lastFrameStats?: RenderStats;
@@ -289,6 +306,16 @@ export class CappedSceneRenderer implements SceneRenderer {
 
   get ready(): boolean | undefined {
     return this.inner.ready;
+  }
+
+  get gpuDevice(): unknown {
+    return this.inner.gpuDevice;
+  }
+
+  get renderToTexture(): SceneRenderer["renderToTexture"] {
+    const inner = this.inner;
+    if (!inner.renderToTexture) return undefined;
+    return (instances, draw) => inner.renderToTexture!(applyRenderCaps(instances, this.caps, this.cache), draw);
   }
 
   dispose(): void {

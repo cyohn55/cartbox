@@ -372,10 +372,10 @@ function writeAgents(block, agents) {
     const a = agents[i];
     const at = PHYS_AGENTS + 4 + i * PHYS_AGENT_BYTES;
     for (let k = 0; k < 3; k += 1) block.setInt32(at + k * 4, toFix(a.position[k]), true);
-    let f2 = a.facing;
-    while (f2 > Math.PI) f2 -= 2 * Math.PI;
-    while (f2 < -Math.PI) f2 += 2 * Math.PI;
-    const facing = Math.round(f2 * 1e4) & 65535;
+    let f3 = a.facing;
+    while (f3 > Math.PI) f3 -= 2 * Math.PI;
+    while (f3 < -Math.PI) f3 += 2 * Math.PI;
+    const facing = Math.round(f3 * 1e4) & 65535;
     block.setUint32(at + 12, (a.key & 1023 | (a.flags & 63) << 10 | facing << 16) >>> 0, true);
   }
 }
@@ -617,22 +617,22 @@ function uiSdkLua(docs, width, height, debugBlock) {
     const first = placed.findIndex((p) => FOCUSABLE.has(p.widget.kind)) + 1;
     const widgets = placed.map((p) => {
       const w = p.widget;
-      const f2 = [`k=${lua(w.kind)}`, `id=${lua(w.id)}`, `x=${p.x}`, `y=${p.y}`, `w=${p.w}`, `h=${p.h}`, `skip=${p.descendants}`];
-      if (w.text !== void 0) f2.push(`t=${lua(w.text)}`);
-      if (w.color !== void 0) f2.push(`c=${w.color}`);
-      if (w.fill !== void 0) f2.push(`f=${w.fill}`);
-      if (w.border !== void 0) f2.push(`b=${w.border}`);
-      if (w.focusFill !== void 0) f2.push(`ff=${w.focusFill}`);
-      if (w.focusColor !== void 0) f2.push(`fc=${w.focusColor}`);
-      f2.push(`s=${w.scale ?? 1}`);
-      if (w.small) f2.push("sm=true");
-      f2.push(`a=${w.align === "center" ? 1 : w.align === "right" ? 2 : 0}`);
-      if (w.value) f2.push(`v=${lua(w.value)}`);
-      if (w.visible) f2.push(`vis=${lua(w.visible)}`);
-      if (w.tint) f2.push(`tn=${lua(w.tint)}`);
-      if (w.row !== void 0) f2.push(`row=${w.row}`);
-      if (w.sprite !== void 0) f2.push(`sp=${w.sprite}`, `tw=${w.tiles?.[0] ?? 1}`, `th=${w.tiles?.[1] ?? 1}`);
-      return `{${f2.join(",")}}`;
+      const f3 = [`k=${lua(w.kind)}`, `id=${lua(w.id)}`, `x=${p.x}`, `y=${p.y}`, `w=${p.w}`, `h=${p.h}`, `skip=${p.descendants}`];
+      if (w.text !== void 0) f3.push(`t=${lua(w.text)}`);
+      if (w.color !== void 0) f3.push(`c=${w.color}`);
+      if (w.fill !== void 0) f3.push(`f=${w.fill}`);
+      if (w.border !== void 0) f3.push(`b=${w.border}`);
+      if (w.focusFill !== void 0) f3.push(`ff=${w.focusFill}`);
+      if (w.focusColor !== void 0) f3.push(`fc=${w.focusColor}`);
+      f3.push(`s=${w.scale ?? 1}`);
+      if (w.small) f3.push("sm=true");
+      f3.push(`a=${w.align === "center" ? 1 : w.align === "right" ? 2 : 0}`);
+      if (w.value) f3.push(`v=${lua(w.value)}`);
+      if (w.visible) f3.push(`vis=${lua(w.visible)}`);
+      if (w.tint) f3.push(`tn=${lua(w.tint)}`);
+      if (w.row !== void 0) f3.push(`row=${w.row}`);
+      if (w.sprite !== void 0) f3.push(`sp=${w.sprite}`, `tw=${w.tiles?.[0] ?? 1}`, `th=${w.tiles?.[1] ?? 1}`);
+      return `{${f3.join(",")}}`;
     });
     const links = placed.map((_, i) => {
       const n = nav.get(i);
@@ -7468,7 +7468,7 @@ function componentsSdkLua(scene) {
       const def = byName.get(a.name);
       if (!def) continue;
       const values = componentValues(def, a);
-      const objectFields = componentFields(def.code).filter((f2) => f2.type === "object").map((f2) => luaQuote(f2.name));
+      const objectFields = componentFields(def.code).filter((f3) => f3.type === "object").map((f3) => luaQuote(f3.name));
       const fields = Object.entries(values).map(([k, v]) => `[${luaQuote(k)}]=${luaValue(v)}`);
       const root = inst.pooled ? inst.pooled.root : -1;
       const at = [12, 13, 14].map((k) => +(inst.model[k] ?? 0).toFixed(4));
@@ -7970,7 +7970,7 @@ function parseMeshScene(raw) {
     let mesh = source?.mesh ?? null;
     let lod = source?.lod ?? null;
     if (!mesh && Array.isArray(prefabs)) {
-      const prefab = prefabs.find((f2) => f2 && f2.name === def.source && Array.isArray(f2.nodes));
+      const prefab = prefabs.find((f3) => f3 && f3.name === def.source && Array.isArray(f3.nodes));
       const root = prefab?.nodes?.find((n) => typeof n.parent !== "string" || !n.parent);
       const entry = root ? readEntry(root, "debris", null, true) : null;
       mesh = entry?.mesh ?? null;
@@ -8492,7 +8492,7 @@ var PhysicsSession = class {
     const castOptions = /* @__PURE__ */ new Map();
     for (const t of this.tracked) if (t.kind === "character") t.lastMove = [0, 0, 0];
     for (const cmd of commands) {
-      const [a, b, c, d, e, f2] = cmd.v;
+      const [a, b, c, d, e, f3] = cmd.v;
       if (cmd.op === PHYS_OP_CAST) {
         if (cmd.a >= 0 && cmd.a < PHYS_MAX_RAYS) {
           const ignore = Math.round(e) - 1;
@@ -8502,10 +8502,10 @@ var PhysicsSession = class {
       }
       if (cmd.op === PHYS_OP_RAY) {
         if (cmd.a >= 0 && cmd.a < PHYS_MAX_RAYS) {
-          const len = Math.hypot(d, e, f2);
+          const len = Math.hypot(d, e, f3);
           const options = castOptions.get(cmd.a) ?? { shape: null };
           castOptions.delete(cmd.a);
-          this.rayRequests[cmd.a] = len > 1e-9 ? { origin: [a, b, c], direction: [d / len, e / len, f2 / len], max: len, ...options } : null;
+          this.rayRequests[cmd.a] = len > 1e-9 ? { origin: [a, b, c], direction: [d / len, e / len, f3 / len], max: len, ...options } : null;
         }
         continue;
       }
@@ -9709,12 +9709,12 @@ var AgentCrowd = class {
   /** Stand a point on the floor beneath it (or the nearest floor), unchanged when there's none. */
   settle(pos) {
     const g = this.graph;
-    let f2 = g.floorAt(pos[0], pos[1] + 0.25, pos[2]);
-    if (f2 < 0) f2 = g.nearest(pos[0], pos[1], pos[2], 2);
-    if (f2 < 0) return [...pos];
-    const fy = g.mesh.heights[f2];
-    if (g.floorAt(pos[0], pos[1] + 0.25, pos[2]) === f2) return [pos[0], fy, pos[2]];
-    return g.position(f2);
+    let f3 = g.floorAt(pos[0], pos[1] + 0.25, pos[2]);
+    if (f3 < 0) f3 = g.nearest(pos[0], pos[1], pos[2], 2);
+    if (f3 < 0) return [...pos];
+    const fy = g.mesh.heights[f3];
+    if (g.floorAt(pos[0], pos[1] + 0.25, pos[2]) === f3) return [pos[0], fy, pos[2]];
+    return g.position(f3);
   }
   /** Advance every agent by `dt` seconds. */
   step(dt) {
@@ -9815,9 +9815,9 @@ var AgentCrowd = class {
   move(a, dx, dz, dt, climb) {
     const g = this.graph;
     const tryTo = (x, z) => {
-      const f2 = g.floorAt(x, a.pos[1], z, climb);
-      if (f2 >= 0 && a.pos[1] - g.mesh.heights[f2] <= climb) {
-        a.pos = [x, a.air ? a.pos[1] : g.mesh.heights[f2], z];
+      const f3 = g.floorAt(x, a.pos[1], z, climb);
+      if (f3 >= 0 && a.pos[1] - g.mesh.heights[f3] <= climb) {
+        a.pos = [x, a.air ? a.pos[1] : g.mesh.heights[f3], z];
         return true;
       }
       if (a.drops[a.corner]) {
@@ -10620,9 +10620,9 @@ function buildClipTable(anim) {
       name: clip.name,
       total,
       once,
-      tile: frames.map((f2) => f2.tile),
-      w: frames.map((f2) => f2.w),
-      h: frames.map((f2) => f2.h),
+      tile: frames.map((f3) => f3.tile),
+      w: frames.map((f3) => f3.w),
+      h: frames.map((f3) => f3.h),
       cum
     });
   }
@@ -11556,6 +11556,14 @@ var CappedSceneRenderer = class {
   get ready() {
     return this.inner.ready;
   }
+  get gpuDevice() {
+    return this.inner.gpuDevice;
+  }
+  get renderToTexture() {
+    const inner = this.inner;
+    if (!inner.renderToTexture) return void 0;
+    return (instances, draw) => inner.renderToTexture(applyRenderCaps(instances, this.caps, this.cache), draw);
+  }
   dispose() {
     this.inner.dispose();
   }
@@ -11736,6 +11744,10 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
     this.lastPlacement = null;
     /** Draws the cart's shown holo UI documents over the finished frame (I12; set by the player). */
     this.holo = null;
+    /** The holo UI's own layer on a GPU-presented frame (premultiplied, cleared each frame). */
+    this.holoLayer = null;
+    /** The presenter's measurements last taken in: luminance's reading, and the frame eye adaptation last stepped on. */
+    this.gpuSeen = { luminanceSeq: 0, adaptedAt: 0 };
     /** Which objects drew on the front layer last frame (where their trails go). */
     this.lastFront = [];
     /** Swing trails (I10): the objects whose meshes leave them, and the ribbons they've swept. */
@@ -12056,7 +12068,7 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
     for (const [i, instance] of this.scene.instances.entries()) {
       const mesh = resolve(instance.mesh);
       const frames = instance.frames?.map(resolve);
-      const framesChanged = frames?.some((f2, k) => f2 !== instance.frames[k]) ?? false;
+      const framesChanged = frames?.some((f3, k) => f3 !== instance.frames[k]) ?? false;
       if (mesh === instance.mesh && !framesChanged) continue;
       if (mesh !== instance.mesh) {
         const { mesh: _decodedMesh, ...maps } = await texture(mesh);
@@ -12198,7 +12210,9 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
   blit(rgba) {
     const started = performance.now();
     const profiler = this.profiler;
-    if (this.hud) {
+    const gpu = this.gpuTarget();
+    if (gpu) {
+    } else if (this.hud) {
       if (!this.hudFrame) this.hudFrame = new Uint8ClampedArray(this.width * this.height * 4);
       this.hudFrame.set(rgba);
     } else {
@@ -12242,7 +12256,7 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
     const local = lighting?.shadows && this.quality.shadows && rig ? this.buildLocalShadows(rig, moved) : null;
     const lights = local ? local.lights : rig;
     const skyBackdrop = this.hud && this.skyMap !== null;
-    if (skyBackdrop) this.paintSky(out, width, height, camera.view, camera.projection, target ? 1 : this.quality.skyScale ?? SKY_BACKDROP_SCALE, lighting?.sky ? skySun(lighting.sky) : null);
+    if (skyBackdrop && !gpu) this.paintSky(out, width, height, camera.view, camera.projection, target ? 1 : this.quality.skyScale ?? SKY_BACKDROP_SCALE, lighting?.sky ? skySun(lighting.sky) : null);
     if (profiler) {
       const now = performance.now();
       profiler.add("sky", now - mark);
@@ -12278,6 +12292,24 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
       if (particles) drawn = [...drawn, particles];
     }
     const antialias = this.options.antialias === true && this.quality.antialias === true;
+    if (gpu) {
+      this.presentOnGpu(gpu, rgba, {
+        drawn,
+        frontDrawn,
+        camera,
+        skyBackdrop,
+        lighting,
+        post,
+        tonemap,
+        lights,
+        local: local?.shadows ?? null,
+        shadow,
+        antialias
+      });
+      if (profiler) profiler.add("scene", performance.now() - mark);
+      this.frame += 1;
+      return;
+    }
     this.renderer.render(drawn, {
       width,
       height,
@@ -12321,14 +12353,7 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
       }
     }
     if (frontDrawn.length > 0) {
-      if (!this.frontRequested && this.options.createFrontRenderer) {
-        this.frontRequested = true;
-        this.options.createFrontRenderer().then((renderer) => {
-          if (this.destroyed || renderer.backend === "software") renderer.dispose();
-          else this.frontRenderer = renderer;
-        }).catch(() => {
-        });
-      }
+      this.requestFrontRenderer();
       const onGpu = this.frontRenderer.backend !== "software";
       this.frontRenderer.render(onGpu ? frontDrawn.map((i) => this.withoutRefraction(i)) : frontDrawn, {
         width,
@@ -12359,6 +12384,105 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
     this.frame += 1;
     this.inner.blit(this.presented);
     this.pace(performance.now() - started);
+  }
+  /** The GPU presenter this frame goes to, when there is one and the renderer can keep its frame on the GPU (F0a). */
+  gpuTarget() {
+    const presenter = this.options.presenter;
+    return presenter && this.renderer.backend === "webgpu" && this.renderer.renderToTexture ? presenter : null;
+  }
+  /**
+   * Finish a frame on the GPU (AAA_FIDELITY_ROADMAP.md F0a): the scene and the
+   * held weapon render to textures, and the presenter composites them with the
+   * sky, its shafts, the cart's frame (beneath, or keyed on top as a HUD) and
+   * the holo UI. The lens flare's visibility and eye adaptation read what the
+   * presenter measured a frame or two ago, as the byte path measures the bytes.
+   */
+  presentOnGpu(gpu, rgba, job) {
+    const { camera, lighting } = job;
+    const width = this.width;
+    const height = this.height;
+    const time = this.frame / 60;
+    const lit = lighting ? {
+      ambient: lighting.ambient,
+      lightDirection: sceneLightingKeyDirection(lighting),
+      environment: this.environment,
+      tonemap: job.tonemap,
+      lights: job.lights
+    } : {};
+    const draw = {
+      width,
+      height,
+      view: camera.view,
+      projection: camera.projection,
+      lod: true,
+      antialias: job.antialias,
+      temporal: this.options.temporal === true && this.quality.temporal === true,
+      reflections: this.options.reflections === true && this.quality.reflections === true,
+      ...lighting ? { ...lit, localShadows: job.local, shadow: job.shadow, fog: lighting.fog ?? null, wind: lighting.wind ?? null } : {},
+      time
+    };
+    const scene = this.renderer.renderToTexture(job.drawn, draw) ?? null;
+    let front = null;
+    if (job.frontDrawn.length > 0) {
+      this.requestFrontRenderer();
+      if (this.frontRenderer.renderToTexture) {
+        front = this.frontRenderer.renderToTexture(
+          job.frontDrawn.map((i) => this.withoutRefraction(i)),
+          { width, height, view: camera.view, projection: camera.projection, ...lit, time }
+        ) ?? null;
+      }
+    }
+    const sky = job.skyBackdrop && this.skyMap ? { map: this.skyMap, view: camera.view, projection: camera.projection, sun: lighting?.sky ? skySun(lighting.sky) : null, clouds: this.skyClouds, time } : null;
+    const sun = sky && lighting?.sky ? sunScreenPosition(lighting.sky.sunDirection, camera.view, camera.projection, width, height) : null;
+    let holo = null;
+    if (this.holo) {
+      if (this.holoLayer?.length !== width * height * 4) this.holoLayer = new Uint8ClampedArray(width * height * 4);
+      this.holoLayer.fill(0);
+      if (this.holo(this.holoLayer, width, height, time, true) !== false) holo = this.holoLayer;
+    }
+    const adapting = Boolean(lighting?.autoExposure && job.tonemap);
+    const flare = this.onSun !== null && sky !== null;
+    gpu.present({
+      base: sky ? { kind: "sky", sky } : this.hud ? { kind: "colour", rgba: HUD_SKY } : { kind: "frame", rgba },
+      scene,
+      shafts: sky && sun && lighting?.shafts && lighting.sky ? { sun, color: lighting.sky.sunColor, shafts: lighting.shafts } : null,
+      front,
+      hud: this.hud ? rgba : null,
+      hudKey: HUD_TRANSPARENT_SUM,
+      holo,
+      measure: adapting || flare ? { luminance: adapting, sun: flare ? sun : null } : null
+    });
+    this.takeGpuMeasurements(gpu.stats, lighting, job.post, adapting, sky !== null, sun);
+  }
+  /** The presenter's newest measurements into the lens flare and eye adaptation (the byte path's reportSun and frameLuminance). */
+  takeGpuMeasurements(stats2, lighting, post, adapting, sky, sun) {
+    if (this.onSun) {
+      if (!sky) {
+        this.sunSeen = 0;
+        this.onSun(null);
+      } else {
+        const target = sun ? stats2.sunVisible ?? 0 : 0;
+        if (sun) this.sunAt = { x: sun.x / this.width, y: sun.y / this.height };
+        this.sunSeen += (target - this.sunSeen) * SUN_EASE;
+        if (this.sunSeen < 1e-3) this.sunSeen = 0;
+        this.onSun({ x: this.sunAt.x, y: this.sunAt.y, visible: this.sunSeen });
+      }
+    }
+    if (adapting && lighting?.autoExposure && stats2.luminance !== null && stats2.luminanceSeq !== this.gpuSeen.luminanceSeq) {
+      const frames = Math.max(1, this.frame - this.gpuSeen.adaptedAt);
+      this.adapted = adaptExposure(this.adapted, stats2.luminance / 2 ** post.exposure, lighting.autoExposure, frames / 60);
+      this.gpuSeen = { luminanceSeq: stats2.luminanceSeq, adaptedAt: this.frame };
+    }
+  }
+  /** Ask for the GPU front renderer once (see MeshOverlayOptions.createFrontRenderer). */
+  requestFrontRenderer() {
+    if (this.frontRequested || !this.options.createFrontRenderer) return;
+    this.frontRequested = true;
+    this.options.createFrontRenderer().then((renderer) => {
+      if (this.destroyed || renderer.backend === "software") renderer.dispose();
+      else this.frontRenderer = renderer;
+    }).catch(() => {
+    });
   }
   /** A front-layer instance as a GPU front renderer draws it: its mesh without refraction (the same instance when it has none). */
   withoutRefraction(instance) {
@@ -12675,16 +12799,16 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
   }
   /** Whether an instance is in reach of the eye: anything but a foliage block is; a block is within its cull distance. */
   foliageInReach(instance) {
-    const f2 = this.foliage.get(instance.mesh);
-    if (!f2 || !this.eye) return true;
+    const f3 = this.foliage.get(instance.mesh);
+    if (!f3 || !this.eye) return true;
     const m = instance.model;
-    const [x, y, z] = f2.center;
+    const [x, y, z] = f3.center;
     const cx = m[0] * x + m[4] * y + m[8] * z + m[12];
     const cy = m[1] * x + m[5] * y + m[9] * z + m[13];
     const cz = m[2] * x + m[6] * y + m[10] * z + m[14];
     const d = Math.hypot(cx - this.eye[0], cy - this.eye[1], cz - this.eye[2]);
-    if (f2.swap && d >= f2.swap.distance * this.quality.terrainDetail !== f2.swap.far) return false;
-    return d - f2.radius < f2.cull * this.quality.terrainDetail;
+    if (f3.swap && d >= f3.swap.distance * this.quality.terrainDetail !== f3.swap.far) return false;
+    return d - f3.radius < f3.cull * this.quality.terrainDetail;
   }
   /**
    * A terrain block at the detail its distance from the eye calls for: full
@@ -14169,10 +14293,10 @@ var TEMPORAL_SHARPEN = 0.25;
 var TEMPORAL_UNIFORM_FLOATS = 20;
 function halton(index, base) {
   let result = 0;
-  let f2 = 1;
+  let f3 = 1;
   for (let i = index; i > 0; i = Math.floor(i / base)) {
-    f2 /= base;
-    result += f2 * (i % base);
+    f3 /= base;
+    result += f3 * (i % base);
   }
   return result;
 }
@@ -18406,19 +18530,42 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
   get ready() {
     return this.latest !== null;
   }
+  get gpuDevice() {
+    return this.device;
+  }
+  /**
+   * Draw the frame and leave it on the GPU (AAA_FIDELITY_ROADMAP.md F0a): the
+   * same passes as {@link render}, ending in the colour texture instead of a
+   * readback, so there is no lag and nothing to composite on the CPU. The
+   * texture is premultiplied RGBA8 with alpha 0 where nothing drew, and holds
+   * this frame until the next render.
+   */
+  renderToTexture(instances, draw) {
+    if (this.destroyed) return null;
+    const visible = applyScenePasses(instances, draw);
+    try {
+      this.submit(visible, draw, false);
+    } catch {
+      return null;
+    }
+    return this.colourTexture;
+  }
   settle(draw) {
     if (this.destroyed) return "current";
     if (this.latest) compositeFrame(this.latest, draw);
     if (this.latestSeq >= this.submitted) return "current";
     return this.readSeq >= this.submitted ? "pending" : "stale";
   }
-  /** Encode and submit one frame, and start a readback if a buffer is free. */
-  submit(instances, draw) {
+  /** Encode and submit one frame, and start a readback if a buffer is free (or, with `readback` false, leave it in the colour texture). */
+  submit(instances, draw, readback = true) {
     const temporal = draw.temporal === true ? this.temporalState.begin(draw.view, draw.projection, this.width, this.height) : null;
     if (!temporal) this.temporalState.reset();
     const viewProj = multiplyMat46(temporal ? temporal.projection : draw.projection, draw.view);
     const { batches: draws, instanceCount } = batchInstances(instances, (mesh) => this.uploadMesh(mesh), cameraPositionFromView3(draw.view));
-    if (draws.length === 0) return;
+    if (draws.length === 0) {
+      if (!readback) this.clearColour();
+      return;
+    }
     this.ensureUniformCapacity(draws.length);
     this.ensureInstanceCapacity(instanceCount);
     const light = resolveLight(draw.lightDirection, draw.ambient);
@@ -18610,6 +18757,11 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     if (gbuffer) this.encodeReflections(encoder, gbuffer, temporal ? temporal.projection : draw.projection, msaa ? msaa.depth : this.depthTexture, msaa !== null);
     if (temporal) this.encodeTemporal(encoder, temporal.uniforms, msaa ? msaa.depth : this.depthTexture, msaa !== null);
     this.timer?.resolve(encoder);
+    if (!readback) {
+      this.device.queue.submit([encoder.finish()]);
+      this.timer?.read();
+      return;
+    }
     this.submitted += 1;
     const slot = this.readback.find((entry) => !entry.busy);
     if (slot) {
@@ -18625,6 +18777,15 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
       this.timer?.read();
       void this.drain(slot);
     }
+  }
+  /** Clear the colour texture to transparent black (a GPU-kept frame with nothing in it). */
+  clearColour() {
+    const encoder = this.device.createCommandEncoder();
+    const pass = encoder.beginRenderPass({
+      colorAttachments: [{ view: this.colourTexture.createView(), clearValue: { r: 0, g: 0, b: 0, a: 0 }, loadOp: "clear", storeOp: "store" }]
+    });
+    pass.end();
+    this.device.queue.submit([encoder.finish()]);
   }
   ensureReflectionTargets(multisampled) {
     const device = this.device;
@@ -19037,6 +19198,1199 @@ async function createSceneRenderer(width, height, caps, deviceProvider = getWebg
   return capsConstrainScene(caps) ? new CappedSceneRenderer(renderer, caps) : renderer;
 }
 
+// src/fx/gpuPostFx.ts
+var f2 = (n) => n.toFixed(4);
+var POST_UNIFORM_FLOATS = 18 * 4;
+function packPostUniforms(u, width, height, time, hasBloom, out = new Float32Array(POST_UNIFORM_FLOATS)) {
+  const rows = [
+    [width, height, time, hasBloom ? 1 : 0],
+    [u.brightness, u.contrast, u.saturation, u.toneMap],
+    [u.exposure, u.lut?.size ?? 2, u.lut ? u.lutStrength : 0, 0],
+    [u.fogColor[0], u.fogColor[1], u.fogColor[2], u.fogDensity],
+    [u.fogHorizon, u.bloomStrength, u.bloomThreshold, u.curvature],
+    [u.scanlines, u.aberration, u.vignette, u.posterize],
+    [u.ditherAmount, u.ditherScale, u.halftoneStrength, u.halftoneScale],
+    [u.halftoneAngle, u.godrayStrength, u.godrayDensity, u.godrayDecay],
+    [u.godrayOrigin[0], u.godrayOrigin[1], u.streakStrength, u.streakLength],
+    [u.flareGlare, u.flareGhosts, u.flareSize, u.flareVisible],
+    [u.flareColor[0], u.flareColor[1], u.flareColor[2], 0],
+    [u.flareOrigin[0], u.flareOrigin[1], 0, 0],
+    [u.splitStrength, u.splitBalance, 0, 0],
+    [u.splitShadows[0], u.splitShadows[1], u.splitShadows[2], 0],
+    [u.splitHighlights[0], u.splitHighlights[1], u.splitHighlights[2], 0],
+    [u.reflectionStrength, u.reflectionHorizon, u.reflectionFalloff, u.reflectionWobble],
+    [u.tiltStrength, u.tiltFocus, u.tiltRange, 0],
+    [u.kaleidoSegments, u.kaleidoAngle, u.grainAmount, u.grainSize]
+  ];
+  rows.forEach((row, i) => out.set(row, i * 4));
+  return out;
+}
+var FULLSCREEN_VS = (
+  /* wgsl */
+  `
+@vertex fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f {
+  let x = f32((i << 1u) & 2u);
+  let y = f32(i & 2u);
+  return vec4f(x * 2.0 - 1.0, 1.0 - y * 2.0, 0.0, 1.0);
+}
+`
+);
+var GHOST_TERMS2 = FLARE_GHOSTS.map(
+  (g) => `      flare = flare + vec3f(${f2(g.tint[0])}, ${f2(g.tint[1])}, ${f2(g.tint[2])}) * flareGhost(uv, ${f2(g.along)}, ${f2(g.radius)}, aspect);`
+).join("\n");
+var POST_WGSL = (
+  /* wgsl */
+  `
+struct Post {
+  size: vec4f,
+  grade: vec4f,
+  grade2: vec4f,
+  fog: vec4f,
+  fog2: vec4f,
+  screen: vec4f,
+  dither: vec4f,
+  half: vec4f,
+  godray: vec4f,
+  flare: vec4f,
+  flareColor: vec4f,
+  flareOrigin: vec4f,
+  split: vec4f,
+  splitShadows: vec4f,
+  splitHighlights: vec4f,
+  reflect: vec4f,
+  tilt: vec4f,
+  kaleido: vec4f,
+};
+@group(0) @binding(0) var<uniform> u: Post;
+@group(0) @binding(1) var source: texture_2d<f32>;
+@group(0) @binding(2) var nearestClamp: sampler;
+@group(0) @binding(3) var bloomTex: texture_2d<f32>;
+@group(0) @binding(4) var linearClamp: sampler;
+@group(0) @binding(5) var lut: texture_2d<f32>;
+${FULLSCREEN_VS}
+const TAU = 6.2831853;
+
+fn src(uv: vec2f) -> vec3f { return textureSampleLevel(source, nearestClamp, uv, 0.0).rgb; }
+fn luma(c: vec3f) -> f32 { return dot(c, vec3f(0.299, 0.587, 0.114)); }
+// GLSL's smoothstep as it evaluates, edges in either order.
+fn glslSmoothstep(e0: f32, e1: f32, x: f32) -> f32 {
+  let t = clamp((x - e0) / (e1 - e0), 0.0, 1.0);
+  return t * t * (3.0 - 2.0 * t);
+}
+// GLSL's mod: floored, so a negative angle wraps rather than mirrors.
+fn gmod(x: f32, y: f32) -> f32 { return x - y * floor(x / y); }
+fn brightPass(uv: vec2f) -> vec3f {
+  let c = src(uv);
+  return c * glslSmoothstep(u.fog2.z, 1.0, luma(c));
+}
+fn acesFilmic(x: vec3f) -> vec3f {
+  return clamp((x * (2.51 * x + 0.03)) / (x * (2.43 * x + 0.59) + 0.14), vec3f(0.0), vec3f(1.0));
+}
+fn bayer2(a: vec2f) -> f32 {
+  let b = floor(a);
+  return fract(b.x * 0.5 + b.y * b.y * 0.75);
+}
+fn bayer4(a: vec2f) -> f32 { return bayer2(a * 0.5) * 0.25 + bayer2(a); }
+fn bayer8(a: vec2f) -> f32 { return bayer4(a * 0.5) * 0.25 + bayer2(a); }
+fn flareGhost(uv: vec2f, along: f32, radius: f32, aspect: f32) -> f32 {
+  let centre = vec2f(0.5) + (u.flareOrigin.xy - vec2f(0.5)) * along;
+  let d = (centre - uv) * vec2f(aspect, 1.0);
+  return glslSmoothstep(radius, radius * 0.6, length(d)) * u.flare.y * ${FLARE_GHOST_GAIN.toFixed(4)};
+}
+fn hash12(p: vec2f) -> f32 { return fract(sin(dot(p, vec2f(12.9898, 78.233))) * 43758.5453); }
+
+@fragment fn post(@builtin(position) pos: vec4f) -> @location(0) vec4f {
+  let size = u.size.xy;
+  // Screen UV with a top-left origin, as the WebGL pass's vUv.
+  var folded = pos.xy / size;
+
+  if (u.kaleido.x >= 2.0) {
+    let offset = folded - 0.5;
+    let radius = length(offset);
+    let segment = TAU / u.kaleido.x;
+    var angle = gmod(atan2(offset.y, offset.x) + u.kaleido.y, segment);
+    angle = abs(angle - segment * 0.5);
+    folded = clamp(vec2f(cos(angle), sin(angle)) * radius + 0.5, vec2f(0.0), vec2f(1.0));
+  }
+
+  let centered = folded - 0.5;
+  let uv = folded + centered * dot(centered, centered) * u.fog2.w * 4.0;
+  if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) { return vec4f(0.0, 0.0, 0.0, 1.0); }
+
+  let fringe = centered * u.screen.y / size;
+  var color = vec3f(src(uv + fringe).r, src(uv).g, src(uv - fringe).b);
+
+  if (u.tilt.x > 0.0) {
+    let outside = abs(uv.y - u.tilt.y) - max(u.tilt.z, 0.0);
+    let blurAmount = clamp(outside / 0.35, 0.0, 1.0) * u.tilt.x;
+    if (blurAmount > 0.001) {
+      let radius = blurAmount * 6.0;
+      let texel = 1.0 / size;
+      var blurred = color;
+      var total = 1.0;
+      for (var i = 0; i < 10; i = i + 1) {
+        let a = f32(i) / 10.0 * TAU;
+        let dir = vec2f(cos(a), sin(a));
+        blurred = blurred + src(uv + dir * radius * texel);
+        blurred = blurred + src(uv + dir * (radius * 0.5) * texel);
+        total = total + 2.0;
+      }
+      color = mix(color, blurred / total, clamp(blurAmount, 0.0, 1.0));
+    }
+  }
+
+  if (u.reflect.x > 0.0) {
+    let below = uv.y - u.reflect.y;
+    if (below > 0.0) {
+      let ripple = sin(uv.x * 40.0 + u.size.z * 2.2) * u.reflect.w * 0.02 * below / max(u.reflect.z, 0.001);
+      let rUv = clamp(vec2f(uv.x + ripple, u.reflect.y - below), vec2f(0.0), vec2f(1.0));
+      let fade = u.reflect.x * clamp(1.0 - below / max(u.reflect.z, 0.001), 0.0, 1.0);
+      color = mix(color, src(rUv), fade);
+    }
+  }
+
+  if (u.fog2.y > 0.0) {
+    var glow = vec3f(0.0);
+    if (u.size.w > 0.5) {
+      glow = textureSampleLevel(bloomTex, linearClamp, uv, 0.0).rgb;
+    } else {
+      let texel = 1.0 / size;
+      for (var dy = -1; dy <= 1; dy = dy + 1) {
+        for (var dx = -1; dx <= 1; dx = dx + 1) {
+          var weight = 0.0625;
+          if (dx == 0 && dy == 0) { weight = 0.25; } else if (dx == 0 || dy == 0) { weight = 0.125; }
+          glow = glow + brightPass(uv + vec2f(f32(dx), f32(dy)) * texel) * weight;
+        }
+      }
+    }
+    color = color + glow * u.fog2.y;
+  }
+
+  if (u.half.y > 0.0) {
+    let marchStep = (uv - u.godray.xy) * u.half.z / 16.0;
+    var probe = uv;
+    var decay = 1.0;
+    var shafts = vec3f(0.0);
+    for (var i = 0; i < 16; i = i + 1) {
+      probe = probe - marchStep;
+      shafts = shafts + brightPass(clamp(probe, vec2f(0.0), vec2f(1.0))) * decay;
+      decay = decay * u.half.w;
+    }
+    color = color + shafts * (u.half.y / 16.0);
+  }
+
+  if (u.godray.z > 0.0) {
+    let reach = u.godray.w * 0.25;
+    var streak = vec3f(0.0);
+    var total = 0.0;
+    for (var i = 1; i <= 8; i = i + 1) {
+      let distance = f32(i) / 8.0;
+      let weight = 1.0 - distance;
+      let offset = vec2f(reach * distance, 0.0);
+      streak = streak + (brightPass(clamp(uv + offset, vec2f(0.0), vec2f(1.0))) + brightPass(clamp(uv - offset, vec2f(0.0), vec2f(1.0)))) * weight;
+      total = total + weight * 2.0;
+    }
+    color = color + streak * (u.godray.z / max(total, 1.0));
+  }
+
+  if ((u.flare.x > 0.0 || u.flare.y > 0.0) && u.flare.w > 0.0) {
+    let aspect = size.x / size.y;
+    let d = (uv - u.flareOrigin.xy) * vec2f(aspect, 1.0);
+    let r = length(d);
+    let fsize = max(0.01, u.flare.z);
+    let glow = exp(-(r * r) / (fsize * fsize));
+    let spikes = pow(abs(cos(atan2(d.y, d.x) * 3.0)), ${FLARE_SPIKE_POWER.toFixed(1)}) * exp(-r / (fsize * 2.5));
+    var flare = vec3f(u.flare.x * (glow + spikes * 0.6));
+    if (u.flare.y > 0.0) {
+${GHOST_TERMS2}
+    }
+    color = color + flare * min(u.flare.w, 1.0) * u.flareColor.rgb;
+  }
+
+  if (u.grade.w > 0.5) { color = acesFilmic(color * u.grade2.x); }
+
+  color = color * u.grade.x;
+  color = (color - 0.5) * u.grade.y + 0.5;
+  color = mix(vec3f(luma(color)), color, u.grade.z);
+
+  if (u.split.x > 0.0) {
+    let tone = glslSmoothstep(u.split.y - 0.25, u.split.y + 0.25, luma(color));
+    let tint = mix(u.splitShadows.rgb, u.splitHighlights.rgb, tone) * 2.0;
+    color = mix(color, color * tint, u.split.x);
+  }
+
+  if (u.grade2.z > 0.0) {
+    let c = clamp(color, vec3f(0.0), vec3f(1.0));
+    let n = u.grade2.y;
+    let slice = c.b * (n - 1.0);
+    let b0 = floor(slice);
+    let b1 = min(b0 + 1.0, n - 1.0);
+    let x = c.r * (n - 1.0) + 0.5;
+    let y = (c.g * (n - 1.0) + 0.5) / n;
+    let lo = textureSampleLevel(lut, linearClamp, vec2f((b0 * n + x) / (n * n), y), 0.0).rgb;
+    let hi = textureSampleLevel(lut, linearClamp, vec2f((b1 * n + x) / (n * n), y), 0.0).rgb;
+    color = mix(color, mix(lo, hi, slice - b0), u.grade2.z);
+  }
+
+  if (u.dither.x > 0.0 && u.screen.w >= 2.0) {
+    let cell = floor(uv * size / max(u.dither.y, 1.0));
+    color = color + (bayer8(cell) - 0.5) * (u.dither.x / u.screen.w);
+  }
+
+  if (u.screen.w >= 2.0) {
+    color = floor(color * u.screen.w) / (u.screen.w - 1.0);
+    color = min(color, vec3f(1.0));
+  }
+
+  if (u.dither.z > 0.0) {
+    let grid = uv * size / max(u.dither.w, 1.0);
+    let sinA = sin(u.half.x);
+    let cosA = cos(u.half.x);
+    let rotated = vec2f(grid.x * cosA - grid.y * sinA, grid.x * sinA + grid.y * cosA);
+    let radius = sqrt(clamp(luma(color), 0.0, 1.0)) * 0.7;
+    let ink = step(length(fract(rotated) - 0.5), radius);
+    color = mix(color, color * mix(0.15, 1.0, ink), u.dither.z);
+  }
+
+  let fogAmount = u.fog.w * (1.0 - glslSmoothstep(u.fog2.x - 0.35, u.fog2.x + 0.35, uv.y));
+  color = mix(color, u.fog.rgb, clamp(fogAmount, 0.0, 1.0));
+
+  let falloff = 1.0 - u.screen.z * glslSmoothstep(0.25, 0.75, dot(centered, centered) * 2.0);
+  color = color * falloff;
+
+  if (u.kaleido.z > 0.0) {
+    let grainCell = floor(uv * size / max(u.kaleido.w, 1.0));
+    color = color + (hash12(grainCell + fract(u.size.z) * 71.0) - 0.5) * u.kaleido.z;
+  }
+
+  let scan = 1.0 - u.screen.x * 0.25 * (1.0 + sin(uv.y * size.y * 3.14159));
+  color = color * scan;
+
+  return vec4f(clamp(color, vec3f(0.0), vec3f(1.0)), 1.0);
+}
+`
+);
+var BLOOM_HEAD = (
+  /* wgsl */
+  `
+struct Bloom {
+  texel: vec4f,
+  params: vec4f,
+};
+@group(0) @binding(0) var<uniform> b: Bloom;
+@group(0) @binding(1) var tex: texture_2d<f32>;
+@group(0) @binding(2) var linearClamp: sampler;
+${FULLSCREEN_VS}
+fn at(uv: vec2f) -> vec3f { return textureSampleLevel(tex, linearClamp, uv, 0.0).rgb; }
+`
+);
+var BLOOM_PREFILTER_WGSL = (
+  /* wgsl */
+  `
+${BLOOM_HEAD}
+fn prefilter(c: vec3f) -> vec3f {
+  let brightest = max(c.r, max(c.g, c.b));
+  let kneeWidth = max(b.params.y, 1e-4);
+  var soft = brightest - b.params.x + kneeWidth;
+  soft = clamp(soft, 0.0, 2.0 * kneeWidth);
+  soft = soft * soft / (4.0 * kneeWidth + 1e-4);
+  let contribution = max(soft, brightest - b.params.x) / max(brightest, 1e-4);
+  return c * max(contribution, 0.0);
+}
+@fragment fn prefilterPass(@builtin(position) pos: vec4f) -> @location(0) vec4f {
+  let uv = pos.xy * b.texel.zw;
+  let o = b.texel.xy * 0.5;
+  var sum = at(uv + vec2f(o.x, o.y));
+  sum = sum + at(uv + vec2f(-o.x, o.y));
+  sum = sum + at(uv + vec2f(o.x, -o.y));
+  sum = sum + at(uv + vec2f(-o.x, -o.y));
+  return vec4f(prefilter(sum * 0.25), 1.0);
+}
+`
+);
+var BLOOM_DOWN_WGSL = (
+  /* wgsl */
+  `
+${BLOOM_HEAD}
+@fragment fn downPass(@builtin(position) pos: vec4f) -> @location(0) vec4f {
+  let uv = pos.xy * b.texel.zw;
+  let h = b.texel.xy * 0.5;
+  var sum = at(uv) * 4.0;
+  sum = sum + at(uv - h);
+  sum = sum + at(uv + h);
+  sum = sum + at(uv + vec2f(h.x, -h.y));
+  sum = sum + at(uv - vec2f(h.x, -h.y));
+  return vec4f(sum / 8.0, 1.0);
+}
+`
+);
+var BLOOM_UP_WGSL = (
+  /* wgsl */
+  `
+${BLOOM_HEAD}
+@fragment fn upPass(@builtin(position) pos: vec4f) -> @location(0) vec4f {
+  let uv = pos.xy * b.texel.zw;
+  let s = b.texel.xy * 0.5 * (0.5 + b.params.z);
+  var sum = at(uv + vec2f(-s.x * 2.0, 0.0));
+  sum = sum + at(uv + vec2f(-s.x, s.y)) * 2.0;
+  sum = sum + at(uv + vec2f(0.0, s.y * 2.0));
+  sum = sum + at(uv + vec2f(s.x, s.y)) * 2.0;
+  sum = sum + at(uv + vec2f(s.x * 2.0, 0.0));
+  sum = sum + at(uv + vec2f(s.x, -s.y)) * 2.0;
+  sum = sum + at(uv + vec2f(0.0, -s.y * 2.0));
+  sum = sum + at(uv + vec2f(-s.x, -s.y)) * 2.0;
+  return vec4f(sum / 12.0, 1.0);
+}
+`
+);
+var USAGE = { copyDst: 2, textureBinding: 4, renderAttachment: 16, uniform: 64, bufferCopyDst: 8 };
+var STAGE_FRAGMENT = 2;
+var GpuPostFx = class {
+  constructor(device, width, height) {
+    this.device = device;
+    this.width = width;
+    this.height = height;
+    this.pipelines = /* @__PURE__ */ new Map();
+    this.data = new Float32Array(POST_UNIFORM_FLOATS);
+    this.levels = [];
+    this.lut = null;
+    /** Each upsample step's uniform block, by the level it adds onto. */
+    this.upUniforms = /* @__PURE__ */ new Map();
+    const tex = (binding) => ({ binding, visibility: STAGE_FRAGMENT, texture: { sampleType: "float" } });
+    const samp = (binding) => ({ binding, visibility: STAGE_FRAGMENT, sampler: { type: "filtering" } });
+    const uni = { binding: 0, visibility: STAGE_FRAGMENT, buffer: { type: "uniform" } };
+    this.layouts = {
+      post: device.createBindGroupLayout({ entries: [uni, tex(1), samp(2), tex(3), samp(4), tex(5)] }),
+      bloom: device.createBindGroupLayout({ entries: [uni, tex(1), samp(2)] })
+    };
+    const sampler = (filter) => device.createSampler({ magFilter: filter, minFilter: filter, addressModeU: "clamp-to-edge", addressModeV: "clamp-to-edge" });
+    this.samplers = { nearest: sampler("nearest"), linear: sampler("linear") };
+    this.uniformBuffer = device.createBuffer({ size: POST_UNIFORM_FLOATS * 4, usage: USAGE.uniform | USAGE.bufferCopyDst });
+    this.blank = device.createTexture({ size: { width: 1, height: 1 }, format: "rgba8unorm", usage: USAGE.textureBinding | USAGE.copyDst });
+    device.queue.writeTexture({ texture: this.blank }, new Uint8Array([0, 0, 0, 255]), { bytesPerRow: 4 }, { width: 1, height: 1 });
+  }
+  /** Encode the stack: `source` (RGBA8, this size) through every effect into `target` (of `format`). */
+  encode(encoder, source, target, format, uniforms, time) {
+    const device = this.device;
+    let bloom = null;
+    if (uniforms.bloomStrength > 0) bloom = this.encodeBloom(encoder, source, uniforms.bloomThreshold, uniforms.bloomRadius);
+    device.queue.writeBuffer(this.uniformBuffer, 0, packPostUniforms(uniforms, this.width, this.height, time, bloom !== null, this.data));
+    const pass = encoder.beginRenderPass({ colorAttachments: [{ view: target.createView(), clearValue: { r: 0, g: 0, b: 0, a: 1 }, loadOp: "clear", storeOp: "store" }] });
+    pass.setPipeline(this.pipeline("post", format, POST_WGSL, "post", false));
+    pass.setBindGroup(
+      0,
+      device.createBindGroup({
+        layout: this.layouts.post,
+        entries: [
+          { binding: 0, resource: { buffer: this.uniformBuffer } },
+          { binding: 1, resource: source.createView() },
+          { binding: 2, resource: this.samplers.nearest },
+          { binding: 3, resource: (bloom ?? this.blank).createView() },
+          { binding: 4, resource: this.samplers.linear },
+          { binding: 5, resource: this.lutTexture(uniforms.lut).createView() }
+        ]
+      })
+    );
+    pass.draw(3);
+    pass.end();
+  }
+  dispose() {
+    for (const level of this.levels) {
+      level.texture.destroy?.();
+      level.uniforms.destroy?.();
+    }
+    this.levels = [];
+    for (const buffer of this.upUniforms.values()) buffer.destroy?.();
+    this.lut?.texture.destroy?.();
+    this.blank.destroy?.();
+    this.uniformBuffer.destroy?.();
+  }
+  /** BloomPyramid.generate on the GPU: prefilter into level 0, blur down the chain, fold back up additively. */
+  encodeBloom(encoder, source, threshold, radius) {
+    if (this.levels.length === 0) {
+      const count = pyramidLevelCount(this.width, this.height);
+      for (let i = 0; i < count; i += 1) {
+        const { width, height } = pyramidLevelSize(this.width, this.height, i);
+        this.levels.push({
+          texture: this.device.createTexture({ size: { width, height }, format: "rgba16float", usage: USAGE.renderAttachment | USAGE.textureBinding }),
+          width,
+          height,
+          uniforms: this.device.createBuffer({ size: 32, usage: USAGE.uniform | USAGE.bufferCopyDst })
+        });
+      }
+    }
+    const levels = this.levels;
+    const draw = (name, code, entry, target, input, inputTexel, params, blend) => {
+      this.device.queue.writeBuffer(target.uniforms, 0, new Float32Array([inputTexel[0], inputTexel[1], 1 / target.width, 1 / target.height, ...params]));
+      const pass = encoder.beginRenderPass({
+        colorAttachments: [{ view: target.texture.createView(), clearValue: { r: 0, g: 0, b: 0, a: 1 }, loadOp: blend ? "load" : "clear", storeOp: "store" }]
+      });
+      pass.setPipeline(this.pipeline(name, "rgba16float", code, entry, blend));
+      pass.setBindGroup(
+        0,
+        this.device.createBindGroup({
+          layout: this.layouts.bloom,
+          entries: [
+            { binding: 0, resource: { buffer: target.uniforms } },
+            { binding: 1, resource: input.createView() },
+            { binding: 2, resource: this.samplers.linear }
+          ]
+        })
+      );
+      pass.draw(3);
+      pass.end();
+    };
+    draw("prefilter", BLOOM_PREFILTER_WGSL, "prefilterPass", levels[0], source, [1 / this.width, 1 / this.height], [threshold, BLOOM_KNEE, 0, 0], false);
+    for (let i = 1; i < levels.length; i += 1) {
+      const finer = levels[i - 1];
+      draw("down", BLOOM_DOWN_WGSL, "downPass", levels[i], finer.texture, [1 / finer.width, 1 / finer.height], [0, 0, 0, 0], false);
+    }
+    for (let i = levels.length - 2; i >= 0; i -= 1) this.drawUp(encoder, i, radius);
+    return levels[0].texture;
+  }
+  /** One upsample step: level `index + 1`'s tent, added onto level `index`. */
+  drawUp(encoder, index, radius) {
+    const target = this.levels[index];
+    const coarser = this.levels[index + 1];
+    let buffer = this.upUniforms.get(index);
+    if (!buffer) {
+      buffer = this.device.createBuffer({ size: 32, usage: USAGE.uniform | USAGE.bufferCopyDst });
+      this.upUniforms.set(index, buffer);
+    }
+    this.device.queue.writeBuffer(buffer, 0, new Float32Array([1 / coarser.width, 1 / coarser.height, 1 / target.width, 1 / target.height, 0, 0, radius, 0]));
+    const pass = encoder.beginRenderPass({ colorAttachments: [{ view: target.texture.createView(), loadOp: "load", storeOp: "store" }] });
+    pass.setPipeline(this.pipeline("up", "rgba16float", BLOOM_UP_WGSL, "upPass", true));
+    pass.setBindGroup(
+      0,
+      this.device.createBindGroup({
+        layout: this.layouts.bloom,
+        entries: [
+          { binding: 0, resource: { buffer } },
+          { binding: 1, resource: coarser.texture.createView() },
+          { binding: 2, resource: this.samplers.linear }
+        ]
+      })
+    );
+    pass.draw(3);
+    pass.end();
+  }
+  lutTexture(lut) {
+    if (!lut) return this.blank;
+    if (this.lut?.source === lut) return this.lut.texture;
+    this.lut?.texture.destroy?.();
+    const strip = lutStrip(lut);
+    const texture = this.device.createTexture({ size: { width: strip.width, height: strip.height }, format: "rgba8unorm", usage: USAGE.textureBinding | USAGE.copyDst });
+    this.device.queue.writeTexture({ texture }, strip.data, { bytesPerRow: strip.width * 4, rowsPerImage: strip.height }, { width: strip.width, height: strip.height });
+    this.lut = { source: lut, texture };
+    return texture;
+  }
+  pipeline(name, format, code, entry, additive) {
+    const key = `${name}|${format}|${additive}`;
+    let pipeline = this.pipelines.get(key);
+    if (!pipeline) {
+      const module = this.device.createShaderModule({ code });
+      pipeline = this.device.createRenderPipeline({
+        layout: this.device.createPipelineLayout({ bindGroupLayouts: [name === "post" ? this.layouts.post : this.layouts.bloom] }),
+        vertex: { module, entryPoint: "vs" },
+        fragment: {
+          module,
+          entryPoint: entry,
+          targets: [
+            additive ? { format, blend: { color: { srcFactor: "one", dstFactor: "one", operation: "add" }, alpha: { srcFactor: "one", dstFactor: "one", operation: "add" } } } : { format }
+          ]
+        },
+        primitive: { topology: "triangle-list" }
+      });
+      this.pipelines.set(key, pipeline);
+    }
+    return pipeline;
+  }
+};
+
+// src/render/gpuPresent.ts
+import { CLOUD_TILE, MAX_CLOUD_LAYERS } from "@cartbox/editor";
+var CLOUD_TILE_SIZE = CLOUD_TILE;
+var SHAFT_CELLS_ACROSS = 160;
+var SHAFT_SKY_SHARE = 0.35;
+var AUTO_KEY_FALLBACK = 0.18;
+var USAGE2 = {
+  copySrc: 1,
+  copyDst: 2,
+  textureBinding: 4,
+  storage: 8,
+  renderAttachment: 16,
+  mapRead: 1,
+  uniform: 64,
+  bufferCopyDst: 8,
+  bufferCopySrc: 4,
+  bufferStorage: 128
+};
+var STAGE_FRAGMENT2 = 2;
+var STAGE_COMPUTE = 4;
+var SKY_UNIFORM_FLOATS = 4 * (6 + 2 * MAX_CLOUD_LAYERS);
+function packSkyUniforms(sky, width, height, out = new Float32Array(SKY_UNIFORM_FLOATS)) {
+  const v = sky.view;
+  const p = sky.projection;
+  const layers = Math.min(MAX_CLOUD_LAYERS, sky.clouds.length);
+  out.set([v[0], v[4], v[8], 1 / p[0]], 0);
+  out.set([v[1], v[5], v[9], 1 / p[5]], 4);
+  out.set([v[2], v[6], v[10], layers], 8);
+  const sun = sky.sun;
+  const sl = sun ? Math.hypot(sun.direction[0], sun.direction[1], sun.direction[2]) || 1 : 1;
+  out.set(sun ? [sun.direction[0] / sl, sun.direction[1] / sl, sun.direction[2] / sl, 1] : [0, 0, 0, 0], 12);
+  out.set(sun ? [sun.color[0], sun.color[1], sun.color[2], sky.time] : [0, 0, 0, sky.time], 16);
+  out.set([width, height, 0, 0], 20);
+  for (let i = 0; i < MAX_CLOUD_LAYERS; i += 1) {
+    const layer = i < layers ? sky.clouds[i].layer : null;
+    out.set(layer ? [layer.scale, layer.wind[0], layer.wind[1], layer.opacity] : [0, 0, 0, 0], 24 + i * 4);
+    out.set(layer ? [layer.color[0], layer.color[1], layer.color[2], 0] : [0, 0, 0, 0], 24 + MAX_CLOUD_LAYERS * 4 + i * 4);
+  }
+  return out;
+}
+function shaftGrid(width, height) {
+  const step = Math.max(1, Math.ceil(width / SHAFT_CELLS_ACROSS));
+  return { step, width: Math.ceil(width / step), height: Math.ceil(height / step) };
+}
+var SHAFT_UNIFORM_FLOATS = 16;
+function packShaftUniforms(sun, shafts, color, width, height, out = new Float32Array(SHAFT_UNIFORM_FLOATS)) {
+  const grid = shaftGrid(width, height);
+  const reach = Math.max(0.05, Math.min(1, shafts.length)) * Math.hypot(grid.width, grid.height);
+  out.set([sun.x, sun.y, Math.hypot(width, height), grid.step], 0);
+  out.set([width, height, grid.width, grid.height], 4);
+  out.set([sun.x / grid.step - 0.5, sun.y / grid.step - 0.5, reach, shafts.strength], 8);
+  out.set([color[0], color[1], color[2], 0], 12);
+  return out;
+}
+var BASE_KIND = { colour: 0, sky: 1, frame: 2 };
+var COMPOSE_UNIFORM_FLOATS = 20;
+function packComposeUniforms(frame, width, height, out = new Float32Array(COMPOSE_UNIFORM_FLOATS)) {
+  const shafts = frame.base.kind === "sky" && frame.shafts && frame.shafts.shafts.strength > 0 ? frame.shafts : null;
+  const grid = shaftGrid(width, height);
+  out.set([BASE_KIND[frame.base.kind], frame.scene ? 1 : 0, shafts ? 1 : 0, frame.front ? 1 : 0], 0);
+  out.set([frame.hud ? 1 : 0, frame.holo ? 1 : 0, frame.hudKey ?? 30, SHAFT_SKY_SHARE], 4);
+  const bg = frame.base.kind === "colour" ? frame.base.rgba : [0, 0, 0, 0];
+  out.set([bg[0] / 255, bg[1] / 255, bg[2] / 255, bg[3] / 255], 8);
+  out.set(shafts ? [shafts.color[0], shafts.color[1], shafts.color[2], 0] : [0, 0, 0, 0], 12);
+  out.set([1 / (grid.step * grid.width), 1 / (grid.step * grid.height), 0, 0], 16);
+  return out;
+}
+var MEASURE_UNIFORM_FLOATS = 12;
+function packMeasureUniforms(frame, width, height, out = new Float32Array(MEASURE_UNIFORM_FLOATS)) {
+  const m = frame.measure;
+  const step = Math.max(1, Math.floor(Math.sqrt(width * height / 1024)));
+  out.set([width, height, step, BASE_KIND[frame.base.kind] + (m?.luminance ? 0 : 8) + (frame.scene ? 0 : 16)], 0);
+  const bg = frame.base.kind === "colour" ? frame.base.rgba : [0, 0, 0, 0];
+  out.set([bg[0] / 255, bg[1] / 255, bg[2] / 255, bg[3] / 255], 4);
+  const sun = m?.sun ?? null;
+  out.set([sun?.x ?? 0, sun?.y ?? 0, Math.max(1.5, height * 0.012), sun ? 1 : 0], 8);
+  return out;
+}
+var FULLSCREEN_VS2 = (
+  /* wgsl */
+  `
+@vertex fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f {
+  let x = f32((i << 1u) & 2u);
+  let y = f32(i & 2u);
+  return vec4f(x * 2.0 - 1.0, 1.0 - y * 2.0, 0.0, 1.0);
+}
+`
+);
+var SKY_WGSL = (
+  /* wgsl */
+  `
+struct Sky {
+  right: vec4f,
+  up: vec4f,
+  back: vec4f,
+  sun: vec4f,
+  sunColor: vec4f,
+  size: vec4f,
+  cloud: array<vec4f, ${MAX_CLOUD_LAYERS}>,
+  cloudColor: array<vec4f, ${MAX_CLOUD_LAYERS}>,
+};
+@group(0) @binding(0) var<uniform> s: Sky;
+@group(0) @binding(1) var pano: texture_2d<f32>;
+@group(0) @binding(2) var panoSampler: sampler;
+@group(0) @binding(3) var clouds: texture_2d_array<f32>;
+@group(0) @binding(4) var cloudSampler: sampler;
+${FULLSCREEN_VS2}
+fn broadGlow(c: f32) -> f32 {
+  if (c <= 0.0) { return 0.0; }
+  let c2 = c * c;
+  let c6 = c2 * c2 * c2;
+  let c8 = c6 * c2;
+  let c16 = c8 * c8;
+  let c32 = c16 * c16;
+  return c6 * 0.18 + c32 * c32 * 0.25;
+}
+fn coreGlow(c: f32) -> f32 {
+  if (c > 0.99) { return pow(c, 1500.0) * 0.6; }
+  return 0.0;
+}
+@fragment fn sky(@builtin(position) pos: vec4f) -> @location(0) vec4f {
+  // Rays through pixel corners, as the CPU backdrop casts them.
+  let px = floor(pos.xy);
+  let ndc = vec2f(px.x / s.size.x * 2.0 - 1.0, 1.0 - px.y / s.size.y * 2.0);
+  let d = s.right.xyz * (ndc.x * s.right.w) + s.up.xyz * (ndc.y * s.up.w) - s.back.xyz;
+  let len = max(length(d), 1e-6);
+  let n = d / len;
+  let u = atan2(d.z, d.x) / 6.28318531 + 0.5;
+  let v = acos(clamp(n.y, -1.0, 1.0)) / 3.14159265;
+  let texel = textureSampleLevel(pano, panoSampler, vec2f(u, v), 0.0);
+  var rgb = texel.rgb;
+  if (s.sun.w > 0.5) {
+    let c = dot(n, s.sun.xyz);
+    let here = broadGlow(c) + coreGlow(c);
+    if (here > broadGlow(0.4) && texel.a > 0.0) {
+      rgb = min(vec3f(1.0), rgb + s.sunColor.rgb * (here * texel.a));
+    }
+  }
+  let layers = i32(s.back.w);
+  if (layers > 0) {
+    let fade = smoothstep(0.02, 0.25, n.y);
+    if (fade > 0.0) {
+      let k = 1.0 / (max(n.y, 0.0) + 0.12);
+      let t = s.sunColor.w;
+      for (var i = 0; i < layers; i = i + 1) {
+        let l = s.cloud[i];
+        let uv = vec2f((n.x * k + l.y * t) * l.x, (n.z * k + l.z * t) * l.x) + vec2f(0.5 / ${CLOUD_TILE_SIZE}.0);
+        let density = textureSampleLevel(clouds, cloudSampler, uv, i, 0.0).r;
+        let a = density * l.w * fade;
+        if (a > 0.0) {
+          rgb = rgb + (s.cloudColor[i].rgb * (1.0 - 0.25 * density) - rgb) * a;
+        }
+      }
+      rgb = clamp(rgb, vec3f(0.0), vec3f(1.0));
+    }
+  }
+  return vec4f(rgb, 1.0);
+}
+`
+);
+var SHAFT_STRUCT = (
+  /* wgsl */
+  `
+struct Shaft {
+  sun: vec4f,
+  size: vec4f,
+  grid: vec4f,
+  color: vec4f,
+};
+@group(0) @binding(0) var<uniform> u: Shaft;
+`
+);
+var SHAFT_MASK_WGSL = (
+  /* wgsl */
+  `
+${SHAFT_STRUCT}
+@group(0) @binding(1) var scene: texture_2d<f32>;
+@group(0) @binding(2) var skyTex: texture_2d<f32>;
+${FULLSCREEN_VS2}
+@fragment fn mask(@builtin(position) pos: vec4f) -> @location(0) vec4f {
+  let cell = floor(pos.xy);
+  let step = u.sun.w;
+  let x = min(u.size.x - 1.0, floor(cell.x * step + step / 2.0));
+  let y = min(u.size.y - 1.0, floor(cell.y * step + step / 2.0));
+  let at = vec2i(i32(x), i32(y));
+  if (any(textureLoad(scene, at, 0) != vec4f(0.0))) { return vec4f(0.0); }
+  let sky = textureLoad(skyTex, at, 0).rgb;
+  let lum = dot(sky, vec3f(0.2126, 0.7152, 0.0722));
+  let bright = max(0.0, lum - 0.55) / 0.45;
+  let near = max(0.0, 1.0 - distance(vec2f(x, y), u.sun.xy) / (u.sun.z * 0.35));
+  return vec4f(bright * near * near, 0.0, 0.0, 0.0);
+}
+`
+);
+var SHAFT_GATHER_WGSL = (
+  /* wgsl */
+  `
+${SHAFT_STRUCT}
+@group(0) @binding(1) var maskTex: texture_2d<f32>;
+${FULLSCREEN_VS2}
+@fragment fn gather(@builtin(position) pos: vec4f) -> @location(0) vec4f {
+  let cell = floor(pos.xy);
+  let sx = u.grid.x;
+  let sy = u.grid.y;
+  let fall = max(0.0, 1.0 - length(vec2f(sx - cell.x, sy - cell.y)) / u.grid.z);
+  if (fall <= 0.0) { return vec4f(0.0); }
+  var acc = 0.0;
+  for (var s = 0; s < 24; s = s + 1) {
+    let t = (f32(s) + 0.5) / 24.0;
+    // Math.round, not round-half-even.
+    let xi = floor(cell.x + (sx - cell.x) * t + 0.5);
+    let yi = floor(cell.y + (sy - cell.y) * t + 0.5);
+    if (xi >= 0.0 && yi >= 0.0 && xi < u.size.z && yi < u.size.w) {
+      acc = acc + textureLoad(maskTex, vec2i(i32(xi), i32(yi)), 0).r;
+    }
+  }
+  return vec4f((acc / 24.0) * fall * fall * 1.6 * u.grid.w, 0.0, 0.0, 0.0);
+}
+`
+);
+var COMPOSE_WGSL = (
+  /* wgsl */
+  `
+struct Compose {
+  layers: vec4f,
+  layers2: vec4f,
+  background: vec4f,
+  shaftColor: vec4f,
+  shaftScale: vec4f,
+};
+@group(0) @binding(0) var<uniform> u: Compose;
+@group(0) @binding(1) var baseTex: texture_2d<f32>;
+@group(0) @binding(2) var scene: texture_2d<f32>;
+@group(0) @binding(3) var light: texture_2d<f32>;
+@group(0) @binding(4) var lightSampler: sampler;
+@group(0) @binding(5) var front: texture_2d<f32>;
+@group(0) @binding(6) var hud: texture_2d<f32>;
+@group(0) @binding(7) var holo: texture_2d<f32>;
+${FULLSCREEN_VS2}
+fn over(top: vec4f, under: vec4f) -> vec4f {
+  return vec4f(top.rgb + under.rgb * (1.0 - top.a), top.a + under.a * (1.0 - top.a));
+}
+@fragment fn compose(@builtin(position) pos: vec4f) -> @location(0) vec4f {
+  let p = vec2i(floor(pos.xy));
+  var c = u.background;
+  if (u.layers.x > 0.5) { c = textureLoad(baseTex, p, 0); }
+  var open = true;
+  if (u.layers.y > 0.5) {
+    let s = textureLoad(scene, p, 0);
+    open = all(s == vec4f(0.0));
+    c = clamp(over(s, c), vec4f(0.0), vec4f(1.0));
+  }
+  var v = textureSampleLevel(light, lightSampler, pos.xy * u.shaftScale.xy, 0.0).r;
+  if (u.layers.z > 0.5) {
+    if (open) { v = v * u.layers2.w; }
+    c = vec4f(min(vec3f(1.0), c.rgb + u.shaftColor.rgb * v), c.a);
+  }
+  if (u.layers.w > 0.5) { c = clamp(over(textureLoad(front, p, 0), c), vec4f(0.0), vec4f(1.0)); }
+  if (u.layers2.x > 0.5) {
+    let h = textureLoad(hud, p, 0);
+    let b = round(h.rgb * 255.0);
+    if (b.r + b.g + b.b > u.layers2.z) { c = vec4f(h.rgb, 1.0); }
+  }
+  if (u.layers2.y > 0.5) { c = clamp(over(textureLoad(holo, p, 0), c), vec4f(0.0), vec4f(1.0)); }
+  return vec4f(c.rgb, 1.0);
+}
+`
+);
+var MEASURE_WGSL = (
+  /* wgsl */
+  `
+struct Measure {
+  size: vec4f,
+  background: vec4f,
+  sun: vec4f,
+};
+@group(0) @binding(0) var<uniform> u: Measure;
+@group(0) @binding(1) var baseTex: texture_2d<f32>;
+@group(0) @binding(2) var scene: texture_2d<f32>;
+@group(0) @binding(3) var<storage, read_write> result: array<f32, 4>;
+var<workgroup> sums: array<f32, 256>;
+var<workgroup> counts: array<f32, 256>;
+fn linear(c: f32) -> f32 {
+  let b = round(c * 255.0) / 255.0;
+  if (b <= 0.04045) { return b / 12.92; }
+  return pow((b + 0.055) / 1.055, 2.4);
+}
+fn composite(p: vec2i, kind: i32, hasScene: bool) -> vec4f {
+  var c = u.background;
+  if (kind > 0) { c = textureLoad(baseTex, p, 0); }
+  if (hasScene) {
+    let s = textureLoad(scene, p, 0);
+    c = clamp(vec4f(s.rgb + c.rgb * (1.0 - s.a), s.a + c.a * (1.0 - s.a)), vec4f(0.0), vec4f(1.0));
+  }
+  return c;
+}
+fn openSky(x: f32, y: f32) -> f32 {
+  let xi = floor(x);
+  let yi = floor(y);
+  if (xi < 0.0 || yi < 0.0 || xi >= u.size.x || yi >= u.size.y) { return 0.0; }
+  if (all(textureLoad(scene, vec2i(i32(xi), i32(yi)), 0) == vec4f(0.0))) { return 1.0; }
+  return 0.0;
+}
+@compute @workgroup_size(256) fn measure(@builtin(local_invocation_index) tid: u32) {
+  let flags = i32(u.size.w);
+  let kind = flags & 7;
+  let wantLuminance = (flags & 8) == 0;
+  let hasScene = (flags & 16) == 0;
+  let step = u.size.z;
+  let first = floor(step / 2.0);
+  let gw = u32(ceil((u.size.x - first) / step));
+  let gh = u32(ceil((u.size.y - first) / step));
+  var sum = 0.0;
+  var count = 0.0;
+  if (wantLuminance) {
+    for (var i = tid; i < gw * gh; i = i + 256u) {
+      let x = first + f32(i % gw) * step;
+      let y = first + f32(i / gw) * step;
+      let c = composite(vec2i(i32(x), i32(y)), kind, hasScene);
+      if (round(c.a * 255.0) == 0.0) { continue; }
+      let l = 0.2126 * linear(c.r) + 0.7152 * linear(c.g) + 0.0722 * linear(c.b);
+      sum = sum + log(max(1e-4, l));
+      count = count + 1.0;
+    }
+  }
+  sums[tid] = sum;
+  counts[tid] = count;
+  workgroupBarrier();
+  for (var half = 128u; half > 0u; half = half >> 1u) {
+    if (tid < half) {
+      sums[tid] = sums[tid] + sums[tid + half];
+      counts[tid] = counts[tid] + counts[tid + half];
+    }
+    workgroupBarrier();
+  }
+  if (tid == 0u) {
+    result[0] = sums[0];
+    result[1] = counts[0];
+    var open = 0.0;
+    var taps = 0.0;
+    if (u.sun.w > 0.5) {
+      open = openSky(u.sun.x, u.sun.y);
+      taps = 1.0;
+      for (var ring = 0; ring < 2; ring = ring + 1) {
+        let r = select(1.0, 0.5, ring == 0);
+        for (var k = 0; k < 8; k = k + 1) {
+          let a = f32(k) / 8.0 * 6.28318531 + r;
+          open = open + openSky(u.sun.x + cos(a) * u.sun.z * r, u.sun.y + sin(a) * u.sun.z * r);
+          taps = taps + 1.0;
+        }
+      }
+    }
+    result[2] = open;
+    result[3] = taps;
+  }
+}
+`
+);
+var GpuPresenter = class {
+  constructor(device, width, height) {
+    this.device = device;
+    this.width = width;
+    this.height = height;
+    this.pipelines = /* @__PURE__ */ new Map();
+    this.data = {
+      sky: new Float32Array(SKY_UNIFORM_FLOATS),
+      shaft: new Float32Array(SHAFT_UNIFORM_FLOATS),
+      compose: new Float32Array(COMPOSE_UNIFORM_FLOATS),
+      measure: new Float32Array(MEASURE_UNIFORM_FLOATS)
+    };
+    this.skyTarget = null;
+    /** The composite, when a post stack reads it before the target. */
+    this.composed = null;
+    this.postFx = null;
+    this.shaftTargets = null;
+    this.uploads = /* @__PURE__ */ new Map();
+    this.panorama = null;
+    this.cloudTexture = null;
+    this.latestStats = { luminance: null, luminanceSeq: 0, sunVisible: null, seq: 0 };
+    this.destroyed = false;
+    this.blank = device.createTexture({ size: { width: 1, height: 1 }, format: "rgba8unorm", usage: USAGE2.textureBinding | USAGE2.copyDst });
+    device.queue.writeTexture({ texture: this.blank }, new Uint8Array(4), { bytesPerRow: 4 }, { width: 1, height: 1 });
+    const sampler = (u, v) => device.createSampler({ magFilter: "linear", minFilter: "linear", addressModeU: u, addressModeV: v });
+    this.linear = { clamp: sampler("clamp-to-edge", "clamp-to-edge"), wrapU: sampler("repeat", "clamp-to-edge"), repeat: sampler("repeat", "repeat") };
+    const tex = (binding, visibility = STAGE_FRAGMENT2, viewDimension = "2d") => ({ binding, visibility, texture: { sampleType: "float", viewDimension } });
+    const uni = (visibility = STAGE_FRAGMENT2) => ({ binding: 0, visibility, buffer: { type: "uniform" } });
+    const samp = (binding) => ({ binding, visibility: STAGE_FRAGMENT2, sampler: { type: "filtering" } });
+    const layout = (entries) => device.createBindGroupLayout({ entries });
+    this.layouts = {
+      sky: layout([uni(), tex(1), samp(2), tex(3, STAGE_FRAGMENT2, "2d-array"), samp(4)]),
+      mask: layout([uni(), tex(1), tex(2)]),
+      gather: layout([uni(), tex(1)]),
+      compose: layout([uni(), tex(1), tex(2), tex(3), samp(4), tex(5), tex(6), tex(7)]),
+      measure: layout([uni(STAGE_COMPUTE), tex(1, STAGE_COMPUTE), tex(2, STAGE_COMPUTE), { binding: 3, visibility: STAGE_COMPUTE, buffer: { type: "storage" } }])
+    };
+    const ubuf = (floats) => device.createBuffer({ size: floats * 4, usage: USAGE2.uniform | USAGE2.bufferCopyDst });
+    this.uniforms = { sky: ubuf(SKY_UNIFORM_FLOATS), shaft: ubuf(SHAFT_UNIFORM_FLOATS), compose: ubuf(COMPOSE_UNIFORM_FLOATS), measure: ubuf(MEASURE_UNIFORM_FLOATS) };
+    this.measured = {
+      result: device.createBuffer({ size: 16, usage: USAGE2.bufferStorage | USAGE2.bufferCopySrc }),
+      staging: device.createBuffer({ size: 16, usage: USAGE2.mapRead | USAGE2.bufferCopyDst }),
+      busy: false
+    };
+  }
+  /** The newest measurements to arrive (a frame or two behind the frame that asked). */
+  get stats() {
+    return this.latestStats;
+  }
+  /** Composite `frame` into `target` (a texture of `format`, `width × height`) and submit. */
+  present(frame, target, format) {
+    if (this.destroyed) return;
+    const device = this.device;
+    const encoder = device.createCommandEncoder();
+    const sky = frame.base.kind === "sky" ? frame.base.sky : null;
+    const shafts = sky && frame.shafts && frame.shafts.shafts.strength > 0 ? frame.shafts : null;
+    if (sky) {
+      this.skyTarget ?? (this.skyTarget = this.target("rgba8unorm", this.width, this.height));
+      device.queue.writeBuffer(this.uniforms.sky, 0, packSkyUniforms(sky, this.width, this.height, this.data.sky));
+      this.fullScreen(encoder, "sky", "rgba8unorm", SKY_WGSL, this.skyTarget, [
+        { binding: 0, resource: { buffer: this.uniforms.sky } },
+        { binding: 1, resource: this.panoramaFor(sky.map).createView() },
+        { binding: 2, resource: this.linear.wrapU },
+        { binding: 3, resource: this.cloudsFor(sky.clouds).createView({ dimension: "2d-array" }) },
+        { binding: 4, resource: this.linear.repeat }
+      ]);
+    }
+    const base = sky ? this.skyTarget : frame.base.kind === "frame" ? this.upload("base", frame.base.rgba) : this.blank;
+    const scene = frame.scene ?? this.blank;
+    let light = this.blank;
+    if (shafts) {
+      const grid = shaftGrid(this.width, this.height);
+      this.shaftTargets ?? (this.shaftTargets = { mask: this.target("r16float", grid.width, grid.height), light: this.target("r16float", grid.width, grid.height) });
+      device.queue.writeBuffer(this.uniforms.shaft, 0, packShaftUniforms(shafts.sun, shafts.shafts, shafts.color, this.width, this.height, this.data.shaft));
+      this.fullScreen(encoder, "mask", "r16float", SHAFT_MASK_WGSL, this.shaftTargets.mask, [
+        { binding: 0, resource: { buffer: this.uniforms.shaft } },
+        { binding: 1, resource: scene.createView() },
+        { binding: 2, resource: this.skyTarget.createView() }
+      ]);
+      this.fullScreen(encoder, "gather", "r16float", SHAFT_GATHER_WGSL, this.shaftTargets.light, [
+        { binding: 0, resource: { buffer: this.uniforms.shaft } },
+        { binding: 1, resource: this.shaftTargets.mask.createView() }
+      ]);
+      light = this.shaftTargets.light;
+    }
+    const post = frame.post ?? null;
+    if (post) this.composed ?? (this.composed = this.target("rgba8unorm", this.width, this.height));
+    device.queue.writeBuffer(this.uniforms.compose, 0, packComposeUniforms(frame, this.width, this.height, this.data.compose));
+    this.fullScreen(encoder, "compose", post ? "rgba8unorm" : format, COMPOSE_WGSL, post ? this.composed : target, [
+      { binding: 0, resource: { buffer: this.uniforms.compose } },
+      { binding: 1, resource: base.createView() },
+      { binding: 2, resource: scene.createView() },
+      { binding: 3, resource: light.createView() },
+      { binding: 4, resource: this.linear.clamp },
+      { binding: 5, resource: (frame.front ?? this.blank).createView() },
+      { binding: 6, resource: (frame.hud ? this.upload("hud", frame.hud) : this.blank).createView() },
+      { binding: 7, resource: (frame.holo ? this.upload("holo", frame.holo) : this.blank).createView() }
+    ]);
+    if (post) {
+      this.postFx ?? (this.postFx = new GpuPostFx(device, this.width, this.height));
+      this.postFx.encode(encoder, this.composed, target, format, post.uniforms, post.time);
+    }
+    const measure = frame.measure && (frame.measure.luminance || frame.measure.sun) && !this.measured.busy ? frame.measure : null;
+    if (measure) {
+      device.queue.writeBuffer(this.uniforms.measure, 0, packMeasureUniforms(frame, this.width, this.height, this.data.measure));
+      const pipeline = this.pipeline("measure", "", MEASURE_WGSL);
+      const pass = encoder.beginComputePass();
+      pass.setPipeline(pipeline);
+      pass.setBindGroup(
+        0,
+        device.createBindGroup({
+          layout: this.layouts.measure,
+          entries: [
+            { binding: 0, resource: { buffer: this.uniforms.measure } },
+            { binding: 1, resource: base.createView() },
+            { binding: 2, resource: scene.createView() },
+            { binding: 3, resource: { buffer: this.measured.result } }
+          ]
+        })
+      );
+      pass.dispatchWorkgroups(1);
+      pass.end();
+      encoder.copyBufferToBuffer(this.measured.result, 0, this.measured.staging, 0, 16);
+    }
+    device.queue.submit([encoder.finish()]);
+    if (measure) void this.readMeasurements(measure.luminance, measure.sun !== null);
+  }
+  /** Release every resource this presenter made. */
+  dispose() {
+    this.destroyed = true;
+    const destroy = (t) => t?.destroy?.();
+    destroy(this.blank);
+    destroy(this.skyTarget);
+    destroy(this.composed);
+    this.postFx?.dispose();
+    destroy(this.shaftTargets?.mask);
+    destroy(this.shaftTargets?.light);
+    destroy(this.panorama?.texture);
+    destroy(this.cloudTexture?.texture);
+    for (const u of this.uploads.values()) destroy(u.texture);
+    for (const b of Object.values(this.uniforms)) destroy(b);
+    destroy(this.measured.result);
+    destroy(this.measured.staging);
+  }
+  async readMeasurements(luminance, sun) {
+    const m = this.measured;
+    m.busy = true;
+    try {
+      await m.staging.mapAsync(USAGE2.mapRead);
+      if (this.destroyed) return;
+      const [sum, count, open, taps] = Array.from(new Float32Array(m.staging.getMappedRange().slice(0)));
+      m.staging.unmap();
+      const prev = this.latestStats;
+      this.latestStats = {
+        luminance: luminance ? count > 0 ? Math.exp(sum / count) : AUTO_KEY_FALLBACK : prev.luminance,
+        luminanceSeq: prev.luminanceSeq + (luminance ? 1 : 0),
+        sunVisible: sun ? taps > 0 ? open / taps : 0 : prev.sunVisible,
+        seq: prev.seq + 1
+      };
+    } catch {
+    } finally {
+      m.busy = false;
+    }
+  }
+  target(format, width, height) {
+    return this.device.createTexture({ size: { width, height }, format, usage: USAGE2.renderAttachment | USAGE2.textureBinding });
+  }
+  /** A CPU frame (RGBA8, this presenter's size) uploaded into its named slot. */
+  upload(slot, rgba) {
+    let entry = this.uploads.get(slot);
+    if (!entry) {
+      entry = {
+        texture: this.device.createTexture({ size: { width: this.width, height: this.height }, format: "rgba8unorm", usage: USAGE2.textureBinding | USAGE2.copyDst }),
+        width: this.width,
+        height: this.height
+      };
+      this.uploads.set(slot, entry);
+    }
+    const bytes = rgba instanceof Uint8Array ? rgba : new Uint8Array(rgba.buffer, rgba.byteOffset, rgba.byteLength);
+    this.device.queue.writeTexture({ texture: entry.texture }, bytes, { bytesPerRow: this.width * 4, rowsPerImage: this.height }, { width: this.width, height: this.height });
+    return entry.texture;
+  }
+  /** The panorama uploaded once per distinct map. */
+  panoramaFor(map) {
+    if (this.panorama?.source === map) return this.panorama.texture;
+    this.panorama?.texture.destroy?.();
+    const texture = this.device.createTexture({ size: { width: map.width, height: map.height }, format: "rgba8unorm", usage: USAGE2.textureBinding | USAGE2.copyDst });
+    this.device.queue.writeTexture({ texture }, map.data, { bytesPerRow: map.width * 4, rowsPerImage: map.height }, { width: map.width, height: map.height });
+    this.panorama = { source: map, texture };
+    return texture;
+  }
+  /** The cloud layers' density tiles as one texture array (one blank layer for none), uploaded when the layers change. */
+  cloudsFor(layers) {
+    const shown = layers.slice(0, MAX_CLOUD_LAYERS);
+    const cached = this.cloudTexture;
+    if (cached && cached.sources.length === shown.length && cached.sources.every((l, i) => l === shown[i])) return cached.texture;
+    cached?.texture.destroy?.();
+    const size = CLOUD_TILE_SIZE;
+    const count = Math.max(1, shown.length);
+    const texture = this.device.createTexture({ size: { width: size, height: size, depthOrArrayLayers: count }, format: "r8unorm", usage: USAGE2.textureBinding | USAGE2.copyDst });
+    shown.forEach((layer, i) => {
+      const bytes = new Uint8Array(size * size);
+      for (let k = 0; k < bytes.length; k += 1) bytes[k] = Math.round(Math.max(0, Math.min(1, layer.density[k] ?? 0)) * 255);
+      this.device.queue.writeTexture({ texture, origin: { x: 0, y: 0, z: i } }, bytes, { bytesPerRow: size, rowsPerImage: size }, { width: size, height: size, depthOrArrayLayers: 1 });
+    });
+    this.cloudTexture = { sources: shown, texture };
+    return texture;
+  }
+  pipeline(name, format, code) {
+    const key = `${name}|${format}`;
+    let pipeline = this.pipelines.get(key);
+    if (!pipeline) {
+      const module = this.device.createShaderModule({ code });
+      const layout = this.device.createPipelineLayout({ bindGroupLayouts: [this.layouts[name]] });
+      pipeline = name === "measure" ? this.device.createComputePipeline({ layout, compute: { module, entryPoint: "measure" } }) : this.device.createRenderPipeline({
+        layout,
+        vertex: { module, entryPoint: "vs" },
+        fragment: { module, entryPoint: name, targets: [{ format }] },
+        primitive: { topology: "triangle-list" }
+      });
+      this.pipelines.set(key, pipeline);
+    }
+    return pipeline;
+  }
+  fullScreen(encoder, name, format, code, target, entries) {
+    const pipeline = this.pipeline(name, format, code);
+    const pass = encoder.beginRenderPass({
+      colorAttachments: [{ view: target.createView(), clearValue: { r: 0, g: 0, b: 0, a: 0 }, loadOp: "clear", storeOp: "store" }]
+    });
+    pass.setPipeline(pipeline);
+    pass.setBindGroup(0, this.device.createBindGroup({ layout: this.layouts[name], entries }));
+    pass.draw(3);
+    pass.end();
+  }
+};
+
+// src/render/GpuCanvasSurface.ts
+var GpuCanvasSurface = class _GpuCanvasSurface {
+  constructor(container, scaleMode, model, canvas, context, format, presenter) {
+    this.container = container;
+    this.scaleMode = scaleMode;
+    this.model = model;
+    this.canvas = canvas;
+    this.context = context;
+    this.format = format;
+    this.presenter = presenter;
+    this.destroyed = false;
+    /** The post stack's uniforms, or null with no effect on. */
+    this.post = null;
+    /** The sun a 3D scene reports; the lens flare follows it (null: the effect's own source point). */
+    this.sun = null;
+    /** When this surface started, so animated effects get a monotonic clock. */
+    this.startedAt = performance.now();
+    container.appendChild(canvas);
+    this.resizeObserver = new ResizeObserver(() => this.applyScale());
+    this.resizeObserver.observe(container);
+    this.applyScale();
+  }
+  /**
+   * A WebGPU canvas on `device`, or null when the page can't give one (no
+   * WebGPU canvas context): the caller then mounts the 2D canvas, and the
+   * frame takes the byte path.
+   */
+  static create(container, scaleMode, model, device) {
+    try {
+      const canvas = container.ownerDocument.createElement("canvas");
+      canvas.width = model.width;
+      canvas.height = model.height;
+      canvas.style.imageRendering = "pixelated";
+      canvas.style.display = "block";
+      canvas.style.margin = "auto";
+      const context = canvas.getContext("webgpu");
+      const gpu = globalThis.navigator?.gpu;
+      if (!context || !gpu) return null;
+      const format = gpu.getPreferredCanvasFormat?.() ?? "bgra8unorm";
+      context.configure({ device, format, alphaMode: "opaque" });
+      return new _GpuCanvasSurface(container, scaleMode, model, canvas, context, format, new GpuPresenter(device, model.width, model.height));
+    } catch {
+      return null;
+    }
+  }
+  /** The newest measurements the presenter has read back (luminance, the sun's visibility). */
+  get stats() {
+    return this.presenter.stats;
+  }
+  /** Set the post-process stack (null, or nothing enabled, for none). */
+  setSettings(settings) {
+    this.post = settings && anyPostFxEnabled(settings) ? uniformsFromSettings(settings) : null;
+  }
+  /** Follow a 3D scene's sun with the lens flare, or null for the effect's own source point. */
+  setSun(sun) {
+    this.sun = sun;
+  }
+  /** Composite and show one frame, through the post stack when one is set. */
+  present(frame) {
+    if (this.destroyed) return;
+    const post = this.post;
+    const sun = this.sun;
+    const uniforms = post && sun ? { ...post, flareOrigin: [sun.x, sun.y], flareVisible: sun.visible } : post;
+    this.presenter.present(
+      uniforms ? { ...frame, post: { uniforms, time: (performance.now() - this.startedAt) / 1e3 } } : frame,
+      this.context.getCurrentTexture(),
+      this.format
+    );
+  }
+  /** Show a CPU frame as it is (the cart's own, before any 3D draws). */
+  blit(rgba) {
+    this.present({ base: { kind: "frame", rgba }, scene: null });
+  }
+  destroy() {
+    this.destroyed = true;
+    this.resizeObserver.disconnect();
+    this.presenter.dispose();
+    try {
+      this.context.unconfigure?.();
+    } catch {
+    }
+    this.canvas.remove();
+  }
+  applyScale() {
+    const { width, height } = computeScaledSize(this.container.clientWidth, this.container.clientHeight, this.model.width, this.model.height, this.scaleMode);
+    this.canvas.style.width = `${width}px`;
+    this.canvas.style.height = `${height}px`;
+  }
+};
+
 // src/player.ts
 import { SpatialLoader, actionMask, createHoloCache, holoBindingKeys as holoBindingKeys2, holoDocuments as holoDocuments2, renderHoloDocument, translate, reboundActions, colorFilterSvg, DEFAULT_ACCESSIBILITY } from "@cartbox/editor";
 var DIRECT_CORE_URL = "/engine/modern-core/modern-core.js";
@@ -19406,28 +20760,29 @@ var Player = class {
           keyRgb: this.cartSource.paletteRgb(scene.keyColor)
         };
       }
+      const particles = this.options.particles;
+      if (mesh || world && this.cartSource) {
+        this.sceneRenderer = await createSceneRenderer(
+          this.model.width,
+          this.model.height,
+          this.model.renderCaps
+        );
+      }
+      const presentFromGpu = (this.options.gpuPresent ?? this.model.renderCaps.gpuPresent === true) && Boolean(mesh) && !this.options.lighting && !(particles && particles.emitters.length > 0) && !(world && this.cartSource) && !(wantsForeground && this.cartSource) && !(scene && backdrop) && this.sceneRenderer?.backend === "webgpu" && Boolean(this.sceneRenderer.renderToTexture);
+      const gpuCanvas = presentFromGpu ? GpuCanvasSurface.create(this.container, scale, this.model, this.sceneRenderer.gpuDevice) : null;
       const makeBaseSurface = async (target) => {
-        let surface = this.options.lighting ? this.litSurface = await LitCanvasSurface.create(target, scale, this.model, this.options.lighting) : new CanvasSurface(target, scale, this.model);
-        const particles = this.options.particles;
+        let surface = gpuCanvas ? gpuCanvas : this.options.lighting ? this.litSurface = await LitCanvasSurface.create(target, scale, this.model, this.options.lighting) : new CanvasSurface(target, scale, this.model);
         if (particles && particles.emitters.length > 0) {
           surface = new ParticleOverlaySurface(surface, this.model.width, this.model.height, particles);
         }
-        const mesh2 = this.options.mesh;
-        if (mesh2 || world && this.cartSource) {
-          this.sceneRenderer = await createSceneRenderer(
-            this.model.width,
-            this.model.height,
-            this.model.renderCaps
-          );
-        }
         this.qualityChoice = this.options.quality;
         this.qualitySettings = resolveQuality(this.options.quality, browserDeviceHints(this.sceneRenderer ? this.sceneRenderer.backend !== "software" : void 0));
-        if (mesh2) {
+        if (mesh) {
           surface = this.meshSurface = await MeshOverlaySurface.create(
             surface,
             this.model.width,
             this.model.height,
-            mesh2,
+            mesh,
             this.sceneRenderer,
             {
               ...this.options.ktx2 ? { ktx2: this.options.ktx2 } : {},
@@ -19435,7 +20790,8 @@ var Player = class {
               temporal: this.model.renderCaps.temporal === true,
               reflections: this.model.renderCaps.reflections === true,
               // A held weapon draws on the GPU too, when the scene does.
-              ...this.sceneRenderer && this.sceneRenderer.backend !== "software" ? { createFrontRenderer: () => createSceneRenderer(this.model.width, this.model.height, this.model.renderCaps) } : {}
+              ...this.sceneRenderer && this.sceneRenderer.backend !== "software" ? { createFrontRenderer: () => createSceneRenderer(this.model.width, this.model.height, this.model.renderCaps) } : {},
+              ...gpuCanvas ? { presenter: gpuCanvas } : {}
             }
           );
           this.meshSurface.setQuality(this.qualitySettings);
@@ -19448,9 +20804,9 @@ var Player = class {
             const language = playLanguage(strings, this.options.languages) ?? "";
             const text = (key) => translate(strings, language, key);
             const cache = createHoloCache();
-            this.meshSurface.setHolo((out, width, height, time) => {
+            this.meshSurface.setHolo((out, width, height, time, premultiplied) => {
               const state = runtime.channel.holo;
-              if (state.shown.size === 0) return;
+              if (state.shown.size === 0) return false;
               const bindings = {};
               keys.forEach((k, i) => {
                 const v = state.values.get(i);
@@ -19458,14 +20814,15 @@ var Player = class {
               });
               for (const i of [...state.shown].sort((a, b) => a - b)) {
                 const doc = holoDocs[i];
-                if (doc) renderHoloDocument(out, width, height, doc, { bindings, time, text }, cache);
+                if (doc) renderHoloDocument(out, width, height, doc, { bindings, time, text }, cache, premultiplied === true);
               }
+              return true;
             });
           }
-          if ((mesh2.levels?.length ?? 0) > 0) this.activateLevel(0);
-          if (mesh2.streaming) {
-            const groups = streamGroups(mesh2);
-            if (groups.length > 0) this.spatial = { loader: new SpatialLoader(groups, mesh2.streaming), unloaded: /* @__PURE__ */ new Set() };
+          if ((mesh.levels?.length ?? 0) > 0) this.activateLevel(0);
+          if (mesh.streaming) {
+            const groups = streamGroups(mesh);
+            if (groups.length > 0) this.spatial = { loader: new SpatialLoader(groups, mesh.streaming), unloaded: /* @__PURE__ */ new Set() };
           }
         }
         if (world && this.cartSource) {
@@ -19501,7 +20858,18 @@ var Player = class {
       const postFx = this.options.postFx;
       this.basePostFx = postFx;
       const shownFx = postFx ? applyQualityToPostFx(postFx, this.qualitySettings) : void 0;
-      if (shownFx && anyPostFxEnabled(shownFx)) {
+      if (gpuCanvas) {
+        this.gpuPostFx = gpuCanvas;
+        gpuCanvas.setSettings(shownFx ?? null);
+        this.surface = await makeBaseSurface(this.container);
+        if (this.meshSurface) {
+          this.meshSurface.onSun = (sun) => gpuCanvas.setSun(sun);
+          this.meshSurface.onPost = (post) => {
+            this.volumePost = post;
+            this.showPostFx();
+          };
+        }
+      } else if (shownFx && anyPostFxEnabled(shownFx)) {
         const fx = await PostFxSurface.create(this.container, scale, this.model, shownFx, makeBaseSurface);
         if (fx) this.postFxSurface = fx;
         if (fx && this.meshSurface) this.meshSurface.onSun = (sun) => fx.setSun(sun);
@@ -19772,9 +21140,10 @@ var Player = class {
   }
   /** Show the cart's post-FX: its settings, the animation's values over them, then the post volumes round the camera. */
   showPostFx() {
-    if (!this.postFxSurface || !this.basePostFx) return;
+    const fx = this.postFxSurface ?? this.gpuPostFx;
+    if (!fx || !this.basePostFx) return;
     const base = this.animPostFx ? { ...this.basePostFx, values: { ...this.basePostFx.values, ...this.animPostFx } } : this.basePostFx;
-    this.postFxSurface.setSettings(applyQualityToPostFx(applyPostVolumes(base, this.volumePost), this.qualitySettings));
+    fx.setSettings(applyQualityToPostFx(applyPostVolumes(base, this.volumePost), this.qualitySettings));
   }
   /**
    * "auto" by measurement: a 3D scene whose frames keep coming slower than
@@ -20072,7 +21441,7 @@ var Player = class {
       this.sceneSurface.setLayerOverrides(hasLayerOverrides ? state.layers : null);
     }
     this.foregroundSurface?.setPlacements(state.placements);
-    if (this.postFxSurface && this.basePostFx && Object.keys(state.postfx).length > 0) {
+    if ((this.postFxSurface || this.gpuPostFx) && this.basePostFx && Object.keys(state.postfx).length > 0) {
       this.animPostFx = state.postfx;
       this.showPostFx();
     }
@@ -21377,8 +22746,8 @@ function trackAt(track, t) {
   const a = track[hi - 1];
   const b = track[hi];
   if (!a.at || !b.at) return null;
-  const f2 = (t - a.t) / (b.t - a.t);
-  return [a.at[0] + (b.at[0] - a.at[0]) * f2, a.at[1] + (b.at[1] - a.at[1]) * f2, a.at[2] + (b.at[2] - a.at[2]) * f2];
+  const f3 = (t - a.t) / (b.t - a.t);
+  return [a.at[0] + (b.at[0] - a.at[0]) * f3, a.at[1] + (b.at[1] - a.at[1]) * f3, a.at[2] + (b.at[2] - a.at[2]) * f3];
 }
 var dist = (a, b) => Math.hypot(a[0] - b[0], a[1] - b[1], a[2] - b[2]);
 function ownerStep(track, from, to) {
@@ -21741,6 +23110,7 @@ export {
   CELL_WORLD,
   CMD_RING_BYTES,
   CMD_RING_MAX,
+  COMPOSE_UNIFORM_FLOATS,
   CappedSceneRenderer,
   CartridgeLoadError,
   ConsoleButton,
@@ -21764,6 +23134,8 @@ export {
   FLARE_SPIKE_POWER,
   GYRO_AIMS,
   GamepadInput,
+  GpuCanvasSurface,
+  GpuPresenter,
   HEIGHT_WORLD,
   IMPORTED_LOOK,
   INPUT_BLOCK_BYTES,
@@ -21837,6 +23209,7 @@ export {
   ReplaySource,
   RuntimeChannel,
   SAVE_MAGIC,
+  SKY_UNIFORM_FLOATS,
   SOFTWARE_RASTER_CAPS,
   START_KEYS,
   STICK_LAYOUTS,
@@ -21977,7 +23350,11 @@ export {
   normalBasis3x3,
   normalVector,
   orbitPitchAboveTerrain,
+  packComposeUniforms,
   packLights,
+  packMeasureUniforms,
+  packShaftUniforms,
+  packSkyUniforms,
   paramKey,
   parseAnim,
   parseCollisionField,
@@ -22044,6 +23421,7 @@ export {
   sendDebugCommand,
   serializeReplay,
   shade,
+  shaftGrid,
   shapeStick,
   simulateEmitter,
   smoothFrontEdges,

@@ -441,7 +441,7 @@ function rasterise(key: string, shapes: readonly Shape[], width: number, height:
   return { key, pixels: Int32Array.from(pixels), mul: Float32Array.from(mul), add: Float32Array.from(add) };
 }
 
-function composite(out: Uint8ClampedArray, layer: HoloLayer): void {
+function composite(out: Uint8ClampedArray, layer: HoloLayer, premultiplied: boolean): void {
   const { pixels, mul, add } = layer;
   for (let i = 0; i < pixels.length; i += 1) {
     const o = pixels[i]! * 4;
@@ -449,6 +449,8 @@ function composite(out: Uint8ClampedArray, layer: HoloLayer): void {
     out[o] = out[o]! * m + add[i * 3]!;
     out[o + 1] = out[o + 1]! * m + add[i * 3 + 1]!;
     out[o + 2] = out[o + 2]! * m + add[i * 3 + 2]!;
+    // A layer of its own keeps its coverage, so it blends over a frame later exactly as it would have here.
+    if (premultiplied) out[o + 3] = 255 - (255 - out[o + 3]!) * m;
   }
 }
 
@@ -459,8 +461,13 @@ function composite(out: Uint8ClampedArray, layer: HoloLayer): void {
  * `cache`, a widget whose light hasn't changed since it was last drawn is
  * composited from its kept layer; the radar's sweep is kept apart from the
  * rest of the radar, so only the sweep is redrawn as it turns.
+ *
+ * With `premultiplied`, `out` is a layer of its own (cleared to transparent):
+ * its alpha keeps the light's coverage, so the GPU can blend it over a frame
+ * later (`out = frame · (1 − a) + rgb`) exactly as drawing over the frame
+ * would have (AAA_FIDELITY_ROADMAP.md F0a).
  */
-export function renderHoloDocument(out: Uint8ClampedArray, width: number, height: number, doc: UiDocument, ctx: HoloContext, cache?: HoloCache): void {
+export function renderHoloDocument(out: Uint8ClampedArray, width: number, height: number, doc: UiDocument, ctx: HoloContext, cache?: HoloCache, premultiplied = false): void {
   const placed = layoutUi(doc, width, height);
   const glow = doc.glow ?? 1;
   const curve = doc.curve ?? 0;
@@ -482,7 +489,7 @@ export function renderHoloDocument(out: Uint8ClampedArray, width: number, height
         layer = rasterise(key, part, width, height, curve, glow);
         cache?.layers.set(id, layer);
       }
-      composite(out, layer);
+      composite(out, layer, premultiplied);
     });
   }
 }

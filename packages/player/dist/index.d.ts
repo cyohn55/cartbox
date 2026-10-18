@@ -1,4 +1,4 @@
-import { MeshSceneInstance, MeshAsset, Mat4, ScenePropValue, PhysicsSpec, AnimatorSpec, AttachedComponent, SceneLighting, PhysicsWorldSettings, SceneTimeline, SceneLevel, NavMesh, Terrain, SceneStreaming, ParticleEffect, DecalDef, DecalMark, RagdollBox, DebrisDef, LodChain, SceneAudio, ComponentDef, StreamGroup, JointKind, JointSpec, ActionRebind, DecodedTexture, ColorFilter, AccessibilitySettings, EncodedImage, UiDocument, InputAction, StringTable, EnvironmentLight, ShadowInput, ToneMap, SceneLight, LocalShadows, SceneFog, SceneWind, RasterStyle, MeshMaterial, ResolvedLayers, ResolvedRefraction, SurfaceEffect, AnimatorOp, NavGraph, AnimationCue } from '@cartbox/editor';
+import { MeshSceneInstance, MeshAsset, Mat4, ScenePropValue, PhysicsSpec, AnimatorSpec, AttachedComponent, SceneLighting, PhysicsWorldSettings, SceneTimeline, SceneLevel, NavMesh, Terrain, SceneStreaming, ParticleEffect, DecalDef, DecalMark, RagdollBox, DebrisDef, LodChain, SceneAudio, ComponentDef, StreamGroup, JointKind, JointSpec, ActionRebind, DecodedTexture, ColorFilter, AccessibilitySettings, EncodedImage, UiDocument, InputAction, StringTable, EnvironmentLight, ShadowInput, ToneMap, SceneLight, LocalShadows, SceneFog, SceneWind, RasterStyle, SkySun, BakedCloudLayer, SunShafts, MeshMaterial, ResolvedLayers, ResolvedRefraction, SurfaceEffect, AnimatorOp, NavGraph, AnimationCue } from '@cartbox/editor';
 
 /**
  * The runtime mesh scene: the cart's mesh sidecar resolved into placed instances
@@ -683,7 +683,7 @@ declare const MAX_LUT_SIZE = 33;
 declare const LUT_LOOKS: readonly ["Infinite", "Warm noon", "Cold steel", "Bleach bypass", "Imported"];
 /** The `look` value that reads the imported table. */
 declare const IMPORTED_LOOK: number;
-type Rgb$2 = [number, number, number];
+type Rgb$3 = [number, number, number];
 /** The table for a built-in look (`look` past the built-ins gives the identity). */
 declare function lookLut(look: number, size?: number): GradingLut;
 /** The identity table: every colour maps to itself. */
@@ -706,7 +706,7 @@ declare function decodeLut(value: unknown): GradingLut | null;
  * Grade one colour (0..1 channels) through the table, trilinearly — what the
  * shader does with its strip texture. Outside 0..1 is clamped first.
  */
-declare function applyLut(lut: GradingLut, r: number, g: number, b: number): Rgb$2;
+declare function applyLut(lut: GradingLut, r: number, g: number, b: number): Rgb$3;
 /** The table as the shader's RGBA strip: `size` slices of `size × size`, blue picking the slice. */
 declare function lutStrip(lut: GradingLut): {
     width: number;
@@ -2315,7 +2315,7 @@ declare function writeWatches(block: DataView, expressions: readonly string[]): 
  * ahead of the lighting + post-FX passes. Intended app home:
  * packages/player/src/scene/parallaxScene.ts.
  */
-type Rgb$1 = readonly [number, number, number];
+type Rgb$2 = readonly [number, number, number];
 /** One depth layer of the scene. */
 interface ParallaxLayer {
     /** Straight-alpha RGBA pixels, width*height*4 bytes. */
@@ -2360,7 +2360,7 @@ interface ParallaxLayer {
 /** Aerial-perspective parameters, shared by the whole scene. */
 interface AtmosphereParams {
     /** The haze/sky colour distance fades toward (each channel 0..255). */
-    fog: Rgb$1;
+    fog: Rgb$2;
     /** 0..1 — how strongly the farthest layer is pulled toward `fog`. */
     density: number;
     /** 0..1 — how much colour the farthest layer loses (aerial desaturation). */
@@ -2967,6 +2967,15 @@ interface PlayerOptions {
      * from the device — see quality.ts. High is everything as authored.
      */
     quality?: QualityChoice;
+    /**
+     * Present the 3D frame from the GPU (AAA_FIDELITY_ROADMAP.md F0a), or not.
+     * Defaults to the model's `gpuPresent` render cap (the AAA tier). It applies
+     * only where it can: WebGPU, a mesh scene, and no CPU-drawn layers between
+     * the scene and the screen (2D lighting, weather, the HD-2D world, sprite
+     * backdrops or foreground placements); anywhere else the frame takes the
+     * byte path as before.
+     */
+    gpuPresent?: boolean;
     /**
      * Control settings (aim inversion, look sensitivity, controller and keyboard
      * bindings, touch pad size/opacity). Change them live with
@@ -3766,6 +3775,12 @@ interface SceneDraw {
     readonly occlude?: boolean;
 }
 /**
+ * A frame drawn to stay on the GPU (AAA_FIDELITY_ROADMAP.md F0a): a
+ * {@link SceneDraw} without the CPU framebuffer, depth scratch or background,
+ * which the GPU compositor supplies instead.
+ */
+type GpuSceneDraw = Omit<SceneDraw, "out" | "depth" | "background">;
+/**
  * Where a renderer's newest frame stands (see {@link SceneRenderer.settle}):
  * on screen ("current"), its readback still in flight ("pending"), or submitted
  * without a readback, so it needs rendering again to be seen ("stale").
@@ -3785,6 +3800,16 @@ interface SceneRenderer {
     settle?(draw: SceneDraw): FrameState;
     /** False while a GPU renderer has no finished frame to show yet (just built); absent for one that always has. */
     readonly ready?: boolean;
+    /**
+     * WebGPU only (AAA_FIDELITY_ROADMAP.md F0a): draw the frame and leave it on
+     * the GPU, returning the texture that holds it — premultiplied RGBA8, alpha 0
+     * wherever nothing drew, as the readback would have composited — with no
+     * readback. Valid until the next render; null when the frame could not be
+     * drawn. Absent on the renderers that have no GPU texture to give.
+     */
+    renderToTexture?(instances: readonly MeshSceneInstance[], draw: GpuSceneDraw): unknown;
+    /** The GPU device a {@link renderToTexture} texture belongs to, so a compositor can share it. */
+    readonly gpuDevice?: unknown;
     dispose(): void;
     /** What the last frame drew, for the profiler (see debug/profiler.ts). */
     readonly lastFrameStats?: RenderStats;
@@ -3825,6 +3850,8 @@ declare class CappedSceneRenderer implements SceneRenderer {
     render(instances: readonly MeshSceneInstance[], draw: SceneDraw): void;
     settle(draw: SceneDraw): FrameState;
     get ready(): boolean | undefined;
+    get gpuDevice(): unknown;
+    get renderToTexture(): SceneRenderer["renderToTexture"];
     dispose(): void;
 }
 /** True when a model's caps constrain the scene, so wrapping would do something. */
@@ -3925,6 +3952,314 @@ declare function rasterStyleFor(caps: RenderCaps): RasterStyle;
  * that actually needs the GPU, and it keeps it.
  */
 declare function webgpuCanHonour(style: RasterStyle): boolean;
+
+/**
+ * Presenting a 3D frame from the GPU (AAA_FIDELITY_ROADMAP.md F0a).
+ *
+ * The byte path renders the scene on the GPU, reads it back, then does the rest
+ * on the CPU: it paints the sky, composites the scene over it, streaks the sun
+ * shafts, draws the held weapon, keys the cart's HUD and the holo UI on top, and
+ * measures the frame for the lens flare and eye adaptation. Everything after
+ * the scene pass sees 8-bit bytes, a frame or two late.
+ *
+ * Here every one of those steps is a GPU pass over textures on the same device
+ * as the scene renderer, ending in the target the caller gives (a WebGPU
+ * canvas's texture):
+ *
+ * 1. **Sky:** the equirectangular dome, its sun's glow and its drifting cloud
+ *    layers, per pixel through the camera (`renderSkyBackground`'s maths).
+ * 2. **Sun shafts:** the light-source mask at reduced resolution (open sky that
+ *    is bright and near the sun), then the gather along the line to the sun
+ *    (`applySunShafts`'s maths).
+ * 3. **Compose:** the base (the sky, a flat colour, or the cart's own frame),
+ *    the scene over it (premultiplied), the shafts added, the held weapon over
+ *    that, the cart's frame keyed on top as a HUD, and the holo UI over all.
+ * 4. **Post:** the post-process stack, when one is set, as a port of the WebGL
+ *    pass (see gpuPostFx.ts) from the composite into the target.
+ * 5. **Measure:** the log-average luminance eye adaptation needs and how much
+ *    of the sun is unblocked, reduced in one compute workgroup and read back
+ *    as four numbers, asynchronously — the only readback left, sixteen bytes
+ *    instead of the frame.
+ *
+ * The cart's frame and the holo layer are CPU-drawn and uploaded as they are
+ * (the cart's core makes its frame on the CPU anyway). What no longer happens
+ * is the round trip of the 3D frame. Pure maths stays in the WGSL below and in
+ * the exported packers, so the uniform layouts are testable without a device.
+ */
+
+type Rgb$1 = readonly [number, number, number];
+type Rgba = readonly [number, number, number, number];
+/** The sky dome a frame draws behind its scene. */
+interface PresentSky {
+    /** The baked panorama (RGBA8; alpha is how much of the sun's glow shows, see `bakeSceneSky`). */
+    readonly map: DecodedTexture;
+    readonly view: Mat4;
+    readonly projection: Mat4;
+    /** The sun whose glow is drawn into it, or null for the panorama as baked. */
+    readonly sun: SkySun | null;
+    /** Drifting cloud layers (I6), and the seconds they have drifted. */
+    readonly clouds: readonly BakedCloudLayer[];
+    readonly time: number;
+}
+/** What a frame's scene draws over. */
+type PresentBase = {
+    readonly kind: "sky";
+    readonly sky: PresentSky;
+}
+/** A flat colour, RGBA 0..255. */
+ | {
+    readonly kind: "colour";
+    readonly rgba: Rgba;
+}
+/** The cart's own frame (RGBA8, `width × height`), shown wherever the scene drew nothing. */
+ | {
+    readonly kind: "frame";
+    readonly rgba: Uint8Array | Uint8ClampedArray;
+};
+/** One frame for {@link GpuPresenter.present}. */
+interface PresentFrame {
+    readonly base: PresentBase;
+    /** The scene, premultiplied RGBA8 on this device (alpha 0 where nothing drew), or null. */
+    readonly scene: any | null;
+    /** Sun shafts, over a sky base only: where the sun is (pixels, y down), its colour and the authored shafts. */
+    readonly shafts?: {
+        readonly sun: {
+            readonly x: number;
+            readonly y: number;
+        };
+        readonly color: Rgb$1;
+        readonly shafts: SunShafts;
+    } | null;
+    /** The front layer (a held weapon), premultiplied RGBA8 on this device, or null. */
+    readonly front?: any | null;
+    /** The cart's frame as a HUD over everything (first person), or null. */
+    readonly hud?: Uint8Array | Uint8ClampedArray | null;
+    /** HUD pixels whose channels sum to more than this (0..765) cover the scene; the rest let it show. */
+    readonly hudKey?: number;
+    /** The holo UI, premultiplied RGBA8 (`width × height`), over everything, or null. */
+    readonly holo?: Uint8ClampedArray | null;
+    /** The post-process stack to finish the frame through (its uniforms, and the clock grain runs on), or null for none. */
+    readonly post?: {
+        readonly uniforms: PostFxUniforms;
+        readonly time: number;
+    } | null;
+    /** What to measure this frame: eye-adaptation luminance, and/or the sun's visibility at a point (pixels). */
+    readonly measure?: {
+        readonly luminance: boolean;
+        readonly sun: {
+            readonly x: number;
+            readonly y: number;
+        } | null;
+    } | null;
+}
+/** The newest measurements to arrive (see {@link PresentFrame.measure}); `seq` counts arrivals. */
+interface PresentStats {
+    /** Log-average linear luminance of the scene over its base, or null when it wasn't measured. */
+    readonly luminance: number | null;
+    /** Counts the arrivals that measured luminance (eye adaptation steps once per new reading). */
+    readonly luminanceSeq: number;
+    /** The share of taps round the sun that see open sky (0..1), or null when it wasn't measured. */
+    readonly sunVisible: number | null;
+    readonly seq: number;
+}
+/** Floats in the sky pass's uniform block. */
+declare const SKY_UNIFORM_FLOATS: number;
+/**
+ * The sky pass's uniforms: the camera's right, up and back rows with the
+ * projection's reciprocal focal lengths, the cloud count, the sun and its
+ * colour, the clock, the frame size, and each cloud layer's scale, wind,
+ * opacity and colour.
+ */
+declare function packSkyUniforms(sky: PresentSky, width: number, height: number, out?: Float32Array<ArrayBuffer>): Float32Array;
+/** The shaft passes' grid: how many frame pixels a cell spans, and the grid's size (`applySunShafts`'s). */
+declare function shaftGrid(width: number, height: number): {
+    step: number;
+    width: number;
+    height: number;
+};
+/**
+ * The shaft passes' uniforms: the sun (pixels), the screen diagonal and the
+ * cell step; the frame and grid sizes; the sun in cell units, the beams' reach
+ * (cells) and strength; and the sun's colour.
+ */
+declare function packShaftUniforms(sun: {
+    readonly x: number;
+    readonly y: number;
+}, shafts: SunShafts, color: Rgb$1, width: number, height: number, out?: Float32Array<ArrayBuffer>): Float32Array;
+/** Floats in the compose pass's uniform block. */
+declare const COMPOSE_UNIFORM_FLOATS = 20;
+/** The compose pass's uniforms: which layers are present, the HUD key, the flat base, and the shafts' colour and sampling scale. */
+declare function packComposeUniforms(frame: PresentFrame, width: number, height: number, out?: Float32Array<ArrayBuffer>): Float32Array;
+/** The measure pass's uniforms: frame size, luminance grid step, base kind; the flat base; the sun (pixels), tap radius and whether to tap it. */
+declare function packMeasureUniforms(frame: PresentFrame, width: number, height: number, out?: Float32Array<ArrayBuffer>): Float32Array;
+/**
+ * Composites and presents frames on one device (see the module comment).
+ * Holds its intermediate targets, sized for one frame size; the caller gives
+ * the target texture each frame (a canvas's current texture) and its format.
+ */
+declare class GpuPresenter {
+    private readonly device;
+    readonly width: number;
+    readonly height: number;
+    private readonly blank;
+    private readonly linear;
+    private readonly layouts;
+    private readonly pipelines;
+    private readonly uniforms;
+    private readonly data;
+    private skyTarget;
+    /** The composite, when a post stack reads it before the target. */
+    private composed;
+    private postFx;
+    private shaftTargets;
+    private readonly uploads;
+    private panorama;
+    private cloudTexture;
+    private readonly measured;
+    private latestStats;
+    private destroyed;
+    constructor(device: any, width: number, height: number);
+    /** The newest measurements to arrive (a frame or two behind the frame that asked). */
+    get stats(): PresentStats;
+    /** Composite `frame` into `target` (a texture of `format`, `width × height`) and submit. */
+    present(frame: PresentFrame, target: any, format: string): void;
+    /** Release every resource this presenter made. */
+    dispose(): void;
+    private readMeasurements;
+    private target;
+    /** A CPU frame (RGBA8, this presenter's size) uploaded into its named slot. */
+    private upload;
+    /** The panorama uploaded once per distinct map. */
+    private panoramaFor;
+    /** The cloud layers' density tiles as one texture array (one blank layer for none), uploaded when the layers change. */
+    private cloudsFor;
+    private pipeline;
+    private fullScreen;
+}
+
+/**
+ * Display surface: owns the <canvas>, computes scaling, and blits engine
+ * framebuffers. The scaling math is a pure function so it can be unit-tested
+ * without a DOM.
+ */
+
+/**
+ * A display surface the player can present frames to. Both the plain 2D
+ * {@link CanvasSurface} and the WebGL {@link LitCanvasSurface} implement it, so
+ * the run loop presents frames the same way regardless of lighting.
+ */
+interface DisplaySurface {
+    /** Present one RGBA framebuffer. */
+    blit(rgba: Uint8Array): void;
+    /** Release the canvas and any observers. */
+    destroy(): void;
+}
+
+/**
+ * PostFxSurface — a display surface that draws every presented frame through
+ * the post-process shader chain. It decorates the real surface (plain 2D or
+ * the lighting surface): the inner surface renders into a detached, offscreen
+ * container, and each `blit` re-samples its canvas GPU-side into the visible
+ * FX canvas. Decorating (rather than merging into the lighting pipeline) keeps
+ * lighting and FX orthogonal — any combination of the two just works.
+ *
+ * Construction can fail (no WebGL, no inner canvas); the factory returns null
+ * and the caller mounts the inner surface directly, so enabling FX can never
+ * stop a cart from playing.
+ */
+
+/** Builds the inner (decorated) surface into the given offscreen container. */
+type InnerSurfaceFactory = (container: HTMLElement) => Promise<DisplaySurface> | DisplaySurface;
+/** Where a 3D scene's sun is on screen (0..1, y down) and how much of it is unblocked (0..1). */
+interface ScreenSun {
+    readonly x: number;
+    readonly y: number;
+    readonly visible: number;
+}
+declare class PostFxSurface implements DisplaySurface {
+    private readonly container;
+    private readonly scaleMode;
+    private readonly model;
+    private readonly inner;
+    private readonly innerCanvas;
+    private readonly canvas;
+    private readonly pass;
+    private readonly resizeObserver;
+    private uniforms;
+    /** When this surface started, so animated effects get a monotonic clock. */
+    private readonly startedAt;
+    /** The sun a 3D scene reports this frame; the lens flare follows it. Null = use the source point. */
+    private sun;
+    private constructor();
+    /**
+     * Builds the FX surface, or returns null when post-processing cannot run
+     * (the caller should then mount the inner surface directly). The inner
+     * factory is only invoked once the FX pass itself is viable.
+     */
+    static create(container: HTMLElement, scaleMode: ScaleMode, model: ConsoleModel, settings: PostFxSettings, makeInner: InnerSurfaceFactory): Promise<PostFxSurface | null>;
+    /** Swap the effect stack without rebuilding the pipeline. */
+    setSettings(settings: PostFxSettings): void;
+    /**
+     * Follow a 3D scene's sun with the lens flare (HALO2_STYLE_ROADMAP.md, H8),
+     * or null to go back to the effect's own source point.
+     */
+    setSun(sun: ScreenSun | null): void;
+    blit(rgba: Uint8Array): void;
+    destroy(): void;
+    private applyScale;
+}
+
+/**
+ * GpuCanvasSurface — the base display surface of a GPU-presented frame
+ * (AAA_FIDELITY_ROADMAP.md F0a): a WebGPU canvas on the scene renderer's own
+ * device, which the mesh overlay presents each frame into through a
+ * {@link GpuPresenter}, so the 3D frame never leaves the GPU.
+ *
+ * It is the {@link CanvasSurface} of that path: native resolution, scaled up
+ * with CSS, and a plain `blit` that shows a CPU frame (the cart's own) through
+ * the same compositor. It is also the post-FX stack of that path (the
+ * {@link PostFxSurface} API: settings and the sun to follow), which the
+ * presenter runs on the GPU rather than in a WebGL context that would have to
+ * copy this canvas first.
+ */
+
+declare class GpuCanvasSurface implements DisplaySurface {
+    private readonly container;
+    private readonly scaleMode;
+    private readonly model;
+    private readonly canvas;
+    private readonly context;
+    private readonly format;
+    /** The compositor every frame goes through. */
+    readonly presenter: GpuPresenter;
+    private readonly resizeObserver;
+    private destroyed;
+    /** The post stack's uniforms, or null with no effect on. */
+    private post;
+    /** The sun a 3D scene reports; the lens flare follows it (null: the effect's own source point). */
+    private sun;
+    /** When this surface started, so animated effects get a monotonic clock. */
+    private readonly startedAt;
+    private constructor();
+    /**
+     * A WebGPU canvas on `device`, or null when the page can't give one (no
+     * WebGPU canvas context): the caller then mounts the 2D canvas, and the
+     * frame takes the byte path.
+     */
+    static create(container: HTMLElement, scaleMode: ScaleMode, model: ConsoleModel, device: any): GpuCanvasSurface | null;
+    /** The newest measurements the presenter has read back (luminance, the sun's visibility). */
+    get stats(): PresentStats;
+    /** Set the post-process stack (null, or nothing enabled, for none). */
+    setSettings(settings: PostFxSettings | null): void;
+    /** Follow a 3D scene's sun with the lens flare, or null for the effect's own source point. */
+    setSun(sun: ScreenSun | null): void;
+    /** Composite and show one frame, through the post stack when one is set. */
+    present(frame: PresentFrame): void;
+    /** Show a CPU frame as it is (the cart's own, before any 3D draws). */
+    blit(rgba: Uint8Array): void;
+    destroy(): void;
+    private applyScale;
+}
 
 /**
  * The player's WebGL2 triangle path (ENGINE_ROADMAP.md, Phase 4): the GPU
@@ -4348,9 +4683,20 @@ declare class WebgpuSceneRenderer implements SceneRenderer {
     render(instances: readonly MeshSceneInstance[], draw: SceneDraw): void;
     /** Whether a finished GPU frame exists to show (false until the first readback lands). */
     get ready(): boolean;
+    get gpuDevice(): any;
+    /**
+     * Draw the frame and leave it on the GPU (AAA_FIDELITY_ROADMAP.md F0a): the
+     * same passes as {@link render}, ending in the colour texture instead of a
+     * readback, so there is no lag and nothing to composite on the CPU. The
+     * texture is premultiplied RGBA8 with alpha 0 where nothing drew, and holds
+     * this frame until the next render.
+     */
+    renderToTexture(instances: readonly MeshSceneInstance[], draw: GpuSceneDraw): any | null;
     settle(draw: SceneDraw): FrameState;
-    /** Encode and submit one frame, and start a readback if a buffer is free. */
+    /** Encode and submit one frame, and start a readback if a buffer is free (or, with `readback` false, leave it in the colour texture). */
     private submit;
+    /** Clear the colour texture to transparent black (a GPU-kept frame with nothing in it). */
+    private clearColour;
     /**
      * The reflection targets (I3): reflect and env, each single-sampled (read by
      * the pass) with a multisampled twin for an anti-aliased frame; the pass's
@@ -4969,24 +5315,6 @@ declare function resolveSupersample(width: number, height: number, requested?: n
 declare function createLightingLayer(doc: Document, width: number, height: number, deviceProvider?: DeviceProvider, supersample?: number): Promise<BuiltLightingRenderer | null>;
 
 /**
- * Display surface: owns the <canvas>, computes scaling, and blits engine
- * framebuffers. The scaling math is a pure function so it can be unit-tested
- * without a DOM.
- */
-
-/**
- * A display surface the player can present frames to. Both the plain 2D
- * {@link CanvasSurface} and the WebGL {@link LitCanvasSurface} implement it, so
- * the run loop presents frames the same way regardless of lighting.
- */
-interface DisplaySurface {
-    /** Present one RGBA framebuffer. */
-    blit(rgba: Uint8Array): void;
-    /** Release the canvas and any observers. */
-    destroy(): void;
-}
-
-/**
  * LitCanvasSurface — a display surface that relights each frame through the
  * lighting renderer before showing it. It is a drop-in for {@link CanvasSurface}:
  * the run loop still calls `blit(albedo)`; this surface pulls the frame's lights
@@ -5179,60 +5507,6 @@ declare class PostFxPass {
      */
     render(source: PostFxSource, width: number, height: number, uniforms: PostFxUniforms, time?: number): void;
     dispose(): void;
-}
-
-/**
- * PostFxSurface — a display surface that draws every presented frame through
- * the post-process shader chain. It decorates the real surface (plain 2D or
- * the lighting surface): the inner surface renders into a detached, offscreen
- * container, and each `blit` re-samples its canvas GPU-side into the visible
- * FX canvas. Decorating (rather than merging into the lighting pipeline) keeps
- * lighting and FX orthogonal — any combination of the two just works.
- *
- * Construction can fail (no WebGL, no inner canvas); the factory returns null
- * and the caller mounts the inner surface directly, so enabling FX can never
- * stop a cart from playing.
- */
-
-/** Builds the inner (decorated) surface into the given offscreen container. */
-type InnerSurfaceFactory = (container: HTMLElement) => Promise<DisplaySurface> | DisplaySurface;
-/** Where a 3D scene's sun is on screen (0..1, y down) and how much of it is unblocked (0..1). */
-interface ScreenSun {
-    readonly x: number;
-    readonly y: number;
-    readonly visible: number;
-}
-declare class PostFxSurface implements DisplaySurface {
-    private readonly container;
-    private readonly scaleMode;
-    private readonly model;
-    private readonly inner;
-    private readonly innerCanvas;
-    private readonly canvas;
-    private readonly pass;
-    private readonly resizeObserver;
-    private uniforms;
-    /** When this surface started, so animated effects get a monotonic clock. */
-    private readonly startedAt;
-    /** The sun a 3D scene reports this frame; the lens flare follows it. Null = use the source point. */
-    private sun;
-    private constructor();
-    /**
-     * Builds the FX surface, or returns null when post-processing cannot run
-     * (the caller should then mount the inner surface directly). The inner
-     * factory is only invoked once the FX pass itself is viable.
-     */
-    static create(container: HTMLElement, scaleMode: ScaleMode, model: ConsoleModel, settings: PostFxSettings, makeInner: InnerSurfaceFactory): Promise<PostFxSurface | null>;
-    /** Swap the effect stack without rebuilding the pipeline. */
-    setSettings(settings: PostFxSettings): void;
-    /**
-     * Follow a 3D scene's sun with the lens flare (HALO2_STYLE_ROADMAP.md, H8),
-     * or null to go back to the effect's own source point.
-     */
-    setSun(sun: ScreenSun | null): void;
-    blit(rgba: Uint8Array): void;
-    destroy(): void;
-    private applyScale;
 }
 
 /**
@@ -5536,7 +5810,7 @@ declare function renderSceneBackdrop(out: Uint8ClampedArray, width: number, heig
  * @param out       Optional target buffer; defaults to a fresh one.
  * @returns The composited RGBA (the same array as `out` when supplied).
  */
-declare function compositeOverBackdrop(cartFrame: Uint8ClampedArray, backdrop: Uint8ClampedArray, width: number, height: number, keyRgb: Rgb$1, tolerance?: number, out?: Uint8ClampedArray): Uint8ClampedArray;
+declare function compositeOverBackdrop(cartFrame: Uint8ClampedArray, backdrop: Uint8ClampedArray, width: number, height: number, keyRgb: Rgb$2, tolerance?: number, out?: Uint8ClampedArray): Uint8ClampedArray;
 
 /**
  * A {@link SpriteRegionSource} that reads a loaded cart's sprite sheet at runtime.
@@ -5557,7 +5831,7 @@ declare function compositeOverBackdrop(cartFrame: Uint8ClampedArray, backdrop: U
 interface CartSpriteSource {
     source: SpriteRegionSource;
     /** The RGB of a cart palette index (e.g. the scene's background keyColor). */
-    paletteRgb(index: number): Rgb$1;
+    paletteRgb(index: number): Rgb$2;
     /** Free the cart object. */
     dispose(): void;
 }
@@ -5618,7 +5892,7 @@ declare class SceneBackdropSurface implements DisplaySurface {
     private readonly backdrop;
     private readonly composited;
     private readonly presented;
-    constructor(inner: DisplaySurface, width: number, height: number, layers: readonly ParallaxLayer[], spec: SceneSpec, keyRgb: Rgb$1);
+    constructor(inner: DisplaySurface, width: number, height: number, layers: readonly ParallaxLayer[], spec: SceneSpec, keyRgb: Rgb$2);
     /**
      * Set the backdrop camera the cart published this frame (via `cartbox.camera`).
      * Added to the scene's own auto-scroll, so an auto-scroll-only cart that never
@@ -5986,6 +6260,20 @@ interface MeshOverlayOptions {
      * milliseconds a frame. The surface owns (and disposes) what it makes.
      */
     readonly createFrontRenderer?: () => Promise<SceneRenderer>;
+    /**
+     * Present the frame from the GPU (AAA_FIDELITY_ROADMAP.md F0a): when given,
+     * and the renderer can keep its frame on the GPU, the scene and the held
+     * weapon render to textures and this composites them with the sky, the sun
+     * shafts, the cart's frame and the holo UI straight to the screen, instead
+     * of reading the scene back and finishing the frame on the CPU. The inner
+     * surface is not blitted then: this is the base surface it would have shown.
+     */
+    readonly presenter?: GpuPresentTarget;
+}
+/** Where a GPU-presented frame goes (a {@link GpuCanvasSurface}): it composites and shows a frame, and reports what it measured. */
+interface GpuPresentTarget {
+    present(frame: PresentFrame): void;
+    readonly stats: PresentStats;
 }
 /** Loads a KTX2 → RGBA decoder (see {@link MeshOverlayOptions.ktx2}). */
 type Ktx2DecoderLoader = () => Promise<(bytes: Uint8Array) => DecodedTexture | null>;
@@ -6126,6 +6414,10 @@ declare class MeshOverlaySurface implements DisplaySurface {
     private lastPlacement;
     /** Draws the cart's shown holo UI documents over the finished frame (I12; set by the player). */
     private holo;
+    /** The holo UI's own layer on a GPU-presented frame (premultiplied, cleared each frame). */
+    private holoLayer;
+    /** The presenter's measurements last taken in: luminance's reading, and the frame eye adaptation last stepped on. */
+    private gpuSeen;
     /** Which objects drew on the front layer last frame (where their trails go). */
     private lastFront;
     /** Swing trails (I10): the objects whose meshes leave them, and the ribbons they've swept. */
@@ -6182,7 +6474,7 @@ declare class MeshOverlaySurface implements DisplaySurface {
      */
     applySceneEdits(next: MeshScene): Promise<boolean>;
     /** Draw holo UI documents over every frame with `draw` (null: none). */
-    setHolo(draw: ((out: Uint8ClampedArray, width: number, height: number, time: number) => void) | null): void;
+    setHolo(draw: ((out: Uint8ClampedArray, width: number, height: number, time: number, premultiplied?: boolean) => boolean | void) | null): void;
     /** Apply a graphics quality preset (takes effect on the next frame). */
     setQuality(quality: QualitySettings): void;
     /**
@@ -6264,6 +6556,20 @@ declare class MeshOverlaySurface implements DisplaySurface {
     /** The scene's memory by kind (every texture map with mips, meshes, targets), for the per-device budgets (P8). */
     sceneMemory(): SceneMemory;
     blit(rgba: Uint8Array): void;
+    /** The GPU presenter this frame goes to, when there is one and the renderer can keep its frame on the GPU (F0a). */
+    private gpuTarget;
+    /**
+     * Finish a frame on the GPU (AAA_FIDELITY_ROADMAP.md F0a): the scene and the
+     * held weapon render to textures, and the presenter composites them with the
+     * sky, its shafts, the cart's frame (beneath, or keyed on top as a HUD) and
+     * the holo UI. The lens flare's visibility and eye adaptation read what the
+     * presenter measured a frame or two ago, as the byte path measures the bytes.
+     */
+    private presentOnGpu;
+    /** The presenter's newest measurements into the lens flare and eye adaptation (the byte path's reportSun and frameLuminance). */
+    private takeGpuMeasurements;
+    /** Ask for the GPU front renderer once (see MeshOverlayOptions.createFrontRenderer). */
+    private requestFrontRenderer;
     /** A front-layer instance as a GPU front renderer draws it: its mesh without refraction (the same instance when it has none). */
     private withoutRefraction;
     /** The rig's tone map with the volumes' and the eye's stops applied (null without tone mapping). */
@@ -7807,4 +8113,4 @@ declare const DIRECT_CORE_URL = "/engine/modern-core/modern-core.js";
  */
 declare function mount(container: HTMLElement, options: PlayerOptions): PlayerHandle;
 
-export { AIM_ASSISTS, AgentCrowd, type AimAssist, type AnimClip, type AnimMode, type AnimPlacement, type AnimSpec, type AnimState, type AnimTarget, type AnimTrack, AnimatedForegroundSurface, AnimationSession, type AtmosphereParams, BLOOM_KNEE, BloomPyramid, BroadcastChannelTransport, type BuiltLightingRenderer, CAMERA_BASE, CAMERA_SCALE, CARTBOX_SDK_LUA, CELL_WORLD, CMD_RING_BYTES, CMD_RING_MAX, CappedSceneRenderer, type CartSpriteSource, CartridgeLoadError, type CastHit, type CastShape, type ClipSample, type ClipTableEntry, type CollisionField, ConsoleButton, type ConsoleInstance, type ConsoleModel, type ControlScheme, type ControlSettings, type ControlTarget, DEFAULT_AMBIENT, DEFAULT_ATMOSPHERE, DEFAULT_CONTROL_SETTINGS, DEFAULT_KEY_BINDINGS, DEFAULT_LIGHT, DEFAULT_MODEL_ID, DEFAULT_MOUSE_LOOK, DEFAULT_PAD_BINDINGS, DEFAULT_STICK_DEAD_ZONES, DEFAULT_TRIGGER_THRESHOLD, DIRECT_CORE_URL, DebugCommand, type DebugStep, type DeviceHints, type DeviceProvider, type DirectConsole, DirectTransport, type DirectTransportOptions, type DriftStats, EVENT_CAPACITY, type Ease, EngineLoadError, type ErrorFrame, FLARE_GHOSTS, FLARE_GHOST_GAIN, FLARE_SPIKE_POWER, type FlagsField, type FlareGhost, type FlareParams, type FrameState, GYRO_AIMS, GamepadInput, type GeneratedTrack, type GlContextProvider, type GradingLut, type GyroAim, HEIGHT_WORLD, IMPORTED_LOOK, INPUT_BLOCK_BYTES, INPUT_MAGIC, INPUT_SETTINGS, INSTANCE_FLOATS, type InnerSurfaceFactory, type InputChange, type InspectedObject, type InstanceTransform, type Keyframe, LIGHTS_BASE, LIGHTS_CAPACITY, LIGHT_FLOATS, LIGHT_STRIDE, LOOP_SLOTS, LUT_LOOKS, LUT_SIZE, type LabCart, type LabProbe, type LayerChannel, type Light, type LightingBackend, type LightingFrameContext, LightingLayer, type LightingOptions, type LightingRenderer, type LightingScene, type LinkConditions, LitCanvasSurface, type LookDevice, type LookProfile, MAILBOX_TYPE_ACHIEVEMENT, MAILBOX_TYPE_PROGRESS, MAILBOX_TYPE_SCORE, MAILBOX_WORDS, MAX_EMITTERS, MAX_LUT_SIZE, MAX_PARTICLES_PER_EMITTER, MAX_PYRAMID_LEVELS, MAX_VOICES, MESH_CAM_ANGLE_SCALE, MESH_CAM_BASE, MESH_CAM_DIST_SCALE, MESH_CAM_STRIDE, MESH_POSE_BASE, MESH_POSE_CAPACITY, MESH_POSE_HIDDEN, MESH_POSE_STRIDE, MIN_LUT_SIZE, MIN_PYRAMID_DIMENSION, MODELS, MOUSE_FULL_LEAN_PX, type MailboxCamera, type MailboxEvent, type MailboxEventKind, type MailboxMeshCamera, type MailboxMeshPose, type MailboxRead, type MaterialBuffer, MemoryNetHub, type MeshInstance, MeshOverlaySurface, type MeshScene, type SceneCamera$1 as MeshSceneCamera, type ModelId, NET_MODE_CLIENT, NET_MODE_HOST, NET_MODE_OFFLINE, NET_SLOTS, NET_WORDS, NORMAL_DIRECTION_COUNT, NORMAL_VECTORS, type NetEvent, type NetInbox, type NetLabOptions, type NetLabReport, type NetMessage, type NetOutbox, type NetPeer, type NetRoomStatus, NetSession, type NetSignal, type NetState, type NetTransport, type ObjectLook, PAD_BUTTONS, PARTICLE_KINDS, PHYSICS_DT, PHYS_BLOCK_BYTES, PHYS_MAGIC, POINTER_AT, POINTER_MAGIC, POST_FX_EFFECTS, PROFILE_SECTIONS, PROFILE_WINDOW, type PackableLight, type PadButton, type PadSnapshot, type Particle, type ParticleEmitter, type ParticleKind, ParticleOverlaySurface, type ParticleSpec, type PauseInfo, type PbrMaterial, type PhysicsBackend, type PhysicsBodyDesc, type PhysicsJointDesc, type Quat as PhysicsQuat, PhysicsSession, type PhysicsShape, type Vec3$3 as PhysicsVec3, type PlacementChannel, type PlayerHandle, type PlayerOptions, PointerInput, type PointerState, type PostFxColorDef, type PostFxEffectDef, type PostFxEffectId, type PostFxParamDef, PostFxPass, type PostFxSettings, type PostFxSource, PostFxSurface, type PostFxUniforms, type ProfileSection, type ProfileSnapshot, Profiler, QUALITY_LEVELS, QUALITY_PRESETS, type QualityChoice, QualityGovernor, type QualityLevel, type QualitySettings, RAM_LAYOUTS, REPLAY_VERSION, RESPONSE_CURVES, type RamLayout, type RegionImage, type RegisteredAchievement, type RenderCanvas, type RenderCaps, type RenderStats, type Replay, ReplayError, ReplayRecorder, ReplaySource, type ResolvedMapping, type ResolvedPbr, type ResolvedPlacement, type ResponseCurve, type Rgb, type RtcDataChannelLike, type RtcPeerConnectionFactory, type RtcPeerConnectionLike, type RumbleEffect, RuntimeChannel, SAVE_MAGIC, SOFTWARE_RASTER_CAPS, START_KEYS, STICK_LAYOUTS, type ScaleMode, SceneBackdropSurface, type SceneBounds, type SceneCamera, type SceneDraw, type SceneLayer, type SceneMemory, type SceneRenderer, type SceneSpec, type SceneVista, type ScreenSun, type SectionStats, SimulatedNetHub, SoftwareSceneRenderer, type SoundContext, SoundSystem, type Speaker, type SpriteRegion, type SpriteRegionSource, type StickDeadZones, type StickLayout, SwitchableTransport, TILT_SHIFT_FEATHER, TINT_PALETTE, TOUCH_CONTROL_IDS, TOUCH_LOOK_MODES, type TextureLookup, type TouchControlId, type TouchLayout, type TouchLookMode, type TouchPlacement, type TraceLine, type TrackMode, UNIFORM_BYTES_USED, UNIFORM_FLOATS, UNIFORM_STRIDE, VERTEX_FLOATS, type Vec3$2 as Vec3, type VerificationResult, WEBGL_INSTANCES_PER_DRAW, WEBGL_MAX_LIGHTS, WebglSceneRenderer, WebgpuLightingLayer, WebgpuSceneRenderer, type WorldBillboard, type WorldBillboardPose, type WorldCamera, type WorldCameraSpec, type WorldLight, WorldOverlaySurface, type WorldProp, type WorldScene, type WorldTileCell, acesFilmic, acesFilmicChannel, actionsSdkLua, aimAssistLevel, alignBytesPerRow, animClipsSdkLua, animatedObjects, anyPostFxEnabled, appendLuaCode, applyActionToggles, applyLookSettings, applyLut, applyQualityToPostFx, applyRenderCaps, armDebugBlock, armSaveBlock, askMotionPermission, breakableLine, browserDeviceHints, browserRtc, browserSpeaker, buildBillboardInstance, buildClipTable, buildOrbitCamera, buildShadowInstance, buildTerrainInstances, buildWorldCamera, cameraAt, capTextures, capTriangles, capsConstrainScene, cellAt, clipFrameIndex, codeChunks, codeLineOffset, collisionSdkLua, commandRingAddress, commandRingBytes, commandRingMax, commandsPerTick, compileAnimator, componentsSdkLua, composeParallax, composeWorldMatrix, compositeOverBackdrop, createCartSpriteSource, createConsole, createDirectConsole, createFlatMaterial, createLightingLayer, createSceneRenderer, createTextureBudgetCache, deadZoned, debugBlockAddress, debugPostlude, debugSdkLua, decodeCamera, decodeLights, decodeLut, decodeMailbox, decodeMeshCamera, decodeMeshPoses, decodeNetMessage, decodeWorldLights, defaultPostFxSettings, detectQuality, deterministicBackend, directCoreModel, dragLean, drift, effectiveBreakpoints, emitterPreset, encodeLut, encodeNetMessage, errorStack, estimateSceneBytes, estimateSceneMemory, evaluate, extractScore, extractUnlocks, fillSky, fitShape, fitTextureToBudget, flagsSdkLua, flicker, frameDurationMs, framebufferBytes, getModel, getWebgpuDevice, gyroLean, hasCommandRing, hashCart, hashEventId, hexToRgb01, identityLut, injectSdk, inputBlockAddress, instrumentLua, interleaveVertices, interpolateNormal, isMobileAgent, jointFrames, layoutSticks, lensFlareAt, loadEngineModule, lookAccelerationBoost, lookGains, lookLut, lookProfileFor, lutStrip, makeShadowTexture, mount, mouseLean, nearestDirection, netSendInterval, normalBasis3x3, normalVector, orbitPitchAboveTerrain, packLights, paramKey, parseAnim, parseCollisionField, parseControlSettings, parseCubeLut, parseFlagsField, parseMeshScene, parseParticles, parsePauseInfo, parsePostFxSettings, parseReplay, parseScene, parseTouchLayout, parseWorldScene, physicsBlockAddress, physicsSdkLua, physicsSlots, physicsStateHash, placeWithin, playLanguage, prehazeLayers, prependLuaCode, pulse, pyramidLevelCount, pyramidLevelSize, randomSeed, rasterStyleFor, readCartCode, readPad, readPause, readSidecarActions, readSidecarUi, reflectionFade, reflectionSampleY, remapErrorLines, renderSceneBackdrop, resolveButton, resolveLight, resolveMapping, resolvePbr, resolveQuality, resolveSceneLayers, resolveSupersample, resolveUnlockedAchievements, responseCurve, rewriteLuaCode, rumbleEffect, runNetLab, runReplayEvents, runtimeSdkLua, sampleClipFrame, sampleNormalBilinear, sampleScalarBilinear, sampleTrack, saveBlockAddress, saveBlockBytes, saveCapacity, saveSdkLua, sceneHasAnimation, sceneHasPhysics, sceneNeedsRuntime, sceneObjectsSdkLua, seedCartridge, sendDebugCommand, serializeReplay, shade, shapeStick, simulateEmitter, smoothFrontEdges, softKneePrefilter, splitWorldMatrix, standardizePad, stepLookAcceleration, streamGroups, stringsSdkLua, sway, takeNetOutbox, takePhysicsCommands, takeRingCommands, takeSave, tiltShiftBlur, toConsolePixel, toggleMask, tokenizeLua, uiSdkLua, uniformsFromSettings, unpadRows, validSave, verifyReplayScore, viewDirection, webgpuCanHonour, worldCenter, writeBreakpoints, writeInputBlock, writeInputSettings, writeInstanceTransform, writeInstanceUniform, writeNetInbox, writePhysicsState, writePointer, writeWatches };
+export { AIM_ASSISTS, AgentCrowd, type AimAssist, type AnimClip, type AnimMode, type AnimPlacement, type AnimSpec, type AnimState, type AnimTarget, type AnimTrack, AnimatedForegroundSurface, AnimationSession, type AtmosphereParams, BLOOM_KNEE, BloomPyramid, BroadcastChannelTransport, type BuiltLightingRenderer, CAMERA_BASE, CAMERA_SCALE, CARTBOX_SDK_LUA, CELL_WORLD, CMD_RING_BYTES, CMD_RING_MAX, COMPOSE_UNIFORM_FLOATS, CappedSceneRenderer, type CartSpriteSource, CartridgeLoadError, type CastHit, type CastShape, type ClipSample, type ClipTableEntry, type CollisionField, ConsoleButton, type ConsoleInstance, type ConsoleModel, type ControlScheme, type ControlSettings, type ControlTarget, DEFAULT_AMBIENT, DEFAULT_ATMOSPHERE, DEFAULT_CONTROL_SETTINGS, DEFAULT_KEY_BINDINGS, DEFAULT_LIGHT, DEFAULT_MODEL_ID, DEFAULT_MOUSE_LOOK, DEFAULT_PAD_BINDINGS, DEFAULT_STICK_DEAD_ZONES, DEFAULT_TRIGGER_THRESHOLD, DIRECT_CORE_URL, DebugCommand, type DebugStep, type DeviceHints, type DeviceProvider, type DirectConsole, DirectTransport, type DirectTransportOptions, type DriftStats, EVENT_CAPACITY, type Ease, EngineLoadError, type ErrorFrame, FLARE_GHOSTS, FLARE_GHOST_GAIN, FLARE_SPIKE_POWER, type FlagsField, type FlareGhost, type FlareParams, type FrameState, GYRO_AIMS, GamepadInput, type GeneratedTrack, type GlContextProvider, GpuCanvasSurface, GpuPresenter, type GpuSceneDraw, type GradingLut, type GyroAim, HEIGHT_WORLD, IMPORTED_LOOK, INPUT_BLOCK_BYTES, INPUT_MAGIC, INPUT_SETTINGS, INSTANCE_FLOATS, type InnerSurfaceFactory, type InputChange, type InspectedObject, type InstanceTransform, type Keyframe, LIGHTS_BASE, LIGHTS_CAPACITY, LIGHT_FLOATS, LIGHT_STRIDE, LOOP_SLOTS, LUT_LOOKS, LUT_SIZE, type LabCart, type LabProbe, type LayerChannel, type Light, type LightingBackend, type LightingFrameContext, LightingLayer, type LightingOptions, type LightingRenderer, type LightingScene, type LinkConditions, LitCanvasSurface, type LookDevice, type LookProfile, MAILBOX_TYPE_ACHIEVEMENT, MAILBOX_TYPE_PROGRESS, MAILBOX_TYPE_SCORE, MAILBOX_WORDS, MAX_EMITTERS, MAX_LUT_SIZE, MAX_PARTICLES_PER_EMITTER, MAX_PYRAMID_LEVELS, MAX_VOICES, MESH_CAM_ANGLE_SCALE, MESH_CAM_BASE, MESH_CAM_DIST_SCALE, MESH_CAM_STRIDE, MESH_POSE_BASE, MESH_POSE_CAPACITY, MESH_POSE_HIDDEN, MESH_POSE_STRIDE, MIN_LUT_SIZE, MIN_PYRAMID_DIMENSION, MODELS, MOUSE_FULL_LEAN_PX, type MailboxCamera, type MailboxEvent, type MailboxEventKind, type MailboxMeshCamera, type MailboxMeshPose, type MailboxRead, type MaterialBuffer, MemoryNetHub, type MeshInstance, MeshOverlaySurface, type MeshScene, type SceneCamera$1 as MeshSceneCamera, type ModelId, NET_MODE_CLIENT, NET_MODE_HOST, NET_MODE_OFFLINE, NET_SLOTS, NET_WORDS, NORMAL_DIRECTION_COUNT, NORMAL_VECTORS, type NetEvent, type NetInbox, type NetLabOptions, type NetLabReport, type NetMessage, type NetOutbox, type NetPeer, type NetRoomStatus, NetSession, type NetSignal, type NetState, type NetTransport, type ObjectLook, PAD_BUTTONS, PARTICLE_KINDS, PHYSICS_DT, PHYS_BLOCK_BYTES, PHYS_MAGIC, POINTER_AT, POINTER_MAGIC, POST_FX_EFFECTS, PROFILE_SECTIONS, PROFILE_WINDOW, type PackableLight, type PadButton, type PadSnapshot, type Particle, type ParticleEmitter, type ParticleKind, ParticleOverlaySurface, type ParticleSpec, type PauseInfo, type PbrMaterial, type PhysicsBackend, type PhysicsBodyDesc, type PhysicsJointDesc, type Quat as PhysicsQuat, PhysicsSession, type PhysicsShape, type Vec3$3 as PhysicsVec3, type PlacementChannel, type PlayerHandle, type PlayerOptions, PointerInput, type PointerState, type PostFxColorDef, type PostFxEffectDef, type PostFxEffectId, type PostFxParamDef, PostFxPass, type PostFxSettings, type PostFxSource, PostFxSurface, type PostFxUniforms, type PresentBase, type PresentFrame, type PresentSky, type PresentStats, type ProfileSection, type ProfileSnapshot, Profiler, QUALITY_LEVELS, QUALITY_PRESETS, type QualityChoice, QualityGovernor, type QualityLevel, type QualitySettings, RAM_LAYOUTS, REPLAY_VERSION, RESPONSE_CURVES, type RamLayout, type RegionImage, type RegisteredAchievement, type RenderCanvas, type RenderCaps, type RenderStats, type Replay, ReplayError, ReplayRecorder, ReplaySource, type ResolvedMapping, type ResolvedPbr, type ResolvedPlacement, type ResponseCurve, type Rgb, type RtcDataChannelLike, type RtcPeerConnectionFactory, type RtcPeerConnectionLike, type RumbleEffect, RuntimeChannel, SAVE_MAGIC, SKY_UNIFORM_FLOATS, SOFTWARE_RASTER_CAPS, START_KEYS, STICK_LAYOUTS, type ScaleMode, SceneBackdropSurface, type SceneBounds, type SceneCamera, type SceneDraw, type SceneLayer, type SceneMemory, type SceneRenderer, type SceneSpec, type SceneVista, type ScreenSun, type SectionStats, SimulatedNetHub, SoftwareSceneRenderer, type SoundContext, SoundSystem, type Speaker, type SpriteRegion, type SpriteRegionSource, type StickDeadZones, type StickLayout, SwitchableTransport, TILT_SHIFT_FEATHER, TINT_PALETTE, TOUCH_CONTROL_IDS, TOUCH_LOOK_MODES, type TextureLookup, type TouchControlId, type TouchLayout, type TouchLookMode, type TouchPlacement, type TraceLine, type TrackMode, UNIFORM_BYTES_USED, UNIFORM_FLOATS, UNIFORM_STRIDE, VERTEX_FLOATS, type Vec3$2 as Vec3, type VerificationResult, WEBGL_INSTANCES_PER_DRAW, WEBGL_MAX_LIGHTS, WebglSceneRenderer, WebgpuLightingLayer, WebgpuSceneRenderer, type WorldBillboard, type WorldBillboardPose, type WorldCamera, type WorldCameraSpec, type WorldLight, WorldOverlaySurface, type WorldProp, type WorldScene, type WorldTileCell, acesFilmic, acesFilmicChannel, actionsSdkLua, aimAssistLevel, alignBytesPerRow, animClipsSdkLua, animatedObjects, anyPostFxEnabled, appendLuaCode, applyActionToggles, applyLookSettings, applyLut, applyQualityToPostFx, applyRenderCaps, armDebugBlock, armSaveBlock, askMotionPermission, breakableLine, browserDeviceHints, browserRtc, browserSpeaker, buildBillboardInstance, buildClipTable, buildOrbitCamera, buildShadowInstance, buildTerrainInstances, buildWorldCamera, cameraAt, capTextures, capTriangles, capsConstrainScene, cellAt, clipFrameIndex, codeChunks, codeLineOffset, collisionSdkLua, commandRingAddress, commandRingBytes, commandRingMax, commandsPerTick, compileAnimator, componentsSdkLua, composeParallax, composeWorldMatrix, compositeOverBackdrop, createCartSpriteSource, createConsole, createDirectConsole, createFlatMaterial, createLightingLayer, createSceneRenderer, createTextureBudgetCache, deadZoned, debugBlockAddress, debugPostlude, debugSdkLua, decodeCamera, decodeLights, decodeLut, decodeMailbox, decodeMeshCamera, decodeMeshPoses, decodeNetMessage, decodeWorldLights, defaultPostFxSettings, detectQuality, deterministicBackend, directCoreModel, dragLean, drift, effectiveBreakpoints, emitterPreset, encodeLut, encodeNetMessage, errorStack, estimateSceneBytes, estimateSceneMemory, evaluate, extractScore, extractUnlocks, fillSky, fitShape, fitTextureToBudget, flagsSdkLua, flicker, frameDurationMs, framebufferBytes, getModel, getWebgpuDevice, gyroLean, hasCommandRing, hashCart, hashEventId, hexToRgb01, identityLut, injectSdk, inputBlockAddress, instrumentLua, interleaveVertices, interpolateNormal, isMobileAgent, jointFrames, layoutSticks, lensFlareAt, loadEngineModule, lookAccelerationBoost, lookGains, lookLut, lookProfileFor, lutStrip, makeShadowTexture, mount, mouseLean, nearestDirection, netSendInterval, normalBasis3x3, normalVector, orbitPitchAboveTerrain, packComposeUniforms, packLights, packMeasureUniforms, packShaftUniforms, packSkyUniforms, paramKey, parseAnim, parseCollisionField, parseControlSettings, parseCubeLut, parseFlagsField, parseMeshScene, parseParticles, parsePauseInfo, parsePostFxSettings, parseReplay, parseScene, parseTouchLayout, parseWorldScene, physicsBlockAddress, physicsSdkLua, physicsSlots, physicsStateHash, placeWithin, playLanguage, prehazeLayers, prependLuaCode, pulse, pyramidLevelCount, pyramidLevelSize, randomSeed, rasterStyleFor, readCartCode, readPad, readPause, readSidecarActions, readSidecarUi, reflectionFade, reflectionSampleY, remapErrorLines, renderSceneBackdrop, resolveButton, resolveLight, resolveMapping, resolvePbr, resolveQuality, resolveSceneLayers, resolveSupersample, resolveUnlockedAchievements, responseCurve, rewriteLuaCode, rumbleEffect, runNetLab, runReplayEvents, runtimeSdkLua, sampleClipFrame, sampleNormalBilinear, sampleScalarBilinear, sampleTrack, saveBlockAddress, saveBlockBytes, saveCapacity, saveSdkLua, sceneHasAnimation, sceneHasPhysics, sceneNeedsRuntime, sceneObjectsSdkLua, seedCartridge, sendDebugCommand, serializeReplay, shade, shaftGrid, shapeStick, simulateEmitter, smoothFrontEdges, softKneePrefilter, splitWorldMatrix, standardizePad, stepLookAcceleration, streamGroups, stringsSdkLua, sway, takeNetOutbox, takePhysicsCommands, takeRingCommands, takeSave, tiltShiftBlur, toConsolePixel, toggleMask, tokenizeLua, uiSdkLua, uniformsFromSettings, unpadRows, validSave, verifyReplayScore, viewDirection, webgpuCanHonour, worldCenter, writeBreakpoints, writeInputBlock, writeInputSettings, writeInstanceTransform, writeInstanceUniform, writeNetInbox, writePhysicsState, writePointer, writeWatches };
