@@ -300,7 +300,25 @@ Everything else depends on this track. It contains no visible "feature", but its
     - *Left for F1c:*
       - Bent normals for specular occlusion: no bake makes them yet (F9).
       - The clearcoat lobe keeps its Schlick visibility.
-      - Stored MikkTSpace tangents (F1c-2).
+  - **F1c-2, stored MikkTSpace tangents: done.**
+    - **The model.** A primitive can carry tangents (`MeshPrimitive.tangents`, `x,y,z,w`) through the sidecar and glTF (`TANGENT`).
+      - A node's transform moves them with its own 3×3; a mirroring one flips w.
+      - The engine samples textures at (u, 1 − v), so its bitangent `w · (n × t)` points up V. That is MikkTSpace's own sign and the opposite of glTF's, so w is flipped on import and export.
+    - **Made on import** (`model/tangents.ts`). A normal-mapped primitive that arrives without tangents gets MikkTSpace's, from its WebAssembly build: vendored in `src/vendor/mikktspace` (42 KB), loaded only in the editor and only for such an import.
+      - MikkTSpace takes unwelded triangles, so the primitive is unwelded, given its tangents, and welded again. A vertex splits only where its corners disagree, at a UV seam or a mirrored island.
+    - **On the GPU.** The WebGPU vertex grows to 64 bytes with the tangent at location 7. Zeros (w = 0) mark a primitive without tangents, or a live skinned copy, whose tangents would stay in bind pose.
+      - The linear-light shader decodes a normal map in the stored frame as it was baked: normal and tangent unit at each vertex, interpolated and left unnormalised, with the bitangent `w · (n × t)`.
+      - Without one it keeps the derivative frame, which is all the Modern tier, WebGL2 and the software rasteriser use. The prepass's G-buffer normal goes through the same `mappedNormal`.
+    - *Tests:* `tangents.test.ts` covers:
+      - the vendored module loading in Node through the browser loader;
+      - U-aligned tangents with w = +1 on a plain quad;
+      - a mirrored island splitting only its shared edge, with opposite w;
+      - generation only where needed;
+      - the sidecar and glTF round trips;
+      - the 64-byte interleave.
+      - On Dawn, the generated frame decodes a map as the derivative frame does on a plain layout (within 2%, along U and up V). A stored frame that differs is the one used, and w flips the bitangent.
+      - In Chromium, Beaver Creek on the `aaa` tier draws with 64-byte pipelines and the four tangent-aware shaders, with no errors.
+    - *Found, not changed:* imported glTF UVs are stored as glTF writes them (V down), while the engine samples V up (as OBJ and its own meshes are). So an imported glTF's textures show flipped vertically. Fixing it means flipping V on glTF import and export, which would change the look of meshes already saved in carts; that needs a decision. When it lands, the tangent conversion becomes w = glTF's w.
 - [ ] **F1d. The full material set.**
   - Sheen (Charlie distribution).
   - Transmission and volume (thickness, attenuation).

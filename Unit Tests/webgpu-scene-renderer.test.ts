@@ -213,7 +213,7 @@ describe("WebgpuSceneRenderer pipeline setup", () => {
     await WebgpuSceneRenderer.create(device, WIDTH, HEIGHT);
 
     const layout = log.pipelines[0].vertex.buffers[0];
-    expect(layout.arrayStride).toBe(48); // VERTEX_FLOATS * 4
+    expect(layout.arrayStride).toBe(64); // TANGENT_VERTEX_FLOATS * 4
     expect(layout.attributes.map((a: any) => [a.shaderLocation, a.offset, a.format])).toEqual([
       [0, 0, "float32x3"],
       [1, 12, "float32x3"],
@@ -221,6 +221,7 @@ describe("WebgpuSceneRenderer pipeline setup", () => {
       [3, 32, "float32x2"], // light-map uv
       [4, 40, "float32"], // blend weight
       [5, 44, "float32"], // sway (B6)
+      [7, 48, "float32x4"], // tangent (F1c; 6 is the prepass's previous position)
     ]);
   });
 

@@ -333,6 +333,16 @@ export interface MeshPrimitive {
   readonly positions: Float32Array;
   /** Per-vertex normals (`x,y,z`), or null when the source had none. */
   readonly normals: Float32Array | null;
+  /**
+   * Per-vertex tangents (`x,y,z,w`, glTF's TANGENT), the frame a normal map was
+   * baked in (AAA_FIDELITY_ROADMAP.md F1c): MikkTSpace, from the file or made
+   * on import (tangents.ts), with the bitangent `w · (normal × tangent)`
+   * pointing up the image (+V, as the engine samples at 1 − V: glTF's TANGENT
+   * has the opposite w, flipped on import and export). The
+   * AAA tier's shader decodes normal maps with them; every other path, and a
+   * primitive without them, takes the tangent from the UVs' screen derivatives.
+   */
+  readonly tangents?: Float32Array | null;
   /** Per-vertex weight (0..1) of the material's blend surface ({@link MeshMaterial.blendImage}), or absent. */
   readonly blend?: Float32Array;
   /** Per-vertex texture coordinates (`u,v`), or null when untextured. */
@@ -599,6 +609,7 @@ interface SerializedPrimitive {
   uvs: string | null;
   uvs2?: string;
   blend?: string;
+  tangents?: string;
   indices: string;
   material: SerializedMaterial;
   joints?: string;
@@ -794,6 +805,7 @@ export function serializeMeshAsset(mesh: MeshAsset): string {
       uvs: primitive.uvs ? f32ToBase64(primitive.uvs) : null,
       ...(primitive.uvs2 ? { uvs2: f32ToBase64(primitive.uvs2) } : {}),
       ...(primitive.blend ? { blend: f32ToBase64(primitive.blend) } : {}),
+      ...(primitive.tangents ? { tangents: f32ToBase64(primitive.tangents) } : {}),
       indices: u32ToBase64(primitive.indices),
       material: serializeMaterial(primitive.material, Object.assign(images, { primitive: index })),
       ...(primitive.joints && primitive.weights && mesh.skin ? serializeBinding(primitive.joints, primitive.weights) : {}),
@@ -1002,6 +1014,8 @@ export function deserializeMeshAsset(json: string): MeshAsset {
     if (uvs2 && uvs2.length !== vertexCount * 2) throw new Error(MALFORMED);
     const blend = typeof entry.blend === "string" ? base64ToF32(entry.blend) : null;
     if (blend && (blend.length !== vertexCount || !blend.every((w) => w >= 0 && w <= 1))) throw new Error(MALFORMED);
+    const tangents = typeof entry.tangents === "string" ? base64ToF32(entry.tangents) : null;
+    if (tangents && (tangents.length !== vertexCount * 4 || !tangents.every(Number.isFinite))) throw new Error(MALFORMED);
 
     const indices = base64ToU32(entry.indices);
     if (indices.length === 0 || indices.length % 3 !== 0) throw new Error(MALFORMED);
@@ -1050,6 +1064,7 @@ export function deserializeMeshAsset(json: string): MeshAsset {
       material: deserializeMaterial(entry.material, Object.assign(images, { primitive: index })),
       ...(uvs2 ? { uvs2 } : {}),
       ...(blend ? { blend } : {}),
+      ...(tangents ? { tangents } : {}),
       ...(joints && weights ? { joints, weights } : {}),
     };
   });

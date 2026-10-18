@@ -794,7 +794,7 @@ export const VERTEX_FLOATS = 12;
 
 /**
  * Interleave the separate attribute streams into the single buffer the pipeline
- * declares (arrayStride 48). A primitive with no UVs (or no light-map UVs, blend weights or sway) gets
+ * declares (arrayStride 48; WebGPU's adds a tangent, see below). A primitive with no UVs (or no light-map UVs, blend weights or sway) gets
  * zeros, which is what the software path effectively uses — and the shader
  * ignores them anyway because the matching texture flag is off.
  */
@@ -822,6 +822,35 @@ export function interleaveVertices(
     out[to + 9] = uvs2 ? (uvs2[i * 2 + 1] ?? 0) : 0;
     out[to + 10] = blend ? (blend[i] ?? 0) : 0;
     out[to + 11] = sway ? (sway[i] ?? 0) : 0;
+  }
+  return out;
+}
+
+/** Floats per vertex in the WebGPU buffer: the {@link VERTEX_FLOATS} above, then a tangent(4) (F1c). */
+export const TANGENT_VERTEX_FLOATS = VERTEX_FLOATS + 4;
+
+/**
+ * The WebGPU renderer's vertices (arrayStride 64): {@link interleaveVertices}'
+ * twelve floats, then the vertex's stored MikkTSpace tangent (F1c). A
+ * primitive without one per vertex gets zeros, whose w of 0 tells the shader
+ * to take its tangent from the UVs' screen derivatives instead.
+ */
+export function interleaveVerticesWithTangents(
+  positions: Float32Array,
+  normals: Float32Array,
+  uvs: Float32Array | null,
+  uvs2: Float32Array | null,
+  blend: Float32Array | null,
+  sway: Float32Array | null,
+  tangents: Float32Array | null,
+): Float32Array {
+  const base = interleaveVertices(positions, normals, uvs, uvs2, blend, sway);
+  const count = base.length / VERTEX_FLOATS;
+  const own = tangents && tangents.length === count * 4 ? tangents : null;
+  const out = new Float32Array(count * TANGENT_VERTEX_FLOATS);
+  for (let i = 0; i < count; i += 1) {
+    out.set(base.subarray(i * VERTEX_FLOATS, (i + 1) * VERTEX_FLOATS), i * TANGENT_VERTEX_FLOATS);
+    if (own) out.set(own.subarray(i * 4, i * 4 + 4), i * TANGENT_VERTEX_FLOATS + VERTEX_FLOATS);
   }
   return out;
 }
