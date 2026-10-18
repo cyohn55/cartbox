@@ -230,6 +230,23 @@ Everything else depends on this track. It contains no visible "feature", but its
   - KTX2/Basis is transcoded to the **native GPU format** rather than RGBA: BC7/BC5/BC4 on desktop, ASTC on Apple, ETC2 as the fallback.
   - Also unblocks the N64 model's true trilinear filtering (`renderCaps.ts:227-242`).
   - *Exit:* texture memory on Beaver Creek drops by at least 4×, with no minification shimmer at distance.
+  - **F1a-1, mips and anisotropy: done.** On the `aaa` tier (the `mipmaps` cap; the `mipmaps` player option; `/lockout?hdr=1`), every 3D texture gets a full mip chain, sampled trilinearly at 16× anisotropy.
+    - **Made on the GPU** (`render/mipmaps.ts`). Each level is drawn from the one above.
+      - Colour maps (base, emissive, blend surface) go through an `rgba8unorm-srgb` view, so they average in linear light. A distant black-and-white checker reads as the grey it looks like (188), not the darker byte average (128).
+      - Data maps (metal-roughness, occlusion and relief, normal, light map, detail) average as stored.
+    - **Cut-outs keep their coverage.** A colour map with see-through texels is mipped on the CPU instead. Each level's alpha is rescaled so the share of texels passing the cutoff matches full size (Castaño), and transparent texels take the level's mean colour so edges don't fringe dark. Plain averaging would thin foliage cards away with distance.
+    - **Where it applies.** The fantasy tiers are untouched, so they keep parity with the software rasteriser, which has no mips; `trilinear` still means bilinear there.
+    - *Tests:* `mipmaps.test.ts` covers:
+      - the chain arithmetic;
+      - linear-light versus byte averaging on Dawn;
+      - coverage-preserving levels;
+      - on Dawn, a receding one-texel checker: shimmer between two camera positions 3 cm apart falls from about 20 levels to 0, and the far floor reads the linear-light grey;
+      - a far field of cut-out cards stays about half covered.
+      - In Chromium, Beaver Creek mips 17 textures and samples them anisotropically, with no errors.
+    - *Left for later:*
+      - The coarsest levels of a cut-out have too few texels to hold its coverage exactly, so the farthest cards round to more or less covered.
+      - Mips cost texture memory a third more until compression lands.
+      - F1a-2 transcodes KTX2 to BC7/ASTC/ETC2 with its mips kept, and F1a-3 ships Beaver Creek's textures compressed for the 4× memory exit.
 - [ ] **F1b. Texture streaming.** Mip streaming driven by GPU feedback: a sampler-feedback-style pass that records the mip each material wanted, under a texture-memory budget per scalability level, with residency in the profiler. It also covers texture arrays, or bindless where available, so materials stop competing for 16 bind slots.
 - [ ] **F1c. BRDF upgrade.**
   - Multiscatter GGX energy compensation (Kulla-Conty, or Fdez-Agüera's LUT).

@@ -302,6 +302,13 @@ interface RenderCaps {
      * `gpuPresent`.
      */
     prepass?: boolean;
+    /**
+     * Full mip chains on every texture, made on the GPU and sampled trilinearly
+     * at 16× anisotropy (AAA_FIDELITY_ROADMAP.md F1a). WebGPU only, and so only
+     * the AAA tier: the fantasy tiers keep parity with the software rasteriser,
+     * which has no mips.
+     */
+    mipmaps?: boolean;
 }
 /**
  * What the shared software rasteriser behind the mesh/world overlays actually
@@ -3009,6 +3016,12 @@ interface PlayerOptions {
      */
     prepass?: boolean;
     /**
+     * Give every 3D texture a full mip chain, filtered trilinearly at 16×
+     * anisotropy (AAA_FIDELITY_ROADMAP.md F1a), or not. Defaults to the model's
+     * `mipmaps` render cap (the AAA tier); applies only on WebGPU.
+     */
+    mipmaps?: boolean;
+    /**
      * Control settings (aim inversion, look sensitivity, controller and keyboard
      * bindings, touch pad size/opacity). Change them live with
      * {@link PlayerHandle.setControlSettings}. Defaults: DEFAULT_CONTROL_SETTINGS.
@@ -3962,10 +3975,11 @@ declare function applyRenderCaps(instances: readonly MeshSceneInstance[], caps: 
 /**
  * The rasteriser style a model's caps ask for.
  *
- * `trilinear` maps to bilinear because no mip chain exists yet on either
- * backend. Mapping it the same way in both is the point: an N64-era model then
- * renders identically whether or not the viewer has WebGPU, and gains real
- * trilinear filtering on both at once when mips land.
+ * `trilinear` maps to bilinear because the fantasy tiers have no mip chain on
+ * any backend (the software rasteriser has none). Mapping it the same way in
+ * all of them is the point: an N64-era model then renders identically whether
+ * or not the viewer has WebGPU. The AAA tier's `mipmaps` cap is what turns real
+ * trilinear (and 16× anisotropic) filtering on, on WebGPU (F1a).
  */
 declare function rasterStyleFor(caps: RenderCaps): RasterStyle;
 /**
@@ -4562,9 +4576,14 @@ type DeviceProvider$1 = () => Promise<any | null>;
  * without a GPU finds the bug.
  */
 declare function createSceneRenderer(width: number, height: number, caps: RenderCaps, deviceProvider?: DeviceProvider$1, glProvider?: GlContextProvider, 
-/** `hdr`: a WebGPU renderer shades in linear light and keeps its frames on the GPU (F0b); the other backends ignore it. */
+/**
+ * `hdr`: a WebGPU renderer shades in linear light and keeps its frames on the GPU (F0b).
+ * `mips`: it gives every texture a full mip chain, filtered trilinearly at 16× anisotropy (F1a).
+ * The other backends ignore both.
+ */
 options?: {
     readonly hdr?: boolean;
+    readonly mips?: boolean;
 }): Promise<SceneRenderer>;
 
 /**
@@ -4655,11 +4674,17 @@ declare class WebgpuSceneRenderer implements SceneRenderer {
     private readonly bytesPerRow;
     /** Linear HDR (F0b): half-float targets, frames kept on the GPU (renderToTexture) and never read back. */
     readonly hdr: boolean;
+    /** Mipmapped textures (F1a): a full chain each, made on the GPU, sampled trilinearly at 16× anisotropy. */
+    readonly mips: boolean;
     readonly backend: "webgpu";
     /** Draws the opening frames, and any frame before the first readback lands. */
     private readonly software;
     private readonly meshes;
     private readonly textures;
+    /** With mips (F1a), colour maps upload apart: their chain is averaged in linear light. */
+    private readonly colourTextures;
+    /** Draws a texture's mip chain on the GPU (F1a). */
+    private readonly mipmaps;
     private bindGroups;
     /** Most recent completed readback, or null before the first one lands. */
     private latest;
@@ -4736,6 +4761,7 @@ declare class WebgpuSceneRenderer implements SceneRenderer {
     /** `hdr`: shade in linear light into half-float targets, for a GPU-presented frame (F0b; no readback). */
     options?: {
         readonly hdr?: boolean;
+        readonly mips?: boolean;
     }): Promise<WebgpuSceneRenderer | null>;
     /**
      * Point the shadow slot at an r32float sized to `size`, (re)creating it on a
@@ -4867,7 +4893,15 @@ declare class WebgpuSceneRenderer implements SceneRenderer {
     private uploadMesh;
     /** The bind group for one primitive, rebuilt if any of its textures changed. */
     private bindGroupFor;
-    /** Upload (once) a decoded texture. */
+    /**
+     * Upload (once) a decoded texture. With mips (F1a) it gets its full chain,
+     * each level drawn from the one above on the GPU; a colour map's through an
+     * sRGB view, so the averaging is in linear light and distant texels don't
+     * darken. The shader reads every level as it is stored (sRGB-encoded bytes).
+     * A colour map with see-through texels (a cut-out's, say a grass card's) is
+     * mipped on the CPU instead, keeping its coverage: averaged alpha would
+     * otherwise fall under the cutoff, and foliage would thin away with distance.
+     */
     private uploadTexture;
     dispose(): void;
 }

@@ -87,6 +87,13 @@ export interface RenderCaps {
    * `gpuPresent`.
    */
   prepass?: boolean;
+  /**
+   * Full mip chains on every texture, made on the GPU and sampled trilinearly
+   * at 16× anisotropy (AAA_FIDELITY_ROADMAP.md F1a). WebGPU only, and so only
+   * the AAA tier: the fantasy tiers keep parity with the software rasteriser,
+   * which has no mips.
+   */
+  mipmaps?: boolean;
 }
 
 /**
@@ -231,6 +238,7 @@ export const AAA_RASTER_CAPS: RenderCaps = {
   gpuPresent: true,
   linearHdr: true,
   prepass: true,
+  mipmaps: true,
 };
 
 export interface ConsoleModel {

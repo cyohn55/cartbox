@@ -174,6 +174,12 @@ export interface PlayerOptions {
    */
   prepass?: boolean;
   /**
+   * Give every 3D texture a full mip chain, filtered trilinearly at 16×
+   * anisotropy (AAA_FIDELITY_ROADMAP.md F1a), or not. Defaults to the model's
+   * `mipmaps` render cap (the AAA tier); applies only on WebGPU.
+   */
+  mipmaps?: boolean;
+  /**
    * Control settings (aim inversion, look sensitivity, controller and keyboard
    * bindings, touch pad size/opacity). Change them live with
    * {@link PlayerHandle.setControlSettings}. Defaults: DEFAULT_CONTROL_SETTINGS.

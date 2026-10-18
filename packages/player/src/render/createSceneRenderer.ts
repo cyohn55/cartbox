@@ -47,8 +47,12 @@ export async function createSceneRenderer(
   caps: RenderCaps,
   deviceProvider: DeviceProvider = getWebgpuDevice,
   glProvider?: GlContextProvider,
-  /** `hdr`: a WebGPU renderer shades in linear light and keeps its frames on the GPU (F0b); the other backends ignore it. */
-  options: { readonly hdr?: boolean } = {},
+  /**
+   * `hdr`: a WebGPU renderer shades in linear light and keeps its frames on the GPU (F0b).
+   * `mips`: it gives every texture a full mip chain, filtered trilinearly at 16× anisotropy (F1a).
+   * The other backends ignore both.
+   */
+  options: { readonly hdr?: boolean; readonly mips?: boolean } = {},
 ): Promise<SceneRenderer> {
   // The model's era decides how to rasterise, and therefore which backends are
   // even eligible: WebGPU declines a style it cannot reproduce (see

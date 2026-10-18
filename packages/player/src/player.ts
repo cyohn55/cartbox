@@ -567,7 +567,7 @@ export class Player {
         !(scene && backdrop);
       // …in linear light, tone-mapped once as it is presented (F0b), where the tier asks.
       let hdr = wantsGpuPresent && (this.options.linearHdr ?? this.model.renderCaps.linearHdr === true);
-      const makeRenderer = () => createSceneRenderer(this.model.width, this.model.height, this.model.renderCaps, undefined, undefined, { hdr });
+      const makeRenderer = () => createSceneRenderer(this.model.width, this.model.height, this.model.renderCaps, undefined, undefined, { hdr, mips: this.options.mipmaps ?? this.model.renderCaps.mipmaps === true });
       if (mesh || (world && this.cartSource)) this.sceneRenderer = await makeRenderer();
       const presentFromGpu = wantsGpuPresent && this.sceneRenderer?.backend === "webgpu" && Boolean(this.sceneRenderer.renderToTexture);
       const gpuCanvas = presentFromGpu ? GpuCanvasSurface.create(this.container, scale, this.model, this.sceneRenderer!.gpuDevice, { hdr }) : null;
