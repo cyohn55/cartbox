@@ -1512,8 +1512,8 @@ function readSidecarActions(raw) {
 
 // src/stringsSdk.ts
 var lua3 = (s) => JSON.stringify(s);
-function playLanguage(table, preferred) {
-  return table ? pickLanguage(table, preferred ?? []) : null;
+function playLanguage(table2, preferred) {
+  return table2 ? pickLanguage(table2, preferred ?? []) : null;
 }
 var INPUT_SETTINGS = 12;
 function writeInputSettings(block, accessibility, languageIndex, revision) {
@@ -1522,11 +1522,11 @@ function writeInputSettings(block, accessibility, languageIndex, revision) {
   block.setUint8(INPUT_SETTINGS + 2, Math.max(0, Math.min(255, languageIndex)));
   block.setUint8(INPUT_SETTINGS + 3, revision & 255);
 }
-function stringsSdkLua(table, language, accessibility, live) {
+function stringsSdkLua(table2, language, accessibility, live) {
   const parts = [];
   const startScale = accessibility?.textScale ?? 1;
   const startFilter = accessibility?.colorFilter ?? "none";
-  if (live !== void 0 && live !== null && (table || accessibility)) {
+  if (live !== void 0 && live !== null && (table2 || accessibility)) {
     parts.push(`local _A = ${live}
 local TS = {${TEXT_SCALES.join(",")}}
 local CF = {${COLOR_FILTERS.map(lua3).join(",")}}
@@ -1540,16 +1540,16 @@ cartbox.colorfilter = function() local v = live(1) if v == nil then return ${lua
     parts.push(`cartbox.textscale = function() return ${startScale} end
 cartbox.colorfilter = function() return ${lua3(startFilter)} end`);
   }
-  if (table && table.languages.length > 0) {
-    const byLanguage = table.languages.map((l) => {
-      const rows = table.entries.flatMap((e) => e.text[l] !== void 0 ? [`[${lua3(e.key)}]=${lua3(e.text[l])}`] : []);
+  if (table2 && table2.languages.length > 0) {
+    const byLanguage = table2.languages.map((l) => {
+      const rows = table2.entries.flatMap((e) => e.text[l] !== void 0 ? [`[${lua3(e.key)}]=${lua3(e.text[l])}`] : []);
       return `[${lua3(l)}]={${rows.join(",")}}`;
     });
-    const current = language && table.languages.includes(language) ? language : table.fallback;
+    const current = language && table2.languages.includes(language) ? language : table2.fallback;
     const liveLanguage = live !== void 0 && live !== null;
     parts.push(`local S = {${byLanguage.join(",\n")}}
-local LANGS = {${table.languages.map(lua3).join(",")}}
-local FALLBACK, lang = ${lua3(table.fallback)}, ${lua3(current)}
+local LANGS = {${table2.languages.map(lua3).join(",")}}
+local FALLBACK, lang = ${lua3(table2.fallback)}, ${lua3(current)}
 ${liveLanguage ? `-- The host's language choice, adopted whenever it changes (the cart's own setlanguage holds until then).
 local seen = nil
 local function sync()
@@ -10622,7 +10622,7 @@ function flattenClip(clip) {
 }
 function buildClipTable(anim) {
   if (!anim || !Array.isArray(anim.clips)) return [];
-  const table = [];
+  const table2 = [];
   for (const clip of anim.clips) {
     if (!clip || typeof clip.name !== "string" || clip.name.length === 0) continue;
     const { frames, once } = flattenClip(clip);
@@ -10633,7 +10633,7 @@ function buildClipTable(anim) {
       total += frame.duration;
       cum.push(total);
     }
-    table.push({
+    table2.push({
       name: clip.name,
       total,
       once,
@@ -10643,7 +10643,7 @@ function buildClipTable(anim) {
       cum
     });
   }
-  return table;
+  return table2;
 }
 function clipFrameIndex(entry, tick) {
   if (entry.total <= 0) return 1;
@@ -10662,9 +10662,9 @@ function luaString2(value) {
   return value.replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/\n/g, "\\n").replace(/\r/g, "");
 }
 function animClipsSdkLua(anim) {
-  const table = buildClipTable(anim);
-  if (table.length === 0) return "";
-  const entries = table.map(
+  const table2 = buildClipTable(anim);
+  if (table2.length === 0) return "";
+  const entries = table2.map(
     (entry) => `  ["${luaString2(entry.name)}"] = { total = ${entry.total}, once = ${entry.once}, tile = {${entry.tile.join(",")}}, w = {${entry.w.join(",")}}, h = {${entry.h.join(",")}}, cum = {${entry.cum.join(",")}} }`
   );
   return `do
@@ -17468,6 +17468,111 @@ function uploadCompressed(device, width, height, chain) {
   return texture;
 }
 
+// src/render/brdf.ts
+var DFG_SIZE = 32;
+var DFG_SAMPLES = 512;
+var MIN_ROUGHNESS = 0.045;
+function smithVisibility(ndl, ndv, a2) {
+  const gv = ndl * Math.sqrt(ndv * ndv * (1 - a2) + a2);
+  const gl = ndv * Math.sqrt(ndl * ndl * (1 - a2) + a2);
+  return 0.5 / (gv + gl + 1e-7);
+}
+function hammersley(i, n) {
+  let bits = i;
+  bits = (bits << 16 | bits >>> 16) >>> 0;
+  bits = ((bits & 1431655765) << 1 | (bits & 2863311530) >>> 1) >>> 0;
+  bits = ((bits & 858993459) << 2 | (bits & 3435973836) >>> 2) >>> 0;
+  bits = ((bits & 252645135) << 4 | (bits & 4042322160) >>> 4) >>> 0;
+  bits = ((bits & 16711935) << 8 | (bits & 4278255360) >>> 8) >>> 0;
+  return [i / n, bits / 4294967296];
+}
+function integrateDfg(ndv, roughness, samples = DFG_SAMPLES) {
+  const alpha = Math.max(MIN_ROUGHNESS, roughness) ** 2;
+  const a2 = alpha * alpha;
+  const vx = Math.sqrt(Math.max(0, 1 - ndv * ndv));
+  const vz = ndv;
+  let a = 0;
+  let b = 0;
+  for (let i = 0; i < samples; i += 1) {
+    const [u1, u2] = hammersley(i, samples);
+    const phi = 2 * Math.PI * u1;
+    const cosT = Math.sqrt((1 - u2) / (1 + (a2 - 1) * u2));
+    const sinT = Math.sqrt(1 - cosT * cosT);
+    const hx = sinT * Math.cos(phi);
+    const hz = cosT;
+    const vdh = vx * hx + vz * hz;
+    const lz = 2 * vdh * hz - vz;
+    if (lz <= 0 || vdh <= 0) continue;
+    const ndl = lz;
+    const ndh = hz;
+    const g = smithVisibility(ndl, ndv, a2) * 4 * ndl * vdh / ndh;
+    const fc = (1 - vdh) ** 5;
+    a += (1 - fc) * g;
+    b += fc * g;
+  }
+  return [a / samples, b / samples];
+}
+var table = null;
+function dfgTable() {
+  if (table) return table;
+  const out = new Float32Array(DFG_SIZE * DFG_SIZE * 2);
+  for (let r = 0; r < DFG_SIZE; r += 1) {
+    for (let v = 0; v < DFG_SIZE; v += 1) {
+      const [a, b] = integrateDfg((v + 0.5) / DFG_SIZE, (r + 0.5) / DFG_SIZE);
+      out[(r * DFG_SIZE + v) * 2] = a;
+      out[(r * DFG_SIZE + v) * 2 + 1] = b;
+    }
+  }
+  table = out;
+  return out;
+}
+function brdfWgsl(group, binding) {
+  const n = DFG_SIZE;
+  return (
+    /* wgsl */
+    `
+// The split-sum DFG table (F1c, brdf.ts): (A, B) by roughness row and N\xB7V column.
+@group(${group}) @binding(${binding}) var<storage, read> dfgLut: array<vec2<f32>>;
+fn dfgAt(ndv: f32, rough: f32) -> vec2<f32> {
+  let x = clamp(ndv * ${n}.0 - 0.5, 0.0, ${n - 1}.0);
+  let y = clamp(rough * ${n}.0 - 0.5, 0.0, ${n - 1}.0);
+  let x0 = u32(x);
+  let y0 = u32(y);
+  let x1 = min(x0 + 1u, ${n - 1}u);
+  let y1 = min(y0 + 1u, ${n - 1}u);
+  let fx = x - f32(x0);
+  let fy = y - f32(y0);
+  let top = mix(dfgLut[y0 * ${n}u + x0], dfgLut[y0 * ${n}u + x1], fx);
+  let bottom = mix(dfgLut[y1 * ${n}u + x0], dfgLut[y1 * ${n}u + x1], fx);
+  return mix(top, bottom, fy);
+}
+// The height-correlated Smith visibility, G2 / (4 N\xB7L N\xB7V), for alpha\xB2 = a2.
+fn smithVisibility(ndl: f32, ndv: f32, a2: f32) -> f32 {
+  let gv = ndl * sqrt(ndv * ndv * (1.0 - a2) + a2);
+  let gl = ndv * sqrt(ndl * ndl * (1.0 - a2) + a2);
+  return 0.5 / (gv + gl + 1e-7);
+}
+// The environment's specular weight, single and multiple scattering (Fdez-Ag\xFCera).
+fn specularEnergy(f0: vec3<f32>, dfg: vec2<f32>) -> vec3<f32> {
+  let ess = dfg.x + dfg.y;
+  let fssEss = f0 * dfg.x + vec3<f32>(dfg.y);
+  let ems = 1.0 - ess;
+  let favg = f0 + (vec3<f32>(1.0) - f0) / 21.0;
+  let fms = fssEss * favg / (vec3<f32>(1.0) - ems * favg);
+  return fssEss + fms * ems;
+}
+// The scale on a light's specular that adds back its multiple scattering (Kulla-Conty).
+fn energyCompensation(f0: vec3<f32>, dfg: vec2<f32>) -> vec3<f32> {
+  return vec3<f32>(1.0) + f0 * (1.0 / max(1e-4, dfg.x + dfg.y) - 1.0);
+}
+// Specular occlusion from ambient occlusion (Lagarde), for alpha = roughness\xB2.
+fn specularOcclusion(ndv: f32, ao: f32, alpha: f32) -> f32 {
+  return clamp(pow(ndv + ao, exp2(-16.0 * alpha - 1.0)) - 1.0 + ao, 0.0, 1.0);
+}
+`
+  );
+}
+
 // src/render/WebgpuSceneRenderer.ts
 var GBUFFER_FORMAT = "rgba16float";
 var VELOCITY_FORMAT = "rg16float";
@@ -17730,7 +17835,7 @@ struct Probe {
 // The opaque scene's colour (I5), copied as the see-through pass begins \u2014 what a
 // refracting surface bends (a 1\xD71 blank in the opaque pass, which never reads it).
 @group(1) @binding(7) var sceneColour: texture_2d<f32>;
-
+${hdr ? brdfWgsl(1, 8) : ""}
 // Optical depth of a fog layer thinning above base, along the ray from the eye
 // (height cy, rise dy, length len) over t in [t0, t1] \u2014 fogLayerDepth in skyDome.ts.
 fn fogLayer(d: f32, k: f32, base: f32, cy: f32, dy: f32, len: f32, t0: f32, t1: f32) -> f32 {
@@ -17902,7 +18007,8 @@ fn camoThreshold(p: vec2<f32>, time: f32) -> f32 {
 // (the pipeline blends it over what's there); an added one leaves its light
 // and no coverage (the pipeline adds it). compositeFrame reads the same codes.
 fn finishAlpha(rgb: vec3<f32>, a: f32) -> vec4<f32> {
-  let c = clamp(rgb, vec3<f32>(0.0), vec3<f32>(1.0));
+  // Linear light (F0b) keeps what is over 1 \u2014 a highlight, the sun on water \u2014 for the presenter's tone map.
+  let c = ${hdr ? "max(rgb, vec3<f32>(0.0))" : "clamp(rgb, vec3<f32>(0.0), vec3<f32>(1.0))"};
   if (u.pbr.w > 2.5) { return vec4<f32>(c * a, 0.0); }
   if (u.pbr.w > 1.5) { return vec4<f32>(c * a, a); }
   return vec4<f32>(c, 1.0);
@@ -18017,7 +18123,7 @@ fn anisoD(rough: f32, aniso: f32, toh: f32, boh: f32, ndh: f32) -> f32 {
   return a2 * b2 * b2 / 3.14159265;
 }
 // This fragment's anisotropy frame (set in fs, read by lightTerm).
-var<private> aniso: f32;
+var<private> aniso: f32;${hdr ? "\n// The multiple scattering a light's specular adds back (F1c; set in fs, read by lightTerm).\nvar<private> eComp: vec3<f32>;" : ""}
 var<private> aT: vec3<f32>;
 var<private> aB: vec3<f32>;
 // The clearcoat's normal and N\xB7V (P1a): the geometric normal, which the coat lies over the bumps with.
@@ -18034,7 +18140,7 @@ fn coatTerm(N: vec3<f32>, ndv: f32, Ld: vec3<f32>, H: vec3<f32>, vdh: f32) -> ve
   let D = ac2 / (3.14159265 * dd * dd + 1e-7);
   let G = (ndv / (ndv * (1.0 - kc) + kc)) * (ndl / (ndl * (1.0 - kc) + kc));
   let fc = ${CLEARCOAT_F02} + (1.0 - ${CLEARCOAT_F02}) * pow(1.0 - vdh, 5.0);
-  return vec2<f32>(u.layer0.x * fc * (D * G) / (4.0 * ndl * ndv + 1e-4) * ndl, u.layer0.x * fc);
+  return vec2<f32>(u.layer0.x * fc * (D * G) / (4.0 * ndl * ndv + 1e-4) * ndl${hdr ? " * 3.14159265" : ""}, u.layer0.x * fc);
 }
 // The environment's reflection along R from P, blurred toward its average by
 // roughness: inside a reflection probe's box (the smallest first), the room
@@ -18092,15 +18198,14 @@ fn lightTerm(lgt: Light, P: vec3<f32>, N: vec3<f32>, V: vec3<f32>, ndv: f32, a2:
   let ddL = ndhL * ndhL * (a2 - 1.0) + 1.0;
   var DL = a2 / (3.14159265 * ddL * ddL + 1e-7);
   if (aniso != 0.0) { DL = anisoD(sqrt(sqrt(a2)), aniso, dot(aT, Hl), dot(aB, Hl), ndhL); }
-  let GL = (ndv / (ndv * (1.0 - k) + k)) * (ndlL / (ndlL * (1.0 - k) + k));
+${hdr ? "  // F1c: the height-correlated visibility, and \u03C0, as the diffuse is albedo rather than albedo / \u03C0.\n  let specL = DL * smithVisibility(ndlL, ndv, a2) * 3.14159265;" : "  let GL = (ndv / (ndv * (1.0 - k) + k)) * (ndlL / (ndlL * (1.0 - k) + k));\n  let specL = (DL * GL) / (4.0 * ndlL * ndv + 1e-4);"}
   let fpL = pow(1.0 - vdhL, 5.0);
-  let specL = (DL * GL) / (4.0 * ndlL * ndv + 1e-4);
   let FL = f0 + (vec3<f32>(1.0) - f0) * fpL;
   var occl = 1.0;
   if (lgt.d0.w < 0.5) { occl = sf; }
   else if (lgt.d2.w >= 0.0 && frame.localShadow.x > 0.5) { occl = localShadow(i32(lgt.d2.w + 0.5), lgt, P, ndlL); }
   let w = lgt.d1.w * atten * ndlL * occl;
-  let lit = (kdm * (vec3<f32>(1.0) - FL) * albedo + FL * specL) * toLinear(lgt.d1.rgb) * w;
+  let lit = (kdm * (vec3<f32>(1.0) - FL) * albedo + FL * specL${hdr ? " * eComp" : ""}) * toLinear(lgt.d1.rgb) * w;
   if (u.layer0.x > 0.0) {
     // The clearcoat's own highlight, over a base its Fresnel dims (I4).
     let c = coatTerm(coatN, coatNdv, Ld, Hl, vdhL);
@@ -18270,7 +18375,7 @@ fn facingNormal(n: vec3<f32>) -> vec3<f32> {
 // addition, or let through at a shield's silhouette \u2014 finishAlpha with the
 // bent scene for the destination, so the pixel ends covered.
 fn finishRefracted(rgb: vec3<f32>, a: f32, bg: vec3<f32>, N: vec3<f32>) -> vec4<f32> {
-  let c = clamp(rgb, vec3<f32>(0.0), vec3<f32>(1.0));
+  let c = ${hdr ? "max(rgb, vec3<f32>(0.0))" : "clamp(rgb, vec3<f32>(0.0), vec3<f32>(1.0))"};
   if (u.pbr.w > 2.5) { return vec4<f32>(c * a + bg, 1.0); }
   if (u.pbr.w > 1.5) { return vec4<f32>(c * a + bg * (1.0 - a), 1.0); }
   let t = u.refract0.z * pow(1.0 - max(0.0, dot(N, u.view.xyz)), ${EFFECT_DISTORT_POWER2.toFixed(4)});
@@ -18360,7 +18465,8 @@ ${g.base}
     // Mirrors the software rasteriser's PBR branch (meshRasterizer.ts) term for
     // term, in the engine's non-linear byte space (a linear/HDR pipeline is a
     // later phase). Small float32-vs-float64 differences from pow/GGX are
-    // expected; the fantasy path below stays byte-identical.
+    // expected; the fantasy path below stays byte-identical. The linear-light
+    // variant (the AAA tier) departs from it for the AAA BRDF (F1c, brdf.ts).
     var N = normalize(sNrm);
     if (dot(N, u.view.xyz) < 0.0) { N = -N; } // two-sided: flip toward the viewer
     N = waterNormal(N, in.worldPos);
@@ -18424,12 +18530,19 @@ ${g.pbr}
     var D = a2 / (3.14159265 * dd * dd + 1e-7);
     if (aniso != 0.0) { D = anisoD(rough, aniso, dot(aT, H), dot(aB, H), ndh); }
     let k = ((rough + 1.0) * (rough + 1.0)) / 8.0; // Schlick-GGX (direct)
-    let G = (ndv / (ndv * (1.0 - k) + k)) * (ndl / (ndl * (1.0 - k) + k));
     let fp = pow(1.0 - vdh, 5.0);              // Fresnel-Schlick
-    let specD = (D * G) / (4.0 * ndl * ndv + 1e-4);
+${hdr ? `    // The AAA BRDF (F1c, brdf.ts): the height-correlated Smith visibility, the
+    // specular normalised against a diffuse of albedo (\u03C0), and the split-sum
+    // DFG for the environment, multiple scattering and specular occlusion.
+    let specD = D * smithVisibility(ndl, ndv, a2) * 3.14159265;` : `    let G = (ndv / (ndv * (1.0 - k) + k)) * (ndl / (ndl * (1.0 - k) + k));
+    let specD = (D * G) / (4.0 * ndl * ndv + 1e-4);`}
     let f0 = vec3<f32>(0.04) + (albedo - vec3<f32>(0.04)) * metallic;
     let F = f0 + (vec3<f32>(1.0) - f0) * fp;
-    let kdm = 1.0 - metallic;                  // metals have no diffuse
+${hdr ? `    let dfg = dfgAt(ndv, rough);
+    eComp = energyCompensation(f0, dfg);
+    let specE = specularEnergy(f0, dfg);
+    let specAo = specularOcclusion(ndv, ao, rough * rough);
+` : ""}    let kdm = 1.0 - metallic;                  // metals have no diffuse
     var emis = vec3<f32>(0.0);
     let ef = u.emissive.xyz;
     if (ef.r > 0.0 || ef.g > 0.0 || ef.b > 0.0) {
@@ -18456,8 +18569,9 @@ ${reflect ? "    var envSpec = vec3<f32>(0.0);\n    var envSeen = vec3<f32>(0.0)
       var rdv = ndv;
       if (aniso != 0.0) { rdv = dot(Rn, V); }
       let pref = envReflect(in.worldPos, 2.0 * rdv * Rn - V, rough);
-      amb = (irr * albedo * kdm + pref * f0 * reflectK) * ao;
-${reflect ? "      envSpec = pref * f0 * reflectK * ao;\n      envSeen = pref;\n" : ""}      // The clearcoat (I4) reflects the room sharply about its own normal, and
+${hdr ? "      // What the environment's reflection takes, the diffuse beneath it no longer receives.\n      amb = irr * albedo * kdm * (vec3<f32>(1.0) - specE) * ao + pref * specE * reflectK * specAo;\n" : "      amb = (irr * albedo * kdm + pref * f0 * reflectK) * ao;\n"}${reflect ? `      envSpec = pref * ${hdr ? "specE * reflectK * specAo" : "f0 * reflectK * ao"};
+      envSeen = pref;
+` : ""}      // The clearcoat (I4) reflects the room sharply about its own normal, and
       // what it reflects the base beneath no longer receives.
       if (u.layer0.x > 0.0) {
         let prefC = envReflect(in.worldPos, 2.0 * coatNdv * coatN - V, u.layer0.y);
@@ -18506,9 +18620,9 @@ ${reflect ? "    // What the light map, probes and SSAO did to the fill, they do
     } else if (u.layer0.x > 0.0) {
       // The clearcoat's own highlight, over a base its Fresnel dims (I4).
       let c = coatTerm(coatN, coatNdv, L, H, vdh);
-      lit = ((kdm * (vec3<f32>(1.0) - F) * albedo + F * specD) * ndl * (1.0 - c.y) + vec3<f32>(c.x)) * sf + amb + emis;
+      lit = ((kdm * (vec3<f32>(1.0) - F) * albedo + F * specD${hdr ? " * eComp" : ""}) * ndl * (1.0 - c.y) + vec3<f32>(c.x)) * sf + amb + emis;
     } else {
-      lit = (kdm * (vec3<f32>(1.0) - F) * albedo + F * specD) * ndl * sf + amb + emis;
+      lit = (kdm * (vec3<f32>(1.0) - F) * albedo + F * specD${hdr ? " * eComp" : ""}) * ndl * sf + amb + emis;
     }
     // A fresnel rim, light at grazing angles (zero when the material has none).
     lit = lit + toLinear(u.surface2.rgb) * pow(1.0 - ndv, u.surface2.w);
@@ -18529,7 +18643,7 @@ ${hdr ? `    // Linear light (F0b): what the reflection adds, and what it sees, 
     var seen = envSeen;
     if (u.tonemap.x > 0.5) { seen = vec3<f32>(aces(seen.r * u.tonemap.y), aces(seen.g * u.tonemap.y), aces(seen.b * u.tonemap.y)); }
     seen = clamp(seen, vec3<f32>(0.0), vec3<f32>(1.0));`}
-    let weight = (f0 * (1.0 - coatV) + vec3<f32>(coatV)) * reflectK * ao * occl;
+    let weight = ${hdr ? "(specE * specAo * (1.0 - coatV) + vec3<f32>(coatV * ao)) * reflectK * occl" : "(f0 * (1.0 - coatV) + vec3<f32>(coatV)) * reflectK * ao * occl"};
     reflectOut = vec4<f32>(clamp(select(weight, contribution / max(seen, vec3<f32>(1e-3)), seen > vec3<f32>(0.02)), vec3<f32>(0.0), vec3<f32>(1.0)), mix(rough, u.layer0.y, u.layer0.x));
     envOut = vec4<f32>(contribution, 1.0);`
     ) : ""}
@@ -18902,7 +19016,9 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
         { binding: 5, visibility: SHADER_STAGE_FRAGMENT, buffer: { type: "read-only-storage" } },
         { binding: 6, visibility: SHADER_STAGE_FRAGMENT, texture: { sampleType: "unfilterable-float", viewDimension: "3d" } },
         // The opaque scene's colour, for refraction (I5).
-        { binding: 7, visibility: SHADER_STAGE_FRAGMENT, texture: { sampleType: "unfilterable-float" } }
+        { binding: 7, visibility: SHADER_STAGE_FRAGMENT, texture: { sampleType: "unfilterable-float" } },
+        // The split-sum DFG table (F1c), read by the linear-light shader.
+        { binding: 8, visibility: SHADER_STAGE_FRAGMENT, buffer: { type: "read-only-storage" } }
       ];
       const depthLayout = device.createBindGroupLayout({ entries: depthEntries(false) });
       const depthLayoutMs = device.createBindGroupLayout({ entries: depthEntries(true) });
@@ -18989,6 +19105,9 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
         // UNIFORM | COPY_DST
       };
       const shadowTiles = device.createBuffer({ size: MAX_LOCAL_SHADOW_TILES2 * 80, usage: 128 | 8 });
+      const dfg = dfgTable();
+      const dfgBuffer = device.createBuffer({ size: dfg.byteLength, usage: 128 | 8 });
+      device.queue.writeBuffer(dfgBuffer, 0, dfg);
       const atlasBlank = device.createTexture({ size: { width: 1, height: 1 }, format: "r32float", usage: 4 | 2 });
       const probesBlank = device.createTexture({ size: { width: 1, height: 1, depthOrArrayLayers: 1 }, dimension: "3d", format: "rgba32float", usage: 4 | 2 });
       const behind = device.createTexture({ size: { width, height }, format: colourFormat, usage: 4 | 2 | 16 });
@@ -19000,7 +19119,8 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
           { binding: 3, resource: { buffer: clusterBuffers.params } },
           { binding: 4, resource: atlas.createView() },
           { binding: 5, resource: { buffer: shadowTiles } },
-          { binding: 6, resource: probes.createView({ dimension: "3d" }) }
+          { binding: 6, resource: probes.createView({ dimension: "3d" }) },
+          { binding: 8, resource: { buffer: dfgBuffer } }
         ];
         return {
           blank: device.createBindGroup({ layout: depthLayout, entries: [{ binding: 0, resource: blankDepth.createView() }, ...shared, { binding: 7, resource: behindBlank.createView() }] }),
@@ -19014,7 +19134,8 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
           { binding: 3, resource: { buffer: clusterBuffers.params } },
           { binding: 4, resource: atlas.createView() },
           { binding: 5, resource: { buffer: shadowTiles } },
-          { binding: 6, resource: probes.createView({ dimension: "3d" }) }
+          { binding: 6, resource: probes.createView({ dimension: "3d" }) },
+          { binding: 8, resource: { buffer: dfgBuffer } }
         ];
         return {
           blank: device.createBindGroup({ layout: depthLayoutMs, entries: [{ binding: 0, resource: blank.createView() }, ...shared, { binding: 7, resource: behindBlank.createView() }] }),
@@ -19028,6 +19149,7 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
         behindBlank,
         clusters: clusterBuffers,
         shadowTiles,
+        dfg: dfgBuffer,
         atlas: atlasBlank,
         atlasBlank: true,
         probes: probesBlank,
@@ -19996,6 +20118,7 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     destroySafely(this.depthGroups.clusters.index);
     destroySafely(this.depthGroups.clusters.params);
     destroySafely(this.depthGroups.shadowTiles);
+    destroySafely(this.depthGroups.dfg);
     destroySafely(this.depthGroups.atlas);
     destroySafely(this.depthGroups.probes);
     destroySafely(this.blankTexture);
@@ -22406,9 +22529,9 @@ var Player = class {
     this.lastActions = held;
   }
   languageIndexFor(preferred) {
-    const table = this.options.strings;
-    const language = playLanguage(table, preferred);
-    return table && language ? table.languages.indexOf(language) + 1 : 0;
+    const table2 = this.options.strings;
+    const language = playLanguage(table2, preferred);
+    return table2 && language ? table2.languages.indexOf(language) + 1 : 0;
   }
   /** Change text size and colour filter at once (see PlayerHandle.setAccessibility). */
   setAccessibility(settings) {
