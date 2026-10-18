@@ -4628,6 +4628,13 @@ options?: {
  * (layout, packing, the parity maths) is pure and tested without a GPU.
  */
 
+/** What a frame's depth prepass leaves (F0c; see WebgpuSceneRenderer.prepassTargets). */
+interface PrepassTargets {
+    readonly depth: any;
+    readonly gbuffer: any;
+    readonly velocity: any;
+    readonly multisampled: boolean;
+}
 declare class WebgpuSceneRenderer implements SceneRenderer {
     private readonly device;
     private readonly width;
@@ -4767,22 +4774,38 @@ declare class WebgpuSceneRenderer implements SceneRenderer {
     private clearColour;
     /** The thin G-buffer (F0c), made on the first frame with a prepass. */
     private gbuffer;
+    /** The velocity buffer (F0c), made with the G-buffer. */
+    private velocity;
     /** What the last frame's prepass left, or null when it had none. */
     private prepassed;
+    /** Frames submitted (a skinned mesh's previous vertices are this frame's when it moved in it). */
+    private frameIndex;
+    /** Last frame's unjittered view-projection and wind, for motion vectors (F0c). */
+    private lastViewProj;
+    private lastWind;
+    /** Each mesh's copies' models last frame, in order, and this frame's matches: model → last frame's. */
+    private lastModels;
+    private motion;
     private ensureGbuffer;
+    private ensureVelocity;
+    /**
+     * Where each instance was last frame (F0c): its `previousModel`, or else the
+     * model of the copy of its mesh (its LOD chain's first) at the same place
+     * among that mesh's copies last frame. Matched before culling, so a copy
+     * leaving the view doesn't shift the rest. A copy with no match hasn't moved.
+     */
+    private matchMotion;
     /**
      * The last frame's depth prepass (AAA_FIDELITY_ROADMAP.md F0c), for
      * screen-space effects: its depth (multisampled in an anti-aliased frame)
      * and the thin G-buffer, an rgba16float of xy = octahedral world normal
      * facing the viewer, z = roughness and w = material ID (0 where nothing
      * opaque drew). Null when the frame had no prepass. Both hold until the next
-     * frame.
+     * frame. The velocity buffer (rg16float) is how far each opaque pixel moved
+     * on screen since last frame, in UV units (x right, y down; 0 where nothing
+     * drew), from the camera's motion, each object's and each skinned vertex's.
      */
-    get prepassTargets(): {
-        readonly depth: any;
-        readonly gbuffer: any;
-        readonly multisampled: boolean;
-    } | null;
+    get prepassTargets(): PrepassTargets | null;
     /** The reflection pass's uniforms and pipelines (I3), made on first use; its targets are the frame graph's. */
     private reflections;
     private ensureReflections;
@@ -4925,9 +4948,12 @@ declare class WebgpuSceneRenderer implements SceneRenderer {
  *                                    y = distance-tiling distance (0 = off) (P2b; farTileBlend),
  *                                    z = 1 when the water flows along the UVs (P3; waterTiltAlong),
  *                                    w = the material's ID in the thin G-buffer (F0c)
+ * 912  wind1      vec4<f32>    16   the previous frame's wind0, for motion vectors (F0c)
+ * 928  motion0    vec4<f32>    16   x = where the frame's motion transforms start in the
+ *                                    instance buffer (F0c)
  * ```
  *
- * 912 bytes used, padded to a 1024-byte stride (a 256-byte multiple a dynamic
+ * 944 bytes used, padded to a 1024-byte stride (a 256-byte multiple a dynamic
  * uniform offset can address), so one buffer still holds every draw in a
  * frame — uniforms are written per batch, not per copy, so the stride costs
  * little. The metallic-roughness inputs and the environment carry the Modern
@@ -4942,7 +4968,7 @@ declare const UNIFORM_STRIDE = 1024;
  * bind group layout's `minBindingSize` must be: it makes a WGSL struct that
  * grows past what this module writes fail at pipeline creation.
  */
-declare const UNIFORM_BYTES_USED = 912;
+declare const UNIFORM_BYTES_USED = 944;
 /** The same stride counted in float32s, which is how `writeBuffer` sizes it. */
 declare const UNIFORM_FLOATS: number;
 /**
@@ -5163,6 +5189,10 @@ interface InstanceUniform {
     readonly hasNormalMap?: boolean;
     /** The draw's material ID in the thin G-buffer (AAA_FIDELITY_ROADMAP.md F0c): 1 and up, one per material in the frame. */
     readonly materialId?: number;
+    /** The previous frame's wind (its windUniform), for motion vectors (F0c); null/omitted for still air. */
+    readonly windBefore?: readonly [number, number, number, number] | null;
+    /** Where the frame's motion transforms start in the instance buffer (F0c). */
+    readonly motionBase?: number;
 }
 /**
  * A draw's triplanar repeat (0 = UV mapping) and height-blend sharpness (0 = an

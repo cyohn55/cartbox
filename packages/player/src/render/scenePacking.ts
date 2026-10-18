@@ -100,9 +100,12 @@ import {
  *                                    y = distance-tiling distance (0 = off) (P2b; farTileBlend),
  *                                    z = 1 when the water flows along the UVs (P3; waterTiltAlong),
  *                                    w = the material's ID in the thin G-buffer (F0c)
+ * 912  wind1      vec4<f32>    16   the previous frame's wind0, for motion vectors (F0c)
+ * 928  motion0    vec4<f32>    16   x = where the frame's motion transforms start in the
+ *                                    instance buffer (F0c)
  * ```
  *
- * 912 bytes used, padded to a 1024-byte stride (a 256-byte multiple a dynamic
+ * 944 bytes used, padded to a 1024-byte stride (a 256-byte multiple a dynamic
  * uniform offset can address), so one buffer still holds every draw in a
  * frame — uniforms are written per batch, not per copy, so the stride costs
  * little. The metallic-roughness inputs and the environment carry the Modern
@@ -117,7 +120,7 @@ export const UNIFORM_STRIDE = 1024;
  * bind group layout's `minBindingSize` must be: it makes a WGSL struct that
  * grows past what this module writes fail at pipeline creation.
  */
-export const UNIFORM_BYTES_USED = 912;
+export const UNIFORM_BYTES_USED = 944;
 /** The same stride counted in float32s, which is how `writeBuffer` sizes it. */
 export const UNIFORM_FLOATS = UNIFORM_STRIDE / 4;
 
@@ -243,6 +246,8 @@ const OFFSET_WATER0 = 212;
 const OFFSET_TERRAIN0 = 216;
 const OFFSET_WIND0 = 220;
 const OFFSET_MAPS0 = 224;
+const OFFSET_WIND1 = 228;
+const OFFSET_MOTION0 = 232;
 
 /** The rasteriser's defaults, restated so an unlit draw shades identically. */
 export const DEFAULT_LIGHT: readonly [number, number, number] = [0.4, 0.8, 0.6];
@@ -491,6 +496,10 @@ export interface InstanceUniform {
   readonly hasNormalMap?: boolean;
   /** The draw's material ID in the thin G-buffer (AAA_FIDELITY_ROADMAP.md F0c): 1 and up, one per material in the frame. */
   readonly materialId?: number;
+  /** The previous frame's wind (its windUniform), for motion vectors (F0c); null/omitted for still air. */
+  readonly windBefore?: readonly [number, number, number, number] | null;
+  /** Where the frame's motion transforms start in the instance buffer (F0c). */
+  readonly motionBase?: number;
 }
 
 /**
@@ -766,6 +775,13 @@ export function writeInstanceUniform(target: Float32Array, index: number, unifor
   target[base + OFFSET_MAPS0 + 1] = mapping?.farTile ?? 0;
   target[base + OFFSET_MAPS0 + 2] = uniform.waterAlong ? 1 : 0;
   target[base + OFFSET_MAPS0 + 3] = uniform.materialId ?? 0;
+
+  const before = uniform.windBefore ?? null;
+  for (let k = 0; k < 4; k += 1) target[base + OFFSET_WIND1 + k] = before ? before[k]! : 0;
+  target[base + OFFSET_MOTION0] = uniform.motionBase ?? 0;
+  target[base + OFFSET_MOTION0 + 1] = 0;
+  target[base + OFFSET_MOTION0 + 2] = 0;
+  target[base + OFFSET_MOTION0 + 3] = 0;
 }
 
 /** The camera's right and up in world space (the view's first two rows) and the frame's height, for refraction (I5). */

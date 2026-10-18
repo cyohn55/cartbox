@@ -1076,6 +1076,12 @@ export interface MeshSceneInstance {
   readonly tintMaskTextures?: readonly (DecodedTexture | null)[];
   /** A surface effect over its (PBR) materials this frame — a shield flare, recharge shimmer or camo (see surfaceEffect.ts). */
   readonly effect?: SurfaceEffect | null;
+  /**
+   * Where the instance was last frame, for motion vectors (AAA_FIDELITY_ROADMAP.md
+   * F0c). Absent, a renderer that needs it matches the instance to last frame's
+   * by its mesh and its place among that mesh's copies.
+   */
+  readonly previousModel?: Mat4;
 }
 
 /**
