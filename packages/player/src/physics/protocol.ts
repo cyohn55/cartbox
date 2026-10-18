@@ -40,6 +40,7 @@ export const RAM_LAYOUTS: Readonly<Record<ModelId, RamLayout>> = {
   n64: ERA,
   xbox360: HD,
   modern: HD,
+  aaa: HD,
 };
 
 export const PHYS_BLOCK_BYTES = 8192;

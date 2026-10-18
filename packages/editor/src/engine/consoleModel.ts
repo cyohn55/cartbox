@@ -10,7 +10,7 @@
  * live in @cartbox/player's model registry, which these mirror.
  */
 
-export type ConsoleModelId = "classic" | "pro" | "portrait" | "voxel" | "ps1" | "n64" | "xbox360" | "modern";
+export type ConsoleModelId = "classic" | "pro" | "portrait" | "voxel" | "ps1" | "n64" | "xbox360" | "modern" | "aaa";
 export type RasterKind = "raster2d" | "voxel3d" | "poly3d";
 
 export interface ConsoleModelSpec {
@@ -249,6 +249,13 @@ export const MODERN_MODEL: ConsoleModelSpec = {
   screenHeight: 135,
 };
 
+/**
+ * The AAA tier's editor spec (AAA_FIDELITY_ROADMAP.md): Modern's 1080p authoring
+ * frame. What sets it apart is in the player — a WebGPU-presented frame — not in
+ * the 2D authoring surface.
+ */
+export const AAA_MODEL: ConsoleModelSpec = { ...MODERN_MODEL, id: "aaa", label: "AAA (WebGPU)" };
+
 export const CONSOLE_MODELS: Record<ConsoleModelId, ConsoleModelSpec> = {
   classic: CLASSIC_MODEL,
   pro: PRO_MODEL,
@@ -258,4 +265,5 @@ export const CONSOLE_MODELS: Record<ConsoleModelId, ConsoleModelSpec> = {
   n64: N64_MODEL,
   xbox360: XBOX360_MODEL,
   modern: MODERN_MODEL,
+  aaa: AAA_MODEL,
 };

@@ -25,13 +25,14 @@ describe("RenderCaps", () => {
     }
   });
 
-  it("grants programmable shaders only to the Modern (AAA) tier", () => {
+  it("grants programmable shaders only to the Modern and AAA tiers", () => {
     // A model that lets creators supply shaders is not a fixed spec. Every
     // fantasy/era model keeps this false so the platform layer (replays,
     // verification, thumbnails) can assume a fixed spec. The deliberately
-    // unconstrained Modern tier is the sole exception (AAA_TIER_ROADMAP.md).
+    // unconstrained Modern tier and the AAA tier built on it are the
+    // exceptions (AAA_TIER_ROADMAP.md, AAA_FIDELITY_ROADMAP.md).
     for (const model of models) {
-      const expected = model.id === "modern";
+      const expected = model.id === "modern" || model.id === "aaa";
       expect(model.renderCaps.programmableShaders, `${model.id}`).toBe(expected);
     }
   });

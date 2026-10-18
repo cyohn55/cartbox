@@ -9,7 +9,7 @@
  * assumptions the platform layer depends on.
  */
 
-export type ModelId = "classic" | "pro" | "portrait" | "voxel" | "ps1" | "n64" | "xbox360" | "modern";
+export type ModelId = "classic" | "pro" | "portrait" | "voxel" | "ps1" | "n64" | "xbox360" | "modern" | "aaa";
 
 /**
  * How a model rasterises triangles.
@@ -66,6 +66,13 @@ export interface RenderCaps {
    * 2 among them, reflected in screen space) and the Modern tier.
    */
   reflections?: boolean;
+  /**
+   * Present the 3D frame from the GPU (AAA_FIDELITY_ROADMAP.md F0a): the scene,
+   * its sky and the cart's HUD are composited on the GPU and shown through a
+   * WebGPU canvas, with no per-frame readback. Only the AAA tier, and only on
+   * WebGPU: without a device the tier plays on the byte path, as Modern does.
+   */
+  gpuPresent?: boolean;
 }
 
 /**
@@ -196,6 +203,18 @@ export const MODERN_RASTER_CAPS: RenderCaps = {
   antialias: true,
   temporal: true,
   reflections: true,
+};
+
+/**
+ * The AAA tier (AAA_FIDELITY_ROADMAP.md): Modern's uncapped PBR path, presented
+ * from the GPU. WebGPU-only by design: its features (compute, HDR targets, a
+ * GPU-resident frame) are what neither WebGL2 nor the software rasteriser can
+ * give, so on a browser without WebGPU it falls back to the Modern pipeline
+ * rather than failing. The fantasy tiers' three-renderer parity is untouched.
+ */
+export const AAA_RASTER_CAPS: RenderCaps = {
+  ...MODERN_RASTER_CAPS,
+  gpuPresent: true,
 };
 
 export interface ConsoleModel {
@@ -447,6 +466,24 @@ export const MODELS: Record<ModelId, ConsoleModel> = {
     renderCaps: MODERN_RASTER_CAPS,
     // 8GB — this tier's whole premise is that storage is no longer the constraint;
     // real photoreal scenes need room for compressed meshes + PBR texture sets.
+    assetBudgetBytes: 8 * 1024 * 1024 * 1024,
+  },
+  aaa: {
+    id: "aaa",
+    label: "AAA (WebGPU)",
+    kind: "poly3d",
+    // Modern's 1080p frame and core for now: native resolution is F0d.
+    width: 1920,
+    height: 1080,
+    pixelBytes: 4,
+    fps: 60,
+    audioChannels: 8,
+    sampleRate: 48000,
+    paletteSize: 256,
+    cartSizeBytes: 8 * 1024 * 1024,
+    engineUrl: "/engine/xbox360/engine.js",
+    inputs: ["gamepad", "keyboard", "mouse"],
+    renderCaps: AAA_RASTER_CAPS,
     assetBudgetBytes: 8 * 1024 * 1024 * 1024,
   },
 };

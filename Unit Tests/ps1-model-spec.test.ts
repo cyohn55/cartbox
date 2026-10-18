@@ -122,7 +122,7 @@ describe("the PS1 asset budget", () => {
     // The budget belongs to the 3D era models (and the Modern tier), whose
     // geometry and textures cannot fit in a cartridge; every 2D/cartridge model
     // stays at 0.
-    const BUDGETED = new Set(["ps1", "n64", "xbox360", "modern"]);
+    const BUDGETED = new Set(["ps1", "n64", "xbox360", "modern", "aaa"]);
     for (const model of Object.values(MODELS)) {
       if (BUDGETED.has(model.id)) {
         expect(model.assetBudgetBytes, `${model.id}`).toBeGreaterThan(0);
@@ -168,7 +168,7 @@ describe("the PS1 model's place in the family", () => {
     // share the kind because they share the rendering *path* (the mesh/world
     // overlays); what separates the eras is renderCaps, not kind.
     const poly = Object.values(MODELS).filter((m) => m.kind === "poly3d");
-    expect(poly.map((m) => m.id).sort()).toEqual(["modern", "n64", "ps1", "xbox360"]);
+    expect(poly.map((m) => m.id).sort()).toEqual(["aaa", "modern", "n64", "ps1", "xbox360"]);
   });
 
   it("keeps the 8-bit model untouched", () => {

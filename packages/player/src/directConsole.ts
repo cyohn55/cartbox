@@ -31,7 +31,7 @@ export interface DirectConsole extends ConsoleInstance {
 
 /** The models the dedicated core runs (the HD core's tier). */
 export function directCoreModel(model: ConsoleModel): boolean {
-  return model.id === "modern" || model.id === "xbox360";
+  return model.id === "modern" || model.id === "aaa" || model.id === "xbox360";
 }
 
 /** Wrap an instantiated modern-core module as a console for `model`. */

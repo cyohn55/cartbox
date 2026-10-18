@@ -225,7 +225,7 @@ declare function buildOrbitCamera(bounds: SceneBounds, yaw: number, pitch: numbe
  * toggles: that would dissolve the aesthetic and break the fixed-spec
  * assumptions the platform layer depends on.
  */
-type ModelId = "classic" | "pro" | "portrait" | "voxel" | "ps1" | "n64" | "xbox360" | "modern";
+type ModelId = "classic" | "pro" | "portrait" | "voxel" | "ps1" | "n64" | "xbox360" | "modern" | "aaa";
 /**
  * How a model rasterises triangles.
  *
@@ -281,6 +281,13 @@ interface RenderCaps {
      * 2 among them, reflected in screen space) and the Modern tier.
      */
     reflections?: boolean;
+    /**
+     * Present the 3D frame from the GPU (AAA_FIDELITY_ROADMAP.md F0a): the scene,
+     * its sky and the cart's HUD are composited on the GPU and shown through a
+     * WebGPU canvas, with no per-frame readback. Only the AAA tier, and only on
+     * WebGPU: without a device the tier plays on the byte path, as Modern does.
+     */
+    gpuPresent?: boolean;
 }
 /**
  * What the shared software rasteriser behind the mesh/world overlays actually
