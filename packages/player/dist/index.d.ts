@@ -2205,11 +2205,19 @@ declare const TEXTURE_SETS: readonly ["textures", "normalTextures", "materialTex
 type TextureSet = readonly ({
     readonly width: number;
     readonly height: number;
+    readonly gpu?: {
+        readonly levels: readonly {
+            readonly data: {
+                readonly byteLength: number;
+            };
+        }[];
+    };
 } | null | undefined)[] | undefined;
 /**
  * A 3D scene's GPU memory by kind (P8), for the per-device budgets: each
  * mesh's vertices and indices once (as {@link estimateSceneBytes}), each
- * texture of every map once as RGBA8 with its mips, and the targets.
+ * texture of every map once ({@link textureMemory}: compressed, or RGBA8
+ * with its mips), and the targets.
  */
 declare function estimateSceneMemory(instances: readonly ({
     readonly mesh: {
@@ -3862,6 +3870,13 @@ interface SceneRenderer {
     renderToTexture?(instances: readonly MeshSceneInstance[], draw: GpuSceneDraw): unknown;
     /** The GPU device a {@link renderToTexture} texture belongs to, so a compositor can share it. */
     readonly gpuDevice?: unknown;
+    /**
+     * The block-compressed formats this renderer uploads a texture's
+     * {@link DecodedTexture.gpu} chain in, preferred first (AAA_FIDELITY_ROADMAP.md
+     * F1a): what a KTX2 texture should transcode to for it. Empty or absent, it
+     * samples RGBA only.
+     */
+    readonly textureFormats?: readonly string[];
     dispose(): void;
     /** What the last frame drew, for the profiler (see debug/profiler.ts). */
     readonly lastFrameStats?: RenderStats;
@@ -3903,6 +3918,7 @@ declare class CappedSceneRenderer implements SceneRenderer {
     settle(draw: SceneDraw): FrameState;
     get ready(): boolean | undefined;
     get gpuDevice(): unknown;
+    get textureFormats(): readonly string[] | undefined;
     get renderToTexture(): SceneRenderer["renderToTexture"];
     dispose(): void;
 }
@@ -4685,6 +4701,8 @@ declare class WebgpuSceneRenderer implements SceneRenderer {
     private readonly colourTextures;
     /** Draws a texture's mip chain on the GPU (F1a). */
     private readonly mipmaps;
+    /** The block-compressed formats this renderer uploads a texture's `gpu` chain in, preferred first (F1a). */
+    readonly textureFormats: readonly string[];
     private bindGroups;
     /** Most recent completed readback, or null before the first one lands. */
     private latest;
@@ -4901,6 +4919,9 @@ declare class WebgpuSceneRenderer implements SceneRenderer {
      * A colour map with see-through texels (a cut-out's, say a grass card's) is
      * mipped on the CPU instead, keeping its coverage: averaged alpha would
      * otherwise fall under the cutoff, and foliage would thin away with distance.
+     * A texture that carries a chain in a block-compressed format this device
+     * samples (a KTX2 one, F1a) uploads that instead: a quarter of the memory,
+     * its mips the encoder's. A cut-out keeps the RGBA path for its coverage.
      */
     private uploadTexture;
     dispose(): void;
@@ -5434,12 +5455,6 @@ declare class WebgpuLightingLayer implements LightingRenderer {
     private flatMaterialBuffer;
 }
 
-/**
- * Acquires a shared WebGPU device, memoised so a page with many players probes
- * the adapter only once. Returns null (never throws) when WebGPU is unavailable
- * or the adapter/device can't be obtained, which is the signal the factory uses
- * to fall back to WebGL.
- */
 declare function getWebgpuDevice(): Promise<any | null>;
 
 /**
@@ -6428,8 +6443,14 @@ interface GpuPresentTarget {
     present(frame: PresentFrame): void;
     readonly stats: PresentStats;
 }
-/** Loads a KTX2 → RGBA decoder (see {@link MeshOverlayOptions.ktx2}). */
-type Ktx2DecoderLoader = () => Promise<(bytes: Uint8Array) => DecodedTexture | null>;
+/**
+ * Loads a KTX2 → RGBA decoder (see {@link MeshOverlayOptions.ktx2}). Given
+ * `gpuFormats`, the decoder also transcodes into the first of them it can
+ * (F1a; see DecodedTexture.gpu).
+ */
+type Ktx2DecoderLoader = () => Promise<(bytes: Uint8Array, options?: {
+    readonly gpuFormats?: readonly string[];
+}) => DecodedTexture | null>;
 declare class MeshOverlaySurface implements DisplaySurface {
     private readonly inner;
     private readonly width;

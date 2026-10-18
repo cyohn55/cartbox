@@ -9,6 +9,23 @@
 
 let devicePromise: Promise<any | null> | undefined;
 
+/** The block-compressed texture families a device can sample (desktop, mobile, Apple), each a WebGPU feature. */
+export const TEXTURE_COMPRESSION_FEATURES = ["texture-compression-bc", "texture-compression-etc2", "texture-compression-astc"] as const;
+
+/**
+ * The compressed formats (F1a) a KTX2 file should transcode to for `device`,
+ * preferred first: BC7 on desktop, ASTC 4×4 on Apple and mobile, ETC2 the
+ * fallback. Empty without any of the features.
+ */
+export function compressedFormatsFor(device: any): string[] {
+  const has = (feature: string) => device?.features?.has?.(feature) === true;
+  return [
+    ...(has("texture-compression-bc") ? ["bc7-rgba-unorm"] : []),
+    ...(has("texture-compression-astc") ? ["astc-4x4-unorm"] : []),
+    ...(has("texture-compression-etc2") ? ["etc2-rgba8unorm"] : []),
+  ];
+}
+
 export function getWebgpuDevice(): Promise<any | null> {
   if (!devicePromise) devicePromise = acquireDevice();
   return devicePromise;
@@ -20,9 +37,10 @@ async function acquireDevice(): Promise<any | null> {
     if (!gpu) return null;
     const adapter = await gpu.requestAdapter();
     if (!adapter) return null;
-    // GPU timing for the playtest profiler, where the adapter offers it.
-    const timestamps = adapter.features?.has?.("timestamp-query") === true;
-    return await adapter.requestDevice(timestamps ? { requiredFeatures: ["timestamp-query"] } : undefined);
+    // GPU timing for the playtest profiler, and block-compressed textures (F1a), where the adapter offers them.
+    const wanted = ["timestamp-query", ...TEXTURE_COMPRESSION_FEATURES];
+    const features = wanted.filter((feature) => adapter.features?.has?.(feature) === true);
+    return await adapter.requestDevice(features.length > 0 ? { requiredFeatures: features } : undefined);
   } catch {
     return null;
   }

@@ -2798,6 +2798,15 @@ var WebgpuLightingLayer = class _WebgpuLightingLayer {
 
 // src/lighting/webgpuDevice.ts
 var devicePromise;
+var TEXTURE_COMPRESSION_FEATURES = ["texture-compression-bc", "texture-compression-etc2", "texture-compression-astc"];
+function compressedFormatsFor(device) {
+  const has = (feature) => device?.features?.has?.(feature) === true;
+  return [
+    ...has("texture-compression-bc") ? ["bc7-rgba-unorm"] : [],
+    ...has("texture-compression-astc") ? ["astc-4x4-unorm"] : [],
+    ...has("texture-compression-etc2") ? ["etc2-rgba8unorm"] : []
+  ];
+}
 function getWebgpuDevice() {
   if (!devicePromise) devicePromise = acquireDevice();
   return devicePromise;
@@ -2808,8 +2817,9 @@ async function acquireDevice() {
     if (!gpu) return null;
     const adapter = await gpu.requestAdapter();
     if (!adapter) return null;
-    const timestamps = adapter.features?.has?.("timestamp-query") === true;
-    return await adapter.requestDevice(timestamps ? { requiredFeatures: ["timestamp-query"] } : void 0);
+    const wanted = ["timestamp-query", ...TEXTURE_COMPRESSION_FEATURES];
+    const features = wanted.filter((feature) => adapter.features?.has?.(feature) === true);
+    return await adapter.requestDevice(features.length > 0 ? { requiredFeatures: features } : void 0);
   } catch {
     return null;
   }
@@ -10520,6 +10530,10 @@ function estimateSceneBytes(instances, width, height) {
   return bytes;
 }
 var TEXTURE_SETS = ["textures", "normalTextures", "materialTextures", "mrTextures", "occlusionTextures", "emissiveTextures", "lightmapTextures"];
+function textureMemory(texture) {
+  if (texture.gpu) return texture.gpu.levels.reduce((sum, level) => sum + level.data.byteLength, 0);
+  return Math.round(texture.width * texture.height * 4 * 4 / 3);
+}
 function estimateSceneMemory(instances, width, height) {
   const meshes = /* @__PURE__ */ new Set();
   const textures = /* @__PURE__ */ new Set();
@@ -10534,7 +10548,7 @@ function estimateSceneMemory(instances, width, height) {
       for (const texture of instance[set] ?? []) {
         if (texture && !textures.has(texture)) {
           textures.add(texture);
-          textureBytes += Math.round(texture.width * texture.height * 4 * 4 / 3);
+          textureBytes += textureMemory(texture);
         }
       }
     }
@@ -11562,6 +11576,9 @@ var CappedSceneRenderer = class {
   get gpuDevice() {
     return this.inner.gpuDevice;
   }
+  get textureFormats() {
+    return this.inner.textureFormats;
+  }
   get renderToTexture() {
     const inner = this.inner;
     if (!inner.renderToTexture) return void 0;
@@ -11965,9 +11982,10 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
   static async create(inner, width, height, scene, renderer = new SoftwareSceneRenderer(), options = {}) {
     const decoded = /* @__PURE__ */ new Map();
     let ktx2 = null;
+    const gpuFormats = renderer.textureFormats ?? [];
     const decodeKtx2 = (bytes) => {
       ktx2 ?? (ktx2 = options.ktx2 ? options.ktx2().catch(() => null) : Promise.resolve(null));
-      return ktx2.then((decode) => decode ? decode(bytes) : null);
+      return ktx2.then((decode) => decode ? decode(bytes, gpuFormats.length > 0 ? { gpuFormats } : void 0) : null);
     };
     const images = /* @__PURE__ */ new Map();
     const texture = (mesh) => {
@@ -17427,6 +17445,21 @@ function coverageMips(source, cutoff = COVERAGE_CUTOFF) {
   }
   return out;
 }
+function uploadCompressed(device, width, height, chain) {
+  const texture = device.createTexture({
+    size: { width, height },
+    format: chain.format,
+    mipLevelCount: chain.levels.length,
+    usage: 4 | 2
+    // TEXTURE_BINDING | COPY_DST
+  });
+  chain.levels.forEach((level, mipLevel) => {
+    const blocksWide = Math.ceil(level.width / 4);
+    const blocksHigh = Math.ceil(level.height / 4);
+    device.queue.writeTexture({ texture, mipLevel }, level.data, { bytesPerRow: blocksWide * 16, rowsPerImage: blocksHigh * 4 }, { width: blocksWide * 4, height: blocksHigh * 4 });
+  });
+  return texture;
+}
 
 // src/render/WebgpuSceneRenderer.ts
 var GBUFFER_FORMAT = "rgba16float";
@@ -18754,6 +18787,7 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     this.ssaoBound = blankShadow;
     this.timer = GraphTimer.create(device);
     this.mipmaps = new MipmapGenerator(device);
+    this.textureFormats = mips ? compressedFormatsFor(device) : [];
     this.transients = new TransientPool(device);
   }
   /**
@@ -19890,11 +19924,20 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
    * A colour map with see-through texels (a cut-out's, say a grass card's) is
    * mipped on the CPU instead, keeping its coverage: averaged alpha would
    * otherwise fall under the cutoff, and foliage would thin away with distance.
+   * A texture that carries a chain in a block-compressed format this device
+   * samples (a KTX2 one, F1a) uploads that instead: a quarter of the memory,
+   * its mips the encoder's. A cut-out keeps the RGBA path for its coverage.
    */
   uploadTexture(source, colour = false) {
     const cache = this.mips && colour ? this.colourTextures : this.textures;
     const cached = cache.get(source);
     if (cached) return cached;
+    const compressed = this.mips && source.gpu && this.textureFormats.includes(source.gpu.format) && !(colour && hasTransparency(source)) ? source.gpu : null;
+    if (compressed) {
+      const texture2 = uploadCompressed(this.device, source.width, source.height, compressed);
+      cache.set(source, texture2);
+      return texture2;
+    }
     const levels = this.mips ? mipLevelCount(source.width, source.height) : 1;
     const texture = this.device.createTexture({
       size: { width: source.width, height: source.height },
