@@ -123,7 +123,7 @@ import {
   type ReflectionProbeSet,
 } from "@cartbox/editor";
 
-import { SoftwareSceneRenderer, applyScenePasses, type FrameState, type SceneDraw, type SceneRenderer } from "./sceneRenderer.js";
+import { SoftwareSceneRenderer, applyScenePasses, type FrameState, type GpuSceneDraw, type SceneDraw, type SceneRenderer } from "./sceneRenderer.js";
 import { webgpuCanHonour } from "./renderCaps.js";
 import { batchInstances, compositeFrame, presentFrame, softEdges, type PrimitiveTextures } from "./gpuFrame.js";
 import { WebgpuPassTimer } from "./gpuTimer.js";
@@ -1807,6 +1807,28 @@ export class WebgpuSceneRenderer implements SceneRenderer {
     return this.latest !== null;
   }
 
+  get gpuDevice(): any {
+    return this.device;
+  }
+
+  /**
+   * Draw the frame and leave it on the GPU (AAA_FIDELITY_ROADMAP.md F0a): the
+   * same passes as {@link render}, ending in the colour texture instead of a
+   * readback, so there is no lag and nothing to composite on the CPU. The
+   * texture is premultiplied RGBA8 with alpha 0 where nothing drew, and holds
+   * this frame until the next render.
+   */
+  renderToTexture(instances: readonly MeshSceneInstance[], draw: GpuSceneDraw): any | null {
+    if (this.destroyed) return null;
+    const visible = applyScenePasses(instances, draw);
+    try {
+      this.submit(visible, draw, false);
+    } catch {
+      return null;
+    }
+    return this.colourTexture;
+  }
+
   settle(draw: SceneDraw): FrameState {
     if (this.destroyed) return "current";
     if (this.latest) compositeFrame(this.latest, draw);
@@ -1814,8 +1836,8 @@ export class WebgpuSceneRenderer implements SceneRenderer {
     return this.readSeq >= this.submitted ? "pending" : "stale";
   }
 
-  /** Encode and submit one frame, and start a readback if a buffer is free. */
-  private submit(instances: readonly MeshSceneInstance[], draw: SceneDraw): void {
+  /** Encode and submit one frame, and start a readback if a buffer is free (or, with `readback` false, leave it in the colour texture). */
+  private submit(instances: readonly MeshSceneInstance[], draw: GpuSceneDraw, readback = true): void {
     // Temporal anti-aliasing (I2): this frame's jittered projection and the resolve's uniforms.
     const temporal = draw.temporal === true ? this.temporalState.begin(draw.view, draw.projection, this.width, this.height) : null;
     if (!temporal) this.temporalState.reset();
@@ -1824,7 +1846,11 @@ export class WebgpuSceneRenderer implements SceneRenderer {
     // Batch the copies of each primitive that bind the same textures: one
     // uniform (addressed by a dynamic offset) and one instanced draw per batch.
     const { batches: draws, instanceCount } = batchInstances(instances, (mesh) => this.uploadMesh(mesh), cameraPositionFromView(draw.view));
-    if (draws.length === 0) return;
+    if (draws.length === 0) {
+      // A frame left on the GPU still has to say "nothing drew": clear it.
+      if (!readback) this.clearColour();
+      return;
+    }
 
     this.ensureUniformCapacity(draws.length);
     this.ensureInstanceCapacity(instanceCount);
@@ -2054,6 +2080,11 @@ export class WebgpuSceneRenderer implements SceneRenderer {
     if (temporal) this.encodeTemporal(encoder, temporal.uniforms, msaa ? msaa.depth : this.depthTexture, msaa !== null);
     this.timer?.resolve(encoder);
 
+    if (!readback) {
+      this.device.queue.submit([encoder.finish()]);
+      this.timer?.read();
+      return;
+    }
     this.submitted += 1;
     const slot = this.readback.find((entry) => !entry.busy);
     if (slot) {
@@ -2069,6 +2100,16 @@ export class WebgpuSceneRenderer implements SceneRenderer {
       this.timer?.read();
       void this.drain(slot);
     }
+  }
+
+  /** Clear the colour texture to transparent black (a GPU-kept frame with nothing in it). */
+  private clearColour(): void {
+    const encoder = this.device.createCommandEncoder();
+    const pass = encoder.beginRenderPass({
+      colorAttachments: [{ view: this.colourTexture.createView(), clearValue: { r: 0, g: 0, b: 0, a: 0 }, loadOp: "clear", storeOp: "store" }],
+    });
+    pass.end();
+    this.device.queue.submit([encoder.finish()]);
   }
 
   /**
@@ -2222,7 +2263,7 @@ export class WebgpuSceneRenderer implements SceneRenderer {
    * Order the frame's lights (global first), build the clustered cells, and
    * write both and their params. An orthographic view (no cells) loops every light.
    */
-  private clusterLights(draw: SceneDraw) {
+  private clusterLights(draw: GpuSceneDraw) {
     const { ordered, globalCount } = orderLights(draw.lights ?? []);
     const clusters = ordered.length > globalCount ? buildLightClusters(ordered, globalCount, draw.view, draw.projection, this.width, this.height) : null;
     const buffers = this.depthGroups.clusters;

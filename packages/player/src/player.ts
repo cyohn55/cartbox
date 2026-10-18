@@ -89,6 +89,7 @@ import { ParticleOverlaySurface } from "./particles/ParticleOverlaySurface.js";
 import { MeshOverlaySurface } from "./mesh/MeshOverlaySurface.js";
 import { WorldOverlaySurface } from "./world/WorldOverlaySurface.js";
 import { createSceneRenderer } from "./render/createSceneRenderer.js";
+import { GpuCanvasSurface } from "./render/GpuCanvasSurface.js";
 import type { SceneRenderer } from "./render/sceneRenderer.js";
 import type { TextureLookup } from "./world/worldScene.js";
 import { SpatialLoader, actionMask, createHoloCache, holoBindingKeys, holoDocuments, renderHoloDocument, translate, reboundActions, type DecodedTexture, type EncodedImage, type InputAction, type Mat4, colorFilterSvg, DEFAULT_ACCESSIBILITY, type AccessibilitySettings, type ColorFilter } from "@cartbox/editor";
@@ -135,6 +136,8 @@ export class Player {
   private sceneRenderer?: SceneRenderer;
   private foregroundSurface?: AnimatedForegroundSurface;
   private postFxSurface?: PostFxSurface;
+  /** A GPU-presented frame's post stack (F0a), in PostFxSurface's place. */
+  private gpuPostFx?: GpuCanvasSurface;
   /** The graphics preset in effect (resolved from the quality option once the renderer is known). */
   private qualitySettings: QualitySettings = QUALITY_PRESETS.high;
   /** "auto" (or no choice) steps the preset down while frames run long (see QualityGovernor). */
@@ -546,19 +549,47 @@ export class Player {
           keyRgb: this.cartSource.paletteRgb(scene.keyColor),
         };
       }
+      const particles = this.options.particles;
+      // Built once, only when something 3D is actually declared, so a plain 2D
+      // cart never touches WebGPU. `createSceneRenderer` always resolves — it
+      // falls back to the software rasteriser rather than returning null.
+      if (mesh || (world && this.cartSource)) {
+        this.sceneRenderer = await createSceneRenderer(
+          this.model.width,
+          this.model.height,
+          this.model.renderCaps,
+        );
+      }
+      // A frame presented from the GPU (F0a): the scene, sky, HUD and post-FX all
+      // run on the renderer's device, into a WebGPU canvas. Only with nothing
+      // CPU-drawn between the scene and the screen; otherwise, or without a
+      // WebGPU canvas, the byte path as before.
+      const presentFromGpu =
+        (this.options.gpuPresent ?? this.model.renderCaps.gpuPresent === true) &&
+        Boolean(mesh) &&
+        !this.options.lighting &&
+        !(particles && particles.emitters.length > 0) &&
+        !(world && this.cartSource) &&
+        !(wantsForeground && this.cartSource) &&
+        !(scene && backdrop) &&
+        this.sceneRenderer?.backend === "webgpu" &&
+        Boolean(this.sceneRenderer.renderToTexture);
+      const gpuCanvas = presentFromGpu ? GpuCanvasSurface.create(this.container, scale, this.model, this.sceneRenderer!.gpuDevice) : null;
       // The base surface renders the cart (optionally relit). With an active FX
       // stack it draws offscreen and PostFxSurface presents it through the
       // effect chain; if FX can't run (no WebGL), the base surface mounts
-      // directly, so post-processing never blocks playback.
+      // directly, so post-processing never blocks playback. A GPU-presented
+      // frame is its own base surface, and runs the FX stack itself.
       const makeBaseSurface = async (target: HTMLElement): Promise<DisplaySurface> => {
-        let surface: DisplaySurface = this.options.lighting
-          ? (this.litSurface = await LitCanvasSurface.create(target, scale, this.model, this.options.lighting))
-          : new CanvasSurface(target, scale, this.model);
+        let surface: DisplaySurface = gpuCanvas
+          ? gpuCanvas
+          : this.options.lighting
+            ? (this.litSurface = await LitCanvasSurface.create(target, scale, this.model, this.options.lighting))
+            : new CanvasSurface(target, scale, this.model);
         // Weather overlay wraps the terminal FIRST (innermost decorator), so it is
         // drawn last into the framebuffer — in front of the cart, backdrop, and
         // foreground placements — and, with post-FX active, still passes through
         // the effect stack (graded/bloomed with the scene rather than pasted flat).
-        const particles = this.options.particles;
         if (particles && particles.emitters.length > 0) {
           surface = new ParticleOverlaySurface(surface, this.model.width, this.model.height, particles);
         }
@@ -566,17 +597,6 @@ export class Player {
         // OUTSIDE the weather overlay, so the meshes sit in the scene (weather
         // still falls in front of them) but ahead of the cart, foreground, and
         // backdrop. Being a decorator, its output flows through lighting + FX.
-        const mesh = this.options.mesh;
-        // Built once, only when something 3D is actually declared, so a plain 2D
-        // cart never touches WebGPU. `createSceneRenderer` always resolves — it
-        // falls back to the software rasteriser rather than returning null.
-        if (mesh || (world && this.cartSource)) {
-          this.sceneRenderer = await createSceneRenderer(
-            this.model.width,
-            this.model.height,
-            this.model.renderCaps,
-          );
-        }
         // "auto" quality weighs the device, including whether the GPU renderer came up.
         this.qualityChoice = this.options.quality;
         this.qualitySettings = resolveQuality(this.options.quality, browserDeviceHints(this.sceneRenderer ? this.sceneRenderer.backend !== "software" : undefined));
@@ -596,6 +616,7 @@ export class Player {
               ...(this.sceneRenderer && this.sceneRenderer.backend !== "software"
                 ? { createFrontRenderer: () => createSceneRenderer(this.model.width, this.model.height, this.model.renderCaps) }
                 : {}),
+              ...(gpuCanvas ? { presenter: gpuCanvas } : {}),
             },
           );
           this.meshSurface.setQuality(this.qualitySettings);
@@ -610,9 +631,9 @@ export class Player {
             const text = (key: string) => translate(strings, language, key);
             // Unchanged widgets composite from their kept layers; only what moves is redrawn.
             const cache = createHoloCache();
-            this.meshSurface.setHolo((out, width, height, time) => {
+            this.meshSurface.setHolo((out, width, height, time, premultiplied) => {
               const state = runtime.channel.holo;
-              if (state.shown.size === 0) return;
+              if (state.shown.size === 0) return false;
               const bindings: Record<string, unknown> = {};
               keys.forEach((k, i) => {
                 const v = state.values.get(i);
@@ -620,8 +641,9 @@ export class Player {
               });
               for (const i of [...state.shown].sort((a, b) => a - b)) {
                 const doc = holoDocs[i];
-                if (doc) renderHoloDocument(out, width, height, doc, { bindings, time, text }, cache);
+                if (doc) renderHoloDocument(out, width, height, doc, { bindings, time, text }, cache, premultiplied === true);
               }
+              return true;
             });
           }
           // A scene with levels starts in its first; the others wait, hidden.
@@ -672,7 +694,19 @@ export class Player {
       const postFx = this.options.postFx;
       this.basePostFx = postFx;
       const shownFx = postFx ? applyQualityToPostFx(postFx, this.qualitySettings) : undefined;
-      if (shownFx && anyPostFxEnabled(shownFx)) {
+      if (gpuCanvas) {
+        // The GPU path: the canvas is mounted already and runs the FX stack itself.
+        this.gpuPostFx = gpuCanvas;
+        gpuCanvas.setSettings(shownFx ?? null);
+        this.surface = await makeBaseSurface(this.container);
+        if (this.meshSurface) {
+          this.meshSurface.onSun = (sun) => gpuCanvas.setSun(sun);
+          this.meshSurface.onPost = (post) => {
+            this.volumePost = post;
+            this.showPostFx();
+          };
+        }
+      } else if (shownFx && anyPostFxEnabled(shownFx)) {
         const fx = await PostFxSurface.create(this.container, scale, this.model, shownFx, makeBaseSurface);
         if (fx) this.postFxSurface = fx;
         // The lens flare follows the 3D scene's sun and fades as geometry covers it (H8).
@@ -1027,9 +1061,10 @@ export class Player {
 
   /** Show the cart's post-FX: its settings, the animation's values over them, then the post volumes round the camera. */
   private showPostFx(): void {
-    if (!this.postFxSurface || !this.basePostFx) return;
+    const fx = this.postFxSurface ?? this.gpuPostFx;
+    if (!fx || !this.basePostFx) return;
     const base = this.animPostFx ? { ...this.basePostFx, values: { ...this.basePostFx.values, ...this.animPostFx } } : this.basePostFx;
-    this.postFxSurface.setSettings(applyQualityToPostFx(applyPostVolumes(base, this.volumePost), this.qualitySettings));
+    fx.setSettings(applyQualityToPostFx(applyPostVolumes(base, this.volumePost), this.qualitySettings));
   }
 
   /**
@@ -1381,7 +1416,7 @@ export class Player {
     }
     this.foregroundSurface?.setPlacements(state.placements);
 
-    if (this.postFxSurface && this.basePostFx && Object.keys(state.postfx).length > 0) {
+    if ((this.postFxSurface || this.gpuPostFx) && this.basePostFx && Object.keys(state.postfx).length > 0) {
       this.animPostFx = state.postfx;
       this.showPostFx();
     }

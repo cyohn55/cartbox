@@ -302,6 +302,8 @@ export function LockoutGame() {
         // ?core=direct tries Lockout on the dedicated Modern core (EP20b).
         ...(new URLSearchParams(window.location.search).get("core") === "direct" ? { core: "direct" as const, directCoreUrl: DIRECT_CORE_URL } : {}),
         modelId: "xbox360",
+        // ?present=gpu presents the frame from the GPU, as the AAA tier does (AAA_FIDELITY_ROADMAP.md F0a).
+        ...(new URLSearchParams(window.location.search).get("present") === "gpu" ? { gpuPresent: true } : {}),
         autostart: true,
         record: false,
         controls: "auto",
