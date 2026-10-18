@@ -375,7 +375,13 @@ Everything else depends on this track. It contains no visible "feature", but its
       - On Dawn: each face's sharp level is the panorama where WebGPU samples it (face orientation); rough levels match a 20 000-sample CPU GGX integral within 4%; a rough white floor gets the sky's irradiance and a mirror the zenith.
       - The white furnace in `brdf.test.ts` still reads 1, now through the cube and SH.
       - In Chromium, Beaver Creek on the `aaa` tier builds its cube once, with no errors.
-    - *Left for F3a:* true HDR environments. The imported `.hdr` sky is still exposed into 8 bits before it gets here (F3a-2), and the F5a sky is not built yet.
+  - **F3a-2, true HDR environments: done.** An imported Radiance `.hdr` sky (I6) now reaches the IBL as its own linear radiance rather than the 8 bits it is exposed into for the backdrop.
+    - `EnvironmentLight.hdr` holds it, resampled to the reflections' 192×96 in linear light (`resampleHdr`: the 8-bit resample's yaw and wrap, scaled by the panorama's exposure). The AAA tier's IBL lights from it in place of `map`; every other path keeps `map`.
+    - **Held under 32** (`HDR_SKY_LIGHT_MAX`, a white sky being 1). The scene's directional light is its sun, so the panorama's own disc (often thousands) would light it a second time. Bright cloud and the sun's glow stay within that ceiling.
+    - *Tests (`ibl.test.ts`):* the resample keeps its range, holds the disc under the ceiling and turns by its yaw like the 8-bit sky; the IBL prefers it over the map. On Dawn, a mirror under an HDR sky shows the zenith's radiance of 12 unclipped.
+    - *Left for F3a:*
+      - The sky's procedural objects, clouds and distant vistas are drawn into the 8-bit panorama only, so an HDR sky's IBL doesn't see them. A procedural sky (no import) still lights through its 8 bits until the F5a sky is built in linear light.
+      - `.exr` import waits for F9d.
 - [ ] **F3b. HDR reflection probes.**
   - Cubemap probes captured on the GPU, then prefiltered and stored compressed (BC6H, or RGBM where it is not available).
   - Box and sphere parallax correction, and blended influence volumes with priorities.

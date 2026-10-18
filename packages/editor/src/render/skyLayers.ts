@@ -405,6 +405,48 @@ export function hdrToTexture(hdr: HdrImage, exposure: number): DecodedTexture {
 }
 
 /**
+ * The brightest an imported HDR sky's light is kept at for image-based
+ * lighting (AAA_FIDELITY_ROADMAP.md F3a), in its exposed linear units (a white
+ * sky is 1). The scene's directional light is its sun; the panorama's own disc,
+ * often thousands, would light it a second time. Bright cloud and the glow
+ * round the sun stay within this.
+ */
+export const HDR_SKY_LIGHT_MAX = 32;
+
+/**
+ * An imported HDR panorama resampled as {@link resamplePanorama} resamples an
+ * 8-bit one (bilinear, wrapping in longitude, turned `yaw` degrees), in linear
+ * light: scaled by `exposure` and held under `max`. RGB floats, as decoded.
+ */
+export function resampleHdr(source: HdrImage, width: number, height: number, yaw: number, exposure: number, max = HDR_SKY_LIGHT_MAX): HdrImage {
+  const data = new Float32Array(width * height * 3);
+  const sw = source.width;
+  const sh = source.height;
+  const turn = yaw / 360;
+  for (let y = 0; y < height; y += 1) {
+    const fy = clamp(((y + 0.5) / height) * sh - 0.5, 0, sh - 1);
+    const y0 = Math.floor(fy);
+    const y1 = Math.min(sh - 1, y0 + 1);
+    const ty = fy - y0;
+    for (let x = 0; x < width; x += 1) {
+      let u = (x + 0.5) / width + turn;
+      u -= Math.floor(u);
+      const fx = u * sw - 0.5;
+      const x0 = ((Math.floor(fx) % sw) + sw) % sw;
+      const x1 = (x0 + 1) % sw;
+      const tx = fx - Math.floor(fx);
+      const at = (yy: number, xx: number, c: number) => Math.min(max, source.data[(yy * sw + xx) * 3 + c]! * exposure);
+      for (let c = 0; c < 3; c += 1) {
+        const a = at(y0, x0, c) + (at(y0, x1, c) - at(y0, x0, c)) * tx;
+        const b = at(y1, x0, c) + (at(y1, x1, c) - at(y1, x0, c)) * tx;
+        data[(y * width + x) * 3 + c] = a + (b - a) * ty;
+      }
+    }
+  }
+  return { width, height, data };
+}
+
+/**
  * An imported equirectangular image resampled into a sky panorama of
  * `width × height` (bilinear, wrapping in longitude), turned `yaw` degrees
  * about the vertical and brightened by `exposure` (an LDR image's gain).

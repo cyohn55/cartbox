@@ -8,7 +8,7 @@
 
 import { describe, expect, it } from "vitest";
 
-import { composeModelMatrix, projectionMatrix, viewMatrix, type EnvironmentLight, type MeshAsset, type MeshSceneInstance } from "@cartbox/editor";
+import { HDR_SKY_LIGHT_MAX, composeModelMatrix, projectionMatrix, resampleHdr, viewMatrix, type EnvironmentLight, type HdrImage, type MeshAsset, type MeshSceneInstance } from "@cartbox/editor";
 import { WebgpuSceneRenderer } from "@cartbox/player";
 import { IBL_FACE, IBL_LEVELS, IblBuilder, cubeDirection, environmentPanorama, environmentSh, shIrradiance, type LinearPanorama } from "../packages/player/src/render/ibl";
 
@@ -66,6 +66,46 @@ describe("the environment in linear light", () => {
     // A constant environment lights white at its radiance.
     const flat = environmentSh(environmentPanorama({ sky: [1, 1, 1], horizon: [1, 1, 1], ground: [1, 1, 1], intensity: 2 }));
     for (const v of shIrradiance(flat, [0.3, 0.9, -0.3])) expect(v).toBeCloseTo(2, 3);
+  });
+});
+
+/** An HDR sky: 1 everywhere, a bright band (radiance 12) round the zenith and a sun (5000) at one longitude on the horizon. */
+function hdrSky(width = 64, height = 32): HdrImage {
+  const data = new Float32Array(width * height * 3).fill(1);
+  for (let x = 0; x < width; x += 1) for (let y = 0; y < 3; y += 1) data.fill(12, (y * width + x) * 3, (y * width + x) * 3 + 3);
+  const sun = ((height >> 1) * width + (width >> 2)) * 3;
+  data.fill(5000, sun, sun + 3);
+  return { width, height, data };
+}
+
+describe("true HDR environments (an imported .hdr sky)", () => {
+  it("are resampled in linear light with their range, the sun's disc held under the ceiling", () => {
+    const light = resampleHdr(hdrSky(), 64, 32, 0, 2);
+    // The bright band round the zenith keeps its range (12 × the exposure of 2) …
+    expect(light.data[0]).toBeCloseTo(24, 3);
+    // … the sun is held at the ceiling, which the scene's own sun light stands in for.
+    expect(Math.max(...light.data)).toBeLessThanOrEqual(HDR_SKY_LIGHT_MAX);
+    expect(Math.max(...light.data)).toBeGreaterThan(HDR_SKY_LIGHT_MAX * 0.5);
+  });
+
+  it("turn by their yaw as the 8-bit sky does: a quarter turn moves the sun a quarter round", () => {
+    const peak = (img: HdrImage) => {
+      let best = 0;
+      for (let i = 1; i < img.width * img.height; i += 1) if (img.data[i * 3]! > img.data[best * 3]!) best = i;
+      return best % img.width;
+    };
+    const still = peak(resampleHdr(hdrSky(), 64, 32, 0, 1, 1e9));
+    const turned = peak(resampleHdr(hdrSky(), 64, 32, 90, 1, 1e9));
+    expect((still - turned + 64) % 64).toBe(16);
+  });
+
+  it("are what the IBL lights from, in place of the 8-bit map", () => {
+    const light = resampleHdr(hdrSky(), 64, 32, 0, 1);
+    const pano = environmentPanorama({ ...SKY, intensity: 0.5, map: { width: 1, height: 1, data: new Uint8ClampedArray([0, 0, 0, 255]) }, hdr: light });
+    expect(pano.width).toBe(64);
+    expect(along(pano, [0, 1, 0])[0]).toBeCloseTo(6, 3); // 12 × the intensity
+    // The band lights the ground more than a plain sky of 1 would (0.5 at this intensity).
+    expect(shIrradiance(environmentSh(pano), [0, 1, 0])[0]).toBeGreaterThan(0.5 * 1.5);
   });
 });
 
@@ -196,11 +236,12 @@ describe.skipIf(!device)("the prefiltered cube, on a real device", { timeout: 12
         ],
       }) as unknown as MeshAsset;
     // A floor facing up (+y), seen from straight above.
+    let env: EnvironmentLight = SKY;
     const shade = async (mesh: MeshAsset) => {
       const renderer = (await WebgpuSceneRenderer.create(device, W, H, undefined, { hdr: true }))!;
       const instances: MeshSceneInstance[] = [{ mesh, model: composeModelMatrix([0, 0, 0], [-90, 0, 0], [2, 2, 1]) }];
       device.pushErrorScope("validation");
-      const texture = renderer.renderToTexture!(instances, { width: W, height: H, view: viewMatrix([0, 3, 0.001], [0, 0, 0]), projection: projectionMatrix(Math.PI / 3, 1, 0.1, 50), ambient: 0, lightDirection: [0, -1, 0], environment: SKY } as any);
+      const texture = renderer.renderToTexture!(instances, { width: W, height: H, view: viewMatrix([0, 3, 0.001], [0, 0, 0]), projection: projectionMatrix(Math.PI / 3, 1, 0.1, 50), ambient: 0, lightDirection: [0, -1, 0], environment: env } as any);
       const error = await settled(device.popErrorScope());
       expect(error ? String((error as any).message ?? error) : null).toBeNull();
       const bytesPerRow = 256;
@@ -227,5 +268,10 @@ describe.skipIf(!device)("the prefiltered cube, on a real device", { timeout: 12
     const mirror = await shade(quad(1, 0.05));
     const zenith = along(pano, [0, 1, 0]);
     for (let k = 0; k < 3; k += 1) expect(Math.abs(mirror[k]! - zenith[k]!) / zenith[k]!).toBeLessThan(0.05);
+    // An HDR sky's zenith, unclipped: the mirror shows its 12, not the 1 an 8-bit sky can hold.
+    env = { ...SKY, intensity: 1, hdr: resampleHdr(hdrSky(), 64, 32, 0, 1) };
+    const bright = await shade(quad(1, 0.05));
+    expect(bright[0]!).toBeGreaterThan(10);
+    expect(bright[0]!).toBeLessThan(13);
   });
 });
