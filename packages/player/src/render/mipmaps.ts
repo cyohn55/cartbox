@@ -215,10 +215,15 @@ export function coverageMips(source: DecodedTexture, cutoff = COVERAGE_CUTOFF): 
   return out;
 }
 
+/** Bytes a 4×4 block of each compressed format holds: 8 for the opaque half-byte ones (BC1, ETC2 RGB), else 16. */
+export function blockBytes(format: string): number {
+  return format === "bc1-rgba-unorm" || format === "etc2-rgb8unorm" ? 8 : 16;
+}
+
 /**
- * A texture in a 4×4 block-compressed format (BC7, ASTC 4×4, ETC2 RGBA: 16
- * bytes a block), its chain uploaded level by level. Each level's copy covers
- * whole blocks, its physical size; the texture's own size is the top level's.
+ * A texture in a 4×4 block-compressed format (BC7, BC1, ASTC 4×4, ETC2), its
+ * chain uploaded level by level. Each level's copy covers whole blocks, its
+ * physical size; the texture's own size is the top level's.
  */
 export function uploadCompressed(device: any, width: number, height: number, chain: { readonly format: string; readonly levels: readonly { readonly width: number; readonly height: number; readonly data: Uint8Array }[] }): any {
   const texture = device.createTexture({
@@ -230,7 +235,7 @@ export function uploadCompressed(device: any, width: number, height: number, cha
   chain.levels.forEach((level, mipLevel) => {
     const blocksWide = Math.ceil(level.width / 4);
     const blocksHigh = Math.ceil(level.height / 4);
-    device.queue.writeTexture({ texture, mipLevel }, level.data, { bytesPerRow: blocksWide * 16, rowsPerImage: blocksHigh * 4 }, { width: blocksWide * 4, height: blocksHigh * 4 });
+    device.queue.writeTexture({ texture, mipLevel }, level.data, { bytesPerRow: blocksWide * blockBytes(chain.format), rowsPerImage: blocksHigh * 4 }, { width: blocksWide * 4, height: blocksHigh * 4 });
   });
   return texture;
 }

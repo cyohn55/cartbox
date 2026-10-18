@@ -60,6 +60,15 @@ export interface EncodedImage {
    * handed the image for this ref (an asset-backed texture's content hash).
    */
   readonly ref?: string;
+  /**
+   * The same image as KTX2 with its mip chain (AAA_FIDELITY_ROADMAP.md F1a), a
+   * map bake's: a renderer that samples the GPU's own compressed formats
+   * decodes this instead, and every other path decodes `bytes`, so a map looks
+   * the same on the tiers that never see it.
+   */
+  readonly ktx2?: Uint8Array;
+  /** `ktx2` is this occlusion map already packed with its material's relief map (I4's packing, baked). */
+  readonly ktx2Relief?: boolean;
 }
 
 /**
@@ -534,6 +543,9 @@ interface SerializedImage {
   same?: string;
   /** An asset-store reference (content hash) in place of `bytes` (see meshTextureAssets.ts in the web app). */
   asset?: string;
+  /** The image as KTX2, base64 (see EncodedImage.ktx2), and whether it is packed with its relief map. */
+  ktx2?: string;
+  ktx2Relief?: boolean;
 }
 export interface SerializedMaterial {
   name: string;
@@ -824,7 +836,7 @@ function serializeImage(image: EncodedImage | null | undefined, field: string, t
   const same = table?.written.get(image);
   if (same !== undefined) return { mime: image.mime, same };
   table?.written.set(image, `${table.primitive}.${field}`);
-  return { mime: image.mime, bytes: bytesToBase64(image.bytes), ...(image.ref ? { ref: image.ref } : {}) };
+  return { mime: image.mime, bytes: bytesToBase64(image.bytes), ...(image.ref ? { ref: image.ref } : {}), ...(image.ktx2 ? { ktx2: bytesToBase64(image.ktx2), ...(image.ktx2Relief ? { ktx2Relief: true } : {}) } : {}) };
 }
 /** Decode an optional serialized image back to bytes (null when absent). */
 function deserializeImage(image: SerializedImage | null | undefined, field: string, table?: ImageTable): EncodedImage | null {
@@ -839,7 +851,12 @@ function decodeImage(image: SerializedImage): EncodedImage {
   // asset-store reference (`asset`, its content hash) — decodes to a
   // placeholder the player fills in when the bytes arrive.
   const ref = typeof image.ref === "string" ? image.ref : typeof image.asset === "string" ? image.asset : undefined;
-  return { mime: String(image.mime ?? "image/png"), bytes: base64ToBytes(image.bytes ?? ""), ...(ref ? { ref } : {}) };
+  return {
+    mime: String(image.mime ?? "image/png"),
+    bytes: base64ToBytes(image.bytes ?? ""),
+    ...(ref ? { ref } : {}),
+    ...(typeof image.ktx2 === "string" && image.ktx2.length > 0 ? { ktx2: base64ToBytes(image.ktx2), ...(image.ktx2Relief === true ? { ktx2Relief: true } : {}) } : {}),
+  };
 }
 
 const MALFORMED = "Mesh asset payload is malformed";

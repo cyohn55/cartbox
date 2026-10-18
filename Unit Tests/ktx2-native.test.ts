@@ -80,6 +80,21 @@ describe("transcoding to the GPU's formats", () => {
     }
   });
 
+  it("puts an opaque ETC1S texture in half a byte a texel where the device can (BC1, ETC2 RGB); data and alpha need a byte", () => {
+    const opaque = transcodeKtx2(transcoder, file, { gpuFormats: ["bc7-rgba-unorm", "bc1-rgba-unorm"] })!.gpu!;
+    expect(opaque.format).toBe("bc1-rgba-unorm");
+    expect(opaque.levels[0]!.data.byteLength).toBe(64 * 64 / 2);
+    expect(transcodeKtx2(transcoder, file, { gpuFormats: ["etc2-rgba8unorm", "etc2-rgb8unorm"] })!.gpu!.format).toBe("etc2-rgb8unorm");
+    // UASTC data (near-lossless) keeps BC7: BC1's 4-bit endpoints would smear it.
+    const data = encodeKtx2(encoder, painted(64), "data")!;
+    expect(transcodeKtx2(transcoder, data, { gpuFormats: ["bc7-rgba-unorm", "bc1-rgba-unorm"] })!.gpu!.format).toBe("bc7-rgba-unorm");
+    // With see-through texels, BC1's opaque blocks would lose the alpha.
+    const card = painted(64);
+    for (let i = 3; i < card.data.length; i += 8) card.data[i] = 0;
+    const cut = encodeKtx2(encoder, card, "color")!;
+    expect(transcodeKtx2(transcoder, cut, { gpuFormats: ["bc7-rgba-unorm", "bc1-rgba-unorm"] })!.gpu!.format).toBe("bc7-rgba-unorm");
+  });
+
   it("adds nothing without formats, for a format it can't make, or for a file without its mips", () => {
     expect(transcodeKtx2(transcoder, file)!.gpu).toBeUndefined();
     expect(transcodeKtx2(transcoder, file, { gpuFormats: ["rgba8unorm"] })!.gpu).toBeUndefined();
@@ -111,8 +126,8 @@ describe("transcoding to the GPU's formats", () => {
   it("names a device's formats: BC7 first, then ASTC, then ETC2", () => {
     const device = (features: string[]) => ({ features: new Set(features) });
     expect(compressedFormatsFor(device([]))).toEqual([]);
-    expect(compressedFormatsFor(device(["texture-compression-etc2", "texture-compression-astc"]))).toEqual(["astc-4x4-unorm", "etc2-rgba8unorm"]);
-    expect(compressedFormatsFor(device(["texture-compression-bc", "texture-compression-etc2"]))).toEqual(["bc7-rgba-unorm", "etc2-rgba8unorm"]);
+    expect(compressedFormatsFor(device(["texture-compression-etc2", "texture-compression-astc"]))).toEqual(["astc-4x4-unorm", "etc2-rgba8unorm", "etc2-rgb8unorm"]);
+    expect(compressedFormatsFor(device(["texture-compression-bc", "texture-compression-etc2"]))).toEqual(["bc7-rgba-unorm", "bc1-rgba-unorm", "etc2-rgba8unorm", "etc2-rgb8unorm"]);
   });
 });
 

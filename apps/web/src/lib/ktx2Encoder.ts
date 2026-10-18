@@ -19,8 +19,8 @@ import type { DecodedTexture } from "@cartbox/editor";
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
-/** What a texture holds, which decides how it's encoded. */
-export type TextureKind = "color" | "data" | "normal";
+/** What a texture holds, which decides how it is encoded; "light" is a light map: colour, but linear (ETC1S, not sRGB). */
+export type TextureKind = "color" | "light" | "data" | "normal";
 
 export type Ktx2Encode = (texture: DecodedTexture, kind: TextureKind) => Uint8Array | null;
 
@@ -65,7 +65,8 @@ export function encodeKtx2(basis: any, texture: DecodedTexture, kind: TextureKin
     const colour = kind === "color";
     encoder.setKTX2AndBasisSRGBTransferFunc(colour);
     encoder.setPerceptual(colour);
-    if (colour) {
+    // A light map is smooth colour: ETC1S holds it well, in linear (its bytes are light, not sRGB).
+    if (colour || kind === "light") {
       encoder.setUASTC(false);
       encoder.setQualityLevel(KTX2_COLOR_QUALITY);
     } else {

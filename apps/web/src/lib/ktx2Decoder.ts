@@ -20,12 +20,20 @@ import type { CompressedTexture, DecodedTexture } from "@cartbox/editor";
 /** Basis `transcoder_texture_format::cTFRGBA32`. */
 const RGBA32 = 13;
 
-/** Basis transcoder targets for the WebGPU formats a device may sample. Each is 16 bytes a 4×4 block. */
+/** Basis transcoder targets for the WebGPU formats a device may sample: a byte a texel, or half that. */
 export const NATIVE_TARGETS: Readonly<Record<string, number>> = {
   "bc7-rgba-unorm": 6, // cTFBC7_RGBA
   "astc-4x4-unorm": 10, // cTFASTC_4x4_RGBA
   "etc2-rgba8unorm": 1, // cTFETC2_RGBA
+  "bc1-rgba-unorm": 2, // cTFBC1_RGB: opaque, half a byte a texel
+  "etc2-rgb8unorm": 0, // cTFETC1_RGB (ETC1 is ETC2's RGB subset): opaque, half a byte a texel
 };
+
+/**
+ * Formats that hold no alpha at half a byte a texel. An opaque ETC1S file
+ * (ETC1 blocks already) loses nothing more in them, so it takes one first.
+ */
+const OPAQUE_FORMATS = new Set(["bc1-rgba-unorm", "etc2-rgb8unorm"]);
 
 export interface Ktx2DecodeOptions {
   /** WebGPU formats the renderer can sample, preferred first; the texture also transcodes to the first one listed here that can be made. */
@@ -95,7 +103,10 @@ function fullChain(width: number, height: number): number {
 function nativeChain(file: any, width: number, height: number, formats: readonly string[]): CompressedTexture | null {
   const levels: number = file.getLevels?.() ?? 1;
   if (levels < fullChain(width, height) || width % 4 !== 0 || height % 4 !== 0) return null;
-  for (const format of formats) {
+  // An opaque ETC1S texture goes to half a byte a texel where the device can; anything else needs a byte.
+  const opaque = !file.getHasAlpha?.() && !file.isUASTC?.();
+  const order = [...formats.filter((f) => opaque && OPAQUE_FORMATS.has(f)), ...formats.filter((f) => !OPAQUE_FORMATS.has(f))];
+  for (const format of order) {
     const target = NATIVE_TARGETS[format];
     if (target === undefined) continue;
     const out: { width: number; height: number; data: Uint8Array }[] = [];

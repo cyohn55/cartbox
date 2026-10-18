@@ -124,7 +124,7 @@ const withRelief = new WeakMap<DecodedTexture, WeakMap<object, DecodedTexture>>(
  * texel centres) and kept per pair, so it is built once per material.
  */
 export function occlusionWithRelief(occ: DecodedTexture | null, relief: DecodedTexture | null): DecodedTexture | null {
-  if (!relief) return occ;
+  if (!relief || occ?.packedWithRelief) return occ;
   let byOcc = withRelief.get(relief);
   if (!byOcc) withRelief.set(relief, (byOcc = new WeakMap()));
   const key = occ ?? NO_OCCLUSION;

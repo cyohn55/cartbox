@@ -51,6 +51,7 @@ import { loadCartDraft } from "@/lib/localCartStore";
 import { lockoutSidecarWithAssets, type LockoutAssetOverlay } from "@/lib/lockoutAssets";
 import { perfLine } from "@/lib/perfReadout";
 import { playableArena } from "@/lib/savedArena";
+import { loadKtx2Decoder } from "@/lib/ktx2Decoder";
 
 /** Where Lockout keeps its career record (it has no cart row, so it stays in this browser). */
 const LOCKOUT_SAVE_KEY = saveKey("lockout");
@@ -306,6 +307,8 @@ export function LockoutGame() {
         // ?hdr=1 shades it in linear light too (F0b).
         ...(new URLSearchParams(window.location.search).get("present") === "gpu" ? { gpuPresent: true } : {}),
         ...(new URLSearchParams(window.location.search).get("hdr") === "1" ? { gpuPresent: true, linearHdr: true, prepass: true, mipmaps: true } : {}),
+        // KTX2: the transcoder loads only if a texture needs it — Beaver Creek's baked images, on a renderer that samples compressed formats (F1a).
+        ktx2: loadKtx2Decoder,
         autostart: true,
         record: false,
         controls: "auto",
