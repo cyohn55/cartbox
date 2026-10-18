@@ -14342,6 +14342,7 @@ import { multiplyMat4 as multiplyMat44 } from "@cartbox/editor";
 var TEMPORAL_SAMPLES = 8;
 var TEMPORAL_BLEND = 0.1;
 var TEMPORAL_SHARPEN = 0.25;
+var REACTIVE_SCALE = 4;
 var TEMPORAL_UNIFORM_FLOATS = 20;
 function halton(index, base) {
   let result = 0;
@@ -14562,6 +14563,132 @@ void main() {
   colour = clamp(c + (4.0 * c - n - s - w - e) * uParams.y, lo, hi);
 }
 `;
+function hdrTemporalShaderWgsl(multisampled) {
+  return (
+    /* wgsl */
+    `
+struct Temporal { reproject: mat4x4<f32>, params: vec4<f32> };
+@group(0) @binding(0) var<uniform> taa: Temporal;
+@group(0) @binding(1) var current: texture_2d<f32>;
+@group(0) @binding(2) var history: texture_2d<f32>;
+@group(0) @binding(3) var historySampler: sampler;
+@group(0) @binding(4) var depth: ${multisampled ? "texture_depth_multisampled_2d" : "texture_depth_2d"};
+@group(0) @binding(5) var velocity: texture_2d<f32>;
+@group(0) @binding(6) var reactive: texture_2d<f32>;
+
+@vertex
+fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4<f32> {
+  let p = vec2<f32>(f32((i << 1u) & 2u), f32(i & 2u));
+  return vec4<f32>(p * 2.0 - 1.0, 0.0, 1.0);
+}
+
+// Karis's reversible tone map, and YCoCg.
+fn toneMap(c: vec3<f32>) -> vec3<f32> { return c / (1.0 + max(c.r, max(c.g, c.b))); }
+fn untoneMap(c: vec3<f32>) -> vec3<f32> { return c / max(1e-5, 1.0 - max(c.r, max(c.g, c.b))); }
+fn toYCoCg(c: vec3<f32>) -> vec3<f32> { return vec3<f32>(0.25 * c.r + 0.5 * c.g + 0.25 * c.b, 0.5 * c.r - 0.5 * c.b, -0.25 * c.r + 0.5 * c.g - 0.25 * c.b); }
+fn fromYCoCg(c: vec3<f32>) -> vec3<f32> { let t = c.x - c.z; return vec3<f32>(t + c.y, c.x + c.z, t - c.y); }
+
+// The history at uv by Catmull-Rom, in five bilinear taps (the corners dropped).
+fn historyAt(uv: vec2<f32>, size: vec2<f32>) -> vec4<f32> {
+  let pos = uv * size;
+  let centre = floor(pos - 0.5) + 0.5;
+  let f = pos - centre;
+  let w0 = f * (-0.5 + f * (1.0 - 0.5 * f));
+  let w1 = 1.0 + f * f * (-2.5 + 1.5 * f);
+  let w2 = f * (0.5 + f * (2.0 - 1.5 * f));
+  let w3 = f * f * (-0.5 + 0.5 * f);
+  let w12 = w1 + w2;
+  let t0 = (centre - 1.0) / size;
+  let t3 = (centre + 2.0) / size;
+  let t12 = (centre + w2 / w12) / size;
+  let a = textureSampleLevel(history, historySampler, vec2<f32>(t12.x, t0.y), 0.0) * (w12.x * w0.y);
+  let b = textureSampleLevel(history, historySampler, vec2<f32>(t0.x, t12.y), 0.0) * (w0.x * w12.y);
+  let c = textureSampleLevel(history, historySampler, t12, 0.0) * (w12.x * w12.y);
+  let d = textureSampleLevel(history, historySampler, vec2<f32>(t3.x, t12.y), 0.0) * (w3.x * w12.y);
+  let e = textureSampleLevel(history, historySampler, vec2<f32>(t12.x, t3.y), 0.0) * (w12.x * w3.y);
+  let weight = w12.x * w0.y + w0.x * w12.y + w12.x * w12.y + w3.x * w12.y + w12.x * w3.y;
+  return max((a + b + c + d + e) / weight, vec4<f32>(0.0));
+}
+
+@fragment
+fn resolve(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
+  let size = vec2<i32>(textureDimensions(current));
+  let fsize = vec2<f32>(size);
+  let p = vec2<i32>(frag.xy);
+  let c = textureLoad(current, p, 0);
+  if (taa.params.z < 0.5) { return c; }
+  // The neighbourhood's moments in YCoCg of the tone-mapped colour, and its nearest surface.
+  var m1 = vec3<f32>(0.0);
+  var m2 = vec3<f32>(0.0);
+  var nearest = 2.0;
+  var at = p;
+  for (var dy = -1; dy <= 1; dy += 1) {
+    for (var dx = -1; dx <= 1; dx += 1) {
+      let q = clamp(p + vec2<i32>(dx, dy), vec2<i32>(0, 0), size - 1);
+      let s = toYCoCg(toneMap(textureLoad(current, q, 0).rgb));
+      m1 = m1 + s;
+      m2 = m2 + s * s;
+      let z = textureLoad(depth, q, 0);
+      if (z < nearest) { nearest = z; at = q; }
+    }
+  }
+  let mean = m1 / 9.0;
+  let sigma = sqrt(max(m2 / 9.0 - mean * mean, vec3<f32>(0.0)));
+  // Where it was: by the nearest surface's velocity, or (nothing drawn) by depth and the cameras.
+  var uv = frag.xy / fsize;
+  if (nearest < 1.0) {
+    uv = uv - textureLoad(velocity, at, 0).xy;
+  } else {
+    var z = textureLoad(depth, p, 0);
+    if (taa.params.w > 0.5) { z = z * 2.0 - 1.0; }
+    let ndc = vec2<f32>(frag.x / fsize.x * 2.0 - 1.0, 1.0 - frag.y / fsize.y * 2.0);
+    let prev = taa.reproject * vec4<f32>(ndc, z, 1.0);
+    if (prev.w <= 0.0) { return c; }
+    uv = vec2<f32>(prev.x / prev.w * 0.5 + 0.5, 0.5 - prev.y / prev.w * 0.5);
+  }
+  if (any(uv < vec2<f32>(0.0, 0.0)) || any(uv > vec2<f32>(1.0, 1.0))) { return c; }
+  let past = historyAt(uv, fsize);
+  // Clip the history toward the box's centre (Salvi's variance box, \u03B3 = 1), the box
+  // grown to hold this pixel's own colour, so a lone highlight keeps its history.
+  let now = toYCoCg(toneMap(c.rgb));
+  let lo = min(mean - sigma, now);
+  let hi = max(mean + sigma, now);
+  let centre = (lo + hi) * 0.5;
+  let extent = (hi - lo) * 0.5 + vec3<f32>(1e-5);
+  var h = toYCoCg(toneMap(past.rgb));
+  let offset = h - centre;
+  let units = abs(offset / extent);
+  let reach = max(units.x, max(units.y, units.z));
+  if (reach > 1.0) { h = centre + offset / reach; }
+  // More of the new frame where something see-through changed the pixel (the reactive mask).
+  var blend = taa.params.x;
+  if (all(vec2<i32>(textureDimensions(reactive)) == size)) { blend = max(blend, textureLoad(reactive, p, 0).r); }
+  let rgb = untoneMap(fromYCoCg(mix(h, now, blend)));
+  return vec4<f32>(max(rgb, vec3<f32>(0.0)), mix(past.a, c.a, max(blend, 0.5)));
+}
+`
+  );
+}
+var REACTIVE_MASK_WGSL = (
+  /* wgsl */
+  `
+@group(0) @binding(0) var opaqueOnly: texture_2d<f32>;
+@group(0) @binding(1) var composited: texture_2d<f32>;
+
+@vertex
+fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4<f32> {
+  let p = vec2<f32>(f32((i << 1u) & 2u), f32(i & 2u));
+  return vec4<f32>(p * 2.0 - 1.0, 0.0, 1.0);
+}
+fn toneMap(c: vec3<f32>) -> vec3<f32> { return c / (1.0 + max(c.r, max(c.g, c.b))); }
+@fragment
+fn mask(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
+  let p = vec2<i32>(frag.xy);
+  let d = abs(toneMap(textureLoad(composited, p, 0).rgb) - toneMap(textureLoad(opaqueOnly, p, 0).rgb));
+  return vec4<f32>(clamp(max(d.r, max(d.g, d.b)) * ${REACTIVE_SCALE.toFixed(1)}, 0.0, 1.0), 0.0, 0.0, 1.0);
+}
+`
+);
 
 // src/render/reflections.ts
 var SSR_STEPS = 64;
@@ -19163,6 +19290,7 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
      * first use.
      */
     this.taa = null;
+    this.reactivePipeline = null;
     /** Pipeline variants (material graph, sample count, reflection targets), built on first use. */
     this.variants = /* @__PURE__ */ new Map();
     /**
@@ -19806,7 +19934,8 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
       ...this.timer && this.timer.lastPasses.length > 0 ? { passes: this.timer.lastPasses } : {}
     };
     const refract = draws.some((entry) => entry.refract);
-    const split = refract || draws.some((entry) => softEdges(entry.primitive.material, entry.alpha, draw.projection) !== void 0);
+    const hdrTaa = this.hdr && temporal !== null && prepass;
+    const split = refract || draws.some((entry) => softEdges(entry.primitive.material, entry.alpha, draw.projection) !== void 0) || hdrTaa && draws.some((entry) => entry.alpha >= 2);
     const firstSeeThrough = split ? draws.findIndex((entry) => entry.alpha >= 2 || entry.refract) : -1;
     const seeThrough = firstSeeThrough >= 0;
     const msaa = draw.antialias === true ? this.ensureMsaa() : null;
@@ -19854,7 +19983,7 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     const msColour = msaa ? graph.createTexture("colour.msaa", { format: this.colourFormat, ...size, sampleCount: MSAA_SAMPLES }) : null;
     const rays = reflections ? ["reflect.ray", "reflect.env"].map((name) => graph.createTexture(name, { format: "rgba16float", ...size })) : [];
     const raysMs = msaa ? rays.map((ray) => graph.createTexture(`${ray.name}.msaa`, { format: "rgba16float", ...size, sampleCount: MSAA_SAMPLES })) : [];
-    const behind = refract && seeThrough ? graph.importTexture("behind", this.depthGroups.behind) : null;
+    const behind = (refract || hdrTaa) && seeThrough ? graph.importTexture("behind", this.depthGroups.behind) : null;
     const groups = msaa ? msaa.groups : this.depthGroups;
     const target = msColour ?? colour;
     const rayTargets = msaa ? raysMs : rays;
@@ -19928,8 +20057,9 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
       });
     }
     if (seeThrough) scenePass("see-through", firstSeeThrough, draws.length, true, true);
+    const reactive = hdrTaa && seeThrough && behind ? this.addReactiveMask(graph, behind, colour) : null;
     if (reflections) this.addReflections(graph, reflections, colour, depth, rays, temporal ? temporal.projection : draw.projection, msaa !== null);
-    if (temporal) this.addTemporal(graph, temporal.uniforms, colour, depth, msaa !== null);
+    if (temporal) this.addTemporal(graph, temporal.uniforms, colour, depth, msaa !== null, hdrTaa ? velocity : null, reactive);
     const slot = readback ? this.readback.find((entry) => !entry.busy) : void 0;
     if (slot) {
       graph.addPass("readback", "transfer", (pass) => {
@@ -20059,12 +20189,46 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     });
   }
   /**
+   * The reactive mask (F4a): how much the see-through pass changed each pixel,
+   * from the opaque scene copied before it against the frame after it.
+   */
+  addReactiveMask(graph, opaqueOnly, colour) {
+    const device = this.device;
+    this.reactivePipeline ?? (this.reactivePipeline = fullScreenPipeline(device, REACTIVE_MASK_WGSL, "mask", "r8unorm"));
+    const mask = graph.createTexture("taa.reactive", { format: "r8unorm", width: this.width, height: this.height });
+    graph.addPass("taa.reactive", "render", (pass) => {
+      pass.read(opaqueOnly);
+      pass.read(colour);
+      pass.write(mask);
+      return (ctx) => {
+        const encoded = ctx.encoder.beginRenderPass({
+          colorAttachments: [{ view: ctx.texture(mask).createView(), clearValue: { r: 0, g: 0, b: 0, a: 0 }, loadOp: "clear", storeOp: "store" }],
+          ...ctx.timing
+        });
+        encoded.setPipeline(this.reactivePipeline);
+        encoded.setBindGroup(
+          0,
+          device.createBindGroup({
+            layout: this.reactivePipeline.getBindGroupLayout(0),
+            entries: [
+              { binding: 0, resource: ctx.texture(opaqueOnly).createView() },
+              { binding: 1, resource: ctx.texture(colour).createView() }
+            ]
+          })
+        );
+        encoded.draw(3);
+        encoded.end();
+      };
+    });
+    return mask;
+  }
+  /**
    * Resolve the frame into the history and sharpen it back into the colour
    * texture that is read back (HALO_INFINITE_STYLE_ROADMAP.md I2). The two
    * history images outlive the frame, so the graph imports them.
    */
-  addTemporal(graph, uniforms, colour, depth, multisampled) {
-    var _a;
+  addTemporal(graph, uniforms, colour, depth, multisampled, velocity = null, reactive = null) {
+    var _a, _b;
     const device = this.device;
     if (!this.taa) {
       const size = { width: this.width, height: this.height };
@@ -20076,12 +20240,13 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
         // UNIFORM | COPY_DST
         sampler: device.createSampler({ magFilter: "linear", minFilter: "linear", addressModeU: "clamp-to-edge", addressModeV: "clamp-to-edge" }),
         resolve: [null, null],
+        hdrResolve: [null, null],
         sharpen: fullScreenPipeline(device, TEMPORAL_SHARPEN_WGSL, "sharpen", this.colourFormat)
       };
     }
     const taa = this.taa;
     const k = multisampled ? 1 : 0;
-    (_a = taa.resolve)[k] ?? (_a[k] = fullScreenPipeline(device, temporalShaderWgsl(multisampled), "resolve", "rgba16float"));
+    const resolve = velocity ? (_a = taa.hdrResolve)[k] ?? (_a[k] = fullScreenPipeline(device, hdrTemporalShaderWgsl(multisampled), "resolve", "rgba16float")) : (_b = taa.resolve)[k] ?? (_b[k] = fullScreenPipeline(device, temporalShaderWgsl(multisampled), "resolve", "rgba16float"));
     const read = graph.importTexture("taa.history", taa.history[taa.index]);
     const write = graph.importTexture("taa.next", taa.history[1 - taa.index]);
     taa.index = 1 - taa.index;
@@ -20099,15 +20264,22 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
       pass.read(colour);
       pass.read(read);
       pass.read(depth);
+      if (velocity) pass.read(velocity);
+      if (reactive) pass.read(reactive);
       pass.write(write);
       return (ctx) => {
         device.queue.writeBuffer(taa.uniforms, 0, uniforms);
-        fullScreen(ctx, taa.resolve[k], write, [
+        fullScreen(ctx, resolve, write, [
           { binding: 0, resource: { buffer: taa.uniforms } },
           { binding: 1, resource: ctx.texture(colour).createView() },
           { binding: 2, resource: ctx.texture(read).createView() },
           { binding: 3, resource: taa.sampler },
-          { binding: 4, resource: ctx.texture(depth).createView() }
+          { binding: 4, resource: ctx.texture(depth).createView() },
+          ...velocity ? [
+            { binding: 5, resource: ctx.texture(velocity).createView() },
+            // Nothing see-through: a 1×1 stand-in the resolve reads only at the frame's size.
+            { binding: 6, resource: reactive ? ctx.texture(reactive).createView() : this.blankTexture.createView() }
+          ] : []
         ]);
       };
     });
