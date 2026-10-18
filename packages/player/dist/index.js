@@ -17585,10 +17585,229 @@ fn specularOcclusion(ndv: f32, ao: f32, alpha: f32) -> f32 {
   );
 }
 
+// src/render/ibl.ts
+var IBL_FACE = 128;
+var IBL_LEVELS = 6;
+var IBL_SAMPLES = 128;
+var GRADIENT_WIDTH = 128;
+var GRADIENT_HEIGHT = 64;
+var srgbToLinear = (c) => c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4;
+function environmentKey(env) {
+  return env.map ? [env.map, env.intensity] : [...env.sky, ...env.horizon, ...env.ground, env.intensity];
+}
+function environmentPanorama(env) {
+  const intensity = env.intensity;
+  if (env.map) {
+    const { width, height, data } = env.map;
+    const out2 = new Float32Array(width * height * 4);
+    for (let i = 0; i < width * height; i += 1) {
+      for (let k = 0; k < 3; k += 1) out2[i * 4 + k] = srgbToLinear(data[i * 4 + k] / 255) * intensity;
+      out2[i * 4 + 3] = 1;
+    }
+    return { width, height, data: out2 };
+  }
+  const out = new Float32Array(GRADIENT_WIDTH * GRADIENT_HEIGHT * 4);
+  for (let y = 0; y < GRADIENT_HEIGHT; y += 1) {
+    const t = Math.cos(Math.PI * (y + 0.5) / GRADIENT_HEIGHT);
+    const to = t >= 0 ? env.sky : env.ground;
+    const k = Math.abs(t);
+    const c = [0, 1, 2].map((i) => srgbToLinear(env.horizon[i] + (to[i] - env.horizon[i]) * k) * intensity);
+    for (let x = 0; x < GRADIENT_WIDTH; x += 1) out.set([c[0], c[1], c[2], 1], (y * GRADIENT_WIDTH + x) * 4);
+  }
+  return { width: GRADIENT_WIDTH, height: GRADIENT_HEIGHT, data: out };
+}
+function texelDirection(pano, x, y) {
+  const phi = 2 * Math.PI * (x + 0.5) / pano.width - Math.PI;
+  const theta = Math.PI * (y + 0.5) / pano.height;
+  return [Math.sin(theta) * Math.cos(phi), Math.cos(theta), Math.sin(theta) * Math.sin(phi)];
+}
+function shBasis(x, y, z) {
+  return [0.282095, 0.488603 * y, 0.488603 * z, 0.488603 * x, 1.092548 * x * y, 1.092548 * y * z, 0.315392 * (3 * z * z - 1), 1.092548 * x * z, 0.546274 * (x * x - y * y)];
+}
+var COSINE_BANDS = [1, 2 / 3, 2 / 3, 2 / 3, 1 / 4, 1 / 4, 1 / 4, 1 / 4, 1 / 4];
+function environmentSh(pano) {
+  const sums = new Float64Array(27);
+  for (let y = 0; y < pano.height; y += 1) {
+    const theta = Math.PI * (y + 0.5) / pano.height;
+    const weight = Math.sin(theta) * (Math.PI / pano.height) * (2 * Math.PI / pano.width);
+    for (let x = 0; x < pano.width; x += 1) {
+      const [dx, dy, dz] = texelDirection(pano, x, y);
+      const basis = shBasis(dx, dy, dz);
+      const i = (y * pano.width + x) * 4;
+      for (let k = 0; k < 9; k += 1) {
+        for (let c = 0; c < 3; c += 1) sums[k * 3 + c] = sums[k * 3 + c] + pano.data[i + c] * basis[k] * weight;
+      }
+    }
+  }
+  const out = new Float32Array(36);
+  for (let k = 0; k < 9; k += 1) for (let c = 0; c < 3; c += 1) out[k * 4 + c] = sums[k * 3 + c] * COSINE_BANDS[k];
+  return out;
+}
+var SH_IRRADIANCE_WGSL = (
+  /* wgsl */
+  `
+// The environment's diffuse light (F3a, ibl.ts): L2 SH irradiance over \u03C0 at a unit normal.
+fn shIrradiance(n: vec3<f32>) -> vec3<f32> {
+  let s = frame.envSh;
+  let e = s[0].xyz * 0.282095
+    + (s[1].xyz * n.y + s[2].xyz * n.z + s[3].xyz * n.x) * 0.488603
+    + (s[4].xyz * (n.x * n.y) + s[5].xyz * (n.y * n.z) + s[7].xyz * (n.x * n.z)) * 1.092548
+    + s[6].xyz * (0.315392 * (3.0 * n.z * n.z - 1.0))
+    + s[8].xyz * (0.546274 * (n.x * n.x - n.y * n.y));
+  return max(e, vec3<f32>(0.0));
+}
+`
+);
+var PREFILTER_WGSL = (
+  /* wgsl */
+  `
+@group(0) @binding(0) var src: texture_2d<f32>;
+@group(0) @binding(1) var srcSamp: sampler;
+@group(0) @binding(2) var dst: texture_storage_2d_array<rgba16float, write>;
+// x = perceptual roughness, y = this level's face size, z = the source's level-0 texel solid angle, w = the coarsest source level to read.
+@group(0) @binding(3) var<uniform> params: vec4<f32>;
+
+const PI = 3.14159265;
+
+fn faceDirection(face: u32, s: f32, t: f32) -> vec3<f32> {
+  switch (face) {
+    case 0u: { return vec3<f32>(1.0, -t, -s); }
+    case 1u: { return vec3<f32>(-1.0, -t, s); }
+    case 2u: { return vec3<f32>(s, 1.0, t); }
+    case 3u: { return vec3<f32>(s, -1.0, -t); }
+    case 4u: { return vec3<f32>(s, -t, 1.0); }
+    default: { return vec3<f32>(-s, -t, -1.0); }
+  }
+}
+// The panorama along a direction (envColorDir's mapping), at a mip level.
+fn panorama(d: vec3<f32>, lod: f32) -> vec3<f32> {
+  let u = atan2(d.z, d.x) / (2.0 * PI) + 0.5;
+  let v = acos(clamp(d.y, -1.0, 1.0)) / PI;
+  return textureSampleLevel(src, srcSamp, vec2<f32>(u, v), lod).rgb;
+}
+fn hammersley(i: u32, n: u32) -> vec2<f32> {
+  return vec2<f32>(f32(i) / f32(n), f32(reverseBits(i)) * 2.3283064365386963e-10);
+}
+
+@compute @workgroup_size(8, 8, 1)
+fn main(@builtin(global_invocation_id) id: vec3<u32>) {
+  let size = u32(params.y);
+  if (id.x >= size || id.y >= size) { return; }
+  let s = (f32(id.x) + 0.5) / params.y * 2.0 - 1.0;
+  let t = (f32(id.y) + 0.5) / params.y * 2.0 - 1.0;
+  let N = normalize(faceDirection(id.z, s, t));
+  let rough = params.x;
+  var colour = vec3<f32>(0.0);
+  if (rough <= 0.0) {
+    colour = panorama(N, 0.0);
+  } else {
+    // GGX importance sampling about N, with V = N (the split-sum's isotropic lobe).
+    let alpha = max(rough * rough, 1e-4);
+    let a2 = alpha * alpha;
+    let up = select(vec3<f32>(1.0, 0.0, 0.0), vec3<f32>(0.0, 0.0, 1.0), abs(N.z) < 0.999);
+    let tx = normalize(cross(up, N));
+    let ty = cross(N, tx);
+    var weight = 0.0;
+    for (var i = 0u; i < ${IBL_SAMPLES}u; i = i + 1u) {
+      let xi = hammersley(i, ${IBL_SAMPLES}u);
+      let phi = 2.0 * PI * xi.x;
+      let cosT = sqrt((1.0 - xi.y) / (1.0 + (a2 - 1.0) * xi.y));
+      let sinT = sqrt(1.0 - cosT * cosT);
+      let H = normalize(tx * (sinT * cos(phi)) + ty * (sinT * sin(phi)) + N * cosT);
+      let L = 2.0 * dot(N, H) * H - N;
+      let ndl = dot(N, L);
+      if (ndl > 0.0) {
+        // The sample's solid angle against a source texel's: the mip to read so samples tile the lobe.
+        let d = cosT * cosT * (a2 - 1.0) + 1.0;
+        let pdf = a2 / (PI * d * d) / 4.0;
+        let omega = 1.0 / (f32(${IBL_SAMPLES}u) * pdf + 1e-6);
+        let lod = clamp(0.5 * log2(omega / params.z) + 1.0, 0.0, params.w);
+        colour = colour + panorama(L, lod) * ndl;
+        weight = weight + ndl;
+      }
+    }
+    colour = colour / max(weight, 1e-6);
+  }
+  textureStore(dst, vec2<u32>(id.xy), id.z, vec4<f32>(colour, 1.0));
+}
+`
+);
+function toHalf(value) {
+  const f3 = new Float32Array([value]);
+  const bits = new Uint32Array(f3.buffer)[0];
+  const sign = bits >>> 16 & 32768;
+  const exponent = (bits >>> 23 & 255) - 127 + 15;
+  const mantissa = bits & 8388607;
+  if (exponent <= 0) return sign;
+  if (exponent >= 31) return sign | 31743;
+  return sign | exponent << 10 | mantissa >>> 13;
+}
+var IblBuilder = class {
+  constructor(device) {
+    this.device = device;
+    this.pipeline = null;
+    this.mips = new MipmapGenerator(device);
+  }
+  /** The prefiltered cube of a panorama: rgba16float, {@link IBL_FACE}², {@link IBL_LEVELS} levels. */
+  build(pano) {
+    const device = this.device;
+    const levels = mipLevelCount(pano.width, pano.height);
+    const source = device.createTexture({
+      size: { width: pano.width, height: pano.height },
+      format: "rgba16float",
+      mipLevelCount: levels,
+      usage: 4 | 2 | 16
+      // TEXTURE_BINDING | COPY_DST | RENDER_ATTACHMENT (its mips)
+    });
+    const halves = new Uint16Array(pano.data.length);
+    for (let i = 0; i < halves.length; i += 1) halves[i] = toHalf(pano.data[i]);
+    device.queue.writeTexture({ texture: source }, halves, { bytesPerRow: pano.width * 8, rowsPerImage: pano.height }, { width: pano.width, height: pano.height });
+    this.mips.generate(source, levels, "rgba16float");
+    const cube = device.createTexture({
+      size: { width: IBL_FACE, height: IBL_FACE, depthOrArrayLayers: 6 },
+      format: "rgba16float",
+      mipLevelCount: IBL_LEVELS,
+      usage: 4 | 8 | 1
+      // TEXTURE_BINDING | STORAGE_BINDING | COPY_SRC (read back by its tests)
+    });
+    this.pipeline ?? (this.pipeline = device.createComputePipeline({ layout: "auto", compute: { module: device.createShaderModule({ code: PREFILTER_WGSL }), entryPoint: "main" } }));
+    const sampler = device.createSampler({ magFilter: "linear", minFilter: "linear", mipmapFilter: "linear", addressModeU: "repeat", addressModeV: "clamp-to-edge" });
+    const texelSolidAngle = 4 * Math.PI / (pano.width * pano.height);
+    const encoder = device.createCommandEncoder();
+    const uniforms = [];
+    for (let level = 0; level < IBL_LEVELS; level += 1) {
+      const size = Math.max(1, IBL_FACE >> level);
+      const params = device.createBuffer({ size: 16, usage: 64 | 8 });
+      device.queue.writeBuffer(params, 0, new Float32Array([level / (IBL_LEVELS - 1), size, texelSolidAngle, Math.max(0, Math.min(levels - 1, Math.log2(pano.height / 8)))]));
+      uniforms.push(params);
+      const pass = encoder.beginComputePass();
+      pass.setPipeline(this.pipeline);
+      pass.setBindGroup(
+        0,
+        device.createBindGroup({
+          layout: this.pipeline.getBindGroupLayout(0),
+          entries: [
+            { binding: 0, resource: source.createView() },
+            { binding: 1, resource: sampler },
+            { binding: 2, resource: cube.createView({ dimension: "2d-array", baseMipLevel: level, mipLevelCount: 1 }) },
+            { binding: 3, resource: { buffer: params } }
+          ]
+        })
+      );
+      pass.dispatchWorkgroups(Math.ceil(size / 8), Math.ceil(size / 8), 6);
+      pass.end();
+    }
+    device.queue.submit([encoder.finish()]);
+    source.destroy();
+    for (const u of uniforms) u.destroy();
+    return cube;
+  }
+};
+
 // src/render/WebgpuSceneRenderer.ts
 var GBUFFER_FORMAT = "rgba16float";
 var VELOCITY_FORMAT = "rg16float";
-var FRAME_BYTES = 176;
+var FRAME_BYTES = 336;
 var READBACK_BUFFERS2 = 3;
 var SHADER_STAGE_VERTEX = 1;
 var SHADER_STAGE_FRAGMENT = 2;
@@ -17777,6 +17996,8 @@ struct Frame {
   probeMin: vec4<f32>,    // EP9: the probe grid's corner, w = 1 when a grid is bound
   probeScale: vec4<f32>,  // world \u2192 grid units per axis: (count \u2212 1) / (max \u2212 min)
   probeCount: vec4<f32>,  // probes per axis
+  envSh: array<vec4<f32>, 9>, // F3a: the environment's L2 SH irradiance over \u03C0 (linear variant)
+  envInfo: vec4<f32>,         // F3a: x = the prefiltered cube's top mip
 };
 // One spot/point shadow tile (EP8c): world\u2192clip, and params.xy = depth\u2192distance terms.
 struct ShadowTile {
@@ -17794,9 +18015,10 @@ struct ShadowTile {
 // tests against. Unfilterable, read via textureLoad (nearest) \u2014 matching the
 // software compare exactly.
 @group(0) @binding(6) var shadowMap: texture_2d<f32>;
-// The equirectangular environment map, read via textureLoad (nearest) to match
+${hdr ? `// The environment as a GGX-prefiltered cube (F3a, ibl.ts): mip = roughness \xD7 top mip.
+@group(0) @binding(7) var envCube: texture_cube<f32>;` : `// The equirectangular environment map, read via textureLoad (nearest) to match
 // sampleEquirectRgb in meshRasterizer.ts. Bound to a 1x1 blank when unused.
-@group(0) @binding(7) var envMap: texture_2d<f32>;
+@group(0) @binding(7) var envMap: texture_2d<f32>;`}
 // The screen-space AO buffer (CPU-generated by computeSsao, uploaded r32float),
 // sampled per fragment by its framebuffer pixel \u2014 the same buffer the software
 // path multiplies its ambient by. Bound to a 1x1 blank when unused.
@@ -17847,7 +18069,9 @@ struct Probe {
 // The opaque scene's colour (I5), copied as the see-through pass begins \u2014 what a
 // refracting surface bends (a 1\xD71 blank in the opaque pass, which never reads it).
 @group(1) @binding(7) var sceneColour: texture_2d<f32>;
-${hdr ? brdfWgsl(1, 8) : ""}
+${hdr ? `${brdfWgsl(1, 8)}// The prefiltered cube's sampler: trilinear, so a roughness between levels blends them (F3a).
+@group(1) @binding(9) var envSamp: sampler;
+${SH_IRRADIANCE_WGSL}` : ""}
 // Optical depth of a fog layer thinning above base, along the ray from the eye
 // (height cy, rise dy, length len) over t in [t0, t1] \u2014 fogLayerDepth in skyDome.ts.
 fn fogLayer(d: f32, k: f32, base: f32, cy: f32, dy: f32, len: f32, t0: f32, t1: f32) -> f32 {
@@ -17982,7 +18206,8 @@ fn envGradient(y: f32) -> vec3<f32> {
 // is bound (envMeta.w), else the analytic gradient (Y only). Mirrors
 // sampleEnvironmentDir in meshRasterizer.ts \u2014 nearest via textureLoad.
 fn envColorDir(dir: vec3<f32>) -> vec3<f32> {
-  if (u.envMeta.w < 0.5) { return envGradient(dir.y); }
+${hdr ? `  // The cube's sharp level holds the panorama or the gradient, decoded and scaled (F3a).
+  return textureSampleLevel(envCube, envSamp, dir, 0.0).rgb;` : `  if (u.envMeta.w < 0.5) { return envGradient(dir.y); }
   let d = normalize(dir);
   let uCoord = atan2(d.z, d.x) / (2.0 * 3.14159265) + 0.5;
   let vCoord = acos(clamp(d.y, -1.0, 1.0)) / 3.14159265;
@@ -17990,7 +18215,7 @@ fn envColorDir(dir: vec3<f32>) -> vec3<f32> {
   let wx = uCoord - floor(uCoord);
   let tx = i32(clamp(floor(wx * dims.x), 0.0, dims.x - 1.0));
   let ty = i32(clamp(floor(vCoord * dims.y), 0.0, dims.y - 1.0));
-  return toLinear(textureLoad(envMap, vec2<i32>(tx, ty), 0).rgb) * u.envHorizon.w;
+  return toLinear(textureLoad(envMap, vec2<i32>(tx, ty), 0).rgb) * u.envHorizon.w;`}
 }
 // Probe i's panorama along a direction, nearest \u2014 mirrors sampleProbe.
 fn probeSample(i: i32, dir: vec3<f32>) -> vec3<f32> {
@@ -18177,7 +18402,25 @@ fn coatTerm(N: vec3<f32>, ndv: f32, Ld: vec3<f32>, H: vec3<f32>, vdh: f32) -> ve
 // around it, box-projected from this point, fading to the sky at the box's
 // faces \u2014 mirroring environmentReflection and pickProbe/boxProject.
 fn envReflect(P: vec3<f32>, R: vec3<f32>, rough: f32) -> vec3<f32> {
-  var spec = envColorDir(R);
+${hdr ? `  // The linear variant (F3a): the sky's GGX lobe from the prefiltered cube, and a
+  // probe's room (still a nearest panorama, until F3b) blurred toward its average.
+  var spec = textureSampleLevel(envCube, envSamp, R, rough * frame.envInfo.x).rgb;
+  let pc = i32(u.ssaoMeta.w + 0.5);
+  for (var i = 0; i < pc; i = i + 1) {
+    let pr = probes[i];
+    let inside = min(min(min(P.x - pr.mn.x, pr.mx.x - P.x), min(P.y - pr.mn.y, pr.mx.y - P.y)), min(P.z - pr.mn.z, pr.mx.z - P.z));
+    let wgt = clamp(inside / ${PROBE_FADE2.toFixed(4)}, 0.0, 1.0);
+    if (wgt > 0.0) {
+      let Rs = select(R, vec3<f32>(1e-6), abs(R) < vec3<f32>(1e-6));
+      let tf = max((pr.mx.xyz - P) / Rs, (pr.mn.xyz - P) / Rs);
+      let t = max(0.0, min(min(tf.x, tf.y), tf.z));
+      spec = mix(spec, mix(probeSample(i, P + R * t - pr.pos.xyz), pr.avg.xyz, rough), wgt);
+      break;
+    }
+  }
+  return spec;
+}
+` : `  var spec = envColorDir(R);
   var specAvg = envAverage();
   let pc = i32(u.ssaoMeta.w + 0.5);
   for (var i = 0; i < pc; i = i + 1) {
@@ -18195,6 +18438,7 @@ fn envReflect(P: vec3<f32>, R: vec3<f32>, rough: f32) -> vec3<f32> {
   }
   return mix(spec, specAvg, rough);
 }
+`}
 
 // One light's direct term (Cook-Torrance), mirroring the software rasteriser's
 // light loop: point and spot lights fall off to nothing at their range, a spot
@@ -18581,7 +18825,8 @@ ${g.emis}
 ${reflect ? "    var envSpec = vec3<f32>(0.0);\n    var envSeen = vec3<f32>(0.0);\n" : ""}    var amb: vec3<f32>;
     var coatV = 0.0;
     if (u.envSky.w > 0.5) {
-      let irr = envColorDir(N);
+      ${hdr ? `// The irradiance over the hemisphere (F3a), not the radiance along N.
+      let irr = shIrradiance(N);` : "let irr = envColorDir(N);"}
       // Brushed metal (I4) reflects about a normal bent across its grain.
       var Rn = N;
       if (aniso != 0.0) {
@@ -18866,6 +19111,10 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     /** The near cascade's depth array last uploaded in full (as shadowUploaded is the main map's). */
     this.nearUploaded = null;
     this.envMapSource = null;
+    /** The linear variant's environment (F3a): its prefiltered cube (a 1×1 black cube without one), SH, and what they were built from. */
+    this.ibl = null;
+    this.iblKey = null;
+    this.iblSh = new Float32Array(36);
     /** The SSAO buffer: a lazily-created width×height r32float upload target, and
      *  what binding 8 currently references (that upload, or the 1x1 blank). */
     this.ssaoTexture = null;
@@ -18915,7 +19164,7 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     this.msaa = null;
     this.software = new SoftwareSceneRenderer(style);
     this.shadowTexture = blankShadow;
-    this.envTexture = blankTexture;
+    this.envTexture = hdr ? blankCube(device) : blankTexture;
     this.probeTexture = blankTexture;
     this.ssaoBound = blankShadow;
     this.timer = GraphTimer.create(device);
@@ -19001,7 +19250,8 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
           // so it declares unfilterable-float and needs no sampler.
           { binding: 6, visibility: SHADER_STAGE_FRAGMENT, texture: { sampleType: "unfilterable-float" } },
           // The equirectangular environment map (rgba8unorm), read via textureLoad.
-          { binding: 7, visibility: SHADER_STAGE_FRAGMENT, texture: { sampleType: "float" } },
+          // The environment: its panorama, or (linear variant, F3a) its prefiltered cube.
+          { binding: 7, visibility: SHADER_STAGE_FRAGMENT, texture: hdr ? { sampleType: "float", viewDimension: "cube" } : { sampleType: "float" } },
           // The SSAO buffer (r32float), read per fragment via textureLoad.
           { binding: 8, visibility: SHADER_STAGE_FRAGMENT, texture: { sampleType: "unfilterable-float" } },
           // The Modern-tier light list, read-only storage.
@@ -19030,7 +19280,9 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
         // The opaque scene's colour, for refraction (I5).
         { binding: 7, visibility: SHADER_STAGE_FRAGMENT, texture: { sampleType: "unfilterable-float" } },
         // The split-sum DFG table (F1c), read by the linear-light shader.
-        { binding: 8, visibility: SHADER_STAGE_FRAGMENT, buffer: { type: "read-only-storage" } }
+        { binding: 8, visibility: SHADER_STAGE_FRAGMENT, buffer: { type: "read-only-storage" } },
+        // The prefiltered environment cube's trilinear sampler (F3a).
+        { binding: 9, visibility: SHADER_STAGE_FRAGMENT, sampler: { type: "filtering" } }
       ];
       const depthLayout = device.createBindGroupLayout({ entries: depthEntries(false) });
       const depthLayoutMs = device.createBindGroupLayout({ entries: depthEntries(true) });
@@ -19121,6 +19373,7 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
       const dfg = dfgTable();
       const dfgBuffer = device.createBuffer({ size: dfg.byteLength, usage: 128 | 8 });
       device.queue.writeBuffer(dfgBuffer, 0, dfg);
+      const iblSampler = device.createSampler({ magFilter: "linear", minFilter: "linear", mipmapFilter: "linear", addressModeU: "clamp-to-edge", addressModeV: "clamp-to-edge", addressModeW: "clamp-to-edge" });
       const atlasBlank = device.createTexture({ size: { width: 1, height: 1 }, format: "r32float", usage: 4 | 2 });
       const probesBlank = device.createTexture({ size: { width: 1, height: 1, depthOrArrayLayers: 1 }, dimension: "3d", format: "rgba32float", usage: 4 | 2 });
       const behind = device.createTexture({ size: { width, height }, format: colourFormat, usage: 4 | 2 | 16 });
@@ -19133,7 +19386,8 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
           { binding: 4, resource: atlas.createView() },
           { binding: 5, resource: { buffer: shadowTiles } },
           { binding: 6, resource: probes.createView({ dimension: "3d" }) },
-          { binding: 8, resource: { buffer: dfgBuffer } }
+          { binding: 8, resource: { buffer: dfgBuffer } },
+          { binding: 9, resource: iblSampler }
         ];
         return {
           blank: device.createBindGroup({ layout: depthLayout, entries: [{ binding: 0, resource: blankDepth.createView() }, ...shared, { binding: 7, resource: behindBlank.createView() }] }),
@@ -19148,7 +19402,8 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
           { binding: 4, resource: atlas.createView() },
           { binding: 5, resource: { buffer: shadowTiles } },
           { binding: 6, resource: probes.createView({ dimension: "3d" }) },
-          { binding: 8, resource: { buffer: dfgBuffer } }
+          { binding: 8, resource: { buffer: dfgBuffer } },
+          { binding: 9, resource: iblSampler }
         ];
         return {
           blank: device.createBindGroup({ layout: depthLayoutMs, entries: [{ binding: 0, resource: blank.createView() }, ...shared, { binding: 7, resource: behindBlank.createView() }] }),
@@ -19265,11 +19520,37 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
    * source object; null restores the 1x1 blank. A change invalidates cached bind
    * groups (binding 7 moved).
    */
-  ensureEnvTexture(map) {
+  ensureEnvTexture(environment) {
+    if (this.hdr) {
+      this.ensureIbl(environment);
+      return;
+    }
+    const map = environment?.map ?? null;
     if (map === this.envMapSource) return;
     if (this.envMapSource) destroySafely(this.envTexture);
     this.envTexture = map ? this.uploadRgba(map) : this.blankTexture;
     this.envMapSource = map;
+    this.bindGroups = /* @__PURE__ */ new WeakMap();
+  }
+  /**
+   * The linear variant's environment (F3a): its panorama (or gradient) in
+   * linear light, prefiltered into the cube at binding 7 and projected into the
+   * SH the frame carries, rebuilt only when what it's made of changes.
+   */
+  ensureIbl(environment) {
+    const key = environment ? environmentKey(environment) : null;
+    const same = key && this.iblKey ? key.length === this.iblKey.length && key.every((v, i) => v === this.iblKey[i]) : key === this.iblKey;
+    if (same) return;
+    destroySafely(this.envTexture);
+    if (environment) {
+      const pano = environmentPanorama(environment);
+      this.envTexture = (this.ibl ?? (this.ibl = new IblBuilder(this.device))).build(pano);
+      this.iblSh = environmentSh(pano);
+    } else {
+      this.envTexture = blankCube(this.device);
+      this.iblSh = new Float32Array(36);
+    }
+    this.iblKey = key;
     this.bindGroups = /* @__PURE__ */ new WeakMap();
   }
   /** The same for the reflection-probe atlas (binding 12), plus the boxes (binding 13). */
@@ -19414,7 +19695,7 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
       }
     }
     const shadowParams = shadow ? { size: shadow.size, bias: shadow.bias ?? 3e-3, strength: shadow.strength ?? 1, slopeBias: shadow.slopeBias ?? 0, pcf: shadow.pcf ?? false, soft: shadow.soft ?? false } : null;
-    this.ensureEnvTexture(draw.environment?.map ?? null);
+    this.ensureEnvTexture(draw.environment ?? null);
     this.ensureProbes(draw.environment?.probes ?? null);
     const ssao = draw.ssao ?? null;
     this.bindSsao(ssao);
@@ -19884,6 +20165,10 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
       frame.set([0, 1, 2].map((a) => (grid.counts[a] - 1) / (grid.max[a] - grid.min[a] || 1)), 36);
       frame.set(grid.counts, 40);
     }
+    if (this.hdr) {
+      frame.set(this.iblSh, 44);
+      frame.set([IBL_LEVELS - 1], 80);
+    }
     this.device.queue.writeBuffer(buffers.params, 0, frame);
     this.uploadLocalShadows(local);
     return { ordered, globalCount, clusters };
@@ -20037,7 +20322,7 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
         // always references the current one.
         { binding: 6, resource: this.shadowTexture.createView() },
         // The active env map (or the 1x1 white blank); likewise cache-invalidated.
-        { binding: 7, resource: this.envTexture.createView() },
+        { binding: 7, resource: this.hdr ? this.envTexture.createView({ dimension: "cube" }) : this.envTexture.createView() },
         // The active SSAO buffer (or the 1x1 blank); likewise cache-invalidated.
         { binding: 8, resource: this.ssaoBound.createView() },
         // The light storage buffer; a grow changes identity and invalidates the cache.
@@ -20148,6 +20433,11 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     this.timer?.destroy();
   }
 };
+function blankCube(device) {
+  const cube = device.createTexture({ size: { width: 1, height: 1, depthOrArrayLayers: 6 }, format: "rgba16float", usage: 4 | 2 });
+  device.queue.writeTexture({ texture: cube }, new Uint16Array(24), { bytesPerRow: 8, rowsPerImage: 1 }, { width: 1, height: 1, depthOrArrayLayers: 6 });
+  return cube;
+}
 function fullScreenPipeline(device, code, entryPoint, format) {
   const module = device.createShaderModule({ code });
   return device.createRenderPipeline({

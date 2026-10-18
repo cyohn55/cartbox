@@ -361,6 +361,21 @@ Everything else depends on this track. It contains no visible "feature", but its
   - True HDR environments from imported `.hdr`/`.exr` (F9d) or the F5a sky.
   - Kept as cubemaps, with a GGX-prefiltered mip chain built in compute, a **split-sum BRDF LUT** and L2 spherical-harmonic irradiance.
   - It replaces the 192×96 nearest-sampled equirect and its roughness-to-average lerp.
+  - **F3a-1, the IBL on the GPU: done.** The linear-light shader (the `aaa` tier) lights from the environment as Karis's split-sum IBL (`render/ibl.ts`). The Modern tier keeps the panorama and lerp for its parity with the software rasteriser.
+    - **The source** is the environment in linear light: its panorama, or its sky/horizon/ground gradient, decoded from authored colour and scaled by its intensity, as the shader's `envColorDir` reads it. It is uploaded as half floats with its own mips.
+    - **The cube** (128², six levels) is built in compute. Each level is the GGX lobe of its roughness (level / 5), importance-sampled with 128 mip-filtered samples (Křivánek and Colbert).
+      - The coarsest source level read keeps eight rows: an equirect's mips weight a polar texel as an equatorial one, and reading past that pulled the poles' light into wide lobes (8% at full roughness, now 2%).
+      - The shader samples it trilinearly at `roughness × 5`, through its own sampler at group 1 binding 9. The cube takes over binding 7 in this variant, because the fragment stage's 16 sampled textures are all bound.
+      - It is rebuilt only when the environment changes: its gradient and intensity, or the identity of its map. On Beaver Creek it is built once.
+    - **The diffuse light** is L2 SH irradiance, projected on the CPU and convolved with the clamped cosine (Ramamoorthi and Hanrahan), carried in the frame uniform. Before, it was the radiance straight along the normal, not the irradiance over the hemisphere.
+    - Reflection probes still mix in their nearest panoramas, blurred toward their average (F3b).
+    - *Tests:* `ibl.test.ts` covers:
+      - the gradient in linear light;
+      - SH irradiance against a brute-force cosine integral (within L2's 5% of the brightest channel; exact for a constant sky).
+      - On Dawn: each face's sharp level is the panorama where WebGPU samples it (face orientation); rough levels match a 20 000-sample CPU GGX integral within 4%; a rough white floor gets the sky's irradiance and a mirror the zenith.
+      - The white furnace in `brdf.test.ts` still reads 1, now through the cube and SH.
+      - In Chromium, Beaver Creek on the `aaa` tier builds its cube once, with no errors.
+    - *Left for F3a:* true HDR environments. The imported `.hdr` sky is still exposed into 8 bits before it gets here (F3a-2), and the F5a sky is not built yet.
 - [ ] **F3b. HDR reflection probes.**
   - Cubemap probes captured on the GPU, then prefiltered and stored compressed (BC6H, or RGBM where it is not available).
   - Box and sphere parallax correction, and blended influence volumes with priorities.
