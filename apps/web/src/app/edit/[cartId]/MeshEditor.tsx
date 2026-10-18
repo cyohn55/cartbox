@@ -63,6 +63,8 @@ import {
   terrainHeight,
   eraseFoliage,
   paintFoliage,
+  needsTangents,
+  withMeshTangents,
   type MeshAsset,
   type MeshSelection,
   type SelectMode,
@@ -108,6 +110,7 @@ import { ContentBrowser, type CodeAccess } from "./ContentBrowser";
 import { ScenePlayView, type PlaytestConfig } from "./ScenePlayView";
 import { importMeshFile, importSummary, decodeImage, decodeMeshTextures } from "@/lib/meshImport";
 import { loadKtx2Encoder } from "@/lib/ktx2Encoder";
+import { loadMikkTSpace } from "@/lib/mikktspace";
 import { loadKtx2Decoder } from "@/lib/ktx2Decoder";
 import { KTX2_TRANSCODER_TRANSFER_BYTES, encodePngInBrowser, hasKtx2, sceneHasKtx2, settleKtx2Textures, compressMeshTextures } from "@/lib/ktx2Policy";
 import { fetchLibraryMesh } from "@/lib/libraryClient";
@@ -1043,7 +1046,9 @@ export function MeshEditor({ sidecar, onSidecarChange, code, onStartPlay, modern
    */
   const prepareImport = async (all: File[]) => {
     const primary = all.find((file) => /\.(obj|glb|gltf)$/i.test(file.name)) ?? all[0]!;
-    const parsed = await importMeshFile(primary, all.filter((file) => file !== primary));
+    const read = await importMeshFile(primary, all.filter((file) => file !== primary));
+    // Normal maps decode in the frame they were baked in (F1c): MikkTSpace where the file has no tangents.
+    const parsed = read.primitives.some(needsTangents) ? withMeshTangents(read, await loadMikkTSpace()) : read;
     // KTX2 textures stay compressed only when that saves more than the
     // transcoder players would then fetch; otherwise they become PNG.
     const sceneKtx2 = sceneHasKtx2([...sidecar.meshes.map((m) => m.mesh), ...(sidecar.prefabs ?? []).flatMap((p) => p.nodes.map((n) => n.mesh))]);

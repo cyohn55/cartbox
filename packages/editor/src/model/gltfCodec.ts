@@ -102,7 +102,7 @@ interface GltfMaterial {
   };
 }
 export interface GltfPrimitive {
-  attributes: { POSITION?: number; NORMAL?: number; TEXCOORD_0?: number; TEXCOORD_1?: number; JOINTS_0?: number; WEIGHTS_0?: number };
+  attributes: { POSITION?: number; NORMAL?: number; TANGENT?: number; TEXCOORD_0?: number; TEXCOORD_1?: number; JOINTS_0?: number; WEIGHTS_0?: number };
   indices?: number;
   material?: number;
   extensions?: {
@@ -330,6 +330,18 @@ function normalMatrix(m: Mat4): [number, number, number, number, number, number,
   const i22 = (a * e - b * d) * inv;
   // transpose:
   return [i00, i10, i20, i01, i11, i21, i02, i12, i22];
+}
+
+/**
+ * A tangent's transform (F1c): the transform's own upper-left 3×3 (a tangent
+ * lies in the surface, so it moves with it, unlike a normal), as row-major
+ * rows for {@link transformDirection}, and whether it mirrors (a negative
+ * determinant), which flips the bitangent's handedness.
+ */
+function tangentMatrix(m: Mat4): { rows: number[]; mirrors: boolean } {
+  const rows = [m[0]!, m[4]!, m[8]!, m[1]!, m[5]!, m[9]!, m[2]!, m[6]!, m[10]!];
+  const [a, b, c, d, e, f, g, h, i] = rows as [number, number, number, number, number, number, number, number, number];
+  return { rows, mirrors: a * (e * i - f * h) - b * (d * i - f * g) + c * (d * h - e * g) < 0 };
 }
 
 function transformDirection(n: readonly number[], x: number, y: number, z: number): [number, number, number] {
@@ -594,6 +606,9 @@ export function parseGltf(sourceJson: GltfJson, sourceBuffers: (Uint8Array | nul
           : null;
       // The second UV set (the light map's), when it has one per vertex.
       const rawUvs2 = primitive.attributes.TEXCOORD_1 !== undefined ? readAccessorFloats(json, buffers, primitive.attributes.TEXCOORD_1) : null;
+      // The tangents a normal map was baked against (F1c), when it has one per vertex.
+      const readTangents = primitive.attributes.TANGENT !== undefined ? readAccessorFloats(json, buffers, primitive.attributes.TANGENT) : null;
+      const rawTangents = readTangents && readTangents.length === vertexCount * 4 && readTangents.every(Number.isFinite) ? readTangents : null;
       const uvs2 = rawUvs2 && rawUvs2.length === vertexCount * 2 ? rawUvs2 : null;
       const indices = readIndices(json, buffers, primitive.indices, vertexCount);
       const material = materialAt(primitive.material);
@@ -629,6 +644,19 @@ export function parseGltf(sourceJson: GltfJson, sourceBuffers: (Uint8Array | nul
             normals[v * 3 + 2] = nz;
           }
         }
+        let tangents: Float32Array | null = null;
+        if (rawTangents) {
+          const tm = tangentMatrix(world);
+          tangents = new Float32Array(rawTangents.length);
+          for (let v = 0; v < vertexCount; v += 1) {
+            const [tx, ty, tz] = transformDirection(tm.rows, rawTangents[v * 4]!, rawTangents[v * 4 + 1]!, rawTangents[v * 4 + 2]!);
+            tangents[v * 4] = tx;
+            tangents[v * 4 + 1] = ty;
+            tangents[v * 4 + 2] = tz;
+            // glTF's bitangent points down its V (its origin is the image's top-left); the engine's, up (it samples at 1 − V).
+            tangents[v * 4 + 3] = (rawTangents[v * 4 + 3]! < 0 ? 1 : -1) * (tm.mirrors ? -1 : 1);
+          }
+        }
         totalVertices += vertexCount;
         totalIndices += indices.length;
         if (totalVertices > MAX_MESH_VERTICES || totalIndices > MAX_MESH_INDICES) {
@@ -641,6 +669,7 @@ export function parseGltf(sourceJson: GltfJson, sourceBuffers: (Uint8Array | nul
           indices: indices.slice(),
           material,
           ...(uvs2 ? { uvs2: uvs2.slice() } : {}),
+          ...(tangents ? { tangents } : {}),
           ...(binding ? { joints: binding.joints, weights: binding.weights } : {}),
         });
         mapped.forEach((m, v) => variantMaterials[v]!.push(m));
@@ -1003,6 +1032,12 @@ export function encodeGlb(mesh: MeshAsset): Uint8Array {
     const positionAccessor = addFloatAccessor(primitive.positions, 3, true);
     const attributes: GltfPrimitive["attributes"] = { POSITION: positionAccessor };
     if (primitive.normals) attributes.NORMAL = addFloatAccessor(primitive.normals, 3, false);
+    if (primitive.tangents && primitive.normals) {
+      // Back to glTF's handedness (see the import).
+      const tangents = primitive.tangents.slice();
+      for (let i = 3; i < tangents.length; i += 4) tangents[i] = tangents[i]! < 0 ? 1 : -1;
+      attributes.TANGENT = addFloatAccessor(tangents, 4, false);
+    }
     if (primitive.uvs) attributes.TEXCOORD_0 = addFloatAccessor(primitive.uvs, 2, false);
     if (primitive.uvs2) attributes.TEXCOORD_1 = addFloatAccessor(primitive.uvs2, 2, false);
     if (skin && bound[index]) {

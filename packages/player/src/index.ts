@@ -163,6 +163,8 @@ export {
   VERTEX_FLOATS,
   alignBytesPerRow,
   interleaveVertices,
+  interleaveVerticesWithTangents,
+  TANGENT_VERTEX_FLOATS,
   normalBasis3x3,
   packLights,
   LIGHT_FLOATS,

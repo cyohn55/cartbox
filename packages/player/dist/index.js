@@ -14148,6 +14148,18 @@ function interleaveVertices(positions, normals, uvs, uvs2 = null, blend = null, 
   }
   return out;
 }
+var TANGENT_VERTEX_FLOATS = VERTEX_FLOATS + 4;
+function interleaveVerticesWithTangents(positions, normals, uvs, uvs2, blend, sway2, tangents) {
+  const base = interleaveVertices(positions, normals, uvs, uvs2, blend, sway2);
+  const count = base.length / VERTEX_FLOATS;
+  const own = tangents && tangents.length === count * 4 ? tangents : null;
+  const out = new Float32Array(count * TANGENT_VERTEX_FLOATS);
+  for (let i = 0; i < count; i += 1) {
+    out.set(base.subarray(i * VERTEX_FLOATS, (i + 1) * VERTEX_FLOATS), i * TANGENT_VERTEX_FLOATS);
+    if (own) out.set(own.subarray(i * 4, i * 4 + 4), i * TANGENT_VERTEX_FLOATS + VERTEX_FLOATS);
+  }
+  return out;
+}
 function unpadRows(padded, width, height, bytesPerRow, reuse = null) {
   const rowBytes = width * 4;
   const out = reuse && reuse.length === rowBytes * height ? reuse : new Uint8Array(rowBytes * height);
@@ -17889,7 +17901,7 @@ struct VSOut {
   @location(4) eyeDepth: f32,
   @location(5) @interpolate(perspective, centroid) uv2: vec2<f32>,
   @location(6) bw: f32,
-  @location(7) objPos: vec3<f32>,
+  @location(7) objPos: vec3<f32>,${hdr ? "\n  // The vertex's MikkTSpace frame in world space (F1c), each unit at the vertex: its tangent (w = 0 without one) and normal.\n  @location(8) tangent: vec4<f32>,\n  @location(9) frameNormal: vec3<f32>," : ""}
 };
 
 // Directional shadow test, mirroring rasterizeTriangle in meshRasterizer.ts:
@@ -18112,6 +18124,24 @@ fn parallaxUv(uv0: vec2<f32>, rate: vec2<f32>, depth: f32) -> vec2<f32> {
   if (abs(span) > 1e-6) { w = after / span; }
   return c - st * w;
 }
+// A normal map's normal (P1a). In the vertex's stored MikkTSpace frame (F1c),
+// decoded as it was baked: the normal and tangent unit at each vertex and
+// interpolated, unnormalised (vn), the bitangent w \xB7 (vn \xD7 t). Without one
+// (w = 0, and always outside the linear variant), in the triangle's frame from
+// the UVs' screen derivatives \u2014 worldTangent's dP/du (Lengyel), as the
+// software rasteriser does.
+fn mappedNormal(n: vec3<f32>, t: vec4<f32>, vn: vec3<f32>, tn: vec3<f32>, dp1: vec3<f32>, dp2: vec3<f32>, duv1: vec2<f32>, duv2: vec2<f32>) -> vec3<f32> {
+  if (t.w != 0.0) { return normalize(tn.x * t.xyz + tn.y * (t.w * cross(vn, t.xyz)) + tn.z * vn); }
+  let det = duv1.x * duv2.y - duv2.x * duv1.y;
+  if (!(abs(det) > 1e-20)) { return n; }
+  let Ng = normalize(n);
+  var T = (dp1 * duv2.y - dp2 * duv1.y) / det;
+  T = T - Ng * dot(T, Ng);
+  let tl = length(T);
+  if (!(tl > 1e-6)) { return n; }
+  T = T / tl;
+  return normalize(T * tn.x + cross(Ng, T) * tn.y + Ng * tn.z);
+}
 // The anisotropic GGX distribution (anisotropicD).
 fn anisoD(rough: f32, aniso: f32, toh: f32, boh: f32, ndh: f32) -> f32 {
   let alpha = rough * rough;
@@ -18249,11 +18279,12 @@ fn vs(
   @location(3) uv2: vec2<f32>,
   @location(4) bw: f32,
   @location(5) sway: f32,
+  @location(7) tangent: vec4<f32>,
   @builtin(instance_index) instance: u32,
 ) -> VSOut {
-  return vertexOf(position, normal, uv, uv2, bw, sway, instance);
+  return vertexOf(position, normal, uv, uv2, bw, sway, tangent, instance);
 }
-fn vertexOf(position: vec3<f32>, normal: vec3<f32>, uv: vec2<f32>, uv2: vec2<f32>, bw: f32, sway: f32, instance: u32) -> VSOut {
+fn vertexOf(position: vec3<f32>, normal: vec3<f32>, uv: vec2<f32>, uv2: vec2<f32>, bw: f32, sway: f32, tangent: vec4<f32>, instance: u32) -> VSOut {
   var out: VSOut;
   let t = xf[instance];
   var pos = position;
@@ -18268,7 +18299,11 @@ fn vertexOf(position: vec3<f32>, normal: vec3<f32>, uv: vec2<f32>, uv2: vec2<f32
   out.worldPos = (t.model * vec4<f32>(pos, 1.0)).xyz;
   out.eyeDepth = out.pos.w; // clip w = view depth, for distance fog
   out.objPos = pos;
-  return out;
+${hdr ? `  // A tangent lies in the surface, so it moves with the model's own 3\xD73; a mirroring one flips the bitangent.
+  let m3 = mat3x3<f32>(t.model[0].xyz, t.model[1].xyz, t.model[2].xyz);
+  out.tangent = vec4<f32>(normalize(m3 * tangent.xyz + vec3<f32>(1e-12, 0.0, 0.0)), tangent.w * select(1.0, -1.0, determinant(m3) < 0.0));
+  out.frameNormal = normalize(out.normal);
+` : ""}  return out;
 }
 
 ${graphNoiseSource2("wgsl")}
@@ -18411,24 +18446,12 @@ fn fs(in: VSOut) -> @location(0) vec4<f32> {
     wGv = wg.gv;
   }
   // Normal mapping (EDITOR_PRO_ROADMAP.md P1a): the tangent-space normal map in
-  // the triangle's tangent frame \u2014 worldTangent's (dP/du, Lengyel), here from the
-  // screen derivatives \u2014 as the software rasteriser does. sNrm is what lights the
-  // surface; the clearcoat, refraction and shadow bias keep the geometric normal.
+  // the vertex's stored frame on the AAA tier (F1c), else the triangle's from the
+  // screen derivatives (mappedNormal). sNrm is what lights the surface; the
+  // clearcoat, refraction and shadow bias keep the geometric normal.
   var sNrm = in.normal;
   let tnSample = textureSample(nrmTex, samp, uv).rgb * 2.0 - 1.0;
-  if (u.maps0.x > 0.5) {
-    let det = duv1.x * duv2.y - duv2.x * duv1.y;
-    if (abs(det) > 1e-20) {
-      let Ng = normalize(in.normal);
-      var T = (dp1 * duv2.y - dp2 * duv1.y) / det;
-      T = T - Ng * dot(T, Ng);
-      let tl = length(T);
-      if (tl > 1e-6) {
-        T = T / tl;
-        sNrm = normalize(T * tnSample.x + cross(Ng, T) * tnSample.y + Ng * tnSample.z);
-      }
-    }
-  }
+  if (u.maps0.x > 0.5) { sNrm = mappedNormal(in.normal, ${hdr ? "in.tangent, in.frameNormal" : "vec4<f32>(0.0), in.normal"}, tnSample, dp1, dp2, duv1, duv2); }
 
   var colour = u.base;
   if (u.texflags.x > 0.5) {
@@ -18690,7 +18713,7 @@ struct PrepassIn {
   @location(6) bw: f32,
   @location(7) objPos: vec3<f32>,
   @location(8) clipNow: vec4<f32>,
-  @location(9) clipThen: vec4<f32>,
+  @location(9) clipThen: vec4<f32>,${hdr ? "\n  @location(10) tangent: vec4<f32>,\n  @location(11) frameNormal: vec3<f32>," : ""}
 };
 @vertex
 fn vs_prepass(
@@ -18701,9 +18724,10 @@ fn vs_prepass(
   @location(4) bw: f32,
   @location(5) sway: f32,
   @location(6) before: vec3<f32>,
+  @location(7) tangent: vec4<f32>,
   @builtin(instance_index) instance: u32,
 ) -> PrepassIn {
-  let v = vertexOf(position, normal, uv, uv2, bw, sway, instance);
+  let v = vertexOf(position, normal, uv, uv2, bw, sway, tangent, instance);
   var out: PrepassIn;
   out.pos = v.pos;
   out.normal = v.normal;
@@ -18714,7 +18738,7 @@ fn vs_prepass(
   out.uv2 = v.uv2;
   out.bw = v.bw;
   out.objPos = v.objPos;
-  let m = xf[u32(u.motion0.x) + instance];
+${hdr ? "  out.tangent = v.tangent;\n  out.frameNormal = v.frameNormal;\n" : ""}  let m = xf[u32(u.motion0.x) + instance];
   let then = windOffsetIn(u.wind1, before.xz, sway);
   out.clipNow = m.mvp * vec4<f32>(v.objPos, 1.0);
   out.clipThen = m.lightMvp * vec4<f32>(before.x + then.x, before.y, before.z + then.y, 1.0);
@@ -18748,19 +18772,7 @@ fn fs_prepass(in: PrepassIn) -> PrepassTargets {
   let uv = vec2<f32>(puv.x, 1.0 - puv.y);
   var sNrm = in.normal;
   let tnSample = textureSample(nrmTex, samp, uv).rgb * 2.0 - 1.0;
-  if (u.maps0.x > 0.5) {
-    let det = duv1.x * duv2.y - duv2.x * duv1.y;
-    if (abs(det) > 1e-20) {
-      let Ng = normalize(in.normal);
-      var T = (dp1 * duv2.y - dp2 * duv1.y) / det;
-      T = T - Ng * dot(T, Ng);
-      let tl = length(T);
-      if (tl > 1e-6) {
-        T = T / tl;
-        sNrm = normalize(T * tnSample.x + cross(Ng, T) * tnSample.y + Ng * tnSample.z);
-      }
-    }
-  }
+  if (u.maps0.x > 0.5) { sNrm = mappedNormal(in.normal, ${hdr ? "in.tangent, in.frameNormal" : "vec4<f32>(0.0), in.normal"}, tnSample, dp1, dp2, duv1, duv2); }
   var colour = u.base;
   if (u.texflags.x > 0.5) {
     var texel = triMap(tex, uv, in.normal, in.objPos);
@@ -19035,19 +19047,20 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
             entryPoint: gbuffer ? "vs_prepass" : "vs",
             buffers: [
               {
-                // Interleaved position(3) + normal(3) + uv(2) + light-map uv(2) + blend weight(1) + sway(1).
-                arrayStride: 48,
+                // Interleaved position(3) + normal(3) + uv(2) + light-map uv(2) + blend weight(1) + sway(1) + tangent(4).
+                arrayStride: 64,
                 attributes: [
                   { shaderLocation: 0, offset: 0, format: "float32x3" },
                   { shaderLocation: 1, offset: 12, format: "float32x3" },
                   { shaderLocation: 2, offset: 24, format: "float32x2" },
                   { shaderLocation: 3, offset: 32, format: "float32x2" },
                   { shaderLocation: 4, offset: 40, format: "float32" },
-                  { shaderLocation: 5, offset: 44, format: "float32" }
+                  { shaderLocation: 5, offset: 44, format: "float32" },
+                  { shaderLocation: 7, offset: 48, format: "float32x4" }
                 ]
               },
               // The prepass's velocity (F0c): the same layout's positions, from last frame's vertices.
-              ...gbuffer ? [{ arrayStride: 48, attributes: [{ shaderLocation: 6, offset: 0, format: "float32x3" }] }] : []
+              ...gbuffer ? [{ arrayStride: 64, attributes: [{ shaderLocation: 6, offset: 0, format: "float32x3" }] }] : []
             ]
           },
           fragment: {
@@ -19966,7 +19979,7 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
         const gpu = cached[i];
         if (!primitive.dynamic || !gpu || gpu.revision === primitive.dynamic.revision) return;
         const normals = primitive.normals ?? computeSmoothNormals2(primitive.positions, primitive.indices);
-        const vertices = interleaveVertices(primitive.positions, normals, primitive.uvs, primitive.uvs2 ?? null, primitive.blend ?? null, primitive.sway ?? null);
+        const vertices = interleaveVerticesWithTangents(primitive.positions, normals, primitive.uvs, primitive.uvs2 ?? null, primitive.blend ?? null, primitive.sway ?? null, null);
         gpu.previousBuffer ?? (gpu.previousBuffer = this.device.createBuffer({ size: Math.max(40, vertices.byteLength), usage: 32 | 8 }));
         const encoder = this.device.createCommandEncoder();
         encoder.copyBufferToBuffer(gpu.vertexBuffer, 0, gpu.previousBuffer, 0, Math.max(40, vertices.byteLength));
@@ -19979,7 +19992,7 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     }
     const uploaded = mesh.primitives.map((primitive) => {
       const normals = primitive.normals ?? computeSmoothNormals2(primitive.positions, primitive.indices);
-      const vertices = interleaveVertices(primitive.positions, normals, primitive.uvs, primitive.uvs2 ?? null, primitive.blend ?? null, primitive.sway ?? null);
+      const vertices = interleaveVerticesWithTangents(primitive.positions, normals, primitive.uvs, primitive.uvs2 ?? null, primitive.blend ?? null, primitive.sway ?? null, primitive.dynamic ? null : primitive.tangents ?? null);
       const vertexBuffer = this.device.createBuffer({
         size: Math.max(40, vertices.byteLength),
         // A dynamic one is also copied from, to keep its last vertices (F0c).
@@ -24237,6 +24250,7 @@ export {
   SoftwareSceneRenderer,
   SoundSystem,
   SwitchableTransport,
+  TANGENT_VERTEX_FLOATS,
   TILT_SHIFT_FEATHER,
   TINT_PALETTE,
   TOUCH_CONTROL_IDS,
@@ -24350,6 +24364,7 @@ export {
   inputBlockAddress,
   instrumentLua,
   interleaveVertices,
+  interleaveVerticesWithTangents,
   interpolateNormal,
   isMobileAgent,
   jointFrames,
