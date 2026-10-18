@@ -44,6 +44,15 @@ import {
   reflectionProbeAt,
   MAX_REFLECTION_PROBES,
   setSceneSky,
+  setSceneUnits,
+  ev100ToExposure,
+  exposureToEv100,
+  lightUnit,
+  luxToUnits,
+  nitsToUnits,
+  unitsToLux,
+  unitsToNits,
+  withLightFalloff,
   updateSceneEnvironment,
   updateSceneLight,
   type ProceduralSky,
@@ -56,7 +65,7 @@ import {
 import { TINT_PALETTE } from "@cartbox/player";
 
 import styles from "./editor.module.css";
-import { RailGroup, RailHint, RangeControl, SegmentedControl } from "./railControls";
+import { PhysicalRange, RailGroup, RailHint, RangeControl, SegmentedControl } from "./railControls";
 
 interface LightingEditorProps {
   lighting: SceneLighting | null;
@@ -151,6 +160,7 @@ export function LightingEditor({ lighting, onChange }: LightingEditorProps) {
   }
 
   const env = lighting.environment;
+  const physical = lighting.units === "physical";
 
   return (
     <RailGroup label="Lighting" advanced defaultOpen>
@@ -158,17 +168,31 @@ export function LightingEditor({ lighting, onChange }: LightingEditorProps) {
       <ColorRow label="Sky" value={env.sky} onChange={(sky) => onChange(updateSceneEnvironment(lighting, { sky }))} />
       <ColorRow label="Horizon" value={env.horizon} onChange={(horizon) => onChange(updateSceneEnvironment(lighting, { horizon }))} />
       <ColorRow label="Ground" value={env.ground} onChange={(ground) => onChange(updateSceneEnvironment(lighting, { ground }))} />
-      <RangeControl
-        label="Sky intensity"
-        nested
-        min={0}
-        max={4}
-        step={0.05}
-        value={env.intensity}
-        ariaLabel="Sky intensity"
-        display={`${env.intensity.toFixed(2)}×`}
-        onChange={(intensity) => onChange(updateSceneEnvironment(lighting, { intensity }))}
+      <SegmentedControl
+        label="Units"
+        ariaLabel="Light units"
+        selected={physical ? "physical" : "renderer"}
+        onSelect={(id) => onChange(setSceneUnits(lighting, id === "physical"))}
+        options={[
+          { id: "renderer", label: "Relative", hint: "The renderer's own units: 1 is the brightness the scene was authored in" },
+          { id: "physical", label: "Physical", hint: "Lux for suns, candela for inverse-square lights, nits for the sky and fill, EV100 for exposure. The scene looks the same either way" },
+        ]}
       />
+      {physical ? (
+        <PhysicalRange label="Sky luminance" unit="nt" min={1} max={200000} value={unitsToNits(env.intensity)} onChange={(nits) => onChange(updateSceneEnvironment(lighting, { intensity: nitsToUnits(nits) }))} />
+      ) : (
+        <RangeControl
+          label="Sky intensity"
+          nested
+          min={0}
+          max={4}
+          step={0.05}
+          value={env.intensity}
+          ariaLabel="Sky intensity"
+          display={`${env.intensity.toFixed(2)}×`}
+          onChange={(intensity) => onChange(updateSceneEnvironment(lighting, { intensity }))}
+        />
+      )}
 
       <SkyDomeControls lighting={lighting} onChange={onChange} />
       <FogControls lighting={lighting} onChange={onChange} />
@@ -178,17 +202,21 @@ export function LightingEditor({ lighting, onChange }: LightingEditorProps) {
       <PostVolumeControls lighting={lighting} onChange={onChange} />
       <TintControls lighting={lighting} onChange={onChange} />
 
-      <RangeControl
-        label="Ambient fill"
-        nested
-        min={0}
-        max={1}
-        step={0.01}
-        value={lighting.ambient}
-        ariaLabel="Ambient fill"
-        display={lighting.ambient.toFixed(2)}
-        onChange={(ambient) => onChange(patchSceneLighting(lighting, { ambient }))}
-      />
+      {physical ? (
+        <PhysicalRange label="Ambient fill" unit="nt" min={10} max={unitsToNits(1)} value={unitsToNits(lighting.ambient)} onChange={(nits) => onChange(patchSceneLighting(lighting, { ambient: Math.min(1, nitsToUnits(nits)) }))} />
+      ) : (
+        <RangeControl
+          label="Ambient fill"
+          nested
+          min={0}
+          max={1}
+          step={0.01}
+          value={lighting.ambient}
+          ariaLabel="Ambient fill"
+          display={lighting.ambient.toFixed(2)}
+          onChange={(ambient) => onChange(patchSceneLighting(lighting, { ambient }))}
+        />
+      )}
 
       <SegmentedControl
         label="Tone mapping"
@@ -200,19 +228,33 @@ export function LightingEditor({ lighting, onChange }: LightingEditorProps) {
           { id: "on", label: "ACES" },
         ]}
       />
-      {lighting.tonemap && (
-        <RangeControl
-          label="Exposure"
-          nested
-          min={0.1}
-          max={4}
-          step={0.05}
-          value={lighting.exposure}
-          ariaLabel="Exposure"
-          display={`${lighting.exposure.toFixed(2)}×`}
-          onChange={(exposure) => onChange(patchSceneLighting(lighting, { exposure }))}
-        />
-      )}
+      {lighting.tonemap &&
+        (physical ? (
+          <RangeControl
+            label="Exposure"
+            nested
+            min={-2}
+            max={20}
+            step={0.1}
+            value={Math.round(exposureToEv100(lighting.exposure) * 10) / 10}
+            ariaLabel="Exposure EV100"
+            display={`EV ${exposureToEv100(lighting.exposure).toFixed(1)}`}
+            onChange={(ev) => onChange(patchSceneLighting(lighting, { exposure: ev100ToExposure(ev) }))}
+          />
+        ) : (
+          <RangeControl
+            label="Exposure"
+            nested
+            min={0.1}
+            max={4}
+            step={0.05}
+            value={lighting.exposure}
+            ariaLabel="Exposure"
+            display={`${lighting.exposure.toFixed(2)}×`}
+            onChange={(exposure) => onChange(patchSceneLighting(lighting, { exposure }))}
+          />
+        ))}
+      {physical && !lighting.tonemap && <RailHint>Exposure (EV100) needs tone mapping on; without it the scene shows at EV 15, a sunny day.</RailHint>}
       {lighting.tonemap && <AutoExposureControls lighting={lighting} onChange={onChange} />}
 
       <SegmentedControl
@@ -267,7 +309,7 @@ export function LightingEditor({ lighting, onChange }: LightingEditorProps) {
                   lighting,
                   index,
                   kind === "directional"
-                    ? { kind, direction: light.direction ?? [0.4, 0.8, 0.6], position: undefined, range: undefined, innerAngle: undefined, outerAngle: undefined }
+                    ? { kind, direction: light.direction ?? [0.4, 0.8, 0.6], position: undefined, range: undefined, innerAngle: undefined, outerAngle: undefined, falloff: undefined }
                     : kind === "spot"
                       ? { kind, position: light.position ?? [0, 3, 0], range: light.range || 12, direction: [0, -1, 0], innerAngle: light.innerAngle ?? 20, outerAngle: light.outerAngle ?? 30 }
                       : { kind, position: light.position ?? [0, 1, 0], range: light.range ?? 0, direction: undefined, innerAngle: undefined, outerAngle: undefined },
@@ -285,17 +327,28 @@ export function LightingEditor({ lighting, onChange }: LightingEditorProps) {
             value={light.color}
             onChange={(color) => onChange(updateSceneLight(lighting, index, { color }))}
           />
-          <RangeControl
-            label="Intensity"
-            nested
-            min={0}
-            max={8}
-            step={0.1}
-            value={light.intensity}
-            ariaLabel={`Light ${index + 1} intensity`}
-            display={`${light.intensity.toFixed(1)}×`}
-            onChange={(intensity) => onChange(updateSceneLight(lighting, index, { intensity }))}
-          />
+          {physical ? (
+            <PhysicalRange
+              label={lightUnit(light) === "cd" ? "Luminous intensity" : light.kind === "directional" ? "Illuminance" : "Illuminance at the light"}
+              unit={lightUnit(light)}
+              min={lightUnit(light) === "cd" ? 0.1 : 0.01}
+              max={lightUnit(light) === "cd" ? 1e7 : 1e6}
+              value={unitsToLux(light.intensity)}
+              onChange={(value) => onChange(updateSceneLight(lighting, index, { intensity: luxToUnits(value) }))}
+            />
+          ) : (
+            <RangeControl
+              label="Intensity"
+              nested
+              min={0}
+              max={8}
+              step={0.1}
+              value={light.intensity}
+              ariaLabel={`Light ${index + 1} intensity`}
+              display={`${light.intensity.toFixed(light.intensity < 0.1 && light.intensity > 0 ? 4 : 1)}×`}
+              onChange={(intensity) => onChange(updateSceneLight(lighting, index, { intensity }))}
+            />
+          )}
           {light.kind === "directional" ? (
             <VectorRow
               label="Direction"
@@ -321,6 +374,16 @@ export function LightingEditor({ lighting, onChange }: LightingEditorProps) {
                 ariaLabel={`Light ${index + 1} range`}
                 display={light.range ? `${light.range}` : "∞"}
                 onChange={(range) => onChange(updateSceneLight(lighting, index, { range }))}
+              />
+              <SegmentedControl
+                label="Falloff"
+                ariaLabel={`Light ${index + 1} falloff`}
+                selected={light.falloff === "inverseSquare" ? "square" : "fade"}
+                onSelect={(v) => onChange({ ...lighting, lights: lighting.lights.map((l, i) => (i === index ? withLightFalloff(l, v === "square") : l)) })}
+                options={[
+                  { id: "fade", label: "Fade", hint: "Flat near the light, fading to nothing at its range" },
+                  { id: "square", label: "Inverse square", hint: "Physical: dims as 1/distance² (metres), so its intensity is in candela. Switching keeps it as bright halfway to its range" },
+                ]}
               />
               <SegmentedControl
                 label="Shadows"

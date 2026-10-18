@@ -62,12 +62,14 @@ import {
   type MaterialImageSlot,
   type MeshAsset,
   type MeshMaterial,
+  nitsToUnits,
+  unitsToNits,
 } from "@cartbox/editor";
 
 import { starterGraph, wornEdgesGraph } from "@/lib/materialGraphEdit";
 import styles from "./editor.module.css";
 import { GraphEditor } from "./GraphEditor";
-import { RailGroup, RailHint, RangeControl, SegmentedControl } from "./railControls";
+import { PhysicalRange, RailGroup, RailHint, RangeControl, SegmentedControl } from "./railControls";
 
 interface MaterialEditorProps {
   /** The mesh whose materials are edited. */
@@ -128,6 +130,9 @@ export function MaterialEditor({ mesh, onChange, set = null, library = [], onLib
 
   const [br, bg, bb, ba] = material.baseColorFactor;
   const emissive = material.emissiveFactor ?? [0, 0, 0];
+  // An emissive brighter than 1 (one that blooms) shows its hue in the picker and its strength as a luminance.
+  const emissivePeak = Math.max(emissive[0]!, emissive[1]!, emissive[2]!);
+  const emissiveHue = emissivePeak > 1 ? (emissive.map((c) => c / emissivePeak) as [number, number, number]) : (emissive as [number, number, number]);
   const metallic = material.metallicFactor ?? 1;
   const roughness = material.roughnessFactor ?? 1;
 
@@ -471,11 +476,21 @@ export function MaterialEditor({ mesh, onChange, set = null, library = [], onLib
       <div className={`${styles.groupLabel} ${styles.railSubLabel}`}>Emissive</div>
       <input
         type="color"
-        value={toHex(emissive as [number, number, number])}
+        value={toHex(emissiveHue)}
         aria-label="Emissive colour"
-        onChange={(event) => patch({ emissiveFactor: fromHex(event.target.value) })}
+        onChange={(event) => patch({ emissiveFactor: fromHex(event.target.value).map((c) => c * Math.max(1, emissivePeak)) as [number, number, number] })}
         style={{ width: 40, height: 32, padding: 0, border: "none", background: "none", borderRadius: 6 }}
       />
+      {emissivePeak > 0 && (
+        <PhysicalRange
+          label="Emissive luminance"
+          unit="nt"
+          min={10}
+          max={unitsToNits(32)}
+          value={unitsToNits(emissivePeak)}
+          onChange={(nits) => patch({ emissiveFactor: emissive.map((c) => (c / emissivePeak) * nitsToUnits(nits)) as [number, number, number] })}
+        />
+      )}
 
       <GeneratedMaps material={material} patch={patch} />
       <MaterialMaps material={material} onImage={(slot, image) => onChange(edited(setMaterialImage(mesh, index, slot, image, editing)))} />

@@ -695,6 +695,9 @@ describe.skipIf(!device)("WebGPU parity on a real device", () => {
       { kind: "directional" as const, direction: [0.3, 0.6, 1] as const, color: [1, 0.9, 0.8] as const, intensity: 1 },
       { kind: "point" as const, position: [1.5, 1, 2] as const, color: [0.2, 0.4, 1] as const, intensity: 3, range: 6 },
       { kind: "point" as const, position: [-1.5, -0.5, 2] as const, color: [1, 0.3, 0.1] as const, intensity: 3, range: 6 },
+      // Physical falloff (F0b): 1/d², windowed to its range.
+      { kind: "point" as const, position: [0, 1.5, 1.5] as const, color: [0.3, 1, 0.4] as const, intensity: 4, range: 8, falloff: "inverseSquare" as const },
+      { kind: "spot" as const, position: [0, 0, 3] as const, direction: [0, 0, -1] as const, color: [1, 1, 0.6] as const, intensity: 6, range: 0, innerAngle: 15, outerAngle: 25, falloff: "inverseSquare" as const },
     ];
     const withLights = (): SceneDraw => ({ ...draw(), lights });
 

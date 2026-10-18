@@ -25,6 +25,7 @@
  * Pure and DOM-free; deterministic.
  */
 
+import { distanceFalloff } from "../render/meshRasterizer";
 import { buildBvh, hash01, trace, type Bvh, type Occluder } from "./lightmap";
 import { PROBE_FACES, probePosition, type LightProbeGrid } from "./lightProbes";
 
@@ -49,7 +50,7 @@ export interface BounceLights {
   /** The sun: toward it, and its colour relative to the baked sun ((1, 1, 1) = as baked); null for none. */
   readonly sun: { readonly direction: readonly [number, number, number]; readonly color: readonly [number, number, number] } | null;
   /** Point lights: their colour in the same units (the sun's at its brightest), and their reach. */
-  readonly points: readonly { readonly position: readonly [number, number, number]; readonly color: readonly [number, number, number]; readonly range: number }[];
+  readonly points: readonly { readonly position: readonly [number, number, number]; readonly color: readonly [number, number, number]; readonly range: number; readonly falloff?: "inverseSquare" }[];
 }
 
 /** The still scene sampled into patches. */
@@ -341,7 +342,7 @@ export function surfelLight(t: BounceTransfer, lights: BounceLights): Float32Arr
       // A wall between the light and the patch keeps its light from bouncing.
       const o: V3 = [s.position[i * 3]! + s.normal[i * 3]! * 0.02, s.position[i * 3 + 1]! + s.normal[i * 3 + 1]! * 0.02, s.position[i * 3 + 2]! + s.normal[i * 3 + 2]! * 0.02];
       if (trace(t.bvh, o, l, d - 0.05, hit, true) >= 0) continue;
-      const fall = (1 - d / r) ** 2;
+      const fall = distanceFalloff({ range: r, falloff: light.falloff }, d);
       for (let k = 0; k < 3; k += 1) out[i * 3 + k] = out[i * 3 + k]! + s.albedo[i * 3 + k]! * light.color[k]! * ndl * fall;
     }
   }

@@ -160,6 +160,7 @@ export interface PackableLight {
   readonly color: readonly [number, number, number];
   readonly intensity: number;
   readonly range?: number;
+  readonly falloff?: "inverseSquare";
   readonly innerAngle?: number;
   readonly outerAngle?: number;
   readonly shadowTile?: number;
@@ -186,6 +187,7 @@ export function packLights(lights: readonly PackableLight[]): Float32Array {
     out[base + 7] = light.intensity;
     out[base + 8] = light.range ?? 0;
     out[base + 11] = light.shadowTile ?? -1;
+    if (placed && light.falloff === "inverseSquare") out[base + 15] = 1;
     if (light.kind === "spot") {
       const [cosOuter, cosInner] = spotCone(light as SceneLight);
       out[base + 9] = cosOuter;

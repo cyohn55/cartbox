@@ -4919,6 +4919,7 @@ interface PackableLight {
     readonly color: readonly [number, number, number];
     readonly intensity: number;
     readonly range?: number;
+    readonly falloff?: "inverseSquare";
     readonly innerAngle?: number;
     readonly outerAngle?: number;
     readonly shadowTile?: number;

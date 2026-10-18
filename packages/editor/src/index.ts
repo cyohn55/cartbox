@@ -617,6 +617,8 @@ export {
   depthLinearTerms,
   softFade,
   spotCone,
+  distanceFalloff,
+  INVERSE_SQUARE_MIN_DISTANCE,
 } from "./render/meshRasterizer";
 export {
   CLUSTER_CELLS,
@@ -722,9 +724,25 @@ export {
   setSceneProbes,
   setScenePostVolumes,
   setSceneAutoExposure,
+  setSceneUnits,
   type SceneLighting,
   type SceneEnvironment,
 } from "./model/SceneLighting";
+export {
+  REFERENCE_EV100,
+  NITS_PER_UNIT,
+  LUX_PER_UNIT,
+  nitsToUnits,
+  unitsToNits,
+  luxToUnits,
+  unitsToLux,
+  ev100ToExposure,
+  exposureToEv100,
+  formatPhysical,
+  lightUnit,
+  withLightFalloff,
+  type LightUnit,
+} from "./model/physicalLight";
 export {
   DEFAULT_DETAIL_SCALE,
   DEFAULT_DETAIL_STRENGTH,

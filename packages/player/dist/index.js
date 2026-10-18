@@ -11336,13 +11336,13 @@ function bounceLightsFor(authored, frame, cart) {
   const brightness = 0.2126 * reference[0] + 0.7152 * reference[1] + 0.0722 * reference[2] || 1;
   const key = frame.lights.find((x) => x.kind === "directional");
   const sun = key?.direction ? { direction: key.direction, color: [0, 1, 2].map((k) => reference[k] > 1e-6 ? key.color[k] * key.intensity / reference[k] : 0) } : null;
-  const points = [...frame.lights, ...cart].filter((x) => (x.kind === "point" || x.kind === "spot") && x.position).map((x) => ({ position: x.position, color: x.color.map((c) => c * x.intensity / brightness), range: x.range && x.range > 0 ? x.range : 8 }));
+  const points = [...frame.lights, ...cart].filter((x) => (x.kind === "point" || x.kind === "spot") && x.position).map((x) => ({ position: x.position, color: x.color.map((c) => c * x.intensity / brightness), range: x.range && x.range > 0 ? x.range : 8, ...x.falloff ? { falloff: x.falloff } : {} }));
   return { sun, points };
 }
 function bounceSignature(lights) {
   const r = (v, s) => Math.round(v * s);
   const sun = lights.sun ? `${lights.sun.direction.map((v) => r(v, 100)).join(",")}:${lights.sun.color.map((v) => r(v, 50)).join(",")}` : "-";
-  return `${sun}|${lights.points.map((p) => `${p.position.map((v) => r(v, 20)).join(",")}:${p.color.map((v) => r(v, 50)).join(",")}:${r(p.range, 10)}`).join(";")}`;
+  return `${sun}|${lights.points.map((p) => `${p.position.map((v) => r(v, 20)).join(",")}:${p.color.map((v) => r(v, 50)).join(",")}:${r(p.range, 10)}${p.falloff ? ":2" : ""}`).join(";")}`;
 }
 
 // src/render/sceneRenderer.ts
@@ -13788,6 +13788,7 @@ function packLights(lights) {
     out[base + 7] = light.intensity;
     out[base + 8] = light.range ?? 0;
     out[base + 11] = light.shadowTile ?? -1;
+    if (placed && light.falloff === "inverseSquare") out[base + 15] = 1;
     if (light.kind === "spot") {
       const [cosOuter, cosInner] = spotCone(light);
       out[base + 9] = cosOuter;
@@ -15422,7 +15423,12 @@ vec3 lightTerm(Light lgt, vec3 P, vec3 N, vec3 V, float ndv, float a2, float k, 
     float dist = max(length(toL), 1e-4);
     Ld = toL / dist;
     float range = lgt.d2.x;
-    if (range > 0.0) { float t = max(0.0, 1.0 - dist / range); atten = t * t; }
+    if (lgt.d3.w > 0.5) { // inverse square, windowed to its range
+      float win = 1.0;
+      if (range > 0.0) { float q = dist / range; float t = clamp(1.0 - q * q * q * q, 0.0, 1.0); win = t * t; }
+      float d = max(dist, 0.01);
+      atten = win / (d * d);
+    } else if (range > 0.0) { float t = max(0.0, 1.0 - dist / range); atten = t * t; }
     if (lgt.d0.w > 1.5) {
       float ct = clamp((-dot(Ld, lgt.d3.xyz) - lgt.d2.y) / (lgt.d2.z - lgt.d2.y), 0.0, 1.0);
       atten = atten * ct * ct * (3.0 - 2.0 * ct);
@@ -17617,7 +17623,12 @@ fn lightTerm(lgt: Light, P: vec3<f32>, N: vec3<f32>, V: vec3<f32>, ndv: f32, a2:
     let dist = max(length(toL), 1e-4);
     Ld = toL / dist;
     let range = lgt.d2.x;
-    if (range > 0.0) { let t = max(0.0, 1.0 - dist / range); atten = t * t; }
+    if (lgt.d3.w > 0.5) { // inverse square, windowed to its range
+      var win = 1.0;
+      if (range > 0.0) { let q = dist / range; let t = clamp(1.0 - q * q * q * q, 0.0, 1.0); win = t * t; }
+      let d = max(dist, 0.01);
+      atten = win / (d * d);
+    } else if (range > 0.0) { let t = max(0.0, 1.0 - dist / range); atten = t * t; }
     if (lgt.d0.w > 1.5) {
       let ct = clamp((-dot(Ld, lgt.d3.xyz) - lgt.d2.y) / (lgt.d2.z - lgt.d2.y), 0.0, 1.0);
       atten = atten * ct * ct * (3.0 - 2.0 * ct);

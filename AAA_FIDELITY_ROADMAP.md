@@ -129,7 +129,7 @@ Everything else depends on this track. It contains no visible "feature", but its
       - The frame is still 8-bit and display-referred (F0b), at the model's 1080p (F0d).
       - The path applies only with nothing CPU-drawn between the scene and the screen. 2D relighting, weather, the HD-2D world, sprite backdrops and foreground placements keep the byte path.
       - This container's headless Chromium renders WebGPU to textures but doesn't display a WebGPU canvas. So the in-browser check here read the canvas's texture back through a test hook. Showing on a real screen still wants a look on a real device.
-- [ ] **F0b. Linear HDR colour.**
+- [x] **F0b. Linear HDR colour.**
   - The scene target becomes `rgba16float`, and albedo and emissive textures are sampled as sRGB.
   - All lighting runs in linear space, and blending happens in linear HDR. One tone map sits at the end of the frame.
   - Lights, sky and emissive take **physical units**: lux for the sun, candela or lumens for punctual lights, nits for emissive, EV100 for exposure. Editor conversion keeps existing scenes looking the same.
@@ -147,6 +147,24 @@ Everything else depends on this track. It contains no visible "feature", but its
       - ACES with exposure maps as expected, and the HUD after it stays unmapped;
       - the measured luminance is linear × exposure;
       - an untone-mapped sky matches the byte sky.
+  - **F0b-2, physical light units: done.** With this, F0b is complete.
+    - **The calibration** (`model/physicalLight.ts`). Rigs keep the renderer's units, and physical units are a fixed, exact conversion. It uses the photographic model, in which 1.2 · 2^EV100 nits saturates, with exposure 1 at EV100 15 (a sunny day). So one unit of luminance is 39,322 nits, and a unit sun is about 123.5 klx. EV100 `ev` is exposure 2^(15 − ev).
+      - Because the conversion is fixed and lossless, an existing scene looks the same in either units. No stored scene, renderer input or cart API changed.
+    - **Inverse-square falloff.** `SceneLight.falloff: "inverseSquare"` is 1/d² (d in metres, floored at 1 cm), windowed by (1 − (d/range)⁴)² to nothing at its range. It is what gives a candela its meaning.
+      - It is in all three renderers (software, WebGL, WebGPU) and in the probe relight. Existing lights keep the (1 − d/range)² fade, so parity holds.
+      - Switching a light's falloff keeps it as bright halfway to its range.
+    - **In the editor.** The Lighting panel gains a Units switch, Relative or Physical; it is only a display choice and is saved with the rig.
+      - In Physical, sky luminance and the ambient fill read in nits, exposure in EV100, a sun in lux, an inverse-square light in candela, and a fading light in lux next to it. Their sliders move in decades.
+      - A point or spot light gains a Falloff switch, Fade or Inverse square.
+      - The material panel shows emissive strength as a luminance in nits. The colour picker now keeps an emissive above 1 (one that blooms) instead of clamping it.
+    - **What it shows about existing scenes.** Beaver Creek's sun reads about 420 klx at EV 14.9, roughly four times a real noon sun. The art is lit hot for a display-referred pipeline, so it's worth re-balancing once F3's physical sky lands.
+    - *Left for later:*
+      - Cart lights from Lua (`light3d`, `sun3d`) stay in the renderer's units: the mailbox's 16-bit ×256 encoding can't hold lux.
+      - The sky dome's own colours are display colours, not nits; F3's physical sky takes that over.
+      - Measured auto-exposure stays relative stops around the authored exposure.
+    - *Tests:*
+      - `physical-light-units.test.ts`: the calibration and its round trips, the falloff and its window, the switch keeping brightness, the packed flag, and the rig's units and falloff surviving a save.
+      - `webgpu-parity.test.ts` and `webgl-parity.test.ts` now include inverse-square point and spot lights, matching the software rasteriser.
 - [ ] **F0c. Frame graph.**
   - A declarative pass graph with transient, aliased resources, replacing the hand-ordered passes of `WebgpuSceneRenderer`.
   - It produces a depth prepass and a thin G-buffer of normal, roughness and material ID.
