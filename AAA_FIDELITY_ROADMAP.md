@@ -403,7 +403,22 @@ Everything else depends on this track. It contains no visible "feature", but its
 
 ### F4. Image quality and the camera
 
-- [ ] **F4a. HDR TAA with motion vectors.** TAA in linear HDR before tone mapping, reprojecting with the F0c velocity buffer, and rejecting history with variance clipping in YCoCg. It adds reactive and transparency masks, so particles and water don't ghost.
+- [x] **F4a. HDR TAA with motion vectors.** TAA in linear HDR before tone mapping, reprojecting with the F0c velocity buffer, and rejecting history with variance clipping in YCoCg. It adds reactive and transparency masks, so particles and water don't ghost.
+  - **Done.** On the `aaa` tier (linear HDR, with the prepass), the I2 resolve becomes `hdrTemporalShaderWgsl` (`render/temporal.ts`). The Modern tier keeps I2's.
+    - **Reprojects with the velocity buffer.** Each pixel takes the velocity of the nearest surface in its 3×3, so an edge moves with what is in front of it. Nothing drawn (the sky behind) still reprojects by depth and the two cameras.
+    - **Reads the history Catmull-Rom**, five bilinear taps, so it doesn't soften a little more each frame.
+    - **Clips the history to the neighbourhood's variance box in YCoCg** (Salvi, γ = 1), toward the box's centre. The box is grown to hold the pixel's own colour: without that, a lone highlight of 40 on a wall of 0.5 was clipped to 1.8.
+    - **Works on Karis's reversible tone map** of the colour, so one HDR sparkle neither dominates the average nor flickers.
+    - **The reactive mask** is made as FSR 2 makes its own. The opaque scene is copied before the see-through draws, and a pass after them (before the reflections land) measures how much they changed each pixel, tone-mapped. The resolve takes that much more of the new frame, so particles and water, whose motion the velocity buffer doesn't hold, don't drag the surface behind them along.
+      - To do so, a frame with see-through draws now draws them in their own pass on this tier (as soft edges and refraction already did).
+    - *Tests (`hdr-taa.test.ts`).* On Dawn, on synthetic frames:
+      - the history comes from where the velocity says;
+      - a stale history outside the box is clipped into it;
+      - a highlight of 40 keeps its value;
+      - a reactive pixel takes the new frame where plain TAA keeps mostly history;
+      - the mask marks what the see-through pass changed and nothing else.
+      - Through the renderer: a still HDR scene converges to itself within 2%; a moving square leaves no trail; a see-through pane whose glow changes every frame shows the current frame's.
+      - In Chromium, Beaver Creek on `aaa` runs the HDR resolve and its reactive mask with no errors.
 - [ ] **F4b. Temporal upscaling.** An FSR 2-class upscaler built on F4a. It renders at 50–77% scale, reconstructs at native resolution and pairs with dynamic resolution (F0d). It is how integrated GPUs and phones reach the tier.
 - [ ] **F4c. Physical camera.**
   - Aperture, shutter speed and ISO drive both exposure and effects:

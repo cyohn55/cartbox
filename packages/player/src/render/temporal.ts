@@ -37,6 +37,8 @@ export const TEMPORAL_SAMPLES = 8;
 export const TEMPORAL_BLEND = 0.1;
 /** How strongly the output is sharpened (0 none). */
 export const TEMPORAL_SHARPEN = 0.25;
+/** The reactive mask's gain (F4a): a see-through change this strong (tone mapped) or more takes the new frame whole. */
+export const REACTIVE_SCALE = 4;
 /** Floats in the resolve's uniforms: the reprojection matrix, then the params vec4. */
 export const TEMPORAL_UNIFORM_FLOATS = 20;
 
@@ -287,5 +289,157 @@ void main() {
   vec4 lo = min(c, min(min(n, s), min(w, e)));
   vec4 hi = max(c, max(max(n, s), max(w, e)));
   colour = clamp(c + (4.0 * c - n - s - w - e) * uParams.y, lo, hi);
+}
+`;
+
+/**
+ * The AAA tier's resolve (AAA_FIDELITY_ROADMAP.md F4a), in linear HDR before
+ * the presenter's tone map. Over {@link temporalShaderWgsl} it:
+ *
+ * - **reprojects with the velocity buffer** (F0c), so a moving object's
+ *   history follows it rather than the camera's, taking the velocity of the
+ *   nearest surface in the 3×3 so an edge moves with what is in front;
+ *   nothing drawn (the sky behind) still reprojects by depth and the cameras;
+ * - **reads the history Catmull-Rom** (five bilinear taps), so it doesn't
+ *   soften a little more every frame;
+ * - **clips it to the neighbourhood's variance box in YCoCg** (Salvi), toward
+ *   the box's centre rather than clamping per channel, which colour-shifts;
+ *   the box is grown to hold the pixel's own colour, so a lone highlight
+ *   keeps its history instead of being clipped toward the wall around it;
+ * - works on Karis's reversible tone map of the colour, so one HDR sparkle
+ *   (a highlight of 40 beside a wall of 0.5) neither dominates the average nor
+ *   flickers;
+ * - and takes more of the new frame where the reactive mask says something
+ *   see-through (particles, water) changed this pixel: their motion is not in
+ *   the velocity buffer, so the history under them is the surface behind.
+ *
+ * The mask (binding 6, {@link REACTIVE_MASK_WGSL}) is 1×1 when the frame has
+ * nothing see-through; the shader reads it only at the frame's size.
+ */
+export function hdrTemporalShaderWgsl(multisampled: boolean): string {
+  return /* wgsl */ `
+struct Temporal { reproject: mat4x4<f32>, params: vec4<f32> };
+@group(0) @binding(0) var<uniform> taa: Temporal;
+@group(0) @binding(1) var current: texture_2d<f32>;
+@group(0) @binding(2) var history: texture_2d<f32>;
+@group(0) @binding(3) var historySampler: sampler;
+@group(0) @binding(4) var depth: ${multisampled ? "texture_depth_multisampled_2d" : "texture_depth_2d"};
+@group(0) @binding(5) var velocity: texture_2d<f32>;
+@group(0) @binding(6) var reactive: texture_2d<f32>;
+
+@vertex
+fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4<f32> {
+  let p = vec2<f32>(f32((i << 1u) & 2u), f32(i & 2u));
+  return vec4<f32>(p * 2.0 - 1.0, 0.0, 1.0);
+}
+
+// Karis's reversible tone map, and YCoCg.
+fn toneMap(c: vec3<f32>) -> vec3<f32> { return c / (1.0 + max(c.r, max(c.g, c.b))); }
+fn untoneMap(c: vec3<f32>) -> vec3<f32> { return c / max(1e-5, 1.0 - max(c.r, max(c.g, c.b))); }
+fn toYCoCg(c: vec3<f32>) -> vec3<f32> { return vec3<f32>(0.25 * c.r + 0.5 * c.g + 0.25 * c.b, 0.5 * c.r - 0.5 * c.b, -0.25 * c.r + 0.5 * c.g - 0.25 * c.b); }
+fn fromYCoCg(c: vec3<f32>) -> vec3<f32> { let t = c.x - c.z; return vec3<f32>(t + c.y, c.x + c.z, t - c.y); }
+
+// The history at uv by Catmull-Rom, in five bilinear taps (the corners dropped).
+fn historyAt(uv: vec2<f32>, size: vec2<f32>) -> vec4<f32> {
+  let pos = uv * size;
+  let centre = floor(pos - 0.5) + 0.5;
+  let f = pos - centre;
+  let w0 = f * (-0.5 + f * (1.0 - 0.5 * f));
+  let w1 = 1.0 + f * f * (-2.5 + 1.5 * f);
+  let w2 = f * (0.5 + f * (2.0 - 1.5 * f));
+  let w3 = f * f * (-0.5 + 0.5 * f);
+  let w12 = w1 + w2;
+  let t0 = (centre - 1.0) / size;
+  let t3 = (centre + 2.0) / size;
+  let t12 = (centre + w2 / w12) / size;
+  let a = textureSampleLevel(history, historySampler, vec2<f32>(t12.x, t0.y), 0.0) * (w12.x * w0.y);
+  let b = textureSampleLevel(history, historySampler, vec2<f32>(t0.x, t12.y), 0.0) * (w0.x * w12.y);
+  let c = textureSampleLevel(history, historySampler, t12, 0.0) * (w12.x * w12.y);
+  let d = textureSampleLevel(history, historySampler, vec2<f32>(t3.x, t12.y), 0.0) * (w3.x * w12.y);
+  let e = textureSampleLevel(history, historySampler, vec2<f32>(t12.x, t3.y), 0.0) * (w12.x * w3.y);
+  let weight = w12.x * w0.y + w0.x * w12.y + w12.x * w12.y + w3.x * w12.y + w12.x * w3.y;
+  return max((a + b + c + d + e) / weight, vec4<f32>(0.0));
+}
+
+@fragment
+fn resolve(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
+  let size = vec2<i32>(textureDimensions(current));
+  let fsize = vec2<f32>(size);
+  let p = vec2<i32>(frag.xy);
+  let c = textureLoad(current, p, 0);
+  if (taa.params.z < 0.5) { return c; }
+  // The neighbourhood's moments in YCoCg of the tone-mapped colour, and its nearest surface.
+  var m1 = vec3<f32>(0.0);
+  var m2 = vec3<f32>(0.0);
+  var nearest = 2.0;
+  var at = p;
+  for (var dy = -1; dy <= 1; dy += 1) {
+    for (var dx = -1; dx <= 1; dx += 1) {
+      let q = clamp(p + vec2<i32>(dx, dy), vec2<i32>(0, 0), size - 1);
+      let s = toYCoCg(toneMap(textureLoad(current, q, 0).rgb));
+      m1 = m1 + s;
+      m2 = m2 + s * s;
+      let z = textureLoad(depth, q, 0);
+      if (z < nearest) { nearest = z; at = q; }
+    }
+  }
+  let mean = m1 / 9.0;
+  let sigma = sqrt(max(m2 / 9.0 - mean * mean, vec3<f32>(0.0)));
+  // Where it was: by the nearest surface's velocity, or (nothing drawn) by depth and the cameras.
+  var uv = frag.xy / fsize;
+  if (nearest < 1.0) {
+    uv = uv - textureLoad(velocity, at, 0).xy;
+  } else {
+    var z = textureLoad(depth, p, 0);
+    if (taa.params.w > 0.5) { z = z * 2.0 - 1.0; }
+    let ndc = vec2<f32>(frag.x / fsize.x * 2.0 - 1.0, 1.0 - frag.y / fsize.y * 2.0);
+    let prev = taa.reproject * vec4<f32>(ndc, z, 1.0);
+    if (prev.w <= 0.0) { return c; }
+    uv = vec2<f32>(prev.x / prev.w * 0.5 + 0.5, 0.5 - prev.y / prev.w * 0.5);
+  }
+  if (any(uv < vec2<f32>(0.0, 0.0)) || any(uv > vec2<f32>(1.0, 1.0))) { return c; }
+  let past = historyAt(uv, fsize);
+  // Clip the history toward the box's centre (Salvi's variance box, γ = 1), the box
+  // grown to hold this pixel's own colour, so a lone highlight keeps its history.
+  let now = toYCoCg(toneMap(c.rgb));
+  let lo = min(mean - sigma, now);
+  let hi = max(mean + sigma, now);
+  let centre = (lo + hi) * 0.5;
+  let extent = (hi - lo) * 0.5 + vec3<f32>(1e-5);
+  var h = toYCoCg(toneMap(past.rgb));
+  let offset = h - centre;
+  let units = abs(offset / extent);
+  let reach = max(units.x, max(units.y, units.z));
+  if (reach > 1.0) { h = centre + offset / reach; }
+  // More of the new frame where something see-through changed the pixel (the reactive mask).
+  var blend = taa.params.x;
+  if (all(vec2<i32>(textureDimensions(reactive)) == size)) { blend = max(blend, textureLoad(reactive, p, 0).r); }
+  let rgb = untoneMap(fromYCoCg(mix(h, now, blend)));
+  return vec4<f32>(max(rgb, vec3<f32>(0.0)), mix(past.a, c.a, max(blend, 0.5)));
+}
+`;
+}
+
+/**
+ * The reactive mask (F4a): how much the see-through pass changed each pixel,
+ * the opaque scene's colour (copied before it) against the frame's, tone
+ * mapped so a bright wall and a dim one count the same. As FSR 2 makes its
+ * own, scaled so a quarter-strength change is fully reactive.
+ */
+export const REACTIVE_MASK_WGSL = /* wgsl */ `
+@group(0) @binding(0) var opaqueOnly: texture_2d<f32>;
+@group(0) @binding(1) var composited: texture_2d<f32>;
+
+@vertex
+fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4<f32> {
+  let p = vec2<f32>(f32((i << 1u) & 2u), f32(i & 2u));
+  return vec4<f32>(p * 2.0 - 1.0, 0.0, 1.0);
+}
+fn toneMap(c: vec3<f32>) -> vec3<f32> { return c / (1.0 + max(c.r, max(c.g, c.b))); }
+@fragment
+fn mask(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
+  let p = vec2<i32>(frag.xy);
+  let d = abs(toneMap(textureLoad(composited, p, 0).rgb) - toneMap(textureLoad(opaqueOnly, p, 0).rgb));
+  return vec4<f32>(clamp(max(d.r, max(d.g, d.b)) * ${REACTIVE_SCALE.toFixed(1)}, 0.0, 1.0), 0.0, 0.0, 1.0);
 }
 `;

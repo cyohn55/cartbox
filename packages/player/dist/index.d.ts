@@ -4906,6 +4906,12 @@ declare class WebgpuSceneRenderer implements SceneRenderer {
      * first use.
      */
     private taa;
+    private reactivePipeline;
+    /**
+     * The reactive mask (F4a): how much the see-through pass changed each pixel,
+     * from the opaque scene copied before it against the frame after it.
+     */
+    private addReactiveMask;
     /**
      * Resolve the frame into the history and sharpen it back into the colour
      * texture that is read back (HALO_INFINITE_STYLE_ROADMAP.md I2). The two
