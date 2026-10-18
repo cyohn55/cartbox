@@ -4736,7 +4736,8 @@ var AAA_RASTER_CAPS = {
   ...MODERN_RASTER_CAPS,
   gpuPresent: true,
   linearHdr: true,
-  prepass: true
+  prepass: true,
+  mipmaps: true
 };
 var MODELS = {
   classic: {
@@ -17255,6 +17256,178 @@ function timesFromStamps(passes, stamps) {
   return { passes: out, total: total / 1e6 };
 }
 
+// src/render/mipmaps.ts
+var MAX_ANISOTROPY = 16;
+function mipLevelCount(width, height) {
+  return Math.floor(Math.log2(Math.max(1, width, height))) + 1;
+}
+function mipSize(width, height, level) {
+  return { width: Math.max(1, width >> level), height: Math.max(1, height >> level) };
+}
+var MIP_WGSL = (
+  /* wgsl */
+  `
+@group(0) @binding(0) var src: texture_2d<f32>;
+@group(0) @binding(1) var samp: sampler;
+struct Out {
+  @builtin(position) pos: vec4<f32>,
+  @location(0) uv: vec2<f32>,
+};
+@vertex
+fn vs(@builtin(vertex_index) i: u32) -> Out {
+  let p = vec2<f32>(f32((i << 1u) & 2u), f32(i & 2u));
+  var out: Out;
+  out.pos = vec4<f32>(p * 2.0 - 1.0, 0.0, 1.0);
+  out.uv = vec2<f32>(p.x, 1.0 - p.y);
+  return out;
+}
+@fragment
+fn fs(in: Out) -> @location(0) vec4<f32> {
+  return textureSample(src, samp, in.uv);
+}
+`
+);
+var MipmapGenerator = class {
+  constructor(device) {
+    this.device = device;
+    this.pipelines = /* @__PURE__ */ new Map();
+    this.sampler = null;
+    this.module = null;
+  }
+  /**
+   * Draw levels 1 to `levels − 1` of `texture` from its level 0, through views
+   * of `format` (the texture's own, or an sRGB view format it was made with).
+   */
+  generate(texture, levels, format) {
+    if (levels < 2) return;
+    const device = this.device;
+    this.module ?? (this.module = device.createShaderModule({ code: MIP_WGSL }));
+    this.sampler ?? (this.sampler = device.createSampler({ magFilter: "linear", minFilter: "linear", addressModeU: "clamp-to-edge", addressModeV: "clamp-to-edge" }));
+    let pipeline = this.pipelines.get(format);
+    if (!pipeline) {
+      pipeline = device.createRenderPipeline({
+        layout: "auto",
+        vertex: { module: this.module, entryPoint: "vs" },
+        fragment: { module: this.module, entryPoint: "fs", targets: [{ format }] },
+        primitive: { topology: "triangle-list" }
+      });
+      this.pipelines.set(format, pipeline);
+    }
+    const encoder = device.createCommandEncoder();
+    for (let level = 1; level < levels; level += 1) {
+      const view = (mip) => texture.createView({ format, baseMipLevel: mip, mipLevelCount: 1 });
+      const pass = encoder.beginRenderPass({
+        colorAttachments: [{ view: view(level), clearValue: { r: 0, g: 0, b: 0, a: 0 }, loadOp: "clear", storeOp: "store" }]
+      });
+      pass.setPipeline(pipeline);
+      pass.setBindGroup(
+        0,
+        device.createBindGroup({
+          layout: pipeline.getBindGroupLayout(0),
+          entries: [
+            { binding: 0, resource: view(level - 1) },
+            { binding: 1, resource: this.sampler }
+          ]
+        })
+      );
+      pass.draw(3);
+      pass.end();
+    }
+    device.queue.submit([encoder.finish()]);
+  }
+};
+var COVERAGE_CUTOFF = 0.5;
+function hasTransparency(texture) {
+  const d = texture.data;
+  for (let i = 3; i < d.length; i += 4) if (d[i] < 255) return true;
+  return false;
+}
+var TO_LINEAR = Float32Array.from({ length: 256 }, (_, i) => {
+  const c = i / 255;
+  return c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4;
+});
+function toSrgbByte(linear) {
+  const c = linear <= 31308e-7 ? linear * 12.92 : 1.055 * linear ** (1 / 2.4) - 0.055;
+  return Math.round(Math.min(1, Math.max(0, c)) * 255);
+}
+function coverageOf(alpha, scale, cutoff) {
+  let kept = 0;
+  for (let i = 0; i < alpha.length; i += 1) if (alpha[i] * scale >= cutoff) kept += 1;
+  return kept / Math.max(1, alpha.length);
+}
+function coverageMips(source, cutoff = COVERAGE_CUTOFF) {
+  const levels = mipLevelCount(source.width, source.height);
+  const base = new Float32Array(source.width * source.height);
+  for (let i = 0; i < base.length; i += 1) base[i] = source.data[i * 4 + 3] / 255;
+  const target = coverageOf(base, 1, cutoff);
+  let width = source.width;
+  let height = source.height;
+  let rgb = new Float32Array(width * height * 3);
+  let alpha = base;
+  for (let i = 0; i < width * height; i += 1) {
+    for (let k = 0; k < 3; k += 1) rgb[i * 3 + k] = TO_LINEAR[source.data[i * 4 + k]] * alpha[i];
+  }
+  const out = [];
+  for (let level = 1; level < levels; level += 1) {
+    const { width: w, height: h } = mipSize(source.width, source.height, level);
+    const nextRgb = new Float32Array(w * h * 3);
+    const nextAlpha = new Float32Array(w * h);
+    for (let y = 0; y < h; y += 1) {
+      for (let x = 0; x < w; x += 1) {
+        let r = 0;
+        let g = 0;
+        let b = 0;
+        let a = 0;
+        let n = 0;
+        for (let dy = 0; dy < 2; dy += 1) {
+          for (let dx = 0; dx < 2; dx += 1) {
+            const sx = Math.min(width - 1, x * 2 + dx);
+            const sy = Math.min(height - 1, y * 2 + dy);
+            const j = sy * width + sx;
+            r += rgb[j * 3];
+            g += rgb[j * 3 + 1];
+            b += rgb[j * 3 + 2];
+            a += alpha[j];
+            n += 1;
+          }
+        }
+        const i = y * w + x;
+        nextRgb[i * 3] = r / n;
+        nextRgb[i * 3 + 1] = g / n;
+        nextRgb[i * 3 + 2] = b / n;
+        nextAlpha[i] = a / n;
+      }
+    }
+    let lo = 0;
+    let hi = 4;
+    if (target <= 0) hi = 1;
+    for (let step = 0; step < 12; step += 1) {
+      const mid = (lo + hi) / 2;
+      if (coverageOf(nextAlpha, mid, cutoff) < target) lo = mid;
+      else hi = mid;
+    }
+    const scale = target <= 0 ? 1 : Math.abs(coverageOf(nextAlpha, lo, cutoff) - target) < Math.abs(coverageOf(nextAlpha, hi, cutoff) - target) ? lo : hi;
+    const mean = [0, 0, 0];
+    let weight = 0;
+    for (let i = 0; i < w * h; i += 1) {
+      for (let k = 0; k < 3; k += 1) mean[k] = mean[k] + nextRgb[i * 3 + k];
+      weight += nextAlpha[i];
+    }
+    const data = new Uint8ClampedArray(w * h * 4);
+    for (let i = 0; i < w * h; i += 1) {
+      const a = nextAlpha[i];
+      for (let k = 0; k < 3; k += 1) data[i * 4 + k] = toSrgbByte(a > 0 ? nextRgb[i * 3 + k] / a : weight > 0 ? mean[k] / weight : 0);
+      data[i * 4 + 3] = Math.round(Math.min(1, a * scale) * 255);
+    }
+    out.push({ width: w, height: h, data });
+    width = w;
+    height = h;
+    rgb = nextRgb;
+    alpha = nextAlpha;
+  }
+  return out;
+}
+
 // src/render/WebgpuSceneRenderer.ts
 var GBUFFER_FORMAT = "rgba16float";
 var VELOCITY_FORMAT = "rg16float";
@@ -18483,7 +18656,7 @@ fn fs(in: VSOut) -> SceneOut {
 }
 var IDENTITY_BASIS = [1, 0, 0, 0, 1, 0, 0, 0, 1];
 var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
-  constructor(device, width, height, pipeline, pipelinesFor, bindGroupLayout, colourTexture, depthTexture, depthGroups, sampler, blankTexture, blankShadow, readback, bytesPerRow, style, hdr = false) {
+  constructor(device, width, height, pipeline, pipelinesFor, bindGroupLayout, colourTexture, depthTexture, depthGroups, sampler, blankTexture, blankShadow, readback, bytesPerRow, style, hdr = false, mips = false) {
     this.device = device;
     this.width = width;
     this.height = height;
@@ -18499,9 +18672,12 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     this.readback = readback;
     this.bytesPerRow = bytesPerRow;
     this.hdr = hdr;
+    this.mips = mips;
     this.backend = "webgpu";
     this.meshes = /* @__PURE__ */ new WeakMap();
     this.textures = /* @__PURE__ */ new WeakMap();
+    /** With mips (F1a), colour maps upload apart: their chain is averaged in linear light. */
+    this.colourTextures = /* @__PURE__ */ new WeakMap();
     // Not readonly: a resized uniform buffer invalidates every cached group at
     // once, and WeakMap has no clear(), so the map itself is replaced.
     this.bindGroups = /* @__PURE__ */ new WeakMap();
@@ -18577,6 +18753,7 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     this.probeTexture = blankTexture;
     this.ssaoBound = blankShadow;
     this.timer = GraphTimer.create(device);
+    this.mipmaps = new MipmapGenerator(device);
     this.transients = new TransientPool(device);
   }
   /**
@@ -18634,6 +18811,7 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
    */
   static async create(device, width, height, style = DEFAULT_RASTER_STYLE3, options = {}) {
     const hdr = options.hdr === true;
+    const mips = options.mips === true && style.textureFiltering !== "none";
     const colourFormat = hdr ? "rgba16float" : "rgba8unorm";
     if (!webgpuCanHonour(style)) return null;
     try {
@@ -18822,7 +19000,9 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
         magFilter: filter,
         minFilter: filter,
         addressModeU: "repeat",
-        addressModeV: "repeat"
+        addressModeV: "repeat",
+        // With mip chains (F1a): trilinear, and 16× anisotropic for surfaces seen at a glancing angle.
+        ...mips ? { mipmapFilter: "linear", maxAnisotropy: MAX_ANISOTROPY } : {}
       });
       const blankTexture = device.createTexture({
         size: { width: 1, height: 1 },
@@ -18873,7 +19053,8 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
         readback,
         bytesPerRow,
         style,
-        hdr
+        hdr,
+        mips
       );
     } catch {
       return null;
@@ -19665,16 +19846,16 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     if (cached && cached.source.base === textures.base && cached.source.mr === textures.mr && cached.source.occ === textures.occ && cached.source.emis === textures.emis && cached.source.lm === textures.lm && cached.source.detail === textures.detail && cached.source.blend === textures.blend && cached.source.normal === textures.normal) {
       return cached.group;
     }
-    const view = (texture) => (texture ? this.uploadTexture(texture) : this.blankTexture).createView();
+    const view = (texture, colour = false) => (texture ? this.uploadTexture(texture, colour) : this.blankTexture).createView();
     const group = this.device.createBindGroup({
       layout: this.bindGroupLayout,
       entries: [
         { binding: 0, resource: { buffer: this.uniformBuffer, offset: 0, size: UNIFORM_STRIDE } },
         { binding: 1, resource: this.sampler },
-        { binding: 2, resource: view(textures.base) },
+        { binding: 2, resource: view(textures.base, true) },
         { binding: 3, resource: view(textures.mr) },
         { binding: 4, resource: view(textures.occ) },
-        { binding: 5, resource: view(textures.emis) },
+        { binding: 5, resource: view(textures.emis, true) },
         // The active shadow map (or the 1x1 blank). Its identity only moves on a
         // size change, which invalidates this whole cache, so a cached group
         // always references the current one.
@@ -19694,22 +19875,33 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
         { binding: 13, resource: { buffer: this.probeBuffer } },
         // The detail map (or the 1x1 white blank; the uniform gates it).
         { binding: 14, resource: view(textures.detail) },
-        { binding: 15, resource: view(textures.blend) },
+        { binding: 15, resource: view(textures.blend, true) },
         { binding: 16, resource: view(textures.normal) }
       ]
     });
     this.bindGroups.set(primitive, { group, source: { ...textures } });
     return group;
   }
-  /** Upload (once) a decoded texture. */
-  uploadTexture(source) {
-    const cached = this.textures.get(source);
+  /**
+   * Upload (once) a decoded texture. With mips (F1a) it gets its full chain,
+   * each level drawn from the one above on the GPU; a colour map's through an
+   * sRGB view, so the averaging is in linear light and distant texels don't
+   * darken. The shader reads every level as it is stored (sRGB-encoded bytes).
+   * A colour map with see-through texels (a cut-out's, say a grass card's) is
+   * mipped on the CPU instead, keeping its coverage: averaged alpha would
+   * otherwise fall under the cutoff, and foliage would thin away with distance.
+   */
+  uploadTexture(source, colour = false) {
+    const cache = this.mips && colour ? this.colourTextures : this.textures;
+    const cached = cache.get(source);
     if (cached) return cached;
+    const levels = this.mips ? mipLevelCount(source.width, source.height) : 1;
     const texture = this.device.createTexture({
       size: { width: source.width, height: source.height },
       format: "rgba8unorm",
-      usage: 4 | 2
-      // TEXTURE_BINDING | COPY_DST
+      // TEXTURE_BINDING | COPY_DST, and RENDER_ATTACHMENT to draw its mips into.
+      usage: 4 | 2 | (levels > 1 ? 16 : 0),
+      ...levels > 1 ? { mipLevelCount: levels, ...colour ? { viewFormats: ["rgba8unorm-srgb"] } : {} } : {}
     });
     this.device.queue.writeTexture(
       { texture },
@@ -19717,7 +19909,14 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
       { bytesPerRow: source.width * 4, rowsPerImage: source.height },
       { width: source.width, height: source.height }
     );
-    this.textures.set(source, texture);
+    if (levels > 1 && colour && hasTransparency(source)) {
+      coverageMips(source).forEach(
+        (mip, i) => this.device.queue.writeTexture({ texture, mipLevel: i + 1 }, mip.data, { bytesPerRow: mip.width * 4, rowsPerImage: mip.height }, { width: mip.width, height: mip.height })
+      );
+    } else if (levels > 1) {
+      this.mipmaps.generate(texture, levels, colour ? "rgba8unorm-srgb" : "rgba8unorm");
+    }
+    cache.set(source, texture);
     return texture;
   }
   dispose() {
@@ -21407,7 +21606,7 @@ var Player = class {
       const particles = this.options.particles;
       const wantsGpuPresent = (this.options.gpuPresent ?? this.model.renderCaps.gpuPresent === true) && Boolean(mesh) && !this.options.lighting && !(particles && particles.emitters.length > 0) && !(world && this.cartSource) && !(wantsForeground && this.cartSource) && !(scene && backdrop);
       let hdr = wantsGpuPresent && (this.options.linearHdr ?? this.model.renderCaps.linearHdr === true);
-      const makeRenderer = () => createSceneRenderer(this.model.width, this.model.height, this.model.renderCaps, void 0, void 0, { hdr });
+      const makeRenderer = () => createSceneRenderer(this.model.width, this.model.height, this.model.renderCaps, void 0, void 0, { hdr, mips: this.options.mipmaps ?? this.model.renderCaps.mipmaps === true });
       if (mesh || world && this.cartSource) this.sceneRenderer = await makeRenderer();
       const presentFromGpu = wantsGpuPresent && this.sceneRenderer?.backend === "webgpu" && Boolean(this.sceneRenderer.renderToTexture);
       const gpuCanvas = presentFromGpu ? GpuCanvasSurface.create(this.container, scale, this.model, this.sceneRenderer.gpuDevice, { hdr }) : null;

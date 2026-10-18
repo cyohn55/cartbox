@@ -127,6 +127,7 @@ import { SoftwareSceneRenderer, applyScenePasses, type FrameState, type GpuScene
 import { webgpuCanHonour } from "./renderCaps.js";
 import { batchInstances, compositeFrame, presentFrame, softEdges, type PrimitiveTextures } from "./gpuFrame.js";
 import { FrameGraph, GraphTimer, TransientPool, type FrameResource, type PassContext } from "./frameGraph.js";
+import { MAX_ANISOTROPY, MipmapGenerator, coverageMips, hasTransparency, mipLevelCount } from "./mipmaps.js";
 import { TEMPORAL_SHARPEN_WGSL, TemporalState, temporalShaderWgsl } from "./temporal.js";
 import { reflectionShaderWgsl, reflectionUniforms } from "./reflections.js";
 import type { RenderStats } from "../debug/profiler.js";
@@ -1462,6 +1463,10 @@ export class WebgpuSceneRenderer implements SceneRenderer {
 
   private readonly meshes = new WeakMap<MeshAsset, GpuPrimitive[]>();
   private readonly textures = new WeakMap<DecodedTexture, any>();
+  /** With mips (F1a), colour maps upload apart: their chain is averaged in linear light. */
+  private readonly colourTextures = new WeakMap<DecodedTexture, any>();
+  /** Draws a texture's mip chain on the GPU (F1a). */
+  private readonly mipmaps: MipmapGenerator;
   // Not readonly: a resized uniform buffer invalidates every cached group at
   // once, and WeakMap has no clear(), so the map itself is replaced.
   private bindGroups = new WeakMap<MeshPrimitive, CachedBindGroup>();
@@ -1565,6 +1570,8 @@ export class WebgpuSceneRenderer implements SceneRenderer {
     style: RasterStyle,
     /** Linear HDR (F0b): half-float targets, frames kept on the GPU (renderToTexture) and never read back. */
     readonly hdr = false,
+    /** Mipmapped textures (F1a): a full chain each, made on the GPU, sampled trilinearly at 16× anisotropy. */
+    readonly mips = false,
   ) {
     // The warm-up rasteriser must draw the same era as the GPU it stands in for.
     this.software = new SoftwareSceneRenderer(style);
@@ -1573,6 +1580,7 @@ export class WebgpuSceneRenderer implements SceneRenderer {
     this.probeTexture = blankTexture;
     this.ssaoBound = blankShadow; // the 1x1 r32float blank until an AO buffer arrives
     this.timer = GraphTimer.create(device);
+    this.mipmaps = new MipmapGenerator(device);
     this.transients = new TransientPool(device);
   }
 
@@ -1635,9 +1643,11 @@ export class WebgpuSceneRenderer implements SceneRenderer {
     height: number,
     style: RasterStyle = DEFAULT_RASTER_STYLE,
     /** `hdr`: shade in linear light into half-float targets, for a GPU-presented frame (F0b; no readback). */
-    options: { readonly hdr?: boolean } = {},
+    options: { readonly hdr?: boolean; readonly mips?: boolean } = {},
   ): Promise<WebgpuSceneRenderer | null> {
     const hdr = options.hdr === true;
+    // Mipmaps (F1a): full chains, filtered trilinearly at 16× anisotropy, where the era filters at all.
+    const mips = options.mips === true && style.textureFiltering !== "none";
     const colourFormat = hdr ? "rgba16float" : "rgba8unorm";
     // Refuse a style this path cannot reproduce, so the factory falls back to
     // the software rasteriser rather than rendering a console model with the
@@ -1855,6 +1865,8 @@ export class WebgpuSceneRenderer implements SceneRenderer {
         minFilter: filter,
         addressModeU: "repeat",
         addressModeV: "repeat",
+        // With mip chains (F1a): trilinear, and 16× anisotropic for surfaces seen at a glancing angle.
+        ...(mips ? { mipmapFilter: "linear", maxAnisotropy: MAX_ANISOTROPY } : {}),
       });
 
       // A 1x1 opaque white stands in for "no texture", so the bind group layout
@@ -1911,6 +1923,7 @@ export class WebgpuSceneRenderer implements SceneRenderer {
         bytesPerRow,
         style,
         hdr,
+        mips,
       );
     } catch {
       return null;
@@ -2873,17 +2886,18 @@ export class WebgpuSceneRenderer implements SceneRenderer {
       return cached.group;
     }
 
-    const view = (texture: DecodedTexture | null): any =>
-      (texture ? this.uploadTexture(texture) : this.blankTexture).createView();
+    // Colour maps (the base, emissive and blend surface's) are sRGB-encoded: their mips average in linear light (F1a).
+    const view = (texture: DecodedTexture | null, colour = false): any =>
+      (texture ? this.uploadTexture(texture, colour) : this.blankTexture).createView();
     const group = this.device.createBindGroup({
       layout: this.bindGroupLayout,
       entries: [
         { binding: 0, resource: { buffer: this.uniformBuffer, offset: 0, size: UNIFORM_STRIDE } },
         { binding: 1, resource: this.sampler },
-        { binding: 2, resource: view(textures.base) },
+        { binding: 2, resource: view(textures.base, true) },
         { binding: 3, resource: view(textures.mr) },
         { binding: 4, resource: view(textures.occ) },
-        { binding: 5, resource: view(textures.emis) },
+        { binding: 5, resource: view(textures.emis, true) },
         // The active shadow map (or the 1x1 blank). Its identity only moves on a
         // size change, which invalidates this whole cache, so a cached group
         // always references the current one.
@@ -2903,7 +2917,7 @@ export class WebgpuSceneRenderer implements SceneRenderer {
         { binding: 13, resource: { buffer: this.probeBuffer } },
         // The detail map (or the 1x1 white blank; the uniform gates it).
         { binding: 14, resource: view(textures.detail) },
-        { binding: 15, resource: view(textures.blend) },
+        { binding: 15, resource: view(textures.blend, true) },
         { binding: 16, resource: view(textures.normal) },
       ],
     });
@@ -2911,15 +2925,27 @@ export class WebgpuSceneRenderer implements SceneRenderer {
     return group;
   }
 
-  /** Upload (once) a decoded texture. */
-  private uploadTexture(source: DecodedTexture): any {
-    const cached = this.textures.get(source);
+  /**
+   * Upload (once) a decoded texture. With mips (F1a) it gets its full chain,
+   * each level drawn from the one above on the GPU; a colour map's through an
+   * sRGB view, so the averaging is in linear light and distant texels don't
+   * darken. The shader reads every level as it is stored (sRGB-encoded bytes).
+   * A colour map with see-through texels (a cut-out's, say a grass card's) is
+   * mipped on the CPU instead, keeping its coverage: averaged alpha would
+   * otherwise fall under the cutoff, and foliage would thin away with distance.
+   */
+  private uploadTexture(source: DecodedTexture, colour = false): any {
+    const cache = this.mips && colour ? this.colourTextures : this.textures;
+    const cached = cache.get(source);
     if (cached) return cached;
 
+    const levels = this.mips ? mipLevelCount(source.width, source.height) : 1;
     const texture = this.device.createTexture({
       size: { width: source.width, height: source.height },
       format: "rgba8unorm",
-      usage: 0x04 | 0x02, // TEXTURE_BINDING | COPY_DST
+      // TEXTURE_BINDING | COPY_DST, and RENDER_ATTACHMENT to draw its mips into.
+      usage: 0x04 | 0x02 | (levels > 1 ? 0x10 : 0),
+      ...(levels > 1 ? { mipLevelCount: levels, ...(colour ? { viewFormats: ["rgba8unorm-srgb"] } : {}) } : {}),
     });
     this.device.queue.writeTexture(
       { texture },
@@ -2927,7 +2953,14 @@ export class WebgpuSceneRenderer implements SceneRenderer {
       { bytesPerRow: source.width * 4, rowsPerImage: source.height },
       { width: source.width, height: source.height },
     );
-    this.textures.set(source, texture);
+    if (levels > 1 && colour && hasTransparency(source)) {
+      coverageMips(source).forEach((mip, i) =>
+        this.device.queue.writeTexture({ texture, mipLevel: i + 1 }, mip.data, { bytesPerRow: mip.width * 4, rowsPerImage: mip.height }, { width: mip.width, height: mip.height }),
+      );
+    } else if (levels > 1) {
+      this.mipmaps.generate(texture, levels, colour ? "rgba8unorm-srgb" : "rgba8unorm");
+    }
+    cache.set(source, texture);
     return texture;
   }
 
