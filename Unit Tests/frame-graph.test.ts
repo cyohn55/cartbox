@@ -353,4 +353,114 @@ describe.skipIf(!device)("on a real device", () => {
     }
     renderer.dispose();
   });
+
+  it("lays a depth prepass and the thin G-buffer before shading: normal, roughness, material ID", async () => {
+    const W = 64;
+    const H = 48;
+    const quadOf = (material: Record<string, unknown>): MeshAsset =>
+      ({
+        name: "q",
+        primitives: [
+          {
+            positions: Float32Array.from([-1, -1, 0, 1, -1, 0, 1, 1, 0, -1, 1, 0]),
+            normals: Float32Array.from([0, 0, 1, 0, 0, 1, 0, 0, 1, 0, 0, 1]),
+            uvs: Float32Array.from([0, 0, 1, 0, 1, 1, 0, 1]),
+            indices: Uint32Array.from([0, 1, 2, 0, 2, 3]),
+            material: { name: "m", baseColorFactor: [0.8, 0.5, 0.3, 1], baseColorImage: null, metallicFactor: 0, roughnessFactor: 0.6, ...material },
+          },
+        ],
+      }) as unknown as MeshAsset;
+    // Left: a rough quad facing the camera. Right: a smoother one, turned 60° about Y.
+    const left = quadOf({ roughnessFactor: 0.6 });
+    const right = quadOf({ roughnessFactor: 0.25 });
+    const glass = quadOf({ baseColorFactor: [0.2, 0.6, 1, 0.4], alphaMode: "blend" });
+    const instances: MeshSceneInstance[] = [
+      { mesh: left, model: composeModelMatrix([-1.1, 0, 0], [0, 0, 0], [0.9, 0.9, 1]), textures: null },
+      { mesh: right, model: composeModelMatrix([1.1, 0, 0], [0, 60, 0], [0.9, 0.9, 1]), textures: null },
+      // See-through: not in the prepass, so not in the G-buffer.
+      { mesh: glass, model: composeModelMatrix([-1.1, 0, 0.5], [0, 0, 0], [0.4, 0.4, 1]), textures: null },
+    ];
+    for (const antialias of [false, true]) {
+      const renderer = (await WebgpuSceneRenderer.create(device, W, H))!;
+      const draw = (): SceneDraw =>
+        ({
+          width: W,
+          height: H,
+          out: new Uint8ClampedArray(W * H * 4),
+          depth: new Float32Array(W * H),
+          background: [0, 0, 0, 255],
+          view: viewMatrix([0, 0, 4], [0, 0, 0]),
+          projection: projectionMatrix(Math.PI / 3, W / H, 0.1, 50),
+          lightDirection: [0.3, 0.6, 1],
+          ambient: 0.3,
+          antialias,
+          prepass: true,
+        }) as unknown as SceneDraw;
+      for (let frame = 0; frame < 3; frame += 1) {
+        renderer.render(instances, draw());
+        await until(() => false, 10);
+      }
+      const targets = renderer.prepassTargets!;
+      expect(targets.multisampled).toBe(antialias);
+      const texels = await readHalf(targets.gbuffer, W, H);
+      const at = (x: number, y: number) => Array.from(texels.subarray((y * W + x) * 4, (y * W + x) * 4 + 4));
+      const decode = ([ox, oy]: number[]) => {
+        let n = [ox!, oy!, 1 - Math.abs(ox!) - Math.abs(oy!)];
+        if (n[2]! < 0) n = [(1 - Math.abs(oy!)) * Math.sign(ox!), (1 - Math.abs(ox!)) * Math.sign(oy!), n[2]!];
+        const l = Math.hypot(n[0]!, n[1]!, n[2]!);
+        return n.map((v) => v / l);
+      };
+      // The left quad, under the see-through one: its own normal (+Z, facing the camera), roughness and ID.
+      const l = at(Math.round(W * 0.27), H / 2);
+      expect(decode(l)[2]).toBeCloseTo(1, 2);
+      expect(l[2]).toBeCloseTo(0.6, 2);
+      expect(l[3]).toBe(1);
+      // The right quad, turned 60°: its normal is the turned one, and it's another material.
+      const row = Array.from({ length: W }, (_, x) => x).filter((x) => at(x, H / 2)[3] === 2);
+      expect(row.length).toBeGreaterThan(2);
+      const r = at(row[row.length >> 1]!, H / 2);
+      const n = decode(r);
+      expect(n[0]).toBeCloseTo(Math.sin(Math.PI / 3), 1);
+      expect(n[2]).toBeCloseTo(Math.cos(Math.PI / 3), 1);
+      expect(r[2]).toBeCloseTo(0.25, 2);
+      expect(r[3]).toBe(2);
+      // Nothing opaque drew in the corner.
+      expect(at(1, 1)).toEqual([0, 0, 0, 0]);
+      // The prepass is the frame's first pass.
+      if (device.features.has("timestamp-query")) {
+        await until(() => (renderer.lastFrameStats.passes?.length ?? 0) > 0);
+        expect(renderer.lastFrameStats.passes![0]!.name).toBe("prepass");
+      }
+      renderer.dispose();
+    }
+  });
 });
+
+/** Read an rgba16float texture back as floats. */
+async function readHalf(texture: any, width: number, height: number): Promise<Float32Array> {
+  const bytesPerRow = Math.ceil((width * 8) / 256) * 256;
+  const buffer = device.createBuffer({ size: bytesPerRow * height, usage: 0x01 | 0x08 }); // MAP_READ | COPY_DST
+  const encoder = device.createCommandEncoder();
+  encoder.copyTextureToBuffer({ texture }, { buffer, bytesPerRow, rowsPerImage: height }, { width, height });
+  device.queue.submit([encoder.finish()]);
+  let mapped = false;
+  void buffer.mapAsync(0x01).then(() => (mapped = true));
+  await until(() => mapped);
+  const halves = new Uint16Array(buffer.getMappedRange().slice(0));
+  buffer.unmap();
+  buffer.destroy();
+  const out = new Float32Array(width * height * 4);
+  for (let y = 0; y < height; y += 1) {
+    for (let i = 0; i < width * 4; i += 1) out[y * width * 4 + i] = halfToFloat(halves[(y * bytesPerRow) / 2 + i]!);
+  }
+  return out;
+}
+
+function halfToFloat(h: number): number {
+  const sign = h & 0x8000 ? -1 : 1;
+  const exponent = (h >> 10) & 0x1f;
+  const fraction = h & 0x3ff;
+  if (exponent === 0) return sign * 2 ** -14 * (fraction / 1024);
+  if (exponent === 31) return fraction ? NaN : sign * Infinity;
+  return sign * 2 ** (exponent - 15) * (1 + fraction / 1024);
+}

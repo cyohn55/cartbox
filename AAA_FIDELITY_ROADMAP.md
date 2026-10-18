@@ -187,7 +187,19 @@ Everything else depends on this track. It contains no visible "feature", but its
       - `frame-graph.test.ts` (pure): culling, order, lifetimes and aliasing, usage, declaration errors, the pool and the timestamp arithmetic.
       - On Dawn: an aliased frame encodes correctly, and the scene renderer names and times its passes and makes no new transients on a steady frame.
       - The WebGPU parity suites (MSAA, TAA, reflections, refraction, see-through) are unchanged and pass.
-    - *Next:* F0c-2 adds the depth prepass and the thin G-buffer; F0c-3 adds the velocity buffer.
+  - **F0c-2, the depth prepass and thin G-buffer: done.** With `prepass` on a frame (the `aaa` tier's `prepass` cap, on GPU-presented frames; `/lockout?hdr=1` turns it on), the graph's first pass is `prepass`.
+    - **What it draws.** Every batch the opaque pipeline draws: opaque and cut-out, not refracting. Its depth goes into the frame's depth and its thin G-buffer into an rgba16float the renderer owns:
+      - xy = the octahedral world normal facing the viewer, normal mapped;
+      - z = roughness (the material's, its map's, or its graph's);
+      - w = a material ID, 1 and up per material in the frame, 0 where nothing opaque drew.
+    - **What it drops.** Exactly the pixels `fs` drops (a cut-out, a near-transparent texel including a graph's alpha, Active Camo's screen door), with the same parallax UVs. So its depth is the depth shading would have left.
+    - **The opaque pass after it.** It loads that depth and tests less-or-equal, so each visible pixel is shaded once. The vertex position is `@invariant`, so both passes compute the same depth.
+    - **Anti-aliased frames.** The prepass is multisampled with the frame and resolves its G-buffer.
+    - **For screen-space effects.** `prepassTargets` hands out the depth and the G-buffer for the frame.
+    - *Tests:*
+      - `webgpu-parity.test.ts` now runs its whole real-device suite a second time with the prepass on, and every comparison with the software rasteriser holds unchanged. That covers cut-outs, Active Camo, material graphs, parallax, normal maps, refraction, see-through, soft edges, lights, shadows and probes.
+      - `frame-graph.test.ts` reads the G-buffer back for a plain and an anti-aliased frame: each quad's normal, roughness and ID, nothing in the corner, nothing for a see-through quad, and the prepass running first.
+    - *Next:* F0c-3 adds the velocity buffer.
 - [ ] **F0d. The `aaa` tier.**
   - A console model on the dedicated Modern core (`packages/modern-core`, ENGINE_PARITY EP20b: a Lua 5.4 VM with direct engine calls and no command cap). `MODELS.modern` still points its `engineUrl` at the 360 core, and the tier ends that placeholder.
   - It renders at native device resolution × DPR, with dynamic resolution driven by the GPU frame time, and gives the 2D layer a scaled presentation.

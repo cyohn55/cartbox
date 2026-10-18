@@ -85,6 +85,13 @@ export interface SceneDraw {
    */
   readonly reflections?: boolean;
   /**
+   * A depth prepass (AAA_FIDELITY_ROADMAP.md F0c): the opaque surfaces' depth,
+   * and the thin G-buffer of their normal, roughness and material ID, before
+   * anything is shaded, so the shading pass shades each pixel once and
+   * screen-space effects have the buffers to read. The WebGPU renderer only.
+   */
+  readonly prepass?: boolean;
+  /**
    * Key light direction, or omitted for the rasteriser's default. The world
    * overlay publishes a cart-driven sun here, so it changes per frame.
    */

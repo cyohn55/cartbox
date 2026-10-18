@@ -168,6 +168,12 @@ export interface PlayerOptions {
    */
   linearHdr?: boolean;
   /**
+   * Lay a depth prepass and thin G-buffer before shading (AAA_FIDELITY_ROADMAP.md
+   * F0c), or not. Defaults to the model's `prepass` render cap (the AAA tier);
+   * applies only where the frame is presented from the GPU.
+   */
+  prepass?: boolean;
+  /**
    * Control settings (aim inversion, look sensitivity, controller and keyboard
    * bindings, touch pad size/opacity). Change them live with
    * {@link PlayerHandle.setControlSettings}. Defaults: DEFAULT_CONTROL_SETTINGS.

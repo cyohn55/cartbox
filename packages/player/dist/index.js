@@ -4735,7 +4735,8 @@ var MODERN_RASTER_CAPS = {
 var AAA_RASTER_CAPS = {
   ...MODERN_RASTER_CAPS,
   gpuPresent: true,
-  linearHdr: true
+  linearHdr: true,
+  prepass: true
 };
 var MODELS = {
   classic: {
@@ -12419,6 +12420,7 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
       antialias: job.antialias,
       temporal: this.options.temporal === true && this.quality.temporal === true,
       reflections: this.options.reflections === true && this.quality.reflections === true,
+      ...this.options.prepass === true ? { prepass: true } : {},
       ...lighting ? { ...lit, localShadows: job.local, shadow: job.shadow, fog: lighting.fog ?? null, wind: lighting.wind ?? null } : {},
       time
     };
@@ -14089,7 +14091,7 @@ function writeInstanceUniform(target, index, uniform) {
   target[base + OFFSET_MAPS0] = uniform.hasNormalMap ? 1 : 0;
   target[base + OFFSET_MAPS0 + 1] = mapping?.farTile ?? 0;
   target[base + OFFSET_MAPS0 + 2] = uniform.waterAlong ? 1 : 0;
-  target[base + OFFSET_MAPS0 + 3] = 0;
+  target[base + OFFSET_MAPS0 + 3] = uniform.materialId ?? 0;
 }
 function refractionCamera(view, height) {
   return { right: [view[0], view[4], view[8]], up: [view[1], view[5], view[9]], height };
@@ -17246,6 +17248,7 @@ function timesFromStamps(passes, stamps) {
 }
 
 // src/render/WebgpuSceneRenderer.ts
+var GBUFFER_FORMAT = "rgba16float";
 var FRAME_BYTES = 176;
 var READBACK_BUFFERS2 = 3;
 var SHADER_STAGE_VERTEX = 1;
@@ -17547,7 +17550,8 @@ fn fogBox(mn: vec3<f32>, mx: vec3<f32>, c: vec3<f32>, dir: vec3<f32>) -> vec2<f3
 }
 
 struct VSOut {
-  @builtin(position) pos: vec4<f32>,
+  // Invariant: the depth prepass (F0c) and the passes after it test against the same depths.
+  @builtin(position) @invariant pos: vec4<f32>,
   @location(0) normal: vec3<f32>,
   // Centroid (I1): a multisampled edge pixel samples its textures inside the triangle, not past its edge.
   @location(1) @interpolate(perspective, centroid) uv: vec2<f32>,
@@ -18320,6 +18324,66 @@ ${hdr ? `    // Linear light (F0b): what the reflection adds, and what it sees, 
   let shade = u.light.w + (1.0 - u.light.w) * nl * shadowFactor(in.lightClip, in.worldPos, abs(dot(normalize(in.normal), u.light.xyz)));
   return finishAlpha(toLinear(colour.rgb) * shade, colour.a);
 }
+
+// --- The depth prepass and thin G-buffer (AAA_FIDELITY_ROADMAP.md F0c) ---
+// A unit normal folded onto the octahedron, then the square: two signed numbers.
+fn octEncode(n: vec3<f32>) -> vec2<f32> {
+  let p = n.xy / (abs(n.x) + abs(n.y) + abs(n.z));
+  if (n.z >= 0.0) { return p; }
+  return (vec2<f32>(1.0) - abs(p.yx)) * select(vec2<f32>(-1.0), vec2<f32>(1.0), p >= vec2<f32>(0.0));
+}
+// The prepass draws what the opaque pipeline draws, and drops exactly the
+// pixels fs drops (the cut-out, the near-transparent, Active Camo's screen
+// door), so the depth it leaves is the depth the opaque pass would. It writes
+// the G-buffer: xy = the octahedral world normal facing the viewer (normal
+// mapped), z = roughness, w = the material's ID (0 where nothing drew).
+@fragment
+fn fs_prepass(in: VSOut) -> @location(0) vec4<f32> {
+  let dp1 = dpdx(in.worldPos);
+  let dp2 = dpdy(in.worldPos);
+  let duv1 = dpdx(in.uv);
+  let duv2 = dpdy(in.uv);
+  var puv = in.uv;
+  if (u.pbr.z > 0.5 && u.layer0.w > 0.0) {
+    var pn = normalize(in.normal);
+    if (dot(pn, u.view.xyz) < 0.0) { pn = -pn; }
+    let pg = uvGrads(pn, dp1, dp2, duv1, duv2);
+    let pv = max(${PARALLAX_MIN_NDV2}, dot(pn, u.view.xyz));
+    puv = parallaxUv(in.uv, -vec2<f32>(dot(pg.gu, u.view.xyz), dot(pg.gv, u.view.xyz)) / pv, u.layer0.w);
+  }
+  let uv = vec2<f32>(puv.x, 1.0 - puv.y);
+  var sNrm = in.normal;
+  let tnSample = textureSample(nrmTex, samp, uv).rgb * 2.0 - 1.0;
+  if (u.maps0.x > 0.5) {
+    let det = duv1.x * duv2.y - duv2.x * duv1.y;
+    if (abs(det) > 1e-20) {
+      let Ng = normalize(in.normal);
+      var T = (dp1 * duv2.y - dp2 * duv1.y) / det;
+      T = T - Ng * dot(T, Ng);
+      let tl = length(T);
+      if (tl > 1e-6) {
+        T = T / tl;
+        sNrm = normalize(T * tnSample.x + cross(Ng, T) * tnSample.y + Ng * tnSample.z);
+      }
+    }
+  }
+  var colour = u.base;
+  if (u.texflags.x > 0.5) {
+    var texel = triMap(tex, uv, in.normal, in.objPos);
+    if (u.maps0.y > 0.0) { texel = mix(texel, triMapFar(tex, puv, in.normal, in.objPos), farTileBlend(in.eyeDepth, u.maps0.y)); }
+    colour = colour * texel;
+  }
+  let mr = textureSample(mrTex, samp, uv);
+${g.base}
+  if (colour.a * 255.0 < 1.0) { discard; }
+  if (u.pbr.w > 0.5 && u.pbr.w < 1.5 && colour.a < u.view.w) { discard; }
+  if (u.pbr.z > 0.5 && u.effect0.w > 0.0 && camoThreshold(in.pos.xy, u.effect1.w) < u.effect0.w) { discard; }
+  var n = normalize(sNrm);
+  if (dot(n, u.view.xyz) < 0.0) { n = -n; }
+  var rough = u.pbr.y;
+  if (u.texflags.y > 0.5) { rough = rough * mr.g; }
+${graph ? "  if (gRough >= 0.0) { rough = gRough; }\n" : ""}  return vec4<f32>(octEncode(n), clamp(rough, 0.0, 1.0), u.maps0.w);
+}
 `
   );
   return reflect ? withReflectionTargets(code) : code;
@@ -18403,6 +18467,10 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     this.instanceData = new Float32Array(0);
     /** What the last submitted frame drew (for the profiler and tests); GPU time when the device can time it. */
     this.lastFrameStats = { drawCalls: 0, instances: 0, triangles: 0, gpuMs: null };
+    /** The thin G-buffer (F0c), made on the first frame with a prepass. */
+    this.gbuffer = null;
+    /** What the last frame's prepass left, or null when it had none. */
+    this.prepassed = null;
     /** The reflection pass's uniforms and pipelines (I3), made on first use; its targets are the frame graph's. */
     this.reflections = null;
     this.temporalState = new TemporalState("ndc");
@@ -18539,10 +18607,10 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
       const depthLayoutMs = device.createBindGroupLayout({ entries: depthEntries(true) });
       const layout = device.createPipelineLayout({ bindGroupLayouts: [bindGroupLayout, depthLayout] });
       const layoutMs = device.createPipelineLayout({ bindGroupLayouts: [bindGroupLayout, depthLayoutMs] });
-      const pipelinesFor = (code, samples = 1, reflect = false) => {
+      const pipelinesFor = (code, samples = 1, reflect = false, prepass = false) => {
         const multisampled = samples > 1;
         const module = device.createShaderModule({ code: multisampled ? multisampledDepthShader(code) : code });
-        const pipelineFor = (blend, depthWrite) => device.createRenderPipeline({
+        const pipelineFor = (blend, depthWrite, depthCompare = "less", gbuffer = false) => device.createRenderPipeline({
           layout: multisampled ? layoutMs : layout,
           ...multisampled ? { multisample: { count: samples } } : {},
           vertex: {
@@ -18565,12 +18633,13 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
           },
           fragment: {
             module,
-            entryPoint: "fs",
+            entryPoint: gbuffer ? "fs_prepass" : "fs",
             // rgba8unorm, never rgba8unorm-srgb: the framebuffer these bytes land
             // in is the same 8-bit buffer the CPU path writes, so any gamma
             // conversion here would show up as the GPU path looking washed out.
             // A frame with reflections (I3) writes the two reflection targets too, blended as the colour is.
-            targets: [
+            // The depth prepass (F0c) writes only the G-buffer.
+            targets: gbuffer ? [{ format: GBUFFER_FORMAT }] : [
               blend ? { format: colourFormat, blend } : { format: colourFormat },
               ...reflect ? [0, 1].map(() => blend ? { format: "rgba16float", blend } : { format: "rgba16float" }) : []
             ]
@@ -18578,10 +18647,12 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
           // cullMode "none" matches the software rasteriser, which draws both
           // faces (its Lambert is two-sided for exactly this reason).
           primitive: { topology: "triangle-list", cullMode: "none" },
-          depthStencil: { format: "depth24plus", depthWriteEnabled: depthWrite, depthCompare: "less" }
+          depthStencil: { format: "depth24plus", depthWriteEnabled: depthWrite, depthCompare }
         });
         return {
-          opaque: pipelineFor(null, true),
+          // After a prepass the opaque surfaces meet their own depths again: less-or-equal lets them through.
+          opaque: pipelineFor(null, true, prepass ? "less-equal" : "less"),
+          ...prepass ? { prepass: pipelineFor(null, true, "less", true) } : {},
           blend: pipelineFor({ color: { srcFactor: "one", dstFactor: "one-minus-src-alpha", operation: "add" }, alpha: { srcFactor: "one", dstFactor: "one-minus-src-alpha", operation: "add" } }, false),
           add: pipelineFor({ color: { srcFactor: "one", dstFactor: "one", operation: "add" }, alpha: { srcFactor: "zero", dstFactor: "one", operation: "add" } }, false)
         };
@@ -18846,6 +18917,7 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     const viewProj = multiplyMat46(temporal ? temporal.projection : draw.projection, draw.view);
     const { batches: draws, instanceCount } = batchInstances(instances, (mesh) => this.uploadMesh(mesh), cameraPositionFromView3(draw.view));
     if (draws.length === 0) {
+      this.prepassed = null;
       if (!readback) this.clearColour();
       return;
     }
@@ -18905,6 +18977,12 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     this.uploadLights(packLights(ordered));
     const lightCount = ordered.length;
     const camera = refractionCamera(draw.view, this.height);
+    const materialIds = /* @__PURE__ */ new Map();
+    const materialId = (material) => {
+      let id = materialIds.get(material);
+      if (id === void 0) materialIds.set(material, id = materialIds.size + 1);
+      return id;
+    };
     let next = 0;
     draws.forEach((entry, index) => {
       entry.first = next;
@@ -18960,7 +19038,8 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
         waterAlong: waterAlong2(entry.primitive.material),
         mapping: resolveMapping(entry.primitive.material),
         hasNormalMap: entry.textures.normal !== null,
-        wind: entry.primitive.sway ? windUniform2(draw.wind, draw.time ?? 0) : null
+        wind: entry.primitive.sway ? windUniform2(draw.wind, draw.time ?? 0) : null,
+        materialId: materialId(entry.primitive.material)
       });
     });
     this.device.queue.writeBuffer(this.uniformBuffer, 0, this.uniformData, 0, draws.length * UNIFORM_FLOATS);
@@ -18980,13 +19059,31 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     const seeThrough = firstSeeThrough >= 0;
     const msaa = draw.antialias === true ? this.ensureMsaa() : null;
     const reflections = draw.reflections === true ? this.ensureReflections() : null;
+    const prepass = draw.prepass === true;
     const drawRange = (pass, from, to, depthGroup) => {
       pass.setBindGroup(1, depthGroup);
       let bound = null;
       for (let index = from; index < to; index += 1) {
         const entry = draws[index];
-        const set = this.pipelinesOf(entry.primitive.material, msaa ? MSAA_SAMPLES : 1, reflections !== null);
+        const set = this.pipelinesOf(entry.primitive.material, msaa ? MSAA_SAMPLES : 1, reflections !== null, prepass);
         const wanted = entry.refract ? set.blend : entry.alpha === 3 ? set.add : entry.alpha === 2 ? set.blend : set.opaque;
+        if (wanted !== bound) {
+          pass.setPipeline(wanted);
+          bound = wanted;
+        }
+        pass.setBindGroup(0, this.bindGroupFor(entry.primitive, entry.textures), [index * UNIFORM_STRIDE]);
+        pass.setVertexBuffer(0, entry.geometry.vertexBuffer);
+        pass.setIndexBuffer(entry.geometry.indexBuffer, "uint32");
+        pass.drawIndexed(entry.geometry.indexCount, entry.models.length, 0, 0, entry.first);
+      }
+    };
+    const prepassRange = (pass) => {
+      pass.setBindGroup(1, (msaa ? msaa.groups : this.depthGroups).blank);
+      let bound = null;
+      for (let index = 0; index < draws.length; index += 1) {
+        const entry = draws[index];
+        if (entry.refract || entry.alpha >= 2) continue;
+        const wanted = this.pipelinesOf(entry.primitive.material, msaa ? MSAA_SAMPLES : 1, reflections !== null, true).prepass;
         if (wanted !== bound) {
           pass.setPipeline(wanted);
           bound = wanted;
@@ -19009,6 +19106,32 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     const target = msColour ?? colour;
     const rayTargets = msaa ? raysMs : rays;
     const opaqueEnd = seeThrough ? firstSeeThrough : draws.length;
+    const gbuffer = prepass ? graph.importTexture("gbuffer", this.ensureGbuffer()) : null;
+    const gbufferMs = gbuffer && msaa ? graph.createTexture("gbuffer.msaa", { format: GBUFFER_FORMAT, ...size, sampleCount: MSAA_SAMPLES }) : null;
+    if (gbuffer) {
+      graph.addPass("prepass", "render", (pass) => {
+        pass.write(depth);
+        pass.write(gbufferMs ?? gbuffer);
+        if (gbufferMs) pass.write(gbuffer);
+        return (ctx) => {
+          const encoded = ctx.encoder.beginRenderPass({
+            colorAttachments: [
+              {
+                view: ctx.texture(gbufferMs ?? gbuffer).createView(),
+                clearValue: { r: 0, g: 0, b: 0, a: 0 },
+                loadOp: "clear",
+                ...gbufferMs ? { resolveTarget: ctx.texture(gbuffer).createView(), storeOp: "discard" } : { storeOp: "store" }
+              }
+            ],
+            depthStencilAttachment: { view: ctx.texture(depth).createView(), depthClearValue: 1, depthLoadOp: "clear", depthStoreOp: "store" },
+            ...ctx.timing
+          });
+          prepassRange(encoded);
+          encoded.end();
+        };
+      });
+    }
+    this.prepassed = prepass ? { depth: msaa ? msaa.depth : this.depthTexture, gbuffer: this.gbuffer, multisampled: msaa !== null } : null;
     const scenePass = (name, from, to, load, last) => graph.addPass(name, "render", (pass) => {
       const resolving = msaa !== null && last;
       const resolveBehind = msaa !== null && behind !== null && !load;
@@ -19018,8 +19141,8 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
       }
       if (resolving) for (const t of [colour, ...rays]) pass.write(t);
       if (resolveBehind) pass.write(behind);
-      if (load) pass.read(depth, "attachment");
-      else pass.write(depth);
+      if (load || prepass) pass.read(depth, "attachment");
+      if (!load) pass.write(depth);
       return (ctx) => {
         const attachment = (t, resolved) => ({
           view: ctx.texture(t).createView(),
@@ -19033,7 +19156,7 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
             { ...attachment(target, resolving ? colour : null), ...resolveBehind ? { resolveTarget: ctx.texture(behind).createView() } : {} },
             ...rayTargets.map((t, k) => attachment(t, resolving ? rays[k] : null))
           ],
-          depthStencilAttachment: load ? { view: ctx.texture(depth).createView(), depthReadOnly: true } : { view: ctx.texture(depth).createView(), depthClearValue: 1, depthLoadOp: "clear", depthStoreOp: "store" },
+          depthStencilAttachment: load ? { view: ctx.texture(depth).createView(), depthReadOnly: true } : prepass ? { view: ctx.texture(depth).createView(), depthLoadOp: "load", depthStoreOp: "store" } : { view: ctx.texture(depth).createView(), depthClearValue: 1, depthLoadOp: "clear", depthStoreOp: "store" },
           ...ctx.timing
         });
         drawRange(encoded, from, to, load ? groups.scene : groups.blank);
@@ -19084,6 +19207,21 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     });
     pass.end();
     this.device.queue.submit([encoder.finish()]);
+  }
+  ensureGbuffer() {
+    this.gbuffer ?? (this.gbuffer = this.device.createTexture({ size: { width: this.width, height: this.height }, format: GBUFFER_FORMAT, usage: 16 | 4 | 1 }));
+    return this.gbuffer;
+  }
+  /**
+   * The last frame's depth prepass (AAA_FIDELITY_ROADMAP.md F0c), for
+   * screen-space effects: its depth (multisampled in an anti-aliased frame)
+   * and the thin G-buffer, an rgba16float of xy = octahedral world normal
+   * facing the viewer, z = roughness and w = material ID (0 where nothing
+   * opaque drew). Null when the frame had no prepass. Both hold until the next
+   * frame.
+   */
+  get prepassTargets() {
+    return this.prepassed;
   }
   ensureReflections() {
     this.reflections ?? (this.reflections = {
@@ -19215,13 +19353,13 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
    * variant; multisampled for an anti-aliased frame (I1); writing the
    * reflection targets for a frame with reflections (I3). Built on first use.
    */
-  pipelinesOf(material, samples = 1, reflect = false) {
+  pipelinesOf(material, samples = 1, reflect = false, prepass = false) {
     const graph = compiledGraphOf2(material);
-    if (!graph && samples === 1 && !reflect) return this.pipeline;
-    const key = `${graph?.key ?? ""}|${samples}|${reflect ? 1 : 0}`;
+    if (!graph && samples === 1 && !reflect && !prepass) return this.pipeline;
+    const key = `${graph?.key ?? ""}|${samples}|${reflect ? 1 : 0}|${prepass ? 1 : 0}`;
     let set = this.variants.get(key);
     if (!set) {
-      set = this.pipelinesFor(sceneShader(graph, reflect, this.hdr), samples, reflect);
+      set = this.pipelinesFor(sceneShader(graph, reflect, this.hdr), samples, reflect, prepass);
       this.variants.set(key, set);
     }
     return set;
@@ -19453,6 +19591,7 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
       destroySafely(this.msaa.blank);
     }
     if (this.reflections) destroySafely(this.reflections.uniforms);
+    destroySafely(this.gbuffer);
     this.transients.destroy();
     if (this.taa) {
       destroySafely(this.taa.history[0]);
@@ -21154,6 +21293,7 @@ var Player = class {
               antialias: this.model.renderCaps.antialias === true,
               temporal: this.model.renderCaps.temporal === true,
               reflections: this.model.renderCaps.reflections === true,
+              prepass: this.options.prepass ?? this.model.renderCaps.prepass === true,
               // A held weapon draws on the GPU too, when the scene does.
               ...this.sceneRenderer && this.sceneRenderer.backend !== "software" ? { createFrontRenderer: makeRenderer } : {},
               ...gpuCanvas ? { presenter: gpuCanvas } : {}

@@ -159,6 +159,8 @@ export interface MeshOverlayOptions {
   readonly temporal?: boolean;
   /** The model's screen-space reflections cap (`reflections`, I3), likewise gated by the quality. Off by default. */
   readonly reflections?: boolean;
+  /** The model's depth-prepass cap (`prepass`, F0c): a GPU-presented scene lays its depth and thin G-buffer first. Off by default. */
+  readonly prepass?: boolean;
   /**
    * Makes a GPU renderer of its own for the front layer (a held weapon and the
    * arms holding it), where the scene draws on the GPU. Called the first time
@@ -1227,6 +1229,7 @@ export class MeshOverlaySurface implements DisplaySurface {
       antialias: job.antialias,
       temporal: this.options.temporal === true && this.quality.temporal === true,
       reflections: this.options.reflections === true && this.quality.reflections === true,
+      ...(this.options.prepass === true ? { prepass: true } : {}),
       ...(lighting ? { ...lit, localShadows: job.local, shadow: job.shadow, fog: lighting.fog ?? null, wind: lighting.wind ?? null } : {}),
       time,
     };

@@ -614,6 +614,7 @@ export class Player {
               antialias: this.model.renderCaps.antialias === true,
               temporal: this.model.renderCaps.temporal === true,
               reflections: this.model.renderCaps.reflections === true,
+              prepass: this.options.prepass ?? this.model.renderCaps.prepass === true,
               // A held weapon draws on the GPU too, when the scene does.
               ...(this.sceneRenderer && this.sceneRenderer.backend !== "software"
                 ? { createFrontRenderer: makeRenderer }
