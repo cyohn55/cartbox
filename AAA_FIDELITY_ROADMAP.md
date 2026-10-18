@@ -416,6 +416,24 @@ Everything else depends on this track. It contains no visible "feature", but its
   - Grading in log or ACEScct space, and LUTs applied in the right space.
   - **HDR display output** where the browser supports it (WebGPU canvas `toneMapping: "extended"`).
   - Bloom from the HDR buffer (an energy-conserving mip-chain bloom, with lens dirt), replacing the threshold on the clipped LDR read-back.
+  - **F4d-1, tone mappers and HDR bloom: done.**
+    - **The curve is the scene's** (`SceneLighting.tonemapper`, `ToneMap.operator`, the Lighting tab). The AAA tier's presenter maps its linear frame through it (`render/toneMappers.ts`, WGSL and TypeScript term for term):
+      - **filmic**, Narkowicz's per-channel ACES fit: every tier's since F0b, still the default, so no scene changes;
+      - **ACES**, Hill's fit of the RRT and ODT through AP1;
+      - **AgX**, Wrensch's fit, so a saturated light goes to white without the hue skew;
+      - **Neutral**, Khronos PBR Neutral, which leaves colours under 0.76 as authored.
+      - Every other tier keeps filmic. Auto-exposure and post-volume exposure keep the choice.
+    - **Bloom from the HDR frame** (`render/hdrBloom.ts`). With the post stack's bloom on, a linear frame is composited in light into a half-float target before its tone map and blurred down a mip chain and back up (Jimenez):
+      - 13-tap downsamples, the first with Karis's average so a lone sparkle can't flicker the glow; 3×3 tents added back up; three to six levels by the bloom's radius.
+      - Nothing is thresholded. The glow, over the levels it summed, is mixed in by the strength (a sixth per unit), so light is moved into it rather than added: a light of 60 glows and one of 1.2 hardly does.
+      - The post stack's own thresholded bloom stands down on that path.
+    - *Tests (`tone-mappers.test.ts`):*
+      - filmic matches the existing curve exactly; every curve maps any light into 0..1, rising with it;
+      - Neutral keeps a base colour under its knee; AgX and ACES take a saturated red toward white where filmic keeps it red;
+      - the choice survives storage and reaches the tone map.
+      - On Dawn: the presenter's output through each curve matches the TypeScript within 2/255; a light of 60 glows eight texels out where one of 1.2 barely does; the chain over its levels keeps the frame's mean light (within 1%).
+      - In Chromium, Beaver Creek on `aaa` blooms from the HDR frame, with no errors.
+    - *Left for F4d:* lens dirt; grading and LUTs in log space; HDR display output (F4d-2).
 - [ ] **F4e. Post on the GPU frame graph.** (Partly ahead of time: F0a ported the stack to WGSL for GPU-presented frames; what remains is running it on the HDR frame graph of F0b/F0c.) The WebGL1 single-pass post stack (`PostFxPass.ts`) becomes frame-graph passes at full precision. Every existing effect (CRT, dither, grain, aberration, flare and the rest) is kept, so the fantasy-tier looks still work on `aaa`.
 
 ### F5. Atmosphere, weather and water

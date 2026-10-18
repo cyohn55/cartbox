@@ -4023,6 +4023,27 @@ declare function rasterStyleFor(caps: RenderCaps): RasterStyle;
 declare function webgpuCanHonour(style: RasterStyle): boolean;
 
 /**
+ * The AAA tier's tone mappers (AAA_FIDELITY_ROADMAP.md F4d): the curve that
+ * takes the linear HDR frame, exposed, into the display's 0..1, chosen per
+ * scene (`SceneLighting.tonemapper`). Each is here twice, as WGSL for the
+ * presenter and as TypeScript for the tests, term for term.
+ *
+ * - **filmic**: Narkowicz's fit of the ACES curve, per channel: what every
+ *   tier has used since F0b, and still the default, so a scene looks as it did.
+ * - **aces**: Hill's fit of the ACES RRT and ODT, through the AP1 working
+ *   space: the reference ACES look, desaturating highlights toward white.
+ * - **agx**: Sobotka's AgX (Wrensch's minimal fit), which compresses in a
+ *   log space rotated off the primaries, so a saturated light goes to white
+ *   without the hue skew per-channel curves give it.
+ * - **neutral**: Khronos PBR Neutral, which leaves colours under 0.76 as
+ *   they are (so a material's base colour shows as authored) and rolls off
+ *   above it.
+ */
+/** The curves, in the order the presenter's uniform names them. */
+declare const TONE_MAPPERS: readonly ["filmic", "aces", "agx", "neutral"];
+type ToneMapper = (typeof TONE_MAPPERS)[number];
+
+/**
  * Presenting a 3D frame from the GPU (AAA_FIDELITY_ROADMAP.md F0a).
  *
  * The byte path renders the scene on the GPU, reads it back, then does the rest
@@ -4114,6 +4135,7 @@ interface PresentFrame {
      */
     readonly tonemap?: {
         readonly exposure: number;
+        readonly operator?: ToneMapper;
     } | null;
     /** The post-process stack to finish the frame through (its uniforms, and the clock grain runs on), or null for none. */
     readonly post?: {
@@ -4164,7 +4186,7 @@ declare function packShaftUniforms(sun: {
     readonly y: number;
 }, shafts: SunShafts, color: Rgb$1, width: number, height: number, out?: Float32Array<ArrayBuffer>, hdr?: boolean): Float32Array;
 /** Floats in the compose pass's uniform block. */
-declare const COMPOSE_UNIFORM_FLOATS = 24;
+declare const COMPOSE_UNIFORM_FLOATS = 28;
 /** The compose pass's uniforms: which layers are present, the HUD key, the flat base, and the shafts' colour and sampling scale. */
 declare function packComposeUniforms(frame: PresentFrame, width: number, height: number, out?: Float32Array<ArrayBuffer>, hdr?: boolean): Float32Array;
 /** The measure pass's uniforms: frame size, luminance grid step, base kind; the flat base; the sun (pixels), tap radius and whether to tap it. */
@@ -4188,6 +4210,9 @@ declare class GpuPresenter {
     /** The composite, when a post stack reads it before the target. */
     private composed;
     private postFx;
+    /** The linear composite and its bloom chain (F4d), made when a linear frame first blooms. */
+    private linearTarget;
+    private bloom;
     private shaftTargets;
     private readonly uploads;
     private panorama;
@@ -4204,6 +4229,11 @@ declare class GpuPresenter {
     get stats(): PresentStats;
     /** Composite `frame` into `target` (a texture of `format`, `width × height`) and submit. */
     present(frame: PresentFrame, target: any, format: string): void;
+    /**
+     * The HDR bloom (F4d): the layers composited in linear light into their own
+     * target, then blurred down and up the mip chain (hdrBloom.ts).
+     */
+    private bloomOver;
     /** Release every resource this presenter made. */
     dispose(): void;
     private readMeasurements;

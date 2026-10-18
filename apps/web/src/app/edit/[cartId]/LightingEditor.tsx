@@ -60,6 +60,7 @@ import {
   type SceneFog,
   type SceneLight,
   type SceneLighting,
+  type ToneMapOperator,
 } from "@cartbox/editor";
 
 import { TINT_PALETTE } from "@cartbox/player";
@@ -73,6 +74,13 @@ interface LightingEditorProps {
 }
 
 type Rgb = readonly [number, number, number];
+
+/** What each tone-mapping curve (F4d) does, for the hint under the choice. */
+const TONEMAPPER_HINTS: Record<Exclude<ToneMapOperator, "filmic">, string> = {
+  aces: "ACES: the reference film look, highlights desaturating toward white.",
+  agx: "AgX: saturated lights go to white without skewing their hue.",
+  neutral: "Neutral: colours under about 0.76 show as authored; only highlights roll off.",
+};
 
 /** A 0..1 RGB triple as `#rrggbb`. */
 function toHex(rgb: Rgb): string {
@@ -221,13 +229,25 @@ export function LightingEditor({ lighting, onChange }: LightingEditorProps) {
       <SegmentedControl
         label="Tone mapping"
         ariaLabel="Tone mapping"
-        selected={lighting.tonemap ? "on" : "off"}
-        onSelect={(id) => onChange(patchSceneLighting(lighting, { tonemap: id === "on" }))}
+        selected={lighting.tonemap ? (lighting.tonemapper ?? "filmic") : "off"}
+        onSelect={(id) =>
+          onChange(
+            id === "off"
+              ? patchSceneLighting(lighting, { tonemap: false })
+              : patchSceneLighting(lighting, { tonemap: true, tonemapper: id === "filmic" ? undefined : (id as ToneMapOperator) }),
+          )
+        }
         options={[
           { id: "off", label: "Off" },
-          { id: "on", label: "ACES" },
+          { id: "filmic", label: "Filmic" },
+          { id: "aces", label: "ACES" },
+          { id: "agx", label: "AgX" },
+          { id: "neutral", label: "Neutral" },
         ]}
       />
+      {lighting.tonemap && lighting.tonemapper && lighting.tonemapper !== "filmic" && (
+        <RailHint>{TONEMAPPER_HINTS[lighting.tonemapper]} The AAA tier maps through it; every other tier keeps Filmic.</RailHint>
+      )}
       {lighting.tonemap &&
         (physical ? (
           <RangeControl

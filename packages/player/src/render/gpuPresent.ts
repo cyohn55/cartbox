@@ -35,6 +35,8 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
 import { GpuPostFx } from "../fx/gpuPostFx.js";
+import { HdrBloom } from "./hdrBloom.js";
+import { TONE_MAPPERS_WGSL, toneMapperIndex, type ToneMapper } from "./toneMappers.js";
 import type { PostFxUniforms } from "../fx/postfx.js";
 import { CLOUD_TILE, MAX_CLOUD_LAYERS, type BakedCloudLayer, type DecodedTexture, type Mat4, type SkySun, type SunShafts } from "@cartbox/editor";
 
@@ -89,7 +91,7 @@ export interface PresentFrame {
    * for ACES over the whole frame, or null to encode it unmapped (clamped). A
    * byte-space frame is tone-mapped as it is shaded, and ignores this.
    */
-  readonly tonemap?: { readonly exposure: number } | null;
+  readonly tonemap?: { readonly exposure: number; readonly operator?: ToneMapper } | null;
   /** The post-process stack to finish the frame through (its uniforms, and the clock grain runs on), or null for none. */
   readonly post?: { readonly uniforms: PostFxUniforms; readonly time: number } | null;
   /** What to measure this frame: eye-adaptation luminance, and/or the sun's visibility at a point (pixels). */
@@ -106,6 +108,14 @@ export interface PresentStats {
   readonly sunVisible: number | null;
   readonly seq: number;
 }
+
+/**
+ * The HDR bloom's mix per unit of the post stack's bloom strength (F4d). That
+ * strength scales a glow added over an 8-bit threshold; here it is the share
+ * of each pixel's light moved into the glow, so a full strength (1) moves a
+ * sixth of it and a typical 0.3 about 5%.
+ */
+export const BLOOM_MIX = 1 / 6;
 
 /** Frame luminance's fallback when nothing was measured (`frameLuminance`'s). */
 const AUTO_KEY_FALLBACK = 0.18;
@@ -192,7 +202,7 @@ export function packShaftUniforms(
 const BASE_KIND = { colour: 0, sky: 1, frame: 2 } as const;
 
 /** Floats in the compose pass's uniform block. */
-export const COMPOSE_UNIFORM_FLOATS = 24;
+export const COMPOSE_UNIFORM_FLOATS = 28;
 
 /** The compose pass's uniforms: which layers are present, the HUD key, the flat base, and the shafts' colour and sampling scale. */
 export function packComposeUniforms(
@@ -210,7 +220,9 @@ export function packComposeUniforms(
   out.set([bg[0]! / 255, bg[1]! / 255, bg[2]! / 255, bg[3]! / 255], 8);
   out.set(shafts ? [shafts.color[0], shafts.color[1], shafts.color[2], 0] : [0, 0, 0, 0], 12);
   out.set([1 / (grid.step * grid.width), 1 / (grid.step * grid.height), 0, 0], 16);
-  out.set([hdr ? 1 : 0, hdr && frame.tonemap ? 1 : 0, frame.tonemap?.exposure ?? 1, 0], 20);
+  out.set([hdr ? 1 : 0, hdr && frame.tonemap ? 1 : 0, frame.tonemap?.exposure ?? 1, toneMapperIndex(frame.tonemap?.operator)], 20);
+  // The pass (0 the whole compose, 1 its linear part, 2 the finish: bloom, tone map, HUD), set by the presenter.
+  out.set([0, 0, 0, 0], 24);
   return out;
 }
 
@@ -398,7 +410,8 @@ struct Compose {
   background: vec4f,
   shaftColor: vec4f,
   shaftScale: vec4f,
-  hdr: vec4f,
+  hdr: vec4f,   // x = linear frame, y = tone-mapped, z = exposure, w = the curve (toneMappers.ts)
+  grade: vec4f, // F4d: x = pass (0 all, 1 the linear composite, 2 the finish), y = bloom strength, z = 1 / levels summed
 };
 @group(0) @binding(0) var<uniform> u: Compose;
 @group(0) @binding(1) var baseTex: texture_2d<f32>;
@@ -410,6 +423,7 @@ struct Compose {
 @group(0) @binding(7) var holo: texture_2d<f32>;
 ${FULLSCREEN_VS}
 ${SRGB_WGSL}
+${TONE_MAPPERS_WGSL}
 fn over(top: vec4f, under: vec4f) -> vec4f {
   return vec4f(top.rgb + under.rgb * (1.0 - top.a), top.a + under.a * (1.0 - top.a));
 }
@@ -418,9 +432,8 @@ fn keep(c: vec4f) -> vec4f {
   if (u.hdr.x > 0.5) { return max(c, vec4f(0.0)); }
   return clamp(c, vec4f(0.0), vec4f(1.0));
 }
-@fragment fn compose(@builtin(position) pos: vec4f) -> @location(0) vec4f {
-  let p = vec2i(floor(pos.xy));
-  let hdr = u.hdr.x > 0.5;
+// The layers in light: the base, the scene over it, the shafts added, the held weapon over all.
+fn composite(pos: vec4f, p: vec2i, hdr: bool) -> vec4f {
   var c = u.background;
   if (u.layers.x > 0.5) { c = textureLoad(baseTex, p, 0); }
   // A linear frame decodes a base that was authored in display space (the sky is linear already).
@@ -438,11 +451,28 @@ fn keep(c: vec4f) -> vec4f {
     else { c = vec4f(min(vec3f(1.0), c.rgb + u.shaftColor.rgb * v), c.a); }
   }
   if (u.layers.w > 0.5) { c = keep(over(textureLoad(front, p, 0), c)); }
-  // The linear frame is tone-mapped once, whole, and encoded for the display;
-  // the HUD and holo UI are drawn in display space over it.
+  return c;
+}
+@fragment fn compose(@builtin(position) pos: vec4f) -> @location(0) vec4f {
+  let p = vec2i(floor(pos.xy));
+  let hdr = u.hdr.x > 0.5;
+  var c: vec4f;
+  if (u.grade.x > 1.5) {
+    // The finish (F4d): the linear composite (binding 1), its bloom (binding 3, half
+    // resolution, summed over its levels) mixed in by the strength: light moved, not added.
+    c = textureLoad(baseTex, p, 0);
+    let glow = textureSampleLevel(light, lightSampler, pos.xy / vec2f(textureDimensions(baseTex)), 0.0).rgb * u.grade.z;
+    c = vec4f(mix(c.rgb, glow, u.grade.y), c.a);
+  } else {
+    c = composite(pos, p, hdr);
+    // The linear composite alone, for the bloom to blur (F4d).
+    if (u.grade.x > 0.5) { return c; }
+  }
+  // The linear frame is tone-mapped once, whole, through the scene's curve (F4d),
+  // and encoded for the display; the HUD and holo UI are drawn in display space over it.
   if (hdr) {
     var mapped = clamp(c.rgb, vec3f(0.0), vec3f(1.0));
-    if (u.hdr.y > 0.5) { mapped = acesFilmic(c.rgb * u.hdr.z); }
+    if (u.hdr.y > 0.5) { mapped = toneMapWith(u.hdr.w, c.rgb * u.hdr.z); }
     c = vec4f(toSrgb(mapped), clamp(c.a, 0.0, 1.0));
   }
   if (u.layers2.x > 0.5) {
@@ -569,7 +599,7 @@ export class GpuPresenter {
   private readonly linear: { clamp: any; wrapU: any; repeat: any };
   private readonly layouts: { sky: any; mask: any; gather: any; compose: any; measure: any };
   private readonly pipelines = new Map<string, any>();
-  private readonly uniforms: { sky: any; shaft: any; compose: any; measure: any };
+  private readonly uniforms: { sky: any; shaft: any; compose: any; finish: any; measure: any };
   private readonly data = {
     sky: new Float32Array(SKY_UNIFORM_FLOATS),
     shaft: new Float32Array(SHAFT_UNIFORM_FLOATS),
@@ -580,6 +610,9 @@ export class GpuPresenter {
   /** The composite, when a post stack reads it before the target. */
   private composed: any = null;
   private postFx: GpuPostFx | null = null;
+  /** The linear composite and its bloom chain (F4d), made when a linear frame first blooms. */
+  private linearTarget: any = null;
+  private bloom: HdrBloom | null = null;
   private shaftTargets: { mask: any; light: any } | null = null;
   private readonly uploads = new Map<string, Uploaded>();
   private panorama: { source: DecodedTexture; texture: any } | null = null;
@@ -614,7 +647,7 @@ export class GpuPresenter {
       measure: layout([uni(STAGE_COMPUTE), tex(1, STAGE_COMPUTE), tex(2, STAGE_COMPUTE), { binding: 3, visibility: STAGE_COMPUTE, buffer: { type: "storage" } }]),
     };
     const ubuf = (floats: number) => device.createBuffer({ size: floats * 4, usage: USAGE.uniform | USAGE.bufferCopyDst });
-    this.uniforms = { sky: ubuf(SKY_UNIFORM_FLOATS), shaft: ubuf(SHAFT_UNIFORM_FLOATS), compose: ubuf(COMPOSE_UNIFORM_FLOATS), measure: ubuf(MEASURE_UNIFORM_FLOATS) };
+    this.uniforms = { sky: ubuf(SKY_UNIFORM_FLOATS), shaft: ubuf(SHAFT_UNIFORM_FLOATS), compose: ubuf(COMPOSE_UNIFORM_FLOATS), finish: ubuf(COMPOSE_UNIFORM_FLOATS), measure: ubuf(MEASURE_UNIFORM_FLOATS) };
     this.measured = {
       result: device.createBuffer({ size: 16, usage: USAGE.bufferStorage | USAGE.bufferCopySrc }),
       staging: device.createBuffer({ size: 16, usage: USAGE.mapRead | USAGE.bufferCopyDst }),
@@ -667,19 +700,33 @@ export class GpuPresenter {
       light = this.shaftTargets.light;
     }
     // 3. Everything over everything: into the target, or for the post stack to read.
-    const post = frame.post ?? null;
+    // A linear frame with bloom on (F4d) blooms here, from its HDR composite, and
+    // the post stack's own (thresholded, after the tone map) stands down.
+    const bloomStrength = this.hdr && frame.post ? frame.post.uniforms.bloomStrength : 0;
+    const post = frame.post ? (bloomStrength > 0 ? { ...frame.post, uniforms: { ...frame.post.uniforms, bloomStrength: 0 } } : frame.post) : null;
     if (post) this.composed ??= this.target("rgba8unorm", this.width, this.height);
-    device.queue.writeBuffer(this.uniforms.compose, 0, packComposeUniforms(frame, this.width, this.height, this.data.compose, this.hdr));
-    this.fullScreen(encoder, "compose", post ? "rgba8unorm" : format, COMPOSE_WGSL, post ? this.composed : target, [
-      { binding: 0, resource: { buffer: this.uniforms.compose } },
-      { binding: 1, resource: base.createView() },
+    const out = post ? this.composed : target;
+    const outFormat = post ? "rgba8unorm" : format;
+    const compose = packComposeUniforms(frame, this.width, this.height, this.data.compose, this.hdr);
+    const layers = (uniforms: any, baseView: any, lightView: any) => [
+      { binding: 0, resource: { buffer: uniforms } },
+      { binding: 1, resource: baseView },
       { binding: 2, resource: scene.createView() },
-      { binding: 3, resource: light.createView() },
+      { binding: 3, resource: lightView },
       { binding: 4, resource: this.linear.clamp },
       { binding: 5, resource: (frame.front ?? this.blank).createView() },
       { binding: 6, resource: (frame.hud ? this.upload("hud", frame.hud) : this.blank).createView() },
       { binding: 7, resource: (frame.holo ? this.upload("holo", frame.holo) : this.blank).createView() },
-    ]);
+    ];
+    const glow = bloomStrength > 0 ? this.bloomOver(encoder, compose, layers(this.uniforms.compose, base.createView(), light.createView()), frame.post!.uniforms.bloomRadius) : null;
+    if (glow) {
+      compose.set([2, Math.min(1, bloomStrength * BLOOM_MIX), 1 / glow.count, 0], 24);
+      device.queue.writeBuffer(this.uniforms.finish, 0, compose);
+      this.fullScreen(encoder, "compose", outFormat, COMPOSE_WGSL, out, layers(this.uniforms.finish, this.linearTarget.createView(), glow.texture.createView()));
+    } else {
+      device.queue.writeBuffer(this.uniforms.compose, 0, compose);
+      this.fullScreen(encoder, "compose", outFormat, COMPOSE_WGSL, out, layers(this.uniforms.compose, base.createView(), light.createView()));
+    }
     // 4. The post stack, from the composite into the target.
     if (post) {
       this.postFx ??= new GpuPostFx(device, this.width, this.height);
@@ -712,6 +759,19 @@ export class GpuPresenter {
     if (measure) void this.readMeasurements(measure.luminance, measure.sun !== null);
   }
 
+  /**
+   * The HDR bloom (F4d): the layers composited in linear light into their own
+   * target, then blurred down and up the mip chain (hdrBloom.ts).
+   */
+  private bloomOver(encoder: any, compose: Float32Array, entries: object[], radius: number): { texture: any; count: number } | null {
+    this.linearTarget ??= this.target("rgba16float", this.width, this.height);
+    compose.set([1, 0, 0, 0], 24);
+    this.device.queue.writeBuffer(this.uniforms.compose, 0, compose);
+    this.fullScreen(encoder, "compose", "rgba16float", COMPOSE_WGSL, this.linearTarget, entries);
+    this.bloom ??= new HdrBloom(this.device);
+    return this.bloom.encode(encoder, this.linearTarget, this.width, this.height, radius);
+  }
+
   /** Release every resource this presenter made. */
   dispose(): void {
     this.destroyed = true;
@@ -719,6 +779,8 @@ export class GpuPresenter {
     destroy(this.blank);
     destroy(this.skyTarget);
     destroy(this.composed);
+    destroy(this.linearTarget);
+    this.bloom?.dispose();
     this.postFx?.dispose();
     destroy(this.shaftTargets?.mask);
     destroy(this.shaftTargets?.light);

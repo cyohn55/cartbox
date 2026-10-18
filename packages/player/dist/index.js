@@ -12529,7 +12529,7 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
   frameTonemap(lighting, post) {
     const base = sceneLightingTonemap(lighting);
     const stops = post.exposure + this.adapted;
-    return base && stops !== 0 ? { exposure: base.exposure * 2 ** stops } : base;
+    return base && stops !== 0 ? { ...base, exposure: base.exposure * 2 ** stops } : base;
   }
   /** Report the volumes' grade, bloom and fog to {@link onPost} when they change. */
   reportPost(lighting, post) {
@@ -20984,11 +20984,223 @@ var GpuPostFx = class {
   }
 };
 
+// src/render/hdrBloom.ts
+var MIN_LEVELS = 3;
+var MAX_LEVELS = 6;
+function bloomLevels(width, height, radius) {
+  const wanted = MIN_LEVELS + Math.round(Math.max(0, Math.min(1, radius)) * (MAX_LEVELS - MIN_LEVELS));
+  const out = [];
+  let w = Math.max(1, width >> 1);
+  let h = Math.max(1, height >> 1);
+  while (out.length < wanted && w >= 4 && h >= 4) {
+    out.push({ width: w, height: h });
+    w = Math.max(1, w >> 1);
+    h = Math.max(1, h >> 1);
+  }
+  return out;
+}
+var VS2 = (
+  /* wgsl */
+  `
+@vertex fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f {
+  let x = f32((i << 1u) & 2u);
+  let y = f32(i & 2u);
+  return vec4f(x * 2.0 - 1.0, 1.0 - y * 2.0, 0.0, 1.0);
+}
+`
+);
+var DOWN_WGSL = (
+  /* wgsl */
+  `
+${VS2}
+@group(0) @binding(0) var src: texture_2d<f32>;
+@group(0) @binding(1) var samp: sampler;
+// xy = the source's texel, zw = the target's; first level when params2.x = 1.
+@group(0) @binding(2) var<uniform> params: array<vec4f, 2>;
+fn tap(uv: vec2f, dx: f32, dy: f32) -> vec3f { return textureSampleLevel(src, samp, uv + vec2f(dx, dy) * params[0].xy, 0.0).rgb; }
+fn karis(c: vec3f) -> f32 { return 1.0 / (1.0 + max(c.r, max(c.g, c.b))); }
+@fragment fn down(@builtin(position) pos: vec4f) -> @location(0) vec4f {
+  let uv = pos.xy * params[0].zw;
+  let a = tap(uv, -2.0, -2.0); let b = tap(uv, 0.0, -2.0); let c = tap(uv, 2.0, -2.0);
+  let d = tap(uv, -1.0, -1.0); let e = tap(uv, 1.0, -1.0);
+  let f = tap(uv, -2.0, 0.0); let g = tap(uv, 0.0, 0.0); let h = tap(uv, 2.0, 0.0);
+  let i = tap(uv, -1.0, 1.0); let j = tap(uv, 1.0, 1.0);
+  let k = tap(uv, -2.0, 2.0); let l = tap(uv, 0.0, 2.0); let m = tap(uv, 2.0, 2.0);
+  // Five overlapping boxes: the inner one at half, the four corners at an eighth each.
+  let inner = (d + e + i + j) * 0.25;
+  let tl = (a + b + f + g) * 0.25;
+  let tr = (b + c + g + h) * 0.25;
+  let bl = (f + g + k + l) * 0.25;
+  let br = (g + h + l + m) * 0.25;
+  if (params[1].x > 0.5) {
+    // The first level: each box weighted down by its brightness (Karis), so one sparkle can't flicker the glow.
+    let wi = karis(inner) * 0.5; let w0 = karis(tl) * 0.125; let w1 = karis(tr) * 0.125; let w2 = karis(bl) * 0.125; let w3 = karis(br) * 0.125;
+    return vec4f((inner * wi + tl * w0 + tr * w1 + bl * w2 + br * w3) / (wi + w0 + w1 + w2 + w3), 1.0);
+  }
+  return vec4f(inner * 0.5 + (tl + tr + bl + br) * 0.125, 1.0);
+}
+`
+);
+var UP_WGSL = (
+  /* wgsl */
+  `
+${VS2}
+@group(0) @binding(0) var src: texture_2d<f32>;
+@group(0) @binding(1) var samp: sampler;
+// xy = the (smaller) source's texel, zw = the target's.
+@group(0) @binding(2) var<uniform> params: array<vec4f, 2>;
+fn tap(uv: vec2f, dx: f32, dy: f32) -> vec3f { return textureSampleLevel(src, samp, uv + vec2f(dx, dy) * params[0].xy, 0.0).rgb; }
+@fragment fn up(@builtin(position) pos: vec4f) -> @location(0) vec4f {
+  let uv = pos.xy * params[0].zw;
+  // A 3\xD73 tent, added (by the blend) onto the level it lands on.
+  let t = (tap(uv, -1.0, -1.0) + tap(uv, 1.0, -1.0) + tap(uv, -1.0, 1.0) + tap(uv, 1.0, 1.0))
+    + (tap(uv, 0.0, -1.0) + tap(uv, -1.0, 0.0) + tap(uv, 1.0, 0.0) + tap(uv, 0.0, 1.0)) * 2.0
+    + tap(uv, 0.0, 0.0) * 4.0;
+  return vec4f(t / 16.0, 1.0);
+}
+`
+);
+var HdrBloom = class {
+  constructor(device) {
+    this.device = device;
+    this.levels = [];
+    this.key = "";
+    this.down = null;
+    this.up = null;
+    this.params = [];
+    this.sampler = device.createSampler({ magFilter: "linear", minFilter: "linear", addressModeU: "clamp-to-edge", addressModeV: "clamp-to-edge" });
+  }
+  /**
+   * Encode the chain over `source` (rgba16float, `width × height`): the
+   * half-resolution glow it returns sums `count` levels.
+   */
+  encode(encoder, source, width, height, radius) {
+    const device = this.device;
+    const sizes = bloomLevels(width, height, radius);
+    if (sizes.length === 0) return null;
+    const key = sizes.map((s) => `${s.width}x${s.height}`).join(",");
+    if (key !== this.key) {
+      for (const level of this.levels) level.texture.destroy?.();
+      this.levels = sizes.map((s) => ({ ...s, texture: device.createTexture({ size: s, format: "rgba16float", usage: 16 | 4 | 1 }) }));
+      this.key = key;
+    }
+    const pipeline = (code, entryPoint, additive) => {
+      const module = device.createShaderModule({ code });
+      return device.createRenderPipeline({
+        layout: "auto",
+        vertex: { module, entryPoint: "vs" },
+        fragment: {
+          module,
+          entryPoint,
+          targets: [{ format: "rgba16float", ...additive ? { blend: { color: { srcFactor: "one", dstFactor: "one", operation: "add" }, alpha: { srcFactor: "one", dstFactor: "one", operation: "add" } } } : {} }]
+        },
+        primitive: { topology: "triangle-list" }
+      });
+    };
+    this.down ?? (this.down = pipeline(DOWN_WGSL, "down", false));
+    this.up ?? (this.up = pipeline(UP_WGSL, "up", true));
+    let param = 0;
+    const pass = (pipeline2, from2, fromSize2, to, first, load) => {
+      var _a;
+      const buffer = (_a = this.params)[param] ?? (_a[param] = device.createBuffer({ size: 32, usage: 64 | 8 }));
+      param += 1;
+      device.queue.writeBuffer(buffer, 0, new Float32Array([1 / fromSize2.width, 1 / fromSize2.height, 1 / to.width, 1 / to.height, first ? 1 : 0, 0, 0, 0]));
+      const encoded = encoder.beginRenderPass({ colorAttachments: [{ view: to.texture.createView(), clearValue: { r: 0, g: 0, b: 0, a: 0 }, loadOp: load ? "load" : "clear", storeOp: "store" }] });
+      encoded.setPipeline(pipeline2);
+      encoded.setBindGroup(
+        0,
+        device.createBindGroup({
+          layout: pipeline2.getBindGroupLayout(0),
+          entries: [
+            { binding: 0, resource: from2.createView() },
+            { binding: 1, resource: this.sampler },
+            { binding: 2, resource: { buffer } }
+          ]
+        })
+      );
+      encoded.draw(3);
+      encoded.end();
+    };
+    let from = source;
+    let fromSize = { width, height };
+    this.levels.forEach((level, i) => {
+      pass(this.down, from, fromSize, level, i === 0, false);
+      from = level.texture;
+      fromSize = level;
+    });
+    for (let i = this.levels.length - 1; i > 0; i -= 1) pass(this.up, this.levels[i].texture, this.levels[i], this.levels[i - 1], false, true);
+    return { texture: this.levels[0].texture, count: this.levels.length };
+  }
+  dispose() {
+    for (const level of this.levels) level.texture.destroy?.();
+    for (const buffer of this.params) buffer.destroy?.();
+    this.levels = [];
+  }
+};
+
+// src/render/toneMappers.ts
+var TONE_MAPPERS = ["filmic", "aces", "agx", "neutral"];
+var ACES_IN = [0.59719, 0.35458, 0.04823, 0.076, 0.90834, 0.01566, 0.0284, 0.13383, 0.83777];
+var ACES_OUT = [1.60475, -0.53108, -0.07367, -0.10208, 1.10813, -605e-5, -327e-5, -0.07276, 1.07602];
+var AGX_IN = [0.842479062253094, 0.0784335999999992, 0.0792237451477643, 0.0423282422610123, 0.878468636469772, 0.0791661274605434, 0.0423756549057051, 0.0784336, 0.879142973793104];
+var AGX_OUT = [1.19687900512017, -0.0980208811401368, -0.0990297440797205, -0.0528968517574562, 1.15190312990417, -0.0989611768448433, -0.0529716355144438, -0.0980434501171241, 1.15107367264116];
+var AGX_MIN_EV = -12.47393;
+var AGX_MAX_EV = 4.026069;
+var NEUTRAL_START = 0.8 - 0.04;
+var NEUTRAL_DESATURATION = 0.15;
+function toneMapperIndex(mapper) {
+  const i = mapper ? TONE_MAPPERS.indexOf(mapper) : 0;
+  return i < 0 ? 0 : i;
+}
+var wgslMat = (m) => `mat3x3f(${[0, 1, 2].map((col) => [0, 1, 2].map((row) => m[row * 3 + col].toString()).join(", ")).join(", ")})`;
+var TONE_MAPPERS_WGSL = (
+  /* wgsl */
+  `
+fn toneFilmic(x: vec3f) -> vec3f {
+  let v = max(x, vec3f(0.0));
+  return clamp((v * (2.51 * v + 0.03)) / (v * (2.43 * v + 0.59) + 0.14), vec3f(0.0), vec3f(1.0));
+}
+fn toneAces(x: vec3f) -> vec3f {
+  let v = ${wgslMat(ACES_IN)} * max(x, vec3f(0.0));
+  let fit = (v * (v + 0.0245786) - 0.000090537) / (v * (0.983729 * v + 0.432951) + 0.238081);
+  return clamp(${wgslMat(ACES_OUT)} * fit, vec3f(0.0), vec3f(1.0));
+}
+fn toneAgx(x: vec3f) -> vec3f {
+  let v = ${wgslMat(AGX_IN)} * max(x, vec3f(1e-10));
+  let t = (clamp(log2(v), vec3f(${AGX_MIN_EV}), vec3f(${AGX_MAX_EV})) - ${AGX_MIN_EV}) / (${AGX_MAX_EV} - ${AGX_MIN_EV});
+  let t2 = t * t;
+  let t4 = t2 * t2;
+  let curve = 15.5 * t4 * t2 - 40.14 * t4 * t + 31.96 * t4 - 6.868 * t2 * t + 0.4298 * t2 + 0.1191 * t - 0.00232;
+  return clamp(pow(max(${wgslMat(AGX_OUT)} * curve, vec3f(0.0)), vec3f(2.2)), vec3f(0.0), vec3f(1.0));
+}
+fn toneNeutral(x: vec3f) -> vec3f {
+  var c = max(x, vec3f(0.0));
+  let low = min(c.r, min(c.g, c.b));
+  let offset = select(0.04, low - 6.25 * low * low, low < 0.08);
+  c = c - offset;
+  let peak = max(c.r, max(c.g, c.b));
+  if (peak < ${NEUTRAL_START}) { return clamp(c, vec3f(0.0), vec3f(1.0)); }
+  let d = 1.0 - ${NEUTRAL_START};
+  let newPeak = 1.0 - d * d / (peak + d - ${NEUTRAL_START});
+  c = c * (newPeak / peak);
+  let g = 1.0 - 1.0 / (${NEUTRAL_DESATURATION} * (peak - newPeak) + 1.0);
+  return clamp(mix(c, vec3f(newPeak), g), vec3f(0.0), vec3f(1.0));
+}
+fn toneMapWith(index: f32, c: vec3f) -> vec3f {
+  if (index > 2.5) { return toneNeutral(c); }
+  if (index > 1.5) { return toneAgx(c); }
+  if (index > 0.5) { return toneAces(c); }
+  return toneFilmic(c);
+}
+`
+);
+
 // src/render/gpuPresent.ts
 import { CLOUD_TILE, MAX_CLOUD_LAYERS } from "@cartbox/editor";
 var CLOUD_TILE_SIZE = CLOUD_TILE;
 var SHAFT_CELLS_ACROSS = 160;
 var SHAFT_SKY_SHARE = 0.35;
+var BLOOM_MIX = 1 / 6;
 var AUTO_KEY_FALLBACK = 0.18;
 var USAGE3 = {
   copySrc: 1,
@@ -21039,7 +21251,7 @@ function packShaftUniforms(sun, shafts, color, width, height, out = new Float32A
   return out;
 }
 var BASE_KIND = { colour: 0, sky: 1, frame: 2 };
-var COMPOSE_UNIFORM_FLOATS = 24;
+var COMPOSE_UNIFORM_FLOATS = 28;
 function packComposeUniforms(frame, width, height, out = new Float32Array(COMPOSE_UNIFORM_FLOATS), hdr = false) {
   const shafts = frame.base.kind === "sky" && frame.shafts && frame.shafts.shafts.strength > 0 ? frame.shafts : null;
   const grid = shaftGrid(width, height);
@@ -21049,7 +21261,8 @@ function packComposeUniforms(frame, width, height, out = new Float32Array(COMPOS
   out.set([bg[0] / 255, bg[1] / 255, bg[2] / 255, bg[3] / 255], 8);
   out.set(shafts ? [shafts.color[0], shafts.color[1], shafts.color[2], 0] : [0, 0, 0, 0], 12);
   out.set([1 / (grid.step * grid.width), 1 / (grid.step * grid.height), 0, 0], 16);
-  out.set([hdr ? 1 : 0, hdr && frame.tonemap ? 1 : 0, frame.tonemap?.exposure ?? 1, 0], 20);
+  out.set([hdr ? 1 : 0, hdr && frame.tonemap ? 1 : 0, frame.tonemap?.exposure ?? 1, toneMapperIndex(frame.tonemap?.operator)], 20);
+  out.set([0, 0, 0, 0], 24);
   return out;
 }
 var MEASURE_UNIFORM_FLOATS = 16;
@@ -21238,7 +21451,8 @@ struct Compose {
   background: vec4f,
   shaftColor: vec4f,
   shaftScale: vec4f,
-  hdr: vec4f,
+  hdr: vec4f,   // x = linear frame, y = tone-mapped, z = exposure, w = the curve (toneMappers.ts)
+  grade: vec4f, // F4d: x = pass (0 all, 1 the linear composite, 2 the finish), y = bloom strength, z = 1 / levels summed
 };
 @group(0) @binding(0) var<uniform> u: Compose;
 @group(0) @binding(1) var baseTex: texture_2d<f32>;
@@ -21250,6 +21464,7 @@ struct Compose {
 @group(0) @binding(7) var holo: texture_2d<f32>;
 ${FULLSCREEN_VS2}
 ${SRGB_WGSL}
+${TONE_MAPPERS_WGSL}
 fn over(top: vec4f, under: vec4f) -> vec4f {
   return vec4f(top.rgb + under.rgb * (1.0 - top.a), top.a + under.a * (1.0 - top.a));
 }
@@ -21258,9 +21473,8 @@ fn keep(c: vec4f) -> vec4f {
   if (u.hdr.x > 0.5) { return max(c, vec4f(0.0)); }
   return clamp(c, vec4f(0.0), vec4f(1.0));
 }
-@fragment fn compose(@builtin(position) pos: vec4f) -> @location(0) vec4f {
-  let p = vec2i(floor(pos.xy));
-  let hdr = u.hdr.x > 0.5;
+// The layers in light: the base, the scene over it, the shafts added, the held weapon over all.
+fn composite(pos: vec4f, p: vec2i, hdr: bool) -> vec4f {
   var c = u.background;
   if (u.layers.x > 0.5) { c = textureLoad(baseTex, p, 0); }
   // A linear frame decodes a base that was authored in display space (the sky is linear already).
@@ -21278,11 +21492,28 @@ fn keep(c: vec4f) -> vec4f {
     else { c = vec4f(min(vec3f(1.0), c.rgb + u.shaftColor.rgb * v), c.a); }
   }
   if (u.layers.w > 0.5) { c = keep(over(textureLoad(front, p, 0), c)); }
-  // The linear frame is tone-mapped once, whole, and encoded for the display;
-  // the HUD and holo UI are drawn in display space over it.
+  return c;
+}
+@fragment fn compose(@builtin(position) pos: vec4f) -> @location(0) vec4f {
+  let p = vec2i(floor(pos.xy));
+  let hdr = u.hdr.x > 0.5;
+  var c: vec4f;
+  if (u.grade.x > 1.5) {
+    // The finish (F4d): the linear composite (binding 1), its bloom (binding 3, half
+    // resolution, summed over its levels) mixed in by the strength: light moved, not added.
+    c = textureLoad(baseTex, p, 0);
+    let glow = textureSampleLevel(light, lightSampler, pos.xy / vec2f(textureDimensions(baseTex)), 0.0).rgb * u.grade.z;
+    c = vec4f(mix(c.rgb, glow, u.grade.y), c.a);
+  } else {
+    c = composite(pos, p, hdr);
+    // The linear composite alone, for the bloom to blur (F4d).
+    if (u.grade.x > 0.5) { return c; }
+  }
+  // The linear frame is tone-mapped once, whole, through the scene's curve (F4d),
+  // and encoded for the display; the HUD and holo UI are drawn in display space over it.
   if (hdr) {
     var mapped = clamp(c.rgb, vec3f(0.0), vec3f(1.0));
-    if (u.hdr.y > 0.5) { mapped = acesFilmic(c.rgb * u.hdr.z); }
+    if (u.hdr.y > 0.5) { mapped = toneMapWith(u.hdr.w, c.rgb * u.hdr.z); }
     c = vec4f(toSrgb(mapped), clamp(c.a, 0.0, 1.0));
   }
   if (u.layers2.x > 0.5) {
@@ -21408,6 +21639,9 @@ var GpuPresenter = class {
     /** The composite, when a post stack reads it before the target. */
     this.composed = null;
     this.postFx = null;
+    /** The linear composite and its bloom chain (F4d), made when a linear frame first blooms. */
+    this.linearTarget = null;
+    this.bloom = null;
     this.shaftTargets = null;
     this.uploads = /* @__PURE__ */ new Map();
     this.panorama = null;
@@ -21431,7 +21665,7 @@ var GpuPresenter = class {
       measure: layout([uni(STAGE_COMPUTE), tex(1, STAGE_COMPUTE), tex(2, STAGE_COMPUTE), { binding: 3, visibility: STAGE_COMPUTE, buffer: { type: "storage" } }])
     };
     const ubuf = (floats) => device.createBuffer({ size: floats * 4, usage: USAGE3.uniform | USAGE3.bufferCopyDst });
-    this.uniforms = { sky: ubuf(SKY_UNIFORM_FLOATS), shaft: ubuf(SHAFT_UNIFORM_FLOATS), compose: ubuf(COMPOSE_UNIFORM_FLOATS), measure: ubuf(MEASURE_UNIFORM_FLOATS) };
+    this.uniforms = { sky: ubuf(SKY_UNIFORM_FLOATS), shaft: ubuf(SHAFT_UNIFORM_FLOATS), compose: ubuf(COMPOSE_UNIFORM_FLOATS), finish: ubuf(COMPOSE_UNIFORM_FLOATS), measure: ubuf(MEASURE_UNIFORM_FLOATS) };
     this.measured = {
       result: device.createBuffer({ size: 16, usage: USAGE3.bufferStorage | USAGE3.bufferCopySrc }),
       staging: device.createBuffer({ size: 16, usage: USAGE3.mapRead | USAGE3.bufferCopyDst }),
@@ -21479,19 +21713,31 @@ var GpuPresenter = class {
       ]);
       light = this.shaftTargets.light;
     }
-    const post = frame.post ?? null;
+    const bloomStrength = this.hdr && frame.post ? frame.post.uniforms.bloomStrength : 0;
+    const post = frame.post ? bloomStrength > 0 ? { ...frame.post, uniforms: { ...frame.post.uniforms, bloomStrength: 0 } } : frame.post : null;
     if (post) this.composed ?? (this.composed = this.target("rgba8unorm", this.width, this.height));
-    device.queue.writeBuffer(this.uniforms.compose, 0, packComposeUniforms(frame, this.width, this.height, this.data.compose, this.hdr));
-    this.fullScreen(encoder, "compose", post ? "rgba8unorm" : format, COMPOSE_WGSL, post ? this.composed : target, [
-      { binding: 0, resource: { buffer: this.uniforms.compose } },
-      { binding: 1, resource: base.createView() },
+    const out = post ? this.composed : target;
+    const outFormat = post ? "rgba8unorm" : format;
+    const compose = packComposeUniforms(frame, this.width, this.height, this.data.compose, this.hdr);
+    const layers = (uniforms, baseView, lightView) => [
+      { binding: 0, resource: { buffer: uniforms } },
+      { binding: 1, resource: baseView },
       { binding: 2, resource: scene.createView() },
-      { binding: 3, resource: light.createView() },
+      { binding: 3, resource: lightView },
       { binding: 4, resource: this.linear.clamp },
       { binding: 5, resource: (frame.front ?? this.blank).createView() },
       { binding: 6, resource: (frame.hud ? this.upload("hud", frame.hud) : this.blank).createView() },
       { binding: 7, resource: (frame.holo ? this.upload("holo", frame.holo) : this.blank).createView() }
-    ]);
+    ];
+    const glow = bloomStrength > 0 ? this.bloomOver(encoder, compose, layers(this.uniforms.compose, base.createView(), light.createView()), frame.post.uniforms.bloomRadius) : null;
+    if (glow) {
+      compose.set([2, Math.min(1, bloomStrength * BLOOM_MIX), 1 / glow.count, 0], 24);
+      device.queue.writeBuffer(this.uniforms.finish, 0, compose);
+      this.fullScreen(encoder, "compose", outFormat, COMPOSE_WGSL, out, layers(this.uniforms.finish, this.linearTarget.createView(), glow.texture.createView()));
+    } else {
+      device.queue.writeBuffer(this.uniforms.compose, 0, compose);
+      this.fullScreen(encoder, "compose", outFormat, COMPOSE_WGSL, out, layers(this.uniforms.compose, base.createView(), light.createView()));
+    }
     if (post) {
       this.postFx ?? (this.postFx = new GpuPostFx(device, this.width, this.height));
       this.postFx.encode(encoder, this.composed, target, format, post.uniforms, post.time);
@@ -21521,6 +21767,18 @@ var GpuPresenter = class {
     device.queue.submit([encoder.finish()]);
     if (measure) void this.readMeasurements(measure.luminance, measure.sun !== null);
   }
+  /**
+   * The HDR bloom (F4d): the layers composited in linear light into their own
+   * target, then blurred down and up the mip chain (hdrBloom.ts).
+   */
+  bloomOver(encoder, compose, entries, radius) {
+    this.linearTarget ?? (this.linearTarget = this.target("rgba16float", this.width, this.height));
+    compose.set([1, 0, 0, 0], 24);
+    this.device.queue.writeBuffer(this.uniforms.compose, 0, compose);
+    this.fullScreen(encoder, "compose", "rgba16float", COMPOSE_WGSL, this.linearTarget, entries);
+    this.bloom ?? (this.bloom = new HdrBloom(this.device));
+    return this.bloom.encode(encoder, this.linearTarget, this.width, this.height, radius);
+  }
   /** Release every resource this presenter made. */
   dispose() {
     this.destroyed = true;
@@ -21528,6 +21786,8 @@ var GpuPresenter = class {
     destroy(this.blank);
     destroy(this.skyTarget);
     destroy(this.composed);
+    destroy(this.linearTarget);
+    this.bloom?.dispose();
     this.postFx?.dispose();
     destroy(this.shaftTargets?.mask);
     destroy(this.shaftTargets?.light);
