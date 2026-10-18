@@ -272,7 +272,8 @@ describe.skipIf(!device)("GPU presentation, on a real device", () => {
     const renderer = (await WebgpuSceneRenderer.create(device, W, H))!;
     const instances = scene();
     renderer.render(instances, draw());
-    for (let i = 0; i < 200 && !renderer.ready; i += 1) {
+    // The first frame waits on its pipelines compiling (seconds, on a software adapter).
+    for (let i = 0; i < 1000 && !renderer.ready; i += 1) {
       await new Promise((resolve) => setTimeout(resolve, 10));
       device.tick?.();
     }
@@ -413,5 +414,104 @@ describe.skipIf(!device)("GPU presentation, on a real device", () => {
     presenter.dispose();
     target.destroy();
     renderer.dispose();
+  });
+});
+
+describe.skipIf(!device)("linear HDR (AAA_FIDELITY_ROADMAP.md F0b), on a real device", () => {
+  const target = () => device.createTexture({ size: { width: W, height: H }, format: "rgba8unorm", usage: 0x10 | 0x01 });
+  /** A half-float texture of one linear colour (alpha 1), as an HDR scene renderer leaves it. */
+  function linearScene(value: number): any {
+    const texture = device.createTexture({ size: { width: W, height: H }, format: "rgba16float", usage: 0x10 | 0x04 });
+    const encoder = device.createCommandEncoder();
+    encoder.beginRenderPass({ colorAttachments: [{ view: texture.createView(), clearValue: { r: value, g: value, b: value, a: 1 }, loadOp: "clear", storeOp: "store" }] }).end();
+    device.queue.submit([encoder.finish()]);
+    return texture;
+  }
+  const srgb = (v: number) => Math.round(255 * (v <= 0.0031308 ? v * 12.92 : 1.055 * v ** (1 / 2.4) - 0.055));
+  const aces = (x: number) => Math.min(1, Math.max(0, (x * (2.51 * x + 0.03)) / (x * (2.43 * x + 0.59) + 0.14)));
+
+  /** The frame a renderer draws and a presenter shows: byte space, or linear light. */
+  async function shown(hdr: boolean, instances: MeshSceneInstance[], ambient: number): Promise<Uint8Array> {
+    const renderer = (await WebgpuSceneRenderer.create(device, W, H, undefined, { hdr }))!;
+    expect(renderer).not.toBeNull();
+    const presenter = new GpuPresenter(device, W, H, { hdr });
+    const out = target();
+    device.pushErrorScope("validation");
+    const scene = renderer.renderToTexture(instances, { width: W, height: H, view: VIEW, projection: PROJECTION, ambient, lightDirection: [0, 0, 1] });
+    presenter.present({ base: { kind: "colour", rgba: [40, 60, 90, 255] }, scene }, out, "rgba8unorm");
+    const error = await settled(device.popErrorScope());
+    expect(error ? String((error as any).message ?? error) : null).toBeNull();
+    const bytes = await readTexture(out, W, H);
+    presenter.dispose();
+    out.destroy();
+    renderer.dispose();
+    return bytes;
+  }
+
+  it("decodes what was authored and encodes it back: unlit, the picture is the byte path's", async () => {
+    // Full ambient: every surface shows its own colour, so the linear round trip must give it back.
+    const byte = await shown(false, scene(), 1);
+    const linear = await shown(true, scene(), 1);
+    expect(byte.filter((_, i) => i % 4 === 0 && byte[i] !== 40).length).toBeGreaterThan(500); // the quads drew
+    const d = difference(linear, byte);
+    expect(d.max).toBeLessThanOrEqual(2);
+  });
+
+  it("lights in linear light: a half-lit surface reads brighter than the byte path's", async () => {
+    // A quad turned 60° from the light: N·L = 0.5 and no ambient.
+    const turned: MeshSceneInstance[] = [{ mesh: quad([0.8, 0.5, 0.3, 1]), model: composeModelMatrix([0, 0, 0], [0, 60, 0], [1.4, 1.4, 1]) }];
+    const byte = await shown(false, turned, 0);
+    const linear = await shown(true, turned, 0);
+    const at = (o: Uint8Array) => o[((H >> 1) * W + (W >> 1)) * 4]!;
+    expect(at(byte)).toBeGreaterThan(60);
+    // 0.8 × 0.5 in byte space is 102; the same light in linear shows as about 140.
+    expect(at(linear)).toBeGreaterThan(at(byte) + 20);
+    expect(Math.abs(at(linear) - srgb(((0.8 + 0.055) / 1.055) ** 2.4 * 0.5))).toBeLessThanOrEqual(3);
+  });
+
+  it("tone-maps the whole frame once, then lays the HUD over it unmapped", async () => {
+    const presenter = new GpuPresenter(device, W, H, { hdr: true });
+    const out = target();
+    const hud = hudFrame();
+    const scene = linearScene(2);
+    presenter.present({ base: { kind: "colour", rgba: [0, 0, 0, 255] }, scene, tonemap: { exposure: 1 }, hud, hudKey: 30 }, out, "rgba8unorm");
+    const mapped = await readTexture(out, W, H);
+    expect(Math.abs(mapped[0]! - srgb(aces(2)))).toBeLessThanOrEqual(1);
+    expect(Array.from(mapped.slice(((H - 3) * W + 20) * 4, ((H - 3) * W + 20) * 4 + 3))).toEqual([240, 230, 90]);
+    // Twice the exposure is twice the light into the curve; no tone map clips it.
+    presenter.present({ base: { kind: "colour", rgba: [0, 0, 0, 255] }, scene: linearScene(0.25), tonemap: { exposure: 2 } }, out, "rgba8unorm");
+    expect(Math.abs((await readTexture(out, W, H))[0]! - srgb(aces(0.5)))).toBeLessThanOrEqual(1);
+    presenter.present({ base: { kind: "colour", rgba: [0, 0, 0, 255] }, scene, tonemap: null }, out, "rgba8unorm");
+    expect((await readTexture(out, W, H))[0]).toBe(255);
+    presenter.dispose();
+    out.destroy();
+  });
+
+  it("measures linear light as the tone map will expose it", async () => {
+    const presenter = new GpuPresenter(device, W, H, { hdr: true });
+    const out = target();
+    presenter.present({ base: { kind: "colour", rgba: [0, 0, 0, 255] }, scene: linearScene(0.5), tonemap: { exposure: 2 }, measure: { luminance: true, sun: null } }, out, "rgba8unorm");
+    for (let i = 0; i < 200 && presenter.stats.seq === 0; i += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      device.tick?.();
+    }
+    expect(presenter.stats.luminance!).toBeCloseTo(1, 2);
+    presenter.dispose();
+    out.destroy();
+  });
+
+  it("shows the sky as the byte path does when nothing maps it", async () => {
+    const map = panorama();
+    const byte = new GpuPresenter(device, W, H);
+    const linear = new GpuPresenter(device, W, H, { hdr: true });
+    const a = target();
+    const b = target();
+    byte.present({ base: { kind: "sky", sky: sky(map) }, scene: null }, a, "rgba8unorm");
+    linear.present({ base: { kind: "sky", sky: sky(map) }, scene: null, tonemap: null }, b, "rgba8unorm");
+    expect(difference(await readTexture(b, W, H), await readTexture(a, W, H)).max).toBeLessThanOrEqual(1);
+    byte.dispose();
+    linear.dispose();
+    a.destroy();
+    b.destroy();
   });
 });

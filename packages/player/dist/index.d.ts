@@ -288,6 +288,13 @@ interface RenderCaps {
      * WebGPU: without a device the tier plays on the byte path, as Modern does.
      */
     gpuPresent?: boolean;
+    /**
+     * Shade in linear light into half-float targets and tone-map the whole frame
+     * once, as it is presented (AAA_FIDELITY_ROADMAP.md F0b). Only with
+     * `gpuPresent`, where the frame stays on the GPU: the byte path has 8 bits
+     * to show and keeps the space its content was authored in.
+     */
+    linearHdr?: boolean;
 }
 /**
  * What the shared software rasteriser behind the mesh/world overlays actually
@@ -2977,6 +2984,13 @@ interface PlayerOptions {
      */
     gpuPresent?: boolean;
     /**
+     * Shade in linear light and tone-map the frame once as it is presented
+     * (AAA_FIDELITY_ROADMAP.md F0b), or not. Defaults to the model's `linearHdr`
+     * render cap (the AAA tier); applies only where the frame is presented from
+     * the GPU.
+     */
+    linearHdr?: boolean;
+    /**
      * Control settings (aim inversion, look sensitivity, controller and keyboard
      * bindings, touch pad size/opacity). Change them live with
      * {@link PlayerHandle.setControlSettings}. Defaults: DEFAULT_CONTROL_SETTINGS.
@@ -4038,6 +4052,14 @@ interface PresentFrame {
     readonly hudKey?: number;
     /** The holo UI, premultiplied RGBA8 (`width × height`), over everything, or null. */
     readonly holo?: Uint8ClampedArray | null;
+    /**
+     * A linear HDR frame's tone map (AAA_FIDELITY_ROADMAP.md F0b): its exposure,
+     * for ACES over the whole frame, or null to encode it unmapped (clamped). A
+     * byte-space frame is tone-mapped as it is shaded, and ignores this.
+     */
+    readonly tonemap?: {
+        readonly exposure: number;
+    } | null;
     /** The post-process stack to finish the frame through (its uniforms, and the clock grain runs on), or null for none. */
     readonly post?: {
         readonly uniforms: PostFxUniforms;
@@ -4070,7 +4092,7 @@ declare const SKY_UNIFORM_FLOATS: number;
  * colour, the clock, the frame size, and each cloud layer's scale, wind,
  * opacity and colour.
  */
-declare function packSkyUniforms(sky: PresentSky, width: number, height: number, out?: Float32Array<ArrayBuffer>): Float32Array;
+declare function packSkyUniforms(sky: PresentSky, width: number, height: number, out?: Float32Array<ArrayBuffer>, hdr?: boolean): Float32Array;
 /** The shaft passes' grid: how many frame pixels a cell spans, and the grid's size (`applySunShafts`'s). */
 declare function shaftGrid(width: number, height: number): {
     step: number;
@@ -4085,13 +4107,13 @@ declare function shaftGrid(width: number, height: number): {
 declare function packShaftUniforms(sun: {
     readonly x: number;
     readonly y: number;
-}, shafts: SunShafts, color: Rgb$1, width: number, height: number, out?: Float32Array<ArrayBuffer>): Float32Array;
+}, shafts: SunShafts, color: Rgb$1, width: number, height: number, out?: Float32Array<ArrayBuffer>, hdr?: boolean): Float32Array;
 /** Floats in the compose pass's uniform block. */
-declare const COMPOSE_UNIFORM_FLOATS = 20;
+declare const COMPOSE_UNIFORM_FLOATS = 24;
 /** The compose pass's uniforms: which layers are present, the HUD key, the flat base, and the shafts' colour and sampling scale. */
-declare function packComposeUniforms(frame: PresentFrame, width: number, height: number, out?: Float32Array<ArrayBuffer>): Float32Array;
+declare function packComposeUniforms(frame: PresentFrame, width: number, height: number, out?: Float32Array<ArrayBuffer>, hdr?: boolean): Float32Array;
 /** The measure pass's uniforms: frame size, luminance grid step, base kind; the flat base; the sun (pixels), tap radius and whether to tap it. */
-declare function packMeasureUniforms(frame: PresentFrame, width: number, height: number, out?: Float32Array<ArrayBuffer>): Float32Array;
+declare function packMeasureUniforms(frame: PresentFrame, width: number, height: number, out?: Float32Array<ArrayBuffer>, hdr?: boolean): Float32Array;
 /**
  * Composites and presents frames on one device (see the module comment).
  * Holds its intermediate targets, sized for one frame size; the caller gives
@@ -4118,7 +4140,11 @@ declare class GpuPresenter {
     private readonly measured;
     private latestStats;
     private destroyed;
-    constructor(device: any, width: number, height: number);
+    /** Linear HDR (F0b): the scene, sky and weapon arrive as linear light, and the frame is tone-mapped and encoded here. */
+    readonly hdr: boolean;
+    constructor(device: any, width: number, height: number, options?: {
+        readonly hdr?: boolean;
+    });
     /** The newest measurements to arrive (a frame or two behind the frame that asked). */
     get stats(): PresentStats;
     /** Composite `frame` into `target` (a texture of `format`, `width × height`) and submit. */
@@ -4246,7 +4272,9 @@ declare class GpuCanvasSurface implements DisplaySurface {
      * WebGPU canvas context): the caller then mounts the 2D canvas, and the
      * frame takes the byte path.
      */
-    static create(container: HTMLElement, scaleMode: ScaleMode, model: ConsoleModel, device: any): GpuCanvasSurface | null;
+    static create(container: HTMLElement, scaleMode: ScaleMode, model: ConsoleModel, device: any, options?: {
+        readonly hdr?: boolean;
+    }): GpuCanvasSurface | null;
     /** The newest measurements the presenter has read back (luminance, the sun's visibility). */
     get stats(): PresentStats;
     /** Set the post-process stack (null, or nothing enabled, for none). */
@@ -4508,7 +4536,11 @@ type DeviceProvider$1 = () => Promise<any | null>;
  * fallback stays tested rather than becoming code nobody runs until a browser
  * without a GPU finds the bug.
  */
-declare function createSceneRenderer(width: number, height: number, caps: RenderCaps, deviceProvider?: DeviceProvider$1, glProvider?: GlContextProvider): Promise<SceneRenderer>;
+declare function createSceneRenderer(width: number, height: number, caps: RenderCaps, deviceProvider?: DeviceProvider$1, glProvider?: GlContextProvider, 
+/** `hdr`: a WebGPU renderer shades in linear light and keeps its frames on the GPU (F0b); the other backends ignore it. */
+options?: {
+    readonly hdr?: boolean;
+}): Promise<SceneRenderer>;
 
 /**
  * The player's WebGPU triangle path.
@@ -4589,6 +4621,8 @@ declare class WebgpuSceneRenderer implements SceneRenderer {
     private readonly blankShadow;
     private readonly readback;
     private readonly bytesPerRow;
+    /** Linear HDR (F0b): half-float targets, frames kept on the GPU (renderToTexture) and never read back. */
+    readonly hdr: boolean;
     readonly backend: "webgpu";
     /** Draws the opening frames, and any frame before the first readback lands. */
     private readonly software;
@@ -4663,7 +4697,11 @@ declare class WebgpuSceneRenderer implements SceneRenderer {
      * the factory falls back to software rather than the caller seeing an
      * exception mid-frame.
      */
-    static create(device: any, width: number, height: number, style?: RasterStyle): Promise<WebgpuSceneRenderer | null>;
+    static create(device: any, width: number, height: number, style?: RasterStyle, 
+    /** `hdr`: shade in linear light into half-float targets, for a GPU-presented frame (F0b; no readback). */
+    options?: {
+        readonly hdr?: boolean;
+    }): Promise<WebgpuSceneRenderer | null>;
     /**
      * Point the shadow slot at an r32float sized to `size`, (re)creating it on a
      * size change and invalidating cached bind groups (binding 6 identity moved).
@@ -4684,6 +4722,8 @@ declare class WebgpuSceneRenderer implements SceneRenderer {
     /** Whether a finished GPU frame exists to show (false until the first readback lands). */
     get ready(): boolean;
     get gpuDevice(): any;
+    /** The colour targets' format: half-float in the linear HDR variant. */
+    private get colourFormat();
     /**
      * Draw the frame and leave it on the GPU (AAA_FIDELITY_ROADMAP.md F0a): the
      * same passes as {@link render}, ending in the colour texture instead of a

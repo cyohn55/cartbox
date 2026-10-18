@@ -161,6 +161,13 @@ export interface PlayerOptions {
    */
   gpuPresent?: boolean;
   /**
+   * Shade in linear light and tone-map the frame once as it is presented
+   * (AAA_FIDELITY_ROADMAP.md F0b), or not. Defaults to the model's `linearHdr`
+   * render cap (the AAA tier); applies only where the frame is presented from
+   * the GPU.
+   */
+  linearHdr?: boolean;
+  /**
    * Control settings (aim inversion, look sensitivity, controller and keyboard
    * bindings, touch pad size/opacity). Change them live with
    * {@link PlayerHandle.setControlSettings}. Defaults: DEFAULT_CONTROL_SETTINGS.

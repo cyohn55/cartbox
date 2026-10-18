@@ -1264,6 +1264,8 @@ export class MeshOverlaySurface implements DisplaySurface {
       hud: this.hud ? rgba : null,
       hudKey: HUD_TRANSPARENT_SUM,
       holo,
+      // A linear frame is tone-mapped as it is presented (F0b); a byte-space one already was.
+      tonemap: job.tonemap,
       measure: adapting || flare ? { luminance: adapting, sun: flare ? sun : null } : null,
     });
     this.takeGpuMeasurements(gpu.stats, lighting, job.post, adapting, sky !== null, sun);

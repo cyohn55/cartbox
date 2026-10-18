@@ -73,6 +73,13 @@ export interface RenderCaps {
    * WebGPU: without a device the tier plays on the byte path, as Modern does.
    */
   gpuPresent?: boolean;
+  /**
+   * Shade in linear light into half-float targets and tone-map the whole frame
+   * once, as it is presented (AAA_FIDELITY_ROADMAP.md F0b). Only with
+   * `gpuPresent`, where the frame stays on the GPU: the byte path has 8 bits
+   * to show and keeps the space its content was authored in.
+   */
+  linearHdr?: boolean;
 }
 
 /**
@@ -215,6 +222,7 @@ export const MODERN_RASTER_CAPS: RenderCaps = {
 export const AAA_RASTER_CAPS: RenderCaps = {
   ...MODERN_RASTER_CAPS,
   gpuPresent: true,
+  linearHdr: true,
 };
 
 export interface ConsoleModel {
