@@ -282,6 +282,25 @@ Everything else depends on this track. It contains no visible "feature", but its
   - A height-correlated Smith visibility term.
   - Fresnel and split-sum on ambient specular, and specular occlusion from AO and bent normals.
   - **Stored MikkTSpace tangents**, so normal maps match Substance, Marmoset and Blender bakes exactly. Derivative tangents stay as the fallback.
+  - **F1c-1, the BRDF: done.** The linear-light shader (the `aaa` tier) shades with the AAA BRDF (`render/brdf.ts`). The Modern tier's shader keeps its term-for-term match with the software rasteriser.
+    - **Height-correlated Smith visibility** (Heitz) replaces the separable Schlick-GGX, for every light and the sun.
+    - **The specular is normalised against the diffuse.** The engine's diffuse is `albedo · N·L` rather than `albedo / π`, so the specular lobe takes the π the old path left out; highlights were π times too dim.
+    - **The split-sum DFG** (Karis) weights the environment's reflection by `f0·A + B` rather than `f0`. A dielectric now reflects more toward grazing (Fresnel on ambient), and a rough one less.
+      - The 32×32 table is integrated once on the CPU by GGX importance sampling with the same visibility, and read from a storage buffer: all 16 of the fragment stage's sampled textures are bound.
+    - **Multiple scattering** (Kulla-Conty, in Fdez-Agüera's closed form) adds back what single-scatter GGX loses, up to 70% for a rough metal. The environment gets it as a lobe, each light as a scale on its specular.
+      - The diffuse beneath keeps only what the reflection leaves (`1 − E`), so a white dielectric in a white furnace stays at 1 rather than gaining its reflection (1.04).
+    - **Specular occlusion from AO** (Lagarde): a crevice reflects less of the sky, by an amount that narrows with a smoother lobe.
+    - **Fix: linear light is no longer clamped at 1** before the presenter's tone map. Since F0b, `finishAlpha` and `finishRefracted` had clamped every highlight to 1 in the half-float target too.
+    - *Tests:* `brdf.test.ts` covers:
+      - the table against a brute-force hemisphere integral (within 0.01);
+      - white-furnace energy, Fresnel toward grazing, and specular occlusion;
+      - that only the linear shader carries the new terms.
+      - On Dawn, the linear output lands on the CPU's numbers: a white furnace reads 1 (±1%) for metals and dielectrics, rough or smooth; a black dielectric's reflection head-on and at 75° matches `f0·A + B` within 3%; and a rough metal's highlight matches D·V·π times its compensation within 2%, over 1 and unclamped.
+      - In Chromium, Beaver Creek on the `aaa` tier compiles the four linear-light shaders with the table, with no errors.
+    - *Left for F1c:*
+      - Bent normals for specular occlusion: no bake makes them yet (F9).
+      - The clearcoat lobe keeps its Schlick visibility.
+      - Stored MikkTSpace tangents (F1c-2).
 - [ ] **F1d. The full material set.**
   - Sheen (Charlie distribution).
   - Transmission and volume (thickness, attenuation).
