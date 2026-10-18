@@ -373,7 +373,9 @@ export interface ToneMap {
  * `range`; a `spot` light (ENGINE_PARITY_ROADMAP.md EP8) is a point light
  * narrowed to a cone, full inside `innerAngle` and fading to nothing at
  * `outerAngle`. Colours are 0..1 in the engine's byte space; `intensity`
- * scales them.
+ * scales them. A point or spot light can instead fall off with the inverse
+ * square of distance (`falloff`), which is what gives a candela its meaning
+ * (see physicalLight.ts).
  */
 export interface SceneLight {
   readonly kind: "directional" | "point" | "spot";
@@ -385,6 +387,12 @@ export interface SceneLight {
   readonly intensity: number;
   /** Point and spot falloff radius in world units; ≤ 0 means no distance falloff. */
   readonly range?: number;
+  /**
+   * Point and spot: how the light dims with distance. Absent, it fades as
+   * (1 − d/range)², flat at the light. "inverseSquare" is physical: 1/d² (d in
+   * metres, floored at 1 cm), windowed to nothing at `range` when there is one.
+   */
+  readonly falloff?: "inverseSquare";
   /** Spot: the cone's half-angles in degrees — full strength inside `innerAngle`, none past `outerAngle`. */
   readonly innerAngle?: number;
   readonly outerAngle?: number;
@@ -395,6 +403,33 @@ export interface SceneLight {
    * frame's {@link LocalShadows} atlas (see assignLocalShadowTiles).
    */
   readonly shadowTile?: number;
+}
+
+/** Floor on an inverse-square light's distance, 1 cm, so a surface touching it doesn't blow up. */
+export const INVERSE_SQUARE_MIN_DISTANCE = 0.01;
+
+/**
+ * A point or spot light's falloff at distance `dist`: the default
+ * (1 − d/range)², or with {@link SceneLight.falloff} "inverseSquare", 1/d²
+ * windowed by (1 − (d/range)⁴)² so it still reaches zero at its range.
+ */
+export function distanceFalloff(light: Pick<SceneLight, "range" | "falloff">, dist: number): number {
+  const range = light.range ?? 0;
+  if (light.falloff === "inverseSquare") {
+    let window = 1;
+    if (range > 0) {
+      const q = dist / range;
+      const t = Math.min(1, Math.max(0, 1 - q * q * q * q));
+      window = t * t;
+    }
+    const d = Math.max(dist, INVERSE_SQUARE_MIN_DISTANCE);
+    return window / (d * d);
+  }
+  if (range > 0) {
+    const t = Math.max(0, 1 - dist / range);
+    return t * t;
+  }
+  return 1;
 }
 
 /** A spot light's cone as cosines: [outer, inner], inner kept just above outer so the fade never divides by zero. */
@@ -2870,11 +2905,7 @@ function rasterizeTriangle(
               Lx = px / dist;
               Ly = py / dist;
               Lz = pz / dist;
-              const range = lgt.range ?? 0;
-              if (range > 0) {
-                const t = Math.max(0, 1 - dist / range);
-                atten = t * t;
-              }
+              atten = distanceFalloff(lgt, dist);
               if (lgt.kind === "spot") {
                 // The cone: how far this point sits off the beam's axis, faded smoothly between the angles.
                 const axis = lgt.direction ?? [0, -1, 0];

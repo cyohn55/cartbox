@@ -115,6 +115,8 @@ function scenes(): Record<string, Scene> {
   const lights: SceneLight[] = [
     { kind: "directional", direction: [0.3, 1, 0.2], color: [1, 0.9, 0.8], intensity: 1 },
     { kind: "point", position: [1, 1.5, 1], color: [0.2, 0.5, 1], intensity: 2, range: 5 },
+    // Physical falloff (F0b): 1/d², windowed to its range.
+    { kind: "point", position: [-1, 1, 1.5], color: [1, 0.6, 0.2], intensity: 3, range: 6, falloff: "inverseSquare" },
   ];
   return {
     fantasy: {

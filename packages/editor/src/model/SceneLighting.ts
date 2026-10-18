@@ -101,6 +101,13 @@ export interface SceneLighting {
   readonly postVolumes?: readonly PostVolume[];
   /** Eye adaptation: the exposure follows what the camera sees. Absent = a fixed exposure. */
   readonly autoExposure?: AutoExposure | null;
+  /**
+   * The units the editor shows this rig in (AAA_FIDELITY_ROADMAP.md F0b):
+   * "physical" for lux, candela, nits and EV100 (see physicalLight.ts).
+   * Absent = the renderer's own. Only a display choice: the stored values and
+   * how the scene looks are the same either way.
+   */
+  readonly units?: "physical";
 }
 
 /** Entries a rig's tint list may hold: the palette's 15 colours after the unused 0. */
@@ -147,14 +154,15 @@ function parseLight(value: unknown): SceneLight | null {
   }
   const position = isFiniteTriple(raw.position) ? raw.position : ([0, 1, 0] as [number, number, number]);
   const range = typeof raw.range === "number" && Number.isFinite(raw.range) ? Math.max(0, raw.range) : 0;
+  const falloff = raw.falloff === "inverseSquare" ? { falloff: "inverseSquare" as const } : {};
   if (kind === "spot") {
     const direction = isFiniteTriple(raw.direction) ? raw.direction : ([0, -1, 0] as [number, number, number]);
     const angle = (v: unknown, fallback: number) => (typeof v === "number" && Number.isFinite(v) ? Math.min(89, Math.max(0, v)) : fallback);
     const outerAngle = Math.max(1, angle(raw.outerAngle, 30));
     const innerAngle = Math.min(outerAngle, angle(raw.innerAngle, outerAngle * 0.75));
-    return { kind, position, direction, color, intensity, range, innerAngle, outerAngle, ...(raw.castShadows === true ? { castShadows: true } : {}) };
+    return { kind, position, direction, color, intensity, range, innerAngle, outerAngle, ...falloff, ...(raw.castShadows === true ? { castShadows: true } : {}) };
   }
-  return { kind, position, color, intensity, range, ...(raw.castShadows === true ? { castShadows: true } : {}) };
+  return { kind, position, color, intensity, range, ...falloff, ...(raw.castShadows === true ? { castShadows: true } : {}) };
 }
 
 /**
@@ -207,6 +215,7 @@ export function parseSceneLighting(raw: unknown): SceneLighting | null {
     ...(tints ? { tints } : {}),
     ...(postVolumes.length > 0 ? { postVolumes } : {}),
     ...(autoExposure ? { autoExposure } : {}),
+    ...(record.units === "physical" ? { units: "physical" as const } : {}),
   };
 }
 
@@ -463,6 +472,12 @@ export function patchSceneLighting(
   patch: Partial<Pick<SceneLighting, "ambient" | "exposure" | "tonemap" | "shadows" | "wind" | "softShadows">>,
 ): SceneLighting {
   return { ...lighting, ...patch };
+}
+
+/** Show the rig in physical units (lux, candela, nits, EV100) or the renderer's own. Nothing it renders changes. */
+export function setSceneUnits(lighting: SceneLighting, physical: boolean): SceneLighting {
+  const { units: _old, ...rest } = lighting;
+  return physical ? { ...rest, units: "physical" } : rest;
 }
 
 /** Set or clear the procedural sky dome. */

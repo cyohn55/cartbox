@@ -754,7 +754,12 @@ vec3 lightTerm(Light lgt, vec3 P, vec3 N, vec3 V, float ndv, float a2, float k, 
     float dist = max(length(toL), 1e-4);
     Ld = toL / dist;
     float range = lgt.d2.x;
-    if (range > 0.0) { float t = max(0.0, 1.0 - dist / range); atten = t * t; }
+    if (lgt.d3.w > 0.5) { // inverse square, windowed to its range
+      float win = 1.0;
+      if (range > 0.0) { float q = dist / range; float t = clamp(1.0 - q * q * q * q, 0.0, 1.0); win = t * t; }
+      float d = max(dist, 0.01);
+      atten = win / (d * d);
+    } else if (range > 0.0) { float t = max(0.0, 1.0 - dist / range); atten = t * t; }
     if (lgt.d0.w > 1.5) {
       float ct = clamp((-dot(Ld, lgt.d3.xyz) - lgt.d2.y) / (lgt.d2.z - lgt.d2.y), 0.0, 1.0);
       atten = atten * ct * ct * (3.0 - 2.0 * ct);

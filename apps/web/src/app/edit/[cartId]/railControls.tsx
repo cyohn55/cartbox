@@ -18,6 +18,8 @@
 
 import { useEffect, useState, type ReactNode } from "react";
 
+import { formatPhysical } from "@cartbox/editor";
+
 import styles from "./editor.module.css";
 import { resolveGroupOpen, useEditorDensity } from "./editorDensity";
 
@@ -316,4 +318,28 @@ export function RangeControl({
     );
   }
   return <RailGroup label={label}>{row}</RailGroup>;
+}
+
+/**
+ * A slider over a physical quantity spanning decades (lux, candela, nits), so
+ * moonlight and noon both sit under the thumb: it moves in log10 steps, and
+ * its far left end is off (0).
+ */
+export function PhysicalRange({ label, unit, min, max, value, onChange }: { label: string; unit: string; min: number; max: number; value: number; onChange: (value: number) => void }) {
+  const lo = Math.log10(min);
+  const hi = Math.log10(max);
+  const off = lo - 0.05;
+  return (
+    <RangeControl
+      label={label}
+      nested
+      min={off}
+      max={hi}
+      step={0.01}
+      value={value > 0 ? Math.min(hi, Math.max(lo, Math.log10(value))) : off}
+      ariaLabel={label}
+      display={formatPhysical(value, unit)}
+      onChange={(position) => onChange(position <= lo - 0.025 ? 0 : 10 ** position)}
+    />
+  );
 }

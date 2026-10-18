@@ -64,7 +64,7 @@ export function bounceLightsFor(authored: SceneLighting, frame: SceneLighting, c
       : null;
   const points = [...frame.lights, ...cart]
     .filter((x) => (x.kind === "point" || x.kind === "spot") && x.position)
-    .map((x) => ({ position: x.position!, color: x.color.map((c) => (c * x.intensity) / brightness) as [number, number, number], range: x.range && x.range > 0 ? x.range : 8 }));
+    .map((x) => ({ position: x.position!, color: x.color.map((c) => (c * x.intensity) / brightness) as [number, number, number], range: x.range && x.range > 0 ? x.range : 8, ...(x.falloff ? { falloff: x.falloff } : {}) }));
   return { sun, points };
 }
 
@@ -72,5 +72,5 @@ export function bounceLightsFor(authored: SceneLighting, frame: SceneLighting, c
 export function bounceSignature(lights: BounceLights): string {
   const r = (v: number, s: number) => Math.round(v * s);
   const sun = lights.sun ? `${lights.sun.direction.map((v) => r(v, 100)).join(",")}:${lights.sun.color.map((v) => r(v, 50)).join(",")}` : "-";
-  return `${sun}|${lights.points.map((p) => `${p.position.map((v) => r(v, 20)).join(",")}:${p.color.map((v) => r(v, 50)).join(",")}:${r(p.range, 10)}`).join(";")}`;
+  return `${sun}|${lights.points.map((p) => `${p.position.map((v) => r(v, 20)).join(",")}:${p.color.map((v) => r(v, 50)).join(",")}:${r(p.range, 10)}${p.falloff ? ":2" : ""}`).join(";")}`;
 }

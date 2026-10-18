@@ -778,7 +778,12 @@ fn lightTerm(lgt: Light, P: vec3<f32>, N: vec3<f32>, V: vec3<f32>, ndv: f32, a2:
     let dist = max(length(toL), 1e-4);
     Ld = toL / dist;
     let range = lgt.d2.x;
-    if (range > 0.0) { let t = max(0.0, 1.0 - dist / range); atten = t * t; }
+    if (lgt.d3.w > 0.5) { // inverse square, windowed to its range
+      var win = 1.0;
+      if (range > 0.0) { let q = dist / range; let t = clamp(1.0 - q * q * q * q, 0.0, 1.0); win = t * t; }
+      let d = max(dist, 0.01);
+      atten = win / (d * d);
+    } else if (range > 0.0) { let t = max(0.0, 1.0 - dist / range); atten = t * t; }
     if (lgt.d0.w > 1.5) {
       let ct = clamp((-dot(Ld, lgt.d3.xyz) - lgt.d2.y) / (lgt.d2.z - lgt.d2.y), 0.0, 1.0);
       atten = atten * ct * ct * (3.0 - 2.0 * ct);
