@@ -98,7 +98,8 @@ import {
  *                                    w = gust (B6; windUniform in wind.ts)
  * 896  maps0      vec4<f32>    16   x = 1 when a tangent-space normal map is bound (P1a),
  *                                    y = distance-tiling distance (0 = off) (P2b; farTileBlend),
- *                                    z = 1 when the water flows along the UVs (P3; waterTiltAlong)
+ *                                    z = 1 when the water flows along the UVs (P3; waterTiltAlong),
+ *                                    w = the material's ID in the thin G-buffer (F0c)
  * ```
  *
  * 912 bytes used, padded to a 1024-byte stride (a 256-byte multiple a dynamic
@@ -488,6 +489,8 @@ export interface InstanceUniform {
   readonly wind?: readonly [number, number, number, number] | null;
   /** A tangent-space normal map is bound (EDITOR_PRO_ROADMAP.md P1a). */
   readonly hasNormalMap?: boolean;
+  /** The draw's material ID in the thin G-buffer (AAA_FIDELITY_ROADMAP.md F0c): 1 and up, one per material in the frame. */
+  readonly materialId?: number;
 }
 
 /**
@@ -762,7 +765,7 @@ export function writeInstanceUniform(target: Float32Array, index: number, unifor
   target[base + OFFSET_MAPS0] = uniform.hasNormalMap ? 1 : 0;
   target[base + OFFSET_MAPS0 + 1] = mapping?.farTile ?? 0;
   target[base + OFFSET_MAPS0 + 2] = uniform.waterAlong ? 1 : 0;
-  target[base + OFFSET_MAPS0 + 3] = 0;
+  target[base + OFFSET_MAPS0 + 3] = uniform.materialId ?? 0;
 }
 
 /** The camera's right and up in world space (the view's first two rows) and the frame's height, for refraction (I5). */

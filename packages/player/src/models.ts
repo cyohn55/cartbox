@@ -80,6 +80,13 @@ export interface RenderCaps {
    * to show and keeps the space its content was authored in.
    */
   linearHdr?: boolean;
+  /**
+   * A depth prepass and thin G-buffer (AAA_FIDELITY_ROADMAP.md F0c): the
+   * opaque depth, normal, roughness and material ID before shading, so each
+   * pixel is shaded once and screen-space effects can read them. Only with
+   * `gpuPresent`.
+   */
+  prepass?: boolean;
 }
 
 /**
@@ -223,6 +230,7 @@ export const AAA_RASTER_CAPS: RenderCaps = {
   ...MODERN_RASTER_CAPS,
   gpuPresent: true,
   linearHdr: true,
+  prepass: true,
 };
 
 export interface ConsoleModel {

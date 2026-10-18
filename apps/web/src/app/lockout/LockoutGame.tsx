@@ -305,7 +305,7 @@ export function LockoutGame() {
         // ?present=gpu presents the frame from the GPU, as the AAA tier does (AAA_FIDELITY_ROADMAP.md F0a);
         // ?hdr=1 shades it in linear light too (F0b).
         ...(new URLSearchParams(window.location.search).get("present") === "gpu" ? { gpuPresent: true } : {}),
-        ...(new URLSearchParams(window.location.search).get("hdr") === "1" ? { gpuPresent: true, linearHdr: true } : {}),
+        ...(new URLSearchParams(window.location.search).get("hdr") === "1" ? { gpuPresent: true, linearHdr: true, prepass: true } : {}),
         autostart: true,
         record: false,
         controls: "auto",

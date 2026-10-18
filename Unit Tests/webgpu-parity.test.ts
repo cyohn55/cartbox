@@ -33,7 +33,7 @@
  * WebGPU. So this asserts zero difference, not a tolerance.
  */
 
-import { describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import {
   composeModelMatrix,
@@ -162,8 +162,16 @@ function shadowScene(): MeshSceneInstance[] {
   ];
 }
 
+/**
+ * The parity suite runs twice: as it always has, then with the depth prepass
+ * (AAA_FIDELITY_ROADMAP.md F0c) on. The prepass must change nothing on screen,
+ * so every comparison holds as it is.
+ */
+let PREPASS = false;
+
 function draw(): SceneDraw {
   return {
+    ...(PREPASS ? { prepass: true } : {}),
     width: W,
     height: H,
     out: new Uint8ClampedArray(W * H * 4),
@@ -174,7 +182,14 @@ function draw(): SceneDraw {
   };
 }
 
-describe.skipIf(!device)("WebGPU parity on a real device", () => {
+for (const prepass of [false, true])
+describe.skipIf(!device)(`WebGPU parity on a real device${prepass ? ", after a depth prepass" : ""}`, () => {
+  beforeAll(() => {
+    PREPASS = prepass;
+  });
+  afterAll(() => {
+    PREPASS = false;
+  });
   it("compiles the shader and builds the pipeline", async () => {
     // A null here means the WGSL failed to compile, the explicit bind group
     // layout was rejected, or a resource could not be allocated — the class of

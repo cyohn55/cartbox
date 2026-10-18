@@ -295,6 +295,13 @@ interface RenderCaps {
      * to show and keeps the space its content was authored in.
      */
     linearHdr?: boolean;
+    /**
+     * A depth prepass and thin G-buffer (AAA_FIDELITY_ROADMAP.md F0c): the
+     * opaque depth, normal, roughness and material ID before shading, so each
+     * pixel is shaded once and screen-space effects can read them. Only with
+     * `gpuPresent`.
+     */
+    prepass?: boolean;
 }
 /**
  * What the shared software rasteriser behind the mesh/world overlays actually
@@ -2996,6 +3003,12 @@ interface PlayerOptions {
      */
     linearHdr?: boolean;
     /**
+     * Lay a depth prepass and thin G-buffer before shading (AAA_FIDELITY_ROADMAP.md
+     * F0c), or not. Defaults to the model's `prepass` render cap (the AAA tier);
+     * applies only where the frame is presented from the GPU.
+     */
+    prepass?: boolean;
+    /**
      * Control settings (aim inversion, look sensitivity, controller and keyboard
      * bindings, touch pad size/opacity). Change them live with
      * {@link PlayerHandle.setControlSettings}. Defaults: DEFAULT_CONTROL_SETTINGS.
@@ -3732,6 +3745,13 @@ interface SceneDraw {
      * software renderer ignores it.
      */
     readonly reflections?: boolean;
+    /**
+     * A depth prepass (AAA_FIDELITY_ROADMAP.md F0c): the opaque surfaces' depth,
+     * and the thin G-buffer of their normal, roughness and material ID, before
+     * anything is shaded, so the shading pass shades each pixel once and
+     * screen-space effects have the buffers to read. The WebGPU renderer only.
+     */
+    readonly prepass?: boolean;
     /**
      * Key light direction, or omitted for the rasteriser's default. The world
      * overlay publishes a cart-driven sun here, so it changes per frame.
@@ -4613,7 +4633,7 @@ declare class WebgpuSceneRenderer implements SceneRenderer {
     private readonly width;
     private readonly height;
     private readonly pipeline;
-    /** Build the pipelines for a shader variant (a material graph's, EP7), at a sample count (I1). */
+    /** Build the pipelines for a shader variant (a material graph's, EP7), at a sample count (I1), with a depth prepass (F0c). */
     private readonly pipelinesFor;
     private readonly bindGroupLayout;
     private readonly colourTexture;
@@ -4745,6 +4765,24 @@ declare class WebgpuSceneRenderer implements SceneRenderer {
     private submit;
     /** Clear the colour texture to transparent black (a GPU-kept frame with nothing in it). */
     private clearColour;
+    /** The thin G-buffer (F0c), made on the first frame with a prepass. */
+    private gbuffer;
+    /** What the last frame's prepass left, or null when it had none. */
+    private prepassed;
+    private ensureGbuffer;
+    /**
+     * The last frame's depth prepass (AAA_FIDELITY_ROADMAP.md F0c), for
+     * screen-space effects: its depth (multisampled in an anti-aliased frame)
+     * and the thin G-buffer, an rgba16float of xy = octahedral world normal
+     * facing the viewer, z = roughness and w = material ID (0 where nothing
+     * opaque drew). Null when the frame had no prepass. Both hold until the next
+     * frame.
+     */
+    get prepassTargets(): {
+        readonly depth: any;
+        readonly gbuffer: any;
+        readonly multisampled: boolean;
+    } | null;
     /** The reflection pass's uniforms and pipelines (I3), made on first use; its targets are the frame graph's. */
     private reflections;
     private ensureReflections;
@@ -4885,7 +4923,8 @@ declare class WebgpuSceneRenderer implements SceneRenderer {
  *                                    w = gust (B6; windUniform in wind.ts)
  * 896  maps0      vec4<f32>    16   x = 1 when a tangent-space normal map is bound (P1a),
  *                                    y = distance-tiling distance (0 = off) (P2b; farTileBlend),
- *                                    z = 1 when the water flows along the UVs (P3; waterTiltAlong)
+ *                                    z = 1 when the water flows along the UVs (P3; waterTiltAlong),
+ *                                    w = the material's ID in the thin G-buffer (F0c)
  * ```
  *
  * 912 bytes used, padded to a 1024-byte stride (a 256-byte multiple a dynamic
@@ -5122,6 +5161,8 @@ interface InstanceUniform {
     readonly wind?: readonly [number, number, number, number] | null;
     /** A tangent-space normal map is bound (EDITOR_PRO_ROADMAP.md P1a). */
     readonly hasNormalMap?: boolean;
+    /** The draw's material ID in the thin G-buffer (AAA_FIDELITY_ROADMAP.md F0c): 1 and up, one per material in the frame. */
+    readonly materialId?: number;
 }
 /**
  * A draw's triplanar repeat (0 = UV mapping) and height-blend sharpness (0 = an
@@ -6297,6 +6338,8 @@ interface MeshOverlayOptions {
     readonly temporal?: boolean;
     /** The model's screen-space reflections cap (`reflections`, I3), likewise gated by the quality. Off by default. */
     readonly reflections?: boolean;
+    /** The model's depth-prepass cap (`prepass`, F0c): a GPU-presented scene lays its depth and thin G-buffer first. Off by default. */
+    readonly prepass?: boolean;
     /**
      * Makes a GPU renderer of its own for the front layer (a held weapon and the
      * arms holding it), where the scene draws on the GPU. Called the first time
