@@ -27,7 +27,7 @@
 
 import type { CartEngine } from "../engine/CartEngine";
 import { encodeRgbaPng } from "./png";
-import { meshBounds, serializeMeshAsset, type EncodedImage, type MeshAsset, type MeshMaterial, type MeshPrimitive, type MeshVariant } from "./MeshAsset";
+import { meshBounds, serializeMaterial, serializeMeshAsset, type EncodedImage, type MeshAsset, type MeshMaterial, type MeshPrimitive, type MeshVariant } from "./MeshAsset";
 import type { AnimationClip, ClipChannel, SkinJoint } from "./skeleton";
 import { INFINITE_TINTS, type SceneLighting } from "./SceneLighting";
 import { plasmaMaterial, type PlasmaLook } from "./plasma";
@@ -63,6 +63,8 @@ import { LOCKOUT_PROBES } from "./lockoutProbes.generated";
 import { planProbeGrid, type LightProbeGrid, type StoredLightProbes } from "./lightProbes";
 import { SWEETIE_16 } from "./palette";
 import { writeArenaMap } from "./arenaMarkup";
+import type { MaterialLibrary } from "./materialInstances";
+import type { Spline } from "./splines";
 import { arenaNavMesh } from "./arenaValidate";
 import {
   ARENA_TILE_WORLD,
@@ -3599,6 +3601,9 @@ export interface ArenaScene {
     readonly decalMarks: unknown;
     readonly foliage: unknown;
     readonly audio: unknown;
+    /** The scene's material library (P1b), and its splines (P3), when it has them. */
+    readonly materials?: MaterialLibrary;
+    readonly splines?: readonly Spline[];
   };
 }
 
@@ -3740,6 +3745,8 @@ export function arenaMeshSidecar(scene: ArenaScene): string {
     strings: LOCKOUT_STRINGS,
     // The map's markup and collision (P7), so the editor opens it as an arena map.
     arena: writeArenaMap(scene.map),
+    ...(own.materials && own.materials.length > 0 ? { materials: own.materials.map((m) => ({ id: m.id, material: serializeMaterial(m.material) })) } : {}),
+    ...(own.splines && own.splines.length > 0 ? { splines: own.splines } : {}),
   });
 }
 

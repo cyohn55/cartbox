@@ -13,7 +13,6 @@ import { describe, expect, it } from "vitest";
 
 import {
   ARENA_MAPS,
-  BEAVER_GROUND,
   BEAVER_MAP,
   DEFAULT_ACCESSIBILITY,
   LOCKOUT_STRINGS,
@@ -161,15 +160,16 @@ end
 end)()`;
 
 describe("Beaver Creek, dressed (B9)", () => {
-  it("textures its canyon: grass on the flats and sandstone on the walls, mapped triplanar", () => {
+  it("textures its canyon: mud down the creek, grass on the flats and sandstone on the walls, mapped triplanar", () => {
     const t = beaverTerrain();
     expect(t.triplanar).toBe(true);
-    expect(t.layers.map((l) => l.material.baseColorImage?.mime)).toEqual(["image/png", "image/png"]);
+    expect(t.layers.map((l) => l.material.baseColorImage?.mime)).toEqual(["image/png", "image/png", "image/png"]);
+    expect(t.layers.map((l) => l.material.name)).toEqual(["terrain-mud", "terrain-grass", "terrain-rock"]);
   });
 
   it("grows grass and reeds clear of the bases, the pads and the water, and trees only out of play", () => {
     const layers = beaverFoliage();
-    const g = BEAVER_GROUND;
+    const g = { x0: beaverTerrain().origin[0], z0: beaverTerrain().origin[2] };
     const byId = Object.fromEntries(layers.map(({ layer }) => [layer.id, layer]));
     expect(byId["beaver-grass"]!.copies.length).toBeGreaterThan(300);
     expect(byId["beaver-reeds"]!.copies.length).toBeGreaterThan(40);
@@ -190,7 +190,7 @@ describe("Beaver Creek, dressed (B9)", () => {
 
   it("stores them in its sidecar, still within budget", () => {
     const stored = JSON.parse(arenaMap("beaver").sidecar()) as { foliage?: unknown[] };
-    expect(stored.foliage?.length).toBe(5);
+    expect(stored.foliage?.length).toBe(6);
     expect(arenaMap("beaver").sidecar().length).toBeLessThan(2_800_000);
   });
 });

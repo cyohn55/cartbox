@@ -168,6 +168,16 @@ From memory of Battle Creek and Beaver Creek. The linked model can't be opened f
   - *Tests:* a map authored only through the editor's model (no code) passes the validator, and its bots reach every pad and hill.
   - **Mostly done by EDITOR_PRO_ROADMAP.md P7.** The editor's Arena panel marks up and checks a map, and `/lockout?map=cart:<id>` plays it offline against bots. Two pieces are still open: online play, where a guest receives the host's map, and dragging markers with the gizmo.
 
+- **B9 continued by EDITOR_PRO_ROADMAP.md P9.** The art pass rebuilt the map with the editor's tools, collision untouched:
+  - an eroded canyon with a gorge, and a mud-banked river spline;
+  - CSG stone bases with Forerunner dressing and team lights;
+  - a CSG rock arch;
+  - instanced materials;
+  - grass cards, impostor forests and cliff rocks;
+  - post volumes, lamps and eye adaptation, and a two-bounce bake.
+
+  Still open from B9: the cave, the vista and the midday grade.
+
 ## Phase B: outdoor visual quality (editor and renderer)
 
 Each item lands in all three renderers (WebGL2, WebGPU, and the software reference), with editor controls, and keeps to the quality tiers so the iPad and iPhone tiers stay playable.

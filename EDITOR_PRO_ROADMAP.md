@@ -264,7 +264,7 @@ Next to Unity and Unreal, it lacks the following:
       - the stored load and the player's memory split;
       - deviation is zero for a mesh against itself, catches a dropped half, and every default level stays within its budget;
       - tags round-trip and filter.
-- [ ] **P9. Beaver Creek, rebuilt with the editor.**
+- [x] **P9. Beaver Creek, rebuilt with the editor.**
   - Every capability above is used:
     - the canyon is sculpted and eroded;
     - the creek is a river spline;
@@ -279,6 +279,52 @@ Next to Unity and Unreal, it lacks the following:
     - the map validates;
     - every mode plays;
     - it fits the iPhone tier's budget.
+  - **P9: done.** All of it is in `beaverCreekSeed.ts`, and none of it touches collision, so the map plays exactly as before.
+    - **The canyon (P2).**
+      - The terrain is now 96 m square, at the cart's own metre. Inside play, its samples are the cart's ground exactly.
+      - Beyond play, walls of rock rise steeply to rims 12–22 m up. They are buttressed and stepped in strata, and are then eroded by water (14 000 droplets) and by slumping.
+      - North and south, the walls fall away to a gorge the creek comes out of, which is also what the intro flies down.
+      - Terrain layers: wet mud down the creek bed (P1c's mud generator), grass on the flats, banded sandstone on the walls (triplanar).
+    - **The creek (P3)** is a river spline down its bed. It draws flowing water along its UVs and foam at its banks, in place of the flat slab.
+    - **The bases (P5):**
+      - Each base is one worn-stone block, hollowed out and cut for its doors by CSG. Its walls stand exactly where the cart's walls are.
+      - Each has Forerunner pillars at its corners, a metal trim band under the parapet, and team-coloured light strips over its doors.
+    - **The arch (P5)** is a block of canyon rock. CSG cuts its opening as a rounded-square head (a superellipse) whose crown meets the span the cart stands on, with rock steps up either end.
+    - **Materials (P1b):** the scene's library holds four parents (stone, metal, rock, light). The map wears instances of them:
+      - the bases' stone;
+      - the arch's rock, overriding only its macro variation;
+      - blue and red lights, overriding only their colour.
+
+      The library travels in the sidecar, so the editor shows the links.
+    - **Plants (P4):**
+      - The meadow is grass cards.
+      - Broadleaf trees and pines fill the rims in patches, drawn as impostors past 32 m.
+      - Boulders fill the walls' ledges, and cliff rocks break up the steep faces.
+    - **Light (P6):**
+      - Each base has a post volume (+0.9 stops, a touch less saturation) and a warm lamp under its roof.
+      - A third volume sits under the arch, and the eye adapts between -0.5 and +1.5 stops.
+      - The bake now takes two bounces; it was re-baked in about 2 minutes.
+    - **Profiler pass (P8):** Beaver Creek and Lockout both fit the iPhone's budget as stored.
+      - Beaver Creek counts about 50 000 triangles, 408 draw calls, 5.4 MB of textures and a 2.5 MB sidecar.
+      - The phone and tablet draw-call budgets were raised to 500 and 900. The static count includes every weapon's viewmodel, which shows only one at a time, and Lockout (396) runs on iPhones.
+    - **Acceptance:**
+      - Side-by-side captures before and after, from the running game, using `scripts/capture-map.mjs`.
+      - The map validates, and every game type plays on the real engine (`beaver-creek.test.ts`).
+      - It fits the iPhone's budget (`beaver-rebuild.test.ts`).
+    - **Not yet:**
+      - The map takes about 2 s to build on load, against roughly 1 s before; erosion and impostor baking are most of it.
+      - Some cliff rocks on near-vertical faces look as if they float.
+      - The cave is still missing (the cart needs boxes for it).
+      - A reference set of shots from the original isn't in the repo, so the side-by-side is before against after.
+    - *Tests:* `beaver-rebuild.test.ts`:
+      - the play space's ground matches the cart's to 3 cm, and the walls and rims rise irregularly beyond it;
+      - the map validates;
+      - the creek spline is at the water line, with water and foam drawn;
+      - the instances and the library check out;
+      - no stone stands in the doors;
+      - the trees have impostors, and the cliff-rock rule is in place;
+      - the post volumes and eye adaptation are set;
+      - both maps fit the iPhone budget.
 
 ## Order
 
