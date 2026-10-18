@@ -132,7 +132,7 @@ import { MAX_ANISOTROPY, MipmapGenerator, coverageMips, hasTransparency, mipLeve
 import { compressedFormatsFor } from "../lighting/webgpuDevice.js";
 import { brdfWgsl, dfgTable } from "./brdf.js";
 import { IBL_LEVELS, IblBuilder, SH_IRRADIANCE_WGSL, environmentKey, environmentPanorama, environmentSh } from "./ibl.js";
-import { TEMPORAL_SHARPEN_WGSL, TemporalState, temporalShaderWgsl } from "./temporal.js";
+import { REACTIVE_MASK_WGSL, TEMPORAL_SHARPEN_WGSL, TemporalState, hdrTemporalShaderWgsl, temporalShaderWgsl } from "./temporal.js";
 import { reflectionShaderWgsl, reflectionUniforms } from "./reflections.js";
 import type { RenderStats } from "../debug/profiler.js";
 import {
@@ -2375,7 +2375,9 @@ export class WebgpuSceneRenderer implements SceneRenderer {
     // Refraction (I5) reads the opaque scene's colour the same way: copied
     // (or resolved) between the two passes.
     const refract = draws.some((entry) => entry.refract);
-    const split = refract || draws.some((entry) => softEdges(entry.primitive.material, entry.alpha, draw.projection) !== undefined);
+    // The AAA tier's TAA (F4a) masks what the see-through draws change, so it draws them apart too.
+    const hdrTaa = this.hdr && temporal !== null && prepass;
+    const split = refract || draws.some((entry) => softEdges(entry.primitive.material, entry.alpha, draw.projection) !== undefined) || (hdrTaa && draws.some((entry) => entry.alpha >= 2));
     const firstSeeThrough = split ? draws.findIndex((entry) => entry.alpha >= 2 || entry.refract) : -1;
     const seeThrough = firstSeeThrough >= 0;
     // Anti-aliased (I1): draw into multisampled targets and resolve into the colour texture as the last scene pass ends.
@@ -2435,7 +2437,8 @@ export class WebgpuSceneRenderer implements SceneRenderer {
     const rays = reflections ? ["reflect.ray", "reflect.env"].map((name) => graph.createTexture(name, { format: "rgba16float", ...size })) : [];
     const raysMs = msaa ? rays.map((ray) => graph.createTexture(`${ray.name}.msaa`, { format: "rgba16float", ...size, sampleCount: MSAA_SAMPLES })) : [];
     // Refraction (I5) reads the opaque scene's colour, copied (or resolved) between the two scene passes.
-    const behind = refract && seeThrough ? graph.importTexture("behind", this.depthGroups.behind) : null;
+    // The AAA tier's TAA reads it too, for its reactive mask (F4a).
+    const behind = (refract || hdrTaa) && seeThrough ? graph.importTexture("behind", this.depthGroups.behind) : null;
     const groups = msaa ? msaa.groups : this.depthGroups;
     const target = msColour ?? colour;
     const rayTargets = msaa ? raysMs : rays;
@@ -2522,8 +2525,10 @@ export class WebgpuSceneRenderer implements SceneRenderer {
       });
     }
     if (seeThrough) scenePass("see-through", firstSeeThrough, draws.length, true, true);
+    // Before the reflections land on the opaque scene: what the see-through draws alone changed (F4a).
+    const reactive = hdrTaa && seeThrough && behind ? this.addReactiveMask(graph, behind, colour) : null;
     if (reflections) this.addReflections(graph, reflections, colour, depth, rays, temporal ? temporal.projection : draw.projection, msaa !== null);
-    if (temporal) this.addTemporal(graph, temporal.uniforms, colour, depth, msaa !== null);
+    if (temporal) this.addTemporal(graph, temporal.uniforms, colour, depth, msaa !== null, hdrTaa ? velocity : null, reactive);
 
     const slot = readback ? this.readback.find((entry) => !entry.busy) : undefined;
     if (slot) {
@@ -2694,14 +2699,50 @@ export class WebgpuSceneRenderer implements SceneRenderer {
    * written, swapping each frame), its uniforms, sampler and pipelines. Made on
    * first use.
    */
-  private taa: { history: [any, any]; index: number; uniforms: any; sampler: any; resolve: [any, any]; sharpen: any } | null = null;
+  private taa: { history: [any, any]; index: number; uniforms: any; sampler: any; resolve: [any, any]; hdrResolve: [any, any]; sharpen: any } | null = null;
+  private reactivePipeline: any = null;
+
+  /**
+   * The reactive mask (F4a): how much the see-through pass changed each pixel,
+   * from the opaque scene copied before it against the frame after it.
+   */
+  private addReactiveMask(graph: FrameGraph, opaqueOnly: FrameResource, colour: FrameResource): FrameResource {
+    const device = this.device;
+    this.reactivePipeline ??= fullScreenPipeline(device, REACTIVE_MASK_WGSL, "mask", "r8unorm");
+    const mask = graph.createTexture("taa.reactive", { format: "r8unorm", width: this.width, height: this.height });
+    graph.addPass("taa.reactive", "render", (pass) => {
+      pass.read(opaqueOnly);
+      pass.read(colour);
+      pass.write(mask);
+      return (ctx) => {
+        const encoded = ctx.encoder.beginRenderPass({
+          colorAttachments: [{ view: ctx.texture(mask).createView(), clearValue: { r: 0, g: 0, b: 0, a: 0 }, loadOp: "clear", storeOp: "store" }],
+          ...ctx.timing,
+        });
+        encoded.setPipeline(this.reactivePipeline);
+        encoded.setBindGroup(
+          0,
+          device.createBindGroup({
+            layout: this.reactivePipeline.getBindGroupLayout(0),
+            entries: [
+              { binding: 0, resource: ctx.texture(opaqueOnly).createView() },
+              { binding: 1, resource: ctx.texture(colour).createView() },
+            ],
+          }),
+        );
+        encoded.draw(3);
+        encoded.end();
+      };
+    });
+    return mask;
+  }
 
   /**
    * Resolve the frame into the history and sharpen it back into the colour
    * texture that is read back (HALO_INFINITE_STYLE_ROADMAP.md I2). The two
    * history images outlive the frame, so the graph imports them.
    */
-  private addTemporal(graph: FrameGraph, uniforms: Float32Array, colour: FrameResource, depth: FrameResource, multisampled: boolean): void {
+  private addTemporal(graph: FrameGraph, uniforms: Float32Array, colour: FrameResource, depth: FrameResource, multisampled: boolean, velocity: FrameResource | null = null, reactive: FrameResource | null = null): void {
     const device = this.device;
     if (!this.taa) {
       const size = { width: this.width, height: this.height };
@@ -2712,13 +2753,17 @@ export class WebgpuSceneRenderer implements SceneRenderer {
         uniforms: device.createBuffer({ size: uniforms.byteLength, usage: 0x40 | 0x08 }), // UNIFORM | COPY_DST
         sampler: device.createSampler({ magFilter: "linear", minFilter: "linear", addressModeU: "clamp-to-edge", addressModeV: "clamp-to-edge" }),
         resolve: [null, null],
+        hdrResolve: [null, null],
         sharpen: fullScreenPipeline(device, TEMPORAL_SHARPEN_WGSL, "sharpen", this.colourFormat),
       };
     }
     const taa = this.taa;
     // The resolve reads the frame's depth: plain, or a multisampled frame's first sample.
     const k = multisampled ? 1 : 0;
-    taa.resolve[k] ??= fullScreenPipeline(device, temporalShaderWgsl(multisampled), "resolve", "rgba16float");
+    // The AAA tier's (F4a) with the velocity buffer and reactive mask; else the depth-reprojected one (I2).
+    const resolve = velocity
+      ? (taa.hdrResolve[k] ??= fullScreenPipeline(device, hdrTemporalShaderWgsl(multisampled), "resolve", "rgba16float"))
+      : (taa.resolve[k] ??= fullScreenPipeline(device, temporalShaderWgsl(multisampled), "resolve", "rgba16float"));
     const read = graph.importTexture("taa.history", taa.history[taa.index]);
     const write = graph.importTexture("taa.next", taa.history[1 - taa.index]);
     taa.index = 1 - taa.index;
@@ -2736,15 +2781,24 @@ export class WebgpuSceneRenderer implements SceneRenderer {
       pass.read(colour);
       pass.read(read);
       pass.read(depth);
+      if (velocity) pass.read(velocity);
+      if (reactive) pass.read(reactive);
       pass.write(write);
       return (ctx) => {
         device.queue.writeBuffer(taa.uniforms, 0, uniforms);
-        fullScreen(ctx, taa.resolve[k], write, [
+        fullScreen(ctx, resolve, write, [
           { binding: 0, resource: { buffer: taa.uniforms } },
           { binding: 1, resource: ctx.texture(colour).createView() },
           { binding: 2, resource: ctx.texture(read).createView() },
           { binding: 3, resource: taa.sampler },
           { binding: 4, resource: ctx.texture(depth).createView() },
+          ...(velocity
+            ? [
+                { binding: 5, resource: ctx.texture(velocity).createView() },
+                // Nothing see-through: a 1×1 stand-in the resolve reads only at the frame's size.
+                { binding: 6, resource: reactive ? ctx.texture(reactive).createView() : this.blankTexture.createView() },
+              ]
+            : []),
         ]);
       };
     });
