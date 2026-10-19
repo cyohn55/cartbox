@@ -60,7 +60,8 @@ await Promise.all(
 console.log(`Standalone export parts built in ${Date.now() - started} ms → ${outDir}`);
 
 // The dedicated Modern core (EP20b, packages/modern-core): served beside the
-// TIC-80 cores, for Modern carts that choose it (and exports that carry it).
+// TIC-80 cores, for the AAA tier, whose own core it is (F0d), and for Modern
+// carts that choose it (and exports that carry it).
 // Its build is committed in its package; this copies it into public/ (when
 // building the site, not when a test builds the parts elsewhere).
 if (!process.argv[2]) {

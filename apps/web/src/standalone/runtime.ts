@@ -74,8 +74,8 @@ export async function boot(game: StandaloneData, stage: HTMLElement, status?: HT
     cartUrl,
     engineUrl,
     engineWasm: base64ToBytes(game.engine.wasm),
-    // A scene on the dedicated Modern core (EP20b) carries that core as its engine.
-    ...(mesh?.core === "direct" ? { directCoreUrl: engineUrl } : {}),
+    // A game on the dedicated Modern core (the AAA tier's own, F0d; or a scene that chose it, EP20b) carries that core as its engine.
+    ...(game.modelId === "aaa" || mesh?.core === "direct" ? { directCoreUrl: engineUrl } : {}),
     modelId: game.modelId as ModelId,
     controls: "auto",
     scale: "fit",

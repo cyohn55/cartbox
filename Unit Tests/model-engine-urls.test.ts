@@ -20,8 +20,15 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { MODELS, type ModelId } from "@cartbox/player";
 
-/** Maps a root-relative engine URL to its file under the web app's public dir. */
+/**
+ * Maps a root-relative engine URL to the file the site serves for it: under
+ * the web app's public dir, except the dedicated Modern core (the AAA tier's,
+ * F0d), whose committed build the site build copies there
+ * (apps/web/scripts/build-standalone.mjs).
+ */
 function publicAssetPath(url: string): string {
+  const core = "/engine/modern-core/";
+  if (url.startsWith(core)) return fileURLToPath(new URL(`../packages/modern-core/dist/${url.slice(core.length)}`, import.meta.url));
   return fileURLToPath(new URL(`../apps/web/public${url}`, import.meta.url));
 }
 

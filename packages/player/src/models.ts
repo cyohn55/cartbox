@@ -496,16 +496,20 @@ export const MODELS: Record<ModelId, ConsoleModel> = {
     id: "aaa",
     label: "AAA (WebGPU)",
     kind: "poly3d",
-    // Modern's 1080p frame and core for now: native resolution is F0d.
-    width: 1920,
-    height: 1080,
+    // The cart's 2D layer (its HUD, its menus): the HD cores' 1280x720 frame and
+    // RAM layout, so the Lua SDK and every HD cart's 2D runs unchanged. The 3D
+    // frame is not bound to it (AAA_FIDELITY_ROADMAP.md F0d).
+    width: 1280,
+    height: 720,
     pixelBytes: 4,
     fps: 60,
     audioChannels: 8,
     sampleRate: 48000,
     paletteSize: 256,
     cartSizeBytes: 8 * 1024 * 1024,
-    engineUrl: "/engine/xbox360/engine.js",
+    // The dedicated Modern core (ENGINE_PARITY_ROADMAP.md EP20b): a Lua 5.4 VM
+    // whose calls into the 3D engine are calls, with no command cap (F0d).
+    engineUrl: "/engine/modern-core/modern-core.js",
     inputs: ["gamepad", "keyboard", "mouse"],
     renderCaps: AAA_RASTER_CAPS,
     assetBudgetBytes: 8 * 1024 * 1024 * 1024,

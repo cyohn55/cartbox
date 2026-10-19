@@ -30,8 +30,9 @@ export const SELECTABLE_MODEL_IDS: readonly ConsoleModelId[] = [
   // a stub today: it runs on the 360 core binary until a dedicated Modern core
   // lands, so authoring a cart on it always boots.
   "modern",
-  // The AAA tier (AAA_FIDELITY_ROADMAP.md): Modern presented from the GPU,
-  // WebGPU-only by design, and playing as Modern where there is no WebGPU.
+  // The AAA tier (AAA_FIDELITY_ROADMAP.md): its own core (the dedicated Modern
+  // core) and a GPU-presented frame, WebGPU-only by design, and playing as Modern
+  // where there is no WebGPU.
   "aaa",
 ];
 
@@ -96,7 +97,9 @@ export const ENGINE_URL_BY_MODEL: Record<ConsoleModelId, string> = {
   modern: withBasePath(
     process.env.NEXT_PUBLIC_MODERN_ENGINE_URL ?? "/engine/xbox360/engine.js",
   ),
-  // The AAA tier runs Modern's core; what differs is how its frame reaches the screen.
+  // The AAA tier plays on the dedicated Modern core (F0d): the player loads it from
+  // beside this URL (directCoreBeside). This one is the HD core it is laid out like,
+  // which the editor authors its cartridge on.
   aaa: withBasePath(
     process.env.NEXT_PUBLIC_MODERN_ENGINE_URL ?? "/engine/xbox360/engine.js",
   ),

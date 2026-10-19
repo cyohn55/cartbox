@@ -164,7 +164,8 @@ export function debugSdkLua(address: number, options: { debugger?: boolean } = {
     for i = 1, #s do poke(a + 2 + i, s:byte(i)) end
     _wr(_B + ${DBG_TRACE_USED}, used + 3 + #s)
   end
-  local _src = debug.getinfo(1, "S").source
+  -- The dedicated Modern core has no debug library: there, traces only.
+  local _src = debug and debug.getinfo(1, "S").source
   -- A cart line for a line of the merged source, or nil inside the injected code.
   local function _cart(n)
     local off = _live() and _rd(_B + ${DBG_LINE_OFFSET}) or 0
@@ -187,6 +188,7 @@ export function debugSdkLua(address: number, options: { debugger?: boolean } = {
   -- The cart frames of a stack, innermost first: {name, line, level}.
   local function _frames(co, max)
     local out = {}
+    if not debug then return out end
     for level = co and 0 or 2, 60 do
       local info
       if co then info = debug.getinfo(co, level, "Slnf") else info = debug.getinfo(level, "Slnf") end
@@ -201,7 +203,7 @@ export function debugSdkLua(address: number, options: { debugger?: boolean } = {
   end
   -- The core passes every runtime error through debug.traceback. Name cart
   -- lines, and keep it short: the core keeps only 256 bytes of it.
-  local _tb = debug.traceback
+  local _tb = debug and debug.traceback
   local function _traceback(co, msg)
     msg = tostring(msg or ""):gsub('^%[string "[^"]*"%]:(%d+):', function(n)
       local l = _cart(n)
@@ -212,9 +214,11 @@ export function debugSdkLua(address: number, options: { debugger?: boolean } = {
     if #parts > 0 then msg = msg .. "\\nat " .. table.concat(parts, " < ") end
     return msg
   end
-  debug.traceback = function(msg, ...)
-    if type(msg) ~= "string" and msg ~= nil then return _tb(msg, ...) end
-    return _traceback(nil, msg)
+  if debug then
+    debug.traceback = function(msg, ...)
+      if type(msg) ~= "string" and msg ~= nil then return _tb(msg, ...) end
+      return _traceback(nil, msg)
+    end
   end${dbg ? debuggerLua() : ""}
 end`;
 }

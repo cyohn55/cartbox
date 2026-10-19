@@ -86,13 +86,14 @@ export interface StandaloneNeeds {
   readonly direct: boolean;
 }
 
-export function standaloneNeeds(game: Pick<StandaloneGame, "mesh">): StandaloneNeeds {
+export function standaloneNeeds(game: Pick<StandaloneGame, "mesh"> & { readonly modelId?: string }): StandaloneNeeds {
   const mesh = game.mesh ?? null;
   const physics = physicsNeeds(mesh);
   return {
     physics: physics.bodies ? (physics.deterministic ? "deterministic" : "regular") : null,
     ktx2: Boolean(mesh?.includes('"mime":"image/ktx2"')),
-    direct: Boolean(mesh && /"core":"direct"/.test(mesh)),
+    // The AAA tier's own core (F0d), or a Modern-tier scene that chose it (EP20b).
+    direct: game.modelId === "aaa" || Boolean(mesh && /"core":"direct"/.test(mesh)),
   };
 }
 
@@ -318,7 +319,7 @@ export interface StandaloneSources {
 }
 
 /** Fetch the parts a game needs: the runtime, its engine core, and physics or the KTX2 transcoder if used. */
-export async function fetchStandaloneParts(game: Pick<StandaloneGame, "mesh">, sources: StandaloneSources): Promise<StandaloneParts> {
+export async function fetchStandaloneParts(game: Pick<StandaloneGame, "mesh"> & { readonly modelId?: string }, sources: StandaloneSources): Promise<StandaloneParts> {
   const get = sources.fetch ?? fetch;
   const needs = standaloneNeeds(game);
   const load = async (url: string) => {

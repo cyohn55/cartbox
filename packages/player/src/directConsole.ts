@@ -34,6 +34,16 @@ export function directCoreModel(model: ConsoleModel): boolean {
   return model.id === "modern" || model.id === "aaa" || model.id === "xbox360";
 }
 
+/**
+ * Whether a cart on `modelId` runs on the dedicated core, given the core its
+ * scene or its caller asked for. The AAA tier runs there unless asked not to
+ * (AAA_FIDELITY_ROADMAP.md F0d); the other HD-tier models only when asked.
+ */
+export function runsOnDirectCore(modelId: string, requested?: "tic80" | "direct" | null): boolean {
+  if (modelId !== "modern" && modelId !== "aaa" && modelId !== "xbox360") return false;
+  return (requested ?? (modelId === "aaa" ? "direct" : "tic80")) === "direct";
+}
+
 /** Wrap an instantiated modern-core module as a console for `model`. */
 export function createDirectConsole(
   module: unknown,

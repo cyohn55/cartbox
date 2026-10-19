@@ -1430,7 +1430,7 @@ function WorkbenchBody({
           revision={revision}
         />
       )}
-      {activeTab === "Mesh" && <MeshEditor key="mesh" sidecar={mesh} onSidecarChange={setMesh} code={doc} onStartPlay={startPlaytest} modernTier={modelId === "modern" || modelId === "aaa" || modelId === "xbox360"} cartId={cartId} />}
+      {activeTab === "Mesh" && <MeshEditor key="mesh" sidecar={mesh} onSidecarChange={setMesh} code={doc} onStartPlay={startPlaytest} modernTier={modelId === "modern" || modelId === "aaa" || modelId === "xbox360"} directCore={modelId === "aaa"} cartId={cartId} />}
       {activeTab === "Input" && <InputEditor key="input" sidecar={mesh} onSidecarChange={setMesh} />}
       {activeTab === "Text" && <StringsEditor key="text" sidecar={mesh} ui={mesh.ui ?? []} onSidecarChange={setMesh} />}
       {activeTab === "UI" && <UiEditor key="ui" sidecar={mesh} onSidecarChange={setMesh} width={activeModel.width} height={activeModel.height} palette={uiPalette} />}
