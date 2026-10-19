@@ -80,6 +80,13 @@ export function ProfilerPanel({ profile, budgetMs }: { profile: ProfileSnapshot 
             value={render.gpuMs !== null ? `${ms(render.gpuMs)} ms` : render.backend === "software" ? "on the CPU" : "not timed here"}
             hint={render.gpuMs === null && render.backend !== "software" ? "This browser doesn't let pages time the GPU" : undefined}
           />
+          {render.resolution && (
+            <Stat
+              label="3D resolution"
+              value={`${render.resolution.width}×${render.resolution.height} (${Math.round(render.resolution.scale * 100)}%)`}
+              hint="The AAA tier renders at the display's own resolution, and gives up pixels when the GPU can't keep up"
+            />
+          )}
           {render.passes?.map((pass) => <Stat key={pass.name} label={`· ${pass.name}`} value={`${ms(pass.ms)} ms`} />)}
         </Group>
       )}

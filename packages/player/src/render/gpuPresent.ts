@@ -456,6 +456,12 @@ ${GRADING_WGSL}
 fn over(top: vec4f, under: vec4f) -> vec4f {
   return vec4f(top.rgb + under.rgb * (1.0 - top.a), top.a + under.a * (1.0 - top.a));
 }
+// A 3D layer rendered at its own size (the scene at its dynamic resolution, F0d):
+// the texel when it is the frame's size, else filtered up to it.
+fn sampleScaled(t: texture_2d<f32>, pos: vec4f, p: vec2i) -> vec4f {
+  if (all(vec2f(textureDimensions(t)) == u.frame.xy)) { return textureLoad(t, p, 0); }
+  return textureSampleLevel(t, lightSampler, pos.xy / u.frame.xy, 0.0);
+}
 // Byte space clamps every layer to the displayable range; linear light (F0b) only to zero.
 fn keep(c: vec4f) -> vec4f {
   if (u.hdr.x > 0.5) { return max(c, vec4f(0.0)); }
@@ -469,7 +475,7 @@ fn composite(pos: vec4f, p: vec2i, hdr: bool) -> vec4f {
   if (hdr && u.layers.x != 1.0) { c = vec4f(toLinear(c.rgb), c.a); }
   var open = true;
   if (u.layers.y > 0.5) {
-    let s = loadScaled(scene, p, u.frame.xy);
+    let s = sampleScaled(scene, pos, p);
     open = all(s == vec4f(0.0));
     c = keep(over(s, c));
   }
@@ -479,7 +485,7 @@ fn composite(pos: vec4f, p: vec2i, hdr: bool) -> vec4f {
     if (hdr) { c = vec4f(c.rgb + toLinear(u.shaftColor.rgb) * v, c.a); }
     else { c = vec4f(min(vec3f(1.0), c.rgb + u.shaftColor.rgb * v), c.a); }
   }
-  if (u.layers.w > 0.5) { c = keep(over(loadScaled(front, p, u.frame.xy), c)); }
+  if (u.layers.w > 0.5) { c = keep(over(sampleScaled(front, pos, p), c)); }
   return c;
 }
 @fragment fn compose(@builtin(position) pos: vec4f) -> @location(0) vec4f {

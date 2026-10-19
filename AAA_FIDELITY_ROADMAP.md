@@ -213,7 +213,7 @@ Everything else depends on this track. It contains no visible "feature", but its
       - a jittered TAA frame reads zero.
       - The parity suite passes with the prepass on, and Chromium creates the targets and pipelines without errors.
     - *Left for later:* F4a's TAA reprojects with it; until then nothing reads it. Particles and debris that come and go can mismatch for a frame (they read as having moved from another copy's place), and the TAA's rejection will handle that.
-- [ ] **F0d. The `aaa` tier.**
+- [x] **F0d. The `aaa` tier.**
   - A console model on the dedicated Modern core (`packages/modern-core`, ENGINE_PARITY EP20b: a Lua 5.4 VM with direct engine calls and no command cap). `MODELS.modern` still points its `engineUrl` at the 360 core, and the tier ends that placeholder.
   - It renders at native device resolution × DPR, with dynamic resolution driven by the GPU frame time, and gives the 2D layer a scaled presentation.
   - It is listed on the home page with a starter scene. `modern` stays as the 1080p 360-pipeline tier.
@@ -235,7 +235,14 @@ Everything else depends on this track. It contains no visible "feature", but its
     - **The 2D layer is scaled to it.** The cart's frame, HUD and holo UI stay 1280×720 and are drawn to the frame texel by texel (nearest), so the HUD's key colours stay exact. Every pass that reads a layer of another size (compose, the shaft mask, the measurements) maps the frame's pixel to its texel (`loadScaled`), which is the same texel when the sizes match: frames at the model's size come out as before.
     - *Tests (`native-resolution.test.ts`):* the backing size, at a pixel ratio and capped; on Dawn, a 32×16 layer presented into a 64×32 frame lands each pixel on its 2×2 exactly; the scene renderer, with multisampling, TAA, the prepass and reflections on, renders at 64×36, 96×54 and 48×27 in turn with no validation error and the frame drawn right at each.
     - In Chromium at a pixel ratio of 2, Beaver Creek on `aaa` (960×540 CSS) presents a 1920×1080 frame with no GPU errors.
-    - *Left for F0d-3:* dynamic resolution, the render scale driven by the GPU frame time.
+  - **F0d-3, dynamic resolution: done.** With the tier's `dynamicResolution` cap (or `/lockout?hdr=1`), the 3D renders at a share of the native frame chosen from the GPU's frame time (`render/dynamicResolution.ts`):
+    - It reads the frame's GPU time (the scene's passes and the presenter's), smoothed. A browser that can't time the GPU gives no reading, and the scale holds.
+    - Down fast, up slow: over 95% of the budget it drops at once to the scale whose pixels fit 85% (time goes with the square of the scale); well under (70%) for two seconds, it climbs one step. Each change waits a few frames for the late readings to catch up.
+    - The scale moves in twentieths between a half and one, so a size it used comes back to the same targets.
+    - The presenter filters a smaller scene and held weapon up to the frame (bilinear); one the frame's size is still read texel for texel.
+    - The profiler shows the 3D resolution and its share of the frame when it isn't all of it.
+    - *Tests (`dynamic-resolution.test.ts`):* the steps; whole while the GPU keeps up; a GPU at 1.5 budgets drops once, within a third of a second, to 0.75 and holds; never under a half; back up a step at a time when there is room; held with no reading; on Dawn, a half-size scene filtered up, flat in its flats and blended across an edge.
+    - In Chromium (SwiftShader, with timestamp queries) at a pixel ratio of 2, Beaver Creek's 1920×1080 frame renders its 3D at 960×540, the floor, with no GPU errors.
 - [ ] **F0e. Off the main thread.**
   - **Compute:** frustum and HZB occlusion culling, LOD selection, light clustering and skinning become compute passes with indirect draws.
   - **Workers:** asset decode (PNG, KTX2 transcode, meshopt), physics and navigation move to workers.

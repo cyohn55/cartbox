@@ -22,6 +22,7 @@
  * `create`, mirroring `LitCanvasSurface.create`.
  */
 
+import { DynamicResolution, scaledSize } from "../render/dynamicResolution.js";
 import {
   bakeReflectionProbesAsync,
   ParticleSystem,
@@ -163,6 +164,11 @@ export interface MeshOverlayOptions {
   readonly reflections?: boolean;
   /** The model's depth-prepass cap (`prepass`, F0c): a GPU-presented scene lays its depth and thin G-buffer first. Off by default. */
   readonly prepass?: boolean;
+  /**
+   * Render a GPU-presented frame's 3D at a share of it chosen from the GPU's
+   * frame time (AAA_FIDELITY_ROADMAP.md F0d). Off by default.
+   */
+  readonly dynamicResolution?: boolean;
   /**
    * Makes a GPU renderer of its own for the front layer (a held weapon and the
    * arms holding it), where the scene draws on the GPU. Called the first time
@@ -326,6 +332,10 @@ export class MeshOverlaySurface implements DisplaySurface {
   private readonly everFront = new Set<number>();
   /** Each mesh's local bounding box, for projecting shadow footprints. */
   private readonly meshBounds = new WeakMap<MeshAsset, readonly [number, number, number, number, number, number]>();
+  /** Dynamic resolution on a GPU-presented frame (F0d), made with the first frame that asks. */
+  private resolution: DynamicResolution | null = null;
+  /** The size the last GPU-presented frame's 3D rendered at, and its share of the frame. */
+  private rendered: { width: number; height: number; scale: number } | null = null;
   /** Software-path resolution governor (see SOFTWARE_SCALES): current step and smoothed frame ms. */
   private scaleStep = 2;
   private frameMs = 0;
@@ -960,9 +970,19 @@ export class MeshOverlaySurface implements DisplaySurface {
     this.profiler = profiler;
   }
 
+  /** The frame's GPU time last measured: the scene's passes and the presenter's (F0d), or null when the GPU isn't timed. */
+  private gpuFrameMs(gpu: GpuPresentTarget): number | null {
+    const scene = this.renderer.lastFrameStats?.gpuMs ?? null;
+    if (scene === null) return null;
+    return scene + (gpu.stats.gpuMs ?? 0);
+  }
+
   /** What the renderer drew last frame. */
   renderStats(): RenderStats | null {
-    const stats = this.renderer.lastFrameStats ?? null;
+    const raw = this.renderer.lastFrameStats ?? null;
+    // A GPU-presented frame's 3D size, when it isn't the cart's own (F0d).
+    const rendered = this.rendered && this.gpuTarget() && (this.rendered.width !== this.width || this.rendered.height !== this.height) ? this.rendered : null;
+    const stats = raw && rendered ? { ...raw, resolution: rendered } : raw;
     // A GPU-presented frame's presenter passes follow the scene's (F4e).
     const present = this.gpuTarget()?.stats;
     if (!stats || !present?.passes) return stats;
@@ -1233,11 +1253,13 @@ export class MeshOverlaySurface implements DisplaySurface {
     },
   ): void {
     const { camera, lighting } = job;
-    // The 3D renders at the size the frame shows at (F0d); the 2D layer stays the cart's.
+    // The 3D renders at the size the frame shows at (F0d), or the share of it the GPU keeps up with; the 2D layer stays the cart's.
     const output = gpu.outputSize ?? { width: this.width, height: this.height };
-    const width = output.width;
-    const height = output.height;
+    if (this.options.dynamicResolution === true) this.resolution ??= new DynamicResolution(1000 / 60);
+    const scale = this.resolution ? this.resolution.update(this.gpuFrameMs(gpu)) : 1;
+    const { width, height } = scaledSize(output.width, output.height, scale);
     this.renderer.resize?.(width, height);
+    this.rendered = { width, height, scale: output.width > 0 ? width / output.width : 1 };
     const time = this.frame / 60;
     const lit = lighting
       ? {
@@ -1278,7 +1300,8 @@ export class MeshOverlaySurface implements DisplaySurface {
       job.skyBackdrop && this.skyMap
         ? { map: this.skyMap, view: camera.view, projection: camera.projection, sun: lighting?.sky ? skySun(lighting.sky) : null, clouds: this.skyClouds, time }
         : null;
-    const sun = sky && lighting?.sky ? sunScreenPosition(lighting.sky.sunDirection, camera.view, camera.projection, width, height) : null;
+    // The sun in the frame's pixels: the shafts and the measurements work at the frame's size.
+    const sun = sky && lighting?.sky ? sunScreenPosition(lighting.sky.sunDirection, camera.view, camera.projection, output.width, output.height) : null;
     let holo: Uint8ClampedArray | null = null;
     if (this.holo) {
       // The holo UI is part of the 2D layer: drawn at the cart's size, scaled with it.
@@ -1301,7 +1324,7 @@ export class MeshOverlaySurface implements DisplaySurface {
       tonemap: job.tonemap,
       measure: adapting || flare ? { luminance: adapting, sun: flare ? sun : null } : null,
     });
-    this.takeGpuMeasurements(gpu.stats, lighting, job.post, adapting, sky !== null, sun && { x: sun.x / width, y: sun.y / height });
+    this.takeGpuMeasurements(gpu.stats, lighting, job.post, adapting, sky !== null, sun && { x: sun.x / output.width, y: sun.y / output.height });
   }
 
   /** The presenter's newest measurements into the lens flare and eye adaptation (the byte path's reportSun and frameLuminance). */

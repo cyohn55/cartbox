@@ -315,6 +315,12 @@ interface RenderCaps {
      * (AAA_FIDELITY_ROADMAP.md F0d). Only with `gpuPresent`.
      */
     nativeResolution?: boolean;
+    /**
+     * Render the 3D at a share of that native frame chosen from the GPU's frame
+     * time, keeping the frame rate by giving up pixels (AAA_FIDELITY_ROADMAP.md
+     * F0d; see render/dynamicResolution.ts). Only with `nativeResolution`.
+     */
+    dynamicResolution?: boolean;
 }
 /**
  * What the shared software rasteriser behind the mesh/world overlays actually
@@ -2131,6 +2137,12 @@ interface RenderStats {
         readonly name: string;
         readonly ms: number;
     }[];
+    /** The size the 3D rendered at and its share of the frame's (F0d), when that isn't the cart's own. */
+    readonly resolution?: {
+        readonly width: number;
+        readonly height: number;
+        readonly scale: number;
+    };
 }
 interface SectionStats {
     /** Average milliseconds per frame over the window. */
@@ -3044,6 +3056,12 @@ interface PlayerOptions {
      * cap (the AAA tier); applies only to a GPU-presented frame.
      */
     nativeResolution?: boolean;
+    /**
+     * Render a native frame's 3D at a share of it chosen from the GPU's frame
+     * time (AAA_FIDELITY_ROADMAP.md F0d), or always at all of it. Defaults to the
+     * model's `dynamicResolution` render cap (the AAA tier).
+     */
+    dynamicResolution?: boolean;
     /**
      * Control settings (aim inversion, look sensitivity, controller and keyboard
      * bindings, touch pad size/opacity). Change them live with
@@ -4404,7 +4422,7 @@ declare class GpuCanvasSurface implements DisplaySurface {
     /** The compositor every frame goes through. */
     readonly presenter: GpuPresenter;
     /** Render at the display's own resolution (F0d), not the model's frame. */
-    private readonly native;
+    readonly native: boolean;
     private readonly resizeObserver;
     private destroyed;
     /** The post stack's uniforms, or null with no effect on. */
@@ -6558,6 +6576,11 @@ interface MeshOverlayOptions {
     /** The model's depth-prepass cap (`prepass`, F0c): a GPU-presented scene lays its depth and thin G-buffer first. Off by default. */
     readonly prepass?: boolean;
     /**
+     * Render a GPU-presented frame's 3D at a share of it chosen from the GPU's
+     * frame time (AAA_FIDELITY_ROADMAP.md F0d). Off by default.
+     */
+    readonly dynamicResolution?: boolean;
+    /**
      * Makes a GPU renderer of its own for the front layer (a held weapon and the
      * arms holding it), where the scene draws on the GPU. Called the first time
      * a front layer shows; the software rasteriser draws it until that resolves,
@@ -6633,6 +6656,10 @@ declare class MeshOverlaySurface implements DisplaySurface {
     private readonly everFront;
     /** Each mesh's local bounding box, for projecting shadow footprints. */
     private readonly meshBounds;
+    /** Dynamic resolution on a GPU-presented frame (F0d), made with the first frame that asks. */
+    private resolution;
+    /** The size the last GPU-presented frame's 3D rendered at, and its share of the frame. */
+    private rendered;
     /** Software-path resolution governor (see SOFTWARE_SCALES): current step and smoothed frame ms. */
     private scaleStep;
     private frameMs;
@@ -6872,6 +6899,8 @@ declare class MeshOverlaySurface implements DisplaySurface {
     private stepBounce;
     /** Report per-pass times to `profiler` (null: stop). */
     setProfiler(profiler: Profiler | null): void;
+    /** The frame's GPU time last measured: the scene's passes and the presenter's (F0d), or null when the GPU isn't timed. */
+    private gpuFrameMs;
     /** What the renderer drew last frame. */
     renderStats(): RenderStats | null;
     /** Bytes the scene keeps for drawing (geometry, textures, targets), estimated. */
