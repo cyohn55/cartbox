@@ -28,6 +28,7 @@ import {
   type SceneLight,
   type ShadowInput,
   type ToneMap,
+  type ToneMapOperator,
 } from "../render/meshRasterizer";
 import { MAX_FOG_VOLUMES, type FogVolume, type ProceduralSky, type SceneFog, type SkyMountainRange, type SkyPanorama } from "../render/skyDome";
 import { MAX_CLOUD_LAYERS, MAX_SKY_OBJECTS, type SkyCloudLayer, type SkyObject } from "../render/skyLayers";
@@ -55,6 +56,8 @@ export interface SceneLighting {
   readonly exposure: number;
   /** Apply the ACES filmic roll-off so bright highlights don't clip flat. */
   readonly tonemap: boolean;
+  /** The tone-mapping curve on the AAA tier (F4d); absent is filmic, every other tier's. */
+  readonly tonemapper?: ToneMapOperator;
   /** Cast a directional shadow from the first directional (key) light. */
   readonly shadows: boolean;
   readonly lights: readonly SceneLight[];
@@ -203,6 +206,7 @@ export function parseSceneLighting(raw: unknown): SceneLighting | null {
     ambient: typeof record.ambient === "number" ? clamp01(record.ambient) : base.ambient,
     exposure: typeof record.exposure === "number" && record.exposure > 0 ? record.exposure : base.exposure,
     tonemap: typeof record.tonemap === "boolean" ? record.tonemap : base.tonemap,
+    ...(record.tonemapper === "aces" || record.tonemapper === "agx" || record.tonemapper === "neutral" ? { tonemapper: record.tonemapper } : {}),
     shadows: typeof record.shadows === "boolean" ? record.shadows : base.shadows,
     lights,
     ...(sky ? { sky } : {}),
@@ -469,7 +473,7 @@ export function defaultSunShafts(): SunShafts {
 /** Patch the top-level scalar/flag fields (ambient, exposure, tonemap, shadows). */
 export function patchSceneLighting(
   lighting: SceneLighting,
-  patch: Partial<Pick<SceneLighting, "ambient" | "exposure" | "tonemap" | "shadows" | "wind" | "softShadows">>,
+  patch: Partial<Pick<SceneLighting, "ambient" | "exposure" | "tonemap" | "tonemapper" | "shadows" | "wind" | "softShadows">>,
 ): SceneLighting {
   return { ...lighting, ...patch };
 }
@@ -566,7 +570,7 @@ function decodedProbes(stored: StoredLightProbes): LightProbeGrid | null {
 
 /** The tone-map for the scene, or null when the creator left it off. */
 export function sceneLightingTonemap(lighting: SceneLighting): ToneMap | null {
-  return lighting.tonemap ? { exposure: lighting.exposure } : null;
+  return lighting.tonemap ? { exposure: lighting.exposure, ...(lighting.tonemapper && lighting.tonemapper !== "filmic" ? { operator: lighting.tonemapper } : {}) } : null;
 }
 
 /**

@@ -1339,7 +1339,7 @@ export class MeshOverlaySurface implements DisplaySurface {
   private frameTonemap(lighting: SceneLighting, post: PostBlend): ToneMap | null {
     const base = sceneLightingTonemap(lighting);
     const stops = post.exposure + this.adapted;
-    return base && stops !== 0 ? { exposure: base.exposure * 2 ** stops } : base;
+    return base && stops !== 0 ? { ...base, exposure: base.exposure * 2 ** stops } : base;
   }
 
   /** Report the volumes' grade, bloom and fog to {@link onPost} when they change. */

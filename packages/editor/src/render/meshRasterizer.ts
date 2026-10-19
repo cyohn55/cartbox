@@ -386,7 +386,15 @@ export function environmentAverage(env: EnvironmentLight): [number, number, numb
 export interface ToneMap {
   /** Linear exposure multiplier applied before the curve (default 1). */
   readonly exposure: number;
+  /**
+   * The curve (AAA_FIDELITY_ROADMAP.md F4d): the AAA tier's presenter maps
+   * its linear frame through it; every other path keeps the filmic one.
+   */
+  readonly operator?: ToneMapOperator;
 }
+
+/** A tone-mapping curve (F4d; see the player's toneMappers.ts): filmic is every tier's since F0b. */
+export type ToneMapOperator = "filmic" | "aces" | "agx" | "neutral";
 
 /**
  * A light for the Modern (AAA) tier's multi-light forward path (Phase 4). The

@@ -610,6 +610,7 @@ export {
   type RenderShadowMapOptions,
   acesFilmic,
   type ToneMap,
+  type ToneMapOperator,
   type SceneLight,
   renderGeometryBuffers,
   computeSsao,
