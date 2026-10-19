@@ -35,7 +35,12 @@ The script opens `/lockout?capture=1`, which hands it the player. It starts a Fr
   - **The sky.** Lockout's painted sky dome is display-referred art, and on the AAA path it is exposed and tone-mapped with the scene. Its blue lifts and pales (90,114,152 → 161,184,202 in the overview), while lit surfaces come out about 0.6 stop darker (the deck 226 → 189).
   - **Fog.** Beaver Creek's fog now mixes in linear light, which lifts the far canyon toward the fog colour.
   - **The sun's bloom.** It spreads wider over the sky.
-- **A defect: Beaver Creek's creek water.** On the AAA path it draws as a bright, stretched, speckled pattern instead of water (`beaver-creek.jpg`), while the banks and steps around it are right. It is the next thing to fix.
+- **Beaver Creek's creek water** reads as a bright, speckled pattern on the AAA path (`beaver-creek.jpg`). F11a-2 traced it.
+  - **Mostly correct physics.** Seen this low, the AAA path's Fresnel makes smooth water nearly a mirror. The ripples tilt its reflection between the canyon walls and the sky, and that gives the cells. The byte path weights reflection by F0 alone, with no Fresnel, so its water stays translucent.
+  - **The material is tuned for the byte path.** Ripples 0.35 and reflectivity 1.3 suit a path without Fresnel. With reflection off on the AAA path the creek reads as water; calming it there is the water pass's work (F5d).
+  - **Two real faults, fixed in F11a-2:**
+    - Linear light lost the water's tint: a dark display colour mixed in linear only dims what is behind it.
+    - Reflectivity over 1 let a surface reflect more than all the light at grazing.
 - **Frame time.** These runs are on SwiftShader, a software GPU, so the times are a floor and say nothing about a device class.
   - The scene's own time is missing for Lockout because its frames took over the frame-graph timer's 10 s sanity bound.
   - Relative cost is meaningful: at 2.25× the pixels, Beaver Creek's scene costs about 1.3× as much, and the presenter about 4×, with the sky, bloom and lens passes it adds.

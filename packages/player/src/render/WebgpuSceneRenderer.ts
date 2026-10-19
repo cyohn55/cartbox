@@ -897,7 +897,26 @@ fn aces(x: f32) -> f32 {
   let v = max(0.0, x);
   return clamp((v * (2.51 * v + 0.03)) / (v * (2.43 * v + 0.59) + 0.14), 0.0, 1.0);
 }
-
+${hdr ? `// Linear light as the display shows it (F11a): exposed, through the curve, sRGB-encoded.
+fn shownOf(x: vec3<f32>) -> vec3<f32> {
+  var y = max(x, vec3<f32>(0.0));
+  if (u.tonemap.x > 0.5) { y = vec3<f32>(aces(y.r * u.tonemap.y), aces(y.g * u.tonemap.y), aces(y.b * u.tonemap.y)); }
+  return select(1.055 * pow(y, vec3<f32>(1.0 / 2.4)) - vec3<f32>(0.055), y * 12.92, y <= vec3<f32>(0.0031308));
+}
+// The curve's inverse, where it is one to one (under its white).
+fn acesInverse(y: f32) -> f32 {
+  let v = clamp(y, 0.0, 1.0);
+  let a = 2.51 - 2.43 * v;
+  let b = 0.03 - 0.59 * v;
+  return (-b + sqrt(b * b + 4.0 * a * 0.14 * v)) / (2.0 * a);
+}
+// shownOf's inverse: what the display shows, as the linear light that shows it.
+fn lightOf(d: vec3<f32>) -> vec3<f32> {
+  let y = toLinear(d);
+  if (u.tonemap.x < 0.5) { return y; }
+  return vec3<f32>(acesInverse(y.r), acesInverse(y.g), acesInverse(y.b)) / max(u.tonemap.y, 1e-6);
+}
+` : ""}
 // Wind (B6): windOffset in wind.ts, term for term — how far a vertex at (x, z) in its
 // mesh's space, bending sway metres per unit of wind, moves this frame.
 fn windOffsetIn(w: vec4<f32>, p: vec2<f32>, sway: f32) -> vec2<f32> {
@@ -1049,7 +1068,11 @@ fn facingNormal(n: vec3<f32>) -> vec3<f32> {
 fn finishRefracted(rgb: vec3<f32>, a: f32, bg: vec3<f32>, N: vec3<f32>) -> vec4<f32> {
   let c = ${hdr ? "max(rgb, vec3<f32>(0.0))" : "clamp(rgb, vec3<f32>(0.0), vec3<f32>(1.0))"};
   if (u.pbr.w > 2.5) { return vec4<f32>(c * a + bg, 1.0); }
-  if (u.pbr.w > 1.5) { return vec4<f32>(c * a + bg * (1.0 - a), 1.0); }
+${hdr
+  ? `  // A tint authored for the display (F11a): linear light mixes it as the display shows the two, as the
+  // byte path does, or a dark one (Beaver Creek's water) only dims what is behind and its colour is lost.
+  if (u.pbr.w > 1.5) { return vec4<f32>(lightOf(mix(shownOf(bg), shownOf(c), a)), 1.0); }`
+  : "  if (u.pbr.w > 1.5) { return vec4<f32>(c * a + bg * (1.0 - a), 1.0); }"}
   let t = u.refract0.z * pow(1.0 - max(0.0, dot(N, u.view.xyz)), ${EFFECT_DISTORT_POWER.toFixed(4)});
   return vec4<f32>(mix(c, bg, t), 1.0);
 }
@@ -1205,6 +1228,9 @@ ${hdr
     eComp = energyCompensation(f0, dfg);
     let specE = specularEnergy(f0, dfg);
     let specAo = specularOcclusion(ndv, ao, rough * rough);
+    // What the environment's reflection takes, the material's reflectivity scaling it but never past all
+    // the light (F11a): reflectivity over 1 (Beaver Creek's water is 1.3) mirrored more than came in at grazing.
+    let specK = min(specE * reflectK, vec3<f32>(1.0));
 `
   : ""}    let kdm = 1.0 - metallic;                  // metals have no diffuse
     var emis = vec3<f32>(0.0);
@@ -1235,8 +1261,8 @@ ${reflect ? "    var envSpec = vec3<f32>(0.0);\n    var envSeen = vec3<f32>(0.0)
       if (aniso != 0.0) { rdv = dot(Rn, V); }
       let pref = envReflect(in.worldPos, 2.0 * rdv * Rn - V, rough);
 ${hdr
-  ? "      // What the environment's reflection takes, the diffuse beneath it no longer receives.\n      amb = irr * albedo * kdm * (vec3<f32>(1.0) - specE) * ao + pref * specE * reflectK * specAo;\n"
-  : "      amb = (irr * albedo * kdm + pref * f0 * reflectK) * ao;\n"}${reflect ? `      envSpec = pref * ${hdr ? "specE * reflectK * specAo" : "f0 * reflectK * ao"};\n      envSeen = pref;\n` : ""}      // The clearcoat (I4) reflects the room sharply about its own normal, and
+  ? "      // What the environment's reflection takes, the diffuse beneath it no longer receives.\n      amb = irr * albedo * kdm * (vec3<f32>(1.0) - specE) * ao + pref * specK * specAo;\n"
+  : "      amb = (irr * albedo * kdm + pref * f0 * reflectK) * ao;\n"}${reflect ? `      envSpec = pref * ${hdr ? "specK * specAo" : "f0 * reflectK * ao"};\n      envSeen = pref;\n` : ""}      // The clearcoat (I4) reflects the room sharply about its own normal, and
       // what it reflects the base beneath no longer receives.
       if (u.layer0.x > 0.0) {
         let prefC = envReflect(in.worldPos, 2.0 * coatNdv * coatN - V, u.layer0.y);
@@ -1308,7 +1334,7 @@ ${hdr
     var seen = envSeen;
     if (u.tonemap.x > 0.5) { seen = vec3<f32>(aces(seen.r * u.tonemap.y), aces(seen.g * u.tonemap.y), aces(seen.b * u.tonemap.y)); }
     seen = clamp(seen, vec3<f32>(0.0), vec3<f32>(1.0));`}
-    let weight = ${hdr ? "(specE * specAo * (1.0 - coatV) + vec3<f32>(coatV * ao)) * reflectK * occl" : "(f0 * (1.0 - coatV) + vec3<f32>(coatV)) * reflectK * ao * occl"};
+    let weight = ${hdr ? "(specK * specAo * (1.0 - coatV) + vec3<f32>(coatV * ao * reflectK)) * occl" : "(f0 * (1.0 - coatV) + vec3<f32>(coatV)) * reflectK * ao * occl"};
     reflectOut = vec4<f32>(clamp(select(weight, contribution / max(seen, vec3<f32>(1e-3)), seen > vec3<f32>(0.02)), vec3<f32>(0.0), vec3<f32>(1.0)), mix(rough, u.layer0.y, u.layer0.x));
     envOut = vec4<f32>(contribution, 1.0);` : ""}
     // Refraction (I5): what's behind is the opaque scene, bent.
