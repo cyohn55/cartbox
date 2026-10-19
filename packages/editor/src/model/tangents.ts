@@ -42,8 +42,8 @@ const STREAMS = [
 /**
  * The primitive with MikkTSpace tangents. The engine samples a texture at
  * (u, 1 − v), so its V points up the image as MikkTSpace's does, and
- * MikkTSpace's sign is the engine's own (glTF's is the opposite, see
- * gltfCodec.ts). Vertices split where their corners' tangents differ;
+ * MikkTSpace's sign is the engine's own (and, with glTF's V flipped on
+ * import, glTF's too: see gltfCodec.ts). Vertices split where their corners' tangents differ;
  * everything else stays as it was.
  */
 export function withMikkTangents(primitive: MeshPrimitive, mikk: MikkTSpace): MeshPrimitive {
