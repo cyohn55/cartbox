@@ -100,6 +100,12 @@ export interface RenderCaps {
    * (AAA_FIDELITY_ROADMAP.md F0d). Only with `gpuPresent`.
    */
   nativeResolution?: boolean;
+  /**
+   * Render the 3D at a share of that native frame chosen from the GPU's frame
+   * time, keeping the frame rate by giving up pixels (AAA_FIDELITY_ROADMAP.md
+   * F0d; see render/dynamicResolution.ts). Only with `nativeResolution`.
+   */
+  dynamicResolution?: boolean;
 }
 
 /**
@@ -246,6 +252,7 @@ export const AAA_RASTER_CAPS: RenderCaps = {
   prepass: true,
   mipmaps: true,
   nativeResolution: true,
+  dynamicResolution: true,
 };
 
 export interface ConsoleModel {

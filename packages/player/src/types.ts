@@ -187,6 +187,12 @@ export interface PlayerOptions {
    */
   nativeResolution?: boolean;
   /**
+   * Render a native frame's 3D at a share of it chosen from the GPU's frame
+   * time (AAA_FIDELITY_ROADMAP.md F0d), or always at all of it. Defaults to the
+   * model's `dynamicResolution` render cap (the AAA tier).
+   */
+  dynamicResolution?: boolean;
+  /**
    * Control settings (aim inversion, look sensitivity, controller and keyboard
    * bindings, touch pad size/opacity). Change them live with
    * {@link PlayerHandle.setControlSettings}. Defaults: DEFAULT_CONTROL_SETTINGS.

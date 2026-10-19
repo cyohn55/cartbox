@@ -61,7 +61,7 @@ export class GpuCanvasSurface implements DisplaySurface {
     /** The compositor every frame goes through. */
     readonly presenter: GpuPresenter,
     /** Render at the display's own resolution (F0d), not the model's frame. */
-    private readonly native = false,
+    readonly native = false,
   ) {
     container.appendChild(canvas);
     this.resizeObserver = new ResizeObserver(() => this.applyScale());

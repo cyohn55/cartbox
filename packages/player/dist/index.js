@@ -4755,7 +4755,8 @@ var AAA_RASTER_CAPS = {
   linearHdr: true,
   prepass: true,
   mipmaps: true,
-  nativeResolution: true
+  nativeResolution: true,
+  dynamicResolution: true
 };
 var MODELS = {
   classic: {
@@ -11288,6 +11289,56 @@ var ParticleOverlaySurface = class {
 };
 var lerp3 = (a, b, t) => a + (b - a) * t;
 
+// src/render/dynamicResolution.ts
+var MIN_RENDER_SCALE = 0.5;
+var RENDER_SCALE_STEP = 0.05;
+var OVER = 0.95;
+var TARGET = 0.85;
+var UNDER = 0.7;
+var CLIMB_FRAMES = 120;
+var SETTLE_FRAMES = 8;
+var SMOOTHING = 0.25;
+function quantizeScale(scale) {
+  const steps = Math.floor(scale / RENDER_SCALE_STEP + 1e-6);
+  return Math.min(1, Math.max(MIN_RENDER_SCALE, steps * RENDER_SCALE_STEP));
+}
+function scaledSize(width, height, scale) {
+  return { width: Math.max(1, Math.round(width * scale)), height: Math.max(1, Math.round(height * scale)) };
+}
+var DynamicResolution = class {
+  constructor(budgetMs) {
+    this.budgetMs = budgetMs;
+    /** The share of the native frame's width (and height) the 3D renders at. */
+    this.scale = 1;
+    /** The smoothed GPU time (ms), or null before the first reading. */
+    this.gpuMs = null;
+    this.sinceChange = 0;
+    this.underFor = 0;
+  }
+  /** One frame: the newest GPU time (null when there's none), and the scale to render the next at. */
+  update(gpuMs) {
+    this.sinceChange += 1;
+    if (gpuMs === null || !Number.isFinite(gpuMs) || gpuMs <= 0) return this.scale;
+    this.gpuMs = this.gpuMs === null ? gpuMs : this.gpuMs + (gpuMs - this.gpuMs) * SMOOTHING;
+    const load = this.gpuMs / this.budgetMs;
+    this.underFor = load < UNDER ? this.underFor + 1 : 0;
+    if (this.sinceChange < SETTLE_FRAMES) return this.scale;
+    if (load > OVER && this.scale > MIN_RENDER_SCALE) {
+      this.change(quantizeScale(this.scale * Math.sqrt(TARGET / load)));
+    } else if (this.underFor >= CLIMB_FRAMES && this.scale < 1) {
+      this.change(quantizeScale(this.scale + RENDER_SCALE_STEP));
+    }
+    return this.scale;
+  }
+  change(scale) {
+    if (scale === this.scale) return;
+    this.scale = scale;
+    this.sinceChange = 0;
+    this.underFor = 0;
+    this.gpuMs = null;
+  }
+};
+
 // src/mesh/MeshOverlaySurface.ts
 import {
   bakeReflectionProbesAsync,
@@ -11693,6 +11744,10 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
     this.everFront = /* @__PURE__ */ new Set();
     /** Each mesh's local bounding box, for projecting shadow footprints. */
     this.meshBounds = /* @__PURE__ */ new WeakMap();
+    /** Dynamic resolution on a GPU-presented frame (F0d), made with the first frame that asks. */
+    this.resolution = null;
+    /** The size the last GPU-presented frame's 3D rendered at, and its share of the frame. */
+    this.rendered = null;
     /** Software-path resolution governor (see SOFTWARE_SCALES): current step and smoothed frame ms. */
     this.scaleStep = 2;
     this.frameMs = 0;
@@ -12240,9 +12295,17 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
   setProfiler(profiler) {
     this.profiler = profiler;
   }
+  /** The frame's GPU time last measured: the scene's passes and the presenter's (F0d), or null when the GPU isn't timed. */
+  gpuFrameMs(gpu) {
+    const scene = this.renderer.lastFrameStats?.gpuMs ?? null;
+    if (scene === null) return null;
+    return scene + (gpu.stats.gpuMs ?? 0);
+  }
   /** What the renderer drew last frame. */
   renderStats() {
-    const stats2 = this.renderer.lastFrameStats ?? null;
+    const raw = this.renderer.lastFrameStats ?? null;
+    const rendered = this.rendered && this.gpuTarget() && (this.rendered.width !== this.width || this.rendered.height !== this.height) ? this.rendered : null;
+    const stats2 = raw && rendered ? { ...raw, resolution: rendered } : raw;
     const present = this.gpuTarget()?.stats;
     if (!stats2 || !present?.passes) return stats2;
     return {
@@ -12452,9 +12515,11 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
   presentOnGpu(gpu, rgba, job) {
     const { camera, lighting } = job;
     const output = gpu.outputSize ?? { width: this.width, height: this.height };
-    const width = output.width;
-    const height = output.height;
+    if (this.options.dynamicResolution === true) this.resolution ?? (this.resolution = new DynamicResolution(1e3 / 60));
+    const scale = this.resolution ? this.resolution.update(this.gpuFrameMs(gpu)) : 1;
+    const { width, height } = scaledSize(output.width, output.height, scale);
     this.renderer.resize?.(width, height);
+    this.rendered = { width, height, scale: output.width > 0 ? width / output.width : 1 };
     const time = this.frame / 60;
     const lit = lighting ? {
       ambient: lighting.ambient,
@@ -12489,7 +12554,7 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
       }
     }
     const sky = job.skyBackdrop && this.skyMap ? { map: this.skyMap, view: camera.view, projection: camera.projection, sun: lighting?.sky ? skySun(lighting.sky) : null, clouds: this.skyClouds, time } : null;
-    const sun = sky && lighting?.sky ? sunScreenPosition(lighting.sky.sunDirection, camera.view, camera.projection, width, height) : null;
+    const sun = sky && lighting?.sky ? sunScreenPosition(lighting.sky.sunDirection, camera.view, camera.projection, output.width, output.height) : null;
     let holo = null;
     if (this.holo) {
       if (this.holoLayer?.length !== this.width * this.height * 4) this.holoLayer = new Uint8ClampedArray(this.width * this.height * 4);
@@ -12510,7 +12575,7 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
       tonemap: job.tonemap,
       measure: adapting || flare ? { luminance: adapting, sun: flare ? sun : null } : null
     });
-    this.takeGpuMeasurements(gpu.stats, lighting, job.post, adapting, sky !== null, sun && { x: sun.x / width, y: sun.y / height });
+    this.takeGpuMeasurements(gpu.stats, lighting, job.post, adapting, sky !== null, sun && { x: sun.x / output.width, y: sun.y / output.height });
   }
   /** The presenter's newest measurements into the lens flare and eye adaptation (the byte path's reportSun and frameLuminance). */
   takeGpuMeasurements(stats2, lighting, post, adapting, sky, sun) {
@@ -22034,6 +22099,12 @@ ${GRADING_WGSL}
 fn over(top: vec4f, under: vec4f) -> vec4f {
   return vec4f(top.rgb + under.rgb * (1.0 - top.a), top.a + under.a * (1.0 - top.a));
 }
+// A 3D layer rendered at its own size (the scene at its dynamic resolution, F0d):
+// the texel when it is the frame's size, else filtered up to it.
+fn sampleScaled(t: texture_2d<f32>, pos: vec4f, p: vec2i) -> vec4f {
+  if (all(vec2f(textureDimensions(t)) == u.frame.xy)) { return textureLoad(t, p, 0); }
+  return textureSampleLevel(t, lightSampler, pos.xy / u.frame.xy, 0.0);
+}
 // Byte space clamps every layer to the displayable range; linear light (F0b) only to zero.
 fn keep(c: vec4f) -> vec4f {
   if (u.hdr.x > 0.5) { return max(c, vec4f(0.0)); }
@@ -22047,7 +22118,7 @@ fn composite(pos: vec4f, p: vec2i, hdr: bool) -> vec4f {
   if (hdr && u.layers.x != 1.0) { c = vec4f(toLinear(c.rgb), c.a); }
   var open = true;
   if (u.layers.y > 0.5) {
-    let s = loadScaled(scene, p, u.frame.xy);
+    let s = sampleScaled(scene, pos, p);
     open = all(s == vec4f(0.0));
     c = keep(over(s, c));
   }
@@ -22057,7 +22128,7 @@ fn composite(pos: vec4f, p: vec2i, hdr: bool) -> vec4f {
     if (hdr) { c = vec4f(c.rgb + toLinear(u.shaftColor.rgb) * v, c.a); }
     else { c = vec4f(min(vec3f(1.0), c.rgb + u.shaftColor.rgb * v), c.a); }
   }
-  if (u.layers.w > 0.5) { c = keep(over(loadScaled(front, p, u.frame.xy), c)); }
+  if (u.layers.w > 0.5) { c = keep(over(sampleScaled(front, pos, p), c)); }
   return c;
 }
 @fragment fn compose(@builtin(position) pos: vec4f) -> @location(0) vec4f {
@@ -23195,6 +23266,8 @@ var Player = class {
               temporal: this.model.renderCaps.temporal === true,
               reflections: this.model.renderCaps.reflections === true,
               prepass: this.options.prepass ?? this.model.renderCaps.prepass === true,
+              // A native frame's 3D at a share of it the GPU keeps up with (F0d).
+              dynamicResolution: Boolean(gpuCanvas?.native) && (this.options.dynamicResolution ?? this.model.renderCaps.dynamicResolution === true),
               // A held weapon draws on the GPU too, when the scene does.
               ...this.sceneRenderer && this.sceneRenderer.backend !== "software" ? { createFrontRenderer: makeRenderer } : {},
               ...gpuCanvas ? { presenter: gpuCanvas } : {}

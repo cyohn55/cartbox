@@ -633,6 +633,8 @@ export class Player {
               temporal: this.model.renderCaps.temporal === true,
               reflections: this.model.renderCaps.reflections === true,
               prepass: this.options.prepass ?? this.model.renderCaps.prepass === true,
+              // A native frame's 3D at a share of it the GPU keeps up with (F0d).
+              dynamicResolution: Boolean(gpuCanvas?.native) && (this.options.dynamicResolution ?? this.model.renderCaps.dynamicResolution === true),
               // A held weapon draws on the GPU too, when the scene does.
               ...(this.sceneRenderer && this.sceneRenderer.backend !== "software"
                 ? { createFrontRenderer: makeRenderer }
