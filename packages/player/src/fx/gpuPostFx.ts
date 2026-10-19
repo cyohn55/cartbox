@@ -18,6 +18,7 @@
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
+import { timingSpan, type PassContext } from "../render/frameGraph.js";
 import { BLOOM_KNEE, pyramidLevelCount, pyramidLevelSize } from "./bloomModel.js";
 import { FLARE_GHOSTS, FLARE_GHOST_GAIN, FLARE_SPIKE_POWER } from "./flareModel.js";
 import { lutStrip, type GradingLut } from "./lutModel.js";
@@ -26,10 +27,22 @@ import type { PostFxUniforms } from "./postfx.js";
 const f = (n: number) => n.toFixed(4);
 
 /** Floats in the main pass's uniform block. */
-export const POST_UNIFORM_FLOATS = 18 * 4;
+export const POST_UNIFORM_FLOATS = 19 * 4;
 
-/** The main pass's uniforms, in the WGSL struct's order. */
-export function packPostUniforms(u: PostFxUniforms, width: number, height: number, time: number, hasBloom: boolean, out = new Float32Array(POST_UNIFORM_FLOATS)): Float32Array {
+/**
+ * The main pass's uniforms, in the WGSL struct's order. `peak` is the
+ * brightest the target shows (F4e): 1 for SDR, more for an HDR display, whose
+ * highlights the stack carries past white instead of clipping.
+ */
+export function packPostUniforms(
+  u: PostFxUniforms,
+  width: number,
+  height: number,
+  time: number,
+  hasBloom: boolean,
+  out = new Float32Array(POST_UNIFORM_FLOATS),
+  peak = 1,
+): Float32Array {
   const rows: number[][] = [
     [width, height, time, hasBloom ? 1 : 0],
     [u.brightness, u.contrast, u.saturation, u.toneMap],
@@ -49,6 +62,7 @@ export function packPostUniforms(u: PostFxUniforms, width: number, height: numbe
     [u.reflectionStrength, u.reflectionHorizon, u.reflectionFalloff, u.reflectionWobble],
     [u.tiltStrength, u.tiltFocus, u.tiltRange, 0],
     [u.kaleidoSegments, u.kaleidoAngle, u.grainAmount, u.grainSize],
+    [peak, peak > 1 ? 1 : 0, 0, 0],
   ];
   rows.forEach((row, i) => out.set(row, i * 4));
   return out;
@@ -87,6 +101,7 @@ struct Post {
   reflect: vec4f,
   tilt: vec4f,
   kaleido: vec4f,
+  range: vec4f, // F4e: x = the brightest the target shows (1 for SDR), y = 1 when that is past white (an HDR display)
 };
 @group(0) @binding(0) var<uniform> u: Post;
 @group(0) @binding(1) var source: texture_2d<f32>;
@@ -256,7 +271,8 @@ ${GHOST_TERMS}
     let y = (c.g * (n - 1.0) + 0.5) / n;
     let lo = textureSampleLevel(lut, linearClamp, vec2f((b0 * n + x) / (n * n), y), 0.0).rgb;
     let hi = textureSampleLevel(lut, linearClamp, vec2f((b1 * n + x) / (n * n), y), 0.0).rgb;
-    color = mix(color, mix(lo, hi, slice - b0), u.grade2.z);
+    // On an HDR display the LUT grades the displayable range and the highlight past it rides along.
+    color = mix(color, mix(lo, hi, slice - b0) + (color - c) * u.range.y, u.grade2.z);
   }
 
   if (u.dither.x > 0.0 && u.screen.w >= 2.0) {
@@ -266,7 +282,7 @@ ${GHOST_TERMS}
 
   if (u.screen.w >= 2.0) {
     color = floor(color * u.screen.w) / (u.screen.w - 1.0);
-    color = min(color, vec3f(1.0));
+    color = min(color, vec3f(u.range.x));
   }
 
   if (u.dither.z > 0.0) {
@@ -293,7 +309,7 @@ ${GHOST_TERMS}
   let scan = 1.0 - u.screen.x * 0.25 * (1.0 + sin(uv.y * size.y * 3.14159));
   color = color * scan;
 
-  return vec4f(clamp(color, vec3f(0.0), vec3f(1.0)), 1.0);
+  return vec4f(clamp(color, vec3f(0.0), vec3f(u.range.x)), 1.0);
 }
 `;
 
@@ -405,13 +421,34 @@ export class GpuPostFx {
     device.queue.writeTexture({ texture: this.blank }, new Uint8Array([0, 0, 0, 255]), { bytesPerRow: 4 }, { width: 1, height: 1 });
   }
 
-  /** Encode the stack: `source` (RGBA8, this size) through every effect into `target` (of `format`). */
-  encode(encoder: any, source: any, target: any, format: string, uniforms: PostFxUniforms, time: number): void {
+  /**
+   * Encode the stack: `source` (this size; RGBA8, or half-float at full
+   * precision on the AAA tier) through every effect into `target` (of
+   * `format`). `peak` is the brightest the target shows (see
+   * {@link packPostUniforms}); `timing` (a frame graph pass's) spans every
+   * pass the stack encodes.
+   */
+  encode(
+    encoder: any,
+    source: any,
+    target: any,
+    format: string,
+    uniforms: PostFxUniforms,
+    time: number,
+    options: { readonly peak?: number; readonly timing?: PassContext["timing"] } = {},
+  ): void {
     const device = this.device;
+    const timing = options.timing ?? {};
+    const blooms = uniforms.bloomStrength > 0;
+    // The bright pass, the downsamples and the upsamples, then the stack itself.
+    const passes = (blooms ? 2 * pyramidLevelCount(this.width, this.height) - 1 : 0) + 1;
     let bloom: any = null;
-    if (uniforms.bloomStrength > 0) bloom = this.encodeBloom(encoder, source, uniforms.bloomThreshold, uniforms.bloomRadius);
-    device.queue.writeBuffer(this.uniformBuffer, 0, packPostUniforms(uniforms, this.width, this.height, time, bloom !== null, this.data));
-    const pass = encoder.beginRenderPass({ colorAttachments: [{ view: target.createView(), clearValue: { r: 0, g: 0, b: 0, a: 1 }, loadOp: "clear", storeOp: "store" }] });
+    if (blooms) bloom = this.encodeBloom(encoder, source, uniforms.bloomThreshold, uniforms.bloomRadius, (i) => timingSpan(timing, i, passes));
+    device.queue.writeBuffer(this.uniformBuffer, 0, packPostUniforms(uniforms, this.width, this.height, time, bloom !== null, this.data, options.peak ?? 1));
+    const pass = encoder.beginRenderPass({
+      colorAttachments: [{ view: target.createView(), clearValue: { r: 0, g: 0, b: 0, a: 1 }, loadOp: "clear", storeOp: "store" }],
+      ...timingSpan(timing, passes - 1, passes),
+    });
     pass.setPipeline(this.pipeline("post", format, POST_WGSL, "post", false));
     pass.setBindGroup(
       0,
@@ -444,7 +481,7 @@ export class GpuPostFx {
   }
 
   /** BloomPyramid.generate on the GPU: prefilter into level 0, blur down the chain, fold back up additively. */
-  private encodeBloom(encoder: any, source: any, threshold: number, radius: number): any {
+  private encodeBloom(encoder: any, source: any, threshold: number, radius: number, span: (index: number) => object): any {
     if (this.levels.length === 0) {
       const count = pyramidLevelCount(this.width, this.height);
       for (let i = 0; i < count; i += 1) {
@@ -458,10 +495,12 @@ export class GpuPostFx {
       }
     }
     const levels = this.levels;
+    let index = 0;
     const draw = (name: "prefilter" | "down" | "up", code: string, entry: string, target: Level, input: any, inputTexel: [number, number], params: [number, number, number, number], blend: boolean) => {
       this.device.queue.writeBuffer(target.uniforms, 0, new Float32Array([inputTexel[0], inputTexel[1], 1 / target.width, 1 / target.height, ...params]));
       const pass = encoder.beginRenderPass({
         colorAttachments: [{ view: target.texture.createView(), clearValue: { r: 0, g: 0, b: 0, a: 1 }, loadOp: blend ? "load" : "clear", storeOp: "store" }],
+        ...span(index++),
       });
       pass.setPipeline(this.pipeline(name, "rgba16float", code, entry, blend));
       pass.setBindGroup(
@@ -486,7 +525,7 @@ export class GpuPostFx {
       const finer = levels[i - 1]!;
       draw("down", BLOOM_DOWN_WGSL, "downPass", levels[i]!, finer.texture, [1 / finer.width, 1 / finer.height], [0, 0, 0, 0], false);
     }
-    for (let i = levels.length - 2; i >= 0; i -= 1) this.drawUp(encoder, i, radius);
+    for (let i = levels.length - 2; i >= 0; i -= 1) this.drawUp(encoder, i, radius, span(index++));
     return levels[0]!.texture;
   }
 
@@ -494,7 +533,7 @@ export class GpuPostFx {
   private readonly upUniforms = new Map<number, any>();
 
   /** One upsample step: level `index + 1`'s tent, added onto level `index`. */
-  private drawUp(encoder: any, index: number, radius: number): void {
+  private drawUp(encoder: any, index: number, radius: number, timing: object): void {
     const target = this.levels[index]!;
     const coarser = this.levels[index + 1]!;
     let buffer = this.upUniforms.get(index);
@@ -503,7 +542,7 @@ export class GpuPostFx {
       this.upUniforms.set(index, buffer);
     }
     this.device.queue.writeBuffer(buffer, 0, new Float32Array([1 / coarser.width, 1 / coarser.height, 1 / target.width, 1 / target.height, 0, 0, radius, 0]));
-    const pass = encoder.beginRenderPass({ colorAttachments: [{ view: target.texture.createView(), loadOp: "load", storeOp: "store" }] });
+    const pass = encoder.beginRenderPass({ colorAttachments: [{ view: target.texture.createView(), loadOp: "load", storeOp: "store" }], ...timing });
     pass.setPipeline(this.pipeline("up", "rgba16float", BLOOM_UP_WGSL, "upPass", true));
     pass.setBindGroup(
       0,

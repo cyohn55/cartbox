@@ -12225,7 +12225,14 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
   }
   /** What the renderer drew last frame. */
   renderStats() {
-    return this.renderer.lastFrameStats ?? null;
+    const stats2 = this.renderer.lastFrameStats ?? null;
+    const present = this.gpuTarget()?.stats;
+    if (!stats2 || !present?.passes) return stats2;
+    return {
+      ...stats2,
+      gpuMs: stats2.gpuMs !== null && present.gpuMs != null ? stats2.gpuMs + present.gpuMs : stats2.gpuMs,
+      passes: [...stats2.passes ?? [], ...present.passes.map((pass) => ({ name: `present: ${pass.name}`, ms: pass.ms }))]
+    };
   }
   /** Bytes the scene keeps for drawing (geometry, textures, targets), estimated. */
   sceneBytes() {
@@ -17159,6 +17166,17 @@ var USAGE = {
   storage: 8,
   attachment: 16
 };
+function timingSpan(timing, index, count) {
+  const writes = timing.timestampWrites;
+  if (!writes || index > 0 && index < count - 1) return {};
+  return {
+    timestampWrites: {
+      querySet: writes.querySet,
+      ...index === 0 ? { beginningOfPassWriteIndex: writes.beginningOfPassWriteIndex } : {},
+      ...index === count - 1 ? { endOfPassWriteIndex: writes.endOfPassWriteIndex } : {}
+    }
+  };
+}
 function slotKey(desc, usage) {
   return `${desc.format}:${desc.width}x${desc.height}:${desc.sampleCount ?? 1}:${usage}`;
 }
@@ -20652,8 +20670,8 @@ async function createSceneRenderer(width, height, caps, deviceProvider = getWebg
 
 // src/fx/gpuPostFx.ts
 var f2 = (n) => n.toFixed(4);
-var POST_UNIFORM_FLOATS = 18 * 4;
-function packPostUniforms(u, width, height, time, hasBloom, out = new Float32Array(POST_UNIFORM_FLOATS)) {
+var POST_UNIFORM_FLOATS = 19 * 4;
+function packPostUniforms(u, width, height, time, hasBloom, out = new Float32Array(POST_UNIFORM_FLOATS), peak = 1) {
   const rows = [
     [width, height, time, hasBloom ? 1 : 0],
     [u.brightness, u.contrast, u.saturation, u.toneMap],
@@ -20672,7 +20690,8 @@ function packPostUniforms(u, width, height, time, hasBloom, out = new Float32Arr
     [u.splitHighlights[0], u.splitHighlights[1], u.splitHighlights[2], 0],
     [u.reflectionStrength, u.reflectionHorizon, u.reflectionFalloff, u.reflectionWobble],
     [u.tiltStrength, u.tiltFocus, u.tiltRange, 0],
-    [u.kaleidoSegments, u.kaleidoAngle, u.grainAmount, u.grainSize]
+    [u.kaleidoSegments, u.kaleidoAngle, u.grainAmount, u.grainSize],
+    [peak, peak > 1 ? 1 : 0, 0, 0]
   ];
   rows.forEach((row, i) => out.set(row, i * 4));
   return out;
@@ -20712,6 +20731,7 @@ struct Post {
   reflect: vec4f,
   tilt: vec4f,
   kaleido: vec4f,
+  range: vec4f, // F4e: x = the brightest the target shows (1 for SDR), y = 1 when that is past white (an HDR display)
 };
 @group(0) @binding(0) var<uniform> u: Post;
 @group(0) @binding(1) var source: texture_2d<f32>;
@@ -20881,7 +20901,8 @@ ${GHOST_TERMS2}
     let y = (c.g * (n - 1.0) + 0.5) / n;
     let lo = textureSampleLevel(lut, linearClamp, vec2f((b0 * n + x) / (n * n), y), 0.0).rgb;
     let hi = textureSampleLevel(lut, linearClamp, vec2f((b1 * n + x) / (n * n), y), 0.0).rgb;
-    color = mix(color, mix(lo, hi, slice - b0), u.grade2.z);
+    // On an HDR display the LUT grades the displayable range and the highlight past it rides along.
+    color = mix(color, mix(lo, hi, slice - b0) + (color - c) * u.range.y, u.grade2.z);
   }
 
   if (u.dither.x > 0.0 && u.screen.w >= 2.0) {
@@ -20891,7 +20912,7 @@ ${GHOST_TERMS2}
 
   if (u.screen.w >= 2.0) {
     color = floor(color * u.screen.w) / (u.screen.w - 1.0);
-    color = min(color, vec3f(1.0));
+    color = min(color, vec3f(u.range.x));
   }
 
   if (u.dither.z > 0.0) {
@@ -20918,7 +20939,7 @@ ${GHOST_TERMS2}
   let scan = 1.0 - u.screen.x * 0.25 * (1.0 + sin(uv.y * size.y * 3.14159));
   color = color * scan;
 
-  return vec4f(clamp(color, vec3f(0.0), vec3f(1.0)), 1.0);
+  return vec4f(clamp(color, vec3f(0.0), vec3f(u.range.x)), 1.0);
 }
 `
 );
@@ -21021,13 +21042,25 @@ var GpuPostFx = class {
     this.blank = device.createTexture({ size: { width: 1, height: 1 }, format: "rgba8unorm", usage: USAGE2.textureBinding | USAGE2.copyDst });
     device.queue.writeTexture({ texture: this.blank }, new Uint8Array([0, 0, 0, 255]), { bytesPerRow: 4 }, { width: 1, height: 1 });
   }
-  /** Encode the stack: `source` (RGBA8, this size) through every effect into `target` (of `format`). */
-  encode(encoder, source, target, format, uniforms, time) {
+  /**
+   * Encode the stack: `source` (this size; RGBA8, or half-float at full
+   * precision on the AAA tier) through every effect into `target` (of
+   * `format`). `peak` is the brightest the target shows (see
+   * {@link packPostUniforms}); `timing` (a frame graph pass's) spans every
+   * pass the stack encodes.
+   */
+  encode(encoder, source, target, format, uniforms, time, options = {}) {
     const device = this.device;
+    const timing = options.timing ?? {};
+    const blooms = uniforms.bloomStrength > 0;
+    const passes = (blooms ? 2 * pyramidLevelCount(this.width, this.height) - 1 : 0) + 1;
     let bloom = null;
-    if (uniforms.bloomStrength > 0) bloom = this.encodeBloom(encoder, source, uniforms.bloomThreshold, uniforms.bloomRadius);
-    device.queue.writeBuffer(this.uniformBuffer, 0, packPostUniforms(uniforms, this.width, this.height, time, bloom !== null, this.data));
-    const pass = encoder.beginRenderPass({ colorAttachments: [{ view: target.createView(), clearValue: { r: 0, g: 0, b: 0, a: 1 }, loadOp: "clear", storeOp: "store" }] });
+    if (blooms) bloom = this.encodeBloom(encoder, source, uniforms.bloomThreshold, uniforms.bloomRadius, (i) => timingSpan(timing, i, passes));
+    device.queue.writeBuffer(this.uniformBuffer, 0, packPostUniforms(uniforms, this.width, this.height, time, bloom !== null, this.data, options.peak ?? 1));
+    const pass = encoder.beginRenderPass({
+      colorAttachments: [{ view: target.createView(), clearValue: { r: 0, g: 0, b: 0, a: 1 }, loadOp: "clear", storeOp: "store" }],
+      ...timingSpan(timing, passes - 1, passes)
+    });
     pass.setPipeline(this.pipeline("post", format, POST_WGSL, "post", false));
     pass.setBindGroup(
       0,
@@ -21058,7 +21091,7 @@ var GpuPostFx = class {
     this.uniformBuffer.destroy?.();
   }
   /** BloomPyramid.generate on the GPU: prefilter into level 0, blur down the chain, fold back up additively. */
-  encodeBloom(encoder, source, threshold, radius) {
+  encodeBloom(encoder, source, threshold, radius, span) {
     if (this.levels.length === 0) {
       const count = pyramidLevelCount(this.width, this.height);
       for (let i = 0; i < count; i += 1) {
@@ -21072,10 +21105,12 @@ var GpuPostFx = class {
       }
     }
     const levels = this.levels;
+    let index = 0;
     const draw = (name, code, entry, target, input, inputTexel, params, blend) => {
       this.device.queue.writeBuffer(target.uniforms, 0, new Float32Array([inputTexel[0], inputTexel[1], 1 / target.width, 1 / target.height, ...params]));
       const pass = encoder.beginRenderPass({
-        colorAttachments: [{ view: target.texture.createView(), clearValue: { r: 0, g: 0, b: 0, a: 1 }, loadOp: blend ? "load" : "clear", storeOp: "store" }]
+        colorAttachments: [{ view: target.texture.createView(), clearValue: { r: 0, g: 0, b: 0, a: 1 }, loadOp: blend ? "load" : "clear", storeOp: "store" }],
+        ...span(index++)
       });
       pass.setPipeline(this.pipeline(name, "rgba16float", code, entry, blend));
       pass.setBindGroup(
@@ -21097,11 +21132,11 @@ var GpuPostFx = class {
       const finer = levels[i - 1];
       draw("down", BLOOM_DOWN_WGSL, "downPass", levels[i], finer.texture, [1 / finer.width, 1 / finer.height], [0, 0, 0, 0], false);
     }
-    for (let i = levels.length - 2; i >= 0; i -= 1) this.drawUp(encoder, i, radius);
+    for (let i = levels.length - 2; i >= 0; i -= 1) this.drawUp(encoder, i, radius, span(index++));
     return levels[0].texture;
   }
   /** One upsample step: level `index + 1`'s tent, added onto level `index`. */
-  drawUp(encoder, index, radius) {
+  drawUp(encoder, index, radius, timing) {
     const target = this.levels[index];
     const coarser = this.levels[index + 1];
     let buffer = this.upUniforms.get(index);
@@ -21110,7 +21145,7 @@ var GpuPostFx = class {
       this.upUniforms.set(index, buffer);
     }
     this.device.queue.writeBuffer(buffer, 0, new Float32Array([1 / coarser.width, 1 / coarser.height, 1 / target.width, 1 / target.height, 0, 0, radius, 0]));
-    const pass = encoder.beginRenderPass({ colorAttachments: [{ view: target.texture.createView(), loadOp: "load", storeOp: "store" }] });
+    const pass = encoder.beginRenderPass({ colorAttachments: [{ view: target.texture.createView(), loadOp: "load", storeOp: "store" }], ...timing });
     pass.setPipeline(this.pipeline("up", "rgba16float", BLOOM_UP_WGSL, "upPass", true));
     pass.setBindGroup(
       0,
@@ -21246,19 +21281,30 @@ var HdrBloom = class {
     this.sampler = device.createSampler({ magFilter: "linear", minFilter: "linear", addressModeU: "clamp-to-edge", addressModeV: "clamp-to-edge" });
   }
   /**
-   * Encode the chain over `source` (rgba16float, `width × height`): the
-   * half-resolution glow it returns sums `count` levels.
+   * The chain's levels for a `width × height` frame and `radius`, made when
+   * the shape changes: the half-resolution glow {@link encode} leaves in the
+   * first, summed over `count` levels (null when the frame is too small).
    */
-  encode(encoder, source, width, height, radius) {
-    const device = this.device;
+  prepare(width, height, radius) {
     const sizes = bloomLevels(width, height, radius);
     if (sizes.length === 0) return null;
     const key = sizes.map((s) => `${s.width}x${s.height}`).join(",");
     if (key !== this.key) {
       for (const level of this.levels) level.texture.destroy?.();
-      this.levels = sizes.map((s) => ({ ...s, texture: device.createTexture({ size: s, format: "rgba16float", usage: 16 | 4 | 1 }) }));
+      this.levels = sizes.map((s) => ({ ...s, texture: this.device.createTexture({ size: s, format: "rgba16float", usage: 16 | 4 | 1 }) }));
       this.key = key;
     }
+    return { texture: this.levels[0].texture, count: this.levels.length };
+  }
+  /**
+   * Encode the chain over `source` (rgba16float, `width × height`): the
+   * half-resolution glow it returns sums `count` levels. `timing` (a frame
+   * graph pass's) spans the chain's passes.
+   */
+  encode(encoder, source, width, height, radius, timing = {}) {
+    const device = this.device;
+    const glow = this.prepare(width, height, radius);
+    if (!glow) return null;
     const pipeline = (code, entryPoint, additive) => {
       const module = device.createShaderModule({ code });
       return device.createRenderPipeline({
@@ -21275,12 +21321,17 @@ var HdrBloom = class {
     this.down ?? (this.down = pipeline(DOWN_WGSL, "down", false));
     this.up ?? (this.up = pipeline(UP_WGSL, "up", true));
     let param = 0;
+    const passes = this.levels.length * 2 - 1;
     const pass = (pipeline2, from2, fromSize2, to, first, load) => {
       var _a;
-      const buffer = (_a = this.params)[param] ?? (_a[param] = device.createBuffer({ size: 32, usage: 64 | 8 }));
+      const index = param;
+      const buffer = (_a = this.params)[index] ?? (_a[index] = device.createBuffer({ size: 32, usage: 64 | 8 }));
       param += 1;
       device.queue.writeBuffer(buffer, 0, new Float32Array([1 / fromSize2.width, 1 / fromSize2.height, 1 / to.width, 1 / to.height, first ? 1 : 0, 0, 0, 0]));
-      const encoded = encoder.beginRenderPass({ colorAttachments: [{ view: to.texture.createView(), clearValue: { r: 0, g: 0, b: 0, a: 0 }, loadOp: load ? "load" : "clear", storeOp: "store" }] });
+      const encoded = encoder.beginRenderPass({
+        colorAttachments: [{ view: to.texture.createView(), clearValue: { r: 0, g: 0, b: 0, a: 0 }, loadOp: load ? "load" : "clear", storeOp: "store" }],
+        ...timingSpan(timing, index, passes)
+      });
       encoded.setPipeline(pipeline2);
       encoded.setBindGroup(
         0,
@@ -21304,7 +21355,7 @@ var HdrBloom = class {
       fromSize = level;
     });
     for (let i = this.levels.length - 1; i > 0; i -= 1) pass(this.up, this.levels[i].texture, this.levels[i], this.levels[i - 1], false, true);
-    return { texture: this.levels[0].texture, count: this.levels.length };
+    return glow;
   }
   dispose() {
     for (const level of this.levels) level.texture.destroy?.();
@@ -21422,6 +21473,7 @@ fn toneMapWith(index: f32, c: vec3f) -> vec3f {
 
 // src/render/grading.ts
 var HDR_HEADROOM = 3;
+var HDR_PEAK = 1.055 * HDR_HEADROOM ** (1 / 2.4) - 0.055;
 var CCT_CUT = 78125e-7;
 var CCT_A = 10.5402377416545;
 var CCT_B = 0.0729055341958355;
@@ -21949,14 +22001,9 @@ var GpuPresenter = class {
       compose: new Float32Array(COMPOSE_UNIFORM_FLOATS),
       measure: new Float32Array(MEASURE_UNIFORM_FLOATS)
     };
-    this.skyTarget = null;
-    /** The composite, when a post stack reads it before the target. */
-    this.composed = null;
     this.postFx = null;
-    /** The linear composite and its bloom chain (F4d), made when a linear frame first blooms. */
-    this.linearTarget = null;
+    /** The HDR bloom's chain (F4d), made when a linear frame first blooms. */
     this.bloom = null;
-    this.shaftTargets = null;
     this.uploads = /* @__PURE__ */ new Map();
     this.panorama = null;
     this.cloudTexture = null;
@@ -21982,6 +22029,8 @@ var GpuPresenter = class {
     };
     const ubuf = (floats) => device.createBuffer({ size: floats * 4, usage: USAGE3.uniform | USAGE3.bufferCopyDst });
     this.uniforms = { sky: ubuf(SKY_UNIFORM_FLOATS), shaft: ubuf(SHAFT_UNIFORM_FLOATS), compose: ubuf(COMPOSE_UNIFORM_FLOATS), finish: ubuf(COMPOSE_UNIFORM_FLOATS), measure: ubuf(MEASURE_UNIFORM_FLOATS) };
+    this.transients = new TransientPool(device);
+    this.timer = GraphTimer.create(device);
     this.measured = {
       result: device.createBuffer({ size: 16, usage: USAGE3.bufferStorage | USAGE3.bufferCopySrc }),
       staging: device.createBuffer({ size: 16, usage: USAGE3.mapRead | USAGE3.bufferCopyDst }),
@@ -21990,57 +22039,109 @@ var GpuPresenter = class {
   }
   /** The newest measurements to arrive (a frame or two behind the frame that asked). */
   get stats() {
-    return this.latestStats;
+    const timer = this.timer;
+    return timer && timer.lastPasses.length > 0 ? { ...this.latestStats, gpuMs: timer.lastMs, passes: timer.lastPasses } : this.latestStats;
   }
-  /** Composite `frame` into `target` (a texture of `format`, `width × height`) and submit. */
+  /**
+   * Composite `frame` into `target` (a texture of `format`, `width × height`)
+   * and submit. The frame is built as a frame graph (F4e): its intermediate
+   * targets are the graph's transients, pooled from frame to frame, and each
+   * step is a pass the graph times when the device can.
+   */
   present(frame, target, format) {
     if (this.destroyed) return;
     const device = this.device;
+    const width = this.width;
+    const height = this.height;
     const encoder = device.createCommandEncoder();
+    const graph = new FrameGraph();
+    const output = graph.importTexture("target", target);
     const sky = frame.base.kind === "sky" ? frame.base.sky : null;
     const shafts = sky && frame.shafts && frame.shafts.shafts.strength > 0 ? frame.shafts : null;
-    if (sky) {
-      const skyFormat = this.hdr ? "rgba16float" : "rgba8unorm";
-      this.skyTarget ?? (this.skyTarget = this.target(skyFormat, this.width, this.height));
-      device.queue.writeBuffer(this.uniforms.sky, 0, packSkyUniforms(sky, this.width, this.height, this.data.sky, this.hdr));
-      this.fullScreen(encoder, "sky", skyFormat, SKY_WGSL, this.skyTarget, [
-        { binding: 0, resource: { buffer: this.uniforms.sky } },
-        { binding: 1, resource: this.panoramaFor(sky.map).createView() },
-        { binding: 2, resource: this.linear.wrapU },
-        { binding: 3, resource: this.cloudsFor(sky.clouds).createView({ dimension: "2d-array" }) },
-        { binding: 4, resource: this.linear.repeat }
-      ]);
-    }
-    const base = sky ? this.skyTarget : frame.base.kind === "frame" ? this.upload("base", frame.base.rgba) : this.blank;
     const scene = frame.scene ?? this.blank;
-    let light = this.blank;
-    if (shafts) {
-      const grid = shaftGrid(this.width, this.height);
-      this.shaftTargets ?? (this.shaftTargets = { mask: this.target("r16float", grid.width, grid.height), light: this.target("r16float", grid.width, grid.height) });
-      device.queue.writeBuffer(this.uniforms.shaft, 0, packShaftUniforms(shafts.sun, shafts.shafts, shafts.color, this.width, this.height, this.data.shaft, this.hdr));
-      this.fullScreen(encoder, "mask", "r16float", SHAFT_MASK_WGSL, this.shaftTargets.mask, [
-        { binding: 0, resource: { buffer: this.uniforms.shaft } },
-        { binding: 1, resource: scene.createView() },
-        { binding: 2, resource: this.skyTarget.createView() }
-      ]);
-      this.fullScreen(encoder, "gather", "r16float", SHAFT_GATHER_WGSL, this.shaftTargets.light, [
-        { binding: 0, resource: { buffer: this.uniforms.shaft } },
-        { binding: 1, resource: this.shaftTargets.mask.createView() }
-      ]);
-      light = this.shaftTargets.light;
+    const skyFormat = this.hdr ? "rgba16float" : "rgba8unorm";
+    const skyTexture = sky ? graph.createTexture("sky", { format: skyFormat, width, height }) : null;
+    if (sky && skyTexture) {
+      graph.addPass("sky", "render", (pass) => {
+        pass.write(skyTexture);
+        return (ctx) => {
+          device.queue.writeBuffer(this.uniforms.sky, 0, packSkyUniforms(sky, width, height, this.data.sky, this.hdr));
+          this.fullScreen(
+            ctx.encoder,
+            "sky",
+            skyFormat,
+            SKY_WGSL,
+            ctx.texture(skyTexture),
+            [
+              { binding: 0, resource: { buffer: this.uniforms.sky } },
+              { binding: 1, resource: this.panoramaFor(sky.map).createView() },
+              { binding: 2, resource: this.linear.wrapU },
+              { binding: 3, resource: this.cloudsFor(sky.clouds).createView({ dimension: "2d-array" }) },
+              { binding: 4, resource: this.linear.repeat }
+            ],
+            ctx.timing
+          );
+        };
+      });
     }
+    const flatBase = sky ? null : frame.base.kind === "frame" ? this.upload("base", frame.base.rgba) : this.blank;
+    const baseOf = (ctx) => skyTexture ? ctx.texture(skyTexture) : flatBase;
+    let light = null;
+    if (shafts && skyTexture) {
+      const grid = shaftGrid(width, height);
+      const mask = graph.createTexture("shaft mask", { format: "r16float", width: grid.width, height: grid.height });
+      const gathered = graph.createTexture("shafts", { format: "r16float", width: grid.width, height: grid.height });
+      graph.addPass("shaft mask", "render", (pass) => {
+        pass.read(skyTexture);
+        pass.write(mask);
+        return (ctx) => {
+          device.queue.writeBuffer(this.uniforms.shaft, 0, packShaftUniforms(shafts.sun, shafts.shafts, shafts.color, width, height, this.data.shaft, this.hdr));
+          this.fullScreen(
+            ctx.encoder,
+            "mask",
+            "r16float",
+            SHAFT_MASK_WGSL,
+            ctx.texture(mask),
+            [
+              { binding: 0, resource: { buffer: this.uniforms.shaft } },
+              { binding: 1, resource: scene.createView() },
+              { binding: 2, resource: ctx.texture(skyTexture).createView() }
+            ],
+            ctx.timing
+          );
+        };
+      });
+      graph.addPass("shafts", "render", (pass) => {
+        pass.read(mask);
+        pass.write(gathered);
+        return (ctx) => this.fullScreen(
+          ctx.encoder,
+          "gather",
+          "r16float",
+          SHAFT_GATHER_WGSL,
+          ctx.texture(gathered),
+          [
+            { binding: 0, resource: { buffer: this.uniforms.shaft } },
+            { binding: 1, resource: ctx.texture(mask).createView() }
+          ],
+          ctx.timing
+        );
+      });
+      light = gathered;
+    }
+    const lightOf = (ctx) => light ? ctx.texture(light) : this.blank;
     const bloomStrength = this.hdr && frame.post ? frame.post.uniforms.bloomStrength : 0;
     const look = this.hdr && frame.post ? frame.post.uniforms : null;
     const graded = look !== null && (look.brightness !== 1 || look.contrast !== 1 || look.saturation !== 1);
     const post = frame.post ? this.hdr ? { ...frame.post, uniforms: { ...frame.post.uniforms, ...bloomStrength > 0 ? { bloomStrength: 0 } : {}, brightness: 1, contrast: 1, saturation: 1 } } : frame.post : null;
-    if (post) this.composed ?? (this.composed = this.target("rgba8unorm", this.width, this.height));
-    const out = post ? this.composed : target;
-    const outFormat = post ? "rgba8unorm" : format;
-    const compose = packComposeUniforms(frame, this.width, this.height, this.data.compose, this.hdr);
+    const composedFormat = this.hdr ? "rgba16float" : "rgba8unorm";
+    const composed = post ? graph.createTexture("composite", { format: composedFormat, width, height }) : null;
+    const composeOut = composed ?? output;
+    const composeFormat = post ? composedFormat : format;
+    const compose = packComposeUniforms(frame, width, height, this.data.compose, this.hdr);
     if (graded) compose.set([look.brightness, look.contrast, look.saturation, 1], 28);
-    const extended = this.extended && !post;
-    compose.set([extended ? 1 : 0, HDR_HEADROOM, extended ? this.extendedExposure(frame.tonemap?.operator ?? "filmic") : 1, look?.bloomDirt ?? 0], 32);
-    const layers = (uniforms, baseView, lightView) => [
+    compose.set([this.extended ? 1 : 0, HDR_HEADROOM, this.extended ? this.extendedExposure(frame.tonemap?.operator ?? "filmic") : 1, look?.bloomDirt ?? 0], 32);
+    const layers = (ctx, uniforms, baseView, lightView) => [
       { binding: 0, resource: { buffer: uniforms } },
       { binding: 1, resource: baseView },
       { binding: 2, resource: scene.createView() },
@@ -22050,55 +22151,91 @@ var GpuPresenter = class {
       { binding: 6, resource: (frame.hud ? this.upload("hud", frame.hud) : this.blank).createView() },
       { binding: 7, resource: (frame.holo ? this.upload("holo", frame.holo) : this.blank).createView() }
     ];
-    const glow = bloomStrength > 0 ? this.bloomOver(encoder, compose, layers(this.uniforms.compose, base.createView(), light.createView()), frame.post.uniforms.bloomRadius) : null;
-    if (glow) {
-      compose.set([2, Math.min(1, bloomStrength * BLOOM_MIX), 1 / glow.count, 0], 24);
-      device.queue.writeBuffer(this.uniforms.finish, 0, compose);
-      this.fullScreen(encoder, "compose", outFormat, COMPOSE_WGSL, out, layers(this.uniforms.finish, this.linearTarget.createView(), glow.texture.createView()));
+    const readLayers = (pass) => {
+      if (skyTexture) pass.read(skyTexture);
+      if (light) pass.read(light);
+    };
+    if (bloomStrength > 0) this.bloom ?? (this.bloom = new HdrBloom(device));
+    const radius = frame.post?.uniforms.bloomRadius ?? 0;
+    const glowShape = bloomStrength > 0 ? this.bloom.prepare(width, height, radius) : null;
+    if (glowShape) {
+      const linearFrame = graph.createTexture("linear composite", { format: "rgba16float", width, height });
+      const glow = graph.importTexture("bloom", glowShape.texture);
+      graph.addPass("linear composite", "render", (pass) => {
+        readLayers(pass);
+        pass.write(linearFrame);
+        return (ctx) => {
+          compose.set([1, 0, 0, 0], 24);
+          device.queue.writeBuffer(this.uniforms.compose, 0, compose);
+          this.fullScreen(ctx.encoder, "compose", "rgba16float", COMPOSE_WGSL, ctx.texture(linearFrame), layers(ctx, this.uniforms.compose, baseOf(ctx).createView(), lightOf(ctx).createView()), ctx.timing);
+        };
+      });
+      graph.addPass("bloom", "render", (pass) => {
+        pass.read(linearFrame);
+        pass.write(glow);
+        return (ctx) => void this.bloom.encode(ctx.encoder, ctx.texture(linearFrame), width, height, radius, ctx.timing);
+      });
+      graph.addPass("tone map", "render", (pass) => {
+        pass.read(linearFrame);
+        pass.read(glow);
+        pass.write(composeOut);
+        return (ctx) => {
+          compose.set([2, Math.min(1, bloomStrength * BLOOM_MIX), 1 / glowShape.count, 0], 24);
+          device.queue.writeBuffer(this.uniforms.finish, 0, compose);
+          this.fullScreen(ctx.encoder, "compose", composeFormat, COMPOSE_WGSL, ctx.texture(composeOut), layers(ctx, this.uniforms.finish, ctx.texture(linearFrame).createView(), ctx.texture(glow).createView()), ctx.timing);
+        };
+      });
     } else {
-      device.queue.writeBuffer(this.uniforms.compose, 0, compose);
-      this.fullScreen(encoder, "compose", outFormat, COMPOSE_WGSL, out, layers(this.uniforms.compose, base.createView(), light.createView()));
+      graph.addPass(this.hdr ? "compose and tone map" : "compose", "render", (pass) => {
+        readLayers(pass);
+        pass.write(composeOut);
+        return (ctx) => {
+          device.queue.writeBuffer(this.uniforms.compose, 0, compose);
+          this.fullScreen(ctx.encoder, "compose", composeFormat, COMPOSE_WGSL, ctx.texture(composeOut), layers(ctx, this.uniforms.compose, baseOf(ctx).createView(), lightOf(ctx).createView()), ctx.timing);
+        };
+      });
     }
-    if (post) {
-      this.postFx ?? (this.postFx = new GpuPostFx(device, this.width, this.height));
-      this.postFx.encode(encoder, this.composed, target, format, post.uniforms, post.time);
+    if (post && composed) {
+      this.postFx ?? (this.postFx = new GpuPostFx(device, width, height));
+      const postFx = this.postFx;
+      graph.addPass("post", "render", (pass) => {
+        pass.read(composed);
+        pass.write(output);
+        return (ctx) => postFx.encode(ctx.encoder, ctx.texture(composed), ctx.texture(output), format, post.uniforms, post.time, { peak: this.extended ? HDR_PEAK : 1, timing: ctx.timing });
+      });
     }
     const measure = frame.measure && (frame.measure.luminance || frame.measure.sun) && !this.measured.busy ? frame.measure : null;
     if (measure) {
-      device.queue.writeBuffer(this.uniforms.measure, 0, packMeasureUniforms(frame, this.width, this.height, this.data.measure, this.hdr));
-      const pipeline = this.pipeline("measure", "", MEASURE_WGSL);
-      const pass = encoder.beginComputePass();
-      pass.setPipeline(pipeline);
-      pass.setBindGroup(
-        0,
-        device.createBindGroup({
-          layout: this.layouts.measure,
-          entries: [
-            { binding: 0, resource: { buffer: this.uniforms.measure } },
-            { binding: 1, resource: base.createView() },
-            { binding: 2, resource: scene.createView() },
-            { binding: 3, resource: { buffer: this.measured.result } }
-          ]
-        })
-      );
-      pass.dispatchWorkgroups(1);
-      pass.end();
-      encoder.copyBufferToBuffer(this.measured.result, 0, this.measured.staging, 0, 16);
+      graph.addPass("measure", "compute", (pass) => {
+        if (skyTexture) pass.read(skyTexture);
+        pass.keep();
+        return (ctx) => {
+          device.queue.writeBuffer(this.uniforms.measure, 0, packMeasureUniforms(frame, width, height, this.data.measure, this.hdr));
+          const pipeline = this.pipeline("measure", "", MEASURE_WGSL);
+          const compute = ctx.encoder.beginComputePass({ ...ctx.timing });
+          compute.setPipeline(pipeline);
+          compute.setBindGroup(
+            0,
+            device.createBindGroup({
+              layout: this.layouts.measure,
+              entries: [
+                { binding: 0, resource: { buffer: this.uniforms.measure } },
+                { binding: 1, resource: baseOf(ctx).createView() },
+                { binding: 2, resource: scene.createView() },
+                { binding: 3, resource: { buffer: this.measured.result } }
+              ]
+            })
+          );
+          compute.dispatchWorkgroups(1);
+          compute.end();
+          ctx.encoder.copyBufferToBuffer(this.measured.result, 0, this.measured.staging, 0, 16);
+        };
+      });
     }
+    graph.run(encoder, this.transients, this.timer);
     device.queue.submit([encoder.finish()]);
+    this.timer?.read();
     if (measure) void this.readMeasurements(measure.luminance, measure.sun !== null);
-  }
-  /**
-   * The HDR bloom (F4d): the layers composited in linear light into their own
-   * target, then blurred down and up the mip chain (hdrBloom.ts).
-   */
-  bloomOver(encoder, compose, entries, radius) {
-    this.linearTarget ?? (this.linearTarget = this.target("rgba16float", this.width, this.height));
-    compose.set([1, 0, 0, 0], 24);
-    this.device.queue.writeBuffer(this.uniforms.compose, 0, compose);
-    this.fullScreen(encoder, "compose", "rgba16float", COMPOSE_WGSL, this.linearTarget, entries);
-    this.bloom ?? (this.bloom = new HdrBloom(this.device));
-    return this.bloom.encode(encoder, this.linearTarget, this.width, this.height, radius);
   }
   /** The exposure that keeps grey where SDR shows it on an HDR display, per curve (found once). */
   extendedExposure(mapper) {
@@ -22114,13 +22251,10 @@ var GpuPresenter = class {
     this.destroyed = true;
     const destroy = (t) => t?.destroy?.();
     destroy(this.blank);
-    destroy(this.skyTarget);
-    destroy(this.composed);
-    destroy(this.linearTarget);
+    this.transients.destroy();
+    this.timer?.destroy();
     this.bloom?.dispose();
     this.postFx?.dispose();
-    destroy(this.shaftTargets?.mask);
-    destroy(this.shaftTargets?.light);
     destroy(this.panorama?.texture);
     destroy(this.cloudTexture?.texture);
     for (const u of this.uploads.values()) destroy(u.texture);
@@ -22147,9 +22281,6 @@ var GpuPresenter = class {
     } finally {
       m.busy = false;
     }
-  }
-  target(format, width, height) {
-    return this.device.createTexture({ size: { width, height }, format, usage: USAGE3.renderAttachment | USAGE3.textureBinding });
   }
   /** A CPU frame (RGBA8, this presenter's size) uploaded into its named slot. */
   upload(slot, rgba) {
@@ -22208,10 +22339,11 @@ var GpuPresenter = class {
     }
     return pipeline;
   }
-  fullScreen(encoder, name, format, code, target, entries) {
+  fullScreen(encoder, name, format, code, target, entries, timing = {}) {
     const pipeline = this.pipeline(name, format, code);
     const pass = encoder.beginRenderPass({
-      colorAttachments: [{ view: target.createView(), clearValue: { r: 0, g: 0, b: 0, a: 0 }, loadOp: "clear", storeOp: "store" }]
+      colorAttachments: [{ view: target.createView(), clearValue: { r: 0, g: 0, b: 0, a: 0 }, loadOp: "clear", storeOp: "store" }],
+      ...timing
     });
     pass.setPipeline(pipeline);
     pass.setBindGroup(0, this.device.createBindGroup({ layout: this.layouts[name], entries }));

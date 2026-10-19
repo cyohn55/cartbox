@@ -4045,6 +4045,12 @@ declare function webgpuCanHonour(style: RasterStyle): boolean;
 declare const TONE_MAPPERS: readonly ["filmic", "aces", "agx", "neutral"];
 type ToneMapper = (typeof TONE_MAPPERS)[number];
 
+/** One pass's GPU time. */
+interface PassTime {
+    readonly name: string;
+    readonly ms: number;
+}
+
 /**
  * Presenting a 3D frame from the GPU (AAA_FIDELITY_ROADMAP.md F0a).
  *
@@ -4067,11 +4073,16 @@ type ToneMapper = (typeof TONE_MAPPERS)[number];
  *    the scene over it (premultiplied), the shafts added, the held weapon over
  *    that, the cart's frame keyed on top as a HUD, and the holo UI over all.
  * 4. **Post:** the post-process stack, when one is set, as a port of the WebGL
- *    pass (see gpuPostFx.ts) from the composite into the target.
+ *    pass (see gpuPostFx.ts) from the composite into the target (half-float on
+ *    a linear frame, F4e).
  * 5. **Measure:** the log-average luminance eye adaptation needs and how much
  *    of the sun is unblocked, reduced in one compute workgroup and read back
  *    as four numbers, asynchronously — the only readback left, sixteen bytes
  *    instead of the frame.
+ *
+ * The steps are passes of a frame graph (frameGraph.ts, F4e): the
+ * intermediate targets are its pooled transients, and each pass is timed for
+ * the profiler when the device can.
  *
  * The cart's frame and the holo layer are CPU-drawn and uploaded as they are
  * (the cart's core makes its frame on the CPU anyway). What no longer happens
@@ -4162,6 +4173,9 @@ interface PresentStats {
     /** The share of taps round the sun that see open sky (0..1), or null when it wasn't measured. */
     readonly sunVisible: number | null;
     readonly seq: number;
+    /** The presenter's GPU time and each of its passes' (F4e), when the device can time them. */
+    readonly gpuMs?: number | null;
+    readonly passes?: readonly PassTime[];
 }
 /** Floats in the sky pass's uniform block. */
 declare const SKY_UNIFORM_FLOATS: number;
@@ -4208,14 +4222,13 @@ declare class GpuPresenter {
     private readonly pipelines;
     private readonly uniforms;
     private readonly data;
-    private skyTarget;
-    /** The composite, when a post stack reads it before the target. */
-    private composed;
     private postFx;
-    /** The linear composite and its bloom chain (F4d), made when a linear frame first blooms. */
-    private linearTarget;
+    /** The HDR bloom's chain (F4d), made when a linear frame first blooms. */
     private bloom;
-    private shaftTargets;
+    /** The frame graph's transients (the sky, the shafts, the composites), kept from frame to frame. */
+    private readonly transients;
+    /** Each pass's GPU time, when the device can time them (F4e: the profiler lists them). */
+    private readonly timer;
     private readonly uploads;
     private panorama;
     private cloudTexture;
@@ -4232,20 +4245,19 @@ declare class GpuPresenter {
     });
     /** The newest measurements to arrive (a frame or two behind the frame that asked). */
     get stats(): PresentStats;
-    /** Composite `frame` into `target` (a texture of `format`, `width × height`) and submit. */
-    present(frame: PresentFrame, target: any, format: string): void;
     /**
-     * The HDR bloom (F4d): the layers composited in linear light into their own
-     * target, then blurred down and up the mip chain (hdrBloom.ts).
+     * Composite `frame` into `target` (a texture of `format`, `width × height`)
+     * and submit. The frame is built as a frame graph (F4e): its intermediate
+     * targets are the graph's transients, pooled from frame to frame, and each
+     * step is a pass the graph times when the device can.
      */
-    private bloomOver;
+    present(frame: PresentFrame, target: any, format: string): void;
     private readonly exposures;
     /** The exposure that keeps grey where SDR shows it on an HDR display, per curve (found once). */
     private extendedExposure;
     /** Release every resource this presenter made. */
     dispose(): void;
     private readMeasurements;
-    private target;
     /** A CPU frame (RGBA8, this presenter's size) uploaded into its named slot. */
     private upload;
     /** The panorama uploaded once per distinct map. */
