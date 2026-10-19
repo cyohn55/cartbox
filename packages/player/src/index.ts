@@ -150,7 +150,7 @@ export {
   shaftGrid,
 } from "./render/gpuPresent.js";
 export type { PresentBase, PresentFrame, PresentSky, PresentStats } from "./render/gpuPresent.js";
-export { GpuCanvasSurface } from "./render/GpuCanvasSurface.js";
+export { GpuCanvasSurface, framePixels, type CapturedFrame } from "./render/GpuCanvasSurface.js";
 export { createSceneRenderer } from "./render/createSceneRenderer.js";
 export { WebgpuSceneRenderer } from "./render/WebgpuSceneRenderer.js";
 export { WEBGL_INSTANCES_PER_DRAW, WEBGL_MAX_LIGHTS, WebglSceneRenderer, type GlContextProvider } from "./render/WebglSceneRenderer.js";
@@ -464,6 +464,7 @@ export function mount(container: HTMLElement, options: PlayerOptions): PlayerHan
     breakableLines: () => player.breakableLines(),
     setProfiling: (on) => player.setProfiling(on),
     profile: () => player.profile(),
+    captureFrame: () => player.captureFrame(),
     quality: () => player.quality(),
     setEditorCamera: (camera) => player.setEditorCamera(camera),
     updateMeshScene: (scene) => player.updateMeshScene(scene),

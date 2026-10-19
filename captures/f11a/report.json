@@ -1,0 +1,629 @@
+{
+  "budgetMs": 16.666666666666668,
+  "viewport": {
+    "width": 1280,
+    "height": 720
+  },
+  "deviceScale": 1.5,
+  "device": "swiftshader",
+  "maps": {
+    "lockout": {
+      "before": [
+        {
+          "view": "overview",
+          "file": "lockout-overview.jpg",
+          "size": [
+            1280,
+            720
+          ],
+          "backend": "webgpu",
+          "rendered": null,
+          "gpuMs": null,
+          "cpuFrameMs": 57.0,
+          "settledScale": null,
+          "drawCalls": 468,
+          "triangles": 33395,
+          "passes": [
+            {
+              "name": "present: compose",
+              "ms": 176.592
+            },
+            {
+              "name": "present: post",
+              "ms": 165.976
+            }
+          ]
+        },
+        {
+          "view": "walkway",
+          "file": "lockout-walkway.jpg",
+          "size": [
+            1280,
+            720
+          ],
+          "backend": "webgpu",
+          "rendered": null,
+          "gpuMs": null,
+          "cpuFrameMs": 614.6,
+          "settledScale": null,
+          "drawCalls": 472,
+          "triangles": 37611,
+          "passes": [
+            {
+              "name": "present: compose",
+              "ms": 208.642
+            },
+            {
+              "name": "present: post",
+              "ms": 177.636
+            }
+          ]
+        },
+        {
+          "view": "pit",
+          "file": "lockout-pit.jpg",
+          "size": [
+            1280,
+            720
+          ],
+          "backend": "webgpu",
+          "rendered": null,
+          "gpuMs": null,
+          "cpuFrameMs": 958.2,
+          "settledScale": null,
+          "drawCalls": 471,
+          "triangles": 36783,
+          "passes": [
+            {
+              "name": "present: compose",
+              "ms": 184.144
+            },
+            {
+              "name": "present: post",
+              "ms": 228.027
+            }
+          ]
+        },
+        {
+          "view": "skyline",
+          "file": "lockout-skyline.jpg",
+          "size": [
+            1280,
+            720
+          ],
+          "backend": "webgpu",
+          "rendered": null,
+          "gpuMs": null,
+          "cpuFrameMs": 718.3,
+          "settledScale": null,
+          "drawCalls": 471,
+          "triangles": 35649,
+          "passes": [
+            {
+              "name": "present: compose",
+              "ms": 187.709
+            },
+            {
+              "name": "present: post",
+              "ms": 174.311
+            }
+          ]
+        }
+      ],
+      "after": [
+        {
+          "view": "overview",
+          "file": "lockout-overview.jpg",
+          "size": [
+            1920,
+            1080
+          ],
+          "backend": "webgpu",
+          "rendered": {
+            "width": 1920,
+            "height": 1080,
+            "scale": 1
+          },
+          "gpuMs": null,
+          "cpuFrameMs": 626.4,
+          "settledScale": 1,
+          "drawCalls": 467,
+          "triangles": 33025,
+          "passes": [
+            {
+              "name": "present: sky",
+              "ms": 115.907
+            },
+            {
+              "name": "present: linear composite",
+              "ms": 464.018
+            },
+            {
+              "name": "present: bloom",
+              "ms": 182.495
+            },
+            {
+              "name": "present: tone map",
+              "ms": 509.829
+            },
+            {
+              "name": "present: post",
+              "ms": 235.608
+            }
+          ]
+        },
+        {
+          "view": "walkway",
+          "file": "lockout-walkway.jpg",
+          "size": [
+            1920,
+            1080
+          ],
+          "backend": "webgpu",
+          "rendered": {
+            "width": 1920,
+            "height": 1080,
+            "scale": 1
+          },
+          "gpuMs": null,
+          "cpuFrameMs": 1834.1,
+          "settledScale": 1,
+          "drawCalls": 472,
+          "triangles": 37087,
+          "passes": [
+            {
+              "name": "present: linear composite",
+              "ms": 473.372
+            },
+            {
+              "name": "present: bloom",
+              "ms": 223.842
+            },
+            {
+              "name": "present: tone map",
+              "ms": 459.364
+            },
+            {
+              "name": "present: post",
+              "ms": 275.671
+            }
+          ]
+        },
+        {
+          "view": "pit",
+          "file": "lockout-pit.jpg",
+          "size": [
+            1920,
+            1080
+          ],
+          "backend": "webgpu",
+          "rendered": {
+            "width": 1920,
+            "height": 1080,
+            "scale": 1
+          },
+          "gpuMs": null,
+          "cpuFrameMs": 2290.6,
+          "settledScale": 1,
+          "drawCalls": 471,
+          "triangles": 36783,
+          "passes": [
+            {
+              "name": "present: linear composite",
+              "ms": 500.76
+            },
+            {
+              "name": "present: bloom",
+              "ms": 204.681
+            },
+            {
+              "name": "present: tone map",
+              "ms": 541.991
+            },
+            {
+              "name": "present: post",
+              "ms": 236.564
+            }
+          ]
+        },
+        {
+          "view": "skyline",
+          "file": "lockout-skyline.jpg",
+          "size": [
+            1920,
+            1080
+          ],
+          "backend": "webgpu",
+          "rendered": {
+            "width": 1920,
+            "height": 1080,
+            "scale": 1
+          },
+          "gpuMs": null,
+          "cpuFrameMs": 1759.8,
+          "settledScale": 1,
+          "drawCalls": 471,
+          "triangles": 36173,
+          "passes": [
+            {
+              "name": "present: linear composite",
+              "ms": 571.94
+            },
+            {
+              "name": "present: bloom",
+              "ms": 178.343
+            },
+            {
+              "name": "present: tone map",
+              "ms": 498.112
+            },
+            {
+              "name": "present: post",
+              "ms": 296.789
+            }
+          ]
+        }
+      ]
+    },
+    "beaver": {
+      "before": [
+        {
+          "view": "overview",
+          "file": "beaver-overview.jpg",
+          "size": [
+            1280,
+            720
+          ],
+          "backend": "webgpu",
+          "rendered": null,
+          "gpuMs": 6915.5,
+          "cpuFrameMs": 40.7,
+          "settledScale": null,
+          "drawCalls": 439,
+          "triangles": 58628,
+          "passes": [
+            {
+              "name": "opaque",
+              "ms": 2362.962
+            },
+            {
+              "name": "see-through",
+              "ms": 3844.648
+            },
+            {
+              "name": "reflections",
+              "ms": 120.332
+            },
+            {
+              "name": "taa.resolve",
+              "ms": 66.866
+            },
+            {
+              "name": "taa.sharpen",
+              "ms": 56.194
+            },
+            {
+              "name": "present: compose",
+              "ms": 186.947
+            },
+            {
+              "name": "present: post",
+              "ms": 178.174
+            },
+            {
+              "name": "present: measure",
+              "ms": 1.712
+            }
+          ]
+        },
+        {
+          "view": "creek",
+          "file": "beaver-creek.jpg",
+          "size": [
+            1280,
+            720
+          ],
+          "backend": "webgpu",
+          "rendered": null,
+          "gpuMs": 6898.7,
+          "cpuFrameMs": 578.8,
+          "settledScale": null,
+          "drawCalls": 456,
+          "triangles": 69916,
+          "passes": [
+            {
+              "name": "opaque",
+              "ms": 2362.962
+            },
+            {
+              "name": "see-through",
+              "ms": 3844.648
+            },
+            {
+              "name": "reflections",
+              "ms": 120.332
+            },
+            {
+              "name": "taa.resolve",
+              "ms": 66.866
+            },
+            {
+              "name": "taa.sharpen",
+              "ms": 56.194
+            },
+            {
+              "name": "present: compose",
+              "ms": 177.552
+            },
+            {
+              "name": "present: post",
+              "ms": 160.808
+            },
+            {
+              "name": "present: measure",
+              "ms": 1.15
+            }
+          ]
+        },
+        {
+          "view": "base",
+          "file": "beaver-base.jpg",
+          "size": [
+            1280,
+            720
+          ],
+          "backend": "webgpu",
+          "rendered": null,
+          "gpuMs": 6817.3,
+          "cpuFrameMs": 732.9,
+          "settledScale": null,
+          "drawCalls": 453,
+          "triangles": 67948,
+          "passes": [
+            {
+              "name": "opaque",
+              "ms": 2362.962
+            },
+            {
+              "name": "see-through",
+              "ms": 3844.648
+            },
+            {
+              "name": "reflections",
+              "ms": 120.332
+            },
+            {
+              "name": "taa.resolve",
+              "ms": 66.866
+            },
+            {
+              "name": "taa.sharpen",
+              "ms": 56.194
+            },
+            {
+              "name": "present: compose",
+              "ms": 198.828
+            },
+            {
+              "name": "present: post",
+              "ms": 172.026
+            },
+            {
+              "name": "present: measure",
+              "ms": 1.172
+            }
+          ]
+        }
+      ],
+      "after": [
+        {
+          "view": "overview",
+          "file": "beaver-overview.jpg",
+          "size": [
+            1920,
+            1080
+          ],
+          "backend": "webgpu",
+          "rendered": {
+            "width": 1920,
+            "height": 1080,
+            "scale": 1
+          },
+          "gpuMs": 10212.9,
+          "cpuFrameMs": 1632.3,
+          "settledScale": 0.5,
+          "drawCalls": 439,
+          "triangles": 58628,
+          "passes": [
+            {
+              "name": "prepass",
+              "ms": 939.418
+            },
+            {
+              "name": "opaque",
+              "ms": 2569.596
+            },
+            {
+              "name": "see-through",
+              "ms": 4444.633
+            },
+            {
+              "name": "taa.reactive",
+              "ms": 50.08
+            },
+            {
+              "name": "reflections",
+              "ms": 243.777
+            },
+            {
+              "name": "taa.resolve",
+              "ms": 181.134
+            },
+            {
+              "name": "taa.sharpen",
+              "ms": 127.93
+            },
+            {
+              "name": "present: linear composite",
+              "ms": 524.521
+            },
+            {
+              "name": "present: bloom",
+              "ms": 194.042
+            },
+            {
+              "name": "present: tone map",
+              "ms": 515.271
+            },
+            {
+              "name": "present: post",
+              "ms": 251.977
+            },
+            {
+              "name": "present: measure",
+              "ms": 1.41
+            }
+          ]
+        },
+        {
+          "view": "creek",
+          "file": "beaver-creek.jpg",
+          "size": [
+            1920,
+            1080
+          ],
+          "backend": "webgpu",
+          "rendered": {
+            "width": 1920,
+            "height": 1080,
+            "scale": 1
+          },
+          "gpuMs": 9968.4,
+          "cpuFrameMs": 2118.9,
+          "settledScale": 0.5,
+          "drawCalls": 454,
+          "triangles": 69700,
+          "passes": [
+            {
+              "name": "prepass",
+              "ms": 939.418
+            },
+            {
+              "name": "opaque",
+              "ms": 2569.596
+            },
+            {
+              "name": "see-through",
+              "ms": 4444.633
+            },
+            {
+              "name": "taa.reactive",
+              "ms": 50.08
+            },
+            {
+              "name": "reflections",
+              "ms": 243.777
+            },
+            {
+              "name": "taa.resolve",
+              "ms": 181.134
+            },
+            {
+              "name": "taa.sharpen",
+              "ms": 127.93
+            },
+            {
+              "name": "present: linear composite",
+              "ms": 471.959
+            },
+            {
+              "name": "present: bloom",
+              "ms": 207.959
+            },
+            {
+              "name": "present: tone map",
+              "ms": 511.798
+            },
+            {
+              "name": "present: post",
+              "ms": 285.052
+            },
+            {
+              "name": "present: measure",
+              "ms": 1.255
+            }
+          ]
+        },
+        {
+          "view": "base",
+          "file": "beaver-base.jpg",
+          "size": [
+            1920,
+            1080
+          ],
+          "backend": "webgpu",
+          "rendered": {
+            "width": 1920,
+            "height": 1080,
+            "scale": 1
+          },
+          "gpuMs": 10017.1,
+          "cpuFrameMs": 1769.4,
+          "settledScale": 0.5,
+          "drawCalls": 454,
+          "triangles": 68318,
+          "passes": [
+            {
+              "name": "prepass",
+              "ms": 939.418
+            },
+            {
+              "name": "opaque",
+              "ms": 2569.596
+            },
+            {
+              "name": "see-through",
+              "ms": 4444.633
+            },
+            {
+              "name": "taa.reactive",
+              "ms": 50.08
+            },
+            {
+              "name": "reflections",
+              "ms": 243.777
+            },
+            {
+              "name": "taa.resolve",
+              "ms": 181.134
+            },
+            {
+              "name": "taa.sharpen",
+              "ms": 127.93
+            },
+            {
+              "name": "present: linear composite",
+              "ms": 476.675
+            },
+            {
+              "name": "present: bloom",
+              "ms": 180.01
+            },
+            {
+              "name": "present: tone map",
+              "ms": 491.291
+            },
+            {
+              "name": "present: post",
+              "ms": 237.262
+            },
+            {
+              "name": "present: measure",
+              "ms": 1.16
+            }
+          ]
+        }
+      ]
+    }
+  }
+}
