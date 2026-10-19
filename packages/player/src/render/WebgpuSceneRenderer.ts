@@ -1589,21 +1589,22 @@ export class WebgpuSceneRenderer implements SceneRenderer {
 
   private constructor(
     private readonly device: any,
-    private readonly width: number,
-    private readonly height: number,
+    private width: number,
+    private height: number,
     private readonly pipeline: PipelineSet,
     /** Build the pipelines for a shader variant (a material graph's, EP7), at a sample count (I1), with a depth prepass (F0c). */
     private readonly pipelinesFor: (code: string, samples?: number, reflect?: boolean, prepass?: boolean) => PipelineSet,
     private readonly bindGroupLayout: any,
-    private readonly colourTexture: any,
-    private readonly depthTexture: any,
+    private colourTexture: any,
+    private depthTexture: any,
     /** Group 1 (EP6b): the opaque depth for the see-through pass, or a blank for the opaque one. */
     private readonly depthGroups: {
       blank: any;
       scene: any;
       readonly blankTexture: any;
       /** The opaque scene's colour for refraction (I5), the size of the frame, and its 1×1 stand-in. */
-      readonly behind: any;
+      /** The frame-sized targets the groups bind (remade on a resize): the depth, and the refraction copy. */
+      readonly sized: { depth: any; behind: any };
       readonly behindBlank: any;
       readonly clusters: { readonly table: any; readonly index: any; readonly params: any };
       readonly shadowTiles: any;
@@ -1622,8 +1623,8 @@ export class WebgpuSceneRenderer implements SceneRenderer {
     private readonly blankTexture: any,
     /** 1x1 r32float, bound to the shadow slot when no shadow map is active. */
     private readonly blankShadow: any,
-    private readonly readback: { buffer: any; busy: boolean; seq?: number }[],
-    private readonly bytesPerRow: number,
+    private readback: { buffer: any; busy: boolean; seq?: number }[],
+    private bytesPerRow: number,
     style: RasterStyle,
     /** Linear HDR (F0b): half-float targets, frames kept on the GPU (renderToTexture) and never read back. */
     readonly hdr = false,
@@ -1883,6 +1884,8 @@ export class WebgpuSceneRenderer implements SceneRenderer {
       // see-through pass begins; a 1×1 blank stands in for it in the opaque pass.
       const behind = device.createTexture({ size: { width, height }, format: colourFormat, usage: 0x04 | 0x02 | 0x10 }); // TEXTURE_BINDING | COPY_DST | RENDER_ATTACHMENT (a resolve target)
       const behindBlank = device.createTexture({ size: { width: 1, height: 1 }, format: colourFormat, usage: 0x04 | 0x02 });
+      // The frame-sized targets the groups bind: a resize swaps them and remakes the groups (F0d).
+      const sized = { depth: depthTexture, behind };
       const makeGroups = (atlas: any, probes: any) => {
         const shared = [
           { binding: 1, resource: { buffer: clusterBuffers.table } },
@@ -1896,7 +1899,7 @@ export class WebgpuSceneRenderer implements SceneRenderer {
         ];
         return {
           blank: device.createBindGroup({ layout: depthLayout, entries: [{ binding: 0, resource: blankDepth.createView() }, ...shared, { binding: 7, resource: behindBlank.createView() }] }),
-          scene: device.createBindGroup({ layout: depthLayout, entries: [{ binding: 0, resource: depthTexture.createView() }, ...shared, { binding: 7, resource: behind.createView() }] }),
+          scene: device.createBindGroup({ layout: depthLayout, entries: [{ binding: 0, resource: sized.depth.createView() }, ...shared, { binding: 7, resource: sized.behind.createView() }] }),
         };
       };
       const makeGroupsMs = (atlas: any, probes: any, blank: any, depth: any) => {
@@ -1912,13 +1915,13 @@ export class WebgpuSceneRenderer implements SceneRenderer {
         ];
         return {
           blank: device.createBindGroup({ layout: depthLayoutMs, entries: [{ binding: 0, resource: blank.createView() }, ...shared, { binding: 7, resource: behindBlank.createView() }] }),
-          scene: device.createBindGroup({ layout: depthLayoutMs, entries: [{ binding: 0, resource: depth.createView() }, ...shared, { binding: 7, resource: behind.createView() }] }),
+          scene: device.createBindGroup({ layout: depthLayoutMs, entries: [{ binding: 0, resource: depth.createView() }, ...shared, { binding: 7, resource: sized.behind.createView() }] }),
         };
       };
       const depthGroups = {
         ...makeGroups(atlasBlank, probesBlank),
         blankTexture: blankDepth,
-        behind,
+        sized,
         behindBlank,
         clusters: clusterBuffers,
         shadowTiles,
@@ -2438,7 +2441,7 @@ export class WebgpuSceneRenderer implements SceneRenderer {
     const raysMs = msaa ? rays.map((ray) => graph.createTexture(`${ray.name}.msaa`, { format: "rgba16float", ...size, sampleCount: MSAA_SAMPLES })) : [];
     // Refraction (I5) reads the opaque scene's colour, copied (or resolved) between the two scene passes.
     // The AAA tier's TAA reads it too, for its reactive mask (F4a).
-    const behind = (refract || hdrTaa) && seeThrough ? graph.importTexture("behind", this.depthGroups.behind) : null;
+    const behind = (refract || hdrTaa) && seeThrough ? graph.importTexture("behind", this.depthGroups.sized.behind) : null;
     const groups = msaa ? msaa.groups : this.depthGroups;
     const target = msColour ?? colour;
     const rayTargets = msaa ? raysMs : rays;
@@ -2935,7 +2938,7 @@ export class WebgpuSceneRenderer implements SceneRenderer {
       await slot.buffer.mapAsync(0x01); // MapMode.READ
       if (this.destroyed) return;
       // Readbacks can land out of order; an older one never replaces a newer frame.
-      if ((slot.seq ?? 0) >= this.latestSeq) {
+      if ((slot.seq ?? 0) >= this.latestSeq && slot.buffer.size === this.bytesPerRow * this.height) {
         const padded = new Uint8Array(slot.buffer.getMappedRange());
         this.latest = unpadRows(padded, this.width, this.height, this.bytesPerRow, this.latest);
         this.latestSeq = slot.seq ?? 0;
@@ -3134,6 +3137,70 @@ export class WebgpuSceneRenderer implements SceneRenderer {
     return texture;
   }
 
+  /** The size frames render at now. */
+  get size(): { readonly width: number; readonly height: number } {
+    return { width: this.width, height: this.height };
+  }
+
+  /**
+   * Render at `width × height` from the next frame on (AAA_FIDELITY_ROADMAP.md
+   * F0d: the AAA tier's frame follows its display, and its dynamic
+   * resolution). The frame's own targets are remade at the new size: the
+   * colour and depth, the refraction copy, the G-buffer and velocity, the
+   * multisampled depth, the TAA history (which starts over) and the readback.
+   * Meshes, textures and pipelines stay; the frame graph's transients follow
+   * by themselves.
+   */
+  resize(width: number, height: number): void {
+    width = Math.max(1, Math.round(width));
+    height = Math.max(1, Math.round(height));
+    if (this.destroyed || (width === this.width && height === this.height)) return;
+    const device = this.device;
+    this.width = width;
+    this.height = height;
+    const size = { width, height };
+    destroySafely(this.colourTexture);
+    this.colourTexture = device.createTexture({ size, format: this.colourFormat, usage: 0x10 | 0x01 | 0x04 | 0x02 });
+    destroySafely(this.depthTexture);
+    this.depthTexture = device.createTexture({ size, format: "depth24plus", usage: 0x10 | 0x04 });
+    const groups = this.depthGroups;
+    destroySafely(groups.sized.behind);
+    groups.sized.behind = device.createTexture({ size, format: this.colourFormat, usage: 0x04 | 0x02 | 0x10 });
+    groups.sized.depth = this.depthTexture;
+    Object.assign(groups, groups.makeGroups(groups.atlas, groups.probes));
+    if (this.msaa) {
+      destroySafely(this.msaa.depth);
+      destroySafely(this.msaa.blank);
+      this.msaa = null;
+    }
+    destroySafely(this.gbuffer);
+    destroySafely(this.velocity);
+    this.gbuffer = null;
+    this.velocity = null;
+    this.prepassed = null;
+    if (this.ssaoTexture) {
+      destroySafely(this.ssaoTexture);
+      this.ssaoTexture = null;
+      this.ssaoBound = this.blankShadow;
+    }
+    if (this.taa) {
+      destroySafely(this.taa.history[0]);
+      destroySafely(this.taa.history[1]);
+      destroySafely(this.taa.uniforms);
+      this.taa = null;
+    }
+    this.temporalState.reset();
+    // A readback still in flight lands at the old size and is dropped (see drain).
+    for (const slot of this.readback) if (!slot.busy) destroySafely(slot.buffer);
+    this.bytesPerRow = alignBytesPerRow(width);
+    this.readback = Array.from({ length: READBACK_BUFFERS }, () => ({
+      buffer: device.createBuffer({ size: this.bytesPerRow * height, usage: 0x08 | 0x01 }),
+      busy: false,
+    }));
+    this.latest = null;
+    this.bindGroups = new WeakMap();
+  }
+
   dispose(): void {
     if (this.destroyed) return;
     this.destroyed = true;
@@ -3155,7 +3222,7 @@ export class WebgpuSceneRenderer implements SceneRenderer {
       destroySafely(this.taa.uniforms);
     }
     destroySafely(this.depthGroups.blankTexture);
-    destroySafely(this.depthGroups.behind);
+    destroySafely(this.depthGroups.sized.behind);
     destroySafely(this.depthGroups.behindBlank);
     destroySafely(this.depthGroups.clusters.table);
     destroySafely(this.depthGroups.clusters.index);

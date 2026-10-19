@@ -4754,7 +4754,8 @@ var AAA_RASTER_CAPS = {
   gpuPresent: true,
   linearHdr: true,
   prepass: true,
-  mipmaps: true
+  mipmaps: true,
+  nativeResolution: true
 };
 var MODELS = {
   classic: {
@@ -11600,6 +11601,10 @@ var CappedSceneRenderer = class {
     if (!inner.renderToTexture) return void 0;
     return (instances, draw) => inner.renderToTexture(applyRenderCaps(instances, this.caps, this.cache), draw);
   }
+  get resize() {
+    const inner = this.inner;
+    return inner.resize ? (width, height) => inner.resize(width, height) : void 0;
+  }
   dispose() {
     this.inner.dispose();
   }
@@ -12446,8 +12451,10 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
    */
   presentOnGpu(gpu, rgba, job) {
     const { camera, lighting } = job;
-    const width = this.width;
-    const height = this.height;
+    const output = gpu.outputSize ?? { width: this.width, height: this.height };
+    const width = output.width;
+    const height = output.height;
+    this.renderer.resize?.(width, height);
     const time = this.frame / 60;
     const lit = lighting ? {
       ambient: lighting.ambient,
@@ -12474,6 +12481,7 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
     if (job.frontDrawn.length > 0) {
       this.requestFrontRenderer();
       if (this.frontRenderer.renderToTexture) {
+        this.frontRenderer.resize?.(width, height);
         front = this.frontRenderer.renderToTexture(
           job.frontDrawn.map((i) => this.withoutRefraction(i)),
           { width, height, view: camera.view, projection: camera.projection, ...lit, time }
@@ -12484,9 +12492,9 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
     const sun = sky && lighting?.sky ? sunScreenPosition(lighting.sky.sunDirection, camera.view, camera.projection, width, height) : null;
     let holo = null;
     if (this.holo) {
-      if (this.holoLayer?.length !== width * height * 4) this.holoLayer = new Uint8ClampedArray(width * height * 4);
+      if (this.holoLayer?.length !== this.width * this.height * 4) this.holoLayer = new Uint8ClampedArray(this.width * this.height * 4);
       this.holoLayer.fill(0);
-      if (this.holo(this.holoLayer, width, height, time, true) !== false) holo = this.holoLayer;
+      if (this.holo(this.holoLayer, this.width, this.height, time, true) !== false) holo = this.holoLayer;
     }
     const adapting = Boolean(lighting?.autoExposure && job.tonemap);
     const flare = this.onSun !== null && sky !== null;
@@ -12502,7 +12510,7 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
       tonemap: job.tonemap,
       measure: adapting || flare ? { luminance: adapting, sun: flare ? sun : null } : null
     });
-    this.takeGpuMeasurements(gpu.stats, lighting, job.post, adapting, sky !== null, sun);
+    this.takeGpuMeasurements(gpu.stats, lighting, job.post, adapting, sky !== null, sun && { x: sun.x / width, y: sun.y / height });
   }
   /** The presenter's newest measurements into the lens flare and eye adaptation (the byte path's reportSun and frameLuminance). */
   takeGpuMeasurements(stats2, lighting, post, adapting, sky, sun) {
@@ -12512,7 +12520,7 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
         this.onSun(null);
       } else {
         const target = sun ? stats2.sunVisible ?? 0 : 0;
-        if (sun) this.sunAt = { x: sun.x / this.width, y: sun.y / this.height };
+        if (sun) this.sunAt = { x: sun.x, y: sun.y };
         this.sunSeen += (target - this.sunSeen) * SUN_EASE;
         if (this.sunSeen < 1e-3) this.sunSeen = 0;
         this.onSun({ x: this.sunAt.x, y: this.sunAt.y, visible: this.sunSeen });
@@ -19549,6 +19557,7 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
       const probesBlank = device.createTexture({ size: { width: 1, height: 1, depthOrArrayLayers: 1 }, dimension: "3d", format: "rgba32float", usage: 4 | 2 });
       const behind = device.createTexture({ size: { width, height }, format: colourFormat, usage: 4 | 2 | 16 });
       const behindBlank = device.createTexture({ size: { width: 1, height: 1 }, format: colourFormat, usage: 4 | 2 });
+      const sized = { depth: depthTexture, behind };
       const makeGroups = (atlas, probes) => {
         const shared = [
           { binding: 1, resource: { buffer: clusterBuffers.table } },
@@ -19562,7 +19571,7 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
         ];
         return {
           blank: device.createBindGroup({ layout: depthLayout, entries: [{ binding: 0, resource: blankDepth.createView() }, ...shared, { binding: 7, resource: behindBlank.createView() }] }),
-          scene: device.createBindGroup({ layout: depthLayout, entries: [{ binding: 0, resource: depthTexture.createView() }, ...shared, { binding: 7, resource: behind.createView() }] })
+          scene: device.createBindGroup({ layout: depthLayout, entries: [{ binding: 0, resource: sized.depth.createView() }, ...shared, { binding: 7, resource: sized.behind.createView() }] })
         };
       };
       const makeGroupsMs = (atlas, probes, blank, depth) => {
@@ -19578,13 +19587,13 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
         ];
         return {
           blank: device.createBindGroup({ layout: depthLayoutMs, entries: [{ binding: 0, resource: blank.createView() }, ...shared, { binding: 7, resource: behindBlank.createView() }] }),
-          scene: device.createBindGroup({ layout: depthLayoutMs, entries: [{ binding: 0, resource: depth.createView() }, ...shared, { binding: 7, resource: behind.createView() }] })
+          scene: device.createBindGroup({ layout: depthLayoutMs, entries: [{ binding: 0, resource: depth.createView() }, ...shared, { binding: 7, resource: sized.behind.createView() }] })
         };
       };
       const depthGroups = {
         ...makeGroups(atlasBlank, probesBlank),
         blankTexture: blankDepth,
-        behind,
+        sized,
         behindBlank,
         clusters: clusterBuffers,
         shadowTiles,
@@ -20016,7 +20025,7 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     const msColour = msaa ? graph.createTexture("colour.msaa", { format: this.colourFormat, ...size, sampleCount: MSAA_SAMPLES }) : null;
     const rays = reflections ? ["reflect.ray", "reflect.env"].map((name) => graph.createTexture(name, { format: "rgba16float", ...size })) : [];
     const raysMs = msaa ? rays.map((ray) => graph.createTexture(`${ray.name}.msaa`, { format: "rgba16float", ...size, sampleCount: MSAA_SAMPLES })) : [];
-    const behind = (refract || hdrTaa) && seeThrough ? graph.importTexture("behind", this.depthGroups.behind) : null;
+    const behind = (refract || hdrTaa) && seeThrough ? graph.importTexture("behind", this.depthGroups.sized.behind) : null;
     const groups = msaa ? msaa.groups : this.depthGroups;
     const target = msColour ?? colour;
     const rayTargets = msaa ? raysMs : rays;
@@ -20430,7 +20439,7 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     try {
       await slot.buffer.mapAsync(1);
       if (this.destroyed) return;
-      if ((slot.seq ?? 0) >= this.latestSeq) {
+      if ((slot.seq ?? 0) >= this.latestSeq && slot.buffer.size === this.bytesPerRow * this.height) {
         const padded = new Uint8Array(slot.buffer.getMappedRange());
         this.latest = unpadRows(padded, this.width, this.height, this.bytesPerRow, this.latest);
         this.latestSeq = slot.seq ?? 0;
@@ -20604,6 +20613,67 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     cache.set(source, texture);
     return texture;
   }
+  /** The size frames render at now. */
+  get size() {
+    return { width: this.width, height: this.height };
+  }
+  /**
+   * Render at `width × height` from the next frame on (AAA_FIDELITY_ROADMAP.md
+   * F0d: the AAA tier's frame follows its display, and its dynamic
+   * resolution). The frame's own targets are remade at the new size: the
+   * colour and depth, the refraction copy, the G-buffer and velocity, the
+   * multisampled depth, the TAA history (which starts over) and the readback.
+   * Meshes, textures and pipelines stay; the frame graph's transients follow
+   * by themselves.
+   */
+  resize(width, height) {
+    width = Math.max(1, Math.round(width));
+    height = Math.max(1, Math.round(height));
+    if (this.destroyed || width === this.width && height === this.height) return;
+    const device = this.device;
+    this.width = width;
+    this.height = height;
+    const size = { width, height };
+    destroySafely(this.colourTexture);
+    this.colourTexture = device.createTexture({ size, format: this.colourFormat, usage: 16 | 1 | 4 | 2 });
+    destroySafely(this.depthTexture);
+    this.depthTexture = device.createTexture({ size, format: "depth24plus", usage: 16 | 4 });
+    const groups = this.depthGroups;
+    destroySafely(groups.sized.behind);
+    groups.sized.behind = device.createTexture({ size, format: this.colourFormat, usage: 4 | 2 | 16 });
+    groups.sized.depth = this.depthTexture;
+    Object.assign(groups, groups.makeGroups(groups.atlas, groups.probes));
+    if (this.msaa) {
+      destroySafely(this.msaa.depth);
+      destroySafely(this.msaa.blank);
+      this.msaa = null;
+    }
+    destroySafely(this.gbuffer);
+    destroySafely(this.velocity);
+    this.gbuffer = null;
+    this.velocity = null;
+    this.prepassed = null;
+    if (this.ssaoTexture) {
+      destroySafely(this.ssaoTexture);
+      this.ssaoTexture = null;
+      this.ssaoBound = this.blankShadow;
+    }
+    if (this.taa) {
+      destroySafely(this.taa.history[0]);
+      destroySafely(this.taa.history[1]);
+      destroySafely(this.taa.uniforms);
+      this.taa = null;
+    }
+    this.temporalState.reset();
+    for (const slot of this.readback) if (!slot.busy) destroySafely(slot.buffer);
+    this.bytesPerRow = alignBytesPerRow(width);
+    this.readback = Array.from({ length: READBACK_BUFFERS2 }, () => ({
+      buffer: device.createBuffer({ size: this.bytesPerRow * height, usage: 8 | 1 }),
+      busy: false
+    }));
+    this.latest = null;
+    this.bindGroups = /* @__PURE__ */ new WeakMap();
+  }
   dispose() {
     if (this.destroyed) return;
     this.destroyed = true;
@@ -20625,7 +20695,7 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
       destroySafely(this.taa.uniforms);
     }
     destroySafely(this.depthGroups.blankTexture);
-    destroySafely(this.depthGroups.behind);
+    destroySafely(this.depthGroups.sized.behind);
     destroySafely(this.depthGroups.behindBlank);
     destroySafely(this.depthGroups.clusters.table);
     destroySafely(this.depthGroups.clusters.index);
@@ -21731,7 +21801,7 @@ function packShaftUniforms(sun, shafts, color, width, height, out = new Float32A
   return out;
 }
 var BASE_KIND = { colour: 0, sky: 1, frame: 2 };
-var COMPOSE_UNIFORM_FLOATS = 36;
+var COMPOSE_UNIFORM_FLOATS = 40;
 function packComposeUniforms(frame, width, height, out = new Float32Array(COMPOSE_UNIFORM_FLOATS), hdr = false) {
   const shafts = frame.base.kind === "sky" && frame.shafts && frame.shafts.shafts.strength > 0 ? frame.shafts : null;
   const grid = shaftGrid(width, height);
@@ -21745,6 +21815,7 @@ function packComposeUniforms(frame, width, height, out = new Float32Array(COMPOS
   out.set([0, 0, 0, 0], 24);
   out.set([1, 1, 1, 0], 28);
   out.set([0, 1, 1, 0], 32);
+  out.set([width, height, 0, 0], 36);
   return out;
 }
 var MEASURE_UNIFORM_FLOATS = 16;
@@ -21762,6 +21833,14 @@ function packMeasureUniforms(frame, width, height, out = new Float32Array(MEASUR
 var SRGB_WGSL = (
   /* wgsl */
   `
+// Pixel \`p\` of a \`frame\`-sized frame in a texture of any size (F0d): the cart's
+// 2D layer at its own size, a scene at its render size. The same texel when the
+// sizes match.
+fn loadScaled(t: texture_2d<f32>, p: vec2i, frame: vec2f) -> vec4f {
+  let d = vec2f(textureDimensions(t));
+  let q = vec2i(floor((vec2f(p) + 0.5) * d / frame));
+  return textureLoad(t, clamp(q, vec2i(0), vec2i(d) - vec2i(1)), 0);
+}
 fn toLinear(c: vec3f) -> vec3f {
   let v = max(c, vec3f(0.0));
   return select(pow((v + vec3f(0.055)) / 1.055, vec3f(2.4)), v / 12.92, v <= vec3f(0.04045));
@@ -21887,7 +21966,7 @@ ${SRGB_WGSL}
   let x = min(u.size.x - 1.0, floor(cell.x * step + step / 2.0));
   let y = min(u.size.y - 1.0, floor(cell.y * step + step / 2.0));
   let at = vec2i(i32(x), i32(y));
-  if (any(textureLoad(scene, at, 0) != vec4f(0.0))) { return vec4f(0.0); }
+  if (any(loadScaled(scene, at, u.size.xy) != vec4f(0.0))) { return vec4f(0.0); }
   var sky = textureLoad(skyTex, at, 0).rgb;
   // The source is the sky as it shows: a linear frame's is encoded back first.
   if (u.color.w > 0.5) { sky = toSrgb(sky); }
@@ -21937,6 +22016,7 @@ struct Compose {
   grade: vec4f, // F4d: x = pass (0 all, 1 the linear composite, 2 the finish), y = bloom strength, z = 1 / levels summed, w = 1 with the lens pass's glare (F4e-2)
   look: vec4f,  // F4d: the linear frame's brightness, contrast (in ACEScct) and saturation; w = 1 when graded
   output: vec4f, // F4d: x = 1 for an HDR display (extended), y = its headroom, z = the exposure keeping grey, w = lens dirt
+  frame: vec4f, // F0d: the frame's size (xy); its layers may be other sizes
 };
 @group(0) @binding(0) var<uniform> u: Compose;
 @group(0) @binding(1) var baseTex: texture_2d<f32>;
@@ -21962,12 +22042,12 @@ fn keep(c: vec4f) -> vec4f {
 // The layers in light: the base, the scene over it, the shafts added, the held weapon over all.
 fn composite(pos: vec4f, p: vec2i, hdr: bool) -> vec4f {
   var c = u.background;
-  if (u.layers.x > 0.5) { c = textureLoad(baseTex, p, 0); }
+  if (u.layers.x > 0.5) { c = loadScaled(baseTex, p, u.frame.xy); }
   // A linear frame decodes a base that was authored in display space (the sky is linear already).
   if (hdr && u.layers.x != 1.0) { c = vec4f(toLinear(c.rgb), c.a); }
   var open = true;
   if (u.layers.y > 0.5) {
-    let s = textureLoad(scene, p, 0);
+    let s = loadScaled(scene, p, u.frame.xy);
     open = all(s == vec4f(0.0));
     c = keep(over(s, c));
   }
@@ -21977,7 +22057,7 @@ fn composite(pos: vec4f, p: vec2i, hdr: bool) -> vec4f {
     if (hdr) { c = vec4f(c.rgb + toLinear(u.shaftColor.rgb) * v, c.a); }
     else { c = vec4f(min(vec3f(1.0), c.rgb + u.shaftColor.rgb * v), c.a); }
   }
-  if (u.layers.w > 0.5) { c = keep(over(textureLoad(front, p, 0), c)); }
+  if (u.layers.w > 0.5) { c = keep(over(loadScaled(front, p, u.frame.xy), c)); }
   return c;
 }
 @fragment fn compose(@builtin(position) pos: vec4f) -> @location(0) vec4f {
@@ -22018,12 +22098,12 @@ fn composite(pos: vec4f, p: vec2i, hdr: bool) -> vec4f {
   // The lens pass's god rays and streaks (F4e-2), gathered as the display shows the light, added over it.
   if (u.grade.w > 0.5) { c = vec4f(c.rgb + textureLoad(glare, p, 0).rgb, c.a); }
   if (u.layers2.x > 0.5) {
-    let h = textureLoad(hud, p, 0);
+    let h = loadScaled(hud, p, u.frame.xy);
     let b = round(h.rgb * 255.0);
     if (b.r + b.g + b.b > u.layers2.z) { c = vec4f(h.rgb, 1.0); }
   }
   if (u.layers2.y > 0.5) {
-    c = over(textureLoad(holo, p, 0), c);
+    c = over(loadScaled(holo, p, u.frame.xy), c);
     if (u.output.x < 0.5) { c = clamp(c, vec4f(0.0), vec4f(1.0)); }
   }
   return vec4f(c.rgb, 1.0);
@@ -22053,11 +22133,11 @@ fn linear(c: f32) -> f32 {
 }
 fn composite(p: vec2i, kind: i32, hasScene: bool) -> vec4f {
   var c = u.background;
-  if (kind > 0) { c = textureLoad(baseTex, p, 0); }
+  if (kind > 0) { c = loadScaled(baseTex, p, u.size.xy); }
   let hdr = u.hdr.x > 0.5;
   if (hdr && kind != 1) { c = vec4f(toLinear(c.rgb), c.a); }
   if (hasScene) {
-    let s = textureLoad(scene, p, 0);
+    let s = loadScaled(scene, p, u.size.xy);
     c = vec4f(s.rgb + c.rgb * (1.0 - s.a), s.a + c.a * (1.0 - s.a));
     if (hdr) { c = max(c, vec4f(0.0)); } else { c = clamp(c, vec4f(0.0), vec4f(1.0)); }
   }
@@ -22067,7 +22147,7 @@ fn openSky(x: f32, y: f32) -> f32 {
   let xi = floor(x);
   let yi = floor(y);
   if (xi < 0.0 || yi < 0.0 || xi >= u.size.x || yi >= u.size.y) { return 0.0; }
-  if (all(textureLoad(scene, vec2i(i32(xi), i32(yi)), 0) == vec4f(0.0))) { return 1.0; }
+  if (all(loadScaled(scene, vec2i(i32(xi), i32(yi)), u.size.xy) == vec4f(0.0))) { return 1.0; }
   return 0.0;
 }
 @compute @workgroup_size(256) fn measure(@builtin(local_invocation_index) tid: u32) {
@@ -22128,10 +22208,15 @@ fn openSky(x: f32, y: f32) -> f32 {
 `
 );
 var GpuPresenter = class {
-  constructor(device, width, height, options = {}) {
+  /**
+   * A presenter on `device` for a cart whose 2D layer (its frame, HUD and holo
+   * UI) is `width × height`. The frame it presents is that size too until
+   * {@link resize} says otherwise; a scene renders at whatever size it likes.
+   */
+  constructor(device, layerWidth, layerHeight, options = {}) {
     this.device = device;
-    this.width = width;
-    this.height = height;
+    this.layerWidth = layerWidth;
+    this.layerHeight = layerHeight;
     this.pipelines = /* @__PURE__ */ new Map();
     this.data = {
       sky: new Float32Array(SKY_UNIFORM_FLOATS),
@@ -22150,6 +22235,8 @@ var GpuPresenter = class {
     this.latestStats = { luminance: null, luminanceSeq: 0, sunVisible: null, seq: 0 };
     this.destroyed = false;
     this.exposures = /* @__PURE__ */ new Map();
+    this.outputWidth = layerWidth;
+    this.outputHeight = layerHeight;
     this.hdr = options.hdr === true;
     this.extended = this.hdr && options.extended === true;
     this.blank = device.createTexture({ size: { width: 1, height: 1 }, format: "rgba8unorm", usage: USAGE3.textureBinding | USAGE3.copyDst });
@@ -22186,6 +22273,28 @@ var GpuPresenter = class {
       staging: device.createBuffer({ size: 16, usage: USAGE3.mapRead | USAGE3.bufferCopyDst }),
       busy: false
     };
+  }
+  /** The frame's width (its target's). */
+  get width() {
+    return this.outputWidth;
+  }
+  /** The frame's height (its target's). */
+  get height() {
+    return this.outputHeight;
+  }
+  /**
+   * Present into `width × height` targets from the next frame on
+   * (AAA_FIDELITY_ROADMAP.md F0d): the AAA tier's canvas follows its display
+   * at the device's pixel ratio. The 2D layer keeps its size and is scaled to it.
+   */
+  resize(width, height) {
+    width = Math.max(1, Math.round(width));
+    height = Math.max(1, Math.round(height));
+    if (width === this.outputWidth && height === this.outputHeight) return;
+    this.outputWidth = width;
+    this.outputHeight = height;
+    this.postFx?.dispose();
+    this.postFx = null;
   }
   /** The newest measurements to arrive (a frame or two behind the frame that asked). */
   get stats() {
@@ -22477,19 +22586,21 @@ var GpuPresenter = class {
       m.busy = false;
     }
   }
-  /** A CPU frame (RGBA8, this presenter's size) uploaded into its named slot. */
+  /** A CPU frame (RGBA8, the 2D layer's size) uploaded into its named slot. */
   upload(slot, rgba) {
+    const width = this.layerWidth;
+    const height = this.layerHeight;
     let entry = this.uploads.get(slot);
     if (!entry) {
       entry = {
-        texture: this.device.createTexture({ size: { width: this.width, height: this.height }, format: "rgba8unorm", usage: USAGE3.textureBinding | USAGE3.copyDst }),
-        width: this.width,
-        height: this.height
+        texture: this.device.createTexture({ size: { width, height }, format: "rgba8unorm", usage: USAGE3.textureBinding | USAGE3.copyDst }),
+        width,
+        height
       };
       this.uploads.set(slot, entry);
     }
     const bytes = rgba instanceof Uint8Array ? rgba : new Uint8Array(rgba.buffer, rgba.byteOffset, rgba.byteLength);
-    this.device.queue.writeTexture({ texture: entry.texture }, bytes, { bytesPerRow: this.width * 4, rowsPerImage: this.height }, { width: this.width, height: this.height });
+    this.device.queue.writeTexture({ texture: entry.texture }, bytes, { bytesPerRow: width * 4, rowsPerImage: height }, { width, height });
     return entry.texture;
   }
   /** The panorama uploaded once per distinct map. */
@@ -22550,8 +22661,20 @@ var GpuPresenter = class {
 };
 
 // src/render/GpuCanvasSurface.ts
+var MAX_NATIVE_PIXELS = 3840 * 2160;
+function nativeBackingSize(cssWidth, cssHeight, pixelRatio) {
+  const ratio = Number.isFinite(pixelRatio) && pixelRatio > 0 ? pixelRatio : 1;
+  let width = Math.max(1, cssWidth * ratio);
+  let height = Math.max(1, cssHeight * ratio);
+  const over = width * height / MAX_NATIVE_PIXELS;
+  if (over > 1) {
+    width /= Math.sqrt(over);
+    height /= Math.sqrt(over);
+  }
+  return { width: Math.max(1, Math.round(width)), height: Math.max(1, Math.round(height)) };
+}
 var GpuCanvasSurface = class _GpuCanvasSurface {
-  constructor(container, scaleMode, model, canvas, context, format, presenter) {
+  constructor(container, scaleMode, model, canvas, context, format, presenter, native = false) {
     this.container = container;
     this.scaleMode = scaleMode;
     this.model = model;
@@ -22559,6 +22682,7 @@ var GpuCanvasSurface = class _GpuCanvasSurface {
     this.context = context;
     this.format = format;
     this.presenter = presenter;
+    this.native = native;
     this.destroyed = false;
     /** The post stack's uniforms, or null with no effect on. */
     this.post = null;
@@ -22581,7 +22705,7 @@ var GpuCanvasSurface = class _GpuCanvasSurface {
       const canvas = container.ownerDocument.createElement("canvas");
       canvas.width = model.width;
       canvas.height = model.height;
-      canvas.style.imageRendering = "pixelated";
+      if (options.native !== true) canvas.style.imageRendering = "pixelated";
       canvas.style.display = "block";
       canvas.style.margin = "auto";
       const context = canvas.getContext("webgpu");
@@ -22590,10 +22714,14 @@ var GpuCanvasSurface = class _GpuCanvasSurface {
       const extended = options.hdr === true && wantsExtended(context, device);
       const format = extended ? "rgba16float" : gpu.getPreferredCanvasFormat?.() ?? "bgra8unorm";
       if (!extended) context.configure({ device, format, alphaMode: "opaque" });
-      return new _GpuCanvasSurface(container, scaleMode, model, canvas, context, format, new GpuPresenter(device, model.width, model.height, { ...options, extended }));
+      return new _GpuCanvasSurface(container, scaleMode, model, canvas, context, format, new GpuPresenter(device, model.width, model.height, { hdr: options.hdr, extended }), options.native === true);
     } catch {
       return null;
     }
+  }
+  /** The size frames show at: the model's, or with a native frame the display's device pixels (F0d). */
+  get outputSize() {
+    return { width: this.presenter.width, height: this.presenter.height };
   }
   /** The newest measurements the presenter has read back (luminance, the sun's visibility). */
   get stats() {
@@ -22637,6 +22765,14 @@ var GpuCanvasSurface = class _GpuCanvasSurface {
     const { width, height } = computeScaledSize(this.container.clientWidth, this.container.clientHeight, this.model.width, this.model.height, this.scaleMode);
     this.canvas.style.width = `${width}px`;
     this.canvas.style.height = `${height}px`;
+    if (this.native && width > 0 && height > 0) {
+      const backing = nativeBackingSize(width, height, globalThis.devicePixelRatio ?? 1);
+      if (this.canvas.width !== backing.width || this.canvas.height !== backing.height) {
+        this.canvas.width = backing.width;
+        this.canvas.height = backing.height;
+      }
+      this.presenter.resize(backing.width, backing.height);
+    }
   }
 };
 function wantsExtended(context, device) {
@@ -23032,7 +23168,8 @@ var Player = class {
       const makeRenderer = () => createSceneRenderer(this.model.width, this.model.height, this.model.renderCaps, void 0, void 0, { hdr, mips: this.options.mipmaps ?? this.model.renderCaps.mipmaps === true });
       if (mesh || world && this.cartSource) this.sceneRenderer = await makeRenderer();
       const presentFromGpu = wantsGpuPresent && this.sceneRenderer?.backend === "webgpu" && Boolean(this.sceneRenderer.renderToTexture);
-      const gpuCanvas = presentFromGpu ? GpuCanvasSurface.create(this.container, scale, this.model, this.sceneRenderer.gpuDevice, { hdr }) : null;
+      const native = this.options.nativeResolution ?? this.model.renderCaps.nativeResolution === true;
+      const gpuCanvas = presentFromGpu ? GpuCanvasSurface.create(this.container, scale, this.model, this.sceneRenderer.gpuDevice, { hdr, native }) : null;
       if (hdr && !gpuCanvas && this.sceneRenderer) {
         this.sceneRenderer.dispose();
         hdr = false;

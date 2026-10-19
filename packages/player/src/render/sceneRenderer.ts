@@ -218,6 +218,12 @@ export interface SceneRenderer {
    * drawn. Absent on the renderers that have no GPU texture to give.
    */
   renderToTexture?(instances: readonly MeshSceneInstance[], draw: GpuSceneDraw): unknown;
+  /**
+   * Render at a new size from the next frame on (AAA_FIDELITY_ROADMAP.md F0d):
+   * the frame's own targets are remade, its meshes and pipelines kept. Only the
+   * renderers whose frames stay on the GPU have it.
+   */
+  resize?(width: number, height: number): void;
   /** The GPU device a {@link renderToTexture} texture belongs to, so a compositor can share it. */
   readonly gpuDevice?: unknown;
   /**
@@ -334,6 +340,11 @@ export class CappedSceneRenderer implements SceneRenderer {
     const inner = this.inner;
     if (!inner.renderToTexture) return undefined;
     return (instances, draw) => inner.renderToTexture!(applyRenderCaps(instances, this.caps, this.cache), draw);
+  }
+
+  get resize(): SceneRenderer["resize"] {
+    const inner = this.inner;
+    return inner.resize ? (width, height) => inner.resize!(width, height) : undefined;
   }
 
   dispose(): void {

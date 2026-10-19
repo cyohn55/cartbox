@@ -309,6 +309,12 @@ interface RenderCaps {
      * which has no mips.
      */
     mipmaps?: boolean;
+    /**
+     * Render the 3D at the display's own resolution (its CSS size × the device's
+     * pixel ratio) rather than the model's frame, and scale the 2D layer to it
+     * (AAA_FIDELITY_ROADMAP.md F0d). Only with `gpuPresent`.
+     */
+    nativeResolution?: boolean;
 }
 /**
  * What the shared software rasteriser behind the mesh/world overlays actually
@@ -3032,6 +3038,13 @@ interface PlayerOptions {
      */
     mipmaps?: boolean;
     /**
+     * Render the 3D at the display's own resolution (its CSS size × the device's
+     * pixel ratio) with the 2D layer scaled to it (AAA_FIDELITY_ROADMAP.md F0d),
+     * or at the model's frame. Defaults to the model's `nativeResolution` render
+     * cap (the AAA tier); applies only to a GPU-presented frame.
+     */
+    nativeResolution?: boolean;
+    /**
      * Control settings (aim inversion, look sensitivity, controller and keyboard
      * bindings, touch pad size/opacity). Change them live with
      * {@link PlayerHandle.setControlSettings}. Defaults: DEFAULT_CONTROL_SETTINGS.
@@ -3870,6 +3883,12 @@ interface SceneRenderer {
      * drawn. Absent on the renderers that have no GPU texture to give.
      */
     renderToTexture?(instances: readonly MeshSceneInstance[], draw: GpuSceneDraw): unknown;
+    /**
+     * Render at a new size from the next frame on (AAA_FIDELITY_ROADMAP.md F0d):
+     * the frame's own targets are remade, its meshes and pipelines kept. Only the
+     * renderers whose frames stay on the GPU have it.
+     */
+    resize?(width: number, height: number): void;
     /** The GPU device a {@link renderToTexture} texture belongs to, so a compositor can share it. */
     readonly gpuDevice?: unknown;
     /**
@@ -3922,6 +3941,7 @@ declare class CappedSceneRenderer implements SceneRenderer {
     get gpuDevice(): unknown;
     get textureFormats(): readonly string[] | undefined;
     get renderToTexture(): SceneRenderer["renderToTexture"];
+    get resize(): SceneRenderer["resize"];
     dispose(): void;
 }
 /** True when a model's caps constrain the scene, so wrapping would do something. */
@@ -4202,7 +4222,7 @@ declare function packShaftUniforms(sun: {
     readonly y: number;
 }, shafts: SunShafts, color: Rgb$1, width: number, height: number, out?: Float32Array<ArrayBuffer>, hdr?: boolean): Float32Array;
 /** Floats in the compose pass's uniform block. */
-declare const COMPOSE_UNIFORM_FLOATS = 36;
+declare const COMPOSE_UNIFORM_FLOATS = 40;
 /** The compose pass's uniforms: which layers are present, the HUD key, the flat base, and the shafts' colour and sampling scale. */
 declare function packComposeUniforms(frame: PresentFrame, width: number, height: number, out?: Float32Array<ArrayBuffer>, hdr?: boolean): Float32Array;
 /** The measure pass's uniforms: frame size, luminance grid step, base kind; the flat base; the sun (pixels), tap radius and whether to tap it. */
@@ -4214,8 +4234,8 @@ declare function packMeasureUniforms(frame: PresentFrame, width: number, height:
  */
 declare class GpuPresenter {
     private readonly device;
-    readonly width: number;
-    readonly height: number;
+    readonly layerWidth: number;
+    readonly layerHeight: number;
     private readonly blank;
     private readonly linear;
     /** The lens pass samples as the post stack does: nearest, clamped. */
@@ -4241,10 +4261,28 @@ declare class GpuPresenter {
     readonly hdr: boolean;
     /** An HDR display (F4d-2): the target shows past SDR white (an rgba16float canvas with extended tone mapping). */
     readonly extended: boolean;
-    constructor(device: any, width: number, height: number, options?: {
+    /** The frame's size: the target's (F0d: the AAA tier's follows its display), the sky, the shafts and the post stack's. */
+    private outputWidth;
+    private outputHeight;
+    /**
+     * A presenter on `device` for a cart whose 2D layer (its frame, HUD and holo
+     * UI) is `width × height`. The frame it presents is that size too until
+     * {@link resize} says otherwise; a scene renders at whatever size it likes.
+     */
+    constructor(device: any, layerWidth: number, layerHeight: number, options?: {
         readonly hdr?: boolean;
         readonly extended?: boolean;
     });
+    /** The frame's width (its target's). */
+    get width(): number;
+    /** The frame's height (its target's). */
+    get height(): number;
+    /**
+     * Present into `width × height` targets from the next frame on
+     * (AAA_FIDELITY_ROADMAP.md F0d): the AAA tier's canvas follows its display
+     * at the device's pixel ratio. The 2D layer keeps its size and is scaled to it.
+     */
+    resize(width: number, height: number): void;
     /** The newest measurements to arrive (a frame or two behind the frame that asked). */
     get stats(): PresentStats;
     /**
@@ -4260,7 +4298,7 @@ declare class GpuPresenter {
     /** Release every resource this presenter made. */
     dispose(): void;
     private readMeasurements;
-    /** A CPU frame (RGBA8, this presenter's size) uploaded into its named slot. */
+    /** A CPU frame (RGBA8, the 2D layer's size) uploaded into its named slot. */
     private upload;
     /** The panorama uploaded once per distinct map. */
     private panoramaFor;
@@ -4365,6 +4403,8 @@ declare class GpuCanvasSurface implements DisplaySurface {
     private readonly format;
     /** The compositor every frame goes through. */
     readonly presenter: GpuPresenter;
+    /** Render at the display's own resolution (F0d), not the model's frame. */
+    private readonly native;
     private readonly resizeObserver;
     private destroyed;
     /** The post stack's uniforms, or null with no effect on. */
@@ -4381,7 +4421,13 @@ declare class GpuCanvasSurface implements DisplaySurface {
      */
     static create(container: HTMLElement, scaleMode: ScaleMode, model: ConsoleModel, device: any, options?: {
         readonly hdr?: boolean;
+        readonly native?: boolean;
     }): GpuCanvasSurface | null;
+    /** The size frames show at: the model's, or with a native frame the display's device pixels (F0d). */
+    get outputSize(): {
+        readonly width: number;
+        readonly height: number;
+    };
     /** The newest measurements the presenter has read back (luminance, the sun's visibility). */
     get stats(): PresentStats;
     /** Set the post-process stack (null, or nothing enabled, for none). */
@@ -4724,22 +4770,22 @@ interface PrepassTargets {
 }
 declare class WebgpuSceneRenderer implements SceneRenderer {
     private readonly device;
-    private readonly width;
-    private readonly height;
+    private width;
+    private height;
     private readonly pipeline;
     /** Build the pipelines for a shader variant (a material graph's, EP7), at a sample count (I1), with a depth prepass (F0c). */
     private readonly pipelinesFor;
     private readonly bindGroupLayout;
-    private readonly colourTexture;
-    private readonly depthTexture;
+    private colourTexture;
+    private depthTexture;
     /** Group 1 (EP6b): the opaque depth for the see-through pass, or a blank for the opaque one. */
     private readonly depthGroups;
     private readonly sampler;
     private readonly blankTexture;
     /** 1x1 r32float, bound to the shadow slot when no shadow map is active. */
     private readonly blankShadow;
-    private readonly readback;
-    private readonly bytesPerRow;
+    private readback;
+    private bytesPerRow;
     /** Linear HDR (F0b): half-float targets, frames kept on the GPU (renderToTexture) and never read back. */
     readonly hdr: boolean;
     /** Mipmapped textures (F1a): a full chain each, made on the GPU, sampled trilinearly at 16× anisotropy. */
@@ -4992,6 +5038,21 @@ declare class WebgpuSceneRenderer implements SceneRenderer {
      * its mips the encoder's. A cut-out keeps the RGBA path for its coverage.
      */
     private uploadTexture;
+    /** The size frames render at now. */
+    get size(): {
+        readonly width: number;
+        readonly height: number;
+    };
+    /**
+     * Render at `width × height` from the next frame on (AAA_FIDELITY_ROADMAP.md
+     * F0d: the AAA tier's frame follows its display, and its dynamic
+     * resolution). The frame's own targets are remade at the new size: the
+     * colour and depth, the refraction copy, the G-buffer and velocity, the
+     * multisampled depth, the TAA history (which starts over) and the readback.
+     * Meshes, textures and pipelines stay; the frame graph's transients follow
+     * by themselves.
+     */
+    resize(width: number, height: number): void;
     dispose(): void;
 }
 
@@ -6519,6 +6580,15 @@ interface MeshOverlayOptions {
 interface GpuPresentTarget {
     present(frame: PresentFrame): void;
     readonly stats: PresentStats;
+    /**
+     * The size its frames show at, when that isn't the cart's own
+     * (AAA_FIDELITY_ROADMAP.md F0d: the AAA tier's follows its display at the
+     * device's pixel ratio). The 3D renders at it; the 2D layer is scaled to it.
+     */
+    readonly outputSize?: {
+        readonly width: number;
+        readonly height: number;
+    };
 }
 /**
  * Loads a KTX2 → RGBA decoder (see {@link MeshOverlayOptions.ktx2}). Given

@@ -94,6 +94,12 @@ export interface RenderCaps {
    * which has no mips.
    */
   mipmaps?: boolean;
+  /**
+   * Render the 3D at the display's own resolution (its CSS size × the device's
+   * pixel ratio) rather than the model's frame, and scale the 2D layer to it
+   * (AAA_FIDELITY_ROADMAP.md F0d). Only with `gpuPresent`.
+   */
+  nativeResolution?: boolean;
 }
 
 /**
@@ -239,6 +245,7 @@ export const AAA_RASTER_CAPS: RenderCaps = {
   linearHdr: true,
   prepass: true,
   mipmaps: true,
+  nativeResolution: true,
 };
 
 export interface ConsoleModel {
