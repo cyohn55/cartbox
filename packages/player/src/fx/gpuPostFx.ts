@@ -80,8 +80,8 @@ const GHOST_TERMS = FLARE_GHOSTS.map(
   (g) => `      flare = flare + vec3f(${f(g.tint[0])}, ${f(g.tint[1])}, ${f(g.tint[2])}) * flareGhost(uv, ${f(g.along)}, ${f(g.radius)}, aspect);`,
 ).join("\n");
 
-/** PostFxPass's fragment shader, in WGSL. */
-export const POST_WGSL = /* wgsl */ `
+/** The main pass's uniform block (and the lens pass's, F4e). */
+export const POST_STRUCT_WGSL = /* wgsl */ `
 struct Post {
   size: vec4f,
   grade: vec4f,
@@ -103,7 +103,100 @@ struct Post {
   kaleido: vec4f,
   range: vec4f, // F4e: x = the brightest the target shows (1 for SDR), y = 1 when that is past white (an HDR display)
 };
-@group(0) @binding(0) var<uniform> u: Post;
+`;
+
+export const POST_HELPERS_WGSL = /* wgsl */ `
+fn luma(c: vec3f) -> f32 { return dot(c, vec3f(0.299, 0.587, 0.114)); }
+// GLSL's smoothstep as it evaluates, edges in either order.
+fn glslSmoothstep(e0: f32, e1: f32, x: f32) -> f32 {
+  let t = clamp((x - e0) / (e1 - e0), 0.0, 1.0);
+  return t * t * (3.0 - 2.0 * t);
+}
+// GLSL's mod: floored, so a negative angle wraps rather than mirrors.
+fn gmod(x: f32, y: f32) -> f32 { return x - y * floor(x / y); }
+`;
+
+// The effects that sample the frame and gather its bright light (F4e): the
+// display stack below and the AAA tier's lens pass (lensFx.ts) share them word
+// for word. Each reads `uv`, `centered`, `size`, `src` and `brightPass`.
+
+/** Chromatic aberration: the frame's three channels sampled apart, along the radius. It declares `color`. */
+export const ABERRATION_WGSL = /* wgsl */ `
+  let fringe = centered * u.screen.y / size;
+  var color = vec3f(src(uv + fringe).r, src(uv).g, src(uv - fringe).b);
+`;
+
+/** Tilt-shift: a ring blur outside the band in focus. */
+export const TILT_SHIFT_WGSL = /* wgsl */ `
+  if (u.tilt.x > 0.0) {
+    let outside = abs(uv.y - u.tilt.y) - max(u.tilt.z, 0.0);
+    let blurAmount = clamp(outside / 0.35, 0.0, 1.0) * u.tilt.x;
+    if (blurAmount > 0.001) {
+      let radius = blurAmount * 6.0;
+      let texel = 1.0 / size;
+      var blurred = color;
+      var total = 1.0;
+      for (var i = 0; i < 10; i = i + 1) {
+        let a = f32(i) / 10.0 * TAU;
+        let dir = vec2f(cos(a), sin(a));
+        blurred = blurred + src(uv + dir * radius * texel);
+        blurred = blurred + src(uv + dir * (radius * 0.5) * texel);
+        total = total + 2.0;
+      }
+      color = mix(color, blurred / total, clamp(blurAmount, 0.0, 1.0));
+    }
+  }
+`;
+
+/** The wet-floor reflection: the frame above the horizon mirrored below it. */
+export const REFLECTION_WGSL = /* wgsl */ `
+  if (u.reflect.x > 0.0) {
+    let below = uv.y - u.reflect.y;
+    if (below > 0.0) {
+      let ripple = sin(uv.x * 40.0 + u.size.z * 2.2) * u.reflect.w * 0.02 * below / max(u.reflect.z, 0.001);
+      let rUv = clamp(vec2f(uv.x + ripple, u.reflect.y - below), vec2f(0.0), vec2f(1.0));
+      let fade = u.reflect.x * clamp(1.0 - below / max(u.reflect.z, 0.001), 0.0, 1.0);
+      color = mix(color, src(rUv), fade);
+    }
+  }
+`;
+
+/** God rays: the bright light gathered along the line to their origin. */
+export const GOD_RAYS_WGSL = /* wgsl */ `
+  if (u.half.y > 0.0) {
+    let marchStep = (uv - u.godray.xy) * u.half.z / 16.0;
+    var probe = uv;
+    var decay = 1.0;
+    var shafts = vec3f(0.0);
+    for (var i = 0; i < 16; i = i + 1) {
+      probe = probe - marchStep;
+      shafts = shafts + brightPass(clamp(probe, vec2f(0.0), vec2f(1.0))) * decay;
+      decay = decay * u.half.w;
+    }
+    color = color + shafts * (u.half.y / 16.0);
+  }
+`;
+
+/** Streaks: the bright light smeared sideways. */
+export const STREAKS_WGSL = /* wgsl */ `
+  if (u.godray.z > 0.0) {
+    let reach = u.godray.w * 0.25;
+    var streak = vec3f(0.0);
+    var total = 0.0;
+    for (var i = 1; i <= 8; i = i + 1) {
+      let distance = f32(i) / 8.0;
+      let weight = 1.0 - distance;
+      let offset = vec2f(reach * distance, 0.0);
+      streak = streak + (brightPass(clamp(uv + offset, vec2f(0.0), vec2f(1.0))) + brightPass(clamp(uv - offset, vec2f(0.0), vec2f(1.0)))) * weight;
+      total = total + weight * 2.0;
+    }
+    color = color + streak * (u.godray.z / max(total, 1.0));
+  }
+`;
+
+/** PostFxPass's fragment shader, in WGSL. */
+export const POST_WGSL = /* wgsl */ `
+${POST_STRUCT_WGSL}@group(0) @binding(0) var<uniform> u: Post;
 @group(0) @binding(1) var source: texture_2d<f32>;
 @group(0) @binding(2) var nearestClamp: sampler;
 @group(0) @binding(3) var bloomTex: texture_2d<f32>;
@@ -113,15 +206,7 @@ ${FULLSCREEN_VS}
 const TAU = 6.2831853;
 
 fn src(uv: vec2f) -> vec3f { return textureSampleLevel(source, nearestClamp, uv, 0.0).rgb; }
-fn luma(c: vec3f) -> f32 { return dot(c, vec3f(0.299, 0.587, 0.114)); }
-// GLSL's smoothstep as it evaluates, edges in either order.
-fn glslSmoothstep(e0: f32, e1: f32, x: f32) -> f32 {
-  let t = clamp((x - e0) / (e1 - e0), 0.0, 1.0);
-  return t * t * (3.0 - 2.0 * t);
-}
-// GLSL's mod: floored, so a negative angle wraps rather than mirrors.
-fn gmod(x: f32, y: f32) -> f32 { return x - y * floor(x / y); }
-fn brightPass(uv: vec2f) -> vec3f {
+${POST_HELPERS_WGSL}fn brightPass(uv: vec2f) -> vec3f {
   let c = src(uv);
   return c * glslSmoothstep(u.fog2.z, 1.0, luma(c));
 }
@@ -159,37 +244,11 @@ fn hash12(p: vec2f) -> f32 { return fract(sin(dot(p, vec2f(12.9898, 78.233))) * 
   let uv = folded + centered * dot(centered, centered) * u.fog2.w * 4.0;
   if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) { return vec4f(0.0, 0.0, 0.0, 1.0); }
 
-  let fringe = centered * u.screen.y / size;
-  var color = vec3f(src(uv + fringe).r, src(uv).g, src(uv - fringe).b);
+${ABERRATION_WGSL}
 
-  if (u.tilt.x > 0.0) {
-    let outside = abs(uv.y - u.tilt.y) - max(u.tilt.z, 0.0);
-    let blurAmount = clamp(outside / 0.35, 0.0, 1.0) * u.tilt.x;
-    if (blurAmount > 0.001) {
-      let radius = blurAmount * 6.0;
-      let texel = 1.0 / size;
-      var blurred = color;
-      var total = 1.0;
-      for (var i = 0; i < 10; i = i + 1) {
-        let a = f32(i) / 10.0 * TAU;
-        let dir = vec2f(cos(a), sin(a));
-        blurred = blurred + src(uv + dir * radius * texel);
-        blurred = blurred + src(uv + dir * (radius * 0.5) * texel);
-        total = total + 2.0;
-      }
-      color = mix(color, blurred / total, clamp(blurAmount, 0.0, 1.0));
-    }
-  }
+${TILT_SHIFT_WGSL}
 
-  if (u.reflect.x > 0.0) {
-    let below = uv.y - u.reflect.y;
-    if (below > 0.0) {
-      let ripple = sin(uv.x * 40.0 + u.size.z * 2.2) * u.reflect.w * 0.02 * below / max(u.reflect.z, 0.001);
-      let rUv = clamp(vec2f(uv.x + ripple, u.reflect.y - below), vec2f(0.0), vec2f(1.0));
-      let fade = u.reflect.x * clamp(1.0 - below / max(u.reflect.z, 0.001), 0.0, 1.0);
-      color = mix(color, src(rUv), fade);
-    }
-  }
+${REFLECTION_WGSL}
 
   if (u.fog2.y > 0.0) {
     var glow = vec3f(0.0);
@@ -208,32 +267,9 @@ fn hash12(p: vec2f) -> f32 { return fract(sin(dot(p, vec2f(12.9898, 78.233))) * 
     color = color + glow * u.fog2.y;
   }
 
-  if (u.half.y > 0.0) {
-    let marchStep = (uv - u.godray.xy) * u.half.z / 16.0;
-    var probe = uv;
-    var decay = 1.0;
-    var shafts = vec3f(0.0);
-    for (var i = 0; i < 16; i = i + 1) {
-      probe = probe - marchStep;
-      shafts = shafts + brightPass(clamp(probe, vec2f(0.0), vec2f(1.0))) * decay;
-      decay = decay * u.half.w;
-    }
-    color = color + shafts * (u.half.y / 16.0);
-  }
+${GOD_RAYS_WGSL}
 
-  if (u.godray.z > 0.0) {
-    let reach = u.godray.w * 0.25;
-    var streak = vec3f(0.0);
-    var total = 0.0;
-    for (var i = 1; i <= 8; i = i + 1) {
-      let distance = f32(i) / 8.0;
-      let weight = 1.0 - distance;
-      let offset = vec2f(reach * distance, 0.0);
-      streak = streak + (brightPass(clamp(uv + offset, vec2f(0.0), vec2f(1.0))) + brightPass(clamp(uv - offset, vec2f(0.0), vec2f(1.0)))) * weight;
-      total = total + weight * 2.0;
-    }
-    color = color + streak * (u.godray.z / max(total, 1.0));
-  }
+${STREAKS_WGSL}
 
   if ((u.flare.x > 0.0 || u.flare.y > 0.0) && u.flare.w > 0.0) {
     let aspect = size.x / size.y;
