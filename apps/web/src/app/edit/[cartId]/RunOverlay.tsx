@@ -9,7 +9,7 @@
  */
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { frameDurationMs, getModel, mount, readCartCode, type DebugStep, type InspectedObject, type PauseInfo, type ProfileSnapshot, type AnimSpec, type CollisionField, type FlagsField, type MeshScene, type ModelId, type ParticleSpec, type PlayerHandle, type PostFxSettings, type QualityChoice, type SceneSpec, type WorldScene } from "@cartbox/player";
+import { frameDurationMs, getModel, mount, readCartCode, runsOnDirectCore, type DebugStep, type InspectedObject, type PauseInfo, type ProfileSnapshot, type AnimSpec, type CollisionField, type FlagsField, type MeshScene, type ModelId, type ParticleSpec, type PlayerHandle, type PostFxSettings, type QualityChoice, type SceneSpec, type WorldScene } from "@cartbox/player";
 import { COLOR_FILTERS, COLOR_FILTER_LABELS, languageName, type ColorFilter, type InputAction, type StringTable, type UiDocument } from "@cartbox/editor";
 import { preferredLanguages, readPlayerPrefs } from "@/lib/accessibilityPrefs";
 import { DIRECT_CORE_URL } from "@/lib/consoleModel";
@@ -141,7 +141,9 @@ export function RunOverlay({
   const [profile, setProfile] = useState<ProfileSnapshot | null>(null);
   // The debugger: on from the start when there are breakpoints (it costs a
   // call per statement, so otherwise it's switched on by hand, which restarts).
-  const [debugOn, setDebugOn] = useState(() => breakpoints.length > 0);
+  // The dedicated Modern core (the AAA tier's own, F0d) has no Lua debug library: no breakpoints there.
+  const directCore = runsOnDirectCore(modelId, mesh?.core);
+  const [debugOn, setDebugOn] = useState(() => breakpoints.length > 0 && !directCore);
   // Save data (EP15b): whether the playtest holds a save, and a bump to restart without it.
   const [hasSave, setHasSave] = useState(() => (saveKey ? readLocalSave(browserStorage(), saveKey) !== null : false));
   const [restarts, setRestarts] = useState(0);
@@ -487,7 +489,14 @@ export function RunOverlay({
                 setRunning(true);
                 setDebugOn((v) => !v);
               }}
-              title={debugOn ? "Turn the Lua debugger off (restarts the cart)" : "Turn the Lua debugger on: breakpoints, stepping, variables (restarts the cart)"}
+              disabled={directCore}
+              title={
+                directCore
+                  ? "Breakpoints and stepping need Lua's debug library, which the dedicated Modern core (the AAA tier's) doesn't have yet. trace() still prints to the console."
+                  : debugOn
+                    ? "Turn the Lua debugger off (restarts the cart)"
+                    : "Turn the Lua debugger on: breakpoints, stepping, variables (restarts the cart)"
+              }
             >
               Debugger
             </button>

@@ -1169,7 +1169,8 @@ function debugSdkLua(address, options = {}) {
     for i = 1, #s do poke(a + 2 + i, s:byte(i)) end
     _wr(_B + ${DBG_TRACE_USED}, used + 3 + #s)
   end
-  local _src = debug.getinfo(1, "S").source
+  -- The dedicated Modern core has no debug library: there, traces only.
+  local _src = debug and debug.getinfo(1, "S").source
   -- A cart line for a line of the merged source, or nil inside the injected code.
   local function _cart(n)
     local off = _live() and _rd(_B + ${DBG_LINE_OFFSET}) or 0
@@ -1192,6 +1193,7 @@ function debugSdkLua(address, options = {}) {
   -- The cart frames of a stack, innermost first: {name, line, level}.
   local function _frames(co, max)
     local out = {}
+    if not debug then return out end
     for level = co and 0 or 2, 60 do
       local info
       if co then info = debug.getinfo(co, level, "Slnf") else info = debug.getinfo(level, "Slnf") end
@@ -1206,7 +1208,7 @@ function debugSdkLua(address, options = {}) {
   end
   -- The core passes every runtime error through debug.traceback. Name cart
   -- lines, and keep it short: the core keeps only 256 bytes of it.
-  local _tb = debug.traceback
+  local _tb = debug and debug.traceback
   local function _traceback(co, msg)
     msg = tostring(msg or ""):gsub('^%[string "[^"]*"%]:(%d+):', function(n)
       local l = _cart(n)
@@ -1217,9 +1219,11 @@ function debugSdkLua(address, options = {}) {
     if #parts > 0 then msg = msg .. "\\nat " .. table.concat(parts, " < ") end
     return msg
   end
-  debug.traceback = function(msg, ...)
-    if type(msg) ~= "string" and msg ~= nil then return _tb(msg, ...) end
-    return _traceback(nil, msg)
+  if debug then
+    debug.traceback = function(msg, ...)
+      if type(msg) ~= "string" and msg ~= nil then return _tb(msg, ...) end
+      return _traceback(nil, msg)
+    end
   end${dbg ? debuggerLua() : ""}
 end`;
 }
@@ -4963,16 +4967,20 @@ var MODELS = {
     id: "aaa",
     label: "AAA (WebGPU)",
     kind: "poly3d",
-    // Modern's 1080p frame and core for now: native resolution is F0d.
-    width: 1920,
-    height: 1080,
+    // The cart's 2D layer (its HUD, its menus): the HD cores' 1280x720 frame and
+    // RAM layout, so the Lua SDK and every HD cart's 2D runs unchanged. The 3D
+    // frame is not bound to it (AAA_FIDELITY_ROADMAP.md F0d).
+    width: 1280,
+    height: 720,
     pixelBytes: 4,
     fps: 60,
     audioChannels: 8,
     sampleRate: 48e3,
     paletteSize: 256,
     cartSizeBytes: 8 * 1024 * 1024,
-    engineUrl: "/engine/xbox360/engine.js",
+    // The dedicated Modern core (ENGINE_PARITY_ROADMAP.md EP20b): a Lua 5.4 VM
+    // whose calls into the 3D engine are calls, with no command cap (F0d).
+    engineUrl: "/engine/modern-core/modern-core.js",
     inputs: ["gamepad", "keyboard", "mouse"],
     renderCaps: AAA_RASTER_CAPS,
     assetBudgetBytes: 8 * 1024 * 1024 * 1024
@@ -5428,6 +5436,10 @@ function hashEventId(id) {
 // src/directConsole.ts
 function directCoreModel(model) {
   return model.id === "modern" || model.id === "aaa" || model.id === "xbox360";
+}
+function runsOnDirectCore(modelId, requested) {
+  if (modelId !== "modern" && modelId !== "aaa" && modelId !== "xbox360") return false;
+  return (requested ?? (modelId === "aaa" ? "direct" : "tic80")) === "direct";
 }
 function createDirectConsole(module, model, layout = RAM_LAYOUTS[model.id], sampleRate = model.sampleRate) {
   let commands = [];
@@ -22642,6 +22654,10 @@ function wantsExtended(context, device) {
 // src/player.ts
 import { SpatialLoader, actionMask, createHoloCache, holoBindingKeys as holoBindingKeys2, holoDocuments as holoDocuments2, renderHoloDocument, translate, reboundActions, colorFilterSvg, DEFAULT_ACCESSIBILITY } from "@cartbox/editor";
 var DIRECT_CORE_URL = "/engine/modern-core/modern-core.js";
+function directCoreBeside(engineUrl) {
+  const at = engineUrl?.lastIndexOf("/engine/") ?? -1;
+  return engineUrl && at >= 0 ? engineUrl.slice(0, at) + DIRECT_CORE_URL : DIRECT_CORE_URL;
+}
 function shouldUseTouch(scheme, view) {
   if (scheme === "touch") return true;
   if (scheme === "keyboard") return false;
@@ -22890,8 +22906,9 @@ var Player = class {
     const filter = this.options.accessibility?.colorFilter;
     if (filter && filter !== "none") this.setColorFilter(filter);
     try {
-      const direct = directCoreModel(this.model) && (this.options.core ?? this.options.mesh?.core) === "direct";
-      const engineUrl = direct ? this.options.directCoreUrl ?? DIRECT_CORE_URL : this.options.engineUrl ?? this.model.engineUrl;
+      const direct = runsOnDirectCore(this.model.id, this.options.core ?? this.options.mesh?.core);
+      const fallbackUrl = this.model.engineUrl === DIRECT_CORE_URL ? MODELS.xbox360.engineUrl : this.model.engineUrl;
+      const engineUrl = direct ? this.options.directCoreUrl ?? directCoreBeside(this.options.engineUrl) : this.options.engineUrl ?? fallbackUrl;
       const [bytes, module] = await Promise.all([
         fetchCartridge(this.options.cartUrl, this.abortController.signal),
         direct ? instantiateEngineModule(engineUrl, this.options.engineWasm) : loadEngineModule(engineUrl, this.options.engineWasm)
@@ -22906,7 +22923,7 @@ var Player = class {
       const cartCode = readCartCode(bytes);
       let ownCode = cartCode;
       if ((this.options.onTrace || debug) && layout) {
-        if (debug && cartCode !== null) {
+        if (debug && cartCode !== null && !direct) {
           const instrumented = instrumentLua(cartCode);
           if (instrumented.lines.length > 0) {
             prepared = appendLuaCode(rewriteLuaCode(prepared, (code) => code.slice(0, code.length - cartCode.length) + instrumented.code), debugPostlude());
@@ -22986,7 +23003,8 @@ var Player = class {
       this.lineCount = cartCode === null ? 0 : cartCode.split("\n").length;
       this.console = direct ? createDirectConsole(module, this.model, void 0, sampleRate) : createConsole(module, this.model, sampleRate);
       if (!this.console.loadCartridge(preparedBytes)) {
-        throw new Error("Engine rejected the cartridge");
+        const why = direct ? this.console.readError?.()?.message : "";
+        throw new Error(why ? `Engine rejected the cartridge: ${why}` : "Engine rejected the cartridge");
       }
       const ring = this.commandRing();
       if (ring) resetCommandRing(ring);
@@ -25551,6 +25569,7 @@ export {
   defaultPostFxSettings,
   detectQuality,
   deterministicBackend,
+  directCoreBeside,
   directCoreModel,
   dragLean,
   drift,
@@ -25657,6 +25676,7 @@ export {
   rumbleEffect,
   runNetLab,
   runReplayEvents,
+  runsOnDirectCore,
   runtimeSdkLua,
   sampleClipFrame,
   sampleNormalBilinear,

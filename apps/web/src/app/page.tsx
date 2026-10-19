@@ -45,6 +45,11 @@ export default function HomePage() {
         </Link>
       </p>
       <p>
+        <Link href="/edit/new?model=aaa">
+          Create an AAA cartridge — WebGPU, lit in linear HDR, on the dedicated Modern core (opens on Beaver Creek) →
+        </Link>
+      </p>
+      <p>
         <Link href="/lockout">Play Lockout — a first-person arena, solo vs bots or online with friends (Xbox 360) →</Link>
       </p>
       <p>

@@ -912,21 +912,30 @@ export function PhysicsWorldPanel({ sidecar, onChange }: { sidecar: MeshSidecar;
 }
 
 /**
- * The core that runs the cart (EP20b), on the Modern tier: the dedicated
- * Modern core (a preview while it's being built) or the usual TIC-80–derived one.
+ * The core that runs the cart (EP20b), on the HD tiers: the dedicated Modern
+ * core or the usual TIC-80–derived one. The AAA tier always runs on the
+ * dedicated core (F0d), so there it is shown, not chosen.
  */
-export function CorePanel({ sidecar, onChange }: { sidecar: MeshSidecar; onChange: (next: MeshSidecar) => void }) {
-  const direct = sidecar.core === "direct";
+export function CorePanel({ sidecar, onChange, fixed = false }: { sidecar: MeshSidecar; onChange: (next: MeshSidecar) => void; fixed?: boolean }) {
+  const direct = fixed || sidecar.core === "direct";
   return (
     <RailGroup label="Core">
       <label style={{ display: "flex", gap: 6, alignItems: "center", fontSize: 12 }}>
-        <input type="checkbox" aria-label="Dedicated Modern core" checked={direct} onChange={(event) => onChange(setMeshCore(sidecar, event.target.checked ? "direct" : null))} />
-        Run on the dedicated Modern core (preview)
+        <input
+          type="checkbox"
+          aria-label="Dedicated Modern core"
+          checked={direct}
+          disabled={fixed}
+          onChange={(event) => onChange(setMeshCore(sidecar, event.target.checked ? "direct" : null))}
+        />
+        Run on the dedicated Modern core
       </label>
       <RailHint>
-        {direct
-          ? "The cart's calls reach the 3D engine directly, with no limit a tick. Sprites, the map and sound aren't on this core yet: they do nothing until they are."
-          : "A core of the Modern tier's own: the cart's calls reach the 3D engine directly, with no limit a tick. Still being built — sprites, the map and sound come later."}
+        {fixed
+          ? "The AAA tier's own core: the cart's calls reach the 3D engine directly, with no limit a tick. Its 2D, sprites, map and sound are TIC-80's, as on the HD core."
+          : direct
+            ? "The cart's calls reach the 3D engine directly, with no limit a tick. Its 2D, sprites, map and sound are TIC-80's, as on the HD core."
+            : "A core of the Modern tier's own: the cart's calls reach the 3D engine directly, with no limit a tick, and everything else runs as on the HD core."}
       </RailHint>
     </RailGroup>
   );

@@ -19,12 +19,23 @@ import { anyPostFxEnabled, type PostFxSettings } from "./fx/postfx.js";
 import { applyPostVolumes, type PostVolumeFx } from "./fx/postVolumeFx.js";
 import { QUALITY_PRESETS, QualityGovernor, applyQualityToPostFx, browserDeviceHints, resolveQuality, type QualityChoice, type QualityLevel, type QualitySettings } from "./quality.js";
 import { createConsole, instantiateEngineModule, loadEngineModule, type ConsoleInstance } from "./engine.js";
-import { createDirectConsole, directCoreModel, type DirectConsole } from "./directConsole.js";
+import { createDirectConsole, runsOnDirectCore, type DirectConsole } from "./directConsole.js";
 
 /** Where the dedicated Modern core is served by default (EP20b). */
 export const DIRECT_CORE_URL = "/engine/modern-core/modern-core.js";
+
+/**
+ * The dedicated core beside the engine a caller serves: the site serves every
+ * core under one `/engine/`, behind whatever base path, so a caller that gives
+ * only its model's engine (a console screen, a feed card) still gets the AAA
+ * tier's core from the same place.
+ */
+export function directCoreBeside(engineUrl: string | undefined): string {
+  const at = engineUrl?.lastIndexOf("/engine/") ?? -1;
+  return engineUrl && at >= 0 ? engineUrl.slice(0, at) + DIRECT_CORE_URL : DIRECT_CORE_URL;
+}
 import { GamepadInput, GamepadState, KeyboardInput, TouchInput, hasTouchSupport } from "./input.js";
-import { frameDurationMs, getModel, type ConsoleModel } from "./models.js";
+import { MODELS, frameDurationMs, getModel, type ConsoleModel } from "./models.js";
 import { ReplayRecorder, ReplaySource, hashCart, randomSeed, type Replay } from "./replay.js";
 import { seedCartridge, prependLuaCode, readCartCode, appendLuaCode, rewriteLuaCode } from "./cartseed.js";
 import { MouseLook } from "./mouseLook.js";
@@ -381,9 +392,11 @@ export class Player {
     const filter = this.options.accessibility?.colorFilter;
     if (filter && filter !== "none") this.setColorFilter(filter);
     try {
-      // The dedicated Modern core (EP20b) when the cart asks for it on a model that has it.
-      const direct = directCoreModel(this.model) && (this.options.core ?? this.options.mesh?.core) === "direct";
-      const engineUrl = direct ? (this.options.directCoreUrl ?? DIRECT_CORE_URL) : (this.options.engineUrl ?? this.model.engineUrl);
+      // The dedicated Modern core (EP20b): the AAA tier's own (F0d), and the HD tiers' when the cart asks for it.
+      const direct = runsOnDirectCore(this.model.id, this.options.core ?? this.options.mesh?.core);
+      // A cart that asks off the dedicated core on a model whose own core it is runs on the HD core it is built like.
+      const fallbackUrl = this.model.engineUrl === DIRECT_CORE_URL ? MODELS.xbox360.engineUrl : this.model.engineUrl;
+      const engineUrl = direct ? (this.options.directCoreUrl ?? directCoreBeside(this.options.engineUrl)) : (this.options.engineUrl ?? fallbackUrl);
       const [bytes, module] = await Promise.all([
         fetchCartridge(this.options.cartUrl, this.abortController.signal),
         direct ? instantiateEngineModule(engineUrl, this.options.engineWasm) : loadEngineModule(engineUrl, this.options.engineWasm),
@@ -415,7 +428,8 @@ export class Player {
       const cartCode = readCartCode(bytes);
       let ownCode = cartCode;
       if ((this.options.onTrace || debug) && layout) {
-        if (debug && cartCode !== null) {
+        // Breakpoints need Lua's debug library, which the dedicated core's sandbox leaves out.
+        if (debug && cartCode !== null && !direct) {
           const instrumented = instrumentLua(cartCode);
           if (instrumented.lines.length > 0) {
             prepared = appendLuaCode(rewriteLuaCode(prepared, (code) => code.slice(0, code.length - cartCode.length) + instrumented.code), debugPostlude());
@@ -511,7 +525,9 @@ export class Player {
 
       this.console = direct ? createDirectConsole(module, this.model, undefined, sampleRate) : createConsole(module as Parameters<typeof createConsole>[0], this.model, sampleRate);
       if (!this.console.loadCartridge(preparedBytes)) {
-        throw new Error("Engine rejected the cartridge");
+        // The dedicated core runs the cart's top level as it loads: say what stopped it.
+        const why = direct ? this.console.readError?.()?.message : "";
+        throw new Error(why ? `Engine rejected the cartridge: ${why}` : "Engine rejected the cartridge");
       }
       // The overflow command ring starts empty (EP20).
       const ring = this.commandRing();

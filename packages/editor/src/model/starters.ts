@@ -131,6 +131,20 @@ export const CART_STARTERS: readonly [CartStarter, ...CartStarter[]] = [
     },
     fx: LOCKOUT_FX,
   },
+  {
+    // The AAA tier's starter (AAA_FIDELITY_ROADMAP.md F0d): the same canyon, on the
+    // tier that lights it in linear HDR, presents it from the GPU and runs its
+    // code on the dedicated Modern core.
+    id: "aaa",
+    label: "AAA Beaver Creek",
+    description:
+      "Beaver Creek on the AAA tier — WebGPU, lit in linear HDR with image-based light, HDR bloom and temporal AA, on the dedicated Modern core.",
+    seed: (engine) => seedArenaCart(engine, arenaMapCode("beaver")),
+    get mesh() {
+      return arenaMap("beaver").sidecar();
+    },
+    fx: LOCKOUT_FX,
+  },
 ];
 
 /** The starter used when none is specified; every fresh engine already carries it. */

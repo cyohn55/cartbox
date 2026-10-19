@@ -217,6 +217,17 @@ Everything else depends on this track. It contains no visible "feature", but its
   - A console model on the dedicated Modern core (`packages/modern-core`, ENGINE_PARITY EP20b: a Lua 5.4 VM with direct engine calls and no command cap). `MODELS.modern` still points its `engineUrl` at the 360 core, and the tier ends that placeholder.
   - It renders at native device resolution × DPR, with dynamic resolution driven by the GPU frame time, and gives the 2D layer a scaled presentation.
   - It is listed on the home page with a starter scene. `modern` stays as the 1080p 360-pipeline tier.
+  - **F0d-1, its own core and starter: done.**
+    - **The dedicated Modern core is the tier's own.** An `aaa` cart runs there unless it asks not to (`runsOnDirectCore`): a Lua 5.4 VM whose calls into the 3D engine are calls, with no command cap. Players find the core beside whatever engine they are given (`directCoreBeside`), behind any base path, and exports carry it.
+    - **Its 2D layer is the HD cores' 1280×720 frame.** The tier declared Modern's 1920×1080, but both cores it could run on are laid out for 1280×720: the 360 core is compiled at that size, so its frame was read 1920 pixels a row, and the dedicated core's HD layout does not fit 1080p at all. The player and editor specs now say 1280×720. The 3D frame is not bound to it (F0d-2).
+      - *Found, not fixed here:* `modern` still declares 1920×1080 on the 1280×720 360 core, so its 2D layer is read the same wrong way.
+    - **The editor runs it.** Its playtest prelude used Lua's `debug` library, which the dedicated core's sandbox leaves out, so any cart on that core (a Modern scene that chose it, too) failed to start in the editor.
+      - The console and traces now work without `debug`. Breakpoints and stepping need it: on this core the Debugger button says so instead.
+      - Giving the core TIC-80's `debug` library means rebuilding it with Emscripten 3.1.64, which this environment can't download; it is left for a core rebuild.
+      - A cart the core rejects now shows the core's own error, not just "rejected".
+    - **A starter and the home page.** `/edit/new?model=aaa` opens on Beaver Creek on the tier (the `aaa` starter), and the home page lists the tier. The Mesh tab shows the dedicated core as the tier's own instead of offering it.
+    - *Tests (`aaa-tier-core.test.ts`):* which carts run on which core; finding the core beside an engine URL; exports carrying it; the 2D spec in the player and the editor; on the real core, an `aaa` cart booting and drawing a 1280-wide frame (and the HD layout refusing 1080p); the starter.
+    - In Chromium: `/edit/new?model=aaa` opens Beaver Creek on the HD core, and Run plays it on the dedicated core, presented by WebGPU at 1280×720, with no GPU errors. It looks the same as the `xbox360` starter.
 - [ ] **F0e. Off the main thread.**
   - **Compute:** frustum and HZB occlusion culling, LOD selection, light clustering and skinning become compute passes with indirect draws.
   - **Workers:** asset decode (PNG, KTX2 transcode, meshopt), physics and navigation move to workers.

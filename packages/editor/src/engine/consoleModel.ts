@@ -250,11 +250,12 @@ export const MODERN_MODEL: ConsoleModelSpec = {
 };
 
 /**
- * The AAA tier's editor spec (AAA_FIDELITY_ROADMAP.md): Modern's 1080p authoring
- * frame. What sets it apart is in the player — a WebGPU-presented frame — not in
- * the 2D authoring surface.
+ * The AAA tier's editor spec (AAA_FIDELITY_ROADMAP.md F0d): its 2D layer is the
+ * HD cores' 1280x720 frame, which the dedicated Modern core it runs on lays out
+ * byte for byte as they do. What sets the tier apart is in the player — a
+ * WebGPU-presented 3D frame not bound to this size — not in the 2D surface.
  */
-export const AAA_MODEL: ConsoleModelSpec = { ...MODERN_MODEL, id: "aaa", label: "AAA (WebGPU)" };
+export const AAA_MODEL: ConsoleModelSpec = { ...XBOX360_MODEL, id: "aaa", label: "AAA (WebGPU)" };
 
 export const CONSOLE_MODELS: Record<ConsoleModelId, ConsoleModelSpec> = {
   classic: CLASSIC_MODEL,

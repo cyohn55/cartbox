@@ -176,6 +176,8 @@ interface MeshEditorProps {
   onStartPlay?: () => Promise<PlaytestConfig | null>;
   /** The cart is on the Modern tier, which has the dedicated core (EP20b). */
   modernTier?: boolean;
+  /** The cart is on the AAA tier, which always runs on the dedicated core (F0d). */
+  directCore?: boolean;
   /** The cart's id: a Lockout cart links to the demo playing its saved assets (L13). */
   cartId?: string;
 }
@@ -201,7 +203,7 @@ function fitDistance(mesh: MeshAsset): number {
   return radius / Math.sin(fov / 2) + radius;
 }
 
-export function MeshEditor({ sidecar, onSidecarChange, code, onStartPlay, modernTier = false, cartId }: MeshEditorProps) {
+export function MeshEditor({ sidecar, onSidecarChange, code, onStartPlay, modernTier = false, directCore = false, cartId }: MeshEditorProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const fileRef = useRef<HTMLInputElement>(null);
   /**
@@ -1626,7 +1628,7 @@ export function MeshEditor({ sidecar, onSidecarChange, code, onStartPlay, modern
             outside the per-mesh selection. */}
         <LightingEditor lighting={sidecar.lighting} onChange={(lighting) => onSidecarChange(setMeshLighting(sidecar, lighting))} />
         <PhysicsWorldPanel sidecar={sidecar} onChange={onSidecarChange} />
-        {modernTier && <CorePanel sidecar={sidecar} onChange={onSidecarChange} />}
+        {modernTier && <CorePanel sidecar={sidecar} onChange={onSidecarChange} fixed={directCore} />}
         <LevelsPanel sidecar={sidecar} onChange={onSidecarChange} />
         <StreamingPanel sidecar={sidecar} onChange={onSidecarChange} />
         <NavigationPanel sidecar={sidecar} onChange={onSidecarChange} />
