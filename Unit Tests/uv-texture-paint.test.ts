@@ -409,7 +409,9 @@ describe("Lockout: a Spartan's armour repainted as a new armour set", () => {
       expect(now.metallicFactor).toBe(was.metallicFactor);
       expect(now.roughnessFactor).toBe(was.roughnessFactor);
       expect(now.emissiveFactor).toEqual(was.emissiveFactor);
-      expect(Array.from(back.primitives[i]!.uvs!)).toEqual(Array.from(mesh.primitives[i]!.uvs!));
+      // V flips to glTF's convention and back: within float32's rounding of 1 − v.
+      const uvs = back.primitives[i]!.uvs!;
+      mesh.primitives[i]!.uvs!.forEach((v, k) => expect(Math.abs(uvs[k]! - v)).toBeLessThan(1e-6));
     }
     // The other sets as they were.
     expect(materialFor(back, part(back, "armor"), "Veteran")!.name).toBe(materialFor(soldier, armor, "Veteran")!.name);

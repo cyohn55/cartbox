@@ -34,16 +34,36 @@ const lockoutMesh = (id: string): MeshAsset => deserializeMeshAsset(resolveMeshR
  * compactly — one joint for a part, a byte a vertex — must come back compact):
  * geometry, bindings, skeleton, inverse binds and clips exactly, and the
  * materials and material sets by name. Normals are compared apart, as import
- * renormalises them.
+ * renormalises them, and so are texture coordinates: V flips between glTF's
+ * convention and the engine's both ways, and 1 − (1 − v) in float32 can land a
+ * bit off v.
  */
 function kept(mesh: MeshAsset): unknown {
-  const stored = JSON.parse(serializeMeshAsset({ ...mesh, primitives: mesh.primitives.map((p) => ({ ...p, normals: null })), trails: undefined }));
+  const stored = JSON.parse(serializeMeshAsset({ ...mesh, primitives: mesh.primitives.map((p) => ({ ...p, normals: null, uvs: null, uvs2: null })), trails: undefined }));
   return {
     primitives: stored.primitives.map(({ material, ...p }: { material: { name: string } }) => ({ ...p, material: material.name })),
     skin: stored.skin,
     clips: stored.clips,
     variants: stored.variants?.map((v: { name: string; materials: ({ name: string } | null)[] }) => ({ name: v.name, materials: v.materials.map((m) => m?.name ?? null) })),
   };
+}
+
+function expectUvsClose(a: MeshAsset, b: MeshAsset): void {
+  a.primitives.forEach((p, i) => {
+    const q = b.primitives[i]!;
+    for (const key of ["uvs", "uvs2"] as const) {
+      const was = p[key];
+      const now = q[key];
+      if (!was) {
+        expect(now ?? null).toBeNull();
+        continue;
+      }
+      expect(now!.length).toBe(was.length);
+      let worst = 0;
+      for (let k = 0; k < was.length; k += 1) worst = Math.max(worst, Math.abs(was[k]! - now![k]!));
+      expect(worst).toBeLessThan(1e-6);
+    }
+  });
 }
 
 function expectNormalsClose(a: MeshAsset, b: MeshAsset): void {
@@ -62,6 +82,7 @@ function roundTrip(mesh: MeshAsset): MeshAsset {
   const back = parseGlb(encodeGlb(mesh), mesh.name);
   expect(kept(back)).toEqual(kept(mesh));
   expectNormalsClose(mesh, back);
+  expectUvsClose(mesh, back);
   return back;
 }
 
@@ -263,8 +284,8 @@ describe("files without a rig, and files from Blender", () => {
 
   it("writes an unskinned mesh exactly as before: one node, no skin, no animations", () => {
     const glb = encodeGlb(prop);
-    // Pinned from the encoder before L14: not a byte has moved.
-    expect(createHash("sha256").update(glb).digest("hex")).toBe("a590c791295cdcbe69614a2a4d70f013623cfc642cc0bd08167950417535c575");
+    // Pinned from the encoder before L14, but for its texture coordinates, which now carry glTF's V (1 − the engine's).
+    expect(createHash("sha256").update(glb).digest("hex")).toBe("00bb356646c9429923bb04cd8ce8754878007e5ef7c26e92a8689b2f920f0f12");
     const json = validate(glb);
     expect(json.nodes).toEqual([{ mesh: 0 }]);
     expect(json.skins).toBeUndefined();
@@ -276,8 +297,15 @@ describe("files without a rig, and files from Blender", () => {
     const uvs2 = Float32Array.from([0.1, 0.2, 0.3, 0.4, 0.5, 0.6]);
     const mesh: MeshAsset = { ...prop, primitives: [{ ...prop.primitives[0]!, uvs2 }] };
     const json = validate(encodeGlb(mesh));
-    expect(json.meshes![0]!.primitives[0]!.attributes.TEXCOORD_1).toBeDefined();
-    expect(parseGlb(encodeGlb(mesh)).primitives[0]!.uvs2).toEqual(uvs2);
+    const accessor = json.meshes![0]!.primitives[0]!.attributes.TEXCOORD_1!;
+    expect(accessor).toBeDefined();
+    // Stored in glTF's convention (V down from the image's top), read back into the engine's.
+    const { buffers } = readGlb(encodeGlb(mesh));
+    const view = json.bufferViews![json.accessors![accessor]!.bufferView!]!;
+    const stored = new Float32Array(buffers[0]!.slice(view.byteOffset ?? 0, (view.byteOffset ?? 0) + view.byteLength).buffer);
+    expect(stored[1]).toBeCloseTo(1 - 0.2, 6);
+    const back = parseGlb(encodeGlb(mesh)).primitives[0]!.uvs2!;
+    uvs2.forEach((v, k) => expect(Math.abs(back[k]! - v)).toBeLessThan(1e-6));
   });
 
   it("imports the Blender-shaped arm as before, and round-trips it", () => {
