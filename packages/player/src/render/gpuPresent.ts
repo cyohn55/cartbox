@@ -213,7 +213,7 @@ export function packShaftUniforms(
 const BASE_KIND = { colour: 0, sky: 1, frame: 2 } as const;
 
 /** Floats in the compose pass's uniform block. */
-export const COMPOSE_UNIFORM_FLOATS = 36;
+export const COMPOSE_UNIFORM_FLOATS = 40;
 
 /** The compose pass's uniforms: which layers are present, the HUD key, the flat base, and the shafts' colour and sampling scale. */
 export function packComposeUniforms(
@@ -237,6 +237,8 @@ export function packComposeUniforms(
   // The linear frame's grade and its display output (F4d-2), set by the presenter: none, SDR.
   out.set([1, 1, 1, 0], 28);
   out.set([0, 1, 1, 0], 32);
+  // The frame's size (F0d): the layers are sampled to it, whatever their own.
+  out.set([width, height, 0, 0], 36);
   return out;
 }
 
@@ -261,6 +263,14 @@ export function packMeasureUniforms(frame: PresentFrame, width: number, height: 
 
 /** The sRGB curves, both ways (F0b's linear frame decodes what was authored and encodes what is shown). */
 const SRGB_WGSL = /* wgsl */ `
+// Pixel \`p\` of a \`frame\`-sized frame in a texture of any size (F0d): the cart's
+// 2D layer at its own size, a scene at its render size. The same texel when the
+// sizes match.
+fn loadScaled(t: texture_2d<f32>, p: vec2i, frame: vec2f) -> vec4f {
+  let d = vec2f(textureDimensions(t));
+  let q = vec2i(floor((vec2f(p) + 0.5) * d / frame));
+  return textureLoad(t, clamp(q, vec2i(0), vec2i(d) - vec2i(1)), 0);
+}
 fn toLinear(c: vec3f) -> vec3f {
   let v = max(c, vec3f(0.0));
   return select(pow((v + vec3f(0.055)) / 1.055, vec3f(2.4)), v / 12.92, v <= vec3f(0.04045));
@@ -380,7 +390,7 @@ ${SRGB_WGSL}
   let x = min(u.size.x - 1.0, floor(cell.x * step + step / 2.0));
   let y = min(u.size.y - 1.0, floor(cell.y * step + step / 2.0));
   let at = vec2i(i32(x), i32(y));
-  if (any(textureLoad(scene, at, 0) != vec4f(0.0))) { return vec4f(0.0); }
+  if (any(loadScaled(scene, at, u.size.xy) != vec4f(0.0))) { return vec4f(0.0); }
   var sky = textureLoad(skyTex, at, 0).rgb;
   // The source is the sky as it shows: a linear frame's is encoded back first.
   if (u.color.w > 0.5) { sky = toSrgb(sky); }
@@ -428,6 +438,7 @@ struct Compose {
   grade: vec4f, // F4d: x = pass (0 all, 1 the linear composite, 2 the finish), y = bloom strength, z = 1 / levels summed, w = 1 with the lens pass's glare (F4e-2)
   look: vec4f,  // F4d: the linear frame's brightness, contrast (in ACEScct) and saturation; w = 1 when graded
   output: vec4f, // F4d: x = 1 for an HDR display (extended), y = its headroom, z = the exposure keeping grey, w = lens dirt
+  frame: vec4f, // F0d: the frame's size (xy); its layers may be other sizes
 };
 @group(0) @binding(0) var<uniform> u: Compose;
 @group(0) @binding(1) var baseTex: texture_2d<f32>;
@@ -453,12 +464,12 @@ fn keep(c: vec4f) -> vec4f {
 // The layers in light: the base, the scene over it, the shafts added, the held weapon over all.
 fn composite(pos: vec4f, p: vec2i, hdr: bool) -> vec4f {
   var c = u.background;
-  if (u.layers.x > 0.5) { c = textureLoad(baseTex, p, 0); }
+  if (u.layers.x > 0.5) { c = loadScaled(baseTex, p, u.frame.xy); }
   // A linear frame decodes a base that was authored in display space (the sky is linear already).
   if (hdr && u.layers.x != 1.0) { c = vec4f(toLinear(c.rgb), c.a); }
   var open = true;
   if (u.layers.y > 0.5) {
-    let s = textureLoad(scene, p, 0);
+    let s = loadScaled(scene, p, u.frame.xy);
     open = all(s == vec4f(0.0));
     c = keep(over(s, c));
   }
@@ -468,7 +479,7 @@ fn composite(pos: vec4f, p: vec2i, hdr: bool) -> vec4f {
     if (hdr) { c = vec4f(c.rgb + toLinear(u.shaftColor.rgb) * v, c.a); }
     else { c = vec4f(min(vec3f(1.0), c.rgb + u.shaftColor.rgb * v), c.a); }
   }
-  if (u.layers.w > 0.5) { c = keep(over(textureLoad(front, p, 0), c)); }
+  if (u.layers.w > 0.5) { c = keep(over(loadScaled(front, p, u.frame.xy), c)); }
   return c;
 }
 @fragment fn compose(@builtin(position) pos: vec4f) -> @location(0) vec4f {
@@ -509,12 +520,12 @@ fn composite(pos: vec4f, p: vec2i, hdr: bool) -> vec4f {
   // The lens pass's god rays and streaks (F4e-2), gathered as the display shows the light, added over it.
   if (u.grade.w > 0.5) { c = vec4f(c.rgb + textureLoad(glare, p, 0).rgb, c.a); }
   if (u.layers2.x > 0.5) {
-    let h = textureLoad(hud, p, 0);
+    let h = loadScaled(hud, p, u.frame.xy);
     let b = round(h.rgb * 255.0);
     if (b.r + b.g + b.b > u.layers2.z) { c = vec4f(h.rgb, 1.0); }
   }
   if (u.layers2.y > 0.5) {
-    c = over(textureLoad(holo, p, 0), c);
+    c = over(loadScaled(holo, p, u.frame.xy), c);
     if (u.output.x < 0.5) { c = clamp(c, vec4f(0.0), vec4f(1.0)); }
   }
   return vec4f(c.rgb, 1.0);
@@ -543,11 +554,11 @@ fn linear(c: f32) -> f32 {
 }
 fn composite(p: vec2i, kind: i32, hasScene: bool) -> vec4f {
   var c = u.background;
-  if (kind > 0) { c = textureLoad(baseTex, p, 0); }
+  if (kind > 0) { c = loadScaled(baseTex, p, u.size.xy); }
   let hdr = u.hdr.x > 0.5;
   if (hdr && kind != 1) { c = vec4f(toLinear(c.rgb), c.a); }
   if (hasScene) {
-    let s = textureLoad(scene, p, 0);
+    let s = loadScaled(scene, p, u.size.xy);
     c = vec4f(s.rgb + c.rgb * (1.0 - s.a), s.a + c.a * (1.0 - s.a));
     if (hdr) { c = max(c, vec4f(0.0)); } else { c = clamp(c, vec4f(0.0), vec4f(1.0)); }
   }
@@ -557,7 +568,7 @@ fn openSky(x: f32, y: f32) -> f32 {
   let xi = floor(x);
   let yi = floor(y);
   if (xi < 0.0 || yi < 0.0 || xi >= u.size.x || yi >= u.size.y) { return 0.0; }
-  if (all(textureLoad(scene, vec2i(i32(xi), i32(yi)), 0) == vec4f(0.0))) { return 1.0; }
+  if (all(loadScaled(scene, vec2i(i32(xi), i32(yi)), u.size.xy) == vec4f(0.0))) { return 1.0; }
   return 0.0;
 }
 @compute @workgroup_size(256) fn measure(@builtin(local_invocation_index) tid: u32) {
@@ -665,12 +676,23 @@ export class GpuPresenter {
   /** An HDR display (F4d-2): the target shows past SDR white (an rgba16float canvas with extended tone mapping). */
   readonly extended: boolean;
 
+  /** The frame's size: the target's (F0d: the AAA tier's follows its display), the sky, the shafts and the post stack's. */
+  private outputWidth: number;
+  private outputHeight: number;
+
+  /**
+   * A presenter on `device` for a cart whose 2D layer (its frame, HUD and holo
+   * UI) is `width × height`. The frame it presents is that size too until
+   * {@link resize} says otherwise; a scene renders at whatever size it likes.
+   */
   constructor(
     private readonly device: any,
-    readonly width: number,
-    readonly height: number,
+    readonly layerWidth: number,
+    readonly layerHeight: number,
     options: { readonly hdr?: boolean; readonly extended?: boolean } = {},
   ) {
+    this.outputWidth = layerWidth;
+    this.outputHeight = layerHeight;
     this.hdr = options.hdr === true;
     this.extended = this.hdr && options.extended === true;
     this.blank = device.createTexture({ size: { width: 1, height: 1 }, format: "rgba8unorm", usage: USAGE.textureBinding | USAGE.copyDst });
@@ -707,6 +729,32 @@ export class GpuPresenter {
       staging: device.createBuffer({ size: 16, usage: USAGE.mapRead | USAGE.bufferCopyDst }),
       busy: false,
     };
+  }
+
+  /** The frame's width (its target's). */
+  get width(): number {
+    return this.outputWidth;
+  }
+
+  /** The frame's height (its target's). */
+  get height(): number {
+    return this.outputHeight;
+  }
+
+  /**
+   * Present into `width × height` targets from the next frame on
+   * (AAA_FIDELITY_ROADMAP.md F0d): the AAA tier's canvas follows its display
+   * at the device's pixel ratio. The 2D layer keeps its size and is scaled to it.
+   */
+  resize(width: number, height: number): void {
+    width = Math.max(1, Math.round(width));
+    height = Math.max(1, Math.round(height));
+    if (width === this.outputWidth && height === this.outputHeight) return;
+    this.outputWidth = width;
+    this.outputHeight = height;
+    // The post stack's bloom pyramid is made for one size.
+    this.postFx?.dispose();
+    this.postFx = null;
   }
 
   /** The newest measurements to arrive (a frame or two behind the frame that asked). */
@@ -1025,19 +1073,21 @@ export class GpuPresenter {
     }
   }
 
-  /** A CPU frame (RGBA8, this presenter's size) uploaded into its named slot. */
+  /** A CPU frame (RGBA8, the 2D layer's size) uploaded into its named slot. */
   private upload(slot: string, rgba: Uint8Array | Uint8ClampedArray): any {
+    const width = this.layerWidth;
+    const height = this.layerHeight;
     let entry = this.uploads.get(slot);
     if (!entry) {
       entry = {
-        texture: this.device.createTexture({ size: { width: this.width, height: this.height }, format: "rgba8unorm", usage: USAGE.textureBinding | USAGE.copyDst }),
-        width: this.width,
-        height: this.height,
+        texture: this.device.createTexture({ size: { width, height }, format: "rgba8unorm", usage: USAGE.textureBinding | USAGE.copyDst }),
+        width,
+        height,
       };
       this.uploads.set(slot, entry);
     }
     const bytes = rgba instanceof Uint8Array ? rgba : new Uint8Array(rgba.buffer, rgba.byteOffset, rgba.byteLength);
-    this.device.queue.writeTexture({ texture: entry.texture }, bytes, { bytesPerRow: this.width * 4, rowsPerImage: this.height }, { width: this.width, height: this.height });
+    this.device.queue.writeTexture({ texture: entry.texture }, bytes, { bytesPerRow: width * 4, rowsPerImage: height }, { width, height });
     return entry.texture;
   }
 

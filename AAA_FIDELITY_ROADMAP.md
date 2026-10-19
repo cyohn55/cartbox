@@ -228,6 +228,14 @@ Everything else depends on this track. It contains no visible "feature", but its
     - **A starter and the home page.** `/edit/new?model=aaa` opens on Beaver Creek on the tier (the `aaa` starter), and the home page lists the tier. The Mesh tab shows the dedicated core as the tier's own instead of offering it.
     - *Tests (`aaa-tier-core.test.ts`):* which carts run on which core; finding the core beside an engine URL; exports carrying it; the 2D spec in the player and the editor; on the real core, an `aaa` cart booting and drawing a 1280-wide frame (and the HD layout refusing 1080p); the starter.
     - In Chromium: `/edit/new?model=aaa` opens Beaver Creek on the HD core, and Run plays it on the dedicated core, presented by WebGPU at 1280×720, with no GPU errors. It looks the same as the `xbox360` starter.
+  - **F0d-2, the display's own resolution: done.**
+    - **The frame follows the display.** With the tier's `nativeResolution` cap (or `/lockout?hdr=1`), the WebGPU canvas's backing store is its CSS size in device pixels (`nativeBackingSize`), up to 4K with its shape kept, and follows the page as it resizes.
+    - **The 3D renders at it.** The presenter's frame takes the canvas's size (`GpuPresenter.resize`), and the scene and the held weapon render at it.
+      - The scene renderer changes size between frames (`resize`): its colour and depth, the refraction copy, the G-buffer and velocity, the multisampled depth, the TAA history (which starts over) and the readback are remade. Meshes, textures and pipelines stay, and the frame graph's transients follow by themselves.
+    - **The 2D layer is scaled to it.** The cart's frame, HUD and holo UI stay 1280×720 and are drawn to the frame texel by texel (nearest), so the HUD's key colours stay exact. Every pass that reads a layer of another size (compose, the shaft mask, the measurements) maps the frame's pixel to its texel (`loadScaled`), which is the same texel when the sizes match: frames at the model's size come out as before.
+    - *Tests (`native-resolution.test.ts`):* the backing size, at a pixel ratio and capped; on Dawn, a 32×16 layer presented into a 64×32 frame lands each pixel on its 2×2 exactly; the scene renderer, with multisampling, TAA, the prepass and reflections on, renders at 64×36, 96×54 and 48×27 in turn with no validation error and the frame drawn right at each.
+    - In Chromium at a pixel ratio of 2, Beaver Creek on `aaa` (960×540 CSS) presents a 1920×1080 frame with no GPU errors.
+    - *Left for F0d-3:* dynamic resolution, the render scale driven by the GPU frame time.
 - [ ] **F0e. Off the main thread.**
   - **Compute:** frustum and HZB occlusion culling, LOD selection, light clustering and skinning become compute passes with indirect draws.
   - **Workers:** asset decode (PNG, KTX2 transcode, meshopt), physics and navigation move to workers.

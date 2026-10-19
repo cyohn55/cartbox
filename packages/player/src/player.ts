@@ -586,7 +586,9 @@ export class Player {
       const makeRenderer = () => createSceneRenderer(this.model.width, this.model.height, this.model.renderCaps, undefined, undefined, { hdr, mips: this.options.mipmaps ?? this.model.renderCaps.mipmaps === true });
       if (mesh || (world && this.cartSource)) this.sceneRenderer = await makeRenderer();
       const presentFromGpu = wantsGpuPresent && this.sceneRenderer?.backend === "webgpu" && Boolean(this.sceneRenderer.renderToTexture);
-      const gpuCanvas = presentFromGpu ? GpuCanvasSurface.create(this.container, scale, this.model, this.sceneRenderer!.gpuDevice, { hdr }) : null;
+      // The AAA tier's 3D at the display's own resolution (F0d), its 2D layer scaled to it.
+      const native = this.options.nativeResolution ?? this.model.renderCaps.nativeResolution === true;
+      const gpuCanvas = presentFromGpu ? GpuCanvasSurface.create(this.container, scale, this.model, this.sceneRenderer!.gpuDevice, { hdr, native }) : null;
       // No WebGPU canvas after all: the byte path, whose renderer reads its frames back in 8 bits.
       if (hdr && !gpuCanvas && this.sceneRenderer) {
         this.sceneRenderer.dispose();

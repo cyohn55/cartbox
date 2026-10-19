@@ -21,6 +21,26 @@ import { anyPostFxEnabled, uniformsFromSettings, type PostFxSettings, type PostF
 import type { ScreenSun } from "../fx/PostFxSurface.js";
 import { GpuPresenter, type PresentFrame, type PresentStats } from "./gpuPresent.js";
 
+/** The most pixels a native-resolution frame renders (F0d): 4K, on the densest display. */
+export const MAX_NATIVE_PIXELS = 3840 * 2160;
+
+/**
+ * The backing size of a native-resolution canvas shown at `cssWidth × cssHeight`
+ * on a display of `pixelRatio` (F0d): its device pixels, scaled down evenly to
+ * at most {@link MAX_NATIVE_PIXELS}.
+ */
+export function nativeBackingSize(cssWidth: number, cssHeight: number, pixelRatio: number): { width: number; height: number } {
+  const ratio = Number.isFinite(pixelRatio) && pixelRatio > 0 ? pixelRatio : 1;
+  let width = Math.max(1, cssWidth * ratio);
+  let height = Math.max(1, cssHeight * ratio);
+  const over = (width * height) / MAX_NATIVE_PIXELS;
+  if (over > 1) {
+    width /= Math.sqrt(over);
+    height /= Math.sqrt(over);
+  }
+  return { width: Math.max(1, Math.round(width)), height: Math.max(1, Math.round(height)) };
+}
+
 export class GpuCanvasSurface implements DisplaySurface {
   private readonly resizeObserver: ResizeObserver;
   private destroyed = false;
@@ -40,6 +60,8 @@ export class GpuCanvasSurface implements DisplaySurface {
     private readonly format: string,
     /** The compositor every frame goes through. */
     readonly presenter: GpuPresenter,
+    /** Render at the display's own resolution (F0d), not the model's frame. */
+    private readonly native = false,
   ) {
     container.appendChild(canvas);
     this.resizeObserver = new ResizeObserver(() => this.applyScale());
@@ -52,12 +74,19 @@ export class GpuCanvasSurface implements DisplaySurface {
    * WebGPU canvas context): the caller then mounts the 2D canvas, and the
    * frame takes the byte path.
    */
-  static create(container: HTMLElement, scaleMode: ScaleMode, model: ConsoleModel, device: any, options: { readonly hdr?: boolean } = {}): GpuCanvasSurface | null {
+  static create(
+    container: HTMLElement,
+    scaleMode: ScaleMode,
+    model: ConsoleModel,
+    device: any,
+    options: { readonly hdr?: boolean; readonly native?: boolean } = {},
+  ): GpuCanvasSurface | null {
     try {
       const canvas = container.ownerDocument.createElement("canvas");
       canvas.width = model.width;
       canvas.height = model.height;
-      canvas.style.imageRendering = "pixelated";
+      // A frame at the model's size is scaled up crisply; a native one is shown pixel for pixel.
+      if (options.native !== true) canvas.style.imageRendering = "pixelated";
       canvas.style.display = "block";
       canvas.style.margin = "auto";
       const context = canvas.getContext("webgpu" as any) as any;
@@ -68,10 +97,15 @@ export class GpuCanvasSurface implements DisplaySurface {
       const extended = options.hdr === true && wantsExtended(context, device);
       const format: string = extended ? "rgba16float" : (gpu.getPreferredCanvasFormat?.() ?? "bgra8unorm");
       if (!extended) context.configure({ device, format, alphaMode: "opaque" });
-      return new GpuCanvasSurface(container, scaleMode, model, canvas, context, format, new GpuPresenter(device, model.width, model.height, { ...options, extended }));
+      return new GpuCanvasSurface(container, scaleMode, model, canvas, context, format, new GpuPresenter(device, model.width, model.height, { hdr: options.hdr, extended }), options.native === true);
     } catch {
       return null;
     }
+  }
+
+  /** The size frames show at: the model's, or with a native frame the display's device pixels (F0d). */
+  get outputSize(): { readonly width: number; readonly height: number } {
+    return { width: this.presenter.width, height: this.presenter.height };
   }
 
   /** The newest measurements the presenter has read back (luminance, the sun's visibility). */
@@ -123,6 +157,15 @@ export class GpuCanvasSurface implements DisplaySurface {
     const { width, height } = computeScaledSize(this.container.clientWidth, this.container.clientHeight, this.model.width, this.model.height, this.scaleMode);
     this.canvas.style.width = `${width}px`;
     this.canvas.style.height = `${height}px`;
+    if (this.native && width > 0 && height > 0) {
+      // The frame follows the display (F0d): the canvas's device pixels, and the presenter's frame with it.
+      const backing = nativeBackingSize(width, height, (globalThis as { devicePixelRatio?: number }).devicePixelRatio ?? 1);
+      if (this.canvas.width !== backing.width || this.canvas.height !== backing.height) {
+        this.canvas.width = backing.width;
+        this.canvas.height = backing.height;
+      }
+      this.presenter.resize(backing.width, backing.height);
+    }
   }
 }
 

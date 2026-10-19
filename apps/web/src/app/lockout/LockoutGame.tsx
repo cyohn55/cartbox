@@ -306,7 +306,7 @@ export function LockoutGame() {
         // ?present=gpu presents the frame from the GPU, as the AAA tier does (AAA_FIDELITY_ROADMAP.md F0a);
         // ?hdr=1 shades it in linear light too (F0b).
         ...(new URLSearchParams(window.location.search).get("present") === "gpu" ? { gpuPresent: true } : {}),
-        ...(new URLSearchParams(window.location.search).get("hdr") === "1" ? { gpuPresent: true, linearHdr: true, prepass: true, mipmaps: true } : {}),
+        ...(new URLSearchParams(window.location.search).get("hdr") === "1" ? { gpuPresent: true, linearHdr: true, prepass: true, mipmaps: true, nativeResolution: true } : {}),
         // KTX2: the transcoder loads only if a texture needs it — Beaver Creek's baked images, on a renderer that samples compressed formats (F1a).
         ktx2: loadKtx2Decoder,
         autostart: true,

@@ -180,6 +180,13 @@ export interface PlayerOptions {
    */
   mipmaps?: boolean;
   /**
+   * Render the 3D at the display's own resolution (its CSS size × the device's
+   * pixel ratio) with the 2D layer scaled to it (AAA_FIDELITY_ROADMAP.md F0d),
+   * or at the model's frame. Defaults to the model's `nativeResolution` render
+   * cap (the AAA tier); applies only to a GPU-presented frame.
+   */
+  nativeResolution?: boolean;
+  /**
    * Control settings (aim inversion, look sensitivity, controller and keyboard
    * bindings, touch pad size/opacity). Change them live with
    * {@link PlayerHandle.setControlSettings}. Defaults: DEFAULT_CONTROL_SETTINGS.

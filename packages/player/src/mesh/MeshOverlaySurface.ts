@@ -187,6 +187,12 @@ export interface MeshOverlayOptions {
 export interface GpuPresentTarget {
   present(frame: PresentFrame): void;
   readonly stats: PresentStats;
+  /**
+   * The size its frames show at, when that isn't the cart's own
+   * (AAA_FIDELITY_ROADMAP.md F0d: the AAA tier's follows its display at the
+   * device's pixel ratio). The 3D renders at it; the 2D layer is scaled to it.
+   */
+  readonly outputSize?: { readonly width: number; readonly height: number };
 }
 
 /**
@@ -1227,8 +1233,11 @@ export class MeshOverlaySurface implements DisplaySurface {
     },
   ): void {
     const { camera, lighting } = job;
-    const width = this.width;
-    const height = this.height;
+    // The 3D renders at the size the frame shows at (F0d); the 2D layer stays the cart's.
+    const output = gpu.outputSize ?? { width: this.width, height: this.height };
+    const width = output.width;
+    const height = output.height;
+    this.renderer.resize?.(width, height);
     const time = this.frame / 60;
     const lit = lighting
       ? {
@@ -1258,6 +1267,7 @@ export class MeshOverlaySurface implements DisplaySurface {
     if (job.frontDrawn.length > 0) {
       this.requestFrontRenderer();
       if (this.frontRenderer.renderToTexture) {
+        this.frontRenderer.resize?.(width, height);
         front = this.frontRenderer.renderToTexture(
           job.frontDrawn.map((i) => this.withoutRefraction(i)),
           { width, height, view: camera.view, projection: camera.projection, ...lit, time },
@@ -1271,10 +1281,11 @@ export class MeshOverlaySurface implements DisplaySurface {
     const sun = sky && lighting?.sky ? sunScreenPosition(lighting.sky.sunDirection, camera.view, camera.projection, width, height) : null;
     let holo: Uint8ClampedArray | null = null;
     if (this.holo) {
-      if (this.holoLayer?.length !== width * height * 4) this.holoLayer = new Uint8ClampedArray(width * height * 4);
+      // The holo UI is part of the 2D layer: drawn at the cart's size, scaled with it.
+      if (this.holoLayer?.length !== this.width * this.height * 4) this.holoLayer = new Uint8ClampedArray(this.width * this.height * 4);
       this.holoLayer.fill(0);
       // A draw that says it showed nothing (false) leaves the layer out.
-      if (this.holo(this.holoLayer, width, height, time, true) !== false) holo = this.holoLayer;
+      if (this.holo(this.holoLayer, this.width, this.height, time, true) !== false) holo = this.holoLayer;
     }
     const adapting = Boolean(lighting?.autoExposure && job.tonemap);
     const flare = this.onSun !== null && sky !== null;
@@ -1290,18 +1301,18 @@ export class MeshOverlaySurface implements DisplaySurface {
       tonemap: job.tonemap,
       measure: adapting || flare ? { luminance: adapting, sun: flare ? sun : null } : null,
     });
-    this.takeGpuMeasurements(gpu.stats, lighting, job.post, adapting, sky !== null, sun);
+    this.takeGpuMeasurements(gpu.stats, lighting, job.post, adapting, sky !== null, sun && { x: sun.x / width, y: sun.y / height });
   }
 
   /** The presenter's newest measurements into the lens flare and eye adaptation (the byte path's reportSun and frameLuminance). */
-  private takeGpuMeasurements(stats: PresentStats, lighting: SceneLighting | null, post: PostBlend, adapting: boolean, sky: boolean, sun: { x: number; y: number } | null): void {
+  private takeGpuMeasurements(stats: PresentStats, lighting: SceneLighting | null, post: PostBlend, adapting: boolean, sky: boolean, sun: { x: number; y: number } | null /* 0..1 of the frame */): void {
     if (this.onSun) {
       if (!sky) {
         this.sunSeen = 0;
         this.onSun(null);
       } else {
         const target = sun ? (stats.sunVisible ?? 0) : 0;
-        if (sun) this.sunAt = { x: sun.x / this.width, y: sun.y / this.height };
+        if (sun) this.sunAt = { x: sun.x, y: sun.y };
         this.sunSeen += (target - this.sunSeen) * SUN_EASE;
         if (this.sunSeen < 1e-3) this.sunSeen = 0;
         this.onSun({ x: this.sunAt.x, y: this.sunAt.y, visible: this.sunSeen });
