@@ -337,8 +337,8 @@ export interface MeshPrimitive {
    * Per-vertex tangents (`x,y,z,w`, glTF's TANGENT), the frame a normal map was
    * baked in (AAA_FIDELITY_ROADMAP.md F1c): MikkTSpace, from the file or made
    * on import (tangents.ts), with the bitangent `w · (normal × tangent)`
-   * pointing up the image (+V, as the engine samples at 1 − V: glTF's TANGENT
-   * has the opposite w, flipped on import and export). The
+   * pointing up the image (+V, as the engine samples at 1 − V; glTF's V is
+   * flipped into this on import and back on export, so its w carries over). The
    * AAA tier's shader decodes normal maps with them; every other path, and a
    * primitive without them, takes the tangent from the UVs' screen derivatives.
    */

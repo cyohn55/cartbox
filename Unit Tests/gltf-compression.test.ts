@@ -176,12 +176,12 @@ describe("Draco-compressed glTF", () => {
     const primitive = mesh.primitives[0]!;
     expect(primitive.indices.length).toBe(12);
     expect(triangles(mesh)).toEqual(triangles(plainMesh()));
-    // Each vertex keeps its own UV, wherever Draco moved it.
+    // Each vertex keeps its own UV, wherever Draco moved it (V into the engine's convention, 1 − glTF's).
     for (let i = 0; i < primitive.positions.length / 3; i += 1) {
       const p = [primitive.positions[i * 3]!, primitive.positions[i * 3 + 1]!, primitive.positions[i * 3 + 2]!];
       const original = [0, 1, 2, 3, 4].find((k) => p.every((v, c) => Math.abs(v - POSITIONS[k * 3 + c]!) < 1e-4))!;
       expect(primitive.uvs![i * 2]).toBeCloseTo(UVS[original * 2]!, 4);
-      expect(primitive.uvs![i * 2 + 1]).toBeCloseTo(UVS[original * 2 + 1]!, 4);
+      expect(primitive.uvs![i * 2 + 1]).toBeCloseTo(1 - UVS[original * 2 + 1]!, 4);
     }
   });
 

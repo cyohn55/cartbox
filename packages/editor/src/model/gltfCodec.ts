@@ -333,6 +333,18 @@ function normalMatrix(m: Mat4): [number, number, number, number, number, number,
 }
 
 /**
+ * Texture coordinates between glTF's convention and the engine's: glTF puts
+ * V = 0 at the image's top row, the engine (as OBJ, and every renderer here,
+ * sampling at 1 − V) at its bottom. So V flips on the way in and on the way
+ * out; without it an imported model's textures showed upside down.
+ */
+function flipV(uvs: Float32Array): Float32Array {
+  const out = uvs.slice();
+  for (let i = 1; i < out.length; i += 2) out[i] = 1 - out[i]!;
+  return out;
+}
+
+/**
  * A tangent's transform (F1c): the transform's own upper-left 3×3 (a tangent
  * lies in the surface, so it moves with it, unlike a normal), as row-major
  * rows for {@link transformDirection}, and whether it mirrors (a negative
@@ -653,8 +665,8 @@ export function parseGltf(sourceJson: GltfJson, sourceBuffers: (Uint8Array | nul
             tangents[v * 4] = tx;
             tangents[v * 4 + 1] = ty;
             tangents[v * 4 + 2] = tz;
-            // glTF's bitangent points down its V (its origin is the image's top-left); the engine's, up (it samples at 1 − V).
-            tangents[v * 4 + 3] = (rawTangents[v * 4 + 3]! < 0 ? 1 : -1) * (tm.mirrors ? -1 : 1);
+            // V is flipped into the engine's (see flipV), so glTF's bitangent, up its image, is the engine's as it is.
+            tangents[v * 4 + 3] = (rawTangents[v * 4 + 3]! < 0 ? -1 : 1) * (tm.mirrors ? -1 : 1);
           }
         }
         totalVertices += vertexCount;
@@ -665,10 +677,10 @@ export function parseGltf(sourceJson: GltfJson, sourceBuffers: (Uint8Array | nul
         primitives.push({
           positions,
           normals,
-          uvs: uvs ? uvs.slice() : null,
+          uvs: uvs ? flipV(uvs) : null,
           indices: indices.slice(),
           material,
-          ...(uvs2 ? { uvs2: uvs2.slice() } : {}),
+          ...(uvs2 ? { uvs2: flipV(uvs2) } : {}),
           ...(tangents ? { tangents } : {}),
           ...(binding ? { joints: binding.joints, weights: binding.weights } : {}),
         });
@@ -1033,13 +1045,13 @@ export function encodeGlb(mesh: MeshAsset): Uint8Array {
     const attributes: GltfPrimitive["attributes"] = { POSITION: positionAccessor };
     if (primitive.normals) attributes.NORMAL = addFloatAccessor(primitive.normals, 3, false);
     if (primitive.tangents && primitive.normals) {
-      // Back to glTF's handedness (see the import).
+      // The handedness carries over as it is (V flips back below, see flipV).
       const tangents = primitive.tangents.slice();
-      for (let i = 3; i < tangents.length; i += 4) tangents[i] = tangents[i]! < 0 ? 1 : -1;
+      for (let i = 3; i < tangents.length; i += 4) tangents[i] = tangents[i]! < 0 ? -1 : 1;
       attributes.TANGENT = addFloatAccessor(tangents, 4, false);
     }
-    if (primitive.uvs) attributes.TEXCOORD_0 = addFloatAccessor(primitive.uvs, 2, false);
-    if (primitive.uvs2) attributes.TEXCOORD_1 = addFloatAccessor(primitive.uvs2, 2, false);
+    if (primitive.uvs) attributes.TEXCOORD_0 = addFloatAccessor(flipV(primitive.uvs), 2, false);
+    if (primitive.uvs2) attributes.TEXCOORD_1 = addFloatAccessor(flipV(primitive.uvs2), 2, false);
     if (skin && bound[index]) {
       const influences = gltfInfluences(primitive.joints!, primitive.weights!, skin.joints.length);
       const jointBytes = new Uint8Array(influences.joints.buffer, influences.joints.byteOffset, influences.joints.byteLength);
