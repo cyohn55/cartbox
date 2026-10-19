@@ -63,9 +63,12 @@ export class GpuCanvasSurface implements DisplaySurface {
       const context = canvas.getContext("webgpu" as any) as any;
       const gpu = (globalThis as any).navigator?.gpu;
       if (!context || !gpu) return null;
-      const format: string = gpu.getPreferredCanvasFormat?.() ?? "bgra8unorm";
-      context.configure({ device, format, alphaMode: "opaque" });
-      return new GpuCanvasSurface(container, scaleMode, model, canvas, context, format, new GpuPresenter(device, model.width, model.height, options));
+      // A linear frame on a display that shows past SDR white (F4d-2): a half-float canvas
+      // with extended tone mapping, kept only where the browser says it took.
+      const extended = options.hdr === true && wantsExtended(context, device);
+      const format: string = extended ? "rgba16float" : (gpu.getPreferredCanvasFormat?.() ?? "bgra8unorm");
+      if (!extended) context.configure({ device, format, alphaMode: "opaque" });
+      return new GpuCanvasSurface(container, scaleMode, model, canvas, context, format, new GpuPresenter(device, model.width, model.height, { ...options, extended }));
     } catch {
       return null;
     }
@@ -120,5 +123,23 @@ export class GpuCanvasSurface implements DisplaySurface {
     const { width, height } = computeScaledSize(this.container.clientWidth, this.container.clientHeight, this.model.width, this.model.height, this.scaleMode);
     this.canvas.style.width = `${width}px`;
     this.canvas.style.height = `${height}px`;
+  }
+}
+
+/**
+ * Whether the page shows high dynamic range and the canvas took an extended,
+ * half-float configuration (AAA_FIDELITY_ROADMAP.md F4d-2). A browser that
+ * doesn't know `toneMapping` ignores it and would clip the frame at SDR white,
+ * so the configuration is only trusted when it reads back.
+ */
+function wantsExtended(context: any, device: any): boolean {
+  try {
+    if (!(globalThis as any).matchMedia?.("(dynamic-range: high)")?.matches) return false;
+    context.configure({ device, format: "rgba16float", toneMapping: { mode: "extended" }, alphaMode: "opaque" });
+    if (context.getConfiguration?.()?.toneMapping?.mode === "extended") return true;
+    context.unconfigure?.();
+    return false;
+  } catch {
+    return false;
   }
 }
