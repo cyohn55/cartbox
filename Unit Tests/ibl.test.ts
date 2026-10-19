@@ -274,4 +274,55 @@ describe.skipIf(!device)("the prefiltered cube, on a real device", { timeout: 12
     expect(bright[0]!).toBeGreaterThan(10);
     expect(bright[0]!).toBeLessThan(13);
   });
+  it("scales the reflection by the material's reflectivity, but never past all the light (F11a)", async () => {
+    const W = 32;
+    const H = 32;
+    const shade = async (material: Record<string, unknown>) => {
+      const mesh = {
+        name: "q",
+        primitives: [
+          {
+            positions: Float32Array.from([-1, -1, 0, 1, -1, 0, 1, 1, 0, -1, 1, 0]),
+            normals: Float32Array.from([0, 0, 1, 0, 0, 1, 0, 0, 1, 0, 0, 1]),
+            uvs: Float32Array.from([0, 0, 1, 0, 1, 1, 0, 1]),
+            indices: Uint32Array.from([0, 1, 2, 0, 2, 3]),
+            material: { name: "m", baseColorImage: null, ...material },
+          },
+        ],
+      } as unknown as MeshAsset;
+      const renderer = (await WebgpuSceneRenderer.create(device, W, H, undefined, { hdr: true }))!;
+      device.pushErrorScope("validation");
+      const texture = renderer.renderToTexture!([{ mesh, model: composeModelMatrix([0, 0, 0], [-90, 0, 0], [2, 2, 1]) }], {
+        width: W,
+        height: H,
+        view: viewMatrix([0, 3, 0.001], [0, 0, 0]),
+        projection: projectionMatrix(Math.PI / 3, 1, 0.1, 50),
+        ambient: 0,
+        lightDirection: [0, -1, 0],
+        environment: SKY,
+      } as any);
+      const error = await settled(device.popErrorScope());
+      expect(error ? String((error as any).message ?? error) : null).toBeNull();
+      const buffer = device.createBuffer({ size: 256 * H, usage: 0x01 | 0x08 });
+      const encoder = device.createCommandEncoder();
+      encoder.copyTextureToBuffer({ texture }, { buffer, bytesPerRow: 256, rowsPerImage: H }, { width: W, height: H });
+      device.queue.submit([encoder.finish()]);
+      await settled(buffer.mapAsync(0x01));
+      const halves = new Uint16Array(buffer.getMappedRange().slice(0));
+      buffer.unmap();
+      renderer.dispose();
+      const i = ((H >> 1) * 256) / 2 + (W >> 1) * 4;
+      return [half(halves[i]!), half(halves[i + 1]!), half(halves[i + 2]!)];
+    };
+    // A smooth black dielectric seen head on reflects a few percent: reflectivity 2 doubles it.
+    const glass = { baseColorFactor: [0, 0, 0, 1], metallicFactor: 0, roughnessFactor: 0.05 };
+    const once = await shade(glass);
+    const twice = await shade({ ...glass, reflectivity: 2 });
+    for (let k = 0; k < 3; k += 1) expect(Math.abs(twice[k]! / once[k]! - 2)).toBeLessThan(0.1);
+    // A white mirror already reflects all of it: reflectivity 2 can't make it reflect more than the sky sends.
+    const mirror = { baseColorFactor: [1, 1, 1, 1], metallicFactor: 1, roughnessFactor: 0.05 };
+    const full = await shade(mirror);
+    const over = await shade({ ...mirror, reflectivity: 2 });
+    for (let k = 0; k < 3; k += 1) expect(Math.abs(over[k]! - full[k]!) / full[k]!).toBeLessThan(0.03);
+  });
 });

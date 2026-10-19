@@ -638,9 +638,8 @@ Everything else depends on this track. It contains no visible "feature", but its
         - Lockout's display-referred painted sky is exposed and tone-mapped with the scene: its blue pales while lit surfaces come out about 0.6 stop darker.
         - Beaver Creek's fog now mixes in linear light and lifts the far canyon.
         - The sun's bloom spreads wider.
-      - **Beaver Creek's creek water draws wrongly on the AAA path:** a bright, stretched, speckled pattern instead of water.
+      - **Beaver Creek's creek water reads as a bright, speckled pattern on the AAA path.** F11a-2 traced it.
     - **Left for later** (next):
-      - Fix the water.
       - Calibrate the AAA path against the authored look: the painted sky as display-referred under the tone curve, fog density in linear light, bloom spread.
       - Then the re-light in physical units, once F3's physical sky replaces the painted one.
     - **Frame time:** only on SwiftShader here, a software GPU, so a floor and not a device class.
@@ -648,6 +647,16 @@ Everything else depends on this track. It contains no visible "feature", but its
       - Lockout's scene frames ran past the frame-graph timer's 10 s sanity bound, so they have no scene time.
       - Per-device numbers need the same run with `CBX_GPU=1` on real hardware.
     - *Tests (`frame-capture.test.ts`):* rows unpadded and BGRA swizzled; an extended frame clipped at white; and on Dawn, the frame just presented read back to every capture waiting on it.
+  - **F11a-2, see-through tints and reflectivity in linear light: done.** Tracing Beaver Creek's creek water on the AAA path found two faults, now fixed in `WebgpuSceneRenderer`'s linear-light shader:
+    - **A refracting surface's tint mixes as the display shows it.** The surface and what is behind it are both exposed, put through the curve and sRGB-encoded, mixed by the surface's alpha, then turned back into the light that shows the result. The curve's inverse is closed-form.
+      - The tint is authored for the display, and the byte path mixes in display space. Mixed in linear light, the water's dark teal (0.02, 0.07, 0.10 linear) only dimmed the creek bed, and its colour was lost.
+      - This covers refracting draws (the creek, Lockout's shields and sword), which already composite over the scene behind them in the shader. A plain blend still mixes in hardware, in linear light.
+    - **Reflectivity scales the environment's reflection but never past all the light.** `min(specE · reflectivity, 1)` is the weight. At grazing, the creek's reflectivity of 1.3 had it reflect more light than came in.
+    - **What the creek's look is otherwise.** Low over the water, Fresnel makes it nearly a mirror, and the ripples tilt the reflection between the canyon walls and the sky. That is how rippled water behaves; the byte path has no Fresnel, so it never showed. With reflection off the creek reads as water. Its ripples and reflectivity were tuned on the byte path, and calming them on this tier is the water pass's (F5d).
+    - `scripts/capture-aaa.mjs` takes `[views] [tiers]` to capture only some, e.g. `… beaver http://localhost:3100 1.5 creek after`.
+    - *Tests:*
+      - `see-through-hdr.test.ts` (Dawn): a refracting tint over the scene equals the display-space mix within 3%, and is far from the linear one. Beaver Creek's water over sand reads blue over red, as on the byte path. Both fail without the fix.
+      - `ibl.test.ts`: reflectivity 2 doubles a dark dielectric's reflection, but leaves a white mirror's at what the sky sends. That case fails without the cap.
 - [ ] **F11b. A photoreal reference scene.** A new map built entirely through the pipeline, for example a Forerunner ruin in a misty canyon at dusk:
   - scanned rock and foliage;
   - a cluster-rendered cliff;

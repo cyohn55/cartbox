@@ -99,7 +99,9 @@ describe("multiple scattering, Fresnel and occlusion", () => {
       expect(linear).toContain(name);
       expect(byte).not.toContain(name);
     }
-    expect(sceneShader(null, true, true)).toContain("specE * specAo");
+    // The reflection's weight: the energy the surface reflects, scaled by its reflectivity but never past 1 (F11a).
+    expect(sceneShader(null, true, true)).toContain("specK * specAo");
+    expect(linear).toContain("min(specE * reflectK, vec3<f32>(1.0))");
   });
 });
 

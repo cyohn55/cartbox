@@ -14,16 +14,18 @@
 //
 // Run the web app first (NEXT_PUBLIC_SUPABASE_URL and _ANON_KEY can be
 // dummies), then:
-//   node scripts/capture-aaa.mjs <out dir> [maps] [base url] [device scale]
+//   node scripts/capture-aaa.mjs <out dir> [maps] [base url] [device scale] [views] [tiers]
 // e.g. node scripts/capture-aaa.mjs /tmp/f11a lockout,beaver http://localhost:3100 1.5
 // On a machine with a real GPU, CBX_GPU=1 launches Chromium on it instead of
 // SwiftShader (whose frame times are a software floor, not a device class).
+// [views] and [tiers] (comma-separated, e.g. creek and after) capture only those.
 
 import { mkdirSync, writeFileSync } from "node:fs";
 import { crc32, deflateSync } from "node:zlib";
 import { chromium } from "playwright";
 
-const [OUT = "captures", MAPS = "lockout,beaver", BASE = "http://localhost:3000", SCALE = "1.5"] = process.argv.slice(2);
+const [OUT = "captures", MAPS = "lockout,beaver", BASE = "http://localhost:3000", SCALE = "1.5", VIEW_NAMES = "", TIER_NAMES = ""] = process.argv.slice(2);
+const only = (list) => (name) => !list || list.split(",").includes(name);
 const DEVICE_SCALE = Number(SCALE);
 const VIEWPORT = { width: 1280, height: 720 };
 const BUDGET_MS = 1000 / 60;
@@ -129,7 +131,7 @@ function launch() {
 const report = { budgetMs: BUDGET_MS, viewport: VIEWPORT, deviceScale: DEVICE_SCALE, device: process.env.CBX_GPU ? "hardware" : "swiftshader", maps: {} };
 for (const map of MAPS.split(",")) {
   report.maps[map] = {};
-  for (const tier of TIERS) {
+  for (const tier of TIERS.filter((t) => only(TIER_NAMES)(t.tag))) {
     const browser = await launch();
     const page = await browser.newPage({ viewport: VIEWPORT, deviceScaleFactor: DEVICE_SCALE });
     page.on("pageerror", (e) => console.error(`[${map} ${tier.tag}] page error: ${e.message}`));
@@ -148,7 +150,7 @@ for (const map of MAPS.split(",")) {
     await frames(page, 30);
     note(`${map} ${tier.tag}: in the match`);
     const views = [];
-    for (const view of VIEWS[map] ?? VIEWS.lockout) {
+    for (const view of (VIEWS[map] ?? VIEWS.lockout).filter((v) => only(VIEW_NAMES)(v.name))) {
       await page.evaluate((v) => window.cartboxPlayer.setEditorCamera({ yaw: v.yaw, pitch: v.pitch, distance: v.distance, target: v.target, fov: v.fov, hud: false }), view);
       // The frame's time, while the game plays on.
       await frames(page, 2);
