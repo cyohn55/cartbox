@@ -100,7 +100,7 @@ import { ParticleOverlaySurface } from "./particles/ParticleOverlaySurface.js";
 import { MeshOverlaySurface } from "./mesh/MeshOverlaySurface.js";
 import { WorldOverlaySurface } from "./world/WorldOverlaySurface.js";
 import { createSceneRenderer } from "./render/createSceneRenderer.js";
-import { GpuCanvasSurface } from "./render/GpuCanvasSurface.js";
+import { GpuCanvasSurface, type CapturedFrame } from "./render/GpuCanvasSurface.js";
 import type { SceneRenderer } from "./render/sceneRenderer.js";
 import type { TextureLookup } from "./world/worldScene.js";
 import { SpatialLoader, actionMask, createHoloCache, holoBindingKeys, holoDocuments, renderHoloDocument, translate, reboundActions, type DecodedTexture, type EncodedImage, type InputAction, type Mat4, colorFilterSvg, DEFAULT_ACCESSIBILITY, type AccessibilitySettings, type ColorFilter } from "@cartbox/editor";
@@ -924,6 +924,11 @@ export class Player {
     this.profiler = on ? new Profiler() : null;
     this.netSamples = [];
     this.meshSurface?.setProfiler(this.profiler);
+  }
+
+  /** The next frame as shown, read back from a GPU-presented canvas (F11a); null on the other paths. */
+  captureFrame(): Promise<CapturedFrame | null> {
+    return this.gpuPostFx ? this.gpuPostFx.capture() : Promise.resolve(null);
   }
 
   /** Where the last second or so of frames spent their time, and what the scene drew; null while profiling is off. */

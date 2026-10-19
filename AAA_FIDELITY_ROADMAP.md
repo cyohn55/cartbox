@@ -625,6 +625,29 @@ Everything else depends on this track. It contains no visible "feature", but its
   - GPU foliage, F5d water and projected decals.
 
   Captures are compared before and after, at native resolution, at frame-time budget on each device class.
+  - **F11a-1, the Milestone A captures: done.** `captures/f11a/` holds Lockout and Beaver Creek from seven fixed views. Each is shown before (the Xbox 360 tier's shading at its 1280×720 frame) and after (the AAA tier's Milestone A path at the display's resolution, 1920×1080 here), with what each frame measured (`report.json`) and a README with the findings.
+    - **How they are made** (`scripts/capture-aaa.mjs`):
+      - `/lockout?capture=1` hands the script the player.
+      - The script starts a match, skips the intro, and puts the editor camera on each view.
+      - It times the frame while the game plays. Then it pauses and steps 20 frames for TAA's history to settle.
+      - It reads the presented frame back through the new `PlayerHandle.captureFrame()`, since a screenshot of a WebGPU canvas can come out blank. The canvas is made copyable on the first capture; an extended frame is clipped at SDR white.
+      - `?dynres=0` holds the after frames at full native size.
+    - **What they show:**
+      - Colour is richer (chroma up 21–54% in six of seven views) at the same brightness.
+      - Contrast is lower in every view (6–29%), from three sources:
+        - Lockout's display-referred painted sky is exposed and tone-mapped with the scene: its blue pales while lit surfaces come out about 0.6 stop darker.
+        - Beaver Creek's fog now mixes in linear light and lifts the far canyon.
+        - The sun's bloom spreads wider.
+      - **Beaver Creek's creek water draws wrongly on the AAA path:** a bright, stretched, speckled pattern instead of water.
+    - **Left for later** (next):
+      - Fix the water.
+      - Calibrate the AAA path against the authored look: the painted sky as display-referred under the tone curve, fog density in linear light, bloom spread.
+      - Then the re-light in physical units, once F3's physical sky replaces the painted one.
+    - **Frame time:** only on SwiftShader here, a software GPU, so a floor and not a device class.
+      - At 2.25× the pixels, Beaver Creek's scene costs 1.3× as much and the presenter about 4×.
+      - Lockout's scene frames ran past the frame-graph timer's 10 s sanity bound, so they have no scene time.
+      - Per-device numbers need the same run with `CBX_GPU=1` on real hardware.
+    - *Tests (`frame-capture.test.ts`):* rows unpadded and BGRA swizzled; an extended frame clipped at white; and on Dawn, the frame just presented read back to every capture waiting on it.
 - [ ] **F11b. A photoreal reference scene.** A new map built entirely through the pipeline, for example a Forerunner ruin in a misty canyon at dusk:
   - scanned rock and foliage;
   - a cluster-rendered cliff;

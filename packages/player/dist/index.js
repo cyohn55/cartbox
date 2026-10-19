@@ -22745,15 +22745,21 @@ function nativeBackingSize(cssWidth, cssHeight, pixelRatio) {
   return { width: Math.max(1, Math.round(width)), height: Math.max(1, Math.round(height)) };
 }
 var GpuCanvasSurface = class _GpuCanvasSurface {
-  constructor(container, scaleMode, model, canvas, context, format, presenter, native = false) {
+  constructor(container, scaleMode, model, canvas, context, device, format, toneMapping, presenter, native = false) {
     this.container = container;
     this.scaleMode = scaleMode;
     this.model = model;
     this.canvas = canvas;
     this.context = context;
+    this.device = device;
     this.format = format;
+    this.toneMapping = toneMapping;
     this.presenter = presenter;
     this.native = native;
+    /** Who waits on the next presented frame's pixels. */
+    this.captures = [];
+    /** Whether the canvas's textures can be copied from (configured once a capture asks). */
+    this.copyable = false;
     this.destroyed = false;
     /** The post stack's uniforms, or null with no effect on. */
     this.post = null;
@@ -22785,7 +22791,7 @@ var GpuCanvasSurface = class _GpuCanvasSurface {
       const extended = options.hdr === true && wantsExtended(context, device);
       const format = extended ? "rgba16float" : gpu.getPreferredCanvasFormat?.() ?? "bgra8unorm";
       if (!extended) context.configure({ device, format, alphaMode: "opaque" });
-      return new _GpuCanvasSurface(container, scaleMode, model, canvas, context, format, new GpuPresenter(device, model.width, model.height, { hdr: options.hdr, extended }), options.native === true);
+      return new _GpuCanvasSurface(container, scaleMode, model, canvas, context, device, format, extended ? { mode: "extended" } : void 0, new GpuPresenter(device, model.width, model.height, { hdr: options.hdr, extended }), options.native === true);
     } catch {
       return null;
     }
@@ -22812,10 +22818,57 @@ var GpuCanvasSurface = class _GpuCanvasSurface {
     const post = this.post;
     const sun = this.sun;
     const uniforms = post && sun ? { ...post, flareOrigin: [sun.x, sun.y], flareVisible: sun.visible } : post;
-    this.presenter.present(
-      uniforms ? { ...frame, post: { uniforms, time: (performance.now() - this.startedAt) / 1e3 } } : frame,
-      this.context.getCurrentTexture(),
-      this.format
+    const texture = this.context.getCurrentTexture();
+    this.presenter.present(uniforms ? { ...frame, post: { uniforms, time: (performance.now() - this.startedAt) / 1e3 } } : frame, texture, this.format);
+    if (this.captures.length > 0) this.readBack(texture);
+  }
+  /**
+   * The next presented frame's pixels, as the display shows them (F11a): what
+   * a screenshot of a WebGPU canvas can't be relied on to catch. An extended
+   * (HDR) frame is clipped at SDR white. Null if the device can't copy it.
+   */
+  capture() {
+    if (this.destroyed) return Promise.resolve(null);
+    if (!this.copyable) {
+      try {
+        this.context.configure({ device: this.device, format: this.format, usage: 16 | 1, alphaMode: "opaque", ...this.toneMapping ? { toneMapping: this.toneMapping } : {} });
+        this.copyable = true;
+      } catch {
+        return Promise.resolve(null);
+      }
+    }
+    return new Promise((resolve) => this.captures.push({ resolve }));
+  }
+  /** Copy the frame just presented (still the canvas's current texture) to the waiting captures. */
+  readBack(texture) {
+    const waiting = this.captures;
+    this.captures = [];
+    const width = texture.width;
+    const height = texture.height;
+    const half = this.format === "rgba16float";
+    const bytesPerRow = Math.ceil(width * (half ? 8 : 4) / 256) * 256;
+    let buffer = null;
+    try {
+      buffer = this.device.createBuffer({ size: bytesPerRow * height, usage: 1 | 8 });
+      const encoder = this.device.createCommandEncoder();
+      encoder.copyTextureToBuffer({ texture }, { buffer, bytesPerRow, rowsPerImage: height }, { width, height });
+      this.device.queue.submit([encoder.finish()]);
+    } catch {
+      buffer?.destroy?.();
+      for (const w of waiting) w.resolve(null);
+      return;
+    }
+    void buffer.mapAsync(1).then(
+      () => {
+        const frame = { width, height, rgba: framePixels(new Uint8Array(buffer.getMappedRange()), width, height, bytesPerRow, this.format) };
+        buffer.unmap();
+        buffer.destroy();
+        for (const w of waiting) w.resolve(frame);
+      },
+      () => {
+        buffer.destroy();
+        for (const w of waiting) w.resolve(null);
+      }
     );
   }
   /** Show a CPU frame as it is (the cart's own, before any 3D draws). */
@@ -22824,6 +22877,8 @@ var GpuCanvasSurface = class _GpuCanvasSurface {
   }
   destroy() {
     this.destroyed = true;
+    for (const w of this.captures) w.resolve(null);
+    this.captures = [];
     this.resizeObserver.disconnect();
     this.presenter.dispose();
     try {
@@ -22856,6 +22911,38 @@ function wantsExtended(context, device) {
   } catch {
     return false;
   }
+}
+function framePixels(bytes, width, height, bytesPerRow, format) {
+  const out = new Uint8Array(width * height * 4);
+  if (format === "rgba16float") {
+    const halves = new Uint16Array(bytes.buffer, bytes.byteOffset, bytes.byteLength >> 1);
+    for (let y = 0; y < height; y += 1) {
+      for (let i = 0; i < width * 4; i += 1) {
+        const v = halfToFloat(halves[y * bytesPerRow / 2 + i]);
+        out[y * width * 4 + i] = (i & 3) === 3 ? 255 : Math.round(Math.min(1, Math.max(0, v)) * 255);
+      }
+    }
+    return out;
+  }
+  const bgra = format === "bgra8unorm";
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      const from = y * bytesPerRow + x * 4;
+      const to = (y * width + x) * 4;
+      out[to] = bytes[from + (bgra ? 2 : 0)];
+      out[to + 1] = bytes[from + 1];
+      out[to + 2] = bytes[from + (bgra ? 0 : 2)];
+      out[to + 3] = 255;
+    }
+  }
+  return out;
+}
+function halfToFloat(h) {
+  const e = h >> 10 & 31;
+  const m = h & 1023;
+  const sign = h & 32768 ? -1 : 1;
+  if (e === 31) return m ? Number.NaN : sign * Infinity;
+  return e === 0 ? sign * 2 ** -14 * (m / 1024) : sign * 2 ** (e - 15) * (1 + m / 1024);
 }
 
 // src/player.ts
@@ -23476,6 +23563,10 @@ var Player = class {
     this.profiler = on ? new Profiler() : null;
     this.netSamples = [];
     this.meshSurface?.setProfiler(this.profiler);
+  }
+  /** The next frame as shown, read back from a GPU-presented canvas (F11a); null on the other paths. */
+  captureFrame() {
+    return this.gpuPostFx ? this.gpuPostFx.capture() : Promise.resolve(null);
   }
   /** Where the last second or so of frames spent their time, and what the scene drew; null while profiling is off. */
   profile() {
@@ -25570,6 +25661,7 @@ function mount(container, options) {
     breakableLines: () => player.breakableLines(),
     setProfiling: (on) => player.setProfiling(on),
     profile: () => player.profile(),
+    captureFrame: () => player.captureFrame(),
     quality: () => player.quality(),
     setEditorCamera: (camera) => player.setEditorCamera(camera),
     updateMeshScene: (scene) => player.updateMeshScene(scene)
@@ -25799,6 +25891,7 @@ export {
   flagsSdkLua,
   flicker,
   frameDurationMs,
+  framePixels,
   framebufferBytes,
   getModel,
   getWebgpuDevice,

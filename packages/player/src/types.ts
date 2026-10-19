@@ -16,6 +16,7 @@ import type { MailboxEvent, MailboxMeshCamera } from "./mailbox.js";
 import type { LightingOptions } from "./lighting/types.js";
 import type { PostFxSettings } from "./fx/postfx.js";
 import type { ProfileSnapshot } from "./debug/profiler.js";
+import type { CapturedFrame } from "./render/GpuCanvasSurface.js";
 import type { DebugStep, PauseInfo } from "./debug/debugBlock.js";
 import type { SceneSpec } from "./scene/sceneModel.js";
 import type { AnimSpec } from "./anim/animModel.js";
@@ -425,6 +426,12 @@ export interface PlayerHandle {
   setProfiling(on: boolean): void;
   /** Where recent frames spent their time, what the 3D scene drew, memory and network use; null while profiling is off. */
   profile(): ProfileSnapshot | null;
+  /**
+   * The next frame's pixels as the display shows them, read back from the GPU
+   * (AAA_FIDELITY_ROADMAP.md F11a): for captures of a GPU-presented frame,
+   * which a page screenshot may miss. Null where the frame isn't GPU-presented.
+   */
+  captureFrame(): Promise<CapturedFrame | null>;
   /**
    * Look at the 3D scene through an editor's camera instead of the cart's (an
    * orbit, as cartbox.meshcam takes it), or give the camera back with null —
