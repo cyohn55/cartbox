@@ -20709,7 +20709,7 @@ var FULLSCREEN_VS = (
 var GHOST_TERMS2 = FLARE_GHOSTS.map(
   (g) => `      flare = flare + vec3f(${f2(g.tint[0])}, ${f2(g.tint[1])}, ${f2(g.tint[2])}) * flareGhost(uv, ${f2(g.along)}, ${f2(g.radius)}, aspect);`
 ).join("\n");
-var POST_WGSL = (
+var POST_STRUCT_WGSL = (
   /* wgsl */
   `
 struct Post {
@@ -20733,7 +20733,104 @@ struct Post {
   kaleido: vec4f,
   range: vec4f, // F4e: x = the brightest the target shows (1 for SDR), y = 1 when that is past white (an HDR display)
 };
-@group(0) @binding(0) var<uniform> u: Post;
+`
+);
+var POST_HELPERS_WGSL = (
+  /* wgsl */
+  `
+fn luma(c: vec3f) -> f32 { return dot(c, vec3f(0.299, 0.587, 0.114)); }
+// GLSL's smoothstep as it evaluates, edges in either order.
+fn glslSmoothstep(e0: f32, e1: f32, x: f32) -> f32 {
+  let t = clamp((x - e0) / (e1 - e0), 0.0, 1.0);
+  return t * t * (3.0 - 2.0 * t);
+}
+// GLSL's mod: floored, so a negative angle wraps rather than mirrors.
+fn gmod(x: f32, y: f32) -> f32 { return x - y * floor(x / y); }
+`
+);
+var ABERRATION_WGSL = (
+  /* wgsl */
+  `
+  let fringe = centered * u.screen.y / size;
+  var color = vec3f(src(uv + fringe).r, src(uv).g, src(uv - fringe).b);
+`
+);
+var TILT_SHIFT_WGSL = (
+  /* wgsl */
+  `
+  if (u.tilt.x > 0.0) {
+    let outside = abs(uv.y - u.tilt.y) - max(u.tilt.z, 0.0);
+    let blurAmount = clamp(outside / 0.35, 0.0, 1.0) * u.tilt.x;
+    if (blurAmount > 0.001) {
+      let radius = blurAmount * 6.0;
+      let texel = 1.0 / size;
+      var blurred = color;
+      var total = 1.0;
+      for (var i = 0; i < 10; i = i + 1) {
+        let a = f32(i) / 10.0 * TAU;
+        let dir = vec2f(cos(a), sin(a));
+        blurred = blurred + src(uv + dir * radius * texel);
+        blurred = blurred + src(uv + dir * (radius * 0.5) * texel);
+        total = total + 2.0;
+      }
+      color = mix(color, blurred / total, clamp(blurAmount, 0.0, 1.0));
+    }
+  }
+`
+);
+var REFLECTION_WGSL = (
+  /* wgsl */
+  `
+  if (u.reflect.x > 0.0) {
+    let below = uv.y - u.reflect.y;
+    if (below > 0.0) {
+      let ripple = sin(uv.x * 40.0 + u.size.z * 2.2) * u.reflect.w * 0.02 * below / max(u.reflect.z, 0.001);
+      let rUv = clamp(vec2f(uv.x + ripple, u.reflect.y - below), vec2f(0.0), vec2f(1.0));
+      let fade = u.reflect.x * clamp(1.0 - below / max(u.reflect.z, 0.001), 0.0, 1.0);
+      color = mix(color, src(rUv), fade);
+    }
+  }
+`
+);
+var GOD_RAYS_WGSL = (
+  /* wgsl */
+  `
+  if (u.half.y > 0.0) {
+    let marchStep = (uv - u.godray.xy) * u.half.z / 16.0;
+    var probe = uv;
+    var decay = 1.0;
+    var shafts = vec3f(0.0);
+    for (var i = 0; i < 16; i = i + 1) {
+      probe = probe - marchStep;
+      shafts = shafts + brightPass(clamp(probe, vec2f(0.0), vec2f(1.0))) * decay;
+      decay = decay * u.half.w;
+    }
+    color = color + shafts * (u.half.y / 16.0);
+  }
+`
+);
+var STREAKS_WGSL = (
+  /* wgsl */
+  `
+  if (u.godray.z > 0.0) {
+    let reach = u.godray.w * 0.25;
+    var streak = vec3f(0.0);
+    var total = 0.0;
+    for (var i = 1; i <= 8; i = i + 1) {
+      let distance = f32(i) / 8.0;
+      let weight = 1.0 - distance;
+      let offset = vec2f(reach * distance, 0.0);
+      streak = streak + (brightPass(clamp(uv + offset, vec2f(0.0), vec2f(1.0))) + brightPass(clamp(uv - offset, vec2f(0.0), vec2f(1.0)))) * weight;
+      total = total + weight * 2.0;
+    }
+    color = color + streak * (u.godray.z / max(total, 1.0));
+  }
+`
+);
+var POST_WGSL = (
+  /* wgsl */
+  `
+${POST_STRUCT_WGSL}@group(0) @binding(0) var<uniform> u: Post;
 @group(0) @binding(1) var source: texture_2d<f32>;
 @group(0) @binding(2) var nearestClamp: sampler;
 @group(0) @binding(3) var bloomTex: texture_2d<f32>;
@@ -20743,15 +20840,7 @@ ${FULLSCREEN_VS}
 const TAU = 6.2831853;
 
 fn src(uv: vec2f) -> vec3f { return textureSampleLevel(source, nearestClamp, uv, 0.0).rgb; }
-fn luma(c: vec3f) -> f32 { return dot(c, vec3f(0.299, 0.587, 0.114)); }
-// GLSL's smoothstep as it evaluates, edges in either order.
-fn glslSmoothstep(e0: f32, e1: f32, x: f32) -> f32 {
-  let t = clamp((x - e0) / (e1 - e0), 0.0, 1.0);
-  return t * t * (3.0 - 2.0 * t);
-}
-// GLSL's mod: floored, so a negative angle wraps rather than mirrors.
-fn gmod(x: f32, y: f32) -> f32 { return x - y * floor(x / y); }
-fn brightPass(uv: vec2f) -> vec3f {
+${POST_HELPERS_WGSL}fn brightPass(uv: vec2f) -> vec3f {
   let c = src(uv);
   return c * glslSmoothstep(u.fog2.z, 1.0, luma(c));
 }
@@ -20789,37 +20878,11 @@ fn hash12(p: vec2f) -> f32 { return fract(sin(dot(p, vec2f(12.9898, 78.233))) * 
   let uv = folded + centered * dot(centered, centered) * u.fog2.w * 4.0;
   if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) { return vec4f(0.0, 0.0, 0.0, 1.0); }
 
-  let fringe = centered * u.screen.y / size;
-  var color = vec3f(src(uv + fringe).r, src(uv).g, src(uv - fringe).b);
+${ABERRATION_WGSL}
 
-  if (u.tilt.x > 0.0) {
-    let outside = abs(uv.y - u.tilt.y) - max(u.tilt.z, 0.0);
-    let blurAmount = clamp(outside / 0.35, 0.0, 1.0) * u.tilt.x;
-    if (blurAmount > 0.001) {
-      let radius = blurAmount * 6.0;
-      let texel = 1.0 / size;
-      var blurred = color;
-      var total = 1.0;
-      for (var i = 0; i < 10; i = i + 1) {
-        let a = f32(i) / 10.0 * TAU;
-        let dir = vec2f(cos(a), sin(a));
-        blurred = blurred + src(uv + dir * radius * texel);
-        blurred = blurred + src(uv + dir * (radius * 0.5) * texel);
-        total = total + 2.0;
-      }
-      color = mix(color, blurred / total, clamp(blurAmount, 0.0, 1.0));
-    }
-  }
+${TILT_SHIFT_WGSL}
 
-  if (u.reflect.x > 0.0) {
-    let below = uv.y - u.reflect.y;
-    if (below > 0.0) {
-      let ripple = sin(uv.x * 40.0 + u.size.z * 2.2) * u.reflect.w * 0.02 * below / max(u.reflect.z, 0.001);
-      let rUv = clamp(vec2f(uv.x + ripple, u.reflect.y - below), vec2f(0.0), vec2f(1.0));
-      let fade = u.reflect.x * clamp(1.0 - below / max(u.reflect.z, 0.001), 0.0, 1.0);
-      color = mix(color, src(rUv), fade);
-    }
-  }
+${REFLECTION_WGSL}
 
   if (u.fog2.y > 0.0) {
     var glow = vec3f(0.0);
@@ -20838,32 +20901,9 @@ fn hash12(p: vec2f) -> f32 { return fract(sin(dot(p, vec2f(12.9898, 78.233))) * 
     color = color + glow * u.fog2.y;
   }
 
-  if (u.half.y > 0.0) {
-    let marchStep = (uv - u.godray.xy) * u.half.z / 16.0;
-    var probe = uv;
-    var decay = 1.0;
-    var shafts = vec3f(0.0);
-    for (var i = 0; i < 16; i = i + 1) {
-      probe = probe - marchStep;
-      shafts = shafts + brightPass(clamp(probe, vec2f(0.0), vec2f(1.0))) * decay;
-      decay = decay * u.half.w;
-    }
-    color = color + shafts * (u.half.y / 16.0);
-  }
+${GOD_RAYS_WGSL}
 
-  if (u.godray.z > 0.0) {
-    let reach = u.godray.w * 0.25;
-    var streak = vec3f(0.0);
-    var total = 0.0;
-    for (var i = 1; i <= 8; i = i + 1) {
-      let distance = f32(i) / 8.0;
-      let weight = 1.0 - distance;
-      let offset = vec2f(reach * distance, 0.0);
-      streak = streak + (brightPass(clamp(uv + offset, vec2f(0.0), vec2f(1.0))) + brightPass(clamp(uv - offset, vec2f(0.0), vec2f(1.0)))) * weight;
-      total = total + weight * 2.0;
-    }
-    color = color + streak * (u.godray.z / max(total, 1.0));
-  }
+${STREAKS_WGSL}
 
   if ((u.flare.x > 0.0 || u.flare.y > 0.0) && u.flare.w > 0.0) {
     let aspect = size.x / size.y;
@@ -21194,176 +21234,6 @@ var GpuPostFx = class {
   }
 };
 
-// src/render/hdrBloom.ts
-var MIN_LEVELS = 3;
-var MAX_LEVELS = 6;
-function bloomLevels(width, height, radius) {
-  const wanted = MIN_LEVELS + Math.round(Math.max(0, Math.min(1, radius)) * (MAX_LEVELS - MIN_LEVELS));
-  const out = [];
-  let w = Math.max(1, width >> 1);
-  let h = Math.max(1, height >> 1);
-  while (out.length < wanted && w >= 4 && h >= 4) {
-    out.push({ width: w, height: h });
-    w = Math.max(1, w >> 1);
-    h = Math.max(1, h >> 1);
-  }
-  return out;
-}
-var VS2 = (
-  /* wgsl */
-  `
-@vertex fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f {
-  let x = f32((i << 1u) & 2u);
-  let y = f32(i & 2u);
-  return vec4f(x * 2.0 - 1.0, 1.0 - y * 2.0, 0.0, 1.0);
-}
-`
-);
-var DOWN_WGSL = (
-  /* wgsl */
-  `
-${VS2}
-@group(0) @binding(0) var src: texture_2d<f32>;
-@group(0) @binding(1) var samp: sampler;
-// xy = the source's texel, zw = the target's; first level when params2.x = 1.
-@group(0) @binding(2) var<uniform> params: array<vec4f, 2>;
-fn tap(uv: vec2f, dx: f32, dy: f32) -> vec3f { return textureSampleLevel(src, samp, uv + vec2f(dx, dy) * params[0].xy, 0.0).rgb; }
-fn karis(c: vec3f) -> f32 { return 1.0 / (1.0 + max(c.r, max(c.g, c.b))); }
-@fragment fn down(@builtin(position) pos: vec4f) -> @location(0) vec4f {
-  let uv = pos.xy * params[0].zw;
-  let a = tap(uv, -2.0, -2.0); let b = tap(uv, 0.0, -2.0); let c = tap(uv, 2.0, -2.0);
-  let d = tap(uv, -1.0, -1.0); let e = tap(uv, 1.0, -1.0);
-  let f = tap(uv, -2.0, 0.0); let g = tap(uv, 0.0, 0.0); let h = tap(uv, 2.0, 0.0);
-  let i = tap(uv, -1.0, 1.0); let j = tap(uv, 1.0, 1.0);
-  let k = tap(uv, -2.0, 2.0); let l = tap(uv, 0.0, 2.0); let m = tap(uv, 2.0, 2.0);
-  // Five overlapping boxes: the inner one at half, the four corners at an eighth each.
-  let inner = (d + e + i + j) * 0.25;
-  let tl = (a + b + f + g) * 0.25;
-  let tr = (b + c + g + h) * 0.25;
-  let bl = (f + g + k + l) * 0.25;
-  let br = (g + h + l + m) * 0.25;
-  if (params[1].x > 0.5) {
-    // The first level: each box weighted down by its brightness (Karis), so one sparkle can't flicker the glow.
-    let wi = karis(inner) * 0.5; let w0 = karis(tl) * 0.125; let w1 = karis(tr) * 0.125; let w2 = karis(bl) * 0.125; let w3 = karis(br) * 0.125;
-    return vec4f((inner * wi + tl * w0 + tr * w1 + bl * w2 + br * w3) / (wi + w0 + w1 + w2 + w3), 1.0);
-  }
-  return vec4f(inner * 0.5 + (tl + tr + bl + br) * 0.125, 1.0);
-}
-`
-);
-var UP_WGSL = (
-  /* wgsl */
-  `
-${VS2}
-@group(0) @binding(0) var src: texture_2d<f32>;
-@group(0) @binding(1) var samp: sampler;
-// xy = the (smaller) source's texel, zw = the target's.
-@group(0) @binding(2) var<uniform> params: array<vec4f, 2>;
-fn tap(uv: vec2f, dx: f32, dy: f32) -> vec3f { return textureSampleLevel(src, samp, uv + vec2f(dx, dy) * params[0].xy, 0.0).rgb; }
-@fragment fn up(@builtin(position) pos: vec4f) -> @location(0) vec4f {
-  let uv = pos.xy * params[0].zw;
-  // A 3\xD73 tent, added (by the blend) onto the level it lands on.
-  let t = (tap(uv, -1.0, -1.0) + tap(uv, 1.0, -1.0) + tap(uv, -1.0, 1.0) + tap(uv, 1.0, 1.0))
-    + (tap(uv, 0.0, -1.0) + tap(uv, -1.0, 0.0) + tap(uv, 1.0, 0.0) + tap(uv, 0.0, 1.0)) * 2.0
-    + tap(uv, 0.0, 0.0) * 4.0;
-  return vec4f(t / 16.0, 1.0);
-}
-`
-);
-var HdrBloom = class {
-  constructor(device) {
-    this.device = device;
-    this.levels = [];
-    this.key = "";
-    this.down = null;
-    this.up = null;
-    this.params = [];
-    this.sampler = device.createSampler({ magFilter: "linear", minFilter: "linear", addressModeU: "clamp-to-edge", addressModeV: "clamp-to-edge" });
-  }
-  /**
-   * The chain's levels for a `width × height` frame and `radius`, made when
-   * the shape changes: the half-resolution glow {@link encode} leaves in the
-   * first, summed over `count` levels (null when the frame is too small).
-   */
-  prepare(width, height, radius) {
-    const sizes = bloomLevels(width, height, radius);
-    if (sizes.length === 0) return null;
-    const key = sizes.map((s) => `${s.width}x${s.height}`).join(",");
-    if (key !== this.key) {
-      for (const level of this.levels) level.texture.destroy?.();
-      this.levels = sizes.map((s) => ({ ...s, texture: this.device.createTexture({ size: s, format: "rgba16float", usage: 16 | 4 | 1 }) }));
-      this.key = key;
-    }
-    return { texture: this.levels[0].texture, count: this.levels.length };
-  }
-  /**
-   * Encode the chain over `source` (rgba16float, `width × height`): the
-   * half-resolution glow it returns sums `count` levels. `timing` (a frame
-   * graph pass's) spans the chain's passes.
-   */
-  encode(encoder, source, width, height, radius, timing = {}) {
-    const device = this.device;
-    const glow = this.prepare(width, height, radius);
-    if (!glow) return null;
-    const pipeline = (code, entryPoint, additive) => {
-      const module = device.createShaderModule({ code });
-      return device.createRenderPipeline({
-        layout: "auto",
-        vertex: { module, entryPoint: "vs" },
-        fragment: {
-          module,
-          entryPoint,
-          targets: [{ format: "rgba16float", ...additive ? { blend: { color: { srcFactor: "one", dstFactor: "one", operation: "add" }, alpha: { srcFactor: "one", dstFactor: "one", operation: "add" } } } : {} }]
-        },
-        primitive: { topology: "triangle-list" }
-      });
-    };
-    this.down ?? (this.down = pipeline(DOWN_WGSL, "down", false));
-    this.up ?? (this.up = pipeline(UP_WGSL, "up", true));
-    let param = 0;
-    const passes = this.levels.length * 2 - 1;
-    const pass = (pipeline2, from2, fromSize2, to, first, load) => {
-      var _a;
-      const index = param;
-      const buffer = (_a = this.params)[index] ?? (_a[index] = device.createBuffer({ size: 32, usage: 64 | 8 }));
-      param += 1;
-      device.queue.writeBuffer(buffer, 0, new Float32Array([1 / fromSize2.width, 1 / fromSize2.height, 1 / to.width, 1 / to.height, first ? 1 : 0, 0, 0, 0]));
-      const encoded = encoder.beginRenderPass({
-        colorAttachments: [{ view: to.texture.createView(), clearValue: { r: 0, g: 0, b: 0, a: 0 }, loadOp: load ? "load" : "clear", storeOp: "store" }],
-        ...timingSpan(timing, index, passes)
-      });
-      encoded.setPipeline(pipeline2);
-      encoded.setBindGroup(
-        0,
-        device.createBindGroup({
-          layout: pipeline2.getBindGroupLayout(0),
-          entries: [
-            { binding: 0, resource: from2.createView() },
-            { binding: 1, resource: this.sampler },
-            { binding: 2, resource: { buffer } }
-          ]
-        })
-      );
-      encoded.draw(3);
-      encoded.end();
-    };
-    let from = source;
-    let fromSize = { width, height };
-    this.levels.forEach((level, i) => {
-      pass(this.down, from, fromSize, level, i === 0, false);
-      from = level.texture;
-      fromSize = level;
-    });
-    for (let i = this.levels.length - 1; i > 0; i -= 1) pass(this.up, this.levels[i].texture, this.levels[i], this.levels[i - 1], false, true);
-    return glow;
-  }
-  dispose() {
-    for (const level of this.levels) level.texture.destroy?.();
-    for (const buffer of this.params) buffer.destroy?.();
-    this.levels = [];
-  }
-};
-
 // src/render/toneMappers.ts
 var TONE_MAPPERS = ["filmic", "aces", "agx", "neutral"];
 function mul(m, c) {
@@ -21539,6 +21409,259 @@ fn lensDirt(uv: vec2f, aspect: f32) -> f32 {
 }
 `
 );
+
+// src/render/lensFx.ts
+var LENS_OFF = { aberration: 0, tiltStrength: 0, reflectionStrength: 0, godrayStrength: 0, streakStrength: 0 };
+function splitLens(u) {
+  const shaped = u.kaleidoSegments >= 2 || u.curvature > 0;
+  const any = u.aberration !== 0 || u.tiltStrength > 0 || u.reflectionStrength > 0 || u.godrayStrength > 0 || u.streakStrength > 0;
+  return shaped || !any ? { lens: false, display: u } : { lens: true, display: { ...u, ...LENS_OFF } };
+}
+var CLIP_KNEE = 0.9;
+var LENS_SHOWN_FLOATS = 12;
+function packLensShown(exposure, curve, toneMapped, grade, extendedExposure2, headroom, out = new Float32Array(LENS_SHOWN_FLOATS)) {
+  out.set([exposure, curve, toneMapped ? 1 : 0, grade ? 1 : 0, grade?.brightness ?? 1, grade?.contrast ?? 1, grade?.saturation ?? 1, 0, extendedExposure2, headroom, 0, 0]);
+  return out;
+}
+var LENS_WGSL = (
+  /* wgsl */
+  `
+${POST_STRUCT_WGSL}@group(0) @binding(0) var<uniform> u: Post;
+@group(0) @binding(1) var source: texture_2d<f32>;
+@group(0) @binding(2) var nearestClamp: sampler;
+@group(0) @binding(3) var<uniform> shown: array<vec4f, 3>;
+@vertex fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f {
+  let x = f32((i << 1u) & 2u);
+  let y = f32(i & 2u);
+  return vec4f(x * 2.0 - 1.0, 1.0 - y * 2.0, 0.0, 1.0);
+}
+const TAU = 6.2831853;
+
+fn src(uv: vec2f) -> vec3f { return textureSampleLevel(source, nearestClamp, uv, 0.0).rgb; }
+${POST_HELPERS_WGSL}${TONE_MAPPERS_WGSL}
+${GRADING_WGSL}
+fn toSrgb(c: vec3f) -> vec3f {
+  let v = clamp(c, vec3f(0.0), vec3f(1.0));
+  return select(1.055 * pow(v, vec3f(1.0 / 2.4)) - vec3f(0.055), v * 12.92, v <= vec3f(0.0031308));
+}
+fn graded(c: vec3f) -> vec3f {
+  if (shown[0].w > 0.5) { return gradeLinear(c, shown[1].x, shown[1].y, shown[1].z); }
+  return c;
+}
+// The pixel as an SDR display shows it: graded, through the curve, encoded.
+fn display(c: vec3f) -> vec3f {
+  let rgb = graded(c);
+  var mapped = clamp(rgb, vec3f(0.0), vec3f(1.0));
+  if (shown[0].z > 0.5) { mapped = toneMapWith(shown[0].y, rgb * shown[0].x); }
+  return toSrgb(mapped);
+}
+// \u2026and as an HDR display shows it: the curve's white at the headroom, grey where SDR shows it.
+fn displayHdr(c: vec3f) -> vec3f {
+  let rgb = graded(c);
+  let headroom = shown[2].y;
+  var mapped = clamp(rgb, vec3f(0.0), vec3f(headroom));
+  if (shown[0].z > 0.5) { mapped = toneMapWith(shown[0].y, rgb * (shown[0].x * shown[2].x / headroom)) * headroom; }
+  return toSrgbExtended(mapped);
+}
+// Picked by how bright it shows, as the display stack picks. What it gives is
+// what it showed, until it clips: from 0.9 of white, what an HDR display shows.
+fn brightPass(uv: vec2f) -> vec3f {
+  let c = src(uv);
+  let sdr = display(c);
+  let gathered = mix(sdr, displayHdr(c), glslSmoothstep(${CLIP_KNEE}, 1.0, luma(sdr)));
+  return gathered * glslSmoothstep(u.fog2.z, 1.0, luma(sdr));
+}
+struct Lensed {
+  @location(0) light: vec4f,
+  @location(1) glare: vec4f,
+};
+
+@fragment fn lens(@builtin(position) pos: vec4f) -> Lensed {
+  let size = u.size.xy;
+  let uv = pos.xy / size;
+  let centered = uv - 0.5;
+${ABERRATION_WGSL}
+${TILT_SHIFT_WGSL}
+${REFLECTION_WGSL}
+  // The sampled light is done; the gathers add into the glare, in display units.
+  let light = vec4f(max(color, vec3f(0.0)), textureSampleLevel(source, nearestClamp, uv, 0.0).a);
+  color = vec3f(0.0);
+${GOD_RAYS_WGSL}
+${STREAKS_WGSL}
+  return Lensed(light, vec4f(color, 0.0));
+}
+`
+);
+
+// src/render/hdrBloom.ts
+var MIN_LEVELS = 3;
+var MAX_LEVELS = 6;
+function bloomLevels(width, height, radius) {
+  const wanted = MIN_LEVELS + Math.round(Math.max(0, Math.min(1, radius)) * (MAX_LEVELS - MIN_LEVELS));
+  const out = [];
+  let w = Math.max(1, width >> 1);
+  let h = Math.max(1, height >> 1);
+  while (out.length < wanted && w >= 4 && h >= 4) {
+    out.push({ width: w, height: h });
+    w = Math.max(1, w >> 1);
+    h = Math.max(1, h >> 1);
+  }
+  return out;
+}
+var VS2 = (
+  /* wgsl */
+  `
+@vertex fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f {
+  let x = f32((i << 1u) & 2u);
+  let y = f32(i & 2u);
+  return vec4f(x * 2.0 - 1.0, 1.0 - y * 2.0, 0.0, 1.0);
+}
+`
+);
+var DOWN_WGSL = (
+  /* wgsl */
+  `
+${VS2}
+@group(0) @binding(0) var src: texture_2d<f32>;
+@group(0) @binding(1) var samp: sampler;
+// xy = the source's texel, zw = the target's; first level when params2.x = 1.
+@group(0) @binding(2) var<uniform> params: array<vec4f, 2>;
+fn tap(uv: vec2f, dx: f32, dy: f32) -> vec3f { return textureSampleLevel(src, samp, uv + vec2f(dx, dy) * params[0].xy, 0.0).rgb; }
+fn karis(c: vec3f) -> f32 { return 1.0 / (1.0 + max(c.r, max(c.g, c.b))); }
+@fragment fn down(@builtin(position) pos: vec4f) -> @location(0) vec4f {
+  let uv = pos.xy * params[0].zw;
+  let a = tap(uv, -2.0, -2.0); let b = tap(uv, 0.0, -2.0); let c = tap(uv, 2.0, -2.0);
+  let d = tap(uv, -1.0, -1.0); let e = tap(uv, 1.0, -1.0);
+  let f = tap(uv, -2.0, 0.0); let g = tap(uv, 0.0, 0.0); let h = tap(uv, 2.0, 0.0);
+  let i = tap(uv, -1.0, 1.0); let j = tap(uv, 1.0, 1.0);
+  let k = tap(uv, -2.0, 2.0); let l = tap(uv, 0.0, 2.0); let m = tap(uv, 2.0, 2.0);
+  // Five overlapping boxes: the inner one at half, the four corners at an eighth each.
+  let inner = (d + e + i + j) * 0.25;
+  let tl = (a + b + f + g) * 0.25;
+  let tr = (b + c + g + h) * 0.25;
+  let bl = (f + g + k + l) * 0.25;
+  let br = (g + h + l + m) * 0.25;
+  if (params[1].x > 0.5) {
+    // The first level: each box weighted down by its brightness (Karis), so one sparkle can't flicker the glow.
+    let wi = karis(inner) * 0.5; let w0 = karis(tl) * 0.125; let w1 = karis(tr) * 0.125; let w2 = karis(bl) * 0.125; let w3 = karis(br) * 0.125;
+    return vec4f((inner * wi + tl * w0 + tr * w1 + bl * w2 + br * w3) / (wi + w0 + w1 + w2 + w3), 1.0);
+  }
+  return vec4f(inner * 0.5 + (tl + tr + bl + br) * 0.125, 1.0);
+}
+`
+);
+var UP_WGSL = (
+  /* wgsl */
+  `
+${VS2}
+@group(0) @binding(0) var src: texture_2d<f32>;
+@group(0) @binding(1) var samp: sampler;
+// xy = the (smaller) source's texel, zw = the target's.
+@group(0) @binding(2) var<uniform> params: array<vec4f, 2>;
+fn tap(uv: vec2f, dx: f32, dy: f32) -> vec3f { return textureSampleLevel(src, samp, uv + vec2f(dx, dy) * params[0].xy, 0.0).rgb; }
+@fragment fn up(@builtin(position) pos: vec4f) -> @location(0) vec4f {
+  let uv = pos.xy * params[0].zw;
+  // A 3\xD73 tent, added (by the blend) onto the level it lands on.
+  let t = (tap(uv, -1.0, -1.0) + tap(uv, 1.0, -1.0) + tap(uv, -1.0, 1.0) + tap(uv, 1.0, 1.0))
+    + (tap(uv, 0.0, -1.0) + tap(uv, -1.0, 0.0) + tap(uv, 1.0, 0.0) + tap(uv, 0.0, 1.0)) * 2.0
+    + tap(uv, 0.0, 0.0) * 4.0;
+  return vec4f(t / 16.0, 1.0);
+}
+`
+);
+var HdrBloom = class {
+  constructor(device) {
+    this.device = device;
+    this.levels = [];
+    this.key = "";
+    this.down = null;
+    this.up = null;
+    this.params = [];
+    this.sampler = device.createSampler({ magFilter: "linear", minFilter: "linear", addressModeU: "clamp-to-edge", addressModeV: "clamp-to-edge" });
+  }
+  /**
+   * The chain's levels for a `width × height` frame and `radius`, made when
+   * the shape changes: the half-resolution glow {@link encode} leaves in the
+   * first, summed over `count` levels (null when the frame is too small).
+   */
+  prepare(width, height, radius) {
+    const sizes = bloomLevels(width, height, radius);
+    if (sizes.length === 0) return null;
+    const key = sizes.map((s) => `${s.width}x${s.height}`).join(",");
+    if (key !== this.key) {
+      for (const level of this.levels) level.texture.destroy?.();
+      this.levels = sizes.map((s) => ({ ...s, texture: this.device.createTexture({ size: s, format: "rgba16float", usage: 16 | 4 | 1 }) }));
+      this.key = key;
+    }
+    return { texture: this.levels[0].texture, count: this.levels.length };
+  }
+  /**
+   * Encode the chain over `source` (rgba16float, `width × height`): the
+   * half-resolution glow it returns sums `count` levels. `timing` (a frame
+   * graph pass's) spans the chain's passes.
+   */
+  encode(encoder, source, width, height, radius, timing = {}) {
+    const device = this.device;
+    const glow = this.prepare(width, height, radius);
+    if (!glow) return null;
+    const pipeline = (code, entryPoint, additive) => {
+      const module = device.createShaderModule({ code });
+      return device.createRenderPipeline({
+        layout: "auto",
+        vertex: { module, entryPoint: "vs" },
+        fragment: {
+          module,
+          entryPoint,
+          targets: [{ format: "rgba16float", ...additive ? { blend: { color: { srcFactor: "one", dstFactor: "one", operation: "add" }, alpha: { srcFactor: "one", dstFactor: "one", operation: "add" } } } : {} }]
+        },
+        primitive: { topology: "triangle-list" }
+      });
+    };
+    this.down ?? (this.down = pipeline(DOWN_WGSL, "down", false));
+    this.up ?? (this.up = pipeline(UP_WGSL, "up", true));
+    let param = 0;
+    const passes = this.levels.length * 2 - 1;
+    const pass = (pipeline2, from2, fromSize2, to, first, load) => {
+      var _a;
+      const index = param;
+      const buffer = (_a = this.params)[index] ?? (_a[index] = device.createBuffer({ size: 32, usage: 64 | 8 }));
+      param += 1;
+      device.queue.writeBuffer(buffer, 0, new Float32Array([1 / fromSize2.width, 1 / fromSize2.height, 1 / to.width, 1 / to.height, first ? 1 : 0, 0, 0, 0]));
+      const encoded = encoder.beginRenderPass({
+        colorAttachments: [{ view: to.texture.createView(), clearValue: { r: 0, g: 0, b: 0, a: 0 }, loadOp: load ? "load" : "clear", storeOp: "store" }],
+        ...timingSpan(timing, index, passes)
+      });
+      encoded.setPipeline(pipeline2);
+      encoded.setBindGroup(
+        0,
+        device.createBindGroup({
+          layout: pipeline2.getBindGroupLayout(0),
+          entries: [
+            { binding: 0, resource: from2.createView() },
+            { binding: 1, resource: this.sampler },
+            { binding: 2, resource: { buffer } }
+          ]
+        })
+      );
+      encoded.draw(3);
+      encoded.end();
+    };
+    let from = source;
+    let fromSize = { width, height };
+    this.levels.forEach((level, i) => {
+      pass(this.down, from, fromSize, level, i === 0, false);
+      from = level.texture;
+      fromSize = level;
+    });
+    for (let i = this.levels.length - 1; i > 0; i -= 1) pass(this.up, this.levels[i].texture, this.levels[i], this.levels[i - 1], false, true);
+    return glow;
+  }
+  dispose() {
+    for (const level of this.levels) level.texture.destroy?.();
+    for (const buffer of this.params) buffer.destroy?.();
+    this.levels = [];
+  }
+};
 
 // src/render/gpuPresent.ts
 import { CLOUD_TILE, MAX_CLOUD_LAYERS } from "@cartbox/editor";
@@ -21799,7 +21922,7 @@ struct Compose {
   shaftColor: vec4f,
   shaftScale: vec4f,
   hdr: vec4f,   // x = linear frame, y = tone-mapped, z = exposure, w = the curve (toneMappers.ts)
-  grade: vec4f, // F4d: x = pass (0 all, 1 the linear composite, 2 the finish), y = bloom strength, z = 1 / levels summed
+  grade: vec4f, // F4d: x = pass (0 all, 1 the linear composite, 2 the finish), y = bloom strength, z = 1 / levels summed, w = 1 with the lens pass's glare (F4e-2)
   look: vec4f,  // F4d: the linear frame's brightness, contrast (in ACEScct) and saturation; w = 1 when graded
   output: vec4f, // F4d: x = 1 for an HDR display (extended), y = its headroom, z = the exposure keeping grey, w = lens dirt
 };
@@ -21811,6 +21934,7 @@ struct Compose {
 @group(0) @binding(5) var front: texture_2d<f32>;
 @group(0) @binding(6) var hud: texture_2d<f32>;
 @group(0) @binding(7) var holo: texture_2d<f32>;
+@group(0) @binding(8) var glare: texture_2d<f32>;
 ${FULLSCREEN_VS2}
 ${SRGB_WGSL}
 ${TONE_MAPPERS_WGSL}
@@ -21879,6 +22003,8 @@ fn composite(pos: vec4f, p: vec2i, hdr: bool) -> vec4f {
       c = vec4f(toSrgb(mapped), clamp(c.a, 0.0, 1.0));
     }
   }
+  // The lens pass's god rays and streaks (F4e-2), gathered as the display shows the light, added over it.
+  if (u.grade.w > 0.5) { c = vec4f(c.rgb + textureLoad(glare, p, 0).rgb, c.a); }
   if (u.layers2.x > 0.5) {
     let h = textureLoad(hud, p, 0);
     let b = round(h.rgb * 255.0);
@@ -21999,6 +22125,8 @@ var GpuPresenter = class {
       sky: new Float32Array(SKY_UNIFORM_FLOATS),
       shaft: new Float32Array(SHAFT_UNIFORM_FLOATS),
       compose: new Float32Array(COMPOSE_UNIFORM_FLOATS),
+      lens: new Float32Array(POST_UNIFORM_FLOATS),
+      lensShown: new Float32Array(LENS_SHOWN_FLOATS),
       measure: new Float32Array(MEASURE_UNIFORM_FLOATS)
     };
     this.postFx = null;
@@ -22016,6 +22144,7 @@ var GpuPresenter = class {
     device.queue.writeTexture({ texture: this.blank }, new Uint8Array(4), { bytesPerRow: 4 }, { width: 1, height: 1 });
     const sampler = (u, v) => device.createSampler({ magFilter: "linear", minFilter: "linear", addressModeU: u, addressModeV: v });
     this.linear = { clamp: sampler("clamp-to-edge", "clamp-to-edge"), wrapU: sampler("repeat", "clamp-to-edge"), repeat: sampler("repeat", "repeat") };
+    this.nearest = device.createSampler({ magFilter: "nearest", minFilter: "nearest", addressModeU: "clamp-to-edge", addressModeV: "clamp-to-edge" });
     const tex = (binding, visibility = STAGE_FRAGMENT2, viewDimension = "2d") => ({ binding, visibility, texture: { sampleType: "float", viewDimension } });
     const uni = (visibility = STAGE_FRAGMENT2) => ({ binding: 0, visibility, buffer: { type: "uniform" } });
     const samp = (binding) => ({ binding, visibility: STAGE_FRAGMENT2, sampler: { type: "filtering" } });
@@ -22024,11 +22153,20 @@ var GpuPresenter = class {
       sky: layout([uni(), tex(1), samp(2), tex(3, STAGE_FRAGMENT2, "2d-array"), samp(4)]),
       mask: layout([uni(), tex(1), tex(2)]),
       gather: layout([uni(), tex(1)]),
-      compose: layout([uni(), tex(1), tex(2), tex(3), samp(4), tex(5), tex(6), tex(7)]),
+      compose: layout([uni(), tex(1), tex(2), tex(3), samp(4), tex(5), tex(6), tex(7), tex(8)]),
+      lens: layout([uni(), tex(1), samp(2), { binding: 3, visibility: STAGE_FRAGMENT2, buffer: { type: "uniform" } }]),
       measure: layout([uni(STAGE_COMPUTE), tex(1, STAGE_COMPUTE), tex(2, STAGE_COMPUTE), { binding: 3, visibility: STAGE_COMPUTE, buffer: { type: "storage" } }])
     };
     const ubuf = (floats) => device.createBuffer({ size: floats * 4, usage: USAGE3.uniform | USAGE3.bufferCopyDst });
-    this.uniforms = { sky: ubuf(SKY_UNIFORM_FLOATS), shaft: ubuf(SHAFT_UNIFORM_FLOATS), compose: ubuf(COMPOSE_UNIFORM_FLOATS), finish: ubuf(COMPOSE_UNIFORM_FLOATS), measure: ubuf(MEASURE_UNIFORM_FLOATS) };
+    this.uniforms = {
+      sky: ubuf(SKY_UNIFORM_FLOATS),
+      shaft: ubuf(SHAFT_UNIFORM_FLOATS),
+      compose: ubuf(COMPOSE_UNIFORM_FLOATS),
+      finish: ubuf(COMPOSE_UNIFORM_FLOATS),
+      lens: ubuf(POST_UNIFORM_FLOATS),
+      lensShown: ubuf(LENS_SHOWN_FLOATS),
+      measure: ubuf(MEASURE_UNIFORM_FLOATS)
+    };
     this.transients = new TransientPool(device);
     this.timer = GraphTimer.create(device);
     this.measured = {
@@ -22133,7 +22271,8 @@ var GpuPresenter = class {
     const bloomStrength = this.hdr && frame.post ? frame.post.uniforms.bloomStrength : 0;
     const look = this.hdr && frame.post ? frame.post.uniforms : null;
     const graded = look !== null && (look.brightness !== 1 || look.contrast !== 1 || look.saturation !== 1);
-    const post = frame.post ? this.hdr ? { ...frame.post, uniforms: { ...frame.post.uniforms, ...bloomStrength > 0 ? { bloomStrength: 0 } : {}, brightness: 1, contrast: 1, saturation: 1 } } : frame.post : null;
+    const split = this.hdr && frame.post ? splitLens(frame.post.uniforms) : null;
+    const post = frame.post ? split ? { ...frame.post, uniforms: { ...split.display, ...bloomStrength > 0 ? { bloomStrength: 0 } : {}, brightness: 1, contrast: 1, saturation: 1 } } : frame.post : null;
     const composedFormat = this.hdr ? "rgba16float" : "rgba8unorm";
     const composed = post ? graph.createTexture("composite", { format: composedFormat, width, height }) : null;
     const composeOut = composed ?? output;
@@ -22141,7 +22280,7 @@ var GpuPresenter = class {
     const compose = packComposeUniforms(frame, width, height, this.data.compose, this.hdr);
     if (graded) compose.set([look.brightness, look.contrast, look.saturation, 1], 28);
     compose.set([this.extended ? 1 : 0, HDR_HEADROOM, this.extended ? this.extendedExposure(frame.tonemap?.operator ?? "filmic") : 1, look?.bloomDirt ?? 0], 32);
-    const layers = (ctx, uniforms, baseView, lightView) => [
+    const layers = (ctx, uniforms, baseView, lightView, glareView = this.blank.createView()) => [
       { binding: 0, resource: { buffer: uniforms } },
       { binding: 1, resource: baseView },
       { binding: 2, resource: scene.createView() },
@@ -22149,7 +22288,8 @@ var GpuPresenter = class {
       { binding: 4, resource: this.linear.clamp },
       { binding: 5, resource: (frame.front ?? this.blank).createView() },
       { binding: 6, resource: (frame.hud ? this.upload("hud", frame.hud) : this.blank).createView() },
-      { binding: 7, resource: (frame.holo ? this.upload("holo", frame.holo) : this.blank).createView() }
+      { binding: 7, resource: (frame.holo ? this.upload("holo", frame.holo) : this.blank).createView() },
+      { binding: 8, resource: glareView }
     ];
     const readLayers = (pass) => {
       if (skyTexture) pass.read(skyTexture);
@@ -22158,9 +22298,8 @@ var GpuPresenter = class {
     if (bloomStrength > 0) this.bloom ?? (this.bloom = new HdrBloom(device));
     const radius = frame.post?.uniforms.bloomRadius ?? 0;
     const glowShape = bloomStrength > 0 ? this.bloom.prepare(width, height, radius) : null;
-    if (glowShape) {
+    if (glowShape || split?.lens) {
       const linearFrame = graph.createTexture("linear composite", { format: "rgba16float", width, height });
-      const glow = graph.importTexture("bloom", glowShape.texture);
       graph.addPass("linear composite", "render", (pass) => {
         readLayers(pass);
         pass.write(linearFrame);
@@ -22170,19 +22309,63 @@ var GpuPresenter = class {
           this.fullScreen(ctx.encoder, "compose", "rgba16float", COMPOSE_WGSL, ctx.texture(linearFrame), layers(ctx, this.uniforms.compose, baseOf(ctx).createView(), lightOf(ctx).createView()), ctx.timing);
         };
       });
-      graph.addPass("bloom", "render", (pass) => {
-        pass.read(linearFrame);
-        pass.write(glow);
-        return (ctx) => void this.bloom.encode(ctx.encoder, ctx.texture(linearFrame), width, height, radius, ctx.timing);
-      });
+      const glow = glowShape ? graph.importTexture("bloom", glowShape.texture) : null;
+      if (glow) {
+        graph.addPass("bloom", "render", (pass) => {
+          pass.read(linearFrame);
+          pass.write(glow);
+          return (ctx) => void this.bloom.encode(ctx.encoder, ctx.texture(linearFrame), width, height, radius, ctx.timing);
+        });
+      }
+      let lit = linearFrame;
+      let glare = null;
+      if (split?.lens) {
+        const lensed = graph.createTexture("lens", { format: "rgba16float", width, height });
+        const gathered = graph.createTexture("glare", { format: "rgba16float", width, height });
+        const lensPost = frame.post;
+        graph.addPass("lens", "render", (pass) => {
+          pass.read(linearFrame);
+          pass.write(lensed);
+          pass.write(gathered);
+          return (ctx) => {
+            const operator = frame.tonemap?.operator ?? "filmic";
+            device.queue.writeBuffer(this.uniforms.lens, 0, packPostUniforms(lensPost.uniforms, width, height, lensPost.time, false, this.data.lens));
+            device.queue.writeBuffer(
+              this.uniforms.lensShown,
+              0,
+              packLensShown(compose[22], compose[23], compose[21] > 0.5, graded ? look : null, this.extendedExposure(operator), HDR_HEADROOM, this.data.lensShown)
+            );
+            this.fullScreen(
+              ctx.encoder,
+              "lens",
+              "rgba16float",
+              LENS_WGSL,
+              [ctx.texture(lensed), ctx.texture(gathered)],
+              [
+                { binding: 0, resource: { buffer: this.uniforms.lens } },
+                { binding: 1, resource: ctx.texture(linearFrame).createView() },
+                { binding: 2, resource: this.nearest },
+                { binding: 3, resource: { buffer: this.uniforms.lensShown } }
+              ],
+              ctx.timing
+            );
+          };
+        });
+        lit = lensed;
+        glare = gathered;
+      }
       graph.addPass("tone map", "render", (pass) => {
-        pass.read(linearFrame);
-        pass.read(glow);
+        pass.read(lit);
+        if (glow) pass.read(glow);
+        if (glare) pass.read(glare);
         pass.write(composeOut);
         return (ctx) => {
-          compose.set([2, Math.min(1, bloomStrength * BLOOM_MIX), 1 / glowShape.count, 0], 24);
+          const withGlare = glare ? 1 : 0;
+          compose.set(glowShape ? [2, Math.min(1, bloomStrength * BLOOM_MIX), 1 / glowShape.count, withGlare] : [2, 0, 1, withGlare], 24);
           device.queue.writeBuffer(this.uniforms.finish, 0, compose);
-          this.fullScreen(ctx.encoder, "compose", composeFormat, COMPOSE_WGSL, ctx.texture(composeOut), layers(ctx, this.uniforms.finish, ctx.texture(linearFrame).createView(), ctx.texture(glow).createView()), ctx.timing);
+          const glowView = (glow ? ctx.texture(glow) : this.blank).createView();
+          const glareView = (glare ? ctx.texture(glare) : this.blank).createView();
+          this.fullScreen(ctx.encoder, "compose", composeFormat, COMPOSE_WGSL, ctx.texture(composeOut), layers(ctx, this.uniforms.finish, ctx.texture(lit).createView(), glowView, glareView), ctx.timing);
         };
       });
     } else {
@@ -22332,7 +22515,8 @@ var GpuPresenter = class {
       pipeline = name === "measure" ? this.device.createComputePipeline({ layout, compute: { module, entryPoint: "measure" } }) : this.device.createRenderPipeline({
         layout,
         vertex: { module, entryPoint: "vs" },
-        fragment: { module, entryPoint: name, targets: [{ format }] },
+        // The lens pass writes its light and its glare (F4e-2).
+        fragment: { module, entryPoint: name, targets: name === "lens" ? [{ format }, { format }] : [{ format }] },
         primitive: { topology: "triangle-list" }
       });
       this.pipelines.set(key, pipeline);
@@ -22341,8 +22525,9 @@ var GpuPresenter = class {
   }
   fullScreen(encoder, name, format, code, target, entries, timing = {}) {
     const pipeline = this.pipeline(name, format, code);
+    const targets = Array.isArray(target) ? target : [target];
     const pass = encoder.beginRenderPass({
-      colorAttachments: [{ view: target.createView(), clearValue: { r: 0, g: 0, b: 0, a: 0 }, loadOp: "clear", storeOp: "store" }],
+      colorAttachments: targets.map((t) => ({ view: t.createView(), clearValue: { r: 0, g: 0, b: 0, a: 0 }, loadOp: "clear", storeOp: "store" })),
       ...timing
     });
     pass.setPipeline(pipeline);

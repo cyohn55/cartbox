@@ -4218,6 +4218,8 @@ declare class GpuPresenter {
     readonly height: number;
     private readonly blank;
     private readonly linear;
+    /** The lens pass samples as the post stack does: nearest, clamped. */
+    private readonly nearest;
     private readonly layouts;
     private readonly pipelines;
     private readonly uniforms;
