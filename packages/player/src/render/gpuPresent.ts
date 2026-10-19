@@ -20,11 +20,16 @@
  *    the scene over it (premultiplied), the shafts added, the held weapon over
  *    that, the cart's frame keyed on top as a HUD, and the holo UI over all.
  * 4. **Post:** the post-process stack, when one is set, as a port of the WebGL
- *    pass (see gpuPostFx.ts) from the composite into the target.
+ *    pass (see gpuPostFx.ts) from the composite into the target (half-float on
+ *    a linear frame, F4e).
  * 5. **Measure:** the log-average luminance eye adaptation needs and how much
  *    of the sun is unblocked, reduced in one compute workgroup and read back
  *    as four numbers, asynchronously — the only readback left, sixteen bytes
  *    instead of the frame.
+ *
+ * The steps are passes of a frame graph (frameGraph.ts, F4e): the
+ * intermediate targets are its pooled transients, and each pass is timed for
+ * the profiler when the device can.
  *
  * The cart's frame and the holo layer are CPU-drawn and uploaded as they are
  * (the cart's core makes its frame on the CPU anyway). What no longer happens
@@ -37,7 +42,8 @@
 import { GpuPostFx } from "../fx/gpuPostFx.js";
 import { HdrBloom } from "./hdrBloom.js";
 import { TONE_MAPPERS_WGSL, toneMapperIndex, type ToneMapper } from "./toneMappers.js";
-import { GRADING_WGSL, HDR_HEADROOM, extendedExposure } from "./grading.js";
+import { GRADING_WGSL, HDR_HEADROOM, HDR_PEAK, extendedExposure } from "./grading.js";
+import { FrameGraph, GraphTimer, TransientPool, type FrameResource, type PassBuilder, type PassContext, type PassTime } from "./frameGraph.js";
 import type { PostFxUniforms } from "../fx/postfx.js";
 import { CLOUD_TILE, MAX_CLOUD_LAYERS, type BakedCloudLayer, type DecodedTexture, type Mat4, type SkySun, type SunShafts } from "@cartbox/editor";
 
@@ -108,6 +114,9 @@ export interface PresentStats {
   /** The share of taps round the sun that see open sky (0..1), or null when it wasn't measured. */
   readonly sunVisible: number | null;
   readonly seq: number;
+  /** The presenter's GPU time and each of its passes' (F4e), when the device can time them. */
+  readonly gpuMs?: number | null;
+  readonly passes?: readonly PassTime[];
 }
 
 /**
@@ -629,14 +638,13 @@ export class GpuPresenter {
     compose: new Float32Array(COMPOSE_UNIFORM_FLOATS),
     measure: new Float32Array(MEASURE_UNIFORM_FLOATS),
   };
-  private skyTarget: any = null;
-  /** The composite, when a post stack reads it before the target. */
-  private composed: any = null;
   private postFx: GpuPostFx | null = null;
-  /** The linear composite and its bloom chain (F4d), made when a linear frame first blooms. */
-  private linearTarget: any = null;
+  /** The HDR bloom's chain (F4d), made when a linear frame first blooms. */
   private bloom: HdrBloom | null = null;
-  private shaftTargets: { mask: any; light: any } | null = null;
+  /** The frame graph's transients (the sky, the shafts, the composites), kept from frame to frame. */
+  private readonly transients: TransientPool;
+  /** Each pass's GPU time, when the device can time them (F4e: the profiler lists them). */
+  private readonly timer: GraphTimer | null;
   private readonly uploads = new Map<string, Uploaded>();
   private panorama: { source: DecodedTexture; texture: any } | null = null;
   private cloudTexture: { sources: readonly BakedCloudLayer[]; texture: any } | null = null;
@@ -674,6 +682,8 @@ export class GpuPresenter {
     };
     const ubuf = (floats: number) => device.createBuffer({ size: floats * 4, usage: USAGE.uniform | USAGE.bufferCopyDst });
     this.uniforms = { sky: ubuf(SKY_UNIFORM_FLOATS), shaft: ubuf(SHAFT_UNIFORM_FLOATS), compose: ubuf(COMPOSE_UNIFORM_FLOATS), finish: ubuf(COMPOSE_UNIFORM_FLOATS), measure: ubuf(MEASURE_UNIFORM_FLOATS) };
+    this.transients = new TransientPool(device);
+    this.timer = GraphTimer.create(device);
     this.measured = {
       result: device.createBuffer({ size: 16, usage: USAGE.bufferStorage | USAGE.bufferCopySrc }),
       staging: device.createBuffer({ size: 16, usage: USAGE.mapRead | USAGE.bufferCopyDst }),
@@ -683,48 +693,101 @@ export class GpuPresenter {
 
   /** The newest measurements to arrive (a frame or two behind the frame that asked). */
   get stats(): PresentStats {
-    return this.latestStats;
+    const timer = this.timer;
+    return timer && timer.lastPasses.length > 0 ? { ...this.latestStats, gpuMs: timer.lastMs, passes: timer.lastPasses } : this.latestStats;
   }
 
-  /** Composite `frame` into `target` (a texture of `format`, `width × height`) and submit. */
+  /**
+   * Composite `frame` into `target` (a texture of `format`, `width × height`)
+   * and submit. The frame is built as a frame graph (F4e): its intermediate
+   * targets are the graph's transients, pooled from frame to frame, and each
+   * step is a pass the graph times when the device can.
+   */
   present(frame: PresentFrame, target: any, format: string): void {
     if (this.destroyed) return;
     const device = this.device;
+    const width = this.width;
+    const height = this.height;
     const encoder = device.createCommandEncoder();
+    const graph = new FrameGraph();
+    const output = graph.importTexture("target", target);
     const sky = frame.base.kind === "sky" ? frame.base.sky : null;
     const shafts = sky && frame.shafts && frame.shafts.shafts.strength > 0 ? frame.shafts : null;
-    // 1. The sky, into its own target: the shafts and the measurements read it too.
-    if (sky) {
-      const skyFormat = this.hdr ? "rgba16float" : "rgba8unorm";
-      this.skyTarget ??= this.target(skyFormat, this.width, this.height);
-      device.queue.writeBuffer(this.uniforms.sky, 0, packSkyUniforms(sky, this.width, this.height, this.data.sky, this.hdr));
-      this.fullScreen(encoder, "sky", skyFormat, SKY_WGSL, this.skyTarget, [
-        { binding: 0, resource: { buffer: this.uniforms.sky } },
-        { binding: 1, resource: this.panoramaFor(sky.map).createView() },
-        { binding: 2, resource: this.linear.wrapU },
-        { binding: 3, resource: this.cloudsFor(sky.clouds).createView({ dimension: "2d-array" }) },
-        { binding: 4, resource: this.linear.repeat },
-      ]);
-    }
-    const base = sky ? this.skyTarget : frame.base.kind === "frame" ? this.upload("base", frame.base.rgba) : this.blank;
     const scene = frame.scene ?? this.blank;
-    // 2. The shafts: their source a cell at a time, then the gather toward the sun.
-    let light = this.blank;
-    if (shafts) {
-      const grid = shaftGrid(this.width, this.height);
-      this.shaftTargets ??= { mask: this.target("r16float", grid.width, grid.height), light: this.target("r16float", grid.width, grid.height) };
-      device.queue.writeBuffer(this.uniforms.shaft, 0, packShaftUniforms(shafts.sun, shafts.shafts, shafts.color, this.width, this.height, this.data.shaft, this.hdr));
-      this.fullScreen(encoder, "mask", "r16float", SHAFT_MASK_WGSL, this.shaftTargets.mask, [
-        { binding: 0, resource: { buffer: this.uniforms.shaft } },
-        { binding: 1, resource: scene.createView() },
-        { binding: 2, resource: this.skyTarget.createView() },
-      ]);
-      this.fullScreen(encoder, "gather", "r16float", SHAFT_GATHER_WGSL, this.shaftTargets.light, [
-        { binding: 0, resource: { buffer: this.uniforms.shaft } },
-        { binding: 1, resource: this.shaftTargets.mask.createView() },
-      ]);
-      light = this.shaftTargets.light;
+    // 1. The sky, into its own target: the shafts and the measurements read it too.
+    const skyFormat = this.hdr ? "rgba16float" : "rgba8unorm";
+    const skyTexture = sky ? graph.createTexture("sky", { format: skyFormat, width, height }) : null;
+    if (sky && skyTexture) {
+      graph.addPass("sky", "render", (pass) => {
+        pass.write(skyTexture);
+        return (ctx) => {
+          device.queue.writeBuffer(this.uniforms.sky, 0, packSkyUniforms(sky, width, height, this.data.sky, this.hdr));
+          this.fullScreen(
+            ctx.encoder,
+            "sky",
+            skyFormat,
+            SKY_WGSL,
+            ctx.texture(skyTexture),
+            [
+              { binding: 0, resource: { buffer: this.uniforms.sky } },
+              { binding: 1, resource: this.panoramaFor(sky.map).createView() },
+              { binding: 2, resource: this.linear.wrapU },
+              { binding: 3, resource: this.cloudsFor(sky.clouds).createView({ dimension: "2d-array" }) },
+              { binding: 4, resource: this.linear.repeat },
+            ],
+            ctx.timing,
+          );
+        };
+      });
     }
+    const flatBase = sky ? null : frame.base.kind === "frame" ? this.upload("base", frame.base.rgba) : this.blank;
+    const baseOf = (ctx: PassContext) => (skyTexture ? ctx.texture(skyTexture) : flatBase);
+    // 2. The shafts: their source a cell at a time, then the gather toward the sun.
+    let light: FrameResource | null = null;
+    if (shafts && skyTexture) {
+      const grid = shaftGrid(width, height);
+      const mask = graph.createTexture("shaft mask", { format: "r16float", width: grid.width, height: grid.height });
+      const gathered = graph.createTexture("shafts", { format: "r16float", width: grid.width, height: grid.height });
+      graph.addPass("shaft mask", "render", (pass) => {
+        pass.read(skyTexture);
+        pass.write(mask);
+        return (ctx) => {
+          device.queue.writeBuffer(this.uniforms.shaft, 0, packShaftUniforms(shafts.sun, shafts.shafts, shafts.color, width, height, this.data.shaft, this.hdr));
+          this.fullScreen(
+            ctx.encoder,
+            "mask",
+            "r16float",
+            SHAFT_MASK_WGSL,
+            ctx.texture(mask),
+            [
+              { binding: 0, resource: { buffer: this.uniforms.shaft } },
+              { binding: 1, resource: scene.createView() },
+              { binding: 2, resource: ctx.texture(skyTexture).createView() },
+            ],
+            ctx.timing,
+          );
+        };
+      });
+      graph.addPass("shafts", "render", (pass) => {
+        pass.read(mask);
+        pass.write(gathered);
+        return (ctx) =>
+          this.fullScreen(
+            ctx.encoder,
+            "gather",
+            "r16float",
+            SHAFT_GATHER_WGSL,
+            ctx.texture(gathered),
+            [
+              { binding: 0, resource: { buffer: this.uniforms.shaft } },
+              { binding: 1, resource: ctx.texture(mask).createView() },
+            ],
+            ctx.timing,
+          );
+      });
+      light = gathered;
+    }
+    const lightOf = (ctx: PassContext) => (light ? ctx.texture(light) : this.blank);
     // 3. Everything over everything: into the target, or for the post stack to read.
     // A linear frame with bloom on (F4d) blooms here, from its HDR composite, and
     // the post stack's own (thresholded, after the tone map) stands down.
@@ -737,15 +800,16 @@ export class GpuPresenter {
         ? { ...frame.post, uniforms: { ...frame.post.uniforms, ...(bloomStrength > 0 ? { bloomStrength: 0 } : {}), brightness: 1, contrast: 1, saturation: 1 } }
         : frame.post
       : null;
-    if (post) this.composed ??= this.target("rgba8unorm", this.width, this.height);
-    const out = post ? this.composed : target;
-    const outFormat = post ? "rgba8unorm" : format;
-    const compose = packComposeUniforms(frame, this.width, this.height, this.data.compose, this.hdr);
+    // The post stack reads the composite at full precision on a linear frame (F4e): half-float, not 8 bits.
+    const composedFormat = this.hdr ? "rgba16float" : "rgba8unorm";
+    const composed = post ? graph.createTexture("composite", { format: composedFormat, width, height }) : null;
+    const composeOut = composed ?? output;
+    const composeFormat = post ? composedFormat : format;
+    const compose = packComposeUniforms(frame, width, height, this.data.compose, this.hdr);
     if (graded) compose.set([look!.brightness, look!.contrast, look!.saturation, 1], 28);
-    // An HDR display, when the frame reaches it unclamped (no post stack until F4e runs it in light).
-    const extended = this.extended && !post;
-    compose.set([extended ? 1 : 0, HDR_HEADROOM, extended ? this.extendedExposure(frame.tonemap?.operator ?? "filmic") : 1, look?.bloomDirt ?? 0], 32);
-    const layers = (uniforms: any, baseView: any, lightView: any) => [
+    // An HDR display: the frame reaches it unclamped, through the post stack too (F4e).
+    compose.set([this.extended ? 1 : 0, HDR_HEADROOM, this.extended ? this.extendedExposure(frame.tonemap?.operator ?? "filmic") : 1, look?.bloomDirt ?? 0], 32);
+    const layers = (ctx: PassContext, uniforms: any, baseView: any, lightView: any) => [
       { binding: 0, resource: { buffer: uniforms } },
       { binding: 1, resource: baseView },
       { binding: 2, resource: scene.createView() },
@@ -755,58 +819,94 @@ export class GpuPresenter {
       { binding: 6, resource: (frame.hud ? this.upload("hud", frame.hud) : this.blank).createView() },
       { binding: 7, resource: (frame.holo ? this.upload("holo", frame.holo) : this.blank).createView() },
     ];
-    const glow = bloomStrength > 0 ? this.bloomOver(encoder, compose, layers(this.uniforms.compose, base.createView(), light.createView()), frame.post!.uniforms.bloomRadius) : null;
-    if (glow) {
-      compose.set([2, Math.min(1, bloomStrength * BLOOM_MIX), 1 / glow.count, 0], 24);
-      device.queue.writeBuffer(this.uniforms.finish, 0, compose);
-      this.fullScreen(encoder, "compose", outFormat, COMPOSE_WGSL, out, layers(this.uniforms.finish, this.linearTarget.createView(), glow.texture.createView()));
+    const readLayers = (pass: PassBuilder) => {
+      if (skyTexture) pass.read(skyTexture);
+      if (light) pass.read(light);
+    };
+    if (bloomStrength > 0) this.bloom ??= new HdrBloom(device);
+    const radius = frame.post?.uniforms.bloomRadius ?? 0;
+    const glowShape = bloomStrength > 0 ? this.bloom!.prepare(width, height, radius) : null;
+    if (glowShape) {
+      // The HDR bloom (F4d): the layers composited in linear light into their own target, then blurred down and up the mip chain.
+      const linearFrame = graph.createTexture("linear composite", { format: "rgba16float", width, height });
+      const glow = graph.importTexture("bloom", glowShape.texture);
+      graph.addPass("linear composite", "render", (pass) => {
+        readLayers(pass);
+        pass.write(linearFrame);
+        return (ctx) => {
+          compose.set([1, 0, 0, 0], 24);
+          device.queue.writeBuffer(this.uniforms.compose, 0, compose);
+          this.fullScreen(ctx.encoder, "compose", "rgba16float", COMPOSE_WGSL, ctx.texture(linearFrame), layers(ctx, this.uniforms.compose, baseOf(ctx).createView(), lightOf(ctx).createView()), ctx.timing);
+        };
+      });
+      graph.addPass("bloom", "render", (pass) => {
+        pass.read(linearFrame);
+        pass.write(glow);
+        return (ctx) => void this.bloom!.encode(ctx.encoder, ctx.texture(linearFrame), width, height, radius, ctx.timing);
+      });
+      graph.addPass("tone map", "render", (pass) => {
+        pass.read(linearFrame);
+        pass.read(glow);
+        pass.write(composeOut);
+        return (ctx) => {
+          compose.set([2, Math.min(1, bloomStrength * BLOOM_MIX), 1 / glowShape.count, 0], 24);
+          device.queue.writeBuffer(this.uniforms.finish, 0, compose);
+          this.fullScreen(ctx.encoder, "compose", composeFormat, COMPOSE_WGSL, ctx.texture(composeOut), layers(ctx, this.uniforms.finish, ctx.texture(linearFrame).createView(), ctx.texture(glow).createView()), ctx.timing);
+        };
+      });
     } else {
-      device.queue.writeBuffer(this.uniforms.compose, 0, compose);
-      this.fullScreen(encoder, "compose", outFormat, COMPOSE_WGSL, out, layers(this.uniforms.compose, base.createView(), light.createView()));
+      graph.addPass(this.hdr ? "compose and tone map" : "compose", "render", (pass) => {
+        readLayers(pass);
+        pass.write(composeOut);
+        return (ctx) => {
+          device.queue.writeBuffer(this.uniforms.compose, 0, compose);
+          this.fullScreen(ctx.encoder, "compose", composeFormat, COMPOSE_WGSL, ctx.texture(composeOut), layers(ctx, this.uniforms.compose, baseOf(ctx).createView(), lightOf(ctx).createView()), ctx.timing);
+        };
+      });
     }
     // 4. The post stack, from the composite into the target.
-    if (post) {
-      this.postFx ??= new GpuPostFx(device, this.width, this.height);
-      this.postFx.encode(encoder, this.composed, target, format, post.uniforms, post.time);
+    if (post && composed) {
+      this.postFx ??= new GpuPostFx(device, width, height);
+      const postFx = this.postFx;
+      graph.addPass("post", "render", (pass) => {
+        pass.read(composed);
+        pass.write(output);
+        return (ctx) => postFx.encode(ctx.encoder, ctx.texture(composed), ctx.texture(output), format, post.uniforms, post.time, { peak: this.extended ? HDR_PEAK : 1, timing: ctx.timing });
+      });
     }
     // 5. The measurements, when asked for and the last ones have been read.
     const measure = frame.measure && (frame.measure.luminance || frame.measure.sun) && !this.measured.busy ? frame.measure : null;
     if (measure) {
-      device.queue.writeBuffer(this.uniforms.measure, 0, packMeasureUniforms(frame, this.width, this.height, this.data.measure, this.hdr));
-      const pipeline = this.pipeline("measure", "", MEASURE_WGSL);
-      const pass = encoder.beginComputePass();
-      pass.setPipeline(pipeline);
-      pass.setBindGroup(
-        0,
-        device.createBindGroup({
-          layout: this.layouts.measure,
-          entries: [
-            { binding: 0, resource: { buffer: this.uniforms.measure } },
-            { binding: 1, resource: base.createView() },
-            { binding: 2, resource: scene.createView() },
-            { binding: 3, resource: { buffer: this.measured.result } },
-          ],
-        }),
-      );
-      pass.dispatchWorkgroups(1);
-      pass.end();
-      encoder.copyBufferToBuffer(this.measured.result, 0, this.measured.staging, 0, 16);
+      graph.addPass("measure", "compute", (pass) => {
+        if (skyTexture) pass.read(skyTexture);
+        pass.keep();
+        return (ctx) => {
+          device.queue.writeBuffer(this.uniforms.measure, 0, packMeasureUniforms(frame, width, height, this.data.measure, this.hdr));
+          const pipeline = this.pipeline("measure", "", MEASURE_WGSL);
+          const compute = ctx.encoder.beginComputePass({ ...ctx.timing });
+          compute.setPipeline(pipeline);
+          compute.setBindGroup(
+            0,
+            device.createBindGroup({
+              layout: this.layouts.measure,
+              entries: [
+                { binding: 0, resource: { buffer: this.uniforms.measure } },
+                { binding: 1, resource: baseOf(ctx).createView() },
+                { binding: 2, resource: scene.createView() },
+                { binding: 3, resource: { buffer: this.measured.result } },
+              ],
+            }),
+          );
+          compute.dispatchWorkgroups(1);
+          compute.end();
+          ctx.encoder.copyBufferToBuffer(this.measured.result, 0, this.measured.staging, 0, 16);
+        };
+      });
     }
+    graph.run(encoder, this.transients, this.timer);
     device.queue.submit([encoder.finish()]);
+    this.timer?.read();
     if (measure) void this.readMeasurements(measure.luminance, measure.sun !== null);
-  }
-
-  /**
-   * The HDR bloom (F4d): the layers composited in linear light into their own
-   * target, then blurred down and up the mip chain (hdrBloom.ts).
-   */
-  private bloomOver(encoder: any, compose: Float32Array, entries: object[], radius: number): { texture: any; count: number } | null {
-    this.linearTarget ??= this.target("rgba16float", this.width, this.height);
-    compose.set([1, 0, 0, 0], 24);
-    this.device.queue.writeBuffer(this.uniforms.compose, 0, compose);
-    this.fullScreen(encoder, "compose", "rgba16float", COMPOSE_WGSL, this.linearTarget, entries);
-    this.bloom ??= new HdrBloom(this.device);
-    return this.bloom.encode(encoder, this.linearTarget, this.width, this.height, radius);
   }
 
   private readonly exposures = new Map<ToneMapper, number>();
@@ -825,13 +925,10 @@ export class GpuPresenter {
     this.destroyed = true;
     const destroy = (t: any) => t?.destroy?.();
     destroy(this.blank);
-    destroy(this.skyTarget);
-    destroy(this.composed);
-    destroy(this.linearTarget);
+    this.transients.destroy();
+    this.timer?.destroy();
     this.bloom?.dispose();
     this.postFx?.dispose();
-    destroy(this.shaftTargets?.mask);
-    destroy(this.shaftTargets?.light);
     destroy(this.panorama?.texture);
     destroy(this.cloudTexture?.texture);
     for (const u of this.uploads.values()) destroy(u.texture);
@@ -860,10 +957,6 @@ export class GpuPresenter {
     } finally {
       m.busy = false;
     }
-  }
-
-  private target(format: string, width: number, height: number): any {
-    return this.device.createTexture({ size: { width, height }, format, usage: USAGE.renderAttachment | USAGE.textureBinding });
   }
 
   /** A CPU frame (RGBA8, this presenter's size) uploaded into its named slot. */
@@ -930,10 +1023,11 @@ export class GpuPresenter {
     return pipeline;
   }
 
-  private fullScreen(encoder: any, name: "sky" | "mask" | "gather" | "compose", format: string, code: string, target: any, entries: object[]): void {
+  private fullScreen(encoder: any, name: "sky" | "mask" | "gather" | "compose", format: string, code: string, target: any, entries: object[], timing: object = {}): void {
     const pipeline = this.pipeline(name, format, code);
     const pass = encoder.beginRenderPass({
       colorAttachments: [{ view: target.createView(), clearValue: { r: 0, g: 0, b: 0, a: 0 }, loadOp: "clear", storeOp: "store" }],
+      ...timing,
     });
     pass.setPipeline(pipeline);
     pass.setBindGroup(0, this.device.createBindGroup({ layout: this.layouts[name], entries }));

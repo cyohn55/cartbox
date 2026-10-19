@@ -956,7 +956,15 @@ export class MeshOverlaySurface implements DisplaySurface {
 
   /** What the renderer drew last frame. */
   renderStats(): RenderStats | null {
-    return this.renderer.lastFrameStats ?? null;
+    const stats = this.renderer.lastFrameStats ?? null;
+    // A GPU-presented frame's presenter passes follow the scene's (F4e).
+    const present = this.gpuTarget()?.stats;
+    if (!stats || !present?.passes) return stats;
+    return {
+      ...stats,
+      gpuMs: stats.gpuMs !== null && present.gpuMs != null ? stats.gpuMs + present.gpuMs : stats.gpuMs,
+      passes: [...(stats.passes ?? []), ...present.passes.map((pass) => ({ name: `present: ${pass.name}`, ms: pass.ms }))],
+    };
   }
 
   /** Bytes the scene keeps for drawing (geometry, textures, targets), estimated. */

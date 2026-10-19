@@ -87,6 +87,23 @@ export interface PassContext {
   readonly timing: { readonly timestampWrites?: object };
 }
 
+/**
+ * The share of a graph pass's timing that its `index`th of `count` encoder
+ * passes carries, when one graph pass encodes several (a bloom chain): the
+ * first writes the beginning timestamp, the last the end.
+ */
+export function timingSpan(timing: PassContext["timing"], index: number, count: number): { readonly timestampWrites?: object } {
+  const writes = timing.timestampWrites as { querySet: any; beginningOfPassWriteIndex: number; endOfPassWriteIndex: number } | undefined;
+  if (!writes || (index > 0 && index < count - 1)) return {};
+  return {
+    timestampWrites: {
+      querySet: writes.querySet,
+      ...(index === 0 ? { beginningOfPassWriteIndex: writes.beginningOfPassWriteIndex } : {}),
+      ...(index === count - 1 ? { endOfPassWriteIndex: writes.endOfPassWriteIndex } : {}),
+    },
+  };
+}
+
 /** Render and compute passes are timed; a transfer (copies, resolves, readbacks) is plain encoder commands. */
 export type PassKind = "render" | "compute" | "transfer";
 

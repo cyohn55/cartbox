@@ -456,7 +456,7 @@ Everything else depends on this track. It contains no visible "feature", but its
       - contrast works in ACEScct about 18% grey, so it scales stops (at 1.5, two stops over grey become three) instead of pivoting on display 0.5 and clipping highlights.
       - A LUT stays where it is authored, on the display image after the tone map.
     - **HDR display output.** Where the display reports `(dynamic-range: high)` and the canvas accepts `rgba16float` with `toneMapping: { mode: "extended" }` (read back from `getConfiguration()`, else unconfigured), the curve rolls off to 3× SDR white instead of 1. It is exposed so 18% grey shows where SDR shows it: the picture is the same, and its highlights go further.
-      - *Until F4e:* only frames without a post stack reach the display extended, because the post stack still clamps to 0..1.
+      - *Until F4e:* only frames without a post stack reached the display extended, because the post stack clamped to 0..1. F4e-1 lifts that.
     - **Lens dirt** (the bloom's *Lens dirt* slider): soft procedural smudges, on two grid scales, that the HDR bloom lights. It adds only where there is glow.
     - *Tests (`grading.test.ts`):*
       - ACEScct round-trips; the grade is neutral at 1, 1, 1; contrast scales stops about grey; saturation 0 gives the luma.
@@ -464,6 +464,19 @@ Everything else depends on this track. It contains no visible "feature", but its
       - On Dawn: the presenter's graded output matches the TypeScript within 2.5/255; an extended `rgba16float` target holds values over 1.1 where SDR clips, with grey matching SDR; lens dirt only brightens the glow.
       - In Chromium, Beaver Creek on `aaa` compiles the grade and dirt with no errors; with an HDR display reported, the canvas keeps `rgba16float` with extended tone mapping.
 - [ ] **F4e. Post on the GPU frame graph.** (Partly ahead of time: F0a ported the stack to WGSL for GPU-presented frames; what remains is running it on the HDR frame graph of F0b/F0c.) The WebGL1 single-pass post stack (`PostFxPass.ts`) becomes frame-graph passes at full precision. Every existing effect (CRT, dither, grain, aberration, flare and the rest) is kept, so the fantasy-tier looks still work on `aaa`.
+  - **F4e-1, the presenter on the frame graph, at full precision: done.**
+    - **Its frame is a graph** (`GpuPresenter.present`): sky, shaft mask, shafts, linear composite, bloom, tone map (or one compose), post and measure are passes over the graph's transients. They are pooled from frame to frame, so a steady frame makes no new targets, and the presenter no longer keeps targets of its own.
+      - Each pass is timed when the device has `timestamp-query`. The profiler lists them after the scene's, as `present: …`, and adds them to the GPU frame time.
+      - A graph pass that encodes several (the bloom chains) spans its timestamps over them (`timingSpan`).
+      - A bloom too small for a frame no longer leaves the linear composite un-tone-mapped: the chain's shape is known before the frame is built.
+    - **The post stack reads the composite at full precision.** On a linear frame the composite it reads is half-float, not 8-bit, so the frame is rounded once, at the end, not before every effect too.
+    - **An HDR display through the post stack.** The stack knows the brightest its target shows (`HDR_PEAK`, the headroom sRGB-encoded) and clamps there instead of at 1. A LUT grades the displayable range and a highlight past it rides along. So frames with a post stack now reach the display extended too (F4d-2's limit, lifted).
+    - Every effect is the same one, in the same order, so the fantasy-tier looks are unchanged on `aaa`. The WebGPU post parity suites pass as they were.
+    - *Tests (`post-in-graph.test.ts`):*
+      - the timing split, and the stack's range (white for SDR, the headroom on an HDR display);
+      - on Dawn: a vignetted fine ramp lands within 0.7 of a step of the TypeScript (through an 8-bit composite it was 0.97 out); a light of 40 stays past SDR white through the post stack on an extended target, never past the headroom; the passes are named and timed, and a steady frame makes no new targets.
+      - In Chromium, Beaver Creek on `aaa` (whose post stack is on) presents with no GPU or compile errors; with an HDR display reported, the canvas keeps `rgba16float` with extended tone mapping and the post stack runs on it.
+    - *Left for F4e-2:* the lens effects (aberration, god rays, streaks, flare, vignette) in linear light, before the tone map.
 
 ### F5. Atmosphere, weather and water
 

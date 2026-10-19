@@ -21,6 +21,8 @@ import { toneMap, type ToneMapper } from "./toneMappers.js";
 
 /** How many times SDR white the extended output's highlights reach (displays don't report their peak). */
 export const HDR_HEADROOM = 3;
+/** That headroom sRGB-encoded (the extended canvas's values): the brightest the post stack carries a highlight to (F4e). */
+export const HDR_PEAK = 1.055 * HDR_HEADROOM ** (1 / 2.4) - 0.055;
 
 const CCT_CUT = 0.0078125;
 const CCT_A = 10.5402377416545;

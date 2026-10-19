@@ -17,6 +17,8 @@
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
+import { timingSpan, type PassContext } from "./frameGraph.js";
+
 /** The fewest and most levels the chain blurs over, by the bloom's radius (0..1). */
 const MIN_LEVELS = 3;
 const MAX_LEVELS = 6;
@@ -104,20 +106,32 @@ export class HdrBloom {
   }
 
   /**
-   * Encode the chain over `source` (rgba16float, `width × height`): the
-   * half-resolution glow it returns sums `count` levels.
+   * The chain's levels for a `width × height` frame and `radius`, made when
+   * the shape changes: the half-resolution glow {@link encode} leaves in the
+   * first, summed over `count` levels (null when the frame is too small).
    */
-  encode(encoder: any, source: any, width: number, height: number, radius: number): { texture: any; count: number } | null {
-    const device = this.device;
+  prepare(width: number, height: number, radius: number): { texture: any; count: number } | null {
     const sizes = bloomLevels(width, height, radius);
     if (sizes.length === 0) return null;
     const key = sizes.map((s) => `${s.width}x${s.height}`).join(",");
     if (key !== this.key) {
       for (const level of this.levels) level.texture.destroy?.();
       // RENDER_ATTACHMENT | TEXTURE_BINDING | COPY_SRC (its tests read the glow).
-      this.levels = sizes.map((s) => ({ ...s, texture: device.createTexture({ size: s, format: "rgba16float", usage: 0x10 | 0x04 | 0x01 }) }));
+      this.levels = sizes.map((s) => ({ ...s, texture: this.device.createTexture({ size: s, format: "rgba16float", usage: 0x10 | 0x04 | 0x01 }) }));
       this.key = key;
     }
+    return { texture: this.levels[0]!.texture, count: this.levels.length };
+  }
+
+  /**
+   * Encode the chain over `source` (rgba16float, `width × height`): the
+   * half-resolution glow it returns sums `count` levels. `timing` (a frame
+   * graph pass's) spans the chain's passes.
+   */
+  encode(encoder: any, source: any, width: number, height: number, radius: number, timing: PassContext["timing"] = {}): { texture: any; count: number } | null {
+    const device = this.device;
+    const glow = this.prepare(width, height, radius);
+    if (!glow) return null;
     const pipeline = (code: string, entryPoint: string, additive: boolean) => {
       const module = device.createShaderModule({ code });
       return device.createRenderPipeline({
@@ -134,11 +148,16 @@ export class HdrBloom {
     this.down ??= pipeline(DOWN_WGSL, "down", false);
     this.up ??= pipeline(UP_WGSL, "up", true);
     let param = 0;
+    const passes = this.levels.length * 2 - 1;
     const pass = (pipeline: any, from: any, fromSize: { width: number; height: number }, to: { width: number; height: number; texture: any }, first: boolean, load: boolean) => {
-      const buffer = (this.params[param] ??= device.createBuffer({ size: 32, usage: 0x40 | 0x08 }));
+      const index = param;
+      const buffer = (this.params[index] ??= device.createBuffer({ size: 32, usage: 0x40 | 0x08 }));
       param += 1;
       device.queue.writeBuffer(buffer, 0, new Float32Array([1 / fromSize.width, 1 / fromSize.height, 1 / to.width, 1 / to.height, first ? 1 : 0, 0, 0, 0]));
-      const encoded = encoder.beginRenderPass({ colorAttachments: [{ view: to.texture.createView(), clearValue: { r: 0, g: 0, b: 0, a: 0 }, loadOp: load ? "load" : "clear", storeOp: "store" }] });
+      const encoded = encoder.beginRenderPass({
+        colorAttachments: [{ view: to.texture.createView(), clearValue: { r: 0, g: 0, b: 0, a: 0 }, loadOp: load ? "load" : "clear", storeOp: "store" }],
+        ...timingSpan(timing, index, passes),
+      });
       encoded.setPipeline(pipeline);
       encoded.setBindGroup(
         0,
@@ -164,7 +183,7 @@ export class HdrBloom {
     });
     // …and back up, each level's tent added into the one above it.
     for (let i = this.levels.length - 1; i > 0; i -= 1) pass(this.up, this.levels[i]!.texture, this.levels[i]!, this.levels[i - 1]!, false, true);
-    return { texture: this.levels[0]!.texture, count: this.levels.length };
+    return glow;
   }
 
   dispose(): void {
