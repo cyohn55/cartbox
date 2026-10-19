@@ -37,6 +37,7 @@
 import { GpuPostFx } from "../fx/gpuPostFx.js";
 import { HdrBloom } from "./hdrBloom.js";
 import { TONE_MAPPERS_WGSL, toneMapperIndex, type ToneMapper } from "./toneMappers.js";
+import { GRADING_WGSL, HDR_HEADROOM, extendedExposure } from "./grading.js";
 import type { PostFxUniforms } from "../fx/postfx.js";
 import { CLOUD_TILE, MAX_CLOUD_LAYERS, type BakedCloudLayer, type DecodedTexture, type Mat4, type SkySun, type SunShafts } from "@cartbox/editor";
 
@@ -202,7 +203,7 @@ export function packShaftUniforms(
 const BASE_KIND = { colour: 0, sky: 1, frame: 2 } as const;
 
 /** Floats in the compose pass's uniform block. */
-export const COMPOSE_UNIFORM_FLOATS = 28;
+export const COMPOSE_UNIFORM_FLOATS = 36;
 
 /** The compose pass's uniforms: which layers are present, the HUD key, the flat base, and the shafts' colour and sampling scale. */
 export function packComposeUniforms(
@@ -223,6 +224,9 @@ export function packComposeUniforms(
   out.set([hdr ? 1 : 0, hdr && frame.tonemap ? 1 : 0, frame.tonemap?.exposure ?? 1, toneMapperIndex(frame.tonemap?.operator)], 20);
   // The pass (0 the whole compose, 1 its linear part, 2 the finish: bloom, tone map, HUD), set by the presenter.
   out.set([0, 0, 0, 0], 24);
+  // The linear frame's grade and its display output (F4d-2), set by the presenter: none, SDR.
+  out.set([1, 1, 1, 0], 28);
+  out.set([0, 1, 1, 0], 32);
   return out;
 }
 
@@ -412,6 +416,8 @@ struct Compose {
   shaftScale: vec4f,
   hdr: vec4f,   // x = linear frame, y = tone-mapped, z = exposure, w = the curve (toneMappers.ts)
   grade: vec4f, // F4d: x = pass (0 all, 1 the linear composite, 2 the finish), y = bloom strength, z = 1 / levels summed
+  look: vec4f,  // F4d: the linear frame's brightness, contrast (in ACEScct) and saturation; w = 1 when graded
+  output: vec4f, // F4d: x = 1 for an HDR display (extended), y = its headroom, z = the exposure keeping grey, w = lens dirt
 };
 @group(0) @binding(0) var<uniform> u: Compose;
 @group(0) @binding(1) var baseTex: texture_2d<f32>;
@@ -424,6 +430,7 @@ struct Compose {
 ${FULLSCREEN_VS}
 ${SRGB_WGSL}
 ${TONE_MAPPERS_WGSL}
+${GRADING_WGSL}
 fn over(top: vec4f, under: vec4f) -> vec4f {
   return vec4f(top.rgb + under.rgb * (1.0 - top.a), top.a + under.a * (1.0 - top.a));
 }
@@ -461,7 +468,10 @@ fn composite(pos: vec4f, p: vec2i, hdr: bool) -> vec4f {
     // The finish (F4d): the linear composite (binding 1), its bloom (binding 3, half
     // resolution, summed over its levels) mixed in by the strength: light moved, not added.
     c = textureLoad(baseTex, p, 0);
-    let glow = textureSampleLevel(light, lightSampler, pos.xy / vec2f(textureDimensions(baseTex)), 0.0).rgb * u.grade.z;
+    let dims = vec2f(textureDimensions(baseTex));
+    var glow = textureSampleLevel(light, lightSampler, pos.xy / dims, 0.0).rgb * u.grade.z;
+    // Lens dirt (F4d-2): smudges the glow lights up.
+    if (u.output.w > 0.0) { glow = glow * (1.0 + u.output.w * lensDirt(pos.xy / dims, dims.x / dims.y)); }
     c = vec4f(mix(c.rgb, glow, u.grade.y), c.a);
   } else {
     c = composite(pos, p, hdr);
@@ -471,16 +481,29 @@ fn composite(pos: vec4f, p: vec2i, hdr: bool) -> vec4f {
   // The linear frame is tone-mapped once, whole, through the scene's curve (F4d),
   // and encoded for the display; the HUD and holo UI are drawn in display space over it.
   if (hdr) {
-    var mapped = clamp(c.rgb, vec3f(0.0), vec3f(1.0));
-    if (u.hdr.y > 0.5) { mapped = toneMapWith(u.hdr.w, c.rgb * u.hdr.z); }
-    c = vec4f(toSrgb(mapped), clamp(c.a, 0.0, 1.0));
+    // Graded in log space before the curve (F4d-2), not on the clipped display image.
+    var rgb = c.rgb;
+    if (u.look.w > 0.5) { rgb = gradeLinear(rgb, u.look.x, u.look.y, u.look.z); }
+    if (u.output.x > 0.5) {
+      // An HDR display: the curve's white moved up to the headroom, grey where SDR shows it.
+      var mapped = max(rgb, vec3f(0.0));
+      if (u.hdr.y > 0.5) { mapped = toneMapWith(u.hdr.w, rgb * (u.hdr.z * u.output.z / u.output.y)) * u.output.y; }
+      c = vec4f(toSrgbExtended(mapped), clamp(c.a, 0.0, 1.0));
+    } else {
+      var mapped = clamp(rgb, vec3f(0.0), vec3f(1.0));
+      if (u.hdr.y > 0.5) { mapped = toneMapWith(u.hdr.w, rgb * u.hdr.z); }
+      c = vec4f(toSrgb(mapped), clamp(c.a, 0.0, 1.0));
+    }
   }
   if (u.layers2.x > 0.5) {
     let h = textureLoad(hud, p, 0);
     let b = round(h.rgb * 255.0);
     if (b.r + b.g + b.b > u.layers2.z) { c = vec4f(h.rgb, 1.0); }
   }
-  if (u.layers2.y > 0.5) { c = clamp(over(textureLoad(holo, p, 0), c), vec4f(0.0), vec4f(1.0)); }
+  if (u.layers2.y > 0.5) {
+    c = over(textureLoad(holo, p, 0), c);
+    if (u.output.x < 0.5) { c = clamp(c, vec4f(0.0), vec4f(1.0)); }
+  }
   return vec4f(c.rgb, 1.0);
 }
 `;
@@ -623,14 +646,17 @@ export class GpuPresenter {
 
   /** Linear HDR (F0b): the scene, sky and weapon arrive as linear light, and the frame is tone-mapped and encoded here. */
   readonly hdr: boolean;
+  /** An HDR display (F4d-2): the target shows past SDR white (an rgba16float canvas with extended tone mapping). */
+  readonly extended: boolean;
 
   constructor(
     private readonly device: any,
     readonly width: number,
     readonly height: number,
-    options: { readonly hdr?: boolean } = {},
+    options: { readonly hdr?: boolean; readonly extended?: boolean } = {},
   ) {
     this.hdr = options.hdr === true;
+    this.extended = this.hdr && options.extended === true;
     this.blank = device.createTexture({ size: { width: 1, height: 1 }, format: "rgba8unorm", usage: USAGE.textureBinding | USAGE.copyDst });
     device.queue.writeTexture({ texture: this.blank }, new Uint8Array(4), { bytesPerRow: 4 }, { width: 1, height: 1 });
     const sampler = (u: string, v: string) => device.createSampler({ magFilter: "linear", minFilter: "linear", addressModeU: u, addressModeV: v });
@@ -703,11 +729,22 @@ export class GpuPresenter {
     // A linear frame with bloom on (F4d) blooms here, from its HDR composite, and
     // the post stack's own (thresholded, after the tone map) stands down.
     const bloomStrength = this.hdr && frame.post ? frame.post.uniforms.bloomStrength : 0;
-    const post = frame.post ? (bloomStrength > 0 ? { ...frame.post, uniforms: { ...frame.post.uniforms, bloomStrength: 0 } } : frame.post) : null;
+    // …and grades before its tone map, in log space (F4d-2): the post stack's display-space grade stands down too.
+    const look = this.hdr && frame.post ? frame.post.uniforms : null;
+    const graded = look !== null && (look.brightness !== 1 || look.contrast !== 1 || look.saturation !== 1);
+    const post = frame.post
+      ? this.hdr
+        ? { ...frame.post, uniforms: { ...frame.post.uniforms, ...(bloomStrength > 0 ? { bloomStrength: 0 } : {}), brightness: 1, contrast: 1, saturation: 1 } }
+        : frame.post
+      : null;
     if (post) this.composed ??= this.target("rgba8unorm", this.width, this.height);
     const out = post ? this.composed : target;
     const outFormat = post ? "rgba8unorm" : format;
     const compose = packComposeUniforms(frame, this.width, this.height, this.data.compose, this.hdr);
+    if (graded) compose.set([look!.brightness, look!.contrast, look!.saturation, 1], 28);
+    // An HDR display, when the frame reaches it unclamped (no post stack until F4e runs it in light).
+    const extended = this.extended && !post;
+    compose.set([extended ? 1 : 0, HDR_HEADROOM, extended ? this.extendedExposure(frame.tonemap?.operator ?? "filmic") : 1, look?.bloomDirt ?? 0], 32);
     const layers = (uniforms: any, baseView: any, lightView: any) => [
       { binding: 0, resource: { buffer: uniforms } },
       { binding: 1, resource: baseView },
@@ -770,6 +807,17 @@ export class GpuPresenter {
     this.fullScreen(encoder, "compose", "rgba16float", COMPOSE_WGSL, this.linearTarget, entries);
     this.bloom ??= new HdrBloom(this.device);
     return this.bloom.encode(encoder, this.linearTarget, this.width, this.height, radius);
+  }
+
+  private readonly exposures = new Map<ToneMapper, number>();
+  /** The exposure that keeps grey where SDR shows it on an HDR display, per curve (found once). */
+  private extendedExposure(mapper: ToneMapper): number {
+    let s = this.exposures.get(mapper);
+    if (s === undefined) {
+      s = extendedExposure(mapper);
+      this.exposures.set(mapper, s);
+    }
+    return s;
   }
 
   /** Release every resource this presenter made. */

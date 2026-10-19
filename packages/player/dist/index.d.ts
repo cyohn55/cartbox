@@ -821,6 +821,8 @@ interface PostFxUniforms {
     bloomThreshold: number;
     /** Pyramid spread, 0..1: how much the coarse blur levels contribute. */
     bloomRadius: number;
+    /** Lens dirt over the AAA tier's HDR bloom (0 = none). */
+    bloomDirt: number;
     /** 0 leaves the frame in gamma space; 1 applies the ACES filmic rolloff. */
     toneMap: number;
     /** Pre-tonemap exposure multiplier (only read when {@link toneMap} is on). */
@@ -4186,7 +4188,7 @@ declare function packShaftUniforms(sun: {
     readonly y: number;
 }, shafts: SunShafts, color: Rgb$1, width: number, height: number, out?: Float32Array<ArrayBuffer>, hdr?: boolean): Float32Array;
 /** Floats in the compose pass's uniform block. */
-declare const COMPOSE_UNIFORM_FLOATS = 28;
+declare const COMPOSE_UNIFORM_FLOATS = 36;
 /** The compose pass's uniforms: which layers are present, the HUD key, the flat base, and the shafts' colour and sampling scale. */
 declare function packComposeUniforms(frame: PresentFrame, width: number, height: number, out?: Float32Array<ArrayBuffer>, hdr?: boolean): Float32Array;
 /** The measure pass's uniforms: frame size, luminance grid step, base kind; the flat base; the sun (pixels), tap radius and whether to tap it. */
@@ -4222,8 +4224,11 @@ declare class GpuPresenter {
     private destroyed;
     /** Linear HDR (F0b): the scene, sky and weapon arrive as linear light, and the frame is tone-mapped and encoded here. */
     readonly hdr: boolean;
+    /** An HDR display (F4d-2): the target shows past SDR white (an rgba16float canvas with extended tone mapping). */
+    readonly extended: boolean;
     constructor(device: any, width: number, height: number, options?: {
         readonly hdr?: boolean;
+        readonly extended?: boolean;
     });
     /** The newest measurements to arrive (a frame or two behind the frame that asked). */
     get stats(): PresentStats;
@@ -4234,6 +4239,9 @@ declare class GpuPresenter {
      * target, then blurred down and up the mip chain (hdrBloom.ts).
      */
     private bloomOver;
+    private readonly exposures;
+    /** The exposure that keeps grey where SDR shows it on an HDR display, per curve (found once). */
+    private extendedExposure;
     /** Release every resource this presenter made. */
     dispose(): void;
     private readMeasurements;

@@ -426,7 +426,7 @@ Everything else depends on this track. It contains no visible "feature", but its
     - **per-object motion blur** (McGuire-style tile max on velocity);
     - histogram **auto-exposure** on the GPU, with metering modes and exposure compensation, replacing the CPU 8-bit luminance read.
   - Post volumes (P6) blend all of it.
-- [ ] **F4d. Tone mapping and output.**
+- [x] **F4d. Tone mapping and output.**
   - Tone mappers: AgX, ACES 1.3 RRT/ODT and Khronos PBR Neutral, selectable per scene.
   - Grading in log or ACEScct space, and LUTs applied in the right space.
   - **HDR display output** where the browser supports it (WebGPU canvas `toneMapping: "extended"`).
@@ -449,6 +449,20 @@ Everything else depends on this track. It contains no visible "feature", but its
       - On Dawn: the presenter's output through each curve matches the TypeScript within 2/255; a light of 60 glows eight texels out where one of 1.2 barely does; the chain over its levels keeps the frame's mean light (within 1%).
       - In Chromium, Beaver Creek on `aaa` blooms from the HDR frame, with no errors.
     - *Left for F4d:* lens dirt; grading and LUTs in log space; HDR display output (F4d-2).
+  - **F4d-2, grading, HDR output and lens dirt: done.**
+    - **The grade runs before the tone map** (`render/grading.ts`, WGSL and TypeScript term for term). On a linear frame the post stack's brightness, contrast and saturation move into the presenter, and the post stack's own 8-bit grade stands down:
+      - brightness is an exposure gain;
+      - saturation works about the Rec.709 luma, in linear light;
+      - contrast works in ACEScct about 18% grey, so it scales stops (at 1.5, two stops over grey become three) instead of pivoting on display 0.5 and clipping highlights.
+      - A LUT stays where it is authored, on the display image after the tone map.
+    - **HDR display output.** Where the display reports `(dynamic-range: high)` and the canvas accepts `rgba16float` with `toneMapping: { mode: "extended" }` (read back from `getConfiguration()`, else unconfigured), the curve rolls off to 3× SDR white instead of 1. It is exposed so 18% grey shows where SDR shows it: the picture is the same, and its highlights go further.
+      - *Until F4e:* only frames without a post stack reach the display extended, because the post stack still clamps to 0..1.
+    - **Lens dirt** (the bloom's *Lens dirt* slider): soft procedural smudges, on two grid scales, that the HDR bloom lights. It adds only where there is glow.
+    - *Tests (`grading.test.ts`):*
+      - ACEScct round-trips; the grade is neutral at 1, 1, 1; contrast scales stops about grey; saturation 0 gives the luma.
+      - Every curve's extended output keeps grey and takes a highlight past 1.5, up to the headroom.
+      - On Dawn: the presenter's graded output matches the TypeScript within 2.5/255; an extended `rgba16float` target holds values over 1.1 where SDR clips, with grey matching SDR; lens dirt only brightens the glow.
+      - In Chromium, Beaver Creek on `aaa` compiles the grade and dirt with no errors; with an HDR display reported, the canvas keeps `rgba16float` with extended tone mapping.
 - [ ] **F4e. Post on the GPU frame graph.** (Partly ahead of time: F0a ported the stack to WGSL for GPU-presented frames; what remains is running it on the HDR frame graph of F0b/F0c.) The WebGL1 single-pass post stack (`PostFxPass.ts`) becomes frame-graph passes at full precision. Every existing effect (CRT, dither, grain, aberration, flare and the rest) is kept, so the fantasy-tier looks still work on `aaa`.
 
 ### F5. Atmosphere, weather and water
