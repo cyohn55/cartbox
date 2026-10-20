@@ -711,6 +711,18 @@ Everything else depends on this track. It contains no visible "feature", but its
       - `see-through-hdr.test.ts`: fog mixes as the display shows it under the authored curve.
       - `bloom-as-authored.test.ts`: the bloom matches the byte path's under either curve.
       - Taking out the presenter's, the sky's or the scene renderer's authored branch fails its test.
+  - **F11a-6, where the lit-surface gap lives: traced.** Lockout's real scene was rendered on Dawn on both paths, with every texture decoded as the player decodes it and the rig as the map ships it. The AAA frame's mean luminance is 0.33 where the byte path's is 0.41, as in the captures.
+    - **Ruled out** (each moves the gap by under 0.01, in the scene or in the captures):
+      - the depth prepass and the HDR TAA it enables, and mipmaps (Lockout captured with each off);
+      - the light probes, the 39 energy lights and the environment map;
+      - a texture's decode: an albedo map and the same colour as a factor show identically on both paths.
+    - **Not the fix:** light intensities read as display-referred (raised to 2.2) overshoot, to 0.47 under the physical curve and 0.48 under the authored one.
+    - **By material**, under the physical curve and then the authored one (luminance; the byte path's first):
+      - Snow (0.91) and the wall panels (0.52) match within 0.02 under either.
+      - The cliff rock (dark albedo, rough): 0.24 against 0.15, then 0.27. The physical curve crushes it; the authored one over-lifts it.
+      - The underside (metal 0.6, dark albedo): 0.46 against 0.35, then 0.47. The authored curve matches it.
+      - The deck: 0.66 against 0.56, then 0.60, and as far off with its metal taken out. The gap there is the deck's own shading (rough 0.7, polished, normal-mapped plates), not the curve or the metal, and is the next thing to look at.
+    - So no single global change closes the gap: what is left is per material. The look-dev stage (F10c), a grey and chrome ball and a colour checker under each tier, is the tool for the rest; the physical re-light (with F5a) replaces the byte path's look as the reference.
 - [ ] **F11b. A photoreal reference scene.** A new map built entirely through the pipeline, for example a Forerunner ruin in a misty canyon at dusk:
   - scanned rock and foliage;
   - a cluster-rendered cliff;
