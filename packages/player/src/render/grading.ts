@@ -17,7 +17,7 @@
  *   at hashed places on a grid, a fixed pattern over the frame.
  */
 
-import { toneMap, type ToneMapper } from "./toneMappers.js";
+import { srgbEncode, toneMap, type ToneMapper } from "./toneMappers.js";
 
 /** How many times SDR white the extended output's highlights reach (displays don't report their peak). */
 export const HDR_HEADROOM = 3;
@@ -52,14 +52,18 @@ export function gradeLinear(c: readonly [number, number, number], brightness: nu
 /**
  * The exposure that keeps 18% grey where SDR shows it when a curve's white is
  * moved to `headroom`: `headroom · curve(0.18 · s / headroom)` equals `curve(0.18)`.
+ * As authored (F11a-5) the curve maps the encoded light, so its white moves to
+ * the headroom's encoding and grey is 0.18 encoded.
  */
-export function extendedExposure(mapper: ToneMapper, headroom = HDR_HEADROOM): number {
-  const want = toneMap(mapper, [0.18, 0.18, 0.18])[1];
+export function extendedExposure(mapper: ToneMapper, headroom = HDR_HEADROOM, authored = false): number {
+  const grey = authored ? srgbEncode(0.18) : 0.18;
+  const top = authored ? srgbEncode(headroom) : headroom;
+  const want = toneMap(mapper, [grey, grey, grey])[1];
   let lo = 0.01;
   let hi = 100;
   for (let i = 0; i < 60; i += 1) {
     const mid = Math.sqrt(lo * hi);
-    const got = headroom * toneMap(mapper, [(0.18 * mid) / headroom, (0.18 * mid) / headroom, (0.18 * mid) / headroom])[1];
+    const got = top * toneMap(mapper, [(grey * mid) / top, (grey * mid) / top, (grey * mid) / top])[1];
     if (got < want) lo = mid;
     else hi = mid;
   }

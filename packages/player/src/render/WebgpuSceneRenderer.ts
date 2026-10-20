@@ -335,7 +335,7 @@ struct Uniforms {
   lightMvp: mat4x4<f32>,// world→light-clip for shadow mapping
   shadow: vec4<f32>,    // x = 1 when shadowed, y = map size, z = bias, w = strength
   envMeta: vec4<f32>,   // xyz = env-map mean radiance, w = 1 when an env map is bound
-  tonemap: vec4<f32>,   // x = 1 when tone-mapping, y = exposure
+  tonemap: vec4<f32>,   // x = 1 when tone-mapping, y = exposure, z = soft edge, w = 1 for the curve as authored (F11a-5)
   ssaoMeta: vec4<f32>,  // x = 1 when an SSAO buffer is bound, y = light count, z = 1 when a light map is bound
   model: mat4x4<f32>,   // this draw's world matrix (point-light world position)
   fog: vec4<f32>,       // rgb = fog colour, w = density
@@ -899,11 +899,18 @@ fn aces(x: f32) -> f32 {
   let v = max(0.0, x);
   return clamp((v * (2.51 * v + 0.03)) / (v * (2.43 * v + 0.59) + 0.14), 0.0, 1.0);
 }
-${hdr ? `// Linear light as the display shows it (F11a): exposed, through the curve, sRGB-encoded.
-fn shownOf(x: vec3<f32>) -> vec3<f32> {
-  var y = max(x, vec3<f32>(0.0));
-  if (u.tonemap.x > 0.5) { y = vec3<f32>(aces(y.r * u.tonemap.y), aces(y.g * u.tonemap.y), aces(y.b * u.tonemap.y)); }
+${hdr ? `fn srgbOf(x: vec3<f32>) -> vec3<f32> {
+  let y = max(x, vec3<f32>(0.0));
   return select(1.055 * pow(y, vec3<f32>(1.0 / 2.4)) - vec3<f32>(0.055), y * 12.92, y <= vec3<f32>(0.0031308));
+}
+// Linear light as the display shows it (F11a): exposed, through the curve, sRGB-encoded; as authored
+// (F11a-5), the curve on the encoded light, as the byte path's shader maps its shading.
+fn shownOf(x: vec3<f32>) -> vec3<f32> {
+  let y = max(x, vec3<f32>(0.0));
+  if (u.tonemap.x < 0.5) { return srgbOf(y); }
+  let e = u.tonemap.y;
+  if (u.tonemap.w > 0.5) { let s = srgbOf(y); return vec3<f32>(aces(s.r * e), aces(s.g * e), aces(s.b * e)); }
+  return srgbOf(vec3<f32>(aces(y.r * e), aces(y.g * e), aces(y.b * e)));
 }
 // The curve's inverse, where it is one to one (under its white).
 fn acesInverse(y: f32) -> f32 {
@@ -914,9 +921,11 @@ fn acesInverse(y: f32) -> f32 {
 }
 // shownOf's inverse: what the display shows, as the linear light that shows it.
 fn lightOf(d: vec3<f32>) -> vec3<f32> {
+  if (u.tonemap.x < 0.5) { return toLinear(d); }
+  let e = max(u.tonemap.y, 1e-6);
+  if (u.tonemap.w > 0.5) { return toLinear(vec3<f32>(acesInverse(d.r), acesInverse(d.g), acesInverse(d.b)) / e); }
   let y = toLinear(d);
-  if (u.tonemap.x < 0.5) { return y; }
-  return vec3<f32>(acesInverse(y.r), acesInverse(y.g), acesInverse(y.b)) / max(u.tonemap.y, 1e-6);
+  return vec3<f32>(acesInverse(y.r), acesInverse(y.g), acesInverse(y.b)) / e;
 }
 // Light x moved toward display colour d by t as the display shows the two: exactly that mix under the
 // curve's white, x itself at t = 0, and light past white keeping what it has over it.

@@ -155,6 +155,24 @@ describe.skipIf(!device)("fog in linear light", { timeout: 60_000 }, () => {
     expect(linear / fogged[2]!).toBeGreaterThan(1.1);
   });
 
+  it("mixes as the display shows it under the curve as authored too (F11a-5)", async () => {
+    // As authored, the curve maps the encoded light: shown = curve(e · encode(x)), and back.
+    const shownAuthored = (x: number, e: number) => aces(encode(x) * e);
+    const lightAuthored = (d: number, e: number) => decode(acesInverse(d) / e);
+    const fogColour: [number, number, number] = [0.72, 0.82, 0.92];
+    const fog = { color: fogColour, density: 5, start: 0.5, max: 0.4 };
+    const tonemap = { exposure: EXPOSURE, authored: true };
+    const clear = await centre(true, [bed], { tonemap });
+    const fogged = await centre(true, [bed], { tonemap, fog });
+    for (let k = 0; k < 3; k += 1) {
+      const want = lightAuthored(0.6 * shownAuthored(clear[k]!, EXPOSURE) + 0.4 * fogColour[k]!, EXPOSURE);
+      expect(Math.abs(fogged[k]! - want) / want).toBeLessThan(0.03);
+    }
+    // The physical model's mix is not this one: it would take the far sand elsewhere.
+    const physical = light(0.6 * shown(clear[2]!, EXPOSURE) + 0.4 * fogColour[2]!, EXPOSURE);
+    expect(Math.abs(physical - fogged[2]!) / fogged[2]!).toBeGreaterThan(0.05);
+  });
+
   it("leaves light past white what it has over it: a glow in thin fog still glows", async () => {
     const glow = { mesh: pane({ baseColorFactor: [0, 0, 0, 1], emissiveFactor: [8, 8, 8] }), model: bed.model };
     const thin = { color: [0.72, 0.82, 0.92], density: 5, start: 0.5, max: 0.05 };

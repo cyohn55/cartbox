@@ -58,6 +58,12 @@ export interface SceneLighting {
   readonly tonemap: boolean;
   /** The tone-mapping curve on the AAA tier (F4d); absent is filmic, every other tier's. */
   readonly tonemapper?: ToneMapOperator;
+  /**
+   * The AAA tier maps its curve physically, on the light, for a rig lit in
+   * physical units (F11a-5). Absent, it maps as the rig was authored: on the
+   * encoded light, as every other tier's shader does, so the scene shows as tuned.
+   */
+  readonly physicalCurve?: boolean;
   /** Cast a directional shadow from the first directional (key) light. */
   readonly shadows: boolean;
   readonly lights: readonly SceneLight[];
@@ -207,6 +213,7 @@ export function parseSceneLighting(raw: unknown): SceneLighting | null {
     exposure: typeof record.exposure === "number" && record.exposure > 0 ? record.exposure : base.exposure,
     tonemap: typeof record.tonemap === "boolean" ? record.tonemap : base.tonemap,
     ...(record.tonemapper === "aces" || record.tonemapper === "agx" || record.tonemapper === "neutral" ? { tonemapper: record.tonemapper } : {}),
+    ...(record.physicalCurve === true ? { physicalCurve: true } : {}),
     shadows: typeof record.shadows === "boolean" ? record.shadows : base.shadows,
     lights,
     ...(sky ? { sky } : {}),
@@ -473,7 +480,7 @@ export function defaultSunShafts(): SunShafts {
 /** Patch the top-level scalar/flag fields (ambient, exposure, tonemap, shadows). */
 export function patchSceneLighting(
   lighting: SceneLighting,
-  patch: Partial<Pick<SceneLighting, "ambient" | "exposure" | "tonemap" | "tonemapper" | "shadows" | "wind" | "softShadows">>,
+  patch: Partial<Pick<SceneLighting, "ambient" | "exposure" | "tonemap" | "tonemapper" | "physicalCurve" | "shadows" | "wind" | "softShadows">>,
 ): SceneLighting {
   return { ...lighting, ...patch };
 }
@@ -570,7 +577,12 @@ function decodedProbes(stored: StoredLightProbes): LightProbeGrid | null {
 
 /** The tone-map for the scene, or null when the creator left it off. */
 export function sceneLightingTonemap(lighting: SceneLighting): ToneMap | null {
-  return lighting.tonemap ? { exposure: lighting.exposure, ...(lighting.tonemapper && lighting.tonemapper !== "filmic" ? { operator: lighting.tonemapper } : {}) } : null;
+  if (!lighting.tonemap) return null;
+  return {
+    exposure: lighting.exposure,
+    ...(lighting.tonemapper && lighting.tonemapper !== "filmic" ? { operator: lighting.tonemapper } : {}),
+    ...(lighting.physicalCurve ? {} : { authored: true }),
+  };
 }
 
 /**

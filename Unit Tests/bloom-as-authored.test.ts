@@ -11,7 +11,7 @@ import { describe, expect, it } from "vitest";
 
 import { GpuPresenter, defaultPostFxSettings, paramKey, uniformsFromSettings } from "@cartbox/player";
 import { POST_UNIFORM_FLOATS, packPostUniforms } from "../packages/player/src/fx/gpuPostFx";
-import { toneMap } from "../packages/player/src/render/toneMappers";
+import { shownAs } from "../packages/player/src/render/toneMappers";
 
 describe("the bloom's model", () => {
   it("is the authored one unless the post stack asks for the physical", () => {
@@ -71,9 +71,6 @@ function toHalf(v: number): number {
   if (e <= 0) return sign;
   return sign | (Math.min(30, e) << 10) | ((bits & 0x7fffff) >>> 13);
 }
-const srgb = (v: number) => (v <= 0.0031308 ? v * 12.92 : 1.055 * v ** (1 / 2.4) - 0.055);
-/** What the AAA tier's curve shows a linear value as (the byte path's scene is drawn as shown). */
-const shown = (v: number) => srgb(toneMap("filmic", [v, v, v])[1]);
 
 const W = 64;
 const H = 32;
@@ -110,22 +107,24 @@ const bloom = (extra: object = {}) => ({ uniforms: { ...uniformsFromSettings(def
 const BLACK = { kind: "colour", rgba: [0, 0, 0, 255] };
 
 describe.skipIf(!device)("the bloom as authored, on a real device", { timeout: 60_000 }, () => {
-  it("blooms as the byte path does where the frame shows under white", async () => {
+  // Through the curve physically, and as authored (F11a-5): either way the frame as shown is what blooms.
+  it.each([false, true])("blooms as the byte path does where the frame shows under white (authored curve: %s)", async (authored) => {
     // A lit square and a coloured patch on a dark ground, all showing under 0.9 of white.
     const light = (x: number, y: number): [number, number, number] =>
       x >= 14 && x < 22 && y >= 10 && y < 20 ? [0.8, 0.8, 0.8] : x >= 40 && x < 50 && y >= 8 && y < 22 ? [0.9, 0.35, 0.1] : [0.02, 0.02, 0.02];
     const byte = new GpuPresenter(device, W, H);
     const linear = new GpuPresenter(device, W, H, { hdr: true });
-    const want = await show(byte, { base: BLACK, scene: sceneOf((x, y) => [...(light(x, y).map(shown) as [number, number, number]), 1]), post: bloom() });
-    const got = await show(linear, { base: BLACK, scene: sceneOf((x, y) => [...light(x, y), 1]), tonemap: { exposure: 1 }, post: bloom() });
+    const shownAt = (x: number, y: number) => shownAs("filmic", light(x, y), 1, authored);
+    const want = await show(byte, { base: BLACK, scene: sceneOf((x, y) => [...shownAt(x, y), 1]), post: bloom() });
+    const got = await show(linear, { base: BLACK, scene: sceneOf((x, y) => [...light(x, y), 1]), tonemap: { exposure: 1, authored }, post: bloom() });
     let worst = 0;
     for (let y = 0; y < H; y += 1) for (let x = 0; x < W; x += 1) for (let k = 0; k < 3; k += 1) worst = Math.max(worst, Math.abs(got(x, y, k) - want(x, y, k)));
     expect(worst).toBeLessThanOrEqual(3 / 255);
     // …and it does bloom: the ground beside the square is lit by its glow, and the square brighter than it shows.
-    expect(got(25, 15)).toBeGreaterThan(shown(0.02) + 10 / 255);
-    expect(got(18, 15)).toBeGreaterThan(shown(0.8) + 5 / 255);
+    expect(got(25, 15)).toBeGreaterThan(shownAt(0, 0)[1] + 10 / 255);
+    expect(got(18, 15)).toBeGreaterThan(shownAt(18, 15)[1] + 5 / 255);
     // Where the physical bloom moved light into its glow, and the square showed darker than drawn.
-    const physical = await show(linear, { base: BLACK, scene: sceneOf((x, y) => [...light(x, y), 1]), tonemap: { exposure: 1 }, post: bloom({ bloomPhysical: 1 }) });
+    const physical = await show(linear, { base: BLACK, scene: sceneOf((x, y) => [...light(x, y), 1]), tonemap: { exposure: 1, authored }, post: bloom({ bloomPhysical: 1 }) });
     expect(physical(18, 15)).toBeLessThan(got(18, 15) - 5 / 255);
     byte.dispose();
     linear.dispose();

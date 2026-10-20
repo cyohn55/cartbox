@@ -55,7 +55,8 @@ import {
  * 320  shadow     vec4<f32>    16   x = 1 when shadowed, y = map size, z = bias, w = strength
  * 336  envMeta    vec4<f32>    16   xyz = env-map mean radiance, w = 1 when an env map is bound
  * 352  tonemap    vec4<f32>    16   x = 1 when tone-mapping, y = exposure,
- *                                    z = soft-edge distance (EP6b; 0 = hard)
+ *                                    z = soft-edge distance (EP6b; 0 = hard),
+ *                                    w = 1 when the curve maps as authored (F11a-5)
  * 368  ssao       vec4<f32>    16   x = 1 when an SSAO buffer is bound, y = light count,
  *                                    z = 1 when a baked light map is bound,
  *                                    w = reflection-probe count
@@ -452,7 +453,7 @@ export interface InstanceUniform {
     readonly soft?: boolean;
   } | null;
   /** HDR tone-map exposure, or null to write the shaded colour straight through. */
-  readonly tonemap: { readonly exposure: number } | null;
+  readonly tonemap: { readonly exposure: number; readonly authored?: boolean } | null;
   /** Whether a screen-space AO buffer is bound (sampled per fragment on the GPU). */
   readonly hasSsao: boolean;
   /** A baked light map is bound (it scales the ambient/IBL term, PBR draws only). */
@@ -645,7 +646,7 @@ export function writeInstanceUniform(target: Float32Array, index: number, unifor
   target[base + OFFSET_TONEMAP] = tonemap ? 1 : 0; // hasTonemap
   target[base + OFFSET_TONEMAP + 1] = tonemap ? tonemap.exposure : 0;
   target[base + OFFSET_TONEMAP + 2] = uniform.soft?.distance ?? 0;
-  target[base + OFFSET_TONEMAP + 3] = 0;
+  target[base + OFFSET_TONEMAP + 3] = tonemap?.authored ? 1 : 0;
 
   target[base + OFFSET_SSAO] = uniform.hasSsao ? 1 : 0;
   target[base + OFFSET_SSAO + 1] = uniform.lightCount; // light count for the storage-buffer loop

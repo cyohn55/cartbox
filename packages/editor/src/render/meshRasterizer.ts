@@ -391,6 +391,12 @@ export interface ToneMap {
    * its linear frame through it; every other path keeps the filmic one.
    */
   readonly operator?: ToneMapOperator;
+  /**
+   * The AAA tier maps the curve as authored (F11a-5): on the light's sRGB
+   * encoding, as the byte path's shader maps its display-space shading, rather
+   * than on the light. Every other path ignores it.
+   */
+  readonly authored?: boolean;
 }
 
 /** A tone-mapping curve (F4d; see the player's toneMappers.ts): filmic is every tier's since F0b. */
