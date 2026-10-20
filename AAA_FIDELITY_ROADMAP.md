@@ -411,6 +411,19 @@ Everything else depends on this track. It contains no visible "feature", but its
   - A 16K virtual shadow map, paged from a physical pool, with pages marked by the depth buffer and cached between frames for static geometry.
   - This is what makes shadow detail hold at every distance in UE5. It falls back to F2a on Medium and below.
 - [ ] **F2c. Contact shadows.** A screen-space ray march toward each light against the depth prepass, so small-scale contact (feet, foliage, props) grounds every object. It closes EDITOR_PRO P6's deferred item.
+  - **F2c-1, the sun's contact shadows: done.** After the depth prepass, a full-screen pass (`contactShadows.ts`) marches each pixel 0.6 m toward the sun across the prepass's depths in 16 steps, jittered per pixel so TAA resolves the banding.
+    - **The hit test.** A step is in shadow when the depth buffer holds a surface in front of it by no more than a thickness (0.2 m, plus the step and a share of the distance). So it neither misses a thin caster nor shadows what is merely behind a wall.
+    - **Fades.** The term fades toward the screen's edges, where the depths run out, and from 30 to 50 m, where the cascades already resolve contact.
+    - **Where it lands.** The pass writes an `rg16float` target the linear-light shader binds in its SSAO slot, so the fragment stage stays within its 16 textures:
+      - **g** is the contact term, multiplied into the sun's shadow (`shadowFactor`) on opaque and cut-out surfaces, the only ones in the prepass;
+      - **r** carries a CPU occlusion buffer through when a caller hands one over, so that slot still serves it.
+    - **When it runs.** Only on frames with a prepass and a casting sun; the `aaa` model turns the prepass on. Contact from spot and point lights is still to come (F2c-2).
+    - *Tests:*
+      - `contact-shadows.test.ts` (Dawn), with a box the cascades are told not to cast from:
+        - with the prepass, the floor beside the box's foot away from the sun drops below half its light (fails with the contact term taken out);
+        - toward the sun, and past the march's reach, the floor stays lit;
+        - without the prepass, the floor by the box stays lit.
+      - The pass's uniforms turn the sun into view space.
 - [ ] **F2d. Local light shadows on the GPU.** A larger atlas (4096² and up) with priority-based tile allocation by screen size, cached static tiles and PCF. It lifts the cap of 16 tiles.
 - [ ] **F2e. Physical lights.**
   - Inverse-square falloff, with a range window for culling only.
