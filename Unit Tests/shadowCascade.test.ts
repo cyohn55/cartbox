@@ -27,6 +27,7 @@ import {
   type ShadowInput,
 } from "@cartbox/editor";
 import { MeshOverlaySurface, QUALITY_PRESETS, type GpuSceneDraw, type SceneDraw, type SceneRenderer } from "@cartbox/player";
+import { SUN_SOFTNESS } from "../packages/player/src/render/cascades";
 
 describe("choosing a map", () => {
   // Main map: everything lit (depth 1). Near map: everything shadowed (depth −1, so any point is behind it).
@@ -203,7 +204,9 @@ describe("the AAA tier's sun cascades (F2a)", () => {
     // Fitted to the scene (radius 17): its span, within the bounds.
     expect(draw.sunShadow!.distance).toBe(34);
     expect(draw.sunShadow!.reach).toBe(34);
-    expect(draw.sunShadow!.size).toBeGreaterThanOrEqual(2048);
+    // The high preset's map size (F2a-2), and the real sun's size for its penumbrae.
+    expect(draw.sunShadow!.size).toBe(4096);
+    expect(draw.sunShadow!.softness).toBeCloseTo(SUN_SOFTNESS, 12);
     // The still casters are gathered once, not every frame.
     surface.blit(new Uint8Array(32 * 24 * 4));
     expect(r.draws.at(-1)!.sunShadow!.casters).toBe(draw.sunShadow!.casters);
@@ -229,6 +232,16 @@ describe("the AAA tier's sun cascades (F2a)", () => {
     expect(names).toContain("swapped");
     expect(names).not.toContain("cards");
     expect(names).toEqual(expect.arrayContaining(["floor", "pillar", "crate"]));
+  });
+
+  it("sizes its maps by quality level, and widens the sun for a rig's soft shadows (F2a-2)", async () => {
+    const r = cascaded();
+    const surface = await MeshOverlaySurface.create({ blit() {}, destroy() {} }, 32, 24, { ...scene(), lighting: patchSceneLighting(lighting, { softShadows: true }) }, r, { presenter });
+    surface.setQuality(QUALITY_PRESETS.medium);
+    surface.setCameraOverride(camera(1, 1));
+    surface.blit(new Uint8Array(32 * 24 * 4));
+    expect(r.draws.at(-1)!.sunShadow!.size).toBe(2048);
+    expect(r.draws.at(-1)!.sunShadow!.softness).toBeCloseTo(4 * SUN_SOFTNESS, 12);
   });
 
   it("reaches the rig's own shadow distance, and casts nothing with shadows off", async () => {

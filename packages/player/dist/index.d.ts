@@ -944,6 +944,8 @@ interface QualitySettings {
     readonly shadowMapSize: number;
     /** Add a near shadow cascade round the camera (ENGINE_PARITY_ROADMAP.md EP8b): sharp shadows close up. */
     readonly shadowCascades?: boolean;
+    /** Each of the AAA tier's GPU sun cascades' edge in texels (AAA_FIDELITY_ROADMAP.md F2a-2). */
+    readonly cascadeMapSize?: number;
     /** The largest 3D render scale for a software first-person view (the governor works below it). */
     readonly maxRenderScale: number;
     /** Post-effects this preset turns off (the costly multi-pass ones). */
@@ -4207,6 +4209,12 @@ interface SunShadow {
     readonly reach: number;
     /** How dark a shadow is, 0 (none) to 1 (default). */
     readonly strength?: number;
+    /**
+     * The sun's size, as the tangent of its angular diameter (F2a-2): how fast a
+     * penumbra widens with the occluder's height above what it shades. Absent is
+     * the real sun's 0.53°.
+     */
+    readonly softness?: number;
 }
 /** One frame's worth of drawing parameters — mirrors `renderMeshScene`'s options. */
 interface SceneDraw {
@@ -4893,6 +4901,8 @@ declare class WebgpuSceneRenderer implements SceneRenderer {
     /** The block-compressed formats this renderer uploads a texture's `gpu` chain in, preferred first (F1a). */
     readonly textureFormats: readonly string[];
     private bindGroups;
+    /** Each cut-out caster's group 0 (F2a-2), with what it was made from, so a grown buffer or a new map remakes it. */
+    private cutGroups;
     /** Most recent completed readback, or null before the first one lands. */
     private latest;
     /** Frames submitted, the one `latest` holds, and the newest that got a readback (see settle). */
@@ -5120,6 +5130,8 @@ declare class WebgpuSceneRenderer implements SceneRenderer {
      * buffer whenever its revision moves on.
      */
     private uploadMesh;
+    /** A cut-out caster's group 0 (F2a-2): the casters' uniforms and transforms, and its base map. */
+    private cutGroupFor;
     /** The bind group for one primitive, rebuilt if any of its textures changed. */
     private bindGroupFor;
     /**
