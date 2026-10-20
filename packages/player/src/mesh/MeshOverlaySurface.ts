@@ -1761,6 +1761,21 @@ export class MeshOverlaySurface implements DisplaySurface {
     return d - f.radius < f.cull * this.quality.terrainDetail;
   }
 
+  /**
+   * Whether an instance casts the sun's shadow on the AAA tier (F2a): anything
+   * but a foliage block does; a block within its cull distance, as its full
+   * copies whichever of them or their impostors are drawn.
+   */
+  private foliageCasts(instance: MeshSceneInstance): boolean {
+    const f = this.foliage.get(instance.mesh);
+    if (!f || !this.eye) return true;
+    if (f.swap?.far) return false;
+    const m = instance.model;
+    const [x, y, z] = f.center;
+    const d = Math.hypot(m[0]! * x + m[4]! * y + m[8]! * z + m[12]! - this.eye[0], m[1]! * x + m[5]! * y + m[9]! * z + m[13]! - this.eye[1], m[2]! * x + m[6]! * y + m[10]! * z + m[14]! - this.eye[2]);
+    return d - f.radius < f.cull * this.quality.terrainDetail;
+  }
+
   /** Each terrain block's world bounds, measured on first use. */
   private readonly blockBounds = new Map<number, readonly number[]>();
 
@@ -1853,19 +1868,23 @@ export class MeshOverlaySurface implements DisplaySurface {
    * The sun's shadow for the AAA tier's GPU cascades (F2a), or null when the
    * rig has shadows off or no sun. The renderer draws the casters into its
    * cascades each frame: the still ones (gathered again only when the static
-   * key changes, as the CPU maps redraw) and what moved this frame. The
-   * cascades reach the rig's shadow distance, or one fitted to the scene; a
-   * caster may stand as far again beyond them toward the sun.
+   * key changes, as the CPU maps redraw) and what moved this frame. Foliage
+   * casts only within its cull distance (past it, it would shade the ground
+   * under nothing), and a layer with impostors always from its full copies:
+   * a tree shown as its cards still casts its crown, never two crossed planes.
+   * The cascades reach the rig's shadow distance, or one fitted to the scene;
+   * a caster may stand as far again beyond them toward the sun.
    */
   private buildSunShadow(moved: readonly MeshSceneInstance[], lighting: SceneLighting): SunShadow | null {
     const toLight = sceneLightingKeyDirection(lighting);
     if (!lighting.shadows || !this.quality.shadows || !toLight) return null;
     const key = this.staticShadowKey();
     if (this.sunCasters?.key !== key) this.sunCasters = { key, still: this.stillCasters() };
-    const still = this.sunCasters.still;
+    const inReach = (list: readonly MeshSceneInstance[]) => (this.foliage.size > 0 ? list.filter((i) => this.foliageCasts(i)) : list);
+    const still = inReach(this.sunCasters.still);
     const span = Math.max(this.scene.bounds.radius, this.scene.extent?.radius ?? 0) * 2;
     return {
-      casters: moved.length > 0 ? [...still, ...moved] : still,
+      casters: moved.length > 0 ? [...still, ...inReach(moved)] : still,
       toLight,
       distance: lighting.shadowDistance ?? Math.min(CASCADE_DISTANCE_MAX, Math.max(CASCADE_DISTANCE_MIN, span)),
       size: Math.max(CASCADE_MAP_SIZE, this.quality.shadowMapSize ?? 0),

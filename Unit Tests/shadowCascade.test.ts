@@ -209,6 +209,28 @@ describe("the AAA tier's sun cascades (F2a)", () => {
     expect(r.draws.at(-1)!.sunShadow!.casters).toBe(draw.sunShadow!.casters);
   });
 
+  it("casts foliage within its cull distance, and a layer with impostors from its full copies, never its cards", async () => {
+    // Bushes on terrain that casts: one block round the camera's target, one 80 m off with a 40 m cull,
+    // and a layer swapped to cards from 20 m: its full copies and its cards, both at 50 m.
+    const bush = (name: string, x: number, foliage: object) => ({ mesh: box(name), model: composeModelMatrix([x, 0.5, 0], [0, 0, 0], [1, 1, 1]), terrain: true as const, casts: true as const, foliage: { center: [0, 0, 0] as [number, number, number], radius: 1, ...foliage } });
+    const s = scene();
+    const near = bush("near", 1, { cull: 40 });
+    const far = bush("far", 80, { cull: 40 });
+    const swapped = bush("swapped", 50, { cull: 200, swap: { distance: 20, far: false } });
+    const cards = bush("cards", 50, { cull: 200, swap: { distance: 20, far: true } });
+    const r = cascaded();
+    const surface = await MeshOverlaySurface.create({ blit() {}, destroy() {} }, 32, 24, { ...s, instances: [...s.instances, near, far, swapped, cards] }, r, { presenter });
+    surface.setCameraOverride(camera(1, 1));
+    surface.blit(new Uint8Array(32 * 24 * 4));
+    const names = r.draws.at(-1)!.sunShadow!.casters.map((c) => c.mesh.name);
+    expect(names).toContain("near");
+    expect(names).not.toContain("far");
+    // Past the swap the cards are drawn, but the full copies cast.
+    expect(names).toContain("swapped");
+    expect(names).not.toContain("cards");
+    expect(names).toEqual(expect.arrayContaining(["floor", "pillar", "crate"]));
+  });
+
   it("reaches the rig's own shadow distance, and casts nothing with shadows off", async () => {
     const near = await MeshOverlaySurface.create({ blit() {}, destroy() {} }, 32, 24, { ...scene(), lighting: patchSceneLighting(lighting, { shadowDistance: 60 }) }, cascaded(), { presenter });
     const r = (near as any).renderer as ReturnType<typeof cascaded>;
