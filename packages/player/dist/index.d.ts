@@ -4315,6 +4315,14 @@ interface SceneDraw {
     /** Shadow maps of the spot and point lights that cast (EP8c), indexed by their `shadowTile`. See {@link LocalShadows}. */
     readonly localShadows?: LocalShadows | null;
     /**
+     * What casts the spot and point lights' shadows, on the linear-light (AAA)
+     * WebGPU renderer, which draws their tiles itself (AAA_FIDELITY_ROADMAP.md
+     * F2d) in place of {@link localShadows}; the lights that cast get tiles by
+     * how much of the screen they cover. Ignored when {@link sunShadow} is given,
+     * whose casters cast for them too.
+     */
+    readonly localShadowCasters?: readonly MeshSceneInstance[] | null;
+    /**
      * The sun's shadow rendered on the GPU in cascades (AAA_FIDELITY_ROADMAP.md
      * F2a), in place of the CPU-rasterised {@link shadow}: what casts (the whole
      * scene's casters, not just what the camera sees), the direction toward the
@@ -5145,6 +5153,11 @@ declare class WebgpuSceneRenderer implements SceneRenderer {
     private clusterLights;
     /** Upload a probe grid (EP9) as a 3D texture, once per grid, rebuilding group 1 to point at it. */
     private uploadProbeGrid;
+    /** This frame's GPU spot/point tiles (F2d), or null when it draws none. */
+    private frameLocalTiles;
+    /** The GPU tiles' records (F2d), and the atlas they're drawn into, made the first time a light casts. */
+    private uploadLocalTiles;
+    private ensureLocalAtlas;
     /** Upload the spot/point shadow tiles (EP8c): each tile into its atlas cell, and every tile's view. */
     private uploadLocalShadows;
     /** Await one readback and publish it as the newest frame. */
@@ -7164,6 +7177,13 @@ declare class MeshOverlaySurface implements DisplaySurface {
      * The cascades reach the rig's shadow distance, or one fitted to the scene;
      * a caster may stand as far again beyond them toward the sun.
      */
+    /**
+     * What casts on the AAA tier this frame (F2a, F2d): the still casters
+     * (gathered again only when the static key changes, as the CPU maps redraw)
+     * and what moved, foliage only within its cull distance and as its full
+     * copies.
+     */
+    private castersNow;
     private buildSunShadow;
     /**
      * What the static shadow maps depend on: *which* instances are posed (not

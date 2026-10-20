@@ -11359,6 +11359,7 @@ import {
   LOCAL_SHADOW_BIAS,
   LOCAL_SHADOW_SLOPE_BIAS,
   assignLocalShadowTiles,
+  castsLocalShadow,
   renderLocalShadow,
   childIndices,
   computeEnvironmentAverage,
@@ -12533,7 +12534,9 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
       mark = now;
     }
     const rig = this.hud && this.cartLights.length > 0 ? [...lighting?.lights ?? [], ...this.cartLights] : lighting?.lights;
-    const local = lighting?.shadows && this.quality.shadows && rig ? this.buildLocalShadows(rig, moved) : null;
+    const casting = lighting?.shadows && this.quality.shadows && rig;
+    const local = casting && !cascaded ? this.buildLocalShadows(rig, moved) : null;
+    const localShadowCasters = casting && cascaded && rig.some(castsLocalShadow) ? sunShadow?.casters ?? this.castersNow(moved) : null;
     const lights = local ? local.lights : rig;
     const skyBackdrop = this.hud && this.skyMap !== null;
     if (skyBackdrop && !gpu) this.paintSky(out, width, height, camera.view, camera.projection, target ? 1 : this.quality.skyScale ?? SKY_BACKDROP_SCALE, lighting?.sky ? skySun(lighting.sky) : null);
@@ -12585,6 +12588,7 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
         local: local?.shadows ?? null,
         shadow,
         sunShadow,
+        localShadowCasters,
         antialias
       });
       if (profiler) profiler.add("scene", performance.now() - mark);
@@ -12704,7 +12708,7 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
       temporal: this.options.temporal === true && this.quality.temporal === true,
       reflections: this.options.reflections === true && this.quality.reflections === true,
       ...this.options.prepass === true ? { prepass: true } : {},
-      ...lighting ? { ...lit, localShadows: job.local, shadow: job.shadow, sunShadow: job.sunShadow, fog: lighting.fog ?? null, wind: lighting.wind ?? null } : {},
+      ...lighting ? { ...lit, localShadows: job.local, shadow: job.shadow, sunShadow: job.sunShadow, localShadowCasters: job.localShadowCasters, fog: lighting.fog ?? null, wind: lighting.wind ?? null } : {},
       time
     };
     const scene = this.renderer.renderToTexture(job.drawn, draw) ?? null;
@@ -13197,16 +13201,25 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
    * The cascades reach the rig's shadow distance, or one fitted to the scene;
    * a caster may stand as far again beyond them toward the sun.
    */
-  buildSunShadow(moved, lighting) {
-    const toLight = sceneLightingKeyDirection(lighting);
-    if (!lighting.shadows || !this.quality.shadows || !toLight) return null;
+  /**
+   * What casts on the AAA tier this frame (F2a, F2d): the still casters
+   * (gathered again only when the static key changes, as the CPU maps redraw)
+   * and what moved, foliage only within its cull distance and as its full
+   * copies.
+   */
+  castersNow(moved) {
     const key = this.staticShadowKey();
     if (this.sunCasters?.key !== key) this.sunCasters = { key, still: this.stillCasters() };
     const inReach = (list) => this.foliage.size > 0 ? list.filter((i) => this.foliageCasts(i)) : list;
     const still = inReach(this.sunCasters.still);
+    return moved.length > 0 ? [...still, ...inReach(moved)] : still;
+  }
+  buildSunShadow(moved, lighting) {
+    const toLight = sceneLightingKeyDirection(lighting);
+    if (!lighting.shadows || !this.quality.shadows || !toLight) return null;
     const span = Math.max(this.scene.bounds.radius, this.scene.extent?.radius ?? 0) * 2;
     return {
-      casters: moved.length > 0 ? [...still, ...inReach(moved)] : still,
+      casters: this.castersNow(moved),
       toLight,
       distance: lighting.shadowDistance ?? Math.min(CASCADE_DISTANCE_MAX, Math.max(CASCADE_DISTANCE_MIN, span)),
       size: this.quality.cascadeMapSize ?? CASCADE_MAP_SIZE,
@@ -17429,7 +17442,9 @@ import {
   compiledGraphOf as compiledGraphOf2,
   computeSmoothNormals as computeSmoothNormals2,
   lightProbeTexels as lightProbeTexels2,
+  LOCAL_SHADOW_BIAS as LOCAL_SHADOW_BIAS2,
   LOCAL_SHADOW_GRID as LOCAL_SHADOW_GRID2,
+  LOCAL_SHADOW_SLOPE_BIAS as LOCAL_SHADOW_SLOPE_BIAS2,
   LOCAL_SHADOW_TILE as LOCAL_SHADOW_TILE2,
   MAX_LOCAL_SHADOW_TILES as MAX_LOCAL_SHADOW_TILES2,
   NEAR_CASCADE_BLEND as NEAR_CASCADE_BLEND2,
@@ -17449,7 +17464,7 @@ import {
   waterAlong as waterAlong2,
   windUniform as windUniform2,
   graphShaderCode as graphShaderCode2,
-  multiplyMat4 as multiplyMat46
+  multiplyMat4 as multiplyMat47
 } from "@cartbox/editor";
 
 // src/render/frameGraph.ts
@@ -18559,6 +18574,138 @@ fn accumulate(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
   );
 }
 
+// src/render/localAtlas.ts
+import { localShadowTileCount, localShadowViews, multiplyMat4 as multiplyMat46 } from "@cartbox/editor";
+var LOCAL_ATLAS_SIZE = 4096;
+var MAX_GPU_LOCAL_TILES = 64;
+var LOCAL_TILE_SIZES = [1024, 512, 256];
+var LOCAL_TILE_COVERAGE = [0.5, 0.15];
+var LOCAL_TILE_FLOATS = 24;
+var TileAllocator = class {
+  constructor(size) {
+    this.size = size;
+    this.free = /* @__PURE__ */ new Map();
+    this.free.set(size, [[0, 0]]);
+  }
+  /** A block of `want`² texels, or null when none is left. */
+  alloc(want) {
+    let s = want;
+    while (s <= this.size && !this.free.get(s)?.length) s *= 2;
+    if (s > this.size) return null;
+    let block = this.free.get(s).pop();
+    while (s > want) {
+      s /= 2;
+      const [x, y] = block;
+      const list = this.free.get(s) ?? [];
+      list.push([x + s, y], [x, y + s], [x + s, y + s]);
+      this.free.set(s, list);
+      block = [x, y];
+    }
+    return block;
+  }
+  /** Give a block back (no merging: the allocator lives one frame). */
+  release(block, size) {
+    const list = this.free.get(size) ?? [];
+    list.push(block);
+    this.free.set(size, list);
+  }
+};
+var TO_WEBGPU_DEPTH = Float64Array.from([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0.5, 0, 0, 0, 0.5, 1]);
+function localCoverage(light, eye, tanHalfFov) {
+  const p = light.position ?? [0, 0, 0];
+  const r = light.range ?? 0;
+  const d = Math.hypot(p[0] - eye[0], p[1] - eye[1], p[2] - eye[2]);
+  return r / (Math.max(d - r, r * 0.25, 1e-3) * Math.max(tanHalfFov, 1e-3));
+}
+function planLocalTiles(lights, eye, tanHalfFov) {
+  const casting = lights.map((light, index) => ({ light, index, faces: localShadowTileCount(light), coverage: localCoverage(light, eye, tanHalfFov) })).filter((c) => c.faces > 0).sort((a, b) => b.coverage - a.coverage);
+  const atlas = new TileAllocator(LOCAL_ATLAS_SIZE);
+  const tiles = [];
+  const first = /* @__PURE__ */ new Map();
+  for (const c of casting) {
+    if (tiles.length + c.faces > MAX_GPU_LOCAL_TILES) continue;
+    const wanted = c.coverage >= LOCAL_TILE_COVERAGE[0] ? 0 : c.coverage >= LOCAL_TILE_COVERAGE[1] ? 1 : 2;
+    for (let k = wanted; k < LOCAL_TILE_SIZES.length; k += 1) {
+      const size = LOCAL_TILE_SIZES[k];
+      const blocks = [];
+      for (let f3 = 0; f3 < c.faces; f3 += 1) {
+        const b = atlas.alloc(size);
+        if (!b) break;
+        blocks.push(b);
+      }
+      if (blocks.length < c.faces) {
+        for (const b of blocks) atlas.release(b, size);
+        continue;
+      }
+      first.set(c.index, tiles.length);
+      localShadowViews(c.light).forEach(({ view, projection }, face) => {
+        const viewProj = multiplyMat46(projection, view);
+        tiles.push({
+          light: c.index,
+          face,
+          x: blocks[face][0],
+          y: blocks[face][1],
+          size,
+          viewProj,
+          drawViewProj: multiplyMat46(TO_WEBGPU_DEPTH, viewProj),
+          linear: [projection[10], projection[14]]
+        });
+      });
+      break;
+    }
+  }
+  const out = lights.map((light, i) => {
+    const t = first.get(i);
+    if (t !== void 0) return { ...light, shadowTile: t };
+    return light.shadowTile === void 0 ? light : { ...light, shadowTile: void 0 };
+  });
+  return { lights: out, tiles };
+}
+function packLocalTiles(tiles, out = new Float32Array(MAX_GPU_LOCAL_TILES * LOCAL_TILE_FLOATS)) {
+  tiles.forEach((t, i) => {
+    out.set(t.viewProj, i * LOCAL_TILE_FLOATS);
+    out.set([t.linear[0], t.linear[1], 0, 0], i * LOCAL_TILE_FLOATS + 16);
+    out.set([t.x, t.y, t.size, 0], i * LOCAL_TILE_FLOATS + 20);
+  });
+  return out;
+}
+var LOCAL_SHADOW_GPU_WGSL = (
+  /* wgsl */
+  `
+fn localShadow(first: i32, lgt: Light, P: vec3<f32>, cosL: f32) -> f32 {
+  var tile = first;
+  if (lgt.d0.w < 1.5) {
+    let d = P - lgt.d0.xyz;
+    let m = abs(d);
+    if (m.x >= m.y && m.x >= m.z) { tile = tile + select(1, 0, d.x >= 0.0); }
+    else if (m.y >= m.z) { tile = tile + select(3, 2, d.y >= 0.0); }
+    else { tile = tile + select(5, 4, d.z >= 0.0); }
+  }
+  let t = shadowTiles[tile];
+  let c = t.mvp * vec4<f32>(P, 1.0);
+  if (c.w <= 0.0) { return 1.0; }
+  let n = c.xyz / c.w;
+  if (n.x < -1.0 || n.x > 1.0 || n.y < -1.0 || n.y > 1.0 || n.z < -1.0 || n.z > 1.0) { return 1.0; }
+  let cc = clamp(cosL, 0.05, 1.0);
+  let own = t.params.y / (n.z + t.params.x) - frame.localShadow.y - frame.localShadow.z * min(10.0, sqrt(1.0 - cc * cc) / cc);
+  // The biased distance back as a depth, GL's then WebGPU's.
+  let depthRef = (t.params.y / max(own, 1e-4) - t.params.x) * 0.5 + 0.5;
+  let atlas = ${LOCAL_ATLAS_SIZE}.0;
+  let size = t.rect.z;
+  // Two texels inside the tile, so the filter (a texel out, each tap bilinear) never reads a neighbour's.
+  let px = clamp(vec2<f32>((n.x * 0.5 + 0.5) * size, (0.5 - n.y * 0.5) * size), vec2<f32>(2.0), vec2<f32>(size - 2.0));
+  let base = (t.rect.xy + px) / atlas;
+  var lit = 0.0;
+  for (var y = -1; y <= 1; y = y + 1) {
+    for (var x = -1; x <= 1; x = x + 1) {
+      lit = lit + textureSampleCompareLevel(localDepth, cascadeSamp, base + vec2<f32>(f32(x), f32(y)) / atlas, depthRef);
+    }
+  }
+  return lit / 9.0;
+}
+`
+);
+
 // src/render/WebgpuSceneRenderer.ts
 var GBUFFER_FORMAT = "rgba16float";
 var VELOCITY_FORMAT = "rg16float";
@@ -18769,6 +18916,7 @@ struct Frame {
 struct ShadowTile {
   mvp: mat4x4<f32>,
   params: vec4<f32>,
+  rect: vec4<f32>, // F2d: the tile's x, y and size in the atlas (texels), on the linear-light renderer
 };
 @group(0) @binding(0) var<uniform> u: Uniforms;
 @group(0) @binding(1) var samp: sampler;
@@ -18830,7 +18978,7 @@ struct Probe {
 @group(1) @binding(2) var<storage, read> clusterIndex: array<u32>;
 @group(1) @binding(3) var<uniform> frame: Frame;
 // Spot and point light shadows (EP8c): the tile atlas and each tile's view.
-@group(1) @binding(4) var localAtlas: texture_2d<f32>;
+${hdr ? "// The spot/point lights' depth atlas, drawn on the GPU (F2d).\n@group(1) @binding(4) var localDepth: texture_depth_2d;" : "@group(1) @binding(4) var localAtlas: texture_2d<f32>;"}
 @group(1) @binding(5) var<storage, read> shadowTiles: array<ShadowTile>;
 // Light probes (EP9): the grid as a 3D texture, face f's probes at x = f \xB7 nx + probe x.
 @group(1) @binding(6) var probeGrid: texture_3d<f32>;
@@ -19055,7 +19203,7 @@ fn finishAlpha(rgb: vec3<f32>, a: f32) -> vec4<f32> {
   if (u.pbr.w > 1.5) { return vec4<f32>(c * a, a); }
   return vec4<f32>(c, 1.0);
 }
-// A spot/point light's shadow at P (mirrors localShadowVisibility): the tile
+${hdr ? LOCAL_SHADOW_GPU_WGSL : `// A spot/point light's shadow at P (mirrors localShadowVisibility): the tile
 // that sees it (a point light's face by dominant axis), a 2\xD72 PCF of distance
 // compares against a slope-scaled world bias.
 fn localTap(fx: f32, fy: f32, ox: f32, oy: f32, own: f32, a: f32, b: f32) -> f32 {
@@ -19091,6 +19239,7 @@ fn localShadow(first: i32, lgt: Light, P: vec3<f32>, cosL: f32) -> f32 {
         + localTap(sx - 0.5, sy + 0.5, ox, oy, own, t.params.x, t.params.y) + localTap(sx + 0.5, sy + 0.5, ox, oy, own, t.params.x, t.params.y)) * 0.25;
 }
 
+`}
 // One ambient-cube face of the probe grid at grid cell i + fraction f (trilinear).
 fn probeFace(face: i32, i: vec3<i32>, f: vec3<f32>) -> vec3<f32> {
   let o = i + vec3<i32>(face * i32(frame.probeCount.x + 0.5), 0, 0);
@@ -20065,6 +20214,8 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
      * them. Its colour is a frame-graph transient.
      */
     this.msaa = null;
+    /** This frame's GPU spot/point tiles (F2d), or null when it draws none. */
+    this.frameLocalTiles = null;
     this.software = new SoftwareSceneRenderer(style);
     this.shadowTexture = blankShadow;
     this.envTexture = hdr ? blankCube(device) : blankTexture;
@@ -20303,7 +20454,8 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
         { binding: 1, visibility: SHADER_STAGE_FRAGMENT, buffer: { type: "read-only-storage" } },
         { binding: 2, visibility: SHADER_STAGE_FRAGMENT, buffer: { type: "read-only-storage" } },
         { binding: 3, visibility: SHADER_STAGE_FRAGMENT, buffer: { type: "uniform" } },
-        { binding: 4, visibility: SHADER_STAGE_FRAGMENT, texture: { sampleType: "unfilterable-float" } },
+        // The spot/point shadow atlas: the CPU's r32float distances, or the linear-light renderer's GPU depths (F2d).
+        { binding: 4, visibility: SHADER_STAGE_FRAGMENT, texture: hdr ? { sampleType: "depth" } : { sampleType: "unfilterable-float" } },
         { binding: 5, visibility: SHADER_STAGE_FRAGMENT, buffer: { type: "read-only-storage" } },
         { binding: 6, visibility: SHADER_STAGE_FRAGMENT, texture: { sampleType: "unfilterable-float", viewDimension: "3d" } },
         // The opaque scene's colour, for refraction (I5).
@@ -20400,12 +20552,12 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
         params: device.createBuffer({ size: FRAME_BYTES, usage: 64 | 8 })
         // UNIFORM | COPY_DST
       };
-      const shadowTiles = device.createBuffer({ size: MAX_LOCAL_SHADOW_TILES2 * 80, usage: 128 | 8 });
+      const shadowTiles = device.createBuffer({ size: Math.max(MAX_LOCAL_SHADOW_TILES2, MAX_GPU_LOCAL_TILES) * LOCAL_TILE_FLOATS * 4, usage: 128 | 8 });
       const dfg = dfgTable();
       const dfgBuffer = device.createBuffer({ size: dfg.byteLength, usage: 128 | 8 });
       device.queue.writeBuffer(dfgBuffer, 0, dfg);
       const iblSampler = device.createSampler({ magFilter: "linear", minFilter: "linear", mipmapFilter: "linear", addressModeU: "clamp-to-edge", addressModeV: "clamp-to-edge", addressModeW: "clamp-to-edge" });
-      const atlasBlank = device.createTexture({ size: { width: 1, height: 1 }, format: "r32float", usage: 4 | 2 });
+      const atlasBlank = hdr ? device.createTexture({ size: { width: 1, height: 1 }, format: "depth32float", usage: 4 | 16 }) : device.createTexture({ size: { width: 1, height: 1 }, format: "r32float", usage: 4 | 2 });
       const probesBlank = device.createTexture({ size: { width: 1, height: 1, depthOrArrayLayers: 1 }, dimension: "3d", format: "rgba32float", usage: 4 | 2 });
       const behind = device.createTexture({ size: { width, height }, format: colourFormat, usage: 4 | 2 | 16 });
       const behindBlank = device.createTexture({ size: { width: 1, height: 1 }, format: colourFormat, usage: 4 | 2 });
@@ -20431,6 +20583,25 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
       });
       const casterModule = hdr ? device.createShaderModule({ code: sceneShader(null, false, hdr) }) : null;
       const casterDepth = { format: CASCADE_FORMAT, depthWriteEnabled: true, depthCompare: "less", depthBias: 2, depthBiasSlopeScale: 1.5 };
+      const localDepth = { format: "depth32float", depthWriteEnabled: true, depthCompare: "less" };
+      const casterVertex = (entryPoint, uv) => ({
+        module: casterModule,
+        entryPoint,
+        buffers: [
+          {
+            arrayStride: 64,
+            attributes: [
+              { shaderLocation: 0, offset: 0, format: "float32x3" },
+              ...uv ? [{ shaderLocation: 2, offset: 24, format: "float32x2" }] : [],
+              { shaderLocation: 5, offset: 44, format: "float32" }
+            ]
+          }
+        ]
+      });
+      const localViews = hdr ? Array.from({ length: MAX_GPU_LOCAL_TILES }, () => {
+        const buffer = device.createBuffer({ size: 64, usage: 64 | 8 });
+        return { buffer, group: device.createBindGroup({ layout: cascadeLayout, entries: [{ binding: 12, resource: { buffer } }] }) };
+      }) : [];
       const cascades = {
         texture: device.createTexture({ size: { width: 1, height: 1, depthOrArrayLayers: CASCADE_COUNT }, format: CASCADE_FORMAT, usage: 16 | 4 }),
         size: 0,
@@ -20467,6 +20638,20 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
           fragment: { module: casterModule, entryPoint: "fs_shadow_cut", targets: [] },
           primitive: { topology: "triangle-list", cullMode: "none" },
           depthStencil: casterDepth
+        }) : null,
+        localViews,
+        localPipeline: casterModule ? device.createRenderPipeline({
+          layout: device.createPipelineLayout({ bindGroupLayouts: [casterLayout, cascadeLayout] }),
+          vertex: casterVertex("vs_shadow", false),
+          primitive: { topology: "triangle-list", cullMode: "none" },
+          depthStencil: localDepth
+        }) : null,
+        localCutPipeline: casterModule ? device.createRenderPipeline({
+          layout: device.createPipelineLayout({ bindGroupLayouts: [cutLayout, cascadeLayout] }),
+          vertex: casterVertex("vs_shadow_cut", true),
+          fragment: { module: casterModule, entryPoint: "fs_shadow_cut", targets: [] },
+          primitive: { topology: "triangle-list", cullMode: "none" },
+          depthStencil: localDepth
         }) : null
       };
       const makeGroups = (atlas, probes) => {
@@ -20746,7 +20931,7 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
   submit(instances, draw, readback = true) {
     const temporal = draw.temporal === true ? this.temporalState.begin(draw.view, draw.projection, this.width, this.height) : null;
     if (!temporal) this.temporalState.reset();
-    const viewProj = multiplyMat46(temporal ? temporal.projection : draw.projection, draw.view);
+    const viewProj = multiplyMat47(temporal ? temporal.projection : draw.projection, draw.view);
     this.frameIndex += 1;
     const prepass = draw.prepass === true;
     const { batches: draws, instanceCount } = batchInstances(instances, (mesh) => this.uploadMesh(mesh), cameraPositionFromView3(draw.view));
@@ -20756,8 +20941,12 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
       return;
     }
     const sun = this.hdr && this.depthGroups.cascades.pipeline ? draw.sunShadow ?? (draw.shadow && draw.lightDirection ? { casters: instances, toLight: draw.lightDirection, distance: FALLBACK_CASCADE_DISTANCE, size: FALLBACK_CASCADE_SIZE, reach: FALLBACK_CASCADE_DISTANCE, strength: draw.shadow.strength ?? 1 } : null) : null;
-    const casting = sun ? batchInstances(sun.casters, (mesh) => this.uploadMesh(mesh), cameraPositionFromView3(draw.view)) : null;
+    const localSource = this.hdr && this.depthGroups.cascades.localPipeline ? draw.localShadowCasters ?? (draw.localShadows ? instances : null) : null;
+    const localPlan = localSource && draw.lights?.length ? planLocalTiles(draw.lights, cameraPositionFromView3(draw.view), 1 / (draw.projection[5] || 1)) : null;
+    const casterSource = sun?.casters ?? (localPlan && localPlan.tiles.length > 0 ? localSource : null);
+    const casting = casterSource ? batchInstances(casterSource, (mesh) => this.uploadMesh(mesh), cameraPositionFromView3(draw.view)) : null;
     const casters = casting ? casting.batches.filter((entry) => entry.alpha < 2 && !entry.refract) : [];
+    this.frameLocalTiles = localPlan && casters.length > 0 ? localPlan.tiles : null;
     const cascadeFit = sun && casters.length > 0 ? fitCascades({ view: draw.view, projection: draw.projection, toLight: sun.toLight, distance: sun.distance, size: sun.size, reach: sun.reach }) : null;
     this.frameCascades = cascadeFit && sun ? { cascades: cascadeFit, size: sun.size, strength: sun.strength ?? 1, softness: sun.softness ?? SUN_SOFTNESS } : null;
     if (cascadeFit && sun) this.ensureCascadeTexture(sun.size);
@@ -20816,7 +21005,7 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     this.frameContact = this.hdr && prepass && this.frameCascades !== null && Boolean(draw.lightDirection);
     this.frameGtao = this.hdr && prepass && draw.ambientOcclusion !== false;
     this.bindSsao(ssao, this.frameContact || this.frameGtao);
-    const { ordered } = this.clusterLights(draw);
+    const { ordered } = this.clusterLights(localPlan ? { ...draw, lights: localPlan.lights, localShadows: null } : draw);
     this.uploadLights(packLights(ordered));
     const lightCount = ordered.length;
     const camera = refractionCamera(draw.view, this.height);
@@ -20826,7 +21015,7 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
       if (id === void 0) materialIds.set(material, id = materialIds.size + 1);
       return id;
     };
-    const viewProjNow = multiplyMat46(draw.projection, draw.view);
+    const viewProjNow = multiplyMat47(draw.projection, draw.view);
     const viewProjThen = this.lastViewProj ?? viewProjNow;
     const windNow = windUniform2(draw.wind, draw.time ?? 0);
     const windThen = this.lastWind ?? windNow;
@@ -20839,7 +21028,7 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
         entry.textures.emis !== null
       );
       return {
-        mvp: multiplyMat46(viewProj, model),
+        mvp: multiplyMat47(viewProj, model),
         normalBasis: normalBasis3x3(model),
         baseColor: entry.primitive.material.baseColorFactor,
         hasTexture: entry.textures.base !== null,
@@ -20850,7 +21039,7 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
         hasOcclusionMap: entry.textures.occ !== null,
         hasEmissiveMap: entry.textures.emis !== null,
         environment: draw.environment ?? null,
-        lightMvp: shadow ? multiplyMat46(shadow.lightViewProj, model) : null,
+        lightMvp: shadow ? multiplyMat47(shadow.lightViewProj, model) : null,
         shadow: shadowParams,
         tonemap: draw.tonemap ?? null,
         hasSsao: ssao !== null,
@@ -20885,15 +21074,15 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
       entry.first = next;
       for (const model of entry.models) {
         writeInstanceTransform(this.instanceData, next, {
-          mvp: multiplyMat46(viewProj, model),
-          lightMvp: shadow ? multiplyMat46(shadow.lightViewProj, model) : null,
+          mvp: multiplyMat47(viewProj, model),
+          lightMvp: shadow ? multiplyMat47(shadow.lightViewProj, model) : null,
           model,
           normalBasis: normalBasis3x3(model)
         });
         if (prepass) {
           writeInstanceTransform(this.instanceData, instanceCount + next, {
-            mvp: multiplyMat46(viewProjNow, model),
-            lightMvp: multiplyMat46(viewProjThen, this.motion.get(model) ?? model),
+            mvp: multiplyMat47(viewProjNow, model),
+            lightMvp: multiplyMat47(viewProjThen, this.motion.get(model) ?? model),
             model,
             normalBasis: IDENTITY_BASIS
           });
@@ -21018,6 +21207,46 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
             }
             encoded.end();
           });
+        };
+      });
+    }
+    const localTiles = this.frameLocalTiles;
+    if (localTiles && localTiles.length > 0) {
+      const res = this.depthGroups.cascades;
+      localTiles.forEach((t, i) => this.device.queue.writeBuffer(res.localViews[i].buffer, 0, new Float32Array(t.drawViewProj)));
+      const map = graph.importTexture("local shadows", this.ensureLocalAtlas());
+      graph.addPass("local shadows", "render", (pass) => {
+        pass.write(map);
+        pass.keep();
+        return (ctx) => {
+          const group = this.device.createBindGroup({
+            layout: res.casterLayout,
+            entries: [
+              { binding: 0, resource: { buffer: this.uniformBuffer, offset: 0, size: UNIFORM_STRIDE } },
+              { binding: 10, resource: { buffer: this.instanceBuffer } }
+            ]
+          });
+          const encoded = ctx.encoder.beginRenderPass({
+            colorAttachments: [],
+            depthStencilAttachment: { view: ctx.texture(map).createView(), depthClearValue: 1, depthLoadOp: "clear", depthStoreOp: "store" },
+            ...ctx.timing
+          });
+          localTiles.forEach((t, i) => {
+            encoded.setViewport(t.x, t.y, t.size, t.size, 0, 1);
+            encoded.setScissorRect(t.x, t.y, t.size, t.size);
+            encoded.setBindGroup(1, res.localViews[i].group);
+            for (const cut of [false, true]) {
+              encoded.setPipeline(cut ? res.localCutPipeline : res.localPipeline);
+              casters.forEach((entry, k) => {
+                if (entry.alpha === 1 !== cut) return;
+                encoded.setBindGroup(0, cut ? this.cutGroupFor(entry.primitive, entry.textures) : group, [(draws.length + k) * UNIFORM_STRIDE]);
+                encoded.setVertexBuffer(0, entry.geometry.vertexBuffer);
+                encoded.setIndexBuffer(entry.geometry.indexBuffer, "uint32");
+                encoded.drawIndexed(entry.geometry.indexCount, entry.models.length, 0, 0, entry.first);
+              });
+            }
+          });
+          encoded.end();
         };
       });
     }
@@ -21375,7 +21604,10 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
       frame.set([1, near.bias, near.slopeBias], 24);
     }
     const local = draw.localShadows ?? null;
-    if (local && local.tiles.length > 0) frame.set([1, local.bias, local.slopeBias], 28);
+    if (this.frameLocalTiles && this.frameLocalTiles.length > 0) {
+      this.uploadLocalTiles(this.frameLocalTiles);
+      frame.set([1, LOCAL_SHADOW_BIAS2, LOCAL_SHADOW_SLOPE_BIAS2], 28);
+    } else if (local && local.tiles.length > 0) frame.set([1, local.bias, local.slopeBias], 28);
     const grid = draw.environment?.lightProbes ?? null;
     if (grid) {
       this.uploadProbeGrid(grid);
@@ -21413,6 +21645,21 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     Object.assign(groups, groups.makeGroups(groups.atlas, groups.probes));
     if (this.msaa) this.msaa.groups = groups.makeGroupsMs(groups.atlas, groups.probes, this.msaa.blank, this.msaa.depth);
   }
+  /** The GPU tiles' records (F2d), and the atlas they're drawn into, made the first time a light casts. */
+  uploadLocalTiles(tiles) {
+    this.ensureLocalAtlas();
+    this.device.queue.writeBuffer(this.depthGroups.shadowTiles, 0, packLocalTiles(tiles));
+  }
+  ensureLocalAtlas() {
+    const groups = this.depthGroups;
+    if (groups.atlasBlank) {
+      groups.atlas = this.device.createTexture({ size: { width: LOCAL_ATLAS_SIZE, height: LOCAL_ATLAS_SIZE }, format: "depth32float", usage: 16 | 4 });
+      groups.atlasBlank = false;
+      Object.assign(groups, groups.makeGroups(groups.atlas, groups.probes));
+      if (this.msaa) this.msaa.groups = groups.makeGroupsMs(groups.atlas, groups.probes, this.msaa.blank, this.msaa.depth);
+    }
+    return groups.atlas;
+  }
   /** Upload the spot/point shadow tiles (EP8c): each tile into its atlas cell, and every tile's view. */
   uploadLocalShadows(local) {
     if (!local || local.tiles.length === 0) return;
@@ -21424,7 +21671,7 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
       Object.assign(groups, groups.makeGroups(groups.atlas, groups.probes));
       if (this.msaa) this.msaa.groups = groups.makeGroupsMs(groups.atlas, groups.probes, this.msaa.blank, this.msaa.depth);
     }
-    const views = new Float32Array(MAX_LOCAL_SHADOW_TILES2 * 20);
+    const views = new Float32Array(MAX_LOCAL_SHADOW_TILES2 * LOCAL_TILE_FLOATS);
     local.tiles.slice(0, MAX_LOCAL_SHADOW_TILES2).forEach((tile, i) => {
       this.device.queue.writeTexture(
         { texture: groups.atlas, origin: { x: i % LOCAL_SHADOW_GRID2 * LOCAL_SHADOW_TILE2, y: Math.floor(i / LOCAL_SHADOW_GRID2) * LOCAL_SHADOW_TILE2 } },
@@ -21432,8 +21679,8 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
         { bytesPerRow: LOCAL_SHADOW_TILE2 * 4, rowsPerImage: LOCAL_SHADOW_TILE2 },
         { width: LOCAL_SHADOW_TILE2, height: LOCAL_SHADOW_TILE2 }
       );
-      views.set(tile.lightViewProj, i * 20);
-      views.set(tile.linear, i * 20 + 16);
+      views.set(tile.lightViewProj, i * LOCAL_TILE_FLOATS);
+      views.set(tile.linear, i * LOCAL_TILE_FLOATS + 16);
     });
     this.device.queue.writeBuffer(groups.shadowTiles, 0, views);
   }

@@ -428,6 +428,28 @@ Everything else depends on this track. It contains no visible "feature", but its
         - without the prepass, the floor by the box stays lit.
       - The pass's uniforms turn the sun into view space.
 - [ ] **F2d. Local light shadows on the GPU.** A larger atlas (4096² and up) with priority-based tile allocation by screen size, cached static tiles and PCF. It lifts the cap of 16 tiles.
+  - **F2d-1, the GPU atlas, its sized tiles and hardware PCF: done** (`localAtlas.ts`). On `aaa`, spot and point lights' shadows are no longer rasterised on the CPU. The linear-light renderer draws them itself each frame into one 4096² `depth32float` atlas.
+    - **Tiles by what they cover.** Each casting light is weighed by how much of the screen its range can cover from the camera: its range over its distance, against half the view's height.
+      - It gets 1024² tiles from a coverage of 0.5, 512² from 0.15, and 256² below that: one for a spot, six faces for a point light.
+      - The tiles come from a buddy allocator over the atlas, the largest lights first. A light that doesn't fit at its size tries the next smaller one.
+      - Up to 64 tiles a frame, four times the old cap. A light left out casts no shadow.
+    - **Drawing.** One pass draws the casters (solid, then cut-out through their material's discard) through each face, a viewport and scissor per tile, from the same caster batches as the sun's cascades.
+      - Each face's GL-style projection is remapped to WebGPU's 0..1 depth for drawing.
+    - **Testing.** The shader still reads distances, with the CPU tiles' `linear` terms and world-unit bias.
+      - It turns the biased distance back into a depth, and filters a 3×3 grid of hardware comparisons, each bilinear, kept two texels inside the tile.
+      - The comparison sampler is the cascades', so the fragment stage gains no sampler.
+    - **The player.** On a GPU-presented AAA frame it skips the CPU tiles and hands over the frame's casters (the sun's, or the same set gathered without one).
+      - A caller that gives the linear-light renderer only CPU tiles gets GPU tiles of what it draws.
+      - The other tiers keep their CPU tiles.
+    - *Still to come:* cached static tiles (F2d-2), and contact shadows from these lights (F2d-3, from F2c-2).
+    - *Tests:*
+      - `local-shadows-gpu.test.ts`:
+        - lights near, mid-way and far get 1024², 512² and 256² tiles, each pointing at its own first tile;
+        - a point light's six faces run in a row, and no two tiles overlap or leave the atlas;
+        - a crowd that wants more than fits shrinks some lights and leaves the rest out, within 64 tiles;
+        - the allocator never hands a block out twice.
+      - On Dawn: a spot light and a point light each shade the floor under a box the camera never draws to under 15% of its light, and leave the floor beside it as lit as without the box (both fail with the test returning lit).
+      - `shadowCascade.test.ts`: the AAA player hands over its casters for a rig with a casting point light, and none without one.
 - [ ] **F2e. Physical lights.**
   - Inverse-square falloff, with a range window for culling only.
   - Area lights (rectangle, disk, tube) with **LTC** (linearly transformed cosines).

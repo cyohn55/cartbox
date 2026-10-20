@@ -158,6 +158,14 @@ export interface SceneDraw {
   /** Shadow maps of the spot and point lights that cast (EP8c), indexed by their `shadowTile`. See {@link LocalShadows}. */
   readonly localShadows?: LocalShadows | null;
   /**
+   * What casts the spot and point lights' shadows, on the linear-light (AAA)
+   * WebGPU renderer, which draws their tiles itself (AAA_FIDELITY_ROADMAP.md
+   * F2d) in place of {@link localShadows}; the lights that cast get tiles by
+   * how much of the screen they cover. Ignored when {@link sunShadow} is given,
+   * whose casters cast for them too.
+   */
+  readonly localShadowCasters?: readonly MeshSceneInstance[] | null;
+  /**
    * The sun's shadow rendered on the GPU in cascades (AAA_FIDELITY_ROADMAP.md
    * F2a), in place of the CPU-rasterised {@link shadow}: what casts (the whole
    * scene's casters, not just what the camera sees), the direction toward the

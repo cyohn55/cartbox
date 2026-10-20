@@ -39,6 +39,7 @@ import {
   LOCAL_SHADOW_BIAS,
   LOCAL_SHADOW_SLOPE_BIAS,
   assignLocalShadowTiles,
+  castsLocalShadow,
   renderLocalShadow,
   childIndices,
   computeEnvironmentAverage,
@@ -1080,7 +1081,10 @@ export class MeshOverlaySurface implements DisplaySurface {
     }
     const rig = this.hud && this.cartLights.length > 0 ? [...(lighting?.lights ?? []), ...this.cartLights] : lighting?.lights;
     // Spot and point lights that cast get their own maps (EP8c), and their tiles.
-    const local = lighting?.shadows && this.quality.shadows && rig ? this.buildLocalShadows(rig, moved) : null;
+    // On the AAA tier the renderer draws their tiles itself, from the casters (F2d).
+    const casting = lighting?.shadows && this.quality.shadows && rig;
+    const local = casting && !cascaded ? this.buildLocalShadows(rig, moved) : null;
+    const localShadowCasters = casting && cascaded && rig.some(castsLocalShadow) ? (sunShadow?.casters ?? this.castersNow(moved)) : null;
     const lights = local ? local.lights : rig;
     // First-person with a sky dome: paint the panorama through the camera, then
     // composite the meshes over it (background null) — backend-agnostic, since
@@ -1139,6 +1143,7 @@ export class MeshOverlaySurface implements DisplaySurface {
         local: local?.shadows ?? null,
         shadow,
         sunShadow,
+        localShadowCasters,
         antialias,
       });
       if (profiler) profiler.add("scene", performance.now() - mark);
@@ -1265,6 +1270,7 @@ export class MeshOverlaySurface implements DisplaySurface {
       readonly local: LocalShadows | null;
       readonly shadow: ShadowInput | null;
       readonly sunShadow: SunShadow | null;
+      readonly localShadowCasters: readonly MeshSceneInstance[] | null;
       readonly antialias: boolean;
     },
   ): void {
@@ -1296,7 +1302,7 @@ export class MeshOverlaySurface implements DisplaySurface {
       temporal: this.options.temporal === true && this.quality.temporal === true,
       reflections: this.options.reflections === true && this.quality.reflections === true,
       ...(this.options.prepass === true ? { prepass: true } : {}),
-      ...(lighting ? { ...lit, localShadows: job.local, shadow: job.shadow, sunShadow: job.sunShadow, fog: lighting.fog ?? null, wind: lighting.wind ?? null } : {}),
+      ...(lighting ? { ...lit, localShadows: job.local, shadow: job.shadow, sunShadow: job.sunShadow, localShadowCasters: job.localShadowCasters, fog: lighting.fog ?? null, wind: lighting.wind ?? null } : {}),
       time,
     };
     const scene = this.renderer.renderToTexture!(job.drawn, draw) ?? null;
@@ -1878,16 +1884,26 @@ export class MeshOverlaySurface implements DisplaySurface {
    * The cascades reach the rig's shadow distance, or one fitted to the scene;
    * a caster may stand as far again beyond them toward the sun.
    */
-  private buildSunShadow(moved: readonly MeshSceneInstance[], lighting: SceneLighting): SunShadow | null {
-    const toLight = sceneLightingKeyDirection(lighting);
-    if (!lighting.shadows || !this.quality.shadows || !toLight) return null;
+  /**
+   * What casts on the AAA tier this frame (F2a, F2d): the still casters
+   * (gathered again only when the static key changes, as the CPU maps redraw)
+   * and what moved, foliage only within its cull distance and as its full
+   * copies.
+   */
+  private castersNow(moved: readonly MeshSceneInstance[]): readonly MeshSceneInstance[] {
     const key = this.staticShadowKey();
     if (this.sunCasters?.key !== key) this.sunCasters = { key, still: this.stillCasters() };
     const inReach = (list: readonly MeshSceneInstance[]) => (this.foliage.size > 0 ? list.filter((i) => this.foliageCasts(i)) : list);
     const still = inReach(this.sunCasters.still);
+    return moved.length > 0 ? [...still, ...inReach(moved)] : still;
+  }
+
+  private buildSunShadow(moved: readonly MeshSceneInstance[], lighting: SceneLighting): SunShadow | null {
+    const toLight = sceneLightingKeyDirection(lighting);
+    if (!lighting.shadows || !this.quality.shadows || !toLight) return null;
     const span = Math.max(this.scene.bounds.radius, this.scene.extent?.radius ?? 0) * 2;
     return {
-      casters: moved.length > 0 ? [...still, ...inReach(moved)] : still,
+      casters: this.castersNow(moved),
       toLight,
       distance: lighting.shadowDistance ?? Math.min(CASCADE_DISTANCE_MAX, Math.max(CASCADE_DISTANCE_MIN, span)),
       size: this.quality.cascadeMapSize ?? CASCADE_MAP_SIZE,
