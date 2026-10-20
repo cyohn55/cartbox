@@ -37,6 +37,22 @@ import type { RenderCaps } from "../models.js";
 import type { RenderStats } from "../debug/profiler.js";
 import { applyRenderCaps, createTextureBudgetCache } from "./renderCaps.js";
 
+/** The sun's GPU shadow cascades for a frame (F2a; see {@link SceneDraw.sunShadow}). */
+export interface SunShadow {
+  /** Everything that casts this frame, seen by the camera or not. */
+  readonly casters: readonly MeshSceneInstance[];
+  /** Toward the sun (the key light's direction). */
+  readonly toLight: readonly [number, number, number];
+  /** How far from the camera the cascades reach (world units). */
+  readonly distance: number;
+  /** Each cascade's edge in texels. */
+  readonly size: number;
+  /** How far beyond a cascade's slice a caster may stand toward the sun (world units). */
+  readonly reach: number;
+  /** How dark a shadow is, 0 (none) to 1 (default). */
+  readonly strength?: number;
+}
+
 /** One frame's worth of drawing parameters — mirrors `renderMeshScene`'s options. */
 export interface SceneDraw {
   readonly width: number;
@@ -129,6 +145,15 @@ export interface SceneDraw {
   readonly lights?: readonly SceneLight[] | null;
   /** Shadow maps of the spot and point lights that cast (EP8c), indexed by their `shadowTile`. See {@link LocalShadows}. */
   readonly localShadows?: LocalShadows | null;
+  /**
+   * The sun's shadow rendered on the GPU in cascades (AAA_FIDELITY_ROADMAP.md
+   * F2a), in place of the CPU-rasterised {@link shadow}: what casts (the whole
+   * scene's casters, not just what the camera sees), the direction toward the
+   * sun, how far from the camera it shadows, each cascade's map size, and how
+   * far beyond a cascade's slice a caster may stand between it and the sun.
+   * Only the linear-light (AAA) WebGPU renderer draws it; the others ignore it.
+   */
+  readonly sunShadow?: SunShadow | null;
   /**
    * Distance fog for PBR (Modern-tier) materials, applied after tone mapping, or
    * omitted for none. Both backends fade by the fragment's eye depth. See
@@ -226,6 +251,11 @@ export interface SceneRenderer {
   resize?(width: number, height: number): void;
   /** The GPU device a {@link renderToTexture} texture belongs to, so a compositor can share it. */
   readonly gpuDevice?: unknown;
+  /**
+   * True when it draws the sun's shadow itself from {@link SceneDraw.sunShadow}
+   * (F2a: the AAA tier's GPU cascades) and ignores a CPU {@link SceneDraw.shadow}.
+   */
+  readonly sunCascades?: boolean;
   /**
    * The block-compressed formats this renderer uploads a texture's
    * {@link DecodedTexture.gpu} chain in, preferred first (AAA_FIDELITY_ROADMAP.md
@@ -336,9 +366,14 @@ export class CappedSceneRenderer implements SceneRenderer {
     return this.inner.textureFormats;
   }
 
+  get sunCascades(): boolean | undefined {
+    return this.inner.sunCascades;
+  }
+
   get renderToTexture(): SceneRenderer["renderToTexture"] {
     const inner = this.inner;
     if (!inner.renderToTexture) return undefined;
+    // The sun's casters go through as they are: depth alone, and a budget cut would drop shadows off-screen at random.
     return (instances, draw) => inner.renderToTexture!(applyRenderCaps(instances, this.caps, this.cache), draw);
   }
 

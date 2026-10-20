@@ -707,6 +707,8 @@ export {
   INFINITE_TINTS,
   MAX_SCENE_TINTS,
   parseSceneLighting,
+  MAX_SHADOW_DISTANCE,
+  MIN_SHADOW_DISTANCE,
   patchSceneLighting,
   updateSceneEnvironment,
   addSceneLight,

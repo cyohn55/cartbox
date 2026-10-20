@@ -16,13 +16,17 @@ import {
   composeModelMatrix,
   defaultSceneLighting,
   orthographicMatrix,
+  parseSceneLighting,
   patchSceneLighting,
+  sceneLightingKeyDirection,
+  MAX_SHADOW_DISTANCE,
+  MIN_SHADOW_DISTANCE,
   sunShadowVisibility,
   viewMatrix,
   type MeshAsset,
   type ShadowInput,
 } from "@cartbox/editor";
-import { MeshOverlaySurface, QUALITY_PRESETS, type SceneDraw, type SceneRenderer } from "@cartbox/player";
+import { MeshOverlaySurface, QUALITY_PRESETS, type GpuSceneDraw, type SceneDraw, type SceneRenderer } from "@cartbox/player";
 
 describe("choosing a map", () => {
   // Main map: everything lit (depth 1). Near map: everything shadowed (depth −1, so any point is behind it).
@@ -176,5 +180,58 @@ describe("the mesh overlay's near cascade", () => {
     surface.blit(new Uint8Array(32 * 24 * 4));
     expect(s.draws.at(-1)!.shadow).toBeTruthy();
     expect(s.draws.at(-1)!.shadow!.near ?? null).toBeNull();
+  });
+});
+
+describe("the AAA tier's sun cascades (F2a)", () => {
+  // A GPU renderer that shadows the sun itself, presented on the GPU.
+  function cascaded(): SceneRenderer & { draws: GpuSceneDraw[] } {
+    const draws: GpuSceneDraw[] = [];
+    return { backend: "webgpu", sunCascades: true, draws, render: () => {}, renderToTexture: (_i, draw) => (draws.push(draw), {}), dispose: () => {} };
+  }
+  const presenter = { present: () => {}, stats: { luminance: null, sun: null } } as any;
+
+  it("hands the renderer the casters and the sun in place of a CPU map", async () => {
+    const r = cascaded();
+    const surface = await MeshOverlaySurface.create({ blit() {}, destroy() {} }, 32, 24, scene(), r, { presenter });
+    surface.setCameraOverride(camera(1, 1));
+    surface.blit(new Uint8Array(32 * 24 * 4));
+    const draw = r.draws.at(-1)!;
+    expect(draw.shadow ?? null).toBeNull();
+    expect(draw.sunShadow!.casters).toHaveLength(3);
+    expect(draw.sunShadow!.toLight).toEqual(sceneLightingKeyDirection(lighting));
+    // Fitted to the scene (radius 17): its span, within the bounds.
+    expect(draw.sunShadow!.distance).toBe(34);
+    expect(draw.sunShadow!.reach).toBe(34);
+    expect(draw.sunShadow!.size).toBeGreaterThanOrEqual(2048);
+    // The still casters are gathered once, not every frame.
+    surface.blit(new Uint8Array(32 * 24 * 4));
+    expect(r.draws.at(-1)!.sunShadow!.casters).toBe(draw.sunShadow!.casters);
+  });
+
+  it("reaches the rig's own shadow distance, and casts nothing with shadows off", async () => {
+    const near = await MeshOverlaySurface.create({ blit() {}, destroy() {} }, 32, 24, { ...scene(), lighting: patchSceneLighting(lighting, { shadowDistance: 60 }) }, cascaded(), { presenter });
+    const r = (near as any).renderer as ReturnType<typeof cascaded>;
+    near.setCameraOverride(camera(1, 1));
+    near.blit(new Uint8Array(32 * 24 * 4));
+    expect(r.draws.at(-1)!.sunShadow!.distance).toBe(60);
+    const off = cascaded();
+    const dark = await MeshOverlaySurface.create({ blit() {}, destroy() {} }, 32, 24, { ...scene(), lighting: patchSceneLighting(lighting, { shadows: false }) }, off, { presenter });
+    dark.setCameraOverride(camera(1, 1));
+    dark.blit(new Uint8Array(32 * 24 * 4));
+    expect(off.draws.at(-1)!.sunShadow ?? null).toBeNull();
+    expect(off.draws.at(-1)!.shadow ?? null).toBeNull();
+  });
+});
+
+describe("a rig's sun-shadow distance", () => {
+  it("parses within its bounds, and clears back to fitting the scene", () => {
+    expect(parseSceneLighting({ ...lighting, shadowDistance: 80 })?.shadowDistance).toBe(80);
+    expect(parseSceneLighting({ ...lighting, shadowDistance: 1 })?.shadowDistance).toBe(MIN_SHADOW_DISTANCE);
+    expect(parseSceneLighting({ ...lighting, shadowDistance: 1e9 })?.shadowDistance).toBe(MAX_SHADOW_DISTANCE);
+    expect("shadowDistance" in (parseSceneLighting({ ...lighting, shadowDistance: -3 }) ?? {})).toBe(false);
+    const set = patchSceneLighting(lighting, { shadowDistance: 120 });
+    expect(set.shadowDistance).toBe(120);
+    expect("shadowDistance" in patchSceneLighting(set, { shadowDistance: undefined })).toBe(false);
   });
 });

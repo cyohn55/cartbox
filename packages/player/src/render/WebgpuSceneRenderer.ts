@@ -124,14 +124,15 @@ import {
   type ReflectionProbeSet,
 } from "@cartbox/editor";
 
-import { SoftwareSceneRenderer, applyScenePasses, type FrameState, type GpuSceneDraw, type SceneDraw, type SceneRenderer } from "./sceneRenderer.js";
+import { SoftwareSceneRenderer, applyScenePasses, type FrameState, type GpuSceneDraw, type SceneDraw, type SceneRenderer, type SunShadow } from "./sceneRenderer.js";
 import { webgpuCanHonour } from "./renderCaps.js";
 import { batchInstances, compositeFrame, presentFrame, softEdges, type PrimitiveTextures } from "./gpuFrame.js";
-import { FrameGraph, GraphTimer, TransientPool, type FrameResource, type PassContext } from "./frameGraph.js";
+import { FrameGraph, GraphTimer, TransientPool, timingSpan, type FrameResource, type PassContext } from "./frameGraph.js";
 import { MAX_ANISOTROPY, MipmapGenerator, coverageMips, hasTransparency, mipLevelCount, uploadCompressed } from "./mipmaps.js";
 import { compressedFormatsFor } from "../lighting/webgpuDevice.js";
 import { brdfWgsl, dfgTable } from "./brdf.js";
 import { IBL_LEVELS, IblBuilder, SH_IRRADIANCE_WGSL, environmentKey, environmentPanorama, environmentSh } from "./ibl.js";
+import { CASCADE_COUNT, CASCADE_SHADOW_WGSL, fitCascades, type Cascade } from "./cascades.js";
 import { REACTIVE_MASK_WGSL, TEMPORAL_SHARPEN_WGSL, TemporalState, hdrTemporalShaderWgsl, temporalShaderWgsl } from "./temporal.js";
 import { reflectionShaderWgsl, reflectionUniforms } from "./reflections.js";
 import type { RenderStats } from "../debug/profiler.js";
@@ -157,6 +158,22 @@ import {
   refractionCamera,
 } from "./scenePacking.js";
 
+/** The sun's GPU cascades (F2a): their depth array, its comparison sampler, each cascade's light view, and the depth-only pipeline. */
+interface CascadeResources {
+  /** depth32float, `size`² × {@link CASCADE_COUNT} layers (1×1 until a frame casts). */
+  texture: any;
+  size: number;
+  readonly sampler: any;
+  readonly views: readonly { readonly buffer: any; readonly group: any }[];
+  /**
+   * Group 0 for the casters: the uniforms and instance transforms alone, since the
+   * draws' own group binds the map these passes write.
+   */
+  readonly casterLayout: any;
+  /** Null on the byte-space renderer, which never draws them. */
+  readonly pipeline: any;
+}
+
 /** One shader variant's pipelines: opaque, blended and added (EP6). */
 interface PipelineSet {
   readonly opaque: any;
@@ -172,8 +189,15 @@ export const GBUFFER_FORMAT = "rgba16float";
 /** The velocity buffer's format (F0c): screen motion since last frame, in UV units. */
 export const VELOCITY_FORMAT = "rg16float";
 
-/** The per-frame globals' bytes (WGSL `Frame`): cluster params and info, the near cascade's matrix and params. */
-const FRAME_BYTES = 336;
+/** The per-frame globals' bytes (WGSL `Frame`): cluster params and info, the near cascade's matrix and params, and the sun's GPU cascades (F2a). */
+const FRAME_BYTES = 640;
+
+/** Floats into `Frame` where the sun's GPU cascades start (F2a): four matrices, then the slices' far depths, the flags and the texels. */
+const FRAME_CASCADES = 84;
+
+/** The cascades the linear-light renderer gives a caller that passes only a CPU shadow map (F2a): how far they reach, and their size. */
+const FALLBACK_CASCADE_DISTANCE = 80;
+const FALLBACK_CASCADE_SIZE = 2048;
 
 /** Staging buffers in flight. Three lets a readback land while two more queue. */
 const READBACK_BUFFERS = 3;
@@ -387,6 +411,10 @@ struct Frame {
   probeCount: vec4<f32>,  // probes per axis
   envSh: array<vec4<f32>, 9>, // F3a: the environment's L2 SH irradiance over π (linear variant)
   envInfo: vec4<f32>,         // F3a: x = the prefiltered cube's top mip
+  cascadeVp: array<mat4x4<f32>, ${CASCADE_COUNT}>, // F2a: the sun's cascades, world → light clip (depth 0..1)
+  cascadeFar: vec4<f32>,      // F2a: each slice's far view depth
+  cascadeInfo: vec4<f32>,     // F2a: x = 1 with GPU cascades, y = map size, z = strength, w = the last cascade's far depth
+  cascadeTexel: vec4<f32>,    // F2a: each cascade's texel in world units
 };
 // One spot/point shadow tile (EP8c): world→clip, and params.xy = depth→distance terms.
 struct ShadowTile {
@@ -399,11 +427,15 @@ struct ShadowTile {
 @group(0) @binding(3) var mrTex: texture_2d<f32>;
 @group(0) @binding(4) var occTex: texture_2d<f32>;
 @group(0) @binding(5) var emisTex: texture_2d<f32>;
-// The shadow map: light-NDC depth in R, generated on the CPU by renderShadowMap
+${hdr
+  ? `// The sun's cascades (F2a), rendered on the GPU: the linear-light renderer's shadow, in the slot the
+// byte-space one gives the CPU's map.
+@group(0) @binding(6) var cascadeMap: texture_depth_2d_array;`
+  : `// The shadow map: light-NDC depth in R, generated on the CPU by renderShadowMap
 // and uploaded as r32float, so the GPU samples the *same* map the software path
 // tests against. Unfilterable, read via textureLoad (nearest) — matching the
 // software compare exactly.
-@group(0) @binding(6) var shadowMap: texture_2d<f32>;
+@group(0) @binding(6) var shadowMap: texture_2d<f32>;`}
 ${hdr
   ? `// The environment as a GGX-prefiltered cube (F3a, ibl.ts): mip = roughness × top mip.
 @group(0) @binding(7) var envCube: texture_cube<f32>;`
@@ -462,7 +494,10 @@ struct Probe {
 @group(1) @binding(7) var sceneColour: texture_2d<f32>;
 ${hdr ? `${brdfWgsl(1, 8)}// The prefiltered cube's sampler: trilinear, so a roughness between levels blends them (F3a).
 @group(1) @binding(9) var envSamp: sampler;
-${SH_IRRADIANCE_WGSL}` : ""}
+${SH_IRRADIANCE_WGSL}
+// The comparison sampler that filters the cascades' tests (F2a).
+@group(1) @binding(11) var cascadeSamp: sampler_comparison;
+${CASCADE_SHADOW_WGSL}` : ""}
 // Optical depth of a fog layer thinning above base, along the ray from the eye
 // (height cy, rise dy, length len) over t in [t0, t1] — fogLayerDepth in skyDome.ts.
 fn fogLayer(d: f32, k: f32, base: f32, cy: f32, dy: f32, len: f32, t0: f32, t1: f32) -> f32 {
@@ -519,7 +554,14 @@ struct VSOut {
   @location(7) objPos: vec3<f32>,${hdr ? "\n  // The vertex's MikkTSpace frame in world space (F1c), each unit at the vertex: its tangent (w = 0 without one) and normal.\n  @location(8) tangent: vec4<f32>,\n  @location(9) frameNormal: vec3<f32>," : ""}
 };
 
-// Directional shadow test, mirroring rasterizeTriangle in meshRasterizer.ts:
+${hdr
+  ? `// The sun's shadow on the linear-light renderer: its GPU cascades (F2a), or none.
+fn shadowFactor(lightClip: vec4<f32>, worldPos: vec3<f32>, cosL: f32) -> f32 {
+  if (frame.cascadeInfo.x < 0.5) { return 1.0; }
+  return cascadeShadow(worldPos, cosL);
+}
+`
+  : `// Directional shadow test, mirroring rasterizeTriangle in meshRasterizer.ts:
 // project into the light's frame, look up the nearest depth the light sees, and
 // return 1 (lit) or 1−strength (occluded). The light is orthographic (w = 1).
 fn shadowTap(fx: f32, fy: f32, z: f32, ox: f32) -> f32 {
@@ -581,7 +623,7 @@ fn shadowFactor(lightClip: vec4<f32>, worldPos: vec3<f32>, cosL: f32) -> f32 {
   if (!inMain) { return 1.0; }
   return shadowAt(ndc, u.shadow.z, u.shadow2.x, 0.0, cosL);
 }
-
+`}
 // Analytic environment (Phase 3 IBL), mirroring environmentColor /
 // environmentAverage in meshRasterizer.ts: a sky/horizon/ground vertical
 // gradient sampled by a direction's Y. WGSL mix(a,b,k) = a+(b-a)*k, matching the
@@ -1375,6 +1417,16 @@ ${hdr
   return finishAlpha(toLinear(colour.rgb) * shade, colour.a);
 }
 
+${hdr ? `// --- The sun's cascades (AAA_FIDELITY_ROADMAP.md F2a) ---
+// A caster's depth as the sun sees it, through the cascade being drawn: the scene's
+// own vertex (its copy's transform, bent by the wind) and nothing else.
+@group(1) @binding(12) var<uniform> cascadeView: mat4x4<f32>;
+@vertex
+fn vs_shadow(@location(0) position: vec3<f32>, @location(5) sway: f32, @builtin(instance_index) instance: u32) -> @builtin(position) vec4<f32> {
+  let bend = windOffset(position.xz, sway);
+  return cascadeView * xf[instance].model * vec4<f32>(position.x + bend.x, position.y, position.z + bend.y, 1.0);
+}
+` : ""}
 // --- The depth prepass and thin G-buffer (AAA_FIDELITY_ROADMAP.md F0c) ---
 // A unit normal folded onto the octahedron, then the square: two signed numbers.
 fn octEncode(n: vec3<f32>) -> vec2<f32> {
@@ -1589,6 +1641,8 @@ export class WebgpuSceneRenderer implements SceneRenderer {
   private shadowMapSize = 0;
   /** Maps side by side in the shadow texture: 1, or 2 with a near cascade (EP8b). */
   private shadowCascades = 1;
+  /** This frame's GPU sun cascades (F2a), for the frame uniform; null when it casts none. */
+  private frameCascades: { readonly cascades: readonly Cascade[]; readonly size: number; readonly strength: number } | null = null;
   /** The near cascade's depth array last uploaded in full (as shadowUploaded is the main map's). */
   private nearUploaded: Float32Array | null = null;
 
@@ -1659,6 +1713,8 @@ export class WebgpuSceneRenderer implements SceneRenderer {
       probes: any;
       probesBlank: boolean;
       probeSource: LightProbeGrid | null;
+      /** The sun's GPU cascades (F2a). */
+      readonly cascades: CascadeResources;
       readonly makeGroups: (atlas: any, probes: any) => { blank: any; scene: any };
       /** The same groups for an anti-aliased frame: its multisampled blank and depth (I1). */
       readonly makeGroupsMs: (atlas: any, probes: any, blank: any, depth: any) => { blank: any; scene: any };
@@ -1782,8 +1838,9 @@ export class WebgpuSceneRenderer implements SceneRenderer {
           { binding: 4, visibility: SHADER_STAGE_FRAGMENT, texture: { sampleType: "float" } },
           { binding: 5, visibility: SHADER_STAGE_FRAGMENT, texture: { sampleType: "float" } },
           // The shadow map is r32float — not filterable — and read via textureLoad,
-          // so it declares unfilterable-float and needs no sampler.
-          { binding: 6, visibility: SHADER_STAGE_FRAGMENT, texture: { sampleType: "unfilterable-float" } },
+          // so it declares unfilterable-float and needs no sampler. The linear-light
+          // renderer binds the sun's GPU cascades here instead (F2a), compared by group 1's sampler.
+          { binding: 6, visibility: SHADER_STAGE_FRAGMENT, texture: hdr ? { sampleType: "depth", viewDimension: "2d-array" } : { sampleType: "unfilterable-float" } },
           // The equirectangular environment map (rgba8unorm), read via textureLoad.
           // The environment: its panorama, or (linear variant, F3a) its prefiltered cube.
           { binding: 7, visibility: SHADER_STAGE_FRAGMENT, texture: hdr ? { sampleType: "float", viewDimension: "cube" } : { sampleType: "float" } },
@@ -1828,6 +1885,8 @@ export class WebgpuSceneRenderer implements SceneRenderer {
         { binding: 8, visibility: SHADER_STAGE_FRAGMENT, buffer: { type: "read-only-storage" } },
         // The prefiltered environment cube's trilinear sampler (F3a).
         { binding: 9, visibility: SHADER_STAGE_FRAGMENT, sampler: { type: "filtering" } },
+        // The comparison sampler that filters the sun's GPU cascades (F2a; group 0 binds the cascades).
+        { binding: 11, visibility: SHADER_STAGE_FRAGMENT, sampler: { type: "comparison" } },
       ];
       const depthLayout = device.createBindGroupLayout({ entries: depthEntries(false) });
       const depthLayoutMs = device.createBindGroupLayout({ entries: depthEntries(true) });
@@ -1930,6 +1989,39 @@ export class WebgpuSceneRenderer implements SceneRenderer {
       const behindBlank = device.createTexture({ size: { width: 1, height: 1 }, format: colourFormat, usage: 0x04 | 0x02 });
       // The frame-sized targets the groups bind: a resize swaps them and remakes the groups (F0d).
       const sized = { depth: depthTexture, behind };
+      // The sun's cascades (F2a): a 1×1 stand-in until a frame casts, each cascade's light view, and the
+      // depth-only pipeline that draws them (the linear-light renderer's alone).
+      const cascadeLayout = device.createBindGroupLayout({ entries: [{ binding: 12, visibility: SHADER_STAGE_VERTEX, buffer: { type: "uniform" } }] });
+      const cascadeViews = Array.from({ length: CASCADE_COUNT }, () => {
+        const buffer = device.createBuffer({ size: 64, usage: 0x40 | 0x08 }); // UNIFORM | COPY_DST
+        return { buffer, group: device.createBindGroup({ layout: cascadeLayout, entries: [{ binding: 12, resource: { buffer } }] }) };
+      });
+      const casterLayout = device.createBindGroupLayout({
+        entries: [
+          { binding: 0, visibility: SHADER_STAGE_VERTEX, buffer: { type: "uniform", hasDynamicOffset: true, minBindingSize: UNIFORM_BYTES_USED } },
+          { binding: 10, visibility: SHADER_STAGE_VERTEX, buffer: { type: "read-only-storage" } },
+        ],
+      });
+      const cascades: CascadeResources = {
+        texture: device.createTexture({ size: { width: 1, height: 1, depthOrArrayLayers: CASCADE_COUNT }, format: "depth32float", usage: 0x10 | 0x04 }),
+        size: 0,
+        sampler: device.createSampler({ compare: "less-equal", magFilter: "linear", minFilter: "linear", addressModeU: "clamp-to-edge", addressModeV: "clamp-to-edge" }),
+        views: cascadeViews,
+        casterLayout,
+        pipeline: hdr
+          ? device.createRenderPipeline({
+              layout: device.createPipelineLayout({ bindGroupLayouts: [casterLayout, cascadeLayout] }),
+              vertex: {
+                module: device.createShaderModule({ code: sceneShader(null, false, hdr) }),
+                entryPoint: "vs_shadow",
+                buffers: [{ arrayStride: 64, attributes: [{ shaderLocation: 0, offset: 0, format: "float32x3" }, { shaderLocation: 5, offset: 44, format: "float32" }] }],
+              },
+              primitive: { topology: "triangle-list", cullMode: "none" },
+              // Slope-scaled bias as it rasterises, against acne on faces the sun grazes.
+              depthStencil: { format: "depth32float", depthWriteEnabled: true, depthCompare: "less", depthBias: 2, depthBiasSlopeScale: 1.5 },
+            })
+          : null,
+      };
       const makeGroups = (atlas: any, probes: any) => {
         const shared = [
           { binding: 1, resource: { buffer: clusterBuffers.table } },
@@ -1940,6 +2032,7 @@ export class WebgpuSceneRenderer implements SceneRenderer {
           { binding: 6, resource: probes.createView({ dimension: "3d" }) },
           { binding: 8, resource: { buffer: dfgBuffer } },
           { binding: 9, resource: iblSampler },
+          { binding: 11, resource: cascades.sampler },
         ];
         return {
           blank: device.createBindGroup({ layout: depthLayout, entries: [{ binding: 0, resource: blankDepth.createView() }, ...shared, { binding: 7, resource: behindBlank.createView() }] }),
@@ -1956,6 +2049,7 @@ export class WebgpuSceneRenderer implements SceneRenderer {
           { binding: 6, resource: probes.createView({ dimension: "3d" }) },
           { binding: 8, resource: { buffer: dfgBuffer } },
           { binding: 9, resource: iblSampler },
+          { binding: 11, resource: cascades.sampler },
         ];
         return {
           blank: device.createBindGroup({ layout: depthLayoutMs, entries: [{ binding: 0, resource: blank.createView() }, ...shared, { binding: 7, resource: behindBlank.createView() }] }),
@@ -1975,6 +2069,7 @@ export class WebgpuSceneRenderer implements SceneRenderer {
         probes: probesBlank,
         probesBlank: true,
         probeSource: null,
+        cascades,
         makeGroups,
         makeGroupsMs,
       };
@@ -2050,6 +2145,18 @@ export class WebgpuSceneRenderer implements SceneRenderer {
     } catch {
       return null;
     }
+  }
+
+  /** The sun's cascade maps (F2a) at `size`², made on a size change. */
+  private ensureCascadeTexture(size: number): void {
+    const groups = this.depthGroups;
+    const res = groups.cascades;
+    if (res.size === size) return;
+    destroySafely(res.texture);
+    res.texture = this.device.createTexture({ size: { width: size, height: size, depthOrArrayLayers: CASCADE_COUNT }, format: "depth32float", usage: 0x10 | 0x04 }); // RENDER_ATTACHMENT | TEXTURE_BINDING
+    res.size = size;
+    // Every draw's group 0 binds it (binding 6): their cached groups are stale.
+    this.bindGroups = new WeakMap();
   }
 
   /**
@@ -2189,6 +2296,11 @@ export class WebgpuSceneRenderer implements SceneRenderer {
     return this.device;
   }
 
+  /** The linear-light renderer shadows the sun in its own cascades (F2a). */
+  get sunCascades(): boolean {
+    return this.hdr;
+  }
+
   /** The colour targets' format: half-float in the linear HDR variant. */
   private get colourFormat(): string {
     return this.hdr ? "rgba16float" : "rgba8unorm";
@@ -2240,9 +2352,26 @@ export class WebgpuSceneRenderer implements SceneRenderer {
       return;
     }
 
-    this.ensureUniformCapacity(draws.length);
-    // With a prepass, the frame's motion transforms (F0c) follow its transforms in the instance buffer.
-    this.ensureInstanceCapacity(prepass ? instanceCount * 2 : instanceCount);
+    // The sun's cascades (F2a): fitted to the camera, drawn on the GPU from everything that casts
+    // (seen or not, opaque and cut-out, as the CPU map draws), and tested by the linear-light shader.
+    // A caller that hands the linear-light renderer only a CPU map gets cascades of what it draws instead.
+    const sun: SunShadow | null =
+      this.hdr && this.depthGroups.cascades.pipeline
+        ? (draw.sunShadow ??
+          (draw.shadow && draw.lightDirection
+            ? { casters: instances, toLight: draw.lightDirection, distance: FALLBACK_CASCADE_DISTANCE, size: FALLBACK_CASCADE_SIZE, reach: FALLBACK_CASCADE_DISTANCE, strength: draw.shadow.strength ?? 1 }
+            : null))
+        : null;
+    const casting = sun ? batchInstances(sun.casters, (mesh) => this.uploadMesh(mesh), cameraPositionFromView(draw.view)) : null;
+    const casters = casting ? casting.batches.filter((entry) => entry.alpha < 2 && !entry.refract) : [];
+    const cascadeFit = sun && casters.length > 0 ? fitCascades({ view: draw.view, projection: draw.projection, toLight: sun.toLight, distance: sun.distance, size: sun.size, reach: sun.reach }) : null;
+    this.frameCascades = cascadeFit && sun ? { cascades: cascadeFit, size: sun.size, strength: sun.strength ?? 1 } : null;
+    if (cascadeFit && sun) this.ensureCascadeTexture(sun.size);
+
+    this.ensureUniformCapacity(draws.length + casters.length);
+    // With a prepass, the frame's motion transforms (F0c) follow its transforms in the instance buffer; the casters' follow those.
+    const casterBase = prepass ? instanceCount * 2 : instanceCount;
+    this.ensureInstanceCapacity(casterBase + (casting?.instanceCount ?? 0));
     // Resolved once: the light and view direction are per frame, not per draw, and
     // normalising them per primitive would be the same answer computed many times.
     const light = resolveLight(draw.lightDirection, draw.ambient);
@@ -2252,7 +2381,8 @@ export class WebgpuSceneRenderer implements SceneRenderer {
     // Shadow map: the CPU-generated map (renderShadowMap) uploaded as r32float so
     // the GPU samples the *same* depths the software path tests against. `size` 0
     // restores the blank when this frame casts no shadow.
-    const shadow = draw.shadow ?? null;
+    // The linear-light renderer never samples it: its sun's shadow is the GPU cascades (F2a).
+    const shadow = this.hdr ? null : (draw.shadow ?? null);
     this.ensureShadowTexture(shadow ? shadow.size : 0, shadow?.near ? 2 : 1);
     if (shadow?.near) {
       // The near cascade (EP8b), to the right of the main map: its changed region, or all of it.
@@ -2331,28 +2461,9 @@ export class WebgpuSceneRenderer implements SceneRenderer {
     const viewProjThen = this.lastViewProj ?? viewProjNow;
     const windNow = windUniform(draw.wind, draw.time ?? 0);
     const windThen = this.lastWind ?? windNow;
-    let next = 0;
-    draws.forEach((entry, index) => {
-      entry.first = next;
-      for (const model of entry.models) {
-        writeInstanceTransform(this.instanceData, next, {
-          mvp: multiplyMat4(viewProj, model),
-          lightMvp: shadow ? multiplyMat4(shadow.lightViewProj, model) : null,
-          model,
-          normalBasis: normalBasis3x3(model),
-        });
-        if (prepass) {
-          writeInstanceTransform(this.instanceData, instanceCount + next, {
-            mvp: multiplyMat4(viewProjNow, model),
-            lightMvp: multiplyMat4(viewProjThen, this.motion.get(model) ?? model),
-            model,
-            normalBasis: IDENTITY_BASIS,
-          });
-        }
-        next += 1;
-      }
-      // The batch's material uniforms. The transform fields are the first
-      // copy's; the shader reads every copy's own from the instance buffer.
+    // A batch's material uniforms. The transform fields are the first
+    // copy's; the shader reads every copy's own from the instance buffer.
+    const uniformOf = (entry: (typeof draws)[number]) => {
       const model = entry.models[0]!;
       const pbr = resolvePbr(
         entry.primitive.material,
@@ -2360,7 +2471,7 @@ export class WebgpuSceneRenderer implements SceneRenderer {
         entry.textures.occ !== null,
         entry.textures.emis !== null,
       );
-      writeInstanceUniform(this.uniformData, index, {
+      return {
         mvp: multiplyMat4(viewProj, model),
         normalBasis: normalBasis3x3(model),
         baseColor: entry.primitive.material.baseColorFactor,
@@ -2400,10 +2511,42 @@ export class WebgpuSceneRenderer implements SceneRenderer {
         materialId: materialId(entry.primitive.material),
         windBefore: entry.primitive.sway ? windThen : null,
         motionBase: prepass ? instanceCount : 0,
-      });
+      };
+    };
+    let next = 0;
+    draws.forEach((entry, index) => {
+      entry.first = next;
+      for (const model of entry.models) {
+        writeInstanceTransform(this.instanceData, next, {
+          mvp: multiplyMat4(viewProj, model),
+          lightMvp: shadow ? multiplyMat4(shadow.lightViewProj, model) : null,
+          model,
+          normalBasis: normalBasis3x3(model),
+        });
+        if (prepass) {
+          writeInstanceTransform(this.instanceData, instanceCount + next, {
+            mvp: multiplyMat4(viewProjNow, model),
+            lightMvp: multiplyMat4(viewProjThen, this.motion.get(model) ?? model),
+            model,
+            normalBasis: IDENTITY_BASIS,
+          });
+        }
+        next += 1;
+      }
+      writeInstanceUniform(this.uniformData, index, uniformOf(entry));
     });
-    this.device.queue.writeBuffer(this.uniformBuffer, 0, this.uniformData, 0, draws.length * UNIFORM_FLOATS);
-    this.device.queue.writeBuffer(this.instanceBuffer, 0, this.instanceData, 0, (prepass ? 2 : 1) * instanceCount * INSTANCE_FLOATS);
+    // The casters (F2a): each copy's model in the instance buffer after the frame's, their uniforms after the draws'.
+    let nextCaster = casterBase;
+    casters.forEach((entry, k) => {
+      entry.first = nextCaster;
+      for (const model of entry.models) {
+        writeInstanceTransform(this.instanceData, nextCaster, { mvp: model, lightMvp: null, model, normalBasis: IDENTITY_BASIS });
+        nextCaster += 1;
+      }
+      writeInstanceUniform(this.uniformData, draws.length + k, uniformOf(entry));
+    });
+    this.device.queue.writeBuffer(this.uniformBuffer, 0, this.uniformData, 0, (draws.length + casters.length) * UNIFORM_FLOATS);
+    this.device.queue.writeBuffer(this.instanceBuffer, 0, this.instanceData, 0, nextCaster * INSTANCE_FLOATS);
     this.lastViewProj = viewProjNow;
     this.lastWind = windNow;
     let triangles = 0;
@@ -2490,6 +2633,48 @@ export class WebgpuSceneRenderer implements SceneRenderer {
     const target = msColour ?? colour;
     const rayTargets = msaa ? raysMs : rays;
     const opaqueEnd = seeThrough ? firstSeeThrough : draws.length;
+
+    // The sun's cascades (F2a): each drawn from the casters into its layer of the map, before
+    // anything shades against it. The scene passes read it through group 1, so the graph keeps it.
+    if (cascadeFit) {
+      const res = this.depthGroups.cascades;
+      cascadeFit.forEach((c, i) => this.device.queue.writeBuffer(res.views[i]!.buffer, 0, new Float32Array(c.viewProj)));
+      const map = graph.importTexture("cascades", res.texture);
+      graph.addPass("shadow cascades", "render", (pass) => {
+        pass.write(map);
+        pass.keep();
+        return (ctx) => {
+          const group = this.device.createBindGroup({
+            layout: res.casterLayout,
+            entries: [
+              { binding: 0, resource: { buffer: this.uniformBuffer, offset: 0, size: UNIFORM_STRIDE } },
+              { binding: 10, resource: { buffer: this.instanceBuffer } },
+            ],
+          });
+          cascadeFit.forEach((_, i) => {
+            const encoded = ctx.encoder.beginRenderPass({
+              colorAttachments: [],
+              depthStencilAttachment: {
+                view: ctx.texture(map).createView({ dimension: "2d", baseArrayLayer: i, arrayLayerCount: 1 }),
+                depthClearValue: 1,
+                depthLoadOp: "clear",
+                depthStoreOp: "store",
+              },
+              ...timingSpan(ctx.timing, i, cascadeFit.length),
+            });
+            encoded.setPipeline(res.pipeline);
+            encoded.setBindGroup(1, res.views[i]!.group);
+            casters.forEach((entry, k) => {
+              encoded.setBindGroup(0, group, [(draws.length + k) * UNIFORM_STRIDE]);
+              encoded.setVertexBuffer(0, entry.geometry.vertexBuffer);
+              encoded.setIndexBuffer(entry.geometry.indexBuffer, "uint32");
+              encoded.drawIndexed(entry.geometry.indexCount, entry.models.length, 0, 0, entry.first);
+            });
+            encoded.end();
+          });
+        };
+      });
+    }
 
     // The depth prepass and thin G-buffer (F0c): the opaque depth, and the
     // G-buffer (the renderer's own, so it outlives the frame for what reads it).
@@ -2932,6 +3117,14 @@ export class WebgpuSceneRenderer implements SceneRenderer {
       frame.set(this.iblSh, 44);
       frame.set([IBL_LEVELS - 1], 80);
     }
+    // The sun's cascades (F2a): each one's world → light clip, the slices' far depths, the flags and the texels.
+    const sun = this.frameCascades;
+    if (sun) {
+      sun.cascades.forEach((c, i) => frame.set(c.viewProj, FRAME_CASCADES + i * 16));
+      frame.set(sun.cascades.map((c) => c.far), FRAME_CASCADES + 64);
+      frame.set([1, sun.size, sun.strength, sun.cascades[sun.cascades.length - 1]!.far], FRAME_CASCADES + 68);
+      frame.set(sun.cascades.map((c) => c.texel), FRAME_CASCADES + 72);
+    }
     this.device.queue.writeBuffer(buffers.params, 0, frame);
     this.uploadLocalShadows(local);
     return { ordered, globalCount, clusters };
@@ -3109,7 +3302,7 @@ export class WebgpuSceneRenderer implements SceneRenderer {
         // The active shadow map (or the 1x1 blank). Its identity only moves on a
         // size change, which invalidates this whole cache, so a cached group
         // always references the current one.
-        { binding: 6, resource: this.shadowTexture.createView() },
+        { binding: 6, resource: this.hdr ? this.depthGroups.cascades.texture.createView({ dimension: "2d-array" }) : this.shadowTexture.createView() },
         // The active env map (or the 1x1 white blank); likewise cache-invalidated.
         { binding: 7, resource: this.hdr ? this.envTexture.createView({ dimension: "cube" }) : this.envTexture.createView() },
         // The active SSAO buffer (or the 1x1 blank); likewise cache-invalidated.
@@ -3252,6 +3445,8 @@ export class WebgpuSceneRenderer implements SceneRenderer {
     this.software.dispose();
     destroySafely(this.colourTexture);
     destroySafely(this.depthTexture);
+    destroySafely(this.depthGroups.cascades.texture);
+    for (const view of this.depthGroups.cascades.views) destroySafely(view.buffer);
     if (this.msaa) {
       destroySafely(this.msaa.depth);
       destroySafely(this.msaa.blank);

@@ -368,6 +368,27 @@ Everything else depends on this track. It contains no visible "feature", but its
   - Practical (log-linear) splits, cascade blending and a shadow-distance control.
   - Hardware comparison sampling, filtered with Poisson PCF or **PCSS** for contact-hardening penumbrae.
   - 2048–4096 per cascade, by level.
+  - **F2a-1, four GPU cascades: done.** On `aaa` the sun's shadow is no longer rasterised on the CPU. The linear-light renderer draws it itself, on the GPU, every frame (`cascades.ts`, `WebgpuSceneRenderer.ts`).
+    - **Fitting.** The view out to the shadow distance is cut by practical splits (λ = 0.75).
+      - Each slice is covered by its bounding sphere, whose size depends only on its depths and the lens, so a cascade never resizes as the camera turns.
+      - The sphere's centre snaps to the cascade's texel grid in the sun's frame, so an edge moves only in whole texels as the camera moves.
+      - Each light backs off by a reach (the scene's span) beyond its slice, so a tower outside the view still shades it.
+    - **Drawing.** Each cascade is a depth-only pass into one layer of a `depth32float` array (2048² by default, or the quality preset's map if larger), with slope-scaled raster bias. Wind bends the casters as it bends what is drawn.
+      - What casts comes from the player, not the camera's draw list: everything still and casting (gathered again only when the posed set changes, as the CPU map redraws) plus what moved this frame.
+      - Cut-out casters still draw solid, as on the CPU map; alpha-tested casters are F2a-2.
+    - **Testing.** A point is tested in the first cascade that holds it, pushed toward the sun by one to nine texels as the light grazes, and filtered over a 3×3 grid of hardware comparisons, each itself bilinear.
+      - The outer tenth of a cascade fades into the next, and past the last into full light.
+    - **The shadow distance.** It is the rig's `shadowDistance` (the Lighting tab's *AAA shadow reach*, 5–2000 m), or the scene's span held to 30–400 m when it sets none.
+      - A caller that gives the linear-light renderer only a CPU map gets cascades of what it draws, 80 m out.
+      - The other tiers keep the CPU map and its near cascade unchanged.
+    - **Captures** (SwiftShader, 1920×1080):
+      - Lockout's overview keeps its shadow layout. Lit deck tiles show as they did (0.73 against 0.72), so nothing self-shadows.
+      - The frame reads darker (0.535 against 0.60) because this session's sky was darker, which lowers the sky's fill. The time the match took to load moved the sky, not the shadow.
+      - Settling the views took as long as before (16 minutes against 13 to 17).
+    - *Tests:*
+      - `cascades.test.ts`: the splits lean logarithmic; the lens reads off the projection; each slice's corners fall inside its cascade, at depth 0 to 1; a caster toward the sun stays in front of the light. Turning the camera never resizes a cascade, and moving it moves a point by whole texels (fails without the snap).
+      - `cascade-shadows.test.ts` (Dawn): the cascades leave the lit floor as it was, and a box the camera never draws darkens the floor under it to under 0.05.
+      - `shadowCascade.test.ts`: on a GPU-presented AAA frame the player hands over the casters and sun in place of a CPU map, gathers the still ones once, reaches the rig's distance, and casts nothing with shadows off; the distance parses within its bounds and clears.
 - [ ] **F2b. Virtual shadow maps.**
   - A 16K virtual shadow map, paged from a physical pool, with pages marked by the depth buffer and cached between frames for static geometry.
   - This is what makes shadow detail hold at every distance in UE5. It falls back to F2a on Medium and below.

@@ -307,6 +307,22 @@ export function LightingEditor({ lighting, onChange }: LightingEditorProps) {
           { id: "soft", label: "Soft", hint: "Wide, soft penumbrae for a daylight sun (16 shadow-map taps a pixel instead of 4)" },
         ]}
       />
+      {lighting.shadows && (
+        <>
+          <RangeControl
+            label="AAA shadow reach"
+            nested
+            min={0}
+            max={500}
+            step={5}
+            value={lighting.shadowDistance ?? 0}
+            display={lighting.shadowDistance ? `${lighting.shadowDistance} m` : "Fit scene"}
+            onChange={(value) => onChange(patchSceneLighting(lighting, { shadowDistance: value >= 5 ? value : undefined }))}
+            ariaLabel="AAA shadow reach"
+          />
+          <RailHint>How far from the camera the AAA tier's four sun cascades reach: nearer is sharper. The other tiers' one map covers the whole scene.</RailHint>
+        </>
+      )}
 
       <div className={`${styles.groupLabel} ${styles.railSubLabel}`} style={{ marginTop: 8 }}>
         Lights · {lighting.lights.length}
