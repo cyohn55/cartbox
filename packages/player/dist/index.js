@@ -4555,8 +4555,8 @@ function applyPostVolumes(base, post) {
 // src/quality.ts
 var QUALITY_LEVELS = ["low", "medium", "high"];
 var QUALITY_PRESETS = {
-  high: { level: "high", shadows: true, shadowMapSize: 1024, shadowCascades: true, maxRenderScale: 1, disabledEffects: [], terrainDetail: 1, antialias: true, temporal: true, reflections: true, skyScale: 3 },
-  medium: { level: "medium", shadows: true, shadowMapSize: 512, maxRenderScale: 0.75, disabledEffects: [], terrainDetail: 0.6, antialias: true, temporal: true, reflections: true, skyScale: 3 },
+  high: { level: "high", shadows: true, shadowMapSize: 1024, shadowCascades: true, cascadeMapSize: 4096, maxRenderScale: 1, disabledEffects: [], terrainDetail: 1, antialias: true, temporal: true, reflections: true, skyScale: 3 },
+  medium: { level: "medium", shadows: true, shadowMapSize: 512, cascadeMapSize: 2048, maxRenderScale: 0.75, disabledEffects: [], terrainDetail: 0.6, antialias: true, temporal: true, reflections: true, skyScale: 3 },
   low: { level: "low", shadows: false, shadowMapSize: 512, maxRenderScale: 0.5, disabledEffects: ["bloom", "chroma"], terrainDetail: 0.3, antialias: false, temporal: false, reflections: false, skyScale: 4 }
 };
 function detectQuality(hints) {
@@ -11671,6 +11671,155 @@ function capsConstrainScene(caps) {
   return caps.polyBudget > 0 || caps.textureCacheBytes > 0;
 }
 
+// src/render/cascades.ts
+import { viewMatrix as viewMatrix2 } from "@cartbox/editor";
+var CASCADE_COUNT = 4;
+var CASCADE_FORMAT = "depth16unorm";
+var CASCADE_LAMBDA = 0.75;
+var CASCADE_BLEND = 0.1;
+var SUN_SOFTNESS = Math.tan(0.53 * Math.PI / 180);
+var PENUMBRA_MAX_TEXELS = 16;
+function cascadeSplits(near, far, count = CASCADE_COUNT, lambda = CASCADE_LAMBDA) {
+  const n = Math.max(1e-3, near);
+  const f3 = Math.max(n * 1.001, far);
+  const out = [];
+  for (let i = 1; i <= count; i += 1) {
+    const t = i / count;
+    out.push(lambda * n * (f3 / n) ** t + (1 - lambda) * (n + (f3 - n) * t));
+  }
+  out[count - 1] = f3;
+  return out;
+}
+function perspectiveLens(projection) {
+  const p10 = projection[10];
+  const p14 = projection[14];
+  return { near: p14 / (p10 - 1), far: p14 / (p10 + 1), tanX: 1 / projection[0], tanY: 1 / projection[5] };
+}
+function sliceSphere(d0, d1, tanX, tanY) {
+  const k2 = tanX * tanX + tanY * tanY;
+  const c = Math.min(d1, Math.max(d0, (d1 * d1 - d0 * d0) * (1 + k2) / (2 * (d1 - d0))));
+  const near = Math.hypot(d0 * Math.sqrt(k2), c - d0);
+  const far = Math.hypot(d1 * Math.sqrt(k2), d1 - c);
+  return { depth: c, radius: Math.max(near, far) };
+}
+function cameraFrame(view) {
+  const r = (i, j) => view[j * 4 + i];
+  const t = [view[12], view[13], view[14]];
+  const eye = [0, 1, 2].map((j) => -(r(0, j) * t[0] + r(1, j) * t[1] + r(2, j) * t[2]));
+  return { eye, forward: [-r(2, 0), -r(2, 1), -r(2, 2)] };
+}
+function normalize2(v) {
+  const l = Math.hypot(v[0], v[1], v[2]) || 1;
+  return [v[0] / l, v[1] / l, v[2] / l];
+}
+function orthographic(r, far) {
+  return Float64Array.from([1 / r, 0, 0, 0, 0, 1 / r, 0, 0, 0, 0, -1 / far, 0, 0, 0, 0, 1]);
+}
+function multiply(a, b) {
+  const out = new Float64Array(16);
+  for (let c = 0; c < 4; c += 1) {
+    for (let r = 0; r < 4; r += 1) {
+      let s = 0;
+      for (let k = 0; k < 4; k += 1) s += a[k * 4 + r] * b[c * 4 + k];
+      out[c * 4 + r] = s;
+    }
+  }
+  return out;
+}
+function fitCascades(options) {
+  const count = options.count ?? CASCADE_COUNT;
+  const lens = perspectiveLens(options.projection);
+  const far = Math.min(lens.far, options.distance);
+  const splits = cascadeSplits(lens.near, far, count, options.lambda ?? CASCADE_LAMBDA);
+  const { eye, forward } = cameraFrame(options.view);
+  const l = normalize2(options.toLight);
+  const up = Math.abs(l[1]) > 0.99 ? [0, 0, 1] : [0, 1, 0];
+  const rotation = viewMatrix2([l[0], l[1], l[2]], [0, 0, 0], up);
+  const out = [];
+  let d0 = lens.near;
+  for (const d1 of splits) {
+    const sphere = sliceSphere(d0, d1, lens.tanX, lens.tanY);
+    const radius = Math.ceil(sphere.radius * 16) / 16;
+    const texel = 2 * radius / options.size;
+    const centre = [0, 1, 2].map((i) => eye[i] + forward[i] * sphere.depth);
+    const lx = rotation[0] * centre[0] + rotation[4] * centre[1] + rotation[8] * centre[2];
+    const ly = rotation[1] * centre[0] + rotation[5] * centre[1] + rotation[9] * centre[2];
+    const lz = rotation[2] * centre[0] + rotation[6] * centre[1] + rotation[10] * centre[2];
+    const sx = Math.round(lx / texel) * texel;
+    const sy = Math.round(ly / texel) * texel;
+    const snapped = [0, 1, 2].map((j) => rotation[j * 4] * sx + rotation[j * 4 + 1] * sy + rotation[j * 4 + 2] * lz);
+    const back = radius + options.reach;
+    const lightEye = [snapped[0] + l[0] * back, snapped[1] + l[1] * back, snapped[2] + l[2] * back];
+    const view = viewMatrix2(lightEye, snapped, up);
+    out.push({ viewProj: multiply(orthographic(radius, back + radius), view), far: d1, texel, depth: back + radius });
+    d0 = d1;
+  }
+  return out;
+}
+var CASCADE_SHADOW_WGSL = (
+  /* wgsl */
+  `
+const CASCADE_DISK = array<vec2<f32>, 16>(
+  vec2<f32>(-0.9420, -0.3991), vec2<f32>(0.9456, -0.7689), vec2<f32>(-0.0942, -0.9294), vec2<f32>(0.3450, 0.2939),
+  vec2<f32>(-0.9159, 0.4577), vec2<f32>(-0.8154, -0.8791), vec2<f32>(-0.3828, 0.2768), vec2<f32>(0.9748, 0.7565),
+  vec2<f32>(0.4432, -0.9751), vec2<f32>(0.5374, -0.4737), vec2<f32>(-0.2650, -0.4189), vec2<f32>(0.7920, 0.1909),
+  vec2<f32>(-0.2419, 0.9971), vec2<f32>(-0.8141, 0.9144), vec2<f32>(0.1998, 0.7864), vec2<f32>(0.1438, -0.1410));
+fn cascadeTest(i: i32, p: vec3<f32>, cosL: f32, spin: vec2<f32>) -> f32 {
+  let c = clamp(cosL, 0.05, 1.0);
+  let texel = frame.cascadeTexel[i];
+  let push = texel * (1.0 + 2.0 * min(4.0, sqrt(1.0 - c * c) / c));
+  let q = frame.cascadeVp[i] * vec4<f32>(p + normalize(u.light.xyz) * push, 1.0);
+  let uv = vec2<f32>(q.x * 0.5 + 0.5, 0.5 - q.y * 0.5);
+  let size = frame.cascadeInfo.y;
+  let step = 1.0 / size;
+  let range = frame.cascadeDepth[i];
+  let soft = frame.cascadeSoft.x;
+  // The blocker search: as far round as an occluder at the light could blur this point.
+  let reach = clamp(q.z * range * soft / texel, 1.5, ${PENUMBRA_MAX_TEXELS}.0);
+  var blockers = 0.0;
+  var count = 0.0;
+  for (var k = 0; k < 16; k = k + 1) {
+    let d = CASCADE_DISK[k];
+    let o = vec2<f32>(d.x * spin.x - d.y * spin.y, d.x * spin.y + d.y * spin.x) * reach;
+    let t = clamp(vec2<i32>((uv + o * step) * size), vec2<i32>(0), vec2<i32>(i32(size) - 1));
+    let z = textureLoad(cascadeMap, t, i, 0);
+    if (z < q.z) { blockers = blockers + z; count = count + 1.0; }
+  }
+  if (count < 0.5) { return 1.0; }
+  // How far the blockers stand above the point, times the sun's size: the penumbra's width in texels.
+  let width = clamp((q.z - blockers / count) * range * soft / texel, 1.5, ${PENUMBRA_MAX_TEXELS}.0);
+  var lit = 0.0;
+  for (var k = 0; k < 16; k = k + 1) {
+    let d = CASCADE_DISK[k];
+    let o = vec2<f32>(d.x * spin.x - d.y * spin.y, d.x * spin.y + d.y * spin.x) * width;
+    lit = lit + textureSampleCompareLevel(cascadeMap, cascadeSamp, uv + o * step, i, q.z);
+  }
+  return lit / 16.0;
+}
+fn cascadeShadow(p: vec3<f32>, cosL: f32, pixel: vec2<f32>) -> f32 {
+  // Interleaved gradient noise (Jimenez) turns the taps per pixel.
+  let a = 6.2831853 * fract(52.9829189 * fract(dot(pixel, vec2<f32>(0.06711056, 0.00583715))));
+  let spin = vec2<f32>(cos(a), sin(a));
+  let inner = 1.0 - 2.0 / frame.cascadeInfo.y;
+  for (var i = 0; i < ${CASCADE_COUNT}; i = i + 1) {
+    let q = frame.cascadeVp[i] * vec4<f32>(p, 1.0);
+    let m = max(abs(q.x), abs(q.y));
+    if (m < inner && q.z > 0.0 && q.z < 1.0) {
+      var v = cascadeTest(i, p, cosL, spin);
+      let edge = inner - ${CASCADE_BLEND};
+      if (m > edge) {
+        var next = 1.0;
+        if (i + 1 < ${CASCADE_COUNT}) { next = cascadeTest(i + 1, p, cosL, spin); }
+        v = mix(v, next, (m - edge) / ${CASCADE_BLEND});
+      }
+      return 1.0 - frame.cascadeInfo.z * (1.0 - v);
+    }
+  }
+  return 1.0;
+}
+`
+);
+
 // src/mesh/MeshOverlaySurface.ts
 var RAD_TO_DEG = 180 / Math.PI;
 var SUN_EASE = 0.35;
@@ -11681,6 +11830,7 @@ var BOUNCE_EVERY = 4;
 var FIRST_PERSON_NEAR = 0.05;
 var SHADOW_MAP_SIZE = 1024;
 var CASCADE_MAP_SIZE = 2048;
+var SOFT_SUN = 4;
 var CASCADE_DISTANCE_MIN = 30;
 var CASCADE_DISTANCE_MAX = 400;
 var SKY_BACKDROP_SCALE = 3;
@@ -13059,8 +13209,10 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
       casters: moved.length > 0 ? [...still, ...inReach(moved)] : still,
       toLight,
       distance: lighting.shadowDistance ?? Math.min(CASCADE_DISTANCE_MAX, Math.max(CASCADE_DISTANCE_MIN, span)),
-      size: Math.max(CASCADE_MAP_SIZE, this.quality.shadowMapSize ?? 0),
-      reach: span
+      size: this.quality.cascadeMapSize ?? CASCADE_MAP_SIZE,
+      reach: span,
+      // The penumbrae widen with the sun's size: the real sun's, or four times it for a rig's soft shadows.
+      softness: SUN_SOFTNESS * (lighting.softShadows ? SOFT_SUN : 1)
     };
   }
   /**
@@ -13482,7 +13634,7 @@ function meshSignature(mesh) {
 // src/world/worldScene.ts
 import {
   projectionMatrix as projectionMatrix2,
-  viewMatrix as viewMatrix2
+  viewMatrix as viewMatrix3
 } from "@cartbox/editor";
 var CELL_WORLD = 1;
 var HEIGHT_WORLD = 0.6;
@@ -13737,7 +13889,7 @@ function buildWorldCamera(scene, spec, aspect) {
     center[1] + distance * Math.sin(spec.pitch),
     center[2] + distance * cosPitch * Math.cos(spec.yaw)
   ];
-  const view = viewMatrix2(eye, center, [0, 1, 0]);
+  const view = viewMatrix3(eye, center, [0, 1, 0]);
   const projection = projectionMatrix2(fov, aspect, 0.05, distance + radius * 6);
   const right = [view[0], view[4], view[8]];
   const up = [view[1], view[5], view[9]];
@@ -18104,130 +18256,10 @@ var IblBuilder = class {
   }
 };
 
-// src/render/cascades.ts
-import { viewMatrix as viewMatrix3 } from "@cartbox/editor";
-var CASCADE_COUNT = 4;
-var CASCADE_LAMBDA = 0.75;
-var CASCADE_BLEND = 0.1;
-function cascadeSplits(near, far, count = CASCADE_COUNT, lambda = CASCADE_LAMBDA) {
-  const n = Math.max(1e-3, near);
-  const f3 = Math.max(n * 1.001, far);
-  const out = [];
-  for (let i = 1; i <= count; i += 1) {
-    const t = i / count;
-    out.push(lambda * n * (f3 / n) ** t + (1 - lambda) * (n + (f3 - n) * t));
-  }
-  out[count - 1] = f3;
-  return out;
-}
-function perspectiveLens(projection) {
-  const p10 = projection[10];
-  const p14 = projection[14];
-  return { near: p14 / (p10 - 1), far: p14 / (p10 + 1), tanX: 1 / projection[0], tanY: 1 / projection[5] };
-}
-function sliceSphere(d0, d1, tanX, tanY) {
-  const k2 = tanX * tanX + tanY * tanY;
-  const c = Math.min(d1, Math.max(d0, (d1 * d1 - d0 * d0) * (1 + k2) / (2 * (d1 - d0))));
-  const near = Math.hypot(d0 * Math.sqrt(k2), c - d0);
-  const far = Math.hypot(d1 * Math.sqrt(k2), d1 - c);
-  return { depth: c, radius: Math.max(near, far) };
-}
-function cameraFrame(view) {
-  const r = (i, j) => view[j * 4 + i];
-  const t = [view[12], view[13], view[14]];
-  const eye = [0, 1, 2].map((j) => -(r(0, j) * t[0] + r(1, j) * t[1] + r(2, j) * t[2]));
-  return { eye, forward: [-r(2, 0), -r(2, 1), -r(2, 2)] };
-}
-function normalize2(v) {
-  const l = Math.hypot(v[0], v[1], v[2]) || 1;
-  return [v[0] / l, v[1] / l, v[2] / l];
-}
-function orthographic(r, far) {
-  return Float64Array.from([1 / r, 0, 0, 0, 0, 1 / r, 0, 0, 0, 0, -1 / far, 0, 0, 0, 0, 1]);
-}
-function multiply(a, b) {
-  const out = new Float64Array(16);
-  for (let c = 0; c < 4; c += 1) {
-    for (let r = 0; r < 4; r += 1) {
-      let s = 0;
-      for (let k = 0; k < 4; k += 1) s += a[k * 4 + r] * b[c * 4 + k];
-      out[c * 4 + r] = s;
-    }
-  }
-  return out;
-}
-function fitCascades(options) {
-  const count = options.count ?? CASCADE_COUNT;
-  const lens = perspectiveLens(options.projection);
-  const far = Math.min(lens.far, options.distance);
-  const splits = cascadeSplits(lens.near, far, count, options.lambda ?? CASCADE_LAMBDA);
-  const { eye, forward } = cameraFrame(options.view);
-  const l = normalize2(options.toLight);
-  const up = Math.abs(l[1]) > 0.99 ? [0, 0, 1] : [0, 1, 0];
-  const rotation = viewMatrix3([l[0], l[1], l[2]], [0, 0, 0], up);
-  const out = [];
-  let d0 = lens.near;
-  for (const d1 of splits) {
-    const sphere = sliceSphere(d0, d1, lens.tanX, lens.tanY);
-    const radius = Math.ceil(sphere.radius * 16) / 16;
-    const texel = 2 * radius / options.size;
-    const centre = [0, 1, 2].map((i) => eye[i] + forward[i] * sphere.depth);
-    const lx = rotation[0] * centre[0] + rotation[4] * centre[1] + rotation[8] * centre[2];
-    const ly = rotation[1] * centre[0] + rotation[5] * centre[1] + rotation[9] * centre[2];
-    const lz = rotation[2] * centre[0] + rotation[6] * centre[1] + rotation[10] * centre[2];
-    const sx = Math.round(lx / texel) * texel;
-    const sy = Math.round(ly / texel) * texel;
-    const snapped = [0, 1, 2].map((j) => rotation[j * 4] * sx + rotation[j * 4 + 1] * sy + rotation[j * 4 + 2] * lz);
-    const back = radius + options.reach;
-    const lightEye = [snapped[0] + l[0] * back, snapped[1] + l[1] * back, snapped[2] + l[2] * back];
-    const view = viewMatrix3(lightEye, snapped, up);
-    out.push({ viewProj: multiply(orthographic(radius, back + radius), view), far: d1, texel });
-    d0 = d1;
-  }
-  return out;
-}
-var CASCADE_SHADOW_WGSL = (
-  /* wgsl */
-  `
-fn cascadeTest(i: i32, p: vec3<f32>, cosL: f32) -> f32 {
-  let c = clamp(cosL, 0.05, 1.0);
-  let push = frame.cascadeTexel[i] * (1.0 + 2.0 * min(4.0, sqrt(1.0 - c * c) / c));
-  let q = frame.cascadeVp[i] * vec4<f32>(p + normalize(u.light.xyz) * push, 1.0);
-  let uv = vec2<f32>(q.x * 0.5 + 0.5, 0.5 - q.y * 0.5);
-  let step = 1.0 / frame.cascadeInfo.y;
-  var lit = 0.0;
-  for (var y = -1; y <= 1; y = y + 1) {
-    for (var x = -1; x <= 1; x = x + 1) {
-      lit = lit + textureSampleCompareLevel(cascadeMap, cascadeSamp, uv + vec2<f32>(f32(x), f32(y)) * step, i, q.z);
-    }
-  }
-  return lit / 9.0;
-}
-fn cascadeShadow(p: vec3<f32>, cosL: f32) -> f32 {
-  let inner = 1.0 - 2.0 / frame.cascadeInfo.y;
-  for (var i = 0; i < ${CASCADE_COUNT}; i = i + 1) {
-    let q = frame.cascadeVp[i] * vec4<f32>(p, 1.0);
-    let m = max(abs(q.x), abs(q.y));
-    if (m < inner && q.z > 0.0 && q.z < 1.0) {
-      var v = cascadeTest(i, p, cosL);
-      let edge = inner - ${CASCADE_BLEND};
-      if (m > edge) {
-        var next = 1.0;
-        if (i + 1 < ${CASCADE_COUNT}) { next = cascadeTest(i + 1, p, cosL); }
-        v = mix(v, next, (m - edge) / ${CASCADE_BLEND});
-      }
-      return 1.0 - frame.cascadeInfo.z * (1.0 - v);
-    }
-  }
-  return 1.0;
-}
-`
-);
-
 // src/render/WebgpuSceneRenderer.ts
 var GBUFFER_FORMAT = "rgba16float";
 var VELOCITY_FORMAT = "rg16float";
-var FRAME_BYTES = 640;
+var FRAME_BYTES = 672;
 var FRAME_CASCADES = 84;
 var FALLBACK_CASCADE_DISTANCE = 80;
 var FALLBACK_CASCADE_SIZE = 2048;
@@ -18427,6 +18459,8 @@ struct Frame {
   cascadeFar: vec4<f32>,      // F2a: each slice's far view depth
   cascadeInfo: vec4<f32>,     // F2a: x = 1 with GPU cascades, y = map size, z = strength, w = the last cascade's far depth
   cascadeTexel: vec4<f32>,    // F2a: each cascade's texel in world units
+  cascadeDepth: vec4<f32>,    // F2a-2: the world distance each cascade's depth 0..1 spans
+  cascadeSoft: vec4<f32>,     // F2a-2: x = the sun's size (its angular diameter's tangent), for the penumbrae
 };
 // One spot/point shadow tile (EP8c): world\u2192clip, and params.xy = depth\u2192distance terms.
 struct ShadowTile {
@@ -18563,9 +18597,11 @@ struct VSOut {
 };
 
 ${hdr ? `// The sun's shadow on the linear-light renderer: its GPU cascades (F2a), or none.
+// The fragment's pixel, which turns the cascades' taps (set as fs starts).
+var<private> shadowPixel: vec2<f32>;
 fn shadowFactor(lightClip: vec4<f32>, worldPos: vec3<f32>, cosL: f32) -> f32 {
   if (frame.cascadeInfo.x < 0.5) { return 1.0; }
-  return cascadeShadow(worldPos, cosL);
+  return cascadeShadow(worldPos, cosL, shadowPixel);
 }
 ` : `// Directional shadow test, mirroring rasterizeTriangle in meshRasterizer.ts:
 // project into the light's frame, look up the nearest depth the light sees, and
@@ -19139,7 +19175,7 @@ ${hdr ? `  // A tint authored for the display (F11a): linear light mixes it as t
 
 @fragment
 fn fs(in: VSOut) -> @location(0) vec4<f32> {
-  // The surface's screen derivatives, for the UV gradients parallax and
+${hdr ? "  shadowPixel = in.pos.xy;\n" : ""}  // The surface's screen derivatives, for the UV gradients parallax and
   // anisotropy need (I4) \u2014 taken here, in uniform control flow.
   let dp1 = dpdx(in.worldPos);
   let dp2 = dpdy(in.worldPos);
@@ -19418,10 +19454,32 @@ ${hdr ? `// --- The sun's cascades (AAA_FIDELITY_ROADMAP.md F2a) ---
 // A caster's depth as the sun sees it, through the cascade being drawn: the scene's
 // own vertex (its copy's transform, bent by the wind) and nothing else.
 @group(1) @binding(12) var<uniform> cascadeView: mat4x4<f32>;
-@vertex
-fn vs_shadow(@location(0) position: vec3<f32>, @location(5) sway: f32, @builtin(instance_index) instance: u32) -> @builtin(position) vec4<f32> {
+fn casterClip(position: vec3<f32>, sway: f32, instance: u32) -> vec4<f32> {
   let bend = windOffset(position.xz, sway);
   return cascadeView * xf[instance].model * vec4<f32>(position.x + bend.x, position.y, position.z + bend.y, 1.0);
+}
+@vertex
+fn vs_shadow(@location(0) position: vec3<f32>, @location(5) sway: f32, @builtin(instance_index) instance: u32) -> @builtin(position) vec4<f32> {
+  return casterClip(position, sway, instance);
+}
+// A cut-out caster (F2a-2): its UVs carried through, so its fragments drop as the scene's do.
+struct CutOut {
+  @builtin(position) pos: vec4<f32>,
+  @location(0) uv: vec2<f32>,
+};
+@vertex
+fn vs_shadow_cut(@location(0) position: vec3<f32>, @location(2) uv: vec2<f32>, @location(5) sway: f32, @builtin(instance_index) instance: u32) -> CutOut {
+  var out: CutOut;
+  out.pos = casterClip(position, sway, instance);
+  out.uv = uv;
+  return out;
+}
+// The scene's own cut-out test: the base colour's alpha, times its map's, against the material's threshold.
+@fragment
+fn fs_shadow_cut(in: CutOut) {
+  var a = u.base.a;
+  if (u.texflags.x > 0.5) { a = a * textureSample(tex, samp, vec2<f32>(in.uv.x, 1.0 - in.uv.y)).a; }
+  if (a < u.view.w) { discard; }
 }
 ` : ""}
 // --- The depth prepass and thin G-buffer (AAA_FIDELITY_ROADMAP.md F0c) ---
@@ -19581,6 +19639,8 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     // Not readonly: a resized uniform buffer invalidates every cached group at
     // once, and WeakMap has no clear(), so the map itself is replaced.
     this.bindGroups = /* @__PURE__ */ new WeakMap();
+    /** Each cut-out caster's group 0 (F2a-2), with what it was made from, so a grown buffer or a new map remakes it. */
+    this.cutGroups = /* @__PURE__ */ new WeakMap();
     /** Most recent completed readback, or null before the first one lands. */
     this.latest = null;
     /** Frames submitted, the one `latest` holds, and the newest that got a readback (see settle). */
@@ -19885,22 +19945,52 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
           { binding: 10, visibility: SHADER_STAGE_VERTEX, buffer: { type: "read-only-storage" } }
         ]
       });
+      const cutLayout = device.createBindGroupLayout({
+        entries: [
+          { binding: 0, visibility: SHADER_STAGE_VERTEX | SHADER_STAGE_FRAGMENT, buffer: { type: "uniform", hasDynamicOffset: true, minBindingSize: UNIFORM_BYTES_USED } },
+          { binding: 1, visibility: SHADER_STAGE_FRAGMENT, sampler: { type: "filtering" } },
+          { binding: 2, visibility: SHADER_STAGE_FRAGMENT, texture: { sampleType: "float" } },
+          { binding: 10, visibility: SHADER_STAGE_VERTEX, buffer: { type: "read-only-storage" } }
+        ]
+      });
+      const casterModule = hdr ? device.createShaderModule({ code: sceneShader(null, false, hdr) }) : null;
+      const casterDepth = { format: CASCADE_FORMAT, depthWriteEnabled: true, depthCompare: "less", depthBias: 2, depthBiasSlopeScale: 1.5 };
       const cascades = {
-        texture: device.createTexture({ size: { width: 1, height: 1, depthOrArrayLayers: CASCADE_COUNT }, format: "depth32float", usage: 16 | 4 }),
+        texture: device.createTexture({ size: { width: 1, height: 1, depthOrArrayLayers: CASCADE_COUNT }, format: CASCADE_FORMAT, usage: 16 | 4 }),
         size: 0,
         sampler: device.createSampler({ compare: "less-equal", magFilter: "linear", minFilter: "linear", addressModeU: "clamp-to-edge", addressModeV: "clamp-to-edge" }),
         views: cascadeViews,
         casterLayout,
-        pipeline: hdr ? device.createRenderPipeline({
+        cutLayout,
+        pipeline: casterModule ? device.createRenderPipeline({
           layout: device.createPipelineLayout({ bindGroupLayouts: [casterLayout, cascadeLayout] }),
           vertex: {
-            module: device.createShaderModule({ code: sceneShader(null, false, hdr) }),
+            module: casterModule,
             entryPoint: "vs_shadow",
             buffers: [{ arrayStride: 64, attributes: [{ shaderLocation: 0, offset: 0, format: "float32x3" }, { shaderLocation: 5, offset: 44, format: "float32" }] }]
           },
           primitive: { topology: "triangle-list", cullMode: "none" },
-          // Slope-scaled bias as it rasterises, against acne on faces the sun grazes.
-          depthStencil: { format: "depth32float", depthWriteEnabled: true, depthCompare: "less", depthBias: 2, depthBiasSlopeScale: 1.5 }
+          depthStencil: casterDepth
+        }) : null,
+        cutPipeline: casterModule ? device.createRenderPipeline({
+          layout: device.createPipelineLayout({ bindGroupLayouts: [cutLayout, cascadeLayout] }),
+          vertex: {
+            module: casterModule,
+            entryPoint: "vs_shadow_cut",
+            buffers: [
+              {
+                arrayStride: 64,
+                attributes: [
+                  { shaderLocation: 0, offset: 0, format: "float32x3" },
+                  { shaderLocation: 2, offset: 24, format: "float32x2" },
+                  { shaderLocation: 5, offset: 44, format: "float32" }
+                ]
+              }
+            ]
+          },
+          fragment: { module: casterModule, entryPoint: "fs_shadow_cut", targets: [] },
+          primitive: { topology: "triangle-list", cullMode: "none" },
+          depthStencil: casterDepth
         }) : null
       };
       const makeGroups = (atlas, probes) => {
@@ -20025,7 +20115,7 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     const res = groups.cascades;
     if (res.size === size) return;
     destroySafely(res.texture);
-    res.texture = this.device.createTexture({ size: { width: size, height: size, depthOrArrayLayers: CASCADE_COUNT }, format: "depth32float", usage: 16 | 4 });
+    res.texture = this.device.createTexture({ size: { width: size, height: size, depthOrArrayLayers: CASCADE_COUNT }, format: CASCADE_FORMAT, usage: 16 | 4 });
     res.size = size;
     this.bindGroups = /* @__PURE__ */ new WeakMap();
   }
@@ -20193,7 +20283,7 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     const casting = sun ? batchInstances(sun.casters, (mesh) => this.uploadMesh(mesh), cameraPositionFromView3(draw.view)) : null;
     const casters = casting ? casting.batches.filter((entry) => entry.alpha < 2 && !entry.refract) : [];
     const cascadeFit = sun && casters.length > 0 ? fitCascades({ view: draw.view, projection: draw.projection, toLight: sun.toLight, distance: sun.distance, size: sun.size, reach: sun.reach }) : null;
-    this.frameCascades = cascadeFit && sun ? { cascades: cascadeFit, size: sun.size, strength: sun.strength ?? 1 } : null;
+    this.frameCascades = cascadeFit && sun ? { cascades: cascadeFit, size: sun.size, strength: sun.strength ?? 1, softness: sun.softness ?? SUN_SOFTNESS } : null;
     if (cascadeFit && sun) this.ensureCascadeTexture(sun.size);
     this.ensureUniformCapacity(draws.length + casters.length);
     const casterBase = prepass ? instanceCount * 2 : instanceCount;
@@ -20437,14 +20527,17 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
               },
               ...timingSpan(ctx.timing, i, cascadeFit.length)
             });
-            encoded.setPipeline(res.pipeline);
             encoded.setBindGroup(1, res.views[i].group);
-            casters.forEach((entry, k) => {
-              encoded.setBindGroup(0, group, [(draws.length + k) * UNIFORM_STRIDE]);
-              encoded.setVertexBuffer(0, entry.geometry.vertexBuffer);
-              encoded.setIndexBuffer(entry.geometry.indexBuffer, "uint32");
-              encoded.drawIndexed(entry.geometry.indexCount, entry.models.length, 0, 0, entry.first);
-            });
+            for (const cut of [false, true]) {
+              encoded.setPipeline(cut ? res.cutPipeline : res.pipeline);
+              casters.forEach((entry, k) => {
+                if (entry.alpha === 1 !== cut) return;
+                encoded.setBindGroup(0, cut ? this.cutGroupFor(entry.primitive, entry.textures) : group, [(draws.length + k) * UNIFORM_STRIDE]);
+                encoded.setVertexBuffer(0, entry.geometry.vertexBuffer);
+                encoded.setIndexBuffer(entry.geometry.indexBuffer, "uint32");
+                encoded.drawIndexed(entry.geometry.indexCount, entry.models.length, 0, 0, entry.first);
+              });
+            }
             encoded.end();
           });
         };
@@ -20819,6 +20912,8 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
       frame.set(sun.cascades.map((c) => c.far), FRAME_CASCADES + 64);
       frame.set([1, sun.size, sun.strength, sun.cascades[sun.cascades.length - 1].far], FRAME_CASCADES + 68);
       frame.set(sun.cascades.map((c) => c.texel), FRAME_CASCADES + 72);
+      frame.set(sun.cascades.map((c) => c.depth), FRAME_CASCADES + 76);
+      frame.set([sun.softness, 0, 0, 0], FRAME_CASCADES + 80);
     }
     this.device.queue.writeBuffer(buffers.params, 0, frame);
     this.uploadLocalShadows(local);
@@ -20951,6 +21046,22 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     });
     this.meshes.set(mesh, uploaded);
     return uploaded;
+  }
+  /** A cut-out caster's group 0 (F2a-2): the casters' uniforms and transforms, and its base map. */
+  cutGroupFor(primitive, textures) {
+    const cached = this.cutGroups.get(primitive);
+    if (cached && cached.uniform === this.uniformBuffer && cached.instances === this.instanceBuffer && cached.base === textures.base) return cached.group;
+    const group = this.device.createBindGroup({
+      layout: this.depthGroups.cascades.cutLayout,
+      entries: [
+        { binding: 0, resource: { buffer: this.uniformBuffer, offset: 0, size: UNIFORM_STRIDE } },
+        { binding: 1, resource: this.sampler },
+        { binding: 2, resource: (textures.base ? this.uploadTexture(textures.base, true) : this.blankTexture).createView() },
+        { binding: 10, resource: { buffer: this.instanceBuffer } }
+      ]
+    });
+    this.cutGroups.set(primitive, { uniform: this.uniformBuffer, instances: this.instanceBuffer, base: textures.base, group });
+    return group;
   }
   /** The bind group for one primitive, rebuilt if any of its textures changed. */
   bindGroupFor(primitive, textures) {

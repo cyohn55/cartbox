@@ -28,11 +28,29 @@ type Vec3 = readonly [number, number, number];
 /** Cascades the AAA tier renders (F2a). */
 export const CASCADE_COUNT = 4;
 
+/**
+ * The cascades' depth format (F2a-2): 16 bits, so four 4096² layers take
+ * 128 MB rather than 256. Over a cascade's depth (its slice and the reach
+ * toward the sun, a few hundred metres at most) that still resolves a few
+ * millimetres, finer than the texel-sized push every test makes.
+ */
+export const CASCADE_FORMAT = "depth16unorm";
+
 /** How far toward a logarithmic split the practical scheme leans (Nvidia's, PSSM): 0 linear, 1 logarithmic. */
 export const CASCADE_LAMBDA = 0.75;
 
 /** The share of each cascade, at its outer edge, that fades into the next. */
 export const CASCADE_BLEND = 0.1;
+
+/**
+ * The sun's angular diameter as a tangent (0.53°), for its penumbrae (F2a-2):
+ * an occluder this many metres above a surface blurs its edge by that many
+ * times this.
+ */
+export const SUN_SOFTNESS = Math.tan((0.53 * Math.PI) / 180);
+
+/** The widest a penumbra filters, in texels of its cascade (and the blocker search's reach). */
+export const PENUMBRA_MAX_TEXELS = 16;
 
 /** One cascade: the world → light-clip transform, the view depth it covers to, and the world size of one of its texels. */
 export interface Cascade {
@@ -42,6 +60,8 @@ export interface Cascade {
   readonly far: number;
   /** One texel's edge, in world units (for normal-offset bias). */
   readonly texel: number;
+  /** The world distance its depth 0..1 spans, from the light (for the penumbrae's blocker distances). */
+  readonly depth: number;
 }
 
 /**
@@ -158,7 +178,7 @@ export function fitCascades(options: {
     const back = radius + options.reach;
     const lightEye: [number, number, number] = [snapped[0] + l[0] * back, snapped[1] + l[1] * back, snapped[2] + l[2] * back];
     const view = viewMatrix(lightEye, snapped, up);
-    out.push({ viewProj: multiply(orthographic(radius, back + radius), view), far: d1, texel });
+    out.push({ viewProj: multiply(orthographic(radius, back + radius), view), far: d1, texel, depth: back + radius });
     d0 = d1;
   }
   return out;
@@ -168,36 +188,68 @@ export function fitCascades(options: {
  * The cascades' test in WGSL (the linear-light scene shader's; reads `frame`,
  * `u.light`, `cascadeMap` and `cascadeSamp`). The point is tested in the
  * first cascade whose map holds it, pushed toward the sun by a texel or more
- * as the light grazes so a surface never shadows itself, and filtered over a
- * 3×3 grid of hardware comparisons (each itself a bilinear 2×2). Toward a
- * cascade's edge it fades into the next, and past the last into full light.
+ * as the light grazes so a surface never shadows itself. Toward a cascade's
+ * edge it fades into the next, and past the last into full light.
+ *
+ * Its penumbra hardens toward contact (PCSS, F2a-2): a search of the map round
+ * the point finds the average depth of what stands between it and the sun,
+ * and the filter widens with that distance times the sun's size
+ * (`frame.cascadeSoft.x`), from a texel and a half at contact to
+ * {@link PENUMBRA_MAX_TEXELS}. Both the search and the filter take 16 Poisson
+ * taps, turned per pixel so their pattern breaks up (and TAA resolves it).
  */
 export const CASCADE_SHADOW_WGSL = /* wgsl */ `
-fn cascadeTest(i: i32, p: vec3<f32>, cosL: f32) -> f32 {
+const CASCADE_DISK = array<vec2<f32>, 16>(
+  vec2<f32>(-0.9420, -0.3991), vec2<f32>(0.9456, -0.7689), vec2<f32>(-0.0942, -0.9294), vec2<f32>(0.3450, 0.2939),
+  vec2<f32>(-0.9159, 0.4577), vec2<f32>(-0.8154, -0.8791), vec2<f32>(-0.3828, 0.2768), vec2<f32>(0.9748, 0.7565),
+  vec2<f32>(0.4432, -0.9751), vec2<f32>(0.5374, -0.4737), vec2<f32>(-0.2650, -0.4189), vec2<f32>(0.7920, 0.1909),
+  vec2<f32>(-0.2419, 0.9971), vec2<f32>(-0.8141, 0.9144), vec2<f32>(0.1998, 0.7864), vec2<f32>(0.1438, -0.1410));
+fn cascadeTest(i: i32, p: vec3<f32>, cosL: f32, spin: vec2<f32>) -> f32 {
   let c = clamp(cosL, 0.05, 1.0);
-  let push = frame.cascadeTexel[i] * (1.0 + 2.0 * min(4.0, sqrt(1.0 - c * c) / c));
+  let texel = frame.cascadeTexel[i];
+  let push = texel * (1.0 + 2.0 * min(4.0, sqrt(1.0 - c * c) / c));
   let q = frame.cascadeVp[i] * vec4<f32>(p + normalize(u.light.xyz) * push, 1.0);
   let uv = vec2<f32>(q.x * 0.5 + 0.5, 0.5 - q.y * 0.5);
-  let step = 1.0 / frame.cascadeInfo.y;
-  var lit = 0.0;
-  for (var y = -1; y <= 1; y = y + 1) {
-    for (var x = -1; x <= 1; x = x + 1) {
-      lit = lit + textureSampleCompareLevel(cascadeMap, cascadeSamp, uv + vec2<f32>(f32(x), f32(y)) * step, i, q.z);
-    }
+  let size = frame.cascadeInfo.y;
+  let step = 1.0 / size;
+  let range = frame.cascadeDepth[i];
+  let soft = frame.cascadeSoft.x;
+  // The blocker search: as far round as an occluder at the light could blur this point.
+  let reach = clamp(q.z * range * soft / texel, 1.5, ${PENUMBRA_MAX_TEXELS}.0);
+  var blockers = 0.0;
+  var count = 0.0;
+  for (var k = 0; k < 16; k = k + 1) {
+    let d = CASCADE_DISK[k];
+    let o = vec2<f32>(d.x * spin.x - d.y * spin.y, d.x * spin.y + d.y * spin.x) * reach;
+    let t = clamp(vec2<i32>((uv + o * step) * size), vec2<i32>(0), vec2<i32>(i32(size) - 1));
+    let z = textureLoad(cascadeMap, t, i, 0);
+    if (z < q.z) { blockers = blockers + z; count = count + 1.0; }
   }
-  return lit / 9.0;
+  if (count < 0.5) { return 1.0; }
+  // How far the blockers stand above the point, times the sun's size: the penumbra's width in texels.
+  let width = clamp((q.z - blockers / count) * range * soft / texel, 1.5, ${PENUMBRA_MAX_TEXELS}.0);
+  var lit = 0.0;
+  for (var k = 0; k < 16; k = k + 1) {
+    let d = CASCADE_DISK[k];
+    let o = vec2<f32>(d.x * spin.x - d.y * spin.y, d.x * spin.y + d.y * spin.x) * width;
+    lit = lit + textureSampleCompareLevel(cascadeMap, cascadeSamp, uv + o * step, i, q.z);
+  }
+  return lit / 16.0;
 }
-fn cascadeShadow(p: vec3<f32>, cosL: f32) -> f32 {
+fn cascadeShadow(p: vec3<f32>, cosL: f32, pixel: vec2<f32>) -> f32 {
+  // Interleaved gradient noise (Jimenez) turns the taps per pixel.
+  let a = 6.2831853 * fract(52.9829189 * fract(dot(pixel, vec2<f32>(0.06711056, 0.00583715))));
+  let spin = vec2<f32>(cos(a), sin(a));
   let inner = 1.0 - 2.0 / frame.cascadeInfo.y;
   for (var i = 0; i < ${CASCADE_COUNT}; i = i + 1) {
     let q = frame.cascadeVp[i] * vec4<f32>(p, 1.0);
     let m = max(abs(q.x), abs(q.y));
     if (m < inner && q.z > 0.0 && q.z < 1.0) {
-      var v = cascadeTest(i, p, cosL);
+      var v = cascadeTest(i, p, cosL, spin);
       let edge = inner - ${CASCADE_BLEND};
       if (m > edge) {
         var next = 1.0;
-        if (i + 1 < ${CASCADE_COUNT}) { next = cascadeTest(i + 1, p, cosL); }
+        if (i + 1 < ${CASCADE_COUNT}) { next = cascadeTest(i + 1, p, cosL, spin); }
         v = mix(v, next, (m - edge) / ${CASCADE_BLEND});
       }
       return 1.0 - frame.cascadeInfo.z * (1.0 - v);

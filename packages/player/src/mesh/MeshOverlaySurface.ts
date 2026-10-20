@@ -96,6 +96,7 @@ import type { DisplaySurface } from "../display.js";
 import type { ScreenSun } from "../fx/PostFxSurface.js";
 import type { PostVolumeFx } from "../fx/postVolumeFx.js";
 import { SoftwareSceneRenderer, type GpuSceneDraw, type SceneRenderer, type SunShadow } from "../render/sceneRenderer.js";
+import { SUN_SOFTNESS } from "../render/cascades.js";
 import type { PresentFrame, PresentSky, PresentStats } from "../render/gpuPresent.js";
 import type { MailboxMeshCamera, MailboxMeshPose, WorldLight } from "../mailbox.js";
 import type { LocalShadowTile, LocalShadows, PostBlend, ShadowCascade, ShadowInput, SceneLight, SceneLighting, ToneMap, VistaLayer } from "@cartbox/editor";
@@ -121,8 +122,10 @@ const FIRST_PERSON_NEAR = 0.05;
 
 /** Edge length of the directional shadow map — a fixed, self-contained cost. */
 const SHADOW_MAP_SIZE = 1024; // the high preset's; see setQuality
-/** Each of the AAA tier's sun cascades' maps (F2a), or the quality preset's map if larger. */
+/** Each of the AAA tier's sun cascades' maps (F2a) when the quality preset sets no size of its own (F2a-2). */
 const CASCADE_MAP_SIZE = 2048;
+/** How much wider the rig's soft shadows make the AAA tier's sun than the real one (F2a-2). */
+const SOFT_SUN = 4;
 /** The bounds of the reach the AAA cascades fit to a scene that sets none (world units). */
 const CASCADE_DISTANCE_MIN = 30;
 const CASCADE_DISTANCE_MAX = 400;
@@ -1887,8 +1890,10 @@ export class MeshOverlaySurface implements DisplaySurface {
       casters: moved.length > 0 ? [...still, ...inReach(moved)] : still,
       toLight,
       distance: lighting.shadowDistance ?? Math.min(CASCADE_DISTANCE_MAX, Math.max(CASCADE_DISTANCE_MIN, span)),
-      size: Math.max(CASCADE_MAP_SIZE, this.quality.shadowMapSize ?? 0),
+      size: this.quality.cascadeMapSize ?? CASCADE_MAP_SIZE,
       reach: span,
+      // The penumbrae widen with the sun's size: the real sun's, or four times it for a rig's soft shadows.
+      softness: SUN_SOFTNESS * (lighting.softShadows ? SOFT_SUN : 1),
     };
   }
 

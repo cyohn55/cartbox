@@ -93,6 +93,18 @@ describe("fitting the cascades", () => {
     expect(cascades[CASCADE_COUNT - 1]!.far).toBeCloseTo(80, 6);
   });
 
+  it("spans each cascade's depth over the world distance it gives (F2a-2)", () => {
+    const cascades = fit([0, 2, 10], [0, 1, 0]);
+    const l = Math.hypot(...SUN);
+    const p = [0.3, 0.5, 4];
+    for (const c of cascades) {
+      // A step of a metre toward the sun moves a point's depth by one metre's share of the cascade's span.
+      const q = p.map((v, i) => v + SUN[i]! / l);
+      expect(project(c.viewProj, p)[2]! - project(c.viewProj, q)[2]!).toBeCloseTo(1 / c.depth, 9);
+      expect(c.depth).toBeGreaterThan(60); // the reach and more
+    }
+  });
+
   it("keeps a caster between the slice and the sun in front of the light", () => {
     const eye: [number, number, number] = [0, 2, 10];
     const cascades = fit(eye, [0, 1, 0]);

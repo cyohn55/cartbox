@@ -304,7 +304,7 @@ export function LightingEditor({ lighting, onChange }: LightingEditorProps) {
         options={[
           { id: "off", label: "Off" },
           { id: "on", label: "On" },
-          { id: "soft", label: "Soft", hint: "Wide, soft penumbrae for a daylight sun (16 shadow-map taps a pixel instead of 4)" },
+          { id: "soft", label: "Soft", hint: "Wide, soft penumbrae for a daylight sun (16 shadow-map taps a pixel instead of 4; on the AAA tier, a sun four times the real one's size)" },
         ]}
       />
       {lighting.shadows && (

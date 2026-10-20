@@ -363,7 +363,7 @@ Everything else depends on this track. It contains no visible "feature", but its
 
 ### F2. Shadows and lights
 
-- [ ] **F2a. GPU cascaded shadows.**
+- [x] **F2a. GPU cascaded shadows.**
   - Four cascades rendered on the GPU (no more CPU shadow rasteriser on `aaa`), with stable texel-snapped fitting.
   - Practical (log-linear) splits, cascade blending and a shadow-distance control.
   - Hardware comparison sampling, filtered with Poisson PCF or **PCSS** for contact-hardening penumbrae.
@@ -392,6 +392,21 @@ Everything else depends on this track. It contains no visible "feature", but its
       - `cascade-shadows.test.ts` (Dawn): the cascades leave the lit floor as it was, and a box the camera never draws darkens the floor under it to under 0.05.
       - `shadowCascade.test.ts`: on a GPU-presented AAA frame the player hands over the casters and sun in place of a CPU map, gathers the still ones once, reaches the rig's distance, and casts nothing with shadows off; the distance parses within its bounds and clears.
       - `shadowCascade.test.ts`, foliage: a bush past its cull distance never casts, a layer's full copies cast past their impostor swap, and its cards never do (fails under the draw rule).
+  - **F2a-2, contact-hardening penumbrae, map size by level and cut-out casters: done.** With this, F2a is complete.
+    - **PCSS** (`cascades.ts`, `CASCADE_SHADOW_WGSL`). Each test first searches the map round the point for what stands between it and the sun: 16 Poisson taps, read with `textureLoad`, as far round as an occluder at the light could blur it.
+      - The blockers' average depth, times the cascade's depth span, is how far above the point they stand. Times the sun's size, that is the penumbra's width.
+      - The filter is 16 hardware comparisons over that width, from a texel and a half at contact to 16 texels. Both tap sets turn per pixel by interleaved gradient noise, which TAA resolves.
+      - The sun's size is the real sun's 0.53° (`SUN_SOFTNESS`), or four times it for a rig with soft shadows (`SunShadow.softness`).
+    - **Map size by level.** The quality presets' `cascadeMapSize` is 4096 on high and 2048 on medium; low casts no shadows.
+      - The maps are `depth16unorm`, so four 4096² layers take 128 MB rather than 256. Over a cascade's depth span (a few hundred metres at most) that still resolves a few millimetres.
+    - **Cut-out casters.** A `mask` material casts through a second caster pipeline whose fragment stage drops what the scene drops: the base colour's alpha times its map's, against the material's threshold. Grass cards and leaf cards cast their shapes, not their quads.
+      - Each cut-out caster's group binds the casters' uniforms and transforms, plus its base map. It is cached against the buffers and map it was made from.
+    - *Tests:*
+      - `cascade-shadows.test.ts` (Dawn):
+        - a plate held 3 m over the floor blurs its edge over 4 pixels or more, more than 2 pixels wider than the same plate at 0.3 m (fails with the filter's width fixed);
+        - a card opaque on one half and clear on the other shadows only under its opaque half (fails without the cut-out's discard).
+      - `cascades.test.ts`: a metre toward the sun moves a point's depth by one metre's share of its cascade's span.
+      - `shadowCascade.test.ts`: the high preset casts 4096² maps and medium 2048²; the real sun's size, four times it with soft shadows.
 - [ ] **F2b. Virtual shadow maps.**
   - A 16K virtual shadow map, paged from a physical pool, with pages marked by the depth buffer and cached between frames for static geometry.
   - This is what makes shadow detail hold at every distance in UE5. It falls back to F2a on Medium and below.

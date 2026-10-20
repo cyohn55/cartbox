@@ -6,7 +6,7 @@
 
 import { describe, expect, it } from "vitest";
 
-import { composeModelMatrix, projectionMatrix, viewMatrix, type MeshAsset, type MeshSceneInstance } from "@cartbox/editor";
+import { composeModelMatrix, projectionMatrix, viewMatrix, type DecodedTexture, type MeshAsset, type MeshSceneInstance } from "@cartbox/editor";
 import { WebgpuSceneRenderer } from "@cartbox/player";
 
 async function realDevice(): Promise<any | null> {
@@ -41,20 +41,20 @@ function half(h: number): number {
   return e === 0 ? s * 2 ** -14 * (m / 1024) : s * 2 ** (e - 15) * (1 + m / 1024);
 }
 
-const W = 64;
-const H = 64;
+let W = 64;
+let H = 64;
 
-/** A unit square in XZ facing up (a floor), or a unit cube. */
-const floor = (): MeshAsset =>
+/** A unit square in XZ facing up (a floor; a cut-out card with `mask`), or a unit cube. */
+const floor = (mask = false): MeshAsset =>
   ({
-    name: "floor",
+    name: mask ? "card" : "floor",
     primitives: [
       {
         positions: Float32Array.from([-1, 0, -1, 1, 0, -1, 1, 0, 1, -1, 0, 1]),
         normals: Float32Array.from([0, 1, 0, 0, 1, 0, 0, 1, 0, 0, 1, 0]),
         uvs: Float32Array.from([0, 0, 1, 0, 1, 1, 0, 1]),
         indices: Uint32Array.from([0, 2, 1, 0, 3, 2]),
-        material: { name: "floor", baseColorImage: null, baseColorFactor: [0.8, 0.8, 0.8, 1], metallicFactor: 0, roughnessFactor: 1 },
+        material: { name: "floor", baseColorImage: null, baseColorFactor: [0.8, 0.8, 0.8, 1], metallicFactor: 0, roughnessFactor: 1, ...(mask ? { alphaMode: "mask", alphaCutoff: 0.5 } : {}) },
       },
     ],
   }) as unknown as MeshAsset;
@@ -114,7 +114,7 @@ async function render(sunShadow: object | null, instances: MeshSceneInstance[] =
   } as any);
   const error = await settled(device.popErrorScope());
   expect(error ? String((error as any).message ?? error) : null).toBeNull();
-  const bytesPerRow = 512;
+  const bytesPerRow = Math.ceil((W * 8) / 256) * 256;
   const buffer = device.createBuffer({ size: bytesPerRow * H, usage: 0x01 | 0x08 });
   const encoder = device.createCommandEncoder();
   encoder.copyTextureToBuffer({ texture }, { buffer, bytesPerRow, rowsPerImage: H }, { width: W, height: H });
@@ -127,7 +127,7 @@ async function render(sunShadow: object | null, instances: MeshSceneInstance[] =
   return (x, y) => half(halves[(y * bytesPerRow) / 2 + x * 4 + 1]!);
 }
 
-const sun = (casters: MeshSceneInstance[]) => ({ casters, toLight: SUN, distance: 30, size: 1024, reach: 20 });
+const sun = (casters: MeshSceneInstance[], softness?: number) => ({ casters, toLight: SUN, distance: 30, size: 1024, reach: 20, ...(softness ? { softness } : {}) });
 
 describe.skipIf(!device)("the sun's GPU cascades, on a real device", { timeout: 60_000 }, () => {
   it("leaves the floor away from the box as lit as without the cascades", async () => {
@@ -146,5 +146,50 @@ describe.skipIf(!device)("the sun's GPU cascades, on a real device", { timeout: 
     const beside = await render(sun([ground, { ...box, model: composeModelMatrix([1.6, 1.5, 0], [0, 0, 0], [0.5, 0.5, 0.5]) }]), [ground]);
     expect(beside(px, H / 2)).toBeLessThan(0.05);
     expect(beside(4, 4)).toBeGreaterThan(0.3);
+  });
+
+  it("hardens its penumbra toward contact (PCSS): an edge blurs with its caster's height", async () => {
+    W = 128;
+    H = 128;
+    try {
+      // A plate the camera never draws, its edge along x = 0, held 0.3 m or 3 m over the floor; a big sun, for a wide penumbra.
+      const plate = (height: number) => ({ mesh: cube(), model: composeModelMatrix([-1.5, height, 0], [0, 0, 0], [1.5, 0.05, 1.5]) });
+      const across = async (height: number) => {
+        const at = await render(sun([ground, plate(height)], 0.15), [ground]);
+        const lit = at(W - 8, H / 2);
+        // Pixels along the row through the edge that are neither shadowed nor lit.
+        let partial = 0;
+        for (let x = 8; x < W - 8; x += 1) {
+          const v = at(x, H / 2) / lit;
+          if (v > 0.1 && v < 0.9) partial += 1;
+        }
+        return { partial, dark: at(W / 2 - 20, H / 2) / lit };
+      };
+      const low = await across(0.3);
+      const high = await across(3);
+      // Both shadow the floor under the plate.
+      expect(low.dark).toBeLessThan(0.1);
+      expect(high.dark).toBeLessThan(0.1);
+      // The edge held high blurs over several pixels; the one near contact stays sharp.
+      expect(high.partial).toBeGreaterThanOrEqual(4);
+      expect(high.partial).toBeGreaterThan(low.partial + 2);
+    } finally {
+      W = 64;
+      H = 64;
+    }
+  });
+
+  it("drops a cut-out caster's clear texels, as the scene drops them", async () => {
+    // A card the camera never draws, opaque on its left half and clear on its right.
+    const data = new Uint8ClampedArray(2 * 1 * 4);
+    data.set([200, 200, 200, 255, 200, 200, 200, 0]);
+    const map: DecodedTexture = { width: 2, height: 1, data };
+    const card: MeshSceneInstance = { mesh: floor(true), model: composeModelMatrix([0, 1.5, 0], [0, 0, 0], [1, 1, 1]), textures: [map] };
+    const at = await render(sun([ground, card]), [ground]);
+    const px = (x: number) => Math.round(W / 2 + (x / (6 * Math.tan(Math.PI / 6))) * (W / 2));
+    // Under the opaque half: shadowed. Under the clear half: lit, as the floor beyond the card is.
+    expect(at(px(-0.6), H / 2)).toBeLessThan(0.05);
+    expect(at(px(0.6), H / 2)).toBeGreaterThan(0.3);
+    expect(Math.abs(at(px(0.6), H / 2) - at(4, 4))).toBeLessThan(0.02);
   });
 });

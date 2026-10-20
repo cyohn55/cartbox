@@ -51,6 +51,12 @@ export interface SunShadow {
   readonly reach: number;
   /** How dark a shadow is, 0 (none) to 1 (default). */
   readonly strength?: number;
+  /**
+   * The sun's size, as the tangent of its angular diameter (F2a-2): how fast a
+   * penumbra widens with the occluder's height above what it shades. Absent is
+   * the real sun's 0.53°.
+   */
+  readonly softness?: number;
 }
 
 /** One frame's worth of drawing parameters — mirrors `renderMeshScene`'s options. */
