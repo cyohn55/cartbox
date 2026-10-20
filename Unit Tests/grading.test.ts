@@ -173,9 +173,10 @@ describe.skipIf(!device)("the presenter, on a real device", { timeout: 60_000 },
     expect(Math.abs(hdr(1, 4, 1) - sdr(1, 4, 1))).toBeLessThan(2.5 / 255);
   });
 
-  it("lights lens dirt with the bloom", async () => {
+  // Both blooms: the physical one (F4d) in the presenter's finish, the authored one (F11a-4) in the post stack.
+  it.each([1, 0])("lights lens dirt with the bloom (physical: %i)", async (bloomPhysical) => {
     const scene = sceneOf((x, y) => (Math.abs(x - 32) < 3 && Math.abs(y - 16) < 3 ? [80, 80, 80] : [0, 0, 0]));
-    const base = { ...uniformsFromSettings(defaultPostFxSettings()), bloomStrength: 0.9, bloomRadius: 1 };
+    const base = { ...uniformsFromSettings(defaultPostFxSettings()), bloomStrength: 0.9, bloomRadius: 1, bloomPhysical };
     const clean = await show({ scene, post: { uniforms: base, time: 0 } });
     const dirty = await show({ scene, post: { uniforms: { ...base, bloomDirt: 1 }, time: 0 } });
     let brighter = 0;

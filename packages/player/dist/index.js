@@ -4126,8 +4126,11 @@ var POST_FX_EFFECTS = [
       // How far up the pyramid the glow reaches: 0 keeps it tight around edges, 1
       // spreads the widest, softest halo by weighting the coarser blur levels more.
       { id: "radius", label: "Radius", min: 0, max: 1, step: 0.01, defaultValue: 0.6 },
-      // Smudges on the lens the glow lights up (AAA_FIDELITY_ROADMAP.md F4d): the AAA tier's HDR bloom only.
-      { id: "dirt", label: "Lens dirt", min: 0, max: 1, step: 0.01, defaultValue: 0 }
+      // Smudges on the lens the glow lights up (AAA_FIDELITY_ROADMAP.md F4d): the AAA tier only.
+      { id: "dirt", label: "Lens dirt", min: 0, max: 1, step: 0.01, defaultValue: 0 },
+      // On the AAA tier (F11a-4): 0 blooms as authored, a glow added over the frame as shown;
+      // 1 blooms physically, light moved into the glow from the HDR frame, for scenes lit in physical units.
+      { id: "physical", label: "Physical (AAA)", min: 0, max: 1, step: 1, defaultValue: 0 }
     ]
   },
   {
@@ -4369,6 +4372,7 @@ function uniformsFromSettings(settings) {
     bloomThreshold: shape("bloom", "threshold", 0.6),
     bloomRadius: shape("bloom", "radius", 0.6),
     bloomDirt: value("bloom", "dirt", 0),
+    bloomPhysical: value("bloom", "physical", 0),
     toneMap: settings.enabled.tonemap ? 1 : 0,
     exposure: shape("tonemap", "exposure", 1),
     curvature: value("crt", "curvature", 0),
@@ -20848,10 +20852,191 @@ async function createSceneRenderer(width, height, caps, deviceProvider = getWebg
   return capsConstrainScene(caps) ? new CappedSceneRenderer(renderer, caps) : renderer;
 }
 
+// src/render/toneMappers.ts
+var TONE_MAPPERS = ["filmic", "aces", "agx", "neutral"];
+function mul(m, c) {
+  return [m[0] * c[0] + m[1] * c[1] + m[2] * c[2], m[3] * c[0] + m[4] * c[1] + m[5] * c[2], m[6] * c[0] + m[7] * c[1] + m[8] * c[2]];
+}
+var clamp013 = (x) => Math.min(1, Math.max(0, x));
+function filmic(c) {
+  return c.map((x) => {
+    const v = Math.max(0, x);
+    return clamp013(v * (2.51 * v + 0.03) / (v * (2.43 * v + 0.59) + 0.14));
+  });
+}
+var ACES_IN = [0.59719, 0.35458, 0.04823, 0.076, 0.90834, 0.01566, 0.0284, 0.13383, 0.83777];
+var ACES_OUT = [1.60475, -0.53108, -0.07367, -0.10208, 1.10813, -605e-5, -327e-5, -0.07276, 1.07602];
+function aces(c) {
+  const v = mul(ACES_IN, c.map((x) => Math.max(0, x)));
+  const fit = v.map((x) => (x * (x + 0.0245786) - 90537e-9) / (x * (0.983729 * x + 0.432951) + 0.238081));
+  return mul(ACES_OUT, fit).map(clamp013);
+}
+var AGX_IN = [0.842479062253094, 0.0784335999999992, 0.0792237451477643, 0.0423282422610123, 0.878468636469772, 0.0791661274605434, 0.0423756549057051, 0.0784336, 0.879142973793104];
+var AGX_OUT = [1.19687900512017, -0.0980208811401368, -0.0990297440797205, -0.0528968517574562, 1.15190312990417, -0.0989611768448433, -0.0529716355144438, -0.0980434501171241, 1.15107367264116];
+var AGX_MIN_EV = -12.47393;
+var AGX_MAX_EV = 4.026069;
+function agx(c) {
+  const v = mul(AGX_IN, c.map((x) => Math.max(1e-10, x)));
+  const curve = v.map((x) => {
+    const t = (Math.min(AGX_MAX_EV, Math.max(AGX_MIN_EV, Math.log2(x))) - AGX_MIN_EV) / (AGX_MAX_EV - AGX_MIN_EV);
+    const t2 = t * t;
+    const t4 = t2 * t2;
+    return 15.5 * t4 * t2 - 40.14 * t4 * t + 31.96 * t4 - 6.868 * t2 * t + 0.4298 * t2 + 0.1191 * t - 232e-5;
+  });
+  return mul(AGX_OUT, curve).map((x) => clamp013(Math.max(0, x) ** 2.2));
+}
+var NEUTRAL_START = 0.8 - 0.04;
+var NEUTRAL_DESATURATION = 0.15;
+function neutral(c) {
+  let rgb = c.map((x) => Math.max(0, x));
+  const low = Math.min(...rgb);
+  const offset = low < 0.08 ? low - 6.25 * low * low : 0.04;
+  rgb = rgb.map((x) => x - offset);
+  const peak = Math.max(...rgb);
+  if (peak < NEUTRAL_START) return rgb.map(clamp013);
+  const d = 1 - NEUTRAL_START;
+  const newPeak = 1 - d * d / (peak + d - NEUTRAL_START);
+  rgb = rgb.map((x) => x * newPeak / peak);
+  const g = 1 - 1 / (NEUTRAL_DESATURATION * (peak - newPeak) + 1);
+  return rgb.map((x) => clamp013(x + (newPeak - x) * g));
+}
+function toneMap(mapper, c) {
+  switch (mapper) {
+    case "aces":
+      return aces(c);
+    case "agx":
+      return agx(c);
+    case "neutral":
+      return neutral(c);
+    default:
+      return filmic(c);
+  }
+}
+function toneMapperIndex(mapper) {
+  const i = mapper ? TONE_MAPPERS.indexOf(mapper) : 0;
+  return i < 0 ? 0 : i;
+}
+var wgslMat = (m) => `mat3x3f(${[0, 1, 2].map((col) => [0, 1, 2].map((row) => m[row * 3 + col].toString()).join(", ")).join(", ")})`;
+var TONE_MAPPERS_WGSL = (
+  /* wgsl */
+  `
+fn toneFilmic(x: vec3f) -> vec3f {
+  let v = max(x, vec3f(0.0));
+  return clamp((v * (2.51 * v + 0.03)) / (v * (2.43 * v + 0.59) + 0.14), vec3f(0.0), vec3f(1.0));
+}
+fn toneAces(x: vec3f) -> vec3f {
+  let v = ${wgslMat(ACES_IN)} * max(x, vec3f(0.0));
+  let fit = (v * (v + 0.0245786) - 0.000090537) / (v * (0.983729 * v + 0.432951) + 0.238081);
+  return clamp(${wgslMat(ACES_OUT)} * fit, vec3f(0.0), vec3f(1.0));
+}
+fn toneAgx(x: vec3f) -> vec3f {
+  let v = ${wgslMat(AGX_IN)} * max(x, vec3f(1e-10));
+  let t = (clamp(log2(v), vec3f(${AGX_MIN_EV}), vec3f(${AGX_MAX_EV})) - ${AGX_MIN_EV}) / (${AGX_MAX_EV} - ${AGX_MIN_EV});
+  let t2 = t * t;
+  let t4 = t2 * t2;
+  let curve = 15.5 * t4 * t2 - 40.14 * t4 * t + 31.96 * t4 - 6.868 * t2 * t + 0.4298 * t2 + 0.1191 * t - 0.00232;
+  return clamp(pow(max(${wgslMat(AGX_OUT)} * curve, vec3f(0.0)), vec3f(2.2)), vec3f(0.0), vec3f(1.0));
+}
+fn toneNeutral(x: vec3f) -> vec3f {
+  var c = max(x, vec3f(0.0));
+  let low = min(c.r, min(c.g, c.b));
+  let offset = select(0.04, low - 6.25 * low * low, low < 0.08);
+  c = c - offset;
+  let peak = max(c.r, max(c.g, c.b));
+  if (peak < ${NEUTRAL_START}) { return clamp(c, vec3f(0.0), vec3f(1.0)); }
+  let d = 1.0 - ${NEUTRAL_START};
+  let newPeak = 1.0 - d * d / (peak + d - ${NEUTRAL_START});
+  c = c * (newPeak / peak);
+  let g = 1.0 - 1.0 / (${NEUTRAL_DESATURATION} * (peak - newPeak) + 1.0);
+  return clamp(mix(c, vec3f(newPeak), g), vec3f(0.0), vec3f(1.0));
+}
+fn toneMapWith(index: f32, c: vec3f) -> vec3f {
+  if (index > 2.5) { return toneNeutral(c); }
+  if (index > 1.5) { return toneAgx(c); }
+  if (index > 0.5) { return toneAces(c); }
+  return toneFilmic(c);
+}
+`
+);
+
+// src/render/grading.ts
+var HDR_HEADROOM = 3;
+var HDR_PEAK = 1.055 * HDR_HEADROOM ** (1 / 2.4) - 0.055;
+var CCT_CUT = 78125e-7;
+var CCT_A = 10.5402377416545;
+var CCT_B = 0.0729055341958355;
+function toAcesCct(x) {
+  return x <= CCT_CUT ? CCT_A * x + CCT_B : (Math.log2(Math.max(x, 1e-10)) + 9.72) / 17.52;
+}
+var CCT_GREY = toAcesCct(0.18);
+function extendedExposure(mapper, headroom = HDR_HEADROOM) {
+  const want = toneMap(mapper, [0.18, 0.18, 0.18])[1];
+  let lo = 0.01;
+  let hi = 100;
+  for (let i = 0; i < 60; i += 1) {
+    const mid = Math.sqrt(lo * hi);
+    const got = headroom * toneMap(mapper, [0.18 * mid / headroom, 0.18 * mid / headroom, 0.18 * mid / headroom])[1];
+    if (got < want) lo = mid;
+    else hi = mid;
+  }
+  return Math.sqrt(lo * hi);
+}
+var LENS_DIRT_WGSL = (
+  /* wgsl */
+  `
+fn dirtHash(p: vec2f) -> vec2f {
+  let q = vec2f(dot(p, vec2f(127.1, 311.7)), dot(p, vec2f(269.5, 183.3)));
+  return fract(sin(q) * 43758.5453);
+}
+// Smudges on the lens: in each cell of a grid (two scales), a soft blob at a hashed place and size.
+fn lensDirt(uv: vec2f, aspect: f32) -> f32 {
+  var dirt = 0.0;
+  for (var scale = 0; scale < 2; scale = scale + 1) {
+    let cells = select(5.0, 11.0, scale == 1);
+    let q = vec2f(uv.x * aspect, uv.y) * cells;
+    let base = floor(q);
+    for (var dy = -1; dy <= 1; dy = dy + 1) {
+      for (var dx = -1; dx <= 1; dx = dx + 1) {
+        let cell = base + vec2f(f32(dx), f32(dy));
+        let h = dirtHash(cell + f32(scale) * 17.0);
+        let centre = cell + h;
+        let radius = 0.25 + 0.45 * fract(h.x * 7.3 + h.y * 3.1);
+        let d = length(q - centre) / radius;
+        dirt = dirt + max(0.0, 1.0 - d * d) * (0.35 + 0.65 * fract(h.y * 5.7));
+      }
+    }
+  }
+  return min(dirt, 1.5);
+}
+`
+);
+var GRADING_WGSL = (
+  /* wgsl */
+  `
+fn toAcesCct(x: vec3f) -> vec3f {
+  return select((log2(max(x, vec3f(1e-10))) + 9.72) / 17.52, ${CCT_A} * x + ${CCT_B}, x <= vec3f(${CCT_CUT}));
+}
+fn fromAcesCct(y: vec3f) -> vec3f {
+  return select(exp2(y * 17.52 - 9.72), (y - ${CCT_B}) / ${CCT_A}, y <= vec3f(${CCT_A * CCT_CUT + CCT_B}));
+}
+fn gradeLinear(c: vec3f, brightness: f32, contrast: f32, saturation: f32) -> vec3f {
+  let lit = max(c, vec3f(0.0)) * brightness;
+  let y = dot(lit, vec3f(0.2126, 0.7152, 0.0722));
+  let sat = max(vec3f(y) + (lit - vec3f(y)) * saturation, vec3f(0.0));
+  return fromAcesCct((toAcesCct(sat) - ${CCT_GREY}) * contrast + ${CCT_GREY});
+}
+// The sRGB curve, extended past 1 for a display that shows more than SDR white.
+fn toSrgbExtended(c: vec3f) -> vec3f {
+  let v = max(c, vec3f(0.0));
+  return select(1.055 * pow(v, vec3f(1.0 / 2.4)) - vec3f(0.055), v * 12.92, v <= vec3f(0.0031308));
+}
+${LENS_DIRT_WGSL}`
+);
+
 // src/fx/gpuPostFx.ts
 var f2 = (n) => n.toFixed(4);
 var POST_UNIFORM_FLOATS = 19 * 4;
-function packPostUniforms(u, width, height, time, hasBloom, out = new Float32Array(POST_UNIFORM_FLOATS), peak = 1) {
+function packPostUniforms(u, width, height, time, hasBloom, out = new Float32Array(POST_UNIFORM_FLOATS), peak = 1, dirt = 0) {
   const rows = [
     [width, height, time, hasBloom ? 1 : 0],
     [u.brightness, u.contrast, u.saturation, u.toneMap],
@@ -20871,7 +21056,7 @@ function packPostUniforms(u, width, height, time, hasBloom, out = new Float32Arr
     [u.reflectionStrength, u.reflectionHorizon, u.reflectionFalloff, u.reflectionWobble],
     [u.tiltStrength, u.tiltFocus, u.tiltRange, 0],
     [u.kaleidoSegments, u.kaleidoAngle, u.grainAmount, u.grainSize],
-    [peak, peak > 1 ? 1 : 0, 0, 0]
+    [peak, peak > 1 ? 1 : 0, dirt, 0]
   ];
   rows.forEach((row, i) => out.set(row, i * 4));
   return out;
@@ -20911,7 +21096,7 @@ struct Post {
   reflect: vec4f,
   tilt: vec4f,
   kaleido: vec4f,
-  range: vec4f, // F4e: x = the brightest the target shows (1 for SDR), y = 1 when that is past white (an HDR display)
+  range: vec4f, // F4e: x = the brightest the target shows (1 for SDR), y = 1 when that is past white (an HDR display); z = lens dirt (F11a-4)
 };
 `
 );
@@ -21020,6 +21205,7 @@ ${FULLSCREEN_VS}
 const TAU = 6.2831853;
 
 fn src(uv: vec2f) -> vec3f { return textureSampleLevel(source, nearestClamp, uv, 0.0).rgb; }
+${LENS_DIRT_WGSL}
 ${POST_HELPERS_WGSL}fn brightPass(uv: vec2f) -> vec3f {
   let c = src(uv);
   return c * glslSmoothstep(u.fog2.z, 1.0, luma(c));
@@ -21078,6 +21264,8 @@ ${REFLECTION_WGSL}
         }
       }
     }
+    // Lens dirt (F11a-4, as the AAA tier's physical bloom has it): smudges the glow lights up.
+    if (u.range.z > 0.0) { glow = glow * (1.0 + u.range.z * lensDirt(uv, size.x / size.y)); }
     color = color + glow * u.fog2.y;
   }
 
@@ -21275,8 +21463,8 @@ var GpuPostFx = class {
     const blooms = uniforms.bloomStrength > 0;
     const passes = (blooms ? 2 * pyramidLevelCount(this.width, this.height) - 1 : 0) + 1;
     let bloom = null;
-    if (blooms) bloom = this.encodeBloom(encoder, source, uniforms.bloomThreshold, uniforms.bloomRadius, (i) => timingSpan(timing, i, passes));
-    device.queue.writeBuffer(this.uniformBuffer, 0, packPostUniforms(uniforms, this.width, this.height, time, bloom !== null, this.data, options.peak ?? 1));
+    if (blooms) bloom = this.encodeBloom(encoder, options.bloomSource ?? source, uniforms.bloomThreshold, uniforms.bloomRadius, (i) => timingSpan(timing, i, passes));
+    device.queue.writeBuffer(this.uniformBuffer, 0, packPostUniforms(uniforms, this.width, this.height, time, bloom !== null, this.data, options.peak ?? 1, options.dirt ?? 0));
     const pass = encoder.beginRenderPass({
       colorAttachments: [{ view: target.createView(), clearValue: { r: 0, g: 0, b: 0, a: 1 }, loadOp: "clear", storeOp: "store" }],
       ...timingSpan(timing, passes - 1, passes)
@@ -21413,182 +21601,6 @@ var GpuPostFx = class {
     return pipeline;
   }
 };
-
-// src/render/toneMappers.ts
-var TONE_MAPPERS = ["filmic", "aces", "agx", "neutral"];
-function mul(m, c) {
-  return [m[0] * c[0] + m[1] * c[1] + m[2] * c[2], m[3] * c[0] + m[4] * c[1] + m[5] * c[2], m[6] * c[0] + m[7] * c[1] + m[8] * c[2]];
-}
-var clamp013 = (x) => Math.min(1, Math.max(0, x));
-function filmic(c) {
-  return c.map((x) => {
-    const v = Math.max(0, x);
-    return clamp013(v * (2.51 * v + 0.03) / (v * (2.43 * v + 0.59) + 0.14));
-  });
-}
-var ACES_IN = [0.59719, 0.35458, 0.04823, 0.076, 0.90834, 0.01566, 0.0284, 0.13383, 0.83777];
-var ACES_OUT = [1.60475, -0.53108, -0.07367, -0.10208, 1.10813, -605e-5, -327e-5, -0.07276, 1.07602];
-function aces(c) {
-  const v = mul(ACES_IN, c.map((x) => Math.max(0, x)));
-  const fit = v.map((x) => (x * (x + 0.0245786) - 90537e-9) / (x * (0.983729 * x + 0.432951) + 0.238081));
-  return mul(ACES_OUT, fit).map(clamp013);
-}
-var AGX_IN = [0.842479062253094, 0.0784335999999992, 0.0792237451477643, 0.0423282422610123, 0.878468636469772, 0.0791661274605434, 0.0423756549057051, 0.0784336, 0.879142973793104];
-var AGX_OUT = [1.19687900512017, -0.0980208811401368, -0.0990297440797205, -0.0528968517574562, 1.15190312990417, -0.0989611768448433, -0.0529716355144438, -0.0980434501171241, 1.15107367264116];
-var AGX_MIN_EV = -12.47393;
-var AGX_MAX_EV = 4.026069;
-function agx(c) {
-  const v = mul(AGX_IN, c.map((x) => Math.max(1e-10, x)));
-  const curve = v.map((x) => {
-    const t = (Math.min(AGX_MAX_EV, Math.max(AGX_MIN_EV, Math.log2(x))) - AGX_MIN_EV) / (AGX_MAX_EV - AGX_MIN_EV);
-    const t2 = t * t;
-    const t4 = t2 * t2;
-    return 15.5 * t4 * t2 - 40.14 * t4 * t + 31.96 * t4 - 6.868 * t2 * t + 0.4298 * t2 + 0.1191 * t - 232e-5;
-  });
-  return mul(AGX_OUT, curve).map((x) => clamp013(Math.max(0, x) ** 2.2));
-}
-var NEUTRAL_START = 0.8 - 0.04;
-var NEUTRAL_DESATURATION = 0.15;
-function neutral(c) {
-  let rgb = c.map((x) => Math.max(0, x));
-  const low = Math.min(...rgb);
-  const offset = low < 0.08 ? low - 6.25 * low * low : 0.04;
-  rgb = rgb.map((x) => x - offset);
-  const peak = Math.max(...rgb);
-  if (peak < NEUTRAL_START) return rgb.map(clamp013);
-  const d = 1 - NEUTRAL_START;
-  const newPeak = 1 - d * d / (peak + d - NEUTRAL_START);
-  rgb = rgb.map((x) => x * newPeak / peak);
-  const g = 1 - 1 / (NEUTRAL_DESATURATION * (peak - newPeak) + 1);
-  return rgb.map((x) => clamp013(x + (newPeak - x) * g));
-}
-function toneMap(mapper, c) {
-  switch (mapper) {
-    case "aces":
-      return aces(c);
-    case "agx":
-      return agx(c);
-    case "neutral":
-      return neutral(c);
-    default:
-      return filmic(c);
-  }
-}
-function toneMapperIndex(mapper) {
-  const i = mapper ? TONE_MAPPERS.indexOf(mapper) : 0;
-  return i < 0 ? 0 : i;
-}
-var wgslMat = (m) => `mat3x3f(${[0, 1, 2].map((col) => [0, 1, 2].map((row) => m[row * 3 + col].toString()).join(", ")).join(", ")})`;
-var TONE_MAPPERS_WGSL = (
-  /* wgsl */
-  `
-fn toneFilmic(x: vec3f) -> vec3f {
-  let v = max(x, vec3f(0.0));
-  return clamp((v * (2.51 * v + 0.03)) / (v * (2.43 * v + 0.59) + 0.14), vec3f(0.0), vec3f(1.0));
-}
-fn toneAces(x: vec3f) -> vec3f {
-  let v = ${wgslMat(ACES_IN)} * max(x, vec3f(0.0));
-  let fit = (v * (v + 0.0245786) - 0.000090537) / (v * (0.983729 * v + 0.432951) + 0.238081);
-  return clamp(${wgslMat(ACES_OUT)} * fit, vec3f(0.0), vec3f(1.0));
-}
-fn toneAgx(x: vec3f) -> vec3f {
-  let v = ${wgslMat(AGX_IN)} * max(x, vec3f(1e-10));
-  let t = (clamp(log2(v), vec3f(${AGX_MIN_EV}), vec3f(${AGX_MAX_EV})) - ${AGX_MIN_EV}) / (${AGX_MAX_EV} - ${AGX_MIN_EV});
-  let t2 = t * t;
-  let t4 = t2 * t2;
-  let curve = 15.5 * t4 * t2 - 40.14 * t4 * t + 31.96 * t4 - 6.868 * t2 * t + 0.4298 * t2 + 0.1191 * t - 0.00232;
-  return clamp(pow(max(${wgslMat(AGX_OUT)} * curve, vec3f(0.0)), vec3f(2.2)), vec3f(0.0), vec3f(1.0));
-}
-fn toneNeutral(x: vec3f) -> vec3f {
-  var c = max(x, vec3f(0.0));
-  let low = min(c.r, min(c.g, c.b));
-  let offset = select(0.04, low - 6.25 * low * low, low < 0.08);
-  c = c - offset;
-  let peak = max(c.r, max(c.g, c.b));
-  if (peak < ${NEUTRAL_START}) { return clamp(c, vec3f(0.0), vec3f(1.0)); }
-  let d = 1.0 - ${NEUTRAL_START};
-  let newPeak = 1.0 - d * d / (peak + d - ${NEUTRAL_START});
-  c = c * (newPeak / peak);
-  let g = 1.0 - 1.0 / (${NEUTRAL_DESATURATION} * (peak - newPeak) + 1.0);
-  return clamp(mix(c, vec3f(newPeak), g), vec3f(0.0), vec3f(1.0));
-}
-fn toneMapWith(index: f32, c: vec3f) -> vec3f {
-  if (index > 2.5) { return toneNeutral(c); }
-  if (index > 1.5) { return toneAgx(c); }
-  if (index > 0.5) { return toneAces(c); }
-  return toneFilmic(c);
-}
-`
-);
-
-// src/render/grading.ts
-var HDR_HEADROOM = 3;
-var HDR_PEAK = 1.055 * HDR_HEADROOM ** (1 / 2.4) - 0.055;
-var CCT_CUT = 78125e-7;
-var CCT_A = 10.5402377416545;
-var CCT_B = 0.0729055341958355;
-function toAcesCct(x) {
-  return x <= CCT_CUT ? CCT_A * x + CCT_B : (Math.log2(Math.max(x, 1e-10)) + 9.72) / 17.52;
-}
-var CCT_GREY = toAcesCct(0.18);
-function extendedExposure(mapper, headroom = HDR_HEADROOM) {
-  const want = toneMap(mapper, [0.18, 0.18, 0.18])[1];
-  let lo = 0.01;
-  let hi = 100;
-  for (let i = 0; i < 60; i += 1) {
-    const mid = Math.sqrt(lo * hi);
-    const got = headroom * toneMap(mapper, [0.18 * mid / headroom, 0.18 * mid / headroom, 0.18 * mid / headroom])[1];
-    if (got < want) lo = mid;
-    else hi = mid;
-  }
-  return Math.sqrt(lo * hi);
-}
-var GRADING_WGSL = (
-  /* wgsl */
-  `
-fn toAcesCct(x: vec3f) -> vec3f {
-  return select((log2(max(x, vec3f(1e-10))) + 9.72) / 17.52, ${CCT_A} * x + ${CCT_B}, x <= vec3f(${CCT_CUT}));
-}
-fn fromAcesCct(y: vec3f) -> vec3f {
-  return select(exp2(y * 17.52 - 9.72), (y - ${CCT_B}) / ${CCT_A}, y <= vec3f(${CCT_A * CCT_CUT + CCT_B}));
-}
-fn gradeLinear(c: vec3f, brightness: f32, contrast: f32, saturation: f32) -> vec3f {
-  let lit = max(c, vec3f(0.0)) * brightness;
-  let y = dot(lit, vec3f(0.2126, 0.7152, 0.0722));
-  let sat = max(vec3f(y) + (lit - vec3f(y)) * saturation, vec3f(0.0));
-  return fromAcesCct((toAcesCct(sat) - ${CCT_GREY}) * contrast + ${CCT_GREY});
-}
-// The sRGB curve, extended past 1 for a display that shows more than SDR white.
-fn toSrgbExtended(c: vec3f) -> vec3f {
-  let v = max(c, vec3f(0.0));
-  return select(1.055 * pow(v, vec3f(1.0 / 2.4)) - vec3f(0.055), v * 12.92, v <= vec3f(0.0031308));
-}
-fn dirtHash(p: vec2f) -> vec2f {
-  let q = vec2f(dot(p, vec2f(127.1, 311.7)), dot(p, vec2f(269.5, 183.3)));
-  return fract(sin(q) * 43758.5453);
-}
-// Smudges on the lens: in each cell of a grid (two scales), a soft blob at a hashed place and size.
-fn lensDirt(uv: vec2f, aspect: f32) -> f32 {
-  var dirt = 0.0;
-  for (var scale = 0; scale < 2; scale = scale + 1) {
-    let cells = select(5.0, 11.0, scale == 1);
-    let q = vec2f(uv.x * aspect, uv.y) * cells;
-    let base = floor(q);
-    for (var dy = -1; dy <= 1; dy = dy + 1) {
-      for (var dx = -1; dx <= 1; dx = dx + 1) {
-        let cell = base + vec2f(f32(dx), f32(dy));
-        let h = dirtHash(cell + f32(scale) * 17.0);
-        let centre = cell + h;
-        let radius = 0.25 + 0.45 * fract(h.x * 7.3 + h.y * 3.1);
-        let d = length(q - centre) / radius;
-        dirt = dirt + max(0.0, 1.0 - d * d) * (0.35 + 0.65 * fract(h.y * 5.7));
-      }
-    }
-  }
-  return min(dirt, 1.5);
-}
-`
-);
 
 // src/render/lensFx.ts
 var LENS_OFF = { aberration: 0, tiltStrength: 0, reflectionStrength: 0, godrayStrength: 0, streakStrength: 0 };
@@ -22155,6 +22167,8 @@ fn keep(c: vec4f) -> vec4f {
   if (u.hdr.x > 0.5) { return max(c, vec4f(0.0)); }
   return clamp(c, vec4f(0.0), vec4f(1.0));
 }
+// The share of the pixel the scene and the held weapon cover, over the base (display art) (F11a-4).
+var<private> drawn: f32 = 0.0;
 // The layers in light: the base, the scene over it, the shafts added, the held weapon over all.
 fn composite(pos: vec4f, p: vec2i, hdr: bool) -> vec4f {
   var c = u.background;
@@ -22166,6 +22180,7 @@ fn composite(pos: vec4f, p: vec2i, hdr: bool) -> vec4f {
     let s = sampleScaled(scene, pos, p);
     open = all(s == vec4f(0.0));
     c = keep(over(s, c));
+    drawn = clamp(s.a, 0.0, 1.0);
   }
   var v = textureSampleLevel(light, lightSampler, pos.xy * u.shaftScale.xy, 0.0).r;
   if (u.layers.z > 0.5) {
@@ -22173,17 +22188,43 @@ fn composite(pos: vec4f, p: vec2i, hdr: bool) -> vec4f {
     if (hdr) { c = vec4f(c.rgb + toLinear(u.shaftColor.rgb) * v, c.a); }
     else { c = vec4f(min(vec3f(1.0), c.rgb + u.shaftColor.rgb * v), c.a); }
   }
-  if (u.layers.w > 0.5) { c = keep(over(sampleScaled(front, pos, p), c)); }
+  if (u.layers.w > 0.5) {
+    let f = sampleScaled(front, pos, p);
+    c = keep(over(f, c));
+    drawn = clamp(f.a + drawn * (1.0 - f.a), 0.0, 1.0);
+  }
   return c;
 }
+// The frame as shown, and what its bloom gathers over that (F11a-4): from 0.9 of
+// white, the light an HDR display would show past it, so a light of 40 still
+// blooms harder than one of 2 that clipped alike. Only where the scene is: the
+// base (the painted sky, a backdrop) is display art and blooms as painted.
+struct Shown {
+  c: vec4f,
+  past: vec3f,
+};
 @fragment fn compose(@builtin(position) pos: vec4f) -> @location(0) vec4f {
+  return shade(pos).c;
+}
+struct Bloomed {
+  @location(0) shown: vec4f,
+  @location(1) bright: vec4f,
+};
+@fragment fn composeBloom(@builtin(position) pos: vec4f) -> Bloomed {
+  let s = shade(pos);
+  return Bloomed(s.c, vec4f(s.c.rgb + s.past, 1.0));
+}
+fn shade(pos: vec4f) -> Shown {
   let p = vec2i(floor(pos.xy));
   let hdr = u.hdr.x > 0.5;
+  var past = vec3f(0.0);
   var c: vec4f;
   if (u.grade.x > 1.5) {
     // The finish (F4d): the linear composite (binding 1), its bloom (binding 3, half
     // resolution, summed over its levels) mixed in by the strength: light moved, not added.
     c = textureLoad(baseTex, p, 0);
+    // (Its alpha is the share the scene covers, from the linear composite below.)
+    drawn = c.a;
     let dims = vec2f(textureDimensions(baseTex));
     var glow = textureSampleLevel(light, lightSampler, pos.xy / dims, 0.0).rgb * u.grade.z;
     // Lens dirt (F4d-2): smudges the glow lights up.
@@ -22192,7 +22233,7 @@ fn composite(pos: vec4f, p: vec2i, hdr: bool) -> vec4f {
   } else {
     c = composite(pos, p, hdr);
     // The linear composite alone, for the bloom to blur (F4d).
-    if (u.grade.x > 0.5) { return c; }
+    if (u.grade.x > 0.5) { return Shown(vec4f(c.rgb, drawn), past); }
   }
   // The linear frame is tone-mapped once, whole, through the scene's curve (F4d),
   // and encoded for the display; the HUD and holo UI are drawn in display space over it.
@@ -22209,20 +22250,38 @@ fn composite(pos: vec4f, p: vec2i, hdr: bool) -> vec4f {
       var mapped = clamp(rgb, vec3f(0.0), vec3f(1.0));
       if (u.hdr.y > 0.5) { mapped = toneMapWith(u.hdr.w, rgb * u.hdr.z); }
       c = vec4f(toSrgb(mapped), clamp(c.a, 0.0, 1.0));
+      // The bloom's gather (F11a-4; frame.z = the exposure keeping grey on an HDR display).
+      if (u.frame.z > 0.0) {
+        var wide = clamp(rgb, vec3f(0.0), vec3f(u.output.y));
+        if (u.hdr.y > 0.5) { wide = toneMapWith(u.hdr.w, rgb * (u.hdr.z * u.frame.z / u.output.y)) * u.output.y; }
+        let l = dot(c.rgb, vec3f(0.299, 0.587, 0.114));
+        let t = clamp((l - 0.9) / 0.1, 0.0, 1.0);
+        past = max(toSrgbExtended(wide) - c.rgb, vec3f(0.0)) * (t * t * (3.0 - 2.0 * t)) * drawn;
+      }
     }
   }
   // The lens pass's god rays and streaks (F4e-2), gathered as the display shows the light, added over it.
-  if (u.grade.w > 0.5) { c = vec4f(c.rgb + textureLoad(glare, p, 0).rgb, c.a); }
+  // (The bloom gathers the frame as the post stack's did, before the glare: \`past\` takes it back out.)
+  if (u.grade.w > 0.5) {
+    let g = textureLoad(glare, p, 0).rgb;
+    c = vec4f(c.rgb + g, c.a);
+    past = past - g;
+  }
   if (u.layers2.x > 0.5) {
     let h = loadScaled(hud, p, u.frame.xy);
     let b = round(h.rgb * 255.0);
-    if (b.r + b.g + b.b > u.layers2.z) { c = vec4f(h.rgb, 1.0); }
+    if (b.r + b.g + b.b > u.layers2.z) {
+      c = vec4f(h.rgb, 1.0);
+      past = vec3f(0.0);
+    }
   }
   if (u.layers2.y > 0.5) {
-    c = over(loadScaled(holo, p, u.frame.xy), c);
+    let top = loadScaled(holo, p, u.frame.xy);
+    c = over(top, c);
+    past = past * (1.0 - top.a);
     if (u.output.x < 0.5) { c = clamp(c, vec4f(0.0), vec4f(1.0)); }
   }
-  return vec4f(c.rgb, 1.0);
+  return Shown(vec4f(c.rgb, 1.0), past);
 }
 `
 );
@@ -22364,11 +22423,14 @@ var GpuPresenter = class {
     const uni = (visibility = STAGE_FRAGMENT2) => ({ binding: 0, visibility, buffer: { type: "uniform" } });
     const samp = (binding) => ({ binding, visibility: STAGE_FRAGMENT2, sampler: { type: "filtering" } });
     const layout = (entries) => device.createBindGroupLayout({ entries });
+    const compose = layout([uni(), tex(1), tex(2), tex(3), samp(4), tex(5), tex(6), tex(7), tex(8)]);
     this.layouts = {
       sky: layout([uni(), tex(1), samp(2), tex(3, STAGE_FRAGMENT2, "2d-array"), samp(4)]),
       mask: layout([uni(), tex(1), tex(2)]),
       gather: layout([uni(), tex(1)]),
-      compose: layout([uni(), tex(1), tex(2), tex(3), samp(4), tex(5), tex(6), tex(7), tex(8)]),
+      compose,
+      // The finish that also writes what the post stack's bloom gathers (F11a-4).
+      composeBloom: compose,
       lens: layout([uni(), tex(1), samp(2), { binding: 3, visibility: STAGE_FRAGMENT2, buffer: { type: "uniform" } }]),
       measure: layout([uni(STAGE_COMPUTE), tex(1, STAGE_COMPUTE), tex(2, STAGE_COMPUTE), { binding: 3, visibility: STAGE_COMPUTE, buffer: { type: "storage" } }])
     };
@@ -22505,7 +22567,9 @@ var GpuPresenter = class {
       light = gathered;
     }
     const lightOf = (ctx) => light ? ctx.texture(light) : this.blank;
-    const bloomStrength = this.hdr && frame.post ? frame.post.uniforms.bloomStrength : 0;
+    const blooms = this.hdr && frame.post ? frame.post.uniforms.bloomStrength : 0;
+    const bloomStrength = blooms > 0 && frame.post.uniforms.bloomPhysical > 0 ? blooms : 0;
+    const gathersBloom = blooms > 0 && bloomStrength === 0 && !this.extended;
     const look = this.hdr && frame.post ? frame.post.uniforms : null;
     const graded = look !== null && (look.brightness !== 1 || look.contrast !== 1 || look.saturation !== 1);
     const split = this.hdr && frame.post ? splitLens(frame.post.uniforms) : null;
@@ -22516,7 +22580,10 @@ var GpuPresenter = class {
     const composeFormat = post ? composedFormat : format;
     const compose = packComposeUniforms(frame, width, height, this.data.compose, this.hdr);
     if (graded) compose.set([look.brightness, look.contrast, look.saturation, 1], 28);
-    compose.set([this.extended ? 1 : 0, HDR_HEADROOM, this.extended ? this.extendedExposure(frame.tonemap?.operator ?? "filmic") : 1, look?.bloomDirt ?? 0], 32);
+    compose.set([this.extended ? 1 : 0, HDR_HEADROOM, this.extended ? this.extendedExposure(frame.tonemap?.operator ?? "filmic") : 1, bloomStrength > 0 ? look?.bloomDirt ?? 0 : 0], 32);
+    const bloomGather = gathersBloom ? graph.createTexture("bloom gather", { format: "rgba16float", width, height }) : null;
+    if (bloomGather) compose[38] = this.extendedExposure(frame.tonemap?.operator ?? "filmic");
+    const finish = (ctx, entries) => bloomGather ? this.fullScreen(ctx.encoder, "composeBloom", composeFormat, COMPOSE_WGSL, [ctx.texture(composeOut), ctx.texture(bloomGather)], entries, ctx.timing) : this.fullScreen(ctx.encoder, "compose", composeFormat, COMPOSE_WGSL, ctx.texture(composeOut), entries, ctx.timing);
     const layers = (ctx, uniforms, baseView, lightView, glareView = this.blank.createView()) => [
       { binding: 0, resource: { buffer: uniforms } },
       { binding: 1, resource: baseView },
@@ -22596,22 +22663,24 @@ var GpuPresenter = class {
         if (glow) pass.read(glow);
         if (glare) pass.read(glare);
         pass.write(composeOut);
+        if (bloomGather) pass.write(bloomGather);
         return (ctx) => {
           const withGlare = glare ? 1 : 0;
           compose.set(glowShape ? [2, Math.min(1, bloomStrength * BLOOM_MIX), 1 / glowShape.count, withGlare] : [2, 0, 1, withGlare], 24);
           device.queue.writeBuffer(this.uniforms.finish, 0, compose);
           const glowView = (glow ? ctx.texture(glow) : this.blank).createView();
           const glareView = (glare ? ctx.texture(glare) : this.blank).createView();
-          this.fullScreen(ctx.encoder, "compose", composeFormat, COMPOSE_WGSL, ctx.texture(composeOut), layers(ctx, this.uniforms.finish, ctx.texture(lit).createView(), glowView, glareView), ctx.timing);
+          finish(ctx, layers(ctx, this.uniforms.finish, ctx.texture(lit).createView(), glowView, glareView));
         };
       });
     } else {
       graph.addPass(this.hdr ? "compose and tone map" : "compose", "render", (pass) => {
         readLayers(pass);
         pass.write(composeOut);
+        if (bloomGather) pass.write(bloomGather);
         return (ctx) => {
           device.queue.writeBuffer(this.uniforms.compose, 0, compose);
-          this.fullScreen(ctx.encoder, "compose", composeFormat, COMPOSE_WGSL, ctx.texture(composeOut), layers(ctx, this.uniforms.compose, baseOf(ctx).createView(), lightOf(ctx).createView()), ctx.timing);
+          finish(ctx, layers(ctx, this.uniforms.compose, baseOf(ctx).createView(), lightOf(ctx).createView()));
         };
       });
     }
@@ -22620,8 +22689,15 @@ var GpuPresenter = class {
       const postFx = this.postFx;
       graph.addPass("post", "render", (pass) => {
         pass.read(composed);
+        if (bloomGather) pass.read(bloomGather);
         pass.write(output);
-        return (ctx) => postFx.encode(ctx.encoder, ctx.texture(composed), ctx.texture(output), format, post.uniforms, post.time, { peak: this.extended ? HDR_PEAK : 1, timing: ctx.timing });
+        const dirt = this.hdr && bloomStrength === 0 ? look?.bloomDirt ?? 0 : 0;
+        return (ctx) => postFx.encode(ctx.encoder, ctx.texture(composed), ctx.texture(output), format, post.uniforms, post.time, {
+          peak: this.extended ? HDR_PEAK : 1,
+          timing: ctx.timing,
+          ...bloomGather ? { bloomSource: ctx.texture(bloomGather) } : {},
+          dirt
+        });
       });
     }
     const measure = frame.measure && (frame.measure.luminance || frame.measure.sun) && !this.measured.busy ? frame.measure : null;
@@ -22754,8 +22830,8 @@ var GpuPresenter = class {
       pipeline = name === "measure" ? this.device.createComputePipeline({ layout, compute: { module, entryPoint: "measure" } }) : this.device.createRenderPipeline({
         layout,
         vertex: { module, entryPoint: "vs" },
-        // The lens pass writes its light and its glare (F4e-2).
-        fragment: { module, entryPoint: name, targets: name === "lens" ? [{ format }, { format }] : [{ format }] },
+        // The lens pass writes its light and its glare (F4e-2); the bloom's finish, the frame and its bloom's gather (F11a-4).
+        fragment: { module, entryPoint: name, targets: name === "lens" || name === "composeBloom" ? [{ format }, { format }] : [{ format }] },
         primitive: { topology: "triangle-list" }
       });
       this.pipelines.set(key, pipeline);

@@ -670,10 +670,30 @@ Everything else depends on this track. It contains no visible "feature", but its
       - On Dawn, with the whole stack on, a flat bright field shows 252 on the byte path and 236 on the AAA tier.
       - With the bloom off they show 239 and 236, and with no stack at all they match.
       - The HDR bloom (F4d-1) moves light rather than adding it, by design, so lit surfaces read darker than the art was tuned for.
-      - Whether the AAA tier should add the authored brightening back (as F4e-2 does for streaks, in display units after the curve) or keep the physical bloom is the next decision. The rest of the gap on lit surfaces is still to trace.
+      - Whether the AAA tier should add the authored brightening back (as F4e-2 does for streaks, in display units after the curve) or keep the physical bloom was the next decision: F11a-4 adds it back, and keeps the physical bloom as a switch.
     - *Tests:*
       - `gpu-present.test.ts` (Dawn): under the tone map, at exposures 0.4, 1.1 and 3, the painted sky matches the byte path's within 2 levels. It fails without the inverse.
       - `see-through-hdr.test.ts` (Dawn): a fogged surface equals the display-space mix with the fog colour within 3%, where the linear mix lifted it at least 10% (fails without the change). A glow of 8 in thin fog keeps most of its light.
+  - **F11a-4, the bloom as authored: done.** The AAA tier now blooms as the maps were tuned: the post stack's own bloom, thresholded on the frame as shown and added over it. Before, the physical bloom (F4d-1) moved light into its glow and left lit surfaces darker than the art.
+    - **Past white it still gathers light** (`gpuPresent.ts`). On the byte path, a light of 60 and one of 2 both clip to white and bloom alike.
+      - The tone map's pass now writes, beside the frame, what the bloom gathers: the frame as shown, and from 0.9 of white the light an HDR display would show past it, the lens pass's rule (F4e-2).
+      - The post stack's bright pass and pyramid read that instead of the frame. Under 0.9 of white the two are the same, so the glow is the byte path's.
+      - Only the scene and the held weapon gather past white. The base (the painted sky, a backdrop) is display art and blooms as painted, so the painted sun glows as it was drawn to.
+      - The glare, the HUD and the holo UI are handled as before: the bloom gathers the frame without the lens pass's glare, as the post stack did, and the HUD and holo cover what they cover.
+    - **The physical bloom is kept for physical light.** The bloom's new *Physical (AAA)* switch runs F4d-1's energy-conserving chain instead, for a scene lit in physical units (F11a's re-light). Lens dirt now lights either bloom; the post stack's draws the same smudges.
+    - **What it does to the captures** (overviews, against F11a-3's):
+      - Lockout: mean luminance rises from 0.51 to 0.55 (the byte path's is 0.60), and contrast from 0.227 to 0.258, all but the byte path's 0.262.
+      - Beaver Creek: mean luminance rises from 0.59 to 0.64 (the byte path's is 0.66), and contrast from 0.265 to 0.295 (the byte path's is 0.319).
+      - The frames are still 0.03 to 0.05 darker in mean luminance than the byte path's, on lit surfaces. That rest of the gap is still to trace.
+    - **Still to calibrate:** a plain colour backdrop is still decoded and tone-mapped with the scene on the AAA tier, where F11a-3 gave the painted sky the curve's inverse. No map ships one, so it waits.
+    - *Tests:*
+      - `bloom-as-authored.test.ts` (Dawn):
+        - A lit square and a coloured patch under white bloom as the byte path does, within 3 levels. The physical bloom shows the square at least 5 levels darker.
+        - A light of 60 blooms at least 15% harder than one of 2 that clips alike (fails without the gather).
+        - A near-white backdrop blooms less than the same light drawn in the scene (fails without the gate).
+        - The frame runs as one compose pass and the post stack.
+      - `grading.test.ts`: lens dirt lights both blooms.
+      - The F4d graph tests (`post-in-graph`, `lens-fx`, `tone-mappers`) now ask for the physical bloom.
 - [ ] **F11b. A photoreal reference scene.** A new map built entirely through the pipeline, for example a Forerunner ruin in a misty canyon at dusk:
   - scanned rock and foliage;
   - a cluster-rendered cliff;

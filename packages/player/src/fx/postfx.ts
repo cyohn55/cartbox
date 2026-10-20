@@ -100,8 +100,11 @@ export const POST_FX_EFFECTS: PostFxEffectDef[] = [
       // How far up the pyramid the glow reaches: 0 keeps it tight around edges, 1
       // spreads the widest, softest halo by weighting the coarser blur levels more.
       { id: "radius", label: "Radius", min: 0, max: 1, step: 0.01, defaultValue: 0.6 },
-      // Smudges on the lens the glow lights up (AAA_FIDELITY_ROADMAP.md F4d): the AAA tier's HDR bloom only.
+      // Smudges on the lens the glow lights up (AAA_FIDELITY_ROADMAP.md F4d): the AAA tier only.
       { id: "dirt", label: "Lens dirt", min: 0, max: 1, step: 0.01, defaultValue: 0 },
+      // On the AAA tier (F11a-4): 0 blooms as authored, a glow added over the frame as shown;
+      // 1 blooms physically, light moved into the glow from the HDR frame, for scenes lit in physical units.
+      { id: "physical", label: "Physical (AAA)", min: 0, max: 1, step: 1, defaultValue: 0 },
     ],
   },
   {
@@ -367,8 +370,10 @@ export interface PostFxUniforms {
   bloomThreshold: number;
   /** Pyramid spread, 0..1: how much the coarse blur levels contribute. */
   bloomRadius: number;
-  /** Lens dirt over the AAA tier's HDR bloom (0 = none). */
+  /** Lens dirt over the AAA tier's bloom (0 = none). */
   bloomDirt: number;
+  /** 1 when the AAA tier blooms physically, from its HDR frame (F4d); 0 as authored (F11a-4). */
+  bloomPhysical: number;
   /** 0 leaves the frame in gamma space; 1 applies the ACES filmic rolloff. */
   toneMap: number;
   /** Pre-tonemap exposure multiplier (only read when {@link toneMap} is on). */
@@ -473,6 +478,7 @@ export function uniformsFromSettings(settings: PostFxSettings): PostFxUniforms {
     bloomThreshold: shape("bloom", "threshold", 0.6),
     bloomRadius: shape("bloom", "radius", 0.6),
     bloomDirt: value("bloom", "dirt", 0),
+    bloomPhysical: value("bloom", "physical", 0),
     toneMap: settings.enabled.tonemap ? 1 : 0,
     exposure: shape("tonemap", "exposure", 1),
     curvature: value("crt", "curvature", 0),

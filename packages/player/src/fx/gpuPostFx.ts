@@ -19,6 +19,7 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
 import { timingSpan, type PassContext } from "../render/frameGraph.js";
+import { LENS_DIRT_WGSL } from "../render/grading.js";
 import { BLOOM_KNEE, pyramidLevelCount, pyramidLevelSize } from "./bloomModel.js";
 import { FLARE_GHOSTS, FLARE_GHOST_GAIN, FLARE_SPIKE_POWER } from "./flareModel.js";
 import { lutStrip, type GradingLut } from "./lutModel.js";
@@ -32,7 +33,8 @@ export const POST_UNIFORM_FLOATS = 19 * 4;
 /**
  * The main pass's uniforms, in the WGSL struct's order. `peak` is the
  * brightest the target shows (F4e): 1 for SDR, more for an HDR display, whose
- * highlights the stack carries past white instead of clipping.
+ * highlights the stack carries past white instead of clipping. `dirt` is the
+ * lens dirt the bloom lights, on the AAA tier only (F11a-4).
  */
 export function packPostUniforms(
   u: PostFxUniforms,
@@ -42,6 +44,7 @@ export function packPostUniforms(
   hasBloom: boolean,
   out = new Float32Array(POST_UNIFORM_FLOATS),
   peak = 1,
+  dirt = 0,
 ): Float32Array {
   const rows: number[][] = [
     [width, height, time, hasBloom ? 1 : 0],
@@ -62,7 +65,7 @@ export function packPostUniforms(
     [u.reflectionStrength, u.reflectionHorizon, u.reflectionFalloff, u.reflectionWobble],
     [u.tiltStrength, u.tiltFocus, u.tiltRange, 0],
     [u.kaleidoSegments, u.kaleidoAngle, u.grainAmount, u.grainSize],
-    [peak, peak > 1 ? 1 : 0, 0, 0],
+    [peak, peak > 1 ? 1 : 0, dirt, 0],
   ];
   rows.forEach((row, i) => out.set(row, i * 4));
   return out;
@@ -101,7 +104,7 @@ struct Post {
   reflect: vec4f,
   tilt: vec4f,
   kaleido: vec4f,
-  range: vec4f, // F4e: x = the brightest the target shows (1 for SDR), y = 1 when that is past white (an HDR display)
+  range: vec4f, // F4e: x = the brightest the target shows (1 for SDR), y = 1 when that is past white (an HDR display); z = lens dirt (F11a-4)
 };
 `;
 
@@ -206,6 +209,7 @@ ${FULLSCREEN_VS}
 const TAU = 6.2831853;
 
 fn src(uv: vec2f) -> vec3f { return textureSampleLevel(source, nearestClamp, uv, 0.0).rgb; }
+${LENS_DIRT_WGSL}
 ${POST_HELPERS_WGSL}fn brightPass(uv: vec2f) -> vec3f {
   let c = src(uv);
   return c * glslSmoothstep(u.fog2.z, 1.0, luma(c));
@@ -264,6 +268,8 @@ ${REFLECTION_WGSL}
         }
       }
     }
+    // Lens dirt (F11a-4, as the AAA tier's physical bloom has it): smudges the glow lights up.
+    if (u.range.z > 0.0) { glow = glow * (1.0 + u.range.z * lensDirt(uv, size.x / size.y)); }
     color = color + glow * u.fog2.y;
   }
 
@@ -471,7 +477,13 @@ export class GpuPostFx {
     format: string,
     uniforms: PostFxUniforms,
     time: number,
-    options: { readonly peak?: number; readonly timing?: PassContext["timing"] } = {},
+    options: {
+      readonly peak?: number;
+      readonly timing?: PassContext["timing"];
+      /** What the bloom gathers, when not `source` (the AAA tier's frame past white, F11a-4). */
+      readonly bloomSource?: any;
+      readonly dirt?: number;
+    } = {},
   ): void {
     const device = this.device;
     const timing = options.timing ?? {};
@@ -479,8 +491,8 @@ export class GpuPostFx {
     // The bright pass, the downsamples and the upsamples, then the stack itself.
     const passes = (blooms ? 2 * pyramidLevelCount(this.width, this.height) - 1 : 0) + 1;
     let bloom: any = null;
-    if (blooms) bloom = this.encodeBloom(encoder, source, uniforms.bloomThreshold, uniforms.bloomRadius, (i) => timingSpan(timing, i, passes));
-    device.queue.writeBuffer(this.uniformBuffer, 0, packPostUniforms(uniforms, this.width, this.height, time, bloom !== null, this.data, options.peak ?? 1));
+    if (blooms) bloom = this.encodeBloom(encoder, options.bloomSource ?? source, uniforms.bloomThreshold, uniforms.bloomRadius, (i) => timingSpan(timing, i, passes));
+    device.queue.writeBuffer(this.uniformBuffer, 0, packPostUniforms(uniforms, this.width, this.height, time, bloom !== null, this.data, options.peak ?? 1, options.dirt ?? 0));
     const pass = encoder.beginRenderPass({
       colorAttachments: [{ view: target.createView(), clearValue: { r: 0, g: 0, b: 0, a: 1 }, loadOp: "clear", storeOp: "store" }],
       ...timingSpan(timing, passes - 1, passes),

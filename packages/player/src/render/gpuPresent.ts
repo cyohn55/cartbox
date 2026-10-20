@@ -487,6 +487,8 @@ fn keep(c: vec4f) -> vec4f {
   if (u.hdr.x > 0.5) { return max(c, vec4f(0.0)); }
   return clamp(c, vec4f(0.0), vec4f(1.0));
 }
+// The share of the pixel the scene and the held weapon cover, over the base (display art) (F11a-4).
+var<private> drawn: f32 = 0.0;
 // The layers in light: the base, the scene over it, the shafts added, the held weapon over all.
 fn composite(pos: vec4f, p: vec2i, hdr: bool) -> vec4f {
   var c = u.background;
@@ -498,6 +500,7 @@ fn composite(pos: vec4f, p: vec2i, hdr: bool) -> vec4f {
     let s = sampleScaled(scene, pos, p);
     open = all(s == vec4f(0.0));
     c = keep(over(s, c));
+    drawn = clamp(s.a, 0.0, 1.0);
   }
   var v = textureSampleLevel(light, lightSampler, pos.xy * u.shaftScale.xy, 0.0).r;
   if (u.layers.z > 0.5) {
@@ -505,17 +508,43 @@ fn composite(pos: vec4f, p: vec2i, hdr: bool) -> vec4f {
     if (hdr) { c = vec4f(c.rgb + toLinear(u.shaftColor.rgb) * v, c.a); }
     else { c = vec4f(min(vec3f(1.0), c.rgb + u.shaftColor.rgb * v), c.a); }
   }
-  if (u.layers.w > 0.5) { c = keep(over(sampleScaled(front, pos, p), c)); }
+  if (u.layers.w > 0.5) {
+    let f = sampleScaled(front, pos, p);
+    c = keep(over(f, c));
+    drawn = clamp(f.a + drawn * (1.0 - f.a), 0.0, 1.0);
+  }
   return c;
 }
+// The frame as shown, and what its bloom gathers over that (F11a-4): from 0.9 of
+// white, the light an HDR display would show past it, so a light of 40 still
+// blooms harder than one of 2 that clipped alike. Only where the scene is: the
+// base (the painted sky, a backdrop) is display art and blooms as painted.
+struct Shown {
+  c: vec4f,
+  past: vec3f,
+};
 @fragment fn compose(@builtin(position) pos: vec4f) -> @location(0) vec4f {
+  return shade(pos).c;
+}
+struct Bloomed {
+  @location(0) shown: vec4f,
+  @location(1) bright: vec4f,
+};
+@fragment fn composeBloom(@builtin(position) pos: vec4f) -> Bloomed {
+  let s = shade(pos);
+  return Bloomed(s.c, vec4f(s.c.rgb + s.past, 1.0));
+}
+fn shade(pos: vec4f) -> Shown {
   let p = vec2i(floor(pos.xy));
   let hdr = u.hdr.x > 0.5;
+  var past = vec3f(0.0);
   var c: vec4f;
   if (u.grade.x > 1.5) {
     // The finish (F4d): the linear composite (binding 1), its bloom (binding 3, half
     // resolution, summed over its levels) mixed in by the strength: light moved, not added.
     c = textureLoad(baseTex, p, 0);
+    // (Its alpha is the share the scene covers, from the linear composite below.)
+    drawn = c.a;
     let dims = vec2f(textureDimensions(baseTex));
     var glow = textureSampleLevel(light, lightSampler, pos.xy / dims, 0.0).rgb * u.grade.z;
     // Lens dirt (F4d-2): smudges the glow lights up.
@@ -524,7 +553,7 @@ fn composite(pos: vec4f, p: vec2i, hdr: bool) -> vec4f {
   } else {
     c = composite(pos, p, hdr);
     // The linear composite alone, for the bloom to blur (F4d).
-    if (u.grade.x > 0.5) { return c; }
+    if (u.grade.x > 0.5) { return Shown(vec4f(c.rgb, drawn), past); }
   }
   // The linear frame is tone-mapped once, whole, through the scene's curve (F4d),
   // and encoded for the display; the HUD and holo UI are drawn in display space over it.
@@ -541,20 +570,38 @@ fn composite(pos: vec4f, p: vec2i, hdr: bool) -> vec4f {
       var mapped = clamp(rgb, vec3f(0.0), vec3f(1.0));
       if (u.hdr.y > 0.5) { mapped = toneMapWith(u.hdr.w, rgb * u.hdr.z); }
       c = vec4f(toSrgb(mapped), clamp(c.a, 0.0, 1.0));
+      // The bloom's gather (F11a-4; frame.z = the exposure keeping grey on an HDR display).
+      if (u.frame.z > 0.0) {
+        var wide = clamp(rgb, vec3f(0.0), vec3f(u.output.y));
+        if (u.hdr.y > 0.5) { wide = toneMapWith(u.hdr.w, rgb * (u.hdr.z * u.frame.z / u.output.y)) * u.output.y; }
+        let l = dot(c.rgb, vec3f(0.299, 0.587, 0.114));
+        let t = clamp((l - 0.9) / 0.1, 0.0, 1.0);
+        past = max(toSrgbExtended(wide) - c.rgb, vec3f(0.0)) * (t * t * (3.0 - 2.0 * t)) * drawn;
+      }
     }
   }
   // The lens pass's god rays and streaks (F4e-2), gathered as the display shows the light, added over it.
-  if (u.grade.w > 0.5) { c = vec4f(c.rgb + textureLoad(glare, p, 0).rgb, c.a); }
+  // (The bloom gathers the frame as the post stack's did, before the glare: \`past\` takes it back out.)
+  if (u.grade.w > 0.5) {
+    let g = textureLoad(glare, p, 0).rgb;
+    c = vec4f(c.rgb + g, c.a);
+    past = past - g;
+  }
   if (u.layers2.x > 0.5) {
     let h = loadScaled(hud, p, u.frame.xy);
     let b = round(h.rgb * 255.0);
-    if (b.r + b.g + b.b > u.layers2.z) { c = vec4f(h.rgb, 1.0); }
+    if (b.r + b.g + b.b > u.layers2.z) {
+      c = vec4f(h.rgb, 1.0);
+      past = vec3f(0.0);
+    }
   }
   if (u.layers2.y > 0.5) {
-    c = over(loadScaled(holo, p, u.frame.xy), c);
+    let top = loadScaled(holo, p, u.frame.xy);
+    c = over(top, c);
+    past = past * (1.0 - top.a);
     if (u.output.x < 0.5) { c = clamp(c, vec4f(0.0), vec4f(1.0)); }
   }
-  return vec4f(c.rgb, 1.0);
+  return Shown(vec4f(c.rgb, 1.0), past);
 }
 `;
 
@@ -672,7 +719,7 @@ export class GpuPresenter {
   private readonly linear: { clamp: any; wrapU: any; repeat: any };
   /** The lens pass samples as the post stack does: nearest, clamped. */
   private readonly nearest: any;
-  private readonly layouts: { sky: any; mask: any; gather: any; compose: any; lens: any; measure: any };
+  private readonly layouts: { sky: any; mask: any; gather: any; compose: any; composeBloom: any; lens: any; measure: any };
   private readonly pipelines = new Map<string, any>();
   private readonly uniforms: { sky: any; shaft: any; compose: any; finish: any; lens: any; lensShown: any; measure: any };
   private readonly data = {
@@ -730,11 +777,14 @@ export class GpuPresenter {
     const uni = (visibility = STAGE_FRAGMENT) => ({ binding: 0, visibility, buffer: { type: "uniform" } });
     const samp = (binding: number) => ({ binding, visibility: STAGE_FRAGMENT, sampler: { type: "filtering" } });
     const layout = (entries: object[]) => device.createBindGroupLayout({ entries });
+    const compose = layout([uni(), tex(1), tex(2), tex(3), samp(4), tex(5), tex(6), tex(7), tex(8)]);
     this.layouts = {
       sky: layout([uni(), tex(1), samp(2), tex(3, STAGE_FRAGMENT, "2d-array"), samp(4)]),
       mask: layout([uni(), tex(1), tex(2)]),
       gather: layout([uni(), tex(1)]),
-      compose: layout([uni(), tex(1), tex(2), tex(3), samp(4), tex(5), tex(6), tex(7), tex(8)]),
+      compose,
+      // The finish that also writes what the post stack's bloom gathers (F11a-4).
+      composeBloom: compose,
       lens: layout([uni(), tex(1), samp(2), { binding: 3, visibility: STAGE_FRAGMENT, buffer: { type: "uniform" } }]),
       measure: layout([uni(STAGE_COMPUTE), tex(1, STAGE_COMPUTE), tex(2, STAGE_COMPUTE), { binding: 3, visibility: STAGE_COMPUTE, buffer: { type: "storage" } }]),
     };
@@ -881,9 +931,13 @@ export class GpuPresenter {
     }
     const lightOf = (ctx: PassContext) => (light ? ctx.texture(light) : this.blank);
     // 3. Everything over everything: into the target, or for the post stack to read.
-    // A linear frame with bloom on (F4d) blooms here, from its HDR composite, and
-    // the post stack's own (thresholded, after the tone map) stands down.
-    const bloomStrength = this.hdr && frame.post ? frame.post.uniforms.bloomStrength : 0;
+    // A linear frame's bloom (F11a-4) is the post stack's, as the maps were authored:
+    // thresholded on the frame as shown and added over it, gathering past white
+    // the light an HDR display would show. Its physical bloom (F4d) moves light
+    // into a glow from the HDR composite instead, and the post stack's stands down.
+    const blooms = this.hdr && frame.post ? frame.post.uniforms.bloomStrength : 0;
+    const bloomStrength = blooms > 0 && frame.post!.uniforms.bloomPhysical > 0 ? blooms : 0;
+    const gathersBloom = blooms > 0 && bloomStrength === 0 && !this.extended;
     // …and grades before its tone map, in log space (F4d-2): the post stack's display-space grade stands down too.
     const look = this.hdr && frame.post ? frame.post.uniforms : null;
     const graded = look !== null && (look.brightness !== 1 || look.contrast !== 1 || look.saturation !== 1);
@@ -902,7 +956,15 @@ export class GpuPresenter {
     const compose = packComposeUniforms(frame, width, height, this.data.compose, this.hdr);
     if (graded) compose.set([look!.brightness, look!.contrast, look!.saturation, 1], 28);
     // An HDR display: the frame reaches it unclamped, through the post stack too (F4e).
-    compose.set([this.extended ? 1 : 0, HDR_HEADROOM, this.extended ? this.extendedExposure(frame.tonemap?.operator ?? "filmic") : 1, look?.bloomDirt ?? 0], 32);
+    compose.set([this.extended ? 1 : 0, HDR_HEADROOM, this.extended ? this.extendedExposure(frame.tonemap?.operator ?? "filmic") : 1, bloomStrength > 0 ? (look?.bloomDirt ?? 0) : 0], 32);
+    // The post stack's bloom gathers from the frame as shown, and past white as an HDR display would show it.
+    const bloomGather = gathersBloom ? graph.createTexture("bloom gather", { format: "rgba16float", width, height }) : null;
+    if (bloomGather) compose[38] = this.extendedExposure(frame.tonemap?.operator ?? "filmic");
+    // The pass that tone-maps the frame: into its target, and what the bloom gathers beside it.
+    const finish = (ctx: PassContext, entries: object[]) =>
+      bloomGather
+        ? this.fullScreen(ctx.encoder, "composeBloom", composeFormat, COMPOSE_WGSL, [ctx.texture(composeOut), ctx.texture(bloomGather)], entries, ctx.timing)
+        : this.fullScreen(ctx.encoder, "compose", composeFormat, COMPOSE_WGSL, ctx.texture(composeOut), entries, ctx.timing);
     const layers = (ctx: PassContext, uniforms: any, baseView: any, lightView: any, glareView: any = this.blank.createView()) => [
       { binding: 0, resource: { buffer: uniforms } },
       { binding: 1, resource: baseView },
@@ -984,6 +1046,7 @@ export class GpuPresenter {
         if (glow) pass.read(glow);
         if (glare) pass.read(glare);
         pass.write(composeOut);
+        if (bloomGather) pass.write(bloomGather);
         return (ctx) => {
           // The finish: the bloom mixed in (none without one), the curve, the glare, the HUD.
           const withGlare = glare ? 1 : 0;
@@ -991,16 +1054,17 @@ export class GpuPresenter {
           device.queue.writeBuffer(this.uniforms.finish, 0, compose);
           const glowView = (glow ? ctx.texture(glow) : this.blank).createView();
           const glareView = (glare ? ctx.texture(glare) : this.blank).createView();
-          this.fullScreen(ctx.encoder, "compose", composeFormat, COMPOSE_WGSL, ctx.texture(composeOut), layers(ctx, this.uniforms.finish, ctx.texture(lit).createView(), glowView, glareView), ctx.timing);
+          finish(ctx, layers(ctx, this.uniforms.finish, ctx.texture(lit).createView(), glowView, glareView));
         };
       });
     } else {
       graph.addPass(this.hdr ? "compose and tone map" : "compose", "render", (pass) => {
         readLayers(pass);
         pass.write(composeOut);
+        if (bloomGather) pass.write(bloomGather);
         return (ctx) => {
           device.queue.writeBuffer(this.uniforms.compose, 0, compose);
-          this.fullScreen(ctx.encoder, "compose", composeFormat, COMPOSE_WGSL, ctx.texture(composeOut), layers(ctx, this.uniforms.compose, baseOf(ctx).createView(), lightOf(ctx).createView()), ctx.timing);
+          finish(ctx, layers(ctx, this.uniforms.compose, baseOf(ctx).createView(), lightOf(ctx).createView()));
         };
       });
     }
@@ -1010,8 +1074,17 @@ export class GpuPresenter {
       const postFx = this.postFx;
       graph.addPass("post", "render", (pass) => {
         pass.read(composed);
+        if (bloomGather) pass.read(bloomGather);
         pass.write(output);
-        return (ctx) => postFx.encode(ctx.encoder, ctx.texture(composed), ctx.texture(output), format, post.uniforms, post.time, { peak: this.extended ? HDR_PEAK : 1, timing: ctx.timing });
+        // A linear frame's authored bloom (F11a-4) gathers what the finish gave it, and lights the lens dirt.
+        const dirt = this.hdr && bloomStrength === 0 ? (look?.bloomDirt ?? 0) : 0;
+        return (ctx) =>
+          postFx.encode(ctx.encoder, ctx.texture(composed), ctx.texture(output), format, post.uniforms, post.time, {
+            peak: this.extended ? HDR_PEAK : 1,
+            timing: ctx.timing,
+            ...(bloomGather ? { bloomSource: ctx.texture(bloomGather) } : {}),
+            dirt,
+          });
       });
     }
     // 5. The measurements, when asked for and the last ones have been read.
@@ -1157,8 +1230,8 @@ export class GpuPresenter {
           : this.device.createRenderPipeline({
               layout,
               vertex: { module, entryPoint: "vs" },
-              // The lens pass writes its light and its glare (F4e-2).
-              fragment: { module, entryPoint: name, targets: name === "lens" ? [{ format }, { format }] : [{ format }] },
+              // The lens pass writes its light and its glare (F4e-2); the bloom's finish, the frame and its bloom's gather (F11a-4).
+              fragment: { module, entryPoint: name, targets: name === "lens" || name === "composeBloom" ? [{ format }, { format }] : [{ format }] },
               primitive: { topology: "triangle-list" },
             });
       this.pipelines.set(key, pipeline);
@@ -1166,7 +1239,7 @@ export class GpuPresenter {
     return pipeline;
   }
 
-  private fullScreen(encoder: any, name: "sky" | "mask" | "gather" | "compose" | "lens", format: string, code: string, target: any, entries: object[], timing: object = {}): void {
+  private fullScreen(encoder: any, name: "sky" | "mask" | "gather" | "compose" | "composeBloom" | "lens", format: string, code: string, target: any, entries: object[], timing: object = {}): void {
     const pipeline = this.pipeline(name, format, code);
     const targets: any[] = Array.isArray(target) ? target : [target];
     const pass = encoder.beginRenderPass({
