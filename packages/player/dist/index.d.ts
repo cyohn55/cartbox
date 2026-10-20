@@ -4969,6 +4969,19 @@ declare class WebgpuSceneRenderer implements SceneRenderer {
      * bind groups (binding 8 moved).
      */
     private bindSsao;
+    /** The contact shadows' target (F2c): rg16float at the frame's size, AO carried in r and the sun's contact in g. */
+    private contactTexture;
+    private ensureContact;
+    /** The contact pass's uniforms and pipelines (one per depth sample count), made on first use. */
+    private contact;
+    /** Whether this frame's sun takes contact shadows (F2c), for the frame uniform. */
+    private frameContact;
+    /**
+     * Contact shadows (F2c): after the prepass, a short march toward the sun from
+     * each pixel across its depths, into the target the scene shader reads in its
+     * SSAO slot.
+     */
+    private addContactShadows;
     /**
      * Upload the packed light list, growing the storage buffer when it needs more
      * room (a grow changes identity, so invalidate cached bind groups). The buffer

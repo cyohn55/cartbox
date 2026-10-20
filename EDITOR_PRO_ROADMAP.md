@@ -178,6 +178,7 @@ Next to Unity and Unreal, it lacks the following:
     - **A stronger bake.** The light bake takes 1–3 bounces. Each extra bounce gathers, from every surface a texel's rays hit, the sky and sunlit surfaces that surface sees. Shaded corners of a sunlit room then fill with coloured light rather than going black. One bounce is byte-identical to before, so existing bakes stay fresh. The Light bake panel has a Bounces slider.
     - **Already there before P6:** sky occlusion and one coloured bounce of sunlight, from H1.
     - **Not yet: contact shadows and foliage SSAO.** Both are screen-space passes that need the frame's depth. The GPU renderers read back colour only, so they need a depth prepass in WGSL and GLSL first. Until then, the near shadow cascade carries small-scale contact.
+      - *Since then:* the AAA tier's WebGPU renderer has the prepass (AAA_FIDELITY_ROADMAP.md F0c) and draws the sun's contact shadows from it (F2c-1). Its ambient occlusion is F3c.
     - *Tests:* `post-volumes.test.ts` (weights fade smoothly and are hard with no blend; priority wins in either order; the luminance measure; adaptation converges, moves at its own speeds and stays in its limits; storage round-trips and is absent when unset; the player's merge). `lightmap.test.ts` (one bounce unchanged; more bounces fill shade deterministically; colour bleeds).
 - [x] **P7. Level editor** (completes B4).
   - Arena maps are authored in the editor:

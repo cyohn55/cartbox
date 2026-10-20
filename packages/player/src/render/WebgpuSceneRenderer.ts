@@ -135,6 +135,7 @@ import { IBL_LEVELS, IblBuilder, SH_IRRADIANCE_WGSL, environmentKey, environment
 import { CASCADE_COUNT, CASCADE_FORMAT, CASCADE_SHADOW_WGSL, SUN_SOFTNESS, fitCascades, type Cascade } from "./cascades.js";
 import { REACTIVE_MASK_WGSL, TEMPORAL_SHARPEN_WGSL, TemporalState, hdrTemporalShaderWgsl, temporalShaderWgsl } from "./temporal.js";
 import { reflectionShaderWgsl, reflectionUniforms } from "./reflections.js";
+import { CONTACT_UNIFORM_FLOATS, contactShaderWgsl, contactUniforms } from "./contactShadows.js";
 import type { RenderStats } from "../debug/profiler.js";
 import {
   UNIFORM_FLOATS,
@@ -420,7 +421,7 @@ struct Frame {
   cascadeInfo: vec4<f32>,     // F2a: x = 1 with GPU cascades, y = map size, z = strength, w = the last cascade's far depth
   cascadeTexel: vec4<f32>,    // F2a: each cascade's texel in world units
   cascadeDepth: vec4<f32>,    // F2a-2: the world distance each cascade's depth 0..1 spans
-  cascadeSoft: vec4<f32>,     // F2a-2: x = the sun's size (its angular diameter's tangent), for the penumbrae
+  cascadeSoft: vec4<f32>,     // F2a-2: x = the sun's size (its angular diameter's tangent), for the penumbrae; F2c: y = 1 with contact shadows
 };
 // One spot/point shadow tile (EP8c): world→clip, and params.xy = depth→distance terms.
 struct ShadowTile {
@@ -566,7 +567,13 @@ ${hdr
 var<private> shadowPixel: vec2<f32>;
 fn shadowFactor(lightClip: vec4<f32>, worldPos: vec3<f32>, cosL: f32) -> f32 {
   if (frame.cascadeInfo.x < 0.5) { return 1.0; }
-  return cascadeShadow(worldPos, cosL, shadowPixel);
+  return cascadeShadow(worldPos, cosL, shadowPixel) * contactAt(shadowPixel);
+}
+// The sun's contact shadow at this pixel (F2c), from the pass after the prepass: an opaque or
+// cut-out surface's alone, as only they are in its depths.
+fn contactAt(pixel: vec2<f32>) -> f32 {
+  if (frame.cascadeSoft.y < 0.5 || u.pbr.w > 1.5) { return 1.0; }
+  return textureLoad(ssaoMap, vec2<i32>(pixel), 0).g;
 }
 `
   : `// Directional shadow test, mirroring rasterizeTriangle in meshRasterizer.ts:
@@ -1781,7 +1788,7 @@ export class WebgpuSceneRenderer implements SceneRenderer {
    * lazily), or the 1x1 blank when there is none; a change invalidates cached
    * bind groups (binding 8 moved).
    */
-  private bindSsao(ao: Float32Array | null): void {
+  private bindSsao(ao: Float32Array | null, contact = false): void {
     if (ao) {
       if (!this.ssaoTexture) {
         this.ssaoTexture = this.device.createTexture({
@@ -1796,14 +1803,64 @@ export class WebgpuSceneRenderer implements SceneRenderer {
         { bytesPerRow: this.width * 4, rowsPerImage: this.height },
         { width: this.width, height: this.height },
       );
-      if (this.ssaoBound !== this.ssaoTexture) {
-        this.ssaoBound = this.ssaoTexture;
-        this.bindGroups = new WeakMap();
-      }
-    } else if (this.ssaoBound !== this.blankShadow) {
-      this.ssaoBound = this.blankShadow;
+    }
+    // With contact shadows (F2c) the slot holds their target, which carries the AO through in red.
+    const bound = contact ? this.ensureContact() : ao ? this.ssaoTexture : this.blankShadow;
+    if (this.ssaoBound !== bound) {
+      this.ssaoBound = bound;
       this.bindGroups = new WeakMap();
     }
+  }
+
+  /** The contact shadows' target (F2c): rg16float at the frame's size, AO carried in r and the sun's contact in g. */
+  private contactTexture: any = null;
+  private ensureContact(): any {
+    this.contactTexture ??= this.device.createTexture({ size: { width: this.width, height: this.height }, format: "rg16float", usage: 0x10 | 0x04 }); // RENDER_ATTACHMENT | TEXTURE_BINDING
+    return this.contactTexture;
+  }
+  /** The contact pass's uniforms and pipelines (one per depth sample count), made on first use. */
+  private contact: { uniforms: any; data: Float32Array<ArrayBuffer>; pipelines: [any, any] } | null = null;
+  /** Whether this frame's sun takes contact shadows (F2c), for the frame uniform. */
+  private frameContact = false;
+
+  /**
+   * Contact shadows (F2c): after the prepass, a short march toward the sun from
+   * each pixel across its depths, into the target the scene shader reads in its
+   * SSAO slot.
+   */
+  private addContactShadows(graph: FrameGraph, depth: FrameResource, view: Mat4, projection: Mat4, toLight: readonly [number, number, number], ao: boolean, multisampled: boolean): void {
+    const device = this.device;
+    this.contact ??= { uniforms: device.createBuffer({ size: CONTACT_UNIFORM_FLOATS * 4, usage: 0x40 | 0x08 }), data: new Float32Array(CONTACT_UNIFORM_FLOATS), pipelines: [null, null] };
+    const contact = this.contact;
+    const k = multisampled ? 1 : 0;
+    contact.pipelines[k] ??= fullScreenPipeline(device, contactShaderWgsl(multisampled), "contactPass", "rg16float");
+    const pipeline = contact.pipelines[k];
+    const target = graph.importTexture("contact", this.ensureContact());
+    const aoView = (ao && this.ssaoTexture ? this.ssaoTexture : this.blankShadow).createView();
+    graph.addPass("contact shadows", "render", (pass) => {
+      pass.read(depth);
+      pass.write(target);
+      // The scene passes read it through their group 0, which the graph doesn't see.
+      pass.keep();
+      return (ctx) => {
+        device.queue.writeBuffer(contact.uniforms, 0, contactUniforms(view, projection, toLight, ao, contact.data));
+        const encoded = ctx.encoder.beginRenderPass({
+          colorAttachments: [{ view: ctx.texture(target).createView(), clearValue: { r: 1, g: 1, b: 0, a: 1 }, loadOp: "clear", storeOp: "store" }],
+          ...ctx.timing,
+        });
+        encoded.setPipeline(pipeline);
+        encoded.setBindGroup(0, device.createBindGroup({
+          layout: pipeline.getBindGroupLayout(0),
+          entries: [
+            { binding: 0, resource: { buffer: contact.uniforms } },
+            { binding: 1, resource: ctx.texture(depth).createView() },
+            { binding: 2, resource: aoView },
+          ],
+        }));
+        encoded.draw(3);
+        encoded.end();
+      };
+    });
   }
 
   /**
@@ -2505,7 +2562,9 @@ export class WebgpuSceneRenderer implements SceneRenderer {
     // SSAO: upload the CPU-generated AO buffer (same one the software path uses)
     // for the shader to sample per fragment.
     const ssao = draw.ssao ?? null;
-    this.bindSsao(ssao);
+    // Contact shadows (F2c) need the prepass's depths and a sun whose shadow they finish.
+    this.frameContact = this.hdr && prepass && this.frameCascades !== null && Boolean(draw.lightDirection);
+    this.bindSsao(ssao, this.frameContact);
 
     // Modern-tier lights: packed global-first for the WGSL loop, the rest
     // sorted into the view's cells (EP8) so each fragment shades only its own.
@@ -2777,6 +2836,8 @@ export class WebgpuSceneRenderer implements SceneRenderer {
       });
     }
     this.prepassed = prepass ? { depth: msaa ? msaa.depth : this.depthTexture, gbuffer: this.gbuffer!, velocity: this.velocity!, multisampled: msaa !== null } : null;
+    // Contact shadows (F2c) march the prepass's depths, before anything shades against them.
+    if (this.frameContact && draw.lightDirection) this.addContactShadows(graph, depth, draw.view, temporal ? temporal.projection : draw.projection, draw.lightDirection, ssao !== null, msaa !== null);
 
     const scenePass = (name: string, from: number, to: number, load: boolean, last: boolean) =>
       graph.addPass(name, "render", (pass) => {
@@ -3195,7 +3256,7 @@ export class WebgpuSceneRenderer implements SceneRenderer {
       frame.set([1, sun.size, sun.strength, sun.cascades[sun.cascades.length - 1]!.far], FRAME_CASCADES + 68);
       frame.set(sun.cascades.map((c) => c.texel), FRAME_CASCADES + 72);
       frame.set(sun.cascades.map((c) => c.depth), FRAME_CASCADES + 76);
-      frame.set([sun.softness, 0, 0, 0], FRAME_CASCADES + 80);
+      frame.set([sun.softness, this.frameContact ? 1 : 0, 0, 0], FRAME_CASCADES + 80);
     }
     this.device.queue.writeBuffer(buffers.params, 0, frame);
     this.uploadLocalShadows(local);
@@ -3507,6 +3568,11 @@ export class WebgpuSceneRenderer implements SceneRenderer {
     if (this.ssaoTexture) {
       destroySafely(this.ssaoTexture);
       this.ssaoTexture = null;
+      this.ssaoBound = this.blankShadow;
+    }
+    if (this.contactTexture) {
+      destroySafely(this.contactTexture);
+      this.contactTexture = null;
       this.ssaoBound = this.blankShadow;
     }
     if (this.taa) {

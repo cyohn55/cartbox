@@ -18256,6 +18256,97 @@ var IblBuilder = class {
   }
 };
 
+// src/render/contactShadows.ts
+var CONTACT_STEPS = 16;
+var CONTACT_LENGTH = 0.6;
+var CONTACT_THICKNESS = 0.2;
+var CONTACT_FADE = [30, 50];
+var CONTACT_UNIFORM_FLOATS = 44;
+function contactUniforms(view, projection, toLight, ao, out = new Float32Array(CONTACT_UNIFORM_FLOATS)) {
+  out.set(projection, 0);
+  out.set(invertMat4(projection) ?? projection, 16);
+  const [x, y, z] = toLight;
+  const l = [0, 1, 2].map((r) => view[r] * x + view[4 + r] * y + view[8 + r] * z);
+  const n = Math.hypot(l[0], l[1], l[2]) || 1;
+  out.set([l[0] / n, l[1] / n, l[2] / n, 0], 32);
+  out.set([CONTACT_LENGTH, CONTACT_THICKNESS, CONTACT_STEPS, ao ? 1 : 0], 36);
+  out.set([CONTACT_FADE[0], CONTACT_FADE[1], 0, 0], 40);
+  return out;
+}
+function contactShaderWgsl(multisampled) {
+  return (
+    /* wgsl */
+    `
+struct Contact { proj: mat4x4<f32>, invProj: mat4x4<f32>, light: vec4<f32>, params: vec4<f32>, params2: vec4<f32> };
+@group(0) @binding(0) var<uniform> cs: Contact;
+@group(0) @binding(1) var depth: ${multisampled ? "texture_depth_multisampled_2d" : "texture_depth_2d"};
+@group(0) @binding(2) var aoMap: texture_2d<f32>;
+
+@vertex
+fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4<f32> {
+  let p = vec2<f32>(f32((i << 1u) & 2u), f32(i & 2u));
+  return vec4<f32>(p * 2.0 - 1.0, 0.0, 1.0);
+}
+
+// A pixel's position in view space, from its depth (WebGPU's, 0..1).
+fn viewAt(p: vec2<i32>, size: vec2<i32>) -> vec3<f32> {
+  let q = clamp(p, vec2<i32>(0, 0), size - 1);
+  let z = textureLoad(depth, q, 0);
+  let ndc = vec2<f32>((f32(q.x) + 0.5) / f32(size.x) * 2.0 - 1.0, 1.0 - (f32(q.y) + 0.5) / f32(size.y) * 2.0);
+  let v = cs.invProj * vec4<f32>(ndc, z, 1.0);
+  return v.xyz / v.w;
+}
+
+// Where a view-space point lands on screen, in pixels (x, y), or w < 0 behind the camera.
+fn screenOf(q: vec3<f32>, size: vec2<i32>) -> vec3<f32> {
+  let c = cs.proj * vec4<f32>(q, 1.0);
+  if (c.w <= 1e-4) { return vec3<f32>(0.0, 0.0, -1.0); }
+  return vec3<f32>((c.x / c.w * 0.5 + 0.5) * f32(size.x), (0.5 - c.y / c.w * 0.5) * f32(size.y), 1.0);
+}
+
+@fragment
+fn contactPass(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
+  let size = vec2<i32>(textureDimensions(depth));
+  let p = vec2<i32>(frag.xy);
+  var ao = 1.0;
+  if (cs.params.w > 0.5) { ao = textureLoad(aoMap, p, 0).r; }
+  // Nothing drawn here (the far plane): nothing to shadow.
+  if (textureLoad(depth, p, 0) >= 1.0) { return vec4<f32>(ao, 1.0, 0.0, 1.0); }
+  let P = viewAt(p, size);
+  let away = length(P);
+  let fade = 1.0 - smoothstep(cs.params2.x, cs.params2.y, away);
+  if (fade <= 0.0) { return vec4<f32>(ao, 1.0, 0.0, 1.0); }
+  let L = cs.light.xyz;
+  let steps = i32(cs.params.z);
+  let stride = cs.params.x / f32(steps);
+  // Interleaved gradient noise (Jimenez) staggers each pixel's steps.
+  let jitter = fract(52.9829189 * fract(dot(frag.xy, vec2<f32>(0.06711056, 0.00583715))));
+  // Off the surface by a share of the distance, so a pixel never finds its own depth in front of it.
+  let start = 0.01 + away * 0.002;
+  var shadow = 0.0;
+  for (var i = 0; i < steps; i += 1) {
+    let t = start + (f32(i) + jitter) * stride;
+    let q = P + L * t;
+    let s = screenOf(q, size);
+    if (s.z < 0.0 || s.x < 0.0 || s.y < 0.0 || s.x >= f32(size.x) || s.y >= f32(size.y)) { break; }
+    // Within a pixel of where it started the ray is still over its own surface.
+    if (distance(s.xy, frag.xy) < 1.5) { continue; }
+    let surface = viewAt(vec2<i32>(s.xy), size).z;
+    // In front of the step (nearer the camera, which looks down \u2212z), by no more than a thickness.
+    let gap = surface - q.z;
+    if (gap > 0.0 && gap < cs.params.y + stride + away * 0.01) {
+      // The screen's edge, where the depth runs out, softens it.
+      let edge = clamp(min(min(s.x, f32(size.x) - s.x), min(s.y, f32(size.y) - s.y)) / (0.05 * f32(size.x)), 0.0, 1.0);
+      shadow = edge;
+      break;
+    }
+  }
+  return vec4<f32>(ao, 1.0 - shadow * fade, 0.0, 1.0);
+}
+`
+  );
+}
+
 // src/render/WebgpuSceneRenderer.ts
 var GBUFFER_FORMAT = "rgba16float";
 var VELOCITY_FORMAT = "rg16float";
@@ -18460,7 +18551,7 @@ struct Frame {
   cascadeInfo: vec4<f32>,     // F2a: x = 1 with GPU cascades, y = map size, z = strength, w = the last cascade's far depth
   cascadeTexel: vec4<f32>,    // F2a: each cascade's texel in world units
   cascadeDepth: vec4<f32>,    // F2a-2: the world distance each cascade's depth 0..1 spans
-  cascadeSoft: vec4<f32>,     // F2a-2: x = the sun's size (its angular diameter's tangent), for the penumbrae
+  cascadeSoft: vec4<f32>,     // F2a-2: x = the sun's size (its angular diameter's tangent), for the penumbrae; F2c: y = 1 with contact shadows
 };
 // One spot/point shadow tile (EP8c): world\u2192clip, and params.xy = depth\u2192distance terms.
 struct ShadowTile {
@@ -18601,7 +18692,13 @@ ${hdr ? `// The sun's shadow on the linear-light renderer: its GPU cascades (F2a
 var<private> shadowPixel: vec2<f32>;
 fn shadowFactor(lightClip: vec4<f32>, worldPos: vec3<f32>, cosL: f32) -> f32 {
   if (frame.cascadeInfo.x < 0.5) { return 1.0; }
-  return cascadeShadow(worldPos, cosL, shadowPixel);
+  return cascadeShadow(worldPos, cosL, shadowPixel) * contactAt(shadowPixel);
+}
+// The sun's contact shadow at this pixel (F2c), from the pass after the prepass: an opaque or
+// cut-out surface's alone, as only they are in its depths.
+fn contactAt(pixel: vec2<f32>) -> f32 {
+  if (frame.cascadeSoft.y < 0.5 || u.pbr.w > 1.5) { return 1.0; }
+  return textureLoad(ssaoMap, vec2<i32>(pixel), 0).g;
 }
 ` : `// Directional shadow test, mirroring rasterizeTriangle in meshRasterizer.ts:
 // project into the light's frame, look up the nearest depth the light sees, and
@@ -19681,6 +19778,12 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     this.instanceData = new Float32Array(0);
     /** What the last submitted frame drew (for the profiler and tests); GPU time when the device can time it. */
     this.lastFrameStats = { drawCalls: 0, instances: 0, triangles: 0, gpuMs: null };
+    /** The contact shadows' target (F2c): rg16float at the frame's size, AO carried in r and the sun's contact in g. */
+    this.contactTexture = null;
+    /** The contact pass's uniforms and pipelines (one per depth sample count), made on first use. */
+    this.contact = null;
+    /** Whether this frame's sun takes contact shadows (F2c), for the frame uniform. */
+    this.frameContact = false;
     /** The thin G-buffer (F0c), made on the first frame with a prepass. */
     this.gbuffer = null;
     /** The velocity buffer (F0c), made with the G-buffer. */
@@ -19729,7 +19832,7 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
    * lazily), or the 1x1 blank when there is none; a change invalidates cached
    * bind groups (binding 8 moved).
    */
-  bindSsao(ao) {
+  bindSsao(ao, contact = false) {
     if (ao) {
       if (!this.ssaoTexture) {
         this.ssaoTexture = this.device.createTexture({
@@ -19745,14 +19848,55 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
         { bytesPerRow: this.width * 4, rowsPerImage: this.height },
         { width: this.width, height: this.height }
       );
-      if (this.ssaoBound !== this.ssaoTexture) {
-        this.ssaoBound = this.ssaoTexture;
-        this.bindGroups = /* @__PURE__ */ new WeakMap();
-      }
-    } else if (this.ssaoBound !== this.blankShadow) {
-      this.ssaoBound = this.blankShadow;
+    }
+    const bound = contact ? this.ensureContact() : ao ? this.ssaoTexture : this.blankShadow;
+    if (this.ssaoBound !== bound) {
+      this.ssaoBound = bound;
       this.bindGroups = /* @__PURE__ */ new WeakMap();
     }
+  }
+  ensureContact() {
+    this.contactTexture ?? (this.contactTexture = this.device.createTexture({ size: { width: this.width, height: this.height }, format: "rg16float", usage: 16 | 4 }));
+    return this.contactTexture;
+  }
+  /**
+   * Contact shadows (F2c): after the prepass, a short march toward the sun from
+   * each pixel across its depths, into the target the scene shader reads in its
+   * SSAO slot.
+   */
+  addContactShadows(graph, depth, view, projection, toLight, ao, multisampled) {
+    var _a;
+    const device = this.device;
+    this.contact ?? (this.contact = { uniforms: device.createBuffer({ size: CONTACT_UNIFORM_FLOATS * 4, usage: 64 | 8 }), data: new Float32Array(CONTACT_UNIFORM_FLOATS), pipelines: [null, null] });
+    const contact = this.contact;
+    const k = multisampled ? 1 : 0;
+    (_a = contact.pipelines)[k] ?? (_a[k] = fullScreenPipeline(device, contactShaderWgsl(multisampled), "contactPass", "rg16float"));
+    const pipeline = contact.pipelines[k];
+    const target = graph.importTexture("contact", this.ensureContact());
+    const aoView = (ao && this.ssaoTexture ? this.ssaoTexture : this.blankShadow).createView();
+    graph.addPass("contact shadows", "render", (pass) => {
+      pass.read(depth);
+      pass.write(target);
+      pass.keep();
+      return (ctx) => {
+        device.queue.writeBuffer(contact.uniforms, 0, contactUniforms(view, projection, toLight, ao, contact.data));
+        const encoded = ctx.encoder.beginRenderPass({
+          colorAttachments: [{ view: ctx.texture(target).createView(), clearValue: { r: 1, g: 1, b: 0, a: 1 }, loadOp: "clear", storeOp: "store" }],
+          ...ctx.timing
+        });
+        encoded.setPipeline(pipeline);
+        encoded.setBindGroup(0, device.createBindGroup({
+          layout: pipeline.getBindGroupLayout(0),
+          entries: [
+            { binding: 0, resource: { buffer: contact.uniforms } },
+            { binding: 1, resource: ctx.texture(depth).createView() },
+            { binding: 2, resource: aoView }
+          ]
+        }));
+        encoded.draw(3);
+        encoded.end();
+      };
+    });
   }
   /**
    * Upload the packed light list, growing the storage buffer when it needs more
@@ -20337,7 +20481,8 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     this.ensureEnvTexture(draw.environment ?? null);
     this.ensureProbes(draw.environment?.probes ?? null);
     const ssao = draw.ssao ?? null;
-    this.bindSsao(ssao);
+    this.frameContact = this.hdr && prepass && this.frameCascades !== null && Boolean(draw.lightDirection);
+    this.bindSsao(ssao, this.frameContact);
     const { ordered } = this.clusterLights(draw);
     this.uploadLights(packLights(ordered));
     const lightCount = ordered.length;
@@ -20572,6 +20717,7 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
       });
     }
     this.prepassed = prepass ? { depth: msaa ? msaa.depth : this.depthTexture, gbuffer: this.gbuffer, velocity: this.velocity, multisampled: msaa !== null } : null;
+    if (this.frameContact && draw.lightDirection) this.addContactShadows(graph, depth, draw.view, temporal ? temporal.projection : draw.projection, draw.lightDirection, ssao !== null, msaa !== null);
     const scenePass = (name, from, to, load, last) => graph.addPass(name, "render", (pass) => {
       const resolving = msaa !== null && last;
       const resolveBehind = msaa !== null && behind !== null && !load;
@@ -20913,7 +21059,7 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
       frame.set([1, sun.size, sun.strength, sun.cascades[sun.cascades.length - 1].far], FRAME_CASCADES + 68);
       frame.set(sun.cascades.map((c) => c.texel), FRAME_CASCADES + 72);
       frame.set(sun.cascades.map((c) => c.depth), FRAME_CASCADES + 76);
-      frame.set([sun.softness, 0, 0, 0], FRAME_CASCADES + 80);
+      frame.set([sun.softness, this.frameContact ? 1 : 0, 0, 0], FRAME_CASCADES + 80);
     }
     this.device.queue.writeBuffer(buffers.params, 0, frame);
     this.uploadLocalShadows(local);
@@ -21194,6 +21340,11 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     if (this.ssaoTexture) {
       destroySafely(this.ssaoTexture);
       this.ssaoTexture = null;
+      this.ssaoBound = this.blankShadow;
+    }
+    if (this.contactTexture) {
+      destroySafely(this.contactTexture);
+      this.contactTexture = null;
       this.ssaoBound = this.blankShadow;
     }
     if (this.taa) {
