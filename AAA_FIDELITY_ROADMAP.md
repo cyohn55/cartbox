@@ -441,7 +441,23 @@ Everything else depends on this track. It contains no visible "feature", but its
     - **The player.** On a GPU-presented AAA frame it skips the CPU tiles and hands over the frame's casters (the sun's, or the same set gathered without one).
       - A caller that gives the linear-light renderer only CPU tiles gets GPU tiles of what it draws.
       - The other tiers keep their CPU tiles.
-    - *Still to come:* cached static tiles (F2d-2), and contact shadows from these lights (F2d-3, from F2c-2).
+    - *Still to come:* contact shadows from these lights (F2d-3, from F2c-2).
+  - **F2d-2, cached tiles: done.** The atlas is kept from frame to frame, and a still lamp's map is drawn once.
+    - **The same rects.** The lights that cover the most still pick the sizes, but the tiles are placed largest first and then by light. So the same sizes land on the same rects as the camera moves, whatever order the lights take on screen.
+    - **When a tile is drawn again.** Only when:
+      - its key changes: the light's position, direction, range or cone, its face or rect, or the still casters (`SceneDraw.localShadowKey`, the player's static shadow key and how much foliage is in reach);
+      - or something that moves (`localShadowMoved`) reaches the light now, or did when the tile was last drawn, so its old shadow is taken away.
+    - **How.** A tile drawn again has its rect cleared to the far plane by a quad writing depth 1, then takes this frame's casters; every other rect keeps its depths.
+      - A ledger of which rect holds whose map forgets any rect a draw overlaps.
+      - A caller with no still key gets every tile drawn every frame, as before.
+    - *Tests:*
+      - `local-shadows-gpu.test.ts`:
+        - two lights that swap order on screen keep their rects;
+        - the ledger redraws on a new key, a moved light, a mover now or last time, and an overlapping draw.
+      - On Dawn, one renderer over five frames:
+        - a box's shadow stays when the box is taken out under the same still key (the map wasn't drawn again; fails with every tile always drawn);
+        - it goes with a new key, comes back with the box as a mover, and goes again the frame after the mover leaves.
+      - `shadowCascade.test.ts`: the player hands over the still key, the same the next frame, and no movers.
     - *Tests:*
       - `local-shadows-gpu.test.ts`:
         - lights near, mid-way and far get 1024², 512² and 256² tiles, each pointing at its own first tile;

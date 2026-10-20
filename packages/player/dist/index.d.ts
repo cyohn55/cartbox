@@ -4323,6 +4323,14 @@ interface SceneDraw {
      */
     readonly localShadowCasters?: readonly MeshSceneInstance[] | null;
     /**
+     * What identifies the still casters among {@link localShadowCasters} (F2d-2):
+     * while it holds, a tile whose light keeps its place and size keeps the map
+     * it drew. Absent, every tile is drawn every frame.
+     */
+    readonly localShadowKey?: string | null;
+    /** The casters that move this frame (F2d-2): a light any of them reaches has its tiles drawn again. */
+    readonly localShadowMoved?: readonly MeshSceneInstance[] | null;
+    /**
      * The sun's shadow rendered on the GPU in cascades (AAA_FIDELITY_ROADMAP.md
      * F2a), in place of the CPU-rasterised {@link shadow}: what casts (the whole
      * scene's casters, not just what the camera sees), the direction toward the
@@ -5157,6 +5165,10 @@ declare class WebgpuSceneRenderer implements SceneRenderer {
     private frameLocalTiles;
     /** The GPU tiles' records (F2d), and the atlas they're drawn into, made the first time a light casts. */
     private uploadLocalTiles;
+    /** Which atlas rects hold whose map (F2d-2). */
+    private readonly localCache;
+    /** Clears a tile's rect to the far plane (F2d-2), made on first use. */
+    private localClear;
     private ensureLocalAtlas;
     /** Upload the spot/point shadow tiles (EP8c): each tile into its atlas cell, and every tile's view. */
     private uploadLocalShadows;
@@ -7184,6 +7196,8 @@ declare class MeshOverlaySurface implements DisplaySurface {
      * copies.
      */
     private castersNow;
+    /** The still casters' key and this frame's movers, from the last castersNow (F2d-2). */
+    private castersFrame;
     private buildSunShadow;
     /**
      * What the static shadow maps depend on: *which* instances are posed (not

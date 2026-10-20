@@ -9,7 +9,7 @@ import { describe, expect, it } from "vitest";
 
 import { composeModelMatrix, projectionMatrix, viewMatrix, type MeshAsset, type MeshSceneInstance, type SceneLight } from "@cartbox/editor";
 import { WebgpuSceneRenderer } from "@cartbox/player";
-import { LOCAL_ATLAS_SIZE, MAX_GPU_LOCAL_TILES, TileAllocator, localCoverage, planLocalTiles } from "../packages/player/src/render/localAtlas";
+import { LOCAL_ATLAS_SIZE, LocalTileCache, MAX_GPU_LOCAL_TILES, TileAllocator, localCoverage, localTileKey, planLocalTiles } from "../packages/player/src/render/localAtlas";
 
 const spot = (position: [number, number, number], range: number): SceneLight =>
   ({ kind: "spot", position, direction: [0, -1, 0], range, innerAngle: 35, outerAngle: 45, color: [1, 1, 1], intensity: 4, castShadows: true }) as SceneLight;
@@ -61,6 +61,40 @@ describe("planning the atlas", () => {
     // Those left out cast nothing.
     const without = plan.lights.filter((l) => l.shadowTile === undefined).length;
     expect(without * 6 + plan.tiles.length).toBe(96);
+  });
+
+  it("keeps each light on its rect when the lights' order on screen changes (F2d-2)", () => {
+    // Two lights the same size either way, nearer and farther: walking past swaps which covers more.
+    const a = spot([0, 2, -3], 1.5);
+    const b = spot([4, 2, -3.5], 1.5);
+    const before = planLocalTiles([a, b], [0, 2, 0], tan);
+    const after = planLocalTiles([a, b], [4, 2, 0], tan);
+    expect(localCoverage(a, [0, 2, 0], tan) > localCoverage(b, [0, 2, 0], tan)).not.toBe(localCoverage(a, [4, 2, 0], tan) > localCoverage(b, [4, 2, 0], tan));
+    const rects = (p: typeof before) => p.tiles.map((t) => [t.light, t.x, t.y, t.size]);
+    expect(rects(after)).toEqual(rects(before));
+  });
+
+  it("remembers which rect holds whose map, and forgets what a draw overlaps (F2d-2)", () => {
+    const plan = planLocalTiles([spot([0, 2, -2], 6)], eye, tan);
+    const tile = plan.tiles[0]!;
+    const light = plan.lights[0]!;
+    const cache = new LocalTileCache();
+    const key = localTileKey(tile, light, "still");
+    expect(cache.dirty(tile, key, false)).toBe(true);
+    cache.drawn(tile, key, false);
+    expect(cache.dirty(tile, key, false)).toBe(false);
+    // Another still set, a moved light, or a mover in range: drawn again.
+    expect(cache.dirty(tile, localTileKey(tile, light, "other"), false)).toBe(true);
+    expect(cache.dirty(tile, localTileKey(tile, { ...light, position: [0, 2.1, -2] }, "still"), false)).toBe(true);
+    expect(cache.dirty(tile, key, true)).toBe(true);
+    // A mover last time: drawn once more after it leaves, to take its shadow away.
+    cache.drawn(tile, key, true);
+    expect(cache.dirty(tile, key, false)).toBe(true);
+    cache.drawn(tile, key, false);
+    expect(cache.dirty(tile, key, false)).toBe(false);
+    // A smaller tile drawn inside its rect: the big one's map is gone.
+    cache.drawn({ ...tile, size: 256 }, "small", false);
+    expect(cache.dirty(tile, key, false)).toBe(true);
   });
 
   it("splits blocks down without handing one out twice", () => {
@@ -192,7 +226,63 @@ async function render(light: SceneLight, casters: MeshSceneInstance[] | null): P
   return (x) => half(halves[(Math.round(H / 2) * bytesPerRow) / 2 + px(x) * 4 + 1]!);
 }
 
+/** One renderer drawing frame after frame: the floor's green under the light, at x = 0, each frame. */
+async function frames(light: SceneLight, steps: { casters: MeshSceneInstance[]; key: string; moved?: MeshSceneInstance[] }[]): Promise<number[]> {
+  const renderer = (await WebgpuSceneRenderer.create(device, W, H, undefined, { hdr: true }))!;
+  const out: number[] = [];
+  for (const step of steps) {
+    device.pushErrorScope("validation");
+    const texture = renderer.renderToTexture!([ground], {
+      width: W,
+      height: H,
+      view: VIEW,
+      projection: PROJECTION,
+      ambient: 0,
+      lightDirection: [0, -1, 0],
+      lights: [light],
+      localShadowCasters: step.casters,
+      localShadowKey: step.key,
+      localShadowMoved: step.moved ?? [],
+    } as any);
+    const error = await settled(device.popErrorScope());
+    expect(error ? String((error as any).message ?? error) : null).toBeNull();
+    const bytesPerRow = Math.ceil((W * 8) / 256) * 256;
+    const buffer = device.createBuffer({ size: bytesPerRow * H, usage: 0x01 | 0x08 });
+    const encoder = device.createCommandEncoder();
+    encoder.copyTextureToBuffer({ texture }, { buffer, bytesPerRow, rowsPerImage: H }, { width: W, height: H });
+    device.queue.submit([encoder.finish()]);
+    await settled(buffer.mapAsync(0x01));
+    const halves = new Uint16Array(buffer.getMappedRange().slice(0));
+    buffer.unmap();
+    buffer.destroy();
+    out.push(half(halves[(Math.round(H / 2) * bytesPerRow) / 2 + Math.round(W / 2) * 4 + 1]!));
+  }
+  renderer.dispose();
+  return out;
+}
+
 describe.skipIf(!device)("local light shadows on the GPU, on a real device", { timeout: 60_000 }, () => {
+  it("keeps a still light's map from frame to frame, and draws it again only when something changes (F2d-2)", async () => {
+    const light = spot([0, 3.5, 0], 8);
+    const [drawn, kept, rekeyed, moving, left] = await frames(light, [
+      { casters: [ground, box], key: "A" },
+      // The box gone but the still key the same: the map isn't drawn again, so its shadow stays (as cached).
+      { casters: [ground], key: "A" },
+      // A new still key: drawn again, without the box.
+      { casters: [ground], key: "B" },
+      // The box back as a mover: drawn with it.
+      { casters: [ground, box], key: "B", moved: [box] },
+      // The mover gone: drawn once more, which takes its shadow away.
+      { casters: [ground], key: "B" },
+    ]);
+    const lit = rekeyed!;
+    expect(lit).toBeGreaterThan(0.05);
+    expect(drawn!).toBeLessThan(0.15 * lit);
+    expect(kept!).toBeLessThan(0.15 * lit);
+    expect(moving!).toBeLessThan(0.15 * lit);
+    expect(left!).toBeGreaterThan(0.9 * lit);
+  });
+
   for (const [name, light] of [["a spot", spot([0, 3.5, 0], 8)], ["a point", point([0, 3.5, 0], 8)]] as const) {
     it(`shadows the floor under a box from ${name} light, and leaves the rest lit`, async () => {
       const lit = await render(light, null);
