@@ -13,6 +13,10 @@
  * summed) into the frame by the bloom strength, so light is moved into a
  * glow rather than added: a bright light glows by how bright it is, and the
  * frame keeps its energy.
+ *
+ * It is the AAA tier's bloom when the post stack asks for it physical, for a
+ * scene lit in physical units. Otherwise the tier blooms as the maps were
+ * authored (F11a-4): the post stack's glow, added over the frame as shown.
  */
 
 /* eslint-disable @typescript-eslint/no-explicit-any */

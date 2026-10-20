@@ -833,8 +833,10 @@ interface PostFxUniforms {
     bloomThreshold: number;
     /** Pyramid spread, 0..1: how much the coarse blur levels contribute. */
     bloomRadius: number;
-    /** Lens dirt over the AAA tier's HDR bloom (0 = none). */
+    /** Lens dirt over the AAA tier's bloom (0 = none). */
     bloomDirt: number;
+    /** 1 when the AAA tier blooms physically, from its HDR frame (F4d); 0 as authored (F11a-4). */
+    bloomPhysical: number;
     /** 0 leaves the frame in gamma space; 1 applies the ACES filmic rolloff. */
     toneMap: number;
     /** Pre-tonemap exposure multiplier (only read when {@link toneMap} is on). */

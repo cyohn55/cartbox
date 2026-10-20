@@ -174,7 +174,7 @@ describe.skipIf(!device)("the presenter's frame graph, on a real device", { time
     const presenter = new GpuPresenter(device, W, H, { hdr: true });
     const out = device.createTexture({ size: { width: W, height: H }, format: "rgba8unorm", usage: 0x10 | 0x01 });
     const scene = sceneOf(ramp);
-    const post = { uniforms: { ...uniformsFromSettings(defaultPostFxSettings()), bloomStrength: 0.5, bloomRadius: 0.5 }, time: 0 };
+    const post = { uniforms: { ...uniformsFromSettings(defaultPostFxSettings()), bloomStrength: 0.5, bloomRadius: 0.5, bloomPhysical: 1 }, time: 0 };
     present(presenter, out, "rgba8unorm", scene, post);
     await settled(device.queue.onSubmittedWorkDone());
     const pool = (presenter as any).transients as { created: number };

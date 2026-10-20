@@ -180,7 +180,7 @@ describe.skipIf(!device)("the lens pass, on a real device", { timeout: 60_000 },
   it("runs in the frame graph between the composite and the tone map", async () => {
     const presenter = new GpuPresenter(device, W, H, { hdr: true });
     const scene = sceneOf(() => [0.1, 0.1, 0.1]);
-    const uniforms = { ...neutral(), aberration: 2, bloomStrength: 0.4, bloomRadius: 0.5, vignette: 0.3 };
+    const uniforms = { ...neutral(), aberration: 2, bloomStrength: 0.4, bloomRadius: 0.5, bloomPhysical: 1, vignette: 0.3 };
     for (let i = 0; i < 3; i += 1) await show(scene, uniforms, presenter);
     if (device.features.has("timestamp-query")) {
       await until(() => (presenter.stats.passes?.length ?? 0) > 0);

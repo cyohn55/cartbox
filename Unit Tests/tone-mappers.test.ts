@@ -171,7 +171,7 @@ describe.skipIf(!device)("the presenter, on a real device", { timeout: 60_000 },
     const scene = sceneOf((x, y) => (Math.abs(y - 16) < 2 && Math.abs(x - 16) < 2 ? [60, 60, 60] : Math.abs(y - 16) < 2 && Math.abs(x - 48) < 2 ? [1.2, 1.2, 1.2] : [0, 0, 0]));
     const presenter = new GpuPresenter(device, W, H, { hdr: true });
     const out = device.createTexture({ size: { width: W, height: H }, format: "rgba8unorm", usage: 0x10 | 0x01 });
-    const uniforms = { ...uniformsFromSettings(defaultPostFxSettings()), bloomStrength: 0.6, bloomRadius: 0.5 };
+    const uniforms = { ...uniformsFromSettings(defaultPostFxSettings()), bloomStrength: 0.6, bloomRadius: 0.5, bloomPhysical: 1 };
     device.pushErrorScope("validation");
     presenter.present({ base: { kind: "colour", rgba: [0, 0, 0, 255] }, scene, tonemap: { exposure: 1 }, post: { uniforms, time: 0 } }, out, "rgba8unorm");
     const error = await settled(device.popErrorScope());

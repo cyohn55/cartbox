@@ -72,25 +72,8 @@ export function toneMapExtended(mapper: ToneMapper, c: readonly [number, number,
   return toneMap(mapper, c.map((x) => (x * s) / headroom) as [number, number, number]).map((x) => x * headroom) as [number, number, number];
 }
 
-/** The WGSL: `gradeLinear`, the extended sRGB encode, and the lens dirt mask. */
-export const GRADING_WGSL = /* wgsl */ `
-fn toAcesCct(x: vec3f) -> vec3f {
-  return select((log2(max(x, vec3f(1e-10))) + 9.72) / 17.52, ${CCT_A} * x + ${CCT_B}, x <= vec3f(${CCT_CUT}));
-}
-fn fromAcesCct(y: vec3f) -> vec3f {
-  return select(exp2(y * 17.52 - 9.72), (y - ${CCT_B}) / ${CCT_A}, y <= vec3f(${CCT_A * CCT_CUT + CCT_B}));
-}
-fn gradeLinear(c: vec3f, brightness: f32, contrast: f32, saturation: f32) -> vec3f {
-  let lit = max(c, vec3f(0.0)) * brightness;
-  let y = dot(lit, vec3f(0.2126, 0.7152, 0.0722));
-  let sat = max(vec3f(y) + (lit - vec3f(y)) * saturation, vec3f(0.0));
-  return fromAcesCct((toAcesCct(sat) - ${CCT_GREY}) * contrast + ${CCT_GREY});
-}
-// The sRGB curve, extended past 1 for a display that shows more than SDR white.
-fn toSrgbExtended(c: vec3f) -> vec3f {
-  let v = max(c, vec3f(0.0));
-  return select(1.055 * pow(v, vec3f(1.0 / 2.4)) - vec3f(0.055), v * 12.92, v <= vec3f(0.0031308));
-}
+/** Lens dirt (F4d-2): smudges the bloom's glow lights up, in the presenter's finish or the post stack's bloom (F11a-4). */
+export const LENS_DIRT_WGSL = /* wgsl */ `
 fn dirtHash(p: vec2f) -> vec2f {
   let q = vec2f(dot(p, vec2f(127.1, 311.7)), dot(p, vec2f(269.5, 183.3)));
   return fract(sin(q) * 43758.5453);
@@ -116,3 +99,24 @@ fn lensDirt(uv: vec2f, aspect: f32) -> f32 {
   return min(dirt, 1.5);
 }
 `;
+
+/** The WGSL: `gradeLinear`, the extended sRGB encode, and the lens dirt mask. */
+export const GRADING_WGSL = /* wgsl */ `
+fn toAcesCct(x: vec3f) -> vec3f {
+  return select((log2(max(x, vec3f(1e-10))) + 9.72) / 17.52, ${CCT_A} * x + ${CCT_B}, x <= vec3f(${CCT_CUT}));
+}
+fn fromAcesCct(y: vec3f) -> vec3f {
+  return select(exp2(y * 17.52 - 9.72), (y - ${CCT_B}) / ${CCT_A}, y <= vec3f(${CCT_A * CCT_CUT + CCT_B}));
+}
+fn gradeLinear(c: vec3f, brightness: f32, contrast: f32, saturation: f32) -> vec3f {
+  let lit = max(c, vec3f(0.0)) * brightness;
+  let y = dot(lit, vec3f(0.2126, 0.7152, 0.0722));
+  let sat = max(vec3f(y) + (lit - vec3f(y)) * saturation, vec3f(0.0));
+  return fromAcesCct((toAcesCct(sat) - ${CCT_GREY}) * contrast + ${CCT_GREY});
+}
+// The sRGB curve, extended past 1 for a display that shows more than SDR white.
+fn toSrgbExtended(c: vec3f) -> vec3f {
+  let v = max(c, vec3f(0.0));
+  return select(1.055 * pow(v, vec3f(1.0 / 2.4)) - vec3f(0.055), v * 12.92, v <= vec3f(0.0031308));
+}
+${LENS_DIRT_WGSL}`;
