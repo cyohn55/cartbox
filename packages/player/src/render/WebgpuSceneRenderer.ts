@@ -139,7 +139,19 @@ import { REACTIVE_MASK_WGSL, TEMPORAL_SHARPEN_WGSL, TemporalState, hdrTemporalSh
 import { reflectionShaderWgsl, reflectionUniforms } from "./reflections.js";
 import { CONTACT_UNIFORM_FLOATS, SCREEN_SHADING_FORMAT, contactShaderWgsl, contactUniforms } from "./contactShadows.js";
 import { GTAO_UNIFORM_FLOATS, gtaoShaderWgsl, gtaoTemporalWgsl, gtaoUniforms } from "./gtao.js";
-import { LOCAL_ATLAS_SIZE, LOCAL_SHADOW_GPU_WGSL, LOCAL_TILE_FLOATS, MAX_GPU_LOCAL_TILES, packLocalTiles, planLocalTiles, type LocalTile } from "./localAtlas.js";
+import {
+  LOCAL_ATLAS_SIZE,
+  LOCAL_CLEAR_WGSL,
+  LOCAL_SHADOW_GPU_WGSL,
+  LOCAL_TILE_FLOATS,
+  LocalTileCache,
+  MAX_GPU_LOCAL_TILES,
+  localTileKey,
+  packLocalTiles,
+  planLocalTiles,
+  reachesLight,
+  type LocalTile,
+} from "./localAtlas.js";
 import type { RenderStats } from "../debug/profiler.js";
 import {
   UNIFORM_FLOATS,
@@ -3001,12 +3013,39 @@ export class WebgpuSceneRenderer implements SceneRenderer {
     }
 
     // The spot/point lights' tiles (F2d): the casters drawn through each tile's face into its rect of the atlas.
+    // The atlas is kept from frame to frame (F2d-2): a tile is drawn again only when its light, rect or the
+    // still casters change, or something that moves reaches its light now or did when last drawn.
     const localTiles = this.frameLocalTiles;
-    if (localTiles && localTiles.length > 0) {
+    const atlasTexture = localTiles && localTiles.length > 0 ? this.ensureLocalAtlas() : null;
+    const statics = draw.localShadowKey ?? null;
+    const movers = draw.localShadowMoved ?? [];
+    const redraw =
+      localTiles && localPlan
+        ? localTiles.flatMap((t, i) => {
+            const light = localPlan.lights[t.light]!;
+            // Without a key for the still casters, nothing can be trusted to hold: every tile is drawn.
+            const key = statics === null ? null : localTileKey(t, light, statics);
+            const moving = movers.some((m) => reachesLight(m, light));
+            if (key !== null && !this.localCache.dirty(t, key, moving)) return [];
+            this.localCache.drawn(t, key ?? "uncached", moving || key === null);
+            return [i];
+          })
+        : [];
+    if (localTiles && atlasTexture && redraw.length > 0) {
       const res = this.depthGroups.cascades;
-      localTiles.forEach((t, i) => this.device.queue.writeBuffer(res.localViews[i]!.buffer, 0, new Float32Array(t.drawViewProj)));
-      const map = graph.importTexture("local shadows", this.ensureLocalAtlas());
+      redraw.forEach((i) => this.device.queue.writeBuffer(res.localViews[i]!.buffer, 0, new Float32Array(localTiles[i]!.drawViewProj)));
+      const map = graph.importTexture("local shadows", atlasTexture);
+      this.localClear ??= this.device.createRenderPipeline({
+        layout: "auto",
+        vertex: { module: this.device.createShaderModule({ code: LOCAL_CLEAR_WGSL }), entryPoint: "vs" },
+        fragment: { module: this.device.createShaderModule({ code: LOCAL_CLEAR_WGSL }), entryPoint: "clear", targets: [] },
+        primitive: { topology: "triangle-list" },
+        depthStencil: { format: "depth32float", depthWriteEnabled: true, depthCompare: "always" },
+      });
+      const clearPipeline = this.localClear;
       graph.addPass("local shadows", "render", (pass) => {
+        // The tiles not drawn this frame keep their maps.
+        pass.read(map, "attachment");
         pass.write(map);
         pass.keep();
         return (ctx) => {
@@ -3019,12 +3058,16 @@ export class WebgpuSceneRenderer implements SceneRenderer {
           });
           const encoded = ctx.encoder.beginRenderPass({
             colorAttachments: [],
-            depthStencilAttachment: { view: ctx.texture(map).createView(), depthClearValue: 1, depthLoadOp: "clear", depthStoreOp: "store" },
+            depthStencilAttachment: { view: ctx.texture(map).createView(), depthLoadOp: "load", depthStoreOp: "store" },
             ...ctx.timing,
           });
-          localTiles.forEach((t, i) => {
+          redraw.forEach((i) => {
+            const t = localTiles[i]!;
             encoded.setViewport(t.x, t.y, t.size, t.size, 0, 1);
             encoded.setScissorRect(t.x, t.y, t.size, t.size);
+            // The rect back to the far plane, then this frame's casters.
+            encoded.setPipeline(clearPipeline);
+            encoded.draw(3);
             encoded.setBindGroup(1, res.localViews[i]!.group);
             for (const cut of [false, true]) {
               encoded.setPipeline(cut ? res.localCutPipeline : res.localPipeline);
@@ -3528,9 +3571,15 @@ export class WebgpuSceneRenderer implements SceneRenderer {
     this.device.queue.writeBuffer(this.depthGroups.shadowTiles, 0, packLocalTiles(tiles));
   }
 
+  /** Which atlas rects hold whose map (F2d-2). */
+  private readonly localCache = new LocalTileCache();
+  /** Clears a tile's rect to the far plane (F2d-2), made on first use. */
+  private localClear: any = null;
+
   private ensureLocalAtlas(): any {
     const groups = this.depthGroups;
     if (groups.atlasBlank) {
+      this.localCache.clear();
       groups.atlas = this.device.createTexture({ size: { width: LOCAL_ATLAS_SIZE, height: LOCAL_ATLAS_SIZE }, format: "depth32float", usage: 0x10 | 0x04 }); // RENDER_ATTACHMENT | TEXTURE_BINDING
       groups.atlasBlank = false;
       Object.assign(groups, groups.makeGroups(groups.atlas, groups.probes));

@@ -12029,6 +12029,8 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
     this.foliage = /* @__PURE__ */ new Map();
     /** Each terrain block's world bounds, measured on first use. */
     this.blockBounds = /* @__PURE__ */ new Map();
+    /** The still casters' key and this frame's movers, from the last castersNow (F2d-2). */
+    this.castersFrame = null;
     this.destroyed = false;
     /** The scene's 3D particle effects in flight, or null when it defines none. */
     this.particles = null;
@@ -12589,6 +12591,8 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
         shadow,
         sunShadow,
         localShadowCasters,
+        localShadowKey: localShadowCasters ? this.castersFrame?.key ?? null : null,
+        localShadowMoved: localShadowCasters ? this.castersFrame?.moved ?? null : null,
         antialias
       });
       if (profiler) profiler.add("scene", performance.now() - mark);
@@ -12708,7 +12712,7 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
       temporal: this.options.temporal === true && this.quality.temporal === true,
       reflections: this.options.reflections === true && this.quality.reflections === true,
       ...this.options.prepass === true ? { prepass: true } : {},
-      ...lighting ? { ...lit, localShadows: job.local, shadow: job.shadow, sunShadow: job.sunShadow, localShadowCasters: job.localShadowCasters, fog: lighting.fog ?? null, wind: lighting.wind ?? null } : {},
+      ...lighting ? { ...lit, localShadows: job.local, shadow: job.shadow, sunShadow: job.sunShadow, localShadowCasters: job.localShadowCasters, localShadowKey: job.localShadowKey, localShadowMoved: job.localShadowMoved, fog: lighting.fog ?? null, wind: lighting.wind ?? null } : {},
       time
     };
     const scene = this.renderer.renderToTexture(job.drawn, draw) ?? null;
@@ -13212,7 +13216,9 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
     if (this.sunCasters?.key !== key) this.sunCasters = { key, still: this.stillCasters() };
     const inReach = (list) => this.foliage.size > 0 ? list.filter((i) => this.foliageCasts(i)) : list;
     const still = inReach(this.sunCasters.still);
-    return moved.length > 0 ? [...still, ...inReach(moved)] : still;
+    const movers = inReach(moved);
+    this.castersFrame = { key: `${key}|${still.length}`, moved: movers };
+    return movers.length > 0 ? [...still, ...movers] : still;
   }
   buildSunShadow(moved, lighting) {
     const toLight = sceneLightingKeyDirection(lighting);
@@ -18619,40 +18625,40 @@ function localCoverage(light, eye, tanHalfFov) {
 }
 function planLocalTiles(lights, eye, tanHalfFov) {
   const casting = lights.map((light, index) => ({ light, index, faces: localShadowTileCount(light), coverage: localCoverage(light, eye, tanHalfFov) })).filter((c) => c.faces > 0).sort((a, b) => b.coverage - a.coverage);
-  const atlas = new TileAllocator(LOCAL_ATLAS_SIZE);
-  const tiles = [];
-  const first = /* @__PURE__ */ new Map();
+  const trial = new TileAllocator(LOCAL_ATLAS_SIZE);
+  const chosen = [];
+  let count = 0;
   for (const c of casting) {
-    if (tiles.length + c.faces > MAX_GPU_LOCAL_TILES) continue;
+    if (count + c.faces > MAX_GPU_LOCAL_TILES) continue;
     const wanted = c.coverage >= LOCAL_TILE_COVERAGE[0] ? 0 : c.coverage >= LOCAL_TILE_COVERAGE[1] ? 1 : 2;
     for (let k = wanted; k < LOCAL_TILE_SIZES.length; k += 1) {
       const size = LOCAL_TILE_SIZES[k];
       const blocks = [];
       for (let f3 = 0; f3 < c.faces; f3 += 1) {
-        const b = atlas.alloc(size);
+        const b = trial.alloc(size);
         if (!b) break;
         blocks.push(b);
       }
       if (blocks.length < c.faces) {
-        for (const b of blocks) atlas.release(b, size);
+        for (const b of blocks) trial.release(b, size);
         continue;
       }
-      first.set(c.index, tiles.length);
-      localShadowViews(c.light).forEach(({ view, projection }, face) => {
-        const viewProj = multiplyMat46(projection, view);
-        tiles.push({
-          light: c.index,
-          face,
-          x: blocks[face][0],
-          y: blocks[face][1],
-          size,
-          viewProj,
-          drawViewProj: multiplyMat46(TO_WEBGPU_DEPTH, viewProj),
-          linear: [projection[10], projection[14]]
-        });
-      });
+      chosen.push({ c, size });
+      count += c.faces;
       break;
     }
+  }
+  chosen.sort((a, b) => b.size - a.size || a.c.index - b.c.index);
+  const atlas = new TileAllocator(LOCAL_ATLAS_SIZE);
+  const tiles = [];
+  const first = /* @__PURE__ */ new Map();
+  for (const { c, size } of chosen) {
+    first.set(c.index, tiles.length);
+    localShadowViews(c.light).forEach(({ view, projection }, face) => {
+      const [x, y] = atlas.alloc(size);
+      const viewProj = multiplyMat46(projection, view);
+      tiles.push({ light: c.index, face, x, y, size, viewProj, drawViewProj: multiplyMat46(TO_WEBGPU_DEPTH, viewProj), linear: [projection[10], projection[14]] });
+    });
   }
   const out = lights.map((light, i) => {
     const t = first.get(i);
@@ -18661,6 +18667,73 @@ function planLocalTiles(lights, eye, tanHalfFov) {
   });
   return { lights: out, tiles };
 }
+function localTileKey(tile, light, statics) {
+  return JSON.stringify([light.kind, light.position, light.direction, light.range, light.innerAngle, light.outerAngle, tile.face, tile.x, tile.y, tile.size, statics]);
+}
+var meshSpheres = /* @__PURE__ */ new WeakMap();
+function meshSphere(mesh) {
+  let s = meshSpheres.get(mesh);
+  if (!s) {
+    const lo = [Infinity, Infinity, Infinity];
+    const hi = [-Infinity, -Infinity, -Infinity];
+    for (const p of mesh.primitives) {
+      for (let i = 0; i < p.positions.length; i += 3) {
+        for (let a = 0; a < 3; a += 1) {
+          lo[a] = Math.min(lo[a], p.positions[i + a]);
+          hi[a] = Math.max(hi[a], p.positions[i + a]);
+        }
+      }
+    }
+    const c = [0, 1, 2].map((a) => Number.isFinite(lo[a]) ? (lo[a] + hi[a]) / 2 : 0);
+    const r = Number.isFinite(lo[0]) ? Math.hypot(hi[0] - c[0], hi[1] - c[1], hi[2] - c[2]) : 0;
+    s = [c[0], c[1], c[2], r];
+    meshSpheres.set(mesh, s);
+  }
+  return s;
+}
+function reachesLight(instance, light) {
+  const [x, y, z, r] = meshSphere(instance.mesh);
+  const m = instance.model;
+  const cx = m[0] * x + m[4] * y + m[8] * z + m[12];
+  const cy = m[1] * x + m[5] * y + m[9] * z + m[13];
+  const cz = m[2] * x + m[6] * y + m[10] * z + m[14];
+  const scale = Math.max(Math.hypot(m[0], m[1], m[2]), Math.hypot(m[4], m[5], m[6]), Math.hypot(m[8], m[9], m[10]));
+  const p = light.position ?? [0, 0, 0];
+  return Math.hypot(cx - p[0], cy - p[1], cz - p[2]) < (light.range ?? 0) + r * scale;
+}
+var LocalTileCache = class {
+  constructor() {
+    this.entries = [];
+  }
+  /** Whether the tile at this rect must be drawn for `key`, `moving` saying whether a mover reaches its light now. */
+  dirty(tile, key, moving) {
+    const e = this.entries.find((c) => c.x === tile.x && c.y === tile.y && c.size === tile.size);
+    return !e || e.key !== key || moving || e.moving;
+  }
+  /** Record a tile drawn this frame. */
+  drawn(tile, key, moving) {
+    this.entries = this.entries.filter((c) => c.x + c.size <= tile.x || tile.x + tile.size <= c.x || c.y + c.size <= tile.y || tile.y + tile.size <= c.y);
+    this.entries.push({ x: tile.x, y: tile.y, size: tile.size, key, moving });
+  }
+  /** Forget everything (the atlas was remade). */
+  clear() {
+    this.entries = [];
+  }
+};
+var LOCAL_CLEAR_WGSL = (
+  /* wgsl */
+  `
+@vertex
+fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4<f32> {
+  let p = vec2<f32>(f32((i << 1u) & 2u), f32(i & 2u));
+  return vec4<f32>(p * 2.0 - 1.0, 1.0, 1.0);
+}
+@fragment
+fn clear() -> @builtin(frag_depth) f32 {
+  return 1.0;
+}
+`
+);
 function packLocalTiles(tiles, out = new Float32Array(MAX_GPU_LOCAL_TILES * LOCAL_TILE_FLOATS)) {
   tiles.forEach((t, i) => {
     out.set(t.viewProj, i * LOCAL_TILE_FLOATS);
@@ -20216,6 +20289,10 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     this.msaa = null;
     /** This frame's GPU spot/point tiles (F2d), or null when it draws none. */
     this.frameLocalTiles = null;
+    /** Which atlas rects hold whose map (F2d-2). */
+    this.localCache = new LocalTileCache();
+    /** Clears a tile's rect to the far plane (F2d-2), made on first use. */
+    this.localClear = null;
     this.software = new SoftwareSceneRenderer(style);
     this.shadowTexture = blankShadow;
     this.envTexture = hdr ? blankCube(device) : blankTexture;
@@ -21211,11 +21288,31 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
       });
     }
     const localTiles = this.frameLocalTiles;
-    if (localTiles && localTiles.length > 0) {
+    const atlasTexture = localTiles && localTiles.length > 0 ? this.ensureLocalAtlas() : null;
+    const statics = draw.localShadowKey ?? null;
+    const movers = draw.localShadowMoved ?? [];
+    const redraw = localTiles && localPlan ? localTiles.flatMap((t, i) => {
+      const light2 = localPlan.lights[t.light];
+      const key = statics === null ? null : localTileKey(t, light2, statics);
+      const moving = movers.some((m) => reachesLight(m, light2));
+      if (key !== null && !this.localCache.dirty(t, key, moving)) return [];
+      this.localCache.drawn(t, key ?? "uncached", moving || key === null);
+      return [i];
+    }) : [];
+    if (localTiles && atlasTexture && redraw.length > 0) {
       const res = this.depthGroups.cascades;
-      localTiles.forEach((t, i) => this.device.queue.writeBuffer(res.localViews[i].buffer, 0, new Float32Array(t.drawViewProj)));
-      const map = graph.importTexture("local shadows", this.ensureLocalAtlas());
+      redraw.forEach((i) => this.device.queue.writeBuffer(res.localViews[i].buffer, 0, new Float32Array(localTiles[i].drawViewProj)));
+      const map = graph.importTexture("local shadows", atlasTexture);
+      this.localClear ?? (this.localClear = this.device.createRenderPipeline({
+        layout: "auto",
+        vertex: { module: this.device.createShaderModule({ code: LOCAL_CLEAR_WGSL }), entryPoint: "vs" },
+        fragment: { module: this.device.createShaderModule({ code: LOCAL_CLEAR_WGSL }), entryPoint: "clear", targets: [] },
+        primitive: { topology: "triangle-list" },
+        depthStencil: { format: "depth32float", depthWriteEnabled: true, depthCompare: "always" }
+      }));
+      const clearPipeline = this.localClear;
       graph.addPass("local shadows", "render", (pass) => {
+        pass.read(map, "attachment");
         pass.write(map);
         pass.keep();
         return (ctx) => {
@@ -21228,12 +21325,15 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
           });
           const encoded = ctx.encoder.beginRenderPass({
             colorAttachments: [],
-            depthStencilAttachment: { view: ctx.texture(map).createView(), depthClearValue: 1, depthLoadOp: "clear", depthStoreOp: "store" },
+            depthStencilAttachment: { view: ctx.texture(map).createView(), depthLoadOp: "load", depthStoreOp: "store" },
             ...ctx.timing
           });
-          localTiles.forEach((t, i) => {
+          redraw.forEach((i) => {
+            const t = localTiles[i];
             encoded.setViewport(t.x, t.y, t.size, t.size, 0, 1);
             encoded.setScissorRect(t.x, t.y, t.size, t.size);
+            encoded.setPipeline(clearPipeline);
+            encoded.draw(3);
             encoded.setBindGroup(1, res.localViews[i].group);
             for (const cut of [false, true]) {
               encoded.setPipeline(cut ? res.localCutPipeline : res.localPipeline);
@@ -21653,6 +21753,7 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
   ensureLocalAtlas() {
     const groups = this.depthGroups;
     if (groups.atlasBlank) {
+      this.localCache.clear();
       groups.atlas = this.device.createTexture({ size: { width: LOCAL_ATLAS_SIZE, height: LOCAL_ATLAS_SIZE }, format: "depth32float", usage: 16 | 4 });
       groups.atlasBlank = false;
       Object.assign(groups, groups.makeGroups(groups.atlas, groups.probes));

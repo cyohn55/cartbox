@@ -254,6 +254,11 @@ describe("the AAA tier's sun cascades (F2a)", () => {
     const draw = r.draws.at(-1)!;
     expect(draw.localShadows ?? null).toBeNull();
     expect(draw.localShadowCasters).toBe(draw.sunShadow!.casters);
+    // And what the cached tiles hang on (F2d-2): the still casters' key, the same next frame, and no movers.
+    expect(typeof draw.localShadowKey).toBe("string");
+    expect(draw.localShadowMoved).toEqual([]);
+    surface.blit(new Uint8Array(32 * 24 * 4));
+    expect(r.draws.at(-1)!.localShadowKey).toBe(draw.localShadowKey);
     // Without a light that casts, none.
     const plain = cascaded();
     const bare = await MeshOverlaySurface.create({ blit() {}, destroy() {} }, 32, 24, scene(), plain, { presenter });

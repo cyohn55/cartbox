@@ -1144,6 +1144,8 @@ export class MeshOverlaySurface implements DisplaySurface {
         shadow,
         sunShadow,
         localShadowCasters,
+        localShadowKey: localShadowCasters ? (this.castersFrame?.key ?? null) : null,
+        localShadowMoved: localShadowCasters ? (this.castersFrame?.moved ?? null) : null,
         antialias,
       });
       if (profiler) profiler.add("scene", performance.now() - mark);
@@ -1271,6 +1273,8 @@ export class MeshOverlaySurface implements DisplaySurface {
       readonly shadow: ShadowInput | null;
       readonly sunShadow: SunShadow | null;
       readonly localShadowCasters: readonly MeshSceneInstance[] | null;
+      readonly localShadowKey: string | null;
+      readonly localShadowMoved: readonly MeshSceneInstance[] | null;
       readonly antialias: boolean;
     },
   ): void {
@@ -1302,7 +1306,7 @@ export class MeshOverlaySurface implements DisplaySurface {
       temporal: this.options.temporal === true && this.quality.temporal === true,
       reflections: this.options.reflections === true && this.quality.reflections === true,
       ...(this.options.prepass === true ? { prepass: true } : {}),
-      ...(lighting ? { ...lit, localShadows: job.local, shadow: job.shadow, sunShadow: job.sunShadow, localShadowCasters: job.localShadowCasters, fog: lighting.fog ?? null, wind: lighting.wind ?? null } : {}),
+      ...(lighting ? { ...lit, localShadows: job.local, shadow: job.shadow, sunShadow: job.sunShadow, localShadowCasters: job.localShadowCasters, localShadowKey: job.localShadowKey, localShadowMoved: job.localShadowMoved, fog: lighting.fog ?? null, wind: lighting.wind ?? null } : {}),
       time,
     };
     const scene = this.renderer.renderToTexture!(job.drawn, draw) ?? null;
@@ -1895,8 +1899,13 @@ export class MeshOverlaySurface implements DisplaySurface {
     if (this.sunCasters?.key !== key) this.sunCasters = { key, still: this.stillCasters() };
     const inReach = (list: readonly MeshSceneInstance[]) => (this.foliage.size > 0 ? list.filter((i) => this.foliageCasts(i)) : list);
     const still = inReach(this.sunCasters.still);
-    return moved.length > 0 ? [...still, ...inReach(moved)] : still;
+    const movers = inReach(moved);
+    // What the cached local tiles depend on (F2d-2): the still set, and how much foliage is in reach of it.
+    this.castersFrame = { key: `${key}|${still.length}`, moved: movers };
+    return movers.length > 0 ? [...still, ...movers] : still;
   }
+  /** The still casters' key and this frame's movers, from the last castersNow (F2d-2). */
+  private castersFrame: { readonly key: string; readonly moved: readonly MeshSceneInstance[] } | null = null;
 
   private buildSunShadow(moved: readonly MeshSceneInstance[], lighting: SceneLighting): SunShadow | null {
     const toLight = sceneLightingKeyDirection(lighting);

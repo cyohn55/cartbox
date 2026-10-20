@@ -166,6 +166,14 @@ export interface SceneDraw {
    */
   readonly localShadowCasters?: readonly MeshSceneInstance[] | null;
   /**
+   * What identifies the still casters among {@link localShadowCasters} (F2d-2):
+   * while it holds, a tile whose light keeps its place and size keeps the map
+   * it drew. Absent, every tile is drawn every frame.
+   */
+  readonly localShadowKey?: string | null;
+  /** The casters that move this frame (F2d-2): a light any of them reaches has its tiles drawn again. */
+  readonly localShadowMoved?: readonly MeshSceneInstance[] | null;
+  /**
    * The sun's shadow rendered on the GPU in cascades (AAA_FIDELITY_ROADMAP.md
    * F2a), in place of the CPU-rasterised {@link shadow}: what casts (the whole
    * scene's casters, not just what the camera sees), the direction toward the
