@@ -1,16 +1,22 @@
 /**
- * Contact shadows on the AAA tier (AAA_FIDELITY_ROADMAP.md F2c): a short ray
+ * Contact shadows on the AAA tier (AAA_FIDELITY_ROADMAP.md F2c), and the
+ * full-resolution resolve of its ambient occlusion (F3c): a short ray
  * marched from each pixel toward the sun across the depth prepass, so what the
  * cascades are too coarse to resolve (feet on a floor, a crate's foot, grass
  * against a wall) still grounds it.
  *
- * The pass runs after the prepass and writes one `rg16float` texel a pixel,
- * which the linear-light scene shader reads in its SSAO slot:
+ * The pass runs after the prepass (and GTAO, gtao.ts) and writes one
+ * `rgba16float` texel a pixel, which the linear-light scene shader reads in its
+ * SSAO slot:
  *
- * - **r**: the CPU's ambient occlusion when a caller hands one over, carried
- *   through (1 otherwise), so the slot still serves it;
+ * - **r**: the ambient occlusion: GTAO's, brought up from half resolution by
+ *   the four nearest texels weighted by how near their depths are to this
+ *   pixel's; or, without it, the CPU's when a caller hands one over (1
+ *   otherwise), so the slot still serves it;
  * - **g**: how much of the sun reaches the pixel past what the march met, 1
- *   (nothing) to 0, which the shader multiplies into the sun's shadow.
+ *   (nothing) to 0, which the shader multiplies into the sun's shadow (1 when
+ *   the frame has no contact shadows);
+ * - **ba**: GTAO's bent normal, octahedron-encoded in world space.
  *
  * A ray steps a fixed length in view space (world units, as the view is
  * rigid), starting a little off its surface and jittered per pixel so the steps
@@ -38,22 +44,32 @@ export const CONTACT_THICKNESS = 0.2;
 export const CONTACT_FADE: readonly [number, number] = [30, 50];
 /** Floats in the pass's uniforms: projection, inverse projection, the sun, params, params2. */
 export const CONTACT_UNIFORM_FLOATS = 44;
+/** The resolve's target: AO, contact, and the bent normal (F3c). */
+export const SCREEN_SHADING_FORMAT = "rgba16float";
 
 /**
  * The pass's uniforms for a frame drawn with `view` and `projection` (the
- * jittered one, when temporal), lit by a sun toward `toLight`; `ao` says
- * whether a CPU occlusion buffer is bound to carry through.
+ * jittered one, when temporal), lit by a sun toward `toLight` (null: no
+ * contact shadows this frame); `ao` says whether a CPU occlusion buffer is
+ * bound to carry through, and `gtao` whether GTAO's is there to resolve.
  */
-export function contactUniforms(view: Mat4, projection: Mat4, toLight: readonly [number, number, number], ao: boolean, out: Float32Array<ArrayBuffer> = new Float32Array(CONTACT_UNIFORM_FLOATS)): Float32Array<ArrayBuffer> {
+export function contactUniforms(
+  view: Mat4,
+  projection: Mat4,
+  toLight: readonly [number, number, number] | null,
+  ao: boolean,
+  gtao = false,
+  out: Float32Array<ArrayBuffer> = new Float32Array(CONTACT_UNIFORM_FLOATS),
+): Float32Array<ArrayBuffer> {
   out.set(projection, 0);
   out.set(invertMat4(projection) ?? projection, 16);
   // The sun's direction in view space (the view's rotation alone), normalised.
-  const [x, y, z] = toLight;
+  const [x, y, z] = toLight ?? [0, 1, 0];
   const l = [0, 1, 2].map((r) => view[r]! * x + view[4 + r]! * y + view[8 + r]! * z);
   const n = Math.hypot(l[0]!, l[1]!, l[2]!) || 1;
-  out.set([l[0]! / n, l[1]! / n, l[2]! / n, 0], 32);
+  out.set([l[0]! / n, l[1]! / n, l[2]! / n, toLight ? 1 : 0], 32);
   out.set([CONTACT_LENGTH, CONTACT_THICKNESS, CONTACT_STEPS, ao ? 1 : 0], 36);
-  out.set([CONTACT_FADE[0], CONTACT_FADE[1], 0, 0], 40);
+  out.set([CONTACT_FADE[0], CONTACT_FADE[1], gtao ? 1 : 0, 0], 40);
   return out;
 }
 
@@ -64,6 +80,13 @@ struct Contact { proj: mat4x4<f32>, invProj: mat4x4<f32>, light: vec4<f32>, para
 @group(0) @binding(0) var<uniform> cs: Contact;
 @group(0) @binding(1) var depth: ${multisampled ? "texture_depth_multisampled_2d" : "texture_depth_2d"};
 @group(0) @binding(2) var aoMap: texture_2d<f32>;
+@group(0) @binding(3) var gtaoMap: texture_2d<f32>;
+
+fn octEncode(n: vec3<f32>) -> vec2<f32> {
+  let p = n.xy / (abs(n.x) + abs(n.y) + abs(n.z));
+  if (n.z >= 0.0) { return p; }
+  return (vec2<f32>(1.0) - abs(p.yx)) * select(vec2<f32>(-1.0), vec2<f32>(1.0), p >= vec2<f32>(0.0));
+}
 
 @vertex
 fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4<f32> {
@@ -87,18 +110,48 @@ fn screenOf(q: vec3<f32>, size: vec2<i32>) -> vec3<f32> {
   return vec3<f32>((c.x / c.w * 0.5 + 0.5) * f32(size.x), (0.5 - c.y / c.w * 0.5) * f32(size.y), 1.0);
 }
 
+// GTAO at this pixel, from the four nearest half-resolution texels: bilinear weights, each times
+// how near its depth is to this pixel's (so an edge never bleeds), or the nearest when none is.
+fn gtaoAt(p: vec2<i32>, size: vec2<i32>, P: vec3<f32>) -> vec4<f32> {
+  let half = vec2<i32>(textureDimensions(gtaoMap));
+  let f = (vec2<f32>(p) + 0.5) * 0.5 - 0.5;
+  let base = vec2<i32>(floor(f));
+  let w = f - floor(f);
+  var sum = vec4<f32>(0.0);
+  var total = 0.0;
+  for (var k = 0; k < 4; k += 1) {
+    let o = vec2<i32>(k & 1, k >> 1);
+    let h = clamp(base + o, vec2<i32>(0), half - 1);
+    let zh = viewAt(h * 2, size).z;
+    let bil = select(1.0 - w.x, w.x, o.x == 1) * select(1.0 - w.y, w.y, o.y == 1);
+    let near = exp(-abs(zh - P.z) / (0.02 * abs(P.z) + 0.02));
+    let weight = bil * near + 1e-5 * bil;
+    sum = sum + textureLoad(gtaoMap, h, 0) * weight;
+    total = total + weight;
+  }
+  let g = sum / max(total, 1e-6);
+  return vec4<f32>(normalize(g.rgb + vec3<f32>(1e-6)), g.a);
+}
+
 @fragment
 fn contactPass(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
   let size = vec2<i32>(textureDimensions(depth));
   let p = vec2<i32>(frag.xy);
   var ao = 1.0;
   if (cs.params.w > 0.5) { ao = textureLoad(aoMap, p, 0).r; }
-  // Nothing drawn here (the far plane): nothing to shadow.
-  if (textureLoad(depth, p, 0) >= 1.0) { return vec4<f32>(ao, 1.0, 0.0, 1.0); }
+  // Nothing drawn here (the far plane): nothing to shadow or occlude.
+  if (textureLoad(depth, p, 0) >= 1.0) { return vec4<f32>(ao, 1.0, octEncode(vec3<f32>(0.0, 1.0, 0.0))); }
   let P = viewAt(p, size);
+  var bentCode = octEncode(vec3<f32>(0.0, 1.0, 0.0));
+  if (cs.params2.z > 0.5) {
+    let g = gtaoAt(p, size, P);
+    ao = g.a;
+    bentCode = octEncode(g.rgb);
+  }
+  if (cs.light.w < 0.5) { return vec4<f32>(ao, 1.0, bentCode); }
   let away = length(P);
   let fade = 1.0 - smoothstep(cs.params2.x, cs.params2.y, away);
-  if (fade <= 0.0) { return vec4<f32>(ao, 1.0, 0.0, 1.0); }
+  if (fade <= 0.0) { return vec4<f32>(ao, 1.0, bentCode); }
   let L = cs.light.xyz;
   let steps = i32(cs.params.z);
   let stride = cs.params.x / f32(steps);
@@ -124,7 +177,7 @@ fn contactPass(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
       break;
     }
   }
-  return vec4<f32>(ao, 1.0 - shadow * fade, 0.0, 1.0);
+  return vec4<f32>(ao, 1.0 - shadow * fade, bentCode);
 }
 `;
 }

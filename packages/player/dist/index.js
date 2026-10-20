@@ -18262,15 +18262,16 @@ var CONTACT_LENGTH = 0.6;
 var CONTACT_THICKNESS = 0.2;
 var CONTACT_FADE = [30, 50];
 var CONTACT_UNIFORM_FLOATS = 44;
-function contactUniforms(view, projection, toLight, ao, out = new Float32Array(CONTACT_UNIFORM_FLOATS)) {
+var SCREEN_SHADING_FORMAT = "rgba16float";
+function contactUniforms(view, projection, toLight, ao, gtao = false, out = new Float32Array(CONTACT_UNIFORM_FLOATS)) {
   out.set(projection, 0);
   out.set(invertMat4(projection) ?? projection, 16);
-  const [x, y, z] = toLight;
+  const [x, y, z] = toLight ?? [0, 1, 0];
   const l = [0, 1, 2].map((r) => view[r] * x + view[4 + r] * y + view[8 + r] * z);
   const n = Math.hypot(l[0], l[1], l[2]) || 1;
-  out.set([l[0] / n, l[1] / n, l[2] / n, 0], 32);
+  out.set([l[0] / n, l[1] / n, l[2] / n, toLight ? 1 : 0], 32);
   out.set([CONTACT_LENGTH, CONTACT_THICKNESS, CONTACT_STEPS, ao ? 1 : 0], 36);
-  out.set([CONTACT_FADE[0], CONTACT_FADE[1], 0, 0], 40);
+  out.set([CONTACT_FADE[0], CONTACT_FADE[1], gtao ? 1 : 0, 0], 40);
   return out;
 }
 function contactShaderWgsl(multisampled) {
@@ -18281,6 +18282,13 @@ struct Contact { proj: mat4x4<f32>, invProj: mat4x4<f32>, light: vec4<f32>, para
 @group(0) @binding(0) var<uniform> cs: Contact;
 @group(0) @binding(1) var depth: ${multisampled ? "texture_depth_multisampled_2d" : "texture_depth_2d"};
 @group(0) @binding(2) var aoMap: texture_2d<f32>;
+@group(0) @binding(3) var gtaoMap: texture_2d<f32>;
+
+fn octEncode(n: vec3<f32>) -> vec2<f32> {
+  let p = n.xy / (abs(n.x) + abs(n.y) + abs(n.z));
+  if (n.z >= 0.0) { return p; }
+  return (vec2<f32>(1.0) - abs(p.yx)) * select(vec2<f32>(-1.0), vec2<f32>(1.0), p >= vec2<f32>(0.0));
+}
 
 @vertex
 fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4<f32> {
@@ -18304,18 +18312,48 @@ fn screenOf(q: vec3<f32>, size: vec2<i32>) -> vec3<f32> {
   return vec3<f32>((c.x / c.w * 0.5 + 0.5) * f32(size.x), (0.5 - c.y / c.w * 0.5) * f32(size.y), 1.0);
 }
 
+// GTAO at this pixel, from the four nearest half-resolution texels: bilinear weights, each times
+// how near its depth is to this pixel's (so an edge never bleeds), or the nearest when none is.
+fn gtaoAt(p: vec2<i32>, size: vec2<i32>, P: vec3<f32>) -> vec4<f32> {
+  let half = vec2<i32>(textureDimensions(gtaoMap));
+  let f = (vec2<f32>(p) + 0.5) * 0.5 - 0.5;
+  let base = vec2<i32>(floor(f));
+  let w = f - floor(f);
+  var sum = vec4<f32>(0.0);
+  var total = 0.0;
+  for (var k = 0; k < 4; k += 1) {
+    let o = vec2<i32>(k & 1, k >> 1);
+    let h = clamp(base + o, vec2<i32>(0), half - 1);
+    let zh = viewAt(h * 2, size).z;
+    let bil = select(1.0 - w.x, w.x, o.x == 1) * select(1.0 - w.y, w.y, o.y == 1);
+    let near = exp(-abs(zh - P.z) / (0.02 * abs(P.z) + 0.02));
+    let weight = bil * near + 1e-5 * bil;
+    sum = sum + textureLoad(gtaoMap, h, 0) * weight;
+    total = total + weight;
+  }
+  let g = sum / max(total, 1e-6);
+  return vec4<f32>(normalize(g.rgb + vec3<f32>(1e-6)), g.a);
+}
+
 @fragment
 fn contactPass(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
   let size = vec2<i32>(textureDimensions(depth));
   let p = vec2<i32>(frag.xy);
   var ao = 1.0;
   if (cs.params.w > 0.5) { ao = textureLoad(aoMap, p, 0).r; }
-  // Nothing drawn here (the far plane): nothing to shadow.
-  if (textureLoad(depth, p, 0) >= 1.0) { return vec4<f32>(ao, 1.0, 0.0, 1.0); }
+  // Nothing drawn here (the far plane): nothing to shadow or occlude.
+  if (textureLoad(depth, p, 0) >= 1.0) { return vec4<f32>(ao, 1.0, octEncode(vec3<f32>(0.0, 1.0, 0.0))); }
   let P = viewAt(p, size);
+  var bentCode = octEncode(vec3<f32>(0.0, 1.0, 0.0));
+  if (cs.params2.z > 0.5) {
+    let g = gtaoAt(p, size, P);
+    ao = g.a;
+    bentCode = octEncode(g.rgb);
+  }
+  if (cs.light.w < 0.5) { return vec4<f32>(ao, 1.0, bentCode); }
   let away = length(P);
   let fade = 1.0 - smoothstep(cs.params2.x, cs.params2.y, away);
-  if (fade <= 0.0) { return vec4<f32>(ao, 1.0, 0.0, 1.0); }
+  if (fade <= 0.0) { return vec4<f32>(ao, 1.0, bentCode); }
   let L = cs.light.xyz;
   let steps = i32(cs.params.z);
   let stride = cs.params.x / f32(steps);
@@ -18341,7 +18379,181 @@ fn contactPass(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
       break;
     }
   }
-  return vec4<f32>(ao, 1.0 - shadow * fade, 0.0, 1.0);
+  return vec4<f32>(ao, 1.0 - shadow * fade, bentCode);
+}
+`
+  );
+}
+
+// src/render/gtao.ts
+var GTAO_RADIUS = 1.2;
+var GTAO_SLICES = 2;
+var GTAO_STEPS = 6;
+var GTAO_BLEND = 0.12;
+var GTAO_UNIFORM_FLOATS = 56;
+function gtaoUniforms(view, projection, frame, history, out = new Float32Array(GTAO_UNIFORM_FLOATS)) {
+  out.set(projection, 0);
+  out.set(invertMat4(projection) ?? projection, 16);
+  out.set(view, 32);
+  out.set([GTAO_RADIUS, GTAO_SLICES, GTAO_STEPS, frame % 64], 48);
+  out.set([GTAO_BLEND, history ? 1 : 0, 0, 0], 52);
+  return out;
+}
+var SHARED = (multisampled) => (
+  /* wgsl */
+  `
+struct Gtao { proj: mat4x4<f32>, invProj: mat4x4<f32>, view: mat4x4<f32>, params: vec4<f32>, params2: vec4<f32> };
+@group(0) @binding(0) var<uniform> ga: Gtao;
+@group(0) @binding(1) var depth: ${multisampled ? "texture_depth_multisampled_2d" : "texture_depth_2d"};
+
+@vertex
+fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4<f32> {
+  let p = vec2<f32>(f32((i << 1u) & 2u), f32(i & 2u));
+  return vec4<f32>(p * 2.0 - 1.0, 0.0, 1.0);
+}
+
+// A full-resolution pixel's position in view space, from its depth (as drawn).
+fn viewAt(p: vec2<i32>, size: vec2<i32>) -> vec3<f32> {
+  let q = clamp(p, vec2<i32>(0, 0), size - 1);
+  let z = textureLoad(depth, q, 0);
+  let ndc = vec2<f32>((f32(q.x) + 0.5) / f32(size.x) * 2.0 - 1.0, 1.0 - (f32(q.y) + 0.5) / f32(size.y) * 2.0);
+  let v = ga.invProj * vec4<f32>(ndc, z, 1.0);
+  return v.xyz / v.w;
+}
+`
+);
+function gtaoShaderWgsl(multisampled) {
+  return (
+    /* wgsl */
+    `${SHARED(multisampled)}
+@group(0) @binding(2) var gbuffer: texture_2d<f32>;
+
+fn octDecode(e: vec2<f32>) -> vec3<f32> {
+  var n = vec3<f32>(e.x, e.y, 1.0 - abs(e.x) - abs(e.y));
+  let t = max(-n.z, 0.0);
+  n.x = n.x + select(t, -t, n.x >= 0.0);
+  n.y = n.y + select(t, -t, n.y >= 0.0);
+  return normalize(n);
+}
+
+@fragment
+fn gtaoPass(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
+  let full = vec2<i32>(textureDimensions(depth));
+  // This half-resolution texel's full-resolution pixel.
+  let p = min(vec2<i32>(frag.xy) * 2, full - 1);
+  if (textureLoad(depth, p, 0) >= 1.0) { return vec4<f32>(0.0, 1.0, 0.0, 1.0); }
+  let P = viewAt(p, full);
+  let V = normalize(-P);
+  let Nw = octDecode(textureLoad(gbuffer, p, 0).xy);
+  var N = normalize((ga.view * vec4<f32>(Nw, 0.0)).xyz);
+  if (dot(N, V) < 0.0) { N = -N; }
+  let radius = ga.params.x;
+  // The radius on screen, in full-resolution pixels, at this depth.
+  let reach = radius * ga.proj[0][0] * 0.5 * f32(full.x) / max(-P.z, 1e-3);
+  if (reach < 1.0) { return vec4<f32>(Nw, 1.0); }
+  let slices = i32(ga.params.y);
+  let steps = i32(ga.params.z);
+  // Interleaved gradient noise, shifted each frame, turns the slices and staggers the steps.
+  let shift = ga.params.w * 5.588238;
+  let spin = fract(52.9829189 * fract(dot(frag.xy + shift, vec2<f32>(0.06711056, 0.00583715))));
+  let jitter = fract(spin * 7.31 + 0.5);
+  var visibility = 0.0;
+  var bent = vec3<f32>(0.0);
+  for (var s = 0; s < slices; s += 1) {
+    let phi = (f32(s) + spin) / f32(slices) * 3.14159265;
+    let dir = vec2<f32>(cos(phi), sin(phi));
+    // The slice's plane: the view vector and the screen direction (y up in view space, down on screen).
+    let d3 = vec3<f32>(dir.x, -dir.y, 0.0);
+    let ortho = normalize(d3 - V * dot(d3, V));
+    let axis = cross(ortho, V);
+    let projN = N - axis * dot(N, axis);
+    let projLen = length(projN);
+    if (projLen < 1e-4) { continue; }
+    let cosN = clamp(dot(projN, V) / projLen, -1.0, 1.0);
+    let n = sign(dot(projN, ortho)) * acos(cosN);
+    // The highest horizon each way, as a cosine to V (\u22121 open), each sample fading toward the radius.
+    var hc = vec2<f32>(-1.0, -1.0);
+    for (var side = 0; side < 2; side += 1) {
+      let sgn = select(-1.0, 1.0, side == 1);
+      for (var k = 0; k < steps; k += 1) {
+        let t = (f32(k) + jitter) / f32(steps);
+        let off = dir * sgn * max(1.0, t * t * reach);
+        let q = vec2<i32>(vec2<f32>(p) + off);
+        if (q.x < 0 || q.y < 0 || q.x >= full.x || q.y >= full.y) { break; }
+        let delta = viewAt(q, full) - P;
+        let len = length(delta);
+        if (len < 1e-4) { continue; }
+        let c = dot(delta / len, V);
+        // Full weight to 0.6 of the radius, then falling to none at it (XeGTAO's).
+        let falloff = clamp((radius - len) / (0.4 * radius), 0.0, 1.0);
+        let h = mix(-1.0, c, falloff);
+        if (side == 0) { hc.x = max(hc.x, h); } else { hc.y = max(hc.y, h); }
+      }
+    }
+    // The open arc, clamped to the hemisphere about the projected normal.
+    let h0 = n + max(-acos(hc.x) - n, -1.5707963);
+    let h1 = n + min(acos(hc.y) - n, 1.5707963);
+    let sinN = sin(n);
+    let arc = 0.25 * (-cos(2.0 * h0 - n) + cosN + 2.0 * h0 * sinN) + 0.25 * (-cos(2.0 * h1 - n) + cosN + 2.0 * h1 * sinN);
+    visibility = visibility + projLen * arc;
+    // The middle of the open arc, from V toward the slice's direction, weighted by its width.
+    let mid = 0.5 * (h0 + h1);
+    bent = bent + (V * cos(mid) + ortho * sin(mid)) * projLen * (h1 - h0);
+  }
+  let ao = clamp(visibility / f32(slices), 0.0, 1.0);
+  var bw = Nw;
+  if (length(bent) > 1e-4) {
+    // Back to world space: the view's rotation, transposed.
+    let bv = normalize(bent);
+    let r = mat3x3<f32>(ga.view[0].xyz, ga.view[1].xyz, ga.view[2].xyz);
+    bw = normalize(transpose(r) * bv);
+  }
+  return vec4<f32>(bw, ao);
+}
+`
+  );
+}
+function gtaoTemporalWgsl() {
+  return (
+    /* wgsl */
+    `
+struct Gtao { proj: mat4x4<f32>, invProj: mat4x4<f32>, view: mat4x4<f32>, params: vec4<f32>, params2: vec4<f32> };
+@group(0) @binding(0) var<uniform> ga: Gtao;
+@group(0) @binding(1) var current: texture_2d<f32>;
+@group(0) @binding(2) var history: texture_2d<f32>;
+@group(0) @binding(3) var velocity: texture_2d<f32>;
+@group(0) @binding(4) var linearSamp: sampler;
+
+@vertex
+fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4<f32> {
+  let p = vec2<f32>(f32((i << 1u) & 2u), f32(i & 2u));
+  return vec4<f32>(p * 2.0 - 1.0, 0.0, 1.0);
+}
+
+@fragment
+fn accumulate(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
+  let size = vec2<i32>(textureDimensions(current));
+  let p = vec2<i32>(frag.xy);
+  let now = textureLoad(current, p, 0);
+  // The range of this frame's visibility round the texel: the history is held inside it.
+  var lo = now.a;
+  var hi = now.a;
+  for (var y = -1; y <= 1; y += 1) {
+    for (var x = -1; x <= 1; x += 1) {
+      let a = textureLoad(current, clamp(p + vec2<i32>(x, y), vec2<i32>(0), size - 1), 0).a;
+      lo = min(lo, a);
+      hi = max(hi, a);
+    }
+  }
+  let full = vec2<i32>(textureDimensions(velocity));
+  let motion = textureLoad(velocity, min(p * 2, full - 1), 0).xy;
+  let uv = (vec2<f32>(p) + 0.5) / vec2<f32>(size) - motion;
+  if (ga.params2.y < 0.5 || any(uv < vec2<f32>(0.0)) || any(uv > vec2<f32>(1.0))) { return now; }
+  let then = textureSampleLevel(history, linearSamp, uv, 0.0);
+  let held = clamp(then.a, lo, hi);
+  let k = ga.params2.x;
+  let bent = normalize(mix(then.rgb, now.rgb, k) + vec3<f32>(1e-6));
+  return vec4<f32>(bent, mix(held, now.a, k));
 }
 `
   );
@@ -18551,7 +18763,7 @@ struct Frame {
   cascadeInfo: vec4<f32>,     // F2a: x = 1 with GPU cascades, y = map size, z = strength, w = the last cascade's far depth
   cascadeTexel: vec4<f32>,    // F2a: each cascade's texel in world units
   cascadeDepth: vec4<f32>,    // F2a-2: the world distance each cascade's depth 0..1 spans
-  cascadeSoft: vec4<f32>,     // F2a-2: x = the sun's size (its angular diameter's tangent), for the penumbrae; F2c: y = 1 with contact shadows
+  cascadeSoft: vec4<f32>,     // F2a-2: x = the sun's size (its angular diameter's tangent), for the penumbrae; F2c: y = 1 with contact shadows; F3c: z = 1 with GTAO
 };
 // One spot/point shadow tile (EP8c): world\u2192clip, and params.xy = depth\u2192distance terms.
 struct ShadowTile {
@@ -18699,6 +18911,27 @@ fn shadowFactor(lightClip: vec4<f32>, worldPos: vec3<f32>, cosL: f32) -> f32 {
 fn contactAt(pixel: vec2<f32>) -> f32 {
   if (frame.cascadeSoft.y < 0.5 || u.pbr.w > 1.5) { return 1.0; }
   return textureLoad(ssaoMap, vec2<i32>(pixel), 0).g;
+}
+fn screenOctDecode(e: vec2<f32>) -> vec3<f32> {
+  var n = vec3<f32>(e.x, e.y, 1.0 - abs(e.x) - abs(e.y));
+  let t = max(-n.z, 0.0);
+  n.x = n.x + select(t, -t, n.x >= 0.0);
+  n.y = n.y + select(t, -t, n.y >= 0.0);
+  return normalize(n);
+}
+// GTAO at this pixel (F3c): xyz its bent normal (zero without it), w its visibility, for an opaque or
+// cut-out surface (the only ones in the prepass it reads).
+fn gtaoAt(pixel: vec2<f32>) -> vec4<f32> {
+  if (frame.cascadeSoft.z < 0.5 || u.pbr.w > 1.5) { return vec4<f32>(0.0, 0.0, 0.0, 1.0); }
+  let t = textureLoad(ssaoMap, vec2<i32>(pixel), 0);
+  return vec4<f32>(screenOctDecode(t.zw), t.x);
+}
+// Light bouncing between the occluders brings some back (Jimenez's fit), the more the brighter the albedo.
+fn gtaoBounce(v: f32, albedo: f32) -> f32 {
+  let a = 2.0404 * albedo - 0.3324;
+  let b = -4.7951 * albedo + 0.6417;
+  let c = 2.7552 * albedo + 0.6903;
+  return max(v, ((v * a + b) * v + c) * v);
 }
 ` : `// Directional shadow test, mirroring rasterizeTriangle in meshRasterizer.ts:
 // project into the light's frame, look up the nearest depth the light sees, and
@@ -19414,7 +19647,12 @@ ${hdr ? `    // The AAA BRDF (F1c, brdf.ts): the height-correlated Smith visibil
     let specD = (D * G) / (4.0 * ndl * ndv + 1e-4);`}
     let f0 = vec3<f32>(0.04) + (albedo - vec3<f32>(0.04)) * metallic;
     let F = f0 + (vec3<f32>(1.0) - f0) * fp;
-${hdr ? `    let dfg = dfgAt(ndv, rough);
+${hdr ? `    // GTAO (F3c): its visibility joins the material's occlusion (diffuse and specular alike), and its
+    // bent normal is where the sky's irradiance comes from.
+    let gt = gtaoAt(in.pos.xy);
+    ao = ao * gtaoBounce(gt.w, dot(albedo, vec3<f32>(0.2126, 0.7152, 0.0722)));
+    let skyN = select(N, gt.xyz, dot(gt.xyz, gt.xyz) > 0.25);
+    let dfg = dfgAt(ndv, rough);
     eComp = energyCompensation(f0, dfg);
     let specE = specularEnergy(f0, dfg);
     let specAo = specularOcclusion(ndv, ao, rough * rough);
@@ -19438,7 +19676,7 @@ ${reflect ? "    var envSpec = vec3<f32>(0.0);\n    var envSeen = vec3<f32>(0.0)
     var coatV = 0.0;
     if (u.envSky.w > 0.5) {
       ${hdr ? `// The irradiance over the hemisphere (F3a), not the radiance along N.
-      let irr = shIrradiance(N);` : "let irr = envColorDir(N);"}
+      let irr = shIrradiance(skyN);` : "let irr = envColorDir(N);"}
       // Brushed metal (I4) reflects about a normal bent across its grain.
       var Rn = N;
       if (aniso != 0.0) {
@@ -19470,7 +19708,8 @@ ${reflect ? "    let ambRaw = amb;\n" : ""}    // A baked light map (the second 
     else if (frame.probeMin.w > 0.5) { amb = amb * probeLight(in.worldPos, N); } // EP9: no light map, the probes light it
     // Screen-space AO darkens only the ambient fill, sampled at this fragment's
     // framebuffer pixel (matching the software path's ssao[di]).
-    if (u.ssaoMeta.x > 0.5) {
+    // (With GTAO, F3c, the slot holds its visibility instead, already in the occlusion above.)
+    if (u.ssaoMeta.x > 0.5 && frame.cascadeSoft.z < 0.5) {
       amb = amb * textureLoad(ssaoMap, vec2<i32>(in.pos.xy), 0).r;
     }
 ${reflect ? "    // What the light map, probes and SSAO did to the fill, they do to its reflection.\n    let occl = select(vec3<f32>(1.0), amb / max(ambRaw, vec3<f32>(1e-6)), ambRaw > vec3<f32>(1e-6));\n    envSpec = envSpec * occl;\n" : ""}    // The direct light is what a shadow occludes; ambient/IBL still fills it.
@@ -19778,12 +20017,21 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     this.instanceData = new Float32Array(0);
     /** What the last submitted frame drew (for the profiler and tests); GPU time when the device can time it. */
     this.lastFrameStats = { drawCalls: 0, instances: 0, triangles: 0, gpuMs: null };
-    /** The contact shadows' target (F2c): rg16float at the frame's size, AO carried in r and the sun's contact in g. */
+    /** The screen-space shading target (F2c, F3c): rgba16float at the frame's size, AO in r, the sun's contact in g, the bent normal in ba. */
     this.contactTexture = null;
-    /** The contact pass's uniforms and pipelines (one per depth sample count), made on first use. */
+    /** The resolve's uniforms and pipelines (one per depth sample count), made on first use. */
     this.contact = null;
     /** Whether this frame's sun takes contact shadows (F2c), for the frame uniform. */
     this.frameContact = false;
+    /** Whether this frame's ambient light takes GTAO (F3c), for the frame uniform. */
+    this.frameGtao = false;
+    /**
+     * GTAO's resources (F3c): its uniforms, the half-resolution history (two,
+     * one read and one written, swapping each frame), and its pipelines.
+     */
+    this.gtao = null;
+    /** A 1×1 stand-in for GTAO's history when the frame has none (F3c). */
+    this.gtaoBlank = null;
     /** The thin G-buffer (F0c), made on the first frame with a prepass. */
     this.gbuffer = null;
     /** The velocity buffer (F0c), made with the G-buffer. */
@@ -19856,30 +20104,113 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     }
   }
   ensureContact() {
-    this.contactTexture ?? (this.contactTexture = this.device.createTexture({ size: { width: this.width, height: this.height }, format: "rg16float", usage: 16 | 4 }));
+    this.contactTexture ?? (this.contactTexture = this.device.createTexture({ size: { width: this.width, height: this.height }, format: SCREEN_SHADING_FORMAT, usage: 16 | 4 | 1 }));
     return this.contactTexture;
   }
   /**
-   * Contact shadows (F2c): after the prepass, a short march toward the sun from
-   * each pixel across its depths, into the target the scene shader reads in its
-   * SSAO slot.
+   * The screen-space shading after the prepass (F2c, F3c): GTAO at half
+   * resolution accumulated over frames, then at full resolution its
+   * depth-aware upsample and the sun's contact shadows, into the target the
+   * scene shader reads in its SSAO slot.
    */
-  addContactShadows(graph, depth, view, projection, toLight, ao, multisampled) {
-    var _a;
+  addScreenShading(graph, depth, gbuffer, velocity, view, projection, toLight, ao, multisampled) {
+    var _a, _b;
     const device = this.device;
+    const k = multisampled ? 1 : 0;
+    let resolvedAo = null;
+    if (this.frameGtao && gbuffer && velocity) {
+      const half = { width: Math.max(1, Math.ceil(this.width / 2)), height: Math.max(1, Math.ceil(this.height / 2)) };
+      const made = () => device.createTexture({ size: half, format: SCREEN_SHADING_FORMAT, usage: 16 | 4 | 1 });
+      if (!this.gtao) {
+        this.gtao = {
+          uniforms: device.createBuffer({ size: GTAO_UNIFORM_FLOATS * 4, usage: 64 | 8 }),
+          data: new Float32Array(GTAO_UNIFORM_FLOATS),
+          history: [made(), made()],
+          index: 0,
+          valid: false,
+          frame: 0,
+          sampler: device.createSampler({ magFilter: "linear", minFilter: "linear", addressModeU: "clamp-to-edge", addressModeV: "clamp-to-edge" }),
+          pipelines: [null, null],
+          accumulate: fullScreenPipeline(device, gtaoTemporalWgsl(), "accumulate", SCREEN_SHADING_FORMAT)
+        };
+      }
+      const g = this.gtao;
+      (_a = g.pipelines)[k] ?? (_a[k] = fullScreenPipeline(device, gtaoShaderWgsl(multisampled), "gtaoPass", SCREEN_SHADING_FORMAT));
+      const pipeline2 = g.pipelines[k];
+      const current = graph.createTexture("gtao", { format: SCREEN_SHADING_FORMAT, ...half });
+      const then = graph.importTexture("gtao.then", g.history[g.index]);
+      const now = graph.importTexture("gtao.now", g.history[1 - g.index]);
+      const history = g.valid;
+      device.queue.writeBuffer(g.uniforms, 0, gtaoUniforms(view, projection, g.frame, history, g.data));
+      g.frame += 1;
+      graph.addPass("gtao", "render", (pass) => {
+        pass.read(depth);
+        pass.read(gbuffer);
+        pass.write(current);
+        return (ctx) => {
+          const encoded = ctx.encoder.beginRenderPass({
+            colorAttachments: [{ view: ctx.texture(current).createView(), clearValue: { r: 0, g: 1, b: 0, a: 1 }, loadOp: "clear", storeOp: "store" }],
+            ...ctx.timing
+          });
+          encoded.setPipeline(pipeline2);
+          encoded.setBindGroup(0, device.createBindGroup({
+            layout: pipeline2.getBindGroupLayout(0),
+            entries: [
+              { binding: 0, resource: { buffer: g.uniforms } },
+              { binding: 1, resource: ctx.texture(depth).createView() },
+              { binding: 2, resource: ctx.texture(gbuffer).createView() }
+            ]
+          }));
+          encoded.draw(3);
+          encoded.end();
+        };
+      });
+      graph.addPass("gtao.accumulate", "render", (pass) => {
+        pass.read(current);
+        pass.read(then);
+        pass.read(velocity);
+        pass.write(now);
+        pass.keep();
+        return (ctx) => {
+          const encoded = ctx.encoder.beginRenderPass({
+            colorAttachments: [{ view: ctx.texture(now).createView(), clearValue: { r: 0, g: 1, b: 0, a: 1 }, loadOp: "clear", storeOp: "store" }],
+            ...ctx.timing
+          });
+          encoded.setPipeline(g.accumulate);
+          encoded.setBindGroup(0, device.createBindGroup({
+            layout: g.accumulate.getBindGroupLayout(0),
+            entries: [
+              { binding: 0, resource: { buffer: g.uniforms } },
+              { binding: 1, resource: ctx.texture(current).createView() },
+              { binding: 2, resource: ctx.texture(then).createView() },
+              { binding: 3, resource: ctx.texture(velocity).createView() },
+              { binding: 4, resource: g.sampler }
+            ]
+          }));
+          encoded.draw(3);
+          encoded.end();
+        };
+      });
+      g.index = 1 - g.index;
+      g.valid = true;
+      resolvedAo = now;
+    } else if (this.gtao) {
+      this.gtao.valid = false;
+    }
     this.contact ?? (this.contact = { uniforms: device.createBuffer({ size: CONTACT_UNIFORM_FLOATS * 4, usage: 64 | 8 }), data: new Float32Array(CONTACT_UNIFORM_FLOATS), pipelines: [null, null] });
     const contact = this.contact;
-    const k = multisampled ? 1 : 0;
-    (_a = contact.pipelines)[k] ?? (_a[k] = fullScreenPipeline(device, contactShaderWgsl(multisampled), "contactPass", "rg16float"));
+    (_b = contact.pipelines)[k] ?? (_b[k] = fullScreenPipeline(device, contactShaderWgsl(multisampled), "contactPass", SCREEN_SHADING_FORMAT));
     const pipeline = contact.pipelines[k];
     const target = graph.importTexture("contact", this.ensureContact());
     const aoView = (ao && this.ssaoTexture ? this.ssaoTexture : this.blankShadow).createView();
+    const gtaoBlank = this.gtaoBlank ?? (this.gtaoBlank = device.createTexture({ size: { width: 1, height: 1 }, format: SCREEN_SHADING_FORMAT, usage: 4 | 2 }));
+    device.queue.writeBuffer(contact.uniforms, 0, contactUniforms(view, projection, toLight, ao, resolvedAo !== null, contact.data));
     graph.addPass("contact shadows", "render", (pass) => {
       pass.read(depth);
+      if (resolvedAo) pass.read(resolvedAo);
       pass.write(target);
       pass.keep();
       return (ctx) => {
-        device.queue.writeBuffer(contact.uniforms, 0, contactUniforms(view, projection, toLight, ao, contact.data));
         const encoded = ctx.encoder.beginRenderPass({
           colorAttachments: [{ view: ctx.texture(target).createView(), clearValue: { r: 1, g: 1, b: 0, a: 1 }, loadOp: "clear", storeOp: "store" }],
           ...ctx.timing
@@ -19890,7 +20221,8 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
           entries: [
             { binding: 0, resource: { buffer: contact.uniforms } },
             { binding: 1, resource: ctx.texture(depth).createView() },
-            { binding: 2, resource: aoView }
+            { binding: 2, resource: aoView },
+            { binding: 3, resource: (resolvedAo ? ctx.texture(resolvedAo) : gtaoBlank).createView() }
           ]
         }));
         encoded.draw(3);
@@ -20482,7 +20814,8 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     this.ensureProbes(draw.environment?.probes ?? null);
     const ssao = draw.ssao ?? null;
     this.frameContact = this.hdr && prepass && this.frameCascades !== null && Boolean(draw.lightDirection);
-    this.bindSsao(ssao, this.frameContact);
+    this.frameGtao = this.hdr && prepass && draw.ambientOcclusion !== false;
+    this.bindSsao(ssao, this.frameContact || this.frameGtao);
     const { ordered } = this.clusterLights(draw);
     this.uploadLights(packLights(ordered));
     const lightCount = ordered.length;
@@ -20717,7 +21050,9 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
       });
     }
     this.prepassed = prepass ? { depth: msaa ? msaa.depth : this.depthTexture, gbuffer: this.gbuffer, velocity: this.velocity, multisampled: msaa !== null } : null;
-    if (this.frameContact && draw.lightDirection) this.addContactShadows(graph, depth, draw.view, temporal ? temporal.projection : draw.projection, draw.lightDirection, ssao !== null, msaa !== null);
+    if (this.frameContact || this.frameGtao) {
+      this.addScreenShading(graph, depth, gbuffer, velocity, draw.view, temporal ? temporal.projection : draw.projection, this.frameContact ? draw.lightDirection ?? null : null, ssao !== null, msaa !== null);
+    }
     const scenePass = (name, from, to, load, last) => graph.addPass(name, "render", (pass) => {
       const resolving = msaa !== null && last;
       const resolveBehind = msaa !== null && behind !== null && !load;
@@ -21059,8 +21394,8 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
       frame.set([1, sun.size, sun.strength, sun.cascades[sun.cascades.length - 1].far], FRAME_CASCADES + 68);
       frame.set(sun.cascades.map((c) => c.texel), FRAME_CASCADES + 72);
       frame.set(sun.cascades.map((c) => c.depth), FRAME_CASCADES + 76);
-      frame.set([sun.softness, this.frameContact ? 1 : 0, 0, 0], FRAME_CASCADES + 80);
     }
+    frame.set([sun?.softness ?? 0, this.frameContact ? 1 : 0, this.frameGtao ? 1 : 0, 0], FRAME_CASCADES + 80);
     this.device.queue.writeBuffer(buffers.params, 0, frame);
     this.uploadLocalShadows(local);
     return { ordered, globalCount, clusters };
@@ -21346,6 +21681,12 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
       destroySafely(this.contactTexture);
       this.contactTexture = null;
       this.ssaoBound = this.blankShadow;
+    }
+    if (this.gtao) {
+      destroySafely(this.gtao.history[0]);
+      destroySafely(this.gtao.history[1]);
+      destroySafely(this.gtao.uniforms);
+      this.gtao = null;
     }
     if (this.taa) {
       destroySafely(this.taa.history[0]);

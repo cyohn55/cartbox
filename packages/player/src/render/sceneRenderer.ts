@@ -114,6 +114,12 @@ export interface SceneDraw {
    */
   readonly prepass?: boolean;
   /**
+   * Ground-truth ambient occlusion from the prepass (AAA_FIDELITY_ROADMAP.md
+   * F3c): on by default whenever the linear-light renderer has a prepass;
+   * false turns it off.
+   */
+  readonly ambientOcclusion?: boolean;
+  /**
    * Key light direction, or omitted for the rasteriser's default. The world
    * overlay publishes a cart-driven sun here, so it changes per frame.
    */

@@ -417,7 +417,10 @@ Everything else depends on this track. It contains no visible "feature", but its
     - **Where it lands.** The pass writes an `rg16float` target the linear-light shader binds in its SSAO slot, so the fragment stage stays within its 16 textures:
       - **g** is the contact term, multiplied into the sun's shadow (`shadowFactor`) on opaque and cut-out surfaces, the only ones in the prepass;
       - **r** carries a CPU occlusion buffer through when a caller hands one over, so that slot still serves it.
-    - **When it runs.** Only on frames with a prepass and a casting sun; the `aaa` model turns the prepass on. Contact from spot and point lights is still to come (F2c-2).
+    - **When it runs.** Only on frames with a prepass and a casting sun; the `aaa` model turns the prepass on.
+  - **F2c-2, contact from spot and point lights: moved to ride with F2d.**
+    - Marching per light in the shading loop needs the prepass's depth bound while the opaque pass draws. That means a read-only depth attachment and its own pipelines.
+    - F2d rebuilds those lights' shadows on the GPU anyway.
     - *Tests:*
       - `contact-shadows.test.ts` (Dawn), with a box the cascades are told not to cast from:
         - with the prepass, the floor beside the box's foot away from the sun drops below half its light (fails with the contact term taken out);
@@ -465,6 +468,24 @@ Everything else depends on this track. It contains no visible "feature", but its
   - Box and sphere parallax correction, and blended influence volumes with priorities.
   - Re-capture on demand in the editor; at runtime, when time of day changes.
 - [ ] **F3c. GTAO with bent normals.** Ground-truth AO on the GPU from the depth prepass, at half resolution, temporally accumulated. Bent normals feed diffuse and specular occlusion. It replaces the unwired CPU SSAO.
+  - **F3c-1, GTAO, its accumulation and bent normals: done** (`gtao.ts`). On every frame with a prepass, the linear-light renderer works out ambient occlusion on the GPU before it shades (`SceneDraw.ambientOcclusion: false` turns it off).
+    - **Half resolution.** Each texel takes two screen directions, turned per pixel and per frame by interleaved gradient noise, and walks six steps each way out to 1.2 m.
+      - It keeps the highest horizon either side. A sample past 0.6 of the radius fades out toward it, so a distant wall doesn't occlude.
+      - The open arc, clamped to the hemisphere about the G-buffer's normal projected into the slice, is integrated in closed form (Jimenez et al. 2016).
+      - The middle of each open arc, weighted by its width, gives the bent normal.
+    - **Accumulation.** Each frame blends into a half-resolution history (an eighth of the new frame), reprojected through the velocity buffer. The history is clamped to the current frame's 3×3 range, so a moving object leaves no ghost.
+    - **Up to full resolution.** The contact pass (F2c) now also resolves GTAO. It weights the four nearest half-resolution texels by bilinear weight times how near their depths are to the pixel's, so an edge never bleeds.
+      - Its target grows to `rgba16float`: AO in r, the sun's contact in g, the bent normal (octahedron-encoded, world space) in ba.
+    - **In the shader.**
+      - The visibility joins the material's occlusion, with Jimenez's multi-bounce fit giving back a share by the albedo. So it reaches the diffuse fill and the split-sum specular occlusion alike.
+      - The bent normal is where the sky's SH irradiance is read.
+      - Opaque and cut-out surfaces only, as in F2c. The CPU SSAO path stands down while GTAO is on.
+    - *Tests:*
+      - `gtao.test.ts` (Dawn), ambient light alone on a dark floor (so the bounce gives little back), a metre-high box standing on it, seen from the side:
+        - the floor a tenth of a metre from the box's face drops below 85% of open floor's light (fails with GTAO's visibility held at 1);
+        - with GTAO off the two match within 3%, and open floor keeps at least 93% of its light;
+        - the uniforms carry the radius, slices, frame and history flag.
+      - The F2c and prepass suites (frame graph, HDR TAA, scene renderer, native resolution, parity) pass with GTAO on.
 - [ ] **F3d. GPU lightmapper.**
   - A compute path tracer, sharing its BVH with F10b, that bakes HDR **directional lightmaps** (L1 SH or ambient-highlight-direction) with any number of bounces, emissive surfaces as lights and area lights.
   - A denoiser (an edge-avoiding à-trous filter, or a small learned one), with seam stitching and texel-density control.
