@@ -375,6 +375,7 @@ Everything else depends on this track. It contains no visible "feature", but its
       - Each light backs off by a reach (the scene's span) beyond its slice, so a tower outside the view still shades it.
     - **Drawing.** Each cascade is a depth-only pass into one layer of a `depth32float` array (2048² by default, or the quality preset's map if larger), with slope-scaled raster bias. Wind bends the casters as it bends what is drawn.
       - What casts comes from the player, not the camera's draw list: everything still and casting (gathered again only when the posed set changes, as the CPU map redraws) plus what moved this frame.
+      - Foliage casts within its cull distance, and a layer with impostors always from its full copies, never its crossed cards. Beaver Creek's meadow grass (45 m) no longer shades the ground past where it is drawn, and a rim tree shown as cards still casts its crown.
       - Cut-out casters still draw solid, as on the CPU map; alpha-tested casters are F2a-2.
     - **Testing.** A point is tested in the first cascade that holds it, pushed toward the sun by one to nine texels as the light grazes, and filtered over a 3×3 grid of hardware comparisons, each itself bilinear.
       - The outer tenth of a cascade fades into the next, and past the last into full light.
@@ -385,10 +386,12 @@ Everything else depends on this track. It contains no visible "feature", but its
       - Lockout's overview keeps its shadow layout. Lit deck tiles show as they did (0.73 against 0.72), so nothing self-shadows.
       - The frame reads darker (0.535 against 0.60) because this session's sky was darker, which lowers the sky's fill. The time the match took to load moved the sky, not the shadow.
       - Settling the views took as long as before (16 minutes against 13 to 17).
+      - Beaver Creek's overview: the rim trees' crowns now lie sharp and dark down the canyon walls, where the CPU map's 1024² over the whole map left soft, faint smudges. The first capture also showed foliage past its cull distance still casting; that is what the foliage rule above fixes. The recapture with the fix did not finish: the dev server hit the session's two-hour limit for background work.
     - *Tests:*
       - `cascades.test.ts`: the splits lean logarithmic; the lens reads off the projection; each slice's corners fall inside its cascade, at depth 0 to 1; a caster toward the sun stays in front of the light. Turning the camera never resizes a cascade, and moving it moves a point by whole texels (fails without the snap).
       - `cascade-shadows.test.ts` (Dawn): the cascades leave the lit floor as it was, and a box the camera never draws darkens the floor under it to under 0.05.
       - `shadowCascade.test.ts`: on a GPU-presented AAA frame the player hands over the casters and sun in place of a CPU map, gathers the still ones once, reaches the rig's distance, and casts nothing with shadows off; the distance parses within its bounds and clears.
+      - `shadowCascade.test.ts`, foliage: a bush past its cull distance never casts, a layer's full copies cast past their impostor swap, and its cards never do (fails under the draw rule).
 - [ ] **F2b. Virtual shadow maps.**
   - A 16K virtual shadow map, paged from a physical pool, with pages marked by the depth buffer and cached between frames for static geometry.
   - This is what makes shadow detail hold at every distance in UE5. It falls back to F2a on Medium and below.

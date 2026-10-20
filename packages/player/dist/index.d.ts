@@ -7085,6 +7085,12 @@ declare class MeshOverlaySurface implements DisplaySurface {
     private readonly foliage;
     /** Whether an instance is in reach of the eye: anything but a foliage block is; a block is within its cull distance. */
     private foliageInReach;
+    /**
+     * Whether an instance casts the sun's shadow on the AAA tier (F2a): anything
+     * but a foliage block does; a block within its cull distance, as its full
+     * copies whichever of them or their impostors are drawn.
+     */
+    private foliageCasts;
     /** Each terrain block's world bounds, measured on first use. */
     private readonly blockBounds;
     /**
@@ -7110,9 +7116,12 @@ declare class MeshOverlaySurface implements DisplaySurface {
      * The sun's shadow for the AAA tier's GPU cascades (F2a), or null when the
      * rig has shadows off or no sun. The renderer draws the casters into its
      * cascades each frame: the still ones (gathered again only when the static
-     * key changes, as the CPU maps redraw) and what moved this frame. The
-     * cascades reach the rig's shadow distance, or one fitted to the scene; a
-     * caster may stand as far again beyond them toward the sun.
+     * key changes, as the CPU maps redraw) and what moved this frame. Foliage
+     * casts only within its cull distance (past it, it would shade the ground
+     * under nothing), and a layer with impostors always from its full copies:
+     * a tree shown as its cards still casts its crown, never two crossed planes.
+     * The cascades reach the rig's shadow distance, or one fitted to the scene;
+     * a caster may stand as far again beyond them toward the sun.
      */
     private buildSunShadow;
     /**
