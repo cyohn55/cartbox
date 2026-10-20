@@ -95,7 +95,7 @@ import { bounceLightsFor, bounceSignature, withCartSun, type CartSun } from "./d
 import type { DisplaySurface } from "../display.js";
 import type { ScreenSun } from "../fx/PostFxSurface.js";
 import type { PostVolumeFx } from "../fx/postVolumeFx.js";
-import { SoftwareSceneRenderer, type GpuSceneDraw, type SceneRenderer } from "../render/sceneRenderer.js";
+import { SoftwareSceneRenderer, type GpuSceneDraw, type SceneRenderer, type SunShadow } from "../render/sceneRenderer.js";
 import type { PresentFrame, PresentSky, PresentStats } from "../render/gpuPresent.js";
 import type { MailboxMeshCamera, MailboxMeshPose, WorldLight } from "../mailbox.js";
 import type { LocalShadowTile, LocalShadows, PostBlend, ShadowCascade, ShadowInput, SceneLight, SceneLighting, ToneMap, VistaLayer } from "@cartbox/editor";
@@ -121,6 +121,11 @@ const FIRST_PERSON_NEAR = 0.05;
 
 /** Edge length of the directional shadow map — a fixed, self-contained cost. */
 const SHADOW_MAP_SIZE = 1024; // the high preset's; see setQuality
+/** Each of the AAA tier's sun cascades' maps (F2a), or the quality preset's map if larger. */
+const CASCADE_MAP_SIZE = 2048;
+/** The bounds of the reach the AAA cascades fit to a scene that sets none (world units). */
+const CASCADE_DISTANCE_MIN = 30;
+const CASCADE_DISTANCE_MAX = 400;
 
 /**
  * The sky backdrop is shaded on a grid this many pixels across, then expanded:
@@ -326,6 +331,8 @@ export class MeshOverlaySurface implements DisplaySurface {
   /** The sun's shadow maps (see buildShadow): the whole scene, and the near cascade round the camera (EP8b). */
   private farShadow: ShadowLayer = newShadowLayer();
   private nearShadow: ShadowLayer = newShadowLayer();
+  /** What never moves and casts, for the AAA tier's GPU cascades (F2a), gathered again when the static key changes. */
+  private sunCasters: { key: string; still: readonly MeshSceneInstance[] } | null = null;
   /** Each casting spot/point light's cached still tiles and this frame's copies (EP8c), in tile order. */
   private localShadowCache: { key: string; statics: Float32Array[]; frames: Float32Array[] }[] = [];
   /** Instances ever posed on the front layer (a held weapon): never part of the static shadow. */
@@ -642,6 +649,7 @@ export class MeshOverlaySurface implements DisplaySurface {
       // The still objects' shadow was drawn where they stood: draw it again.
       this.farShadow.key = "";
       this.nearShadow.key = "";
+      this.sunCasters = null;
       this.localShadowCache = [];
     }
     return true;
@@ -1058,7 +1066,10 @@ export class MeshOverlaySurface implements DisplaySurface {
     if (!lighting?.autoExposure) this.adapted = 0;
     const tonemap = lighting ? this.frameTonemap(lighting, post) : null;
     let mark = profiler ? performance.now() : 0;
-    const shadow = lighting ? this.buildShadow(instances, moved, lighting) : null;
+    // The AAA tier draws the sun's shadow in GPU cascades from the casters (F2a); the others take a CPU map.
+    const cascaded = gpu !== null && this.renderer.sunCascades === true;
+    const shadow = lighting && !cascaded ? this.buildShadow(instances, moved, lighting) : null;
+    const sunShadow = lighting && cascaded ? this.buildSunShadow(moved, lighting) : null;
     if (profiler) {
       const now = performance.now();
       profiler.add("shadow", now - mark);
@@ -1124,6 +1135,7 @@ export class MeshOverlaySurface implements DisplaySurface {
         lights,
         local: local?.shadows ?? null,
         shadow,
+        sunShadow,
         antialias,
       });
       if (profiler) profiler.add("scene", performance.now() - mark);
@@ -1249,6 +1261,7 @@ export class MeshOverlaySurface implements DisplaySurface {
       readonly lights: readonly SceneLight[] | undefined;
       readonly local: LocalShadows | null;
       readonly shadow: ShadowInput | null;
+      readonly sunShadow: SunShadow | null;
       readonly antialias: boolean;
     },
   ): void {
@@ -1280,7 +1293,7 @@ export class MeshOverlaySurface implements DisplaySurface {
       temporal: this.options.temporal === true && this.quality.temporal === true,
       reflections: this.options.reflections === true && this.quality.reflections === true,
       ...(this.options.prepass === true ? { prepass: true } : {}),
-      ...(lighting ? { ...lit, localShadows: job.local, shadow: job.shadow, fog: lighting.fog ?? null, wind: lighting.wind ?? null } : {}),
+      ...(lighting ? { ...lit, localShadows: job.local, shadow: job.shadow, sunShadow: job.sunShadow, fog: lighting.fog ?? null, wind: lighting.wind ?? null } : {}),
       time,
     };
     const scene = this.renderer.renderToTexture!(job.drawn, draw) ?? null;
@@ -1834,6 +1847,30 @@ export class MeshOverlaySurface implements DisplaySurface {
       if (built) near = { lightViewProj: built.lightViewProj, depth: built.depth, bias: built.bias ?? 0.003, slopeBias: built.slopeBias ?? 0, dirty: built.dirty };
     }
     return { ...far, near };
+  }
+
+  /**
+   * The sun's shadow for the AAA tier's GPU cascades (F2a), or null when the
+   * rig has shadows off or no sun. The renderer draws the casters into its
+   * cascades each frame: the still ones (gathered again only when the static
+   * key changes, as the CPU maps redraw) and what moved this frame. The
+   * cascades reach the rig's shadow distance, or one fitted to the scene; a
+   * caster may stand as far again beyond them toward the sun.
+   */
+  private buildSunShadow(moved: readonly MeshSceneInstance[], lighting: SceneLighting): SunShadow | null {
+    const toLight = sceneLightingKeyDirection(lighting);
+    if (!lighting.shadows || !this.quality.shadows || !toLight) return null;
+    const key = this.staticShadowKey();
+    if (this.sunCasters?.key !== key) this.sunCasters = { key, still: this.stillCasters() };
+    const still = this.sunCasters.still;
+    const span = Math.max(this.scene.bounds.radius, this.scene.extent?.radius ?? 0) * 2;
+    return {
+      casters: moved.length > 0 ? [...still, ...moved] : still,
+      toLight,
+      distance: lighting.shadowDistance ?? Math.min(CASCADE_DISTANCE_MAX, Math.max(CASCADE_DISTANCE_MIN, span)),
+      size: Math.max(CASCADE_MAP_SIZE, this.quality.shadowMapSize ?? 0),
+      reach: span,
+    };
   }
 
   /**

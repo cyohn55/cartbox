@@ -137,7 +137,7 @@ export {
   rasterStyleFor,
   webgpuCanHonour,
 } from "./render/renderCaps.js";
-export type { FrameState, GpuSceneDraw, SceneDraw, SceneRenderer } from "./render/sceneRenderer.js";
+export type { FrameState, GpuSceneDraw, SceneDraw, SceneRenderer, SunShadow } from "./render/sceneRenderer.js";
 // Presenting the 3D frame from the GPU (AAA_FIDELITY_ROADMAP.md F0a).
 export {
   COMPOSE_UNIFORM_FLOATS,

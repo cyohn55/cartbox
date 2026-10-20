@@ -47,6 +47,10 @@ export interface SceneEnvironment {
   readonly intensity: number;
 }
 
+/** The range a rig's AAA sun-shadow distance is held to (F2a), in world units. */
+export const MIN_SHADOW_DISTANCE = 5;
+export const MAX_SHADOW_DISTANCE = 2000;
+
 /** A complete authored lighting rig for a mesh scene. */
 export interface SceneLighting {
   readonly environment: SceneEnvironment;
@@ -67,6 +71,12 @@ export interface SceneLighting {
   readonly authoredCurve?: boolean;
   /** Cast a directional shadow from the first directional (key) light. */
   readonly shadows: boolean;
+  /**
+   * How far from the camera the AAA tier's sun cascades reach (F2a), in world
+   * units; absent fits them to the scene. The other tiers' one map always
+   * covers the whole scene.
+   */
+  readonly shadowDistance?: number;
   readonly lights: readonly SceneLight[];
   /**
    * An optional procedural sky dome. When set, the runtime bakes it into a
@@ -216,6 +226,9 @@ export function parseSceneLighting(raw: unknown): SceneLighting | null {
     ...(record.tonemapper === "aces" || record.tonemapper === "agx" || record.tonemapper === "neutral" ? { tonemapper: record.tonemapper } : {}),
     ...(record.authoredCurve === true ? { authoredCurve: true } : {}),
     shadows: typeof record.shadows === "boolean" ? record.shadows : base.shadows,
+    ...(typeof record.shadowDistance === "number" && Number.isFinite(record.shadowDistance) && record.shadowDistance > 0
+      ? { shadowDistance: Math.min(MAX_SHADOW_DISTANCE, Math.max(MIN_SHADOW_DISTANCE, record.shadowDistance)) }
+      : {}),
     lights,
     ...(sky ? { sky } : {}),
     ...(fog ? { fog } : {}),
@@ -481,9 +494,12 @@ export function defaultSunShafts(): SunShafts {
 /** Patch the top-level scalar/flag fields (ambient, exposure, tonemap, shadows). */
 export function patchSceneLighting(
   lighting: SceneLighting,
-  patch: Partial<Pick<SceneLighting, "ambient" | "exposure" | "tonemap" | "tonemapper" | "authoredCurve" | "shadows" | "wind" | "softShadows">>,
+  patch: Partial<Pick<SceneLighting, "ambient" | "exposure" | "tonemap" | "tonemapper" | "authoredCurve" | "shadows" | "shadowDistance" | "wind" | "softShadows">>,
 ): SceneLighting {
-  return { ...lighting, ...patch };
+  const next = { ...lighting, ...patch };
+  // A cleared distance goes back to fitting the scene, rather than staying as undefined.
+  if ("shadowDistance" in patch && patch.shadowDistance === undefined) delete (next as { shadowDistance?: number }).shadowDistance;
+  return next;
 }
 
 /** Show the rig in physical units (lux, candela, nits, EV100) or the renderer's own. Nothing it renders changes. */

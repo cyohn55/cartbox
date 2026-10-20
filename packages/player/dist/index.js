@@ -11651,6 +11651,9 @@ var CappedSceneRenderer = class {
   get textureFormats() {
     return this.inner.textureFormats;
   }
+  get sunCascades() {
+    return this.inner.sunCascades;
+  }
   get renderToTexture() {
     const inner = this.inner;
     if (!inner.renderToTexture) return void 0;
@@ -11677,6 +11680,9 @@ var BOUNCE_FACES_PER_FRAME = 150;
 var BOUNCE_EVERY = 4;
 var FIRST_PERSON_NEAR = 0.05;
 var SHADOW_MAP_SIZE = 1024;
+var CASCADE_MAP_SIZE = 2048;
+var CASCADE_DISTANCE_MIN = 30;
+var CASCADE_DISTANCE_MAX = 400;
 var SKY_BACKDROP_SCALE = 3;
 var SOFTWARE_SCALES = [1, 0.75, 0.5, 0.35, 0.25];
 var SLOW_FRAME_MS = 40;
@@ -11742,6 +11748,8 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
     /** The sun's shadow maps (see buildShadow): the whole scene, and the near cascade round the camera (EP8b). */
     this.farShadow = newShadowLayer();
     this.nearShadow = newShadowLayer();
+    /** What never moves and casts, for the AAA tier's GPU cascades (F2a), gathered again when the static key changes. */
+    this.sunCasters = null;
     /** Each casting spot/point light's cached still tiles and this frame's copies (EP8c), in tile order. */
     this.localShadowCache = [];
     /** Instances ever posed on the front layer (a held weapon): never part of the static shadow. */
@@ -12025,6 +12033,7 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
       this.flat = null;
       this.farShadow.key = "";
       this.nearShadow.key = "";
+      this.sunCasters = null;
       this.localShadowCache = [];
     }
     return true;
@@ -12365,7 +12374,9 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
     if (!lighting?.autoExposure) this.adapted = 0;
     const tonemap = lighting ? this.frameTonemap(lighting, post) : null;
     let mark = profiler ? performance.now() : 0;
-    const shadow = lighting ? this.buildShadow(instances, moved, lighting) : null;
+    const cascaded = gpu !== null && this.renderer.sunCascades === true;
+    const shadow = lighting && !cascaded ? this.buildShadow(instances, moved, lighting) : null;
+    const sunShadow = lighting && cascaded ? this.buildSunShadow(moved, lighting) : null;
     if (profiler) {
       const now = performance.now();
       profiler.add("shadow", now - mark);
@@ -12423,6 +12434,7 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
         lights,
         local: local?.shadows ?? null,
         shadow,
+        sunShadow,
         antialias
       });
       if (profiler) profiler.add("scene", performance.now() - mark);
@@ -12542,7 +12554,7 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
       temporal: this.options.temporal === true && this.quality.temporal === true,
       reflections: this.options.reflections === true && this.quality.reflections === true,
       ...this.options.prepass === true ? { prepass: true } : {},
-      ...lighting ? { ...lit, localShadows: job.local, shadow: job.shadow, fog: lighting.fog ?? null, wind: lighting.wind ?? null } : {},
+      ...lighting ? { ...lit, localShadows: job.local, shadow: job.shadow, sunShadow: job.sunShadow, fog: lighting.fog ?? null, wind: lighting.wind ?? null } : {},
       time
     };
     const scene = this.renderer.renderToTexture(job.drawn, draw) ?? null;
@@ -13009,6 +13021,29 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
       if (built) near = { lightViewProj: built.lightViewProj, depth: built.depth, bias: built.bias ?? 3e-3, slopeBias: built.slopeBias ?? 0, dirty: built.dirty };
     }
     return { ...far, near };
+  }
+  /**
+   * The sun's shadow for the AAA tier's GPU cascades (F2a), or null when the
+   * rig has shadows off or no sun. The renderer draws the casters into its
+   * cascades each frame: the still ones (gathered again only when the static
+   * key changes, as the CPU maps redraw) and what moved this frame. The
+   * cascades reach the rig's shadow distance, or one fitted to the scene; a
+   * caster may stand as far again beyond them toward the sun.
+   */
+  buildSunShadow(moved, lighting) {
+    const toLight = sceneLightingKeyDirection(lighting);
+    if (!lighting.shadows || !this.quality.shadows || !toLight) return null;
+    const key = this.staticShadowKey();
+    if (this.sunCasters?.key !== key) this.sunCasters = { key, still: this.stillCasters() };
+    const still = this.sunCasters.still;
+    const span = Math.max(this.scene.bounds.radius, this.scene.extent?.radius ?? 0) * 2;
+    return {
+      casters: moved.length > 0 ? [...still, ...moved] : still,
+      toLight,
+      distance: lighting.shadowDistance ?? Math.min(CASCADE_DISTANCE_MAX, Math.max(CASCADE_DISTANCE_MIN, span)),
+      size: Math.max(CASCADE_MAP_SIZE, this.quality.shadowMapSize ?? 0),
+      reach: span
+    };
   }
   /**
    * What the static shadow maps depend on: *which* instances are posed (not
@@ -18051,10 +18086,133 @@ var IblBuilder = class {
   }
 };
 
+// src/render/cascades.ts
+import { viewMatrix as viewMatrix3 } from "@cartbox/editor";
+var CASCADE_COUNT = 4;
+var CASCADE_LAMBDA = 0.75;
+var CASCADE_BLEND = 0.1;
+function cascadeSplits(near, far, count = CASCADE_COUNT, lambda = CASCADE_LAMBDA) {
+  const n = Math.max(1e-3, near);
+  const f3 = Math.max(n * 1.001, far);
+  const out = [];
+  for (let i = 1; i <= count; i += 1) {
+    const t = i / count;
+    out.push(lambda * n * (f3 / n) ** t + (1 - lambda) * (n + (f3 - n) * t));
+  }
+  out[count - 1] = f3;
+  return out;
+}
+function perspectiveLens(projection) {
+  const p10 = projection[10];
+  const p14 = projection[14];
+  return { near: p14 / (p10 - 1), far: p14 / (p10 + 1), tanX: 1 / projection[0], tanY: 1 / projection[5] };
+}
+function sliceSphere(d0, d1, tanX, tanY) {
+  const k2 = tanX * tanX + tanY * tanY;
+  const c = Math.min(d1, Math.max(d0, (d1 * d1 - d0 * d0) * (1 + k2) / (2 * (d1 - d0))));
+  const near = Math.hypot(d0 * Math.sqrt(k2), c - d0);
+  const far = Math.hypot(d1 * Math.sqrt(k2), d1 - c);
+  return { depth: c, radius: Math.max(near, far) };
+}
+function cameraFrame(view) {
+  const r = (i, j) => view[j * 4 + i];
+  const t = [view[12], view[13], view[14]];
+  const eye = [0, 1, 2].map((j) => -(r(0, j) * t[0] + r(1, j) * t[1] + r(2, j) * t[2]));
+  return { eye, forward: [-r(2, 0), -r(2, 1), -r(2, 2)] };
+}
+function normalize2(v) {
+  const l = Math.hypot(v[0], v[1], v[2]) || 1;
+  return [v[0] / l, v[1] / l, v[2] / l];
+}
+function orthographic(r, far) {
+  return Float64Array.from([1 / r, 0, 0, 0, 0, 1 / r, 0, 0, 0, 0, -1 / far, 0, 0, 0, 0, 1]);
+}
+function multiply(a, b) {
+  const out = new Float64Array(16);
+  for (let c = 0; c < 4; c += 1) {
+    for (let r = 0; r < 4; r += 1) {
+      let s = 0;
+      for (let k = 0; k < 4; k += 1) s += a[k * 4 + r] * b[c * 4 + k];
+      out[c * 4 + r] = s;
+    }
+  }
+  return out;
+}
+function fitCascades(options) {
+  const count = options.count ?? CASCADE_COUNT;
+  const lens = perspectiveLens(options.projection);
+  const far = Math.min(lens.far, options.distance);
+  const splits = cascadeSplits(lens.near, far, count, options.lambda ?? CASCADE_LAMBDA);
+  const { eye, forward } = cameraFrame(options.view);
+  const l = normalize2(options.toLight);
+  const up = Math.abs(l[1]) > 0.99 ? [0, 0, 1] : [0, 1, 0];
+  const rotation = viewMatrix3([l[0], l[1], l[2]], [0, 0, 0], up);
+  const out = [];
+  let d0 = lens.near;
+  for (const d1 of splits) {
+    const sphere = sliceSphere(d0, d1, lens.tanX, lens.tanY);
+    const radius = Math.ceil(sphere.radius * 16) / 16;
+    const texel = 2 * radius / options.size;
+    const centre = [0, 1, 2].map((i) => eye[i] + forward[i] * sphere.depth);
+    const lx = rotation[0] * centre[0] + rotation[4] * centre[1] + rotation[8] * centre[2];
+    const ly = rotation[1] * centre[0] + rotation[5] * centre[1] + rotation[9] * centre[2];
+    const lz = rotation[2] * centre[0] + rotation[6] * centre[1] + rotation[10] * centre[2];
+    const sx = Math.round(lx / texel) * texel;
+    const sy = Math.round(ly / texel) * texel;
+    const snapped = [0, 1, 2].map((j) => rotation[j * 4] * sx + rotation[j * 4 + 1] * sy + rotation[j * 4 + 2] * lz);
+    const back = radius + options.reach;
+    const lightEye = [snapped[0] + l[0] * back, snapped[1] + l[1] * back, snapped[2] + l[2] * back];
+    const view = viewMatrix3(lightEye, snapped, up);
+    out.push({ viewProj: multiply(orthographic(radius, back + radius), view), far: d1, texel });
+    d0 = d1;
+  }
+  return out;
+}
+var CASCADE_SHADOW_WGSL = (
+  /* wgsl */
+  `
+fn cascadeTest(i: i32, p: vec3<f32>, cosL: f32) -> f32 {
+  let c = clamp(cosL, 0.05, 1.0);
+  let push = frame.cascadeTexel[i] * (1.0 + 2.0 * min(4.0, sqrt(1.0 - c * c) / c));
+  let q = frame.cascadeVp[i] * vec4<f32>(p + normalize(u.light.xyz) * push, 1.0);
+  let uv = vec2<f32>(q.x * 0.5 + 0.5, 0.5 - q.y * 0.5);
+  let step = 1.0 / frame.cascadeInfo.y;
+  var lit = 0.0;
+  for (var y = -1; y <= 1; y = y + 1) {
+    for (var x = -1; x <= 1; x = x + 1) {
+      lit = lit + textureSampleCompareLevel(cascadeMap, cascadeSamp, uv + vec2<f32>(f32(x), f32(y)) * step, i, q.z);
+    }
+  }
+  return lit / 9.0;
+}
+fn cascadeShadow(p: vec3<f32>, cosL: f32) -> f32 {
+  let inner = 1.0 - 2.0 / frame.cascadeInfo.y;
+  for (var i = 0; i < ${CASCADE_COUNT}; i = i + 1) {
+    let q = frame.cascadeVp[i] * vec4<f32>(p, 1.0);
+    let m = max(abs(q.x), abs(q.y));
+    if (m < inner && q.z > 0.0 && q.z < 1.0) {
+      var v = cascadeTest(i, p, cosL);
+      let edge = inner - ${CASCADE_BLEND};
+      if (m > edge) {
+        var next = 1.0;
+        if (i + 1 < ${CASCADE_COUNT}) { next = cascadeTest(i + 1, p, cosL); }
+        v = mix(v, next, (m - edge) / ${CASCADE_BLEND});
+      }
+      return 1.0 - frame.cascadeInfo.z * (1.0 - v);
+    }
+  }
+  return 1.0;
+}
+`
+);
+
 // src/render/WebgpuSceneRenderer.ts
 var GBUFFER_FORMAT = "rgba16float";
 var VELOCITY_FORMAT = "rg16float";
-var FRAME_BYTES = 336;
+var FRAME_BYTES = 640;
+var FRAME_CASCADES = 84;
+var FALLBACK_CASCADE_DISTANCE = 80;
+var FALLBACK_CASCADE_SIZE = 2048;
 var READBACK_BUFFERS2 = 3;
 var SHADER_STAGE_VERTEX = 1;
 var SHADER_STAGE_FRAGMENT = 2;
@@ -18247,6 +18405,10 @@ struct Frame {
   probeCount: vec4<f32>,  // probes per axis
   envSh: array<vec4<f32>, 9>, // F3a: the environment's L2 SH irradiance over \u03C0 (linear variant)
   envInfo: vec4<f32>,         // F3a: x = the prefiltered cube's top mip
+  cascadeVp: array<mat4x4<f32>, ${CASCADE_COUNT}>, // F2a: the sun's cascades, world \u2192 light clip (depth 0..1)
+  cascadeFar: vec4<f32>,      // F2a: each slice's far view depth
+  cascadeInfo: vec4<f32>,     // F2a: x = 1 with GPU cascades, y = map size, z = strength, w = the last cascade's far depth
+  cascadeTexel: vec4<f32>,    // F2a: each cascade's texel in world units
 };
 // One spot/point shadow tile (EP8c): world\u2192clip, and params.xy = depth\u2192distance terms.
 struct ShadowTile {
@@ -18259,11 +18421,13 @@ struct ShadowTile {
 @group(0) @binding(3) var mrTex: texture_2d<f32>;
 @group(0) @binding(4) var occTex: texture_2d<f32>;
 @group(0) @binding(5) var emisTex: texture_2d<f32>;
-// The shadow map: light-NDC depth in R, generated on the CPU by renderShadowMap
+${hdr ? `// The sun's cascades (F2a), rendered on the GPU: the linear-light renderer's shadow, in the slot the
+// byte-space one gives the CPU's map.
+@group(0) @binding(6) var cascadeMap: texture_depth_2d_array;` : `// The shadow map: light-NDC depth in R, generated on the CPU by renderShadowMap
 // and uploaded as r32float, so the GPU samples the *same* map the software path
 // tests against. Unfilterable, read via textureLoad (nearest) \u2014 matching the
 // software compare exactly.
-@group(0) @binding(6) var shadowMap: texture_2d<f32>;
+@group(0) @binding(6) var shadowMap: texture_2d<f32>;`}
 ${hdr ? `// The environment as a GGX-prefiltered cube (F3a, ibl.ts): mip = roughness \xD7 top mip.
 @group(0) @binding(7) var envCube: texture_cube<f32>;` : `// The equirectangular environment map, read via textureLoad (nearest) to match
 // sampleEquirectRgb in meshRasterizer.ts. Bound to a 1x1 blank when unused.
@@ -18320,7 +18484,10 @@ struct Probe {
 @group(1) @binding(7) var sceneColour: texture_2d<f32>;
 ${hdr ? `${brdfWgsl(1, 8)}// The prefiltered cube's sampler: trilinear, so a roughness between levels blends them (F3a).
 @group(1) @binding(9) var envSamp: sampler;
-${SH_IRRADIANCE_WGSL}` : ""}
+${SH_IRRADIANCE_WGSL}
+// The comparison sampler that filters the cascades' tests (F2a).
+@group(1) @binding(11) var cascadeSamp: sampler_comparison;
+${CASCADE_SHADOW_WGSL}` : ""}
 // Optical depth of a fog layer thinning above base, along the ray from the eye
 // (height cy, rise dy, length len) over t in [t0, t1] \u2014 fogLayerDepth in skyDome.ts.
 fn fogLayer(d: f32, k: f32, base: f32, cy: f32, dy: f32, len: f32, t0: f32, t1: f32) -> f32 {
@@ -18377,7 +18544,12 @@ struct VSOut {
   @location(7) objPos: vec3<f32>,${hdr ? "\n  // The vertex's MikkTSpace frame in world space (F1c), each unit at the vertex: its tangent (w = 0 without one) and normal.\n  @location(8) tangent: vec4<f32>,\n  @location(9) frameNormal: vec3<f32>," : ""}
 };
 
-// Directional shadow test, mirroring rasterizeTriangle in meshRasterizer.ts:
+${hdr ? `// The sun's shadow on the linear-light renderer: its GPU cascades (F2a), or none.
+fn shadowFactor(lightClip: vec4<f32>, worldPos: vec3<f32>, cosL: f32) -> f32 {
+  if (frame.cascadeInfo.x < 0.5) { return 1.0; }
+  return cascadeShadow(worldPos, cosL);
+}
+` : `// Directional shadow test, mirroring rasterizeTriangle in meshRasterizer.ts:
 // project into the light's frame, look up the nearest depth the light sees, and
 // return 1 (lit) or 1\u2212strength (occluded). The light is orthographic (w = 1).
 fn shadowTap(fx: f32, fy: f32, z: f32, ox: f32) -> f32 {
@@ -18439,7 +18611,7 @@ fn shadowFactor(lightClip: vec4<f32>, worldPos: vec3<f32>, cosL: f32) -> f32 {
   if (!inMain) { return 1.0; }
   return shadowAt(ndc, u.shadow.z, u.shadow2.x, 0.0, cosL);
 }
-
+`}
 // Analytic environment (Phase 3 IBL), mirroring environmentColor /
 // environmentAverage in meshRasterizer.ts: a sky/horizon/ground vertical
 // gradient sampled by a direction's Y. WGSL mix(a,b,k) = a+(b-a)*k, matching the
@@ -19224,6 +19396,16 @@ ${hdr ? `    // Linear light (F0b): what the reflection adds, and what it sees, 
   return finishAlpha(toLinear(colour.rgb) * shade, colour.a);
 }
 
+${hdr ? `// --- The sun's cascades (AAA_FIDELITY_ROADMAP.md F2a) ---
+// A caster's depth as the sun sees it, through the cascade being drawn: the scene's
+// own vertex (its copy's transform, bent by the wind) and nothing else.
+@group(1) @binding(12) var<uniform> cascadeView: mat4x4<f32>;
+@vertex
+fn vs_shadow(@location(0) position: vec3<f32>, @location(5) sway: f32, @builtin(instance_index) instance: u32) -> @builtin(position) vec4<f32> {
+  let bend = windOffset(position.xz, sway);
+  return cascadeView * xf[instance].model * vec4<f32>(position.x + bend.x, position.y, position.z + bend.y, 1.0);
+}
+` : ""}
 // --- The depth prepass and thin G-buffer (AAA_FIDELITY_ROADMAP.md F0c) ---
 // A unit normal folded onto the octahedron, then the square: two signed numbers.
 fn octEncode(n: vec3<f32>) -> vec2<f32> {
@@ -19397,6 +19579,8 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     this.shadowMapSize = 0;
     /** Maps side by side in the shadow texture: 1, or 2 with a near cascade (EP8b). */
     this.shadowCascades = 1;
+    /** This frame's GPU sun cascades (F2a), for the frame uniform; null when it casts none. */
+    this.frameCascades = null;
     /** The near cascade's depth array last uploaded in full (as shadowUploaded is the main map's). */
     this.nearUploaded = null;
     this.envMapSource = null;
@@ -19537,8 +19721,9 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
           { binding: 4, visibility: SHADER_STAGE_FRAGMENT, texture: { sampleType: "float" } },
           { binding: 5, visibility: SHADER_STAGE_FRAGMENT, texture: { sampleType: "float" } },
           // The shadow map is r32float — not filterable — and read via textureLoad,
-          // so it declares unfilterable-float and needs no sampler.
-          { binding: 6, visibility: SHADER_STAGE_FRAGMENT, texture: { sampleType: "unfilterable-float" } },
+          // so it declares unfilterable-float and needs no sampler. The linear-light
+          // renderer binds the sun's GPU cascades here instead (F2a), compared by group 1's sampler.
+          { binding: 6, visibility: SHADER_STAGE_FRAGMENT, texture: hdr ? { sampleType: "depth", viewDimension: "2d-array" } : { sampleType: "unfilterable-float" } },
           // The equirectangular environment map (rgba8unorm), read via textureLoad.
           // The environment: its panorama, or (linear variant, F3a) its prefiltered cube.
           { binding: 7, visibility: SHADER_STAGE_FRAGMENT, texture: hdr ? { sampleType: "float", viewDimension: "cube" } : { sampleType: "float" } },
@@ -19572,7 +19757,9 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
         // The split-sum DFG table (F1c), read by the linear-light shader.
         { binding: 8, visibility: SHADER_STAGE_FRAGMENT, buffer: { type: "read-only-storage" } },
         // The prefiltered environment cube's trilinear sampler (F3a).
-        { binding: 9, visibility: SHADER_STAGE_FRAGMENT, sampler: { type: "filtering" } }
+        { binding: 9, visibility: SHADER_STAGE_FRAGMENT, sampler: { type: "filtering" } },
+        // The comparison sampler that filters the sun's GPU cascades (F2a; group 0 binds the cascades).
+        { binding: 11, visibility: SHADER_STAGE_FRAGMENT, sampler: { type: "comparison" } }
       ];
       const depthLayout = device.createBindGroupLayout({ entries: depthEntries(false) });
       const depthLayoutMs = device.createBindGroupLayout({ entries: depthEntries(true) });
@@ -19669,6 +19856,35 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
       const behind = device.createTexture({ size: { width, height }, format: colourFormat, usage: 4 | 2 | 16 });
       const behindBlank = device.createTexture({ size: { width: 1, height: 1 }, format: colourFormat, usage: 4 | 2 });
       const sized = { depth: depthTexture, behind };
+      const cascadeLayout = device.createBindGroupLayout({ entries: [{ binding: 12, visibility: SHADER_STAGE_VERTEX, buffer: { type: "uniform" } }] });
+      const cascadeViews = Array.from({ length: CASCADE_COUNT }, () => {
+        const buffer = device.createBuffer({ size: 64, usage: 64 | 8 });
+        return { buffer, group: device.createBindGroup({ layout: cascadeLayout, entries: [{ binding: 12, resource: { buffer } }] }) };
+      });
+      const casterLayout = device.createBindGroupLayout({
+        entries: [
+          { binding: 0, visibility: SHADER_STAGE_VERTEX, buffer: { type: "uniform", hasDynamicOffset: true, minBindingSize: UNIFORM_BYTES_USED } },
+          { binding: 10, visibility: SHADER_STAGE_VERTEX, buffer: { type: "read-only-storage" } }
+        ]
+      });
+      const cascades = {
+        texture: device.createTexture({ size: { width: 1, height: 1, depthOrArrayLayers: CASCADE_COUNT }, format: "depth32float", usage: 16 | 4 }),
+        size: 0,
+        sampler: device.createSampler({ compare: "less-equal", magFilter: "linear", minFilter: "linear", addressModeU: "clamp-to-edge", addressModeV: "clamp-to-edge" }),
+        views: cascadeViews,
+        casterLayout,
+        pipeline: hdr ? device.createRenderPipeline({
+          layout: device.createPipelineLayout({ bindGroupLayouts: [casterLayout, cascadeLayout] }),
+          vertex: {
+            module: device.createShaderModule({ code: sceneShader(null, false, hdr) }),
+            entryPoint: "vs_shadow",
+            buffers: [{ arrayStride: 64, attributes: [{ shaderLocation: 0, offset: 0, format: "float32x3" }, { shaderLocation: 5, offset: 44, format: "float32" }] }]
+          },
+          primitive: { topology: "triangle-list", cullMode: "none" },
+          // Slope-scaled bias as it rasterises, against acne on faces the sun grazes.
+          depthStencil: { format: "depth32float", depthWriteEnabled: true, depthCompare: "less", depthBias: 2, depthBiasSlopeScale: 1.5 }
+        }) : null
+      };
       const makeGroups = (atlas, probes) => {
         const shared = [
           { binding: 1, resource: { buffer: clusterBuffers.table } },
@@ -19678,7 +19894,8 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
           { binding: 5, resource: { buffer: shadowTiles } },
           { binding: 6, resource: probes.createView({ dimension: "3d" }) },
           { binding: 8, resource: { buffer: dfgBuffer } },
-          { binding: 9, resource: iblSampler }
+          { binding: 9, resource: iblSampler },
+          { binding: 11, resource: cascades.sampler }
         ];
         return {
           blank: device.createBindGroup({ layout: depthLayout, entries: [{ binding: 0, resource: blankDepth.createView() }, ...shared, { binding: 7, resource: behindBlank.createView() }] }),
@@ -19694,7 +19911,8 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
           { binding: 5, resource: { buffer: shadowTiles } },
           { binding: 6, resource: probes.createView({ dimension: "3d" }) },
           { binding: 8, resource: { buffer: dfgBuffer } },
-          { binding: 9, resource: iblSampler }
+          { binding: 9, resource: iblSampler },
+          { binding: 11, resource: cascades.sampler }
         ];
         return {
           blank: device.createBindGroup({ layout: depthLayoutMs, entries: [{ binding: 0, resource: blank.createView() }, ...shared, { binding: 7, resource: behindBlank.createView() }] }),
@@ -19714,6 +19932,7 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
         probes: probesBlank,
         probesBlank: true,
         probeSource: null,
+        cascades,
         makeGroups,
         makeGroupsMs
       };
@@ -19781,6 +20000,16 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     } catch {
       return null;
     }
+  }
+  /** The sun's cascade maps (F2a) at `size`², made on a size change. */
+  ensureCascadeTexture(size) {
+    const groups = this.depthGroups;
+    const res = groups.cascades;
+    if (res.size === size) return;
+    destroySafely(res.texture);
+    res.texture = this.device.createTexture({ size: { width: size, height: size, depthOrArrayLayers: CASCADE_COUNT }, format: "depth32float", usage: 16 | 4 });
+    res.size = size;
+    this.bindGroups = /* @__PURE__ */ new WeakMap();
   }
   /**
    * Point the shadow slot at an r32float sized to `size`, (re)creating it on a
@@ -19897,6 +20126,10 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
   get gpuDevice() {
     return this.device;
   }
+  /** The linear-light renderer shadows the sun in its own cascades (F2a). */
+  get sunCascades() {
+    return this.hdr;
+  }
   /** The colour targets' format: half-float in the linear HDR variant. */
   get colourFormat() {
     return this.hdr ? "rgba16float" : "rgba8unorm";
@@ -19938,12 +20171,19 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
       if (!readback) this.clearColour();
       return;
     }
-    this.ensureUniformCapacity(draws.length);
-    this.ensureInstanceCapacity(prepass ? instanceCount * 2 : instanceCount);
+    const sun = this.hdr && this.depthGroups.cascades.pipeline ? draw.sunShadow ?? (draw.shadow && draw.lightDirection ? { casters: instances, toLight: draw.lightDirection, distance: FALLBACK_CASCADE_DISTANCE, size: FALLBACK_CASCADE_SIZE, reach: FALLBACK_CASCADE_DISTANCE, strength: draw.shadow.strength ?? 1 } : null) : null;
+    const casting = sun ? batchInstances(sun.casters, (mesh) => this.uploadMesh(mesh), cameraPositionFromView3(draw.view)) : null;
+    const casters = casting ? casting.batches.filter((entry) => entry.alpha < 2 && !entry.refract) : [];
+    const cascadeFit = sun && casters.length > 0 ? fitCascades({ view: draw.view, projection: draw.projection, toLight: sun.toLight, distance: sun.distance, size: sun.size, reach: sun.reach }) : null;
+    this.frameCascades = cascadeFit && sun ? { cascades: cascadeFit, size: sun.size, strength: sun.strength ?? 1 } : null;
+    if (cascadeFit && sun) this.ensureCascadeTexture(sun.size);
+    this.ensureUniformCapacity(draws.length + casters.length);
+    const casterBase = prepass ? instanceCount * 2 : instanceCount;
+    this.ensureInstanceCapacity(casterBase + (casting?.instanceCount ?? 0));
     const light = resolveLight(draw.lightDirection, draw.ambient);
     const viewDir = viewDirection(draw.view);
     const eye = cameraPositionFromView3(draw.view);
-    const shadow = draw.shadow ?? null;
+    const shadow = this.hdr ? null : draw.shadow ?? null;
     this.ensureShadowTexture(shadow ? shadow.size : 0, shadow?.near ? 2 : 1);
     if (shadow?.near) {
       const near = shadow.near;
@@ -20004,26 +20244,7 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     const viewProjThen = this.lastViewProj ?? viewProjNow;
     const windNow = windUniform2(draw.wind, draw.time ?? 0);
     const windThen = this.lastWind ?? windNow;
-    let next = 0;
-    draws.forEach((entry, index) => {
-      entry.first = next;
-      for (const model2 of entry.models) {
-        writeInstanceTransform(this.instanceData, next, {
-          mvp: multiplyMat46(viewProj, model2),
-          lightMvp: shadow ? multiplyMat46(shadow.lightViewProj, model2) : null,
-          model: model2,
-          normalBasis: normalBasis3x3(model2)
-        });
-        if (prepass) {
-          writeInstanceTransform(this.instanceData, instanceCount + next, {
-            mvp: multiplyMat46(viewProjNow, model2),
-            lightMvp: multiplyMat46(viewProjThen, this.motion.get(model2) ?? model2),
-            model: model2,
-            normalBasis: IDENTITY_BASIS
-          });
-        }
-        next += 1;
-      }
+    const uniformOf = (entry) => {
       const model = entry.models[0];
       const pbr = resolvePbr(
         entry.primitive.material,
@@ -20031,7 +20252,7 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
         entry.textures.occ !== null,
         entry.textures.emis !== null
       );
-      writeInstanceUniform(this.uniformData, index, {
+      return {
         mvp: multiplyMat46(viewProj, model),
         normalBasis: normalBasis3x3(model),
         baseColor: entry.primitive.material.baseColorFactor,
@@ -20071,10 +20292,41 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
         materialId: materialId(entry.primitive.material),
         windBefore: entry.primitive.sway ? windThen : null,
         motionBase: prepass ? instanceCount : 0
-      });
+      };
+    };
+    let next = 0;
+    draws.forEach((entry, index) => {
+      entry.first = next;
+      for (const model of entry.models) {
+        writeInstanceTransform(this.instanceData, next, {
+          mvp: multiplyMat46(viewProj, model),
+          lightMvp: shadow ? multiplyMat46(shadow.lightViewProj, model) : null,
+          model,
+          normalBasis: normalBasis3x3(model)
+        });
+        if (prepass) {
+          writeInstanceTransform(this.instanceData, instanceCount + next, {
+            mvp: multiplyMat46(viewProjNow, model),
+            lightMvp: multiplyMat46(viewProjThen, this.motion.get(model) ?? model),
+            model,
+            normalBasis: IDENTITY_BASIS
+          });
+        }
+        next += 1;
+      }
+      writeInstanceUniform(this.uniformData, index, uniformOf(entry));
     });
-    this.device.queue.writeBuffer(this.uniformBuffer, 0, this.uniformData, 0, draws.length * UNIFORM_FLOATS);
-    this.device.queue.writeBuffer(this.instanceBuffer, 0, this.instanceData, 0, (prepass ? 2 : 1) * instanceCount * INSTANCE_FLOATS);
+    let nextCaster = casterBase;
+    casters.forEach((entry, k) => {
+      entry.first = nextCaster;
+      for (const model of entry.models) {
+        writeInstanceTransform(this.instanceData, nextCaster, { mvp: model, lightMvp: null, model, normalBasis: IDENTITY_BASIS });
+        nextCaster += 1;
+      }
+      writeInstanceUniform(this.uniformData, draws.length + k, uniformOf(entry));
+    });
+    this.device.queue.writeBuffer(this.uniformBuffer, 0, this.uniformData, 0, (draws.length + casters.length) * UNIFORM_FLOATS);
+    this.device.queue.writeBuffer(this.instanceBuffer, 0, this.instanceData, 0, nextCaster * INSTANCE_FLOATS);
     this.lastViewProj = viewProjNow;
     this.lastWind = windNow;
     let triangles = 0;
@@ -20141,6 +20393,45 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     const target = msColour ?? colour;
     const rayTargets = msaa ? raysMs : rays;
     const opaqueEnd = seeThrough ? firstSeeThrough : draws.length;
+    if (cascadeFit) {
+      const res = this.depthGroups.cascades;
+      cascadeFit.forEach((c, i) => this.device.queue.writeBuffer(res.views[i].buffer, 0, new Float32Array(c.viewProj)));
+      const map = graph.importTexture("cascades", res.texture);
+      graph.addPass("shadow cascades", "render", (pass) => {
+        pass.write(map);
+        pass.keep();
+        return (ctx) => {
+          const group = this.device.createBindGroup({
+            layout: res.casterLayout,
+            entries: [
+              { binding: 0, resource: { buffer: this.uniformBuffer, offset: 0, size: UNIFORM_STRIDE } },
+              { binding: 10, resource: { buffer: this.instanceBuffer } }
+            ]
+          });
+          cascadeFit.forEach((_, i) => {
+            const encoded = ctx.encoder.beginRenderPass({
+              colorAttachments: [],
+              depthStencilAttachment: {
+                view: ctx.texture(map).createView({ dimension: "2d", baseArrayLayer: i, arrayLayerCount: 1 }),
+                depthClearValue: 1,
+                depthLoadOp: "clear",
+                depthStoreOp: "store"
+              },
+              ...timingSpan(ctx.timing, i, cascadeFit.length)
+            });
+            encoded.setPipeline(res.pipeline);
+            encoded.setBindGroup(1, res.views[i].group);
+            casters.forEach((entry, k) => {
+              encoded.setBindGroup(0, group, [(draws.length + k) * UNIFORM_STRIDE]);
+              encoded.setVertexBuffer(0, entry.geometry.vertexBuffer);
+              encoded.setIndexBuffer(entry.geometry.indexBuffer, "uint32");
+              encoded.drawIndexed(entry.geometry.indexCount, entry.models.length, 0, 0, entry.first);
+            });
+            encoded.end();
+          });
+        };
+      });
+    }
     const gbuffer = prepass ? graph.importTexture("gbuffer", this.ensureGbuffer()) : null;
     const velocity = prepass ? graph.importTexture("velocity", this.ensureVelocity()) : null;
     const gbufferMs = gbuffer && msaa ? graph.createTexture("gbuffer.msaa", { format: GBUFFER_FORMAT, ...size, sampleCount: MSAA_SAMPLES }) : null;
@@ -20504,6 +20795,13 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
       frame.set(this.iblSh, 44);
       frame.set([IBL_LEVELS - 1], 80);
     }
+    const sun = this.frameCascades;
+    if (sun) {
+      sun.cascades.forEach((c, i) => frame.set(c.viewProj, FRAME_CASCADES + i * 16));
+      frame.set(sun.cascades.map((c) => c.far), FRAME_CASCADES + 64);
+      frame.set([1, sun.size, sun.strength, sun.cascades[sun.cascades.length - 1].far], FRAME_CASCADES + 68);
+      frame.set(sun.cascades.map((c) => c.texel), FRAME_CASCADES + 72);
+    }
     this.device.queue.writeBuffer(buffers.params, 0, frame);
     this.uploadLocalShadows(local);
     return { ordered, globalCount, clusters };
@@ -20655,7 +20953,7 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
         // The active shadow map (or the 1x1 blank). Its identity only moves on a
         // size change, which invalidates this whole cache, so a cached group
         // always references the current one.
-        { binding: 6, resource: this.shadowTexture.createView() },
+        { binding: 6, resource: this.hdr ? this.depthGroups.cascades.texture.createView({ dimension: "2d-array" }) : this.shadowTexture.createView() },
         // The active env map (or the 1x1 white blank); likewise cache-invalidated.
         { binding: 7, resource: this.hdr ? this.envTexture.createView({ dimension: "cube" }) : this.envTexture.createView() },
         // The active SSAO buffer (or the 1x1 blank); likewise cache-invalidated.
@@ -20792,6 +21090,8 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     this.software.dispose();
     destroySafely(this.colourTexture);
     destroySafely(this.depthTexture);
+    destroySafely(this.depthGroups.cascades.texture);
+    for (const view of this.depthGroups.cascades.views) destroySafely(view.buffer);
     if (this.msaa) {
       destroySafely(this.msaa.depth);
       destroySafely(this.msaa.blank);
