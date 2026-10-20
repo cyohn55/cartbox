@@ -57,8 +57,9 @@ export const LENS_SHOWN_FLOATS = 12;
 /**
  * How the presenter will show a linear pixel, for the bright pass to pick by:
  * `[exposure, curve, tone-mapped, graded]`, `[brightness, contrast,
- * saturation, 0]`, then `[the exposure keeping grey on an HDR display, its
- * headroom, 0, 0]`: the compose pass's own values (gpuPresent.ts).
+ * saturation, 1 when the curve maps as authored (F11a-5)]`, then `[the
+ * exposure keeping grey on an HDR display, its headroom, 0, 0]`: the compose
+ * pass's own values (gpuPresent.ts).
  */
 export function packLensShown(
   exposure: number,
@@ -68,8 +69,9 @@ export function packLensShown(
   extendedExposure: number,
   headroom: number,
   out = new Float32Array(LENS_SHOWN_FLOATS),
+  authored = false,
 ): Float32Array {
-  out.set([exposure, curve, toneMapped ? 1 : 0, grade ? 1 : 0, grade?.brightness ?? 1, grade?.contrast ?? 1, grade?.saturation ?? 1, 0, extendedExposure, headroom, 0, 0]);
+  out.set([exposure, curve, toneMapped ? 1 : 0, grade ? 1 : 0, grade?.brightness ?? 1, grade?.contrast ?? 1, grade?.saturation ?? 1, authored ? 1 : 0, extendedExposure, headroom, 0, 0]);
   return out;
 }
 
@@ -101,20 +103,18 @@ fn graded(c: vec3f) -> vec3f {
   if (shown[0].w > 0.5) { return gradeLinear(c, shown[1].x, shown[1].y, shown[1].z); }
   return c;
 }
-// The pixel as an SDR display shows it: graded, through the curve, encoded.
+// The pixel as an SDR display shows it: graded, through the curve (physically or as authored, F11a-5), encoded.
 fn display(c: vec3f) -> vec3f {
   let rgb = graded(c);
-  var mapped = clamp(rgb, vec3f(0.0), vec3f(1.0));
-  if (shown[0].z > 0.5) { mapped = toneMapWith(shown[0].y, rgb * shown[0].x); }
-  return toSrgb(mapped);
+  if (shown[0].z > 0.5) { return clamp(shownWith(shown[0].y, rgb, shown[0].x, shown[1].w > 0.5), vec3f(0.0), vec3f(1.0)); }
+  return toSrgb(rgb);
 }
 // …and as an HDR display shows it: the curve's white at the headroom, grey where SDR shows it.
 fn displayHdr(c: vec3f) -> vec3f {
   let rgb = graded(c);
   let headroom = shown[2].y;
-  var mapped = clamp(rgb, vec3f(0.0), vec3f(headroom));
-  if (shown[0].z > 0.5) { mapped = toneMapWith(shown[0].y, rgb * (shown[0].x * shown[2].x / headroom)) * headroom; }
-  return toSrgbExtended(mapped);
+  if (shown[0].z > 0.5) { return shownWideWith(shown[0].y, rgb, shown[0].x, shown[2].x, headroom, shown[1].w > 0.5); }
+  return toSrgbExtended(clamp(rgb, vec3f(0.0), vec3f(headroom)));
 }
 // Picked by how bright it shows, as the display stack picks. What it gives is
 // what it showed, until it clips: from 0.9 of white, what an HDR display shows.

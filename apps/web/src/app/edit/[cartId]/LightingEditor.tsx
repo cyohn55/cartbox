@@ -248,6 +248,25 @@ export function LightingEditor({ lighting, onChange }: LightingEditorProps) {
       {lighting.tonemap && lighting.tonemapper && lighting.tonemapper !== "filmic" && (
         <RailHint>{TONEMAPPER_HINTS[lighting.tonemapper]} The AAA tier maps through it; every other tier keeps Filmic.</RailHint>
       )}
+      {lighting.tonemap && (
+        <>
+          <SegmentedControl
+            label="AAA curve"
+            ariaLabel="AAA curve"
+            selected={lighting.authoredCurve ? "authored" : "physical"}
+            onSelect={(id) => onChange(patchSceneLighting(lighting, { authoredCurve: id === "authored" ? true : undefined }))}
+            options={[
+              { id: "physical", label: "Physical" },
+              { id: "authored", label: "As authored" },
+            ]}
+          />
+          <RailHint>
+            {lighting.authoredCurve
+              ? "The AAA tier maps the curve as every other tier's shader does: fully lit surfaces show as tuned, but on linear lighting the shade lifts further than elsewhere."
+              : "The AAA tier maps the curve on the light itself, as a linear pipeline does: shadows read deeper and highlights brighter than on the other tiers."}
+          </RailHint>
+        </>
+      )}
       {lighting.tonemap &&
         (physical ? (
           <RangeControl

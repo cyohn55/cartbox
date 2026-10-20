@@ -14101,7 +14101,7 @@ function writeInstanceUniform(target, index, uniform) {
   target[base + OFFSET_TONEMAP] = tonemap ? 1 : 0;
   target[base + OFFSET_TONEMAP + 1] = tonemap ? tonemap.exposure : 0;
   target[base + OFFSET_TONEMAP + 2] = uniform.soft?.distance ?? 0;
-  target[base + OFFSET_TONEMAP + 3] = 0;
+  target[base + OFFSET_TONEMAP + 3] = tonemap?.authored ? 1 : 0;
   target[base + OFFSET_SSAO] = uniform.hasSsao ? 1 : 0;
   target[base + OFFSET_SSAO + 1] = uniform.lightCount;
   target[base + OFFSET_SSAO + 2] = uniform.hasLightmap ? 1 : 0;
@@ -18195,7 +18195,7 @@ struct Uniforms {
   lightMvp: mat4x4<f32>,// world\u2192light-clip for shadow mapping
   shadow: vec4<f32>,    // x = 1 when shadowed, y = map size, z = bias, w = strength
   envMeta: vec4<f32>,   // xyz = env-map mean radiance, w = 1 when an env map is bound
-  tonemap: vec4<f32>,   // x = 1 when tone-mapping, y = exposure
+  tonemap: vec4<f32>,   // x = 1 when tone-mapping, y = exposure, z = soft edge, w = 1 for the curve as authored (F11a-5)
   ssaoMeta: vec4<f32>,  // x = 1 when an SSAO buffer is bound, y = light count, z = 1 when a light map is bound
   model: mat4x4<f32>,   // this draw's world matrix (point-light world position)
   fog: vec4<f32>,       // rgb = fog colour, w = density
@@ -18753,11 +18753,18 @@ fn aces(x: f32) -> f32 {
   let v = max(0.0, x);
   return clamp((v * (2.51 * v + 0.03)) / (v * (2.43 * v + 0.59) + 0.14), 0.0, 1.0);
 }
-${hdr ? `// Linear light as the display shows it (F11a): exposed, through the curve, sRGB-encoded.
-fn shownOf(x: vec3<f32>) -> vec3<f32> {
-  var y = max(x, vec3<f32>(0.0));
-  if (u.tonemap.x > 0.5) { y = vec3<f32>(aces(y.r * u.tonemap.y), aces(y.g * u.tonemap.y), aces(y.b * u.tonemap.y)); }
+${hdr ? `fn srgbOf(x: vec3<f32>) -> vec3<f32> {
+  let y = max(x, vec3<f32>(0.0));
   return select(1.055 * pow(y, vec3<f32>(1.0 / 2.4)) - vec3<f32>(0.055), y * 12.92, y <= vec3<f32>(0.0031308));
+}
+// Linear light as the display shows it (F11a): exposed, through the curve, sRGB-encoded; as authored
+// (F11a-5), the curve on the encoded light, as the byte path's shader maps its shading.
+fn shownOf(x: vec3<f32>) -> vec3<f32> {
+  let y = max(x, vec3<f32>(0.0));
+  if (u.tonemap.x < 0.5) { return srgbOf(y); }
+  let e = u.tonemap.y;
+  if (u.tonemap.w > 0.5) { let s = srgbOf(y); return vec3<f32>(aces(s.r * e), aces(s.g * e), aces(s.b * e)); }
+  return srgbOf(vec3<f32>(aces(y.r * e), aces(y.g * e), aces(y.b * e)));
 }
 // The curve's inverse, where it is one to one (under its white).
 fn acesInverse(y: f32) -> f32 {
@@ -18768,9 +18775,11 @@ fn acesInverse(y: f32) -> f32 {
 }
 // shownOf's inverse: what the display shows, as the linear light that shows it.
 fn lightOf(d: vec3<f32>) -> vec3<f32> {
+  if (u.tonemap.x < 0.5) { return toLinear(d); }
+  let e = max(u.tonemap.y, 1e-6);
+  if (u.tonemap.w > 0.5) { return toLinear(vec3<f32>(acesInverse(d.r), acesInverse(d.g), acesInverse(d.b)) / e); }
   let y = toLinear(d);
-  if (u.tonemap.x < 0.5) { return y; }
-  return vec3<f32>(acesInverse(y.r), acesInverse(y.g), acesInverse(y.b)) / max(u.tonemap.y, 1e-6);
+  return vec3<f32>(acesInverse(y.r), acesInverse(y.g), acesInverse(y.b)) / e;
 }
 // Light x moved toward display colour d by t as the display shows the two: exactly that mix under the
 // curve's white, x itself at t = 0, and light past white keeping what it has over it.
@@ -20912,6 +20921,7 @@ function toneMap(mapper, c) {
       return filmic(c);
   }
 }
+var srgbEncode = (v) => v <= 31308e-7 ? Math.max(0, v) * 12.92 : 1.055 * v ** (1 / 2.4) - 0.055;
 function toneMapperIndex(mapper) {
   const i = mapper ? TONE_MAPPERS.indexOf(mapper) : 0;
   return i < 0 ? 0 : i;
@@ -20956,6 +20966,26 @@ fn toneMapWith(index: f32, c: vec3f) -> vec3f {
   if (index > 0.5) { return toneAces(c); }
   return toneFilmic(c);
 }
+// The sRGB curve, carried past 1.
+fn srgbOf(x: vec3f) -> vec3f {
+  let v = max(x, vec3f(0.0));
+  return select(1.055 * pow(v, vec3f(1.0 / 2.4)) - vec3f(0.055), v * 12.92, v <= vec3f(0.0031308));
+}
+// Light x as the display shows it under exposure e, sRGB-encoded (F11a-5): physically, the curve on
+// the light then the encode; as authored, the curve on the encoded light, as the byte path's shader maps.
+fn shownWith(index: f32, x: vec3f, e: f32, authored: bool) -> vec3f {
+  if (authored) { return toneMapWith(index, srgbOf(x) * e); }
+  return srgbOf(toneMapWith(index, x * e));
+}
+// \u2026as an HDR display shows it, encoded: the curve's white at headroom h (its encoding, as authored)
+// and grey where SDR shows it (s, extendedExposure's).
+fn shownWideWith(index: f32, x: vec3f, e: f32, s: f32, h: f32, authored: bool) -> vec3f {
+  if (authored) {
+    let top = srgbOf(vec3f(h)).x;
+    return toneMapWith(index, srgbOf(x) * (e * s / top)) * top;
+  }
+  return srgbOf(toneMapWith(index, x * (e * s / h)) * h);
+}
 `
 );
 
@@ -20969,13 +20999,15 @@ function toAcesCct(x) {
   return x <= CCT_CUT ? CCT_A * x + CCT_B : (Math.log2(Math.max(x, 1e-10)) + 9.72) / 17.52;
 }
 var CCT_GREY = toAcesCct(0.18);
-function extendedExposure(mapper, headroom = HDR_HEADROOM) {
-  const want = toneMap(mapper, [0.18, 0.18, 0.18])[1];
+function extendedExposure(mapper, headroom = HDR_HEADROOM, authored = false) {
+  const grey = authored ? srgbEncode(0.18) : 0.18;
+  const top = authored ? srgbEncode(headroom) : headroom;
+  const want = toneMap(mapper, [grey, grey, grey])[1];
   let lo = 0.01;
   let hi = 100;
   for (let i = 0; i < 60; i += 1) {
     const mid = Math.sqrt(lo * hi);
-    const got = headroom * toneMap(mapper, [0.18 * mid / headroom, 0.18 * mid / headroom, 0.18 * mid / headroom])[1];
+    const got = top * toneMap(mapper, [grey * mid / top, grey * mid / top, grey * mid / top])[1];
     if (got < want) lo = mid;
     else hi = mid;
   }
@@ -21611,8 +21643,8 @@ function splitLens(u) {
 }
 var CLIP_KNEE = 0.9;
 var LENS_SHOWN_FLOATS = 12;
-function packLensShown(exposure, curve, toneMapped, grade, extendedExposure2, headroom, out = new Float32Array(LENS_SHOWN_FLOATS)) {
-  out.set([exposure, curve, toneMapped ? 1 : 0, grade ? 1 : 0, grade?.brightness ?? 1, grade?.contrast ?? 1, grade?.saturation ?? 1, 0, extendedExposure2, headroom, 0, 0]);
+function packLensShown(exposure, curve, toneMapped, grade, extendedExposure2, headroom, out = new Float32Array(LENS_SHOWN_FLOATS), authored = false) {
+  out.set([exposure, curve, toneMapped ? 1 : 0, grade ? 1 : 0, grade?.brightness ?? 1, grade?.contrast ?? 1, grade?.saturation ?? 1, authored ? 1 : 0, extendedExposure2, headroom, 0, 0]);
   return out;
 }
 var LENS_WGSL = (
@@ -21640,20 +21672,18 @@ fn graded(c: vec3f) -> vec3f {
   if (shown[0].w > 0.5) { return gradeLinear(c, shown[1].x, shown[1].y, shown[1].z); }
   return c;
 }
-// The pixel as an SDR display shows it: graded, through the curve, encoded.
+// The pixel as an SDR display shows it: graded, through the curve (physically or as authored, F11a-5), encoded.
 fn display(c: vec3f) -> vec3f {
   let rgb = graded(c);
-  var mapped = clamp(rgb, vec3f(0.0), vec3f(1.0));
-  if (shown[0].z > 0.5) { mapped = toneMapWith(shown[0].y, rgb * shown[0].x); }
-  return toSrgb(mapped);
+  if (shown[0].z > 0.5) { return clamp(shownWith(shown[0].y, rgb, shown[0].x, shown[1].w > 0.5), vec3f(0.0), vec3f(1.0)); }
+  return toSrgb(rgb);
 }
 // \u2026and as an HDR display shows it: the curve's white at the headroom, grey where SDR shows it.
 fn displayHdr(c: vec3f) -> vec3f {
   let rgb = graded(c);
   let headroom = shown[2].y;
-  var mapped = clamp(rgb, vec3f(0.0), vec3f(headroom));
-  if (shown[0].z > 0.5) { mapped = toneMapWith(shown[0].y, rgb * (shown[0].x * shown[2].x / headroom)) * headroom; }
-  return toSrgbExtended(mapped);
+  if (shown[0].z > 0.5) { return shownWideWith(shown[0].y, rgb, shown[0].x, shown[2].x, headroom, shown[1].w > 0.5); }
+  return toSrgbExtended(clamp(rgb, vec3f(0.0), vec3f(headroom)));
 }
 // Picked by how bright it shows, as the display stack picks. What it gives is
 // what it showed, until it clips: from 0.9 of white, what an HDR display shows.
@@ -21877,7 +21907,7 @@ var USAGE3 = {
 var STAGE_FRAGMENT2 = 2;
 var STAGE_COMPUTE = 4;
 var SKY_UNIFORM_FLOATS = 4 * (6 + 2 * MAX_CLOUD_LAYERS);
-function packSkyUniforms(sky, width, height, out = new Float32Array(SKY_UNIFORM_FLOATS), hdr = false, exposure = null) {
+function packSkyUniforms(sky, width, height, out = new Float32Array(SKY_UNIFORM_FLOATS), hdr = false, exposure = null, authored = false) {
   const v = sky.view;
   const p = sky.projection;
   const layers = Math.min(MAX_CLOUD_LAYERS, sky.clouds.length);
@@ -21888,7 +21918,7 @@ function packSkyUniforms(sky, width, height, out = new Float32Array(SKY_UNIFORM_
   const sl = sun ? Math.hypot(sun.direction[0], sun.direction[1], sun.direction[2]) || 1 : 1;
   out.set(sun ? [sun.direction[0] / sl, sun.direction[1] / sl, sun.direction[2] / sl, 1] : [0, 0, 0, 0], 12);
   out.set(sun ? [sun.color[0], sun.color[1], sun.color[2], sky.time] : [0, 0, 0, sky.time], 16);
-  out.set([width, height, hdr ? 1 : 0, hdr && exposure !== null && exposure > 0 ? exposure : 0], 20);
+  out.set([width, height, hdr ? authored ? 2 : 1 : 0, hdr && exposure !== null && exposure > 0 ? exposure : 0], 20);
   for (let i = 0; i < MAX_CLOUD_LAYERS; i += 1) {
     const layer = i < layers ? sky.clouds[i].layer : null;
     out.set(layer ? [layer.scale, layer.wind[0], layer.wind[1], layer.opacity] : [0, 0, 0, 0], 24 + i * 4);
@@ -21925,7 +21955,7 @@ function packComposeUniforms(frame, width, height, out = new Float32Array(COMPOS
   out.set([0, 0, 0, 0], 24);
   out.set([1, 1, 1, 0], 28);
   out.set([0, 1, 1, 0], 32);
-  out.set([width, height, 0, 0], 36);
+  out.set([width, height, 0, hdr && frame.tonemap?.authored ? 1 : 0], 36);
   return out;
 }
 var MEASURE_UNIFORM_FLOATS = 16;
@@ -22054,7 +22084,10 @@ fn coreGlow(c: f32) -> f32 {
   // A linear frame (F0b) takes the painted sky as the light it shows. Painted for the display, it is
   // the light that shows as painted (F11a): through the curve's inverse, under the frame's exposure,
   // as the byte path shows it, rather than tone-mapped a second time.
-  if (s.size.z > 0.5) {
+  // As authored (F11a-5), the curve maps the encoded light: the inverse is taken before the decode.
+  if (s.size.z > 1.5 && s.size.w > 0.0) {
+    rgb = toLinear(filmicInverse(rgb) / s.size.w);
+  } else if (s.size.z > 0.5) {
     rgb = toLinear(rgb);
     if (s.size.w > 0.0) { rgb = filmicInverse(rgb) / s.size.w; }
   }
@@ -22138,7 +22171,7 @@ struct Compose {
   grade: vec4f, // F4d: x = pass (0 all, 1 the linear composite, 2 the finish), y = bloom strength, z = 1 / levels summed, w = 1 with the lens pass's glare (F4e-2)
   look: vec4f,  // F4d: the linear frame's brightness, contrast (in ACEScct) and saturation; w = 1 when graded
   output: vec4f, // F4d: x = 1 for an HDR display (extended), y = its headroom, z = the exposure keeping grey, w = lens dirt
-  frame: vec4f, // F0d: the frame's size (xy); its layers may be other sizes
+  frame: vec4f, // F0d: the frame's size (xy); its layers may be other sizes. z = the bloom's gather (F11a-4), w = 1 for the curve as authored (F11a-5)
 };
 @group(0) @binding(0) var<uniform> u: Compose;
 @group(0) @binding(1) var baseTex: texture_2d<f32>;
@@ -22241,22 +22274,24 @@ fn shade(pos: vec4f) -> Shown {
     // Graded in log space before the curve (F4d-2), not on the clipped display image.
     var rgb = c.rgb;
     if (u.look.w > 0.5) { rgb = gradeLinear(rgb, u.look.x, u.look.y, u.look.z); }
+    // The curve physically, or as authored (F11a-5; frame.w): on the encoded light, as the byte path's shader maps.
+    let authored = u.frame.w > 0.5;
     if (u.output.x > 0.5) {
       // An HDR display: the curve's white moved up to the headroom, grey where SDR shows it.
-      var mapped = max(rgb, vec3f(0.0));
-      if (u.hdr.y > 0.5) { mapped = toneMapWith(u.hdr.w, rgb * (u.hdr.z * u.output.z / u.output.y)) * u.output.y; }
-      c = vec4f(toSrgbExtended(mapped), clamp(c.a, 0.0, 1.0));
+      var shown = toSrgbExtended(max(rgb, vec3f(0.0)));
+      if (u.hdr.y > 0.5) { shown = shownWideWith(u.hdr.w, rgb, u.hdr.z, u.output.z, u.output.y, authored); }
+      c = vec4f(shown, clamp(c.a, 0.0, 1.0));
     } else {
-      var mapped = clamp(rgb, vec3f(0.0), vec3f(1.0));
-      if (u.hdr.y > 0.5) { mapped = toneMapWith(u.hdr.w, rgb * u.hdr.z); }
-      c = vec4f(toSrgb(mapped), clamp(c.a, 0.0, 1.0));
+      var shown = toSrgb(rgb);
+      if (u.hdr.y > 0.5) { shown = clamp(shownWith(u.hdr.w, rgb, u.hdr.z, authored), vec3f(0.0), vec3f(1.0)); }
+      c = vec4f(shown, clamp(c.a, 0.0, 1.0));
       // The bloom's gather (F11a-4; frame.z = the exposure keeping grey on an HDR display).
       if (u.frame.z > 0.0) {
-        var wide = clamp(rgb, vec3f(0.0), vec3f(u.output.y));
-        if (u.hdr.y > 0.5) { wide = toneMapWith(u.hdr.w, rgb * (u.hdr.z * u.frame.z / u.output.y)) * u.output.y; }
+        var wide = toSrgbExtended(clamp(rgb, vec3f(0.0), vec3f(u.output.y)));
+        if (u.hdr.y > 0.5) { wide = shownWideWith(u.hdr.w, rgb, u.hdr.z, u.frame.z, u.output.y, authored); }
         let l = dot(c.rgb, vec3f(0.299, 0.587, 0.114));
         let t = clamp((l - 0.9) / 0.1, 0.0, 1.0);
-        past = max(toSrgbExtended(wide) - c.rgb, vec3f(0.0)) * (t * t * (3.0 - 2.0 * t)) * drawn;
+        past = max(wide - c.rgb, vec3f(0.0)) * (t * t * (3.0 - 2.0 * t)) * drawn;
       }
     }
   }
@@ -22502,7 +22537,7 @@ var GpuPresenter = class {
       graph.addPass("sky", "render", (pass) => {
         pass.write(skyTexture);
         return (ctx) => {
-          device.queue.writeBuffer(this.uniforms.sky, 0, packSkyUniforms(sky, width, height, this.data.sky, this.hdr, frame.tonemap ? frame.tonemap.exposure : null));
+          device.queue.writeBuffer(this.uniforms.sky, 0, packSkyUniforms(sky, width, height, this.data.sky, this.hdr, frame.tonemap ? frame.tonemap.exposure : null, frame.tonemap?.authored ?? false));
           this.fullScreen(
             ctx.encoder,
             "sky",
@@ -22580,9 +22615,9 @@ var GpuPresenter = class {
     const composeFormat = post ? composedFormat : format;
     const compose = packComposeUniforms(frame, width, height, this.data.compose, this.hdr);
     if (graded) compose.set([look.brightness, look.contrast, look.saturation, 1], 28);
-    compose.set([this.extended ? 1 : 0, HDR_HEADROOM, this.extended ? this.extendedExposure(frame.tonemap?.operator ?? "filmic") : 1, bloomStrength > 0 ? look?.bloomDirt ?? 0 : 0], 32);
+    compose.set([this.extended ? 1 : 0, HDR_HEADROOM, this.extended ? this.extendedExposure(frame.tonemap?.operator ?? "filmic", frame.tonemap?.authored) : 1, bloomStrength > 0 ? look?.bloomDirt ?? 0 : 0], 32);
     const bloomGather = gathersBloom ? graph.createTexture("bloom gather", { format: "rgba16float", width, height }) : null;
-    if (bloomGather) compose[38] = this.extendedExposure(frame.tonemap?.operator ?? "filmic");
+    if (bloomGather) compose[38] = this.extendedExposure(frame.tonemap?.operator ?? "filmic", frame.tonemap?.authored);
     const finish = (ctx, entries) => bloomGather ? this.fullScreen(ctx.encoder, "composeBloom", composeFormat, COMPOSE_WGSL, [ctx.texture(composeOut), ctx.texture(bloomGather)], entries, ctx.timing) : this.fullScreen(ctx.encoder, "compose", composeFormat, COMPOSE_WGSL, ctx.texture(composeOut), entries, ctx.timing);
     const layers = (ctx, uniforms, baseView, lightView, glareView = this.blank.createView()) => [
       { binding: 0, resource: { buffer: uniforms } },
@@ -22637,7 +22672,7 @@ var GpuPresenter = class {
             device.queue.writeBuffer(
               this.uniforms.lensShown,
               0,
-              packLensShown(compose[22], compose[23], compose[21] > 0.5, graded ? look : null, this.extendedExposure(operator), HDR_HEADROOM, this.data.lensShown)
+              packLensShown(compose[22], compose[23], compose[21] > 0.5, graded ? look : null, this.extendedExposure(operator, frame.tonemap?.authored), HDR_HEADROOM, this.data.lensShown, frame.tonemap?.authored ?? false)
             );
             this.fullScreen(
               ctx.encoder,
@@ -22733,12 +22768,13 @@ var GpuPresenter = class {
     this.timer?.read();
     if (measure) void this.readMeasurements(measure.luminance, measure.sun !== null);
   }
-  /** The exposure that keeps grey where SDR shows it on an HDR display, per curve (found once). */
-  extendedExposure(mapper) {
-    let s = this.exposures.get(mapper);
+  /** The exposure that keeps grey where SDR shows it on an HDR display, per curve and domain (found once). */
+  extendedExposure(mapper, authored = false) {
+    const key = `${mapper}|${authored}`;
+    let s = this.exposures.get(key);
     if (s === void 0) {
-      s = extendedExposure(mapper);
-      this.exposures.set(mapper, s);
+      s = extendedExposure(mapper, HDR_HEADROOM, authored);
+      this.exposures.set(key, s);
     }
     return s;
   }

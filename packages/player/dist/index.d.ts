@@ -2338,6 +2338,12 @@ declare class PostFxSurface implements DisplaySurface {
  * - **neutral**: Khronos PBR Neutral, which leaves colours under 0.76 as
  *   they are (so a material's base colour shows as authored) and rolls off
  *   above it.
+ *
+ * Each maps in one of two domains (F11a-5). **Physical**: the curve on the
+ * exposed light, then the sRGB encode, as a linear pipeline does. **As
+ * authored**: the curve on the light's sRGB encoding, as the byte path's
+ * shader maps its display-space shading, so a map tuned there shows as tuned;
+ * its shadows and midtones lift and its highlights hold lower.
  */
 /** The curves, in the order the presenter's uniform names them. */
 declare const TONE_MAPPERS: readonly ["filmic", "aces", "agx", "neutral"];
@@ -2447,6 +2453,8 @@ interface PresentFrame {
     readonly tonemap?: {
         readonly exposure: number;
         readonly operator?: ToneMapper;
+        /** The curve on the encoded light, as the byte path maps its shading (F11a-5), rather than on the light. */
+        readonly authored?: boolean;
     } | null;
     /** The post-process stack to finish the frame through (its uniforms, and the clock grain runs on), or null for none. */
     readonly post?: {
@@ -2485,7 +2493,9 @@ declare const SKY_UNIFORM_FLOATS: number;
  */
 declare function packSkyUniforms(sky: PresentSky, width: number, height: number, out?: Float32Array<ArrayBuffer>, hdr?: boolean, 
 /** A linear frame's exposure when it is tone-mapped (F11a): the painted sky is undone through the curve so it shows as painted. */
-exposure?: number | null): Float32Array;
+exposure?: number | null, 
+/** Its curve maps the encoded light (F11a-5), so the sky is undone through that. */
+authored?: boolean): Float32Array;
 /** The shaft passes' grid: how many frame pixels a cell spans, and the grid's size (`applySunShafts`'s). */
 declare function shaftGrid(width: number, height: number): {
     step: number;
@@ -2573,7 +2583,7 @@ declare class GpuPresenter {
      */
     present(frame: PresentFrame, target: any, format: string): void;
     private readonly exposures;
-    /** The exposure that keeps grey where SDR shows it on an HDR display, per curve (found once). */
+    /** The exposure that keeps grey where SDR shows it on an HDR display, per curve and domain (found once). */
     private extendedExposure;
     /** Release every resource this presenter made. */
     dispose(): void;
@@ -5138,7 +5148,8 @@ declare class WebgpuSceneRenderer implements SceneRenderer {
  * 320  shadow     vec4<f32>    16   x = 1 when shadowed, y = map size, z = bias, w = strength
  * 336  envMeta    vec4<f32>    16   xyz = env-map mean radiance, w = 1 when an env map is bound
  * 352  tonemap    vec4<f32>    16   x = 1 when tone-mapping, y = exposure,
- *                                    z = soft-edge distance (EP6b; 0 = hard)
+ *                                    z = soft-edge distance (EP6b; 0 = hard),
+ *                                    w = 1 when the curve maps as authored (F11a-5)
  * 368  ssao       vec4<f32>    16   x = 1 when an SSAO buffer is bound, y = light count,
  *                                    z = 1 when a baked light map is bound,
  *                                    w = reflection-probe count
@@ -5370,6 +5381,7 @@ interface InstanceUniform {
     /** HDR tone-map exposure, or null to write the shaded colour straight through. */
     readonly tonemap: {
         readonly exposure: number;
+        readonly authored?: boolean;
     } | null;
     /** Whether a screen-space AO buffer is bound (sampled per fragment on the GPU). */
     readonly hasSsao: boolean;

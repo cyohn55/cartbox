@@ -14,6 +14,12 @@
  * - **neutral**: Khronos PBR Neutral, which leaves colours under 0.76 as
  *   they are (so a material's base colour shows as authored) and rolls off
  *   above it.
+ *
+ * Each maps in one of two domains (F11a-5). **Physical**: the curve on the
+ * exposed light, then the sRGB encode, as a linear pipeline does. **As
+ * authored**: the curve on the light's sRGB encoding, as the byte path's
+ * shader maps its display-space shading, so a map tuned there shows as tuned;
+ * its shadows and midtones lift and its highlights hold lower.
  */
 
 /** The curves, in the order the presenter's uniform names them. */
@@ -90,6 +96,19 @@ export function toneMap(mapper: ToneMapper, c: readonly [number, number, number]
   }
 }
 
+/** The sRGB curve and its inverse, both carried past 1. */
+export const srgbEncode = (v: number): number => (v <= 0.0031308 ? Math.max(0, v) * 12.92 : 1.055 * v ** (1 / 2.4) - 0.055);
+export const srgbDecode = (v: number): number => (v <= 0.04045 ? Math.max(0, v) / 12.92 : ((v + 0.055) / 1.055) ** 2.4);
+
+/**
+ * A linear colour as the display shows it under `exposure` (sRGB-encoded,
+ * 0..1): physically, or as authored (see the module comment).
+ */
+export function shownAs(mapper: ToneMapper, c: readonly [number, number, number], exposure: number, authored = false): Rgb {
+  if (authored) return toneMap(mapper, c.map((x) => srgbEncode(Math.max(0, x)) * exposure) as Rgb);
+  return toneMap(mapper, c.map((x) => x * exposure) as Rgb).map(srgbEncode) as Rgb;
+}
+
 /** The uniform's index for a curve (filmic for anything unknown). */
 export function toneMapperIndex(mapper: ToneMapper | undefined): number {
   const i = mapper ? TONE_MAPPERS.indexOf(mapper) : 0;
@@ -135,5 +154,25 @@ fn toneMapWith(index: f32, c: vec3f) -> vec3f {
   if (index > 1.5) { return toneAgx(c); }
   if (index > 0.5) { return toneAces(c); }
   return toneFilmic(c);
+}
+// The sRGB curve, carried past 1.
+fn srgbOf(x: vec3f) -> vec3f {
+  let v = max(x, vec3f(0.0));
+  return select(1.055 * pow(v, vec3f(1.0 / 2.4)) - vec3f(0.055), v * 12.92, v <= vec3f(0.0031308));
+}
+// Light x as the display shows it under exposure e, sRGB-encoded (F11a-5): physically, the curve on
+// the light then the encode; as authored, the curve on the encoded light, as the byte path's shader maps.
+fn shownWith(index: f32, x: vec3f, e: f32, authored: bool) -> vec3f {
+  if (authored) { return toneMapWith(index, srgbOf(x) * e); }
+  return srgbOf(toneMapWith(index, x * e));
+}
+// …as an HDR display shows it, encoded: the curve's white at headroom h (its encoding, as authored)
+// and grey where SDR shows it (s, extendedExposure's).
+fn shownWideWith(index: f32, x: vec3f, e: f32, s: f32, h: f32, authored: bool) -> vec3f {
+  if (authored) {
+    let top = srgbOf(vec3f(h)).x;
+    return toneMapWith(index, srgbOf(x) * (e * s / top)) * top;
+  }
+  return srgbOf(toneMapWith(index, x * (e * s / h)) * h);
 }
 `;
