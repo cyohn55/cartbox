@@ -293,4 +293,56 @@ describe.skipIf(!device)("local light shadows on the GPU, on a real device", { t
       expect(Math.abs(shaded(1.6) - lit(1.6))).toBeLessThan(0.05 * lit(1.6) + 1e-3);
     });
   }
+
+  it("grounds a box beside a point light with its contact shadow, from the prepass's depths (F2d-3)", async () => {
+    // The light low on the box's +x side; the box drawn but not a caster, so its tile shades nothing.
+    const lamp = point([1.2, 0.6, 0], 4);
+    const footBox: MeshSceneInstance = { mesh: cube(), model: composeModelMatrix([0, 0.25, 0], [0, 0, 0], [0.25, 0.25, 0.25]) };
+    const view = viewMatrix([-4, 2.5, 0.01], [-0.6, 0.2, 0]);
+    const frame = async (prepass: boolean) => {
+      const renderer = (await WebgpuSceneRenderer.create(device, W, H, undefined, { hdr: true }))!;
+      device.pushErrorScope("validation");
+      const texture = renderer.renderToTexture!([ground, footBox], {
+        width: W,
+        height: H,
+        view,
+        projection: PROJECTION,
+        ambient: 0,
+        lightDirection: [0, -1, 0],
+        lights: [lamp],
+        localShadowCasters: [ground],
+        ambientOcclusion: false,
+        ...(prepass ? { prepass: true } : {}),
+      } as any);
+      const error = await settled(device.popErrorScope());
+      expect(error ? String((error as any).message ?? error) : null).toBeNull();
+      const bytesPerRow = Math.ceil((W * 8) / 256) * 256;
+      const buffer = device.createBuffer({ size: bytesPerRow * H, usage: 0x01 | 0x08 });
+      const encoder = device.createCommandEncoder();
+      encoder.copyTextureToBuffer({ texture }, { buffer, bytesPerRow, rowsPerImage: H }, { width: W, height: H });
+      device.queue.submit([encoder.finish()]);
+      await settled(buffer.mapAsync(0x01));
+      const halves = new Uint16Array(buffer.getMappedRange().slice(0));
+      buffer.unmap();
+      buffer.destroy();
+      renderer.dispose();
+      // A floor point (x, 0, 0) on screen, averaged over 3×3.
+      return (x: number) => {
+        const m = (a: Float64Array, v: number[]) => [0, 1, 2, 3].map((r) => a[r]! * v[0]! + a[4 + r]! * v[1]! + a[8 + r]! * v[2]! + a[12 + r]! * v[3]!);
+        const c = m(PROJECTION, m(view, [x, 0, 0, 1]));
+        const cx = Math.round((c[0]! / c[3]! * 0.5 + 0.5) * W);
+        const cy = Math.round((0.5 - (c[1]! / c[3]!) * 0.5) * H);
+        let sum = 0;
+        for (let y = -1; y <= 1; y += 1) for (let dx = -1; dx <= 1; dx += 1) sum += half(halves[((cy + y) * bytesPerRow) / 2 + (cx + dx) * 4 + 1]!);
+        return sum / 9;
+      };
+    };
+    const plain = await frame(false);
+    const grounded = await frame(true);
+    expect(plain(-0.35)).toBeGreaterThan(0.01);
+    // Behind the box from the light, at its foot: in its contact shadow.
+    expect(grounded(-0.35)).toBeLessThan(0.5 * plain(-0.35));
+    // Out past the march's reach: lit as without it.
+    expect(grounded(-1.5)).toBeGreaterThan(0.9 * plain(-1.5));
+  });
 });

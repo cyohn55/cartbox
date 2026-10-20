@@ -215,7 +215,7 @@ export const GBUFFER_FORMAT = "rgba16float";
 export const VELOCITY_FORMAT = "rg16float";
 
 /** The per-frame globals' bytes (WGSL `Frame`): cluster params and info, the near cascade's matrix and params, and the sun's GPU cascades (F2a). */
-const FRAME_BYTES = 672;
+const FRAME_BYTES = 752;
 
 /** Floats into `Frame` where the sun's GPU cascades start (F2a): four matrices, then the slices' far depths, the flags and the texels. */
 const FRAME_CASCADES = 84;
@@ -442,6 +442,8 @@ struct Frame {
   cascadeTexel: vec4<f32>,    // F2a: each cascade's texel in world units
   cascadeDepth: vec4<f32>,    // F2a-2: the world distance each cascade's depth 0..1 spans
   cascadeSoft: vec4<f32>,     // F2a-2: x = the sun's size (its angular diameter's tangent), for the penumbrae; F2c: y = 1 with contact shadows; F3c: z = 1 with GTAO
+  viewProj: mat4x4<f32>,      // F2d-3: world → clip as drawn (jittered with TAA), for marching the prepass's depths
+  depthTerms: vec4<f32>,      // F2d-3: xy = view distance from depth (d = y / (z + x)); z = 1 when the depths are readable as the scene shades
 };
 // One spot/point shadow tile (EP8c): world→clip, and params.xy = depth→distance terms.
 struct ShadowTile {
@@ -1789,6 +1791,8 @@ export class WebgpuSceneRenderer implements SceneRenderer {
     private readonly depthGroups: {
       blank: any;
       scene: any;
+      /** The opaque pass after a prepass (F2d-3): the depths bound, the scene behind not. */
+      opaque: any;
       readonly blankTexture: any;
       /** The opaque scene's colour for refraction (I5), the size of the frame, and its 1×1 stand-in. */
       /** The frame-sized targets the groups bind (remade on a resize): the depth, and the refraction copy. */
@@ -1805,9 +1809,9 @@ export class WebgpuSceneRenderer implements SceneRenderer {
       probeSource: LightProbeGrid | null;
       /** The sun's GPU cascades (F2a). */
       readonly cascades: CascadeResources;
-      readonly makeGroups: (atlas: any, probes: any) => { blank: any; scene: any };
+      readonly makeGroups: (atlas: any, probes: any) => { blank: any; scene: any; opaque: any };
       /** The same groups for an anti-aliased frame: its multisampled blank and depth (I1). */
-      readonly makeGroupsMs: (atlas: any, probes: any, blank: any, depth: any) => { blank: any; scene: any };
+      readonly makeGroupsMs: (atlas: any, probes: any, blank: any, depth: any) => { blank: any; scene: any; opaque: any };
     },
     private readonly sampler: any,
     private readonly blankTexture: any,
@@ -1873,6 +1877,8 @@ export class WebgpuSceneRenderer implements SceneRenderer {
   private contact: { uniforms: any; data: Float32Array<ArrayBuffer>; pipelines: [any, any] } | null = null;
   /** Whether this frame's sun takes contact shadows (F2c), for the frame uniform. */
   private frameContact = false;
+  /** The frame's world → clip as drawn and its depth → distance terms, when its depths are readable as it shades (F2d-3). */
+  private frameDepthView: { readonly viewProj: Mat4; readonly terms: readonly [number, number] } | null = null;
   /** Whether this frame's ambient light takes GTAO (F3c), for the frame uniform. */
   private frameGtao = false;
   /**
@@ -2187,7 +2193,8 @@ export class WebgpuSceneRenderer implements SceneRenderer {
         });
         return {
           // After a prepass the opaque surfaces meet their own depths again: less-or-equal lets them through.
-          opaque: pipelineFor(null, true, prepass ? "less-equal" : "less"),
+          // After a prepass the opaque pass only tests its depths (and reads them, F2d-3): it writes none.
+          opaque: pipelineFor(null, !(prepass && hdr), prepass ? "less-equal" : "less"),
           ...(prepass ? { prepass: pipelineFor(null, true, "less", true) } : {}),
           blend: pipelineFor({ color: { srcFactor: "one", dstFactor: "one-minus-src-alpha", operation: "add" }, alpha: { srcFactor: "one", dstFactor: "one-minus-src-alpha", operation: "add" } }, false),
           add: pipelineFor({ color: { srcFactor: "one", dstFactor: "one", operation: "add" }, alpha: { srcFactor: "zero", dstFactor: "one", operation: "add" } }, false),
@@ -2359,6 +2366,8 @@ export class WebgpuSceneRenderer implements SceneRenderer {
         return {
           blank: device.createBindGroup({ layout: depthLayout, entries: [{ binding: 0, resource: blankDepth.createView() }, ...shared, { binding: 7, resource: behindBlank.createView() }] }),
           scene: device.createBindGroup({ layout: depthLayout, entries: [{ binding: 0, resource: sized.depth.createView() }, ...shared, { binding: 7, resource: sized.behind.createView() }] }),
+          // The opaque pass after a prepass (F2d-3): the depths, but not the scene it is still drawing (and may resolve into).
+          opaque: device.createBindGroup({ layout: depthLayout, entries: [{ binding: 0, resource: sized.depth.createView() }, ...shared, { binding: 7, resource: behindBlank.createView() }] }),
         };
       };
       const makeGroupsMs = (atlas: any, probes: any, blank: any, depth: any) => {
@@ -2376,6 +2385,7 @@ export class WebgpuSceneRenderer implements SceneRenderer {
         return {
           blank: device.createBindGroup({ layout: depthLayoutMs, entries: [{ binding: 0, resource: blank.createView() }, ...shared, { binding: 7, resource: behindBlank.createView() }] }),
           scene: device.createBindGroup({ layout: depthLayoutMs, entries: [{ binding: 0, resource: depth.createView() }, ...shared, { binding: 7, resource: sized.behind.createView() }] }),
+          opaque: device.createBindGroup({ layout: depthLayoutMs, entries: [{ binding: 0, resource: depth.createView() }, ...shared, { binding: 7, resource: behindBlank.createView() }] }),
         };
       };
       const depthGroups = {
@@ -2775,6 +2785,9 @@ export class WebgpuSceneRenderer implements SceneRenderer {
     // Modern-tier lights: packed global-first for the WGSL loop, the rest
     // sorted into the view's cells (EP8) so each fragment shades only its own.
     // With GPU tiles (F2d) the lights point at those, and the CPU's tiles aren't uploaded.
+    // With a prepass the scene shades with its depths bound (F2d-3): how to read them.
+    const drawnProjection = temporal ? temporal.projection : draw.projection;
+    this.frameDepthView = this.hdr && prepass ? { viewProj, terms: [drawnProjection[10]!, drawnProjection[14]!] } : null;
     const { ordered } = this.clusterLights(localPlan ? { ...draw, lights: localPlan.lights, localShadows: null } : draw);
     this.uploadLights(packLights(ordered));
     const lightCount = ordered.length;
@@ -3121,6 +3134,8 @@ export class WebgpuSceneRenderer implements SceneRenderer {
       this.addScreenShading(graph, depth, gbuffer, velocity, draw.view, temporal ? temporal.projection : draw.projection, this.frameContact ? draw.lightDirection ?? null : null, ssao !== null, msaa !== null);
     }
 
+    // After a prepass the linear-light renderer's opaque pass holds the depths read-only and binds them (F2d-3).
+    const readDepths = prepass && this.hdr;
     const scenePass = (name: string, from: number, to: number, load: boolean, last: boolean) =>
       graph.addPass(name, "render", (pass) => {
         // The pass that ends the scene resolves the samples (and need not keep them).
@@ -3133,9 +3148,10 @@ export class WebgpuSceneRenderer implements SceneRenderer {
         }
         if (resolving) for (const t of [colour, ...rays]) pass.write(t);
         if (resolveBehind) pass.write(behind!);
-        // After a prepass the opaque pass shades against its depths rather than clearing them.
+        // After a prepass the opaque pass shades against its depths rather than clearing them, and reads them
+        // as it shades (F2d-3), so it holds them read-only.
         if (load || prepass) pass.read(depth, "attachment");
-        if (!load) pass.write(depth);
+        if (!load && !readDepths) pass.write(depth);
         return (ctx) => {
           const attachment = (t: FrameResource, resolved: FrameResource | null) => ({
             view: ctx.texture(t).createView(),
@@ -3149,14 +3165,14 @@ export class WebgpuSceneRenderer implements SceneRenderer {
               { ...attachment(target, resolving ? colour : null), ...(resolveBehind ? { resolveTarget: ctx.texture(behind!).createView() } : {}) },
               ...rayTargets.map((t, k) => attachment(t, resolving ? rays[k]! : null)),
             ],
-            depthStencilAttachment: load
+            depthStencilAttachment: load || readDepths
               ? { view: ctx.texture(depth).createView(), depthReadOnly: true }
               : prepass
                 ? { view: ctx.texture(depth).createView(), depthLoadOp: "load", depthStoreOp: "store" }
                 : { view: ctx.texture(depth).createView(), depthClearValue: 1, depthLoadOp: "clear", depthStoreOp: "store" },
             ...ctx.timing,
           });
-          drawRange(encoded, from, to, load ? groups.scene : groups.blank);
+          drawRange(encoded, from, to, load ? groups.scene : readDepths ? groups.opaque : groups.blank);
           encoded.end();
         };
       });
@@ -3467,7 +3483,7 @@ export class WebgpuSceneRenderer implements SceneRenderer {
    * made on first use, so a renderer that never anti-aliases pays nothing for
    * them. Its colour is a frame-graph transient.
    */
-  private msaa: { depth: any; blank: any; groups: { blank: any; scene: any } } | null = null;
+  private msaa: { depth: any; blank: any; groups: { blank: any; scene: any; opaque: any } } | null = null;
 
   private ensureMsaa(): NonNullable<WebgpuSceneRenderer["msaa"]> {
     if (!this.msaa) {
@@ -3543,6 +3559,11 @@ export class WebgpuSceneRenderer implements SceneRenderer {
       frame.set(sun.cascades.map((c) => c.depth), FRAME_CASCADES + 76);
     }
     frame.set([sun?.softness ?? 0, this.frameContact ? 1 : 0, this.frameGtao ? 1 : 0, 0], FRAME_CASCADES + 80);
+    // The prepass's depths, readable as the opaque pass shades (F2d-3), for the local lights' contact shadows.
+    if (this.frameDepthView) {
+      frame.set(this.frameDepthView.viewProj, FRAME_CASCADES + 84);
+      frame.set([this.frameDepthView.terms[0], this.frameDepthView.terms[1], 1, 0], FRAME_CASCADES + 100);
+    }
     this.device.queue.writeBuffer(buffers.params, 0, frame);
     this.uploadLocalShadows(local);
     return { ordered, globalCount, clusters };

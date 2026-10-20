@@ -410,7 +410,7 @@ Everything else depends on this track. It contains no visible "feature", but its
 - [ ] **F2b. Virtual shadow maps.**
   - A 16K virtual shadow map, paged from a physical pool, with pages marked by the depth buffer and cached between frames for static geometry.
   - This is what makes shadow detail hold at every distance in UE5. It falls back to F2a on Medium and below.
-- [ ] **F2c. Contact shadows.** A screen-space ray march toward each light against the depth prepass, so small-scale contact (feet, foliage, props) grounds every object. It closes EDITOR_PRO P6's deferred item.
+- [x] **F2c. Contact shadows.** A screen-space ray march toward each light against the depth prepass, so small-scale contact (feet, foliage, props) grounds every object. It closes EDITOR_PRO P6's deferred item.
   - **F2c-1, the sun's contact shadows: done.** After the depth prepass, a full-screen pass (`contactShadows.ts`) marches each pixel 0.6 m toward the sun across the prepass's depths in 16 steps, jittered per pixel so TAA resolves the banding.
     - **The hit test.** A step is in shadow when the depth buffer holds a surface in front of it by no more than a thickness (0.2 m, plus the step and a share of the distance). So it neither misses a thin caster nor shadows what is merely behind a wall.
     - **Fades.** The term fades toward the screen's edges, where the depths run out, and from 30 to 50 m, where the cascades already resolve contact.
@@ -418,7 +418,7 @@ Everything else depends on this track. It contains no visible "feature", but its
       - **g** is the contact term, multiplied into the sun's shadow (`shadowFactor`) on opaque and cut-out surfaces, the only ones in the prepass;
       - **r** carries a CPU occlusion buffer through when a caller hands one over, so that slot still serves it.
     - **When it runs.** Only on frames with a prepass and a casting sun; the `aaa` model turns the prepass on.
-  - **F2c-2, contact from spot and point lights: moved to ride with F2d.**
+  - **F2c-2, contact from spot and point lights: done as F2d-3.** With it, F2c is complete.
     - Marching per light in the shading loop needs the prepass's depth bound while the opaque pass draws. That means a read-only depth attachment and its own pipelines.
     - F2d rebuilds those lights' shadows on the GPU anyway.
     - *Tests:*
@@ -427,7 +427,7 @@ Everything else depends on this track. It contains no visible "feature", but its
         - toward the sun, and past the march's reach, the floor stays lit;
         - without the prepass, the floor by the box stays lit.
       - The pass's uniforms turn the sun into view space.
-- [ ] **F2d. Local light shadows on the GPU.** A larger atlas (4096² and up) with priority-based tile allocation by screen size, cached static tiles and PCF. It lifts the cap of 16 tiles.
+- [x] **F2d. Local light shadows on the GPU.** A larger atlas (4096² and up) with priority-based tile allocation by screen size, cached static tiles and PCF. It lifts the cap of 16 tiles.
   - **F2d-1, the GPU atlas, its sized tiles and hardware PCF: done** (`localAtlas.ts`). On `aaa`, spot and point lights' shadows are no longer rasterised on the CPU. The linear-light renderer draws them itself each frame into one 4096² `depth32float` atlas.
     - **Tiles by what they cover.** Each casting light is weighed by how much of the screen its range can cover from the camera: its range over its distance, against half the view's height.
       - It gets 1024² tiles from a coverage of 0.5, 512² from 0.15, and 256² below that: one for a spot, six faces for a point light.
@@ -458,6 +458,16 @@ Everything else depends on this track. It contains no visible "feature", but its
         - a box's shadow stays when the box is taken out under the same still key (the map wasn't drawn again; fails with every tile always drawn);
         - it goes with a new key, comes back with the box as a mover, and goes again the frame after the mover leaves.
       - `shadowCascade.test.ts`: the player hands over the still key, the same the next frame, and no movers.
+  - **F2d-3, contact shadows from spot and point lights: done.** With it, F2d is complete (and F2c with it).
+    - **The prepass's depths, bound as the scene shades.** On a frame with a prepass, the opaque pass now holds its depths read-only: the opaque pipeline writes none, as the prepass already did. It binds them in the group the see-through pass already used.
+      - The frame uniform gains the view-projection as drawn (jittered under TAA) and the depth → distance terms.
+    - **The march.** Each shadowed spot or point light's test (`localShadow`) ends with a march from the shaded point toward the light, 10 steps to 0.4 m (or half the distance to the light), jittered per pixel.
+      - A step is in shadow when the depths hold a surface in front of it by no more than 0.2 m plus half its distance.
+      - Opaque and cut-out surfaces only, as with the sun's.
+    - *Tests:* `local-shadows-gpu.test.ts` (Dawn):
+      - with the prepass, the floor at the foot of a box on the far side from a low point light drops below half its light, though the box isn't given to the tiles as a caster (fails with the march taken out);
+      - past the march's reach, the floor stays lit;
+      - the shadow, cache, contact and GTAO suites pass with the opaque pass's depths read-only.
     - *Tests:*
       - `local-shadows-gpu.test.ts`:
         - lights near, mid-way and far get 1024², 512² and 256² tiles, each pointing at its own first tile;

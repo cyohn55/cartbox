@@ -18586,6 +18586,9 @@ var LOCAL_ATLAS_SIZE = 4096;
 var MAX_GPU_LOCAL_TILES = 64;
 var LOCAL_TILE_SIZES = [1024, 512, 256];
 var LOCAL_TILE_COVERAGE = [0.5, 0.15];
+var LOCAL_CONTACT_LENGTH = 0.4;
+var LOCAL_CONTACT_STEPS = 10;
+var LOCAL_CONTACT_THICKNESS = 0.2;
 var LOCAL_TILE_FLOATS = 24;
 var TileAllocator = class {
   constructor(size) {
@@ -18774,7 +18777,35 @@ fn localShadow(first: i32, lgt: Light, P: vec3<f32>, cosL: f32) -> f32 {
       lit = lit + textureSampleCompareLevel(localDepth, cascadeSamp, base + vec2<f32>(f32(x), f32(y)) / atlas, depthRef);
     }
   }
-  return lit / 9.0;
+  return lit / 9.0 * localContact(P, lgt.d0.xyz);
+}
+// The light's contact shadow (F2d-3): a short march from P toward the light across the prepass's
+// depths, which the scene shades with bound, for what its tile is too coarse to resolve. An opaque or
+// cut-out surface's alone, as only they are in those depths.
+fn localContact(P: vec3<f32>, lp: vec3<f32>) -> f32 {
+  if (frame.depthTerms.z < 0.5 || u.pbr.w > 1.5) { return 1.0; }
+  let toLight = lp - P;
+  let dist = length(toLight);
+  if (dist < 1e-3) { return 1.0; }
+  let L = toLight / dist;
+  let reach = min(${LOCAL_CONTACT_LENGTH}, dist * 0.5);
+  let size = vec2<f32>(textureDimensions(sceneDepth));
+  let jitter = fract(52.9829189 * fract(dot(shadowPixel, vec2<f32>(0.06711056, 0.00583715))));
+  for (var i = 0; i < ${LOCAL_CONTACT_STEPS}; i = i + 1) {
+    let t = 0.01 + (f32(i) + jitter) / ${LOCAL_CONTACT_STEPS}.0 * reach;
+    let c = frame.viewProj * vec4<f32>(P + L * t, 1.0);
+    if (c.w <= 1e-4) { break; }
+    let s = vec2<f32>((c.x / c.w * 0.5 + 0.5) * size.x, (0.5 - c.y / c.w * 0.5) * size.y);
+    if (s.x < 0.0 || s.y < 0.0 || s.x >= size.x || s.y >= size.y) { break; }
+    // Within a pixel and a half of where it started the ray is still over its own surface.
+    if (distance(s, shadowPixel) < 1.5) { continue; }
+    let z = textureLoad(sceneDepth, vec2<i32>(s), 0);
+    let surface = frame.depthTerms.y / (z + frame.depthTerms.x);
+    // In front of the step, by no more than a thickness: an occluder, not a wall it passes behind.
+    let gap = c.w - surface;
+    if (gap > 0.0 && gap < ${LOCAL_CONTACT_THICKNESS} + t * 0.5) { return 0.0; }
+  }
+  return 1.0;
 }
 `
 );
@@ -18782,7 +18813,7 @@ fn localShadow(first: i32, lgt: Light, P: vec3<f32>, cosL: f32) -> f32 {
 // src/render/WebgpuSceneRenderer.ts
 var GBUFFER_FORMAT = "rgba16float";
 var VELOCITY_FORMAT = "rg16float";
-var FRAME_BYTES = 672;
+var FRAME_BYTES = 752;
 var FRAME_CASCADES = 84;
 var FALLBACK_CASCADE_DISTANCE = 80;
 var FALLBACK_CASCADE_SIZE = 2048;
@@ -18984,6 +19015,8 @@ struct Frame {
   cascadeTexel: vec4<f32>,    // F2a: each cascade's texel in world units
   cascadeDepth: vec4<f32>,    // F2a-2: the world distance each cascade's depth 0..1 spans
   cascadeSoft: vec4<f32>,     // F2a-2: x = the sun's size (its angular diameter's tangent), for the penumbrae; F2c: y = 1 with contact shadows; F3c: z = 1 with GTAO
+  viewProj: mat4x4<f32>,      // F2d-3: world \u2192 clip as drawn (jittered with TAA), for marching the prepass's depths
+  depthTerms: vec4<f32>,      // F2d-3: xy = view distance from depth (d = y / (z + x)); z = 1 when the depths are readable as the scene shades
 };
 // One spot/point shadow tile (EP8c): world\u2192clip, and params.xy = depth\u2192distance terms.
 struct ShadowTile {
@@ -20245,6 +20278,8 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     this.contact = null;
     /** Whether this frame's sun takes contact shadows (F2c), for the frame uniform. */
     this.frameContact = false;
+    /** The frame's world → clip as drawn and its depth → distance terms, when its depths are readable as it shades (F2d-3). */
+    this.frameDepthView = null;
     /** Whether this frame's ambient light takes GTAO (F3c), for the frame uniform. */
     this.frameGtao = false;
     /**
@@ -20595,7 +20630,8 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
         });
         return {
           // After a prepass the opaque surfaces meet their own depths again: less-or-equal lets them through.
-          opaque: pipelineFor(null, true, prepass ? "less-equal" : "less"),
+          // After a prepass the opaque pass only tests its depths (and reads them, F2d-3): it writes none.
+          opaque: pipelineFor(null, !prepass, prepass ? "less-equal" : "less"),
           ...prepass ? { prepass: pipelineFor(null, true, "less", true) } : {},
           blend: pipelineFor({ color: { srcFactor: "one", dstFactor: "one-minus-src-alpha", operation: "add" }, alpha: { srcFactor: "one", dstFactor: "one-minus-src-alpha", operation: "add" } }, false),
           add: pipelineFor({ color: { srcFactor: "one", dstFactor: "one", operation: "add" }, alpha: { srcFactor: "zero", dstFactor: "one", operation: "add" } }, false)
@@ -21082,6 +21118,8 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     this.frameContact = this.hdr && prepass && this.frameCascades !== null && Boolean(draw.lightDirection);
     this.frameGtao = this.hdr && prepass && draw.ambientOcclusion !== false;
     this.bindSsao(ssao, this.frameContact || this.frameGtao);
+    const drawnProjection = temporal ? temporal.projection : draw.projection;
+    this.frameDepthView = this.hdr && prepass ? { viewProj, terms: [drawnProjection[10], drawnProjection[14]] } : null;
     const { ordered } = this.clusterLights(localPlan ? { ...draw, lights: localPlan.lights, localShadows: null } : draw);
     this.uploadLights(packLights(ordered));
     const lightCount = ordered.length;
@@ -21392,7 +21430,7 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
       if (resolving) for (const t of [colour, ...rays]) pass.write(t);
       if (resolveBehind) pass.write(behind);
       if (load || prepass) pass.read(depth, "attachment");
-      if (!load) pass.write(depth);
+      if (!load && !prepass) pass.write(depth);
       return (ctx) => {
         const attachment = (t, resolved) => ({
           view: ctx.texture(t).createView(),
@@ -21406,10 +21444,10 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
             { ...attachment(target, resolving ? colour : null), ...resolveBehind ? { resolveTarget: ctx.texture(behind).createView() } : {} },
             ...rayTargets.map((t, k) => attachment(t, resolving ? rays[k] : null))
           ],
-          depthStencilAttachment: load ? { view: ctx.texture(depth).createView(), depthReadOnly: true } : prepass ? { view: ctx.texture(depth).createView(), depthLoadOp: "load", depthStoreOp: "store" } : { view: ctx.texture(depth).createView(), depthClearValue: 1, depthLoadOp: "clear", depthStoreOp: "store" },
+          depthStencilAttachment: load || prepass ? { view: ctx.texture(depth).createView(), depthReadOnly: true } : { view: ctx.texture(depth).createView(), depthClearValue: 1, depthLoadOp: "clear", depthStoreOp: "store" },
           ...ctx.timing
         });
-        drawRange(encoded, from, to, load ? groups.scene : groups.blank);
+        drawRange(encoded, from, to, load || prepass ? groups.scene : groups.blank);
         encoded.end();
       };
     });
@@ -21728,6 +21766,10 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
       frame.set(sun.cascades.map((c) => c.depth), FRAME_CASCADES + 76);
     }
     frame.set([sun?.softness ?? 0, this.frameContact ? 1 : 0, this.frameGtao ? 1 : 0, 0], FRAME_CASCADES + 80);
+    if (this.frameDepthView) {
+      frame.set(this.frameDepthView.viewProj, FRAME_CASCADES + 84);
+      frame.set([this.frameDepthView.terms[0], this.frameDepthView.terms[1], 1, 0], FRAME_CASCADES + 100);
+    }
     this.device.queue.writeBuffer(buffers.params, 0, frame);
     this.uploadLocalShadows(local);
     return { ordered, globalCount, clusters };
