@@ -514,4 +514,25 @@ describe.skipIf(!device)("linear HDR (AAA_FIDELITY_ROADMAP.md F0b), on a real de
     a.destroy();
     b.destroy();
   });
+
+  it("shows the painted sky as painted under the tone map too, whatever the exposure (F11a)", async () => {
+    // Painted for the display: the light behind it is what the curve takes back to the painting.
+    const map = panorama();
+    const byte = new GpuPresenter(device, W, H);
+    const linear = new GpuPresenter(device, W, H, { hdr: true });
+    const a = target();
+    const b = target();
+    byte.present({ base: { kind: "sky", sky: sky(map) }, scene: null }, a, "rgba8unorm");
+    const painted = await readTexture(a, W, H);
+    for (const exposure of [1.1, 0.4, 3]) {
+      linear.present({ base: { kind: "sky", sky: sky(map) }, scene: null, tonemap: { exposure } }, b, "rgba8unorm");
+      const d = difference(await readTexture(b, W, H), painted);
+      expect(d.max).toBeLessThanOrEqual(2);
+      expect(d.mean).toBeLessThan(0.5);
+    }
+    byte.dispose();
+    linear.dispose();
+    a.destroy();
+    b.destroy();
+  });
 });

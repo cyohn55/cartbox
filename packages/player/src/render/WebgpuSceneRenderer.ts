@@ -255,7 +255,9 @@ function wgslDisplay(v: string, hdr = false): string {
     return /* wgsl */ `    if (u.fogParams.x > 0.5) {
       let d = max(0.0, in.eyeDepth - u.fogParams.y);
       var f = min(u.fogParams.z, 1.0 - exp(-d * u.fog.w));
-      var fc = toLinear(u.fog.rgb);
+      // The fog's colour is the display's (F11a): mixed into what the display shows, as the byte path
+      // mixes it, then turned back into light. Mixed in linear light, it lifted the distance far more.
+      var fc = u.fog.rgb;
       if (u.fogParams.w > 0.5) {
         let c = u.fogCam.xyz;
         let ray = in.worldPos - c;
@@ -271,10 +273,10 @@ function wgslDisplay(v: string, hdr = false): string {
         f = 1.0 - (1.0 - f) * exp(-tau);
         if (u.fogHeight.w > 0.0) {
           let cosv = max(0.0, dot(ray, u.light.xyz) / (max(len, 1e-6) * max(length(u.light.xyz), 1e-6)));
-          fc = fc + toLinear(u.fogGlow.rgb) * (u.fogHeight.w * pow(cosv, ${FOG_GLOW_POWER.toFixed(1)}));
+          fc = min(vec3<f32>(1.0), fc + u.fogGlow.rgb * (u.fogHeight.w * pow(cosv, ${FOG_GLOW_POWER.toFixed(1)})));
         }
       }
-      ${v} = mix(max(${v}, vec3<f32>(0.0)), fc, f);
+      ${v} = mixAsShown(${v}, fc, f);
     }`;
   }
   return /* wgsl */ `    if (u.tonemap.x > 0.5) {
@@ -915,6 +917,13 @@ fn lightOf(d: vec3<f32>) -> vec3<f32> {
   let y = toLinear(d);
   if (u.tonemap.x < 0.5) { return y; }
   return vec3<f32>(acesInverse(y.r), acesInverse(y.g), acesInverse(y.b)) / max(u.tonemap.y, 1e-6);
+}
+// Light x moved toward display colour d by t as the display shows the two: exactly that mix under the
+// curve's white, x itself at t = 0, and light past white keeping what it has over it.
+fn mixAsShown(x: vec3<f32>, d: vec3<f32>, t: f32) -> vec3<f32> {
+  let v = max(x, vec3<f32>(0.0));
+  let s = shownOf(v);
+  return max(v + lightOf(mix(s, d, t)) - lightOf(s), vec3<f32>(0.0));
 }
 ` : ""}
 // Wind (B6): windOffset in wind.ts, term for term — how far a vertex at (x, z) in its

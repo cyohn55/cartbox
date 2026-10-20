@@ -1,5 +1,7 @@
 /**
- * A see-through tint in linear light (AAA_FIDELITY_ROADMAP.md F11a): a
+ * Colours authored for the display, in linear light (AAA_FIDELITY_ROADMAP.md
+ * F11a). Fog's colour mixes into what the display shows, as on the byte path,
+ * so it lifts the distance as much as it did there and no more. And a
  * refracting surface's colour is authored for the display, so on the AAA tier
  * it mixes with what is behind it as the display shows the two (exposed,
  * through the curve, sRGB-encoded) and back, as the byte path mixes them. Mixed
@@ -78,7 +80,7 @@ const bed = { mesh: pane({ baseColorFactor: [0.8, 0.7, 0.5, 1] }), model: compos
 const over = (material: Record<string, unknown>): MeshSceneInstance => ({ mesh: pane(material), model: composeModelMatrix([0, 0, 0], [0, 0, 0], [0.8, 0.8, 1]) });
 
 /** The frame's centre pixel (rgb), rendered linear (half floats) or in bytes (0–1). */
-async function centre(hdr: boolean, instances: MeshSceneInstance[]): Promise<number[]> {
+async function centre(hdr: boolean, instances: MeshSceneInstance[], extra: Record<string, unknown> = {}): Promise<number[]> {
   const renderer = (await WebgpuSceneRenderer.create(device, R, R, undefined, { hdr } as any))!;
   device.pushErrorScope("validation");
   const texture = renderer.renderToTexture!(instances, {
@@ -89,6 +91,7 @@ async function centre(hdr: boolean, instances: MeshSceneInstance[]): Promise<num
     ambient: 0.5,
     lightDirection: [0.3, 0.5, 1],
     tonemap: { exposure: EXPOSURE },
+    ...extra,
   } as any);
   const error = await settled(device.popErrorScope());
   expect(error ? String((error as any).message ?? error) : null).toBeNull();
@@ -133,5 +136,31 @@ describe.skipIf(!device)("a refracting tint over the scene, in linear light", { 
     expect(bytes[2]!).toBeGreaterThan(bytes[0]!);
     expect(shownHdr[2]!).toBeGreaterThan(shownHdr[0]!);
     expect(shownHdr[1]!).toBeGreaterThan(shownHdr[0]!);
+  });
+});
+
+describe.skipIf(!device)("fog in linear light", { timeout: 60_000 }, () => {
+  it("mixes its colour into what the display shows, as the byte path does, not into the light", async () => {
+    const fogColour: [number, number, number] = [0.72, 0.82, 0.92];
+    // The bed 3.5 m off: past the start, and dense enough that the fog stops at its cap.
+    const fog = { color: fogColour, density: 5, start: 0.5, max: 0.4 };
+    const clear = await centre(true, [bed]);
+    const fogged = await centre(true, [bed], { fog });
+    for (let k = 0; k < 3; k += 1) {
+      const want = light(0.6 * shown(clear[k]!, EXPOSURE) + 0.4 * fogColour[k]!, EXPOSURE);
+      expect(Math.abs(fogged[k]! - want) / want).toBeLessThan(0.03);
+    }
+    // Mixed in light, the pale fog weighed far more: the far sand came out lighter than the byte path shows it.
+    const linear = 0.6 * clear[2]! + 0.4 * decode(fogColour[2]!);
+    expect(linear / fogged[2]!).toBeGreaterThan(1.1);
+  });
+
+  it("leaves light past white what it has over it: a glow in thin fog still glows", async () => {
+    const glow = { mesh: pane({ baseColorFactor: [0, 0, 0, 1], emissiveFactor: [8, 8, 8] }), model: bed.model };
+    const thin = { color: [0.72, 0.82, 0.92], density: 5, start: 0.5, max: 0.05 };
+    const clear = await centre(true, [glow]);
+    const fogged = await centre(true, [glow], { fog: thin });
+    expect(clear[0]!).toBeGreaterThan(5);
+    expect(fogged[0]!).toBeGreaterThan(clear[0]! * 0.7);
   });
 });

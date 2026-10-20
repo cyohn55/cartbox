@@ -18111,7 +18111,9 @@ function wgslDisplay(v, hdr = false) {
       `    if (u.fogParams.x > 0.5) {
       let d = max(0.0, in.eyeDepth - u.fogParams.y);
       var f = min(u.fogParams.z, 1.0 - exp(-d * u.fog.w));
-      var fc = toLinear(u.fog.rgb);
+      // The fog's colour is the display's (F11a): mixed into what the display shows, as the byte path
+      // mixes it, then turned back into light. Mixed in linear light, it lifted the distance far more.
+      var fc = u.fog.rgb;
       if (u.fogParams.w > 0.5) {
         let c = u.fogCam.xyz;
         let ray = in.worldPos - c;
@@ -18127,10 +18129,10 @@ function wgslDisplay(v, hdr = false) {
         f = 1.0 - (1.0 - f) * exp(-tau);
         if (u.fogHeight.w > 0.0) {
           let cosv = max(0.0, dot(ray, u.light.xyz) / (max(len, 1e-6) * max(length(u.light.xyz), 1e-6)));
-          fc = fc + toLinear(u.fogGlow.rgb) * (u.fogHeight.w * pow(cosv, ${FOG_GLOW_POWER2.toFixed(1)}));
+          fc = min(vec3<f32>(1.0), fc + u.fogGlow.rgb * (u.fogHeight.w * pow(cosv, ${FOG_GLOW_POWER2.toFixed(1)})));
         }
       }
-      ${v} = mix(max(${v}, vec3<f32>(0.0)), fc, f);
+      ${v} = mixAsShown(${v}, fc, f);
     }`
     );
   }
@@ -18765,6 +18767,13 @@ fn lightOf(d: vec3<f32>) -> vec3<f32> {
   let y = toLinear(d);
   if (u.tonemap.x < 0.5) { return y; }
   return vec3<f32>(acesInverse(y.r), acesInverse(y.g), acesInverse(y.b)) / max(u.tonemap.y, 1e-6);
+}
+// Light x moved toward display colour d by t as the display shows the two: exactly that mix under the
+// curve's white, x itself at t = 0, and light past white keeping what it has over it.
+fn mixAsShown(x: vec3<f32>, d: vec3<f32>, t: f32) -> vec3<f32> {
+  let v = max(x, vec3<f32>(0.0));
+  let s = shownOf(v);
+  return max(v + lightOf(mix(s, d, t)) - lightOf(s), vec3<f32>(0.0));
 }
 ` : ""}
 // Wind (B6): windOffset in wind.ts, term for term \u2014 how far a vertex at (x, z) in its
@@ -21856,7 +21865,7 @@ var USAGE3 = {
 var STAGE_FRAGMENT2 = 2;
 var STAGE_COMPUTE = 4;
 var SKY_UNIFORM_FLOATS = 4 * (6 + 2 * MAX_CLOUD_LAYERS);
-function packSkyUniforms(sky, width, height, out = new Float32Array(SKY_UNIFORM_FLOATS), hdr = false) {
+function packSkyUniforms(sky, width, height, out = new Float32Array(SKY_UNIFORM_FLOATS), hdr = false, exposure = null) {
   const v = sky.view;
   const p = sky.projection;
   const layers = Math.min(MAX_CLOUD_LAYERS, sky.clouds.length);
@@ -21867,7 +21876,7 @@ function packSkyUniforms(sky, width, height, out = new Float32Array(SKY_UNIFORM_
   const sl = sun ? Math.hypot(sun.direction[0], sun.direction[1], sun.direction[2]) || 1 : 1;
   out.set(sun ? [sun.direction[0] / sl, sun.direction[1] / sl, sun.direction[2] / sl, 1] : [0, 0, 0, 0], 12);
   out.set(sun ? [sun.color[0], sun.color[1], sun.color[2], sky.time] : [0, 0, 0, sky.time], 16);
-  out.set([width, height, hdr ? 1 : 0, 0], 20);
+  out.set([width, height, hdr ? 1 : 0, hdr && exposure !== null && exposure > 0 ? exposure : 0], 20);
   for (let i = 0; i < MAX_CLOUD_LAYERS; i += 1) {
     const layer = i < layers ? sky.clouds[i].layer : null;
     out.set(layer ? [layer.scale, layer.wind[0], layer.wind[1], layer.opacity] : [0, 0, 0, 0], 24 + i * 4);
@@ -21941,6 +21950,13 @@ fn toSrgb(c: vec3f) -> vec3f {
 fn acesFilmic(x: vec3f) -> vec3f {
   let v = max(x, vec3f(0.0));
   return clamp((v * (2.51 * v + 0.03)) / (v * (2.43 * v + 0.59) + 0.14), vec3f(0.0), vec3f(1.0));
+}
+// acesFilmic's inverse, under its white: the light it maps to y.
+fn filmicInverse(y: vec3f) -> vec3f {
+  let v = clamp(y, vec3f(0.0), vec3f(1.0));
+  let a = 2.51 - 2.43 * v;
+  let b = 0.03 - 0.59 * v;
+  return (-b + sqrt(b * b + 4.0 * a * 0.14 * v)) / (2.0 * a);
 }
 `
 );
@@ -22023,8 +22039,13 @@ fn coreGlow(c: f32) -> f32 {
       rgb = clamp(rgb, vec3f(0.0), vec3f(1.0));
     }
   }
-  // A linear frame (F0b) takes the painted sky as the light it shows.
-  if (s.size.z > 0.5) { rgb = toLinear(rgb); }
+  // A linear frame (F0b) takes the painted sky as the light it shows. Painted for the display, it is
+  // the light that shows as painted (F11a): through the curve's inverse, under the frame's exposure,
+  // as the byte path shows it, rather than tone-mapped a second time.
+  if (s.size.z > 0.5) {
+    rgb = toLinear(rgb);
+    if (s.size.w > 0.0) { rgb = filmicInverse(rgb) / s.size.w; }
+  }
   return vec4f(rgb, 1.0);
 }
 `
@@ -22419,7 +22440,7 @@ var GpuPresenter = class {
       graph.addPass("sky", "render", (pass) => {
         pass.write(skyTexture);
         return (ctx) => {
-          device.queue.writeBuffer(this.uniforms.sky, 0, packSkyUniforms(sky, width, height, this.data.sky, this.hdr));
+          device.queue.writeBuffer(this.uniforms.sky, 0, packSkyUniforms(sky, width, height, this.data.sky, this.hdr, frame.tonemap ? frame.tonemap.exposure : null));
           this.fullScreen(
             ctx.encoder,
             "sky",
