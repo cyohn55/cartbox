@@ -59,11 +59,12 @@ export interface SceneLighting {
   /** The tone-mapping curve on the AAA tier (F4d); absent is filmic, every other tier's. */
   readonly tonemapper?: ToneMapOperator;
   /**
-   * The AAA tier maps its curve physically, on the light, for a rig lit in
-   * physical units (F11a-5). Absent, it maps as the rig was authored: on the
-   * encoded light, as every other tier's shader does, so the scene shows as tuned.
+   * The AAA tier maps its curve as the rig was authored (F11a-5): on the
+   * encoded light, as every other tier's shader does, rather than physically on
+   * the light (absent). Fully lit surfaces show as tuned, but on top of linear
+   * lighting it lifts the shade further than the byte path does.
    */
-  readonly physicalCurve?: boolean;
+  readonly authoredCurve?: boolean;
   /** Cast a directional shadow from the first directional (key) light. */
   readonly shadows: boolean;
   readonly lights: readonly SceneLight[];
@@ -213,7 +214,7 @@ export function parseSceneLighting(raw: unknown): SceneLighting | null {
     exposure: typeof record.exposure === "number" && record.exposure > 0 ? record.exposure : base.exposure,
     tonemap: typeof record.tonemap === "boolean" ? record.tonemap : base.tonemap,
     ...(record.tonemapper === "aces" || record.tonemapper === "agx" || record.tonemapper === "neutral" ? { tonemapper: record.tonemapper } : {}),
-    ...(record.physicalCurve === true ? { physicalCurve: true } : {}),
+    ...(record.authoredCurve === true ? { authoredCurve: true } : {}),
     shadows: typeof record.shadows === "boolean" ? record.shadows : base.shadows,
     lights,
     ...(sky ? { sky } : {}),
@@ -480,7 +481,7 @@ export function defaultSunShafts(): SunShafts {
 /** Patch the top-level scalar/flag fields (ambient, exposure, tonemap, shadows). */
 export function patchSceneLighting(
   lighting: SceneLighting,
-  patch: Partial<Pick<SceneLighting, "ambient" | "exposure" | "tonemap" | "tonemapper" | "physicalCurve" | "shadows" | "wind" | "softShadows">>,
+  patch: Partial<Pick<SceneLighting, "ambient" | "exposure" | "tonemap" | "tonemapper" | "authoredCurve" | "shadows" | "wind" | "softShadows">>,
 ): SceneLighting {
   return { ...lighting, ...patch };
 }
@@ -581,7 +582,7 @@ export function sceneLightingTonemap(lighting: SceneLighting): ToneMap | null {
   return {
     exposure: lighting.exposure,
     ...(lighting.tonemapper && lighting.tonemapper !== "filmic" ? { operator: lighting.tonemapper } : {}),
-    ...(lighting.physicalCurve ? {} : { authored: true }),
+    ...(lighting.authoredCurve ? { authored: true } : {}),
   };
 }
 

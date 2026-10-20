@@ -694,17 +694,19 @@ Everything else depends on this track. It contains no visible "feature", but its
         - The frame runs as one compose pass and the post stack.
       - `grading.test.ts`: lens dirt lights both blooms.
       - The F4d graph tests (`post-in-graph`, `lens-fx`, `tone-mappers`) now ask for the physical bloom.
-  - **F11a-5, the tone curve as authored: done.** What was left between the AAA tier and the byte path was the tone curve itself, not the light.
-    - **The byte path's shader maps its display-space shading.** For a fully lit surface it shows `aces(1.1 · v)` on sRGB values. The AAA tier mapped linear light, `encode(aces(1.1 · x))`, which is the physically right curve but not the one the maps were tuned under.
-      - On a real scene renderer, a fully lit 0.3 surface showed 118 on the byte path and 96 on the AAA tier; a 0.8 one showed 196 and 218. In shade the gap was wider still: ambient alone, 88 against 44.
-      - So the AAA frames were darker in the shade and midtones and paler in the highlights, which is the remaining mean luminance gap F11a-4 left.
-    - **As authored, the curve maps the light's encoding** (`toneMappers.ts`, `shownWith`): `aces(exposure · encode(x))`. A fully lit surface shows as the byte path shows it; the lighting itself stays linear, so a half-lit surface still reads as linear light does.
-      - Everything that models how a pixel shows uses the same rule: the presenter's tone map and its HDR-display output, the bloom's gather (F11a-4), the painted sky's inverse (F11a-3), the lens pass's bright pass (F4e-2), and the scene renderer's fog and see-through mixes (F11a-2, F11a-3).
+  - **F11a-5, the tone curve as authored, as an option: done.** It traced what F11a-4 left to the tone curve, tried the byte path's curve as the default, and kept it as a switch when the captures showed it trades one gap for another.
+    - **The byte path's shader maps its display-space shading.** For a fully lit surface it shows `aces(1.1 · v)` on sRGB values. The AAA tier maps linear light, `encode(aces(1.1 · x))`, which is the physically right curve but not the one the maps were tuned under.
+      - On a real scene renderer, a fully lit 0.3 surface showed 118 on the byte path and 96 on the AAA tier; a 0.8 one showed 196 and 218. In ambient alone the gap was 88 against 44.
+    - **As authored, the curve maps the light's encoding** (`toneMappers.ts`, `shownWith`): `aces(exposure · encode(x))`. A fully lit surface then shows as the byte path shows it (128, 166 and 197 for those surfaces); the lighting itself stays linear.
+      - Everything that models how a pixel shows follows the same rule: the presenter's tone map and its HDR-display output, the bloom's gather (F11a-4), the painted sky's inverse (F11a-3), the lens pass's bright pass (F4e-2), and the scene renderer's fog and see-through mixes (F11a-2, F11a-3).
       - On an HDR display the authored curve's white moves to the headroom's encoding, with grey kept where SDR shows it (`extendedExposure`'s authored domain).
-    - **The physical curve is kept for physical light.** A rig's *AAA curve* setting (*As authored* or *Physical*, `SceneLighting.physicalCurve`) picks it, for a rig lit in physical units. As authored is the default, so every map shows as tuned.
-    - **What it does to the captures.** CAPTURE_NUMBERS
+    - **Why it is not the default.** Linear lighting already makes partial light read brighter once encoded (half the light shows at about 0.75 of the colour, not 0.5); the authored curve then lifts it again.
+      - Lockout's overview: mean luminance 0.55 to 0.60 (the byte path's is 0.60), but contrast 0.258 to 0.223 (the byte path's is 0.262), with the shade (0.2 to 0.4 on the byte path) going from 0.03 dark to 0.05 bright.
+      - Beaver Creek's overview: mean 0.64 to 0.72 (the byte path's is 0.66), contrast 0.295 to 0.237 (0.319), and its shade 0.23 too bright: the canyon reads washed out.
+      - So the rig's *AAA curve* setting (`SceneLighting.authoredCurve`) defaults to *Physical*; *As authored* is there for a scene that wants its lit surfaces exactly as tuned.
+    - **What is left is in the light, not the curve.** Lockout's sunlit surfaces (0.8 to 0.9 on the byte path) are about 0.07 dark under either curve. That is the next thing to trace: the direct light's energy on the AAA path against the byte path's.
     - *Tests:*
-      - `curve-as-authored.test.ts`: the authored curve shows a fully lit surface exactly as the byte path's shader does; grey holds on an HDR display in both domains; the rig maps as authored unless it asks for the physical curve, and the choice survives a save. On Dawn, lit 0.3, 0.5 and 0.8 surfaces show within 12 levels of the byte path (the rest is the AAA tier's BRDF), where the physical curve was more than 2.5 times as far off.
+      - `curve-as-authored.test.ts`: the authored curve shows a fully lit surface exactly as the byte path's shader does; grey holds on an HDR display in both domains; the rig maps physically unless it asks for the authored curve, and the choice survives a save. On Dawn, lit 0.3, 0.5 and 0.8 surfaces show within 12 levels of the byte path under the authored curve (the rest is the AAA tier's BRDF), where the physical curve is more than 2.5 times as far off.
       - `gpu-present.test.ts`: the painted sky shows as painted under either curve, at exposures 0.4, 1.1 and 3.
       - `see-through-hdr.test.ts`: fog mixes as the display shows it under the authored curve.
       - `bloom-as-authored.test.ts`: the bloom matches the byte path's under either curve.

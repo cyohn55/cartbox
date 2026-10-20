@@ -1,12 +1,12 @@
 /**
  * The AAA tier's tone curve as the maps were authored (AAA_FIDELITY_ROADMAP.md
  * F11a-5). The byte path's shader maps its display-space shading through the
- * curve: `aces(exposure · v)` on sRGB values. The AAA tier mapped linear light:
+ * curve: `aces(exposure · v)` on sRGB values. The AAA tier maps linear light:
  * `encode(aces(exposure · x))`, which crushes what the byte path lifted (a 0.3
- * surface showed 0.33 where it was tuned to show 0.47). As authored, the curve
- * maps the light's encoding, `aces(exposure · encode(x))`, so a surface shows
- * as tuned while its lighting stays linear; a rig can still ask for the
- * physical curve.
+ * surface shows 0.33 where it was tuned to show 0.47). A rig can ask for the
+ * curve as authored, on the light's encoding, `aces(exposure · encode(x))`, so
+ * a fully lit surface shows as tuned while its lighting stays linear. It is
+ * not the default: on linear lighting it lifts the shade past the byte path's.
  */
 
 import { describe, expect, it } from "vitest";
@@ -36,13 +36,13 @@ describe("the curve's two domains", () => {
     expect(s).not.toBeCloseTo(extendedExposure("filmic", 3), 2);
   });
 
-  it("is the rig's unless it asks for the physical curve, and survives a save", () => {
+  it("is physical unless the rig asks for it as authored, and the choice survives a save", () => {
     const rig = parseSceneLighting({ tonemap: true, exposure: 1.1 }) as SceneLighting;
-    expect(sceneLightingTonemap(rig)).toEqual({ exposure: 1.1, authored: true });
-    const physical = parseSceneLighting(JSON.parse(JSON.stringify({ ...rig, physicalCurve: true }))) as SceneLighting;
-    expect(physical.physicalCurve).toBe(true);
-    expect(sceneLightingTonemap(physical)).toEqual({ exposure: 1.1 });
-    expect(sceneLightingTonemap({ ...rig, tonemap: false })).toBeNull();
+    expect(sceneLightingTonemap(rig)).toEqual({ exposure: 1.1 });
+    const authored = parseSceneLighting(JSON.parse(JSON.stringify({ ...rig, authoredCurve: true }))) as SceneLighting;
+    expect(authored.authoredCurve).toBe(true);
+    expect(sceneLightingTonemap(authored)).toEqual({ exposure: 1.1, authored: true });
+    expect(sceneLightingTonemap({ ...authored, tonemap: false })).toBeNull();
   });
 });
 

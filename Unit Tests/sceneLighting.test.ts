@@ -97,9 +97,9 @@ describe("render-input mappings", () => {
     expect(env.intensity).toBe(lit.environment.intensity);
 
     expect(sceneLightingTonemap(lit)).toBeNull(); // off by default
-    // The AAA tier maps the curve as authored unless the rig asks for the physical one (F11a-5).
-    expect(sceneLightingTonemap(patchSceneLighting(lit, { tonemap: true, exposure: 1.5 }))).toEqual({ exposure: 1.5, authored: true });
-    expect(sceneLightingTonemap(patchSceneLighting(lit, { tonemap: true, exposure: 1.5, physicalCurve: true }))).toEqual({ exposure: 1.5 });
+    expect(sceneLightingTonemap(patchSceneLighting(lit, { tonemap: true, exposure: 1.5 }))).toEqual({ exposure: 1.5 });
+    // The AAA tier maps the curve as authored only when the rig asks (F11a-5).
+    expect(sceneLightingTonemap(patchSceneLighting(lit, { tonemap: true, exposure: 1.5, authoredCurve: true }))).toEqual({ exposure: 1.5, authored: true });
 
     expect(sceneLightingKeyDirection(lit)).toEqual([0.4, 0.8, 0.6]);
     expect(sceneLightingKeyDirection(removeSceneLight(lit, 0))).toBeUndefined();
