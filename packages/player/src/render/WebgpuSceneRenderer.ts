@@ -92,7 +92,9 @@ import {
   computeSmoothNormals,
   lightProbeTexels,
   type LightProbeGrid,
+  LOCAL_SHADOW_BIAS,
   LOCAL_SHADOW_GRID,
+  LOCAL_SHADOW_SLOPE_BIAS,
   LOCAL_SHADOW_TILE,
   MAX_LOCAL_SHADOW_TILES,
   NEAR_CASCADE_BLEND,
@@ -137,6 +139,7 @@ import { REACTIVE_MASK_WGSL, TEMPORAL_SHARPEN_WGSL, TemporalState, hdrTemporalSh
 import { reflectionShaderWgsl, reflectionUniforms } from "./reflections.js";
 import { CONTACT_UNIFORM_FLOATS, SCREEN_SHADING_FORMAT, contactShaderWgsl, contactUniforms } from "./contactShadows.js";
 import { GTAO_UNIFORM_FLOATS, gtaoShaderWgsl, gtaoTemporalWgsl, gtaoUniforms } from "./gtao.js";
+import { LOCAL_ATLAS_SIZE, LOCAL_SHADOW_GPU_WGSL, LOCAL_TILE_FLOATS, MAX_GPU_LOCAL_TILES, packLocalTiles, planLocalTiles, type LocalTile } from "./localAtlas.js";
 import type { RenderStats } from "../debug/profiler.js";
 import {
   UNIFORM_FLOATS,
@@ -178,6 +181,10 @@ interface CascadeResources {
   readonly pipeline: any;
   /** Cut-out casters', dropping what their material does (F2a-2); null with `pipeline`. */
   readonly cutPipeline: any;
+  /** The spot/point lights' tile views (F2d), one a tile, and the depth32float pipelines that draw them. */
+  readonly localViews: readonly { readonly buffer: any; readonly group: any }[];
+  readonly localPipeline: any;
+  readonly localCutPipeline: any;
 }
 
 /** One shader variant's pipelines: opaque, blended and added (EP6). */
@@ -428,6 +435,7 @@ struct Frame {
 struct ShadowTile {
   mvp: mat4x4<f32>,
   params: vec4<f32>,
+  rect: vec4<f32>, // F2d: the tile's x, y and size in the atlas (texels), on the linear-light renderer
 };
 @group(0) @binding(0) var<uniform> u: Uniforms;
 @group(0) @binding(1) var samp: sampler;
@@ -493,7 +501,7 @@ struct Probe {
 @group(1) @binding(2) var<storage, read> clusterIndex: array<u32>;
 @group(1) @binding(3) var<uniform> frame: Frame;
 // Spot and point light shadows (EP8c): the tile atlas and each tile's view.
-@group(1) @binding(4) var localAtlas: texture_2d<f32>;
+${hdr ? "// The spot/point lights' depth atlas, drawn on the GPU (F2d).\n@group(1) @binding(4) var localDepth: texture_depth_2d;" : "@group(1) @binding(4) var localAtlas: texture_2d<f32>;"}
 @group(1) @binding(5) var<storage, read> shadowTiles: array<ShadowTile>;
 // Light probes (EP9): the grid as a 3D texture, face f's probes at x = f · nx + probe x.
 @group(1) @binding(6) var probeGrid: texture_3d<f32>;
@@ -722,7 +730,9 @@ fn finishAlpha(rgb: vec3<f32>, a: f32) -> vec4<f32> {
   if (u.pbr.w > 1.5) { return vec4<f32>(c * a, a); }
   return vec4<f32>(c, 1.0);
 }
-// A spot/point light's shadow at P (mirrors localShadowVisibility): the tile
+${hdr
+  ? LOCAL_SHADOW_GPU_WGSL
+  : `// A spot/point light's shadow at P (mirrors localShadowVisibility): the tile
 // that sees it (a point light's face by dominant axis), a 2×2 PCF of distance
 // compares against a slope-scaled world bias.
 fn localTap(fx: f32, fy: f32, ox: f32, oy: f32, own: f32, a: f32, b: f32) -> f32 {
@@ -758,6 +768,7 @@ fn localShadow(first: i32, lgt: Light, P: vec3<f32>, cosL: f32) -> f32 {
         + localTap(sx - 0.5, sy + 0.5, ox, oy, own, t.params.x, t.params.y) + localTap(sx + 0.5, sy + 0.5, ox, oy, own, t.params.x, t.params.y)) * 0.25;
 }
 
+`}
 // One ambient-cube face of the probe grid at grid cell i + fraction f (trilinear).
 fn probeFace(face: i32, i: vec3<i32>, f: vec3<f32>) -> vec3<f32> {
   let o = i + vec3<i32>(face * i32(frame.probeCount.x + 0.5), 0, 0);
@@ -2098,7 +2109,8 @@ export class WebgpuSceneRenderer implements SceneRenderer {
         { binding: 1, visibility: SHADER_STAGE_FRAGMENT, buffer: { type: "read-only-storage" } },
         { binding: 2, visibility: SHADER_STAGE_FRAGMENT, buffer: { type: "read-only-storage" } },
         { binding: 3, visibility: SHADER_STAGE_FRAGMENT, buffer: { type: "uniform" } },
-        { binding: 4, visibility: SHADER_STAGE_FRAGMENT, texture: { sampleType: "unfilterable-float" } },
+        // The spot/point shadow atlas: the CPU's r32float distances, or the linear-light renderer's GPU depths (F2d).
+        { binding: 4, visibility: SHADER_STAGE_FRAGMENT, texture: hdr ? { sampleType: "depth" } : { sampleType: "unfilterable-float" } },
         { binding: 5, visibility: SHADER_STAGE_FRAGMENT, buffer: { type: "read-only-storage" } },
         { binding: 6, visibility: SHADER_STAGE_FRAGMENT, texture: { sampleType: "unfilterable-float", viewDimension: "3d" } },
         // The opaque scene's colour, for refraction (I5).
@@ -2197,13 +2209,15 @@ export class WebgpuSceneRenderer implements SceneRenderer {
         params: device.createBuffer({ size: FRAME_BYTES, usage: 0x40 | 0x08 }), // UNIFORM | COPY_DST
       };
       // Spot/point shadows (EP8c): the atlas (a 1×1 stand-in until a light casts) and the tiles' views.
-      const shadowTiles = device.createBuffer({ size: MAX_LOCAL_SHADOW_TILES * 80, usage: 0x80 | 0x08 }); // STORAGE | COPY_DST
+      const shadowTiles = device.createBuffer({ size: Math.max(MAX_LOCAL_SHADOW_TILES, MAX_GPU_LOCAL_TILES) * LOCAL_TILE_FLOATS * 4, usage: 0x80 | 0x08 }); // STORAGE | COPY_DST
       // The split-sum DFG table (F1c), integrated once on the CPU.
       const dfg = dfgTable();
       const dfgBuffer = device.createBuffer({ size: dfg.byteLength, usage: 0x80 | 0x08 }); // STORAGE | COPY_DST
       device.queue.writeBuffer(dfgBuffer, 0, dfg);
       const iblSampler = device.createSampler({ magFilter: "linear", minFilter: "linear", mipmapFilter: "linear", addressModeU: "clamp-to-edge", addressModeV: "clamp-to-edge", addressModeW: "clamp-to-edge" });
-      const atlasBlank = device.createTexture({ size: { width: 1, height: 1 }, format: "r32float", usage: 0x04 | 0x02 });
+      const atlasBlank = hdr
+        ? device.createTexture({ size: { width: 1, height: 1 }, format: "depth32float", usage: 0x04 | 0x10 }) // TEXTURE_BINDING | RENDER_ATTACHMENT
+        : device.createTexture({ size: { width: 1, height: 1 }, format: "r32float", usage: 0x04 | 0x02 });
       const probesBlank = device.createTexture({ size: { width: 1, height: 1, depthOrArrayLayers: 1 }, dimension: "3d", format: "rgba32float", usage: 0x04 | 0x02 });
       // Refraction (I5): the opaque scene's colour, copied (or resolved) into this as the
       // see-through pass begins; a 1×1 blank stands in for it in the opaque pass.
@@ -2236,6 +2250,28 @@ export class WebgpuSceneRenderer implements SceneRenderer {
       const casterModule = hdr ? device.createShaderModule({ code: sceneShader(null, false, hdr) }) : null;
       // Slope-scaled bias as it rasterises, against acne on faces the sun grazes.
       const casterDepth = { format: CASCADE_FORMAT, depthWriteEnabled: true, depthCompare: "less", depthBias: 2, depthBiasSlopeScale: 1.5 };
+      // The spot/point tiles (F2d) keep the full float depth a perspective map needs; their bias is the shader's, in world units.
+      const localDepth = { format: "depth32float", depthWriteEnabled: true, depthCompare: "less" };
+      const casterVertex = (entryPoint: string, uv: boolean) => ({
+        module: casterModule,
+        entryPoint,
+        buffers: [
+          {
+            arrayStride: 64,
+            attributes: [
+              { shaderLocation: 0, offset: 0, format: "float32x3" },
+              ...(uv ? [{ shaderLocation: 2, offset: 24, format: "float32x2" }] : []),
+              { shaderLocation: 5, offset: 44, format: "float32" },
+            ],
+          },
+        ],
+      });
+      const localViews = hdr
+        ? Array.from({ length: MAX_GPU_LOCAL_TILES }, () => {
+            const buffer = device.createBuffer({ size: 64, usage: 0x40 | 0x08 }); // UNIFORM | COPY_DST
+            return { buffer, group: device.createBindGroup({ layout: cascadeLayout, entries: [{ binding: 12, resource: { buffer } }] }) };
+          })
+        : [];
       const cascades: CascadeResources = {
         texture: device.createTexture({ size: { width: 1, height: 1, depthOrArrayLayers: CASCADE_COUNT }, format: CASCADE_FORMAT, usage: 0x10 | 0x04 }),
         size: 0,
@@ -2275,6 +2311,24 @@ export class WebgpuSceneRenderer implements SceneRenderer {
               fragment: { module: casterModule, entryPoint: "fs_shadow_cut", targets: [] },
               primitive: { topology: "triangle-list", cullMode: "none" },
               depthStencil: casterDepth,
+            })
+          : null,
+        localViews,
+        localPipeline: casterModule
+          ? device.createRenderPipeline({
+              layout: device.createPipelineLayout({ bindGroupLayouts: [casterLayout, cascadeLayout] }),
+              vertex: casterVertex("vs_shadow", false),
+              primitive: { topology: "triangle-list", cullMode: "none" },
+              depthStencil: localDepth,
+            })
+          : null,
+        localCutPipeline: casterModule
+          ? device.createRenderPipeline({
+              layout: device.createPipelineLayout({ bindGroupLayouts: [cutLayout, cascadeLayout] }),
+              vertex: casterVertex("vs_shadow_cut", true),
+              fragment: { module: casterModule, entryPoint: "fs_shadow_cut", targets: [] },
+              primitive: { topology: "triangle-list", cullMode: "none" },
+              depthStencil: localDepth,
             })
           : null,
       };
@@ -2618,8 +2672,14 @@ export class WebgpuSceneRenderer implements SceneRenderer {
             ? { casters: instances, toLight: draw.lightDirection, distance: FALLBACK_CASCADE_DISTANCE, size: FALLBACK_CASCADE_SIZE, reach: FALLBACK_CASCADE_DISTANCE, strength: draw.shadow.strength ?? 1 }
             : null))
         : null;
-    const casting = sun ? batchInstances(sun.casters, (mesh) => this.uploadMesh(mesh), cameraPositionFromView(draw.view)) : null;
+    // The spot and point lights' shadows (F2d) are drawn here too, from the same casters (or, given only
+    // CPU tiles, from what the frame draws), into tiles sized by how much of the screen each light covers.
+    const localSource = this.hdr && this.depthGroups.cascades.localPipeline ? (draw.localShadowCasters ?? (draw.localShadows ? instances : null)) : null;
+    const localPlan = localSource && draw.lights?.length ? planLocalTiles(draw.lights, cameraPositionFromView(draw.view), 1 / (draw.projection[5] || 1)) : null;
+    const casterSource = sun?.casters ?? (localPlan && localPlan.tiles.length > 0 ? localSource : null);
+    const casting = casterSource ? batchInstances(casterSource, (mesh) => this.uploadMesh(mesh), cameraPositionFromView(draw.view)) : null;
     const casters = casting ? casting.batches.filter((entry) => entry.alpha < 2 && !entry.refract) : [];
+    this.frameLocalTiles = localPlan && casters.length > 0 ? localPlan.tiles : null;
     const cascadeFit = sun && casters.length > 0 ? fitCascades({ view: draw.view, projection: draw.projection, toLight: sun.toLight, distance: sun.distance, size: sun.size, reach: sun.reach }) : null;
     this.frameCascades = cascadeFit && sun ? { cascades: cascadeFit, size: sun.size, strength: sun.strength ?? 1, softness: sun.softness ?? SUN_SOFTNESS } : null;
     if (cascadeFit && sun) this.ensureCascadeTexture(sun.size);
@@ -2702,7 +2762,8 @@ export class WebgpuSceneRenderer implements SceneRenderer {
 
     // Modern-tier lights: packed global-first for the WGSL loop, the rest
     // sorted into the view's cells (EP8) so each fragment shades only its own.
-    const { ordered } = this.clusterLights(draw);
+    // With GPU tiles (F2d) the lights point at those, and the CPU's tiles aren't uploaded.
+    const { ordered } = this.clusterLights(localPlan ? { ...draw, lights: localPlan.lights, localShadows: null } : draw);
     this.uploadLights(packLights(ordered));
     const lightCount = ordered.length;
 
@@ -2935,6 +2996,48 @@ export class WebgpuSceneRenderer implements SceneRenderer {
             }
             encoded.end();
           });
+        };
+      });
+    }
+
+    // The spot/point lights' tiles (F2d): the casters drawn through each tile's face into its rect of the atlas.
+    const localTiles = this.frameLocalTiles;
+    if (localTiles && localTiles.length > 0) {
+      const res = this.depthGroups.cascades;
+      localTiles.forEach((t, i) => this.device.queue.writeBuffer(res.localViews[i]!.buffer, 0, new Float32Array(t.drawViewProj)));
+      const map = graph.importTexture("local shadows", this.ensureLocalAtlas());
+      graph.addPass("local shadows", "render", (pass) => {
+        pass.write(map);
+        pass.keep();
+        return (ctx) => {
+          const group = this.device.createBindGroup({
+            layout: res.casterLayout,
+            entries: [
+              { binding: 0, resource: { buffer: this.uniformBuffer, offset: 0, size: UNIFORM_STRIDE } },
+              { binding: 10, resource: { buffer: this.instanceBuffer } },
+            ],
+          });
+          const encoded = ctx.encoder.beginRenderPass({
+            colorAttachments: [],
+            depthStencilAttachment: { view: ctx.texture(map).createView(), depthClearValue: 1, depthLoadOp: "clear", depthStoreOp: "store" },
+            ...ctx.timing,
+          });
+          localTiles.forEach((t, i) => {
+            encoded.setViewport(t.x, t.y, t.size, t.size, 0, 1);
+            encoded.setScissorRect(t.x, t.y, t.size, t.size);
+            encoded.setBindGroup(1, res.localViews[i]!.group);
+            for (const cut of [false, true]) {
+              encoded.setPipeline(cut ? res.localCutPipeline : res.localPipeline);
+              casters.forEach((entry, k) => {
+                if ((entry.alpha === 1) !== cut) return;
+                encoded.setBindGroup(0, cut ? this.cutGroupFor(entry.primitive, entry.textures) : group, [(draws.length + k) * UNIFORM_STRIDE]);
+                encoded.setVertexBuffer(0, entry.geometry.vertexBuffer);
+                encoded.setIndexBuffer(entry.geometry.indexBuffer, "uint32");
+                encoded.drawIndexed(entry.geometry.indexCount, entry.models.length, 0, 0, entry.first);
+              });
+            }
+          });
+          encoded.end();
         };
       });
     }
@@ -3372,7 +3475,10 @@ export class WebgpuSceneRenderer implements SceneRenderer {
       frame.set([1, near.bias, near.slopeBias], 24);
     }
     const local = draw.localShadows ?? null;
-    if (local && local.tiles.length > 0) frame.set([1, local.bias, local.slopeBias], 28);
+    if (this.frameLocalTiles && this.frameLocalTiles.length > 0) {
+      this.uploadLocalTiles(this.frameLocalTiles);
+      frame.set([1, LOCAL_SHADOW_BIAS, LOCAL_SHADOW_SLOPE_BIAS], 28);
+    } else if (local && local.tiles.length > 0) frame.set([1, local.bias, local.slopeBias], 28);
     const grid = draw.environment?.lightProbes ?? null;
     if (grid) {
       this.uploadProbeGrid(grid);
@@ -3413,6 +3519,26 @@ export class WebgpuSceneRenderer implements SceneRenderer {
     if (this.msaa) this.msaa.groups = groups.makeGroupsMs(groups.atlas, groups.probes, this.msaa.blank, this.msaa.depth);
   }
 
+  /** This frame's GPU spot/point tiles (F2d), or null when it draws none. */
+  private frameLocalTiles: readonly LocalTile[] | null = null;
+
+  /** The GPU tiles' records (F2d), and the atlas they're drawn into, made the first time a light casts. */
+  private uploadLocalTiles(tiles: readonly LocalTile[]): void {
+    this.ensureLocalAtlas();
+    this.device.queue.writeBuffer(this.depthGroups.shadowTiles, 0, packLocalTiles(tiles));
+  }
+
+  private ensureLocalAtlas(): any {
+    const groups = this.depthGroups;
+    if (groups.atlasBlank) {
+      groups.atlas = this.device.createTexture({ size: { width: LOCAL_ATLAS_SIZE, height: LOCAL_ATLAS_SIZE }, format: "depth32float", usage: 0x10 | 0x04 }); // RENDER_ATTACHMENT | TEXTURE_BINDING
+      groups.atlasBlank = false;
+      Object.assign(groups, groups.makeGroups(groups.atlas, groups.probes));
+      if (this.msaa) this.msaa.groups = groups.makeGroupsMs(groups.atlas, groups.probes, this.msaa.blank, this.msaa.depth);
+    }
+    return groups.atlas;
+  }
+
   /** Upload the spot/point shadow tiles (EP8c): each tile into its atlas cell, and every tile's view. */
   private uploadLocalShadows(local: SceneDraw["localShadows"]): void {
     if (!local || local.tiles.length === 0) return;
@@ -3424,7 +3550,7 @@ export class WebgpuSceneRenderer implements SceneRenderer {
       Object.assign(groups, groups.makeGroups(groups.atlas, groups.probes));
       if (this.msaa) this.msaa.groups = groups.makeGroupsMs(groups.atlas, groups.probes, this.msaa.blank, this.msaa.depth);
     }
-    const views = new Float32Array(MAX_LOCAL_SHADOW_TILES * 20);
+    const views = new Float32Array(MAX_LOCAL_SHADOW_TILES * LOCAL_TILE_FLOATS);
     local.tiles.slice(0, MAX_LOCAL_SHADOW_TILES).forEach((tile, i) => {
       this.device.queue.writeTexture(
         { texture: groups.atlas, origin: { x: (i % LOCAL_SHADOW_GRID) * LOCAL_SHADOW_TILE, y: Math.floor(i / LOCAL_SHADOW_GRID) * LOCAL_SHADOW_TILE } },
@@ -3432,8 +3558,8 @@ export class WebgpuSceneRenderer implements SceneRenderer {
         { bytesPerRow: LOCAL_SHADOW_TILE * 4, rowsPerImage: LOCAL_SHADOW_TILE },
         { width: LOCAL_SHADOW_TILE, height: LOCAL_SHADOW_TILE },
       );
-      views.set(tile.lightViewProj, i * 20);
-      views.set(tile.linear, i * 20 + 16);
+      views.set(tile.lightViewProj, i * LOCAL_TILE_FLOATS);
+      views.set(tile.linear, i * LOCAL_TILE_FLOATS + 16);
     });
     this.device.queue.writeBuffer(groups.shadowTiles, 0, views);
   }

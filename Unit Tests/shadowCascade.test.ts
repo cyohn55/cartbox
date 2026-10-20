@@ -244,6 +244,24 @@ describe("the AAA tier's sun cascades (F2a)", () => {
     expect(r.draws.at(-1)!.sunShadow!.softness).toBeCloseTo(4 * SUN_SOFTNESS, 12);
   });
 
+  it("hands the renderer the casters for its spot and point lights' tiles, not CPU maps (F2d)", async () => {
+    const r = cascaded();
+    const lamp = { kind: "point" as const, position: [0, 2, 0] as [number, number, number], range: 6, color: [1, 1, 1] as [number, number, number], intensity: 2, castShadows: true };
+    const lit = { ...lighting, lights: [...lighting.lights, lamp] };
+    const surface = await MeshOverlaySurface.create({ blit() {}, destroy() {} }, 32, 24, { ...scene(), lighting: lit }, r, { presenter });
+    surface.setCameraOverride(camera(1, 1));
+    surface.blit(new Uint8Array(32 * 24 * 4));
+    const draw = r.draws.at(-1)!;
+    expect(draw.localShadows ?? null).toBeNull();
+    expect(draw.localShadowCasters).toBe(draw.sunShadow!.casters);
+    // Without a light that casts, none.
+    const plain = cascaded();
+    const bare = await MeshOverlaySurface.create({ blit() {}, destroy() {} }, 32, 24, scene(), plain, { presenter });
+    bare.setCameraOverride(camera(1, 1));
+    bare.blit(new Uint8Array(32 * 24 * 4));
+    expect(plain.draws.at(-1)!.localShadowCasters ?? null).toBeNull();
+  });
+
   it("reaches the rig's own shadow distance, and casts nothing with shadows off", async () => {
     const near = await MeshOverlaySurface.create({ blit() {}, destroy() {} }, 32, 24, { ...scene(), lighting: patchSceneLighting(lighting, { shadowDistance: 60 }) }, cascaded(), { presenter });
     const r = (near as any).renderer as ReturnType<typeof cascaded>;
