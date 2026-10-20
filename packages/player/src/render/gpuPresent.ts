@@ -157,7 +157,15 @@ export const SKY_UNIFORM_FLOATS = 4 * (6 + 2 * MAX_CLOUD_LAYERS);
  * colour, the clock, the frame size, and each cloud layer's scale, wind,
  * opacity and colour.
  */
-export function packSkyUniforms(sky: PresentSky, width: number, height: number, out = new Float32Array(SKY_UNIFORM_FLOATS), hdr = false): Float32Array {
+export function packSkyUniforms(
+  sky: PresentSky,
+  width: number,
+  height: number,
+  out = new Float32Array(SKY_UNIFORM_FLOATS),
+  hdr = false,
+  /** A linear frame's exposure when it is tone-mapped (F11a): the painted sky is undone through the curve so it shows as painted. */
+  exposure: number | null = null,
+): Float32Array {
   const v = sky.view;
   const p = sky.projection;
   const layers = Math.min(MAX_CLOUD_LAYERS, sky.clouds.length);
@@ -168,7 +176,7 @@ export function packSkyUniforms(sky: PresentSky, width: number, height: number, 
   const sl = sun ? Math.hypot(sun.direction[0], sun.direction[1], sun.direction[2]) || 1 : 1;
   out.set(sun ? [sun.direction[0] / sl, sun.direction[1] / sl, sun.direction[2] / sl, 1] : [0, 0, 0, 0], 12);
   out.set(sun ? [sun.color[0], sun.color[1], sun.color[2], sky.time] : [0, 0, 0, sky.time], 16);
-  out.set([width, height, hdr ? 1 : 0, 0], 20);
+  out.set([width, height, hdr ? 1 : 0, hdr && exposure !== null && exposure > 0 ? exposure : 0], 20);
   for (let i = 0; i < MAX_CLOUD_LAYERS; i += 1) {
     const layer = i < layers ? sky.clouds[i]!.layer : null;
     out.set(layer ? [layer.scale, layer.wind[0], layer.wind[1], layer.opacity] : [0, 0, 0, 0], 24 + i * 4);
@@ -283,6 +291,13 @@ fn acesFilmic(x: vec3f) -> vec3f {
   let v = max(x, vec3f(0.0));
   return clamp((v * (2.51 * v + 0.03)) / (v * (2.43 * v + 0.59) + 0.14), vec3f(0.0), vec3f(1.0));
 }
+// acesFilmic's inverse, under its white: the light it maps to y.
+fn filmicInverse(y: vec3f) -> vec3f {
+  let v = clamp(y, vec3f(0.0), vec3f(1.0));
+  let a = 2.51 - 2.43 * v;
+  let b = 0.03 - 0.59 * v;
+  return (-b + sqrt(b * b + 4.0 * a * 0.14 * v)) / (2.0 * a);
+}
 `;
 
 const FULLSCREEN_VS = /* wgsl */ `
@@ -361,8 +376,13 @@ fn coreGlow(c: f32) -> f32 {
       rgb = clamp(rgb, vec3f(0.0), vec3f(1.0));
     }
   }
-  // A linear frame (F0b) takes the painted sky as the light it shows.
-  if (s.size.z > 0.5) { rgb = toLinear(rgb); }
+  // A linear frame (F0b) takes the painted sky as the light it shows. Painted for the display, it is
+  // the light that shows as painted (F11a): through the curve's inverse, under the frame's exposure,
+  // as the byte path shows it, rather than tone-mapped a second time.
+  if (s.size.z > 0.5) {
+    rgb = toLinear(rgb);
+    if (s.size.w > 0.0) { rgb = filmicInverse(rgb) / s.size.w; }
+  }
   return vec4f(rgb, 1.0);
 }
 `;
@@ -793,7 +813,7 @@ export class GpuPresenter {
       graph.addPass("sky", "render", (pass) => {
         pass.write(skyTexture);
         return (ctx) => {
-          device.queue.writeBuffer(this.uniforms.sky, 0, packSkyUniforms(sky, width, height, this.data.sky, this.hdr));
+          device.queue.writeBuffer(this.uniforms.sky, 0, packSkyUniforms(sky, width, height, this.data.sky, this.hdr, frame.tonemap ? frame.tonemap.exposure : null));
           this.fullScreen(
             ctx.encoder,
             "sky",

@@ -2481,7 +2481,9 @@ declare const SKY_UNIFORM_FLOATS: number;
  * colour, the clock, the frame size, and each cloud layer's scale, wind,
  * opacity and colour.
  */
-declare function packSkyUniforms(sky: PresentSky, width: number, height: number, out?: Float32Array<ArrayBuffer>, hdr?: boolean): Float32Array;
+declare function packSkyUniforms(sky: PresentSky, width: number, height: number, out?: Float32Array<ArrayBuffer>, hdr?: boolean, 
+/** A linear frame's exposure when it is tone-mapped (F11a): the painted sky is undone through the curve so it shows as painted. */
+exposure?: number | null): Float32Array;
 /** The shaft passes' grid: how many frame pixels a cell spans, and the grid's size (`applySunShafts`'s). */
 declare function shaftGrid(width: number, height: number): {
     step: number;

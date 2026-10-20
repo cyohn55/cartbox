@@ -657,6 +657,23 @@ Everything else depends on this track. It contains no visible "feature", but its
     - *Tests:*
       - `see-through-hdr.test.ts` (Dawn): a refracting tint over the scene equals the display-space mix within 3%, and is far from the linear one. Beaver Creek's water over sand reads blue over red, as on the byte path. Both fail without the fix.
       - `ibl.test.ts`: reflectivity 2 doubles a dark dielectric's reflection, but leaves a white mirror's at what the sky sends. That case fails without the cap.
+  - **F11a-3, the painted sky and fog as authored: done.** Two display-referred parts of the maps' look now come out on the AAA tier as they were authored on the byte path:
+    - **The painted sky shows as painted** (`gpuPresent.ts`). The sky dome is display art. A linear frame used to tone-map it a second time, which deepened and shifted its blues. It now takes the light the curve maps back to the painting: the filmic curve's inverse, closed-form, divided by the frame's exposure. The sky holds steady as the eye adapts, as on the byte path, and still blooms as light.
+    - **Fog mixes as the display shows it** (`WebgpuSceneRenderer.ts`). The byte path mixes its display colour into the tone-mapped surface; mixed in linear light, it lifted the distance far more.
+      - Now the surface is taken to what the display shows, mixed with the fog colour there, and turned back into light.
+      - Only the change is applied (`mixAsShown`), so a light past white keeps what it has over it, and a glow in thin fog still glows.
+    - **What it does to the captures.**
+      - Lockout's overview gets its painted sky back. Contrast rises from 0.186 to 0.227 (the byte path's is 0.262), and mean luminance falls from 0.67 to 0.51 (the byte path's is 0.60).
+      - Beaver Creek's overview loses the veil the fog laid over the canyon. Contrast rises from 0.256 to 0.265 (the byte path's is 0.319) and chroma from 0.208 to 0.252, while mean luminance falls from 0.65 to 0.59 (the byte path's is 0.66).
+      - In both maps the frame is now darker than the byte path's, by 0.07 to 0.09 in mean luminance. Part of that is the bloom, below.
+    - **What is left: the bloom.** Lockout's post stack was tuned with the byte path's thresholded bloom, which adds light to everything past 0.9.
+      - On Dawn, with the whole stack on, a flat bright field shows 252 on the byte path and 236 on the AAA tier.
+      - With the bloom off they show 239 and 236, and with no stack at all they match.
+      - The HDR bloom (F4d-1) moves light rather than adding it, by design, so lit surfaces read darker than the art was tuned for.
+      - Whether the AAA tier should add the authored brightening back (as F4e-2 does for streaks, in display units after the curve) or keep the physical bloom is the next decision. The rest of the gap on lit surfaces is still to trace.
+    - *Tests:*
+      - `gpu-present.test.ts` (Dawn): under the tone map, at exposures 0.4, 1.1 and 3, the painted sky matches the byte path's within 2 levels. It fails without the inverse.
+      - `see-through-hdr.test.ts` (Dawn): a fogged surface equals the display-space mix with the fog colour within 3%, where the linear mix lifted it at least 10% (fails without the change). A glow of 8 in thin fog keeps most of its light.
 - [ ] **F11b. A photoreal reference scene.** A new map built entirely through the pipeline, for example a Forerunner ruin in a misty canyon at dusk:
   - scanned rock and foliage;
   - a cluster-rendered cliff;
