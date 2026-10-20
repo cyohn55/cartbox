@@ -4271,6 +4271,12 @@ interface SceneDraw {
      */
     readonly prepass?: boolean;
     /**
+     * Ground-truth ambient occlusion from the prepass (AAA_FIDELITY_ROADMAP.md
+     * F3c): on by default whenever the linear-light renderer has a prepass;
+     * false turns it off.
+     */
+    readonly ambientOcclusion?: boolean;
+    /**
      * Key light direction, or omitted for the rasteriser's default. The world
      * overlay publishes a cart-driven sun here, so it changes per frame.
      */
@@ -4969,19 +4975,29 @@ declare class WebgpuSceneRenderer implements SceneRenderer {
      * bind groups (binding 8 moved).
      */
     private bindSsao;
-    /** The contact shadows' target (F2c): rg16float at the frame's size, AO carried in r and the sun's contact in g. */
+    /** The screen-space shading target (F2c, F3c): rgba16float at the frame's size, AO in r, the sun's contact in g, the bent normal in ba. */
     private contactTexture;
     private ensureContact;
-    /** The contact pass's uniforms and pipelines (one per depth sample count), made on first use. */
+    /** The resolve's uniforms and pipelines (one per depth sample count), made on first use. */
     private contact;
     /** Whether this frame's sun takes contact shadows (F2c), for the frame uniform. */
     private frameContact;
+    /** Whether this frame's ambient light takes GTAO (F3c), for the frame uniform. */
+    private frameGtao;
     /**
-     * Contact shadows (F2c): after the prepass, a short march toward the sun from
-     * each pixel across its depths, into the target the scene shader reads in its
-     * SSAO slot.
+     * GTAO's resources (F3c): its uniforms, the half-resolution history (two,
+     * one read and one written, swapping each frame), and its pipelines.
      */
-    private addContactShadows;
+    private gtao;
+    /**
+     * The screen-space shading after the prepass (F2c, F3c): GTAO at half
+     * resolution accumulated over frames, then at full resolution its
+     * depth-aware upsample and the sun's contact shadows, into the target the
+     * scene shader reads in its SSAO slot.
+     */
+    private addScreenShading;
+    /** A 1×1 stand-in for GTAO's history when the frame has none (F3c). */
+    private gtaoBlank;
     /**
      * Upload the packed light list, growing the storage buffer when it needs more
      * room (a grow changes identity, so invalidate cached bind groups). The buffer
