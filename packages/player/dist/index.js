@@ -7707,7 +7707,8 @@ import {
   parseRagdollColliders,
   parseDebrisDefs,
   parseComponentDefs,
-  parseAttached
+  parseAttached,
+  lightChannelMask
 } from "@cartbox/editor";
 var DEFAULT_PREFAB_POOL = 8;
 var MAX_PREFAB_POOL = 32;
@@ -7827,6 +7828,7 @@ function parseMeshScene(raw) {
       ...typeof record.level === "string" && record.level ? { levelId: record.level } : {},
       ...record.alwaysLoaded === true ? { alwaysLoaded: true } : {},
       ...components.length > 0 ? { components } : {},
+      ...record.lightChannels !== void 0 ? { lightChannels: lightChannelMask(record.lightChannels) } : {},
       parentId
     };
   };
@@ -11397,6 +11399,7 @@ import {
 } from "@cartbox/editor";
 
 // src/mesh/dynamicLights.ts
+import { lightColor } from "@cartbox/editor";
 function withCartSun(lighting, sun) {
   const l = Math.hypot(...sun.direction) || 1;
   const direction = [sun.direction[0] / l, sun.direction[1] / l, sun.direction[2] / l];
@@ -11406,26 +11409,31 @@ function withCartSun(lighting, sun) {
   const sky = lighting.sky;
   return {
     ...lighting,
-    lights: at < 0 ? [key, ...lighting.lights] : lighting.lights.map((x, i) => i === at ? { ...x, ...key } : x),
+    // The cart's sun is the colour it says: the key's temperature (F2e) goes with the key.
+    lights: at < 0 ? [key, ...lighting.lights] : lighting.lights.map((x, i) => i === at ? { ...withoutTemperature(x), ...key } : x),
     ...sky ? {
       sky: {
         ...sky,
         sunDirection: direction,
         sunColor: [0, 1, 2].map((k) => {
-          const reference = authored ? authored.color[k] * authored.intensity : 1;
+          const reference = authored ? lightColor(authored)[k] * authored.intensity : 1;
           return reference > 1e-6 ? sky.sunColor[k] * sun.color[k] / reference : 0;
         })
       }
     } : {}
   };
 }
+function withoutTemperature(light) {
+  const { temperature: _drop, ...rest } = light;
+  return rest;
+}
 function bounceLightsFor(authored, frame, cart) {
   const authoredKey = authored.lights.find((x) => x.kind === "directional");
-  const reference = authoredKey ? authoredKey.color.map((c) => c * authoredKey.intensity) : [1, 1, 1];
+  const reference = authoredKey ? lightColor(authoredKey).map((c) => c * authoredKey.intensity) : [1, 1, 1];
   const brightness = 0.2126 * reference[0] + 0.7152 * reference[1] + 0.0722 * reference[2] || 1;
   const key = frame.lights.find((x) => x.kind === "directional");
-  const sun = key?.direction ? { direction: key.direction, color: [0, 1, 2].map((k) => reference[k] > 1e-6 ? key.color[k] * key.intensity / reference[k] : 0) } : null;
-  const points = [...frame.lights, ...cart].filter((x) => (x.kind === "point" || x.kind === "spot") && x.position).map((x) => ({ position: x.position, color: x.color.map((c) => c * x.intensity / brightness), range: x.range && x.range > 0 ? x.range : 8, ...x.falloff ? { falloff: x.falloff } : {} }));
+  const sun = key?.direction ? { direction: key.direction, color: [0, 1, 2].map((k) => reference[k] > 1e-6 ? lightColor(key)[k] * key.intensity / reference[k] : 0) } : null;
+  const points = [...frame.lights, ...cart].filter((x) => (x.kind === "point" || x.kind === "spot") && x.position).map((x) => ({ position: x.position, color: lightColor(x).map((c) => c * x.intensity / brightness), range: x.range && x.range > 0 ? x.range : 8, ...x.falloff ? { falloff: x.falloff } : {} }));
   return { sun, points };
 }
 function bounceSignature(lights) {
@@ -12248,7 +12256,13 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
       const skinned = isSkinned2(instance.mesh) ? createLiveSkinnedMesh(instance.mesh) : null;
       if (skinned) live.set(i, skinned);
       const lod = liveLod(instance.lod, skinned);
-      instances.push({ ...textured, ...skinned ? { mesh: skinned.mesh } : {}, ...lod ? { lod } : {}, model: instance.model });
+      instances.push({
+        ...textured,
+        ...skinned ? { mesh: skinned.mesh } : {},
+        ...lod ? { lod } : {},
+        model: instance.model,
+        ...instance.lightChannels !== void 0 ? { lightChannels: instance.lightChannels } : {}
+      });
       frames.push(instance.frames && instance.frames.length > 0 ? await Promise.all(instance.frames.map(texture)) : null);
     }
     const lighting = scene.lighting;
@@ -13006,7 +13020,9 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
         ...source,
         ...pose?.tint || this.looks.get(i)?.tint ? this.tintedLook(source, pose?.tint || this.looks.get(i)?.tint) : {},
         model: s.model,
-        ...s.effect ? { effect: s.effect } : {}
+        ...s.effect ? { effect: s.effect } : {},
+        // An animation frame is only a mesh: the object's lighting channels (F2e) go with it.
+        ...authored.lightChannels !== void 0 ? { lightChannels: authored.lightChannels } : {}
       };
       if (s.front) front.push(instance);
       else {
@@ -14104,6 +14120,8 @@ import {
   materialHasWater,
   materialRefracts,
   spotCone,
+  lightColor as lightColor2,
+  lightChannelMask as lightChannelMask2,
   fogIsVolumetric
 } from "@cartbox/editor";
 var UNIFORM_STRIDE = 1024;
@@ -14133,13 +14151,14 @@ function packLights(lights) {
     out[base + 1] = v[1];
     out[base + 2] = v[2];
     out[base + 3] = light.kind === "spot" ? 2 : placed ? 1 : 0;
-    out[base + 4] = light.color[0];
-    out[base + 5] = light.color[1];
-    out[base + 6] = light.color[2];
+    const color = lightColor2(light);
+    out[base + 4] = color[0];
+    out[base + 5] = color[1];
+    out[base + 6] = color[2];
     out[base + 7] = light.intensity;
     out[base + 8] = light.range ?? 0;
     out[base + 11] = light.shadowTile ?? -1;
-    if (placed && light.falloff === "inverseSquare") out[base + 15] = 1;
+    out[base + 15] = (placed && light.falloff === "inverseSquare" ? 1 : 0) + 2 * lightChannelMask2(light.channels ?? 1);
     if (light.kind === "spot") {
       const [cosOuter, cosInner] = spotCone(light);
       out[base + 9] = cosOuter;
@@ -14446,7 +14465,7 @@ function writeInstanceUniform(target, index, uniform) {
   const before = uniform.windBefore ?? null;
   for (let k = 0; k < 4; k += 1) target[base + OFFSET_WIND1 + k] = before ? before[k] : 0;
   target[base + OFFSET_MOTION0] = uniform.motionBase ?? 0;
-  target[base + OFFSET_MOTION0 + 1] = 0;
+  target[base + OFFSET_MOTION0 + 1] = uniform.lightChannels ?? 1;
   target[base + OFFSET_MOTION0 + 2] = 0;
   target[base + OFFSET_MOTION0 + 3] = 0;
 }
@@ -14604,6 +14623,7 @@ function batchInstances(instances, geometryOf, eye = [0, 0, 0]) {
         normal: primitive.uvs ? instance.normalTextures?.[index] ?? null : null
       };
       const effect = instance.effect ?? null;
+      const channels = instance.lightChannels ?? 1;
       const alpha = alphaCode(primitive.material.alphaMode);
       const refract = batchRefracts(primitive, textures, effect);
       if (alpha >= 2 || refract) {
@@ -14612,15 +14632,15 @@ function batchInstances(instances, geometryOf, eye = [0, 0, 0]) {
         const x = m[0] * c[0] + m[4] * c[1] + m[8] * c[2] + m[12] - eye[0];
         const y = m[1] * c[0] + m[5] * c[1] + m[9] * c[2] + m[13] - eye[1];
         const z = m[2] * c[0] + m[6] * c[1] + m[10] * c[2] + m[14] - eye[2];
-        seeThrough.push({ batch: { primitive, geometry, textures, models: [instance.model], effect, alpha, refract, first: 0 }, distance: x * x + y * y + z * z });
+        seeThrough.push({ batch: { primitive, geometry, textures, models: [instance.model], effect, channels, alpha, refract, first: 0 }, distance: x * x + y * y + z * z });
         instanceCount += 1;
         return;
       }
       let list = byPrimitive.get(primitive);
       if (!list) byPrimitive.set(primitive, list = []);
-      let batch = list.find((b) => b.effect === effect && sameTextures(b.textures, textures));
+      let batch = list.find((b) => b.effect === effect && b.channels === channels && sameTextures(b.textures, textures));
       if (!batch) {
-        batch = { primitive, geometry, textures, models: [], effect, alpha, refract, first: 0 };
+        batch = { primitive, geometry, textures, models: [], effect, channels, alpha, refract, first: 0 };
         list.push(batch);
         batches.push(batch);
       }
@@ -15336,6 +15356,8 @@ layout(std140) uniform Uniforms {
   vec4 terrain0; // x = triplanar repeat (0 = UVs), y = height-blend sharpness (B6)
   vec4 wind0;    // xy = wind x, z \xD7 strength, z = phase (0..1), w = gust (B6)
   vec4 maps0;    // x = 1 when a normal map is bound (P1a)
+  vec4 wind1;    // the previous frame's wind0 (motion vectors, unused here)
+  vec4 motion0;  // y = the draw's lighting channels (F2e)
 } u;
 `
 );
@@ -15860,6 +15882,9 @@ vec3 envReflect(vec3 P, vec3 R, float rough) {
 // light loop: point and spot lights fall off to nothing at their range, a spot
 // fades across its cone, and directional lights honour the sun shadow (sf).
 vec3 lightTerm(Light lgt, vec3 P, vec3 N, vec3 V, float ndv, float a2, float k, vec3 f0, float kdm, vec3 albedo, float sf) {
+  // d3.w: inverse square in bit 0, the light's channels above it, which the draw's must share (F2e).
+  uint bits = uint(lgt.d3.w + 0.5);
+  if (((bits >> 1u) & uint(u.motion0.y + 0.5)) == 0u) { return vec3(0.0); }
   vec3 Ld;
   float atten = 1.0;
   if (lgt.d0.w > 0.5) {
@@ -15867,7 +15892,7 @@ vec3 lightTerm(Light lgt, vec3 P, vec3 N, vec3 V, float ndv, float a2, float k, 
     float dist = max(length(toL), 1e-4);
     Ld = toL / dist;
     float range = lgt.d2.x;
-    if (lgt.d3.w > 0.5) { // inverse square, windowed to its range
+    if ((bits & 1u) != 0u) { // inverse square, windowed to its range
       float win = 1.0;
       if (range > 0.0) { float q = dist / range; float t = clamp(1.0 - q * q * q * q, 0.0, 1.0); win = t * t; }
       float d = max(dist, 0.01);
@@ -16614,7 +16639,8 @@ var WebglSceneRenderer = class _WebglSceneRenderer {
         waterAlong: waterAlong(batch.primitive.material),
         mapping: resolveMapping(batch.primitive.material),
         hasNormalMap: batch.textures.normal !== null,
-        wind: batch.primitive.sway ? windUniform(draw.wind, draw.time ?? 0) : null
+        wind: batch.primitive.sway ? windUniform(draw.wind, draw.time ?? 0) : null,
+        lightChannels: batch.channels
       });
     });
     for (const chunk of chunks2) {
@@ -18983,7 +19009,7 @@ struct Uniforms {
   wind0: vec4<f32>,     // xy = wind x, z \xD7 strength, z = phase (0..1), w = gust (B6)
   maps0: vec4<f32>,     // x = 1 when a normal map is bound (P1a)
   wind1: vec4<f32>,     // the previous frame's wind0, for motion vectors (F0c)
-  motion0: vec4<f32>,   // x = where this frame's motion transforms start in xf (F0c)
+  motion0: vec4<f32>,   // x = where this frame's motion transforms start in xf (F0c), y = the draw's lighting channels (F2e)
 };
 
 // A Modern-tier light (see packLights): d0 = dir/pos + kind, d1 = colour +
@@ -19504,6 +19530,9 @@ ${hdr ? `  // The linear variant (F3a): the sky's GGX lobe from the prefiltered 
 // light loop: point and spot lights fall off to nothing at their range, a spot
 // fades across its cone, and directional lights honour the sun shadow (sf).
 fn lightTerm(lgt: Light, P: vec3<f32>, N: vec3<f32>, V: vec3<f32>, ndv: f32, a2: f32, k: f32, f0: vec3<f32>, kdm: f32, albedo: vec3<f32>, sf: f32) -> vec3<f32> {
+  // d3.w: inverse square in bit 0, the light's channels above it, which the draw's must share (F2e).
+  let bits = u32(lgt.d3.w + 0.5);
+  if (((bits >> 1u) & u32(u.motion0.y + 0.5)) == 0u) { return vec3<f32>(0.0); }
   var Ld: vec3<f32>;
   var atten = 1.0;
   if (lgt.d0.w > 0.5) { // point or spot
@@ -19511,7 +19540,7 @@ fn lightTerm(lgt: Light, P: vec3<f32>, N: vec3<f32>, V: vec3<f32>, ndv: f32, a2:
     let dist = max(length(toL), 1e-4);
     Ld = toL / dist;
     let range = lgt.d2.x;
-    if (lgt.d3.w > 0.5) { // inverse square, windowed to its range
+    if ((bits & 1u) != 0u) { // inverse square, windowed to its range
       var win = 1.0;
       if (range > 0.0) { let q = dist / range; let t = clamp(1.0 - q * q * q * q, 0.0, 1.0); win = t * t; }
       let d = max(dist, 0.01);
@@ -21184,7 +21213,8 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
         wind: entry.primitive.sway ? windNow : null,
         materialId: materialId(entry.primitive.material),
         windBefore: entry.primitive.sway ? windThen : null,
-        motionBase: prepass ? instanceCount : 0
+        motionBase: prepass ? instanceCount : 0,
+        lightChannels: entry.channels
       };
     };
     let next = 0;

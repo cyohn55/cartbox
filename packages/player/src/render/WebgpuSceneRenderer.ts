@@ -410,7 +410,7 @@ struct Uniforms {
   wind0: vec4<f32>,     // xy = wind x, z × strength, z = phase (0..1), w = gust (B6)
   maps0: vec4<f32>,     // x = 1 when a normal map is bound (P1a)
   wind1: vec4<f32>,     // the previous frame's wind0, for motion vectors (F0c)
-  motion0: vec4<f32>,   // x = where this frame's motion transforms start in xf (F0c)
+  motion0: vec4<f32>,   // x = where this frame's motion transforms start in xf (F0c), y = the draw's lighting channels (F2e)
 };
 
 // A Modern-tier light (see packLights): d0 = dir/pos + kind, d1 = colour +
@@ -941,6 +941,9 @@ ${hdr ? `  // The linear variant (F3a): the sky's GGX lobe from the prefiltered 
 // light loop: point and spot lights fall off to nothing at their range, a spot
 // fades across its cone, and directional lights honour the sun shadow (sf).
 fn lightTerm(lgt: Light, P: vec3<f32>, N: vec3<f32>, V: vec3<f32>, ndv: f32, a2: f32, k: f32, f0: vec3<f32>, kdm: f32, albedo: vec3<f32>, sf: f32) -> vec3<f32> {
+  // d3.w: inverse square in bit 0, the light's channels above it, which the draw's must share (F2e).
+  let bits = u32(lgt.d3.w + 0.5);
+  if (((bits >> 1u) & u32(u.motion0.y + 0.5)) == 0u) { return vec3<f32>(0.0); }
   var Ld: vec3<f32>;
   var atten = 1.0;
   if (lgt.d0.w > 0.5) { // point or spot
@@ -948,7 +951,7 @@ fn lightTerm(lgt: Light, P: vec3<f32>, N: vec3<f32>, V: vec3<f32>, ndv: f32, a2:
     let dist = max(length(toL), 1e-4);
     Ld = toL / dist;
     let range = lgt.d2.x;
-    if (lgt.d3.w > 0.5) { // inverse square, windowed to its range
+    if ((bits & 1u) != 0u) { // inverse square, windowed to its range
       var win = 1.0;
       if (range > 0.0) { let q = dist / range; let t = clamp(1.0 - q * q * q * q, 0.0, 1.0); win = t * t; }
       let d = max(dist, 0.01);
@@ -2856,6 +2859,7 @@ export class WebgpuSceneRenderer implements SceneRenderer {
         materialId: materialId(entry.primitive.material),
         windBefore: entry.primitive.sway ? windThen : null,
         motionBase: prepass ? instanceCount : 0,
+        lightChannels: entry.channels,
       };
     };
     let next = 0;

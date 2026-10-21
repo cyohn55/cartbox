@@ -161,6 +161,8 @@ export interface DrawBatch<G> {
   models: Mat4[];
   /** The surface effect its copies carry (H11) — copies with an effect batch only with copies of the same one. */
   effect: SurfaceEffect | null;
+  /** The lighting channels its copies are on (F2e): copies batch only with copies on the same ones. */
+  channels: number;
   /**
    * The material's transparency (EP6): 0 opaque, 1 cut out, 2 blended, 3 added.
    * Blended and added copies are each a batch of their own, drawn after every
@@ -215,6 +217,7 @@ export function batchInstances<G extends { indexCount: number }>(
         normal: primitive.uvs ? (instance.normalTextures?.[index] ?? null) : null,
       };
       const effect = instance.effect ?? null;
+      const channels = instance.lightChannels ?? 1;
       const alpha = alphaCode(primitive.material.alphaMode);
       const refract = batchRefracts(primitive, textures, effect);
       if (alpha >= 2 || refract) {
@@ -223,15 +226,15 @@ export function batchInstances<G extends { indexCount: number }>(
         const x = m[0]! * c[0] + m[4]! * c[1] + m[8]! * c[2] + m[12]! - eye[0];
         const y = m[1]! * c[0] + m[5]! * c[1] + m[9]! * c[2] + m[13]! - eye[1];
         const z = m[2]! * c[0] + m[6]! * c[1] + m[10]! * c[2] + m[14]! - eye[2];
-        seeThrough.push({ batch: { primitive, geometry, textures, models: [instance.model], effect, alpha, refract, first: 0 }, distance: x * x + y * y + z * z });
+        seeThrough.push({ batch: { primitive, geometry, textures, models: [instance.model], effect, channels, alpha, refract, first: 0 }, distance: x * x + y * y + z * z });
         instanceCount += 1;
         return;
       }
       let list = byPrimitive.get(primitive);
       if (!list) byPrimitive.set(primitive, (list = []));
-      let batch = list.find((b) => b.effect === effect && sameTextures(b.textures, textures));
+      let batch = list.find((b) => b.effect === effect && b.channels === channels && sameTextures(b.textures, textures));
       if (!batch) {
-        batch = { primitive, geometry, textures, models: [], effect, alpha, refract, first: 0 };
+        batch = { primitive, geometry, textures, models: [], effect, channels, alpha, refract, first: 0 };
         list.push(batch);
         batches.push(batch);
       }

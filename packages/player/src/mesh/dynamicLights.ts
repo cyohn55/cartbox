@@ -6,7 +6,7 @@
  * @cartbox/editor). Pure.
  */
 
-import type { BounceLights, SceneLight, SceneLighting } from "@cartbox/editor";
+import { lightColor, type BounceLights, type SceneLight, type SceneLighting } from "@cartbox/editor";
 
 /** The cart's sun this frame: the direction toward it, and its colour with its intensity folded in. */
 export interface CartSun {
@@ -29,20 +29,26 @@ export function withCartSun(lighting: SceneLighting, sun: CartSun): SceneLightin
   const sky = lighting.sky;
   return {
     ...lighting,
-    lights: at < 0 ? [key, ...lighting.lights] : lighting.lights.map((x, i) => (i === at ? { ...x, ...key } : x)),
+    // The cart's sun is the colour it says: the key's temperature (F2e) goes with the key.
+    lights: at < 0 ? [key, ...lighting.lights] : lighting.lights.map((x, i) => (i === at ? { ...withoutTemperature(x), ...key } : x)),
     ...(sky
       ? {
           sky: {
             ...sky,
             sunDirection: direction,
             sunColor: [0, 1, 2].map((k) => {
-              const reference = authored ? authored.color[k]! * authored.intensity : 1;
+              const reference = authored ? lightColor(authored)[k]! * authored.intensity : 1;
               return reference > 1e-6 ? (sky.sunColor[k]! * sun.color[k]!) / reference : 0;
             }) as [number, number, number],
           },
         }
       : {}),
   };
+}
+
+function withoutTemperature(light: SceneLight): SceneLight {
+  const { temperature: _drop, ...rest } = light;
+  return rest;
 }
 
 /**
@@ -55,16 +61,16 @@ export function withCartSun(lighting: SceneLighting, sun: CartSun): SceneLightin
  */
 export function bounceLightsFor(authored: SceneLighting, frame: SceneLighting, cart: readonly SceneLight[]): BounceLights {
   const authoredKey = authored.lights.find((x) => x.kind === "directional");
-  const reference = authoredKey ? authoredKey.color.map((c) => c * authoredKey.intensity) : [1, 1, 1];
+  const reference = authoredKey ? lightColor(authoredKey).map((c) => c * authoredKey.intensity) : [1, 1, 1];
   const brightness = 0.2126 * reference[0]! + 0.7152 * reference[1]! + 0.0722 * reference[2]! || 1;
   const key = frame.lights.find((x) => x.kind === "directional");
   const sun =
     key?.direction
-      ? { direction: key.direction, color: [0, 1, 2].map((k) => (reference[k]! > 1e-6 ? (key.color[k]! * key.intensity) / reference[k]! : 0)) as [number, number, number] }
+      ? { direction: key.direction, color: [0, 1, 2].map((k) => (reference[k]! > 1e-6 ? (lightColor(key)[k]! * key.intensity) / reference[k]! : 0)) as [number, number, number] }
       : null;
   const points = [...frame.lights, ...cart]
     .filter((x) => (x.kind === "point" || x.kind === "spot") && x.position)
-    .map((x) => ({ position: x.position!, color: x.color.map((c) => (c * x.intensity) / brightness) as [number, number, number], range: x.range && x.range > 0 ? x.range : 8, ...(x.falloff ? { falloff: x.falloff } : {}) }));
+    .map((x) => ({ position: x.position!, color: lightColor(x).map((c) => (c * x.intensity) / brightness) as [number, number, number], range: x.range && x.range > 0 ? x.range : 8, ...(x.falloff ? { falloff: x.falloff } : {}) }));
   return { sun, points };
 }
 

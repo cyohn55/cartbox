@@ -24,6 +24,8 @@ import {
   materialHasWater,
   materialRefracts,
   spotCone,
+  lightColor,
+  lightChannelMask,
   fogIsVolumetric,
   type EnvironmentLight,
   type Mat4,
@@ -131,7 +133,8 @@ export const UNIFORM_FLOATS = UNIFORM_STRIDE / 4;
  *   d1: rgb = colour, w = intensity
  *   d2: x = range (0 = no falloff), y = spot cone's outer cosine, z = its inner cosine,
  *       w = first shadow tile (EP8c), −1 when it casts none
- *   d3: xyz = spot beam axis (unit, the way it points)
+ *   d3: xyz = spot beam axis (unit, the way it points), w = 1 for inverse-square
+ *       falloff, plus twice its lighting channels (F2e), the bits a draw's must share
  * Matches the `Light` struct in the WGSL and GLSL scene shaders.
  */
 export const LIGHT_FLOATS = 16;
@@ -169,6 +172,8 @@ export interface PackableLight {
   readonly innerAngle?: number;
   readonly outerAngle?: number;
   readonly shadowTile?: number;
+  readonly temperature?: number;
+  readonly channels?: number;
 }
 
 /**
@@ -186,13 +191,15 @@ export function packLights(lights: readonly PackableLight[]): Float32Array {
     out[base + 1] = v[1]!;
     out[base + 2] = v[2]!;
     out[base + 3] = light.kind === "spot" ? 2 : placed ? 1 : 0;
-    out[base + 4] = light.color[0]!;
-    out[base + 5] = light.color[1]!;
-    out[base + 6] = light.color[2]!;
+    // Its temperature (F2e) is its colour as it shades.
+    const color = lightColor(light);
+    out[base + 4] = color[0]!;
+    out[base + 5] = color[1]!;
+    out[base + 6] = color[2]!;
     out[base + 7] = light.intensity;
     out[base + 8] = light.range ?? 0;
     out[base + 11] = light.shadowTile ?? -1;
-    if (placed && light.falloff === "inverseSquare") out[base + 15] = 1;
+    out[base + 15] = (placed && light.falloff === "inverseSquare" ? 1 : 0) + 2 * lightChannelMask(light.channels ?? 1);
     if (light.kind === "spot") {
       const [cosOuter, cosInner] = spotCone(light as SceneLight);
       out[base + 9] = cosOuter;
@@ -501,6 +508,8 @@ export interface InstanceUniform {
   readonly windBefore?: readonly [number, number, number, number] | null;
   /** Where the frame's motion transforms start in the instance buffer (F0c). */
   readonly motionBase?: number;
+  /** The lighting channels the draw's copies are on (F2e), absent the first. */
+  readonly lightChannels?: number;
 }
 
 /**
@@ -780,7 +789,7 @@ export function writeInstanceUniform(target: Float32Array, index: number, unifor
   const before = uniform.windBefore ?? null;
   for (let k = 0; k < 4; k += 1) target[base + OFFSET_WIND1 + k] = before ? before[k]! : 0;
   target[base + OFFSET_MOTION0] = uniform.motionBase ?? 0;
-  target[base + OFFSET_MOTION0 + 1] = 0;
+  target[base + OFFSET_MOTION0 + 1] = uniform.lightChannels ?? 1;
   target[base + OFFSET_MOTION0 + 2] = 0;
   target[base + OFFSET_MOTION0 + 3] = 0;
 }

@@ -28,6 +28,7 @@ import { cameraPositionFromView } from "./lod";
 import { localShadowVisibility, type LocalShadows } from "./localShadows";
 import { sampleLightProbes, type LightProbeGrid } from "../model/lightProbes";
 import { EFFECT_RIM_POWER, bandAmount, camoThreshold, effectActive, type SurfaceEffect } from "./surfaceEffect";
+import { tintToTemperature } from "./lightTemperature";
 
 /** The fog for one frame, with the eye it is seen from (height fog and volumes trace from it). */
 type FrameFog = SceneFog & { readonly eye: readonly [number, number, number] };
@@ -441,6 +442,47 @@ export interface SceneLight {
    * frame's {@link LocalShadows} atlas (see assignLocalShadowTiles).
    */
   readonly shadowTile?: number;
+  /**
+   * The light's colour temperature in kelvin (F2e; see lightTemperature.ts):
+   * a black body's colour, at unit luminance, over `color`. Absent, `color`
+   * alone, as 6500 K would be.
+   */
+  readonly temperature?: number;
+  /**
+   * The lighting channels it lights (F2e), a bit each of {@link LIGHT_CHANNEL_COUNT}:
+   * it lights an instance whose {@link MeshSceneInstance.lightChannels} share
+   * one. Absent, the first, which every instance is on unless it says otherwise.
+   */
+  readonly channels?: number;
+}
+
+/** A rig of one dark light: what lights an instance on none of the rig's channels (a list, so it stays on the rig's path). */
+const NO_LIGHTS: readonly SceneLight[] = [{ kind: "directional", direction: [0, 1, 0], color: [0, 0, 0], intensity: 0 }];
+
+/** How many lighting channels there are (F2e): bits 0 to 7 of a mask. */
+export const LIGHT_CHANNEL_COUNT = 8;
+/** The mask of every lighting channel. */
+export const ALL_LIGHT_CHANNELS = (1 << LIGHT_CHANNEL_COUNT) - 1;
+
+/** A channel mask as stored: an integer of {@link LIGHT_CHANNEL_COUNT} bits, the first channel when absent or malformed. */
+export function lightChannelMask(value: unknown): number {
+  if (typeof value !== "number" || !Number.isFinite(value)) return 1;
+  return Math.round(value) & ALL_LIGHT_CHANNELS;
+}
+
+/** Whether a light lights an instance on `channels` (F2e): their masks share a channel. */
+export function lightsChannel(light: Pick<SceneLight, "channels">, channels: number | undefined): boolean {
+  return ((light.channels ?? 1) & (channels ?? 1)) !== 0;
+}
+
+/** The lights that light an instance on `channels`: the same list when every one does. */
+export function lightsOnChannels<L extends Pick<SceneLight, "channels">>(lights: readonly L[], channels: number | undefined): readonly L[] {
+  return lights.every((l) => lightsChannel(l, channels)) ? lights : lights.filter((l) => lightsChannel(l, channels));
+}
+
+/** A light's colour as it shades (authored space), its {@link SceneLight.temperature} laid over it. */
+export function lightColor(light: Pick<SceneLight, "color" | "temperature">): readonly [number, number, number] {
+  return light.temperature === undefined ? light.color : tintToTemperature(light.color, light.temperature);
 }
 
 /** Floor on an inverse-square light's distance, 1 cm, so a surface touching it doesn't blow up. */
@@ -1115,6 +1157,12 @@ export interface MeshSceneInstance {
   /** A surface effect over its (PBR) materials this frame — a shield flare, recharge shimmer or camo (see surfaceEffect.ts). */
   readonly effect?: SurfaceEffect | null;
   /**
+   * The lighting channels it is lit on (F2e; see {@link SceneLight.channels}):
+   * absent, the first. The sun, point and spot lights all honour it. The
+   * ambient and image-based light reach it whatever its channels.
+   */
+  readonly lightChannels?: number;
+  /**
    * Where the instance was last frame, for motion vectors (AAA_FIDELITY_ROADMAP.md
    * F0c). Absent, a renderer that needs it matches the instance to last frame's
    * by its mesh and its place among that mesh's copies.
@@ -1238,7 +1286,8 @@ export function renderMeshScene(instances: readonly MeshSceneInstance[], options
   const shadow = options.shadow ?? null;
   const tonemap = options.tonemap ?? null;
   const ssao = options.ssao ?? null;
-  const lights = options.lights ?? null;
+  // A light's temperature (F2e) is its colour as it shades.
+  const lights = options.lights ? options.lights.map((l) => (l.temperature === undefined ? l : { ...l, color: lightColor(l) })) : null;
   const localShadows = options.localShadows ?? null;
   const fog: FrameFog | null = options.fog ? { ...options.fog, eye: cameraPositionFromView(view) } : null;
   const style = options.style ?? DEFAULT_RASTER_STYLE;
@@ -1286,10 +1335,13 @@ export function renderMeshScene(instances: readonly MeshSceneInstance[], options
     const mrTextures = instance.mrTextures ?? null;
     const occlusionTextures = instance.occlusionTextures ?? null;
     const emissiveTextures = instance.emissiveTextures ?? null;
-    const extras: PrimitiveExtras = { lightmap: instance.lightmapTextures ?? null, detail: instance.detailTextures ?? null, blend: instance.blendTextures ?? null, relief: instance.reliefTextures ?? null, time, effect: instance.effect ?? null, wind };
+    let lit = lights ? lightsOnChannels(lights, instance.lightChannels) : null;
+    // On none of the rig's channels, the instance is still lit by the rig: by none of its lights.
+    if (lit && lit.length === 0 && lights!.length > 0) lit = NO_LIGHTS;
+    const extras: PrimitiveExtras = { lightmap: instance.lightmapTextures ?? null, detail: instance.detailTextures ?? null, blend: instance.blendTextures ?? null, relief: instance.reliefTextures ?? null, time, effect: instance.effect ?? null, wind, lights: lit };
     const lightMvp = shadow ? multiply(shadow.lightViewProj, instance.model) : null;
     if (style.zBuffer) {
-      drawMesh(instance.mesh, mvp, modelView, instance.model, normalBasis, width, height, out, depth, textures, normalTextures, materialTextures, mrTextures, occlusionTextures, emissiveTextures, extras, light, viewDir, ambient, environment, lightMvp, shadow, tonemap, ssao, lights, style, fog, deferred, localShadows);
+      drawMesh(instance.mesh, mvp, modelView, instance.model, normalBasis, width, height, out, depth, textures, normalTextures, materialTextures, mrTextures, occlusionTextures, emissiveTextures, extras, light, viewDir, ambient, environment, lightMvp, shadow, tonemap, ssao, lit, style, fog, deferred, localShadows);
     } else {
       eachTriangle(instance.mesh, mvp, modelView, instance.model, normalBasis, textures, normalTextures, materialTextures, mrTextures, occlusionTextures, emissiveTextures, extras, lightMvp, (triangle) => queue.push(triangle));
     }
@@ -1328,7 +1380,7 @@ export function renderMeshScene(instances: readonly MeshSceneInstance[], options
         shadow,
         tonemap,
         ssao,
-        lights,
+        triangle.lights !== undefined ? triangle.lights : lights,
         style,
         fog,
         triangle.alpha,
@@ -1812,6 +1864,8 @@ interface PrimitiveExtras {
   readonly effect?: SurfaceEffect | null;
   /** The frame's wind (B6), its {@link windUniform}, or null for still air. */
   readonly wind?: readonly [number, number, number, number] | null;
+  /** The lights that reach this instance's channels (F2e), the frame's when every one does. */
+  readonly lights?: readonly SceneLight[] | null;
 }
 
 /**
@@ -1925,6 +1979,8 @@ interface PendingTriangle {
   readonly grads: TriangleGrads | null;
   /** Triplanar mapping and height blending (B6), or null for neither. */
   readonly mapping: SurfaceMapping | null;
+  /** The lights on its instance's channels (F2e), or undefined for the frame's. */
+  readonly lights?: readonly SceneLight[] | null;
 }
 
 /**
@@ -2218,7 +2274,7 @@ function eachTriangle(
         const a = clipped[c]!;
         const b = clipped[c + 1]!;
         const cc = clipped[c + 2]!;
-        emit({ a, b, c: cc, texture, normalTexture, tangent, materialTexture, pbr, base, alpha, viewDepth: (a.viewZ + b.viewZ + cc.viewZ) / 3, grads, mapping });
+        emit({ a, b, c: cc, texture, normalTexture, tangent, materialTexture, pbr, base, alpha, viewDepth: (a.viewZ + b.viewZ + cc.viewZ) / 3, grads, mapping, ...(extras?.lights !== undefined ? { lights: extras.lights } : {}) });
       }
     }
   });
@@ -2297,7 +2353,7 @@ function drawMesh(
         shadow,
         tonemap,
         ssao,
-        lights,
+        triangle.lights !== undefined ? triangle.lights : lights,
         style,
         fog,
         triangle.alpha,

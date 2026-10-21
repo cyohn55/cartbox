@@ -89,6 +89,7 @@ import {
   writeArenaMap,
   type StoredArenaMap,
   worldMatrices,
+  lightChannelMask,
   type MeshAsset,
   type AnimatorSpec,
   type PhysicsSpec,
@@ -145,6 +146,8 @@ export interface MeshSidecarEntry {
   readonly level?: string;
   /** Kept loaded whatever the distance when the scene streams (see streaming.ts in @cartbox/editor). */
   readonly alwaysLoaded?: true;
+  /** The lighting channels it is lit on (F2e; see SceneLight.channels in @cartbox/editor); absent, the first. */
+  readonly lightChannels?: number;
   /** Components attached to this object, with its field values (see components.ts in @cartbox/editor). */
   readonly components?: readonly AttachedComponent[];
   /** A parametric shape (P5; see shapeGenerators.ts in @cartbox/editor): its mesh is built from these parameters, and rebuilt when they change. */
@@ -416,6 +419,7 @@ export function decodeMeshSidecar(raw: string | null | undefined): MeshSidecar {
       ...(readAnimatorSpec(record.animator) ? { animator: readAnimatorSpec(record.animator)! } : {}),
       ...(typeof record.level === "string" && record.level ? { level: record.level } : {}),
       ...(record.alwaysLoaded === true ? { alwaysLoaded: true as const } : {}),
+      ...(record.lightChannels !== undefined && lightChannelMask(record.lightChannels) !== 1 ? { lightChannels: lightChannelMask(record.lightChannels) } : {}),
       ...(attached(record.components).length > 0 ? { components: attached(record.components) } : {}),
       ...(readParametric((record as { shape?: unknown }).shape) ? { shape: readParametric((record as { shape?: unknown }).shape)! } : {}),
     });
@@ -834,6 +838,19 @@ export function setMeshAlwaysLoaded(sidecar: MeshSidecar, id: string, always: bo
       if (m.id !== id) return m;
       const { alwaysLoaded: _drop, ...rest } = m;
       return always ? { ...rest, alwaysLoaded: true as const } : rest;
+    }),
+  };
+}
+
+/** Light an object on these lighting channels (F2e); the first alone is the default, and stored as nothing. */
+export function setMeshLightChannels(sidecar: MeshSidecar, id: string, channels: number): MeshSidecar {
+  const mask = lightChannelMask(channels);
+  return {
+    ...sidecar,
+    meshes: sidecar.meshes.map((m) => {
+      if (m.id !== id) return m;
+      const { lightChannels: _drop, ...rest } = m;
+      return mask === 1 ? rest : { ...rest, lightChannels: mask };
     }),
   };
 }

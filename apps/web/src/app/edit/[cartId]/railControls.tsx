@@ -18,7 +18,7 @@
 
 import { useEffect, useState, type ReactNode } from "react";
 
-import { formatPhysical } from "@cartbox/editor";
+import { LIGHT_CHANNEL_COUNT, formatPhysical } from "@cartbox/editor";
 
 import styles from "./editor.module.css";
 import { resolveGroupOpen, useEditorDensity } from "./editorDensity";
@@ -341,5 +341,36 @@ export function PhysicalRange({ label, unit, min, max, value, onChange }: { labe
       display={formatPhysical(value, unit)}
       onChange={(position) => onChange(position <= lo - 0.025 ? 0 : 10 ** position)}
     />
+  );
+}
+
+/**
+ * A lighting-channel mask (F2e), one toggle a channel: a light lights an
+ * object when their masks share a channel. At least one stays on unless
+ * `allowNone`, as a light on none lights nothing.
+ */
+export function ChannelMask({ label, value, onChange, allowNone = false }: { label: string; value: number; onChange: (mask: number) => void; allowNone?: boolean }) {
+  return (
+    <RailGroup label={label}>
+      <div className={`${styles.segmented} ${styles.segmentedWrap}`} role="group" aria-label={label}>
+        {Array.from({ length: LIGHT_CHANNEL_COUNT }, (_, channel) => {
+          const on = (value & (1 << channel)) !== 0;
+          const next = value ^ (1 << channel);
+          return (
+            <button
+              key={channel}
+              type="button"
+              className={`${styles.segment} ${on ? styles.segmentActive : ""}`}
+              aria-pressed={on}
+              title={`Channel ${channel + 1}`}
+              disabled={on && next === 0 && !allowNone}
+              onClick={() => onChange(next)}
+            >
+              {channel + 1}
+            </button>
+          );
+        })}
+      </div>
+    </RailGroup>
   );
 }

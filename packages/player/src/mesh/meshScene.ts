@@ -73,6 +73,7 @@ import {
   type DecalMark,
   parseComponentDefs,
   parseAttached,
+  lightChannelMask,
   type ComponentDef,
   type AttachedComponent,
 } from "@cartbox/editor";
@@ -351,7 +352,7 @@ export function parseMeshScene(raw: string | null | undefined): MeshScene | null
     }
     return byBase.get(key) ?? null;
   };
-  type Record_ = { mesh?: unknown; variant?: unknown; transform?: unknown; frames?: unknown; lods?: unknown; id?: unknown; name?: unknown; parent?: unknown; tags?: unknown; props?: unknown; physics?: unknown; animator?: unknown; level?: unknown; alwaysLoaded?: unknown; components?: unknown };
+  type Record_ = { mesh?: unknown; variant?: unknown; transform?: unknown; frames?: unknown; lods?: unknown; id?: unknown; name?: unknown; parent?: unknown; tags?: unknown; props?: unknown; physics?: unknown; animator?: unknown; level?: unknown; alwaysLoaded?: unknown; components?: unknown; lightChannels?: unknown };
   const readEntry = (record: Record_, id: string, parentId: string | null, identity = false): Parsed | null => {
     if (typeof record.mesh !== "string") return null;
     const resolved = resolveMeshRef(record.mesh, library);
@@ -378,6 +379,7 @@ export function parseMeshScene(raw: string | null | undefined): MeshScene | null
       ...(typeof record.level === "string" && record.level ? { levelId: record.level } : {}),
       ...(record.alwaysLoaded === true ? { alwaysLoaded: true as const } : {}),
       ...(components.length > 0 ? { components } : {}),
+      ...(record.lightChannels !== undefined ? { lightChannels: lightChannelMask(record.lightChannels) } : {}),
       parentId,
     };
   };

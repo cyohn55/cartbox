@@ -219,6 +219,8 @@ layout(std140) uniform Uniforms {
   vec4 terrain0; // x = triplanar repeat (0 = UVs), y = height-blend sharpness (B6)
   vec4 wind0;    // xy = wind x, z × strength, z = phase (0..1), w = gust (B6)
   vec4 maps0;    // x = 1 when a normal map is bound (P1a)
+  vec4 wind1;    // the previous frame's wind0 (motion vectors, unused here)
+  vec4 motion0;  // y = the draw's lighting channels (F2e)
 } u;
 `;
 
@@ -747,6 +749,9 @@ vec3 envReflect(vec3 P, vec3 R, float rough) {
 // light loop: point and spot lights fall off to nothing at their range, a spot
 // fades across its cone, and directional lights honour the sun shadow (sf).
 vec3 lightTerm(Light lgt, vec3 P, vec3 N, vec3 V, float ndv, float a2, float k, vec3 f0, float kdm, vec3 albedo, float sf) {
+  // d3.w: inverse square in bit 0, the light's channels above it, which the draw's must share (F2e).
+  uint bits = uint(lgt.d3.w + 0.5);
+  if (((bits >> 1u) & uint(u.motion0.y + 0.5)) == 0u) { return vec3(0.0); }
   vec3 Ld;
   float atten = 1.0;
   if (lgt.d0.w > 0.5) {
@@ -754,7 +759,7 @@ vec3 lightTerm(Light lgt, vec3 P, vec3 N, vec3 V, float ndv, float a2, float k, 
     float dist = max(length(toL), 1e-4);
     Ld = toL / dist;
     float range = lgt.d2.x;
-    if (lgt.d3.w > 0.5) { // inverse square, windowed to its range
+    if ((bits & 1u) != 0u) { // inverse square, windowed to its range
       float win = 1.0;
       if (range > 0.0) { float q = dist / range; float t = clamp(1.0 - q * q * q * q, 0.0, 1.0); win = t * t; }
       float d = max(dist, 0.01);
@@ -1516,6 +1521,7 @@ export class WebglSceneRenderer implements SceneRenderer {
         mapping: resolveMapping(batch.primitive.material),
         hasNormalMap: batch.textures.normal !== null,
         wind: batch.primitive.sway ? windUniform(draw.wind, draw.time ?? 0) : null,
+        lightChannels: batch.channels,
       });
     });
     for (const chunk of chunks) {

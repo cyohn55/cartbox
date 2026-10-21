@@ -110,9 +110,10 @@ describe("inverse-square falloff", () => {
       { kind: "point", position: [0, 1, 0], color: [1, 1, 1], intensity: 1, range: 4, falloff: "inverseSquare" },
       { kind: "spot", position: [0, 1, 0], direction: [0, -1, 0], color: [1, 1, 1], intensity: 1, range: 4, falloff: "inverseSquare" },
     ]);
-    expect(packed[LIGHT_FLOATS - 1]).toBe(0);
-    expect(packed[2 * LIGHT_FLOATS - 1]).toBe(1);
-    expect(packed[3 * LIGHT_FLOATS - 1]).toBe(1);
+    // Bit 0 of d3.w; the lights' channels (F2e, the first) sit above it.
+    expect(packed[LIGHT_FLOATS - 1]).toBe(2);
+    expect(packed[2 * LIGHT_FLOATS - 1]).toBe(3);
+    expect(packed[3 * LIGHT_FLOATS - 1]).toBe(3);
   });
 });
 
