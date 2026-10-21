@@ -106,6 +106,55 @@ function ColorRow({ label, value, onChange }: { label: string; value: Rgb; onCha
   );
 }
 
+const AREA_SHAPE_LABEL: Record<NonNullable<SceneLight["shape"]>, string> = { rect: "Panel", disk: "Disk", tube: "Tube" };
+
+/** An area light's shape, size and frame (F2e-2). */
+function AreaShapeControls({ light, index, onPatch }: { light: SceneLight; index: number; onPatch: (patch: Partial<SceneLight>) => void }) {
+  const shape = light.shape ?? "rect";
+  const [w, h] = light.size ?? [1, 0.5];
+  return (
+    <>
+      <SegmentedControl
+        label="Shape"
+        ariaLabel={`Light ${index + 1} shape`}
+        selected={shape}
+        onSelect={(next) => onPatch({ shape: next, size: next === "disk" ? [w, w] : next === "tube" ? [w, Math.min(h, 0.1)] : [w, h] })}
+        options={[
+          { id: "rect", label: "Panel", hint: "A glowing rectangle: a window, a light panel, a screen. It lights the side it faces" },
+          { id: "disk", label: "Disk", hint: "A glowing disk: a downlight, a round lamp. It lights the side it faces" },
+          { id: "tube", label: "Tube", hint: "A glowing capsule: a strip light or neon. It lights all round" },
+        ]}
+      />
+      <RangeControl
+        label={shape === "disk" ? "Diameter" : shape === "tube" ? "Length" : "Width"}
+        nested
+        min={0.05}
+        max={10}
+        step={0.05}
+        value={w}
+        ariaLabel={`Light ${index + 1} ${shape === "disk" ? "diameter" : shape === "tube" ? "length" : "width"}`}
+        display={`${w.toFixed(2)} m`}
+        onChange={(v) => onPatch({ size: shape === "disk" ? [v, v] : [v, h] })}
+      />
+      {shape !== "disk" && (
+        <RangeControl
+          label={shape === "tube" ? "Thickness" : "Height"}
+          nested
+          min={shape === "tube" ? 0.01 : 0.05}
+          max={shape === "tube" ? 1 : 10}
+          step={0.01}
+          value={h}
+          ariaLabel={`Light ${index + 1} ${shape === "tube" ? "thickness" : "height"}`}
+          display={`${h.toFixed(2)} m`}
+          onChange={(v) => onPatch({ size: [w, v] })}
+        />
+      )}
+      {shape !== "tube" && <VectorRow label="Faces" step={0.1} value={light.direction ?? [0, -1, 0]} onChange={(direction) => onPatch({ direction })} />}
+      <VectorRow label={shape === "tube" ? "Along" : "Width along"} step={0.1} value={light.tangent ?? [1, 0, 0]} onChange={(tangent) => onPatch({ tangent })} />
+    </>
+  );
+}
+
 /** Three numeric inputs editing a world-space vector (direction or position). */
 function VectorRow({
   label,
@@ -341,10 +390,10 @@ export function LightingEditor({ lighting, onChange }: LightingEditorProps) {
               title="Edit this light"
               style={{ display: "flex", alignItems: "center", gap: 6, width: "100%", marginBottom: 3, textAlign: "left" }}
             >
-              <span aria-hidden>{light.kind === "directional" ? "☀" : light.kind === "spot" ? "◢" : "●"}</span>
+              <span aria-hidden>{light.kind === "directional" ? "☀" : light.kind === "spot" ? "◢" : light.kind === "area" ? "▭" : "●"}</span>
               <span aria-hidden style={{ width: 10, height: 10, borderRadius: 5, flex: "0 0 auto", background: `rgb(${light.color.map((c) => Math.round(c * 255)).join(",")})` }} />
               <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                {light.kind === "directional" ? "Sun" : light.kind === "spot" ? "Spot" : "Point"} · {where}
+                {light.kind === "directional" ? "Sun" : light.kind === "spot" ? "Spot" : light.kind === "area" ? AREA_SHAPE_LABEL[light.shape ?? "rect"] : "Point"} · {where}
               </span>
             </button>
           );
@@ -364,11 +413,17 @@ export function LightingEditor({ lighting, onChange }: LightingEditorProps) {
                 updateSceneLight(
                   lighting,
                   index,
-                  kind === "directional"
-                    ? { kind, direction: light.direction ?? [0.4, 0.8, 0.6], position: undefined, range: undefined, innerAngle: undefined, outerAngle: undefined, falloff: undefined }
-                    : kind === "spot"
-                      ? { kind, position: light.position ?? [0, 3, 0], range: light.range || 12, direction: [0, -1, 0], innerAngle: light.innerAngle ?? 20, outerAngle: light.outerAngle ?? 30 }
-                      : { kind, position: light.position ?? [0, 1, 0], range: light.range ?? 0, direction: undefined, innerAngle: undefined, outerAngle: undefined },
+                  {
+                    // An area light's shape and frame go when it becomes another kind.
+                    ...(kind === "area" ? {} : { shape: undefined, size: undefined, tangent: undefined }),
+                    ...(kind === "directional"
+                      ? { kind, direction: light.direction ?? [0.4, 0.8, 0.6], position: undefined, range: undefined, innerAngle: undefined, outerAngle: undefined, falloff: undefined }
+                      : kind === "spot"
+                        ? { kind, position: light.position ?? [0, 3, 0], range: light.range || 12, direction: [0, -1, 0], innerAngle: light.innerAngle ?? 20, outerAngle: light.outerAngle ?? 30 }
+                        : kind === "area"
+                          ? { kind, shape: "rect", size: [1, 0.5], position: light.position ?? [0, 3, 0], direction: [0, -1, 0], tangent: [1, 0, 0], range: light.range || 12, innerAngle: undefined, outerAngle: undefined, falloff: undefined, castShadows: undefined }
+                          : { kind, position: light.position ?? [0, 1, 0], range: light.range ?? 0, direction: undefined, innerAngle: undefined, outerAngle: undefined }),
+                  },
                 ),
               )
             }
@@ -376,6 +431,7 @@ export function LightingEditor({ lighting, onChange }: LightingEditorProps) {
               { id: "directional", label: "Sun" },
               { id: "point", label: "Point" },
               { id: "spot", label: "Spot" },
+              { id: "area", label: "Area", hint: "A glowing rectangle, disk or tube: soft, shaped highlights and shading on the AAA tier, and a light from its face elsewhere" },
             ]}
           />
           <ColorRow
@@ -412,7 +468,16 @@ export function LightingEditor({ lighting, onChange }: LightingEditorProps) {
             allowNone
             onChange={(channels) => onChange(updateSceneLight(lighting, index, { channels: channels === 1 ? undefined : channels }))}
           />
-          {physical ? (
+          {physical && light.kind === "area" ? (
+            <PhysicalRange
+              label="Luminance"
+              unit="nt"
+              min={1}
+              max={1e8}
+              value={unitsToNits(light.intensity)}
+              onChange={(value) => onChange(updateSceneLight(lighting, index, { intensity: nitsToUnits(value) }))}
+            />
+          ) : physical ? (
             <PhysicalRange
               label={lightUnit(light) === "cd" ? "Luminous intensity" : light.kind === "directional" ? "Illuminance" : "Illuminance at the light"}
               unit={lightUnit(light)}
@@ -460,6 +525,11 @@ export function LightingEditor({ lighting, onChange }: LightingEditorProps) {
                 display={light.range ? `${light.range}` : "∞"}
                 onChange={(range) => onChange(updateSceneLight(lighting, index, { range }))}
               />
+              {light.kind === "area" && (
+                <AreaShapeControls light={light} index={index} onPatch={(patch) => onChange(updateSceneLight(lighting, index, patch))} />
+              )}
+              {light.kind !== "area" && (
+              <>
               <SegmentedControl
                 label="Falloff"
                 ariaLabel={`Light ${index + 1} falloff`}
@@ -480,6 +550,8 @@ export function LightingEditor({ lighting, onChange }: LightingEditorProps) {
                   { id: "on", label: "Cast", hint: "This light throws shadows (it needs a range); a spot takes one shadow map, a point light six" },
                 ]}
               />
+              </>
+              )}
               {light.kind === "spot" && (
                 <>
                   <VectorRow

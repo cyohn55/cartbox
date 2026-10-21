@@ -6,7 +6,7 @@
  * @cartbox/editor). Pure.
  */
 
-import { lightColor, type BounceLights, type SceneLight, type SceneLighting } from "@cartbox/editor";
+import { areaAsPunctual, lightColor, type BounceLights, type SceneLight, type SceneLighting } from "@cartbox/editor";
 
 /** The cart's sun this frame: the direction toward it, and its colour with its intensity folded in. */
 export interface CartSun {
@@ -68,7 +68,9 @@ export function bounceLightsFor(authored: SceneLighting, frame: SceneLighting, c
     key?.direction
       ? { direction: key.direction, color: [0, 1, 2].map((k) => (reference[k]! > 1e-6 ? (lightColor(key)[k]! * key.intensity) / reference[k]! : 0)) as [number, number, number] }
       : null;
+  // An area light (F2e-2) bounces as the punctual light it is from far off.
   const points = [...frame.lights, ...cart]
+    .map(areaAsPunctual)
     .filter((x) => (x.kind === "point" || x.kind === "spot") && x.position)
     .map((x) => ({ position: x.position!, color: lightColor(x).map((c) => (c * x.intensity) / brightness) as [number, number, number], range: x.range && x.range > 0 ? x.range : 8, ...(x.falloff ? { falloff: x.falloff } : {}) }));
   return { sun, points };

@@ -29,6 +29,7 @@ import { localShadowVisibility, type LocalShadows } from "./localShadows";
 import { sampleLightProbes, type LightProbeGrid } from "../model/lightProbes";
 import { EFFECT_RIM_POWER, bandAmount, camoThreshold, effectActive, type SurfaceEffect } from "./surfaceEffect";
 import { tintToTemperature } from "./lightTemperature";
+import { areaAsPunctual } from "./areaLights";
 
 /** The fog for one frame, with the eye it is seen from (height fog and volumes trace from it). */
 type FrameFog = SceneFog & { readonly eye: readonly [number, number, number] };
@@ -417,10 +418,17 @@ export type ToneMapOperator = "filmic" | "aces" | "agx" | "neutral";
  * (see physicalLight.ts).
  */
 export interface SceneLight {
-  readonly kind: "directional" | "point" | "spot";
-  /** Directional: unit direction *towards* the light. Spot: the direction the beam points. */
+  /** "area" (F2e-2; see areaLights.ts): a rectangle, disk or tube that glows with a luminance, `intensity` in nits' units. */
+  readonly kind: "directional" | "point" | "spot" | "area";
+  /** Directional: unit direction *towards* the light. Spot: the direction the beam points. Area (rectangle, disk): the way its lit face looks. */
   readonly direction?: readonly [number, number, number];
-  /** Point and spot: world-space position. */
+  /** Area: its shape, a rectangle when absent. */
+  readonly shape?: "rect" | "disk" | "tube";
+  /** Area: its size in metres, rectangle width × height, disk diameter, tube length × diameter. */
+  readonly size?: readonly [number, number];
+  /** Area: a rectangle's or disk's width axis (made perpendicular to `direction`), a tube's length. */
+  readonly tangent?: readonly [number, number, number];
+  /** Point, spot and area: world-space position (an area light's centre). */
   readonly position?: readonly [number, number, number];
   readonly color: readonly [number, number, number];
   readonly intensity: number;
@@ -1286,8 +1294,8 @@ export function renderMeshScene(instances: readonly MeshSceneInstance[], options
   const shadow = options.shadow ?? null;
   const tonemap = options.tonemap ?? null;
   const ssao = options.ssao ?? null;
-  // A light's temperature (F2e) is its colour as it shades.
-  const lights = options.lights ? options.lights.map((l) => (l.temperature === undefined ? l : { ...l, color: lightColor(l) })) : null;
+  // A light's temperature (F2e) is its colour as it shades; an area light (F2e-2) the punctual light it is from far off.
+  const lights = options.lights ? options.lights.map((l) => areaAsPunctual(l.temperature === undefined ? l : { ...l, color: lightColor(l) })) : null;
   const localShadows = options.localShadows ?? null;
   const fog: FrameFog | null = options.fog ? { ...options.fog, eye: cameraPositionFromView(view) } : null;
   const style = options.style ?? DEFAULT_RASTER_STYLE;

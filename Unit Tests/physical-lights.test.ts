@@ -103,8 +103,8 @@ describe("lighting channels", () => {
       { kind: "directional", direction: [0, 1, 0], color: [1, 1, 1], intensity: 1, channels: 5 },
       { kind: "point", position: [0, 0, 0], color: [1, 1, 1], intensity: 1, range: 3, falloff: "inverseSquare", channels: 2 },
     ]);
-    expect(packed[LIGHT_FLOATS - 1]).toBe(10);
-    expect(packed[2 * LIGHT_FLOATS - 1]).toBe(5);
+    expect(packed[15]).toBe(10);
+    expect(packed[LIGHT_FLOATS + 15]).toBe(5);
   });
 
   it("splits a primitive's copies into one batch a channel mask", () => {

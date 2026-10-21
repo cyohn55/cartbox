@@ -75,10 +75,11 @@ export function formatPhysical(value: number, unit: string): string {
 }
 
 /** The physical unit a light's intensity reads in. */
-export type LightUnit = "lx" | "cd";
+export type LightUnit = "lx" | "cd" | "nt";
 
-/** A sun reads in lux, an inverse-square light in candela, and a light with the default fade in lux (next to it). */
+/** A sun reads in lux, an inverse-square light in candela, a light with the default fade in lux (next to it), and an area light in nits (its luminance). */
 export function lightUnit(light: Pick<SceneLight, "kind" | "falloff">): LightUnit {
+  if (light.kind === "area") return "nt";
   return light.kind !== "directional" && light.falloff === "inverseSquare" ? "cd" : "lx";
 }
 
@@ -89,7 +90,7 @@ export function lightUnit(light: Pick<SceneLight, "kind" | "falloff">): LightUni
  * such point, and the intensity carries over. A sun is returned as it is.
  */
 export function withLightFalloff(light: SceneLight, inverseSquare: boolean): SceneLight {
-  if (light.kind === "directional" || (light.falloff === "inverseSquare") === inverseSquare) return light;
+  if (light.kind === "directional" || light.kind === "area" || (light.falloff === "inverseSquare") === inverseSquare) return light;
   const { falloff: _old, ...rest } = light;
   const range = light.range ?? 0;
   if (range <= 0) return inverseSquare ? { ...rest, falloff: "inverseSquare" } : rest;

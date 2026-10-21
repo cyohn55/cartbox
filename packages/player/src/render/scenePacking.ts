@@ -26,6 +26,9 @@ import {
   spotCone,
   lightColor,
   lightChannelMask,
+  areaAsPunctual,
+  areaFrame,
+  areaSize,
   fogIsVolumetric,
   type EnvironmentLight,
   type Mat4,
@@ -37,6 +40,8 @@ import {
   type SceneLight,
   type SurfaceEffect,
 } from "@cartbox/editor";
+
+import { AREA_KIND } from "./ltc.js";
 
 /**
  * WGSL uniform layout, in bytes:
@@ -128,16 +133,21 @@ export const UNIFORM_BYTES_USED = 944;
 export const UNIFORM_FLOATS = UNIFORM_STRIDE / 4;
 
 /**
- * Floats per light in the storage buffer: four vec4s —
- *   d0: xyz = direction (directional) or world position (point, spot), w = kind (0 directional, 1 point, 2 spot)
- *   d1: rgb = colour, w = intensity
- *   d2: x = range (0 = no falloff), y = spot cone's outer cosine, z = its inner cosine,
- *       w = first shadow tile (EP8c), −1 when it casts none
- *   d3: xyz = spot beam axis (unit, the way it points), w = 1 for inverse-square
- *       falloff, plus twice its lighting channels (F2e), the bits a draw's must share
+ * Floats per light in the storage buffer: five vec4s —
+ *   d0: xyz = direction (directional) or world position (point, spot; an area
+ *       light's centre), w = kind (0 directional, 1 point, 2 spot; 3, 4, 5 an
+ *       area rectangle, disk or tube, F2e-2)
+ *   d1: rgb = colour, w = intensity (an area light's luminance)
+ *   d2: x = range (0 = no falloff), y = spot cone's outer cosine, z = its inner cosine
+ *       (an area light's half width and half height: a disk's radius twice, a
+ *       tube's half length and radius), w = first shadow tile (EP8c), −1 when it casts none
+ *   d3: xyz = spot beam axis (unit, the way it points; the way an area light's lit
+ *       face looks), w = 1 for inverse-square falloff, plus twice its lighting
+ *       channels (F2e), the bits a draw's must share
+ *   d4: xyz = an area light's tangent (its width axis, a tube's length)
  * Matches the `Light` struct in the WGSL and GLSL scene shaders.
  */
-export const LIGHT_FLOATS = 16;
+export const LIGHT_FLOATS = 20;
 
 /**
  * Floats per reflection probe in its buffer: four vec4s — box min, box max,
@@ -162,7 +172,10 @@ export function packProbes(set: ReflectionProbeSet | null | undefined): Float32A
 
 /** A minimal light for {@link packLights} (mirrors editor's SceneLight). */
 export interface PackableLight {
-  readonly kind: "directional" | "point" | "spot";
+  readonly kind: "directional" | "point" | "spot" | "area";
+  readonly shape?: "rect" | "disk" | "tube";
+  readonly size?: readonly [number, number];
+  readonly tangent?: readonly [number, number, number];
   readonly direction?: readonly [number, number, number];
   readonly position?: readonly [number, number, number];
   readonly color: readonly [number, number, number];
@@ -179,18 +192,21 @@ export interface PackableLight {
 /**
  * Pack a light list into the storage-buffer layout the WGSL loop reads. Always
  * returns at least one (zeroed) light so the binding is never empty; the draw's
- * `lightCount` uniform, not the buffer length, bounds the loop.
+ * `lightCount` uniform, not the buffer length, bounds the loop. With `area`
+ * false (every shader but the linear-light one), an area light (F2e-2) packs
+ * as the punctual light it is from far off.
  */
-export function packLights(lights: readonly PackableLight[]): Float32Array {
+export function packLights(lights: readonly PackableLight[], area = false): Float32Array {
   const out = new Float32Array(Math.max(1, lights.length) * LIGHT_FLOATS);
-  lights.forEach((light, i) => {
+  lights.forEach((authored, i) => {
+    const light: PackableLight = area ? authored : areaAsPunctual(authored as SceneLight);
     const base = i * LIGHT_FLOATS;
     const placed = light.kind !== "directional";
     const v = placed ? light.position ?? [0, 0, 0] : light.direction ?? [0, 1, 0];
     out[base] = v[0]!;
     out[base + 1] = v[1]!;
     out[base + 2] = v[2]!;
-    out[base + 3] = light.kind === "spot" ? 2 : placed ? 1 : 0;
+    out[base + 3] = light.kind === "area" ? AREA_KIND[light.shape ?? "rect"] : light.kind === "spot" ? 2 : placed ? 1 : 0;
     // Its temperature (F2e) is its colour as it shades.
     const color = lightColor(light);
     out[base + 4] = color[0]!;
@@ -200,6 +216,17 @@ export function packLights(lights: readonly PackableLight[]): Float32Array {
     out[base + 8] = light.range ?? 0;
     out[base + 11] = light.shadowTile ?? -1;
     out[base + 15] = (placed && light.falloff === "inverseSquare" ? 1 : 0) + 2 * lightChannelMask(light.channels ?? 1);
+    if (light.kind === "area") {
+      const [w, h] = areaSize(light);
+      const frame = areaFrame(light);
+      out[base + 9] = w / 2;
+      out[base + 10] = h / 2;
+      out[base + 11] = -1; // casts none
+      out.set(frame.normal, base + 12);
+      out.set(frame.tangent, base + 16);
+      // Physical: its luminance falls as the square of the distance by nature, windowed to its range.
+      out[base + 15] = 1 + 2 * lightChannelMask(light.channels ?? 1);
+    }
     if (light.kind === "spot") {
       const [cosOuter, cosInner] = spotCone(light as SceneLight);
       out[base + 9] = cosOuter;
