@@ -422,12 +422,12 @@ describe("resolvePbr", () => {
 });
 
 describe("packLights", () => {
-  it("packs a directional and a point light into four vec4s each", () => {
+  it("packs a directional and a point light into five vec4s each", () => {
     const packed = packLights([
       { kind: "directional", direction: [0, 1, 0], color: [1, 0.5, 0.25], intensity: 2 },
       { kind: "point", position: [3, 4, 5], color: [0, 0, 1], intensity: 1.5, range: 8 },
     ]);
-    expect(LIGHT_FLOATS).toBe(16);
+    expect(LIGHT_FLOATS).toBe(20);
     expect(packed.length).toBe(2 * LIGHT_FLOATS);
     // Directional: d0 = dir + kind 0; d1 = colour + intensity; d2.x = range 0.
     expect(Array.from(packed.subarray(0, 8))).toEqual([0, 1, 0, 0, 1, Math.fround(0.5), Math.fround(0.25), 2]);

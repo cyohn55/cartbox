@@ -631,6 +631,15 @@ export {
   lightColor,
 } from "./render/meshRasterizer";
 export {
+  MIN_AREA_SIZE,
+  areaAsPunctual,
+  areaFrame,
+  areaOf,
+  areaSize,
+  perpendicularTo,
+  type AreaShape,
+} from "./render/areaLights";
+export {
   MIN_LIGHT_TEMPERATURE,
   MAX_LIGHT_TEMPERATURE,
   WHITE_TEMPERATURE,

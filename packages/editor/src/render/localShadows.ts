@@ -43,7 +43,7 @@ export interface LocalShadows {
 
 /** Whether a light casts shadows (it must be a ranged point or spot light). */
 export function castsLocalShadow(light: SceneLight): boolean {
-  return light.castShadows === true && light.kind !== "directional" && (light.range ?? 0) > 0;
+  return light.castShadows === true && (light.kind === "point" || light.kind === "spot") && (light.range ?? 0) > 0;
 }
 
 /** The six faces of a point light, in the order {@link localShadowFace} picks them: +X, −X, +Y, −Y, +Z, −Z. */

@@ -133,6 +133,7 @@ import { FrameGraph, GraphTimer, TransientPool, timingSpan, type FrameResource, 
 import { MAX_ANISOTROPY, MipmapGenerator, coverageMips, hasTransparency, mipLevelCount, uploadCompressed } from "./mipmaps.js";
 import { compressedFormatsFor } from "../lighting/webgpuDevice.js";
 import { brdfWgsl, dfgTable } from "./brdf.js";
+import { ltcTables, ltcWgsl } from "./ltc.js";
 import { IBL_LEVELS, IblBuilder, SH_IRRADIANCE_WGSL, environmentKey, environmentPanorama, environmentSh } from "./ibl.js";
 import { CASCADE_COUNT, CASCADE_FORMAT, CASCADE_SHADOW_WGSL, SUN_SOFTNESS, fitCascades, type Cascade } from "./cascades.js";
 import { REACTIVE_MASK_WGSL, TEMPORAL_SHARPEN_WGSL, TemporalState, hdrTemporalShaderWgsl, temporalShaderWgsl } from "./temporal.js";
@@ -420,6 +421,7 @@ struct Light {
   d1: vec4<f32>,
   d2: vec4<f32>,
   d3: vec4<f32>,
+  d4: vec4<f32>, // xyz = an area light's tangent (F2e-2)
 };
 // Per-frame globals. Clustered lights (EP8): clusterParams = tile size (px),
 // near plane, slice scale; clusterInfo.x = global lights (looped by every
@@ -524,6 +526,7 @@ ${hdr ? "// The spot/point lights' depth atlas, drawn on the GPU (F2d).\n@group(
 @group(1) @binding(7) var sceneColour: texture_2d<f32>;
 ${hdr ? `${brdfWgsl(1, 8)}// The prefiltered cube's sampler: trilinear, so a roughness between levels blends them (F3a).
 @group(1) @binding(9) var envSamp: sampler;
+${ltcWgsl(1, 10)}
 ${SH_IRRADIANCE_WGSL}
 // The comparison sampler that filters the cascades' tests (F2a).
 @group(1) @binding(11) var cascadeSamp: sampler_comparison;
@@ -944,7 +947,7 @@ fn lightTerm(lgt: Light, P: vec3<f32>, N: vec3<f32>, V: vec3<f32>, ndv: f32, a2:
   // d3.w: inverse square in bit 0, the light's channels above it, which the draw's must share (F2e).
   let bits = u32(lgt.d3.w + 0.5);
   if (((bits >> 1u) & u32(u.motion0.y + 0.5)) == 0u) { return vec3<f32>(0.0); }
-  var Ld: vec3<f32>;
+${hdr ? "  // An area light (F2e-2): its rectangle, disk or tube integrated with linearly transformed cosines.\n  if (lgt.d0.w > 2.5) { return areaTerm(lgt, P, N, V, ndv, sqrt(sqrt(a2)), f0, kdm, albedo); }\n" : ""}  var Ld: vec3<f32>;
   var atten = 1.0;
   if (lgt.d0.w > 0.5) { // point or spot
     let toL = lgt.d0.xyz - P;
@@ -1805,6 +1808,8 @@ export class WebgpuSceneRenderer implements SceneRenderer {
       readonly shadowTiles: any;
       /** The split-sum DFG table (F1c). */
       readonly dfg: any;
+      /** The linearly transformed cosines' tables (F2e-2). */
+      readonly ltc: any;
       atlas: any;
       atlasBlank: boolean;
       probes: any;
@@ -2140,6 +2145,8 @@ export class WebgpuSceneRenderer implements SceneRenderer {
         { binding: 8, visibility: SHADER_STAGE_FRAGMENT, buffer: { type: "read-only-storage" } },
         // The prefiltered environment cube's trilinear sampler (F3a).
         { binding: 9, visibility: SHADER_STAGE_FRAGMENT, sampler: { type: "filtering" } },
+        // The linearly transformed cosines' tables, for area lights (F2e-2), read by the linear-light shader.
+        { binding: 10, visibility: SHADER_STAGE_FRAGMENT, buffer: { type: "read-only-storage" } },
         // The comparison sampler that filters the sun's GPU cascades (F2a; group 0 binds the cascades).
         { binding: 11, visibility: SHADER_STAGE_FRAGMENT, sampler: { type: "comparison" } },
       ];
@@ -2236,6 +2243,10 @@ export class WebgpuSceneRenderer implements SceneRenderer {
       const dfg = dfgTable();
       const dfgBuffer = device.createBuffer({ size: dfg.byteLength, usage: 0x80 | 0x08 }); // STORAGE | COPY_DST
       device.queue.writeBuffer(dfgBuffer, 0, dfg);
+      // The linearly transformed cosines' tables (F2e-2), decoded once.
+      const ltc = ltcTables();
+      const ltcBuffer = device.createBuffer({ size: ltc.byteLength, usage: 0x80 | 0x08 }); // STORAGE | COPY_DST
+      device.queue.writeBuffer(ltcBuffer, 0, ltc);
       const iblSampler = device.createSampler({ magFilter: "linear", minFilter: "linear", mipmapFilter: "linear", addressModeU: "clamp-to-edge", addressModeV: "clamp-to-edge", addressModeW: "clamp-to-edge" });
       const atlasBlank = hdr
         ? device.createTexture({ size: { width: 1, height: 1 }, format: "depth32float", usage: 0x04 | 0x10 }) // TEXTURE_BINDING | RENDER_ATTACHMENT
@@ -2364,6 +2375,7 @@ export class WebgpuSceneRenderer implements SceneRenderer {
           { binding: 6, resource: probes.createView({ dimension: "3d" }) },
           { binding: 8, resource: { buffer: dfgBuffer } },
           { binding: 9, resource: iblSampler },
+          { binding: 10, resource: { buffer: ltcBuffer } },
           { binding: 11, resource: cascades.sampler },
         ];
         return {
@@ -2383,6 +2395,7 @@ export class WebgpuSceneRenderer implements SceneRenderer {
           { binding: 6, resource: probes.createView({ dimension: "3d" }) },
           { binding: 8, resource: { buffer: dfgBuffer } },
           { binding: 9, resource: iblSampler },
+          { binding: 10, resource: { buffer: ltcBuffer } },
           { binding: 11, resource: cascades.sampler },
         ];
         return {
@@ -2399,6 +2412,7 @@ export class WebgpuSceneRenderer implements SceneRenderer {
         clusters: clusterBuffers,
         shadowTiles,
         dfg: dfgBuffer,
+        ltc: ltcBuffer,
         atlas: atlasBlank,
         atlasBlank: true,
         probes: probesBlank,
@@ -2792,7 +2806,7 @@ export class WebgpuSceneRenderer implements SceneRenderer {
     const drawnProjection = temporal ? temporal.projection : draw.projection;
     this.frameDepthView = this.hdr && prepass ? { viewProj, terms: [drawnProjection[10]!, drawnProjection[14]!] } : null;
     const { ordered } = this.clusterLights(localPlan ? { ...draw, lights: localPlan.lights, localShadows: null } : draw);
-    this.uploadLights(packLights(ordered));
+    this.uploadLights(packLights(ordered, this.hdr));
     const lightCount = ordered.length;
 
     const camera = refractionCamera(draw.view, this.height);
@@ -3965,6 +3979,7 @@ export class WebgpuSceneRenderer implements SceneRenderer {
     destroySafely(this.depthGroups.clusters.params);
     destroySafely(this.depthGroups.shadowTiles);
     destroySafely(this.depthGroups.dfg);
+    destroySafely(this.depthGroups.ltc);
     destroySafely(this.depthGroups.atlas);
     destroySafely(this.depthGroups.probes);
     destroySafely(this.blankTexture);
