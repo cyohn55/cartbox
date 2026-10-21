@@ -15,6 +15,10 @@
  *   when its light, rect or the still casters change, or when something that
  *   moves reaches its light (or did last frame); a static lamp's map is drawn
  *   once.
+ * - **Contact shadows (F2d-3).** With a prepass, the opaque pass holds its
+ *   depths read-only and binds them, and each shadowed light's test ends with
+ *   a short march toward the light across them ({@link LOCAL_CONTACT_LENGTH}),
+ *   so what the tile is too coarse for still grounds what it lights.
  * - **Depth as drawn.** A face's GL-style projection is remapped to WebGPU's
  *   0..1 depth for drawing. The shader still reads distances (the same
  *   `linear` terms as the CPU tiles), so its world-unit bias carries over; it
@@ -32,6 +36,10 @@ export const MAX_GPU_LOCAL_TILES = 64;
 export const LOCAL_TILE_SIZES: readonly number[] = [1024, 512, 256];
 /** Screen coverage (its range's share of half the view's height) from which a light gets each size. */
 export const LOCAL_TILE_COVERAGE: readonly number[] = [0.5, 0.15];
+/** The local lights' contact shadows (F2d-3): how far toward the light they march (world units), in how many steps, and how thick a surface is taken to be. */
+export const LOCAL_CONTACT_LENGTH = 0.4;
+export const LOCAL_CONTACT_STEPS = 10;
+export const LOCAL_CONTACT_THICKNESS = 0.2;
 /** Floats per tile record: world → GL clip (16), linear terms (x, y), its rect in the atlas (x, y, size, 0). */
 export const LOCAL_TILE_FLOATS = 24;
 
@@ -279,6 +287,34 @@ fn localShadow(first: i32, lgt: Light, P: vec3<f32>, cosL: f32) -> f32 {
       lit = lit + textureSampleCompareLevel(localDepth, cascadeSamp, base + vec2<f32>(f32(x), f32(y)) / atlas, depthRef);
     }
   }
-  return lit / 9.0;
+  return lit / 9.0 * localContact(P, lgt.d0.xyz);
+}
+// The light's contact shadow (F2d-3): a short march from P toward the light across the prepass's
+// depths, which the scene shades with bound, for what its tile is too coarse to resolve. An opaque or
+// cut-out surface's alone, as only they are in those depths.
+fn localContact(P: vec3<f32>, lp: vec3<f32>) -> f32 {
+  if (frame.depthTerms.z < 0.5 || u.pbr.w > 1.5) { return 1.0; }
+  let toLight = lp - P;
+  let dist = length(toLight);
+  if (dist < 1e-3) { return 1.0; }
+  let L = toLight / dist;
+  let reach = min(${LOCAL_CONTACT_LENGTH}, dist * 0.5);
+  let size = vec2<f32>(textureDimensions(sceneDepth));
+  let jitter = fract(52.9829189 * fract(dot(shadowPixel, vec2<f32>(0.06711056, 0.00583715))));
+  for (var i = 0; i < ${LOCAL_CONTACT_STEPS}; i = i + 1) {
+    let t = 0.01 + (f32(i) + jitter) / ${LOCAL_CONTACT_STEPS}.0 * reach;
+    let c = frame.viewProj * vec4<f32>(P + L * t, 1.0);
+    if (c.w <= 1e-4) { break; }
+    let s = vec2<f32>((c.x / c.w * 0.5 + 0.5) * size.x, (0.5 - c.y / c.w * 0.5) * size.y);
+    if (s.x < 0.0 || s.y < 0.0 || s.x >= size.x || s.y >= size.y) { break; }
+    // Within a pixel and a half of where it started the ray is still over its own surface.
+    if (distance(s, shadowPixel) < 1.5) { continue; }
+    let z = textureLoad(sceneDepth, vec2<i32>(s), 0);
+    let surface = frame.depthTerms.y / (z + frame.depthTerms.x);
+    // In front of the step, by no more than a thickness: an occluder, not a wall it passes behind.
+    let gap = c.w - surface;
+    if (gap > 0.0 && gap < ${LOCAL_CONTACT_THICKNESS} + t * 0.5) { return 0.0; }
+  }
+  return 1.0;
 }
 `;

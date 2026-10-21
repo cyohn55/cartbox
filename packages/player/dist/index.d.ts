@@ -4998,6 +4998,8 @@ declare class WebgpuSceneRenderer implements SceneRenderer {
     private contact;
     /** Whether this frame's sun takes contact shadows (F2c), for the frame uniform. */
     private frameContact;
+    /** The frame's world → clip as drawn and its depth → distance terms, when its depths are readable as it shades (F2d-3). */
+    private frameDepthView;
     /** Whether this frame's ambient light takes GTAO (F3c), for the frame uniform. */
     private frameGtao;
     /**
