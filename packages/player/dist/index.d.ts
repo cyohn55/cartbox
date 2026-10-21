@@ -5327,7 +5327,8 @@ declare const UNIFORM_FLOATS: number;
  *   d1: rgb = colour, w = intensity
  *   d2: x = range (0 = no falloff), y = spot cone's outer cosine, z = its inner cosine,
  *       w = first shadow tile (EP8c), −1 when it casts none
- *   d3: xyz = spot beam axis (unit, the way it points)
+ *   d3: xyz = spot beam axis (unit, the way it points), w = 1 for inverse-square
+ *       falloff, plus twice its lighting channels (F2e), the bits a draw's must share
  * Matches the `Light` struct in the WGSL and GLSL scene shaders.
  */
 declare const LIGHT_FLOATS = 16;
@@ -5343,6 +5344,8 @@ interface PackableLight {
     readonly innerAngle?: number;
     readonly outerAngle?: number;
     readonly shadowTile?: number;
+    readonly temperature?: number;
+    readonly channels?: number;
 }
 /**
  * Pack a light list into the storage-buffer layout the WGSL loop reads. Always
@@ -5544,6 +5547,8 @@ interface InstanceUniform {
     readonly windBefore?: readonly [number, number, number, number] | null;
     /** Where the frame's motion transforms start in the instance buffer (F0c). */
     readonly motionBase?: number;
+    /** The lighting channels the draw's copies are on (F2e), absent the first. */
+    readonly lightChannels?: number;
 }
 /**
  * A draw's triplanar repeat (0 = UV mapping) and height-blend sharpness (0 = an
