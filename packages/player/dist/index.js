@@ -20631,7 +20631,7 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
         return {
           // After a prepass the opaque surfaces meet their own depths again: less-or-equal lets them through.
           // After a prepass the opaque pass only tests its depths (and reads them, F2d-3): it writes none.
-          opaque: pipelineFor(null, !prepass, prepass ? "less-equal" : "less"),
+          opaque: pipelineFor(null, !(prepass && hdr), prepass ? "less-equal" : "less"),
           ...prepass ? { prepass: pipelineFor(null, true, "less", true) } : {},
           blend: pipelineFor({ color: { srcFactor: "one", dstFactor: "one-minus-src-alpha", operation: "add" }, alpha: { srcFactor: "one", dstFactor: "one-minus-src-alpha", operation: "add" } }, false),
           add: pipelineFor({ color: { srcFactor: "one", dstFactor: "one", operation: "add" }, alpha: { srcFactor: "zero", dstFactor: "one", operation: "add" } }, false)
@@ -20781,7 +20781,9 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
         ];
         return {
           blank: device.createBindGroup({ layout: depthLayout, entries: [{ binding: 0, resource: blankDepth.createView() }, ...shared, { binding: 7, resource: behindBlank.createView() }] }),
-          scene: device.createBindGroup({ layout: depthLayout, entries: [{ binding: 0, resource: sized.depth.createView() }, ...shared, { binding: 7, resource: sized.behind.createView() }] })
+          scene: device.createBindGroup({ layout: depthLayout, entries: [{ binding: 0, resource: sized.depth.createView() }, ...shared, { binding: 7, resource: sized.behind.createView() }] }),
+          // The opaque pass after a prepass (F2d-3): the depths, but not the scene it is still drawing (and may resolve into).
+          opaque: device.createBindGroup({ layout: depthLayout, entries: [{ binding: 0, resource: sized.depth.createView() }, ...shared, { binding: 7, resource: behindBlank.createView() }] })
         };
       };
       const makeGroupsMs = (atlas, probes, blank, depth) => {
@@ -20798,7 +20800,8 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
         ];
         return {
           blank: device.createBindGroup({ layout: depthLayoutMs, entries: [{ binding: 0, resource: blank.createView() }, ...shared, { binding: 7, resource: behindBlank.createView() }] }),
-          scene: device.createBindGroup({ layout: depthLayoutMs, entries: [{ binding: 0, resource: depth.createView() }, ...shared, { binding: 7, resource: sized.behind.createView() }] })
+          scene: device.createBindGroup({ layout: depthLayoutMs, entries: [{ binding: 0, resource: depth.createView() }, ...shared, { binding: 7, resource: sized.behind.createView() }] }),
+          opaque: device.createBindGroup({ layout: depthLayoutMs, entries: [{ binding: 0, resource: depth.createView() }, ...shared, { binding: 7, resource: behindBlank.createView() }] })
         };
       };
       const depthGroups = {
@@ -21420,6 +21423,7 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     if (this.frameContact || this.frameGtao) {
       this.addScreenShading(graph, depth, gbuffer, velocity, draw.view, temporal ? temporal.projection : draw.projection, this.frameContact ? draw.lightDirection ?? null : null, ssao !== null, msaa !== null);
     }
+    const readDepths = prepass && this.hdr;
     const scenePass = (name, from, to, load, last) => graph.addPass(name, "render", (pass) => {
       const resolving = msaa !== null && last;
       const resolveBehind = msaa !== null && behind !== null && !load;
@@ -21430,7 +21434,7 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
       if (resolving) for (const t of [colour, ...rays]) pass.write(t);
       if (resolveBehind) pass.write(behind);
       if (load || prepass) pass.read(depth, "attachment");
-      if (!load && !prepass) pass.write(depth);
+      if (!load && !readDepths) pass.write(depth);
       return (ctx) => {
         const attachment = (t, resolved) => ({
           view: ctx.texture(t).createView(),
@@ -21444,10 +21448,10 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
             { ...attachment(target, resolving ? colour : null), ...resolveBehind ? { resolveTarget: ctx.texture(behind).createView() } : {} },
             ...rayTargets.map((t, k) => attachment(t, resolving ? rays[k] : null))
           ],
-          depthStencilAttachment: load || prepass ? { view: ctx.texture(depth).createView(), depthReadOnly: true } : { view: ctx.texture(depth).createView(), depthClearValue: 1, depthLoadOp: "clear", depthStoreOp: "store" },
+          depthStencilAttachment: load || readDepths ? { view: ctx.texture(depth).createView(), depthReadOnly: true } : prepass ? { view: ctx.texture(depth).createView(), depthLoadOp: "load", depthStoreOp: "store" } : { view: ctx.texture(depth).createView(), depthClearValue: 1, depthLoadOp: "clear", depthStoreOp: "store" },
           ...ctx.timing
         });
-        drawRange(encoded, from, to, load || prepass ? groups.scene : groups.blank);
+        drawRange(encoded, from, to, load ? groups.scene : readDepths ? groups.opaque : groups.blank);
         encoded.end();
       };
     });
