@@ -735,7 +735,13 @@ export class MeshOverlaySurface implements DisplaySurface {
       const skinned = isSkinned(instance.mesh) ? createLiveSkinnedMesh(instance.mesh) : null;
       if (skinned) live.set(i, skinned);
       const lod = liveLod(instance.lod, skinned);
-      instances.push({ ...textured, ...(skinned ? { mesh: skinned.mesh } : {}), ...(lod ? { lod } : {}), model: instance.model });
+      instances.push({
+        ...textured,
+        ...(skinned ? { mesh: skinned.mesh } : {}),
+        ...(lod ? { lod } : {}),
+        model: instance.model,
+        ...(instance.lightChannels !== undefined ? { lightChannels: instance.lightChannels } : {}),
+      });
       frames.push(instance.frames && instance.frames.length > 0 ? await Promise.all(instance.frames.map(texture)) : null);
     }
     // Bake the procedural sky dome once, if the rig authors one: the full map is
@@ -1651,6 +1657,8 @@ export class MeshOverlaySurface implements DisplaySurface {
         ...(pose?.tint || this.looks.get(i)?.tint ? this.tintedLook(source, (pose?.tint || this.looks.get(i)?.tint)!) : {}),
         model: s.model,
         ...(s.effect ? { effect: s.effect } : {}),
+        // An animation frame is only a mesh: the object's lighting channels (F2e) go with it.
+        ...(authored.lightChannels !== undefined ? { lightChannels: authored.lightChannels } : {}),
       };
       if (s.front) front.push(instance);
       else {

@@ -701,6 +701,42 @@ describe.skipIf(!device)(`WebGPU parity on a real device${prepass ? ", after a d
     renderer.dispose();
   });
 
+  it("lights by temperature and lighting channel like the software rasteriser (F2e)", async () => {
+    // One quad's mesh, twice: on the first channel and on channels 2 and 3, so the batch splits by channel.
+    const renderer = (await WebgpuSceneRenderer.create(device, W, H))!;
+    const quad = pbrQuad(0, 0.6);
+    const instances: MeshSceneInstance[] = [
+      { mesh: quad, model: composeModelMatrix([-0.9, 0, 0], [0, 15, 0], [1.1, 1.1, 1.1]) },
+      { mesh: quad, model: composeModelMatrix([0.9, 0, 0], [0, -15, 0], [1.1, 1.1, 1.1]), lightChannels: 6 },
+    ];
+    const lights = [
+      { kind: "directional" as const, direction: [0.3, 0.6, 1] as const, color: [1, 1, 1] as const, intensity: 0.7, temperature: 9000, channels: 3 },
+      { kind: "point" as const, position: [-0.9, 0.5, 1.5] as const, color: [1, 1, 1] as const, intensity: 3, range: 6, temperature: 2700 },
+      { kind: "point" as const, position: [0.9, 0.5, 1.5] as const, color: [1, 1, 1] as const, intensity: 3, range: 6, temperature: 4000, channels: 4 },
+    ];
+    const withLights = (): SceneDraw => ({ ...draw(), lights });
+    renderer.render(instances, withLights());
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      device.tick?.();
+    }
+    const gpu = withLights();
+    renderer.render(instances, gpu);
+    const software = withLights();
+    new SoftwareSceneRenderer().render(instances, software);
+
+    // The two quads differ: the left takes the warm point light and the sun, the right only its own (channel 3).
+    const at = (out: Uint8ClampedArray, x: number) => [out[((H >> 1) * W + x) * 4]!, out[((H >> 1) * W + x) * 4 + 2]!];
+    const [lr, lb] = at(software.out, Math.round(W * 0.3));
+    const [rr, rb] = at(software.out, Math.round(W * 0.7));
+    expect(lr).toBeGreaterThan(lb);
+    expect(lr + lb).not.toBe(rr + rb);
+    let maxDelta = 0;
+    for (let i = 0; i < W * H * 4; i += 1) maxDelta = Math.max(maxDelta, Math.abs(gpu.out[i]! - software.out[i]!));
+    expect(maxDelta).toBeLessThanOrEqual(4);
+    renderer.dispose();
+  });
+
   it("matches the software rasteriser on multi-light forward shading (within float tolerance)", async () => {
     // Several directional + point lights: the GPU loops the same packed list and
     // the same BRDF as meshRasterizer.ts, so only float rounding differs.

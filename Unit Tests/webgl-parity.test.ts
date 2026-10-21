@@ -173,6 +173,12 @@ describe.skipIf(!chromiumPath)("WebGL2 parity in a real browser", () => {
     if (exact) expect(result.maxDelta).toBeLessThanOrEqual(4);
   });
 
+  it("lights by temperature and lighting channel like the software rasteriser (F2e)", async () => {
+    const result = await run("channels");
+    expect(result.drawn).toBeGreaterThan(100);
+    if (exact) expect(result.maxDelta).toBeLessThanOrEqual(4);
+  });
+
   it("samples the shadow map identically on the fantasy path", async () => {
     expectMatch(await run("shadowFantasy"));
   });

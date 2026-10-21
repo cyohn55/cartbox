@@ -157,6 +157,7 @@ import {
   PropertyEditor,
   ShieldPanel,
   TagEditor,
+  LightChannelEditor,
   type ShieldPreview,
 } from "./SceneObjectPanels";
 
@@ -1427,6 +1428,8 @@ export function MeshEditor({ sidecar, onSidecarChange, code, onStartPlay, modern
             <TransformControls transform={selectedEntry.transform} onChange={updateTransform} relative={Boolean(selectedEntry.parent)} />
 
             <TagEditor sidecar={sidecar} entry={selectedEntry} onChange={onSidecarChange} />
+
+            <LightChannelEditor sidecar={sidecar} entry={selectedEntry} onChange={onSidecarChange} />
 
             <PropertyEditor sidecar={sidecar} entry={selectedEntry} onChange={onSidecarChange} />
 

@@ -623,7 +623,21 @@ export {
   spotCone,
   distanceFalloff,
   INVERSE_SQUARE_MIN_DISTANCE,
+  LIGHT_CHANNEL_COUNT,
+  ALL_LIGHT_CHANNELS,
+  lightChannelMask,
+  lightsChannel,
+  lightsOnChannels,
+  lightColor,
 } from "./render/meshRasterizer";
+export {
+  MIN_LIGHT_TEMPERATURE,
+  MAX_LIGHT_TEMPERATURE,
+  WHITE_TEMPERATURE,
+  planckianXy,
+  temperatureTint,
+  tintToTemperature,
+} from "./render/lightTemperature";
 export {
   CLUSTER_CELLS,
   CLUSTER_INDEX_CAP,

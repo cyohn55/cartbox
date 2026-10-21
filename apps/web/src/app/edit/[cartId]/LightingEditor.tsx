@@ -53,6 +53,7 @@ import {
   unitsToLux,
   unitsToNits,
   withLightFalloff,
+  WHITE_TEMPERATURE,
   updateSceneEnvironment,
   updateSceneLight,
   type ProceduralSky,
@@ -66,7 +67,7 @@ import {
 import { TINT_PALETTE } from "@cartbox/player";
 
 import styles from "./editor.module.css";
-import { PhysicalRange, RailGroup, RailHint, RangeControl, SegmentedControl } from "./railControls";
+import { ChannelMask, PhysicalRange, RailGroup, RailHint, RangeControl, SegmentedControl } from "./railControls";
 
 interface LightingEditorProps {
   lighting: SceneLighting | null;
@@ -381,6 +382,35 @@ export function LightingEditor({ lighting, onChange }: LightingEditorProps) {
             label="Colour"
             value={light.color}
             onChange={(color) => onChange(updateSceneLight(lighting, index, { color }))}
+          />
+          <SegmentedControl
+            label="Temperature"
+            ariaLabel={`Light ${index + 1} temperature`}
+            selected={light.temperature === undefined ? "off" : "kelvin"}
+            onSelect={(v) => onChange(updateSceneLight(lighting, index, { temperature: v === "kelvin" ? light.temperature ?? WHITE_TEMPERATURE : undefined }))}
+            options={[
+              { id: "off", label: "Colour only" },
+              { id: "kelvin", label: "Kelvin", hint: "A black body's colour over the light's: 1900 K a candle, 2700 K a household bulb, 5500 K noon sun, 6500 K white, 10 000 K blue sky. Its brightness stays" },
+            ]}
+          />
+          {light.temperature !== undefined && (
+            <RangeControl
+              label="Kelvin"
+              nested
+              min={1700}
+              max={12000}
+              step={100}
+              value={light.temperature}
+              ariaLabel={`Light ${index + 1} kelvin`}
+              display={`${light.temperature} K`}
+              onChange={(temperature) => onChange(updateSceneLight(lighting, index, { temperature }))}
+            />
+          )}
+          <ChannelMask
+            label="Lights channels"
+            value={light.channels ?? 1}
+            allowNone
+            onChange={(channels) => onChange(updateSceneLight(lighting, index, { channels: channels === 1 ? undefined : channels }))}
           />
           {physical ? (
             <PhysicalRange

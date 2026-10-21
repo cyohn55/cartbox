@@ -232,6 +232,24 @@ function scenes(): Record<string, Scene> {
       instances: [{ mesh: floor(3, 0), model: composeModelMatrix([0, 0, 0], [0, 0, 0], [1, 1, 1]) }],
       draw: () => ({ ...lit(), lights }),
     },
+    // Physical lights (F2e): temperatures, and two copies of one floor on different lighting channels.
+    channels: (() => {
+      const tile = floor(1.4, 0);
+      return {
+        instances: [
+          { mesh: tile, model: composeModelMatrix([-1.5, 0, 0], [0, 0, 0], [1, 1, 1]) },
+          { mesh: tile, model: composeModelMatrix([1.5, 0, 0], [0, 0, 0], [1, 1, 1]), lightChannels: 6 },
+        ],
+        draw: () => ({
+          ...lit(),
+          lights: [
+            { kind: "directional", direction: [0.3, 1, 0.2], color: [1, 1, 1], intensity: 0.6, temperature: 9000, channels: 3 },
+            { kind: "point", position: [-1.5, 1.2, 0.5], color: [1, 1, 1], intensity: 3, range: 5, temperature: 2700 },
+            { kind: "point", position: [1.5, 1.2, 0.5], color: [1, 0.9, 0.9], intensity: 3, range: 5, temperature: 4000, channels: 4 },
+          ],
+        }),
+      };
+    })(),
     // A floor under an occluder with a CPU-built shadow map: PBR, then the fantasy path.
     shadow: shadowScene(true),
     shadowFantasy: shadowScene(false),

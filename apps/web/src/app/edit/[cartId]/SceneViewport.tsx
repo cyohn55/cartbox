@@ -365,14 +365,17 @@ export function SceneViewport({ sidecar, onSidecarChange, selectedIds, onSelectI
     return new Map(sidecar.meshes.map((m, i) => [m.id, { world: world[i]!, parentWorld: parents[i]! >= 0 ? world[parents[i]!]! : null }]));
   }, [sidecar.meshes, previewLocals]);
 
+  // Each object's lighting channels (F2e), where they aren't the first alone.
+  const channels = useMemo(() => new Map(sidecar.meshes.flatMap((m) => (m.lightChannels !== undefined ? [[m.id, m.lightChannels] as const] : []))), [sidecar.meshes]);
   const instances = useMemo<SceneInstance[]>(() => {
     const out: SceneInstance[] = [];
     for (const d of decoded) {
       const placed = placement.get(d.id);
-      if (placed && !hidden.has(d.id)) out.push({ id: d.id, mesh: d.mesh, textures: d.textures, model: placed.world, ...(d.lod ? { lod: d.lod } : {}) });
+      const lightChannels = channels.get(d.id);
+      if (placed && !hidden.has(d.id)) out.push({ id: d.id, mesh: d.mesh, textures: d.textures, model: placed.world, ...(d.lod ? { lod: d.lod } : {}), ...(lightChannels !== undefined ? { lightChannels } : {}) });
     }
     return out;
-  }, [decoded, placement, hidden]);
+  }, [decoded, placement, hidden, channels]);
 
   const terrainInstances = useMemo<MeshSceneInstance[]>(() => {
     if (!showTerrain) return [];

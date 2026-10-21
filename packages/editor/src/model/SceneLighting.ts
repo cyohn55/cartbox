@@ -19,7 +19,9 @@
 import { parseWind, type SceneWind } from "./wind";
 import { decodeLightProbes, type LightProbeGrid, type StoredLightProbes } from "./lightProbes";
 import { readAutoExposure, readPostVolumes, type AutoExposure, type PostVolume } from "./postVolumes";
+import { MAX_LIGHT_TEMPERATURE, MIN_LIGHT_TEMPERATURE } from "../render/lightTemperature";
 import {
+  lightChannelMask,
   orthographicMatrix,
   renderShadowMap,
   viewMatrix,
@@ -168,9 +170,16 @@ function parseLight(value: unknown): SceneLight | null {
   if (!kind) return null;
   const color = isFiniteTriple(raw.color) ? clampTriple(raw.color) : ([1, 1, 1] as [number, number, number]);
   const intensity = typeof raw.intensity === "number" && Number.isFinite(raw.intensity) ? Math.max(0, raw.intensity) : 1;
+  // Physical lights (F2e): a temperature, held to the locus's fit; channels, only when not the first alone.
+  const temperature =
+    typeof raw.temperature === "number" && Number.isFinite(raw.temperature)
+      ? { temperature: Math.round(Math.min(MAX_LIGHT_TEMPERATURE, Math.max(MIN_LIGHT_TEMPERATURE, raw.temperature))) }
+      : {};
+  const mask = raw.channels === undefined ? 1 : lightChannelMask(raw.channels);
+  const physical = { ...temperature, ...(mask !== 1 ? { channels: mask } : {}) };
   if (kind === "directional") {
     const direction = isFiniteTriple(raw.direction) ? raw.direction : ([0.4, 0.8, 0.6] as [number, number, number]);
-    return { kind, direction, color, intensity };
+    return { kind, direction, color, intensity, ...physical };
   }
   const position = isFiniteTriple(raw.position) ? raw.position : ([0, 1, 0] as [number, number, number]);
   const range = typeof raw.range === "number" && Number.isFinite(raw.range) ? Math.max(0, raw.range) : 0;
@@ -180,9 +189,9 @@ function parseLight(value: unknown): SceneLight | null {
     const angle = (v: unknown, fallback: number) => (typeof v === "number" && Number.isFinite(v) ? Math.min(89, Math.max(0, v)) : fallback);
     const outerAngle = Math.max(1, angle(raw.outerAngle, 30));
     const innerAngle = Math.min(outerAngle, angle(raw.innerAngle, outerAngle * 0.75));
-    return { kind, position, direction, color, intensity, range, innerAngle, outerAngle, ...falloff, ...(raw.castShadows === true ? { castShadows: true } : {}) };
+    return { kind, position, direction, color, intensity, range, innerAngle, outerAngle, ...falloff, ...(raw.castShadows === true ? { castShadows: true } : {}), ...physical };
   }
-  return { kind, position, color, intensity, range, ...falloff, ...(raw.castShadows === true ? { castShadows: true } : {}) };
+  return { kind, position, color, intensity, range, ...falloff, ...(raw.castShadows === true ? { castShadows: true } : {}), ...physical };
 }
 
 /**

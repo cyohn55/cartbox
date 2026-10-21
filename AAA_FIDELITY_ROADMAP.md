@@ -482,6 +482,30 @@ Everything else depends on this track. It contains no visible "feature", but its
   - IES profiles, imported in F9d.
   - Light temperature in Kelvin, and lighting channels.
   - GPU clustered culling (from F0e) with thousands of lights.
+  - Inverse-square falloff with its range window was done in F0b (`SceneLight.falloff: "inverseSquare"`).
+  - **F2e-1, temperature and lighting channels: done**, on every renderer (the software rasteriser, WebGL2, and both WebGPU variants), in parity.
+    - **Temperature.** `SceneLight.temperature` is in kelvin (`render/lightTemperature.ts`).
+      - The chromaticity is the Planckian locus as Kim et al. fit it with cubics, 1667–25 000 K. It is taken to linear sRGB, divided by 6500 K's so 6500 K is white, and scaled to unit luminance. A temperature therefore changes a light's colour, not its brightness, as a photometric intensity requires.
+      - The tint goes over the authored colour in linear light (decoded, tinted, re-encoded), so the linear-light shader gets exactly the tint and the byte-space ones a colour that reads the same.
+      - The renderers read it through `lightColor`: `packLights` for the GPU loops, the software rasteriser's light list, and the probe relight's bounce lights.
+      - When a cart sets the sun (`cartbox.sun3d`), its colour replaces the authored key's temperature.
+    - **Lighting channels.** There are eight. `SceneLight.channels` and `MeshSceneInstance.lightChannels` are bit masks, both the first channel when absent. A light lights an instance when the masks share a bit. This applies to the sun, point and spot lights, but not the ambient or image-based light.
+      - On the GPU, a light's mask rides above the inverse-square bit in `d3.w`, and a draw's mask in `motion0.y` (now also declared in the WebGL2 block).
+      - `batchInstances` splits a primitive's copies by mask.
+      - The software rasteriser filters the list per instance. An instance on none of the rig's channels gets one dark light, so it stays on the rig's path.
+    - **Authoring.** The scene object carries `lightChannels`, through the sidecar (`setMeshLightChannels`) and the scene parse. The Lighting panel edits each light's temperature (Colour only / Kelvin, 1700–12 000 K) and its channels; the object panel edits "Lit on channels".
+    - *Tests:* `physical-lights.test.ts` covers:
+      - the locus against CIE illuminant A (2848 K under today's second radiation constant) and 6500 K;
+      - unit luminance, and white at 6500 K;
+      - the linear-light tint;
+      - packing, batching and the save;
+      - the software rasteriser's channels;
+      - the bounce lights.
+      - Both `webgpu-parity.test.ts` and `webgl-parity.test.ts` gain a scene with warm and cool lights on split channels, one mesh on two masks, against the software rasteriser.
+  - **Still to do:**
+    - Area lights with LTC are next, as F2e-2.
+    - IES profiles wait on their importer (F9d).
+    - GPU clustering is F0e's.
 - [ ] **F2f. Emissive surfaces that light.** Emissive meshes contribute through GI (F3d and F3e), so the energy trim on a Forerunner wall lights the floor in front of it.
 
 ### F3. Global illumination and reflections

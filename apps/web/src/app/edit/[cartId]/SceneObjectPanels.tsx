@@ -39,6 +39,7 @@ import {
   setMeshPhysicsWorld,
   setMeshProp,
   setMeshTags,
+  setMeshLightChannels,
   type MeshSidecar,
   type MeshSidecarEntry,
 } from "@/lib/meshSidecar";
@@ -59,7 +60,7 @@ import {
 import { addMeshClip, renameMeshClip, retargetClip, retimeClip, reverseClip, setMeshClip, trimClip } from "@cartbox/editor";
 import { clearEntryLods, generateEntryLods, lodDeviations, lodSummary } from "@/lib/meshLods";
 import styles from "./editor.module.css";
-import { RailGroup, RailHint, RangeControl } from "./railControls";
+import { ChannelMask, RailGroup, RailHint, RangeControl } from "./railControls";
 
 const inputStyle: React.CSSProperties = { width: "100%", minWidth: 0, padding: "4px 6px", borderRadius: 6 };
 
@@ -241,6 +242,16 @@ export function ParentPicker({
           : "Pick a parent to group this object under another one. It stays where it is."}
       </RailHint>
     </RailGroup>
+  );
+}
+
+/** The lighting channels the selected object is lit on (F2e): only the lights on one of them light it. */
+export function LightChannelEditor({ sidecar, entry, onChange }: { sidecar: MeshSidecar; entry: MeshSidecarEntry; onChange: (next: MeshSidecar) => void }) {
+  return (
+    <>
+      <ChannelMask label="Lit on channels" value={entry.lightChannels ?? 1} onChange={(mask) => onChange(setMeshLightChannels(sidecar, entry.id, mask))} />
+      <RailHint>A light lights it when they share a channel. Ambient and sky light reach it whatever its channels.</RailHint>
+    </>
   );
 }
 
