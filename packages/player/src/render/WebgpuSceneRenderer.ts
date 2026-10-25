@@ -135,6 +135,7 @@ import { compressedFormatsFor } from "../lighting/webgpuDevice.js";
 import { brdfWgsl, dfgTable } from "./brdf.js";
 import { ltcTables, ltcWgsl } from "./ltc.js";
 import { PROBE_FACE, ProbeCapture, packCapturedProbes } from "./probeCapture.js";
+import { DECAL_BUFFER_WORDS, DECAL_TILES_AT, decalWgsl, packDecalBoxes, packDecalTiles } from "./decalBuffer.js";
 import { IBL_LEVELS, IblBuilder, SH_IRRADIANCE_WGSL, environmentKey, environmentPanorama, environmentSh } from "./ibl.js";
 import { CASCADE_COUNT, CASCADE_FORMAT, CASCADE_SHADOW_WGSL, SUN_SOFTNESS, fitCascades, type Cascade } from "./cascades.js";
 import { REACTIVE_MASK_WGSL, TEMPORAL_SHARPEN_WGSL, TemporalState, hdrTemporalShaderWgsl, temporalShaderWgsl } from "./temporal.js";
@@ -528,6 +529,7 @@ ${hdr ? "// The spot/point lights' depth atlas, drawn on the GPU (F2d).\n@group(
 ${hdr ? `${brdfWgsl(1, 8)}// The prefiltered cube's sampler: trilinear, so a roughness between levels blends them (F3a).
 @group(1) @binding(9) var envSamp: sampler;
 ${ltcWgsl(1, 10)}
+${decalWgsl(1, 13)}
 ${SH_IRRADIANCE_WGSL}
 // The comparison sampler that filters the cascades' tests (F2a).
 @group(1) @binding(11) var cascadeSamp: sampler_comparison;
@@ -1350,6 +1352,18 @@ ${g.pbr}
     if (dk > 0.0) { albedo = albedo * (vec3<f32>(1.0) + dk * (2.0 * detail - vec3<f32>(1.0))); }
     // The material's colour, built in authored space, into light (F0b's linear variant).
     albedo = toLinear(albedo);
+${hdr ? `    // Projected decals (F1f): the boxes round this point, laid over the surface before it is lit.
+    var decalGlow = vec3<f32>(0.0);
+    if (u.motion0.z > 0.5) {
+      let dc = applyDecals(in.worldPos, Decalled(albedo, rough, ao, metallic, N, vec3<f32>(0.0)));
+      albedo = dc.albedo;
+      rough = dc.rough;
+      ao = dc.ao;
+      metallic = dc.metallic;
+      N = dc.N;
+      decalGlow = dc.glow;
+    }
+` : ""}
     let L = u.light.xyz;
     let V = u.view.xyz;
     let H = normalize(L + V);
@@ -1395,7 +1409,7 @@ ${hdr
       emis = ef * es;
     }
 ${g.emis}
-    emis = toLinear(emis);
+    emis = toLinear(emis);${hdr ? "\n    emis = emis + decalGlow;" : ""}
     // Ambient / image-based lighting, mirroring the software rasteriser: with an
     // environment, a diffuse irradiance along N + a specular reflection along R
     // blurred toward the average by roughness; without one, the flat ambient.
@@ -1837,6 +1851,8 @@ export class WebgpuSceneRenderer implements SceneRenderer {
       readonly dfg: any;
       /** The linearly transformed cosines' tables (F2e-2). */
       readonly ltc: any;
+      /** The projected decals' boxes and tiles (F1f). */
+      readonly decals: any;
       atlas: any;
       atlasBlank: boolean;
       probes: any;
@@ -2175,6 +2191,8 @@ export class WebgpuSceneRenderer implements SceneRenderer {
         { binding: 9, visibility: SHADER_STAGE_FRAGMENT, sampler: { type: "filtering" } },
         // The linearly transformed cosines' tables, for area lights (F2e-2), read by the linear-light shader.
         { binding: 10, visibility: SHADER_STAGE_FRAGMENT, buffer: { type: "read-only-storage" } },
+        // The projected decals' boxes and tiles (F1f), read by the linear-light shader.
+        { binding: 13, visibility: SHADER_STAGE_FRAGMENT, buffer: { type: "read-only-storage" } },
         // The comparison sampler that filters the sun's GPU cascades (F2a; group 0 binds the cascades).
         { binding: 11, visibility: SHADER_STAGE_FRAGMENT, sampler: { type: "comparison" } },
       ];
@@ -2275,6 +2293,8 @@ export class WebgpuSceneRenderer implements SceneRenderer {
       const ltc = ltcTables();
       const ltcBuffer = device.createBuffer({ size: ltc.byteLength, usage: 0x80 | 0x08 }); // STORAGE | COPY_DST
       device.queue.writeBuffer(ltcBuffer, 0, ltc);
+      // The projected decals (F1f): a fixed buffer, zeroed (no boxes) until a frame has some.
+      const decalBuffer = device.createBuffer({ size: DECAL_BUFFER_WORDS * 4, usage: 0x80 | 0x08 }); // STORAGE | COPY_DST
       const iblSampler = device.createSampler({ magFilter: "linear", minFilter: "linear", mipmapFilter: "linear", addressModeU: "clamp-to-edge", addressModeV: "clamp-to-edge", addressModeW: "clamp-to-edge" });
       const atlasBlank = hdr
         ? device.createTexture({ size: { width: 1, height: 1 }, format: "depth32float", usage: 0x04 | 0x10 }) // TEXTURE_BINDING | RENDER_ATTACHMENT
@@ -2404,6 +2424,7 @@ export class WebgpuSceneRenderer implements SceneRenderer {
           { binding: 8, resource: { buffer: dfgBuffer } },
           { binding: 9, resource: iblSampler },
           { binding: 10, resource: { buffer: ltcBuffer } },
+          { binding: 13, resource: { buffer: decalBuffer } },
           { binding: 11, resource: cascades.sampler },
         ];
         return {
@@ -2424,6 +2445,7 @@ export class WebgpuSceneRenderer implements SceneRenderer {
           { binding: 8, resource: { buffer: dfgBuffer } },
           { binding: 9, resource: iblSampler },
           { binding: 10, resource: { buffer: ltcBuffer } },
+          { binding: 13, resource: { buffer: decalBuffer } },
           { binding: 11, resource: cascades.sampler },
         ];
         return {
@@ -2441,6 +2463,7 @@ export class WebgpuSceneRenderer implements SceneRenderer {
         shadowTiles,
         dfg: dfgBuffer,
         ltc: ltcBuffer,
+        decals: decalBuffer,
         atlas: atlasBlank,
         atlasBlank: true,
         probes: probesBlank,
@@ -2599,6 +2622,24 @@ export class WebgpuSceneRenderer implements SceneRenderer {
     this.iblKey = key;
     this.bindGroups = new WeakMap(); // binding 7 changed identity
   }
+
+  /** The frame's projected decals (F1f) into their buffer: the boxes each frame they change, the tiles when they do. */
+  private uploadDecals(draw: GpuSceneDraw, eye: readonly [number, number, number]): void {
+    const decals = draw.decals ?? null;
+    const buffer = this.depthGroups.decals;
+    if (decals && decals.tiles !== this.decalTiles) {
+      const tiles = packDecalTiles(decals.tiles);
+      this.device.queue.writeBuffer(buffer, DECAL_TILES_AT * 4, tiles, 0, tiles.length);
+      this.decalTiles = decals.tiles;
+    }
+    const boxes = decals ? decals.boxes : [];
+    if (boxes.length === 0 && this.decalCount === 0) return;
+    const head = packDecalBoxes(boxes, eye);
+    this.device.queue.writeBuffer(buffer, 0, head, 0, head.length);
+    this.decalCount = head[0]!;
+  }
+  private decalTiles: unknown = null;
+  private decalCount = 0;
 
   /**
    * The linear variant's probes (F3b): captured on the GPU into the cube array
@@ -2848,6 +2889,7 @@ export class WebgpuSceneRenderer implements SceneRenderer {
     this.ensureEnvTexture(draw.environment ?? null);
     // The linear variant captures its own probes on the GPU (F3b); the others take the CPU's baked panoramas.
     if (this.hdr) this.updateProbeCapture(draw);
+    if (this.hdr) this.uploadDecals(draw, eye);
     else this.ensureProbes(draw.environment?.probes ?? null);
 
     // SSAO: upload the CPU-generated AO buffer (same one the software path uses)
@@ -2933,7 +2975,7 @@ export class WebgpuSceneRenderer implements SceneRenderer {
         windBefore: entry.primitive.sway ? windThen : null,
         motionBase: prepass ? instanceCount : 0,
         lightChannels: entry.channels,
-        ...(this.hdr ? { probeCount: this.capturedProbes } : {}),
+        ...(this.hdr ? { probeCount: this.capturedProbes, receivesDecals: entry.alpha < 2 && !entry.refract } : {}),
       };
     };
     let next = 0;
@@ -4040,6 +4082,7 @@ export class WebgpuSceneRenderer implements SceneRenderer {
     destroySafely(this.depthGroups.shadowTiles);
     destroySafely(this.depthGroups.dfg);
     destroySafely(this.depthGroups.ltc);
+    destroySafely(this.depthGroups.decals);
     destroySafely(this.depthGroups.atlas);
     destroySafely(this.depthGroups.probes);
     destroySafely(this.blankTexture);

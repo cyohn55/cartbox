@@ -539,6 +539,8 @@ export interface InstanceUniform {
   readonly lightChannels?: number;
   /** How many probes the shader loops over, where not `environment.probes`' (the linear variant's GPU-captured ones, F3b). */
   readonly probeCount?: number;
+  /** The draw takes the frame's projected decals (F1f): an opaque or cut-out surface that doesn't refract. */
+  readonly receivesDecals?: boolean;
 }
 
 /**
@@ -819,7 +821,7 @@ export function writeInstanceUniform(target: Float32Array, index: number, unifor
   for (let k = 0; k < 4; k += 1) target[base + OFFSET_WIND1 + k] = before ? before[k]! : 0;
   target[base + OFFSET_MOTION0] = uniform.motionBase ?? 0;
   target[base + OFFSET_MOTION0 + 1] = uniform.lightChannels ?? 1;
-  target[base + OFFSET_MOTION0 + 2] = 0;
+  target[base + OFFSET_MOTION0 + 2] = uniform.receivesDecals ? 1 : 0;
   target[base + OFFSET_MOTION0 + 3] = 0;
 }
 

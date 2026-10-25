@@ -15,6 +15,8 @@ import {
   cameraPositionFromView,
   composeModelMatrix,
   reflectionProbeAt,
+  decalPreset,
+  type MeshSceneInstance,
   defaultSceneLighting,
   orthographicMatrix,
   parseSceneLighting,
@@ -187,9 +189,10 @@ describe("the mesh overlay's near cascade", () => {
 
 describe("the AAA tier's sun cascades (F2a)", () => {
   // A GPU renderer that shadows the sun itself, presented on the GPU.
-  function cascaded(): SceneRenderer & { draws: GpuSceneDraw[] } {
+  function cascaded(): SceneRenderer & { draws: GpuSceneDraw[]; drawn: (readonly MeshSceneInstance[])[] } {
     const draws: GpuSceneDraw[] = [];
-    return { backend: "webgpu", sunCascades: true, draws, render: () => {}, renderToTexture: (_i, draw) => (draws.push(draw), {}), dispose: () => {} };
+    const drawn: (readonly MeshSceneInstance[])[] = [];
+    return { backend: "webgpu", sunCascades: true, draws, drawn, render: () => {}, renderToTexture: (i, draw) => (draws.push(draw), drawn.push(i), {}), dispose: () => {} };
   }
   const presenter = { present: () => {}, stats: { luminance: null, sun: null } } as any;
 
@@ -288,6 +291,23 @@ describe("the AAA tier's sun cascades (F2a)", () => {
     bare.setCameraOverride(camera(1, 1));
     bare.blit(new Uint8Array(32 * 24 * 4));
     expect(plain.draws.at(-1)!.reflectionCapture ?? null).toBeNull();
+  });
+
+  it("projects decals as boxes in place of their quads (F1f)", async () => {
+    const r = cascaded();
+    const pock = decalPreset("pock");
+    const marks = [{ decal: pock.name, position: [0, 0.01, 0] as [number, number, number], normal: [0, 1, 0] as [number, number, number], size: 0, spin: 0 }];
+    const surface = await MeshOverlaySurface.create({ blit() {}, destroy() {} }, 32, 24, { ...scene(), decals: [pock], decalMarks: marks }, r, { presenter });
+    surface.setCameraOverride(camera(1, 1));
+    surface.blit(new Uint8Array(32 * 24 * 4));
+    const draw = r.draws.at(-1)!;
+    expect(draw.decals!.boxes).toHaveLength(1);
+    expect(draw.decals!.boxes[0]!.center).toEqual([0, 0.01, 0]);
+    expect(draw.decals!.tiles.count).toBe(1);
+    // No quad mesh among what's drawn, and the tiles are drawn once.
+    expect(r.drawn.at(-1)!.some((i) => i.mesh.name === "decals")).toBe(false);
+    surface.blit(new Uint8Array(32 * 24 * 4));
+    expect(r.draws.at(-1)!.decals!.tiles).toBe(draw.decals!.tiles);
   });
 
   it("reaches the rig's own shadow distance, and casts nothing with shadows off", async () => {

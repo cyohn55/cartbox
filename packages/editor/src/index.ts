@@ -954,6 +954,7 @@ export {
   type SurfaceEffect,
 } from "./render/surfaceEffect";
 export { DECAL_FRAMES, DECAL_OFFSET, DecalSystem, decalAtlas } from "./render/decalSystem";
+export { DECAL_DEPTH, DECAL_TILE, decalBox, decalTiles, projectDecals, type DecalTiles, type ProjectedDecal } from "./render/projectedDecals";
 export { MAX_REFLECTION_PROBES, parseReflectionProbes, reflectionProbeAt, type ReflectionProbe } from "./model/reflectionProbes";
 export { PROBE_FADE, PROBE_RANGE, boxProject, pickProbe, probeWeight, sampleProbe, type ProbeBox, type ReflectionProbeSet } from "./render/probeSampling";
 export {

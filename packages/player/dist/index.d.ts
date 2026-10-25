@@ -1,4 +1,4 @@
-import { MeshSceneInstance, MeshAsset, Mat4, ScenePropValue, PhysicsSpec, AnimatorSpec, AttachedComponent, SceneLighting, PhysicsWorldSettings, SceneTimeline, SceneLevel, NavMesh, Terrain, SceneStreaming, ParticleEffect, DecalDef, DecalMark, RagdollBox, DebrisDef, LodChain, SceneAudio, ComponentDef, StreamGroup, JointKind, JointSpec, ActionRebind, DecodedTexture, SkySun, BakedCloudLayer, SunShafts, ColorFilter, AccessibilitySettings, EncodedImage, UiDocument, InputAction, StringTable, ReflectionProbe, EnvironmentLight, ShadowInput, ToneMap, SceneLight, LocalShadows, SceneFog, SceneWind, RasterStyle, MeshMaterial, ResolvedLayers, ResolvedRefraction, SurfaceEffect, AnimatorOp, NavGraph, AnimationCue } from '@cartbox/editor';
+import { MeshSceneInstance, MeshAsset, Mat4, ScenePropValue, PhysicsSpec, AnimatorSpec, AttachedComponent, SceneLighting, PhysicsWorldSettings, SceneTimeline, SceneLevel, NavMesh, Terrain, SceneStreaming, ParticleEffect, DecalDef, DecalMark, RagdollBox, DebrisDef, LodChain, SceneAudio, ComponentDef, StreamGroup, JointKind, JointSpec, ActionRebind, DecodedTexture, SkySun, BakedCloudLayer, SunShafts, ColorFilter, AccessibilitySettings, EncodedImage, UiDocument, InputAction, StringTable, ReflectionProbe, EnvironmentLight, ShadowInput, ToneMap, SceneLight, LocalShadows, ProjectedDecal, DecalTiles, SceneFog, SceneWind, RasterStyle, MeshMaterial, ResolvedLayers, ResolvedRefraction, SurfaceEffect, AnimatorOp, NavGraph, AnimationCue } from '@cartbox/editor';
 
 /**
  * The runtime mesh scene: the cart's mesh sidecar resolved into placed instances
@@ -4368,6 +4368,15 @@ interface SceneDraw {
      */
     readonly reflectionCapture?: ReflectionCapture | null;
     /**
+     * The projected decals the linear-light (AAA) WebGPU renderer lays over its
+     * surfaces before lighting them (AAA_FIDELITY_ROADMAP.md F1f), in place of
+     * the decal marks' quads: the boxes, in drawing order, and every decal's tiles.
+     */
+    readonly decals?: {
+        readonly boxes: readonly ProjectedDecal[];
+        readonly tiles: DecalTiles;
+    } | null;
+    /**
      * The sun's shadow rendered on the GPU in cascades (AAA_FIDELITY_ROADMAP.md
      * F2a), in place of the CPU-rasterised {@link shadow}: what casts (the whole
      * scene's casters, not just what the camera sees), the direction toward the
@@ -5096,6 +5105,10 @@ declare class WebgpuSceneRenderer implements SceneRenderer {
      * SH the frame carries, rebuilt only when what it's made of changes.
      */
     private ensureIbl;
+    /** The frame's projected decals (F1f) into their buffer: the boxes each frame they change, the tiles when they do. */
+    private uploadDecals;
+    private decalTiles;
+    private decalCount;
     /**
      * The linear variant's probes (F3b): captured on the GPU into the cube array
      * bound at 12, a probe a frame, and their boxes (13), each marked once captured.
@@ -5609,6 +5622,8 @@ interface InstanceUniform {
     readonly lightChannels?: number;
     /** How many probes the shader loops over, where not `environment.probes`' (the linear variant's GPU-captured ones, F3b). */
     readonly probeCount?: number;
+    /** The draw takes the frame's projected decals (F1f): an opaque or cut-out surface that doesn't refract. */
+    readonly receivesDecals?: boolean;
 }
 /**
  * A draw's triplanar repeat (0 = UV mapping) and height-blend sharpness (0 = an
@@ -7311,6 +7326,8 @@ declare class MeshOverlaySurface implements DisplaySurface {
     burst(effect: number, at: readonly [number, number, number], dir: readonly [number, number, number], scale: number): void;
     /** Settles once the scene's reflection probes are baked and in use (tests await it). */
     probesReady: Promise<void>;
+    /** Every decal's tiles, drawn the first time the AAA tier projects them (F1f). */
+    private decalTiles;
     /** What the reflection probes see: the scene's still objects (F3b). */
     private probeScene;
     /** The probes' capture key's parts that hold while the rig does, and a token for each sky map (F3b). */

@@ -46,7 +46,7 @@ function smoothNoise(x: number, y: number, cell: number, seed: number): number {
  * How much of a pattern covers a texel (0..1) and how bright it is there, at
  * u, v in −1..1 across the mark.
  */
-function coverage(pattern: DecalDef["pattern"], u: number, v: number, px: number, py: number): [number, number] {
+export function coverageOf(pattern: DecalDef["pattern"], u: number, v: number, px: number, py: number): [number, number] {
   const r = Math.hypot(u, v);
   const a = Math.atan2(v, u);
   switch (pattern) {
@@ -96,7 +96,7 @@ export function decalAtlas(def: DecalDef): DecodedTexture {
       for (let x = 0; x < SIZE; x += 1) {
         const u = ((x + 0.5) / SIZE) * 2 - 1;
         const v = ((y + 0.5) / SIZE) * 2 - 1;
-        const [cover, bright] = coverage(def.pattern, u, v, x, y);
+        const [cover, bright] = coverageOf(def.pattern, u, v, x, y);
         if (cover <= 0 || keep < BAYER[(y % 4) * 4 + (x % 4)]! || Math.max(Math.abs(u), Math.abs(v)) > 0.97) continue;
         const o = (y * width + f * SIZE + x) * 4;
         data[o] = def.color[0] * bright * 255;
@@ -205,6 +205,30 @@ export class DecalSystem {
     }
     pool.marks.push({ at: [at[0], at[1], at[2]], normal: n, size, spin, age: 0, permanent });
     pool.dirty = true;
+  }
+
+  /** The decals, in the order their tiles are drawn (projectedDecals.ts). */
+  get defs(): readonly DecalDef[] {
+    return this.pools.map((p) => p.def);
+  }
+
+  /**
+   * Every mark as it stands (F1f): its decal, place, size and spin, and how
+   * much of it is left. A cart-laid mark fades over the last third of its life
+   * as its frames dissolve. Permanent marks come first, then cart-laid ones
+   * oldest first, so a fresh mark lies over an old one.
+   */
+  liveMarks(): { readonly decal: number; readonly at: V3; readonly normal: V3; readonly size: number; readonly spin: number; readonly alpha: number }[] {
+    const out: { decal: number; at: V3; normal: V3; size: number; spin: number; alpha: number; permanent: boolean; age: number }[] = [];
+    this.pools.forEach((pool, decal) => {
+      const life = pool.def.life;
+      for (const m of pool.marks) {
+        const fade = m.permanent || life <= 0 ? 0 : Math.max(0, (m.age / life - 0.66) / 0.34);
+        out.push({ decal, at: m.at, normal: m.normal, size: m.size, spin: m.spin, alpha: 1 - Math.min(1, fade), permanent: m.permanent, age: m.age });
+      }
+    });
+    out.sort((a, b) => Number(b.permanent) - Number(a.permanent) || b.age - a.age);
+    return out;
   }
 
   /** Age cart-laid marks by `dt` seconds; a faded one is taken away. */

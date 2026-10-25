@@ -11350,6 +11350,8 @@ import {
   bakeReflectionProbesAsync,
   ParticleSystem,
   DecalSystem,
+  decalTiles,
+  projectDecals,
   DebrisSystem,
   applySunShafts,
   sunScreenPosition,
@@ -12050,6 +12052,8 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
     this.debrisLooks = /* @__PURE__ */ new Map();
     /** Settles once the scene's reflection probes are baked and in use (tests await it). */
     this.probesReady = Promise.resolve();
+    /** Every decal's tiles, drawn the first time the AAA tier projects them (F1f). */
+    this.decalTiles = null;
     /** What the reflection probes see: the scene's still objects (F3b). */
     this.probeScene = [];
     /** The probes' capture key's parts that hold while the rig does, and a token for each sky map (F3b). */
@@ -12583,10 +12587,16 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
       if (ribbons.main) drawn = [...drawn, ribbons.main];
       if (ribbons.front) frontDrawn = [...front, ribbons.front];
     }
+    let decals = null;
     if (this.decals) {
       this.decals.step(1 / 60);
-      const marks = this.decals.sceneInstance();
-      if (marks) drawn = [...drawn, marks];
+      if (cascaded) {
+        this.decalTiles ?? (this.decalTiles = decalTiles(this.decals.defs));
+        decals = { boxes: projectDecals(this.decals), tiles: this.decalTiles };
+      } else {
+        const marks = this.decals.sceneInstance();
+        if (marks) drawn = [...drawn, marks];
+      }
     }
     if (this.debris) {
       this.debris.step(1 / 60, this.debrisBoxes);
@@ -12616,7 +12626,8 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
         localShadowKey: localShadowCasters ? this.castersFrame?.key ?? null : null,
         localShadowMoved: localShadowCasters ? this.castersFrame?.moved ?? null : null,
         antialias,
-        reflectionCapture: cascaded && lighting ? this.reflectionCapture(lighting) : null
+        reflectionCapture: cascaded && lighting ? this.reflectionCapture(lighting) : null,
+        decals
       });
       if (profiler) profiler.add("scene", performance.now() - mark);
       this.frame += 1;
@@ -12737,6 +12748,7 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
       ...this.options.prepass === true ? { prepass: true } : {},
       ...lighting ? { ...lit, localShadows: job.local, shadow: job.shadow, sunShadow: job.sunShadow, localShadowCasters: job.localShadowCasters, localShadowKey: job.localShadowKey, localShadowMoved: job.localShadowMoved, fog: lighting.fog ?? null, wind: lighting.wind ?? null } : {},
       ...job.reflectionCapture ? { reflectionCapture: job.reflectionCapture } : {},
+      ...job.decals ? { decals: job.decals } : {},
       time
     };
     const scene = this.renderer.renderToTexture(job.drawn, draw) ?? null;
@@ -14650,7 +14662,7 @@ function writeInstanceUniform(target, index, uniform) {
   for (let k = 0; k < 4; k += 1) target[base + OFFSET_WIND1 + k] = before ? before[k] : 0;
   target[base + OFFSET_MOTION0] = uniform.motionBase ?? 0;
   target[base + OFFSET_MOTION0 + 1] = uniform.lightChannels ?? 1;
-  target[base + OFFSET_MOTION0 + 2] = 0;
+  target[base + OFFSET_MOTION0 + 2] = uniform.receivesDecals ? 1 : 0;
   target[base + OFFSET_MOTION0 + 3] = 0;
 }
 function refractionCamera(view, height) {
@@ -18761,6 +18773,124 @@ var ProbeCapture = class {
   }
 };
 
+// src/render/decalBuffer.ts
+import { MAX_DECAL_DEFS } from "@cartbox/editor";
+var MAX_GPU_DECALS = 256;
+var DECAL_WORDS = 20;
+var HEADER = 4;
+var GPU_DECAL_TILE = 64;
+var DECAL_TILES_AT = HEADER + MAX_GPU_DECALS * DECAL_WORDS;
+var DECAL_BUFFER_WORDS = DECAL_TILES_AT + MAX_DECAL_DEFS * GPU_DECAL_TILE * GPU_DECAL_TILE * 2;
+function packDecalBoxes(decals, eye) {
+  let kept = decals;
+  if (decals.length > MAX_GPU_DECALS) {
+    const far = (d) => (d.center[0] - eye[0]) ** 2 + (d.center[1] - eye[1]) ** 2 + (d.center[2] - eye[2]) ** 2;
+    const cut = [...decals].map(far).sort((a, b) => a - b)[MAX_GPU_DECALS - 1];
+    let room = MAX_GPU_DECALS;
+    kept = decals.filter((d) => far(d) <= cut && room-- > 0);
+  }
+  const words = new Uint32Array(HEADER + kept.length * DECAL_WORDS);
+  const floats = new Float32Array(words.buffer);
+  words[0] = kept.length;
+  words[1] = GPU_DECAL_TILE;
+  words[2] = DECAL_TILES_AT;
+  kept.forEach((d, i) => {
+    const o = HEADER + i * DECAL_WORDS;
+    d.axes.forEach((a, r) => {
+      const l2 = a[0] * a[0] + a[1] * a[1] + a[2] * a[2] || 1;
+      floats[o + r * 4] = a[0] / l2;
+      floats[o + r * 4 + 1] = a[1] / l2;
+      floats[o + r * 4 + 2] = a[2] / l2;
+      floats[o + r * 4 + 3] = -(a[0] * d.center[0] + a[1] * d.center[1] + a[2] * d.center[2]) / l2;
+    });
+    floats[o + 12] = d.tile;
+    floats[o + 13] = Math.max(0, Math.min(1, d.alpha));
+    floats[o + 14] = d.glow;
+    const z = d.axes[2];
+    const zl = Math.hypot(z[0], z[1], z[2]) || 1;
+    floats[o + 16] = z[0] / zl;
+    floats[o + 17] = z[1] / zl;
+    floats[o + 18] = z[2] / zl;
+  });
+  return words;
+}
+function packDecalTiles(tiles) {
+  if (tiles.size !== GPU_DECAL_TILE) throw new Error(`decal tiles are ${tiles.size}\xB2, the buffer is laid out for ${GPU_DECAL_TILE}\xB2`);
+  const texels = Math.min(tiles.count, MAX_DECAL_DEFS) * tiles.size * tiles.size;
+  const out = new Uint32Array(texels * 2);
+  const c = tiles.colour;
+  const s = tiles.surface;
+  for (let i = 0; i < texels; i += 1) {
+    out[i * 2] = (c[i * 4] | c[i * 4 + 1] << 8 | c[i * 4 + 2] << 16 | c[i * 4 + 3] << 24) >>> 0;
+    out[i * 2 + 1] = (s[i * 4] | s[i * 4 + 1] << 8 | s[i * 4 + 2] << 16 | s[i * 4 + 3] << 24) >>> 0;
+  }
+  return out;
+}
+function decalWgsl(group, binding) {
+  return (
+    /* wgsl */
+    `
+// Projected decals (F1f, decalBuffer.ts): the boxes and their tiles, in one buffer.
+@group(${group}) @binding(${binding}) var<storage, read> decalData: array<u32>;
+struct Decalled { albedo: vec3<f32>, rough: f32, ao: f32, metallic: f32, N: vec3<f32>, glow: vec3<f32> };
+fn decalWord(i: u32) -> f32 { return bitcast<f32>(decalData[i]); }
+fn decalRow(i: u32) -> vec4<f32> { return vec4<f32>(decalWord(i), decalWord(i + 1u), decalWord(i + 2u), decalWord(i + 3u)); }
+// A tile's colour and surface at uv (0..1), bilinearly between texel centres.
+fn decalSample(tile: u32, uv: vec2<f32>) -> array<vec4<f32>, 2> {
+  let n = decalData[1];
+  let base = decalData[2] + tile * n * n * 2u;
+  let p = clamp(uv * f32(n) - 0.5, vec2<f32>(0.0), vec2<f32>(f32(n - 1u)));
+  let p0 = vec2<u32>(p);
+  let p1 = min(p0 + 1u, vec2<u32>(n - 1u));
+  let f = p - vec2<f32>(p0);
+  var out: array<vec4<f32>, 2>;
+  for (var k = 0u; k < 2u; k = k + 1u) {
+    let a = unpack4x8unorm(decalData[base + (p0.y * n + p0.x) * 2u + k]);
+    let b = unpack4x8unorm(decalData[base + (p0.y * n + p1.x) * 2u + k]);
+    let c = unpack4x8unorm(decalData[base + (p1.y * n + p0.x) * 2u + k]);
+    let d = unpack4x8unorm(decalData[base + (p1.y * n + p1.x) * 2u + k]);
+    out[k] = mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
+  }
+  return out;
+}
+// Every box round P, in order, over the surface: its colour by its coverage (faded as the surface turns from
+// the box's normal, toward the box's depth, and as the mark fades), its roughness, occlusion, relief and glow.
+fn applyDecals(P: vec3<f32>, s: Decalled) -> Decalled {
+  var o = s;
+  let count = decalData[0];
+  for (var i = 0u; i < count; i = i + 1u) {
+    let at = 4u + i * ${DECAL_WORDS}u;
+    let rx = decalRow(at);
+    let ry = decalRow(at + 4u);
+    let rz = decalRow(at + 8u);
+    let q = vec3<f32>(dot(rx.xyz, P) + rx.w, dot(ry.xyz, P) + ry.w, dot(rz.xyz, P) + rz.w);
+    if (any(abs(q) > vec3<f32>(1.0))) { continue; }
+    let info = decalRow(at + 12u);
+    let nz = decalRow(at + 16u).xyz;
+    let facing = smoothstep(0.15, 0.45, dot(o.N, nz));
+    let depth = 1.0 - smoothstep(0.6, 1.0, abs(q.z));
+    let fade = facing * depth * info.y;
+    if (fade <= 0.0) { continue; }
+    let t = decalSample(u32(info.x + 0.5), q.xy * 0.5 + vec2<f32>(0.5));
+    let a = t[0].a * fade;
+    if (a <= 0.0) { continue; }
+    let colour = toLinear(t[0].rgb);
+    o.albedo = mix(o.albedo, colour, a);
+    o.rough = mix(o.rough, max(t[1].z, 0.045), a);
+    o.metallic = mix(o.metallic, 0.0, a);
+    o.ao = o.ao * mix(1.0, t[1].w, a);
+    // The relief, in the box's frame: across, along, out of the surface.
+    let lean = t[1].xy * 2.0 - vec2<f32>(1.0);
+    let bent = normalize(o.N + normalize(rx.xyz) * lean.x + normalize(ry.xyz) * lean.y);
+    o.N = normalize(mix(o.N, bent, a));
+    o.glow = o.glow + colour * info.z * a;
+  }
+  return o;
+}
+`
+  );
+}
+
 // src/render/contactShadows.ts
 var CONTACT_STEPS = 16;
 var CONTACT_LENGTH = 0.6;
@@ -19579,6 +19709,7 @@ ${hdr ? "// The spot/point lights' depth atlas, drawn on the GPU (F2d).\n@group(
 ${hdr ? `${brdfWgsl(1, 8)}// The prefiltered cube's sampler: trilinear, so a roughness between levels blends them (F3a).
 @group(1) @binding(9) var envSamp: sampler;
 ${ltcWgsl(1, 10)}
+${decalWgsl(1, 13)}
 ${SH_IRRADIANCE_WGSL}
 // The comparison sampler that filters the cascades' tests (F2a).
 @group(1) @binding(11) var cascadeSamp: sampler_comparison;
@@ -20391,6 +20522,18 @@ ${g.pbr}
     if (dk > 0.0) { albedo = albedo * (vec3<f32>(1.0) + dk * (2.0 * detail - vec3<f32>(1.0))); }
     // The material's colour, built in authored space, into light (F0b's linear variant).
     albedo = toLinear(albedo);
+${hdr ? `    // Projected decals (F1f): the boxes round this point, laid over the surface before it is lit.
+    var decalGlow = vec3<f32>(0.0);
+    if (u.motion0.z > 0.5) {
+      let dc = applyDecals(in.worldPos, Decalled(albedo, rough, ao, metallic, N, vec3<f32>(0.0)));
+      albedo = dc.albedo;
+      rough = dc.rough;
+      ao = dc.ao;
+      metallic = dc.metallic;
+      N = dc.N;
+      decalGlow = dc.glow;
+    }
+` : ""}
     let L = u.light.xyz;
     let V = u.view.xyz;
     let H = normalize(L + V);
@@ -20432,7 +20575,7 @@ ${hdr ? `    // GTAO (F3c): its visibility joins the material's occlusion (diffu
       emis = ef * es;
     }
 ${g.emis}
-    emis = toLinear(emis);
+    emis = toLinear(emis);${hdr ? "\n    emis = emis + decalGlow;" : ""}
     // Ambient / image-based lighting, mirroring the software rasteriser: with an
     // environment, a diffuse irradiance along N + a specular reflection along R
     // blurred toward the average by roughness; without one, the flat ambient.
@@ -20804,6 +20947,8 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     this.gtao = null;
     /** A 1×1 stand-in for GTAO's history when the frame has none (F3c). */
     this.gtaoBlank = null;
+    this.decalTiles = null;
+    this.decalCount = 0;
     /** The thin G-buffer (F0c), made on the first frame with a prepass. */
     this.gbuffer = null;
     /** The velocity buffer (F0c), made with the G-buffer. */
@@ -21094,6 +21239,8 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
         { binding: 9, visibility: SHADER_STAGE_FRAGMENT, sampler: { type: "filtering" } },
         // The linearly transformed cosines' tables, for area lights (F2e-2), read by the linear-light shader.
         { binding: 10, visibility: SHADER_STAGE_FRAGMENT, buffer: { type: "read-only-storage" } },
+        // The projected decals' boxes and tiles (F1f), read by the linear-light shader.
+        { binding: 13, visibility: SHADER_STAGE_FRAGMENT, buffer: { type: "read-only-storage" } },
         // The comparison sampler that filters the sun's GPU cascades (F2a; group 0 binds the cascades).
         { binding: 11, visibility: SHADER_STAGE_FRAGMENT, sampler: { type: "comparison" } }
       ];
@@ -21190,6 +21337,7 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
       const ltc = ltcTables();
       const ltcBuffer = device.createBuffer({ size: ltc.byteLength, usage: 128 | 8 });
       device.queue.writeBuffer(ltcBuffer, 0, ltc);
+      const decalBuffer = device.createBuffer({ size: DECAL_BUFFER_WORDS * 4, usage: 128 | 8 });
       const iblSampler = device.createSampler({ magFilter: "linear", minFilter: "linear", mipmapFilter: "linear", addressModeU: "clamp-to-edge", addressModeV: "clamp-to-edge", addressModeW: "clamp-to-edge" });
       const atlasBlank = hdr ? device.createTexture({ size: { width: 1, height: 1 }, format: "depth32float", usage: 4 | 16 }) : device.createTexture({ size: { width: 1, height: 1 }, format: "r32float", usage: 4 | 2 });
       const probesBlank = device.createTexture({ size: { width: 1, height: 1, depthOrArrayLayers: 1 }, dimension: "3d", format: "rgba32float", usage: 4 | 2 });
@@ -21299,6 +21447,7 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
           { binding: 8, resource: { buffer: dfgBuffer } },
           { binding: 9, resource: iblSampler },
           { binding: 10, resource: { buffer: ltcBuffer } },
+          { binding: 13, resource: { buffer: decalBuffer } },
           { binding: 11, resource: cascades.sampler }
         ];
         return {
@@ -21319,6 +21468,7 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
           { binding: 8, resource: { buffer: dfgBuffer } },
           { binding: 9, resource: iblSampler },
           { binding: 10, resource: { buffer: ltcBuffer } },
+          { binding: 13, resource: { buffer: decalBuffer } },
           { binding: 11, resource: cascades.sampler }
         ];
         return {
@@ -21336,6 +21486,7 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
         shadowTiles,
         dfg: dfgBuffer,
         ltc: ltcBuffer,
+        decals: decalBuffer,
         atlas: atlasBlank,
         atlasBlank: true,
         probes: probesBlank,
@@ -21481,6 +21632,21 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     }
     this.iblKey = key;
     this.bindGroups = /* @__PURE__ */ new WeakMap();
+  }
+  /** The frame's projected decals (F1f) into their buffer: the boxes each frame they change, the tiles when they do. */
+  uploadDecals(draw, eye) {
+    const decals = draw.decals ?? null;
+    const buffer = this.depthGroups.decals;
+    if (decals && decals.tiles !== this.decalTiles) {
+      const tiles = packDecalTiles(decals.tiles);
+      this.device.queue.writeBuffer(buffer, DECAL_TILES_AT * 4, tiles, 0, tiles.length);
+      this.decalTiles = decals.tiles;
+    }
+    const boxes = decals ? decals.boxes : [];
+    if (boxes.length === 0 && this.decalCount === 0) return;
+    const head = packDecalBoxes(boxes, eye);
+    this.device.queue.writeBuffer(buffer, 0, head, 0, head.length);
+    this.decalCount = head[0];
   }
   /**
    * The linear variant's probes (F3b): captured on the GPU into the cube array
@@ -21669,6 +21835,7 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     const shadowParams = shadow ? { size: shadow.size, bias: shadow.bias ?? 3e-3, strength: shadow.strength ?? 1, slopeBias: shadow.slopeBias ?? 0, pcf: shadow.pcf ?? false, soft: shadow.soft ?? false } : null;
     this.ensureEnvTexture(draw.environment ?? null);
     if (this.hdr) this.updateProbeCapture(draw);
+    if (this.hdr) this.uploadDecals(draw, eye);
     else this.ensureProbes(draw.environment?.probes ?? null);
     const ssao = draw.ssao ?? null;
     this.frameContact = this.hdr && prepass && this.frameCascades !== null && Boolean(draw.lightDirection);
@@ -21739,7 +21906,7 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
         windBefore: entry.primitive.sway ? windThen : null,
         motionBase: prepass ? instanceCount : 0,
         lightChannels: entry.channels,
-        ...this.hdr ? { probeCount: this.capturedProbes } : {}
+        ...this.hdr ? { probeCount: this.capturedProbes, receivesDecals: entry.alpha < 2 && !entry.refract } : {}
       };
     };
     let next = 0;
@@ -22684,6 +22851,7 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     destroySafely(this.depthGroups.shadowTiles);
     destroySafely(this.depthGroups.dfg);
     destroySafely(this.depthGroups.ltc);
+    destroySafely(this.depthGroups.decals);
     destroySafely(this.depthGroups.atlas);
     destroySafely(this.depthGroups.probes);
     destroySafely(this.blankTexture);

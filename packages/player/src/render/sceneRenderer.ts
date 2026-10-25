@@ -31,7 +31,7 @@ import {
   type MeshSceneInstance,
   type SceneWind,
 } from "@cartbox/editor";
-import type { EnvironmentLight, LocalShadows, Mat4, RasterStyle, SceneFog, SceneLight, ShadowInput, ToneMap } from "@cartbox/editor";
+import type { DecalTiles, EnvironmentLight, LocalShadows, Mat4, ProjectedDecal, RasterStyle, SceneFog, SceneLight, ShadowInput, ToneMap } from "@cartbox/editor";
 
 import type { RenderCaps } from "../models.js";
 import type { ReflectionCapture } from "./probeCapture.js";
@@ -181,6 +181,12 @@ export interface SceneDraw {
    * a key that changes when either, or the light, does.
    */
   readonly reflectionCapture?: ReflectionCapture | null;
+  /**
+   * The projected decals the linear-light (AAA) WebGPU renderer lays over its
+   * surfaces before lighting them (AAA_FIDELITY_ROADMAP.md F1f), in place of
+   * the decal marks' quads: the boxes, in drawing order, and every decal's tiles.
+   */
+  readonly decals?: { readonly boxes: readonly ProjectedDecal[]; readonly tiles: DecalTiles } | null;
   /**
    * The sun's shadow rendered on the GPU in cascades (AAA_FIDELITY_ROADMAP.md
    * F2a), in place of the CPU-rasterised {@link shadow}: what casts (the whole
