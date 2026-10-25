@@ -5,16 +5,18 @@
  *
  * - **The scene** is the CPU bake's own triangle BVH (`buildBvh`), flattened
  *   into storage buffers: two words per node, three vec4s per triangle (a
- *   corner and two edges) and its material in linear light (albedo, and an
- *   emissive colour that lights what sees it).
+ *   corner and two edges) and its material in linear light (the albedo a
+ *   diffuse bounce takes, its lighting channels, and an emissive colour that
+ *   lights what sees it).
  * - **The texels** are the ones the CPU bake shades (`lightmapTexels`): each
  *   one's surface point and normal.
  * - **Each path** leaves the texel along a cosine-weighted direction (the
  *   first stratified over the bake, rotated per texel) and bounces diffusely
  *   up to `bounces` times. Open sky gives the sky's radiance (the IBL's own
  *   panorama, F3a); a surface gives its emission, and each surface it bounces
- *   off is lit by the directional lights (a shadow ray each). The texel's own
- *   sunlight is left out: the live cascades (F2a) draw it.
+ *   off is lit by the directional lights (a shadow ray each) and by one of the
+ *   point, spot and area lights (F3d-4, below). The texel's own direct light
+ *   is left out: the live cascades (F2a) and local lights draw it.
  * - **The mean** of what the paths bring back is the irradiance over π: what
  *   a white Lambertian surface there reflects, as the sky's SH irradiance is.
  *   The paths also give the light's dominant direction (luminance-weighted)
@@ -39,6 +41,27 @@
  *   as it is.
  * - **Seams** stitched: where one edge in the world sits on two charts, the
  *   texels along both are nudged (least squares) until the two lookups agree.
+ *
+ * And it bakes what the renderer lights (F3d-4):
+ * - **Local lights' bounce.** At each surface a path bounces off, one point,
+ *   spot or area light is picked by what it would give there unshadowed (with
+ *   a tenth of the choice spread evenly, so none is ever unpickable), and its
+ *   light, over the chance of picking it, comes through a shadow ray. With
+ *   many lights that is one ray where each light's would be many, and the
+ *   estimate stays unbiased.
+ *   - A point or spot light falls off and narrows to its cone as the
+ *     renderers' `distanceFalloff` and the shader's cone do.
+ *   - An area light (F2e-2) is sampled on its surface: a point uniformly on
+ *     its rectangle or disk, or on the rectangle a tube shows the point (as
+ *     the LTC shader takes it, ltc.ts), as its luminance × the two cosines ×
+ *     its area over π d², the renderer's units for its diffuse.
+ *   - A light lights only what shares one of its lighting channels (F2e).
+ * - **Metalness.** A surface bounces its albedo × (1 − metalness), as the
+ *   renderer's diffuse is, plus a metal's own colour as far as it is rough: a
+ *   rough metal's reflection is spread as a diffuser's is, a mirror's goes
+ *   one way and is the reflection probes' (F3b) to carry.
+ * - **Textured albedo** comes in with the occluders (`Occluder.surfaces`;
+ *   bakeSurface.ts in @cartbox/editor), per triangle from its map.
  */
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
@@ -47,27 +70,46 @@ import {
   LIGHTMAP_RANGE,
   PROBE_DEPTH_SIDE,
   PROBE_SH,
+  areaFrame,
+  areaSize,
   buildBvh,
   dilateLightmapValues,
+  lightChannelMask,
+  lightColor,
   lightmapTexels,
+  spotCone,
   stitchLightmapSeams,
+  type DecodedTexture,
+  type EncodedImage,
   type HdrLightmap,
   type LightmapLayout,
   type LightmapTexels,
+  type MeshAsset,
   type Occluder,
+  type OccluderSurface,
   type ProbeVolume,
+  type SceneLight,
 } from "@cartbox/editor";
 
 import type { LinearPanorama } from "./ibl.js";
+import { resolvePbr } from "./scenePacking.js";
 
-/** The most bounces a bake takes, and the most directional lights. */
+/** The most bounces a bake takes, the most directional lights, and the most point, spot and area lights (F3d-4). */
 export const LIGHTMAP_MAX_BOUNCES = 8;
 export const LIGHTMAP_MAX_LIGHTS = 4;
+export const LIGHTMAP_MAX_LOCAL_LIGHTS = 256;
 const WORKGROUP = 64;
 /** Texels a dispatch covers at most, and paths (texels × samples) a submit traces at most. */
 const CHUNK_TEXELS = 65536;
 const PATHS_PER_SUBMIT = 1 << 19;
-const PARAMS_BYTES = 64 + LIGHTMAP_MAX_LIGHTS * 32;
+
+/** Paths a submit traces at most with `local` point, spot and area lights, each weighed twice a bounce (F3d-4): fewer, so none nears a watchdog. */
+function pathBudget(local: number): number {
+  return Math.max(4096, Math.floor(PATHS_PER_SUBMIT / (1 + local / 16)));
+}
+const PARAMS_BYTES = 64;
+/** A light's record in the tracer's storage: five vec4s (see {@link packBakeLights}). */
+const LIGHT_VEC4S = 5;
 /** A probe's sums: nine SH vec4s, its sky / backs / rays, and its 8 × 8 octahedral depth texels (F3d-3). */
 const PROBE_ACC_VEC4S = 10 + PROBE_DEPTH_SIDE * PROBE_DEPTH_SIDE;
 /** The tracer's sums per texel: four vec4s. */
@@ -79,10 +121,81 @@ const COPY_SRC = 0x04;
 const MAP_READ = 0x01;
 const UNIFORM = 0x40;
 
-/** A directional light the bounces are lit by: the direction toward it, and its radiance in linear light (colour × intensity). */
-export interface BakeLight {
-  readonly direction: readonly [number, number, number];
+/**
+ * A light the bounces are lit by: its radiance in linear light (colour ×
+ * intensity; an area light's luminance) and, as a {@link SceneLight} reads
+ * them, where it is and how it falls off. Without a kind it is directional,
+ * `direction` toward it.
+ */
+export interface BakeLight extends Partial<Pick<SceneLight, "kind" | "direction" | "position" | "range" | "falloff" | "innerAngle" | "outerAngle" | "shape" | "size" | "tangent" | "channels">> {
   readonly radiance: readonly [number, number, number];
+}
+
+/** Authored colour into linear light, as the AAA shader's `toLinear` decodes it (an emissive above 1 included). */
+function toLinear(c: number): number {
+  const v = Math.max(0, c);
+  return v <= 0.04045 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4;
+}
+
+/** A rig's lights as the bake lights bounces with them: each one's linear colour (its temperature laid over it) × intensity. */
+export function bakeLights(lights: readonly SceneLight[]): BakeLight[] {
+  return lights.map((l) => {
+    const c = lightColor(l);
+    return { ...l, radiance: [toLinear(c[0]) * l.intensity, toLinear(c[1]) * l.intensity, toLinear(c[2]) * l.intensity] as [number, number, number] };
+  });
+}
+
+/** Light kinds as the tracer reads a record's first w: 0 directional, 1 point, 2 spot, 3 rectangle, 4 disk, 5 tube. */
+const BAKE_LIGHT_KIND = { directional: 0, point: 1, spot: 2, rect: 3, disk: 4, tube: 5 } as const;
+
+/**
+ * The lights as the tracer's storage reads them: the directional ones first
+ * (at most {@link LIGHTMAP_MAX_LIGHTS}), then the point, spot and area ones (at
+ * most {@link LIGHTMAP_MAX_LOCAL_LIGHTS}). Five vec4s each:
+ * - the direction toward it (directional) or its position, and its kind;
+ * - its radiance, and its lighting channels;
+ * - its range, a spot's cone cosines (outer, inner) or an area's half width
+ *   and height, and whether it falls off with the inverse square;
+ * - a spot's axis or an area's facing direction;
+ * - an area's tangent (its width, a tube's length).
+ */
+export function packBakeLights(lights: readonly BakeLight[]): { data: Float32Array; directional: number; local: number } {
+  const directional = lights.filter((l) => (l.kind ?? "directional") === "directional" && l.direction).slice(0, LIGHTMAP_MAX_LIGHTS);
+  const local = lights.filter((l) => l.kind !== undefined && l.kind !== "directional").slice(0, LIGHTMAP_MAX_LOCAL_LIGHTS);
+  const data = new Float32Array(Math.max(1, directional.length + local.length) * LIGHT_VEC4S * 4);
+  [...directional, ...local].forEach((light, i) => {
+    const o = i * LIGHT_VEC4S * 4;
+    const kind = light.kind ?? "directional";
+    const channels = lightChannelMask(light.channels ?? 1);
+    data.set([...light.radiance, channels], o + 4);
+    if (kind === "directional") {
+      const [x, y, z] = light.direction!;
+      const len = Math.hypot(x, y, z) || 1;
+      data.set([x / len, y / len, z / len, BAKE_LIGHT_KIND.directional], o);
+      return;
+    }
+    data.set([...(light.position ?? [0, 0, 0]), kind === "area" ? BAKE_LIGHT_KIND[light.shape ?? "rect"] : BAKE_LIGHT_KIND[kind]], o);
+    if (kind === "area") {
+      const [w, h] = areaSize(light);
+      const frame = areaFrame(light);
+      // Physical by nature: its light falls as the square of the distance, unwindowed, as the LTC shader's does.
+      data.set([0, w / 2, h / 2, 1], o + 8);
+      data.set([...frame.normal, 0], o + 12);
+      data.set([...frame.tangent, 0], o + 16);
+      return;
+    }
+    data[o + 8] = light.range ?? 0;
+    data[o + 11] = light.falloff === "inverseSquare" ? 1 : 0;
+    if (kind === "spot") {
+      // Its cone reads only the angles.
+      const [cosOuter, cosInner] = spotCone(light as unknown as SceneLight);
+      const axis = light.direction ?? [0, -1, 0];
+      const len = Math.hypot(axis[0], axis[1], axis[2]) || 1;
+      data.set([cosOuter, cosInner], o + 9);
+      data.set([axis[0] / len, axis[1] / len, axis[2] / len, 0], o + 12);
+    }
+  });
+  return { data, directional: directional.length, local: local.length };
 }
 
 export interface GpuLightBakeOptions {
@@ -92,7 +205,7 @@ export interface GpuLightBakeOptions {
   readonly bounces?: number;
   /** The sky's radiance in linear light (`environmentPanorama`); none is a black sky. */
   readonly sky?: LinearPanorama | null;
-  /** The directional lights (at most four) that light the surfaces paths bounce off. */
+  /** The lights that light the surfaces paths bounce off: at most four directional ones, and point, spot and area ones (F3d-4; {@link bakeLights}). */
   readonly lights?: readonly BakeLight[];
   /** Denoise on the GPU (default true; F3d-2). */
   readonly denoise?: boolean;
@@ -118,15 +231,27 @@ export interface PackedLightmapScene {
   readonly nodes: Uint32Array;
   /** Per triangle three vec4s: a corner, and the two edges from it (in the BVH's order); their w's the side it faces by its authored normals. */
   readonly tris: Float32Array;
-  /** Per triangle two vec4s: albedo and emission, linear. */
+  /** Per triangle two vec4s: the albedo a diffuse bounce takes (its w the triangle's lighting channels, as u32 bits) and emission, linear. */
   readonly mats: Float32Array;
   readonly triangles: number;
 }
 
-/** Authored colour into linear light, as the AAA shader's `toLinear` decodes it (an emissive above 1 included). */
-function toLinear(c: number): number {
-  const v = Math.max(0, c);
-  return v <= 0.04045 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4;
+/**
+ * A mesh's surfaces as the bake reads them (F3d-4; `Occluder.surfaces`): each
+ * primitive's base-colour and metal/roughness maps, decoded by `decode` (null
+ * where it can't; `data` asks for the pixels as stored, a data map's), and its
+ * metalness and roughness as the renderer resolves them (no metalness on a
+ * material the renderer doesn't shade as PBR).
+ */
+export async function bakeSurfaces(mesh: MeshAsset, decode: (image: EncodedImage, data: boolean) => Promise<DecodedTexture | null>): Promise<OccluderSurface[]> {
+  const read = (image: EncodedImage | null | undefined, data: boolean) => (image && image.bytes.length > 0 ? decode(image, data).catch(() => null) : Promise.resolve(null));
+  return Promise.all(
+    mesh.primitives.map(async ({ material: m }) => {
+      const [base, metallicRoughness] = await Promise.all([read(m.baseColorImage, false), read(m.metallicRoughnessImage, true)]);
+      const pbr = resolvePbr(m, metallicRoughness !== null, !!m.occlusionImage, !!m.emissiveImage);
+      return { base, metallicRoughness, metallic: pbr.isPbr ? pbr.metallic : 0, roughness: pbr.roughness };
+    }),
+  );
 }
 
 /** Flatten the occluders' BVH into the tracer's buffers. */
@@ -153,17 +278,22 @@ export function packLightmapScene(occluders: readonly Occluder[]): PackedLightma
   }
   const tris = new Float32Array(Math.max(1, triangles) * 12);
   const mats = new Float32Array(Math.max(1, triangles) * 8);
+  const matBits = new Uint32Array(mats.buffer);
   for (let i = 0; i < triangles; i += 1) {
     const t = bvh.order[i]!;
     const k = t * 9;
+    // The share of its albedo a diffuse bounce takes (F3d-4): the renderer's diffuse, and a metal's colour as far as it is rough.
+    const metal = Math.min(1, Math.max(0, bvh.mr[t * 2]!));
+    const bounce = 1 - metal + metal * Math.min(1, Math.max(0, bvh.mr[t * 2 + 1]!));
     for (let a = 0; a < 3; a += 1) {
       tris[i * 12 + a * 4 + 3] = bvh.front[t * 3 + a]!;
       tris[i * 12 + a] = bvh.tri[k + a]!;
       tris[i * 12 + 4 + a] = bvh.tri[k + 3 + a]! - bvh.tri[k + a]!;
       tris[i * 12 + 8 + a] = bvh.tri[k + 6 + a]! - bvh.tri[k + a]!;
-      mats[i * 8 + a] = toLinear(bvh.col[t * 3 + a]!);
+      mats[i * 8 + a] = toLinear(bvh.col[t * 3 + a]!) * bounce;
       mats[i * 8 + 4 + a] = toLinear(bvh.emi[t * 3 + a]!);
     }
+    matBits[i * 8 + 3] = bvh.channels[t]!;
   }
   return { nodes, tris, mats, triangles };
 }
@@ -171,10 +301,8 @@ export function packLightmapScene(occluders: readonly Occluder[]): PackedLightma
 export const LIGHTMAP_TRACE_WGSL = /* wgsl */ `
 struct Params {
   run: vec4<u32>,   // x = first texel, y = texels, z = first sample, w = samples this pass
-  info: vec4<u32>,  // x = bounces, y = lights, z = sky width, w = sky height
-  total: vec4<u32>, // x = samples in all
-  lightDir: array<vec4<f32>, ${LIGHTMAP_MAX_LIGHTS}>,
-  lightRad: array<vec4<f32>, ${LIGHTMAP_MAX_LIGHTS}>,
+  info: vec4<u32>,  // x = bounces, y = directional lights, z = sky width, w = sky height
+  total: vec4<u32>, // x = samples in all, y = point, spot and area lights (F3d-4)
   extra: vec4<f32>, // x = a probe's depth cap (F3d-3)
 };
 @group(0) @binding(0) var<storage, read> nodes: array<vec4<u32>>;
@@ -184,6 +312,7 @@ struct Params {
 @group(0) @binding(4) var<storage, read_write> accum: array<vec4<f32>>;
 @group(0) @binding(5) var<storage, read> sky: array<vec4<f32>>;
 @group(0) @binding(6) var<uniform> params: Params;
+@group(0) @binding(7) var<storage, read> lights: array<vec4<f32>>;
 
 const PI = 3.14159265;
 // How far a ray starts off its surface, and the nearest hit it takes (metres).
@@ -305,6 +434,153 @@ fn octTexel(d: vec3<f32>) -> u32 {
   return y * ${PROBE_DEPTH_SIDE}u + x;
 }
 
+// A light's record (packBakeLights): five vec4s from its first.
+fn lightAt(l: u32, k: u32) -> vec4<f32> {
+  return lights[l * ${LIGHT_VEC4S}u + k];
+}
+
+// Whether light l lights a surface on the channels \`mask\` (F2e).
+fn lightsMask(l: u32, mask: u32) -> bool {
+  return (u32(lightAt(l, 1u).w + 0.5) & mask) != 0u;
+}
+
+// A point or spot light's falloff toward a point d away along Ld (the renderers' distanceFalloff, and the shader's cone).
+fn punctualAtten(l: u32, d: f32, Ld: vec3<f32>) -> f32 {
+  let r = lightAt(l, 2u);
+  var atten = 1.0;
+  if (r.w > 0.5) {
+    var win = 1.0;
+    if (r.x > 0.0) { let q = d / r.x; let t = clamp(1.0 - q * q * q * q, 0.0, 1.0); win = t * t; }
+    let dm = max(d, 0.01);
+    atten = win / (dm * dm);
+  } else if (r.x > 0.0) {
+    let t = max(0.0, 1.0 - d / r.x);
+    atten = t * t;
+  }
+  if (lightAt(l, 0u).w > 1.5) {
+    let ct = clamp((-dot(Ld, lightAt(l, 3u).xyz) - r.y) / (r.z - r.y), 0.0, 1.0);
+    atten = atten * ct * ct * (3.0 - 2.0 * ct);
+  }
+  return atten;
+}
+
+// What local light l would give a surface at p facing n, unshadowed, by luminance: how likely it is to be picked.
+// An area light is taken as the point at its centre it is from far off.
+fn localWeight(l: u32, p: vec3<f32>, n: vec3<f32>, mask: u32) -> f32 {
+  if (!lightsMask(l, mask)) { return 0.0; }
+  let a = lightAt(l, 0u);
+  let toL = a.xyz - p;
+  let d = max(length(toL), 1e-4);
+  let Ld = toL / d;
+  let ndl = max(dot(n, Ld), 0.0);
+  let power = lum(lightAt(l, 1u).rgb);
+  if (a.w < 2.5) { return power * punctualAtten(l, d, Ld) * ndl; }
+  let r = lightAt(l, 2u);
+  var area = 4.0 * r.y * r.z;
+  var facing = 1.0;
+  if (a.w > 4.5) { area = 2.0 * r.y * 2.0 * r.z + PI * r.z * r.z; }
+  else {
+    facing = max(-dot(Ld, lightAt(l, 3u).xyz), 0.0);
+    if (a.w > 3.5) { area = PI * r.y * r.y; }
+  }
+  let dm = max(d, 0.1);
+  return power * area * facing * max(ndl, 0.05) / (PI * dm * dm);
+}
+
+struct LightSample {
+  c: vec3<f32>,  // what it gives the surface, unshadowed
+  dir: vec3<f32>,
+  dist: f32,
+};
+
+// Local light l's light on a surface at p facing n: a point or spot light's, or an area light's through one point
+// on it (uniform on its rectangle or disk, or on the rectangle a tube shows p, as the LTC shader takes it).
+fn localSample(l: u32, p: vec3<f32>, n: vec3<f32>) -> LightSample {
+  var out = LightSample(vec3<f32>(0.0), vec3<f32>(0.0, 1.0, 0.0), 0.0);
+  let a = lightAt(l, 0u);
+  let rad = lightAt(l, 1u).rgb;
+  if (a.w < 2.5) {
+    let toL = a.xyz - p;
+    let d = max(length(toL), 1e-4);
+    out.dir = toL / d;
+    out.dist = d;
+    out.c = rad * punctualAtten(l, d, out.dir) * max(dot(n, out.dir), 0.0);
+    return out;
+  }
+  let r = lightAt(l, 2u);
+  let tan = lightAt(l, 4u).xyz;
+  var nrm = lightAt(l, 3u).xyz;
+  var hw = r.y;
+  let hh = r.z;
+  let toP = p - a.xyz;
+  if (a.w > 4.5) {
+    let off = toP - tan * dot(toP, tan);
+    nrm = select(normalize(cross(tan, select(vec3<f32>(1.0, 0.0, 0.0), vec3<f32>(0.0, 1.0, 0.0), abs(tan.y) < 0.9))), normalize(off), length(off) > 1e-5);
+    hw = hw + 0.78539816 * hh;
+  } else if (dot(toP, nrm) <= 0.0) {
+    return out;
+  }
+  let bt = cross(nrm, tan);
+  let xi = vec2<f32>(rand(), rand());
+  var s: vec3<f32>;
+  var area: f32;
+  if (a.w > 3.5 && a.w < 4.5) {
+    let rr = hw * sqrt(xi.x);
+    let phi = 2.0 * PI * xi.y;
+    s = a.xyz + tan * (rr * cos(phi)) + bt * (rr * sin(phi));
+    area = PI * hw * hw;
+  } else {
+    s = a.xyz + tan * (hw * (2.0 * xi.x - 1.0)) + bt * (hh * (2.0 * xi.y - 1.0));
+    area = 4.0 * hw * hh;
+  }
+  let toS = s - p;
+  let d = max(length(toS), 1e-4);
+  out.dir = toS / d;
+  out.dist = d;
+  let cosS = dot(n, out.dir);
+  let cosL = -dot(out.dir, nrm);
+  if (cosS > 0.0 && cosL > 0.0) { out.c = rad * (cosS * cosL * area / (PI * max(d * d, 1e-4))); }
+  return out;
+}
+
+// The lights on a surface a path bounced off at p, facing n, on the channels \`mask\`: every directional light, and one
+// local light picked by localWeight (a tenth of the choice spread evenly), over the chance of picking it.
+fn lightsOn(p: vec3<f32>, n: vec3<f32>, mask: u32) -> vec3<f32> {
+  var L = vec3<f32>(0.0);
+  let directional = params.info.y;
+  for (var l = 0u; l < directional; l = l + 1u) {
+    if (!lightsMask(l, mask)) { continue; }
+    let Ld = lightAt(l, 0u).xyz;
+    let ndl = dot(n, Ld);
+    if (ndl > 0.0 && trace(p, Ld, FAR, true).tri < 0) {
+      L = L + lightAt(l, 1u).rgb * ndl;
+    }
+  }
+  let local = params.total.y;
+  if (local == 0u) { return L; }
+  var total = 0.0;
+  for (var k = 0u; k < local; k = k + 1u) { total = total + localWeight(directional + k, p, n, mask); }
+  let even = select(1.0, 0.1, total > 0.0) / f32(local);
+  let spread = select(0.0, 0.9 / total, total > 0.0);
+  let u = rand();
+  var pick = local - 1u;
+  var pdf = 0.0;
+  var cdf = 0.0;
+  for (var k = 0u; k < local; k = k + 1u) {
+    pdf = localWeight(directional + k, p, n, mask) * spread + even;
+    cdf = cdf + pdf;
+    if (u < cdf) { pick = k; break; }
+  }
+  if (pick == local - 1u) { pdf = localWeight(directional + pick, p, n, mask) * spread + even; }
+  let l = directional + pick;
+  if (!lightsMask(l, mask)) { return L; }
+  let ls = localSample(l, p, n);
+  if (max(ls.c.r, max(ls.c.g, ls.c.b)) > 0.0 && trace(p, ls.dir, ls.dist - EPS, true).tri < 0) {
+    L = L + ls.c / pdf;
+  }
+  return L;
+}
+
 struct Path {
   L: vec3<f32>,
   // The first segment's hit distance (FAR when it reached the sky), and whether it met the back of a surface (F3d-2).
@@ -312,11 +588,10 @@ struct Path {
   back: bool,
 };
 
-// What a path from o along d brings back: the sky on a miss; on a hit, the surface's emission, the
-// directional lights on it, and (while bounces remain) what a cosine-weighted bounce off it gathers.
+// What a path from o along d brings back: the sky on a miss; on a hit, the surface's emission, and (while
+// bounces remain) the lights on it and what a cosine-weighted bounce off it gathers.
 fn pathFrom(origin: vec3<f32>, dir: vec3<f32>) -> Path {
   let bounces = params.info.x;
-  let lights = params.info.y;
   var out = Path(vec3<f32>(0.0), FAR, false);
   var tp = vec3<f32>(1.0);
   var o = origin;
@@ -338,13 +613,7 @@ fn pathFrom(origin: vec3<f32>, dir: vec3<f32>) -> Path {
     if (dot(n, d) > 0.0) { n = -n; } // the side the path arrived on (surfaces are two-sided)
     let hp = o + d * h.t + n * EPS;
     tp = tp * mats[i * 2u].rgb;
-    for (var l = 0u; l < lights; l = l + 1u) {
-      let Ld = params.lightDir[l].xyz;
-      let ndl = dot(n, Ld);
-      if (ndl > 0.0 && trace(hp, Ld, FAR, true).tri < 0) {
-        out.L = out.L + tp * params.lightRad[l].rgb * ndl;
-      }
-    }
+    out.L = out.L + tp * lightsOn(hp, n, bitcast<u32>(mats[i * 2u].w));
     if (max(tp.r, max(tp.g, tp.b)) < 1e-4) { break; }
     o = hp;
     d = cosineDir(n, vec2<f32>(rand(), rand()));
@@ -438,19 +707,11 @@ fn probeMain(@builtin(global_invocation_id) id: vec3<u32>) {
 
 const luminance = (r: number, g: number, b: number) => 0.2126 * r + 0.7152 * g + 0.0722 * b;
 
-/** The tracer's parameters for one dispatch. */
-export function lightmapParams(first: number, texels: number, firstSample: number, samples: number, total: number, bounces: number, sky: LinearPanorama | null, lights: readonly BakeLight[], reach = 0): ArrayBuffer {
+/** The tracer's parameters for one dispatch; `lights` counts the packed lights ({@link packBakeLights}). */
+export function lightmapParams(first: number, texels: number, firstSample: number, samples: number, total: number, bounces: number, sky: LinearPanorama | null, lights: { readonly directional: number; readonly local: number }, reach = 0): ArrayBuffer {
   const buffer = new ArrayBuffer(PARAMS_BYTES);
-  const u = new Uint32Array(buffer);
-  const f = new Float32Array(buffer);
-  u.set([first, texels, firstSample, samples, bounces, Math.min(lights.length, LIGHTMAP_MAX_LIGHTS), sky?.width ?? 0, sky?.height ?? 0, total], 0);
-  lights.slice(0, LIGHTMAP_MAX_LIGHTS).forEach((light, i) => {
-    const [x, y, z] = light.direction;
-    const len = Math.hypot(x, y, z) || 1;
-    f.set([x / len, y / len, z / len, 0], 12 + i * 4);
-    f.set([...light.radiance, 0], 12 + LIGHTMAP_MAX_LIGHTS * 4 + i * 4);
-  });
-  f[12 + LIGHTMAP_MAX_LIGHTS * 8] = reach;
+  new Uint32Array(buffer).set([first, texels, firstSample, samples, bounces, lights.directional, sky?.width ?? 0, sky?.height ?? 0, total, lights.local], 0);
+  new Float32Array(buffer)[12] = reach;
   return buffer;
 }
 
@@ -463,7 +724,7 @@ export async function bakeLightmapGpu(device: any, layout: LightmapLayout, occlu
   const samples = Math.max(1, Math.round(options.samples ?? 256));
   const bounces = Math.max(0, Math.min(LIGHTMAP_MAX_BOUNCES, Math.round(options.bounces ?? 3)));
   const sky = options.sky ?? null;
-  const lights = options.lights ?? [];
+  const lights = packBakeLights(options.lights ?? []);
   const texels = lightmapTexels(layout);
   const count = texels.index.length;
   const acc = new Float32Array(count * ACC_FLOATS);
@@ -485,16 +746,18 @@ export async function bakeLightmapGpu(device: any, layout: LightmapLayout, occlu
     const buffers = [upload(scene.nodes), upload(scene.tris), upload(scene.mats), upload(points)];
     const accum = device.createBuffer({ size: acc.byteLength, usage: STORAGE | COPY_SRC });
     const skyBuffer = upload(skyData);
+    const lightBuffer = upload(lights.data);
     const params = device.createBuffer({ size: PARAMS_BYTES, usage: UNIFORM | COPY_DST });
     const readback = device.createBuffer({ size: acc.byteLength, usage: MAP_READ | COPY_DST });
     try {
       const pipeline = device.createComputePipeline({ layout: "auto", compute: { module: device.createShaderModule({ code: LIGHTMAP_TRACE_WGSL }), entryPoint: "main" } });
       const group = device.createBindGroup({
         layout: pipeline.getBindGroupLayout(0),
-        entries: [...buffers, accum, skyBuffer].map((buffer, binding) => ({ binding, resource: { buffer } })).concat([{ binding: 6, resource: { buffer: params } }]),
+        entries: [...buffers, accum, skyBuffer].map((buffer, binding) => ({ binding, resource: { buffer } })).concat([{ binding: 6, resource: { buffer: params } }, { binding: 7, resource: { buffer: lightBuffer } }]),
       });
-      const chunk = Math.min(count, CHUNK_TEXELS);
-      const perPass = Math.max(1, Math.min(samples, Math.floor(PATHS_PER_SUBMIT / chunk)));
+      const budget = pathBudget(lights.local);
+      const chunk = Math.min(count, CHUNK_TEXELS, budget);
+      const perPass = Math.max(1, Math.min(samples, Math.floor(budget / chunk)));
       const submits = Math.ceil(samples / perPass) * Math.ceil(count / chunk);
       let done = 0;
       for (let s = 0; s < samples; s += perPass) {
@@ -522,7 +785,7 @@ export async function bakeLightmapGpu(device: any, layout: LightmapLayout, occlu
       acc.set(new Float32Array(readback.getMappedRange()));
       readback.unmap();
     } finally {
-      for (const buffer of [...buffers, accum, skyBuffer, params, readback]) buffer.destroy();
+      for (const buffer of [...buffers, accum, skyBuffer, lightBuffer, params, readback]) buffer.destroy();
     }
   }
   const atlas = resolveLightmap(texels, acc, samples, options.backfaceLimit ?? 0.6);
@@ -783,7 +1046,7 @@ export async function bakeProbeVolumeGpu(
   const rays = Math.max(16, Math.round(options.rays ?? 1024));
   const bounces = Math.max(0, Math.min(LIGHTMAP_MAX_BOUNCES, Math.round(options.bounces ?? 3)));
   const sky = options.sky ?? null;
-  const lights = options.lights ?? [];
+  const lights = packBakeLights(options.lights ?? []);
   const [cx, cy, cz] = counts;
   const count = cx * cy * cz;
   const spacing = [0, 1, 2].map((a) => (max[a]! - min[a]!) / Math.max(1, counts[a]! - 1));
@@ -803,15 +1066,16 @@ export async function bakeProbeVolumeGpu(
   const buffers = [upload(scene.nodes), upload(scene.tris), upload(scene.mats), upload(positions)];
   const accum = device.createBuffer({ size: acc.byteLength, usage: STORAGE | COPY_SRC });
   const skyBuffer = upload(sky ? sky.data : new Float32Array(4));
+  const lightBuffer = upload(lights.data);
   const params = device.createBuffer({ size: PARAMS_BYTES, usage: UNIFORM | COPY_DST });
   const readback = device.createBuffer({ size: acc.byteLength, usage: MAP_READ | COPY_DST });
   try {
     const pipeline = device.createComputePipeline({ layout: "auto", compute: { module: device.createShaderModule({ code: LIGHTMAP_TRACE_WGSL }), entryPoint: "probeMain" } });
     const group = device.createBindGroup({
       layout: pipeline.getBindGroupLayout(0),
-      entries: [...buffers, accum, skyBuffer].map((buffer, binding) => ({ binding, resource: { buffer } })).concat([{ binding: 6, resource: { buffer: params } }]),
+      entries: [...buffers, accum, skyBuffer].map((buffer, binding) => ({ binding, resource: { buffer } })).concat([{ binding: 6, resource: { buffer: params } }, { binding: 7, resource: { buffer: lightBuffer } }]),
     });
-    const perPass = Math.max(1, Math.min(rays, Math.floor(PATHS_PER_SUBMIT / count)));
+    const perPass = Math.max(1, Math.min(rays, Math.floor(pathBudget(lights.local) / count)));
     const submits = Math.ceil(rays / perPass);
     for (let s = 0, done = 0; s < rays; s += perPass) {
       device.queue.writeBuffer(params, 0, lightmapParams(0, count, s, Math.min(perPass, rays - s), rays, bounces, sky, lights, reach));
@@ -833,7 +1097,7 @@ export async function bakeProbeVolumeGpu(
     acc.set(new Float32Array(readback.getMappedRange()));
     readback.unmap();
   } finally {
-    for (const buffer of [...buffers, accum, skyBuffer, params, readback]) buffer.destroy();
+    for (const buffer of [...buffers, accum, skyBuffer, lightBuffer, params, readback]) buffer.destroy();
   }
   return finishProbeVolume(min, max, counts, acc, reach, options.backfaceLimit ?? 0.6);
 }

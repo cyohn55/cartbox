@@ -628,7 +628,7 @@ Everything else depends on this track. It contains no visible "feature", but its
         - with GTAO off the two match within 3%, and open floor keeps at least 93% of its light;
         - the uniforms carry the radius, slices, frame and history flag.
       - The F2c and prepass suites (frame graph, HDR TAA, scene renderer, native resolution, parity) pass with GTAO on.
-- [ ] **F3d. GPU lightmapper.**
+- [x] **F3d. GPU lightmapper.** (Re-baking the shipped maps waits on F11a; see below.)
   - A compute path tracer, sharing its BVH with F10b, that bakes HDR **directional lightmaps** (L1 SH or ambient-highlight-direction) with any number of bounces, emissive surfaces as lights and area lights.
   - A denoiser (an edge-avoiding à-trous filter, or a small learned one), with seam stitching and texel-density control.
   - Baked **probe volumes** with L2 SH and visibility (to stop leaks) light dynamic objects.
@@ -723,10 +723,42 @@ Everything else depends on this track. It contains no visible "feature", but its
         - a probe inside a closed box is dropped;
         - the renderer lights a floor without a light map as the mirror says, within the reflection's few %, and keeps the light behind the wall, while the byte path is unchanged;
         - the editor's GPU bake stores the volume and the cubes, the environment hands the volume over, and a CPU rebake or a clear takes it away.
+  - **F3d-4, what the renderer lights by: done** (`gpuLightmapper.ts`, `model/bakeSurface.ts`, `sceneSkyEnvironment`). The GPU bake now takes every light of the rig, each surface's textured albedo and metalness, and the sky the player draws. Light maps and the probe volume take them alike, through the shared `pathFrom`. The CPU bake is unchanged.
+    - **Local lights' bounce.** The lights move from the uniform to a storage buffer (group 0 binding 7, five vec4s a light): up to four directional, then up to 256 point, spot and area lights (`packBakeLights`, `bakeLights`).
+      - At each surface a path bounces off, every directional light is traced as before. One local light is picked by what it would give there unshadowed, with a tenth of the choice spread evenly so that no light is ever unpickable. Its light over the chance of picking it comes through one shadow ray.
+      - With many lights that is one ray where each light's would be many, and the estimate stays unbiased: one bright, seven dim and one out-of-reach light give the single light's 0.4 ρI within 5%.
+      - A point or spot light falls off as `distanceFalloff` does (inverse square windowed to its range, or (1 − d/range)²), and a spot narrows by the shader's smoothstep cone.
+      - An area light (F2e-2) is sampled at one point on its rectangle or disk, or on the rectangle a tube shows the point, as the LTC shader takes it. That point gives luminance × both cosines × area / π d², the renderer's diffuse units, from its lit face only.
+      - A light lights only what shares one of its lighting channels (F2e). The triangle's channels ride in its albedo's w, from `Occluder.lightChannels`.
+      - As with the sun, the texel's own direct light from them is left out, because the live lights draw it.
+    - **Metalness.** A surface bounces albedo × (1 − metalness), as the renderer's diffuse does. It adds a metal's own colour as far as the metal is rough: a rough metal's reflection is spread the way a diffuser's is, while a mirror's goes one way and is the reflection probes' (F3b) to carry.
+      - The metalness and roughness are the renderer's own (`resolvePbr`). A material that isn't shaded as PBR has none.
+    - **Textured albedo.** `Occluder.surfaces` carries each primitive's decoded base-colour and metal/roughness maps (`bakeSurfaces`). `buildBvh` reads each triangle's albedo from its map, in place of the factor × 0.55.
+      - The read is the map's mean over the triangle's UV footprint: the mip level whose texel is about the footprint's size, read trilinearly at the centroid with wrap (`footprintMean`), in linear light for a base-colour map and as data for a metal/roughness map.
+      - A triangle that tiles the map reads its mean; a sliver of a trim sheet reads its strip.
+      - The editor decodes PNGs with our own decoder and anything else with the browser's (KTX2 through the transcoder). A map neither can read keeps the old factor.
+    - **The sky the player draws.** `sceneSkyEnvironment` gives the environment the surface lights by: the rig's gradient, or its procedural or imported sky baked with its objects, clouds and vistas (I6, I7), carrying an HDR sky's own light (F3a-2).
+      - The surface's two sky bakes now share `litBySky` with it. The light maps, the probe volume and the other tiers' ambient cubes all take this sky in place of the gradient.
+    - *Tests (`bake-lights.test.ts`):*
+      - A map's footprint mean: its whole mean, a sliver's strip, a tiled triangle's mean, and sRGB decoded only for colour.
+      - `buildBvh` per triangle under a map: its albedo, metalness and channels. Without one, the plain BVH is unchanged (× 0.55, no metal).
+      - The bounce share at each metalness and roughness, and the channels in the packed material.
+      - `bakeSurfaces` resolves as the renderer does and asks for the metal/roughness map as data.
+      - The packed light records, and a rig's lights in linear light with their temperature.
+      - On Dawn, a black floor under a wide grey ceiling (ρ = 0.5) 1 m up, lit by a light just above the floor, so only the ceiling's bounce reaches the floor. Each case is checked against the closed-form integral 2ρ ∫ r · E(d) / d⁴ dr:
+        - an inverse-square point light gives 0.4 ρI, and a ranged one its (1 − d/range)² integral, each within 4%;
+        - a spot light gives its cone's integral within 5%, and none when it points away;
+        - a 10 cm rectangle and a disk of the same area give ρLA / 3π within 5%, and the rectangle none when it faces away;
+        - a light on another channel gives none, and the same light on a shared channel gives the full bounce;
+        - nine lights picked among give the sum without bias;
+        - a mirror metal gives none, and a half-rough metal half the dielectric's bounce;
+        - a white-factored ceiling with a red map bleeds red, where without its decoded map it bled the factor × 0.55's grey.
+      - The editor's scene bake under an orange procedural sky over a blue gradient: the floor reads the drawn sky's cosine integral within 5% in every channel.
+      - The F3d-1 to F3d-3 suites pass unchanged.
     - *Left for F3d:*
-      - **F3d-4**: local and area lights' bounce, metalness and textured albedo (the bake still takes a textured material's factor × 0.55), and the procedural or imported HDR sky as the player draws it (the bake reads the rig's gradient).
       - Re-baking Lockout and Beaver Creek with HDR maps, which waits on F11a's physical re-light.
-      - The CPU bake could take the seam stitching too; it is left byte-identical for now, so `bake:map`'s stored maps don't move.
+      - The CPU bake could take the seam stitching, the local lights and the maps too. It is left byte-identical for now, so `bake:map`'s stored maps don't move.
+      - Emissive maps (the bake takes the emissive factor) and a smooth surface's specular bounce (caustics) are not baked.
 - [ ] **F3e. Real-time GI.**
   - **DDGI**: a probe grid whose irradiance and visibility are updated every frame by software ray tracing in compute, against a scene BVH or a global signed distance field.
   - **SSGI** for near-field detail on top.

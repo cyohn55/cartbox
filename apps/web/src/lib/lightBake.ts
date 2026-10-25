@@ -9,17 +9,20 @@
  *
  * Where the browser has WebGPU, the GPU lightmapper bakes instead
  * (AAA_FIDELITY_ROADMAP.md F3d; gpuLightmapper.ts in @cartbox/player): a path
- * tracer that takes the rig's sky and directional lights, emissive surfaces
- * and up to eight bounces, in seconds. Each object then carries the same
- * 8-bit map as before, for every tier, and an HDR directional one the AAA
- * tier lights by; and the probes become a probe volume (F3d-3: L2 SH with
- * DDGI's visibility, so what moves isn't lit through walls), from which the
- * other tiers' ambient cubes are derived.
+ * tracer that takes the sky the player draws (procedural, imported or HDR,
+ * F3d-4), every light of the rig (directional, point, spot and area, on their
+ * lighting channels), emissive surfaces, each surface's textured albedo and
+ * metalness, and up to eight bounces, in seconds. Each object then carries
+ * the same 8-bit map as before, for every tier, and an HDR directional one
+ * the AAA tier lights by; and the probes become a probe volume (F3d-3: L2 SH
+ * with DDGI's visibility, so what moves isn't lit through walls), from which
+ * the other tiers' ambient cubes are derived.
  */
 
 import {
   applyLightmapImage,
   bakeLightProbes,
+  decodePngRgba,
   bakeLightmap,
   encodeHdrLightmap,
   ambientCubesFromVolume,
@@ -28,19 +31,20 @@ import {
   encodeRgbaPng,
   LIGHTMAP_RANGE,
   planProbeVolume,
-  lightColor,
   sceneLightingEnvironment,
   planProbeGrid,
+  type DecodedTexture,
+  type EncodedImage,
   deserializeMeshAsset,
   layoutLightmap,
   sceneLightingKeyDirection,
   withLightmap,
   type MeshAsset,
   type Occluder,
-  type SceneLighting,
 } from "@cartbox/editor";
-import { LIGHTMAP_MAX_BOUNCES, LIGHTMAP_MAX_LIGHTS, bakeLightmapGpu, bakeProbeVolumeGpu, environmentPanorama, environmentSh, parseMeshScene, shIrradiance, type BakeLight } from "@cartbox/player";
+import { LIGHTMAP_MAX_BOUNCES, bakeLightmapGpu, bakeLights, bakeProbeVolumeGpu, bakeSurfaces, environmentPanorama, environmentSh, parseMeshScene, sceneSkyEnvironment, shIrradiance } from "@cartbox/player";
 
+import { decodeImage } from "./meshImport";
 import { encodeMeshSidecar, setMeshAsset, type MeshSidecar } from "./meshSidecar";
 
 export interface SceneLightBakeOptions {
@@ -74,24 +78,31 @@ export async function lightBakeDevice(): Promise<unknown | null> {
   }
 }
 
-/** Authored colour into linear light, as the AAA shader decodes it. */
-const toLinear = (c: number) => (c <= 0.04045 ? Math.max(0, c) / 12.92 : ((c + 0.055) / 1.055) ** 2.4);
-
-/** The rig's directional lights as the GPU bake lights bounces with them: toward each, its linear colour × intensity. */
-function bakeLights(lighting: SceneLighting): BakeLight[] {
-  return lighting.lights
-    .filter((l) => l.kind === "directional" && l.direction)
-    .slice(0, LIGHTMAP_MAX_LIGHTS)
-    .map((l) => {
-      const c = lightColor(l);
-      return { direction: [...l.direction!] as [number, number, number], radiance: [toLinear(c[0]) * l.intensity, toLinear(c[1]) * l.intensity, toLinear(c[2]) * l.intensity] as [number, number, number] };
-    });
+/** A map for the GPU bake's surfaces (F3d-4): a PNG by our own decoder (exact, and in node too), else the browser's (KTX2 by the transcoder); null where neither can. */
+async function decodeBakeImage(image: EncodedImage, data: boolean): Promise<DecodedTexture | null> {
+  if (image.mime === "image/png") {
+    try {
+      const png = await decodePngRgba(image.bytes);
+      return { width: png.width, height: png.height, data: new Uint8ClampedArray(png.data.buffer, png.data.byteOffset, png.data.byteLength) };
+    } catch {
+      // A PNG ours can't read (16 bits a channel): the browser's.
+    }
+  }
+  try {
+    return await decodeImage(image.bytes, image.mime, data);
+  } catch {
+    return null;
+  }
 }
 
-/** The still objects of a scene, as the runtime places them: id, mesh, world matrix, and light-map density against the bake's (F3d-2). */
-function stillObjects(sidecar: MeshSidecar): { id: string; mesh: MeshAsset; model: ArrayLike<number>; scale: number }[] {
+/** A scene as the runtime parses it, or null. */
+function parsedScene(sidecar: MeshSidecar): ReturnType<typeof parseMeshScene> | null {
   const encoded = encodeMeshSidecar(sidecar);
-  const scene = encoded ? parseMeshScene(encoded) : null;
+  return encoded ? parseMeshScene(encoded) : null;
+}
+
+/** The still objects of a scene, as the runtime places them: id, mesh, world matrix, light-map density against the bake's (F3d-2), and lighting channels (F2e). */
+function stillObjects(sidecar: MeshSidecar, scene = parsedScene(sidecar)): { id: string; mesh: MeshAsset; model: ArrayLike<number>; scale: number; lightChannels?: number }[] {
   if (!scene) return [];
   const scales = new Map(sidecar.meshes.map((m) => [m.id, m.lightmapScale ?? 1]));
   return scene.instances
@@ -100,7 +111,7 @@ function stillObjects(sidecar: MeshSidecar): { id: string; mesh: MeshAsset; mode
       const body = inst.physics?.body;
       return !(body === "dynamic" || body === "kinematic" || body === "character" || inst.physics?.trigger);
     })
-    .map((inst) => ({ id: inst.id, mesh: inst.mesh, model: inst.model, scale: scales.get(inst.id) ?? 1 }));
+    .map((inst) => ({ id: inst.id, mesh: inst.mesh, model: inst.model, scale: scales.get(inst.id) ?? 1, ...(inst.lightChannels !== undefined ? { lightChannels: inst.lightChannels } : {}) }));
 }
 
 /** How many of the scene's still objects carry a baked light map, and how many light probes it has. */
@@ -115,22 +126,33 @@ export function lightingStats(sidecar: MeshSidecar): { baked: number; still: num
  * stays responsive; `progress` hears the share done (0..1).
  */
 export async function bakeSceneLighting(sidecar: MeshSidecar, options: SceneLightBakeOptions = {}, progress?: (done: number) => void): Promise<MeshSidecar> {
-  const still = stillObjects(sidecar);
+  const scene = parsedScene(sidecar);
+  const still = stillObjects(sidecar, scene);
   const occluders: Occluder[] = still.map((o) => ({ mesh: o.mesh, model: o.model }));
   const sun = (sidecar.lighting ? sceneLightingKeyDirection(sidecar.lighting) : undefined) ?? null;
   let next = sidecar;
   // The light maps take most of the time; the probe grid the last tenth.
   const probes = (options.probeSpacing ?? 2.5) > 0 && still.length > 0 && sidecar.lighting;
   const share = probes ? 0.9 : 1;
-  // The GPU bake's sky and lights (F3d): the rig's environment in linear light, as the AAA tier's IBL sees it.
-  const gpu = options.device && sidecar.lighting ? { sky: environmentPanorama(sceneLightingEnvironment(sidecar.lighting)), lights: bakeLights(sidecar.lighting) } : null;
+  // The GPU bake's sky, lights and surfaces (F3d): the sky the player draws in linear light, as the AAA tier's IBL sees it
+  // (F3d-4); every light of the rig; and each still object's maps and metalness, on its lighting channels.
+  let gpu: { sky: ReturnType<typeof environmentPanorama>; lights: ReturnType<typeof bakeLights>; occluders: Occluder[] } | null = null;
+  if (options.device && sidecar.lighting) {
+    const environment = (scene ? await sceneSkyEnvironment(scene) : null) ?? sceneLightingEnvironment(sidecar.lighting);
+    const surfaces = await Promise.all(still.map((o) => bakeSurfaces(o.mesh, decodeBakeImage)));
+    gpu = {
+      sky: environmentPanorama(environment),
+      lights: bakeLights(sidecar.lighting.lights),
+      occluders: still.map((o, i) => ({ mesh: o.mesh, model: o.model, surfaces: surfaces[i], ...(o.lightChannels !== undefined ? { lightChannels: o.lightChannels } : {}) })),
+    };
+  }
   for (let i = 0; i < still.length; i += 1) {
     const object = still[i]!;
     const layout = layoutLightmap(object.mesh, object.model, { density: (options.density ?? 4) * object.scale });
     const step = (d: number) => progress?.(((i + d) / still.length) * share);
     if (gpu) {
       // Paths are cheap on the GPU: four for each of the CPU's rays.
-      const baked = await bakeLightmapGpu(options.device, layout, occluders, { samples: (options.rays ?? 48) * 4, bounces: Math.min(LIGHTMAP_MAX_BOUNCES, options.bounces ?? 3), sky: gpu.sky, lights: gpu.lights }, step);
+      const baked = await bakeLightmapGpu(options.device, layout, gpu.occluders, { samples: (options.rays ?? 48) * 4, bounces: Math.min(LIGHTMAP_MAX_BOUNCES, options.bounces ?? 3), sky: gpu.sky, lights: gpu.lights }, step);
       const ambient = { mime: "image/png", bytes: encodeRgbaPng(baked.ambient, layout.size, layout.size, { compress: true }) };
       next = setMeshAsset(next, object.id, applyLightmapImage(layout.mesh, ambient, encodeHdrLightmap(baked.hdr)));
     } else {
@@ -150,7 +172,7 @@ export async function bakeSceneLighting(sidecar: MeshSidecar, options: SceneLigh
       // On the GPU (F3d-3): a probe volume of L2 SH and visibility for the AAA tier, sixteen rays for each of
       // the CPU's, and from it the ambient cubes every other tier reads.
       const counts = planProbeVolume(min, max, options.probeSpacing ?? 2.5);
-      const volume = await bakeProbeVolumeGpu(options.device, min, max, counts, occluders, { rays: (options.rays ?? 48) * 16, bounces: Math.min(LIGHTMAP_MAX_BOUNCES, options.bounces ?? 3), sky: gpu.sky, lights: gpu.lights }, step);
+      const volume = await bakeProbeVolumeGpu(options.device, min, max, counts, gpu.occluders, { rays: (options.rays ?? 48) * 16, bounces: Math.min(LIGHTMAP_MAX_BOUNCES, options.bounces ?? 3), sky: gpu.sky, lights: gpu.lights }, step);
       const skySh = environmentSh(gpu.sky);
       const cubes = ambientCubesFromVolume(volume, (n) => shIrradiance(skySh, n), LIGHTMAP_RANGE);
       next = { ...next, lighting: { ...next.lighting, lightProbes: encodeLightProbes(cubes), probeVolume: encodeProbeVolume(volume) } };

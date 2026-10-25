@@ -332,6 +332,7 @@ export {
   type Occluder,
   type SeamSample,
 } from "./model/lightmap";
+export { footprintMean, linearToAuthored, type OccluderSurface } from "./model/bakeSurface";
 export {
   MAX_PROBE_VOLUME_AXIS,
   PROBE_DEPTH_SIDE,

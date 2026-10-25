@@ -636,7 +636,7 @@ export class MeshOverlaySurface implements DisplaySurface {
         const baked = await bakeSceneSky(lighting.sky, lighting, environment, this.vistas, next.bounds.center);
         skyMap = baked.map;
         clouds = baked.clouds;
-        environment = { ...environment, map: baked.reflections, average: computeEnvironmentAverage(baked.reflections), ...(baked.hdr ? { hdr: baked.hdr } : {}) };
+        environment = litBySky(environment, baked);
         this.skyReflections = { small: baked.small, sun: sunKey(skySun(lighting.sky)) };
       } else {
         this.skyReflections = null;
@@ -763,7 +763,7 @@ export class MeshOverlaySurface implements DisplaySurface {
       const baked = await bakeSceneSky(lighting.sky, lighting, environment, vistas, scene.bounds.center);
       skyMap = baked.map;
       clouds = baked.clouds;
-      environment = { ...environment, map: baked.reflections, average: computeEnvironmentAverage(baked.reflections), ...(baked.hdr ? { hdr: baked.hdr } : {}) };
+      environment = litBySky(environment, baked);
       reflections = { small: baked.small, sun: sunKey(skySun(lighting.sky)) };
     }
     const surface = new MeshOverlaySurface(inner, width, height, scene, instances, frames, renderer, skyMap, environment, options);
@@ -2205,6 +2205,29 @@ const VISTA_SHADOW_SIZE = 2048;
 const VISTA_AIR_WIDTH = 192;
 
 /** A scene's vistas with their meshes' maps decoded (the frame's own decode, so shared images decode once). */
+/** The rig's environment lit by its baked sky: the reflections' panorama, its mean, and an imported HDR sky's own light. */
+function litBySky(environment: EnvironmentLight, baked: { reflections: DecodedTexture; hdr: HdrImage | null }): EnvironmentLight {
+  return { ...environment, map: baked.reflections, average: computeEnvironmentAverage(baked.reflections), ...(baked.hdr ? { hdr: baked.hdr } : {}) };
+}
+
+/**
+ * The environment a scene is lit by, as the player draws it: the rig's
+ * gradient, or, where it authors a sky, that sky baked (its imported or HDR
+ * panorama, objects, clouds and distant vistas, I6 and I7) as the surface
+ * bakes it. The light bake reads it (AAA_FIDELITY_ROADMAP.md F3d-4), so what
+ * is baked is lit by the sky the frame shows. Null without a rig. Textures go
+ * through the browser's decoder (none in node, where the vistas draw flat);
+ * KTX2-only ones draw flat.
+ */
+export async function sceneSkyEnvironment(scene: MeshScene): Promise<EnvironmentLight | null> {
+  const lighting = scene.lighting;
+  if (!lighting) return null;
+  const environment = sceneLightingEnvironment(lighting);
+  if (!lighting.sky) return environment;
+  const vistas = await texturedVistas(scene.vistas, (mesh) => decodeMeshTextures(mesh, () => Promise.resolve(null)));
+  return litBySky(environment, await bakeSceneSky(lighting.sky, lighting, environment, vistas, scene.bounds.center));
+}
+
 async function texturedVistas(vistas: readonly SceneVista[] | undefined, texture: (mesh: MeshAsset) => Promise<TexturedMesh>): Promise<VistaLayer[]> {
   return Promise.all(
     (vistas ?? []).map(async (v) => ({ haze: v.haze, instances: await Promise.all(v.parts.map(async (p) => ({ ...(await texture(p.mesh)), model: p.model }))) })),

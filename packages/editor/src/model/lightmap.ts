@@ -24,6 +24,7 @@
  * sun's direct light is left to the live shadow map). Pure and DOM-free.
  */
 
+import { footprintMean, linearToAuthored, type OccluderSurface } from "./bakeSurface";
 import { PROBE_FACES, probePosition, quantizeLightProbes, type LightProbeGrid } from "./lightProbes";
 import { encodeRgbaPng } from "./png";
 import type { EncodedImage, MeshAsset, MeshPrimitive } from "./MeshAsset";
@@ -228,6 +229,15 @@ export interface Occluder {
   readonly model: Mat4;
   /** Diffuse colour per primitive (0..1) for bounce light; default its base colour. */
   readonly albedo?: readonly (readonly [number, number, number])[];
+  /**
+   * Per primitive, its decoded maps and resolved metalness (F3d-4; bakeSurface.ts):
+   * the albedo is then read per triangle from its base-colour map, in place of
+   * the factor × 0.55, and the GPU bake takes the metalness. Absent, the bake is
+   * as before (the CPU bake ignores the metalness).
+   */
+  readonly surfaces?: readonly (OccluderSurface | null | undefined)[];
+  /** The lighting channels it is on (F2e), which the GPU bake's lights must share; default the first. */
+  readonly lightChannels?: number;
 }
 
 /** A triangle BVH over occluders (shared with the texture baker, textureBake.ts). */
@@ -237,13 +247,15 @@ export interface Bvh {
   col: Float32Array; // albedo per triangle
   emi: Float32Array; // emissive colour per triangle, as authored (the GPU bake's lights, F3d)
   front: Float32Array; // the side each triangle faces by its authored normals (mean of its corners'; else its winding's), F3d-2
+  mr: Float32Array; // metalness and perceptual roughness per triangle (0 and 1 unless the occluder's surfaces say), F3d-4
+  channels: Uint8Array; // the lighting channels per triangle, F3d-4
   nodes: Float32Array; // min xyz, max xyz per node
   meta: Int32Array; // per node: left child (or -1 leaf), right/first, count
   order: Int32Array;
 }
 
 export function buildBvh(occluders: readonly Occluder[]): Bvh {
-  const tris: number[] = [], cols: number[] = [], emis: number[] = [], fronts: number[] = [];
+  const tris: number[] = [], cols: number[] = [], emis: number[] = [], fronts: number[] = [], mrs: number[] = [], channels: number[] = [];
   for (const o of occluders) {
     const m = o.model;
     o.mesh.primitives.forEach((p, pi) => {
@@ -251,12 +263,30 @@ export function buildBvh(occluders: readonly Occluder[]): Bvh {
       const textured = p.material.baseColorImage ? 0.55 : 1;
       const col = o.albedo?.[pi] ?? [f[0] * textured, f[1] * textured, f[2] * textured];
       const emi = p.material.emissiveFactor ?? [0, 0, 0];
+      const surface = o.surfaces?.[pi];
+      const uvs = p.uvs;
+      // A decoded base-colour map gives each triangle its own albedo (F3d-4), the factor over the map's mean.
+      const base = !o.albedo?.[pi] && surface?.base && uvs ? surface.base : null;
+      const mrMap = surface?.metallicRoughness && uvs ? surface.metallicRoughness : null;
+      const uv = (v: number): [number, number] => [uvs![v * 2]!, uvs![v * 2 + 1]!];
       for (let t = 0; t < p.indices.length; t += 3) {
         for (let k = 0; k < 3; k += 1) {
           const v = p.indices[t + k]!;
           tris.push(...transform(o.model, p.positions[v * 3]!, p.positions[v * 3 + 1]!, p.positions[v * 3 + 2]!));
         }
-        cols.push(col[0], col[1], col[2]);
+        if (base) {
+          const mean = footprintMean(base, true, uv(p.indices[t]!), uv(p.indices[t + 1]!), uv(p.indices[t + 2]!));
+          cols.push(...[0, 1, 2].map((c) => linearToAuthored(srgbToLinear(f[c]!) * mean[c]!)));
+        } else cols.push(col[0], col[1], col[2]);
+        let metal = surface?.metallic ?? 0;
+        let rough = surface?.roughness ?? 1;
+        if (mrMap) {
+          const mean = footprintMean(mrMap, false, uv(p.indices[t]!), uv(p.indices[t + 1]!), uv(p.indices[t + 2]!));
+          rough *= mean[1];
+          metal *= mean[2];
+        }
+        mrs.push(metal, rough);
+        channels.push(o.lightChannels ?? 1);
         emis.push(emi[0], emi[1], emi[2]);
         if (p.normals) {
           let x = 0, y = 0, z = 0;
@@ -329,7 +359,13 @@ export function buildBvh(occluders: readonly Occluder[]): Bvh {
     return node;
   };
   if (count > 0) build(0, count);
-  return { tri, nrm, col: new Float32Array(cols), emi: new Float32Array(emis), front: new Float32Array(fronts), nodes: new Float32Array(nodes), meta: new Int32Array(meta), order };
+  return { tri, nrm, col: new Float32Array(cols), emi: new Float32Array(emis), front: new Float32Array(fronts), mr: new Float32Array(mrs), channels: Uint8Array.from(channels), nodes: new Float32Array(nodes), meta: new Int32Array(meta), order };
+}
+
+/** Authored colour into linear light (the renderers' toLinear). */
+function srgbToLinear(c: number): number {
+  const v = Math.max(0, c);
+  return v <= 0.04045 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4;
 }
 
 /** Closest hit along a ray within tMax: the triangle index, or -1. `out[0]` = distance. */
