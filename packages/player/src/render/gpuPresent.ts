@@ -12,7 +12,9 @@
  * canvas's texture):
  *
  * 1. **Sky:** the equirectangular dome, its sun's glow and its drifting cloud
- *    layers, per pixel through the camera (`renderSkyBackground`'s maths).
+ *    layers, per pixel through the camera (`renderSkyBackground`'s maths); or,
+ *    on a linear frame with a physical sky (F5a), the atmosphere's sky view
+ *    and the sun's disc, in the renderer's units (atmosphere.ts).
  * 2. **Sun shafts:** the light-source mask at reduced resolution (open sky that
  *    is bright and near the sun), then the gather along the line to the sun
  *    (`applySunShafts`'s maths).
@@ -46,6 +48,7 @@ import { TONE_MAPPERS_WGSL, toneMapperIndex, type ToneMapper } from "./toneMappe
 import { GRADING_WGSL, HDR_HEADROOM, HDR_PEAK, extendedExposure } from "./grading.js";
 import { FrameGraph, GraphTimer, TransientPool, type FrameResource, type PassBuilder, type PassContext, type PassTime } from "./frameGraph.js";
 import type { PostFxUniforms } from "../fx/postfx.js";
+import { GpuAtmosphere, SKY_VIEW_UV_WGSL, type AtmosphereSky } from "./atmosphere.js";
 import { CLOUD_TILE, MAX_CLOUD_LAYERS, type BakedCloudLayer, type DecodedTexture, type Mat4, type SkySun, type SunShafts } from "@cartbox/editor";
 
 /** Edge of a baked cloud layer's density tile. */
@@ -69,6 +72,12 @@ export interface PresentSky {
   /** Drifting cloud layers (I6), and the seconds they have drifted. */
   readonly clouds: readonly BakedCloudLayer[];
   readonly time: number;
+  /**
+   * A physical sky (F5a), which a linear frame draws in place of the panorama:
+   * the medium and its sun, and the sun disc's radiance as the eye sees it
+   * (sunDiscRadiance). A byte-space frame draws the panorama regardless.
+   */
+  readonly atmosphere?: (AtmosphereSky & { readonly disc: Rgb }) | null;
 }
 
 /** What a frame's scene draws over. */
@@ -192,6 +201,34 @@ export function packSkyUniforms(
   }
   return out;
 }
+
+/** Floats in the physical sky pass's uniform block. */
+export const ATMOSPHERE_SKY_UNIFORM_FLOATS = 24;
+
+/** The disc's radiance is held under this, within a half float with the bloom's sums to spare. */
+const SUN_DISC_MAX = 30000;
+
+/**
+ * The physical sky pass's uniforms (F5a): the camera's rows and reciprocal
+ * focal lengths, as {@link packSkyUniforms}'s; the sun toward it and the
+ * cosine of its angular radius; the disc's radiance; the frame's size, and
+ * the viewer's and the ground's radii (km), which the sky view is mapped by.
+ */
+export function packAtmosphereSkyUniforms(sky: PresentSky & { readonly atmosphere: NonNullable<PresentSky["atmosphere"]> }, width: number, height: number, out = new Float32Array(ATMOSPHERE_SKY_UNIFORM_FLOATS)): Float32Array {
+  const v = sky.view;
+  const p = sky.projection;
+  const atm = sky.atmosphere;
+  const a = atm.atmosphere;
+  out.set([v[0]!, v[4]!, v[8]!, 1 / p[0]!], 0);
+  out.set([v[1]!, v[5]!, v[9]!, 1 / p[5]!], 4);
+  out.set([v[2]!, v[6]!, v[10]!, 0], 8);
+  const l = Math.hypot(atm.sun[0], atm.sun[1], atm.sun[2]) || 1;
+  out.set([atm.sun[0] / l, atm.sun[1] / l, atm.sun[2] / l, Math.cos(a.sunRadius)], 12);
+  out.set([...atm.disc.map((c) => Math.min(SUN_DISC_MAX, Math.max(0, c))), 0], 16);
+  out.set([width, height, a.bottom + a.viewHeight, a.bottom], 20);
+  return out;
+}
+
 
 /** The shaft passes' grid: how many frame pixels a cell spans, and the grid's size (`applySunShafts`'s). */
 export function shaftGrid(width: number, height: number): { step: number; width: number; height: number } {
@@ -394,6 +431,30 @@ fn coreGlow(c: f32) -> f32 {
     rgb = toLinear(rgb);
     if (s.size.w > 0.0) { rgb = filmicInverse(rgb) / s.size.w; }
   }
+  return vec4f(rgb, 1.0);
+}
+`;
+
+/** The physical sky through the camera (F5a): the atmosphere's sky view per pixel, and the sun's disc over it. */
+export const ATMOSPHERE_SKY_WGSL = /* wgsl */ `
+struct AtmSky {
+  right: vec4f,
+  up: vec4f,
+  back: vec4f,
+  sun: vec4f,
+  disc: vec4f,
+  size: vec4f,
+};
+@group(0) @binding(0) var<uniform> s: AtmSky;
+@group(0) @binding(1) var skyView: texture_2d<f32>;
+@group(0) @binding(2) var viewSampler: sampler;
+${FULLSCREEN_VS}
+${SKY_VIEW_UV_WGSL}
+@fragment fn atmosphere(@builtin(position) pos: vec4f) -> @location(0) vec4f {
+  let ndc = vec2f(pos.x / s.size.x * 2.0 - 1.0, 1.0 - pos.y / s.size.y * 2.0);
+  let n = normalize(s.right.xyz * (ndc.x * s.right.w) + s.up.xyz * (ndc.y * s.up.w) - s.back.xyz);
+  var rgb = textureSampleLevel(skyView, viewSampler, skyViewUv(n, s.sun.xyz, s.size.z, s.size.w), 0.0).rgb;
+  if (dot(n, s.sun.xyz) > s.sun.w) { rgb = rgb + s.disc.rgb; }
   return vec4f(rgb, 1.0);
 }
 `;
@@ -732,11 +793,12 @@ export class GpuPresenter {
   private readonly linear: { clamp: any; wrapU: any; repeat: any };
   /** The lens pass samples as the post stack does: nearest, clamped. */
   private readonly nearest: any;
-  private readonly layouts: { sky: any; mask: any; gather: any; compose: any; composeBloom: any; lens: any; measure: any };
+  private readonly layouts: { sky: any; atmosphere: any; mask: any; gather: any; compose: any; composeBloom: any; lens: any; measure: any };
   private readonly pipelines = new Map<string, any>();
-  private readonly uniforms: { sky: any; shaft: any; compose: any; finish: any; lens: any; lensShown: any; measure: any };
+  private readonly uniforms: { sky: any; atmosphere: any; shaft: any; compose: any; finish: any; lens: any; lensShown: any; measure: any };
   private readonly data = {
     sky: new Float32Array(SKY_UNIFORM_FLOATS),
+    atmosphere: new Float32Array(ATMOSPHERE_SKY_UNIFORM_FLOATS),
     shaft: new Float32Array(SHAFT_UNIFORM_FLOATS),
     compose: new Float32Array(COMPOSE_UNIFORM_FLOATS),
     lens: new Float32Array(POST_UNIFORM_FLOATS),
@@ -744,6 +806,8 @@ export class GpuPresenter {
     measure: new Float32Array(MEASURE_UNIFORM_FLOATS),
   };
   private postFx: GpuPostFx | null = null;
+  /** The physical sky's LUTs (F5a), made when a linear frame first draws one. */
+  private atmosphereLuts: GpuAtmosphere | null = null;
   /** The HDR bloom's chain (F4d), made when a linear frame first blooms. */
   private bloom: HdrBloom | null = null;
   /** The frame graph's transients (the sky, the shafts, the composites), kept from frame to frame. */
@@ -793,6 +857,7 @@ export class GpuPresenter {
     const compose = layout([uni(), tex(1), tex(2), tex(3), samp(4), tex(5), tex(6), tex(7), tex(8)]);
     this.layouts = {
       sky: layout([uni(), tex(1), samp(2), tex(3, STAGE_FRAGMENT, "2d-array"), samp(4)]),
+      atmosphere: layout([uni(), tex(1), samp(2)]),
       mask: layout([uni(), tex(1), tex(2)]),
       gather: layout([uni(), tex(1)]),
       compose,
@@ -804,6 +869,7 @@ export class GpuPresenter {
     const ubuf = (floats: number) => device.createBuffer({ size: floats * 4, usage: USAGE.uniform | USAGE.bufferCopyDst });
     this.uniforms = {
       sky: ubuf(SKY_UNIFORM_FLOATS),
+      atmosphere: ubuf(ATMOSPHERE_SKY_UNIFORM_FLOATS),
       shaft: ubuf(SHAFT_UNIFORM_FLOATS),
       compose: ubuf(COMPOSE_UNIFORM_FLOATS),
       finish: ubuf(COMPOSE_UNIFORM_FLOATS),
@@ -876,6 +942,26 @@ export class GpuPresenter {
       graph.addPass("sky", "render", (pass) => {
         pass.write(skyTexture);
         return (ctx) => {
+          const atmosphere = this.hdr && sky.atmosphere ? sky.atmosphere : null;
+          if (atmosphere) {
+            // The physical sky (F5a): its LUTs brought up to this sun (their own submit, ahead of the frame's), then the sky view per pixel.
+            (this.atmosphereLuts ??= new GpuAtmosphere(device)).update(atmosphere);
+            device.queue.writeBuffer(this.uniforms.atmosphere, 0, packAtmosphereSkyUniforms({ ...sky, atmosphere }, width, height, this.data.atmosphere));
+            this.fullScreen(
+              ctx.encoder,
+              "atmosphere",
+              skyFormat,
+              ATMOSPHERE_SKY_WGSL,
+              ctx.texture(skyTexture),
+              [
+                { binding: 0, resource: { buffer: this.uniforms.atmosphere } },
+                { binding: 1, resource: this.atmosphereLuts.skyView.createView() },
+                { binding: 2, resource: this.linear.clamp },
+              ],
+              ctx.timing,
+            );
+            return;
+          }
           device.queue.writeBuffer(this.uniforms.sky, 0, packSkyUniforms(sky, width, height, this.data.sky, this.hdr, frame.tonemap ? frame.tonemap.exposure : null, frame.tonemap?.authored ?? false));
           this.fullScreen(
             ctx.encoder,
@@ -1156,6 +1242,7 @@ export class GpuPresenter {
     this.timer?.destroy();
     this.bloom?.dispose();
     this.postFx?.dispose();
+    this.atmosphereLuts?.dispose();
     destroy(this.panorama?.texture);
     destroy(this.cloudTexture?.texture);
     for (const u of this.uploads.values()) destroy(u.texture);
@@ -1253,7 +1340,7 @@ export class GpuPresenter {
     return pipeline;
   }
 
-  private fullScreen(encoder: any, name: "sky" | "mask" | "gather" | "compose" | "composeBloom" | "lens", format: string, code: string, target: any, entries: object[], timing: object = {}): void {
+  private fullScreen(encoder: any, name: "sky" | "atmosphere" | "mask" | "gather" | "compose" | "composeBloom" | "lens", format: string, code: string, target: any, entries: object[], timing: object = {}): void {
     const pipeline = this.pipeline(name, format, code);
     const targets: any[] = Array.isArray(target) ? target : [target];
     const pass = encoder.beginRenderPass({

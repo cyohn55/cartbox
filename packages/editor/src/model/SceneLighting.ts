@@ -16,6 +16,7 @@
  * multiple lights, tone mapping, and shadows (see AAA_TIER_ROADMAP.md).
  */
 
+import { parseAtmosphere } from "./atmosphere";
 import { parseWind, type SceneWind } from "./wind";
 import { decodeLightProbes, type LightProbeGrid, type StoredLightProbes } from "./lightProbes";
 import { decodeProbeVolume, type ProbeVolume, type StoredProbeVolume } from "./probeVolume";
@@ -388,8 +389,10 @@ export function parseSky(value: unknown): ProceduralSky | null {
   const objects = Array.isArray(raw.objects) ? raw.objects.map(parseSkyObject).filter((o): o is SkyObject => o !== null).slice(0, MAX_SKY_OBJECTS) : [];
   const cloudLayers = Array.isArray(raw.cloudLayers) ? raw.cloudLayers.map(parseCloudLayer).filter((l): l is SkyCloudLayer => l !== null).slice(0, MAX_CLOUD_LAYERS) : [];
   const panorama = parsePanorama(raw.panorama);
+  const atmosphere = parseAtmosphere(raw.atmosphere);
   return {
     ...(panorama ? { panorama } : {}),
+    ...(atmosphere ? { atmosphere } : {}),
     ...(objects.length > 0 ? { objects } : {}),
     ...(cloudLayers.length > 0 ? { cloudLayers } : {}),
     zenith: tripleOr(raw.zenith, base.zenith),

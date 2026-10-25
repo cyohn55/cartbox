@@ -1,4 +1,4 @@
-import { MeshSceneInstance, MeshAsset, Mat4, ScenePropValue, PhysicsSpec, AnimatorSpec, AttachedComponent, SceneLighting, PhysicsWorldSettings, SceneTimeline, SceneLevel, NavMesh, Terrain, SceneStreaming, ParticleEffect, DecalDef, DecalMark, RagdollBox, DebrisDef, LodChain, SceneAudio, ComponentDef, StreamGroup, JointKind, JointSpec, ActionRebind, DecodedTexture, SkySun, BakedCloudLayer, SunShafts, ColorFilter, AccessibilitySettings, EncodedImage, UiDocument, InputAction, StringTable, ReflectionProbe, EnvironmentLight, ShadowInput, ToneMap, SceneLight, LocalShadows, ProjectedDecal, DecalTiles, SceneFog, SceneWind, RasterStyle, HdrLightmap, LightmapLayout, Occluder, ProbeVolume, OccluderSurface, MeshMaterial, ResolvedLayers, ResolvedRefraction, SurfaceEffect, AnimatorOp, NavGraph, AnimationCue } from '@cartbox/editor';
+import { MeshSceneInstance, MeshAsset, Mat4, ScenePropValue, PhysicsSpec, AnimatorSpec, AttachedComponent, SceneLighting, PhysicsWorldSettings, SceneTimeline, SceneLevel, NavMesh, Terrain, SceneStreaming, ParticleEffect, DecalDef, DecalMark, RagdollBox, DebrisDef, LodChain, SceneAudio, ComponentDef, StreamGroup, JointKind, JointSpec, ActionRebind, Atmosphere, DecodedTexture, SkySun, BakedCloudLayer, SunShafts, ColorFilter, AccessibilitySettings, EncodedImage, UiDocument, InputAction, StringTable, ReflectionProbe, EnvironmentLight, ShadowInput, ToneMap, SceneLight, LocalShadows, ProjectedDecal, DecalTiles, SceneFog, SceneWind, RasterStyle, HdrLightmap, LightmapLayout, Occluder, ProbeVolume, OccluderSurface, MeshMaterial, ResolvedLayers, ResolvedRefraction, SurfaceEffect, AnimatorOp, NavGraph, AnimationCue } from '@cartbox/editor';
 
 /**
  * The runtime mesh scene: the cart's mesh sidecar resolved into placed instances
@@ -2358,6 +2358,35 @@ interface PassTime {
 }
 
 /**
+ * The physically based sky on the GPU (AAA_FIDELITY_ROADMAP.md F5a): Hillaire's
+ * three LUTs in compute, mirroring the CPU reference in @cartbox/editor
+ * (atmosphere.ts) step for step, so each can be held to the other.
+ *
+ * - **Transmittance** (256 × 64): to the top of the atmosphere, over a point's
+ *   radius and the ray's zenith cosine (Bruneton's mapping), 128 steps a ray.
+ *   Built once per medium.
+ * - **Multiple scattering** (32 × 32): Hillaire's Ψ_ms over the sun's zenith
+ *   cosine and the height, 64 directions of 20 steps a texel. Built once per
+ *   medium.
+ * - **Sky view** (192 × 108): the sky's radiance from the scene, over the
+ *   azimuth from the sun (finer toward it) and the zenith angle (finer toward
+ *   the horizon, which sits at v = ½), 32 steps a ray spaced quadratically.
+ *   Rebuilt when the sun moves, so a time of day is a few hundred microseconds
+ *   of compute.
+ *
+ * The presenter (gpuPresent.ts) draws the AAA tier's backdrop from the sky
+ * view per pixel, and the sun's disc over it, in the renderer's units of
+ * linear light, which the frame then tone-maps with the scene.
+ */
+
+/** A physical sky as a frame draws it: the medium, the sun toward it and its radiance above the air (linear units). */
+interface AtmosphereSky {
+    readonly atmosphere: Atmosphere;
+    readonly sun: readonly [number, number, number];
+    readonly sunRadiance: readonly [number, number, number];
+}
+
+/**
  * Presenting a 3D frame from the GPU (AAA_FIDELITY_ROADMAP.md F0a).
  *
  * The byte path renders the scene on the GPU, reads it back, then does the rest
@@ -2371,7 +2400,9 @@ interface PassTime {
  * canvas's texture):
  *
  * 1. **Sky:** the equirectangular dome, its sun's glow and its drifting cloud
- *    layers, per pixel through the camera (`renderSkyBackground`'s maths).
+ *    layers, per pixel through the camera (`renderSkyBackground`'s maths); or,
+ *    on a linear frame with a physical sky (F5a), the atmosphere's sky view
+ *    and the sun's disc, in the renderer's units (atmosphere.ts).
  * 2. **Sun shafts:** the light-source mask at reduced resolution (open sky that
  *    is bright and near the sun), then the gather along the line to the sun
  *    (`applySunShafts`'s maths).
@@ -2409,6 +2440,14 @@ interface PresentSky {
     /** Drifting cloud layers (I6), and the seconds they have drifted. */
     readonly clouds: readonly BakedCloudLayer[];
     readonly time: number;
+    /**
+     * A physical sky (F5a), which a linear frame draws in place of the panorama:
+     * the medium and its sun, and the sun disc's radiance as the eye sees it
+     * (sunDiscRadiance). A byte-space frame draws the panorama regardless.
+     */
+    readonly atmosphere?: (AtmosphereSky & {
+        readonly disc: Rgb$2;
+    }) | null;
 }
 /** What a frame's scene draws over. */
 type PresentBase = {
@@ -2537,6 +2576,8 @@ declare class GpuPresenter {
     private readonly uniforms;
     private readonly data;
     private postFx;
+    /** The physical sky's LUTs (F5a), made when a linear frame first draws one. */
+    private atmosphereLuts;
     /** The HDR bloom's chain (F4d), made when a linear frame first blooms. */
     private bloom;
     /** The frame graph's transients (the sky, the shafts, the composites), kept from frame to frame. */
@@ -7305,8 +7346,10 @@ declare class MeshOverlaySurface implements DisplaySurface {
      * top of the authored rig's lights.
      */
     setCartLights(lights: readonly WorldLight[]): void;
-    /** The rig as this frame lights with it: with the cart's sun as its key, if it set one (I17). */
+    /** The rig as this frame lights with it: with the cart's sun as its key, if it set one (I17), tinted by a physical sky's air (F5a). */
     private frameLighting;
+    /** The rig with the cart's sun as its key, if it set one (I17): above the air, before a physical sky tints it. */
+    private sunLighting;
     /**
      * Keep the sun the metals reflect where the frame's sun is: when it has
      * moved (or changed colour) past what {@link sunKey} rounds away, redraw the
@@ -7342,6 +7385,8 @@ declare class MeshOverlaySurface implements DisplaySurface {
      * presenter measured a frame or two ago, as the byte path measures the bytes.
      */
     private presentOnGpu;
+    /** A physical sky as the presenter draws it (F5a): the medium, its sun above the air, and the disc as the eye sees it; null for a painted one. */
+    private presentAtmosphere;
     /** The presenter's newest measurements into the lens flare and eye adaptation (the byte path's reportSun and frameLuminance). */
     private takeGpuMeasurements;
     /** Ask for the GPU front renderer once (see MeshOverlayOptions.createFrontRenderer). */

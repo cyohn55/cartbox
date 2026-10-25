@@ -18,6 +18,7 @@
  * the same pixels in the editor preview, the runtime, and tests.
  */
 
+import type { AtmosphereSettings } from "../model/atmosphere";
 import type { DecodedTexture, Mat4 } from "./meshRasterizer";
 import { cloudPlane, overClouds, prepareSkyObjects, resamplePanorama, skyObjectsAt, type BakedCloudLayer, type SkyCloudLayer, type SkyObject } from "./skyLayers";
 
@@ -69,6 +70,13 @@ export interface ProceduralSky {
   readonly objects?: readonly SkyObject[];
   /** Cloud layers drifting overhead, drawn over the backdrop each frame (I6). */
   readonly cloudLayers?: readonly SkyCloudLayer[];
+  /**
+   * A physically based atmosphere (AAA_FIDELITY_ROADMAP.md F5a; atmosphere.ts)
+   * in place of the painted gradient, glow and mountains, as an imported
+   * panorama is: its sun is the rig's key light, and it tints that light by the
+   * air between. The painted sky stays when this is absent.
+   */
+  readonly atmosphere?: AtmosphereSettings | null;
 }
 
 /**

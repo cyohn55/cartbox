@@ -57,6 +57,7 @@ import {
   updateSceneEnvironment,
   updateSceneLight,
   type ProceduralSky,
+  type AtmosphereSettings,
   type ReflectionProbe,
   type SceneFog,
   type SceneLight,
@@ -693,7 +694,8 @@ function TintControls({ lighting, onChange }: LightingEditorProps & { lighting: 
 
 /**
  * The procedural sky dome: a baked panorama (clouds + mountain rings) drawn
- * behind a first-person view and used as the image-based light. The rig stores
+ * behind a first-person view and used as the image-based light, or a physical
+ * atmosphere (AAA_FIDELITY_ROADMAP.md F5a) lit by the key light. The rig stores
  * only these parameters; the runtime bakes the pixels at load.
  */
 function SkyDomeControls({ lighting, onChange }: LightingEditorProps & { lighting: SceneLighting }) {
@@ -705,14 +707,20 @@ function SkyDomeControls({ lighting, onChange }: LightingEditorProps & { lightin
       <SegmentedControl
         label="Sky dome"
         ariaLabel="Sky dome"
-        selected={sky ? "on" : "off"}
-        onSelect={(id) => onChange(setSceneSky(lighting, id === "on" ? (sky ?? defaultProceduralSky()) : null))}
+        selected={!sky ? "off" : sky.atmosphere ? "physical" : "on"}
+        onSelect={(id) => {
+          if (id === "off") return onChange(setSceneSky(lighting, null));
+          const { atmosphere: _atmosphere, ...painted } = sky ?? defaultProceduralSky();
+          onChange(setSceneSky(lighting, id === "physical" ? { ...painted, atmosphere: sky?.atmosphere ?? {} } : painted));
+        }}
         options={[
           { id: "off", label: "Gradient" },
           { id: "on", label: "Mountains" },
+          { id: "physical", label: "Physical", hint: "A physically based atmosphere lit by the key light, which it tints by the air between: blue at noon, orange at sunset. It lights the scene and the bake too" },
         ]}
       />
-      {sky && (
+      {sky?.atmosphere && <AtmosphereControls settings={sky.atmosphere} patch={(atmosphere) => patch({ atmosphere })} />}
+      {sky && !sky.atmosphere && (
         <>
           <ColorRow label="Zenith" value={sky.zenith} onChange={(zenith) => patch({ zenith })} />
           <ColorRow label="Sky horizon" value={sky.horizon} onChange={(horizon) => patch({ horizon })} />
@@ -774,6 +782,23 @@ function SkyDomeControls({ lighting, onChange }: LightingEditorProps & { lightin
           <CloudLayerControls sky={sky} patch={patch} />
         </>
       )}
+    </>
+  );
+}
+
+/** A physical atmosphere's settings (F5a): each against Earth's, which is where they start. */
+function AtmosphereControls({ settings, patch }: { settings: AtmosphereSettings; patch: (next: AtmosphereSettings) => void }) {
+  const set = (key: keyof AtmosphereSettings, value: number) => patch({ ...settings, [key]: value });
+  return (
+    <>
+      <RailHint>The sun is the key light: aim it and set its brightness under Lights. 1 is Earth&apos;s for each of these.</RailHint>
+      <RangeControl label="Air (Rayleigh)" nested min={0} max={4} step={0.05} value={settings.rayleigh ?? 1} ariaLabel="Rayleigh scattering" display={`×${(settings.rayleigh ?? 1).toFixed(2)}`} onChange={(v) => set("rayleigh", v)} />
+      <RangeControl label="Haze (Mie)" nested min={0} max={20} step={0.1} value={settings.mie ?? 1} ariaLabel="Mie scattering" display={`×${(settings.mie ?? 1).toFixed(1)}`} onChange={(v) => set("mie", v)} />
+      <RangeControl label="Ozone" nested min={0} max={4} step={0.05} value={settings.ozone ?? 1} ariaLabel="Ozone" display={`×${(settings.ozone ?? 1).toFixed(2)}`} onChange={(v) => set("ozone", v)} />
+      <RangeControl label="Sun glow" nested min={0} max={0.95} step={0.01} value={settings.mieAnisotropy ?? 0.8} ariaLabel="Mie anisotropy" display={(settings.mieAnisotropy ?? 0.8).toFixed(2)} onChange={(v) => set("mieAnisotropy", v)} />
+      <RangeControl label="Ground albedo" nested min={0} max={1} step={0.01} value={settings.groundAlbedo ?? 0.3} ariaLabel="Ground albedo" display={(settings.groundAlbedo ?? 0.3).toFixed(2)} onChange={(v) => set("groundAlbedo", v)} />
+      <RangeControl label="Altitude" nested min={0} max={8000} step={50} value={settings.altitude ?? 0} ariaLabel="Altitude" display={`${Math.round(settings.altitude ?? 0)} m`} onChange={(v) => set("altitude", v)} />
+      <RangeControl label="Sun size" nested min={0.1} max={5} step={0.05} value={settings.sunSize ?? 0.545} ariaLabel="Sun angular diameter" display={`${(settings.sunSize ?? 0.545).toFixed(2)}°`} onChange={(v) => set("sunSize", v)} />
     </>
   );
 }

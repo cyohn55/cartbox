@@ -862,6 +862,46 @@ Everything else depends on this track. It contains no visible "feature", but its
   - Rayleigh, Mie and ozone parameters, a planet radius, and a sun and moon in physical units.
   - Time of day drives the sun, sky, IBL (F3a) and fog together.
   - The stylised dome and rings stay as a "painted sky" option.
+  - **F5a-1, Hillaire's atmosphere and its sky: done** (`model/atmosphere.ts`, `render/atmosphere.ts`). A sky dome gains a Physical mode (`ProceduralSky.atmosphere`) beside Gradient and Mountains. The AAA tier draws it per pixel in physical units; every tier is lit by it.
+    - **The medium** is Earth's by default (Hillaire 2020, in km):
+      - Rayleigh scattering (5.802, 13.558, 33.1)·10⁻³ with an 8 km scale height;
+      - Mie scattering 3.996·10⁻³ and absorption 4.4·10⁻³ with 1.2 km, Cornette–Shanks's phase at g = 0.8;
+      - ozone absorption (0.65, 1.881, 0.085)·10⁻³ in a tent 30 km wide about 25 km up;
+      - a 6360 km planet with 100 km of air and a ground albedo of 0.3.
+      - A creator scales the air, haze and ozone against Earth's, and sets the Mie anisotropy, the ground's albedo, the altitude, the planet's radius and the sun's size. The settings are stored sparsely and read defensively (`parseAtmosphere`).
+    - **The sun is the key light above the air.** Its linear colour × intensity is the sun's radiance in the renderer's units, so 1 is about 123.5 klx (F0b-2). The scattering takes π times that, because the renderer's diffuse carries no 1/π.
+      - `atmosphereLighting` tints the key light by the transmittance toward it, folding in its temperature: 0.94, 0.86, 0.76 at noon, orange near the horizon, and black once the sun has set.
+      - It aims the sky's own sun along the key light, so the shafts and the lens flare follow it. The player's frame lighting and the light bake both take it.
+    - **The CPU reference** builds the LUTs once per medium, in about 0.8 s:
+      - the transmittance LUT (256 × 64, Bruneton's mapping, 128 steps a ray);
+      - the multiple-scattering LUT (32 × 32: Ψ_ms over the sun's zenith cosine and the height, 64 Fibonacci directions of 20 steps, L₂ / (1 − f_ms));
+      - and `skyRadiance` from them: single scattering under both phases, the multiple scattering, and the lit ground, in 32 quadratically spaced steps with Hillaire's energy-conserving integration.
+    - **On the GPU** (`GpuAtmosphere`) the same three passes run in compute, line for line: the transmittance and multiple-scattering LUTs once per medium, and the sky view (192 × 108, Hillaire's mapping: finer toward the sun and the horizon) whenever the sun moves.
+    - **The AAA backdrop.** On a linear frame, the presenter's sky pass reads the sky view per pixel and adds the sun's disc: its illuminance over its solid angle through the air, held under 30 000. The frame tone-maps it with the scene. A byte-space frame draws the painted copy as before.
+    - **Every tier's light** comes through the imported-sky path (I6). The atmosphere renders an HDR panorama (256 × 128) under the key light:
+      - exposed into the 8-bit copy at the rig's exposure, the other tiers' backdrop and reflections;
+      - resampled as the AAA tier's IBL light (F3a-2);
+      - and, through `sceneSkyEnvironment`, the light bake's sky (F3d-4).
+    - **Authoring.** The Lighting panel's Sky dome gains Physical, with Air, Haze, Ozone, Sun glow, Ground albedo, Altitude and Sun size. The painted controls hide, and the painted sky's settings are kept for switching back.
+    - *Tests (`atmosphere.test.ts`):*
+      - Settings parse, resolve to Earth and survive a save.
+      - The transmittance LUT maps both ways, and the zenith's optical depth matches its closed form within 0.1%.
+      - Both phases integrate to 1 over the sphere.
+      - The sky is blue overhead at noon, red toward a setting sun and under 2% of noon once the sun has set. The noon horizon is brighter than the zenith.
+      - A high sun's clear-sky diffuse light is 6–25% of the direct beam, and haze whitens the horizon.
+      - The key light is tinted (orange at 3°) with the other lights left alone, and the disc's radiance × its solid angle is π × the transmitted sun.
+      - The sky view maps both ways, with the horizon at its middle row.
+      - On Dawn:
+        - the GPU's transmittance, multiple-scattering and sky-view LUTs match the CPU's texel by texel within 0.5%, 1% and 2%, and are not rebuilt for an unchanged sun;
+        - the presenter's backdrop is the CPU's sky radiance per pixel within 4/255, with the disc past white where the sun is;
+        - the GPU bake lights an open floor by the atmosphere's sky within 5%, blue where the gradient was not.
+      - The scene's environment carries the atmosphere's HDR light, and its 8-bit copy is blue overhead.
+      - The player hands the presenter the atmosphere, its sun above the air and the disc, and lights the renderer by the tinted key light and the atmosphere's light.
+    - *Left for F5a:*
+      - **F5a-2**: aerial perspective (the froxel LUT over the scene), and a time of day that re-renders the IBL's panorama and the probes as the sun moves (the backdrop already follows it each frame).
+      - **F5a-3**: the moon and the night sky in physical units.
+      - The painted sky's objects, cloud layers and distant vistas draw over the other tiers' copy of the physical sky, but not over the AAA backdrop. F5c's clouds and a composite of the vistas will bring them back there.
+      - The CPU LUTs take about 0.8 s at load. A worker, or reading the GPU's LUTs back on the AAA tier, would hide that.
 - [ ] **F5b. Volumetric fog.** A froxel grid (for example 160×90×64) of scattering and extinction from height fog, local fog volumes and particles. It is lit by the sun with its shadow map, and by local lights with theirs, then temporally reprojected and integrated. **God rays emerge from it**, so the CPU screen-space shafts retire.
 - [ ] **F5c. Volumetric clouds.** Raymarched clouds with a Nubis-style shape plus erosion noise and weather maps, multiple-scattering approximation, temporal amortisation at quarter resolution, cloud shadows on the ground and aerial perspective.
 - [ ] **F5d. Water.**

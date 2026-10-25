@@ -21,6 +21,7 @@
 
 import {
   applyLightmapImage,
+  atmosphereLighting,
   bakeLightProbes,
   decodePngRgba,
   bakeLightmap,
@@ -142,7 +143,8 @@ export async function bakeSceneLighting(sidecar: MeshSidecar, options: SceneLigh
     const surfaces = await Promise.all(still.map((o) => bakeSurfaces(o.mesh, decodeBakeImage)));
     gpu = {
       sky: environmentPanorama(environment),
-      lights: bakeLights(sidecar.lighting.lights),
+      // Under a physical sky the key light is the sun through the air (F5a).
+      lights: bakeLights(atmosphereLighting(sidecar.lighting).lights),
       occluders: still.map((o, i) => ({ mesh: o.mesh, model: o.model, surfaces: surfaces[i], ...(o.lightChannels !== undefined ? { lightChannels: o.lightChannels } : {}) })),
     };
   }

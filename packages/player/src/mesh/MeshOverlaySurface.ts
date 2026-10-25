@@ -24,6 +24,11 @@
 
 import { DynamicResolution, scaledSize } from "../render/dynamicResolution.js";
 import {
+  atmosphereLighting,
+  atmosphereLuts,
+  atmospherePanorama,
+  atmosphereSun,
+  sunDiscRadiance,
   bakeReflectionProbesAsync,
   ParticleSystem,
   DecalSystem,
@@ -927,8 +932,14 @@ export class MeshOverlaySurface implements DisplaySurface {
     this.cartSun = sun ? { direction: sun.position, color: sun.color } : null;
   }
 
-  /** The rig as this frame lights with it: with the cart's sun as its key, if it set one (I17). */
+  /** The rig as this frame lights with it: with the cart's sun as its key, if it set one (I17), tinted by a physical sky's air (F5a). */
   private frameLighting(): SceneLighting | null {
+    const lighting = this.sunLighting();
+    return lighting ? atmosphereLighting(lighting) : null;
+  }
+
+  /** The rig with the cart's sun as its key, if it set one (I17): above the air, before a physical sky tints it. */
+  private sunLighting(): SceneLighting | null {
     const lighting = this.scene.lighting ?? null;
     if (!lighting || !this.cartSun) return lighting;
     const sun = `${this.cartSun.direction.map((v) => v.toFixed(3)).join(",")}|${this.cartSun.color.map((v) => v.toFixed(3)).join(",")}`;
@@ -1352,7 +1363,7 @@ export class MeshOverlaySurface implements DisplaySurface {
     }
     const sky: PresentSky | null =
       job.skyBackdrop && this.skyMap
-        ? { map: this.skyMap, view: camera.view, projection: camera.projection, sun: lighting?.sky ? skySun(lighting.sky) : null, clouds: this.skyClouds, time }
+        ? { map: this.skyMap, view: camera.view, projection: camera.projection, sun: lighting?.sky ? skySun(lighting.sky) : null, clouds: this.skyClouds, time, atmosphere: this.presentAtmosphere() }
         : null;
     // The sun in the frame's pixels: the shafts and the measurements work at the frame's size.
     const sun = sky && lighting?.sky ? sunScreenPosition(lighting.sky.sunDirection, camera.view, camera.projection, output.width, output.height) : null;
@@ -1379,6 +1390,15 @@ export class MeshOverlaySurface implements DisplaySurface {
       measure: adapting || flare ? { luminance: adapting, sun: flare ? sun : null } : null,
     });
     this.takeGpuMeasurements(gpu.stats, lighting, job.post, adapting, sky !== null, sun && { x: sun.x / output.width, y: sun.y / output.height });
+  }
+
+  /** A physical sky as the presenter draws it (F5a): the medium, its sun above the air, and the disc as the eye sees it; null for a painted one. */
+  private presentAtmosphere(): PresentSky["atmosphere"] {
+    const lighting = this.sunLighting();
+    const sun = lighting ? atmosphereSun(lighting) : null;
+    if (!sun) return null;
+    const disc = sunDiscRadiance(atmosphereLuts(sun.atmosphere), sun.direction, sun.radiance);
+    return { atmosphere: sun.atmosphere, sun: sun.direction, sunRadiance: sun.radiance, disc };
   }
 
   /** The presenter's newest measurements into the lens flare and eye adaptation (the byte path's reportSun and frameLuminance). */
@@ -2258,7 +2278,15 @@ async function bakeSceneSky(
   let imported: DecodedTexture | null = null;
   // An imported HDR sky's own light, beyond 8 bits, at the reflections' size: the AAA tier's IBL (F3a).
   let hdrLight: HdrImage | null = null;
-  if (sky.panorama) {
+  const physical = sky.atmosphere ? atmosphereSun(lighting) : null;
+  if (physical) {
+    // A physical sky (F5a) is an HDR panorama the atmosphere makes under the key light: exposed into the
+    // painted copy at the rig's exposure, as the frame shows it, and its own light for the IBL and the bake.
+    const hdr = atmospherePanorama(atmosphereLuts(physical.atmosphere), physical.direction, physical.radiance);
+    imported = hdrToTexture(hdr, lighting.exposure);
+    hdrLight = resampleHdr(hdr, SKY_PANORAMA_WIDTH / SKY_IBL_DOWNSAMPLE, SKY_PANORAMA_HEIGHT / SKY_IBL_DOWNSAMPLE, 0, 1);
+    sky = { ...sky, panorama: null };
+  } else if (sky.panorama) {
     try {
       const bytes = base64ToBytes(sky.panorama.data);
       if (isRadiance(sky.panorama.mime)) {

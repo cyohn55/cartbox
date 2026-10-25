@@ -11347,6 +11347,11 @@ var DynamicResolution = class {
 
 // src/mesh/MeshOverlaySurface.ts
 import {
+  atmosphereLighting,
+  atmosphereLuts,
+  atmospherePanorama,
+  atmosphereSun,
+  sunDiscRadiance,
   bakeReflectionProbesAsync,
   ParticleSystem,
   DecalSystem,
@@ -12424,8 +12429,13 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
     const sun = lights.find((light) => light.sun);
     this.cartSun = sun ? { direction: sun.position, color: sun.color } : null;
   }
-  /** The rig as this frame lights with it: with the cart's sun as its key, if it set one (I17). */
+  /** The rig as this frame lights with it: with the cart's sun as its key, if it set one (I17), tinted by a physical sky's air (F5a). */
   frameLighting() {
+    const lighting = this.sunLighting();
+    return lighting ? atmosphereLighting(lighting) : null;
+  }
+  /** The rig with the cart's sun as its key, if it set one (I17): above the air, before a physical sky tints it. */
+  sunLighting() {
     const lighting = this.scene.lighting ?? null;
     if (!lighting || !this.cartSun) return lighting;
     const sun = `${this.cartSun.direction.map((v) => v.toFixed(3)).join(",")}|${this.cartSun.color.map((v) => v.toFixed(3)).join(",")}`;
@@ -12764,7 +12774,7 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
         ) ?? null;
       }
     }
-    const sky = job.skyBackdrop && this.skyMap ? { map: this.skyMap, view: camera.view, projection: camera.projection, sun: lighting?.sky ? skySun(lighting.sky) : null, clouds: this.skyClouds, time } : null;
+    const sky = job.skyBackdrop && this.skyMap ? { map: this.skyMap, view: camera.view, projection: camera.projection, sun: lighting?.sky ? skySun(lighting.sky) : null, clouds: this.skyClouds, time, atmosphere: this.presentAtmosphere() } : null;
     const sun = sky && lighting?.sky ? sunScreenPosition(lighting.sky.sunDirection, camera.view, camera.projection, output.width, output.height) : null;
     let holo = null;
     if (this.holo) {
@@ -12787,6 +12797,14 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
       measure: adapting || flare ? { luminance: adapting, sun: flare ? sun : null } : null
     });
     this.takeGpuMeasurements(gpu.stats, lighting, job.post, adapting, sky !== null, sun && { x: sun.x / output.width, y: sun.y / output.height });
+  }
+  /** A physical sky as the presenter draws it (F5a): the medium, its sun above the air, and the disc as the eye sees it; null for a painted one. */
+  presentAtmosphere() {
+    const lighting = this.sunLighting();
+    const sun = lighting ? atmosphereSun(lighting) : null;
+    if (!sun) return null;
+    const disc = sunDiscRadiance(atmosphereLuts(sun.atmosphere), sun.direction, sun.radiance);
+    return { atmosphere: sun.atmosphere, sun: sun.direction, sunRadiance: sun.radiance, disc };
   }
   /** The presenter's newest measurements into the lens flare and eye adaptation (the byte path's reportSun and frameLuminance). */
   takeGpuMeasurements(stats2, lighting, post, adapting, sky, sun) {
@@ -13495,7 +13513,13 @@ function vistaSignature(vistas) {
 async function bakeSceneSky(sky, lighting, environment, vistas, eye) {
   let imported = null;
   let hdrLight = null;
-  if (sky.panorama) {
+  const physical = sky.atmosphere ? atmosphereSun(lighting) : null;
+  if (physical) {
+    const hdr = atmospherePanorama(atmosphereLuts(physical.atmosphere), physical.direction, physical.radiance);
+    imported = hdrToTexture(hdr, lighting.exposure);
+    hdrLight = resampleHdr(hdr, SKY_PANORAMA_WIDTH / SKY_IBL_DOWNSAMPLE, SKY_PANORAMA_HEIGHT / SKY_IBL_DOWNSAMPLE, 0, 1);
+    sky = { ...sky, panorama: null };
+  } else if (sky.panorama) {
     try {
       const bytes = base64ToBytes2(sky.panorama.data);
       if (isRadiance(sky.panorama.mime)) {
@@ -24104,6 +24128,364 @@ var HdrBloom = class {
   }
 };
 
+// src/render/atmosphere.ts
+import {
+  MULTISCATTER_DIRECTIONS,
+  MULTISCATTER_SIZE,
+  MULTISCATTER_STEPS,
+  SKY_STEPS,
+  TRANSMITTANCE_HEIGHT,
+  TRANSMITTANCE_STEPS,
+  TRANSMITTANCE_WIDTH,
+  atmosphereKey
+} from "@cartbox/editor";
+var SKY_VIEW_WIDTH = 192;
+var SKY_VIEW_HEIGHT = 108;
+var ATMOSPHERE_UNIFORM_FLOATS = 28;
+function packAtmosphereUniforms(sky, out = new Float32Array(ATMOSPHERE_UNIFORM_FLOATS)) {
+  const a = sky.atmosphere;
+  out.set([a.bottom, a.top, a.rayleighScale, a.mieScale], 0);
+  out.set([...a.rayleighScattering, 0], 4);
+  out.set([...a.ozoneAbsorption, a.ozoneCenter], 8);
+  out.set([a.mieScattering, a.mieExtinction, a.mieG, a.groundAlbedo], 12);
+  out.set([a.viewHeight, a.ozoneWidth, 0, 0], 16);
+  const l = Math.hypot(sky.sun[0], sky.sun[1], sky.sun[2]) || 1;
+  out.set([sky.sun[0] / l, sky.sun[1] / l, sky.sun[2] / l, 0], 20);
+  out.set([Math.PI * sky.sunRadiance[0], Math.PI * sky.sunRadiance[1], Math.PI * sky.sunRadiance[2], 0], 24);
+  return out;
+}
+var ATMOSPHERE_COMMON_WGSL = (
+  /* wgsl */
+  `
+struct Atm {
+  radii: vec4f,    // bottom, top, Rayleigh and Mie scale heights (km)
+  rayleigh: vec4f, // scattering per km
+  ozone: vec4f,    // absorption per km, centre (km)
+  mie: vec4f,      // scattering, extinction, g, ground albedo
+  view: vec4f,     // height above the ground (km), ozone half width
+  sun: vec4f,      // toward the sun
+  sunE: vec4f,     // its illuminance, \u03C0 \xD7 its radiance above the air
+};
+const PI = 3.14159265;
+
+struct Medium { rayleigh: vec3f, mie: f32, extinction: vec3f };
+
+fn mediumAt(h: f32) -> Medium {
+  let dr = exp(-max(0.0, h) / atm.radii.z);
+  let dm = exp(-max(0.0, h) / atm.radii.w);
+  let dozone = max(0.0, 1.0 - abs(h - atm.ozone.w) / atm.view.y);
+  let rayleigh = atm.rayleigh.rgb * dr;
+  return Medium(rayleigh, atm.mie.x * dm, rayleigh + vec3f(atm.mie.y * dm) + atm.ozone.rgb * dozone);
+}
+
+fn raySphere(r: f32, mu: f32, radius: f32) -> f32 {
+  let b = r * mu;
+  let disc = b * b - (r * r - radius * radius);
+  if (disc < 0.0) { return -1.0; }
+  let s = sqrt(disc);
+  if (-b - s > 0.0) { return -b - s; }
+  if (-b + s > 0.0) { return -b + s; }
+  return -1.0;
+}
+
+fn hitsGround(r: f32, mu: f32) -> bool {
+  return mu < 0.0 && r * r * (mu * mu - 1.0) + atm.radii.x * atm.radii.x >= 0.0;
+}
+
+fn transmittanceUv(r: f32, mu: f32) -> vec2f {
+  let bottom = atm.radii.x;
+  let top = atm.radii.y;
+  let H = sqrt(top * top - bottom * bottom);
+  let rho = sqrt(max(0.0, r * r - bottom * bottom));
+  let d = max(0.0, -r * mu + sqrt(max(0.0, r * r * (mu * mu - 1.0) + top * top)));
+  let dMin = top - r;
+  let dMax = rho + H;
+  return vec2f(select(0.0, (d - dMin) / (dMax - dMin), dMax > dMin), rho / H);
+}
+
+fn rayleighPhase(c: f32) -> f32 { return 3.0 / (16.0 * PI) * (1.0 + c * c); }
+fn miePhase(c: f32, g: f32) -> f32 {
+  let g2 = g * g;
+  return 3.0 / (8.0 * PI) * ((1.0 - g2) * (1.0 + c * c)) / ((2.0 + g2) * pow(max(1e-6, 1.0 + g2 - 2.0 * g * c), 1.5));
+}
+`
+);
+var LUT_BINDINGS_WGSL = (
+  /* wgsl */
+  `
+@group(0) @binding(0) var<uniform> atm: Atm;
+@group(0) @binding(1) var lutSampler: sampler;
+@group(0) @binding(2) var transmittanceLut: texture_2d<f32>;
+@group(0) @binding(3) var multiScatterLut: texture_2d<f32>;
+`
+);
+var LOOKUPS_WGSL = (
+  /* wgsl */
+  `
+fn transmittanceTo(r: f32, mu: f32) -> vec3f {
+  if (hitsGround(r, mu)) { return vec3f(0.0); }
+  return textureSampleLevel(transmittanceLut, lutSampler, transmittanceUv(r, mu), 0.0).rgb;
+}
+fn multiScatteringAt(h: f32, muS: f32) -> vec3f {
+  return textureSampleLevel(multiScatterLut, lutSampler, vec2f(muS * 0.5 + 0.5, max(0.0, h) / (atm.radii.y - atm.radii.x)), 0.0).rgb;
+}
+`
+);
+var TRANSMITTANCE_WGSL = (
+  /* wgsl */
+  `
+${ATMOSPHERE_COMMON_WGSL}
+@group(0) @binding(0) var<uniform> atm: Atm;
+@group(0) @binding(1) var outLut: texture_storage_2d<rgba16float, write>;
+
+@compute @workgroup_size(8, 8, 1)
+fn main(@builtin(global_invocation_id) id: vec3u) {
+  if (id.x >= ${TRANSMITTANCE_WIDTH}u || id.y >= ${TRANSMITTANCE_HEIGHT}u) { return; }
+  let u = (f32(id.x) + 0.5) / ${TRANSMITTANCE_WIDTH}.0;
+  let v = (f32(id.y) + 0.5) / ${TRANSMITTANCE_HEIGHT}.0;
+  let bottom = atm.radii.x;
+  let top = atm.radii.y;
+  let H = sqrt(top * top - bottom * bottom);
+  let rho = H * v;
+  let r = sqrt(rho * rho + bottom * bottom);
+  let dMin = top - r;
+  let dMax = rho + H;
+  let dd = dMin + u * (dMax - dMin);
+  var mu = 1.0;
+  if (dd != 0.0) { mu = clamp((H * H - rho * rho - dd * dd) / (2.0 * r * dd), -1.0, 1.0); }
+  let t = max(0.0, raySphere(r, mu, top));
+  let dt = t / ${TRANSMITTANCE_STEPS}.0;
+  var depth = vec3f(0.0);
+  for (var i = 0; i < ${TRANSMITTANCE_STEPS}; i = i + 1) {
+    let s = (f32(i) + 0.5) * dt;
+    let h = sqrt(r * r + s * s + 2.0 * r * mu * s) - bottom;
+    depth = depth + mediumAt(h).extinction * dt;
+  }
+  textureStore(outLut, vec2i(id.xy), vec4f(exp(-depth), 1.0));
+}
+`
+);
+var MULTISCATTER_WGSL = (
+  /* wgsl */
+  `
+${ATMOSPHERE_COMMON_WGSL}
+@group(0) @binding(0) var<uniform> atm: Atm;
+@group(0) @binding(1) var lutSampler: sampler;
+@group(0) @binding(2) var transmittanceLut: texture_2d<f32>;
+@group(0) @binding(3) var outLut: texture_storage_2d<rgba16float, write>;
+
+fn transmittanceTo(r: f32, mu: f32) -> vec3f {
+  if (hitsGround(r, mu)) { return vec3f(0.0); }
+  return textureSampleLevel(transmittanceLut, lutSampler, transmittanceUv(r, mu), 0.0).rgb;
+}
+
+@compute @workgroup_size(8, 8, 1)
+fn main(@builtin(global_invocation_id) id: vec3u) {
+  if (id.x >= ${MULTISCATTER_SIZE}u || id.y >= ${MULTISCATTER_SIZE}u) { return; }
+  let muS = (f32(id.x) + 0.5) / ${MULTISCATTER_SIZE}.0 * 2.0 - 1.0;
+  let h = (f32(id.y) + 0.5) / ${MULTISCATTER_SIZE}.0 * (atm.radii.y - atm.radii.x);
+  let r = atm.radii.x + max(1e-3, h);
+  let sun = vec3f(sqrt(max(0.0, 1.0 - muS * muS)), muS, 0.0);
+  let iso = 1.0 / (4.0 * PI);
+  var L = vec3f(0.0);
+  var f = vec3f(0.0);
+  for (var k = 0; k < ${MULTISCATTER_DIRECTIONS}; k = k + 1) {
+    let y = 1.0 - (2.0 * f32(k) + 1.0) / ${MULTISCATTER_DIRECTIONS}.0;
+    let rr = sqrt(max(0.0, 1.0 - y * y));
+    let phi = f32(k) * 2.399963229728653;
+    let d = vec3f(rr * cos(phi), y, rr * sin(phi));
+    let mu = d.y;
+    var ground = -1.0;
+    if (hitsGround(r, mu)) { ground = raySphere(r, mu, atm.radii.x); }
+    let tMax = select(max(0.0, raySphere(r, mu, atm.radii.y)), ground, ground > 0.0);
+    let dt = tMax / ${MULTISCATTER_STEPS}.0;
+    var throughput = vec3f(1.0);
+    for (var i = 0; i < ${MULTISCATTER_STEPS}; i = i + 1) {
+      let t = (f32(i) + 0.3) * dt;
+      let p = vec3f(d.x * t, r + d.y * t, d.z * t);
+      let pr = length(p);
+      let m = mediumAt(pr - atm.radii.x);
+      let ts = transmittanceTo(pr, dot(p, sun) / pr);
+      let scattering = m.rayleigh + vec3f(m.mie);
+      let ext = max(vec3f(1e-9), m.extinction);
+      let stepT = exp(-ext * dt);
+      let S = scattering * ts * iso;
+      L = L + throughput * ((S - S * stepT) / ext);
+      f = f + throughput * ((scattering - scattering * stepT) / ext);
+      throughput = throughput * stepT;
+    }
+    if (ground > 0.0) {
+      let p = vec3f(d.x * ground, r + d.y * ground, d.z * ground);
+      let pr = length(p);
+      let muSun = dot(p, sun) / pr;
+      L = L + throughput * transmittanceTo(pr, muSun) * max(0.0, muSun) * (atm.mie.w / PI);
+    }
+  }
+  let fms = min(vec3f(0.999), f * iso * 4.0 * PI / ${MULTISCATTER_DIRECTIONS}.0);
+  textureStore(outLut, vec2i(id.xy), vec4f(L / ${MULTISCATTER_DIRECTIONS}.0 / (vec3f(1.0) - fms), 1.0));
+}
+`
+);
+var SKY_RADIANCE_WGSL = (
+  /* wgsl */
+  `
+fn skyRadiance(d: vec3f, sun: vec3f) -> vec3f {
+  let r = atm.radii.x + atm.view.x;
+  let mu = d.y;
+  var ground = -1.0;
+  if (hitsGround(r, mu)) { ground = raySphere(r, mu, atm.radii.x); }
+  let tMax = select(max(0.0, raySphere(r, mu, atm.radii.y)), ground, ground > 0.0);
+  let c = dot(d, sun);
+  let pr = rayleighPhase(c);
+  let pm = miePhase(c, atm.mie.z);
+  let E = atm.sunE.rgb;
+  var L = vec3f(0.0);
+  var throughput = vec3f(1.0);
+  for (var i = 0; i < ${SKY_STEPS}; i = i + 1) {
+    let a0 = f32(i) / ${SKY_STEPS}.0;
+    let a1 = f32(i + 1) / ${SKY_STEPS}.0;
+    let t0 = tMax * a0 * a0;
+    let t1 = tMax * a1 * a1;
+    let t = t0 + 0.3 * (t1 - t0);
+    let dt = t1 - t0;
+    let p = vec3f(d.x * t, r + d.y * t, d.z * t);
+    let pR = length(p);
+    let m = mediumAt(pR - atm.radii.x);
+    let muSun = dot(p, sun) / pR;
+    let ts = transmittanceTo(pR, muSun);
+    let ms = multiScatteringAt(pR - atm.radii.x, muSun);
+    let ext = max(vec3f(1e-9), m.extinction);
+    let stepT = exp(-ext * dt);
+    let S = E * ((m.rayleigh * pr + vec3f(m.mie * pm)) * ts + ms * (m.rayleigh + vec3f(m.mie)));
+    L = L + throughput * ((S - S * stepT) / ext);
+    throughput = throughput * stepT;
+  }
+  if (ground > 0.0) {
+    let p = vec3f(d.x * ground, r + d.y * ground, d.z * ground);
+    let pR = length(p);
+    let muSun = dot(p, sun) / pR;
+    L = L + throughput * transmittanceTo(pR, muSun) * max(0.0, muSun) * (atm.mie.w / PI) * E;
+  }
+  return L;
+}
+`
+);
+var SKY_VIEW_WGSL = (
+  /* wgsl */
+  `
+${ATMOSPHERE_COMMON_WGSL}
+${LUT_BINDINGS_WGSL}
+@group(0) @binding(4) var outLut: texture_storage_2d<rgba16float, write>;
+${LOOKUPS_WGSL}
+${SKY_RADIANCE_WGSL}
+
+@compute @workgroup_size(8, 8, 1)
+fn main(@builtin(global_invocation_id) id: vec3u) {
+  if (id.x >= ${SKY_VIEW_WIDTH}u || id.y >= ${SKY_VIEW_HEIGHT}u) { return; }
+  let u = (f32(id.x) + 0.5) / ${SKY_VIEW_WIDTH}.0;
+  let v = (f32(id.y) + 0.5) / ${SKY_VIEW_HEIGHT}.0;
+  let r = atm.radii.x + atm.view.x;
+  let beta = acos(min(1.0, sqrt(max(0.0, r * r - atm.radii.x * atm.radii.x)) / r));
+  let horizon = PI - beta;
+  var zenith: f32;
+  if (v < 0.5) {
+    let k = 1.0 - 2.0 * v;
+    zenith = horizon * (1.0 - k * k);
+  } else {
+    let k = 2.0 * v - 1.0;
+    zenith = horizon + beta * k * k;
+  }
+  let cosAz = 1.0 - 2.0 * u * u;
+  let sinAz = sqrt(max(0.0, 1.0 - cosAz * cosAz));
+  let d = vec3f(sin(zenith) * cosAz, cos(zenith), sin(zenith) * sinAz);
+  let muS = atm.sun.y;
+  let sun = vec3f(sqrt(max(0.0, 1.0 - muS * muS)), muS, 0.0);
+  textureStore(outLut, vec2i(id.xy), vec4f(skyRadiance(d, sun), 1.0));
+}
+`
+);
+var SKY_VIEW_UV_WGSL = (
+  /* wgsl */
+  `
+// The sky view's (u, v) for a world view direction d under a sun toward s, a viewer at radius r over a ground of radius bottom.
+fn skyViewUv(d: vec3f, s: vec3f, r: f32, bottom: f32) -> vec2f {
+  let beta = acos(min(1.0, sqrt(max(0.0, r * r - bottom * bottom)) / r));
+  let horizon = 3.14159265 - beta;
+  let zenith = acos(clamp(d.y, -1.0, 1.0));
+  var v: f32;
+  if (zenith < horizon) { v = (1.0 - sqrt(max(0.0, 1.0 - zenith / horizon))) * 0.5; }
+  else { v = (sqrt(min(1.0, (zenith - horizon) / beta)) + 1.0) * 0.5; }
+  let dh = length(d.xz);
+  let sh = length(s.xz);
+  var cosAz = 1.0;
+  if (dh > 1e-6 && sh > 1e-6) { cosAz = dot(d.xz, s.xz) / (dh * sh); }
+  return vec2f(sqrt(max(0.0, (1.0 - clamp(cosAz, -1.0, 1.0)) * 0.5)), v);
+}
+`
+);
+var USAGE3 = { textureBinding: 4, storage: 8, copySrc: 1, uniform: 64, copyDst: 8 };
+var GpuAtmosphere = class {
+  constructor(device) {
+    this.device = device;
+    this.data = new Float32Array(ATMOSPHERE_UNIFORM_FLOATS);
+    this.mediumKey = "";
+    this.viewKey = "";
+    const texture = (width, height) => device.createTexture({ size: { width, height }, format: "rgba16float", usage: USAGE3.textureBinding | USAGE3.storage | USAGE3.copySrc });
+    this.transmittance = texture(TRANSMITTANCE_WIDTH, TRANSMITTANCE_HEIGHT);
+    this.multiScattering = texture(MULTISCATTER_SIZE, MULTISCATTER_SIZE);
+    this.skyView = texture(SKY_VIEW_WIDTH, SKY_VIEW_HEIGHT);
+    this.sampler = device.createSampler({ magFilter: "linear", minFilter: "linear", addressModeU: "clamp-to-edge", addressModeV: "clamp-to-edge" });
+    this.uniforms = device.createBuffer({ size: ATMOSPHERE_UNIFORM_FLOATS * 4, usage: USAGE3.uniform | USAGE3.copyDst });
+    const pipeline = (code) => device.createComputePipeline({ layout: "auto", compute: { module: device.createShaderModule({ code }), entryPoint: "main" } });
+    this.pipelines = { transmittance: pipeline(TRANSMITTANCE_WGSL), multiScattering: pipeline(MULTISCATTER_WGSL), skyView: pipeline(SKY_VIEW_WGSL) };
+  }
+  /** Bring the LUTs up to `sky` (a submit of its own when anything changed); true when the sky view was rebuilt. */
+  update(sky) {
+    const medium = atmosphereKey(sky.atmosphere);
+    const view = [medium, sky.atmosphere.viewHeight, ...sky.sun.map((v) => v.toFixed(5)), ...sky.sunRadiance.map((v) => v.toPrecision(5))].join("|");
+    if (view === this.viewKey) return false;
+    this.device.queue.writeBuffer(this.uniforms, 0, packAtmosphereUniforms(sky, this.data));
+    const encoder = this.device.createCommandEncoder();
+    const run = (pipeline, entries, width, height) => {
+      const pass = encoder.beginComputePass();
+      pass.setPipeline(pipeline);
+      pass.setBindGroup(0, this.device.createBindGroup({ layout: pipeline.getBindGroupLayout(0), entries }));
+      pass.dispatchWorkgroups(Math.ceil(width / 8), Math.ceil(height / 8));
+      pass.end();
+    };
+    const uniform = { binding: 0, resource: { buffer: this.uniforms } };
+    if (medium !== this.mediumKey) {
+      run(this.pipelines.transmittance, [uniform, { binding: 1, resource: this.transmittance.createView() }], TRANSMITTANCE_WIDTH, TRANSMITTANCE_HEIGHT);
+      run(
+        this.pipelines.multiScattering,
+        [uniform, { binding: 1, resource: this.sampler }, { binding: 2, resource: this.transmittance.createView() }, { binding: 3, resource: this.multiScattering.createView() }],
+        MULTISCATTER_SIZE,
+        MULTISCATTER_SIZE
+      );
+      this.mediumKey = medium;
+    }
+    run(
+      this.pipelines.skyView,
+      [
+        uniform,
+        { binding: 1, resource: this.sampler },
+        { binding: 2, resource: this.transmittance.createView() },
+        { binding: 3, resource: this.multiScattering.createView() },
+        { binding: 4, resource: this.skyView.createView() }
+      ],
+      SKY_VIEW_WIDTH,
+      SKY_VIEW_HEIGHT
+    );
+    this.device.queue.submit([encoder.finish()]);
+    this.viewKey = view;
+    return true;
+  }
+  dispose() {
+    for (const t of [this.transmittance, this.multiScattering, this.skyView]) t.destroy?.();
+    this.uniforms.destroy?.();
+  }
+};
+
 // src/render/gpuPresent.ts
 import { CLOUD_TILE, MAX_CLOUD_LAYERS } from "@cartbox/editor";
 var CLOUD_TILE_SIZE = CLOUD_TILE;
@@ -24111,7 +24493,7 @@ var SHAFT_CELLS_ACROSS = 160;
 var SHAFT_SKY_SHARE = 0.35;
 var BLOOM_MIX = 1 / 6;
 var AUTO_KEY_FALLBACK = 0.18;
-var USAGE3 = {
+var USAGE4 = {
   copySrc: 1,
   copyDst: 2,
   textureBinding: 4,
@@ -24143,6 +24525,22 @@ function packSkyUniforms(sky, width, height, out = new Float32Array(SKY_UNIFORM_
     out.set(layer ? [layer.scale, layer.wind[0], layer.wind[1], layer.opacity] : [0, 0, 0, 0], 24 + i * 4);
     out.set(layer ? [layer.color[0], layer.color[1], layer.color[2], 0] : [0, 0, 0, 0], 24 + MAX_CLOUD_LAYERS * 4 + i * 4);
   }
+  return out;
+}
+var ATMOSPHERE_SKY_UNIFORM_FLOATS = 24;
+var SUN_DISC_MAX = 3e4;
+function packAtmosphereSkyUniforms(sky, width, height, out = new Float32Array(ATMOSPHERE_SKY_UNIFORM_FLOATS)) {
+  const v = sky.view;
+  const p = sky.projection;
+  const atm = sky.atmosphere;
+  const a = atm.atmosphere;
+  out.set([v[0], v[4], v[8], 1 / p[0]], 0);
+  out.set([v[1], v[5], v[9], 1 / p[5]], 4);
+  out.set([v[2], v[6], v[10], 0], 8);
+  const l = Math.hypot(atm.sun[0], atm.sun[1], atm.sun[2]) || 1;
+  out.set([atm.sun[0] / l, atm.sun[1] / l, atm.sun[2] / l, Math.cos(a.sunRadius)], 12);
+  out.set([...atm.disc.map((c) => Math.min(SUN_DISC_MAX, Math.max(0, c))), 0], 16);
+  out.set([width, height, a.bottom + a.viewHeight, a.bottom], 20);
   return out;
 }
 function shaftGrid(width, height) {
@@ -24310,6 +24708,31 @@ fn coreGlow(c: f32) -> f32 {
     rgb = toLinear(rgb);
     if (s.size.w > 0.0) { rgb = filmicInverse(rgb) / s.size.w; }
   }
+  return vec4f(rgb, 1.0);
+}
+`
+);
+var ATMOSPHERE_SKY_WGSL = (
+  /* wgsl */
+  `
+struct AtmSky {
+  right: vec4f,
+  up: vec4f,
+  back: vec4f,
+  sun: vec4f,
+  disc: vec4f,
+  size: vec4f,
+};
+@group(0) @binding(0) var<uniform> s: AtmSky;
+@group(0) @binding(1) var skyView: texture_2d<f32>;
+@group(0) @binding(2) var viewSampler: sampler;
+${FULLSCREEN_VS2}
+${SKY_VIEW_UV_WGSL}
+@fragment fn atmosphere(@builtin(position) pos: vec4f) -> @location(0) vec4f {
+  let ndc = vec2f(pos.x / s.size.x * 2.0 - 1.0, 1.0 - pos.y / s.size.y * 2.0);
+  let n = normalize(s.right.xyz * (ndc.x * s.right.w) + s.up.xyz * (ndc.y * s.up.w) - s.back.xyz);
+  var rgb = textureSampleLevel(skyView, viewSampler, skyViewUv(n, s.sun.xyz, s.size.z, s.size.w), 0.0).rgb;
+  if (dot(n, s.sun.xyz) > s.sun.w) { rgb = rgb + s.disc.rgb; }
   return vec4f(rgb, 1.0);
 }
 `
@@ -24649,6 +25072,7 @@ var GpuPresenter = class {
     this.pipelines = /* @__PURE__ */ new Map();
     this.data = {
       sky: new Float32Array(SKY_UNIFORM_FLOATS),
+      atmosphere: new Float32Array(ATMOSPHERE_SKY_UNIFORM_FLOATS),
       shaft: new Float32Array(SHAFT_UNIFORM_FLOATS),
       compose: new Float32Array(COMPOSE_UNIFORM_FLOATS),
       lens: new Float32Array(POST_UNIFORM_FLOATS),
@@ -24656,6 +25080,8 @@ var GpuPresenter = class {
       measure: new Float32Array(MEASURE_UNIFORM_FLOATS)
     };
     this.postFx = null;
+    /** The physical sky's LUTs (F5a), made when a linear frame first draws one. */
+    this.atmosphereLuts = null;
     /** The HDR bloom's chain (F4d), made when a linear frame first blooms. */
     this.bloom = null;
     this.uploads = /* @__PURE__ */ new Map();
@@ -24668,7 +25094,7 @@ var GpuPresenter = class {
     this.outputHeight = layerHeight;
     this.hdr = options.hdr === true;
     this.extended = this.hdr && options.extended === true;
-    this.blank = device.createTexture({ size: { width: 1, height: 1 }, format: "rgba8unorm", usage: USAGE3.textureBinding | USAGE3.copyDst });
+    this.blank = device.createTexture({ size: { width: 1, height: 1 }, format: "rgba8unorm", usage: USAGE4.textureBinding | USAGE4.copyDst });
     device.queue.writeTexture({ texture: this.blank }, new Uint8Array(4), { bytesPerRow: 4 }, { width: 1, height: 1 });
     const sampler = (u, v) => device.createSampler({ magFilter: "linear", minFilter: "linear", addressModeU: u, addressModeV: v });
     this.linear = { clamp: sampler("clamp-to-edge", "clamp-to-edge"), wrapU: sampler("repeat", "clamp-to-edge"), repeat: sampler("repeat", "repeat") };
@@ -24680,6 +25106,7 @@ var GpuPresenter = class {
     const compose = layout([uni(), tex(1), tex(2), tex(3), samp(4), tex(5), tex(6), tex(7), tex(8)]);
     this.layouts = {
       sky: layout([uni(), tex(1), samp(2), tex(3, STAGE_FRAGMENT2, "2d-array"), samp(4)]),
+      atmosphere: layout([uni(), tex(1), samp(2)]),
       mask: layout([uni(), tex(1), tex(2)]),
       gather: layout([uni(), tex(1)]),
       compose,
@@ -24688,9 +25115,10 @@ var GpuPresenter = class {
       lens: layout([uni(), tex(1), samp(2), { binding: 3, visibility: STAGE_FRAGMENT2, buffer: { type: "uniform" } }]),
       measure: layout([uni(STAGE_COMPUTE), tex(1, STAGE_COMPUTE), tex(2, STAGE_COMPUTE), { binding: 3, visibility: STAGE_COMPUTE, buffer: { type: "storage" } }])
     };
-    const ubuf = (floats) => device.createBuffer({ size: floats * 4, usage: USAGE3.uniform | USAGE3.bufferCopyDst });
+    const ubuf = (floats) => device.createBuffer({ size: floats * 4, usage: USAGE4.uniform | USAGE4.bufferCopyDst });
     this.uniforms = {
       sky: ubuf(SKY_UNIFORM_FLOATS),
+      atmosphere: ubuf(ATMOSPHERE_SKY_UNIFORM_FLOATS),
       shaft: ubuf(SHAFT_UNIFORM_FLOATS),
       compose: ubuf(COMPOSE_UNIFORM_FLOATS),
       finish: ubuf(COMPOSE_UNIFORM_FLOATS),
@@ -24701,8 +25129,8 @@ var GpuPresenter = class {
     this.transients = new TransientPool(device);
     this.timer = GraphTimer.create(device);
     this.measured = {
-      result: device.createBuffer({ size: 16, usage: USAGE3.bufferStorage | USAGE3.bufferCopySrc }),
-      staging: device.createBuffer({ size: 16, usage: USAGE3.mapRead | USAGE3.bufferCopyDst }),
+      result: device.createBuffer({ size: 16, usage: USAGE4.bufferStorage | USAGE4.bufferCopySrc }),
+      staging: device.createBuffer({ size: 16, usage: USAGE4.mapRead | USAGE4.bufferCopyDst }),
       busy: false
     };
   }
@@ -24756,6 +25184,25 @@ var GpuPresenter = class {
       graph.addPass("sky", "render", (pass) => {
         pass.write(skyTexture);
         return (ctx) => {
+          const atmosphere = this.hdr && sky.atmosphere ? sky.atmosphere : null;
+          if (atmosphere) {
+            (this.atmosphereLuts ?? (this.atmosphereLuts = new GpuAtmosphere(device))).update(atmosphere);
+            device.queue.writeBuffer(this.uniforms.atmosphere, 0, packAtmosphereSkyUniforms({ ...sky, atmosphere }, width, height, this.data.atmosphere));
+            this.fullScreen(
+              ctx.encoder,
+              "atmosphere",
+              skyFormat,
+              ATMOSPHERE_SKY_WGSL,
+              ctx.texture(skyTexture),
+              [
+                { binding: 0, resource: { buffer: this.uniforms.atmosphere } },
+                { binding: 1, resource: this.atmosphereLuts.skyView.createView() },
+                { binding: 2, resource: this.linear.clamp }
+              ],
+              ctx.timing
+            );
+            return;
+          }
           device.queue.writeBuffer(this.uniforms.sky, 0, packSkyUniforms(sky, width, height, this.data.sky, this.hdr, frame.tonemap ? frame.tonemap.exposure : null, frame.tonemap?.authored ?? false));
           this.fullScreen(
             ctx.encoder,
@@ -25006,6 +25453,7 @@ var GpuPresenter = class {
     this.timer?.destroy();
     this.bloom?.dispose();
     this.postFx?.dispose();
+    this.atmosphereLuts?.dispose();
     destroy(this.panorama?.texture);
     destroy(this.cloudTexture?.texture);
     for (const u of this.uploads.values()) destroy(u.texture);
@@ -25017,7 +25465,7 @@ var GpuPresenter = class {
     const m = this.measured;
     m.busy = true;
     try {
-      await m.staging.mapAsync(USAGE3.mapRead);
+      await m.staging.mapAsync(USAGE4.mapRead);
       if (this.destroyed) return;
       const [sum, count, open, taps] = Array.from(new Float32Array(m.staging.getMappedRange().slice(0)));
       m.staging.unmap();
@@ -25040,7 +25488,7 @@ var GpuPresenter = class {
     let entry = this.uploads.get(slot);
     if (!entry) {
       entry = {
-        texture: this.device.createTexture({ size: { width, height }, format: "rgba8unorm", usage: USAGE3.textureBinding | USAGE3.copyDst }),
+        texture: this.device.createTexture({ size: { width, height }, format: "rgba8unorm", usage: USAGE4.textureBinding | USAGE4.copyDst }),
         width,
         height
       };
@@ -25054,7 +25502,7 @@ var GpuPresenter = class {
   panoramaFor(map) {
     if (this.panorama?.source === map) return this.panorama.texture;
     this.panorama?.texture.destroy?.();
-    const texture = this.device.createTexture({ size: { width: map.width, height: map.height }, format: "rgba8unorm", usage: USAGE3.textureBinding | USAGE3.copyDst });
+    const texture = this.device.createTexture({ size: { width: map.width, height: map.height }, format: "rgba8unorm", usage: USAGE4.textureBinding | USAGE4.copyDst });
     this.device.queue.writeTexture({ texture }, map.data, { bytesPerRow: map.width * 4, rowsPerImage: map.height }, { width: map.width, height: map.height });
     this.panorama = { source: map, texture };
     return texture;
@@ -25067,7 +25515,7 @@ var GpuPresenter = class {
     cached?.texture.destroy?.();
     const size = CLOUD_TILE_SIZE;
     const count = Math.max(1, shown.length);
-    const texture = this.device.createTexture({ size: { width: size, height: size, depthOrArrayLayers: count }, format: "r8unorm", usage: USAGE3.textureBinding | USAGE3.copyDst });
+    const texture = this.device.createTexture({ size: { width: size, height: size, depthOrArrayLayers: count }, format: "r8unorm", usage: USAGE4.textureBinding | USAGE4.copyDst });
     shown.forEach((layer, i) => {
       const bytes = new Uint8Array(size * size);
       for (let k = 0; k < bytes.length; k += 1) bytes[k] = Math.round(Math.max(0, Math.min(1, layer.density[k] ?? 0)) * 255);
