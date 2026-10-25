@@ -27,6 +27,9 @@ import {
   bakeReflectionProbesAsync,
   ParticleSystem,
   DecalSystem,
+  decalTiles,
+  projectDecals,
+  type DecalTiles,
   DebrisSystem,
   applySunShafts,
   sunScreenPosition,
@@ -1123,10 +1126,17 @@ export class MeshOverlaySurface implements DisplaySurface {
       if (ribbons.main) drawn = [...drawn, ribbons.main];
       if (ribbons.front) frontDrawn = [...front, ribbons.front];
     }
+    // The AAA tier projects decals onto the surfaces as it lights them (F1f); the others draw their quads.
+    let decals: GpuSceneDraw["decals"] = null;
     if (this.decals) {
       this.decals.step(1 / 60);
-      const marks = this.decals.sceneInstance();
-      if (marks) drawn = [...drawn, marks];
+      if (cascaded) {
+        this.decalTiles ??= decalTiles(this.decals.defs);
+        decals = { boxes: projectDecals(this.decals), tiles: this.decalTiles };
+      } else {
+        const marks = this.decals.sceneInstance();
+        if (marks) drawn = [...drawn, marks];
+      }
     }
     if (this.debris) {
       this.debris.step(1 / 60, this.debrisBoxes);
@@ -1158,6 +1168,7 @@ export class MeshOverlaySurface implements DisplaySurface {
         localShadowMoved: localShadowCasters ? (this.castersFrame?.moved ?? null) : null,
         antialias,
         reflectionCapture: cascaded && lighting ? this.reflectionCapture(lighting) : null,
+        decals,
       });
       if (profiler) profiler.add("scene", performance.now() - mark);
       this.frame += 1;
@@ -1288,6 +1299,7 @@ export class MeshOverlaySurface implements DisplaySurface {
       readonly localShadowMoved: readonly MeshSceneInstance[] | null;
       readonly antialias: boolean;
       readonly reflectionCapture: ReflectionCapture | null;
+      readonly decals: GpuSceneDraw["decals"];
     },
   ): void {
     const { camera, lighting } = job;
@@ -1320,6 +1332,7 @@ export class MeshOverlaySurface implements DisplaySurface {
       ...(this.options.prepass === true ? { prepass: true } : {}),
       ...(lighting ? { ...lit, localShadows: job.local, shadow: job.shadow, sunShadow: job.sunShadow, localShadowCasters: job.localShadowCasters, localShadowKey: job.localShadowKey, localShadowMoved: job.localShadowMoved, fog: lighting.fog ?? null, wind: lighting.wind ?? null } : {}),
       ...(job.reflectionCapture ? { reflectionCapture: job.reflectionCapture } : {}),
+      ...(job.decals ? { decals: job.decals } : {}),
       time,
     };
     const scene = this.renderer.renderToTexture!(job.drawn, draw) ?? null;
@@ -2129,6 +2142,8 @@ export class MeshOverlaySurface implements DisplaySurface {
   }
   /** Settles once the scene's reflection probes are baked and in use (tests await it). */
   probesReady: Promise<void> = Promise.resolve();
+  /** Every decal's tiles, drawn the first time the AAA tier projects them (F1f). */
+  private decalTiles: DecalTiles | null = null;
   /** What the reflection probes see: the scene's still objects (F3b). */
   private probeScene: readonly MeshSceneInstance[] = [];
   /** The probes' capture key's parts that hold while the rig does, and a token for each sky map (F3b). */

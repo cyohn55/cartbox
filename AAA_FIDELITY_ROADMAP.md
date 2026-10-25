@@ -359,7 +359,30 @@ Everything else depends on this track. It contains no visible "feature", but its
   - Any number of texture samplers.
   - Material functions with reusable subgraphs, and layered materials that blend whole material stacks by masks (Unreal's Material Layers).
   - A static-switch permutation system, with a shader-compile cache to avoid hitches.
-- [ ] **F1f. Projected decals.** Deferred, D-buffer-style box decals that modify base colour, normal, roughness and AO, with sorting, fade by angle and distance, and sharing of an atlas. They replace the quad-mesh decals for impacts, grime, leaks and road markings.
+- [x] **F1f. Projected decals.** Deferred, D-buffer-style box decals that modify base colour, normal, roughness and AO, with sorting, fade by angle and distance, and sharing of an atlas. They replace the quad-mesh decals for impacts, grime, leaks and road markings.
+  - **F1f-1, projected box decals: done** on the `aaa` tier. They replace the decal marks' quads there; every other tier keeps the quads.
+    - **Boxes** (`editor/render/projectedDecals.ts`). A mark is a box on its surface: half its size across and along (turned by its spin), and a quarter of it out of and into the surface.
+      - It carries its decal's tile, what is left of it, and its glow. A cart-laid mark fades smoothly over the last third of its life, where the quads dissolved frame by frame.
+      - They are ordered permanent first, then the oldest, so a fresh mark lies over an old one (`DecalSystem.liveMarks`).
+    - **The atlas** is shared. Every decal's pattern is drawn once to a 64² tile in two planes:
+      - colour, with coverage in alpha, supersampled so the edge is soft rather than dithered;
+      - surface: the normal its relief bends (a pock sinks, a glyph is cut in, frost stands), its roughness and its occlusion.
+    - **On the GPU** (`player/render/decalBuffer.ts`), the boxes and tiles share one storage buffer at group 1 binding 13. The fragment stage's 16 sampled textures are all bound, so the tiles are filtered by hand, as the DFG and LTC tables are.
+      - A box is three rows taking a world point into it, its tile, alpha and glow, and its surface normal. The frame takes up to 256, the nearest the camera.
+    - **In the shader**, before a surface is lit, each box round the point lays its tile over it by its coverage. The tile's coverage is faded:
+      - as the surface turns from the box's normal (so a floor's mark doesn't run up a wall);
+      - toward the box's depth;
+      - and as the mark fades.
+      - It replaces the base colour, roughness and metalness (a mark is paint, not metal), multiplies in its occlusion, bends the normal by its relief and adds its glow.
+      - Only opaque and cut-out surfaces that don't refract take decals.
+    - *Tests:* `projected-decals.test.ts` covers:
+      - the tiles' coverage and relief, the box's frame, the order and fade, and the packed boxes (rows into the box, the nearest kept, in order) and tiles;
+      - on Dawn: a decal paints a lit white surface its colour; it fades with the mark; it misses a surface outside its box or turned from it, and a see-through one; it glows by its glow and occludes by its tile.
+      - `shadowCascade.test.ts`: on the AAA tier the player hands over boxes and tiles, draws no decal quads, and draws the tiles once.
+    - **Still to do:**
+      - Grime, leaks and road markings authored as boxes of their own (the marks' presets are what exists now).
+      - Excluding moving objects that pass through a box, by a receiver flag.
+      - Culling boxes per cluster instead of looping all of a frame's 256.
 
 ### F2. Shadows and lights
 
