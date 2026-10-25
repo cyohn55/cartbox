@@ -938,6 +938,27 @@ Everything else depends on this track. It contains no visible "feature", but its
       - The underside (metal 0.6, dark albedo): 0.46 against 0.35, then 0.47. The authored curve matches it.
       - The deck: 0.66 against 0.56, then 0.60, and as far off with its metal taken out. The gap there is the deck's own shading (rough 0.7, polished, normal-mapped plates), not the curve or the metal, and is the next thing to look at.
     - So no single global change closes the gap: what is left is per material. The look-dev stage (F10c), a grey and chrome ball and a colour checker under each tier, is the tool for the rest; the physical re-light (with F5a) replaces the byte path's look as the reference.
+  - **F11a-7, the deck's gap: traced to its albedo, not its shading.** The deck was rendered alone on Dawn on both paths, one of its inputs changed at a time (luminance, byte path first; then the AAA path under the physical curve and the authored one).
+    - **Its maps don't hold it.**
+      - Without its normal map it is 0.683 against 0.568, and without its metal-roughness map 0.626 against 0.577.
+      - Its albedo map, or its metal-roughness map, flattened to its mean, moves it by about 0.01; so does dropping its light map, detail map or relief.
+      - Without its albedo map, at its factor of about 0.9, the gap turns round: 0.815 against 0.862 (0.788 authored).
+    - **What holds it is how each path answers albedo.** A plain grey deck (no maps, metal 0, rough 0.7), byte path against AAA:
+
+      | albedo | byte | AAA, physical | AAA, authored |
+      | --- | --- | --- | --- |
+      | 0.2 | 0.604 | 0.408 | 0.509 |
+      | 0.4 | 0.774 | 0.679 | 0.667 |
+      | 0.6 | 0.845 | 0.829 | 0.762 |
+      | 0.8 | 0.885 | 0.901 | 0.820 |
+      | 1.0 | 0.911 | 0.939 | 0.858 |
+
+      - The byte path shades the authored, encoded albedo as if it were reflectance, so a 0.2 albedo lights as 0.2 rather than its linear 0.033, under a rig tuned that way.
+      - Its answer to albedo is flat, darks lifted. The AAA path's is physically steeper, as each material's own gap in F11a-6 shows: dark materials darker, light ones lighter.
+      - Roughness doesn't move it (rough 1 is within 0.01). Metal 0.4 leaves the authored curve on the byte path's values at 0.2 and 0.6, and over it at 1.
+    - **Not the fix: albedo left encoded** (shaded as authored, as an option would). Every material overshoots: the deck reads 0.782 against 0.661, the rock 0.393 against 0.240, and the frame 0.544 against 0.409 (0.585 authored). The byte path's rig was tuned for its own answer as a whole, not for linear light with encoded albedo.
+    - So the deck needs nothing of its own. Its gap is the one F11a-6 found in every material, from albedos and a rig tuned under byte-space lighting. The authored curve already matches the frame's mean (0.414 against 0.409).
+    - What closes it per material is the physical re-light this item calls for: albedos re-measured for linear light, with F10c's look-dev balls and colour checker, and lights in physical units, with F5a's sky. It comes after Milestone C's lighting.
 - [ ] **F11b. A photoreal reference scene.** A new map built entirely through the pipeline, for example a Forerunner ruin in a misty canyon at dusk:
   - scanned rock and foliage;
   - a cluster-rendered cliff;
