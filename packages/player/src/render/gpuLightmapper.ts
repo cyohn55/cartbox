@@ -43,7 +43,20 @@
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
-import { LIGHTMAP_RANGE, buildBvh, dilateLightmapValues, lightmapTexels, stitchLightmapSeams, type HdrLightmap, type LightmapLayout, type LightmapTexels, type Occluder } from "@cartbox/editor";
+import {
+  LIGHTMAP_RANGE,
+  PROBE_DEPTH_SIDE,
+  PROBE_SH,
+  buildBvh,
+  dilateLightmapValues,
+  lightmapTexels,
+  stitchLightmapSeams,
+  type HdrLightmap,
+  type LightmapLayout,
+  type LightmapTexels,
+  type Occluder,
+  type ProbeVolume,
+} from "@cartbox/editor";
 
 import type { LinearPanorama } from "./ibl.js";
 
@@ -54,7 +67,9 @@ const WORKGROUP = 64;
 /** Texels a dispatch covers at most, and paths (texels × samples) a submit traces at most. */
 const CHUNK_TEXELS = 65536;
 const PATHS_PER_SUBMIT = 1 << 19;
-const PARAMS_BYTES = 48 + LIGHTMAP_MAX_LIGHTS * 32;
+const PARAMS_BYTES = 64 + LIGHTMAP_MAX_LIGHTS * 32;
+/** A probe's sums: nine SH vec4s, its sky / backs / rays, and its 8 × 8 octahedral depth texels (F3d-3). */
+const PROBE_ACC_VEC4S = 10 + PROBE_DEPTH_SIDE * PROBE_DEPTH_SIDE;
 /** The tracer's sums per texel: four vec4s. */
 const ACC_FLOATS = 16;
 
@@ -160,6 +175,7 @@ struct Params {
   total: vec4<u32>, // x = samples in all
   lightDir: array<vec4<f32>, ${LIGHTMAP_MAX_LIGHTS}>,
   lightRad: array<vec4<f32>, ${LIGHTMAP_MAX_LIGHTS}>,
+  extra: vec4<f32>, // x = a probe's depth cap (F3d-3)
 };
 @group(0) @binding(0) var<storage, read> nodes: array<vec4<u32>>;
 @group(0) @binding(1) var<storage, read> tris: array<vec4<f32>>;
@@ -279,6 +295,63 @@ fn lum(c: vec3<f32>) -> f32 {
   return dot(c, vec3<f32>(0.2126, 0.7152, 0.0722));
 }
 
+// A unit direction's octahedral texel (probeVolume.ts's octTexel).
+fn octTexel(d: vec3<f32>) -> u32 {
+  var e = d.xz / (abs(d.x) + abs(d.y) + abs(d.z));
+  if (d.y < 0.0) { e = (vec2<f32>(1.0) - abs(e.yx)) * select(vec2<f32>(-1.0), vec2<f32>(1.0), e >= vec2<f32>(0.0)); }
+  let uv = e * 0.5 + vec2<f32>(0.5);
+  let x = min(u32(uv.x * ${PROBE_DEPTH_SIDE}.0), ${PROBE_DEPTH_SIDE - 1}u);
+  let y = min(u32(uv.y * ${PROBE_DEPTH_SIDE}.0), ${PROBE_DEPTH_SIDE - 1}u);
+  return y * ${PROBE_DEPTH_SIDE}u + x;
+}
+
+struct Path {
+  L: vec3<f32>,
+  // The first segment's hit distance (FAR when it reached the sky), and whether it met the back of a surface (F3d-2).
+  t: f32,
+  back: bool,
+};
+
+// What a path from o along d brings back: the sky on a miss; on a hit, the surface's emission, the
+// directional lights on it, and (while bounces remain) what a cosine-weighted bounce off it gathers.
+fn pathFrom(origin: vec3<f32>, dir: vec3<f32>) -> Path {
+  let bounces = params.info.x;
+  let lights = params.info.y;
+  var out = Path(vec3<f32>(0.0), FAR, false);
+  var tp = vec3<f32>(1.0);
+  var o = origin;
+  var d = dir;
+  for (var b = 0u; b <= bounces; b = b + 1u) {
+    let h = trace(o, d, FAR, false);
+    if (h.tri < 0) {
+      out.L = out.L + tp * skyAt(d);
+      break;
+    }
+    let i = u32(h.tri);
+    if (b == 0u) {
+      out.t = h.t;
+      out.back = dot(d, vec3<f32>(tris[i * 3u].w, tris[i * 3u + 1u].w, tris[i * 3u + 2u].w)) > 0.0;
+    }
+    out.L = out.L + tp * mats[i * 2u + 1u].rgb;
+    if (b == bounces) { break; }
+    var n = normalize(cross(tris[i * 3u + 1u].xyz, tris[i * 3u + 2u].xyz));
+    if (dot(n, d) > 0.0) { n = -n; } // the side the path arrived on (surfaces are two-sided)
+    let hp = o + d * h.t + n * EPS;
+    tp = tp * mats[i * 2u].rgb;
+    for (var l = 0u; l < lights; l = l + 1u) {
+      let Ld = params.lightDir[l].xyz;
+      let ndl = dot(n, Ld);
+      if (ndl > 0.0 && trace(hp, Ld, FAR, true).tri < 0) {
+        out.L = out.L + tp * params.lightRad[l].rgb * ndl;
+      }
+    }
+    if (max(tp.r, max(tp.g, tp.b)) < 1e-4) { break; }
+    o = hp;
+    d = cosineDir(n, vec2<f32>(rand(), rand()));
+  }
+  return out;
+}
+
 @compute @workgroup_size(${WORKGROUP})
 fn main(@builtin(global_invocation_id) id: vec3<u32>) {
   if (id.x >= params.run.y) { return; }
@@ -287,8 +360,6 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
   let Ng = normalize(texels[j * 2u + 1u].xyz);
   // The first bounce's directions: one stratified set for the bake, turned per texel (Cranley–Patterson).
   let turn = vec2<f32>(f32(pcg(j * 2u + 1u) >> 8u), f32(pcg(j * 2u + 2u) >> 8u)) / 16777216.0;
-  let bounces = params.info.x;
-  let lights = params.info.y;
   var e = vec3<f32>(0.0);
   var dirSum = vec3<f32>(0.0);
   var lumSum = 0.0;
@@ -303,43 +374,11 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     let d0 = cosineDir(Ng, xi);
     let sky0 = skyAt(d0);
     skyRef = skyRef + sky0;
-    var tp = vec3<f32>(1.0);
-    var o = P + Ng * EPS;
-    var d = d0;
-    var L = vec3<f32>(0.0);
-    for (var b = 0u; b <= bounces; b = b + 1u) {
-      let h = trace(o, d, FAR, false);
-      if (h.tri < 0) {
-        if (b == 0u) {
-          L = L + sky0;
-          skyOpen = skyOpen + lum(sky0);
-        } else {
-          L = L + tp * skyAt(d);
-        }
-        break;
-      }
-      let i = u32(h.tri);
-      // The first ray met the back of a surface: this texel may lie inside it (F3d-2).
-      if (b == 0u && dot(d, vec3<f32>(tris[i * 3u].w, tris[i * 3u + 1u].w, tris[i * 3u + 2u].w)) > 0.0) { backs = backs + 1.0; }
-      L = L + tp * mats[i * 2u + 1u].rgb;
-      if (b == bounces) { break; }
-      var n = normalize(cross(tris[i * 3u + 1u].xyz, tris[i * 3u + 2u].xyz));
-      if (dot(n, d) > 0.0) { n = -n; } // the side the path arrived on (surfaces are two-sided)
-      let hp = o + d * h.t + n * EPS;
-      tp = tp * mats[i * 2u].rgb;
-      for (var l = 0u; l < lights; l = l + 1u) {
-        let Ld = params.lightDir[l].xyz;
-        let ndl = dot(n, Ld);
-        if (ndl > 0.0 && trace(hp, Ld, FAR, true).tri < 0) {
-          L = L + tp * params.lightRad[l].rgb * ndl;
-        }
-      }
-      if (max(tp.r, max(tp.g, tp.b)) < 1e-4) { break; }
-      o = hp;
-      d = cosineDir(n, vec2<f32>(rand(), rand()));
-    }
-    e = e + L;
-    let y = lum(L);
+    let path = pathFrom(P + Ng * EPS, d0);
+    if (path.t >= FAR) { skyOpen = skyOpen + lum(sky0); }
+    if (path.back) { backs = backs + 1.0; }
+    e = e + path.L;
+    let y = lum(path.L);
     dirSum = dirSum + d0 * y;
     lumSum = lumSum + y;
     lumSq = lumSq + y * y;
@@ -349,12 +388,58 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
   accum[j * 4u + 2u] = accum[j * 4u + 2u] + vec4<f32>(skyRef, skyOpen);
   accum[j * 4u + 3u] = accum[j * 4u + 3u] + vec4<f32>(lumSq, backs, 0.0, 0.0);
 }
+
+// A probe (F3d-3): rays over the whole sphere (a Fibonacci set for the bake, turned per probe about the
+// vertical), projected onto L2 SH; the sky's share; backs met; and per octahedral texel the distance the
+// first segment travelled (capped), with its square.
+@compute @workgroup_size(${WORKGROUP})
+fn probeMain(@builtin(global_invocation_id) id: vec3<u32>) {
+  if (id.x >= params.run.y) { return; }
+  let p = params.run.x + id.x;
+  let P = texels[p].xyz;
+  let total = params.total.x;
+  let reach = params.extra.x;
+  let turn = f32(pcg(p * 2u + 11u) >> 8u) / 16777216.0 * 2.0 * PI;
+  var sh = array<vec3<f32>, 9>();
+  var skyRef = 0.0;
+  var skyOpen = 0.0;
+  var backs = 0.0;
+  let base = p * ${PROBE_ACC_VEC4S}u;
+  for (var k = 0u; k < params.run.w; k = k + 1u) {
+    let s = params.run.z + k;
+    rng = pcg(p ^ pcg(s + 0x85ebca6bu));
+    let y = 1.0 - (2.0 * f32(s) + 1.0) / f32(total);
+    let r = sqrt(max(0.0, 1.0 - y * y));
+    let phi = f32(s) * 2.39996323 + turn;
+    let d = vec3<f32>(r * cos(phi), y, r * sin(phi));
+    let path = pathFrom(P, d);
+    let L = path.L;
+    sh[0] = sh[0] + L * 0.282095;
+    sh[1] = sh[1] + L * (0.488603 * d.y);
+    sh[2] = sh[2] + L * (0.488603 * d.z);
+    sh[3] = sh[3] + L * (0.488603 * d.x);
+    sh[4] = sh[4] + L * (1.092548 * d.x * d.y);
+    sh[5] = sh[5] + L * (1.092548 * d.y * d.z);
+    sh[6] = sh[6] + L * (0.315392 * (3.0 * d.z * d.z - 1.0));
+    sh[7] = sh[7] + L * (1.092548 * d.x * d.z);
+    sh[8] = sh[8] + L * (0.546274 * (d.x * d.x - d.y * d.y));
+    let sl = lum(skyAt(d));
+    skyRef = skyRef + sl;
+    if (path.t >= FAR) { skyOpen = skyOpen + sl; }
+    if (path.back) { backs = backs + 1.0; }
+    let t = min(path.t, reach);
+    let texel = octTexel(d);
+    accum[base + 10u + texel] = accum[base + 10u + texel] + vec4<f32>(t, t * t, 1.0, 0.0);
+  }
+  for (var c = 0u; c < 9u; c = c + 1u) { accum[base + c] = accum[base + c] + vec4<f32>(sh[c], 0.0); }
+  accum[base + 9u] = accum[base + 9u] + vec4<f32>(skyRef, skyOpen, backs, f32(params.run.w));
+}
 `;
 
 const luminance = (r: number, g: number, b: number) => 0.2126 * r + 0.7152 * g + 0.0722 * b;
 
 /** The tracer's parameters for one dispatch. */
-export function lightmapParams(first: number, texels: number, firstSample: number, samples: number, total: number, bounces: number, sky: LinearPanorama | null, lights: readonly BakeLight[]): ArrayBuffer {
+export function lightmapParams(first: number, texels: number, firstSample: number, samples: number, total: number, bounces: number, sky: LinearPanorama | null, lights: readonly BakeLight[], reach = 0): ArrayBuffer {
   const buffer = new ArrayBuffer(PARAMS_BYTES);
   const u = new Uint32Array(buffer);
   const f = new Float32Array(buffer);
@@ -365,6 +450,7 @@ export function lightmapParams(first: number, texels: number, firstSample: numbe
     f.set([x / len, y / len, z / len, 0], 12 + i * 4);
     f.set([...light.radiance, 0], 12 + LIGHTMAP_MAX_LIGHTS * 4 + i * 4);
   });
+  f[12 + LIGHTMAP_MAX_LIGHTS * 8] = reach;
   return buffer;
 }
 
@@ -667,4 +753,113 @@ export function finishLightmap(layout: LightmapLayout, atlas: LightmapAtlas, sti
     ambient.set([q(values[v + 8]!), q(values[v + 9]!), q(values[v + 10]!), 255], i * 4);
   }
   return { hdr: { width: size, height: size, irradiance, direction }, ambient, invalid: atlas.invalid, seams };
+}
+
+// --- Probe volumes (F3d-3) --------------------------------------------------------
+
+/** The clamped cosine's SH bands over π (ibl.ts's COSINE_BANDS): the SH of radiance into irradiance over π. */
+const COSINE_BANDS = [1, 2 / 3, 2 / 3, 2 / 3, 1 / 4, 1 / 4, 1 / 4, 1 / 4, 1 / 4];
+
+export interface ProbeVolumeBakeOptions extends Pick<GpuLightBakeOptions, "bounces" | "sky" | "lights" | "backfaceLimit"> {
+  /** Rays per probe (default 1024). */
+  readonly rays?: number;
+}
+
+/**
+ * Bake a probe volume over `counts` probes spanning `min`–`max` against
+ * `occluders` on `device` (see probeVolume.ts): each probe's rays over the
+ * whole sphere, through the same paths as a light map's texels. A probe's
+ * depths are capped at 1.5 times the probe spacing, as DDGI's are.
+ */
+export async function bakeProbeVolumeGpu(
+  device: any,
+  min: readonly [number, number, number],
+  max: readonly [number, number, number],
+  counts: readonly [number, number, number],
+  occluders: readonly Occluder[],
+  options: ProbeVolumeBakeOptions = {},
+  progress?: (done: number) => void,
+): Promise<ProbeVolume> {
+  const rays = Math.max(16, Math.round(options.rays ?? 1024));
+  const bounces = Math.max(0, Math.min(LIGHTMAP_MAX_BOUNCES, Math.round(options.bounces ?? 3)));
+  const sky = options.sky ?? null;
+  const lights = options.lights ?? [];
+  const [cx, cy, cz] = counts;
+  const count = cx * cy * cz;
+  const spacing = [0, 1, 2].map((a) => (max[a]! - min[a]!) / Math.max(1, counts[a]! - 1));
+  const reach = 1.5 * Math.max(...spacing, 1e-3);
+  const positions = new Float32Array(count * 4);
+  for (let z = 0; z < cz; z += 1) for (let y = 0; y < cy; y += 1) for (let x = 0; x < cx; x += 1) {
+    const p = (z * cy + y) * cx + x;
+    positions.set([min[0] + x * spacing[0]!, min[1] + y * spacing[1]!, min[2] + z * spacing[2]!, 1], p * 4);
+  }
+  const acc = new Float32Array(count * PROBE_ACC_VEC4S * 4);
+  const scene = packLightmapScene(occluders);
+  const upload = (data: ArrayBufferView) => {
+    const buffer = device.createBuffer({ size: Math.max(16, data.byteLength), usage: STORAGE | COPY_DST });
+    device.queue.writeBuffer(buffer, 0, data.buffer, data.byteOffset, data.byteLength);
+    return buffer;
+  };
+  const buffers = [upload(scene.nodes), upload(scene.tris), upload(scene.mats), upload(positions)];
+  const accum = device.createBuffer({ size: acc.byteLength, usage: STORAGE | COPY_SRC });
+  const skyBuffer = upload(sky ? sky.data : new Float32Array(4));
+  const params = device.createBuffer({ size: PARAMS_BYTES, usage: UNIFORM | COPY_DST });
+  const readback = device.createBuffer({ size: acc.byteLength, usage: MAP_READ | COPY_DST });
+  try {
+    const pipeline = device.createComputePipeline({ layout: "auto", compute: { module: device.createShaderModule({ code: LIGHTMAP_TRACE_WGSL }), entryPoint: "probeMain" } });
+    const group = device.createBindGroup({
+      layout: pipeline.getBindGroupLayout(0),
+      entries: [...buffers, accum, skyBuffer].map((buffer, binding) => ({ binding, resource: { buffer } })).concat([{ binding: 6, resource: { buffer: params } }]),
+    });
+    const perPass = Math.max(1, Math.min(rays, Math.floor(PATHS_PER_SUBMIT / count)));
+    const submits = Math.ceil(rays / perPass);
+    for (let s = 0, done = 0; s < rays; s += perPass) {
+      device.queue.writeBuffer(params, 0, lightmapParams(0, count, s, Math.min(perPass, rays - s), rays, bounces, sky, lights, reach));
+      const encoder = device.createCommandEncoder();
+      const pass = encoder.beginComputePass();
+      pass.setPipeline(pipeline);
+      pass.setBindGroup(0, group);
+      pass.dispatchWorkgroups(Math.ceil(count / WORKGROUP));
+      pass.end();
+      device.queue.submit([encoder.finish()]);
+      await device.queue.onSubmittedWorkDone();
+      done += 1;
+      progress?.(done / submits);
+    }
+    const encoder = device.createCommandEncoder();
+    encoder.copyBufferToBuffer(accum, 0, readback, 0, acc.byteLength);
+    device.queue.submit([encoder.finish()]);
+    await readback.mapAsync(MAP_READ);
+    acc.set(new Float32Array(readback.getMappedRange()));
+    readback.unmap();
+  } finally {
+    for (const buffer of [...buffers, accum, skyBuffer, params, readback]) buffer.destroy();
+  }
+  return finishProbeVolume(min, max, counts, acc, reach, options.backfaceLimit ?? 0.6);
+}
+
+/** A probe volume from the tracer's sums (see {@link bakeProbeVolumeGpu}). */
+export function finishProbeVolume(min: readonly [number, number, number], max: readonly [number, number, number], counts: readonly [number, number, number], acc: Float32Array, reach: number, backfaceLimit: number): ProbeVolume {
+  const count = counts[0] * counts[1] * counts[2];
+  const depthTexels = PROBE_DEPTH_SIDE * PROBE_DEPTH_SIDE;
+  const sh = new Float32Array(count * PROBE_SH * 3);
+  const visibility = new Float32Array(count);
+  const valid = new Uint8Array(count);
+  const depth = new Float32Array(count * depthTexels * 2);
+  for (let p = 0; p < count; p += 1) {
+    const o = p * PROBE_ACC_VEC4S * 4;
+    const rays = acc[o + 39]!;
+    valid[p] = rays > 0 && acc[o + 38]! <= backfaceLimit * rays ? 1 : 0;
+    visibility[p] = acc[o + 36]! > 1e-12 ? Math.min(1, acc[o + 37]! / acc[o + 36]!) : 1;
+    // Each ray stands for 4π / rays of the sphere; the cosine's bands make it irradiance over π.
+    if (valid[p]) for (let k = 0; k < PROBE_SH; k += 1) for (let c = 0; c < 3; c += 1) sh[(p * PROBE_SH + k) * 3 + c] = ((acc[o + k * 4 + c]! * 4 * Math.PI) / rays) * COSINE_BANDS[k]!;
+    for (let t = 0; t < depthTexels; t += 1) {
+      const d = o + (10 + t) * 4;
+      const n = acc[d + 2]!;
+      // A texel no ray fell in reads as open to the cap.
+      depth[(p * depthTexels + t) * 2] = n > 0 ? acc[d]! / n : reach;
+      depth[(p * depthTexels + t) * 2 + 1] = n > 0 ? acc[d + 1]! / n : reach * reach;
+    }
+  }
+  return { min, max, counts, sh, visibility, valid, depth };
 }

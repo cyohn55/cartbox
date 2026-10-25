@@ -18,6 +18,7 @@
 
 import { parseWind, type SceneWind } from "./wind";
 import { decodeLightProbes, type LightProbeGrid, type StoredLightProbes } from "./lightProbes";
+import { decodeProbeVolume, type ProbeVolume, type StoredProbeVolume } from "./probeVolume";
 import { readAutoExposure, readPostVolumes, type AutoExposure, type PostVolume } from "./postVolumes";
 import { MAX_LIGHT_TEMPERATURE, MIN_LIGHT_TEMPERATURE } from "../render/lightTemperature";
 import { areaSize } from "../render/areaLights";
@@ -109,6 +110,12 @@ export interface SceneLighting {
    * things without a light map take their ambient from this grid. Absent = none.
    */
   readonly lightProbes?: StoredLightProbes | null;
+  /**
+   * The GPU bake's probe volume (AAA_FIDELITY_ROADMAP.md F3d-3; see
+   * probeVolume.ts): L2 SH irradiance and visibility per probe, which the AAA
+   * tier lights things without a light map by. Absent = none.
+   */
+  readonly probeVolume?: StoredProbeVolume | null;
   /**
    * The armour colours for this scene (HALO_INFINITE_STYLE_ROADMAP.md I8): entry
    * k replaces tint k of the runtime's palette (1..15; entry 0 is unused), null
@@ -224,6 +231,7 @@ export function parseSceneLighting(raw: unknown): SceneLighting | null {
   const shafts = parseShafts(record.shafts);
   // Kept only when it decodes: a bad grid is dropped, never half-used.
   const lightProbes = decodeLightProbes(record.lightProbes) ? (record.lightProbes as StoredLightProbes) : null;
+  const probeVolume = decodeProbeVolume(record.probeVolume) ? (record.probeVolume as StoredProbeVolume) : null;
 
   const lights = Array.isArray(record.lights)
     ? record.lights.map(parseLight).filter((l): l is SceneLight => l !== null)
@@ -256,6 +264,7 @@ export function parseSceneLighting(raw: unknown): SceneLighting | null {
     ...(probes.length > 0 ? { probes } : {}),
     ...(shafts ? { shafts } : {}),
     ...(lightProbes ? { lightProbes } : {}),
+    ...(probeVolume ? { probeVolume } : {}),
     ...(tints ? { tints } : {}),
     ...(postVolumes.length > 0 ? { postVolumes } : {}),
     ...(autoExposure ? { autoExposure } : {}),
@@ -591,13 +600,26 @@ export function removeSceneLight(lighting: SceneLighting, index: number): SceneL
 /** The authored gradient as an {@link EnvironmentLight} the rasteriser samples. */
 export function sceneLightingEnvironment(lighting: SceneLighting): EnvironmentLight {
   const grid = lighting.lightProbes ? decodedProbes(lighting.lightProbes) : null;
+  const volume = lighting.probeVolume ? decodedVolume(lighting.probeVolume) : null;
   return {
     sky: lighting.environment.sky,
     horizon: lighting.environment.horizon,
     ground: lighting.environment.ground,
     intensity: lighting.environment.intensity,
     ...(grid ? { lightProbes: grid } : {}),
+    ...(volume ? { probeVolume: volume } : {}),
   };
+}
+
+const decodedVolumes = new WeakMap<StoredProbeVolume, ProbeVolume | null>();
+/** A stored probe volume (F3d-3), decoded once per stored object. */
+function decodedVolume(stored: StoredProbeVolume): ProbeVolume | null {
+  let volume = decodedVolumes.get(stored);
+  if (volume === undefined) {
+    volume = decodeProbeVolume(stored);
+    decodedVolumes.set(stored, volume);
+  }
+  return volume;
 }
 
 const decoded = new WeakMap<StoredLightProbes, LightProbeGrid | null>();

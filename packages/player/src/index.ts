@@ -157,11 +157,12 @@ export {
   LIGHTMAP_MAX_BOUNCES,
   LIGHTMAP_MAX_LIGHTS,
   bakeLightmapGpu,
+  bakeProbeVolumeGpu,
   type BakeLight,
   type GpuLightBakeOptions,
   type GpuLightmapBake,
 } from "./render/gpuLightmapper.js";
-export { environmentPanorama, type LinearPanorama } from "./render/ibl.js";
+export { environmentPanorama, environmentSh, shIrradiance, type LinearPanorama } from "./render/ibl.js";
 export { WEBGL_INSTANCES_PER_DRAW, WEBGL_MAX_LIGHTS, WebglSceneRenderer, type GlContextProvider } from "./render/WebglSceneRenderer.js";
 export {
   DEFAULT_AMBIENT,

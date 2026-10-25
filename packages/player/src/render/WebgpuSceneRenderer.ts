@@ -80,6 +80,12 @@ import {
   resolveRefraction,
   LIGHTMAP_DIRECTION_FLOOR,
   LIGHTMAP_RANGE,
+  PROBE_DEPTH_SIDE,
+  PROBE_NORMAL_BIAS,
+  PROBE_SH,
+  PROBE_VOLUME_SLOTS,
+  probeVolumeTexels,
+  type ProbeVolume,
   MAX_REFLECTION_PROBES,
   PROBE_FADE,
   FOG_GLOW_POWER,
@@ -816,6 +822,72 @@ fn probeLight(P: vec3<f32>, N: vec3<f32>) -> vec3<f32> {
        + w.y * probeFace(select(3, 2, nn.y >= 0.0), i, f)
        + w.z * probeFace(select(5, 4, nn.z >= 0.0), i, f);
 }
+${hdr ? /* wgsl */ `
+// --- The probe volume (F3d-3; probeVolume.ts, whose sampleProbeVolume this mirrors) ---
+// One probe's slot of the volume texture: slots 0–8 its SH (slot 0's alpha its validity, slot 1's its sky
+// visibility), slots 9–40 its octahedral depths, two texels each.
+fn volumeSlot(slot: i32, i: vec3<i32>) -> vec4<f32> {
+  return textureLoad(probeGrid, i + vec3<i32>(slot * i32(frame.probeCount.x + 0.5), 0, 0), 0);
+}
+fn volumeOctTexel(d: vec3<f32>) -> i32 {
+  var e = d.xz / (abs(d.x) + abs(d.y) + abs(d.z));
+  if (d.y < 0.0) { e = (vec2<f32>(1.0) - abs(e.yx)) * select(vec2<f32>(-1.0), vec2<f32>(1.0), e >= vec2<f32>(0.0)); }
+  let uv = e * 0.5 + vec2<f32>(0.5);
+  let x = min(i32(uv.x * ${PROBE_DEPTH_SIDE}.0), ${PROBE_DEPTH_SIDE - 1});
+  let y = min(i32(uv.y * ${PROBE_DEPTH_SIDE}.0), ${PROBE_DEPTH_SIDE - 1});
+  return y * ${PROBE_DEPTH_SIDE} + x;
+}
+// The irradiance (over π) and sky visibility the volume gives P with normal N: the eight probes round it,
+// weighed trilinearly, by a wrapped cosine toward each, and by Chebyshev's bound on each seeing P (DDGI).
+// w < 0 when no probe is valid or sees it.
+fn probeVolumeAt(P: vec3<f32>, N: vec3<f32>) -> vec4<f32> {
+  let n = frame.probeCount.xyz;
+  let spacing = 1.0 / max(frame.probeScale.xyz, vec3<f32>(1e-6));
+  let Pb = P + N * (${PROBE_NORMAL_BIAS} * min(spacing.x, min(spacing.y, spacing.z)));
+  let g = clamp((Pb - frame.probeMin.xyz) * frame.probeScale.xyz, vec3<f32>(0.0), n - vec3<f32>(1.0));
+  let i0 = min(vec3<i32>(floor(g)), vec3<i32>(n + vec3<f32>(0.5)) - vec3<i32>(2));
+  let f = g - vec3<f32>(i0);
+  var sum = vec3<f32>(0.0);
+  var vis = 0.0;
+  var wsum = 0.0;
+  for (var c = 0; c < 8; c = c + 1) {
+    let o = vec3<i32>(c & 1, (c >> 1) & 1, (c >> 2) & 1);
+    let i = i0 + o;
+    let s0 = volumeSlot(0, i);
+    if (s0.w < 0.5) { continue; }
+    let tri = select(vec3<f32>(1.0) - f, f, o == vec3<i32>(1));
+    let at = frame.probeMin.xyz + vec3<f32>(i) * spacing;
+    let to = at - P;
+    let wrap = (dot(to, N) / max(length(to), 1e-6) + 1.0) * 0.5;
+    var w = wrap * wrap + 0.2;
+    let off = Pb - at;
+    let dist = length(off);
+    if (dist > 1e-4) {
+      let k = volumeOctTexel(off / dist);
+      let pair = volumeSlot(${PROBE_SH} + k / 2, i);
+      let m = select(pair.xy, pair.zw, (k & 1) == 1);
+      if (dist > m.x) {
+        let variance = max(m.y - m.x * m.x, 1e-4);
+        let cheb = variance / (variance + (dist - m.x) * (dist - m.x));
+        w = w * cheb * cheb * cheb;
+      }
+    }
+    w = w * tri.x * tri.y * tri.z;
+    if (w <= 1e-6) { continue; }
+    let s1 = volumeSlot(1, i);
+    let e = s0.xyz * 0.282095
+      + (s1.xyz * N.y + volumeSlot(2, i).xyz * N.z + volumeSlot(3, i).xyz * N.x) * 0.488603
+      + (volumeSlot(4, i).xyz * (N.x * N.y) + volumeSlot(5, i).xyz * (N.y * N.z) + volumeSlot(7, i).xyz * (N.x * N.z)) * 1.092548
+      + volumeSlot(6, i).xyz * (0.315392 * (3.0 * N.z * N.z - 1.0))
+      + volumeSlot(8, i).xyz * (0.546274 * (N.x * N.x - N.y * N.y));
+    sum = sum + max(e, vec3<f32>(0.0)) * w;
+    vis = vis + s1.w * w;
+    wsum = wsum + w;
+  }
+  if (wsum <= 1e-6) { return vec4<f32>(0.0, 0.0, 0.0, -1.0); }
+  return vec4<f32>(sum / wsum, vis / wsum);
+}
+` : ""}
 
 
 // --- Layers and relief (HALO_INFINITE_STYLE_ROADMAP.md I4; materialLayers.ts) ---
@@ -1414,7 +1486,21 @@ ${hdr
     let lm0 = textureSample(lmTex, samp, lmUv, 0);
     let lm1 = textureSample(lmTex, samp, lmUv, 1);
     let lmHdr = u.ssaoMeta.z > 1.5;
-    if (lmHdr) { specAo = specAo * lm1.w; }
+    // Baked diffuse light in place of the sky's: the HDR light map's, or, for a surface without a light map,
+    // the probe volume's (F3d-3), with its sky visibility.
+    var baked = lmHdr;
+    var bakedIrr = vec3<f32>(0.0);
+    if (lmHdr) {
+      bakedIrr = lightmapIrradiance(lm0.rgb, lm1.xyz, N, in.normal);
+      specAo = specAo * lm1.w;
+    } else if (u.ssaoMeta.z < 0.5 && frame.probeMin.w > 1.5) {
+      let pv = probeVolumeAt(in.worldPos, N);
+      if (pv.w >= 0.0) {
+        baked = true;
+        bakedIrr = pv.rgb;
+        specAo = specAo * pv.w;
+      }
+    }
     // What the environment's reflection takes, the material's reflectivity scaling it but never past all
     // the light (F11a): reflectivity over 1 (Beaver Creek's water is 1.3) mirrored more than came in at grazing.
     let specK = min(specE * reflectK, vec3<f32>(1.0));
@@ -1436,7 +1522,7 @@ ${reflect ? "    var envSpec = vec3<f32>(0.0);\n    var envSeen = vec3<f32>(0.0)
     var coatV = 0.0;
     if (u.envSky.w > 0.5) {
       ${hdr ? `// The irradiance over the hemisphere (F3a), not the radiance along N; or the light map's (F3d).
-      let irr = select(shIrradiance(skyN), lightmapIrradiance(lm0.rgb, lm1.xyz, N, in.normal), lmHdr);` : "let irr = envColorDir(N);"}
+      let irr = select(shIrradiance(skyN), bakedIrr, baked);` : "let irr = envColorDir(N);"}
       // Brushed metal (I4) reflects about a normal bent across its grain.
       var Rn = N;
       if (aniso != 0.0) {
@@ -1457,7 +1543,7 @@ ${hdr
         amb = amb * (1.0 - coatV) + coatV * prefC * reflectK * ao;
 ${reflect ? "        envSpec = envSpec * (1.0 - coatV) + coatV * prefC * reflectK * ao;\n" : ""}      }
     } else {
-      amb = ${hdr ? "select(toLinear(vec3<f32>(u.light.w)), lightmapIrradiance(lm0.rgb, lm1.xyz, N, in.normal) * kdm, lmHdr)" : "toLinear(vec3<f32>(u.light.w))"} * albedo * ao;
+      amb = ${hdr ? "select(toLinear(vec3<f32>(u.light.w)), bakedIrr * kdm, baked)" : "toLinear(vec3<f32>(u.light.w))"} * albedo * ao;
     }
 ${reflect ? "    let ambRaw = amb;\n" : ""}    // A baked light map (the second UV set) scales the sky/ambient fill by how
     // much of it reaches this point, bounce included — mirroring the CPU path.
@@ -1468,7 +1554,7 @@ ${hdr
   : `    let lmUv = vec2<f32>(in.uv2.x, 1.0 - in.uv2.y);
     let lm = textureSample(lmTex, samp, lmUv).rgb * ${LIGHTMAP_RANGE};
     if (u.ssaoMeta.z > 0.5) { amb = amb * lm; }`}
-    else if (frame.probeMin.w > 0.5) { amb = amb * probeLight(in.worldPos, N); } // EP9: no light map, the probes light it
+    else if (frame.probeMin.w > 0.5 && frame.probeMin.w < 1.5) { amb = amb * probeLight(in.worldPos, N); } // EP9: no light map, the probes light it
     // Screen-space AO darkens only the ambient fill, sampled at this fragment's
     // framebuffer pixel (matching the software path's ssao[di]).
     // (With GTAO, F3c, the slot holds its visibility instead, already in the occlusion above.)
@@ -1882,7 +1968,7 @@ export class WebgpuSceneRenderer implements SceneRenderer {
       atlasBlank: boolean;
       probes: any;
       probesBlank: boolean;
-      probeSource: LightProbeGrid | null;
+      probeSource: LightProbeGrid | ProbeVolume | null;
       /** The sun's GPU cascades (F2a). */
       readonly cascades: CascadeResources;
       readonly makeGroups: (atlas: any, probes: any) => { blank: any; scene: any; opaque: any };
@@ -3685,10 +3771,13 @@ export class WebgpuSceneRenderer implements SceneRenderer {
       this.uploadLocalTiles(this.frameLocalTiles);
       frame.set([1, LOCAL_SHADOW_BIAS, LOCAL_SHADOW_SLOPE_BIAS], 28);
     } else if (local && local.tiles.length > 0) frame.set([1, local.bias, local.slopeBias], 28);
-    const grid = draw.environment?.lightProbes ?? null;
+    // The AAA tier lights by the GPU bake's probe volume where there is one (F3d-3, probeMin.w = 2); else the ambient cubes.
+    const volume = this.hdr ? (draw.environment?.probeVolume ?? null) : null;
+    const grid = volume ?? draw.environment?.lightProbes ?? null;
     if (grid) {
-      this.uploadProbeGrid(grid);
-      frame.set([...grid.min, 1], 32);
+      if (volume) this.uploadProbeTexture(volume, probeVolumeTexels(volume), PROBE_VOLUME_SLOTS);
+      else this.uploadProbeTexture(grid, lightProbeTexels(grid as LightProbeGrid), 6);
+      frame.set([...grid.min, volume ? 2 : 1], 32);
       frame.set([0, 1, 2].map((a) => (grid.counts[a]! - 1) / (grid.max[a]! - grid.min[a]! || 1)), 36);
       frame.set(grid.counts, 40);
     }
@@ -3716,16 +3805,19 @@ export class WebgpuSceneRenderer implements SceneRenderer {
     return { ordered, globalCount, clusters };
   }
 
-  /** Upload a probe grid (EP9) as a 3D texture, once per grid, rebuilding group 1 to point at it. */
-  private uploadProbeGrid(grid: LightProbeGrid): void {
+  /**
+   * Upload a probe grid (EP9) or volume (F3d-3) as a 3D texture, `slots` texels
+   * a probe along x, once per grid, rebuilding group 1 to point at it.
+   */
+  private uploadProbeTexture(grid: LightProbeGrid | ProbeVolume, texels: Float32Array, slots: number): void {
     const groups = this.depthGroups;
     if (groups.probeSource === grid) return;
     const [nx, ny, nz] = grid.counts;
     if (!groups.probesBlank) destroySafely(groups.probes);
-    groups.probes = this.device.createTexture({ size: { width: nx * 6, height: ny, depthOrArrayLayers: nz }, dimension: "3d", format: "rgba32float", usage: 0x04 | 0x02 });
+    groups.probes = this.device.createTexture({ size: { width: nx * slots, height: ny, depthOrArrayLayers: nz }, dimension: "3d", format: "rgba32float", usage: 0x04 | 0x02 });
     groups.probesBlank = false;
     groups.probeSource = grid;
-    this.device.queue.writeTexture({ texture: groups.probes }, lightProbeTexels(grid), { bytesPerRow: nx * 6 * 16, rowsPerImage: ny }, { width: nx * 6, height: ny, depthOrArrayLayers: nz });
+    this.device.queue.writeTexture({ texture: groups.probes }, texels, { bytesPerRow: nx * slots * 16, rowsPerImage: ny }, { width: nx * slots, height: ny, depthOrArrayLayers: nz });
     Object.assign(groups, groups.makeGroups(groups.atlas, groups.probes));
     if (this.msaa) this.msaa.groups = groups.makeGroupsMs(groups.atlas, groups.probes, this.msaa.blank, this.msaa.depth);
   }

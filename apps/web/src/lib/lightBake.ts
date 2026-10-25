@@ -12,7 +12,9 @@
  * tracer that takes the rig's sky and directional lights, emissive surfaces
  * and up to eight bounces, in seconds. Each object then carries the same
  * 8-bit map as before, for every tier, and an HDR directional one the AAA
- * tier lights by.
+ * tier lights by; and the probes become a probe volume (F3d-3: L2 SH with
+ * DDGI's visibility, so what moves isn't lit through walls), from which the
+ * other tiers' ambient cubes are derived.
  */
 
 import {
@@ -20,8 +22,12 @@ import {
   bakeLightProbes,
   bakeLightmap,
   encodeHdrLightmap,
+  ambientCubesFromVolume,
   encodeLightProbes,
+  encodeProbeVolume,
   encodeRgbaPng,
+  LIGHTMAP_RANGE,
+  planProbeVolume,
   lightColor,
   sceneLightingEnvironment,
   planProbeGrid,
@@ -33,7 +39,7 @@ import {
   type Occluder,
   type SceneLighting,
 } from "@cartbox/editor";
-import { LIGHTMAP_MAX_BOUNCES, LIGHTMAP_MAX_LIGHTS, bakeLightmapGpu, environmentPanorama, parseMeshScene, type BakeLight } from "@cartbox/player";
+import { LIGHTMAP_MAX_BOUNCES, LIGHTMAP_MAX_LIGHTS, bakeLightmapGpu, bakeProbeVolumeGpu, environmentPanorama, environmentSh, parseMeshScene, shIrradiance, type BakeLight } from "@cartbox/player";
 
 import { encodeMeshSidecar, setMeshAsset, type MeshSidecar } from "./meshSidecar";
 
@@ -139,11 +145,24 @@ export async function bakeSceneLighting(sidecar: MeshSidecar, options: SceneLigh
     const box = boundsOf(still);
     const min: [number, number, number] = [box.min[0] - 1, box.min[1], box.min[2] - 1];
     const max: [number, number, number] = [box.max[0] + 1, box.max[1] + 2, box.max[2] + 1];
-    const counts = planProbeGrid(min, max, options.probeSpacing ?? 2.5);
-    const grid = bakeLightProbes(min, max, counts, occluders, { rays: options.rays ?? 48, distance: options.distance ?? 7, sun, bounces: options.bounces ?? 1 }, (d) => progress?.(share + d * (1 - share)));
-    // With the sun it was baked under, so the player can relight the bounce as lights move (I17).
-    const bake = sun ? { sun, distance: options.distance ?? 7, bounce: 0.9 } : undefined;
-    next = { ...next, lighting: { ...next.lighting, lightProbes: encodeLightProbes(grid, bake) } };
+    const step = (d: number) => progress?.(share + d * (1 - share));
+    if (gpu) {
+      // On the GPU (F3d-3): a probe volume of L2 SH and visibility for the AAA tier, sixteen rays for each of
+      // the CPU's, and from it the ambient cubes every other tier reads.
+      const counts = planProbeVolume(min, max, options.probeSpacing ?? 2.5);
+      const volume = await bakeProbeVolumeGpu(options.device, min, max, counts, occluders, { rays: (options.rays ?? 48) * 16, bounces: Math.min(LIGHTMAP_MAX_BOUNCES, options.bounces ?? 3), sky: gpu.sky, lights: gpu.lights }, step);
+      const skySh = environmentSh(gpu.sky);
+      const cubes = ambientCubesFromVolume(volume, (n) => shIrradiance(skySh, n), LIGHTMAP_RANGE);
+      next = { ...next, lighting: { ...next.lighting, lightProbes: encodeLightProbes(cubes), probeVolume: encodeProbeVolume(volume) } };
+    } else {
+      const counts = planProbeGrid(min, max, options.probeSpacing ?? 2.5);
+      const grid = bakeLightProbes(min, max, counts, occluders, { rays: options.rays ?? 48, distance: options.distance ?? 7, sun, bounces: options.bounces ?? 1 }, step);
+      // With the sun it was baked under, so the player can relight the bounce as lights move (I17).
+      const bake = sun ? { sun, distance: options.distance ?? 7, bounce: 0.9 } : undefined;
+      // A GPU bake's probe volume no longer matches: it goes.
+      const { probeVolume: _stale, ...lighting } = next.lighting;
+      next = { ...next, lighting: { ...lighting, lightProbes: encodeLightProbes(grid, bake) } };
+    }
   }
   progress?.(1);
   return next;
@@ -168,11 +187,11 @@ function boundsOf(objects: readonly { mesh: MeshAsset; model: ArrayLike<number> 
   return { min, max };
 }
 
-/** Take every baked light map off the scene (the second UV sets go too), and its light probes. */
+/** Take every baked light map off the scene (the second UV sets go too), and its light probes and probe volume. */
 export function clearSceneLighting(sidecar: MeshSidecar): MeshSidecar {
   let next = sidecar;
-  if (sidecar.lighting?.lightProbes) {
-    const { lightProbes: _probes, ...lighting } = sidecar.lighting;
+  if (sidecar.lighting?.lightProbes || sidecar.lighting?.probeVolume) {
+    const { lightProbes: _probes, probeVolume: _volume, ...lighting } = sidecar.lighting;
     next = { ...next, lighting };
   }
   for (const entry of sidecar.meshes) {

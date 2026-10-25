@@ -41,6 +41,7 @@ import { EFFECT_DISTORT_POWER, materialRefracts, refractionOffset, refracts, res
 import { CLEARCOAT_F0, anisotropicD, curvatureOf, materialHasLayers, parallaxRate, parallaxUv, resolveLayers, uvGradients, type ResolvedLayers } from "../model/materialLayers";
 import { type MeshAsset, type MeshBounds, computeSmoothNormals, meshBounds } from "../model/MeshAsset";
 import type { HdrLightmap } from "../model/hdrLightmap";
+import type { ProbeVolume } from "../model/probeVolume";
 
 /** A decoded texture: tightly-packed RGBA rows, `width × height`. */
 export interface DecodedTexture {
@@ -311,6 +312,12 @@ export interface EnvironmentLight {
    * map scales its ambient and sky fill by the grid at its position and normal.
    */
   readonly lightProbes?: LightProbeGrid | null;
+  /**
+   * The GPU bake's probe volume (F3d-3; see probeVolume.ts): on the AAA tier,
+   * a surface without a light map takes its diffuse light from it in place of
+   * the sky's. Every other path reads {@link lightProbes}.
+   */
+  readonly probeVolume?: ProbeVolume | null;
 }
 
 /**

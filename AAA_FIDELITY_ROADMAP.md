@@ -696,8 +696,34 @@ Everything else depends on this track. It contains no visible "feature", but its
         - the red wall's bounce denoised to under 0.6 of the noisy error;
         - a synthetic floor beside a wall in the atlas and the world: noise halved, mean kept, nothing crossing the corner, unbaked texels left alone.
       - F3d-1's suite passes with the finish on.
+  - **F3d-3, baked probe volumes: done** (`model/probeVolume.ts`, `bakeProbeVolumeGpu`). With WebGPU, the editor's bake makes its light probes a probe volume, which the AAA tier lights everything without a light map by: characters, physics bodies, what moves. The other tiers get their ambient cubes derived from the same bake. Without WebGPU, the CPU's ambient cubes are baked as before.
+    - **The bake.** Each probe casts rays over the whole sphere: a Fibonacci set over the bake, turned per probe about the vertical. They run through the same paths as a light map's texels (the tracer's path is now one function, `pathFrom`, shared by both kernels).
+      - The radiance is projected onto L2 SH, convolved with the clamped cosine and over π, as the sky's is (F3a). Unlike a texel's, a probe's light includes the sun on the surfaces it sees: those are what light a mover beside them.
+      - It also keeps the share of the sky's light that reached it.
+      - A probe is dropped as invalid when over 60% of its rays meet the backs of surfaces.
+      - Like DDGI (Majercik et al. 2019), it keeps the mean distance each 8 × 8 octahedral texel's rays travelled, and the mean of its square, capped at 1.5 times the spacing.
+      - The grid is planned at most 49 probes a side (`planProbeVolume`), so the volume texture stays within a 3D texture's width, and 4096 probes in all.
+    - **Storage.** `SceneLighting.probeVolume` stores half floats per probe: 27 SH values, visibility, validity and 128 depth moments. The scene's environment decodes it once per stored object.
+    - **Shading (AAA tier).** The volume rides in the probe grid's own 3D texture (group 1 binding 6), 41 texels a probe along x. `probeMin.w` = 2 marks it, so no binding is added; the fragment stage's storage buffers are all taken.
+      - A surface without a light map blends the eight probes round it, pushed out along its normal by 0.3 of the spacing.
+      - Each probe is weighed trilinearly, by a wrapped cosine toward it (DDGI's (½(1 + cos))² + 0.2), and by Chebyshev's bound on that probe seeing the point, cubed. A bright room's probes therefore don't light a point behind the wall they see.
+      - The result replaces the sky's SH irradiance in the diffuse, and its sky visibility joins the reflection's specular occlusion, as an HDR light map's do (F3d-1).
+      - With no valid probe seeing the point, the sky lights it.
+      - `sampleProbeVolume` is the CPU mirror, and the shader matches it.
+    - **The other tiers' ambient cubes** (`ambientCubesFromVolume`): each face is the probe's irradiance along it over the open sky's (the rig's sky SH), per channel, as a light map's ambient scale is. An invalid probe takes its valid neighbours' mean. The byte variant and the other renderers read only them.
+    - **In the editor.** Sixteen rays a probe for each of the CPU's rays, the same bounces as the light maps. A CPU rebake drops a stale volume, and Clear takes it with the cubes.
+    - *Tests (`probe-volume.test.ts`):*
+      - The plan's axis cap; the octahedral map covers every texel, and its inverse round-trips.
+      - Storage round-trips as halves, and a malformed volume is refused.
+      - The sampling is trilinear between probes that see the point. A wall the bright probes see 1 m off keeps their light from a point behind it (0.3 or more open, under 0.05 walled). Invalid probes are skipped, and null comes back with none.
+      - The ambient cubes are ratios over the sky, and an invalid probe is filled from its neighbours.
+      - On Dawn:
+        - an empty uniform sky gives its radiance every way, all of the sky, and depths at the cap;
+        - a metre above a wide grey floor, the sky is above (±7%), the floor's bounce below at its linear albedo (±15%), half the sky is visible, and the floor reads a metre down;
+        - a probe inside a closed box is dropped;
+        - the renderer lights a floor without a light map as the mirror says, within the reflection's few %, and keeps the light behind the wall, while the byte path is unchanged;
+        - the editor's GPU bake stores the volume and the cubes, the environment hands the volume over, and a CPU rebake or a clear takes it away.
     - *Left for F3d:*
-      - **F3d-3**: baked probe volumes with L2 SH and visibility for what moves. The editor still bakes the CPU's ambient-cube probes.
       - **F3d-4**: local and area lights' bounce, metalness and textured albedo (the bake still takes a textured material's factor × 0.55), and the procedural or imported HDR sky as the player draws it (the bake reads the rig's gradient).
       - Re-baking Lockout and Beaver Creek with HDR maps, which waits on F11a's physical re-light.
       - The CPU bake could take the seam stitching too; it is left byte-identical for now, so `bake:map`'s stored maps don't move.

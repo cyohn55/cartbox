@@ -332,6 +332,24 @@ export {
   type Occluder,
   type SeamSample,
 } from "./model/lightmap";
+export {
+  MAX_PROBE_VOLUME_AXIS,
+  PROBE_DEPTH_SIDE,
+  PROBE_NORMAL_BIAS,
+  PROBE_SH,
+  PROBE_VOLUME_SLOTS,
+  ambientCubesFromVolume,
+  decodeProbeVolume,
+  encodeProbeVolume,
+  octEncode,
+  octTexel,
+  planProbeVolume,
+  probeIrradiance,
+  probeVolumeTexels,
+  sampleProbeVolume,
+  type ProbeVolume,
+  type StoredProbeVolume,
+} from "./model/probeVolume";
 export { LIGHTMAP_DIRECTION_FLOOR, decodeHdrLightmap, directionalIrradiance, encodeHdrLightmap, fromRgbe, toRgbe, type HdrLightmap } from "./model/hdrLightmap";
 export {
   MAX_TERRAIN_LAYERS,
