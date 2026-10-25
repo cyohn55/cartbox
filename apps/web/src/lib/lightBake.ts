@@ -82,19 +82,19 @@ function bakeLights(lighting: SceneLighting): BakeLight[] {
     });
 }
 
-/** The still objects of a scene, as the runtime places them: id, mesh and world matrix. */
-function stillObjects(sidecar: MeshSidecar): { id: string; mesh: MeshAsset; model: ArrayLike<number> }[] {
+/** The still objects of a scene, as the runtime places them: id, mesh, world matrix, and light-map density against the bake's (F3d-2). */
+function stillObjects(sidecar: MeshSidecar): { id: string; mesh: MeshAsset; model: ArrayLike<number>; scale: number }[] {
   const encoded = encodeMeshSidecar(sidecar);
   const scene = encoded ? parseMeshScene(encoded) : null;
   if (!scene) return [];
-  const ids = new Set(sidecar.meshes.map((m) => m.id));
+  const scales = new Map(sidecar.meshes.map((m) => [m.id, m.lightmapScale ?? 1]));
   return scene.instances
     .filter((inst) => {
-      if (inst.pooled || inst.terrain || inst.mesh.skin || !ids.has(inst.id)) return false;
+      if (inst.pooled || inst.terrain || inst.mesh.skin || !scales.has(inst.id)) return false;
       const body = inst.physics?.body;
       return !(body === "dynamic" || body === "kinematic" || body === "character" || inst.physics?.trigger);
     })
-    .map((inst) => ({ id: inst.id, mesh: inst.mesh, model: inst.model }));
+    .map((inst) => ({ id: inst.id, mesh: inst.mesh, model: inst.model, scale: scales.get(inst.id) ?? 1 }));
 }
 
 /** How many of the scene's still objects carry a baked light map, and how many light probes it has. */
@@ -120,7 +120,7 @@ export async function bakeSceneLighting(sidecar: MeshSidecar, options: SceneLigh
   const gpu = options.device && sidecar.lighting ? { sky: environmentPanorama(sceneLightingEnvironment(sidecar.lighting)), lights: bakeLights(sidecar.lighting) } : null;
   for (let i = 0; i < still.length; i += 1) {
     const object = still[i]!;
-    const layout = layoutLightmap(object.mesh, object.model, { density: options.density ?? 4 });
+    const layout = layoutLightmap(object.mesh, object.model, { density: (options.density ?? 4) * object.scale });
     const step = (d: number) => progress?.(((i + d) / still.length) * share);
     if (gpu) {
       // Paths are cheap on the GPU: four for each of the CPU's rays.

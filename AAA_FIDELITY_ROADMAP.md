@@ -671,11 +671,36 @@ Everything else depends on this track. It contains no visible "feature", but its
       - In the renderer, the HDR map's irradiance replaces the sky's linearly and in its colour, its visibility occludes the reflection, an 8-bit map still scales the fill on the AAA tier, and the byte path ignores the HDR map.
       - The editor's scene bake on the GPU gives every still object both maps, and a CPU rebake or a clear takes the HDR one away.
       - `lightmap.test.ts` and the map bakes pass unchanged.
+  - **F3d-2, finishing the bake: done.** The GPU bake's maps are now finished, in order, by dropping texels inside geometry, denoising on the GPU, growing past chart edges, and stitching seams (`gpuLightmapper.ts`, `lightmap.ts`). It replaces F3d-1's two 3×3 blurs. The CPU bake is unchanged.
+    - **Texels inside geometry.**
+      - The BVH now carries the side each triangle faces by its authored normals (`Bvh.front`, the mean of its corners' normals, else its winding's).
+      - The tracer counts a texel's first rays that meet the back of a surface. Past 60% of them (`backfaceLimit`), the texel lies inside something, such as a floor texel under a box's foot, and is dropped.
+      - It is filled from its valid neighbours by the dilation, so the floor beside the box neither darkens nor lets the box's dark inside out. Under a 1 m box at 8 texels a metre, all 64 texels under it are dropped, and the texel just inside its edge reads 0.99 of the one just outside, against 0 when kept.
+      - A floor behind a one-sided wall loses nothing: at most half its rays meet the wall's back.
+    - **The denoiser** is an edge-avoiding à-trous wavelet (Dammertz et al. 2010) in compute: four passes 1, 2, 4 and 8 texels apart, with a B3-spline kernel.
+      - A neighbour is weighed by how near its normal is (to the 32nd power) and how near it lies to this texel's plane, so a corner doesn't blur across.
+      - A neighbour farther in the world than its atlas step allows is skipped: another chart that merely sits beside this one in the atlas.
+      - A neighbour is also weighed by how near its luminance is, against 1.5 standard deviations of this texel's mean. The tracer now sums each path's squared luminance for that variance, prefiltered over the texel's 3×3 as in SVGF, and the variance is filtered through the passes too. A well-converged texel is therefore left nearly as it is.
+      - **Measured** on a sunlit red wall's two-bounce light on the floor: at 8 paths a texel, the error against a 1024-path bake fell to 0.45 of the raw bake's, and at 32 paths to 0.53.
+      - A wider luminance stop blurred more real gradient than it removed noise (4σ over five passes left 0.74 of the error). The cost is a little bias on smooth peaks: the glowing ceiling's view factor at the floor's centre now reads 0.97 of the analytic one, against 0.995 raw.
+    - **Seams.** `lightmapSeams` finds every edge two triangles share in the world that sits in two places in the atlas: two charts' borders, or a curved patch's triangles, each its own chart. It samples each seam about every half texel along its longer side, as four bilinear taps either side.
+      - `stitchLightmapSeams` solves least squares by conjugate gradients, for every channel: the lookups either side agree, and each texel stays near its value (stiffness 0.01).
+      - A hinge between a black floor and a white wall closes from a step of over 0.9 to under 0.1. Texels no seam touches keep their values exactly.
+    - **Texel density per object.** `MeshSidecarEntry.lightmapScale` (¼ to 4×, powers of two, stored only when not 1) multiplies the bake's Detail for that object. The object's lighting panel gains a "Light map detail" slider, so a piece seen up close takes more texels and a far wall fewer.
+    - *Tests (`lightmap-finish.test.ts`):*
+      - Seams are found on a hinge and not on a flat quad, and stitching closes them while leaving untouched texels alone.
+      - The density snaps, survives a save, stores nothing at 1 and scales the baked atlas.
+      - On Dawn:
+        - the box's foot (about 64 texels dropped, the edge kept bright, and dark without the limit);
+        - the one-sided wall (none dropped);
+        - the red wall's bounce denoised to under 0.6 of the noisy error;
+        - a synthetic floor beside a wall in the atlas and the world: noise halved, mean kept, nothing crossing the corner, unbaked texels left alone.
+      - F3d-1's suite passes with the finish on.
     - *Left for F3d:*
-      - **F3d-2**: the à-trous denoiser on the GPU, seam stitching across charts, texel-density control, and treating texels whose rays start inside geometry as invalid, so walls don't leak.
       - **F3d-3**: baked probe volumes with L2 SH and visibility for what moves. The editor still bakes the CPU's ambient-cube probes.
       - **F3d-4**: local and area lights' bounce, metalness and textured albedo (the bake still takes a textured material's factor × 0.55), and the procedural or imported HDR sky as the player draws it (the bake reads the rig's gradient).
       - Re-baking Lockout and Beaver Creek with HDR maps, which waits on F11a's physical re-light.
+      - The CPU bake could take the seam stitching too; it is left byte-identical for now, so `bake:map`'s stored maps don't move.
 - [ ] **F3e. Real-time GI.**
   - **DDGI**: a probe grid whose irradiance and visibility are updated every frame by software ray tracing in compute, against a scene BVH or a global signed distance field.
   - **SSGI** for near-field detail on top.

@@ -317,10 +317,12 @@ export {
   bakeLightmap,
   bakeLightProbes,
   buildBvh,
-  finishLightmapValues,
+  dilateLightmapValues,
   layoutFingerprint,
   layoutLightmap,
+  lightmapSeams,
   lightmapTexels,
+  stitchLightmapSeams,
   withLightmap,
   type Bvh,
   type LightBakeOptions,
@@ -328,6 +330,7 @@ export {
   type LightmapLayoutOptions,
   type LightmapTexels,
   type Occluder,
+  type SeamSample,
 } from "./model/lightmap";
 export { LIGHTMAP_DIRECTION_FLOOR, decodeHdrLightmap, directionalIrradiance, encodeHdrLightmap, fromRgbe, toRgbe, type HdrLightmap } from "./model/hdrLightmap";
 export {

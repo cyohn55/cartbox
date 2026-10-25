@@ -5356,6 +5356,21 @@ declare function environmentPanorama(env: EnvironmentLight): LinearPanorama;
  * tier, and, from the same paths, the 8-bit ambient scale every other tier
  * reads (the irradiance over the open sky's, per channel). Each dispatch is a
  * bounded number of paths, so no submit nears a GPU's watchdog.
+ *
+ * Then it is finished (F3d-2):
+ * - **Invalid texels.** A texel whose first rays mostly hit the backs of
+ *   surfaces (by their authored normals) lies inside something, a floor
+ *   texel under a wall's foot, say. It is dropped and filled from its valid
+ *   neighbours, so it neither darkens the floor beside the wall nor lets the
+ *   light inside it out.
+ * - **Denoising** on the GPU: an edge-avoiding à-trous wavelet (Dammertz et
+ *   al. 2010) of four passes, 1 to 8 texels apart, stopped by the texels'
+ *   normals and planes (so neither a corner nor a neighbouring chart blurs
+ *   in) and by luminance against each texel's own variance, prefiltered over
+ *   its 3×3 (Schied et al.'s SVGF), so a well-converged texel is left nearly
+ *   as it is.
+ * - **Seams** stitched: where one edge in the world sits on two charts, the
+ *   texels along both are nudged (least squares) until the two lookups agree.
  */
 
 /** The most bounces a bake takes, and the most directional lights. */
@@ -5375,12 +5390,21 @@ interface GpuLightBakeOptions {
     readonly sky?: LinearPanorama | null;
     /** The directional lights (at most four) that light the surfaces paths bounce off. */
     readonly lights?: readonly BakeLight[];
+    /** Denoise on the GPU (default true; F3d-2). */
+    readonly denoise?: boolean;
+    /** Stitch the seams between charts (default true; F3d-2). */
+    readonly stitch?: boolean;
+    /** The share of a texel's first rays that may hit backs of surfaces before it counts as inside one (default 0.6; F3d-2). */
+    readonly backfaceLimit?: number;
 }
 /** A finished bake: the HDR directional light map and the 8-bit ambient scale, both `size × size`. */
 interface GpuLightmapBake {
     readonly hdr: HdrLightmap;
     /** RGBA bytes in lightmap.ts's format (× 1/{@link LIGHTMAP_RANGE}). */
     readonly ambient: Uint8ClampedArray;
+    /** Texels dropped as inside geometry, and seam points stitched (F3d-2). */
+    readonly invalid: number;
+    readonly seams: number;
 }
 /**
  * Bake a laid-out mesh's light map on `device` against `occluders` (which

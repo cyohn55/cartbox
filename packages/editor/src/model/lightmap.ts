@@ -236,14 +236,16 @@ export interface Bvh {
   nrm: Float32Array; // face normal per triangle
   col: Float32Array; // albedo per triangle
   emi: Float32Array; // emissive colour per triangle, as authored (the GPU bake's lights, F3d)
+  front: Float32Array; // the side each triangle faces by its authored normals (mean of its corners'; else its winding's), F3d-2
   nodes: Float32Array; // min xyz, max xyz per node
   meta: Int32Array; // per node: left child (or -1 leaf), right/first, count
   order: Int32Array;
 }
 
 export function buildBvh(occluders: readonly Occluder[]): Bvh {
-  const tris: number[] = [], cols: number[] = [], emis: number[] = [];
+  const tris: number[] = [], cols: number[] = [], emis: number[] = [], fronts: number[] = [];
   for (const o of occluders) {
+    const m = o.model;
     o.mesh.primitives.forEach((p, pi) => {
       const f = p.material.baseColorFactor;
       const textured = p.material.baseColorImage ? 0.55 : 1;
@@ -256,6 +258,17 @@ export function buildBvh(occluders: readonly Occluder[]): Bvh {
         }
         cols.push(col[0], col[1], col[2]);
         emis.push(emi[0], emi[1], emi[2]);
+        if (p.normals) {
+          let x = 0, y = 0, z = 0;
+          for (let k = 0; k < 3; k += 1) {
+            const v = p.indices[t + k]!;
+            x += p.normals[v * 3]!;
+            y += p.normals[v * 3 + 1]!;
+            z += p.normals[v * 3 + 2]!;
+          }
+          // Through the model's rotation (uniform scale assumed for baking, as the texels' normals are).
+          fronts.push(...normalize([m[0]! * x + m[4]! * y + m[8]! * z, m[1]! * x + m[5]! * y + m[9]! * z, m[2]! * x + m[6]! * y + m[10]! * z]));
+        } else fronts.push(NaN, NaN, NaN);
       }
     });
   }
@@ -267,6 +280,7 @@ export function buildBvh(occluders: readonly Occluder[]): Bvh {
     const o = i * 9;
     const n = normalize(cross([tri[o + 3]! - tri[o]!, tri[o + 4]! - tri[o + 1]!, tri[o + 5]! - tri[o + 2]!], [tri[o + 6]! - tri[o]!, tri[o + 7]! - tri[o + 1]!, tri[o + 8]! - tri[o + 2]!]));
     nrm.set(n, i * 3);
+    if (Number.isNaN(fronts[i * 3]!)) fronts.splice(i * 3, 3, n[0], n[1], n[2]);
     for (let a = 0; a < 3; a += 1) centre[i * 3 + a] = (tri[o + a]! + tri[o + 3 + a]! + tri[o + 6 + a]!) / 3;
   }
   const order = new Int32Array(count).map((_, i) => i);
@@ -315,7 +329,7 @@ export function buildBvh(occluders: readonly Occluder[]): Bvh {
     return node;
   };
   if (count > 0) build(0, count);
-  return { tri, nrm, col: new Float32Array(cols), emi: new Float32Array(emis), nodes: new Float32Array(nodes), meta: new Int32Array(meta), order };
+  return { tri, nrm, col: new Float32Array(cols), emi: new Float32Array(emis), front: new Float32Array(fronts), nodes: new Float32Array(nodes), meta: new Int32Array(meta), order };
 }
 
 /** Closest hit along a ray within tMax: the triangle index, or -1. `out[0]` = distance. */
@@ -790,6 +804,157 @@ function dilate(value: Float32Array, chartId: Int32Array, size: number, steps: n
     if (filled[i]) continue;
     value[i * 3] = value[i * 3 + 1] = value[i * 3 + 2] = 1;
   }
+}
+
+/**
+ * Grow baked values (`stride` floats per atlas texel) out from the texels
+ * `filled` marks (≥ 0) into the rest, `steps` texels deep (the charts' padding
+ * by default), so bilinear filtering never pulls in an unbaked texel. Texels
+ * never reached read 1, as open sky.
+ */
+export function dilateLightmapValues(value: Float32Array, filled: Int32Array, size: number, stride = 3, steps = PAD + 1): void {
+  if (stride === 3) {
+    dilate(value, filled, size, steps);
+    return;
+  }
+  // One channel triple at a time: dilate's own layout.
+  const triple = new Float32Array(size * size * 3);
+  for (let c = 0; c < stride; c += 3) {
+    const n = Math.min(3, stride - c);
+    for (let i = 0; i < size * size; i += 1) for (let k = 0; k < n; k += 1) triple[i * 3 + k] = value[i * stride + c + k]!;
+    dilate(triple, filled, size, steps);
+    for (let i = 0; i < size * size; i += 1) for (let k = 0; k < n; k += 1) value[i * stride + c + k] = triple[i * 3 + k]!;
+  }
+}
+
+// --- Seam stitching (F3d-2) -----------------------------------------------------
+
+/** One point on a seam: the four bilinear taps either side (texel indices and weights; B's weights negated). */
+export interface SeamSample {
+  readonly taps: Int32Array;
+  readonly weights: Float32Array;
+}
+
+/** The bilinear taps of a light-map lookup at atlas texel coordinates (x, y), as a GPU's linear filter takes them. */
+function bilinearTaps(x: number, y: number, size: number, sign: number, taps: Int32Array, weights: Float32Array, at: number): void {
+  const fx = x - 0.5, fy = y - 0.5;
+  const x0 = Math.floor(fx), y0 = Math.floor(fy);
+  const tx = fx - x0, ty = fy - y0;
+  const clampX = (v: number) => Math.min(size - 1, Math.max(0, v));
+  let k = at;
+  for (const [dx, dy, w] of [[0, 0, (1 - tx) * (1 - ty)], [1, 0, tx * (1 - ty)], [0, 1, (1 - tx) * ty], [1, 1, tx * ty]] as const) {
+    taps[k] = clampX(y0 + dy) * size + clampX(x0 + dx);
+    weights[k] = w * sign;
+    k += 1;
+  }
+}
+
+/**
+ * Where a laid-out mesh's light map has seams: an edge two triangles share in
+ * the world that sits in two places in the atlas (two charts' borders, or a
+ * curved patch's triangles, each its own chart). Each seam is sampled about
+ * every half texel along its longer side.
+ */
+export function lightmapSeams(layout: LightmapLayout): SeamSample[] {
+  const { size, model } = layout;
+  const key = (p: V3) => p.map((v) => Math.round(v * 1e4)).join(",");
+  const edges = new Map<string, { a: readonly [number, number]; b: readonly [number, number] }[]>();
+  const samples: SeamSample[] = [];
+  for (const p of layout.mesh.primitives) {
+    const uv2 = p.uvs2;
+    if (!uv2) continue;
+    const texel = (i: number) => [uv2[i * 2]! * size, (1 - uv2[i * 2 + 1]!) * size] as const;
+    const world = (i: number) => transform(model, p.positions[i * 3]!, p.positions[i * 3 + 1]!, p.positions[i * 3 + 2]!);
+    for (let t = 0; t < p.indices.length; t += 3) {
+      for (let e = 0; e < 3; e += 1) {
+        const i = p.indices[t + e]!, j = p.indices[t + ((e + 1) % 3)]!;
+        let ka = key(world(i)), kb = key(world(j));
+        let a = texel(i), b = texel(j);
+        // The same edge either way round: its ends in a fixed order.
+        if (ka > kb) [ka, kb, a, b] = [kb, ka, b, a];
+        const k = `${ka}|${kb}`;
+        if (ka === kb) continue;
+        const list = edges.get(k) ?? [];
+        for (const other of list) {
+          const apart = Math.max(Math.abs(other.a[0] - a[0]), Math.abs(other.a[1] - a[1]), Math.abs(other.b[0] - b[0]), Math.abs(other.b[1] - b[1]));
+          if (apart < 1e-3) continue; // the same place in the atlas: no seam
+          const n = Math.max(2, Math.ceil(Math.max(Math.hypot(a[0] - b[0], a[1] - b[1]), Math.hypot(other.a[0] - other.b[0], other.a[1] - other.b[1])) * 2));
+          for (let s = 0; s < n; s += 1) {
+            const f = (s + 0.5) / n;
+            const taps = new Int32Array(8);
+            const weights = new Float32Array(8);
+            bilinearTaps(a[0] + (b[0] - a[0]) * f, a[1] + (b[1] - a[1]) * f, size, 1, taps, weights, 0);
+            bilinearTaps(other.a[0] + (other.b[0] - other.a[0]) * f, other.a[1] + (other.b[1] - other.a[1]) * f, size, -1, taps, weights, 4);
+            samples.push({ taps, weights });
+          }
+        }
+        list.push({ a, b });
+        edges.set(k, list);
+      }
+    }
+  }
+  return samples;
+}
+
+/**
+ * Stitch a light map's seams (F3d-2): nudge the texels along them, least
+ * squares, so a lookup either side of each seam reads alike while every texel
+ * stays near its baked value (`stiffness` weighs that: lower closes seams
+ * harder). Solved by conjugate gradients, for each of the `stride` channels
+ * of `value` in place. Returns the seam points it stitched.
+ */
+export function stitchLightmapSeams(layout: LightmapLayout, value: Float32Array, stride = 3, options: { readonly stiffness?: number; readonly iterations?: number; readonly seams?: readonly SeamSample[] } = {}): number {
+  const samples = options.seams ?? lightmapSeams(layout);
+  if (samples.length === 0) return 0;
+  const lambda = options.stiffness ?? 0.01;
+  const iterations = options.iterations ?? 128;
+  // The texels the seams touch are the unknowns; the rest stay as baked.
+  const index = new Map<number, number>();
+  for (const s of samples) for (const t of s.taps) if (!index.has(t)) index.set(t, index.size);
+  const texels = [...index.keys()];
+  const rows = samples.map((s) => ({ cols: Int32Array.from(s.taps, (t) => index.get(t)!), weights: s.weights }));
+  const n = texels.length;
+  // A · x = λx + Cᵀ(C x).
+  const apply = (x: Float64Array, out: Float64Array) => {
+    for (let i = 0; i < n; i += 1) out[i] = lambda * x[i]!;
+    for (const r of rows) {
+      let c = 0;
+      for (let k = 0; k < 8; k += 1) c += r.weights[k]! * x[r.cols[k]!]!;
+      for (let k = 0; k < 8; k += 1) out[r.cols[k]!] = out[r.cols[k]!]! + r.weights[k]! * c;
+    }
+  };
+  const x = new Float64Array(n), b = new Float64Array(n), r = new Float64Array(n), p = new Float64Array(n), ap = new Float64Array(n);
+  for (let ch = 0; ch < stride; ch += 1) {
+    for (let i = 0; i < n; i += 1) {
+      x[i] = value[texels[i]! * stride + ch]!;
+      b[i] = lambda * x[i]!;
+    }
+    apply(x, ap);
+    let rr = 0;
+    for (let i = 0; i < n; i += 1) {
+      r[i] = b[i]! - ap[i]!;
+      p[i] = r[i]!;
+      rr += r[i]! * r[i]!;
+    }
+    for (let it = 0; it < iterations && rr > 1e-14; it += 1) {
+      apply(p, ap);
+      let pap = 0;
+      for (let i = 0; i < n; i += 1) pap += p[i]! * ap[i]!;
+      if (pap <= 0) break;
+      const alpha = rr / pap;
+      let next = 0;
+      for (let i = 0; i < n; i += 1) {
+        x[i] = x[i]! + alpha * p[i]!;
+        r[i] = r[i]! - alpha * ap[i]!;
+        next += r[i]! * r[i]!;
+      }
+      const beta = next / rr;
+      rr = next;
+      for (let i = 0; i < n; i += 1) p[i] = r[i]! + beta * p[i]!;
+    }
+    for (let i = 0; i < n; i += 1) value[texels[i]! * stride + ch] = x[i]!;
+  }
+  return samples.length;
 }
 
 /** The light map as a PNG, and the laid-out mesh with it on every material. */
