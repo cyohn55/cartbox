@@ -476,7 +476,7 @@ Everything else depends on this track. It contains no visible "feature", but its
         - the allocator never hands a block out twice.
       - On Dawn: a spot light and a point light each shade the floor under a box the camera never draws to under 15% of its light, and leave the floor beside it as lit as without the box (both fail with the test returning lit).
       - `shadowCascade.test.ts`: the AAA player hands over its casters for a rig with a casting point light, and none without one.
-- [ ] **F2e. Physical lights.**
+- [x] **F2e. Physical lights.** (IES with F9d, GPU clustering with F0e, area-light shadows later.)
   - Inverse-square falloff, with a range window for culling only.
   - Area lights (rectangle, disk, tube) with **LTC** (linearly transformed cosines).
   - IES profiles, imported in F9d.
@@ -502,10 +502,34 @@ Everything else depends on this track. It contains no visible "feature", but its
       - the software rasteriser's channels;
       - the bounce lights.
       - Both `webgpu-parity.test.ts` and `webgl-parity.test.ts` gain a scene with warm and cool lights on split channels, one mesh on two masks, against the software rasteriser.
+  - **F2e-2, area lights: done.** `SceneLight.kind: "area"` is a rectangle, a disk or a tube (`shape`, `size` in metres, `tangent`), glowing with a luminance (it reads in nits).
+    - **On the linear-light shader** it is shaded with linearly transformed cosines (Heitz, Dupuy, Hill and Neubelt 2016; `render/ltc.ts`).
+      - The fitted GGX tables are Heitz's, as three.js ships them (MIT). They are stored as half floats (`ltcTables.ts`) and read bilinearly from a storage buffer at group 1 binding 10, as the fragment stage's 16 sampled textures are all bound.
+      - The diffuse is the polygon's form factor times the albedo and the luminance, with no 1/π, as the renderer's diffuse carries none. When the polygon is wholly above the horizon the form factor is exact; otherwise it is Heitz's clipped sphere.
+      - The specular is the lobe's integral, scaled by the fitted norm and Fresnel terms (Karis's split), times the multiple-scattering compensation (F1c). The lobe always takes the clipped sphere, as its tables were fitted to be read: read exactly, it comes out up to 23% off a brute-force integral.
+      - The shapes:
+        - a rectangle is its four corners;
+        - a disk is an area-matched octagon;
+        - a tube is the rectangle through its axis that faces the point, a cap's worth (πr/4) longer each end.
+      - A rectangle and a disk light only the side they face; a tube lights all round.
+    - **Everywhere else** an area light is the punctual light it is from far off (`areaAsPunctual`, `editor/render/areaLights.ts`). This covers the software rasteriser, WebGL2, the byte-space WebGPU shader and the probe relight.
+      - A rectangle or disk becomes a spot of L·A/π, inverse square, with an 89° cone and no inner part. The cone's fade is within 0.1 of a Lambertian emitter's cosine.
+      - A tube becomes a point of L × its side-on area / π.
+      - Far off, the LTC diffuse is the same light, within 1%.
+    - **The light record** grows to five vec4s (`LIGHT_FLOATS` 20): d4.xyz is the tangent, d2.yz the half size, d3.xyz the lit face's normal, and kinds 3, 4 and 5 are rectangle, disk and tube. Area lights cast no shadows yet.
+    - **Authoring:** the Lighting panel adds an Area kind, with its shape (Panel, Disk, Tube), size, facing and tangent, and luminance in nits in physical units.
+    - *Tests:* `area-lights.test.ts` covers:
+      - the CPU mirror: a rectangle's diffuse against the closed form, both under it and off to one side, and a disk's against R²/(R² + h²); the lobe within 5% of a brute-force GGX integral, across roughness and view;
+      - lighting from the faced side only, and a tube from any side;
+      - the far-off equivalence with the punctual light;
+      - packing and the save;
+      - on Dawn, the shader within 2% of the mirror for each shape, dielectric and metal, and dark behind a rectangle.
+      - A thin tube under a tight lobe is left out of the Dawn test: there the highlight moves 4.5% a centimetre, and f32 lands about 5% off f64.
+      - The parity scenes on WebGPU and WebGL2 carry an area light, shaded as its punctual light, against the software rasteriser.
   - **Still to do:**
-    - Area lights with LTC are next, as F2e-2.
     - IES profiles wait on their importer (F9d).
     - GPU clustering is F0e's.
+    - Area-light shadows.
 - [ ] **F2f. Emissive surfaces that light.** Emissive meshes contribute through GI (F3d and F3e), so the energy trim on a Forerunner wall lights the floor in front of it.
 
 ### F3. Global illumination and reflections

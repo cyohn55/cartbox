@@ -20,6 +20,7 @@ import { parseWind, type SceneWind } from "./wind";
 import { decodeLightProbes, type LightProbeGrid, type StoredLightProbes } from "./lightProbes";
 import { readAutoExposure, readPostVolumes, type AutoExposure, type PostVolume } from "./postVolumes";
 import { MAX_LIGHT_TEMPERATURE, MIN_LIGHT_TEMPERATURE } from "../render/lightTemperature";
+import { areaSize } from "../render/areaLights";
 import {
   lightChannelMask,
   orthographicMatrix,
@@ -166,7 +167,7 @@ function clampTriple(value: readonly [number, number, number]): [number, number,
 /** Read one authored light defensively, dropping anything malformed to a default. */
 function parseLight(value: unknown): SceneLight | null {
   const raw = (value ?? {}) as Record<string, unknown>;
-  const kind = raw.kind === "point" ? "point" : raw.kind === "spot" ? "spot" : raw.kind === "directional" ? "directional" : null;
+  const kind = raw.kind === "point" ? "point" : raw.kind === "spot" ? "spot" : raw.kind === "directional" ? "directional" : raw.kind === "area" ? "area" : null;
   if (!kind) return null;
   const color = isFiniteTriple(raw.color) ? clampTriple(raw.color) : ([1, 1, 1] as [number, number, number]);
   const intensity = typeof raw.intensity === "number" && Number.isFinite(raw.intensity) ? Math.max(0, raw.intensity) : 1;
@@ -184,6 +185,15 @@ function parseLight(value: unknown): SceneLight | null {
   const position = isFiniteTriple(raw.position) ? raw.position : ([0, 1, 0] as [number, number, number]);
   const range = typeof raw.range === "number" && Number.isFinite(raw.range) ? Math.max(0, raw.range) : 0;
   const falloff = raw.falloff === "inverseSquare" ? { falloff: "inverseSquare" as const } : {};
+  if (kind === "area") {
+    // An area light (F2e-2): its shape, size and frame; it falls off physically, and casts no shadows.
+    const shape = raw.shape === "disk" || raw.shape === "tube" ? raw.shape : "rect";
+    const pair = Array.isArray(raw.size) && raw.size.length === 2 && raw.size.every((n) => typeof n === "number" && Number.isFinite(n)) ? (raw.size as [number, number]) : ([1, 0.5] as [number, number]);
+    const size = areaSize({ shape, size: [Math.min(100, pair[0]), Math.min(100, pair[1])] });
+    const direction = isFiniteTriple(raw.direction) ? raw.direction : ([0, -1, 0] as [number, number, number]);
+    const tangent = isFiniteTriple(raw.tangent) ? { tangent: raw.tangent } : {};
+    return { kind, shape, size: [size[0], size[1]], position, direction, ...tangent, color, intensity, range, ...physical };
+  }
   if (kind === "spot") {
     const direction = isFiniteTriple(raw.direction) ? raw.direction : ([0, -1, 0] as [number, number, number]);
     const angle = (v: unknown, fallback: number) => (typeof v === "number" && Number.isFinite(v) ? Math.min(89, Math.max(0, v)) : fallback);

@@ -379,6 +379,7 @@ struct Light {
   vec4 d1;
   vec4 d2;
   vec4 d3;
+  vec4 d4; // an area light's tangent (F2e-2; the WebGL2 path packs area lights as punctual ones)
 };
 // Clustered lights (EP8): per cell (offset, count) in an RG32UI table
 // (x = tile, y = slice), the indices in an R32UI list 1024 wide; params = tile

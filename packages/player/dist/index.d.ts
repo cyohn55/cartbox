@@ -5322,19 +5322,27 @@ declare const UNIFORM_BYTES_USED = 944;
 /** The same stride counted in float32s, which is how `writeBuffer` sizes it. */
 declare const UNIFORM_FLOATS: number;
 /**
- * Floats per light in the storage buffer: four vec4s —
- *   d0: xyz = direction (directional) or world position (point, spot), w = kind (0 directional, 1 point, 2 spot)
- *   d1: rgb = colour, w = intensity
- *   d2: x = range (0 = no falloff), y = spot cone's outer cosine, z = its inner cosine,
- *       w = first shadow tile (EP8c), −1 when it casts none
- *   d3: xyz = spot beam axis (unit, the way it points), w = 1 for inverse-square
- *       falloff, plus twice its lighting channels (F2e), the bits a draw's must share
+ * Floats per light in the storage buffer: five vec4s —
+ *   d0: xyz = direction (directional) or world position (point, spot; an area
+ *       light's centre), w = kind (0 directional, 1 point, 2 spot; 3, 4, 5 an
+ *       area rectangle, disk or tube, F2e-2)
+ *   d1: rgb = colour, w = intensity (an area light's luminance)
+ *   d2: x = range (0 = no falloff), y = spot cone's outer cosine, z = its inner cosine
+ *       (an area light's half width and half height: a disk's radius twice, a
+ *       tube's half length and radius), w = first shadow tile (EP8c), −1 when it casts none
+ *   d3: xyz = spot beam axis (unit, the way it points; the way an area light's lit
+ *       face looks), w = 1 for inverse-square falloff, plus twice its lighting
+ *       channels (F2e), the bits a draw's must share
+ *   d4: xyz = an area light's tangent (its width axis, a tube's length)
  * Matches the `Light` struct in the WGSL and GLSL scene shaders.
  */
-declare const LIGHT_FLOATS = 16;
+declare const LIGHT_FLOATS = 20;
 /** A minimal light for {@link packLights} (mirrors editor's SceneLight). */
 interface PackableLight {
-    readonly kind: "directional" | "point" | "spot";
+    readonly kind: "directional" | "point" | "spot" | "area";
+    readonly shape?: "rect" | "disk" | "tube";
+    readonly size?: readonly [number, number];
+    readonly tangent?: readonly [number, number, number];
     readonly direction?: readonly [number, number, number];
     readonly position?: readonly [number, number, number];
     readonly color: readonly [number, number, number];
@@ -5350,9 +5358,11 @@ interface PackableLight {
 /**
  * Pack a light list into the storage-buffer layout the WGSL loop reads. Always
  * returns at least one (zeroed) light so the binding is never empty; the draw's
- * `lightCount` uniform, not the buffer length, bounds the loop.
+ * `lightCount` uniform, not the buffer length, bounds the loop. With `area`
+ * false (every shader but the linear-light one), an area light (F2e-2) packs
+ * as the punctual light it is from far off.
  */
-declare function packLights(lights: readonly PackableLight[]): Float32Array;
+declare function packLights(lights: readonly PackableLight[], area?: boolean): Float32Array;
 /** The rasteriser's defaults, restated so an unlit draw shades identically. */
 declare const DEFAULT_LIGHT: readonly [number, number, number];
 declare const DEFAULT_AMBIENT = 0.35;

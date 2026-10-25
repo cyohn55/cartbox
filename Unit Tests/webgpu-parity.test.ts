@@ -713,6 +713,8 @@ describe.skipIf(!device)(`WebGPU parity on a real device${prepass ? ", after a d
       { kind: "directional" as const, direction: [0.3, 0.6, 1] as const, color: [1, 1, 1] as const, intensity: 0.7, temperature: 9000, channels: 3 },
       { kind: "point" as const, position: [-0.9, 0.5, 1.5] as const, color: [1, 1, 1] as const, intensity: 3, range: 6, temperature: 2700 },
       { kind: "point" as const, position: [0.9, 0.5, 1.5] as const, color: [1, 1, 1] as const, intensity: 3, range: 6, temperature: 4000, channels: 4 },
+      // An area light (F2e-2), which this shader shades as the punctual light it is from far off.
+      { kind: "area" as const, shape: "rect" as const, size: [1, 0.5] as const, position: [0, 1.2, 1] as const, direction: [0, -0.6, -0.8] as const, color: [1, 1, 1] as const, intensity: 4, range: 8, channels: 3 },
     ];
     const withLights = (): SceneDraw => ({ ...draw(), lights });
     renderer.render(instances, withLights());

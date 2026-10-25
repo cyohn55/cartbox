@@ -246,6 +246,8 @@ function scenes(): Record<string, Scene> {
             { kind: "directional", direction: [0.3, 1, 0.2], color: [1, 1, 1], intensity: 0.6, temperature: 9000, channels: 3 },
             { kind: "point", position: [-1.5, 1.2, 0.5], color: [1, 1, 1], intensity: 3, range: 5, temperature: 2700 },
             { kind: "point", position: [1.5, 1.2, 0.5], color: [1, 0.9, 0.9], intensity: 3, range: 5, temperature: 4000, channels: 4 },
+            // An area light (F2e-2), shaded here as the punctual light it is from far off.
+            { kind: "area", shape: "disk", size: [0.8, 0.8], position: [0, 1.5, 0], direction: [0, -1, 0], color: [1, 1, 1], intensity: 4, range: 6, channels: 3 },
           ],
         }),
       };
