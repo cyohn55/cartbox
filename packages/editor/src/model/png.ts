@@ -353,12 +353,19 @@ async function zlibInflate(bytes: Uint8Array): Promise<Uint8Array> {
   return concat(chunks);
 }
 
-/**
- * Decode a non-interlaced PNG of 8 or 16 bits per channel (greyscale, grey +
- * alpha, RGB or RGBA) to its first channel — what a heightmap needs. Throws
- * on anything else (palettes, interlacing, low bit depths) or a damaged file.
- */
-export async function decodePngSamples(bytes: Uint8Array): Promise<PngSamples> {
+/** A decoded PNG's unfiltered scanlines: `height` rows of `width × channels` samples at `depth` bits. */
+interface PngRows {
+  readonly width: number;
+  readonly height: number;
+  readonly channels: number;
+  readonly depth: number;
+  /** The rows back to back, filters undone (big-endian samples at 16 bits). */
+  readonly rows: Uint8Array;
+  readonly text: Readonly<Record<string, string>>;
+}
+
+/** Undo a non-interlaced PNG of 8 or 16 bits per channel (greyscale, grey + alpha, RGB or RGBA) to its rows. */
+async function decodePngRows(bytes: Uint8Array): Promise<PngRows> {
   if (bytes.length < 8 || PNG_SIGNATURE.some((b, i) => bytes[i] !== b)) throw new Error("Not a PNG file");
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
   let width = 0, height = 0, depth = 0, type = -1, interlace = 0;
@@ -389,12 +396,13 @@ export async function decodePngSamples(bytes: Uint8Array): Promise<PngSamples> {
   const stride = width * bpp;
   const raw = await zlibInflate(concat(idat));
   if (raw.length < height * (stride + 1)) throw new Error("Truncated PNG data");
-  const cur = new Uint8Array(stride);
-  const prev = new Uint8Array(stride);
-  const values = new Float32Array(width * height);
+  const rows = new Uint8Array(height * stride);
+  const zero = new Uint8Array(stride);
   for (let y = 0; y < height; y += 1) {
     const o = y * (stride + 1);
     const filter = raw[o]!;
+    const cur = rows.subarray(y * stride, (y + 1) * stride);
+    const prev = y > 0 ? rows.subarray((y - 1) * stride, y * stride) : zero;
     for (let x = 0; x < stride; x += 1) {
       const a = x >= bpp ? cur[x - bpp]! : 0;
       const b = prev[x]!;
@@ -402,8 +410,40 @@ export async function decodePngSamples(bytes: Uint8Array): Promise<PngSamples> {
       const r = raw[o + 1 + x]!;
       cur[x] = (r + (filter === 0 ? 0 : filter === 1 ? a : filter === 2 ? b : filter === 3 ? (a + b) >> 1 : paeth(a, b, c))) & 0xff;
     }
-    for (let x = 0; x < width; x += 1) values[y * width + x] = depth === 16 ? ((cur[x * bpp]! << 8) | cur[x * bpp + 1]!) / 65535 : cur[x * bpp]! / 255;
-    prev.set(cur);
   }
+  return { width, height, channels, depth, rows, text };
+}
+
+/**
+ * Decode a non-interlaced PNG of 8 or 16 bits per channel (greyscale, grey +
+ * alpha, RGB or RGBA) to its first channel — what a heightmap needs. Throws
+ * on anything else (palettes, interlacing, low bit depths) or a damaged file.
+ */
+export async function decodePngSamples(bytes: Uint8Array): Promise<PngSamples> {
+  const { width, height, channels, depth, rows, text } = await decodePngRows(bytes);
+  const bpp = channels * (depth / 8);
+  const values = new Float32Array(width * height);
+  for (let i = 0; i < width * height; i += 1) values[i] = depth === 16 ? ((rows[i * bpp]! << 8) | rows[i * bpp + 1]!) / 65535 : rows[i * bpp]! / 255;
   return { width, height, values, text };
+}
+
+/**
+ * Decode an 8-bit PNG to straight RGBA bytes, exactly as stored: no colour
+ * management and no premultiplied alpha, which a browser's decode applies and
+ * which would wreck data kept in the alpha channel (an HDR light map's
+ * exponent, hdrLightmap.ts). Grey and RGB gain opaque alpha.
+ */
+export async function decodePngRgba(bytes: Uint8Array): Promise<{ width: number; height: number; data: Uint8Array }> {
+  const { width, height, channels, depth, rows } = await decodePngRows(bytes);
+  if (depth !== 8) throw new Error("Unsupported PNG (needs 8 bits per channel)");
+  const data = new Uint8Array(width * height * 4);
+  for (let i = 0; i < width * height; i += 1) {
+    const s = i * channels;
+    const grey = channels <= 2;
+    data[i * 4] = rows[s]!;
+    data[i * 4 + 1] = grey ? rows[s]! : rows[s + 1]!;
+    data[i * 4 + 2] = grey ? rows[s]! : rows[s + 2]!;
+    data[i * 4 + 3] = channels === 2 ? rows[s + 1]! : channels === 4 ? rows[s + 3]! : 255;
+  }
+  return { width, height, data };
 }

@@ -153,6 +153,15 @@ export type { PresentBase, PresentFrame, PresentSky, PresentStats } from "./rend
 export { GpuCanvasSurface, framePixels, type CapturedFrame } from "./render/GpuCanvasSurface.js";
 export { createSceneRenderer } from "./render/createSceneRenderer.js";
 export { WebgpuSceneRenderer } from "./render/WebgpuSceneRenderer.js";
+export {
+  LIGHTMAP_MAX_BOUNCES,
+  LIGHTMAP_MAX_LIGHTS,
+  bakeLightmapGpu,
+  type BakeLight,
+  type GpuLightBakeOptions,
+  type GpuLightmapBake,
+} from "./render/gpuLightmapper.js";
+export { environmentPanorama, type LinearPanorama } from "./render/ibl.js";
 export { WEBGL_INSTANCES_PER_DRAW, WEBGL_MAX_LIGHTS, WebglSceneRenderer, type GlContextProvider } from "./render/WebglSceneRenderer.js";
 export {
   DEFAULT_AMBIENT,

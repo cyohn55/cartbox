@@ -6,12 +6,24 @@
  * move (skinned characters, physics bodies that move, prefab copies held in
  * reserve) and triggers are neither lit nor block the light, as in the
  * navigation bake.
+ *
+ * Where the browser has WebGPU, the GPU lightmapper bakes instead
+ * (AAA_FIDELITY_ROADMAP.md F3d; gpuLightmapper.ts in @cartbox/player): a path
+ * tracer that takes the rig's sky and directional lights, emissive surfaces
+ * and up to eight bounces, in seconds. Each object then carries the same
+ * 8-bit map as before, for every tier, and an HDR directional one the AAA
+ * tier lights by.
  */
 
 import {
+  applyLightmapImage,
   bakeLightProbes,
   bakeLightmap,
+  encodeHdrLightmap,
   encodeLightProbes,
+  encodeRgbaPng,
+  lightColor,
+  sceneLightingEnvironment,
   planProbeGrid,
   deserializeMeshAsset,
   layoutLightmap,
@@ -19,8 +31,9 @@ import {
   withLightmap,
   type MeshAsset,
   type Occluder,
+  type SceneLighting,
 } from "@cartbox/editor";
-import { parseMeshScene } from "@cartbox/player";
+import { LIGHTMAP_MAX_BOUNCES, LIGHTMAP_MAX_LIGHTS, bakeLightmapGpu, environmentPanorama, parseMeshScene, type BakeLight } from "@cartbox/player";
 
 import { encodeMeshSidecar, setMeshAsset, type MeshSidecar } from "./meshSidecar";
 
@@ -33,8 +46,40 @@ export interface SceneLightBakeOptions {
   readonly rays?: number;
   /** How far shade reaches, world units (default 7). */
   readonly distance?: number;
-  /** Light bounces, 1..3 (default 1): more fill shade with the light around it, at several times the bake. */
+  /** Light bounces, 1..3 on the CPU (default 1), up to 8 on the GPU: more fill shade with the light around it, at several times the bake. */
   readonly bounces?: number;
+  /** Bake on this WebGPU device (F3d) rather than the CPU; see {@link lightBakeDevice}. */
+  readonly device?: unknown;
+}
+
+/** Whether this browser can bake on the GPU (F3d). */
+export function gpuLightBakeAvailable(): boolean {
+  return typeof navigator !== "undefined" && "gpu" in navigator;
+}
+
+/** A WebGPU device to bake on, or null where there is none (the CPU bake then runs). The caller destroys it. */
+export async function lightBakeDevice(): Promise<unknown | null> {
+  if (!gpuLightBakeAvailable()) return null;
+  try {
+    const adapter = await (navigator as unknown as { gpu: { requestAdapter(): Promise<{ requestDevice(): Promise<unknown> } | null> } }).gpu.requestAdapter();
+    return adapter ? await adapter.requestDevice() : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Authored colour into linear light, as the AAA shader decodes it. */
+const toLinear = (c: number) => (c <= 0.04045 ? Math.max(0, c) / 12.92 : ((c + 0.055) / 1.055) ** 2.4);
+
+/** The rig's directional lights as the GPU bake lights bounces with them: toward each, its linear colour × intensity. */
+function bakeLights(lighting: SceneLighting): BakeLight[] {
+  return lighting.lights
+    .filter((l) => l.kind === "directional" && l.direction)
+    .slice(0, LIGHTMAP_MAX_LIGHTS)
+    .map((l) => {
+      const c = lightColor(l);
+      return { direction: [...l.direction!] as [number, number, number], radiance: [toLinear(c[0]) * l.intensity, toLinear(c[1]) * l.intensity, toLinear(c[2]) * l.intensity] as [number, number, number] };
+    });
 }
 
 /** The still objects of a scene, as the runtime places them: id, mesh and world matrix. */
@@ -71,11 +116,21 @@ export async function bakeSceneLighting(sidecar: MeshSidecar, options: SceneLigh
   // The light maps take most of the time; the probe grid the last tenth.
   const probes = (options.probeSpacing ?? 2.5) > 0 && still.length > 0 && sidecar.lighting;
   const share = probes ? 0.9 : 1;
+  // The GPU bake's sky and lights (F3d): the rig's environment in linear light, as the AAA tier's IBL sees it.
+  const gpu = options.device && sidecar.lighting ? { sky: environmentPanorama(sceneLightingEnvironment(sidecar.lighting)), lights: bakeLights(sidecar.lighting) } : null;
   for (let i = 0; i < still.length; i += 1) {
     const object = still[i]!;
     const layout = layoutLightmap(object.mesh, object.model, { density: options.density ?? 4 });
-    const rgba = bakeLightmap(layout, occluders, { rays: options.rays ?? 48, distance: options.distance ?? 7, sun, bounces: options.bounces ?? 1 }, (d) => progress?.(((i + d) / still.length) * share));
-    next = setMeshAsset(next, object.id, withLightmap(layout, rgba));
+    const step = (d: number) => progress?.(((i + d) / still.length) * share);
+    if (gpu) {
+      // Paths are cheap on the GPU: four for each of the CPU's rays.
+      const baked = await bakeLightmapGpu(options.device, layout, occluders, { samples: (options.rays ?? 48) * 4, bounces: Math.min(LIGHTMAP_MAX_BOUNCES, options.bounces ?? 3), sky: gpu.sky, lights: gpu.lights }, step);
+      const ambient = { mime: "image/png", bytes: encodeRgbaPng(baked.ambient, layout.size, layout.size, { compress: true }) };
+      next = setMeshAsset(next, object.id, applyLightmapImage(layout.mesh, ambient, encodeHdrLightmap(baked.hdr)));
+    } else {
+      const rgba = bakeLightmap(layout, occluders, { rays: options.rays ?? 48, distance: options.distance ?? 7, sun, bounces: options.bounces ?? 1 }, step);
+      next = setMeshAsset(next, object.id, withLightmap(layout, rgba));
+    }
     progress?.(((i + 1) / still.length) * share);
     await new Promise((resolve) => setTimeout(resolve, 0));
   }
@@ -127,11 +182,11 @@ export function clearSceneLighting(sidecar: MeshSidecar): MeshSidecar {
     } catch {
       continue;
     }
-    if (!mesh.primitives.some((p) => p.uvs2 || p.material.lightmapImage)) continue;
+    if (!mesh.primitives.some((p) => p.uvs2 || p.material.lightmapImage || p.material.lightmapHdrImage)) continue;
     next = setMeshAsset(next, entry.id, {
       ...mesh,
       primitives: mesh.primitives.map(({ uvs2: _uv2, ...p }) => {
-        const { lightmapImage: _lm, ...material } = p.material;
+        const { lightmapImage: _lm, lightmapHdrImage: _hdr, ...material } = p.material;
         return { ...p, material };
       }),
     });

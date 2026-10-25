@@ -78,6 +78,7 @@ import {
   REFRACTION_SCALE,
   effectActive,
   resolveRefraction,
+  LIGHTMAP_DIRECTION_FLOOR,
   LIGHTMAP_RANGE,
   MAX_REFLECTION_PROBES,
   PROBE_FADE,
@@ -118,6 +119,7 @@ import {
   type CompiledGraph,
   type DecodedTexture,
   type EnvironmentLight,
+  type HdrLightmap,
   type Mat4,
   type MeshPrimitive,
   type MeshAsset,
@@ -136,7 +138,7 @@ import { brdfWgsl, dfgTable } from "./brdf.js";
 import { ltcTables, ltcWgsl } from "./ltc.js";
 import { PROBE_FACE, ProbeCapture, packCapturedProbes } from "./probeCapture.js";
 import { DECAL_BUFFER_WORDS, DECAL_TILES_AT, decalWgsl, packDecalBoxes, packDecalTiles } from "./decalBuffer.js";
-import { IBL_LEVELS, IblBuilder, SH_IRRADIANCE_WGSL, environmentKey, environmentPanorama, environmentSh } from "./ibl.js";
+import { IBL_LEVELS, IblBuilder, SH_IRRADIANCE_WGSL, environmentKey, environmentPanorama, environmentSh, toHalf } from "./ibl.js";
 import { CASCADE_COUNT, CASCADE_FORMAT, CASCADE_SHADOW_WGSL, SUN_SOFTNESS, fitCascades, type Cascade } from "./cascades.js";
 import { REACTIVE_MASK_WGSL, TEMPORAL_SHARPEN_WGSL, TemporalState, hdrTemporalShaderWgsl, temporalShaderWgsl } from "./temporal.js";
 import { reflectionShaderWgsl, reflectionUniforms } from "./reflections.js";
@@ -388,7 +390,7 @@ struct Uniforms {
   shadow: vec4<f32>,    // x = 1 when shadowed, y = map size, z = bias, w = strength
   envMeta: vec4<f32>,   // xyz = env-map mean radiance, w = 1 when an env map is bound
   tonemap: vec4<f32>,   // x = 1 when tone-mapping, y = exposure, z = soft edge, w = 1 for the curve as authored (F11a-5)
-  ssaoMeta: vec4<f32>,  // x = 1 when an SSAO buffer is bound, y = light count, z = 1 when a light map is bound
+  ssaoMeta: vec4<f32>,  // x = 1 when an SSAO buffer is bound, y = light count, z = 1 when a light map is bound (2: an HDR directional one, F3d)
   model: mat4x4<f32>,   // this draw's world matrix (point-light world position)
   fog: vec4<f32>,       // rgb = fog colour, w = density
   fogParams: vec4<f32>, // x = 1 when fogged, y = start distance, z = max amount
@@ -492,8 +494,9 @@ struct InstanceXf {
   nrm: mat3x3<f32>,
 };
 @group(0) @binding(10) var<storage, read> xf: array<InstanceXf>;
-// A baked light map, sampled with the second UV set (1x1 white when none).
-@group(0) @binding(11) var lmTex: texture_2d<f32>;
+// A baked light map, sampled with the second UV set (1x1 white when none). The linear variant binds an
+// array: an HDR directional map's two layers (F3d: irradiance; direction and sky visibility), or an 8-bit map's one.
+@group(0) @binding(11) var lmTex: ${hdr ? "texture_2d_array<f32>" : "texture_2d<f32>"};
 // Reflection probes (probeSampling.ts in @cartbox/editor): every probe's
 // panorama stacked in one atlas, and each one's box, capture point and mean
 // colour; the uniform's ssaoMeta.w counts them (a zeroed slot when none).
@@ -1025,7 +1028,15 @@ fn envAverage() -> vec3<f32> {
 // stays in the space it was authored in.
 fn toLinear(c: vec3<f32>) -> vec3<f32> {
 ${hdr ? "  let v = max(c, vec3<f32>(0.0));\n  return select(pow((v + vec3<f32>(0.055)) / 1.055, vec3<f32>(2.4)), v / 12.92, v <= vec3<f32>(0.04045));" : "  return c;"}
-}
+}${hdr ? `
+// An HDR directional light map's irradiance at the shading normal N (F3d; mirrors directionalIrradiance in
+// hdrLightmap.ts): the baked irradiance e rebalanced by a half-Lambert about its dominant direction d, exact at
+// the normal it was baked for (the interpolated vertex normal, on the side N faces).
+fn lightmapIrradiance(e: vec3<f32>, d: vec3<f32>, N: vec3<f32>, vn: vec3<f32>) -> vec3<f32> {
+  var ng = normalize(vn);
+  if (dot(ng, N) < 0.0) { ng = -ng; }
+  return e * (0.5 + 0.5 * dot(N, d)) / max(${LIGHTMAP_DIRECTION_FLOOR}, 0.5 + 0.5 * dot(ng, d));
+}` : ""}
 // ACES filmic tone map (Narkowicz), per channel, mirroring acesFilmic in
 // meshRasterizer.ts. Applied only to the Modern-tier PBR radiance.
 fn aces(x: f32) -> f32 {
@@ -1395,7 +1406,15 @@ ${hdr
     let dfg = dfgAt(ndv, rough);
     eComp = energyCompensation(f0, dfg);
     let specE = specularEnergy(f0, dfg);
-    let specAo = specularOcclusion(ndv, ao, rough * rough);
+    var specAo = specularOcclusion(ndv, ao, rough * rough);
+    // An HDR directional light map (F3d) lights the diffuse in place of the sky's irradiance, and its sky
+    // visibility occludes the environment's reflection. Both layers are sampled whatever is bound (uniform
+    // control flow); an 8-bit map's single layer stands in for the second.
+    let lmUv = vec2<f32>(in.uv2.x, 1.0 - in.uv2.y);
+    let lm0 = textureSample(lmTex, samp, lmUv, 0);
+    let lm1 = textureSample(lmTex, samp, lmUv, 1);
+    let lmHdr = u.ssaoMeta.z > 1.5;
+    if (lmHdr) { specAo = specAo * lm1.w; }
     // What the environment's reflection takes, the material's reflectivity scaling it but never past all
     // the light (F11a): reflectivity over 1 (Beaver Creek's water is 1.3) mirrored more than came in at grazing.
     let specK = min(specE * reflectK, vec3<f32>(1.0));
@@ -1416,8 +1435,8 @@ ${g.emis}
 ${reflect ? "    var envSpec = vec3<f32>(0.0);\n    var envSeen = vec3<f32>(0.0);\n" : ""}    var amb: vec3<f32>;
     var coatV = 0.0;
     if (u.envSky.w > 0.5) {
-      ${hdr ? `// The irradiance over the hemisphere (F3a), not the radiance along N.
-      let irr = shIrradiance(skyN);` : "let irr = envColorDir(N);"}
+      ${hdr ? `// The irradiance over the hemisphere (F3a), not the radiance along N; or the light map's (F3d).
+      let irr = select(shIrradiance(skyN), lightmapIrradiance(lm0.rgb, lm1.xyz, N, in.normal), lmHdr);` : "let irr = envColorDir(N);"}
       // Brushed metal (I4) reflects about a normal bent across its grain.
       var Rn = N;
       if (aniso != 0.0) {
@@ -1438,14 +1457,17 @@ ${hdr
         amb = amb * (1.0 - coatV) + coatV * prefC * reflectK * ao;
 ${reflect ? "        envSpec = envSpec * (1.0 - coatV) + coatV * prefC * reflectK * ao;\n" : ""}      }
     } else {
-      amb = toLinear(vec3<f32>(u.light.w)) * albedo * ao;
+      amb = ${hdr ? "select(toLinear(vec3<f32>(u.light.w)), lightmapIrradiance(lm0.rgb, lm1.xyz, N, in.normal) * kdm, lmHdr)" : "toLinear(vec3<f32>(u.light.w))"} * albedo * ao;
     }
 ${reflect ? "    let ambRaw = amb;\n" : ""}    // A baked light map (the second UV set) scales the sky/ambient fill by how
     // much of it reaches this point, bounce included — mirroring the CPU path.
     // Sampled unconditionally (uniform control flow), applied when bound.
-    let lmUv = vec2<f32>(in.uv2.x, 1.0 - in.uv2.y);
+${hdr
+  ? `    // (An HDR one, F3d, lit the fill above.)
+    if (u.ssaoMeta.z > 0.5) { if (!lmHdr) { amb = amb * lm0.rgb * ${LIGHTMAP_RANGE}; } }`
+  : `    let lmUv = vec2<f32>(in.uv2.x, 1.0 - in.uv2.y);
     let lm = textureSample(lmTex, samp, lmUv).rgb * ${LIGHTMAP_RANGE};
-    if (u.ssaoMeta.z > 0.5) { amb = amb * lm; }
+    if (u.ssaoMeta.z > 0.5) { amb = amb * lm; }`}
     else if (frame.probeMin.w > 0.5) { amb = amb * probeLight(in.worldPos, N); } // EP9: no light map, the probes light it
     // Screen-space AO darkens only the ambient fill, sampled at this fragment's
     // framebuffer pixel (matching the software path's ssao[di]).
@@ -1725,6 +1747,7 @@ interface CachedBindGroup {
     occ: DecodedTexture | null;
     emis: DecodedTexture | null;
     lm: DecodedTexture | null;
+    lmHdr: HdrLightmap | null;
     detail: DecodedTexture | null;
     blend: DecodedTexture | null;
     normal: DecodedTexture | null;
@@ -1741,6 +1764,8 @@ export class WebgpuSceneRenderer implements SceneRenderer {
   private readonly textures = new WeakMap<DecodedTexture, any>();
   /** With mips (F1a), colour maps upload apart: their chain is averaged in linear light. */
   private readonly colourTextures = new WeakMap<DecodedTexture, any>();
+  /** HDR directional light maps (F3d), uploaded once each as two rgba16float layers. */
+  private readonly hdrLightmaps = new WeakMap<HdrLightmap, any>();
   /** Draws a texture's mip chain on the GPU (F1a). */
   private readonly mipmaps: MipmapGenerator;
   /** The block-compressed formats this renderer uploads a texture's `gpu` chain in, preferred first (F1a). */
@@ -2153,7 +2178,8 @@ export class WebgpuSceneRenderer implements SceneRenderer {
           { binding: 9, visibility: SHADER_STAGE_FRAGMENT, buffer: { type: "read-only-storage" } },
           // Per-instance transforms, read by the vertex stage.
           { binding: 10, visibility: SHADER_STAGE_VERTEX, buffer: { type: "read-only-storage" } },
-          { binding: 11, visibility: SHADER_STAGE_FRAGMENT, texture: { sampleType: "float" } },
+          // The baked light map: an array in the linear variant, for an HDR directional map's two layers (F3d).
+          { binding: 11, visibility: SHADER_STAGE_FRAGMENT, texture: hdr ? { sampleType: "float", viewDimension: "2d-array" } : { sampleType: "float" } },
           // Reflection probes: the panorama atlas (read via textureLoad), or the linear variant's cube array (F3b); and their boxes.
           { binding: 12, visibility: SHADER_STAGE_FRAGMENT, texture: hdr ? { sampleType: "float", viewDimension: "cube-array" } : { sampleType: "float" } },
           { binding: 13, visibility: SHADER_STAGE_FRAGMENT, buffer: { type: "read-only-storage" } },
@@ -2950,7 +2976,8 @@ export class WebgpuSceneRenderer implements SceneRenderer {
         shadow: shadowParams,
         tonemap: draw.tonemap ?? null,
         hasSsao: ssao !== null,
-        hasLightmap: entry.textures.lm !== null,
+        hasLightmap: entry.textures.lm !== null || (this.hdr && entry.textures.lmHdr !== null),
+        hdrLightmap: this.hdr && entry.textures.lmHdr !== null,
         model,
         lightCount,
         fog: draw.fog ?? null,
@@ -3882,6 +3909,7 @@ export class WebgpuSceneRenderer implements SceneRenderer {
       cached.source.occ === textures.occ &&
       cached.source.emis === textures.emis &&
       cached.source.lm === textures.lm &&
+      cached.source.lmHdr === textures.lmHdr &&
       cached.source.detail === textures.detail &&
       cached.source.blend === textures.blend &&
       cached.source.normal === textures.normal
@@ -3913,8 +3941,16 @@ export class WebgpuSceneRenderer implements SceneRenderer {
         { binding: 9, resource: { buffer: this.lightBuffer } },
         // The instance transforms; a grow changes identity and invalidates the cache.
         { binding: 10, resource: { buffer: this.instanceBuffer } },
-        // The baked light map (or the 1x1 white blank; the uniform flag gates it).
-        { binding: 11, resource: view(textures.lm) },
+        // The baked light map (or the 1x1 white blank; the uniform flag gates it). The linear variant binds an
+        // array: an HDR directional map (F3d) where there is one, else the 8-bit map as one layer.
+        {
+          binding: 11,
+          resource: !this.hdr
+            ? view(textures.lm)
+            : textures.lmHdr
+              ? this.uploadHdrLightmap(textures.lmHdr).createView({ dimension: "2d-array" })
+              : (textures.lm ? this.uploadTexture(textures.lm) : this.blankTexture).createView({ dimension: "2d-array" }),
+        },
         // The probe atlas (or the blank) and boxes; a change invalidates the cache.
         { binding: 12, resource: this.hdr ? (this.probeCapture?.cubes ?? this.blankProbeCubes).createView({ dimension: "cube-array" }) : this.probeTexture.createView() },
         { binding: 13, resource: { buffer: this.probeBuffer } },
@@ -3973,6 +4009,30 @@ export class WebgpuSceneRenderer implements SceneRenderer {
       this.mipmaps.generate(texture, levels, colour ? "rgba8unorm-srgb" : "rgba8unorm");
     }
     cache.set(source, texture);
+    return texture;
+  }
+
+  /**
+   * Upload (once) an HDR directional light map (F3d, hdrLightmap.ts) as a
+   * two-layer rgba16float array: the irradiance (and 1), then the dominant
+   * direction and the sky's visibility. One level: a light map's texels are
+   * already a few centimetres to metres apart.
+   */
+  private uploadHdrLightmap(map: HdrLightmap): any {
+    const cached = this.hdrLightmaps.get(map);
+    if (cached) return cached;
+    const { width, height } = map;
+    const texels = width * height;
+    const halves = new Uint16Array(texels * 8);
+    const one = toHalf(1);
+    for (let i = 0; i < texels; i += 1) {
+      for (let c = 0; c < 3; c += 1) halves[i * 4 + c] = toHalf(map.irradiance[i * 3 + c]!);
+      halves[i * 4 + 3] = one;
+      for (let c = 0; c < 4; c += 1) halves[(texels + i) * 4 + c] = toHalf(map.direction[i * 4 + c]!);
+    }
+    const texture = this.device.createTexture({ size: { width, height, depthOrArrayLayers: 2 }, format: "rgba16float", usage: 0x04 | 0x02 });
+    this.device.queue.writeTexture({ texture }, halves, { bytesPerRow: width * 8, rowsPerImage: height }, { width, height, depthOrArrayLayers: 2 });
+    this.hdrLightmaps.set(map, texture);
     return texture;
   }
 

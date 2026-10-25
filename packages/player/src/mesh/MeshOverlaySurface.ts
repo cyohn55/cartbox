@@ -63,8 +63,10 @@ import {
   frameLuminance,
   postVolumeReach,
   withDescendants,
+  decodeHdrLightmap,
   type DecodedTexture,
   type EncodedImage,
+  type HdrLightmap,
   type EnvironmentLight,
   type HdrImage,
   type LiveSkinnedMesh,
@@ -2180,7 +2182,7 @@ export class MeshOverlaySurface implements DisplaySurface {
 
 /** The mesh with each placeholder image whose ref is in `images` filled in (the same mesh when none is). */
 function fillPlaceholders(mesh: MeshAsset, images: ReadonlyMap<string, EncodedImage>): MeshAsset {
-  const slots = ["baseColorImage", "normalImage", "materialImage", "metallicRoughnessImage", "occlusionImage", "emissiveImage", "lightmapImage", "detailImage", "blendImage", "reliefImage", "tintMaskImage"] as const;
+  const slots = ["baseColorImage", "normalImage", "materialImage", "metallicRoughnessImage", "occlusionImage", "emissiveImage", "lightmapImage", "lightmapHdrImage", "detailImage", "blendImage", "reliefImage", "tintMaskImage"] as const;
   let touched = false;
   const primitives = mesh.primitives.map((primitive) => {
     let material = primitive.material;
@@ -2295,6 +2297,20 @@ function sunKey(sun: SkySun): string {
 /** A mesh with every material map decoded — what an instance (or a frame) draws with. */
 type TexturedMesh = Omit<MeshSceneInstance, "model">;
 
+/**
+ * HDR directional light maps (F3d) decoded once each, by our own PNG decoder:
+ * a browser's would premultiply the alpha that holds their exponent.
+ */
+const hdrLightmapDecodes = new WeakMap<EncodedImage, Promise<HdrLightmap | null>>();
+function decodeHdrLightmapOnce(image: EncodedImage): Promise<HdrLightmap | null> {
+  let entry = hdrLightmapDecodes.get(image);
+  if (!entry) {
+    entry = decodeHdrLightmap(image.bytes).catch(() => null);
+    hdrLightmapDecodes.set(image, entry);
+  }
+  return entry;
+}
+
 /** Decode all of one mesh's material maps; a failed decode falls back to null (flat). */
 async function decodeMeshTextures(
   mesh: MeshAsset,
@@ -2344,6 +2360,13 @@ async function decodeMeshTextures(
     // A painted team-colour mask (L17): applied when the copy is tinted.
     each((m) => m.tintMaskImage),
   ]);
+  // The GPU bake's HDR directional light map (F3d), which the AAA tier lights by.
+  const lightmapHdrTextures = await Promise.all(
+    mesh.primitives.map((primitive) => {
+      const image = primitive.material.lightmapHdrImage;
+      return image && image.bytes.length > 0 ? decodeHdrLightmapOnce(image) : Promise.resolve(null);
+    }),
+  );
   return {
     mesh,
     textures,
@@ -2353,6 +2376,7 @@ async function decodeMeshTextures(
     occlusionTextures,
     emissiveTextures,
     ...(lightmapTextures.some((t) => t !== null) ? { lightmapTextures } : {}),
+    ...(lightmapHdrTextures.some((t) => t !== null) ? { lightmapHdrTextures } : {}),
     ...(detailTextures.some((t) => t !== null) ? { detailTextures } : {}),
     ...(blendTextures.some((t) => t !== null) ? { blendTextures } : {}),
     ...(reliefTextures.some((t) => t !== null) ? { reliefTextures } : {}),

@@ -1,4 +1,4 @@
-import { MeshSceneInstance, MeshAsset, Mat4, ScenePropValue, PhysicsSpec, AnimatorSpec, AttachedComponent, SceneLighting, PhysicsWorldSettings, SceneTimeline, SceneLevel, NavMesh, Terrain, SceneStreaming, ParticleEffect, DecalDef, DecalMark, RagdollBox, DebrisDef, LodChain, SceneAudio, ComponentDef, StreamGroup, JointKind, JointSpec, ActionRebind, DecodedTexture, SkySun, BakedCloudLayer, SunShafts, ColorFilter, AccessibilitySettings, EncodedImage, UiDocument, InputAction, StringTable, ReflectionProbe, EnvironmentLight, ShadowInput, ToneMap, SceneLight, LocalShadows, ProjectedDecal, DecalTiles, SceneFog, SceneWind, RasterStyle, MeshMaterial, ResolvedLayers, ResolvedRefraction, SurfaceEffect, AnimatorOp, NavGraph, AnimationCue } from '@cartbox/editor';
+import { MeshSceneInstance, MeshAsset, Mat4, ScenePropValue, PhysicsSpec, AnimatorSpec, AttachedComponent, SceneLighting, PhysicsWorldSettings, SceneTimeline, SceneLevel, NavMesh, Terrain, SceneStreaming, ParticleEffect, DecalDef, DecalMark, RagdollBox, DebrisDef, LodChain, SceneAudio, ComponentDef, StreamGroup, JointKind, JointSpec, ActionRebind, DecodedTexture, SkySun, BakedCloudLayer, SunShafts, ColorFilter, AccessibilitySettings, EncodedImage, UiDocument, InputAction, StringTable, ReflectionProbe, EnvironmentLight, ShadowInput, ToneMap, SceneLight, LocalShadows, ProjectedDecal, DecalTiles, SceneFog, SceneWind, RasterStyle, HdrLightmap, LightmapLayout, Occluder, MeshMaterial, ResolvedLayers, ResolvedRefraction, SurfaceEffect, AnimatorOp, NavGraph, AnimationCue } from '@cartbox/editor';
 
 /**
  * The runtime mesh scene: the cart's mesh sidecar resolved into placed instances
@@ -4964,6 +4964,8 @@ declare class WebgpuSceneRenderer implements SceneRenderer {
     private readonly textures;
     /** With mips (F1a), colour maps upload apart: their chain is averaged in linear light. */
     private readonly colourTextures;
+    /** HDR directional light maps (F3d), uploaded once each as two rgba16float layers. */
+    private readonly hdrLightmaps;
     /** Draws a texture's mip chain on the GPU (F1a). */
     private readonly mipmaps;
     /** The block-compressed formats this renderer uploads a texture's `gpu` chain in, preferred first (F1a). */
@@ -5264,6 +5266,13 @@ declare class WebgpuSceneRenderer implements SceneRenderer {
      * its mips the encoder's. A cut-out keeps the RGBA path for its coverage.
      */
     private uploadTexture;
+    /**
+     * Upload (once) an HDR directional light map (F3d, hdrLightmap.ts) as a
+     * two-layer rgba16float array: the irradiance (and 1), then the dominant
+     * direction and the sky's visibility. One level: a light map's texels are
+     * already a few centimetres to metres apart.
+     */
+    private uploadHdrLightmap;
     /** The size frames render at now. */
     get size(): {
         readonly width: number;
@@ -5281,6 +5290,104 @@ declare class WebgpuSceneRenderer implements SceneRenderer {
     resize(width: number, height: number): void;
     dispose(): void;
 }
+
+/**
+ * Image-based lighting on the GPU (AAA_FIDELITY_ROADMAP.md F3a): the AAA tier's
+ * environment as a cubemap whose mips are the GGX-prefiltered reflection at
+ * rising roughness, and its diffuse light as L2 spherical harmonics. Together
+ * with the split-sum DFG (brdf.ts) they are Karis's split-sum IBL.
+ *
+ * They replace what the Modern tier keeps for its parity with the software
+ * rasteriser: the 192×96 panorama read nearest, a reflection "blurred" by
+ * lerping toward the environment's average, and a diffuse light that was the
+ * radiance straight along the normal rather than the irradiance over its
+ * hemisphere.
+ *
+ * - **The source** is the environment in linear light ({@link environmentPanorama}):
+ *   an imported HDR sky's own radiance, else its panorama, or its
+ *   sky/horizon/ground gradient, decoded and scaled by its intensity as the
+ *   shader's `envColorDir` does.
+ * - **The cube** is drawn from it in compute, each mip level the GGX lobe of
+ *   its roughness (level / (levels − 1)) importance-sampled around the
+ *   direction, with mip-filtered samples (Křivánek and Colbert) from the
+ *   source's own mips, so a few hundred samples don't alias.
+ * - **The irradiance** is projected on the CPU into nine coefficients
+ *   (Ramamoorthi and Hanrahan), already convolved with the clamped cosine and
+ *   divided by π, so a constant environment of radiance L lights white at L.
+ */
+
+/** An environment in linear light: RGBA floats, equirectangular (u = longitude, v = 0 at the zenith). */
+interface LinearPanorama {
+    readonly width: number;
+    readonly height: number;
+    readonly data: Float32Array;
+}
+/**
+ * The environment as the linear shader sees it: its HDR light when it has one
+ * (an imported `.hdr` sky, F3a), else its panorama, or its gradient by a
+ * direction's height (envGradient), each decoded from authored colour; all
+ * scaled by the intensity.
+ */
+declare function environmentPanorama(env: EnvironmentLight): LinearPanorama;
+
+/**
+ * The GPU lightmapper (AAA_FIDELITY_ROADMAP.md F3d): a path tracer in compute
+ * that bakes a laid-out mesh's light map in linear light, in seconds in the
+ * browser where the CPU bake (lightmap.ts) takes minutes.
+ *
+ * - **The scene** is the CPU bake's own triangle BVH (`buildBvh`), flattened
+ *   into storage buffers: two words per node, three vec4s per triangle (a
+ *   corner and two edges) and its material in linear light (albedo, and an
+ *   emissive colour that lights what sees it).
+ * - **The texels** are the ones the CPU bake shades (`lightmapTexels`): each
+ *   one's surface point and normal.
+ * - **Each path** leaves the texel along a cosine-weighted direction (the
+ *   first stratified over the bake, rotated per texel) and bounces diffusely
+ *   up to `bounces` times. Open sky gives the sky's radiance (the IBL's own
+ *   panorama, F3a); a surface gives its emission, and each surface it bounces
+ *   off is lit by the directional lights (a shadow ray each). The texel's own
+ *   sunlight is left out: the live cascades (F2a) draw it.
+ * - **The mean** of what the paths bring back is the irradiance over π: what
+ *   a white Lambertian surface there reflects, as the sky's SH irradiance is.
+ *   The paths also give the light's dominant direction (luminance-weighted)
+ *   and the share of the sky's light that came through unblocked.
+ *
+ * The result is an HDR directional light map (hdrLightmap.ts) for the AAA
+ * tier, and, from the same paths, the 8-bit ambient scale every other tier
+ * reads (the irradiance over the open sky's, per channel). Each dispatch is a
+ * bounded number of paths, so no submit nears a GPU's watchdog.
+ */
+
+/** The most bounces a bake takes, and the most directional lights. */
+declare const LIGHTMAP_MAX_BOUNCES = 8;
+declare const LIGHTMAP_MAX_LIGHTS = 4;
+/** A directional light the bounces are lit by: the direction toward it, and its radiance in linear light (colour × intensity). */
+interface BakeLight {
+    readonly direction: readonly [number, number, number];
+    readonly radiance: readonly [number, number, number];
+}
+interface GpuLightBakeOptions {
+    /** Paths per texel (default 256). */
+    readonly samples?: number;
+    /** Diffuse bounces after the first surface a path meets (0..8, default 3): 0 is sky and emission seen directly. */
+    readonly bounces?: number;
+    /** The sky's radiance in linear light (`environmentPanorama`); none is a black sky. */
+    readonly sky?: LinearPanorama | null;
+    /** The directional lights (at most four) that light the surfaces paths bounce off. */
+    readonly lights?: readonly BakeLight[];
+}
+/** A finished bake: the HDR directional light map and the 8-bit ambient scale, both `size × size`. */
+interface GpuLightmapBake {
+    readonly hdr: HdrLightmap;
+    /** RGBA bytes in lightmap.ts's format (× 1/{@link LIGHTMAP_RANGE}). */
+    readonly ambient: Uint8ClampedArray;
+}
+/**
+ * Bake a laid-out mesh's light map on `device` against `occluders` (which
+ * should include the mesh itself); see the module comment. `progress` hears
+ * the share done after each submit.
+ */
+declare function bakeLightmapGpu(device: any, layout: LightmapLayout, occluders: readonly Occluder[], options?: GpuLightBakeOptions, progress?: (done: number) => void): Promise<GpuLightmapBake>;
 
 /**
  * The pure half of the WebGPU scene renderer: memory layout and buffer packing.
@@ -5565,6 +5672,8 @@ interface InstanceUniform {
     readonly hasSsao: boolean;
     /** A baked light map is bound (it scales the ambient/IBL term, PBR draws only). */
     readonly hasLightmap?: boolean;
+    /** The bound light map is an HDR directional one (F3d), which the linear-light shader lights by in place of the sky's irradiance. */
+    readonly hdrLightmap?: boolean;
     /** This draw's world matrix, for point-light world position in the shader. */
     readonly model: Mat4 | null;
     /** Number of lights in the shared storage buffer, or 0 for the single key light. */
@@ -8751,4 +8860,4 @@ declare function directCoreBeside(engineUrl: string | undefined): string;
  */
 declare function mount(container: HTMLElement, options: PlayerOptions): PlayerHandle;
 
-export { AIM_ASSISTS, AgentCrowd, type AimAssist, type AnimClip, type AnimMode, type AnimPlacement, type AnimSpec, type AnimState, type AnimTarget, type AnimTrack, AnimatedForegroundSurface, AnimationSession, type AtmosphereParams, BLOOM_KNEE, BloomPyramid, BroadcastChannelTransport, type BuiltLightingRenderer, CAMERA_BASE, CAMERA_SCALE, CARTBOX_SDK_LUA, CELL_WORLD, CMD_RING_BYTES, CMD_RING_MAX, COMPOSE_UNIFORM_FLOATS, CappedSceneRenderer, type CapturedFrame, type CartSpriteSource, CartridgeLoadError, type CastHit, type CastShape, type ClipSample, type ClipTableEntry, type CollisionField, ConsoleButton, type ConsoleInstance, type ConsoleModel, type ControlScheme, type ControlSettings, type ControlTarget, DEFAULT_AMBIENT, DEFAULT_ATMOSPHERE, DEFAULT_CONTROL_SETTINGS, DEFAULT_KEY_BINDINGS, DEFAULT_LIGHT, DEFAULT_MODEL_ID, DEFAULT_MOUSE_LOOK, DEFAULT_PAD_BINDINGS, DEFAULT_STICK_DEAD_ZONES, DEFAULT_TRIGGER_THRESHOLD, DIRECT_CORE_URL, DebugCommand, type DebugStep, type DeviceHints, type DeviceProvider, type DirectConsole, DirectTransport, type DirectTransportOptions, type DriftStats, EVENT_CAPACITY, type Ease, EngineLoadError, type ErrorFrame, FLARE_GHOSTS, FLARE_GHOST_GAIN, FLARE_SPIKE_POWER, type FlagsField, type FlareGhost, type FlareParams, type FrameState, GYRO_AIMS, GamepadInput, type GeneratedTrack, type GlContextProvider, GpuCanvasSurface, GpuPresenter, type GpuSceneDraw, type GradingLut, type GyroAim, HEIGHT_WORLD, IMPORTED_LOOK, INPUT_BLOCK_BYTES, INPUT_MAGIC, INPUT_SETTINGS, INSTANCE_FLOATS, type InnerSurfaceFactory, type InputChange, type InspectedObject, type InstanceTransform, type Keyframe, LIGHTS_BASE, LIGHTS_CAPACITY, LIGHT_FLOATS, LIGHT_STRIDE, LOOP_SLOTS, LUT_LOOKS, LUT_SIZE, type LabCart, type LabProbe, type LayerChannel, type Light, type LightingBackend, type LightingFrameContext, LightingLayer, type LightingOptions, type LightingRenderer, type LightingScene, type LinkConditions, LitCanvasSurface, type LookDevice, type LookProfile, MAILBOX_TYPE_ACHIEVEMENT, MAILBOX_TYPE_PROGRESS, MAILBOX_TYPE_SCORE, MAILBOX_WORDS, MAX_EMITTERS, MAX_LUT_SIZE, MAX_PARTICLES_PER_EMITTER, MAX_PYRAMID_LEVELS, MAX_VOICES, MESH_CAM_ANGLE_SCALE, MESH_CAM_BASE, MESH_CAM_DIST_SCALE, MESH_CAM_STRIDE, MESH_POSE_BASE, MESH_POSE_CAPACITY, MESH_POSE_HIDDEN, MESH_POSE_STRIDE, MIN_LUT_SIZE, MIN_PYRAMID_DIMENSION, MODELS, MOUSE_FULL_LEAN_PX, type MailboxCamera, type MailboxEvent, type MailboxEventKind, type MailboxMeshCamera, type MailboxMeshPose, type MailboxRead, type MaterialBuffer, MemoryNetHub, type MeshInstance, MeshOverlaySurface, type MeshScene, type SceneCamera$1 as MeshSceneCamera, type ModelId, NET_MODE_CLIENT, NET_MODE_HOST, NET_MODE_OFFLINE, NET_SLOTS, NET_WORDS, NORMAL_DIRECTION_COUNT, NORMAL_VECTORS, type NetEvent, type NetInbox, type NetLabOptions, type NetLabReport, type NetMessage, type NetOutbox, type NetPeer, type NetRoomStatus, NetSession, type NetSignal, type NetState, type NetTransport, type ObjectLook, PAD_BUTTONS, PARTICLE_KINDS, PHYSICS_DT, PHYS_BLOCK_BYTES, PHYS_MAGIC, POINTER_AT, POINTER_MAGIC, POST_FX_EFFECTS, PROFILE_SECTIONS, PROFILE_WINDOW, type PackableLight, type PadButton, type PadSnapshot, type Particle, type ParticleEmitter, type ParticleKind, ParticleOverlaySurface, type ParticleSpec, type PauseInfo, type PbrMaterial, type PhysicsBackend, type PhysicsBodyDesc, type PhysicsJointDesc, type Quat as PhysicsQuat, PhysicsSession, type PhysicsShape, type Vec3$3 as PhysicsVec3, type PlacementChannel, type PlayerHandle, type PlayerOptions, PointerInput, type PointerState, type PostFxColorDef, type PostFxEffectDef, type PostFxEffectId, type PostFxParamDef, PostFxPass, type PostFxSettings, type PostFxSource, PostFxSurface, type PostFxUniforms, type PresentBase, type PresentFrame, type PresentSky, type PresentStats, type ProfileSection, type ProfileSnapshot, Profiler, QUALITY_LEVELS, QUALITY_PRESETS, type QualityChoice, QualityGovernor, type QualityLevel, type QualitySettings, RAM_LAYOUTS, REPLAY_VERSION, RESPONSE_CURVES, type RamLayout, type RegionImage, type RegisteredAchievement, type RenderCanvas, type RenderCaps, type RenderStats, type Replay, ReplayError, ReplayRecorder, ReplaySource, type ResolvedMapping, type ResolvedPbr, type ResolvedPlacement, type ResponseCurve, type Rgb, type RtcDataChannelLike, type RtcPeerConnectionFactory, type RtcPeerConnectionLike, type RumbleEffect, RuntimeChannel, SAVE_MAGIC, SKY_UNIFORM_FLOATS, SOFTWARE_RASTER_CAPS, START_KEYS, STICK_LAYOUTS, type ScaleMode, SceneBackdropSurface, type SceneBounds, type SceneCamera, type SceneDraw, type SceneLayer, type SceneMemory, type SceneRenderer, type SceneSpec, type SceneVista, type ScreenSun, type SectionStats, SimulatedNetHub, SoftwareSceneRenderer, type SoundContext, SoundSystem, type Speaker, type SpriteRegion, type SpriteRegionSource, type StickDeadZones, type StickLayout, type SunShadow, SwitchableTransport, TANGENT_VERTEX_FLOATS, TILT_SHIFT_FEATHER, TINT_PALETTE, TOUCH_CONTROL_IDS, TOUCH_LOOK_MODES, type TextureLookup, type TouchControlId, type TouchLayout, type TouchLookMode, type TouchPlacement, type TraceLine, type TrackMode, UNIFORM_BYTES_USED, UNIFORM_FLOATS, UNIFORM_STRIDE, VERTEX_FLOATS, type Vec3$2 as Vec3, type VerificationResult, WEBGL_INSTANCES_PER_DRAW, WEBGL_MAX_LIGHTS, WebglSceneRenderer, WebgpuLightingLayer, WebgpuSceneRenderer, type WorldBillboard, type WorldBillboardPose, type WorldCamera, type WorldCameraSpec, type WorldLight, WorldOverlaySurface, type WorldProp, type WorldScene, type WorldTileCell, acesFilmic, acesFilmicChannel, actionsSdkLua, aimAssistLevel, alignBytesPerRow, animClipsSdkLua, animatedObjects, anyPostFxEnabled, appendLuaCode, applyActionToggles, applyLookSettings, applyLut, applyQualityToPostFx, applyRenderCaps, armDebugBlock, armSaveBlock, askMotionPermission, breakableLine, browserDeviceHints, browserRtc, browserSpeaker, buildBillboardInstance, buildClipTable, buildOrbitCamera, buildShadowInstance, buildTerrainInstances, buildWorldCamera, cameraAt, capTextures, capTriangles, capsConstrainScene, cellAt, clipFrameIndex, codeChunks, codeLineOffset, collisionSdkLua, commandRingAddress, commandRingBytes, commandRingMax, commandsPerTick, compileAnimator, componentsSdkLua, composeParallax, composeWorldMatrix, compositeOverBackdrop, createCartSpriteSource, createConsole, createDirectConsole, createFlatMaterial, createLightingLayer, createSceneRenderer, createTextureBudgetCache, deadZoned, debugBlockAddress, debugPostlude, debugSdkLua, decodeCamera, decodeLights, decodeLut, decodeMailbox, decodeMeshCamera, decodeMeshPoses, decodeNetMessage, decodeWorldLights, defaultPostFxSettings, detectQuality, deterministicBackend, directCoreBeside, directCoreModel, dragLean, drift, effectiveBreakpoints, emitterPreset, encodeLut, encodeNetMessage, errorStack, estimateSceneBytes, estimateSceneMemory, evaluate, extractScore, extractUnlocks, fillSky, fitShape, fitTextureToBudget, flagsSdkLua, flicker, frameDurationMs, framePixels, framebufferBytes, getModel, getWebgpuDevice, gyroLean, hasCommandRing, hashCart, hashEventId, hexToRgb01, identityLut, injectSdk, inputBlockAddress, instrumentLua, interleaveVertices, interleaveVerticesWithTangents, interpolateNormal, isMobileAgent, jointFrames, layoutSticks, lensFlareAt, loadEngineModule, lookAccelerationBoost, lookGains, lookLut, lookProfileFor, lutStrip, makeShadowTexture, mount, mouseLean, nearestDirection, netSendInterval, normalBasis3x3, normalVector, orbitPitchAboveTerrain, packComposeUniforms, packLights, packMeasureUniforms, packShaftUniforms, packSkyUniforms, paramKey, parseAnim, parseCollisionField, parseControlSettings, parseCubeLut, parseFlagsField, parseMeshScene, parseParticles, parsePauseInfo, parsePostFxSettings, parseReplay, parseScene, parseTouchLayout, parseWorldScene, physicsBlockAddress, physicsSdkLua, physicsSlots, physicsStateHash, placeWithin, playLanguage, prehazeLayers, prependLuaCode, pulse, pyramidLevelCount, pyramidLevelSize, randomSeed, rasterStyleFor, readCartCode, readPad, readPause, readSidecarActions, readSidecarUi, reflectionFade, reflectionSampleY, remapErrorLines, renderSceneBackdrop, resolveButton, resolveLight, resolveMapping, resolvePbr, resolveQuality, resolveSceneLayers, resolveSupersample, resolveUnlockedAchievements, responseCurve, rewriteLuaCode, rumbleEffect, runNetLab, runReplayEvents, runsOnDirectCore, runtimeSdkLua, sampleClipFrame, sampleNormalBilinear, sampleScalarBilinear, sampleTrack, saveBlockAddress, saveBlockBytes, saveCapacity, saveSdkLua, sceneHasAnimation, sceneHasPhysics, sceneNeedsRuntime, sceneObjectsSdkLua, seedCartridge, sendDebugCommand, serializeReplay, shade, shaftGrid, shapeStick, simulateEmitter, smoothFrontEdges, softKneePrefilter, splitWorldMatrix, standardizePad, stepLookAcceleration, streamGroups, stringsSdkLua, sway, takeNetOutbox, takePhysicsCommands, takeRingCommands, takeSave, tiltShiftBlur, toConsolePixel, toggleMask, tokenizeLua, uiSdkLua, uniformsFromSettings, unpadRows, validSave, verifyReplayScore, viewDirection, webgpuCanHonour, worldCenter, writeBreakpoints, writeInputBlock, writeInputSettings, writeInstanceTransform, writeInstanceUniform, writeNetInbox, writePhysicsState, writePointer, writeWatches };
+export { AIM_ASSISTS, AgentCrowd, type AimAssist, type AnimClip, type AnimMode, type AnimPlacement, type AnimSpec, type AnimState, type AnimTarget, type AnimTrack, AnimatedForegroundSurface, AnimationSession, type AtmosphereParams, BLOOM_KNEE, type BakeLight, BloomPyramid, BroadcastChannelTransport, type BuiltLightingRenderer, CAMERA_BASE, CAMERA_SCALE, CARTBOX_SDK_LUA, CELL_WORLD, CMD_RING_BYTES, CMD_RING_MAX, COMPOSE_UNIFORM_FLOATS, CappedSceneRenderer, type CapturedFrame, type CartSpriteSource, CartridgeLoadError, type CastHit, type CastShape, type ClipSample, type ClipTableEntry, type CollisionField, ConsoleButton, type ConsoleInstance, type ConsoleModel, type ControlScheme, type ControlSettings, type ControlTarget, DEFAULT_AMBIENT, DEFAULT_ATMOSPHERE, DEFAULT_CONTROL_SETTINGS, DEFAULT_KEY_BINDINGS, DEFAULT_LIGHT, DEFAULT_MODEL_ID, DEFAULT_MOUSE_LOOK, DEFAULT_PAD_BINDINGS, DEFAULT_STICK_DEAD_ZONES, DEFAULT_TRIGGER_THRESHOLD, DIRECT_CORE_URL, DebugCommand, type DebugStep, type DeviceHints, type DeviceProvider, type DirectConsole, DirectTransport, type DirectTransportOptions, type DriftStats, EVENT_CAPACITY, type Ease, EngineLoadError, type ErrorFrame, FLARE_GHOSTS, FLARE_GHOST_GAIN, FLARE_SPIKE_POWER, type FlagsField, type FlareGhost, type FlareParams, type FrameState, GYRO_AIMS, GamepadInput, type GeneratedTrack, type GlContextProvider, GpuCanvasSurface, type GpuLightBakeOptions, type GpuLightmapBake, GpuPresenter, type GpuSceneDraw, type GradingLut, type GyroAim, HEIGHT_WORLD, IMPORTED_LOOK, INPUT_BLOCK_BYTES, INPUT_MAGIC, INPUT_SETTINGS, INSTANCE_FLOATS, type InnerSurfaceFactory, type InputChange, type InspectedObject, type InstanceTransform, type Keyframe, LIGHTMAP_MAX_BOUNCES, LIGHTMAP_MAX_LIGHTS, LIGHTS_BASE, LIGHTS_CAPACITY, LIGHT_FLOATS, LIGHT_STRIDE, LOOP_SLOTS, LUT_LOOKS, LUT_SIZE, type LabCart, type LabProbe, type LayerChannel, type Light, type LightingBackend, type LightingFrameContext, LightingLayer, type LightingOptions, type LightingRenderer, type LightingScene, type LinearPanorama, type LinkConditions, LitCanvasSurface, type LookDevice, type LookProfile, MAILBOX_TYPE_ACHIEVEMENT, MAILBOX_TYPE_PROGRESS, MAILBOX_TYPE_SCORE, MAILBOX_WORDS, MAX_EMITTERS, MAX_LUT_SIZE, MAX_PARTICLES_PER_EMITTER, MAX_PYRAMID_LEVELS, MAX_VOICES, MESH_CAM_ANGLE_SCALE, MESH_CAM_BASE, MESH_CAM_DIST_SCALE, MESH_CAM_STRIDE, MESH_POSE_BASE, MESH_POSE_CAPACITY, MESH_POSE_HIDDEN, MESH_POSE_STRIDE, MIN_LUT_SIZE, MIN_PYRAMID_DIMENSION, MODELS, MOUSE_FULL_LEAN_PX, type MailboxCamera, type MailboxEvent, type MailboxEventKind, type MailboxMeshCamera, type MailboxMeshPose, type MailboxRead, type MaterialBuffer, MemoryNetHub, type MeshInstance, MeshOverlaySurface, type MeshScene, type SceneCamera$1 as MeshSceneCamera, type ModelId, NET_MODE_CLIENT, NET_MODE_HOST, NET_MODE_OFFLINE, NET_SLOTS, NET_WORDS, NORMAL_DIRECTION_COUNT, NORMAL_VECTORS, type NetEvent, type NetInbox, type NetLabOptions, type NetLabReport, type NetMessage, type NetOutbox, type NetPeer, type NetRoomStatus, NetSession, type NetSignal, type NetState, type NetTransport, type ObjectLook, PAD_BUTTONS, PARTICLE_KINDS, PHYSICS_DT, PHYS_BLOCK_BYTES, PHYS_MAGIC, POINTER_AT, POINTER_MAGIC, POST_FX_EFFECTS, PROFILE_SECTIONS, PROFILE_WINDOW, type PackableLight, type PadButton, type PadSnapshot, type Particle, type ParticleEmitter, type ParticleKind, ParticleOverlaySurface, type ParticleSpec, type PauseInfo, type PbrMaterial, type PhysicsBackend, type PhysicsBodyDesc, type PhysicsJointDesc, type Quat as PhysicsQuat, PhysicsSession, type PhysicsShape, type Vec3$3 as PhysicsVec3, type PlacementChannel, type PlayerHandle, type PlayerOptions, PointerInput, type PointerState, type PostFxColorDef, type PostFxEffectDef, type PostFxEffectId, type PostFxParamDef, PostFxPass, type PostFxSettings, type PostFxSource, PostFxSurface, type PostFxUniforms, type PresentBase, type PresentFrame, type PresentSky, type PresentStats, type ProfileSection, type ProfileSnapshot, Profiler, QUALITY_LEVELS, QUALITY_PRESETS, type QualityChoice, QualityGovernor, type QualityLevel, type QualitySettings, RAM_LAYOUTS, REPLAY_VERSION, RESPONSE_CURVES, type RamLayout, type RegionImage, type RegisteredAchievement, type RenderCanvas, type RenderCaps, type RenderStats, type Replay, ReplayError, ReplayRecorder, ReplaySource, type ResolvedMapping, type ResolvedPbr, type ResolvedPlacement, type ResponseCurve, type Rgb, type RtcDataChannelLike, type RtcPeerConnectionFactory, type RtcPeerConnectionLike, type RumbleEffect, RuntimeChannel, SAVE_MAGIC, SKY_UNIFORM_FLOATS, SOFTWARE_RASTER_CAPS, START_KEYS, STICK_LAYOUTS, type ScaleMode, SceneBackdropSurface, type SceneBounds, type SceneCamera, type SceneDraw, type SceneLayer, type SceneMemory, type SceneRenderer, type SceneSpec, type SceneVista, type ScreenSun, type SectionStats, SimulatedNetHub, SoftwareSceneRenderer, type SoundContext, SoundSystem, type Speaker, type SpriteRegion, type SpriteRegionSource, type StickDeadZones, type StickLayout, type SunShadow, SwitchableTransport, TANGENT_VERTEX_FLOATS, TILT_SHIFT_FEATHER, TINT_PALETTE, TOUCH_CONTROL_IDS, TOUCH_LOOK_MODES, type TextureLookup, type TouchControlId, type TouchLayout, type TouchLookMode, type TouchPlacement, type TraceLine, type TrackMode, UNIFORM_BYTES_USED, UNIFORM_FLOATS, UNIFORM_STRIDE, VERTEX_FLOATS, type Vec3$2 as Vec3, type VerificationResult, WEBGL_INSTANCES_PER_DRAW, WEBGL_MAX_LIGHTS, WebglSceneRenderer, WebgpuLightingLayer, WebgpuSceneRenderer, type WorldBillboard, type WorldBillboardPose, type WorldCamera, type WorldCameraSpec, type WorldLight, WorldOverlaySurface, type WorldProp, type WorldScene, type WorldTileCell, acesFilmic, acesFilmicChannel, actionsSdkLua, aimAssistLevel, alignBytesPerRow, animClipsSdkLua, animatedObjects, anyPostFxEnabled, appendLuaCode, applyActionToggles, applyLookSettings, applyLut, applyQualityToPostFx, applyRenderCaps, armDebugBlock, armSaveBlock, askMotionPermission, bakeLightmapGpu, breakableLine, browserDeviceHints, browserRtc, browserSpeaker, buildBillboardInstance, buildClipTable, buildOrbitCamera, buildShadowInstance, buildTerrainInstances, buildWorldCamera, cameraAt, capTextures, capTriangles, capsConstrainScene, cellAt, clipFrameIndex, codeChunks, codeLineOffset, collisionSdkLua, commandRingAddress, commandRingBytes, commandRingMax, commandsPerTick, compileAnimator, componentsSdkLua, composeParallax, composeWorldMatrix, compositeOverBackdrop, createCartSpriteSource, createConsole, createDirectConsole, createFlatMaterial, createLightingLayer, createSceneRenderer, createTextureBudgetCache, deadZoned, debugBlockAddress, debugPostlude, debugSdkLua, decodeCamera, decodeLights, decodeLut, decodeMailbox, decodeMeshCamera, decodeMeshPoses, decodeNetMessage, decodeWorldLights, defaultPostFxSettings, detectQuality, deterministicBackend, directCoreBeside, directCoreModel, dragLean, drift, effectiveBreakpoints, emitterPreset, encodeLut, encodeNetMessage, environmentPanorama, errorStack, estimateSceneBytes, estimateSceneMemory, evaluate, extractScore, extractUnlocks, fillSky, fitShape, fitTextureToBudget, flagsSdkLua, flicker, frameDurationMs, framePixels, framebufferBytes, getModel, getWebgpuDevice, gyroLean, hasCommandRing, hashCart, hashEventId, hexToRgb01, identityLut, injectSdk, inputBlockAddress, instrumentLua, interleaveVertices, interleaveVerticesWithTangents, interpolateNormal, isMobileAgent, jointFrames, layoutSticks, lensFlareAt, loadEngineModule, lookAccelerationBoost, lookGains, lookLut, lookProfileFor, lutStrip, makeShadowTexture, mount, mouseLean, nearestDirection, netSendInterval, normalBasis3x3, normalVector, orbitPitchAboveTerrain, packComposeUniforms, packLights, packMeasureUniforms, packShaftUniforms, packSkyUniforms, paramKey, parseAnim, parseCollisionField, parseControlSettings, parseCubeLut, parseFlagsField, parseMeshScene, parseParticles, parsePauseInfo, parsePostFxSettings, parseReplay, parseScene, parseTouchLayout, parseWorldScene, physicsBlockAddress, physicsSdkLua, physicsSlots, physicsStateHash, placeWithin, playLanguage, prehazeLayers, prependLuaCode, pulse, pyramidLevelCount, pyramidLevelSize, randomSeed, rasterStyleFor, readCartCode, readPad, readPause, readSidecarActions, readSidecarUi, reflectionFade, reflectionSampleY, remapErrorLines, renderSceneBackdrop, resolveButton, resolveLight, resolveMapping, resolvePbr, resolveQuality, resolveSceneLayers, resolveSupersample, resolveUnlockedAchievements, responseCurve, rewriteLuaCode, rumbleEffect, runNetLab, runReplayEvents, runsOnDirectCore, runtimeSdkLua, sampleClipFrame, sampleNormalBilinear, sampleScalarBilinear, sampleTrack, saveBlockAddress, saveBlockBytes, saveCapacity, saveSdkLua, sceneHasAnimation, sceneHasPhysics, sceneNeedsRuntime, sceneObjectsSdkLua, seedCartridge, sendDebugCommand, serializeReplay, shade, shaftGrid, shapeStick, simulateEmitter, smoothFrontEdges, softKneePrefilter, splitWorldMatrix, standardizePad, stepLookAcceleration, streamGroups, stringsSdkLua, sway, takeNetOutbox, takePhysicsCommands, takeRingCommands, takeSave, tiltShiftBlur, toConsolePixel, toggleMask, tokenizeLua, uiSdkLua, uniformsFromSettings, unpadRows, validSave, verifyReplayScore, viewDirection, webgpuCanHonour, worldCenter, writeBreakpoints, writeInputBlock, writeInputSettings, writeInstanceTransform, writeInstanceUniform, writeNetInbox, writePhysicsState, writePointer, writeWatches };

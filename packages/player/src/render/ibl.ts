@@ -240,7 +240,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
 `;
 
 /** A float as an IEEE half's bits. */
-function toHalf(value: number): number {
+export function toHalf(value: number): number {
   const f = new Float32Array([value]);
   const bits = new Uint32Array(f.buffer)[0]!;
   const sign = (bits >>> 16) & 0x8000;

@@ -492,6 +492,8 @@ export interface InstanceUniform {
   readonly hasSsao: boolean;
   /** A baked light map is bound (it scales the ambient/IBL term, PBR draws only). */
   readonly hasLightmap?: boolean;
+  /** The bound light map is an HDR directional one (F3d), which the linear-light shader lights by in place of the sky's irradiance. */
+  readonly hdrLightmap?: boolean;
   /** This draw's world matrix, for point-light world position in the shader. */
   readonly model: Mat4 | null;
   /** Number of lights in the shared storage buffer, or 0 for the single key light. */
@@ -690,7 +692,7 @@ export function writeInstanceUniform(target: Float32Array, index: number, unifor
 
   target[base + OFFSET_SSAO] = uniform.hasSsao ? 1 : 0;
   target[base + OFFSET_SSAO + 1] = uniform.lightCount; // light count for the storage-buffer loop
-  target[base + OFFSET_SSAO + 2] = uniform.hasLightmap ? 1 : 0;
+  target[base + OFFSET_SSAO + 2] = uniform.hdrLightmap ? 2 : uniform.hasLightmap ? 1 : 0;
   target[base + OFFSET_SSAO + 3] = uniform.probeCount ?? (env?.probes ? Math.min(env.probes.probes.length, MAX_REFLECTION_PROBES) : 0);
 
   const model = uniform.model;

@@ -332,7 +332,7 @@ export function bakeLayout(mesh: MeshAsset, size: number): { mesh: MeshAsset; at
     bare.map((i, k) => {
       const p = layout.mesh.primitives[k]!;
       // Its light map no longer fits the new layout.
-      const { lightmapImage: _lightmap, ...material } = p.material;
+      const { lightmapImage: _lightmap, lightmapHdrImage: _hdr, ...material } = p.material;
       return [i, { ...p, uvs: p.uvs2!, uvs2: null, material }];
     }),
   );

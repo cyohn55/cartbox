@@ -316,14 +316,20 @@ export {
   applyLightmapImage,
   bakeLightmap,
   bakeLightProbes,
+  buildBvh,
+  finishLightmapValues,
   layoutFingerprint,
   layoutLightmap,
+  lightmapTexels,
   withLightmap,
+  type Bvh,
   type LightBakeOptions,
   type LightmapLayout,
   type LightmapLayoutOptions,
+  type LightmapTexels,
   type Occluder,
 } from "./model/lightmap";
+export { LIGHTMAP_DIRECTION_FLOOR, decodeHdrLightmap, directionalIrradiance, encodeHdrLightmap, fromRgbe, toRgbe, type HdrLightmap } from "./model/hdrLightmap";
 export {
   MAX_TERRAIN_LAYERS,
   MAX_TERRAIN_SAMPLES,
@@ -1186,7 +1192,7 @@ export {
   type VoxelMeshOptions,
 } from "./render/voxelMesh";
 export { voxelGridToMeshAsset, type VoxelToMeshOptions } from "./model/voxelToMesh";
-export { crc32, decodePngSamples, deflateFixed, encodeGray16Png, encodeRgbaPng, type PngSamples } from "./model/png";
+export { crc32, decodePngRgba, decodePngSamples, deflateFixed, encodeGray16Png, encodeRgbaPng, type PngSamples } from "./model/png";
 export { bytesToBase64, base64ToBytes } from "./model/base64";
 export {
   MESH_LIBRARY_REF,

@@ -10,7 +10,7 @@
 import type { MeshMaterial } from "./MeshAsset";
 
 /** A material field an instance can take from its parent or override. */
-export type InstanceField = Exclude<keyof MeshMaterial, "name" | "instance" | "lightmapImage" | "textureSprite">;
+export type InstanceField = Exclude<keyof MeshMaterial, "name" | "instance" | "lightmapImage" | "lightmapHdrImage" | "textureSprite">;
 
 /** Every field an instance inherits, in the order the material panel lists them, with a label. */
 export const INSTANCE_FIELDS = [

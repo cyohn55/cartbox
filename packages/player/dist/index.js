@@ -11384,6 +11384,7 @@ import {
   frameLuminance,
   postVolumeReach,
   withDescendants,
+  decodeHdrLightmap,
   bakeCloudLayer,
   base64ToBytes as base64ToBytes2,
   decodeRadianceHdr,
@@ -13454,7 +13455,7 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
   }
 };
 function fillPlaceholders(mesh, images) {
-  const slots = ["baseColorImage", "normalImage", "materialImage", "metallicRoughnessImage", "occlusionImage", "emissiveImage", "lightmapImage", "detailImage", "blendImage", "reliefImage", "tintMaskImage"];
+  const slots = ["baseColorImage", "normalImage", "materialImage", "metallicRoughnessImage", "occlusionImage", "emissiveImage", "lightmapImage", "lightmapHdrImage", "detailImage", "blendImage", "reliefImage", "tintMaskImage"];
   let touched = false;
   const primitives = mesh.primitives.map((primitive) => {
     let material = primitive.material;
@@ -13532,6 +13533,15 @@ function sunKey(sun) {
   const l = Math.hypot(sun.direction[0], sun.direction[1], sun.direction[2]) || 1;
   return `${sun.direction.map((v) => Math.round(v / l * 100)).join(",")}:${sun.color.map((v) => Math.round(v * 50)).join(",")}`;
 }
+var hdrLightmapDecodes = /* @__PURE__ */ new WeakMap();
+function decodeHdrLightmapOnce(image) {
+  let entry = hdrLightmapDecodes.get(image);
+  if (!entry) {
+    entry = decodeHdrLightmap(image.bytes).catch(() => null);
+    hdrLightmapDecodes.set(image, entry);
+  }
+  return entry;
+}
 async function decodeMeshTextures(mesh, decodeKtx2, cache = /* @__PURE__ */ new Map(), compressed = false) {
   const plain = (image) => image.mime === "image/ktx2" ? decodeKtx2(image.bytes) : decodeTexture(image.mime, image.bytes);
   const decode = (image) => compressed && image.ktx2 ? decodeKtx2(image.ktx2).then((texture) => texture ? image.ktx2Relief ? { ...texture, packedWithRelief: true } : texture : plain(image)) : plain(image);
@@ -13570,6 +13580,12 @@ async function decodeMeshTextures(mesh, decodeKtx2, cache = /* @__PURE__ */ new 
     // A painted team-colour mask (L17): applied when the copy is tinted.
     each((m) => m.tintMaskImage)
   ]);
+  const lightmapHdrTextures = await Promise.all(
+    mesh.primitives.map((primitive) => {
+      const image = primitive.material.lightmapHdrImage;
+      return image && image.bytes.length > 0 ? decodeHdrLightmapOnce(image) : Promise.resolve(null);
+    })
+  );
   return {
     mesh,
     textures,
@@ -13579,6 +13595,7 @@ async function decodeMeshTextures(mesh, decodeKtx2, cache = /* @__PURE__ */ new 
     occlusionTextures,
     emissiveTextures,
     ...lightmapTextures.some((t) => t !== null) ? { lightmapTextures } : {},
+    ...lightmapHdrTextures.some((t) => t !== null) ? { lightmapHdrTextures } : {},
     ...detailTextures.some((t) => t !== null) ? { detailTextures } : {},
     ...blendTextures.some((t) => t !== null) ? { blendTextures } : {},
     ...reliefTextures.some((t) => t !== null) ? { reliefTextures } : {},
@@ -14543,7 +14560,7 @@ function writeInstanceUniform(target, index, uniform) {
   target[base + OFFSET_TONEMAP + 3] = tonemap?.authored ? 1 : 0;
   target[base + OFFSET_SSAO] = uniform.hasSsao ? 1 : 0;
   target[base + OFFSET_SSAO + 1] = uniform.lightCount;
-  target[base + OFFSET_SSAO + 2] = uniform.hasLightmap ? 1 : 0;
+  target[base + OFFSET_SSAO + 2] = uniform.hdrLightmap ? 2 : uniform.hasLightmap ? 1 : 0;
   target[base + OFFSET_SSAO + 3] = uniform.probeCount ?? (env?.probes ? Math.min(env.probes.probes.length, MAX_REFLECTION_PROBES) : 0);
   const model = uniform.model;
   for (let i = 0; i < 16; i += 1) target[base + OFFSET_MODEL + i] = model ? model[i] : i % 5 === 0 ? 1 : 0;
@@ -14759,7 +14776,7 @@ function packRgba([r, g, b, a]) {
   return (a << 24 | b << 16 | g << 8 | r) >>> 0;
 }
 function sameTextures(a, b) {
-  return a.base === b.base && a.mr === b.mr && a.occ === b.occ && a.emis === b.emis && a.lm === b.lm && a.detail === b.detail && a.blend === b.blend && a.relief === b.relief;
+  return a.base === b.base && a.mr === b.mr && a.occ === b.occ && a.emis === b.emis && a.lm === b.lm && a.lmHdr === b.lmHdr && a.detail === b.detail && a.blend === b.blend && a.relief === b.relief;
 }
 var NO_OCCLUSION = {};
 var withRelief = /* @__PURE__ */ new WeakMap();
@@ -14813,6 +14830,7 @@ function batchInstances(instances, geometryOf, eye = [0, 0, 0]) {
         occ: occlusionWithRelief(instance.occlusionTextures?.[index] ?? null, instance.reliefTextures?.[index] ?? null),
         emis: instance.emissiveTextures?.[index] ?? null,
         lm: primitive.uvs2 ? instance.lightmapTextures?.[index] ?? null : null,
+        lmHdr: primitive.uvs2 ? instance.lightmapHdrTextures?.[index] ?? null : null,
         detail: instance.detailTextures?.[index] ?? null,
         blend: primitive.blend ? instance.blendTextures?.[index] ?? null : null,
         relief: instance.reliefTextures?.[index] ?? null,
@@ -17658,6 +17676,7 @@ import {
   REFRACTION_SCALE as REFRACTION_SCALE2,
   effectActive as effectActive4,
   resolveRefraction as resolveRefraction3,
+  LIGHTMAP_DIRECTION_FLOOR,
   LIGHTMAP_RANGE as LIGHTMAP_RANGE2,
   MAX_REFLECTION_PROBES as MAX_REFLECTION_PROBES4,
   PROBE_FADE as PROBE_FADE2,
@@ -19572,7 +19591,7 @@ struct Uniforms {
   shadow: vec4<f32>,    // x = 1 when shadowed, y = map size, z = bias, w = strength
   envMeta: vec4<f32>,   // xyz = env-map mean radiance, w = 1 when an env map is bound
   tonemap: vec4<f32>,   // x = 1 when tone-mapping, y = exposure, z = soft edge, w = 1 for the curve as authored (F11a-5)
-  ssaoMeta: vec4<f32>,  // x = 1 when an SSAO buffer is bound, y = light count, z = 1 when a light map is bound
+  ssaoMeta: vec4<f32>,  // x = 1 when an SSAO buffer is bound, y = light count, z = 1 when a light map is bound (2: an HDR directional one, F3d)
   model: mat4x4<f32>,   // this draw's world matrix (point-light world position)
   fog: vec4<f32>,       // rgb = fog colour, w = density
   fogParams: vec4<f32>, // x = 1 when fogged, y = start distance, z = max amount
@@ -19672,8 +19691,9 @@ struct InstanceXf {
   nrm: mat3x3<f32>,
 };
 @group(0) @binding(10) var<storage, read> xf: array<InstanceXf>;
-// A baked light map, sampled with the second UV set (1x1 white when none).
-@group(0) @binding(11) var lmTex: texture_2d<f32>;
+// A baked light map, sampled with the second UV set (1x1 white when none). The linear variant binds an
+// array: an HDR directional map's two layers (F3d: irradiance; direction and sky visibility), or an 8-bit map's one.
+@group(0) @binding(11) var lmTex: ${hdr ? "texture_2d_array<f32>" : "texture_2d<f32>"};
 // Reflection probes (probeSampling.ts in @cartbox/editor): every probe's
 // panorama stacked in one atlas, and each one's box, capture point and mean
 // colour; the uniform's ssaoMeta.w counts them (a zeroed slot when none).
@@ -20197,7 +20217,15 @@ fn envAverage() -> vec3<f32> {
 // stays in the space it was authored in.
 fn toLinear(c: vec3<f32>) -> vec3<f32> {
 ${hdr ? "  let v = max(c, vec3<f32>(0.0));\n  return select(pow((v + vec3<f32>(0.055)) / 1.055, vec3<f32>(2.4)), v / 12.92, v <= vec3<f32>(0.04045));" : "  return c;"}
-}
+}${hdr ? `
+// An HDR directional light map's irradiance at the shading normal N (F3d; mirrors directionalIrradiance in
+// hdrLightmap.ts): the baked irradiance e rebalanced by a half-Lambert about its dominant direction d, exact at
+// the normal it was baked for (the interpolated vertex normal, on the side N faces).
+fn lightmapIrradiance(e: vec3<f32>, d: vec3<f32>, N: vec3<f32>, vn: vec3<f32>) -> vec3<f32> {
+  var ng = normalize(vn);
+  if (dot(ng, N) < 0.0) { ng = -ng; }
+  return e * (0.5 + 0.5 * dot(N, d)) / max(${LIGHTMAP_DIRECTION_FLOOR}, 0.5 + 0.5 * dot(ng, d));
+}` : ""}
 // ACES filmic tone map (Narkowicz), per channel, mirroring acesFilmic in
 // meshRasterizer.ts. Applied only to the Modern-tier PBR radiance.
 fn aces(x: f32) -> f32 {
@@ -20562,7 +20590,15 @@ ${hdr ? `    // GTAO (F3c): its visibility joins the material's occlusion (diffu
     let dfg = dfgAt(ndv, rough);
     eComp = energyCompensation(f0, dfg);
     let specE = specularEnergy(f0, dfg);
-    let specAo = specularOcclusion(ndv, ao, rough * rough);
+    var specAo = specularOcclusion(ndv, ao, rough * rough);
+    // An HDR directional light map (F3d) lights the diffuse in place of the sky's irradiance, and its sky
+    // visibility occludes the environment's reflection. Both layers are sampled whatever is bound (uniform
+    // control flow); an 8-bit map's single layer stands in for the second.
+    let lmUv = vec2<f32>(in.uv2.x, 1.0 - in.uv2.y);
+    let lm0 = textureSample(lmTex, samp, lmUv, 0);
+    let lm1 = textureSample(lmTex, samp, lmUv, 1);
+    let lmHdr = u.ssaoMeta.z > 1.5;
+    if (lmHdr) { specAo = specAo * lm1.w; }
     // What the environment's reflection takes, the material's reflectivity scaling it but never past all
     // the light (F11a): reflectivity over 1 (Beaver Creek's water is 1.3) mirrored more than came in at grazing.
     let specK = min(specE * reflectK, vec3<f32>(1.0));
@@ -20582,8 +20618,8 @@ ${g.emis}
 ${reflect ? "    var envSpec = vec3<f32>(0.0);\n    var envSeen = vec3<f32>(0.0);\n" : ""}    var amb: vec3<f32>;
     var coatV = 0.0;
     if (u.envSky.w > 0.5) {
-      ${hdr ? `// The irradiance over the hemisphere (F3a), not the radiance along N.
-      let irr = shIrradiance(skyN);` : "let irr = envColorDir(N);"}
+      ${hdr ? `// The irradiance over the hemisphere (F3a), not the radiance along N; or the light map's (F3d).
+      let irr = select(shIrradiance(skyN), lightmapIrradiance(lm0.rgb, lm1.xyz, N, in.normal), lmHdr);` : "let irr = envColorDir(N);"}
       // Brushed metal (I4) reflects about a normal bent across its grain.
       var Rn = N;
       if (aniso != 0.0) {
@@ -20604,14 +20640,15 @@ ${hdr ? "      // What the environment's reflection takes, the diffuse beneath i
         amb = amb * (1.0 - coatV) + coatV * prefC * reflectK * ao;
 ${reflect ? "        envSpec = envSpec * (1.0 - coatV) + coatV * prefC * reflectK * ao;\n" : ""}      }
     } else {
-      amb = toLinear(vec3<f32>(u.light.w)) * albedo * ao;
+      amb = ${hdr ? "select(toLinear(vec3<f32>(u.light.w)), lightmapIrradiance(lm0.rgb, lm1.xyz, N, in.normal) * kdm, lmHdr)" : "toLinear(vec3<f32>(u.light.w))"} * albedo * ao;
     }
 ${reflect ? "    let ambRaw = amb;\n" : ""}    // A baked light map (the second UV set) scales the sky/ambient fill by how
     // much of it reaches this point, bounce included \u2014 mirroring the CPU path.
     // Sampled unconditionally (uniform control flow), applied when bound.
-    let lmUv = vec2<f32>(in.uv2.x, 1.0 - in.uv2.y);
+${hdr ? `    // (An HDR one, F3d, lit the fill above.)
+    if (u.ssaoMeta.z > 0.5) { if (!lmHdr) { amb = amb * lm0.rgb * ${LIGHTMAP_RANGE2}; } }` : `    let lmUv = vec2<f32>(in.uv2.x, 1.0 - in.uv2.y);
     let lm = textureSample(lmTex, samp, lmUv).rgb * ${LIGHTMAP_RANGE2};
-    if (u.ssaoMeta.z > 0.5) { amb = amb * lm; }
+    if (u.ssaoMeta.z > 0.5) { amb = amb * lm; }`}
     else if (frame.probeMin.w > 0.5) { amb = amb * probeLight(in.worldPos, N); } // EP9: no light map, the probes light it
     // Screen-space AO darkens only the ambient fill, sampled at this fragment's
     // framebuffer pixel (matching the software path's ssao[di]).
@@ -20879,6 +20916,8 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     this.textures = /* @__PURE__ */ new WeakMap();
     /** With mips (F1a), colour maps upload apart: their chain is averaged in linear light. */
     this.colourTextures = /* @__PURE__ */ new WeakMap();
+    /** HDR directional light maps (F3d), uploaded once each as two rgba16float layers. */
+    this.hdrLightmaps = /* @__PURE__ */ new WeakMap();
     // Not readonly: a resized uniform buffer invalidates every cached group at
     // once, and WeakMap has no clear(), so the map itself is replaced.
     this.bindGroups = /* @__PURE__ */ new WeakMap();
@@ -21211,7 +21250,8 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
           { binding: 9, visibility: SHADER_STAGE_FRAGMENT, buffer: { type: "read-only-storage" } },
           // Per-instance transforms, read by the vertex stage.
           { binding: 10, visibility: SHADER_STAGE_VERTEX, buffer: { type: "read-only-storage" } },
-          { binding: 11, visibility: SHADER_STAGE_FRAGMENT, texture: { sampleType: "float" } },
+          // The baked light map: an array in the linear variant, for an HDR directional map's two layers (F3d).
+          { binding: 11, visibility: SHADER_STAGE_FRAGMENT, texture: hdr ? { sampleType: "float", viewDimension: "2d-array" } : { sampleType: "float" } },
           // Reflection probes: the panorama atlas (read via textureLoad), or the linear variant's cube array (F3b); and their boxes.
           { binding: 12, visibility: SHADER_STAGE_FRAGMENT, texture: hdr ? { sampleType: "float", viewDimension: "cube-array" } : { sampleType: "float" } },
           { binding: 13, visibility: SHADER_STAGE_FRAGMENT, buffer: { type: "read-only-storage" } },
@@ -21881,7 +21921,8 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
         shadow: shadowParams,
         tonemap: draw.tonemap ?? null,
         hasSsao: ssao !== null,
-        hasLightmap: entry.textures.lm !== null,
+        hasLightmap: entry.textures.lm !== null || this.hdr && entry.textures.lmHdr !== null,
+        hdrLightmap: this.hdr && entry.textures.lmHdr !== null,
         model,
         lightCount,
         fog: draw.fog ?? null,
@@ -22663,7 +22704,7 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
   /** The bind group for one primitive, rebuilt if any of its textures changed. */
   bindGroupFor(primitive, textures) {
     const cached = this.bindGroups.get(primitive);
-    if (cached && cached.source.base === textures.base && cached.source.mr === textures.mr && cached.source.occ === textures.occ && cached.source.emis === textures.emis && cached.source.lm === textures.lm && cached.source.detail === textures.detail && cached.source.blend === textures.blend && cached.source.normal === textures.normal) {
+    if (cached && cached.source.base === textures.base && cached.source.mr === textures.mr && cached.source.occ === textures.occ && cached.source.emis === textures.emis && cached.source.lm === textures.lm && cached.source.lmHdr === textures.lmHdr && cached.source.detail === textures.detail && cached.source.blend === textures.blend && cached.source.normal === textures.normal) {
       return cached.group;
     }
     const view = (texture, colour = false) => (texture ? this.uploadTexture(texture, colour) : this.blankTexture).createView();
@@ -22688,8 +22729,12 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
         { binding: 9, resource: { buffer: this.lightBuffer } },
         // The instance transforms; a grow changes identity and invalidates the cache.
         { binding: 10, resource: { buffer: this.instanceBuffer } },
-        // The baked light map (or the 1x1 white blank; the uniform flag gates it).
-        { binding: 11, resource: view(textures.lm) },
+        // The baked light map (or the 1x1 white blank; the uniform flag gates it). The linear variant binds an
+        // array: an HDR directional map (F3d) where there is one, else the 8-bit map as one layer.
+        {
+          binding: 11,
+          resource: !this.hdr ? view(textures.lm) : textures.lmHdr ? this.uploadHdrLightmap(textures.lmHdr).createView({ dimension: "2d-array" }) : (textures.lm ? this.uploadTexture(textures.lm) : this.blankTexture).createView({ dimension: "2d-array" })
+        },
         // The probe atlas (or the blank) and boxes; a change invalidates the cache.
         { binding: 12, resource: this.hdr ? (this.probeCapture?.cubes ?? this.blankProbeCubes).createView({ dimension: "cube-array" }) : this.probeTexture.createView() },
         { binding: 13, resource: { buffer: this.probeBuffer } },
@@ -22746,6 +22791,29 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
       this.mipmaps.generate(texture, levels, colour ? "rgba8unorm-srgb" : "rgba8unorm");
     }
     cache.set(source, texture);
+    return texture;
+  }
+  /**
+   * Upload (once) an HDR directional light map (F3d, hdrLightmap.ts) as a
+   * two-layer rgba16float array: the irradiance (and 1), then the dominant
+   * direction and the sky's visibility. One level: a light map's texels are
+   * already a few centimetres to metres apart.
+   */
+  uploadHdrLightmap(map) {
+    const cached = this.hdrLightmaps.get(map);
+    if (cached) return cached;
+    const { width, height } = map;
+    const texels = width * height;
+    const halves = new Uint16Array(texels * 8);
+    const one = toHalf(1);
+    for (let i = 0; i < texels; i += 1) {
+      for (let c = 0; c < 3; c += 1) halves[i * 4 + c] = toHalf(map.irradiance[i * 3 + c]);
+      halves[i * 4 + 3] = one;
+      for (let c = 0; c < 4; c += 1) halves[(texels + i) * 4 + c] = toHalf(map.direction[i * 4 + c]);
+    }
+    const texture = this.device.createTexture({ size: { width, height, depthOrArrayLayers: 2 }, format: "rgba16float", usage: 4 | 2 });
+    this.device.queue.writeTexture({ texture }, halves, { bytesPerRow: width * 8, rowsPerImage: height }, { width, height, depthOrArrayLayers: 2 });
+    this.hdrLightmaps.set(map, texture);
     return texture;
   }
   /** The size frames render at now. */
@@ -24835,7 +24903,7 @@ var GpuPresenter = class {
     destroy(this.measured.result);
     destroy(this.measured.staging);
   }
-  async readMeasurements(luminance, sun) {
+  async readMeasurements(luminance2, sun) {
     const m = this.measured;
     m.busy = true;
     try {
@@ -24845,8 +24913,8 @@ var GpuPresenter = class {
       m.staging.unmap();
       const prev = this.latestStats;
       this.latestStats = {
-        luminance: luminance ? count > 0 ? Math.exp(sum / count) : AUTO_KEY_FALLBACK : prev.luminance,
-        luminanceSeq: prev.luminanceSeq + (luminance ? 1 : 0),
+        luminance: luminance2 ? count > 0 ? Math.exp(sum / count) : AUTO_KEY_FALLBACK : prev.luminance,
+        luminanceSeq: prev.luminanceSeq + (luminance2 ? 1 : 0),
         sunVisible: sun ? taps > 0 ? open / taps : 0 : prev.sunVisible,
         seq: prev.seq + 1
       };
@@ -26387,6 +26455,367 @@ function resolveUnlockedAchievements(unlockHashes, registered) {
   return registered.filter((achievement) => unlocked.has(achievement.hash >>> 0));
 }
 
+// src/render/gpuLightmapper.ts
+import { LIGHTMAP_RANGE as LIGHTMAP_RANGE3, buildBvh, finishLightmapValues, lightmapTexels } from "@cartbox/editor";
+var LIGHTMAP_MAX_BOUNCES = 8;
+var LIGHTMAP_MAX_LIGHTS = 4;
+var WORKGROUP = 64;
+var CHUNK_TEXELS = 65536;
+var PATHS_PER_SUBMIT = 1 << 19;
+var PARAMS_BYTES = 48 + LIGHTMAP_MAX_LIGHTS * 32;
+var STORAGE = 128;
+var COPY_DST = 8;
+var COPY_SRC = 4;
+var MAP_READ = 1;
+var UNIFORM2 = 64;
+function toLinear(c) {
+  const v = Math.max(0, c);
+  return v <= 0.04045 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4;
+}
+function packLightmapScene(occluders) {
+  const bvh = buildBvh(occluders);
+  const triangles = bvh.order.length;
+  const nodeCount = bvh.meta.length / 3;
+  const nodes = new Uint32Array(Math.max(1, nodeCount) * 8);
+  const bits = new Float32Array(nodes.buffer);
+  if (nodeCount === 0) {
+    bits.set([1, 1, 1], 0);
+    bits.set([-1, -1, -1], 4);
+    nodes[3] = 4294967295;
+  }
+  for (let n = 0; n < nodeCount; n += 1) {
+    for (let a = 0; a < 3; a += 1) {
+      bits[n * 8 + a] = bvh.nodes[n * 6 + a];
+      bits[n * 8 + 4 + a] = bvh.nodes[n * 6 + 3 + a];
+    }
+    const left = bvh.meta[n * 3];
+    nodes[n * 8 + 3] = (left >= 0 ? left : -1 - bvh.meta[n * 3 + 2]) >>> 0;
+    nodes[n * 8 + 7] = bvh.meta[n * 3 + 1] >>> 0;
+  }
+  const tris = new Float32Array(Math.max(1, triangles) * 12);
+  const mats = new Float32Array(Math.max(1, triangles) * 8);
+  for (let i = 0; i < triangles; i += 1) {
+    const t = bvh.order[i];
+    const k = t * 9;
+    for (let a = 0; a < 3; a += 1) {
+      tris[i * 12 + a] = bvh.tri[k + a];
+      tris[i * 12 + 4 + a] = bvh.tri[k + 3 + a] - bvh.tri[k + a];
+      tris[i * 12 + 8 + a] = bvh.tri[k + 6 + a] - bvh.tri[k + a];
+      mats[i * 8 + a] = toLinear(bvh.col[t * 3 + a]);
+      mats[i * 8 + 4 + a] = toLinear(bvh.emi[t * 3 + a]);
+    }
+  }
+  return { nodes, tris, mats, triangles };
+}
+var LIGHTMAP_TRACE_WGSL = (
+  /* wgsl */
+  `
+struct Params {
+  run: vec4<u32>,   // x = first texel, y = texels, z = first sample, w = samples this pass
+  info: vec4<u32>,  // x = bounces, y = lights, z = sky width, w = sky height
+  total: vec4<u32>, // x = samples in all
+  lightDir: array<vec4<f32>, ${LIGHTMAP_MAX_LIGHTS}>,
+  lightRad: array<vec4<f32>, ${LIGHTMAP_MAX_LIGHTS}>,
+};
+@group(0) @binding(0) var<storage, read> nodes: array<vec4<u32>>;
+@group(0) @binding(1) var<storage, read> tris: array<vec4<f32>>;
+@group(0) @binding(2) var<storage, read> mats: array<vec4<f32>>;
+@group(0) @binding(3) var<storage, read> texels: array<vec4<f32>>;
+@group(0) @binding(4) var<storage, read_write> accum: array<vec4<f32>>;
+@group(0) @binding(5) var<storage, read> sky: array<vec4<f32>>;
+@group(0) @binding(6) var<uniform> params: Params;
+
+const PI = 3.14159265;
+// How far a ray starts off its surface, and the nearest hit it takes (metres).
+const EPS = 0.005;
+const T_MIN = 1e-4;
+const FAR = 1e30;
+
+struct Hit {
+  t: f32,
+  tri: i32,
+};
+
+// The closest hit along o + t\xB7d within tMax (or, with anyHit, the first found).
+fn trace(o: vec3<f32>, d: vec3<f32>, tMax: f32, anyHit: bool) -> Hit {
+  var best = Hit(tMax, -1);
+  let tiny = abs(d) < vec3<f32>(1e-9);
+  let inv = 1.0 / select(d, select(vec3<f32>(-1e-9), vec3<f32>(1e-9), d >= vec3<f32>(0.0)), tiny);
+  var stack: array<u32, 64>;
+  var sp = 1u;
+  stack[0] = 0u;
+  loop {
+    if (sp == 0u) { break; }
+    sp = sp - 1u;
+    let n = stack[sp];
+    let a = nodes[n * 2u];
+    let b = nodes[n * 2u + 1u];
+    let t0 = (bitcast<vec3<f32>>(a.xyz) - o) * inv;
+    let t1 = (bitcast<vec3<f32>>(b.xyz) - o) * inv;
+    let lo = min(t0, t1);
+    let hi = max(t0, t1);
+    let tn = max(max(lo.x, lo.y), max(lo.z, 0.0));
+    let tf = min(min(hi.x, hi.y), min(hi.z, best.t));
+    if (tn > tf) { continue; }
+    let left = bitcast<i32>(a.w);
+    if (left >= 0) {
+      if (sp + 2u <= 64u) {
+        stack[sp] = u32(left);
+        stack[sp + 1u] = b.w;
+        sp = sp + 2u;
+      }
+      continue;
+    }
+    let first = b.w;
+    let count = u32(-1 - left);
+    for (var i = first; i < first + count; i = i + 1u) {
+      // M\xF6ller\u2013Trumbore.
+      let v0 = tris[i * 3u].xyz;
+      let e1 = tris[i * 3u + 1u].xyz;
+      let e2 = tris[i * 3u + 2u].xyz;
+      let p = cross(d, e2);
+      let det = dot(e1, p);
+      if (abs(det) < 1e-12) { continue; }
+      let id = 1.0 / det;
+      let s = o - v0;
+      let u = dot(s, p) * id;
+      if (u < 0.0 || u > 1.0) { continue; }
+      let q = cross(s, e1);
+      let v = dot(d, q) * id;
+      if (v < 0.0 || u + v > 1.0) { continue; }
+      let t = dot(e2, q) * id;
+      if (t > T_MIN && t < best.t) {
+        best = Hit(t, i32(i));
+        if (anyHit) { return best; }
+      }
+    }
+  }
+  return best;
+}
+
+fn pcg(v: u32) -> u32 {
+  let s = v * 747796405u + 2891336453u;
+  let w = ((s >> ((s >> 28u) + 4u)) ^ s) * 277803737u;
+  return (w >> 22u) ^ w;
+}
+var<private> rng: u32;
+fn rand() -> f32 {
+  rng = pcg(rng);
+  return f32(rng >> 8u) / 16777216.0;
+}
+fn radicalInverse(i: u32) -> f32 {
+  return f32(reverseBits(i)) * 2.3283064365386963e-10;
+}
+
+// A cosine-weighted direction about n (Duff et al.'s branchless frame).
+fn cosineDir(n: vec3<f32>, xi: vec2<f32>) -> vec3<f32> {
+  let r = sqrt(xi.x);
+  let phi = 2.0 * PI * xi.y;
+  let sg = select(-1.0, 1.0, n.z >= 0.0);
+  let a = -1.0 / (sg + n.z);
+  let b = n.x * n.y * a;
+  let t = vec3<f32>(1.0 + sg * n.x * n.x * a, sg * b, -sg * n.x);
+  let bt = vec3<f32>(b, sg + n.y * n.y * a, -n.y);
+  return normalize(t * (r * cos(phi)) + bt * (r * sin(phi)) + n * sqrt(max(0.0, 1.0 - xi.x)));
+}
+
+// The sky along d: the panorama's texel (u around from \u2212x, v down from the zenith, as the IBL reads it).
+fn skyAt(d: vec3<f32>) -> vec3<f32> {
+  let w = params.info.z;
+  let h = params.info.w;
+  if (w == 0u) { return vec3<f32>(0.0); }
+  let u = atan2(d.z, d.x) / (2.0 * PI) + 0.5;
+  let v = acos(clamp(d.y, -1.0, 1.0)) / PI;
+  let x = min(u32(max(u, 0.0) * f32(w)), w - 1u);
+  let y = min(u32(max(v, 0.0) * f32(h)), h - 1u);
+  return sky[y * w + x].rgb;
+}
+
+fn lum(c: vec3<f32>) -> f32 {
+  return dot(c, vec3<f32>(0.2126, 0.7152, 0.0722));
+}
+
+@compute @workgroup_size(${WORKGROUP})
+fn main(@builtin(global_invocation_id) id: vec3<u32>) {
+  if (id.x >= params.run.y) { return; }
+  let j = params.run.x + id.x;
+  let P = texels[j * 2u].xyz;
+  let Ng = normalize(texels[j * 2u + 1u].xyz);
+  // The first bounce's directions: one stratified set for the bake, turned per texel (Cranley\u2013Patterson).
+  let turn = vec2<f32>(f32(pcg(j * 2u + 1u) >> 8u), f32(pcg(j * 2u + 2u) >> 8u)) / 16777216.0;
+  let bounces = params.info.x;
+  let lights = params.info.y;
+  var e = vec3<f32>(0.0);
+  var dirSum = vec3<f32>(0.0);
+  var lumSum = 0.0;
+  var skyRef = vec3<f32>(0.0);
+  var skyOpen = 0.0;
+  for (var k = 0u; k < params.run.w; k = k + 1u) {
+    let s = params.run.z + k;
+    rng = pcg(j ^ pcg(s + 0x9e3779b9u));
+    let xi = fract(vec2<f32>(f32(s) / f32(params.total.x), radicalInverse(s)) + turn);
+    let d0 = cosineDir(Ng, xi);
+    let sky0 = skyAt(d0);
+    skyRef = skyRef + sky0;
+    var tp = vec3<f32>(1.0);
+    var o = P + Ng * EPS;
+    var d = d0;
+    var L = vec3<f32>(0.0);
+    for (var b = 0u; b <= bounces; b = b + 1u) {
+      let h = trace(o, d, FAR, false);
+      if (h.tri < 0) {
+        if (b == 0u) {
+          L = L + sky0;
+          skyOpen = skyOpen + lum(sky0);
+        } else {
+          L = L + tp * skyAt(d);
+        }
+        break;
+      }
+      let i = u32(h.tri);
+      L = L + tp * mats[i * 2u + 1u].rgb;
+      if (b == bounces) { break; }
+      var n = normalize(cross(tris[i * 3u + 1u].xyz, tris[i * 3u + 2u].xyz));
+      if (dot(n, d) > 0.0) { n = -n; } // the side the path arrived on (surfaces are two-sided)
+      let hp = o + d * h.t + n * EPS;
+      tp = tp * mats[i * 2u].rgb;
+      for (var l = 0u; l < lights; l = l + 1u) {
+        let Ld = params.lightDir[l].xyz;
+        let ndl = dot(n, Ld);
+        if (ndl > 0.0 && trace(hp, Ld, FAR, true).tri < 0) {
+          L = L + tp * params.lightRad[l].rgb * ndl;
+        }
+      }
+      if (max(tp.r, max(tp.g, tp.b)) < 1e-4) { break; }
+      o = hp;
+      d = cosineDir(n, vec2<f32>(rand(), rand()));
+    }
+    e = e + L;
+    let y = lum(L);
+    dirSum = dirSum + d0 * y;
+    lumSum = lumSum + y;
+  }
+  accum[j * 3u] = accum[j * 3u] + vec4<f32>(e, 0.0);
+  accum[j * 3u + 1u] = accum[j * 3u + 1u] + vec4<f32>(dirSum, lumSum);
+  accum[j * 3u + 2u] = accum[j * 3u + 2u] + vec4<f32>(skyRef, skyOpen);
+}
+`
+);
+var luminance = (r, g, b) => 0.2126 * r + 0.7152 * g + 0.0722 * b;
+function lightmapParams(first, texels, firstSample, samples, total, bounces, sky, lights) {
+  const buffer = new ArrayBuffer(PARAMS_BYTES);
+  const u = new Uint32Array(buffer);
+  const f3 = new Float32Array(buffer);
+  u.set([first, texels, firstSample, samples, bounces, Math.min(lights.length, LIGHTMAP_MAX_LIGHTS), sky?.width ?? 0, sky?.height ?? 0, total], 0);
+  lights.slice(0, LIGHTMAP_MAX_LIGHTS).forEach((light, i) => {
+    const [x, y, z] = light.direction;
+    const len = Math.hypot(x, y, z) || 1;
+    f3.set([x / len, y / len, z / len, 0], 12 + i * 4);
+    f3.set([...light.radiance, 0], 12 + LIGHTMAP_MAX_LIGHTS * 4 + i * 4);
+  });
+  return buffer;
+}
+async function bakeLightmapGpu(device, layout, occluders, options = {}, progress) {
+  const samples = Math.max(1, Math.round(options.samples ?? 256));
+  const bounces = Math.max(0, Math.min(LIGHTMAP_MAX_BOUNCES, Math.round(options.bounces ?? 3)));
+  const sky = options.sky ?? null;
+  const lights = options.lights ?? [];
+  const { size } = layout;
+  const texels = lightmapTexels(layout);
+  const count = texels.index.length;
+  const acc = new Float32Array(count * 12);
+  if (count > 0) {
+    const scene = packLightmapScene(occluders);
+    const points = new Float32Array(count * 8);
+    for (let j = 0; j < count; j += 1) {
+      for (let a = 0; a < 3; a += 1) {
+        points[j * 8 + a] = texels.position[j * 3 + a];
+        points[j * 8 + 4 + a] = texels.normal[j * 3 + a];
+      }
+    }
+    const upload = (data) => {
+      const buffer = device.createBuffer({ size: Math.max(16, data.byteLength), usage: STORAGE | COPY_DST });
+      device.queue.writeBuffer(buffer, 0, data.buffer, data.byteOffset, data.byteLength);
+      return buffer;
+    };
+    const skyData = sky ? sky.data : new Float32Array(4);
+    const buffers = [upload(scene.nodes), upload(scene.tris), upload(scene.mats), upload(points)];
+    const accum = device.createBuffer({ size: acc.byteLength, usage: STORAGE | COPY_SRC });
+    const skyBuffer = upload(skyData);
+    const params = device.createBuffer({ size: PARAMS_BYTES, usage: UNIFORM2 | COPY_DST });
+    const readback = device.createBuffer({ size: acc.byteLength, usage: MAP_READ | COPY_DST });
+    try {
+      const pipeline = device.createComputePipeline({ layout: "auto", compute: { module: device.createShaderModule({ code: LIGHTMAP_TRACE_WGSL }), entryPoint: "main" } });
+      const group = device.createBindGroup({
+        layout: pipeline.getBindGroupLayout(0),
+        entries: [...buffers, accum, skyBuffer].map((buffer, binding) => ({ binding, resource: { buffer } })).concat([{ binding: 6, resource: { buffer: params } }])
+      });
+      const chunk = Math.min(count, CHUNK_TEXELS);
+      const perPass = Math.max(1, Math.min(samples, Math.floor(PATHS_PER_SUBMIT / chunk)));
+      const submits = Math.ceil(samples / perPass) * Math.ceil(count / chunk);
+      let done = 0;
+      for (let s = 0; s < samples; s += perPass) {
+        const n = Math.min(perPass, samples - s);
+        for (let first = 0; first < count; first += chunk) {
+          const texelsHere = Math.min(chunk, count - first);
+          device.queue.writeBuffer(params, 0, lightmapParams(first, texelsHere, s, n, samples, bounces, sky, lights));
+          const encoder2 = device.createCommandEncoder();
+          const pass = encoder2.beginComputePass();
+          pass.setPipeline(pipeline);
+          pass.setBindGroup(0, group);
+          pass.dispatchWorkgroups(Math.ceil(texelsHere / WORKGROUP));
+          pass.end();
+          device.queue.submit([encoder2.finish()]);
+          await device.queue.onSubmittedWorkDone();
+          done += 1;
+          progress?.(done / submits);
+        }
+      }
+      const encoder = device.createCommandEncoder();
+      encoder.copyBufferToBuffer(accum, 0, readback, 0, acc.byteLength);
+      device.queue.submit([encoder.finish()]);
+      await readback.mapAsync(MAP_READ);
+      acc.set(new Float32Array(readback.getMappedRange()));
+      readback.unmap();
+    } finally {
+      for (const buffer of [...buffers, accum, skyBuffer, params, readback]) buffer.destroy();
+    }
+  }
+  progress?.(1);
+  return finishGpuLightmap(size, texels.index, texels.chart, acc, samples);
+}
+function finishGpuLightmap(size, index, chart, acc, samples) {
+  const texels = size * size;
+  const irradiance = new Float32Array(texels * 3);
+  const dir = new Float32Array(texels * 3);
+  const ratio = new Float32Array(texels * 3);
+  const vis = new Float32Array(texels * 3);
+  for (let j = 0; j < index.length; j += 1) {
+    const i = index[j];
+    const o = j * 12;
+    for (let c = 0; c < 3; c += 1) irradiance[i * 3 + c] = acc[o + c] / samples;
+    const w = acc[o + 7];
+    for (let c = 0; c < 3; c += 1) dir[i * 3 + c] = w > 1e-12 ? acc[o + 4 + c] / w : 0;
+    for (let c = 0; c < 3; c += 1) {
+      const open = acc[o + 8 + c] / samples;
+      ratio[i * 3 + c] = open > 1e-6 ? Math.min(LIGHTMAP_RANGE3, irradiance[i * 3 + c] / open) : 1;
+    }
+    const ref = luminance(acc[o + 8], acc[o + 9], acc[o + 10]);
+    vis[i * 3] = ref > 1e-12 ? Math.min(1, acc[o + 11] / ref) : 1;
+  }
+  for (const values of [irradiance, dir, ratio, vis]) finishLightmapValues(values, chart, size);
+  const direction = new Float32Array(texels * 4);
+  const ambient = new Uint8ClampedArray(texels * 4);
+  const q = (x) => Math.min(255, Math.round(x / LIGHTMAP_RANGE3 * 127.5) * 2);
+  for (let i = 0; i < texels; i += 1) {
+    const length = Math.hypot(dir[i * 3], dir[i * 3 + 1], dir[i * 3 + 2]);
+    const k = length > 1 ? 1 / length : 1;
+    direction.set([dir[i * 3] * k, dir[i * 3 + 1] * k, dir[i * 3 + 2] * k, vis[i * 3]], i * 4);
+    ambient.set([q(ratio[i * 3]), q(ratio[i * 3 + 1]), q(ratio[i * 3 + 2]), 255], i * 4);
+  }
+  return { hdr: { width: size, height: size, irradiance, direction }, ambient };
+}
+
 // src/fx/lensModel.ts
 var TILT_SHIFT_FEATHER = 0.35;
 var EPSILON2 = 1e-3;
@@ -27911,6 +28340,8 @@ export {
   INPUT_MAGIC,
   INPUT_SETTINGS,
   INSTANCE_FLOATS,
+  LIGHTMAP_MAX_BOUNCES,
+  LIGHTMAP_MAX_LIGHTS,
   LIGHTS_BASE,
   LIGHTS_CAPACITY,
   LIGHT_FLOATS,
@@ -28019,6 +28450,7 @@ export {
   armDebugBlock,
   armSaveBlock,
   askMotionPermission,
+  bakeLightmapGpu,
   breakableLine,
   browserDeviceHints,
   browserRtc,
@@ -28077,6 +28509,7 @@ export {
   emitterPreset,
   encodeLut,
   encodeNetMessage,
+  environmentPanorama,
   errorStack,
   estimateSceneBytes,
   estimateSceneMemory,

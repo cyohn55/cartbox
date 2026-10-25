@@ -633,6 +633,49 @@ Everything else depends on this track. It contains no visible "feature", but its
   - A denoiser (an edge-avoiding à-trous filter, or a small learned one), with seam stitching and texel-density control.
   - Baked **probe volumes** with L2 SH and visibility (to stop leaks) light dynamic objects.
   - Minutes in the browser rather than CPU-bound bakes in node, with `bake:map` kept for CI.
+  - **F3d-1, the GPU path tracer and HDR directional light maps: done** (`render/gpuLightmapper.ts`, `model/hdrLightmap.ts`). With WebGPU, the editor's Bake lighting runs on the GPU and gives each still object the AAA tier's HDR light map beside the 8-bit one every other tier reads. Without WebGPU, and in `bake:map`, the CPU bake runs as before.
+    - **The scene** is the CPU bake's own triangle BVH (`buildBvh`, now carrying each triangle's emissive colour), flattened into storage buffers: two words per node, a corner and two edges per triangle, and its albedo and emission in linear light.
+    - **The texels** are the CPU bake's (`lightmapTexels`, split out of `bakeLightmap`, whose output is byte-identical): each one's surface point and interpolated normal.
+    - **The paths.** Each leaves its texel along a cosine-weighted direction (the first stratified over the bake and turned per texel) and bounces diffusely up to `bounces` times (0–8).
+      - Open sky gives the sky's radiance, the IBL's own linear panorama (F3a).
+      - A surface gives its emission, so emissive meshes light what sees them.
+      - Each surface a path bounces off is lit by the rig's directional lights (up to four), a shadow ray each.
+      - The texel's own sunlight is left out: the live cascades (F2a) draw it, as Unreal's stationary lights do.
+      - Dispatches are bounded (64 Ki texels, 512 Ki paths a submit), so none nears a GPU's watchdog.
+    - **What a texel keeps.**
+      - Its irradiance over π in linear light, in the sky's SH irradiance's units.
+      - The light's dominant direction (luminance-weighted and cosine-weighted, so ⅔ of the normal under a uniform sky).
+      - The share of the sky's light that came through unblocked.
+      - The 8-bit ambient scale, which is the irradiance over the open sky's, per channel, so the fantasy tiers' maps carry the bounce's tint as before.
+      - The maps are blurred within each chart and grown past its edges, as the CPU bake's are.
+    - **Storage.** `MeshMaterial.lightmapHdrImage` is one 8-bit PNG twice the atlas's height: Radiance RGBE irradiance over the direction (xyz · 0.5 + 0.5) and visibility.
+      - It is decoded by our own PNG decoder (`decodePngRgba`, new), because a browser's premultiplied alpha would wreck the exponent.
+      - It is stripped wherever the 8-bit map is (a topology edit, a re-layout, a material instance's parent, a clear), and a CPU rebake drops it.
+      - It is never re-encoded as KTX2.
+    - **Shading (AAA tier).** Binding 11 becomes a texture array in the linear variant: the HDR map's two rgba16float layers, or the 8-bit map as one layer (`ssaoMeta.z` = 2 or 1).
+      - With an HDR map, the diffuse fill is its irradiance in place of the sky's SH irradiance, rebalanced for the shading normal by a half-Lambert about the dominant direction. This is exact at the baked normal, so a normal map still reads under baked light (`directionalIrradiance` mirrors it).
+      - The sky visibility joins the specular occlusion of the environment's reflection. GTAO stays on top for near-field contact.
+      - Without one, the 8-bit map scales the fill as before. The byte variant and the other renderers never read the HDR map.
+    - **In the editor.** Up to eight bounces on the GPU (three on the CPU), four paths for each of the CPU's rays, and "Baking on the GPU…" while it runs.
+    - *Tests (`gpu-lightmapper.test.ts`):*
+      - RGBE and the stored PNG round-trip, and `decodePngRgba` keeps alpha exactly.
+      - The directional rebalance is exact at the baked normal, brighter toward the light and flat without one.
+      - The BVH flattens with its leaves and linear materials.
+      - On Dawn:
+        - open floor under a uniform sky reads the sky's radiance, all of the sky and the ⅔ direction;
+        - the floor at a tall black wall's foot gets half the sky (0.47–0.53), from the open side;
+        - a dark box's floor is lit by its glowing ceiling at the analytic view factor (±5%);
+        - a sunlit red wall bleeds red onto the floor with one bounce and not with none;
+        - three bounces in a white pit give more than 1.5× no bounce;
+        - a bake is deterministic.
+      - In the renderer, the HDR map's irradiance replaces the sky's linearly and in its colour, its visibility occludes the reflection, an 8-bit map still scales the fill on the AAA tier, and the byte path ignores the HDR map.
+      - The editor's scene bake on the GPU gives every still object both maps, and a CPU rebake or a clear takes the HDR one away.
+      - `lightmap.test.ts` and the map bakes pass unchanged.
+    - *Left for F3d:*
+      - **F3d-2**: the à-trous denoiser on the GPU, seam stitching across charts, texel-density control, and treating texels whose rays start inside geometry as invalid, so walls don't leak.
+      - **F3d-3**: baked probe volumes with L2 SH and visibility for what moves. The editor still bakes the CPU's ambient-cube probes.
+      - **F3d-4**: local and area lights' bounce, metalness and textured albedo (the bake still takes a textured material's factor × 0.55), and the procedural or imported HDR sky as the player draws it (the bake reads the rig's gradient).
+      - Re-baking Lockout and Beaver Creek with HDR maps, which waits on F11a's physical re-light.
 - [ ] **F3e. Real-time GI.**
   - **DDGI**: a probe grid whose irradiance and visibility are updated every frame by software ray tracing in compute, against a scene BVH or a global signed distance field.
   - **SSGI** for near-field detail on top.

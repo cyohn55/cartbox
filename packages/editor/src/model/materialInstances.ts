@@ -53,9 +53,10 @@ export function libraryMaterial(library: MaterialLibrary, id: string): MeshMater
 
 /** A material as a parent: no link of its own and nothing per-object (a light map, a sprite). */
 function asParent(material: MeshMaterial): MeshMaterial {
-  const { instance: _instance, lightmapImage: _lightmap, textureSprite: _sprite, ...rest } = material;
+  const { instance: _instance, lightmapImage: _lightmap, lightmapHdrImage: _hdr, textureSprite: _sprite, ...rest } = material;
   void _instance;
   void _lightmap;
+  void _hdr;
   void _sprite;
   return rest;
 }
@@ -81,6 +82,7 @@ export function resolveInstance(material: MeshMaterial, parent: MeshMaterial): M
   out.name = material.name;
   out.instance = link;
   if (material.lightmapImage !== undefined) out.lightmapImage = material.lightmapImage;
+  if (material.lightmapHdrImage !== undefined) out.lightmapHdrImage = material.lightmapHdrImage;
   if (material.textureSprite !== undefined) out.textureSprite = material.textureSprite;
   if (out.baseColorFactor === undefined) out.baseColorFactor = material.baseColorFactor;
   if (out.baseColorImage === undefined) out.baseColorImage = null;
