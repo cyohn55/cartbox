@@ -82,6 +82,12 @@ export async function bakeReflectionProbesAsync(
   }
 }
 
+/** The probes in the order they take precedence (F3b): highest priority, then the smallest box (a small room within a hall wins). */
+export function probeOrder(probes: readonly ReflectionProbe[]): ReflectionProbe[] {
+  const volume = (p: ReflectionProbe) => (p.max[0] - p.min[0]) * (p.max[1] - p.min[1]) * (p.max[2] - p.min[2]);
+  return [...probes].sort((a, b) => (b.priority ?? 0) - (a.priority ?? 0) || volume(a) - volume(b));
+}
+
 /** The bake, one probe per step. */
 function* probeSteps(
   probes: readonly ReflectionProbe[],
@@ -90,8 +96,7 @@ function* probeSteps(
   width: number,
 ): Generator<void, ReflectionProbeSet | null> {
   if (probes.length === 0) return null;
-  const volume = (p: ReflectionProbe) => (p.max[0] - p.min[0]) * (p.max[1] - p.min[1]) * (p.max[2] - p.min[2]);
-  const ordered = [...probes].sort((a, b) => volume(a) - volume(b));
+  const ordered = probeOrder(probes);
   const w = Math.max(8, width);
   const h = w >> 1;
   const atlas = new Uint8ClampedArray(w * h * ordered.length * 4);

@@ -63,9 +63,10 @@ export class MipmapGenerator {
 
   /**
    * Draw levels 1 to `levels − 1` of `texture` from its level 0, through views
-   * of `format` (the texture's own, or an sRGB view format it was made with).
+   * of `format` (the texture's own, or an sRGB view format it was made with),
+   * for each of its first `layers` array layers.
    */
-  generate(texture: any, levels: number, format: string): void {
+  generate(texture: any, levels: number, format: string, layers = 1): void {
     if (levels < 2) return;
     const device = this.device;
     this.module ??= device.createShaderModule({ code: MIP_WGSL });
@@ -81,8 +82,10 @@ export class MipmapGenerator {
       this.pipelines.set(format, pipeline);
     }
     const encoder = device.createCommandEncoder();
+    for (let layer = 0; layer < layers; layer += 1)
     for (let level = 1; level < levels; level += 1) {
-      const view = (mip: number) => texture.createView({ format, baseMipLevel: mip, mipLevelCount: 1 });
+      const view = (mip: number) =>
+        texture.createView(layers > 1 ? { format, dimension: "2d", baseMipLevel: mip, mipLevelCount: 1, baseArrayLayer: layer, arrayLayerCount: 1 } : { format, baseMipLevel: mip, mipLevelCount: 1 });
       const pass = encoder.beginRenderPass({
         colorAttachments: [{ view: view(level), clearValue: { r: 0, g: 0, b: 0, a: 0 }, loadOp: "clear", storeOp: "store" }],
       });

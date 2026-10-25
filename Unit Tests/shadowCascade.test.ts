@@ -14,6 +14,7 @@ import {
   buildSceneShadow,
   cameraPositionFromView,
   composeModelMatrix,
+  reflectionProbeAt,
   defaultSceneLighting,
   orthographicMatrix,
   parseSceneLighting,
@@ -265,6 +266,28 @@ describe("the AAA tier's sun cascades (F2a)", () => {
     bare.setCameraOverride(camera(1, 1));
     bare.blit(new Uint8Array(32 * 24 * 4));
     expect(plain.draws.at(-1)!.localShadowCasters ?? null).toBeNull();
+  });
+
+  it("hands the renderer its reflection probes to capture on the GPU, and bakes none on the CPU (F3b)", async () => {
+    const r = cascaded();
+    const lit = { ...lighting, probes: [reflectionProbeAt([0, 1, 0], [10, 4, 10], "hall")] };
+    const surface = await MeshOverlaySurface.create({ blit() {}, destroy() {} }, 32, 24, { ...scene(), lighting: lit }, r, { presenter });
+    await surface.probesReady;
+    surface.setCameraOverride(camera(1, 1));
+    surface.blit(new Uint8Array(32 * 24 * 4));
+    const draw = r.draws.at(-1)!;
+    expect(draw.reflectionCapture!.probes).toBe(lit.probes);
+    expect(draw.reflectionCapture!.instances.map((i) => i.mesh.name).sort()).toEqual(["crate", "floor", "pillar"]);
+    expect(draw.environment?.probes ?? null).toBeNull();
+    // The key holds while nothing changes, so nothing is captured again.
+    surface.blit(new Uint8Array(32 * 24 * 4));
+    expect(r.draws.at(-1)!.reflectionCapture!.key).toBe(draw.reflectionCapture!.key);
+    // Without probes, nothing to capture.
+    const plain = cascaded();
+    const bare = await MeshOverlaySurface.create({ blit() {}, destroy() {} }, 32, 24, scene(), plain, { presenter });
+    bare.setCameraOverride(camera(1, 1));
+    bare.blit(new Uint8Array(32 * 24 * 4));
+    expect(plain.draws.at(-1)!.reflectionCapture ?? null).toBeNull();
   });
 
   it("reaches the rig's own shadow distance, and casts nothing with shadows off", async () => {

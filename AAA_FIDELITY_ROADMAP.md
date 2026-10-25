@@ -545,7 +545,7 @@ Everything else depends on this track. It contains no visible "feature", but its
       - The shader samples it trilinearly at `roughness × 5`, through its own sampler at group 1 binding 9. The cube takes over binding 7 in this variant, because the fragment stage's 16 sampled textures are all bound.
       - It is rebuilt only when the environment changes: its gradient and intensity, or the identity of its map. On Beaver Creek it is built once.
     - **The diffuse light** is L2 SH irradiance, projected on the CPU and convolved with the clamped cosine (Ramamoorthi and Hanrahan), carried in the frame uniform. Before, it was the radiance straight along the normal, not the irradiance over the hemisphere.
-    - Reflection probes still mix in their nearest panoramas, blurred toward their average (F3b).
+    - Reflection probes mixed in their nearest panoramas, blurred toward their average, until F3b-1 captured them on the GPU.
     - *Tests:* `ibl.test.ts` covers:
       - the gradient in linear light;
       - SH irradiance against a brute-force cosine integral (within L2's 5% of the brightest channel; exact for a constant sky).
@@ -559,10 +559,33 @@ Everything else depends on this track. It contains no visible "feature", but its
     - *Left for F3a:*
       - The sky's procedural objects, clouds and distant vistas are drawn into the 8-bit panorama only, so an HDR sky's IBL doesn't see them. A procedural sky (no import) still lights through its 8 bits until the F5a sky is built in linear light.
       - `.exr` import waits for F9d.
-- [ ] **F3b. HDR reflection probes.**
+- [x] **F3b. HDR reflection probes.** (Compressed storage later; see below.)
   - Cubemap probes captured on the GPU, then prefiltered and stored compressed (BC6H, or RGBM where it is not available).
   - Box and sphere parallax correction, and blended influence volumes with priorities.
   - Re-capture on demand in the editor; at runtime, when time of day changes.
+  - **F3b-1, GPU-captured HDR probes: done** on the `aaa` tier (`render/probeCapture.ts`). They replace the CPU-baked 8-bit panoramas there, read nearest and blurred toward their average. Every other tier keeps those, and the AAA tier no longer bakes them.
+    - **Capture.** A second linear-light renderer (128², with no probes of its own) draws each probe's six faces from its capture point, linear and unclamped: the still scene, under the frame's lights, sun cascades and sky.
+      - The faces go into a six-layer array with its mips (`MipmapGenerator` now takes array layers).
+    - **Prefilter.** In compute, as the sky's cube is (F3a), each of the cube's six levels is written in WebGPU's cube layout.
+      - The faces are read by direction, with the sky composited where nothing drew.
+      - Each level is the GGX lobe of its roughness, importance-sampled with mip-filtered samples.
+      - Every probe sits in one `rgba16float` cube array (128², 6 × 8 layers, about 8 MB), bound at group 0 binding 12 in this variant.
+    - **Shading.** `envReflect` takes the probes in priority order: `priority` (new, −10 to 10 in the editor), then the smaller volume, which is the CPU bake's order too (`probeOrder`).
+      - Each probe takes its influence's share of what the probes before it left. The sky's lobe takes the rest, so overlapping probes blend rather than one cutting off at another's edge.
+      - A box probe is box-projected. A sphere probe (`shape: "sphere"`, `radius`, new) is projected onto its sphere and fades in from its edge; the other tiers take its bounds.
+      - Each probe is sampled trilinearly at the roughness's level, as the sky is.
+    - **Re-capture.** The player hands the renderer the probes, the still scene and a key (`SceneDraw.reflectionCapture`). The key covers the probes, the sky's map or gradient, the key light (direction to about half a degree, colour, intensity and temperature) and the static scene.
+      - When the key changes (a time of day, a relit sky), the probes are captured again, one per frame, highest priority first.
+      - A probe that hasn't moved keeps its cube bound meanwhile; a moved or new one is skipped until it is captured, so nothing pops.
+    - **Authoring:** the Lighting panel's probes gain a Box or Sphere shape (with a radius) and a priority.
+    - *Tests:* `hdr-probes.test.ts` covers the order and the packed records, and on Dawn:
+      - a room of six coloured glowing walls captures each wall onto the cube face WebGPU reads for its direction, with the roughest level a blend of them;
+      - a mirror in the room reflects the wall it faces, box- and sphere-projected, and the black sky when the probe is elsewhere;
+      - a key change captures again a probe a frame, keeping the unmoved probe's cube throughout.
+      - `shadowCascade.test.ts`: on the AAA tier the player hands over the probes and still scene, bakes no CPU panoramas, and holds its key while nothing changes.
+    - **Still to do:**
+      - BC6H storage needs a GPU encoder (the half-float array is 8 MB at most).
+      - Re-capture on demand in the editor waits for the editor's own AAA viewport. At runtime the probes already follow the light.
 - [ ] **F3c. GTAO with bent normals.** Ground-truth AO on the GPU from the depth prepass, at half resolution, temporally accumulated. Bent normals feed diffuse and specular occlusion. It replaces the unwired CPU SSAO.
   - **F3c-1, GTAO, its accumulation and bent normals: done** (`gtao.ts`). On every frame with a prepass, the linear-light renderer works out ambient occlusion on the GPU before it shades (`SceneDraw.ambientOcclusion: false` turns it off).
     - **Half resolution.** Each texel takes two screen directions, turned per pixel and per frame by interleaved gradient noise, and walks six steps each way out to 1.2 m.
