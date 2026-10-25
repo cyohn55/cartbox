@@ -97,6 +97,7 @@ import type { DisplaySurface } from "../display.js";
 import type { ScreenSun } from "../fx/PostFxSurface.js";
 import type { PostVolumeFx } from "../fx/postVolumeFx.js";
 import { SoftwareSceneRenderer, type GpuSceneDraw, type SceneRenderer, type SunShadow } from "../render/sceneRenderer.js";
+import type { ReflectionCapture } from "../render/probeCapture.js";
 import { SUN_SOFTNESS } from "../render/cascades.js";
 import type { PresentFrame, PresentSky, PresentStats } from "../render/gpuPresent.js";
 import type { MailboxMeshCamera, MailboxMeshPose, WorldLight } from "../mailbox.js";
@@ -798,6 +799,9 @@ export class MeshOverlaySurface implements DisplaySurface {
         const moves = body === "dynamic" || body === "kinematic" || body === "character";
         return inst.pooled || isSkinned(inst.mesh) || moves ? [] : [instances[i]!];
       });
+      // The AAA tier captures its probes on the GPU, in linear light (F3b): it is handed the still scene each frame.
+      surface.probeScene = still;
+      if (renderer.sunCascades === true) return surface;
       surface.probesReady = bakeReflectionProbesAsync(lighting.probes, still, {
         lightDirection: sceneLightingKeyDirection(lighting),
         ambient: lighting.ambient,
@@ -1153,6 +1157,7 @@ export class MeshOverlaySurface implements DisplaySurface {
         localShadowKey: localShadowCasters ? (this.castersFrame?.key ?? null) : null,
         localShadowMoved: localShadowCasters ? (this.castersFrame?.moved ?? null) : null,
         antialias,
+        reflectionCapture: cascaded && lighting ? this.reflectionCapture(lighting) : null,
       });
       if (profiler) profiler.add("scene", performance.now() - mark);
       this.frame += 1;
@@ -1282,6 +1287,7 @@ export class MeshOverlaySurface implements DisplaySurface {
       readonly localShadowKey: string | null;
       readonly localShadowMoved: readonly MeshSceneInstance[] | null;
       readonly antialias: boolean;
+      readonly reflectionCapture: ReflectionCapture | null;
     },
   ): void {
     const { camera, lighting } = job;
@@ -1313,6 +1319,7 @@ export class MeshOverlaySurface implements DisplaySurface {
       reflections: this.options.reflections === true && this.quality.reflections === true,
       ...(this.options.prepass === true ? { prepass: true } : {}),
       ...(lighting ? { ...lit, localShadows: job.local, shadow: job.shadow, sunShadow: job.sunShadow, localShadowCasters: job.localShadowCasters, localShadowKey: job.localShadowKey, localShadowMoved: job.localShadowMoved, fog: lighting.fog ?? null, wind: lighting.wind ?? null } : {}),
+      ...(job.reflectionCapture ? { reflectionCapture: job.reflectionCapture } : {}),
       time,
     };
     const scene = this.renderer.renderToTexture!(job.drawn, draw) ?? null;
@@ -2122,6 +2129,38 @@ export class MeshOverlaySurface implements DisplaySurface {
   }
   /** Settles once the scene's reflection probes are baked and in use (tests await it). */
   probesReady: Promise<void> = Promise.resolve();
+  /** What the reflection probes see: the scene's still objects (F3b). */
+  private probeScene: readonly MeshSceneInstance[] = [];
+  /** The probes' capture key's parts that hold while the rig does, and a token for each sky map (F3b). */
+  private probeKeys = new WeakMap<object, string>();
+  private envTokens = new WeakMap<object, number>();
+
+  /**
+   * What the AAA tier's renderer captures its probes from this frame (F3b):
+   * the probes, the still scene, and a key that changes with them, the sky, or
+   * the key light (the sun turning by more than about half a degree, or changing
+   * colour), so a time of day re-captures them.
+   */
+  private reflectionCapture(lighting: SceneLighting): ReflectionCapture | null {
+    const probes = lighting.probes;
+    if (!probes || probes.length === 0 || this.probeScene.length === 0) return null;
+    let rig = this.probeKeys.get(probes);
+    if (rig === undefined) this.probeKeys.set(probes, (rig = JSON.stringify(probes)));
+    // The sky as its cube is built from (environmentKey): its map's identity, or its gradient, and its intensity.
+    const env = this.environment;
+    const map = env ? (env.hdr ?? env.map ?? null) : null;
+    let token = 0;
+    if (map) {
+      token = this.envTokens.get(map) ?? 0;
+      if (!token) this.envTokens.set(map, (token = ++this.envCounter));
+    }
+    const sky = env ? (map ? `${token}:${env.intensity}` : [...env.sky, ...env.horizon, ...env.ground, env.intensity].map((v) => Math.round(v * 1000)).join(",")) : "-";
+    const key = lighting.lights.find((l) => l.kind === "directional");
+    const r = (v: number) => Math.round(v * 100);
+    const sun = key ? [...(key.direction ?? [0, 1, 0]).map(r), ...key.color.map(r), r(key.intensity), key.temperature ?? 0].join(",") : "-";
+    return { probes, instances: this.probeScene, key: `${rig}|${sky}|${sun}|${this.staticShadowKey()}` };
+  }
+  private envCounter = 0;
 }
 
 /** The mesh with each placeholder image whose ref is in `images` filled in (the same mesh when none is). */

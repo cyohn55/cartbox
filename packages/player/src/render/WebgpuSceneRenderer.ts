@@ -134,6 +134,7 @@ import { MAX_ANISOTROPY, MipmapGenerator, coverageMips, hasTransparency, mipLeve
 import { compressedFormatsFor } from "../lighting/webgpuDevice.js";
 import { brdfWgsl, dfgTable } from "./brdf.js";
 import { ltcTables, ltcWgsl } from "./ltc.js";
+import { PROBE_FACE, ProbeCapture, packCapturedProbes } from "./probeCapture.js";
 import { IBL_LEVELS, IblBuilder, SH_IRRADIANCE_WGSL, environmentKey, environmentPanorama, environmentSh } from "./ibl.js";
 import { CASCADE_COUNT, CASCADE_FORMAT, CASCADE_SHADOW_WGSL, SUN_SOFTNESS, fitCascades, type Cascade } from "./cascades.js";
 import { REACTIVE_MASK_WGSL, TEMPORAL_SHARPEN_WGSL, TemporalState, hdrTemporalShaderWgsl, temporalShaderWgsl } from "./temporal.js";
@@ -501,7 +502,7 @@ struct Probe {
   pos: vec4<f32>,
   avg: vec4<f32>,
 };
-@group(0) @binding(12) var probeAtlas: texture_2d<f32>;
+${hdr ? "// The linear variant's probes (F3b, probeCapture.ts): each one's prefiltered cube, six layers apiece.\n@group(0) @binding(12) var probeCubes: texture_cube_array<f32>;" : "@group(0) @binding(12) var probeAtlas: texture_2d<f32>;"}
 @group(0) @binding(13) var<storage, read> probes: array<Probe>;
 // A finely tiled detail map (materialEffects.ts; 1x1 white when none — the
 // uniform's surface0.y gates it).
@@ -714,7 +715,10 @@ ${hdr
   let ty = i32(clamp(floor(vCoord * dims.y), 0.0, dims.y - 1.0));
   return toLinear(textureLoad(envMap, vec2<i32>(tx, ty), 0).rgb) * u.envHorizon.w;`}
 }
-// Probe i's panorama along a direction, nearest — mirrors sampleProbe.
+${hdr ? `// Probe i's cube along a direction, at a roughness's level (F3b).
+fn probeSample(i: i32, dir: vec3<f32>, rough: f32) -> vec3<f32> {
+  return textureSampleLevel(probeCubes, envSamp, dir, i, rough * frame.envInfo.x).rgb;
+}` : `// Probe i's panorama along a direction, nearest — mirrors sampleProbe.
 fn probeSample(i: i32, dir: vec3<f32>) -> vec3<f32> {
   let d = normalize(dir);
   let uCoord = atan2(d.z, d.x) / (2.0 * 3.14159265) + 0.5;
@@ -724,7 +728,7 @@ fn probeSample(i: i32, dir: vec3<f32>) -> vec3<f32> {
   let tx = i32(clamp(floor((uCoord - floor(uCoord)) * dims.x), 0.0, dims.x - 1.0));
   let ty = i32(clamp(floor(vCoord * h), 0.0, h - 1.0) + f32(i) * h);
   return toLinear(textureLoad(probeAtlas, vec2<i32>(tx, ty), 0).rgb * ${PROBE_RANGE.toFixed(4)});
-}
+}`}
 // The 2×2 ordered-dither matrix [[0, 2], [3, 1]], and the crawling camo threshold (surfaceEffect.ts).
 fn bayer2(x: i32, y: i32) -> f32 {
   if ((y & 1) == 1) { return select(3.0, 1.0, (x & 1) == 1); }
@@ -902,23 +906,40 @@ fn coatTerm(N: vec3<f32>, ndv: f32, Ld: vec3<f32>, H: vec3<f32>, vdh: f32) -> ve
 // around it, box-projected from this point, fading to the sky at the box's
 // faces — mirroring environmentReflection and pickProbe/boxProject.
 fn envReflect(P: vec3<f32>, R: vec3<f32>, rough: f32) -> vec3<f32> {
-${hdr ? `  // The linear variant (F3a): the sky's GGX lobe from the prefiltered cube, and a
-  // probe's room (still a nearest panorama, until F3b) blurred toward its average.
-  var spec = textureSampleLevel(envCube, envSamp, R, rough * frame.envInfo.x).rgb;
+${hdr ? `  // The linear variant (F3a, F3b): the probes' prefiltered cubes, the highest
+  // priority first, each taking its share of what the ones before left, and the
+  // sky's lobe from its own cube the rest. A box probe is box-projected, a sphere
+  // probe (pos.w its radius) sphere-projected; avg.w is 1 once it is captured.
+  var spec = vec3<f32>(0.0);
+  var left = 1.0;
   let pc = i32(u.ssaoMeta.w + 0.5);
   for (var i = 0; i < pc; i = i + 1) {
     let pr = probes[i];
-    let inside = min(min(min(P.x - pr.mn.x, pr.mx.x - P.x), min(P.y - pr.mn.y, pr.mx.y - P.y)), min(P.z - pr.mn.z, pr.mx.z - P.z));
-    let wgt = clamp(inside / ${PROBE_FADE.toFixed(4)}, 0.0, 1.0);
-    if (wgt > 0.0) {
+    if (pr.avg.w < 0.5) { continue; }
+    var wgt = 0.0;
+    var dir = R;
+    if (pr.pos.w > 0.0) {
+      let o = P - pr.pos.xyz;
+      let r = pr.pos.w;
+      wgt = clamp((r - length(o)) / ${PROBE_FADE.toFixed(4)}, 0.0, 1.0);
+      let b = dot(o, R);
+      let t = -b + sqrt(max(b * b - (dot(o, o) - r * r), 0.0));
+      dir = o + R * t;
+    } else {
+      let inside = min(min(min(P.x - pr.mn.x, pr.mx.x - P.x), min(P.y - pr.mn.y, pr.mx.y - P.y)), min(P.z - pr.mn.z, pr.mx.z - P.z));
+      wgt = clamp(inside / ${PROBE_FADE.toFixed(4)}, 0.0, 1.0);
       let Rs = select(R, vec3<f32>(1e-6), abs(R) < vec3<f32>(1e-6));
       let tf = max((pr.mx.xyz - P) / Rs, (pr.mn.xyz - P) / Rs);
       let t = max(0.0, min(min(tf.x, tf.y), tf.z));
-      spec = mix(spec, mix(probeSample(i, P + R * t - pr.pos.xyz), pr.avg.xyz, rough), wgt);
-      break;
+      dir = P + R * t - pr.pos.xyz;
     }
+    if (wgt <= 0.0) { continue; }
+    let share = wgt * left;
+    spec = spec + probeSample(i, dir, rough) * share;
+    left = left - share;
+    if (left <= 0.001) { return spec; }
   }
-  return spec;
+  return spec + textureSampleLevel(envCube, envSamp, R, rough * frame.envInfo.x).rgb * left;
 }
 ` : `  var spec = envColorDir(R);
   var specAvg = envAverage();
@@ -1770,6 +1791,12 @@ export class WebgpuSceneRenderer implements SceneRenderer {
   private probeSource: DecodedTexture | null = null;
   /** The probe boxes (binding 13): room for every probe a scene may carry. */
   private probeBuffer: any = null;
+  /** The linear variant's GPU-captured probes (F3b), made when a frame first has some; their stand-in until then. */
+  private probeCapture: ProbeCapture | null = null;
+  private readonly blankProbeCubes: any = null;
+  /** The probes the linear variant's shader loops over, and what was last written of them. */
+  private capturedProbes = 0;
+  private capturedSig = "";
 
   /** Per-instance transforms (binding 10), grown as needed. */
   private instanceBuffer: any = null;
@@ -1838,6 +1865,7 @@ export class WebgpuSceneRenderer implements SceneRenderer {
     this.shadowTexture = blankShadow;
     this.envTexture = hdr ? blankCube(device) : blankTexture; // the 1x1 white stands in until a map is bound (a black cube in the linear variant)
     this.probeTexture = blankTexture;
+    if (hdr) this.blankProbeCubes = device.createTexture({ size: { width: 1, height: 1, depthOrArrayLayers: 6 }, format: "rgba16float", usage: 0x04 });
     this.ssaoBound = blankShadow; // the 1x1 r32float blank until an AO buffer arrives
     this.timer = GraphTimer.create(device);
     this.mipmaps = new MipmapGenerator(device);
@@ -2110,8 +2138,8 @@ export class WebgpuSceneRenderer implements SceneRenderer {
           // Per-instance transforms, read by the vertex stage.
           { binding: 10, visibility: SHADER_STAGE_VERTEX, buffer: { type: "read-only-storage" } },
           { binding: 11, visibility: SHADER_STAGE_FRAGMENT, texture: { sampleType: "float" } },
-          // Reflection probes: the panorama atlas (read via textureLoad) and their boxes.
-          { binding: 12, visibility: SHADER_STAGE_FRAGMENT, texture: { sampleType: "float" } },
+          // Reflection probes: the panorama atlas (read via textureLoad), or the linear variant's cube array (F3b); and their boxes.
+          { binding: 12, visibility: SHADER_STAGE_FRAGMENT, texture: hdr ? { sampleType: "float", viewDimension: "cube-array" } : { sampleType: "float" } },
           { binding: 13, visibility: SHADER_STAGE_FRAGMENT, buffer: { type: "read-only-storage" } },
           // The detail map, and the blend surface's map.
           { binding: 14, visibility: SHADER_STAGE_FRAGMENT, texture: { sampleType: "float" } },
@@ -2572,6 +2600,35 @@ export class WebgpuSceneRenderer implements SceneRenderer {
     this.bindGroups = new WeakMap(); // binding 7 changed identity
   }
 
+  /**
+   * The linear variant's probes (F3b): captured on the GPU into the cube array
+   * bound at 12, a probe a frame, and their boxes (13), each marked once captured.
+   */
+  private updateProbeCapture(draw: GpuSceneDraw): void {
+    const capture = draw.reflectionCapture ?? null;
+    if (!this.probeBuffer) {
+      this.probeBuffer = this.device.createBuffer({ size: MAX_REFLECTION_PROBES * PROBE_FLOATS * 4, usage: 0x80 | 0x08 }); // STORAGE | COPY_DST
+      this.bindGroups = new WeakMap();
+    }
+    if (capture && capture.probes.length > 0 && !this.probeCapture) {
+      const device = this.device;
+      this.probeCapture = new ProbeCapture(device, () => WebgpuSceneRenderer.create(device, PROBE_FACE, PROBE_FACE, undefined, { hdr: true }));
+      this.bindGroups = new WeakMap(); // binding 12 changed identity
+    }
+    if (!this.probeCapture) {
+      this.capturedProbes = 0;
+      return;
+    }
+    this.probeCapture.update(capture, draw, this.envTexture);
+    const packed = packCapturedProbes(this.probeCapture.current);
+    const sig = packed.join(",");
+    if (sig !== this.capturedSig) {
+      this.device.queue.writeBuffer(this.probeBuffer, 0, packed, 0, packed.length);
+      this.capturedSig = sig;
+    }
+    this.capturedProbes = this.probeCapture.current.length;
+  }
+
   /** The same for the reflection-probe atlas (binding 12), plus the boxes (binding 13). */
   private ensureProbes(set: ReflectionProbeSet | null): void {
     const atlas = set?.atlas ?? null;
@@ -2789,7 +2846,9 @@ export class WebgpuSceneRenderer implements SceneRenderer {
     // Env map: uploaded once per distinct decoded panorama; the uniform's
     // envMeta.w (written from environment.average) gates whether it is sampled.
     this.ensureEnvTexture(draw.environment ?? null);
-    this.ensureProbes(draw.environment?.probes ?? null);
+    // The linear variant captures its own probes on the GPU (F3b); the others take the CPU's baked panoramas.
+    if (this.hdr) this.updateProbeCapture(draw);
+    else this.ensureProbes(draw.environment?.probes ?? null);
 
     // SSAO: upload the CPU-generated AO buffer (same one the software path uses)
     // for the shader to sample per fragment.
@@ -2874,6 +2933,7 @@ export class WebgpuSceneRenderer implements SceneRenderer {
         windBefore: entry.primitive.sway ? windThen : null,
         motionBase: prepass ? instanceCount : 0,
         lightChannels: entry.channels,
+        ...(this.hdr ? { probeCount: this.capturedProbes } : {}),
       };
     };
     let next = 0;
@@ -3814,7 +3874,7 @@ export class WebgpuSceneRenderer implements SceneRenderer {
         // The baked light map (or the 1x1 white blank; the uniform flag gates it).
         { binding: 11, resource: view(textures.lm) },
         // The probe atlas (or the blank) and boxes; a change invalidates the cache.
-        { binding: 12, resource: this.probeTexture.createView() },
+        { binding: 12, resource: this.hdr ? (this.probeCapture?.cubes ?? this.blankProbeCubes).createView({ dimension: "cube-array" }) : this.probeTexture.createView() },
         { binding: 13, resource: { buffer: this.probeBuffer } },
         // The detail map (or the 1x1 white blank; the uniform gates it).
         { binding: 14, resource: view(textures.detail) },
@@ -3987,6 +4047,8 @@ export class WebgpuSceneRenderer implements SceneRenderer {
     if (this.shadowTexture !== this.blankShadow) destroySafely(this.shadowTexture);
     if (this.envTexture !== this.blankTexture) destroySafely(this.envTexture);
     if (this.probeTexture !== this.blankTexture) destroySafely(this.probeTexture);
+    this.probeCapture?.dispose();
+    destroySafely(this.blankProbeCubes);
     destroySafely(this.probeBuffer);
     destroySafely(this.ssaoTexture);
     destroySafely(this.lightBuffer);

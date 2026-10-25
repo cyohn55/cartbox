@@ -1221,9 +1221,64 @@ function ProbeControls({ lighting, onChange }: LightingEditorProps & { lighting:
               ✕
             </button>
           </div>
-          <VectorRow label="Capture point" value={probe.position} step={0.5} onChange={(position) => patch(index, { position })} />
-          <VectorRow label="Box min" value={probe.min} step={0.5} onChange={(min) => patch(index, { min })} />
-          <VectorRow label="Box max" value={probe.max} step={0.5} onChange={(max) => patch(index, { max })} />
+          <SegmentedControl
+            label="Shape"
+            ariaLabel={`Probe ${index + 1} shape`}
+            selected={probe.shape === "sphere" ? "sphere" : "box"}
+            onSelect={(v) => {
+              if (v === "box") {
+                const { shape: _shape, radius: _radius, ...rest } = probe;
+                set(probes.map((p, i) => (i === index ? rest : p)));
+                return;
+              }
+              const radius = probe.radius ?? Math.max(0.5, Math.min(...[0, 1, 2].map((a) => (probe.max[a]! - probe.min[a]!) / 2)));
+              const at = (s: number) => probe.position.map((c) => c + s * radius) as [number, number, number];
+              patch(index, { shape: "sphere", radius, min: at(-1), max: at(1) });
+            }}
+            options={[
+              { id: "box", label: "Box", hint: "A room: reflections line up with its walls" },
+              { id: "sphere", label: "Sphere", hint: "An open space round the capture point (the AAA tier projects onto the sphere; the other tiers take its bounds)" },
+            ]}
+          />
+          <VectorRow
+            label="Capture point"
+            value={probe.position}
+            step={0.5}
+            onChange={(position) =>
+              probe.shape === "sphere" && probe.radius
+                ? patch(index, { position, min: position.map((c) => c - probe.radius!) as [number, number, number], max: position.map((c) => c + probe.radius!) as [number, number, number] })
+                : patch(index, { position })
+            }
+          />
+          {probe.shape === "sphere" ? (
+            <RangeControl
+              label="Radius"
+              nested
+              min={0.5}
+              max={200}
+              step={0.5}
+              value={probe.radius ?? 4}
+              ariaLabel={`Probe ${index + 1} radius`}
+              display={`${(probe.radius ?? 4).toFixed(1)} m`}
+              onChange={(radius) => patch(index, { radius, min: probe.position.map((c) => c - radius) as [number, number, number], max: probe.position.map((c) => c + radius) as [number, number, number] })}
+            />
+          ) : (
+            <>
+              <VectorRow label="Box min" value={probe.min} step={0.5} onChange={(min) => patch(index, { min })} />
+              <VectorRow label="Box max" value={probe.max} step={0.5} onChange={(max) => patch(index, { max })} />
+            </>
+          )}
+          <RangeControl
+            label="Priority"
+            nested
+            min={-10}
+            max={10}
+            step={1}
+            value={probe.priority ?? 0}
+            ariaLabel={`Probe ${index + 1} priority`}
+            display={`${probe.priority ?? 0}`}
+            onChange={(priority) => patch(index, { priority: priority === 0 ? undefined : priority })}
+          />
         </div>
       ))}
       <button

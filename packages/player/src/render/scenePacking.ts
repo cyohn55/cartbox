@@ -537,6 +537,8 @@ export interface InstanceUniform {
   readonly motionBase?: number;
   /** The lighting channels the draw's copies are on (F2e), absent the first. */
   readonly lightChannels?: number;
+  /** How many probes the shader loops over, where not `environment.probes`' (the linear variant's GPU-captured ones, F3b). */
+  readonly probeCount?: number;
 }
 
 /**
@@ -687,7 +689,7 @@ export function writeInstanceUniform(target: Float32Array, index: number, unifor
   target[base + OFFSET_SSAO] = uniform.hasSsao ? 1 : 0;
   target[base + OFFSET_SSAO + 1] = uniform.lightCount; // light count for the storage-buffer loop
   target[base + OFFSET_SSAO + 2] = uniform.hasLightmap ? 1 : 0;
-  target[base + OFFSET_SSAO + 3] = env?.probes ? Math.min(env.probes.probes.length, MAX_REFLECTION_PROBES) : 0;
+  target[base + OFFSET_SSAO + 3] = uniform.probeCount ?? (env?.probes ? Math.min(env.probes.probes.length, MAX_REFLECTION_PROBES) : 0);
 
   const model = uniform.model;
   for (let i = 0; i < 16; i += 1) target[base + OFFSET_MODEL + i] = model ? model[i]! : (i % 5 === 0 ? 1 : 0);

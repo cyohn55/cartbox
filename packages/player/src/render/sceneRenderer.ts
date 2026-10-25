@@ -34,6 +34,7 @@ import {
 import type { EnvironmentLight, LocalShadows, Mat4, RasterStyle, SceneFog, SceneLight, ShadowInput, ToneMap } from "@cartbox/editor";
 
 import type { RenderCaps } from "../models.js";
+import type { ReflectionCapture } from "./probeCapture.js";
 import type { RenderStats } from "../debug/profiler.js";
 import { applyRenderCaps, createTextureBudgetCache } from "./renderCaps.js";
 
@@ -173,6 +174,13 @@ export interface SceneDraw {
   readonly localShadowKey?: string | null;
   /** The casters that move this frame (F2d-2): a light any of them reaches has its tiles drawn again. */
   readonly localShadowMoved?: readonly MeshSceneInstance[] | null;
+  /**
+   * The reflection probes the linear-light (AAA) WebGPU renderer captures on
+   * the GPU (AAA_FIDELITY_ROADMAP.md F3b), in place of the CPU's baked
+   * panoramas in `environment.probes`: the probes, the still scene they see, and
+   * a key that changes when either, or the light, does.
+   */
+  readonly reflectionCapture?: ReflectionCapture | null;
   /**
    * The sun's shadow rendered on the GPU in cascades (AAA_FIDELITY_ROADMAP.md
    * F2a), in place of the CPU-rasterised {@link shadow}: what casts (the whole

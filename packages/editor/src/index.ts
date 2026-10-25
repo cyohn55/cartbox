@@ -968,7 +968,7 @@ export {
   type VistaLayer,
   type VistaShading,
 } from "./render/vista";
-export { PROBE_PANORAMA_WIDTH, bakePanorama, bakeReflectionProbes, bakeReflectionProbesAsync, type ProbeBakeLighting } from "./render/probeBake";
+export { PANORAMA_FACES, PROBE_PANORAMA_WIDTH, probeOrder, bakePanorama, bakeReflectionProbes, bakeReflectionProbesAsync, type ProbeBakeLighting } from "./render/probeBake";
 export {
   CLOUD_TILE,
   MAX_CLOUD_LAYERS,

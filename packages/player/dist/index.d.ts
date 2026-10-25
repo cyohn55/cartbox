@@ -1,4 +1,4 @@
-import { MeshSceneInstance, MeshAsset, Mat4, ScenePropValue, PhysicsSpec, AnimatorSpec, AttachedComponent, SceneLighting, PhysicsWorldSettings, SceneTimeline, SceneLevel, NavMesh, Terrain, SceneStreaming, ParticleEffect, DecalDef, DecalMark, RagdollBox, DebrisDef, LodChain, SceneAudio, ComponentDef, StreamGroup, JointKind, JointSpec, ActionRebind, DecodedTexture, SkySun, BakedCloudLayer, SunShafts, ColorFilter, AccessibilitySettings, EncodedImage, UiDocument, InputAction, StringTable, EnvironmentLight, ShadowInput, ToneMap, SceneLight, LocalShadows, SceneFog, SceneWind, RasterStyle, MeshMaterial, ResolvedLayers, ResolvedRefraction, SurfaceEffect, AnimatorOp, NavGraph, AnimationCue } from '@cartbox/editor';
+import { MeshSceneInstance, MeshAsset, Mat4, ScenePropValue, PhysicsSpec, AnimatorSpec, AttachedComponent, SceneLighting, PhysicsWorldSettings, SceneTimeline, SceneLevel, NavMesh, Terrain, SceneStreaming, ParticleEffect, DecalDef, DecalMark, RagdollBox, DebrisDef, LodChain, SceneAudio, ComponentDef, StreamGroup, JointKind, JointSpec, ActionRebind, DecodedTexture, SkySun, BakedCloudLayer, SunShafts, ColorFilter, AccessibilitySettings, EncodedImage, UiDocument, InputAction, StringTable, ReflectionProbe, EnvironmentLight, ShadowInput, ToneMap, SceneLight, LocalShadows, SceneFog, SceneWind, RasterStyle, MeshMaterial, ResolvedLayers, ResolvedRefraction, SurfaceEffect, AnimatorOp, NavGraph, AnimationCue } from '@cartbox/editor';
 
 /**
  * The runtime mesh scene: the cart's mesh sidecar resolved into placed instances
@@ -4174,6 +4174,36 @@ interface RegisteredAchievement {
 declare function resolveUnlockedAchievements(unlockHashes: number[], registered: RegisteredAchievement[]): RegisteredAchievement[];
 
 /**
+ * HDR reflection probes on the AAA tier (AAA_FIDELITY_ROADMAP.md F3b): each
+ * probe captured on the GPU as a cube of the scene in linear light, and
+ * prefiltered into the GGX lobes of rising roughness, as the sky's own cube is
+ * (F3a, ibl.ts).
+ *
+ * - **Capture.** A second linear-light renderer, {@link PROBE_FACE}² and
+ *   without probes of its own (its reflections are of the sky), draws the six
+ *   faces from the probe's capture point (`PANORAMA_FACES`, the CPU bake's).
+ *   Its output, linear and unclamped, is copied into a six-layer array and
+ *   given its mips.
+ * - **Prefilter.** A compute pass writes each level of the probe's cube, in
+ *   WebGPU's cube layout, from the faces read by direction (with the sky
+ *   composited where nothing drew). It importance-samples the GGX lobe of the
+ *   level's roughness with mip-filtered samples, as the sky's cube is.
+ * - **One cube array** holds every probe, {@link MAX_REFLECTION_PROBES} × 6
+ *   layers, and the scene shader samples it trilinearly by roughness.
+ * - **Re-capture.** Re-capturing happens when the caller's key changes: the
+ *   probes, the still scene, or the light (the sun moving with the time of
+ *   day). It goes a probe a frame, highest priority first, and the probes
+ *   already captured stay bound meanwhile, so nothing pops back to the sky.
+ */
+
+/** What a frame asks to be captured: the probes, the still scene they see, and what identifies both and the light. */
+interface ReflectionCapture {
+    readonly probes: readonly ReflectionProbe[];
+    readonly instances: readonly MeshSceneInstance[];
+    readonly key: string;
+}
+
+/**
  * Scene rendering: the seam between "what to draw" and "what draws it".
  *
  * Both 3D overlays — {@link MeshOverlaySurface} and {@link WorldOverlaySurface} —
@@ -4330,6 +4360,13 @@ interface SceneDraw {
     readonly localShadowKey?: string | null;
     /** The casters that move this frame (F2d-2): a light any of them reaches has its tiles drawn again. */
     readonly localShadowMoved?: readonly MeshSceneInstance[] | null;
+    /**
+     * The reflection probes the linear-light (AAA) WebGPU renderer captures on
+     * the GPU (AAA_FIDELITY_ROADMAP.md F3b), in place of the CPU's baked
+     * panoramas in `environment.probes`: the probes, the still scene they see, and
+     * a key that changes when either, or the light, does.
+     */
+    readonly reflectionCapture?: ReflectionCapture | null;
     /**
      * The sun's shadow rendered on the GPU in cascades (AAA_FIDELITY_ROADMAP.md
      * F2a), in place of the CPU-rasterised {@link shadow}: what casts (the whole
@@ -4974,6 +5011,12 @@ declare class WebgpuSceneRenderer implements SceneRenderer {
     private probeSource;
     /** The probe boxes (binding 13): room for every probe a scene may carry. */
     private probeBuffer;
+    /** The linear variant's GPU-captured probes (F3b), made when a frame first has some; their stand-in until then. */
+    private probeCapture;
+    private readonly blankProbeCubes;
+    /** The probes the linear variant's shader loops over, and what was last written of them. */
+    private capturedProbes;
+    private capturedSig;
     /** Per-instance transforms (binding 10), grown as needed. */
     private instanceBuffer;
     private instanceCapacity;
@@ -5053,6 +5096,11 @@ declare class WebgpuSceneRenderer implements SceneRenderer {
      * SH the frame carries, rebuilt only when what it's made of changes.
      */
     private ensureIbl;
+    /**
+     * The linear variant's probes (F3b): captured on the GPU into the cube array
+     * bound at 12, a probe a frame, and their boxes (13), each marked once captured.
+     */
+    private updateProbeCapture;
     /** The same for the reflection-probe atlas (binding 12), plus the boxes (binding 13). */
     private ensureProbes;
     /** A one-off rgba8unorm upload of a decoded image. */
@@ -5559,6 +5607,8 @@ interface InstanceUniform {
     readonly motionBase?: number;
     /** The lighting channels the draw's copies are on (F2e), absent the first. */
     readonly lightChannels?: number;
+    /** How many probes the shader loops over, where not `environment.probes`' (the linear variant's GPU-captured ones, F3b). */
+    readonly probeCount?: number;
 }
 /**
  * A draw's triplanar repeat (0 = UV mapping) and height-blend sharpness (0 = an
@@ -7261,6 +7311,19 @@ declare class MeshOverlaySurface implements DisplaySurface {
     burst(effect: number, at: readonly [number, number, number], dir: readonly [number, number, number], scale: number): void;
     /** Settles once the scene's reflection probes are baked and in use (tests await it). */
     probesReady: Promise<void>;
+    /** What the reflection probes see: the scene's still objects (F3b). */
+    private probeScene;
+    /** The probes' capture key's parts that hold while the rig does, and a token for each sky map (F3b). */
+    private probeKeys;
+    private envTokens;
+    /**
+     * What the AAA tier's renderer captures its probes from this frame (F3b):
+     * the probes, the still scene, and a key that changes with them, the sky, or
+     * the key light (the sun turning by more than about half a degree, or changing
+     * colour), so a time of day re-captures them.
+     */
+    private reflectionCapture;
+    private envCounter;
 }
 /**
  * The 15 armour colours a pose's `tint` picks from (index 0 = no tint). Applied
