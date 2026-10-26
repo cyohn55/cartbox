@@ -1181,10 +1181,30 @@ Everything else depends on this track. It contains no visible "feature", but its
 
 ### F9. The asset pipeline for AAA content
 
-- [ ] **F9a. High-to-low baking.**
+- [x] **F9a. High-to-low baking.** (On the CPU; a GPU bake over the F3d tracer for multi-million-triangle sources later.)
   - Normal, AO, curvature, thickness, position and ID maps baked from a high-poly mesh onto a low-poly one.
   - Cages or ray distances, MikkTSpace-synced so bakes match F1c tangents, with anti-aliased supersampling.
   - This is the Marmoset and Substance baker workflow, and the foundation of every AAA prop.
+  - **F9a-1: done** (`editor model/highToLowBake.ts`; the Mesh tab's Bake maps panel).
+    - **Projection.** Each low texel's subsamples (2×2 by default, so the maps are anti-aliased) cast a ray toward the high mesh, through the same BVH tracer as the light bakes. With a cage (the low mesh's topology pushed out), rays run from the cage to the low surface. Without one, they run from `front` above the low surface to `back` below it, along its interpolated normal.
+      - The first hit is what the texel shows. A ray that slips along an edge between two high triangles is nudged and tried again; one that still finds nothing tries outward. A texel no ray reaches keeps the low surface's own, and the bake reports the share found.
+    - **Synced to F1c.** The low mesh's tangents (MikkTSpace through the caller's `mikk` when it has none, else a per-vertex frame from its UVs, Lengyel's) are written to it, so every renderer decodes in the frame the bake used.
+      - The baked normal solves [t b n]·x = N_high in the shader's own frame: the interpolated unit tangent and normal, unrenormalised, and the bitangent w·(n × t). So it decodes to exactly the high mesh's smooth normal, not its projection on an orthonormal frame.
+    - **The maps.**
+      - A tangent-space normal map.
+      - Occlusion, curvature and thickness of the high mesh at the hit, with the same-mesh bake's estimators (`EdgeField`, `hemisphere`, now exported).
+      - The high surface's height over the low (the relief map's R, beside curvature and thinness).
+      - Its position over its bounds.
+      - An ID map: a golden-ratio colour per high primitive, the masks smart materials pick from (F9b).
+      - Charts grow four texels into the gaps.
+    - **The panel.** A high mesh (OBJ or GLB) loads beside the same-mesh bake, with Ray front and back. One button bakes and sets the normal, occlusion and relief maps on the mesh, with thumbnails of the normal, height and ID maps.
+    - *Tests (`high-to-low.test.ts`):* a flat 2×2 quad baked from a finely tessellated dome.
+      - Decoded as the AAA shader decodes it, its normal map gives back the dome's analytic normals within 5°, with full coverage.
+      - Its height rises by the dome's 0.3 over the quad's mid-grey.
+      - Its ID map tells the high mesh's two halves apart.
+      - A cage bakes the same normals as ray distances (within 2 of 255).
+      - A trench in the high mesh darkens the occlusion while open ground reads open.
+      - The low mesh comes back with its tangents and maps.
 - [ ] **F9b. Smart materials.**
   - Layer-based texturing in the Mesh tab: fill layers, masks generated from bakes (edge wear from curvature, dirt from AO, rust from position and gravity), anchors and brush strokes.
   - Exports to 4K texture sets, with UDIM support for heroes.

@@ -1728,3 +1728,4 @@ export {
   type PhysicalCamera,
   type PhysicalCameraSettings,
 } from "./model/physicalCamera";
+export { bakeHighToLow, idColour, uvTangents, type HighToLowBake, type HighToLowMaps, type HighToLowOptions } from "./model/highToLowBake";

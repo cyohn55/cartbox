@@ -6,11 +6,16 @@
  * relief maps (see textureBake.ts in @cartbox/editor), which feed the material
  * graph's Occlusion, Curvature and Thickness inputs and its wear masks. A mesh
  * without texture coordinates is given a unique layout first.
+ *
+ * High-to-low (AAA_FIDELITY_ROADMAP.md F9a): with a detailed source mesh
+ * loaded (OBJ or GLB), the same panel bakes its normals, occlusion, curvature,
+ * thickness, height, position and IDs onto this mesh's texture space
+ * (highToLowBake.ts), by ray distances or a cage.
  */
 
 import { useEffect, useMemo, useState } from "react";
 
-import { bakeSurfaceMaps, meshBounds, type BakedMaps, type DecodedTexture, type MeshAsset } from "@cartbox/editor";
+import { bakeHighToLow, bakeSurfaceMaps, meshBounds, parseGlb, parseObj, type BakedMaps, type DecodedTexture, type HighToLowMaps, type MeshAsset } from "@cartbox/editor";
 
 import { RailGroup, RailHint } from "./railControls";
 
@@ -33,6 +38,19 @@ function channelUrl(t: DecodedTexture, channel: number): string {
   return canvas.toDataURL();
 }
 
+/** A map's colour as a data URL, for a thumbnail. */
+function rgbUrl(t: DecodedTexture): string {
+  const canvas = document.createElement("canvas");
+  canvas.width = t.width;
+  canvas.height = t.height;
+  const context = canvas.getContext("2d");
+  if (!context) return "";
+  const image = context.createImageData(t.width, t.height);
+  image.data.set(t.data);
+  context.putImageData(image, 0, 0);
+  return canvas.toDataURL();
+}
+
 export function BakePanel({ mesh, onBaked }: { mesh: MeshAsset; onBaked: (next: MeshAsset) => void }) {
   const extent = useMemo(() => {
     const b = meshBounds(mesh);
@@ -46,6 +64,41 @@ export function BakePanel({ mesh, onBaked }: { mesh: MeshAsset; onBaked: (next: 
   const [busy, setBusy] = useState(false);
   const [baked, setBaked] = useState<readonly BakedMaps[] | null>(null);
   const [note, setNote] = useState<string | null>(null);
+  // High-to-low (F9a): the detailed source, and how far rays reach above and below this mesh to find it.
+  const [high, setHigh] = useState<MeshAsset | null>(null);
+  const [front, setFront] = useState(+(extent * 0.02).toFixed(3));
+  const [back, setBack] = useState(+(extent * 0.02).toFixed(3));
+  const [highMaps, setHighMaps] = useState<HighToLowMaps | null>(null);
+  const loadHigh = async (file: File) => {
+    try {
+      const lower = file.name.toLowerCase();
+      const mesh = lower.endsWith(".glb") ? parseGlb(new Uint8Array(await file.arrayBuffer()), file.name) : parseObj(await file.text());
+      setHigh(mesh);
+      const triangles = mesh.primitives.reduce((n, p) => n + p.indices.length / 3, 0);
+      setNote(`Loaded ${file.name}: ${triangles.toLocaleString()} triangles.`);
+    } catch (e) {
+      setNote(e instanceof Error ? e.message : String(e));
+    }
+  };
+  const bakeFromHigh = () => {
+    if (!high) return;
+    setBusy(true);
+    setNote("Baking from the high mesh…");
+    setTimeout(() => {
+      try {
+        const start = performance.now();
+        const out = bakeHighToLow(mesh, high, { size, rays: Math.min(rays, 32), front, back, aoDistance, thicknessDistance, curvatureRadius });
+        setHighMaps(out.maps[0] ?? null);
+        onBaked(out.mesh);
+        const missed = out.maps.reduce((worst, m) => Math.max(worst, 1 - m.coverage), 0);
+        setNote(`Baked ${out.maps.length} set${out.maps.length === 1 ? "" : "s"} in ${((performance.now() - start) / 1000).toFixed(1)} s${missed > 0.01 ? `; ${(missed * 100).toFixed(0)}% of texels found nothing (widen the ray reach)` : ""}.`);
+      } catch (e) {
+        setNote(e instanceof Error ? e.message : String(e));
+      } finally {
+        setBusy(false);
+      }
+    }, 20);
+  };
   // A new mesh: fresh defaults, no stale thumbnails.
   useEffect(() => {
     setAoDistance(+(extent / 4).toFixed(2));
@@ -118,6 +171,31 @@ export function BakePanel({ mesh, onBaked }: { mesh: MeshAsset; onBaked: (next: 
             <figure key={label as string} style={{ margin: 0, textAlign: "center", fontSize: 11 }}>
               {/* eslint-disable-next-line @next/next/no-img-element */}
               <img src={channelUrl(t as DecodedTexture, c as number)} alt={`${label as string} map`} width={64} height={64} style={{ imageRendering: "pixelated", borderRadius: 4 }} />
+              <figcaption>{label as string}</figcaption>
+            </figure>
+          ))}
+        </div>
+      )}
+      <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
+        <label style={{ fontSize: 12 }} title="A detailed mesh to bake onto this one (OBJ or GLB), in the same place">
+          High mesh <input type="file" accept=".obj,.glb" aria-label="High-poly source mesh" onChange={(e) => e.target.files?.[0] && void loadHigh(e.target.files[0])} />
+        </label>
+        {number("Ray front", front, setFront, "How far above this mesh's surface rays start looking for the high mesh (world units)")}
+        {number("Ray back", back, setBack, "How far below it they keep looking (world units)")}
+      </div>
+      <button type="button" onClick={bakeFromHigh} disabled={busy || !high}>
+        Bake normals and maps from the high mesh
+      </button>
+      {highMaps && (
+        <div style={{ display: "flex", gap: 6 }} aria-label="High-to-low maps">
+          {[
+            ["Normal", highMaps.normal, -1],
+            ["Height", highMaps.relief, 0],
+            ["ID", highMaps.id, -1],
+          ].map(([label, t, c]) => (
+            <figure key={label as string} style={{ margin: 0, textAlign: "center", fontSize: 11 }}>
+              {/* eslint-disable-next-line @next/next/no-img-element */}
+              <img src={(c as number) < 0 ? rgbUrl(t as DecodedTexture) : channelUrl(t as DecodedTexture, c as number)} alt={`${label as string} map`} width={64} height={64} style={{ imageRendering: "pixelated", borderRadius: 4 }} />
               <figcaption>{label as string}</figcaption>
             </figure>
           ))}
