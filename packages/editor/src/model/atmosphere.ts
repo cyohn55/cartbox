@@ -55,6 +55,12 @@ export interface AtmosphereSettings {
   readonly sunSize?: number;
   /** How many times their length the scene's distances count through the air (aerial perspective): 1 is true, more hazes a small map as a large one, 0 is none. */
   readonly aerialScale?: number;
+  /** The moon's brightness against the real one's (F5a-3): 1 is true, 0 is no moon. */
+  readonly moon?: number;
+  /** Toward the moon; absent, opposite the sun (a full moon). */
+  readonly moonDirection?: readonly [number, number, number];
+  /** The stars' and night sky's brightness against the real ones' (F5a-3): 1 is true, 0 is none. */
+  readonly stars?: number;
 }
 
 /** An atmosphere resolved into its medium, in kilometres. */
@@ -114,6 +120,12 @@ export function parseAtmosphere(value: unknown): AtmosphereSettings | null {
   take("planetRadius", 100, 100000);
   take("sunSize", 0.05, 20);
   take("aerialScale", 0, 100);
+  take("moon", 0, 1000);
+  take("stars", 0, 1000);
+  const md = raw.moonDirection;
+  if (Array.isArray(md) && md.length === 3 && md.every((v) => typeof v === "number" && Number.isFinite(v)) && Math.hypot(md[0], md[1], md[2]) > 1e-6) {
+    (out as Record<string, unknown>).moonDirection = [md[0], md[1], md[2]];
+  }
   return out as AtmosphereSettings;
 }
 
@@ -446,30 +458,94 @@ export function sunDiscRadiance(luts: AtmosphereLuts, sun: readonly number[], su
   return [0, 1, 2].map((c) => (Math.PI * sunRadiance[c]! * t[c]!) / solid) as V3;
 }
 
+// --- The moon and the night sky (F5a-3) --------------------------------------------
+
+/** The moon's geometric albedo, and its angular radius (radians): 0.12 and 0.26°. */
+export const MOON_ALBEDO = 0.12;
+export const MOON_RADIUS = (0.26 * Math.PI) / 180;
+/** The solid angle it fills. */
+export const MOON_SOLID_ANGLE = 2 * Math.PI * (1 - Math.cos(MOON_RADIUS));
+
+/**
+ * How much of the full moon's light the moon gives at the phase the sun and it
+ * stand at (a Lambert sphere's phase law): 1 full (opposite the sun), 1/π at
+ * quarter, 0 new (beside it).
+ */
+export function moonPhase(sun: readonly number[], moon: readonly number[]): number {
+  // The phase angle, at the moon between the sun and the eye: the sun is far, so the moon sees it along `sun`.
+  const cos = Math.min(1, Math.max(-1, -(sun[0]! * moon[0]! + sun[1]! * moon[1]! + sun[2]! * moon[2]!)));
+  const a = Math.acos(cos);
+  return ((Math.PI - a) * cos + Math.sin(a)) / Math.PI;
+}
+
+/**
+ * The moon as a light above the air, in the renderer's units: its disc, of
+ * radiance albedo × the sun's at full, over its solid angle, as an intensity
+ * (whose irradiance is π × it): albedo × Ω / π × the phase × the sun.
+ */
+export function moonRadiance(sunRadiance: readonly number[], sun: readonly number[], moon: readonly number[], scale = 1): V3 {
+  const k = ((MOON_ALBEDO * MOON_SOLID_ANGLE) / Math.PI) * moonPhase(sun, moon) * scale;
+  return [sunRadiance[0]! * k, sunRadiance[1]! * k, sunRadiance[2]! * k];
+}
+
+/** A star of visual magnitude m's illuminance above the air, lux. */
+export function starIlluminance(magnitude: number): number {
+  return 2.54e-6 * Math.pow(10, -0.4 * magnitude);
+}
+
+/** Lux into the renderer's units of irradiance (a sun of 1 is 123.5 klx, F0b-2), over π. */
+export const LUX_TO_UNITS = Math.PI / 123500;
+
+/**
+ * The night sky's own glow (airglow and unresolved starlight), about 21.8
+ * magnitudes a square arcsecond, as a radiance in the renderer's units.
+ */
+export const NIGHT_SKY_RADIANCE = 1.7e-4 * (Math.PI / 123500);
+
 /**
  * The sky as an equirectangular panorama (u around from −x, v down from the
  * zenith, as the IBL reads it) of RGB floats in the renderer's units.
  */
-export function atmospherePanorama(luts: AtmosphereLuts, sun: readonly number[], sunRadiance: readonly number[], width = 256, height = 128): HdrImage {
+export function atmospherePanorama(luts: AtmosphereLuts, sun: readonly number[], sunRadiance: readonly number[], width = 256, height = 128, moon: SkyMoon | null = null): HdrImage {
   const out: HdrImage = { width, height, data: new Float32Array(width * height * 3) };
-  atmospherePanoramaRows(luts, sun, sunRadiance, out, 0, height);
+  atmospherePanoramaRows(luts, sun, sunRadiance, out, 0, height, moon);
   return out;
+}
+
+/** The moon as the sky scatters its light: toward it, and its radiance above the air ({@link moonRadiance}). */
+export interface SkyMoon {
+  readonly direction: readonly number[];
+  readonly radiance: readonly number[];
+}
+
+/**
+ * Whether the moon's light counts in the sky: only once the sun is down, as
+ * by day it is a millionth of the sun's (and would double the sky's cost).
+ */
+export function moonLightsSky(sun: readonly number[], moon: SkyMoon | null): moon is SkyMoon {
+  return moon !== null && sun[1]! < 0 && moon.radiance.some((r) => r > 0);
 }
 
 /**
  * Rows `y0` to `y1` of {@link atmospherePanorama} into `out`, so a time of day
  * can spread a panorama over several frames (F5a-2).
  */
-export function atmospherePanoramaRows(luts: AtmosphereLuts, sun: readonly number[], sunRadiance: readonly number[], out: HdrImage, y0: number, y1: number): void {
+export function atmospherePanoramaRows(luts: AtmosphereLuts, sun: readonly number[], sunRadiance: readonly number[], out: HdrImage, y0: number, y1: number, moon: SkyMoon | null = null): void {
   const { width, height, data } = out;
   const l = Math.hypot(sun[0]!, sun[1]!, sun[2]!) || 1;
   const s = [sun[0]! / l, sun[1]! / l, sun[2]! / l];
+  const night = moonLightsSky(s, moon) ? moon : null;
   for (let y = Math.max(0, y0); y < Math.min(height, y1); y += 1) {
     const theta = (Math.PI * (y + 0.5)) / height;
     for (let x = 0; x < width; x += 1) {
       const phi = (2 * Math.PI * (x + 0.5)) / width - Math.PI;
       const d = [Math.sin(theta) * Math.cos(phi), Math.cos(theta), Math.sin(theta) * Math.sin(phi)];
-      data.set(skyRadiance(luts, d, s, sunRadiance), (y * width + x) * 3);
+      const L = skyRadiance(luts, d, s, sunRadiance);
+      if (night) {
+        const m = skyRadiance(luts, d, night.direction, night.radiance);
+        for (let c = 0; c < 3; c += 1) L[c]! += m[c]!;
+      }
+      data.set(L, (y * width + x) * 3);
     }
   }
 }
@@ -629,7 +705,7 @@ const toLinear = (c: number) => (c <= 0.04045 ? Math.max(0, c) / 12.92 : ((c + 0
  * above the atmosphere, toward it and its linear colour × intensity. A rig
  * without a key has the sky's own sun direction at unit radiance.
  */
-export function atmosphereSun(lighting: SceneLighting): { atmosphere: Atmosphere; direction: V3; radiance: V3 } | null {
+export function atmosphereSun(lighting: SceneLighting): { atmosphere: Atmosphere; direction: V3; radiance: V3; moon: SkyMoon | null; stars: number } | null {
   const settings = lighting.sky?.atmosphere;
   if (!lighting.sky || !settings) return null;
   const key = lighting.lights.find((l) => l.kind === "directional" && l.direction);
@@ -637,14 +713,32 @@ export function atmosphereSun(lighting: SceneLighting): { atmosphere: Atmosphere
   const l = Math.hypot(d[0], d[1], d[2]) || 1;
   const c = key ? lightColor(key) : ([1, 1, 1] as const);
   const intensity = key ? key.intensity : 1;
+  const direction: V3 = [d[0] / l, d[1] / l, d[2] / l];
+  const radiance: V3 = [toLinear(c[0]) * intensity, toLinear(c[1]) * intensity, toLinear(c[2]) * intensity];
+  // The moon (F5a-3): where it is set, else opposite the sun; lit by the sun at its phase.
+  const scale = settings.moon ?? 1;
+  const md = settings.moonDirection;
+  const ml = md ? Math.hypot(md[0], md[1], md[2]) || 1 : 1;
+  const toMoon: V3 = md ? [md[0] / ml, md[1] / ml, md[2] / ml] : [-direction[0], -direction[1], -direction[2]];
   return {
     atmosphere: resolveAtmosphere(settings),
-    direction: [d[0] / l, d[1] / l, d[2] / l],
-    radiance: [toLinear(c[0]) * intensity, toLinear(c[1]) * intensity, toLinear(c[2]) * intensity],
+    direction,
+    radiance,
+    moon: scale > 0 ? { direction: toMoon, radiance: moonRadiance(radiance, direction, toMoon, scale) } : null,
+    stars: settings.stars ?? 1,
   };
 }
 
 const tinted = new WeakMap<SceneLighting, SceneLighting>();
+
+/** The moon as a directional light, through the air between it and the scene; null below the horizon. */
+export function moonLight(luts: AtmosphereLuts, moon: SkyMoon): SceneLight | null {
+  const t = sunTransmittance(luts, moon.direction);
+  const rgb = [0, 1, 2].map((k) => moon.radiance[k]! * t[k]!);
+  const intensity = Math.max(rgb[0]!, rgb[1]!, rgb[2]!);
+  if (intensity <= 0) return null;
+  return { kind: "directional", direction: [moon.direction[0]!, moon.direction[1]!, moon.direction[2]!], color: rgb.map((v) => linearToAuthored(v / intensity)) as V3, intensity };
+}
 
 /**
  * The rig as its physical sky lights it (F5a): the key light tinted by the
@@ -665,7 +759,14 @@ export function atmosphereLighting(lighting: SceneLighting): SceneLighting {
   const c = lightColor(key);
   const { temperature: _temperature, ...rest } = key;
   const lit: SceneLight = { ...rest, color: [0, 1, 2].map((k) => linearToAuthored(toLinear(c[k]!) * t[k]!)) as V3 };
-  const out = { ...lighting, lights: lighting.lights.map((l, i) => (i === at ? lit : l)), sky: { ...lighting.sky!, sunDirection: sun.direction } };
+  let lights = lighting.lights.map((l, i) => (i === at ? lit : l));
+  // The moon (F5a-3), through the air toward it: a light of its own, and the key once the sun has set.
+  const moon = sun.moon ? moonLight(atmosphereLuts(sun.atmosphere), sun.moon) : null;
+  if (moon) {
+    const set = Math.max(t[0], t[1], t[2]) < 1e-4;
+    lights = set ? [moon, ...lights] : [...lights, moon];
+  }
+  const out = { ...lighting, lights, sky: { ...lighting.sky!, sunDirection: sun.direction } };
   tinted.set(lighting, out);
   return out;
 }

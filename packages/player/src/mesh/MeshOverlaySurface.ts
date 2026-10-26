@@ -28,6 +28,8 @@ import {
   atmosphereLuts,
   atmospherePanorama,
   atmospherePanoramaRows,
+  MOON_ALBEDO,
+  sunTransmittance,
   atmosphereSun,
   sunDiscRadiance,
   bakeReflectionProbesAsync,
@@ -1007,7 +1009,7 @@ export class MeshOverlaySurface implements DisplaySurface {
       this.skyRelight = { key, sun, hdr: { width: SKY_RELIGHT_WIDTH, height: SKY_RELIGHT_HEIGHT, data: new Float32Array(SKY_RELIGHT_WIDTH * SKY_RELIGHT_HEIGHT * 3) }, row: 0 };
     }
     const job = this.skyRelight;
-    atmospherePanoramaRows(atmosphereLuts(job.sun.atmosphere), job.sun.direction, job.sun.radiance, job.hdr, job.row, job.row + SKY_RELIGHT_ROWS);
+    atmospherePanoramaRows(atmosphereLuts(job.sun.atmosphere), job.sun.direction, job.sun.radiance, job.hdr, job.row, job.row + SKY_RELIGHT_ROWS, job.sun.moon);
     job.row += SKY_RELIGHT_ROWS;
     if (job.row < SKY_RELIGHT_HEIGHT) return;
     const hdr = resampleHdr(job.hdr, SKY_PANORAMA_WIDTH / SKY_IBL_DOWNSAMPLE, SKY_PANORAMA_HEIGHT / SKY_IBL_DOWNSAMPLE, 0, 1);
@@ -1461,8 +1463,13 @@ export class MeshOverlaySurface implements DisplaySurface {
     const lighting = this.sunLighting();
     const sun = lighting ? atmosphereSun(lighting) : null;
     if (!sun) return null;
-    const disc = sunDiscRadiance(atmosphereLuts(sun.atmosphere), sun.direction, sun.radiance);
-    return { atmosphere: sun.atmosphere, sun: sun.direction, sunRadiance: sun.radiance, disc };
+    const luts = atmosphereLuts(sun.atmosphere);
+    const disc = sunDiscRadiance(luts, sun.direction, sun.radiance);
+    // The moon's disc (F5a-3): its albedo × the sun's light on it, through the air toward it.
+    const scale = lighting!.sky?.atmosphere?.moon ?? 1;
+    const t = sun.moon ? sunTransmittance(luts, sun.moon.direction) : null;
+    const moonDisc = t ? ([0, 1, 2].map((c) => MOON_ALBEDO * scale * sun.radiance[c]! * t[c]!) as [number, number, number]) : null;
+    return { atmosphere: sun.atmosphere, sun: sun.direction, sunRadiance: sun.radiance, disc, moon: sun.moon, stars: sun.stars, moonDisc };
   }
 
   /** The presenter's newest measurements into the lens flare and eye adaptation (the byte path's reportSun and frameLuminance). */
@@ -2346,7 +2353,7 @@ async function bakeSceneSky(
   if (physical) {
     // A physical sky (F5a) is an HDR panorama the atmosphere makes under the key light: exposed into the
     // painted copy at the rig's exposure, as the frame shows it, and its own light for the IBL and the bake.
-    const hdr = atmospherePanorama(atmosphereLuts(physical.atmosphere), physical.direction, physical.radiance);
+    const hdr = atmospherePanorama(atmosphereLuts(physical.atmosphere), physical.direction, physical.radiance, 256, 128, physical.moon);
     imported = hdrToTexture(hdr, lighting.exposure);
     hdrLight = resampleHdr(hdr, SKY_PANORAMA_WIDTH / SKY_IBL_DOWNSAMPLE, SKY_PANORAMA_HEIGHT / SKY_IBL_DOWNSAMPLE, 0, 1);
     sky = { ...sky, panorama: null };

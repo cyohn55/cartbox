@@ -44,7 +44,9 @@ import {
   TRANSMITTANCE_WIDTH,
   aerialCamera,
   atmosphereKey,
+  moonLightsSky,
   type AerialCamera,
+  type SkyMoon,
   type Atmosphere,
   type Mat4,
 } from "@cartbox/editor";
@@ -60,6 +62,10 @@ export interface AtmosphereSky {
   readonly atmosphere: Atmosphere;
   readonly sun: readonly [number, number, number];
   readonly sunRadiance: readonly [number, number, number];
+  /** The moon (F5a-3): toward it and its radiance above the air, or none. */
+  readonly moon?: SkyMoon | null;
+  /** The stars' and night sky's brightness against the real ones' (F5a-3; 1 when absent). */
+  readonly stars?: number;
 }
 
 /** The angle from the zenith down to the horizon a viewer at radius r sees, and the angle below it to the nadir. */
@@ -512,6 +518,10 @@ export class GpuAtmosphere {
   readonly transmittance: any;
   readonly multiScattering: any;
   readonly skyView: any;
+  /** The sky view of the moon's light (F5a-3), built while the sun is down and a moon is up. */
+  readonly moonView: any;
+  private readonly moonUniforms: any;
+  private readonly moonData = new Float32Array(ATMOSPHERE_UNIFORM_FLOATS);
   private readonly sampler: any;
   private readonly uniforms: any;
   private readonly camera: any;
@@ -527,6 +537,8 @@ export class GpuAtmosphere {
     this.transmittance = texture(TRANSMITTANCE_WIDTH, TRANSMITTANCE_HEIGHT);
     this.multiScattering = texture(MULTISCATTER_SIZE, MULTISCATTER_SIZE);
     this.skyView = texture(SKY_VIEW_WIDTH, SKY_VIEW_HEIGHT);
+    this.moonView = texture(SKY_VIEW_WIDTH, SKY_VIEW_HEIGHT);
+    this.moonUniforms = device.createBuffer({ size: ATMOSPHERE_UNIFORM_FLOATS * 4, usage: USAGE.uniform | USAGE.copyDst });
     this.sampler = device.createSampler({ magFilter: "linear", minFilter: "linear", addressModeU: "clamp-to-edge", addressModeV: "clamp-to-edge" });
     this.uniforms = device.createBuffer({ size: ATMOSPHERE_UNIFORM_FLOATS * 4, usage: USAGE.uniform | USAGE.copyDst });
     this.camera = device.createBuffer({ size: AERIAL_CAMERA_FLOATS * 4, usage: USAGE.uniform | USAGE.copyDst });
@@ -536,23 +548,32 @@ export class GpuAtmosphere {
 
   /** Bring the LUTs up to `sky` (a submit of its own when anything changed); true when the sky view was rebuilt. */
   update(sky: AtmosphereSky): boolean {
-    const view = this.prepare(sky);
+    const moon = moonLightsSky(sky.sun, sky.moon ?? null) ? sky.moon! : null;
+    const view = [this.prepare(sky), ...(moon ? [...moon.direction, ...moon.radiance].map((v) => v.toPrecision(5)) : [])].join("|");
     if (view === this.viewKey) return false;
     const encoder = this.device.createCommandEncoder();
     this.medium(encoder, sky);
-    this.run(
-      encoder,
-      this.pipelines.skyView,
-      [
-        this.uniformEntry(),
-        { binding: 1, resource: this.sampler },
-        { binding: 2, resource: this.transmittance.createView() },
-        { binding: 3, resource: this.multiScattering.createView() },
-        { binding: 4, resource: this.skyView.createView() },
-      ],
-      SKY_VIEW_WIDTH,
-      SKY_VIEW_HEIGHT,
-    );
+    const skyView = (uniforms: any, target: any) =>
+      this.run(
+        encoder,
+        this.pipelines.skyView,
+        [
+          { binding: 0, resource: { buffer: uniforms } },
+          { binding: 1, resource: this.sampler },
+          { binding: 2, resource: this.transmittance.createView() },
+          { binding: 3, resource: this.multiScattering.createView() },
+          { binding: 4, resource: target.createView() },
+        ],
+        SKY_VIEW_WIDTH,
+        SKY_VIEW_HEIGHT,
+      );
+    skyView(this.uniforms, this.skyView);
+    if (moon) {
+      // The moon's own sky view: the same pass with the moon in the sun's place (F5a-3).
+      const m = moon.direction;
+      this.device.queue.writeBuffer(this.moonUniforms, 0, packAtmosphereUniforms({ ...sky, sun: [m[0]!, m[1]!, m[2]!], sunRadiance: [moon.radiance[0]!, moon.radiance[1]!, moon.radiance[2]!] }, this.moonData));
+      skyView(this.moonUniforms, this.moonView);
+    }
     this.device.queue.submit([encoder.finish()]);
     this.viewKey = view;
     return true;
@@ -588,8 +609,9 @@ export class GpuAtmosphere {
   }
 
   dispose(): void {
-    for (const t of [this.transmittance, this.multiScattering, this.skyView]) t.destroy?.();
+    for (const t of [this.transmittance, this.multiScattering, this.skyView, this.moonView]) t.destroy?.();
     this.uniforms.destroy?.();
+    this.moonUniforms.destroy?.();
     this.camera.destroy?.();
   }
 

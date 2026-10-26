@@ -801,6 +801,9 @@ function AtmosphereControls({ settings, patch }: { settings: AtmosphereSettings;
       <RangeControl label="Altitude" nested min={0} max={8000} step={50} value={settings.altitude ?? 0} ariaLabel="Altitude" display={`${Math.round(settings.altitude ?? 0)} m`} onChange={(v) => set("altitude", v)} />
       <RangeControl label="Sun size" nested min={0.1} max={5} step={0.05} value={settings.sunSize ?? 0.545} ariaLabel="Sun angular diameter" display={`${(settings.sunSize ?? 0.545).toFixed(2)}°`} onChange={(v) => set("sunSize", v)} />
       <RangeControl label="Aerial distance" nested min={0} max={50} step={0.5} value={settings.aerialScale ?? 1} ariaLabel="Aerial perspective distance scale" display={(settings.aerialScale ?? 1) === 0 ? "Off" : `×${(settings.aerialScale ?? 1).toFixed(1)}`} onChange={(v) => set("aerialScale", v)} />
+      <RangeControl label="Moon" nested min={0} max={1000} step={1} value={settings.moon ?? 1} ariaLabel="Moon brightness" display={(settings.moon ?? 1) === 0 ? "None" : `×${Math.round(settings.moon ?? 1)}`} onChange={(v) => set("moon", v)} />
+      <RangeControl label="Stars" nested min={0} max={1000} step={1} value={settings.stars ?? 1} ariaLabel="Star brightness" display={(settings.stars ?? 1) === 0 ? "None" : `×${Math.round(settings.stars ?? 1)}`} onChange={(v) => set("stars", v)} />
+      <RailHint>The moon stands opposite the sun (full) and lights the scene once the sun has set; ×1 is the real moon and stars, which want eye adaptation (or a raised exposure) to be seen.</RailHint>
       <RailHint>Aerial distance hazes the scene by the air between it and the eye (AAA tier). At ×1 a metre is a metre, so only kilometres haze over; more lays a landscape&apos;s haze over a small map.</RailHint>
     </>
   );

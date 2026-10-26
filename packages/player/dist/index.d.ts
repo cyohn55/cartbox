@@ -1,4 +1,4 @@
-import { MeshSceneInstance, MeshAsset, Mat4, ScenePropValue, PhysicsSpec, AnimatorSpec, AttachedComponent, SceneLighting, PhysicsWorldSettings, SceneTimeline, SceneLevel, NavMesh, Terrain, SceneStreaming, ParticleEffect, DecalDef, DecalMark, RagdollBox, DebrisDef, LodChain, SceneAudio, ComponentDef, StreamGroup, JointKind, JointSpec, ActionRebind, Atmosphere, DecodedTexture, SkySun, BakedCloudLayer, SunShafts, ColorFilter, AccessibilitySettings, EncodedImage, UiDocument, InputAction, StringTable, ReflectionProbe, EnvironmentLight, ShadowInput, ToneMap, SceneLight, LocalShadows, ProjectedDecal, DecalTiles, SceneFog, SceneWind, RasterStyle, HdrLightmap, LightmapLayout, Occluder, ProbeVolume, OccluderSurface, MeshMaterial, ResolvedLayers, ResolvedRefraction, SurfaceEffect, AnimatorOp, NavGraph, AnimationCue } from '@cartbox/editor';
+import { MeshSceneInstance, MeshAsset, Mat4, ScenePropValue, PhysicsSpec, AnimatorSpec, AttachedComponent, SceneLighting, PhysicsWorldSettings, SceneTimeline, SceneLevel, NavMesh, Terrain, SceneStreaming, ParticleEffect, DecalDef, DecalMark, RagdollBox, DebrisDef, LodChain, SceneAudio, ComponentDef, StreamGroup, JointKind, JointSpec, ActionRebind, Atmosphere, SkyMoon, DecodedTexture, SkySun, BakedCloudLayer, SunShafts, ColorFilter, AccessibilitySettings, EncodedImage, UiDocument, InputAction, StringTable, ReflectionProbe, EnvironmentLight, ShadowInput, ToneMap, SceneLight, LocalShadows, ProjectedDecal, DecalTiles, SceneFog, SceneWind, RasterStyle, HdrLightmap, LightmapLayout, Occluder, ProbeVolume, OccluderSurface, MeshMaterial, ResolvedLayers, ResolvedRefraction, SurfaceEffect, AnimatorOp, NavGraph, AnimationCue } from '@cartbox/editor';
 
 /**
  * The runtime mesh scene: the cart's mesh sidecar resolved into placed instances
@@ -2392,6 +2392,10 @@ interface AtmosphereSky {
     readonly atmosphere: Atmosphere;
     readonly sun: readonly [number, number, number];
     readonly sunRadiance: readonly [number, number, number];
+    /** The moon (F5a-3): toward it and its radiance above the air, or none. */
+    readonly moon?: SkyMoon | null;
+    /** The stars' and night sky's brightness against the real ones' (F5a-3; 1 when absent). */
+    readonly stars?: number;
 }
 
 /**
@@ -2455,6 +2459,7 @@ interface PresentSky {
      */
     readonly atmosphere?: (AtmosphereSky & {
         readonly disc: Rgb$2;
+        readonly moonDisc?: Rgb$2 | null;
     }) | null;
 }
 /** What a frame's scene draws over. */

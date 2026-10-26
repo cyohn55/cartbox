@@ -857,7 +857,7 @@ Everything else depends on this track. It contains no visible "feature", but its
 
 ### F5. Atmosphere, weather and water
 
-- [ ] **F5a. Physically based sky.**
+- [x] **F5a. Physically based sky.**
   - Hillaire's 2020 atmosphere: transmittance, multiple-scattering, sky-view and aerial-perspective LUTs.
   - Rayleigh, Mie and ozone parameters, a planet radius, and a sun and moon in physical units.
   - Time of day drives the sun, sky, IBL (F3a) and fog together.
@@ -929,7 +929,33 @@ Everything else depends on this track. It contains no visible "feature", but its
       - A time-of-day re-light drops the distant vistas from the reflections copy, which are drawn only at load.
       - The probe volume and light maps are baked for one sun. Re-lighting them as the sun moves is real-time GI (F3e).
       - The volume carries no shadows: the air in a mountain's shadow still glows. F5b's froxel fog, which marches the sun's cascades, will bring them.
-      - **F5a-3**: the moon and the night sky in physical units.
+  - **F5a-3, the moon and the night sky: done** (`moonPhase`, `moonRadiance`, `moonLight` in `model/atmosphere.ts`; the moon's sky view in `GpuAtmosphere`; the backdrop in `gpuPresent.ts`). Every number comes from the moon's and the stars' physics, in the renderer's units, with no tuning.
+    - **The moon** stands opposite the sun by default (full), or wherever `moonDirection` puts it. It is a Lambertian sphere of albedo 0.12 and angular radius 0.26°.
+      - Its phase is the Lambert sphere's law: 1 full, 1/π at quarter, 0 new.
+      - As a light above the air it is albedo × Ω / π × the phase × the sun. For a sun of 1 (123.5 klx), a full moon gives about a quarter of a lux.
+      - `moon` scales it (0 removes it).
+    - **Among the rig's lights**, the moon is a directional light of its own, through the air toward it (`moonLight`).
+      - By day it comes after the sun, about a millionth of it, and adds nothing while it is set.
+      - Once the sun has set (its transmittance under 10⁻⁴), the moon becomes the key. So the GPU cascades, the volumetric fog and the light bake follow it.
+    - **The night sky** is the moon's light scattered by the same atmosphere, which is linear in its radiance.
+      - The CPU panorama adds it once the sun is down (`moonLightsSky`), when it no longer drowns in the day's.
+      - The AAA backdrop reads a second sky-view LUT built with the moon in the sun's place.
+    - **The AAA backdrop**, past the air:
+      - the moon's disc, each pixel the point of its near face that the ray meets, lit by the sun as a Lambertian sphere, through the air toward it;
+      - **stars**: a cube of cells over the sky (512 per face edge), about 9000 in all to magnitude 6.5. Each has a magnitude drawn so the count brighter than m grows threefold a magnitude, and an illuminance of 2.54 µlx × 10^(−0.4m). Each spreads over a Gaussian three-quarters of a pixel wide, so it keeps its illuminance at any resolution, through the air along the view;
+      - the night sky's own glow (airglow and unresolved stars, about 21.8 mag/arcsec²).
+      - `stars` scales both. At ×1 they want eye adaptation (or a raised exposure) to be seen, as at night.
+    - **Authoring.** The Physical sky gains **Moon** and **Stars**.
+    - *Tests (`night-sky.test.ts`):*
+      - The phase is 1, 1/π and 0 at full, quarter and new. A full moon gives 0.2–0.35 lx from its albedo and size, a magnitude-0 star 2.54 µlx, and the night glow is a millionth of the day sky. Settings read in range, and a direction given is kept.
+      - By day the sun stays the key. By night (the sun 30° down) the moon 30° up is the key, at its radiance through the air, with the set sun after it, dark.
+      - The night panorama adds exactly the moon's `skyRadiance`: blue, and under 10⁻⁴ of the day's.
+      - On Dawn:
+        - the backdrop's moon is the CPU's moonlit air plus albedo × transmittance × N·L at the pixel's point of its face, within 3%; off the disc, the moonlit air alone;
+        - stars stand over a hundred times the night glow, yet four-fifths of the sky has no star and is the glow alone.
+    - *Left for F5a:*
+      - The other tiers' painted copy of the night sky has the moonlit air but no disc or stars.
+      - The stars don't turn with the hour, and the moon has no texture (maria) or earthshine.
       - The painted sky's objects, cloud layers and distant vistas draw over the other tiers' copy of the physical sky, but not over the AAA backdrop. F5c's clouds and a composite of the vistas will bring them back there.
       - The CPU LUTs take about 0.8 s at load. A worker, or reading the GPU's LUTs back on the AAA tier, would hide that.
 - [x] **F5b. Volumetric fog.** (Particles adding density waits on GPU particles, F8a.) A froxel grid (for example 160×90×64) of scattering and extinction from height fog, local fog volumes and particles. It is lit by the sun with its shadow map, and by local lights with theirs, then temporally reprojected and integrated. **God rays emerge from it**, so the CPU screen-space shafts retire.
