@@ -1729,3 +1729,22 @@ export {
   type PhysicalCameraSettings,
 } from "./model/physicalCamera";
 export { bakeHighToLow, idColour, uvTangents, type HighToLowBake, type HighToLowMaps, type HighToLowOptions } from "./model/highToLowBake";
+export {
+  SMART_PRESETS,
+  applyTextureSet,
+  evaluateMask,
+  fbm,
+  paintSmartStack,
+  readSmartStack,
+  splitUdim,
+  textureSetFiles,
+  udimTile,
+  udimTiles,
+  type BrushDab,
+  type SmartBakes,
+  type SmartLayer,
+  type SmartMask,
+  type SmartMaskKind,
+  type SmartStack,
+  type SmartTextureSet,
+} from "./model/smartMaterials";

@@ -28,6 +28,7 @@ import { generateTextures, isGeneratedImage, readGenerator, type TextureGenerato
 import { readInstanceLink, type MaterialInstanceLink } from "./materialInstanceLink";
 import { readSurfaceEffects, writeSurfaceEffects } from "./materialEffects";
 import { readMaterialLayers, writeMaterialLayers } from "./materialLayers";
+import { readSmartStack, writeSmartStack, type SmartStack } from "./smartMaterials";
 import type { MaterialGraph } from "./materialGraph";
 import { readMeshTrails, type MeshTrail } from "../render/meshTrails";
 import {
@@ -233,6 +234,11 @@ export interface MeshMaterial {
    * height gives panel seams depth by parallax occlusion ({@link parallaxDepth});
    * its curvature drives the material graph's wear masks.
    */
+  /**
+   * The smart-material stack that painted this material's maps (AAA_FIDELITY_ROADMAP.md
+   * F9b; smartMaterials.ts), kept so it can be edited and painted again. Absent = none.
+   */
+  readonly smartStack?: SmartStack;
   readonly reliefImage?: EncodedImage | null;
   /** How deep the relief's darkest point sits, in world units (0..0.25); absent or 0 is flat. */
   readonly parallaxDepth?: number;
@@ -942,6 +948,7 @@ export function serializeMaterial(material: MeshMaterial, table?: ImageTable): S
     ...(material.instance ? { instance: { of: material.instance.of, overrides: [...material.instance.overrides] } } : {}),
     ...writeSurfaceEffects(material),
     ...writeMaterialLayers(material),
+    ...writeSmartStack(material),
   };
 }
 
@@ -975,6 +982,7 @@ export function deserializeMaterial(value: unknown, table?: ImageTable): MeshMat
     ...(material.reliefImage ? { reliefImage: deserializeImage(material.reliefImage, "reliefImage", table) } : {}),
     ...readSurfaceEffects(material),
     ...readMaterialLayers(material),
+    ...(readSmartStack((material as { smartStack?: unknown }).smartStack) ? { smartStack: readSmartStack((material as { smartStack?: unknown }).smartStack)! } : {}),
   });
 }
 

@@ -1205,10 +1205,27 @@ Everything else depends on this track. It contains no visible "feature", but its
       - A cage bakes the same normals as ray distances (within 2 of 255).
       - A trench in the high mesh darkens the occlusion while open ground reads open.
       - The low mesh comes back with its tangents and maps.
-- [ ] **F9b. Smart materials.**
+- [x] **F9b. Smart materials.** (Painting live on the 3D view, and on the GPU, later; see below.)
   - Layer-based texturing in the Mesh tab: fill layers, masks generated from bakes (edge wear from curvature, dirt from AO, rust from position and gravity), anchors and brush strokes.
   - Exports to 4K texture sets, with UDIM support for heroes.
   - It turns the P1 texture generators and the I15 bakes into a Substance Painter-class workflow.
+  - **F9b-1: done** (`editor model/smartMaterials.ts`; the Mesh tab's **Smart material** panel). A stack of layers paints a texture set from the bottom up.
+    - **Layers.** Each fills the channels it sets (colour mixed in linear light, metalness, roughness, a height, a glow) through its opacity and its mask.
+    - **Masks.** Each has a level, a width, a break-up by tileable fBm noise and an invert.
+      - **Generated from the bakes:** edge wear from convex curvature (the relief map's G); dirt from occlusion and cavities; rust from the position map's height (gravity) and occlusion, streaked downward; an ID map colour pick (F9a); noise.
+      - **Brush strokes:** dabs in texture space, hard or soft, adding or erasing, over any mask or alone.
+      - **Anchors:** a layer's mask is an earlier layer's, or its inverse, so the paint wears through exactly where the edge-wear layer says.
+    - **Height.** Heights sum into one field whose slope bends the baked normal map (a whiteout-style detail), so worn paint has an edge.
+    - **The set.** Up to 4096²: sRGB base colour, glTF metal/roughness, tangent normal, emissive. `applyTextureSet` puts it in the material's slots with its factors at one, and the material keeps its stack (`MeshMaterial.smartStack`, saved and loaded; an instance can override it) so it can be painted again.
+    - **UDIM.** `udimTile` numbers tiles 1001 + u + 10·v. `splitUdim` splits a primitive spanning several into one a tile, its UVs moved into 0..1 and its material named for the tile, so each takes its own set. `textureSetFiles` names exports `name_Channel.1001.png`.
+    - **Presets.** Worn painted metal (an edge-wear layer the paint is anchored to, inverted, with dirt over it) and rusted iron.
+    - **The panel.** Per part: a preset, fill and brush layers (reorder, hide, remove), each layer's channels and mask, the set's size, Paint (from the part's baked occlusion, relief and normal maps), a texture-space canvas to brush the selected layer's mask, Export PNGs, and Split UDIM tiles when the UVs span several.
+    - *Tests (`smart-materials.test.ts`):*
+      - Edge wear takes the convex band and not a concave seam; dirt takes occlusion and cavities; rust runs to the low ground; an ID pick takes one part.
+      - Strokes paint and erase, hard and soft; an anchor inverts its layer's mask.
+      - A painted stack shows paint on the flats and bare steel (metal 1, its roughness) at the worn edge, glow where brushed; the normals lean at the paint's edge and stay flat on the flats.
+      - The set goes on a material whose stack survives a save; the presets paint.
+      - UDIM tiles are found and split with UVs in 0..1, and the files are named.
 - [ ] **F9c. Scans and dense meshes.** Import of photogrammetry and scan meshes (millions of triangles), automatic delighting of albedo, auto-UV, and conversion to F6a clusters with no manual LODs. Decimation to a "game" proxy for collision.
 - [ ] **F9d. Import completeness.**
   - FBX (through a WASM converter), USD/USDZ, and the full set of glTF KHR material extensions (F1d).

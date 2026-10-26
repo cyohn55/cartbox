@@ -56,6 +56,7 @@ export const INSTANCE_FIELDS = [
   ["alphaCutoff", "Alpha cutoff"],
   ["softDepth", "Soft edges"],
   ["graph", "Node graph"],
+  ["smartStack", "Smart material"],
 ] as const satisfies readonly (readonly [InstanceField, string])[];
 
 // Every inheritable field is listed (a new material field must be added above).
