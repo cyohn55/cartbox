@@ -971,6 +971,8 @@ interface QualitySettings {
      * expanded in blocks, so much past 4 shows on cloud edges.)
      */
     readonly skyScale?: number;
+    /** On the AAA tier's temporal frames, the share of the display's pixels across that renders; the upscaler (F4b) makes up the rest. */
+    readonly renderScale?: number;
     /** On the AAA tier, the sun's virtual shadow maps over its cascades (F2b). */
     readonly virtualShadows?: boolean;
     /** On the AAA tier, reflections the screen can't show traced through the still scene's BVH (F3f). */
@@ -4524,6 +4526,16 @@ interface SceneDraw {
     readonly virtualShadows?: {
         readonly poolSize: number;
     } | null;
+    /**
+     * Temporal upscaling (AAA_FIDELITY_ROADMAP.md F4b; upscaler.ts): on the
+     * linear-light renderer's temporal frames with a prepass, the size the frame
+     * is shown at, when larger than it renders. The frame then returns a texture
+     * of that size, reconstructed over the frames. Absent = shown as rendered.
+     */
+    readonly upscale?: {
+        readonly width: number;
+        readonly height: number;
+    } | null;
     readonly reflectionTrace?: {
         readonly occluders: readonly Occluder[];
         readonly key: string;
@@ -5399,6 +5411,15 @@ declare class WebgpuSceneRenderer implements SceneRenderer {
      */
     private taa;
     private reactivePipeline;
+    /** This frame's output when it isn't the colour texture: the upscaled frame (F4b). */
+    private frameOutput;
+    /** The upscaler's display-sized output and pipelines (F4b); its history is the TAA's, made at the display's size. */
+    private upscaler;
+    /**
+     * Temporal upscaling (F4b): the render-sized frame resolved into the TAA history at the display's size (see
+     * upscaler.ts), then sharpened into the upscaled output the frame returns.
+     */
+    private addUpscale;
     /**
      * The reactive mask (F4a): how much the see-through pass changed each pixel,
      * from the opaque scene copied before it against the frame after it.

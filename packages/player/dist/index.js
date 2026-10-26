@@ -4557,7 +4557,7 @@ var QUALITY_LEVELS = ["low", "medium", "high", "epic"];
 var QUALITY_PRESETS = {
   epic: { level: "epic", shadows: true, shadowMapSize: 1024, shadowCascades: true, cascadeMapSize: 4096, maxRenderScale: 1, disabledEffects: [], terrainDetail: 1, antialias: true, temporal: true, reflections: true, skyScale: 3, tracedReflections: true, virtualShadows: true },
   high: { level: "high", shadows: true, shadowMapSize: 1024, shadowCascades: true, cascadeMapSize: 4096, maxRenderScale: 1, disabledEffects: [], terrainDetail: 1, antialias: true, temporal: true, reflections: true, skyScale: 3, virtualShadows: true },
-  medium: { level: "medium", shadows: true, shadowMapSize: 512, cascadeMapSize: 2048, maxRenderScale: 0.75, disabledEffects: [], terrainDetail: 0.6, antialias: true, temporal: true, reflections: true, skyScale: 3 },
+  medium: { level: "medium", shadows: true, shadowMapSize: 512, cascadeMapSize: 2048, maxRenderScale: 0.75, disabledEffects: [], terrainDetail: 0.6, antialias: true, temporal: true, reflections: true, skyScale: 3, renderScale: 2 / 3 },
   low: { level: "low", shadows: false, shadowMapSize: 512, maxRenderScale: 0.5, disabledEffects: ["bloom", "chroma"], terrainDetail: 0.3, antialias: false, temporal: false, reflections: false, skyScale: 4 }
 };
 function detectQuality(hints) {
@@ -12799,7 +12799,10 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
     const { camera, lighting } = job;
     const output = gpu.outputSize ?? { width: this.width, height: this.height };
     if (this.options.dynamicResolution === true) this.resolution ?? (this.resolution = new DynamicResolution(1e3 / 60));
-    const scale = this.resolution ? this.resolution.update(this.gpuFrameMs(gpu)) : 1;
+    const temporal = this.options.temporal === true && this.quality.temporal === true;
+    const upscaling = this.renderer.sunCascades === true && temporal && this.options.prepass === true;
+    const dynamic = this.resolution ? this.resolution.update(this.gpuFrameMs(gpu)) : 1;
+    const scale = upscaling ? Math.min(dynamic, this.quality.renderScale ?? 1) : dynamic;
     const { width, height } = scaledSize(output.width, output.height, scale);
     this.renderer.resize?.(width, height);
     this.rendered = { width, height, scale: output.width > 0 ? width / output.width : 1 };
@@ -12820,7 +12823,8 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
       projection: camera.projection,
       lod: true,
       antialias: job.antialias,
-      temporal: this.options.temporal === true && this.quality.temporal === true,
+      temporal,
+      ...upscaling && (width < output.width || height < output.height) ? { upscale: { width: output.width, height: output.height } } : {},
       reflections: this.options.reflections === true && this.quality.reflections === true,
       ...this.options.prepass === true ? { prepass: true } : {},
       ...lighting ? { ...lit, localShadows: job.local, shadow: job.shadow, sunShadow: job.sunShadow, localShadowCasters: job.localShadowCasters, localShadowKey: job.localShadowKey, localShadowMoved: job.localShadowMoved, fog: lighting.fog ?? null, wind: lighting.wind ?? null } : {},
@@ -15064,8 +15068,8 @@ function halton(index, base) {
   }
   return result;
 }
-function temporalJitter(frame) {
-  const i = (frame % TEMPORAL_SAMPLES + TEMPORAL_SAMPLES) % TEMPORAL_SAMPLES + 1;
+function temporalJitter(frame, phases = TEMPORAL_SAMPLES) {
+  const i = (frame % phases + phases) % phases + 1;
   return [halton(i, 2) - 0.5, halton(i, 3) - 0.5];
 }
 function jitterProjection(projection, jitter, width, height) {
@@ -15123,16 +15127,17 @@ var TemporalState = class {
     this.uniforms = new Float32Array(TEMPORAL_UNIFORM_FLOATS);
   }
   /** Start a temporal frame of `width × height` seen through `view` and `projection`. */
-  begin(view, projection, width, height) {
+  begin(view, projection, width, height, phases = TEMPORAL_SAMPLES) {
     const viewProj = multiplyMat44(projection, view);
     const inverse = invertMat4(viewProj);
     const reprojection = this.previous && inverse ? multiplyMat44(this.previous, inverse) : null;
     this.uniforms.set(reprojection ?? IDENTITY, 0);
     this.uniforms.set([TEMPORAL_BLEND, TEMPORAL_SHARPEN, reprojection ? 1 : 0, this.depth === "unit" ? 1 : 0], 16);
-    const jittered = jitterProjection(projection, temporalJitter(this.frame), width, height);
+    const jitter = temporalJitter(this.frame, phases);
+    const jittered = jitterProjection(projection, jitter, width, height);
     this.frame += 1;
     this.previous = viewProj;
-    return { projection: jittered, uniforms: this.uniforms };
+    return { projection: jittered, uniforms: this.uniforms, jitter };
   }
   /** Forget the history: the next temporal frame starts fresh. */
   reset() {
@@ -20159,6 +20164,162 @@ function pageTouches(page, basis, sphere) {
   return lx + r >= page.gx * size && lx - r <= (page.gx + 1) * size && ly + r >= page.gy * size && ly - r <= (page.gy + 1) * size;
 }
 
+// src/render/upscaler.ts
+var UPSCALE_MODES = { quality: 1 / 1.5, balanced: 1 / 1.7, performance: 0.5 };
+var UPSCALE_UNIFORM_FLOATS = 12;
+var UPSCALE_BLEND = 0.1;
+var UPSCALE_SHARPEN = 0.3;
+function upscaleJitterPhases(renderWidth, displayWidth) {
+  const ratio = Math.max(1, displayWidth / Math.max(1, renderWidth));
+  return Math.ceil(TEMPORAL_SAMPLES * ratio * ratio);
+}
+function upscaleUniforms(jitter, render, display, history, out = new Float32Array(UPSCALE_UNIFORM_FLOATS)) {
+  out.set([UPSCALE_BLEND, UPSCALE_SHARPEN, history ? 1 : 0, 0], 0);
+  out.set([jitter[0], -jitter[1], render.width, render.height], 4);
+  out.set([display.width, display.height, 0, 0], 8);
+  return out;
+}
+function upscaleShaderWgsl(multisampled) {
+  return (
+    /* wgsl */
+    `
+struct Upscale { params: vec4<f32>, jitter: vec4<f32>, display: vec4<f32> };
+@group(0) @binding(0) var<uniform> up: Upscale;
+@group(0) @binding(1) var current: texture_2d<f32>;
+@group(0) @binding(2) var history: texture_2d<f32>;
+@group(0) @binding(3) var historySampler: sampler;
+@group(0) @binding(4) var depth: ${multisampled ? "texture_depth_multisampled_2d" : "texture_depth_2d"};
+@group(0) @binding(5) var velocity: texture_2d<f32>;
+@group(0) @binding(6) var reactive: texture_2d<f32>;
+
+@vertex
+fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4<f32> {
+  let p = vec2<f32>(f32((i << 1u) & 2u), f32(i & 2u));
+  return vec4<f32>(p * 2.0 - 1.0, 0.0, 1.0);
+}
+
+fn toneMap(c: vec3<f32>) -> vec3<f32> { return c / (1.0 + max(c.r, max(c.g, c.b))); }
+fn untoneMap(c: vec3<f32>) -> vec3<f32> { return c / max(1e-5, 1.0 - max(c.r, max(c.g, c.b))); }
+fn toYCoCg(c: vec3<f32>) -> vec3<f32> { return vec3<f32>(0.25 * c.r + 0.5 * c.g + 0.25 * c.b, 0.5 * c.r - 0.5 * c.b, -0.25 * c.r + 0.5 * c.g - 0.25 * c.b); }
+fn fromYCoCg(c: vec3<f32>) -> vec3<f32> { let t = c.x - c.z; return vec3<f32>(t + c.y, c.x + c.z, t - c.y); }
+
+// The history at uv by Catmull-Rom, in five bilinear taps (as F4a's).
+fn historyAt(uv: vec2<f32>, size: vec2<f32>) -> vec4<f32> {
+  let pos = uv * size;
+  let centre = floor(pos - 0.5) + 0.5;
+  let f = pos - centre;
+  let w0 = f * (-0.5 + f * (1.0 - 0.5 * f));
+  let w1 = 1.0 + f * f * (-2.5 + 1.5 * f);
+  let w2 = f * (0.5 + f * (2.0 - 1.5 * f));
+  let w3 = f * f * (-0.5 + 0.5 * f);
+  let w12 = w1 + w2;
+  let t0 = (centre - 1.0) / size;
+  let t3 = (centre + 2.0) / size;
+  let t12 = (centre + w2 / w12) / size;
+  let a = textureSampleLevel(history, historySampler, vec2<f32>(t12.x, t0.y), 0.0) * (w12.x * w0.y);
+  let b = textureSampleLevel(history, historySampler, vec2<f32>(t0.x, t12.y), 0.0) * (w0.x * w12.y);
+  let c = textureSampleLevel(history, historySampler, t12, 0.0) * (w12.x * w12.y);
+  let d = textureSampleLevel(history, historySampler, vec2<f32>(t3.x, t12.y), 0.0) * (w3.x * w12.y);
+  let e = textureSampleLevel(history, historySampler, vec2<f32>(t12.x, t3.y), 0.0) * (w12.x * w3.y);
+  let weight = w12.x * w0.y + w0.x * w12.y + w12.x * w12.y + w3.x * w12.y + w12.x * w3.y;
+  return max((a + b + c + d + e) / weight, vec4<f32>(0.0));
+}
+
+@fragment
+fn resolve(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
+  let rsize = vec2<i32>(textureDimensions(current));
+  let dsize = up.display.xy;
+  let uv = frag.xy / dsize;
+  // This display pixel's centre in the unjittered render frame, and the render pixel the jittered frame put nearest it.
+  let pr = uv * vec2<f32>(rsize);
+  let base = vec2<i32>(floor(pr + up.jitter.xy));
+  var sum = vec3<f32>(0.0);
+  var wsum = 0.0;
+  var wmax = 0.0;
+  var m1 = vec3<f32>(0.0);
+  var m2 = vec3<f32>(0.0);
+  var nearest = 2.0;
+  var at = clamp(base, vec2<i32>(0), rsize - 1);
+  var alpha = 0.0;
+  for (var dy = -1; dy <= 1; dy += 1) {
+    for (var dx = -1; dx <= 1; dx += 1) {
+      let q = clamp(base + vec2<i32>(dx, dy), vec2<i32>(0), rsize - 1);
+      let s = textureLoad(current, q, 0);
+      // Where this sample really stands, and how far from the display pixel's centre (render pixels).
+      let d = vec2<f32>(q) + 0.5 - up.jitter.xy - pr;
+      let w = exp(-2.0 * dot(d, d));
+      sum = sum + s.rgb * w;
+      alpha = alpha + s.a * w;
+      wsum = wsum + w;
+      wmax = max(wmax, w);
+      let y = toYCoCg(toneMap(s.rgb));
+      m1 = m1 + y;
+      m2 = m2 + y * y;
+      let z = textureLoad(depth, q, 0);
+      if (z < nearest) { nearest = z; at = q; }
+    }
+  }
+  let gathered = sum / max(wsum, 1e-6);
+  let coverage = alpha / max(wsum, 1e-6);
+  let mean = m1 / 9.0;
+  let sigma = sqrt(max(m2 / 9.0 - mean * mean, vec3<f32>(0.0)));
+  let now = toYCoCg(toneMap(gathered));
+  let prevUv = uv - textureLoad(velocity, at, 0).xy;
+  if (up.params.z < 0.5 || any(prevUv < vec2<f32>(0.0)) || any(prevUv > vec2<f32>(1.0))) {
+    return vec4<f32>(gathered, coverage);
+  }
+  let past = historyAt(prevUv, dsize);
+  // Clip the history toward the box's centre (Salvi's variance box), grown to hold the gathered colour.
+  let lo = min(mean - 1.25 * sigma, now);
+  let hi = max(mean + 1.25 * sigma, now);
+  let centre = (lo + hi) * 0.5;
+  let extent = (hi - lo) * 0.5 + vec3<f32>(1e-5);
+  var h = toYCoCg(toneMap(past.rgb));
+  let offset = h - centre;
+  let units = abs(offset / extent);
+  let reach = max(units.x, max(units.y, units.z));
+  if (reach > 1.0) { h = centre + offset / reach; }
+  // The new frame counts as much as its nearest sample is near this display pixel.
+  var blend = up.params.x * wmax;
+  if (all(vec2<i32>(textureDimensions(reactive)) == rsize)) { blend = max(blend, textureLoad(reactive, at, 0).r); }
+  // Blended in linear light: a display pixel's samples come and go over the sequence, and a mean taken on
+  // the tone map would lose the light of the bright ones.
+  let rgb = mix(untoneMap(fromYCoCg(h)), gathered, blend);
+  return vec4<f32>(max(rgb, vec3<f32>(0.0)), mix(past.a, coverage, max(blend, 0.5)));
+}
+`
+  );
+}
+var UPSCALE_SHARPEN_WGSL = (
+  /* wgsl */
+  `
+struct Upscale { params: vec4<f32>, jitter: vec4<f32>, display: vec4<f32> };
+@group(0) @binding(0) var<uniform> up: Upscale;
+@group(0) @binding(1) var resolved: texture_2d<f32>;
+
+@vertex
+fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4<f32> {
+  let p = vec2<f32>(f32((i << 1u) & 2u), f32(i & 2u));
+  return vec4<f32>(p * 2.0 - 1.0, 0.0, 1.0);
+}
+
+@fragment
+fn sharpen(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
+  let size = vec2<i32>(textureDimensions(resolved));
+  let p = vec2<i32>(frag.xy);
+  let top = size - 1;
+  let c = textureLoad(resolved, p, 0);
+  let n = textureLoad(resolved, clamp(p + vec2<i32>(0, -1), vec2<i32>(0, 0), top), 0);
+  let s = textureLoad(resolved, clamp(p + vec2<i32>(0, 1), vec2<i32>(0, 0), top), 0);
+  let w = textureLoad(resolved, clamp(p + vec2<i32>(-1, 0), vec2<i32>(0, 0), top), 0);
+  let e = textureLoad(resolved, clamp(p + vec2<i32>(1, 0), vec2<i32>(0, 0), top), 0);
+  let lo = min(c, min(min(n, s), min(w, e)));
+  let hi = max(c, max(max(n, s), max(w, e)));
+  return clamp(c + (4.0 * c - n - s - w - e) * up.params.y, lo, hi);
+}
+`
+);
+
 // src/render/ssgi.ts
 var SSGI_RAYS = 2;
 var SSGI_STEPS = 12;
@@ -24645,6 +24806,10 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
      */
     this.taa = null;
     this.reactivePipeline = null;
+    /** This frame's output when it isn't the colour texture: the upscaled frame (F4b). */
+    this.frameOutput = null;
+    /** The upscaler's display-sized output and pipelines (F4b); its history is the TAA's, made at the display's size. */
+    this.upscaler = null;
     /** Pipeline variants (material graph, sample count, reflection targets), built on first use. */
     this.variants = /* @__PURE__ */ new Map();
     /**
@@ -25736,7 +25901,7 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     } catch {
       return null;
     }
-    return this.colourTexture;
+    return this.frameOutput ?? this.colourTexture;
   }
   settle(draw) {
     if (this.destroyed) return "current";
@@ -25746,8 +25911,10 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
   }
   /** Encode and submit one frame, and start a readback if a buffer is free (or, with `readback` false, leave it in the colour texture). */
   submit(instances, draw, readback = true) {
-    const temporal = draw.temporal === true ? this.temporalState.begin(draw.view, draw.projection, this.width, this.height) : null;
+    const display = this.hdr && draw.temporal === true && draw.prepass === true && draw.upscale && (draw.upscale.width > this.width || draw.upscale.height > this.height) ? { width: draw.upscale.width, height: draw.upscale.height } : null;
+    const temporal = draw.temporal === true ? this.temporalState.begin(draw.view, draw.projection, this.width, this.height, display ? upscaleJitterPhases(this.width, display.width) : void 0) : null;
     if (!temporal) this.temporalState.reset();
+    this.frameOutput = null;
     const viewProj = multiplyMat47(temporal ? temporal.projection : draw.projection, draw.view);
     this.frameIndex += 1;
     const prepass = draw.prepass === true;
@@ -26199,7 +26366,8 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     const reactive = hdrTaa && seeThrough && behind ? this.addReactiveMask(graph, behind, colour) : null;
     if (reflections && this.hdr && gbuffer && velocity) this.addHizReflections(graph, colour, depth, gbuffer, velocity, rays, draw, temporal ? temporal.projection : draw.projection, msaa !== null);
     else if (reflections) this.addReflections(graph, reflections, colour, depth, rays, temporal ? temporal.projection : draw.projection, msaa !== null);
-    if (temporal) this.addTemporal(graph, temporal.uniforms, colour, depth, msaa !== null, hdrTaa ? velocity : null, reactive);
+    if (temporal && display && velocity) this.addUpscale(graph, temporal, colour, depth, velocity, reactive, display, msaa !== null);
+    else if (temporal) this.addTemporal(graph, temporal.uniforms, colour, depth, msaa !== null, hdrTaa ? velocity : null, reactive);
     const slot = readback ? this.readback.find((entry) => !entry.busy) : void 0;
     if (slot) {
       graph.addPass("readback", "transfer", (pass) => {
@@ -26475,6 +26643,97 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     return this.probeGi.gi;
   }
   /**
+   * Temporal upscaling (F4b): the render-sized frame resolved into the TAA history at the display's size (see
+   * upscaler.ts), then sharpened into the upscaled output the frame returns.
+   */
+  addUpscale(graph, temporal, colour, depth, velocity, reactive, display, multisampled) {
+    var _a;
+    const device = this.device;
+    const size = { width: display.width, height: display.height };
+    if (this.taa && (this.taa.history[0].width !== size.width || this.taa.history[0].height !== size.height)) {
+      destroySafely(this.taa.history[0]);
+      destroySafely(this.taa.history[1]);
+      destroySafely(this.taa.uniforms);
+      this.taa = null;
+    }
+    const fresh = !this.taa;
+    if (!this.taa) {
+      const history = () => device.createTexture({ size, format: "rgba16float", usage: 16 | 4 });
+      this.taa = {
+        history: [history(), history()],
+        index: 0,
+        uniforms: device.createBuffer({ size: temporal.uniforms.byteLength, usage: 64 | 8 }),
+        sampler: device.createSampler({ magFilter: "linear", minFilter: "linear", addressModeU: "clamp-to-edge", addressModeV: "clamp-to-edge" }),
+        resolve: [null, null],
+        hdrResolve: [null, null],
+        sharpen: fullScreenPipeline(device, TEMPORAL_SHARPEN_WGSL, "sharpen", this.colourFormat)
+      };
+    }
+    if (this.upscaler && (this.upscaler.width !== size.width || this.upscaler.height !== size.height)) {
+      destroySafely(this.upscaler.output);
+      this.upscaler.output = device.createTexture({ size, format: this.colourFormat, usage: 16 | 4 | 1 });
+      this.upscaler.width = size.width;
+      this.upscaler.height = size.height;
+    }
+    this.upscaler ?? (this.upscaler = {
+      output: device.createTexture({ size, format: this.colourFormat, usage: 16 | 4 | 1 }),
+      // RENDER_ATTACHMENT | TEXTURE_BINDING | COPY_SRC
+      width: size.width,
+      height: size.height,
+      uniforms: device.createBuffer({ size: UPSCALE_UNIFORM_FLOATS * 4, usage: 64 | 8 }),
+      data: new Float32Array(UPSCALE_UNIFORM_FLOATS),
+      resolve: [null, null],
+      sharpen: fullScreenPipeline(device, UPSCALE_SHARPEN_WGSL, "sharpen", this.colourFormat)
+    });
+    const taa = this.taa;
+    const ups = this.upscaler;
+    const k = multisampled ? 1 : 0;
+    (_a = ups.resolve)[k] ?? (_a[k] = fullScreenPipeline(device, upscaleShaderWgsl(multisampled), "resolve", "rgba16float"));
+    const resolve = ups.resolve[k];
+    const read = graph.importTexture("taa.history", taa.history[taa.index]);
+    const write = graph.importTexture("taa.next", taa.history[1 - taa.index]);
+    const output = graph.importTexture("upscaled", ups.output);
+    taa.index = 1 - taa.index;
+    device.queue.writeBuffer(ups.uniforms, 0, upscaleUniforms(temporal.jitter, { width: this.width, height: this.height }, display, !fresh && temporal.uniforms[18] === 1, ups.data));
+    const fullScreen = (ctx, pipeline, target, entries) => {
+      const encoded = ctx.encoder.beginRenderPass({
+        colorAttachments: [{ view: ctx.texture(target).createView(), clearValue: { r: 0, g: 0, b: 0, a: 0 }, loadOp: "clear", storeOp: "store" }],
+        ...ctx.timing
+      });
+      encoded.setPipeline(pipeline);
+      encoded.setBindGroup(0, device.createBindGroup({ layout: pipeline.getBindGroupLayout(0), entries }));
+      encoded.draw(3);
+      encoded.end();
+    };
+    graph.addPass("upscale.resolve", "render", (pass) => {
+      pass.read(colour);
+      pass.read(read);
+      pass.read(depth);
+      pass.read(velocity);
+      if (reactive) pass.read(reactive);
+      pass.write(write);
+      return (ctx) => fullScreen(ctx, resolve, write, [
+        { binding: 0, resource: { buffer: ups.uniforms } },
+        { binding: 1, resource: ctx.texture(colour).createView() },
+        { binding: 2, resource: ctx.texture(read).createView() },
+        { binding: 3, resource: taa.sampler },
+        { binding: 4, resource: ctx.texture(depth).createView() },
+        { binding: 5, resource: ctx.texture(velocity).createView() },
+        { binding: 6, resource: reactive ? ctx.texture(reactive).createView() : this.blankTexture.createView() }
+      ]);
+    });
+    graph.addPass("upscale.sharpen", "render", (pass) => {
+      pass.read(write);
+      pass.write(output);
+      pass.keep();
+      return (ctx) => fullScreen(ctx, ups.sharpen, output, [
+        { binding: 0, resource: { buffer: ups.uniforms } },
+        { binding: 1, resource: ctx.texture(write).createView() }
+      ]);
+    });
+    this.frameOutput = ups.output;
+  }
+  /**
    * The reactive mask (F4a): how much the see-through pass changed each pixel,
    * from the opaque scene copied before it against the frame after it.
    */
@@ -26516,6 +26775,12 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
   addTemporal(graph, uniforms, colour, depth, multisampled, velocity = null, reactive = null) {
     var _a, _b;
     const device = this.device;
+    if (this.taa && (this.taa.history[0].width !== this.width || this.taa.history[0].height !== this.height)) {
+      destroySafely(this.taa.history[0]);
+      destroySafely(this.taa.history[1]);
+      destroySafely(this.taa.uniforms);
+      this.taa = null;
+    }
     if (!this.taa) {
       const size = { width: this.width, height: this.height };
       const history = () => device.createTexture({ size, format: "rgba16float", usage: 16 | 4 });
@@ -27104,6 +27369,11 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     this.volumetricFog?.dispose();
     this.probeGi?.gi.dispose();
     this.disposeVsm();
+    if (this.upscaler) {
+      destroySafely(this.upscaler.output);
+      destroySafely(this.upscaler.uniforms);
+      this.upscaler = null;
+    }
     destroySafely(this.depthGroups.fogVolume.texture);
     destroySafely(this.blankProbeCubes);
     destroySafely(this.probeBuffer);

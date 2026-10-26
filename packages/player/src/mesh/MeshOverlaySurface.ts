@@ -1389,7 +1389,12 @@ export class MeshOverlaySurface implements DisplaySurface {
     // The 3D renders at the size the frame shows at (F0d), or the share of it the GPU keeps up with; the 2D layer stays the cart's.
     const output = gpu.outputSize ?? { width: this.width, height: this.height };
     if (this.options.dynamicResolution === true) this.resolution ??= new DynamicResolution(1000 / 60);
-    const scale = this.resolution ? this.resolution.update(this.gpuFrameMs(gpu)) : 1;
+    // On the AAA tier's temporal frames the upscaler (F4b) reconstructs the display's pixels, so a preset may
+    // render at a share of them too (Medium, FSR 2's quality mode).
+    const temporal = this.options.temporal === true && this.quality.temporal === true;
+    const upscaling = this.renderer.sunCascades === true && temporal && this.options.prepass === true;
+    const dynamic = this.resolution ? this.resolution.update(this.gpuFrameMs(gpu)) : 1;
+    const scale = upscaling ? Math.min(dynamic, this.quality.renderScale ?? 1) : dynamic;
     const { width, height } = scaledSize(output.width, output.height, scale);
     this.renderer.resize?.(width, height);
     this.rendered = { width, height, scale: output.width > 0 ? width / output.width : 1 };
@@ -1414,7 +1419,8 @@ export class MeshOverlaySurface implements DisplaySurface {
       projection: camera.projection,
       lod: true,
       antialias: job.antialias,
-      temporal: this.options.temporal === true && this.quality.temporal === true,
+      temporal,
+      ...(upscaling && (width < output.width || height < output.height) ? { upscale: { width: output.width, height: output.height } } : {}),
       reflections: this.options.reflections === true && this.quality.reflections === true,
       ...(this.options.prepass === true ? { prepass: true } : {}),
       ...(lighting ? { ...lit, localShadows: job.local, shadow: job.shadow, sunShadow: job.sunShadow, localShadowCasters: job.localShadowCasters, localShadowKey: job.localShadowKey, localShadowMoved: job.localShadowMoved, fog: lighting.fog ?? null, wind: lighting.wind ?? null } : {}),

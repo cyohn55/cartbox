@@ -224,6 +224,13 @@ export interface SceneDraw {
    * the cascades alone.
    */
   readonly virtualShadows?: { readonly poolSize: number } | null;
+  /**
+   * Temporal upscaling (AAA_FIDELITY_ROADMAP.md F4b; upscaler.ts): on the
+   * linear-light renderer's temporal frames with a prepass, the size the frame
+   * is shown at, when larger than it renders. The frame then returns a texture
+   * of that size, reconstructed over the frames. Absent = shown as rendered.
+   */
+  readonly upscale?: { readonly width: number; readonly height: number } | null;
   readonly reflectionTrace?: { readonly occluders: readonly Occluder[]; readonly key: string } | null;
   /**
    * A physical sky's air (AAA_FIDELITY_ROADMAP.md F5a-2): the medium and its

@@ -53,9 +53,9 @@ export function halton(index: number, base: number): number {
   return result;
 }
 
-/** Frame `frame`'s sub-pixel offset, in pixels, each axis in −½..½. */
-export function temporalJitter(frame: number): [number, number] {
-  const i = (((frame % TEMPORAL_SAMPLES) + TEMPORAL_SAMPLES) % TEMPORAL_SAMPLES) + 1;
+/** Frame `frame`'s sub-pixel offset, in pixels, each axis in −½..½, over a sequence of `phases` (F4b's upscaling takes more). */
+export function temporalJitter(frame: number, phases = TEMPORAL_SAMPLES): [number, number] {
+  const i = (((frame % phases) + phases) % phases) + 1;
   return [halton(i, 2) - 0.5, halton(i, 3) - 0.5];
 }
 
@@ -119,6 +119,8 @@ export interface TemporalFrame {
   readonly projection: Mat4;
   /** The reprojection (this frame's NDC → last frame's clip space), then [blend, sharpen, history valid, depth is 0..1]. */
   readonly uniforms: Float32Array;
+  /** This frame's sub-pixel offset (F4b reads where its samples fell). */
+  readonly jitter: readonly [number, number];
 }
 
 /**
@@ -134,16 +136,17 @@ export class TemporalState {
   constructor(private readonly depth: DepthStorage) {}
 
   /** Start a temporal frame of `width × height` seen through `view` and `projection`. */
-  begin(view: Mat4, projection: Mat4, width: number, height: number): TemporalFrame {
+  begin(view: Mat4, projection: Mat4, width: number, height: number, phases = TEMPORAL_SAMPLES): TemporalFrame {
     const viewProj = multiplyMat4(projection, view);
     const inverse = invertMat4(viewProj);
     const reprojection = this.previous && inverse ? multiplyMat4(this.previous, inverse) : null;
     this.uniforms.set(reprojection ?? IDENTITY, 0);
     this.uniforms.set([TEMPORAL_BLEND, TEMPORAL_SHARPEN, reprojection ? 1 : 0, this.depth === "unit" ? 1 : 0], 16);
-    const jittered = jitterProjection(projection, temporalJitter(this.frame), width, height);
+    const jitter = temporalJitter(this.frame, phases);
+    const jittered = jitterProjection(projection, jitter, width, height);
     this.frame += 1;
     this.previous = viewProj;
-    return { projection: jittered, uniforms: this.uniforms };
+    return { projection: jittered, uniforms: this.uniforms, jitter };
   }
 
   /** Forget the history: the next temporal frame starts fresh. */

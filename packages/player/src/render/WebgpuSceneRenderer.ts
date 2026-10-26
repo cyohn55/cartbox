@@ -176,6 +176,7 @@ import {
   worldSphere,
   type PageDraw,
 } from "./virtualShadows.js";
+import { UPSCALE_SHARPEN_WGSL, UPSCALE_UNIFORM_FLOATS, upscaleJitterPhases, upscaleShaderWgsl, upscaleUniforms } from "./upscaler.js";
 import { SSGI_UNIFORM_FLOATS, ssgiResolveWgsl, ssgiTemporalWgsl, ssgiTraceWgsl, ssgiUniforms, type SsgiFrame } from "./ssgi.js";
 import { AERIAL_FRAME_FLOATS, AERIAL_LUT_BYTES, AERIAL_SAMPLE_WGSL, GpuAtmosphere, packAerialFrame } from "./atmosphere.js";
 import { GpuProbeGi } from "./dynamicGi.js";
@@ -3343,7 +3344,7 @@ export class WebgpuSceneRenderer implements SceneRenderer {
     } catch {
       return null;
     }
-    return this.colourTexture;
+    return this.frameOutput ?? this.colourTexture;
   }
 
   settle(draw: SceneDraw): FrameState {
@@ -3356,8 +3357,11 @@ export class WebgpuSceneRenderer implements SceneRenderer {
   /** Encode and submit one frame, and start a readback if a buffer is free (or, with `readback` false, leave it in the colour texture). */
   private submit(instances: readonly MeshSceneInstance[], draw: GpuSceneDraw, readback = true): void {
     // Temporal anti-aliasing (I2): this frame's jittered projection and the resolve's uniforms.
-    const temporal = draw.temporal === true ? this.temporalState.begin(draw.view, draw.projection, this.width, this.height) : null;
+    // Temporal upscaling (F4b): a linear-light temporal frame with a prepass, shown larger than it renders.
+    const display = this.hdr && draw.temporal === true && draw.prepass === true && draw.upscale && (draw.upscale.width > this.width || draw.upscale.height > this.height) ? { width: draw.upscale.width, height: draw.upscale.height } : null;
+    const temporal = draw.temporal === true ? this.temporalState.begin(draw.view, draw.projection, this.width, this.height, display ? upscaleJitterPhases(this.width, display.width) : undefined) : null;
     if (!temporal) this.temporalState.reset();
+    this.frameOutput = null;
     const viewProj = multiplyMat4(temporal ? temporal.projection : draw.projection, draw.view);
 
     // A new frame: a skinned mesh re-uploaded now keeps last frame's vertices for the velocity buffer (F0c).
@@ -3924,7 +3928,8 @@ export class WebgpuSceneRenderer implements SceneRenderer {
     // On the AAA tier, with the prepass's G-buffer, reflections trace the Hi-Z chain (F3f); elsewhere I3's march.
     if (reflections && this.hdr && gbuffer && velocity) this.addHizReflections(graph, colour, depth, gbuffer, velocity, rays, draw, temporal ? temporal.projection : draw.projection, msaa !== null);
     else if (reflections) this.addReflections(graph, reflections, colour, depth, rays, temporal ? temporal.projection : draw.projection, msaa !== null);
-    if (temporal) this.addTemporal(graph, temporal.uniforms, colour, depth, msaa !== null, hdrTaa ? velocity : null, reactive);
+    if (temporal && display && velocity) this.addUpscale(graph, temporal, colour, depth, velocity, reactive, display, msaa !== null);
+    else if (temporal) this.addTemporal(graph, temporal.uniforms, colour, depth, msaa !== null, hdrTaa ? velocity : null, reactive);
 
     const slot = readback ? this.readback.find((entry) => !entry.busy) : undefined;
     if (slot) {
@@ -4254,6 +4259,102 @@ export class WebgpuSceneRenderer implements SceneRenderer {
    */
   private taa: { history: [any, any]; index: number; uniforms: any; sampler: any; resolve: [any, any]; hdrResolve: [any, any]; sharpen: any } | null = null;
   private reactivePipeline: any = null;
+  /** This frame's output when it isn't the colour texture: the upscaled frame (F4b). */
+  private frameOutput: any = null;
+  /** The upscaler's display-sized output and pipelines (F4b); its history is the TAA's, made at the display's size. */
+  private upscaler: { output: any; width: number; height: number; uniforms: any; data: Float32Array<ArrayBuffer>; resolve: [any, any]; sharpen: any } | null = null;
+
+  /**
+   * Temporal upscaling (F4b): the render-sized frame resolved into the TAA history at the display's size (see
+   * upscaler.ts), then sharpened into the upscaled output the frame returns.
+   */
+  private addUpscale(graph: FrameGraph, temporal: { readonly uniforms: Float32Array; readonly jitter: readonly [number, number] }, colour: FrameResource, depth: FrameResource, velocity: FrameResource, reactive: FrameResource | null, display: { width: number; height: number }, multisampled: boolean): void {
+    const device = this.device;
+    const size = { width: display.width, height: display.height };
+    if (this.taa && (this.taa.history[0].width !== size.width || this.taa.history[0].height !== size.height)) {
+      destroySafely(this.taa.history[0]);
+      destroySafely(this.taa.history[1]);
+      destroySafely(this.taa.uniforms);
+      this.taa = null;
+    }
+    const fresh = !this.taa;
+    if (!this.taa) {
+      const history = () => device.createTexture({ size, format: "rgba16float", usage: 0x10 | 0x04 });
+      this.taa = {
+        history: [history(), history()],
+        index: 0,
+        uniforms: device.createBuffer({ size: temporal.uniforms.byteLength, usage: 0x40 | 0x08 }),
+        sampler: device.createSampler({ magFilter: "linear", minFilter: "linear", addressModeU: "clamp-to-edge", addressModeV: "clamp-to-edge" }),
+        resolve: [null, null],
+        hdrResolve: [null, null],
+        sharpen: fullScreenPipeline(device, TEMPORAL_SHARPEN_WGSL, "sharpen", this.colourFormat),
+      };
+    }
+    if (this.upscaler && (this.upscaler.width !== size.width || this.upscaler.height !== size.height)) {
+      destroySafely(this.upscaler.output);
+      this.upscaler.output = device.createTexture({ size, format: this.colourFormat, usage: 0x10 | 0x04 | 0x01 });
+      this.upscaler.width = size.width;
+      this.upscaler.height = size.height;
+    }
+    this.upscaler ??= {
+      output: device.createTexture({ size, format: this.colourFormat, usage: 0x10 | 0x04 | 0x01 }), // RENDER_ATTACHMENT | TEXTURE_BINDING | COPY_SRC
+      width: size.width,
+      height: size.height,
+      uniforms: device.createBuffer({ size: UPSCALE_UNIFORM_FLOATS * 4, usage: 0x40 | 0x08 }),
+      data: new Float32Array(UPSCALE_UNIFORM_FLOATS),
+      resolve: [null, null],
+      sharpen: fullScreenPipeline(device, UPSCALE_SHARPEN_WGSL, "sharpen", this.colourFormat),
+    };
+    const taa = this.taa;
+    const ups = this.upscaler;
+    const k = multisampled ? 1 : 0;
+    ups.resolve[k] ??= fullScreenPipeline(device, upscaleShaderWgsl(multisampled), "resolve", "rgba16float");
+    const resolve = ups.resolve[k];
+    const read = graph.importTexture("taa.history", taa.history[taa.index]);
+    const write = graph.importTexture("taa.next", taa.history[1 - taa.index]);
+    const output = graph.importTexture("upscaled", ups.output);
+    taa.index = 1 - taa.index;
+    device.queue.writeBuffer(ups.uniforms, 0, upscaleUniforms(temporal.jitter, { width: this.width, height: this.height }, display, !fresh && temporal.uniforms[18] === 1, ups.data));
+    const fullScreen = (ctx: PassContext, pipeline: any, target: FrameResource, entries: any[]) => {
+      const encoded = ctx.encoder.beginRenderPass({
+        colorAttachments: [{ view: ctx.texture(target).createView(), clearValue: { r: 0, g: 0, b: 0, a: 0 }, loadOp: "clear", storeOp: "store" }],
+        ...ctx.timing,
+      });
+      encoded.setPipeline(pipeline);
+      encoded.setBindGroup(0, device.createBindGroup({ layout: pipeline.getBindGroupLayout(0), entries }));
+      encoded.draw(3);
+      encoded.end();
+    };
+    graph.addPass("upscale.resolve", "render", (pass) => {
+      pass.read(colour);
+      pass.read(read);
+      pass.read(depth);
+      pass.read(velocity);
+      if (reactive) pass.read(reactive);
+      pass.write(write);
+      return (ctx) =>
+        fullScreen(ctx, resolve, write, [
+          { binding: 0, resource: { buffer: ups.uniforms } },
+          { binding: 1, resource: ctx.texture(colour).createView() },
+          { binding: 2, resource: ctx.texture(read).createView() },
+          { binding: 3, resource: taa.sampler },
+          { binding: 4, resource: ctx.texture(depth).createView() },
+          { binding: 5, resource: ctx.texture(velocity).createView() },
+          { binding: 6, resource: reactive ? ctx.texture(reactive).createView() : this.blankTexture.createView() },
+        ]);
+    });
+    graph.addPass("upscale.sharpen", "render", (pass) => {
+      pass.read(write);
+      pass.write(output);
+      pass.keep();
+      return (ctx) =>
+        fullScreen(ctx, ups.sharpen, output, [
+          { binding: 0, resource: { buffer: ups.uniforms } },
+          { binding: 1, resource: ctx.texture(write).createView() },
+        ]);
+    });
+    this.frameOutput = ups.output;
+  }
 
   /**
    * The reactive mask (F4a): how much the see-through pass changed each pixel,
@@ -4297,6 +4398,13 @@ export class WebgpuSceneRenderer implements SceneRenderer {
    */
   private addTemporal(graph: FrameGraph, uniforms: Float32Array, colour: FrameResource, depth: FrameResource, multisampled: boolean, velocity: FrameResource | null = null, reactive: FrameResource | null = null): void {
     const device = this.device;
+    // After upscaled frames (F4b) the history is the display's size: start afresh at the frame's.
+    if (this.taa && (this.taa.history[0].width !== this.width || this.taa.history[0].height !== this.height)) {
+      destroySafely(this.taa.history[0]);
+      destroySafely(this.taa.history[1]);
+      destroySafely(this.taa.uniforms);
+      this.taa = null;
+    }
     if (!this.taa) {
       const size = { width: this.width, height: this.height };
       const history = () => device.createTexture({ size, format: "rgba16float", usage: 0x10 | 0x04 }); // RENDER_ATTACHMENT | TEXTURE_BINDING
@@ -4961,6 +5069,11 @@ export class WebgpuSceneRenderer implements SceneRenderer {
     this.volumetricFog?.dispose();
     this.probeGi?.gi.dispose();
     this.disposeVsm();
+    if (this.upscaler) {
+      destroySafely(this.upscaler.output);
+      destroySafely(this.upscaler.uniforms);
+      this.upscaler = null;
+    }
     destroySafely(this.depthGroups.fogVolume.texture);
     destroySafely(this.blankProbeCubes);
     destroySafely(this.probeBuffer);

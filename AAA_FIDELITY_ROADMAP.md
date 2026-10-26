@@ -868,7 +868,20 @@ Everything else depends on this track. It contains no visible "feature", but its
       - the mask marks what the see-through pass changed and nothing else.
       - Through the renderer: a still HDR scene converges to itself within 2%; a moving square leaves no trail; a see-through pane whose glow changes every frame shows the current frame's.
       - In Chromium, Beaver Creek on `aaa` runs the HDR resolve and its reactive mask with no errors.
-- [ ] **F4b. Temporal upscaling.** An FSR 2-class upscaler built on F4a. It renders at 50–77% scale, reconstructs at native resolution and pairs with dynamic resolution (F0d). It is how integrated GPUs and phones reach the tier.
+- [x] **F4b. Temporal upscaling.** An FSR 2-class upscaler built on F4a. It renders at 50–77% scale, reconstructs at native resolution and pairs with dynamic resolution (F0d). It is how integrated GPUs and phones reach the tier.
+  - **F4b-1: done** (`render/upscaler.ts`). On the AAA tier's temporal frames with a prepass, a frame shown larger than it renders (`SceneDraw.upscale`, the display's size) is reconstructed at the display's size in place of F4a's resolve. `renderToTexture` then returns the upscaled frame.
+    - **Jitter.** The sequence lengthens by the display pixels a render pixel covers (FSR 2's rule): 8 × ratio² phases, so every display pixel gets samples (32 at half scale).
+    - **Gather.** The jitter moves what a render pixel shows by (jx, −jy) on screen, so render pixel q's sample stands at q + ½ − (jx, −jy). Each display pixel gathers the 3×3 render samples round its own position, each weighted by a Gaussian of its distance from the display pixel's centre (σ half a render pixel).
+    - **Blend.** The new frame's share is 0.1 × the nearest sample's weight: a display pixel no sample came near keeps its history, one a sample fell right on takes the full share. With no history the gathered samples stand alone, a plain filtered upsample.
+      - The history (display-sized, linear HDR) is reprojected through the nearest surface's velocity in the 3×3, read Catmull-Rom, and clipped to the render samples' variance box in YCoCg on Karis's tone map (γ 1.25), grown to hold the gathered colour. The reactive mask (F4a) takes more of the new frame.
+      - The blend itself is in linear light. A display pixel's samples come and go over the sequence, and a mean on the tone map lost half of thin highlights' light in the first test.
+    - **Sharpen.** F4a's contrast-limited pass, at the display's size (0.3).
+    - **Sizes.** The TAA history follows the display's size, and starts afresh when a frame changes between upscaled and not. SSGI (F3e-2), which reads it by UV, needs no change.
+    - **Player.** On the AAA tier's temporal frames with a prepass, the render scale is the lesser of dynamic resolution's (F0d, down to a half) and the preset's new `renderScale`: Medium renders at two-thirds (FSR 2's quality mode), High and Epic at full size until the GPU falls behind. The draw asks for the display's size back whenever the render is smaller.
+    - *Tests (`upscale.test.ts`):*
+      - The jitter sequence's length and range, and the uniforms.
+      - The player: Medium renders an AAA frame at two-thirds and asks for the display's size back, High renders at full size, and another tier never upscales.
+      - On Dawn: a fan of glowing slivers finer than the render's pixels, at half the display's size, reconstructed over 96 frames. It comes back at the display's size with a mean error against the native TAA frame of 0.0085, against a plain upsample's 0.0125, and the same total light (122.5 against 123).
 - [ ] **F4c. Physical camera.**
   - Aperture, shutter speed and ISO drive both exposure and effects:
     - **bokeh depth of field** (gather-based, with near/far fields and a shaped aperture);
