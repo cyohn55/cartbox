@@ -40,6 +40,8 @@ import { compiledGraphOf, evaluateGraph, graphRegisters, type CompiledGraph, typ
 import { EFFECT_DISTORT_POWER, materialRefracts, refractionOffset, refracts, resolveRefraction, type ResolvedRefraction } from "./refraction";
 import { CLEARCOAT_F0, anisotropicD, curvatureOf, materialHasLayers, parallaxRate, parallaxUv, resolveLayers, uvGradients, type ResolvedLayers } from "../model/materialLayers";
 import { type MeshAsset, type MeshBounds, computeSmoothNormals, meshBounds } from "../model/MeshAsset";
+import type { HdrLightmap } from "../model/hdrLightmap";
+import type { ProbeVolume } from "../model/probeVolume";
 
 /** A decoded texture: tightly-packed RGBA rows, `width × height`. */
 export interface DecodedTexture {
@@ -310,6 +312,12 @@ export interface EnvironmentLight {
    * map scales its ambient and sky fill by the grid at its position and normal.
    */
   readonly lightProbes?: LightProbeGrid | null;
+  /**
+   * The GPU bake's probe volume (F3d-3; see probeVolume.ts): on the AAA tier,
+   * a surface without a light map takes its diffuse light from it in place of
+   * the sky's. Every other path reads {@link lightProbes}.
+   */
+  readonly probeVolume?: ProbeVolume | null;
 }
 
 /**
@@ -1150,6 +1158,12 @@ export interface MeshSceneInstance {
    * (see lightBake.ts). Null entries (or no `uvs2`) leave it unscaled.
    */
   readonly lightmapTextures?: readonly (DecodedTexture | null)[];
+  /**
+   * Decoded HDR directional light maps per primitive
+   * ({@link MeshMaterial.lightmapHdrImage}, AAA_FIDELITY_ROADMAP.md F3d), or
+   * null entries. Only the AAA tier reads them; the rest read {@link lightmapTextures}.
+   */
+  readonly lightmapHdrTextures?: readonly (HdrLightmap | null)[];
   /** Decoded detail maps per primitive ({@link MeshMaterial.detailImage}), or null entries. */
   readonly detailTextures?: readonly (DecodedTexture | null)[];
   /** Decoded blend-surface maps per primitive ({@link MeshMaterial.blendImage}), or null entries. */

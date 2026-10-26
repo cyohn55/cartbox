@@ -5,7 +5,7 @@
  * warming up on the software rasteriser before the first one lands.
  */
 
-import { depthLinearTerms, effectActive, refracts, resolveRefraction, type DecodedTexture, type Mat4, type MeshAsset, type MeshPrimitive, type MeshSceneInstance, type SurfaceEffect } from "@cartbox/editor";
+import { depthLinearTerms, effectActive, refracts, resolveRefraction, type DecodedTexture, type HdrLightmap, type Mat4, type MeshAsset, type MeshPrimitive, type MeshSceneInstance, type SurfaceEffect } from "@cartbox/editor";
 
 import type { SceneDraw, SoftwareSceneRenderer } from "./sceneRenderer.js";
 import { resolvePbr } from "./scenePacking.js";
@@ -97,6 +97,8 @@ export interface PrimitiveTextures {
   occ: DecodedTexture | null;
   emis: DecodedTexture | null;
   lm: DecodedTexture | null;
+  /** The HDR directional light map (AAA_FIDELITY_ROADMAP.md F3d), or null: what the AAA tier lights by in place of {@link lm}. */
+  lmHdr: HdrLightmap | null;
   /** The detail map (HALO2_STYLE_ROADMAP.md H3), or null. */
   detail: DecodedTexture | null;
   /** The blend surface's map (H4), or null. */
@@ -108,7 +110,7 @@ export interface PrimitiveTextures {
 }
 
 export function sameTextures(a: PrimitiveTextures, b: PrimitiveTextures): boolean {
-  return a.base === b.base && a.mr === b.mr && a.occ === b.occ && a.emis === b.emis && a.lm === b.lm && a.detail === b.detail && a.blend === b.blend && a.relief === b.relief;
+  return a.base === b.base && a.mr === b.mr && a.occ === b.occ && a.emis === b.emis && a.lm === b.lm && a.lmHdr === b.lmHdr && a.detail === b.detail && a.blend === b.blend && a.relief === b.relief;
 }
 
 const NO_OCCLUSION = {};
@@ -211,6 +213,7 @@ export function batchInstances<G extends { indexCount: number }>(
         occ: occlusionWithRelief(instance.occlusionTextures?.[index] ?? null, instance.reliefTextures?.[index] ?? null),
         emis: instance.emissiveTextures?.[index] ?? null,
         lm: primitive.uvs2 ? (instance.lightmapTextures?.[index] ?? null) : null,
+        lmHdr: primitive.uvs2 ? (instance.lightmapHdrTextures?.[index] ?? null) : null,
         detail: instance.detailTextures?.[index] ?? null,
         blend: primitive.blend ? (instance.blendTextures?.[index] ?? null) : null,
         relief: instance.reliefTextures?.[index] ?? null,

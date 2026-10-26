@@ -57,6 +57,9 @@ import {
   updateSceneEnvironment,
   updateSceneLight,
   type ProceduralSky,
+  type AtmosphereSettings,
+  type VolumetricFogSettings,
+  type DynamicGiSettings,
   type ReflectionProbe,
   type SceneFog,
   type SceneLight,
@@ -254,6 +257,7 @@ export function LightingEditor({ lighting, onChange }: LightingEditorProps) {
 
       <SkyDomeControls lighting={lighting} onChange={onChange} />
       <FogControls lighting={lighting} onChange={onChange} />
+      <DynamicGiControls lighting={lighting} onChange={onChange} />
       <WindControls lighting={lighting} onChange={onChange} />
       <ShaftControls lighting={lighting} onChange={onChange} />
       <ProbeControls lighting={lighting} onChange={onChange} />
@@ -693,7 +697,8 @@ function TintControls({ lighting, onChange }: LightingEditorProps & { lighting: 
 
 /**
  * The procedural sky dome: a baked panorama (clouds + mountain rings) drawn
- * behind a first-person view and used as the image-based light. The rig stores
+ * behind a first-person view and used as the image-based light, or a physical
+ * atmosphere (AAA_FIDELITY_ROADMAP.md F5a) lit by the key light. The rig stores
  * only these parameters; the runtime bakes the pixels at load.
  */
 function SkyDomeControls({ lighting, onChange }: LightingEditorProps & { lighting: SceneLighting }) {
@@ -705,14 +710,20 @@ function SkyDomeControls({ lighting, onChange }: LightingEditorProps & { lightin
       <SegmentedControl
         label="Sky dome"
         ariaLabel="Sky dome"
-        selected={sky ? "on" : "off"}
-        onSelect={(id) => onChange(setSceneSky(lighting, id === "on" ? (sky ?? defaultProceduralSky()) : null))}
+        selected={!sky ? "off" : sky.atmosphere ? "physical" : "on"}
+        onSelect={(id) => {
+          if (id === "off") return onChange(setSceneSky(lighting, null));
+          const { atmosphere: _atmosphere, ...painted } = sky ?? defaultProceduralSky();
+          onChange(setSceneSky(lighting, id === "physical" ? { ...painted, atmosphere: sky?.atmosphere ?? {} } : painted));
+        }}
         options={[
           { id: "off", label: "Gradient" },
           { id: "on", label: "Mountains" },
+          { id: "physical", label: "Physical", hint: "A physically based atmosphere lit by the key light, which it tints by the air between: blue at noon, orange at sunset. It lights the scene and the bake too" },
         ]}
       />
-      {sky && (
+      {sky?.atmosphere && <AtmosphereControls settings={sky.atmosphere} patch={(atmosphere) => patch({ atmosphere })} />}
+      {sky && !sky.atmosphere && (
         <>
           <ColorRow label="Zenith" value={sky.zenith} onChange={(zenith) => patch({ zenith })} />
           <ColorRow label="Sky horizon" value={sky.horizon} onChange={(horizon) => patch({ horizon })} />
@@ -774,6 +785,28 @@ function SkyDomeControls({ lighting, onChange }: LightingEditorProps & { lightin
           <CloudLayerControls sky={sky} patch={patch} />
         </>
       )}
+    </>
+  );
+}
+
+/** A physical atmosphere's settings (F5a): each against Earth's, which is where they start. */
+function AtmosphereControls({ settings, patch }: { settings: AtmosphereSettings; patch: (next: AtmosphereSettings) => void }) {
+  const set = (key: keyof AtmosphereSettings, value: number) => patch({ ...settings, [key]: value });
+  return (
+    <>
+      <RailHint>The sun is the key light: aim it and set its brightness under Lights. 1 is Earth&apos;s for each of these.</RailHint>
+      <RangeControl label="Air (Rayleigh)" nested min={0} max={4} step={0.05} value={settings.rayleigh ?? 1} ariaLabel="Rayleigh scattering" display={`×${(settings.rayleigh ?? 1).toFixed(2)}`} onChange={(v) => set("rayleigh", v)} />
+      <RangeControl label="Haze (Mie)" nested min={0} max={20} step={0.1} value={settings.mie ?? 1} ariaLabel="Mie scattering" display={`×${(settings.mie ?? 1).toFixed(1)}`} onChange={(v) => set("mie", v)} />
+      <RangeControl label="Ozone" nested min={0} max={4} step={0.05} value={settings.ozone ?? 1} ariaLabel="Ozone" display={`×${(settings.ozone ?? 1).toFixed(2)}`} onChange={(v) => set("ozone", v)} />
+      <RangeControl label="Sun glow" nested min={0} max={0.95} step={0.01} value={settings.mieAnisotropy ?? 0.8} ariaLabel="Mie anisotropy" display={(settings.mieAnisotropy ?? 0.8).toFixed(2)} onChange={(v) => set("mieAnisotropy", v)} />
+      <RangeControl label="Ground albedo" nested min={0} max={1} step={0.01} value={settings.groundAlbedo ?? 0.3} ariaLabel="Ground albedo" display={(settings.groundAlbedo ?? 0.3).toFixed(2)} onChange={(v) => set("groundAlbedo", v)} />
+      <RangeControl label="Altitude" nested min={0} max={8000} step={50} value={settings.altitude ?? 0} ariaLabel="Altitude" display={`${Math.round(settings.altitude ?? 0)} m`} onChange={(v) => set("altitude", v)} />
+      <RangeControl label="Sun size" nested min={0.1} max={5} step={0.05} value={settings.sunSize ?? 0.545} ariaLabel="Sun angular diameter" display={`${(settings.sunSize ?? 0.545).toFixed(2)}°`} onChange={(v) => set("sunSize", v)} />
+      <RangeControl label="Aerial distance" nested min={0} max={50} step={0.5} value={settings.aerialScale ?? 1} ariaLabel="Aerial perspective distance scale" display={(settings.aerialScale ?? 1) === 0 ? "Off" : `×${(settings.aerialScale ?? 1).toFixed(1)}`} onChange={(v) => set("aerialScale", v)} />
+      <RangeControl label="Moon" nested min={0} max={1000} step={1} value={settings.moon ?? 1} ariaLabel="Moon brightness" display={(settings.moon ?? 1) === 0 ? "None" : `×${Math.round(settings.moon ?? 1)}`} onChange={(v) => set("moon", v)} />
+      <RangeControl label="Stars" nested min={0} max={1000} step={1} value={settings.stars ?? 1} ariaLabel="Star brightness" display={(settings.stars ?? 1) === 0 ? "None" : `×${Math.round(settings.stars ?? 1)}`} onChange={(v) => set("stars", v)} />
+      <RailHint>The moon stands opposite the sun (full) and lights the scene once the sun has set; ×1 is the real moon and stars, which want eye adaptation (or a raised exposure) to be seen.</RailHint>
+      <RailHint>Aerial distance hazes the scene by the air between it and the eye (AAA tier). At ×1 a metre is a metre, so only kilometres haze over; more lays a landscape&apos;s haze over a small map.</RailHint>
     </>
   );
 }
@@ -1001,6 +1034,70 @@ function FogControls({ lighting, onChange }: LightingEditorProps & { lighting: S
             onChange={(max) => patch({ max })}
           />
           <FogLayerControls fog={fog} patch={patch} />
+          <VolumetricFogControls fog={fog} patch={patch} />
+        </>
+      )}
+    </>
+  );
+}
+
+/**
+ * Real-time GI (AAA_FIDELITY_ROADMAP.md F3e): on the AAA tier a probe volume
+ * traced and relit every frame, so moving lights and a time of day bounce
+ * without a bake; light-mapped surfaces take it too while it is on.
+ */
+function DynamicGiControls({ lighting, onChange }: LightingEditorProps & { lighting: SceneLighting }) {
+  const gi = lighting.dynamicGi ?? null;
+  const set = (next: Partial<DynamicGiSettings>) => gi && onChange({ ...lighting, dynamicGi: { ...gi, ...next } });
+  return (
+    <>
+      <SegmentedControl
+        label="Global illumination (AAA)"
+        ariaLabel="Global illumination"
+        selected={gi ? "live" : "baked"}
+        onSelect={(id) => onChange({ ...lighting, dynamicGi: id === "live" ? (gi ?? {}) : null })}
+        options={[
+          { id: "baked", label: "Baked" },
+          { id: "live", label: "Real-time", hint: "On the AAA tier, probes are traced through the still scene every frame, so light that moves bounces without a bake. A baked probe volume is its starting point; light maps step aside while it is on" },
+        ]}
+      />
+      {gi && (
+        <>
+          <RangeControl label="Rays per probe" nested min={16} max={256} step={16} value={gi.rays ?? 64} ariaLabel="GI rays per probe" display={`${gi.rays ?? 64}`} onChange={(rays) => set({ rays })} />
+          <RangeControl label="Steadiness" nested min={0.5} max={0.99} step={0.01} value={gi.hysteresis ?? 0.97} ariaLabel="GI hysteresis" display={(gi.hysteresis ?? 0.97).toFixed(2)} onChange={(hysteresis) => set({ hysteresis })} />
+          <RangeControl label="Probe spacing" nested min={1} max={10} step={0.5} value={gi.spacing ?? 3} ariaLabel="GI probe spacing" display={`${(gi.spacing ?? 3).toFixed(1)} m`} onChange={(spacing) => set({ spacing })} />
+        </>
+      )}
+    </>
+  );
+}
+
+/**
+ * Volumetric fog (AAA_FIDELITY_ROADMAP.md F5b): on the AAA tier the densities
+ * above become a medium the sun and sky light scatter in, shadowed into
+ * shafts, in place of the fade toward the fog colour (which the other tiers keep).
+ */
+function VolumetricFogControls({ fog, patch }: { fog: SceneFog; patch: (next: Partial<SceneFog>) => void }) {
+  const v = fog.volumetric ?? null;
+  const set = (next: Partial<VolumetricFogSettings>) => v && patch({ volumetric: { ...v, ...next } });
+  return (
+    <>
+      <SegmentedControl
+        label="Volumetric (AAA)"
+        ariaLabel="Volumetric fog"
+        selected={v ? "on" : "off"}
+        onSelect={(id) => patch({ volumetric: id === "on" ? (v ?? {}) : null })}
+        options={[
+          { id: "off", label: "Painted" },
+          { id: "on", label: "Volumetric", hint: "On the AAA tier, the fog's densities become a medium lit by the sun (through its shadows, so shafts of light appear) and the sky. Start and Max don't apply to it; the other tiers keep the painted fade" },
+        ]}
+      />
+      {v && (
+        <>
+          <ColorRow label="Scattering" value={v.albedo ?? [1, 1, 1]} onChange={(albedo) => set({ albedo })} />
+          <RangeControl label="Toward the sun" nested min={-0.5} max={0.95} step={0.01} value={v.anisotropy ?? 0.6} ariaLabel="Fog anisotropy" display={(v.anisotropy ?? 0.6).toFixed(2)} onChange={(anisotropy) => set({ anisotropy })} />
+          <RangeControl label="Reach" nested min={16} max={500} step={4} value={v.distance ?? 96} ariaLabel="Volumetric fog reach" display={`${Math.round(v.distance ?? 96)} m`} onChange={(distance) => set({ distance })} />
+          <RangeControl label="Sky light" nested min={0} max={4} step={0.05} value={v.ambient ?? 1} ariaLabel="Volumetric fog sky light" display={`×${(v.ambient ?? 1).toFixed(2)}`} onChange={(ambient) => set({ ambient })} />
         </>
       )}
     </>

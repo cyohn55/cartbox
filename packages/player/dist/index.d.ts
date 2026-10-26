@@ -1,4 +1,4 @@
-import { MeshSceneInstance, MeshAsset, Mat4, ScenePropValue, PhysicsSpec, AnimatorSpec, AttachedComponent, SceneLighting, PhysicsWorldSettings, SceneTimeline, SceneLevel, NavMesh, Terrain, SceneStreaming, ParticleEffect, DecalDef, DecalMark, RagdollBox, DebrisDef, LodChain, SceneAudio, ComponentDef, StreamGroup, JointKind, JointSpec, ActionRebind, DecodedTexture, SkySun, BakedCloudLayer, SunShafts, ColorFilter, AccessibilitySettings, EncodedImage, UiDocument, InputAction, StringTable, ReflectionProbe, EnvironmentLight, ShadowInput, ToneMap, SceneLight, LocalShadows, ProjectedDecal, DecalTiles, SceneFog, SceneWind, RasterStyle, MeshMaterial, ResolvedLayers, ResolvedRefraction, SurfaceEffect, AnimatorOp, NavGraph, AnimationCue } from '@cartbox/editor';
+import { MeshSceneInstance, MeshAsset, Mat4, ScenePropValue, PhysicsSpec, AnimatorSpec, AttachedComponent, SceneLighting, PhysicsWorldSettings, SceneTimeline, SceneLevel, NavMesh, Terrain, SceneStreaming, ParticleEffect, DecalDef, DecalMark, RagdollBox, DebrisDef, LodChain, SceneAudio, ComponentDef, StreamGroup, JointKind, JointSpec, ActionRebind, Atmosphere, SkyMoon, DecodedTexture, SkySun, BakedCloudLayer, SunShafts, ColorFilter, AccessibilitySettings, EncodedImage, UiDocument, InputAction, StringTable, ReflectionProbe, EnvironmentLight, ShadowInput, ToneMap, SceneLight, LocalShadows, ProjectedDecal, DecalTiles, Occluder, DynamicGi, SceneFog, SceneWind, RasterStyle, HdrLightmap, LightmapLayout, ProbeVolume, OccluderSurface, MeshMaterial, ResolvedLayers, ResolvedRefraction, SurfaceEffect, AnimatorOp, NavGraph, AnimationCue } from '@cartbox/editor';
 
 /**
  * The runtime mesh scene: the cart's mesh sidecar resolved into placed instances
@@ -2358,6 +2358,47 @@ interface PassTime {
 }
 
 /**
+ * The physically based sky on the GPU (AAA_FIDELITY_ROADMAP.md F5a): Hillaire's
+ * three LUTs in compute, mirroring the CPU reference in @cartbox/editor
+ * (atmosphere.ts) step for step, so each can be held to the other.
+ *
+ * - **Transmittance** (256 × 64): to the top of the atmosphere, over a point's
+ *   radius and the ray's zenith cosine (Bruneton's mapping), 128 steps a ray.
+ *   Built once per medium.
+ * - **Multiple scattering** (32 × 32): Hillaire's Ψ_ms over the sun's zenith
+ *   cosine and the height, 64 directions of 20 steps a texel. Built once per
+ *   medium.
+ * - **Sky view** (192 × 108): the sky's radiance from the scene, over the
+ *   azimuth from the sun (finer toward it) and the zenith angle (finer toward
+ *   the horizon, which sits at v = ½), 32 steps a ray spaced quadratically.
+ *   Rebuilt when the sun moves, so a time of day is a few hundred microseconds
+ *   of compute.
+ * - **Aerial perspective** (16 × 16 × 32, F5a-2): Hillaire's froxel volume
+ *   over a camera's frustum, the air's in-scattered light and transmittance
+ *   out to each of 32 slices spaced quadratically to 32 km. Rebuilt for every
+ *   camera that draws (a column a thread), and read by the AAA scene shader
+ *   per fragment. It is kept in a uniform buffer as half floats, not a 3D
+ *   texture: the scene shader already binds the 16 sampled textures and 8
+ *   storage buffers a stage may have on every device, so the volume is
+ *   filtered by hand.
+ *
+ * The presenter (gpuPresent.ts) draws the AAA tier's backdrop from the sky
+ * view per pixel, and the sun's disc over it, in the renderer's units of
+ * linear light, which the frame then tone-maps with the scene.
+ */
+
+/** A physical sky as a frame draws it: the medium, the sun toward it and its radiance above the air (linear units). */
+interface AtmosphereSky {
+    readonly atmosphere: Atmosphere;
+    readonly sun: readonly [number, number, number];
+    readonly sunRadiance: readonly [number, number, number];
+    /** The moon (F5a-3): toward it and its radiance above the air, or none. */
+    readonly moon?: SkyMoon | null;
+    /** The stars' and night sky's brightness against the real ones' (F5a-3; 1 when absent). */
+    readonly stars?: number;
+}
+
+/**
  * Presenting a 3D frame from the GPU (AAA_FIDELITY_ROADMAP.md F0a).
  *
  * The byte path renders the scene on the GPU, reads it back, then does the rest
@@ -2371,7 +2412,9 @@ interface PassTime {
  * canvas's texture):
  *
  * 1. **Sky:** the equirectangular dome, its sun's glow and its drifting cloud
- *    layers, per pixel through the camera (`renderSkyBackground`'s maths).
+ *    layers, per pixel through the camera (`renderSkyBackground`'s maths); or,
+ *    on a linear frame with a physical sky (F5a), the atmosphere's sky view
+ *    and the sun's disc, in the renderer's units (atmosphere.ts).
  * 2. **Sun shafts:** the light-source mask at reduced resolution (open sky that
  *    is bright and near the sun), then the gather along the line to the sun
  *    (`applySunShafts`'s maths).
@@ -2409,6 +2452,15 @@ interface PresentSky {
     /** Drifting cloud layers (I6), and the seconds they have drifted. */
     readonly clouds: readonly BakedCloudLayer[];
     readonly time: number;
+    /**
+     * A physical sky (F5a), which a linear frame draws in place of the panorama:
+     * the medium and its sun, and the sun disc's radiance as the eye sees it
+     * (sunDiscRadiance). A byte-space frame draws the panorama regardless.
+     */
+    readonly atmosphere?: (AtmosphereSky & {
+        readonly disc: Rgb$2;
+        readonly moonDisc?: Rgb$2 | null;
+    }) | null;
 }
 /** What a frame's scene draws over. */
 type PresentBase = {
@@ -2537,6 +2589,8 @@ declare class GpuPresenter {
     private readonly uniforms;
     private readonly data;
     private postFx;
+    /** The physical sky's LUTs (F5a), made when a linear frame first draws one. */
+    private atmosphereLuts;
     /** The HDR bloom's chain (F4d), made when a linear frame first blooms. */
     private bloom;
     /** The frame graph's transients (the sky, the shafts, the composites), kept from frame to frame. */
@@ -4386,6 +4440,25 @@ interface SceneDraw {
      */
     readonly sunShadow?: SunShadow | null;
     /**
+     * Real-time GI (AAA_FIDELITY_ROADMAP.md F3e) on the linear-light (AAA)
+     * WebGPU renderer: the still scene its probes trace (a key that changes
+     * with it), and the settings. The volume it relights is the environment's
+     * probe volume, which every surface then takes its diffuse light from, the
+     * light-mapped ones too. The others ignore it.
+     */
+    readonly dynamicGi?: {
+        readonly occluders: readonly Occluder[];
+        readonly key: string;
+        readonly settings: DynamicGi;
+    } | null;
+    /**
+     * A physical sky's air (AAA_FIDELITY_ROADMAP.md F5a-2): the medium and its
+     * sun above the air, whose aerial perspective the linear-light (AAA) WebGPU
+     * renderer lays over every surface, built for this draw's camera. The others
+     * ignore it.
+     */
+    readonly atmosphere?: AtmosphereSky | null;
+    /**
      * Distance fog for PBR (Modern-tier) materials, applied after tone mapping, or
      * omitted for none. Both backends fade by the fragment's eye depth. See
      * {@link SceneFog}.
@@ -4964,6 +5037,8 @@ declare class WebgpuSceneRenderer implements SceneRenderer {
     private readonly textures;
     /** With mips (F1a), colour maps upload apart: their chain is averaged in linear light. */
     private readonly colourTextures;
+    /** HDR directional light maps (F3d), uploaded once each as two rgba16float layers. */
+    private readonly hdrLightmaps;
     /** Draws a texture's mip chain on the GPU (F1a). */
     private readonly mipmaps;
     /** The block-compressed formats this renderer uploads a texture's `gpu` chain in, preferred first (F1a). */
@@ -5054,6 +5129,17 @@ declare class WebgpuSceneRenderer implements SceneRenderer {
     private frameDepthView;
     /** Whether this frame's ambient light takes GTAO (F3c), for the frame uniform. */
     private frameGtao;
+    /** This frame's real-time GI (F3e), its tracer for the still scene it was made for, and the sky it traces. */
+    private frameGi;
+    private probeGi;
+    private giSky;
+    /** This frame's volumetric fog (F5b), its volumes (made when a frame first has some) and the shader's terms. */
+    private frameFog;
+    private volumetricFog;
+    private readonly fogTerms;
+    /** The physical sky's LUTs (F5a-2), made when a draw first brings one, and the frame's aerial terms. */
+    private atmosphere;
+    private readonly aerialTerms;
     /**
      * GTAO's resources (F3c): its uniforms, the half-resolution history (two,
      * one read and one written, swapping each frame), and its pipelines.
@@ -5222,8 +5308,25 @@ declare class WebgpuSceneRenderer implements SceneRenderer {
      * write both and their params. An orthographic view (no cells) loops every light.
      */
     private clusterLights;
-    /** Upload a probe grid (EP9) as a 3D texture, once per grid, rebuilding group 1 to point at it. */
-    private uploadProbeGrid;
+    /**
+     * This draw's volumetric fog (F5b), on the linear-light renderer, for a
+     * perspective camera under a rig whose fog is volumetric: the grid for the
+     * frame's size, the sun (shadowed by its cascades when it casts) and the
+     * sky's mean radiance, and the camera, uniforms written. Null (and the
+     * history dropped) otherwise.
+     */
+    private prepareFog;
+    /**
+     * The physical sky's aerial perspective for this draw's camera (F5a-2): its
+     * froxels built in compute ahead of the frame, and the terms the shader
+     * finds a fragment's with; all zero (off) without one.
+     */
+    private aerialFrame;
+    /**
+     * Upload a probe grid (EP9) or volume (F3d-3) as a 3D texture, `slots` texels
+     * a probe along x, once per grid, rebuilding group 1 to point at it.
+     */
+    private uploadProbeTexture;
     /** This frame's GPU spot/point tiles (F2d), or null when it draws none. */
     private frameLocalTiles;
     /** The GPU tiles' records (F2d), and the atlas they're drawn into, made the first time a light casts. */
@@ -5264,6 +5367,13 @@ declare class WebgpuSceneRenderer implements SceneRenderer {
      * its mips the encoder's. A cut-out keeps the RGBA path for its coverage.
      */
     private uploadTexture;
+    /**
+     * Upload (once) an HDR directional light map (F3d, hdrLightmap.ts) as a
+     * two-layer rgba16float array: the irradiance (and 1), then the dominant
+     * direction and the sky's visibility. One level: a light map's texels are
+     * already a few centimetres to metres apart.
+     */
+    private uploadHdrLightmap;
     /** The size frames render at now. */
     get size(): {
         readonly width: number;
@@ -5281,6 +5391,185 @@ declare class WebgpuSceneRenderer implements SceneRenderer {
     resize(width: number, height: number): void;
     dispose(): void;
 }
+
+/**
+ * Image-based lighting on the GPU (AAA_FIDELITY_ROADMAP.md F3a): the AAA tier's
+ * environment as a cubemap whose mips are the GGX-prefiltered reflection at
+ * rising roughness, and its diffuse light as L2 spherical harmonics. Together
+ * with the split-sum DFG (brdf.ts) they are Karis's split-sum IBL.
+ *
+ * They replace what the Modern tier keeps for its parity with the software
+ * rasteriser: the 192×96 panorama read nearest, a reflection "blurred" by
+ * lerping toward the environment's average, and a diffuse light that was the
+ * radiance straight along the normal rather than the irradiance over its
+ * hemisphere.
+ *
+ * - **The source** is the environment in linear light ({@link environmentPanorama}):
+ *   an imported HDR sky's own radiance, else its panorama, or its
+ *   sky/horizon/ground gradient, decoded and scaled by its intensity as the
+ *   shader's `envColorDir` does.
+ * - **The cube** is drawn from it in compute, each mip level the GGX lobe of
+ *   its roughness (level / (levels − 1)) importance-sampled around the
+ *   direction, with mip-filtered samples (Křivánek and Colbert) from the
+ *   source's own mips, so a few hundred samples don't alias.
+ * - **The irradiance** is projected on the CPU into nine coefficients
+ *   (Ramamoorthi and Hanrahan), already convolved with the clamped cosine and
+ *   divided by π, so a constant environment of radiance L lights white at L.
+ */
+
+/** An environment in linear light: RGBA floats, equirectangular (u = longitude, v = 0 at the zenith). */
+interface LinearPanorama {
+    readonly width: number;
+    readonly height: number;
+    readonly data: Float32Array;
+}
+/**
+ * The environment as the linear shader sees it: its HDR light when it has one
+ * (an imported `.hdr` sky, F3a), else its panorama, or its gradient by a
+ * direction's height (envGradient), each decoded from authored colour; all
+ * scaled by the intensity.
+ */
+declare function environmentPanorama(env: EnvironmentLight): LinearPanorama;
+/**
+ * The panorama's irradiance as L2 spherical harmonics: nine RGB coefficients
+ * (as vec4s, 36 floats), convolved with the clamped cosine and over π, so
+ * {@link shIrradiance} gives the radiance a white Lambertian surface reflects.
+ */
+declare function environmentSh(pano: LinearPanorama): Float32Array;
+/** The SH irradiance (over π) at a unit normal, as the shader evaluates it. */
+declare function shIrradiance(sh: Float32Array, n: readonly [number, number, number]): [number, number, number];
+
+/**
+ * The GPU lightmapper (AAA_FIDELITY_ROADMAP.md F3d): a path tracer in compute
+ * that bakes a laid-out mesh's light map in linear light, in seconds in the
+ * browser where the CPU bake (lightmap.ts) takes minutes.
+ *
+ * - **The scene** is the CPU bake's own triangle BVH (`buildBvh`), flattened
+ *   into storage buffers: two words per node, three vec4s per triangle (a
+ *   corner and two edges) and its material in linear light (the albedo a
+ *   diffuse bounce takes, its lighting channels, and an emissive colour that
+ *   lights what sees it).
+ * - **The texels** are the ones the CPU bake shades (`lightmapTexels`): each
+ *   one's surface point and normal.
+ * - **Each path** leaves the texel along a cosine-weighted direction (the
+ *   first stratified over the bake, rotated per texel) and bounces diffusely
+ *   up to `bounces` times. Open sky gives the sky's radiance (the IBL's own
+ *   panorama, F3a); a surface gives its emission, and each surface it bounces
+ *   off is lit by the directional lights (a shadow ray each) and by one of the
+ *   point, spot and area lights (F3d-4, below). The texel's own direct light
+ *   is left out: the live cascades (F2a) and local lights draw it.
+ * - **The mean** of what the paths bring back is the irradiance over π: what
+ *   a white Lambertian surface there reflects, as the sky's SH irradiance is.
+ *   The paths also give the light's dominant direction (luminance-weighted)
+ *   and the share of the sky's light that came through unblocked.
+ *
+ * The result is an HDR directional light map (hdrLightmap.ts) for the AAA
+ * tier, and, from the same paths, the 8-bit ambient scale every other tier
+ * reads (the irradiance over the open sky's, per channel). Each dispatch is a
+ * bounded number of paths, so no submit nears a GPU's watchdog.
+ *
+ * Then it is finished (F3d-2):
+ * - **Invalid texels.** A texel whose first rays mostly hit the backs of
+ *   surfaces (by their authored normals) lies inside something, a floor
+ *   texel under a wall's foot, say. It is dropped and filled from its valid
+ *   neighbours, so it neither darkens the floor beside the wall nor lets the
+ *   light inside it out.
+ * - **Denoising** on the GPU: an edge-avoiding à-trous wavelet (Dammertz et
+ *   al. 2010) of four passes, 1 to 8 texels apart, stopped by the texels'
+ *   normals and planes (so neither a corner nor a neighbouring chart blurs
+ *   in) and by luminance against each texel's own variance, prefiltered over
+ *   its 3×3 (Schied et al.'s SVGF), so a well-converged texel is left nearly
+ *   as it is.
+ * - **Seams** stitched: where one edge in the world sits on two charts, the
+ *   texels along both are nudged (least squares) until the two lookups agree.
+ *
+ * And it bakes what the renderer lights (F3d-4):
+ * - **Local lights' bounce.** At each surface a path bounces off, one point,
+ *   spot or area light is picked by what it would give there unshadowed (with
+ *   a tenth of the choice spread evenly, so none is ever unpickable), and its
+ *   light, over the chance of picking it, comes through a shadow ray. With
+ *   many lights that is one ray where each light's would be many, and the
+ *   estimate stays unbiased.
+ *   - A point or spot light falls off and narrows to its cone as the
+ *     renderers' `distanceFalloff` and the shader's cone do.
+ *   - An area light (F2e-2) is sampled on its surface: a point uniformly on
+ *     its rectangle or disk, or on the rectangle a tube shows the point (as
+ *     the LTC shader takes it, ltc.ts), as its luminance × the two cosines ×
+ *     its area over π d², the renderer's units for its diffuse.
+ *   - A light lights only what shares one of its lighting channels (F2e).
+ * - **Metalness.** A surface bounces its albedo × (1 − metalness), as the
+ *   renderer's diffuse is, plus a metal's own colour as far as it is rough: a
+ *   rough metal's reflection is spread as a diffuser's is, a mirror's goes
+ *   one way and is the reflection probes' (F3b) to carry.
+ * - **Textured albedo** comes in with the occluders (`Occluder.surfaces`;
+ *   bakeSurface.ts in @cartbox/editor), per triangle from its map.
+ */
+
+/** The most bounces a bake takes, the most directional lights, and the most point, spot and area lights (F3d-4). */
+declare const LIGHTMAP_MAX_BOUNCES = 8;
+declare const LIGHTMAP_MAX_LIGHTS = 4;
+declare const LIGHTMAP_MAX_LOCAL_LIGHTS = 256;
+/**
+ * A light the bounces are lit by: its radiance in linear light (colour ×
+ * intensity; an area light's luminance) and, as a {@link SceneLight} reads
+ * them, where it is and how it falls off. Without a kind it is directional,
+ * `direction` toward it.
+ */
+interface BakeLight extends Partial<Pick<SceneLight, "kind" | "direction" | "position" | "range" | "falloff" | "innerAngle" | "outerAngle" | "shape" | "size" | "tangent" | "channels">> {
+    readonly radiance: readonly [number, number, number];
+}
+/** A rig's lights as the bake lights bounces with them: each one's linear colour (its temperature laid over it) × intensity. */
+declare function bakeLights(lights: readonly SceneLight[]): BakeLight[];
+interface GpuLightBakeOptions {
+    /** Paths per texel (default 256). */
+    readonly samples?: number;
+    /** Diffuse bounces after the first surface a path meets (0..8, default 3): 0 is sky and emission seen directly. */
+    readonly bounces?: number;
+    /** The sky's radiance in linear light (`environmentPanorama`); none is a black sky. */
+    readonly sky?: LinearPanorama | null;
+    /** The lights that light the surfaces paths bounce off: at most four directional ones, and point, spot and area ones (F3d-4; {@link bakeLights}). */
+    readonly lights?: readonly BakeLight[];
+    /** Denoise on the GPU (default true; F3d-2). */
+    readonly denoise?: boolean;
+    /** Stitch the seams between charts (default true; F3d-2). */
+    readonly stitch?: boolean;
+    /** The share of a texel's first rays that may hit backs of surfaces before it counts as inside one (default 0.6; F3d-2). */
+    readonly backfaceLimit?: number;
+}
+/** A finished bake: the HDR directional light map and the 8-bit ambient scale, both `size × size`. */
+interface GpuLightmapBake {
+    readonly hdr: HdrLightmap;
+    /** RGBA bytes in lightmap.ts's format (× 1/{@link LIGHTMAP_RANGE}). */
+    readonly ambient: Uint8ClampedArray;
+    /** Texels dropped as inside geometry, and seam points stitched (F3d-2). */
+    readonly invalid: number;
+    readonly seams: number;
+}
+/**
+ * A mesh's surfaces as the bake reads them (F3d-4; `Occluder.surfaces`): each
+ * primitive's base-colour and metal/roughness maps, decoded by `decode` (null
+ * where it can't; `data` asks for the pixels as stored, a data map's), and its
+ * metalness and roughness as the renderer resolves them (no metalness on a
+ * material the renderer doesn't shade as PBR).
+ */
+declare function bakeSurfaces(mesh: MeshAsset, decode: (image: EncodedImage, data: boolean) => Promise<DecodedTexture | null>): Promise<OccluderSurface[]>;
+/**
+ * Bake a laid-out mesh's light map on `device` against `occluders` (which
+ * should include the mesh itself); see the module comment. `progress` hears
+ * the share done after each submit.
+ */
+declare function bakeLightmapGpu(device: any, layout: LightmapLayout, occluders: readonly Occluder[], options?: GpuLightBakeOptions, progress?: (done: number) => void): Promise<GpuLightmapBake>;
+interface ProbeVolumeBakeOptions extends Pick<GpuLightBakeOptions, "bounces" | "sky" | "lights" | "backfaceLimit"> {
+    /** Rays per probe (default 1024). */
+    readonly rays?: number;
+}
+/**
+ * Bake a probe volume over `counts` probes spanning `min`–`max` against
+ * `occluders` on `device` (see probeVolume.ts): each probe's rays over the
+ * whole sphere, through the same paths as a light map's texels. A probe's
+ * depths are capped at 1.5 times the probe spacing, as DDGI's are.
+ */
+declare function bakeProbeVolumeGpu(device: any, min: readonly [number, number, number], max: readonly [number, number, number], counts: readonly [number, number, number], occluders: readonly Occluder[], options?: ProbeVolumeBakeOptions, progress?: (done: number) => void): Promise<ProbeVolume>;
 
 /**
  * The pure half of the WebGPU scene renderer: memory layout and buffer packing.
@@ -5565,6 +5854,8 @@ interface InstanceUniform {
     readonly hasSsao: boolean;
     /** A baked light map is bound (it scales the ambient/IBL term, PBR draws only). */
     readonly hasLightmap?: boolean;
+    /** The bound light map is an HDR directional one (F3d), which the linear-light shader lights by in place of the sky's irradiance. */
+    readonly hdrLightmap?: boolean;
     /** This draw's world matrix, for point-light world position in the shader. */
     readonly model: Mat4 | null;
     /** Number of lights in the shared storage buffer, or 0 for the single key light. */
@@ -6907,6 +7198,13 @@ declare class MeshOverlaySurface implements DisplaySurface {
      * moves the sun the metals reflect too.
      */
     private skyReflections;
+    /**
+     * A physical sky's time of day (F5a-2): the sun its light was last rendered
+     * for (null until the first frame takes the bake's), and the re-render under
+     * way for where the sun is now, a few rows a frame.
+     */
+    private skyLitFor;
+    private skyRelight;
     /** The scene's distant vistas, textured: re-drawn into the sky whenever it is re-baked. */
     private vistas;
     /**
@@ -7112,14 +7410,26 @@ declare class MeshOverlaySurface implements DisplaySurface {
      * top of the authored rig's lights.
      */
     setCartLights(lights: readonly WorldLight[]): void;
-    /** The rig as this frame lights with it: with the cart's sun as its key, if it set one (I17). */
+    /** The rig as this frame lights with it: with the cart's sun as its key, if it set one (I17), tinted by a physical sky's air (F5a). */
     private frameLighting;
+    /** The rig with the cart's sun as its key, if it set one (I17): above the air, before a physical sky tints it. */
+    private sunLighting;
     /**
      * Keep the sun the metals reflect where the frame's sun is: when it has
      * moved (or changed colour) past what {@link sunKey} rounds away, redraw the
      * reflections copy's glow — a small map, a few milliseconds.
      */
     private followSun;
+    /**
+     * A physical sky's time of day (F5a-2): when its sun (above the air) has
+     * turned past what {@link physicalSunKey} rounds away, or changed, render
+     * the atmosphere's light again for where it is, {@link SKY_RELIGHT_ROWS} a
+     * frame, then swap it in whole: the AAA tier's IBL is rebuilt from it and
+     * its reflection probes re-captured (their key follows the environment), and
+     * the other tiers' reflections copy is made from it. The backdrop already
+     * follows the sun each frame on the AAA tier.
+     */
+    private followPhysicalSun;
     /** Start finding the probes' bounce transfer (I17), when they were baked with their light recorded. */
     private startBounce;
     /**
@@ -7149,6 +7459,17 @@ declare class MeshOverlaySurface implements DisplaySurface {
      * presenter measured a frame or two ago, as the byte path measures the bytes.
      */
     private presentOnGpu;
+    /**
+     * Real-time GI (F3e), on the AAA tier under a rig that asks for it: the
+     * still scene the probes trace (with a key that changes with it), and the
+     * environment with the volume they relight — the rig's baked one, else an
+     * empty one over the scene's bounds, the same object frame after frame so
+     * the renderer keeps relighting it.
+     */
+    private liveGi;
+    private giState;
+    /** A physical sky as the presenter draws it (F5a): the medium, its sun above the air, and the disc as the eye sees it; null for a painted one. */
+    private presentAtmosphere;
     /** The presenter's newest measurements into the lens flare and eye adaptation (the byte path's reportSun and frameLuminance). */
     private takeGpuMeasurements;
     /** Ask for the GPU front renderer once (see MeshOverlayOptions.createFrontRenderer). */
@@ -7342,6 +7663,16 @@ declare class MeshOverlaySurface implements DisplaySurface {
     private reflectionCapture;
     private envCounter;
 }
+/**
+ * The environment a scene is lit by, as the player draws it: the rig's
+ * gradient, or, where it authors a sky, that sky baked (its imported or HDR
+ * panorama, objects, clouds and distant vistas, I6 and I7) as the surface
+ * bakes it. The light bake reads it (AAA_FIDELITY_ROADMAP.md F3d-4), so what
+ * is baked is lit by the sky the frame shows. Null without a rig. Textures go
+ * through the browser's decoder (none in node, where the vistas draw flat);
+ * KTX2-only ones draw flat.
+ */
+declare function sceneSkyEnvironment(scene: MeshScene): Promise<EnvironmentLight | null>;
 /**
  * The 15 armour colours a pose's `tint` picks from (index 0 = no tint). Applied
  * to a mesh's `tintable` materials only, replacing their base colour's RGB.
@@ -8751,4 +9082,4 @@ declare function directCoreBeside(engineUrl: string | undefined): string;
  */
 declare function mount(container: HTMLElement, options: PlayerOptions): PlayerHandle;
 
-export { AIM_ASSISTS, AgentCrowd, type AimAssist, type AnimClip, type AnimMode, type AnimPlacement, type AnimSpec, type AnimState, type AnimTarget, type AnimTrack, AnimatedForegroundSurface, AnimationSession, type AtmosphereParams, BLOOM_KNEE, BloomPyramid, BroadcastChannelTransport, type BuiltLightingRenderer, CAMERA_BASE, CAMERA_SCALE, CARTBOX_SDK_LUA, CELL_WORLD, CMD_RING_BYTES, CMD_RING_MAX, COMPOSE_UNIFORM_FLOATS, CappedSceneRenderer, type CapturedFrame, type CartSpriteSource, CartridgeLoadError, type CastHit, type CastShape, type ClipSample, type ClipTableEntry, type CollisionField, ConsoleButton, type ConsoleInstance, type ConsoleModel, type ControlScheme, type ControlSettings, type ControlTarget, DEFAULT_AMBIENT, DEFAULT_ATMOSPHERE, DEFAULT_CONTROL_SETTINGS, DEFAULT_KEY_BINDINGS, DEFAULT_LIGHT, DEFAULT_MODEL_ID, DEFAULT_MOUSE_LOOK, DEFAULT_PAD_BINDINGS, DEFAULT_STICK_DEAD_ZONES, DEFAULT_TRIGGER_THRESHOLD, DIRECT_CORE_URL, DebugCommand, type DebugStep, type DeviceHints, type DeviceProvider, type DirectConsole, DirectTransport, type DirectTransportOptions, type DriftStats, EVENT_CAPACITY, type Ease, EngineLoadError, type ErrorFrame, FLARE_GHOSTS, FLARE_GHOST_GAIN, FLARE_SPIKE_POWER, type FlagsField, type FlareGhost, type FlareParams, type FrameState, GYRO_AIMS, GamepadInput, type GeneratedTrack, type GlContextProvider, GpuCanvasSurface, GpuPresenter, type GpuSceneDraw, type GradingLut, type GyroAim, HEIGHT_WORLD, IMPORTED_LOOK, INPUT_BLOCK_BYTES, INPUT_MAGIC, INPUT_SETTINGS, INSTANCE_FLOATS, type InnerSurfaceFactory, type InputChange, type InspectedObject, type InstanceTransform, type Keyframe, LIGHTS_BASE, LIGHTS_CAPACITY, LIGHT_FLOATS, LIGHT_STRIDE, LOOP_SLOTS, LUT_LOOKS, LUT_SIZE, type LabCart, type LabProbe, type LayerChannel, type Light, type LightingBackend, type LightingFrameContext, LightingLayer, type LightingOptions, type LightingRenderer, type LightingScene, type LinkConditions, LitCanvasSurface, type LookDevice, type LookProfile, MAILBOX_TYPE_ACHIEVEMENT, MAILBOX_TYPE_PROGRESS, MAILBOX_TYPE_SCORE, MAILBOX_WORDS, MAX_EMITTERS, MAX_LUT_SIZE, MAX_PARTICLES_PER_EMITTER, MAX_PYRAMID_LEVELS, MAX_VOICES, MESH_CAM_ANGLE_SCALE, MESH_CAM_BASE, MESH_CAM_DIST_SCALE, MESH_CAM_STRIDE, MESH_POSE_BASE, MESH_POSE_CAPACITY, MESH_POSE_HIDDEN, MESH_POSE_STRIDE, MIN_LUT_SIZE, MIN_PYRAMID_DIMENSION, MODELS, MOUSE_FULL_LEAN_PX, type MailboxCamera, type MailboxEvent, type MailboxEventKind, type MailboxMeshCamera, type MailboxMeshPose, type MailboxRead, type MaterialBuffer, MemoryNetHub, type MeshInstance, MeshOverlaySurface, type MeshScene, type SceneCamera$1 as MeshSceneCamera, type ModelId, NET_MODE_CLIENT, NET_MODE_HOST, NET_MODE_OFFLINE, NET_SLOTS, NET_WORDS, NORMAL_DIRECTION_COUNT, NORMAL_VECTORS, type NetEvent, type NetInbox, type NetLabOptions, type NetLabReport, type NetMessage, type NetOutbox, type NetPeer, type NetRoomStatus, NetSession, type NetSignal, type NetState, type NetTransport, type ObjectLook, PAD_BUTTONS, PARTICLE_KINDS, PHYSICS_DT, PHYS_BLOCK_BYTES, PHYS_MAGIC, POINTER_AT, POINTER_MAGIC, POST_FX_EFFECTS, PROFILE_SECTIONS, PROFILE_WINDOW, type PackableLight, type PadButton, type PadSnapshot, type Particle, type ParticleEmitter, type ParticleKind, ParticleOverlaySurface, type ParticleSpec, type PauseInfo, type PbrMaterial, type PhysicsBackend, type PhysicsBodyDesc, type PhysicsJointDesc, type Quat as PhysicsQuat, PhysicsSession, type PhysicsShape, type Vec3$3 as PhysicsVec3, type PlacementChannel, type PlayerHandle, type PlayerOptions, PointerInput, type PointerState, type PostFxColorDef, type PostFxEffectDef, type PostFxEffectId, type PostFxParamDef, PostFxPass, type PostFxSettings, type PostFxSource, PostFxSurface, type PostFxUniforms, type PresentBase, type PresentFrame, type PresentSky, type PresentStats, type ProfileSection, type ProfileSnapshot, Profiler, QUALITY_LEVELS, QUALITY_PRESETS, type QualityChoice, QualityGovernor, type QualityLevel, type QualitySettings, RAM_LAYOUTS, REPLAY_VERSION, RESPONSE_CURVES, type RamLayout, type RegionImage, type RegisteredAchievement, type RenderCanvas, type RenderCaps, type RenderStats, type Replay, ReplayError, ReplayRecorder, ReplaySource, type ResolvedMapping, type ResolvedPbr, type ResolvedPlacement, type ResponseCurve, type Rgb, type RtcDataChannelLike, type RtcPeerConnectionFactory, type RtcPeerConnectionLike, type RumbleEffect, RuntimeChannel, SAVE_MAGIC, SKY_UNIFORM_FLOATS, SOFTWARE_RASTER_CAPS, START_KEYS, STICK_LAYOUTS, type ScaleMode, SceneBackdropSurface, type SceneBounds, type SceneCamera, type SceneDraw, type SceneLayer, type SceneMemory, type SceneRenderer, type SceneSpec, type SceneVista, type ScreenSun, type SectionStats, SimulatedNetHub, SoftwareSceneRenderer, type SoundContext, SoundSystem, type Speaker, type SpriteRegion, type SpriteRegionSource, type StickDeadZones, type StickLayout, type SunShadow, SwitchableTransport, TANGENT_VERTEX_FLOATS, TILT_SHIFT_FEATHER, TINT_PALETTE, TOUCH_CONTROL_IDS, TOUCH_LOOK_MODES, type TextureLookup, type TouchControlId, type TouchLayout, type TouchLookMode, type TouchPlacement, type TraceLine, type TrackMode, UNIFORM_BYTES_USED, UNIFORM_FLOATS, UNIFORM_STRIDE, VERTEX_FLOATS, type Vec3$2 as Vec3, type VerificationResult, WEBGL_INSTANCES_PER_DRAW, WEBGL_MAX_LIGHTS, WebglSceneRenderer, WebgpuLightingLayer, WebgpuSceneRenderer, type WorldBillboard, type WorldBillboardPose, type WorldCamera, type WorldCameraSpec, type WorldLight, WorldOverlaySurface, type WorldProp, type WorldScene, type WorldTileCell, acesFilmic, acesFilmicChannel, actionsSdkLua, aimAssistLevel, alignBytesPerRow, animClipsSdkLua, animatedObjects, anyPostFxEnabled, appendLuaCode, applyActionToggles, applyLookSettings, applyLut, applyQualityToPostFx, applyRenderCaps, armDebugBlock, armSaveBlock, askMotionPermission, breakableLine, browserDeviceHints, browserRtc, browserSpeaker, buildBillboardInstance, buildClipTable, buildOrbitCamera, buildShadowInstance, buildTerrainInstances, buildWorldCamera, cameraAt, capTextures, capTriangles, capsConstrainScene, cellAt, clipFrameIndex, codeChunks, codeLineOffset, collisionSdkLua, commandRingAddress, commandRingBytes, commandRingMax, commandsPerTick, compileAnimator, componentsSdkLua, composeParallax, composeWorldMatrix, compositeOverBackdrop, createCartSpriteSource, createConsole, createDirectConsole, createFlatMaterial, createLightingLayer, createSceneRenderer, createTextureBudgetCache, deadZoned, debugBlockAddress, debugPostlude, debugSdkLua, decodeCamera, decodeLights, decodeLut, decodeMailbox, decodeMeshCamera, decodeMeshPoses, decodeNetMessage, decodeWorldLights, defaultPostFxSettings, detectQuality, deterministicBackend, directCoreBeside, directCoreModel, dragLean, drift, effectiveBreakpoints, emitterPreset, encodeLut, encodeNetMessage, errorStack, estimateSceneBytes, estimateSceneMemory, evaluate, extractScore, extractUnlocks, fillSky, fitShape, fitTextureToBudget, flagsSdkLua, flicker, frameDurationMs, framePixels, framebufferBytes, getModel, getWebgpuDevice, gyroLean, hasCommandRing, hashCart, hashEventId, hexToRgb01, identityLut, injectSdk, inputBlockAddress, instrumentLua, interleaveVertices, interleaveVerticesWithTangents, interpolateNormal, isMobileAgent, jointFrames, layoutSticks, lensFlareAt, loadEngineModule, lookAccelerationBoost, lookGains, lookLut, lookProfileFor, lutStrip, makeShadowTexture, mount, mouseLean, nearestDirection, netSendInterval, normalBasis3x3, normalVector, orbitPitchAboveTerrain, packComposeUniforms, packLights, packMeasureUniforms, packShaftUniforms, packSkyUniforms, paramKey, parseAnim, parseCollisionField, parseControlSettings, parseCubeLut, parseFlagsField, parseMeshScene, parseParticles, parsePauseInfo, parsePostFxSettings, parseReplay, parseScene, parseTouchLayout, parseWorldScene, physicsBlockAddress, physicsSdkLua, physicsSlots, physicsStateHash, placeWithin, playLanguage, prehazeLayers, prependLuaCode, pulse, pyramidLevelCount, pyramidLevelSize, randomSeed, rasterStyleFor, readCartCode, readPad, readPause, readSidecarActions, readSidecarUi, reflectionFade, reflectionSampleY, remapErrorLines, renderSceneBackdrop, resolveButton, resolveLight, resolveMapping, resolvePbr, resolveQuality, resolveSceneLayers, resolveSupersample, resolveUnlockedAchievements, responseCurve, rewriteLuaCode, rumbleEffect, runNetLab, runReplayEvents, runsOnDirectCore, runtimeSdkLua, sampleClipFrame, sampleNormalBilinear, sampleScalarBilinear, sampleTrack, saveBlockAddress, saveBlockBytes, saveCapacity, saveSdkLua, sceneHasAnimation, sceneHasPhysics, sceneNeedsRuntime, sceneObjectsSdkLua, seedCartridge, sendDebugCommand, serializeReplay, shade, shaftGrid, shapeStick, simulateEmitter, smoothFrontEdges, softKneePrefilter, splitWorldMatrix, standardizePad, stepLookAcceleration, streamGroups, stringsSdkLua, sway, takeNetOutbox, takePhysicsCommands, takeRingCommands, takeSave, tiltShiftBlur, toConsolePixel, toggleMask, tokenizeLua, uiSdkLua, uniformsFromSettings, unpadRows, validSave, verifyReplayScore, viewDirection, webgpuCanHonour, worldCenter, writeBreakpoints, writeInputBlock, writeInputSettings, writeInstanceTransform, writeInstanceUniform, writeNetInbox, writePhysicsState, writePointer, writeWatches };
+export { AIM_ASSISTS, AgentCrowd, type AimAssist, type AnimClip, type AnimMode, type AnimPlacement, type AnimSpec, type AnimState, type AnimTarget, type AnimTrack, AnimatedForegroundSurface, AnimationSession, type AtmosphereParams, BLOOM_KNEE, type BakeLight, BloomPyramid, BroadcastChannelTransport, type BuiltLightingRenderer, CAMERA_BASE, CAMERA_SCALE, CARTBOX_SDK_LUA, CELL_WORLD, CMD_RING_BYTES, CMD_RING_MAX, COMPOSE_UNIFORM_FLOATS, CappedSceneRenderer, type CapturedFrame, type CartSpriteSource, CartridgeLoadError, type CastHit, type CastShape, type ClipSample, type ClipTableEntry, type CollisionField, ConsoleButton, type ConsoleInstance, type ConsoleModel, type ControlScheme, type ControlSettings, type ControlTarget, DEFAULT_AMBIENT, DEFAULT_ATMOSPHERE, DEFAULT_CONTROL_SETTINGS, DEFAULT_KEY_BINDINGS, DEFAULT_LIGHT, DEFAULT_MODEL_ID, DEFAULT_MOUSE_LOOK, DEFAULT_PAD_BINDINGS, DEFAULT_STICK_DEAD_ZONES, DEFAULT_TRIGGER_THRESHOLD, DIRECT_CORE_URL, DebugCommand, type DebugStep, type DeviceHints, type DeviceProvider, type DirectConsole, DirectTransport, type DirectTransportOptions, type DriftStats, EVENT_CAPACITY, type Ease, EngineLoadError, type ErrorFrame, FLARE_GHOSTS, FLARE_GHOST_GAIN, FLARE_SPIKE_POWER, type FlagsField, type FlareGhost, type FlareParams, type FrameState, GYRO_AIMS, GamepadInput, type GeneratedTrack, type GlContextProvider, GpuCanvasSurface, type GpuLightBakeOptions, type GpuLightmapBake, GpuPresenter, type GpuSceneDraw, type GradingLut, type GyroAim, HEIGHT_WORLD, IMPORTED_LOOK, INPUT_BLOCK_BYTES, INPUT_MAGIC, INPUT_SETTINGS, INSTANCE_FLOATS, type InnerSurfaceFactory, type InputChange, type InspectedObject, type InstanceTransform, type Keyframe, LIGHTMAP_MAX_BOUNCES, LIGHTMAP_MAX_LIGHTS, LIGHTMAP_MAX_LOCAL_LIGHTS, LIGHTS_BASE, LIGHTS_CAPACITY, LIGHT_FLOATS, LIGHT_STRIDE, LOOP_SLOTS, LUT_LOOKS, LUT_SIZE, type LabCart, type LabProbe, type LayerChannel, type Light, type LightingBackend, type LightingFrameContext, LightingLayer, type LightingOptions, type LightingRenderer, type LightingScene, type LinearPanorama, type LinkConditions, LitCanvasSurface, type LookDevice, type LookProfile, MAILBOX_TYPE_ACHIEVEMENT, MAILBOX_TYPE_PROGRESS, MAILBOX_TYPE_SCORE, MAILBOX_WORDS, MAX_EMITTERS, MAX_LUT_SIZE, MAX_PARTICLES_PER_EMITTER, MAX_PYRAMID_LEVELS, MAX_VOICES, MESH_CAM_ANGLE_SCALE, MESH_CAM_BASE, MESH_CAM_DIST_SCALE, MESH_CAM_STRIDE, MESH_POSE_BASE, MESH_POSE_CAPACITY, MESH_POSE_HIDDEN, MESH_POSE_STRIDE, MIN_LUT_SIZE, MIN_PYRAMID_DIMENSION, MODELS, MOUSE_FULL_LEAN_PX, type MailboxCamera, type MailboxEvent, type MailboxEventKind, type MailboxMeshCamera, type MailboxMeshPose, type MailboxRead, type MaterialBuffer, MemoryNetHub, type MeshInstance, MeshOverlaySurface, type MeshScene, type SceneCamera$1 as MeshSceneCamera, type ModelId, NET_MODE_CLIENT, NET_MODE_HOST, NET_MODE_OFFLINE, NET_SLOTS, NET_WORDS, NORMAL_DIRECTION_COUNT, NORMAL_VECTORS, type NetEvent, type NetInbox, type NetLabOptions, type NetLabReport, type NetMessage, type NetOutbox, type NetPeer, type NetRoomStatus, NetSession, type NetSignal, type NetState, type NetTransport, type ObjectLook, PAD_BUTTONS, PARTICLE_KINDS, PHYSICS_DT, PHYS_BLOCK_BYTES, PHYS_MAGIC, POINTER_AT, POINTER_MAGIC, POST_FX_EFFECTS, PROFILE_SECTIONS, PROFILE_WINDOW, type PackableLight, type PadButton, type PadSnapshot, type Particle, type ParticleEmitter, type ParticleKind, ParticleOverlaySurface, type ParticleSpec, type PauseInfo, type PbrMaterial, type PhysicsBackend, type PhysicsBodyDesc, type PhysicsJointDesc, type Quat as PhysicsQuat, PhysicsSession, type PhysicsShape, type Vec3$3 as PhysicsVec3, type PlacementChannel, type PlayerHandle, type PlayerOptions, PointerInput, type PointerState, type PostFxColorDef, type PostFxEffectDef, type PostFxEffectId, type PostFxParamDef, PostFxPass, type PostFxSettings, type PostFxSource, PostFxSurface, type PostFxUniforms, type PresentBase, type PresentFrame, type PresentSky, type PresentStats, type ProfileSection, type ProfileSnapshot, Profiler, QUALITY_LEVELS, QUALITY_PRESETS, type QualityChoice, QualityGovernor, type QualityLevel, type QualitySettings, RAM_LAYOUTS, REPLAY_VERSION, RESPONSE_CURVES, type RamLayout, type RegionImage, type RegisteredAchievement, type RenderCanvas, type RenderCaps, type RenderStats, type Replay, ReplayError, ReplayRecorder, ReplaySource, type ResolvedMapping, type ResolvedPbr, type ResolvedPlacement, type ResponseCurve, type Rgb, type RtcDataChannelLike, type RtcPeerConnectionFactory, type RtcPeerConnectionLike, type RumbleEffect, RuntimeChannel, SAVE_MAGIC, SKY_UNIFORM_FLOATS, SOFTWARE_RASTER_CAPS, START_KEYS, STICK_LAYOUTS, type ScaleMode, SceneBackdropSurface, type SceneBounds, type SceneCamera, type SceneDraw, type SceneLayer, type SceneMemory, type SceneRenderer, type SceneSpec, type SceneVista, type ScreenSun, type SectionStats, SimulatedNetHub, SoftwareSceneRenderer, type SoundContext, SoundSystem, type Speaker, type SpriteRegion, type SpriteRegionSource, type StickDeadZones, type StickLayout, type SunShadow, SwitchableTransport, TANGENT_VERTEX_FLOATS, TILT_SHIFT_FEATHER, TINT_PALETTE, TOUCH_CONTROL_IDS, TOUCH_LOOK_MODES, type TextureLookup, type TouchControlId, type TouchLayout, type TouchLookMode, type TouchPlacement, type TraceLine, type TrackMode, UNIFORM_BYTES_USED, UNIFORM_FLOATS, UNIFORM_STRIDE, VERTEX_FLOATS, type Vec3$2 as Vec3, type VerificationResult, WEBGL_INSTANCES_PER_DRAW, WEBGL_MAX_LIGHTS, WebglSceneRenderer, WebgpuLightingLayer, WebgpuSceneRenderer, type WorldBillboard, type WorldBillboardPose, type WorldCamera, type WorldCameraSpec, type WorldLight, WorldOverlaySurface, type WorldProp, type WorldScene, type WorldTileCell, acesFilmic, acesFilmicChannel, actionsSdkLua, aimAssistLevel, alignBytesPerRow, animClipsSdkLua, animatedObjects, anyPostFxEnabled, appendLuaCode, applyActionToggles, applyLookSettings, applyLut, applyQualityToPostFx, applyRenderCaps, armDebugBlock, armSaveBlock, askMotionPermission, bakeLightmapGpu, bakeLights, bakeProbeVolumeGpu, bakeSurfaces, breakableLine, browserDeviceHints, browserRtc, browserSpeaker, buildBillboardInstance, buildClipTable, buildOrbitCamera, buildShadowInstance, buildTerrainInstances, buildWorldCamera, cameraAt, capTextures, capTriangles, capsConstrainScene, cellAt, clipFrameIndex, codeChunks, codeLineOffset, collisionSdkLua, commandRingAddress, commandRingBytes, commandRingMax, commandsPerTick, compileAnimator, componentsSdkLua, composeParallax, composeWorldMatrix, compositeOverBackdrop, createCartSpriteSource, createConsole, createDirectConsole, createFlatMaterial, createLightingLayer, createSceneRenderer, createTextureBudgetCache, deadZoned, debugBlockAddress, debugPostlude, debugSdkLua, decodeCamera, decodeLights, decodeLut, decodeMailbox, decodeMeshCamera, decodeMeshPoses, decodeNetMessage, decodeWorldLights, defaultPostFxSettings, detectQuality, deterministicBackend, directCoreBeside, directCoreModel, dragLean, drift, effectiveBreakpoints, emitterPreset, encodeLut, encodeNetMessage, environmentPanorama, environmentSh, errorStack, estimateSceneBytes, estimateSceneMemory, evaluate, extractScore, extractUnlocks, fillSky, fitShape, fitTextureToBudget, flagsSdkLua, flicker, frameDurationMs, framePixels, framebufferBytes, getModel, getWebgpuDevice, gyroLean, hasCommandRing, hashCart, hashEventId, hexToRgb01, identityLut, injectSdk, inputBlockAddress, instrumentLua, interleaveVertices, interleaveVerticesWithTangents, interpolateNormal, isMobileAgent, jointFrames, layoutSticks, lensFlareAt, loadEngineModule, lookAccelerationBoost, lookGains, lookLut, lookProfileFor, lutStrip, makeShadowTexture, mount, mouseLean, nearestDirection, netSendInterval, normalBasis3x3, normalVector, orbitPitchAboveTerrain, packComposeUniforms, packLights, packMeasureUniforms, packShaftUniforms, packSkyUniforms, paramKey, parseAnim, parseCollisionField, parseControlSettings, parseCubeLut, parseFlagsField, parseMeshScene, parseParticles, parsePauseInfo, parsePostFxSettings, parseReplay, parseScene, parseTouchLayout, parseWorldScene, physicsBlockAddress, physicsSdkLua, physicsSlots, physicsStateHash, placeWithin, playLanguage, prehazeLayers, prependLuaCode, pulse, pyramidLevelCount, pyramidLevelSize, randomSeed, rasterStyleFor, readCartCode, readPad, readPause, readSidecarActions, readSidecarUi, reflectionFade, reflectionSampleY, remapErrorLines, renderSceneBackdrop, resolveButton, resolveLight, resolveMapping, resolvePbr, resolveQuality, resolveSceneLayers, resolveSupersample, resolveUnlockedAchievements, responseCurve, rewriteLuaCode, rumbleEffect, runNetLab, runReplayEvents, runsOnDirectCore, runtimeSdkLua, sampleClipFrame, sampleNormalBilinear, sampleScalarBilinear, sampleTrack, saveBlockAddress, saveBlockBytes, saveCapacity, saveSdkLua, sceneHasAnimation, sceneHasPhysics, sceneNeedsRuntime, sceneObjectsSdkLua, sceneSkyEnvironment, seedCartridge, sendDebugCommand, serializeReplay, shIrradiance, shade, shaftGrid, shapeStick, simulateEmitter, smoothFrontEdges, softKneePrefilter, splitWorldMatrix, standardizePad, stepLookAcceleration, streamGroups, stringsSdkLua, sway, takeNetOutbox, takePhysicsCommands, takeRingCommands, takeSave, tiltShiftBlur, toConsolePixel, toggleMask, tokenizeLua, uiSdkLua, uniformsFromSettings, unpadRows, validSave, verifyReplayScore, viewDirection, webgpuCanHonour, worldCenter, writeBreakpoints, writeInputBlock, writeInputSettings, writeInstanceTransform, writeInstanceUniform, writeNetInbox, writePhysicsState, writePointer, writeWatches };

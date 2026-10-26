@@ -153,6 +153,19 @@ export type { PresentBase, PresentFrame, PresentSky, PresentStats } from "./rend
 export { GpuCanvasSurface, framePixels, type CapturedFrame } from "./render/GpuCanvasSurface.js";
 export { createSceneRenderer } from "./render/createSceneRenderer.js";
 export { WebgpuSceneRenderer } from "./render/WebgpuSceneRenderer.js";
+export {
+  LIGHTMAP_MAX_BOUNCES,
+  LIGHTMAP_MAX_LIGHTS,
+  LIGHTMAP_MAX_LOCAL_LIGHTS,
+  bakeLightmapGpu,
+  bakeLights,
+  bakeProbeVolumeGpu,
+  bakeSurfaces,
+  type BakeLight,
+  type GpuLightBakeOptions,
+  type GpuLightmapBake,
+} from "./render/gpuLightmapper.js";
+export { environmentPanorama, environmentSh, shIrradiance, type LinearPanorama } from "./render/ibl.js";
 export { WEBGL_INSTANCES_PER_DRAW, WEBGL_MAX_LIGHTS, WebglSceneRenderer, type GlContextProvider } from "./render/WebglSceneRenderer.js";
 export {
   DEFAULT_AMBIENT,
@@ -358,7 +371,7 @@ export type {
 // geometry with placement transforms); the player rasterises it over each frame
 // with a pure software rasteriser — the runtime has no GPU triangle path — no cart
 // code needed. Phase 2 of the mesh asset feature.
-export { MeshOverlaySurface, TINT_PALETTE, smoothFrontEdges, parseMeshScene, buildOrbitCamera, orbitPitchAboveTerrain, streamGroups, sceneObjectsSdkLua } from "./mesh/index.js";
+export { MeshOverlaySurface, TINT_PALETTE, sceneSkyEnvironment, smoothFrontEdges, parseMeshScene, buildOrbitCamera, orbitPitchAboveTerrain, streamGroups, sceneObjectsSdkLua } from "./mesh/index.js";
 export { readSidecarUi, uiSdkLua } from "./uiSdk.js";
 export { INPUT_SETTINGS, playLanguage, stringsSdkLua, writeInputSettings } from "./stringsSdk.js";
 export { componentsSdkLua } from "./componentsSdk.js";

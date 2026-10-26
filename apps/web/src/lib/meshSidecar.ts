@@ -148,6 +148,12 @@ export interface MeshSidecarEntry {
   readonly alwaysLoaded?: true;
   /** The lighting channels it is lit on (F2e; see SceneLight.channels in @cartbox/editor); absent, the first. */
   readonly lightChannels?: number;
+  /**
+   * Its light map's texel density against the bake's own (AAA_FIDELITY_ROADMAP.md
+   * F3d-2), {@link LIGHTMAP_SCALES} from a quarter to four times; absent, 1. A
+   * hero piece takes more texels, a far wall fewer.
+   */
+  readonly lightmapScale?: number;
   /** Components attached to this object, with its field values (see components.ts in @cartbox/editor). */
   readonly components?: readonly AttachedComponent[];
   /** A parametric shape (P5; see shapeGenerators.ts in @cartbox/editor): its mesh is built from these parameters, and rebuilt when they change. */
@@ -420,6 +426,7 @@ export function decodeMeshSidecar(raw: string | null | undefined): MeshSidecar {
       ...(typeof record.level === "string" && record.level ? { level: record.level } : {}),
       ...(record.alwaysLoaded === true ? { alwaysLoaded: true as const } : {}),
       ...(record.lightChannels !== undefined && lightChannelMask(record.lightChannels) !== 1 ? { lightChannels: lightChannelMask(record.lightChannels) } : {}),
+      ...(lightmapScaleOf(record.lightmapScale) !== 1 ? { lightmapScale: lightmapScaleOf(record.lightmapScale) } : {}),
       ...(attached(record.components).length > 0 ? { components: attached(record.components) } : {}),
       ...(readParametric((record as { shape?: unknown }).shape) ? { shape: readParametric((record as { shape?: unknown }).shape)! } : {}),
     });
@@ -838,6 +845,29 @@ export function setMeshAlwaysLoaded(sidecar: MeshSidecar, id: string, always: bo
       if (m.id !== id) return m;
       const { alwaysLoaded: _drop, ...rest } = m;
       return always ? { ...rest, alwaysLoaded: true as const } : rest;
+    }),
+  };
+}
+
+/** The light-map densities an object can take against the bake's (F3d-2): powers of two. */
+export const LIGHTMAP_SCALES = [0.25, 0.5, 1, 2, 4] as const;
+
+/** A stored light-map scale, snapped to the nearest of {@link LIGHTMAP_SCALES} (1 for anything else). */
+export function lightmapScaleOf(value: unknown): number {
+  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) return 1;
+  const log = Math.min(2, Math.max(-2, Math.round(Math.log2(value))));
+  return 2 ** log;
+}
+
+/** Bake an object's light map at `scale` times the bake's texel density (F3d-2); 1 is the default, and stored as nothing. */
+export function setMeshLightmapScale(sidecar: MeshSidecar, id: string, scale: number): MeshSidecar {
+  const snapped = lightmapScaleOf(scale);
+  return {
+    ...sidecar,
+    meshes: sidecar.meshes.map((m) => {
+      if (m.id !== id) return m;
+      const { lightmapScale: _drop, ...rest } = m;
+      return snapped === 1 ? rest : { ...rest, lightmapScale: snapped };
     }),
   };
 }

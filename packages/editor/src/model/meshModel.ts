@@ -792,18 +792,19 @@ class Rebuild {
         if (len(n) > 0) normals.set(n, v * 3);
       }
     }
-    const { lightmapImage: _lightmap, ...withoutLightmap } = this.src.material;
+    const { lightmapImage: _lightmap, lightmapHdrImage: _hdr, ...withoutLightmap } = this.src.material;
     const joints = pick(this.jnt, 4, Uint16Array) as Uint16Array | null;
     const weights = pick(this.wgt, 4, Float32Array) as Float32Array | null;
     const uvs2 = pick(this.uv2, 2, Float32Array) as Float32Array | null;
+    const baked = Boolean(this.src.material.lightmapImage || this.src.material.lightmapHdrImage);
     const blend = pick(this.blendW, 1, Float32Array) as Float32Array | null;
     return {
       positions,
       normals,
       uvs: pick(this.uv, 2, Float32Array) as Float32Array | null,
       indices,
-      material: topology && this.src.material.lightmapImage ? withoutLightmap : this.src.material,
-      ...(uvs2 && !(topology && this.src.material.lightmapImage) ? { uvs2 } : {}),
+      material: topology && baked ? withoutLightmap : this.src.material,
+      ...(uvs2 && !(topology && baked) ? { uvs2 } : {}),
       ...(blend ? { blend } : {}),
       ...(joints && weights ? { joints, weights } : {}),
     };

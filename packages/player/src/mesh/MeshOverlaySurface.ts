@@ -24,6 +24,18 @@
 
 import { DynamicResolution, scaledSize } from "../render/dynamicResolution.js";
 import {
+  atmosphereLighting,
+  atmosphereLuts,
+  atmospherePanorama,
+  atmospherePanoramaRows,
+  dynamicGiGrid,
+  emptyProbeVolume,
+  resolveDynamicGi,
+  type ProbeVolume,
+  MOON_ALBEDO,
+  sunTransmittance,
+  atmosphereSun,
+  sunDiscRadiance,
   bakeReflectionProbesAsync,
   ParticleSystem,
   DecalSystem,
@@ -63,8 +75,10 @@ import {
   frameLuminance,
   postVolumeReach,
   withDescendants,
+  decodeHdrLightmap,
   type DecodedTexture,
   type EncodedImage,
+  type HdrLightmap,
   type EnvironmentLight,
   type HdrImage,
   type LiveSkinnedMesh,
@@ -288,6 +302,14 @@ const SKY_PANORAMA_HEIGHT = 768;
 const SKY_IBL_DOWNSAMPLE = 8;
 /** Points across each reflections texel the sun's glow is averaged over, so the small copy keeps the core's light. */
 const SKY_IBL_SUN_SAMPLES = 4;
+/**
+ * A physical sky's light re-rendered for a time of day (F5a-2): this size,
+ * upsampled to the IBL's, and this many rows a frame (each row about a
+ * millisecond and a half of CPU), so a sunset re-lights in under a second.
+ */
+const SKY_RELIGHT_WIDTH = 96;
+const SKY_RELIGHT_HEIGHT = 48;
+const SKY_RELIGHT_ROWS = 1;
 
 /**
  * A cart pose's local transform. The SDK's rotation is (yaw, pitch, roll): yaw
@@ -367,6 +389,13 @@ export class MeshOverlaySurface implements DisplaySurface {
    * moves the sun the metals reflect too.
    */
   private skyReflections: { small: DecodedTexture; sun: string } | null = null;
+  /**
+   * A physical sky's time of day (F5a-2): the sun its light was last rendered
+   * for (null until the first frame takes the bake's), and the re-render under
+   * way for where the sun is now, a few rows a frame.
+   */
+  private skyLitFor: string | null = null;
+  private skyRelight: { key: string; sun: NonNullable<ReturnType<typeof atmosphereSun>>; hdr: HdrImage; row: number } | null = null;
   /** The scene's distant vistas, textured: re-drawn into the sky whenever it is re-baked. */
   private vistas: VistaLayer[] = [];
   /**
@@ -634,11 +663,13 @@ export class MeshOverlaySurface implements DisplaySurface {
         const baked = await bakeSceneSky(lighting.sky, lighting, environment, this.vistas, next.bounds.center);
         skyMap = baked.map;
         clouds = baked.clouds;
-        environment = { ...environment, map: baked.reflections, average: computeEnvironmentAverage(baked.reflections), ...(baked.hdr ? { hdr: baked.hdr } : {}) };
+        environment = litBySky(environment, baked);
         this.skyReflections = { small: baked.small, sun: sunKey(skySun(lighting.sky)) };
       } else {
         this.skyReflections = null;
       }
+      this.skyLitFor = null;
+      this.skyRelight = null;
       this.environment = environment;
       this.skyMap = skyMap;
       this.startBounce();
@@ -761,7 +792,7 @@ export class MeshOverlaySurface implements DisplaySurface {
       const baked = await bakeSceneSky(lighting.sky, lighting, environment, vistas, scene.bounds.center);
       skyMap = baked.map;
       clouds = baked.clouds;
-      environment = { ...environment, map: baked.reflections, average: computeEnvironmentAverage(baked.reflections), ...(baked.hdr ? { hdr: baked.hdr } : {}) };
+      environment = litBySky(environment, baked);
       reflections = { small: baked.small, sun: sunKey(skySun(lighting.sky)) };
     }
     const surface = new MeshOverlaySurface(inner, width, height, scene, instances, frames, renderer, skyMap, environment, options);
@@ -925,8 +956,14 @@ export class MeshOverlaySurface implements DisplaySurface {
     this.cartSun = sun ? { direction: sun.position, color: sun.color } : null;
   }
 
-  /** The rig as this frame lights with it: with the cart's sun as its key, if it set one (I17). */
+  /** The rig as this frame lights with it: with the cart's sun as its key, if it set one (I17), tinted by a physical sky's air (F5a). */
   private frameLighting(): SceneLighting | null {
+    const lighting = this.sunLighting();
+    return lighting ? atmosphereLighting(lighting) : null;
+  }
+
+  /** The rig with the cart's sun as its key, if it set one (I17): above the air, before a physical sky tints it. */
+  private sunLighting(): SceneLighting | null {
     const lighting = this.scene.lighting ?? null;
     if (!lighting || !this.cartSun) return lighting;
     const sun = `${this.cartSun.direction.map((v) => v.toFixed(3)).join(",")}|${this.cartSun.color.map((v) => v.toFixed(3)).join(",")}`;
@@ -942,12 +979,52 @@ export class MeshOverlaySurface implements DisplaySurface {
   private followSun(lighting: SceneLighting | null): void {
     const reflections = this.skyReflections;
     if (!reflections || !lighting?.sky || !this.environment) return;
+    if (lighting.sky.atmosphere) return this.followPhysicalSun();
     const sun = skySun(lighting.sky);
     const key = sunKey(sun);
     if (key === reflections.sun) return;
     const map = skyReflectionsWith(reflections.small, sun, this.skyClouds);
     this.environment = { ...this.environment, map, average: computeEnvironmentAverage(map) };
     this.skyReflections = { small: reflections.small, sun: key };
+  }
+
+  /**
+   * A physical sky's time of day (F5a-2): when its sun (above the air) has
+   * turned past what {@link physicalSunKey} rounds away, or changed, render
+   * the atmosphere's light again for where it is, {@link SKY_RELIGHT_ROWS} a
+   * frame, then swap it in whole: the AAA tier's IBL is rebuilt from it and
+   * its reflection probes re-captured (their key follows the environment), and
+   * the other tiers' reflections copy is made from it. The backdrop already
+   * follows the sun each frame on the AAA tier.
+   */
+  private followPhysicalSun(): void {
+    const authored = this.scene.lighting;
+    const lighting = this.sunLighting();
+    const sun = lighting ? atmosphereSun(lighting) : null;
+    if (!sun || !authored?.sky || !this.environment) return;
+    // The bake at load was for the rig's own sun.
+    if (this.skyLitFor === null) {
+      const baked = atmosphereSun(authored);
+      this.skyLitFor = baked ? physicalSunKey(baked) : "";
+    }
+    if (!this.skyRelight) {
+      const key = physicalSunKey(sun);
+      if (key === this.skyLitFor) return;
+      this.skyRelight = { key, sun, hdr: { width: SKY_RELIGHT_WIDTH, height: SKY_RELIGHT_HEIGHT, data: new Float32Array(SKY_RELIGHT_WIDTH * SKY_RELIGHT_HEIGHT * 3) }, row: 0 };
+    }
+    const job = this.skyRelight;
+    atmospherePanoramaRows(atmosphereLuts(job.sun.atmosphere), job.sun.direction, job.sun.radiance, job.hdr, job.row, job.row + SKY_RELIGHT_ROWS, job.sun.moon);
+    job.row += SKY_RELIGHT_ROWS;
+    if (job.row < SKY_RELIGHT_HEIGHT) return;
+    const hdr = resampleHdr(job.hdr, SKY_PANORAMA_WIDTH / SKY_IBL_DOWNSAMPLE, SKY_PANORAMA_HEIGHT / SKY_IBL_DOWNSAMPLE, 0, 1);
+    const sky = authored.sky;
+    const small = bakeSkyPanorama({ ...sky, panorama: null }, hdr.width, hdr.height, hdrToTexture(hdr, authored.exposure), { sunLayer: true });
+    const glow = skySun(lighting!.sky!);
+    const map = skyReflectionsWith(small, glow, this.skyClouds);
+    this.environment = { ...this.environment, hdr, map, average: computeEnvironmentAverage(map) };
+    this.skyReflections = { small, sun: sunKey(glow) };
+    this.skyLitFor = job.key;
+    this.skyRelight = null;
   }
 
   /** Start finding the probes' bounce transfer (I17), when they were baked with their light recorded. */
@@ -1200,6 +1277,8 @@ export class MeshOverlaySurface implements DisplaySurface {
             shadow,
             fog: lighting.fog ?? null,
             wind: lighting.wind ?? null,
+            // A physical sky's air (F5a-2), which only the AAA renderer lays over the scene.
+            atmosphere: this.presentAtmosphere(),
           }
         : {}),
       // Animated emissive runs on the frame clock (60 per second), so it
@@ -1311,15 +1390,19 @@ export class MeshOverlaySurface implements DisplaySurface {
     this.renderer.resize?.(width, height);
     this.rendered = { width, height, scale: output.width > 0 ? width / output.width : 1 };
     const time = this.frame / 60;
+    // Real-time GI on the AAA tier (F3e): the still scene its probes trace, and the volume they relight.
+    const gi = lighting ? this.liveGi(lighting) : null;
     const lit = lighting
       ? {
           ambient: lighting.ambient,
           lightDirection: sceneLightingKeyDirection(lighting),
-          environment: this.environment,
+          environment: gi ? gi.environment : this.environment,
           tonemap: job.tonemap,
           lights: job.lights,
         }
       : {};
+    // A physical sky (F5a): the presenter's backdrop, and the air the AAA scene lays over its surfaces (F5a-2).
+    const atmosphere = this.presentAtmosphere();
     const draw: GpuSceneDraw = {
       width,
       height,
@@ -1333,6 +1416,8 @@ export class MeshOverlaySurface implements DisplaySurface {
       ...(lighting ? { ...lit, localShadows: job.local, shadow: job.shadow, sunShadow: job.sunShadow, localShadowCasters: job.localShadowCasters, localShadowKey: job.localShadowKey, localShadowMoved: job.localShadowMoved, fog: lighting.fog ?? null, wind: lighting.wind ?? null } : {}),
       ...(job.reflectionCapture ? { reflectionCapture: job.reflectionCapture } : {}),
       ...(job.decals ? { decals: job.decals } : {}),
+      ...(atmosphere ? { atmosphere } : {}),
+      ...(gi ? { dynamicGi: gi.draw } : {}),
       time,
     };
     const scene = this.renderer.renderToTexture!(job.drawn, draw) ?? null;
@@ -1350,7 +1435,7 @@ export class MeshOverlaySurface implements DisplaySurface {
     }
     const sky: PresentSky | null =
       job.skyBackdrop && this.skyMap
-        ? { map: this.skyMap, view: camera.view, projection: camera.projection, sun: lighting?.sky ? skySun(lighting.sky) : null, clouds: this.skyClouds, time }
+        ? { map: this.skyMap, view: camera.view, projection: camera.projection, sun: lighting?.sky ? skySun(lighting.sky) : null, clouds: this.skyClouds, time, atmosphere }
         : null;
     // The sun in the frame's pixels: the shafts and the measurements work at the frame's size.
     const sun = sky && lighting?.sky ? sunScreenPosition(lighting.sky.sunDirection, camera.view, camera.projection, output.width, output.height) : null;
@@ -1367,7 +1452,8 @@ export class MeshOverlaySurface implements DisplaySurface {
     gpu.present({
       base: sky ? { kind: "sky", sky } : this.hud ? { kind: "colour", rgba: HUD_SKY } : { kind: "frame", rgba },
       scene,
-      shafts: sky && sun && lighting?.shafts && lighting.sky ? { sun, color: lighting.sky.sunColor, shafts: lighting.shafts } : null,
+      // On the AAA tier a volumetric fog's shadowed light is the shafts (F5b): the screen-space ones retire.
+      shafts: sky && sun && lighting?.shafts && lighting.sky && !(this.renderer.sunCascades === true && lighting.fog?.volumetric) ? { sun, color: lighting.sky.sunColor, shafts: lighting.shafts } : null,
       front,
       hud: this.hud ? rgba : null,
       hudKey: HUD_TRANSPARENT_SUM,
@@ -1377,6 +1463,52 @@ export class MeshOverlaySurface implements DisplaySurface {
       measure: adapting || flare ? { luminance: adapting, sun: flare ? sun : null } : null,
     });
     this.takeGpuMeasurements(gpu.stats, lighting, job.post, adapting, sky !== null, sun && { x: sun.x / output.width, y: sun.y / output.height });
+  }
+
+  /**
+   * Real-time GI (F3e), on the AAA tier under a rig that asks for it: the
+   * still scene the probes trace (with a key that changes with it), and the
+   * environment with the volume they relight — the rig's baked one, else an
+   * empty one over the scene's bounds, the same object frame after frame so
+   * the renderer keeps relighting it.
+   */
+  private liveGi(lighting: SceneLighting): { draw: NonNullable<GpuSceneDraw["dynamicGi"]>; environment: EnvironmentLight } | null {
+    const settings = this.renderer.sunCascades === true ? resolveDynamicGi(lighting.dynamicGi) : null;
+    const env = this.environment;
+    if (!settings || !env) return null;
+    if (!this.giState || this.giState.scene !== this.scene) {
+      const still = this.scene.instances.filter((inst) => {
+        const body = inst.physics?.body;
+        return !(inst.pooled || isSkinned(inst.mesh) || body === "dynamic" || body === "kinematic" || body === "character");
+      });
+      const b = this.scene.bounds;
+      const grid = dynamicGiGrid(b.min, b.max, settings.spacing);
+      const spacing = [0, 1, 2].map((a) => (grid.max[a]! - grid.min[a]!) / Math.max(1, grid.counts[a]! - 1));
+      this.giState = {
+        scene: this.scene,
+        occluders: still.map((inst) => ({ mesh: inst.mesh, model: inst.model })),
+        empty: emptyProbeVolume(grid.min, grid.max, grid.counts, 1.5 * Math.max(...spacing)),
+        env: null,
+      };
+    }
+    const state = this.giState;
+    if (state.env?.source !== env) state.env = { source: env, value: { ...env, probeVolume: env.probeVolume ?? state.empty } };
+    return { draw: { occluders: state.occluders, key: this.staticShadowKey(), settings }, environment: state.env.value };
+  }
+  private giState: { scene: MeshScene; occluders: { mesh: MeshAsset; model: Mat4 }[]; empty: ProbeVolume; env: { source: EnvironmentLight; value: EnvironmentLight } | null } | null = null;
+
+  /** A physical sky as the presenter draws it (F5a): the medium, its sun above the air, and the disc as the eye sees it; null for a painted one. */
+  private presentAtmosphere(): PresentSky["atmosphere"] {
+    const lighting = this.sunLighting();
+    const sun = lighting ? atmosphereSun(lighting) : null;
+    if (!sun) return null;
+    const luts = atmosphereLuts(sun.atmosphere);
+    const disc = sunDiscRadiance(luts, sun.direction, sun.radiance);
+    // The moon's disc (F5a-3): its albedo × the sun's light on it, through the air toward it.
+    const scale = lighting!.sky?.atmosphere?.moon ?? 1;
+    const t = sun.moon ? sunTransmittance(luts, sun.moon.direction) : null;
+    const moonDisc = t ? ([0, 1, 2].map((c) => MOON_ALBEDO * scale * sun.radiance[c]! * t[c]!) as [number, number, number]) : null;
+    return { atmosphere: sun.atmosphere, sun: sun.direction, sunRadiance: sun.radiance, disc, moon: sun.moon, stars: sun.stars, moonDisc };
   }
 
   /** The presenter's newest measurements into the lens flare and eye adaptation (the byte path's reportSun and frameLuminance). */
@@ -2180,7 +2312,7 @@ export class MeshOverlaySurface implements DisplaySurface {
 
 /** The mesh with each placeholder image whose ref is in `images` filled in (the same mesh when none is). */
 function fillPlaceholders(mesh: MeshAsset, images: ReadonlyMap<string, EncodedImage>): MeshAsset {
-  const slots = ["baseColorImage", "normalImage", "materialImage", "metallicRoughnessImage", "occlusionImage", "emissiveImage", "lightmapImage", "detailImage", "blendImage", "reliefImage", "tintMaskImage"] as const;
+  const slots = ["baseColorImage", "normalImage", "materialImage", "metallicRoughnessImage", "occlusionImage", "emissiveImage", "lightmapImage", "lightmapHdrImage", "detailImage", "blendImage", "reliefImage", "tintMaskImage"] as const;
   let touched = false;
   const primitives = mesh.primitives.map((primitive) => {
     let material = primitive.material;
@@ -2203,6 +2335,29 @@ const VISTA_SHADOW_SIZE = 2048;
 const VISTA_AIR_WIDTH = 192;
 
 /** A scene's vistas with their meshes' maps decoded (the frame's own decode, so shared images decode once). */
+/** The rig's environment lit by its baked sky: the reflections' panorama, its mean, and an imported HDR sky's own light. */
+function litBySky(environment: EnvironmentLight, baked: { reflections: DecodedTexture; hdr: HdrImage | null }): EnvironmentLight {
+  return { ...environment, map: baked.reflections, average: computeEnvironmentAverage(baked.reflections), ...(baked.hdr ? { hdr: baked.hdr } : {}) };
+}
+
+/**
+ * The environment a scene is lit by, as the player draws it: the rig's
+ * gradient, or, where it authors a sky, that sky baked (its imported or HDR
+ * panorama, objects, clouds and distant vistas, I6 and I7) as the surface
+ * bakes it. The light bake reads it (AAA_FIDELITY_ROADMAP.md F3d-4), so what
+ * is baked is lit by the sky the frame shows. Null without a rig. Textures go
+ * through the browser's decoder (none in node, where the vistas draw flat);
+ * KTX2-only ones draw flat.
+ */
+export async function sceneSkyEnvironment(scene: MeshScene): Promise<EnvironmentLight | null> {
+  const lighting = scene.lighting;
+  if (!lighting) return null;
+  const environment = sceneLightingEnvironment(lighting);
+  if (!lighting.sky) return environment;
+  const vistas = await texturedVistas(scene.vistas, (mesh) => decodeMeshTextures(mesh, () => Promise.resolve(null)));
+  return litBySky(environment, await bakeSceneSky(lighting.sky, lighting, environment, vistas, scene.bounds.center));
+}
+
 async function texturedVistas(vistas: readonly SceneVista[] | undefined, texture: (mesh: MeshAsset) => Promise<TexturedMesh>): Promise<VistaLayer[]> {
   return Promise.all(
     (vistas ?? []).map(async (v) => ({ haze: v.haze, instances: await Promise.all(v.parts.map(async (p) => ({ ...(await texture(p.mesh)), model: p.model }))) })),
@@ -2233,7 +2388,15 @@ async function bakeSceneSky(
   let imported: DecodedTexture | null = null;
   // An imported HDR sky's own light, beyond 8 bits, at the reflections' size: the AAA tier's IBL (F3a).
   let hdrLight: HdrImage | null = null;
-  if (sky.panorama) {
+  const physical = sky.atmosphere ? atmosphereSun(lighting) : null;
+  if (physical) {
+    // A physical sky (F5a) is an HDR panorama the atmosphere makes under the key light: exposed into the
+    // painted copy at the rig's exposure, as the frame shows it, and its own light for the IBL and the bake.
+    const hdr = atmospherePanorama(atmosphereLuts(physical.atmosphere), physical.direction, physical.radiance, 256, 128, physical.moon);
+    imported = hdrToTexture(hdr, lighting.exposure);
+    hdrLight = resampleHdr(hdr, SKY_PANORAMA_WIDTH / SKY_IBL_DOWNSAMPLE, SKY_PANORAMA_HEIGHT / SKY_IBL_DOWNSAMPLE, 0, 1);
+    sky = { ...sky, panorama: null };
+  } else if (sky.panorama) {
     try {
       const bytes = base64ToBytes(sky.panorama.data);
       if (isRadiance(sky.panorama.mime)) {
@@ -2286,6 +2449,11 @@ function skyReflectionsWith(small: DecodedTexture, sun: SkySun, clouds: readonly
   return panoramaWithClouds(panoramaWithSun(small, sun, SKY_IBL_SUN_SAMPLES), clouds, 0);
 }
 
+/** A physical sky's sun (above the air) rounded to what's worth re-lighting for: turned about half a degree, or a step brighter or redder (F5a-2). */
+function physicalSunKey(sun: { readonly direction: readonly number[]; readonly radiance: readonly number[] }): string {
+  return `${sun.direction.map((v) => Math.round(v * 100)).join(",")}:${sun.radiance.map((v) => v.toPrecision(2)).join(",")}`;
+}
+
 /** A sun rounded to what's worth redrawing its glow for: turned about half a degree, or recoloured a step. */
 function sunKey(sun: SkySun): string {
   const l = Math.hypot(sun.direction[0], sun.direction[1], sun.direction[2]) || 1;
@@ -2294,6 +2462,20 @@ function sunKey(sun: SkySun): string {
 
 /** A mesh with every material map decoded — what an instance (or a frame) draws with. */
 type TexturedMesh = Omit<MeshSceneInstance, "model">;
+
+/**
+ * HDR directional light maps (F3d) decoded once each, by our own PNG decoder:
+ * a browser's would premultiply the alpha that holds their exponent.
+ */
+const hdrLightmapDecodes = new WeakMap<EncodedImage, Promise<HdrLightmap | null>>();
+function decodeHdrLightmapOnce(image: EncodedImage): Promise<HdrLightmap | null> {
+  let entry = hdrLightmapDecodes.get(image);
+  if (!entry) {
+    entry = decodeHdrLightmap(image.bytes).catch(() => null);
+    hdrLightmapDecodes.set(image, entry);
+  }
+  return entry;
+}
 
 /** Decode all of one mesh's material maps; a failed decode falls back to null (flat). */
 async function decodeMeshTextures(
@@ -2344,6 +2526,13 @@ async function decodeMeshTextures(
     // A painted team-colour mask (L17): applied when the copy is tinted.
     each((m) => m.tintMaskImage),
   ]);
+  // The GPU bake's HDR directional light map (F3d), which the AAA tier lights by.
+  const lightmapHdrTextures = await Promise.all(
+    mesh.primitives.map((primitive) => {
+      const image = primitive.material.lightmapHdrImage;
+      return image && image.bytes.length > 0 ? decodeHdrLightmapOnce(image) : Promise.resolve(null);
+    }),
+  );
   return {
     mesh,
     textures,
@@ -2353,6 +2542,7 @@ async function decodeMeshTextures(
     occlusionTextures,
     emissiveTextures,
     ...(lightmapTextures.some((t) => t !== null) ? { lightmapTextures } : {}),
+    ...(lightmapHdrTextures.some((t) => t !== null) ? { lightmapHdrTextures } : {}),
     ...(detailTextures.some((t) => t !== null) ? { detailTextures } : {}),
     ...(blendTextures.some((t) => t !== null) ? { blendTextures } : {}),
     ...(reliefTextures.some((t) => t !== null) ? { reliefTextures } : {}),

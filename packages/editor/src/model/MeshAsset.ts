@@ -137,6 +137,14 @@ export interface MeshMaterial {
    * Null/absent: lit only by the scene's live lighting.
    */
   readonly lightmapImage?: EncodedImage | null;
+  /**
+   * The same bake as an HDR directional light map (AAA_FIDELITY_ROADMAP.md
+   * F3d; see hdrLightmap.ts): the irradiance in linear light, where it comes
+   * from, and how much sky reaches the point. The AAA tier lights by it in
+   * place of the sky's irradiance; every other tier reads
+   * {@link lightmapImage}. Null/absent: no GPU bake.
+   */
+  readonly lightmapHdrImage?: EncodedImage | null;
   /** Scalar metalness multiplier, glTF's `metallicFactor` (default 1). */
   readonly metallicFactor?: number;
   /** Scalar roughness multiplier, glTF's `roughnessFactor` (default 1). */
@@ -567,6 +575,7 @@ export interface SerializedMaterial {
   occlusionImage?: SerializedImage | null;
   emissiveImage?: SerializedImage | null;
   lightmapImage?: SerializedImage | null;
+  lightmapHdrImage?: SerializedImage | null;
   metallicFactor?: number;
   roughnessFactor?: number;
   emissiveFactor?: [number, number, number];
@@ -918,6 +927,7 @@ export function serializeMaterial(material: MeshMaterial, table?: ImageTable): S
     occlusionImage: serializeImage(material.occlusionImage, "occlusionImage", table),
     emissiveImage: serializeImage(material.emissiveImage, "emissiveImage", table),
     ...(material.lightmapImage ? { lightmapImage: serializeImage(material.lightmapImage, "lightmapImage", table) } : {}),
+    ...(material.lightmapHdrImage ? { lightmapHdrImage: serializeImage(material.lightmapHdrImage, "lightmapHdrImage", table) } : {}),
     metallicFactor: material.metallicFactor,
     roughnessFactor: material.roughnessFactor,
     emissiveFactor: material.emissiveFactor ? [...material.emissiveFactor] : undefined,
@@ -952,6 +962,7 @@ export function deserializeMaterial(value: unknown, table?: ImageTable): MeshMat
     occlusionImage: deserializeImage(material.occlusionImage, "occlusionImage", table),
     emissiveImage: deserializeImage(material.emissiveImage, "emissiveImage", table),
     ...(material.lightmapImage ? { lightmapImage: deserializeImage(material.lightmapImage, "lightmapImage", table) } : {}),
+    ...(material.lightmapHdrImage ? { lightmapHdrImage: deserializeImage(material.lightmapHdrImage, "lightmapHdrImage", table) } : {}),
     metallicFactor: typeof material.metallicFactor === "number" ? material.metallicFactor : undefined,
     roughnessFactor: typeof material.roughnessFactor === "number" ? material.roughnessFactor : undefined,
     emissiveFactor: toEmissiveFactor(material.emissiveFactor),

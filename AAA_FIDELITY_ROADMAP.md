@@ -553,7 +553,10 @@ Everything else depends on this track. It contains no visible "feature", but its
     - IES profiles wait on their importer (F9d).
     - GPU clustering is F0e's.
     - Area-light shadows.
-- [ ] **F2f. Emissive surfaces that light.** Emissive meshes contribute through GI (F3d and F3e), so the energy trim on a Forerunner wall lights the floor in front of it.
+- [x] **F2f. Emissive surfaces that light.** Emissive meshes contribute through GI (F3d and F3e), so the energy trim on a Forerunner wall lights the floor in front of it.
+  - **F2f-1: done.** Both tracers take a surface's emission as light: the GPU bake's paths (F3d) and the live volume's rays (F3e-1). Each takes the material's emissive colour in linear light, as the renderer's shading does, so what glows on screen lights by the same amount.
+    - *Tests (`emissive-light.test.ts`):* the closed form for a point facing a glowing plane that fills its view is irradiance over π = the plane's radiance. Every probe a metre or two above a vast glowing black floor (with no sky and no lights) takes it within 10%, both from the GPU bake and from 30 frames of the live volume, and is nearly dark facing away.
+    - *Left:* the tracers take the emissive factor alone, not an emissive map's texels or a material graph's emissive output. A glowing pattern lights as its factor's flat colour.
 
 ### F3. Global illumination and reflections
 
@@ -628,15 +631,167 @@ Everything else depends on this track. It contains no visible "feature", but its
         - with GTAO off the two match within 3%, and open floor keeps at least 93% of its light;
         - the uniforms carry the radius, slices, frame and history flag.
       - The F2c and prepass suites (frame graph, HDR TAA, scene renderer, native resolution, parity) pass with GTAO on.
-- [ ] **F3d. GPU lightmapper.**
+- [x] **F3d. GPU lightmapper.** (Re-baking the shipped maps waits on F11a; see below.)
   - A compute path tracer, sharing its BVH with F10b, that bakes HDR **directional lightmaps** (L1 SH or ambient-highlight-direction) with any number of bounces, emissive surfaces as lights and area lights.
   - A denoiser (an edge-avoiding à-trous filter, or a small learned one), with seam stitching and texel-density control.
   - Baked **probe volumes** with L2 SH and visibility (to stop leaks) light dynamic objects.
   - Minutes in the browser rather than CPU-bound bakes in node, with `bake:map` kept for CI.
+  - **F3d-1, the GPU path tracer and HDR directional light maps: done** (`render/gpuLightmapper.ts`, `model/hdrLightmap.ts`). With WebGPU, the editor's Bake lighting runs on the GPU and gives each still object the AAA tier's HDR light map beside the 8-bit one every other tier reads. Without WebGPU, and in `bake:map`, the CPU bake runs as before.
+    - **The scene** is the CPU bake's own triangle BVH (`buildBvh`, now carrying each triangle's emissive colour), flattened into storage buffers: two words per node, a corner and two edges per triangle, and its albedo and emission in linear light.
+    - **The texels** are the CPU bake's (`lightmapTexels`, split out of `bakeLightmap`, whose output is byte-identical): each one's surface point and interpolated normal.
+    - **The paths.** Each leaves its texel along a cosine-weighted direction (the first stratified over the bake and turned per texel) and bounces diffusely up to `bounces` times (0–8).
+      - Open sky gives the sky's radiance, the IBL's own linear panorama (F3a).
+      - A surface gives its emission, so emissive meshes light what sees them.
+      - Each surface a path bounces off is lit by the rig's directional lights (up to four), a shadow ray each.
+      - The texel's own sunlight is left out: the live cascades (F2a) draw it, as Unreal's stationary lights do.
+      - Dispatches are bounded (64 Ki texels, 512 Ki paths a submit), so none nears a GPU's watchdog.
+    - **What a texel keeps.**
+      - Its irradiance over π in linear light, in the sky's SH irradiance's units.
+      - The light's dominant direction (luminance-weighted and cosine-weighted, so ⅔ of the normal under a uniform sky).
+      - The share of the sky's light that came through unblocked.
+      - The 8-bit ambient scale, which is the irradiance over the open sky's, per channel, so the fantasy tiers' maps carry the bounce's tint as before.
+      - The maps are blurred within each chart and grown past its edges, as the CPU bake's are.
+    - **Storage.** `MeshMaterial.lightmapHdrImage` is one 8-bit PNG twice the atlas's height: Radiance RGBE irradiance over the direction (xyz · 0.5 + 0.5) and visibility.
+      - It is decoded by our own PNG decoder (`decodePngRgba`, new), because a browser's premultiplied alpha would wreck the exponent.
+      - It is stripped wherever the 8-bit map is (a topology edit, a re-layout, a material instance's parent, a clear), and a CPU rebake drops it.
+      - It is never re-encoded as KTX2.
+    - **Shading (AAA tier).** Binding 11 becomes a texture array in the linear variant: the HDR map's two rgba16float layers, or the 8-bit map as one layer (`ssaoMeta.z` = 2 or 1).
+      - With an HDR map, the diffuse fill is its irradiance in place of the sky's SH irradiance, rebalanced for the shading normal by a half-Lambert about the dominant direction. This is exact at the baked normal, so a normal map still reads under baked light (`directionalIrradiance` mirrors it).
+      - The sky visibility joins the specular occlusion of the environment's reflection. GTAO stays on top for near-field contact.
+      - Without one, the 8-bit map scales the fill as before. The byte variant and the other renderers never read the HDR map.
+    - **In the editor.** Up to eight bounces on the GPU (three on the CPU), four paths for each of the CPU's rays, and "Baking on the GPU…" while it runs.
+    - *Tests (`gpu-lightmapper.test.ts`):*
+      - RGBE and the stored PNG round-trip, and `decodePngRgba` keeps alpha exactly.
+      - The directional rebalance is exact at the baked normal, brighter toward the light and flat without one.
+      - The BVH flattens with its leaves and linear materials.
+      - On Dawn:
+        - open floor under a uniform sky reads the sky's radiance, all of the sky and the ⅔ direction;
+        - the floor at a tall black wall's foot gets half the sky (0.47–0.53), from the open side;
+        - a dark box's floor is lit by its glowing ceiling at the analytic view factor (±5%);
+        - a sunlit red wall bleeds red onto the floor with one bounce and not with none;
+        - three bounces in a white pit give more than 1.5× no bounce;
+        - a bake is deterministic.
+      - In the renderer, the HDR map's irradiance replaces the sky's linearly and in its colour, its visibility occludes the reflection, an 8-bit map still scales the fill on the AAA tier, and the byte path ignores the HDR map.
+      - The editor's scene bake on the GPU gives every still object both maps, and a CPU rebake or a clear takes the HDR one away.
+      - `lightmap.test.ts` and the map bakes pass unchanged.
+  - **F3d-2, finishing the bake: done.** The GPU bake's maps are now finished, in order, by dropping texels inside geometry, denoising on the GPU, growing past chart edges, and stitching seams (`gpuLightmapper.ts`, `lightmap.ts`). It replaces F3d-1's two 3×3 blurs. The CPU bake is unchanged.
+    - **Texels inside geometry.**
+      - The BVH now carries the side each triangle faces by its authored normals (`Bvh.front`, the mean of its corners' normals, else its winding's).
+      - The tracer counts a texel's first rays that meet the back of a surface. Past 60% of them (`backfaceLimit`), the texel lies inside something, such as a floor texel under a box's foot, and is dropped.
+      - It is filled from its valid neighbours by the dilation, so the floor beside the box neither darkens nor lets the box's dark inside out. Under a 1 m box at 8 texels a metre, all 64 texels under it are dropped, and the texel just inside its edge reads 0.99 of the one just outside, against 0 when kept.
+      - A floor behind a one-sided wall loses nothing: at most half its rays meet the wall's back.
+    - **The denoiser** is an edge-avoiding à-trous wavelet (Dammertz et al. 2010) in compute: four passes 1, 2, 4 and 8 texels apart, with a B3-spline kernel.
+      - A neighbour is weighed by how near its normal is (to the 32nd power) and how near it lies to this texel's plane, so a corner doesn't blur across.
+      - A neighbour farther in the world than its atlas step allows is skipped: another chart that merely sits beside this one in the atlas.
+      - A neighbour is also weighed by how near its luminance is, against 1.5 standard deviations of this texel's mean. The tracer now sums each path's squared luminance for that variance, prefiltered over the texel's 3×3 as in SVGF, and the variance is filtered through the passes too. A well-converged texel is therefore left nearly as it is.
+      - **Measured** on a sunlit red wall's two-bounce light on the floor: at 8 paths a texel, the error against a 1024-path bake fell to 0.45 of the raw bake's, and at 32 paths to 0.53.
+      - A wider luminance stop blurred more real gradient than it removed noise (4σ over five passes left 0.74 of the error). The cost is a little bias on smooth peaks: the glowing ceiling's view factor at the floor's centre now reads 0.97 of the analytic one, against 0.995 raw.
+    - **Seams.** `lightmapSeams` finds every edge two triangles share in the world that sits in two places in the atlas: two charts' borders, or a curved patch's triangles, each its own chart. It samples each seam about every half texel along its longer side, as four bilinear taps either side.
+      - `stitchLightmapSeams` solves least squares by conjugate gradients, for every channel: the lookups either side agree, and each texel stays near its value (stiffness 0.01).
+      - A hinge between a black floor and a white wall closes from a step of over 0.9 to under 0.1. Texels no seam touches keep their values exactly.
+    - **Texel density per object.** `MeshSidecarEntry.lightmapScale` (¼ to 4×, powers of two, stored only when not 1) multiplies the bake's Detail for that object. The object's lighting panel gains a "Light map detail" slider, so a piece seen up close takes more texels and a far wall fewer.
+    - *Tests (`lightmap-finish.test.ts`):*
+      - Seams are found on a hinge and not on a flat quad, and stitching closes them while leaving untouched texels alone.
+      - The density snaps, survives a save, stores nothing at 1 and scales the baked atlas.
+      - On Dawn:
+        - the box's foot (about 64 texels dropped, the edge kept bright, and dark without the limit);
+        - the one-sided wall (none dropped);
+        - the red wall's bounce denoised to under 0.6 of the noisy error;
+        - a synthetic floor beside a wall in the atlas and the world: noise halved, mean kept, nothing crossing the corner, unbaked texels left alone.
+      - F3d-1's suite passes with the finish on.
+  - **F3d-3, baked probe volumes: done** (`model/probeVolume.ts`, `bakeProbeVolumeGpu`). With WebGPU, the editor's bake makes its light probes a probe volume, which the AAA tier lights everything without a light map by: characters, physics bodies, what moves. The other tiers get their ambient cubes derived from the same bake. Without WebGPU, the CPU's ambient cubes are baked as before.
+    - **The bake.** Each probe casts rays over the whole sphere: a Fibonacci set over the bake, turned per probe about the vertical. They run through the same paths as a light map's texels (the tracer's path is now one function, `pathFrom`, shared by both kernels).
+      - The radiance is projected onto L2 SH, convolved with the clamped cosine and over π, as the sky's is (F3a). Unlike a texel's, a probe's light includes the sun on the surfaces it sees: those are what light a mover beside them.
+      - It also keeps the share of the sky's light that reached it.
+      - A probe is dropped as invalid when over 60% of its rays meet the backs of surfaces.
+      - Like DDGI (Majercik et al. 2019), it keeps the mean distance each 8 × 8 octahedral texel's rays travelled, and the mean of its square, capped at 1.5 times the spacing.
+      - The grid is planned at most 49 probes a side (`planProbeVolume`), so the volume texture stays within a 3D texture's width, and 4096 probes in all.
+    - **Storage.** `SceneLighting.probeVolume` stores half floats per probe: 27 SH values, visibility, validity and 128 depth moments. The scene's environment decodes it once per stored object.
+    - **Shading (AAA tier).** The volume rides in the probe grid's own 3D texture (group 1 binding 6), 41 texels a probe along x. `probeMin.w` = 2 marks it, so no binding is added; the fragment stage's storage buffers are all taken.
+      - A surface without a light map blends the eight probes round it, pushed out along its normal by 0.3 of the spacing.
+      - Each probe is weighed trilinearly, by a wrapped cosine toward it (DDGI's (½(1 + cos))² + 0.2), and by Chebyshev's bound on that probe seeing the point, cubed. A bright room's probes therefore don't light a point behind the wall they see.
+      - The result replaces the sky's SH irradiance in the diffuse, and its sky visibility joins the reflection's specular occlusion, as an HDR light map's do (F3d-1).
+      - With no valid probe seeing the point, the sky lights it.
+      - `sampleProbeVolume` is the CPU mirror, and the shader matches it.
+    - **The other tiers' ambient cubes** (`ambientCubesFromVolume`): each face is the probe's irradiance along it over the open sky's (the rig's sky SH), per channel, as a light map's ambient scale is. An invalid probe takes its valid neighbours' mean. The byte variant and the other renderers read only them.
+    - **In the editor.** Sixteen rays a probe for each of the CPU's rays, the same bounces as the light maps. A CPU rebake drops a stale volume, and Clear takes it with the cubes.
+    - *Tests (`probe-volume.test.ts`):*
+      - The plan's axis cap; the octahedral map covers every texel, and its inverse round-trips.
+      - Storage round-trips as halves, and a malformed volume is refused.
+      - The sampling is trilinear between probes that see the point. A wall the bright probes see 1 m off keeps their light from a point behind it (0.3 or more open, under 0.05 walled). Invalid probes are skipped, and null comes back with none.
+      - The ambient cubes are ratios over the sky, and an invalid probe is filled from its neighbours.
+      - On Dawn:
+        - an empty uniform sky gives its radiance every way, all of the sky, and depths at the cap;
+        - a metre above a wide grey floor, the sky is above (±7%), the floor's bounce below at its linear albedo (±15%), half the sky is visible, and the floor reads a metre down;
+        - a probe inside a closed box is dropped;
+        - the renderer lights a floor without a light map as the mirror says, within the reflection's few %, and keeps the light behind the wall, while the byte path is unchanged;
+        - the editor's GPU bake stores the volume and the cubes, the environment hands the volume over, and a CPU rebake or a clear takes it away.
+  - **F3d-4, what the renderer lights by: done** (`gpuLightmapper.ts`, `model/bakeSurface.ts`, `sceneSkyEnvironment`). The GPU bake now takes every light of the rig, each surface's textured albedo and metalness, and the sky the player draws. Light maps and the probe volume take them alike, through the shared `pathFrom`. The CPU bake is unchanged.
+    - **Local lights' bounce.** The lights move from the uniform to a storage buffer (group 0 binding 7, five vec4s a light): up to four directional, then up to 256 point, spot and area lights (`packBakeLights`, `bakeLights`).
+      - At each surface a path bounces off, every directional light is traced as before. One local light is picked by what it would give there unshadowed, with a tenth of the choice spread evenly so that no light is ever unpickable. Its light over the chance of picking it comes through one shadow ray.
+      - With many lights that is one ray where each light's would be many, and the estimate stays unbiased: one bright, seven dim and one out-of-reach light give the single light's 0.4 ρI within 5%.
+      - A point or spot light falls off as `distanceFalloff` does (inverse square windowed to its range, or (1 − d/range)²), and a spot narrows by the shader's smoothstep cone.
+      - An area light (F2e-2) is sampled at one point on its rectangle or disk, or on the rectangle a tube shows the point, as the LTC shader takes it. That point gives luminance × both cosines × area / π d², the renderer's diffuse units, from its lit face only.
+      - A light lights only what shares one of its lighting channels (F2e). The triangle's channels ride in its albedo's w, from `Occluder.lightChannels`.
+      - As with the sun, the texel's own direct light from them is left out, because the live lights draw it.
+    - **Metalness.** A surface bounces albedo × (1 − metalness), as the renderer's diffuse does. It adds a metal's own colour as far as the metal is rough: a rough metal's reflection is spread the way a diffuser's is, while a mirror's goes one way and is the reflection probes' (F3b) to carry.
+      - The metalness and roughness are the renderer's own (`resolvePbr`). A material that isn't shaded as PBR has none.
+    - **Textured albedo.** `Occluder.surfaces` carries each primitive's decoded base-colour and metal/roughness maps (`bakeSurfaces`). `buildBvh` reads each triangle's albedo from its map, in place of the factor × 0.55.
+      - The read is the map's mean over the triangle's UV footprint: the mip level whose texel is about the footprint's size, read trilinearly at the centroid with wrap (`footprintMean`), in linear light for a base-colour map and as data for a metal/roughness map.
+      - A triangle that tiles the map reads its mean; a sliver of a trim sheet reads its strip.
+      - The editor decodes PNGs with our own decoder and anything else with the browser's (KTX2 through the transcoder). A map neither can read keeps the old factor.
+    - **The sky the player draws.** `sceneSkyEnvironment` gives the environment the surface lights by: the rig's gradient, or its procedural or imported sky baked with its objects, clouds and vistas (I6, I7), carrying an HDR sky's own light (F3a-2).
+      - The surface's two sky bakes now share `litBySky` with it. The light maps, the probe volume and the other tiers' ambient cubes all take this sky in place of the gradient.
+    - *Tests (`bake-lights.test.ts`):*
+      - A map's footprint mean: its whole mean, a sliver's strip, a tiled triangle's mean, and sRGB decoded only for colour.
+      - `buildBvh` per triangle under a map: its albedo, metalness and channels. Without one, the plain BVH is unchanged (× 0.55, no metal).
+      - The bounce share at each metalness and roughness, and the channels in the packed material.
+      - `bakeSurfaces` resolves as the renderer does and asks for the metal/roughness map as data.
+      - The packed light records, and a rig's lights in linear light with their temperature.
+      - On Dawn, a black floor under a wide grey ceiling (ρ = 0.5) 1 m up, lit by a light just above the floor, so only the ceiling's bounce reaches the floor. Each case is checked against the closed-form integral 2ρ ∫ r · E(d) / d⁴ dr:
+        - an inverse-square point light gives 0.4 ρI, and a ranged one its (1 − d/range)² integral, each within 4%;
+        - a spot light gives its cone's integral within 5%, and none when it points away;
+        - a 10 cm rectangle and a disk of the same area give ρLA / 3π within 5%, and the rectangle none when it faces away;
+        - a light on another channel gives none, and the same light on a shared channel gives the full bounce;
+        - nine lights picked among give the sum without bias;
+        - a mirror metal gives none, and a half-rough metal half the dielectric's bounce;
+        - a white-factored ceiling with a red map bleeds red, where without its decoded map it bled the factor × 0.55's grey.
+      - The editor's scene bake under an orange procedural sky over a blue gradient: the floor reads the drawn sky's cosine integral within 5% in every channel.
+      - The F3d-1 to F3d-3 suites pass unchanged.
+    - *Left for F3d:*
+      - Re-baking Lockout and Beaver Creek with HDR maps, which waits on F11a's physical re-light.
+      - The CPU bake could take the seam stitching, the local lights and the maps too. It is left byte-identical for now, so `bake:map`'s stored maps don't move.
+      - Emissive maps (the bake takes the emissive factor) and a smooth surface's specular bounce (caustics) are not baked.
 - [ ] **F3e. Real-time GI.**
   - **DDGI**: a probe grid whose irradiance and visibility are updated every frame by software ray tracing in compute, against a scene BVH or a global signed distance field.
   - **SSGI** for near-field detail on top.
   - Together they give moving lights, time of day and destructible scenery correct bounce light without a bake: the Lumen-class result, built from techniques WebGPU can run.
+  - **F3e-1, DDGI over the probe volume: done** (`model/dynamicGi.ts`, `render/dynamicGi.ts`). On the AAA tier, a rig can ask for real-time GI (`SceneLighting.dynamicGi`). The probe volume every surface takes its diffuse light from (F3d-3) is then traced and relit every frame on the GPU, so moving lights, the time of day (F5a-2) and a cart's sun bounce without a bake.
+    - **The volume** is the rig's baked one where it has one, as the starting point. Otherwise it is an empty one (no light, open, valid) laid a little past the scene's bounds at the set spacing (3 m by default), within the probe limits.
+      - It is the same buffer the scene shader reads (F5b-0 made it storage), written in place.
+      - While it is live, light-mapped surfaces read it too, so a moving sun doesn't leave baked light behind.
+    - **Trace** (a thread a ray, in compute, through the GPU lightmapper's own BVH tracer, built once from the still scene):
+      - each probe casts its rays (64 by default) over the sphere, a Fibonacci set turned by a fresh uniformly random rotation each frame;
+      - a miss takes the sky (the IBL's panorama);
+      - a hit takes its emission, plus its albedo × the light on it: the directional lights through a shadow ray, one local light picked by what it would give (as the bake picks it), and the volume's own irradiance there. So light bounces once more each frame, without end;
+      - a hit on a surface's back is dark and counted, and its distance cut to a fifth, so the visibility keeps light from leaking through walls.
+    - **Update** (a thread a probe's slot):
+      - the rays projected onto L2 SH as irradiance over π, the bake's own estimator;
+      - the probe's validity (most rays on backs means it is inside something) and its sky visibility;
+      - per octahedral texel, the mean distance and its square where this frame's rays fell;
+      - each blended into what the probe held by the hysteresis (0.97 by default).
+    - **Authoring.** The Lighting panel gains **Global illumination (AAA)**: Baked or Real-time, with Rays per probe, Steadiness and Probe spacing.
+    - *Tests (`dynamic-gi.test.ts`):*
+      - Settings read in range and survive a save. The grid lies past the bounds within the probe limits. The frames' rotations are orthonormal.
+      - The player hands the AAA renderer the still scene and one volume over its bounds, the same object frame after frame, and hands it nothing on other renderers.
+      - On Dawn:
+        - from nothing, the live volume converges within 8% on what the GPU bake (4096 rays, 4 bounces) gives the same floor under the sky and sun;
+        - in a closed room, a lamp switched on more than doubles the light at the probe beside it and lifts the room's far corner by bounce. Switched off, the probes fall back within 15% of the dark room's;
+        - the AAA renderer's wall gains the room's bounce over the frames: brighter after one frame than its direct light alone, and brighter still after sixteen.
+    - *Left for F3e:*
+      - **F3e-2:** SSGI for near-field detail, from the prepass's depths and the frame before.
+      - What moves isn't in the BVH: characters and physics bodies are lit by the volume but don't block or bounce its light. A refit BVH, or an SDF, would bring them in.
+      - The reflection probes capture with the volume as it was given, not as it is live. All probes update every frame. A budget per frame, and probe relocation out of walls, would scale it to large maps.
 - [ ] **F3f. Reflections.**
   - Hierarchical-Z SSR with GGX importance sampling and a temporal denoiser.
   - Rough reflections that blend into F3b probes.
@@ -731,12 +886,154 @@ Everything else depends on this track. It contains no visible "feature", but its
 
 ### F5. Atmosphere, weather and water
 
-- [ ] **F5a. Physically based sky.**
+- [x] **F5a. Physically based sky.**
   - Hillaire's 2020 atmosphere: transmittance, multiple-scattering, sky-view and aerial-perspective LUTs.
   - Rayleigh, Mie and ozone parameters, a planet radius, and a sun and moon in physical units.
   - Time of day drives the sun, sky, IBL (F3a) and fog together.
   - The stylised dome and rings stay as a "painted sky" option.
-- [ ] **F5b. Volumetric fog.** A froxel grid (for example 160×90×64) of scattering and extinction from height fog, local fog volumes and particles. It is lit by the sun with its shadow map, and by local lights with theirs, then temporally reprojected and integrated. **God rays emerge from it**, so the CPU screen-space shafts retire.
+  - **F5a-1, Hillaire's atmosphere and its sky: done** (`model/atmosphere.ts`, `render/atmosphere.ts`). A sky dome gains a Physical mode (`ProceduralSky.atmosphere`) beside Gradient and Mountains. The AAA tier draws it per pixel in physical units; every tier is lit by it.
+    - **The medium** is Earth's by default (Hillaire 2020, in km):
+      - Rayleigh scattering (5.802, 13.558, 33.1)·10⁻³ with an 8 km scale height;
+      - Mie scattering 3.996·10⁻³ and absorption 4.4·10⁻³ with 1.2 km, Cornette–Shanks's phase at g = 0.8;
+      - ozone absorption (0.65, 1.881, 0.085)·10⁻³ in a tent 30 km wide about 25 km up;
+      - a 6360 km planet with 100 km of air and a ground albedo of 0.3.
+      - A creator scales the air, haze and ozone against Earth's, and sets the Mie anisotropy, the ground's albedo, the altitude, the planet's radius and the sun's size. The settings are stored sparsely and read defensively (`parseAtmosphere`).
+    - **The sun is the key light above the air.** Its linear colour × intensity is the sun's radiance in the renderer's units, so 1 is about 123.5 klx (F0b-2). The scattering takes π times that, because the renderer's diffuse carries no 1/π.
+      - `atmosphereLighting` tints the key light by the transmittance toward it, folding in its temperature: 0.94, 0.86, 0.76 at noon, orange near the horizon, and black once the sun has set.
+      - It aims the sky's own sun along the key light, so the shafts and the lens flare follow it. The player's frame lighting and the light bake both take it.
+    - **The CPU reference** builds the LUTs once per medium, in about 0.8 s:
+      - the transmittance LUT (256 × 64, Bruneton's mapping, 128 steps a ray);
+      - the multiple-scattering LUT (32 × 32: Ψ_ms over the sun's zenith cosine and the height, 64 Fibonacci directions of 20 steps, L₂ / (1 − f_ms));
+      - and `skyRadiance` from them: single scattering under both phases, the multiple scattering, and the lit ground, in 32 quadratically spaced steps with Hillaire's energy-conserving integration.
+    - **On the GPU** (`GpuAtmosphere`) the same three passes run in compute, line for line: the transmittance and multiple-scattering LUTs once per medium, and the sky view (192 × 108, Hillaire's mapping: finer toward the sun and the horizon) whenever the sun moves.
+    - **The AAA backdrop.** On a linear frame, the presenter's sky pass reads the sky view per pixel and adds the sun's disc: its illuminance over its solid angle through the air, held under 30 000. The frame tone-maps it with the scene. A byte-space frame draws the painted copy as before.
+    - **Every tier's light** comes through the imported-sky path (I6). The atmosphere renders an HDR panorama (256 × 128) under the key light:
+      - exposed into the 8-bit copy at the rig's exposure, the other tiers' backdrop and reflections;
+      - resampled as the AAA tier's IBL light (F3a-2);
+      - and, through `sceneSkyEnvironment`, the light bake's sky (F3d-4).
+    - **Authoring.** The Lighting panel's Sky dome gains Physical, with Air, Haze, Ozone, Sun glow, Ground albedo, Altitude and Sun size. The painted controls hide, and the painted sky's settings are kept for switching back.
+    - *Tests (`atmosphere.test.ts`):*
+      - Settings parse, resolve to Earth and survive a save.
+      - The transmittance LUT maps both ways, and the zenith's optical depth matches its closed form within 0.1%.
+      - Both phases integrate to 1 over the sphere.
+      - The sky is blue overhead at noon, red toward a setting sun and under 2% of noon once the sun has set. The noon horizon is brighter than the zenith.
+      - A high sun's clear-sky diffuse light is 6–25% of the direct beam, and haze whitens the horizon.
+      - The key light is tinted (orange at 3°) with the other lights left alone, and the disc's radiance × its solid angle is π × the transmitted sun.
+      - The sky view maps both ways, with the horizon at its middle row.
+      - On Dawn:
+        - the GPU's transmittance, multiple-scattering and sky-view LUTs match the CPU's texel by texel within 0.5%, 1% and 2%, and are not rebuilt for an unchanged sun;
+        - the presenter's backdrop is the CPU's sky radiance per pixel within 4/255, with the disc past white where the sun is;
+        - the GPU bake lights an open floor by the atmosphere's sky within 5%, blue where the gradient was not.
+      - The scene's environment carries the atmosphere's HDR light, and its 8-bit copy is blue overhead.
+      - The player hands the presenter the atmosphere, its sun above the air and the disc, and lights the renderer by the tinted key light and the atmosphere's light.
+  - **F5a-2, aerial perspective and the time of day: done** (`aerialColumn` and `bakeAerialPerspective` in `model/atmosphere.ts`; `AERIAL_WGSL` and `GpuAtmosphere.aerial` in `render/atmosphere.ts`). On the AAA tier, every surface stands behind the air between it and the eye, and a sun that moves re-lights the sky's light.
+    - **The volume** is Hillaire's froxel LUT over the camera's frustum:
+      - 16 × 16 columns across the screen, each a view ray through its centre;
+      - 32 slices along each, spaced quadratically out to 32 km, so the first slice's centre is 8 m out and half the slices fall inside 8 km;
+      - each froxel holds the light the air scatters toward the eye up to it, and the mean transmittance to it.
+      - A column is integrated slice after slice (4 steps a slice) with the sky's own energy-conserving step, over the transmittance and multiple-scattering LUTs. It is rebuilt in compute for every camera that draws, one thread a column, so the probes' cube faces get their own.
+      - The ray passes under the planet's ground as air at its foot, since the scene's ground is the scene's. Looking down from a ridge still hazes the valley.
+    - **Why a uniform buffer.** The AAA scene shader already binds the 16 sampled textures and 8 storage buffers a stage gets on every device. So the volume is kept as half floats in one 64 KB uniform buffer (two froxels a `vec4<u32>`), and filtered trilinearly by hand.
+    - **In the shader**, after the fog, each fragment finds its froxel from its world position through the camera's axes and focal terms, and its slice from its distance.
+      - The colour becomes colour × T + L, with L taken by coverage, since it is premultiplied after.
+      - An additive surface is only dimmed.
+      - Nearer than the first slice's centre, the air fades toward none.
+    - **Scale.** At ×1 a metre is a metre, so only kilometres haze over. The Lighting panel's **Aerial distance** (0–50, stored as `aerialScale`, 0 to 100) lays the haze of a large landscape over a small map. 0 turns it off.
+    - **Time of day.** When the key light above the air turns past about half a degree, or brightens or reddens a step (`physicalSunKey`, a cart's `cartbox.sun3d` included), the player re-renders the atmosphere's light for where the sun now is:
+      - 96 × 48, a row a frame (about 1.5 ms of CPU), so a sunset re-lights in under a second;
+      - then it is upsampled to the IBL's 192 × 96 and swapped in whole, never half done.
+      - The AAA tier rebuilds its prefiltered IBL and SH from it. Its reflection probes re-capture, as their key follows the environment.
+      - The other tiers' 8-bit reflections copy is made from it.
+    - *Tests (`aerial-perspective.test.ts`):*
+      - The setting parses in range, defaults to Earth's ×1 and survives a save. The slices map both ways, and a froxel column points along its camera ray.
+      - A short level stretch passes light as `exp(−σ_t d)` of the air at the eye's height (to 0.05%), and gathers a uniform slab's closed form `S/σ_t (1 − e^{−σ_t d})` (to 5%).
+      - Straight up, the volume thickens with each slice and its far end is 90–102% of the zenith's sky. Distant things go blue; tenfold aerosol hazes more; a set sun leaves the air dark.
+      - The volume is laid out as the shader reads it, a froxel's centre samples as itself, and the eye sees clear air. The frame's terms are off without a sky, for an orthographic camera, or at ×0.
+      - The player hands the AAA scene the air. After `cartbox.sun3d` lowers the sun, the environment keeps its old light until every row is drawn, then takes the new sky whole: within 5% of `skyRadiance` for the new sun, dimmer than at 40°, and with a new 8-bit copy.
+      - On Dawn:
+        - the GPU's volume is the CPU's froxel by froxel, within 1% for the light and 0.002 for the transmittance;
+        - a grey wall 3 km of air away (300 m at ×10) is colour × T + L of the CPU's volume within 2%, bluer for it, and is untouched at ×0 or without a sky.
+    - *Left for F5a:*
+      - The fantasy tiers' backdrop (the 1536 × 768 painted copy) keeps the sun it was baked for. Only their reflections follow the time of day.
+      - A time-of-day re-light drops the distant vistas from the reflections copy, which are drawn only at load.
+      - The probe volume and light maps are baked for one sun. Re-lighting them as the sun moves is real-time GI (F3e).
+      - The volume carries no shadows: the air in a mountain's shadow still glows. F5b's froxel fog, which marches the sun's cascades, will bring them.
+  - **F5a-3, the moon and the night sky: done** (`moonPhase`, `moonRadiance`, `moonLight` in `model/atmosphere.ts`; the moon's sky view in `GpuAtmosphere`; the backdrop in `gpuPresent.ts`). Every number comes from the moon's and the stars' physics, in the renderer's units, with no tuning.
+    - **The moon** stands opposite the sun by default (full), or wherever `moonDirection` puts it. It is a Lambertian sphere of albedo 0.12 and angular radius 0.26°.
+      - Its phase is the Lambert sphere's law: 1 full, 1/π at quarter, 0 new.
+      - As a light above the air it is albedo × Ω / π × the phase × the sun. For a sun of 1 (123.5 klx), a full moon gives about a quarter of a lux.
+      - `moon` scales it (0 removes it).
+    - **Among the rig's lights**, the moon is a directional light of its own, through the air toward it (`moonLight`).
+      - By day it comes after the sun, about a millionth of it, and adds nothing while it is set.
+      - Once the sun has set (its transmittance under 10⁻⁴), the moon becomes the key. So the GPU cascades, the volumetric fog and the light bake follow it.
+    - **The night sky** is the moon's light scattered by the same atmosphere, which is linear in its radiance.
+      - The CPU panorama adds it once the sun is down (`moonLightsSky`), when it no longer drowns in the day's.
+      - The AAA backdrop reads a second sky-view LUT built with the moon in the sun's place.
+    - **The AAA backdrop**, past the air:
+      - the moon's disc, each pixel the point of its near face that the ray meets, lit by the sun as a Lambertian sphere, through the air toward it;
+      - **stars**: a cube of cells over the sky (512 per face edge), about 9000 in all to magnitude 6.5. Each has a magnitude drawn so the count brighter than m grows threefold a magnitude, and an illuminance of 2.54 µlx × 10^(−0.4m). Each spreads over a Gaussian three-quarters of a pixel wide, so it keeps its illuminance at any resolution, through the air along the view;
+      - the night sky's own glow (airglow and unresolved stars, about 21.8 mag/arcsec²).
+      - `stars` scales both. At ×1 they want eye adaptation (or a raised exposure) to be seen, as at night.
+    - **Authoring.** The Physical sky gains **Moon** and **Stars**.
+    - *Tests (`night-sky.test.ts`):*
+      - The phase is 1, 1/π and 0 at full, quarter and new. A full moon gives 0.2–0.35 lx from its albedo and size, a magnitude-0 star 2.54 µlx, and the night glow is a millionth of the day sky. Settings read in range, and a direction given is kept.
+      - By day the sun stays the key. By night (the sun 30° down) the moon 30° up is the key, at its radiance through the air, with the set sun after it, dark.
+      - The night panorama adds exactly the moon's `skyRadiance`: blue, and under 10⁻⁴ of the day's.
+      - On Dawn:
+        - the backdrop's moon is the CPU's moonlit air plus albedo × transmittance × N·L at the pixel's point of its face, within 3%; off the disc, the moonlit air alone;
+        - stars stand over a hundred times the night glow, yet four-fifths of the sky has no star and is the glow alone.
+    - *Left for F5a:*
+      - The other tiers' painted copy of the night sky has the moonlit air but no disc or stars.
+      - The stars don't turn with the hour, and the moon has no texture (maria) or earthshine.
+      - The painted sky's objects, cloud layers and distant vistas draw over the other tiers' copy of the physical sky, but not over the AAA backdrop. F5c's clouds and a composite of the vistas will bring them back there.
+      - The CPU LUTs take about 0.8 s at load. A worker, or reading the GPU's LUTs back on the AAA tier, would hide that.
+- [x] **F5b. Volumetric fog.** (Particles adding density waits on GPU particles, F8a.) A froxel grid (for example 160×90×64) of scattering and extinction from height fog, local fog volumes and particles. It is lit by the sun with its shadow map, and by local lights with theirs, then temporally reprojected and integrated. **God rays emerge from it**, so the CPU screen-space shafts retire.
+  - **F5b-0, room in the scene shader: done** (`WebgpuSceneRenderer.ts`). The AAA scene shader bound the 16 sampled textures and 8 storage buffers a stage gets on every device, so a froxel volume had nowhere to go.
+    - The clustered lights' cell table and index list now share one storage buffer, the table first. That frees a storage slot.
+    - The probe grid and probe volume move from a 3D texture, which was only ever read texel by texel, into that slot, as a storage buffer indexed by the probe stride (`probeCount.w`). That frees a sampled texture for the fog.
+    - The image is unchanged: the probe, probe-volume, clustered-light and parity suites pass as they did, on Dawn as well.
+  - **F5b-1, the sun and sky through the fog: done** (`model/volumetricFog.ts`, `render/volumetricFog.ts`). On the AAA tier, a rig's fog can be volumetric (`SceneFog.volumetric`). Its densities become a medium that the sun lights through its cascades and the sky lights evenly. That light is integrated over a froxel grid and laid over every surface.
+    - **The medium** is the fog the rig already authors, read as extinction per metre:
+      - the distance fog's density everywhere;
+      - the height fog's density, thinning above its base;
+      - each fog box's density, thinning above its floor.
+      - The painted fade's start and maximum don't apply. The other tiers keep the fade unchanged.
+    - **The settings** are the albedo (what share of the light taken out is scattered, and in what colour), Henyey–Greenstein's anisotropy (0.6 by default: bright toward the sun), the reach (96 m by default, 8–1000) and the sky light's scale.
+    - **The grid** is a column every 12 pixels (at least 8, at most 160 × 90) and 64 slices spaced quadratically out to the reach.
+    - **Inject** (a thread a froxel, compute) takes the medium's extinction at the froxel and the light it scatters toward the eye:
+      - the sun's π E through the phase, and one comparison tap of the first cascade that holds the point, a texel and a half toward the sun;
+      - the sky's mean radiance (the IBL's L0) times the sky-light setting;
+      - both times the albedo and the extinction.
+    - **Temporal accumulation**, with TAA on: each frame jitters the sample within its froxel (Halton 2, 3, 5) and blends it 9 parts to 1 into the froxel's history, reprojected through the last frame's camera. So the shafts settle on their froxels' means rather than crawling. Without TAA, the froxels' centres are taken as they are.
+    - **Integrate** (a thread a column) runs front to back with the energy-conserving step, writing the light so far and the transmittance at each slice's centre.
+    - **In the scene shader**, after the painted fog (now turned off) and before the aerial perspective:
+      - each fragment finds its froxel through the camera's axes;
+      - the colour becomes colour × T + L, filtered by the hardware in the freed 3D texture;
+      - an additive surface is only dimmed, and nearer than the first slice's centre the fog fades toward none.
+    - **God rays** are the sun's shadow seen through the fog. With volumetric fog on, the AAA tier retires the screen-space shafts.
+    - **Authoring.** The Lighting panel's fog gains **Volumetric (AAA)**, with Scattering, Toward the sun, Reach and Sky light.
+    - *Tests (`volumetric-fog.test.ts`):*
+      - The settings parse in range, survive a save and resolve their defaults. The medium is the distance fog, the height fog and each box's own. Henyey–Greenstein's phase integrates to 1 and is even at g = 0. The grid is as stated at 1080p, 720p and small sizes.
+      - In an even fog lit by the sky alone, a column is the closed form `L = albedo × sky × (1 − e^{−σt})` to 6 places. It glows toward the sun, and where the sun is shadowed it is lit by the sky alone. The key light is read in linear light.
+      - The frame's terms are off without fog, and the jitter stays in its froxel with a mean of zero.
+      - On Dawn:
+        - the GPU's froxels, under height fog and a box, are the CPU's within 1% (and 0.003 for the transmittance);
+        - a grey wall 40 m into the fog is colour × T + L of the CPU's volume within 2%, and a volumetric fog with no medium leaves it as it was, so the painted fade has given way;
+        - 24 jittered frames of history converge on the centre-sampled volume within 5%;
+        - a roof between a low sun and the fog halves the light deep in the fog beneath it, while the fog beside it is lit as without the roof: a shaft's edge, from the real cascades.
+    - *Left for F5b:*
+      - The sky backdrop isn't fogged: it is drawn by the presenter, past the last slice.
+      - Scalability levels for the grid (fewer slices on phones), and per-pass timing in the budgets.
+  - **F5b-2, spot and point lights in the fog: done** (`fogLocalLight`; `localLights` in the inject pass). The fog is lit by the scene's spot and point lights as its surfaces are, so a lamp in mist casts a cone, and what stands under it casts a shadow into it.
+    - **The light** is each one's π × linear colour × intensity, its falloff (windowed inverse square, or the default curve) and its cone, through the fog's phase. Only lights in the default lighting channel take part. Area lights do not yet.
+    - **Which lights**: the ones every point takes (unranged), then those of the froxel's clustered-light cell. The froxel finds its cell by the pixel and view depth it stands at, as a fragment does, so the fog's cost per froxel is the scene's per pixel.
+    - **Their shadows**: a light with a tile in the spot/point atlas (F2d) shadows the fog by one hardware comparison in it (a point light's face by its dominant axis), with the tiles' world bias.
+    - So the fog pass now runs after the tiles are drawn, and before the prepass.
+    - *Tests:*
+      - CPU: a point light brings π I / d² × the phase, and a spot light the same inside its cone. Outside its cone, in another channel, or the sun: nothing.
+      - On Dawn:
+        - a clustered point and spot light in the fog are the CPU's froxel by froxel (within 1.5%), and lift it well past the sun's own light;
+        - a plate under a shadow-casting spot lamp halves the cone's light in the fog beneath it, and leaves the cone's other side as it was.
 - [ ] **F5c. Volumetric clouds.** Raymarched clouds with a Nubis-style shape plus erosion noise and weather maps, multiple-scattering approximation, temporal amortisation at quarter resolution, cloud shadows on the ground and aerial perspective.
 - [ ] **F5d. Water.**
   - FFT ocean, and Gerstner waves for lakes and rivers.
