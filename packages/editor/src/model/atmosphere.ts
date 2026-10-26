@@ -53,6 +53,8 @@ export interface AtmosphereSettings {
   readonly planetRadius?: number;
   /** The sun's angular diameter, degrees. */
   readonly sunSize?: number;
+  /** How many times their length the scene's distances count through the air (aerial perspective): 1 is true, more hazes a small map as a large one, 0 is none. */
+  readonly aerialScale?: number;
 }
 
 /** An atmosphere resolved into its medium, in kilometres. */
@@ -74,6 +76,8 @@ export interface Atmosphere {
   readonly viewHeight: number;
   /** The sun's angular radius, radians. */
   readonly sunRadius: number;
+  /** How many times their length the scene's distances count through the air (0: no aerial perspective). */
+  readonly aerialScale: number;
 }
 
 /** Earth's atmosphere (Hillaire 2020), per km. */
@@ -109,6 +113,7 @@ export function parseAtmosphere(value: unknown): AtmosphereSettings | null {
   take("altitude", 0, 20000);
   take("planetRadius", 100, 100000);
   take("sunSize", 0.05, 20);
+  take("aerialScale", 0, 100);
   return out as AtmosphereSettings;
 }
 
@@ -133,6 +138,7 @@ export function resolveAtmosphere(settings: AtmosphereSettings = {}): Atmosphere
     groundAlbedo: settings.groundAlbedo ?? 0.3,
     viewHeight: Math.max(0.01, (settings.altitude ?? 0) / 1000),
     sunRadius: ((settings.sunSize ?? 0.545) * Math.PI) / 360,
+    aerialScale: settings.aerialScale ?? 1,
   };
 }
 
@@ -445,10 +451,20 @@ export function sunDiscRadiance(luts: AtmosphereLuts, sun: readonly number[], su
  * zenith, as the IBL reads it) of RGB floats in the renderer's units.
  */
 export function atmospherePanorama(luts: AtmosphereLuts, sun: readonly number[], sunRadiance: readonly number[], width = 256, height = 128): HdrImage {
+  const out: HdrImage = { width, height, data: new Float32Array(width * height * 3) };
+  atmospherePanoramaRows(luts, sun, sunRadiance, out, 0, height);
+  return out;
+}
+
+/**
+ * Rows `y0` to `y1` of {@link atmospherePanorama} into `out`, so a time of day
+ * can spread a panorama over several frames (F5a-2).
+ */
+export function atmospherePanoramaRows(luts: AtmosphereLuts, sun: readonly number[], sunRadiance: readonly number[], out: HdrImage, y0: number, y1: number): void {
+  const { width, height, data } = out;
   const l = Math.hypot(sun[0]!, sun[1]!, sun[2]!) || 1;
   const s = [sun[0]! / l, sun[1]! / l, sun[2]! / l];
-  const data = new Float32Array(width * height * 3);
-  for (let y = 0; y < height; y += 1) {
+  for (let y = Math.max(0, y0); y < Math.min(height, y1); y += 1) {
     const theta = (Math.PI * (y + 0.5)) / height;
     for (let x = 0; x < width; x += 1) {
       const phi = (2 * Math.PI * (x + 0.5)) / width - Math.PI;
@@ -456,7 +472,150 @@ export function atmospherePanorama(luts: AtmosphereLuts, sun: readonly number[],
       data.set(skyRadiance(luts, d, s, sunRadiance), (y * width + x) * 3);
     }
   }
-  return { width, height, data };
+}
+
+// --- Aerial perspective (F5a-2) ------------------------------------------------------
+
+/**
+ * The aerial-perspective LUT (Hillaire's froxel volume over the camera's
+ * frustum): {@link AERIAL_SIZE}² columns across the screen, each a view ray,
+ * and {@link AERIAL_SLICES} slices along it, spaced quadratically out to
+ * {@link AERIAL_RANGE} km, so the near air, which the scene mostly stands in,
+ * gets most of them. Each froxel holds the light the air scatters toward the
+ * eye between it and the camera, and the share of what lies beyond that
+ * reaches the eye (the mean over red, green and blue, as Hillaire keeps it).
+ */
+export const AERIAL_SIZE = 16;
+export const AERIAL_SLICES = 32;
+export const AERIAL_RANGE = 32;
+/** The steps each slice's stretch of air is integrated in. */
+export const AERIAL_SUBSTEPS = 4;
+
+/** A slice coordinate (0..1 along the volume) into the distance it stands for, km. */
+export function aerialDistance(w: number): number {
+  return w * w * AERIAL_RANGE;
+}
+
+/** A distance, km, into its slice coordinate (the inverse of {@link aerialDistance}, clamped to the volume). */
+export function aerialSlice(t: number): number {
+  return Math.sqrt(Math.min(1, Math.max(0, t) / AERIAL_RANGE));
+}
+
+/** The camera a froxel volume is built for: its right, up and back axes (world) and its projection's x and y focal terms (P[0], P[5]). */
+export interface AerialCamera {
+  readonly right: readonly number[];
+  readonly up: readonly number[];
+  readonly back: readonly number[];
+  readonly focalX: number;
+  readonly focalY: number;
+}
+
+/** A camera's axes from its view matrix (column-major, world → view) and projection. */
+export function aerialCamera(view: ArrayLike<number>, projection: ArrayLike<number>): AerialCamera {
+  return { right: [view[0]!, view[4]!, view[8]!], up: [view[1]!, view[5]!, view[9]!], back: [view[2]!, view[6]!, view[10]!], focalX: projection[0]!, focalY: projection[5]! };
+}
+
+/** The view ray through screen point (u, v), y down: a froxel column's direction. */
+export function aerialDirection(camera: AerialCamera, u: number, v: number): V3 {
+  const x = (u * 2 - 1) / camera.focalX;
+  const y = (1 - v * 2) / camera.focalY;
+  const d = [0, 1, 2].map((k) => camera.right[k]! * x + camera.up[k]! * y - camera.back[k]!);
+  const l = Math.hypot(d[0]!, d[1]!, d[2]!) || 1;
+  return [d[0]! / l, d[1]! / l, d[2]! / l];
+}
+
+/**
+ * One froxel column: along the unit direction `d` from the scene's eye, the
+ * light scattered toward it (RGB, the renderer's units) and the transmittance
+ * (RGB) out to each slice's centre, integrated slice after slice with the sky's
+ * own energy-conserving step. The ray passes under the planet's ground as
+ * though it were air at its foot (the scene's ground is the scene's), and
+ * stops gathering once it leaves the atmosphere.
+ */
+export function aerialColumn(luts: AtmosphereLuts, d: readonly number[], sun: readonly number[], sunRadiance: readonly number[]): { inscatter: V3[]; transmittance: V3[] } {
+  const a = luts.atmosphere;
+  const r = a.bottom + a.viewHeight;
+  const tTop = Math.max(0, raySphere(r, d[1]!, a.top));
+  const cos = d[0]! * sun[0]! + d[1]! * sun[1]! + d[2]! * sun[2]!;
+  const pr = rayleighPhase(cos);
+  const pm = miePhase(cos, a.mieG);
+  const E = sunRadiance.map((s) => s * Math.PI);
+  const L: V3 = [0, 0, 0];
+  const throughput: V3 = [1, 1, 1];
+  const inscatter: V3[] = [];
+  const transmittance: V3[] = [];
+  let t = 0;
+  for (let z = 0; z < AERIAL_SLICES; z += 1) {
+    const end = Math.min(tTop, aerialDistance((z + 0.5) / AERIAL_SLICES));
+    const dt = Math.max(0, end - t) / AERIAL_SUBSTEPS;
+    for (let i = 0; i < AERIAL_SUBSTEPS && dt > 0; i += 1) {
+      const s = t + (i + 0.5) * dt;
+      const p: V3 = [d[0]! * s, r + d[1]! * s, d[2]! * s];
+      const pR = Math.max(a.bottom + 1e-3, Math.hypot(p[0], p[1], p[2]));
+      const m = mediumAt(a, pR - a.bottom);
+      const muSun = (p[0] * sun[0]! + p[1] * sun[1]! + p[2] * sun[2]!) / pR;
+      const ts = transmittanceTo(a, luts.transmittance, pR, muSun);
+      const ms = multiScatteringAt(a, luts.multiScattering, pR - a.bottom, muSun);
+      for (let c = 0; c < 3; c += 1) {
+        const ext = Math.max(1e-9, m.extinction[c]!);
+        const step = Math.exp(-ext * dt);
+        const S = E[c]! * ((m.rayleigh[c]! * pr + m.mie * pm) * ts[c]! + ms[c]! * (m.rayleigh[c]! + m.mie));
+        L[c]! += throughput[c]! * ((S - S * step) / ext);
+        throughput[c]! *= step;
+      }
+    }
+    t = Math.max(t, end);
+    inscatter.push([...L]);
+    transmittance.push([...throughput]);
+  }
+  return { inscatter, transmittance };
+}
+
+/**
+ * The aerial-perspective LUT for a camera, as the GPU builds it: per froxel
+ * (x fastest, then y down the screen, then the slice) its in-scattered RGB and
+ * mean transmittance, four floats.
+ */
+export function bakeAerialPerspective(luts: AtmosphereLuts, camera: AerialCamera, sun: readonly number[], sunRadiance: readonly number[]): Float32Array {
+  const n = AERIAL_SIZE;
+  const out = new Float32Array(n * n * AERIAL_SLICES * 4);
+  for (let y = 0; y < n; y += 1) {
+    for (let x = 0; x < n; x += 1) {
+      const column = aerialColumn(luts, aerialDirection(camera, (x + 0.5) / n, (y + 0.5) / n), sun, sunRadiance);
+      for (let z = 0; z < AERIAL_SLICES; z += 1) {
+        const T = column.transmittance[z]!;
+        out.set([...column.inscatter[z]!, (T[0] + T[1] + T[2]) / 3], ((z * n + y) * n + x) * 4);
+      }
+    }
+  }
+  return out;
+}
+
+/**
+ * A LUT's aerial perspective at screen point (u, v) and a distance (km),
+ * filtered as the scene shader filters it: trilinearly between froxel
+ * centres, faded toward none (no light, all passing) nearer than the first
+ * slice's centre. Returns the in-scattered RGB and the transmittance.
+ */
+export function sampleAerialPerspective(lut: Float32Array, u: number, v: number, t: number): { inscatter: V3; transmittance: number } {
+  const n = AERIAL_SIZE;
+  const first = aerialDistance(0.5 / AERIAL_SLICES);
+  const fade = Math.min(1, Math.max(0, t) / first);
+  const fx = Math.min(n - 1, Math.max(0, u * n - 0.5));
+  const fy = Math.min(n - 1, Math.max(0, v * n - 0.5));
+  const fz = Math.min(AERIAL_SLICES - 1, Math.max(0, aerialSlice(t) * AERIAL_SLICES - 0.5));
+  const x0 = Math.floor(fx), y0 = Math.floor(fy), z0 = Math.floor(fz);
+  const x1 = Math.min(n - 1, x0 + 1), y1 = Math.min(n - 1, y0 + 1), z1 = Math.min(AERIAL_SLICES - 1, z0 + 1);
+  const out = [0, 0, 0, 0];
+  for (const [z, wz] of [[z0, 1 - (fz - z0)], [z1, fz - z0]] as const) {
+    for (const [y, wy] of [[y0, 1 - (fy - y0)], [y1, fy - y0]] as const) {
+      for (const [x, wx] of [[x0, 1 - (fx - x0)], [x1, fx - x0]] as const) {
+        const i = ((z * n + y) * n + x) * 4;
+        for (let c = 0; c < 4; c += 1) out[c]! += lut[i + c]! * wx * wy * wz;
+      }
+    }
+  }
+  return { inscatter: [out[0]! * fade, out[1]! * fade, out[2]! * fade], transmittance: 1 - (1 - out[3]!) * fade };
 }
 
 // --- The sun ---------------------------------------------------------------------

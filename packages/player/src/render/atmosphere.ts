@@ -14,6 +14,14 @@
  *   the horizon, which sits at v = ½), 32 steps a ray spaced quadratically.
  *   Rebuilt when the sun moves, so a time of day is a few hundred microseconds
  *   of compute.
+ * - **Aerial perspective** (16 × 16 × 32, F5a-2): Hillaire's froxel volume
+ *   over a camera's frustum, the air's in-scattered light and transmittance
+ *   out to each of 32 slices spaced quadratically to 32 km. Rebuilt for every
+ *   camera that draws (a column a thread), and read by the AAA scene shader
+ *   per fragment. It is kept in a uniform buffer as half floats, not a 3D
+ *   texture: the scene shader already binds the 16 sampled textures and 8
+ *   storage buffers a stage may have on every device, so the volume is
+ *   filtered by hand.
  *
  * The presenter (gpuPresent.ts) draws the AAA tier's backdrop from the sky
  * view per pixel, and the sun's disc over it, in the renderer's units of
@@ -23,6 +31,10 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
 import {
+  AERIAL_RANGE,
+  AERIAL_SIZE,
+  AERIAL_SLICES,
+  AERIAL_SUBSTEPS,
   MULTISCATTER_DIRECTIONS,
   MULTISCATTER_SIZE,
   MULTISCATTER_STEPS,
@@ -30,8 +42,11 @@ import {
   TRANSMITTANCE_HEIGHT,
   TRANSMITTANCE_STEPS,
   TRANSMITTANCE_WIDTH,
+  aerialCamera,
   atmosphereKey,
+  type AerialCamera,
   type Atmosphere,
+  type Mat4,
 } from "@cartbox/editor";
 
 type V3 = [number, number, number];
@@ -363,12 +378,135 @@ fn skyViewUv(d: vec3f, s: vec3f, r: f32, bottom: f32) -> vec2f {
 }
 `;
 
+/** Bytes of the aerial-perspective LUT: a froxel's in-scattered RGB and mean transmittance as four half floats. */
+export const AERIAL_LUT_BYTES = AERIAL_SIZE * AERIAL_SIZE * AERIAL_SLICES * 8;
+
+/** Floats in the aerial pass's camera block: right, up and back, each with its reciprocal focal term (0 for back). */
+export const AERIAL_CAMERA_FLOATS = 12;
+
+export function packAerialCamera(camera: AerialCamera, out = new Float32Array(AERIAL_CAMERA_FLOATS)): Float32Array {
+  out.set([...camera.right, 1 / camera.focalX], 0);
+  out.set([...camera.up, 1 / camera.focalY], 4);
+  out.set([...camera.back, 0], 8);
+  return out;
+}
+
+/** The aerial-perspective LUT's pass (aerialColumn in @cartbox/editor): a thread a column, slice after slice. */
+export const AERIAL_WGSL = /* wgsl */ `
+${ATMOSPHERE_COMMON_WGSL}
+${LUT_BINDINGS_WGSL}
+struct AerialCam { right: vec4f, up: vec4f, back: vec4f };
+@group(0) @binding(4) var<storage, read_write> outLut: array<vec2<u32>>;
+@group(0) @binding(5) var<uniform> cam: AerialCam;
+${LOOKUPS_WGSL}
+
+@compute @workgroup_size(8, 8, 1)
+fn main(@builtin(global_invocation_id) id: vec3u) {
+  if (id.x >= ${AERIAL_SIZE}u || id.y >= ${AERIAL_SIZE}u) { return; }
+  let u = (f32(id.x) + 0.5) / ${AERIAL_SIZE}.0;
+  let v = (f32(id.y) + 0.5) / ${AERIAL_SIZE}.0;
+  let d = normalize(cam.right.xyz * ((u * 2.0 - 1.0) * cam.right.w) + cam.up.xyz * ((1.0 - v * 2.0) * cam.up.w) - cam.back.xyz);
+  let bottom = atm.radii.x;
+  let r = bottom + atm.view.x;
+  let tTop = max(0.0, raySphere(r, d.y, atm.radii.y));
+  let sun = atm.sun.xyz;
+  let c = dot(d, sun);
+  let pr = rayleighPhase(c);
+  let pm = miePhase(c, atm.mie.z);
+  let E = atm.sunE.rgb;
+  var L = vec3f(0.0);
+  var throughput = vec3f(1.0);
+  var t = 0.0;
+  for (var z = 0u; z < ${AERIAL_SLICES}u; z = z + 1u) {
+    let w = (f32(z) + 0.5) / ${AERIAL_SLICES}.0;
+    let end = min(tTop, w * w * ${AERIAL_RANGE.toFixed(1)});
+    let dt = max(0.0, end - t) / ${AERIAL_SUBSTEPS}.0;
+    if (dt > 0.0) {
+      for (var i = 0; i < ${AERIAL_SUBSTEPS}; i = i + 1) {
+        let s = t + (f32(i) + 0.5) * dt;
+        let p = vec3f(d.x * s, r + d.y * s, d.z * s);
+        let pR = max(bottom + 1e-3, length(p));
+        let m = mediumAt(pR - bottom);
+        let muSun = dot(p, sun) / pR;
+        let ts = transmittanceTo(pR, muSun);
+        let ms = multiScatteringAt(pR - bottom, muSun);
+        let ext = max(vec3f(1e-9), m.extinction);
+        let stepT = exp(-ext * dt);
+        let S = E * ((m.rayleigh * pr + vec3f(m.mie * pm)) * ts + ms * (m.rayleigh + vec3f(m.mie)));
+        L = L + throughput * ((S - S * stepT) / ext);
+        throughput = throughput * stepT;
+      }
+    }
+    t = max(t, end);
+    let held = min(L, vec3f(65000.0));
+    outLut[(z * ${AERIAL_SIZE}u + id.y) * ${AERIAL_SIZE}u + id.x] = vec2<u32>(pack2x16float(held.rg), pack2x16float(vec2f(held.b, (throughput.r + throughput.g + throughput.b) / 3.0)));
+  }
+}
+`;
+
+/** Floats in the scene's frame block for aerial perspective: the eye (w = 1 when on), and right, up and back with P[0], P[5] and km per world unit. */
+export const AERIAL_FRAME_FLOATS = 16;
+
+/**
+ * The scene shader's aerial-perspective terms for a camera: the eye; its
+ * right, up and back axes with the projection's focal terms (so a fragment
+ * finds its froxel column as the camera projects it); and how many km of air
+ * a world unit (a metre) counts for. All zero (off) without a sky, for an
+ * orthographic camera, or with aerial perspective turned off.
+ */
+export function packAerialFrame(sky: AtmosphereSky | null, view: Mat4, projection: Mat4, out = new Float32Array(AERIAL_FRAME_FLOATS)): Float32Array {
+  out.fill(0);
+  if (!sky || sky.atmosphere.aerialScale <= 0 || projection[15] !== 0) return out;
+  const c = aerialCamera(view, projection);
+  const v = view;
+  const eye = [-(v[0]! * v[12]! + v[1]! * v[13]! + v[2]! * v[14]!), -(v[4]! * v[12]! + v[5]! * v[13]! + v[6]! * v[14]!), -(v[8]! * v[12]! + v[9]! * v[13]! + v[10]! * v[14]!)];
+  out.set([...eye, 1], 0);
+  out.set([...c.right, c.focalX], 4);
+  out.set([...c.up, c.focalY], 8);
+  out.set([...c.back, 0.001 * sky.atmosphere.aerialScale], 12);
+  return out;
+}
+
+/**
+ * The WGSL a scene shader reads its aerial perspective with (sampleAerialPerspective
+ * in @cartbox/editor): the LUT as `aerialLut` (vec4s of two froxels' halves), and
+ * the frame's `aerialEye`, `aerialRight`, `aerialUp` and `aerialBack`.
+ * `aerialAt` gives a world point's in-scattered light and transmittance.
+ */
+export const AERIAL_SAMPLE_WGSL = /* wgsl */ `
+fn aerialTexel(x: u32, y: u32, z: u32) -> vec4<f32> {
+  let i = (z * ${AERIAL_SIZE}u + y) * ${AERIAL_SIZE}u + x;
+  let q = aerialLut[i >> 1u];
+  let pair = select(q.xy, q.zw, (i & 1u) == 1u);
+  return vec4<f32>(unpack2x16float(pair.x), unpack2x16float(pair.y));
+}
+fn aerialAt(P: vec3<f32>) -> vec4<f32> {
+  let ray = P - frame.aerialEye.xyz;
+  let ahead = -dot(ray, frame.aerialBack.xyz);
+  if (ahead <= 1e-4) { return vec4<f32>(0.0, 0.0, 0.0, 1.0); }
+  let u = (dot(ray, frame.aerialRight.xyz) / ahead * frame.aerialRight.w + 1.0) * 0.5;
+  let v = (1.0 - dot(ray, frame.aerialUp.xyz) / ahead * frame.aerialUp.w) * 0.5;
+  let t = length(ray) * frame.aerialBack.w;
+  let top = vec3<f32>(${AERIAL_SIZE - 1}.0, ${AERIAL_SIZE - 1}.0, ${AERIAL_SLICES - 1}.0);
+  let f = clamp(vec3<f32>(u * ${AERIAL_SIZE}.0 - 0.5, v * ${AERIAL_SIZE}.0 - 0.5, sqrt(min(1.0, t / ${AERIAL_RANGE.toFixed(1)})) * ${AERIAL_SLICES}.0 - 0.5), vec3<f32>(0.0), top);
+  let a = vec3<u32>(floor(f));
+  let b = min(a + vec3<u32>(1u), vec3<u32>(top));
+  let w = f - floor(f);
+  let y0 = mix(mix(aerialTexel(a.x, a.y, a.z), aerialTexel(b.x, a.y, a.z), w.x), mix(aerialTexel(a.x, b.y, a.z), aerialTexel(b.x, b.y, a.z), w.x), w.y);
+  let y1 = mix(mix(aerialTexel(a.x, a.y, b.z), aerialTexel(b.x, a.y, b.z), w.x), mix(aerialTexel(a.x, b.y, b.z), aerialTexel(b.x, b.y, b.z), w.x), w.y);
+  let s = mix(y0, y1, w.z);
+  // Nearer than the first slice's centre, the air fades toward none.
+  let fade = clamp(t / ${(((0.5 / AERIAL_SLICES) ** 2) * AERIAL_RANGE).toPrecision(6)}, 0.0, 1.0);
+  return vec4<f32>(s.rgb * fade, 1.0 - (1.0 - s.a) * fade);
+}
+`;
+
 const USAGE = { textureBinding: 0x04, storage: 0x08, copySrc: 0x01, uniform: 0x40, copyDst: 0x08 } as const;
 
 /**
  * The atmosphere's LUTs on a device: the transmittance and multiple
  * scattering built once per medium, the sky view whenever the sun or the
- * view's height changes.
+ * view's height changes, and the aerial perspective for each camera (F5a-2).
  */
 export class GpuAtmosphere {
   readonly transmittance: any;
@@ -376,9 +514,12 @@ export class GpuAtmosphere {
   readonly skyView: any;
   private readonly sampler: any;
   private readonly uniforms: any;
+  private readonly camera: any;
   private readonly data = new Float32Array(ATMOSPHERE_UNIFORM_FLOATS);
-  private readonly pipelines: { transmittance: any; multiScattering: any; skyView: any };
+  private readonly cameraData = new Float32Array(AERIAL_CAMERA_FLOATS);
+  private readonly pipelines: { transmittance: any; multiScattering: any; skyView: any; aerial: any | null };
   private mediumKey = "";
+  private uniformKey = "";
   private viewKey = "";
 
   constructor(private readonly device: any) {
@@ -388,39 +529,22 @@ export class GpuAtmosphere {
     this.skyView = texture(SKY_VIEW_WIDTH, SKY_VIEW_HEIGHT);
     this.sampler = device.createSampler({ magFilter: "linear", minFilter: "linear", addressModeU: "clamp-to-edge", addressModeV: "clamp-to-edge" });
     this.uniforms = device.createBuffer({ size: ATMOSPHERE_UNIFORM_FLOATS * 4, usage: USAGE.uniform | USAGE.copyDst });
+    this.camera = device.createBuffer({ size: AERIAL_CAMERA_FLOATS * 4, usage: USAGE.uniform | USAGE.copyDst });
     const pipeline = (code: string) => device.createComputePipeline({ layout: "auto", compute: { module: device.createShaderModule({ code }), entryPoint: "main" } });
-    this.pipelines = { transmittance: pipeline(TRANSMITTANCE_WGSL), multiScattering: pipeline(MULTISCATTER_WGSL), skyView: pipeline(SKY_VIEW_WGSL) };
+    this.pipelines = { transmittance: pipeline(TRANSMITTANCE_WGSL), multiScattering: pipeline(MULTISCATTER_WGSL), skyView: pipeline(SKY_VIEW_WGSL), aerial: null };
   }
 
   /** Bring the LUTs up to `sky` (a submit of its own when anything changed); true when the sky view was rebuilt. */
   update(sky: AtmosphereSky): boolean {
-    const medium = atmosphereKey(sky.atmosphere);
-    const view = [medium, sky.atmosphere.viewHeight, ...sky.sun.map((v) => v.toFixed(5)), ...sky.sunRadiance.map((v) => v.toPrecision(5))].join("|");
+    const view = this.prepare(sky);
     if (view === this.viewKey) return false;
-    this.device.queue.writeBuffer(this.uniforms, 0, packAtmosphereUniforms(sky, this.data));
     const encoder = this.device.createCommandEncoder();
-    const run = (pipeline: any, entries: { binding: number; resource: any }[], width: number, height: number) => {
-      const pass = encoder.beginComputePass();
-      pass.setPipeline(pipeline);
-      pass.setBindGroup(0, this.device.createBindGroup({ layout: pipeline.getBindGroupLayout(0), entries }));
-      pass.dispatchWorkgroups(Math.ceil(width / 8), Math.ceil(height / 8));
-      pass.end();
-    };
-    const uniform = { binding: 0, resource: { buffer: this.uniforms } };
-    if (medium !== this.mediumKey) {
-      run(this.pipelines.transmittance, [uniform, { binding: 1, resource: this.transmittance.createView() }], TRANSMITTANCE_WIDTH, TRANSMITTANCE_HEIGHT);
-      run(
-        this.pipelines.multiScattering,
-        [uniform, { binding: 1, resource: this.sampler }, { binding: 2, resource: this.transmittance.createView() }, { binding: 3, resource: this.multiScattering.createView() }],
-        MULTISCATTER_SIZE,
-        MULTISCATTER_SIZE,
-      );
-      this.mediumKey = medium;
-    }
-    run(
+    this.medium(encoder, sky);
+    this.run(
+      encoder,
       this.pipelines.skyView,
       [
-        uniform,
+        this.uniformEntry(),
         { binding: 1, resource: this.sampler },
         { binding: 2, resource: this.transmittance.createView() },
         { binding: 3, resource: this.multiScattering.createView() },
@@ -434,8 +558,76 @@ export class GpuAtmosphere {
     return true;
   }
 
+  /**
+   * The aerial perspective of `sky` for a camera into `target` (a buffer of
+   * {@link AERIAL_LUT_BYTES} with storage usage), with the medium's LUTs built
+   * first where they are new: a submit of its own, ahead of the frame that
+   * reads it.
+   */
+  aerial(sky: AtmosphereSky, camera: AerialCamera, target: any): void {
+    this.prepare(sky);
+    this.device.queue.writeBuffer(this.camera, 0, packAerialCamera(camera, this.cameraData));
+    const encoder = this.device.createCommandEncoder();
+    this.medium(encoder, sky);
+    this.pipelines.aerial ??= this.device.createComputePipeline({ layout: "auto", compute: { module: this.device.createShaderModule({ code: AERIAL_WGSL }), entryPoint: "main" } });
+    this.run(
+      encoder,
+      this.pipelines.aerial,
+      [
+        this.uniformEntry(),
+        { binding: 1, resource: this.sampler },
+        { binding: 2, resource: this.transmittance.createView() },
+        { binding: 3, resource: this.multiScattering.createView() },
+        { binding: 4, resource: { buffer: target } },
+        { binding: 5, resource: { buffer: this.camera } },
+      ],
+      AERIAL_SIZE,
+      AERIAL_SIZE,
+    );
+    this.device.queue.submit([encoder.finish()]);
+  }
+
   dispose(): void {
     for (const t of [this.transmittance, this.multiScattering, this.skyView]) t.destroy?.();
     this.uniforms.destroy?.();
+    this.camera.destroy?.();
+  }
+
+  /** The uniforms written for `sky` where they changed; its key. */
+  private prepare(sky: AtmosphereSky): string {
+    const medium = atmosphereKey(sky.atmosphere);
+    const key = [medium, sky.atmosphere.viewHeight, ...sky.sun.map((v) => v.toFixed(5)), ...sky.sunRadiance.map((v) => v.toPrecision(5))].join("|");
+    if (key !== this.uniformKey) {
+      this.device.queue.writeBuffer(this.uniforms, 0, packAtmosphereUniforms(sky, this.data));
+      this.uniformKey = key;
+    }
+    return key;
+  }
+
+  /** The transmittance and multiple-scattering passes, when the medium is new. */
+  private medium(encoder: any, sky: AtmosphereSky): void {
+    const medium = atmosphereKey(sky.atmosphere);
+    if (medium === this.mediumKey) return;
+    this.run(encoder, this.pipelines.transmittance, [this.uniformEntry(), { binding: 1, resource: this.transmittance.createView() }], TRANSMITTANCE_WIDTH, TRANSMITTANCE_HEIGHT);
+    this.run(
+      encoder,
+      this.pipelines.multiScattering,
+      [this.uniformEntry(), { binding: 1, resource: this.sampler }, { binding: 2, resource: this.transmittance.createView() }, { binding: 3, resource: this.multiScattering.createView() }],
+      MULTISCATTER_SIZE,
+      MULTISCATTER_SIZE,
+    );
+    this.mediumKey = medium;
+  }
+
+  private uniformEntry(): { binding: number; resource: any } {
+    return { binding: 0, resource: { buffer: this.uniforms } };
+  }
+
+  private run(encoder: any, pipeline: any, entries: { binding: number; resource: any }[], width: number, height: number): void {
+    const pass = encoder.beginComputePass();
+    pass.setPipeline(pipeline);
+    pass.setBindGroup(0, this.device.createBindGroup({ layout: pipeline.getBindGroupLayout(0), entries }));
+    pass.dispatchWorkgroups(Math.ceil(width / 8), Math.ceil(height / 8));
+    pass.end();
   }
 }

@@ -799,6 +799,8 @@ function AtmosphereControls({ settings, patch }: { settings: AtmosphereSettings;
       <RangeControl label="Ground albedo" nested min={0} max={1} step={0.01} value={settings.groundAlbedo ?? 0.3} ariaLabel="Ground albedo" display={(settings.groundAlbedo ?? 0.3).toFixed(2)} onChange={(v) => set("groundAlbedo", v)} />
       <RangeControl label="Altitude" nested min={0} max={8000} step={50} value={settings.altitude ?? 0} ariaLabel="Altitude" display={`${Math.round(settings.altitude ?? 0)} m`} onChange={(v) => set("altitude", v)} />
       <RangeControl label="Sun size" nested min={0.1} max={5} step={0.05} value={settings.sunSize ?? 0.545} ariaLabel="Sun angular diameter" display={`${(settings.sunSize ?? 0.545).toFixed(2)}°`} onChange={(v) => set("sunSize", v)} />
+      <RangeControl label="Aerial distance" nested min={0} max={50} step={0.5} value={settings.aerialScale ?? 1} ariaLabel="Aerial perspective distance scale" display={(settings.aerialScale ?? 1) === 0 ? "Off" : `×${(settings.aerialScale ?? 1).toFixed(1)}`} onChange={(v) => set("aerialScale", v)} />
+      <RailHint>Aerial distance hazes the scene by the air between it and the eye (AAA tier). At ×1 a metre is a metre, so only kilometres haze over; more lays a landscape&apos;s haze over a small map.</RailHint>
     </>
   );
 }

@@ -35,6 +35,7 @@ import type { DecalTiles, EnvironmentLight, LocalShadows, Mat4, ProjectedDecal, 
 
 import type { RenderCaps } from "../models.js";
 import type { ReflectionCapture } from "./probeCapture.js";
+import type { AtmosphereSky } from "./atmosphere.js";
 import type { RenderStats } from "../debug/profiler.js";
 import { applyRenderCaps, createTextureBudgetCache } from "./renderCaps.js";
 
@@ -196,6 +197,13 @@ export interface SceneDraw {
    * Only the linear-light (AAA) WebGPU renderer draws it; the others ignore it.
    */
   readonly sunShadow?: SunShadow | null;
+  /**
+   * A physical sky's air (AAA_FIDELITY_ROADMAP.md F5a-2): the medium and its
+   * sun above the air, whose aerial perspective the linear-light (AAA) WebGPU
+   * renderer lays over every surface, built for this draw's camera. The others
+   * ignore it.
+   */
+  readonly atmosphere?: AtmosphereSky | null;
   /**
    * Distance fog for PBR (Modern-tier) materials, applied after tone mapping, or
    * omitted for none. Both backends fade by the fragment's eye depth. See

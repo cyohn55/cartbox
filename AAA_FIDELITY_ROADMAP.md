@@ -897,8 +897,38 @@ Everything else depends on this track. It contains no visible "feature", but its
         - the GPU bake lights an open floor by the atmosphere's sky within 5%, blue where the gradient was not.
       - The scene's environment carries the atmosphere's HDR light, and its 8-bit copy is blue overhead.
       - The player hands the presenter the atmosphere, its sun above the air and the disc, and lights the renderer by the tinted key light and the atmosphere's light.
+  - **F5a-2, aerial perspective and the time of day: done** (`aerialColumn` and `bakeAerialPerspective` in `model/atmosphere.ts`; `AERIAL_WGSL` and `GpuAtmosphere.aerial` in `render/atmosphere.ts`). On the AAA tier, every surface stands behind the air between it and the eye, and a sun that moves re-lights the sky's light.
+    - **The volume** is Hillaire's froxel LUT over the camera's frustum:
+      - 16 × 16 columns across the screen, each a view ray through its centre;
+      - 32 slices along each, spaced quadratically out to 32 km, so the first slice's centre is 8 m out and half the slices fall inside 8 km;
+      - each froxel holds the light the air scatters toward the eye up to it, and the mean transmittance to it.
+      - A column is integrated slice after slice (4 steps a slice) with the sky's own energy-conserving step, over the transmittance and multiple-scattering LUTs. It is rebuilt in compute for every camera that draws, one thread a column, so the probes' cube faces get their own.
+      - The ray passes under the planet's ground as air at its foot, since the scene's ground is the scene's. Looking down from a ridge still hazes the valley.
+    - **Why a uniform buffer.** The AAA scene shader already binds the 16 sampled textures and 8 storage buffers a stage gets on every device. So the volume is kept as half floats in one 64 KB uniform buffer (two froxels a `vec4<u32>`), and filtered trilinearly by hand.
+    - **In the shader**, after the fog, each fragment finds its froxel from its world position through the camera's axes and focal terms, and its slice from its distance.
+      - The colour becomes colour × T + L, with L taken by coverage, since it is premultiplied after.
+      - An additive surface is only dimmed.
+      - Nearer than the first slice's centre, the air fades toward none.
+    - **Scale.** At ×1 a metre is a metre, so only kilometres haze over. The Lighting panel's **Aerial distance** (0–50, stored as `aerialScale`, 0 to 100) lays the haze of a large landscape over a small map. 0 turns it off.
+    - **Time of day.** When the key light above the air turns past about half a degree, or brightens or reddens a step (`physicalSunKey`, a cart's `cartbox.sun3d` included), the player re-renders the atmosphere's light for where the sun now is:
+      - 96 × 48, a row a frame (about 1.5 ms of CPU), so a sunset re-lights in under a second;
+      - then it is upsampled to the IBL's 192 × 96 and swapped in whole, never half done.
+      - The AAA tier rebuilds its prefiltered IBL and SH from it. Its reflection probes re-capture, as their key follows the environment.
+      - The other tiers' 8-bit reflections copy is made from it.
+    - *Tests (`aerial-perspective.test.ts`):*
+      - The setting parses in range, defaults to Earth's ×1 and survives a save. The slices map both ways, and a froxel column points along its camera ray.
+      - A short level stretch passes light as `exp(−σ_t d)` of the air at the eye's height (to 0.05%), and gathers a uniform slab's closed form `S/σ_t (1 − e^{−σ_t d})` (to 5%).
+      - Straight up, the volume thickens with each slice and its far end is 90–102% of the zenith's sky. Distant things go blue; tenfold aerosol hazes more; a set sun leaves the air dark.
+      - The volume is laid out as the shader reads it, a froxel's centre samples as itself, and the eye sees clear air. The frame's terms are off without a sky, for an orthographic camera, or at ×0.
+      - The player hands the AAA scene the air. After `cartbox.sun3d` lowers the sun, the environment keeps its old light until every row is drawn, then takes the new sky whole: within 5% of `skyRadiance` for the new sun, dimmer than at 40°, and with a new 8-bit copy.
+      - On Dawn:
+        - the GPU's volume is the CPU's froxel by froxel, within 1% for the light and 0.002 for the transmittance;
+        - a grey wall 3 km of air away (300 m at ×10) is colour × T + L of the CPU's volume within 2%, bluer for it, and is untouched at ×0 or without a sky.
     - *Left for F5a:*
-      - **F5a-2**: aerial perspective (the froxel LUT over the scene), and a time of day that re-renders the IBL's panorama and the probes as the sun moves (the backdrop already follows it each frame).
+      - The fantasy tiers' backdrop (the 1536 × 768 painted copy) keeps the sun it was baked for. Only their reflections follow the time of day.
+      - A time-of-day re-light drops the distant vistas from the reflections copy, which are drawn only at load.
+      - The probe volume and light maps are baked for one sun. Re-lighting them as the sun moves is real-time GI (F3e).
+      - The volume carries no shadows: the air in a mountain's shadow still glows. F5b's froxel fog, which marches the sun's cascades, will bring them.
       - **F5a-3**: the moon and the night sky in physical units.
       - The painted sky's objects, cloud layers and distant vistas draw over the other tiers' copy of the physical sky, but not over the AAA backdrop. F5c's clouds and a composite of the vistas will bring them back there.
       - The CPU LUTs take about 0.8 s at load. A worker, or reading the GPU's LUTs back on the AAA tier, would hide that.

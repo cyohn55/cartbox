@@ -27,6 +27,7 @@ import {
   atmosphereLighting,
   atmosphereLuts,
   atmospherePanorama,
+  atmospherePanoramaRows,
   atmosphereSun,
   sunDiscRadiance,
   bakeReflectionProbesAsync,
@@ -295,6 +296,14 @@ const SKY_PANORAMA_HEIGHT = 768;
 const SKY_IBL_DOWNSAMPLE = 8;
 /** Points across each reflections texel the sun's glow is averaged over, so the small copy keeps the core's light. */
 const SKY_IBL_SUN_SAMPLES = 4;
+/**
+ * A physical sky's light re-rendered for a time of day (F5a-2): this size,
+ * upsampled to the IBL's, and this many rows a frame (each row about a
+ * millisecond and a half of CPU), so a sunset re-lights in under a second.
+ */
+const SKY_RELIGHT_WIDTH = 96;
+const SKY_RELIGHT_HEIGHT = 48;
+const SKY_RELIGHT_ROWS = 1;
 
 /**
  * A cart pose's local transform. The SDK's rotation is (yaw, pitch, roll): yaw
@@ -374,6 +383,13 @@ export class MeshOverlaySurface implements DisplaySurface {
    * moves the sun the metals reflect too.
    */
   private skyReflections: { small: DecodedTexture; sun: string } | null = null;
+  /**
+   * A physical sky's time of day (F5a-2): the sun its light was last rendered
+   * for (null until the first frame takes the bake's), and the re-render under
+   * way for where the sun is now, a few rows a frame.
+   */
+  private skyLitFor: string | null = null;
+  private skyRelight: { key: string; sun: NonNullable<ReturnType<typeof atmosphereSun>>; hdr: HdrImage; row: number } | null = null;
   /** The scene's distant vistas, textured: re-drawn into the sky whenever it is re-baked. */
   private vistas: VistaLayer[] = [];
   /**
@@ -646,6 +662,8 @@ export class MeshOverlaySurface implements DisplaySurface {
       } else {
         this.skyReflections = null;
       }
+      this.skyLitFor = null;
+      this.skyRelight = null;
       this.environment = environment;
       this.skyMap = skyMap;
       this.startBounce();
@@ -955,12 +973,52 @@ export class MeshOverlaySurface implements DisplaySurface {
   private followSun(lighting: SceneLighting | null): void {
     const reflections = this.skyReflections;
     if (!reflections || !lighting?.sky || !this.environment) return;
+    if (lighting.sky.atmosphere) return this.followPhysicalSun();
     const sun = skySun(lighting.sky);
     const key = sunKey(sun);
     if (key === reflections.sun) return;
     const map = skyReflectionsWith(reflections.small, sun, this.skyClouds);
     this.environment = { ...this.environment, map, average: computeEnvironmentAverage(map) };
     this.skyReflections = { small: reflections.small, sun: key };
+  }
+
+  /**
+   * A physical sky's time of day (F5a-2): when its sun (above the air) has
+   * turned past what {@link physicalSunKey} rounds away, or changed, render
+   * the atmosphere's light again for where it is, {@link SKY_RELIGHT_ROWS} a
+   * frame, then swap it in whole: the AAA tier's IBL is rebuilt from it and
+   * its reflection probes re-captured (their key follows the environment), and
+   * the other tiers' reflections copy is made from it. The backdrop already
+   * follows the sun each frame on the AAA tier.
+   */
+  private followPhysicalSun(): void {
+    const authored = this.scene.lighting;
+    const lighting = this.sunLighting();
+    const sun = lighting ? atmosphereSun(lighting) : null;
+    if (!sun || !authored?.sky || !this.environment) return;
+    // The bake at load was for the rig's own sun.
+    if (this.skyLitFor === null) {
+      const baked = atmosphereSun(authored);
+      this.skyLitFor = baked ? physicalSunKey(baked) : "";
+    }
+    if (!this.skyRelight) {
+      const key = physicalSunKey(sun);
+      if (key === this.skyLitFor) return;
+      this.skyRelight = { key, sun, hdr: { width: SKY_RELIGHT_WIDTH, height: SKY_RELIGHT_HEIGHT, data: new Float32Array(SKY_RELIGHT_WIDTH * SKY_RELIGHT_HEIGHT * 3) }, row: 0 };
+    }
+    const job = this.skyRelight;
+    atmospherePanoramaRows(atmosphereLuts(job.sun.atmosphere), job.sun.direction, job.sun.radiance, job.hdr, job.row, job.row + SKY_RELIGHT_ROWS);
+    job.row += SKY_RELIGHT_ROWS;
+    if (job.row < SKY_RELIGHT_HEIGHT) return;
+    const hdr = resampleHdr(job.hdr, SKY_PANORAMA_WIDTH / SKY_IBL_DOWNSAMPLE, SKY_PANORAMA_HEIGHT / SKY_IBL_DOWNSAMPLE, 0, 1);
+    const sky = authored.sky;
+    const small = bakeSkyPanorama({ ...sky, panorama: null }, hdr.width, hdr.height, hdrToTexture(hdr, authored.exposure), { sunLayer: true });
+    const glow = skySun(lighting!.sky!);
+    const map = skyReflectionsWith(small, glow, this.skyClouds);
+    this.environment = { ...this.environment, hdr, map, average: computeEnvironmentAverage(map) };
+    this.skyReflections = { small, sun: sunKey(glow) };
+    this.skyLitFor = job.key;
+    this.skyRelight = null;
   }
 
   /** Start finding the probes' bounce transfer (I17), when they were baked with their light recorded. */
@@ -1213,6 +1271,8 @@ export class MeshOverlaySurface implements DisplaySurface {
             shadow,
             fog: lighting.fog ?? null,
             wind: lighting.wind ?? null,
+            // A physical sky's air (F5a-2), which only the AAA renderer lays over the scene.
+            atmosphere: this.presentAtmosphere(),
           }
         : {}),
       // Animated emissive runs on the frame clock (60 per second), so it
@@ -1333,6 +1393,8 @@ export class MeshOverlaySurface implements DisplaySurface {
           lights: job.lights,
         }
       : {};
+    // A physical sky (F5a): the presenter's backdrop, and the air the AAA scene lays over its surfaces (F5a-2).
+    const atmosphere = this.presentAtmosphere();
     const draw: GpuSceneDraw = {
       width,
       height,
@@ -1346,6 +1408,7 @@ export class MeshOverlaySurface implements DisplaySurface {
       ...(lighting ? { ...lit, localShadows: job.local, shadow: job.shadow, sunShadow: job.sunShadow, localShadowCasters: job.localShadowCasters, localShadowKey: job.localShadowKey, localShadowMoved: job.localShadowMoved, fog: lighting.fog ?? null, wind: lighting.wind ?? null } : {}),
       ...(job.reflectionCapture ? { reflectionCapture: job.reflectionCapture } : {}),
       ...(job.decals ? { decals: job.decals } : {}),
+      ...(atmosphere ? { atmosphere } : {}),
       time,
     };
     const scene = this.renderer.renderToTexture!(job.drawn, draw) ?? null;
@@ -1363,7 +1426,7 @@ export class MeshOverlaySurface implements DisplaySurface {
     }
     const sky: PresentSky | null =
       job.skyBackdrop && this.skyMap
-        ? { map: this.skyMap, view: camera.view, projection: camera.projection, sun: lighting?.sky ? skySun(lighting.sky) : null, clouds: this.skyClouds, time, atmosphere: this.presentAtmosphere() }
+        ? { map: this.skyMap, view: camera.view, projection: camera.projection, sun: lighting?.sky ? skySun(lighting.sky) : null, clouds: this.skyClouds, time, atmosphere }
         : null;
     // The sun in the frame's pixels: the shafts and the measurements work at the frame's size.
     const sun = sky && lighting?.sky ? sunScreenPosition(lighting.sky.sunDirection, camera.view, camera.projection, output.width, output.height) : null;
@@ -2337,6 +2400,11 @@ async function bakeSceneSky(
 /** The reflections' copy of the sky: its small sun layer with `sun`'s glow drawn in, and the clouds laid over it at rest. */
 function skyReflectionsWith(small: DecodedTexture, sun: SkySun, clouds: readonly BakedCloudLayer[]): DecodedTexture {
   return panoramaWithClouds(panoramaWithSun(small, sun, SKY_IBL_SUN_SAMPLES), clouds, 0);
+}
+
+/** A physical sky's sun (above the air) rounded to what's worth re-lighting for: turned about half a degree, or a step brighter or redder (F5a-2). */
+function physicalSunKey(sun: { readonly direction: readonly number[]; readonly radiance: readonly number[] }): string {
+  return `${sun.direction.map((v) => Math.round(v * 100)).join(",")}:${sun.radiance.map((v) => v.toPrecision(2)).join(",")}`;
 }
 
 /** A sun rounded to what's worth redrawing its glow for: turned about half a degree, or recoloured a step. */

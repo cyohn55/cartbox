@@ -85,6 +85,7 @@ import {
   PROBE_SH,
   PROBE_VOLUME_SLOTS,
   probeVolumeTexels,
+  aerialCamera,
   type ProbeVolume,
   MAX_REFLECTION_PROBES,
   PROBE_FADE,
@@ -150,6 +151,7 @@ import { REACTIVE_MASK_WGSL, TEMPORAL_SHARPEN_WGSL, TemporalState, hdrTemporalSh
 import { reflectionShaderWgsl, reflectionUniforms } from "./reflections.js";
 import { CONTACT_UNIFORM_FLOATS, SCREEN_SHADING_FORMAT, contactShaderWgsl, contactUniforms } from "./contactShadows.js";
 import { GTAO_UNIFORM_FLOATS, gtaoShaderWgsl, gtaoTemporalWgsl, gtaoUniforms } from "./gtao.js";
+import { AERIAL_FRAME_FLOATS, AERIAL_LUT_BYTES, AERIAL_SAMPLE_WGSL, GpuAtmosphere, packAerialFrame } from "./atmosphere.js";
 import {
   LOCAL_ATLAS_SIZE,
   LOCAL_CLEAR_WGSL,
@@ -225,11 +227,14 @@ export const GBUFFER_FORMAT = "rgba16float";
 /** The velocity buffer's format (F0c): screen motion since last frame, in UV units. */
 export const VELOCITY_FORMAT = "rg16float";
 
-/** The per-frame globals' bytes (WGSL `Frame`): cluster params and info, the near cascade's matrix and params, and the sun's GPU cascades (F2a). */
-const FRAME_BYTES = 752;
+/** The per-frame globals' bytes (WGSL `Frame`): cluster params and info, the near cascade's matrix and params, the sun's GPU cascades (F2a), and the aerial perspective's camera (F5a-2). */
+const FRAME_BYTES = 816;
 
 /** Floats into `Frame` where the sun's GPU cascades start (F2a): four matrices, then the slices' far depths, the flags and the texels. */
 const FRAME_CASCADES = 84;
+
+/** Floats into `Frame` where the aerial perspective's camera starts (F5a-2). */
+const FRAME_AERIAL = FRAME_CASCADES + 104;
 
 /** The cascades the linear-light renderer gives a caller that passes only a CPU shadow map (F2a): how far they reach, and their size. */
 const FALLBACK_CASCADE_DISTANCE = 80;
@@ -337,6 +342,12 @@ function wgslDisplay(v: string, hdr = false): string {
         }
       }
       ${v} = mixAsShown(${v}, fc, f);
+    }
+    // The physical sky's air between the surface and the eye (F5a-2): what lies beyond it dimmed, the light it
+    // scatters toward the eye added (by coverage, as the colour is premultiplied after; an additive surface only dims).
+    if (frame.aerialEye.w > 0.5) {
+      let air = aerialAt(in.worldPos);
+      ${v} = ${v} * air.a + select(air.rgb, vec3<f32>(0.0), u.pbr.w > 2.5);
     }`;
   }
   return /* wgsl */ `    if (u.tonemap.x > 0.5) {
@@ -456,6 +467,10 @@ struct Frame {
   cascadeSoft: vec4<f32>,     // F2a-2: x = the sun's size (its angular diameter's tangent), for the penumbrae; F2c: y = 1 with contact shadows; F3c: z = 1 with GTAO
   viewProj: mat4x4<f32>,      // F2d-3: world → clip as drawn (jittered with TAA), for marching the prepass's depths
   depthTerms: vec4<f32>,      // F2d-3: xy = view distance from depth (d = y / (z + x)); z = 1 when the depths are readable as the scene shades
+  aerialEye: vec4<f32>,       // F5a-2: the eye the aerial perspective was built from, w = 1 when it is on
+  aerialRight: vec4<f32>,     // F5a-2: its camera's right axis, w = P[0]
+  aerialUp: vec4<f32>,        // F5a-2: its up axis, w = P[5]
+  aerialBack: vec4<f32>,      // F5a-2: its back axis, w = km of air per world unit
 };
 // One spot/point shadow tile (EP8c): world→clip, and params.xy = depth→distance terms.
 struct ShadowTile {
@@ -542,7 +557,10 @@ ${decalWgsl(1, 13)}
 ${SH_IRRADIANCE_WGSL}
 // The comparison sampler that filters the cascades' tests (F2a).
 @group(1) @binding(11) var cascadeSamp: sampler_comparison;
-${CASCADE_SHADOW_WGSL}` : ""}
+${CASCADE_SHADOW_WGSL}
+// The physical sky's aerial perspective (F5a-2, atmosphere.ts): its froxels as half floats, two a vec4.
+@group(1) @binding(14) var<uniform> aerialLut: array<vec4<u32>, ${AERIAL_LUT_BYTES / 16}>;
+${AERIAL_SAMPLE_WGSL}` : ""}
 // Optical depth of a fog layer thinning above base, along the ray from the eye
 // (height cy, rise dy, length len) over t in [t0, t1] — fogLayerDepth in skyDome.ts.
 fn fogLayer(d: f32, k: f32, base: f32, cy: f32, dy: f32, len: f32, t0: f32, t1: f32) -> f32 {
@@ -1964,6 +1982,8 @@ export class WebgpuSceneRenderer implements SceneRenderer {
       readonly ltc: any;
       /** The projected decals' boxes and tiles (F1f). */
       readonly decals: any;
+      /** The physical sky's aerial perspective (F5a-2), as the linear-light shader reads it. */
+      readonly aerial: any;
       atlas: any;
       atlasBlank: boolean;
       probes: any;
@@ -2044,6 +2064,9 @@ export class WebgpuSceneRenderer implements SceneRenderer {
   private frameDepthView: { readonly viewProj: Mat4; readonly terms: readonly [number, number] } | null = null;
   /** Whether this frame's ambient light takes GTAO (F3c), for the frame uniform. */
   private frameGtao = false;
+  /** The physical sky's LUTs (F5a-2), made when a draw first brings one, and the frame's aerial terms. */
+  private atmosphere: GpuAtmosphere | null = null;
+  private readonly aerialTerms = new Float32Array(AERIAL_FRAME_FLOATS);
   /**
    * GTAO's resources (F3c): its uniforms, the half-resolution history (two,
    * one read and one written, swapping each frame), and its pipelines.
@@ -2307,6 +2330,8 @@ export class WebgpuSceneRenderer implements SceneRenderer {
         { binding: 13, visibility: SHADER_STAGE_FRAGMENT, buffer: { type: "read-only-storage" } },
         // The comparison sampler that filters the sun's GPU cascades (F2a; group 0 binds the cascades).
         { binding: 11, visibility: SHADER_STAGE_FRAGMENT, sampler: { type: "comparison" } },
+        // The physical sky's aerial perspective (F5a-2), read by the linear-light shader.
+        ...(hdr ? [{ binding: 14, visibility: SHADER_STAGE_FRAGMENT, buffer: { type: "uniform" } }] : []),
       ];
       const depthLayout = device.createBindGroupLayout({ entries: depthEntries(false) });
       const depthLayoutMs = device.createBindGroupLayout({ entries: depthEntries(true) });
@@ -2407,6 +2432,8 @@ export class WebgpuSceneRenderer implements SceneRenderer {
       device.queue.writeBuffer(ltcBuffer, 0, ltc);
       // The projected decals (F1f): a fixed buffer, zeroed (no boxes) until a frame has some.
       const decalBuffer = device.createBuffer({ size: DECAL_BUFFER_WORDS * 4, usage: 0x80 | 0x08 }); // STORAGE | COPY_DST
+      // The aerial perspective (F5a-2): written in compute for each camera, read as a uniform by the scene.
+      const aerialBuffer = device.createBuffer({ size: AERIAL_LUT_BYTES, usage: 0x40 | 0x80 | 0x04 }); // UNIFORM | STORAGE | COPY_SRC (read back by its tests)
       const iblSampler = device.createSampler({ magFilter: "linear", minFilter: "linear", mipmapFilter: "linear", addressModeU: "clamp-to-edge", addressModeV: "clamp-to-edge", addressModeW: "clamp-to-edge" });
       const atlasBlank = hdr
         ? device.createTexture({ size: { width: 1, height: 1 }, format: "depth32float", usage: 0x04 | 0x10 }) // TEXTURE_BINDING | RENDER_ATTACHMENT
@@ -2538,6 +2565,7 @@ export class WebgpuSceneRenderer implements SceneRenderer {
           { binding: 10, resource: { buffer: ltcBuffer } },
           { binding: 13, resource: { buffer: decalBuffer } },
           { binding: 11, resource: cascades.sampler },
+          ...(hdr ? [{ binding: 14, resource: { buffer: aerialBuffer } }] : []),
         ];
         return {
           blank: device.createBindGroup({ layout: depthLayout, entries: [{ binding: 0, resource: blankDepth.createView() }, ...shared, { binding: 7, resource: behindBlank.createView() }] }),
@@ -2559,6 +2587,7 @@ export class WebgpuSceneRenderer implements SceneRenderer {
           { binding: 10, resource: { buffer: ltcBuffer } },
           { binding: 13, resource: { buffer: decalBuffer } },
           { binding: 11, resource: cascades.sampler },
+          ...(hdr ? [{ binding: 14, resource: { buffer: aerialBuffer } }] : []),
         ];
         return {
           blank: device.createBindGroup({ layout: depthLayoutMs, entries: [{ binding: 0, resource: blank.createView() }, ...shared, { binding: 7, resource: behindBlank.createView() }] }),
@@ -2576,6 +2605,7 @@ export class WebgpuSceneRenderer implements SceneRenderer {
         dfg: dfgBuffer,
         ltc: ltcBuffer,
         decals: decalBuffer,
+        aerial: aerialBuffer,
         atlas: atlasBlank,
         atlasBlank: true,
         probes: probesBlank,
@@ -3800,9 +3830,22 @@ export class WebgpuSceneRenderer implements SceneRenderer {
       frame.set(this.frameDepthView.viewProj, FRAME_CASCADES + 84);
       frame.set([this.frameDepthView.terms[0], this.frameDepthView.terms[1], 1, 0], FRAME_CASCADES + 100);
     }
+    if (this.hdr) frame.set(this.aerialFrame(draw), FRAME_AERIAL);
     this.device.queue.writeBuffer(buffers.params, 0, frame);
     this.uploadLocalShadows(local);
     return { ordered, globalCount, clusters };
+  }
+
+  /**
+   * The physical sky's aerial perspective for this draw's camera (F5a-2): its
+   * froxels built in compute ahead of the frame, and the terms the shader
+   * finds a fragment's with; all zero (off) without one.
+   */
+  private aerialFrame(draw: GpuSceneDraw): Float32Array {
+    const sky = draw.atmosphere ?? null;
+    const terms = packAerialFrame(sky, draw.view, draw.projection, this.aerialTerms);
+    if (sky && terms[3] === 1) (this.atmosphere ??= new GpuAtmosphere(this.device)).aerial(sky, aerialCamera(draw.view, draw.projection), this.depthGroups.aerial);
+    return terms;
   }
 
   /**
@@ -4235,6 +4278,7 @@ export class WebgpuSceneRenderer implements SceneRenderer {
     destroySafely(this.depthGroups.dfg);
     destroySafely(this.depthGroups.ltc);
     destroySafely(this.depthGroups.decals);
+    destroySafely(this.depthGroups.aerial);
     destroySafely(this.depthGroups.atlas);
     destroySafely(this.depthGroups.probes);
     destroySafely(this.blankTexture);
@@ -4243,6 +4287,7 @@ export class WebgpuSceneRenderer implements SceneRenderer {
     if (this.envTexture !== this.blankTexture) destroySafely(this.envTexture);
     if (this.probeTexture !== this.blankTexture) destroySafely(this.probeTexture);
     this.probeCapture?.dispose();
+    this.atmosphere?.dispose();
     destroySafely(this.blankProbeCubes);
     destroySafely(this.probeBuffer);
     destroySafely(this.ssaoTexture);

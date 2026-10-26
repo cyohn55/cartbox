@@ -2373,6 +2373,14 @@ interface PassTime {
  *   the horizon, which sits at v = ½), 32 steps a ray spaced quadratically.
  *   Rebuilt when the sun moves, so a time of day is a few hundred microseconds
  *   of compute.
+ * - **Aerial perspective** (16 × 16 × 32, F5a-2): Hillaire's froxel volume
+ *   over a camera's frustum, the air's in-scattered light and transmittance
+ *   out to each of 32 slices spaced quadratically to 32 km. Rebuilt for every
+ *   camera that draws (a column a thread), and read by the AAA scene shader
+ *   per fragment. It is kept in a uniform buffer as half floats, not a 3D
+ *   texture: the scene shader already binds the 16 sampled textures and 8
+ *   storage buffers a stage may have on every device, so the volume is
+ *   filtered by hand.
  *
  * The presenter (gpuPresent.ts) draws the AAA tier's backdrop from the sky
  * view per pixel, and the sun's disc over it, in the renderer's units of
@@ -4427,6 +4435,13 @@ interface SceneDraw {
      */
     readonly sunShadow?: SunShadow | null;
     /**
+     * A physical sky's air (AAA_FIDELITY_ROADMAP.md F5a-2): the medium and its
+     * sun above the air, whose aerial perspective the linear-light (AAA) WebGPU
+     * renderer lays over every surface, built for this draw's camera. The others
+     * ignore it.
+     */
+    readonly atmosphere?: AtmosphereSky | null;
+    /**
      * Distance fog for PBR (Modern-tier) materials, applied after tone mapping, or
      * omitted for none. Both backends fade by the fragment's eye depth. See
      * {@link SceneFog}.
@@ -5097,6 +5112,9 @@ declare class WebgpuSceneRenderer implements SceneRenderer {
     private frameDepthView;
     /** Whether this frame's ambient light takes GTAO (F3c), for the frame uniform. */
     private frameGtao;
+    /** The physical sky's LUTs (F5a-2), made when a draw first brings one, and the frame's aerial terms. */
+    private atmosphere;
+    private readonly aerialTerms;
     /**
      * GTAO's resources (F3c): its uniforms, the half-resolution history (two,
      * one read and one written, swapping each frame), and its pipelines.
@@ -5265,6 +5283,12 @@ declare class WebgpuSceneRenderer implements SceneRenderer {
      * write both and their params. An orthographic view (no cells) loops every light.
      */
     private clusterLights;
+    /**
+     * The physical sky's aerial perspective for this draw's camera (F5a-2): its
+     * froxels built in compute ahead of the frame, and the terms the shader
+     * finds a fragment's with; all zero (off) without one.
+     */
+    private aerialFrame;
     /**
      * Upload a probe grid (EP9) or volume (F3d-3) as a 3D texture, `slots` texels
      * a probe along x, once per grid, rebuilding group 1 to point at it.
@@ -7141,6 +7165,13 @@ declare class MeshOverlaySurface implements DisplaySurface {
      * moves the sun the metals reflect too.
      */
     private skyReflections;
+    /**
+     * A physical sky's time of day (F5a-2): the sun its light was last rendered
+     * for (null until the first frame takes the bake's), and the re-render under
+     * way for where the sun is now, a few rows a frame.
+     */
+    private skyLitFor;
+    private skyRelight;
     /** The scene's distant vistas, textured: re-drawn into the sky whenever it is re-baked. */
     private vistas;
     /**
@@ -7356,6 +7387,16 @@ declare class MeshOverlaySurface implements DisplaySurface {
      * reflections copy's glow — a small map, a few milliseconds.
      */
     private followSun;
+    /**
+     * A physical sky's time of day (F5a-2): when its sun (above the air) has
+     * turned past what {@link physicalSunKey} rounds away, or changed, render
+     * the atmosphere's light again for where it is, {@link SKY_RELIGHT_ROWS} a
+     * frame, then swap it in whole: the AAA tier's IBL is rebuilt from it and
+     * its reflection probes re-captured (their key follows the environment), and
+     * the other tiers' reflections copy is made from it. The backdrop already
+     * follows the sun each frame on the AAA tier.
+     */
+    private followPhysicalSun;
     /** Start finding the probes' bounce transfer (I17), when they were baked with their light recorded. */
     private startBounce;
     /**
