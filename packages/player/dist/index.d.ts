@@ -2531,6 +2531,11 @@ interface PresentFrame {
             readonly x: number;
             readonly y: number;
         } | null;
+        /**
+         * A linear frame's metering (F4c): a histogram of its light, its darkest and brightest tenth dropped,
+         * weighted over the whole frame, toward its centre, or on a spot there. Absent = the plain log-average.
+         */
+        readonly metering?: "average" | "centre" | "spot";
     } | null;
 }
 /** The newest measurements to arrive (see {@link PresentFrame.measure}); `seq` counts arrivals. */
@@ -4282,6 +4287,20 @@ interface SsgiFrame {
     readonly intensity: number;
 }
 
+/** What a frame's camera does (SceneDraw.camera). */
+interface CameraEffects {
+    /** Depth of field: the circle of confusion's scale (a share of the frame's width), the distance in focus, and the aperture's blades (0 round). */
+    readonly dof?: {
+        readonly scale: number;
+        readonly focus: number;
+        readonly blades: number;
+    } | null;
+    /** Motion blur: the share of each frame's motion the shutter takes in (times any strength). */
+    readonly motionBlur?: {
+        readonly fraction: number;
+    } | null;
+}
+
 /**
  * HDR reflection probes on the AAA tier (AAA_FIDELITY_ROADMAP.md F3b): each
  * probe captured on the GPU as a cube of the scene in linear light, and
@@ -4536,6 +4555,12 @@ interface SceneDraw {
         readonly width: number;
         readonly height: number;
     } | null;
+    /**
+     * The physical camera's depth of field and motion blur (AAA_FIDELITY_ROADMAP.md
+     * F4c; cameraEffects.ts), on the linear-light renderer's frames with a
+     * prepass. Absent = neither.
+     */
+    readonly camera?: CameraEffects | null;
     readonly reflectionTrace?: {
         readonly occluders: readonly Occluder[];
         readonly key: string;
@@ -5420,6 +5445,10 @@ declare class WebgpuSceneRenderer implements SceneRenderer {
      * upscaler.ts), then sharpened into the upscaled output the frame returns.
      */
     private addUpscale;
+    /** The physical camera's passes (F4c) and what they keep between frames: their uniforms, sampler and pipelines. */
+    private camera;
+    /** Depth of field, then motion blur (F4c; see cameraEffects.ts), on `target` (`size`), written back into it. */
+    private addCameraEffects;
     /**
      * The reactive mask (F4a): how much the see-through pass changed each pixel,
      * from the opaque scene copied before it against the frame after it.
@@ -7625,6 +7654,13 @@ declare class MeshOverlaySurface implements DisplaySurface {
     private withoutRefraction;
     /** The rig's tone map with the volumes' and the eye's stops applied (null without tone mapping). */
     private frameTonemap;
+    /**
+     * The eye adaptation a rig asks for: its own, or (with a physical camera in auto mode, F4c) the default's,
+     * the camera's compensation shifting the key; none when the camera's exposure is manual.
+     */
+    private eyeAdaptation;
+    /** The physical camera's depth of field and motion blur for the AAA renderer (F4c), with the post volumes' pull. */
+    private cameraEffects;
     /** Report the volumes' grade, bloom and fog to {@link onPost} when they change. */
     private reportPost;
     /** Report the sun to {@link onSun}: its place on screen and its eased visibility. */

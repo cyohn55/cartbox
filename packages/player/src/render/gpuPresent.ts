@@ -118,7 +118,15 @@ export interface PresentFrame {
   /** The post-process stack to finish the frame through (its uniforms, and the clock grain runs on), or null for none. */
   readonly post?: { readonly uniforms: PostFxUniforms; readonly time: number } | null;
   /** What to measure this frame: eye-adaptation luminance, and/or the sun's visibility at a point (pixels). */
-  readonly measure?: { readonly luminance: boolean; readonly sun: { readonly x: number; readonly y: number } | null } | null;
+  readonly measure?: {
+    readonly luminance: boolean;
+    readonly sun: { readonly x: number; readonly y: number } | null;
+    /**
+     * A linear frame's metering (F4c): a histogram of its light, its darkest and brightest tenth dropped,
+     * weighted over the whole frame, toward its centre, or on a spot there. Absent = the plain log-average.
+     */
+    readonly metering?: "average" | "centre" | "spot";
+  } | null;
 }
 
 /** The newest measurements to arrive (see {@link PresentFrame.measure}); `seq` counts arrivals. */
@@ -325,7 +333,9 @@ export function packMeasureUniforms(frame: PresentFrame, width: number, height: 
   const sun = m?.sun ?? null;
   out.set([sun?.x ?? 0, sun?.y ?? 0, Math.max(1.5, height * 0.012), sun ? 1 : 0], 8);
   // A linear frame measures its light as the tone map will expose it.
-  out.set([hdr ? 1 : 0, hdr ? (frame.tonemap?.exposure ?? 1) : 1, 0, 0], 12);
+  // z: the histogram's metering (F4c), 1 + its mode, or 0 for the log-average.
+  const metering = hdr && m?.metering ? 1 + ["average", "centre", "spot"].indexOf(m.metering) : 0;
+  out.set([hdr ? 1 : 0, hdr ? (frame.tonemap?.exposure ?? 1) : 1, metering, 0], 12);
   return out;
 }
 
@@ -789,6 +799,10 @@ struct Measure {
 @group(0) @binding(3) var<storage, read_write> result: array<f32, 4>;
 var<workgroup> sums: array<f32, 256>;
 var<workgroup> counts: array<f32, 256>;
+// The histogram (F4c): 64 bins of log2 luminance from −12 to +8, each a weighted count (16ths).
+var<workgroup> bins: array<atomic<u32>, 64>;
+const HIST_LO = -12.0;
+const HIST_SPAN = 20.0;
 ${SRGB_WGSL}
 fn linear(c: f32) -> f32 {
   let b = round(c * 255.0) / 255.0;
@@ -825,6 +839,9 @@ fn openSky(x: f32, y: f32) -> f32 {
   let gh = u32(ceil((u.size.y - first) / step));
   var sum = 0.0;
   var count = 0.0;
+  let metering = i32(u.hdr.z + 0.5);
+  if (tid < 64u) { atomicStore(&bins[tid], 0u); }
+  workgroupBarrier();
   if (wantLuminance) {
     for (var i = tid; i < gw * gh; i = i + 256u) {
       let x = first + f32(i % gw) * step;
@@ -834,6 +851,17 @@ fn openSky(x: f32, y: f32) -> f32 {
       var l = 0.2126 * linear(c.r) + 0.7152 * linear(c.g) + 0.0722 * linear(c.b);
       // Linear light (F0b): its luminance as exposed, before the tone map.
       if (u.hdr.x > 0.5) { l = dot(c.rgb, vec3f(0.2126, 0.7152, 0.0722)) * u.hdr.y; }
+      if (metering > 0) {
+        // Weighted by the metering mode: everywhere alike, toward the centre, or a spot there.
+        let off = (vec2f(x, y) - u.size.xy * 0.5) / (0.5 * min(u.size.x, u.size.y));
+        let r2 = dot(off, off);
+        var w = 1.0;
+        if (metering == 2) { w = 1.0 + 3.0 * exp(-r2 / 0.18); }
+        if (metering == 3) { w = select(0.0, 1.0, r2 < 0.04); }
+        let bin = u32(clamp((log2(max(l, 1e-6)) - HIST_LO) / HIST_SPAN * 64.0, 0.0, 63.0));
+        atomicAdd(&bins[bin], u32(round(w * 16.0)));
+        continue;
+      }
       sum = sum + log(max(1e-4, l));
       count = count + 1.0;
     }
@@ -851,6 +879,26 @@ fn openSky(x: f32, y: f32) -> f32 {
   if (tid == 0u) {
     result[0] = sums[0];
     result[1] = counts[0];
+    if (metering > 0) {
+      // The histogram's mean log2 luminance between its darkest and brightest tenth, as a natural log over one.
+      var total = 0.0;
+      for (var b = 0u; b < 64u; b = b + 1u) { total = total + f32(atomicLoad(&bins[b])); }
+      let lo = total * 0.1;
+      let hi = total * 0.9;
+      var seen = 0.0;
+      var acc = 0.0;
+      var kept = 0.0;
+      for (var b = 0u; b < 64u; b = b + 1u) {
+        let n = f32(atomicLoad(&bins[b]));
+        // The share of this bin between the two cuts.
+        let take = max(0.0, min(seen + n, hi) - max(seen, lo));
+        acc = acc + take * (HIST_LO + (f32(b) + 0.5) / 64.0 * HIST_SPAN);
+        kept = kept + take;
+        seen = seen + n;
+      }
+      result[0] = select(0.0, acc / kept * 0.69314718, kept > 0.0);
+      result[1] = select(0.0, 1.0, kept > 0.0);
+    }
     var open = 0.0;
     var taps = 0.0;
     if (u.sun.w > 0.5) {

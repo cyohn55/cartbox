@@ -73,6 +73,12 @@ import {
   sceneLightingTonemap,
   adaptExposure,
   blendPostVolumes,
+  cameraExposure,
+  cocTerms,
+  resolvePhysicalCamera,
+  shutterFraction,
+  DEFAULT_AUTO_EXPOSURE,
+  type AutoExposure,
   frameLuminance,
   postVolumeReach,
   withDescendants,
@@ -1158,9 +1164,10 @@ export class MeshOverlaySurface implements DisplaySurface {
     this.stepBounce(lighting);
     this.followSun(lighting);
     // Post volumes round the camera (P6): exposure goes to the tone map, the rest to the post stack.
-    const post = lighting?.postVolumes && this.eye ? blendPostVolumes(lighting.postVolumes, this.eye) : NO_POST;
+    const lens = lighting?.camera ? resolvePhysicalCamera(lighting.camera) : null;
+    const post = lighting?.postVolumes && this.eye ? blendPostVolumes(lighting.postVolumes, this.eye, lens ? { aperture: lens.aperture, focusDistance: lens.focusDistance, motionBlur: 1 } : undefined) : NO_POST;
     if (this.onPost) this.reportPost(lighting, post);
-    if (!lighting?.autoExposure) this.adapted = 0;
+    if (!(lighting && this.eyeAdaptation(lighting))) this.adapted = 0;
     const tonemap = lighting ? this.frameTonemap(lighting, post) : null;
     let mark = profiler ? performance.now() : 0;
     // The AAA tier draws the sun's shadow in GPU cascades from the casters (F2a); the others take a CPU map.
@@ -1294,9 +1301,9 @@ export class MeshOverlaySurface implements DisplaySurface {
     if (this.onSun) this.reportSun(out, width, height, camera.view, camera.projection, skyBackdrop ? lighting?.sky ?? null : null);
     // Eye adaptation: every few frames, ease toward the exposure that brings
     // what the camera sees to mid-grey (the volumes' own stops taken back out).
-    if (lighting?.autoExposure && tonemap && this.frame % ADAPT_EVERY === 0) {
+    if (lighting && this.eyeAdaptation(lighting) && tonemap && this.frame % ADAPT_EVERY === 0) {
       const measured = frameLuminance(out, width, height) / 2 ** post.exposure;
-      this.adapted = adaptExposure(this.adapted, measured, lighting.autoExposure, ADAPT_EVERY / 60);
+      this.adapted = adaptExposure(this.adapted, measured, this.eyeAdaptation(lighting)!, ADAPT_EVERY / 60);
     }
     // Sun shafts: open sky near the sun streaks through the gaps in the scene.
     // Drawn before the held weapon, which sits in front of the light.
@@ -1428,6 +1435,8 @@ export class MeshOverlaySurface implements DisplaySurface {
       ...(job.decals ? { decals: job.decals } : {}),
       ...(atmosphere ? { atmosphere } : {}),
       ...(gi ? { dynamicGi: gi.draw } : {}),
+      // The physical camera's depth of field and motion blur (F4c).
+      ...(lighting && this.renderer.sunCascades === true && lighting.camera ? { camera: this.cameraEffects(lighting, job.post) } : {}),
       // The sun's virtual shadow maps (F2b) at High and Epic, over the cascades.
       ...(this.renderer.sunCascades === true && this.quality.virtualShadows === true && this.options.prepass === true && job.sunShadow ? { virtualShadows: { poolSize: VSM_POOL_SIZE } } : {}),
       // Epic's reflections through the still scene's BVH (F3f), on the AAA tier with reflections.
@@ -1463,7 +1472,9 @@ export class MeshOverlaySurface implements DisplaySurface {
       // A draw that says it showed nothing (false) leaves the layer out.
       if (this.holo(this.holoLayer, this.width, this.height, time, true) !== false) holo = this.holoLayer;
     }
-    const adapting = Boolean(lighting?.autoExposure && job.tonemap);
+    const adapting = Boolean(lighting && this.eyeAdaptation(lighting) && job.tonemap);
+    // The physical camera's metering (F4c), on the AAA tier's linear frame.
+    const metering = lighting?.camera && this.renderer.sunCascades === true ? resolvePhysicalCamera(lighting.camera).metering : null;
     const flare = this.onSun !== null && sky !== null;
     gpu.present({
       base: sky ? { kind: "sky", sky } : this.hud ? { kind: "colour", rgba: HUD_SKY } : { kind: "frame", rgba },
@@ -1476,7 +1487,7 @@ export class MeshOverlaySurface implements DisplaySurface {
       holo,
       // A linear frame is tone-mapped as it is presented (F0b); a byte-space one already was.
       tonemap: job.tonemap,
-      measure: adapting || flare ? { luminance: adapting, sun: flare ? sun : null } : null,
+      measure: adapting || flare ? { luminance: adapting, sun: flare ? sun : null, ...(metering ? { metering } : {}) } : null,
     });
     this.takeGpuMeasurements(gpu.stats, lighting, job.post, adapting, sky !== null, sun && { x: sun.x / output.width, y: sun.y / output.height });
   }
@@ -1552,10 +1563,11 @@ export class MeshOverlaySurface implements DisplaySurface {
         this.onSun({ x: this.sunAt.x, y: this.sunAt.y, visible: this.sunSeen });
       }
     }
-    if (adapting && lighting?.autoExposure && stats.luminance !== null && stats.luminanceSeq !== this.gpuSeen.luminanceSeq) {
+    const eye = lighting ? this.eyeAdaptation(lighting) : null;
+    if (adapting && eye && stats.luminance !== null && stats.luminanceSeq !== this.gpuSeen.luminanceSeq) {
       // Each new reading steps the adaptation by the frames since the last.
       const frames = Math.max(1, this.frame - this.gpuSeen.adaptedAt);
-      this.adapted = adaptExposure(this.adapted, stats.luminance / 2 ** post.exposure, lighting.autoExposure, frames / 60);
+      this.adapted = adaptExposure(this.adapted, stats.luminance / 2 ** post.exposure, eye, frames / 60);
       this.gpuSeen = { luminanceSeq: stats.luminanceSeq, adaptedAt: this.frame };
     }
   }
@@ -1591,8 +1603,35 @@ export class MeshOverlaySurface implements DisplaySurface {
   /** The rig's tone map with the volumes' and the eye's stops applied (null without tone mapping). */
   private frameTonemap(lighting: SceneLighting, post: PostBlend): ToneMap | null {
     const base = sceneLightingTonemap(lighting);
+    // A physical camera in manual mode (F4c) sets the exposure from its aperture, shutter and ISO.
+    const lens = lighting.camera ? resolvePhysicalCamera(lighting.camera) : null;
+    if (base && lens?.exposure === "manual") return { ...base, exposure: cameraExposure(lens) * 2 ** (post.exposure + lens.compensation) };
     const stops = post.exposure + this.adapted;
     return base && stops !== 0 ? { ...base, exposure: base.exposure * 2 ** stops } : base;
+  }
+
+  /**
+   * The eye adaptation a rig asks for: its own, or (with a physical camera in auto mode, F4c) the default's,
+   * the camera's compensation shifting the key; none when the camera's exposure is manual.
+   */
+  private eyeAdaptation(lighting: SceneLighting): AutoExposure | null {
+    const lens = lighting.camera ? resolvePhysicalCamera(lighting.camera) : null;
+    if (lens?.exposure === "manual") return null;
+    const base = lighting.autoExposure ?? (lens ? DEFAULT_AUTO_EXPOSURE : null);
+    return base && lens && lens.compensation !== 0 ? { ...base, key: base.key * 2 ** lens.compensation } : base;
+  }
+
+  /** The physical camera's depth of field and motion blur for the AAA renderer (F4c), with the post volumes' pull. */
+  private cameraEffects(lighting: SceneLighting, post: PostBlend): GpuSceneDraw["camera"] {
+    const lens = lighting.camera ? resolvePhysicalCamera(lighting.camera) : null;
+    if (!lens || (!lens.depthOfField && !lens.motionBlur)) return null;
+    const aperture = post.aperture ?? lens.aperture;
+    const focusDistance = post.focusDistance ?? lens.focusDistance;
+    const terms = cocTerms({ ...lens, aperture, focusDistance });
+    return {
+      ...(lens.depthOfField ? { dof: { scale: terms.scale, focus: terms.focus, blades: lens.blades } } : {}),
+      ...(lens.motionBlur ? { motionBlur: { fraction: shutterFraction(lens.shutter) * (post.motionBlur ?? 1) } } : {}),
+    };
   }
 
   /** Report the volumes' grade, bloom and fog to {@link onPost} when they change. */

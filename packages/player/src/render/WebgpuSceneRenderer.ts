@@ -176,6 +176,7 @@ import {
   worldSphere,
   type PageDraw,
 } from "./virtualShadows.js";
+import { CAMERA_UNIFORM_FLOATS, DOF_GATHER_WGSL, MOTION_NEIGHBOURS_WGSL, MOTION_TILE, MOTION_TILES_WGSL, cameraUniforms, dofCompositeWgsl, dofPrefilterWgsl, motionGatherWgsl, type CameraEffects } from "./cameraEffects.js";
 import { UPSCALE_SHARPEN_WGSL, UPSCALE_UNIFORM_FLOATS, upscaleJitterPhases, upscaleShaderWgsl, upscaleUniforms } from "./upscaler.js";
 import { SSGI_UNIFORM_FLOATS, ssgiResolveWgsl, ssgiTemporalWgsl, ssgiTraceWgsl, ssgiUniforms, type SsgiFrame } from "./ssgi.js";
 import { AERIAL_FRAME_FLOATS, AERIAL_LUT_BYTES, AERIAL_SAMPLE_WGSL, GpuAtmosphere, packAerialFrame } from "./atmosphere.js";
@@ -3928,8 +3929,13 @@ export class WebgpuSceneRenderer implements SceneRenderer {
     // On the AAA tier, with the prepass's G-buffer, reflections trace the Hi-Z chain (F3f); elsewhere I3's march.
     if (reflections && this.hdr && gbuffer && velocity) this.addHizReflections(graph, colour, depth, gbuffer, velocity, rays, draw, temporal ? temporal.projection : draw.projection, msaa !== null);
     else if (reflections) this.addReflections(graph, reflections, colour, depth, rays, temporal ? temporal.projection : draw.projection, msaa !== null);
-    if (temporal && display && velocity) this.addUpscale(graph, temporal, colour, depth, velocity, reactive, display, msaa !== null);
+    let shown = colour;
+    if (temporal && display && velocity) shown = this.addUpscale(graph, temporal, colour, depth, velocity, reactive, display, msaa !== null);
     else if (temporal) this.addTemporal(graph, temporal.uniforms, colour, depth, msaa !== null, hdrTaa ? velocity : null, reactive);
+    // The physical camera's depth of field and motion blur (F4c), on the resolved frame.
+    if (this.hdr && draw.camera && this.frameDepthView && velocity && (draw.camera.dof || draw.camera.motionBlur)) {
+      this.addCameraEffects(graph, shown, display ?? { width: this.width, height: this.height }, depth, velocity, draw.camera, this.frameDepthView.terms, msaa !== null);
+    }
 
     const slot = readback ? this.readback.find((entry) => !entry.busy) : undefined;
     if (slot) {
@@ -4268,7 +4274,7 @@ export class WebgpuSceneRenderer implements SceneRenderer {
    * Temporal upscaling (F4b): the render-sized frame resolved into the TAA history at the display's size (see
    * upscaler.ts), then sharpened into the upscaled output the frame returns.
    */
-  private addUpscale(graph: FrameGraph, temporal: { readonly uniforms: Float32Array; readonly jitter: readonly [number, number] }, colour: FrameResource, depth: FrameResource, velocity: FrameResource, reactive: FrameResource | null, display: { width: number; height: number }, multisampled: boolean): void {
+  private addUpscale(graph: FrameGraph, temporal: { readonly uniforms: Float32Array; readonly jitter: readonly [number, number] }, colour: FrameResource, depth: FrameResource, velocity: FrameResource, reactive: FrameResource | null, display: { width: number; height: number }, multisampled: boolean): FrameResource {
     const device = this.device;
     const size = { width: display.width, height: display.height };
     if (this.taa && (this.taa.history[0].width !== size.width || this.taa.history[0].height !== size.height)) {
@@ -4292,12 +4298,12 @@ export class WebgpuSceneRenderer implements SceneRenderer {
     }
     if (this.upscaler && (this.upscaler.width !== size.width || this.upscaler.height !== size.height)) {
       destroySafely(this.upscaler.output);
-      this.upscaler.output = device.createTexture({ size, format: this.colourFormat, usage: 0x10 | 0x04 | 0x01 });
+      this.upscaler.output = device.createTexture({ size, format: this.colourFormat, usage: 0x10 | 0x04 | 0x01 | 0x02 });
       this.upscaler.width = size.width;
       this.upscaler.height = size.height;
     }
     this.upscaler ??= {
-      output: device.createTexture({ size, format: this.colourFormat, usage: 0x10 | 0x04 | 0x01 }), // RENDER_ATTACHMENT | TEXTURE_BINDING | COPY_SRC
+      output: device.createTexture({ size, format: this.colourFormat, usage: 0x10 | 0x04 | 0x01 | 0x02 }), // RENDER_ATTACHMENT | TEXTURE_BINDING | COPY_SRC | COPY_DST (F4c lands in it)
       width: size.width,
       height: size.height,
       uniforms: device.createBuffer({ size: UPSCALE_UNIFORM_FLOATS * 4, usage: 0x40 | 0x08 }),
@@ -4354,6 +4360,134 @@ export class WebgpuSceneRenderer implements SceneRenderer {
         ]);
     });
     this.frameOutput = ups.output;
+    return output;
+  }
+
+  /** The physical camera's passes (F4c) and what they keep between frames: their uniforms, sampler and pipelines. */
+  private camera: { uniforms: any; data: Float32Array<ArrayBuffer>; sampler: any; frame: number; pipelines: Map<string, any> } | null = null;
+
+  /** Depth of field, then motion blur (F4c; see cameraEffects.ts), on `target` (`size`), written back into it. */
+  private addCameraEffects(graph: FrameGraph, target: FrameResource, size: { width: number; height: number }, depth: FrameResource, velocity: FrameResource, effects: CameraEffects, terms: readonly [number, number], multisampled: boolean): void {
+    const device = this.device;
+    this.camera ??= {
+      uniforms: device.createBuffer({ size: CAMERA_UNIFORM_FLOATS * 4, usage: 0x40 | 0x08 }),
+      data: new Float32Array(CAMERA_UNIFORM_FLOATS),
+      sampler: device.createSampler({ magFilter: "linear", minFilter: "linear", addressModeU: "clamp-to-edge", addressModeV: "clamp-to-edge" }),
+      frame: 0,
+      pipelines: new Map(),
+    };
+    const cam = this.camera;
+    const k = multisampled ? "ms" : "";
+    const pipeline = (name: string, code: () => string, entry: string, formats: string[]) => {
+      let made = cam.pipelines.get(name + k);
+      if (!made) {
+        const module = device.createShaderModule({ code: code() });
+        made = device.createRenderPipeline({ layout: "auto", vertex: { module, entryPoint: "vs" }, fragment: { module, entryPoint: entry, targets: formats.map((format) => ({ format })) }, primitive: { topology: "triangle-list" } });
+        cam.pipelines.set(name + k, made);
+      }
+      return made;
+    };
+    device.queue.writeBuffer(cam.uniforms, 0, cameraUniforms(effects, terms, size, { width: this.width, height: this.height }, cam.frame, cam.data));
+    cam.frame += 1;
+    const draw = (ctx: PassContext, pipe: any, targets: FrameResource[], entries: { binding: number; resource: any }[]) => {
+      const encoded = ctx.encoder.beginRenderPass({
+        colorAttachments: targets.map((t) => ({ view: ctx.texture(t).createView(), clearValue: { r: 0, g: 0, b: 0, a: 0 }, loadOp: "clear", storeOp: "store" })),
+        ...ctx.timing,
+      });
+      encoded.setPipeline(pipe);
+      encoded.setBindGroup(0, device.createBindGroup({ layout: pipe.getBindGroupLayout(0), entries: [{ binding: 0, resource: { buffer: cam.uniforms } }, ...entries] }));
+      encoded.draw(3);
+      encoded.end();
+    };
+    const copyBack = (from: FrameResource) =>
+      graph.addPass(`${from.name}.copy`, "transfer", (pass) => {
+        pass.read(from, "copySrc");
+        pass.write(target, "copyDst");
+        return (ctx) => ctx.encoder.copyTextureToTexture({ texture: ctx.texture(from) }, { texture: ctx.texture(target) }, size);
+      });
+    const half = { width: Math.max(1, Math.ceil(size.width / 2)), height: Math.max(1, Math.ceil(size.height / 2)) };
+    if (effects.dof) {
+      const halfColour = graph.createTexture("dof.colour", { format: "rgba16float", ...half });
+      const halfCoc = graph.createTexture("dof.coc", { format: "r16float", ...half });
+      const blurred = graph.createTexture("dof.blurred", { format: "rgba16float", ...half });
+      const near = graph.createTexture("dof.near", { format: "r16float", ...half });
+      const out = graph.createTexture("dof.out", { format: this.colourFormat, ...size });
+      const prefilter = pipeline("dof.prefilter", () => dofPrefilterWgsl(multisampled), "prefilter", ["rgba16float", "r16float"]);
+      const gather = pipeline("dof.gather", () => DOF_GATHER_WGSL, "gather", ["rgba16float", "r16float"]);
+      const composite = pipeline("dof.composite", () => dofCompositeWgsl(multisampled), "composite", [this.colourFormat]);
+      graph.addPass("dof.prefilter", "render", (pass) => {
+        pass.read(target);
+        pass.read(depth);
+        pass.write(halfColour);
+        pass.write(halfCoc);
+        return (ctx) => draw(ctx, prefilter, [halfColour, halfCoc], [{ binding: 1, resource: ctx.texture(depth).createView() }, { binding: 2, resource: ctx.texture(target).createView() }]);
+      });
+      graph.addPass("dof.gather", "render", (pass) => {
+        pass.read(halfColour);
+        pass.read(halfCoc);
+        pass.write(blurred);
+        pass.write(near);
+        return (ctx) => draw(ctx, gather, [blurred, near], [{ binding: 1, resource: ctx.texture(halfColour).createView() }, { binding: 2, resource: ctx.texture(halfCoc).createView() }]);
+      });
+      graph.addPass("dof.composite", "render", (pass) => {
+        pass.read(target);
+        pass.read(depth);
+        pass.read(blurred);
+        pass.read(near);
+        pass.read(halfCoc);
+        pass.write(out);
+        return (ctx) =>
+          draw(ctx, composite, [out], [
+            { binding: 1, resource: ctx.texture(depth).createView() },
+            { binding: 2, resource: ctx.texture(target).createView() },
+            { binding: 3, resource: ctx.texture(blurred).createView() },
+            { binding: 4, resource: ctx.texture(near).createView() },
+            { binding: 5, resource: cam.sampler },
+            { binding: 6, resource: ctx.texture(halfCoc).createView() },
+          ]);
+      });
+      copyBack(out);
+    }
+    if (effects.motionBlur && effects.motionBlur.fraction > 0) {
+      const tileSize = { width: Math.max(1, Math.ceil(size.width / MOTION_TILE)), height: Math.max(1, Math.ceil(size.height / MOTION_TILE)) };
+      const tiles = graph.createTexture("motion.tiles", { format: "rg16float", ...tileSize });
+      const neighbours = graph.createTexture("motion.neighbours", { format: "rg16float", ...tileSize });
+      const out = graph.createTexture("motion.out", { format: this.colourFormat, ...size });
+      const tilePipe = pipeline("motion.tiles", () => MOTION_TILES_WGSL, "tiles", ["rg16float"]);
+      const neighbourPipe = pipeline("motion.neighbours", () => MOTION_NEIGHBOURS_WGSL, "neighbours", ["rg16float"]);
+      const gatherPipe = pipeline("motion.gather", () => motionGatherWgsl(multisampled), "gather", [this.colourFormat]);
+      graph.addPass("motion.tiles", "render", (pass) => {
+        pass.read(velocity);
+        pass.write(tiles);
+        return (ctx) => draw(ctx, tilePipe, [tiles], [{ binding: 1, resource: ctx.texture(velocity).createView() }]);
+      });
+      graph.addPass("motion.neighbours", "render", (pass) => {
+        pass.read(tiles);
+        pass.write(neighbours);
+        return (ctx) => {
+          const encoded = ctx.encoder.beginRenderPass({ colorAttachments: [{ view: ctx.texture(neighbours).createView(), clearValue: { r: 0, g: 0, b: 0, a: 0 }, loadOp: "clear", storeOp: "store" }], ...ctx.timing });
+          encoded.setPipeline(neighbourPipe);
+          encoded.setBindGroup(0, device.createBindGroup({ layout: neighbourPipe.getBindGroupLayout(0), entries: [{ binding: 0, resource: ctx.texture(tiles).createView() }] }));
+          encoded.draw(3);
+          encoded.end();
+        };
+      });
+      graph.addPass("motion.gather", "render", (pass) => {
+        pass.read(target);
+        pass.read(depth);
+        pass.read(velocity);
+        pass.read(neighbours);
+        pass.write(out);
+        return (ctx) =>
+          draw(ctx, gatherPipe, [out], [
+            { binding: 1, resource: ctx.texture(depth).createView() },
+            { binding: 2, resource: ctx.texture(target).createView() },
+            { binding: 3, resource: ctx.texture(velocity).createView() },
+            { binding: 4, resource: ctx.texture(neighbours).createView() },
+          ]);
+      });
+      copyBack(out);
+    }
   }
 
   /**

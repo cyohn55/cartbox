@@ -21,6 +21,7 @@
  */
 
 import type { SsgiFrame } from "./ssgi.js";
+import type { CameraEffects } from "./cameraEffects.js";
 import {
   DEFAULT_RASTER_STYLE,
   applyLods,
@@ -231,6 +232,12 @@ export interface SceneDraw {
    * of that size, reconstructed over the frames. Absent = shown as rendered.
    */
   readonly upscale?: { readonly width: number; readonly height: number } | null;
+  /**
+   * The physical camera's depth of field and motion blur (AAA_FIDELITY_ROADMAP.md
+   * F4c; cameraEffects.ts), on the linear-light renderer's frames with a
+   * prepass. Absent = neither.
+   */
+  readonly camera?: CameraEffects | null;
   readonly reflectionTrace?: { readonly occluders: readonly Occluder[]; readonly key: string } | null;
   /**
    * A physical sky's air (AAA_FIDELITY_ROADMAP.md F5a-2): the medium and its

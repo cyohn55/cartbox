@@ -11394,6 +11394,11 @@ import {
   sceneLightingTonemap,
   adaptExposure,
   blendPostVolumes,
+  cameraExposure,
+  cocTerms,
+  resolvePhysicalCamera,
+  shutterFraction,
+  DEFAULT_AUTO_EXPOSURE,
   frameLuminance,
   postVolumeReach,
   withDescendants,
@@ -12620,9 +12625,10 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
     const lighting = this.frameLighting();
     this.stepBounce(lighting);
     this.followSun(lighting);
-    const post = lighting?.postVolumes && this.eye ? blendPostVolumes(lighting.postVolumes, this.eye) : NO_POST;
+    const lens = lighting?.camera ? resolvePhysicalCamera(lighting.camera) : null;
+    const post = lighting?.postVolumes && this.eye ? blendPostVolumes(lighting.postVolumes, this.eye, lens ? { aperture: lens.aperture, focusDistance: lens.focusDistance, motionBlur: 1 } : void 0) : NO_POST;
     if (this.onPost) this.reportPost(lighting, post);
-    if (!lighting?.autoExposure) this.adapted = 0;
+    if (!(lighting && this.eyeAdaptation(lighting))) this.adapted = 0;
     const tonemap = lighting ? this.frameTonemap(lighting, post) : null;
     let mark = profiler ? performance.now() : 0;
     const cascaded = gpu !== null && this.renderer.sunCascades === true;
@@ -12739,9 +12745,9 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
       time: this.frame / 60
     });
     if (this.onSun) this.reportSun(out, width, height, camera.view, camera.projection, skyBackdrop ? lighting?.sky ?? null : null);
-    if (lighting?.autoExposure && tonemap && this.frame % ADAPT_EVERY === 0) {
+    if (lighting && this.eyeAdaptation(lighting) && tonemap && this.frame % ADAPT_EVERY === 0) {
       const measured = frameLuminance(out, width, height) / 2 ** post.exposure;
-      this.adapted = adaptExposure(this.adapted, measured, lighting.autoExposure, ADAPT_EVERY / 60);
+      this.adapted = adaptExposure(this.adapted, measured, this.eyeAdaptation(lighting), ADAPT_EVERY / 60);
     }
     if (skyBackdrop && lighting?.shafts && lighting.sky && this.skyCache) {
       const sun = sunScreenPosition(lighting.sky.sunDirection, camera.view, camera.projection, width, height);
@@ -12832,6 +12838,8 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
       ...job.decals ? { decals: job.decals } : {},
       ...atmosphere ? { atmosphere } : {},
       ...gi ? { dynamicGi: gi.draw } : {},
+      // The physical camera's depth of field and motion blur (F4c).
+      ...lighting && this.renderer.sunCascades === true && lighting.camera ? { camera: this.cameraEffects(lighting, job.post) } : {},
       // The sun's virtual shadow maps (F2b) at High and Epic, over the cascades.
       ...this.renderer.sunCascades === true && this.quality.virtualShadows === true && this.options.prepass === true && job.sunShadow ? { virtualShadows: { poolSize: VSM_POOL_SIZE } } : {},
       // Epic's reflections through the still scene's BVH (F3f), on the AAA tier with reflections.
@@ -12860,7 +12868,8 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
       this.holoLayer.fill(0);
       if (this.holo(this.holoLayer, this.width, this.height, time, true) !== false) holo = this.holoLayer;
     }
-    const adapting = Boolean(lighting?.autoExposure && job.tonemap);
+    const adapting = Boolean(lighting && this.eyeAdaptation(lighting) && job.tonemap);
+    const metering = lighting?.camera && this.renderer.sunCascades === true ? resolvePhysicalCamera(lighting.camera).metering : null;
     const flare = this.onSun !== null && sky !== null;
     gpu.present({
       base: sky ? { kind: "sky", sky } : this.hud ? { kind: "colour", rgba: HUD_SKY } : { kind: "frame", rgba },
@@ -12873,7 +12882,7 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
       holo,
       // A linear frame is tone-mapped as it is presented (F0b); a byte-space one already was.
       tonemap: job.tonemap,
-      measure: adapting || flare ? { luminance: adapting, sun: flare ? sun : null } : null
+      measure: adapting || flare ? { luminance: adapting, sun: flare ? sun : null, ...metering ? { metering } : {} } : null
     });
     this.takeGpuMeasurements(gpu.stats, lighting, job.post, adapting, sky !== null, sun && { x: sun.x / output.width, y: sun.y / output.height });
   }
@@ -12940,9 +12949,10 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
         this.onSun({ x: this.sunAt.x, y: this.sunAt.y, visible: this.sunSeen });
       }
     }
-    if (adapting && lighting?.autoExposure && stats2.luminance !== null && stats2.luminanceSeq !== this.gpuSeen.luminanceSeq) {
+    const eye = lighting ? this.eyeAdaptation(lighting) : null;
+    if (adapting && eye && stats2.luminance !== null && stats2.luminanceSeq !== this.gpuSeen.luminanceSeq) {
       const frames = Math.max(1, this.frame - this.gpuSeen.adaptedAt);
-      this.adapted = adaptExposure(this.adapted, stats2.luminance / 2 ** post.exposure, lighting.autoExposure, frames / 60);
+      this.adapted = adaptExposure(this.adapted, stats2.luminance / 2 ** post.exposure, eye, frames / 60);
       this.gpuSeen = { luminanceSeq: stats2.luminanceSeq, adaptedAt: this.frame };
     }
   }
@@ -12972,8 +12982,32 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
   /** The rig's tone map with the volumes' and the eye's stops applied (null without tone mapping). */
   frameTonemap(lighting, post) {
     const base = sceneLightingTonemap(lighting);
+    const lens = lighting.camera ? resolvePhysicalCamera(lighting.camera) : null;
+    if (base && lens?.exposure === "manual") return { ...base, exposure: cameraExposure(lens) * 2 ** (post.exposure + lens.compensation) };
     const stops = post.exposure + this.adapted;
     return base && stops !== 0 ? { ...base, exposure: base.exposure * 2 ** stops } : base;
+  }
+  /**
+   * The eye adaptation a rig asks for: its own, or (with a physical camera in auto mode, F4c) the default's,
+   * the camera's compensation shifting the key; none when the camera's exposure is manual.
+   */
+  eyeAdaptation(lighting) {
+    const lens = lighting.camera ? resolvePhysicalCamera(lighting.camera) : null;
+    if (lens?.exposure === "manual") return null;
+    const base = lighting.autoExposure ?? (lens ? DEFAULT_AUTO_EXPOSURE : null);
+    return base && lens && lens.compensation !== 0 ? { ...base, key: base.key * 2 ** lens.compensation } : base;
+  }
+  /** The physical camera's depth of field and motion blur for the AAA renderer (F4c), with the post volumes' pull. */
+  cameraEffects(lighting, post) {
+    const lens = lighting.camera ? resolvePhysicalCamera(lighting.camera) : null;
+    if (!lens || !lens.depthOfField && !lens.motionBlur) return null;
+    const aperture = post.aperture ?? lens.aperture;
+    const focusDistance = post.focusDistance ?? lens.focusDistance;
+    const terms = cocTerms({ ...lens, aperture, focusDistance });
+    return {
+      ...lens.depthOfField ? { dof: { scale: terms.scale, focus: terms.focus, blades: lens.blades } } : {},
+      ...lens.motionBlur ? { motionBlur: { fraction: shutterFraction(lens.shutter) * (post.motionBlur ?? 1) } } : {}
+    };
   }
   /** Report the volumes' grade, bloom and fog to {@link onPost} when they change. */
   reportPost(lighting, post) {
@@ -20164,6 +20198,293 @@ function pageTouches(page, basis, sphere) {
   return lx + r >= page.gx * size && lx - r <= (page.gx + 1) * size && ly + r >= page.gy * size && ly - r <= (page.gy + 1) * size;
 }
 
+// src/render/cameraEffects.ts
+var DOF_MAX_COC = 0.025;
+var MOTION_TILE = 16;
+var MOTION_MAX_PIXELS = 48;
+var CAMERA_UNIFORM_FLOATS = 16;
+function cameraUniforms(effects, depthTerms, frame, render, index, out = new Float32Array(CAMERA_UNIFORM_FLOATS)) {
+  const dof = effects.dof ?? null;
+  out.set([dof?.scale ?? 0, dof?.focus ?? 1, Math.max(1, DOF_MAX_COC * frame.width), dof?.blades ?? 0], 0);
+  out.set([depthTerms[0], depthTerms[1], frame.width, frame.height], 4);
+  out.set([effects.motionBlur?.fraction ?? 0, MOTION_TILE, MOTION_MAX_PIXELS, index % 1024], 8);
+  out.set([render.width, render.height, 0, 0], 12);
+  return out;
+}
+var SHARED4 = (multisampled) => (
+  /* wgsl */
+  `
+struct Camera { dof: vec4<f32>, frame: vec4<f32>, motion: vec4<f32>, render: vec4<f32> };
+@group(0) @binding(0) var<uniform> cam: Camera;
+@group(0) @binding(1) var depth: ${multisampled ? "texture_depth_multisampled_2d" : "texture_depth_2d"};
+
+@vertex
+fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4<f32> {
+  let p = vec2<f32>(f32((i << 1u) & 2u), f32(i & 2u));
+  return vec4<f32>(p * 2.0 - 1.0, 0.0, 1.0);
+}
+
+// The render's pixel under a point of the frame (in the frame's pixels).
+fn renderPixel(q: vec2<f32>) -> vec2<i32> {
+  let r = vec2<i32>(cam.render.xy);
+  return clamp(vec2<i32>(q / cam.frame.zw * cam.render.xy), vec2<i32>(0), r - 1);
+}
+// The distance to what the frame shows at a point (in the frame's pixels); far for nothing drawn.
+fn distanceAt(q: vec2<f32>) -> f32 {
+  let z = textureLoad(depth, renderPixel(q), 0);
+  if (z >= 1.0) { return 1e6; }
+  return cam.frame.y / (z + cam.frame.x);
+}
+// The circle of confusion there, in the frame's pixels: negative in front of the focus.
+fn cocAt(q: vec2<f32>) -> f32 {
+  let coc = cam.dof.x * (1.0 - cam.dof.y / max(distanceAt(q), 1e-4)) * cam.frame.z;
+  return clamp(coc, -cam.dof.z, cam.dof.z);
+}
+`
+);
+function dofPrefilterWgsl(multisampled) {
+  return (
+    /* wgsl */
+    `${SHARED4(multisampled)}
+@group(0) @binding(2) var colour: texture_2d<f32>;
+struct Out { @location(0) colour: vec4<f32>, @location(1) coc: vec4<f32> };
+@fragment
+fn prefilter(@builtin(position) frag: vec4<f32>) -> Out {
+  let size = vec2<i32>(textureDimensions(colour));
+  let p = vec2<i32>(frag.xy) * 2;
+  var c = vec4<f32>(0.0);
+  var total = 0.0;
+  var coc = 0.0;
+  for (var k = 0; k < 4; k += 1) {
+    let q = min(p + vec2<i32>(k & 1, k >> 1), size - 1);
+    // Each by its own blur: what is in focus stays out of the blurred frame, so it can't bleed back round itself.
+    let qc = cocAt(vec2<f32>(q) + 0.5);
+    let w = abs(qc) + 1e-3;
+    c = c + textureLoad(colour, q, 0) * w;
+    total = total + w;
+    // The most blurred of the four's, sign and all.
+    if (abs(qc) > abs(coc)) { coc = qc; }
+  }
+  return Out(c / total, vec4<f32>(coc * 0.5, 0.0, 0.0, 1.0));
+}
+`
+  );
+}
+var DOF_GATHER_WGSL = (
+  /* wgsl */
+  `
+struct Camera { dof: vec4<f32>, frame: vec4<f32>, motion: vec4<f32>, render: vec4<f32> };
+@group(0) @binding(0) var<uniform> cam: Camera;
+@group(0) @binding(1) var halfColour: texture_2d<f32>;
+@group(0) @binding(2) var halfCoc: texture_2d<f32>;
+
+@vertex
+fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4<f32> {
+  let p = vec2<f32>(f32((i << 1u) & 2u), f32(i & 2u));
+  return vec4<f32>(p * 2.0 - 1.0, 0.0, 1.0);
+}
+
+// The aperture's polygon (n blades): how far its edge stands, at angle a, from a unit circle's.
+fn blade(a: f32, n: f32) -> f32 {
+  if (n < 2.5) { return 1.0; }
+  let seg = 6.2831853 / n;
+  let t = a - seg * floor(a / seg) - seg * 0.5;
+  return cos(seg * 0.5) / cos(t);
+}
+
+struct Out { @location(0) colour: vec4<f32>, @location(1) near: vec4<f32> };
+@fragment
+fn gather(@builtin(position) frag: vec4<f32>) -> Out {
+  let size = vec2<i32>(textureDimensions(halfColour));
+  let p = vec2<i32>(frag.xy);
+  let c0 = textureLoad(halfCoc, p, 0).r;
+  let reach = cam.dof.z * 0.5;
+  // The centre counts as one tap of its own blur.
+  let own = max(abs(c0), 0.5);
+  var sum = textureLoad(halfColour, p, 0) / (own * own);
+  var weight = 1.0 / (own * own);
+  var near = 0.0;
+  var nearTaps = 0.0;
+  // Three rings of 8, 16 and 24 taps out to the frame's largest blur.
+  for (var ring = 1; ring <= 3; ring += 1) {
+    let count = ring * 8;
+    let r = f32(ring) / 3.0 * reach;
+    for (var k = 0; k < count; k += 1) {
+      let a = (f32(k) + 0.5 * f32(ring & 1)) / f32(count) * 6.2831853;
+      let o = vec2<i32>(round(vec2<f32>(cos(a), sin(a)) * r * blade(a, cam.dof.w)));
+      // Where the tap really landed: a whole texel off, or none.
+      let dist = length(vec2<f32>(o));
+      let q = clamp(p + o, vec2<i32>(0), size - 1);
+      let s = textureLoad(halfColour, q, 0);
+      let cs = textureLoad(halfCoc, q, 0).r;
+      // How far this tap's blur reaches: no further than this pixel's own, from behind it.
+      var spread = abs(cs);
+      if (cs > c0) { spread = min(spread, max(abs(c0), 0.0)); }
+      let w = clamp(spread - dist + 1.0, 0.0, 1.0) / max(spread * spread, 0.25);
+      sum = sum + s * w;
+      weight = weight + w;
+      // The near field: taps in front of the focus whose blur reaches here.
+      if (cs < -0.5) {
+        near = near + clamp(-cs - dist + 1.0, 0.0, 1.0);
+        nearTaps = nearTaps + 1.0;
+      }
+    }
+  }
+  let cover = select(0.0, clamp(near / max(nearTaps, 1.0) * 2.0, 0.0, 1.0), nearTaps > 0.0);
+  return Out(sum / weight, vec4<f32>(cover, 0.0, 0.0, 1.0));
+}
+`
+);
+function dofCompositeWgsl(multisampled) {
+  return (
+    /* wgsl */
+    `${SHARED4(multisampled)}
+@group(0) @binding(2) var colour: texture_2d<f32>;
+@group(0) @binding(3) var blurred: texture_2d<f32>;
+@group(0) @binding(4) var nearCover: texture_2d<f32>;
+@group(0) @binding(5) var linearSamp: sampler;
+@group(0) @binding(6) var halfCoc: texture_2d<f32>;
+@fragment
+fn composite(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
+  let p = vec2<i32>(frag.xy);
+  let sharp = textureLoad(colour, p, 0);
+  let uv = frag.xy / cam.frame.zw;
+  let signed = cocAt(frag.xy);
+  let coc = abs(signed);
+  // The four nearest half-resolution texels, bilinear, each by how alike its blur is to this pixel's: an
+  // in-focus neighbour's texel doesn't bleed into the blurred pixel beside it.
+  let half = vec2<i32>(textureDimensions(blurred));
+  let f = frag.xy * 0.5 - 0.5;
+  let base = vec2<i32>(floor(f));
+  let t = f - floor(f);
+  var soft = vec4<f32>(0.0);
+  var total = 0.0;
+  for (var k = 0; k < 4; k += 1) {
+    let o = vec2<i32>(k & 1, k >> 1);
+    let h = clamp(base + o, vec2<i32>(0), half - 1);
+    let bil = select(1.0 - t.x, t.x, o.x == 1) * select(1.0 - t.y, t.y, o.y == 1);
+    let alike = exp(-abs(textureLoad(halfCoc, h, 0).r * 2.0 - signed));
+    let w = bil * alike + 1e-4 * bil;
+    soft = soft + textureLoad(blurred, h, 0) * w;
+    total = total + w;
+  }
+  soft = soft / total;
+  let cover = textureSampleLevel(nearCover, linearSamp, uv, 0.0).r;
+  let amount = max(smoothstep(0.5, 2.0, coc), cover);
+  return mix(sharp, soft, amount);
+}
+`
+  );
+}
+var MOTION_TILES_WGSL = (
+  /* wgsl */
+  `
+struct Camera { dof: vec4<f32>, frame: vec4<f32>, motion: vec4<f32>, render: vec4<f32> };
+@group(0) @binding(0) var<uniform> cam: Camera;
+@group(0) @binding(1) var velocity: texture_2d<f32>;
+@vertex
+fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4<f32> {
+  let p = vec2<f32>(f32((i << 1u) & 2u), f32(i & 2u));
+  return vec4<f32>(p * 2.0 - 1.0, 0.0, 1.0);
+}
+@fragment
+fn tiles(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
+  let tile = cam.motion.y;
+  let rsize = vec2<i32>(cam.render.xy);
+  // The tile's corners in the render's pixels; a stride keeps a large tile's reads in hand.
+  let lo = vec2<i32>(floor(frag.xy - 0.5) * tile / cam.frame.zw * cam.render.xy);
+  let hi = min(vec2<i32>(ceil((floor(frag.xy - 0.5) + 1.0) * tile / cam.frame.zw * cam.render.xy)), rsize);
+  let stride = max(1, (hi.x - lo.x) / 8);
+  var best = vec2<f32>(0.0);
+  for (var y = lo.y; y < hi.y; y += stride) {
+    for (var x = lo.x; x < hi.x; x += stride) {
+      let v = textureLoad(velocity, vec2<i32>(x, y), 0).xy * cam.frame.zw * cam.motion.x;
+      if (dot(v, v) > dot(best, best)) { best = v; }
+    }
+  }
+  return vec4<f32>(best, 0.0, 1.0);
+}
+`
+);
+var MOTION_NEIGHBOURS_WGSL = (
+  /* wgsl */
+  `
+@group(0) @binding(0) var tiles: texture_2d<f32>;
+@vertex
+fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4<f32> {
+  let p = vec2<f32>(f32((i << 1u) & 2u), f32(i & 2u));
+  return vec4<f32>(p * 2.0 - 1.0, 0.0, 1.0);
+}
+@fragment
+fn neighbours(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
+  let size = vec2<i32>(textureDimensions(tiles));
+  let p = vec2<i32>(frag.xy);
+  var best = vec2<f32>(0.0);
+  for (var y = -1; y <= 1; y += 1) {
+    for (var x = -1; x <= 1; x += 1) {
+      let v = textureLoad(tiles, clamp(p + vec2<i32>(x, y), vec2<i32>(0), size - 1), 0).xy;
+      if (dot(v, v) > dot(best, best)) { best = v; }
+    }
+  }
+  return vec4<f32>(best, 0.0, 1.0);
+}
+`
+);
+function motionGatherWgsl(multisampled) {
+  return (
+    /* wgsl */
+    `${SHARED4(multisampled)}
+@group(0) @binding(2) var colour: texture_2d<f32>;
+@group(0) @binding(3) var velocity: texture_2d<f32>;
+@group(0) @binding(4) var neighbourMax: texture_2d<f32>;
+
+fn motionAt(q: vec2<f32>) -> vec2<f32> {
+  let v = textureLoad(velocity, renderPixel(q), 0).xy * cam.frame.zw * cam.motion.x;
+  let l = length(v);
+  return select(v, v * (cam.motion.z / l), l > cam.motion.z);
+}
+// McGuire's cone: how much a sample whose motion reaches |v| pixels covers a point dist pixels off.
+fn cone(dist: f32, v: f32) -> f32 { return clamp(1.0 - dist / max(v, 1e-3), 0.0, 1.0); }
+fn cylinder(dist: f32, v: f32) -> f32 { return 1.0 - smoothstep(0.95 * v, 1.05 * v, dist); }
+fn softDepth(a: f32, b: f32) -> f32 { return clamp(1.0 - (b - a) / max(0.01 * min(a, b), 0.05), 0.0, 1.0); }
+
+@fragment
+fn gather(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
+  let size = vec2<i32>(textureDimensions(colour));
+  let p = vec2<i32>(frag.xy);
+  let c = textureLoad(colour, p, 0);
+  let tiles = vec2<i32>(textureDimensions(neighbourMax));
+  var vmax = textureLoad(neighbourMax, min(p / i32(cam.motion.y), tiles - 1), 0).xy;
+  let lmax = length(vmax);
+  if (lmax < 0.5) { return c; }
+  if (lmax > cam.motion.z) { vmax = vmax * (cam.motion.z / lmax); }
+  let vc = length(motionAt(frag.xy));
+  let zc = distanceAt(frag.xy);
+  // The centre's own weight: as if it were a sample of its own motion.
+  let own = 1.0 / max(vc, 1.0);
+  var sum = c * own;
+  var weight = own;
+  let jitter = fract(52.9829189 * fract(dot(frag.xy + cam.motion.w * 5.588238, vec2<f32>(0.06711056, 0.00583715)))) - 0.5;
+  for (var k = 0; k < 12; k += 1) {
+    if (k == 6) { continue; }
+    let t = mix(-0.5, 0.5, (f32(k) + jitter + 0.5) / 12.0);
+    let q = clamp(frag.xy + vmax * t, vec2<f32>(0.5), vec2<f32>(size) - 0.5);
+    let dist = length(vmax * t);
+    let zs = distanceAt(q);
+    let vs = length(motionAt(q));
+    // In front of the centre: it smears by its own motion. Behind: the centre's motion reveals it.
+    let front = softDepth(zc, zs);
+    let back = softDepth(zs, zc);
+    let w = front * cone(dist, vs) + back * cone(dist, vc) + cylinder(dist, vs) * cylinder(dist, vc) * 2.0;
+    sum = sum + textureLoad(colour, vec2<i32>(q), 0) * w;
+    weight = weight + w;
+  }
+  return sum / weight;
+}
+`
+  );
+}
+
 // src/render/upscaler.ts
 var UPSCALE_MODES = { quality: 1 / 1.5, balanced: 1 / 1.7, performance: 0.5 };
 var UPSCALE_UNIFORM_FLOATS = 12;
@@ -20335,7 +20656,7 @@ function ssgiUniforms(view, projection, frame, history, settings, out = new Floa
   out.set([SSGI_THICKNESS, SSGI_BLEND, history ? 1 : 0, settings.intensity], 52);
   return out;
 }
-var SHARED4 = (multisampled) => (
+var SHARED5 = (multisampled) => (
   /* wgsl */
   `
 struct Ssgi { proj: mat4x4<f32>, invProj: mat4x4<f32>, view: mat4x4<f32>, params: vec4<f32>, params2: vec4<f32> };
@@ -20375,7 +20696,7 @@ fn normalAt(p: vec2<i32>, size: vec2<i32>) -> vec3<f32> {
 function ssgiTraceWgsl(multisampled) {
   return (
     /* wgsl */
-    `${SHARED4(multisampled)}
+    `${SHARED5(multisampled)}
 @group(0) @binding(3) var velocity: texture_2d<f32>;
 @group(0) @binding(4) var radiance: texture_2d<f32>;
 @group(0) @binding(5) var linearSamp: sampler;
@@ -20510,7 +20831,7 @@ fn accumulate(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
 function ssgiResolveWgsl(multisampled) {
   return (
     /* wgsl */
-    `${SHARED4(multisampled)}
+    `${SHARED5(multisampled)}
 @group(0) @binding(3) var accumulated: texture_2d<f32>;
 
 @fragment
@@ -24810,6 +25131,8 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     this.frameOutput = null;
     /** The upscaler's display-sized output and pipelines (F4b); its history is the TAA's, made at the display's size. */
     this.upscaler = null;
+    /** The physical camera's passes (F4c) and what they keep between frames: their uniforms, sampler and pipelines. */
+    this.camera = null;
     /** Pipeline variants (material graph, sample count, reflection targets), built on first use. */
     this.variants = /* @__PURE__ */ new Map();
     /**
@@ -26366,8 +26689,12 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     const reactive = hdrTaa && seeThrough && behind ? this.addReactiveMask(graph, behind, colour) : null;
     if (reflections && this.hdr && gbuffer && velocity) this.addHizReflections(graph, colour, depth, gbuffer, velocity, rays, draw, temporal ? temporal.projection : draw.projection, msaa !== null);
     else if (reflections) this.addReflections(graph, reflections, colour, depth, rays, temporal ? temporal.projection : draw.projection, msaa !== null);
-    if (temporal && display && velocity) this.addUpscale(graph, temporal, colour, depth, velocity, reactive, display, msaa !== null);
+    let shown = colour;
+    if (temporal && display && velocity) shown = this.addUpscale(graph, temporal, colour, depth, velocity, reactive, display, msaa !== null);
     else if (temporal) this.addTemporal(graph, temporal.uniforms, colour, depth, msaa !== null, hdrTaa ? velocity : null, reactive);
+    if (this.hdr && draw.camera && this.frameDepthView && velocity && (draw.camera.dof || draw.camera.motionBlur)) {
+      this.addCameraEffects(graph, shown, display ?? { width: this.width, height: this.height }, depth, velocity, draw.camera, this.frameDepthView.terms, msaa !== null);
+    }
     const slot = readback ? this.readback.find((entry) => !entry.busy) : void 0;
     if (slot) {
       graph.addPass("readback", "transfer", (pass) => {
@@ -26671,13 +26998,13 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     }
     if (this.upscaler && (this.upscaler.width !== size.width || this.upscaler.height !== size.height)) {
       destroySafely(this.upscaler.output);
-      this.upscaler.output = device.createTexture({ size, format: this.colourFormat, usage: 16 | 4 | 1 });
+      this.upscaler.output = device.createTexture({ size, format: this.colourFormat, usage: 16 | 4 | 1 | 2 });
       this.upscaler.width = size.width;
       this.upscaler.height = size.height;
     }
     this.upscaler ?? (this.upscaler = {
-      output: device.createTexture({ size, format: this.colourFormat, usage: 16 | 4 | 1 }),
-      // RENDER_ATTACHMENT | TEXTURE_BINDING | COPY_SRC
+      output: device.createTexture({ size, format: this.colourFormat, usage: 16 | 4 | 1 | 2 }),
+      // RENDER_ATTACHMENT | TEXTURE_BINDING | COPY_SRC | COPY_DST (F4c lands in it)
       width: size.width,
       height: size.height,
       uniforms: device.createBuffer({ size: UPSCALE_UNIFORM_FLOATS * 4, usage: 64 | 8 }),
@@ -26732,6 +27059,127 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
       ]);
     });
     this.frameOutput = ups.output;
+    return output;
+  }
+  /** Depth of field, then motion blur (F4c; see cameraEffects.ts), on `target` (`size`), written back into it. */
+  addCameraEffects(graph, target, size, depth, velocity, effects, terms, multisampled) {
+    const device = this.device;
+    this.camera ?? (this.camera = {
+      uniforms: device.createBuffer({ size: CAMERA_UNIFORM_FLOATS * 4, usage: 64 | 8 }),
+      data: new Float32Array(CAMERA_UNIFORM_FLOATS),
+      sampler: device.createSampler({ magFilter: "linear", minFilter: "linear", addressModeU: "clamp-to-edge", addressModeV: "clamp-to-edge" }),
+      frame: 0,
+      pipelines: /* @__PURE__ */ new Map()
+    });
+    const cam = this.camera;
+    const k = multisampled ? "ms" : "";
+    const pipeline = (name, code, entry, formats) => {
+      let made = cam.pipelines.get(name + k);
+      if (!made) {
+        const module = device.createShaderModule({ code: code() });
+        made = device.createRenderPipeline({ layout: "auto", vertex: { module, entryPoint: "vs" }, fragment: { module, entryPoint: entry, targets: formats.map((format) => ({ format })) }, primitive: { topology: "triangle-list" } });
+        cam.pipelines.set(name + k, made);
+      }
+      return made;
+    };
+    device.queue.writeBuffer(cam.uniforms, 0, cameraUniforms(effects, terms, size, { width: this.width, height: this.height }, cam.frame, cam.data));
+    cam.frame += 1;
+    const draw = (ctx, pipe, targets, entries) => {
+      const encoded = ctx.encoder.beginRenderPass({
+        colorAttachments: targets.map((t) => ({ view: ctx.texture(t).createView(), clearValue: { r: 0, g: 0, b: 0, a: 0 }, loadOp: "clear", storeOp: "store" })),
+        ...ctx.timing
+      });
+      encoded.setPipeline(pipe);
+      encoded.setBindGroup(0, device.createBindGroup({ layout: pipe.getBindGroupLayout(0), entries: [{ binding: 0, resource: { buffer: cam.uniforms } }, ...entries] }));
+      encoded.draw(3);
+      encoded.end();
+    };
+    const copyBack = (from) => graph.addPass(`${from.name}.copy`, "transfer", (pass) => {
+      pass.read(from, "copySrc");
+      pass.write(target, "copyDst");
+      return (ctx) => ctx.encoder.copyTextureToTexture({ texture: ctx.texture(from) }, { texture: ctx.texture(target) }, size);
+    });
+    const half = { width: Math.max(1, Math.ceil(size.width / 2)), height: Math.max(1, Math.ceil(size.height / 2)) };
+    if (effects.dof) {
+      const halfColour = graph.createTexture("dof.colour", { format: "rgba16float", ...half });
+      const halfCoc = graph.createTexture("dof.coc", { format: "r16float", ...half });
+      const blurred = graph.createTexture("dof.blurred", { format: "rgba16float", ...half });
+      const near = graph.createTexture("dof.near", { format: "r16float", ...half });
+      const out = graph.createTexture("dof.out", { format: this.colourFormat, ...size });
+      const prefilter = pipeline("dof.prefilter", () => dofPrefilterWgsl(multisampled), "prefilter", ["rgba16float", "r16float"]);
+      const gather = pipeline("dof.gather", () => DOF_GATHER_WGSL, "gather", ["rgba16float", "r16float"]);
+      const composite = pipeline("dof.composite", () => dofCompositeWgsl(multisampled), "composite", [this.colourFormat]);
+      graph.addPass("dof.prefilter", "render", (pass) => {
+        pass.read(target);
+        pass.read(depth);
+        pass.write(halfColour);
+        pass.write(halfCoc);
+        return (ctx) => draw(ctx, prefilter, [halfColour, halfCoc], [{ binding: 1, resource: ctx.texture(depth).createView() }, { binding: 2, resource: ctx.texture(target).createView() }]);
+      });
+      graph.addPass("dof.gather", "render", (pass) => {
+        pass.read(halfColour);
+        pass.read(halfCoc);
+        pass.write(blurred);
+        pass.write(near);
+        return (ctx) => draw(ctx, gather, [blurred, near], [{ binding: 1, resource: ctx.texture(halfColour).createView() }, { binding: 2, resource: ctx.texture(halfCoc).createView() }]);
+      });
+      graph.addPass("dof.composite", "render", (pass) => {
+        pass.read(target);
+        pass.read(depth);
+        pass.read(blurred);
+        pass.read(near);
+        pass.read(halfCoc);
+        pass.write(out);
+        return (ctx) => draw(ctx, composite, [out], [
+          { binding: 1, resource: ctx.texture(depth).createView() },
+          { binding: 2, resource: ctx.texture(target).createView() },
+          { binding: 3, resource: ctx.texture(blurred).createView() },
+          { binding: 4, resource: ctx.texture(near).createView() },
+          { binding: 5, resource: cam.sampler },
+          { binding: 6, resource: ctx.texture(halfCoc).createView() }
+        ]);
+      });
+      copyBack(out);
+    }
+    if (effects.motionBlur && effects.motionBlur.fraction > 0) {
+      const tileSize = { width: Math.max(1, Math.ceil(size.width / MOTION_TILE)), height: Math.max(1, Math.ceil(size.height / MOTION_TILE)) };
+      const tiles = graph.createTexture("motion.tiles", { format: "rg16float", ...tileSize });
+      const neighbours = graph.createTexture("motion.neighbours", { format: "rg16float", ...tileSize });
+      const out = graph.createTexture("motion.out", { format: this.colourFormat, ...size });
+      const tilePipe = pipeline("motion.tiles", () => MOTION_TILES_WGSL, "tiles", ["rg16float"]);
+      const neighbourPipe = pipeline("motion.neighbours", () => MOTION_NEIGHBOURS_WGSL, "neighbours", ["rg16float"]);
+      const gatherPipe = pipeline("motion.gather", () => motionGatherWgsl(multisampled), "gather", [this.colourFormat]);
+      graph.addPass("motion.tiles", "render", (pass) => {
+        pass.read(velocity);
+        pass.write(tiles);
+        return (ctx) => draw(ctx, tilePipe, [tiles], [{ binding: 1, resource: ctx.texture(velocity).createView() }]);
+      });
+      graph.addPass("motion.neighbours", "render", (pass) => {
+        pass.read(tiles);
+        pass.write(neighbours);
+        return (ctx) => {
+          const encoded = ctx.encoder.beginRenderPass({ colorAttachments: [{ view: ctx.texture(neighbours).createView(), clearValue: { r: 0, g: 0, b: 0, a: 0 }, loadOp: "clear", storeOp: "store" }], ...ctx.timing });
+          encoded.setPipeline(neighbourPipe);
+          encoded.setBindGroup(0, device.createBindGroup({ layout: neighbourPipe.getBindGroupLayout(0), entries: [{ binding: 0, resource: ctx.texture(tiles).createView() }] }));
+          encoded.draw(3);
+          encoded.end();
+        };
+      });
+      graph.addPass("motion.gather", "render", (pass) => {
+        pass.read(target);
+        pass.read(depth);
+        pass.read(velocity);
+        pass.read(neighbours);
+        pass.write(out);
+        return (ctx) => draw(ctx, gatherPipe, [out], [
+          { binding: 1, resource: ctx.texture(depth).createView() },
+          { binding: 2, resource: ctx.texture(target).createView() },
+          { binding: 3, resource: ctx.texture(velocity).createView() },
+          { binding: 4, resource: ctx.texture(neighbours).createView() }
+        ]);
+      });
+      copyBack(out);
+    }
   }
   /**
    * The reactive mask (F4a): how much the see-through pass changed each pixel,
@@ -28551,7 +28999,8 @@ function packMeasureUniforms(frame, width, height, out = new Float32Array(MEASUR
   out.set([bg[0] / 255, bg[1] / 255, bg[2] / 255, bg[3] / 255], 4);
   const sun = m?.sun ?? null;
   out.set([sun?.x ?? 0, sun?.y ?? 0, Math.max(1.5, height * 0.012), sun ? 1 : 0], 8);
-  out.set([hdr ? 1 : 0, hdr ? frame.tonemap?.exposure ?? 1 : 1, 0, 0], 12);
+  const metering = hdr && m?.metering ? 1 + ["average", "centre", "spot"].indexOf(m.metering) : 0;
+  out.set([hdr ? 1 : 0, hdr ? frame.tonemap?.exposure ?? 1 : 1, metering, 0], 12);
   return out;
 }
 var SRGB_WGSL = (
@@ -29023,6 +29472,10 @@ struct Measure {
 @group(0) @binding(3) var<storage, read_write> result: array<f32, 4>;
 var<workgroup> sums: array<f32, 256>;
 var<workgroup> counts: array<f32, 256>;
+// The histogram (F4c): 64 bins of log2 luminance from \u221212 to +8, each a weighted count (16ths).
+var<workgroup> bins: array<atomic<u32>, 64>;
+const HIST_LO = -12.0;
+const HIST_SPAN = 20.0;
 ${SRGB_WGSL}
 fn linear(c: f32) -> f32 {
   let b = round(c * 255.0) / 255.0;
@@ -29059,6 +29512,9 @@ fn openSky(x: f32, y: f32) -> f32 {
   let gh = u32(ceil((u.size.y - first) / step));
   var sum = 0.0;
   var count = 0.0;
+  let metering = i32(u.hdr.z + 0.5);
+  if (tid < 64u) { atomicStore(&bins[tid], 0u); }
+  workgroupBarrier();
   if (wantLuminance) {
     for (var i = tid; i < gw * gh; i = i + 256u) {
       let x = first + f32(i % gw) * step;
@@ -29068,6 +29524,17 @@ fn openSky(x: f32, y: f32) -> f32 {
       var l = 0.2126 * linear(c.r) + 0.7152 * linear(c.g) + 0.0722 * linear(c.b);
       // Linear light (F0b): its luminance as exposed, before the tone map.
       if (u.hdr.x > 0.5) { l = dot(c.rgb, vec3f(0.2126, 0.7152, 0.0722)) * u.hdr.y; }
+      if (metering > 0) {
+        // Weighted by the metering mode: everywhere alike, toward the centre, or a spot there.
+        let off = (vec2f(x, y) - u.size.xy * 0.5) / (0.5 * min(u.size.x, u.size.y));
+        let r2 = dot(off, off);
+        var w = 1.0;
+        if (metering == 2) { w = 1.0 + 3.0 * exp(-r2 / 0.18); }
+        if (metering == 3) { w = select(0.0, 1.0, r2 < 0.04); }
+        let bin = u32(clamp((log2(max(l, 1e-6)) - HIST_LO) / HIST_SPAN * 64.0, 0.0, 63.0));
+        atomicAdd(&bins[bin], u32(round(w * 16.0)));
+        continue;
+      }
       sum = sum + log(max(1e-4, l));
       count = count + 1.0;
     }
@@ -29085,6 +29552,26 @@ fn openSky(x: f32, y: f32) -> f32 {
   if (tid == 0u) {
     result[0] = sums[0];
     result[1] = counts[0];
+    if (metering > 0) {
+      // The histogram's mean log2 luminance between its darkest and brightest tenth, as a natural log over one.
+      var total = 0.0;
+      for (var b = 0u; b < 64u; b = b + 1u) { total = total + f32(atomicLoad(&bins[b])); }
+      let lo = total * 0.1;
+      let hi = total * 0.9;
+      var seen = 0.0;
+      var acc = 0.0;
+      var kept = 0.0;
+      for (var b = 0u; b < 64u; b = b + 1u) {
+        let n = f32(atomicLoad(&bins[b]));
+        // The share of this bin between the two cuts.
+        let take = max(0.0, min(seen + n, hi) - max(seen, lo));
+        acc = acc + take * (HIST_LO + (f32(b) + 0.5) / 64.0 * HIST_SPAN);
+        kept = kept + take;
+        seen = seen + n;
+      }
+      result[0] = select(0.0, acc / kept * 0.69314718, kept > 0.0);
+      result[1] = select(0.0, 1.0, kept > 0.0);
+    }
     var open = 0.0;
     var taps = 0.0;
     if (u.sun.w > 0.5) {

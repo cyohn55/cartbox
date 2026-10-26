@@ -16,6 +16,7 @@
  * multiple lights, tone mapping, and shadows (see AAA_TIER_ROADMAP.md).
  */
 
+import { parsePhysicalCamera, type PhysicalCameraSettings } from "./physicalCamera";
 import { parseVolumetricFog } from "./volumetricFog";
 import { parseDynamicGi, parseScreenSpaceGi, type DynamicGiSettings, type ScreenSpaceGiSettings } from "./dynamicGi";
 import { parseAtmosphere } from "./atmosphere";
@@ -147,6 +148,12 @@ export interface SceneLighting {
   /** Eye adaptation: the exposure follows what the camera sees. Absent = a fixed exposure. */
   readonly autoExposure?: AutoExposure | null;
   /**
+   * The physical camera (AAA_FIDELITY_ROADMAP.md F4c; physicalCamera.ts):
+   * aperture, shutter and ISO set the exposure (in manual mode) and drive the
+   * AAA tier's depth of field and motion blur. Absent = none.
+   */
+  readonly camera?: PhysicalCameraSettings | null;
+  /**
    * The units the editor shows this rig in (AAA_FIDELITY_ROADMAP.md F0b):
    * "physical" for lux, candela, nits and EV100 (see physicalLight.ts).
    * Absent = the renderer's own. Only a display choice: the stored values and
@@ -256,6 +263,7 @@ export function parseSceneLighting(raw: unknown): SceneLighting | null {
   const tints = parseTints(record.tints);
   const postVolumes = readPostVolumes(record.postVolumes);
   const autoExposure = readAutoExposure(record.autoExposure);
+  const camera = parsePhysicalCamera(record.camera);
 
   return {
     environment: {
@@ -287,6 +295,7 @@ export function parseSceneLighting(raw: unknown): SceneLighting | null {
     ...(tints ? { tints } : {}),
     ...(postVolumes.length > 0 ? { postVolumes } : {}),
     ...(autoExposure ? { autoExposure } : {}),
+    ...(camera ? { camera } : {}),
     ...(record.units === "physical" ? { units: "physical" as const } : {}),
   };
 }

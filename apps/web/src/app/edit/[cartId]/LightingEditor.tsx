@@ -61,6 +61,11 @@ import {
   type VolumetricFogSettings,
   type DynamicGiSettings,
   type ScreenSpaceGiSettings,
+  type PhysicalCameraSettings,
+  type ExposureMode,
+  type MeteringMode,
+  cameraEv100,
+  resolvePhysicalCamera,
   type ReflectionProbe,
   type SceneFog,
   type SceneLight,
@@ -259,6 +264,7 @@ export function LightingEditor({ lighting, onChange }: LightingEditorProps) {
       <SkyDomeControls lighting={lighting} onChange={onChange} />
       <FogControls lighting={lighting} onChange={onChange} />
       <DynamicGiControls lighting={lighting} onChange={onChange} />
+      <CameraControls lighting={lighting} onChange={onChange} />
       <WindControls lighting={lighting} onChange={onChange} />
       <ShaftControls lighting={lighting} onChange={onChange} />
       <ProbeControls lighting={lighting} onChange={onChange} />
@@ -1094,6 +1100,93 @@ function DynamicGiControls({ lighting, onChange }: LightingEditorProps & { light
 }
 
 /**
+ * The physical camera (AAA_FIDELITY_ROADMAP.md F4c): aperture, shutter and ISO
+ * set the exposure (manual) or eye adaptation's metering and compensation
+ * (auto), and on the AAA tier drive bokeh depth of field and motion blur.
+ */
+function CameraControls({ lighting, onChange }: LightingEditorProps & { lighting: SceneLighting }) {
+  const cam = lighting.camera ?? null;
+  const on = cam !== null;
+  const set = (next: Partial<PhysicalCameraSettings>) => onChange({ ...lighting, camera: { ...(cam ?? {}), ...next } });
+  const c = resolvePhysicalCamera(cam);
+  const ev = cameraEv100(c.aperture, c.shutter, c.iso);
+  return (
+    <>
+      <SegmentedControl
+        label="Physical camera"
+        ariaLabel="Physical camera"
+        selected={on ? "on" : "off"}
+        onSelect={(id) => onChange({ ...lighting, camera: id === "on" ? (cam ?? {}) : null })}
+        options={[
+          { id: "off", label: "Off" },
+          { id: "on", label: "On", hint: "Aperture, shutter and ISO set the exposure as a camera's do; on the AAA tier they also drive depth of field and motion blur" },
+        ]}
+      />
+      {on && (
+        <>
+          <SegmentedControl
+            label="Exposure"
+            ariaLabel="Camera exposure mode"
+            selected={c.exposure}
+            onSelect={(id) => set({ exposure: id as ExposureMode })}
+            options={[
+              { id: "auto", label: "Auto", hint: "Eye adaptation meters the frame; compensation shifts it" },
+              { id: "manual", label: "Manual", hint: `Set by aperture, shutter and ISO: EV100 ${ev.toFixed(1)}` },
+            ]}
+          />
+          <RangeControl label="Aperture" nested min={1.2} max={22} step={0.1} value={c.aperture} ariaLabel="Camera aperture" display={`f/${c.aperture.toFixed(1)}`} onChange={(aperture) => set({ aperture })} />
+          <RangeControl label="Shutter" nested min={-13} max={0} step={0.5} value={Math.log2(c.shutter)} ariaLabel="Camera shutter" display={c.shutter >= 0.5 ? `${c.shutter.toFixed(1)} s` : `1/${Math.round(1 / c.shutter)} s`} onChange={(v) => set({ shutter: 2 ** v })} />
+          <RangeControl label="ISO" nested min={Math.log2(50)} max={Math.log2(12800)} step={1 / 3} value={Math.log2(c.iso)} ariaLabel="Camera ISO" display={`${Math.round(c.iso)}`} onChange={(v) => set({ iso: Math.round(2 ** v) })} />
+          {c.exposure === "auto" && (
+            <>
+              <RangeControl label="Compensation" nested min={-4} max={4} step={0.1} value={c.compensation} ariaLabel="Exposure compensation" display={`${c.compensation >= 0 ? "+" : ""}${c.compensation.toFixed(1)} EV`} onChange={(compensation) => set({ compensation })} />
+              <SegmentedControl
+                label="Metering"
+                ariaLabel="Camera metering"
+                selected={c.metering}
+                onSelect={(id) => set({ metering: id as MeteringMode })}
+                options={[
+                  { id: "average", label: "Average" },
+                  { id: "centre", label: "Centre" },
+                  { id: "spot", label: "Spot" },
+                ]}
+              />
+            </>
+          )}
+          <SegmentedControl
+            label="Depth of field (AAA)"
+            ariaLabel="Depth of field"
+            selected={c.depthOfField ? "on" : "off"}
+            onSelect={(id) => set({ depthOfField: id === "on" })}
+            options={[
+              { id: "off", label: "Off" },
+              { id: "on", label: "Bokeh", hint: "What is nearer or farther than the focus blurs as the lens and aperture make it, shaped by the aperture's blades" },
+            ]}
+          />
+          {c.depthOfField && (
+            <>
+              <RangeControl label="Focus" nested min={Math.log2(0.1)} max={Math.log2(500)} step={0.05} value={Math.log2(c.focusDistance)} ariaLabel="Focus distance" display={`${c.focusDistance < 10 ? c.focusDistance.toFixed(2) : Math.round(c.focusDistance)} m`} onChange={(v) => set({ focusDistance: 2 ** v })} />
+              <RangeControl label="Focal length" nested min={8} max={400} step={1} value={c.focalLength} ariaLabel="Focal length" display={`${Math.round(c.focalLength)} mm`} onChange={(focalLength) => set({ focalLength })} />
+              <RangeControl label="Blades" nested min={4} max={9} step={1} value={c.blades === 0 ? 4 : c.blades} ariaLabel="Aperture blades" display={c.blades === 0 ? "round" : `${c.blades}`} onChange={(blades) => set({ blades: blades < 5 ? 0 : blades })} />
+            </>
+          )}
+          <SegmentedControl
+            label="Motion blur (AAA)"
+            ariaLabel="Motion blur"
+            selected={c.motionBlur ? "on" : "off"}
+            onSelect={(id) => set({ motionBlur: id === "on" })}
+            options={[
+              { id: "off", label: "Off" },
+              { id: "on", label: "On", hint: "What moves on screen blurs over the share of the frame the shutter is open" },
+            ]}
+          />
+        </>
+      )}
+    </>
+  );
+}
+
+/**
  * Volumetric fog (AAA_FIDELITY_ROADMAP.md F5b): on the AAA tier the densities
  * above become a medium the sun and sky light scatter in, shadowed into
  * shafts, in place of the fade toward the fog colour (which the other tiers keep).
@@ -1449,13 +1542,17 @@ function AutoExposureControls({ lighting, onChange }: LightingEditorProps & { li
 }
 
 /** The overrides a post volume may set, with their ranges and neutral values. */
-const POST_FIELDS: readonly { readonly key: "exposure" | "brightness" | "contrast" | "saturation" | "bloom" | "fog"; readonly label: string; readonly min: number; readonly max: number; readonly step: number; readonly neutral: number }[] = [
+const POST_FIELDS: readonly { readonly key: "exposure" | "brightness" | "contrast" | "saturation" | "bloom" | "fog" | "aperture" | "focusDistance" | "motionBlur"; readonly label: string; readonly min: number; readonly max: number; readonly step: number; readonly neutral: number }[] = [
   { key: "exposure", label: "Exposure (stops)", min: -4, max: 4, step: 0.1, neutral: 0 },
   { key: "brightness", label: "Brightness", min: 0.5, max: 1.5, step: 0.01, neutral: 1 },
   { key: "contrast", label: "Contrast", min: 0.5, max: 1.5, step: 0.01, neutral: 1 },
   { key: "saturation", label: "Saturation", min: 0, max: 2, step: 0.01, neutral: 1 },
   { key: "bloom", label: "Bloom", min: 0, max: 1.5, step: 0.01, neutral: 0.6 },
   { key: "fog", label: "Fog density", min: 0, max: 1, step: 0.01, neutral: 0.35 },
+  // The physical camera's (F4c, the AAA tier): the depth of field's aperture and focus, the motion blur's strength.
+  { key: "aperture", label: "Aperture (f/)", min: 1.2, max: 22, step: 0.1, neutral: 4 },
+  { key: "focusDistance", label: "Focus (m)", min: 0.1, max: 200, step: 0.1, neutral: 5 },
+  { key: "motionBlur", label: "Motion blur", min: 0, max: 2, step: 0.05, neutral: 1 },
 ];
 
 /**

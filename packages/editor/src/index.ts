@@ -1713,3 +1713,18 @@ export {
 } from "./model/dopeSheet";
 export { CURVATURE_FULL_BEND, bakeLayout, bakeSurfaceMaps, type BakedMaps, type SurfaceBake, type SurfaceBakeOptions } from "./model/textureBake";
 export { BounceTransferBuilder, buildBounceTransfer, buildSurfels, clipOccluders, probeBounce, relightProbes, surfelLight, type BounceLights, type BounceOptions, type BounceTransfer, type Surfels } from "./model/dynamicBounce";
+export {
+  DEFAULT_PHYSICAL_CAMERA,
+  FRAME_SECONDS,
+  cameraEv100,
+  cameraExposure,
+  circleOfConfusion,
+  cocTerms,
+  parsePhysicalCamera,
+  resolvePhysicalCamera,
+  shutterFraction,
+  type ExposureMode,
+  type MeteringMode,
+  type PhysicalCamera,
+  type PhysicalCameraSettings,
+} from "./model/physicalCamera";

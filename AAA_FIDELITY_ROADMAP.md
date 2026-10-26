@@ -882,12 +882,32 @@ Everything else depends on this track. It contains no visible "feature", but its
       - The jitter sequence's length and range, and the uniforms.
       - The player: Medium renders an AAA frame at two-thirds and asks for the display's size back, High renders at full size, and another tier never upscales.
       - On Dawn: a fan of glowing slivers finer than the render's pixels, at half the display's size, reconstructed over 96 frames. It comes back at the display's size with a mean error against the native TAA frame of 0.0085, against a plain upsample's 0.0125, and the same total light (122.5 against 123).
-- [ ] **F4c. Physical camera.**
+- [x] **F4c. Physical camera.**
   - Aperture, shutter speed and ISO drive both exposure and effects:
     - **bokeh depth of field** (gather-based, with near/far fields and a shaped aperture);
     - **per-object motion blur** (McGuire-style tile max on velocity);
     - histogram **auto-exposure** on the GPU, with metering modes and exposure compensation, replacing the CPU 8-bit luminance read.
   - Post volumes (P6) blend all of it.
+  - **F4c-1: done** (`editor model/physicalCamera.ts`, `player render/cameraEffects.ts`). A rig gains a physical camera (`SceneLighting.camera`; the Lighting panel's **Physical camera**).
+    - **Exposure.** EV100 = log2(N² / t · 100 / S), and physicalLight.ts's calibration makes that exposure 2^(15 − EV100) ("sunny 16" is exposure 1.02).
+      - In manual mode it replaces the rig's exposure, and post volumes' stops still add.
+      - In auto mode eye adaptation drives it (the rig's, or the default's), its key shifted by the compensation, metered as the camera says.
+    - **Metering** (the presenter's measure pass, on the AAA tier's linear frame). A 64-bin histogram of log2 luminance (−12..+8 EV) in workgroup memory, each sample weighted by the mode: alike everywhere (average), up to 4× toward the centre (centre), or a spot of a fifth of the frame's height (spot). The darkest and brightest tenth are dropped, and the rest's mean taken. Without a camera the plain log-average stays.
+    - **Depth of field** (half resolution, on the resolved HDR frame after TAA and the upscaler).
+      - Each pixel's circle of confusion comes from its depth by the thin lens: A·f/(s − f)/sensor · (1 − s/d), signed, held to 2.5% of the frame's width.
+      - The half-resolution frame weights each pixel by its own blur, so what is in focus stays out of it.
+      - The gather walks 48 taps in three rings, reshaped to the aperture's polygon (its blades). A tap counts where its own blur reaches back (scatter as gather), by the inverse of its blur's area. A tap behind spreads no further than the pixel's own blur; one in front spreads freely (the near field), and its cover is kept.
+      - The composite blends the sharp frame toward the gathered one by the pixel's blur or the near field's cover, upsampling the four nearest texels by how alike their blur is to the pixel's (so an in-focus edge doesn't bleed).
+    - **Motion blur** (McGuire et al. 2012). The velocity times the shutter's share of a 60 Hz frame (and a volume's strength), its largest per 16-px tile and over each tile's neighbours, then 12 jittered taps along it. A tap in front smears by its own motion's cone, one behind by the pixel's, plus both cylinders.
+    - **Post volumes** gain Aperture, Focus and Motion blur, pulled from the camera's own values as the grade is from neutral.
+    - *Tests (`physical-camera.test.ts`):*
+      - Sunny 16, a stop of aperture or ISO is a stop of exposure. The circle of confusion is none at the focus, negative nearer and limited far off, and stopping down a stop narrows it by √2. Parsing and saving; the volumes' pull.
+      - The player: manual exposure in the tone map, and the depth of field and motion blur handed over; the metering handed to the presenter in auto mode.
+      - On Dawn:
+        - The histogram's spot reads a bright disc at the centre (4 within a bin), the average drops it as the brightest tenth (under 0.065 against the plain log-average's higher reading), and centre-weighted lies between.
+        - Bars 20 m off lose their edges (sharpness 0.19 against 1.01) while bars 2 m off, in focus, keep theirs, and the far bars' light is kept within 15%.
+        - A bar sweeping 10 px a frame smears along its motion while one standing still keeps its edges.
+    - *Left for F4c:* exposure adapting on the GPU without the read-back; a focus pull from the camera's aim (autofocus); DOF and motion blur on the other tiers.
 - [x] **F4d. Tone mapping and output.**
   - Tone mappers: AgX, ACES 1.3 RRT/ODT and Khronos PBR Neutral, selectable per scene.
   - Grading in log or ACEScct space, and LUTs applied in the right space.
