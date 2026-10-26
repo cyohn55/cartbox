@@ -31,7 +31,7 @@ import {
   type MeshSceneInstance,
   type SceneWind,
 } from "@cartbox/editor";
-import type { DecalTiles, EnvironmentLight, LocalShadows, Mat4, ProjectedDecal, RasterStyle, SceneFog, SceneLight, ShadowInput, ToneMap } from "@cartbox/editor";
+import type { DynamicGi, Occluder, DecalTiles, EnvironmentLight, LocalShadows, Mat4, ProjectedDecal, RasterStyle, SceneFog, SceneLight, ShadowInput, ToneMap } from "@cartbox/editor";
 
 import type { RenderCaps } from "../models.js";
 import type { ReflectionCapture } from "./probeCapture.js";
@@ -197,6 +197,14 @@ export interface SceneDraw {
    * Only the linear-light (AAA) WebGPU renderer draws it; the others ignore it.
    */
   readonly sunShadow?: SunShadow | null;
+  /**
+   * Real-time GI (AAA_FIDELITY_ROADMAP.md F3e) on the linear-light (AAA)
+   * WebGPU renderer: the still scene its probes trace (a key that changes
+   * with it), and the settings. The volume it relights is the environment's
+   * probe volume, which every surface then takes its diffuse light from, the
+   * light-mapped ones too. The others ignore it.
+   */
+  readonly dynamicGi?: { readonly occluders: readonly Occluder[]; readonly key: string; readonly settings: DynamicGi } | null;
   /**
    * A physical sky's air (AAA_FIDELITY_ROADMAP.md F5a-2): the medium and its
    * sun above the air, whose aerial perspective the linear-light (AAA) WebGPU

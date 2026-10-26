@@ -28,6 +28,10 @@ import {
   atmosphereLuts,
   atmospherePanorama,
   atmospherePanoramaRows,
+  dynamicGiGrid,
+  emptyProbeVolume,
+  resolveDynamicGi,
+  type ProbeVolume,
   MOON_ALBEDO,
   sunTransmittance,
   atmosphereSun,
@@ -1386,11 +1390,13 @@ export class MeshOverlaySurface implements DisplaySurface {
     this.renderer.resize?.(width, height);
     this.rendered = { width, height, scale: output.width > 0 ? width / output.width : 1 };
     const time = this.frame / 60;
+    // Real-time GI on the AAA tier (F3e): the still scene its probes trace, and the volume they relight.
+    const gi = lighting ? this.liveGi(lighting) : null;
     const lit = lighting
       ? {
           ambient: lighting.ambient,
           lightDirection: sceneLightingKeyDirection(lighting),
-          environment: this.environment,
+          environment: gi ? gi.environment : this.environment,
           tonemap: job.tonemap,
           lights: job.lights,
         }
@@ -1411,6 +1417,7 @@ export class MeshOverlaySurface implements DisplaySurface {
       ...(job.reflectionCapture ? { reflectionCapture: job.reflectionCapture } : {}),
       ...(job.decals ? { decals: job.decals } : {}),
       ...(atmosphere ? { atmosphere } : {}),
+      ...(gi ? { dynamicGi: gi.draw } : {}),
       time,
     };
     const scene = this.renderer.renderToTexture!(job.drawn, draw) ?? null;
@@ -1457,6 +1464,38 @@ export class MeshOverlaySurface implements DisplaySurface {
     });
     this.takeGpuMeasurements(gpu.stats, lighting, job.post, adapting, sky !== null, sun && { x: sun.x / output.width, y: sun.y / output.height });
   }
+
+  /**
+   * Real-time GI (F3e), on the AAA tier under a rig that asks for it: the
+   * still scene the probes trace (with a key that changes with it), and the
+   * environment with the volume they relight — the rig's baked one, else an
+   * empty one over the scene's bounds, the same object frame after frame so
+   * the renderer keeps relighting it.
+   */
+  private liveGi(lighting: SceneLighting): { draw: NonNullable<GpuSceneDraw["dynamicGi"]>; environment: EnvironmentLight } | null {
+    const settings = this.renderer.sunCascades === true ? resolveDynamicGi(lighting.dynamicGi) : null;
+    const env = this.environment;
+    if (!settings || !env) return null;
+    if (!this.giState || this.giState.scene !== this.scene) {
+      const still = this.scene.instances.filter((inst) => {
+        const body = inst.physics?.body;
+        return !(inst.pooled || isSkinned(inst.mesh) || body === "dynamic" || body === "kinematic" || body === "character");
+      });
+      const b = this.scene.bounds;
+      const grid = dynamicGiGrid(b.min, b.max, settings.spacing);
+      const spacing = [0, 1, 2].map((a) => (grid.max[a]! - grid.min[a]!) / Math.max(1, grid.counts[a]! - 1));
+      this.giState = {
+        scene: this.scene,
+        occluders: still.map((inst) => ({ mesh: inst.mesh, model: inst.model })),
+        empty: emptyProbeVolume(grid.min, grid.max, grid.counts, 1.5 * Math.max(...spacing)),
+        env: null,
+      };
+    }
+    const state = this.giState;
+    if (state.env?.source !== env) state.env = { source: env, value: { ...env, probeVolume: env.probeVolume ?? state.empty } };
+    return { draw: { occluders: state.occluders, key: this.staticShadowKey(), settings }, environment: state.env.value };
+  }
+  private giState: { scene: MeshScene; occluders: { mesh: MeshAsset; model: Mat4 }[]; empty: ProbeVolume; env: { source: EnvironmentLight; value: EnvironmentLight } | null } | null = null;
 
   /** A physical sky as the presenter draws it (F5a): the medium, its sun above the air, and the disc as the eye sees it; null for a painted one. */
   private presentAtmosphere(): PresentSky["atmosphere"] {

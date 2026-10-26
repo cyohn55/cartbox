@@ -1,4 +1,4 @@
-import { MeshSceneInstance, MeshAsset, Mat4, ScenePropValue, PhysicsSpec, AnimatorSpec, AttachedComponent, SceneLighting, PhysicsWorldSettings, SceneTimeline, SceneLevel, NavMesh, Terrain, SceneStreaming, ParticleEffect, DecalDef, DecalMark, RagdollBox, DebrisDef, LodChain, SceneAudio, ComponentDef, StreamGroup, JointKind, JointSpec, ActionRebind, Atmosphere, SkyMoon, DecodedTexture, SkySun, BakedCloudLayer, SunShafts, ColorFilter, AccessibilitySettings, EncodedImage, UiDocument, InputAction, StringTable, ReflectionProbe, EnvironmentLight, ShadowInput, ToneMap, SceneLight, LocalShadows, ProjectedDecal, DecalTiles, SceneFog, SceneWind, RasterStyle, HdrLightmap, LightmapLayout, Occluder, ProbeVolume, OccluderSurface, MeshMaterial, ResolvedLayers, ResolvedRefraction, SurfaceEffect, AnimatorOp, NavGraph, AnimationCue } from '@cartbox/editor';
+import { MeshSceneInstance, MeshAsset, Mat4, ScenePropValue, PhysicsSpec, AnimatorSpec, AttachedComponent, SceneLighting, PhysicsWorldSettings, SceneTimeline, SceneLevel, NavMesh, Terrain, SceneStreaming, ParticleEffect, DecalDef, DecalMark, RagdollBox, DebrisDef, LodChain, SceneAudio, ComponentDef, StreamGroup, JointKind, JointSpec, ActionRebind, Atmosphere, SkyMoon, DecodedTexture, SkySun, BakedCloudLayer, SunShafts, ColorFilter, AccessibilitySettings, EncodedImage, UiDocument, InputAction, StringTable, ReflectionProbe, EnvironmentLight, ShadowInput, ToneMap, SceneLight, LocalShadows, ProjectedDecal, DecalTiles, Occluder, DynamicGi, SceneFog, SceneWind, RasterStyle, HdrLightmap, LightmapLayout, ProbeVolume, OccluderSurface, MeshMaterial, ResolvedLayers, ResolvedRefraction, SurfaceEffect, AnimatorOp, NavGraph, AnimationCue } from '@cartbox/editor';
 
 /**
  * The runtime mesh scene: the cart's mesh sidecar resolved into placed instances
@@ -4440,6 +4440,18 @@ interface SceneDraw {
      */
     readonly sunShadow?: SunShadow | null;
     /**
+     * Real-time GI (AAA_FIDELITY_ROADMAP.md F3e) on the linear-light (AAA)
+     * WebGPU renderer: the still scene its probes trace (a key that changes
+     * with it), and the settings. The volume it relights is the environment's
+     * probe volume, which every surface then takes its diffuse light from, the
+     * light-mapped ones too. The others ignore it.
+     */
+    readonly dynamicGi?: {
+        readonly occluders: readonly Occluder[];
+        readonly key: string;
+        readonly settings: DynamicGi;
+    } | null;
+    /**
      * A physical sky's air (AAA_FIDELITY_ROADMAP.md F5a-2): the medium and its
      * sun above the air, whose aerial perspective the linear-light (AAA) WebGPU
      * renderer lays over every surface, built for this draw's camera. The others
@@ -5117,6 +5129,10 @@ declare class WebgpuSceneRenderer implements SceneRenderer {
     private frameDepthView;
     /** Whether this frame's ambient light takes GTAO (F3c), for the frame uniform. */
     private frameGtao;
+    /** This frame's real-time GI (F3e), its tracer for the still scene it was made for, and the sky it traces. */
+    private frameGi;
+    private probeGi;
+    private giSky;
     /** This frame's volumetric fog (F5b), its volumes (made when a frame first has some) and the shader's terms. */
     private frameFog;
     private volumetricFog;
@@ -7443,6 +7459,15 @@ declare class MeshOverlaySurface implements DisplaySurface {
      * presenter measured a frame or two ago, as the byte path measures the bytes.
      */
     private presentOnGpu;
+    /**
+     * Real-time GI (F3e), on the AAA tier under a rig that asks for it: the
+     * still scene the probes trace (with a key that changes with it), and the
+     * environment with the volume they relight — the rig's baked one, else an
+     * empty one over the scene's bounds, the same object frame after frame so
+     * the renderer keeps relighting it.
+     */
+    private liveGi;
+    private giState;
     /** A physical sky as the presenter draws it (F5a): the medium, its sun above the air, and the disc as the eye sees it; null for a painted one. */
     private presentAtmosphere;
     /** The presenter's newest measurements into the lens flare and eye adaptation (the byte path's reportSun and frameLuminance). */

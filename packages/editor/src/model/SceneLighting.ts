@@ -17,6 +17,7 @@
  */
 
 import { parseVolumetricFog } from "./volumetricFog";
+import { parseDynamicGi, type DynamicGiSettings } from "./dynamicGi";
 import { parseAtmosphere } from "./atmosphere";
 import { parseWind, type SceneWind } from "./wind";
 import { decodeLightProbes, type LightProbeGrid, type StoredLightProbes } from "./lightProbes";
@@ -118,6 +119,12 @@ export interface SceneLighting {
    * tier lights things without a light map by. Absent = none.
    */
   readonly probeVolume?: StoredProbeVolume | null;
+  /**
+   * Real-time global illumination (AAA_FIDELITY_ROADMAP.md F3e; dynamicGi.ts):
+   * on the AAA tier, a probe volume traced and relit every frame, so moving
+   * lights and a time of day bounce without a bake. Absent = the baked light.
+   */
+  readonly dynamicGi?: DynamicGiSettings | null;
   /**
    * The armour colours for this scene (HALO_INFINITE_STYLE_ROADMAP.md I8): entry
    * k replaces tint k of the runtime's palette (1..15; entry 0 is unused), null
@@ -234,6 +241,7 @@ export function parseSceneLighting(raw: unknown): SceneLighting | null {
   // Kept only when it decodes: a bad grid is dropped, never half-used.
   const lightProbes = decodeLightProbes(record.lightProbes) ? (record.lightProbes as StoredLightProbes) : null;
   const probeVolume = decodeProbeVolume(record.probeVolume) ? (record.probeVolume as StoredProbeVolume) : null;
+  const dynamicGi = parseDynamicGi(record.dynamicGi);
 
   const lights = Array.isArray(record.lights)
     ? record.lights.map(parseLight).filter((l): l is SceneLight => l !== null)
@@ -267,6 +275,7 @@ export function parseSceneLighting(raw: unknown): SceneLighting | null {
     ...(shafts ? { shafts } : {}),
     ...(lightProbes ? { lightProbes } : {}),
     ...(probeVolume ? { probeVolume } : {}),
+    ...(dynamicGi ? { dynamicGi } : {}),
     ...(tints ? { tints } : {}),
     ...(postVolumes.length > 0 ? { postVolumes } : {}),
     ...(autoExposure ? { autoExposure } : {}),

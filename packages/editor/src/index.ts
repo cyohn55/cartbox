@@ -333,6 +333,7 @@ export {
   type SeamSample,
 } from "./model/lightmap";
 export { footprintMean, linearToAuthored, type OccluderSurface } from "./model/bakeSurface";
+export { dynamicGiGrid, parseDynamicGi, resolveDynamicGi, type DynamicGi, type DynamicGiSettings } from "./model/dynamicGi";
 export {
   FOG_MAX_X,
   FOG_MAX_Y,
@@ -423,6 +424,7 @@ export {
   encodeProbeVolume,
   octEncode,
   octTexel,
+  emptyProbeVolume,
   planProbeVolume,
   probeIrradiance,
   probeVolumeTexels,

@@ -11351,6 +11351,9 @@ import {
   atmosphereLuts,
   atmospherePanorama,
   atmospherePanoramaRows,
+  dynamicGiGrid,
+  emptyProbeVolume,
+  resolveDynamicGi,
   MOON_ALBEDO,
   sunTransmittance,
   atmosphereSun,
@@ -12049,6 +12052,7 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
     this.decodeKtx2 = async () => null;
     /** The renderer samples compressed formats, so baked KTX2 images decode in place of their PNGs (F1a). */
     this.compressedTextures = false;
+    this.giState = null;
     this.maskCache = /* @__PURE__ */ new WeakMap();
     /** The camera's eye this frame (terrain blocks pick their detail by distance from it). */
     this.eye = null;
@@ -12795,10 +12799,11 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
     this.renderer.resize?.(width, height);
     this.rendered = { width, height, scale: output.width > 0 ? width / output.width : 1 };
     const time = this.frame / 60;
+    const gi = lighting ? this.liveGi(lighting) : null;
     const lit = lighting ? {
       ambient: lighting.ambient,
       lightDirection: sceneLightingKeyDirection(lighting),
-      environment: this.environment,
+      environment: gi ? gi.environment : this.environment,
       tonemap: job.tonemap,
       lights: job.lights
     } : {};
@@ -12817,6 +12822,7 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
       ...job.reflectionCapture ? { reflectionCapture: job.reflectionCapture } : {},
       ...job.decals ? { decals: job.decals } : {},
       ...atmosphere ? { atmosphere } : {},
+      ...gi ? { dynamicGi: gi.draw } : {},
       time
     };
     const scene = this.renderer.renderToTexture(job.drawn, draw) ?? null;
@@ -12855,6 +12861,36 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
       measure: adapting || flare ? { luminance: adapting, sun: flare ? sun : null } : null
     });
     this.takeGpuMeasurements(gpu.stats, lighting, job.post, adapting, sky !== null, sun && { x: sun.x / output.width, y: sun.y / output.height });
+  }
+  /**
+   * Real-time GI (F3e), on the AAA tier under a rig that asks for it: the
+   * still scene the probes trace (with a key that changes with it), and the
+   * environment with the volume they relight — the rig's baked one, else an
+   * empty one over the scene's bounds, the same object frame after frame so
+   * the renderer keeps relighting it.
+   */
+  liveGi(lighting) {
+    const settings = this.renderer.sunCascades === true ? resolveDynamicGi(lighting.dynamicGi) : null;
+    const env = this.environment;
+    if (!settings || !env) return null;
+    if (!this.giState || this.giState.scene !== this.scene) {
+      const still = this.scene.instances.filter((inst) => {
+        const body = inst.physics?.body;
+        return !(inst.pooled || isSkinned2(inst.mesh) || body === "dynamic" || body === "kinematic" || body === "character");
+      });
+      const b = this.scene.bounds;
+      const grid = dynamicGiGrid(b.min, b.max, settings.spacing);
+      const spacing = [0, 1, 2].map((a) => (grid.max[a] - grid.min[a]) / Math.max(1, grid.counts[a] - 1));
+      this.giState = {
+        scene: this.scene,
+        occluders: still.map((inst) => ({ mesh: inst.mesh, model: inst.model })),
+        empty: emptyProbeVolume(grid.min, grid.max, grid.counts, 1.5 * Math.max(...spacing)),
+        env: null
+      };
+    }
+    const state = this.giState;
+    if (state.env?.source !== env) state.env = { source: env, value: { ...env, probeVolume: env.probeVolume ?? state.empty } };
+    return { draw: { occluders: state.occluders, key: this.staticShadowKey(), settings }, environment: state.env.value };
   }
   /** A physical sky as the presenter draws it (F5a): the medium, its sun above the air, and the disc as the eye sees it; null for a painted one. */
   presentAtmosphere() {
@@ -17777,11 +17813,11 @@ import {
   effectActive as effectActive4,
   resolveRefraction as resolveRefraction3,
   LIGHTMAP_DIRECTION_FLOOR,
-  LIGHTMAP_RANGE as LIGHTMAP_RANGE2,
-  PROBE_DEPTH_SIDE,
-  PROBE_NORMAL_BIAS,
-  PROBE_SH,
-  PROBE_VOLUME_SLOTS,
+  LIGHTMAP_RANGE as LIGHTMAP_RANGE3,
+  PROBE_DEPTH_SIDE as PROBE_DEPTH_SIDE2,
+  PROBE_NORMAL_BIAS as PROBE_NORMAL_BIAS2,
+  PROBE_SH as PROBE_SH3,
+  PROBE_VOLUME_SLOTS as PROBE_VOLUME_SLOTS2,
   probeVolumeTexels,
   aerialCamera as aerialCamera3,
   fogGrid,
@@ -18842,6 +18878,8 @@ var ProbeCapture = class {
         prepass: false,
         tonemap: null,
         reflectionCapture: null,
+        // The live GI's volume is the main renderer's; a capture takes the probes' light as they were given.
+        dynamicGi: null,
         environment: draw.environment ? { ...draw.environment, probes: null } : null,
         ...draw.sunShadow ? { sunShadow: { ...draw.sunShadow, casters: instances } } : {},
         ...draw.localShadowCasters ? { localShadowCasters: instances, localShadowKey: `probe:${this.key}`, localShadowMoved: [] } : {}
@@ -19854,6 +19892,1215 @@ var GpuAtmosphere = class {
     pass.setBindGroup(0, this.device.createBindGroup({ layout: pipeline.getBindGroupLayout(0), entries }));
     pass.dispatchWorkgroups(Math.ceil(width / 8), Math.ceil(height / 8));
     pass.end();
+  }
+};
+
+// src/render/dynamicGi.ts
+import { PROBE_NORMAL_BIAS, PROBE_SH as PROBE_SH2, PROBE_VOLUME_SLOTS } from "@cartbox/editor";
+
+// src/render/gpuLightmapper.ts
+import {
+  LIGHTMAP_RANGE as LIGHTMAP_RANGE2,
+  PROBE_DEPTH_SIDE,
+  PROBE_SH,
+  areaFrame as areaFrame3,
+  areaSize as areaSize3,
+  buildBvh,
+  dilateLightmapValues,
+  lightChannelMask as lightChannelMask3,
+  lightColor as lightColor3,
+  lightmapTexels,
+  spotCone as spotCone2,
+  stitchLightmapSeams
+} from "@cartbox/editor";
+var LIGHTMAP_MAX_BOUNCES = 8;
+var LIGHTMAP_MAX_LIGHTS = 4;
+var LIGHTMAP_MAX_LOCAL_LIGHTS = 256;
+var WORKGROUP = 64;
+var CHUNK_TEXELS = 65536;
+var PATHS_PER_SUBMIT = 1 << 19;
+function pathBudget(local) {
+  return Math.max(4096, Math.floor(PATHS_PER_SUBMIT / (1 + local / 16)));
+}
+var PARAMS_BYTES = 64;
+var LIGHT_VEC4S = 5;
+var PROBE_ACC_VEC4S = 10 + PROBE_DEPTH_SIDE * PROBE_DEPTH_SIDE;
+var ACC_FLOATS = 16;
+var STORAGE = 128;
+var COPY_DST = 8;
+var COPY_SRC = 4;
+var MAP_READ = 1;
+var UNIFORM2 = 64;
+function toLinear(c) {
+  const v = Math.max(0, c);
+  return v <= 0.04045 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4;
+}
+function bakeLights(lights) {
+  return lights.map((l) => {
+    const c = lightColor3(l);
+    return { ...l, radiance: [toLinear(c[0]) * l.intensity, toLinear(c[1]) * l.intensity, toLinear(c[2]) * l.intensity] };
+  });
+}
+var BAKE_LIGHT_KIND = { directional: 0, point: 1, spot: 2, rect: 3, disk: 4, tube: 5 };
+function packBakeLights(lights) {
+  const directional = lights.filter((l) => (l.kind ?? "directional") === "directional" && l.direction).slice(0, LIGHTMAP_MAX_LIGHTS);
+  const local = lights.filter((l) => l.kind !== void 0 && l.kind !== "directional").slice(0, LIGHTMAP_MAX_LOCAL_LIGHTS);
+  const data = new Float32Array(Math.max(1, directional.length + local.length) * LIGHT_VEC4S * 4);
+  [...directional, ...local].forEach((light, i) => {
+    const o = i * LIGHT_VEC4S * 4;
+    const kind = light.kind ?? "directional";
+    const channels = lightChannelMask3(light.channels ?? 1);
+    data.set([...light.radiance, channels], o + 4);
+    if (kind === "directional") {
+      const [x, y, z] = light.direction;
+      const len = Math.hypot(x, y, z) || 1;
+      data.set([x / len, y / len, z / len, BAKE_LIGHT_KIND.directional], o);
+      return;
+    }
+    data.set([...light.position ?? [0, 0, 0], kind === "area" ? BAKE_LIGHT_KIND[light.shape ?? "rect"] : BAKE_LIGHT_KIND[kind]], o);
+    if (kind === "area") {
+      const [w, h] = areaSize3(light);
+      const frame = areaFrame3(light);
+      data.set([0, w / 2, h / 2, 1], o + 8);
+      data.set([...frame.normal, 0], o + 12);
+      data.set([...frame.tangent, 0], o + 16);
+      return;
+    }
+    data[o + 8] = light.range ?? 0;
+    data[o + 11] = light.falloff === "inverseSquare" ? 1 : 0;
+    if (kind === "spot") {
+      const [cosOuter, cosInner] = spotCone2(light);
+      const axis = light.direction ?? [0, -1, 0];
+      const len = Math.hypot(axis[0], axis[1], axis[2]) || 1;
+      data.set([cosOuter, cosInner], o + 9);
+      data.set([axis[0] / len, axis[1] / len, axis[2] / len, 0], o + 12);
+    }
+  });
+  return { data, directional: directional.length, local: local.length };
+}
+async function bakeSurfaces(mesh, decode) {
+  const read = (image, data) => image && image.bytes.length > 0 ? decode(image, data).catch(() => null) : Promise.resolve(null);
+  return Promise.all(
+    mesh.primitives.map(async ({ material: m }) => {
+      const [base, metallicRoughness] = await Promise.all([read(m.baseColorImage, false), read(m.metallicRoughnessImage, true)]);
+      const pbr = resolvePbr(m, metallicRoughness !== null, !!m.occlusionImage, !!m.emissiveImage);
+      return { base, metallicRoughness, metallic: pbr.isPbr ? pbr.metallic : 0, roughness: pbr.roughness };
+    })
+  );
+}
+function packLightmapScene(occluders) {
+  const bvh = buildBvh(occluders);
+  const triangles = bvh.order.length;
+  const nodeCount = bvh.meta.length / 3;
+  const nodes = new Uint32Array(Math.max(1, nodeCount) * 8);
+  const bits = new Float32Array(nodes.buffer);
+  if (nodeCount === 0) {
+    bits.set([1, 1, 1], 0);
+    bits.set([-1, -1, -1], 4);
+    nodes[3] = 4294967295;
+  }
+  for (let n = 0; n < nodeCount; n += 1) {
+    for (let a = 0; a < 3; a += 1) {
+      bits[n * 8 + a] = bvh.nodes[n * 6 + a];
+      bits[n * 8 + 4 + a] = bvh.nodes[n * 6 + 3 + a];
+    }
+    const left = bvh.meta[n * 3];
+    nodes[n * 8 + 3] = (left >= 0 ? left : -1 - bvh.meta[n * 3 + 2]) >>> 0;
+    nodes[n * 8 + 7] = bvh.meta[n * 3 + 1] >>> 0;
+  }
+  const tris = new Float32Array(Math.max(1, triangles) * 12);
+  const mats = new Float32Array(Math.max(1, triangles) * 8);
+  const matBits = new Uint32Array(mats.buffer);
+  for (let i = 0; i < triangles; i += 1) {
+    const t = bvh.order[i];
+    const k = t * 9;
+    const metal = Math.min(1, Math.max(0, bvh.mr[t * 2]));
+    const bounce = 1 - metal + metal * Math.min(1, Math.max(0, bvh.mr[t * 2 + 1]));
+    for (let a = 0; a < 3; a += 1) {
+      tris[i * 12 + a * 4 + 3] = bvh.front[t * 3 + a];
+      tris[i * 12 + a] = bvh.tri[k + a];
+      tris[i * 12 + 4 + a] = bvh.tri[k + 3 + a] - bvh.tri[k + a];
+      tris[i * 12 + 8 + a] = bvh.tri[k + 6 + a] - bvh.tri[k + a];
+      mats[i * 8 + a] = toLinear(bvh.col[t * 3 + a]) * bounce;
+      mats[i * 8 + 4 + a] = toLinear(bvh.emi[t * 3 + a]);
+    }
+    matBits[i * 8 + 3] = bvh.channels[t];
+  }
+  return { nodes, tris, mats, triangles };
+}
+var LIGHTMAP_TRACE_WGSL = (
+  /* wgsl */
+  `
+struct Params {
+  run: vec4<u32>,   // x = first texel, y = texels, z = first sample, w = samples this pass
+  info: vec4<u32>,  // x = bounces, y = directional lights, z = sky width, w = sky height
+  total: vec4<u32>, // x = samples in all, y = point, spot and area lights (F3d-4)
+  extra: vec4<f32>, // x = a probe's depth cap (F3d-3)
+};
+@group(0) @binding(0) var<storage, read> nodes: array<vec4<u32>>;
+@group(0) @binding(1) var<storage, read> tris: array<vec4<f32>>;
+@group(0) @binding(2) var<storage, read> mats: array<vec4<f32>>;
+@group(0) @binding(3) var<storage, read> texels: array<vec4<f32>>;
+@group(0) @binding(4) var<storage, read_write> accum: array<vec4<f32>>;
+@group(0) @binding(5) var<storage, read> sky: array<vec4<f32>>;
+@group(0) @binding(6) var<uniform> params: Params;
+@group(0) @binding(7) var<storage, read> lights: array<vec4<f32>>;
+
+const PI = 3.14159265;
+// How far a ray starts off its surface, and the nearest hit it takes (metres).
+const EPS = 0.005;
+const T_MIN = 1e-4;
+const FAR = 1e30;
+
+struct Hit {
+  t: f32,
+  tri: i32,
+};
+
+// The closest hit along o + t\xB7d within tMax (or, with anyHit, the first found).
+fn trace(o: vec3<f32>, d: vec3<f32>, tMax: f32, anyHit: bool) -> Hit {
+  var best = Hit(tMax, -1);
+  let tiny = abs(d) < vec3<f32>(1e-9);
+  let inv = 1.0 / select(d, select(vec3<f32>(-1e-9), vec3<f32>(1e-9), d >= vec3<f32>(0.0)), tiny);
+  var stack: array<u32, 64>;
+  var sp = 1u;
+  stack[0] = 0u;
+  loop {
+    if (sp == 0u) { break; }
+    sp = sp - 1u;
+    let n = stack[sp];
+    let a = nodes[n * 2u];
+    let b = nodes[n * 2u + 1u];
+    let t0 = (bitcast<vec3<f32>>(a.xyz) - o) * inv;
+    let t1 = (bitcast<vec3<f32>>(b.xyz) - o) * inv;
+    let lo = min(t0, t1);
+    let hi = max(t0, t1);
+    let tn = max(max(lo.x, lo.y), max(lo.z, 0.0));
+    let tf = min(min(hi.x, hi.y), min(hi.z, best.t));
+    if (tn > tf) { continue; }
+    let left = bitcast<i32>(a.w);
+    if (left >= 0) {
+      if (sp + 2u <= 64u) {
+        stack[sp] = u32(left);
+        stack[sp + 1u] = b.w;
+        sp = sp + 2u;
+      }
+      continue;
+    }
+    let first = b.w;
+    let count = u32(-1 - left);
+    for (var i = first; i < first + count; i = i + 1u) {
+      // M\xF6ller\u2013Trumbore.
+      let v0 = tris[i * 3u].xyz;
+      let e1 = tris[i * 3u + 1u].xyz;
+      let e2 = tris[i * 3u + 2u].xyz;
+      let p = cross(d, e2);
+      let det = dot(e1, p);
+      if (abs(det) < 1e-12) { continue; }
+      let id = 1.0 / det;
+      let s = o - v0;
+      let u = dot(s, p) * id;
+      if (u < 0.0 || u > 1.0) { continue; }
+      let q = cross(s, e1);
+      let v = dot(d, q) * id;
+      if (v < 0.0 || u + v > 1.0) { continue; }
+      let t = dot(e2, q) * id;
+      if (t > T_MIN && t < best.t) {
+        best = Hit(t, i32(i));
+        if (anyHit) { return best; }
+      }
+    }
+  }
+  return best;
+}
+
+fn pcg(v: u32) -> u32 {
+  let s = v * 747796405u + 2891336453u;
+  let w = ((s >> ((s >> 28u) + 4u)) ^ s) * 277803737u;
+  return (w >> 22u) ^ w;
+}
+var<private> rng: u32;
+fn rand() -> f32 {
+  rng = pcg(rng);
+  return f32(rng >> 8u) / 16777216.0;
+}
+fn radicalInverse(i: u32) -> f32 {
+  return f32(reverseBits(i)) * 2.3283064365386963e-10;
+}
+
+// A cosine-weighted direction about n (Duff et al.'s branchless frame).
+fn cosineDir(n: vec3<f32>, xi: vec2<f32>) -> vec3<f32> {
+  let r = sqrt(xi.x);
+  let phi = 2.0 * PI * xi.y;
+  let sg = select(-1.0, 1.0, n.z >= 0.0);
+  let a = -1.0 / (sg + n.z);
+  let b = n.x * n.y * a;
+  let t = vec3<f32>(1.0 + sg * n.x * n.x * a, sg * b, -sg * n.x);
+  let bt = vec3<f32>(b, sg + n.y * n.y * a, -n.y);
+  return normalize(t * (r * cos(phi)) + bt * (r * sin(phi)) + n * sqrt(max(0.0, 1.0 - xi.x)));
+}
+
+// The sky along d: the panorama's texel (u around from \u2212x, v down from the zenith, as the IBL reads it).
+fn skyAt(d: vec3<f32>) -> vec3<f32> {
+  let w = params.info.z;
+  let h = params.info.w;
+  if (w == 0u) { return vec3<f32>(0.0); }
+  let u = atan2(d.z, d.x) / (2.0 * PI) + 0.5;
+  let v = acos(clamp(d.y, -1.0, 1.0)) / PI;
+  let x = min(u32(max(u, 0.0) * f32(w)), w - 1u);
+  let y = min(u32(max(v, 0.0) * f32(h)), h - 1u);
+  return sky[y * w + x].rgb;
+}
+
+fn lum(c: vec3<f32>) -> f32 {
+  return dot(c, vec3<f32>(0.2126, 0.7152, 0.0722));
+}
+
+// A unit direction's octahedral texel (probeVolume.ts's octTexel).
+fn octTexel(d: vec3<f32>) -> u32 {
+  var e = d.xz / (abs(d.x) + abs(d.y) + abs(d.z));
+  if (d.y < 0.0) { e = (vec2<f32>(1.0) - abs(e.yx)) * select(vec2<f32>(-1.0), vec2<f32>(1.0), e >= vec2<f32>(0.0)); }
+  let uv = e * 0.5 + vec2<f32>(0.5);
+  let x = min(u32(uv.x * ${PROBE_DEPTH_SIDE}.0), ${PROBE_DEPTH_SIDE - 1}u);
+  let y = min(u32(uv.y * ${PROBE_DEPTH_SIDE}.0), ${PROBE_DEPTH_SIDE - 1}u);
+  return y * ${PROBE_DEPTH_SIDE}u + x;
+}
+
+// A light's record (packBakeLights): five vec4s from its first.
+fn lightAt(l: u32, k: u32) -> vec4<f32> {
+  return lights[l * ${LIGHT_VEC4S}u + k];
+}
+
+// Whether light l lights a surface on the channels \`mask\` (F2e).
+fn lightsMask(l: u32, mask: u32) -> bool {
+  return (u32(lightAt(l, 1u).w + 0.5) & mask) != 0u;
+}
+
+// A point or spot light's falloff toward a point d away along Ld (the renderers' distanceFalloff, and the shader's cone).
+fn punctualAtten(l: u32, d: f32, Ld: vec3<f32>) -> f32 {
+  let r = lightAt(l, 2u);
+  var atten = 1.0;
+  if (r.w > 0.5) {
+    var win = 1.0;
+    if (r.x > 0.0) { let q = d / r.x; let t = clamp(1.0 - q * q * q * q, 0.0, 1.0); win = t * t; }
+    let dm = max(d, 0.01);
+    atten = win / (dm * dm);
+  } else if (r.x > 0.0) {
+    let t = max(0.0, 1.0 - d / r.x);
+    atten = t * t;
+  }
+  if (lightAt(l, 0u).w > 1.5) {
+    let ct = clamp((-dot(Ld, lightAt(l, 3u).xyz) - r.y) / (r.z - r.y), 0.0, 1.0);
+    atten = atten * ct * ct * (3.0 - 2.0 * ct);
+  }
+  return atten;
+}
+
+// What local light l would give a surface at p facing n, unshadowed, by luminance: how likely it is to be picked.
+// An area light is taken as the point at its centre it is from far off.
+fn localWeight(l: u32, p: vec3<f32>, n: vec3<f32>, mask: u32) -> f32 {
+  if (!lightsMask(l, mask)) { return 0.0; }
+  let a = lightAt(l, 0u);
+  let toL = a.xyz - p;
+  let d = max(length(toL), 1e-4);
+  let Ld = toL / d;
+  let ndl = max(dot(n, Ld), 0.0);
+  let power = lum(lightAt(l, 1u).rgb);
+  if (a.w < 2.5) { return power * punctualAtten(l, d, Ld) * ndl; }
+  let r = lightAt(l, 2u);
+  var area = 4.0 * r.y * r.z;
+  var facing = 1.0;
+  if (a.w > 4.5) { area = 2.0 * r.y * 2.0 * r.z + PI * r.z * r.z; }
+  else {
+    facing = max(-dot(Ld, lightAt(l, 3u).xyz), 0.0);
+    if (a.w > 3.5) { area = PI * r.y * r.y; }
+  }
+  let dm = max(d, 0.1);
+  return power * area * facing * max(ndl, 0.05) / (PI * dm * dm);
+}
+
+struct LightSample {
+  c: vec3<f32>,  // what it gives the surface, unshadowed
+  dir: vec3<f32>,
+  dist: f32,
+};
+
+// Local light l's light on a surface at p facing n: a point or spot light's, or an area light's through one point
+// on it (uniform on its rectangle or disk, or on the rectangle a tube shows p, as the LTC shader takes it).
+fn localSample(l: u32, p: vec3<f32>, n: vec3<f32>) -> LightSample {
+  var out = LightSample(vec3<f32>(0.0), vec3<f32>(0.0, 1.0, 0.0), 0.0);
+  let a = lightAt(l, 0u);
+  let rad = lightAt(l, 1u).rgb;
+  if (a.w < 2.5) {
+    let toL = a.xyz - p;
+    let d = max(length(toL), 1e-4);
+    out.dir = toL / d;
+    out.dist = d;
+    out.c = rad * punctualAtten(l, d, out.dir) * max(dot(n, out.dir), 0.0);
+    return out;
+  }
+  let r = lightAt(l, 2u);
+  let tan = lightAt(l, 4u).xyz;
+  var nrm = lightAt(l, 3u).xyz;
+  var hw = r.y;
+  let hh = r.z;
+  let toP = p - a.xyz;
+  if (a.w > 4.5) {
+    let off = toP - tan * dot(toP, tan);
+    nrm = select(normalize(cross(tan, select(vec3<f32>(1.0, 0.0, 0.0), vec3<f32>(0.0, 1.0, 0.0), abs(tan.y) < 0.9))), normalize(off), length(off) > 1e-5);
+    hw = hw + 0.78539816 * hh;
+  } else if (dot(toP, nrm) <= 0.0) {
+    return out;
+  }
+  let bt = cross(nrm, tan);
+  let xi = vec2<f32>(rand(), rand());
+  var s: vec3<f32>;
+  var area: f32;
+  if (a.w > 3.5 && a.w < 4.5) {
+    let rr = hw * sqrt(xi.x);
+    let phi = 2.0 * PI * xi.y;
+    s = a.xyz + tan * (rr * cos(phi)) + bt * (rr * sin(phi));
+    area = PI * hw * hw;
+  } else {
+    s = a.xyz + tan * (hw * (2.0 * xi.x - 1.0)) + bt * (hh * (2.0 * xi.y - 1.0));
+    area = 4.0 * hw * hh;
+  }
+  let toS = s - p;
+  let d = max(length(toS), 1e-4);
+  out.dir = toS / d;
+  out.dist = d;
+  let cosS = dot(n, out.dir);
+  let cosL = -dot(out.dir, nrm);
+  if (cosS > 0.0 && cosL > 0.0) { out.c = rad * (cosS * cosL * area / (PI * max(d * d, 1e-4))); }
+  return out;
+}
+
+// The lights on a surface a path bounced off at p, facing n, on the channels \`mask\`: every directional light, and one
+// local light picked by localWeight (a tenth of the choice spread evenly), over the chance of picking it.
+fn lightsOn(p: vec3<f32>, n: vec3<f32>, mask: u32) -> vec3<f32> {
+  var L = vec3<f32>(0.0);
+  let directional = params.info.y;
+  for (var l = 0u; l < directional; l = l + 1u) {
+    if (!lightsMask(l, mask)) { continue; }
+    let Ld = lightAt(l, 0u).xyz;
+    let ndl = dot(n, Ld);
+    if (ndl > 0.0 && trace(p, Ld, FAR, true).tri < 0) {
+      L = L + lightAt(l, 1u).rgb * ndl;
+    }
+  }
+  let local = params.total.y;
+  if (local == 0u) { return L; }
+  var total = 0.0;
+  for (var k = 0u; k < local; k = k + 1u) { total = total + localWeight(directional + k, p, n, mask); }
+  let even = select(1.0, 0.1, total > 0.0) / f32(local);
+  let spread = select(0.0, 0.9 / total, total > 0.0);
+  let u = rand();
+  var pick = local - 1u;
+  var pdf = 0.0;
+  var cdf = 0.0;
+  for (var k = 0u; k < local; k = k + 1u) {
+    pdf = localWeight(directional + k, p, n, mask) * spread + even;
+    cdf = cdf + pdf;
+    if (u < cdf) { pick = k; break; }
+  }
+  if (pick == local - 1u) { pdf = localWeight(directional + pick, p, n, mask) * spread + even; }
+  let l = directional + pick;
+  if (!lightsMask(l, mask)) { return L; }
+  let ls = localSample(l, p, n);
+  if (max(ls.c.r, max(ls.c.g, ls.c.b)) > 0.0 && trace(p, ls.dir, ls.dist - EPS, true).tri < 0) {
+    L = L + ls.c / pdf;
+  }
+  return L;
+}
+
+struct Path {
+  L: vec3<f32>,
+  // The first segment's hit distance (FAR when it reached the sky), and whether it met the back of a surface (F3d-2).
+  t: f32,
+  back: bool,
+};
+
+// What a path from o along d brings back: the sky on a miss; on a hit, the surface's emission, and (while
+// bounces remain) the lights on it and what a cosine-weighted bounce off it gathers.
+fn pathFrom(origin: vec3<f32>, dir: vec3<f32>) -> Path {
+  let bounces = params.info.x;
+  var out = Path(vec3<f32>(0.0), FAR, false);
+  var tp = vec3<f32>(1.0);
+  var o = origin;
+  var d = dir;
+  for (var b = 0u; b <= bounces; b = b + 1u) {
+    let h = trace(o, d, FAR, false);
+    if (h.tri < 0) {
+      out.L = out.L + tp * skyAt(d);
+      break;
+    }
+    let i = u32(h.tri);
+    if (b == 0u) {
+      out.t = h.t;
+      out.back = dot(d, vec3<f32>(tris[i * 3u].w, tris[i * 3u + 1u].w, tris[i * 3u + 2u].w)) > 0.0;
+    }
+    out.L = out.L + tp * mats[i * 2u + 1u].rgb;
+    if (b == bounces) { break; }
+    var n = normalize(cross(tris[i * 3u + 1u].xyz, tris[i * 3u + 2u].xyz));
+    if (dot(n, d) > 0.0) { n = -n; } // the side the path arrived on (surfaces are two-sided)
+    let hp = o + d * h.t + n * EPS;
+    tp = tp * mats[i * 2u].rgb;
+    out.L = out.L + tp * lightsOn(hp, n, bitcast<u32>(mats[i * 2u].w));
+    if (max(tp.r, max(tp.g, tp.b)) < 1e-4) { break; }
+    o = hp;
+    d = cosineDir(n, vec2<f32>(rand(), rand()));
+  }
+  return out;
+}
+
+@compute @workgroup_size(${WORKGROUP})
+fn main(@builtin(global_invocation_id) id: vec3<u32>) {
+  if (id.x >= params.run.y) { return; }
+  let j = params.run.x + id.x;
+  let P = texels[j * 2u].xyz;
+  let Ng = normalize(texels[j * 2u + 1u].xyz);
+  // The first bounce's directions: one stratified set for the bake, turned per texel (Cranley\u2013Patterson).
+  let turn = vec2<f32>(f32(pcg(j * 2u + 1u) >> 8u), f32(pcg(j * 2u + 2u) >> 8u)) / 16777216.0;
+  var e = vec3<f32>(0.0);
+  var dirSum = vec3<f32>(0.0);
+  var lumSum = 0.0;
+  var skyRef = vec3<f32>(0.0);
+  var skyOpen = 0.0;
+  var lumSq = 0.0;
+  var backs = 0.0;
+  for (var k = 0u; k < params.run.w; k = k + 1u) {
+    let s = params.run.z + k;
+    rng = pcg(j ^ pcg(s + 0x9e3779b9u));
+    let xi = fract(vec2<f32>(f32(s) / f32(params.total.x), radicalInverse(s)) + turn);
+    let d0 = cosineDir(Ng, xi);
+    let sky0 = skyAt(d0);
+    skyRef = skyRef + sky0;
+    let path = pathFrom(P + Ng * EPS, d0);
+    if (path.t >= FAR) { skyOpen = skyOpen + lum(sky0); }
+    if (path.back) { backs = backs + 1.0; }
+    e = e + path.L;
+    let y = lum(path.L);
+    dirSum = dirSum + d0 * y;
+    lumSum = lumSum + y;
+    lumSq = lumSq + y * y;
+  }
+  accum[j * 4u] = accum[j * 4u] + vec4<f32>(e, 0.0);
+  accum[j * 4u + 1u] = accum[j * 4u + 1u] + vec4<f32>(dirSum, lumSum);
+  accum[j * 4u + 2u] = accum[j * 4u + 2u] + vec4<f32>(skyRef, skyOpen);
+  accum[j * 4u + 3u] = accum[j * 4u + 3u] + vec4<f32>(lumSq, backs, 0.0, 0.0);
+}
+
+// A probe (F3d-3): rays over the whole sphere (a Fibonacci set for the bake, turned per probe about the
+// vertical), projected onto L2 SH; the sky's share; backs met; and per octahedral texel the distance the
+// first segment travelled (capped), with its square.
+@compute @workgroup_size(${WORKGROUP})
+fn probeMain(@builtin(global_invocation_id) id: vec3<u32>) {
+  if (id.x >= params.run.y) { return; }
+  let p = params.run.x + id.x;
+  let P = texels[p].xyz;
+  let total = params.total.x;
+  let reach = params.extra.x;
+  let turn = f32(pcg(p * 2u + 11u) >> 8u) / 16777216.0 * 2.0 * PI;
+  var sh = array<vec3<f32>, 9>();
+  var skyRef = 0.0;
+  var skyOpen = 0.0;
+  var backs = 0.0;
+  let base = p * ${PROBE_ACC_VEC4S}u;
+  for (var k = 0u; k < params.run.w; k = k + 1u) {
+    let s = params.run.z + k;
+    rng = pcg(p ^ pcg(s + 0x85ebca6bu));
+    let y = 1.0 - (2.0 * f32(s) + 1.0) / f32(total);
+    let r = sqrt(max(0.0, 1.0 - y * y));
+    let phi = f32(s) * 2.39996323 + turn;
+    let d = vec3<f32>(r * cos(phi), y, r * sin(phi));
+    let path = pathFrom(P, d);
+    let L = path.L;
+    sh[0] = sh[0] + L * 0.282095;
+    sh[1] = sh[1] + L * (0.488603 * d.y);
+    sh[2] = sh[2] + L * (0.488603 * d.z);
+    sh[3] = sh[3] + L * (0.488603 * d.x);
+    sh[4] = sh[4] + L * (1.092548 * d.x * d.y);
+    sh[5] = sh[5] + L * (1.092548 * d.y * d.z);
+    sh[6] = sh[6] + L * (0.315392 * (3.0 * d.z * d.z - 1.0));
+    sh[7] = sh[7] + L * (1.092548 * d.x * d.z);
+    sh[8] = sh[8] + L * (0.546274 * (d.x * d.x - d.y * d.y));
+    let sl = lum(skyAt(d));
+    skyRef = skyRef + sl;
+    if (path.t >= FAR) { skyOpen = skyOpen + sl; }
+    if (path.back) { backs = backs + 1.0; }
+    let t = min(path.t, reach);
+    let texel = octTexel(d);
+    accum[base + 10u + texel] = accum[base + 10u + texel] + vec4<f32>(t, t * t, 1.0, 0.0);
+  }
+  for (var c = 0u; c < 9u; c = c + 1u) { accum[base + c] = accum[base + c] + vec4<f32>(sh[c], 0.0); }
+  accum[base + 9u] = accum[base + 9u] + vec4<f32>(skyRef, skyOpen, backs, f32(params.run.w));
+}
+`
+);
+var luminance = (r, g, b) => 0.2126 * r + 0.7152 * g + 0.0722 * b;
+function lightmapParams(first, texels, firstSample, samples, total, bounces, sky, lights, reach = 0) {
+  const buffer = new ArrayBuffer(PARAMS_BYTES);
+  new Uint32Array(buffer).set([first, texels, firstSample, samples, bounces, lights.directional, sky?.width ?? 0, sky?.height ?? 0, total, lights.local], 0);
+  new Float32Array(buffer)[12] = reach;
+  return buffer;
+}
+async function bakeLightmapGpu(device, layout, occluders, options = {}, progress) {
+  const samples = Math.max(1, Math.round(options.samples ?? 256));
+  const bounces = Math.max(0, Math.min(LIGHTMAP_MAX_BOUNCES, Math.round(options.bounces ?? 3)));
+  const sky = options.sky ?? null;
+  const lights = packBakeLights(options.lights ?? []);
+  const texels = lightmapTexels(layout);
+  const count = texels.index.length;
+  const acc = new Float32Array(count * ACC_FLOATS);
+  if (count > 0) {
+    const scene = packLightmapScene(occluders);
+    const points = new Float32Array(count * 8);
+    for (let j = 0; j < count; j += 1) {
+      for (let a = 0; a < 3; a += 1) {
+        points[j * 8 + a] = texels.position[j * 3 + a];
+        points[j * 8 + 4 + a] = texels.normal[j * 3 + a];
+      }
+    }
+    const upload = (data) => {
+      const buffer = device.createBuffer({ size: Math.max(16, data.byteLength), usage: STORAGE | COPY_DST });
+      device.queue.writeBuffer(buffer, 0, data.buffer, data.byteOffset, data.byteLength);
+      return buffer;
+    };
+    const skyData = sky ? sky.data : new Float32Array(4);
+    const buffers = [upload(scene.nodes), upload(scene.tris), upload(scene.mats), upload(points)];
+    const accum = device.createBuffer({ size: acc.byteLength, usage: STORAGE | COPY_SRC });
+    const skyBuffer = upload(skyData);
+    const lightBuffer = upload(lights.data);
+    const params = device.createBuffer({ size: PARAMS_BYTES, usage: UNIFORM2 | COPY_DST });
+    const readback = device.createBuffer({ size: acc.byteLength, usage: MAP_READ | COPY_DST });
+    try {
+      const pipeline = device.createComputePipeline({ layout: "auto", compute: { module: device.createShaderModule({ code: LIGHTMAP_TRACE_WGSL }), entryPoint: "main" } });
+      const group = device.createBindGroup({
+        layout: pipeline.getBindGroupLayout(0),
+        entries: [...buffers, accum, skyBuffer].map((buffer, binding) => ({ binding, resource: { buffer } })).concat([{ binding: 6, resource: { buffer: params } }, { binding: 7, resource: { buffer: lightBuffer } }])
+      });
+      const budget = pathBudget(lights.local);
+      const chunk = Math.min(count, CHUNK_TEXELS, budget);
+      const perPass = Math.max(1, Math.min(samples, Math.floor(budget / chunk)));
+      const submits = Math.ceil(samples / perPass) * Math.ceil(count / chunk);
+      let done = 0;
+      for (let s = 0; s < samples; s += perPass) {
+        const n = Math.min(perPass, samples - s);
+        for (let first = 0; first < count; first += chunk) {
+          const texelsHere = Math.min(chunk, count - first);
+          device.queue.writeBuffer(params, 0, lightmapParams(first, texelsHere, s, n, samples, bounces, sky, lights));
+          const encoder2 = device.createCommandEncoder();
+          const pass = encoder2.beginComputePass();
+          pass.setPipeline(pipeline);
+          pass.setBindGroup(0, group);
+          pass.dispatchWorkgroups(Math.ceil(texelsHere / WORKGROUP));
+          pass.end();
+          device.queue.submit([encoder2.finish()]);
+          await device.queue.onSubmittedWorkDone();
+          done += 1;
+          progress?.(done / submits);
+        }
+      }
+      const encoder = device.createCommandEncoder();
+      encoder.copyBufferToBuffer(accum, 0, readback, 0, acc.byteLength);
+      device.queue.submit([encoder.finish()]);
+      await readback.mapAsync(MAP_READ);
+      acc.set(new Float32Array(readback.getMappedRange()));
+      readback.unmap();
+    } finally {
+      for (const buffer of [...buffers, accum, skyBuffer, lightBuffer, params, readback]) buffer.destroy();
+    }
+  }
+  const atlas = resolveLightmap(texels, acc, samples, options.backfaceLimit ?? 0.6);
+  if (count > 0 && options.denoise !== false) await denoiseLightmap(device, atlas, 1 / layout.density);
+  progress?.(1);
+  return finishLightmap(layout, atlas, options.stitch !== false);
+}
+function resolveLightmap(texels, acc, samples, backfaceLimit) {
+  const { size, index } = texels;
+  const values = new Float32Array(size * size * 12);
+  const guide = new Float32Array(size * size * 8);
+  const valid = new Int32Array(size * size).fill(-1);
+  let invalid = 0;
+  for (let j = 0; j < index.length; j += 1) {
+    const i = index[j];
+    const o = j * ACC_FLOATS;
+    if (acc[o + 13] > backfaceLimit * samples) {
+      invalid += 1;
+      continue;
+    }
+    valid[i] = texels.chart[i];
+    const v = i * 12;
+    for (let c = 0; c < 3; c += 1) values[v + c] = acc[o + c] / samples;
+    const mean = acc[o + 7] / samples;
+    values[v + 3] = Math.max(0, acc[o + 12] / samples - mean * mean) / samples;
+    const w = acc[o + 7];
+    for (let c = 0; c < 3; c += 1) values[v + 4 + c] = w > 1e-12 ? acc[o + 4 + c] / w : 0;
+    const ref = luminance(acc[o + 8], acc[o + 9], acc[o + 10]);
+    values[v + 7] = ref > 1e-12 ? Math.min(1, acc[o + 11] / ref) : 1;
+    for (let c = 0; c < 3; c += 1) {
+      const open = acc[o + 8 + c] / samples;
+      values[v + 8 + c] = open > 1e-6 ? Math.min(LIGHTMAP_RANGE2, values[v + c] / open) : 1;
+    }
+    for (let c = 0; c < 3; c += 1) {
+      guide[i * 8 + c] = texels.position[j * 3 + c];
+      guide[i * 8 + 4 + c] = texels.normal[j * 3 + c];
+    }
+    guide[i * 8 + 3] = 1;
+  }
+  return { size, values, valid, guide, invalid };
+}
+var DENOISE_PASSES = 4;
+var DENOISE_SIGMA = 1.5;
+var LIGHTMAP_DENOISE_WGSL = (
+  /* wgsl */
+  `
+struct Params {
+  size: u32,
+  step: u32,
+  texel: f32, // world units per texel
+  sigma: f32,
+};
+@group(0) @binding(0) var<storage, read> guide: array<vec4<f32>>;
+@group(0) @binding(1) var<storage, read> src: array<vec4<f32>>;
+@group(0) @binding(2) var<storage, read_write> dst: array<vec4<f32>>;
+@group(0) @binding(3) var<uniform> params: Params;
+
+fn lum(c: vec3<f32>) -> f32 {
+  return dot(c, vec3<f32>(0.2126, 0.7152, 0.0722));
+}
+
+@compute @workgroup_size(8, 8, 1)
+fn main(@builtin(global_invocation_id) id: vec3<u32>) {
+  let size = params.size;
+  if (id.x >= size || id.y >= size) { return; }
+  let i = id.y * size + id.x;
+  let a0 = src[i * 3u];
+  let a1 = src[i * 3u + 1u];
+  let a2 = src[i * 3u + 2u];
+  let g = guide[i * 2u];
+  if (g.w < 0.5) {
+    dst[i * 3u] = a0;
+    dst[i * 3u + 1u] = a1;
+    dst[i * 3u + 2u] = a2;
+    return;
+  }
+  let p = g.xyz;
+  let n = guide[i * 2u + 1u].xyz;
+  let l = lum(a0.rgb);
+  // The variance the luminance stop is scaled by, prefiltered over the texel's 3\xD73 (SVGF): a few paths' estimate is noisy itself.
+  var vsum = 0.0;
+  var vw = 0.0;
+  for (var vy = -1; vy <= 1; vy = vy + 1) {
+    for (var vx = -1; vx <= 1; vx = vx + 1) {
+      let qx = i32(id.x) + vx;
+      let qy = i32(id.y) + vy;
+      if (qx < 0 || qy < 0 || qx >= i32(size) || qy >= i32(size)) { continue; }
+      let j = u32(qy) * size + u32(qx);
+      if (guide[j * 2u].w < 0.5) { continue; }
+      let k = select(0.5, 1.0, vx == 0) * select(0.5, 1.0, vy == 0);
+      vsum = vsum + src[j * 3u].w * k;
+      vw = vw + k;
+    }
+  }
+  let sigma = params.sigma * sqrt(max(vsum / vw, 0.0)) + 1e-4;
+  // Farther than this in the world, a texel the kernel reaches is on another chart that merely sits beside this one in the atlas.
+  let reach = (2.83 * f32(params.step) + 1.5) * params.texel;
+  var kernel = array<f32, 5>(0.0625, 0.25, 0.375, 0.25, 0.0625);
+  var s0 = vec3<f32>(0.0);
+  var sv = 0.0;
+  var s1 = vec4<f32>(0.0);
+  var s2 = vec4<f32>(0.0);
+  var ws = 0.0;
+  for (var dy = -2; dy <= 2; dy = dy + 1) {
+    for (var dx = -2; dx <= 2; dx = dx + 1) {
+      let qx = i32(id.x) + dx * i32(params.step);
+      let qy = i32(id.y) + dy * i32(params.step);
+      if (qx < 0 || qy < 0 || qx >= i32(size) || qy >= i32(size)) { continue; }
+      let j = u32(qy) * size + u32(qx);
+      let gq = guide[j * 2u];
+      if (gq.w < 0.5) { continue; }
+      let dp = gq.xyz - p;
+      if (length(dp) > reach) { continue; }
+      let b0 = src[j * 3u];
+      let wn = pow(max(0.0, dot(n, guide[j * 2u + 1u].xyz)), 32.0);
+      let wp = exp(-abs(dot(dp, n)) / params.texel);
+      let wl = exp(-abs(lum(b0.rgb) - l) / sigma);
+      let w = kernel[dx + 2] * kernel[dy + 2] * wn * wp * wl;
+      s0 = s0 + b0.rgb * w;
+      sv = sv + b0.w * w * w;
+      s1 = s1 + src[j * 3u + 1u] * w;
+      s2 = s2 + src[j * 3u + 2u] * w;
+      ws = ws + w;
+    }
+  }
+  // The texel itself always weighs in, so ws > 0.
+  dst[i * 3u] = vec4<f32>(s0 / ws, sv / (ws * ws));
+  dst[i * 3u + 1u] = s1 / ws;
+  dst[i * 3u + 2u] = s2 / ws;
+}
+`
+);
+async function denoiseLightmap(device, atlas, texel, passes = DENOISE_PASSES, sigma = DENOISE_SIGMA) {
+  const { size, values, guide } = atlas;
+  const guideBuffer = device.createBuffer({ size: guide.byteLength, usage: STORAGE | COPY_DST });
+  device.queue.writeBuffer(guideBuffer, 0, guide.buffer, guide.byteOffset, guide.byteLength);
+  const ping = [0, 1].map(() => device.createBuffer({ size: values.byteLength, usage: STORAGE | COPY_DST | COPY_SRC }));
+  device.queue.writeBuffer(ping[0], 0, values.buffer, values.byteOffset, values.byteLength);
+  const params = device.createBuffer({ size: 16, usage: UNIFORM2 | COPY_DST });
+  const readback = device.createBuffer({ size: values.byteLength, usage: MAP_READ | COPY_DST });
+  try {
+    const pipeline = device.createComputePipeline({ layout: "auto", compute: { module: device.createShaderModule({ code: LIGHTMAP_DENOISE_WGSL }), entryPoint: "main" } });
+    const groups = [0, 1].map(
+      (k) => device.createBindGroup({
+        layout: pipeline.getBindGroupLayout(0),
+        entries: [
+          { binding: 0, resource: { buffer: guideBuffer } },
+          { binding: 1, resource: { buffer: ping[k] } },
+          { binding: 2, resource: { buffer: ping[1 - k] } },
+          { binding: 3, resource: { buffer: params } }
+        ]
+      })
+    );
+    for (let pass = 0; pass < passes; pass += 1) {
+      const p = new ArrayBuffer(16);
+      new Uint32Array(p).set([size, 1 << pass]);
+      new Float32Array(p).set([texel, sigma], 2);
+      device.queue.writeBuffer(params, 0, p);
+      const encoder2 = device.createCommandEncoder();
+      const compute = encoder2.beginComputePass();
+      compute.setPipeline(pipeline);
+      compute.setBindGroup(0, groups[pass % 2]);
+      compute.dispatchWorkgroups(Math.ceil(size / 8), Math.ceil(size / 8));
+      compute.end();
+      device.queue.submit([encoder2.finish()]);
+      await device.queue.onSubmittedWorkDone();
+    }
+    const encoder = device.createCommandEncoder();
+    encoder.copyBufferToBuffer(ping[passes % 2], 0, readback, 0, values.byteLength);
+    device.queue.submit([encoder.finish()]);
+    await readback.mapAsync(MAP_READ);
+    values.set(new Float32Array(readback.getMappedRange()));
+    readback.unmap();
+  } finally {
+    for (const buffer of [guideBuffer, ...ping, params, readback]) buffer.destroy();
+  }
+}
+function finishLightmap(layout, atlas, stitch = true) {
+  const { size, values, valid } = atlas;
+  dilateLightmapValues(values, valid, size, 12);
+  const seams = stitch ? stitchLightmapSeams(layout, values, 12) : 0;
+  const texels = size * size;
+  const irradiance = new Float32Array(texels * 3);
+  const direction = new Float32Array(texels * 4);
+  const ambient = new Uint8ClampedArray(texels * 4);
+  const q = (x) => Math.min(255, Math.round(Math.max(0, x) / LIGHTMAP_RANGE2 * 127.5) * 2);
+  for (let i = 0; i < texels; i += 1) {
+    const v = i * 12;
+    for (let c = 0; c < 3; c += 1) irradiance[i * 3 + c] = Math.max(0, values[v + c]);
+    const length = Math.hypot(values[v + 4], values[v + 5], values[v + 6]);
+    const k = length > 1 ? 1 / length : 1;
+    direction.set([values[v + 4] * k, values[v + 5] * k, values[v + 6] * k, Math.min(1, Math.max(0, values[v + 7]))], i * 4);
+    ambient.set([q(values[v + 8]), q(values[v + 9]), q(values[v + 10]), 255], i * 4);
+  }
+  return { hdr: { width: size, height: size, irradiance, direction }, ambient, invalid: atlas.invalid, seams };
+}
+var COSINE_BANDS2 = [1, 2 / 3, 2 / 3, 2 / 3, 1 / 4, 1 / 4, 1 / 4, 1 / 4, 1 / 4];
+async function bakeProbeVolumeGpu(device, min, max, counts, occluders, options = {}, progress) {
+  const rays = Math.max(16, Math.round(options.rays ?? 1024));
+  const bounces = Math.max(0, Math.min(LIGHTMAP_MAX_BOUNCES, Math.round(options.bounces ?? 3)));
+  const sky = options.sky ?? null;
+  const lights = packBakeLights(options.lights ?? []);
+  const [cx, cy, cz] = counts;
+  const count = cx * cy * cz;
+  const spacing = [0, 1, 2].map((a) => (max[a] - min[a]) / Math.max(1, counts[a] - 1));
+  const reach = 1.5 * Math.max(...spacing, 1e-3);
+  const positions = new Float32Array(count * 4);
+  for (let z = 0; z < cz; z += 1) for (let y = 0; y < cy; y += 1) for (let x = 0; x < cx; x += 1) {
+    const p = (z * cy + y) * cx + x;
+    positions.set([min[0] + x * spacing[0], min[1] + y * spacing[1], min[2] + z * spacing[2], 1], p * 4);
+  }
+  const acc = new Float32Array(count * PROBE_ACC_VEC4S * 4);
+  const scene = packLightmapScene(occluders);
+  const upload = (data) => {
+    const buffer = device.createBuffer({ size: Math.max(16, data.byteLength), usage: STORAGE | COPY_DST });
+    device.queue.writeBuffer(buffer, 0, data.buffer, data.byteOffset, data.byteLength);
+    return buffer;
+  };
+  const buffers = [upload(scene.nodes), upload(scene.tris), upload(scene.mats), upload(positions)];
+  const accum = device.createBuffer({ size: acc.byteLength, usage: STORAGE | COPY_SRC });
+  const skyBuffer = upload(sky ? sky.data : new Float32Array(4));
+  const lightBuffer = upload(lights.data);
+  const params = device.createBuffer({ size: PARAMS_BYTES, usage: UNIFORM2 | COPY_DST });
+  const readback = device.createBuffer({ size: acc.byteLength, usage: MAP_READ | COPY_DST });
+  try {
+    const pipeline = device.createComputePipeline({ layout: "auto", compute: { module: device.createShaderModule({ code: LIGHTMAP_TRACE_WGSL }), entryPoint: "probeMain" } });
+    const group = device.createBindGroup({
+      layout: pipeline.getBindGroupLayout(0),
+      entries: [...buffers, accum, skyBuffer].map((buffer, binding) => ({ binding, resource: { buffer } })).concat([{ binding: 6, resource: { buffer: params } }, { binding: 7, resource: { buffer: lightBuffer } }])
+    });
+    const perPass = Math.max(1, Math.min(rays, Math.floor(pathBudget(lights.local) / count)));
+    const submits = Math.ceil(rays / perPass);
+    for (let s = 0, done = 0; s < rays; s += perPass) {
+      device.queue.writeBuffer(params, 0, lightmapParams(0, count, s, Math.min(perPass, rays - s), rays, bounces, sky, lights, reach));
+      const encoder2 = device.createCommandEncoder();
+      const pass = encoder2.beginComputePass();
+      pass.setPipeline(pipeline);
+      pass.setBindGroup(0, group);
+      pass.dispatchWorkgroups(Math.ceil(count / WORKGROUP));
+      pass.end();
+      device.queue.submit([encoder2.finish()]);
+      await device.queue.onSubmittedWorkDone();
+      done += 1;
+      progress?.(done / submits);
+    }
+    const encoder = device.createCommandEncoder();
+    encoder.copyBufferToBuffer(accum, 0, readback, 0, acc.byteLength);
+    device.queue.submit([encoder.finish()]);
+    await readback.mapAsync(MAP_READ);
+    acc.set(new Float32Array(readback.getMappedRange()));
+    readback.unmap();
+  } finally {
+    for (const buffer of [...buffers, accum, skyBuffer, lightBuffer, params, readback]) buffer.destroy();
+  }
+  return finishProbeVolume(min, max, counts, acc, reach, options.backfaceLimit ?? 0.6);
+}
+function finishProbeVolume(min, max, counts, acc, reach, backfaceLimit) {
+  const count = counts[0] * counts[1] * counts[2];
+  const depthTexels = PROBE_DEPTH_SIDE * PROBE_DEPTH_SIDE;
+  const sh = new Float32Array(count * PROBE_SH * 3);
+  const visibility = new Float32Array(count);
+  const valid = new Uint8Array(count);
+  const depth = new Float32Array(count * depthTexels * 2);
+  for (let p = 0; p < count; p += 1) {
+    const o = p * PROBE_ACC_VEC4S * 4;
+    const rays = acc[o + 39];
+    valid[p] = rays > 0 && acc[o + 38] <= backfaceLimit * rays ? 1 : 0;
+    visibility[p] = acc[o + 36] > 1e-12 ? Math.min(1, acc[o + 37] / acc[o + 36]) : 1;
+    if (valid[p]) for (let k = 0; k < PROBE_SH; k += 1) for (let c = 0; c < 3; c += 1) sh[(p * PROBE_SH + k) * 3 + c] = acc[o + k * 4 + c] * 4 * Math.PI / rays * COSINE_BANDS2[k];
+    for (let t = 0; t < depthTexels; t += 1) {
+      const d = o + (10 + t) * 4;
+      const n = acc[d + 2];
+      depth[(p * depthTexels + t) * 2] = n > 0 ? acc[d] / n : reach;
+      depth[(p * depthTexels + t) * 2 + 1] = n > 0 ? acc[d + 1] / n : reach * reach;
+    }
+  }
+  return { min, max, counts, sh, visibility, valid, depth };
+}
+
+// src/render/dynamicGi.ts
+var GI_UNIFORM_FLOATS = 32;
+var GI_REACH = 1.5;
+var GI_BACKFACE_LIMIT = 0.6;
+var STORAGE2 = 128;
+var COPY_DST2 = 8;
+var UNIFORM3 = 64;
+function randomRotation(u1, u2, u3) {
+  const a = Math.sqrt(1 - u1), b = Math.sqrt(u1);
+  const [x, y, z, w] = [a * Math.sin(2 * Math.PI * u2), a * Math.cos(2 * Math.PI * u2), b * Math.sin(2 * Math.PI * u3), b * Math.cos(2 * Math.PI * u3)];
+  return [
+    [1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w)],
+    [2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w)],
+    [2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)]
+  ];
+}
+function giSpacing(volume) {
+  const spacing = [0, 1, 2].map((a) => (volume.max[a] - volume.min[a]) / Math.max(1, volume.counts[a] - 1) || 1);
+  return { spacing, reach: GI_REACH * Math.max(...spacing) };
+}
+function packGiUniforms(volume, gi, rotation, seed, bounce, out = new Float32Array(GI_UNIFORM_FLOATS)) {
+  const { spacing, reach } = giSpacing(volume);
+  out.set([...volume.min, gi.rays], 0);
+  out.set([...spacing.map((s) => 1 / s), gi.hysteresis], 4);
+  out.set([...volume.counts, PROBE_VOLUME_SLOTS], 8);
+  out.set([...rotation[0], seed], 12);
+  out.set([...rotation[1], 0], 16);
+  out.set([...rotation[2], 0], 20);
+  out.set([reach, GI_BACKFACE_LIMIT, bounce ? 1 : 0, PROBE_NORMAL_BIAS * Math.min(...spacing)], 24);
+  return out;
+}
+var GI_WGSL = (
+  /* wgsl */
+  `
+${LIGHTMAP_TRACE_WGSL}
+struct Gi {
+  min: vec4<f32>,    // w: rays a probe
+  scale: vec4<f32>,  // grid units per metre, w: hysteresis
+  counts: vec4<f32>, // w: slots a probe
+  rot0: vec4<f32>,   // this frame's rotation, row by row; rot0.w its seed
+  rot1: vec4<f32>,
+  rot2: vec4<f32>,
+  info: vec4<f32>,   // the depth cap, the backface limit, 1 when the volume lights hits, the normal bias
+};
+@group(0) @binding(8) var<storage, read_write> probeData: array<vec4<f32>>;
+@group(0) @binding(9) var<uniform> gi: Gi;
+@group(0) @binding(10) var<storage, read_write> giRays: array<vec4<f32>>;
+
+fn giCount() -> vec3<u32> { return vec3<u32>(gi.counts.xyz + vec3<f32>(0.5)); }
+fn giSlot(slot: u32, i: vec3<u32>) -> u32 {
+  let n = giCount();
+  return (i.z * n.y + i.y) * (${PROBE_VOLUME_SLOTS}u * n.x) + slot * n.x + i.x;
+}
+fn giProbe(p: u32) -> vec3<u32> {
+  let n = giCount();
+  return vec3<u32>(p % n.x, (p / n.x) % n.y, p / (n.x * n.y));
+}
+fn giAt(i: vec3<u32>) -> vec3<f32> { return gi.min.xyz + vec3<f32>(i) / gi.scale.xyz; }
+
+// The volume's irradiance (over \u03C0) at P with normal N (the scene shader's probeVolumeAt): the eight probes
+// round it, trilinear, by a wrapped cosine toward each and Chebyshev's bound on each seeing P.
+fn giIrradiance(P: vec3<f32>, N: vec3<f32>) -> vec3<f32> {
+  let n = vec3<f32>(giCount());
+  let Pb = P + N * gi.info.w;
+  let g = clamp((Pb - gi.min.xyz) * gi.scale.xyz, vec3<f32>(0.0), n - vec3<f32>(1.0));
+  let i0 = min(vec3<u32>(floor(g)), vec3<u32>(n) - vec3<u32>(2u));
+  let f = g - vec3<f32>(i0);
+  var sum = vec3<f32>(0.0);
+  var wsum = 0.0;
+  for (var c = 0u; c < 8u; c = c + 1u) {
+    let o = vec3<u32>(c & 1u, (c >> 1u) & 1u, (c >> 2u) & 1u);
+    let i = i0 + o;
+    let s0 = probeData[giSlot(0u, i)];
+    if (s0.w < 0.5) { continue; }
+    let tri = select(vec3<f32>(1.0) - f, f, o == vec3<u32>(1u));
+    let at = giAt(i);
+    let to = at - P;
+    let wrap = (dot(to, N) / max(length(to), 1e-6) + 1.0) * 0.5;
+    var w = wrap * wrap + 0.2;
+    let off = Pb - at;
+    let dist = length(off);
+    if (dist > 1e-4) {
+      let k = octTexel(off / dist);
+      let pair = probeData[giSlot(${PROBE_SH2}u + k / 2u, i)];
+      let m = select(pair.xy, pair.zw, (k & 1u) == 1u);
+      if (dist > m.x) {
+        let variance = max(m.y - m.x * m.x, 1e-4);
+        let cheb = variance / (variance + (dist - m.x) * (dist - m.x));
+        w = w * cheb * cheb * cheb;
+      }
+    }
+    w = w * tri.x * tri.y * tri.z;
+    if (w <= 1e-6) { continue; }
+    let e = s0.xyz * 0.282095
+      + (probeData[giSlot(1u, i)].xyz * N.y + probeData[giSlot(2u, i)].xyz * N.z + probeData[giSlot(3u, i)].xyz * N.x) * 0.488603
+      + (probeData[giSlot(4u, i)].xyz * (N.x * N.y) + probeData[giSlot(5u, i)].xyz * (N.y * N.z) + probeData[giSlot(7u, i)].xyz * (N.x * N.z)) * 1.092548
+      + probeData[giSlot(6u, i)].xyz * (0.315392 * (3.0 * N.z * N.z - 1.0))
+      + probeData[giSlot(8u, i)].xyz * (0.546274 * (N.x * N.x - N.y * N.y));
+    sum = sum + max(e, vec3<f32>(0.0)) * w;
+    wsum = wsum + w;
+  }
+  return select(vec3<f32>(0.0), sum / wsum, wsum > 0.0);
+}
+
+fn giRay(r: u32, rays: u32) -> vec3<f32> {
+  let y = 1.0 - (2.0 * f32(r) + 1.0) / f32(rays);
+  let rr = sqrt(max(0.0, 1.0 - y * y));
+  let phi = f32(r) * 2.39996323;
+  let d = vec3<f32>(rr * cos(phi), y, rr * sin(phi));
+  return vec3<f32>(dot(gi.rot0.xyz, d), dot(gi.rot1.xyz, d), dot(gi.rot2.xyz, d));
+}
+
+@compute @workgroup_size(64)
+fn giTrace(@builtin(global_invocation_id) id: vec3<u32>) {
+  let n = giCount();
+  let rays = u32(gi.min.w + 0.5);
+  let p = id.x / rays;
+  if (p >= n.x * n.y * n.z) { return; }
+  let r = id.x % rays;
+  rng = pcg(id.x ^ pcg(u32(gi.rot0.w)));
+  let P = giAt(giProbe(p));
+  let d = giRay(r, rays);
+  let h = trace(P, d, FAR, false);
+  var L = vec3<f32>(0.0);
+  var t = FAR;
+  var back = 0.0;
+  if (h.tri < 0) {
+    L = skyAt(d);
+  } else {
+    let i = u32(h.tri);
+    t = h.t;
+    if (dot(d, vec3<f32>(tris[i * 3u].w, tris[i * 3u + 1u].w, tris[i * 3u + 2u].w)) > 0.0) {
+      // Inside something: dark, and nearer than it is, so the probe's visibility keeps the light out.
+      back = 1.0;
+      t = t * 0.2;
+    } else {
+      var nrm = normalize(cross(tris[i * 3u + 1u].xyz, tris[i * 3u + 2u].xyz));
+      if (dot(nrm, d) > 0.0) { nrm = -nrm; }
+      let hp = P + d * h.t + nrm * EPS;
+      var light = lightsOn(hp, nrm, bitcast<u32>(mats[i * 2u].w));
+      if (gi.info.z > 0.5) { light = light + giIrradiance(hp, nrm); }
+      L = mats[i * 2u + 1u].rgb + mats[i * 2u].rgb * light;
+    }
+  }
+  giRays[id.x * 2u] = vec4<f32>(L, t);
+  giRays[id.x * 2u + 1u] = vec4<f32>(d, back);
+}
+
+@compute @workgroup_size(64)
+fn giUpdate(@builtin(global_invocation_id) id: vec3<u32>) {
+  let n = giCount();
+  let p = id.x / ${PROBE_VOLUME_SLOTS}u;
+  if (p >= n.x * n.y * n.z) { return; }
+  let slot = id.x % ${PROBE_VOLUME_SLOTS}u;
+  let rays = u32(gi.min.w + 0.5);
+  let base = p * rays;
+  let at = giSlot(slot, giProbe(p));
+  let old = probeData[at];
+  let h = gi.scale.w;
+  if (slot < ${PROBE_SH2}u) {
+    let band = select(select(0.25, 2.0 / 3.0, slot < 4u), 1.0, slot == 0u);
+    var e = vec3<f32>(0.0);
+    var backs = 0.0;
+    var skyAll = 0.0;
+    var skyOpen = 0.0;
+    for (var r = 0u; r < rays; r = r + 1u) {
+      let a = giRays[(base + r) * 2u];
+      let b = giRays[(base + r) * 2u + 1u];
+      let d = b.xyz;
+      let y = array<f32, 9>(0.282095, 0.488603 * d.y, 0.488603 * d.z, 0.488603 * d.x, 1.092548 * d.x * d.y, 1.092548 * d.y * d.z, 0.315392 * (3.0 * d.z * d.z - 1.0), 1.092548 * d.x * d.z, 0.546274 * (d.x * d.x - d.y * d.y));
+      e = e + a.rgb * y[slot];
+      backs = backs + b.w;
+      let s = lum(skyAt(d));
+      skyAll = skyAll + s;
+      if (a.w >= FAR) { skyOpen = skyOpen + s; }
+    }
+    let estimate = e * (4.0 * PI / f32(rays)) * band;
+    var w = 0.0;
+    if (slot == 0u) { w = mix(select(0.0, 1.0, backs <= gi.info.y * f32(rays)), old.w, h); }
+    if (slot == 1u) { w = mix(select(1.0, min(1.0, skyOpen / skyAll), skyAll > 1e-12), old.w, h); }
+    probeData[at] = vec4<f32>(mix(estimate, old.rgb, h), w);
+    return;
+  }
+  // Two octahedral depth texels a slot: their mean distance and its square, where this frame's rays fell.
+  let first = (slot - ${PROBE_SH2}u) * 2u;
+  var acc = vec4<f32>(0.0);
+  var hits = vec2<f32>(0.0);
+  for (var r = 0u; r < rays; r = r + 1u) {
+    let a = giRays[(base + r) * 2u];
+    let k = octTexel(giRays[(base + r) * 2u + 1u].xyz);
+    let t = min(a.w, gi.info.x);
+    if (k == first) { acc = acc + vec4<f32>(t, t * t, 0.0, 0.0); hits.x = hits.x + 1.0; }
+    if (k == first + 1u) { acc = acc + vec4<f32>(0.0, 0.0, t, t * t); hits.y = hits.y + 1.0; }
+  }
+  var out = old;
+  if (hits.x > 0.0) { out = vec4<f32>(mix(acc.xy / hits.x, old.xy, h), out.zw); }
+  if (hits.y > 0.0) { out = vec4<f32>(out.xy, mix(acc.zw / hits.y, old.zw, h)); }
+  probeData[at] = out;
+}
+`
+);
+function mulberry(seed) {
+  let a = seed >>> 0;
+  return () => {
+    a = a + 1831565813 >>> 0;
+    let t = a;
+    t = Math.imul(t ^ t >>> 15, t | 1);
+    t ^= t + Math.imul(t ^ t >>> 7, t | 61);
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+}
+var GpuProbeGi = class {
+  constructor(device, occluders) {
+    this.device = device;
+    this.data = new Float32Array(GI_UNIFORM_FLOATS);
+    this.rays = null;
+    this.lights = null;
+    this.lightsSize = 0;
+    this.sky = null;
+    this.skySource = void 0;
+    this.skySize = [0, 0];
+    this.pipelines = null;
+    this.random = mulberry(24301);
+    this.frames = 0;
+    /** The probe buffer the passes last wrote into, so a new one (a re-uploaded volume) starts its bounce afresh. */
+    this.target = null;
+    const packed = packLightmapScene(occluders);
+    const upload = (view) => {
+      const buffer = device.createBuffer({ size: Math.max(16, view.byteLength), usage: STORAGE2 | COPY_DST2 });
+      device.queue.writeBuffer(buffer, 0, view.buffer, view.byteOffset, view.byteLength);
+      return buffer;
+    };
+    this.scene = [upload(packed.nodes), upload(packed.tris), upload(packed.mats)];
+    this.uniforms = device.createBuffer({ size: GI_UNIFORM_FLOATS * 4, usage: UNIFORM3 | COPY_DST2 });
+    this.params = device.createBuffer({ size: 64, usage: UNIFORM3 | COPY_DST2 });
+  }
+  /**
+   * Write this frame's uniforms and encode its passes into `encoder`: the
+   * volume `layout` (the probe buffer `probes` holds it as the scene reads
+   * it), lit by `lights` and `sky`.
+   */
+  update(encoder, probes, layout, settings, lights, sky, timing = {}) {
+    const device = this.device;
+    const count = layout.counts[0] * layout.counts[1] * layout.counts[2];
+    const rays = settings.rays;
+    const raysBytes = count * rays * 32;
+    if (!this.rays || this.rays.size < raysBytes) {
+      this.rays?.destroy();
+      this.rays = device.createBuffer({ size: raysBytes, usage: STORAGE2 });
+    }
+    const packedLights = packBakeLights(bakeLights(lights));
+    if (!this.lights || this.lightsSize < packedLights.data.byteLength) {
+      this.lights?.destroy();
+      this.lightsSize = Math.max(16, packedLights.data.byteLength);
+      this.lights = device.createBuffer({ size: this.lightsSize, usage: STORAGE2 | COPY_DST2 });
+    }
+    device.queue.writeBuffer(this.lights, 0, packedLights.data);
+    if (sky !== this.skySource) {
+      this.sky?.destroy();
+      const data = sky ? sky.data : new Float32Array(4);
+      this.sky = device.createBuffer({ size: Math.max(16, data.byteLength), usage: STORAGE2 | COPY_DST2 });
+      device.queue.writeBuffer(this.sky, 0, data);
+      this.skySource = sky;
+      this.skySize = sky ? [sky.width, sky.height] : [0, 0];
+    }
+    const { reach } = giSpacing(layout);
+    device.queue.writeBuffer(this.params, 0, lightmapParams(0, count, 0, rays, rays, 1, sky, packedLights, reach));
+    const bounce = this.target === probes;
+    this.target = probes;
+    const rotation = randomRotation(this.random(), this.random(), this.random());
+    device.queue.writeBuffer(this.uniforms, 0, packGiUniforms(layout, settings, rotation, this.frames % 16777216, bounce, this.data));
+    this.frames += 1;
+    const pipeline = (entryPoint) => device.createComputePipeline({ layout: "auto", compute: { module: device.createShaderModule({ code: GI_WGSL }), entryPoint } });
+    this.pipelines ?? (this.pipelines = { trace: pipeline("giTrace"), update: pipeline("giUpdate") });
+    const pass = encoder.beginComputePass(timing);
+    pass.setPipeline(this.pipelines.trace);
+    pass.setBindGroup(
+      0,
+      device.createBindGroup({
+        layout: this.pipelines.trace.getBindGroupLayout(0),
+        entries: [
+          { binding: 0, resource: { buffer: this.scene[0] } },
+          { binding: 1, resource: { buffer: this.scene[1] } },
+          { binding: 2, resource: { buffer: this.scene[2] } },
+          { binding: 5, resource: { buffer: this.sky } },
+          { binding: 6, resource: { buffer: this.params } },
+          { binding: 7, resource: { buffer: this.lights } },
+          { binding: 8, resource: { buffer: probes } },
+          { binding: 9, resource: { buffer: this.uniforms } },
+          { binding: 10, resource: { buffer: this.rays } }
+        ]
+      })
+    );
+    pass.dispatchWorkgroups(Math.ceil(count * rays / 64));
+    pass.setPipeline(this.pipelines.update);
+    pass.setBindGroup(
+      0,
+      device.createBindGroup({
+        layout: this.pipelines.update.getBindGroupLayout(0),
+        entries: [
+          { binding: 5, resource: { buffer: this.sky } },
+          { binding: 6, resource: { buffer: this.params } },
+          { binding: 8, resource: { buffer: probes } },
+          { binding: 9, resource: { buffer: this.uniforms } },
+          { binding: 10, resource: { buffer: this.rays } }
+        ]
+      })
+    );
+    pass.dispatchWorkgroups(Math.ceil(count * PROBE_VOLUME_SLOTS / 64));
+    pass.end();
+  }
+  dispose() {
+    for (const b of [...this.scene, this.uniforms, this.params, this.rays, this.lights, this.sky]) b?.destroy?.();
   }
 };
 
@@ -21111,9 +22358,9 @@ fn volumeOctTexel(d: vec3<f32>) -> i32 {
   var e = d.xz / (abs(d.x) + abs(d.y) + abs(d.z));
   if (d.y < 0.0) { e = (vec2<f32>(1.0) - abs(e.yx)) * select(vec2<f32>(-1.0), vec2<f32>(1.0), e >= vec2<f32>(0.0)); }
   let uv = e * 0.5 + vec2<f32>(0.5);
-  let x = min(i32(uv.x * ${PROBE_DEPTH_SIDE}.0), ${PROBE_DEPTH_SIDE - 1});
-  let y = min(i32(uv.y * ${PROBE_DEPTH_SIDE}.0), ${PROBE_DEPTH_SIDE - 1});
-  return y * ${PROBE_DEPTH_SIDE} + x;
+  let x = min(i32(uv.x * ${PROBE_DEPTH_SIDE2}.0), ${PROBE_DEPTH_SIDE2 - 1});
+  let y = min(i32(uv.y * ${PROBE_DEPTH_SIDE2}.0), ${PROBE_DEPTH_SIDE2 - 1});
+  return y * ${PROBE_DEPTH_SIDE2} + x;
 }
 // The irradiance (over \u03C0) and sky visibility the volume gives P with normal N: the eight probes round it,
 // weighed trilinearly, by a wrapped cosine toward each, and by Chebyshev's bound on each seeing P (DDGI).
@@ -21121,7 +22368,7 @@ fn volumeOctTexel(d: vec3<f32>) -> i32 {
 fn probeVolumeAt(P: vec3<f32>, N: vec3<f32>) -> vec4<f32> {
   let n = frame.probeCount.xyz;
   let spacing = 1.0 / max(frame.probeScale.xyz, vec3<f32>(1e-6));
-  let Pb = P + N * (${PROBE_NORMAL_BIAS} * min(spacing.x, min(spacing.y, spacing.z)));
+  let Pb = P + N * (${PROBE_NORMAL_BIAS2} * min(spacing.x, min(spacing.y, spacing.z)));
   let g = clamp((Pb - frame.probeMin.xyz) * frame.probeScale.xyz, vec3<f32>(0.0), n - vec3<f32>(1.0));
   let i0 = min(vec3<i32>(floor(g)), vec3<i32>(n + vec3<f32>(0.5)) - vec3<i32>(2));
   let f = g - vec3<f32>(i0);
@@ -21142,7 +22389,7 @@ fn probeVolumeAt(P: vec3<f32>, N: vec3<f32>) -> vec4<f32> {
     let dist = length(off);
     if (dist > 1e-4) {
       let k = volumeOctTexel(off / dist);
-      let pair = volumeSlot(${PROBE_SH} + k / 2, i);
+      let pair = volumeSlot(${PROBE_SH3} + k / 2, i);
       let m = select(pair.xy, pair.zw, (k & 1) == 1);
       if (dist > m.x) {
         let variance = max(m.y - m.x * m.x, 1e-4);
@@ -21820,8 +23067,8 @@ ${reflect ? "    let ambRaw = amb;\n" : ""}    // A baked light map (the second 
     // much of it reaches this point, bounce included \u2014 mirroring the CPU path.
     // Sampled unconditionally (uniform control flow), applied when bound.
 ${hdr ? `    // (An HDR one, F3d, lit the fill above.)
-    if (u.ssaoMeta.z > 0.5) { if (!lmHdr) { amb = amb * lm0.rgb * ${LIGHTMAP_RANGE2}; } }` : `    let lmUv = vec2<f32>(in.uv2.x, 1.0 - in.uv2.y);
-    let lm = textureSample(lmTex, samp, lmUv).rgb * ${LIGHTMAP_RANGE2};
+    if (u.ssaoMeta.z > 0.5) { if (!lmHdr) { amb = amb * lm0.rgb * ${LIGHTMAP_RANGE3}; } }` : `    let lmUv = vec2<f32>(in.uv2.x, 1.0 - in.uv2.y);
+    let lm = textureSample(lmTex, samp, lmUv).rgb * ${LIGHTMAP_RANGE3};
     if (u.ssaoMeta.z > 0.5) { amb = amb * lm; }`}
     else if (frame.probeMin.w > 0.5 && frame.probeMin.w < 1.5) { amb = amb * probeLight(in.worldPos, N); } // EP9: no light map, the probes light it
     // Screen-space AO darkens only the ambient fill, sampled at this fragment's
@@ -22153,6 +23400,10 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     this.frameDepthView = null;
     /** Whether this frame's ambient light takes GTAO (F3c), for the frame uniform. */
     this.frameGtao = false;
+    /** This frame's real-time GI (F3e), its tracer for the still scene it was made for, and the sky it traces. */
+    this.frameGi = null;
+    this.probeGi = null;
+    this.giSky = null;
     /** This frame's volumetric fog (F5b), its volumes (made when a frame first has some) and the shader's terms. */
     this.frameFog = null;
     this.volumetricFog = null;
@@ -23071,6 +24322,7 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     const drawnProjection = temporal ? temporal.projection : draw.projection;
     this.frameDepthView = this.hdr && prepass ? { viewProj, terms: [drawnProjection[10], drawnProjection[14]] } : null;
     this.frameFog = this.prepareFog(draw);
+    this.frameGi = this.hdr && draw.dynamicGi && draw.environment?.probeVolume ? draw.dynamicGi : null;
     const { ordered, globalCount, clusters: cells } = this.clusterLights(localPlan ? { ...draw, lights: localPlan.lights, localShadows: null } : draw);
     this.uploadLights(packLights(ordered, this.hdr));
     if (this.frameFog) {
@@ -23113,8 +24365,9 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
         shadow: shadowParams,
         tonemap: draw.tonemap ?? null,
         hasSsao: ssao !== null,
-        hasLightmap: entry.textures.lm !== null || this.hdr && entry.textures.lmHdr !== null,
-        hdrLightmap: this.hdr && entry.textures.lmHdr !== null,
+        // With real-time GI (F3e) every surface takes the live volume's light, a light-mapped one too.
+        hasLightmap: !this.frameGi && (entry.textures.lm !== null || this.hdr && entry.textures.lmHdr !== null),
+        hdrLightmap: !this.frameGi && this.hdr && entry.textures.lmHdr !== null,
         model,
         lightCount,
         // A volumetric fog (F5b) takes the place of the painted fade.
@@ -23353,6 +24606,23 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
       graph.addPass("volumetric fog", "compute", (pass) => {
         pass.keep();
         return (ctx) => fog.encode(ctx.encoder, { cascades: groups2.cascades.texture, sampler: groups2.cascades.sampler, lights: this.lightBuffer, clusters: groups2.clusters.data, tiles: groups2.shadowTiles, atlas: groups2.atlas }, ctx.timing);
+      });
+    }
+    const liveGi = this.frameGi;
+    const volume = draw.environment?.probeVolume ?? null;
+    if (liveGi && volume) {
+      if (!this.probeGi || this.probeGi.key !== liveGi.key) {
+        this.probeGi?.gi.dispose();
+        this.probeGi = { key: liveGi.key, gi: new GpuProbeGi(this.device, liveGi.occluders) };
+      }
+      const gi = this.probeGi.gi;
+      const env = draw.environment;
+      if (this.giSky?.source !== env) this.giSky = { source: env, sky: environmentPanorama(env) };
+      const sky = this.giSky.sky;
+      const groups2 = this.depthGroups;
+      graph.addPass("dynamic gi", "compute", (pass) => {
+        pass.keep();
+        return (ctx) => gi.update(ctx.encoder, groups2.probes, volume, liveGi.settings, draw.lights ?? [], sky, ctx.timing);
       });
     }
     const gbuffer = prepass ? graph.importTexture("gbuffer", this.ensureGbuffer()) : null;
@@ -23717,11 +24987,11 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     const volume = this.hdr ? draw.environment?.probeVolume ?? null : null;
     const grid = volume ?? draw.environment?.lightProbes ?? null;
     if (grid) {
-      if (volume) this.uploadProbeTexture(volume, probeVolumeTexels(volume), PROBE_VOLUME_SLOTS);
+      if (volume) this.uploadProbeTexture(volume, probeVolumeTexels(volume), PROBE_VOLUME_SLOTS2);
       else this.uploadProbeTexture(grid, lightProbeTexels2(grid), 6);
       frame.set([...grid.min, volume ? 2 : 1], 32);
       frame.set([0, 1, 2].map((a) => (grid.counts[a] - 1) / (grid.max[a] - grid.min[a] || 1)), 36);
-      frame.set([...grid.counts, volume ? PROBE_VOLUME_SLOTS : 6], 40);
+      frame.set([...grid.counts, volume ? PROBE_VOLUME_SLOTS2 : 6], 40);
     }
     if (this.hdr) {
       frame.set(this.iblSh, 44);
@@ -24177,6 +25447,7 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     this.probeCapture?.dispose();
     this.atmosphere?.dispose();
     this.volumetricFog?.dispose();
+    this.probeGi?.gi.dispose();
     destroySafely(this.depthGroups.fogVolume.texture);
     destroySafely(this.blankProbeCubes);
     destroySafely(this.probeBuffer);
@@ -27862,896 +29133,6 @@ function verifyReplayScore(console2, replay, claimedScore, options = {}) {
 function resolveUnlockedAchievements(unlockHashes, registered) {
   const unlocked = new Set(unlockHashes.map((hash) => hash >>> 0));
   return registered.filter((achievement) => unlocked.has(achievement.hash >>> 0));
-}
-
-// src/render/gpuLightmapper.ts
-import {
-  LIGHTMAP_RANGE as LIGHTMAP_RANGE3,
-  PROBE_DEPTH_SIDE as PROBE_DEPTH_SIDE2,
-  PROBE_SH as PROBE_SH2,
-  areaFrame as areaFrame3,
-  areaSize as areaSize3,
-  buildBvh,
-  dilateLightmapValues,
-  lightChannelMask as lightChannelMask3,
-  lightColor as lightColor3,
-  lightmapTexels,
-  spotCone as spotCone2,
-  stitchLightmapSeams
-} from "@cartbox/editor";
-var LIGHTMAP_MAX_BOUNCES = 8;
-var LIGHTMAP_MAX_LIGHTS = 4;
-var LIGHTMAP_MAX_LOCAL_LIGHTS = 256;
-var WORKGROUP = 64;
-var CHUNK_TEXELS = 65536;
-var PATHS_PER_SUBMIT = 1 << 19;
-function pathBudget(local) {
-  return Math.max(4096, Math.floor(PATHS_PER_SUBMIT / (1 + local / 16)));
-}
-var PARAMS_BYTES = 64;
-var LIGHT_VEC4S = 5;
-var PROBE_ACC_VEC4S = 10 + PROBE_DEPTH_SIDE2 * PROBE_DEPTH_SIDE2;
-var ACC_FLOATS = 16;
-var STORAGE = 128;
-var COPY_DST = 8;
-var COPY_SRC = 4;
-var MAP_READ = 1;
-var UNIFORM2 = 64;
-function toLinear(c) {
-  const v = Math.max(0, c);
-  return v <= 0.04045 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4;
-}
-function bakeLights(lights) {
-  return lights.map((l) => {
-    const c = lightColor3(l);
-    return { ...l, radiance: [toLinear(c[0]) * l.intensity, toLinear(c[1]) * l.intensity, toLinear(c[2]) * l.intensity] };
-  });
-}
-var BAKE_LIGHT_KIND = { directional: 0, point: 1, spot: 2, rect: 3, disk: 4, tube: 5 };
-function packBakeLights(lights) {
-  const directional = lights.filter((l) => (l.kind ?? "directional") === "directional" && l.direction).slice(0, LIGHTMAP_MAX_LIGHTS);
-  const local = lights.filter((l) => l.kind !== void 0 && l.kind !== "directional").slice(0, LIGHTMAP_MAX_LOCAL_LIGHTS);
-  const data = new Float32Array(Math.max(1, directional.length + local.length) * LIGHT_VEC4S * 4);
-  [...directional, ...local].forEach((light, i) => {
-    const o = i * LIGHT_VEC4S * 4;
-    const kind = light.kind ?? "directional";
-    const channels = lightChannelMask3(light.channels ?? 1);
-    data.set([...light.radiance, channels], o + 4);
-    if (kind === "directional") {
-      const [x, y, z] = light.direction;
-      const len = Math.hypot(x, y, z) || 1;
-      data.set([x / len, y / len, z / len, BAKE_LIGHT_KIND.directional], o);
-      return;
-    }
-    data.set([...light.position ?? [0, 0, 0], kind === "area" ? BAKE_LIGHT_KIND[light.shape ?? "rect"] : BAKE_LIGHT_KIND[kind]], o);
-    if (kind === "area") {
-      const [w, h] = areaSize3(light);
-      const frame = areaFrame3(light);
-      data.set([0, w / 2, h / 2, 1], o + 8);
-      data.set([...frame.normal, 0], o + 12);
-      data.set([...frame.tangent, 0], o + 16);
-      return;
-    }
-    data[o + 8] = light.range ?? 0;
-    data[o + 11] = light.falloff === "inverseSquare" ? 1 : 0;
-    if (kind === "spot") {
-      const [cosOuter, cosInner] = spotCone2(light);
-      const axis = light.direction ?? [0, -1, 0];
-      const len = Math.hypot(axis[0], axis[1], axis[2]) || 1;
-      data.set([cosOuter, cosInner], o + 9);
-      data.set([axis[0] / len, axis[1] / len, axis[2] / len, 0], o + 12);
-    }
-  });
-  return { data, directional: directional.length, local: local.length };
-}
-async function bakeSurfaces(mesh, decode) {
-  const read = (image, data) => image && image.bytes.length > 0 ? decode(image, data).catch(() => null) : Promise.resolve(null);
-  return Promise.all(
-    mesh.primitives.map(async ({ material: m }) => {
-      const [base, metallicRoughness] = await Promise.all([read(m.baseColorImage, false), read(m.metallicRoughnessImage, true)]);
-      const pbr = resolvePbr(m, metallicRoughness !== null, !!m.occlusionImage, !!m.emissiveImage);
-      return { base, metallicRoughness, metallic: pbr.isPbr ? pbr.metallic : 0, roughness: pbr.roughness };
-    })
-  );
-}
-function packLightmapScene(occluders) {
-  const bvh = buildBvh(occluders);
-  const triangles = bvh.order.length;
-  const nodeCount = bvh.meta.length / 3;
-  const nodes = new Uint32Array(Math.max(1, nodeCount) * 8);
-  const bits = new Float32Array(nodes.buffer);
-  if (nodeCount === 0) {
-    bits.set([1, 1, 1], 0);
-    bits.set([-1, -1, -1], 4);
-    nodes[3] = 4294967295;
-  }
-  for (let n = 0; n < nodeCount; n += 1) {
-    for (let a = 0; a < 3; a += 1) {
-      bits[n * 8 + a] = bvh.nodes[n * 6 + a];
-      bits[n * 8 + 4 + a] = bvh.nodes[n * 6 + 3 + a];
-    }
-    const left = bvh.meta[n * 3];
-    nodes[n * 8 + 3] = (left >= 0 ? left : -1 - bvh.meta[n * 3 + 2]) >>> 0;
-    nodes[n * 8 + 7] = bvh.meta[n * 3 + 1] >>> 0;
-  }
-  const tris = new Float32Array(Math.max(1, triangles) * 12);
-  const mats = new Float32Array(Math.max(1, triangles) * 8);
-  const matBits = new Uint32Array(mats.buffer);
-  for (let i = 0; i < triangles; i += 1) {
-    const t = bvh.order[i];
-    const k = t * 9;
-    const metal = Math.min(1, Math.max(0, bvh.mr[t * 2]));
-    const bounce = 1 - metal + metal * Math.min(1, Math.max(0, bvh.mr[t * 2 + 1]));
-    for (let a = 0; a < 3; a += 1) {
-      tris[i * 12 + a * 4 + 3] = bvh.front[t * 3 + a];
-      tris[i * 12 + a] = bvh.tri[k + a];
-      tris[i * 12 + 4 + a] = bvh.tri[k + 3 + a] - bvh.tri[k + a];
-      tris[i * 12 + 8 + a] = bvh.tri[k + 6 + a] - bvh.tri[k + a];
-      mats[i * 8 + a] = toLinear(bvh.col[t * 3 + a]) * bounce;
-      mats[i * 8 + 4 + a] = toLinear(bvh.emi[t * 3 + a]);
-    }
-    matBits[i * 8 + 3] = bvh.channels[t];
-  }
-  return { nodes, tris, mats, triangles };
-}
-var LIGHTMAP_TRACE_WGSL = (
-  /* wgsl */
-  `
-struct Params {
-  run: vec4<u32>,   // x = first texel, y = texels, z = first sample, w = samples this pass
-  info: vec4<u32>,  // x = bounces, y = directional lights, z = sky width, w = sky height
-  total: vec4<u32>, // x = samples in all, y = point, spot and area lights (F3d-4)
-  extra: vec4<f32>, // x = a probe's depth cap (F3d-3)
-};
-@group(0) @binding(0) var<storage, read> nodes: array<vec4<u32>>;
-@group(0) @binding(1) var<storage, read> tris: array<vec4<f32>>;
-@group(0) @binding(2) var<storage, read> mats: array<vec4<f32>>;
-@group(0) @binding(3) var<storage, read> texels: array<vec4<f32>>;
-@group(0) @binding(4) var<storage, read_write> accum: array<vec4<f32>>;
-@group(0) @binding(5) var<storage, read> sky: array<vec4<f32>>;
-@group(0) @binding(6) var<uniform> params: Params;
-@group(0) @binding(7) var<storage, read> lights: array<vec4<f32>>;
-
-const PI = 3.14159265;
-// How far a ray starts off its surface, and the nearest hit it takes (metres).
-const EPS = 0.005;
-const T_MIN = 1e-4;
-const FAR = 1e30;
-
-struct Hit {
-  t: f32,
-  tri: i32,
-};
-
-// The closest hit along o + t\xB7d within tMax (or, with anyHit, the first found).
-fn trace(o: vec3<f32>, d: vec3<f32>, tMax: f32, anyHit: bool) -> Hit {
-  var best = Hit(tMax, -1);
-  let tiny = abs(d) < vec3<f32>(1e-9);
-  let inv = 1.0 / select(d, select(vec3<f32>(-1e-9), vec3<f32>(1e-9), d >= vec3<f32>(0.0)), tiny);
-  var stack: array<u32, 64>;
-  var sp = 1u;
-  stack[0] = 0u;
-  loop {
-    if (sp == 0u) { break; }
-    sp = sp - 1u;
-    let n = stack[sp];
-    let a = nodes[n * 2u];
-    let b = nodes[n * 2u + 1u];
-    let t0 = (bitcast<vec3<f32>>(a.xyz) - o) * inv;
-    let t1 = (bitcast<vec3<f32>>(b.xyz) - o) * inv;
-    let lo = min(t0, t1);
-    let hi = max(t0, t1);
-    let tn = max(max(lo.x, lo.y), max(lo.z, 0.0));
-    let tf = min(min(hi.x, hi.y), min(hi.z, best.t));
-    if (tn > tf) { continue; }
-    let left = bitcast<i32>(a.w);
-    if (left >= 0) {
-      if (sp + 2u <= 64u) {
-        stack[sp] = u32(left);
-        stack[sp + 1u] = b.w;
-        sp = sp + 2u;
-      }
-      continue;
-    }
-    let first = b.w;
-    let count = u32(-1 - left);
-    for (var i = first; i < first + count; i = i + 1u) {
-      // M\xF6ller\u2013Trumbore.
-      let v0 = tris[i * 3u].xyz;
-      let e1 = tris[i * 3u + 1u].xyz;
-      let e2 = tris[i * 3u + 2u].xyz;
-      let p = cross(d, e2);
-      let det = dot(e1, p);
-      if (abs(det) < 1e-12) { continue; }
-      let id = 1.0 / det;
-      let s = o - v0;
-      let u = dot(s, p) * id;
-      if (u < 0.0 || u > 1.0) { continue; }
-      let q = cross(s, e1);
-      let v = dot(d, q) * id;
-      if (v < 0.0 || u + v > 1.0) { continue; }
-      let t = dot(e2, q) * id;
-      if (t > T_MIN && t < best.t) {
-        best = Hit(t, i32(i));
-        if (anyHit) { return best; }
-      }
-    }
-  }
-  return best;
-}
-
-fn pcg(v: u32) -> u32 {
-  let s = v * 747796405u + 2891336453u;
-  let w = ((s >> ((s >> 28u) + 4u)) ^ s) * 277803737u;
-  return (w >> 22u) ^ w;
-}
-var<private> rng: u32;
-fn rand() -> f32 {
-  rng = pcg(rng);
-  return f32(rng >> 8u) / 16777216.0;
-}
-fn radicalInverse(i: u32) -> f32 {
-  return f32(reverseBits(i)) * 2.3283064365386963e-10;
-}
-
-// A cosine-weighted direction about n (Duff et al.'s branchless frame).
-fn cosineDir(n: vec3<f32>, xi: vec2<f32>) -> vec3<f32> {
-  let r = sqrt(xi.x);
-  let phi = 2.0 * PI * xi.y;
-  let sg = select(-1.0, 1.0, n.z >= 0.0);
-  let a = -1.0 / (sg + n.z);
-  let b = n.x * n.y * a;
-  let t = vec3<f32>(1.0 + sg * n.x * n.x * a, sg * b, -sg * n.x);
-  let bt = vec3<f32>(b, sg + n.y * n.y * a, -n.y);
-  return normalize(t * (r * cos(phi)) + bt * (r * sin(phi)) + n * sqrt(max(0.0, 1.0 - xi.x)));
-}
-
-// The sky along d: the panorama's texel (u around from \u2212x, v down from the zenith, as the IBL reads it).
-fn skyAt(d: vec3<f32>) -> vec3<f32> {
-  let w = params.info.z;
-  let h = params.info.w;
-  if (w == 0u) { return vec3<f32>(0.0); }
-  let u = atan2(d.z, d.x) / (2.0 * PI) + 0.5;
-  let v = acos(clamp(d.y, -1.0, 1.0)) / PI;
-  let x = min(u32(max(u, 0.0) * f32(w)), w - 1u);
-  let y = min(u32(max(v, 0.0) * f32(h)), h - 1u);
-  return sky[y * w + x].rgb;
-}
-
-fn lum(c: vec3<f32>) -> f32 {
-  return dot(c, vec3<f32>(0.2126, 0.7152, 0.0722));
-}
-
-// A unit direction's octahedral texel (probeVolume.ts's octTexel).
-fn octTexel(d: vec3<f32>) -> u32 {
-  var e = d.xz / (abs(d.x) + abs(d.y) + abs(d.z));
-  if (d.y < 0.0) { e = (vec2<f32>(1.0) - abs(e.yx)) * select(vec2<f32>(-1.0), vec2<f32>(1.0), e >= vec2<f32>(0.0)); }
-  let uv = e * 0.5 + vec2<f32>(0.5);
-  let x = min(u32(uv.x * ${PROBE_DEPTH_SIDE2}.0), ${PROBE_DEPTH_SIDE2 - 1}u);
-  let y = min(u32(uv.y * ${PROBE_DEPTH_SIDE2}.0), ${PROBE_DEPTH_SIDE2 - 1}u);
-  return y * ${PROBE_DEPTH_SIDE2}u + x;
-}
-
-// A light's record (packBakeLights): five vec4s from its first.
-fn lightAt(l: u32, k: u32) -> vec4<f32> {
-  return lights[l * ${LIGHT_VEC4S}u + k];
-}
-
-// Whether light l lights a surface on the channels \`mask\` (F2e).
-fn lightsMask(l: u32, mask: u32) -> bool {
-  return (u32(lightAt(l, 1u).w + 0.5) & mask) != 0u;
-}
-
-// A point or spot light's falloff toward a point d away along Ld (the renderers' distanceFalloff, and the shader's cone).
-fn punctualAtten(l: u32, d: f32, Ld: vec3<f32>) -> f32 {
-  let r = lightAt(l, 2u);
-  var atten = 1.0;
-  if (r.w > 0.5) {
-    var win = 1.0;
-    if (r.x > 0.0) { let q = d / r.x; let t = clamp(1.0 - q * q * q * q, 0.0, 1.0); win = t * t; }
-    let dm = max(d, 0.01);
-    atten = win / (dm * dm);
-  } else if (r.x > 0.0) {
-    let t = max(0.0, 1.0 - d / r.x);
-    atten = t * t;
-  }
-  if (lightAt(l, 0u).w > 1.5) {
-    let ct = clamp((-dot(Ld, lightAt(l, 3u).xyz) - r.y) / (r.z - r.y), 0.0, 1.0);
-    atten = atten * ct * ct * (3.0 - 2.0 * ct);
-  }
-  return atten;
-}
-
-// What local light l would give a surface at p facing n, unshadowed, by luminance: how likely it is to be picked.
-// An area light is taken as the point at its centre it is from far off.
-fn localWeight(l: u32, p: vec3<f32>, n: vec3<f32>, mask: u32) -> f32 {
-  if (!lightsMask(l, mask)) { return 0.0; }
-  let a = lightAt(l, 0u);
-  let toL = a.xyz - p;
-  let d = max(length(toL), 1e-4);
-  let Ld = toL / d;
-  let ndl = max(dot(n, Ld), 0.0);
-  let power = lum(lightAt(l, 1u).rgb);
-  if (a.w < 2.5) { return power * punctualAtten(l, d, Ld) * ndl; }
-  let r = lightAt(l, 2u);
-  var area = 4.0 * r.y * r.z;
-  var facing = 1.0;
-  if (a.w > 4.5) { area = 2.0 * r.y * 2.0 * r.z + PI * r.z * r.z; }
-  else {
-    facing = max(-dot(Ld, lightAt(l, 3u).xyz), 0.0);
-    if (a.w > 3.5) { area = PI * r.y * r.y; }
-  }
-  let dm = max(d, 0.1);
-  return power * area * facing * max(ndl, 0.05) / (PI * dm * dm);
-}
-
-struct LightSample {
-  c: vec3<f32>,  // what it gives the surface, unshadowed
-  dir: vec3<f32>,
-  dist: f32,
-};
-
-// Local light l's light on a surface at p facing n: a point or spot light's, or an area light's through one point
-// on it (uniform on its rectangle or disk, or on the rectangle a tube shows p, as the LTC shader takes it).
-fn localSample(l: u32, p: vec3<f32>, n: vec3<f32>) -> LightSample {
-  var out = LightSample(vec3<f32>(0.0), vec3<f32>(0.0, 1.0, 0.0), 0.0);
-  let a = lightAt(l, 0u);
-  let rad = lightAt(l, 1u).rgb;
-  if (a.w < 2.5) {
-    let toL = a.xyz - p;
-    let d = max(length(toL), 1e-4);
-    out.dir = toL / d;
-    out.dist = d;
-    out.c = rad * punctualAtten(l, d, out.dir) * max(dot(n, out.dir), 0.0);
-    return out;
-  }
-  let r = lightAt(l, 2u);
-  let tan = lightAt(l, 4u).xyz;
-  var nrm = lightAt(l, 3u).xyz;
-  var hw = r.y;
-  let hh = r.z;
-  let toP = p - a.xyz;
-  if (a.w > 4.5) {
-    let off = toP - tan * dot(toP, tan);
-    nrm = select(normalize(cross(tan, select(vec3<f32>(1.0, 0.0, 0.0), vec3<f32>(0.0, 1.0, 0.0), abs(tan.y) < 0.9))), normalize(off), length(off) > 1e-5);
-    hw = hw + 0.78539816 * hh;
-  } else if (dot(toP, nrm) <= 0.0) {
-    return out;
-  }
-  let bt = cross(nrm, tan);
-  let xi = vec2<f32>(rand(), rand());
-  var s: vec3<f32>;
-  var area: f32;
-  if (a.w > 3.5 && a.w < 4.5) {
-    let rr = hw * sqrt(xi.x);
-    let phi = 2.0 * PI * xi.y;
-    s = a.xyz + tan * (rr * cos(phi)) + bt * (rr * sin(phi));
-    area = PI * hw * hw;
-  } else {
-    s = a.xyz + tan * (hw * (2.0 * xi.x - 1.0)) + bt * (hh * (2.0 * xi.y - 1.0));
-    area = 4.0 * hw * hh;
-  }
-  let toS = s - p;
-  let d = max(length(toS), 1e-4);
-  out.dir = toS / d;
-  out.dist = d;
-  let cosS = dot(n, out.dir);
-  let cosL = -dot(out.dir, nrm);
-  if (cosS > 0.0 && cosL > 0.0) { out.c = rad * (cosS * cosL * area / (PI * max(d * d, 1e-4))); }
-  return out;
-}
-
-// The lights on a surface a path bounced off at p, facing n, on the channels \`mask\`: every directional light, and one
-// local light picked by localWeight (a tenth of the choice spread evenly), over the chance of picking it.
-fn lightsOn(p: vec3<f32>, n: vec3<f32>, mask: u32) -> vec3<f32> {
-  var L = vec3<f32>(0.0);
-  let directional = params.info.y;
-  for (var l = 0u; l < directional; l = l + 1u) {
-    if (!lightsMask(l, mask)) { continue; }
-    let Ld = lightAt(l, 0u).xyz;
-    let ndl = dot(n, Ld);
-    if (ndl > 0.0 && trace(p, Ld, FAR, true).tri < 0) {
-      L = L + lightAt(l, 1u).rgb * ndl;
-    }
-  }
-  let local = params.total.y;
-  if (local == 0u) { return L; }
-  var total = 0.0;
-  for (var k = 0u; k < local; k = k + 1u) { total = total + localWeight(directional + k, p, n, mask); }
-  let even = select(1.0, 0.1, total > 0.0) / f32(local);
-  let spread = select(0.0, 0.9 / total, total > 0.0);
-  let u = rand();
-  var pick = local - 1u;
-  var pdf = 0.0;
-  var cdf = 0.0;
-  for (var k = 0u; k < local; k = k + 1u) {
-    pdf = localWeight(directional + k, p, n, mask) * spread + even;
-    cdf = cdf + pdf;
-    if (u < cdf) { pick = k; break; }
-  }
-  if (pick == local - 1u) { pdf = localWeight(directional + pick, p, n, mask) * spread + even; }
-  let l = directional + pick;
-  if (!lightsMask(l, mask)) { return L; }
-  let ls = localSample(l, p, n);
-  if (max(ls.c.r, max(ls.c.g, ls.c.b)) > 0.0 && trace(p, ls.dir, ls.dist - EPS, true).tri < 0) {
-    L = L + ls.c / pdf;
-  }
-  return L;
-}
-
-struct Path {
-  L: vec3<f32>,
-  // The first segment's hit distance (FAR when it reached the sky), and whether it met the back of a surface (F3d-2).
-  t: f32,
-  back: bool,
-};
-
-// What a path from o along d brings back: the sky on a miss; on a hit, the surface's emission, and (while
-// bounces remain) the lights on it and what a cosine-weighted bounce off it gathers.
-fn pathFrom(origin: vec3<f32>, dir: vec3<f32>) -> Path {
-  let bounces = params.info.x;
-  var out = Path(vec3<f32>(0.0), FAR, false);
-  var tp = vec3<f32>(1.0);
-  var o = origin;
-  var d = dir;
-  for (var b = 0u; b <= bounces; b = b + 1u) {
-    let h = trace(o, d, FAR, false);
-    if (h.tri < 0) {
-      out.L = out.L + tp * skyAt(d);
-      break;
-    }
-    let i = u32(h.tri);
-    if (b == 0u) {
-      out.t = h.t;
-      out.back = dot(d, vec3<f32>(tris[i * 3u].w, tris[i * 3u + 1u].w, tris[i * 3u + 2u].w)) > 0.0;
-    }
-    out.L = out.L + tp * mats[i * 2u + 1u].rgb;
-    if (b == bounces) { break; }
-    var n = normalize(cross(tris[i * 3u + 1u].xyz, tris[i * 3u + 2u].xyz));
-    if (dot(n, d) > 0.0) { n = -n; } // the side the path arrived on (surfaces are two-sided)
-    let hp = o + d * h.t + n * EPS;
-    tp = tp * mats[i * 2u].rgb;
-    out.L = out.L + tp * lightsOn(hp, n, bitcast<u32>(mats[i * 2u].w));
-    if (max(tp.r, max(tp.g, tp.b)) < 1e-4) { break; }
-    o = hp;
-    d = cosineDir(n, vec2<f32>(rand(), rand()));
-  }
-  return out;
-}
-
-@compute @workgroup_size(${WORKGROUP})
-fn main(@builtin(global_invocation_id) id: vec3<u32>) {
-  if (id.x >= params.run.y) { return; }
-  let j = params.run.x + id.x;
-  let P = texels[j * 2u].xyz;
-  let Ng = normalize(texels[j * 2u + 1u].xyz);
-  // The first bounce's directions: one stratified set for the bake, turned per texel (Cranley\u2013Patterson).
-  let turn = vec2<f32>(f32(pcg(j * 2u + 1u) >> 8u), f32(pcg(j * 2u + 2u) >> 8u)) / 16777216.0;
-  var e = vec3<f32>(0.0);
-  var dirSum = vec3<f32>(0.0);
-  var lumSum = 0.0;
-  var skyRef = vec3<f32>(0.0);
-  var skyOpen = 0.0;
-  var lumSq = 0.0;
-  var backs = 0.0;
-  for (var k = 0u; k < params.run.w; k = k + 1u) {
-    let s = params.run.z + k;
-    rng = pcg(j ^ pcg(s + 0x9e3779b9u));
-    let xi = fract(vec2<f32>(f32(s) / f32(params.total.x), radicalInverse(s)) + turn);
-    let d0 = cosineDir(Ng, xi);
-    let sky0 = skyAt(d0);
-    skyRef = skyRef + sky0;
-    let path = pathFrom(P + Ng * EPS, d0);
-    if (path.t >= FAR) { skyOpen = skyOpen + lum(sky0); }
-    if (path.back) { backs = backs + 1.0; }
-    e = e + path.L;
-    let y = lum(path.L);
-    dirSum = dirSum + d0 * y;
-    lumSum = lumSum + y;
-    lumSq = lumSq + y * y;
-  }
-  accum[j * 4u] = accum[j * 4u] + vec4<f32>(e, 0.0);
-  accum[j * 4u + 1u] = accum[j * 4u + 1u] + vec4<f32>(dirSum, lumSum);
-  accum[j * 4u + 2u] = accum[j * 4u + 2u] + vec4<f32>(skyRef, skyOpen);
-  accum[j * 4u + 3u] = accum[j * 4u + 3u] + vec4<f32>(lumSq, backs, 0.0, 0.0);
-}
-
-// A probe (F3d-3): rays over the whole sphere (a Fibonacci set for the bake, turned per probe about the
-// vertical), projected onto L2 SH; the sky's share; backs met; and per octahedral texel the distance the
-// first segment travelled (capped), with its square.
-@compute @workgroup_size(${WORKGROUP})
-fn probeMain(@builtin(global_invocation_id) id: vec3<u32>) {
-  if (id.x >= params.run.y) { return; }
-  let p = params.run.x + id.x;
-  let P = texels[p].xyz;
-  let total = params.total.x;
-  let reach = params.extra.x;
-  let turn = f32(pcg(p * 2u + 11u) >> 8u) / 16777216.0 * 2.0 * PI;
-  var sh = array<vec3<f32>, 9>();
-  var skyRef = 0.0;
-  var skyOpen = 0.0;
-  var backs = 0.0;
-  let base = p * ${PROBE_ACC_VEC4S}u;
-  for (var k = 0u; k < params.run.w; k = k + 1u) {
-    let s = params.run.z + k;
-    rng = pcg(p ^ pcg(s + 0x85ebca6bu));
-    let y = 1.0 - (2.0 * f32(s) + 1.0) / f32(total);
-    let r = sqrt(max(0.0, 1.0 - y * y));
-    let phi = f32(s) * 2.39996323 + turn;
-    let d = vec3<f32>(r * cos(phi), y, r * sin(phi));
-    let path = pathFrom(P, d);
-    let L = path.L;
-    sh[0] = sh[0] + L * 0.282095;
-    sh[1] = sh[1] + L * (0.488603 * d.y);
-    sh[2] = sh[2] + L * (0.488603 * d.z);
-    sh[3] = sh[3] + L * (0.488603 * d.x);
-    sh[4] = sh[4] + L * (1.092548 * d.x * d.y);
-    sh[5] = sh[5] + L * (1.092548 * d.y * d.z);
-    sh[6] = sh[6] + L * (0.315392 * (3.0 * d.z * d.z - 1.0));
-    sh[7] = sh[7] + L * (1.092548 * d.x * d.z);
-    sh[8] = sh[8] + L * (0.546274 * (d.x * d.x - d.y * d.y));
-    let sl = lum(skyAt(d));
-    skyRef = skyRef + sl;
-    if (path.t >= FAR) { skyOpen = skyOpen + sl; }
-    if (path.back) { backs = backs + 1.0; }
-    let t = min(path.t, reach);
-    let texel = octTexel(d);
-    accum[base + 10u + texel] = accum[base + 10u + texel] + vec4<f32>(t, t * t, 1.0, 0.0);
-  }
-  for (var c = 0u; c < 9u; c = c + 1u) { accum[base + c] = accum[base + c] + vec4<f32>(sh[c], 0.0); }
-  accum[base + 9u] = accum[base + 9u] + vec4<f32>(skyRef, skyOpen, backs, f32(params.run.w));
-}
-`
-);
-var luminance = (r, g, b) => 0.2126 * r + 0.7152 * g + 0.0722 * b;
-function lightmapParams(first, texels, firstSample, samples, total, bounces, sky, lights, reach = 0) {
-  const buffer = new ArrayBuffer(PARAMS_BYTES);
-  new Uint32Array(buffer).set([first, texels, firstSample, samples, bounces, lights.directional, sky?.width ?? 0, sky?.height ?? 0, total, lights.local], 0);
-  new Float32Array(buffer)[12] = reach;
-  return buffer;
-}
-async function bakeLightmapGpu(device, layout, occluders, options = {}, progress) {
-  const samples = Math.max(1, Math.round(options.samples ?? 256));
-  const bounces = Math.max(0, Math.min(LIGHTMAP_MAX_BOUNCES, Math.round(options.bounces ?? 3)));
-  const sky = options.sky ?? null;
-  const lights = packBakeLights(options.lights ?? []);
-  const texels = lightmapTexels(layout);
-  const count = texels.index.length;
-  const acc = new Float32Array(count * ACC_FLOATS);
-  if (count > 0) {
-    const scene = packLightmapScene(occluders);
-    const points = new Float32Array(count * 8);
-    for (let j = 0; j < count; j += 1) {
-      for (let a = 0; a < 3; a += 1) {
-        points[j * 8 + a] = texels.position[j * 3 + a];
-        points[j * 8 + 4 + a] = texels.normal[j * 3 + a];
-      }
-    }
-    const upload = (data) => {
-      const buffer = device.createBuffer({ size: Math.max(16, data.byteLength), usage: STORAGE | COPY_DST });
-      device.queue.writeBuffer(buffer, 0, data.buffer, data.byteOffset, data.byteLength);
-      return buffer;
-    };
-    const skyData = sky ? sky.data : new Float32Array(4);
-    const buffers = [upload(scene.nodes), upload(scene.tris), upload(scene.mats), upload(points)];
-    const accum = device.createBuffer({ size: acc.byteLength, usage: STORAGE | COPY_SRC });
-    const skyBuffer = upload(skyData);
-    const lightBuffer = upload(lights.data);
-    const params = device.createBuffer({ size: PARAMS_BYTES, usage: UNIFORM2 | COPY_DST });
-    const readback = device.createBuffer({ size: acc.byteLength, usage: MAP_READ | COPY_DST });
-    try {
-      const pipeline = device.createComputePipeline({ layout: "auto", compute: { module: device.createShaderModule({ code: LIGHTMAP_TRACE_WGSL }), entryPoint: "main" } });
-      const group = device.createBindGroup({
-        layout: pipeline.getBindGroupLayout(0),
-        entries: [...buffers, accum, skyBuffer].map((buffer, binding) => ({ binding, resource: { buffer } })).concat([{ binding: 6, resource: { buffer: params } }, { binding: 7, resource: { buffer: lightBuffer } }])
-      });
-      const budget = pathBudget(lights.local);
-      const chunk = Math.min(count, CHUNK_TEXELS, budget);
-      const perPass = Math.max(1, Math.min(samples, Math.floor(budget / chunk)));
-      const submits = Math.ceil(samples / perPass) * Math.ceil(count / chunk);
-      let done = 0;
-      for (let s = 0; s < samples; s += perPass) {
-        const n = Math.min(perPass, samples - s);
-        for (let first = 0; first < count; first += chunk) {
-          const texelsHere = Math.min(chunk, count - first);
-          device.queue.writeBuffer(params, 0, lightmapParams(first, texelsHere, s, n, samples, bounces, sky, lights));
-          const encoder2 = device.createCommandEncoder();
-          const pass = encoder2.beginComputePass();
-          pass.setPipeline(pipeline);
-          pass.setBindGroup(0, group);
-          pass.dispatchWorkgroups(Math.ceil(texelsHere / WORKGROUP));
-          pass.end();
-          device.queue.submit([encoder2.finish()]);
-          await device.queue.onSubmittedWorkDone();
-          done += 1;
-          progress?.(done / submits);
-        }
-      }
-      const encoder = device.createCommandEncoder();
-      encoder.copyBufferToBuffer(accum, 0, readback, 0, acc.byteLength);
-      device.queue.submit([encoder.finish()]);
-      await readback.mapAsync(MAP_READ);
-      acc.set(new Float32Array(readback.getMappedRange()));
-      readback.unmap();
-    } finally {
-      for (const buffer of [...buffers, accum, skyBuffer, lightBuffer, params, readback]) buffer.destroy();
-    }
-  }
-  const atlas = resolveLightmap(texels, acc, samples, options.backfaceLimit ?? 0.6);
-  if (count > 0 && options.denoise !== false) await denoiseLightmap(device, atlas, 1 / layout.density);
-  progress?.(1);
-  return finishLightmap(layout, atlas, options.stitch !== false);
-}
-function resolveLightmap(texels, acc, samples, backfaceLimit) {
-  const { size, index } = texels;
-  const values = new Float32Array(size * size * 12);
-  const guide = new Float32Array(size * size * 8);
-  const valid = new Int32Array(size * size).fill(-1);
-  let invalid = 0;
-  for (let j = 0; j < index.length; j += 1) {
-    const i = index[j];
-    const o = j * ACC_FLOATS;
-    if (acc[o + 13] > backfaceLimit * samples) {
-      invalid += 1;
-      continue;
-    }
-    valid[i] = texels.chart[i];
-    const v = i * 12;
-    for (let c = 0; c < 3; c += 1) values[v + c] = acc[o + c] / samples;
-    const mean = acc[o + 7] / samples;
-    values[v + 3] = Math.max(0, acc[o + 12] / samples - mean * mean) / samples;
-    const w = acc[o + 7];
-    for (let c = 0; c < 3; c += 1) values[v + 4 + c] = w > 1e-12 ? acc[o + 4 + c] / w : 0;
-    const ref = luminance(acc[o + 8], acc[o + 9], acc[o + 10]);
-    values[v + 7] = ref > 1e-12 ? Math.min(1, acc[o + 11] / ref) : 1;
-    for (let c = 0; c < 3; c += 1) {
-      const open = acc[o + 8 + c] / samples;
-      values[v + 8 + c] = open > 1e-6 ? Math.min(LIGHTMAP_RANGE3, values[v + c] / open) : 1;
-    }
-    for (let c = 0; c < 3; c += 1) {
-      guide[i * 8 + c] = texels.position[j * 3 + c];
-      guide[i * 8 + 4 + c] = texels.normal[j * 3 + c];
-    }
-    guide[i * 8 + 3] = 1;
-  }
-  return { size, values, valid, guide, invalid };
-}
-var DENOISE_PASSES = 4;
-var DENOISE_SIGMA = 1.5;
-var LIGHTMAP_DENOISE_WGSL = (
-  /* wgsl */
-  `
-struct Params {
-  size: u32,
-  step: u32,
-  texel: f32, // world units per texel
-  sigma: f32,
-};
-@group(0) @binding(0) var<storage, read> guide: array<vec4<f32>>;
-@group(0) @binding(1) var<storage, read> src: array<vec4<f32>>;
-@group(0) @binding(2) var<storage, read_write> dst: array<vec4<f32>>;
-@group(0) @binding(3) var<uniform> params: Params;
-
-fn lum(c: vec3<f32>) -> f32 {
-  return dot(c, vec3<f32>(0.2126, 0.7152, 0.0722));
-}
-
-@compute @workgroup_size(8, 8, 1)
-fn main(@builtin(global_invocation_id) id: vec3<u32>) {
-  let size = params.size;
-  if (id.x >= size || id.y >= size) { return; }
-  let i = id.y * size + id.x;
-  let a0 = src[i * 3u];
-  let a1 = src[i * 3u + 1u];
-  let a2 = src[i * 3u + 2u];
-  let g = guide[i * 2u];
-  if (g.w < 0.5) {
-    dst[i * 3u] = a0;
-    dst[i * 3u + 1u] = a1;
-    dst[i * 3u + 2u] = a2;
-    return;
-  }
-  let p = g.xyz;
-  let n = guide[i * 2u + 1u].xyz;
-  let l = lum(a0.rgb);
-  // The variance the luminance stop is scaled by, prefiltered over the texel's 3\xD73 (SVGF): a few paths' estimate is noisy itself.
-  var vsum = 0.0;
-  var vw = 0.0;
-  for (var vy = -1; vy <= 1; vy = vy + 1) {
-    for (var vx = -1; vx <= 1; vx = vx + 1) {
-      let qx = i32(id.x) + vx;
-      let qy = i32(id.y) + vy;
-      if (qx < 0 || qy < 0 || qx >= i32(size) || qy >= i32(size)) { continue; }
-      let j = u32(qy) * size + u32(qx);
-      if (guide[j * 2u].w < 0.5) { continue; }
-      let k = select(0.5, 1.0, vx == 0) * select(0.5, 1.0, vy == 0);
-      vsum = vsum + src[j * 3u].w * k;
-      vw = vw + k;
-    }
-  }
-  let sigma = params.sigma * sqrt(max(vsum / vw, 0.0)) + 1e-4;
-  // Farther than this in the world, a texel the kernel reaches is on another chart that merely sits beside this one in the atlas.
-  let reach = (2.83 * f32(params.step) + 1.5) * params.texel;
-  var kernel = array<f32, 5>(0.0625, 0.25, 0.375, 0.25, 0.0625);
-  var s0 = vec3<f32>(0.0);
-  var sv = 0.0;
-  var s1 = vec4<f32>(0.0);
-  var s2 = vec4<f32>(0.0);
-  var ws = 0.0;
-  for (var dy = -2; dy <= 2; dy = dy + 1) {
-    for (var dx = -2; dx <= 2; dx = dx + 1) {
-      let qx = i32(id.x) + dx * i32(params.step);
-      let qy = i32(id.y) + dy * i32(params.step);
-      if (qx < 0 || qy < 0 || qx >= i32(size) || qy >= i32(size)) { continue; }
-      let j = u32(qy) * size + u32(qx);
-      let gq = guide[j * 2u];
-      if (gq.w < 0.5) { continue; }
-      let dp = gq.xyz - p;
-      if (length(dp) > reach) { continue; }
-      let b0 = src[j * 3u];
-      let wn = pow(max(0.0, dot(n, guide[j * 2u + 1u].xyz)), 32.0);
-      let wp = exp(-abs(dot(dp, n)) / params.texel);
-      let wl = exp(-abs(lum(b0.rgb) - l) / sigma);
-      let w = kernel[dx + 2] * kernel[dy + 2] * wn * wp * wl;
-      s0 = s0 + b0.rgb * w;
-      sv = sv + b0.w * w * w;
-      s1 = s1 + src[j * 3u + 1u] * w;
-      s2 = s2 + src[j * 3u + 2u] * w;
-      ws = ws + w;
-    }
-  }
-  // The texel itself always weighs in, so ws > 0.
-  dst[i * 3u] = vec4<f32>(s0 / ws, sv / (ws * ws));
-  dst[i * 3u + 1u] = s1 / ws;
-  dst[i * 3u + 2u] = s2 / ws;
-}
-`
-);
-async function denoiseLightmap(device, atlas, texel, passes = DENOISE_PASSES, sigma = DENOISE_SIGMA) {
-  const { size, values, guide } = atlas;
-  const guideBuffer = device.createBuffer({ size: guide.byteLength, usage: STORAGE | COPY_DST });
-  device.queue.writeBuffer(guideBuffer, 0, guide.buffer, guide.byteOffset, guide.byteLength);
-  const ping = [0, 1].map(() => device.createBuffer({ size: values.byteLength, usage: STORAGE | COPY_DST | COPY_SRC }));
-  device.queue.writeBuffer(ping[0], 0, values.buffer, values.byteOffset, values.byteLength);
-  const params = device.createBuffer({ size: 16, usage: UNIFORM2 | COPY_DST });
-  const readback = device.createBuffer({ size: values.byteLength, usage: MAP_READ | COPY_DST });
-  try {
-    const pipeline = device.createComputePipeline({ layout: "auto", compute: { module: device.createShaderModule({ code: LIGHTMAP_DENOISE_WGSL }), entryPoint: "main" } });
-    const groups = [0, 1].map(
-      (k) => device.createBindGroup({
-        layout: pipeline.getBindGroupLayout(0),
-        entries: [
-          { binding: 0, resource: { buffer: guideBuffer } },
-          { binding: 1, resource: { buffer: ping[k] } },
-          { binding: 2, resource: { buffer: ping[1 - k] } },
-          { binding: 3, resource: { buffer: params } }
-        ]
-      })
-    );
-    for (let pass = 0; pass < passes; pass += 1) {
-      const p = new ArrayBuffer(16);
-      new Uint32Array(p).set([size, 1 << pass]);
-      new Float32Array(p).set([texel, sigma], 2);
-      device.queue.writeBuffer(params, 0, p);
-      const encoder2 = device.createCommandEncoder();
-      const compute = encoder2.beginComputePass();
-      compute.setPipeline(pipeline);
-      compute.setBindGroup(0, groups[pass % 2]);
-      compute.dispatchWorkgroups(Math.ceil(size / 8), Math.ceil(size / 8));
-      compute.end();
-      device.queue.submit([encoder2.finish()]);
-      await device.queue.onSubmittedWorkDone();
-    }
-    const encoder = device.createCommandEncoder();
-    encoder.copyBufferToBuffer(ping[passes % 2], 0, readback, 0, values.byteLength);
-    device.queue.submit([encoder.finish()]);
-    await readback.mapAsync(MAP_READ);
-    values.set(new Float32Array(readback.getMappedRange()));
-    readback.unmap();
-  } finally {
-    for (const buffer of [guideBuffer, ...ping, params, readback]) buffer.destroy();
-  }
-}
-function finishLightmap(layout, atlas, stitch = true) {
-  const { size, values, valid } = atlas;
-  dilateLightmapValues(values, valid, size, 12);
-  const seams = stitch ? stitchLightmapSeams(layout, values, 12) : 0;
-  const texels = size * size;
-  const irradiance = new Float32Array(texels * 3);
-  const direction = new Float32Array(texels * 4);
-  const ambient = new Uint8ClampedArray(texels * 4);
-  const q = (x) => Math.min(255, Math.round(Math.max(0, x) / LIGHTMAP_RANGE3 * 127.5) * 2);
-  for (let i = 0; i < texels; i += 1) {
-    const v = i * 12;
-    for (let c = 0; c < 3; c += 1) irradiance[i * 3 + c] = Math.max(0, values[v + c]);
-    const length = Math.hypot(values[v + 4], values[v + 5], values[v + 6]);
-    const k = length > 1 ? 1 / length : 1;
-    direction.set([values[v + 4] * k, values[v + 5] * k, values[v + 6] * k, Math.min(1, Math.max(0, values[v + 7]))], i * 4);
-    ambient.set([q(values[v + 8]), q(values[v + 9]), q(values[v + 10]), 255], i * 4);
-  }
-  return { hdr: { width: size, height: size, irradiance, direction }, ambient, invalid: atlas.invalid, seams };
-}
-var COSINE_BANDS2 = [1, 2 / 3, 2 / 3, 2 / 3, 1 / 4, 1 / 4, 1 / 4, 1 / 4, 1 / 4];
-async function bakeProbeVolumeGpu(device, min, max, counts, occluders, options = {}, progress) {
-  const rays = Math.max(16, Math.round(options.rays ?? 1024));
-  const bounces = Math.max(0, Math.min(LIGHTMAP_MAX_BOUNCES, Math.round(options.bounces ?? 3)));
-  const sky = options.sky ?? null;
-  const lights = packBakeLights(options.lights ?? []);
-  const [cx, cy, cz] = counts;
-  const count = cx * cy * cz;
-  const spacing = [0, 1, 2].map((a) => (max[a] - min[a]) / Math.max(1, counts[a] - 1));
-  const reach = 1.5 * Math.max(...spacing, 1e-3);
-  const positions = new Float32Array(count * 4);
-  for (let z = 0; z < cz; z += 1) for (let y = 0; y < cy; y += 1) for (let x = 0; x < cx; x += 1) {
-    const p = (z * cy + y) * cx + x;
-    positions.set([min[0] + x * spacing[0], min[1] + y * spacing[1], min[2] + z * spacing[2], 1], p * 4);
-  }
-  const acc = new Float32Array(count * PROBE_ACC_VEC4S * 4);
-  const scene = packLightmapScene(occluders);
-  const upload = (data) => {
-    const buffer = device.createBuffer({ size: Math.max(16, data.byteLength), usage: STORAGE | COPY_DST });
-    device.queue.writeBuffer(buffer, 0, data.buffer, data.byteOffset, data.byteLength);
-    return buffer;
-  };
-  const buffers = [upload(scene.nodes), upload(scene.tris), upload(scene.mats), upload(positions)];
-  const accum = device.createBuffer({ size: acc.byteLength, usage: STORAGE | COPY_SRC });
-  const skyBuffer = upload(sky ? sky.data : new Float32Array(4));
-  const lightBuffer = upload(lights.data);
-  const params = device.createBuffer({ size: PARAMS_BYTES, usage: UNIFORM2 | COPY_DST });
-  const readback = device.createBuffer({ size: acc.byteLength, usage: MAP_READ | COPY_DST });
-  try {
-    const pipeline = device.createComputePipeline({ layout: "auto", compute: { module: device.createShaderModule({ code: LIGHTMAP_TRACE_WGSL }), entryPoint: "probeMain" } });
-    const group = device.createBindGroup({
-      layout: pipeline.getBindGroupLayout(0),
-      entries: [...buffers, accum, skyBuffer].map((buffer, binding) => ({ binding, resource: { buffer } })).concat([{ binding: 6, resource: { buffer: params } }, { binding: 7, resource: { buffer: lightBuffer } }])
-    });
-    const perPass = Math.max(1, Math.min(rays, Math.floor(pathBudget(lights.local) / count)));
-    const submits = Math.ceil(rays / perPass);
-    for (let s = 0, done = 0; s < rays; s += perPass) {
-      device.queue.writeBuffer(params, 0, lightmapParams(0, count, s, Math.min(perPass, rays - s), rays, bounces, sky, lights, reach));
-      const encoder2 = device.createCommandEncoder();
-      const pass = encoder2.beginComputePass();
-      pass.setPipeline(pipeline);
-      pass.setBindGroup(0, group);
-      pass.dispatchWorkgroups(Math.ceil(count / WORKGROUP));
-      pass.end();
-      device.queue.submit([encoder2.finish()]);
-      await device.queue.onSubmittedWorkDone();
-      done += 1;
-      progress?.(done / submits);
-    }
-    const encoder = device.createCommandEncoder();
-    encoder.copyBufferToBuffer(accum, 0, readback, 0, acc.byteLength);
-    device.queue.submit([encoder.finish()]);
-    await readback.mapAsync(MAP_READ);
-    acc.set(new Float32Array(readback.getMappedRange()));
-    readback.unmap();
-  } finally {
-    for (const buffer of [...buffers, accum, skyBuffer, lightBuffer, params, readback]) buffer.destroy();
-  }
-  return finishProbeVolume(min, max, counts, acc, reach, options.backfaceLimit ?? 0.6);
-}
-function finishProbeVolume(min, max, counts, acc, reach, backfaceLimit) {
-  const count = counts[0] * counts[1] * counts[2];
-  const depthTexels = PROBE_DEPTH_SIDE2 * PROBE_DEPTH_SIDE2;
-  const sh = new Float32Array(count * PROBE_SH2 * 3);
-  const visibility = new Float32Array(count);
-  const valid = new Uint8Array(count);
-  const depth = new Float32Array(count * depthTexels * 2);
-  for (let p = 0; p < count; p += 1) {
-    const o = p * PROBE_ACC_VEC4S * 4;
-    const rays = acc[o + 39];
-    valid[p] = rays > 0 && acc[o + 38] <= backfaceLimit * rays ? 1 : 0;
-    visibility[p] = acc[o + 36] > 1e-12 ? Math.min(1, acc[o + 37] / acc[o + 36]) : 1;
-    if (valid[p]) for (let k = 0; k < PROBE_SH2; k += 1) for (let c = 0; c < 3; c += 1) sh[(p * PROBE_SH2 + k) * 3 + c] = acc[o + k * 4 + c] * 4 * Math.PI / rays * COSINE_BANDS2[k];
-    for (let t = 0; t < depthTexels; t += 1) {
-      const d = o + (10 + t) * 4;
-      const n = acc[d + 2];
-      depth[(p * depthTexels + t) * 2] = n > 0 ? acc[d] / n : reach;
-      depth[(p * depthTexels + t) * 2 + 1] = n > 0 ? acc[d + 1] / n : reach * reach;
-    }
-  }
-  return { min, max, counts, sh, visibility, valid, depth };
 }
 
 // src/fx/lensModel.ts

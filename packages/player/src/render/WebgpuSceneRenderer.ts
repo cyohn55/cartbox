@@ -155,6 +155,7 @@ import { reflectionShaderWgsl, reflectionUniforms } from "./reflections.js";
 import { CONTACT_UNIFORM_FLOATS, SCREEN_SHADING_FORMAT, contactShaderWgsl, contactUniforms } from "./contactShadows.js";
 import { GTAO_UNIFORM_FLOATS, gtaoShaderWgsl, gtaoTemporalWgsl, gtaoUniforms } from "./gtao.js";
 import { AERIAL_FRAME_FLOATS, AERIAL_LUT_BYTES, AERIAL_SAMPLE_WGSL, GpuAtmosphere, packAerialFrame } from "./atmosphere.js";
+import { GpuProbeGi } from "./dynamicGi.js";
 import { FOG_FORMAT, FOG_FRAME_FLOATS, FOG_SAMPLE_WGSL, GpuVolumetricFog, fogCamera, packFogFrame, type FogFrame } from "./volumetricFog.js";
 import {
   LOCAL_ATLAS_SIZE,
@@ -2090,6 +2091,10 @@ export class WebgpuSceneRenderer implements SceneRenderer {
   private frameDepthView: { readonly viewProj: Mat4; readonly terms: readonly [number, number] } | null = null;
   /** Whether this frame's ambient light takes GTAO (F3c), for the frame uniform. */
   private frameGtao = false;
+  /** This frame's real-time GI (F3e), its tracer for the still scene it was made for, and the sky it traces. */
+  private frameGi: GpuSceneDraw["dynamicGi"] | null = null;
+  private probeGi: { readonly key: string; readonly gi: GpuProbeGi } | null = null;
+  private giSky: { readonly source: object; readonly sky: ReturnType<typeof environmentPanorama> } | null = null;
   /** This frame's volumetric fog (F5b), its volumes (made when a frame first has some) and the shader's terms. */
   private frameFog: FogFrame | null = null;
   private volumetricFog: GpuVolumetricFog | null = null;
@@ -3080,6 +3085,7 @@ export class WebgpuSceneRenderer implements SceneRenderer {
     const drawnProjection = temporal ? temporal.projection : draw.projection;
     this.frameDepthView = this.hdr && prepass ? { viewProj, terms: [drawnProjection[10]!, drawnProjection[14]!] } : null;
     this.frameFog = this.prepareFog(draw);
+    this.frameGi = this.hdr && draw.dynamicGi && draw.environment?.probeVolume ? draw.dynamicGi : null;
     const { ordered, globalCount, clusters: cells } = this.clusterLights(localPlan ? { ...draw, lights: localPlan.lights, localShadows: null } : draw);
     this.uploadLights(packLights(ordered, this.hdr));
     // The fog's local lights (F5b-2): as the scene's, by the same cells and tiles.
@@ -3129,8 +3135,9 @@ export class WebgpuSceneRenderer implements SceneRenderer {
         shadow: shadowParams,
         tonemap: draw.tonemap ?? null,
         hasSsao: ssao !== null,
-        hasLightmap: entry.textures.lm !== null || (this.hdr && entry.textures.lmHdr !== null),
-        hdrLightmap: this.hdr && entry.textures.lmHdr !== null,
+        // With real-time GI (F3e) every surface takes the live volume's light, a light-mapped one too.
+        hasLightmap: !this.frameGi && (entry.textures.lm !== null || (this.hdr && entry.textures.lmHdr !== null)),
+        hdrLightmap: !this.frameGi && this.hdr && entry.textures.lmHdr !== null,
         model,
         lightCount,
         // A volumetric fog (F5b) takes the place of the painted fade.
@@ -3408,6 +3415,25 @@ export class WebgpuSceneRenderer implements SceneRenderer {
         pass.keep();
         return (ctx) =>
           fog.encode(ctx.encoder, { cascades: groups.cascades.texture, sampler: groups.cascades.sampler, lights: this.lightBuffer, clusters: groups.clusters.data, tiles: groups.shadowTiles, atlas: groups.atlas }, ctx.timing);
+      });
+    }
+
+    // Real-time GI (F3e): the probe volume the scene reads, traced and relit before anything shades by it.
+    const liveGi = this.frameGi;
+    const volume = draw.environment?.probeVolume ?? null;
+    if (liveGi && volume) {
+      if (!this.probeGi || this.probeGi.key !== liveGi.key) {
+        this.probeGi?.gi.dispose();
+        this.probeGi = { key: liveGi.key, gi: new GpuProbeGi(this.device, liveGi.occluders) };
+      }
+      const gi = this.probeGi.gi;
+      const env = draw.environment!;
+      if (this.giSky?.source !== env) this.giSky = { source: env, sky: environmentPanorama(env) };
+      const sky = this.giSky.sky;
+      const groups = this.depthGroups;
+      graph.addPass("dynamic gi", "compute", (pass) => {
+        pass.keep();
+        return (ctx) => gi.update(ctx.encoder, groups.probes, volume, liveGi.settings, draw.lights ?? [], sky, ctx.timing);
       });
     }
 
@@ -4370,6 +4396,7 @@ export class WebgpuSceneRenderer implements SceneRenderer {
     this.probeCapture?.dispose();
     this.atmosphere?.dispose();
     this.volumetricFog?.dispose();
+    this.probeGi?.gi.dispose();
     destroySafely(this.depthGroups.fogVolume.texture);
     destroySafely(this.blankProbeCubes);
     destroySafely(this.probeBuffer);

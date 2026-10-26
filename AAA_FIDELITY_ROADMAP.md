@@ -763,6 +763,32 @@ Everything else depends on this track. It contains no visible "feature", but its
   - **DDGI**: a probe grid whose irradiance and visibility are updated every frame by software ray tracing in compute, against a scene BVH or a global signed distance field.
   - **SSGI** for near-field detail on top.
   - Together they give moving lights, time of day and destructible scenery correct bounce light without a bake: the Lumen-class result, built from techniques WebGPU can run.
+  - **F3e-1, DDGI over the probe volume: done** (`model/dynamicGi.ts`, `render/dynamicGi.ts`). On the AAA tier, a rig can ask for real-time GI (`SceneLighting.dynamicGi`). The probe volume every surface takes its diffuse light from (F3d-3) is then traced and relit every frame on the GPU, so moving lights, the time of day (F5a-2) and a cart's sun bounce without a bake.
+    - **The volume** is the rig's baked one where it has one, as the starting point. Otherwise it is an empty one (no light, open, valid) laid a little past the scene's bounds at the set spacing (3 m by default), within the probe limits.
+      - It is the same buffer the scene shader reads (F5b-0 made it storage), written in place.
+      - While it is live, light-mapped surfaces read it too, so a moving sun doesn't leave baked light behind.
+    - **Trace** (a thread a ray, in compute, through the GPU lightmapper's own BVH tracer, built once from the still scene):
+      - each probe casts its rays (64 by default) over the sphere, a Fibonacci set turned by a fresh uniformly random rotation each frame;
+      - a miss takes the sky (the IBL's panorama);
+      - a hit takes its emission, plus its albedo × the light on it: the directional lights through a shadow ray, one local light picked by what it would give (as the bake picks it), and the volume's own irradiance there. So light bounces once more each frame, without end;
+      - a hit on a surface's back is dark and counted, and its distance cut to a fifth, so the visibility keeps light from leaking through walls.
+    - **Update** (a thread a probe's slot):
+      - the rays projected onto L2 SH as irradiance over π, the bake's own estimator;
+      - the probe's validity (most rays on backs means it is inside something) and its sky visibility;
+      - per octahedral texel, the mean distance and its square where this frame's rays fell;
+      - each blended into what the probe held by the hysteresis (0.97 by default).
+    - **Authoring.** The Lighting panel gains **Global illumination (AAA)**: Baked or Real-time, with Rays per probe, Steadiness and Probe spacing.
+    - *Tests (`dynamic-gi.test.ts`):*
+      - Settings read in range and survive a save. The grid lies past the bounds within the probe limits. The frames' rotations are orthonormal.
+      - The player hands the AAA renderer the still scene and one volume over its bounds, the same object frame after frame, and hands it nothing on other renderers.
+      - On Dawn:
+        - from nothing, the live volume converges within 8% on what the GPU bake (4096 rays, 4 bounces) gives the same floor under the sky and sun;
+        - in a closed room, a lamp switched on more than doubles the light at the probe beside it and lifts the room's far corner by bounce. Switched off, the probes fall back within 15% of the dark room's;
+        - the AAA renderer's wall gains the room's bounce over the frames: brighter after one frame than its direct light alone, and brighter still after sixteen.
+    - *Left for F3e:*
+      - **F3e-2:** SSGI for near-field detail, from the prepass's depths and the frame before.
+      - What moves isn't in the BVH: characters and physics bodies are lit by the volume but don't block or bounce its light. A refit BVH, or an SDF, would bring them in.
+      - The reflection probes capture with the volume as it was given, not as it is live. All probes update every frame. A budget per frame, and probe relocation out of walls, would scale it to large maps.
 - [ ] **F3f. Reflections.**
   - Hierarchical-Z SSR with GGX importance sampling and a temporal denoiser.
   - Rough reflections that blend into F3b probes.

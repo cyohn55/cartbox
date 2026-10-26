@@ -59,6 +59,7 @@ import {
   type ProceduralSky,
   type AtmosphereSettings,
   type VolumetricFogSettings,
+  type DynamicGiSettings,
   type ReflectionProbe,
   type SceneFog,
   type SceneLight,
@@ -256,6 +257,7 @@ export function LightingEditor({ lighting, onChange }: LightingEditorProps) {
 
       <SkyDomeControls lighting={lighting} onChange={onChange} />
       <FogControls lighting={lighting} onChange={onChange} />
+      <DynamicGiControls lighting={lighting} onChange={onChange} />
       <WindControls lighting={lighting} onChange={onChange} />
       <ShaftControls lighting={lighting} onChange={onChange} />
       <ProbeControls lighting={lighting} onChange={onChange} />
@@ -1033,6 +1035,37 @@ function FogControls({ lighting, onChange }: LightingEditorProps & { lighting: S
           />
           <FogLayerControls fog={fog} patch={patch} />
           <VolumetricFogControls fog={fog} patch={patch} />
+        </>
+      )}
+    </>
+  );
+}
+
+/**
+ * Real-time GI (AAA_FIDELITY_ROADMAP.md F3e): on the AAA tier a probe volume
+ * traced and relit every frame, so moving lights and a time of day bounce
+ * without a bake; light-mapped surfaces take it too while it is on.
+ */
+function DynamicGiControls({ lighting, onChange }: LightingEditorProps & { lighting: SceneLighting }) {
+  const gi = lighting.dynamicGi ?? null;
+  const set = (next: Partial<DynamicGiSettings>) => gi && onChange({ ...lighting, dynamicGi: { ...gi, ...next } });
+  return (
+    <>
+      <SegmentedControl
+        label="Global illumination (AAA)"
+        ariaLabel="Global illumination"
+        selected={gi ? "live" : "baked"}
+        onSelect={(id) => onChange({ ...lighting, dynamicGi: id === "live" ? (gi ?? {}) : null })}
+        options={[
+          { id: "baked", label: "Baked" },
+          { id: "live", label: "Real-time", hint: "On the AAA tier, probes are traced through the still scene every frame, so light that moves bounces without a bake. A baked probe volume is its starting point; light maps step aside while it is on" },
+        ]}
+      />
+      {gi && (
+        <>
+          <RangeControl label="Rays per probe" nested min={16} max={256} step={16} value={gi.rays ?? 64} ariaLabel="GI rays per probe" display={`${gi.rays ?? 64}`} onChange={(rays) => set({ rays })} />
+          <RangeControl label="Steadiness" nested min={0.5} max={0.99} step={0.01} value={gi.hysteresis ?? 0.97} ariaLabel="GI hysteresis" display={(gi.hysteresis ?? 0.97).toFixed(2)} onChange={(hysteresis) => set({ hysteresis })} />
+          <RangeControl label="Probe spacing" nested min={1} max={10} step={0.5} value={gi.spacing ?? 3} ariaLabel="GI probe spacing" display={`${(gi.spacing ?? 3).toFixed(1)} m`} onChange={(spacing) => set({ spacing })} />
         </>
       )}
     </>

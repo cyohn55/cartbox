@@ -297,3 +297,16 @@ export function decodeProbeVolume(stored: unknown): ProbeVolume | null {
   }
   return { min: s.min, max: s.max, counts, sh, visibility, valid, depth };
 }
+
+/**
+ * A volume of probes that have seen nothing yet (F3e): no light, valid, open
+ * to the sky, and seeing as far as `reach` every way. A live volume starts
+ * from it where the rig has no bake to start from.
+ */
+export function emptyProbeVolume(min: readonly [number, number, number], max: readonly [number, number, number], counts: readonly [number, number, number], reach: number): ProbeVolume {
+  const count = counts[0] * counts[1] * counts[2];
+  const depthTexels = PROBE_DEPTH_SIDE * PROBE_DEPTH_SIDE;
+  const depth = new Float32Array(count * depthTexels * 2);
+  for (let i = 0; i < count * depthTexels; i += 1) depth.set([reach, reach * reach], i * 2);
+  return { min, max, counts, sh: new Float32Array(count * PROBE_SH * 3), visibility: new Float32Array(count).fill(1), valid: new Uint8Array(count).fill(1), depth };
+}
