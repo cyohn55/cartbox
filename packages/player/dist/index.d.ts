@@ -971,6 +971,8 @@ interface QualitySettings {
      * expanded in blocks, so much past 4 shows on cloud edges.)
      */
     readonly skyScale?: number;
+    /** On the AAA tier, the sun's virtual shadow maps over its cascades (F2b). */
+    readonly virtualShadows?: boolean;
     /** On the AAA tier, reflections the screen can't show traced through the still scene's BVH (F3f). */
     readonly tracedReflections?: boolean;
 }
@@ -4513,6 +4515,15 @@ interface SceneDraw {
      * whose BVH the reflections trace where the screen has nothing to show,
      * keyed as `dynamicGi`'s (the two share one tracer when both are given).
      */
+    /**
+     * Virtual shadow maps for the sun (AAA_FIDELITY_ROADMAP.md F2b;
+     * virtualShadows.ts) on the linear-light renderer with a prepass and its
+     * cascades, at High and Epic: the physical pool's edge in texels. Absent =
+     * the cascades alone.
+     */
+    readonly virtualShadows?: {
+        readonly poolSize: number;
+    } | null;
     readonly reflectionTrace?: {
         readonly occluders: readonly Occluder[];
         readonly key: string;
@@ -5186,7 +5197,8 @@ declare class WebgpuSceneRenderer implements SceneRenderer {
     private bindSsao;
     /**
      * The screen-space shading target (F2c, F3c): rgba16float at the frame's size, AO in r, the sun's contact
-     * in g, the bent normal in ba; and, in its second layer, SSGI (F3e-2): the near field's light in rgb, its share in a.
+     * in g, the bent normal in ba; in its second layer, SSGI (F3e-2): the near field's light in rgb, its share in a;
+     * and in its third, the sun's light through the virtual shadow maps (F2b) in r, −1 where no page is resident.
      */
     private contactTexture;
     private ensureContact;
@@ -5230,6 +5242,27 @@ declare class WebgpuSceneRenderer implements SceneRenderer {
     private addScreenShading;
     /** A 1×1 stand-in for GTAO's history when the frame has none (F3c). */
     private gtaoBlank;
+    /** This frame's virtual shadow maps (F2b): the pages it draws, when it has them. */
+    private frameVsm;
+    /**
+     * The virtual shadow maps' resources (F2b): the physical pool and its bookkeeping, the marks and the
+     * buffers they are read back through (each with the windows it was marked under), the page table, the
+     * passes' uniforms, a view uniform a page drawn a frame, and the pipelines.
+     */
+    private vsm;
+    /** Plan the frame's virtual shadow maps (F2b): see virtualShadows.ts. */
+    private planVsm;
+    /** Draw the frame's pages (F2b): each cleared, then the casters whose shadow can reach it, through its own view. */
+    private addVsmPages;
+    /** Mark the pages the frame's pixels want (F2b), and copy the marks out to be read back. */
+    private addVsmMarks;
+    /** The sun's light through the virtual map at each pixel (F2b), into the screen-shading target's third layer. */
+    private addVsmResolve;
+    /** Read back the marks the frame just copied out (F2b); they reach a later frame's plan. */
+    private readVsmMarks;
+    private disposeVsm;
+    /** Clears a rect of a depth32float map to the far plane (F2d-2's, shared with F2b's pages). */
+    private localClearPipeline;
     /**
      * SSGI (F3e-2): at half resolution its trace against the prepass's depths, lit by last frame's resolved
      * image (the TAA history), accumulated over frames through the velocity buffer, then filtered up to full

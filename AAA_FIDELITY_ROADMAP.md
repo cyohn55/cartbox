@@ -430,9 +430,26 @@ Everything else depends on this track. It contains no visible "feature", but its
         - a card opaque on one half and clear on the other shadows only under its opaque half (fails without the cut-out's discard).
       - `cascades.test.ts`: a metre toward the sun moves a point's depth by one metre's share of its cascade's span.
       - `shadowCascade.test.ts`: the high preset casts 4096² maps and medium 2048²; the real sun's size, four times it with soft shadows.
-- [ ] **F2b. Virtual shadow maps.**
+- [x] **F2b. Virtual shadow maps.** (GPU-side page allocation, and the cascades' retirement where every pixel has a page, later; see below.)
   - A 16K virtual shadow map, paged from a physical pool, with pages marked by the depth buffer and cached between frames for static geometry.
   - This is what makes shadow detail hold at every distance in UE5. It falls back to F2a on Medium and below.
+  - **F2b-1: done** (`render/virtualShadows.ts`). On the AAA tier at High and Epic (`QualitySettings.virtualShadows`; Medium and Low keep the cascades alone), the sun's shadow on what the prepass holds comes from a virtual map.
+    - **The virtual map.** A clipmap of six levels round the camera. Each level is a virtual 16384² map (128² pages of 128² texels), its texels twice the level below's: 2 mm at level 0, 6.4 cm at level 5.
+      - A page always holds the same square of the sun's view: the light-space grid is fixed, each level's window wraps over it, and the depth range (±1 km along the sun) moves only in 250 m steps. So a page drawn once stays good as the camera moves.
+    - **Marking.** A compute pass over the prepass's depths finds each pixel's finest level whose texels are no larger than the pixel (or the first whose window holds it). It sets a bit for each page the filter reaches at that level and two above.
+    - **The pool.** The marks are copied out and read back a frame or two late (three staging buffers, each remembering the windows it was marked under). The CPU's `VirtualPagePool` gives each marked page a page of a 4096² depth32float pool (1024 pages, 64 MB), evicting the least recently needed and never one needed this frame.
+      - A page is drawn when first given out, when the key changes (the sun's direction to 1e-4, the depth range, the still casters' key), and while something that moves stands in it or did when it was last drawn. The player now hands the still casters' key and movers over whenever the sun casts.
+      - At most 48 pages are drawn a frame, missing pages before stale ones and finest first. Each is cleared and drawn through its own view by the local tiles' depth32float pipelines, with only the casters whose bounding sphere can shade it.
+      - The page table (per level, the wrapped window's physical page + 1) is uploaded when a page changes or a window moves.
+    - **Sampling.** A full-screen pass writes each pixel's sun light into the screen-shading target's **third layer**, before the scene shades. It uses the finest level with resident pages round the pixel, pushed off the surface by a texel or more as the light grazes.
+      - The filter is PCSS: a 12-tap blocker search and a 12-tap filter, as wide as the sun's size makes the penumbra, up to 12 texels. A wider penumbra is filtered two levels up.
+      - It writes −1 where no page is resident yet, and the shader falls back to the cascades there, as it always does for see-through surfaces, which the prepass doesn't hold. The contact shadows (F2c) still multiply in.
+    - *Tests (`virtual-shadows.test.ts`):*
+      - The levels, the sun's frame, a page's view (its square to −1..1, its depth sunward to 0) and the windows.
+      - The pool: gives out, keeps while the key holds, redraws for a new key or a mover (and once after it leaves), evicts the least recently needed, keeps to its budget finest first, lays out its wrapped table, and reads marks back to pages.
+      - The presets, and the player's hand-off at High and none at Medium.
+      - On Dawn: a rod 2 cm thick a metre above the floor, under a sun straight above. The cascades (256² here, for a hard case) lose its line entirely (above 0.85 of the lit floor). The virtual map shows it dark (under 0.3) once its pages are marked, read back and drawn. The first frame, with no pages yet, is the cascades' frame.
+    - *Left for F2b:* allocating pages on the GPU, so newly seen ground needs no read-back frame; the volumetric fog and see-through surfaces sampling the pages too; and then rendering the cascades only where the pool can't serve.
 - [x] **F2c. Contact shadows.** A screen-space ray march toward each light against the depth prepass, so small-scale contact (feet, foliage, props) grounds every object. It closes EDITOR_PRO P6's deferred item.
   - **F2c-1, the sun's contact shadows: done.** After the depth prepass, a full-screen pass (`contactShadows.ts`) marches each pixel 0.6 m toward the sun across the prepass's depths in 16 steps, jittered per pixel so TAA resolves the banding.
     - **The hit test.** A step is in shadow when the depth buffer holds a surface in front of it by no more than a thickness (0.2 m, plus the step and a share of the distance). So it neither misses a thin caster nor shadows what is merely behind a wall.

@@ -156,6 +156,26 @@ import { reflectionShaderWgsl, reflectionUniforms } from "./reflections.js";
 import { CONTACT_UNIFORM_FLOATS, SCREEN_SHADING_FORMAT, contactShaderWgsl, contactUniforms } from "./contactShadows.js";
 import { GTAO_UNIFORM_FLOATS, gtaoShaderWgsl, gtaoTemporalWgsl, gtaoUniforms } from "./gtao.js";
 import { HIZ_MAX_ROUGHNESS, HIZ_REDUCE_WGSL, HIZ_RESOLVE_WGSL, HIZ_TEMPORAL_WGSL, HIZ_TRACE_WGSL, HIZ_UNIFORM_FLOATS, hizCopyWgsl, hizLevels, hizUniforms } from "./hizReflections.js";
+import {
+  VSM_MARK_WORDS,
+  VSM_PAGES,
+  VSM_UNIFORM_FLOATS,
+  VSM_LEVELS,
+  VirtualPagePool,
+  localSphere,
+  markedPages,
+  pageTouches,
+  physicalCorner,
+  vsmDepthCentre,
+  vsmLightBasis,
+  vsmMarkWgsl,
+  vsmPageViewProj,
+  vsmResolveWgsl,
+  vsmUniforms,
+  vsmWindows,
+  worldSphere,
+  type PageDraw,
+} from "./virtualShadows.js";
 import { SSGI_UNIFORM_FLOATS, ssgiResolveWgsl, ssgiTemporalWgsl, ssgiTraceWgsl, ssgiUniforms, type SsgiFrame } from "./ssgi.js";
 import { AERIAL_FRAME_FLOATS, AERIAL_LUT_BYTES, AERIAL_SAMPLE_WGSL, GpuAtmosphere, packAerialFrame } from "./atmosphere.js";
 import { GpuProbeGi } from "./dynamicGi.js";
@@ -480,7 +500,7 @@ struct Frame {
   cascadeDepth: vec4<f32>,    // F2a-2: the world distance each cascade's depth 0..1 spans
   cascadeSoft: vec4<f32>,     // F2a-2: x = the sun's size (its angular diameter's tangent), for the penumbrae; F2c: y = 1 with contact shadows; F3c: z = 1 with GTAO; F3e-2: w = 1 with SSGI
   viewProj: mat4x4<f32>,      // F2d-3: world → clip as drawn (jittered with TAA), for marching the prepass's depths
-  depthTerms: vec4<f32>,      // F2d-3: xy = view distance from depth (d = y / (z + x)); z = 1 when the depths are readable as the scene shades
+  depthTerms: vec4<f32>,      // F2d-3: xy = view distance from depth (d = y / (z + x)); z = 1 when the depths are readable as the scene shades; F2b: w = 1 with virtual shadow maps
   aerialEye: vec4<f32>,       // F5a-2: the eye the aerial perspective was built from, w = 1 when it is on
   aerialRight: vec4<f32>,     // F5a-2: its camera's right axis, w = P[0]
   aerialUp: vec4<f32>,        // F5a-2: its up axis, w = P[5]
@@ -654,6 +674,11 @@ ${hdr
 var<private> shadowPixel: vec2<f32>;
 fn shadowFactor(lightClip: vec4<f32>, worldPos: vec3<f32>, cosL: f32) -> f32 {
   if (frame.cascadeInfo.x < 0.5) { return 1.0; }
+  // The virtual shadow maps (F2b) for what the prepass holds, where a page is resident; the cascades elsewhere.
+  if (frame.depthTerms.w > 0.5 && u.pbr.w < 1.5) {
+    let v = textureLoad(ssaoMap, vec2<i32>(shadowPixel), 2, 0).r;
+    if (v >= 0.0) { return v * contactAt(shadowPixel); }
+  }
   return cascadeShadow(worldPos, cosL, shadowPixel) * contactAt(shadowPixel);
 }
 // The sun's contact shadow at this pixel (F2c), from the pass after the prepass: an opaque or
@@ -2096,11 +2121,12 @@ export class WebgpuSceneRenderer implements SceneRenderer {
 
   /**
    * The screen-space shading target (F2c, F3c): rgba16float at the frame's size, AO in r, the sun's contact
-   * in g, the bent normal in ba; and, in its second layer, SSGI (F3e-2): the near field's light in rgb, its share in a.
+   * in g, the bent normal in ba; in its second layer, SSGI (F3e-2): the near field's light in rgb, its share in a;
+   * and in its third, the sun's light through the virtual shadow maps (F2b) in r, −1 where no page is resident.
    */
   private contactTexture: any = null;
   private ensureContact(): any {
-    this.contactTexture ??= this.device.createTexture({ size: { width: this.width, height: this.height, depthOrArrayLayers: 2 }, format: SCREEN_SHADING_FORMAT, usage: 0x10 | 0x04 | 0x01 }); // RENDER_ATTACHMENT | TEXTURE_BINDING | COPY_SRC (for captures)
+    this.contactTexture ??= this.device.createTexture({ size: { width: this.width, height: this.height, depthOrArrayLayers: 3 }, format: SCREEN_SHADING_FORMAT, usage: 0x10 | 0x04 | 0x01 }); // RENDER_ATTACHMENT | TEXTURE_BINDING | COPY_SRC (for captures)
     return this.contactTexture;
   }
   /** The resolve's uniforms and pipelines (one per depth sample count), made on first use. */
@@ -2236,6 +2262,7 @@ export class WebgpuSceneRenderer implements SceneRenderer {
       // A frame without it: the next one with it starts its history afresh.
       this.gtao.valid = false;
     }
+    if (this.frameVsm && gbuffer) this.addVsmResolve(graph, depth, gbuffer, multisampled);
     if (this.frameSsgi && gbuffer && velocity && this.taa) this.addSsgi(graph, depth, gbuffer, velocity, view, projection, this.frameSsgi, multisampled);
     else if (this.ssgi) this.ssgi.valid = false;
     this.contact ??= { uniforms: device.createBuffer({ size: CONTACT_UNIFORM_FLOATS * 4, usage: 0x40 | 0x08 }), data: new Float32Array(CONTACT_UNIFORM_FLOATS), pipelines: [null, null] };
@@ -2274,6 +2301,251 @@ export class WebgpuSceneRenderer implements SceneRenderer {
   }
   /** A 1×1 stand-in for GTAO's history when the frame has none (F3c). */
   private gtaoBlank: any = null;
+
+  /** This frame's virtual shadow maps (F2b): the pages it draws, when it has them. */
+  private frameVsm: { readonly draws: readonly PageDraw[]; readonly basis: ReturnType<typeof vsmLightBasis>; readonly centre: number } | null = null;
+  /**
+   * The virtual shadow maps' resources (F2b): the physical pool and its bookkeeping, the marks and the
+   * buffers they are read back through (each with the windows it was marked under), the page table, the
+   * passes' uniforms, a view uniform a page drawn a frame, and the pipelines.
+   */
+  private vsm: {
+    pool: any;
+    poolSize: number;
+    pages: VirtualPagePool;
+    marks: any;
+    staging: { buffer: any; busy: boolean; windows: [number, number][] }[];
+    pending: { marks: Uint32Array; windows: [number, number][] } | null;
+    needed: ReturnType<typeof markedPages>;
+    table: any;
+    tableData: Uint32Array;
+    windowsKey: string;
+    windows: [number, number][];
+    uniforms: any;
+    data: Float32Array<ArrayBuffer>;
+    views: { buffer: any; group: any }[];
+    sampler: any;
+    mark: [any, any];
+    resolve: [any, any];
+    marking: { buffer: any; busy: boolean; windows: [number, number][] } | null;
+  } | null = null;
+
+  /** Plan the frame's virtual shadow maps (F2b): see virtualShadows.ts. */
+  private planVsm(draw: GpuSceneDraw, toLight: readonly [number, number, number], strength: number, softness: number, projection: Mat4): NonNullable<WebgpuSceneRenderer["frameVsm"]> {
+    const device = this.device;
+    const poolSize = Math.max(VSM_PAGES, Math.floor((draw.virtualShadows?.poolSize ?? 4096) / VSM_PAGES) * VSM_PAGES);
+    if (this.vsm && this.vsm.poolSize !== poolSize) this.disposeVsm();
+    if (!this.vsm) {
+      const capacity = (poolSize / VSM_PAGES) ** 2;
+      const layout = this.depthGroups.cascades.localPipeline.getBindGroupLayout(1);
+      this.vsm = {
+        pool: device.createTexture({ size: { width: poolSize, height: poolSize }, format: "depth32float", usage: 0x10 | 0x04 }),
+        poolSize,
+        pages: new VirtualPagePool(capacity),
+        marks: device.createBuffer({ size: VSM_MARK_WORDS * 4, usage: 0x80 | 0x04 | 0x08 }), // STORAGE | COPY_SRC | COPY_DST
+        staging: Array.from({ length: 3 }, () => ({ buffer: device.createBuffer({ size: VSM_MARK_WORDS * 4, usage: 0x01 | 0x08 }), busy: false, windows: [] as [number, number][] })),
+        pending: null,
+        needed: [],
+        table: device.createBuffer({ size: VSM_LEVELS * VSM_PAGES * VSM_PAGES * 4, usage: 0x80 | 0x08 }),
+        tableData: new Uint32Array(VSM_LEVELS * VSM_PAGES * VSM_PAGES),
+        windowsKey: "",
+        windows: [],
+        uniforms: device.createBuffer({ size: VSM_UNIFORM_FLOATS * 4, usage: 0x40 | 0x08 }),
+        data: new Float32Array(VSM_UNIFORM_FLOATS),
+        views: [],
+        sampler: device.createSampler({ compare: "less-equal", magFilter: "linear", minFilter: "linear", addressModeU: "clamp-to-edge", addressModeV: "clamp-to-edge" }),
+        mark: [null, null],
+        resolve: [null, null],
+        marking: null,
+      };
+      for (let i = 0; i < 48; i += 1) {
+        const buffer = device.createBuffer({ size: 64, usage: 0x40 | 0x08 });
+        this.vsm.views.push({ buffer, group: device.createBindGroup({ layout, entries: [{ binding: 12, resource: { buffer } }] }) });
+      }
+    }
+    const v = this.vsm;
+    const eyeM = invertMat4(draw.view) ?? draw.view;
+    const eye: [number, number, number] = [eyeM[12]!, eyeM[13]!, eyeM[14]!];
+    const basis = vsmLightBasis(toLight);
+    const centre = vsmDepthCentre(eye, basis);
+    const windows = vsmWindows(eye, basis);
+    // What the newest marks read back asked for, in the windows they were marked under.
+    if (v.pending) {
+      v.needed = markedPages(v.pending.marks, v.pending.windows);
+      v.pending = null;
+    }
+    const key = `${toLight.map((c) => c.toFixed(4)).join(",")}|${centre}|${draw.localShadowKey ?? `frame ${this.frameIndex}`}`;
+    const movers = (draw.localShadowMoved ?? []).map((m) => worldSphere(localSphere(m.mesh), m.model));
+    const draws = v.pages.update(v.needed, key, (page) => movers.some((sphere) => pageTouches(page, basis, sphere)), v.views.length);
+    const windowsKey = windows.map((w) => w.join(",")).join(";");
+    if (v.pages.changed || windowsKey !== v.windowsKey) {
+      device.queue.writeBuffer(v.table, 0, v.pages.table(windows, v.tableData));
+      v.windowsKey = windowsKey;
+    }
+    v.windows = windows;
+    draws.forEach((d, i) => device.queue.writeBuffer(v.views[i]!.buffer, 0, vsmPageViewProj(d.level, d.gx, d.gy, basis, centre)));
+    const viewProj = multiplyMat4(projection, draw.view);
+    device.queue.writeBuffer(
+      v.uniforms,
+      0,
+      vsmUniforms({ invViewProj: invertMat4(viewProj) ?? viewProj, eye, basis, centre, windows, pixelAngle: 2 / ((projection[5] || 1) * this.height), width: this.width, height: this.height, poolSize: v.poolSize, softness, strength, view: draw.view }, v.data),
+    );
+    return { draws, basis, centre };
+  }
+
+  /** Draw the frame's pages (F2b): each cleared, then the casters whose shadow can reach it, through its own view. */
+  private addVsmPages(graph: FrameGraph, pages: readonly PageDraw[], casters: readonly any[], first: number): void {
+    const v = this.vsm!;
+    const res = this.depthGroups.cascades;
+    const basis = this.frameVsm!.basis;
+    const pool = graph.importTexture("vsm.pool", v.pool);
+    const clearPipeline = this.localClearPipeline();
+    graph.addPass("virtual shadows", "render", (pass) => {
+      // The pages not drawn this frame keep their maps.
+      pass.read(pool, "attachment");
+      pass.write(pool);
+      pass.keep();
+      return (ctx) => {
+        const group = this.device.createBindGroup({
+          layout: res.casterLayout,
+          entries: [
+            { binding: 0, resource: { buffer: this.uniformBuffer, offset: 0, size: UNIFORM_STRIDE } },
+            { binding: 10, resource: { buffer: this.instanceBuffer } },
+          ],
+        });
+        const encoded = ctx.encoder.beginRenderPass({ colorAttachments: [], depthStencilAttachment: { view: ctx.texture(pool).createView(), depthLoadOp: "load", depthStoreOp: "store" }, ...ctx.timing });
+        pages.forEach((page, i) => {
+          const [x, y] = physicalCorner(page.physical, v.poolSize);
+          encoded.setViewport(x, y, VSM_PAGES, VSM_PAGES, 0, 1);
+          encoded.setScissorRect(x, y, VSM_PAGES, VSM_PAGES);
+          encoded.setPipeline(clearPipeline);
+          encoded.draw(3);
+          encoded.setBindGroup(1, v.views[i]!.group);
+          for (const cut of [false, true]) {
+            encoded.setPipeline(cut ? res.localCutPipeline : res.localPipeline);
+            casters.forEach((entry, k) => {
+              if ((entry.alpha === 1) !== cut) return;
+              const sphere = localSphere(entry.primitive);
+              if (!entry.models.some((m: Mat4) => pageTouches(page, basis, worldSphere(sphere, m)))) return;
+              encoded.setBindGroup(0, cut ? this.cutGroupFor(entry.primitive, entry.textures) : group, [(first + k) * UNIFORM_STRIDE]);
+              encoded.setVertexBuffer(0, entry.geometry.vertexBuffer);
+              encoded.setIndexBuffer(entry.geometry.indexBuffer, "uint32");
+              encoded.drawIndexed(entry.geometry.indexCount, entry.models.length, 0, 0, entry.first);
+            });
+          }
+        });
+        encoded.end();
+      };
+    });
+  }
+
+  /** Mark the pages the frame's pixels want (F2b), and copy the marks out to be read back. */
+  private addVsmMarks(graph: FrameGraph, depth: FrameResource, multisampled: boolean): void {
+    const v = this.vsm!;
+    const k = multisampled ? 1 : 0;
+    v.mark[k] ??= this.device.createComputePipeline({ layout: "auto", compute: { module: this.device.createShaderModule({ code: vsmMarkWgsl(multisampled) }), entryPoint: "markPages" } });
+    const pipeline = v.mark[k];
+    const slot = v.staging.find((s) => !s.busy) ?? null;
+    if (slot) {
+      slot.busy = true;
+      slot.windows = v.windows;
+    }
+    v.marking = slot;
+    graph.addPass("vsm.mark", "compute", (pass) => {
+      pass.read(depth);
+      pass.keep();
+      return (ctx) => {
+        ctx.encoder.clearBuffer(v.marks);
+        const encoded = ctx.encoder.beginComputePass(ctx.timing);
+        encoded.setPipeline(pipeline);
+        encoded.setBindGroup(0, this.device.createBindGroup({
+          layout: pipeline.getBindGroupLayout(0),
+          entries: [
+            { binding: 0, resource: { buffer: v.uniforms } },
+            { binding: 1, resource: ctx.texture(depth).createView() },
+            { binding: 2, resource: { buffer: v.marks } },
+          ],
+        }));
+        encoded.dispatchWorkgroups(Math.ceil(this.width / 8), Math.ceil(this.height / 8));
+        encoded.end();
+        if (slot) ctx.encoder.copyBufferToBuffer(v.marks, 0, slot.buffer, 0, VSM_MARK_WORDS * 4);
+      };
+    });
+  }
+
+  /** The sun's light through the virtual map at each pixel (F2b), into the screen-shading target's third layer. */
+  private addVsmResolve(graph: FrameGraph, depth: FrameResource, gbuffer: FrameResource, multisampled: boolean): void {
+    const v = this.vsm!;
+    const k = multisampled ? 1 : 0;
+    v.resolve[k] ??= fullScreenPipeline(this.device, vsmResolveWgsl(multisampled), "resolve", SCREEN_SHADING_FORMAT);
+    const pipeline = v.resolve[k];
+    const target = graph.importTexture("vsm.target", this.ensureContact());
+    const pool = graph.importTexture("vsm.sampled", v.pool);
+    graph.addPass("vsm.resolve", "render", (pass) => {
+      pass.read(depth);
+      pass.read(gbuffer);
+      pass.read(pool);
+      pass.write(target);
+      pass.keep();
+      return (ctx) => {
+        const encoded = ctx.encoder.beginRenderPass({
+          colorAttachments: [{ view: ctx.texture(target).createView({ dimension: "2d", baseArrayLayer: 2, arrayLayerCount: 1 }), clearValue: { r: -1, g: 0, b: 0, a: 1 }, loadOp: "clear", storeOp: "store" }],
+          ...ctx.timing,
+        });
+        encoded.setPipeline(pipeline);
+        encoded.setBindGroup(0, this.device.createBindGroup({
+          layout: pipeline.getBindGroupLayout(0),
+          entries: [
+            { binding: 0, resource: { buffer: v.uniforms } },
+            { binding: 1, resource: ctx.texture(depth).createView() },
+            { binding: 2, resource: { buffer: v.table } },
+            { binding: 3, resource: v.pool.createView() },
+            { binding: 4, resource: v.sampler },
+            { binding: 5, resource: ctx.texture(gbuffer).createView() },
+          ],
+        }));
+        encoded.draw(3);
+        encoded.end();
+      };
+    });
+  }
+
+  /** Read back the marks the frame just copied out (F2b); they reach a later frame's plan. */
+  private readVsmMarks(): void {
+    const v = this.vsm;
+    const slot = v?.marking ?? null;
+    if (!v || !slot) return;
+    v.marking = null;
+    void slot.buffer.mapAsync(0x01).then(
+      () => {
+        if (this.vsm === v) v.pending = { marks: new Uint32Array(slot.buffer.getMappedRange().slice(0)), windows: slot.windows };
+        slot.buffer.unmap();
+        slot.busy = false;
+      },
+      () => {
+        slot.busy = false;
+      },
+    );
+  }
+
+  private disposeVsm(): void {
+    const v = this.vsm;
+    if (!v) return;
+    for (const b of [v.pool, v.marks, v.table, v.uniforms, ...v.staging.map((s) => s.buffer), ...v.views.map((w) => w.buffer)]) destroySafely(b);
+    this.vsm = null;
+  }
+
+  /** Clears a rect of a depth32float map to the far plane (F2d-2's, shared with F2b's pages). */
+  private localClearPipeline(): any {
+    this.localClear ??= this.device.createRenderPipeline({
+      layout: "auto",
+      vertex: { module: this.device.createShaderModule({ code: LOCAL_CLEAR_WGSL }), entryPoint: "vs" },
+      fragment: { module: this.device.createShaderModule({ code: LOCAL_CLEAR_WGSL }), entryPoint: "clear", targets: [] },
+      primitive: { topology: "triangle-list" },
+      depthStencil: { format: "depth32float", depthWriteEnabled: true, depthCompare: "always" },
+    });
+    return this.localClear;
+  }
 
   /**
    * SSGI (F3e-2): at half resolution its trace against the prepass's depths, lit by last frame's resolved
@@ -3122,6 +3394,8 @@ export class WebgpuSceneRenderer implements SceneRenderer {
     const cascadeFit = sun && casters.length > 0 ? fitCascades({ view: draw.view, projection: draw.projection, toLight: sun.toLight, distance: sun.distance, size: sun.size, reach: sun.reach }) : null;
     this.frameCascades = cascadeFit && sun ? { cascades: cascadeFit, size: sun.size, strength: sun.strength ?? 1, softness: sun.softness ?? SUN_SOFTNESS } : null;
     if (cascadeFit && sun) this.ensureCascadeTexture(sun.size);
+    // Virtual shadow maps (F2b): the pages the last marks asked for, given out and drawn as the pool allows.
+    this.frameVsm = this.hdr && prepass && sun !== null && cascadeFit !== null && draw.virtualShadows ? this.planVsm(draw, sun.toLight, sun.strength ?? 1, sun.softness ?? SUN_SOFTNESS, temporal ? temporal.projection : draw.projection) : null;
 
     this.ensureUniformCapacity(draws.length + casters.length);
     // With a prepass, the frame's motion transforms (F0c) follow its transforms in the instance buffer; the casters' follow those.
@@ -3459,6 +3733,8 @@ export class WebgpuSceneRenderer implements SceneRenderer {
       });
     }
 
+    if (this.frameVsm && this.frameVsm.draws.length > 0) this.addVsmPages(graph, this.frameVsm.draws, casters, draws.length);
+
     // The spot/point lights' tiles (F2d): the casters drawn through each tile's face into its rect of the atlas.
     // The atlas is kept from frame to frame (F2d-2): a tile is drawn again only when its light, rect or the
     // still casters change, or something that moves reaches its light now or did when last drawn.
@@ -3482,14 +3758,7 @@ export class WebgpuSceneRenderer implements SceneRenderer {
       const res = this.depthGroups.cascades;
       redraw.forEach((i) => this.device.queue.writeBuffer(res.localViews[i]!.buffer, 0, new Float32Array(localTiles[i]!.drawViewProj)));
       const map = graph.importTexture("local shadows", atlasTexture);
-      this.localClear ??= this.device.createRenderPipeline({
-        layout: "auto",
-        vertex: { module: this.device.createShaderModule({ code: LOCAL_CLEAR_WGSL }), entryPoint: "vs" },
-        fragment: { module: this.device.createShaderModule({ code: LOCAL_CLEAR_WGSL }), entryPoint: "clear", targets: [] },
-        primitive: { topology: "triangle-list" },
-        depthStencil: { format: "depth32float", depthWriteEnabled: true, depthCompare: "always" },
-      });
-      const clearPipeline = this.localClear;
+      const clearPipeline = this.localClearPipeline();
       graph.addPass("local shadows", "render", (pass) => {
         // The tiles not drawn this frame keep their maps.
         pass.read(map, "attachment");
@@ -3590,8 +3859,11 @@ export class WebgpuSceneRenderer implements SceneRenderer {
       });
     }
     this.prepassed = prepass ? { depth: msaa ? msaa.depth : this.depthTexture, gbuffer: this.gbuffer!, velocity: this.velocity!, multisampled: msaa !== null } : null;
-    // Contact shadows (F2c), GTAO (F3c) and SSGI (F3e-2) read the prepass's depths, before anything shades against them.
-    if (this.frameContact || this.frameGtao || this.frameSsgi) {
+    // The pages the frame's pixels want (F2b), marked from the prepass's depths and read back for a later frame.
+    if (this.frameVsm) this.addVsmMarks(graph, depth, msaa !== null);
+    // Contact shadows (F2c), GTAO (F3c), SSGI (F3e-2) and the virtual shadow maps' sampling (F2b) read the
+    // prepass's depths, before anything shades against them.
+    if (this.frameContact || this.frameGtao || this.frameSsgi || this.frameVsm) {
       this.addScreenShading(graph, depth, gbuffer, velocity, draw.view, temporal ? temporal.projection : draw.projection, this.frameContact ? draw.lightDirection ?? null : null, ssao !== null, msaa !== null);
     }
 
@@ -3672,6 +3944,7 @@ export class WebgpuSceneRenderer implements SceneRenderer {
     graph.run(encoder, this.transients, this.timer);
     this.device.queue.submit([encoder.finish()]);
     this.timer?.read();
+    this.readVsmMarks();
     if (!readback) return;
     this.submitted += 1;
     if (slot) {
@@ -4185,7 +4458,7 @@ export class WebgpuSceneRenderer implements SceneRenderer {
     // The prepass's depths, readable as the opaque pass shades (F2d-3), for the local lights' contact shadows.
     if (this.frameDepthView) {
       frame.set(this.frameDepthView.viewProj, FRAME_CASCADES + 84);
-      frame.set([this.frameDepthView.terms[0], this.frameDepthView.terms[1], 1, 0], FRAME_CASCADES + 100);
+      frame.set([this.frameDepthView.terms[0], this.frameDepthView.terms[1], 1, this.frameVsm ? 1 : 0], FRAME_CASCADES + 100);
     }
     if (this.hdr) frame.set(this.aerialFrame(draw), FRAME_AERIAL);
     if (this.hdr) frame.set(packFogFrame(this.frameFog, this.fogTerms), FRAME_FOG);
@@ -4687,6 +4960,7 @@ export class WebgpuSceneRenderer implements SceneRenderer {
     this.atmosphere?.dispose();
     this.volumetricFog?.dispose();
     this.probeGi?.gi.dispose();
+    this.disposeVsm();
     destroySafely(this.depthGroups.fogVolume.texture);
     destroySafely(this.blankProbeCubes);
     destroySafely(this.probeBuffer);

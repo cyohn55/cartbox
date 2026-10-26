@@ -4555,8 +4555,8 @@ function applyPostVolumes(base, post) {
 // src/quality.ts
 var QUALITY_LEVELS = ["low", "medium", "high", "epic"];
 var QUALITY_PRESETS = {
-  epic: { level: "epic", shadows: true, shadowMapSize: 1024, shadowCascades: true, cascadeMapSize: 4096, maxRenderScale: 1, disabledEffects: [], terrainDetail: 1, antialias: true, temporal: true, reflections: true, skyScale: 3, tracedReflections: true },
-  high: { level: "high", shadows: true, shadowMapSize: 1024, shadowCascades: true, cascadeMapSize: 4096, maxRenderScale: 1, disabledEffects: [], terrainDetail: 1, antialias: true, temporal: true, reflections: true, skyScale: 3 },
+  epic: { level: "epic", shadows: true, shadowMapSize: 1024, shadowCascades: true, cascadeMapSize: 4096, maxRenderScale: 1, disabledEffects: [], terrainDetail: 1, antialias: true, temporal: true, reflections: true, skyScale: 3, tracedReflections: true, virtualShadows: true },
+  high: { level: "high", shadows: true, shadowMapSize: 1024, shadowCascades: true, cascadeMapSize: 4096, maxRenderScale: 1, disabledEffects: [], terrainDetail: 1, antialias: true, temporal: true, reflections: true, skyScale: 3, virtualShadows: true },
   medium: { level: "medium", shadows: true, shadowMapSize: 512, cascadeMapSize: 2048, maxRenderScale: 0.75, disabledEffects: [], terrainDetail: 0.6, antialias: true, temporal: true, reflections: true, skyScale: 3 },
   low: { level: "low", shadows: false, shadowMapSize: 512, maxRenderScale: 0.5, disabledEffects: ["bloom", "chroma"], terrainDetail: 0.3, antialias: false, temporal: false, reflections: false, skyScale: 4 }
 };
@@ -11854,6 +11854,7 @@ var BOUNCE_FACES_PER_FRAME = 150;
 var BOUNCE_EVERY = 4;
 var FIRST_PERSON_NEAR = 0.05;
 var SHADOW_MAP_SIZE = 1024;
+var VSM_POOL_SIZE = 4096;
 var CASCADE_MAP_SIZE = 2048;
 var SOFT_SUN = 4;
 var CASCADE_DISTANCE_MIN = 30;
@@ -12694,8 +12695,9 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
         shadow,
         sunShadow,
         localShadowCasters,
-        localShadowKey: localShadowCasters ? this.castersFrame?.key ?? null : null,
-        localShadowMoved: localShadowCasters ? this.castersFrame?.moved ?? null : null,
+        // The still casters' key and the movers serve the local tiles' cache (F2d-2) and the sun's virtual pages (F2b).
+        localShadowKey: localShadowCasters || sunShadow ? this.castersFrame?.key ?? null : null,
+        localShadowMoved: localShadowCasters || sunShadow ? this.castersFrame?.moved ?? null : null,
         antialias,
         reflectionCapture: cascaded && lighting ? this.reflectionCapture(lighting) : null,
         decals
@@ -12826,6 +12828,8 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
       ...job.decals ? { decals: job.decals } : {},
       ...atmosphere ? { atmosphere } : {},
       ...gi ? { dynamicGi: gi.draw } : {},
+      // The sun's virtual shadow maps (F2b) at High and Epic, over the cascades.
+      ...this.renderer.sunCascades === true && this.quality.virtualShadows === true && this.options.prepass === true && job.sunShadow ? { virtualShadows: { poolSize: VSM_POOL_SIZE } } : {},
       // Epic's reflections through the still scene's BVH (F3f), on the AAA tier with reflections.
       ...this.renderer.sunCascades === true && this.quality.tracedReflections === true && this.options.reflections === true && this.quality.reflections === true ? { reflectionTrace: { occluders: this.stillOccluders(), key: this.staticShadowKey() } } : {},
       // Screen-space GI on the AAA tier (F3e-2): on unless the rig turns it off.
@@ -19698,6 +19702,463 @@ fn resolve(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
 `
 );
 
+// src/render/virtualShadows.ts
+var VSM_LEVELS = 6;
+var VSM_PAGES = 128;
+var VSM_PAGE = 128;
+var VSM_TEXEL0 = 2e-3;
+var VSM_DEPTH_REACH = 1e3;
+var VSM_PAGES_PER_FRAME = 48;
+var VSM_FILTER_TEXELS = 12;
+var VSM_UNIFORM_FLOATS = 64;
+var VSM_MARK_WORDS = VSM_LEVELS * VSM_PAGES * VSM_PAGES / 32;
+function vsmTexel(level) {
+  return VSM_TEXEL0 * 2 ** level;
+}
+function vsmPageSize(level) {
+  return vsmTexel(level) * VSM_PAGE;
+}
+function vsmLightBasis(toLight) {
+  const lz = Math.hypot(toLight[0], toLight[1], toLight[2]) || 1;
+  const z = [toLight[0] / lz, toLight[1] / lz, toLight[2] / lz];
+  const up = Math.abs(z[1]) > 0.99 ? [0, 0, 1] : [0, 1, 0];
+  let x = [up[1] * z[2] - up[2] * z[1], up[2] * z[0] - up[0] * z[2], up[0] * z[1] - up[1] * z[0]];
+  const lx = Math.hypot(x[0], x[1], x[2]) || 1;
+  x = [x[0] / lx, x[1] / lx, x[2] / lx];
+  const y = [z[1] * x[2] - z[2] * x[1], z[2] * x[0] - z[0] * x[2], z[0] * x[1] - z[1] * x[0]];
+  return { x, y, z };
+}
+function vsmDepthCentre(eye, basis) {
+  const step = VSM_DEPTH_REACH / 4;
+  return Math.round((eye[0] * basis.z[0] + eye[1] * basis.z[1] + eye[2] * basis.z[2]) / step) * step;
+}
+function vsmWindows(eye, basis) {
+  const lx = eye[0] * basis.x[0] + eye[1] * basis.x[1] + eye[2] * basis.x[2];
+  const ly = eye[0] * basis.y[0] + eye[1] * basis.y[1] + eye[2] * basis.y[2];
+  return Array.from({ length: VSM_LEVELS }, (_, k) => {
+    const size = vsmPageSize(k);
+    return [Math.floor(lx / size) - VSM_PAGES / 2, Math.floor(ly / size) - VSM_PAGES / 2];
+  });
+}
+function vsmPageViewProj(level, gx, gy, basis, centre) {
+  const size = vsmPageSize(level);
+  const cx = (gx + 0.5) * size;
+  const cy = (gy + 0.5) * size;
+  const s = 2 / size;
+  const d = 1 / (2 * VSM_DEPTH_REACH);
+  const { x, y, z } = basis;
+  return Float32Array.from([
+    x[0] * s,
+    y[0] * s,
+    -z[0] * d,
+    0,
+    x[1] * s,
+    y[1] * s,
+    -z[1] * d,
+    0,
+    x[2] * s,
+    y[2] * s,
+    -z[2] * d,
+    0,
+    -cx * s,
+    -cy * s,
+    (centre + VSM_DEPTH_REACH) * d,
+    1
+  ]);
+}
+var keyOf = (level, gx, gy) => `${level}:${gx}:${gy}`;
+var VirtualPagePool = class {
+  constructor(capacity) {
+    this.capacity = capacity;
+    this.entries = /* @__PURE__ */ new Map();
+    this.free = [];
+    this.frame = 0;
+    this.key = null;
+    /** Whether the table needs building again (a page was given out, dropped or drawn, or a window moved). */
+    this.changed = true;
+    for (let i = capacity - 1; i >= 0; i -= 1) this.free.push(i);
+  }
+  /** Physical pages in use. */
+  get used() {
+    return this.entries.size;
+  }
+  /**
+   * A frame: `needed` the pages the marks asked for, `key` what the maps were
+   * drawn for (the light, the depth range, the still scene; a change makes
+   * every page draw again), `moving(page)` whether something that moves stands
+   * in a page now. Returns the pages to draw, at most `budget`, finest first.
+   */
+  update(needed, key, moving, budget = VSM_PAGES_PER_FRAME) {
+    this.frame += 1;
+    if (key !== this.key) {
+      for (const e of this.entries.values()) e.valid = false;
+      this.key = key;
+      this.changed = true;
+    }
+    const want = [];
+    for (const page of needed) {
+      const e = this.entries.get(keyOf(page.level, page.gx, page.gy)) ?? null;
+      if (e) e.needed = this.frame;
+      want.push({ e, page });
+    }
+    const draws = [];
+    for (const { e, page } of want) {
+      const now = moving(page);
+      if (!e || !e.valid || now || e.mover) draws.push({ page, e, moving: now });
+    }
+    draws.sort((a, b) => Number(a.e !== null && a.e.valid) - Number(b.e !== null && b.e.valid) || a.page.level - b.page.level);
+    const out = [];
+    for (const d of draws) {
+      if (out.length >= budget) break;
+      let e = d.e;
+      if (!e) {
+        const physical = this.take();
+        if (physical === null) continue;
+        e = { page: d.page, physical, needed: this.frame, valid: false, mover: false };
+        this.entries.set(keyOf(d.page.level, d.page.gx, d.page.gy), e);
+      }
+      e.valid = true;
+      e.mover = d.moving;
+      out.push({ ...d.page, physical: e.physical });
+      this.changed = true;
+    }
+    return out;
+  }
+  /** A free physical page, or the least recently needed one not needed this frame (null: the pool is full of this frame's). */
+  take() {
+    const free = this.free.pop();
+    if (free !== void 0) return free;
+    let oldest = null;
+    let at = Infinity;
+    for (const [k, e2] of this.entries) {
+      if (e2.needed < this.frame && e2.needed < at) {
+        at = e2.needed;
+        oldest = k;
+      }
+    }
+    if (oldest === null) return null;
+    const e = this.entries.get(oldest);
+    this.entries.delete(oldest);
+    this.changed = true;
+    return e.physical;
+  }
+  /** The physical page holding a good map of `page`, or null. */
+  resident(page) {
+    const e = this.entries.get(keyOf(page.level, page.gx, page.gy));
+    return e && e.valid ? e.physical : null;
+  }
+  /**
+   * The page table for the levels' `windows`: per level, VSM_PAGES² words at
+   * the page's place in its window wrapped (x mod VSM_PAGES, y mod VSM_PAGES),
+   * each the physical page + 1 holding it, or 0.
+   */
+  table(windows, out = new Uint32Array(VSM_LEVELS * VSM_PAGES * VSM_PAGES)) {
+    out.fill(0);
+    for (const e of this.entries.values()) {
+      if (!e.valid) continue;
+      const { level, gx, gy } = e.page;
+      const w = windows[level];
+      if (!w || gx < w[0] || gy < w[1] || gx >= w[0] + VSM_PAGES || gy >= w[1] + VSM_PAGES) continue;
+      out[level * VSM_PAGES * VSM_PAGES + wrap2(gy) * VSM_PAGES + wrap2(gx)] = e.physical + 1;
+    }
+    this.changed = false;
+    return out;
+  }
+  /** Forget every page (the pool was remade). */
+  clear() {
+    this.entries.clear();
+    this.free.length = 0;
+    for (let i = this.capacity - 1; i >= 0; i -= 1) this.free.push(i);
+    this.key = null;
+    this.changed = true;
+  }
+};
+function wrap2(g) {
+  return (g % VSM_PAGES + VSM_PAGES) % VSM_PAGES;
+}
+function markedPages(marks, windows) {
+  const out = [];
+  const perLevel = VSM_PAGES * VSM_PAGES;
+  for (let word = 0; word < marks.length; word += 1) {
+    let bits = marks[word];
+    while (bits !== 0) {
+      const b = 31 - Math.clz32(bits);
+      bits &= ~(1 << b);
+      const index = word * 32 + b;
+      const level = Math.floor(index / perLevel);
+      const slot = index % perLevel;
+      const sx = slot % VSM_PAGES;
+      const sy = Math.floor(slot / VSM_PAGES);
+      const w = windows[level];
+      out.push({ level, gx: w[0] + wrap2(sx - w[0]), gy: w[1] + wrap2(sy - w[1]) });
+    }
+  }
+  return out;
+}
+function physicalCorner(physical, poolSize) {
+  const across = Math.floor(poolSize / VSM_PAGE);
+  return [physical % across * VSM_PAGE, Math.floor(physical / across) * VSM_PAGE];
+}
+function vsmUniforms(options, out = new Float32Array(VSM_UNIFORM_FLOATS)) {
+  out.set(options.invViewProj, 0);
+  out.set([...options.eye, options.pixelAngle], 16);
+  out.set([...options.basis.x, options.centre], 20);
+  out.set([...options.basis.y, VSM_DEPTH_REACH], 24);
+  out.set([...options.basis.z, VSM_TEXEL0], 28);
+  options.windows.forEach((w, k) => out.set(w, 32 + k * 2));
+  out.set([options.width, options.height, options.poolSize, options.softness], 44);
+  out.set([options.strength, VSM_LEVELS, 0, 0], 48);
+  out.set([options.view[2], options.view[6], options.view[10], options.view[14]], 52);
+  return out;
+}
+var SHARED3 = (multisampled) => (
+  /* wgsl */
+  `
+struct Vsm {
+  invViewProj: mat4x4<f32>,
+  eye: vec4<f32>,      // w: a pixel's size at unit depth
+  axisX: vec4<f32>,    // w: the depth range's middle along the sun
+  axisY: vec4<f32>,    // w: the depth range's reach either way
+  axisZ: vec4<f32>,    // toward the sun; w: a level-0 texel
+  windows: array<vec4<f32>, 3>, // each level's first page, two levels a vec4
+  screen: vec4<f32>,   // width, height, the pool's size, the sun's softness
+  info: vec4<f32>,     // strength, levels
+  viewRow: vec4<f32>,  // the view's third row
+};
+@group(0) @binding(0) var<uniform> vsm: Vsm;
+@group(0) @binding(1) var depth: ${multisampled ? "texture_depth_multisampled_2d" : "texture_depth_2d"};
+
+fn vsmWindow(k: i32) -> vec2<f32> {
+  let w = vsm.windows[k / 2];
+  return select(w.xy, w.zw, (k & 1) == 1);
+}
+fn vsmTexel(k: i32) -> f32 { return vsm.axisZ.w * exp2(f32(k)); }
+fn vsmLight(p: vec3<f32>) -> vec3<f32> { return vec3<f32>(dot(p, vsm.axisX.xyz), dot(p, vsm.axisY.xyz), dot(p, vsm.axisZ.xyz)); }
+// A light-space point's page at level k (x, y), and whether the level's window holds it.
+fn vsmPageOf(l: vec2<f32>, k: i32) -> vec3<f32> {
+  let g = floor(l / (vsmTexel(k) * ${VSM_PAGE}.0));
+  let w = vsmWindow(k);
+  let inside = all(g >= w) && all(g < w + vec2<f32>(${VSM_PAGES}.0));
+  return vec3<f32>(g, select(0.0, 1.0, inside));
+}
+// The finest level whose texels are no larger than the pixel at view depth d.
+fn vsmLevel(d: f32) -> i32 {
+  let footprint = d * vsm.eye.w;
+  return clamp(i32(ceil(log2(max(footprint / vsm.axisZ.w, 1e-6)))), 0, i32(vsm.info.y) - 1);
+}
+// The world point at a pixel, and its view depth (w).
+fn vsmWorldAt(p: vec2<i32>) -> vec4<f32> {
+  let z = textureLoad(depth, p, 0);
+  let ndc = vec2<f32>((f32(p.x) + 0.5) / vsm.screen.x * 2.0 - 1.0, 1.0 - (f32(p.y) + 0.5) / vsm.screen.y * 2.0);
+  let w = vsm.invViewProj * vec4<f32>(ndc, z, 1.0);
+  let world = w.xyz / w.w;
+  return vec4<f32>(world, -(dot(vsm.viewRow.xyz, world) + vsm.viewRow.w));
+}
+`
+);
+function vsmMarkWgsl(multisampled) {
+  return (
+    /* wgsl */
+    `${SHARED3(multisampled)}
+@group(0) @binding(2) var<storage, read_write> marks: array<atomic<u32>>;
+
+fn mark(l: vec2<f32>, k: i32) {
+  let g = vsmPageOf(l, k);
+  if (g.z < 0.5) { return; }
+  let sx = u32((i32(g.x) % ${VSM_PAGES} + ${VSM_PAGES}) % ${VSM_PAGES});
+  let sy = u32((i32(g.y) % ${VSM_PAGES} + ${VSM_PAGES}) % ${VSM_PAGES});
+  let bit = u32(k) * ${VSM_PAGES * VSM_PAGES}u + sy * ${VSM_PAGES}u + sx;
+  atomicOr(&marks[bit / 32u], 1u << (bit % 32u));
+}
+fn markAround(l: vec2<f32>, k: i32) {
+  let r = vsmTexel(k) * ${VSM_FILTER_TEXELS + 2}.0;
+  mark(l + vec2<f32>(-r, -r), k);
+  mark(l + vec2<f32>(r, -r), k);
+  mark(l + vec2<f32>(-r, r), k);
+  mark(l + vec2<f32>(r, r), k);
+}
+
+@compute @workgroup_size(8, 8)
+fn markPages(@builtin(global_invocation_id) id: vec3<u32>) {
+  let p = vec2<i32>(id.xy);
+  if (f32(p.x) >= vsm.screen.x || f32(p.y) >= vsm.screen.y) { return; }
+  if (textureLoad(depth, p, 0) >= 1.0) { return; }
+  let at = vsmWorldAt(p);
+  let l = vsmLight(at.xyz).xy;
+  let levels = i32(vsm.info.y);
+  var k = vsmLevel(at.w);
+  // Up to the first level whose window holds the point.
+  loop {
+    if (k >= levels - 1 || vsmPageOf(l, k).z > 0.5) { break; }
+    k += 1;
+  }
+  markAround(l, k);
+  if (k + 2 < levels) { markAround(l, k + 2); }
+}
+`
+  );
+}
+function vsmResolveWgsl(multisampled) {
+  return (
+    /* wgsl */
+    `${SHARED3(multisampled)}
+@group(0) @binding(2) var<storage, read> pageTable: array<u32>;
+@group(0) @binding(3) var pool: texture_depth_2d;
+@group(0) @binding(4) var poolSamp: sampler_comparison;
+@group(0) @binding(5) var gbuffer: texture_2d<f32>;
+
+const DISK = array<vec2<f32>, 12>(
+  vec2<f32>(-0.326, -0.406), vec2<f32>(-0.840, -0.074), vec2<f32>(-0.696, 0.457), vec2<f32>(-0.203, 0.621),
+  vec2<f32>(0.962, -0.195), vec2<f32>(0.473, -0.480), vec2<f32>(0.519, 0.767), vec2<f32>(0.185, -0.893),
+  vec2<f32>(0.507, 0.064), vec2<f32>(0.896, 0.412), vec2<f32>(-0.322, -0.933), vec2<f32>(-0.792, -0.598));
+
+@vertex
+fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4<f32> {
+  let p = vec2<f32>(f32((i << 1u) & 2u), f32(i & 2u));
+  return vec4<f32>(p * 2.0 - 1.0, 0.0, 1.0);
+}
+
+fn octDecode(e: vec2<f32>) -> vec3<f32> {
+  var n = vec3<f32>(e.x, e.y, 1.0 - abs(e.x) - abs(e.y));
+  let t = max(-n.z, 0.0);
+  n.x = n.x + select(t, -t, n.x >= 0.0);
+  n.y = n.y + select(t, -t, n.y >= 0.0);
+  return normalize(n);
+}
+
+// The physical page holding a light-space point's page at level k (+1), or 0.
+fn vsmPhysical(l: vec2<f32>, k: i32) -> u32 {
+  let g = vsmPageOf(l, k);
+  if (g.z < 0.5) { return 0u; }
+  let sx = u32((i32(g.x) % ${VSM_PAGES} + ${VSM_PAGES}) % ${VSM_PAGES});
+  let sy = u32((i32(g.y) % ${VSM_PAGES} + ${VSM_PAGES}) % ${VSM_PAGES});
+  return pageTable[u32(k) * ${VSM_PAGES * VSM_PAGES}u + sy * ${VSM_PAGES}u + sx];
+}
+
+// Where a light-space point lies in the pool at level k (texels), or x < 0 where its page isn't resident.
+fn vsmPoolAt(l: vec2<f32>, k: i32) -> vec2<f32> {
+  let phys = vsmPhysical(l, k);
+  if (phys == 0u) { return vec2<f32>(-1.0); }
+  let size = vsmTexel(k) * ${VSM_PAGE}.0;
+  let g = floor(l / size);
+  // Within the page: x across, y down (row 0 is the page's top, as it was drawn).
+  let f = (l - g * size) / size;
+  let inPage = clamp(vec2<f32>(f.x, 1.0 - f.y) * ${VSM_PAGE}.0, vec2<f32>(0.5), vec2<f32>(${VSM_PAGE}.0 - 0.5));
+  let across = u32(vsm.screen.z) / ${VSM_PAGE}u;
+  let corner = vec2<f32>(f32((phys - 1u) % across), f32((phys - 1u) / across)) * ${VSM_PAGE}.0;
+  return corner + inPage;
+}
+
+// The depth a light-space point (with its depth along the sun) has in a page's map.
+fn vsmDepth(lz: f32) -> f32 { return (vsm.axisX.w + vsm.axisY.w - lz) / (2.0 * vsm.axisY.w); }
+
+// PCSS at level k round light-space point l of depth z: \u22121 where a tap's page isn't resident; else the light,
+// and in .y the penumbra's width in metres the blockers ask for.
+fn vsmPcss(l: vec2<f32>, z: f32, k: i32, spin: vec2<f32>) -> vec2<f32> {
+  let texel = vsmTexel(k);
+  let inv = 1.0 / vsm.screen.z;
+  let reach = ${VSM_FILTER_TEXELS}.0;
+  var blockers = 0.0;
+  var count = 0.0;
+  for (var i = 0; i < 12; i += 1) {
+    let d = DISK[i];
+    let o = vec2<f32>(d.x * spin.x - d.y * spin.y, d.x * spin.y + d.y * spin.x) * reach * texel;
+    let at = vsmPoolAt(l + o, k);
+    if (at.x < 0.0) { return vec2<f32>(-1.0, 0.0); }
+    let b = textureLoad(pool, vec2<i32>(at), 0);
+    if (b < z) { blockers = blockers + b; count = count + 1.0; }
+  }
+  if (count < 0.5) { return vec2<f32>(1.0, 0.0); }
+  // How far above the point the blockers stand, metres, times the sun's size: the penumbra.
+  let above = (z - blockers / count) * 2.0 * vsm.axisY.w;
+  let penumbra = above * vsm.screen.w;
+  let width = clamp(penumbra / texel, 1.0, reach);
+  var lit = 0.0;
+  for (var i = 0; i < 12; i += 1) {
+    let d = DISK[i];
+    let o = vec2<f32>(d.x * spin.x - d.y * spin.y, d.x * spin.y + d.y * spin.x) * width * texel;
+    let at = vsmPoolAt(l + o, k);
+    if (at.x < 0.0) { return vec2<f32>(-1.0, 0.0); }
+    lit = lit + textureSampleCompareLevel(pool, poolSamp, at * inv, z);
+  }
+  return vec2<f32>(lit / 12.0, penumbra);
+}
+
+@fragment
+fn resolve(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
+  let p = vec2<i32>(frag.xy);
+  if (textureLoad(depth, p, 0) >= 1.0) { return vec4<f32>(1.0, 0.0, 0.0, 1.0); }
+  let at = vsmWorldAt(p);
+  let N = octDecode(textureLoad(gbuffer, p, 0).xy);
+  let L = vsm.axisZ.xyz;
+  let levels = i32(vsm.info.y);
+  let a = 6.2831853 * fract(52.9829189 * fract(dot(frag.xy, vec2<f32>(0.06711056, 0.00583715))));
+  let spin = vec2<f32>(cos(a), sin(a));
+  let cosL = clamp(abs(dot(N, L)), 0.05, 1.0);
+  // Facing away from the sun: in its own shadow.
+  if (dot(N, L) <= 0.0) { return vec4<f32>(1.0 - vsm.info.x, 0.0, 0.0, 1.0); }
+  var k = vsmLevel(at.w);
+  loop {
+    if (k >= levels - 1 || vsmPageOf(vsmLight(at.xyz).xy, k).z > 0.5) { break; }
+    k += 1;
+  }
+  // From the level the pixel wants up to the first with resident pages round it.
+  for (; k < levels; k += 1) {
+    let texel = vsmTexel(k);
+    // Off the surface toward the sun and along its normal, by a texel or more as the light grazes.
+    let push = texel * (1.5 + 2.0 * min(4.0, sqrt(1.0 - cosL * cosL) / cosL));
+    let q = vsmLight(at.xyz + L * push + N * texel);
+    let z = vsmDepth(q.z);
+    var s = vsmPcss(q.xy, z, k, spin);
+    if (s.x < 0.0) { continue; }
+    // A penumbra wider than this level's filter reaches: filter it two levels up, where it fits.
+    if (s.y > vsmTexel(k) * ${VSM_FILTER_TEXELS}.0 && k + 2 < levels) {
+      let wide = vsmPcss(q.xy, z, k + 2, spin);
+      if (wide.x >= 0.0) { s = wide; }
+    }
+    return vec4<f32>(1.0 - vsm.info.x * (1.0 - s.x), 0.0, 0.0, 1.0);
+  }
+  return vec4<f32>(-1.0, 0.0, 0.0, 1.0);
+}
+`
+  );
+}
+var spheres = /* @__PURE__ */ new WeakMap();
+function localSphere(owner) {
+  let s = spheres.get(owner);
+  if (s) return s;
+  const lists = "primitives" in owner ? owner.primitives.map((p) => p.positions) : [owner.positions];
+  const lo = [Infinity, Infinity, Infinity];
+  const hi = [-Infinity, -Infinity, -Infinity];
+  for (const positions of lists) {
+    for (let i = 0; i + 2 < positions.length; i += 3) {
+      for (let a = 0; a < 3; a += 1) {
+        lo[a] = Math.min(lo[a], positions[i + a]);
+        hi[a] = Math.max(hi[a], positions[i + a]);
+      }
+    }
+  }
+  if (!Number.isFinite(lo[0])) s = [0, 0, 0, 0];
+  else {
+    const c = [0, 1, 2].map((a) => (lo[a] + hi[a]) / 2);
+    s = [c[0], c[1], c[2], Math.hypot(hi[0] - c[0], hi[1] - c[1], hi[2] - c[2])];
+  }
+  spheres.set(owner, s);
+  return s;
+}
+function worldSphere(local, m) {
+  const [x, y, z, r] = local;
+  const scale = Math.max(Math.hypot(m[0], m[1], m[2]), Math.hypot(m[4], m[5], m[6]), Math.hypot(m[8], m[9], m[10]));
+  return [m[0] * x + m[4] * y + m[8] * z + m[12], m[1] * x + m[5] * y + m[9] * z + m[13], m[2] * x + m[6] * y + m[10] * z + m[14], r * scale];
+}
+function pageTouches(page, basis, sphere) {
+  const size = vsmPageSize(page.level);
+  const lx = sphere[0] * basis.x[0] + sphere[1] * basis.x[1] + sphere[2] * basis.x[2];
+  const ly = sphere[0] * basis.y[0] + sphere[1] * basis.y[1] + sphere[2] * basis.y[2];
+  const r = sphere[3];
+  return lx + r >= page.gx * size && lx - r <= (page.gx + 1) * size && ly + r >= page.gy * size && ly - r <= (page.gy + 1) * size;
+}
+
 // src/render/ssgi.ts
 var SSGI_RAYS = 2;
 var SSGI_STEPS = 12;
@@ -19713,7 +20174,7 @@ function ssgiUniforms(view, projection, frame, history, settings, out = new Floa
   out.set([SSGI_THICKNESS, SSGI_BLEND, history ? 1 : 0, settings.intensity], 52);
   return out;
 }
-var SHARED3 = (multisampled) => (
+var SHARED4 = (multisampled) => (
   /* wgsl */
   `
 struct Ssgi { proj: mat4x4<f32>, invProj: mat4x4<f32>, view: mat4x4<f32>, params: vec4<f32>, params2: vec4<f32> };
@@ -19753,7 +20214,7 @@ fn normalAt(p: vec2<i32>, size: vec2<i32>) -> vec3<f32> {
 function ssgiTraceWgsl(multisampled) {
   return (
     /* wgsl */
-    `${SHARED3(multisampled)}
+    `${SHARED4(multisampled)}
 @group(0) @binding(3) var velocity: texture_2d<f32>;
 @group(0) @binding(4) var radiance: texture_2d<f32>;
 @group(0) @binding(5) var linearSamp: sampler;
@@ -19888,7 +20349,7 @@ fn accumulate(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
 function ssgiResolveWgsl(multisampled) {
   return (
     /* wgsl */
-    `${SHARED3(multisampled)}
+    `${SHARED4(multisampled)}
 @group(0) @binding(3) var accumulated: texture_2d<f32>;
 
 @fragment
@@ -22664,7 +23125,7 @@ struct Frame {
   cascadeDepth: vec4<f32>,    // F2a-2: the world distance each cascade's depth 0..1 spans
   cascadeSoft: vec4<f32>,     // F2a-2: x = the sun's size (its angular diameter's tangent), for the penumbrae; F2c: y = 1 with contact shadows; F3c: z = 1 with GTAO; F3e-2: w = 1 with SSGI
   viewProj: mat4x4<f32>,      // F2d-3: world \u2192 clip as drawn (jittered with TAA), for marching the prepass's depths
-  depthTerms: vec4<f32>,      // F2d-3: xy = view distance from depth (d = y / (z + x)); z = 1 when the depths are readable as the scene shades
+  depthTerms: vec4<f32>,      // F2d-3: xy = view distance from depth (d = y / (z + x)); z = 1 when the depths are readable as the scene shades; F2b: w = 1 with virtual shadow maps
   aerialEye: vec4<f32>,       // F5a-2: the eye the aerial perspective was built from, w = 1 when it is on
   aerialRight: vec4<f32>,     // F5a-2: its camera's right axis, w = P[0]
   aerialUp: vec4<f32>,        // F5a-2: its up axis, w = P[5]
@@ -22833,6 +23294,11 @@ ${hdr ? `// The sun's shadow on the linear-light renderer: its GPU cascades (F2a
 var<private> shadowPixel: vec2<f32>;
 fn shadowFactor(lightClip: vec4<f32>, worldPos: vec3<f32>, cosL: f32) -> f32 {
   if (frame.cascadeInfo.x < 0.5) { return 1.0; }
+  // The virtual shadow maps (F2b) for what the prepass holds, where a page is resident; the cascades elsewhere.
+  if (frame.depthTerms.w > 0.5 && u.pbr.w < 1.5) {
+    let v = textureLoad(ssaoMap, vec2<i32>(shadowPixel), 2, 0).r;
+    if (v >= 0.0) { return v * contactAt(shadowPixel); }
+  }
   return cascadeShadow(worldPos, cosL, shadowPixel) * contactAt(shadowPixel);
 }
 // The sun's contact shadow at this pixel (F2c), from the pass after the prepass: an opaque or
@@ -24103,7 +24569,8 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     this.lastFrameStats = { drawCalls: 0, instances: 0, triangles: 0, gpuMs: null };
     /**
      * The screen-space shading target (F2c, F3c): rgba16float at the frame's size, AO in r, the sun's contact
-     * in g, the bent normal in ba; and, in its second layer, SSGI (F3e-2): the near field's light in rgb, its share in a.
+     * in g, the bent normal in ba; in its second layer, SSGI (F3e-2): the near field's light in rgb, its share in a;
+     * and in its third, the sun's light through the virtual shadow maps (F2b) in r, −1 where no page is resident.
      */
     this.contactTexture = null;
     /** The resolve's uniforms and pipelines (one per depth sample count), made on first use. */
@@ -24139,6 +24606,14 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     this.gtao = null;
     /** A 1×1 stand-in for GTAO's history when the frame has none (F3c). */
     this.gtaoBlank = null;
+    /** This frame's virtual shadow maps (F2b): the pages it draws, when it has them. */
+    this.frameVsm = null;
+    /**
+     * The virtual shadow maps' resources (F2b): the physical pool and its bookkeeping, the marks and the
+     * buffers they are read back through (each with the windows it was marked under), the page table, the
+     * passes' uniforms, a view uniform a page drawn a frame, and the pipelines.
+     */
+    this.vsm = null;
     this.decalTiles = null;
     this.decalCount = 0;
     /** The thin G-buffer (F0c), made on the first frame with a prepass. */
@@ -24225,7 +24700,7 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     }
   }
   ensureContact() {
-    this.contactTexture ?? (this.contactTexture = this.device.createTexture({ size: { width: this.width, height: this.height, depthOrArrayLayers: 2 }, format: SCREEN_SHADING_FORMAT, usage: 16 | 4 | 1 }));
+    this.contactTexture ?? (this.contactTexture = this.device.createTexture({ size: { width: this.width, height: this.height, depthOrArrayLayers: 3 }, format: SCREEN_SHADING_FORMAT, usage: 16 | 4 | 1 }));
     return this.contactTexture;
   }
   /**
@@ -24318,6 +24793,7 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     } else if (this.gtao) {
       this.gtao.valid = false;
     }
+    if (this.frameVsm && gbuffer) this.addVsmResolve(graph, depth, gbuffer, multisampled);
     if (this.frameSsgi && gbuffer && velocity && this.taa) this.addSsgi(graph, depth, gbuffer, velocity, view, projection, this.frameSsgi, multisampled);
     else if (this.ssgi) this.ssgi.valid = false;
     this.contact ?? (this.contact = { uniforms: device.createBuffer({ size: CONTACT_UNIFORM_FLOATS * 4, usage: 64 | 8 }), data: new Float32Array(CONTACT_UNIFORM_FLOATS), pipelines: [null, null] });
@@ -24352,6 +24828,217 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
         encoded.end();
       };
     });
+  }
+  /** Plan the frame's virtual shadow maps (F2b): see virtualShadows.ts. */
+  planVsm(draw, toLight, strength, softness, projection) {
+    const device = this.device;
+    const poolSize = Math.max(VSM_PAGES, Math.floor((draw.virtualShadows?.poolSize ?? 4096) / VSM_PAGES) * VSM_PAGES);
+    if (this.vsm && this.vsm.poolSize !== poolSize) this.disposeVsm();
+    if (!this.vsm) {
+      const capacity = (poolSize / VSM_PAGES) ** 2;
+      const layout = this.depthGroups.cascades.localPipeline.getBindGroupLayout(1);
+      this.vsm = {
+        pool: device.createTexture({ size: { width: poolSize, height: poolSize }, format: "depth32float", usage: 16 | 4 }),
+        poolSize,
+        pages: new VirtualPagePool(capacity),
+        marks: device.createBuffer({ size: VSM_MARK_WORDS * 4, usage: 128 | 4 | 8 }),
+        // STORAGE | COPY_SRC | COPY_DST
+        staging: Array.from({ length: 3 }, () => ({ buffer: device.createBuffer({ size: VSM_MARK_WORDS * 4, usage: 1 | 8 }), busy: false, windows: [] })),
+        pending: null,
+        needed: [],
+        table: device.createBuffer({ size: VSM_LEVELS * VSM_PAGES * VSM_PAGES * 4, usage: 128 | 8 }),
+        tableData: new Uint32Array(VSM_LEVELS * VSM_PAGES * VSM_PAGES),
+        windowsKey: "",
+        windows: [],
+        uniforms: device.createBuffer({ size: VSM_UNIFORM_FLOATS * 4, usage: 64 | 8 }),
+        data: new Float32Array(VSM_UNIFORM_FLOATS),
+        views: [],
+        sampler: device.createSampler({ compare: "less-equal", magFilter: "linear", minFilter: "linear", addressModeU: "clamp-to-edge", addressModeV: "clamp-to-edge" }),
+        mark: [null, null],
+        resolve: [null, null],
+        marking: null
+      };
+      for (let i = 0; i < 48; i += 1) {
+        const buffer = device.createBuffer({ size: 64, usage: 64 | 8 });
+        this.vsm.views.push({ buffer, group: device.createBindGroup({ layout, entries: [{ binding: 12, resource: { buffer } }] }) });
+      }
+    }
+    const v = this.vsm;
+    const eyeM = invertMat4(draw.view) ?? draw.view;
+    const eye = [eyeM[12], eyeM[13], eyeM[14]];
+    const basis = vsmLightBasis(toLight);
+    const centre = vsmDepthCentre(eye, basis);
+    const windows = vsmWindows(eye, basis);
+    if (v.pending) {
+      v.needed = markedPages(v.pending.marks, v.pending.windows);
+      v.pending = null;
+    }
+    const key = `${toLight.map((c) => c.toFixed(4)).join(",")}|${centre}|${draw.localShadowKey ?? `frame ${this.frameIndex}`}`;
+    const movers = (draw.localShadowMoved ?? []).map((m) => worldSphere(localSphere(m.mesh), m.model));
+    const draws = v.pages.update(v.needed, key, (page) => movers.some((sphere) => pageTouches(page, basis, sphere)), v.views.length);
+    const windowsKey = windows.map((w) => w.join(",")).join(";");
+    if (v.pages.changed || windowsKey !== v.windowsKey) {
+      device.queue.writeBuffer(v.table, 0, v.pages.table(windows, v.tableData));
+      v.windowsKey = windowsKey;
+    }
+    v.windows = windows;
+    draws.forEach((d, i) => device.queue.writeBuffer(v.views[i].buffer, 0, vsmPageViewProj(d.level, d.gx, d.gy, basis, centre)));
+    const viewProj = multiplyMat47(projection, draw.view);
+    device.queue.writeBuffer(
+      v.uniforms,
+      0,
+      vsmUniforms({ invViewProj: invertMat4(viewProj) ?? viewProj, eye, basis, centre, windows, pixelAngle: 2 / ((projection[5] || 1) * this.height), width: this.width, height: this.height, poolSize: v.poolSize, softness, strength, view: draw.view }, v.data)
+    );
+    return { draws, basis, centre };
+  }
+  /** Draw the frame's pages (F2b): each cleared, then the casters whose shadow can reach it, through its own view. */
+  addVsmPages(graph, pages, casters, first) {
+    const v = this.vsm;
+    const res = this.depthGroups.cascades;
+    const basis = this.frameVsm.basis;
+    const pool = graph.importTexture("vsm.pool", v.pool);
+    const clearPipeline = this.localClearPipeline();
+    graph.addPass("virtual shadows", "render", (pass) => {
+      pass.read(pool, "attachment");
+      pass.write(pool);
+      pass.keep();
+      return (ctx) => {
+        const group = this.device.createBindGroup({
+          layout: res.casterLayout,
+          entries: [
+            { binding: 0, resource: { buffer: this.uniformBuffer, offset: 0, size: UNIFORM_STRIDE } },
+            { binding: 10, resource: { buffer: this.instanceBuffer } }
+          ]
+        });
+        const encoded = ctx.encoder.beginRenderPass({ colorAttachments: [], depthStencilAttachment: { view: ctx.texture(pool).createView(), depthLoadOp: "load", depthStoreOp: "store" }, ...ctx.timing });
+        pages.forEach((page, i) => {
+          const [x, y] = physicalCorner(page.physical, v.poolSize);
+          encoded.setViewport(x, y, VSM_PAGES, VSM_PAGES, 0, 1);
+          encoded.setScissorRect(x, y, VSM_PAGES, VSM_PAGES);
+          encoded.setPipeline(clearPipeline);
+          encoded.draw(3);
+          encoded.setBindGroup(1, v.views[i].group);
+          for (const cut of [false, true]) {
+            encoded.setPipeline(cut ? res.localCutPipeline : res.localPipeline);
+            casters.forEach((entry, k) => {
+              if (entry.alpha === 1 !== cut) return;
+              const sphere = localSphere(entry.primitive);
+              if (!entry.models.some((m) => pageTouches(page, basis, worldSphere(sphere, m)))) return;
+              encoded.setBindGroup(0, cut ? this.cutGroupFor(entry.primitive, entry.textures) : group, [(first + k) * UNIFORM_STRIDE]);
+              encoded.setVertexBuffer(0, entry.geometry.vertexBuffer);
+              encoded.setIndexBuffer(entry.geometry.indexBuffer, "uint32");
+              encoded.drawIndexed(entry.geometry.indexCount, entry.models.length, 0, 0, entry.first);
+            });
+          }
+        });
+        encoded.end();
+      };
+    });
+  }
+  /** Mark the pages the frame's pixels want (F2b), and copy the marks out to be read back. */
+  addVsmMarks(graph, depth, multisampled) {
+    var _a;
+    const v = this.vsm;
+    const k = multisampled ? 1 : 0;
+    (_a = v.mark)[k] ?? (_a[k] = this.device.createComputePipeline({ layout: "auto", compute: { module: this.device.createShaderModule({ code: vsmMarkWgsl(multisampled) }), entryPoint: "markPages" } }));
+    const pipeline = v.mark[k];
+    const slot = v.staging.find((s) => !s.busy) ?? null;
+    if (slot) {
+      slot.busy = true;
+      slot.windows = v.windows;
+    }
+    v.marking = slot;
+    graph.addPass("vsm.mark", "compute", (pass) => {
+      pass.read(depth);
+      pass.keep();
+      return (ctx) => {
+        ctx.encoder.clearBuffer(v.marks);
+        const encoded = ctx.encoder.beginComputePass(ctx.timing);
+        encoded.setPipeline(pipeline);
+        encoded.setBindGroup(0, this.device.createBindGroup({
+          layout: pipeline.getBindGroupLayout(0),
+          entries: [
+            { binding: 0, resource: { buffer: v.uniforms } },
+            { binding: 1, resource: ctx.texture(depth).createView() },
+            { binding: 2, resource: { buffer: v.marks } }
+          ]
+        }));
+        encoded.dispatchWorkgroups(Math.ceil(this.width / 8), Math.ceil(this.height / 8));
+        encoded.end();
+        if (slot) ctx.encoder.copyBufferToBuffer(v.marks, 0, slot.buffer, 0, VSM_MARK_WORDS * 4);
+      };
+    });
+  }
+  /** The sun's light through the virtual map at each pixel (F2b), into the screen-shading target's third layer. */
+  addVsmResolve(graph, depth, gbuffer, multisampled) {
+    var _a;
+    const v = this.vsm;
+    const k = multisampled ? 1 : 0;
+    (_a = v.resolve)[k] ?? (_a[k] = fullScreenPipeline(this.device, vsmResolveWgsl(multisampled), "resolve", SCREEN_SHADING_FORMAT));
+    const pipeline = v.resolve[k];
+    const target = graph.importTexture("vsm.target", this.ensureContact());
+    const pool = graph.importTexture("vsm.sampled", v.pool);
+    graph.addPass("vsm.resolve", "render", (pass) => {
+      pass.read(depth);
+      pass.read(gbuffer);
+      pass.read(pool);
+      pass.write(target);
+      pass.keep();
+      return (ctx) => {
+        const encoded = ctx.encoder.beginRenderPass({
+          colorAttachments: [{ view: ctx.texture(target).createView({ dimension: "2d", baseArrayLayer: 2, arrayLayerCount: 1 }), clearValue: { r: -1, g: 0, b: 0, a: 1 }, loadOp: "clear", storeOp: "store" }],
+          ...ctx.timing
+        });
+        encoded.setPipeline(pipeline);
+        encoded.setBindGroup(0, this.device.createBindGroup({
+          layout: pipeline.getBindGroupLayout(0),
+          entries: [
+            { binding: 0, resource: { buffer: v.uniforms } },
+            { binding: 1, resource: ctx.texture(depth).createView() },
+            { binding: 2, resource: { buffer: v.table } },
+            { binding: 3, resource: v.pool.createView() },
+            { binding: 4, resource: v.sampler },
+            { binding: 5, resource: ctx.texture(gbuffer).createView() }
+          ]
+        }));
+        encoded.draw(3);
+        encoded.end();
+      };
+    });
+  }
+  /** Read back the marks the frame just copied out (F2b); they reach a later frame's plan. */
+  readVsmMarks() {
+    const v = this.vsm;
+    const slot = v?.marking ?? null;
+    if (!v || !slot) return;
+    v.marking = null;
+    void slot.buffer.mapAsync(1).then(
+      () => {
+        if (this.vsm === v) v.pending = { marks: new Uint32Array(slot.buffer.getMappedRange().slice(0)), windows: slot.windows };
+        slot.buffer.unmap();
+        slot.busy = false;
+      },
+      () => {
+        slot.busy = false;
+      }
+    );
+  }
+  disposeVsm() {
+    const v = this.vsm;
+    if (!v) return;
+    for (const b of [v.pool, v.marks, v.table, v.uniforms, ...v.staging.map((s) => s.buffer), ...v.views.map((w) => w.buffer)]) destroySafely(b);
+    this.vsm = null;
+  }
+  /** Clears a rect of a depth32float map to the far plane (F2d-2's, shared with F2b's pages). */
+  localClearPipeline() {
+    this.localClear ?? (this.localClear = this.device.createRenderPipeline({
+      layout: "auto",
+      vertex: { module: this.device.createShaderModule({ code: LOCAL_CLEAR_WGSL }), entryPoint: "vs" },
+      fragment: { module: this.device.createShaderModule({ code: LOCAL_CLEAR_WGSL }), entryPoint: "clear", targets: [] },
+      primitive: { topology: "triangle-list" },
+      depthStencil: { format: "depth32float", depthWriteEnabled: true, depthCompare: "always" }
+    }));
+    return this.localClear;
   }
   /**
    * SSGI (F3e-2): at half resolution its trace against the prepass's depths, lit by last frame's resolved
@@ -25080,6 +25767,7 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     const cascadeFit = sun && casters.length > 0 ? fitCascades({ view: draw.view, projection: draw.projection, toLight: sun.toLight, distance: sun.distance, size: sun.size, reach: sun.reach }) : null;
     this.frameCascades = cascadeFit && sun ? { cascades: cascadeFit, size: sun.size, strength: sun.strength ?? 1, softness: sun.softness ?? SUN_SOFTNESS } : null;
     if (cascadeFit && sun) this.ensureCascadeTexture(sun.size);
+    this.frameVsm = this.hdr && prepass && sun !== null && cascadeFit !== null && draw.virtualShadows ? this.planVsm(draw, sun.toLight, sun.strength ?? 1, sun.softness ?? SUN_SOFTNESS, temporal ? temporal.projection : draw.projection) : null;
     this.ensureUniformCapacity(draws.length + casters.length);
     const casterBase = prepass ? instanceCount * 2 : instanceCount;
     this.ensureInstanceCapacity(casterBase + (casting?.instanceCount ?? 0));
@@ -25356,6 +26044,7 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
         };
       });
     }
+    if (this.frameVsm && this.frameVsm.draws.length > 0) this.addVsmPages(graph, this.frameVsm.draws, casters, draws.length);
     const localTiles = this.frameLocalTiles;
     const atlasTexture = localTiles && localTiles.length > 0 ? this.ensureLocalAtlas() : null;
     const statics = draw.localShadowKey ?? null;
@@ -25372,14 +26061,7 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
       const res = this.depthGroups.cascades;
       redraw.forEach((i) => this.device.queue.writeBuffer(res.localViews[i].buffer, 0, new Float32Array(localTiles[i].drawViewProj)));
       const map = graph.importTexture("local shadows", atlasTexture);
-      this.localClear ?? (this.localClear = this.device.createRenderPipeline({
-        layout: "auto",
-        vertex: { module: this.device.createShaderModule({ code: LOCAL_CLEAR_WGSL }), entryPoint: "vs" },
-        fragment: { module: this.device.createShaderModule({ code: LOCAL_CLEAR_WGSL }), entryPoint: "clear", targets: [] },
-        primitive: { topology: "triangle-list" },
-        depthStencil: { format: "depth32float", depthWriteEnabled: true, depthCompare: "always" }
-      }));
-      const clearPipeline = this.localClear;
+      const clearPipeline = this.localClearPipeline();
       graph.addPass("local shadows", "render", (pass) => {
         pass.read(map, "attachment");
         pass.write(map);
@@ -25469,7 +26151,8 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
       });
     }
     this.prepassed = prepass ? { depth: msaa ? msaa.depth : this.depthTexture, gbuffer: this.gbuffer, velocity: this.velocity, multisampled: msaa !== null } : null;
-    if (this.frameContact || this.frameGtao || this.frameSsgi) {
+    if (this.frameVsm) this.addVsmMarks(graph, depth, msaa !== null);
+    if (this.frameContact || this.frameGtao || this.frameSsgi || this.frameVsm) {
       this.addScreenShading(graph, depth, gbuffer, velocity, draw.view, temporal ? temporal.projection : draw.projection, this.frameContact ? draw.lightDirection ?? null : null, ssao !== null, msaa !== null);
     }
     const readDepths = prepass && this.hdr;
@@ -25533,6 +26216,7 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     graph.run(encoder, this.transients, this.timer);
     this.device.queue.submit([encoder.finish()]);
     this.timer?.read();
+    this.readVsmMarks();
     if (!readback) return;
     this.submitted += 1;
     if (slot) {
@@ -25969,7 +26653,7 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     frame.set([sun?.softness ?? 0, this.frameContact ? 1 : 0, this.frameGtao ? 1 : 0, this.frameSsgi ? 1 : 0], FRAME_CASCADES + 80);
     if (this.frameDepthView) {
       frame.set(this.frameDepthView.viewProj, FRAME_CASCADES + 84);
-      frame.set([this.frameDepthView.terms[0], this.frameDepthView.terms[1], 1, 0], FRAME_CASCADES + 100);
+      frame.set([this.frameDepthView.terms[0], this.frameDepthView.terms[1], 1, this.frameVsm ? 1 : 0], FRAME_CASCADES + 100);
     }
     if (this.hdr) frame.set(this.aerialFrame(draw), FRAME_AERIAL);
     if (this.hdr) frame.set(packFogFrame(this.frameFog, this.fogTerms), FRAME_FOG);
@@ -26419,6 +27103,7 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     this.atmosphere?.dispose();
     this.volumetricFog?.dispose();
     this.probeGi?.gi.dispose();
+    this.disposeVsm();
     destroySafely(this.depthGroups.fogVolume.texture);
     destroySafely(this.blankProbeCubes);
     destroySafely(this.probeBuffer);

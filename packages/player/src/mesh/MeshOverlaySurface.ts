@@ -142,6 +142,8 @@ const FIRST_PERSON_NEAR = 0.05;
 
 /** Edge length of the directional shadow map — a fixed, self-contained cost. */
 const SHADOW_MAP_SIZE = 1024; // the high preset's; see setQuality
+/** The edge of the AAA tier's virtual shadow pool (F2b): 1024 pages of 128², 64 MB of depth. */
+const VSM_POOL_SIZE = 4096;
 /** Each of the AAA tier's sun cascades' maps (F2a) when the quality preset sets no size of its own (F2a-2). */
 const CASCADE_MAP_SIZE = 2048;
 /** How much wider the rig's soft shadows make the AAA tier's sun than the real one (F2a-2). */
@@ -1242,8 +1244,9 @@ export class MeshOverlaySurface implements DisplaySurface {
         shadow,
         sunShadow,
         localShadowCasters,
-        localShadowKey: localShadowCasters ? (this.castersFrame?.key ?? null) : null,
-        localShadowMoved: localShadowCasters ? (this.castersFrame?.moved ?? null) : null,
+        // The still casters' key and the movers serve the local tiles' cache (F2d-2) and the sun's virtual pages (F2b).
+        localShadowKey: localShadowCasters || sunShadow ? (this.castersFrame?.key ?? null) : null,
+        localShadowMoved: localShadowCasters || sunShadow ? (this.castersFrame?.moved ?? null) : null,
         antialias,
         reflectionCapture: cascaded && lighting ? this.reflectionCapture(lighting) : null,
         decals,
@@ -1419,6 +1422,8 @@ export class MeshOverlaySurface implements DisplaySurface {
       ...(job.decals ? { decals: job.decals } : {}),
       ...(atmosphere ? { atmosphere } : {}),
       ...(gi ? { dynamicGi: gi.draw } : {}),
+      // The sun's virtual shadow maps (F2b) at High and Epic, over the cascades.
+      ...(this.renderer.sunCascades === true && this.quality.virtualShadows === true && this.options.prepass === true && job.sunShadow ? { virtualShadows: { poolSize: VSM_POOL_SIZE } } : {}),
       // Epic's reflections through the still scene's BVH (F3f), on the AAA tier with reflections.
       ...(this.renderer.sunCascades === true && this.quality.tracedReflections === true && this.options.reflections === true && this.quality.reflections === true ? { reflectionTrace: { occluders: this.stillOccluders(), key: this.staticShadowKey() } } : {}),
       // Screen-space GI on the AAA tier (F3e-2): on unless the rig turns it off.

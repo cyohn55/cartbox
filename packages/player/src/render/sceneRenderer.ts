@@ -217,6 +217,13 @@ export interface SceneDraw {
    * whose BVH the reflections trace where the screen has nothing to show,
    * keyed as `dynamicGi`'s (the two share one tracer when both are given).
    */
+  /**
+   * Virtual shadow maps for the sun (AAA_FIDELITY_ROADMAP.md F2b;
+   * virtualShadows.ts) on the linear-light renderer with a prepass and its
+   * cascades, at High and Epic: the physical pool's edge in texels. Absent =
+   * the cascades alone.
+   */
+  readonly virtualShadows?: { readonly poolSize: number } | null;
   readonly reflectionTrace?: { readonly occluders: readonly Occluder[]; readonly key: string } | null;
   /**
    * A physical sky's air (AAA_FIDELITY_ROADMAP.md F5a-2): the medium and its
