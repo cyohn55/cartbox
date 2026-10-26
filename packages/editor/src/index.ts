@@ -341,6 +341,7 @@ export {
   bakeFogVolume,
   fogColumn,
   fogExtinction,
+  fogLocalLight,
   fogGrid,
   fogScattered,
   fogSlice,

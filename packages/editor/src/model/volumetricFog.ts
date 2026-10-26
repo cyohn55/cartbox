@@ -28,7 +28,7 @@
  * Pure and DOM-free.
  */
 
-import { lightColor, type SceneLight } from "../render/meshRasterizer";
+import { distanceFalloff, lightChannelMask, lightColor, spotCone, type SceneLight } from "../render/meshRasterizer";
 import { aerialDirection, type AerialCamera } from "./atmosphere";
 import type { SceneFog } from "../render/skyDome";
 
@@ -153,6 +153,35 @@ export interface FogLight {
   readonly shadow?: (p: readonly number[]) => number;
   /** The sky's mean radiance over the sphere (its L0 irradiance over π). */
   readonly sky: readonly number[];
+  /** Spot and point lights (F5b-2), in the default lighting channel; others are passed over. */
+  readonly locals?: readonly SceneLight[];
+  /** A local light's shadow at a world point (1: lit), by its index in {@link locals}, or none. */
+  readonly localShadow?: (light: number, p: readonly number[]) => number;
+}
+
+/**
+ * The radiance (the renderer's units) a spot or point light brings a point of
+ * fog from along the view ray `d`, through the phase: its π × linear colour ×
+ * intensity, its falloff and cone, as the scene shader lights a surface.
+ * Zero for any other light, or one outside the default channel.
+ */
+export function fogLocalLight(light: SceneLight, p: readonly number[], d: readonly number[], g: number): V3 {
+  if ((light.kind !== "point" && light.kind !== "spot") || !light.position || (lightChannelMask(light.channels ?? 1) & 1) === 0) return [0, 0, 0];
+  const to = [light.position[0] - p[0]!, light.position[1] - p[1]!, light.position[2] - p[2]!];
+  const dist = Math.max(1e-4, Math.hypot(to[0]!, to[1]!, to[2]!));
+  const L = to.map((c) => c / dist);
+  let atten = distanceFalloff(light, dist);
+  if (light.kind === "spot") {
+    const [cosOuter, cosInner] = spotCone(light);
+    const axis = light.direction ?? [0, -1, 0];
+    const len = Math.hypot(axis[0], axis[1], axis[2]) || 1;
+    const ct = clamp((-(L[0]! * axis[0] + L[1]! * axis[1] + L[2]! * axis[2]) / len - cosOuter) / (cosInner - cosOuter), 0, 1);
+    atten *= ct * ct * (3 - 2 * ct);
+  }
+  if (atten <= 0) return [0, 0, 0];
+  const phase = henyeyGreenstein(L[0]! * d[0]! + L[1]! * d[1]! + L[2]! * d[2]!, g);
+  const c = lightColor(light);
+  return [0, 1, 2].map((k) => Math.PI * toLinear(c[k]!) * light.intensity * atten * phase) as V3;
 }
 
 /**
@@ -170,6 +199,12 @@ export function fogScattered(v: VolumetricFog, light: FogLight, p: readonly numb
     const shadow = light.shadow ? light.shadow(p) : 1;
     sun = light.sun.radiance.map((r) => Math.PI * r * phase * shadow);
   }
+  (light.locals ?? []).forEach((l, i) => {
+    const lit = fogLocalLight(l, p, d, v.anisotropy);
+    if (lit[0] === 0 && lit[1] === 0 && lit[2] === 0) return;
+    const shadow = light.localShadow ? light.localShadow(i, p) : 1;
+    for (let c = 0; c < 3; c += 1) sun[c]! += lit[c]! * shadow;
+  });
   for (let c = 0; c < 3; c += 1) out[c] = v.albedo[c]! * (sun[c]! + light.sky[c]! * v.ambient);
   return out;
 }

@@ -24,9 +24,10 @@
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
-import { FOG_SLICES, aerialCamera, type AerialCamera, type FogLight, type Mat4, type VolumetricFog } from "@cartbox/editor";
+import { CLUSTER_CELLS, CLUSTER_X, CLUSTER_Y, CLUSTER_Z, FOG_SLICES, aerialCamera, type AerialCamera, type FogLight, type Mat4, type VolumetricFog } from "@cartbox/editor";
 
 import { CASCADE_COUNT, type Cascade } from "./cascades.js";
+import { LOCAL_ATLAS_SIZE } from "./localAtlas.js";
 
 /** The fog volumes' format: in-scattered RGB and extinction (inject), or transmittance (integrate). */
 export const FOG_FORMAT = "rgba16float";
@@ -34,8 +35,32 @@ export const FOG_FORMAT = "rgba16float";
 /** How much of a froxel's history a temporal frame keeps. */
 export const FOG_HISTORY = 0.9;
 
-/** Floats in the fog passes' uniform block. */
-export const FOG_UNIFORM_FLOATS = 100 + CASCADE_COUNT * 16;
+/** Where in the fog passes' uniform block the local lights' terms start (F5b-2), and the block's floats. */
+export const FOG_LIGHTS_AT = 100 + CASCADE_COUNT * 16;
+export const FOG_UNIFORM_FLOATS = FOG_LIGHTS_AT + 12;
+
+/**
+ * The local lights as this frame's scene lights them (F5b-2): the clustered
+ * cells' parameters (tile size, near, slice scale), the lights every point
+ * takes before the cells and whether the cells are built, the frame's size,
+ * and the spot/point shadow tiles' bias when they are drawn.
+ */
+export interface FogLights {
+  readonly clusterParams: readonly number[];
+  readonly globalCount: number;
+  readonly clustered: boolean;
+  readonly width: number;
+  readonly height: number;
+  /** The tiles' world bias, or null when no tiles are drawn this frame. */
+  readonly shadowBias: number | null;
+}
+
+export function packFogLights(lights: FogLights, out = new Float32Array(12)): Float32Array {
+  out.set(lights.clusterParams.slice(0, 4), 0);
+  out.set([lights.globalCount, lights.clustered ? 1 : 0, 0, lights.shadowBias === null ? 0 : 1], 4);
+  out.set([lights.shadowBias ?? 0, lights.width, lights.height, 0], 8);
+  return out;
+}
 
 /** A camera as the fog reads it: its axes and focal terms, and its eye. */
 export interface FogCamera {
@@ -134,6 +159,9 @@ struct Fog {
   cascade: vec4f,   // x: strength
   cascadeTexel: vec4f,
   cascadeVp: array<mat4x4f, ${CASCADE_COUNT}>,
+  clusterParams: vec4f, // F5b-2: tile size (px), near, slice scale
+  clusterInfo: vec4f,   // global lights, 1 with cells, -, 1 with spot/point shadow tiles
+  local: vec4f,         // the tiles' bias, the frame's width and height
 };
 @group(0) @binding(0) var<uniform> fog: Fog;
 `;
@@ -146,6 +174,79 @@ ${FOG_STRUCT_WGSL}
 @group(0) @binding(3) var cascadeMap: texture_depth_2d_array;
 @group(0) @binding(4) var cascadeSamp: sampler_comparison;
 @group(0) @binding(5) var outLight: texture_storage_3d<rgba16float, write>;
+// The scene's lights, their clustered cells, and the spot/point shadow tiles (F5b-2).
+struct Light { d0: vec4f, d1: vec4f, d2: vec4f, d3: vec4f, d4: vec4f };
+struct ShadowTile { mvp: mat4x4f, params: vec4f, rect: vec4f };
+@group(0) @binding(6) var<storage, read> lights: array<Light>;
+@group(0) @binding(7) var<storage, read> clusterData: array<u32>;
+@group(0) @binding(8) var<storage, read> shadowTiles: array<ShadowTile>;
+@group(0) @binding(9) var localDepth: texture_depth_2d;
+
+fn fogToLinear(c: vec3f) -> vec3f {
+  return select(pow((c + vec3f(0.055)) / 1.055, vec3f(2.4)), c / 12.92, c <= vec3f(0.04045));
+}
+// A spot/point light's shadow at P: one comparison tap of its tile (a point light's face by dominant axis).
+fn localShadowAt(first: i32, lgt: Light, P: vec3f) -> f32 {
+  var tile = first;
+  if (lgt.d0.w < 1.5) {
+    let d = P - lgt.d0.xyz;
+    let m = abs(d);
+    if (m.x >= m.y && m.x >= m.z) { tile = tile + select(1, 0, d.x >= 0.0); }
+    else if (m.y >= m.z) { tile = tile + select(3, 2, d.y >= 0.0); }
+    else { tile = tile + select(5, 4, d.z >= 0.0); }
+  }
+  let t = shadowTiles[tile];
+  let c = t.mvp * vec4f(P, 1.0);
+  if (c.w <= 0.0) { return 1.0; }
+  let n = c.xyz / c.w;
+  if (any(abs(n) > vec3f(1.0))) { return 1.0; }
+  let own = t.params.y / (n.z + t.params.x) - fog.local.x;
+  let depthRef = (t.params.y / max(own, 1e-4) - t.params.x) * 0.5 + 0.5;
+  let px = clamp(vec2f((n.x * 0.5 + 0.5) * t.rect.z, (0.5 - n.y * 0.5) * t.rect.z), vec2f(1.0), vec2f(t.rect.z - 1.0));
+  return textureSampleCompareLevel(localDepth, cascadeSamp, (t.rect.xy + px) / ${LOCAL_ATLAS_SIZE}.0, depthRef);
+}
+// What a spot or point light in the default channel brings fog at P seen along d (fogLocalLight).
+fn localFog(lgt: Light, P: vec3f, d: vec3f) -> vec3f {
+  let bits = u32(lgt.d3.w + 0.5);
+  if (((bits >> 1u) & 1u) == 0u || lgt.d0.w < 0.5 || lgt.d0.w > 2.5) { return vec3f(0.0); }
+  let toL = lgt.d0.xyz - P;
+  let dist = max(length(toL), 1e-4);
+  let Ld = toL / dist;
+  let range = lgt.d2.x;
+  var atten = 1.0;
+  if ((bits & 1u) != 0u) {
+    var win = 1.0;
+    if (range > 0.0) { let q = dist / range; let w = clamp(1.0 - q * q * q * q, 0.0, 1.0); win = w * w; }
+    let dd = max(dist, 0.01);
+    atten = win / (dd * dd);
+  } else if (range > 0.0) { let w = max(0.0, 1.0 - dist / range); atten = w * w; }
+  if (lgt.d0.w > 1.5) {
+    let ct = clamp((-dot(Ld, lgt.d3.xyz) - lgt.d2.y) / (lgt.d2.z - lgt.d2.y), 0.0, 1.0);
+    atten = atten * ct * ct * (3.0 - 2.0 * ct);
+  }
+  if (atten <= 0.0) { return vec3f(0.0); }
+  var occl = 1.0;
+  if (lgt.d2.w >= 0.0 && fog.clusterInfo.w > 0.5) { occl = localShadowAt(i32(lgt.d2.w + 0.5), lgt, P); }
+  return fogToLinear(lgt.d1.rgb) * (3.14159265 * lgt.d1.w * atten * occl * phase(dot(Ld, d), fog.sun.w));
+}
+// Every local light that reaches P: the global ones, then those of its cluster cell.
+fn localLights(P: vec3f, d: vec3f) -> vec3f {
+  var sum = vec3f(0.0);
+  let ng = i32(fog.clusterInfo.x + 0.5);
+  for (var i = 0; i < ng; i = i + 1) { sum = sum + localFog(lights[i], P, d); }
+  let depth = -dot(P - fog.eye.xyz, fog.back.xyz);
+  if (fog.clusterInfo.y > 0.5 && depth >= fog.clusterParams.z) {
+    let r = P - fog.eye.xyz;
+    let pixel = vec2f((dot(r, fog.right.xyz) / depth / fog.right.w + 1.0) * 0.5 * fog.local.y, (1.0 - dot(r, fog.up.xyz) / depth / fog.up.w) * 0.5 * fog.local.z);
+    let tile = min(vec2u(max(pixel, vec2f(0.0)) / fog.clusterParams.xy), vec2u(${CLUSTER_X - 1}u, ${CLUSTER_Y - 1}u));
+    let slice = min(u32(log(depth / fog.clusterParams.z) * fog.clusterParams.w), ${CLUSTER_Z - 1}u);
+    let i = (slice * ${CLUSTER_Y}u + tile.y) * ${CLUSTER_X}u + tile.x;
+    let offset = clusterData[i * 2u];
+    let count = clusterData[i * 2u + 1u];
+    for (var j = 0u; j < count; j = j + 1u) { sum = sum + localFog(lights[clusterData[${CLUSTER_CELLS * 2}u + offset + j]], P, d); }
+  }
+  return sum;
+}
 
 fn extinction(p: vec3f) -> f32 {
   var sigma = fog.albedo.w;
@@ -188,7 +289,7 @@ fn main(@builtin(global_invocation_id) id: vec3u) {
   let d = froxelRay(at.x, at.y);
   let p = fog.eye.xyz + d * (at.z * at.z * reach);
   let sigma = extinction(p);
-  let sun = fog.sunE.rgb * phase(dot(d, fog.sun.xyz), fog.sun.w) * sunShadow(p);
+  let sun = fog.sunE.rgb * phase(dot(d, fog.sun.xyz), fog.sun.w) * sunShadow(p) + localLights(p, d);
   var current = vec4f(fog.albedo.rgb * (sun + fog.sky.rgb) * sigma, sigma);
   if (fog.prevEye.w > 0.5) {
     // The froxel's centre, as last frame's camera saw it.
@@ -336,8 +437,17 @@ export class GpuVolumetricFog {
     return { frame: full, remade };
   }
 
-  /** Encode the inject and integrate passes (after {@link prepare}), shadowed by `cascades` (the map) and its comparison sampler. */
-  encode(encoder: any, cascades: any, cascadeSampler: any, timing: { readonly timestampWrites?: object } = {}): void {
+  /** The frame's local lights' terms (F5b-2), once its lights are clustered (after {@link prepare}). */
+  lights(lights: FogLights): void {
+    this.device.queue.writeBuffer(this.uniforms, FOG_LIGHTS_AT * 4, packFogLights(lights));
+  }
+
+  /**
+   * Encode the inject and integrate passes (after {@link prepare}): shadowed
+   * by the sun's cascades and their comparison sampler, and lit by the scene's
+   * lights, their cells and their shadow tiles and atlas.
+   */
+  encode(encoder: any, scene: { readonly cascades: any; readonly sampler: any; readonly lights: any; readonly clusters: any; readonly tiles: any; readonly atlas: any }, timing: { readonly timestampWrites?: object } = {}): void {
     const device = this.device;
     const [nx, ny, nz] = this.grid.split("x").map(Number) as [number, number, number];
     const pipeline = (code: string) => device.createComputePipeline({ layout: "auto", compute: { module: device.createShaderModule({ code }), entryPoint: "main" } });
@@ -354,9 +464,13 @@ export class GpuVolumetricFog {
           { binding: 0, resource: { buffer: this.uniforms } },
           { binding: 1, resource: history.createView() },
           { binding: 2, resource: this.sampler },
-          { binding: 3, resource: cascades.createView({ dimension: "2d-array" }) },
-          { binding: 4, resource: cascadeSampler },
+          { binding: 3, resource: scene.cascades.createView({ dimension: "2d-array" }) },
+          { binding: 4, resource: scene.sampler },
           { binding: 5, resource: current.createView() },
+          { binding: 6, resource: { buffer: scene.lights } },
+          { binding: 7, resource: { buffer: scene.clusters } },
+          { binding: 8, resource: { buffer: scene.tiles } },
+          { binding: 9, resource: scene.atlas.createView() },
         ],
       }),
     );

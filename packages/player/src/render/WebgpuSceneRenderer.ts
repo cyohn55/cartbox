@@ -3080,8 +3080,13 @@ export class WebgpuSceneRenderer implements SceneRenderer {
     const drawnProjection = temporal ? temporal.projection : draw.projection;
     this.frameDepthView = this.hdr && prepass ? { viewProj, terms: [drawnProjection[10]!, drawnProjection[14]!] } : null;
     this.frameFog = this.prepareFog(draw);
-    const { ordered } = this.clusterLights(localPlan ? { ...draw, lights: localPlan.lights, localShadows: null } : draw);
+    const { ordered, globalCount, clusters: cells } = this.clusterLights(localPlan ? { ...draw, lights: localPlan.lights, localShadows: null } : draw);
     this.uploadLights(packLights(ordered, this.hdr));
+    // The fog's local lights (F5b-2): as the scene's, by the same cells and tiles.
+    if (this.frameFog) {
+      const tiles = this.frameLocalTiles !== null && this.frameLocalTiles.length > 0;
+      this.volumetricFog!.lights({ clusterParams: cells?.params ?? [1, 1, 1, 1], globalCount: cells ? globalCount : ordered.length, clustered: cells !== null, width: this.width, height: this.height, shadowBias: tiles ? LOCAL_SHADOW_BIAS : null });
+    }
     const lightCount = ordered.length;
 
     const camera = refractionCamera(draw.view, this.height);
@@ -3321,16 +3326,6 @@ export class WebgpuSceneRenderer implements SceneRenderer {
       });
     }
 
-    // The volumetric fog (F5b): its froxels lit through the cascades just drawn, then integrated, before the scene samples it.
-    const fog = this.frameFog ? this.volumetricFog : null;
-    if (fog) {
-      const cascadeRes = this.depthGroups.cascades;
-      graph.addPass("volumetric fog", "compute", (pass) => {
-        pass.keep();
-        return (ctx) => fog.encode(ctx.encoder, cascadeRes.texture, cascadeRes.sampler, ctx.timing);
-      });
-    }
-
     // The spot/point lights' tiles (F2d): the casters drawn through each tile's face into its rect of the atlas.
     // The atlas is kept from frame to frame (F2d-2): a tile is drawn again only when its light, rect or the
     // still casters change, or something that moves reaches its light now or did when last drawn.
@@ -3401,6 +3396,18 @@ export class WebgpuSceneRenderer implements SceneRenderer {
           });
           encoded.end();
         };
+      });
+    }
+
+    // The volumetric fog (F5b): its froxels lit through the cascades and the spot/point tiles just drawn, then
+    // integrated, before the scene samples it.
+    const fog = this.frameFog ? this.volumetricFog : null;
+    if (fog) {
+      const groups = this.depthGroups;
+      graph.addPass("volumetric fog", "compute", (pass) => {
+        pass.keep();
+        return (ctx) =>
+          fog.encode(ctx.encoder, { cascades: groups.cascades.texture, sampler: groups.cascades.sampler, lights: this.lightBuffer, clusters: groups.clusters.data, tiles: groups.shadowTiles, atlas: groups.atlas }, ctx.timing);
       });
     }
 

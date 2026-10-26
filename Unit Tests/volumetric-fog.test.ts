@@ -17,6 +17,7 @@ import {
   fogColumn,
   fogExtinction,
   fogGrid,
+  fogLocalLight,
   fogSliceDistance,
   fogSun,
   henyeyGreenstein,
@@ -111,6 +112,20 @@ describe("the CPU's columns", () => {
     expect(sun.direction).toEqual([0, 1, 0]);
     expect(sun.radiance[0]).toBeCloseTo(0.214 * 3, 2);
     expect(fogSun([lights[0]!])).toBeNull();
+  });
+});
+
+describe("spot and point lights in the fog (F5b-2)", () => {
+  it("bring π × their light, its falloff and cone, through the phase, in the default channel alone", () => {
+    const point: SceneLight = { kind: "point", position: [0, 3, 0], color: [1, 1, 1], intensity: 2, falloff: "inverseSquare" };
+    const lit = fogLocalLight(point, [0, 1, 0], [1, 0, 0], 0.5);
+    expect(lit[0]).toBeCloseTo((Math.PI * 2 * henyeyGreenstein(0, 0.5)) / 4, 9);
+    const spot: SceneLight = { kind: "spot", position: [0, 3, 0], direction: [0, -1, 0], color: [1, 1, 1], intensity: 2, outerAngle: 20, falloff: "inverseSquare" };
+    expect(fogLocalLight(spot, [0, 1, 0], [1, 0, 0], 0.5)[0]).toBeCloseTo(lit[0], 9);
+    // Outside its cone, or another channel's, it brings nothing; nor does the sun.
+    expect(fogLocalLight(spot, [2, 1, 0], [1, 0, 0], 0.5)).toEqual([0, 0, 0]);
+    expect(fogLocalLight({ ...point, channels: 2 }, [0, 1, 0], [1, 0, 0], 0.5)).toEqual([0, 0, 0]);
+    expect(fogLocalLight({ kind: "directional", direction: [0, 1, 0], color: [1, 1, 1], intensity: 1 }, [0, 1, 0], [1, 0, 0], 0.5)).toEqual([0, 0, 0]);
   });
 });
 
@@ -314,5 +329,60 @@ describe.skipIf(!device)("volumetric fog on a real device", { timeout: 240_000 }
     const z = FOG_SLICES - 8;
     expect(shaded.volume![at(0, z)]!).toBeLessThan(lit.volume![at(0, z)]! * 0.5);
     expect(shaded.volume![at(nx - 1, z)]! / lit.volume![at(nx - 1, z)]!).toBeGreaterThan(0.97);
+  });
+
+  it("is lit by spot and point lights through their cells, as the CPU lights it", async () => {
+    const locals: SceneLight[] = [
+      { kind: "point", position: [3, 2.5, -12], color: [1, 0.6, 0.3], intensity: 40, range: 25, falloff: "inverseSquare" },
+      { kind: "spot", position: [-4, 6, -20], direction: [0.2, -1, 0.1], color: [0.4, 0.7, 1], intensity: 300, range: 40, outerAngle: 30, falloff: "inverseSquare" },
+    ];
+    const renderer = (await WebgpuSceneRenderer.create(device, W, H, undefined, { hdr: true }))!;
+    device.pushErrorScope("validation");
+    renderer.renderToTexture!([speck], { width: W, height: H, view: VIEW, projection: PROJECTION, ambient: 0, lightDirection: SUN, environment: null, lights: [...LIGHTS, ...locals], fog: FOG, temporal: false } as any);
+    const error = await settled(device.popErrorScope());
+    expect(error ? String((error as any).message ?? error) : null).toBeNull();
+    const volume = await readTexture((renderer as any).volumetricFog.volume, grid[0], grid[1], grid[2]);
+    renderer.dispose();
+    const want = bakeFogVolume(resolveVolumetricFog(FOG)!, { ...sunLight, locals }, camera, EYE, grid);
+    const sunOnly = bakeFogVolume(resolveVolumetricFog(FOG)!, sunLight, camera, EYE, grid);
+    let peak = 0;
+    for (let i = 0; i < want.length; i += 4) peak = Math.max(peak, want[i]!, want[i + 2]!);
+    let worst = 0;
+    let lifted = 0;
+    for (let i = 0; i < want.length; i += 1) {
+      const allowed = i % 4 === 3 ? 0.003 : Math.max(0.015 * Math.abs(want[i]!), 2e-3 * peak);
+      worst = Math.max(worst, Math.abs(volume[i]! - want[i]!) / allowed);
+      if (i % 4 === 2) lifted = Math.max(lifted, want[i]! - sunOnly[i]!);
+    }
+    // The lights matter (they lift the fog well past the sun's light), and the GPU's froxels are the CPU's.
+    expect(lifted).toBeGreaterThan(0.05 * peak);
+    expect(worst).toBeLessThan(1);
+  });
+
+  it("is dark under what shadows a spot light from it", async () => {
+    const lamp: SceneLight = { kind: "spot", position: [0, 8, -14], direction: [0, -1, 0], color: [1, 1, 1], intensity: 60, range: 30, outerAngle: 40, falloff: "inverseSquare", castShadows: true };
+    // A plate just under the lamp, over its right half.
+    const plate: MeshSceneInstance = { mesh: roof(), model: composeModelMatrix([2.5, 7, -14], [0, 0, 0], [2.5, 1, 6]) };
+    const draw = (casters: MeshSceneInstance[]) => ({ width: W, height: H, view: VIEW, projection: PROJECTION, ambient: 0, lightDirection: SUN, environment: null, lights: [lamp], fog: { ...FOG, density: 0.05 }, temporal: false, localShadowCasters: casters });
+    const volumes: Float32Array[] = [];
+    for (const casters of [[speck], [speck, plate]]) {
+      const renderer = (await WebgpuSceneRenderer.create(device, W, H, undefined, { hdr: true }))!;
+      device.pushErrorScope("validation");
+      renderer.renderToTexture!(casters, draw(casters) as any);
+      const error = await settled(device.popErrorScope());
+      expect(error ? String((error as any).message ?? error) : null).toBeNull();
+      volumes.push(await readTexture((renderer as any).volumetricFog.volume, grid[0], grid[1], grid[2]));
+      renderer.dispose();
+    }
+    const [open, shaded] = volumes as [Float32Array, Float32Array];
+    // Down the middle row, past the lamp: the plate darkens the cone's right side and leaves its left.
+    const [nx, ny] = grid;
+    const z = FOG_SLICES - 1;
+    const at = (x: number) => ((z * ny + (ny >> 1)) * nx + x) * 4;
+    const right = Math.round(nx * 0.62);
+    const left = Math.round(nx * 0.38);
+    expect(open[at(right)]!).toBeGreaterThan(0);
+    expect(shaded[at(right)]!).toBeLessThan(open[at(right)]! * 0.5);
+    expect(shaded[at(left)]! / open[at(left)]!).toBeGreaterThan(0.9);
   });
 });

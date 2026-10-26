@@ -932,7 +932,7 @@ Everything else depends on this track. It contains no visible "feature", but its
       - **F5a-3**: the moon and the night sky in physical units.
       - The painted sky's objects, cloud layers and distant vistas draw over the other tiers' copy of the physical sky, but not over the AAA backdrop. F5c's clouds and a composite of the vistas will bring them back there.
       - The CPU LUTs take about 0.8 s at load. A worker, or reading the GPU's LUTs back on the AAA tier, would hide that.
-- [ ] **F5b. Volumetric fog.** A froxel grid (for example 160×90×64) of scattering and extinction from height fog, local fog volumes and particles. It is lit by the sun with its shadow map, and by local lights with theirs, then temporally reprojected and integrated. **God rays emerge from it**, so the CPU screen-space shafts retire.
+- [x] **F5b. Volumetric fog.** (Particles adding density waits on GPU particles, F8a.) A froxel grid (for example 160×90×64) of scattering and extinction from height fog, local fog volumes and particles. It is lit by the sun with its shadow map, and by local lights with theirs, then temporally reprojected and integrated. **God rays emerge from it**, so the CPU screen-space shafts retire.
   - **F5b-0, room in the scene shader: done** (`WebgpuSceneRenderer.ts`). The AAA scene shader bound the 16 sampled textures and 8 storage buffers a stage gets on every device, so a froxel volume had nowhere to go.
     - The clustered lights' cell table and index list now share one storage buffer, the table first. That frees a storage slot.
     - The probe grid and probe volume move from a 3D texture, which was only ever read texel by texel, into that slot, as a storage buffer indexed by the probe stride (`probeCount.w`). That frees a sampled texture for the fog.
@@ -967,9 +967,18 @@ Everything else depends on this track. It contains no visible "feature", but its
         - 24 jittered frames of history converge on the centre-sampled volume within 5%;
         - a roof between a low sun and the fog halves the light deep in the fog beneath it, while the fog beside it is lit as without the roof: a shaft's edge, from the real cascades.
     - *Left for F5b:*
-      - **F5b-2:** spot and point lights in the fog, through the clustered lights and their shadow tiles; particles adding density.
       - The sky backdrop isn't fogged: it is drawn by the presenter, past the last slice.
       - Scalability levels for the grid (fewer slices on phones), and per-pass timing in the budgets.
+  - **F5b-2, spot and point lights in the fog: done** (`fogLocalLight`; `localLights` in the inject pass). The fog is lit by the scene's spot and point lights as its surfaces are, so a lamp in mist casts a cone, and what stands under it casts a shadow into it.
+    - **The light** is each one's π × linear colour × intensity, its falloff (windowed inverse square, or the default curve) and its cone, through the fog's phase. Only lights in the default lighting channel take part. Area lights do not yet.
+    - **Which lights**: the ones every point takes (unranged), then those of the froxel's clustered-light cell. The froxel finds its cell by the pixel and view depth it stands at, as a fragment does, so the fog's cost per froxel is the scene's per pixel.
+    - **Their shadows**: a light with a tile in the spot/point atlas (F2d) shadows the fog by one hardware comparison in it (a point light's face by its dominant axis), with the tiles' world bias.
+    - So the fog pass now runs after the tiles are drawn, and before the prepass.
+    - *Tests:*
+      - CPU: a point light brings π I / d² × the phase, and a spot light the same inside its cone. Outside its cone, in another channel, or the sun: nothing.
+      - On Dawn:
+        - a clustered point and spot light in the fog are the CPU's froxel by froxel (within 1.5%), and lift it well past the sun's own light;
+        - a plate under a shadow-casting spot lamp halves the cone's light in the fog beneath it, and leaves the cone's other side as it was.
 - [ ] **F5c. Volumetric clouds.** Raymarched clouds with a Nubis-style shape plus erosion noise and weather maps, multiple-scattering approximation, temporal amortisation at quarter resolution, cloud shadows on the ground and aerial perspective.
 - [ ] **F5d. Water.**
   - FFT ocean, and Gerstner waves for lakes and rivers.
