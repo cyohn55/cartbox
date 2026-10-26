@@ -405,6 +405,7 @@ export function RunOverlay({
                 <option value="low">Quality: low</option>
                 <option value="medium">Quality: medium</option>
                 <option value="high">Quality: high</option>
+                <option value="epic">Quality: epic</option>
               </select>
             )}
             {mesh && (

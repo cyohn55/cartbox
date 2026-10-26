@@ -20,6 +20,7 @@
  * rasteriser is a hardcoded call. See ERA_MODELS.md §5.1.
  */
 
+import type { SsgiFrame } from "./ssgi.js";
 import {
   DEFAULT_RASTER_STYLE,
   applyLods,
@@ -122,6 +123,12 @@ export interface SceneDraw {
    */
   readonly ambientOcclusion?: boolean;
   /**
+   * Screen-space GI from the prepass (AAA_FIDELITY_ROADMAP.md F3e-2; ssgi.ts):
+   * the near field's bounce, lit by last frame's image, on the linear-light
+   * renderer's temporal frames with a prepass. Absent = none.
+   */
+  readonly screenSpaceGi?: SsgiFrame | null;
+  /**
    * Key light direction, or omitted for the rasteriser's default. The world
    * overlay publishes a cart-driven sun here, so it changes per frame.
    */
@@ -205,6 +212,12 @@ export interface SceneDraw {
    * light-mapped ones too. The others ignore it.
    */
   readonly dynamicGi?: { readonly occluders: readonly Occluder[]; readonly key: string; readonly settings: DynamicGi } | null;
+  /**
+   * On the AAA tier at Epic (AAA_FIDELITY_ROADMAP.md F3f), the still scene
+   * whose BVH the reflections trace where the screen has nothing to show,
+   * keyed as `dynamicGi`'s (the two share one tracer when both are given).
+   */
+  readonly reflectionTrace?: { readonly occluders: readonly Occluder[]; readonly key: string } | null;
   /**
    * A physical sky's air (AAA_FIDELITY_ROADMAP.md F5a-2): the medium and its
    * sun above the air, whose aerial perspective the linear-light (AAA) WebGPU

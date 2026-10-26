@@ -762,7 +762,7 @@ Everything else depends on this track. It contains no visible "feature", but its
       - Re-baking Lockout and Beaver Creek with HDR maps, which waits on F11a's physical re-light.
       - The CPU bake could take the seam stitching, the local lights and the maps too. It is left byte-identical for now, so `bake:map`'s stored maps don't move.
       - Emissive maps (the bake takes the emissive factor) and a smooth surface's specular bounce (caustics) are not baked.
-- [ ] **F3e. Real-time GI.**
+- [x] **F3e. Real-time GI.** (Moving occluders in the BVH, and a per-frame probe budget, later; see below.)
   - **DDGI**: a probe grid whose irradiance and visibility are updated every frame by software ray tracing in compute, against a scene BVH or a global signed distance field.
   - **SSGI** for near-field detail on top.
   - Together they give moving lights, time of day and destructible scenery correct bounce light without a bake: the Lumen-class result, built from techniques WebGPU can run.
@@ -789,13 +789,49 @@ Everything else depends on this track. It contains no visible "feature", but its
         - in a closed room, a lamp switched on more than doubles the light at the probe beside it and lifts the room's far corner by bounce. Switched off, the probes fall back within 15% of the dark room's;
         - the AAA renderer's wall gains the room's bounce over the frames: brighter after one frame than its direct light alone, and brighter still after sixteen.
     - *Left for F3e:*
-      - **F3e-2:** SSGI for near-field detail, from the prepass's depths and the frame before.
+      - **F3e-2:** SSGI for near-field detail, from the prepass's depths and the frame before (done; below).
       - What moves isn't in the BVH: characters and physics bodies are lit by the volume but don't block or bounce its light. A refit BVH, or an SDF, would bring them in.
       - The reflection probes capture with the volume as it was given, not as it is live. All probes update every frame. A budget per frame, and probe relocation out of walls, would scale it to large maps.
-- [ ] **F3f. Reflections.**
+  - **F3e-2, screen-space GI: done** (`render/ssgi.ts`). On the AAA tier, the near field's bounce the probes are too coarse to hold: a lit wall bleeds its colour onto the floor beside it.
+    - **When it runs.** A temporal frame with a prepass after another (it lights by last frame's image), unless the rig turns it off (`SceneLighting.screenSpaceGi`, on by default, with its reach and strength).
+    - **Trace** (half resolution, after the prepass): each pixel casts two rays over the cosine-weighted hemisphere about its G-buffer normal, turned per pixel and frame by interleaved gradient noise, and marches each 12 steps across the depths out to the reach (4 m by default).
+      - A step behind a surface by no more than a thickness is a hit. It takes what that surface sent the camera last frame: the TAA history (linear light before any tone map), found through the velocity buffer. So last frame's bounce is in it, and light bounces once more each frame.
+      - A hit on a surface's back is dark. Misses (off screen, past the reach) count as none. The screen's edge and the reach's end fade a hit; radiance is held to 32, so a glint doesn't speckle.
+      - It returns the rays' mean radiance (for cosine-weighted rays, the irradiance over π the shader lights its diffuse by) and the share that hit.
+    - **Accumulate:** into a history reprojected through the velocity buffer, held within two spreads of the neighbourhood's mean, at a tenth a frame.
+    - **Resolve:** to full resolution by a joint bilateral filter over the 3×3 half-resolution texels round each pixel (weighted by distance, depth and normal), times the strength, into the **second layer** of the screen-shading target. Binding 8 becomes an array in the linear variant, so no texture slot is spent.
+    - **Shading.** An opaque or cut-out surface takes its far-field irradiance (the sky's, the light map's or the probe volume's) only from the directions the rays left open, and the rays' light from the rest: `irr × (1 − a) + rgb`. The hits already hold the near-field occlusion GTAO measures, so with SSGI GTAO darkens only the specular.
+    - **Authoring.** The Lighting panel gains **Screen-space GI (AAA)**: On or Off, with Reach and Strength.
+    - *Tests (`ssgi.test.ts`, `dynamic-gi.test.ts`):*
+      - The settings read in range, default on, turn off and survive a save; the uniforms carry them.
+      - The player hands the AAA renderer the defaults, none on other renderers, and null when the rig turns it off.
+      - On Dawn: a glowing red wall beside a grey floor. After 24 frames the floor beside it reads 5.7× the red it had without SSGI (0.132 against 0.023), and less green, as the black wall hides the sky there. The floor 3 m away keeps its grey. The first frame, with nothing yet to light by, matches the frame without it.
+- [x] **F3f. Reflections.** (Reprojecting by the hit's own motion, and the BVH's moving objects, later; see below.)
   - Hierarchical-Z SSR with GGX importance sampling and a temporal denoiser.
   - Rough reflections that blend into F3b probes.
   - On Epic, ray-traced reflections from a low-resolution software BVH trace for off-screen objects.
+  - **F3f-1: done** (`render/hizReflections.ts`; the BVH kernel `giReflect` in `render/dynamicGi.ts`). On the AAA tier, a frame with reflections and the prepass's G-buffer traces them through a Hi-Z chain in place of I3's mirror march, which the other tiers keep.
+    - **The chain.** The prepass's depths are copied to an r32float chain (up to 10 mips). Each mip holds the nearest depth of the four texels under it, and of the odd row or column at an edge, so nothing falls between cells.
+    - **The ray** (one a pixel, full resolution). Normal and roughness come from the G-buffer. The view is reflected about a microfacet normal drawn from GGX's visible normals (Heitz 2018) for the roughness, turned per pixel and frame; a mirror's is the plain reflection.
+    - **The walk** (Uludag, GPU Pro 5). The ray is projected to the screen, where NDC depth runs linear along it, and clipped to the screen and short of the near plane (120 m reach).
+      - Up a level past a cell it is wholly in front of; down a level into one it may pass behind.
+      - At the finest level, a hit is where it passes behind the surface by no more than a thickness (0.3 m, plus 1% of the distance). Otherwise it steps on, at most 96 times.
+      - The hit gives that pixel's colour. Its confidence fades toward the screen's edges, toward the reach, for rays turning back toward the camera, and to nothing on a surface's back.
+    - **Denoise.**
+      - The trace is blended (tone mapped, Karis) into a history reprojected through the velocity buffer, held to the neighbourhood's box. Rougher surfaces keep more frames (from 0.3 of each new frame down to 0.06) and a wider box.
+      - It is then filtered over an 8-tap disc that grows with the roughness (to 7 px), weighted by depth, normal, roughness and each tap's confidence.
+    - **Composite** (as I3's): `colour − confidence · env + confidence · weight · hit`. The probes' reflection (F3b) gives way where the trace is sure and stays where it isn't, and the trace fades out from 0.56 to 0.8 roughness, so rough reflections blend into the probes.
+    - **Epic.** The player gains an **Epic** quality level (above High, never picked by "auto"; in the run overlay's and Lockout's menus) that sets `tracedReflections`.
+      - On the AAA tier the player then hands the renderer the still scene (`SceneDraw.reflectionTrace`). It is the same occluders and key as the live GI's, so the two share one tracer.
+      - A half-resolution compute pass traces each pixel's own GGX-sampled ray through the BVH from its depth and G-buffer. Each hit is lit as the live GI lights its own: emission, plus albedo × (the lights through shadow rays, and the probe volume's irradiance where there is one). A miss takes the sky.
+      - The screen trace then takes the BVH's light wherever its own confidence falls short, so what lies off screen still shows in a mirror.
+    - *Tests (`hiz-reflections.test.ts`):*
+      - The levels and uniforms; Epic sets the BVH trace and High doesn't. The player hands the still scene over at Epic on the AAA tier alone.
+      - On Dawn: each level of the chain is the nearest of the four texels under it.
+      - A mirror floor shows a glowing red block standing on it: 0.87 at its mirror image against the block's own 1.0, where without reflections it showed the probe's black sky (0.026).
+      - At roughness 0.35 the image spreads (0.47 at its middle); at 0.95 the probes' reflection is left as it was.
+      - At Epic, a red panel above the screen's top shows in the mirror (0.55), where the screen trace alone leaves the sky (0.026).
+    - *Left for F3f:* reprojecting the history by the reflected point's motion (the surface's own motion smears a mirror's reflection of something moving); moving objects in the BVH (as F3e).
 
 ### F4. Image quality and the camera
 

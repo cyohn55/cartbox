@@ -60,6 +60,7 @@ import {
   type AtmosphereSettings,
   type VolumetricFogSettings,
   type DynamicGiSettings,
+  type ScreenSpaceGiSettings,
   type ReflectionProbe,
   type SceneFog,
   type SceneLight,
@@ -1049,6 +1050,10 @@ function FogControls({ lighting, onChange }: LightingEditorProps & { lighting: S
 function DynamicGiControls({ lighting, onChange }: LightingEditorProps & { lighting: SceneLighting }) {
   const gi = lighting.dynamicGi ?? null;
   const set = (next: Partial<DynamicGiSettings>) => gi && onChange({ ...lighting, dynamicGi: { ...gi, ...next } });
+  // Screen-space GI (F3e-2): on unless the rig turns it off.
+  const ssgi = lighting.screenSpaceGi ?? null;
+  const ssgiOn = ssgi?.enabled !== false;
+  const setSsgi = (next: Partial<ScreenSpaceGiSettings>) => onChange({ ...lighting, screenSpaceGi: { ...(ssgi ?? {}), ...next } });
   return (
     <>
       <SegmentedControl
@@ -1066,6 +1071,22 @@ function DynamicGiControls({ lighting, onChange }: LightingEditorProps & { light
           <RangeControl label="Rays per probe" nested min={16} max={256} step={16} value={gi.rays ?? 64} ariaLabel="GI rays per probe" display={`${gi.rays ?? 64}`} onChange={(rays) => set({ rays })} />
           <RangeControl label="Steadiness" nested min={0.5} max={0.99} step={0.01} value={gi.hysteresis ?? 0.97} ariaLabel="GI hysteresis" display={(gi.hysteresis ?? 0.97).toFixed(2)} onChange={(hysteresis) => set({ hysteresis })} />
           <RangeControl label="Probe spacing" nested min={1} max={10} step={0.5} value={gi.spacing ?? 3} ariaLabel="GI probe spacing" display={`${(gi.spacing ?? 3).toFixed(1)} m`} onChange={(spacing) => set({ spacing })} />
+        </>
+      )}
+      <SegmentedControl
+        label="Screen-space GI (AAA)"
+        ariaLabel="Screen-space GI"
+        selected={ssgiOn ? "on" : "off"}
+        onSelect={(id) => setSsgi({ enabled: id === "on" })}
+        options={[
+          { id: "off", label: "Off" },
+          { id: "on", label: "On", hint: "On the AAA tier, rays across the screen bring back the light nearby surfaces sent last frame, so a lit wall bleeds its colour onto the floor beside it. It fills in the detail the probes are too coarse to hold" },
+        ]}
+      />
+      {ssgiOn && (
+        <>
+          <RangeControl label="Reach" nested min={0.5} max={16} step={0.5} value={ssgi?.radius ?? 4} ariaLabel="Screen-space GI reach" display={`${(ssgi?.radius ?? 4).toFixed(1)} m`} onChange={(radius) => setSsgi({ radius })} />
+          <RangeControl label="Strength" nested min={0} max={4} step={0.05} value={ssgi?.intensity ?? 1} ariaLabel="Screen-space GI strength" display={`×${(ssgi?.intensity ?? 1).toFixed(2)}`} onChange={(intensity) => setSsgi({ intensity })} />
         </>
       )}
     </>

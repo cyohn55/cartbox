@@ -31,6 +31,7 @@ import {
   dynamicGiGrid,
   emptyProbeVolume,
   resolveDynamicGi,
+  resolveScreenSpaceGi,
   type ProbeVolume,
   MOON_ALBEDO,
   sunTransmittance,
@@ -1418,6 +1419,10 @@ export class MeshOverlaySurface implements DisplaySurface {
       ...(job.decals ? { decals: job.decals } : {}),
       ...(atmosphere ? { atmosphere } : {}),
       ...(gi ? { dynamicGi: gi.draw } : {}),
+      // Epic's reflections through the still scene's BVH (F3f), on the AAA tier with reflections.
+      ...(this.renderer.sunCascades === true && this.quality.tracedReflections === true && this.options.reflections === true && this.quality.reflections === true ? { reflectionTrace: { occluders: this.stillOccluders(), key: this.staticShadowKey() } } : {}),
+      // Screen-space GI on the AAA tier (F3e-2): on unless the rig turns it off.
+      ...(lighting && this.renderer.sunCascades === true ? { screenSpaceGi: resolveScreenSpaceGi(lighting.screenSpaceGi) } : {}),
       time,
     };
     const scene = this.renderer.renderToTexture!(job.drawn, draw) ?? null;
@@ -1477,16 +1482,12 @@ export class MeshOverlaySurface implements DisplaySurface {
     const env = this.environment;
     if (!settings || !env) return null;
     if (!this.giState || this.giState.scene !== this.scene) {
-      const still = this.scene.instances.filter((inst) => {
-        const body = inst.physics?.body;
-        return !(inst.pooled || isSkinned(inst.mesh) || body === "dynamic" || body === "kinematic" || body === "character");
-      });
       const b = this.scene.bounds;
       const grid = dynamicGiGrid(b.min, b.max, settings.spacing);
       const spacing = [0, 1, 2].map((a) => (grid.max[a]! - grid.min[a]!) / Math.max(1, grid.counts[a]! - 1));
       this.giState = {
         scene: this.scene,
-        occluders: still.map((inst) => ({ mesh: inst.mesh, model: inst.model })),
+        occluders: this.stillOccluders(),
         empty: emptyProbeVolume(grid.min, grid.max, grid.counts, 1.5 * Math.max(...spacing)),
         env: null,
       };
@@ -1495,6 +1496,21 @@ export class MeshOverlaySurface implements DisplaySurface {
     if (state.env?.source !== env) state.env = { source: env, value: { ...env, probeVolume: env.probeVolume ?? state.empty } };
     return { draw: { occluders: state.occluders, key: this.staticShadowKey(), settings }, environment: state.env.value };
   }
+  /** What stands still in the scene, as the BVH tracers take it (F3e's live GI, F3f's Epic reflections), gathered once a scene. */
+  private stillOccluders(): { mesh: MeshAsset; model: Mat4 }[] {
+    if (this.still?.scene !== this.scene) {
+      const occluders = this.scene.instances
+        .filter((inst) => {
+          const body = inst.physics?.body;
+          return !(inst.pooled || isSkinned(inst.mesh) || body === "dynamic" || body === "kinematic" || body === "character");
+        })
+        .map((inst) => ({ mesh: inst.mesh, model: inst.model }));
+      this.still = { scene: this.scene, occluders };
+    }
+    return this.still.occluders;
+  }
+  private still: { scene: MeshScene; occluders: { mesh: MeshAsset; model: Mat4 }[] } | null = null;
+
   private giState: { scene: MeshScene; occluders: { mesh: MeshAsset; model: Mat4 }[]; empty: ProbeVolume; env: { source: EnvironmentLight; value: EnvironmentLight } | null } | null = null;
 
   /** A physical sky as the presenter draws it (F5a): the medium, its sun above the air, and the disc as the eye sees it; null for a painted one. */

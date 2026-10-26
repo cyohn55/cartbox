@@ -8,6 +8,9 @@
  *   behaviour before presets existed.
  * - **medium**: half-resolution shadow maps; the first-person software view
  *   starts at three-quarter size.
+ * - **epic** (AAA_FIDELITY_ROADMAP.md's top scalability level): high, plus the
+ *   AAA tier's costliest paths — reflections traced through the scene's BVH
+ *   where the screen has nothing to show (F3f). Never picked by "auto".
  * - **low**: no shadows, no bloom or chromatic aberration (the multi-pass
  *   effects; cheap per-pixel looks like grading, CRT or dithering stay), no
  *   anti-aliasing, and the first-person software view capped at half size.
@@ -25,9 +28,9 @@
 
 import type { PostFxSettings } from "./fx/postfx.js";
 
-export type QualityLevel = "low" | "medium" | "high";
+export type QualityLevel = "low" | "medium" | "high" | "epic";
 export type QualityChoice = QualityLevel | "auto";
-export const QUALITY_LEVELS: readonly QualityLevel[] = ["low", "medium", "high"];
+export const QUALITY_LEVELS: readonly QualityLevel[] = ["low", "medium", "high", "epic"];
 
 export interface QualitySettings {
   readonly level: QualityLevel;
@@ -61,9 +64,12 @@ export interface QualitySettings {
    * expanded in blocks, so much past 4 shows on cloud edges.)
    */
   readonly skyScale?: number;
+  /** On the AAA tier, reflections the screen can't show traced through the still scene's BVH (F3f). */
+  readonly tracedReflections?: boolean;
 }
 
 export const QUALITY_PRESETS: Readonly<Record<QualityLevel, QualitySettings>> = {
+  epic: { level: "epic", shadows: true, shadowMapSize: 1024, shadowCascades: true, cascadeMapSize: 4096, maxRenderScale: 1, disabledEffects: [], terrainDetail: 1, antialias: true, temporal: true, reflections: true, skyScale: 3, tracedReflections: true },
   high: { level: "high", shadows: true, shadowMapSize: 1024, shadowCascades: true, cascadeMapSize: 4096, maxRenderScale: 1, disabledEffects: [], terrainDetail: 1, antialias: true, temporal: true, reflections: true, skyScale: 3 },
   medium: { level: "medium", shadows: true, shadowMapSize: 512, cascadeMapSize: 2048, maxRenderScale: 0.75, disabledEffects: [], terrainDetail: 0.6, antialias: true, temporal: true, reflections: true, skyScale: 3 },
   low: { level: "low", shadows: false, shadowMapSize: 512, maxRenderScale: 0.5, disabledEffects: ["bloom", "chroma"], terrainDetail: 0.3, antialias: false, temporal: false, reflections: false, skyScale: 4 },

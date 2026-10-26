@@ -17,7 +17,7 @@
  */
 
 import { parseVolumetricFog } from "./volumetricFog";
-import { parseDynamicGi, type DynamicGiSettings } from "./dynamicGi";
+import { parseDynamicGi, parseScreenSpaceGi, type DynamicGiSettings, type ScreenSpaceGiSettings } from "./dynamicGi";
 import { parseAtmosphere } from "./atmosphere";
 import { parseWind, type SceneWind } from "./wind";
 import { decodeLightProbes, type LightProbeGrid, type StoredLightProbes } from "./lightProbes";
@@ -125,6 +125,12 @@ export interface SceneLighting {
    * lights and a time of day bounce without a bake. Absent = the baked light.
    */
   readonly dynamicGi?: DynamicGiSettings | null;
+  /**
+   * Screen-space GI (AAA_FIDELITY_ROADMAP.md F3e-2; dynamicGi.ts): on the AAA
+   * tier, the near field's bounce from the depth buffer and last frame's
+   * image. Absent = on, with its defaults.
+   */
+  readonly screenSpaceGi?: ScreenSpaceGiSettings | null;
   /**
    * The armour colours for this scene (HALO_INFINITE_STYLE_ROADMAP.md I8): entry
    * k replaces tint k of the runtime's palette (1..15; entry 0 is unused), null
@@ -242,6 +248,7 @@ export function parseSceneLighting(raw: unknown): SceneLighting | null {
   const lightProbes = decodeLightProbes(record.lightProbes) ? (record.lightProbes as StoredLightProbes) : null;
   const probeVolume = decodeProbeVolume(record.probeVolume) ? (record.probeVolume as StoredProbeVolume) : null;
   const dynamicGi = parseDynamicGi(record.dynamicGi);
+  const screenSpaceGi = parseScreenSpaceGi(record.screenSpaceGi);
 
   const lights = Array.isArray(record.lights)
     ? record.lights.map(parseLight).filter((l): l is SceneLight => l !== null)
@@ -276,6 +283,7 @@ export function parseSceneLighting(raw: unknown): SceneLighting | null {
     ...(lightProbes ? { lightProbes } : {}),
     ...(probeVolume ? { probeVolume } : {}),
     ...(dynamicGi ? { dynamicGi } : {}),
+    ...(screenSpaceGi ? { screenSpaceGi } : {}),
     ...(tints ? { tints } : {}),
     ...(postVolumes.length > 0 ? { postVolumes } : {}),
     ...(autoExposure ? { autoExposure } : {}),

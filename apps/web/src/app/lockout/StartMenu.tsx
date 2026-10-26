@@ -656,6 +656,7 @@ export function StartMenu(props: StartMenuProps) {
                   <option value="low">Low — no shadows, lighter effects</option>
                   <option value="medium">Medium</option>
                   <option value="high">High</option>
+                  <option value="epic">Epic — AAA ray-traced extras</option>
                 </select>
               </Row>
               <Row label="Show frame rate">

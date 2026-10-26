@@ -918,6 +918,9 @@ declare function uniformsFromSettings(settings: PostFxSettings): PostFxUniforms;
  *   behaviour before presets existed.
  * - **medium**: half-resolution shadow maps; the first-person software view
  *   starts at three-quarter size.
+ * - **epic** (AAA_FIDELITY_ROADMAP.md's top scalability level): high, plus the
+ *   AAA tier's costliest paths — reflections traced through the scene's BVH
+ *   where the screen has nothing to show (F3f). Never picked by "auto".
  * - **low**: no shadows, no bloom or chromatic aberration (the multi-pass
  *   effects; cheap per-pixel looks like grading, CRT or dithering stay), no
  *   anti-aliasing, and the first-person software view capped at half size.
@@ -933,7 +936,7 @@ declare function uniformsFromSettings(settings: PostFxSettings): PostFxUniforms;
  * keep running long.
  */
 
-type QualityLevel = "low" | "medium" | "high";
+type QualityLevel = "low" | "medium" | "high" | "epic";
 type QualityChoice = QualityLevel | "auto";
 declare const QUALITY_LEVELS: readonly QualityLevel[];
 interface QualitySettings {
@@ -968,6 +971,8 @@ interface QualitySettings {
      * expanded in blocks, so much past 4 shows on cloud edges.)
      */
     readonly skyScale?: number;
+    /** On the AAA tier, reflections the screen can't show traced through the still scene's BVH (F3f). */
+    readonly tracedReflections?: boolean;
 }
 declare const QUALITY_PRESETS: Readonly<Record<QualityLevel, QualitySettings>>;
 /** What the browser reveals about the device (all optional: browsers differ). */
@@ -4228,6 +4233,52 @@ interface RegisteredAchievement {
 declare function resolveUnlockedAchievements(unlockHashes: number[], registered: RegisteredAchievement[]): RegisteredAchievement[];
 
 /**
+ * Screen-space global illumination on the AAA tier (AAA_FIDELITY_ROADMAP.md
+ * F3e-2): the near-field bounce the probe volume (F3d-3, F3e-1) is too coarse
+ * to hold — a red wall's light on the floor beside it, the glow of a lit
+ * panel on the crate in front of it.
+ *
+ * From the depth prepass, its G-buffer normals and the last frame's resolved
+ * HDR image (the TAA history, linear light before any tone map), at half
+ * resolution:
+ *
+ * - **Trace.** Each pixel casts {@link SSGI_RAYS} rays over the cosine-weighted
+ *   hemisphere about its normal, turned per pixel and per frame, and marches
+ *   each across the screen against the depths, out to {@link SSGI_RADIUS}
+ *   metres, as the reflections and contact shadows march theirs.
+ * - **Hits.** A ray that passes behind a surface by no more than a thickness
+ *   has hit it. It takes the light that surface sent the camera last frame
+ *   (found by the velocity buffer), so what it sees includes last frame's
+ *   bounce: light bounces once more each frame. A hit on a surface's back is
+ *   dark. Rays that leave the screen or the radius miss.
+ * - **What it returns.** rgb: the mean radiance the rays brought back (misses
+ *   count as none), which for cosine-weighted rays is the irradiance over π
+ *   from what they hit — the convention the scene shader lights its diffuse
+ *   by. a: the share of rays that hit.
+ *
+ * The scene shader then takes, for an opaque or cut-out surface, its far-field
+ * irradiance (the sky's, the light map's or the probe volume's) only from the
+ * share of directions the rays left open, and the rays' own light from the
+ * rest: `irr × (1 − a) + rgb`. Since that share already holds the near-field
+ * occlusion GTAO measures, GTAO then darkens only the specular.
+ *
+ * The accumulation pass blends each frame into a history reprojected through
+ * the velocity buffer, held to the current frame's neighbourhood (its mean
+ * and spread, generously, as two rays a pixel are noisy). The resolve pass
+ * brings it to full resolution with a joint bilateral filter over the 3×3
+ * half-resolution texels round each pixel, weighted by depth and normal, into
+ * the screen-shading target's second layer.
+ */
+
+/** What a frame's SSGI is set to (`SceneLighting.screenSpaceGi`, resolved). */
+interface SsgiFrame {
+    /** World units a ray reaches. */
+    readonly radius: number;
+    /** Scales the light the rays bring back. */
+    readonly intensity: number;
+}
+
+/**
  * HDR reflection probes on the AAA tier (AAA_FIDELITY_ROADMAP.md F3b): each
  * probe captured on the GPU as a cube of the scene in linear light, and
  * prefiltered into the GGX lobes of rising roughness, as the sky's own cube is
@@ -4361,6 +4412,12 @@ interface SceneDraw {
      */
     readonly ambientOcclusion?: boolean;
     /**
+     * Screen-space GI from the prepass (AAA_FIDELITY_ROADMAP.md F3e-2; ssgi.ts):
+     * the near field's bounce, lit by last frame's image, on the linear-light
+     * renderer's temporal frames with a prepass. Absent = none.
+     */
+    readonly screenSpaceGi?: SsgiFrame | null;
+    /**
      * Key light direction, or omitted for the rasteriser's default. The world
      * overlay publishes a cart-driven sun here, so it changes per frame.
      */
@@ -4450,6 +4507,15 @@ interface SceneDraw {
         readonly occluders: readonly Occluder[];
         readonly key: string;
         readonly settings: DynamicGi;
+    } | null;
+    /**
+     * On the AAA tier at Epic (AAA_FIDELITY_ROADMAP.md F3f), the still scene
+     * whose BVH the reflections trace where the screen has nothing to show,
+     * keyed as `dynamicGi`'s (the two share one tracer when both are given).
+     */
+    readonly reflectionTrace?: {
+        readonly occluders: readonly Occluder[];
+        readonly key: string;
     } | null;
     /**
      * A physical sky's air (AAA_FIDELITY_ROADMAP.md F5a-2): the medium and its
@@ -5118,7 +5184,10 @@ declare class WebgpuSceneRenderer implements SceneRenderer {
      * bind groups (binding 8 moved).
      */
     private bindSsao;
-    /** The screen-space shading target (F2c, F3c): rgba16float at the frame's size, AO in r, the sun's contact in g, the bent normal in ba. */
+    /**
+     * The screen-space shading target (F2c, F3c): rgba16float at the frame's size, AO in r, the sun's contact
+     * in g, the bent normal in ba; and, in its second layer, SSGI (F3e-2): the near field's light in rgb, its share in a.
+     */
     private contactTexture;
     private ensureContact;
     /** The resolve's uniforms and pipelines (one per depth sample count), made on first use. */
@@ -5129,6 +5198,13 @@ declare class WebgpuSceneRenderer implements SceneRenderer {
     private frameDepthView;
     /** Whether this frame's ambient light takes GTAO (F3c), for the frame uniform. */
     private frameGtao;
+    /** This frame's SSGI (F3e-2), when it has one, for the frame uniform and the screen-space shading. */
+    private frameSsgi;
+    /**
+     * SSGI's resources (F3e-2): its uniforms, the half-resolution history (two, one read and one written,
+     * swapping each frame), and its pipelines.
+     */
+    private ssgi;
     /** This frame's real-time GI (F3e), its tracer for the still scene it was made for, and the sky it traces. */
     private frameGi;
     private probeGi;
@@ -5154,6 +5230,12 @@ declare class WebgpuSceneRenderer implements SceneRenderer {
     private addScreenShading;
     /** A 1×1 stand-in for GTAO's history when the frame has none (F3c). */
     private gtaoBlank;
+    /**
+     * SSGI (F3e-2): at half resolution its trace against the prepass's depths, lit by last frame's resolved
+     * image (the TAA history), accumulated over frames through the velocity buffer, then filtered up to full
+     * resolution into the screen-shading target's second layer.
+     */
+    private addSsgi;
     /**
      * Upload the packed light list, growing the storage buffer when it needs more
      * room (a grow changes identity, so invalidate cached bind groups). The buffer
@@ -5268,6 +5350,14 @@ declare class WebgpuSceneRenderer implements SceneRenderer {
      * the reflected frame, which is copied back over the colour.
      */
     private addReflections;
+    /**
+     * The AAA tier's reflections (F3f): the Hi-Z chain (sized to the frame), the accumulation's history (two,
+     * swapping), the Epic trace's half-resolution target, the uniforms and the pipelines. Made on first use.
+     */
+    private hiz;
+    private addHizReflections;
+    /** The still scene's BVH tracer for `key` (F3e's, shared with the reflections' Epic trace, F3f). */
+    private tracerFor;
     private readonly temporalState;
     /**
      * The temporal resolve's resources (I2): two history images (one read, one
@@ -7467,6 +7557,9 @@ declare class MeshOverlaySurface implements DisplaySurface {
      * the renderer keeps relighting it.
      */
     private liveGi;
+    /** What stands still in the scene, as the BVH tracers take it (F3e's live GI, F3f's Epic reflections), gathered once a scene. */
+    private stillOccluders;
+    private still;
     private giState;
     /** A physical sky as the presenter draws it (F5a): the medium, its sun above the air, and the disc as the eye sees it; null for a painted one. */
     private presentAtmosphere;

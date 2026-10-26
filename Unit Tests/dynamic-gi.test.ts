@@ -130,12 +130,22 @@ describe("the player under real-time GI", () => {
     const volume = a.environment!.probeVolume!;
     expect(volume.min[0]).toBeLessThan(-6);
     expect(b.environment!.probeVolume).toBe(volume);
+    // Screen-space GI (F3e-2) rides along on the AAA tier, on by default.
+    expect(a.screenSpaceGi).toEqual({ radius: 4, intensity: 1 });
     // Without the AAA tier's cascades (another renderer), no live GI.
     draws.length = 0;
     const plain = await MeshOverlaySurface.create({ blit() {}, destroy() {} }, 32, 24, scene, make(false), { presenter } as never);
     plain.setHudMode(true);
     plain.blit(new Uint8Array(32 * 24 * 4));
     expect(draws.at(-1)!.dynamicGi).toBeUndefined();
+    expect(draws.at(-1)!.screenSpaceGi).toBeUndefined();
+    // A rig that turns screen-space GI off hands the AAA renderer none.
+    draws.length = 0;
+    const off = { instances: [{ mesh: room(true), model: IDENTITY }], bounds: { min: [-6, 0, -6], max: [6, 4, 6], center: [0, 2, 0], radius: 9 }, lighting: { ...defaultSceneLighting(), screenSpaceGi: { enabled: false } } } as never;
+    const dark = await MeshOverlaySurface.create({ blit() {}, destroy() {} }, 32, 24, off, make(true), { presenter } as never);
+    dark.setHudMode(true);
+    dark.blit(new Uint8Array(32 * 24 * 4));
+    expect(draws.at(-1)!.screenSpaceGi).toBeNull();
   });
 });
 

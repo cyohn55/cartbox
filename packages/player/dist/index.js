@@ -4553,8 +4553,9 @@ function applyPostVolumes(base, post) {
 }
 
 // src/quality.ts
-var QUALITY_LEVELS = ["low", "medium", "high"];
+var QUALITY_LEVELS = ["low", "medium", "high", "epic"];
 var QUALITY_PRESETS = {
+  epic: { level: "epic", shadows: true, shadowMapSize: 1024, shadowCascades: true, cascadeMapSize: 4096, maxRenderScale: 1, disabledEffects: [], terrainDetail: 1, antialias: true, temporal: true, reflections: true, skyScale: 3, tracedReflections: true },
   high: { level: "high", shadows: true, shadowMapSize: 1024, shadowCascades: true, cascadeMapSize: 4096, maxRenderScale: 1, disabledEffects: [], terrainDetail: 1, antialias: true, temporal: true, reflections: true, skyScale: 3 },
   medium: { level: "medium", shadows: true, shadowMapSize: 512, cascadeMapSize: 2048, maxRenderScale: 0.75, disabledEffects: [], terrainDetail: 0.6, antialias: true, temporal: true, reflections: true, skyScale: 3 },
   low: { level: "low", shadows: false, shadowMapSize: 512, maxRenderScale: 0.5, disabledEffects: ["bloom", "chroma"], terrainDetail: 0.3, antialias: false, temporal: false, reflections: false, skyScale: 4 }
@@ -11354,6 +11355,7 @@ import {
   dynamicGiGrid,
   emptyProbeVolume,
   resolveDynamicGi,
+  resolveScreenSpaceGi,
   MOON_ALBEDO,
   sunTransmittance,
   atmosphereSun,
@@ -12052,6 +12054,7 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
     this.decodeKtx2 = async () => null;
     /** The renderer samples compressed formats, so baked KTX2 images decode in place of their PNGs (F1a). */
     this.compressedTextures = false;
+    this.still = null;
     this.giState = null;
     this.maskCache = /* @__PURE__ */ new WeakMap();
     /** The camera's eye this frame (terrain blocks pick their detail by distance from it). */
@@ -12823,6 +12826,10 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
       ...job.decals ? { decals: job.decals } : {},
       ...atmosphere ? { atmosphere } : {},
       ...gi ? { dynamicGi: gi.draw } : {},
+      // Epic's reflections through the still scene's BVH (F3f), on the AAA tier with reflections.
+      ...this.renderer.sunCascades === true && this.quality.tracedReflections === true && this.options.reflections === true && this.quality.reflections === true ? { reflectionTrace: { occluders: this.stillOccluders(), key: this.staticShadowKey() } } : {},
+      // Screen-space GI on the AAA tier (F3e-2): on unless the rig turns it off.
+      ...lighting && this.renderer.sunCascades === true ? { screenSpaceGi: resolveScreenSpaceGi(lighting.screenSpaceGi) } : {},
       time
     };
     const scene = this.renderer.renderToTexture(job.drawn, draw) ?? null;
@@ -12874,16 +12881,12 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
     const env = this.environment;
     if (!settings || !env) return null;
     if (!this.giState || this.giState.scene !== this.scene) {
-      const still = this.scene.instances.filter((inst) => {
-        const body = inst.physics?.body;
-        return !(inst.pooled || isSkinned2(inst.mesh) || body === "dynamic" || body === "kinematic" || body === "character");
-      });
       const b = this.scene.bounds;
       const grid = dynamicGiGrid(b.min, b.max, settings.spacing);
       const spacing = [0, 1, 2].map((a) => (grid.max[a] - grid.min[a]) / Math.max(1, grid.counts[a] - 1));
       this.giState = {
         scene: this.scene,
-        occluders: still.map((inst) => ({ mesh: inst.mesh, model: inst.model })),
+        occluders: this.stillOccluders(),
         empty: emptyProbeVolume(grid.min, grid.max, grid.counts, 1.5 * Math.max(...spacing)),
         env: null
       };
@@ -12891,6 +12894,17 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
     const state = this.giState;
     if (state.env?.source !== env) state.env = { source: env, value: { ...env, probeVolume: env.probeVolume ?? state.empty } };
     return { draw: { occluders: state.occluders, key: this.staticShadowKey(), settings }, environment: state.env.value };
+  }
+  /** What stands still in the scene, as the BVH tracers take it (F3e's live GI, F3f's Epic reflections), gathered once a scene. */
+  stillOccluders() {
+    if (this.still?.scene !== this.scene) {
+      const occluders = this.scene.instances.filter((inst) => {
+        const body = inst.physics?.body;
+        return !(inst.pooled || isSkinned2(inst.mesh) || body === "dynamic" || body === "kinematic" || body === "character");
+      }).map((inst) => ({ mesh: inst.mesh, model: inst.model }));
+      this.still = { scene: this.scene, occluders };
+    }
+    return this.still.occluders;
   }
   /** A physical sky as the presenter draws it (F5a): the medium, its sun above the air, and the disc as the eye sees it; null for a painted one. */
   presentAtmosphere() {
@@ -19366,6 +19380,549 @@ fn accumulate(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
   );
 }
 
+// src/render/hizReflections.ts
+var HIZ_MAX_DISTANCE = 120;
+var HIZ_THICKNESS = 0.3;
+var HIZ_MAX_ROUGHNESS = 0.8;
+var HIZ_MAX_ITERATIONS = 96;
+var HIZ_MAX_LEVELS = 10;
+var HIZ_UNIFORM_FLOATS = 56;
+function hizLevels(width, height) {
+  return Math.min(HIZ_MAX_LEVELS, Math.floor(Math.log2(Math.max(1, width, height))) + 1);
+}
+function hizUniforms(view, projection, frame, levels, traced, history, out = new Float32Array(HIZ_UNIFORM_FLOATS)) {
+  out.set(projection, 0);
+  out.set(invertMat4(projection) ?? projection, 16);
+  out.set(view, 32);
+  out.set([HIZ_MAX_DISTANCE, HIZ_THICKNESS, HIZ_MAX_ROUGHNESS, frame % 1024], 48);
+  out.set([levels, traced ? 1 : 0, history ? 1 : 0, HIZ_MAX_ITERATIONS], 52);
+  return out;
+}
+var VS2 = (
+  /* wgsl */
+  `
+@vertex
+fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4<f32> {
+  let p = vec2<f32>(f32((i << 1u) & 2u), f32(i & 2u));
+  return vec4<f32>(p * 2.0 - 1.0, 0.0, 1.0);
+}
+`
+);
+function hizCopyWgsl(multisampled) {
+  return (
+    /* wgsl */
+    `${VS2}
+@group(0) @binding(0) var depth: ${multisampled ? "texture_depth_multisampled_2d" : "texture_depth_2d"};
+@fragment
+fn copyDepth(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
+  return vec4<f32>(textureLoad(depth, vec2<i32>(frag.xy), 0), 0.0, 0.0, 1.0);
+}
+`
+  );
+}
+var HIZ_REDUCE_WGSL = (
+  /* wgsl */
+  `${VS2}
+@group(0) @binding(0) var above: texture_2d<f32>;
+@fragment
+fn reduce(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
+  let size = vec2<i32>(textureDimensions(above));
+  let p = vec2<i32>(frag.xy) * 2;
+  // An odd row or column at the edge belongs to the last texel, so nothing falls between the cells.
+  let ex = select(1, 2, p.x + 3 == size.x);
+  let ey = select(1, 2, p.y + 3 == size.y);
+  var z = 1.0;
+  for (var y = 0; y <= ey; y += 1) {
+    for (var x = 0; x <= ex; x += 1) {
+      z = min(z, textureLoad(above, min(p + vec2<i32>(x, y), size - 1), 0).r);
+    }
+  }
+  return vec4<f32>(z, 0.0, 0.0, 1.0);
+}
+`
+);
+var SHARED2 = (
+  /* wgsl */
+  `
+struct Hiz { proj: mat4x4<f32>, invProj: mat4x4<f32>, view: mat4x4<f32>, params: vec4<f32>, params2: vec4<f32> };
+@group(0) @binding(0) var<uniform> hz: Hiz;
+${VS2}
+fn octDecode(e: vec2<f32>) -> vec3<f32> {
+  var n = vec3<f32>(e.x, e.y, 1.0 - abs(e.x) - abs(e.y));
+  let t = max(-n.z, 0.0);
+  n.x = n.x + select(t, -t, n.x >= 0.0);
+  n.y = n.y + select(t, -t, n.y >= 0.0);
+  return normalize(n);
+}
+// A pixel's position in view space, from a screen point (pixels) and its NDC depth.
+fn unproject(s: vec2<f32>, z: f32, size: vec2<f32>) -> vec3<f32> {
+  let ndc = vec2<f32>(s.x / size.x * 2.0 - 1.0, 1.0 - s.y / size.y * 2.0);
+  let v = hz.invProj * vec4<f32>(ndc, z, 1.0);
+  return v.xyz / v.w;
+}
+`
+);
+var HIZ_TRACE_WGSL = (
+  /* wgsl */
+  `${SHARED2}
+@group(0) @binding(1) var colour: texture_2d<f32>;
+@group(0) @binding(2) var hiz: texture_2d<f32>;
+@group(0) @binding(3) var gbuffer: texture_2d<f32>;
+@group(0) @binding(4) var reflectMap: texture_2d<f32>;
+@group(0) @binding(5) var traced: texture_2d<f32>;
+
+// Where a view-space point lands: pixels (x, y) and NDC depth, w < 0 behind the camera.
+fn screenOf(q: vec3<f32>, size: vec2<f32>) -> vec4<f32> {
+  let c = hz.proj * vec4<f32>(q, 1.0);
+  if (c.w <= 1e-5) { return vec4<f32>(0.0, 0.0, 0.0, -1.0); }
+  return vec4<f32>((c.x / c.w * 0.5 + 0.5) * size.x, (0.5 - c.y / c.w * 0.5) * size.y, c.z / c.w, 1.0);
+}
+
+// A microfacet normal from GGX's visible normals (Heitz 2018), in the frame where the normal is +z.
+fn sampleVndf(Ve: vec3<f32>, alpha: f32, u1: f32, u2: f32) -> vec3<f32> {
+  let Vh = normalize(vec3<f32>(alpha * Ve.x, alpha * Ve.y, Ve.z));
+  let lensq = Vh.x * Vh.x + Vh.y * Vh.y;
+  let T1 = select(vec3<f32>(1.0, 0.0, 0.0), vec3<f32>(-Vh.y, Vh.x, 0.0) / sqrt(max(lensq, 1e-12)), lensq > 1e-12);
+  let T2 = cross(Vh, T1);
+  let r = sqrt(u1);
+  let phi = 6.2831853 * u2;
+  let t1 = r * cos(phi);
+  let s = 0.5 * (1.0 + Vh.z);
+  let t2 = (1.0 - s) * sqrt(max(0.0, 1.0 - t1 * t1)) + s * (r * sin(phi));
+  let Nh = t1 * T1 + t2 * T2 + sqrt(max(0.0, 1.0 - t1 * t1 - t2 * t2)) * Vh;
+  return normalize(vec3<f32>(alpha * Nh.x, alpha * Nh.y, max(0.0, Nh.z)));
+}
+
+@fragment
+fn trace(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
+  let isize = vec2<i32>(textureDimensions(colour));
+  let size = vec2<f32>(isize);
+  let p = vec2<i32>(frag.xy);
+  let refl = textureLoad(reflectMap, p, 0);
+  let rough = refl.a;
+  let maxRough = hz.params.z;
+  var fallback = vec4<f32>(0.0);
+  if (hz.params2.y > 0.5) { fallback = vec4<f32>(textureLoad(traced, p / 2, 0).rgb, 1.0); }
+  if (max(refl.r, max(refl.g, refl.b)) < 0.002 || rough > maxRough) { return vec4<f32>(0.0); }
+  let z0 = textureLoad(hiz, p, 0).r;
+  if (z0 >= 1.0) { return vec4<f32>(0.0); }
+  let P = unproject(frag.xy, z0, size);
+  let rot = mat3x3<f32>(hz.view[0].xyz, hz.view[1].xyz, hz.view[2].xyz);
+  var N = normalize(rot * octDecode(textureLoad(gbuffer, p, 0).xy));
+  let V = normalize(-P);
+  if (dot(N, V) < 0.0) { N = -N; }
+  // The ray: the view reflected about a visible microfacet normal for the roughness.
+  var H = N;
+  let alpha = rough * rough;
+  if (alpha > 0.0025) {
+    let shift = hz.params.w * 5.588238;
+    let u1 = fract(52.9829189 * fract(dot(frag.xy + shift, vec2<f32>(0.06711056, 0.00583715))));
+    let u2 = fract(52.9829189 * fract(dot(frag.xy + vec2<f32>(23.0, 71.0) + shift * 1.3, vec2<f32>(0.06711056, 0.00583715))));
+    let up = select(vec3<f32>(0.0, 1.0, 0.0), vec3<f32>(1.0, 0.0, 0.0), abs(N.y) > 0.9);
+    let T = normalize(cross(up, N));
+    let B = cross(N, T);
+    let Ve = vec3<f32>(dot(V, T), dot(V, B), dot(V, N));
+    let h = sampleVndf(Ve, alpha, u1, u2);
+    H = normalize(T * h.x + B * h.y + N * h.z);
+  }
+  let R = reflect(-V, H);
+  if (dot(R, N) <= 0.0) { return fallback; }
+  // The ray's end: its reach, or short of the near plane (the camera looks down \u2212z).
+  let near = -unproject(size * 0.5, 0.0, size).z;
+  var reach = hz.params.x;
+  if (R.z > 1e-4) { reach = min(reach, (-near * 1.001 - P.z) / R.z); }
+  let s0 = vec4<f32>(frag.xy, z0, 1.0);
+  let s1 = screenOf(P + R * reach, size);
+  if (s1.w < 0.0) { return fallback; }
+  // In screen space NDC depth runs linear along the ray; clip it to the screen.
+  var d = s1.xyz - s0.xyz;
+  var tEnd = 1.0;
+  if (d.x > 1e-4) { tEnd = min(tEnd, (size.x - 0.5 - s0.x) / d.x); }
+  if (d.x < -1e-4) { tEnd = min(tEnd, (0.5 - s0.x) / d.x); }
+  if (d.y > 1e-4) { tEnd = min(tEnd, (size.y - 0.5 - s0.y) / d.y); }
+  if (d.y < -1e-4) { tEnd = min(tEnd, (0.5 - s0.y) / d.y); }
+  let span = length(d.xy);
+  if (span < 1.0) { return fallback; }
+  let levels = i32(hz.params2.x);
+  // Off its own pixel before testing.
+  var t = 1.5 / span;
+  var level = 0;
+  var hitT = -1.0;
+  let iterations = i32(hz.params2.w);
+  for (var i = 0; i < iterations; i += 1) {
+    if (t > tEnd) { break; }
+    let pos = s0.xyz + d * t;
+    let cell = f32(1 << u32(level));
+    let c = floor(pos.xy / cell);
+    // The ray's leaving this cell: the nearer of its x and y walls.
+    var tx = 1e9;
+    var ty = 1e9;
+    if (abs(d.x) > 1e-6) { tx = ((c.x + select(0.0, 1.0, d.x > 0.0)) * cell - s0.x) / d.x; }
+    if (abs(d.y) > 1e-6) { ty = ((c.y + select(0.0, 1.0, d.y > 0.0)) * cell - s0.y) / d.y; }
+    let tExit = min(min(tx, ty) + 1e-4 / span, tEnd);
+    let mip = vec2<i32>(textureDimensions(hiz, level));
+    let zMin = textureLoad(hiz, clamp(vec2<i32>(c), vec2<i32>(0), mip - 1), level).r;
+    let zOut = s0.z + d.z * tExit;
+    if (max(pos.z, zOut) < zMin) {
+      // Wholly in front of everything in the cell: past it, and coarser.
+      t = tExit;
+      level = min(level + 1, levels - 1);
+      continue;
+    }
+    if (level > 0) { level -= 1; continue; }
+    // At the finest level the ray reaches the surface's depth here: in front of it by no more than a thickness?
+    let tz = select(t, clamp((zMin - s0.z) / d.z, t, tExit), d.z > 1e-9);
+    let at = s0.xyz + d * tz;
+    let surface = unproject(at.xy, zMin, size);
+    let ray = unproject(at.xy, at.z, size);
+    let behind = surface.z - ray.z;
+    if (behind > -1e-3 && behind < hz.params.y + 0.01 * length(ray)) { hitT = tz; break; }
+    t = tExit;
+  }
+  if (hitT < 0.0) { return fallback; }
+  let hitAt = s0.xyz + d * hitT;
+  let hit = clamp(vec2<i32>(hitAt.xy), vec2<i32>(0), isize - 1);
+  // A hit on a surface's back shows nothing true.
+  let hitN = normalize(rot * octDecode(textureLoad(gbuffer, hit, 0).xy));
+  if (dot(hitN, R) > 0.2) { return fallback; }
+  let edge = clamp(min(min(hitAt.x, size.x - hitAt.x) / (0.1 * size.x), min(hitAt.y, size.y - hitAt.y) / (0.1 * size.y)), 0.0, 1.0);
+  let travelled = length(unproject(hitAt.xy, hitAt.z, size) - P) / hz.params.x;
+  let confidence = edge
+    * (1.0 - smoothstep(0.7, 1.0, travelled))
+    * (1.0 - smoothstep(0.4, 0.9, R.z));
+  let seen = textureLoad(colour, hit, 0).rgb;
+  if (hz.params2.y > 0.5) { return vec4<f32>(mix(fallback.rgb, seen, confidence), 1.0); }
+  return vec4<f32>(seen, confidence);
+}
+`
+);
+var HIZ_TEMPORAL_WGSL = (
+  /* wgsl */
+  `${SHARED2}
+@group(0) @binding(1) var current: texture_2d<f32>;
+@group(0) @binding(2) var history: texture_2d<f32>;
+@group(0) @binding(3) var velocity: texture_2d<f32>;
+@group(0) @binding(4) var reflectMap: texture_2d<f32>;
+@group(0) @binding(5) var linearSamp: sampler;
+
+fn toneMap(c: vec4<f32>) -> vec4<f32> { return vec4<f32>(c.rgb / (1.0 + max(c.r, max(c.g, c.b))), c.a); }
+fn untoneMap(c: vec4<f32>) -> vec4<f32> { return vec4<f32>(c.rgb / max(1e-5, 1.0 - max(c.r, max(c.g, c.b))), c.a); }
+
+@fragment
+fn accumulate(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
+  let size = vec2<i32>(textureDimensions(current));
+  let p = vec2<i32>(frag.xy);
+  // Tone mapped (Karis), so one bright hit neither rules the average nor flickers.
+  let now = toneMap(textureLoad(current, p, 0));
+  var m1 = vec4<f32>(0.0);
+  var m2 = vec4<f32>(0.0);
+  for (var y = -1; y <= 1; y += 1) {
+    for (var x = -1; x <= 1; x += 1) {
+      let s = toneMap(textureLoad(current, clamp(p + vec2<i32>(x, y), vec2<i32>(0), size - 1), 0));
+      m1 = m1 + s;
+      m2 = m2 + s * s;
+    }
+  }
+  let mean = m1 / 9.0;
+  let spread = sqrt(max(m2 / 9.0 - mean * mean, vec4<f32>(0.0)));
+  let uv = (vec2<f32>(p) + 0.5) / vec2<f32>(size) - textureLoad(velocity, p, 0).xy;
+  if (hz.params2.z < 0.5 || any(uv < vec2<f32>(0.0)) || any(uv > vec2<f32>(1.0))) { return untoneMap(now); }
+  let then = toneMap(textureSampleLevel(history, linearSamp, uv, 0.0));
+  let rough = textureLoad(reflectMap, p, 0).a;
+  // Rougher surfaces are noisier and change less with the view: they keep more frames, and a wider box.
+  let gamma = mix(1.0, 2.5, smoothstep(0.05, 0.5, rough));
+  let held = clamp(then, min(mean - gamma * spread, now), max(mean + gamma * spread, now));
+  let blend = mix(0.3, 0.06, smoothstep(0.05, 0.5, rough));
+  return untoneMap(mix(held, now, blend));
+}
+`
+);
+var HIZ_RESOLVE_WGSL = (
+  /* wgsl */
+  `${SHARED2}
+@group(0) @binding(1) var colour: texture_2d<f32>;
+@group(0) @binding(2) var accumulated: texture_2d<f32>;
+@group(0) @binding(3) var hiz: texture_2d<f32>;
+@group(0) @binding(4) var gbuffer: texture_2d<f32>;
+@group(0) @binding(5) var reflectMap: texture_2d<f32>;
+@group(0) @binding(6) var envMap: texture_2d<f32>;
+
+const TAPS = array<vec2<f32>, 8>(
+  vec2<f32>(-0.326, -0.406), vec2<f32>(-0.840, -0.074), vec2<f32>(-0.696, 0.457), vec2<f32>(-0.203, 0.621),
+  vec2<f32>(0.962, -0.195), vec2<f32>(0.473, -0.480), vec2<f32>(0.519, 0.767), vec2<f32>(0.185, -0.893),
+);
+
+@fragment
+fn resolve(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
+  let isize = vec2<i32>(textureDimensions(colour));
+  let size = vec2<f32>(isize);
+  let p = vec2<i32>(frag.xy);
+  let c = textureLoad(colour, p, 0);
+  let refl = textureLoad(reflectMap, p, 0);
+  let w = refl.rgb;
+  let rough = refl.a;
+  if (max(w.r, max(w.g, w.b)) < 0.002 || rough > hz.params.z) { return c; }
+  let z = textureLoad(hiz, p, 0).r;
+  let P = unproject(frag.xy, z, size);
+  let N = octDecode(textureLoad(gbuffer, p, 0).xy);
+  var sum = textureLoad(accumulated, p, 0);
+  var rgb = sum.rgb * sum.a;
+  var conf = sum.a;
+  var total = 1.0;
+  // A disc that grows with the roughness, turned per pixel.
+  let radius = min(rough * 14.0, 7.0);
+  if (radius >= 0.75) {
+    let spin = 6.2831853 * fract(52.9829189 * fract(dot(frag.xy, vec2<f32>(0.06711056, 0.00583715))));
+    let cs = vec2<f32>(cos(spin), sin(spin));
+    for (var k = 0; k < 8; k += 1) {
+      let o = TAPS[k];
+      let q = clamp(vec2<i32>(frag.xy + vec2<f32>(o.x * cs.x - o.y * cs.y, o.x * cs.y + o.y * cs.x) * radius), vec2<i32>(0), isize - 1);
+      let qz = textureLoad(hiz, q, 0).r;
+      if (qz >= 1.0) { continue; }
+      let Q = unproject(vec2<f32>(q) + 0.5, qz, size);
+      let near = exp(-abs(Q.z - P.z) / (0.02 * abs(P.z) + 0.02));
+      let facing = pow(max(dot(octDecode(textureLoad(gbuffer, q, 0).xy), N), 0.0), 16.0);
+      let alike = exp(-abs(textureLoad(reflectMap, q, 0).a - rough) * 8.0);
+      let s = textureLoad(accumulated, q, 0);
+      let wt = near * facing * alike;
+      rgb = rgb + s.rgb * s.a * wt;
+      conf = conf + s.a * wt;
+      total = total + wt;
+    }
+  }
+  let L = rgb / max(conf, 1e-4);
+  let confidence = clamp(conf / total, 0.0, 1.0) * (1.0 - smoothstep(hz.params.z * 0.7, hz.params.z, rough));
+  let env = textureLoad(envMap, p, 0).rgb;
+  return vec4<f32>(max(c.rgb + confidence * (w * L - env), vec3<f32>(0.0)), c.a);
+}
+`
+);
+
+// src/render/ssgi.ts
+var SSGI_RAYS = 2;
+var SSGI_STEPS = 12;
+var SSGI_THICKNESS = 0.35;
+var SSGI_BLEND = 0.1;
+var SSGI_MAX_RADIANCE = 32;
+var SSGI_UNIFORM_FLOATS = 56;
+function ssgiUniforms(view, projection, frame, history, settings, out = new Float32Array(SSGI_UNIFORM_FLOATS)) {
+  out.set(projection, 0);
+  out.set(invertMat4(projection) ?? projection, 16);
+  out.set(view, 32);
+  out.set([settings.radius, SSGI_RAYS, SSGI_STEPS, frame % 1024], 48);
+  out.set([SSGI_THICKNESS, SSGI_BLEND, history ? 1 : 0, settings.intensity], 52);
+  return out;
+}
+var SHARED3 = (multisampled) => (
+  /* wgsl */
+  `
+struct Ssgi { proj: mat4x4<f32>, invProj: mat4x4<f32>, view: mat4x4<f32>, params: vec4<f32>, params2: vec4<f32> };
+@group(0) @binding(0) var<uniform> gi: Ssgi;
+@group(0) @binding(1) var depth: ${multisampled ? "texture_depth_multisampled_2d" : "texture_depth_2d"};
+@group(0) @binding(2) var gbuffer: texture_2d<f32>;
+
+@vertex
+fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4<f32> {
+  let p = vec2<f32>(f32((i << 1u) & 2u), f32(i & 2u));
+  return vec4<f32>(p * 2.0 - 1.0, 0.0, 1.0);
+}
+
+// A full-resolution pixel's position in view space, from its depth (as drawn).
+fn viewAt(p: vec2<i32>, size: vec2<i32>) -> vec3<f32> {
+  let q = clamp(p, vec2<i32>(0, 0), size - 1);
+  let z = textureLoad(depth, q, 0);
+  let ndc = vec2<f32>((f32(q.x) + 0.5) / f32(size.x) * 2.0 - 1.0, 1.0 - (f32(q.y) + 0.5) / f32(size.y) * 2.0);
+  let v = gi.invProj * vec4<f32>(ndc, z, 1.0);
+  return v.xyz / v.w;
+}
+
+fn octDecode(e: vec2<f32>) -> vec3<f32> {
+  var n = vec3<f32>(e.x, e.y, 1.0 - abs(e.x) - abs(e.y));
+  let t = max(-n.z, 0.0);
+  n.x = n.x + select(t, -t, n.x >= 0.0);
+  n.y = n.y + select(t, -t, n.y >= 0.0);
+  return normalize(n);
+}
+
+// A full-resolution pixel's world normal, from the prepass's G-buffer.
+fn normalAt(p: vec2<i32>, size: vec2<i32>) -> vec3<f32> {
+  return octDecode(textureLoad(gbuffer, clamp(p, vec2<i32>(0, 0), size - 1), 0).xy);
+}
+`
+);
+function ssgiTraceWgsl(multisampled) {
+  return (
+    /* wgsl */
+    `${SHARED3(multisampled)}
+@group(0) @binding(3) var velocity: texture_2d<f32>;
+@group(0) @binding(4) var radiance: texture_2d<f32>;
+@group(0) @binding(5) var linearSamp: sampler;
+
+// Where a view-space point lands on screen, in pixels (x, y), or w < 0 behind the camera.
+fn screenOf(q: vec3<f32>, size: vec2<i32>) -> vec3<f32> {
+  let c = gi.proj * vec4<f32>(q, 1.0);
+  if (c.w <= 1e-4) { return vec3<f32>(0.0, 0.0, -1.0); }
+  return vec3<f32>((c.x / c.w * 0.5 + 0.5) * f32(size.x), (0.5 - c.y / c.w * 0.5) * f32(size.y), 1.0);
+}
+
+@fragment
+fn ssgiTrace(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
+  let full = vec2<i32>(textureDimensions(depth));
+  let p = min(vec2<i32>(frag.xy) * 2, full - 1);
+  if (textureLoad(depth, p, 0) >= 1.0) { return vec4<f32>(0.0); }
+  let P = viewAt(p, full);
+  let V = normalize(-P);
+  let rot = mat3x3<f32>(gi.view[0].xyz, gi.view[1].xyz, gi.view[2].xyz);
+  var N = normalize(rot * normalAt(p, full));
+  if (dot(N, V) < 0.0) { N = -N; }
+  // A frame about the normal.
+  let up = select(vec3<f32>(0.0, 1.0, 0.0), vec3<f32>(1.0, 0.0, 0.0), abs(N.y) > 0.9);
+  let T = normalize(cross(up, N));
+  let B = cross(N, T);
+  let radius = gi.params.x;
+  let rays = i32(gi.params.y);
+  let steps = i32(gi.params.z);
+  let thickness = gi.params2.x;
+  // Interleaved gradient noise, shifted each frame, picks the rays and staggers their steps.
+  let shift = gi.params.w * 5.588238;
+  let n1 = fract(52.9829189 * fract(dot(frag.xy + shift, vec2<f32>(0.06711056, 0.00583715))));
+  let n2 = fract(52.9829189 * fract(dot(frag.xy + vec2<f32>(17.0, 59.0) + shift * 1.7, vec2<f32>(0.06711056, 0.00583715))));
+  let away = length(P);
+  let start = 0.02 + away * 0.002;
+  var sum = vec3<f32>(0.0);
+  var hits = 0.0;
+  for (var r = 0; r < rays; r += 1) {
+    // Cosine-weighted over the hemisphere: the rays' mean radiance is the irradiance over \u03C0.
+    let u1 = fract(n1 + f32(r) * 0.6180340);
+    let u2 = fract(n2 + f32(r) * 0.7548777);
+    let phi = 6.2831853 * u1;
+    let s2 = sqrt(u2);
+    let dir = T * (s2 * cos(phi)) + B * (s2 * sin(phi)) + N * sqrt(max(0.0, 1.0 - u2));
+    let jitter = fract(n2 * 3.7 + f32(r) * 0.381966);
+    var last = 0.0;
+    for (var i = 0; i < steps; i += 1) {
+      let f = (f32(i) + jitter) / f32(steps);
+      let t = start + radius * f * f;
+      let q = P + dir * t;
+      let s = screenOf(q, full);
+      if (s.z < 0.0 || s.x < 0.0 || s.y < 0.0 || s.x >= f32(full.x) || s.y >= f32(full.y)) { break; }
+      // Within a couple of pixels of where it started the ray is still over its own surface.
+      if (distance(s.xy, vec2<f32>(p)) < 2.0) { last = t; continue; }
+      let at = vec2<i32>(s.xy);
+      let surface = viewAt(at, full).z;
+      // Behind a surface on screen (nearer the camera, which looks down \u2212z), by no more than its thickness.
+      let gap = surface - q.z;
+      if (gap > 0.0 && gap < thickness + (t - last) + away * 0.01) {
+        // The light it sent the camera last frame, where it stood then: unless the ray met its back.
+        let hitN = normalize(rot * normalAt(at, full));
+        if (dot(hitN, dir) < 0.0) {
+          let uv = (vec2<f32>(at) + 0.5) / vec2<f32>(full) - textureLoad(velocity, at, 0).xy;
+          if (all(uv >= vec2<f32>(0.0)) && all(uv <= vec2<f32>(1.0))) {
+            var L = textureSampleLevel(radiance, linearSamp, uv, 0.0).rgb;
+            let peak = max(L.r, max(L.g, L.b));
+            if (peak > ${SSGI_MAX_RADIANCE.toFixed(1)}) { L = L * (${SSGI_MAX_RADIANCE.toFixed(1)} / peak); }
+            // The screen's edge, where the image runs out, and the radius's end soften the hit.
+            let edge = clamp(min(min(s.x, f32(full.x) - s.x), min(s.y, f32(full.y) - s.y)) / (0.05 * f32(full.x)), 0.0, 1.0);
+            let w = edge * (1.0 - smoothstep(0.75, 1.0, t / (start + radius)));
+            sum = sum + L * w;
+            hits = hits + w;
+          }
+        } else {
+          hits = hits + 1.0;
+        }
+        break;
+      }
+      last = t;
+    }
+  }
+  return vec4<f32>(sum / f32(rays), hits / f32(rays));
+}
+`
+  );
+}
+function ssgiTemporalWgsl() {
+  return (
+    /* wgsl */
+    `
+struct Ssgi { proj: mat4x4<f32>, invProj: mat4x4<f32>, view: mat4x4<f32>, params: vec4<f32>, params2: vec4<f32> };
+@group(0) @binding(0) var<uniform> gi: Ssgi;
+@group(0) @binding(1) var current: texture_2d<f32>;
+@group(0) @binding(2) var history: texture_2d<f32>;
+@group(0) @binding(3) var velocity: texture_2d<f32>;
+@group(0) @binding(4) var linearSamp: sampler;
+
+@vertex
+fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4<f32> {
+  let p = vec2<f32>(f32((i << 1u) & 2u), f32(i & 2u));
+  return vec4<f32>(p * 2.0 - 1.0, 0.0, 1.0);
+}
+
+@fragment
+fn accumulate(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
+  let size = vec2<i32>(textureDimensions(current));
+  let p = vec2<i32>(frag.xy);
+  let now = textureLoad(current, p, 0);
+  // The neighbourhood's mean and spread: the history is held within two spreads of the mean.
+  var m1 = vec4<f32>(0.0);
+  var m2 = vec4<f32>(0.0);
+  for (var y = -1; y <= 1; y += 1) {
+    for (var x = -1; x <= 1; x += 1) {
+      let s = textureLoad(current, clamp(p + vec2<i32>(x, y), vec2<i32>(0), size - 1), 0);
+      m1 = m1 + s;
+      m2 = m2 + s * s;
+    }
+  }
+  let mean = m1 / 9.0;
+  let spread = sqrt(max(m2 / 9.0 - mean * mean, vec4<f32>(0.0)));
+  let full = vec2<i32>(textureDimensions(velocity));
+  let motion = textureLoad(velocity, min(p * 2, full - 1), 0).xy;
+  let uv = (vec2<f32>(p) + 0.5) / vec2<f32>(size) - motion;
+  if (gi.params2.z < 0.5 || any(uv < vec2<f32>(0.0)) || any(uv > vec2<f32>(1.0))) { return now; }
+  let then = textureSampleLevel(history, linearSamp, uv, 0.0);
+  let held = clamp(then, mean - 2.0 * spread - 0.02, mean + 2.0 * spread + 0.02);
+  return max(mix(held, now, gi.params2.y), vec4<f32>(0.0));
+}
+`
+  );
+}
+function ssgiResolveWgsl(multisampled) {
+  return (
+    /* wgsl */
+    `${SHARED3(multisampled)}
+@group(0) @binding(3) var accumulated: texture_2d<f32>;
+
+@fragment
+fn resolve(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
+  let size = vec2<i32>(textureDimensions(depth));
+  let p = vec2<i32>(frag.xy);
+  if (textureLoad(depth, p, 0) >= 1.0) { return vec4<f32>(0.0); }
+  let P = viewAt(p, size);
+  let N = normalAt(p, size);
+  let half = vec2<i32>(textureDimensions(accumulated));
+  let f = (vec2<f32>(p) + 0.5) * 0.5 - 0.5;
+  let centre = vec2<i32>(round(f));
+  var sum = vec4<f32>(0.0);
+  var total = 0.0;
+  for (var y = -1; y <= 1; y += 1) {
+    for (var x = -1; x <= 1; x += 1) {
+      let h = clamp(centre + vec2<i32>(x, y), vec2<i32>(0), half - 1);
+      let d = vec2<f32>(h) - f;
+      let spatial = exp(-dot(d, d) * 0.5);
+      let zh = viewAt(h * 2, size).z;
+      let near = exp(-abs(zh - P.z) / (0.02 * abs(P.z) + 0.02));
+      let facing = pow(max(dot(normalAt(h * 2, size), N), 0.0), 8.0);
+      let w = spatial * near * facing + 1e-5 * spatial;
+      sum = sum + textureLoad(accumulated, h, 0) * w;
+      total = total + w;
+    }
+  }
+  let g = sum / max(total, 1e-6);
+  return vec4<f32>(g.rgb * gi.params2.w, clamp(g.a, 0.0, 1.0));
+}
+`
+  );
+}
+
 // src/render/atmosphere.ts
 import {
   AERIAL_RANGE,
@@ -20936,6 +21493,86 @@ fn giTrace(@builtin(global_invocation_id) id: vec3<u32>) {
   giRays[id.x * 2u + 1u] = vec4<f32>(d, back);
 }
 
+// --- Reflections the screen can't show (F3f, Epic), traced at half resolution ---
+struct ReflectFrame {
+  invViewProj: mat4x4<f32>, // clip \u2192 world, as drawn
+  eye: vec4<f32>,           // w: this frame's seed
+  info: vec4<f32>,          // the frame's full width and height, 1 when the volume lights hits, the roughness limit
+};
+@group(0) @binding(11) var<uniform> rf: ReflectFrame;
+@group(0) @binding(12) var reflectDepth: texture_2d<f32>;
+@group(0) @binding(13) var reflectGbuffer: texture_2d<f32>;
+@group(0) @binding(14) var reflectOut: texture_storage_2d<rgba16float, write>;
+
+fn reflectOct(e: vec2<f32>) -> vec3<f32> {
+  var n = vec3<f32>(e.x, e.y, 1.0 - abs(e.x) - abs(e.y));
+  let t = max(-n.z, 0.0);
+  n.x = n.x + select(t, -t, n.x >= 0.0);
+  n.y = n.y + select(t, -t, n.y >= 0.0);
+  return normalize(n);
+}
+
+// GGX's visible normals (Heitz 2018), in the frame where the normal is +z.
+fn reflectVndf(Ve: vec3<f32>, alpha: f32, u1: f32, u2: f32) -> vec3<f32> {
+  let Vh = normalize(vec3<f32>(alpha * Ve.x, alpha * Ve.y, Ve.z));
+  let lensq = Vh.x * Vh.x + Vh.y * Vh.y;
+  let T1 = select(vec3<f32>(1.0, 0.0, 0.0), vec3<f32>(-Vh.y, Vh.x, 0.0) / sqrt(max(lensq, 1e-12)), lensq > 1e-12);
+  let T2 = cross(Vh, T1);
+  let r = sqrt(u1);
+  let phi = 6.2831853 * u2;
+  let t1 = r * cos(phi);
+  let s = 0.5 * (1.0 + Vh.z);
+  let t2 = (1.0 - s) * sqrt(max(0.0, 1.0 - t1 * t1)) + s * (r * sin(phi));
+  let Nh = t1 * T1 + t2 * T2 + sqrt(max(0.0, 1.0 - t1 * t1 - t2 * t2)) * Vh;
+  return normalize(vec3<f32>(alpha * Nh.x, alpha * Nh.y, max(0.0, Nh.z)));
+}
+
+@compute @workgroup_size(8, 8)
+fn giReflect(@builtin(global_invocation_id) id: vec3<u32>) {
+  let out = vec2<i32>(textureDimensions(reflectOut));
+  if (i32(id.x) >= out.x || i32(id.y) >= out.y) { return; }
+  let full = vec2<i32>(i32(rf.info.x), i32(rf.info.y));
+  let p = min(vec2<i32>(id.xy) * 2, full - 1);
+  let z = textureLoad(reflectDepth, p, 0).r;
+  let g = textureLoad(reflectGbuffer, p, 0);
+  if (z >= 1.0 || g.z > rf.info.w) { textureStore(reflectOut, vec2<i32>(id.xy), vec4<f32>(0.0)); return; }
+  rng = pcg((id.y * 4096u + id.x) ^ pcg(u32(rf.eye.w)));
+  let ndc = vec2<f32>((f32(p.x) + 0.5) / f32(full.x) * 2.0 - 1.0, 1.0 - (f32(p.y) + 0.5) / f32(full.y) * 2.0);
+  let w = rf.invViewProj * vec4<f32>(ndc, z, 1.0);
+  let P = w.xyz / w.w;
+  let V = normalize(rf.eye.xyz - P);
+  var N = reflectOct(g.xy);
+  if (dot(N, V) < 0.0) { N = -N; }
+  let alpha = g.z * g.z;
+  var H = N;
+  if (alpha > 0.0025) {
+    let up = select(vec3<f32>(0.0, 1.0, 0.0), vec3<f32>(1.0, 0.0, 0.0), abs(N.y) > 0.9);
+    let T = normalize(cross(up, N));
+    let B = cross(N, T);
+    let h = reflectVndf(vec3<f32>(dot(V, T), dot(V, B), dot(V, N)), alpha, rand(), rand());
+    H = normalize(T * h.x + B * h.y + N * h.z);
+  }
+  let d = reflect(-V, H);
+  let o = P + N * (EPS * 4.0 + 0.002 * length(rf.eye.xyz - P));
+  let h = trace(o, d, FAR, false);
+  var L = vec3<f32>(0.0);
+  if (h.tri < 0) {
+    L = skyAt(d);
+  } else {
+    let i = u32(h.tri);
+    // A surface's back shows nothing (it is inside something).
+    if (dot(d, vec3<f32>(tris[i * 3u].w, tris[i * 3u + 1u].w, tris[i * 3u + 2u].w)) <= 0.0) {
+      var nrm = normalize(cross(tris[i * 3u + 1u].xyz, tris[i * 3u + 2u].xyz));
+      if (dot(nrm, d) > 0.0) { nrm = -nrm; }
+      let hp = o + d * h.t + nrm * EPS;
+      var light = lightsOn(hp, nrm, bitcast<u32>(mats[i * 2u].w));
+      if (rf.info.z > 0.5) { light = light + giIrradiance(hp, nrm); }
+      L = mats[i * 2u + 1u].rgb + mats[i * 2u].rgb * light;
+    }
+  }
+  textureStore(reflectOut, vec2<i32>(id.xy), vec4<f32>(L, 1.0));
+}
+
 @compute @workgroup_size(64)
 fn giUpdate(@builtin(global_invocation_id) id: vec3<u32>) {
   let n = giCount();
@@ -21010,6 +21647,11 @@ var GpuProbeGi = class {
     this.skySource = void 0;
     this.skySize = [0, 0];
     this.pipelines = null;
+    this.reflectPipeline = null;
+    this.reflectUniforms = null;
+    this.reflectGi = null;
+    this.blankProbes = null;
+    this.reflectData = new Float32Array(24);
     this.random = mulberry(24301);
     this.frames = 0;
     /** The probe buffer the passes last wrote into, so a new one (a re-uploaded volume) starts its bounce afresh. */
@@ -21038,21 +21680,7 @@ var GpuProbeGi = class {
       this.rays?.destroy();
       this.rays = device.createBuffer({ size: raysBytes, usage: STORAGE2 });
     }
-    const packedLights = packBakeLights(bakeLights(lights));
-    if (!this.lights || this.lightsSize < packedLights.data.byteLength) {
-      this.lights?.destroy();
-      this.lightsSize = Math.max(16, packedLights.data.byteLength);
-      this.lights = device.createBuffer({ size: this.lightsSize, usage: STORAGE2 | COPY_DST2 });
-    }
-    device.queue.writeBuffer(this.lights, 0, packedLights.data);
-    if (sky !== this.skySource) {
-      this.sky?.destroy();
-      const data = sky ? sky.data : new Float32Array(4);
-      this.sky = device.createBuffer({ size: Math.max(16, data.byteLength), usage: STORAGE2 | COPY_DST2 });
-      device.queue.writeBuffer(this.sky, 0, data);
-      this.skySource = sky;
-      this.skySize = sky ? [sky.width, sky.height] : [0, 0];
-    }
+    const packedLights = this.prepare(lights, sky);
     const { reach } = giSpacing(layout);
     device.queue.writeBuffer(this.params, 0, lightmapParams(0, count, 0, rays, rays, 1, sky, packedLights, reach));
     const bounce = this.target === probes;
@@ -21099,8 +21727,77 @@ var GpuProbeGi = class {
     pass.dispatchWorkgroups(Math.ceil(count * PROBE_VOLUME_SLOTS / 64));
     pass.end();
   }
+  /** Upload the frame's lights and (when it changed) the sky the tracer lights its hits by. */
+  prepare(lights, sky) {
+    const device = this.device;
+    const packedLights = packBakeLights(bakeLights(lights));
+    if (!this.lights || this.lightsSize < packedLights.data.byteLength) {
+      this.lights?.destroy();
+      this.lightsSize = Math.max(16, packedLights.data.byteLength);
+      this.lights = device.createBuffer({ size: this.lightsSize, usage: STORAGE2 | COPY_DST2 });
+    }
+    device.queue.writeBuffer(this.lights, 0, packedLights.data);
+    if (sky !== this.skySource) {
+      this.sky?.destroy();
+      const data = sky ? sky.data : new Float32Array(4);
+      this.sky = device.createBuffer({ size: Math.max(16, data.byteLength), usage: STORAGE2 | COPY_DST2 });
+      device.queue.writeBuffer(this.sky, 0, data);
+      this.skySource = sky;
+      this.skySize = sky ? [sky.width, sky.height] : [0, 0];
+    }
+    return packedLights;
+  }
+  /**
+   * Reflections the screen can't show (F3f, Epic): encode, into `encoder`, a
+   * ray a half-resolution pixel of the frame — from its depth (`depth`, the
+   * Hi-Z chain's first level) and G-buffer, reflected about a microfacet
+   * normal for its roughness — through the still scene, each hit lit as the
+   * live volume lights its own (by `lights`, and by `volume`'s irradiance when
+   * there is one), a miss by the sky; into `out` (rgba16float storage, half the
+   * frame's size). `lit` says whether update() already prepared this frame's
+   * lights and sky.
+   */
+  traceReflections(encoder, frame, lights, sky, volume, lit, timing = {}) {
+    const device = this.device;
+    const packedLights = lit ? null : this.prepare(lights, sky);
+    if (packedLights) device.queue.writeBuffer(this.params, 0, lightmapParams(0, 0, 0, 1, 1, 1, sky, packedLights, 0));
+    this.reflectUniforms ?? (this.reflectUniforms = device.createBuffer({ size: this.reflectData.byteLength, usage: UNIFORM3 | COPY_DST2 }));
+    this.reflectGi ?? (this.reflectGi = device.createBuffer({ size: GI_UNIFORM_FLOATS * 4, usage: UNIFORM3 | COPY_DST2 }));
+    this.blankProbes ?? (this.blankProbes = device.createBuffer({ size: 16, usage: STORAGE2 }));
+    this.reflectData.set(frame.invViewProj, 0);
+    this.reflectData.set([frame.eye[0], frame.eye[1], frame.eye[2], this.frames % 16777216], 16);
+    this.reflectData.set([frame.width, frame.height, volume ? 1 : 0, frame.maxRoughness], 20);
+    device.queue.writeBuffer(this.reflectUniforms, 0, this.reflectData);
+    if (volume) device.queue.writeBuffer(this.reflectGi, 0, packGiUniforms(volume.layout, { rays: 1, hysteresis: 0, spacing: 1 }, [[1, 0, 0], [0, 1, 0], [0, 0, 1]], 0, true));
+    if (!lit) this.frames += 1;
+    this.reflectPipeline ?? (this.reflectPipeline = device.createComputePipeline({ layout: "auto", compute: { module: device.createShaderModule({ code: GI_WGSL }), entryPoint: "giReflect" } }));
+    const pass = encoder.beginComputePass(timing);
+    pass.setPipeline(this.reflectPipeline);
+    pass.setBindGroup(
+      0,
+      device.createBindGroup({
+        layout: this.reflectPipeline.getBindGroupLayout(0),
+        entries: [
+          { binding: 0, resource: { buffer: this.scene[0] } },
+          { binding: 1, resource: { buffer: this.scene[1] } },
+          { binding: 2, resource: { buffer: this.scene[2] } },
+          { binding: 5, resource: { buffer: this.sky } },
+          { binding: 6, resource: { buffer: this.params } },
+          { binding: 7, resource: { buffer: this.lights } },
+          { binding: 8, resource: { buffer: volume ? volume.buffer : this.blankProbes } },
+          { binding: 9, resource: { buffer: this.reflectGi } },
+          { binding: 11, resource: { buffer: this.reflectUniforms } },
+          { binding: 12, resource: frame.depth },
+          { binding: 13, resource: frame.gbuffer },
+          { binding: 14, resource: frame.out }
+        ]
+      })
+    );
+    pass.dispatchWorkgroups(Math.ceil(Math.ceil(frame.width / 2) / 8), Math.ceil(Math.ceil(frame.height / 2) / 8));
+    pass.end();
+  }
   dispose() {
-    for (const b of [...this.scene, this.uniforms, this.params, this.rays, this.lights, this.sky]) b?.destroy?.();
+    for (const b of [...this.scene, this.uniforms, this.params, this.rays, this.lights, this.sky, this.reflectUniforms, this.reflectGi, this.blankProbes]) b?.destroy?.();
   }
 };
 
@@ -21965,7 +22662,7 @@ struct Frame {
   cascadeInfo: vec4<f32>,     // F2a: x = 1 with GPU cascades, y = map size, z = strength, w = the last cascade's far depth
   cascadeTexel: vec4<f32>,    // F2a: each cascade's texel in world units
   cascadeDepth: vec4<f32>,    // F2a-2: the world distance each cascade's depth 0..1 spans
-  cascadeSoft: vec4<f32>,     // F2a-2: x = the sun's size (its angular diameter's tangent), for the penumbrae; F2c: y = 1 with contact shadows; F3c: z = 1 with GTAO
+  cascadeSoft: vec4<f32>,     // F2a-2: x = the sun's size (its angular diameter's tangent), for the penumbrae; F2c: y = 1 with contact shadows; F3c: z = 1 with GTAO; F3e-2: w = 1 with SSGI
   viewProj: mat4x4<f32>,      // F2d-3: world \u2192 clip as drawn (jittered with TAA), for marching the prepass's depths
   depthTerms: vec4<f32>,      // F2d-3: xy = view distance from depth (d = y / (z + x)); z = 1 when the depths are readable as the scene shades
   aerialEye: vec4<f32>,       // F5a-2: the eye the aerial perspective was built from, w = 1 when it is on
@@ -22003,7 +22700,10 @@ ${hdr ? `// The environment as a GGX-prefiltered cube (F3a, ibl.ts): mip = rough
 // The screen-space AO buffer (CPU-generated by computeSsao, uploaded r32float),
 // sampled per fragment by its framebuffer pixel \u2014 the same buffer the software
 // path multiplies its ambient by. Bound to a 1x1 blank when unused.
-@group(0) @binding(8) var ssaoMap: texture_2d<f32>;
+// The linear variant binds an array: the screen-space shading target's two layers (F2c, F3c; F3e-2's SSGI in
+// the second), or the AO buffer as one layer.
+@group(0) @binding(8) var ssaoMap: ${hdr ? "texture_2d_array<f32>" : "texture_2d<f32>"};
+fn ssaoTexel(p: vec2<i32>) -> vec4<f32> { return textureLoad(ssaoMap, p, ${hdr ? "0, " : ""}0); }
 // The Modern-tier light list (packLights); the uniform's ssaoMeta.y bounds the
 // loop, so a spare 1-light buffer is bound when there are none.
 @group(0) @binding(9) var<storage, read> lights: array<Light>;
@@ -22139,7 +22839,7 @@ fn shadowFactor(lightClip: vec4<f32>, worldPos: vec3<f32>, cosL: f32) -> f32 {
 // cut-out surface's alone, as only they are in its depths.
 fn contactAt(pixel: vec2<f32>) -> f32 {
   if (frame.cascadeSoft.y < 0.5 || u.pbr.w > 1.5) { return 1.0; }
-  return textureLoad(ssaoMap, vec2<i32>(pixel), 0).g;
+  return ssaoTexel(vec2<i32>(pixel)).g;
 }
 fn screenOctDecode(e: vec2<f32>) -> vec3<f32> {
   var n = vec3<f32>(e.x, e.y, 1.0 - abs(e.x) - abs(e.y));
@@ -22152,8 +22852,14 @@ fn screenOctDecode(e: vec2<f32>) -> vec3<f32> {
 // cut-out surface (the only ones in the prepass it reads).
 fn gtaoAt(pixel: vec2<f32>) -> vec4<f32> {
   if (frame.cascadeSoft.z < 0.5 || u.pbr.w > 1.5) { return vec4<f32>(0.0, 0.0, 0.0, 1.0); }
-  let t = textureLoad(ssaoMap, vec2<i32>(pixel), 0);
+  let t = ssaoTexel(vec2<i32>(pixel));
   return vec4<f32>(screenOctDecode(t.zw), t.x);
+}
+// SSGI at this pixel (F3e-2), from the screen-shading target's second layer: rgb the near field's light
+// (irradiance over \u03C0), a the share of directions it fills; none for what isn't in the prepass.
+fn ssgiAt(pixel: vec2<f32>) -> vec4<f32> {
+  if (frame.cascadeSoft.w < 0.5 || u.pbr.w > 1.5) { return vec4<f32>(0.0); }
+  return textureLoad(ssaoMap, vec2<i32>(pixel), 1, 0);
 }
 // Light bouncing between the occluders brings some back (Jimenez's fit), the more the brighter the albedo.
 fn gtaoBounce(v: f32, albedo: f32) -> f32 {
@@ -22992,7 +23698,12 @@ ${hdr ? `    // The AAA BRDF (F1c, brdf.ts): the height-correlated Smith visibil
 ${hdr ? `    // GTAO (F3c): its visibility joins the material's occlusion (diffuse and specular alike), and its
     // bent normal is where the sky's irradiance comes from.
     let gt = gtaoAt(in.pos.xy);
+    let matAo = ao;
     ao = ao * gtaoBounce(gt.w, dot(albedo, vec3<f32>(0.2126, 0.7152, 0.0722)));
+    // SSGI (F3e-2): the near field's own light where its rays met something, the far field's where they
+    // didn't. The rays' hits already hold the occlusion GTAO measures, so the diffuse then takes only the material's.
+    let ssgi = ssgiAt(in.pos.xy);
+    let aoD = select(ao, matAo, frame.cascadeSoft.w > 0.5 && u.pbr.w < 1.5);
     let skyN = select(N, gt.xyz, dot(gt.xyz, gt.xyz) > 0.25);
     let dfg = dfgAt(ndv, rough);
     eComp = energyCompensation(f0, dfg);
@@ -23051,7 +23762,7 @@ ${reflect ? "    var envSpec = vec3<f32>(0.0);\n    var envSeen = vec3<f32>(0.0)
       var rdv = ndv;
       if (aniso != 0.0) { rdv = dot(Rn, V); }
       let pref = envReflect(in.worldPos, 2.0 * rdv * Rn - V, rough);
-${hdr ? "      // What the environment's reflection takes, the diffuse beneath it no longer receives.\n      amb = irr * albedo * kdm * (vec3<f32>(1.0) - specE) * ao + pref * specK * specAo;\n" : "      amb = (irr * albedo * kdm + pref * f0 * reflectK) * ao;\n"}${reflect ? `      envSpec = pref * ${hdr ? "specK * specAo" : "f0 * reflectK * ao"};
+${hdr ? "      // What the environment's reflection takes, the diffuse beneath it no longer receives.\n      amb = (irr * (1.0 - ssgi.a) + ssgi.rgb) * albedo * kdm * (vec3<f32>(1.0) - specE) * aoD + pref * specK * specAo;\n" : "      amb = (irr * albedo * kdm + pref * f0 * reflectK) * ao;\n"}${reflect ? `      envSpec = pref * ${hdr ? "specK * specAo" : "f0 * reflectK * ao"};
       envSeen = pref;
 ` : ""}      // The clearcoat (I4) reflects the room sharply about its own normal, and
       // what it reflects the base beneath no longer receives.
@@ -23061,7 +23772,7 @@ ${hdr ? "      // What the environment's reflection takes, the diffuse beneath i
         amb = amb * (1.0 - coatV) + coatV * prefC * reflectK * ao;
 ${reflect ? "        envSpec = envSpec * (1.0 - coatV) + coatV * prefC * reflectK * ao;\n" : ""}      }
     } else {
-      amb = ${hdr ? "select(toLinear(vec3<f32>(u.light.w)), bakedIrr * kdm, baked)" : "toLinear(vec3<f32>(u.light.w))"} * albedo * ao;
+      amb = ${hdr ? "(select(toLinear(vec3<f32>(u.light.w)), bakedIrr * kdm, baked) * (1.0 - ssgi.a) + ssgi.rgb * kdm) * albedo * aoD" : "toLinear(vec3<f32>(u.light.w)) * albedo * ao"};
     }
 ${reflect ? "    let ambRaw = amb;\n" : ""}    // A baked light map (the second UV set) scales the sky/ambient fill by how
     // much of it reaches this point, bounce included \u2014 mirroring the CPU path.
@@ -23075,7 +23786,7 @@ ${hdr ? `    // (An HDR one, F3d, lit the fill above.)
     // framebuffer pixel (matching the software path's ssao[di]).
     // (With GTAO, F3c, the slot holds its visibility instead, already in the occlusion above.)
     if (u.ssaoMeta.x > 0.5 && frame.cascadeSoft.z < 0.5) {
-      amb = amb * textureLoad(ssaoMap, vec2<i32>(in.pos.xy), 0).r;
+      amb = amb * ssaoTexel(vec2<i32>(in.pos.xy)).r;
     }
 ${reflect ? "    // What the light map, probes and SSAO did to the fill, they do to its reflection.\n    let occl = select(vec3<f32>(1.0), amb / max(ambRaw, vec3<f32>(1e-6)), ambRaw > vec3<f32>(1e-6));\n    envSpec = envSpec * occl;\n" : ""}    // The direct light is what a shadow occludes; ambient/IBL still fills it.
     let sf = shadowFactor(in.lightClip, in.worldPos, abs(dot(normalize(in.normal), u.light.xyz)));
@@ -23390,7 +24101,10 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     this.instanceData = new Float32Array(0);
     /** What the last submitted frame drew (for the profiler and tests); GPU time when the device can time it. */
     this.lastFrameStats = { drawCalls: 0, instances: 0, triangles: 0, gpuMs: null };
-    /** The screen-space shading target (F2c, F3c): rgba16float at the frame's size, AO in r, the sun's contact in g, the bent normal in ba. */
+    /**
+     * The screen-space shading target (F2c, F3c): rgba16float at the frame's size, AO in r, the sun's contact
+     * in g, the bent normal in ba; and, in its second layer, SSGI (F3e-2): the near field's light in rgb, its share in a.
+     */
     this.contactTexture = null;
     /** The resolve's uniforms and pipelines (one per depth sample count), made on first use. */
     this.contact = null;
@@ -23400,6 +24114,13 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     this.frameDepthView = null;
     /** Whether this frame's ambient light takes GTAO (F3c), for the frame uniform. */
     this.frameGtao = false;
+    /** This frame's SSGI (F3e-2), when it has one, for the frame uniform and the screen-space shading. */
+    this.frameSsgi = null;
+    /**
+     * SSGI's resources (F3e-2): its uniforms, the half-resolution history (two, one read and one written,
+     * swapping each frame), and its pipelines.
+     */
+    this.ssgi = null;
     /** This frame's real-time GI (F3e), its tracer for the still scene it was made for, and the sky it traces. */
     this.frameGi = null;
     this.probeGi = null;
@@ -23436,6 +24157,11 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     this.motion = /* @__PURE__ */ new Map();
     /** The reflection pass's uniforms and pipelines (I3), made on first use; its targets are the frame graph's. */
     this.reflections = null;
+    /**
+     * The AAA tier's reflections (F3f): the Hi-Z chain (sized to the frame), the accumulation's history (two,
+     * swapping), the Epic trace's half-resolution target, the uniforms and the pipelines. Made on first use.
+     */
+    this.hiz = null;
     this.temporalState = new TemporalState("ndc");
     /**
      * The temporal resolve's resources (I2): two history images (one read, one
@@ -23499,7 +24225,7 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     }
   }
   ensureContact() {
-    this.contactTexture ?? (this.contactTexture = this.device.createTexture({ size: { width: this.width, height: this.height }, format: SCREEN_SHADING_FORMAT, usage: 16 | 4 | 1 }));
+    this.contactTexture ?? (this.contactTexture = this.device.createTexture({ size: { width: this.width, height: this.height, depthOrArrayLayers: 2 }, format: SCREEN_SHADING_FORMAT, usage: 16 | 4 | 1 }));
     return this.contactTexture;
   }
   /**
@@ -23592,6 +24318,8 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     } else if (this.gtao) {
       this.gtao.valid = false;
     }
+    if (this.frameSsgi && gbuffer && velocity && this.taa) this.addSsgi(graph, depth, gbuffer, velocity, view, projection, this.frameSsgi, multisampled);
+    else if (this.ssgi) this.ssgi.valid = false;
     this.contact ?? (this.contact = { uniforms: device.createBuffer({ size: CONTACT_UNIFORM_FLOATS * 4, usage: 64 | 8 }), data: new Float32Array(CONTACT_UNIFORM_FLOATS), pipelines: [null, null] });
     const contact = this.contact;
     (_b = contact.pipelines)[k] ?? (_b[k] = fullScreenPipeline(device, contactShaderWgsl(multisampled), "contactPass", SCREEN_SHADING_FORMAT));
@@ -23607,7 +24335,7 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
       pass.keep();
       return (ctx) => {
         const encoded = ctx.encoder.beginRenderPass({
-          colorAttachments: [{ view: ctx.texture(target).createView(), clearValue: { r: 1, g: 1, b: 0, a: 1 }, loadOp: "clear", storeOp: "store" }],
+          colorAttachments: [{ view: ctx.texture(target).createView({ dimension: "2d", baseArrayLayer: 0, arrayLayerCount: 1 }), clearValue: { r: 1, g: 1, b: 0, a: 1 }, loadOp: "clear", storeOp: "store" }],
           ...ctx.timing
         });
         encoded.setPipeline(pipeline);
@@ -23624,6 +24352,95 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
         encoded.end();
       };
     });
+  }
+  /**
+   * SSGI (F3e-2): at half resolution its trace against the prepass's depths, lit by last frame's resolved
+   * image (the TAA history), accumulated over frames through the velocity buffer, then filtered up to full
+   * resolution into the screen-shading target's second layer.
+   */
+  addSsgi(graph, depth, gbuffer, velocity, view, projection, settings, multisampled) {
+    var _a, _b;
+    const device = this.device;
+    const k = multisampled ? 1 : 0;
+    const half = { width: Math.max(1, Math.ceil(this.width / 2)), height: Math.max(1, Math.ceil(this.height / 2)) };
+    if (!this.ssgi) {
+      const made = () => device.createTexture({ size: half, format: SCREEN_SHADING_FORMAT, usage: 16 | 4 | 1 });
+      this.ssgi = {
+        uniforms: device.createBuffer({ size: SSGI_UNIFORM_FLOATS * 4, usage: 64 | 8 }),
+        data: new Float32Array(SSGI_UNIFORM_FLOATS),
+        history: [made(), made()],
+        index: 0,
+        valid: false,
+        frame: 0,
+        sampler: device.createSampler({ magFilter: "linear", minFilter: "linear", addressModeU: "clamp-to-edge", addressModeV: "clamp-to-edge" }),
+        trace: [null, null],
+        resolve: [null, null],
+        accumulate: fullScreenPipeline(device, ssgiTemporalWgsl(), "accumulate", SCREEN_SHADING_FORMAT)
+      };
+    }
+    const gi = this.ssgi;
+    (_a = gi.trace)[k] ?? (_a[k] = fullScreenPipeline(device, ssgiTraceWgsl(multisampled), "ssgiTrace", SCREEN_SHADING_FORMAT));
+    (_b = gi.resolve)[k] ?? (_b[k] = fullScreenPipeline(device, ssgiResolveWgsl(multisampled), "resolve", SCREEN_SHADING_FORMAT));
+    const trace = gi.trace[k];
+    const resolve = gi.resolve[k];
+    const current = graph.createTexture("ssgi", { format: SCREEN_SHADING_FORMAT, ...half });
+    const then = graph.importTexture("ssgi.then", gi.history[gi.index]);
+    const now = graph.importTexture("ssgi.now", gi.history[1 - gi.index]);
+    const radiance = graph.importTexture("ssgi.radiance", this.taa.history[this.taa.index]);
+    const target = graph.importTexture("ssgi.target", this.ensureContact());
+    device.queue.writeBuffer(gi.uniforms, 0, ssgiUniforms(view, projection, gi.frame, gi.valid, settings, gi.data));
+    gi.frame += 1;
+    const draw = (ctx, pipeline, into, entries) => {
+      const encoded = ctx.encoder.beginRenderPass({
+        colorAttachments: [{ view: into, clearValue: { r: 0, g: 0, b: 0, a: 0 }, loadOp: "clear", storeOp: "store" }],
+        ...ctx.timing
+      });
+      encoded.setPipeline(pipeline);
+      encoded.setBindGroup(0, device.createBindGroup({ layout: pipeline.getBindGroupLayout(0), entries: [{ binding: 0, resource: { buffer: gi.uniforms } }, ...entries] }));
+      encoded.draw(3);
+      encoded.end();
+    };
+    graph.addPass("ssgi", "render", (pass) => {
+      pass.read(depth);
+      pass.read(gbuffer);
+      pass.read(velocity);
+      pass.read(radiance);
+      pass.write(current);
+      return (ctx) => draw(ctx, trace, ctx.texture(current).createView(), [
+        { binding: 1, resource: ctx.texture(depth).createView() },
+        { binding: 2, resource: ctx.texture(gbuffer).createView() },
+        { binding: 3, resource: ctx.texture(velocity).createView() },
+        { binding: 4, resource: ctx.texture(radiance).createView() },
+        { binding: 5, resource: gi.sampler }
+      ]);
+    });
+    graph.addPass("ssgi.accumulate", "render", (pass) => {
+      pass.read(current);
+      pass.read(then);
+      pass.read(velocity);
+      pass.write(now);
+      pass.keep();
+      return (ctx) => draw(ctx, gi.accumulate, ctx.texture(now).createView(), [
+        { binding: 1, resource: ctx.texture(current).createView() },
+        { binding: 2, resource: ctx.texture(then).createView() },
+        { binding: 3, resource: ctx.texture(velocity).createView() },
+        { binding: 4, resource: gi.sampler }
+      ]);
+    });
+    graph.addPass("ssgi.resolve", "render", (pass) => {
+      pass.read(depth);
+      pass.read(gbuffer);
+      pass.read(now);
+      pass.write(target);
+      pass.keep();
+      return (ctx) => draw(ctx, resolve, ctx.texture(target).createView({ dimension: "2d", baseArrayLayer: 1, arrayLayerCount: 1 }), [
+        { binding: 1, resource: ctx.texture(depth).createView() },
+        { binding: 2, resource: ctx.texture(gbuffer).createView() },
+        { binding: 3, resource: ctx.texture(now).createView() }
+      ]);
+    });
+    gi.index = 1 - gi.index;
+    gi.valid = true;
   }
   /**
    * Upload the packed light list, growing the storage buffer when it needs more
@@ -23677,7 +24494,8 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
           // The environment: its panorama, or (linear variant, F3a) its prefiltered cube.
           { binding: 7, visibility: SHADER_STAGE_FRAGMENT, texture: hdr ? { sampleType: "float", viewDimension: "cube" } : { sampleType: "float" } },
           // The SSAO buffer (r32float), read per fragment via textureLoad.
-          { binding: 8, visibility: SHADER_STAGE_FRAGMENT, texture: { sampleType: "unfilterable-float" } },
+          // The linear variant's is an array: the screen-space shading target's two layers (F3e-2).
+          { binding: 8, visibility: SHADER_STAGE_FRAGMENT, texture: hdr ? { sampleType: "unfilterable-float", viewDimension: "2d-array" } : { sampleType: "unfilterable-float" } },
           // The Modern-tier light list, read-only storage.
           { binding: 9, visibility: SHADER_STAGE_FRAGMENT, buffer: { type: "read-only-storage" } },
           // Per-instance transforms, read by the vertex stage.
@@ -24318,7 +25136,8 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     const ssao = draw.ssao ?? null;
     this.frameContact = this.hdr && prepass && this.frameCascades !== null && Boolean(draw.lightDirection);
     this.frameGtao = this.hdr && prepass && draw.ambientOcclusion !== false;
-    this.bindSsao(ssao, this.frameContact || this.frameGtao);
+    this.frameSsgi = this.hdr && prepass && temporal !== null && temporal.uniforms[18] === 1 && this.taa !== null && draw.screenSpaceGi ? draw.screenSpaceGi : null;
+    this.bindSsao(ssao, this.frameContact || this.frameGtao || this.frameSsgi !== null);
     const drawnProjection = temporal ? temporal.projection : draw.projection;
     this.frameDepthView = this.hdr && prepass ? { viewProj, terms: [drawnProjection[10], drawnProjection[14]] } : null;
     this.frameFog = this.prepareFog(draw);
@@ -24611,11 +25430,7 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     const liveGi = this.frameGi;
     const volume = draw.environment?.probeVolume ?? null;
     if (liveGi && volume) {
-      if (!this.probeGi || this.probeGi.key !== liveGi.key) {
-        this.probeGi?.gi.dispose();
-        this.probeGi = { key: liveGi.key, gi: new GpuProbeGi(this.device, liveGi.occluders) };
-      }
-      const gi = this.probeGi.gi;
+      const gi = this.tracerFor(liveGi.key, liveGi.occluders);
       const env = draw.environment;
       if (this.giSky?.source !== env) this.giSky = { source: env, sky: environmentPanorama(env) };
       const sky = this.giSky.sky;
@@ -24654,7 +25469,7 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
       });
     }
     this.prepassed = prepass ? { depth: msaa ? msaa.depth : this.depthTexture, gbuffer: this.gbuffer, velocity: this.velocity, multisampled: msaa !== null } : null;
-    if (this.frameContact || this.frameGtao) {
+    if (this.frameContact || this.frameGtao || this.frameSsgi) {
       this.addScreenShading(graph, depth, gbuffer, velocity, draw.view, temporal ? temporal.projection : draw.projection, this.frameContact ? draw.lightDirection ?? null : null, ssao !== null, msaa !== null);
     }
     const readDepths = prepass && this.hdr;
@@ -24699,7 +25514,8 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     }
     if (seeThrough) scenePass("see-through", firstSeeThrough, draws.length, true, true);
     const reactive = hdrTaa && seeThrough && behind ? this.addReactiveMask(graph, behind, colour) : null;
-    if (reflections) this.addReflections(graph, reflections, colour, depth, rays, temporal ? temporal.projection : draw.projection, msaa !== null);
+    if (reflections && this.hdr && gbuffer && velocity) this.addHizReflections(graph, colour, depth, gbuffer, velocity, rays, draw, temporal ? temporal.projection : draw.projection, msaa !== null);
+    else if (reflections) this.addReflections(graph, reflections, colour, depth, rays, temporal ? temporal.projection : draw.projection, msaa !== null);
     if (temporal) this.addTemporal(graph, temporal.uniforms, colour, depth, msaa !== null, hdrTaa ? velocity : null, reactive);
     const slot = readback ? this.readback.find((entry) => !entry.busy) : void 0;
     if (slot) {
@@ -24828,6 +25644,151 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
       pass.write(colour, "copyDst");
       return (ctx) => ctx.encoder.copyTextureToTexture({ texture: ctx.texture(out) }, { texture: ctx.texture(colour) }, { width: this.width, height: this.height });
     });
+  }
+  addHizReflections(graph, colour, depth, gbuffer, velocity, rays, draw, projection, multisampled) {
+    var _a;
+    const device = this.device;
+    const k = multisampled ? 1 : 0;
+    const format = this.colourFormat;
+    if (!this.hiz) {
+      const levels = hizLevels(this.width, this.height);
+      const full = { width: this.width, height: this.height };
+      const history = () => device.createTexture({ size: full, format: "rgba16float", usage: 16 | 4 });
+      this.hiz = {
+        chain: device.createTexture({ size: full, format: "r32float", mipLevelCount: levels, usage: 16 | 4 | 1 }),
+        // RENDER_ATTACHMENT | TEXTURE_BINDING | COPY_SRC (for captures)
+        levels,
+        history: [history(), history()],
+        index: 0,
+        valid: false,
+        frame: 0,
+        traced: null,
+        blank: device.createTexture({ size: { width: 1, height: 1 }, format: "rgba16float", usage: 4 }),
+        uniforms: device.createBuffer({ size: HIZ_UNIFORM_FLOATS * 4, usage: 64 | 8 }),
+        data: new Float32Array(HIZ_UNIFORM_FLOATS),
+        sampler: device.createSampler({ magFilter: "linear", minFilter: "linear", addressModeU: "clamp-to-edge", addressModeV: "clamp-to-edge" }),
+        copy: [null, null],
+        reduce: fullScreenPipeline(device, HIZ_REDUCE_WGSL, "reduce", "r32float"),
+        trace: fullScreenPipeline(device, HIZ_TRACE_WGSL, "trace", "rgba16float"),
+        accumulate: fullScreenPipeline(device, HIZ_TEMPORAL_WGSL, "accumulate", "rgba16float"),
+        resolve: fullScreenPipeline(device, HIZ_RESOLVE_WGSL, "resolve", format)
+      };
+    }
+    const hz = this.hiz;
+    (_a = hz.copy)[k] ?? (_a[k] = fullScreenPipeline(device, hizCopyWgsl(multisampled), "copyDepth", "r32float"));
+    const copy = hz.copy[k];
+    const tracer = draw.reflectionTrace ? this.tracerFor(draw.reflectionTrace.key, draw.reflectionTrace.occluders) : null;
+    if (tracer && !hz.traced) hz.traced = device.createTexture({ size: { width: Math.max(1, Math.ceil(this.width / 2)), height: Math.max(1, Math.ceil(this.height / 2)) }, format: "rgba16float", usage: 8 | 4 });
+    const chain = graph.importTexture("hiz", hz.chain);
+    const then = graph.importTexture("hiz.then", hz.history[hz.index]);
+    const now = graph.importTexture("hiz.now", hz.history[1 - hz.index]);
+    const traced = tracer ? graph.importTexture("hiz.traced", hz.traced) : null;
+    const traceOut = graph.createTexture("hiz.trace", { format: "rgba16float", width: this.width, height: this.height });
+    const out = graph.createTexture("reflect.out", { format, width: this.width, height: this.height });
+    device.queue.writeBuffer(hz.uniforms, 0, hizUniforms(draw.view, projection, hz.frame, hz.levels, tracer !== null, hz.valid, hz.data));
+    hz.frame += 1;
+    const fullScreen = (ctx, pipeline, into, entries, uniforms = true) => {
+      const encoded = ctx.encoder.beginRenderPass({ colorAttachments: [{ view: into, clearValue: { r: 0, g: 0, b: 0, a: 0 }, loadOp: "clear", storeOp: "store" }], ...ctx.timing });
+      encoded.setPipeline(pipeline);
+      encoded.setBindGroup(0, device.createBindGroup({ layout: pipeline.getBindGroupLayout(0), entries: uniforms ? [{ binding: 0, resource: { buffer: hz.uniforms } }, ...entries] : entries }));
+      encoded.draw(3);
+      encoded.end();
+    };
+    const mip = (level) => hz.chain.createView({ baseMipLevel: level, mipLevelCount: 1 });
+    graph.addPass("hiz", "render", (pass) => {
+      pass.read(depth);
+      pass.write(chain);
+      return (ctx) => {
+        fullScreen(ctx, copy, mip(0), [{ binding: 0, resource: ctx.texture(depth).createView() }], false);
+        for (let level = 1; level < hz.levels; level += 1) fullScreen(ctx, hz.reduce, mip(level), [{ binding: 0, resource: mip(level - 1) }], false);
+      };
+    });
+    if (tracer && traced) {
+      const env = draw.environment ?? null;
+      if (env && this.giSky?.source !== env) this.giSky = { source: env, sky: environmentPanorama(env) };
+      const sky = env ? this.giSky.sky : null;
+      const volume = draw.environment?.probeVolume ?? null;
+      const viewProj = multiplyMat47(projection, draw.view);
+      const inverse = invertMat4(viewProj) ?? viewProj;
+      const eye = invertMat4(draw.view) ?? draw.view;
+      const lit = this.frameGi !== null && this.probeGi?.gi === tracer;
+      const groups = this.depthGroups;
+      graph.addPass("reflections.bvh", "compute", (pass) => {
+        pass.read(chain);
+        pass.read(gbuffer);
+        pass.write(traced, "storage");
+        return (ctx) => tracer.traceReflections(
+          ctx.encoder,
+          { depth: mip(0), gbuffer: ctx.texture(gbuffer).createView(), out: hz.traced.createView(), invViewProj: inverse, eye: [eye[12], eye[13], eye[14]], width: this.width, height: this.height, maxRoughness: HIZ_MAX_ROUGHNESS },
+          draw.lights ?? [],
+          sky,
+          volume ? { buffer: groups.probes, layout: volume } : null,
+          lit,
+          ctx.timing
+        );
+      });
+    }
+    graph.addPass("reflections.trace", "render", (pass) => {
+      pass.read(colour);
+      pass.read(chain);
+      pass.read(gbuffer);
+      pass.read(rays[0]);
+      if (traced) pass.read(traced);
+      pass.write(traceOut);
+      return (ctx) => fullScreen(ctx, hz.trace, ctx.texture(traceOut).createView(), [
+        { binding: 1, resource: ctx.texture(colour).createView() },
+        { binding: 2, resource: hz.chain.createView() },
+        { binding: 3, resource: ctx.texture(gbuffer).createView() },
+        { binding: 4, resource: ctx.texture(rays[0]).createView() },
+        { binding: 5, resource: (traced ? hz.traced : hz.blank).createView() }
+      ]);
+    });
+    graph.addPass("reflections.accumulate", "render", (pass) => {
+      pass.read(traceOut);
+      pass.read(then);
+      pass.read(velocity);
+      pass.read(rays[0]);
+      pass.write(now);
+      pass.keep();
+      return (ctx) => fullScreen(ctx, hz.accumulate, ctx.texture(now).createView(), [
+        { binding: 1, resource: ctx.texture(traceOut).createView() },
+        { binding: 2, resource: ctx.texture(then).createView() },
+        { binding: 3, resource: ctx.texture(velocity).createView() },
+        { binding: 4, resource: ctx.texture(rays[0]).createView() },
+        { binding: 5, resource: hz.sampler }
+      ]);
+    });
+    graph.addPass("reflections", "render", (pass) => {
+      pass.read(colour);
+      pass.read(now);
+      pass.read(chain);
+      pass.read(gbuffer);
+      for (const ray of rays) pass.read(ray);
+      pass.write(out);
+      return (ctx) => fullScreen(ctx, hz.resolve, ctx.texture(out).createView(), [
+        { binding: 1, resource: ctx.texture(colour).createView() },
+        { binding: 2, resource: ctx.texture(now).createView() },
+        { binding: 3, resource: hz.chain.createView() },
+        { binding: 4, resource: ctx.texture(gbuffer).createView() },
+        { binding: 5, resource: ctx.texture(rays[0]).createView() },
+        { binding: 6, resource: ctx.texture(rays[1]).createView() }
+      ]);
+    });
+    graph.addPass("reflections.copy", "transfer", (pass) => {
+      pass.read(out, "copySrc");
+      pass.write(colour, "copyDst");
+      return (ctx) => ctx.encoder.copyTextureToTexture({ texture: ctx.texture(out) }, { texture: ctx.texture(colour) }, { width: this.width, height: this.height });
+    });
+    hz.index = 1 - hz.index;
+    hz.valid = true;
+  }
+  /** The still scene's BVH tracer for `key` (F3e's, shared with the reflections' Epic trace, F3f). */
+  tracerFor(key, occluders) {
+    if (!this.probeGi || this.probeGi.key !== key) {
+      this.probeGi?.gi.dispose();
+      this.probeGi = { key, gi: new GpuProbeGi(this.device, occluders) };
+    }
+    return this.probeGi.gi;
   }
   /**
    * The reactive mask (F4a): how much the see-through pass changed each pixel,
@@ -25005,7 +25966,7 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
       frame.set(sun.cascades.map((c) => c.texel), FRAME_CASCADES + 72);
       frame.set(sun.cascades.map((c) => c.depth), FRAME_CASCADES + 76);
     }
-    frame.set([sun?.softness ?? 0, this.frameContact ? 1 : 0, this.frameGtao ? 1 : 0, 0], FRAME_CASCADES + 80);
+    frame.set([sun?.softness ?? 0, this.frameContact ? 1 : 0, this.frameGtao ? 1 : 0, this.frameSsgi ? 1 : 0], FRAME_CASCADES + 80);
     if (this.frameDepthView) {
       frame.set(this.frameDepthView.viewProj, FRAME_CASCADES + 84);
       frame.set([this.frameDepthView.terms[0], this.frameDepthView.terms[1], 1, 0], FRAME_CASCADES + 100);
@@ -25241,7 +26202,7 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
         // The active env map (or the 1x1 white blank); likewise cache-invalidated.
         { binding: 7, resource: this.hdr ? this.envTexture.createView({ dimension: "cube" }) : this.envTexture.createView() },
         // The active SSAO buffer (or the 1x1 blank); likewise cache-invalidated.
-        { binding: 8, resource: this.ssaoBound.createView() },
+        { binding: 8, resource: this.hdr ? this.ssaoBound.createView({ dimension: "2d-array" }) : this.ssaoBound.createView() },
         // The light storage buffer; a grow changes identity and invalidates the cache.
         { binding: 9, resource: { buffer: this.lightBuffer } },
         // The instance transforms; a grow changes identity and invalidates the cache.
@@ -25388,6 +26349,16 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
       destroySafely(this.gtao.history[1]);
       destroySafely(this.gtao.uniforms);
       this.gtao = null;
+    }
+    if (this.hiz) {
+      for (const t of [this.hiz.chain, this.hiz.history[0], this.hiz.history[1], this.hiz.traced, this.hiz.blank, this.hiz.uniforms]) destroySafely(t);
+      this.hiz = null;
+    }
+    if (this.ssgi) {
+      destroySafely(this.ssgi.history[0]);
+      destroySafely(this.ssgi.history[1]);
+      destroySafely(this.ssgi.uniforms);
+      this.ssgi = null;
     }
     if (this.taa) {
       destroySafely(this.taa.history[0]);
@@ -26360,7 +27331,7 @@ function bloomLevels(width, height, radius) {
   }
   return out;
 }
-var VS2 = (
+var VS3 = (
   /* wgsl */
   `
 @vertex fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f {
@@ -26373,7 +27344,7 @@ var VS2 = (
 var DOWN_WGSL = (
   /* wgsl */
   `
-${VS2}
+${VS3}
 @group(0) @binding(0) var src: texture_2d<f32>;
 @group(0) @binding(1) var samp: sampler;
 // xy = the source's texel, zw = the target's; first level when params2.x = 1.
@@ -26405,7 +27376,7 @@ fn karis(c: vec3f) -> f32 { return 1.0 / (1.0 + max(c.r, max(c.g, c.b))); }
 var UP_WGSL = (
   /* wgsl */
   `
-${VS2}
+${VS3}
 @group(0) @binding(0) var src: texture_2d<f32>;
 @group(0) @binding(1) var samp: sampler;
 // xy = the (smaller) source's texel, zw = the target's.

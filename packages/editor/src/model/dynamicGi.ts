@@ -50,6 +50,38 @@ export function resolveDynamicGi(settings: DynamicGiSettings | null | undefined)
   return { rays: settings.rays ?? 64, hysteresis: settings.hysteresis ?? 0.97, spacing: settings.spacing ?? 3 };
 }
 
+/**
+ * Screen-space GI (F3e-2, ssgi.ts in @cartbox/player): on the AAA tier, rays
+ * marched across the depth buffer from each pixel bring back the light the
+ * surfaces near it sent last frame, so a lit wall bleeds its colour onto the
+ * floor beside it. On by default; a rig can turn it off or tune it.
+ */
+export interface ScreenSpaceGiSettings {
+  /** False turns it off. */
+  readonly enabled?: boolean;
+  /** How far a ray reaches, metres. */
+  readonly radius?: number;
+  /** Scales the light the rays bring back. */
+  readonly intensity?: number;
+}
+
+/** Screen-space GI as stored, read defensively; null when absent (the defaults). */
+export function parseScreenSpaceGi(value: unknown): ScreenSpaceGiSettings | null {
+  if (!value || typeof value !== "object") return null;
+  const raw = value as Record<string, unknown>;
+  const out: { enabled?: boolean; radius?: number; intensity?: number } = {};
+  if (typeof raw.enabled === "boolean") out.enabled = raw.enabled;
+  if (typeof raw.radius === "number" && Number.isFinite(raw.radius)) out.radius = clamp(raw.radius, 0.5, 16);
+  if (typeof raw.intensity === "number" && Number.isFinite(raw.intensity)) out.intensity = clamp(raw.intensity, 0, 4);
+  return out;
+}
+
+/** What the renderer takes: null when it is off. */
+export function resolveScreenSpaceGi(settings: ScreenSpaceGiSettings | null | undefined): { readonly radius: number; readonly intensity: number } | null {
+  if (settings?.enabled === false) return null;
+  return { radius: settings?.radius ?? 4, intensity: settings?.intensity ?? 1 };
+}
+
 /** The grid a scene's live volume is traced over, round its bounds, when no baked volume gives one. */
 export function dynamicGiGrid(min: readonly [number, number, number], max: readonly [number, number, number], spacing: number): { min: [number, number, number]; max: [number, number, number]; counts: [number, number, number] } {
   // A little past the bounds, so the outermost surfaces sit inside the grid.
