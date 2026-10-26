@@ -178,6 +178,8 @@ export interface DrawBatch<G> {
   refract: boolean;
   /** Index of the batch's first copy in the instance data (set by the renderer). */
   first: number;
+  /** The LOD level its copies draw (F10a), or −1 without a chain. */
+  lod?: number;
 }
 
 /** Whether a batch refracts (I5): a PBR draw whose material or surface effect bends what's behind it. */
@@ -223,13 +225,14 @@ export function batchInstances<G extends { indexCount: number }>(
       const channels = instance.lightChannels ?? 1;
       const alpha = alphaCode(primitive.material.alphaMode);
       const refract = batchRefracts(primitive, textures, effect);
+      const lod = instance.lod ? instance.lod.meshes.indexOf(instance.mesh) : -1;
       if (alpha >= 2 || refract) {
         const c = primitiveCentre(primitive);
         const m = instance.model;
         const x = m[0]! * c[0] + m[4]! * c[1] + m[8]! * c[2] + m[12]! - eye[0];
         const y = m[1]! * c[0] + m[5]! * c[1] + m[9]! * c[2] + m[13]! - eye[1];
         const z = m[2]! * c[0] + m[6]! * c[1] + m[10]! * c[2] + m[14]! - eye[2];
-        seeThrough.push({ batch: { primitive, geometry, textures, models: [instance.model], effect, channels, alpha, refract, first: 0 }, distance: x * x + y * y + z * z });
+        seeThrough.push({ batch: { primitive, geometry, textures, models: [instance.model], effect, channels, alpha, refract, first: 0, lod }, distance: x * x + y * y + z * z });
         instanceCount += 1;
         return;
       }
@@ -237,7 +240,7 @@ export function batchInstances<G extends { indexCount: number }>(
       if (!list) byPrimitive.set(primitive, (list = []));
       let batch = list.find((b) => b.effect === effect && b.channels === channels && sameTextures(b.textures, textures));
       if (!batch) {
-        batch = { primitive, geometry, textures, models: [], effect, channels, alpha, refract, first: 0 };
+        batch = { primitive, geometry, textures, models: [], effect, channels, alpha, refract, first: 0, lod };
         list.push(batch);
         batches.push(batch);
       }

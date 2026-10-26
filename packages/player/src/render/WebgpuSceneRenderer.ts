@@ -178,6 +178,7 @@ import {
 } from "./virtualShadows.js";
 import { CAMERA_UNIFORM_FLOATS, DOF_GATHER_WGSL, MOTION_NEIGHBOURS_WGSL, MOTION_TILE, MOTION_TILES_WGSL, cameraUniforms, dofCompositeWgsl, dofPrefilterWgsl, motionGatherWgsl, type CameraEffects } from "./cameraEffects.js";
 import { UPSCALE_SHARPEN_WGSL, UPSCALE_UNIFORM_FLOATS, upscaleJitterPhases, upscaleShaderWgsl, upscaleUniforms } from "./upscaler.js";
+import { DEFAULT_TEXEL_DENSITY, LIGHT_COMPLEXITY_FULL, OVERDRAW_FULL, SHADER_COMPLEXITY_FULL, VIEW_MODE_WGSL, VIEW_RESOLVE_WGSL, viewModeCode } from "./viewModes.js";
 import { SSGI_UNIFORM_FLOATS, ssgiResolveWgsl, ssgiTemporalWgsl, ssgiTraceWgsl, ssgiUniforms, type SsgiFrame } from "./ssgi.js";
 import { AERIAL_FRAME_FLOATS, AERIAL_LUT_BYTES, AERIAL_SAMPLE_WGSL, GpuAtmosphere, packAerialFrame } from "./atmosphere.js";
 import { GpuProbeGi } from "./dynamicGi.js";
@@ -257,8 +258,71 @@ export const GBUFFER_FORMAT = "rgba16float";
 /** The velocity buffer's format (F0c): screen motion since last frame, in UV units. */
 export const VELOCITY_FORMAT = "rg16float";
 
+/** The linear-light shader's view modes (F10a; viewModes.ts): a diagnostic of what it shades with, in place of the lit colour. */
+const VIEW_MODE_SHADE = /* wgsl */ `    let vm = i32(frame.debug.x + 0.5);
+    if (vm > 0) {
+      // Palettes and ramps are display colours, shaded a little by the sun so the forms still read.
+      let form = 0.55 + 0.45 * max(0.0, dot(N, L));
+      let texels = vec2<f32>(textureDimensions(tex));
+      var d = vec3<f32>(0.0);
+      if (vm == 1) { d = vmAlbedo + emis; }
+      else if (vm == 2) { d = vmAlbedo; }
+      else if (vm == 3) { d = vmLight(vec3<f32>(rough)); }
+      else if (vm == 4) { d = vmLight(vec3<f32>(vmMetallic)); }
+      else if (vm == 5) { d = vmLight(N * 0.5 + vec3<f32>(0.5)); }
+      else if (vm == 6) { d = vmLight(vec3<f32>(ao)); }
+      else if (vm == 7) { d = lit; }
+      else if (vm == 9) {
+        // An estimate of the pixel's shading work: its maps, its layers and features, and its lights.
+        var cost = 4.0 + u.texflags.x + u.texflags.y + u.texflags.z + u.texflags.w;
+        if (u.maps0.x > 0.5) { cost = cost + 2.0; }
+        if (u.layer0.w > 0.0) { cost = cost + 8.0; }
+        if (u.layer0.x > 0.0) { cost = cost + 3.0; }
+        if (u.layer0.z != 0.0) { cost = cost + 2.0; }
+        if (u.refract0.w > 0.5) { cost = cost + 4.0; }
+        if (u.surface1.z > 0.5) { cost = cost + 2.0; }
+        if (u.surface0.y > 0.0) { cost = cost + 1.0; }
+        if (u.terrain0.x > 0.0) { cost = cost + 4.0; }
+        if (u.motion0.z > 0.5) { cost = cost + 2.0; }
+        if (u.envSky.w > 0.5) { cost = cost + 2.0; }
+        cost = cost + 1.5 * f32(vmLights);
+        d = vmLight(vmHeat(cost / ${SHADER_COMPLEXITY_FULL.toFixed(1)}));
+      }
+      else if (vm == 10) { d = vmLight(vmHeat(f32(vmLights) / ${LIGHT_COMPLEXITY_FULL.toFixed(1)}) * form); }
+      else if (vm == 12) { d = vmLight(select(vec3<f32>(1.0), vmPalette(i32(u.motion0.w + 0.5)), u.motion0.w > -0.5) * form); }
+      else if (vm == 13) {
+        // Base-colour texels per metre: the UV footprint's texels over the surface's.
+        if (u.texflags.x > 0.5) {
+          let uvArea = abs(duv1.x * duv2.y - duv1.y * duv2.x) * texels.x * texels.y;
+          let density = sqrt(uvArea / max(length(cross(dp1, dp2)), 1e-12));
+          let t = clamp(log2(density / frame.debug.y) * 0.25 + 0.5, 0.0, 1.0);
+          d = vmLight(select(mix(vec3<f32>(0.0, 0.85, 0.2), vec3<f32>(1.0, 0.1, 0.0), t * 2.0 - 1.0), mix(vec3<f32>(0.1, 0.3, 1.0), vec3<f32>(0.0, 0.85, 0.2), t * 2.0), t < 0.5) * form);
+        } else { d = vmLight(vec3<f32>(0.3) * form); }
+      }
+      else if (vm == 14) {
+        // The mip the base colour samples: green at 0, then yellow, red and magenta.
+        let fx = duv1 * texels;
+        let fy = duv2 * texels;
+        let mip = max(0.0, 0.5 * log2(max(max(dot(fx, fx), dot(fy, fy)), 1e-8)));
+        var ramp = array<vec3<f32>, 4>(vec3<f32>(0.1, 0.85, 0.2), vec3<f32>(1.0, 0.9, 0.1), vec3<f32>(1.0, 0.15, 0.1), vec3<f32>(0.9, 0.2, 1.0));
+        let m = min(mip, 3.0);
+        let i = min(2, i32(floor(m)));
+        d = select(vmLight(vec3<f32>(0.3) * form), vmLight(mix(ramp[i], ramp[i + 1], m - f32(i)) * form), u.texflags.x > 0.5);
+      }
+      else if (vm == 15) {
+        var ci = 0;
+        for (var c = 0; c < ${CASCADE_COUNT}; c = c + 1) { if (in.eyeDepth > frame.cascadeFar[c]) { ci = ci + 1; } }
+        d = vmLight(select(vec3<f32>(0.3), vmPalette(ci), frame.cascadeInfo.x > 0.5 && ci < ${CASCADE_COUNT}) * form);
+      }
+      shaded = d;
+    }
+`;
+
 /** The per-frame globals' bytes (WGSL `Frame`): cluster params and info, the near cascade's matrix and params, the sun's GPU cascades (F2a), the aerial perspective's camera (F5a-2) and the fog's (F5b). */
-const FRAME_BYTES = 880;
+const FRAME_BYTES = 896;
+
+/** Floats into `Frame` where the view mode (F10a) sits. */
+const FRAME_DEBUG = 220;
 
 /** Floats into `Frame` where the sun's GPU cascades start (F2a): four matrices, then the slices' far depths, the flags and the texels. */
 const FRAME_CASCADES = 84;
@@ -511,6 +575,7 @@ struct Frame {
   fogRight: vec4<f32>,        // F5b: its camera's right axis, w = P[0]
   fogUp: vec4<f32>,           // F5b: its up axis, w = P[5]
   fogBack: vec4<f32>,         // F5b: its back axis, w = the volume's reach
+  debug: vec4<f32>,           // F10a: x = the view mode's code (0 lit), y = the texel density on target (per metre)
 };
 // One spot/point shadow tile (EP8c): world→clip, and params.xy = depth→distance terms.
 struct ShadowTile {
@@ -837,6 +902,7 @@ fn camoThreshold(p: vec2<f32>, time: f32) -> f32 {
 // pixel (alpha 1); a blended one leaves premultiplied colour and its coverage
 // (the pipeline blends it over what's there); an added one leaves its light
 // and no coverage (the pipeline adds it). compositeFrame reads the same codes.
+${hdr ? VIEW_MODE_WGSL : ""}
 fn finishAlpha(rgb: vec3<f32>, a: f32) -> vec4<f32> {
   // Linear light (F0b) keeps what is over 1 — a highlight, the sun on water — for the presenter's tone map.
   let c = ${hdr ? "max(rgb, vec3<f32>(0.0))" : "clamp(rgb, vec3<f32>(0.0), vec3<f32>(1.0))"};
@@ -1395,7 +1461,7 @@ ${hdr
 
 @fragment
 fn fs(in: VSOut) -> @location(0) vec4<f32> {
-${hdr ? "  shadowPixel = in.pos.xy;\n" : ""}  // The surface's screen derivatives, for the UV gradients parallax and
+${hdr ? "  shadowPixel = in.pos.xy;\n  // Overdraw (F10a): every fragment shaded counts one, added up in red.\n  if (frame.debug.x > 10.5 && frame.debug.x < 11.5) { return vec4<f32>(1.0, 0.0, 0.0, 0.0); }\n" : ""}  // The surface's screen derivatives, for the UV gradients parallax and
   // anisotropy need (I4) — taken here, in uniform control flow.
   let dp1 = dpdx(in.worldPos);
   let dp2 = dpdy(in.worldPos);
@@ -1528,6 +1594,13 @@ ${hdr ? `    // Projected decals (F1f): the boxes round this point, laid over th
       N = dc.N;
       decalGlow = dc.glow;
     }
+    // View modes (F10a): the albedo as it shades, and lighting only's white dielectric in its place.
+    let vmAlbedo = albedo;
+    let vmMetallic = metallic;
+    if (frame.debug.x > 6.5 && frame.debug.x < 7.5) {
+      albedo = vec3<f32>(1.0);
+      metallic = 0.0;
+    }
 ` : ""}
     let L = u.light.xyz;
     let V = u.view.xyz;
@@ -1652,6 +1725,7 @@ ${reflect ? "    // What the light map, probes and SSAO did to the fill, they do
     let sf = shadowFactor(in.lightClip, in.worldPos, abs(dot(normalize(in.normal), u.light.xyz)));
     let lc = i32(u.ssaoMeta.y + 0.5);
     var lit: vec3<f32>;
+    var vmLights = 0;
     if (lc > 0) {
       // --- Multi-light forward accumulation (Modern tier) ---
       // Mirrors meshRasterizer.ts: each light re-evaluates the direct term with
@@ -1662,11 +1736,13 @@ ${reflect ? "    // What the light map, probes and SSAO did to the fill, they do
       for (var i = 0; i < ng; i = i + 1) {
         direct = direct + lightTerm(lights[i], in.worldPos, N, V, ndv, a2, k, f0, kdm, albedo, sf);
       }
+      vmLights = ng;
       // …the rest only the cells they touch (EP8): this fragment's cell, by pixel and depth.
       if (frame.clusterInfo.y > 0.5 && in.eyeDepth >= frame.clusterParams.z) {
         let tile = min(vec2<u32>(in.pos.xy / frame.clusterParams.xy), vec2<u32>(${CLUSTER_X - 1}u, ${CLUSTER_Y - 1}u));
         let slice = min(u32(log(in.eyeDepth / frame.clusterParams.z) * frame.clusterParams.w), ${CLUSTER_Z - 1}u);
         let cell = clusterCell((slice * ${CLUSTER_Y}u + tile.y) * ${CLUSTER_X}u + tile.x);
+        vmLights = vmLights + i32(cell.y);
         for (var j = 0u; j < cell.y; j = j + 1u) {
           direct = direct + lightTerm(lights[clusterLight(cell.x + j)], in.worldPos, N, V, ndv, a2, k, f0, kdm, albedo, sf);
         }
@@ -1686,7 +1762,7 @@ ${reflect ? "    // What the light map, probes and SSAO did to the fill, they do
     lit = lit + toLinear(u.effect0.rgb) + toLinear(u.effect1.rgb) * band;
     // HDR: expose + ACES roll-off, or write the linear colour straight through.
     var shaded = lit;
-${wgslDisplay("shaded", hdr)}${reflect ? /* wgsl */ `
+${wgslDisplay("shaded", hdr)}${hdr ? VIEW_MODE_SHADE : ""}${reflect ? /* wgsl */ `
     // Reflections (I3): the same without the environment's reflection, so the pass can take it away.
     var without = lit - envSpec;
 ${wgslDisplay("without", hdr)}
@@ -3361,8 +3437,9 @@ export class WebgpuSceneRenderer implements SceneRenderer {
    * texture is premultiplied RGBA8 with alpha 0 where nothing drew, and holds
    * this frame until the next render.
    */
-  renderToTexture(instances: readonly MeshSceneInstance[], draw: GpuSceneDraw): any | null {
+  renderToTexture(instances: readonly MeshSceneInstance[], given: GpuSceneDraw): any | null {
     if (this.destroyed) return null;
+    const draw = this.hdr ? viewModeDraw(given) : given;
     if (draw.prepass === true) this.matchMotion(instances);
     const visible = applyScenePasses(instances, draw);
     try {
@@ -3592,6 +3669,7 @@ export class WebgpuSceneRenderer implements SceneRenderer {
         materialId: materialId(entry.primitive.material),
         windBefore: entry.primitive.sway ? windThen : null,
         motionBase: prepass ? instanceCount : 0,
+        lodLevel: entry.lod ?? -1,
         lightChannels: entry.channels,
         ...(this.hdr ? { probeCount: this.capturedProbes, receivesDecals: entry.alpha < 2 && !entry.refract } : {}),
       };
@@ -3656,6 +3734,8 @@ export class WebgpuSceneRenderer implements SceneRenderer {
     // Anti-aliased (I1): draw into multisampled targets and resolve into the colour texture as the last scene pass ends.
     const msaa = draw.antialias === true ? this.ensureMsaa() : null;
     const reflections = draw.reflections === true ? this.ensureReflections() : null;
+    // Overdraw (F10a) adds every fragment up, depth unwritten.
+    const overdraw = this.hdr && viewModeCode(draw.viewMode) === 11;
     const drawRange = (pass: any, from: number, to: number, depthGroup: any) => {
       pass.setBindGroup(1, depthGroup);
       let bound: any = null;
@@ -3663,7 +3743,7 @@ export class WebgpuSceneRenderer implements SceneRenderer {
         const entry = draws[index]!;
         const set = this.pipelinesOf(entry.primitive.material, msaa ? MSAA_SAMPLES : 1, reflections !== null, prepass);
         // A refracting draw covers what it bends (premultiplied, alpha 1), or blends or adds as usual where it bends nothing.
-        const wanted = entry.refract ? set.blend : entry.alpha === 3 ? set.add : entry.alpha === 2 ? set.blend : set.opaque;
+        const wanted = overdraw ? set.add : entry.refract ? set.blend : entry.alpha === 3 ? set.add : entry.alpha === 2 ? set.blend : set.opaque;
         if (wanted !== bound) {
           pass.setPipeline(wanted);
           bound = wanted;
@@ -3954,6 +4034,9 @@ export class WebgpuSceneRenderer implements SceneRenderer {
     // On the AAA tier, with the prepass's G-buffer, reflections trace the Hi-Z chain (F3f); elsewhere I3's march.
     if (reflections && this.hdr && gbuffer && velocity) this.addHizReflections(graph, colour, depth, gbuffer, velocity, rays, draw, temporal ? temporal.projection : draw.projection, msaa !== null);
     else if (reflections) this.addReflections(graph, reflections, colour, depth, rays, temporal ? temporal.projection : draw.projection, msaa !== null);
+    // Motion vectors and overdraw (F10a) are coloured from the whole frame.
+    const viewCode = this.hdr ? viewModeCode(draw.viewMode) : 0;
+    if ((viewCode === 8 && velocity && gbuffer) || viewCode === 11) this.addViewResolve(graph, colour, velocity, gbuffer, viewCode);
     let shown = colour;
     if (temporal && display && velocity) shown = this.addUpscale(graph, temporal, colour, depth, velocity, reactive, display, msaa !== null);
     else if (temporal) this.addTemporal(graph, temporal.uniforms, colour, depth, msaa !== null, hdrTaa ? velocity : null, reactive);
@@ -4388,6 +4471,49 @@ export class WebgpuSceneRenderer implements SceneRenderer {
     return output;
   }
 
+  /** The view modes' resolve (F10a): its pipeline and uniforms, made on first use. */
+  private viewResolve: { pipeline: any; uniforms: any } | null = null;
+
+  /** Colour motion vectors (from the velocity buffer) or overdraw (from the count in the colour's red) over the frame (F10a). */
+  private addViewResolve(graph: FrameGraph, colour: FrameResource, velocity: FrameResource | null, gbuffer: FrameResource | null, code: number): void {
+    const device = this.device;
+    this.viewResolve ??= { pipeline: fullScreenPipeline(device, VIEW_RESOLVE_WGSL, "resolve", this.colourFormat), uniforms: device.createBuffer({ size: 16, usage: 0x40 | 0x08 }) };
+    const vr = this.viewResolve;
+    device.queue.writeBuffer(vr.uniforms, 0, new Float32Array([code, OVERDRAW_FULL, 0, 0]));
+    const size = { width: this.width, height: this.height };
+    const out = graph.createTexture("view mode", { format: this.colourFormat, ...size });
+    graph.addPass("view mode", "render", (pass) => {
+      pass.read(colour);
+      if (velocity) pass.read(velocity);
+      if (gbuffer) pass.read(gbuffer);
+      pass.write(out);
+      return (ctx) => {
+        const encoded = ctx.encoder.beginRenderPass({
+          colorAttachments: [{ view: ctx.texture(out).createView(), clearValue: { r: 0, g: 0, b: 0, a: 0 }, loadOp: "clear", storeOp: "store" }],
+          ...ctx.timing,
+        });
+        encoded.setPipeline(vr.pipeline);
+        encoded.setBindGroup(0, device.createBindGroup({
+          layout: vr.pipeline.getBindGroupLayout(0),
+          entries: [
+            { binding: 0, resource: { buffer: vr.uniforms } },
+            { binding: 1, resource: ctx.texture(colour).createView() },
+            { binding: 2, resource: velocity ? ctx.texture(velocity).createView() : this.blankTexture.createView() },
+            { binding: 3, resource: gbuffer ? ctx.texture(gbuffer).createView() : this.blankTexture.createView() },
+          ],
+        }));
+        encoded.draw(3);
+        encoded.end();
+      };
+    });
+    graph.addPass("view mode.copy", "transfer", (pass) => {
+      pass.read(out, "copySrc");
+      pass.write(colour, "copyDst");
+      pass.keep();
+      return (ctx) => ctx.encoder.copyTextureToTexture({ texture: ctx.texture(out) }, { texture: ctx.texture(colour) }, size);
+    });
+  }
+
   /** The physical camera's passes (F4c) and what they keep between frames: their uniforms, sampler and pipelines. */
   private camera: { uniforms: any; data: Float32Array<ArrayBuffer>; sampler: any; frame: number; pipelines: Map<string, any> } | null = null;
 
@@ -4729,6 +4855,7 @@ export class WebgpuSceneRenderer implements SceneRenderer {
     }
     if (this.hdr) frame.set(this.aerialFrame(draw), FRAME_AERIAL);
     if (this.hdr) frame.set(packFogFrame(this.frameFog, this.fogTerms), FRAME_FOG);
+    if (this.hdr) frame.set([viewModeCode(draw.viewMode), draw.texelDensity ?? DEFAULT_TEXEL_DENSITY], FRAME_DEBUG);
     this.device.queue.writeBuffer(buffers.params, 0, frame);
     this.uploadLocalShadows(local);
     return { ordered, globalCount, clusters };
@@ -5261,6 +5388,21 @@ function fullScreenPipeline(device: any, code: string, entryPoint: string, forma
     fragment: { module, entryPoint, targets: [{ format }] },
     primitive: { topology: "triangle-list" },
   });
+}
+
+/**
+ * A draw as its view mode (F10a) shows it: a diagnostic frame without what would change its values
+ * (temporal accumulation and upscaling, reflections, the camera's effects), with the prepass motion
+ * vectors need, and without the depths overdraw ignores (nor what reads them).
+ */
+function viewModeDraw(draw: GpuSceneDraw): GpuSceneDraw {
+  const code = viewModeCode(draw.viewMode);
+  if (code === 0) return draw;
+  const out: Record<string, unknown> = { ...draw };
+  for (const key of ["temporal", "upscale", "reflections", "camera", "reflectionTrace"]) delete out[key];
+  if (code === 8) out.prepass = true;
+  if (code === 11) for (const key of ["prepass", "virtualShadows", "ambientOcclusion", "screenSpaceGi"]) delete out[key];
+  return out as unknown as GpuSceneDraw;
 }
 
 /** Release a GPU resource without caring whether it exists or supports destroy. */

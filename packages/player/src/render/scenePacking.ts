@@ -110,7 +110,7 @@ import { AREA_KIND } from "./ltc.js";
  *                                    w = the material's ID in the thin G-buffer (F0c)
  * 912  wind1      vec4<f32>    16   the previous frame's wind0, for motion vectors (F0c)
  * 928  motion0    vec4<f32>    16   x = where the frame's motion transforms start in the
- *                                    instance buffer (F0c)
+ *                                    instance buffer (F0c), w = the LOD level drawn (−1 without a chain; F10a)
  * ```
  *
  * 944 bytes used, padded to a 1024-byte stride (a 256-byte multiple a dynamic
@@ -554,6 +554,8 @@ export interface InstanceUniform {
   readonly probeCount?: number;
   /** The draw takes the frame's projected decals (F1f): an opaque or cut-out surface that doesn't refract. */
   readonly receivesDecals?: boolean;
+  /** The LOD level its copies draw (F10a's LOD view), or −1 (the default) without a chain. */
+  readonly lodLevel?: number;
 }
 
 /**
@@ -835,7 +837,7 @@ export function writeInstanceUniform(target: Float32Array, index: number, unifor
   target[base + OFFSET_MOTION0] = uniform.motionBase ?? 0;
   target[base + OFFSET_MOTION0 + 1] = uniform.lightChannels ?? 1;
   target[base + OFFSET_MOTION0 + 2] = uniform.receivesDecals ? 1 : 0;
-  target[base + OFFSET_MOTION0 + 3] = 0;
+  target[base + OFFSET_MOTION0 + 3] = uniform.lodLevel ?? -1;
 }
 
 /** The camera's right and up in world space (the view's first two rows) and the frame's height, for refraction (I5). */

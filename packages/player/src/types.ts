@@ -1,6 +1,7 @@
 import type { AccessibilitySettings, ColorFilter, DecodedTexture, EncodedImage, InputAction, SceneLevel, StringTable, UiDocument } from "@cartbox/editor";
 import type { PhysicsBackend } from "./physics/physicsSession.js";
 import type { QualityChoice, QualityLevel } from "./quality.js";
+import type { ViewMode } from "./render/viewModes.js";
 /**
  * Public and shared types for @cartbox/player.
  *
@@ -392,6 +393,8 @@ export interface PlayerHandle {
   inspect(): InspectedObject[];
   /** Change the graphics preset live: "low" | "medium" | "high" | "auto" (see quality.ts). */
   setQuality(choice: QualityChoice): void;
+  /** Show the 3D scene lit (the default) or as a diagnostic view (F10a; the AAA tier alone draws them). */
+  setViewMode(mode: ViewMode): void;
   /**
    * Hand the running scene streamed textures, keyed by the `ref` of the
    * placeholder each fills (an asset-backed texture's content hash). Safe to

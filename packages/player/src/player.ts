@@ -17,6 +17,7 @@ import { LitCanvasSurface } from "./lighting/LitCanvasSurface.js";
 import { PostFxSurface } from "./fx/PostFxSurface.js";
 import { anyPostFxEnabled, type PostFxSettings } from "./fx/postfx.js";
 import { applyPostVolumes, type PostVolumeFx } from "./fx/postVolumeFx.js";
+import type { ViewMode } from "./render/viewModes.js";
 import { QUALITY_PRESETS, QualityGovernor, applyQualityToPostFx, browserDeviceHints, resolveQuality, type QualityChoice, type QualityLevel, type QualitySettings } from "./quality.js";
 import { createConsole, instantiateEngineModule, loadEngineModule, type ConsoleInstance } from "./engine.js";
 import { createDirectConsole, runsOnDirectCore, type DirectConsole } from "./directConsole.js";
@@ -153,6 +154,7 @@ export class Player {
   private qualitySettings: QualitySettings = QUALITY_PRESETS.high;
   /** "auto" (or no choice) steps the preset down while frames run long (see QualityGovernor). */
   private qualityChoice: QualityChoice | undefined;
+  private viewMode: ViewMode = "lit";
   private readonly qualityGovernor = new QualityGovernor();
   private basePostFx?: PostFxSettings;
   /** The animation's post-FX values this frame, and the post volumes' look (P6). */
@@ -643,6 +645,7 @@ export class Player {
             },
           );
           this.meshSurface.setQuality(this.qualitySettings);
+          this.meshSurface.setViewMode(this.viewMode);
           this.meshSurface.setProfiler(this.profiler);
           // Holo UI documents (I12): the host draws them from what the cart sends.
           const holoDocs = holoDocuments(this.options.ui ?? []);
@@ -1081,6 +1084,13 @@ export class Player {
     this.applyQuality(resolveQuality(choice, browserDeviceHints(this.sceneRenderer ? this.sceneRenderer.backend !== "software" : undefined)));
   }
 
+  /** What the 3D viewport shows (F10a): the lit frame, or a diagnostic of it on the AAA tier. */
+  setViewMode(mode: ViewMode): void {
+    this.viewMode = mode;
+    this.meshSurface?.setViewMode(mode);
+    this.showPostFx();
+  }
+
   private applyQuality(settings: QualitySettings): void {
     this.qualitySettings = settings;
     this.meshSurface?.setQuality(this.qualitySettings);
@@ -1092,7 +1102,9 @@ export class Player {
     const fx = this.postFxSurface ?? this.gpuPostFx;
     if (!fx || !this.basePostFx) return;
     const base = this.animPostFx ? { ...this.basePostFx, values: { ...this.basePostFx.values, ...this.animPostFx } } : this.basePostFx;
-    fx.setSettings(applyQualityToPostFx(applyPostVolumes(base, this.volumePost), this.qualitySettings));
+    const settings = applyQualityToPostFx(applyPostVolumes(base, this.volumePost), this.qualitySettings);
+    // A diagnostic view (F10a) is shown as written: no effect over it.
+    fx.setSettings(this.viewMode === "lit" ? settings : { ...settings, enabled: Object.fromEntries(Object.keys(settings.enabled).map((id) => [id, false])) as typeof settings.enabled });
   }
 
   /**

@@ -9,7 +9,7 @@
  */
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { frameDurationMs, getModel, mount, readCartCode, runsOnDirectCore, type DebugStep, type InspectedObject, type PauseInfo, type ProfileSnapshot, type AnimSpec, type CollisionField, type FlagsField, type MeshScene, type ModelId, type ParticleSpec, type PlayerHandle, type PostFxSettings, type QualityChoice, type SceneSpec, type WorldScene } from "@cartbox/player";
+import { frameDurationMs, getModel, mount, readCartCode, runsOnDirectCore, type DebugStep, type InspectedObject, type PauseInfo, type ProfileSnapshot, type AnimSpec, type CollisionField, type FlagsField, type MeshScene, type ModelId, type ParticleSpec, type PlayerHandle, type PostFxSettings, type QualityChoice, type SceneSpec, type ViewMode, VIEW_MODES, type WorldScene } from "@cartbox/player";
 import { COLOR_FILTERS, COLOR_FILTER_LABELS, languageName, type ColorFilter, type InputAction, type StringTable, type UiDocument } from "@cartbox/editor";
 import { preferredLanguages, readPlayerPrefs } from "@/lib/accessibilityPrefs";
 import { DIRECT_CORE_URL } from "@/lib/consoleModel";
@@ -107,6 +107,8 @@ export function RunOverlay({
   const stageRef = useRef<HTMLDivElement>(null);
   const handleRef = useRef<PlayerHandle | null>(null);
   const [quality, setQuality] = useState<QualityChoice>("auto");
+  // What the 3D viewport shows (F10a): the lit frame, or a diagnostic of it on the AAA tier.
+  const [viewMode, setViewMode] = useState<ViewMode>("lit");
   // Localisation and accessibility (EP19b): the playtest's language (switching restarts it) and a colour preview.
   const [language, setLanguage] = useState<string | null>(null);
   const languageRef = useRef(language);
@@ -406,6 +408,30 @@ export function RunOverlay({
                 <option value="medium">Quality: medium</option>
                 <option value="high">Quality: high</option>
                 <option value="epic">Quality: epic</option>
+              </select>
+            )}
+            {mesh && (
+              <select
+                aria-label="View mode"
+                title="What the viewport shows: the lit frame, or a diagnostic of it (on the AAA tier)"
+                value={viewMode}
+                disabled={status !== "ready"}
+                onChange={(e) => {
+                  const next = e.target.value as ViewMode;
+                  setViewMode(next);
+                  handleRef.current?.setViewMode(next);
+                }}
+                style={{ font: "inherit", padding: "4px 8px", borderRadius: 6 }}
+              >
+                {(["Lighting", "Buffers", "Complexity", "Geometry"] as const).map((group) => (
+                  <optgroup key={group} label={group}>
+                    {VIEW_MODES.filter((m) => m.group === group).map((m) => (
+                      <option key={m.id} value={m.id} title={m.hint}>
+                        View: {m.label}
+                      </option>
+                    ))}
+                  </optgroup>
+                ))}
               </select>
             )}
             {mesh && (

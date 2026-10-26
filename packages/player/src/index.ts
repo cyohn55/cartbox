@@ -138,6 +138,7 @@ export {
   webgpuCanHonour,
 } from "./render/renderCaps.js";
 export type { FrameState, GpuSceneDraw, SceneDraw, SceneRenderer, SunShadow } from "./render/sceneRenderer.js";
+export { DEFAULT_TEXEL_DENSITY, VIEW_MODES, heat, readViewMode, viewModeCode, type ViewMode } from "./render/viewModes.js";
 // Presenting the 3D frame from the GPU (AAA_FIDELITY_ROADMAP.md F0a).
 export {
   COMPOSE_UNIFORM_FLOATS,
@@ -465,6 +466,7 @@ export function mount(container: HTMLElement, options: PlayerOptions): PlayerHan
     editTouchLayout: () => player.editTouchLayout(),
     inspect: () => player.inspect(),
     setQuality: (choice) => player.setQuality(choice),
+    setViewMode: (mode) => player.setViewMode(mode),
     supplyTextures: (textures) => player.supplyTextures(textures),
     setTimeScale: (scale) => player.setTimeScale(scale),
     timeScale: () => player.timeScale(),

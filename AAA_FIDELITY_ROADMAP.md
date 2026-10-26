@@ -1273,12 +1273,30 @@ Everything else depends on this track. It contains no visible "feature", but its
 
 ### F10. Look development and the editor viewport
 
-- [ ] **F10a. View modes.** The viewport shows exactly what the game renders, plus diagnostic views:
+- [x] **F10a. View modes.** The viewport shows exactly what the game renders, plus diagnostic views:
   - single buffers: lit, unlit, base colour, roughness, metallic, normals, AO, lighting only;
   - motion vectors;
   - complexity: shader complexity, light complexity, overdraw;
   - geometry and textures: LOD and cluster colouring, texel density, mip residency;
   - shadow cascades.
+  - **Done** on the `aaa` tier (`player render/viewModes.ts`). Every other tier draws the lit frame.
+    - **In the scene's own shader.** A view code in the frame's uniforms (`Frame.debug`) swaps the lit colour for what the shader shades with:
+      - the buffers: unlit, base colour (maps, blends, detail and decals applied), roughness, metallic, the world-space shading normal, and AO (the material's times GTAO's);
+      - lighting only: the same light on a white dielectric;
+      - shader complexity: an estimate from the maps, layers, features and lights a pixel runs;
+      - light complexity: the lights it loops over, global and clustered;
+      - LOD: the level each batch draws, carried in its uniforms (`motion0.w`);
+      - texel density: base-colour texels per metre against a target (512 by default, `SceneDraw.texelDensity`);
+      - mip level: the base colour's mip, from the UV derivatives;
+      - shadow cascades: the sun's cascade by view depth.
+    - **From the whole frame.**
+      - Motion vectors come from the prepass's velocity buffer (forced on): hue for direction, brightness for speed.
+      - Overdraw draws every batch additively with depth unwritten and the prepass off, counting fragments, then maps the count to the heat ramp.
+      - A resolve pass colours both and copies them over the frame.
+    - **Shown as written.** A diagnostic frame drops TAA and upscaling, reflections and the camera's effects. The presenter shows it over black, without exposure, tone map, shafts or metering, and the cart's post-FX stage turns its effects off.
+    - **In the editor.** A "View" picker in the playtest bar, grouped Lighting / Buffers / Complexity / Geometry (`PlayerHandle.setViewMode`).
+    - Tests: `Unit Tests/view-modes.test.ts`. On Dawn, each buffer reads its material's values, lighting only lights white, light count, LOD level, texel density (under, on, over), the mip, overdraw's count of three, and motion against a still frame.
+    - *Left for later:* cluster colouring waits for F6a's clusters, and true mip *residency* for F1b's streaming (the mip view shows the mip wanted).
 - [ ] **F10b. Path-traced reference.**
   - A progressive WebGPU compute path tracer over the scene BVH, using the same materials and lights. It is the ground truth for F0–F5 parity tests, the look-dev check, and the source for F3d bakes.
   - A **high-resolution capture** mode (accumulated, up to 8K) for marketing shots and the roadmap's reference images.

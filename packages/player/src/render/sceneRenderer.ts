@@ -20,6 +20,7 @@
  * rasteriser is a hardcoded call. See ERA_MODELS.md §5.1.
  */
 
+import type { ViewMode } from "./viewModes.js";
 import type { SsgiFrame } from "./ssgi.js";
 import type { CameraEffects } from "./cameraEffects.js";
 import {
@@ -254,6 +255,13 @@ export interface SceneDraw {
   readonly fog?: SceneFog | null;
   /** Seconds since the scene started, for animated emissive (scroll and pulse). */
   readonly time?: number;
+  /**
+   * What the viewport shows (AAA_FIDELITY_ROADMAP.md F10a; viewModes.ts): the lit frame (the default), or a
+   * diagnostic of it, on the linear-light renderer. Every other renderer draws the lit frame.
+   */
+  readonly viewMode?: ViewMode;
+  /** The texel density the texel-density view takes as on target, per metre (512 when omitted). */
+  readonly texelDensity?: number;
   /** The scene's wind (B6): it sways primitives that carry per-vertex sway. Omitted is still air. */
   readonly wind?: SceneWind | null;
   /**
