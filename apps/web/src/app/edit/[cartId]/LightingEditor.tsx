@@ -58,6 +58,7 @@ import {
   updateSceneLight,
   type ProceduralSky,
   type AtmosphereSettings,
+  type VolumetricFogSettings,
   type ReflectionProbe,
   type SceneFog,
   type SceneLight,
@@ -1028,6 +1029,39 @@ function FogControls({ lighting, onChange }: LightingEditorProps & { lighting: S
             onChange={(max) => patch({ max })}
           />
           <FogLayerControls fog={fog} patch={patch} />
+          <VolumetricFogControls fog={fog} patch={patch} />
+        </>
+      )}
+    </>
+  );
+}
+
+/**
+ * Volumetric fog (AAA_FIDELITY_ROADMAP.md F5b): on the AAA tier the densities
+ * above become a medium the sun and sky light scatter in, shadowed into
+ * shafts, in place of the fade toward the fog colour (which the other tiers keep).
+ */
+function VolumetricFogControls({ fog, patch }: { fog: SceneFog; patch: (next: Partial<SceneFog>) => void }) {
+  const v = fog.volumetric ?? null;
+  const set = (next: Partial<VolumetricFogSettings>) => v && patch({ volumetric: { ...v, ...next } });
+  return (
+    <>
+      <SegmentedControl
+        label="Volumetric (AAA)"
+        ariaLabel="Volumetric fog"
+        selected={v ? "on" : "off"}
+        onSelect={(id) => patch({ volumetric: id === "on" ? (v ?? {}) : null })}
+        options={[
+          { id: "off", label: "Painted" },
+          { id: "on", label: "Volumetric", hint: "On the AAA tier, the fog's densities become a medium lit by the sun (through its shadows, so shafts of light appear) and the sky. Start and Max don't apply to it; the other tiers keep the painted fade" },
+        ]}
+      />
+      {v && (
+        <>
+          <ColorRow label="Scattering" value={v.albedo ?? [1, 1, 1]} onChange={(albedo) => set({ albedo })} />
+          <RangeControl label="Toward the sun" nested min={-0.5} max={0.95} step={0.01} value={v.anisotropy ?? 0.6} ariaLabel="Fog anisotropy" display={(v.anisotropy ?? 0.6).toFixed(2)} onChange={(anisotropy) => set({ anisotropy })} />
+          <RangeControl label="Reach" nested min={16} max={500} step={4} value={v.distance ?? 96} ariaLabel="Volumetric fog reach" display={`${Math.round(v.distance ?? 96)} m`} onChange={(distance) => set({ distance })} />
+          <RangeControl label="Sky light" nested min={0} max={4} step={0.05} value={v.ambient ?? 1} ariaLabel="Volumetric fog sky light" display={`×${(v.ambient ?? 1).toFixed(2)}`} onChange={(ambient) => set({ ambient })} />
         </>
       )}
     </>

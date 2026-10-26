@@ -5112,6 +5112,10 @@ declare class WebgpuSceneRenderer implements SceneRenderer {
     private frameDepthView;
     /** Whether this frame's ambient light takes GTAO (F3c), for the frame uniform. */
     private frameGtao;
+    /** This frame's volumetric fog (F5b), its volumes (made when a frame first has some) and the shader's terms. */
+    private frameFog;
+    private volumetricFog;
+    private readonly fogTerms;
     /** The physical sky's LUTs (F5a-2), made when a draw first brings one, and the frame's aerial terms. */
     private atmosphere;
     private readonly aerialTerms;
@@ -5283,6 +5287,14 @@ declare class WebgpuSceneRenderer implements SceneRenderer {
      * write both and their params. An orthographic view (no cells) loops every light.
      */
     private clusterLights;
+    /**
+     * This draw's volumetric fog (F5b), on the linear-light renderer, for a
+     * perspective camera under a rig whose fog is volumetric: the grid for the
+     * frame's size, the sun (shadowed by its cascades when it casts) and the
+     * sky's mean radiance, and the camera, uniforms written. Null (and the
+     * history dropped) otherwise.
+     */
+    private prepareFog;
     /**
      * The physical sky's aerial perspective for this draw's camera (F5a-2): its
      * froxels built in compute ahead of the frame, and the terms the shader

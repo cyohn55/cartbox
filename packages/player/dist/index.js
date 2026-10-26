@@ -12842,7 +12842,8 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
     gpu.present({
       base: sky ? { kind: "sky", sky } : this.hud ? { kind: "colour", rgba: HUD_SKY } : { kind: "frame", rgba },
       scene,
-      shafts: sky && sun && lighting?.shafts && lighting.sky ? { sun, color: lighting.sky.sunColor, shafts: lighting.shafts } : null,
+      // On the AAA tier a volumetric fog's shadowed light is the shafts (F5b): the screen-space ones retire.
+      shafts: sky && sun && lighting?.shafts && lighting.sky && !(this.renderer.sunCascades === true && lighting.fog?.volumetric) ? { sun, color: lighting.sky.sunColor, shafts: lighting.shafts } : null,
       front,
       hud: this.hud ? rgba : null,
       hudKey: HUD_TRANSPARENT_SUM,
@@ -17776,7 +17777,10 @@ import {
   PROBE_SH,
   PROBE_VOLUME_SLOTS,
   probeVolumeTexels,
-  aerialCamera as aerialCamera2,
+  aerialCamera as aerialCamera3,
+  fogGrid,
+  fogSun,
+  resolveVolumetricFog,
   MAX_REFLECTION_PROBES as MAX_REFLECTION_PROBES4,
   PROBE_FADE as PROBE_FADE2,
   FOG_GLOW_POWER as FOG_GLOW_POWER2,
@@ -19835,6 +19839,322 @@ var GpuAtmosphere = class {
   }
 };
 
+// src/render/volumetricFog.ts
+import { FOG_SLICES, aerialCamera as aerialCamera2 } from "@cartbox/editor";
+var FOG_FORMAT = "rgba16float";
+var FOG_HISTORY = 0.9;
+var FOG_UNIFORM_FLOATS = 100 + CASCADE_COUNT * 16;
+function fogCamera(view, projection) {
+  const v = view;
+  const eye = [-(v[0] * v[12] + v[1] * v[13] + v[2] * v[14]), -(v[4] * v[12] + v[5] * v[13] + v[6] * v[14]), -(v[8] * v[12] + v[9] * v[13] + v[10] * v[14])];
+  return { camera: aerialCamera2(view, projection), eye };
+}
+function packFogUniforms(frame, out = new Float32Array(FOG_UNIFORM_FLOATS)) {
+  out.fill(0);
+  const v = frame.fog;
+  const { camera, eye } = frame.camera;
+  const history = frame.previous !== null;
+  out.set([...frame.grid, v.distance], 0);
+  out.set([...eye, history ? FOG_HISTORY : 0], 4);
+  out.set([...camera.right, 1 / camera.focalX], 8);
+  out.set([...camera.up, 1 / camera.focalY], 12);
+  out.set([...camera.back, 0], 16);
+  out.set([...frame.jitter, 0], 20);
+  if (frame.previous) {
+    const p = frame.previous;
+    out.set([...p.eye, 1], 24);
+    out.set([...p.camera.right, p.camera.focalX], 28);
+    out.set([...p.camera.up, p.camera.focalY], 32);
+    out.set([...p.camera.back, 0], 36);
+  }
+  const sun = frame.light.sun;
+  if (sun) {
+    out.set([...sun.direction, v.anisotropy], 40);
+    out.set([...sun.radiance.map((r) => Math.PI * r), frame.cascades ? 1 : 0], 44);
+  }
+  out.set([...frame.light.sky.map((s) => s * v.ambient), 0], 48);
+  out.set([...v.albedo, Math.max(0, v.fog.density)], 52);
+  const h = v.fog.height;
+  const boxes = (v.fog.volumes ?? []).slice(0, 4);
+  out.set([h?.density ?? 0, h?.base ?? 0, h?.falloff ?? 0, boxes.length], 56);
+  boxes.forEach((b, i) => {
+    out.set([...b.min, b.density], 60 + i * 8);
+    out.set([...b.max, b.falloff], 64 + i * 8);
+  });
+  const c = frame.cascades;
+  if (c) {
+    out.set([c.strength, 0, 0, 0], 92);
+    out.set(c.cascades.slice(0, CASCADE_COUNT).map((k) => k.texel), 96);
+    c.cascades.slice(0, CASCADE_COUNT).forEach((k, i) => out.set(k.viewProj, 100 + i * 16));
+  }
+  return out;
+}
+var FOG_STRUCT_WGSL = (
+  /* wgsl */
+  `
+struct Fog {
+  grid: vec4f,      // columns, rows, slices, reach
+  eye: vec4f,       // w: the history's weight
+  right: vec4f,     // w: 1 / P[0]
+  up: vec4f,        // w: 1 / P[5]
+  back: vec4f,
+  jitter: vec4f,
+  prevEye: vec4f,   // w: 1 with a history
+  prevRight: vec4f, // w: P[0]
+  prevUp: vec4f,    // w: P[5]
+  prevBack: vec4f,
+  sun: vec4f,       // toward it, w: anisotropy
+  sunE: vec4f,      // \u03C0 \xD7 its radiance, w: 1 when shadowed
+  sky: vec4f,       // the sky's mean radiance \xD7 the ambient setting
+  albedo: vec4f,    // w: the distance fog's density
+  height: vec4f,    // density, base, falloff, box count
+  boxes: array<vec4f, 8>,
+  cascade: vec4f,   // x: strength
+  cascadeTexel: vec4f,
+  cascadeVp: array<mat4x4f, ${CASCADE_COUNT}>,
+};
+@group(0) @binding(0) var<uniform> fog: Fog;
+`
+);
+var FOG_INJECT_WGSL = (
+  /* wgsl */
+  `
+${FOG_STRUCT_WGSL}
+@group(0) @binding(1) var history: texture_3d<f32>;
+@group(0) @binding(2) var linearSamp: sampler;
+@group(0) @binding(3) var cascadeMap: texture_depth_2d_array;
+@group(0) @binding(4) var cascadeSamp: sampler_comparison;
+@group(0) @binding(5) var outLight: texture_storage_3d<rgba16float, write>;
+
+fn extinction(p: vec3f) -> f32 {
+  var sigma = fog.albedo.w;
+  if (fog.height.x > 0.0) { sigma = sigma + fog.height.x * exp(-fog.height.z * max(0.0, p.y - fog.height.y)); }
+  let n = i32(fog.height.w + 0.5);
+  for (var i = 0; i < n; i = i + 1) {
+    let a = fog.boxes[i * 2];
+    let b = fog.boxes[i * 2 + 1];
+    if (a.w > 0.0 && all(p >= a.xyz) && all(p <= b.xyz)) { sigma = sigma + a.w * exp(-b.w * max(0.0, p.y - a.y)); }
+  }
+  return sigma;
+}
+fn phase(c: f32, g: f32) -> f32 {
+  let g2 = g * g;
+  return (1.0 - g2) / (4.0 * 3.14159265 * pow(max(1e-6, 1.0 + g2 - 2.0 * g * c), 1.5));
+}
+// The sun's shadow at p: one comparison tap of the first cascade that holds it, a texel and a half toward the sun.
+fn sunShadow(p: vec3f) -> f32 {
+  if (fog.sunE.w < 0.5) { return 1.0; }
+  for (var i = 0; i < ${CASCADE_COUNT}; i = i + 1) {
+    let q = fog.cascadeVp[i] * vec4f(p + fog.sun.xyz * (1.5 * fog.cascadeTexel[i]), 1.0);
+    if (max(abs(q.x), abs(q.y)) < 1.0 && q.z > 0.0 && q.z < 1.0) {
+      let lit = textureSampleCompareLevel(cascadeMap, cascadeSamp, vec2f(q.x * 0.5 + 0.5, 0.5 - q.y * 0.5), i, q.z);
+      return 1.0 - fog.cascade.x * (1.0 - lit);
+    }
+  }
+  return 1.0;
+}
+fn froxelRay(u: f32, v: f32) -> vec3f {
+  return normalize(fog.right.xyz * ((u * 2.0 - 1.0) * fog.right.w) + fog.up.xyz * ((1.0 - v * 2.0) * fog.up.w) - fog.back.xyz);
+}
+
+@compute @workgroup_size(4, 4, 4)
+fn main(@builtin(global_invocation_id) id: vec3u) {
+  let n = vec3u(fog.grid.xyz + vec3f(0.5));
+  if (any(id >= n)) { return; }
+  let size = vec3f(n);
+  let reach = fog.grid.w;
+  let at = (vec3f(id) + vec3f(0.5) + fog.jitter.xyz) / size;
+  let d = froxelRay(at.x, at.y);
+  let p = fog.eye.xyz + d * (at.z * at.z * reach);
+  let sigma = extinction(p);
+  let sun = fog.sunE.rgb * phase(dot(d, fog.sun.xyz), fog.sun.w) * sunShadow(p);
+  var current = vec4f(fog.albedo.rgb * (sun + fog.sky.rgb) * sigma, sigma);
+  if (fog.prevEye.w > 0.5) {
+    // The froxel's centre, as last frame's camera saw it.
+    let c = (vec3f(id) + vec3f(0.5)) / size;
+    let pc = fog.eye.xyz + froxelRay(c.x, c.y) * (c.z * c.z * reach);
+    let r = pc - fog.prevEye.xyz;
+    let ahead = -dot(r, fog.prevBack.xyz);
+    if (ahead > 1e-4) {
+      let was = vec3f((dot(r, fog.prevRight.xyz) / ahead * fog.prevRight.w + 1.0) * 0.5, (1.0 - dot(r, fog.prevUp.xyz) / ahead * fog.prevUp.w) * 0.5, sqrt(length(r) / reach));
+      if (all(was >= vec3f(0.0)) && all(was <= vec3f(1.0))) {
+        current = mix(current, textureSampleLevel(history, linearSamp, was, 0.0), fog.eye.w);
+      }
+    }
+  }
+  textureStore(outLight, vec3i(id), current);
+}
+`
+);
+var FOG_INTEGRATE_WGSL = (
+  /* wgsl */
+  `
+${FOG_STRUCT_WGSL}
+@group(0) @binding(1) var lightVolume: texture_3d<f32>;
+@group(0) @binding(2) var outVolume: texture_storage_3d<rgba16float, write>;
+
+@compute @workgroup_size(8, 8, 1)
+fn main(@builtin(global_invocation_id) id: vec3u) {
+  let n = vec3u(fog.grid.xyz + vec3f(0.5));
+  if (id.x >= n.x || id.y >= n.y) { return; }
+  let reach = fog.grid.w;
+  var L = vec3f(0.0);
+  var T = 1.0;
+  var t = 0.0;
+  for (var z = 0u; z < n.z; z = z + 1u) {
+    let w = (f32(z) + 0.5) / f32(n.z);
+    let end = w * w * reach;
+    let s = textureLoad(lightVolume, vec3i(vec3u(id.xy, z)), 0);
+    let dt = end - t;
+    let step = exp(-s.a * dt);
+    if (s.a > 1e-9) { L = L + T * (s.rgb - s.rgb * step) / s.a; } else { L = L + T * s.rgb * dt; }
+    T = T * step;
+    t = end;
+    textureStore(outVolume, vec3i(vec3u(id.xy, z)), vec4f(L, T));
+  }
+}
+`
+);
+var FOG_FRAME_FLOATS = 16;
+function packFogFrame(frame, out = new Float32Array(FOG_FRAME_FLOATS)) {
+  out.fill(0);
+  if (!frame) return out;
+  const { camera, eye } = frame.camera;
+  out.set([...eye, 1], 0);
+  out.set([...camera.right, camera.focalX], 4);
+  out.set([...camera.up, camera.focalY], 8);
+  out.set([...camera.back, frame.fog.distance], 12);
+  return out;
+}
+var FOG_SAMPLE_WGSL = (
+  /* wgsl */
+  `
+fn fogAt(P: vec3<f32>) -> vec4<f32> {
+  let ray = P - frame.fogEye.xyz;
+  let ahead = -dot(ray, frame.fogBack.xyz);
+  if (ahead <= 1e-4) { return vec4<f32>(0.0, 0.0, 0.0, 1.0); }
+  let reach = frame.fogBack.w;
+  let t = length(ray);
+  let at = vec3<f32>((dot(ray, frame.fogRight.xyz) / ahead * frame.fogRight.w + 1.0) * 0.5, (1.0 - dot(ray, frame.fogUp.xyz) / ahead * frame.fogUp.w) * 0.5, sqrt(min(1.0, t / reach)));
+  let s = textureSampleLevel(fogVolume, envSamp, at, 0.0);
+  // Nearer than the first slice's centre, the fog fades toward none.
+  let fade = clamp(t / (reach * ${((0.5 / FOG_SLICES) ** 2).toPrecision(6)}), 0.0, 1.0);
+  return vec4<f32>(s.rgb * fade, 1.0 - (1.0 - s.a) * fade);
+}
+`
+);
+function halton2(i, b) {
+  let f3 = 1;
+  let r = 0;
+  for (let k = i; k > 0; k = Math.floor(k / b)) {
+    f3 /= b;
+    r += f3 * (k % b);
+  }
+  return r;
+}
+function fogJitter(n) {
+  const i = n % 64 + 1;
+  return [halton2(i, 2) - 0.5, halton2(i, 3) - 0.5, halton2(i, 5) - 0.5];
+}
+var USAGE3 = { copySrc: 1, textureBinding: 4, storage: 8 };
+var BUFFER = { uniform: 64, copyDst: 8 };
+var GpuVolumetricFog = class {
+  constructor(device) {
+    this.device = device;
+    this.light = null;
+    this.index = 0;
+    this.grid = "";
+    this.data = new Float32Array(FOG_UNIFORM_FLOATS);
+    this.pipelines = null;
+    /** Last frame's camera, while its history is valid. */
+    this.previous = null;
+    this.frames = 0;
+    this.volume = this.texture([1, 1, 1]);
+    this.uniforms = device.createBuffer({ size: FOG_UNIFORM_FLOATS * 4, usage: BUFFER.uniform | BUFFER.copyDst });
+    this.sampler = device.createSampler({ magFilter: "linear", minFilter: "linear", addressModeU: "clamp-to-edge", addressModeV: "clamp-to-edge", addressModeW: "clamp-to-edge" });
+  }
+  /**
+   * Bring the volumes up to the grid, and write the frame's uniforms: with
+   * `temporal`, a jittered sample blended into the last frame's history;
+   * without, the froxels' centres alone. Returns the frame as packed, and
+   * whether the volume was remade (the scene's groups must point at it).
+   */
+  prepare(frame, temporal) {
+    const key = frame.grid.join("x");
+    let remade = false;
+    if (key !== this.grid) {
+      for (const t of [this.volume, ...this.light ?? []]) t.destroy?.();
+      this.light = [this.texture(frame.grid), this.texture(frame.grid)];
+      this.volume = this.texture(frame.grid);
+      this.grid = key;
+      this.previous = null;
+      remade = true;
+    }
+    const full = { ...frame, previous: temporal ? this.previous : null, jitter: temporal ? fogJitter(this.frames) : [0, 0, 0] };
+    this.device.queue.writeBuffer(this.uniforms, 0, packFogUniforms(full, this.data));
+    this.previous = temporal ? frame.camera : null;
+    this.frames += 1;
+    return { frame: full, remade };
+  }
+  /** Encode the inject and integrate passes (after {@link prepare}), shadowed by `cascades` (the map) and its comparison sampler. */
+  encode(encoder, cascades, cascadeSampler, timing = {}) {
+    const device = this.device;
+    const [nx, ny, nz] = this.grid.split("x").map(Number);
+    const pipeline = (code) => device.createComputePipeline({ layout: "auto", compute: { module: device.createShaderModule({ code }), entryPoint: "main" } });
+    this.pipelines ?? (this.pipelines = { inject: pipeline(FOG_INJECT_WGSL), integrate: pipeline(FOG_INTEGRATE_WGSL) });
+    const history = this.light[this.index];
+    const current = this.light[1 - this.index];
+    const pass = encoder.beginComputePass(timing);
+    pass.setPipeline(this.pipelines.inject);
+    pass.setBindGroup(
+      0,
+      device.createBindGroup({
+        layout: this.pipelines.inject.getBindGroupLayout(0),
+        entries: [
+          { binding: 0, resource: { buffer: this.uniforms } },
+          { binding: 1, resource: history.createView() },
+          { binding: 2, resource: this.sampler },
+          { binding: 3, resource: cascades.createView({ dimension: "2d-array" }) },
+          { binding: 4, resource: cascadeSampler },
+          { binding: 5, resource: current.createView() }
+        ]
+      })
+    );
+    pass.dispatchWorkgroups(Math.ceil(nx / 4), Math.ceil(ny / 4), Math.ceil(nz / 4));
+    pass.setPipeline(this.pipelines.integrate);
+    pass.setBindGroup(
+      0,
+      device.createBindGroup({
+        layout: this.pipelines.integrate.getBindGroupLayout(0),
+        entries: [
+          { binding: 0, resource: { buffer: this.uniforms } },
+          { binding: 1, resource: current.createView() },
+          { binding: 2, resource: this.volume.createView() }
+        ]
+      })
+    );
+    pass.dispatchWorkgroups(Math.ceil(nx / 8), Math.ceil(ny / 8));
+    pass.end();
+    this.index = 1 - this.index;
+  }
+  /** Forget the history (a cut, or a frame without fog). */
+  reset() {
+    this.previous = null;
+  }
+  dispose() {
+    for (const t of [this.volume, ...this.light ?? []]) t.destroy?.();
+    this.uniforms.destroy?.();
+  }
+  texture(size) {
+    return this.device.createTexture({
+      size: { width: size[0], height: size[1], depthOrArrayLayers: size[2] },
+      dimension: "3d",
+      format: FOG_FORMAT,
+      usage: USAGE3.textureBinding | USAGE3.storage | USAGE3.copySrc
+    });
+  }
+};
+
 // src/render/localAtlas.ts
 import { localShadowTileCount, localShadowViews, multiplyMat4 as multiplyMat46 } from "@cartbox/editor";
 var LOCAL_ATLAS_SIZE = 4096;
@@ -20068,9 +20388,10 @@ fn localContact(P: vec3<f32>, lp: vec3<f32>) -> f32 {
 // src/render/WebgpuSceneRenderer.ts
 var GBUFFER_FORMAT = "rgba16float";
 var VELOCITY_FORMAT = "rg16float";
-var FRAME_BYTES = 816;
+var FRAME_BYTES = 880;
 var FRAME_CASCADES = 84;
 var FRAME_AERIAL = FRAME_CASCADES + 104;
+var FRAME_FOG = FRAME_AERIAL + 16;
 var FALLBACK_CASCADE_DISTANCE = 80;
 var FALLBACK_CASCADE_SIZE = 2048;
 var READBACK_BUFFERS2 = 3;
@@ -20155,6 +20476,11 @@ function wgslDisplay(v, hdr = false) {
         }
       }
       ${v} = mixAsShown(${v}, fc, f);
+    }
+    // The volumetric fog between the surface and the eye (F5b), as the air below: dimmed, and its light added.
+    if (frame.fogEye.w > 0.5) {
+      let mist = fogAt(in.worldPos);
+      ${v} = ${v} * mist.a + select(mist.rgb, vec3<f32>(0.0), u.pbr.w > 2.5);
     }
     // The physical sky's air between the surface and the eye (F5a-2): what lies beyond it dimmed, the light it
     // scatters toward the eye added (by coverage, as the colour is premultiplied after; an additive surface only dims).
@@ -20269,7 +20595,7 @@ struct Frame {
   localShadow: vec4<f32>, // EP8c: x = 1 when spot/point shadows are on, y = bias, z = slope bias (world units)
   probeMin: vec4<f32>,    // EP9: the probe grid's corner, w = 1 when a grid is bound
   probeScale: vec4<f32>,  // world \u2192 grid units per axis: (count \u2212 1) / (max \u2212 min)
-  probeCount: vec4<f32>,  // probes per axis
+  probeCount: vec4<f32>,  // probes per axis; w = the slots a probe takes along x (F5b-0)
   envSh: array<vec4<f32>, 9>, // F3a: the environment's L2 SH irradiance over \u03C0 (linear variant)
   envInfo: vec4<f32>,         // F3a: x = the prefiltered cube's top mip
   cascadeVp: array<mat4x4<f32>, ${CASCADE_COUNT}>, // F2a: the sun's cascades, world \u2192 light clip (depth 0..1)
@@ -20284,6 +20610,10 @@ struct Frame {
   aerialRight: vec4<f32>,     // F5a-2: its camera's right axis, w = P[0]
   aerialUp: vec4<f32>,        // F5a-2: its up axis, w = P[5]
   aerialBack: vec4<f32>,      // F5a-2: its back axis, w = km of air per world unit
+  fogEye: vec4<f32>,          // F5b: the eye the volumetric fog was built from, w = 1 when it is on
+  fogRight: vec4<f32>,        // F5b: its camera's right axis, w = P[0]
+  fogUp: vec4<f32>,           // F5b: its up axis, w = P[5]
+  fogBack: vec4<f32>,         // F5b: its back axis, w = the volume's reach
 };
 // One spot/point shadow tile (EP8c): world\u2192clip, and params.xy = depth\u2192distance terms.
 struct ShadowTile {
@@ -20347,15 +20677,22 @@ ${hdr ? "// The linear variant's probes (F3b, probeCapture.ts): each one's prefi
 // The opaque pass's depth (EP6b), read by the see-through pass for soft edges;
 // the opaque pass binds a blank in its place.
 @group(1) @binding(0) var sceneDepth: texture_depth_2d;
-// Clustered lights (EP8): per cell (offset, count) into the index list.
-@group(1) @binding(1) var<storage, read> clusterTable: array<vec2<u32>>;
-@group(1) @binding(2) var<storage, read> clusterIndex: array<u32>;
+// Clustered lights (EP8): per cell (offset, count) into the index list, then the list, in one buffer
+// (F5b-0: the stage's eight storage buffers are all in use, so the two share one).
+@group(1) @binding(1) var<storage, read> clusterData: array<u32>;
+fn clusterCell(i: u32) -> vec2<u32> { return vec2<u32>(clusterData[i * 2u], clusterData[i * 2u + 1u]); }
+fn clusterLight(j: u32) -> u32 { return clusterData[${CLUSTER_CELLS * 2}u + j]; }
+// Light probes (EP9) and the probe volume (F3d-3): slot f's probes at x = f \xB7 nx + probe x, in a buffer
+// (F5b-0: it was a 3D texture read texel by texel, and the stage's sixteen sampled textures are all in use).
+@group(1) @binding(2) var<storage, read> probeData: array<vec4<f32>>;
+fn probeTexel(p: vec3<i32>) -> vec4<f32> {
+  let w = i32(frame.probeCount.x * frame.probeCount.w + 0.5);
+  return probeData[(p.z * i32(frame.probeCount.y + 0.5) + p.y) * w + p.x];
+}
 @group(1) @binding(3) var<uniform> frame: Frame;
 // Spot and point light shadows (EP8c): the tile atlas and each tile's view.
 ${hdr ? "// The spot/point lights' depth atlas, drawn on the GPU (F2d).\n@group(1) @binding(4) var localDepth: texture_depth_2d;" : "@group(1) @binding(4) var localAtlas: texture_2d<f32>;"}
 @group(1) @binding(5) var<storage, read> shadowTiles: array<ShadowTile>;
-// Light probes (EP9): the grid as a 3D texture, face f's probes at x = f \xB7 nx + probe x.
-@group(1) @binding(6) var probeGrid: texture_3d<f32>;
 // The opaque scene's colour (I5), copied as the see-through pass begins \u2014 what a
 // refracting surface bends (a 1\xD71 blank in the opaque pass, which never reads it).
 @group(1) @binding(7) var sceneColour: texture_2d<f32>;
@@ -20369,7 +20706,10 @@ ${SH_IRRADIANCE_WGSL}
 ${CASCADE_SHADOW_WGSL}
 // The physical sky's aerial perspective (F5a-2, atmosphere.ts): its froxels as half floats, two a vec4.
 @group(1) @binding(14) var<uniform> aerialLut: array<vec4<u32>, ${AERIAL_LUT_BYTES / 16}>;
-${AERIAL_SAMPLE_WGSL}` : ""}
+${AERIAL_SAMPLE_WGSL}
+// The volumetric fog (F5b, volumetricFog.ts): its light and transmittance, integrated over the froxels.
+@group(1) @binding(6) var fogVolume: texture_3d<f32>;
+${FOG_SAMPLE_WGSL}` : ""}
 // Optical depth of a fog layer thinning above base, along the ray from the eye
 // (height cy, rise dy, length len) over t in [t0, t1] \u2014 fogLayerDepth in skyDome.ts.
 fn fogLayer(d: f32, k: f32, base: f32, cy: f32, dy: f32, len: f32, t0: f32, t1: f32) -> f32 {
@@ -20625,10 +20965,10 @@ fn localShadow(first: i32, lgt: Light, P: vec3<f32>, cosL: f32) -> f32 {
 // One ambient-cube face of the probe grid at grid cell i + fraction f (trilinear).
 fn probeFace(face: i32, i: vec3<i32>, f: vec3<f32>) -> vec3<f32> {
   let o = i + vec3<i32>(face * i32(frame.probeCount.x + 0.5), 0, 0);
-  let x00 = mix(textureLoad(probeGrid, o, 0).rgb, textureLoad(probeGrid, o + vec3<i32>(1, 0, 0), 0).rgb, f.x);
-  let x10 = mix(textureLoad(probeGrid, o + vec3<i32>(0, 1, 0), 0).rgb, textureLoad(probeGrid, o + vec3<i32>(1, 1, 0), 0).rgb, f.x);
-  let x01 = mix(textureLoad(probeGrid, o + vec3<i32>(0, 0, 1), 0).rgb, textureLoad(probeGrid, o + vec3<i32>(1, 0, 1), 0).rgb, f.x);
-  let x11 = mix(textureLoad(probeGrid, o + vec3<i32>(0, 1, 1), 0).rgb, textureLoad(probeGrid, o + vec3<i32>(1, 1, 1), 0).rgb, f.x);
+  let x00 = mix(probeTexel(o).rgb, probeTexel(o + vec3<i32>(1, 0, 0)).rgb, f.x);
+  let x10 = mix(probeTexel(o + vec3<i32>(0, 1, 0)).rgb, probeTexel(o + vec3<i32>(1, 1, 0)).rgb, f.x);
+  let x01 = mix(probeTexel(o + vec3<i32>(0, 0, 1)).rgb, probeTexel(o + vec3<i32>(1, 0, 1)).rgb, f.x);
+  let x11 = mix(probeTexel(o + vec3<i32>(0, 1, 1)).rgb, probeTexel(o + vec3<i32>(1, 1, 1)).rgb, f.x);
   return mix(mix(x00, x10, f.y), mix(x01, x11, f.y), f.z);
 }
 // The ambient scale from the probe grid at P for normal N (mirrors sampleLightProbes).
@@ -20650,7 +20990,7 @@ ${hdr ? (
 // One probe's slot of the volume texture: slots 0\u20138 its SH (slot 0's alpha its validity, slot 1's its sky
 // visibility), slots 9\u201340 its octahedral depths, two texels each.
 fn volumeSlot(slot: i32, i: vec3<i32>) -> vec4<f32> {
-  return textureLoad(probeGrid, i + vec3<i32>(slot * i32(frame.probeCount.x + 0.5), 0, 0), 0);
+  return probeTexel(i + vec3<i32>(slot * i32(frame.probeCount.x + 0.5), 0, 0));
 }
 fn volumeOctTexel(d: vec3<f32>) -> i32 {
   var e = d.xz / (abs(d.x) + abs(d.y) + abs(d.z));
@@ -21393,9 +21733,9 @@ ${reflect ? "    // What the light map, probes and SSAO did to the fill, they do
       if (frame.clusterInfo.y > 0.5 && in.eyeDepth >= frame.clusterParams.z) {
         let tile = min(vec2<u32>(in.pos.xy / frame.clusterParams.xy), vec2<u32>(${CLUSTER_X2 - 1}u, ${CLUSTER_Y2 - 1}u));
         let slice = min(u32(log(in.eyeDepth / frame.clusterParams.z) * frame.clusterParams.w), ${CLUSTER_Z2 - 1}u);
-        let cell = clusterTable[(slice * ${CLUSTER_Y2}u + tile.y) * ${CLUSTER_X2}u + tile.x];
+        let cell = clusterCell((slice * ${CLUSTER_Y2}u + tile.y) * ${CLUSTER_X2}u + tile.x);
         for (var j = 0u; j < cell.y; j = j + 1u) {
-          direct = direct + lightTerm(lights[clusterIndex[cell.x + j]], in.worldPos, N, V, ndv, a2, k, f0, kdm, albedo, sf);
+          direct = direct + lightTerm(lights[clusterLight(cell.x + j)], in.worldPos, N, V, ndv, a2, k, f0, kdm, albedo, sf);
         }
       }
       lit = direct + amb + emis;
@@ -21698,6 +22038,10 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     this.frameDepthView = null;
     /** Whether this frame's ambient light takes GTAO (F3c), for the frame uniform. */
     this.frameGtao = false;
+    /** This frame's volumetric fog (F5b), its volumes (made when a frame first has some) and the shader's terms. */
+    this.frameFog = null;
+    this.volumetricFog = null;
+    this.fogTerms = new Float32Array(FOG_FRAME_FLOATS);
     /** The physical sky's LUTs (F5a-2), made when a draw first brings one, and the frame's aerial terms. */
     this.atmosphere = null;
     this.aerialTerms = new Float32Array(AERIAL_FRAME_FLOATS);
@@ -21986,13 +22330,13 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
       });
       const depthEntries = (multisampled) => [
         { binding: 0, visibility: SHADER_STAGE_FRAGMENT, texture: multisampled ? { sampleType: "depth", multisampled: true } : { sampleType: "depth" } },
+        // The clustered lights' table and index list (EP8), then the probes (EP9, F3d-3), both in storage (F5b-0).
         { binding: 1, visibility: SHADER_STAGE_FRAGMENT, buffer: { type: "read-only-storage" } },
         { binding: 2, visibility: SHADER_STAGE_FRAGMENT, buffer: { type: "read-only-storage" } },
         { binding: 3, visibility: SHADER_STAGE_FRAGMENT, buffer: { type: "uniform" } },
         // The spot/point shadow atlas: the CPU's r32float distances, or the linear-light renderer's GPU depths (F2d).
         { binding: 4, visibility: SHADER_STAGE_FRAGMENT, texture: hdr ? { sampleType: "depth" } : { sampleType: "unfilterable-float" } },
         { binding: 5, visibility: SHADER_STAGE_FRAGMENT, buffer: { type: "read-only-storage" } },
-        { binding: 6, visibility: SHADER_STAGE_FRAGMENT, texture: { sampleType: "unfilterable-float", viewDimension: "3d" } },
         // The opaque scene's colour, for refraction (I5).
         { binding: 7, visibility: SHADER_STAGE_FRAGMENT, texture: { sampleType: "unfilterable-float" } },
         // The split-sum DFG table (F1c), read by the linear-light shader.
@@ -22005,8 +22349,8 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
         { binding: 13, visibility: SHADER_STAGE_FRAGMENT, buffer: { type: "read-only-storage" } },
         // The comparison sampler that filters the sun's GPU cascades (F2a; group 0 binds the cascades).
         { binding: 11, visibility: SHADER_STAGE_FRAGMENT, sampler: { type: "comparison" } },
-        // The physical sky's aerial perspective (F5a-2), read by the linear-light shader.
-        ...hdr ? [{ binding: 14, visibility: SHADER_STAGE_FRAGMENT, buffer: { type: "uniform" } }] : []
+        // The physical sky's aerial perspective (F5a-2), and the volumetric fog (F5b), read by the linear-light shader.
+        ...hdr ? [{ binding: 14, visibility: SHADER_STAGE_FRAGMENT, buffer: { type: "uniform" } }, { binding: 6, visibility: SHADER_STAGE_FRAGMENT, texture: { sampleType: "float", viewDimension: "3d" } }] : []
       ];
       const depthLayout = device.createBindGroupLayout({ entries: depthEntries(false) });
       const depthLayoutMs = device.createBindGroupLayout({ entries: depthEntries(true) });
@@ -22088,9 +22432,9 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
         // RENDER_ATTACHMENT | TEXTURE_BINDING
       });
       const clusterBuffers = {
-        table: device.createBuffer({ size: CLUSTER_CELLS * 8, usage: 128 | 8 }),
+        // The cells' table, then the index list after it (F5b-0).
+        data: device.createBuffer({ size: CLUSTER_CELLS * 8 + CLUSTER_INDEX_CAP2 * 4, usage: 128 | 8 }),
         // STORAGE | COPY_DST
-        index: device.createBuffer({ size: CLUSTER_INDEX_CAP2 * 4, usage: 128 | 8 }),
         params: device.createBuffer({ size: FRAME_BYTES, usage: 64 | 8 })
         // UNIFORM | COPY_DST
       };
@@ -22103,9 +22447,10 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
       device.queue.writeBuffer(ltcBuffer, 0, ltc);
       const decalBuffer = device.createBuffer({ size: DECAL_BUFFER_WORDS * 4, usage: 128 | 8 });
       const aerialBuffer = device.createBuffer({ size: AERIAL_LUT_BYTES, usage: 64 | 128 | 4 });
+      const fogVolume = { texture: device.createTexture({ size: { width: 1, height: 1, depthOrArrayLayers: 1 }, dimension: "3d", format: FOG_FORMAT, usage: 4 }) };
       const iblSampler = device.createSampler({ magFilter: "linear", minFilter: "linear", mipmapFilter: "linear", addressModeU: "clamp-to-edge", addressModeV: "clamp-to-edge", addressModeW: "clamp-to-edge" });
       const atlasBlank = hdr ? device.createTexture({ size: { width: 1, height: 1 }, format: "depth32float", usage: 4 | 16 }) : device.createTexture({ size: { width: 1, height: 1 }, format: "r32float", usage: 4 | 2 });
-      const probesBlank = device.createTexture({ size: { width: 1, height: 1, depthOrArrayLayers: 1 }, dimension: "3d", format: "rgba32float", usage: 4 | 2 });
+      const probesBlank = device.createBuffer({ size: 16, usage: 128 | 8 });
       const behind = device.createTexture({ size: { width, height }, format: colourFormat, usage: 4 | 2 | 16 });
       const behindBlank = device.createTexture({ size: { width: 1, height: 1 }, format: colourFormat, usage: 4 | 2 });
       const sized = { depth: depthTexture, behind };
@@ -22203,18 +22548,17 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
       };
       const makeGroups = (atlas, probes) => {
         const shared = [
-          { binding: 1, resource: { buffer: clusterBuffers.table } },
-          { binding: 2, resource: { buffer: clusterBuffers.index } },
+          { binding: 1, resource: { buffer: clusterBuffers.data } },
+          { binding: 2, resource: { buffer: probes } },
           { binding: 3, resource: { buffer: clusterBuffers.params } },
           { binding: 4, resource: atlas.createView() },
           { binding: 5, resource: { buffer: shadowTiles } },
-          { binding: 6, resource: probes.createView({ dimension: "3d" }) },
           { binding: 8, resource: { buffer: dfgBuffer } },
           { binding: 9, resource: iblSampler },
           { binding: 10, resource: { buffer: ltcBuffer } },
           { binding: 13, resource: { buffer: decalBuffer } },
           { binding: 11, resource: cascades.sampler },
-          ...hdr ? [{ binding: 14, resource: { buffer: aerialBuffer } }] : []
+          ...hdr ? [{ binding: 14, resource: { buffer: aerialBuffer } }, { binding: 6, resource: fogVolume.texture.createView({ dimension: "3d" }) }] : []
         ];
         return {
           blank: device.createBindGroup({ layout: depthLayout, entries: [{ binding: 0, resource: blankDepth.createView() }, ...shared, { binding: 7, resource: behindBlank.createView() }] }),
@@ -22225,18 +22569,17 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
       };
       const makeGroupsMs = (atlas, probes, blank, depth) => {
         const shared = [
-          { binding: 1, resource: { buffer: clusterBuffers.table } },
-          { binding: 2, resource: { buffer: clusterBuffers.index } },
+          { binding: 1, resource: { buffer: clusterBuffers.data } },
+          { binding: 2, resource: { buffer: probes } },
           { binding: 3, resource: { buffer: clusterBuffers.params } },
           { binding: 4, resource: atlas.createView() },
           { binding: 5, resource: { buffer: shadowTiles } },
-          { binding: 6, resource: probes.createView({ dimension: "3d" }) },
           { binding: 8, resource: { buffer: dfgBuffer } },
           { binding: 9, resource: iblSampler },
           { binding: 10, resource: { buffer: ltcBuffer } },
           { binding: 13, resource: { buffer: decalBuffer } },
           { binding: 11, resource: cascades.sampler },
-          ...hdr ? [{ binding: 14, resource: { buffer: aerialBuffer } }] : []
+          ...hdr ? [{ binding: 14, resource: { buffer: aerialBuffer } }, { binding: 6, resource: fogVolume.texture.createView({ dimension: "3d" }) }] : []
         ];
         return {
           blank: device.createBindGroup({ layout: depthLayoutMs, entries: [{ binding: 0, resource: blank.createView() }, ...shared, { binding: 7, resource: behindBlank.createView() }] }),
@@ -22255,6 +22598,7 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
         ltc: ltcBuffer,
         decals: decalBuffer,
         aerial: aerialBuffer,
+        fogVolume,
         atlas: atlasBlank,
         atlasBlank: true,
         probes: probesBlank,
@@ -22611,6 +22955,7 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     this.bindSsao(ssao, this.frameContact || this.frameGtao);
     const drawnProjection = temporal ? temporal.projection : draw.projection;
     this.frameDepthView = this.hdr && prepass ? { viewProj, terms: [drawnProjection[10], drawnProjection[14]] } : null;
+    this.frameFog = this.prepareFog(draw);
     const { ordered } = this.clusterLights(localPlan ? { ...draw, lights: localPlan.lights, localShadows: null } : draw);
     this.uploadLights(packLights(ordered, this.hdr));
     const lightCount = ordered.length;
@@ -22653,7 +22998,8 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
         hdrLightmap: this.hdr && entry.textures.lmHdr !== null,
         model,
         lightCount,
-        fog: draw.fog ?? null,
+        // A volumetric fog (F5b) takes the place of the painted fade.
+        fog: this.frameFog ? null : draw.fog ?? null,
         eye,
         effect: entry.effect ?? null,
         time: draw.time ?? 0,
@@ -22817,6 +23163,14 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
             encoded.end();
           });
         };
+      });
+    }
+    const fog = this.frameFog ? this.volumetricFog : null;
+    if (fog) {
+      const cascadeRes = this.depthGroups.cascades;
+      graph.addPass("volumetric fog", "compute", (pass) => {
+        pass.keep();
+        return (ctx) => fog.encode(ctx.encoder, cascadeRes.texture, cascadeRes.sampler, ctx.timing);
       });
     }
     const localTiles = this.frameLocalTiles;
@@ -23225,8 +23579,8 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     const clusters = ordered.length > globalCount ? buildLightClusters2(ordered, globalCount, draw.view, draw.projection, this.width, this.height) : null;
     const buffers = this.depthGroups.clusters;
     if (clusters) {
-      this.device.queue.writeBuffer(buffers.table, 0, clusters.table);
-      this.device.queue.writeBuffer(buffers.index, 0, clusters.indices, 0, Math.max(4, Math.ceil(clusters.used / 4) * 4));
+      this.device.queue.writeBuffer(buffers.data, 0, clusters.table);
+      this.device.queue.writeBuffer(buffers.data, CLUSTER_CELLS * 8, clusters.indices, 0, Math.max(4, Math.ceil(clusters.used / 4) * 4));
     }
     const near = draw.shadow?.near ?? null;
     const frame = new Float32Array(FRAME_BYTES / 4);
@@ -23248,7 +23602,7 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
       else this.uploadProbeTexture(grid, lightProbeTexels2(grid), 6);
       frame.set([...grid.min, volume ? 2 : 1], 32);
       frame.set([0, 1, 2].map((a) => (grid.counts[a] - 1) / (grid.max[a] - grid.min[a] || 1)), 36);
-      frame.set(grid.counts, 40);
+      frame.set([...grid.counts, volume ? PROBE_VOLUME_SLOTS : 6], 40);
     }
     if (this.hdr) {
       frame.set(this.iblSh, 44);
@@ -23268,9 +23622,38 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
       frame.set([this.frameDepthView.terms[0], this.frameDepthView.terms[1], 1, 0], FRAME_CASCADES + 100);
     }
     if (this.hdr) frame.set(this.aerialFrame(draw), FRAME_AERIAL);
+    if (this.hdr) frame.set(packFogFrame(this.frameFog, this.fogTerms), FRAME_FOG);
     this.device.queue.writeBuffer(buffers.params, 0, frame);
     this.uploadLocalShadows(local);
     return { ordered, globalCount, clusters };
+  }
+  /**
+   * This draw's volumetric fog (F5b), on the linear-light renderer, for a
+   * perspective camera under a rig whose fog is volumetric: the grid for the
+   * frame's size, the sun (shadowed by its cascades when it casts) and the
+   * sky's mean radiance, and the camera, uniforms written. Null (and the
+   * history dropped) otherwise.
+   */
+  prepareFog(draw) {
+    const settings = this.hdr && draw.projection[15] === 0 ? resolveVolumetricFog(draw.fog) : null;
+    if (!settings) {
+      this.volumetricFog?.reset();
+      return null;
+    }
+    const fog = this.volumetricFog ?? (this.volumetricFog = new GpuVolumetricFog(this.device));
+    const sky = [0, 1, 2].map((c) => Math.max(0, this.iblSh[c] * 0.282095));
+    const cascades = this.frameCascades ? { cascades: this.frameCascades.cascades, strength: this.frameCascades.strength } : null;
+    const { frame, remade } = fog.prepare(
+      { fog: settings, light: { sun: fogSun(draw.lights), sky }, grid: fogGrid(this.width, this.height), camera: fogCamera(draw.view, draw.projection), cascades },
+      draw.temporal === true
+    );
+    if (remade) {
+      const groups = this.depthGroups;
+      groups.fogVolume.texture = fog.volume;
+      Object.assign(groups, groups.makeGroups(groups.atlas, groups.probes));
+      if (this.msaa) this.msaa.groups = groups.makeGroupsMs(groups.atlas, groups.probes, this.msaa.blank, this.msaa.depth);
+    }
+    return frame;
   }
   /**
    * The physical sky's aerial perspective for this draw's camera (F5a-2): its
@@ -23280,7 +23663,7 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
   aerialFrame(draw) {
     const sky = draw.atmosphere ?? null;
     const terms = packAerialFrame(sky, draw.view, draw.projection, this.aerialTerms);
-    if (sky && terms[3] === 1) (this.atmosphere ?? (this.atmosphere = new GpuAtmosphere(this.device))).aerial(sky, aerialCamera2(draw.view, draw.projection), this.depthGroups.aerial);
+    if (sky && terms[3] === 1) (this.atmosphere ?? (this.atmosphere = new GpuAtmosphere(this.device))).aerial(sky, aerialCamera3(draw.view, draw.projection), this.depthGroups.aerial);
     return terms;
   }
   /**
@@ -23292,10 +23675,10 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     if (groups.probeSource === grid) return;
     const [nx, ny, nz] = grid.counts;
     if (!groups.probesBlank) destroySafely(groups.probes);
-    groups.probes = this.device.createTexture({ size: { width: nx * slots, height: ny, depthOrArrayLayers: nz }, dimension: "3d", format: "rgba32float", usage: 4 | 2 });
+    groups.probes = this.device.createBuffer({ size: nx * slots * ny * nz * 16, usage: 128 | 8 });
     groups.probesBlank = false;
     groups.probeSource = grid;
-    this.device.queue.writeTexture({ texture: groups.probes }, texels, { bytesPerRow: nx * slots * 16, rowsPerImage: ny }, { width: nx * slots, height: ny, depthOrArrayLayers: nz });
+    this.device.queue.writeBuffer(groups.probes, 0, texels, 0, nx * slots * ny * nz * 4);
     Object.assign(groups, groups.makeGroups(groups.atlas, groups.probes));
     if (this.msaa) this.msaa.groups = groups.makeGroupsMs(groups.atlas, groups.probes, this.msaa.blank, this.msaa.depth);
   }
@@ -23658,8 +24041,7 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     destroySafely(this.depthGroups.blankTexture);
     destroySafely(this.depthGroups.sized.behind);
     destroySafely(this.depthGroups.behindBlank);
-    destroySafely(this.depthGroups.clusters.table);
-    destroySafely(this.depthGroups.clusters.index);
+    destroySafely(this.depthGroups.clusters.data);
     destroySafely(this.depthGroups.clusters.params);
     destroySafely(this.depthGroups.shadowTiles);
     destroySafely(this.depthGroups.dfg);
@@ -23675,6 +24057,8 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     if (this.probeTexture !== this.blankTexture) destroySafely(this.probeTexture);
     this.probeCapture?.dispose();
     this.atmosphere?.dispose();
+    this.volumetricFog?.dispose();
+    destroySafely(this.depthGroups.fogVolume.texture);
     destroySafely(this.blankProbeCubes);
     destroySafely(this.probeBuffer);
     destroySafely(this.ssaoTexture);
@@ -24312,7 +24696,7 @@ ${BLOOM_HEAD}
 }
 `
 );
-var USAGE3 = { copyDst: 2, textureBinding: 4, renderAttachment: 16, uniform: 64, bufferCopyDst: 8 };
+var USAGE4 = { copyDst: 2, textureBinding: 4, renderAttachment: 16, uniform: 64, bufferCopyDst: 8 };
 var STAGE_FRAGMENT = 2;
 var GpuPostFx = class {
   constructor(device, width, height) {
@@ -24334,8 +24718,8 @@ var GpuPostFx = class {
     };
     const sampler = (filter) => device.createSampler({ magFilter: filter, minFilter: filter, addressModeU: "clamp-to-edge", addressModeV: "clamp-to-edge" });
     this.samplers = { nearest: sampler("nearest"), linear: sampler("linear") };
-    this.uniformBuffer = device.createBuffer({ size: POST_UNIFORM_FLOATS * 4, usage: USAGE3.uniform | USAGE3.bufferCopyDst });
-    this.blank = device.createTexture({ size: { width: 1, height: 1 }, format: "rgba8unorm", usage: USAGE3.textureBinding | USAGE3.copyDst });
+    this.uniformBuffer = device.createBuffer({ size: POST_UNIFORM_FLOATS * 4, usage: USAGE4.uniform | USAGE4.bufferCopyDst });
+    this.blank = device.createTexture({ size: { width: 1, height: 1 }, format: "rgba8unorm", usage: USAGE4.textureBinding | USAGE4.copyDst });
     device.queue.writeTexture({ texture: this.blank }, new Uint8Array([0, 0, 0, 255]), { bytesPerRow: 4 }, { width: 1, height: 1 });
   }
   /**
@@ -24393,10 +24777,10 @@ var GpuPostFx = class {
       for (let i = 0; i < count; i += 1) {
         const { width, height } = pyramidLevelSize(this.width, this.height, i);
         this.levels.push({
-          texture: this.device.createTexture({ size: { width, height }, format: "rgba16float", usage: USAGE3.renderAttachment | USAGE3.textureBinding }),
+          texture: this.device.createTexture({ size: { width, height }, format: "rgba16float", usage: USAGE4.renderAttachment | USAGE4.textureBinding }),
           width,
           height,
-          uniforms: this.device.createBuffer({ size: 32, usage: USAGE3.uniform | USAGE3.bufferCopyDst })
+          uniforms: this.device.createBuffer({ size: 32, usage: USAGE4.uniform | USAGE4.bufferCopyDst })
         });
       }
     }
@@ -24437,7 +24821,7 @@ var GpuPostFx = class {
     const coarser = this.levels[index + 1];
     let buffer = this.upUniforms.get(index);
     if (!buffer) {
-      buffer = this.device.createBuffer({ size: 32, usage: USAGE3.uniform | USAGE3.bufferCopyDst });
+      buffer = this.device.createBuffer({ size: 32, usage: USAGE4.uniform | USAGE4.bufferCopyDst });
       this.upUniforms.set(index, buffer);
     }
     this.device.queue.writeBuffer(buffer, 0, new Float32Array([1 / coarser.width, 1 / coarser.height, 1 / target.width, 1 / target.height, 0, 0, radius, 0]));
@@ -24462,7 +24846,7 @@ var GpuPostFx = class {
     if (this.lut?.source === lut) return this.lut.texture;
     this.lut?.texture.destroy?.();
     const strip = lutStrip(lut);
-    const texture = this.device.createTexture({ size: { width: strip.width, height: strip.height }, format: "rgba8unorm", usage: USAGE3.textureBinding | USAGE3.copyDst });
+    const texture = this.device.createTexture({ size: { width: strip.width, height: strip.height }, format: "rgba8unorm", usage: USAGE4.textureBinding | USAGE4.copyDst });
     this.device.queue.writeTexture({ texture }, strip.data, { bytesPerRow: strip.width * 4, rowsPerImage: strip.height }, { width: strip.width, height: strip.height });
     this.lut = { source: lut, texture };
     return texture;
@@ -24748,7 +25132,7 @@ var SHAFT_CELLS_ACROSS = 160;
 var SHAFT_SKY_SHARE = 0.35;
 var BLOOM_MIX = 1 / 6;
 var AUTO_KEY_FALLBACK = 0.18;
-var USAGE4 = {
+var USAGE5 = {
   copySrc: 1,
   copyDst: 2,
   textureBinding: 4,
@@ -25349,7 +25733,7 @@ var GpuPresenter = class {
     this.outputHeight = layerHeight;
     this.hdr = options.hdr === true;
     this.extended = this.hdr && options.extended === true;
-    this.blank = device.createTexture({ size: { width: 1, height: 1 }, format: "rgba8unorm", usage: USAGE4.textureBinding | USAGE4.copyDst });
+    this.blank = device.createTexture({ size: { width: 1, height: 1 }, format: "rgba8unorm", usage: USAGE5.textureBinding | USAGE5.copyDst });
     device.queue.writeTexture({ texture: this.blank }, new Uint8Array(4), { bytesPerRow: 4 }, { width: 1, height: 1 });
     const sampler = (u, v) => device.createSampler({ magFilter: "linear", minFilter: "linear", addressModeU: u, addressModeV: v });
     this.linear = { clamp: sampler("clamp-to-edge", "clamp-to-edge"), wrapU: sampler("repeat", "clamp-to-edge"), repeat: sampler("repeat", "repeat") };
@@ -25370,7 +25754,7 @@ var GpuPresenter = class {
       lens: layout([uni(), tex(1), samp(2), { binding: 3, visibility: STAGE_FRAGMENT2, buffer: { type: "uniform" } }]),
       measure: layout([uni(STAGE_COMPUTE), tex(1, STAGE_COMPUTE), tex(2, STAGE_COMPUTE), { binding: 3, visibility: STAGE_COMPUTE, buffer: { type: "storage" } }])
     };
-    const ubuf = (floats) => device.createBuffer({ size: floats * 4, usage: USAGE4.uniform | USAGE4.bufferCopyDst });
+    const ubuf = (floats) => device.createBuffer({ size: floats * 4, usage: USAGE5.uniform | USAGE5.bufferCopyDst });
     this.uniforms = {
       sky: ubuf(SKY_UNIFORM_FLOATS),
       atmosphere: ubuf(ATMOSPHERE_SKY_UNIFORM_FLOATS),
@@ -25384,8 +25768,8 @@ var GpuPresenter = class {
     this.transients = new TransientPool(device);
     this.timer = GraphTimer.create(device);
     this.measured = {
-      result: device.createBuffer({ size: 16, usage: USAGE4.bufferStorage | USAGE4.bufferCopySrc }),
-      staging: device.createBuffer({ size: 16, usage: USAGE4.mapRead | USAGE4.bufferCopyDst }),
+      result: device.createBuffer({ size: 16, usage: USAGE5.bufferStorage | USAGE5.bufferCopySrc }),
+      staging: device.createBuffer({ size: 16, usage: USAGE5.mapRead | USAGE5.bufferCopyDst }),
       busy: false
     };
   }
@@ -25720,7 +26104,7 @@ var GpuPresenter = class {
     const m = this.measured;
     m.busy = true;
     try {
-      await m.staging.mapAsync(USAGE4.mapRead);
+      await m.staging.mapAsync(USAGE5.mapRead);
       if (this.destroyed) return;
       const [sum, count, open, taps] = Array.from(new Float32Array(m.staging.getMappedRange().slice(0)));
       m.staging.unmap();
@@ -25743,7 +26127,7 @@ var GpuPresenter = class {
     let entry = this.uploads.get(slot);
     if (!entry) {
       entry = {
-        texture: this.device.createTexture({ size: { width, height }, format: "rgba8unorm", usage: USAGE4.textureBinding | USAGE4.copyDst }),
+        texture: this.device.createTexture({ size: { width, height }, format: "rgba8unorm", usage: USAGE5.textureBinding | USAGE5.copyDst }),
         width,
         height
       };
@@ -25757,7 +26141,7 @@ var GpuPresenter = class {
   panoramaFor(map) {
     if (this.panorama?.source === map) return this.panorama.texture;
     this.panorama?.texture.destroy?.();
-    const texture = this.device.createTexture({ size: { width: map.width, height: map.height }, format: "rgba8unorm", usage: USAGE4.textureBinding | USAGE4.copyDst });
+    const texture = this.device.createTexture({ size: { width: map.width, height: map.height }, format: "rgba8unorm", usage: USAGE5.textureBinding | USAGE5.copyDst });
     this.device.queue.writeTexture({ texture }, map.data, { bytesPerRow: map.width * 4, rowsPerImage: map.height }, { width: map.width, height: map.height });
     this.panorama = { source: map, texture };
     return texture;
@@ -25770,7 +26154,7 @@ var GpuPresenter = class {
     cached?.texture.destroy?.();
     const size = CLOUD_TILE_SIZE;
     const count = Math.max(1, shown.length);
-    const texture = this.device.createTexture({ size: { width: size, height: size, depthOrArrayLayers: count }, format: "r8unorm", usage: USAGE4.textureBinding | USAGE4.copyDst });
+    const texture = this.device.createTexture({ size: { width: size, height: size, depthOrArrayLayers: count }, format: "r8unorm", usage: USAGE5.textureBinding | USAGE5.copyDst });
     shown.forEach((layer, i) => {
       const bytes = new Uint8Array(size * size);
       for (let k = 0; k < bytes.length; k += 1) bytes[k] = Math.round(Math.max(0, Math.min(1, layer.density[k] ?? 0)) * 255);

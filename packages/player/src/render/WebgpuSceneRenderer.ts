@@ -86,6 +86,9 @@ import {
   PROBE_VOLUME_SLOTS,
   probeVolumeTexels,
   aerialCamera,
+  fogGrid,
+  fogSun,
+  resolveVolumetricFog,
   type ProbeVolume,
   MAX_REFLECTION_PROBES,
   PROBE_FADE,
@@ -152,6 +155,7 @@ import { reflectionShaderWgsl, reflectionUniforms } from "./reflections.js";
 import { CONTACT_UNIFORM_FLOATS, SCREEN_SHADING_FORMAT, contactShaderWgsl, contactUniforms } from "./contactShadows.js";
 import { GTAO_UNIFORM_FLOATS, gtaoShaderWgsl, gtaoTemporalWgsl, gtaoUniforms } from "./gtao.js";
 import { AERIAL_FRAME_FLOATS, AERIAL_LUT_BYTES, AERIAL_SAMPLE_WGSL, GpuAtmosphere, packAerialFrame } from "./atmosphere.js";
+import { FOG_FORMAT, FOG_FRAME_FLOATS, FOG_SAMPLE_WGSL, GpuVolumetricFog, fogCamera, packFogFrame, type FogFrame } from "./volumetricFog.js";
 import {
   LOCAL_ATLAS_SIZE,
   LOCAL_CLEAR_WGSL,
@@ -227,14 +231,15 @@ export const GBUFFER_FORMAT = "rgba16float";
 /** The velocity buffer's format (F0c): screen motion since last frame, in UV units. */
 export const VELOCITY_FORMAT = "rg16float";
 
-/** The per-frame globals' bytes (WGSL `Frame`): cluster params and info, the near cascade's matrix and params, the sun's GPU cascades (F2a), and the aerial perspective's camera (F5a-2). */
-const FRAME_BYTES = 816;
+/** The per-frame globals' bytes (WGSL `Frame`): cluster params and info, the near cascade's matrix and params, the sun's GPU cascades (F2a), the aerial perspective's camera (F5a-2) and the fog's (F5b). */
+const FRAME_BYTES = 880;
 
 /** Floats into `Frame` where the sun's GPU cascades start (F2a): four matrices, then the slices' far depths, the flags and the texels. */
 const FRAME_CASCADES = 84;
 
-/** Floats into `Frame` where the aerial perspective's camera starts (F5a-2). */
+/** Floats into `Frame` where the aerial perspective's camera starts (F5a-2), and the volumetric fog's (F5b). */
 const FRAME_AERIAL = FRAME_CASCADES + 104;
+const FRAME_FOG = FRAME_AERIAL + 16;
 
 /** The cascades the linear-light renderer gives a caller that passes only a CPU shadow map (F2a): how far they reach, and their size. */
 const FALLBACK_CASCADE_DISTANCE = 80;
@@ -342,6 +347,11 @@ function wgslDisplay(v: string, hdr = false): string {
         }
       }
       ${v} = mixAsShown(${v}, fc, f);
+    }
+    // The volumetric fog between the surface and the eye (F5b), as the air below: dimmed, and its light added.
+    if (frame.fogEye.w > 0.5) {
+      let mist = fogAt(in.worldPos);
+      ${v} = ${v} * mist.a + select(mist.rgb, vec3<f32>(0.0), u.pbr.w > 2.5);
     }
     // The physical sky's air between the surface and the eye (F5a-2): what lies beyond it dimmed, the light it
     // scatters toward the eye added (by coverage, as the colour is premultiplied after; an additive surface only dims).
@@ -456,7 +466,7 @@ struct Frame {
   localShadow: vec4<f32>, // EP8c: x = 1 when spot/point shadows are on, y = bias, z = slope bias (world units)
   probeMin: vec4<f32>,    // EP9: the probe grid's corner, w = 1 when a grid is bound
   probeScale: vec4<f32>,  // world → grid units per axis: (count − 1) / (max − min)
-  probeCount: vec4<f32>,  // probes per axis
+  probeCount: vec4<f32>,  // probes per axis; w = the slots a probe takes along x (F5b-0)
   envSh: array<vec4<f32>, 9>, // F3a: the environment's L2 SH irradiance over π (linear variant)
   envInfo: vec4<f32>,         // F3a: x = the prefiltered cube's top mip
   cascadeVp: array<mat4x4<f32>, ${CASCADE_COUNT}>, // F2a: the sun's cascades, world → light clip (depth 0..1)
@@ -471,6 +481,10 @@ struct Frame {
   aerialRight: vec4<f32>,     // F5a-2: its camera's right axis, w = P[0]
   aerialUp: vec4<f32>,        // F5a-2: its up axis, w = P[5]
   aerialBack: vec4<f32>,      // F5a-2: its back axis, w = km of air per world unit
+  fogEye: vec4<f32>,          // F5b: the eye the volumetric fog was built from, w = 1 when it is on
+  fogRight: vec4<f32>,        // F5b: its camera's right axis, w = P[0]
+  fogUp: vec4<f32>,           // F5b: its up axis, w = P[5]
+  fogBack: vec4<f32>,         // F5b: its back axis, w = the volume's reach
 };
 // One spot/point shadow tile (EP8c): world→clip, and params.xy = depth→distance terms.
 struct ShadowTile {
@@ -538,15 +552,22 @@ ${hdr ? "// The linear variant's probes (F3b, probeCapture.ts): each one's prefi
 // The opaque pass's depth (EP6b), read by the see-through pass for soft edges;
 // the opaque pass binds a blank in its place.
 @group(1) @binding(0) var sceneDepth: texture_depth_2d;
-// Clustered lights (EP8): per cell (offset, count) into the index list.
-@group(1) @binding(1) var<storage, read> clusterTable: array<vec2<u32>>;
-@group(1) @binding(2) var<storage, read> clusterIndex: array<u32>;
+// Clustered lights (EP8): per cell (offset, count) into the index list, then the list, in one buffer
+// (F5b-0: the stage's eight storage buffers are all in use, so the two share one).
+@group(1) @binding(1) var<storage, read> clusterData: array<u32>;
+fn clusterCell(i: u32) -> vec2<u32> { return vec2<u32>(clusterData[i * 2u], clusterData[i * 2u + 1u]); }
+fn clusterLight(j: u32) -> u32 { return clusterData[${CLUSTER_CELLS * 2}u + j]; }
+// Light probes (EP9) and the probe volume (F3d-3): slot f's probes at x = f · nx + probe x, in a buffer
+// (F5b-0: it was a 3D texture read texel by texel, and the stage's sixteen sampled textures are all in use).
+@group(1) @binding(2) var<storage, read> probeData: array<vec4<f32>>;
+fn probeTexel(p: vec3<i32>) -> vec4<f32> {
+  let w = i32(frame.probeCount.x * frame.probeCount.w + 0.5);
+  return probeData[(p.z * i32(frame.probeCount.y + 0.5) + p.y) * w + p.x];
+}
 @group(1) @binding(3) var<uniform> frame: Frame;
 // Spot and point light shadows (EP8c): the tile atlas and each tile's view.
 ${hdr ? "// The spot/point lights' depth atlas, drawn on the GPU (F2d).\n@group(1) @binding(4) var localDepth: texture_depth_2d;" : "@group(1) @binding(4) var localAtlas: texture_2d<f32>;"}
 @group(1) @binding(5) var<storage, read> shadowTiles: array<ShadowTile>;
-// Light probes (EP9): the grid as a 3D texture, face f's probes at x = f · nx + probe x.
-@group(1) @binding(6) var probeGrid: texture_3d<f32>;
 // The opaque scene's colour (I5), copied as the see-through pass begins — what a
 // refracting surface bends (a 1×1 blank in the opaque pass, which never reads it).
 @group(1) @binding(7) var sceneColour: texture_2d<f32>;
@@ -560,7 +581,10 @@ ${SH_IRRADIANCE_WGSL}
 ${CASCADE_SHADOW_WGSL}
 // The physical sky's aerial perspective (F5a-2, atmosphere.ts): its froxels as half floats, two a vec4.
 @group(1) @binding(14) var<uniform> aerialLut: array<vec4<u32>, ${AERIAL_LUT_BYTES / 16}>;
-${AERIAL_SAMPLE_WGSL}` : ""}
+${AERIAL_SAMPLE_WGSL}
+// The volumetric fog (F5b, volumetricFog.ts): its light and transmittance, integrated over the froxels.
+@group(1) @binding(6) var fogVolume: texture_3d<f32>;
+${FOG_SAMPLE_WGSL}` : ""}
 // Optical depth of a fog layer thinning above base, along the ray from the eye
 // (height cy, rise dy, length len) over t in [t0, t1] — fogLayerDepth in skyDome.ts.
 fn fogLayer(d: f32, k: f32, base: f32, cy: f32, dy: f32, len: f32, t0: f32, t1: f32) -> f32 {
@@ -822,10 +846,10 @@ fn localShadow(first: i32, lgt: Light, P: vec3<f32>, cosL: f32) -> f32 {
 // One ambient-cube face of the probe grid at grid cell i + fraction f (trilinear).
 fn probeFace(face: i32, i: vec3<i32>, f: vec3<f32>) -> vec3<f32> {
   let o = i + vec3<i32>(face * i32(frame.probeCount.x + 0.5), 0, 0);
-  let x00 = mix(textureLoad(probeGrid, o, 0).rgb, textureLoad(probeGrid, o + vec3<i32>(1, 0, 0), 0).rgb, f.x);
-  let x10 = mix(textureLoad(probeGrid, o + vec3<i32>(0, 1, 0), 0).rgb, textureLoad(probeGrid, o + vec3<i32>(1, 1, 0), 0).rgb, f.x);
-  let x01 = mix(textureLoad(probeGrid, o + vec3<i32>(0, 0, 1), 0).rgb, textureLoad(probeGrid, o + vec3<i32>(1, 0, 1), 0).rgb, f.x);
-  let x11 = mix(textureLoad(probeGrid, o + vec3<i32>(0, 1, 1), 0).rgb, textureLoad(probeGrid, o + vec3<i32>(1, 1, 1), 0).rgb, f.x);
+  let x00 = mix(probeTexel(o).rgb, probeTexel(o + vec3<i32>(1, 0, 0)).rgb, f.x);
+  let x10 = mix(probeTexel(o + vec3<i32>(0, 1, 0)).rgb, probeTexel(o + vec3<i32>(1, 1, 0)).rgb, f.x);
+  let x01 = mix(probeTexel(o + vec3<i32>(0, 0, 1)).rgb, probeTexel(o + vec3<i32>(1, 0, 1)).rgb, f.x);
+  let x11 = mix(probeTexel(o + vec3<i32>(0, 1, 1)).rgb, probeTexel(o + vec3<i32>(1, 1, 1)).rgb, f.x);
   return mix(mix(x00, x10, f.y), mix(x01, x11, f.y), f.z);
 }
 // The ambient scale from the probe grid at P for normal N (mirrors sampleLightProbes).
@@ -845,7 +869,7 @@ ${hdr ? /* wgsl */ `
 // One probe's slot of the volume texture: slots 0–8 its SH (slot 0's alpha its validity, slot 1's its sky
 // visibility), slots 9–40 its octahedral depths, two texels each.
 fn volumeSlot(slot: i32, i: vec3<i32>) -> vec4<f32> {
-  return textureLoad(probeGrid, i + vec3<i32>(slot * i32(frame.probeCount.x + 0.5), 0, 0), 0);
+  return probeTexel(i + vec3<i32>(slot * i32(frame.probeCount.x + 0.5), 0, 0));
 }
 fn volumeOctTexel(d: vec3<f32>) -> i32 {
   var e = d.xz / (abs(d.x) + abs(d.y) + abs(d.z));
@@ -1597,9 +1621,9 @@ ${reflect ? "    // What the light map, probes and SSAO did to the fill, they do
       if (frame.clusterInfo.y > 0.5 && in.eyeDepth >= frame.clusterParams.z) {
         let tile = min(vec2<u32>(in.pos.xy / frame.clusterParams.xy), vec2<u32>(${CLUSTER_X - 1}u, ${CLUSTER_Y - 1}u));
         let slice = min(u32(log(in.eyeDepth / frame.clusterParams.z) * frame.clusterParams.w), ${CLUSTER_Z - 1}u);
-        let cell = clusterTable[(slice * ${CLUSTER_Y}u + tile.y) * ${CLUSTER_X}u + tile.x];
+        let cell = clusterCell((slice * ${CLUSTER_Y}u + tile.y) * ${CLUSTER_X}u + tile.x);
         for (var j = 0u; j < cell.y; j = j + 1u) {
-          direct = direct + lightTerm(lights[clusterIndex[cell.x + j]], in.worldPos, N, V, ndv, a2, k, f0, kdm, albedo, sf);
+          direct = direct + lightTerm(lights[clusterLight(cell.x + j)], in.worldPos, N, V, ndv, a2, k, f0, kdm, albedo, sf);
         }
       }
       lit = direct + amb + emis;
@@ -1974,7 +1998,7 @@ export class WebgpuSceneRenderer implements SceneRenderer {
       /** The frame-sized targets the groups bind (remade on a resize): the depth, and the refraction copy. */
       readonly sized: { depth: any; behind: any };
       readonly behindBlank: any;
-      readonly clusters: { readonly table: any; readonly index: any; readonly params: any };
+      readonly clusters: { readonly data: any; readonly params: any };
       readonly shadowTiles: any;
       /** The split-sum DFG table (F1c). */
       readonly dfg: any;
@@ -1984,6 +2008,8 @@ export class WebgpuSceneRenderer implements SceneRenderer {
       readonly decals: any;
       /** The physical sky's aerial perspective (F5a-2), as the linear-light shader reads it. */
       readonly aerial: any;
+      /** The volume the groups bind for the volumetric fog (F5b): point it at a new one, then remake the groups. */
+      readonly fogVolume: { texture: any };
       atlas: any;
       atlasBlank: boolean;
       probes: any;
@@ -2064,6 +2090,10 @@ export class WebgpuSceneRenderer implements SceneRenderer {
   private frameDepthView: { readonly viewProj: Mat4; readonly terms: readonly [number, number] } | null = null;
   /** Whether this frame's ambient light takes GTAO (F3c), for the frame uniform. */
   private frameGtao = false;
+  /** This frame's volumetric fog (F5b), its volumes (made when a frame first has some) and the shader's terms. */
+  private frameFog: FogFrame | null = null;
+  private volumetricFog: GpuVolumetricFog | null = null;
+  private readonly fogTerms = new Float32Array(FOG_FRAME_FLOATS);
   /** The physical sky's LUTs (F5a-2), made when a draw first brings one, and the frame's aerial terms. */
   private atmosphere: GpuAtmosphere | null = null;
   private readonly aerialTerms = new Float32Array(AERIAL_FRAME_FLOATS);
@@ -2311,13 +2341,13 @@ export class WebgpuSceneRenderer implements SceneRenderer {
       // same group with binding 0 declared multisampled.
       const depthEntries = (multisampled: boolean) => [
         { binding: 0, visibility: SHADER_STAGE_FRAGMENT, texture: multisampled ? { sampleType: "depth", multisampled: true } : { sampleType: "depth" } },
+        // The clustered lights' table and index list (EP8), then the probes (EP9, F3d-3), both in storage (F5b-0).
         { binding: 1, visibility: SHADER_STAGE_FRAGMENT, buffer: { type: "read-only-storage" } },
         { binding: 2, visibility: SHADER_STAGE_FRAGMENT, buffer: { type: "read-only-storage" } },
         { binding: 3, visibility: SHADER_STAGE_FRAGMENT, buffer: { type: "uniform" } },
         // The spot/point shadow atlas: the CPU's r32float distances, or the linear-light renderer's GPU depths (F2d).
         { binding: 4, visibility: SHADER_STAGE_FRAGMENT, texture: hdr ? { sampleType: "depth" } : { sampleType: "unfilterable-float" } },
         { binding: 5, visibility: SHADER_STAGE_FRAGMENT, buffer: { type: "read-only-storage" } },
-        { binding: 6, visibility: SHADER_STAGE_FRAGMENT, texture: { sampleType: "unfilterable-float", viewDimension: "3d" } },
         // The opaque scene's colour, for refraction (I5).
         { binding: 7, visibility: SHADER_STAGE_FRAGMENT, texture: { sampleType: "unfilterable-float" } },
         // The split-sum DFG table (F1c), read by the linear-light shader.
@@ -2330,8 +2360,8 @@ export class WebgpuSceneRenderer implements SceneRenderer {
         { binding: 13, visibility: SHADER_STAGE_FRAGMENT, buffer: { type: "read-only-storage" } },
         // The comparison sampler that filters the sun's GPU cascades (F2a; group 0 binds the cascades).
         { binding: 11, visibility: SHADER_STAGE_FRAGMENT, sampler: { type: "comparison" } },
-        // The physical sky's aerial perspective (F5a-2), read by the linear-light shader.
-        ...(hdr ? [{ binding: 14, visibility: SHADER_STAGE_FRAGMENT, buffer: { type: "uniform" } }] : []),
+        // The physical sky's aerial perspective (F5a-2), and the volumetric fog (F5b), read by the linear-light shader.
+        ...(hdr ? [{ binding: 14, visibility: SHADER_STAGE_FRAGMENT, buffer: { type: "uniform" } }, { binding: 6, visibility: SHADER_STAGE_FRAGMENT, texture: { sampleType: "float", viewDimension: "3d" } }] : []),
       ];
       const depthLayout = device.createBindGroupLayout({ entries: depthEntries(false) });
       const depthLayoutMs = device.createBindGroupLayout({ entries: depthEntries(true) });
@@ -2416,8 +2446,8 @@ export class WebgpuSceneRenderer implements SceneRenderer {
         usage: 0x10 | 0x04, // RENDER_ATTACHMENT | TEXTURE_BINDING
       });
       const clusterBuffers = {
-        table: device.createBuffer({ size: CLUSTER_CELLS * 8, usage: 0x80 | 0x08 }), // STORAGE | COPY_DST
-        index: device.createBuffer({ size: CLUSTER_INDEX_CAP * 4, usage: 0x80 | 0x08 }),
+        // The cells' table, then the index list after it (F5b-0).
+        data: device.createBuffer({ size: CLUSTER_CELLS * 8 + CLUSTER_INDEX_CAP * 4, usage: 0x80 | 0x08 }), // STORAGE | COPY_DST
         params: device.createBuffer({ size: FRAME_BYTES, usage: 0x40 | 0x08 }), // UNIFORM | COPY_DST
       };
       // Spot/point shadows (EP8c): the atlas (a 1×1 stand-in until a light casts) and the tiles' views.
@@ -2434,11 +2464,13 @@ export class WebgpuSceneRenderer implements SceneRenderer {
       const decalBuffer = device.createBuffer({ size: DECAL_BUFFER_WORDS * 4, usage: 0x80 | 0x08 }); // STORAGE | COPY_DST
       // The aerial perspective (F5a-2): written in compute for each camera, read as a uniform by the scene.
       const aerialBuffer = device.createBuffer({ size: AERIAL_LUT_BYTES, usage: 0x40 | 0x80 | 0x04 }); // UNIFORM | STORAGE | COPY_SRC (read back by its tests)
+      // The volumetric fog's volume (F5b): a 1³ stand-in until a frame has fog, then the fog's own.
+      const fogVolume = { texture: device.createTexture({ size: { width: 1, height: 1, depthOrArrayLayers: 1 }, dimension: "3d", format: FOG_FORMAT, usage: 0x04 }) };
       const iblSampler = device.createSampler({ magFilter: "linear", minFilter: "linear", mipmapFilter: "linear", addressModeU: "clamp-to-edge", addressModeV: "clamp-to-edge", addressModeW: "clamp-to-edge" });
       const atlasBlank = hdr
         ? device.createTexture({ size: { width: 1, height: 1 }, format: "depth32float", usage: 0x04 | 0x10 }) // TEXTURE_BINDING | RENDER_ATTACHMENT
         : device.createTexture({ size: { width: 1, height: 1 }, format: "r32float", usage: 0x04 | 0x02 });
-      const probesBlank = device.createTexture({ size: { width: 1, height: 1, depthOrArrayLayers: 1 }, dimension: "3d", format: "rgba32float", usage: 0x04 | 0x02 });
+      const probesBlank = device.createBuffer({ size: 16, usage: 0x80 | 0x08 }); // STORAGE | COPY_DST: one zeroed texel
       // Refraction (I5): the opaque scene's colour, copied (or resolved) into this as the
       // see-through pass begins; a 1×1 blank stands in for it in the opaque pass.
       const behind = device.createTexture({ size: { width, height }, format: colourFormat, usage: 0x04 | 0x02 | 0x10 }); // TEXTURE_BINDING | COPY_DST | RENDER_ATTACHMENT (a resolve target)
@@ -2554,18 +2586,17 @@ export class WebgpuSceneRenderer implements SceneRenderer {
       };
       const makeGroups = (atlas: any, probes: any) => {
         const shared = [
-          { binding: 1, resource: { buffer: clusterBuffers.table } },
-          { binding: 2, resource: { buffer: clusterBuffers.index } },
+          { binding: 1, resource: { buffer: clusterBuffers.data } },
+          { binding: 2, resource: { buffer: probes } },
           { binding: 3, resource: { buffer: clusterBuffers.params } },
           { binding: 4, resource: atlas.createView() },
           { binding: 5, resource: { buffer: shadowTiles } },
-          { binding: 6, resource: probes.createView({ dimension: "3d" }) },
           { binding: 8, resource: { buffer: dfgBuffer } },
           { binding: 9, resource: iblSampler },
           { binding: 10, resource: { buffer: ltcBuffer } },
           { binding: 13, resource: { buffer: decalBuffer } },
           { binding: 11, resource: cascades.sampler },
-          ...(hdr ? [{ binding: 14, resource: { buffer: aerialBuffer } }] : []),
+          ...(hdr ? [{ binding: 14, resource: { buffer: aerialBuffer } }, { binding: 6, resource: fogVolume.texture.createView({ dimension: "3d" }) }] : []),
         ];
         return {
           blank: device.createBindGroup({ layout: depthLayout, entries: [{ binding: 0, resource: blankDepth.createView() }, ...shared, { binding: 7, resource: behindBlank.createView() }] }),
@@ -2576,18 +2607,17 @@ export class WebgpuSceneRenderer implements SceneRenderer {
       };
       const makeGroupsMs = (atlas: any, probes: any, blank: any, depth: any) => {
         const shared = [
-          { binding: 1, resource: { buffer: clusterBuffers.table } },
-          { binding: 2, resource: { buffer: clusterBuffers.index } },
+          { binding: 1, resource: { buffer: clusterBuffers.data } },
+          { binding: 2, resource: { buffer: probes } },
           { binding: 3, resource: { buffer: clusterBuffers.params } },
           { binding: 4, resource: atlas.createView() },
           { binding: 5, resource: { buffer: shadowTiles } },
-          { binding: 6, resource: probes.createView({ dimension: "3d" }) },
           { binding: 8, resource: { buffer: dfgBuffer } },
           { binding: 9, resource: iblSampler },
           { binding: 10, resource: { buffer: ltcBuffer } },
           { binding: 13, resource: { buffer: decalBuffer } },
           { binding: 11, resource: cascades.sampler },
-          ...(hdr ? [{ binding: 14, resource: { buffer: aerialBuffer } }] : []),
+          ...(hdr ? [{ binding: 14, resource: { buffer: aerialBuffer } }, { binding: 6, resource: fogVolume.texture.createView({ dimension: "3d" }) }] : []),
         ];
         return {
           blank: device.createBindGroup({ layout: depthLayoutMs, entries: [{ binding: 0, resource: blank.createView() }, ...shared, { binding: 7, resource: behindBlank.createView() }] }),
@@ -2606,6 +2636,7 @@ export class WebgpuSceneRenderer implements SceneRenderer {
         ltc: ltcBuffer,
         decals: decalBuffer,
         aerial: aerialBuffer,
+        fogVolume,
         atlas: atlasBlank,
         atlasBlank: true,
         probes: probesBlank,
@@ -3048,6 +3079,7 @@ export class WebgpuSceneRenderer implements SceneRenderer {
     // With a prepass the scene shades with its depths bound (F2d-3): how to read them.
     const drawnProjection = temporal ? temporal.projection : draw.projection;
     this.frameDepthView = this.hdr && prepass ? { viewProj, terms: [drawnProjection[10]!, drawnProjection[14]!] } : null;
+    this.frameFog = this.prepareFog(draw);
     const { ordered } = this.clusterLights(localPlan ? { ...draw, lights: localPlan.lights, localShadows: null } : draw);
     this.uploadLights(packLights(ordered, this.hdr));
     const lightCount = ordered.length;
@@ -3096,7 +3128,8 @@ export class WebgpuSceneRenderer implements SceneRenderer {
         hdrLightmap: this.hdr && entry.textures.lmHdr !== null,
         model,
         lightCount,
-        fog: draw.fog ?? null,
+        // A volumetric fog (F5b) takes the place of the painted fade.
+        fog: this.frameFog ? null : (draw.fog ?? null),
         eye,
         effect: entry.effect ?? null,
         time: draw.time ?? 0,
@@ -3285,6 +3318,16 @@ export class WebgpuSceneRenderer implements SceneRenderer {
             encoded.end();
           });
         };
+      });
+    }
+
+    // The volumetric fog (F5b): its froxels lit through the cascades just drawn, then integrated, before the scene samples it.
+    const fog = this.frameFog ? this.volumetricFog : null;
+    if (fog) {
+      const cascadeRes = this.depthGroups.cascades;
+      graph.addPass("volumetric fog", "compute", (pass) => {
+        pass.keep();
+        return (ctx) => fog.encode(ctx.encoder, cascadeRes.texture, cascadeRes.sampler, ctx.timing);
       });
     }
 
@@ -3785,8 +3828,8 @@ export class WebgpuSceneRenderer implements SceneRenderer {
     const clusters = ordered.length > globalCount ? buildLightClusters(ordered, globalCount, draw.view, draw.projection, this.width, this.height) : null;
     const buffers = this.depthGroups.clusters;
     if (clusters) {
-      this.device.queue.writeBuffer(buffers.table, 0, clusters.table);
-      this.device.queue.writeBuffer(buffers.index, 0, clusters.indices, 0, Math.max(4, Math.ceil(clusters.used / 4) * 4));
+      this.device.queue.writeBuffer(buffers.data, 0, clusters.table);
+      this.device.queue.writeBuffer(buffers.data, CLUSTER_CELLS * 8, clusters.indices, 0, Math.max(4, Math.ceil(clusters.used / 4) * 4));
     }
     const near = draw.shadow?.near ?? null;
     const frame = new Float32Array(FRAME_BYTES / 4);
@@ -3809,7 +3852,8 @@ export class WebgpuSceneRenderer implements SceneRenderer {
       else this.uploadProbeTexture(grid, lightProbeTexels(grid as LightProbeGrid), 6);
       frame.set([...grid.min, volume ? 2 : 1], 32);
       frame.set([0, 1, 2].map((a) => (grid.counts[a]! - 1) / (grid.max[a]! - grid.min[a]! || 1)), 36);
-      frame.set(grid.counts, 40);
+      // w: the slots a probe takes along x, by which the shader strides the probe buffer (F5b-0).
+      frame.set([...grid.counts, volume ? PROBE_VOLUME_SLOTS : 6], 40);
     }
     if (this.hdr) {
       frame.set(this.iblSh, 44);
@@ -3831,9 +3875,40 @@ export class WebgpuSceneRenderer implements SceneRenderer {
       frame.set([this.frameDepthView.terms[0], this.frameDepthView.terms[1], 1, 0], FRAME_CASCADES + 100);
     }
     if (this.hdr) frame.set(this.aerialFrame(draw), FRAME_AERIAL);
+    if (this.hdr) frame.set(packFogFrame(this.frameFog, this.fogTerms), FRAME_FOG);
     this.device.queue.writeBuffer(buffers.params, 0, frame);
     this.uploadLocalShadows(local);
     return { ordered, globalCount, clusters };
+  }
+
+  /**
+   * This draw's volumetric fog (F5b), on the linear-light renderer, for a
+   * perspective camera under a rig whose fog is volumetric: the grid for the
+   * frame's size, the sun (shadowed by its cascades when it casts) and the
+   * sky's mean radiance, and the camera, uniforms written. Null (and the
+   * history dropped) otherwise.
+   */
+  private prepareFog(draw: GpuSceneDraw): FogFrame | null {
+    const settings = this.hdr && draw.projection[15] === 0 ? resolveVolumetricFog(draw.fog) : null;
+    if (!settings) {
+      this.volumetricFog?.reset();
+      return null;
+    }
+    const fog = (this.volumetricFog ??= new GpuVolumetricFog(this.device));
+    // The sky's mean radiance: its L0 irradiance over π (zero without an environment).
+    const sky = [0, 1, 2].map((c) => Math.max(0, this.iblSh[c]! * 0.282095));
+    const cascades = this.frameCascades ? { cascades: this.frameCascades.cascades, strength: this.frameCascades.strength } : null;
+    const { frame, remade } = fog.prepare(
+      { fog: settings, light: { sun: fogSun(draw.lights), sky }, grid: fogGrid(this.width, this.height), camera: fogCamera(draw.view, draw.projection), cascades },
+      draw.temporal === true,
+    );
+    if (remade) {
+      const groups = this.depthGroups;
+      groups.fogVolume.texture = fog.volume;
+      Object.assign(groups, groups.makeGroups(groups.atlas, groups.probes));
+      if (this.msaa) this.msaa.groups = groups.makeGroupsMs(groups.atlas, groups.probes, this.msaa.blank, this.msaa.depth);
+    }
+    return frame;
   }
 
   /**
@@ -3857,10 +3932,10 @@ export class WebgpuSceneRenderer implements SceneRenderer {
     if (groups.probeSource === grid) return;
     const [nx, ny, nz] = grid.counts;
     if (!groups.probesBlank) destroySafely(groups.probes);
-    groups.probes = this.device.createTexture({ size: { width: nx * slots, height: ny, depthOrArrayLayers: nz }, dimension: "3d", format: "rgba32float", usage: 0x04 | 0x02 });
+    groups.probes = this.device.createBuffer({ size: nx * slots * ny * nz * 16, usage: 0x80 | 0x08 }); // STORAGE | COPY_DST
     groups.probesBlank = false;
     groups.probeSource = grid;
-    this.device.queue.writeTexture({ texture: groups.probes }, texels, { bytesPerRow: nx * slots * 16, rowsPerImage: ny }, { width: nx * slots, height: ny, depthOrArrayLayers: nz });
+    this.device.queue.writeBuffer(groups.probes, 0, texels, 0, nx * slots * ny * nz * 4);
     Object.assign(groups, groups.makeGroups(groups.atlas, groups.probes));
     if (this.msaa) this.msaa.groups = groups.makeGroupsMs(groups.atlas, groups.probes, this.msaa.blank, this.msaa.depth);
   }
@@ -4271,8 +4346,7 @@ export class WebgpuSceneRenderer implements SceneRenderer {
     destroySafely(this.depthGroups.blankTexture);
     destroySafely(this.depthGroups.sized.behind);
     destroySafely(this.depthGroups.behindBlank);
-    destroySafely(this.depthGroups.clusters.table);
-    destroySafely(this.depthGroups.clusters.index);
+    destroySafely(this.depthGroups.clusters.data);
     destroySafely(this.depthGroups.clusters.params);
     destroySafely(this.depthGroups.shadowTiles);
     destroySafely(this.depthGroups.dfg);
@@ -4288,6 +4362,8 @@ export class WebgpuSceneRenderer implements SceneRenderer {
     if (this.probeTexture !== this.blankTexture) destroySafely(this.probeTexture);
     this.probeCapture?.dispose();
     this.atmosphere?.dispose();
+    this.volumetricFog?.dispose();
+    destroySafely(this.depthGroups.fogVolume.texture);
     destroySafely(this.blankProbeCubes);
     destroySafely(this.probeBuffer);
     destroySafely(this.ssaoTexture);

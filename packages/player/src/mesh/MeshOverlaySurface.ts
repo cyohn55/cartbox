@@ -1443,7 +1443,8 @@ export class MeshOverlaySurface implements DisplaySurface {
     gpu.present({
       base: sky ? { kind: "sky", sky } : this.hud ? { kind: "colour", rgba: HUD_SKY } : { kind: "frame", rgba },
       scene,
-      shafts: sky && sun && lighting?.shafts && lighting.sky ? { sun, color: lighting.sky.sunColor, shafts: lighting.shafts } : null,
+      // On the AAA tier a volumetric fog's shadowed light is the shafts (F5b): the screen-space ones retire.
+      shafts: sky && sun && lighting?.shafts && lighting.sky && !(this.renderer.sunCascades === true && lighting.fog?.volumetric) ? { sun, color: lighting.sky.sunColor, shafts: lighting.shafts } : null,
       front,
       hud: this.hud ? rgba : null,
       hudKey: HUD_TRANSPARENT_SUM,

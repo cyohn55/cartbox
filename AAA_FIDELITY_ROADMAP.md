@@ -933,6 +933,43 @@ Everything else depends on this track. It contains no visible "feature", but its
       - The painted sky's objects, cloud layers and distant vistas draw over the other tiers' copy of the physical sky, but not over the AAA backdrop. F5c's clouds and a composite of the vistas will bring them back there.
       - The CPU LUTs take about 0.8 s at load. A worker, or reading the GPU's LUTs back on the AAA tier, would hide that.
 - [ ] **F5b. Volumetric fog.** A froxel grid (for example 160×90×64) of scattering and extinction from height fog, local fog volumes and particles. It is lit by the sun with its shadow map, and by local lights with theirs, then temporally reprojected and integrated. **God rays emerge from it**, so the CPU screen-space shafts retire.
+  - **F5b-0, room in the scene shader: done** (`WebgpuSceneRenderer.ts`). The AAA scene shader bound the 16 sampled textures and 8 storage buffers a stage gets on every device, so a froxel volume had nowhere to go.
+    - The clustered lights' cell table and index list now share one storage buffer, the table first. That frees a storage slot.
+    - The probe grid and probe volume move from a 3D texture, which was only ever read texel by texel, into that slot, as a storage buffer indexed by the probe stride (`probeCount.w`). That frees a sampled texture for the fog.
+    - The image is unchanged: the probe, probe-volume, clustered-light and parity suites pass as they did, on Dawn as well.
+  - **F5b-1, the sun and sky through the fog: done** (`model/volumetricFog.ts`, `render/volumetricFog.ts`). On the AAA tier, a rig's fog can be volumetric (`SceneFog.volumetric`). Its densities become a medium that the sun lights through its cascades and the sky lights evenly. That light is integrated over a froxel grid and laid over every surface.
+    - **The medium** is the fog the rig already authors, read as extinction per metre:
+      - the distance fog's density everywhere;
+      - the height fog's density, thinning above its base;
+      - each fog box's density, thinning above its floor.
+      - The painted fade's start and maximum don't apply. The other tiers keep the fade unchanged.
+    - **The settings** are the albedo (what share of the light taken out is scattered, and in what colour), Henyey–Greenstein's anisotropy (0.6 by default: bright toward the sun), the reach (96 m by default, 8–1000) and the sky light's scale.
+    - **The grid** is a column every 12 pixels (at least 8, at most 160 × 90) and 64 slices spaced quadratically out to the reach.
+    - **Inject** (a thread a froxel, compute) takes the medium's extinction at the froxel and the light it scatters toward the eye:
+      - the sun's π E through the phase, and one comparison tap of the first cascade that holds the point, a texel and a half toward the sun;
+      - the sky's mean radiance (the IBL's L0) times the sky-light setting;
+      - both times the albedo and the extinction.
+    - **Temporal accumulation**, with TAA on: each frame jitters the sample within its froxel (Halton 2, 3, 5) and blends it 9 parts to 1 into the froxel's history, reprojected through the last frame's camera. So the shafts settle on their froxels' means rather than crawling. Without TAA, the froxels' centres are taken as they are.
+    - **Integrate** (a thread a column) runs front to back with the energy-conserving step, writing the light so far and the transmittance at each slice's centre.
+    - **In the scene shader**, after the painted fog (now turned off) and before the aerial perspective:
+      - each fragment finds its froxel through the camera's axes;
+      - the colour becomes colour × T + L, filtered by the hardware in the freed 3D texture;
+      - an additive surface is only dimmed, and nearer than the first slice's centre the fog fades toward none.
+    - **God rays** are the sun's shadow seen through the fog. With volumetric fog on, the AAA tier retires the screen-space shafts.
+    - **Authoring.** The Lighting panel's fog gains **Volumetric (AAA)**, with Scattering, Toward the sun, Reach and Sky light.
+    - *Tests (`volumetric-fog.test.ts`):*
+      - The settings parse in range, survive a save and resolve their defaults. The medium is the distance fog, the height fog and each box's own. Henyey–Greenstein's phase integrates to 1 and is even at g = 0. The grid is as stated at 1080p, 720p and small sizes.
+      - In an even fog lit by the sky alone, a column is the closed form `L = albedo × sky × (1 − e^{−σt})` to 6 places. It glows toward the sun, and where the sun is shadowed it is lit by the sky alone. The key light is read in linear light.
+      - The frame's terms are off without fog, and the jitter stays in its froxel with a mean of zero.
+      - On Dawn:
+        - the GPU's froxels, under height fog and a box, are the CPU's within 1% (and 0.003 for the transmittance);
+        - a grey wall 40 m into the fog is colour × T + L of the CPU's volume within 2%, and a volumetric fog with no medium leaves it as it was, so the painted fade has given way;
+        - 24 jittered frames of history converge on the centre-sampled volume within 5%;
+        - a roof between a low sun and the fog halves the light deep in the fog beneath it, while the fog beside it is lit as without the roof: a shaft's edge, from the real cascades.
+    - *Left for F5b:*
+      - **F5b-2:** spot and point lights in the fog, through the clustered lights and their shadow tiles; particles adding density.
+      - The sky backdrop isn't fogged: it is drawn by the presenter, past the last slice.
+      - Scalability levels for the grid (fewer slices on phones), and per-pass timing in the budgets.
 - [ ] **F5c. Volumetric clouds.** Raymarched clouds with a Nubis-style shape plus erosion noise and weather maps, multiple-scattering approximation, temporal amortisation at quarter resolution, cloud shadows on the ground and aerial perspective.
 - [ ] **F5d. Water.**
   - FFT ocean, and Gerstner waves for lakes and rivers.

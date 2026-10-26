@@ -334,6 +334,27 @@ export {
 } from "./model/lightmap";
 export { footprintMean, linearToAuthored, type OccluderSurface } from "./model/bakeSurface";
 export {
+  FOG_MAX_X,
+  FOG_MAX_Y,
+  FOG_SLICES,
+  FOG_TILE,
+  bakeFogVolume,
+  fogColumn,
+  fogExtinction,
+  fogGrid,
+  fogScattered,
+  fogSlice,
+  fogSliceDistance,
+  fogSun,
+  henyeyGreenstein,
+  parseVolumetricFog,
+  resolveVolumetricFog,
+  sampleFogVolume,
+  type FogLight,
+  type VolumetricFog,
+  type VolumetricFogSettings,
+} from "./model/volumetricFog";
+export {
   AERIAL_RANGE,
   AERIAL_SIZE,
   AERIAL_SLICES,

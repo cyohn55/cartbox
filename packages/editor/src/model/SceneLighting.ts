@@ -16,6 +16,7 @@
  * multiple lights, tone mapping, and shadows (see AAA_TIER_ROADMAP.md).
  */
 
+import { parseVolumetricFog } from "./volumetricFog";
 import { parseAtmosphere } from "./atmosphere";
 import { parseWind, type SceneWind } from "./wind";
 import { decodeLightProbes, type LightProbeGrid, type StoredLightProbes } from "./lightProbes";
@@ -482,6 +483,7 @@ export function parseFog(value: unknown): SceneFog | null {
   const base = defaultSceneFog();
   const h = raw.height && typeof raw.height === "object" ? (raw.height as Record<string, unknown>) : null;
   const g = raw.glow && typeof raw.glow === "object" ? (raw.glow as Record<string, unknown>) : null;
+  const volumetric = parseVolumetricFog(raw.volumetric);
   const volumes = Array.isArray(raw.volumes)
     ? raw.volumes.map(parseFogVolume).filter((v): v is FogVolume => v !== null).slice(0, MAX_FOG_VOLUMES)
     : [];
@@ -502,6 +504,7 @@ export function parseFog(value: unknown): SceneFog | null {
       : {}),
     ...(volumes.length > 0 ? { volumes } : {}),
     ...(g ? { glow: { color: tripleOr(g.color, [1, 0.9, 0.7]), strength: Math.max(0, Math.min(2, finiteOr(g.strength, 0.6))) } } : {}),
+    ...(volumetric ? { volumetric } : {}),
   };
 }
 
