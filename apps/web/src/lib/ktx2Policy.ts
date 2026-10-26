@@ -17,7 +17,49 @@
 import type { DecodedTexture, EncodedImage, MeshAsset, MeshMaterial } from "@cartbox/editor";
 
 import { KTX2_TRANSCODER_TRANSFER_BYTES, gzipSize } from "./downloadBudget";
-import type { Ktx2Encode, TextureKind } from "./ktx2Encoder";
+import type { Ktx2Codec, Ktx2Encode, TextureKind } from "./ktx2Encoder";
+import { KTX2_MAX_TEXELS } from "./ktx2Encoder";
+
+/**
+ * The platform an import's textures are compressed for (AAA_FIDELITY_ROADMAP.md
+ * F9d): a desktop's GPU memory and BC7 take UASTC colour maps at up to 8K (past
+ * Basis Universal's 12-megapixel limit they stay PNG); a phone's take ETC1S
+ * colour, and every map held to 2048 across.
+ */
+export type TexturePlatform = "desktop" | "mobile";
+
+/** The largest edge a platform's textures keep on import. */
+export const PLATFORM_MAX_EDGE: Readonly<Record<TexturePlatform, number>> = { desktop: 8192, mobile: 2048 };
+
+/** How one texture of `kind`, `width × height`, is compressed for `platform`: its codec (or kept as it is), and its largest edge. */
+export function importTexturePlan(platform: TexturePlatform, kind: TextureKind, width: number, height: number): { readonly codec: Ktx2Codec | "keep"; readonly maxEdge: number } {
+  const maxEdge = PLATFORM_MAX_EDGE[platform];
+  const scale = Math.min(1, maxEdge / Math.max(width, height, 1));
+  const texels = Math.round(width * scale) * Math.round(height * scale);
+  if (texels > KTX2_MAX_TEXELS) return { codec: "keep", maxEdge };
+  const data = kind === "data" || kind === "normal";
+  return { codec: data || platform === "desktop" ? "uastc" : "etc1s", maxEdge };
+}
+
+/** A texture halved (2×2 box) until its longer edge is at most `maxEdge`. */
+export function downscaleTexture(texture: DecodedTexture, maxEdge: number): DecodedTexture {
+  let t = texture;
+  while (Math.max(t.width, t.height) > maxEdge) {
+    const w = Math.max(1, t.width >> 1), h = Math.max(1, t.height >> 1);
+    const data = new Uint8ClampedArray(w * h * 4);
+    for (let y = 0; y < h; y += 1) {
+      for (let x = 0; x < w; x += 1) {
+        for (let c = 0; c < 4; c += 1) {
+          let sum = 0;
+          for (let k = 0; k < 4; k += 1) sum += t.data[((Math.min(t.height - 1, y * 2 + (k >> 1))) * t.width + Math.min(t.width - 1, x * 2 + (k & 1))) * 4 + c]!;
+          data[(y * w + x) * 4 + c] = Math.round(sum / 4);
+        }
+      }
+    }
+    t = { width: w, height: h, data };
+  }
+  return t;
+}
 
 export { KTX2_TRANSCODER_TRANSFER_BYTES };
 
@@ -158,6 +200,8 @@ export async function compressMeshTextures(
     decode: (image: EncodedImage, raw: boolean) => Promise<DecodedTexture | null>;
     /** The encoder, fetched only when there is something to encode. */
     encoder: () => Promise<Ktx2Encode>;
+    /** The platform its textures are planned for (F9d); absent, the encoder's defaults at the size given. */
+    platform?: TexturePlatform;
   },
 ): Promise<Ktx2Compression> {
   const kinds = new Map<EncodedImage, TextureKind>();
@@ -174,7 +218,10 @@ export async function compressMeshTextures(
   let sourceBytes = 0;
   for (const [image, kind] of kinds) {
     const decoded = await options.decode(image, kind !== "color").catch(() => null);
-    const encoded = decoded ? encode(decoded, kind) : null;
+    const plan = decoded && options.platform ? importTexturePlan(options.platform, kind, decoded.width, decoded.height) : null;
+    if (plan?.codec === "keep") continue;
+    const sized = decoded && plan ? downscaleTexture(decoded, plan.maxEdge) : decoded;
+    const encoded = sized ? encode(sized, kind, plan?.codec) : null;
     if (!encoded) continue;
     ktx2Bytes += await gzipSize(encoded);
     sourceBytes += await gzipSize(image.bytes);

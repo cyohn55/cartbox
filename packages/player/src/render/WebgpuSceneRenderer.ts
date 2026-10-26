@@ -146,7 +146,7 @@ import { FrameGraph, GraphTimer, TransientPool, timingSpan, type FrameResource, 
 import { MAX_ANISOTROPY, MipmapGenerator, coverageMips, hasTransparency, mipLevelCount, uploadCompressed } from "./mipmaps.js";
 import { compressedFormatsFor } from "../lighting/webgpuDevice.js";
 import { brdfWgsl, dfgTable } from "./brdf.js";
-import { ltcTables, ltcWgsl } from "./ltc.js";
+import { IES_BASE, IES_MAX_PROFILES, IES_VEC4S, ltcTables, ltcWgsl } from "./ltc.js";
 import { PROBE_FACE, ProbeCapture, packCapturedProbes } from "./probeCapture.js";
 import { DECAL_BUFFER_WORDS, DECAL_TILES_AT, decalWgsl, packDecalBoxes, packDecalTiles } from "./decalBuffer.js";
 import { IBL_LEVELS, IblBuilder, SH_IRRADIANCE_WGSL, environmentKey, environmentPanorama, environmentSh, toHalf } from "./ibl.js";
@@ -1143,7 +1143,7 @@ ${hdr ? "  // An area light (F2e-2): its rectangle, disk or tube integrated with
     if (lgt.d0.w > 1.5) {
       let ct = clamp((-dot(Ld, lgt.d3.xyz) - lgt.d2.y) / (lgt.d2.z - lgt.d2.y), 0.0, 1.0);
       atten = atten * ct * ct * (3.0 - 2.0 * ct);
-    }
+    }${hdr ? "\n    // An IES profile (F9d): the fixture's measured distribution about its axis.\n    if (lgt.d4.w > -0.5) { atten = atten * iesFactor(u32(lgt.d4.w + 0.5), lgt.d3.xyz, -Ld); }" : ""}
   } else {
     Ld = normalize(lgt.d0.xyz);
   }
@@ -2301,6 +2301,30 @@ export class WebgpuSceneRenderer implements SceneRenderer {
       };
     });
   }
+  /** The IES profiles in the LTC buffer's slots (F9d), by identity. */
+  private readonly iesHeld: (object | null)[] = Array.from({ length: IES_MAX_PROFILES }, () => null);
+
+  /**
+   * Each distinct IES profile among the frame's lights a slot (F9d), uploaded when it first takes it; the
+   * light's slot, or −1 (no profile, or more profiles than slots).
+   */
+  private iesSlots(lights: readonly { readonly ies?: object | null }[]): (light: { readonly ies?: object | null }) => number {
+    const wanted = new Set(lights.map((l) => l.ies).filter((p): p is object => Boolean(p)));
+    // Free the slots of profiles no light uses now.
+    this.iesHeld.forEach((p, i) => {
+      if (p && !wanted.has(p)) this.iesHeld[i] = null;
+    });
+    for (const profile of wanted) {
+      if (this.iesHeld.includes(profile)) continue;
+      const slot = this.iesHeld.indexOf(null);
+      if (slot < 0) break;
+      this.iesHeld[slot] = profile;
+      const samples = (profile as { samples?: readonly number[] }).samples ?? [];
+      this.device.queue.writeBuffer(this.depthGroups.ltc, (IES_BASE + slot * IES_VEC4S) * 16, Float32Array.from(samples.slice(0, IES_VEC4S * 4)));
+    }
+    return (light) => (light.ies ? this.iesHeld.indexOf(light.ies) : -1);
+  }
+
   /** A 1×1 stand-in for GTAO's history when the frame has none (F3c). */
   private gtaoBlank: any = null;
 
@@ -2861,7 +2885,8 @@ export class WebgpuSceneRenderer implements SceneRenderer {
       device.queue.writeBuffer(dfgBuffer, 0, dfg);
       // The linearly transformed cosines' tables (F2e-2), decoded once.
       const ltc = ltcTables();
-      const ltcBuffer = device.createBuffer({ size: ltc.byteLength, usage: 0x80 | 0x08 }); // STORAGE | COPY_DST
+      // The IES profiles (F9d) follow the tables in the same buffer.
+      const ltcBuffer = device.createBuffer({ size: ltc.byteLength + IES_MAX_PROFILES * IES_VEC4S * 16, usage: 0x80 | 0x08 }); // STORAGE | COPY_DST
       device.queue.writeBuffer(ltcBuffer, 0, ltc);
       // The projected decals (F1f): a fixed buffer, zeroed (no boxes) until a frame has some.
       const decalBuffer = device.createBuffer({ size: DECAL_BUFFER_WORDS * 4, usage: 0x80 | 0x08 }); // STORAGE | COPY_DST
@@ -3492,7 +3517,7 @@ export class WebgpuSceneRenderer implements SceneRenderer {
     this.frameFog = this.prepareFog(draw);
     this.frameGi = this.hdr && draw.dynamicGi && draw.environment?.probeVolume ? draw.dynamicGi : null;
     const { ordered, globalCount, clusters: cells } = this.clusterLights(localPlan ? { ...draw, lights: localPlan.lights, localShadows: null } : draw);
-    this.uploadLights(packLights(ordered, this.hdr));
+    this.uploadLights(packLights(ordered, this.hdr, this.hdr ? this.iesSlots(ordered) : null));
     // The fog's local lights (F5b-2): as the scene's, by the same cells and tiles.
     if (this.frameFog) {
       const tiles = this.frameLocalTiles !== null && this.frameLocalTiles.length > 0;

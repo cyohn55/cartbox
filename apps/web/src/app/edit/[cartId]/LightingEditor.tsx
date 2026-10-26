@@ -61,6 +61,10 @@ import {
   type VolumetricFogSettings,
   type DynamicGiSettings,
   type ScreenSpaceGiSettings,
+  decodeExr,
+  decodeKtx2Hdr,
+  encodeRadianceHdr,
+  iesProfile,
   type PhysicalCameraSettings,
   type ExposureMode,
   type MeteringMode,
@@ -561,6 +565,32 @@ export function LightingEditor({ lighting, onChange }: LightingEditorProps) {
                   { id: "on", label: "Cast", hint: "This light throws shadows (it needs a range); a spot takes one shadow map, a point light six" },
                 ]}
               />
+              <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
+                <label className={styles.toolBtn} title="A real fixture's light distribution (an IESNA LM-63 .ies file): the AAA tier shapes this light by it about its axis">
+                  {light.ies ? "Replace IES…" : "IES profile…"}
+                  <input
+                    type="file"
+                    accept=".ies"
+                    style={{ display: "none" }}
+                    aria-label={`Light ${index + 1} IES profile`}
+                    onChange={async (event) => {
+                      const file = event.target.files?.[0];
+                      event.target.value = "";
+                      if (!file) return;
+                      try {
+                        onChange(updateSceneLight(lighting, index, { ies: iesProfile(await file.text()) }));
+                      } catch {
+                        // Not a profile: leave the light as it was.
+                      }
+                    }}
+                  />
+                </label>
+                {light.ies && (
+                  <button type="button" className={styles.toolBtn} onClick={() => onChange(updateSceneLight(lighting, index, { ies: undefined }))}>
+                    {light.ies.label ? `${light.ies.label} ✕` : "Clear IES ✕"}
+                  </button>
+                )}
+              </div>
               </>
               )}
               {light.kind === "spot" && (
@@ -819,7 +849,7 @@ function AtmosphereControls({ settings, patch }: { settings: AtmosphereSettings;
 }
 
 /** The file types a sky panorama may be, by extension. */
-const PANORAMA_TYPES: Record<string, string> = { png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", hdr: "image/vnd.radiance" };
+const PANORAMA_TYPES: Record<string, string> = { png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", hdr: "image/vnd.radiance", exr: "image/x-exr", ktx2: "image/ktx2" };
 
 /**
  * An imported sky (HALO_INFINITE_STYLE_ROADMAP.md I6): an equirectangular PNG,
@@ -836,18 +866,29 @@ function SkyPanoramaControls({ sky, patch }: { sky: ProceduralSky; patch: (next:
           {panorama ? "Replace panorama…" : "Import panorama…"}
           <input
             type="file"
-            accept=".png,.jpg,.jpeg,.hdr"
+            accept=".png,.jpg,.jpeg,.hdr,.exr,.ktx2"
             style={{ display: "none" }}
             onChange={async (event) => {
               const file = event.target.files?.[0];
               event.target.value = "";
               if (!file) return;
               const mime = PANORAMA_TYPES[file.name.split(".").pop()?.toLowerCase() ?? ""];
-              if (!mime) return setError("Use a .png, .jpg or .hdr panorama.");
-              const data = bytesToBase64(new Uint8Array(await file.arrayBuffer()));
+              if (!mime) return setError("Use a .png, .jpg, .hdr, .exr or float .ktx2 panorama.");
+              let bytes: Uint8Array = new Uint8Array(await file.arrayBuffer());
+              let stored = mime;
+              // OpenEXR and float KTX2 (F9d) travel as the Radiance HDR the sky reads.
+              if (mime === "image/x-exr" || mime === "image/ktx2") {
+                try {
+                  bytes = encodeRadianceHdr(mime === "image/x-exr" ? await decodeExr(bytes) : decodeKtx2Hdr(bytes));
+                  stored = "image/vnd.radiance";
+                } catch (e) {
+                  return setError(e instanceof Error ? e.message : "That panorama couldn't be read.");
+                }
+              }
+              const data = bytesToBase64(bytes);
               if (data.length > MAX_SKY_PANORAMA_CHARS) return setError("That panorama is too large (about 6 MB at most).");
               setError(null);
-              patch({ panorama: { mime, data, exposure: 1, yaw: 0 } });
+              patch({ panorama: { mime: stored, data, exposure: 1, yaw: 0 } });
             }}
           />
         </label>

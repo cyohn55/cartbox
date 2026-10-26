@@ -5277,6 +5277,13 @@ declare class WebgpuSceneRenderer implements SceneRenderer {
      * scene shader reads in its SSAO slot.
      */
     private addScreenShading;
+    /** The IES profiles in the LTC buffer's slots (F9d), by identity. */
+    private readonly iesHeld;
+    /**
+     * Each distinct IES profile among the frame's lights a slot (F9d), uploaded when it first takes it; the
+     * light's slot, or −1 (no profile, or more profiles than slots).
+     */
+    private iesSlots;
     /** A 1×1 stand-in for GTAO's history when the frame has none (F3c). */
     private gtaoBlank;
     /** This frame's virtual shadow maps (F2b): the pages it draws, when it has them. */
@@ -5877,6 +5884,8 @@ interface PackableLight {
     readonly shadowTile?: number;
     readonly temperature?: number;
     readonly channels?: number;
+    /** An IES profile (F9d): the renderer gives each distinct one a slot. */
+    readonly ies?: object | null;
 }
 /**
  * Pack a light list into the storage-buffer layout the WGSL loop reads. Always
@@ -5885,7 +5894,7 @@ interface PackableLight {
  * false (every shader but the linear-light one), an area light (F2e-2) packs
  * as the punctual light it is from far off.
  */
-declare function packLights(lights: readonly PackableLight[], area?: boolean): Float32Array;
+declare function packLights(lights: readonly PackableLight[], area?: boolean, iesIndex?: ((light: PackableLight) => number) | null): Float32Array;
 /** The rasteriser's defaults, restated so an unlit draw shades identically. */
 declare const DEFAULT_LIGHT: readonly [number, number, number];
 declare const DEFAULT_AMBIENT = 0.35;

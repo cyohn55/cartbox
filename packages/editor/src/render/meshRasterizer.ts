@@ -22,6 +22,7 @@
  * rasteriser stay pure and testable. DOM-free.
  */
 
+import type { IesProfile } from "../model/iesProfile";
 import { boxProject, pickProbe, sampleProbe, type ReflectionProbeSet } from "./probeSampling";
 import { applyFog, type SceneFog } from "./skyDome";
 import { cameraPositionFromView } from "./lod";
@@ -470,6 +471,13 @@ export interface SceneLight {
    * one. Absent, the first, which every instance is on unless it says otherwise.
    */
   readonly channels?: number;
+  /**
+   * A point or spot light's IES profile (AAA_FIDELITY_ROADMAP.md F9d;
+   * iesProfile.ts): its measured distribution about its axis (a spot's
+   * direction, else straight down, or `direction` when given). The AAA tier
+   * shapes the light by it.
+   */
+  readonly ies?: IesProfile | null;
 }
 
 /** A rig of one dark light: what lights an instance on none of the rig's channels (a list, so it stays on the rig's path). */

@@ -112,7 +112,7 @@ import { importMeshFile, importSummary, decodeImage, decodeMeshTextures } from "
 import { loadKtx2Encoder } from "@/lib/ktx2Encoder";
 import { loadMikkTSpace } from "@/lib/mikktspace";
 import { loadKtx2Decoder } from "@/lib/ktx2Decoder";
-import { KTX2_TRANSCODER_TRANSFER_BYTES, encodePngInBrowser, hasKtx2, sceneHasKtx2, settleKtx2Textures, compressMeshTextures } from "@/lib/ktx2Policy";
+import { KTX2_TRANSCODER_TRANSFER_BYTES, encodePngInBrowser, hasKtx2, sceneHasKtx2, settleKtx2Textures, compressMeshTextures, type TexturePlatform } from "@/lib/ktx2Policy";
 import { fetchLibraryMesh } from "@/lib/libraryClient";
 import type { LibraryAsset } from "@/lib/libraryManifest";
 import styles from "./editor.module.css";
@@ -1049,8 +1049,10 @@ export function MeshEditor({ sidecar, onSidecarChange, code, onStartPlay, modern
    * Read model files the way an import does: parsed, KTX2 settled, textures
    * compressed — the asset ready to place, and what happened to its textures.
    */
+  /** The platform imported textures are compressed for (F9d). */
+  const [texturePlatform, setTexturePlatform] = useState<TexturePlatform>("desktop");
   const prepareImport = async (all: File[]) => {
-    const primary = all.find((file) => /\.(obj|glb|gltf)$/i.test(file.name)) ?? all[0]!;
+    const primary = all.find((file) => /\.(obj|glb|gltf|fbx|usda|usdz|usd|cbpk)$/i.test(file.name)) ?? all[0]!;
     const read = await importMeshFile(primary, all.filter((file) => file !== primary));
     // Normal maps decode in the frame they were baked in (F1c): MikkTSpace where the file has no tangents.
     const parsed = read.primitives.some(needsTangents) ? withMeshTangents(read, await loadMikkTSpace()) : read;
@@ -1068,6 +1070,7 @@ export function MeshEditor({ sidecar, onSidecarChange, code, onStartPlay, modern
       sceneHasKtx2: sceneKtx2 || settled.outcome === "kept",
       decode: (image, raw) => decodeImage(image.bytes, image.mime, raw),
       encoder: loadKtx2Encoder,
+      platform: texturePlatform,
     });
     return { mesh: compressed.mesh, settled, compressed };
   };
@@ -1248,7 +1251,7 @@ export function MeshEditor({ sidecar, onSidecarChange, code, onStartPlay, modern
           <input
             ref={fileRef}
             type="file"
-            accept=".obj,.glb,.gltf,.mtl"
+            accept=".obj,.glb,.gltf,.mtl,.fbx,.usda,.usdz,.cbpk"
             multiple
             hidden
             onChange={(event) => {
@@ -1256,7 +1259,14 @@ export function MeshEditor({ sidecar, onSidecarChange, code, onStartPlay, modern
               event.target.value = "";
             }}
           />
-          <RailHint>OBJ, glTF, or GLB (meshopt- and Draco-compressed too), with its skeleton, clips, PBR maps and material sets; maps are compressed to KTX2 when that is lighter. For OBJ, select its .mtl alongside to keep colours. See BLENDER_WORKFLOW.md.</RailHint>
+          <label style={{ fontSize: 12, display: "flex", gap: 6, alignItems: "center" }} title="How imported maps are compressed: a desktop's take UASTC colour up to 8K; a phone's take ETC1S colour, every map held to 2048 across">
+            Textures for
+            <select aria-label="Texture platform" value={texturePlatform} onChange={(e) => setTexturePlatform(e.target.value as TexturePlatform)}>
+              <option value="desktop">Desktop</option>
+              <option value="mobile">Mobile</option>
+            </select>
+          </label>
+          <RailHint>OBJ, glTF, GLB (meshopt- and Draco-compressed too), FBX, USDA/USDZ or a .cbpk package, with its skeleton, clips, PBR maps and material sets; maps are compressed to KTX2 for the platform when that is lighter. For OBJ, select its .mtl alongside to keep colours. See BLENDER_WORKFLOW.md.</RailHint>
           {note && <RailHint>{note}</RailHint>}
         </RailGroup>
 
@@ -1561,7 +1571,7 @@ export function MeshEditor({ sidecar, onSidecarChange, code, onStartPlay, modern
                   Replace from file…
                   <input
                     type="file"
-                    accept=".obj,.glb,.gltf,.mtl"
+                    accept=".obj,.glb,.gltf,.mtl,.fbx,.usda,.usdz,.cbpk"
                     multiple
                     hidden
                     onChange={(event) => {

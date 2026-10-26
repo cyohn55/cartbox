@@ -14408,6 +14408,9 @@ function decodeHalves(text) {
   for (let i = 0; i < out.length; i += 1) out[i] = halfToFloat(bytes.charCodeAt(2 * i) | bytes.charCodeAt(2 * i + 1) << 8);
   return out;
 }
+var IES_MAX_PROFILES = 16;
+var IES_VEC4S = 128;
+var IES_BASE = 2 * LTC_SIZE * LTC_SIZE;
 var tables = null;
 function ltcTables() {
   if (tables) return tables;
@@ -14437,6 +14440,27 @@ fn ltcAt(which: u32, ndv: f32, rough: f32) -> vec4<f32> {
   let top = mix(ltcLut[b + y0 * ${n}u + x0], ltcLut[b + y0 * ${n}u + x1], fx);
   let bottom = mix(ltcLut[b + y1 * ${n}u + x0], ltcLut[b + y1 * ${n}u + x1], fx);
   return mix(top, bottom, fy);
+}
+// An IES profile's intensity (F9d) for light leaving along out from a light whose axis is axis:
+// the vertical angle from the axis, the horizontal one round it from a fixed reference, bilinear.
+fn iesValue(index: u32, v: u32, h: u32) -> f32 {
+  let i = v + h * 32u;
+  return ltcLut[${IES_BASE}u + index * ${IES_VEC4S}u + i / 4u][i % 4u];
+}
+fn iesFactor(index: u32, axis: vec3<f32>, out: vec3<f32>) -> f32 {
+  let a = normalize(axis);
+  let basis = normalize(cross(a, select(vec3<f32>(1.0, 0.0, 0.0), vec3<f32>(0.0, 0.0, 1.0), abs(a.x) > 0.9)));
+  let theta = acos(clamp(dot(out, a), -1.0, 1.0));
+  let phi = atan2(dot(out, cross(a, basis)), dot(out, basis));
+  let v = theta / 3.14159265 * 31.0;
+  let h = fract(phi / 6.2831853 + 1.0) * 16.0;
+  let v0 = u32(floor(v));
+  let v1 = min(v0 + 1u, 31u);
+  let h0 = u32(floor(h)) % 16u;
+  let h1 = (h0 + 1u) % 16u;
+  let fv = v - floor(v);
+  let fh = h - floor(h);
+  return mix(mix(iesValue(index, v0, h0), iesValue(index, v1, h0), fv), mix(iesValue(index, v0, h1), iesValue(index, v1, h1), fv), fh);
 }
 fn ltcEdge(v1: vec3<f32>, v2: vec3<f32>) -> vec3<f32> {
   let x = dot(v1, v2);
@@ -14535,7 +14559,7 @@ function packProbes(set) {
   });
   return out;
 }
-function packLights(lights, area = false) {
+function packLights(lights, area = false, iesIndex = null) {
   const out = new Float32Array(Math.max(1, lights.length) * LIGHT_FLOATS);
   lights.forEach((authored, i) => {
     const light = area ? authored : areaAsPunctual2(authored);
@@ -14554,6 +14578,14 @@ function packLights(lights, area = false) {
     out[base + 8] = light.range ?? 0;
     out[base + 11] = light.shadowTile ?? -1;
     out[base + 15] = (placed && light.falloff === "inverseSquare" ? 1 : 0) + 2 * lightChannelMask2(light.channels ?? 1);
+    out[base + 19] = -1;
+    const profile = iesIndex && (light.kind === "point" || light.kind === "spot") ? iesIndex(authored) : -1;
+    if (profile >= 0) {
+      out[base + 19] = profile;
+      const axis = light.direction ?? [0, -1, 0];
+      const len = Math.hypot(axis[0], axis[1], axis[2]) || 1;
+      out.set([axis[0] / len, axis[1] / len, axis[2] / len], base + 12);
+    }
     if (light.kind === "area") {
       const [w, h] = areaSize2(light);
       const frame = areaFrame2(light);
@@ -24241,7 +24273,7 @@ ${hdr ? "  // An area light (F2e-2): its rectangle, disk or tube integrated with
     if (lgt.d0.w > 1.5) {
       let ct = clamp((-dot(Ld, lgt.d3.xyz) - lgt.d2.y) / (lgt.d2.z - lgt.d2.y), 0.0, 1.0);
       atten = atten * ct * ct * (3.0 - 2.0 * ct);
-    }
+    }${hdr ? "\n    // An IES profile (F9d): the fixture's measured distribution about its axis.\n    if (lgt.d4.w > -0.5) { atten = atten * iesFactor(u32(lgt.d4.w + 0.5), lgt.d3.xyz, -Ld); }" : ""}
   } else {
     Ld = normalize(lgt.d0.xyz);
   }
@@ -25086,6 +25118,8 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
      * one read and one written, swapping each frame), and its pipelines.
      */
     this.gtao = null;
+    /** The IES profiles in the LTC buffer's slots (F9d), by identity. */
+    this.iesHeld = Array.from({ length: IES_MAX_PROFILES }, () => null);
     /** A 1×1 stand-in for GTAO's history when the frame has none (F3c). */
     this.gtaoBlank = null;
     /** This frame's virtual shadow maps (F2b): the pages it draws, when it has them. */
@@ -25316,6 +25350,25 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
         encoded.end();
       };
     });
+  }
+  /**
+   * Each distinct IES profile among the frame's lights a slot (F9d), uploaded when it first takes it; the
+   * light's slot, or −1 (no profile, or more profiles than slots).
+   */
+  iesSlots(lights) {
+    const wanted = new Set(lights.map((l) => l.ies).filter((p) => Boolean(p)));
+    this.iesHeld.forEach((p, i) => {
+      if (p && !wanted.has(p)) this.iesHeld[i] = null;
+    });
+    for (const profile of wanted) {
+      if (this.iesHeld.includes(profile)) continue;
+      const slot = this.iesHeld.indexOf(null);
+      if (slot < 0) break;
+      this.iesHeld[slot] = profile;
+      const samples = profile.samples ?? [];
+      this.device.queue.writeBuffer(this.depthGroups.ltc, (IES_BASE + slot * IES_VEC4S) * 16, Float32Array.from(samples.slice(0, IES_VEC4S * 4)));
+    }
+    return (light) => light.ies ? this.iesHeld.indexOf(light.ies) : -1;
   }
   /** Plan the frame's virtual shadow maps (F2b): see virtualShadows.ts. */
   planVsm(draw, toLight, strength, softness, projection) {
@@ -25802,7 +25855,7 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
       const dfgBuffer = device.createBuffer({ size: dfg.byteLength, usage: 128 | 8 });
       device.queue.writeBuffer(dfgBuffer, 0, dfg);
       const ltc = ltcTables();
-      const ltcBuffer = device.createBuffer({ size: ltc.byteLength, usage: 128 | 8 });
+      const ltcBuffer = device.createBuffer({ size: ltc.byteLength + IES_MAX_PROFILES * IES_VEC4S * 16, usage: 128 | 8 });
       device.queue.writeBuffer(ltcBuffer, 0, ltc);
       const decalBuffer = device.createBuffer({ size: DECAL_BUFFER_WORDS * 4, usage: 128 | 8 });
       const aerialBuffer = device.createBuffer({ size: AERIAL_LUT_BYTES, usage: 64 | 128 | 4 });
@@ -26321,7 +26374,7 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     this.frameFog = this.prepareFog(draw);
     this.frameGi = this.hdr && draw.dynamicGi && draw.environment?.probeVolume ? draw.dynamicGi : null;
     const { ordered, globalCount, clusters: cells } = this.clusterLights(localPlan ? { ...draw, lights: localPlan.lights, localShadows: null } : draw);
-    this.uploadLights(packLights(ordered, this.hdr));
+    this.uploadLights(packLights(ordered, this.hdr, this.hdr ? this.iesSlots(ordered) : null));
     if (this.frameFog) {
       const tiles = this.frameLocalTiles !== null && this.frameLocalTiles.length > 0;
       this.volumetricFog.lights({ clusterParams: cells?.params ?? [1, 1, 1, 1], globalCount: cells ? globalCount : ordered.length, clustered: cells !== null, width: this.width, height: this.height, shadowBias: tiles ? LOCAL_SHADOW_BIAS2 : null });

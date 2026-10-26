@@ -17,6 +17,7 @@
  */
 
 import { parsePhysicalCamera, type PhysicalCameraSettings } from "./physicalCamera";
+import { readIesProfile } from "./iesProfile";
 import { parseVolumetricFog } from "./volumetricFog";
 import { parseDynamicGi, parseScreenSpaceGi, type DynamicGiSettings, type ScreenSpaceGiSettings } from "./dynamicGi";
 import { parseAtmosphere } from "./atmosphere";
@@ -207,6 +208,9 @@ function parseLight(value: unknown): SceneLight | null {
       : {};
   const mask = raw.channels === undefined ? 1 : lightChannelMask(raw.channels);
   const physical = { ...temperature, ...(mask !== 1 ? { channels: mask } : {}) };
+  // An IES profile (F9d), for a point or spot light.
+  const profile = readIesProfile(raw.ies);
+  const ies = profile ? { ies: profile } : {};
   if (kind === "directional") {
     const direction = isFiniteTriple(raw.direction) ? raw.direction : ([0.4, 0.8, 0.6] as [number, number, number]);
     return { kind, direction, color, intensity, ...physical };
@@ -228,9 +232,10 @@ function parseLight(value: unknown): SceneLight | null {
     const angle = (v: unknown, fallback: number) => (typeof v === "number" && Number.isFinite(v) ? Math.min(89, Math.max(0, v)) : fallback);
     const outerAngle = Math.max(1, angle(raw.outerAngle, 30));
     const innerAngle = Math.min(outerAngle, angle(raw.innerAngle, outerAngle * 0.75));
-    return { kind, position, direction, color, intensity, range, innerAngle, outerAngle, ...falloff, ...(raw.castShadows === true ? { castShadows: true } : {}), ...physical };
+    return { kind, position, direction, color, intensity, range, innerAngle, outerAngle, ...falloff, ...(raw.castShadows === true ? { castShadows: true } : {}), ...physical, ...ies };
   }
-  return { kind, position, color, intensity, range, ...falloff, ...(raw.castShadows === true ? { castShadows: true } : {}), ...physical };
+  const axis = ies.ies && isFiniteTriple(raw.direction) ? { direction: raw.direction } : {};
+  return { kind, position, ...axis, color, intensity, range, ...falloff, ...(raw.castShadows === true ? { castShadows: true } : {}), ...physical, ...ies };
 }
 
 /**

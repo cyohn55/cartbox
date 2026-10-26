@@ -1227,10 +1227,22 @@ Everything else depends on this track. It contains no visible "feature", but its
       - The set goes on a material whose stack survives a save; the presets paint.
       - UDIM tiles are found and split with UVs in 0..1, and the files are named.
 - [ ] **F9c. Scans and dense meshes.** Import of photogrammetry and scan meshes (millions of triangles), automatic delighting of albedo, auto-UV, and conversion to F6a clusters with no manual LODs. Decimation to a "game" proxy for collision.
-- [ ] **F9d. Import completeness.**
+- [x] **F9d. Import completeness.** (The glTF KHR material extensions are F1d's.)
   - FBX (through a WASM converter), USD/USDZ, and the full set of glTF KHR material extensions (F1d).
   - 8K textures, HDR environments (`.hdr`, `.exr`, KTX2 HDR), and IES profiles.
   - Per-platform texture compression on import.
+  - **Done.**
+    - **FBX** (`editor model/fbxCodec.ts`), read directly rather than through a WASM converter: binary 7.x (32- and 64-bit records, zlib arrays) and ASCII.
+      - Each Mesh geometry's polygons (fan-triangulated), normals and first UV set by any mapping and reference, placed by its Model up the parent chain (translation, XYZ rotation, scale), with its Materials' diffuse colours; `UnitScaleFactor` to metres.
+    - **USD** (`usdCodec.ts`): USDA, and USDZ packages holding a USDA layer.
+      - Mesh prims' points, faces, normals, `primvars:st` (indexed or not) and display colour, placed by their and their Xforms' translate, rotateXYZ and scale; `metersPerUnit` and Z-up honoured.
+      - The binary crate (`.usdc`) is refused with a message to export USDA.
+    - **HDR environments** (`exrCodec.ts`): OpenEXR scanline images (half or float; NONE, RLE, ZIPS, ZIP) and uncompressed float KTX2 (RGBA16F/32F, B10G11R11, E5B9G9R9) decode to linear floats and are stored as Radiance, so they light the sky as `.hdr` does.
+    - **IES profiles** (`iesProfile.ts`): LM-63 (1986 to 2002, TILT included), unfolded by symmetry and resampled to 32 × 16 about the light's axis, normalised with the peak candela kept.
+      - Lighting panel: a profile per point or spot light. The AAA renderer keeps up to 16 profiles after the LTC tables in their storage buffer, and a light's slot rides in its d4.w.
+    - **Per-platform textures** (`apps/web lib/ktx2Policy.ts`): a "Textures for" choice in the mesh editor. Desktop keeps 8K and UASTC; mobile holds every map to 2048 and colour to ETC1S. Packages (`.cbpk`) import too.
+    - Tests: `Unit Tests/import-formats.test.ts` (built EXR, KTX2, FBX binary and ASCII, USDA and USDZ; IES on Dawn).
+    - *Left for later:* EXR's PIZ, PXR24, B44 and DWA codecs, tiled and multi-part files; USDC; FBX skinning and animation (the glTF path has them); IES on the non-AAA tiers.
 - [x] **F9e. Packaging and storage.** (Moving the existing mesh sidecars onto packages is a migration of its own; see below.)
   - A binary package format (chunked geometry, KTX2 and meshopt, a manifest), replacing base64 JSON sidecars.
   - **Direct-to-storage uploads**, past the 4.5 MB request body, with dedupe by content hash.

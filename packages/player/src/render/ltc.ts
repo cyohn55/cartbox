@@ -60,6 +60,13 @@ function decodeHalves(text: string): Float32Array {
   return out;
 }
 
+/** IES profiles (F9d) the renderer holds at once, after the LTC tables in the same storage buffer. */
+export const IES_MAX_PROFILES = 16;
+/** vec4s a profile takes there: its IES_VERTICAL_SAMPLES × IES_HORIZONTAL_SAMPLES intensities, four a vec4. */
+export const IES_VEC4S = 128;
+/** Where the profiles start in the buffer, in vec4s. */
+export const IES_BASE = 2 * LTC_SIZE * LTC_SIZE;
+
 let tables: Float32Array | null = null;
 
 /** Both tables as the shader reads them: `LTC_SIZE²` vec4s of the inverse transform, then as many of the norm and Fresnel. */
@@ -235,6 +242,27 @@ fn ltcAt(which: u32, ndv: f32, rough: f32) -> vec4<f32> {
   let top = mix(ltcLut[b + y0 * ${n}u + x0], ltcLut[b + y0 * ${n}u + x1], fx);
   let bottom = mix(ltcLut[b + y1 * ${n}u + x0], ltcLut[b + y1 * ${n}u + x1], fx);
   return mix(top, bottom, fy);
+}
+// An IES profile's intensity (F9d) for light leaving along out from a light whose axis is axis:
+// the vertical angle from the axis, the horizontal one round it from a fixed reference, bilinear.
+fn iesValue(index: u32, v: u32, h: u32) -> f32 {
+  let i = v + h * 32u;
+  return ltcLut[${IES_BASE}u + index * ${IES_VEC4S}u + i / 4u][i % 4u];
+}
+fn iesFactor(index: u32, axis: vec3<f32>, out: vec3<f32>) -> f32 {
+  let a = normalize(axis);
+  let basis = normalize(cross(a, select(vec3<f32>(1.0, 0.0, 0.0), vec3<f32>(0.0, 0.0, 1.0), abs(a.x) > 0.9)));
+  let theta = acos(clamp(dot(out, a), -1.0, 1.0));
+  let phi = atan2(dot(out, cross(a, basis)), dot(out, basis));
+  let v = theta / 3.14159265 * 31.0;
+  let h = fract(phi / 6.2831853 + 1.0) * 16.0;
+  let v0 = u32(floor(v));
+  let v1 = min(v0 + 1u, 31u);
+  let h0 = u32(floor(h)) % 16u;
+  let h1 = (h0 + 1u) % 16u;
+  let fv = v - floor(v);
+  let fh = h - floor(h);
+  return mix(mix(iesValue(index, v0, h0), iesValue(index, v1, h0), fv), mix(iesValue(index, v0, h1), iesValue(index, v1, h1), fv), fh);
 }
 fn ltcEdge(v1: vec3<f32>, v2: vec3<f32>) -> vec3<f32> {
   let x = dot(v1, v2);

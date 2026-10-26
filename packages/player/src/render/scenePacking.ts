@@ -187,6 +187,8 @@ export interface PackableLight {
   readonly shadowTile?: number;
   readonly temperature?: number;
   readonly channels?: number;
+  /** An IES profile (F9d): the renderer gives each distinct one a slot. */
+  readonly ies?: object | null;
 }
 
 /**
@@ -196,7 +198,7 @@ export interface PackableLight {
  * false (every shader but the linear-light one), an area light (F2e-2) packs
  * as the punctual light it is from far off.
  */
-export function packLights(lights: readonly PackableLight[], area = false): Float32Array {
+export function packLights(lights: readonly PackableLight[], area = false, iesIndex: ((light: PackableLight) => number) | null = null): Float32Array {
   const out = new Float32Array(Math.max(1, lights.length) * LIGHT_FLOATS);
   lights.forEach((authored, i) => {
     const light: PackableLight = area ? authored : areaAsPunctual(authored as SceneLight);
@@ -216,6 +218,15 @@ export function packLights(lights: readonly PackableLight[], area = false): Floa
     out[base + 8] = light.range ?? 0;
     out[base + 11] = light.shadowTile ?? -1;
     out[base + 15] = (placed && light.falloff === "inverseSquare" ? 1 : 0) + 2 * lightChannelMask(light.channels ?? 1);
+    // d4.w: an IES profile's slot (F9d), or −1; its axis in d3 (a spot's direction, else straight down).
+    out[base + 19] = -1;
+    const profile = iesIndex && (light.kind === "point" || light.kind === "spot") ? iesIndex(authored) : -1;
+    if (profile >= 0) {
+      out[base + 19] = profile;
+      const axis = light.direction ?? [0, -1, 0];
+      const len = Math.hypot(axis[0]!, axis[1]!, axis[2]!) || 1;
+      out.set([axis[0]! / len, axis[1]! / len, axis[2]! / len], base + 12);
+    }
     if (light.kind === "area") {
       const [w, h] = areaSize(light);
       const frame = areaFrame(light);
