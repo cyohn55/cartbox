@@ -553,7 +553,10 @@ Everything else depends on this track. It contains no visible "feature", but its
     - IES profiles wait on their importer (F9d).
     - GPU clustering is F0e's.
     - Area-light shadows.
-- [ ] **F2f. Emissive surfaces that light.** Emissive meshes contribute through GI (F3d and F3e), so the energy trim on a Forerunner wall lights the floor in front of it.
+- [x] **F2f. Emissive surfaces that light.** Emissive meshes contribute through GI (F3d and F3e), so the energy trim on a Forerunner wall lights the floor in front of it.
+  - **F2f-1: done.** Both tracers take a surface's emission as light: the GPU bake's paths (F3d) and the live volume's rays (F3e-1). Each takes the material's emissive colour in linear light, as the renderer's shading does, so what glows on screen lights by the same amount.
+    - *Tests (`emissive-light.test.ts`):* the closed form for a point facing a glowing plane that fills its view is irradiance over π = the plane's radiance. Every probe a metre or two above a vast glowing black floor (with no sky and no lights) takes it within 10%, both from the GPU bake and from 30 frames of the live volume, and is nearly dark facing away.
+    - *Left:* the tracers take the emissive factor alone, not an emissive map's texels or a material graph's emissive output. A glowing pattern lights as its factor's flat colour.
 
 ### F3. Global illumination and reflections
 

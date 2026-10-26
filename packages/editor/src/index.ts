@@ -426,6 +426,7 @@ export {
   octTexel,
   emptyProbeVolume,
   planProbeVolume,
+  shBasis,
   probeIrradiance,
   probeVolumeTexels,
   sampleProbeVolume,
