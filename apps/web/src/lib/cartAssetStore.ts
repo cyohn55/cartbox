@@ -71,10 +71,39 @@ export const ALLOWED_ASSET_TYPES: readonly string[] = [
   "model/gltf-binary",
   "audio/wav",
   "audio/ogg",
+  // The binary asset package (AAA_FIDELITY_ROADMAP.md F9e; cartPackage.ts).
+  "application/vnd.cartbox.package",
 ];
 
-/** Largest single asset, whatever the model's total budget. */
+/** Largest single asset sent through the API, whatever the model's total budget. */
 export const MAX_ASSET_BYTES = 16 * 1024 * 1024;
+
+/**
+ * Largest single asset sent straight to storage (F9e): the bytes go to R2 on a
+ * presigned PUT, past the serverless body limit, so only the model's budget
+ * bounds them. A ceiling still stands so one asset can't be a whole disc.
+ */
+export const MAX_DIRECT_ASSET_BYTES = 256 * 1024 * 1024;
+
+/**
+ * Above this an upload goes straight to storage: a serverless deploy refuses a
+ * request body much over 4.5 MB, multipart overhead included.
+ */
+export const DIRECT_UPLOAD_THRESHOLD = 4 * 1024 * 1024;
+
+/** How an upload of `bytes` travels: through the API, or straight to storage on a presigned URL. */
+export function uploadRoute(bytes: number): "multipart" | "direct" {
+  return bytes > DIRECT_UPLOAD_THRESHOLD ? "direct" : "multipart";
+}
+
+/** A hex SHA-256 as the base64 an `x-amz-checksum-sha256` header carries (so storage checks the bytes itself). */
+export function hashToBase64(hash: string): string {
+  const bytes = new Uint8Array(hash.length / 2);
+  for (let i = 0; i < bytes.length; i += 1) bytes[i] = parseInt(hash.slice(i * 2, i * 2 + 2), 16);
+  let binary = "";
+  for (const b of bytes) binary += String.fromCharCode(b);
+  return btoa(binary);
+}
 
 /** One stored blob, addressed by its content hash. */
 export interface AssetRef {
@@ -200,11 +229,13 @@ export function checkAssetUpload(
   contentType: string,
   assets: CartAssets,
   budgetBytes: number,
+  /** The per-asset ceiling: the API's, or a direct upload's (F9e). */
+  limit: number = MAX_ASSET_BYTES,
 ): AssetRejection | null {
   if (!isValidAssetName(name)) return { reason: "name", name };
   if (!ALLOWED_ASSET_TYPES.includes(contentType)) return { reason: "type", contentType };
   if (bytes <= 0) return { reason: "empty" };
-  if (bytes > MAX_ASSET_BYTES) return { reason: "too-large", bytes, limit: MAX_ASSET_BYTES };
+  if (bytes > limit) return { reason: "too-large", bytes, limit };
 
   // Already referenced: no new storage, so no new charge against the budget.
   if (cartAssetHashes(assets).includes(hash)) return null;

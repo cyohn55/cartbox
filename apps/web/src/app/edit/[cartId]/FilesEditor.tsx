@@ -33,7 +33,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import {
   ALLOWED_ASSET_TYPES,
   EMPTY_CART_ASSETS,
-  MAX_ASSET_BYTES,
+  MAX_DIRECT_ASSET_BYTES,
   checkAssetUpload,
   describeRejection,
   hashAsset,
@@ -43,6 +43,7 @@ import {
   type CartAssets,
 } from "@/lib/cartAssetStore";
 import { authHeaders } from "@/lib/supabase-browser";
+import { uploadCartAsset } from "@/lib/assetUploadClient";
 
 import {
   assetNameFromFile,
@@ -134,12 +135,13 @@ export function FilesEditor({ cartId, budgetBytes, onHasAssetsChange }: FilesEdi
         const name = uniqueAssetName(assetNameFromFile(file.name), Object.keys(manifest.entries));
         const contentType = contentTypeForUpload(file.name, file.type);
 
-        // Checked before the bytes are read, so an oversized file costs nothing.
-        if (file.size > MAX_ASSET_BYTES) {
+        // Checked before the bytes are read, so an oversized file costs nothing. Past the API's body
+        // limit a file goes straight to storage (F9e), so the direct ceiling is the one that applies.
+        if (file.size > MAX_DIRECT_ASSET_BYTES) {
           results.push({
             fileName: file.name,
             failed: true,
-            text: `${formatBytes(file.size)} is over the ${formatBytes(MAX_ASSET_BYTES)} per-file limit.`,
+            text: `${formatBytes(file.size)} is over the ${formatBytes(MAX_DIRECT_ASSET_BYTES)} per-file limit.`,
           });
           continue;
         }
@@ -161,36 +163,20 @@ export function FilesEditor({ cartId, budgetBytes, onHasAssetsChange }: FilesEdi
           contentType,
           manifest,
           budgetBytes,
+          MAX_DIRECT_ASSET_BYTES,
         );
         if (rejection) {
           results.push({ fileName: file.name, failed: true, text: describeRejection(rejection) });
           continue;
         }
 
-        const form = new FormData();
-        form.set("name", name);
-        form.set("hash", hash);
-        // Re-wrapped so the part carries the type resolved above: the browser
-        // leaves `.glb` and friends untyped, and the server allowlists whatever
-        // the part declares.
-        form.set("file", new File([bytes as BlobPart], name, { type: contentType }));
-
         try {
-          const response = await fetch(`/api/carts/${cartId}/assets`, {
-            method: "POST",
-            headers: await authHeaders(),
-            body: form,
-          });
-          const body = (await response.json()) as {
-            error?: string;
-            url?: string;
-            deduplicated?: boolean;
-          };
-          if (!response.ok) {
+          const body = await uploadCartAsset(cartId, name, bytes, hash, contentType, await authHeaders());
+          if (!body.ok) {
             results.push({
               fileName: file.name,
               failed: true,
-              text: body.error ?? `Server said ${response.status}.`,
+              text: body.error ?? "The upload failed.",
             });
             continue;
           }
@@ -289,7 +275,7 @@ export function FilesEditor({ cartId, budgetBytes, onHasAssetsChange }: FilesEdi
           }}
         />
         <span className={styles.panelMeta}>
-          {formatBytes(usage.freeBytes)} free · up to {formatBytes(MAX_ASSET_BYTES)} per file
+          {formatBytes(usage.freeBytes)} free · up to {formatBytes(MAX_DIRECT_ASSET_BYTES)} per file
         </span>
       </div>
 

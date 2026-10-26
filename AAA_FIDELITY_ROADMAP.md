@@ -1231,10 +1231,32 @@ Everything else depends on this track. It contains no visible "feature", but its
   - FBX (through a WASM converter), USD/USDZ, and the full set of glTF KHR material extensions (F1d).
   - 8K textures, HDR environments (`.hdr`, `.exr`, KTX2 HDR), and IES profiles.
   - Per-platform texture compression on import.
-- [ ] **F9e. Packaging and storage.**
+- [x] **F9e. Packaging and storage.** (Moving the existing mesh sidecars onto packages is a migration of its own; see below.)
   - A binary package format (chunked geometry, KTX2 and meshopt, a manifest), replacing base64 JSON sidecars.
   - **Direct-to-storage uploads**, past the 4.5 MB request body, with dedupe by content hash.
   - Asset validation: texel density, naming, budgets, missing maps.
+  - **F9e-1: done.**
+    - **The package** (`editor model/cartPackage.ts`).
+      - Layout: `CBPK`, a version, a JSON manifest, then chunks, each on a 16-byte boundary so a typed array can view it in place.
+      - The manifest holds per chunk its role, encoding, offset, length, raw length, count, stride, type and SHA-256; per primitive its streams and material; the materials serialised without their images; and the mesh's skin, clips, trails and variants as the JSON codec stores them.
+      - Streams (positions through joints and indices) are stored raw or squeezed with meshoptimizer's vertex and index codecs, whichever is smaller. The codecs are handed in, as the glTF decoders are. Images keep their encoding (PNG, KTX2).
+      - Reading checks the magic, the version, every chunk's bounds and (by default) its hash, so a truncated, tampered or newer package fails loudly.
+      - The asset store accepts it (`application/vnd.cartbox.package`), and the Mesh tab's **Asset check** downloads one (`.cbpk`).
+    - **Direct-to-storage uploads.** Past 4 MB, the client (`assetUploadClient.ts`) sends a file straight to R2 instead of through the API's multipart route; the Files tab uses it for every upload. The flow is `/api/carts/[cartId]/assets/direct`:
+      - **begin:** the same checks as multipart (name, type, the model's budget), against a 256 MB direct ceiling. Bytes the store already holds (from any cart) are referenced at once, and nothing is sent.
+      - Otherwise **a presigned PUT**, bound by the signature to its type, its length and an `x-amz-checksum-sha256` of the hash, so R2 itself refuses bytes that aren't the hash's.
+      - **commit**, after the PUT: the object's size is confirmed with a HEAD, then the row is written, then the manifest. That is blob, row, manifest, the order the multipart path keeps.
+    - **Validation** (`editor model/assetValidation.ts`; the Mesh tab's **Asset check**, with a texel-density aim).
+      - Each primitive's texel density (its UV area over its surface area, times its base map's size) is checked against the aim within a factor, and its spread across triangles (10th to 90th area-weighted percentile).
+      - Names; whole triangles; normals; maps without UVs; a PBR set half there; a normal map without tangents.
+      - Map sizes, read from PNG, JPEG and KTX2 headers, against a maximum. Budgets for triangles and texture memory (RGBA8 with mips).
+    - *Tests (`asset-packaging.test.ts`):*
+      - SHA-256's test vectors.
+      - A grid round-trips raw and meshopt-squeezed: positions, indices, UVs, tangents, u16 joints, its PNG, its factors and its smart stack, with chunks on 16-byte boundaries.
+      - meshopt halves its size, and needs the decoder to read. A non-package, a truncated one, a tampered one and another version are each refused.
+      - Validation passes a 2 m crate with 1024² maps at 512 px/m, and flags low and high density, names, half a PBR set, missing tangents and UVs, and each budget.
+      - Uploads: the route by size, the direct ceiling, the package type, and the checksum's base64. The client goes begin → PUT → commit for a large file, sends nothing for bytes the store holds, and uses multipart for a small one.
+    - *Left for F9e:* saving the editor's mesh sidecars as packages through the store (the format and upload path are ready, and the sidecar routes still take JSON); KTX2 transcoding of a package's textures on import (F9d).
 - [ ] **F9f. Asset library.** In-editor search and import from CC0 libraries (Poly Haven, ambientCG), plus a Cartbox library of scanned surfaces, props and HDRIs prepared for the tier. These are licensed for redistribution and attributed.
 
 ### F10. Look development and the editor viewport

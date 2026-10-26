@@ -19,8 +19,8 @@
  * Orphaned bytes are a bill; a dangling reference is a bug.
  */
 
-import { assetKey, isValidHash, type AssetRef } from "./cartAssetStore";
-import { getObject, putObject, publicUrl } from "./storage";
+import { assetKey, hashToBase64, isValidHash, type AssetRef } from "./cartAssetStore";
+import { getObject, headObject, presignPut, putObject, publicUrl } from "./storage";
 import { serviceClient } from "./supabase";
 
 /** Postgres unique-violation. An asset that already exists is success, not error. */
@@ -65,6 +65,33 @@ export async function storeCartAsset(
     throw new Error(error.message);
   }
   return { ref, uploaded: true };
+}
+
+/**
+ * A presigned PUT for an asset's bytes (F9e), keyed by its hash, which storage
+ * verifies with the SHA-256 checksum the signature binds.
+ */
+export async function presignCartAssetUpload(hash: string, bytes: number, contentType: string): Promise<{ url: string; headers: Record<string, string> }> {
+  return presignPut(assetKey(hash), contentType, bytes, hashToBase64(hash));
+}
+
+/**
+ * Record an asset a browser stored directly (F9e), once its object is there at
+ * the size it was presigned for: blob first (the browser's PUT), row second,
+ * manifest third, as {@link storeCartAsset} orders them. Null when the object
+ * isn't there (the PUT failed, or hasn't happened).
+ */
+export async function confirmCartAsset(hash: string, bytes: number, contentType: string): Promise<AssetRef | null> {
+  const existing = await findCartAsset(hash);
+  if (existing) return existing;
+  const head = await headObject(assetKey(hash));
+  if (!head || head.bytes !== bytes) return null;
+  const { error } = await serviceClient().from("cart_assets").insert({ hash, bytes, content_type: contentType });
+  if (error && error.code !== UNIQUE_VIOLATION) {
+    if (error.code === UNDEFINED_TABLE) throw new Error("Asset storage is not available: migration 0024 has not been applied");
+    throw new Error(error.message);
+  }
+  return { hash, bytes, contentType };
 }
 
 /** Look up a stored asset by hash, or null when it is not stored. */

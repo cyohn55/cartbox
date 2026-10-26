@@ -126,6 +126,7 @@ import { PosePanel, WeightPaintPanel, type BrushSettings } from "./RiggingPanels
 import { DopeSheet } from "./DopeSheet";
 import { TexturePaintPanel, useTexturePaint } from "./TexturePaintPanel";
 import { SmartMaterialPanel } from "./SmartMaterialPanel";
+import { AssetCheckPanel } from "./AssetCheckPanel";
 import { BakePanel } from "./BakePanel";
 import { AnimatorPanel } from "./AnimatorPanel";
 import { LightingEditor } from "./LightingEditor";
@@ -1529,6 +1530,8 @@ export function MeshEditor({ sidecar, onSidecarChange, code, onStartPlay, modern
             {meshAsset && <BakePanel mesh={meshAsset} onBaked={applyGeometryEdit} />}
 
             {meshAsset && <SmartMaterialPanel mesh={meshAsset} onEdit={applyGeometryEdit} />}
+
+            {meshAsset && <AssetCheckPanel mesh={meshAsset} />}
 
             {meshAsset && texturing && <TexturePaintPanel mesh={meshAsset} set={variant ?? null} paint={paint} onEdit={applyGeometryEdit} />}
 

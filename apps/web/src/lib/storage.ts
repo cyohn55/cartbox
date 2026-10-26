@@ -3,7 +3,8 @@
  * rendered thumbnails. Server-only — uses secret credentials.
  */
 
-import { DeleteObjectCommand, GetObjectCommand, PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
+import { DeleteObjectCommand, GetObjectCommand, HeadObjectCommand, PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
+import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 
 function required(name: string): string {
   const value = process.env[name];
@@ -103,4 +104,43 @@ export function publicUrl(key: string): string {
     return key;
   }
   return `${required("R2_PUBLIC_BASE_URL")}/${key}`;
+}
+
+/**
+ * A presigned PUT for `key` (AAA_FIDELITY_ROADMAP.md F9e): a browser sends the
+ * bytes straight to R2, past the API's body limit. The URL is good for one
+ * object of exactly `bytes` bytes of `contentType` whose SHA-256 is
+ * `checksumBase64`: storage itself refuses bytes that don't match, so the key
+ * (the content hash) can't be filled with anything else.
+ */
+export async function presignPut(
+  key: string,
+  contentType: string,
+  bytes: number,
+  checksumBase64: string,
+  expiresSeconds = 600,
+): Promise<{ url: string; headers: Record<string, string> }> {
+  const command = new PutObjectCommand({
+    Bucket: required("R2_BUCKET"),
+    Key: key,
+    ContentType: contentType,
+    ContentLength: bytes,
+    ChecksumSHA256: checksumBase64,
+  });
+  const url = await getSignedUrl(client(), command, {
+    expiresIn: expiresSeconds,
+    // The checksum and type travel as headers the signature covers.
+    signableHeaders: new Set(["content-type", "x-amz-checksum-sha256"]),
+  });
+  return { url, headers: { "Content-Type": contentType, "x-amz-checksum-sha256": checksumBase64 } };
+}
+
+/** An object's stored size, or null when it is not there. */
+export async function headObject(key: string): Promise<{ bytes: number } | null> {
+  try {
+    const result = await client().send(new HeadObjectCommand({ Bucket: required("R2_BUCKET"), Key: key }));
+    return { bytes: result.ContentLength ?? 0 };
+  } catch {
+    return null;
+  }
 }

@@ -1748,3 +1748,5 @@ export {
   type SmartStack,
   type SmartTextureSet,
 } from "./model/smartMaterials";
+export { PACKAGE_MAGIC, PACKAGE_VERSION, packMeshAsset, readPackageManifest, sha256, unpackMeshAsset, type MeshoptCodec, type PackageChunk, type PackageManifest } from "./model/cartPackage";
+export { imageSize as encodedImageSize, texelDensity, validateMeshAsset, type ValidationIssue, type ValidationOptions, type ValidationSeverity } from "./model/assetValidation";
