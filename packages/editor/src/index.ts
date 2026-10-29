@@ -1081,6 +1081,28 @@ export {
 } from "./model/motionMatching";
 export { placeFeet, solveFabrik, turnJoint, type FootPlacement, type GroundQuery, type Leg } from "./model/footPlacement";
 export { PoweredRagdoll, type PoweredOptions } from "./model/poweredRagdoll";
+export {
+  CpuEmitter,
+  MAX_EMITTER_CAPACITY,
+  MAX_SDF_SHAPES,
+  PARTICLE_FLOATS,
+  compileEmitter,
+  curlNoise,
+  emitterFromEffect,
+  flipbookFrame,
+  parseEmitters,
+  particleRandom,
+  pcg,
+  ringSize,
+  sdfShape,
+  spawnParticle,
+  stepParticle,
+  type CpuParticle,
+  type EmitterModule,
+  type EmitterParams,
+  type EmitterSpec,
+  type SdfShape,
+} from "./model/particleGraph";
 export { DEFAULT_TOLERANCE, clipBytes, packClip, packQuat, reduceChannel, reduceClip, unpackClip, unpackQuat, type CompressionTolerance } from "./model/clipCompression";
 export {
   GRAPH_NODES,

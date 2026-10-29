@@ -141,6 +141,7 @@ import {
   type RasterStyle,
   type ReflectionProbeSet,
   CLOTH_GRAVITY,
+  type EmitterSpec,
   CLOTH_ITERATIONS,
   CLOTH_RELAX,
   CORNEA_ROUGHNESS,
@@ -159,6 +160,7 @@ import { compressedFormatsFor } from "../lighting/webgpuDevice.js";
 import { brdfLut, brdfWgsl } from "./brdf.js";
 import { MATERIAL_SET_WGSL } from "./materialSet.js";
 import { CHARACTER_WGSL } from "./characterShading.js";
+import { GpuParticles, type ParticleFrame } from "./gpuParticles.js";
 import { CLOTH_FINISH_WGSL, CLOTH_PREDICT_WGSL, CLOTH_SOLVE_WGSL, CLOTH_WORKGROUP, clothParams, packCapsules, vertexTriangles } from "./clothGpu.js";
 import { SKIN_WGSL, SKIN_WORKGROUP, packBindShape, packInfluences, skinParams } from "./gpuSkinning.js";
 import { SSS_MAX_PROFILES, SSS_WGSL, packSssProfiles, type SssProfile } from "./subsurface.js";
@@ -4272,6 +4274,10 @@ export class WebgpuSceneRenderer implements SceneRenderer {
       });
     }
     if (seeThrough) scenePass("see-through", firstSeeThrough, draws.length, true, true);
+    // GPU particles (F8a): simulated against the prepass's depths, drawn over the scene before TAA's reactive mask.
+    if (this.particles && this.hdr && prepass && gbuffer && !msaa && this.frameDepthView) {
+      this.addParticles(graph, colour, depth, gbuffer, { draw, viewProj, eye, globalCount: cells ? globalCount : ordered.length });
+    }
     // Before the reflections land on the opaque scene: what the see-through draws alone changed (F4a).
     const reactive = hdrTaa && seeThrough && behind ? this.addReactiveMask(graph, behind, colour) : null;
     // On the AAA tier, with the prepass's G-buffer, reflections trace the Hi-Z chain (F3f); elsewhere I3's march.
@@ -5560,6 +5566,68 @@ export class WebgpuSceneRenderer implements SceneRenderer {
     }
   }
 
+  /** The GPU particle system (F8a; gpuParticles.ts), when the scene has emitters. */
+  private particles: GpuParticles | null = null;
+  private particleTime = 0;
+
+  /** Give the renderer its particle emitters (F8a), replacing any it had; none clears them. */
+  setParticles(specs: readonly EmitterSpec[], looks: ConstructorParameters<typeof GpuParticles>[3] = []): void {
+    this.particles?.dispose();
+    this.particles = specs.length > 0 && this.hdr ? new GpuParticles(this.device, this.colourFormat, specs, looks) : null;
+  }
+
+  /** Fire an emitter's burst (F8a). */
+  particleBurst(index: number, at: readonly number[], dir: readonly number[] = [0, 0, 0], scale = 1): void {
+    this.particles?.burst(index, at, dir, scale);
+  }
+
+  /** An emitter's ring (F8a): its particles' buffer, for tests and the profiler. */
+  particleRing(index: number): { buffer: any; capacity: number; born: number } | null {
+    return this.particles?.ring(index) ?? null;
+  }
+
+  /** The particles' frame: simulated after the prepass, drawn after the see-through scene (F8a). */
+  private addParticles(graph: FrameGraph, colour: FrameResource, depth: FrameResource, gbuffer: FrameResource, f: { draw: GpuSceneDraw; viewProj: Mat4; eye: readonly number[]; globalCount: number }): void {
+    const particles = this.particles!;
+    const view = f.draw.view;
+    const dt = f.draw.particleDt ?? 1 / 60;
+    this.particleTime += dt;
+    const sun = f.draw.lightDirection ?? [0, 1, 0];
+    const sl = Math.hypot(sun[0]!, sun[1]!, sun[2]!) || 1;
+    const frame: ParticleFrame = {
+      dt,
+      time: this.particleTime,
+      viewProj: f.viewProj,
+      width: this.width,
+      height: this.height,
+      depthTerms: this.frameDepthView!.terms as [number, number],
+      eye: f.eye,
+      right: [view[0]!, view[4]!, view[8]!],
+      up: [view[1]!, view[5]!, view[9]!],
+      light: { direction: [sun[0]! / sl, sun[1]! / sl, sun[2]! / sl], color: [1, 1, 1], ambient: f.draw.ambient ?? 0.3, lights: f.globalCount },
+    };
+    graph.addPass("particles.simulate", "compute", (pass) => {
+      pass.read(depth);
+      pass.read(gbuffer);
+      pass.keep();
+      return (ctx) => particles.simulate(ctx.encoder, frame, ctx.texture(depth), ctx.texture(gbuffer));
+    });
+    graph.addPass("particles", "render", (pass) => {
+      pass.read(colour, "attachment");
+      pass.write(colour);
+      pass.read(depth, "attachment");
+      return (ctx) => {
+        const encoded = ctx.encoder.beginRenderPass({
+          colorAttachments: [{ view: ctx.texture(colour).createView(), loadOp: "load", storeOp: "store" }],
+          depthStencilAttachment: { view: ctx.texture(depth).createView(), depthReadOnly: true },
+          ...ctx.timing,
+        });
+        particles.draw(encoded, frame, this.lightBuffer, ctx.texture(depth));
+        encoded.end();
+      };
+    });
+  }
+
   /** Whether this renderer skins live meshes on the GPU (F7a): the linear-light one, whose frames no CPU reference has to match. */
   get gpuSkinning(): boolean {
     return this.hdr;
@@ -6015,6 +6083,8 @@ export class WebgpuSceneRenderer implements SceneRenderer {
   }
 
   dispose(): void {
+    this.particles?.dispose();
+    this.particles = null;
     if (this.destroyed) return;
     this.destroyed = true;
     this.pathTracer?.destroy();

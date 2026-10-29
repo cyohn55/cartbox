@@ -1375,11 +1375,45 @@ Everything else depends on this track. It contains no visible "feature", but its
 
 ### F8. Visual effects
 
-- [ ] **F8a. GPU particles.**
+- [x] **F8a. GPU particles.**
   - Compute-simulated particles in the millions, with emitters, forces, curl noise, and collisions against the depth buffer and SDF.
   - GPU sorting for blended particles, and lighting from clustered lights and probes.
   - Flipbooks with motion-vector blending, mesh particles and GPU ribbons.
   - It replaces the CPU billboard system at 512 per effect. A node graph authors emitters (Niagara-lite).
+  - **Done** on the `aaa` tier (`editor model/particleGraph.ts`, `player render/gpuParticles.ts`). Every other tier keeps H5's billboards.
+    - **Emitters** are a stack of modules, Niagara-lite: spawn rate and burst, shape (point, sphere, cone, box), velocity, lifetime, size and colour over life, gravity, drag, curl noise, an attractor and a vortex, collision with the depth buffer and with distance shapes, and the renderer. `compileEmitter` flattens the stack, later modules winning and every value clamped. H5's effects compile to emitters (`emitterFromEffect`), so a cart's `cartbox.burst` draws on the GPU unchanged.
+    - **The ring.** An emitter's particles live in a power-of-two ring of up to 2²⁰ slots. A frame's spawns (each burst, and the rate's carry) take the next run of slots, the oldest recycled. There is no free list and no atomics, and ribbons keep their birth order. Each particle's random numbers are a PCG hash of its birth, alike on the CPU and the GPU.
+    - **Compute passes:**
+      - **spawn** places the frame's new particles (a request's run found by scanning the frame's requests);
+      - **update** integrates every slot: gravity; drag; curl noise (the curl of a trigonometric vector potential, so divergence-free); the attractor and vortex; the spheres, boxes and planes, with restitution and friction;
+      - **the depth buffer:** a particle in front of the prepass's surface a step ago and behind it now, or just behind within 25 cm, steps back and bounces off the G-buffer's normal;
+      - **keys** and a **bitonic sort** order a blended emitter back to front (dead particles last), with one 256-byte uniform slot per (k, j) stage.
+    - **Drawing**, after the see-through scene and before TAA's reactive mask, against the prepass's depths read-only:
+      - sprites face the camera, stretch along their velocity on screen, and fade where they meet the scene (soft particles);
+      - a flipbook atlas plays over a particle's life, blended between frames, each pushed along its motion vectors toward the in-between; without an atlas, a soft disc;
+      - mesh particles are instanced, turned along their velocity;
+      - ribbons are a strip through each run of consecutive births;
+      - additive or blended (premultiplied);
+      - lit by the key light (half-Lambert, as light passes through), the frame's global lights and the ambient, or emissive by their glow.
+    - **The reference:** `CpuEmitter` runs the same spawn and update (the depth buffer aside), term for term.
+    - *Tests:* `Unit Tests/gpu-particles.test.ts` covers:
+      - compiling a stack (the ring's size, overrides, clamps); an H5 effect as an emitter; stored emitters read defensively;
+      - the hash; curl noise's zero divergence; the distance shapes; the ring's spawning and recycling, falling and bouncing off a plane; the rate's carry; flipbook frames; the bitonic stages;
+      - on Dawn:
+        - a second of a fountain (cone, gravity, drag, curl noise, a plane) on the GPU within 5 mm of the reference, ages exact, dead slots dead;
+        - a blended emitter's 300 particles sorted back to front with the dead after;
+        - glowing sparks drawn into a frame and coming to rest on a floor through the depth buffer;
+        - mesh particles lit warm and a glowing ribbon drawn with no validation errors.
+    - *Found, then fixed:*
+      - a falling particle, seen at a grazing angle, ended a step deeper behind the floor than any fixed thickness. The test is now swept: in front a step ago and behind now.
+      - mesh and sprite pipelines need one explicit bind group layout: the mesh's shaders leave bindings unused, which an automatic layout drops.
+    - *Left for later:*
+      - the clustered lights' cells and the probes (particles take the global lights and the ambient);
+      - an editor panel for the module stack (emitters are data for now, from carts and H5's effects);
+      - collision against a scene SDF (analytic shapes only);
+      - the flipbook's motion vectors exercised on a device;
+      - particles writing velocity for TAA and motion blur;
+      - measured budgets at a million particles.
 - [ ] **F8b. Volumetric effects.** Smoke, fire and explosions as raymarched 3D textures (baked simulations or a small GPU fluid solver), lit by the sun and lights, and casting into the F5b froxel fog.
 - [ ] **F8c. Destruction.** Voronoi pre-fracture in the editor, physics-driven chunks with debris particles and dust, decals at the breaks, and GI that updates (F3e).
 

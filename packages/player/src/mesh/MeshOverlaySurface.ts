@@ -116,6 +116,7 @@ import {
   surfelLight,
   type BounceTransfer,
   type ProbeBake,
+  emitterFromEffect,
 } from "@cartbox/editor";
 import { bounceLightsFor, bounceSignature, withCartSun, type CartSun } from "./dynamicLights.js";
 import type { DisplaySurface } from "../display.js";
@@ -881,7 +882,13 @@ export class MeshOverlaySurface implements DisplaySurface {
     surface.decodeKtx2 = decodeKtx2;
     surface.compressedTextures = gpuFormats.length > 0;
     // 3D particle effects the cart fires with cartbox.burst.
-    if (scene.effects && scene.effects.length > 0) surface.particles = new ParticleSystem(scene.effects);
+    // On the AAA tier they simulate and draw on the GPU (F8a); elsewhere as billboards.
+    if (scene.effects && scene.effects.length > 0) {
+      if (renderer.gpuSkinning === true && renderer.setParticles) {
+        renderer.setParticles(scene.effects.map(emitterFromEffect));
+        surface.gpuParticles = true;
+      } else surface.particles = new ParticleSystem(scene.effects);
+    }
     // Decals: the cart's marks and the scene's permanent ones.
     if (scene.decals && scene.decals.length > 0) surface.decals = new DecalSystem(scene.decals, scene.decalMarks ?? []);
     // Debris the cart throws (casings, dropped weapons): simulated here, on the
@@ -2406,8 +2413,11 @@ export class MeshOverlaySurface implements DisplaySurface {
 
   /** Fire particle effect `effect` (see cartbox.burst). */
   burst(effect: number, at: readonly [number, number, number], dir: readonly [number, number, number], scale: number): void {
-    this.particles?.burst(effect, at, dir, scale);
+    if (this.gpuParticles) this.renderer.particleBurst?.(effect, at, dir, scale);
+    else this.particles?.burst(effect, at, dir, scale);
   }
+  /** Whether the scene's particle effects run on the GPU (F8a). */
+  private gpuParticles = false;
   /** Settles once the scene's reflection probes are baked and in use (tests await it). */
   probesReady: Promise<void> = Promise.resolve();
   /** Every decal's tiles, drawn the first time the AAA tier projects them (F1f). */

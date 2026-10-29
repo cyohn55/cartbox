@@ -1,4 +1,4 @@
-import { MeshSceneInstance, MeshAsset, Mat4, ScenePropValue, PhysicsSpec, AnimatorSpec, AttachedComponent, SceneLighting, PhysicsWorldSettings, SceneTimeline, SceneLevel, NavMesh, Terrain, SceneStreaming, ParticleEffect, DecalDef, DecalMark, RagdollBox, DebrisDef, LodChain, SceneAudio, ComponentDef, StreamGroup, JointKind, JointSpec, EnvironmentLight, SceneLight, ActionRebind, Atmosphere, SkyMoon, DecodedTexture, SkySun, BakedCloudLayer, SunShafts, ColorFilter, AccessibilitySettings, EncodedImage, UiDocument, InputAction, StringTable, ReflectionProbe, ShadowInput, ToneMap, LocalShadows, ProjectedDecal, DecalTiles, Occluder, DynamicGi, SceneFog, SceneWind, MeshMaterial, RasterStyle, MeshPrimitive, HdrLightmap, LightmapLayout, ProbeVolume, OccluderSurface, ResolvedLayers, ResolvedExtensions, ResolvedRefraction, SurfaceEffect, AnimatorOp, NavGraph, AnimationCue, FaceRig, VisemeSpan, FaceClip } from '@cartbox/editor';
+import { MeshSceneInstance, MeshAsset, Mat4, ScenePropValue, PhysicsSpec, AnimatorSpec, AttachedComponent, SceneLighting, PhysicsWorldSettings, SceneTimeline, SceneLevel, NavMesh, Terrain, SceneStreaming, ParticleEffect, DecalDef, DecalMark, RagdollBox, DebrisDef, LodChain, SceneAudio, ComponentDef, StreamGroup, JointKind, JointSpec, EnvironmentLight, SceneLight, ActionRebind, Atmosphere, SkyMoon, DecodedTexture, SkySun, BakedCloudLayer, SunShafts, ColorFilter, AccessibilitySettings, EncodedImage, UiDocument, InputAction, StringTable, ReflectionProbe, ShadowInput, ToneMap, LocalShadows, ProjectedDecal, DecalTiles, Occluder, DynamicGi, SceneFog, SceneWind, MeshMaterial, EmitterSpec, RasterStyle, MeshPrimitive, HdrLightmap, LightmapLayout, ProbeVolume, OccluderSurface, ResolvedLayers, ResolvedExtensions, ResolvedRefraction, SurfaceEffect, AnimatorOp, NavGraph, AnimationCue, FaceRig, VisemeSpan, FaceClip } from '@cartbox/editor';
 
 /**
  * The runtime mesh scene: the cart's mesh sidecar resolved into placed instances
@@ -4654,6 +4654,8 @@ interface SunShadow {
 /** One frame's worth of drawing parameters — mirrors `renderMeshScene`'s options. */
 interface SceneDraw {
     readonly width: number;
+    /** Seconds the GPU particles (F8a) step this frame (default a 60th). */
+    readonly particleDt?: number;
     readonly height: number;
     /** The framebuffer to composite into, RGBA8, `width * height * 4`. */
     readonly out: Uint8ClampedArray;
@@ -4945,6 +4947,9 @@ interface SceneRenderer {
     readonly referenceSamples?: number;
     /** True when it skins and morphs live meshes itself, in a compute pass (AAA_FIDELITY_ROADMAP.md F7a). */
     readonly gpuSkinning?: boolean;
+    /** GPU particles (AAA_FIDELITY_ROADMAP.md F8a): its emitters, and a burst of one. */
+    setParticles?(specs: readonly EmitterSpec[]): void;
+    particleBurst?(index: number, at: readonly number[], dir?: readonly number[], scale?: number): void;
     /**
      * True when it draws the sun's shadow itself from {@link SceneDraw.sunShadow}
      * (F2a: the AAA tier's GPU cascades) and ignores a CPU {@link SceneDraw.shadow}.
@@ -5001,6 +5006,8 @@ declare class CappedSceneRenderer implements SceneRenderer {
     get textureFormats(): readonly string[] | undefined;
     get sunCascades(): boolean | undefined;
     get gpuSkinning(): boolean | undefined;
+    setParticles(specs: readonly EmitterSpec[]): void;
+    particleBurst(index: number, at: readonly number[], dir?: readonly number[], scale?: number): void;
     get referenceSamples(): number | undefined;
     get prepareMaterials(): SceneRenderer["prepareMaterials"];
     get captureReference(): SceneRenderer["captureReference"];
@@ -5559,6 +5566,103 @@ options?: {
     readonly mips?: boolean;
 }): Promise<SceneRenderer>;
 
+/**
+ * GPU particles (AAA_FIDELITY_ROADMAP.md F8a) on the linear-light renderer:
+ * the emitters of particleGraph.ts (@cartbox/editor) simulated in compute and
+ * drawn in the scene, after the see-through pass, against its depths.
+ *
+ * - **spawn** writes a frame's new particles into their emitter's ring (each
+ *   request — a burst or the rate's spawns — a run of slots), from the same
+ *   hash the CPU's reference uses;
+ * - **update** integrates every slot: gravity, drag, curl noise, the
+ *   attractor and vortex, the distance shapes, and the depth buffer (a
+ *   particle that passes behind the prepass's surface, within a thickness,
+ *   steps back and bounces off the G-buffer's normal);
+ * - **sort** (blended emitters): each slot's view depth as a key, then a
+ *   bitonic sort of (key, slot) pairs, back to front;
+ * - **draw**: sprites (camera-facing, stretched along their velocity, a
+ *   flipbook over their life with motion-vector blending between frames, a
+ *   procedural soft disc without an atlas), meshes (instanced, oriented along
+ *   their velocity) or ribbons (a strip through the ring in birth order).
+ *   Lit by the key light and the frame's global lights plus the ambient, or
+ *   emissive; faded softly where they meet the scene.
+ */
+
+/** A mesh for mesh particles: positions and normals, and its triangles. */
+interface ParticleMesh {
+    readonly positions: Float32Array;
+    readonly normals: Float32Array;
+    readonly indices: Uint32Array;
+}
+/** What the renderer hands a frame's simulation and draw. */
+interface ParticleFrame {
+    readonly dt: number;
+    readonly time: number;
+    readonly viewProj: ArrayLike<number>;
+    readonly width: number;
+    readonly height: number;
+    readonly depthTerms: readonly [number, number];
+    readonly eye: readonly number[];
+    readonly right: readonly number[];
+    readonly up: readonly number[];
+    readonly light: {
+        readonly direction: readonly number[];
+        readonly color: readonly number[];
+        readonly ambient: number;
+        readonly lights: number;
+    };
+}
+/** The GPU particle system: emitters, their rings, and the passes over them. */
+declare class GpuParticles {
+    private readonly device;
+    private readonly colourFormat;
+    private readonly emitters;
+    private pipes;
+    private stages;
+    private time;
+    constructor(device: any, colourFormat: string, specs: readonly EmitterSpec[], looks?: readonly ({
+        atlas?: {
+            width: number;
+            height: number;
+            data: Uint8ClampedArray;
+        };
+        motion?: {
+            width: number;
+            height: number;
+            data: Uint8ClampedArray;
+        };
+        mesh?: ParticleMesh;
+    } | undefined)[]);
+    /** An emitter's index by name, or −1. */
+    indexOf(name: string): number;
+    /** Fire an emitter's burst at `at` toward `dir`, `scale` times its count. */
+    burst(index: number, at: readonly number[], dir?: readonly number[], scale?: number): void;
+    /** Spawn `count` from an emitter (as its rate does), at `at`. */
+    emit(index: number, count: number, at: readonly number[], dir?: readonly number[]): void;
+    /** Each emitter's ring: its particles buffer and capacity (for tests and the profiler). */
+    ring(index: number): {
+        buffer: any;
+        capacity: number;
+        born: number;
+    } | null;
+    /** Whether any emitter has particles or spawns to run. */
+    get active(): boolean;
+    private pipelines;
+    /** The draw pipeline for a blend and a kind (sprite and ribbon, or mesh). */
+    private drawPipeline;
+    /** The bitonic stages' uniforms, one 256-byte slot each, for rings up to `n`. */
+    private stageBuffer;
+    /**
+     * Simulate a frame (spawn, update, sort keys and sort) into `encoder`'s compute pass. `depth` and `gbuffer`
+     * are the prepass's (for the depth collision).
+     */
+    simulate(encoder: any, frame: ParticleFrame, depth: any, gbuffer: any): void;
+    /** Draw every emitter into an open render pass (colour and the scene's depths, read-only). */
+    draw(pass: any, frame: ParticleFrame, lights: any, depth: any): void;
+    private sampler;
+    dispose(): void;
+}
+
 /** What residency looks like (for the profiler). */
 interface StreamingStats {
     readonly budgetMB: number;
@@ -6095,6 +6199,21 @@ declare class WebgpuSceneRenderer implements SceneRenderer {
      * copy's space) and written over the primitive's indices when the eye has moved a centimetre.
      */
     private sortHairCards;
+    /** The GPU particle system (F8a; gpuParticles.ts), when the scene has emitters. */
+    private particles;
+    private particleTime;
+    /** Give the renderer its particle emitters (F8a), replacing any it had; none clears them. */
+    setParticles(specs: readonly EmitterSpec[], looks?: ConstructorParameters<typeof GpuParticles>[3]): void;
+    /** Fire an emitter's burst (F8a). */
+    particleBurst(index: number, at: readonly number[], dir?: readonly number[], scale?: number): void;
+    /** An emitter's ring (F8a): its particles' buffer, for tests and the profiler. */
+    particleRing(index: number): {
+        buffer: any;
+        capacity: number;
+        born: number;
+    } | null;
+    /** The particles' frame: simulated after the prepass, drawn after the see-through scene (F8a). */
+    private addParticles;
     /** Whether this renderer skins live meshes on the GPU (F7a): the linear-light one, whose frames no CPU reference has to match. */
     get gpuSkinning(): boolean;
     /** A cut-out caster's group 0 (F2a-2): the casters' uniforms and transforms, and its base map. */
@@ -8431,6 +8550,8 @@ declare class MeshOverlaySurface implements DisplaySurface {
     decal(decal: number, at: readonly [number, number, number], normal: readonly [number, number, number], scale: number): void;
     /** Fire particle effect `effect` (see cartbox.burst). */
     burst(effect: number, at: readonly [number, number, number], dir: readonly [number, number, number], scale: number): void;
+    /** Whether the scene's particle effects run on the GPU (F8a). */
+    private gpuParticles;
     /** Settles once the scene's reflection probes are baked and in use (tests await it). */
     probesReady: Promise<void>;
     /** Every decal's tiles, drawn the first time the AAA tier projects them (F1f). */

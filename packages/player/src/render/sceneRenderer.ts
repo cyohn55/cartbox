@@ -35,7 +35,7 @@ import {
   type MeshSceneInstance,
   type SceneWind,
 } from "@cartbox/editor";
-import type { DynamicGi, MeshMaterial, Occluder, DecalTiles, EnvironmentLight, LocalShadows, Mat4, ProjectedDecal, RasterStyle, SceneFog, SceneLight, ShadowInput, ToneMap } from "@cartbox/editor";
+import type { DynamicGi, EmitterSpec, MeshMaterial, Occluder, DecalTiles, EnvironmentLight, LocalShadows, Mat4, ProjectedDecal, RasterStyle, SceneFog, SceneLight, ShadowInput, ToneMap } from "@cartbox/editor";
 
 import type { RenderCaps } from "../models.js";
 import type { ReflectionCapture } from "./probeCapture.js";
@@ -68,6 +68,8 @@ export interface SunShadow {
 /** One frame's worth of drawing parameters — mirrors `renderMeshScene`'s options. */
 export interface SceneDraw {
   readonly width: number;
+  /** Seconds the GPU particles (F8a) step this frame (default a 60th). */
+  readonly particleDt?: number;
   readonly height: number;
   /** The framebuffer to composite into, RGBA8, `width * height * 4`. */
   readonly out: Uint8ClampedArray;
@@ -372,6 +374,9 @@ export interface SceneRenderer {
   readonly referenceSamples?: number;
   /** True when it skins and morphs live meshes itself, in a compute pass (AAA_FIDELITY_ROADMAP.md F7a). */
   readonly gpuSkinning?: boolean;
+  /** GPU particles (AAA_FIDELITY_ROADMAP.md F8a): its emitters, and a burst of one. */
+  setParticles?(specs: readonly EmitterSpec[]): void;
+  particleBurst?(index: number, at: readonly number[], dir?: readonly number[], scale?: number): void;
   /**
    * True when it draws the sun's shadow itself from {@link SceneDraw.sunShadow}
    * (F2a: the AAA tier's GPU cascades) and ignores a CPU {@link SceneDraw.shadow}.
@@ -493,6 +498,14 @@ export class CappedSceneRenderer implements SceneRenderer {
 
   get gpuSkinning(): boolean | undefined {
     return this.inner.gpuSkinning;
+  }
+
+  setParticles(specs: readonly EmitterSpec[]): void {
+    this.inner.setParticles?.(specs);
+  }
+
+  particleBurst(index: number, at: readonly number[], dir?: readonly number[], scale?: number): void {
+    this.inner.particleBurst?.(index, at, dir, scale);
   }
 
   get referenceSamples(): number | undefined {
