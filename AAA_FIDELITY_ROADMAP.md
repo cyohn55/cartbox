@@ -1668,7 +1668,38 @@ Everything else depends on this track. It contains no visible "feature", but its
       - on Dawn, the check under the overcast rig: the grey ball reads 0.130 in the renderer against 0.113 in the reference, and the frame is 8% apart on average.
     - *Found:* the check's first finding. Under an overcast sky the renderer's grey ball is about 15% brighter than the reference's, and the chrome ball 33%: the sky's irradiance and reflection light the balls' undersides from the open ground, where the reference sees the darker floor. GTAO takes back only the near field. The reflection probes (F3b) or DDGI (F3e) placed on the stage would close it, as they do in a level.
     - *Left for later:* per-patch readouts of the checker against its known reflectances; a stage saved with the asset (its rig and turntable angle) for review.
-- [ ] **F10d. Cinematics.** Timeline sequences (from the existing timeline) with the physical camera (F4c), focus pulls, camera shake and rails, plus offline rendering to video through F10b accumulation.
+- [x] **F10d. Cinematics.** Timeline sequences (from the existing timeline) with the physical camera (F4c), focus pulls, camera shake and rails, plus offline rendering to video through F10b accumulation.
+  - **Done** (`editor model/cinematics.ts`; camera keys and tracks in `model/timeline.ts`; the path tracer's thin lens; `PlayerHandle.renderSequence`; `apps/web lib/webmMuxer.ts` and `lib/videoEncode.ts`; the Timelines panel and the run overlay).
+    - **The film camera.** A camera key may give:
+      - a focal length (mm on a 36 × 24 mm sensor, which sets the field of view, in live playback too);
+      - an f-stop and a focus distance, or an object to focus on (its distance from the eye at that moment), for the thin lens of aperture radius f / 2N;
+      - a roll about the view, how far along the track's rail the eye is, and how much of the track's shake.
+      - Between keys these ease as the eye does. A focus pull is two keys' focus.
+    - **Shake:** the track's amplitude (°) and frequency (Hz), scaled by each key's shake. It is smooth noise on yaw, pitch and roll, three octaves of incommensurate sines, turning the view about the eye without moving it.
+    - **Rails:** a Catmull-Rom curve through points. The panel's "Rail through keys" lays one through the keys' eyes and spaces their positions along it, so the camera glides on the curve between keys.
+    - **The thin lens in the path tracer** (`Params.lens`, where the spare vec4 was): each sample's ray leaves a point on the aperture's disc, aimed at where the pinhole ray meets the focus plane, at the focus distance along the view. A pinhole draws exactly as before, with no extra random numbers.
+    - **The offline render:** `renderSequence` takes the timeline at its frame rate (24 by default, the last frame included). Each frame's shot becomes a view (its roll inside) and projection, and is path-traced at the size asked through `captureReference`, the scene as last drawn, then handed on in order; it can be aborted.
+    - **Video in the browser:** frames go to WebCodecs' VideoEncoder (VP9, else VP8; a key frame every two seconds), and the chunks are muxed into a WebM: the EBML header, Info, one video track, and Clusters of SimpleBlocks, a new Cluster at each key frame or before a block's 16-bit offset would overflow.
+    - **The run overlay:** in the path-traced view, a timeline with camera keys can be rendered at 1080p, 64 samples a pixel, and downloaded as a WebM; the button stops it.
+    - *Tests:* `Unit Tests/cinematics.test.ts` covers:
+      - focal length to field of view (24 mm: 53.1°; 50 mm: 27.0°) and f-stop to aperture;
+      - shake still at no amplitude, bounded, smooth over a millisecond, and centred;
+      - rails through every point;
+      - the keys' fields read and clamped, absent ones left out, a one-point rail refused;
+      - a shot's field of view (live playback's too), a focus pull halfway, focus on an object, the eye halfway along its rail, a pinhole without lens keys, no shot without keys;
+      - a quarter roll turning up to the side, shake turning the view without moving it;
+      - the matrices (plain ones match `viewMatrix` and the projection; a roll lands "above" to the side);
+      - the frame times;
+      - the WebM's structure (EBML header and doc type, Info, the VP9 track at its size, Clusters at key frames with their blocks' offsets and flags), and a new Cluster before an offset overflows;
+      - on Dawn, the edges of a glowing card at 3 m: 2 px of blur through a pinhole, 9 with the lens focused at 30 m, 2 again focused on it.
+    - *Found, then fixed:*
+      - the Timelines panel rebuilt the camera track from its keys alone, which would have dropped the rail and shake;
+      - an aperture of 0.15 m blurred the card's edges less than estimated (5 px across both): the test opens it to 0.3 m.
+    - *Left for later:*
+      - objects a timeline moves stay where they were last drawn in an offline render (the render takes the last frame's scene);
+      - live playback drives the field of view but not F4c's raster depth of field from the keys' lens;
+      - audio in the video;
+      - the raster frame as a fast preview render.
 
 ### F11. Showcase and acceptance
 

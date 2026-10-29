@@ -343,6 +343,24 @@ export interface PlayerOptions {
 }
 
 /** Handle returned by {@link mount} for controlling a live player instance. */
+/** An offline render of a timeline (F10d; see {@link PlayerHandle.renderSequence}). */
+export interface SequenceOptions {
+  /** The timeline's name. */
+  readonly timeline: string;
+  readonly width: number;
+  /** Default: the shown frame's aspect. */
+  readonly height?: number;
+  /** Frames a second (default 24, up to 120). */
+  readonly fps?: number;
+  /** Samples a pixel takes each frame (default 64). */
+  readonly samples?: number;
+  /** Hears the share done, 0..1. */
+  readonly progress?: (done: number) => void;
+  /** Stops after the frame in hand. */
+  readonly signal?: AbortSignal;
+  readonly onFrame: (frame: ReferenceCapture, index: number, count: number) => void | Promise<void>;
+}
+
 export interface PlayerHandle {
   /** Halt the run loop and silence audio without tearing down the instance. */
   pause(): void;
@@ -405,6 +423,13 @@ export interface PlayerHandle {
   captureReference(options: { readonly width: number; readonly samples?: number; readonly progress?: (done: number) => void }): Promise<ReferenceCapture> | null;
   /** Samples each pixel of the viewport's path-traced reference holds (F10b; 0 when it isn't shown). */
   readonly referenceSamples: number;
+  /**
+   * Render a timeline offline (F10d): every frame at its frame rate path-traced
+   * through the timeline's film camera, handed to `onFrame` in order. Resolves
+   * to the frames rendered; null on every tier but AAA, before a frame has
+   * drawn, or for a timeline without camera keys.
+   */
+  renderSequence(options: SequenceOptions): Promise<number> | null;
   /**
    * Hand the running scene streamed textures, keyed by the `ref` of the
    * placeholder each fills (an asset-backed texture's content hash). Safe to

@@ -84,6 +84,8 @@ export interface SceneDraw {
   readonly depth: Float32Array;
   readonly view: Mat4;
   readonly projection: Mat4;
+  /** The path-traced reference's thin lens (F10d): aperture radius and focus distance (m); the raster ignores it. */
+  readonly lens?: { readonly aperture: number; readonly focus: number } | null;
   /**
    * Clear colour, or null to composite over whatever `out` already holds (the
    * cart's own frame). Null is what makes these surfaces overlays.

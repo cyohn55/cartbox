@@ -660,7 +660,11 @@ export {
   type TimelineTrack,
   type TransformKey,
   type ValueKey,
+  type CameraRig,
+  SENSOR_HEIGHT_MM,
+  focalLengthToFov,
 } from "./model/timeline";
+export { apertureRadius, cameraShake, railPoint, sampleShot, sequenceTimes, shotMatrices, type Shot } from "./model/cinematics";
 export {
   MAX_CLIPS,
   MAX_SKIN_JOINTS,

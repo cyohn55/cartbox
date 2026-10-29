@@ -11928,6 +11928,9 @@ function capsConstrainScene(caps) {
   return caps.polyBudget > 0 || caps.textureCacheBytes > 0;
 }
 
+// src/mesh/MeshOverlaySurface.ts
+import { sampleShot, sequenceTimes, shotMatrices } from "@cartbox/editor";
+
 // src/render/cascades.ts
 import { viewMatrix as viewMatrix2 } from "@cartbox/editor";
 var CASCADE_COUNT = 4;
@@ -12511,6 +12514,45 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
     if (!last || !this.renderer.captureReference) return null;
     const height = options.height ?? Math.max(1, Math.round(options.width * last.draw.height / Math.max(1, last.draw.width)));
     return this.renderer.captureReference(last.instances, last.draw, { ...options, height });
+  }
+  /**
+   * Render a timeline offline (F10d): each frame at `fps` path-traced through
+   * its shot (the camera track's eye, rail, shake, roll, focal length and thin
+   * lens), the scene as last drawn, each handed to `onFrame` as it finishes.
+   * Resolves to the frames rendered (fewer when aborted); null where the
+   * renderer has no reference (every tier but AAA), nothing has drawn yet, or
+   * the timeline has no camera keys.
+   */
+  renderSequence(options) {
+    const last = this.lastFrame;
+    const timeline = this.scene.timelines?.find((t) => t.name === options.timeline);
+    if (!last || !timeline || !this.renderer.captureReference || !sampleShot(timeline, 0)) return null;
+    const capture = this.renderer.captureReference.bind(this.renderer);
+    const width = Math.max(1, Math.round(options.width));
+    const height = options.height ?? Math.max(1, Math.round(width * last.draw.height / Math.max(1, last.draw.width)));
+    const times = sequenceTimes(timeline, Math.max(1, Math.min(120, options.fps ?? 24)));
+    const objectAt = (id) => {
+      const inst = this.scene.instances.find((i) => i.id === id);
+      return inst ? [inst.model[12], inst.model[13], inst.model[14]] : null;
+    };
+    const run = async () => {
+      let done = 0;
+      for (const [index, t] of times.entries()) {
+        if (options.signal?.aborted) break;
+        const shot = sampleShot(timeline, t, objectAt);
+        const { view, projection } = shotMatrices(shot, width / height);
+        const frame = await capture(last.instances, { ...last.draw, view, projection, lens: shot.lens }, {
+          width,
+          height,
+          samples: options.samples ?? 64,
+          progress: (share) => options.progress?.((index + share) / times.length)
+        });
+        await options.onFrame(frame, index, times.length);
+        done += 1;
+      }
+      return done;
+    };
+    return run();
   }
   /** Compile a newly seen mesh's material-graph permutations in the background (F1e), as this frame draws them. */
   prepareGraphs(instances, draw) {
@@ -22401,7 +22443,7 @@ struct Params {
   run: vec4<u32>,      // x, y = the tile's size; z = first sample; w = samples this pass
   extra: vec4<u32>,    // x = point, spot and area lights; y = 1 where a miss from the eye shows the sky; z = the map table's first vec4 in mats
   ambient: vec4<f32>,  // rgb = the uniform sky without a panorama (the flat ambient)
-  pad: vec4<f32>,
+  lens: vec4<f32>,     // x = the thin lens's aperture radius (0 = a pinhole), y = the focus distance along the view (F10d)
 };
 @group(0) @binding(0) var<storage, read> nodes: array<vec4<u32>>;
 @group(0) @binding(1) var<storage, read> prims: array<vec4<f32>>;
@@ -22829,6 +22871,11 @@ fn radiance(origin: vec3<f32>, dir: vec3<f32>) -> vec4<f32> {
   return vec4<f32>(L, seen);
 }
 
+fn unproject(ndc: vec2<f32>) -> vec3<f32> {
+  let p = params.invViewProj * vec4<f32>(ndc, 0.5, 1.0);
+  return p.xyz / p.w;
+}
+
 @compute @workgroup_size(${WORKGROUP2}, ${WORKGROUP2})
 fn main(@builtin(global_invocation_id) id: vec3<u32>) {
   if (id.x >= params.run.x || id.y >= params.run.y) { return; }
@@ -22843,8 +22890,20 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     let jitter = vec2<f32>(rand(), rand());
     let ndc = vec2<f32>((f32(px) + jitter.x) / size.x * 2.0 - 1.0, 1.0 - (f32(py) + jitter.y) / size.y * 2.0);
     let far = params.invViewProj * vec4<f32>(ndc, 0.5, 1.0);
-    let d = normalize(far.xyz / far.w - params.eye.xyz);
-    sum = sum + radiance(params.eye.xyz, d);
+    var d = normalize(far.xyz / far.w - params.eye.xyz);
+    var o = params.eye.xyz;
+    if (params.lens.x > 0.0) {
+      // A thin lens: rays through a disc of the aperture meet again on the focus plane.
+      let forward = normalize(unproject(vec2<f32>(0.0, 0.0)) - o);
+      let right = normalize(unproject(vec2<f32>(1.0, 0.0)) - unproject(vec2<f32>(-1.0, 0.0)));
+      let up = cross(right, forward);
+      let focal = o + d * (params.lens.y / max(1e-4, dot(d, forward)));
+      let r = sqrt(rand()) * params.lens.x;
+      let a = 6.2831853 * rand();
+      o = o + (right * cos(a) + up * sin(a)) * r;
+      d = normalize(focal - o);
+    }
+    sum = sum + radiance(o, d);
   }
   let j = id.y * params.run.x + id.x;
   accum[j] = accum[j] + sum;
@@ -22886,6 +22945,7 @@ function pathTraceParams(camera, image, firstSample, samples, setup) {
   u.set([image.tileWidth, image.tileHeight, firstSample, samples], 28);
   u.set([setup.lights.local, setup.background ? 1 : 0, setup.mapTable, 0], 32);
   f3.set([setup.ambient, setup.ambient, setup.ambient, 0], 36);
+  if (camera.lens && camera.lens.aperture > 0) f3.set([camera.lens.aperture, Math.max(0.01, camera.lens.focus), 0, 0], 40);
   return buffer;
 }
 var TracerCore = class {
@@ -22954,11 +23014,11 @@ var TracerCore = class {
 };
 function cameraOf(draw) {
   const inv = invertMat4(multiplyMat46(draw.projection, draw.view)) ?? new Array(16).fill(0);
-  return { inv, eye: cameraPositionFromView3(draw.view) };
+  return { inv, eye: cameraPositionFromView3(draw.view), lens: draw.lens ?? null };
 }
 function drawKey(draw, width, height, settings) {
   const env = draw.environment ? environmentKey(draw.environment).map((v) => typeof v === "object" && v !== null ? objectId(v) : v) : null;
-  return JSON.stringify([width, height, draw.view, draw.projection, draw.lightDirection ?? null, draw.ambient ?? null, draw.lights ?? null, env, settings.bounces ?? REFERENCE_BOUNCES, settings.clamp ?? 0, settings.background ?? false]);
+  return JSON.stringify([width, height, draw.view, draw.projection, draw.lightDirection ?? null, draw.ambient ?? null, draw.lights ?? null, draw.lens ?? null, env, settings.bounces ?? REFERENCE_BOUNCES, settings.clamp ?? 0, settings.background ?? false]);
 }
 var PathTracer = class _PathTracer {
   constructor(device) {
@@ -23009,11 +23069,11 @@ var PathTracer = class _PathTracer {
     if (this.samples === 0) encoder.clearBuffer(this.accum);
     const take = Math.max(0, Math.min(settings.samplesPerFrame ?? 1, maxSamples - this.samples));
     if (take > 0) {
-      const { inv, eye } = cameraOf(draw);
+      const camera = cameraOf(draw);
       const lights = referenceLights(draw);
       const sky = this.core.setSky(draw.environment);
       const setup = { bounces: settings.bounces ?? REFERENCE_BOUNCES, sky, lights, ambient: referenceAmbient(draw), clamp: settings.clamp ?? 0, background: settings.background ?? false, mapTable: this.core.mapTable };
-      const params = pathTraceParams({ inv, eye }, { width, height, x: 0, y: 0, tileWidth: width, tileHeight: height }, this.samples, take, setup);
+      const params = pathTraceParams(camera, { width, height, x: 0, y: 0, tileWidth: width, tileHeight: height }, this.samples, take, setup);
       this.device.queue.writeBuffer(this.params, 0, params);
       const pass = encoder.beginComputePass();
       pass.setPipeline(this.core.tracePipeline);
@@ -23059,7 +23119,7 @@ async function captureReference(device, instances, draw, options) {
   const sky = core.setSky(draw.environment);
   const lights = referenceLights(draw);
   core.setLights(lights.data);
-  const { inv, eye } = cameraOf(draw);
+  const camera = cameraOf(draw);
   const setup = { bounces: options.bounces ?? REFERENCE_BOUNCES, sky, lights, ambient: referenceAmbient(draw), clamp: options.clamp ?? 0, background: options.background ?? true, mapTable: core.mapTable };
   const accum = device.createBuffer({ size: tile * tile * 16, usage: STORAGE2 | COPY_DST2 | COPY_SRC2 });
   const params = device.createBuffer({ size: PARAMS_BYTES2, usage: UNIFORM3 | COPY_DST2 });
@@ -23085,7 +23145,7 @@ async function captureReference(device, instances, draw, options) {
         const group = core.traceGroup(accum, params);
         for (let first = 0; first < samples; first += perSubmit) {
           const take = Math.min(perSubmit, samples - first);
-          device.queue.writeBuffer(params, 0, pathTraceParams({ inv, eye }, { width, height, x, y, tileWidth: tw, tileHeight: th }, first, take, setup));
+          device.queue.writeBuffer(params, 0, pathTraceParams(camera, { width, height, x, y, tileWidth: tw, tileHeight: th }, first, take, setup));
           const encoder = device.createCommandEncoder();
           const pass = encoder.beginComputePass();
           pass.setPipeline(core.tracePipeline);
@@ -35410,6 +35470,10 @@ var Player = class {
   captureReference(options) {
     return this.meshSurface?.captureReference(options) ?? null;
   }
+  /** Render a timeline offline, frame by frame through the path tracer (F10d). */
+  renderSequence(options) {
+    return this.meshSurface?.renderSequence(options) ?? null;
+  }
   /** Samples each pixel of the viewport's path-traced reference holds (F10b). */
   get referenceSamples() {
     return this.meshSurface?.referenceSamples ?? 0;
@@ -37862,6 +37926,7 @@ function mount(container, options) {
     setQuality: (choice) => player.setQuality(choice),
     setViewMode: (mode) => player.setViewMode(mode),
     captureReference: (options2) => player.captureReference(options2),
+    renderSequence: (options2) => player.renderSequence(options2),
     get referenceSamples() {
       return player.referenceSamples;
     },

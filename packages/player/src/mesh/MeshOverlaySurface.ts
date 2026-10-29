@@ -130,6 +130,8 @@ import { SoftwareSceneRenderer, type GpuSceneDraw, type SceneRenderer, type SunS
 import type { ReflectionCapture } from "../render/probeCapture.js";
 import { isDiagnosticView, type ViewMode } from "../render/viewModes.js";
 import type { CaptureOptions, ReferenceCapture } from "../render/pathTracer.js";
+import { sampleShot, sequenceTimes, shotMatrices } from "@cartbox/editor";
+import type { SequenceOptions } from "../types.js";
 import { SUN_SOFTNESS } from "../render/cascades.js";
 import type { PresentFrame, PresentSky, PresentStats } from "../render/gpuPresent.js";
 import type { MailboxMeshCamera, MailboxMeshPose, WorldLight } from "../mailbox.js";
@@ -748,6 +750,46 @@ export class MeshOverlaySurface implements DisplaySurface {
     if (!last || !this.renderer.captureReference) return null;
     const height = options.height ?? Math.max(1, Math.round((options.width * last.draw.height) / Math.max(1, last.draw.width)));
     return this.renderer.captureReference(last.instances, last.draw, { ...options, height });
+  }
+
+  /**
+   * Render a timeline offline (F10d): each frame at `fps` path-traced through
+   * its shot (the camera track's eye, rail, shake, roll, focal length and thin
+   * lens), the scene as last drawn, each handed to `onFrame` as it finishes.
+   * Resolves to the frames rendered (fewer when aborted); null where the
+   * renderer has no reference (every tier but AAA), nothing has drawn yet, or
+   * the timeline has no camera keys.
+   */
+  renderSequence(options: SequenceOptions): Promise<number> | null {
+    const last = this.lastFrame;
+    const timeline = this.scene.timelines?.find((t) => t.name === options.timeline);
+    if (!last || !timeline || !this.renderer.captureReference || !sampleShot(timeline, 0)) return null;
+    const capture = this.renderer.captureReference.bind(this.renderer);
+    const width = Math.max(1, Math.round(options.width));
+    const height = options.height ?? Math.max(1, Math.round((width * last.draw.height) / Math.max(1, last.draw.width)));
+    const times = sequenceTimes(timeline, Math.max(1, Math.min(120, options.fps ?? 24)));
+    const objectAt = (id: string) => {
+      const inst = this.scene.instances.find((i) => i.id === id);
+      return inst ? [inst.model[12]!, inst.model[13]!, inst.model[14]!] : null;
+    };
+    const run = async () => {
+      let done = 0;
+      for (const [index, t] of times.entries()) {
+        if (options.signal?.aborted) break;
+        const shot = sampleShot(timeline, t, objectAt)!;
+        const { view, projection } = shotMatrices(shot, width / height);
+        const frame = await capture(last.instances, { ...last.draw, view, projection, lens: shot.lens }, {
+          width,
+          height,
+          samples: options.samples ?? 64,
+          progress: (share) => options.progress?.((index + share) / times.length),
+        });
+        await options.onFrame(frame, index, times.length);
+        done += 1;
+      }
+      return done;
+    };
+    return run();
   }
 
   /** Meshes whose material graphs have been sent to compile (F1e). */

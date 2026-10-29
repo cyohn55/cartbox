@@ -23,6 +23,7 @@ import { DebuggerPanel } from "./DebuggerPanel";
 import { toggleBreakpoint } from "./debuggerView";
 import { loadKtx2Decoder } from "@/lib/ktx2Decoder";
 import { rapierPhysics } from "@/lib/physicsRapier";
+import { WebmRecorder, canEncodeVideo } from "@/lib/videoEncode";
 
 interface RunOverlayProps {
   bytes: Uint8Array;
@@ -112,6 +113,11 @@ export function RunOverlay({
   // The path-traced reference (F10b): the samples it holds, and a capture's progress (null when none runs).
   const [referenceSamples, setReferenceSamples] = useState(0);
   const [capturing, setCapturing] = useState<number | null>(null);
+  // An offline timeline render (F10d): its progress, and how to stop it.
+  const [sequencing, setSequencing] = useState<number | null>(null);
+  const sequenceStop = useRef<AbortController | null>(null);
+  const filmTimelines = useMemo(() => (mesh?.timelines ?? []).filter((t) => t.tracks.some((k) => k.kind === "camera" && k.keys.length > 0)).map((t) => t.name), [mesh]);
+  const [filmTimeline, setFilmTimeline] = useState<string | null>(null);
   useEffect(() => {
     if (viewMode !== "pathTraced") return;
     const timer = setInterval(() => setReferenceSamples(handleRef.current?.referenceSamples ?? 0), 500);
@@ -463,6 +469,59 @@ export function RunOverlay({
                 >
                   {capturing === null ? "Capture 4K" : `Capturing ${Math.round(capturing * 100)}%`}
                 </button>
+                {filmTimelines.length > 0 && canEncodeVideo() && (
+                  <>
+                    <select aria-label="Timeline to render" value={filmTimeline ?? filmTimelines[0]} onChange={(e) => setFilmTimeline(e.target.value)} style={{ font: "inherit", padding: "4px 8px", borderRadius: 6 }} disabled={sequencing !== null}>
+                      {filmTimelines.map((name) => (
+                        <option key={name} value={name}>
+                          {name}
+                        </option>
+                      ))}
+                    </select>
+                    <button
+                      type="button"
+                      className="cbx-btn"
+                      title="Render the timeline through its film camera, path-traced at 1080p, 24 frames a second, and download it as a WebM"
+                      disabled={status !== "ready" || capturing !== null}
+                      onClick={() => {
+                        if (sequencing !== null) {
+                          sequenceStop.current?.abort();
+                          return;
+                        }
+                        const handle = handleRef.current;
+                        if (!handle) return;
+                        const stop = new AbortController();
+                        sequenceStop.current = stop;
+                        const fps = 24;
+                        let recorder: Promise<WebmRecorder> | null = null;
+                        const job = handle.renderSequence({
+                          timeline: filmTimeline ?? filmTimelines[0]!,
+                          width: 1920,
+                          fps,
+                          samples: 64,
+                          signal: stop.signal,
+                          progress: (done) => setSequencing(done),
+                          onFrame: async (frame) => {
+                            recorder ??= WebmRecorder.create(frame.width, frame.height, fps);
+                            (await recorder).add(frame.rgba, frame.width, frame.height);
+                          },
+                        });
+                        if (!job) return;
+                        setSequencing(0);
+                        void job
+                          .then(async (frames) => {
+                            if (frames > 0 && recorder) downloadBlob(await (await recorder).finish(), `${filmTimeline ?? filmTimelines[0]}.webm`);
+                          })
+                          .finally(() => {
+                            sequenceStop.current = null;
+                            setSequencing(null);
+                          });
+                      }}
+                    >
+                      {sequencing === null ? "Render timeline" : `Stop (${Math.round(sequencing * 100)}%)`}
+                    </button>
+                  </>
+                )}
               </>
             )}
             {mesh && (
@@ -793,6 +852,15 @@ function ObjectsPanel({ objects, filter, onFilter }: { objects: InspectedObject[
 }
 
 /** Save RGBA bytes as a PNG download (the path-traced reference's capture, F10b). */
+function downloadBlob(blob: Blob, name: string): void {
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = name;
+  link.click();
+  URL.revokeObjectURL(url);
+}
+
 function downloadRgba(rgba: Uint8ClampedArray, width: number, height: number, name: string): void {
   const canvas = document.createElement("canvas");
   canvas.width = width;

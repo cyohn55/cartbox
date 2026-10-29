@@ -337,7 +337,7 @@ struct Params {
   run: vec4<u32>,      // x, y = the tile's size; z = first sample; w = samples this pass
   extra: vec4<u32>,    // x = point, spot and area lights; y = 1 where a miss from the eye shows the sky; z = the map table's first vec4 in mats
   ambient: vec4<f32>,  // rgb = the uniform sky without a panorama (the flat ambient)
-  pad: vec4<f32>,
+  lens: vec4<f32>,     // x = the thin lens's aperture radius (0 = a pinhole), y = the focus distance along the view (F10d)
 };
 @group(0) @binding(0) var<storage, read> nodes: array<vec4<u32>>;
 @group(0) @binding(1) var<storage, read> prims: array<vec4<f32>>;
@@ -765,6 +765,11 @@ fn radiance(origin: vec3<f32>, dir: vec3<f32>) -> vec4<f32> {
   return vec4<f32>(L, seen);
 }
 
+fn unproject(ndc: vec2<f32>) -> vec3<f32> {
+  let p = params.invViewProj * vec4<f32>(ndc, 0.5, 1.0);
+  return p.xyz / p.w;
+}
+
 @compute @workgroup_size(${WORKGROUP}, ${WORKGROUP})
 fn main(@builtin(global_invocation_id) id: vec3<u32>) {
   if (id.x >= params.run.x || id.y >= params.run.y) { return; }
@@ -779,8 +784,20 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
     let jitter = vec2<f32>(rand(), rand());
     let ndc = vec2<f32>((f32(px) + jitter.x) / size.x * 2.0 - 1.0, 1.0 - (f32(py) + jitter.y) / size.y * 2.0);
     let far = params.invViewProj * vec4<f32>(ndc, 0.5, 1.0);
-    let d = normalize(far.xyz / far.w - params.eye.xyz);
-    sum = sum + radiance(params.eye.xyz, d);
+    var d = normalize(far.xyz / far.w - params.eye.xyz);
+    var o = params.eye.xyz;
+    if (params.lens.x > 0.0) {
+      // A thin lens: rays through a disc of the aperture meet again on the focus plane.
+      let forward = normalize(unproject(vec2<f32>(0.0, 0.0)) - o);
+      let right = normalize(unproject(vec2<f32>(1.0, 0.0)) - unproject(vec2<f32>(-1.0, 0.0)));
+      let up = cross(right, forward);
+      let focal = o + d * (params.lens.y / max(1e-4, dot(d, forward)));
+      let r = sqrt(rand()) * params.lens.x;
+      let a = 6.2831853 * rand();
+      o = o + (right * cos(a) + up * sin(a)) * r;
+      d = normalize(focal - o);
+    }
+    sum = sum + radiance(o, d);
   }
   let j = id.y * params.run.x + id.x;
   accum[j] = accum[j] + sum;
@@ -809,6 +826,8 @@ export interface ReferenceDraw {
   readonly ambient?: number;
   readonly environment?: EnvironmentLight | null;
   readonly lights?: readonly SceneLight[] | null;
+  /** A thin lens (F10d): its aperture radius and focus distance (m); absent, a pinhole. */
+  readonly lens?: { readonly aperture: number; readonly focus: number } | null;
 }
 
 export interface ReferenceSettings {
@@ -850,7 +869,7 @@ export interface TraceSetup {
 
 /** The tracer's parameters for one dispatch: `samples` from `firstSample` of the tile at (x, y) of the whole image. */
 export function pathTraceParams(
-  camera: { readonly inv: Mat4; readonly eye: readonly [number, number, number] },
+  camera: { readonly inv: Mat4; readonly eye: readonly [number, number, number]; readonly lens?: { readonly aperture: number; readonly focus: number } | null },
   image: { readonly width: number; readonly height: number; readonly x: number; readonly y: number; readonly tileWidth: number; readonly tileHeight: number },
   firstSample: number,
   samples: number,
@@ -866,6 +885,7 @@ export function pathTraceParams(
   u.set([image.tileWidth, image.tileHeight, firstSample, samples], 28);
   u.set([setup.lights.local, setup.background ? 1 : 0, setup.mapTable, 0], 32);
   f.set([setup.ambient, setup.ambient, setup.ambient, 0], 36);
+  if (camera.lens && camera.lens.aperture > 0) f.set([camera.lens.aperture, Math.max(0.01, camera.lens.focus), 0, 0], 40);
   return buffer;
 }
 
@@ -945,16 +965,16 @@ class TracerCore {
   }
 }
 
-/** A draw's camera: its inverse view-projection and eye. */
-function cameraOf(draw: ReferenceDraw): { inv: Mat4; eye: [number, number, number] } {
+/** A draw's camera: its inverse view-projection, eye and lens. */
+function cameraOf(draw: ReferenceDraw): { inv: Mat4; eye: [number, number, number]; lens: ReferenceDraw["lens"] } {
   const inv = invertMat4(multiplyMat4(draw.projection, draw.view)) ?? (new Array(16).fill(0) as unknown as Mat4);
-  return { inv, eye: cameraPositionFromView(draw.view) };
+  return { inv, eye: cameraPositionFromView(draw.view), lens: draw.lens ?? null };
 }
 
 /** A key for what the image depends on besides the scene: the camera, the lights and the sky. */
 function drawKey(draw: ReferenceDraw, width: number, height: number, settings: ReferenceSettings): string {
   const env = draw.environment ? environmentKey(draw.environment).map((v) => (typeof v === "object" && v !== null ? objectId(v) : v)) : null;
-  return JSON.stringify([width, height, draw.view, draw.projection, draw.lightDirection ?? null, draw.ambient ?? null, draw.lights ?? null, env, settings.bounces ?? REFERENCE_BOUNCES, settings.clamp ?? 0, settings.background ?? false]);
+  return JSON.stringify([width, height, draw.view, draw.projection, draw.lightDirection ?? null, draw.ambient ?? null, draw.lights ?? null, draw.lens ?? null, env, settings.bounces ?? REFERENCE_BOUNCES, settings.clamp ?? 0, settings.background ?? false]);
 }
 
 /**
@@ -1018,11 +1038,11 @@ export class PathTracer {
     if (this.samples === 0) encoder.clearBuffer(this.accum);
     const take = Math.max(0, Math.min(settings.samplesPerFrame ?? 1, maxSamples - this.samples));
     if (take > 0) {
-      const { inv, eye } = cameraOf(draw);
+      const camera = cameraOf(draw);
       const lights = referenceLights(draw);
       const sky = this.core.setSky(draw.environment);
       const setup = { bounces: settings.bounces ?? REFERENCE_BOUNCES, sky, lights, ambient: referenceAmbient(draw), clamp: settings.clamp ?? 0, background: settings.background ?? false, mapTable: this.core.mapTable };
-      const params = pathTraceParams({ inv, eye }, { width, height, x: 0, y: 0, tileWidth: width, tileHeight: height }, this.samples, take, setup);
+      const params = pathTraceParams(camera, { width, height, x: 0, y: 0, tileWidth: width, tileHeight: height }, this.samples, take, setup);
       this.device.queue.writeBuffer(this.params, 0, params);
       const pass = encoder.beginComputePass();
       pass.setPipeline(this.core.tracePipeline);
@@ -1100,7 +1120,7 @@ export async function captureReference(device: any, instances: readonly MeshScen
   const sky = core.setSky(draw.environment);
   const lights = referenceLights(draw);
   core.setLights(lights.data);
-  const { inv, eye } = cameraOf(draw);
+  const camera = cameraOf(draw);
   const setup: TraceSetup = { bounces: options.bounces ?? REFERENCE_BOUNCES, sky, lights, ambient: referenceAmbient(draw), clamp: options.clamp ?? 0, background: options.background ?? true, mapTable: core.mapTable };
   const accum = device.createBuffer({ size: tile * tile * 16, usage: STORAGE | COPY_DST | COPY_SRC });
   const params = device.createBuffer({ size: PARAMS_BYTES, usage: UNIFORM | COPY_DST });
@@ -1126,7 +1146,7 @@ export async function captureReference(device: any, instances: readonly MeshScen
         const group = core.traceGroup(accum, params);
         for (let first = 0; first < samples; first += perSubmit) {
           const take = Math.min(perSubmit, samples - first);
-          device.queue.writeBuffer(params, 0, pathTraceParams({ inv, eye }, { width, height, x, y, tileWidth: tw, tileHeight: th }, first, take, setup));
+          device.queue.writeBuffer(params, 0, pathTraceParams(camera, { width, height, x, y, tileWidth: tw, tileHeight: th }, first, take, setup));
           const encoder = device.createCommandEncoder();
           const pass = encoder.beginComputePass();
           pass.setPipeline(core.tracePipeline);

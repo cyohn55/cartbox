@@ -106,7 +106,7 @@ import { GpuCanvasSurface, type CapturedFrame } from "./render/GpuCanvasSurface.
 import type { SceneRenderer } from "./render/sceneRenderer.js";
 import type { TextureLookup } from "./world/worldScene.js";
 import { SpatialLoader, actionMask, createHoloCache, holoBindingKeys, holoDocuments, renderHoloDocument, translate, reboundActions, type DecodedTexture, type EncodedImage, type InputAction, type Mat4, colorFilterSvg, DEFAULT_ACCESSIBILITY, type AccessibilitySettings, type ColorFilter } from "@cartbox/editor";
-import type { ControlScheme, InspectedObject, PlayerOptions } from "./types.js";
+import type { ControlScheme, InspectedObject, PlayerOptions, SequenceOptions } from "./types.js";
 
 /**
  * Decides whether to show the on-screen gamepad. "auto" shows it on any device
@@ -1096,6 +1096,11 @@ export class Player {
   /** The path-traced reference of the 3D frame shown (F10b), `width` across at its aspect; null without one (every tier but AAA). */
   captureReference(options: { readonly width: number; readonly samples?: number; readonly progress?: (done: number) => void }): Promise<ReferenceCapture> | null {
     return this.meshSurface?.captureReference(options) ?? null;
+  }
+
+  /** Render a timeline offline, frame by frame through the path tracer (F10d). */
+  renderSequence(options: SequenceOptions): Promise<number> | null {
+    return this.meshSurface?.renderSequence(options) ?? null;
   }
 
   /** Samples each pixel of the viewport's path-traced reference holds (F10b). */

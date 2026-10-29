@@ -21,6 +21,7 @@ export type {
   PlayerHandle,
   PlayerOptions,
   ScaleMode,
+  SequenceOptions,
 } from "./types.js";
 export { ConsoleButton } from "./types.js";
 export { CartridgeLoadError } from "./cartridge.js";
@@ -483,6 +484,7 @@ export function mount(container: HTMLElement, options: PlayerOptions): PlayerHan
     setQuality: (choice) => player.setQuality(choice),
     setViewMode: (mode) => player.setViewMode(mode),
     captureReference: (options) => player.captureReference(options),
+    renderSequence: (options) => player.renderSequence(options),
     get referenceSamples(): number {
       return player.referenceSamples;
     },
