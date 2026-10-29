@@ -140,6 +140,8 @@ import {
   type Occluder,
   type RasterStyle,
   type ReflectionProbeSet,
+  CORNEA_ROUGHNESS,
+  sortTrianglesBackToFront,
 } from "@cartbox/editor";
 
 import { SoftwareSceneRenderer, applyScenePasses, type FrameState, type GpuSceneDraw, type SceneDraw, type SceneRenderer, type SunShadow } from "./sceneRenderer.js";
@@ -150,6 +152,7 @@ import { MAX_ANISOTROPY, MipmapGenerator, coverageMips, hasTransparency, mipLeve
 import { compressedFormatsFor } from "../lighting/webgpuDevice.js";
 import { brdfLut, brdfWgsl } from "./brdf.js";
 import { MATERIAL_SET_WGSL } from "./materialSet.js";
+import { CHARACTER_WGSL } from "./characterShading.js";
 import { SKIN_WGSL, SKIN_WORKGROUP, packBindShape, packInfluences, skinParams } from "./gpuSkinning.js";
 import { SSS_MAX_PROFILES, SSS_WGSL, packSssProfiles, type SssProfile } from "./subsurface.js";
 import { FEEDBACK_NONE, FEEDBACK_SLOTS, TextureStreamer, feedbackWgsl, footprintLog2, type StreamingStats } from "./textureStreaming.js";
@@ -595,6 +598,9 @@ struct Uniforms {
   // Subsurface scattering and thin-surface transmission (F1d-2).
   sss0: vec4<f32>,
   dt0: vec4<f32>,
+  // Character shading (F7c; characterShading.ts).
+  char0: vec4<f32>,
+  char1: vec4<f32>,
 };
 
 // A Modern-tier light (see packLights): d0 = dir/pos + kind, d1 = colour +
@@ -744,7 +750,7 @@ ${hdr ? "// The spot/point lights' depth atlas, drawn on the GPU (F2d).\n@group(
 // The opaque scene's colour (I5), copied as the see-through pass begins — what a
 // refracting surface bends (a 1×1 blank in the opaque pass, which never reads it).
 @group(1) @binding(7) var sceneColour: texture_2d<f32>;
-${hdr ? `${brdfWgsl(1, 8)}${MATERIAL_SET_WGSL}// The prefiltered cube's sampler: trilinear, so a roughness between levels blends them (F3a).
+${hdr ? `${brdfWgsl(1, 8)}${MATERIAL_SET_WGSL}${CHARACTER_WGSL}// The prefiltered cube's sampler: trilinear, so a roughness between levels blends them (F3a).
 @group(1) @binding(9) var envSamp: sampler;
 ${ltcWgsl(1, 10)}
 ${decalWgsl(1, 13)}
@@ -1293,6 +1299,14 @@ ${hdr ? "  // An area light (F2e-2): its rectangle, disk or tube integrated with
     Ld = normalize(lgt.d0.xyz);
   }
   let ndlL = max(0.0, dot(N, Ld));${hdr ? `
+  // Character shading (F7c): its own lobes, under the light's falloff and shadow as any surface's.
+  if (charKind() > 0) {
+    if (atten <= 0.0) { return vec3<f32>(0.0); }
+    var occlC = 1.0;
+    if (lgt.d0.w < 0.5) { occlC = sf; }
+    else if (lgt.d2.w >= 0.0 && frame.localShadow.x > 0.5) { occlC = localShadow(i32(lgt.d2.w + 0.5), lgt, P, abs(dot(N, Ld))); }
+    return charLight(Ld, N, V, ndv, sqrt(sqrt(a2)), f0, kdm, albedo) * toLinear(lgt.d1.rgb) * (lgt.d1.w * atten * occlC);
+  }
   // A thin surface lit from behind (F1d-2): what comes through, a diffuse of its own.
   if (u.dt0.w > 0.0 && atten > 0.0 && dot(N, Ld) < 0.0) {
     let back = -dot(N, Ld);
@@ -1576,7 +1590,21 @@ ${hdr ? "  shadowPixel = in.pos.xy;\n  // Overdraw (F10a): every fragment shaded
     let pg = uvGrads(pn, dp1, dp2, duv1, duv2);
     let pv = max(${PARALLAX_MIN_NDV}, dot(pn, u.view.xyz));
     puv = parallaxUv(in.uv, -vec2<f32>(dot(pg.gu, u.view.xyz), dot(pg.gv, u.view.xyz)) / pv, u.layer0.w);
-  }
+  }${hdr ? `
+  // An eye (F7c): its UVs centred on the pupil; inside the iris the view refracts through the cornea and
+  // lands on the iris behind it, which is where the iris is sampled.
+  if (u.pbr.z > 0.5 && charKind() == 2) {
+    var en = normalize(in.normal);
+    if (dot(en, u.view.xyz) < 0.0) { en = -en; }
+    let eg = uvGrads(en, dp1, dp2, duv1, duv2);
+    charT = eg.gu / max(length(eg.gu), 1e-12);
+    charB = eg.gv / max(length(eg.gv), 1e-12);
+    charFwd = normalize((u.model * vec4<f32>(0.0, 0.0, 1.0, 0.0)).xyz);
+    charR = length(puv - vec2<f32>(0.5));
+    charMask = charIrisMask(charR);
+    puv = puv + charIrisParallax(u.view.xyz, en) * charMask;
+    charOff = (puv.x - 0.5) * charT + (puv.y - 0.5) * charB;
+  }` : ""}
   // glTF's V origin is top-left, so flip; the sampler wraps and (per era) filters.
   let uv = vec2<f32>(puv.x, 1.0 - puv.y);
   wUv = puv;
@@ -1603,7 +1631,9 @@ ${hdr ? "  shadowPixel = in.pos.xy;\n  // Overdraw (F10a): every fragment shaded
     colour = colour * texel;
   }
   // Macro variation (P2b): broad lighter and darker patches over the whole surface.
-  if (u.terrain0.z > 0.0) { colour = vec4<f32>(colour.rgb * macroGain(in.objPos), colour.a); }
+  if (u.terrain0.z > 0.0) { colour = vec4<f32>(colour.rgb * macroGain(in.objPos), colour.a); }${hdr ? `
+  // The limbus's dark ring round the iris (F7c).
+  if (u.pbr.z > 0.5 && charKind() == 2) { colour = vec4<f32>(colour.rgb * charLimbus(charR), colour.a); }` : ""}
 ${g.base}${g.pdo ? `
   // A pixel depth offset (F1e): the prepass wrote the pushed depth; here the surface keeps only the pixels
   // where that is what the prepass left, so what it went behind shows.
@@ -1622,7 +1652,7 @@ ${g.base}${g.pdo ? `
   }
   if (colour.a * 255.0 < 1.0) { discard; }
   // A cut-out surface (EP6) drops what's below its threshold.
-  if (u.pbr.w > 0.5 && u.pbr.w < 1.5 && colour.a < u.view.w) { discard; }
+  if (u.pbr.w > 0.5 && u.pbr.w < 1.5 && ${hdr ? "select((colour.a < u.view.w), !charDitherKeeps(colour.a, in.pos.xy), u.char1.x > 0.5 && charKind() == 3)" : "colour.a < u.view.w"}) { discard; }
 
   if (u.pbr.z > 0.5) {
     // Active Camo (H11): screen-door transparency, as the rasteriser drops pixels.
@@ -1641,7 +1671,20 @@ ${g.base}${g.pdo ? `
     // variant (the AAA tier) departs from it for the AAA BRDF (F1c, brdf.ts).
     var N = normalize(sNrm);
     if (dot(N, u.view.xyz) < 0.0) { N = -N; } // two-sided: flip toward the viewer
-    N = waterNormal(N, in.worldPos);
+    N = waterNormal(N, in.worldPos);${hdr ? `
+    // Character shading (F7c): skin's pores tilt the normal; a hair card's strands run along V; a mouth
+    // darkens behind its opening.
+    if (charKind() == 1 && u.char1.y > 0.0) {
+      let mg = uvGrads(N, dp1, dp2, duv1, duv2);
+      let tilt = charMicroTilt(puv);
+      N = normalize(N + tilt.x * mg.gu / max(length(mg.gu), 1e-12) + tilt.y * mg.gv / max(length(mg.gv), 1e-12));
+    }
+    if (charKind() == 3) {
+      let hg = uvGrads(N, dp1, dp2, duv1, duv2);
+      let t0 = hg.gv - N * dot(hg.gv, N);
+      charT = select(normalize(cross(N, vec3<f32>(1.0, 0.0, 0.0)) + vec3<f32>(1e-6)), t0 / max(length(t0), 1e-12), length(t0) > 1e-12);
+    }
+    if (charKind() == 4) { charLit = charMouth(in.objPos); }` : ""}
     coatN = waterNormal(facingNormal(in.normal), in.worldPos);
     coatNdv = max(1e-4, dot(coatN, u.view.xyz));
     var metallic = u.pbr.x;
@@ -1666,7 +1709,11 @@ ${g.base}${g.pdo ? `
 ${g.pbr}
     rough = clamp(rough, 0.045, 1.0); // a perfectly-smooth NDF blows up
     var ao = 1.0;
-    if (u.texflags.z > 0.5) { ao = textureSample(occTex, samp, uv).r; }
+    if (u.texflags.z > 0.5) { ao = textureSample(occTex, samp, uv).r; }${hdr ? `
+    // The cornea's tear film is smooth (F7c); skin's cavities keep the specular out; a mouth's depth dims all.
+    if (charKind() == 2) { rough = mix(rough, ${CORNEA_ROUGHNESS}, charMask); }
+    if (charKind() == 1) { charSpec = 1.0 - u.char1.z * (1.0 - ao); }
+    ao = ao * charLit;` : ""}
     // Anisotropy (I4): the grain's tangent, U's gradient laid in the surface and
     // turned about N, and the bitangent across it (round without a gradient).
     aniso = 0.0;
@@ -1749,7 +1796,7 @@ ${hdr
     let dfg = dfgAt(ndv, rough);
     eComp = energyCompensation(f0, dfg);
     let specE = specularEnergy(f0, dfg);
-    var specAo = specularOcclusion(ndv, ao, rough * rough);
+    var specAo = specularOcclusion(ndv, ao, rough * rough) * charSpec;
     // The sheen (F1d) takes what it reflects from the layer beneath.
     sheenScale = 1.0 - max(u.sheen0.r, max(u.sheen0.g, u.sheen0.b)) * sheenE(ndv, u.sheen0.w);
     // An HDR directional light map (F3d) lights the diffuse in place of the sky's irradiance, and its sky
@@ -1861,7 +1908,7 @@ ${reflect ? "    // What the light map, probes and SSAO did to the fill, they do
         }
       }
       lit = direct + amb + emis;
-    } else if (u.layer0.x > 0.0) {
+    }${hdr ? " else if (charKind() > 0) {\n      // Character shading (F7c) under the key light.\n      lit = charLight(L, N, V, ndv, rough, f0, kdf, albedo) * sf + amb + emis;\n    }" : ""} else if (u.layer0.x > 0.0) {
       // The clearcoat's own highlight, over a base its Fresnel dims (I4).
       let c = coatTerm(coatN, coatNdv, L, H, vdh);
       lit = (((${hdr ? "kdf" : "kdm"} * (vec3<f32>(1.0) - F) * albedo + F * specD${hdr ? " * eComp" : ""})${hdr ? " * sheenScale + sheenLobe(ndl, ndv, ndh)" : ""}) * ndl * (1.0 - c.y) + vec3<f32>(c.x)) * sf + amb + emis;
@@ -2052,7 +2099,7 @@ fn fs_prepass(in: PrepassIn) -> PrepassTargets {
   let mr = textureSample(mrTex, samp, uv);
 ${g.base}
   if (colour.a * 255.0 < 1.0) { discard; }
-  if (u.pbr.w > 0.5 && u.pbr.w < 1.5 && colour.a < u.view.w) { discard; }
+  if (u.pbr.w > 0.5 && u.pbr.w < 1.5 && ${hdr ? "select((colour.a < u.view.w), !charDitherKeeps(colour.a, in.pos.xy), u.char1.x > 0.5 && charKind() == 3)" : "colour.a < u.view.w"}) { discard; }
   if (u.pbr.z > 0.5 && u.effect0.w > 0.0 && camoThreshold(in.pos.xy, u.effect1.w) < u.effect0.w) { discard; }
   var n = normalize(sNrm);
   if (dot(n, u.view.xyz) < 0.0) { n = -n; }
@@ -3759,6 +3806,7 @@ export class WebgpuSceneRenderer implements SceneRenderer {
     this.frameGi = this.hdr && draw.dynamicGi && draw.environment?.probeVolume ? draw.dynamicGi : null;
     // Subsurface scattering (F1d-2): split and blurred on the AAA tier with a prepass, unless multisampled or diagnostic.
     this.frameSss = this.hdr && prepass && draw.antialias !== true && viewModeCode(draw.viewMode) === 0 && draws.some((entry) => (entry.primitive.material.subsurface ?? 0) > 0);
+    if (this.hdr) this.sortHairCards(draws, eye);
     const { ordered, globalCount, clusters: cells } = this.clusterLights(localPlan ? { ...draw, lights: localPlan.lights, localShadows: null } : draw);
     this.uploadLights(packLights(ordered, this.hdr, this.hdr ? this.iesSlots(ordered) : null));
     // The fog's local lights (F5b-2): as the scene's, by the same cells and tiles.
@@ -3835,6 +3883,7 @@ export class WebgpuSceneRenderer implements SceneRenderer {
         }),
         layers: resolveLayers(entry.primitive.material, entry.textures.relief !== null),
         extensions: resolveExtensions(entry.primitive.material),
+        frame: this.frameIndex,
         refraction: entry.refract ? resolveRefraction(entry.primitive.material, effectActive(entry.effect) ? entry.effect : null) : null,
         camera,
         water: waterUniform(entry.primitive.material, draw.time ?? 0),
@@ -5415,6 +5464,27 @@ export class WebgpuSceneRenderer implements SceneRenderer {
     pass.dispatchWorkgroups(Math.ceil(vertices / SKIN_WORKGROUP));
     pass.end();
     device.queue.submit([encoder.finish()]);
+  }
+
+  /** Where each blended hair primitive's triangles were last sorted from (F7c), in its mesh's space. */
+  private readonly hairSorted = new WeakMap<object, string>();
+
+  /**
+   * Blended hair cards (F7c) draw their triangles back to front from the eye, sorted on the CPU (in the first
+   * copy's space) and written over the primitive's indices when the eye has moved a centimetre.
+   */
+  private sortHairCards(draws: readonly { readonly alpha: number; readonly primitive: MeshPrimitive; readonly geometry: GpuPrimitive; readonly models: readonly Mat4[] }[], eye: readonly number[]): void {
+    for (const entry of draws) {
+      if (entry.alpha !== 2 || entry.primitive.material.character?.kind !== "hair") continue;
+      const inverse = invertMat4(entry.models[0]!);
+      if (!inverse) continue;
+      const local = [0, 1, 2].map((r) => inverse[r]! * eye[0]! + inverse[4 + r]! * eye[1]! + inverse[8 + r]! * eye[2]! + inverse[12 + r]!);
+      const key = local.map((c) => Math.round(c * 100)).join(",");
+      if (this.hairSorted.get(entry.geometry) === key) continue;
+      this.hairSorted.set(entry.geometry, key);
+      const sorted = sortTrianglesBackToFront(entry.primitive.positions, entry.primitive.indices, local);
+      this.device.queue.writeBuffer(entry.geometry.indexBuffer, 0, sorted.buffer, sorted.byteOffset, sorted.byteLength);
+    }
   }
 
   /** Whether this renderer skins live meshes on the GPU (F7a): the linear-light one, whose frames no CPU reference has to match. */

@@ -10,6 +10,7 @@
  * are the parts covered by tests.
  */
 
+import { packCharacter } from "./characterShading.js";
 import {
   DEFAULT_DETAIL_SCALE,
   DEFAULT_DETAIL_STRENGTH,
@@ -125,9 +126,12 @@ import { AREA_KIND } from "./ltc.js";
  * 1040 uvx1       vec4<f32>    16   xy = its offset, z = the share of the diffuse that scatters (F1d-2)
  * 1056 sss0       vec4<f32>    16   rgb = how far each channel scatters, as a colour, w = its radius (m)
  * 1072 dt0        vec4<f32>    16   rgb = the thin-surface transmission's colour, w = its share
+ * 1088 char0      vec4<f32>    16   character shading (F7c; characterShading.ts): x = its kind
+ *                                    (0 none, 1 skin, 2 eye, 3 hair, 4 mouth), yzw = its terms
+ * 1104 char1      vec4<f32>    16   its other terms (a hair's dither and frame, a mouth's opening)
  * ```
  *
- * 1088 bytes used, padded to a 1280-byte stride (a 256-byte multiple a dynamic
+ * 1120 bytes used, padded to a 1280-byte stride (a 256-byte multiple a dynamic
  * uniform offset can address), so one buffer still holds every draw in a
  * frame — uniforms are written per batch, not per copy, so the stride costs
  * little. The metallic-roughness inputs and the environment carry the Modern
@@ -142,7 +146,7 @@ export const UNIFORM_STRIDE = 1280;
  * bind group layout's `minBindingSize` must be: it makes a WGSL struct that
  * grows past what this module writes fail at pipeline creation.
  */
-export const UNIFORM_BYTES_USED = 1088;
+export const UNIFORM_BYTES_USED = 1120;
 /** The same stride counted in float32s, which is how `writeBuffer` sizes it. */
 export const UNIFORM_FLOATS = UNIFORM_STRIDE / 4;
 
@@ -317,6 +321,8 @@ const OFFSET_UVX0 = 256;
 const OFFSET_UVX1 = 260;
 const OFFSET_SSS0 = 264;
 const OFFSET_DT0 = 268;
+const OFFSET_CHAR0 = 272;
+const OFFSET_CHAR1 = 276;
 
 /** The rasteriser's defaults, restated so an unlit draw shades identically. */
 export const DEFAULT_LIGHT: readonly [number, number, number] = [0.4, 0.8, 0.6];
@@ -539,6 +545,8 @@ export interface InstanceUniform {
   readonly layers?: ResolvedLayers;
   /** This draw's full material set (F1d; materialExtensions.ts in @cartbox/editor), or omitted for the defaults. */
   readonly extensions?: ResolvedExtensions;
+  /** The frame's count, which moves a hair's dither (F7c). */
+  readonly frame?: number;
   /** How this draw bends what's behind it (I5; refraction.ts in @cartbox/editor), or null/omitted when it doesn't. */
   readonly refraction?: ResolvedRefraction | null;
   /** The camera's right and up and the frame's height, which a refraction's offset is measured by. */
@@ -640,7 +648,7 @@ export function writeInstanceTransform(target: Float32Array, index: number, tran
 }
 
 /** A draw's full material set into its uniform (F1d): the defaults (a 4% dielectric of IOR 1.5, no sheen, film or transform) without one. */
-function writeExtensions(target: Float32Array, base: number, e: ResolvedExtensions | null): void {
+function writeExtensions(target: Float32Array, base: number, e: ResolvedExtensions | null, alphaMode: number, frame: number): void {
   const sheen = e?.sheenColor ?? [0, 0, 0];
   target.set([sheen[0], sheen[1], sheen[2], e?.sheenRoughness ?? 0], base + OFFSET_SHEEN0);
   const f0 = e?.dielectricF0 ?? [0.04, 0.04, 0.04];
@@ -656,6 +664,10 @@ function writeExtensions(target: Float32Array, base: number, e: ResolvedExtensio
   target.set([sss[0], sss[1], sss[2], e?.subsurfaceRadius ?? 0], base + OFFSET_SSS0);
   const dt = e?.diffuseTransmissionColor ?? [1, 1, 1];
   target.set([dt[0], dt[1], dt[2], e?.diffuseTransmission ?? 0], base + OFFSET_DT0);
+  // Character shading (F7c): a masked hair card dithers its alpha.
+  const [char0, char1] = packCharacter(e?.character ?? null, alphaMode === 1, frame);
+  target.set(char0, base + OFFSET_CHAR0);
+  target.set(char1, base + OFFSET_CHAR1);
 }
 
 /**
@@ -839,7 +851,7 @@ export function writeInstanceUniform(target: Float32Array, index: number, unifor
   target[base + OFFSET_LAYER1 + 2] = layers.relief ? 1 : 0;
   target[base + OFFSET_LAYER1 + 3] = 0;
 
-  writeExtensions(target, base, uniform.extensions ?? null);
+  writeExtensions(target, base, uniform.extensions ?? null, uniform.alpha?.mode ?? 0, uniform.frame ?? 0);
 
   const refraction = uniform.refraction ?? null;
   target[base + OFFSET_REFRACT0] = refraction ? refraction.bend : 0;

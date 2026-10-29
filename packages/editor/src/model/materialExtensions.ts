@@ -28,6 +28,7 @@
  */
 
 import type { MeshMaterial } from "./MeshAsset";
+import { readCharacterShading, resolveCharacter, type CharacterShading, type ResolvedCharacter } from "./characterShading";
 
 export type Rgb = readonly [number, number, number];
 
@@ -61,6 +62,7 @@ export type MaterialExtensions = Pick<
   | "subsurfaceRadius"
   | "diffuseTransmission"
   | "diffuseTransmissionColor"
+  | "character"
 >;
 
 /** A dielectric's index when a material doesn't say (glTF's default). */
@@ -109,6 +111,8 @@ export function readMaterialExtensions(raw: Record<string, unknown> | object): M
     const tint = rgb(r.diffuseTransmissionColor);
     if (tint && tint.some((c) => c !== 1)) out.diffuseTransmissionColor = tint;
   }
+  const character = readCharacterShading(r.character);
+  if (character) out.character = character;
   const t = r.uvTransform as Record<string, unknown> | undefined;
   if (t && typeof t === "object") {
     const offset = Array.isArray(t.offset) && t.offset.length >= 2 && t.offset.slice(0, 2).every(finite) ? ([t.offset[0], t.offset[1]] as [number, number]) : ([0, 0] as [number, number]);
@@ -156,6 +160,8 @@ export interface ResolvedExtensions {
   readonly subsurfaceRadius: number;
   readonly diffuseTransmission: number;
   readonly diffuseTransmissionColor: Rgb;
+  /** Character shading (F7c), every field resolved, or null. */
+  readonly character: ResolvedCharacter | null;
 }
 
 /** Skin's scatter by channel when a material doesn't say (red farthest), and its radius in metres (about 1.2 cm). */
@@ -195,6 +201,7 @@ export function resolveExtensions(material: MeshMaterial): ResolvedExtensions {
     subsurfaceRadius: e.subsurfaceRadius ?? DEFAULT_SUBSURFACE_RADIUS,
     diffuseTransmission: e.diffuseTransmission ?? 0,
     diffuseTransmissionColor: e.diffuseTransmissionColor ?? [1, 1, 1],
+    character: resolveCharacter(e),
   };
 }
 
@@ -332,6 +339,8 @@ export interface GltfMaterialExtensions {
 /** Subsurface scattering, which no ratified glTF extension carries: kept in the material's extras (F1d-2). */
 export interface GltfSubsurfaceExtras {
   cartboxSubsurface?: { factor?: number; color?: number[]; radius?: number };
+  /** Character shading (F7c), as the material stores it. */
+  cartboxCharacter?: CharacterShading;
 }
 
 /** A texture reference's KHR_texture_transform, as glTF writes it. */
@@ -360,6 +369,7 @@ export function readGltfMaterialExtensions(extensions: GltfMaterialExtensions | 
     ...(e.KHR_materials_emissive_strength ? { emissiveStrength: e.KHR_materials_emissive_strength.emissiveStrength ?? 1 } : {}),
     ...(transform ? { uvTransform: { offset: transform.offset, rotation: transform.rotation, scale: transform.scale } } : {}),
     ...(e.KHR_materials_diffuse_transmission ? { diffuseTransmission: e.KHR_materials_diffuse_transmission.diffuseTransmissionFactor ?? 0, diffuseTransmissionColor: e.KHR_materials_diffuse_transmission.diffuseTransmissionColorFactor } : {}),
+    ...(extras?.cartboxCharacter ? { character: extras.cartboxCharacter } : {}),
     ...(extras?.cartboxSubsurface ? { subsurface: extras.cartboxSubsurface.factor ?? 0, subsurfaceColor: extras.cartboxSubsurface.color, subsurfaceRadius: extras.cartboxSubsurface.radius } : {}),
   });
 }
@@ -381,11 +391,14 @@ export function writeGltfMaterialExtensions(material: MeshMaterial): GltfMateria
   return out;
 }
 
-/** A material's subsurface scattering as its glTF extras (F1d-2), or nothing. */
+/** A material's subsurface scattering (F1d-2) and character shading (F7c) as its glTF extras, or nothing. */
 export function writeGltfSubsurface(material: MeshMaterial): GltfSubsurfaceExtras | null {
   const e = readMaterialExtensions(material);
-  if (!e.subsurface) return null;
-  return { cartboxSubsurface: { factor: e.subsurface, ...(e.subsurfaceColor ? { color: [...e.subsurfaceColor] } : {}), ...(e.subsurfaceRadius ? { radius: e.subsurfaceRadius } : {}) } };
+  if (!e.subsurface && !e.character) return null;
+  return {
+    ...(e.subsurface ? { cartboxSubsurface: { factor: e.subsurface, ...(e.subsurfaceColor ? { color: [...e.subsurfaceColor] } : {}), ...(e.subsurfaceRadius ? { radius: e.subsurfaceRadius } : {}) } } : {}),
+    ...(e.character ? { cartboxCharacter: e.character } : {}),
+  };
 }
 
 /** A material's UV transform as each of its texture references writes it, or nothing. */

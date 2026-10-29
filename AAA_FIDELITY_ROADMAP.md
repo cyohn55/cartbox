@@ -1237,11 +1237,43 @@ Everything else depends on this track. It contains no visible "feature", but its
     - *Found, then fixed:* the transform the importer used for directions normalises them, which would have turned a 2 cm delta into a metre; deltas now take the linear part as it is.
     - *Left for later:* the editor's UI for adding targets and drivers (they arrive by import or by script); tangents on a GPU-skinned copy (it takes the derivative frame, as the CPU copy did); compressed (quantised) deltas.
 - [ ] **F7b. Faces.** A facial rig standard (ARKit's 52 blend shapes, or FACS), with animation import, phoneme-driven lip sync from audio, and look-at with saccades.
-- [ ] **F7c. Character shading.**
+- [x] **F7c. Character shading.**
   - **Skin:** F1d SSS with a dual-lobe specular, micro-normal detail and cavity.
   - **Eyes:** a refractive cornea, an iris with parallax and caustic, and a wet tear line.
   - **Hair:** strand cards with Marschner or Kajiya-Kay anisotropic shading, alpha-to-coverage with TAA, depth-sorted opacity and shadowing.
   - **Teeth and mouth:** occlusion.
+  - **Done** on the `aaa` tier. A material's `character` (`editor model/characterShading.ts`) names its shading model, `skin`, `eye`, `hair` or `mouth`, with its terms; every term has a default. The linear-light shader lights it with its own lobes (`player render/characterShading.ts`), under each light's falloff and shadows like any other surface. The other renderers draw it as its ordinary PBR; skin keeps its F1d scattering everywhere.
+    - **Skin:**
+      - two GGX lobes, as Unreal ships them: at 0.75× and 1.3× the material's roughness, the broader one 15%, so the oily sheen and the skin's own roughness both show;
+      - pores: a value-noise micro-normal tiled finely in UV (96 a UV unit by default);
+      - the occlusion map's cavities darken the specular as well as the diffuse, for every light and the environment;
+      - the F1d subsurface scattering carries on underneath, its diffuse split out as before.
+    - **Eyes:** one mesh whose UVs are centred on the pupil.
+      - Inside the iris radius the surface is the cornea, smooth (roughness 0.06) as its tear film keeps it.
+      - The view refracts through it (IOR 1.376) to the iris plane `irisDepth` behind, along the eye's axis (the mesh's +Z), and the iris is sampled where it lands: parallax that moves with the eye and the viewer.
+      - Each light refracts too: the iris takes its light through the cornea, gathered on its far side (the caustic).
+      - A dark limbus ring rims it.
+    - **Hair:** strand cards whose strands run along V.
+      - The diffuse is wrapped. The specular is Kajiya-Kay's along the strand, two lobes shifted along the normal as Scheuermann shifts them: the white R toward the tip, and the coloured, broader TRT toward the root. Light from behind scatters through toward the viewer (TT).
+      - **Coverage.** A masked card's alpha becomes a dither, Interleaved Gradient Noise moved every frame. TAA averages the frames into the fraction: alpha-to-coverage without MSAA. The depth prepass dithers alike, so the two agree.
+      - A blended card draws its triangles back to front from the eye: sorted on the CPU in its mesh's space and written over its indices whenever the eye moves a centimetre.
+      - Its shadow is the cut-out caster's (F2a-2).
+    - **Mouth:** teeth, gums and tongue darken with distance behind the opening, a point in the mesh's space, to `occlusion` at `depth`, and less as `open` (set by the cart) opens it. Diffuse, specular and the environment alike.
+    - **Files:** the field is stored with the material, inherited by instances, and written to glTF in the material's extras (`cartboxCharacter`, beside F1d's `cartboxSubsurface`).
+    - *Tests:* `Unit Tests/character-shading.test.ts` covers:
+      - reading and clamping the field; its defaults; that it puts a material on the PBR path; the mesh format and glTF;
+      - the dual lobe against one; the pores' tilt; the cavity;
+      - the iris's mask and limbus; Snell's law and total internal reflection; the parallax's direction and its growth with depth; the caustic's side;
+      - Kajiya-Kay across a strand against along it, the shifted tangent, the forward scatter, the dither averaging to alpha over 64 frames, sorting triangles;
+      - the mouth's occlusion with depth and opening;
+      - on Dawn: skin's two lobes against one at the highlight and off it, and its pores; the iris seen shifted from the side (a split map turns from blue to red); a hair card lit across its strands, not along them, and through it from behind; a masked card's coverage near its alpha, with a new pattern each frame; a blended card's near strands over its far ones although listed first; a mouth darker deeper in, and less so open.
+    - *Left for later:*
+      - a separate wet tear-line mesh: the cornea's smoothness stands in for now;
+      - deep opacity maps for hair's self-shadowing;
+      - Marschner's full longitudinal and azimuthal terms;
+      - dual-lobe reflection of the environment, which takes one lobe at the material's roughness;
+      - the path-traced reference's character models;
+      - UI for the field: it arrives by import or by script.
 - [ ] **F7d. Cloth and secondary motion.** A GPU position-based dynamics cloth with skinned constraints, colliders from the ragdoll shapes and wind, plus jiggle and spring bones for straps, antennas and hair.
 - [ ] **F7e. Animation quality.**
   - **Motion matching:** a pose database searched every few frames.

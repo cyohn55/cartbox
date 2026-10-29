@@ -6084,6 +6084,13 @@ declare class WebgpuSceneRenderer implements SceneRenderer {
      * then the compute pass morphs and skins its bind shape into its vertex buffer.
      */
     private skinOnGpu;
+    /** Where each blended hair primitive's triangles were last sorted from (F7c), in its mesh's space. */
+    private readonly hairSorted;
+    /**
+     * Blended hair cards (F7c) draw their triangles back to front from the eye, sorted on the CPU (in the first
+     * copy's space) and written over the primitive's indices when the eye has moved a centimetre.
+     */
+    private sortHairCards;
     /** Whether this renderer skins live meshes on the GPU (F7a): the linear-light one, whose frames no CPU reference has to match. */
     get gpuSkinning(): boolean;
     /** A cut-out caster's group 0 (F2a-2): the casters' uniforms and transforms, and its base map. */
@@ -6380,9 +6387,12 @@ declare function bakeProbeVolumeGpu(device: any, min: readonly [number, number, 
  * 1040 uvx1       vec4<f32>    16   xy = its offset, z = the share of the diffuse that scatters (F1d-2)
  * 1056 sss0       vec4<f32>    16   rgb = how far each channel scatters, as a colour, w = its radius (m)
  * 1072 dt0        vec4<f32>    16   rgb = the thin-surface transmission's colour, w = its share
+ * 1088 char0      vec4<f32>    16   character shading (F7c; characterShading.ts): x = its kind
+ *                                    (0 none, 1 skin, 2 eye, 3 hair, 4 mouth), yzw = its terms
+ * 1104 char1      vec4<f32>    16   its other terms (a hair's dither and frame, a mouth's opening)
  * ```
  *
- * 1088 bytes used, padded to a 1280-byte stride (a 256-byte multiple a dynamic
+ * 1120 bytes used, padded to a 1280-byte stride (a 256-byte multiple a dynamic
  * uniform offset can address), so one buffer still holds every draw in a
  * frame — uniforms are written per batch, not per copy, so the stride costs
  * little. The metallic-roughness inputs and the environment carry the Modern
@@ -6397,7 +6407,7 @@ declare const UNIFORM_STRIDE = 1280;
  * bind group layout's `minBindingSize` must be: it makes a WGSL struct that
  * grows past what this module writes fail at pipeline creation.
  */
-declare const UNIFORM_BYTES_USED = 1088;
+declare const UNIFORM_BYTES_USED = 1120;
 /** The same stride counted in float32s, which is how `writeBuffer` sizes it. */
 declare const UNIFORM_FLOATS: number;
 /**
@@ -6597,6 +6607,8 @@ interface InstanceUniform {
     readonly layers?: ResolvedLayers;
     /** This draw's full material set (F1d; materialExtensions.ts in @cartbox/editor), or omitted for the defaults. */
     readonly extensions?: ResolvedExtensions;
+    /** The frame's count, which moves a hair's dither (F7c). */
+    readonly frame?: number;
     /** How this draw bends what's behind it (I5; refraction.ts in @cartbox/editor), or null/omitted when it doesn't. */
     readonly refraction?: ResolvedRefraction | null;
     /** The camera's right and up and the frame's height, which a refraction's offset is measured by. */

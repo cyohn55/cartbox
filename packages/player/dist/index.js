@@ -14540,6 +14540,162 @@ import {
 // src/render/gpuFrame.ts
 import { depthLinearTerms, effectActive as effectActive2, refracts, resolveRefraction } from "@cartbox/editor";
 
+// src/render/characterShading.ts
+import { characterKindCode } from "@cartbox/editor";
+function packCharacter(c, dither, frame) {
+  if (!c) return [[0, 0, 0, 0], [0, 0, 0, 0]];
+  const code = characterKindCode(c.kind);
+  switch (c.kind) {
+    case "skin":
+      return [[code, c.lobeMix, c.lobeRoughness[0], c.lobeRoughness[1]], [c.microScale, c.microStrength, c.cavity, 0]];
+    case "eye":
+      return [[code, c.irisRadius, c.irisDepth, c.corneaIor], [c.limbus, c.caustic, 0, 0]];
+    case "hair":
+      return [[code, c.shift, c.secondaryShift, c.scatter], [dither ? 1 : 0, frame % 64, 0, 0]];
+    case "mouth":
+      return [[code, c.occlusion, c.open, c.depth], [c.opening[0], c.opening[1], c.opening[2], 0]];
+  }
+}
+var CHARACTER_WGSL = (
+  /* wgsl */
+  `
+var<private> charT: vec3<f32>;
+var<private> charB: vec3<f32>;
+var<private> charMask: f32 = 0.0;
+var<private> charR: f32 = 0.0;
+var<private> charFwd: vec3<f32>;
+var<private> charOff: vec3<f32>;
+var<private> charSpec: f32 = 1.0;
+var<private> charLit: f32 = 1.0;
+
+fn charKind() -> i32 { return i32(u.char0.x + 0.5); }
+
+fn charHash(p: vec2<f32>) -> f32 { return fract(sin(p.x * 127.1 + p.y * 311.7) * 43758.5453); }
+fn charNoise(p: vec2<f32>) -> f32 {
+  let i = floor(p);
+  let f = p - i;
+  let s = f * f * (vec2<f32>(3.0) - 2.0 * f);
+  let a = charHash(i);
+  let b = charHash(i + vec2<f32>(1.0, 0.0));
+  let c = charHash(i + vec2<f32>(0.0, 1.0));
+  let d = charHash(i + vec2<f32>(1.0, 1.0));
+  return a + (b - a) * s.x + (c - a) * s.y + (a - b - c + d) * s.x * s.y;
+}
+// A skin's pores: the noise's slope in tangent space (microTilt).
+fn charMicroTilt(uv: vec2<f32>) -> vec2<f32> {
+  let p = uv * u.char1.x;
+  let e = 0.25;
+  let du = charNoise(p + vec2<f32>(e, 0.0)) - charNoise(p - vec2<f32>(e, 0.0));
+  let dv = charNoise(p + vec2<f32>(0.0, e)) - charNoise(p - vec2<f32>(0.0, e));
+  return -vec2<f32>(du, dv) * u.char1.y;
+}
+
+fn charGgx(ndh: f32, rough: f32) -> f32 {
+  let a2 = rough * rough * rough * rough;
+  let d = ndh * ndh * (a2 - 1.0) + 1.0;
+  return a2 / (3.14159265 * d * d + 1e-7);
+}
+// Skin's two lobes (dualLobeD).
+fn charDualLobe(ndh: f32, rough: f32) -> f32 {
+  let r0 = clamp(rough * u.char0.z, 0.045, 1.0);
+  let r1 = clamp(rough * u.char0.w, 0.045, 1.0);
+  return mix(charGgx(ndh, r0), charGgx(ndh, r1), u.char0.y);
+}
+
+// The eye (irisMask, limbusShade).
+fn charIrisMask(r: f32) -> f32 {
+  let w = max(u.char1.x, 1e-4);
+  let t = clamp((u.char0.y - r) / w + 0.5, 0.0, 1.0);
+  return t * t * (3.0 - 2.0 * t);
+}
+fn charLimbus(r: f32) -> f32 {
+  if (u.char1.x <= 0.0) { return 1.0; }
+  let t = clamp(1.0 - abs(r - u.char0.y) / u.char1.x, 0.0, 1.0);
+  return 1.0 - 0.65 * t * t;
+}
+// Where the iris is seen through the cornea (irisParallax): the offset in UV.
+fn charIrisParallax(V: vec3<f32>, N: vec3<f32>) -> vec2<f32> {
+  var into = refract(-V, N, 1.0 / u.char0.w);
+  if (dot(into, into) < 1e-8) { into = -charFwd; }
+  let down = max(0.2, -dot(into, charFwd));
+  let t = u.char0.z / down;
+  return vec2<f32>(t * dot(into, charT), t * dot(into, charB));
+}
+// The iris's light (irisLight): refracted onto its plane, gathered on the far side.
+fn charIrisLight(Ld: vec3<f32>, N: vec3<f32>) -> f32 {
+  let into = refract(-Ld, N, 1.0 / u.char0.w);
+  if (dot(into, into) < 1e-8) { return 0.0; }
+  let ndl = max(0.0, -dot(into, charFwd));
+  let side = dot(into, charOff);
+  return ndl * (1.0 + u.char1.y * max(0.0, side) * 4.0);
+}
+
+// Hair (kajiyaKay, shiftTangent, hairExponent, hairScatter).
+fn charKajiya(tdh: f32, e: f32) -> f32 {
+  let s = sqrt(max(0.0, 1.0 - tdh * tdh));
+  return (e + 2.0) / 6.28318531 * pow(s, e);
+}
+fn charHairExponent(rough: f32) -> f32 {
+  let a = max(0.045, rough) * max(0.045, rough);
+  return max(2.0, 2.0 / (a * a) - 2.0);
+}
+// Whether a hair texel survives the frame's dither (ditherKeeps): TAA averages the frames into its alpha.
+fn charDitherKeeps(alpha: f32, pixel: vec2<f32>) -> bool {
+  let shift = u.char1.y * 5.588238;
+  let threshold = fract(52.9829189 * fract((pixel.x + shift) * 0.06711056 + (pixel.y + shift) * 0.00583715));
+  return alpha > threshold;
+}
+
+// The mouth (mouthOcclusion): darker deeper behind the opening, less so the wider it opens.
+fn charMouth(objPos: vec3<f32>) -> f32 {
+  let t = clamp(length(objPos - u.char1.xyz) / max(u.char0.w, 1e-4), 0.0, 1.0);
+  let s = t * t * (3.0 - 2.0 * t);
+  return 1.0 - u.char0.y * (1.0 - 0.6 * u.char0.z) * s;
+}
+
+/**
+ * One light on a character surface, for unit radiance (the caller scales it
+ * by the light's colour, intensity, falloff and shadow): the reflection and
+ * the diffuse, cosine included. \`kdm\` is the diffuse's share; the diffuse
+ * it adds goes to \`diffuseLit\` for the scattering pass.
+ */
+fn charLight(Ld: vec3<f32>, N: vec3<f32>, V: vec3<f32>, ndv: f32, rough: f32, f0: vec3<f32>, kdm: f32, albedo: vec3<f32>) -> vec3<f32> {
+  let kind = charKind();
+  let ndl = dot(N, Ld);
+  let H = normalize(Ld + V);
+  let vdh = max(0.0, dot(V, H));
+  let F = f0 + (vec3<f32>(1.0) - f0) * pow(1.0 - vdh, 5.0);
+  if (kind == 3) {
+    // Hair: a wrapped diffuse, Kajiya-Kay's two shifted lobes (R white toward the tip, TRT coloured and
+    // broader toward the root), faded as the light goes behind, and the light through it from behind (TT).
+    let wrap = max(0.0, 0.25 + 0.75 * ndl);
+    let e = charHairExponent(rough);
+    let t1 = normalize(charT + u.char0.y * N);
+    let t2 = normalize(charT + u.char0.z * N);
+    let r = charKajiya(dot(t1, H), e);
+    let trt = charKajiya(dot(t2, H), e * 0.25);
+    let facing = smoothstep(-0.1, 0.25, ndl);
+    let tt = u.char0.w * pow(max(0.0, -dot(Ld, V)), 4.0);
+    let diffuse = kdm * albedo * wrap;
+    diffuseLit = diffuseLit + diffuse;
+    return diffuse + (F * r + F * trt * albedo) * facing * charSpec + albedo * tt;
+  }
+  if (ndl <= 0.0) { return vec3<f32>(0.0); }
+  let ndh = max(0.0, dot(N, H));
+  let a2 = rough * rough * rough * rough;
+  var D = charGgx(ndh, rough);
+  if (kind == 1) { D = charDualLobe(ndh, rough); }
+  let spec = F * D * smithVisibility(ndl, ndv, a2) * 3.14159265 * eComp * charSpec;
+  var diffuse = kdm * (vec3<f32>(1.0) - F) * albedo;
+  var cosine = ndl;
+  // The iris takes its light through the cornea.
+  if (kind == 2) { cosine = mix(ndl, charIrisLight(Ld, N), charMask); }
+  diffuseLit = diffuseLit + diffuse * cosine * charLit;
+  return (diffuse * cosine + spec * ndl) * charLit;
+}
+`
+);
+
 // src/render/scenePacking.ts
 import {
   DEFAULT_DETAIL_SCALE,
@@ -14724,7 +14880,7 @@ fn areaTerm(lgt: Light, P: vec3<f32>, N: vec3<f32>, V: vec3<f32>, ndv: f32, roug
 
 // src/render/scenePacking.ts
 var UNIFORM_STRIDE = 1280;
-var UNIFORM_BYTES_USED = 1088;
+var UNIFORM_BYTES_USED = 1120;
 var UNIFORM_FLOATS = UNIFORM_STRIDE / 4;
 var LIGHT_FLOATS = 20;
 var PROBE_FLOATS = 16;
@@ -14840,6 +14996,8 @@ var OFFSET_UVX0 = 256;
 var OFFSET_UVX1 = 260;
 var OFFSET_SSS0 = 264;
 var OFFSET_DT0 = 268;
+var OFFSET_CHAR0 = 272;
+var OFFSET_CHAR1 = 276;
 var DEFAULT_LIGHT = [0.4, 0.8, 0.6];
 var DEFAULT_AMBIENT2 = 0.35;
 function resolveLight(direction, ambient) {
@@ -14908,7 +15066,7 @@ function writeInstanceTransform(target, index, transform3, base = index * INSTAN
     target[base + 48 + column * 4 + 3] = 0;
   }
 }
-function writeExtensions(target, base, e) {
+function writeExtensions(target, base, e, alphaMode, frame) {
   const sheen2 = e?.sheenColor ?? [0, 0, 0];
   target.set([sheen2[0], sheen2[1], sheen2[2], e?.sheenRoughness ?? 0], base + OFFSET_SHEEN0);
   const f0 = e?.dielectricF0 ?? [0.04, 0.04, 0.04];
@@ -14924,6 +15082,9 @@ function writeExtensions(target, base, e) {
   target.set([sss[0], sss[1], sss[2], e?.subsurfaceRadius ?? 0], base + OFFSET_SSS0);
   const dt = e?.diffuseTransmissionColor ?? [1, 1, 1];
   target.set([dt[0], dt[1], dt[2], e?.diffuseTransmission ?? 0], base + OFFSET_DT0);
+  const [char0, char1] = packCharacter(e?.character ?? null, alphaMode === 1, frame);
+  target.set(char0, base + OFFSET_CHAR0);
+  target.set(char1, base + OFFSET_CHAR1);
 }
 function writeInstanceUniform(target, index, uniform) {
   const base = index * UNIFORM_FLOATS;
@@ -15073,7 +15234,7 @@ function writeInstanceUniform(target, index, uniform) {
   target[base + OFFSET_LAYER1 + 1] = layers.anisotropySin;
   target[base + OFFSET_LAYER1 + 2] = layers.relief ? 1 : 0;
   target[base + OFFSET_LAYER1 + 3] = 0;
-  writeExtensions(target, base, uniform.extensions ?? null);
+  writeExtensions(target, base, uniform.extensions ?? null, uniform.alpha?.mode ?? 0, uniform.frame ?? 0);
   const refraction = uniform.refraction ?? null;
   target[base + OFFSET_REFRACT0] = refraction ? refraction.bend : 0;
   target[base + OFFSET_REFRACT0 + 1] = refraction ? refraction.warp : 0;
@@ -18159,7 +18320,9 @@ import {
   waterAlong as waterAlong2,
   windUniform as windUniform2,
   graphShaderCode as graphShaderCode2,
-  multiplyMat4 as multiplyMat48
+  multiplyMat4 as multiplyMat48,
+  CORNEA_ROUGHNESS,
+  sortTrianglesBackToFront
 } from "@cartbox/editor";
 
 // src/render/frameGraph.ts
@@ -25527,6 +25690,9 @@ struct Uniforms {
   // Subsurface scattering and thin-surface transmission (F1d-2).
   sss0: vec4<f32>,
   dt0: vec4<f32>,
+  // Character shading (F7c; characterShading.ts).
+  char0: vec4<f32>,
+  char1: vec4<f32>,
 };
 
 // A Modern-tier light (see packLights): d0 = dir/pos + kind, d1 = colour +
@@ -25672,7 +25838,7 @@ ${hdr ? "// The spot/point lights' depth atlas, drawn on the GPU (F2d).\n@group(
 // The opaque scene's colour (I5), copied as the see-through pass begins \u2014 what a
 // refracting surface bends (a 1\xD71 blank in the opaque pass, which never reads it).
 @group(1) @binding(7) var sceneColour: texture_2d<f32>;
-${hdr ? `${brdfWgsl(1, 8)}${MATERIAL_SET_WGSL}// The prefiltered cube's sampler: trilinear, so a roughness between levels blends them (F3a).
+${hdr ? `${brdfWgsl(1, 8)}${MATERIAL_SET_WGSL}${CHARACTER_WGSL}// The prefiltered cube's sampler: trilinear, so a roughness between levels blends them (F3a).
 @group(1) @binding(9) var envSamp: sampler;
 ${ltcWgsl(1, 10)}
 ${decalWgsl(1, 13)}
@@ -26218,6 +26384,14 @@ ${hdr ? "  // An area light (F2e-2): its rectangle, disk or tube integrated with
     Ld = normalize(lgt.d0.xyz);
   }
   let ndlL = max(0.0, dot(N, Ld));${hdr ? `
+  // Character shading (F7c): its own lobes, under the light's falloff and shadow as any surface's.
+  if (charKind() > 0) {
+    if (atten <= 0.0) { return vec3<f32>(0.0); }
+    var occlC = 1.0;
+    if (lgt.d0.w < 0.5) { occlC = sf; }
+    else if (lgt.d2.w >= 0.0 && frame.localShadow.x > 0.5) { occlC = localShadow(i32(lgt.d2.w + 0.5), lgt, P, abs(dot(N, Ld))); }
+    return charLight(Ld, N, V, ndv, sqrt(sqrt(a2)), f0, kdm, albedo) * toLinear(lgt.d1.rgb) * (lgt.d1.w * atten * occlC);
+  }
   // A thin surface lit from behind (F1d-2): what comes through, a diffuse of its own.
   if (u.dt0.w > 0.0 && atten > 0.0 && dot(N, Ld) < 0.0) {
     let back = -dot(N, Ld);
@@ -26497,7 +26671,21 @@ ${hdr ? "  shadowPixel = in.pos.xy;\n  // Overdraw (F10a): every fragment shaded
     let pg = uvGrads(pn, dp1, dp2, duv1, duv2);
     let pv = max(${PARALLAX_MIN_NDV2}, dot(pn, u.view.xyz));
     puv = parallaxUv(in.uv, -vec2<f32>(dot(pg.gu, u.view.xyz), dot(pg.gv, u.view.xyz)) / pv, u.layer0.w);
-  }
+  }${hdr ? `
+  // An eye (F7c): its UVs centred on the pupil; inside the iris the view refracts through the cornea and
+  // lands on the iris behind it, which is where the iris is sampled.
+  if (u.pbr.z > 0.5 && charKind() == 2) {
+    var en = normalize(in.normal);
+    if (dot(en, u.view.xyz) < 0.0) { en = -en; }
+    let eg = uvGrads(en, dp1, dp2, duv1, duv2);
+    charT = eg.gu / max(length(eg.gu), 1e-12);
+    charB = eg.gv / max(length(eg.gv), 1e-12);
+    charFwd = normalize((u.model * vec4<f32>(0.0, 0.0, 1.0, 0.0)).xyz);
+    charR = length(puv - vec2<f32>(0.5));
+    charMask = charIrisMask(charR);
+    puv = puv + charIrisParallax(u.view.xyz, en) * charMask;
+    charOff = (puv.x - 0.5) * charT + (puv.y - 0.5) * charB;
+  }` : ""}
   // glTF's V origin is top-left, so flip; the sampler wraps and (per era) filters.
   let uv = vec2<f32>(puv.x, 1.0 - puv.y);
   wUv = puv;
@@ -26524,7 +26712,9 @@ ${hdr ? "  shadowPixel = in.pos.xy;\n  // Overdraw (F10a): every fragment shaded
     colour = colour * texel;
   }
   // Macro variation (P2b): broad lighter and darker patches over the whole surface.
-  if (u.terrain0.z > 0.0) { colour = vec4<f32>(colour.rgb * macroGain(in.objPos), colour.a); }
+  if (u.terrain0.z > 0.0) { colour = vec4<f32>(colour.rgb * macroGain(in.objPos), colour.a); }${hdr ? `
+  // The limbus's dark ring round the iris (F7c).
+  if (u.pbr.z > 0.5 && charKind() == 2) { colour = vec4<f32>(colour.rgb * charLimbus(charR), colour.a); }` : ""}
 ${g.base}${g.pdo ? `
   // A pixel depth offset (F1e): the prepass wrote the pushed depth; here the surface keeps only the pixels
   // where that is what the prepass left, so what it went behind shows.
@@ -26543,7 +26733,7 @@ ${g.base}${g.pdo ? `
   }
   if (colour.a * 255.0 < 1.0) { discard; }
   // A cut-out surface (EP6) drops what's below its threshold.
-  if (u.pbr.w > 0.5 && u.pbr.w < 1.5 && colour.a < u.view.w) { discard; }
+  if (u.pbr.w > 0.5 && u.pbr.w < 1.5 && ${hdr ? "select((colour.a < u.view.w), !charDitherKeeps(colour.a, in.pos.xy), u.char1.x > 0.5 && charKind() == 3)" : "colour.a < u.view.w"}) { discard; }
 
   if (u.pbr.z > 0.5) {
     // Active Camo (H11): screen-door transparency, as the rasteriser drops pixels.
@@ -26562,7 +26752,20 @@ ${g.base}${g.pdo ? `
     // variant (the AAA tier) departs from it for the AAA BRDF (F1c, brdf.ts).
     var N = normalize(sNrm);
     if (dot(N, u.view.xyz) < 0.0) { N = -N; } // two-sided: flip toward the viewer
-    N = waterNormal(N, in.worldPos);
+    N = waterNormal(N, in.worldPos);${hdr ? `
+    // Character shading (F7c): skin's pores tilt the normal; a hair card's strands run along V; a mouth
+    // darkens behind its opening.
+    if (charKind() == 1 && u.char1.y > 0.0) {
+      let mg = uvGrads(N, dp1, dp2, duv1, duv2);
+      let tilt = charMicroTilt(puv);
+      N = normalize(N + tilt.x * mg.gu / max(length(mg.gu), 1e-12) + tilt.y * mg.gv / max(length(mg.gv), 1e-12));
+    }
+    if (charKind() == 3) {
+      let hg = uvGrads(N, dp1, dp2, duv1, duv2);
+      let t0 = hg.gv - N * dot(hg.gv, N);
+      charT = select(normalize(cross(N, vec3<f32>(1.0, 0.0, 0.0)) + vec3<f32>(1e-6)), t0 / max(length(t0), 1e-12), length(t0) > 1e-12);
+    }
+    if (charKind() == 4) { charLit = charMouth(in.objPos); }` : ""}
     coatN = waterNormal(facingNormal(in.normal), in.worldPos);
     coatNdv = max(1e-4, dot(coatN, u.view.xyz));
     var metallic = u.pbr.x;
@@ -26587,7 +26790,11 @@ ${g.base}${g.pdo ? `
 ${g.pbr}
     rough = clamp(rough, 0.045, 1.0); // a perfectly-smooth NDF blows up
     var ao = 1.0;
-    if (u.texflags.z > 0.5) { ao = textureSample(occTex, samp, uv).r; }
+    if (u.texflags.z > 0.5) { ao = textureSample(occTex, samp, uv).r; }${hdr ? `
+    // The cornea's tear film is smooth (F7c); skin's cavities keep the specular out; a mouth's depth dims all.
+    if (charKind() == 2) { rough = mix(rough, ${CORNEA_ROUGHNESS}, charMask); }
+    if (charKind() == 1) { charSpec = 1.0 - u.char1.z * (1.0 - ao); }
+    ao = ao * charLit;` : ""}
     // Anisotropy (I4): the grain's tangent, U's gradient laid in the surface and
     // turned about N, and the bitangent across it (round without a gradient).
     aniso = 0.0;
@@ -26665,7 +26872,7 @@ ${hdr ? `    // GTAO (F3c): its visibility joins the material's occlusion (diffu
     let dfg = dfgAt(ndv, rough);
     eComp = energyCompensation(f0, dfg);
     let specE = specularEnergy(f0, dfg);
-    var specAo = specularOcclusion(ndv, ao, rough * rough);
+    var specAo = specularOcclusion(ndv, ao, rough * rough) * charSpec;
     // The sheen (F1d) takes what it reflects from the layer beneath.
     sheenScale = 1.0 - max(u.sheen0.r, max(u.sheen0.g, u.sheen0.b)) * sheenE(ndv, u.sheen0.w);
     // An HDR directional light map (F3d) lights the diffuse in place of the sky's irradiance, and its sky
@@ -26774,7 +26981,7 @@ ${reflect ? "    // What the light map, probes and SSAO did to the fill, they do
         }
       }
       lit = direct + amb + emis;
-    } else if (u.layer0.x > 0.0) {
+    }${hdr ? " else if (charKind() > 0) {\n      // Character shading (F7c) under the key light.\n      lit = charLight(L, N, V, ndv, rough, f0, kdf, albedo) * sf + amb + emis;\n    }" : ""} else if (u.layer0.x > 0.0) {
       // The clearcoat's own highlight, over a base its Fresnel dims (I4).
       let c = coatTerm(coatN, coatNdv, L, H, vdh);
       lit = (((${hdr ? "kdf" : "kdm"} * (vec3<f32>(1.0) - F) * albedo + F * specD${hdr ? " * eComp" : ""})${hdr ? " * sheenScale + sheenLobe(ndl, ndv, ndh)" : ""}) * ndl * (1.0 - c.y) + vec3<f32>(c.x)) * sf + amb + emis;
@@ -26966,7 +27173,7 @@ fn fs_prepass(in: PrepassIn) -> PrepassTargets {
   let mr = textureSample(mrTex, samp, uv);
 ${g.base}
   if (colour.a * 255.0 < 1.0) { discard; }
-  if (u.pbr.w > 0.5 && u.pbr.w < 1.5 && colour.a < u.view.w) { discard; }
+  if (u.pbr.w > 0.5 && u.pbr.w < 1.5 && ${hdr ? "select((colour.a < u.view.w), !charDitherKeeps(colour.a, in.pos.xy), u.char1.x > 0.5 && charKind() == 3)" : "colour.a < u.view.w"}) { discard; }
   if (u.pbr.z > 0.5 && u.effect0.w > 0.0 && camoThreshold(in.pos.xy, u.effect1.w) < u.effect0.w) { discard; }
   var n = normalize(sNrm);
   if (dot(n, u.view.xyz) < 0.0) { n = -n; }
@@ -27205,6 +27412,8 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     this.localClear = null;
     /** The skinning pass's pipeline (F7a), made the first time a primitive skins on the GPU. */
     this.skinPipeline = null;
+    /** Where each blended hair primitive's triangles were last sorted from (F7c), in its mesh's space. */
+    this.hairSorted = /* @__PURE__ */ new WeakMap();
     /** Texture streaming (F1b): the residency plan, and the feedback pass's pipeline, buffers and state. */
     this.streamer = null;
     this.feedback = null;
@@ -28422,6 +28631,7 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     this.frameFog = this.prepareFog(draw);
     this.frameGi = this.hdr && draw.dynamicGi && draw.environment?.probeVolume ? draw.dynamicGi : null;
     this.frameSss = this.hdr && prepass && draw.antialias !== true && viewModeCode(draw.viewMode) === 0 && draws.some((entry) => (entry.primitive.material.subsurface ?? 0) > 0);
+    if (this.hdr) this.sortHairCards(draws, eye);
     const { ordered, globalCount, clusters: cells } = this.clusterLights(localPlan ? { ...draw, lights: localPlan.lights, localShadows: null } : draw);
     this.uploadLights(packLights(ordered, this.hdr, this.hdr ? this.iesSlots(ordered) : null));
     if (this.frameFog) {
@@ -28490,6 +28700,7 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
         }),
         layers: resolveLayers2(entry.primitive.material, entry.textures.relief !== null),
         extensions: resolveExtensions2(entry.primitive.material),
+        frame: this.frameIndex,
         refraction: entry.refract ? resolveRefraction3(entry.primitive.material, effectActive4(entry.effect) ? entry.effect : null) : null,
         camera,
         water: waterUniform2(entry.primitive.material, draw.time ?? 0),
@@ -29853,6 +30064,23 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     pass.dispatchWorkgroups(Math.ceil(vertices / SKIN_WORKGROUP));
     pass.end();
     device.queue.submit([encoder.finish()]);
+  }
+  /**
+   * Blended hair cards (F7c) draw their triangles back to front from the eye, sorted on the CPU (in the first
+   * copy's space) and written over the primitive's indices when the eye has moved a centimetre.
+   */
+  sortHairCards(draws, eye) {
+    for (const entry of draws) {
+      if (entry.alpha !== 2 || entry.primitive.material.character?.kind !== "hair") continue;
+      const inverse = invertMat4(entry.models[0]);
+      if (!inverse) continue;
+      const local = [0, 1, 2].map((r) => inverse[r] * eye[0] + inverse[4 + r] * eye[1] + inverse[8 + r] * eye[2] + inverse[12 + r]);
+      const key = local.map((c) => Math.round(c * 100)).join(",");
+      if (this.hairSorted.get(entry.geometry) === key) continue;
+      this.hairSorted.set(entry.geometry, key);
+      const sorted = sortTrianglesBackToFront(entry.primitive.positions, entry.primitive.indices, local);
+      this.device.queue.writeBuffer(entry.geometry.indexBuffer, 0, sorted.buffer, sorted.byteOffset, sorted.byteLength);
+    }
   }
   /** Whether this renderer skins live meshes on the GPU (F7a): the linear-light one, whose frames no CPU reference has to match. */
   get gpuSkinning() {

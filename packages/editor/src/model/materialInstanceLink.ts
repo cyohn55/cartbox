@@ -61,6 +61,7 @@ export const INSTANCE_FIELDS = [
   ["subsurfaceRadius", "Subsurface radius"],
   ["diffuseTransmission", "Diffuse transmission"],
   ["diffuseTransmissionColor", "Diffuse transmission colour"],
+  ["character", "Character shading"],
   ["reliefImage", "Relief map"],
   ["parallaxDepth", "Parallax depth"],
   ["refraction", "Refraction"],

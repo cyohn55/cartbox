@@ -30,6 +30,7 @@ import { readSurfaceEffects, writeSurfaceEffects } from "./materialEffects";
 import { readMaterialLayers, writeMaterialLayers } from "./materialLayers";
 import { MAX_MORPH_TARGETS, type MorphTarget } from "./morphTargets";
 import { readMaterialExtensions, writeMaterialExtensions } from "./materialExtensions";
+import type { CharacterShading } from "./characterShading";
 import { readSmartStack, writeSmartStack, type SmartStack } from "./smartMaterials";
 import type { MaterialGraph } from "./materialGraph";
 import { readMeshTrails, type MeshTrail } from "../render/meshTrails";
@@ -245,6 +246,8 @@ export interface MeshMaterial {
   /** Thin-surface transmission (KHR_materials_diffuse_transmission): the share of light from behind a leaf or a lampshade that comes through, and its tint (linear). */
   readonly diffuseTransmission?: number;
   readonly diffuseTransmissionColor?: readonly [number, number, number];
+  /** Character shading (F7c; characterShading.ts): skin, an eye, hair or a mouth, on the `aaa` tier. */
+  readonly character?: CharacterShading;
   // --- Layers and relief (HALO_INFINITE_STYLE_ROADMAP.md I4; see materialLayers.ts) ---
   /**
    * A clearcoat: a thin glossy lacquer over the base surface (armour paint, a
@@ -670,6 +673,7 @@ export interface SerializedMaterial {
   subsurfaceRadius?: number;
   diffuseTransmission?: number;
   diffuseTransmissionColor?: readonly [number, number, number];
+  character?: CharacterShading;
   clearcoat?: number;
   clearcoatRoughness?: number;
   anisotropy?: number;
