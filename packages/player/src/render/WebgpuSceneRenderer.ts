@@ -140,7 +140,13 @@ import {
   type Occluder,
   type RasterStyle,
   type ReflectionProbeSet,
+  CLOTH_GRAVITY,
+  CLOTH_ITERATIONS,
+  CLOTH_RELAX,
   CORNEA_ROUGHNESS,
+  MAX_CLOTH_CAPSULES,
+  clothTopology,
+  type Capsule,
   sortTrianglesBackToFront,
 } from "@cartbox/editor";
 
@@ -153,6 +159,7 @@ import { compressedFormatsFor } from "../lighting/webgpuDevice.js";
 import { brdfLut, brdfWgsl } from "./brdf.js";
 import { MATERIAL_SET_WGSL } from "./materialSet.js";
 import { CHARACTER_WGSL } from "./characterShading.js";
+import { CLOTH_FINISH_WGSL, CLOTH_PREDICT_WGSL, CLOTH_SOLVE_WGSL, CLOTH_WORKGROUP, clothParams, packCapsules, vertexTriangles } from "./clothGpu.js";
 import { SKIN_WGSL, SKIN_WORKGROUP, packBindShape, packInfluences, skinParams } from "./gpuSkinning.js";
 import { SSS_MAX_PROFILES, SSS_WGSL, packSssProfiles, type SssProfile } from "./subsurface.js";
 import { FEEDBACK_NONE, FEEDBACK_SLOTS, TextureStreamer, feedbackWgsl, footprintLog2, type StreamingStats } from "./textureStreaming.js";
@@ -2161,6 +2168,8 @@ interface GpuPrimitive {
   movedFrame?: number;
   /** GPU skinning's buffers (F7a): the bind shape, influences, morphs, the joints and weights written each pose, and their group. */
   skin?: { readonly buffers: any[]; readonly joints: any; readonly weights: any; readonly params: any; readonly group: any; readonly vertices: number; readonly jointBytes: number };
+  /** GPU cloth's buffers and groups (F7d): predict, the solve both ways, and finish. */
+  cloth?: { readonly params: any; readonly capsules: any; readonly groups: readonly [any, any, any, any]; readonly buffers: any[] };
 }
 
 /** What a frame's depth prepass leaves (F0c; see WebgpuSceneRenderer.prepassTargets). */
@@ -5462,8 +5471,72 @@ export class WebgpuSceneRenderer implements SceneRenderer {
     pass.setPipeline(this.skinPipeline);
     pass.setBindGroup(0, skin.group);
     pass.dispatchWorkgroups(Math.ceil(vertices / SKIN_WORKGROUP));
+    // Cloth (F7d) over the skinned vertices, in the same pass: each dispatch sees the last's writes.
+    if (pose.cloth && primitive.cloth) this.clothOnGpu(pass, primitive, gpu, pose.cloth);
     pass.end();
     device.queue.submit([encoder.finish()]);
+  }
+
+  /** GPU cloth's pipelines (F7d; clothGpu.ts), made the first time a cloth simulates. */
+  private clothPipelines: { predict: any; solve: any; finish: any } | null = null;
+
+  /** One step of a primitive's cloth on the GPU (F7d): predict, the Jacobi sweeps, then positions and normals into its vertices. */
+  private clothOnGpu(pass: any, primitive: MeshPrimitive, gpu: GpuPrimitive, step: { readonly capsules: readonly Capsule[]; readonly dt: number; readonly wind: readonly [number, number, number] }): void {
+    const device = this.device;
+    const settings = primitive.cloth!;
+    const count = primitive.positions.length / 3;
+    const pipeline = (code: string) => device.createComputePipeline({ layout: "auto", compute: { module: cachedShaderModule(device, code), entryPoint: "main" } });
+    this.clothPipelines ??= { predict: pipeline(CLOTH_PREDICT_WGSL), solve: pipeline(CLOTH_SOLVE_WGSL), finish: pipeline(CLOTH_FINISH_WGSL) };
+    const pipes = this.clothPipelines;
+    if (!gpu.cloth) {
+      const storage = (data: ArrayBufferView) => {
+        const buffer = device.createBuffer({ size: Math.max(16, Math.ceil(data.byteLength / 16) * 16), usage: 0x80 | 0x08 });
+        device.queue.writeBuffer(buffer, 0, data.buffer, data.byteOffset, data.byteLength);
+        return buffer;
+      };
+      const topology = clothTopology(primitive.positions, primitive.indices, settings);
+      // The particles start at the bind shape, as the CPU's do.
+      const rest = new Float32Array(count * 4);
+      for (let v = 0; v < count; v += 1) rest.set(primitive.positions.subarray(v * 3, v * 3 + 3), v * 4);
+      const particles = new Float32Array(count * 2);
+      for (let v = 0; v < count; v += 1) particles.set([topology.invMass[v]!, topology.maxDistance[v]!], v * 2);
+      const triangles = vertexTriangles(primitive.indices, count);
+      const [posA, posB, previous, particle, starts, entries, triStarts, tris, indices] = [rest, rest, rest, particles, topology.starts, topology.entries, triangles.starts, triangles.tris, primitive.indices].map(storage);
+      const params = device.createBuffer({ size: 64, usage: 0x40 | 0x08 });
+      const capsules = device.createBuffer({ size: MAX_CLOTH_CAPSULES * 32, usage: 0x80 | 0x08 });
+      const group = (pipe: any, buffers: any[]) => device.createBindGroup({ layout: pipe.getBindGroupLayout(0), entries: [params, ...buffers].map((buffer, binding) => ({ binding, resource: { buffer } })) });
+      gpu.cloth = {
+        params,
+        capsules,
+        groups: [
+          group(pipes.predict, [gpu.vertexBuffer, posA, previous, particle]),
+          group(pipes.solve, [posA, posB, starts, entries, particle, gpu.vertexBuffer, capsules]),
+          group(pipes.solve, [posB, posA, starts, entries, particle, gpu.vertexBuffer, capsules]),
+          group(pipes.finish, [gpu.vertexBuffer, posA, triStarts, tris, indices]),
+        ],
+        buffers: [posA, posB, previous, particle, starts, entries, triStarts, tris, indices],
+      };
+    }
+    const cloth = gpu.cloth;
+    const capsules = step.capsules.slice(0, MAX_CLOTH_CAPSULES);
+    device.queue.writeBuffer(cloth.params, 0, clothParams(count, capsules.length, step.dt, settings.damping ?? 0.02, settings.stretch ?? 1, settings.bend ?? 0.3, settings.windResponse ?? 1, settings.thickness ?? 0.01, CLOTH_RELAX, step.wind, CLOTH_GRAVITY));
+    if (capsules.length > 0) {
+      const packed = packCapsules(capsules);
+      device.queue.writeBuffer(cloth.capsules, 0, packed.buffer, packed.byteOffset, packed.byteLength);
+    }
+    const groups = Math.ceil(count / CLOTH_WORKGROUP);
+    pass.setPipeline(pipes.predict);
+    pass.setBindGroup(0, cloth.groups[0]);
+    pass.dispatchWorkgroups(groups);
+    // An even number of sweeps, so the last lands back in the first buffer.
+    pass.setPipeline(pipes.solve);
+    for (let it = 0; it < CLOTH_ITERATIONS; it += 1) {
+      pass.setBindGroup(0, cloth.groups[1 + (it & 1)]);
+      pass.dispatchWorkgroups(groups);
+    }
+    pass.setPipeline(pipes.finish);
+    pass.setBindGroup(0, cloth.groups[3]);
+    pass.dispatchWorkgroups(groups);
   }
 
   /** Where each blended hair primitive's triangles were last sorted from (F7c), in its mesh's space. */

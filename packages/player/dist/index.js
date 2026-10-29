@@ -8725,6 +8725,7 @@ import {
   isSkinned,
   restPose,
   sampleClip,
+  stepSpringBones,
   sampleMorphs,
   skinMatrices
 } from "@cartbox/editor";
@@ -8788,6 +8789,8 @@ var AnimationSession = class {
     this.scene = scene;
     this.playback = /* @__PURE__ */ new Map();
     this.tick = 0;
+    /** The last step's length, which the spring bones (F7d) advance by. */
+    this.lastDt = 1 / 60;
     this.cache = null;
     /** Each object's final pose (after any adjustment, e.g. IK) as last skinned. */
     this.lastPose = /* @__PURE__ */ new Map();
@@ -8799,7 +8802,7 @@ var AnimationSession = class {
     const params = new Float64Array(machine?.params.length ?? 0);
     machine?.params.forEach((p, i) => params[i] = p.kind === "trigger" ? 0 : p.initial);
     const current = machine ? stateTrack(machine, 0) : clipTrack((inst.mesh.clips?.length ?? 0) > 0 ? 0 : -1);
-    return { mesh: inst.mesh, machine, params, current, from: null, fade: 0, fadeElapsed: 0, fired: [] };
+    return { mesh: inst.mesh, machine, params, current, from: null, fade: 0, fadeElapsed: 0, fired: [], springs: { tails: [], previous: [] } };
   }
   /** Crossfade `p` into `next` over `fade` seconds. */
   switchTo(p, next, fade) {
@@ -8840,6 +8843,7 @@ var AnimationSession = class {
   }
   /** Take any transition that's ready, then advance every playback one tick (firing clip events). */
   step(dt) {
+    this.lastDt = dt;
     for (const p of this.playback.values()) {
       p.fired = [];
       if (p.machine && p.current.state >= 0) this.transition(p);
@@ -8958,6 +8962,7 @@ var AnimationSession = class {
       const pose = this.pose(p, p.current);
       const faded = p.from && p.fade > 0 ? blendPoses(this.pose(p, p.from), pose, Math.min(1, p.fadeElapsed / p.fade)) : pose;
       adjust?.(object, p.mesh, faded);
+      if (p.mesh.springs?.length) stepSpringBones(p.mesh.skin, faded, p.mesh.springs, p.springs, this.lastDt);
       this.lastPose.set(object, faded);
       out.set(object, skinMatrices(p.mesh.skin, faded));
     }
@@ -18359,7 +18364,12 @@ import {
   windUniform as windUniform2,
   graphShaderCode as graphShaderCode2,
   multiplyMat4 as multiplyMat48,
+  CLOTH_GRAVITY,
+  CLOTH_ITERATIONS,
+  CLOTH_RELAX,
   CORNEA_ROUGHNESS,
+  MAX_CLOTH_CAPSULES,
+  clothTopology,
   sortTrianglesBackToFront
 } from "@cartbox/editor";
 
@@ -19060,6 +19070,189 @@ fn iridescenceF0(cos1: f32, baseF0: vec3<f32>) -> vec3<f32> {
 }
 `
 );
+
+// src/render/clothGpu.ts
+var CLOTH_WORKGROUP = 64;
+function clothParams(count, capsules, dt, damping, stretch, bend, windResponse, margin, relax, wind, gravity) {
+  const buffer = new ArrayBuffer(64);
+  const u = new Uint32Array(buffer);
+  const f3 = new Float32Array(buffer);
+  u[0] = count;
+  u[1] = capsules;
+  f3[2] = dt;
+  f3[3] = damping;
+  f3[4] = stretch;
+  f3[5] = bend;
+  f3[6] = windResponse;
+  f3[7] = margin;
+  f3[8] = wind[0];
+  f3[9] = wind[1];
+  f3[10] = wind[2];
+  f3[11] = relax;
+  f3[12] = gravity[0];
+  f3[13] = gravity[1];
+  f3[14] = gravity[2];
+  return buffer;
+}
+var PARAMS = (
+  /* wgsl */
+  `
+struct Params {
+  count: u32,
+  capsules: u32,
+  dt: f32,
+  damping: f32,
+  stretch: f32,
+  bend: f32,
+  windResponse: f32,
+  margin: f32,
+  wind: vec3<f32>,
+  relax: f32,
+  gravity: vec3<f32>,
+};
+@group(0) @binding(0) var<uniform> params: Params;
+`
+);
+var CLOTH_PREDICT_WGSL = (
+  /* wgsl */
+  `${PARAMS}
+@group(0) @binding(1) var<storage, read> vertices: array<f32>;
+@group(0) @binding(2) var<storage, read_write> position: array<vec4<f32>>;
+@group(0) @binding(3) var<storage, read_write> previous: array<vec4<f32>>;
+@group(0) @binding(4) var<storage, read> particle: array<vec2<f32>>;
+
+@compute @workgroup_size(${CLOTH_WORKGROUP})
+fn main(@builtin(global_invocation_id) id: vec3<u32>) {
+  let i = id.x;
+  if (i >= params.count) { return; }
+  let skinned = vec3<f32>(vertices[i * 16u], vertices[i * 16u + 1u], vertices[i * 16u + 2u]);
+  if (particle[i].x == 0.0) {
+    position[i] = vec4<f32>(skinned, 0.0);
+    previous[i] = vec4<f32>(skinned, 0.0);
+    return;
+  }
+  let p = position[i].xyz;
+  let v = (p - previous[i].xyz) * (1.0 - params.damping);
+  let rel = params.wind - v / params.dt;
+  let n = vec3<f32>(vertices[i * 16u + 3u], vertices[i * 16u + 4u], vertices[i * 16u + 5u]);
+  let facing = abs(dot(n, rel)) / max(length(rel), 1e-9);
+  previous[i] = vec4<f32>(p, 0.0);
+  position[i] = vec4<f32>(p + v + (params.gravity + rel * params.windResponse * facing) * params.dt * params.dt, 0.0);
+}
+`
+);
+var CLOTH_SOLVE_WGSL = (
+  /* wgsl */
+  `${PARAMS}
+@group(0) @binding(1) var<storage, read> source: array<vec4<f32>>;
+@group(0) @binding(2) var<storage, read_write> dest: array<vec4<f32>>;
+@group(0) @binding(3) var<storage, read> starts: array<u32>;
+@group(0) @binding(4) var<storage, read> entries: array<vec4<f32>>;
+@group(0) @binding(5) var<storage, read> particle: array<vec2<f32>>;
+@group(0) @binding(6) var<storage, read> vertices: array<f32>;
+@group(0) @binding(7) var<storage, read> capsules: array<vec4<f32>>;
+
+@compute @workgroup_size(${CLOTH_WORKGROUP})
+fn main(@builtin(global_invocation_id) id: vec3<u32>) {
+  let i = id.x;
+  if (i >= params.count) { return; }
+  let p = source[i].xyz;
+  let wi = particle[i].x;
+  if (wi == 0.0) { dest[i] = vec4<f32>(p, 0.0); return; }
+  var c = vec3<f32>(0.0);
+  let first = starts[i];
+  let last = starts[i + 1u];
+  for (var e = first; e < last; e = e + 1u) {
+    let entry = entries[e];
+    let j = u32(entry.x + 0.5);
+    let d = source[j].xyz - p;
+    let len = length(d);
+    if (len < 1e-9) { continue; }
+    let k = select(params.stretch, params.bend, entry.z > 0.5);
+    let w = wi / (wi + particle[j].x);
+    c = c + d * (k * w * (len - entry.y) / len);
+  }
+  let n = last - first;
+  var q = p;
+  if (n > 0u) { q = p + c * (params.relax / f32(n)); }
+  // Within its distance of the skin.
+  let s = vec3<f32>(vertices[i * 16u], vertices[i * 16u + 1u], vertices[i * 16u + 2u]);
+  let f = q - s;
+  let fl = length(f);
+  let m = particle[i].y;
+  if (fl > m) { q = s + f * (m / fl); }
+  // Out of the body's capsules.
+  for (var k = 0u; k < params.capsules; k = k + 1u) {
+    let a = capsules[k * 2u].xyz;
+    let b = capsules[k * 2u + 1u].xyz;
+    let r = capsules[k * 2u + 1u].w + params.margin;
+    let ab = b - a;
+    let len2 = dot(ab, ab);
+    var t = 0.0;
+    if (len2 > 1e-12) { t = clamp(dot(q - a, ab) / len2, 0.0, 1.0); }
+    let near = a + ab * t;
+    let dq = q - near;
+    let dist = length(dq);
+    if (dist < r) {
+      var dir = vec3<f32>(0.0, 1.0, 0.0);
+      if (dist > 1e-9) { dir = dq / dist; }
+      q = near + dir * r;
+    }
+  }
+  dest[i] = vec4<f32>(q, 0.0);
+}
+`
+);
+var CLOTH_FINISH_WGSL = (
+  /* wgsl */
+  `${PARAMS}
+@group(0) @binding(1) var<storage, read_write> vertices: array<f32>;
+@group(0) @binding(2) var<storage, read> position: array<vec4<f32>>;
+@group(0) @binding(3) var<storage, read> triStarts: array<u32>;
+@group(0) @binding(4) var<storage, read> tris: array<u32>;
+@group(0) @binding(5) var<storage, read> indices: array<u32>;
+
+@compute @workgroup_size(${CLOTH_WORKGROUP})
+fn main(@builtin(global_invocation_id) id: vec3<u32>) {
+  let i = id.x;
+  if (i >= params.count) { return; }
+  let p = position[i].xyz;
+  var n = vec3<f32>(0.0);
+  for (var e = triStarts[i]; e < triStarts[i + 1u]; e = e + 1u) {
+    let t = tris[e] * 3u;
+    let a = position[indices[t]].xyz;
+    let b = position[indices[t + 1u]].xyz;
+    let c = position[indices[t + 2u]].xyz;
+    n = n + cross(b - a, c - a);
+  }
+  let len = length(n);
+  if (len > 1e-12) { n = n / len; } else { n = vec3<f32>(vertices[i * 16u + 3u], vertices[i * 16u + 4u], vertices[i * 16u + 5u]); }
+  vertices[i * 16u] = p.x;
+  vertices[i * 16u + 1u] = p.y;
+  vertices[i * 16u + 2u] = p.z;
+  vertices[i * 16u + 3u] = n.x;
+  vertices[i * 16u + 4u] = n.y;
+  vertices[i * 16u + 5u] = n.z;
+}
+`
+);
+function vertexTriangles(indices, count) {
+  const lists = Array.from({ length: count }, () => []);
+  for (let t = 0; t + 2 < indices.length; t += 3) for (let k = 0; k < 3; k += 1) lists[indices[t + k]]?.push(t / 3);
+  const starts = new Uint32Array(count + 1);
+  const tris = [];
+  lists.forEach((l, v) => {
+    starts[v] = tris.length;
+    tris.push(...l);
+  });
+  starts[count] = tris.length;
+  return { starts, tris: Uint32Array.from(tris.length > 0 ? tris : [0]) };
+}
+function packCapsules(capsules) {
+  const out = new Float32Array(Math.max(1, capsules.length) * 8);
+  capsules.forEach((c, k) => out.set([c.a[0], c.a[1], c.a[2], 0, c.b[0], c.b[1], c.b[2], c.radius], k * 8));
+  return out;
+}
 
 // src/render/gpuSkinning.ts
 var SKIN_WORKGROUP = 64;
@@ -27450,6 +27643,8 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     this.localClear = null;
     /** The skinning pass's pipeline (F7a), made the first time a primitive skins on the GPU. */
     this.skinPipeline = null;
+    /** GPU cloth's pipelines (F7d; clothGpu.ts), made the first time a cloth simulates. */
+    this.clothPipelines = null;
     /** Where each blended hair primitive's triangles were last sorted from (F7c), in its mesh's space. */
     this.hairSorted = /* @__PURE__ */ new WeakMap();
     /** Texture streaming (F1b): the residency plan, and the feedback pass's pipeline, buffers and state. */
@@ -30100,8 +30295,65 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     pass.setPipeline(this.skinPipeline);
     pass.setBindGroup(0, skin.group);
     pass.dispatchWorkgroups(Math.ceil(vertices / SKIN_WORKGROUP));
+    if (pose.cloth && primitive.cloth) this.clothOnGpu(pass, primitive, gpu, pose.cloth);
     pass.end();
     device.queue.submit([encoder.finish()]);
+  }
+  /** One step of a primitive's cloth on the GPU (F7d): predict, the Jacobi sweeps, then positions and normals into its vertices. */
+  clothOnGpu(pass, primitive, gpu, step) {
+    const device = this.device;
+    const settings = primitive.cloth;
+    const count = primitive.positions.length / 3;
+    const pipeline = (code) => device.createComputePipeline({ layout: "auto", compute: { module: cachedShaderModule(device, code), entryPoint: "main" } });
+    this.clothPipelines ?? (this.clothPipelines = { predict: pipeline(CLOTH_PREDICT_WGSL), solve: pipeline(CLOTH_SOLVE_WGSL), finish: pipeline(CLOTH_FINISH_WGSL) });
+    const pipes = this.clothPipelines;
+    if (!gpu.cloth) {
+      const storage = (data) => {
+        const buffer = device.createBuffer({ size: Math.max(16, Math.ceil(data.byteLength / 16) * 16), usage: 128 | 8 });
+        device.queue.writeBuffer(buffer, 0, data.buffer, data.byteOffset, data.byteLength);
+        return buffer;
+      };
+      const topology = clothTopology(primitive.positions, primitive.indices, settings);
+      const rest = new Float32Array(count * 4);
+      for (let v = 0; v < count; v += 1) rest.set(primitive.positions.subarray(v * 3, v * 3 + 3), v * 4);
+      const particles = new Float32Array(count * 2);
+      for (let v = 0; v < count; v += 1) particles.set([topology.invMass[v], topology.maxDistance[v]], v * 2);
+      const triangles = vertexTriangles(primitive.indices, count);
+      const [posA, posB, previous, particle, starts, entries, triStarts, tris, indices] = [rest, rest, rest, particles, topology.starts, topology.entries, triangles.starts, triangles.tris, primitive.indices].map(storage);
+      const params = device.createBuffer({ size: 64, usage: 64 | 8 });
+      const capsules2 = device.createBuffer({ size: MAX_CLOTH_CAPSULES * 32, usage: 128 | 8 });
+      const group = (pipe, buffers) => device.createBindGroup({ layout: pipe.getBindGroupLayout(0), entries: [params, ...buffers].map((buffer, binding) => ({ binding, resource: { buffer } })) });
+      gpu.cloth = {
+        params,
+        capsules: capsules2,
+        groups: [
+          group(pipes.predict, [gpu.vertexBuffer, posA, previous, particle]),
+          group(pipes.solve, [posA, posB, starts, entries, particle, gpu.vertexBuffer, capsules2]),
+          group(pipes.solve, [posB, posA, starts, entries, particle, gpu.vertexBuffer, capsules2]),
+          group(pipes.finish, [gpu.vertexBuffer, posA, triStarts, tris, indices])
+        ],
+        buffers: [posA, posB, previous, particle, starts, entries, triStarts, tris, indices]
+      };
+    }
+    const cloth = gpu.cloth;
+    const capsules = step.capsules.slice(0, MAX_CLOTH_CAPSULES);
+    device.queue.writeBuffer(cloth.params, 0, clothParams(count, capsules.length, step.dt, settings.damping ?? 0.02, settings.stretch ?? 1, settings.bend ?? 0.3, settings.windResponse ?? 1, settings.thickness ?? 0.01, CLOTH_RELAX, step.wind, CLOTH_GRAVITY));
+    if (capsules.length > 0) {
+      const packed = packCapsules(capsules);
+      device.queue.writeBuffer(cloth.capsules, 0, packed.buffer, packed.byteOffset, packed.byteLength);
+    }
+    const groups = Math.ceil(count / CLOTH_WORKGROUP);
+    pass.setPipeline(pipes.predict);
+    pass.setBindGroup(0, cloth.groups[0]);
+    pass.dispatchWorkgroups(groups);
+    pass.setPipeline(pipes.solve);
+    for (let it = 0; it < CLOTH_ITERATIONS; it += 1) {
+      pass.setBindGroup(0, cloth.groups[1 + (it & 1)]);
+      pass.dispatchWorkgroups(groups);
+    }
+    pass.setPipeline(pipes.finish);
+    pass.setBindGroup(0, cloth.groups[3]);
+    pass.dispatchWorkgroups(groups);
   }
   /**
    * Blended hair cards (F7c) draw their triangles back to front from the eye, sorted on the CPU (in the first

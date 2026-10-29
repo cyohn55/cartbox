@@ -29,6 +29,7 @@ import { readInstanceLink, type MaterialInstanceLink } from "./materialInstanceL
 import { readSurfaceEffects, writeSurfaceEffects } from "./materialEffects";
 import { readMaterialLayers, writeMaterialLayers } from "./materialLayers";
 import { MAX_MORPH_TARGETS, type MorphTarget } from "./morphTargets";
+import { readClothSettings, readSpringChains, type Capsule, type ClothSettings, type SpringChain } from "./cloth";
 import { readMaterialExtensions, writeMaterialExtensions } from "./materialExtensions";
 import type { CharacterShading } from "./characterShading";
 import { readSmartStack, writeSmartStack, type SmartStack } from "./smartMaterials";
@@ -436,10 +437,18 @@ export interface MeshPrimitive {
      * Skinned on the GPU (F7a; gpuSkinning.ts in @cartbox/player): the pose's joint matrices and the morph
      * weights the renderer's compute pass applies, in place of positions rewritten on the CPU.
      */
-    gpu?: { readonly matrices: Float32Array; readonly morphWeights: Float32Array | null; readonly dualQuaternion: boolean };
+    gpu?: {
+      readonly matrices: Float32Array;
+      readonly morphWeights: Float32Array | null;
+      readonly dualQuaternion: boolean;
+      /** Cloth (F7d): the body's capsules this frame, the step, and the wind (mesh space). */
+      readonly cloth?: { readonly capsules: readonly Capsule[]; readonly dt: number; readonly wind: readonly [number, number, number] };
+    };
   };
   /** Morph targets (F7a; morphTargets.ts): deltas from this shape, blended by the mesh's weights before skinning. */
   readonly morphTargets?: readonly MorphTarget[];
+  /** Cloth (F7d; cloth.ts): how far each vertex may leave its skinned place, and the material it simulates as. */
+  readonly cloth?: ClothSettings;
 }
 
 /** A named mesh: one or more primitives in a shared object space. */
@@ -452,6 +461,8 @@ export interface MeshAsset {
   readonly morphWeights?: readonly number[];
   /** Skin by dual quaternions (F7a), keeping a twisting joint's volume, rather than by blending matrices. */
   readonly dualQuaternion?: boolean;
+  /** Spring bones (F7d; cloth.ts): chains of joints that trail the animation. */
+  readonly springs?: readonly SpringChain[];
   /** Animation clips that move the skeleton. */
   readonly clips?: readonly AnimationClip[];
   /** Ribbons of light the mesh leaves as parts of it sweep (I10; see meshTrails.ts). */
@@ -713,6 +724,7 @@ interface SerializedPrimitive {
   bones?: string;
   /** Morph targets (F7a): position (and normal) deltas, and a corrective's driver. */
   morphTargets?: { name: string; positions: string; normals?: string; driver?: { joint: number; angles: number[] } }[];
+  cloth?: { maxDistance: string; stretch?: number; bend?: number; damping?: number; windResponse?: number; thickness?: number };
 }
 interface SerializedJoint {
   name: string;
@@ -741,6 +753,7 @@ interface SerializedMesh {
   variants?: { name: string; materials: (SerializedMaterial | null)[] }[];
   morphWeights?: number[];
   dualQuaternion?: boolean;
+  springs?: SpringChain[];
 }
 
 function u16ToBase64(array: Uint16Array): string {
@@ -931,8 +944,10 @@ export function serializeMeshAsset(mesh: MeshAsset): string {
             })),
           }
         : {}),
+      ...(primitive.cloth ? { cloth: { ...primitive.cloth, maxDistance: f32ToBase64(primitive.cloth.maxDistance) } } : {}),
     })),
     ...(mesh.morphWeights?.length ? { morphWeights: [...mesh.morphWeights] } : {}),
+    ...(mesh.skin && mesh.springs?.length ? { springs: mesh.springs.map((s) => ({ ...s, joints: [...s.joints] })) } : {}),
     ...(mesh.dualQuaternion ? { dualQuaternion: true } : {}),
     ...(mesh.skin ? { skin: serializeSkin(mesh.skin) } : {}),
     ...(mesh.skin && mesh.clips && mesh.clips.length > 0 ? { clips: mesh.clips.map(serializeClip) } : {}),
@@ -1201,6 +1216,7 @@ export function deserializeMeshAsset(json: string): MeshAsset {
       ...(tangents ? { tangents } : {}),
       ...(joints && weights ? { joints, weights } : {}),
       ...readMorphTargets(entry.morphTargets, vertexCount, skin?.joints.length ?? 0),
+      ...readCloth(entry.cloth, vertexCount),
     };
   });
 
@@ -1226,12 +1242,20 @@ export function deserializeMeshAsset(json: string): MeshAsset {
     ...(clips.length > 0 ? { clips } : {}),
     ...(trails.length > 0 ? { trails } : {}),
     ...(variants.length > 0 ? { variants } : {}),
+    ...(skin && Array.isArray(raw.springs) && readSpringChains(raw.springs, skin.joints.length).length > 0 ? { springs: readSpringChains(raw.springs, skin.joints.length) } : {}),
     ...(Array.isArray(raw.morphWeights) && raw.morphWeights.every((w) => typeof w === "number" && Number.isFinite(w)) ? { morphWeights: raw.morphWeights.slice(0, MAX_MORPH_TARGETS) } : {}),
     ...(raw.dualQuaternion === true ? { dualQuaternion: true } : {}),
   };
 }
 
 /** A stored primitive's morph targets (F7a), each the primitive's length; a malformed one throws. */
+/** A stored cloth (F7d), or nothing when absent or malformed. */
+function readCloth(raw: SerializedMesh["primitives"][number]["cloth"], vertexCount: number): { cloth?: ClothSettings } {
+  if (!raw || typeof raw.maxDistance !== "string") return {};
+  const cloth = readClothSettings(raw, base64ToF32(raw.maxDistance), vertexCount);
+  return cloth ? { cloth } : {};
+}
+
 function readMorphTargets(raw: unknown, vertexCount: number, jointCount: number): { morphTargets?: MorphTarget[] } {
   if (raw === undefined) return {};
   if (!Array.isArray(raw) || raw.length > MAX_MORPH_TARGETS) throw new Error("Malformed mesh asset");

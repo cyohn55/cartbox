@@ -1304,7 +1304,33 @@ Everything else depends on this track. It contains no visible "feature", but its
       - dual-lobe reflection of the environment, which takes one lobe at the material's roughness;
       - the path-traced reference's character models;
       - UI for the field: it arrives by import or by script.
-- [ ] **F7d. Cloth and secondary motion.** A GPU position-based dynamics cloth with skinned constraints, colliders from the ragdoll shapes and wind, plus jiggle and spring bones for straps, antennas and hair.
+- [x] **F7d. Cloth and secondary motion.** A GPU position-based dynamics cloth with skinned constraints, colliders from the ragdoll shapes and wind, plus jiggle and spring bones for straps, antennas and hair.
+  - **Done** (`editor model/cloth.ts`, `player render/clothGpu.ts`).
+    - **Cloth** is a primitive's `cloth`: each vertex's `maxDistance` from where skinning puts it, plus the material (stretch, bend, damping, wind response, thickness).
+      - The vertices are particles in the mesh's space, with the skinned shape as their anchor. Each step predicts them from their velocity, gravity and the wind. Then 16 sweeps pull them toward their rest lengths along the triangles' edges (stretch) and across each edge's two triangles (bend), each sweep ending with the skinned constraint and the colliders.
+      - **The solve is Jacobi**, over-relaxed by 1.5: each particle averages its constraints' corrections from the same positions. The CPU and the GPU run it alike, the GPU a thread a particle, ping-ponging two buffers.
+      - **Skinned constraints:** a particle keeps within its distance of its skinned place, and 0 pins it there. `clothFromHeight` authors the distances: a collar or waist held, freer toward the hem.
+      - **Colliders** are capsules along the bones (joint to first child), sized by the ragdoll's radii (H9), measured without the cloth, and recomputed from each frame's skinning matrices.
+      - **Wind** pushes a particle by its speed relative to the air, scaled by how squarely its surface faces it.
+      - **On the GPU** (`aaa`), in GPU skinning's compute pass (F7a): predict reads the skinned vertices, the sweeps follow, and finish writes the positions and area-weighted normals back. Motion vectors keep the vertices from before the frame, as skinning does.
+      - On the CPU (every other renderer) the live copy steps the same solve after skinning and recomputes its normals.
+    - **Spring bones** are a mesh's `springs`, chains of joints as VRM's spring bones are.
+      - Each joint's tail (the next in the chain) is a Verlet particle: dragged, pulled back toward where the animation holds it (stiffness a second), pulled by gravity, kept at the bone's length and out of the capsules. The joint then turns toward it in its parent's frame.
+      - The animation session steps them once a tick, after the clips, the blend and IK.
+    - Both are stored in the mesh format.
+    - *Tests:* `Unit Tests/cloth.test.ts` covers:
+      - a sheet's stretch and bend links; pushing out of a capsule; distances by height;
+      - a sheet laid flat swinging down from its pinned row, its edges within 8% of their length; a sheet held within its distance, kept off a capsule behind it and blown forward;
+      - capsules along the arm's bones, moved with the skeleton; a spring chain lagging a moving root and settling back;
+      - cloth and springs through the mesh format; a live copy's cape with its collar moved with the root and its hem lagging;
+      - on Dawn: the cape simulated on the GPU within 5 mm of the CPU after 20 frames (f32 against f64), its hem off its skinned place and its normals unit length.
+    - *Left for later:*
+      - self-collision;
+      - tearing;
+      - long-range attachments for very long cloth;
+      - capsule colliders authored by hand (only the bones' for now);
+      - the world's wind reaching a character's cloth through the player (the live copy takes a wind, which the overlay doesn't yet pass);
+      - jiggle (soft-body) deformers beyond spring chains.
 - [ ] **F7e. Animation quality.**
   - **Motion matching:** a pose database searched every few frames.
   - Full-body IK with foot placement on terrain.

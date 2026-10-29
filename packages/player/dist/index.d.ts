@@ -6084,6 +6084,10 @@ declare class WebgpuSceneRenderer implements SceneRenderer {
      * then the compute pass morphs and skins its bind shape into its vertex buffer.
      */
     private skinOnGpu;
+    /** GPU cloth's pipelines (F7d; clothGpu.ts), made the first time a cloth simulates. */
+    private clothPipelines;
+    /** One step of a primitive's cloth on the GPU (F7d): predict, the Jacobi sweeps, then positions and normals into its vertices. */
+    private clothOnGpu;
     /** Where each blended hair primitive's triangles were last sorted from (F7c), in its mesh's space. */
     private readonly hairSorted;
     /**
@@ -9397,6 +9401,8 @@ declare class AnimationSession {
     private readonly scene;
     private readonly playback;
     private tick;
+    /** The last step's length, which the spring bones (F7d) advance by. */
+    private lastDt;
     private cache;
     /** Each object's final pose (after any adjustment, e.g. IK) as last skinned. */
     private readonly lastPose;

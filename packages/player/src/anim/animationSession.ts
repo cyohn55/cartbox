@@ -27,6 +27,8 @@ import {
   isSkinned,
   restPose,
   sampleClip,
+  stepSpringBones,
+  type SpringState,
   sampleMorphs,
   skinMatrices,
   type AnimationClip,
@@ -90,6 +92,8 @@ interface Playback {
   fadeElapsed: number;
   /** Event indices that fired during the last step. */
   fired: number[];
+  /** Its spring bones' tails (F7d), kept between ticks. */
+  springs: SpringState;
 }
 
 /** The scene objects with a skeleton, in index order. */
@@ -167,6 +171,8 @@ function blendMix(points: readonly { clip: number; at: number; at2?: number }[],
 export class AnimationSession {
   private readonly playback = new Map<number, Playback>();
   private tick = 0;
+  /** The last step's length, which the spring bones (F7d) advance by. */
+  private lastDt = 1 / 60;
   private cache: { tick: number; matrices: Map<number, Float32Array> } | null = null;
   /** Each object's final pose (after any adjustment, e.g. IK) as last skinned. */
   private readonly lastPose = new Map<number, Float32Array>();
@@ -181,7 +187,7 @@ export class AnimationSession {
     const params = new Float64Array(machine?.params.length ?? 0);
     machine?.params.forEach((p, i) => (params[i] = p.kind === "trigger" ? 0 : p.initial));
     const current = machine ? stateTrack(machine, 0) : clipTrack((inst.mesh.clips?.length ?? 0) > 0 ? 0 : -1);
-    return { mesh: inst.mesh, machine, params, current, from: null, fade: 0, fadeElapsed: 0, fired: [] };
+    return { mesh: inst.mesh, machine, params, current, from: null, fade: 0, fadeElapsed: 0, fired: [], springs: { tails: [], previous: [] } };
   }
 
   /** Crossfade `p` into `next` over `fade` seconds. */
@@ -228,6 +234,7 @@ export class AnimationSession {
 
   /** Take any transition that's ready, then advance every playback one tick (firing clip events). */
   step(dt: number): void {
+    this.lastDt = dt;
     for (const p of this.playback.values()) {
       p.fired = [];
       if (p.machine && p.current.state >= 0) this.transition(p);
@@ -363,6 +370,8 @@ export class AnimationSession {
       const pose = this.pose(p, p.current);
       const faded = p.from && p.fade > 0 ? blendPoses(this.pose(p, p.from), pose, Math.min(1, p.fadeElapsed / p.fade)) : pose;
       adjust?.(object, p.mesh, faded);
+      // Spring bones (F7d) trail what the animation (and IK) made of the pose.
+      if (p.mesh.springs?.length) stepSpringBones(p.mesh.skin!, faded, p.mesh.springs, p.springs, this.lastDt);
       this.lastPose.set(object, faded);
       out.set(object, skinMatrices(p.mesh.skin!, faded));
     }
