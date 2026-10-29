@@ -24,7 +24,7 @@
  * from a storage buffer: the fragment stage's sampled textures are all bound.
  */
 
-/** The table's resolution: N·V across, roughness down, cell-centred. */
+/** The table's resolution: N·V across, roughness down, its first and last texels on 0 and 1 (F10b: a cell-centred table clamped at roughness 0.984, short of the rough end's loss by 6%). */
 export const DFG_SIZE = 32;
 /** Samples per cell. */
 const DFG_SAMPLES = 512;
@@ -89,14 +89,14 @@ let table: Float32Array | null = null;
 
 /**
  * The DFG table the shader reads: `DFG_SIZE²` pairs (A, B), row by roughness
- * and column by N·V, each at its cell's centre. Integrated once and kept.
+ * and column by N·V, from 0 to 1 inclusive. Integrated once and kept.
  */
 export function dfgTable(): Float32Array {
   if (table) return table;
   const out = new Float32Array(DFG_SIZE * DFG_SIZE * 2);
   for (let r = 0; r < DFG_SIZE; r += 1) {
     for (let v = 0; v < DFG_SIZE; v += 1) {
-      const [a, b] = integrateDfg((v + 0.5) / DFG_SIZE, (r + 0.5) / DFG_SIZE);
+      const [a, b] = integrateDfg(Math.max(1e-3, v / (DFG_SIZE - 1)), r / (DFG_SIZE - 1));
       out[(r * DFG_SIZE + v) * 2] = a;
       out[(r * DFG_SIZE + v) * 2 + 1] = b;
     }
@@ -105,10 +105,10 @@ export function dfgTable(): Float32Array {
   return out;
 }
 
-/** The table read as the shader reads it: bilinearly between cell centres, clamped at the edges. */
+/** The table read as the shader reads it: bilinearly between its texels, clamped to 0..1. */
 export function dfgAt(lut: Float32Array, ndv: number, roughness: number): [number, number] {
-  const x = Math.min(DFG_SIZE - 1, Math.max(0, ndv * DFG_SIZE - 0.5));
-  const y = Math.min(DFG_SIZE - 1, Math.max(0, roughness * DFG_SIZE - 0.5));
+  const x = Math.min(DFG_SIZE - 1, Math.max(0, ndv * (DFG_SIZE - 1)));
+  const y = Math.min(DFG_SIZE - 1, Math.max(0, roughness * (DFG_SIZE - 1)));
   const x0 = Math.floor(x);
   const y0 = Math.floor(y);
   const x1 = Math.min(x0 + 1, DFG_SIZE - 1);
@@ -156,8 +156,8 @@ export function brdfWgsl(group: number, binding: number): string {
 // The split-sum DFG table (F1c, brdf.ts): (A, B) by roughness row and N·V column.
 @group(${group}) @binding(${binding}) var<storage, read> dfgLut: array<vec2<f32>>;
 fn dfgAt(ndv: f32, rough: f32) -> vec2<f32> {
-  let x = clamp(ndv * ${n}.0 - 0.5, 0.0, ${n - 1}.0);
-  let y = clamp(rough * ${n}.0 - 0.5, 0.0, ${n - 1}.0);
+  let x = clamp(ndv * ${n - 1}.0, 0.0, ${n - 1}.0);
+  let y = clamp(rough * ${n - 1}.0, 0.0, ${n - 1}.0);
   let x0 = u32(x);
   let y0 = u32(y);
   let x1 = min(x0 + 1u, ${n - 1}u);

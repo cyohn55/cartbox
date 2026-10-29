@@ -1297,10 +1297,57 @@ Everything else depends on this track. It contains no visible "feature", but its
     - **In the editor.** A "View" picker in the playtest bar, grouped Lighting / Buffers / Complexity / Geometry (`PlayerHandle.setViewMode`).
     - Tests: `Unit Tests/view-modes.test.ts`. On Dawn, each buffer reads its material's values, lighting only lights white, light count, LOD level, texel density (under, on, over), the mip, overdraw's count of three, and motion against a still frame.
     - *Left for later:* cluster colouring waits for F6a's clusters, and true mip *residency* for F1b's streaming (the mip view shows the mip wanted).
-- [ ] **F10b. Path-traced reference.**
+- [x] **F10b. Path-traced reference.**
   - A progressive WebGPU compute path tracer over the scene BVH, using the same materials and lights. It is the ground truth for F0–F5 parity tests, the look-dev check, and the source for F3d bakes.
   - A **high-resolution capture** mode (accumulated, up to 8K) for marketing shots and the roadmap's reference images.
-- [ ] **F10c. Look-dev stage.** A neutral scene with an HDRI turntable, a calibrated grey and chrome ball, a colour checker and light rigs, where any asset is checked under standard lighting before it ships.
+  - **Done** on the `aaa` tier (`player render/pathTracer.ts`).
+    - **The scene** is the lightmapper's own BVH (`buildBvh`, its nodes packed by `packBvhNodes`, now shared with F3d). Each triangle carries its corners, their normals and UVs, and its material, in seven vec4s.
+    - **The materials** are the renderer's:
+      - base colour, metal/roughness and emissive factors times their maps, from one texel store (each map once, at most 1024 a side), filtered by hand at the renderer's (u, 1 − v);
+      - authored colour into linear light as the shader's `toLinear` takes it;
+      - a cut-out lets rays through its clear texels, a blended surface as often as its alpha, an additive one always.
+    - **The BRDF** is the AAA shader's (F1c) term for term: GGX with the height-correlated visibility, Schlick's Fresnel, the Kulla-Conty scale, and a diffuse of `(1 − metal)(1 − F)·albedo`. In the renderer's units a light of radiance `c` gives `f·π·c·N·L`, and each light here does too; the sky and emission are radiance as they are.
+    - **Each path** leaves the eye through a jittered point of its pixel. At every surface it gathers:
+      - the surface's emission;
+      - every directional light, and one point, spot or area light picked as the lightmapper picks them, each through a shadow ray (the light sampling is the lightmapper's WGSL, `BAKE_SAMPLING_WGSL`).
+      - It then bounces by one sample of the BRDF, the specular by its visible normals (Heitz 2018) or the diffuse by the cosine, weighed by the two lobes' mixed density. Russian roulette ends it after the third bounce.
+      - A miss sees the environment's panorama (F3a), or without one the flat ambient as a uniform sky, as the shader's fill is.
+    - **Progressive.** A pixel's sums stay in a storage buffer while the scene, camera, lights and sky hold; a resolve pass writes the mean to a half-float texture, premultiplied, alpha 0 where the eye saw nothing (the presenter's sky shows, as with the raster).
+    - **Capture** (`captureReference`): any size up to 8K a side, a tile at a time, each tile's samples over submits of at most a million paths. It returns sRGB bytes tone-mapped (ACES by default) and, if asked, the linear image. The random numbers are seeded by the pixel's place in the whole image, so a capture in tiles is the same image as one in a piece.
+    - **In the editor.** "Path traced" in the playtest bar's View picker, exposed and tone-mapped as the lit frame (not a diagnostic), with its samples per pixel and a "Capture 4K" button that downloads a PNG (`PlayerHandle.captureReference`).
+    - *Found, then fixed:* the DFG table (F1c) was read between cell centres and clamped at roughness 0.984, so a fully rough surface took the compensation of a slightly smoother one, and a rough white metal in a white furnace came back 6% dark. The table now spans 0 to 1 inclusive (`brdf.ts`), for the renderer and the reference alike.
+    - *Tests:* `Unit Tests/path-tracer.test.ts` covers:
+      - the packed scene: corners in the BVH's order with their normals, UVs and materials; maps stored once and downsized; the scene's key; the lights and the ambient sky;
+      - on Dawn: a white furnace (a rough white metal under a uniform sky) within 4%; the renderer's key light, an inverse-square point light and a textured base colour, matched within 3% (the first reference-image comparisons the ground rules call for);
+      - a shadow, emission as it is, a cut-out's clear texels; accumulation and its restart when the view moves; and a capture in 8-pixel tiles matching one in a piece.
+    - *Left for later:*
+      - normal maps, clearcoat, anisotropy, refraction, layers, the graph's outputs and IES profiles in the reference (each joins when the material work, F1d and F1e, lands);
+      - the sun's angular size (the raster's soft penumbra); the reference's sun is a point;
+      - comparisons of the whole frame for each F0–F5 feature, held as each is next touched.
+- [x] **F10c. Look-dev stage.** A neutral scene with an HDRI turntable, a calibrated grey and chrome ball, a colour checker and light rigs, where any asset is checked under standard lighting before it ships.
+  - **Done** on the `aaa` tier (`player render/lookDev.ts`, `lookDevCheck.ts`, `lookDevView.ts`).
+    - **The stage.** The asset stands at its own scale with its feet on the floor at the origin. Its props are sized to it:
+      - a grey ball of 18% reflectance, fully rough (a grey card made round), and a chrome ball, a mirror metal;
+      - the ColorChecker Classic's 24 patches (X-Rite's sRGB values) on a black card;
+      - an 18% grey floor to catch its shadow and bounce.
+    - **The rigs**, in the renderer's units:
+      - Studio: a key, a fill and a rim, area lights (F2e-2) three of the asset's sizes off, under a dim cyclorama;
+      - Noon: a high sun under a blue sky;
+      - Overcast: a soft white sky and no sun;
+      - Golden hour: a low warm sun under a cooling sky;
+      - Night: a cold moon over a dark sky;
+      - HDRI: the cart's own environment (the studio stands in without one).
+      - Each suggests the exposure that brings a level grey card to middle grey; the view adds stops over it.
+    - **The turntable** turns the asset, or with the HDRI rig turns the light about a still asset: the panorama's columns shifted (`turnEnvironment`), its lights turned with it.
+    - **The check** (`checkLookDev`) draws the stage with the linear-light renderer and with the path-traced reference (F10b) at the same size, and reports:
+      - the grey and chrome balls' mean light in each (the middle 60% of each disc on screen);
+      - the mean relative difference in luminance over the frame, and the share of pixels more than 10% apart.
+    - **In the editor.** A "Look dev" group in the Mesh tab opens the stage (`LookDevView` on a canvas, through the AAA presenter with the rig's exposure and ACES): rig, renderer or reference, exposure in stops, turntable, Check, and Capture 4K (the reference, downloaded as a PNG).
+    - *Tests:* `Unit Tests/look-dev.test.ts` covers:
+      - the chart's 24 patches and the grey card; the asset on the floor at the origin with the props beside it, all in frame; each rig lit with an exposure (night's far over noon's); the turntable turning the asset, and the HDRI turning about a still one; the draw the stage is seen through;
+      - on Dawn, the check under the overcast rig: the grey ball reads 0.130 in the renderer against 0.113 in the reference, and the frame is 8% apart on average.
+    - *Found:* the check's first finding. Under an overcast sky the renderer's grey ball is about 15% brighter than the reference's, and the chrome ball 33%: the sky's irradiance and reflection light the balls' undersides from the open ground, where the reference sees the darker floor. GTAO takes back only the near field. The reflection probes (F3b) or DDGI (F3e) placed on the stage would close it, as they do in a level.
+    - *Left for later:* per-patch readouts of the checker against its known reflectances; a stage saved with the asset (its rig and turntable angle) for review.
 - [ ] **F10d. Cinematics.** Timeline sequences (from the existing timeline) with the physical camera (F4c), focus pulls, camera shake and rails, plus offline rendering to video through F10b accumulation.
 
 ### F11. Showcase and acceptance

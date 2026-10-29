@@ -17,7 +17,8 @@ import { LitCanvasSurface } from "./lighting/LitCanvasSurface.js";
 import { PostFxSurface } from "./fx/PostFxSurface.js";
 import { anyPostFxEnabled, type PostFxSettings } from "./fx/postfx.js";
 import { applyPostVolumes, type PostVolumeFx } from "./fx/postVolumeFx.js";
-import type { ViewMode } from "./render/viewModes.js";
+import { isDiagnosticView, type ViewMode } from "./render/viewModes.js";
+import type { ReferenceCapture } from "./render/pathTracer.js";
 import { QUALITY_PRESETS, QualityGovernor, applyQualityToPostFx, browserDeviceHints, resolveQuality, type QualityChoice, type QualityLevel, type QualitySettings } from "./quality.js";
 import { createConsole, instantiateEngineModule, loadEngineModule, type ConsoleInstance } from "./engine.js";
 import { createDirectConsole, runsOnDirectCore, type DirectConsole } from "./directConsole.js";
@@ -1091,6 +1092,16 @@ export class Player {
     this.showPostFx();
   }
 
+  /** The path-traced reference of the 3D frame shown (F10b), `width` across at its aspect; null without one (every tier but AAA). */
+  captureReference(options: { readonly width: number; readonly samples?: number; readonly progress?: (done: number) => void }): Promise<ReferenceCapture> | null {
+    return this.meshSurface?.captureReference(options) ?? null;
+  }
+
+  /** Samples each pixel of the viewport's path-traced reference holds (F10b). */
+  get referenceSamples(): number {
+    return this.meshSurface?.referenceSamples ?? 0;
+  }
+
   private applyQuality(settings: QualitySettings): void {
     this.qualitySettings = settings;
     this.meshSurface?.setQuality(this.qualitySettings);
@@ -1104,7 +1115,7 @@ export class Player {
     const base = this.animPostFx ? { ...this.basePostFx, values: { ...this.basePostFx.values, ...this.animPostFx } } : this.basePostFx;
     const settings = applyQualityToPostFx(applyPostVolumes(base, this.volumePost), this.qualitySettings);
     // A diagnostic view (F10a) is shown as written: no effect over it.
-    fx.setSettings(this.viewMode === "lit" ? settings : { ...settings, enabled: Object.fromEntries(Object.keys(settings.enabled).map((id) => [id, false])) as typeof settings.enabled });
+    fx.setSettings(!isDiagnosticView(this.viewMode) ? settings : { ...settings, enabled: Object.fromEntries(Object.keys(settings.enabled).map((id) => [id, false])) as typeof settings.enabled });
   }
 
   /**

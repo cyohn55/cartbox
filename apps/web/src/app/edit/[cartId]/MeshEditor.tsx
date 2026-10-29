@@ -127,6 +127,7 @@ import { DopeSheet } from "./DopeSheet";
 import { TexturePaintPanel, useTexturePaint } from "./TexturePaintPanel";
 import { SmartMaterialPanel } from "./SmartMaterialPanel";
 import { AssetCheckPanel } from "./AssetCheckPanel";
+import { LookDevPanel } from "./LookDevPanel";
 import { BakePanel } from "./BakePanel";
 import { AnimatorPanel } from "./AnimatorPanel";
 import { LightingEditor } from "./LightingEditor";
@@ -1542,6 +1543,8 @@ export function MeshEditor({ sidecar, onSidecarChange, code, onStartPlay, modern
             {meshAsset && <SmartMaterialPanel mesh={meshAsset} onEdit={applyGeometryEdit} />}
 
             {meshAsset && <AssetCheckPanel mesh={meshAsset} />}
+
+            {meshAsset && <LookDevPanel mesh={meshAsset} environment={sidecar.lighting ? sceneLightingEnvironment(sidecar.lighting) : null} />}
 
             {meshAsset && texturing && <TexturePaintPanel mesh={meshAsset} set={variant ?? null} paint={paint} onEdit={applyGeometryEdit} />}
 

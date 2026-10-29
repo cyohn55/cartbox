@@ -109,6 +109,14 @@ export function RunOverlay({
   const [quality, setQuality] = useState<QualityChoice>("auto");
   // What the 3D viewport shows (F10a): the lit frame, or a diagnostic of it on the AAA tier.
   const [viewMode, setViewMode] = useState<ViewMode>("lit");
+  // The path-traced reference (F10b): the samples it holds, and a capture's progress (null when none runs).
+  const [referenceSamples, setReferenceSamples] = useState(0);
+  const [capturing, setCapturing] = useState<number | null>(null);
+  useEffect(() => {
+    if (viewMode !== "pathTraced") return;
+    const timer = setInterval(() => setReferenceSamples(handleRef.current?.referenceSamples ?? 0), 500);
+    return () => clearInterval(timer);
+  }, [viewMode]);
   // Localisation and accessibility (EP19b): the playtest's language (switching restarts it) and a colour preview.
   const [language, setLanguage] = useState<string | null>(null);
   const languageRef = useRef(language);
@@ -433,6 +441,29 @@ export function RunOverlay({
                   </optgroup>
                 ))}
               </select>
+            )}
+            {mesh && viewMode === "pathTraced" && (
+              <>
+                <span title="Samples each pixel of the reference holds; it starts again when the view moves" style={{ alignSelf: "center", opacity: 0.8 }}>
+                  {referenceSamples} spp
+                </span>
+                <button
+                  type="button"
+                  className="cbx-btn"
+                  title="Render the path-traced reference at 4K (256 samples a pixel) and download it as a PNG"
+                  disabled={status !== "ready" || capturing !== null}
+                  onClick={() => {
+                    const job = handleRef.current?.captureReference({ width: 3840, samples: 256, progress: (done) => setCapturing(done) });
+                    if (!job) return;
+                    setCapturing(0);
+                    void job
+                      .then((shot) => downloadRgba(shot.rgba, shot.width, shot.height, "reference.png"))
+                      .finally(() => setCapturing(null));
+                  }}
+                >
+                  {capturing === null ? "Capture 4K" : `Capturing ${Math.round(capturing * 100)}%`}
+                </button>
+              </>
             )}
             {mesh && (
               <button type="button" className="cbx-btn" aria-pressed={inspecting} onClick={() => setInspecting((v) => !v)} disabled={status !== "ready"}>
@@ -759,4 +790,23 @@ function ObjectsPanel({ objects, filter, onFilter }: { objects: InspectedObject[
       {shown.length === 0 && <span style={{ opacity: 0.7 }}>No objects match.</span>}
     </aside>
   );
+}
+
+/** Save RGBA bytes as a PNG download (the path-traced reference's capture, F10b). */
+function downloadRgba(rgba: Uint8ClampedArray, width: number, height: number, name: string): void {
+  const canvas = document.createElement("canvas");
+  canvas.width = width;
+  canvas.height = height;
+  const context = canvas.getContext("2d");
+  if (!context) return;
+  context.putImageData(new ImageData(new Uint8ClampedArray(rgba), width, height), 0, 0);
+  canvas.toBlob((blob) => {
+    if (!blob) return;
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = name;
+    link.click();
+    URL.revokeObjectURL(url);
+  }, "image/png");
 }

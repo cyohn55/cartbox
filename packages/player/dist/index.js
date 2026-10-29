@@ -1986,9 +1986,9 @@ function shade(albedo, normal, toLight, ambient) {
 
 // src/lighting/LightingRenderer.ts
 function createFlatMaterial(width, height) {
-  const material = new Uint8Array(width * height * 4);
-  for (let i = 0; i < width * height; i += 1) material[i * 4 + 3] = 255;
-  return material;
+  const material2 = new Uint8Array(width * height * 4);
+  for (let i = 0; i < width * height; i += 1) material2[i * 4 + 3] = 255;
+  return material2;
 }
 
 // src/lighting/LightingLayer.ts
@@ -2248,9 +2248,9 @@ var LightingLayer = class {
    *                 null, pixels are lit flat.
    * @param scene    The lights and ambient for this frame.
    */
-  render(albedo, material, scene) {
+  render(albedo, material2, scene) {
     const gl = this.gl;
-    const material0 = material ?? this.flatMaterialBuffer();
+    const material0 = material2 ?? this.flatMaterialBuffer();
     gl.activeTexture(gl.TEXTURE0);
     gl.bindTexture(gl.TEXTURE_2D, this.albedoTex);
     gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, this.width, this.height, 0, gl.RGBA, gl.UNSIGNED_BYTE, albedo);
@@ -2290,7 +2290,7 @@ var LightingLayer = class {
     gl.uniform1i(this.uni(this.pLight, "uLightCount"), count);
     gl.uniform1f(this.uni(this.pLight, "uAmbient"), scene.ambient);
     gl.uniform3f(this.uni(this.pLight, "uAmbientColor"), scene.ambientColor[0], scene.ambientColor[1], scene.ambientColor[2]);
-    gl.uniform1f(this.uni(this.pLight, "uEnableShadows"), scene.shadows && material ? 1 : 0);
+    gl.uniform1f(this.uni(this.pLight, "uEnableShadows"), scene.shadows && material2 ? 1 : 0);
     gl.uniform1f(this.uni(this.pLight, "uSmoothNormals"), scene.smoothNormals ? 1 : 0);
     gl.uniform1i(this.uni(this.pLight, "uUnlit"), scene.unlit ? 1 : 0);
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
@@ -2725,9 +2725,9 @@ var WebgpuLightingLayer = class _WebgpuLightingLayer {
       return null;
     }
   }
-  render(albedo, material, scene) {
+  render(albedo, material2, scene) {
     const q = this.device.queue;
-    const mat = material ?? this.flatMaterialBuffer();
+    const mat = material2 ?? this.flatMaterialBuffer();
     const layout = { bytesPerRow: this.width * 4, rowsPerImage: this.height };
     const size = { width: this.width, height: this.height };
     q.writeTexture({ texture: this.textures.albedo }, albedo, layout, size);
@@ -2742,7 +2742,7 @@ var WebgpuLightingLayer = class _WebgpuLightingLayer {
     u[5] = scene.ambientColor[1];
     u[6] = scene.ambientColor[2];
     u[7] = count;
-    u[8] = scene.shadows && material ? 1 : 0;
+    u[8] = scene.shadows && material2 ? 1 : 0;
     u[9] = scene.smoothNormals ? 1 : 0;
     u[10] = 0;
     u[11] = 0;
@@ -2925,8 +2925,8 @@ var LitCanvasSurface = class _LitCanvasSurface {
    * sprites (RGBA: normal index, height, specular, roughness). Copied into a
    * stable buffer on {@link blit}; an empty buffer falls back to host material.
    */
-  setCartMaterial(material) {
-    this.cartMaterial = material.length ? material : null;
+  setCartMaterial(material2) {
+    this.cartMaterial = material2.length ? material2 : null;
   }
   /**
    * Sets the per-pixel emissive plane (one byte each) the engine emitted this
@@ -2950,7 +2950,7 @@ var LitCanvasSurface = class _LitCanvasSurface {
     };
     const hostLights = this.options.lights?.(context) ?? [];
     const lights = this.cartLights.length ? [...this.cartLights, ...hostLights] : hostLights;
-    const material = this.resolveMaterial(context);
+    const material2 = this.resolveMaterial(context);
     const unlit = (this.options.autoDetect ?? false) && lights.length === 0;
     if (!this.albedoCopy || this.albedoCopy.length !== albedo.length) {
       this.albedoCopy = new Uint8Array(albedo.length);
@@ -2961,7 +2961,7 @@ var LitCanvasSurface = class _LitCanvasSurface {
         this.albedoCopy[i * 4 + 3] = this.cartEmissive[i] ?? 0;
       }
     }
-    this.renderer.render(this.albedoCopy, material, {
+    this.renderer.render(this.albedoCopy, material2, {
       lights,
       ambient: this.options.ambient ?? DEFAULT_AMBIENT,
       ambientColor: this.options.ambientColor ?? DEFAULT_AMBIENT_COLOR,
@@ -4552,6 +4552,104 @@ function applyPostVolumes(base, post) {
   return changed ? { ...base, enabled, values } : base;
 }
 
+// src/render/viewModes.ts
+var VIEW_MODES = [
+  { id: "lit", code: 0, label: "Lit", group: "Lighting", hint: "The frame as the game renders it." },
+  { id: "unlit", code: 1, label: "Unlit", group: "Lighting", hint: "Base colour and emission, with no light." },
+  { id: "pathTraced", code: 16, label: "Path traced", group: "Lighting", hint: "The path-traced reference (F10b): the same scene, materials and lights, converging while the view holds." },
+  { id: "lightingOnly", code: 7, label: "Lighting only", group: "Lighting", hint: "The light on a white, non-metal surface: direct, sky, bakes and GI." },
+  { id: "baseColor", code: 2, label: "Base colour", group: "Buffers", hint: "The albedo the surface shades with (maps, blends, detail and decals applied)." },
+  { id: "roughness", code: 3, label: "Roughness", group: "Buffers", hint: "Black is mirror-smooth, white fully rough." },
+  { id: "metallic", code: 4, label: "Metallic", group: "Buffers", hint: "Black is a dielectric, white a metal." },
+  { id: "normals", code: 5, label: "Normals", group: "Buffers", hint: "The shading normal in world space, normal maps applied (x red, y green, z blue)." },
+  { id: "ambientOcclusion", code: 6, label: "Ambient occlusion", group: "Buffers", hint: "The material's occlusion times GTAO's." },
+  { id: "motion", code: 8, label: "Motion vectors", group: "Buffers", hint: "Screen motion since last frame: hue is the direction, brightness the speed." },
+  { id: "shaderComplexity", code: 9, label: "Shader complexity", group: "Complexity", hint: "An estimate of the shading work each pixel runs, green to red to white." },
+  { id: "lightComplexity", code: 10, label: "Light complexity", group: "Complexity", hint: "How many lights each pixel loops over." },
+  { id: "overdraw", code: 11, label: "Overdraw", group: "Complexity", hint: "How many fragments shaded each pixel, depth ignored." },
+  { id: "lod", code: 12, label: "LOD", group: "Geometry", hint: "The level of detail drawn: white without a chain, then red, green, blue, yellow, magenta, cyan." },
+  { id: "texelDensity", code: 13, label: "Texel density", group: "Geometry", hint: "Base-colour texels per metre against the target: blue under, green on, red over." },
+  { id: "mipLevel", code: 14, label: "Mip level", group: "Geometry", hint: "The base colour's mip each pixel samples: 0 green, then yellow, red, magenta." },
+  { id: "cascades", code: 15, label: "Shadow cascades", group: "Geometry", hint: "The sun's cascade each pixel is shadowed from: red, green, blue, yellow." }
+];
+function isDiagnosticView(mode) {
+  return mode !== void 0 && mode !== null && mode !== "lit" && mode !== "pathTraced";
+}
+function viewModeCode(mode) {
+  return VIEW_MODES.find((m) => m.id === mode)?.code ?? 0;
+}
+function readViewMode(raw) {
+  return VIEW_MODES.some((m) => m.id === raw) ? raw : "lit";
+}
+var DEFAULT_TEXEL_DENSITY = 512;
+var SHADER_COMPLEXITY_FULL = 24;
+var LIGHT_COMPLEXITY_FULL = 16;
+var OVERDRAW_FULL = 12;
+function heat(t) {
+  const stops = [[0, 0, 0], [0, 0.25, 1], [0, 0.85, 0.2], [1, 0.9, 0], [1, 0.1, 0], [1, 1, 1]];
+  const x = Math.min(1, Math.max(0, t)) * (stops.length - 1);
+  const i = Math.min(stops.length - 2, Math.floor(x));
+  const f3 = x - i;
+  const a = stops[i], b = stops[i + 1];
+  return [a[0] + (b[0] - a[0]) * f3, a[1] + (b[1] - a[1]) * f3, a[2] + (b[2] - a[2]) * f3];
+}
+var VIEW_MODE_WGSL = (
+  /* wgsl */
+  `
+fn vmHeat(t: f32) -> vec3<f32> {
+  var stops = array<vec3<f32>, 6>(vec3<f32>(0.0), vec3<f32>(0.0, 0.25, 1.0), vec3<f32>(0.0, 0.85, 0.2), vec3<f32>(1.0, 0.9, 0.0), vec3<f32>(1.0, 0.1, 0.0), vec3<f32>(1.0));
+  let x = clamp(t, 0.0, 1.0) * 5.0;
+  let i = min(4, i32(floor(x)));
+  return mix(stops[i], stops[i + 1], x - f32(i));
+}
+// A display colour as light the frame encodes back to it (sRGB's inverse).
+fn vmLight(c: vec3<f32>) -> vec3<f32> {
+  let x = clamp(c, vec3<f32>(0.0), vec3<f32>(1.0));
+  return select(pow((x + vec3<f32>(0.055)) / 1.055, vec3<f32>(2.4)), x / 12.92, x <= vec3<f32>(0.04045));
+}
+fn vmPalette(i: i32) -> vec3<f32> {
+  var p = array<vec3<f32>, 7>(vec3<f32>(1.0, 0.2, 0.2), vec3<f32>(0.2, 0.9, 0.2), vec3<f32>(0.25, 0.4, 1.0), vec3<f32>(1.0, 0.9, 0.1), vec3<f32>(1.0, 0.2, 1.0), vec3<f32>(0.1, 0.9, 0.9), vec3<f32>(1.0, 0.6, 0.2));
+  return p[clamp(i, 0, 6)];
+}
+`
+);
+var VIEW_RESOLVE_WGSL = (
+  /* wgsl */
+  `
+@group(0) @binding(0) var<uniform> params: vec4<f32>;
+@group(0) @binding(1) var colourTex: texture_2d<f32>;
+@group(0) @binding(2) var velocityTex: texture_2d<f32>;
+@group(0) @binding(3) var gbufferTex: texture_2d<f32>;
+${VIEW_MODE_WGSL}
+@vertex
+fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4<f32> {
+  let p = vec2<f32>(f32((i << 1u) & 2u), f32(i & 2u));
+  return vec4<f32>(p * 2.0 - 1.0, 0.0, 1.0);
+}
+fn hue(h: f32) -> vec3<f32> {
+  let k = vec3<f32>(5.0, 3.0, 1.0);
+  return clamp(vec3<f32>(1.0) - clamp(min(fract(vec3<f32>(h) + k / 6.0) * 6.0, 4.0 - fract(vec3<f32>(h) + k / 6.0) * 6.0), vec3<f32>(0.0), vec3<f32>(1.0)), vec3<f32>(0.0), vec3<f32>(1.0));
+}
+@fragment
+fn resolve(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
+  let p = vec2<i32>(pos.xy);
+  if (params.x > 10.5) {
+    let n = textureLoad(colourTex, p, 0).r;
+    if (n <= 0.0) { return vec4<f32>(0.0); }
+    return vec4<f32>(vmLight(vmHeat(n / params.y)), 1.0);
+  }
+  if (textureLoad(gbufferTex, p, 0).w <= 0.0) { return vec4<f32>(0.0); }
+  // Screen motion in pixels: its direction as hue, its speed (to 32 px) as brightness.
+  let dims = vec2<f32>(textureDimensions(velocityTex));
+  let v = textureLoad(velocityTex, p, 0).xy * dims;
+  let speed = length(v);
+  let angle = atan2(-v.y, v.x) / 6.2831853 + 0.5;
+  let c = mix(vec3<f32>(0.08), hue(angle), clamp(speed / 32.0, 0.0, 1.0));
+  return vec4<f32>(vmLight(c), 1.0);
+}
+`
+);
+
 // src/quality.ts
 var QUALITY_LEVELS = ["low", "medium", "high", "epic"];
 var QUALITY_PRESETS = {
@@ -5471,7 +5569,7 @@ function createDirectConsole(module, model, layout = RAM_LAYOUTS[model.id], samp
   };
   const pmem = () => core.ram().subarray(layout.pmemAddress, layout.pmemAddress + 1024);
   const pixels = model.width * model.height;
-  let material = null;
+  let material2 = null;
   let emissive = null;
   return {
     direct: true,
@@ -5509,7 +5607,7 @@ function createDirectConsole(module, model, layout = RAM_LAYOUTS[model.id], samp
     },
     setMaterialCapture() {
     },
-    readMaterial: () => material ?? (material = new Uint8Array(pixels * 4)),
+    readMaterial: () => material2 ?? (material2 = new Uint8Array(pixels * 4)),
     readEmissive: () => emissive ?? (emissive = new Uint8Array(pixels)),
     readError: () => ({ seq: errorSeq, message: errorMessage }),
     memoryBytes: () => core.memoryBytes(),
@@ -5596,8 +5694,8 @@ function parseTouchLayout(value) {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return {};
   const raw = value;
   const out = {};
-  const ids = [...TOUCH_CONTROL_IDS, ...Object.keys(raw).filter((k) => ACTION_CONTROL.test(k))];
-  for (const id of ids) {
+  const ids2 = [...TOUCH_CONTROL_IDS, ...Object.keys(raw).filter((k) => ACTION_CONTROL.test(k))];
+  for (const id of ids2) {
     const p = raw[id];
     if (typeof p !== "object" || p === null) continue;
     const { x, y, size } = p;
@@ -5611,7 +5709,7 @@ function parseTouchLayout(value) {
   return out;
 }
 function placeWithin(x, y, halfW, halfH) {
-  const keep = (v, half) => half >= 0.5 ? 0.5 : clamp(v, half, 1 - half);
+  const keep = (v, half2) => half2 >= 0.5 ? 0.5 : clamp(v, half2, 1 - half2);
   return [keep(x, halfW), keep(y, halfH)];
 }
 var TOUCH_LOOK_MODES = ["stick", "drag"];
@@ -7989,7 +8087,7 @@ function parseMeshScene(raw) {
   if (instances.length === 0) return null;
   const audio = parseSceneAudio(parsed.audio);
   const lighting = parseSceneLighting(parsed.lighting);
-  const pools = [...poolRoots.entries()].map(([prefab, ids]) => ({ prefab, roots: ids.map((id) => indexOf.get(id)) }));
+  const pools = [...poolRoots.entries()].map(([prefab, ids2]) => ({ prefab, roots: ids2.map((id) => indexOf.get(id)) }));
   const placed = instances.filter((instance) => !instance.pooled && !instance.terrain && (instance.level === void 0 || instance.level === 0));
   const physicsWorld = readPhysicsWorld(parsed.physicsWorld);
   const core = parsed.core === "direct" ? "direct" : void 0;
@@ -8321,7 +8419,7 @@ function jointFrames(spec, self, target) {
 }
 function fitShape(spec, mesh, scale) {
   const b = meshBounds2(mesh) ?? { min: [-0.5, -0.5, -0.5], max: [0.5, 0.5, 0.5] };
-  const half = [
+  const half2 = [
     Math.max(5e-3, (b.max[0] - b.min[0]) / 2 * scale[0]),
     Math.max(5e-3, (b.max[1] - b.min[1]) / 2 * scale[1]),
     Math.max(5e-3, (b.max[2] - b.min[2]) / 2 * scale[2])
@@ -8333,10 +8431,10 @@ function fitShape(spec, mesh, scale) {
   ];
   switch (spec.shape) {
     case "sphere":
-      return { kind: "sphere", radius: Math.max(half[0], half[1], half[2]), offset };
+      return { kind: "sphere", radius: Math.max(half2[0], half2[1], half2[2]), offset };
     case "capsule": {
-      const radius = Math.max(0.01, Math.min(half[0], half[2]));
-      return { kind: "capsule", radius, halfHeight: Math.max(0, half[1] - radius), offset };
+      const radius = Math.max(0.01, Math.min(half2[0], half2[2]));
+      return { kind: "capsule", radius, halfHeight: Math.max(0, half2[1] - radius), offset };
     }
     case "mesh": {
       const positions = [];
@@ -8351,7 +8449,7 @@ function fitShape(spec, mesh, scale) {
       return { kind: "mesh", vertices: Float32Array.from(positions), indices: Uint32Array.from(indices) };
     }
     default:
-      return { kind: "box", halfExtents: half, offset };
+      return { kind: "box", halfExtents: half2, offset };
   }
 }
 function castShape(kind, a, b, c) {
@@ -11264,21 +11362,21 @@ var ParticleOverlaySurface = class {
   /** Straight-alpha composite one particle: a vertical streak, or a square dot. */
   draw(particle) {
     if (particle.alpha <= 0) return;
-    const half = Math.max(0, Math.floor(particle.size / 2));
+    const half2 = Math.max(0, Math.floor(particle.size / 2));
     const originX = Math.round(particle.x);
     if (particle.streak > 0) {
       const top = Math.round(particle.y);
       const bottom = top + Math.round(particle.streak);
       for (let y = top; y <= bottom; y += 1) {
-        for (let dx = -half; dx <= half; dx += 1) {
+        for (let dx = -half2; dx <= half2; dx += 1) {
           this.blend(originX + dx, y, particle);
         }
       }
       return;
     }
     const originY = Math.round(particle.y);
-    for (let dy = -half; dy <= half; dy += 1) {
-      for (let dx = -half; dx <= half; dx += 1) {
+    for (let dy = -half2; dy <= half2; dy += 1) {
+      for (let dx = -half2; dx <= half2; dx += 1) {
         this.blend(originX + dx, originY + dy, particle);
       }
     }
@@ -11684,6 +11782,13 @@ var CappedSceneRenderer = class {
   get sunCascades() {
     return this.inner.sunCascades;
   }
+  get referenceSamples() {
+    return this.inner.referenceSamples;
+  }
+  get captureReference() {
+    const inner = this.inner;
+    return inner.captureReference ? (instances, draw, options) => inner.captureReference(instances, draw, options) : void 0;
+  }
   get renderToTexture() {
     const inner = this.inner;
     if (!inner.renderToTexture) return void 0;
@@ -12032,6 +12137,8 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
     this.quality = QUALITY_PRESETS.high;
     /** What the viewport shows (F10a): the lit frame, or a diagnostic of it on the AAA tier. */
     this.viewMode = "lit";
+    /** The last frame handed to the GPU renderer, for a reference capture of it (F10b). */
+    this.lastFrame = null;
     /** Skinned instances' live meshes (their buffers are rewritten for each pose). */
     this.live = /* @__PURE__ */ new Map();
     /** The skinning matrices each live mesh was last posed with (skip re-skinning the same pose). */
@@ -12248,6 +12355,21 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
   /** Draw holo UI documents over every frame with `draw` (null: none). */
   setHolo(draw) {
     this.holo = draw;
+  }
+  /**
+   * The path-traced reference of the last frame drawn (F10b), `width` across at
+   * the frame's aspect (up to 8K a side), or null where the renderer has none
+   * (every tier but AAA) or nothing has drawn yet.
+   */
+  captureReference(options) {
+    const last = this.lastFrame;
+    if (!last || !this.renderer.captureReference) return null;
+    const height = options.height ?? Math.max(1, Math.round(options.width * last.draw.height / Math.max(1, last.draw.width)));
+    return this.renderer.captureReference(last.instances, last.draw, { ...options, height });
+  }
+  /** Samples each pixel of the viewport's path-traced reference holds (F10b); 0 when it isn't shown. */
+  get referenceSamples() {
+    return this.viewMode === "pathTraced" ? this.renderer.referenceSamples ?? 0 : 0;
   }
   /** Show the lit frame or a diagnostic of it (F10a; the AAA tier alone draws the diagnostics). */
   setViewMode(mode) {
@@ -12811,7 +12933,7 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
     const { camera, lighting } = job;
     const output = gpu.outputSize ?? { width: this.width, height: this.height };
     if (this.options.dynamicResolution === true) this.resolution ?? (this.resolution = new DynamicResolution(1e3 / 60));
-    const diagnostic = this.viewMode !== "lit" && this.renderer.sunCascades === true;
+    const diagnostic = isDiagnosticView(this.viewMode) && this.renderer.sunCascades === true;
     const temporal = this.options.temporal === true && this.quality.temporal === true;
     const upscaling = this.renderer.sunCascades === true && temporal && this.options.prepass === true;
     const dynamic = this.resolution ? this.resolution.update(this.gpuFrameMs(gpu)) : 1;
@@ -12854,8 +12976,9 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
       // Screen-space GI on the AAA tier (F3e-2): on unless the rig turns it off.
       ...lighting && this.renderer.sunCascades === true ? { screenSpaceGi: resolveScreenSpaceGi(lighting.screenSpaceGi) } : {},
       time,
-      ...diagnostic ? { viewMode: this.viewMode } : {}
+      ...this.viewMode !== "lit" && this.renderer.sunCascades === true ? { viewMode: this.viewMode } : {}
     };
+    this.lastFrame = { instances: job.drawn, draw };
     const scene = this.renderer.renderToTexture(job.drawn, draw) ?? null;
     let front = null;
     if (job.frontDrawn.length > 0) {
@@ -12977,11 +13100,11 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
   /** A front-layer instance as a GPU front renderer draws it: its mesh without refraction (the same instance when it has none). */
   withoutRefraction(instance) {
     const mesh = instance.mesh;
-    const bends = (material) => Boolean(material.refraction || material.distortion);
+    const bends = (material2) => Boolean(material2.refraction || material2.distortion);
     if (!mesh.primitives.some((p) => bends(p.material))) return instance;
     let plain = this.unrefracted.get(mesh);
     if (!plain) {
-      const straight = ({ refraction: _r, distortion: _d, ...material }) => material;
+      const straight = ({ refraction: _r, distortion: _d, ...material2 }) => material2;
       plain = { ...mesh, primitives: mesh.primitives.map((p) => bends(p.material) ? { ...p, material: straight(p.material) } : p) };
       this.unrefracted.set(mesh, plain);
     }
@@ -13284,7 +13407,7 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
     return out;
   }
   /** A part's base colour map with the tint painted through its mask, cached per mask, map and tint (stable identity for GPU uploads). */
-  maskedTexture(base, mask, material, color, tint) {
+  maskedTexture(base, mask, material2, color, tint) {
     let byBase = this.maskCache.get(mask);
     if (!byBase) {
       byBase = /* @__PURE__ */ new Map();
@@ -13297,8 +13420,8 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
     }
     let out = byTint.get(tint);
     if (!out) {
-      const [r, g, b] = material.baseColorFactor;
-      out = tintMaskTexture(base, mask, [r, g, b], color, material.tintMix ?? 1);
+      const [r, g, b] = material2.baseColorFactor;
+      out = tintMaskTexture(base, mask, [r, g, b], color, material2.tintMix ?? 1);
       byTint.set(tint, out);
     }
     return out;
@@ -13638,16 +13761,16 @@ function fillPlaceholders(mesh, images) {
   const slots = ["baseColorImage", "normalImage", "materialImage", "metallicRoughnessImage", "occlusionImage", "emissiveImage", "lightmapImage", "lightmapHdrImage", "detailImage", "blendImage", "reliefImage", "tintMaskImage"];
   let touched = false;
   const primitives = mesh.primitives.map((primitive) => {
-    let material = primitive.material;
+    let material2 = primitive.material;
     for (const slot of slots) {
-      const image = material[slot];
+      const image = material2[slot];
       const supplied = image?.ref ? images.get(image.ref) : void 0;
       if (supplied) {
-        material = { ...material, [slot]: supplied };
+        material2 = { ...material2, [slot]: supplied };
         touched = true;
       }
     }
-    return material === primitive.material ? primitive : { ...primitive, material };
+    return material2 === primitive.material ? primitive : { ...primitive, material: material2 };
   });
   return touched ? { ...mesh, primitives } : mesh;
 }
@@ -14674,13 +14797,13 @@ function alignBytesPerRow(width) {
 function normalBasis3x3(model) {
   return [model[0], model[1], model[2], model[4], model[5], model[6], model[8], model[9], model[10]];
 }
-function resolvePbr(material, hasMr, hasOcc, hasEmis) {
-  const emissiveFactor = material.emissiveFactor;
-  const isPbr = hasMr || hasOcc || hasEmis || material.metallicFactor !== void 0 || material.roughnessFactor !== void 0 || emissiveFactor !== void 0 && (emissiveFactor[0] > 0 || emissiveFactor[1] > 0 || emissiveFactor[2] > 0) || material.graph !== void 0 || materialHasLayers(material) || materialRefracts(material) || materialHasWater(material);
+function resolvePbr(material2, hasMr, hasOcc, hasEmis) {
+  const emissiveFactor = material2.emissiveFactor;
+  const isPbr = hasMr || hasOcc || hasEmis || material2.metallicFactor !== void 0 || material2.roughnessFactor !== void 0 || emissiveFactor !== void 0 && (emissiveFactor[0] > 0 || emissiveFactor[1] > 0 || emissiveFactor[2] > 0) || material2.graph !== void 0 || materialHasLayers(material2) || materialRefracts(material2) || materialHasWater(material2);
   return {
     isPbr,
-    metallic: material.metallicFactor ?? 1,
-    roughness: material.roughnessFactor ?? 1,
+    metallic: material2.metallicFactor ?? 1,
+    roughness: material2.roughnessFactor ?? 1,
     emissive: emissiveFactor ?? [0, 0, 0]
   };
 }
@@ -14692,26 +14815,26 @@ function viewDirection(view) {
   return length < 1e-8 ? [0, 0, 1] : [x / length, y / length, z / length];
 }
 var NO_SURFACE = { detailScale: DEFAULT_DETAIL_SCALE, detailStrength: 0, reflect: 1, reflectMask: false, emisOffset: [0, 0], emisGain: 1, rim: [0, 0, 0], rimPower: 1, blend: null };
-function resolveSurface(material, time, hasDetail, hasMr, blend = { weights: false, textured: false }) {
-  const { offset, gain } = emissiveAnimation(material, time);
-  const rim = material.rim && material.rim.strength > 0 ? material.rim : null;
+function resolveSurface(material2, time, hasDetail, hasMr, blend = { weights: false, textured: false }) {
+  const { offset, gain } = emissiveAnimation(material2, time);
+  const rim = material2.rim && material2.rim.strength > 0 ? material2.rim : null;
   return {
-    detailScale: material.detailScale ?? DEFAULT_DETAIL_SCALE,
-    detailStrength: hasDetail ? material.detailStrength ?? DEFAULT_DETAIL_STRENGTH : 0,
-    reflect: material.reflectivity ?? 1,
-    reflectMask: material.reflectionMask === true && hasMr,
+    detailScale: material2.detailScale ?? DEFAULT_DETAIL_SCALE,
+    detailStrength: hasDetail ? material2.detailStrength ?? DEFAULT_DETAIL_STRENGTH : 0,
+    reflect: material2.reflectivity ?? 1,
+    reflectMask: material2.reflectionMask === true && hasMr,
     emisOffset: offset,
     emisGain: gain,
     rim: rim ? [rim.color[0] * rim.strength, rim.color[1] * rim.strength, rim.color[2] * rim.strength] : [0, 0, 0],
     rimPower: rim?.power ?? 1,
-    blend: blend.weights ? { color: material.blendColor ?? [1, 1, 1], roughness: material.blendRoughness ?? null, textured: blend.textured } : null
+    blend: blend.weights ? { color: material2.blendColor ?? [1, 1, 1], roughness: material2.blendRoughness ?? null, textured: blend.textured } : null
   };
 }
-function resolveMapping(material) {
-  const triplanar = material.triplanar && material.triplanar > 0 ? material.triplanar : 0;
-  const blendSharpness = material.blendSharpness && material.blendSharpness > 0 ? Math.min(1, material.blendSharpness) : 0;
-  const macro = macroUniform(material);
-  const farTile = material.farTile && material.farTile > 0 ? material.farTile : 0;
+function resolveMapping(material2) {
+  const triplanar = material2.triplanar && material2.triplanar > 0 ? material2.triplanar : 0;
+  const blendSharpness = material2.blendSharpness && material2.blendSharpness > 0 ? Math.min(1, material2.blendSharpness) : 0;
+  const macro = macroUniform(material2);
+  const farTile = material2.farTile && material2.farTile > 0 ? material2.farTile : 0;
   return triplanar > 0 || blendSharpness > 0 || macro[0] > 0 || farTile > 0 ? { triplanar, blendSharpness, macro, farTile } : null;
 }
 var INSTANCE_FLOATS = 60;
@@ -15042,9 +15165,9 @@ function occlusionWithRelief(occ, relief) {
   return out;
 }
 function batchRefracts(primitive, textures, effect) {
-  const material = primitive.material;
-  if (!resolvePbr(material, textures.mr !== null, textures.occ !== null, textures.emis !== null).isPbr) return false;
-  return refracts(resolveRefraction(material, effectActive2(effect) ? effect : null));
+  const material2 = primitive.material;
+  if (!resolvePbr(material2, textures.mr !== null, textures.occ !== null, textures.emis !== null).isPbr) return false;
+  return refracts(resolveRefraction(material2, effectActive2(effect) ? effect : null));
 }
 function batchInstances(instances, geometryOf, eye = [0, 0, 0]) {
   const batches = [];
@@ -15102,8 +15225,8 @@ function batchInstances(instances, geometryOf, eye = [0, 0, 0]) {
 function alphaCode(mode) {
   return mode === "mask" ? 1 : mode === "blend" ? 2 : mode === "additive" ? 3 : 0;
 }
-function softEdges(material, alpha, projection) {
-  const distance = alpha >= 2 ? material.softDepth ?? 0 : 0;
+function softEdges(material2, alpha, projection) {
+  const distance = alpha >= 2 ? material2.softDepth ?? 0 : 0;
   if (!(distance > 0) || projection[15] !== 0) return void 0;
   return { distance, linear: depthLinearTerms(projection) };
 }
@@ -17329,8 +17452,8 @@ var WebglSceneRenderer = class _WebglSceneRenderer {
     gl.bindSampler(UNIT_CLUSTER, null);
   }
   /** The program a material draws with: the plain one, or its graph's variant. */
-  programOf(material, reflect = false) {
-    const graph = compiledGraphOf(material);
+  programOf(material2, reflect = false) {
+    const graph = compiledGraphOf(material2);
     if (!graph && !reflect) return this.program;
     const key = `${graph?.key ?? ""}|${reflect ? 1 : 0}`;
     let program = this.graphPrograms.get(key);
@@ -17338,7 +17461,7 @@ var WebglSceneRenderer = class _WebglSceneRenderer {
       try {
         program = buildProgram2(this.gl, this.nearest, graph, reflect);
       } catch {
-        program = graph && reflect ? this.programOf({ ...material, graph: void 0 }, true) : this.program;
+        program = graph && reflect ? this.programOf({ ...material2, graph: void 0 }, true) : this.program;
       }
       this.graphPrograms.set(key, program);
     }
@@ -17929,7 +18052,7 @@ import {
   EFFECT_BAND_POWER as EFFECT_BAND_POWER2,
   EFFECT_BAND_SPEED as EFFECT_BAND_SPEED2,
   EFFECT_CAMO_CRAWL as EFFECT_CAMO_CRAWL2,
-  cameraPositionFromView as cameraPositionFromView3,
+  cameraPositionFromView as cameraPositionFromView4,
   compiledGraphOf as compiledGraphOf2,
   computeSmoothNormals as computeSmoothNormals2,
   lightProbeTexels as lightProbeTexels2,
@@ -17955,7 +18078,7 @@ import {
   waterAlong as waterAlong2,
   windUniform as windUniform2,
   graphShaderCode as graphShaderCode2,
-  multiplyMat4 as multiplyMat47
+  multiplyMat4 as multiplyMat48
 } from "@cartbox/editor";
 
 // src/render/frameGraph.ts
@@ -18483,7 +18606,7 @@ function dfgTable() {
   const out = new Float32Array(DFG_SIZE * DFG_SIZE * 2);
   for (let r = 0; r < DFG_SIZE; r += 1) {
     for (let v = 0; v < DFG_SIZE; v += 1) {
-      const [a, b] = integrateDfg((v + 0.5) / DFG_SIZE, (r + 0.5) / DFG_SIZE);
+      const [a, b] = integrateDfg(Math.max(1e-3, v / (DFG_SIZE - 1)), r / (DFG_SIZE - 1));
       out[(r * DFG_SIZE + v) * 2] = a;
       out[(r * DFG_SIZE + v) * 2 + 1] = b;
     }
@@ -18499,8 +18622,8 @@ function brdfWgsl(group, binding) {
 // The split-sum DFG table (F1c, brdf.ts): (A, B) by roughness row and N\xB7V column.
 @group(${group}) @binding(${binding}) var<storage, read> dfgLut: array<vec2<f32>>;
 fn dfgAt(ndv: f32, rough: f32) -> vec2<f32> {
-  let x = clamp(ndv * ${n}.0 - 0.5, 0.0, ${n - 1}.0);
-  let y = clamp(rough * ${n}.0 - 0.5, 0.0, ${n - 1}.0);
+  let x = clamp(ndv * ${n - 1}.0, 0.0, ${n - 1}.0);
+  let y = clamp(rough * ${n - 1}.0, 0.0, ${n - 1}.0);
   let x0 = u32(x);
   let y0 = u32(y);
   let x1 = min(x0 + 1u, ${n - 1}u);
@@ -18538,8 +18661,907 @@ fn specularOcclusion(ndv: f32, ao: f32, alpha: f32) -> f32 {
   );
 }
 
-// src/render/probeCapture.ts
-import { MAX_REFLECTION_PROBES as MAX_REFLECTION_PROBES3, PANORAMA_FACES, probeOrder, projectionMatrix as projectionMatrix3, viewMatrix as viewMatrix4 } from "@cartbox/editor";
+// src/render/pathTracer.ts
+import { buildBvh as buildBvh2, cameraPositionFromView as cameraPositionFromView3, multiplyMat4 as multiplyMat46 } from "@cartbox/editor";
+
+// src/render/gpuLightmapper.ts
+import {
+  LIGHTMAP_RANGE as LIGHTMAP_RANGE2,
+  PROBE_DEPTH_SIDE,
+  PROBE_SH,
+  areaFrame as areaFrame3,
+  areaSize as areaSize3,
+  buildBvh,
+  dilateLightmapValues,
+  lightChannelMask as lightChannelMask3,
+  lightColor as lightColor3,
+  lightmapTexels,
+  spotCone as spotCone2,
+  stitchLightmapSeams
+} from "@cartbox/editor";
+var LIGHTMAP_MAX_BOUNCES = 8;
+var LIGHTMAP_MAX_LIGHTS = 4;
+var LIGHTMAP_MAX_LOCAL_LIGHTS = 256;
+var WORKGROUP = 64;
+var CHUNK_TEXELS = 65536;
+var PATHS_PER_SUBMIT = 1 << 19;
+function pathBudget(local) {
+  return Math.max(4096, Math.floor(PATHS_PER_SUBMIT / (1 + local / 16)));
+}
+var PARAMS_BYTES = 64;
+var LIGHT_VEC4S = 5;
+var PROBE_ACC_VEC4S = 10 + PROBE_DEPTH_SIDE * PROBE_DEPTH_SIDE;
+var ACC_FLOATS = 16;
+var STORAGE = 128;
+var COPY_DST = 8;
+var COPY_SRC = 4;
+var MAP_READ = 1;
+var UNIFORM2 = 64;
+function toLinear(c) {
+  const v = Math.max(0, c);
+  return v <= 0.04045 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4;
+}
+function bakeLights(lights) {
+  return lights.map((l) => {
+    const c = lightColor3(l);
+    return { ...l, radiance: [toLinear(c[0]) * l.intensity, toLinear(c[1]) * l.intensity, toLinear(c[2]) * l.intensity] };
+  });
+}
+var BAKE_LIGHT_KIND = { directional: 0, point: 1, spot: 2, rect: 3, disk: 4, tube: 5 };
+function packBakeLights(lights) {
+  const directional = lights.filter((l) => (l.kind ?? "directional") === "directional" && l.direction).slice(0, LIGHTMAP_MAX_LIGHTS);
+  const local = lights.filter((l) => l.kind !== void 0 && l.kind !== "directional").slice(0, LIGHTMAP_MAX_LOCAL_LIGHTS);
+  const data = new Float32Array(Math.max(1, directional.length + local.length) * LIGHT_VEC4S * 4);
+  [...directional, ...local].forEach((light, i) => {
+    const o = i * LIGHT_VEC4S * 4;
+    const kind = light.kind ?? "directional";
+    const channels = lightChannelMask3(light.channels ?? 1);
+    data.set([...light.radiance, channels], o + 4);
+    if (kind === "directional") {
+      const [x, y, z] = light.direction;
+      const len = Math.hypot(x, y, z) || 1;
+      data.set([x / len, y / len, z / len, BAKE_LIGHT_KIND.directional], o);
+      return;
+    }
+    data.set([...light.position ?? [0, 0, 0], kind === "area" ? BAKE_LIGHT_KIND[light.shape ?? "rect"] : BAKE_LIGHT_KIND[kind]], o);
+    if (kind === "area") {
+      const [w, h] = areaSize3(light);
+      const frame = areaFrame3(light);
+      data.set([0, w / 2, h / 2, 1], o + 8);
+      data.set([...frame.normal, 0], o + 12);
+      data.set([...frame.tangent, 0], o + 16);
+      return;
+    }
+    data[o + 8] = light.range ?? 0;
+    data[o + 11] = light.falloff === "inverseSquare" ? 1 : 0;
+    if (kind === "spot") {
+      const [cosOuter, cosInner] = spotCone2(light);
+      const axis = light.direction ?? [0, -1, 0];
+      const len = Math.hypot(axis[0], axis[1], axis[2]) || 1;
+      data.set([cosOuter, cosInner], o + 9);
+      data.set([axis[0] / len, axis[1] / len, axis[2] / len, 0], o + 12);
+    }
+  });
+  return { data, directional: directional.length, local: local.length };
+}
+async function bakeSurfaces(mesh, decode) {
+  const read = (image, data) => image && image.bytes.length > 0 ? decode(image, data).catch(() => null) : Promise.resolve(null);
+  return Promise.all(
+    mesh.primitives.map(async ({ material: m }) => {
+      const [base, metallicRoughness] = await Promise.all([read(m.baseColorImage, false), read(m.metallicRoughnessImage, true)]);
+      const pbr = resolvePbr(m, metallicRoughness !== null, !!m.occlusionImage, !!m.emissiveImage);
+      return { base, metallicRoughness, metallic: pbr.isPbr ? pbr.metallic : 0, roughness: pbr.roughness };
+    })
+  );
+}
+function packBvhNodes(bvh) {
+  const nodeCount = bvh.meta.length / 3;
+  const nodes = new Uint32Array(Math.max(1, nodeCount) * 8);
+  const bits = new Float32Array(nodes.buffer);
+  if (nodeCount === 0) {
+    bits.set([1, 1, 1], 0);
+    bits.set([-1, -1, -1], 4);
+    nodes[3] = 4294967295;
+  }
+  for (let n = 0; n < nodeCount; n += 1) {
+    for (let a = 0; a < 3; a += 1) {
+      bits[n * 8 + a] = bvh.nodes[n * 6 + a];
+      bits[n * 8 + 4 + a] = bvh.nodes[n * 6 + 3 + a];
+    }
+    const left = bvh.meta[n * 3];
+    nodes[n * 8 + 3] = (left >= 0 ? left : -1 - bvh.meta[n * 3 + 2]) >>> 0;
+    nodes[n * 8 + 7] = bvh.meta[n * 3 + 1] >>> 0;
+  }
+  return nodes;
+}
+function packLightmapScene(occluders) {
+  const bvh = buildBvh(occluders);
+  const triangles = bvh.order.length;
+  const nodes = packBvhNodes(bvh);
+  const tris = new Float32Array(Math.max(1, triangles) * 12);
+  const mats = new Float32Array(Math.max(1, triangles) * 8);
+  const matBits = new Uint32Array(mats.buffer);
+  for (let i = 0; i < triangles; i += 1) {
+    const t = bvh.order[i];
+    const k = t * 9;
+    const metal = Math.min(1, Math.max(0, bvh.mr[t * 2]));
+    const bounce = 1 - metal + metal * Math.min(1, Math.max(0, bvh.mr[t * 2 + 1]));
+    for (let a = 0; a < 3; a += 1) {
+      tris[i * 12 + a * 4 + 3] = bvh.front[t * 3 + a];
+      tris[i * 12 + a] = bvh.tri[k + a];
+      tris[i * 12 + 4 + a] = bvh.tri[k + 3 + a] - bvh.tri[k + a];
+      tris[i * 12 + 8 + a] = bvh.tri[k + 6 + a] - bvh.tri[k + a];
+      mats[i * 8 + a] = toLinear(bvh.col[t * 3 + a]) * bounce;
+      mats[i * 8 + 4 + a] = toLinear(bvh.emi[t * 3 + a]);
+    }
+    matBits[i * 8 + 3] = bvh.channels[t];
+  }
+  return { nodes, tris, mats, triangles };
+}
+var BAKE_SAMPLING_WGSL = (
+  /* wgsl */
+  `
+fn pcg(v: u32) -> u32 {
+  let s = v * 747796405u + 2891336453u;
+  let w = ((s >> ((s >> 28u) + 4u)) ^ s) * 277803737u;
+  return (w >> 22u) ^ w;
+}
+var<private> rng: u32;
+fn rand() -> f32 {
+  rng = pcg(rng);
+  return f32(rng >> 8u) / 16777216.0;
+}
+fn radicalInverse(i: u32) -> f32 {
+  return f32(reverseBits(i)) * 2.3283064365386963e-10;
+}
+
+// A cosine-weighted direction about n (Duff et al.'s branchless frame).
+fn cosineDir(n: vec3<f32>, xi: vec2<f32>) -> vec3<f32> {
+  let r = sqrt(xi.x);
+  let phi = 2.0 * PI * xi.y;
+  let sg = select(-1.0, 1.0, n.z >= 0.0);
+  let a = -1.0 / (sg + n.z);
+  let b = n.x * n.y * a;
+  let t = vec3<f32>(1.0 + sg * n.x * n.x * a, sg * b, -sg * n.x);
+  let bt = vec3<f32>(b, sg + n.y * n.y * a, -n.y);
+  return normalize(t * (r * cos(phi)) + bt * (r * sin(phi)) + n * sqrt(max(0.0, 1.0 - xi.x)));
+}
+
+// The sky along d: the panorama's texel (u around from \u2212x, v down from the zenith, as the IBL reads it).
+fn skyAt(d: vec3<f32>) -> vec3<f32> {
+  let w = params.info.z;
+  let h = params.info.w;
+  if (w == 0u) { return vec3<f32>(0.0); }
+  let u = atan2(d.z, d.x) / (2.0 * PI) + 0.5;
+  let v = acos(clamp(d.y, -1.0, 1.0)) / PI;
+  let x = min(u32(max(u, 0.0) * f32(w)), w - 1u);
+  let y = min(u32(max(v, 0.0) * f32(h)), h - 1u);
+  return sky[y * w + x].rgb;
+}
+
+fn lum(c: vec3<f32>) -> f32 {
+  return dot(c, vec3<f32>(0.2126, 0.7152, 0.0722));
+}
+
+// A unit direction's octahedral texel (probeVolume.ts's octTexel).
+fn octTexel(d: vec3<f32>) -> u32 {
+  var e = d.xz / (abs(d.x) + abs(d.y) + abs(d.z));
+  if (d.y < 0.0) { e = (vec2<f32>(1.0) - abs(e.yx)) * select(vec2<f32>(-1.0), vec2<f32>(1.0), e >= vec2<f32>(0.0)); }
+  let uv = e * 0.5 + vec2<f32>(0.5);
+  let x = min(u32(uv.x * ${PROBE_DEPTH_SIDE}.0), ${PROBE_DEPTH_SIDE - 1}u);
+  let y = min(u32(uv.y * ${PROBE_DEPTH_SIDE}.0), ${PROBE_DEPTH_SIDE - 1}u);
+  return y * ${PROBE_DEPTH_SIDE}u + x;
+}
+
+// A light's record (packBakeLights): five vec4s from its first.
+fn lightAt(l: u32, k: u32) -> vec4<f32> {
+  return lights[l * ${LIGHT_VEC4S}u + k];
+}
+
+// Whether light l lights a surface on the channels \`mask\` (F2e).
+fn lightsMask(l: u32, mask: u32) -> bool {
+  return (u32(lightAt(l, 1u).w + 0.5) & mask) != 0u;
+}
+
+// A point or spot light's falloff toward a point d away along Ld (the renderers' distanceFalloff, and the shader's cone).
+fn punctualAtten(l: u32, d: f32, Ld: vec3<f32>) -> f32 {
+  let r = lightAt(l, 2u);
+  var atten = 1.0;
+  if (r.w > 0.5) {
+    var win = 1.0;
+    if (r.x > 0.0) { let q = d / r.x; let t = clamp(1.0 - q * q * q * q, 0.0, 1.0); win = t * t; }
+    let dm = max(d, 0.01);
+    atten = win / (dm * dm);
+  } else if (r.x > 0.0) {
+    let t = max(0.0, 1.0 - d / r.x);
+    atten = t * t;
+  }
+  if (lightAt(l, 0u).w > 1.5) {
+    let ct = clamp((-dot(Ld, lightAt(l, 3u).xyz) - r.y) / (r.z - r.y), 0.0, 1.0);
+    atten = atten * ct * ct * (3.0 - 2.0 * ct);
+  }
+  return atten;
+}
+
+// What local light l would give a surface at p facing n, unshadowed, by luminance: how likely it is to be picked.
+// An area light is taken as the point at its centre it is from far off.
+fn localWeight(l: u32, p: vec3<f32>, n: vec3<f32>, mask: u32) -> f32 {
+  if (!lightsMask(l, mask)) { return 0.0; }
+  let a = lightAt(l, 0u);
+  let toL = a.xyz - p;
+  let d = max(length(toL), 1e-4);
+  let Ld = toL / d;
+  let ndl = max(dot(n, Ld), 0.0);
+  let power = lum(lightAt(l, 1u).rgb);
+  if (a.w < 2.5) { return power * punctualAtten(l, d, Ld) * ndl; }
+  let r = lightAt(l, 2u);
+  var area = 4.0 * r.y * r.z;
+  var facing = 1.0;
+  if (a.w > 4.5) { area = 2.0 * r.y * 2.0 * r.z + PI * r.z * r.z; }
+  else {
+    facing = max(-dot(Ld, lightAt(l, 3u).xyz), 0.0);
+    if (a.w > 3.5) { area = PI * r.y * r.y; }
+  }
+  let dm = max(d, 0.1);
+  return power * area * facing * max(ndl, 0.05) / (PI * dm * dm);
+}
+
+struct LightSample {
+  c: vec3<f32>,  // what it gives the surface, unshadowed
+  dir: vec3<f32>,
+  dist: f32,
+};
+
+// Local light l's light on a surface at p facing n: a point or spot light's, or an area light's through one point
+// on it (uniform on its rectangle or disk, or on the rectangle a tube shows p, as the LTC shader takes it).
+fn localSample(l: u32, p: vec3<f32>, n: vec3<f32>) -> LightSample {
+  var out = LightSample(vec3<f32>(0.0), vec3<f32>(0.0, 1.0, 0.0), 0.0);
+  let a = lightAt(l, 0u);
+  let rad = lightAt(l, 1u).rgb;
+  if (a.w < 2.5) {
+    let toL = a.xyz - p;
+    let d = max(length(toL), 1e-4);
+    out.dir = toL / d;
+    out.dist = d;
+    out.c = rad * punctualAtten(l, d, out.dir) * max(dot(n, out.dir), 0.0);
+    return out;
+  }
+  let r = lightAt(l, 2u);
+  let tan = lightAt(l, 4u).xyz;
+  var nrm = lightAt(l, 3u).xyz;
+  var hw = r.y;
+  let hh = r.z;
+  let toP = p - a.xyz;
+  if (a.w > 4.5) {
+    let off = toP - tan * dot(toP, tan);
+    nrm = select(normalize(cross(tan, select(vec3<f32>(1.0, 0.0, 0.0), vec3<f32>(0.0, 1.0, 0.0), abs(tan.y) < 0.9))), normalize(off), length(off) > 1e-5);
+    hw = hw + 0.78539816 * hh;
+  } else if (dot(toP, nrm) <= 0.0) {
+    return out;
+  }
+  let bt = cross(nrm, tan);
+  let xi = vec2<f32>(rand(), rand());
+  var s: vec3<f32>;
+  var area: f32;
+  if (a.w > 3.5 && a.w < 4.5) {
+    let rr = hw * sqrt(xi.x);
+    let phi = 2.0 * PI * xi.y;
+    s = a.xyz + tan * (rr * cos(phi)) + bt * (rr * sin(phi));
+    area = PI * hw * hw;
+  } else {
+    s = a.xyz + tan * (hw * (2.0 * xi.x - 1.0)) + bt * (hh * (2.0 * xi.y - 1.0));
+    area = 4.0 * hw * hh;
+  }
+  let toS = s - p;
+  let d = max(length(toS), 1e-4);
+  out.dir = toS / d;
+  out.dist = d;
+  let cosS = dot(n, out.dir);
+  let cosL = -dot(out.dir, nrm);
+  if (cosS > 0.0 && cosL > 0.0) { out.c = rad * (cosS * cosL * area / (PI * max(d * d, 1e-4))); }
+  return out;
+}
+`
+);
+var LIGHTMAP_TRACE_WGSL = (
+  /* wgsl */
+  `
+struct Params {
+  run: vec4<u32>,   // x = first texel, y = texels, z = first sample, w = samples this pass
+  info: vec4<u32>,  // x = bounces, y = directional lights, z = sky width, w = sky height
+  total: vec4<u32>, // x = samples in all, y = point, spot and area lights (F3d-4)
+  extra: vec4<f32>, // x = a probe's depth cap (F3d-3)
+};
+@group(0) @binding(0) var<storage, read> nodes: array<vec4<u32>>;
+@group(0) @binding(1) var<storage, read> tris: array<vec4<f32>>;
+@group(0) @binding(2) var<storage, read> mats: array<vec4<f32>>;
+@group(0) @binding(3) var<storage, read> texels: array<vec4<f32>>;
+@group(0) @binding(4) var<storage, read_write> accum: array<vec4<f32>>;
+@group(0) @binding(5) var<storage, read> sky: array<vec4<f32>>;
+@group(0) @binding(6) var<uniform> params: Params;
+@group(0) @binding(7) var<storage, read> lights: array<vec4<f32>>;
+
+const PI = 3.14159265;
+// How far a ray starts off its surface, and the nearest hit it takes (metres).
+const EPS = 0.005;
+const T_MIN = 1e-4;
+const FAR = 1e30;
+
+struct Hit {
+  t: f32,
+  tri: i32,
+};
+
+// The closest hit along o + t\xB7d within tMax (or, with anyHit, the first found).
+fn trace(o: vec3<f32>, d: vec3<f32>, tMax: f32, anyHit: bool) -> Hit {
+  var best = Hit(tMax, -1);
+  let tiny = abs(d) < vec3<f32>(1e-9);
+  let inv = 1.0 / select(d, select(vec3<f32>(-1e-9), vec3<f32>(1e-9), d >= vec3<f32>(0.0)), tiny);
+  var stack: array<u32, 64>;
+  var sp = 1u;
+  stack[0] = 0u;
+  loop {
+    if (sp == 0u) { break; }
+    sp = sp - 1u;
+    let n = stack[sp];
+    let a = nodes[n * 2u];
+    let b = nodes[n * 2u + 1u];
+    let t0 = (bitcast<vec3<f32>>(a.xyz) - o) * inv;
+    let t1 = (bitcast<vec3<f32>>(b.xyz) - o) * inv;
+    let lo = min(t0, t1);
+    let hi = max(t0, t1);
+    let tn = max(max(lo.x, lo.y), max(lo.z, 0.0));
+    let tf = min(min(hi.x, hi.y), min(hi.z, best.t));
+    if (tn > tf) { continue; }
+    let left = bitcast<i32>(a.w);
+    if (left >= 0) {
+      if (sp + 2u <= 64u) {
+        stack[sp] = u32(left);
+        stack[sp + 1u] = b.w;
+        sp = sp + 2u;
+      }
+      continue;
+    }
+    let first = b.w;
+    let count = u32(-1 - left);
+    for (var i = first; i < first + count; i = i + 1u) {
+      // M\xF6ller\u2013Trumbore.
+      let v0 = tris[i * 3u].xyz;
+      let e1 = tris[i * 3u + 1u].xyz;
+      let e2 = tris[i * 3u + 2u].xyz;
+      let p = cross(d, e2);
+      let det = dot(e1, p);
+      if (abs(det) < 1e-12) { continue; }
+      let id = 1.0 / det;
+      let s = o - v0;
+      let u = dot(s, p) * id;
+      if (u < 0.0 || u > 1.0) { continue; }
+      let q = cross(s, e1);
+      let v = dot(d, q) * id;
+      if (v < 0.0 || u + v > 1.0) { continue; }
+      let t = dot(e2, q) * id;
+      if (t > T_MIN && t < best.t) {
+        best = Hit(t, i32(i));
+        if (anyHit) { return best; }
+      }
+    }
+  }
+  return best;
+}
+
+${BAKE_SAMPLING_WGSL}
+// The lights on a surface a path bounced off at p, facing n, on the channels \`mask\`: every directional light, and one
+// local light picked by localWeight (a tenth of the choice spread evenly), over the chance of picking it.
+fn lightsOn(p: vec3<f32>, n: vec3<f32>, mask: u32) -> vec3<f32> {
+  var L = vec3<f32>(0.0);
+  let directional = params.info.y;
+  for (var l = 0u; l < directional; l = l + 1u) {
+    if (!lightsMask(l, mask)) { continue; }
+    let Ld = lightAt(l, 0u).xyz;
+    let ndl = dot(n, Ld);
+    if (ndl > 0.0 && trace(p, Ld, FAR, true).tri < 0) {
+      L = L + lightAt(l, 1u).rgb * ndl;
+    }
+  }
+  let local = params.total.y;
+  if (local == 0u) { return L; }
+  var total = 0.0;
+  for (var k = 0u; k < local; k = k + 1u) { total = total + localWeight(directional + k, p, n, mask); }
+  let even = select(1.0, 0.1, total > 0.0) / f32(local);
+  let spread = select(0.0, 0.9 / total, total > 0.0);
+  let u = rand();
+  var pick = local - 1u;
+  var pdf = 0.0;
+  var cdf = 0.0;
+  for (var k = 0u; k < local; k = k + 1u) {
+    pdf = localWeight(directional + k, p, n, mask) * spread + even;
+    cdf = cdf + pdf;
+    if (u < cdf) { pick = k; break; }
+  }
+  if (pick == local - 1u) { pdf = localWeight(directional + pick, p, n, mask) * spread + even; }
+  let l = directional + pick;
+  if (!lightsMask(l, mask)) { return L; }
+  let ls = localSample(l, p, n);
+  if (max(ls.c.r, max(ls.c.g, ls.c.b)) > 0.0 && trace(p, ls.dir, ls.dist - EPS, true).tri < 0) {
+    L = L + ls.c / pdf;
+  }
+  return L;
+}
+
+struct Path {
+  L: vec3<f32>,
+  // The first segment's hit distance (FAR when it reached the sky), and whether it met the back of a surface (F3d-2).
+  t: f32,
+  back: bool,
+};
+
+// What a path from o along d brings back: the sky on a miss; on a hit, the surface's emission, and (while
+// bounces remain) the lights on it and what a cosine-weighted bounce off it gathers.
+fn pathFrom(origin: vec3<f32>, dir: vec3<f32>) -> Path {
+  let bounces = params.info.x;
+  var out = Path(vec3<f32>(0.0), FAR, false);
+  var tp = vec3<f32>(1.0);
+  var o = origin;
+  var d = dir;
+  for (var b = 0u; b <= bounces; b = b + 1u) {
+    let h = trace(o, d, FAR, false);
+    if (h.tri < 0) {
+      out.L = out.L + tp * skyAt(d);
+      break;
+    }
+    let i = u32(h.tri);
+    if (b == 0u) {
+      out.t = h.t;
+      out.back = dot(d, vec3<f32>(tris[i * 3u].w, tris[i * 3u + 1u].w, tris[i * 3u + 2u].w)) > 0.0;
+    }
+    out.L = out.L + tp * mats[i * 2u + 1u].rgb;
+    if (b == bounces) { break; }
+    var n = normalize(cross(tris[i * 3u + 1u].xyz, tris[i * 3u + 2u].xyz));
+    if (dot(n, d) > 0.0) { n = -n; } // the side the path arrived on (surfaces are two-sided)
+    let hp = o + d * h.t + n * EPS;
+    tp = tp * mats[i * 2u].rgb;
+    out.L = out.L + tp * lightsOn(hp, n, bitcast<u32>(mats[i * 2u].w));
+    if (max(tp.r, max(tp.g, tp.b)) < 1e-4) { break; }
+    o = hp;
+    d = cosineDir(n, vec2<f32>(rand(), rand()));
+  }
+  return out;
+}
+
+@compute @workgroup_size(${WORKGROUP})
+fn main(@builtin(global_invocation_id) id: vec3<u32>) {
+  if (id.x >= params.run.y) { return; }
+  let j = params.run.x + id.x;
+  let P = texels[j * 2u].xyz;
+  let Ng = normalize(texels[j * 2u + 1u].xyz);
+  // The first bounce's directions: one stratified set for the bake, turned per texel (Cranley\u2013Patterson).
+  let turn = vec2<f32>(f32(pcg(j * 2u + 1u) >> 8u), f32(pcg(j * 2u + 2u) >> 8u)) / 16777216.0;
+  var e = vec3<f32>(0.0);
+  var dirSum = vec3<f32>(0.0);
+  var lumSum = 0.0;
+  var skyRef = vec3<f32>(0.0);
+  var skyOpen = 0.0;
+  var lumSq = 0.0;
+  var backs = 0.0;
+  for (var k = 0u; k < params.run.w; k = k + 1u) {
+    let s = params.run.z + k;
+    rng = pcg(j ^ pcg(s + 0x9e3779b9u));
+    let xi = fract(vec2<f32>(f32(s) / f32(params.total.x), radicalInverse(s)) + turn);
+    let d0 = cosineDir(Ng, xi);
+    let sky0 = skyAt(d0);
+    skyRef = skyRef + sky0;
+    let path = pathFrom(P + Ng * EPS, d0);
+    if (path.t >= FAR) { skyOpen = skyOpen + lum(sky0); }
+    if (path.back) { backs = backs + 1.0; }
+    e = e + path.L;
+    let y = lum(path.L);
+    dirSum = dirSum + d0 * y;
+    lumSum = lumSum + y;
+    lumSq = lumSq + y * y;
+  }
+  accum[j * 4u] = accum[j * 4u] + vec4<f32>(e, 0.0);
+  accum[j * 4u + 1u] = accum[j * 4u + 1u] + vec4<f32>(dirSum, lumSum);
+  accum[j * 4u + 2u] = accum[j * 4u + 2u] + vec4<f32>(skyRef, skyOpen);
+  accum[j * 4u + 3u] = accum[j * 4u + 3u] + vec4<f32>(lumSq, backs, 0.0, 0.0);
+}
+
+// A probe (F3d-3): rays over the whole sphere (a Fibonacci set for the bake, turned per probe about the
+// vertical), projected onto L2 SH; the sky's share; backs met; and per octahedral texel the distance the
+// first segment travelled (capped), with its square.
+@compute @workgroup_size(${WORKGROUP})
+fn probeMain(@builtin(global_invocation_id) id: vec3<u32>) {
+  if (id.x >= params.run.y) { return; }
+  let p = params.run.x + id.x;
+  let P = texels[p].xyz;
+  let total = params.total.x;
+  let reach = params.extra.x;
+  let turn = f32(pcg(p * 2u + 11u) >> 8u) / 16777216.0 * 2.0 * PI;
+  var sh = array<vec3<f32>, 9>();
+  var skyRef = 0.0;
+  var skyOpen = 0.0;
+  var backs = 0.0;
+  let base = p * ${PROBE_ACC_VEC4S}u;
+  for (var k = 0u; k < params.run.w; k = k + 1u) {
+    let s = params.run.z + k;
+    rng = pcg(p ^ pcg(s + 0x85ebca6bu));
+    let y = 1.0 - (2.0 * f32(s) + 1.0) / f32(total);
+    let r = sqrt(max(0.0, 1.0 - y * y));
+    let phi = f32(s) * 2.39996323 + turn;
+    let d = vec3<f32>(r * cos(phi), y, r * sin(phi));
+    let path = pathFrom(P, d);
+    let L = path.L;
+    sh[0] = sh[0] + L * 0.282095;
+    sh[1] = sh[1] + L * (0.488603 * d.y);
+    sh[2] = sh[2] + L * (0.488603 * d.z);
+    sh[3] = sh[3] + L * (0.488603 * d.x);
+    sh[4] = sh[4] + L * (1.092548 * d.x * d.y);
+    sh[5] = sh[5] + L * (1.092548 * d.y * d.z);
+    sh[6] = sh[6] + L * (0.315392 * (3.0 * d.z * d.z - 1.0));
+    sh[7] = sh[7] + L * (1.092548 * d.x * d.z);
+    sh[8] = sh[8] + L * (0.546274 * (d.x * d.x - d.y * d.y));
+    let sl = lum(skyAt(d));
+    skyRef = skyRef + sl;
+    if (path.t >= FAR) { skyOpen = skyOpen + sl; }
+    if (path.back) { backs = backs + 1.0; }
+    let t = min(path.t, reach);
+    let texel = octTexel(d);
+    accum[base + 10u + texel] = accum[base + 10u + texel] + vec4<f32>(t, t * t, 1.0, 0.0);
+  }
+  for (var c = 0u; c < 9u; c = c + 1u) { accum[base + c] = accum[base + c] + vec4<f32>(sh[c], 0.0); }
+  accum[base + 9u] = accum[base + 9u] + vec4<f32>(skyRef, skyOpen, backs, f32(params.run.w));
+}
+`
+);
+var luminance = (r, g, b) => 0.2126 * r + 0.7152 * g + 0.0722 * b;
+function lightmapParams(first, texels, firstSample, samples, total, bounces, sky, lights, reach = 0) {
+  const buffer = new ArrayBuffer(PARAMS_BYTES);
+  new Uint32Array(buffer).set([first, texels, firstSample, samples, bounces, lights.directional, sky?.width ?? 0, sky?.height ?? 0, total, lights.local], 0);
+  new Float32Array(buffer)[12] = reach;
+  return buffer;
+}
+async function bakeLightmapGpu(device, layout, occluders, options = {}, progress) {
+  const samples = Math.max(1, Math.round(options.samples ?? 256));
+  const bounces = Math.max(0, Math.min(LIGHTMAP_MAX_BOUNCES, Math.round(options.bounces ?? 3)));
+  const sky = options.sky ?? null;
+  const lights = packBakeLights(options.lights ?? []);
+  const texels = lightmapTexels(layout);
+  const count = texels.index.length;
+  const acc = new Float32Array(count * ACC_FLOATS);
+  if (count > 0) {
+    const scene = packLightmapScene(occluders);
+    const points = new Float32Array(count * 8);
+    for (let j = 0; j < count; j += 1) {
+      for (let a = 0; a < 3; a += 1) {
+        points[j * 8 + a] = texels.position[j * 3 + a];
+        points[j * 8 + 4 + a] = texels.normal[j * 3 + a];
+      }
+    }
+    const upload = (data) => {
+      const buffer = device.createBuffer({ size: Math.max(16, data.byteLength), usage: STORAGE | COPY_DST });
+      device.queue.writeBuffer(buffer, 0, data.buffer, data.byteOffset, data.byteLength);
+      return buffer;
+    };
+    const skyData = sky ? sky.data : new Float32Array(4);
+    const buffers = [upload(scene.nodes), upload(scene.tris), upload(scene.mats), upload(points)];
+    const accum = device.createBuffer({ size: acc.byteLength, usage: STORAGE | COPY_SRC });
+    const skyBuffer = upload(skyData);
+    const lightBuffer = upload(lights.data);
+    const params = device.createBuffer({ size: PARAMS_BYTES, usage: UNIFORM2 | COPY_DST });
+    const readback = device.createBuffer({ size: acc.byteLength, usage: MAP_READ | COPY_DST });
+    try {
+      const pipeline = device.createComputePipeline({ layout: "auto", compute: { module: device.createShaderModule({ code: LIGHTMAP_TRACE_WGSL }), entryPoint: "main" } });
+      const group = device.createBindGroup({
+        layout: pipeline.getBindGroupLayout(0),
+        entries: [...buffers, accum, skyBuffer].map((buffer, binding) => ({ binding, resource: { buffer } })).concat([{ binding: 6, resource: { buffer: params } }, { binding: 7, resource: { buffer: lightBuffer } }])
+      });
+      const budget = pathBudget(lights.local);
+      const chunk = Math.min(count, CHUNK_TEXELS, budget);
+      const perPass = Math.max(1, Math.min(samples, Math.floor(budget / chunk)));
+      const submits = Math.ceil(samples / perPass) * Math.ceil(count / chunk);
+      let done = 0;
+      for (let s = 0; s < samples; s += perPass) {
+        const n = Math.min(perPass, samples - s);
+        for (let first = 0; first < count; first += chunk) {
+          const texelsHere = Math.min(chunk, count - first);
+          device.queue.writeBuffer(params, 0, lightmapParams(first, texelsHere, s, n, samples, bounces, sky, lights));
+          const encoder2 = device.createCommandEncoder();
+          const pass = encoder2.beginComputePass();
+          pass.setPipeline(pipeline);
+          pass.setBindGroup(0, group);
+          pass.dispatchWorkgroups(Math.ceil(texelsHere / WORKGROUP));
+          pass.end();
+          device.queue.submit([encoder2.finish()]);
+          await device.queue.onSubmittedWorkDone();
+          done += 1;
+          progress?.(done / submits);
+        }
+      }
+      const encoder = device.createCommandEncoder();
+      encoder.copyBufferToBuffer(accum, 0, readback, 0, acc.byteLength);
+      device.queue.submit([encoder.finish()]);
+      await readback.mapAsync(MAP_READ);
+      acc.set(new Float32Array(readback.getMappedRange()));
+      readback.unmap();
+    } finally {
+      for (const buffer of [...buffers, accum, skyBuffer, lightBuffer, params, readback]) buffer.destroy();
+    }
+  }
+  const atlas = resolveLightmap(texels, acc, samples, options.backfaceLimit ?? 0.6);
+  if (count > 0 && options.denoise !== false) await denoiseLightmap(device, atlas, 1 / layout.density);
+  progress?.(1);
+  return finishLightmap(layout, atlas, options.stitch !== false);
+}
+function resolveLightmap(texels, acc, samples, backfaceLimit) {
+  const { size, index } = texels;
+  const values = new Float32Array(size * size * 12);
+  const guide = new Float32Array(size * size * 8);
+  const valid = new Int32Array(size * size).fill(-1);
+  let invalid = 0;
+  for (let j = 0; j < index.length; j += 1) {
+    const i = index[j];
+    const o = j * ACC_FLOATS;
+    if (acc[o + 13] > backfaceLimit * samples) {
+      invalid += 1;
+      continue;
+    }
+    valid[i] = texels.chart[i];
+    const v = i * 12;
+    for (let c = 0; c < 3; c += 1) values[v + c] = acc[o + c] / samples;
+    const mean = acc[o + 7] / samples;
+    values[v + 3] = Math.max(0, acc[o + 12] / samples - mean * mean) / samples;
+    const w = acc[o + 7];
+    for (let c = 0; c < 3; c += 1) values[v + 4 + c] = w > 1e-12 ? acc[o + 4 + c] / w : 0;
+    const ref = luminance(acc[o + 8], acc[o + 9], acc[o + 10]);
+    values[v + 7] = ref > 1e-12 ? Math.min(1, acc[o + 11] / ref) : 1;
+    for (let c = 0; c < 3; c += 1) {
+      const open = acc[o + 8 + c] / samples;
+      values[v + 8 + c] = open > 1e-6 ? Math.min(LIGHTMAP_RANGE2, values[v + c] / open) : 1;
+    }
+    for (let c = 0; c < 3; c += 1) {
+      guide[i * 8 + c] = texels.position[j * 3 + c];
+      guide[i * 8 + 4 + c] = texels.normal[j * 3 + c];
+    }
+    guide[i * 8 + 3] = 1;
+  }
+  return { size, values, valid, guide, invalid };
+}
+var DENOISE_PASSES = 4;
+var DENOISE_SIGMA = 1.5;
+var LIGHTMAP_DENOISE_WGSL = (
+  /* wgsl */
+  `
+struct Params {
+  size: u32,
+  step: u32,
+  texel: f32, // world units per texel
+  sigma: f32,
+};
+@group(0) @binding(0) var<storage, read> guide: array<vec4<f32>>;
+@group(0) @binding(1) var<storage, read> src: array<vec4<f32>>;
+@group(0) @binding(2) var<storage, read_write> dst: array<vec4<f32>>;
+@group(0) @binding(3) var<uniform> params: Params;
+
+fn lum(c: vec3<f32>) -> f32 {
+  return dot(c, vec3<f32>(0.2126, 0.7152, 0.0722));
+}
+
+@compute @workgroup_size(8, 8, 1)
+fn main(@builtin(global_invocation_id) id: vec3<u32>) {
+  let size = params.size;
+  if (id.x >= size || id.y >= size) { return; }
+  let i = id.y * size + id.x;
+  let a0 = src[i * 3u];
+  let a1 = src[i * 3u + 1u];
+  let a2 = src[i * 3u + 2u];
+  let g = guide[i * 2u];
+  if (g.w < 0.5) {
+    dst[i * 3u] = a0;
+    dst[i * 3u + 1u] = a1;
+    dst[i * 3u + 2u] = a2;
+    return;
+  }
+  let p = g.xyz;
+  let n = guide[i * 2u + 1u].xyz;
+  let l = lum(a0.rgb);
+  // The variance the luminance stop is scaled by, prefiltered over the texel's 3\xD73 (SVGF): a few paths' estimate is noisy itself.
+  var vsum = 0.0;
+  var vw = 0.0;
+  for (var vy = -1; vy <= 1; vy = vy + 1) {
+    for (var vx = -1; vx <= 1; vx = vx + 1) {
+      let qx = i32(id.x) + vx;
+      let qy = i32(id.y) + vy;
+      if (qx < 0 || qy < 0 || qx >= i32(size) || qy >= i32(size)) { continue; }
+      let j = u32(qy) * size + u32(qx);
+      if (guide[j * 2u].w < 0.5) { continue; }
+      let k = select(0.5, 1.0, vx == 0) * select(0.5, 1.0, vy == 0);
+      vsum = vsum + src[j * 3u].w * k;
+      vw = vw + k;
+    }
+  }
+  let sigma = params.sigma * sqrt(max(vsum / vw, 0.0)) + 1e-4;
+  // Farther than this in the world, a texel the kernel reaches is on another chart that merely sits beside this one in the atlas.
+  let reach = (2.83 * f32(params.step) + 1.5) * params.texel;
+  var kernel = array<f32, 5>(0.0625, 0.25, 0.375, 0.25, 0.0625);
+  var s0 = vec3<f32>(0.0);
+  var sv = 0.0;
+  var s1 = vec4<f32>(0.0);
+  var s2 = vec4<f32>(0.0);
+  var ws = 0.0;
+  for (var dy = -2; dy <= 2; dy = dy + 1) {
+    for (var dx = -2; dx <= 2; dx = dx + 1) {
+      let qx = i32(id.x) + dx * i32(params.step);
+      let qy = i32(id.y) + dy * i32(params.step);
+      if (qx < 0 || qy < 0 || qx >= i32(size) || qy >= i32(size)) { continue; }
+      let j = u32(qy) * size + u32(qx);
+      let gq = guide[j * 2u];
+      if (gq.w < 0.5) { continue; }
+      let dp = gq.xyz - p;
+      if (length(dp) > reach) { continue; }
+      let b0 = src[j * 3u];
+      let wn = pow(max(0.0, dot(n, guide[j * 2u + 1u].xyz)), 32.0);
+      let wp = exp(-abs(dot(dp, n)) / params.texel);
+      let wl = exp(-abs(lum(b0.rgb) - l) / sigma);
+      let w = kernel[dx + 2] * kernel[dy + 2] * wn * wp * wl;
+      s0 = s0 + b0.rgb * w;
+      sv = sv + b0.w * w * w;
+      s1 = s1 + src[j * 3u + 1u] * w;
+      s2 = s2 + src[j * 3u + 2u] * w;
+      ws = ws + w;
+    }
+  }
+  // The texel itself always weighs in, so ws > 0.
+  dst[i * 3u] = vec4<f32>(s0 / ws, sv / (ws * ws));
+  dst[i * 3u + 1u] = s1 / ws;
+  dst[i * 3u + 2u] = s2 / ws;
+}
+`
+);
+async function denoiseLightmap(device, atlas, texel, passes = DENOISE_PASSES, sigma = DENOISE_SIGMA) {
+  const { size, values, guide } = atlas;
+  const guideBuffer = device.createBuffer({ size: guide.byteLength, usage: STORAGE | COPY_DST });
+  device.queue.writeBuffer(guideBuffer, 0, guide.buffer, guide.byteOffset, guide.byteLength);
+  const ping = [0, 1].map(() => device.createBuffer({ size: values.byteLength, usage: STORAGE | COPY_DST | COPY_SRC }));
+  device.queue.writeBuffer(ping[0], 0, values.buffer, values.byteOffset, values.byteLength);
+  const params = device.createBuffer({ size: 16, usage: UNIFORM2 | COPY_DST });
+  const readback = device.createBuffer({ size: values.byteLength, usage: MAP_READ | COPY_DST });
+  try {
+    const pipeline = device.createComputePipeline({ layout: "auto", compute: { module: device.createShaderModule({ code: LIGHTMAP_DENOISE_WGSL }), entryPoint: "main" } });
+    const groups = [0, 1].map(
+      (k) => device.createBindGroup({
+        layout: pipeline.getBindGroupLayout(0),
+        entries: [
+          { binding: 0, resource: { buffer: guideBuffer } },
+          { binding: 1, resource: { buffer: ping[k] } },
+          { binding: 2, resource: { buffer: ping[1 - k] } },
+          { binding: 3, resource: { buffer: params } }
+        ]
+      })
+    );
+    for (let pass = 0; pass < passes; pass += 1) {
+      const p = new ArrayBuffer(16);
+      new Uint32Array(p).set([size, 1 << pass]);
+      new Float32Array(p).set([texel, sigma], 2);
+      device.queue.writeBuffer(params, 0, p);
+      const encoder2 = device.createCommandEncoder();
+      const compute = encoder2.beginComputePass();
+      compute.setPipeline(pipeline);
+      compute.setBindGroup(0, groups[pass % 2]);
+      compute.dispatchWorkgroups(Math.ceil(size / 8), Math.ceil(size / 8));
+      compute.end();
+      device.queue.submit([encoder2.finish()]);
+      await device.queue.onSubmittedWorkDone();
+    }
+    const encoder = device.createCommandEncoder();
+    encoder.copyBufferToBuffer(ping[passes % 2], 0, readback, 0, values.byteLength);
+    device.queue.submit([encoder.finish()]);
+    await readback.mapAsync(MAP_READ);
+    values.set(new Float32Array(readback.getMappedRange()));
+    readback.unmap();
+  } finally {
+    for (const buffer of [guideBuffer, ...ping, params, readback]) buffer.destroy();
+  }
+}
+function finishLightmap(layout, atlas, stitch = true) {
+  const { size, values, valid } = atlas;
+  dilateLightmapValues(values, valid, size, 12);
+  const seams = stitch ? stitchLightmapSeams(layout, values, 12) : 0;
+  const texels = size * size;
+  const irradiance = new Float32Array(texels * 3);
+  const direction = new Float32Array(texels * 4);
+  const ambient = new Uint8ClampedArray(texels * 4);
+  const q = (x) => Math.min(255, Math.round(Math.max(0, x) / LIGHTMAP_RANGE2 * 127.5) * 2);
+  for (let i = 0; i < texels; i += 1) {
+    const v = i * 12;
+    for (let c = 0; c < 3; c += 1) irradiance[i * 3 + c] = Math.max(0, values[v + c]);
+    const length = Math.hypot(values[v + 4], values[v + 5], values[v + 6]);
+    const k = length > 1 ? 1 / length : 1;
+    direction.set([values[v + 4] * k, values[v + 5] * k, values[v + 6] * k, Math.min(1, Math.max(0, values[v + 7]))], i * 4);
+    ambient.set([q(values[v + 8]), q(values[v + 9]), q(values[v + 10]), 255], i * 4);
+  }
+  return { hdr: { width: size, height: size, irradiance, direction }, ambient, invalid: atlas.invalid, seams };
+}
+var COSINE_BANDS = [1, 2 / 3, 2 / 3, 2 / 3, 1 / 4, 1 / 4, 1 / 4, 1 / 4, 1 / 4];
+async function bakeProbeVolumeGpu(device, min, max, counts, occluders, options = {}, progress) {
+  const rays = Math.max(16, Math.round(options.rays ?? 1024));
+  const bounces = Math.max(0, Math.min(LIGHTMAP_MAX_BOUNCES, Math.round(options.bounces ?? 3)));
+  const sky = options.sky ?? null;
+  const lights = packBakeLights(options.lights ?? []);
+  const [cx, cy, cz] = counts;
+  const count = cx * cy * cz;
+  const spacing = [0, 1, 2].map((a) => (max[a] - min[a]) / Math.max(1, counts[a] - 1));
+  const reach = 1.5 * Math.max(...spacing, 1e-3);
+  const positions = new Float32Array(count * 4);
+  for (let z = 0; z < cz; z += 1) for (let y = 0; y < cy; y += 1) for (let x = 0; x < cx; x += 1) {
+    const p = (z * cy + y) * cx + x;
+    positions.set([min[0] + x * spacing[0], min[1] + y * spacing[1], min[2] + z * spacing[2], 1], p * 4);
+  }
+  const acc = new Float32Array(count * PROBE_ACC_VEC4S * 4);
+  const scene = packLightmapScene(occluders);
+  const upload = (data) => {
+    const buffer = device.createBuffer({ size: Math.max(16, data.byteLength), usage: STORAGE | COPY_DST });
+    device.queue.writeBuffer(buffer, 0, data.buffer, data.byteOffset, data.byteLength);
+    return buffer;
+  };
+  const buffers = [upload(scene.nodes), upload(scene.tris), upload(scene.mats), upload(positions)];
+  const accum = device.createBuffer({ size: acc.byteLength, usage: STORAGE | COPY_SRC });
+  const skyBuffer = upload(sky ? sky.data : new Float32Array(4));
+  const lightBuffer = upload(lights.data);
+  const params = device.createBuffer({ size: PARAMS_BYTES, usage: UNIFORM2 | COPY_DST });
+  const readback = device.createBuffer({ size: acc.byteLength, usage: MAP_READ | COPY_DST });
+  try {
+    const pipeline = device.createComputePipeline({ layout: "auto", compute: { module: device.createShaderModule({ code: LIGHTMAP_TRACE_WGSL }), entryPoint: "probeMain" } });
+    const group = device.createBindGroup({
+      layout: pipeline.getBindGroupLayout(0),
+      entries: [...buffers, accum, skyBuffer].map((buffer, binding) => ({ binding, resource: { buffer } })).concat([{ binding: 6, resource: { buffer: params } }, { binding: 7, resource: { buffer: lightBuffer } }])
+    });
+    const perPass = Math.max(1, Math.min(rays, Math.floor(pathBudget(lights.local) / count)));
+    const submits = Math.ceil(rays / perPass);
+    for (let s = 0, done = 0; s < rays; s += perPass) {
+      device.queue.writeBuffer(params, 0, lightmapParams(0, count, s, Math.min(perPass, rays - s), rays, bounces, sky, lights, reach));
+      const encoder2 = device.createCommandEncoder();
+      const pass = encoder2.beginComputePass();
+      pass.setPipeline(pipeline);
+      pass.setBindGroup(0, group);
+      pass.dispatchWorkgroups(Math.ceil(count / WORKGROUP));
+      pass.end();
+      device.queue.submit([encoder2.finish()]);
+      await device.queue.onSubmittedWorkDone();
+      done += 1;
+      progress?.(done / submits);
+    }
+    const encoder = device.createCommandEncoder();
+    encoder.copyBufferToBuffer(accum, 0, readback, 0, acc.byteLength);
+    device.queue.submit([encoder.finish()]);
+    await readback.mapAsync(MAP_READ);
+    acc.set(new Float32Array(readback.getMappedRange()));
+    readback.unmap();
+  } finally {
+    for (const buffer of [...buffers, accum, skyBuffer, lightBuffer, params, readback]) buffer.destroy();
+  }
+  return finishProbeVolume(min, max, counts, acc, reach, options.backfaceLimit ?? 0.6);
+}
+function finishProbeVolume(min, max, counts, acc, reach, backfaceLimit) {
+  const count = counts[0] * counts[1] * counts[2];
+  const depthTexels = PROBE_DEPTH_SIDE * PROBE_DEPTH_SIDE;
+  const sh = new Float32Array(count * PROBE_SH * 3);
+  const visibility = new Float32Array(count);
+  const valid = new Uint8Array(count);
+  const depth = new Float32Array(count * depthTexels * 2);
+  for (let p = 0; p < count; p += 1) {
+    const o = p * PROBE_ACC_VEC4S * 4;
+    const rays = acc[o + 39];
+    valid[p] = rays > 0 && acc[o + 38] <= backfaceLimit * rays ? 1 : 0;
+    visibility[p] = acc[o + 36] > 1e-12 ? Math.min(1, acc[o + 37] / acc[o + 36]) : 1;
+    if (valid[p]) for (let k = 0; k < PROBE_SH; k += 1) for (let c = 0; c < 3; c += 1) sh[(p * PROBE_SH + k) * 3 + c] = acc[o + k * 4 + c] * 4 * Math.PI / rays * COSINE_BANDS[k];
+    for (let t = 0; t < depthTexels; t += 1) {
+      const d = o + (10 + t) * 4;
+      const n = acc[d + 2];
+      depth[(p * depthTexels + t) * 2] = n > 0 ? acc[d] / n : reach;
+      depth[(p * depthTexels + t) * 2 + 1] = n > 0 ? acc[d + 1] / n : reach * reach;
+    }
+  }
+  return { min, max, counts, sh, visibility, valid, depth };
+}
 
 // src/render/ibl.ts
 var IBL_FACE = 128;
@@ -18587,7 +19609,7 @@ function texelDirection(pano, x, y) {
 function shBasis(x, y, z) {
   return [0.282095, 0.488603 * y, 0.488603 * z, 0.488603 * x, 1.092548 * x * y, 1.092548 * y * z, 0.315392 * (3 * z * z - 1), 1.092548 * x * z, 0.546274 * (x * x - y * y)];
 }
-var COSINE_BANDS = [1, 2 / 3, 2 / 3, 2 / 3, 1 / 4, 1 / 4, 1 / 4, 1 / 4, 1 / 4];
+var COSINE_BANDS2 = [1, 2 / 3, 2 / 3, 2 / 3, 1 / 4, 1 / 4, 1 / 4, 1 / 4, 1 / 4];
 function environmentSh(pano) {
   const sums = new Float64Array(27);
   for (let y = 0; y < pano.height; y += 1) {
@@ -18603,7 +19625,7 @@ function environmentSh(pano) {
     }
   }
   const out = new Float32Array(36);
-  for (let k = 0; k < 9; k += 1) for (let c = 0; c < 3; c += 1) out[k * 4 + c] = sums[k * 3 + c] * COSINE_BANDS[k];
+  for (let k = 0; k < 9; k += 1) for (let c = 0; c < 3; c += 1) out[k * 4 + c] = sums[k * 3 + c] * COSINE_BANDS2[k];
   return out;
 }
 function shIrradiance(sh, n) {
@@ -18773,7 +19795,990 @@ var IblBuilder = class {
   }
 };
 
+// src/render/toneMappers.ts
+var TONE_MAPPERS = ["filmic", "aces", "agx", "neutral"];
+function mul(m, c) {
+  return [m[0] * c[0] + m[1] * c[1] + m[2] * c[2], m[3] * c[0] + m[4] * c[1] + m[5] * c[2], m[6] * c[0] + m[7] * c[1] + m[8] * c[2]];
+}
+var clamp013 = (x) => Math.min(1, Math.max(0, x));
+function filmic(c) {
+  return c.map((x) => {
+    const v = Math.max(0, x);
+    return clamp013(v * (2.51 * v + 0.03) / (v * (2.43 * v + 0.59) + 0.14));
+  });
+}
+var ACES_IN = [0.59719, 0.35458, 0.04823, 0.076, 0.90834, 0.01566, 0.0284, 0.13383, 0.83777];
+var ACES_OUT = [1.60475, -0.53108, -0.07367, -0.10208, 1.10813, -605e-5, -327e-5, -0.07276, 1.07602];
+function aces(c) {
+  const v = mul(ACES_IN, c.map((x) => Math.max(0, x)));
+  const fit = v.map((x) => (x * (x + 0.0245786) - 90537e-9) / (x * (0.983729 * x + 0.432951) + 0.238081));
+  return mul(ACES_OUT, fit).map(clamp013);
+}
+var AGX_IN = [0.842479062253094, 0.0784335999999992, 0.0792237451477643, 0.0423282422610123, 0.878468636469772, 0.0791661274605434, 0.0423756549057051, 0.0784336, 0.879142973793104];
+var AGX_OUT = [1.19687900512017, -0.0980208811401368, -0.0990297440797205, -0.0528968517574562, 1.15190312990417, -0.0989611768448433, -0.0529716355144438, -0.0980434501171241, 1.15107367264116];
+var AGX_MIN_EV = -12.47393;
+var AGX_MAX_EV = 4.026069;
+function agx(c) {
+  const v = mul(AGX_IN, c.map((x) => Math.max(1e-10, x)));
+  const curve = v.map((x) => {
+    const t = (Math.min(AGX_MAX_EV, Math.max(AGX_MIN_EV, Math.log2(x))) - AGX_MIN_EV) / (AGX_MAX_EV - AGX_MIN_EV);
+    const t2 = t * t;
+    const t4 = t2 * t2;
+    return 15.5 * t4 * t2 - 40.14 * t4 * t + 31.96 * t4 - 6.868 * t2 * t + 0.4298 * t2 + 0.1191 * t - 232e-5;
+  });
+  return mul(AGX_OUT, curve).map((x) => clamp013(Math.max(0, x) ** 2.2));
+}
+var NEUTRAL_START = 0.8 - 0.04;
+var NEUTRAL_DESATURATION = 0.15;
+function neutral(c) {
+  let rgb = c.map((x) => Math.max(0, x));
+  const low = Math.min(...rgb);
+  const offset = low < 0.08 ? low - 6.25 * low * low : 0.04;
+  rgb = rgb.map((x) => x - offset);
+  const peak = Math.max(...rgb);
+  if (peak < NEUTRAL_START) return rgb.map(clamp013);
+  const d = 1 - NEUTRAL_START;
+  const newPeak = 1 - d * d / (peak + d - NEUTRAL_START);
+  rgb = rgb.map((x) => x * newPeak / peak);
+  const g = 1 - 1 / (NEUTRAL_DESATURATION * (peak - newPeak) + 1);
+  return rgb.map((x) => clamp013(x + (newPeak - x) * g));
+}
+function toneMap(mapper, c) {
+  switch (mapper) {
+    case "aces":
+      return aces(c);
+    case "agx":
+      return agx(c);
+    case "neutral":
+      return neutral(c);
+    default:
+      return filmic(c);
+  }
+}
+var srgbEncode = (v) => v <= 31308e-7 ? Math.max(0, v) * 12.92 : 1.055 * v ** (1 / 2.4) - 0.055;
+function toneMapperIndex(mapper) {
+  const i = mapper ? TONE_MAPPERS.indexOf(mapper) : 0;
+  return i < 0 ? 0 : i;
+}
+var wgslMat = (m) => `mat3x3f(${[0, 1, 2].map((col) => [0, 1, 2].map((row) => m[row * 3 + col].toString()).join(", ")).join(", ")})`;
+var TONE_MAPPERS_WGSL = (
+  /* wgsl */
+  `
+fn toneFilmic(x: vec3f) -> vec3f {
+  let v = max(x, vec3f(0.0));
+  return clamp((v * (2.51 * v + 0.03)) / (v * (2.43 * v + 0.59) + 0.14), vec3f(0.0), vec3f(1.0));
+}
+fn toneAces(x: vec3f) -> vec3f {
+  let v = ${wgslMat(ACES_IN)} * max(x, vec3f(0.0));
+  let fit = (v * (v + 0.0245786) - 0.000090537) / (v * (0.983729 * v + 0.432951) + 0.238081);
+  return clamp(${wgslMat(ACES_OUT)} * fit, vec3f(0.0), vec3f(1.0));
+}
+fn toneAgx(x: vec3f) -> vec3f {
+  let v = ${wgslMat(AGX_IN)} * max(x, vec3f(1e-10));
+  let t = (clamp(log2(v), vec3f(${AGX_MIN_EV}), vec3f(${AGX_MAX_EV})) - ${AGX_MIN_EV}) / (${AGX_MAX_EV} - ${AGX_MIN_EV});
+  let t2 = t * t;
+  let t4 = t2 * t2;
+  let curve = 15.5 * t4 * t2 - 40.14 * t4 * t + 31.96 * t4 - 6.868 * t2 * t + 0.4298 * t2 + 0.1191 * t - 0.00232;
+  return clamp(pow(max(${wgslMat(AGX_OUT)} * curve, vec3f(0.0)), vec3f(2.2)), vec3f(0.0), vec3f(1.0));
+}
+fn toneNeutral(x: vec3f) -> vec3f {
+  var c = max(x, vec3f(0.0));
+  let low = min(c.r, min(c.g, c.b));
+  let offset = select(0.04, low - 6.25 * low * low, low < 0.08);
+  c = c - offset;
+  let peak = max(c.r, max(c.g, c.b));
+  if (peak < ${NEUTRAL_START}) { return clamp(c, vec3f(0.0), vec3f(1.0)); }
+  let d = 1.0 - ${NEUTRAL_START};
+  let newPeak = 1.0 - d * d / (peak + d - ${NEUTRAL_START});
+  c = c * (newPeak / peak);
+  let g = 1.0 - 1.0 / (${NEUTRAL_DESATURATION} * (peak - newPeak) + 1.0);
+  return clamp(mix(c, vec3f(newPeak), g), vec3f(0.0), vec3f(1.0));
+}
+fn toneMapWith(index: f32, c: vec3f) -> vec3f {
+  if (index > 2.5) { return toneNeutral(c); }
+  if (index > 1.5) { return toneAgx(c); }
+  if (index > 0.5) { return toneAces(c); }
+  return toneFilmic(c);
+}
+// The sRGB curve, carried past 1.
+fn srgbOf(x: vec3f) -> vec3f {
+  let v = max(x, vec3f(0.0));
+  return select(1.055 * pow(v, vec3f(1.0 / 2.4)) - vec3f(0.055), v * 12.92, v <= vec3f(0.0031308));
+}
+// Light x as the display shows it under exposure e, sRGB-encoded (F11a-5): physically, the curve on
+// the light then the encode; as authored, the curve on the encoded light, as the byte path's shader maps.
+fn shownWith(index: f32, x: vec3f, e: f32, authored: bool) -> vec3f {
+  if (authored) { return toneMapWith(index, srgbOf(x) * e); }
+  return srgbOf(toneMapWith(index, x * e));
+}
+// \u2026as an HDR display shows it, encoded: the curve's white at headroom h (its encoding, as authored)
+// and grey where SDR shows it (s, extendedExposure's).
+fn shownWideWith(index: f32, x: vec3f, e: f32, s: f32, h: f32, authored: bool) -> vec3f {
+  if (authored) {
+    let top = srgbOf(vec3f(h)).x;
+    return toneMapWith(index, srgbOf(x) * (e * s / top)) * top;
+  }
+  return srgbOf(toneMapWith(index, x * (e * s / h)) * h);
+}
+`
+);
+
+// src/render/pathTracer.ts
+var REFERENCE_BOUNCES = 4;
+var REFERENCE_TEXTURE_SIDE = 1024;
+var MAX_CAPTURE_SIDE = 8192;
+var MAT_VEC4S = 4;
+var PRIM_VEC4S = 7;
+var ATTR_VEC4S = 4;
+var WORKGROUP2 = 8;
+var PARAMS_BYTES2 = 176;
+var CAPTURE_PATHS_PER_SUBMIT = 1 << 20;
+var STORAGE2 = 128;
+var COPY_DST2 = 8;
+var COPY_SRC2 = 4;
+var MAP_READ2 = 1;
+var UNIFORM3 = 64;
+var TEXTURE_BINDING2 = 4;
+var STORAGE_BINDING = 8;
+var TEXTURE_COPY_SRC = 1;
+var ALPHA_MODE = { opaque: 0, mask: 1, blend: 2, additive: 3 };
+function referenceSceneKey(instances) {
+  let h = 2166136261 >>> 0;
+  const mix = (v) => {
+    h = Math.imul(h ^ (v | 0), 16777619) >>> 0;
+  };
+  const f3 = new Float32Array(1);
+  const u = new Uint32Array(f3.buffer);
+  for (const instance of instances) {
+    mix(objectId(instance.mesh));
+    for (const p of instance.mesh.primitives) mix(objectId(p.positions));
+    for (const list of [instance.textures, instance.mrTextures, instance.emissiveTextures]) for (const t of list ?? []) mix(t ? objectId(t) : 0);
+    for (const v of instance.model) {
+      f3[0] = v;
+      mix(u[0]);
+    }
+    mix(instance.lightChannels ?? 1);
+  }
+  return `${instances.length}:${h.toString(36)}`;
+}
+var ids = /* @__PURE__ */ new WeakMap();
+var nextId = 1;
+function objectId(o) {
+  let id = ids.get(o);
+  if (id === void 0) {
+    id = nextId++;
+    ids.set(o, id);
+  }
+  return id;
+}
+function storedTexels(texture) {
+  let { width, height, data } = texture;
+  while (width > REFERENCE_TEXTURE_SIDE || height > REFERENCE_TEXTURE_SIDE) {
+    const w = Math.max(1, width >> 1);
+    const h = Math.max(1, height >> 1);
+    const out = new Uint8ClampedArray(w * h * 4);
+    for (let y = 0; y < h; y += 1) {
+      for (let x = 0; x < w; x += 1) {
+        for (let c = 0; c < 4; c += 1) {
+          let sum = 0;
+          let n = 0;
+          for (let dy = 0; dy < 2; dy += 1) {
+            for (let dx = 0; dx < 2; dx += 1) {
+              const sx = Math.min(width - 1, x * 2 + dx);
+              const sy = Math.min(height - 1, y * 2 + dy);
+              sum += data[(sy * width + sx) * 4 + c] ?? 255;
+              n += 1;
+            }
+          }
+          out[(y * w + x) * 4 + c] = sum / n;
+        }
+      }
+    }
+    width = w;
+    height = h;
+    data = out;
+  }
+  return { width, height, data };
+}
+function normalMatrix(m) {
+  const a = m[0], b = m[1], c = m[2], d = m[4], e = m[5], f3 = m[6], g = m[8], h = m[9], i = m[10];
+  const co = [e * i - f3 * h, f3 * g - d * i, d * h - e * g, c * h - b * i, a * i - c * g, b * g - a * h, b * f3 - c * e, c * d - a * f3, a * e - b * d];
+  const det = a * co[0] + b * co[1] + c * co[2];
+  const s = det < 0 ? -1 : 1;
+  return co.map((v) => v * s);
+}
+function packReferenceScene(instances) {
+  const occluders = instances.map((i) => ({ mesh: i.mesh, model: i.model, lightChannels: i.lightChannels ?? 1 }));
+  const bvh = buildBvh2(occluders);
+  const triangles = bvh.order.length;
+  const textureIndex = /* @__PURE__ */ new Map();
+  const textureList = [];
+  const texture = (t2) => {
+    if (!t2 || t2.width <= 0 || t2.height <= 0 || t2.data.length < t2.width * t2.height * 4) return -1;
+    let index = textureIndex.get(t2);
+    if (index === void 0) {
+      index = textureList.length;
+      textureIndex.set(t2, index);
+      textureList.push(storedTexels(t2));
+    }
+    return index;
+  };
+  const materialIndex = /* @__PURE__ */ new Map();
+  const materialRows = [];
+  const attrsIn = new Float32Array(Math.max(1, triangles) * ATTR_VEC4S * 4);
+  const matOf = new Uint32Array(Math.max(1, triangles));
+  let t = 0;
+  for (const instance of instances) {
+    const nm = normalMatrix(instance.model);
+    instance.mesh.primitives.forEach((p, pi) => {
+      const m = p.material;
+      const base = texture(instance.textures?.[pi]);
+      const mr = texture(instance.mrTextures?.[pi]);
+      const emis = texture(instance.emissiveTextures?.[pi]);
+      const pbr = resolvePbr(m, mr >= 0, Boolean(instance.occlusionTextures?.[pi]), emis >= 0);
+      const mode = ALPHA_MODE[m.alphaMode ?? "opaque"] ?? 0;
+      const row = [
+        ...m.baseColorFactor,
+        ...pbr.emissive,
+        mode,
+        pbr.isPbr ? pbr.metallic : 0,
+        pbr.isPbr ? pbr.roughness : 1,
+        base,
+        pbr.isPbr ? mr : -1,
+        emis,
+        pbr.isPbr ? 1 : 0,
+        m.alphaCutoff ?? 0.5,
+        instance.lightChannels ?? 1
+      ];
+      const key = row.join(",");
+      let mat = materialIndex.get(key);
+      if (mat === void 0) {
+        mat = materialRows.length;
+        materialIndex.set(key, mat);
+        materialRows.push(row);
+      }
+      const { normals, uvs, indices } = p;
+      for (let k = 0; k < indices.length; k += 3) {
+        const o = t * ATTR_VEC4S * 4;
+        for (let c = 0; c < 3; c += 1) {
+          const v = indices[k + c];
+          if (normals) {
+            const x = normals[v * 3], y = normals[v * 3 + 1], z = normals[v * 3 + 2];
+            const nx = nm[0] * x + nm[3] * y + nm[6] * z;
+            const ny = nm[1] * x + nm[4] * y + nm[7] * z;
+            const nz = nm[2] * x + nm[5] * y + nm[8] * z;
+            const len = Math.hypot(nx, ny, nz) || 1;
+            attrsIn.set([nx / len, ny / len, nz / len], o + c * 4);
+          }
+        }
+        const uv = (v, a) => uvs ? uvs[v * 2 + a] : 0;
+        const [i0, i1, i2] = [indices[k], indices[k + 1], indices[k + 2]];
+        attrsIn[o + 3] = uv(i0, 0);
+        attrsIn[o + 7] = uv(i0, 1);
+        attrsIn[o + 11] = uv(i1, 0);
+        attrsIn.set([uv(i1, 1), uv(i2, 0), uv(i2, 1)], o + 12);
+        matOf[t] = mat;
+        t += 1;
+      }
+    });
+  }
+  const stride = PRIM_VEC4S * 4;
+  const prims = new Float32Array(Math.max(1, triangles) * stride);
+  const primBits = new Uint32Array(prims.buffer);
+  for (let i = 0; i < triangles; i += 1) {
+    const src = bvh.order[i];
+    const k = src * 9;
+    const o = i * stride;
+    for (let a = 0; a < 3; a += 1) {
+      prims[o + a] = bvh.tri[k + a];
+      prims[o + 4 + a] = bvh.tri[k + 3 + a] - bvh.tri[k + a];
+      prims[o + 8 + a] = bvh.tri[k + 6 + a] - bvh.tri[k + a];
+    }
+    prims.set(attrsIn.subarray(src * 16, src * 16 + 15), o + 12);
+    primBits[o + 27] = matOf[src];
+  }
+  const mapTable = materialRows.length * MAT_VEC4S;
+  const mats = new Float32Array(Math.max(1, mapTable + textureList.length) * 4);
+  const matBits = new Uint32Array(mats.buffer);
+  materialRows.forEach((row, i) => mats.set(row, i * 16));
+  let total = 0;
+  textureList.forEach((tex, i) => {
+    matBits.set([total, tex.width, tex.height, 0], (mapTable + i) * 4);
+    total += tex.width * tex.height;
+  });
+  const texels = new Uint32Array(Math.max(1, total));
+  textureList.forEach((tex, i) => {
+    const words = new Uint32Array(tex.data.buffer.slice(tex.data.byteOffset, tex.data.byteOffset + tex.width * tex.height * 4));
+    texels.set(words, matBits[(mapTable + i) * 4]);
+  });
+  return { nodes: packBvhNodes(bvh), prims, mats, mapTable, texels, triangles, materials: materialRows.length };
+}
+var PATH_TRACE_WGSL = (
+  /* wgsl */
+  `
+struct Params {
+  invViewProj: mat4x4<f32>,
+  eye: vec4<f32>,      // xyz = the camera, w = the clamp on what a bounce brings back (0 = none)
+  info: vec4<u32>,     // x = bounces, y = directional lights, z = sky width, w = sky height
+  image: vec4<u32>,    // x, y = the whole image's size; z, w = this tile's corner in it
+  run: vec4<u32>,      // x, y = the tile's size; z = first sample; w = samples this pass
+  extra: vec4<u32>,    // x = point, spot and area lights; y = 1 where a miss from the eye shows the sky; z = the map table's first vec4 in mats
+  ambient: vec4<f32>,  // rgb = the uniform sky without a panorama (the flat ambient)
+  pad: vec4<f32>,
+};
+@group(0) @binding(0) var<storage, read> nodes: array<vec4<u32>>;
+@group(0) @binding(1) var<storage, read> prims: array<vec4<f32>>;
+@group(0) @binding(2) var<storage, read> mats: array<vec4<f32>>;
+@group(0) @binding(3) var<storage, read> texels: array<u32>;
+@group(0) @binding(4) var<storage, read> lights: array<vec4<f32>>;
+@group(0) @binding(5) var<storage, read> sky: array<vec4<f32>>;
+@group(0) @binding(6) var<storage, read_write> accum: array<vec4<f32>>;
+@group(0) @binding(7) var<uniform> params: Params;
+${brdfWgsl(0, 8)}
+
+const PI = 3.14159265;
+const EPS = 0.002;
+const T_MIN = 1e-4;
+const FAR = 1e30;
+
+${BAKE_SAMPLING_WGSL}
+
+// A map's texel, wrapped.
+fn texFetch(m: vec4<u32>, x: i32, y: i32) -> vec4<f32> {
+  let w = i32(m.y);
+  let h = i32(m.z);
+  let xi = ((x % w) + w) % w;
+  let yi = ((y % h) + h) % h;
+  return unpack4x8unorm(texels[m.x + u32(yi * w + xi)]);
+}
+// Map \`tex\` at uv, bilinearly and wrapping, at the renderer's (u, 1 \u2212 v); white without one.
+fn texSample(tex: f32, uv: vec2<f32>) -> vec4<f32> {
+  if (tex < 0.0) { return vec4<f32>(1.0); }
+  let m = bitcast<vec4<u32>>(mats[params.extra.z + u32(tex + 0.5)]);
+  let p = fract(vec2<f32>(uv.x, 1.0 - uv.y)) * vec2<f32>(f32(m.y), f32(m.z)) - vec2<f32>(0.5);
+  let f = floor(p);
+  let t = p - f;
+  let i = vec2<i32>(f);
+  let top = mix(texFetch(m, i.x, i.y), texFetch(m, i.x + 1, i.y), t.x);
+  let bottom = mix(texFetch(m, i.x, i.y + 1), texFetch(m, i.x + 1, i.y + 1), t.x);
+  return mix(top, bottom, t.y);
+}
+
+fn tri(i: u32, k: u32) -> vec4<f32> {
+  return prims[i * ${PRIM_VEC4S}u + k];
+}
+fn attr(i: u32, k: u32) -> vec4<f32> {
+  return prims[i * ${PRIM_VEC4S}u + 3u + k];
+}
+fn matOf(i: u32) -> u32 {
+  return bitcast<u32>(attr(i, 3u).w);
+}
+fn mat(m: u32, k: u32) -> vec4<f32> {
+  return mats[m * ${MAT_VEC4S}u + k];
+}
+fn uvAt(i: u32, b: vec2<f32>) -> vec2<f32> {
+  let uv0 = vec2<f32>(attr(i, 0u).w, attr(i, 1u).w);
+  let uv1 = vec2<f32>(attr(i, 2u).w, attr(i, 3u).x);
+  let uv2 = attr(i, 3u).yz;
+  return uv0 * (1.0 - b.x - b.y) + uv1 * b.x + uv2 * b.y;
+}
+
+// Whether a ray stops at triangle i at barycentrics b: an opaque surface always; a cut-out where its
+// alpha reaches the cutoff; a blended one as often as its alpha; an additive one never.
+fn stops(i: u32, b: vec2<f32>) -> bool {
+  let m = matOf(i);
+  let mode = mat(m, 1u).w;
+  if (mode < 0.5) { return true; }
+  if (mode > 2.5) { return false; }
+  let a = mat(m, 0u).a * texSample(mat(m, 2u).z, uvAt(i, b)).a;
+  if (mode < 1.5) { return a >= mat(m, 3u).z; }
+  return rand() < a;
+}
+
+struct Hit {
+  t: f32,
+  tri: i32,
+  b: vec2<f32>,
+};
+
+// The closest surface along o + t\xB7d within tMax that stops it (or, with anyHit, the first found).
+fn trace(o: vec3<f32>, d: vec3<f32>, tMax: f32, anyHit: bool) -> Hit {
+  var best = Hit(tMax, -1, vec2<f32>(0.0));
+  let tiny = abs(d) < vec3<f32>(1e-9);
+  let inv = 1.0 / select(d, select(vec3<f32>(-1e-9), vec3<f32>(1e-9), d >= vec3<f32>(0.0)), tiny);
+  var stack: array<u32, 64>;
+  var sp = 1u;
+  stack[0] = 0u;
+  loop {
+    if (sp == 0u) { break; }
+    sp = sp - 1u;
+    let n = stack[sp];
+    let a = nodes[n * 2u];
+    let bb = nodes[n * 2u + 1u];
+    let t0 = (bitcast<vec3<f32>>(a.xyz) - o) * inv;
+    let t1 = (bitcast<vec3<f32>>(bb.xyz) - o) * inv;
+    let lo = min(t0, t1);
+    let hi = max(t0, t1);
+    let tn = max(max(lo.x, lo.y), max(lo.z, 0.0));
+    let tf = min(min(hi.x, hi.y), min(hi.z, best.t));
+    if (tn > tf) { continue; }
+    let left = bitcast<i32>(a.w);
+    if (left >= 0) {
+      if (sp + 2u <= 64u) {
+        stack[sp] = u32(left);
+        stack[sp + 1u] = bb.w;
+        sp = sp + 2u;
+      }
+      continue;
+    }
+    let first = bb.w;
+    let count = u32(-1 - left);
+    for (var i = first; i < first + count; i = i + 1u) {
+      // M\xF6ller\u2013Trumbore.
+      let v0 = tri(i, 0u).xyz;
+      let e1 = tri(i, 1u).xyz;
+      let e2 = tri(i, 2u).xyz;
+      let p = cross(d, e2);
+      let det = dot(e1, p);
+      if (abs(det) < 1e-12) { continue; }
+      let id = 1.0 / det;
+      let s = o - v0;
+      let u = dot(s, p) * id;
+      if (u < 0.0 || u > 1.0) { continue; }
+      let q = cross(s, e1);
+      let v = dot(d, q) * id;
+      if (v < 0.0 || u + v > 1.0) { continue; }
+      let t = dot(e2, q) * id;
+      if (t > T_MIN && t < best.t && stops(i, vec2<f32>(u, v))) {
+        best = Hit(t, i32(i), vec2<f32>(u, v));
+        if (anyHit) { return best; }
+      }
+    }
+  }
+  return best;
+}
+
+fn visible(p: vec3<f32>, d: vec3<f32>, tMax: f32) -> bool {
+  return trace(p, d, tMax, true).tri < 0;
+}
+
+// The sky along d: the panorama, or the flat ambient as a uniform sky.
+fn skyRadiance(d: vec3<f32>) -> vec3<f32> {
+  if (params.info.z == 0u) { return params.ambient.rgb; }
+  return skyAt(d);
+}
+
+fn toLinear(c: vec3<f32>) -> vec3<f32> {
+  let v = max(c, vec3<f32>(0.0));
+  return select(pow((v + vec3<f32>(0.055)) / 1.055, vec3<f32>(2.4)), v / 12.92, v <= vec3<f32>(0.04045));
+}
+
+struct Surface {
+  albedo: vec3<f32>,
+  metal: f32,
+  rough: f32,
+  emission: vec3<f32>,
+  pbr: bool,
+  channels: u32,
+};
+
+fn surfaceAt(i: u32, b: vec2<f32>) -> Surface {
+  let m = matOf(i);
+  let uv = uvAt(i, b);
+  let m2 = mat(m, 2u);
+  let m3 = mat(m, 3u);
+  let base = mat(m, 0u).rgb * texSample(m2.z, uv).rgb;
+  let mr = texSample(m2.w, uv);
+  var s: Surface;
+  s.albedo = toLinear(base);
+  s.metal = clamp(m2.x * mr.b, 0.0, 1.0);
+  s.rough = clamp(m2.y * mr.g, 0.045, 1.0);
+  s.emission = toLinear(mat(m, 1u).rgb * texSample(m3.x, uv).rgb);
+  s.pbr = m3.y > 0.5;
+  s.channels = u32(m3.w + 0.5);
+  return s;
+}
+
+// The BRDF toward L from V about N, without the cosine: the AAA shader's terms over \u03C0 for the diffuse
+// (its lights' units), and its specular with the Kulla-Conty scale.
+fn brdf(s: Surface, N: vec3<f32>, V: vec3<f32>, L: vec3<f32>) -> vec3<f32> {
+  let ndl = dot(N, L);
+  if (ndl <= 0.0) { return vec3<f32>(0.0); }
+  if (!s.pbr) { return s.albedo / PI; }
+  let ndv = max(1e-4, dot(N, V));
+  let H = normalize(L + V);
+  let ndh = max(0.0, dot(N, H));
+  let vdh = max(0.0, dot(V, H));
+  let a2 = s.rough * s.rough * s.rough * s.rough;
+  let dd = ndh * ndh * (a2 - 1.0) + 1.0;
+  let D = a2 / (PI * dd * dd + 1e-7);
+  let f0 = mix(vec3<f32>(0.04), s.albedo, s.metal);
+  let F = f0 + (vec3<f32>(1.0) - f0) * pow(1.0 - vdh, 5.0);
+  let eComp = energyCompensation(f0, dfgAt(ndv, s.rough));
+  let diffuse = (1.0 - s.metal) * (vec3<f32>(1.0) - F) * s.albedo / PI;
+  return diffuse + F * D * smithVisibility(ndl, ndv, a2) * eComp;
+}
+
+// An orthonormal frame about n (Duff et al.): tangent, bitangent, n.
+fn frameOf(n: vec3<f32>) -> mat3x3<f32> {
+  let sg = select(-1.0, 1.0, n.z >= 0.0);
+  let a = -1.0 / (sg + n.z);
+  let b = n.x * n.y * a;
+  return mat3x3<f32>(vec3<f32>(1.0 + sg * n.x * n.x * a, sg * b, -sg * n.x), vec3<f32>(b, sg + n.y * n.y * a, -n.y), n);
+}
+
+// A GGX normal visible from Ve (in the frame), for alpha = roughness\xB2 (Heitz 2018).
+fn sampleVndf(Ve: vec3<f32>, alpha: f32, xi: vec2<f32>) -> vec3<f32> {
+  let Vh = normalize(vec3<f32>(alpha * Ve.x, alpha * Ve.y, Ve.z));
+  let lensq = Vh.x * Vh.x + Vh.y * Vh.y;
+  let T1 = select(vec3<f32>(1.0, 0.0, 0.0), vec3<f32>(-Vh.y, Vh.x, 0.0) / sqrt(lensq), lensq > 1e-12);
+  let T2 = cross(Vh, T1);
+  let r = sqrt(xi.x);
+  let phi = 2.0 * PI * xi.y;
+  let t1 = r * cos(phi);
+  let sv = 0.5 * (1.0 + Vh.z);
+  let t2 = (1.0 - sv) * sqrt(max(0.0, 1.0 - t1 * t1)) + sv * r * sin(phi);
+  let Nh = t1 * T1 + t2 * T2 + sqrt(max(0.0, 1.0 - t1 * t1 - t2 * t2)) * Vh;
+  return normalize(vec3<f32>(alpha * Nh.x, alpha * Nh.y, max(0.0, Nh.z)));
+}
+
+// How likely a bounce takes the specular lobe: by the two lobes' share of what the surface reflects.
+fn specularChance(s: Surface, ndv: f32) -> f32 {
+  if (!s.pbr) { return 0.0; }
+  let f0 = mix(vec3<f32>(0.04), s.albedo, s.metal);
+  let e = specularEnergy(f0, dfgAt(ndv, s.rough));
+  let ls = lum(e);
+  let ld = lum(s.albedo * (1.0 - s.metal) * (vec3<f32>(1.0) - e));
+  return clamp(ls / max(ls + ld, 1e-6), 0.1, 0.9);
+}
+
+// The density of bouncing toward L: the two lobes' mixed.
+fn bouncePdf(s: Surface, N: vec3<f32>, V: vec3<f32>, L: vec3<f32>, ps: f32) -> f32 {
+  let ndl = dot(N, L);
+  if (ndl <= 0.0) { return 0.0; }
+  var pdf = (1.0 - ps) * ndl / PI;
+  if (ps > 0.0) {
+    let ndv = max(1e-4, dot(N, V));
+    let H = normalize(L + V);
+    let ndh = max(0.0, dot(N, H));
+    let alpha = s.rough * s.rough;
+    let a2 = alpha * alpha;
+    let dd = ndh * ndh * (a2 - 1.0) + 1.0;
+    let D = a2 / (PI * dd * dd + 1e-7);
+    let g1 = 2.0 * ndv / (ndv + sqrt(a2 + (1.0 - a2) * ndv * ndv));
+    pdf = pdf + ps * g1 * D / (4.0 * ndv);
+  }
+  return pdf;
+}
+
+// The direct light on a surface at p facing N, seen from V: every directional light, and one point, spot or
+// area light picked by what it would give there (a tenth spread evenly), over the chance of picking it.
+fn directLight(s: Surface, p: vec3<f32>, N: vec3<f32>, V: vec3<f32>) -> vec3<f32> {
+  var L = vec3<f32>(0.0);
+  let directional = params.info.y;
+  for (var l = 0u; l < directional; l = l + 1u) {
+    if (!lightsMask(l, s.channels)) { continue; }
+    let Ld = lightAt(l, 0u).xyz;
+    let ndl = dot(N, Ld);
+    if (ndl <= 0.0) { continue; }
+    let f = brdf(s, N, V, Ld);
+    if (max(f.r, max(f.g, f.b)) > 0.0 && visible(p, Ld, FAR)) {
+      L = L + f * PI * lightAt(l, 1u).rgb * ndl;
+    }
+  }
+  let local = params.extra.x;
+  if (local == 0u) { return L; }
+  var total = 0.0;
+  for (var k = 0u; k < local; k = k + 1u) { total = total + localWeight(directional + k, p, N, s.channels); }
+  let even = select(1.0, 0.1, total > 0.0) / f32(local);
+  let spread = select(0.0, 0.9 / total, total > 0.0);
+  let u = rand();
+  var pick = local - 1u;
+  var pdf = 0.0;
+  var cdf = 0.0;
+  for (var k = 0u; k < local; k = k + 1u) {
+    pdf = localWeight(directional + k, p, N, s.channels) * spread + even;
+    cdf = cdf + pdf;
+    if (u < cdf) { pick = k; break; }
+  }
+  if (pick == local - 1u) { pdf = localWeight(directional + pick, p, N, s.channels) * spread + even; }
+  let l = directional + pick;
+  if (!lightsMask(l, s.channels)) { return L; }
+  let ls = localSample(l, p, N);
+  if (max(ls.c.r, max(ls.c.g, ls.c.b)) <= 0.0) { return L; }
+  let f = brdf(s, N, V, ls.dir);
+  if (max(f.r, max(f.g, f.b)) > 0.0 && visible(p, ls.dir, ls.dist - EPS)) {
+    L = L + f * PI * ls.c / pdf;
+  }
+  return L;
+}
+
+// What a path from the eye along d brings back (rgb), and whether the eye saw anything (a).
+fn radiance(origin: vec3<f32>, dir: vec3<f32>) -> vec4<f32> {
+  var L = vec3<f32>(0.0);
+  var seen = 0.0;
+  var tp = vec3<f32>(1.0);
+  var o = origin;
+  var d = dir;
+  let clampTo = params.eye.w;
+  for (var b = 0u; b <= params.info.x; b = b + 1u) {
+    let h = trace(o, d, FAR, false);
+    var add = vec3<f32>(0.0);
+    if (h.tri < 0) {
+      if (b > 0u) { add = tp * skyRadiance(d); }
+      else if (params.extra.y > 0u) { add = skyRadiance(d); seen = 1.0; }
+    } else {
+      if (b == 0u) { seen = 1.0; }
+    }
+    if (h.tri < 0) {
+      if (clampTo > 0.0 && b > 0u) { add = add * min(1.0, clampTo / max(lum(add), 1e-6)); }
+      L = L + add;
+      break;
+    }
+    let i = u32(h.tri);
+    let s = surfaceAt(i, h.b);
+    let V = -d;
+    var ng = normalize(cross(tri(i, 1u).xyz, tri(i, 2u).xyz));
+    if (dot(ng, V) < 0.0) { ng = -ng; } // two-sided, as the renderer's surfaces are
+    let w = vec3<f32>(1.0 - h.b.x - h.b.y, h.b.x, h.b.y);
+    var N = attr(i, 0u).xyz * w.x + attr(i, 1u).xyz * w.y + attr(i, 2u).xyz * w.z;
+    if (dot(N, N) < 1e-8) { N = ng; } else { N = normalize(N); }
+    if (dot(N, ng) < 0.0) { N = -N; }
+    if (dot(N, V) <= 0.0) { N = ng; }
+    let p = o + d * h.t + ng * EPS;
+    add = s.emission + directLight(s, p, N, V);
+    add = tp * add;
+    if (clampTo > 0.0 && b > 0u) { add = add * min(1.0, clampTo / max(lum(add), 1e-6)); }
+    L = L + add;
+    if (b == params.info.x) { break; }
+    // A bounce: the specular by its visible normals, or the diffuse by the cosine.
+    let ndv = max(1e-4, dot(N, V));
+    let ps = specularChance(s, ndv);
+    var next: vec3<f32>;
+    if (rand() < ps) {
+      let fr = frameOf(N);
+      let Ve = transpose(fr) * V;
+      let He = sampleVndf(Ve, s.rough * s.rough, vec2<f32>(rand(), rand()));
+      next = reflect(-V, fr * He);
+    } else {
+      next = cosineDir(N, vec2<f32>(rand(), rand()));
+    }
+    let pdf = bouncePdf(s, N, V, next, ps);
+    if (pdf <= 0.0 || dot(next, ng) <= 0.0) { break; }
+    tp = tp * brdf(s, N, V, next) * dot(N, next) / pdf;
+    if (b >= 2u) {
+      let survive = clamp(max(tp.r, max(tp.g, tp.b)), 0.05, 0.95);
+      if (rand() > survive) { break; }
+      tp = tp / survive;
+    }
+    if (max(tp.r, max(tp.g, tp.b)) <= 0.0) { break; }
+    o = p;
+    d = next;
+  }
+  return vec4<f32>(L, seen);
+}
+
+@compute @workgroup_size(${WORKGROUP2}, ${WORKGROUP2})
+fn main(@builtin(global_invocation_id) id: vec3<u32>) {
+  if (id.x >= params.run.x || id.y >= params.run.y) { return; }
+  let px = params.image.z + id.x;
+  let py = params.image.w + id.y;
+  let size = vec2<f32>(f32(params.image.x), f32(params.image.y));
+  let pixel = py * params.image.x + px;
+  var sum = vec4<f32>(0.0);
+  for (var k = 0u; k < params.run.w; k = k + 1u) {
+    let sIndex = params.run.z + k;
+    rng = pcg(pixel ^ pcg(sIndex * 0x9e3779b9u + 0x632be5abu));
+    let jitter = vec2<f32>(rand(), rand());
+    let ndc = vec2<f32>((f32(px) + jitter.x) / size.x * 2.0 - 1.0, 1.0 - (f32(py) + jitter.y) / size.y * 2.0);
+    let far = params.invViewProj * vec4<f32>(ndc, 0.5, 1.0);
+    let d = normalize(far.xyz / far.w - params.eye.xyz);
+    sum = sum + radiance(params.eye.xyz, d);
+  }
+  let j = id.y * params.run.x + id.x;
+  accum[j] = accum[j] + sum;
+}
+`
+);
+var PATH_RESOLVE_WGSL = (
+  /* wgsl */
+  `
+@group(0) @binding(0) var<storage, read> accum: array<vec4<f32>>;
+@group(0) @binding(1) var frame: texture_storage_2d<rgba16float, write>;
+@group(0) @binding(2) var<uniform> info: vec4<u32>; // x, y = size, z = samples
+@compute @workgroup_size(${WORKGROUP2}, ${WORKGROUP2})
+fn resolve(@builtin(global_invocation_id) id: vec3<u32>) {
+  if (id.x >= info.x || id.y >= info.y) { return; }
+  let n = max(1.0, f32(info.z));
+  let v = accum[id.y * info.x + id.x] / n;
+  textureStore(frame, vec2<i32>(id.xy), vec4<f32>(min(v.rgb, vec3<f32>(60000.0)), v.a));
+}
+`
+);
+function referenceLights(draw) {
+  if (draw.lights && draw.lights.length > 0) return packBakeLights(bakeLights(draw.lights));
+  const light = resolveLight(draw.lightDirection, draw.ambient);
+  return packBakeLights([{ direction: light.direction, radiance: [1, 1, 1] }]);
+}
+function referenceAmbient(draw) {
+  const a = resolveLight(draw.lightDirection, draw.ambient).ambient;
+  return a <= 0.04045 ? a / 12.92 : ((a + 0.055) / 1.055) ** 2.4;
+}
+function pathTraceParams(camera, image, firstSample, samples, setup) {
+  const buffer = new ArrayBuffer(PARAMS_BYTES2);
+  const f3 = new Float32Array(buffer);
+  const u = new Uint32Array(buffer);
+  f3.set(camera.inv, 0);
+  f3.set([...camera.eye, setup.clamp], 16);
+  u.set([Math.min(LIGHTMAP_MAX_BOUNCES, Math.max(0, Math.round(setup.bounces))), setup.lights.directional, setup.sky?.width ?? 0, setup.sky?.height ?? 0], 20);
+  u.set([image.width, image.height, image.x, image.y], 24);
+  u.set([image.tileWidth, image.tileHeight, firstSample, samples], 28);
+  u.set([setup.lights.local, setup.background ? 1 : 0, setup.mapTable, 0], 32);
+  f3.set([setup.ambient, setup.ambient, setup.ambient, 0], 36);
+  return buffer;
+}
+var TracerCore = class {
+  constructor(device) {
+    this.device = device;
+    this.pipeline = null;
+    this.resolvePipeline = null;
+    this.scene = null;
+    this.skyFor = { key: null, buffer: null, panorama: null };
+    this.lightBuffer = null;
+    const table2 = dfgTable();
+    this.dfg = device.createBuffer({ size: table2.byteLength, usage: STORAGE2 | COPY_DST2 });
+    device.queue.writeBuffer(this.dfg, 0, table2);
+  }
+  get tracePipeline() {
+    this.pipeline ?? (this.pipeline = this.device.createComputePipeline({ layout: "auto", compute: { module: this.device.createShaderModule({ code: PATH_TRACE_WGSL }), entryPoint: "main" } }));
+    return this.pipeline;
+  }
+  get resolver() {
+    this.resolvePipeline ?? (this.resolvePipeline = this.device.createComputePipeline({ layout: "auto", compute: { module: this.device.createShaderModule({ code: PATH_RESOLVE_WGSL }), entryPoint: "resolve" } }));
+    return this.resolvePipeline;
+  }
+  storage(data) {
+    const buffer = this.device.createBuffer({ size: Math.max(16, Math.ceil(data.byteLength / 16) * 16), usage: STORAGE2 | COPY_DST2 });
+    this.device.queue.writeBuffer(buffer, 0, data.buffer, data.byteOffset, data.byteLength);
+    return buffer;
+  }
+  /** The scene's buffers for `instances`, packed again only when its key changes. Returns whether it did. */
+  setScene(instances, key = referenceSceneKey(instances)) {
+    if (this.scene?.key === key) return false;
+    for (const b of this.scene?.buffers ?? []) b.destroy();
+    const packed = packReferenceScene(instances);
+    this.scene = { key, buffers: [packed.nodes, packed.prims, packed.mats, packed.texels].map((d) => this.storage(d)), mapTable: packed.mapTable };
+    return true;
+  }
+  get mapTable() {
+    return this.scene?.mapTable ?? 0;
+  }
+  /** The sky's panorama for `environment` (null: the flat ambient), uploaded once per environment. */
+  setSky(environment) {
+    const key = environment ? environmentKey(environment) : null;
+    const same = (a, b) => a === null || b === null ? a === b : a.length === b.length && a.every((v, i) => v === b[i]);
+    if (this.skyFor.buffer && same(this.skyFor.key, key)) return this.skyFor.panorama;
+    this.skyFor.buffer?.destroy();
+    const panorama = environment ? environmentPanorama(environment) : null;
+    this.skyFor = { key, panorama, buffer: this.storage(panorama?.data ?? new Float32Array(4)) };
+    return panorama;
+  }
+  setLights(data) {
+    this.lightBuffer?.destroy();
+    this.lightBuffer = this.storage(data);
+  }
+  /** The trace's bind group against `accum` and `params`. */
+  traceGroup(accum, params) {
+    const [nodes, prims, mats, texels] = this.scene.buffers;
+    const buffers = [nodes, prims, mats, texels, this.lightBuffer, this.skyFor.buffer, accum, params, this.dfg];
+    return this.device.createBindGroup({ layout: this.tracePipeline.getBindGroupLayout(0), entries: buffers.map((buffer, binding) => ({ binding, resource: { buffer } })) });
+  }
+  destroy() {
+    for (const b of this.scene?.buffers ?? []) b.destroy();
+    this.skyFor.buffer?.destroy();
+    this.lightBuffer?.destroy();
+    this.dfg.destroy();
+    this.scene = null;
+  }
+};
+function cameraOf(draw) {
+  const inv = invertMat4(multiplyMat46(draw.projection, draw.view)) ?? new Array(16).fill(0);
+  return { inv, eye: cameraPositionFromView3(draw.view) };
+}
+function drawKey(draw, width, height, settings) {
+  const env = draw.environment ? environmentKey(draw.environment).map((v) => typeof v === "object" && v !== null ? objectId(v) : v) : null;
+  return JSON.stringify([width, height, draw.view, draw.projection, draw.lightDirection ?? null, draw.ambient ?? null, draw.lights ?? null, env, settings.bounces ?? REFERENCE_BOUNCES, settings.clamp ?? 0, settings.background ?? false]);
+}
+var PathTracer = class _PathTracer {
+  constructor(device) {
+    this.device = device;
+    this.accum = null;
+    this.frame = null;
+    this.size = { width: 0, height: 0 };
+    this.key = "";
+    /** Samples each pixel holds. */
+    this.samples = 0;
+    this.core = new TracerCore(device);
+    this.params = device.createBuffer({ size: PARAMS_BYTES2, usage: UNIFORM3 | COPY_DST2 });
+    this.resolveInfo = device.createBuffer({ size: 16, usage: UNIFORM3 | COPY_DST2 });
+  }
+  static create(device) {
+    return new _PathTracer(device);
+  }
+  /** Start accumulating again. */
+  reset() {
+    this.samples = 0;
+    this.key = "";
+  }
+  ensureTargets(width, height) {
+    if (this.size.width === width && this.size.height === height && this.accum) return;
+    this.accum?.destroy();
+    this.frame?.destroy();
+    this.accum = this.device.createBuffer({ size: width * height * 16, usage: STORAGE2 | COPY_DST2 | COPY_SRC2 });
+    this.frame = this.device.createTexture({ size: { width, height }, format: "rgba16float", usage: TEXTURE_BINDING2 | STORAGE_BINDING | TEXTURE_COPY_SRC });
+    this.size = { width, height };
+    this.samples = 0;
+  }
+  /**
+   * Add a frame's samples of `instances` seen through `draw` at `width × height`,
+   * and return the mean so far: an rgba16float texture, premultiplied, alpha
+   * 0 where the eye saw nothing (unless `background`).
+   */
+  render(instances, draw, width, height, settings = {}) {
+    this.ensureTargets(width, height);
+    const sceneChanged = this.core.setScene(instances);
+    const key = drawKey(draw, width, height, settings);
+    if (sceneChanged || key !== this.key) {
+      this.key = key;
+      this.samples = 0;
+      this.core.setLights(referenceLights(draw).data);
+    }
+    const maxSamples = settings.maxSamples ?? 4096;
+    const encoder = this.device.createCommandEncoder();
+    if (this.samples === 0) encoder.clearBuffer(this.accum);
+    const take = Math.max(0, Math.min(settings.samplesPerFrame ?? 1, maxSamples - this.samples));
+    if (take > 0) {
+      const { inv, eye } = cameraOf(draw);
+      const lights = referenceLights(draw);
+      const sky = this.core.setSky(draw.environment);
+      const setup = { bounces: settings.bounces ?? REFERENCE_BOUNCES, sky, lights, ambient: referenceAmbient(draw), clamp: settings.clamp ?? 0, background: settings.background ?? false, mapTable: this.core.mapTable };
+      const params = pathTraceParams({ inv, eye }, { width, height, x: 0, y: 0, tileWidth: width, tileHeight: height }, this.samples, take, setup);
+      this.device.queue.writeBuffer(this.params, 0, params);
+      const pass = encoder.beginComputePass();
+      pass.setPipeline(this.core.tracePipeline);
+      pass.setBindGroup(0, this.core.traceGroup(this.accum, this.params));
+      pass.dispatchWorkgroups(Math.ceil(width / WORKGROUP2), Math.ceil(height / WORKGROUP2));
+      pass.end();
+      this.samples += take;
+    }
+    this.device.queue.writeBuffer(this.resolveInfo, 0, new Uint32Array([width, height, this.samples, 0]));
+    const resolve = encoder.beginComputePass();
+    resolve.setPipeline(this.core.resolver);
+    resolve.setBindGroup(
+      0,
+      this.device.createBindGroup({
+        layout: this.core.resolver.getBindGroupLayout(0),
+        entries: [
+          { binding: 0, resource: { buffer: this.accum } },
+          { binding: 1, resource: this.frame.createView() },
+          { binding: 2, resource: { buffer: this.resolveInfo } }
+        ]
+      })
+    );
+    resolve.dispatchWorkgroups(Math.ceil(width / WORKGROUP2), Math.ceil(height / WORKGROUP2));
+    resolve.end();
+    this.device.queue.submit([encoder.finish()]);
+    return this.frame;
+  }
+  destroy() {
+    this.core.destroy();
+    this.accum?.destroy();
+    this.frame?.destroy();
+    this.params.destroy();
+    this.resolveInfo.destroy();
+  }
+};
+async function captureReference(device, instances, draw, options) {
+  const width = Math.max(1, Math.min(MAX_CAPTURE_SIDE, Math.round(options.width)));
+  const height = Math.max(1, Math.min(MAX_CAPTURE_SIDE, Math.round(options.height)));
+  const samples = Math.max(1, Math.round(options.samples ?? 256));
+  const tile = Math.max(WORKGROUP2, Math.min(2048, Math.round(options.tile ?? 512)));
+  const core = new TracerCore(device);
+  core.setScene(instances);
+  const sky = core.setSky(draw.environment);
+  const lights = referenceLights(draw);
+  core.setLights(lights.data);
+  const { inv, eye } = cameraOf(draw);
+  const setup = { bounces: options.bounces ?? REFERENCE_BOUNCES, sky, lights, ambient: referenceAmbient(draw), clamp: options.clamp ?? 0, background: options.background ?? true, mapTable: core.mapTable };
+  const accum = device.createBuffer({ size: tile * tile * 16, usage: STORAGE2 | COPY_DST2 | COPY_SRC2 });
+  const params = device.createBuffer({ size: PARAMS_BYTES2, usage: UNIFORM3 | COPY_DST2 });
+  const readback = device.createBuffer({ size: tile * tile * 16, usage: MAP_READ2 | COPY_DST2 });
+  const rgba = new Uint8ClampedArray(width * height * 4);
+  const hdr = options.hdr ? new Float32Array(width * height * 4) : null;
+  const exposure = options.exposure ?? 1;
+  const mapper = options.toneMapper ?? "aces";
+  const tilesX = Math.ceil(width / tile);
+  const tilesY = Math.ceil(height / tile);
+  let done = 0;
+  try {
+    for (let ty = 0; ty < tilesY; ty += 1) {
+      for (let tx = 0; tx < tilesX; tx += 1) {
+        const x = tx * tile;
+        const y = ty * tile;
+        const tw = Math.min(tile, width - x);
+        const th = Math.min(tile, height - y);
+        const perSubmit = Math.max(1, Math.floor(CAPTURE_PATHS_PER_SUBMIT / (tw * th)));
+        const clear = device.createCommandEncoder();
+        clear.clearBuffer(accum);
+        device.queue.submit([clear.finish()]);
+        const group = core.traceGroup(accum, params);
+        for (let first = 0; first < samples; first += perSubmit) {
+          const take = Math.min(perSubmit, samples - first);
+          device.queue.writeBuffer(params, 0, pathTraceParams({ inv, eye }, { width, height, x, y, tileWidth: tw, tileHeight: th }, first, take, setup));
+          const encoder = device.createCommandEncoder();
+          const pass = encoder.beginComputePass();
+          pass.setPipeline(core.tracePipeline);
+          pass.setBindGroup(0, group);
+          pass.dispatchWorkgroups(Math.ceil(tw / WORKGROUP2), Math.ceil(th / WORKGROUP2));
+          pass.end();
+          device.queue.submit([encoder.finish()]);
+          await device.queue.onSubmittedWorkDone();
+          done += take * tw * th;
+          options.progress?.(done / (samples * width * height));
+        }
+        const copy = device.createCommandEncoder();
+        copy.copyBufferToBuffer(accum, 0, readback, 0, tw * th * 16);
+        device.queue.submit([copy.finish()]);
+        await readback.mapAsync(MAP_READ2, 0, tw * th * 16);
+        const sums = new Float32Array(readback.getMappedRange(0, tw * th * 16).slice(0));
+        readback.unmap();
+        for (let j = 0; j < th; j += 1) {
+          for (let i = 0; i < tw; i += 1) {
+            const s = (j * tw + i) * 4;
+            const o = ((y + j) * width + (x + i)) * 4;
+            const c = [sums[s] / samples, sums[s + 1] / samples, sums[s + 2] / samples];
+            const a = sums[s + 3] / samples;
+            if (hdr) hdr.set([c[0], c[1], c[2], a], o);
+            const shown = toneMap(mapper, [c[0] * exposure, c[1] * exposure, c[2] * exposure]);
+            rgba[o] = Math.round(srgbEncode(shown[0]) * 255);
+            rgba[o + 1] = Math.round(srgbEncode(shown[1]) * 255);
+            rgba[o + 2] = Math.round(srgbEncode(shown[2]) * 255);
+            rgba[o + 3] = Math.round(Math.min(1, a) * 255);
+          }
+        }
+      }
+    }
+  } finally {
+    core.destroy();
+    accum.destroy();
+    params.destroy();
+    readback.destroy();
+  }
+  return { width, height, rgba, hdr };
+}
+
 // src/render/probeCapture.ts
+import { MAX_REFLECTION_PROBES as MAX_REFLECTION_PROBES3, PANORAMA_FACES, probeOrder, projectionMatrix as projectionMatrix3, viewMatrix as viewMatrix4 } from "@cartbox/editor";
 var PROBE_FACE = 128;
 var PROBE_SAMPLES = 96;
 var PROBE_NEAR = 0.05;
@@ -20682,100 +22687,6 @@ fn sharpen(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
 `
 );
 
-// src/render/viewModes.ts
-var VIEW_MODES = [
-  { id: "lit", code: 0, label: "Lit", group: "Lighting", hint: "The frame as the game renders it." },
-  { id: "unlit", code: 1, label: "Unlit", group: "Lighting", hint: "Base colour and emission, with no light." },
-  { id: "lightingOnly", code: 7, label: "Lighting only", group: "Lighting", hint: "The light on a white, non-metal surface: direct, sky, bakes and GI." },
-  { id: "baseColor", code: 2, label: "Base colour", group: "Buffers", hint: "The albedo the surface shades with (maps, blends, detail and decals applied)." },
-  { id: "roughness", code: 3, label: "Roughness", group: "Buffers", hint: "Black is mirror-smooth, white fully rough." },
-  { id: "metallic", code: 4, label: "Metallic", group: "Buffers", hint: "Black is a dielectric, white a metal." },
-  { id: "normals", code: 5, label: "Normals", group: "Buffers", hint: "The shading normal in world space, normal maps applied (x red, y green, z blue)." },
-  { id: "ambientOcclusion", code: 6, label: "Ambient occlusion", group: "Buffers", hint: "The material's occlusion times GTAO's." },
-  { id: "motion", code: 8, label: "Motion vectors", group: "Buffers", hint: "Screen motion since last frame: hue is the direction, brightness the speed." },
-  { id: "shaderComplexity", code: 9, label: "Shader complexity", group: "Complexity", hint: "An estimate of the shading work each pixel runs, green to red to white." },
-  { id: "lightComplexity", code: 10, label: "Light complexity", group: "Complexity", hint: "How many lights each pixel loops over." },
-  { id: "overdraw", code: 11, label: "Overdraw", group: "Complexity", hint: "How many fragments shaded each pixel, depth ignored." },
-  { id: "lod", code: 12, label: "LOD", group: "Geometry", hint: "The level of detail drawn: white without a chain, then red, green, blue, yellow, magenta, cyan." },
-  { id: "texelDensity", code: 13, label: "Texel density", group: "Geometry", hint: "Base-colour texels per metre against the target: blue under, green on, red over." },
-  { id: "mipLevel", code: 14, label: "Mip level", group: "Geometry", hint: "The base colour's mip each pixel samples: 0 green, then yellow, red, magenta." },
-  { id: "cascades", code: 15, label: "Shadow cascades", group: "Geometry", hint: "The sun's cascade each pixel is shadowed from: red, green, blue, yellow." }
-];
-function viewModeCode(mode) {
-  return VIEW_MODES.find((m) => m.id === mode)?.code ?? 0;
-}
-function readViewMode(raw) {
-  return VIEW_MODES.some((m) => m.id === raw) ? raw : "lit";
-}
-var DEFAULT_TEXEL_DENSITY = 512;
-var SHADER_COMPLEXITY_FULL = 24;
-var LIGHT_COMPLEXITY_FULL = 16;
-var OVERDRAW_FULL = 12;
-function heat(t) {
-  const stops = [[0, 0, 0], [0, 0.25, 1], [0, 0.85, 0.2], [1, 0.9, 0], [1, 0.1, 0], [1, 1, 1]];
-  const x = Math.min(1, Math.max(0, t)) * (stops.length - 1);
-  const i = Math.min(stops.length - 2, Math.floor(x));
-  const f3 = x - i;
-  const a = stops[i], b = stops[i + 1];
-  return [a[0] + (b[0] - a[0]) * f3, a[1] + (b[1] - a[1]) * f3, a[2] + (b[2] - a[2]) * f3];
-}
-var VIEW_MODE_WGSL = (
-  /* wgsl */
-  `
-fn vmHeat(t: f32) -> vec3<f32> {
-  var stops = array<vec3<f32>, 6>(vec3<f32>(0.0), vec3<f32>(0.0, 0.25, 1.0), vec3<f32>(0.0, 0.85, 0.2), vec3<f32>(1.0, 0.9, 0.0), vec3<f32>(1.0, 0.1, 0.0), vec3<f32>(1.0));
-  let x = clamp(t, 0.0, 1.0) * 5.0;
-  let i = min(4, i32(floor(x)));
-  return mix(stops[i], stops[i + 1], x - f32(i));
-}
-// A display colour as light the frame encodes back to it (sRGB's inverse).
-fn vmLight(c: vec3<f32>) -> vec3<f32> {
-  let x = clamp(c, vec3<f32>(0.0), vec3<f32>(1.0));
-  return select(pow((x + vec3<f32>(0.055)) / 1.055, vec3<f32>(2.4)), x / 12.92, x <= vec3<f32>(0.04045));
-}
-fn vmPalette(i: i32) -> vec3<f32> {
-  var p = array<vec3<f32>, 7>(vec3<f32>(1.0, 0.2, 0.2), vec3<f32>(0.2, 0.9, 0.2), vec3<f32>(0.25, 0.4, 1.0), vec3<f32>(1.0, 0.9, 0.1), vec3<f32>(1.0, 0.2, 1.0), vec3<f32>(0.1, 0.9, 0.9), vec3<f32>(1.0, 0.6, 0.2));
-  return p[clamp(i, 0, 6)];
-}
-`
-);
-var VIEW_RESOLVE_WGSL = (
-  /* wgsl */
-  `
-@group(0) @binding(0) var<uniform> params: vec4<f32>;
-@group(0) @binding(1) var colourTex: texture_2d<f32>;
-@group(0) @binding(2) var velocityTex: texture_2d<f32>;
-@group(0) @binding(3) var gbufferTex: texture_2d<f32>;
-${VIEW_MODE_WGSL}
-@vertex
-fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4<f32> {
-  let p = vec2<f32>(f32((i << 1u) & 2u), f32(i & 2u));
-  return vec4<f32>(p * 2.0 - 1.0, 0.0, 1.0);
-}
-fn hue(h: f32) -> vec3<f32> {
-  let k = vec3<f32>(5.0, 3.0, 1.0);
-  return clamp(vec3<f32>(1.0) - clamp(min(fract(vec3<f32>(h) + k / 6.0) * 6.0, 4.0 - fract(vec3<f32>(h) + k / 6.0) * 6.0), vec3<f32>(0.0), vec3<f32>(1.0)), vec3<f32>(0.0), vec3<f32>(1.0));
-}
-@fragment
-fn resolve(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
-  let p = vec2<i32>(pos.xy);
-  if (params.x > 10.5) {
-    let n = textureLoad(colourTex, p, 0).r;
-    if (n <= 0.0) { return vec4<f32>(0.0); }
-    return vec4<f32>(vmLight(vmHeat(n / params.y)), 1.0);
-  }
-  if (textureLoad(gbufferTex, p, 0).w <= 0.0) { return vec4<f32>(0.0); }
-  // Screen motion in pixels: its direction as hue, its speed (to 32 px) as brightness.
-  let dims = vec2<f32>(textureDimensions(velocityTex));
-  let v = textureLoad(velocityTex, p, 0).xy * dims;
-  let speed = length(v);
-  let angle = atan2(-v.y, v.x) / 6.2831853 + 0.5;
-  let c = mix(vec3<f32>(0.08), hue(angle), clamp(speed / 32.0, 0.0, 1.0));
-  return vec4<f32>(vmLight(c), 1.0);
-}
-`
-);
-
 // src/render/ssgi.ts
 var SSGI_RAYS = 2;
 var SSGI_STEPS = 12;
@@ -21532,904 +23443,12 @@ var GpuAtmosphere = class {
 
 // src/render/dynamicGi.ts
 import { PROBE_NORMAL_BIAS, PROBE_SH as PROBE_SH2, PROBE_VOLUME_SLOTS } from "@cartbox/editor";
-
-// src/render/gpuLightmapper.ts
-import {
-  LIGHTMAP_RANGE as LIGHTMAP_RANGE2,
-  PROBE_DEPTH_SIDE,
-  PROBE_SH,
-  areaFrame as areaFrame3,
-  areaSize as areaSize3,
-  buildBvh,
-  dilateLightmapValues,
-  lightChannelMask as lightChannelMask3,
-  lightColor as lightColor3,
-  lightmapTexels,
-  spotCone as spotCone2,
-  stitchLightmapSeams
-} from "@cartbox/editor";
-var LIGHTMAP_MAX_BOUNCES = 8;
-var LIGHTMAP_MAX_LIGHTS = 4;
-var LIGHTMAP_MAX_LOCAL_LIGHTS = 256;
-var WORKGROUP = 64;
-var CHUNK_TEXELS = 65536;
-var PATHS_PER_SUBMIT = 1 << 19;
-function pathBudget(local) {
-  return Math.max(4096, Math.floor(PATHS_PER_SUBMIT / (1 + local / 16)));
-}
-var PARAMS_BYTES = 64;
-var LIGHT_VEC4S = 5;
-var PROBE_ACC_VEC4S = 10 + PROBE_DEPTH_SIDE * PROBE_DEPTH_SIDE;
-var ACC_FLOATS = 16;
-var STORAGE = 128;
-var COPY_DST = 8;
-var COPY_SRC = 4;
-var MAP_READ = 1;
-var UNIFORM2 = 64;
-function toLinear(c) {
-  const v = Math.max(0, c);
-  return v <= 0.04045 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4;
-}
-function bakeLights(lights) {
-  return lights.map((l) => {
-    const c = lightColor3(l);
-    return { ...l, radiance: [toLinear(c[0]) * l.intensity, toLinear(c[1]) * l.intensity, toLinear(c[2]) * l.intensity] };
-  });
-}
-var BAKE_LIGHT_KIND = { directional: 0, point: 1, spot: 2, rect: 3, disk: 4, tube: 5 };
-function packBakeLights(lights) {
-  const directional = lights.filter((l) => (l.kind ?? "directional") === "directional" && l.direction).slice(0, LIGHTMAP_MAX_LIGHTS);
-  const local = lights.filter((l) => l.kind !== void 0 && l.kind !== "directional").slice(0, LIGHTMAP_MAX_LOCAL_LIGHTS);
-  const data = new Float32Array(Math.max(1, directional.length + local.length) * LIGHT_VEC4S * 4);
-  [...directional, ...local].forEach((light, i) => {
-    const o = i * LIGHT_VEC4S * 4;
-    const kind = light.kind ?? "directional";
-    const channels = lightChannelMask3(light.channels ?? 1);
-    data.set([...light.radiance, channels], o + 4);
-    if (kind === "directional") {
-      const [x, y, z] = light.direction;
-      const len = Math.hypot(x, y, z) || 1;
-      data.set([x / len, y / len, z / len, BAKE_LIGHT_KIND.directional], o);
-      return;
-    }
-    data.set([...light.position ?? [0, 0, 0], kind === "area" ? BAKE_LIGHT_KIND[light.shape ?? "rect"] : BAKE_LIGHT_KIND[kind]], o);
-    if (kind === "area") {
-      const [w, h] = areaSize3(light);
-      const frame = areaFrame3(light);
-      data.set([0, w / 2, h / 2, 1], o + 8);
-      data.set([...frame.normal, 0], o + 12);
-      data.set([...frame.tangent, 0], o + 16);
-      return;
-    }
-    data[o + 8] = light.range ?? 0;
-    data[o + 11] = light.falloff === "inverseSquare" ? 1 : 0;
-    if (kind === "spot") {
-      const [cosOuter, cosInner] = spotCone2(light);
-      const axis = light.direction ?? [0, -1, 0];
-      const len = Math.hypot(axis[0], axis[1], axis[2]) || 1;
-      data.set([cosOuter, cosInner], o + 9);
-      data.set([axis[0] / len, axis[1] / len, axis[2] / len, 0], o + 12);
-    }
-  });
-  return { data, directional: directional.length, local: local.length };
-}
-async function bakeSurfaces(mesh, decode) {
-  const read = (image, data) => image && image.bytes.length > 0 ? decode(image, data).catch(() => null) : Promise.resolve(null);
-  return Promise.all(
-    mesh.primitives.map(async ({ material: m }) => {
-      const [base, metallicRoughness] = await Promise.all([read(m.baseColorImage, false), read(m.metallicRoughnessImage, true)]);
-      const pbr = resolvePbr(m, metallicRoughness !== null, !!m.occlusionImage, !!m.emissiveImage);
-      return { base, metallicRoughness, metallic: pbr.isPbr ? pbr.metallic : 0, roughness: pbr.roughness };
-    })
-  );
-}
-function packLightmapScene(occluders) {
-  const bvh = buildBvh(occluders);
-  const triangles = bvh.order.length;
-  const nodeCount = bvh.meta.length / 3;
-  const nodes = new Uint32Array(Math.max(1, nodeCount) * 8);
-  const bits = new Float32Array(nodes.buffer);
-  if (nodeCount === 0) {
-    bits.set([1, 1, 1], 0);
-    bits.set([-1, -1, -1], 4);
-    nodes[3] = 4294967295;
-  }
-  for (let n = 0; n < nodeCount; n += 1) {
-    for (let a = 0; a < 3; a += 1) {
-      bits[n * 8 + a] = bvh.nodes[n * 6 + a];
-      bits[n * 8 + 4 + a] = bvh.nodes[n * 6 + 3 + a];
-    }
-    const left = bvh.meta[n * 3];
-    nodes[n * 8 + 3] = (left >= 0 ? left : -1 - bvh.meta[n * 3 + 2]) >>> 0;
-    nodes[n * 8 + 7] = bvh.meta[n * 3 + 1] >>> 0;
-  }
-  const tris = new Float32Array(Math.max(1, triangles) * 12);
-  const mats = new Float32Array(Math.max(1, triangles) * 8);
-  const matBits = new Uint32Array(mats.buffer);
-  for (let i = 0; i < triangles; i += 1) {
-    const t = bvh.order[i];
-    const k = t * 9;
-    const metal = Math.min(1, Math.max(0, bvh.mr[t * 2]));
-    const bounce = 1 - metal + metal * Math.min(1, Math.max(0, bvh.mr[t * 2 + 1]));
-    for (let a = 0; a < 3; a += 1) {
-      tris[i * 12 + a * 4 + 3] = bvh.front[t * 3 + a];
-      tris[i * 12 + a] = bvh.tri[k + a];
-      tris[i * 12 + 4 + a] = bvh.tri[k + 3 + a] - bvh.tri[k + a];
-      tris[i * 12 + 8 + a] = bvh.tri[k + 6 + a] - bvh.tri[k + a];
-      mats[i * 8 + a] = toLinear(bvh.col[t * 3 + a]) * bounce;
-      mats[i * 8 + 4 + a] = toLinear(bvh.emi[t * 3 + a]);
-    }
-    matBits[i * 8 + 3] = bvh.channels[t];
-  }
-  return { nodes, tris, mats, triangles };
-}
-var LIGHTMAP_TRACE_WGSL = (
-  /* wgsl */
-  `
-struct Params {
-  run: vec4<u32>,   // x = first texel, y = texels, z = first sample, w = samples this pass
-  info: vec4<u32>,  // x = bounces, y = directional lights, z = sky width, w = sky height
-  total: vec4<u32>, // x = samples in all, y = point, spot and area lights (F3d-4)
-  extra: vec4<f32>, // x = a probe's depth cap (F3d-3)
-};
-@group(0) @binding(0) var<storage, read> nodes: array<vec4<u32>>;
-@group(0) @binding(1) var<storage, read> tris: array<vec4<f32>>;
-@group(0) @binding(2) var<storage, read> mats: array<vec4<f32>>;
-@group(0) @binding(3) var<storage, read> texels: array<vec4<f32>>;
-@group(0) @binding(4) var<storage, read_write> accum: array<vec4<f32>>;
-@group(0) @binding(5) var<storage, read> sky: array<vec4<f32>>;
-@group(0) @binding(6) var<uniform> params: Params;
-@group(0) @binding(7) var<storage, read> lights: array<vec4<f32>>;
-
-const PI = 3.14159265;
-// How far a ray starts off its surface, and the nearest hit it takes (metres).
-const EPS = 0.005;
-const T_MIN = 1e-4;
-const FAR = 1e30;
-
-struct Hit {
-  t: f32,
-  tri: i32,
-};
-
-// The closest hit along o + t\xB7d within tMax (or, with anyHit, the first found).
-fn trace(o: vec3<f32>, d: vec3<f32>, tMax: f32, anyHit: bool) -> Hit {
-  var best = Hit(tMax, -1);
-  let tiny = abs(d) < vec3<f32>(1e-9);
-  let inv = 1.0 / select(d, select(vec3<f32>(-1e-9), vec3<f32>(1e-9), d >= vec3<f32>(0.0)), tiny);
-  var stack: array<u32, 64>;
-  var sp = 1u;
-  stack[0] = 0u;
-  loop {
-    if (sp == 0u) { break; }
-    sp = sp - 1u;
-    let n = stack[sp];
-    let a = nodes[n * 2u];
-    let b = nodes[n * 2u + 1u];
-    let t0 = (bitcast<vec3<f32>>(a.xyz) - o) * inv;
-    let t1 = (bitcast<vec3<f32>>(b.xyz) - o) * inv;
-    let lo = min(t0, t1);
-    let hi = max(t0, t1);
-    let tn = max(max(lo.x, lo.y), max(lo.z, 0.0));
-    let tf = min(min(hi.x, hi.y), min(hi.z, best.t));
-    if (tn > tf) { continue; }
-    let left = bitcast<i32>(a.w);
-    if (left >= 0) {
-      if (sp + 2u <= 64u) {
-        stack[sp] = u32(left);
-        stack[sp + 1u] = b.w;
-        sp = sp + 2u;
-      }
-      continue;
-    }
-    let first = b.w;
-    let count = u32(-1 - left);
-    for (var i = first; i < first + count; i = i + 1u) {
-      // M\xF6ller\u2013Trumbore.
-      let v0 = tris[i * 3u].xyz;
-      let e1 = tris[i * 3u + 1u].xyz;
-      let e2 = tris[i * 3u + 2u].xyz;
-      let p = cross(d, e2);
-      let det = dot(e1, p);
-      if (abs(det) < 1e-12) { continue; }
-      let id = 1.0 / det;
-      let s = o - v0;
-      let u = dot(s, p) * id;
-      if (u < 0.0 || u > 1.0) { continue; }
-      let q = cross(s, e1);
-      let v = dot(d, q) * id;
-      if (v < 0.0 || u + v > 1.0) { continue; }
-      let t = dot(e2, q) * id;
-      if (t > T_MIN && t < best.t) {
-        best = Hit(t, i32(i));
-        if (anyHit) { return best; }
-      }
-    }
-  }
-  return best;
-}
-
-fn pcg(v: u32) -> u32 {
-  let s = v * 747796405u + 2891336453u;
-  let w = ((s >> ((s >> 28u) + 4u)) ^ s) * 277803737u;
-  return (w >> 22u) ^ w;
-}
-var<private> rng: u32;
-fn rand() -> f32 {
-  rng = pcg(rng);
-  return f32(rng >> 8u) / 16777216.0;
-}
-fn radicalInverse(i: u32) -> f32 {
-  return f32(reverseBits(i)) * 2.3283064365386963e-10;
-}
-
-// A cosine-weighted direction about n (Duff et al.'s branchless frame).
-fn cosineDir(n: vec3<f32>, xi: vec2<f32>) -> vec3<f32> {
-  let r = sqrt(xi.x);
-  let phi = 2.0 * PI * xi.y;
-  let sg = select(-1.0, 1.0, n.z >= 0.0);
-  let a = -1.0 / (sg + n.z);
-  let b = n.x * n.y * a;
-  let t = vec3<f32>(1.0 + sg * n.x * n.x * a, sg * b, -sg * n.x);
-  let bt = vec3<f32>(b, sg + n.y * n.y * a, -n.y);
-  return normalize(t * (r * cos(phi)) + bt * (r * sin(phi)) + n * sqrt(max(0.0, 1.0 - xi.x)));
-}
-
-// The sky along d: the panorama's texel (u around from \u2212x, v down from the zenith, as the IBL reads it).
-fn skyAt(d: vec3<f32>) -> vec3<f32> {
-  let w = params.info.z;
-  let h = params.info.w;
-  if (w == 0u) { return vec3<f32>(0.0); }
-  let u = atan2(d.z, d.x) / (2.0 * PI) + 0.5;
-  let v = acos(clamp(d.y, -1.0, 1.0)) / PI;
-  let x = min(u32(max(u, 0.0) * f32(w)), w - 1u);
-  let y = min(u32(max(v, 0.0) * f32(h)), h - 1u);
-  return sky[y * w + x].rgb;
-}
-
-fn lum(c: vec3<f32>) -> f32 {
-  return dot(c, vec3<f32>(0.2126, 0.7152, 0.0722));
-}
-
-// A unit direction's octahedral texel (probeVolume.ts's octTexel).
-fn octTexel(d: vec3<f32>) -> u32 {
-  var e = d.xz / (abs(d.x) + abs(d.y) + abs(d.z));
-  if (d.y < 0.0) { e = (vec2<f32>(1.0) - abs(e.yx)) * select(vec2<f32>(-1.0), vec2<f32>(1.0), e >= vec2<f32>(0.0)); }
-  let uv = e * 0.5 + vec2<f32>(0.5);
-  let x = min(u32(uv.x * ${PROBE_DEPTH_SIDE}.0), ${PROBE_DEPTH_SIDE - 1}u);
-  let y = min(u32(uv.y * ${PROBE_DEPTH_SIDE}.0), ${PROBE_DEPTH_SIDE - 1}u);
-  return y * ${PROBE_DEPTH_SIDE}u + x;
-}
-
-// A light's record (packBakeLights): five vec4s from its first.
-fn lightAt(l: u32, k: u32) -> vec4<f32> {
-  return lights[l * ${LIGHT_VEC4S}u + k];
-}
-
-// Whether light l lights a surface on the channels \`mask\` (F2e).
-fn lightsMask(l: u32, mask: u32) -> bool {
-  return (u32(lightAt(l, 1u).w + 0.5) & mask) != 0u;
-}
-
-// A point or spot light's falloff toward a point d away along Ld (the renderers' distanceFalloff, and the shader's cone).
-fn punctualAtten(l: u32, d: f32, Ld: vec3<f32>) -> f32 {
-  let r = lightAt(l, 2u);
-  var atten = 1.0;
-  if (r.w > 0.5) {
-    var win = 1.0;
-    if (r.x > 0.0) { let q = d / r.x; let t = clamp(1.0 - q * q * q * q, 0.0, 1.0); win = t * t; }
-    let dm = max(d, 0.01);
-    atten = win / (dm * dm);
-  } else if (r.x > 0.0) {
-    let t = max(0.0, 1.0 - d / r.x);
-    atten = t * t;
-  }
-  if (lightAt(l, 0u).w > 1.5) {
-    let ct = clamp((-dot(Ld, lightAt(l, 3u).xyz) - r.y) / (r.z - r.y), 0.0, 1.0);
-    atten = atten * ct * ct * (3.0 - 2.0 * ct);
-  }
-  return atten;
-}
-
-// What local light l would give a surface at p facing n, unshadowed, by luminance: how likely it is to be picked.
-// An area light is taken as the point at its centre it is from far off.
-fn localWeight(l: u32, p: vec3<f32>, n: vec3<f32>, mask: u32) -> f32 {
-  if (!lightsMask(l, mask)) { return 0.0; }
-  let a = lightAt(l, 0u);
-  let toL = a.xyz - p;
-  let d = max(length(toL), 1e-4);
-  let Ld = toL / d;
-  let ndl = max(dot(n, Ld), 0.0);
-  let power = lum(lightAt(l, 1u).rgb);
-  if (a.w < 2.5) { return power * punctualAtten(l, d, Ld) * ndl; }
-  let r = lightAt(l, 2u);
-  var area = 4.0 * r.y * r.z;
-  var facing = 1.0;
-  if (a.w > 4.5) { area = 2.0 * r.y * 2.0 * r.z + PI * r.z * r.z; }
-  else {
-    facing = max(-dot(Ld, lightAt(l, 3u).xyz), 0.0);
-    if (a.w > 3.5) { area = PI * r.y * r.y; }
-  }
-  let dm = max(d, 0.1);
-  return power * area * facing * max(ndl, 0.05) / (PI * dm * dm);
-}
-
-struct LightSample {
-  c: vec3<f32>,  // what it gives the surface, unshadowed
-  dir: vec3<f32>,
-  dist: f32,
-};
-
-// Local light l's light on a surface at p facing n: a point or spot light's, or an area light's through one point
-// on it (uniform on its rectangle or disk, or on the rectangle a tube shows p, as the LTC shader takes it).
-fn localSample(l: u32, p: vec3<f32>, n: vec3<f32>) -> LightSample {
-  var out = LightSample(vec3<f32>(0.0), vec3<f32>(0.0, 1.0, 0.0), 0.0);
-  let a = lightAt(l, 0u);
-  let rad = lightAt(l, 1u).rgb;
-  if (a.w < 2.5) {
-    let toL = a.xyz - p;
-    let d = max(length(toL), 1e-4);
-    out.dir = toL / d;
-    out.dist = d;
-    out.c = rad * punctualAtten(l, d, out.dir) * max(dot(n, out.dir), 0.0);
-    return out;
-  }
-  let r = lightAt(l, 2u);
-  let tan = lightAt(l, 4u).xyz;
-  var nrm = lightAt(l, 3u).xyz;
-  var hw = r.y;
-  let hh = r.z;
-  let toP = p - a.xyz;
-  if (a.w > 4.5) {
-    let off = toP - tan * dot(toP, tan);
-    nrm = select(normalize(cross(tan, select(vec3<f32>(1.0, 0.0, 0.0), vec3<f32>(0.0, 1.0, 0.0), abs(tan.y) < 0.9))), normalize(off), length(off) > 1e-5);
-    hw = hw + 0.78539816 * hh;
-  } else if (dot(toP, nrm) <= 0.0) {
-    return out;
-  }
-  let bt = cross(nrm, tan);
-  let xi = vec2<f32>(rand(), rand());
-  var s: vec3<f32>;
-  var area: f32;
-  if (a.w > 3.5 && a.w < 4.5) {
-    let rr = hw * sqrt(xi.x);
-    let phi = 2.0 * PI * xi.y;
-    s = a.xyz + tan * (rr * cos(phi)) + bt * (rr * sin(phi));
-    area = PI * hw * hw;
-  } else {
-    s = a.xyz + tan * (hw * (2.0 * xi.x - 1.0)) + bt * (hh * (2.0 * xi.y - 1.0));
-    area = 4.0 * hw * hh;
-  }
-  let toS = s - p;
-  let d = max(length(toS), 1e-4);
-  out.dir = toS / d;
-  out.dist = d;
-  let cosS = dot(n, out.dir);
-  let cosL = -dot(out.dir, nrm);
-  if (cosS > 0.0 && cosL > 0.0) { out.c = rad * (cosS * cosL * area / (PI * max(d * d, 1e-4))); }
-  return out;
-}
-
-// The lights on a surface a path bounced off at p, facing n, on the channels \`mask\`: every directional light, and one
-// local light picked by localWeight (a tenth of the choice spread evenly), over the chance of picking it.
-fn lightsOn(p: vec3<f32>, n: vec3<f32>, mask: u32) -> vec3<f32> {
-  var L = vec3<f32>(0.0);
-  let directional = params.info.y;
-  for (var l = 0u; l < directional; l = l + 1u) {
-    if (!lightsMask(l, mask)) { continue; }
-    let Ld = lightAt(l, 0u).xyz;
-    let ndl = dot(n, Ld);
-    if (ndl > 0.0 && trace(p, Ld, FAR, true).tri < 0) {
-      L = L + lightAt(l, 1u).rgb * ndl;
-    }
-  }
-  let local = params.total.y;
-  if (local == 0u) { return L; }
-  var total = 0.0;
-  for (var k = 0u; k < local; k = k + 1u) { total = total + localWeight(directional + k, p, n, mask); }
-  let even = select(1.0, 0.1, total > 0.0) / f32(local);
-  let spread = select(0.0, 0.9 / total, total > 0.0);
-  let u = rand();
-  var pick = local - 1u;
-  var pdf = 0.0;
-  var cdf = 0.0;
-  for (var k = 0u; k < local; k = k + 1u) {
-    pdf = localWeight(directional + k, p, n, mask) * spread + even;
-    cdf = cdf + pdf;
-    if (u < cdf) { pick = k; break; }
-  }
-  if (pick == local - 1u) { pdf = localWeight(directional + pick, p, n, mask) * spread + even; }
-  let l = directional + pick;
-  if (!lightsMask(l, mask)) { return L; }
-  let ls = localSample(l, p, n);
-  if (max(ls.c.r, max(ls.c.g, ls.c.b)) > 0.0 && trace(p, ls.dir, ls.dist - EPS, true).tri < 0) {
-    L = L + ls.c / pdf;
-  }
-  return L;
-}
-
-struct Path {
-  L: vec3<f32>,
-  // The first segment's hit distance (FAR when it reached the sky), and whether it met the back of a surface (F3d-2).
-  t: f32,
-  back: bool,
-};
-
-// What a path from o along d brings back: the sky on a miss; on a hit, the surface's emission, and (while
-// bounces remain) the lights on it and what a cosine-weighted bounce off it gathers.
-fn pathFrom(origin: vec3<f32>, dir: vec3<f32>) -> Path {
-  let bounces = params.info.x;
-  var out = Path(vec3<f32>(0.0), FAR, false);
-  var tp = vec3<f32>(1.0);
-  var o = origin;
-  var d = dir;
-  for (var b = 0u; b <= bounces; b = b + 1u) {
-    let h = trace(o, d, FAR, false);
-    if (h.tri < 0) {
-      out.L = out.L + tp * skyAt(d);
-      break;
-    }
-    let i = u32(h.tri);
-    if (b == 0u) {
-      out.t = h.t;
-      out.back = dot(d, vec3<f32>(tris[i * 3u].w, tris[i * 3u + 1u].w, tris[i * 3u + 2u].w)) > 0.0;
-    }
-    out.L = out.L + tp * mats[i * 2u + 1u].rgb;
-    if (b == bounces) { break; }
-    var n = normalize(cross(tris[i * 3u + 1u].xyz, tris[i * 3u + 2u].xyz));
-    if (dot(n, d) > 0.0) { n = -n; } // the side the path arrived on (surfaces are two-sided)
-    let hp = o + d * h.t + n * EPS;
-    tp = tp * mats[i * 2u].rgb;
-    out.L = out.L + tp * lightsOn(hp, n, bitcast<u32>(mats[i * 2u].w));
-    if (max(tp.r, max(tp.g, tp.b)) < 1e-4) { break; }
-    o = hp;
-    d = cosineDir(n, vec2<f32>(rand(), rand()));
-  }
-  return out;
-}
-
-@compute @workgroup_size(${WORKGROUP})
-fn main(@builtin(global_invocation_id) id: vec3<u32>) {
-  if (id.x >= params.run.y) { return; }
-  let j = params.run.x + id.x;
-  let P = texels[j * 2u].xyz;
-  let Ng = normalize(texels[j * 2u + 1u].xyz);
-  // The first bounce's directions: one stratified set for the bake, turned per texel (Cranley\u2013Patterson).
-  let turn = vec2<f32>(f32(pcg(j * 2u + 1u) >> 8u), f32(pcg(j * 2u + 2u) >> 8u)) / 16777216.0;
-  var e = vec3<f32>(0.0);
-  var dirSum = vec3<f32>(0.0);
-  var lumSum = 0.0;
-  var skyRef = vec3<f32>(0.0);
-  var skyOpen = 0.0;
-  var lumSq = 0.0;
-  var backs = 0.0;
-  for (var k = 0u; k < params.run.w; k = k + 1u) {
-    let s = params.run.z + k;
-    rng = pcg(j ^ pcg(s + 0x9e3779b9u));
-    let xi = fract(vec2<f32>(f32(s) / f32(params.total.x), radicalInverse(s)) + turn);
-    let d0 = cosineDir(Ng, xi);
-    let sky0 = skyAt(d0);
-    skyRef = skyRef + sky0;
-    let path = pathFrom(P + Ng * EPS, d0);
-    if (path.t >= FAR) { skyOpen = skyOpen + lum(sky0); }
-    if (path.back) { backs = backs + 1.0; }
-    e = e + path.L;
-    let y = lum(path.L);
-    dirSum = dirSum + d0 * y;
-    lumSum = lumSum + y;
-    lumSq = lumSq + y * y;
-  }
-  accum[j * 4u] = accum[j * 4u] + vec4<f32>(e, 0.0);
-  accum[j * 4u + 1u] = accum[j * 4u + 1u] + vec4<f32>(dirSum, lumSum);
-  accum[j * 4u + 2u] = accum[j * 4u + 2u] + vec4<f32>(skyRef, skyOpen);
-  accum[j * 4u + 3u] = accum[j * 4u + 3u] + vec4<f32>(lumSq, backs, 0.0, 0.0);
-}
-
-// A probe (F3d-3): rays over the whole sphere (a Fibonacci set for the bake, turned per probe about the
-// vertical), projected onto L2 SH; the sky's share; backs met; and per octahedral texel the distance the
-// first segment travelled (capped), with its square.
-@compute @workgroup_size(${WORKGROUP})
-fn probeMain(@builtin(global_invocation_id) id: vec3<u32>) {
-  if (id.x >= params.run.y) { return; }
-  let p = params.run.x + id.x;
-  let P = texels[p].xyz;
-  let total = params.total.x;
-  let reach = params.extra.x;
-  let turn = f32(pcg(p * 2u + 11u) >> 8u) / 16777216.0 * 2.0 * PI;
-  var sh = array<vec3<f32>, 9>();
-  var skyRef = 0.0;
-  var skyOpen = 0.0;
-  var backs = 0.0;
-  let base = p * ${PROBE_ACC_VEC4S}u;
-  for (var k = 0u; k < params.run.w; k = k + 1u) {
-    let s = params.run.z + k;
-    rng = pcg(p ^ pcg(s + 0x85ebca6bu));
-    let y = 1.0 - (2.0 * f32(s) + 1.0) / f32(total);
-    let r = sqrt(max(0.0, 1.0 - y * y));
-    let phi = f32(s) * 2.39996323 + turn;
-    let d = vec3<f32>(r * cos(phi), y, r * sin(phi));
-    let path = pathFrom(P, d);
-    let L = path.L;
-    sh[0] = sh[0] + L * 0.282095;
-    sh[1] = sh[1] + L * (0.488603 * d.y);
-    sh[2] = sh[2] + L * (0.488603 * d.z);
-    sh[3] = sh[3] + L * (0.488603 * d.x);
-    sh[4] = sh[4] + L * (1.092548 * d.x * d.y);
-    sh[5] = sh[5] + L * (1.092548 * d.y * d.z);
-    sh[6] = sh[6] + L * (0.315392 * (3.0 * d.z * d.z - 1.0));
-    sh[7] = sh[7] + L * (1.092548 * d.x * d.z);
-    sh[8] = sh[8] + L * (0.546274 * (d.x * d.x - d.y * d.y));
-    let sl = lum(skyAt(d));
-    skyRef = skyRef + sl;
-    if (path.t >= FAR) { skyOpen = skyOpen + sl; }
-    if (path.back) { backs = backs + 1.0; }
-    let t = min(path.t, reach);
-    let texel = octTexel(d);
-    accum[base + 10u + texel] = accum[base + 10u + texel] + vec4<f32>(t, t * t, 1.0, 0.0);
-  }
-  for (var c = 0u; c < 9u; c = c + 1u) { accum[base + c] = accum[base + c] + vec4<f32>(sh[c], 0.0); }
-  accum[base + 9u] = accum[base + 9u] + vec4<f32>(skyRef, skyOpen, backs, f32(params.run.w));
-}
-`
-);
-var luminance = (r, g, b) => 0.2126 * r + 0.7152 * g + 0.0722 * b;
-function lightmapParams(first, texels, firstSample, samples, total, bounces, sky, lights, reach = 0) {
-  const buffer = new ArrayBuffer(PARAMS_BYTES);
-  new Uint32Array(buffer).set([first, texels, firstSample, samples, bounces, lights.directional, sky?.width ?? 0, sky?.height ?? 0, total, lights.local], 0);
-  new Float32Array(buffer)[12] = reach;
-  return buffer;
-}
-async function bakeLightmapGpu(device, layout, occluders, options = {}, progress) {
-  const samples = Math.max(1, Math.round(options.samples ?? 256));
-  const bounces = Math.max(0, Math.min(LIGHTMAP_MAX_BOUNCES, Math.round(options.bounces ?? 3)));
-  const sky = options.sky ?? null;
-  const lights = packBakeLights(options.lights ?? []);
-  const texels = lightmapTexels(layout);
-  const count = texels.index.length;
-  const acc = new Float32Array(count * ACC_FLOATS);
-  if (count > 0) {
-    const scene = packLightmapScene(occluders);
-    const points = new Float32Array(count * 8);
-    for (let j = 0; j < count; j += 1) {
-      for (let a = 0; a < 3; a += 1) {
-        points[j * 8 + a] = texels.position[j * 3 + a];
-        points[j * 8 + 4 + a] = texels.normal[j * 3 + a];
-      }
-    }
-    const upload = (data) => {
-      const buffer = device.createBuffer({ size: Math.max(16, data.byteLength), usage: STORAGE | COPY_DST });
-      device.queue.writeBuffer(buffer, 0, data.buffer, data.byteOffset, data.byteLength);
-      return buffer;
-    };
-    const skyData = sky ? sky.data : new Float32Array(4);
-    const buffers = [upload(scene.nodes), upload(scene.tris), upload(scene.mats), upload(points)];
-    const accum = device.createBuffer({ size: acc.byteLength, usage: STORAGE | COPY_SRC });
-    const skyBuffer = upload(skyData);
-    const lightBuffer = upload(lights.data);
-    const params = device.createBuffer({ size: PARAMS_BYTES, usage: UNIFORM2 | COPY_DST });
-    const readback = device.createBuffer({ size: acc.byteLength, usage: MAP_READ | COPY_DST });
-    try {
-      const pipeline = device.createComputePipeline({ layout: "auto", compute: { module: device.createShaderModule({ code: LIGHTMAP_TRACE_WGSL }), entryPoint: "main" } });
-      const group = device.createBindGroup({
-        layout: pipeline.getBindGroupLayout(0),
-        entries: [...buffers, accum, skyBuffer].map((buffer, binding) => ({ binding, resource: { buffer } })).concat([{ binding: 6, resource: { buffer: params } }, { binding: 7, resource: { buffer: lightBuffer } }])
-      });
-      const budget = pathBudget(lights.local);
-      const chunk = Math.min(count, CHUNK_TEXELS, budget);
-      const perPass = Math.max(1, Math.min(samples, Math.floor(budget / chunk)));
-      const submits = Math.ceil(samples / perPass) * Math.ceil(count / chunk);
-      let done = 0;
-      for (let s = 0; s < samples; s += perPass) {
-        const n = Math.min(perPass, samples - s);
-        for (let first = 0; first < count; first += chunk) {
-          const texelsHere = Math.min(chunk, count - first);
-          device.queue.writeBuffer(params, 0, lightmapParams(first, texelsHere, s, n, samples, bounces, sky, lights));
-          const encoder2 = device.createCommandEncoder();
-          const pass = encoder2.beginComputePass();
-          pass.setPipeline(pipeline);
-          pass.setBindGroup(0, group);
-          pass.dispatchWorkgroups(Math.ceil(texelsHere / WORKGROUP));
-          pass.end();
-          device.queue.submit([encoder2.finish()]);
-          await device.queue.onSubmittedWorkDone();
-          done += 1;
-          progress?.(done / submits);
-        }
-      }
-      const encoder = device.createCommandEncoder();
-      encoder.copyBufferToBuffer(accum, 0, readback, 0, acc.byteLength);
-      device.queue.submit([encoder.finish()]);
-      await readback.mapAsync(MAP_READ);
-      acc.set(new Float32Array(readback.getMappedRange()));
-      readback.unmap();
-    } finally {
-      for (const buffer of [...buffers, accum, skyBuffer, lightBuffer, params, readback]) buffer.destroy();
-    }
-  }
-  const atlas = resolveLightmap(texels, acc, samples, options.backfaceLimit ?? 0.6);
-  if (count > 0 && options.denoise !== false) await denoiseLightmap(device, atlas, 1 / layout.density);
-  progress?.(1);
-  return finishLightmap(layout, atlas, options.stitch !== false);
-}
-function resolveLightmap(texels, acc, samples, backfaceLimit) {
-  const { size, index } = texels;
-  const values = new Float32Array(size * size * 12);
-  const guide = new Float32Array(size * size * 8);
-  const valid = new Int32Array(size * size).fill(-1);
-  let invalid = 0;
-  for (let j = 0; j < index.length; j += 1) {
-    const i = index[j];
-    const o = j * ACC_FLOATS;
-    if (acc[o + 13] > backfaceLimit * samples) {
-      invalid += 1;
-      continue;
-    }
-    valid[i] = texels.chart[i];
-    const v = i * 12;
-    for (let c = 0; c < 3; c += 1) values[v + c] = acc[o + c] / samples;
-    const mean = acc[o + 7] / samples;
-    values[v + 3] = Math.max(0, acc[o + 12] / samples - mean * mean) / samples;
-    const w = acc[o + 7];
-    for (let c = 0; c < 3; c += 1) values[v + 4 + c] = w > 1e-12 ? acc[o + 4 + c] / w : 0;
-    const ref = luminance(acc[o + 8], acc[o + 9], acc[o + 10]);
-    values[v + 7] = ref > 1e-12 ? Math.min(1, acc[o + 11] / ref) : 1;
-    for (let c = 0; c < 3; c += 1) {
-      const open = acc[o + 8 + c] / samples;
-      values[v + 8 + c] = open > 1e-6 ? Math.min(LIGHTMAP_RANGE2, values[v + c] / open) : 1;
-    }
-    for (let c = 0; c < 3; c += 1) {
-      guide[i * 8 + c] = texels.position[j * 3 + c];
-      guide[i * 8 + 4 + c] = texels.normal[j * 3 + c];
-    }
-    guide[i * 8 + 3] = 1;
-  }
-  return { size, values, valid, guide, invalid };
-}
-var DENOISE_PASSES = 4;
-var DENOISE_SIGMA = 1.5;
-var LIGHTMAP_DENOISE_WGSL = (
-  /* wgsl */
-  `
-struct Params {
-  size: u32,
-  step: u32,
-  texel: f32, // world units per texel
-  sigma: f32,
-};
-@group(0) @binding(0) var<storage, read> guide: array<vec4<f32>>;
-@group(0) @binding(1) var<storage, read> src: array<vec4<f32>>;
-@group(0) @binding(2) var<storage, read_write> dst: array<vec4<f32>>;
-@group(0) @binding(3) var<uniform> params: Params;
-
-fn lum(c: vec3<f32>) -> f32 {
-  return dot(c, vec3<f32>(0.2126, 0.7152, 0.0722));
-}
-
-@compute @workgroup_size(8, 8, 1)
-fn main(@builtin(global_invocation_id) id: vec3<u32>) {
-  let size = params.size;
-  if (id.x >= size || id.y >= size) { return; }
-  let i = id.y * size + id.x;
-  let a0 = src[i * 3u];
-  let a1 = src[i * 3u + 1u];
-  let a2 = src[i * 3u + 2u];
-  let g = guide[i * 2u];
-  if (g.w < 0.5) {
-    dst[i * 3u] = a0;
-    dst[i * 3u + 1u] = a1;
-    dst[i * 3u + 2u] = a2;
-    return;
-  }
-  let p = g.xyz;
-  let n = guide[i * 2u + 1u].xyz;
-  let l = lum(a0.rgb);
-  // The variance the luminance stop is scaled by, prefiltered over the texel's 3\xD73 (SVGF): a few paths' estimate is noisy itself.
-  var vsum = 0.0;
-  var vw = 0.0;
-  for (var vy = -1; vy <= 1; vy = vy + 1) {
-    for (var vx = -1; vx <= 1; vx = vx + 1) {
-      let qx = i32(id.x) + vx;
-      let qy = i32(id.y) + vy;
-      if (qx < 0 || qy < 0 || qx >= i32(size) || qy >= i32(size)) { continue; }
-      let j = u32(qy) * size + u32(qx);
-      if (guide[j * 2u].w < 0.5) { continue; }
-      let k = select(0.5, 1.0, vx == 0) * select(0.5, 1.0, vy == 0);
-      vsum = vsum + src[j * 3u].w * k;
-      vw = vw + k;
-    }
-  }
-  let sigma = params.sigma * sqrt(max(vsum / vw, 0.0)) + 1e-4;
-  // Farther than this in the world, a texel the kernel reaches is on another chart that merely sits beside this one in the atlas.
-  let reach = (2.83 * f32(params.step) + 1.5) * params.texel;
-  var kernel = array<f32, 5>(0.0625, 0.25, 0.375, 0.25, 0.0625);
-  var s0 = vec3<f32>(0.0);
-  var sv = 0.0;
-  var s1 = vec4<f32>(0.0);
-  var s2 = vec4<f32>(0.0);
-  var ws = 0.0;
-  for (var dy = -2; dy <= 2; dy = dy + 1) {
-    for (var dx = -2; dx <= 2; dx = dx + 1) {
-      let qx = i32(id.x) + dx * i32(params.step);
-      let qy = i32(id.y) + dy * i32(params.step);
-      if (qx < 0 || qy < 0 || qx >= i32(size) || qy >= i32(size)) { continue; }
-      let j = u32(qy) * size + u32(qx);
-      let gq = guide[j * 2u];
-      if (gq.w < 0.5) { continue; }
-      let dp = gq.xyz - p;
-      if (length(dp) > reach) { continue; }
-      let b0 = src[j * 3u];
-      let wn = pow(max(0.0, dot(n, guide[j * 2u + 1u].xyz)), 32.0);
-      let wp = exp(-abs(dot(dp, n)) / params.texel);
-      let wl = exp(-abs(lum(b0.rgb) - l) / sigma);
-      let w = kernel[dx + 2] * kernel[dy + 2] * wn * wp * wl;
-      s0 = s0 + b0.rgb * w;
-      sv = sv + b0.w * w * w;
-      s1 = s1 + src[j * 3u + 1u] * w;
-      s2 = s2 + src[j * 3u + 2u] * w;
-      ws = ws + w;
-    }
-  }
-  // The texel itself always weighs in, so ws > 0.
-  dst[i * 3u] = vec4<f32>(s0 / ws, sv / (ws * ws));
-  dst[i * 3u + 1u] = s1 / ws;
-  dst[i * 3u + 2u] = s2 / ws;
-}
-`
-);
-async function denoiseLightmap(device, atlas, texel, passes = DENOISE_PASSES, sigma = DENOISE_SIGMA) {
-  const { size, values, guide } = atlas;
-  const guideBuffer = device.createBuffer({ size: guide.byteLength, usage: STORAGE | COPY_DST });
-  device.queue.writeBuffer(guideBuffer, 0, guide.buffer, guide.byteOffset, guide.byteLength);
-  const ping = [0, 1].map(() => device.createBuffer({ size: values.byteLength, usage: STORAGE | COPY_DST | COPY_SRC }));
-  device.queue.writeBuffer(ping[0], 0, values.buffer, values.byteOffset, values.byteLength);
-  const params = device.createBuffer({ size: 16, usage: UNIFORM2 | COPY_DST });
-  const readback = device.createBuffer({ size: values.byteLength, usage: MAP_READ | COPY_DST });
-  try {
-    const pipeline = device.createComputePipeline({ layout: "auto", compute: { module: device.createShaderModule({ code: LIGHTMAP_DENOISE_WGSL }), entryPoint: "main" } });
-    const groups = [0, 1].map(
-      (k) => device.createBindGroup({
-        layout: pipeline.getBindGroupLayout(0),
-        entries: [
-          { binding: 0, resource: { buffer: guideBuffer } },
-          { binding: 1, resource: { buffer: ping[k] } },
-          { binding: 2, resource: { buffer: ping[1 - k] } },
-          { binding: 3, resource: { buffer: params } }
-        ]
-      })
-    );
-    for (let pass = 0; pass < passes; pass += 1) {
-      const p = new ArrayBuffer(16);
-      new Uint32Array(p).set([size, 1 << pass]);
-      new Float32Array(p).set([texel, sigma], 2);
-      device.queue.writeBuffer(params, 0, p);
-      const encoder2 = device.createCommandEncoder();
-      const compute = encoder2.beginComputePass();
-      compute.setPipeline(pipeline);
-      compute.setBindGroup(0, groups[pass % 2]);
-      compute.dispatchWorkgroups(Math.ceil(size / 8), Math.ceil(size / 8));
-      compute.end();
-      device.queue.submit([encoder2.finish()]);
-      await device.queue.onSubmittedWorkDone();
-    }
-    const encoder = device.createCommandEncoder();
-    encoder.copyBufferToBuffer(ping[passes % 2], 0, readback, 0, values.byteLength);
-    device.queue.submit([encoder.finish()]);
-    await readback.mapAsync(MAP_READ);
-    values.set(new Float32Array(readback.getMappedRange()));
-    readback.unmap();
-  } finally {
-    for (const buffer of [guideBuffer, ...ping, params, readback]) buffer.destroy();
-  }
-}
-function finishLightmap(layout, atlas, stitch = true) {
-  const { size, values, valid } = atlas;
-  dilateLightmapValues(values, valid, size, 12);
-  const seams = stitch ? stitchLightmapSeams(layout, values, 12) : 0;
-  const texels = size * size;
-  const irradiance = new Float32Array(texels * 3);
-  const direction = new Float32Array(texels * 4);
-  const ambient = new Uint8ClampedArray(texels * 4);
-  const q = (x) => Math.min(255, Math.round(Math.max(0, x) / LIGHTMAP_RANGE2 * 127.5) * 2);
-  for (let i = 0; i < texels; i += 1) {
-    const v = i * 12;
-    for (let c = 0; c < 3; c += 1) irradiance[i * 3 + c] = Math.max(0, values[v + c]);
-    const length = Math.hypot(values[v + 4], values[v + 5], values[v + 6]);
-    const k = length > 1 ? 1 / length : 1;
-    direction.set([values[v + 4] * k, values[v + 5] * k, values[v + 6] * k, Math.min(1, Math.max(0, values[v + 7]))], i * 4);
-    ambient.set([q(values[v + 8]), q(values[v + 9]), q(values[v + 10]), 255], i * 4);
-  }
-  return { hdr: { width: size, height: size, irradiance, direction }, ambient, invalid: atlas.invalid, seams };
-}
-var COSINE_BANDS2 = [1, 2 / 3, 2 / 3, 2 / 3, 1 / 4, 1 / 4, 1 / 4, 1 / 4, 1 / 4];
-async function bakeProbeVolumeGpu(device, min, max, counts, occluders, options = {}, progress) {
-  const rays = Math.max(16, Math.round(options.rays ?? 1024));
-  const bounces = Math.max(0, Math.min(LIGHTMAP_MAX_BOUNCES, Math.round(options.bounces ?? 3)));
-  const sky = options.sky ?? null;
-  const lights = packBakeLights(options.lights ?? []);
-  const [cx, cy, cz] = counts;
-  const count = cx * cy * cz;
-  const spacing = [0, 1, 2].map((a) => (max[a] - min[a]) / Math.max(1, counts[a] - 1));
-  const reach = 1.5 * Math.max(...spacing, 1e-3);
-  const positions = new Float32Array(count * 4);
-  for (let z = 0; z < cz; z += 1) for (let y = 0; y < cy; y += 1) for (let x = 0; x < cx; x += 1) {
-    const p = (z * cy + y) * cx + x;
-    positions.set([min[0] + x * spacing[0], min[1] + y * spacing[1], min[2] + z * spacing[2], 1], p * 4);
-  }
-  const acc = new Float32Array(count * PROBE_ACC_VEC4S * 4);
-  const scene = packLightmapScene(occluders);
-  const upload = (data) => {
-    const buffer = device.createBuffer({ size: Math.max(16, data.byteLength), usage: STORAGE | COPY_DST });
-    device.queue.writeBuffer(buffer, 0, data.buffer, data.byteOffset, data.byteLength);
-    return buffer;
-  };
-  const buffers = [upload(scene.nodes), upload(scene.tris), upload(scene.mats), upload(positions)];
-  const accum = device.createBuffer({ size: acc.byteLength, usage: STORAGE | COPY_SRC });
-  const skyBuffer = upload(sky ? sky.data : new Float32Array(4));
-  const lightBuffer = upload(lights.data);
-  const params = device.createBuffer({ size: PARAMS_BYTES, usage: UNIFORM2 | COPY_DST });
-  const readback = device.createBuffer({ size: acc.byteLength, usage: MAP_READ | COPY_DST });
-  try {
-    const pipeline = device.createComputePipeline({ layout: "auto", compute: { module: device.createShaderModule({ code: LIGHTMAP_TRACE_WGSL }), entryPoint: "probeMain" } });
-    const group = device.createBindGroup({
-      layout: pipeline.getBindGroupLayout(0),
-      entries: [...buffers, accum, skyBuffer].map((buffer, binding) => ({ binding, resource: { buffer } })).concat([{ binding: 6, resource: { buffer: params } }, { binding: 7, resource: { buffer: lightBuffer } }])
-    });
-    const perPass = Math.max(1, Math.min(rays, Math.floor(pathBudget(lights.local) / count)));
-    const submits = Math.ceil(rays / perPass);
-    for (let s = 0, done = 0; s < rays; s += perPass) {
-      device.queue.writeBuffer(params, 0, lightmapParams(0, count, s, Math.min(perPass, rays - s), rays, bounces, sky, lights, reach));
-      const encoder2 = device.createCommandEncoder();
-      const pass = encoder2.beginComputePass();
-      pass.setPipeline(pipeline);
-      pass.setBindGroup(0, group);
-      pass.dispatchWorkgroups(Math.ceil(count / WORKGROUP));
-      pass.end();
-      device.queue.submit([encoder2.finish()]);
-      await device.queue.onSubmittedWorkDone();
-      done += 1;
-      progress?.(done / submits);
-    }
-    const encoder = device.createCommandEncoder();
-    encoder.copyBufferToBuffer(accum, 0, readback, 0, acc.byteLength);
-    device.queue.submit([encoder.finish()]);
-    await readback.mapAsync(MAP_READ);
-    acc.set(new Float32Array(readback.getMappedRange()));
-    readback.unmap();
-  } finally {
-    for (const buffer of [...buffers, accum, skyBuffer, lightBuffer, params, readback]) buffer.destroy();
-  }
-  return finishProbeVolume(min, max, counts, acc, reach, options.backfaceLimit ?? 0.6);
-}
-function finishProbeVolume(min, max, counts, acc, reach, backfaceLimit) {
-  const count = counts[0] * counts[1] * counts[2];
-  const depthTexels = PROBE_DEPTH_SIDE * PROBE_DEPTH_SIDE;
-  const sh = new Float32Array(count * PROBE_SH * 3);
-  const visibility = new Float32Array(count);
-  const valid = new Uint8Array(count);
-  const depth = new Float32Array(count * depthTexels * 2);
-  for (let p = 0; p < count; p += 1) {
-    const o = p * PROBE_ACC_VEC4S * 4;
-    const rays = acc[o + 39];
-    valid[p] = rays > 0 && acc[o + 38] <= backfaceLimit * rays ? 1 : 0;
-    visibility[p] = acc[o + 36] > 1e-12 ? Math.min(1, acc[o + 37] / acc[o + 36]) : 1;
-    if (valid[p]) for (let k = 0; k < PROBE_SH; k += 1) for (let c = 0; c < 3; c += 1) sh[(p * PROBE_SH + k) * 3 + c] = acc[o + k * 4 + c] * 4 * Math.PI / rays * COSINE_BANDS2[k];
-    for (let t = 0; t < depthTexels; t += 1) {
-      const d = o + (10 + t) * 4;
-      const n = acc[d + 2];
-      depth[(p * depthTexels + t) * 2] = n > 0 ? acc[d] / n : reach;
-      depth[(p * depthTexels + t) * 2 + 1] = n > 0 ? acc[d + 1] / n : reach * reach;
-    }
-  }
-  return { min, max, counts, sh, visibility, valid, depth };
-}
-
-// src/render/dynamicGi.ts
 var GI_UNIFORM_FLOATS = 32;
 var GI_REACH = 1.5;
 var GI_BACKFACE_LIMIT = 0.6;
-var STORAGE2 = 128;
-var COPY_DST2 = 8;
-var UNIFORM3 = 64;
+var STORAGE3 = 128;
+var COPY_DST3 = 8;
+var UNIFORM4 = 64;
 function randomRotation(u1, u2, u3) {
   const a = Math.sqrt(1 - u1), b = Math.sqrt(u1);
   const [x, y, z, w] = [a * Math.sin(2 * Math.PI * u2), a * Math.cos(2 * Math.PI * u2), b * Math.sin(2 * Math.PI * u3), b * Math.cos(2 * Math.PI * u3)];
@@ -22736,13 +23755,13 @@ var GpuProbeGi = class {
     this.target = null;
     const packed = packLightmapScene(occluders);
     const upload = (view) => {
-      const buffer = device.createBuffer({ size: Math.max(16, view.byteLength), usage: STORAGE2 | COPY_DST2 });
+      const buffer = device.createBuffer({ size: Math.max(16, view.byteLength), usage: STORAGE3 | COPY_DST3 });
       device.queue.writeBuffer(buffer, 0, view.buffer, view.byteOffset, view.byteLength);
       return buffer;
     };
     this.scene = [upload(packed.nodes), upload(packed.tris), upload(packed.mats)];
-    this.uniforms = device.createBuffer({ size: GI_UNIFORM_FLOATS * 4, usage: UNIFORM3 | COPY_DST2 });
-    this.params = device.createBuffer({ size: 64, usage: UNIFORM3 | COPY_DST2 });
+    this.uniforms = device.createBuffer({ size: GI_UNIFORM_FLOATS * 4, usage: UNIFORM4 | COPY_DST3 });
+    this.params = device.createBuffer({ size: 64, usage: UNIFORM4 | COPY_DST3 });
   }
   /**
    * Write this frame's uniforms and encode its passes into `encoder`: the
@@ -22756,7 +23775,7 @@ var GpuProbeGi = class {
     const raysBytes = count * rays * 32;
     if (!this.rays || this.rays.size < raysBytes) {
       this.rays?.destroy();
-      this.rays = device.createBuffer({ size: raysBytes, usage: STORAGE2 });
+      this.rays = device.createBuffer({ size: raysBytes, usage: STORAGE3 });
     }
     const packedLights = this.prepare(lights, sky);
     const { reach } = giSpacing(layout);
@@ -22812,13 +23831,13 @@ var GpuProbeGi = class {
     if (!this.lights || this.lightsSize < packedLights.data.byteLength) {
       this.lights?.destroy();
       this.lightsSize = Math.max(16, packedLights.data.byteLength);
-      this.lights = device.createBuffer({ size: this.lightsSize, usage: STORAGE2 | COPY_DST2 });
+      this.lights = device.createBuffer({ size: this.lightsSize, usage: STORAGE3 | COPY_DST3 });
     }
     device.queue.writeBuffer(this.lights, 0, packedLights.data);
     if (sky !== this.skySource) {
       this.sky?.destroy();
       const data = sky ? sky.data : new Float32Array(4);
-      this.sky = device.createBuffer({ size: Math.max(16, data.byteLength), usage: STORAGE2 | COPY_DST2 });
+      this.sky = device.createBuffer({ size: Math.max(16, data.byteLength), usage: STORAGE3 | COPY_DST3 });
       device.queue.writeBuffer(this.sky, 0, data);
       this.skySource = sky;
       this.skySize = sky ? [sky.width, sky.height] : [0, 0];
@@ -22839,9 +23858,9 @@ var GpuProbeGi = class {
     const device = this.device;
     const packedLights = lit ? null : this.prepare(lights, sky);
     if (packedLights) device.queue.writeBuffer(this.params, 0, lightmapParams(0, 0, 0, 1, 1, 1, sky, packedLights, 0));
-    this.reflectUniforms ?? (this.reflectUniforms = device.createBuffer({ size: this.reflectData.byteLength, usage: UNIFORM3 | COPY_DST2 }));
-    this.reflectGi ?? (this.reflectGi = device.createBuffer({ size: GI_UNIFORM_FLOATS * 4, usage: UNIFORM3 | COPY_DST2 }));
-    this.blankProbes ?? (this.blankProbes = device.createBuffer({ size: 16, usage: STORAGE2 }));
+    this.reflectUniforms ?? (this.reflectUniforms = device.createBuffer({ size: this.reflectData.byteLength, usage: UNIFORM4 | COPY_DST3 }));
+    this.reflectGi ?? (this.reflectGi = device.createBuffer({ size: GI_UNIFORM_FLOATS * 4, usage: UNIFORM4 | COPY_DST3 }));
+    this.blankProbes ?? (this.blankProbes = device.createBuffer({ size: 16, usage: STORAGE3 }));
     this.reflectData.set(frame.invViewProj, 0);
     this.reflectData.set([frame.eye[0], frame.eye[1], frame.eye[2], this.frames % 16777216], 16);
     this.reflectData.set([frame.width, frame.height, volume ? 1 : 0, frame.maxRoughness], 20);
@@ -22883,7 +23902,7 @@ var GpuProbeGi = class {
 import { CLUSTER_CELLS, CLUSTER_X as CLUSTER_X2, CLUSTER_Y as CLUSTER_Y2, CLUSTER_Z as CLUSTER_Z2, FOG_SLICES, aerialCamera as aerialCamera2 } from "@cartbox/editor";
 
 // src/render/localAtlas.ts
-import { localShadowTileCount, localShadowViews, multiplyMat4 as multiplyMat46 } from "@cartbox/editor";
+import { localShadowTileCount, localShadowViews, multiplyMat4 as multiplyMat47 } from "@cartbox/editor";
 var LOCAL_ATLAS_SIZE = 4096;
 var MAX_GPU_LOCAL_TILES = 64;
 var LOCAL_TILE_SIZES = [1024, 512, 256];
@@ -22961,8 +23980,8 @@ function planLocalTiles(lights, eye, tanHalfFov) {
     first.set(c.index, tiles.length);
     localShadowViews(c.light).forEach(({ view, projection }, face) => {
       const [x, y] = atlas.alloc(size);
-      const viewProj = multiplyMat46(projection, view);
-      tiles.push({ light: c.index, face, x, y, size, viewProj, drawViewProj: multiplyMat46(TO_WEBGPU_DEPTH, viewProj), linear: [projection[10], projection[14]] });
+      const viewProj = multiplyMat47(projection, view);
+      tiles.push({ light: c.index, face, x, y, size, viewProj, drawViewProj: multiplyMat47(TO_WEBGPU_DEPTH, viewProj), linear: [projection[10], projection[14]] });
     });
   }
   const out = lights.map((light, i) => {
@@ -25225,6 +26244,8 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     this.uniformBuffer = null;
     this.uniformData = new Float32Array(0);
     this.destroyed = false;
+    /** The path-traced reference (F10b), made the first time it is shown. */
+    this.pathTracer = null;
     this.shadowMapSize = 0;
     /** Maps side by side in the shadow texture: 1, or 2 with a near cascade (EP8b). */
     this.shadowCascades = 1;
@@ -25416,8 +26437,8 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     const k = multisampled ? 1 : 0;
     let resolvedAo = null;
     if (this.frameGtao && gbuffer && velocity) {
-      const half = { width: Math.max(1, Math.ceil(this.width / 2)), height: Math.max(1, Math.ceil(this.height / 2)) };
-      const made = () => device.createTexture({ size: half, format: SCREEN_SHADING_FORMAT, usage: 16 | 4 | 1 });
+      const half2 = { width: Math.max(1, Math.ceil(this.width / 2)), height: Math.max(1, Math.ceil(this.height / 2)) };
+      const made = () => device.createTexture({ size: half2, format: SCREEN_SHADING_FORMAT, usage: 16 | 4 | 1 });
       if (!this.gtao) {
         this.gtao = {
           uniforms: device.createBuffer({ size: GTAO_UNIFORM_FLOATS * 4, usage: 64 | 8 }),
@@ -25434,7 +26455,7 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
       const g = this.gtao;
       (_a = g.pipelines)[k] ?? (_a[k] = fullScreenPipeline(device, gtaoShaderWgsl(multisampled), "gtaoPass", SCREEN_SHADING_FORMAT));
       const pipeline2 = g.pipelines[k];
-      const current = graph.createTexture("gtao", { format: SCREEN_SHADING_FORMAT, ...half });
+      const current = graph.createTexture("gtao", { format: SCREEN_SHADING_FORMAT, ...half2 });
       const then = graph.importTexture("gtao.then", g.history[g.index]);
       const now = graph.importTexture("gtao.now", g.history[1 - g.index]);
       const history = g.valid;
@@ -25603,7 +26624,7 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     }
     v.windows = windows;
     draws.forEach((d, i) => device.queue.writeBuffer(v.views[i].buffer, 0, vsmPageViewProj(d.level, d.gx, d.gy, basis, centre)));
-    const viewProj = multiplyMat47(projection, draw.view);
+    const viewProj = multiplyMat48(projection, draw.view);
     device.queue.writeBuffer(
       v.uniforms,
       0,
@@ -25769,9 +26790,9 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     var _a, _b;
     const device = this.device;
     const k = multisampled ? 1 : 0;
-    const half = { width: Math.max(1, Math.ceil(this.width / 2)), height: Math.max(1, Math.ceil(this.height / 2)) };
+    const half2 = { width: Math.max(1, Math.ceil(this.width / 2)), height: Math.max(1, Math.ceil(this.height / 2)) };
     if (!this.ssgi) {
-      const made = () => device.createTexture({ size: half, format: SCREEN_SHADING_FORMAT, usage: 16 | 4 | 1 });
+      const made = () => device.createTexture({ size: half2, format: SCREEN_SHADING_FORMAT, usage: 16 | 4 | 1 });
       this.ssgi = {
         uniforms: device.createBuffer({ size: SSGI_UNIFORM_FLOATS * 4, usage: 64 | 8 }),
         data: new Float32Array(SSGI_UNIFORM_FLOATS),
@@ -25790,7 +26811,7 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     (_b = gi.resolve)[k] ?? (_b[k] = fullScreenPipeline(device, ssgiResolveWgsl(multisampled), "resolve", SCREEN_SHADING_FORMAT));
     const trace = gi.trace[k];
     const resolve = gi.resolve[k];
-    const current = graph.createTexture("ssgi", { format: SCREEN_SHADING_FORMAT, ...half });
+    const current = graph.createTexture("ssgi", { format: SCREEN_SHADING_FORMAT, ...half2 });
     const then = graph.importTexture("ssgi.then", gi.history[gi.index]);
     const now = graph.importTexture("ssgi.now", gi.history[1 - gi.index]);
     const radiance = graph.importTexture("ssgi.radiance", this.taa.history[this.taa.index]);
@@ -26449,6 +27470,10 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
    */
   renderToTexture(instances, given) {
     if (this.destroyed) return null;
+    if (this.hdr && given.viewMode === "pathTraced") {
+      this.pathTracer ?? (this.pathTracer = PathTracer.create(this.device));
+      return this.pathTracer.render(applyScenePasses(instances, given), given, this.width, this.height);
+    }
     const draw = this.hdr ? viewModeDraw(given) : given;
     if (draw.prepass === true) this.matchMotion(instances);
     const visible = applyScenePasses(instances, draw);
@@ -26458,6 +27483,14 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
       return null;
     }
     return this.frameOutput ?? this.colourTexture;
+  }
+  /** Samples each pixel of the path-traced reference holds (F10b); 0 when it isn't shown. */
+  get referenceSamples() {
+    return this.pathTracer?.samples ?? 0;
+  }
+  /** Render the path-traced reference of `instances` through `draw` at any size up to 8K (F10b; {@link captureReference}). */
+  captureReference(instances, draw, options) {
+    return captureReference(this.device, applyScenePasses(instances, draw), draw, options);
   }
   settle(draw) {
     if (this.destroyed) return "current";
@@ -26471,10 +27504,10 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     const temporal = draw.temporal === true ? this.temporalState.begin(draw.view, draw.projection, this.width, this.height, display ? upscaleJitterPhases(this.width, display.width) : void 0) : null;
     if (!temporal) this.temporalState.reset();
     this.frameOutput = null;
-    const viewProj = multiplyMat47(temporal ? temporal.projection : draw.projection, draw.view);
+    const viewProj = multiplyMat48(temporal ? temporal.projection : draw.projection, draw.view);
     this.frameIndex += 1;
     const prepass = draw.prepass === true;
-    const { batches: draws, instanceCount } = batchInstances(instances, (mesh) => this.uploadMesh(mesh), cameraPositionFromView3(draw.view));
+    const { batches: draws, instanceCount } = batchInstances(instances, (mesh) => this.uploadMesh(mesh), cameraPositionFromView4(draw.view));
     if (draws.length === 0) {
       this.prepassed = null;
       if (!readback) this.clearColour();
@@ -26482,9 +27515,9 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     }
     const sun = this.hdr && this.depthGroups.cascades.pipeline ? draw.sunShadow ?? (draw.shadow && draw.lightDirection ? { casters: instances, toLight: draw.lightDirection, distance: FALLBACK_CASCADE_DISTANCE, size: FALLBACK_CASCADE_SIZE, reach: FALLBACK_CASCADE_DISTANCE, strength: draw.shadow.strength ?? 1 } : null) : null;
     const localSource = this.hdr && this.depthGroups.cascades.localPipeline ? draw.localShadowCasters ?? (draw.localShadows ? instances : null) : null;
-    const localPlan = localSource && draw.lights?.length ? planLocalTiles(draw.lights, cameraPositionFromView3(draw.view), 1 / (draw.projection[5] || 1)) : null;
+    const localPlan = localSource && draw.lights?.length ? planLocalTiles(draw.lights, cameraPositionFromView4(draw.view), 1 / (draw.projection[5] || 1)) : null;
     const casterSource = sun?.casters ?? (localPlan && localPlan.tiles.length > 0 ? localSource : null);
-    const casting = casterSource ? batchInstances(casterSource, (mesh) => this.uploadMesh(mesh), cameraPositionFromView3(draw.view)) : null;
+    const casting = casterSource ? batchInstances(casterSource, (mesh) => this.uploadMesh(mesh), cameraPositionFromView4(draw.view)) : null;
     const casters = casting ? casting.batches.filter((entry) => entry.alpha < 2 && !entry.refract) : [];
     this.frameLocalTiles = localPlan && casters.length > 0 ? localPlan.tiles : null;
     const cascadeFit = sun && casters.length > 0 ? fitCascades({ view: draw.view, projection: draw.projection, toLight: sun.toLight, distance: sun.distance, size: sun.size, reach: sun.reach }) : null;
@@ -26496,7 +27529,7 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     this.ensureInstanceCapacity(casterBase + (casting?.instanceCount ?? 0));
     const light = resolveLight(draw.lightDirection, draw.ambient);
     const viewDir = viewDirection(draw.view);
-    const eye = cameraPositionFromView3(draw.view);
+    const eye = cameraPositionFromView4(draw.view);
     const shadow = this.hdr ? null : draw.shadow ?? null;
     this.ensureShadowTexture(shadow ? shadow.size : 0, shadow?.near ? 2 : 1);
     if (shadow?.near) {
@@ -26562,12 +27595,12 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     const lightCount = ordered.length;
     const camera = refractionCamera(draw.view, this.height);
     const materialIds = /* @__PURE__ */ new Map();
-    const materialId = (material) => {
-      let id = materialIds.get(material);
-      if (id === void 0) materialIds.set(material, id = materialIds.size + 1);
+    const materialId = (material2) => {
+      let id = materialIds.get(material2);
+      if (id === void 0) materialIds.set(material2, id = materialIds.size + 1);
       return id;
     };
-    const viewProjNow = multiplyMat47(draw.projection, draw.view);
+    const viewProjNow = multiplyMat48(draw.projection, draw.view);
     const viewProjThen = this.lastViewProj ?? viewProjNow;
     const windNow = windUniform2(draw.wind, draw.time ?? 0);
     const windThen = this.lastWind ?? windNow;
@@ -26580,7 +27613,7 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
         entry.textures.emis !== null
       );
       return {
-        mvp: multiplyMat47(viewProj, model),
+        mvp: multiplyMat48(viewProj, model),
         normalBasis: normalBasis3x3(model),
         baseColor: entry.primitive.material.baseColorFactor,
         hasTexture: entry.textures.base !== null,
@@ -26591,7 +27624,7 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
         hasOcclusionMap: entry.textures.occ !== null,
         hasEmissiveMap: entry.textures.emis !== null,
         environment: draw.environment ?? null,
-        lightMvp: shadow ? multiplyMat47(shadow.lightViewProj, model) : null,
+        lightMvp: shadow ? multiplyMat48(shadow.lightViewProj, model) : null,
         shadow: shadowParams,
         tonemap: draw.tonemap ?? null,
         hasSsao: ssao !== null,
@@ -26632,15 +27665,15 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
       entry.first = next;
       for (const model of entry.models) {
         writeInstanceTransform(this.instanceData, next, {
-          mvp: multiplyMat47(viewProj, model),
-          lightMvp: shadow ? multiplyMat47(shadow.lightViewProj, model) : null,
+          mvp: multiplyMat48(viewProj, model),
+          lightMvp: shadow ? multiplyMat48(shadow.lightViewProj, model) : null,
           model,
           normalBasis: normalBasis3x3(model)
         });
         if (prepass) {
           writeInstanceTransform(this.instanceData, instanceCount + next, {
-            mvp: multiplyMat47(viewProjNow, model),
-            lightMvp: multiplyMat47(viewProjThen, this.motion.get(model) ?? model),
+            mvp: multiplyMat48(viewProjNow, model),
+            lightMvp: multiplyMat48(viewProjThen, this.motion.get(model) ?? model),
             model,
             normalBasis: IDENTITY_BASIS
           });
@@ -27124,7 +28157,7 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
       if (env && this.giSky?.source !== env) this.giSky = { source: env, sky: environmentPanorama(env) };
       const sky = env ? this.giSky.sky : null;
       const volume = draw.environment?.probeVolume ?? null;
-      const viewProj = multiplyMat47(projection, draw.view);
+      const viewProj = multiplyMat48(projection, draw.view);
       const inverse = invertMat4(viewProj) ?? viewProj;
       const eye = invertMat4(draw.view) ?? draw.view;
       const lit = this.frameGi !== null && this.probeGi?.gi === tracer;
@@ -27375,12 +28408,12 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
       pass.write(target, "copyDst");
       return (ctx) => ctx.encoder.copyTextureToTexture({ texture: ctx.texture(from) }, { texture: ctx.texture(target) }, size);
     });
-    const half = { width: Math.max(1, Math.ceil(size.width / 2)), height: Math.max(1, Math.ceil(size.height / 2)) };
+    const half2 = { width: Math.max(1, Math.ceil(size.width / 2)), height: Math.max(1, Math.ceil(size.height / 2)) };
     if (effects.dof) {
-      const halfColour = graph.createTexture("dof.colour", { format: "rgba16float", ...half });
-      const halfCoc = graph.createTexture("dof.coc", { format: "r16float", ...half });
-      const blurred = graph.createTexture("dof.blurred", { format: "rgba16float", ...half });
-      const near = graph.createTexture("dof.near", { format: "r16float", ...half });
+      const halfColour = graph.createTexture("dof.colour", { format: "rgba16float", ...half2 });
+      const halfCoc = graph.createTexture("dof.coc", { format: "r16float", ...half2 });
+      const blurred = graph.createTexture("dof.blurred", { format: "rgba16float", ...half2 });
+      const near = graph.createTexture("dof.near", { format: "r16float", ...half2 });
       const out = graph.createTexture("dof.out", { format: this.colourFormat, ...size });
       const prefilter = pipeline("dof.prefilter", () => dofPrefilterWgsl(multisampled), "prefilter", ["rgba16float", "r16float"]);
       const gather = pipeline("dof.gather", () => DOF_GATHER_WGSL, "gather", ["rgba16float", "r16float"]);
@@ -27582,8 +28615,8 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
    * variant; multisampled for an anti-aliased frame (I1); writing the
    * reflection targets for a frame with reflections (I3). Built on first use.
    */
-  pipelinesOf(material, samples = 1, reflect = false, prepass = false) {
-    const graph = compiledGraphOf2(material);
+  pipelinesOf(material2, samples = 1, reflect = false, prepass = false) {
+    const graph = compiledGraphOf2(material2);
     if (!graph && samples === 1 && !reflect && !prepass) return this.pipeline;
     const key = `${graph?.key ?? ""}|${samples}|${reflect ? 1 : 0}|${prepass ? 1 : 0}`;
     let set = this.variants.get(key);
@@ -28053,6 +29086,8 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
   dispose() {
     if (this.destroyed) return;
     this.destroyed = true;
+    this.pathTracer?.destroy();
+    this.pathTracer = null;
     this.latest = null;
     this.software.dispose();
     destroySafely(this.colourTexture);
@@ -28150,134 +29185,6 @@ async function createSceneRenderer(width, height, caps, deviceProvider = getWebg
   renderer ?? (renderer = new SoftwareSceneRenderer(style));
   return capsConstrainScene(caps) ? new CappedSceneRenderer(renderer, caps) : renderer;
 }
-
-// src/render/toneMappers.ts
-var TONE_MAPPERS = ["filmic", "aces", "agx", "neutral"];
-function mul(m, c) {
-  return [m[0] * c[0] + m[1] * c[1] + m[2] * c[2], m[3] * c[0] + m[4] * c[1] + m[5] * c[2], m[6] * c[0] + m[7] * c[1] + m[8] * c[2]];
-}
-var clamp013 = (x) => Math.min(1, Math.max(0, x));
-function filmic(c) {
-  return c.map((x) => {
-    const v = Math.max(0, x);
-    return clamp013(v * (2.51 * v + 0.03) / (v * (2.43 * v + 0.59) + 0.14));
-  });
-}
-var ACES_IN = [0.59719, 0.35458, 0.04823, 0.076, 0.90834, 0.01566, 0.0284, 0.13383, 0.83777];
-var ACES_OUT = [1.60475, -0.53108, -0.07367, -0.10208, 1.10813, -605e-5, -327e-5, -0.07276, 1.07602];
-function aces(c) {
-  const v = mul(ACES_IN, c.map((x) => Math.max(0, x)));
-  const fit = v.map((x) => (x * (x + 0.0245786) - 90537e-9) / (x * (0.983729 * x + 0.432951) + 0.238081));
-  return mul(ACES_OUT, fit).map(clamp013);
-}
-var AGX_IN = [0.842479062253094, 0.0784335999999992, 0.0792237451477643, 0.0423282422610123, 0.878468636469772, 0.0791661274605434, 0.0423756549057051, 0.0784336, 0.879142973793104];
-var AGX_OUT = [1.19687900512017, -0.0980208811401368, -0.0990297440797205, -0.0528968517574562, 1.15190312990417, -0.0989611768448433, -0.0529716355144438, -0.0980434501171241, 1.15107367264116];
-var AGX_MIN_EV = -12.47393;
-var AGX_MAX_EV = 4.026069;
-function agx(c) {
-  const v = mul(AGX_IN, c.map((x) => Math.max(1e-10, x)));
-  const curve = v.map((x) => {
-    const t = (Math.min(AGX_MAX_EV, Math.max(AGX_MIN_EV, Math.log2(x))) - AGX_MIN_EV) / (AGX_MAX_EV - AGX_MIN_EV);
-    const t2 = t * t;
-    const t4 = t2 * t2;
-    return 15.5 * t4 * t2 - 40.14 * t4 * t + 31.96 * t4 - 6.868 * t2 * t + 0.4298 * t2 + 0.1191 * t - 232e-5;
-  });
-  return mul(AGX_OUT, curve).map((x) => clamp013(Math.max(0, x) ** 2.2));
-}
-var NEUTRAL_START = 0.8 - 0.04;
-var NEUTRAL_DESATURATION = 0.15;
-function neutral(c) {
-  let rgb = c.map((x) => Math.max(0, x));
-  const low = Math.min(...rgb);
-  const offset = low < 0.08 ? low - 6.25 * low * low : 0.04;
-  rgb = rgb.map((x) => x - offset);
-  const peak = Math.max(...rgb);
-  if (peak < NEUTRAL_START) return rgb.map(clamp013);
-  const d = 1 - NEUTRAL_START;
-  const newPeak = 1 - d * d / (peak + d - NEUTRAL_START);
-  rgb = rgb.map((x) => x * newPeak / peak);
-  const g = 1 - 1 / (NEUTRAL_DESATURATION * (peak - newPeak) + 1);
-  return rgb.map((x) => clamp013(x + (newPeak - x) * g));
-}
-function toneMap(mapper, c) {
-  switch (mapper) {
-    case "aces":
-      return aces(c);
-    case "agx":
-      return agx(c);
-    case "neutral":
-      return neutral(c);
-    default:
-      return filmic(c);
-  }
-}
-var srgbEncode = (v) => v <= 31308e-7 ? Math.max(0, v) * 12.92 : 1.055 * v ** (1 / 2.4) - 0.055;
-function toneMapperIndex(mapper) {
-  const i = mapper ? TONE_MAPPERS.indexOf(mapper) : 0;
-  return i < 0 ? 0 : i;
-}
-var wgslMat = (m) => `mat3x3f(${[0, 1, 2].map((col) => [0, 1, 2].map((row) => m[row * 3 + col].toString()).join(", ")).join(", ")})`;
-var TONE_MAPPERS_WGSL = (
-  /* wgsl */
-  `
-fn toneFilmic(x: vec3f) -> vec3f {
-  let v = max(x, vec3f(0.0));
-  return clamp((v * (2.51 * v + 0.03)) / (v * (2.43 * v + 0.59) + 0.14), vec3f(0.0), vec3f(1.0));
-}
-fn toneAces(x: vec3f) -> vec3f {
-  let v = ${wgslMat(ACES_IN)} * max(x, vec3f(0.0));
-  let fit = (v * (v + 0.0245786) - 0.000090537) / (v * (0.983729 * v + 0.432951) + 0.238081);
-  return clamp(${wgslMat(ACES_OUT)} * fit, vec3f(0.0), vec3f(1.0));
-}
-fn toneAgx(x: vec3f) -> vec3f {
-  let v = ${wgslMat(AGX_IN)} * max(x, vec3f(1e-10));
-  let t = (clamp(log2(v), vec3f(${AGX_MIN_EV}), vec3f(${AGX_MAX_EV})) - ${AGX_MIN_EV}) / (${AGX_MAX_EV} - ${AGX_MIN_EV});
-  let t2 = t * t;
-  let t4 = t2 * t2;
-  let curve = 15.5 * t4 * t2 - 40.14 * t4 * t + 31.96 * t4 - 6.868 * t2 * t + 0.4298 * t2 + 0.1191 * t - 0.00232;
-  return clamp(pow(max(${wgslMat(AGX_OUT)} * curve, vec3f(0.0)), vec3f(2.2)), vec3f(0.0), vec3f(1.0));
-}
-fn toneNeutral(x: vec3f) -> vec3f {
-  var c = max(x, vec3f(0.0));
-  let low = min(c.r, min(c.g, c.b));
-  let offset = select(0.04, low - 6.25 * low * low, low < 0.08);
-  c = c - offset;
-  let peak = max(c.r, max(c.g, c.b));
-  if (peak < ${NEUTRAL_START}) { return clamp(c, vec3f(0.0), vec3f(1.0)); }
-  let d = 1.0 - ${NEUTRAL_START};
-  let newPeak = 1.0 - d * d / (peak + d - ${NEUTRAL_START});
-  c = c * (newPeak / peak);
-  let g = 1.0 - 1.0 / (${NEUTRAL_DESATURATION} * (peak - newPeak) + 1.0);
-  return clamp(mix(c, vec3f(newPeak), g), vec3f(0.0), vec3f(1.0));
-}
-fn toneMapWith(index: f32, c: vec3f) -> vec3f {
-  if (index > 2.5) { return toneNeutral(c); }
-  if (index > 1.5) { return toneAgx(c); }
-  if (index > 0.5) { return toneAces(c); }
-  return toneFilmic(c);
-}
-// The sRGB curve, carried past 1.
-fn srgbOf(x: vec3f) -> vec3f {
-  let v = max(x, vec3f(0.0));
-  return select(1.055 * pow(v, vec3f(1.0 / 2.4)) - vec3f(0.055), v * 12.92, v <= vec3f(0.0031308));
-}
-// Light x as the display shows it under exposure e, sRGB-encoded (F11a-5): physically, the curve on
-// the light then the encode; as authored, the curve on the encoded light, as the byte path's shader maps.
-fn shownWith(index: f32, x: vec3f, e: f32, authored: bool) -> vec3f {
-  if (authored) { return toneMapWith(index, srgbOf(x) * e); }
-  return srgbOf(toneMapWith(index, x * e));
-}
-// \u2026as an HDR display shows it, encoded: the curve's white at headroom h (its encoding, as authored)
-// and grey where SDR shows it (s, extendedExposure's).
-fn shownWideWith(index: f32, x: vec3f, e: f32, s: f32, h: f32, authored: bool) -> vec3f {
-  if (authored) {
-    let top = srgbOf(vec3f(h)).x;
-    return toneMapWith(index, srgbOf(x) * (e * s / top)) * top;
-  }
-  return srgbOf(toneMapWith(index, x * (e * s / h)) * h);
-}
-`
-);
 
 // src/render/grading.ts
 var HDR_HEADROOM = 3;
@@ -30282,7 +31189,7 @@ var GpuPresenter = class {
     destroy(this.measured.result);
     destroy(this.measured.staging);
   }
-  async readMeasurements(luminance2, sun) {
+  async readMeasurements(luminance3, sun) {
     const m = this.measured;
     m.busy = true;
     try {
@@ -30292,8 +31199,8 @@ var GpuPresenter = class {
       m.staging.unmap();
       const prev = this.latestStats;
       this.latestStats = {
-        luminance: luminance2 ? count > 0 ? Math.exp(sum / count) : AUTO_KEY_FALLBACK : prev.luminance,
-        luminanceSeq: prev.luminanceSeq + (luminance2 ? 1 : 0),
+        luminance: luminance3 ? count > 0 ? Math.exp(sum / count) : AUTO_KEY_FALLBACK : prev.luminance,
+        luminanceSeq: prev.luminanceSeq + (luminance3 ? 1 : 0),
         sunVisible: sun ? taps > 0 ? open / taps : 0 : prev.sunVisible,
         seq: prev.seq + 1
       };
@@ -30490,8 +31397,8 @@ var GpuCanvasSurface = class _GpuCanvasSurface {
     this.captures = [];
     const width = texture.width;
     const height = texture.height;
-    const half = this.format === "rgba16float";
-    const bytesPerRow = Math.ceil(width * (half ? 8 : 4) / 256) * 256;
+    const half2 = this.format === "rgba16float";
+    const bytesPerRow = Math.ceil(width * (half2 ? 8 : 4) / 256) * 256;
     let buffer = null;
     try {
       buffer = this.device.createBuffer({ size: bytesPerRow * height, usage: 1 | 8 });
@@ -31356,6 +32263,14 @@ var Player = class {
     this.meshSurface?.setViewMode(mode);
     this.showPostFx();
   }
+  /** The path-traced reference of the 3D frame shown (F10b), `width` across at its aspect; null without one (every tier but AAA). */
+  captureReference(options) {
+    return this.meshSurface?.captureReference(options) ?? null;
+  }
+  /** Samples each pixel of the viewport's path-traced reference holds (F10b). */
+  get referenceSamples() {
+    return this.meshSurface?.referenceSamples ?? 0;
+  }
   applyQuality(settings) {
     this.qualitySettings = settings;
     this.meshSurface?.setQuality(this.qualitySettings);
@@ -31367,7 +32282,7 @@ var Player = class {
     if (!fx || !this.basePostFx) return;
     const base = this.animPostFx ? { ...this.basePostFx, values: { ...this.basePostFx.values, ...this.animPostFx } } : this.basePostFx;
     const settings = applyQualityToPostFx(applyPostVolumes(base, this.volumePost), this.qualitySettings);
-    fx.setSettings(this.viewMode === "lit" ? settings : { ...settings, enabled: Object.fromEntries(Object.keys(settings.enabled).map((id) => [id, false])) });
+    fx.setSettings(!isDiagnosticView(this.viewMode) ? settings : { ...settings, enabled: Object.fromEntries(Object.keys(settings.enabled).map((id) => [id, false])) });
   }
   /**
    * "auto" by measurement: a 3D scene whose frames keep coming slower than
@@ -31819,13 +32734,13 @@ function extractScore(events) {
   return best;
 }
 function extractUnlocks(events) {
-  const ids = /* @__PURE__ */ new Set();
+  const ids2 = /* @__PURE__ */ new Set();
   for (const event of events) {
     if (event.kind === "achievement") {
-      ids.add(event.id);
+      ids2.add(event.id);
     }
   }
-  return [...ids];
+  return [...ids2];
 }
 function verifyReplayScore(console2, replay, claimedScore, options = {}) {
   const events = runReplayEvents(console2, replay, options);
@@ -31842,6 +32757,442 @@ function resolveUnlockedAchievements(unlockHashes, registered) {
   const unlocked = new Set(unlockHashes.map((hash) => hash >>> 0));
   return registered.filter((achievement) => unlocked.has(achievement.hash >>> 0));
 }
+
+// src/render/lookDev.ts
+import { composeModelMatrix as composeModelMatrix5, multiplyMat4 as multiplyMat49, projectionMatrix as projectionMatrix4, viewMatrix as viewMatrix5 } from "@cartbox/editor";
+var GREY_CARD = 0.18;
+function authoredFromLinear(v) {
+  const c = Math.min(1, Math.max(0, v));
+  return c <= 31308e-7 ? c * 12.92 : 1.055 * c ** (1 / 2.4) - 0.055;
+}
+var COLOR_CHECKER = [
+  { name: "dark skin", srgb: [115, 82, 68] },
+  { name: "light skin", srgb: [194, 150, 130] },
+  { name: "blue sky", srgb: [98, 122, 157] },
+  { name: "foliage", srgb: [87, 108, 67] },
+  { name: "blue flower", srgb: [133, 128, 177] },
+  { name: "bluish green", srgb: [103, 189, 170] },
+  { name: "orange", srgb: [214, 126, 44] },
+  { name: "purplish blue", srgb: [80, 91, 166] },
+  { name: "moderate red", srgb: [193, 90, 99] },
+  { name: "purple", srgb: [94, 60, 108] },
+  { name: "yellow green", srgb: [157, 188, 64] },
+  { name: "orange yellow", srgb: [224, 163, 46] },
+  { name: "blue", srgb: [56, 61, 150] },
+  { name: "green", srgb: [70, 148, 73] },
+  { name: "red", srgb: [175, 54, 60] },
+  { name: "yellow", srgb: [231, 199, 31] },
+  { name: "magenta", srgb: [187, 86, 149] },
+  { name: "cyan", srgb: [8, 133, 161] },
+  { name: "white 9.5", srgb: [243, 243, 242] },
+  { name: "neutral 8", srgb: [200, 200, 200] },
+  { name: "neutral 6.5", srgb: [160, 160, 160] },
+  { name: "neutral 5", srgb: [122, 122, 121] },
+  { name: "neutral 3.5", srgb: [85, 85, 85] },
+  { name: "black 2", srgb: [52, 52, 52] }
+];
+var LOOK_DEV_RIGS = [
+  { id: "studio", label: "Studio", hint: "A key, a fill and a rim (area lights) under a dim cyclorama: form and highlights." },
+  { id: "noon", label: "Noon", hint: "A high sun under a blue sky: hard shadows and saturated colour." },
+  { id: "overcast", label: "Overcast", hint: "A soft white sky and no sun: albedo and occlusion, with no direct light to hide behind." },
+  { id: "goldenHour", label: "Golden hour", hint: "A low, warm sun under a cooling sky: grazing light and long shadows." },
+  { id: "night", label: "Night", hint: "A cold moon over a dark sky: how the asset holds in the dark, and its emission." },
+  { id: "hdri", label: "HDRI", hint: "The cart's own environment, turned about the asset by the turntable." }
+];
+function material(name, linear, metallic, roughness) {
+  return { name, baseColorFactor: [authoredFromLinear(linear[0]), authoredFromLinear(linear[1]), authoredFromLinear(linear[2]), 1], baseColorImage: null, metallicFactor: metallic, roughnessFactor: roughness };
+}
+function lookDevSphere(name, mat, rings = 24, segments = 48) {
+  const positions = [];
+  const normals = [];
+  const uvs = [];
+  const indices = [];
+  for (let r = 0; r <= rings; r += 1) {
+    const theta = Math.PI * r / rings;
+    for (let s = 0; s <= segments; s += 1) {
+      const phi = 2 * Math.PI * s / segments;
+      const n = [Math.sin(theta) * Math.cos(phi), Math.cos(theta), Math.sin(theta) * Math.sin(phi)];
+      positions.push(...n);
+      normals.push(...n);
+      uvs.push(s / segments, 1 - r / rings);
+    }
+  }
+  for (let r = 0; r < rings; r += 1) {
+    for (let s = 0; s < segments; s += 1) {
+      const a = r * (segments + 1) + s;
+      const b = a + segments + 1;
+      indices.push(a, a + 1, b, a + 1, b + 1, b);
+    }
+  }
+  return { name, primitives: [{ positions: new Float32Array(positions), normals: new Float32Array(normals), uvs: new Float32Array(uvs), indices: new Uint32Array(indices), material: mat }] };
+}
+function quadPrimitive(mat, centre, w, h, up = false) {
+  const [x, y, z] = centre;
+  const positions = up ? [x - w / 2, y, z + h / 2, x + w / 2, y, z + h / 2, x + w / 2, y, z - h / 2, x - w / 2, y, z - h / 2] : [x - w / 2, y - h / 2, z, x + w / 2, y - h / 2, z, x + w / 2, y + h / 2, z, x - w / 2, y + h / 2, z];
+  const n = up ? [0, 1, 0] : [0, 0, 1];
+  return {
+    positions: new Float32Array(positions),
+    normals: new Float32Array([...n, ...n, ...n, ...n]),
+    uvs: new Float32Array([0, 0, 1, 0, 1, 1, 0, 1]),
+    indices: new Uint32Array([0, 1, 2, 0, 2, 3]),
+    material: mat
+  };
+}
+function lookDevChart(patch) {
+  const gap = patch / 6;
+  const pitch = patch + gap;
+  const width = 6 * pitch + gap;
+  const height = 4 * pitch + gap;
+  const primitives = [quadPrimitive(material("chart card", [0.02, 0.02, 0.02], 0, 0.9), [0, 0, -1e-3], width, height)];
+  COLOR_CHECKER.forEach((p, i) => {
+    const col = i % 6;
+    const row = Math.floor(i / 6);
+    const centre = [-width / 2 + gap + pitch * col + patch / 2, height / 2 - gap - pitch * row - patch / 2, 0];
+    const m = { name: p.name, baseColorFactor: [p.srgb[0] / 255, p.srgb[1] / 255, p.srgb[2] / 255, 1], baseColorImage: null, metallicFactor: 0, roughnessFactor: 0.9 };
+    primitives.push(quadPrimitive(m, centre, patch, patch));
+  });
+  return { name: "colour checker", primitives };
+}
+function meshBounds3(mesh) {
+  const min = [Infinity, Infinity, Infinity];
+  const max = [-Infinity, -Infinity, -Infinity];
+  for (const p of mesh?.primitives ?? []) {
+    for (let i = 0; i < p.positions.length; i += 3) {
+      for (let a = 0; a < 3; a += 1) {
+        min[a] = Math.min(min[a], p.positions[i + a]);
+        max[a] = Math.max(max[a], p.positions[i + a]);
+      }
+    }
+  }
+  if (!Number.isFinite(min[0])) return { min: [-0.5, 0, -0.5], max: [0.5, 1, 0.5] };
+  return { min, max };
+}
+function turn(v, angle) {
+  const c = Math.cos(angle);
+  const s = Math.sin(angle);
+  return [v[0] * c + v[2] * s, v[1], -v[0] * s + v[2] * c];
+}
+function turnEnvironment(env, angle) {
+  const shift = (width) => (Math.round(-angle / (2 * Math.PI) * width) % width + width) % width;
+  const rotate = (data, width, height, channels) => {
+    const k = shift(width);
+    if (k === 0) return data;
+    const out = new data.constructor(data.length);
+    for (let y = 0; y < height; y += 1) {
+      for (let x = 0; x < width; x += 1) {
+        const from = (y * width + x) * channels;
+        const to = (y * width + (x + k) % width) * channels;
+        for (let c = 0; c < channels; c += 1) out[to + c] = data[from + c];
+      }
+    }
+    return out;
+  };
+  if (env.hdr) return { ...env, hdr: { ...env.hdr, data: rotate(env.hdr.data, env.hdr.width, env.hdr.height, 3) } };
+  if (env.map) return { ...env, map: { ...env.map, data: rotate(env.map.data, env.map.width, env.map.height, 4) } };
+  return env;
+}
+var gradient = (sky, horizon, ground, intensity) => ({ sky: sky.map(authoredFromLinear), horizon: horizon.map(authoredFromLinear), ground: ground.map(authoredFromLinear), intensity });
+function sunAt(elevation, azimuth) {
+  return [Math.cos(elevation) * Math.sin(azimuth), Math.sin(elevation), Math.cos(elevation) * Math.cos(azimuth)];
+}
+function rigLights(rig, r, hdri) {
+  const dark = [{ kind: "directional", direction: [0, 1, 0], color: [0, 0, 0], intensity: 0 }];
+  switch (rig) {
+    case "noon": {
+      const sun = sunAt(1.05, 0.6);
+      return { lights: [{ kind: "directional", direction: sun, color: [1, 0.97, 0.92], intensity: 3 }], environment: gradient([0.12, 0.22, 0.5], [0.45, 0.55, 0.7], [0.12, 0.11, 0.1], 1), light: 3 * Math.sin(1.05) + 0.6 };
+    }
+    case "overcast":
+      return { lights: dark, environment: gradient([0.85, 0.87, 0.9], [0.75, 0.76, 0.78], [0.2, 0.2, 0.2], 1), light: 0.85 };
+    case "goldenHour": {
+      const sun = sunAt(0.14, -0.9);
+      return { lights: [{ kind: "directional", direction: sun, color: [1, 0.62, 0.32], intensity: 2.5 }], environment: gradient([0.08, 0.12, 0.28], [0.6, 0.38, 0.22], [0.06, 0.05, 0.04], 1), light: 2.5 * 0.6 + 0.3 };
+    }
+    case "night": {
+      const moon = sunAt(0.7, 2.4);
+      return { lights: [{ kind: "directional", direction: moon, color: [0.62, 0.72, 1], intensity: 0.02 }], environment: gradient([4e-3, 6e-3, 0.014], [8e-3, 0.01, 0.02], [2e-3, 2e-3, 3e-3], 1), light: 0.02 };
+    }
+    case "hdri":
+      if (hdri) return { lights: dark, environment: hdri, light: 1 };
+    // falls through: without an HDRI the studio stands in
+    case "studio":
+    default: {
+      const d = 3 * r;
+      const side = 1.5 * r;
+      const luminance3 = (k) => k * Math.PI * d * d / (side * side);
+      const panel = (at, k, color) => {
+        const len = Math.hypot(...at);
+        const toward = at.map((v) => -v / len);
+        return { kind: "area", shape: "rect", size: [side, side], position: at.map((v) => v / len * d), direction: toward, color, intensity: luminance3(k) };
+      };
+      return {
+        lights: [panel([-1, 1.1, 1.2], 1, [1, 0.97, 0.94]), panel([1.4, 0.4, 1], 0.3, [0.9, 0.95, 1]), panel([0.4, 1, -1.5], 0.6, [1, 1, 1])],
+        environment: gradient([0.05, 0.05, 0.05], [0.04, 0.04, 0.04], [0.03, 0.03, 0.03], 1),
+        light: 1
+      };
+    }
+  }
+}
+function lookDevStage(asset, options, aspect = 16 / 9, maps = {}) {
+  const angle = options.turntable ?? 0;
+  const { min, max } = meshBounds3(asset);
+  const centre = [(min[0] + max[0]) / 2, (min[1] + max[1]) / 2, (min[2] + max[2]) / 2];
+  const r = Math.max(0.05, Math.hypot(max[0] - min[0], max[1] - min[1], max[2] - min[2]) / 2);
+  const height = max[1] - min[1];
+  const instances = [];
+  const hdriRig = options.rig === "hdri" && Boolean(options.environment);
+  if (asset) {
+    const spin = hdriRig ? 0 : angle * 180 / Math.PI;
+    const model = composeModelMatrix5([0, 0, 0], [0, spin, 0], [1, 1, 1]);
+    const offset = composeModelMatrix5([-centre[0], -min[1], -centre[2]], [0, 0, 0], [1, 1, 1]);
+    instances.push({ ...maps, mesh: asset, model: multiplyMat49(model, offset) });
+  }
+  const ball = Math.max(0.05, 0.2 * r);
+  const greyBall = options.balls === false ? null : { centre: [r + 1.5 * ball, ball, 0.6 * r], radius: ball };
+  const chromeBall = options.balls === false ? null : { centre: [r + 4 * ball, ball, 0.6 * r], radius: ball };
+  if (greyBall && chromeBall) {
+    instances.push({ mesh: lookDevSphere("grey ball", material("grey ball", [GREY_CARD, GREY_CARD, GREY_CARD], 0, 1)), model: composeModelMatrix5(greyBall.centre, [0, 0, 0], [ball, ball, ball]) });
+    instances.push({ mesh: lookDevSphere("chrome ball", material("chrome ball", [0.95, 0.95, 0.95], 1, 0)), model: composeModelMatrix5(chromeBall.centre, [0, 0, 0], [ball, ball, ball]) });
+  }
+  const patch = Math.max(0.02, 0.14 * r);
+  const chartHeight = 4 * (patch * 7) / 6 + patch / 6;
+  const chart = options.chart === false ? null : { centre: [-(r + 3.6 * patch), chartHeight / 2 + 0.02 * r, -0.2 * r], patch };
+  if (chart) instances.push({ mesh: lookDevChart(patch), model: composeModelMatrix5(chart.centre, [0, 20, 0], [1, 1, 1]) });
+  if (options.floor !== false) {
+    const side = 30 * r;
+    instances.push({ mesh: { name: "floor", primitives: [quadPrimitive(material("floor", [GREY_CARD, GREY_CARD, GREY_CARD], 0, 0.85), [0, 0, 0], side, side, true)] }, model: composeModelMatrix5([0, 0, 0], [0, 0, 0], [1, 1, 1]) });
+  }
+  const rig = rigLights(options.rig, r, options.environment ?? null);
+  const lights = hdriRig ? rig.lights.map((l) => ({ ...l, ...l.direction ? { direction: turn(l.direction, angle) } : {}, ...l.position ? { position: turn(l.position, angle) } : {} })) : rig.lights;
+  const environment = rig.environment && hdriRig ? turnEnvironment(rig.environment, angle) : rig.environment;
+  const fov = options.fov ?? Math.PI / 4;
+  const elevation = options.elevation ?? 0.25;
+  const left = chart ? chart.centre[0] - 3.6 * patch : -r;
+  const right = chromeBall ? chromeBall.centre[0] + ball : r;
+  const span = Math.max(right - left, (height + 0.2 * r) * aspect);
+  const target = [(left + right) / 2, Math.max(height, 2 * ball) / 2, 0];
+  const distance = span / 2 / Math.tan(fov * Math.min(1, aspect) / 2) * 1.15 + r;
+  const eye = [target[0], target[1] + Math.sin(elevation) * distance, Math.cos(elevation) * distance];
+  return {
+    instances,
+    lights,
+    environment,
+    ambient: 0,
+    view: viewMatrix5(eye, target),
+    projection: projectionMatrix4(fov, aspect, Math.max(0.01, distance / 200), distance * 40),
+    // A level grey card reflects 0.18 × the light it takes: over that light, it shows at middle grey.
+    exposure: 1 / Math.max(1e-4, rig.light),
+    greyBall,
+    chromeBall,
+    chart
+  };
+}
+
+// src/render/lookDevCheck.ts
+import { multiplyMat4 as multiplyMat410 } from "@cartbox/editor";
+var luminance2 = (d, i) => 0.2126 * d[i] + 0.7152 * d[i + 1] + 0.0722 * d[i + 2];
+function half(h) {
+  const s = h & 32768 ? -1 : 1;
+  const e = h >> 10 & 31;
+  const m = h & 1023;
+  if (e === 0) return s * 2 ** -14 * (m / 1024);
+  if (e === 31) return m ? NaN : s * Infinity;
+  return s * 2 ** (e - 15) * (1 + m / 1024);
+}
+async function readLinearTexture(device, texture, width, height, wait = (p) => p) {
+  const bytesPerRow = Math.ceil(width * 8 / 256) * 256;
+  const buffer = device.createBuffer({ size: bytesPerRow * height, usage: 1 | 8 });
+  const encoder = device.createCommandEncoder();
+  encoder.copyTextureToBuffer({ texture }, { buffer, bytesPerRow, rowsPerImage: height }, { width, height });
+  device.queue.submit([encoder.finish()]);
+  await wait(buffer.mapAsync(1));
+  const halves = new Uint16Array(buffer.getMappedRange().slice(0));
+  buffer.unmap();
+  buffer.destroy();
+  const data = new Float32Array(width * height * 4);
+  for (let y = 0; y < height; y += 1) for (let x = 0; x < width * 4; x += 1) data[y * width * 4 + x] = half(halves[y * bytesPerRow / 2 + x]);
+  return { width, height, data };
+}
+function lookDevDraw(stage, width, height) {
+  const sun = stage.lights.find((l) => l.kind === "directional" && l.intensity > 0);
+  return {
+    width,
+    height,
+    view: stage.view,
+    projection: stage.projection,
+    ambient: stage.ambient,
+    lightDirection: sun?.direction ?? [0, 1, 0],
+    environment: stage.environment,
+    lights: stage.lights,
+    prepass: true,
+    localShadowCasters: stage.instances,
+    ...sun?.direction ? { sunShadow: { casters: stage.instances, toLight: sun.direction, distance: 60, size: 2048, reach: 60, strength: 1 } } : {}
+  };
+}
+function ballLight(image, viewProj, ball, view) {
+  const project = ([x, y, z]) => {
+    const m = viewProj;
+    const w = m[3] * x + m[7] * y + m[11] * z + m[15];
+    return [((m[0] * x + m[4] * y + m[8] * z + m[12]) / w + 1) * 0.5 * image.width, (1 - (m[1] * x + m[5] * y + m[9] * z + m[13]) / w) * 0.5 * image.height];
+  };
+  const [cx, cy] = project(ball.centre);
+  const up = [view[1], view[5], view[9]];
+  const [, ey] = project([ball.centre[0] + up[0] * ball.radius, ball.centre[1] + up[1] * ball.radius, ball.centre[2] + up[2] * ball.radius]);
+  const r = Math.abs(cy - ey) * 0.6;
+  let sum = 0;
+  let n = 0;
+  for (let y = Math.floor(cy - r); y <= Math.ceil(cy + r); y += 1) {
+    for (let x = Math.floor(cx - r); x <= Math.ceil(cx + r); x += 1) {
+      if (x < 0 || y < 0 || x >= image.width || y >= image.height || (x + 0.5 - cx) ** 2 + (y + 0.5 - cy) ** 2 > r * r) continue;
+      sum += luminance2(image.data, (y * image.width + x) * 4);
+      n += 1;
+    }
+  }
+  return n > 0 ? sum / n : null;
+}
+async function checkLookDev(device, stage, width, height, samples = 256, wait = (p) => p) {
+  const draw = lookDevDraw(stage, width, height);
+  const renderer = await WebgpuSceneRenderer.create(device, width, height, void 0, { hdr: true });
+  if (!renderer) throw new Error("The look-dev check needs the linear-light WebGPU renderer.");
+  const tracer = PathTracer.create(device);
+  try {
+    let texture = null;
+    for (let i = 0; i < 3; i += 1) texture = renderer.renderToTexture(stage.instances, draw);
+    const raster = await readLinearTexture(device, texture, width, height, wait);
+    let traced = null;
+    const perFrame = Math.max(1, Math.min(samples, Math.floor((1 << 20) / (width * height))));
+    while (tracer.samples < samples) {
+      traced = tracer.render(stage.instances, draw, width, height, { samplesPerFrame: Math.min(perFrame, samples - tracer.samples) });
+      await wait(device.queue.onSubmittedWorkDone());
+    }
+    const reference = await readLinearTexture(device, traced, width, height, wait);
+    const viewProj = multiplyMat410(stage.projection, stage.view);
+    const balls = (ball) => {
+      if (!ball) return null;
+      const a = ballLight(raster, viewProj, ball, stage.view);
+      const b = ballLight(reference, viewProj, ball, stage.view);
+      return a === null || b === null ? null : { raster: a, reference: b };
+    };
+    let error = 0;
+    let outliers = 0;
+    let n = 0;
+    for (let i = 0; i < width * height * 4; i += 4) {
+      if (raster.data[i + 3] < 0.5 || reference.data[i + 3] < 0.5) continue;
+      const a = luminance2(raster.data, i);
+      const b = luminance2(reference.data, i);
+      const e = Math.abs(a - b) / Math.max(b, 1e-3);
+      error += e;
+      if (e > 0.1) outliers += 1;
+      n += 1;
+    }
+    return { greyBall: balls(stage.greyBall), chromeBall: balls(stage.chromeBall), frameError: n > 0 ? error / n : 0, outliers: n > 0 ? outliers / n : 0, raster, reference };
+  } finally {
+    tracer.destroy();
+    renderer.dispose();
+  }
+}
+
+// src/render/lookDevView.ts
+var LookDevView = class _LookDevView {
+  constructor(canvas, device, context, format, renderer, presenter) {
+    this.canvas = canvas;
+    this.device = device;
+    this.context = context;
+    this.format = format;
+    this.renderer = renderer;
+    this.presenter = presenter;
+    this.options = { rig: "studio", mode: "raster", spin: 0.4 };
+    this.asset = null;
+    this.maps = {};
+    this.stage = null;
+    this.angle = 0;
+    this.last = 0;
+    this.raf = 0;
+    this.destroyed = false;
+    this.size = { width: canvas.width, height: canvas.height };
+    this.raf = requestAnimationFrame((t) => this.frame(t));
+  }
+  /** A view on `canvas`, or null without WebGPU (the stage needs the AAA tier's renderer). */
+  static async create(canvas) {
+    const device = await getWebgpuDevice();
+    const gpu = navigator.gpu;
+    const context = device ? canvas.getContext("webgpu") : null;
+    if (!device || !gpu || !context) return null;
+    const format = gpu.getPreferredCanvasFormat?.() ?? "bgra8unorm";
+    context.configure({ device, format, alphaMode: "opaque" });
+    const width = Math.max(1, canvas.width);
+    const height = Math.max(1, canvas.height);
+    const renderer = await WebgpuSceneRenderer.create(device, width, height, void 0, { hdr: true, mips: true });
+    if (!renderer) return null;
+    return new _LookDevView(canvas, device, context, format, renderer, new GpuPresenter(device, width, height, { hdr: true }));
+  }
+  /** The asset on the stage, with its decoded maps per primitive (or none: the props alone). */
+  setAsset(asset, maps = {}) {
+    this.asset = asset;
+    this.maps = maps;
+    this.stage = null;
+  }
+  setOptions(options) {
+    this.options = { ...this.options, ...options };
+    this.stage = null;
+  }
+  /** The turntable's angle, radians. */
+  get turntable() {
+    return this.angle;
+  }
+  /** Samples each pixel of the reference holds (0 while the raster is shown). */
+  get samples() {
+    return this.options.mode === "pathTraced" ? this.renderer.referenceSamples : 0;
+  }
+  stageNow() {
+    const { width, height } = this.size;
+    this.stage ?? (this.stage = lookDevStage(this.asset, { ...this.options, turntable: this.options.turntable ?? this.angle }, width / Math.max(1, height), this.maps));
+    return this.stage;
+  }
+  frame(time) {
+    if (this.destroyed) return;
+    this.raf = requestAnimationFrame((t) => this.frame(t));
+    const dt = this.last ? Math.min(0.1, (time - this.last) / 1e3) : 0;
+    this.last = time;
+    const tracing = this.options.mode === "pathTraced";
+    if (!tracing && this.options.turntable === void 0 && (this.options.spin ?? 0) !== 0) {
+      this.angle = (this.angle + dt * (this.options.spin ?? 0)) % (2 * Math.PI);
+      this.stage = null;
+    }
+    const width = Math.max(1, this.canvas.width);
+    const height = Math.max(1, this.canvas.height);
+    if (width !== this.size.width || height !== this.size.height) {
+      this.size = { width, height };
+      this.renderer.resize(width, height);
+      this.presenter.resize(width, height);
+      this.stage = null;
+    }
+    const stage = this.stageNow();
+    const draw = { ...lookDevDraw(stage, width, height), ...tracing ? { viewMode: "pathTraced" } : { temporal: true } };
+    const scene = this.renderer.renderToTexture(stage.instances, draw);
+    const exposure = stage.exposure * 2 ** (this.options.stops ?? 0);
+    this.presenter.present({ base: { kind: "colour", rgba: [12, 12, 14, 255] }, scene, tonemap: { exposure, operator: this.options.toneMapper ?? "aces" } }, this.context.getCurrentTexture(), this.format);
+  }
+  /** Draw the stage as it stands both ways at a small size and compare them (lookDevCheck.ts). */
+  check(width = 192, height = 108, samples = 128) {
+    const stage = lookDevStage(this.asset, { ...this.options, turntable: this.options.turntable ?? this.angle }, width / height, this.maps);
+    return checkLookDev(this.device, stage, width, height, samples);
+  }
+  /** The reference of the stage as it stands, `width` across at the canvas's aspect (up to 8K). */
+  capture(width, samples = 256, progress) {
+    const height = Math.max(1, Math.round(width * this.size.height / Math.max(1, this.size.width)));
+    const stage = lookDevStage(this.asset, { ...this.options, turntable: this.options.turntable ?? this.angle }, width / height, this.maps);
+    const exposure = stage.exposure * 2 ** (this.options.stops ?? 0);
+    return captureReference(this.device, stage.instances, lookDevDraw(stage, width, height), { width, height, samples, exposure, ...this.options.toneMapper ? { toneMapper: this.options.toneMapper } : {}, ...progress ? { progress } : {} });
+  }
+  destroy() {
+    this.destroyed = true;
+    cancelAnimationFrame(this.raf);
+    this.renderer.dispose();
+    this.presenter.dispose();
+    this.context.unconfigure?.();
+  }
+};
 
 // src/fx/lensModel.ts
 var TILT_SHIFT_FEATHER = 0.35;
@@ -32076,21 +33427,21 @@ function seededRandom(seed) {
   };
 }
 function pulse(period, min, max) {
-  const half = Math.max(1, Math.round(period / 2));
+  const half2 = Math.max(1, Math.round(period / 2));
   return {
     keys: [
       { t: 0, value: min, ease: "smooth" },
-      { t: half, value: max, ease: "smooth" }
+      { t: half2, value: max, ease: "smooth" }
     ],
     mode: "pingpong"
   };
 }
 function sway(period, amplitude, center = 0) {
-  const half = Math.max(1, Math.round(period / 2));
+  const half2 = Math.max(1, Math.round(period / 2));
   return {
     keys: [
       { t: 0, value: center - amplitude, ease: "smooth" },
-      { t: half, value: center + amplitude, ease: "smooth" }
+      { t: half2, value: center + amplitude, ease: "smooth" }
     ],
     mode: "pingpong"
   };
@@ -33304,6 +34655,10 @@ function mount(container, options) {
     inspect: () => player.inspect(),
     setQuality: (choice) => player.setQuality(choice),
     setViewMode: (mode) => player.setViewMode(mode),
+    captureReference: (options2) => player.captureReference(options2),
+    get referenceSamples() {
+      return player.referenceSamples;
+    },
     supplyTextures: (textures) => player.supplyTextures(textures),
     setTimeScale: (scale) => player.setTimeScale(scale),
     timeScale: () => player.timeScale(),
@@ -33336,6 +34691,7 @@ export {
   CELL_WORLD,
   CMD_RING_BYTES,
   CMD_RING_MAX,
+  COLOR_CHECKER,
   COMPOSE_UNIFORM_FLOATS,
   CappedSceneRenderer,
   CartridgeLoadError,
@@ -33359,6 +34715,7 @@ export {
   FLARE_GHOSTS,
   FLARE_GHOST_GAIN,
   FLARE_SPIKE_POWER,
+  GREY_CARD,
   GYRO_AIMS,
   GamepadInput,
   GpuCanvasSurface,
@@ -33376,15 +34733,18 @@ export {
   LIGHTS_CAPACITY,
   LIGHT_FLOATS,
   LIGHT_STRIDE,
+  LOOK_DEV_RIGS,
   LOOP_SLOTS,
   LUT_LOOKS,
   LUT_SIZE,
   LightingLayer,
   LitCanvasSurface,
+  LookDevView,
   MAILBOX_TYPE_ACHIEVEMENT,
   MAILBOX_TYPE_PROGRESS,
   MAILBOX_TYPE_SCORE,
   MAILBOX_WORDS,
+  MAX_CAPTURE_SIDE,
   MAX_EMITTERS,
   MAX_LUT_SIZE,
   MAX_PARTICLES_PER_EMITTER,
@@ -33423,6 +34783,7 @@ export {
   PROFILE_SECTIONS,
   PROFILE_WINDOW,
   ParticleOverlaySurface,
+  PathTracer,
   PhysicsSession,
   PointerInput,
   PostFxPass,
@@ -33432,6 +34793,7 @@ export {
   QUALITY_PRESETS,
   QualityGovernor,
   RAM_LAYOUTS,
+  REFERENCE_BOUNCES,
   REPLAY_VERSION,
   RESPONSE_CURVES,
   ReplayError,
@@ -33499,7 +34861,9 @@ export {
   capTextures,
   capTriangles,
   capsConstrainScene,
+  captureReference,
   cellAt,
+  checkLookDev,
   clipFrameIndex,
   codeChunks,
   codeLineOffset,
@@ -33574,12 +34938,15 @@ export {
   interleaveVertices,
   interleaveVerticesWithTangents,
   interpolateNormal,
+  isDiagnosticView,
   isMobileAgent,
   jointFrames,
   layoutSticks,
   lensFlareAt,
   loadEngineModule,
   lookAccelerationBoost,
+  lookDevDraw,
+  lookDevStage,
   lookGains,
   lookLut,
   lookProfileFor,
@@ -33595,6 +34962,7 @@ export {
   packComposeUniforms,
   packLights,
   packMeasureUniforms,
+  packReferenceScene,
   packShaftUniforms,
   packSkyUniforms,
   paramKey,
@@ -33686,6 +35054,7 @@ export {
   toConsolePixel,
   toggleMask,
   tokenizeLua,
+  turnEnvironment,
   uiSdkLua,
   uniformsFromSettings,
   unpadRows,

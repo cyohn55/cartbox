@@ -2,6 +2,7 @@ import type { AccessibilitySettings, ColorFilter, DecodedTexture, EncodedImage, 
 import type { PhysicsBackend } from "./physics/physicsSession.js";
 import type { QualityChoice, QualityLevel } from "./quality.js";
 import type { ViewMode } from "./render/viewModes.js";
+import type { ReferenceCapture } from "./render/pathTracer.js";
 /**
  * Public and shared types for @cartbox/player.
  *
@@ -395,6 +396,15 @@ export interface PlayerHandle {
   setQuality(choice: QualityChoice): void;
   /** Show the 3D scene lit (the default) or as a diagnostic view (F10a; the AAA tier alone draws them). */
   setViewMode(mode: ViewMode): void;
+  /**
+   * Render the path-traced reference of the 3D frame shown (F10b), `width`
+   * across at its aspect (up to 8K a side), accumulated over `samples` a pixel
+   * (default 256): a display image and, if asked, the linear one. Null on every
+   * tier but AAA, or before a frame has drawn.
+   */
+  captureReference(options: { readonly width: number; readonly samples?: number; readonly progress?: (done: number) => void }): Promise<ReferenceCapture> | null;
+  /** Samples each pixel of the viewport's path-traced reference holds (F10b; 0 when it isn't shown). */
+  readonly referenceSamples: number;
   /**
    * Hand the running scene streamed textures, keyed by the `ref` of the
    * placeholder each fills (an asset-backed texture's content hash). Safe to

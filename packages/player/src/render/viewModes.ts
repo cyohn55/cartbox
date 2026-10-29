@@ -12,6 +12,9 @@
  * velocity buffer, and overdraw counts every fragment the scene shades
  * (additively, depth unwritten) before both are coloured in a resolve pass.
  *
+ * The path-traced reference (F10b; pathTracer.ts) replaces the frame instead,
+ * and is exposed and tone-mapped as the lit frame is.
+ *
  * A diagnostic frame skips what would change its values: temporal
  * accumulation and upscaling, reflections, the camera's effects, fog and the
  * presenter's exposure, tone map and post stack. Its colours are written as
@@ -34,12 +37,14 @@ export type ViewMode =
   | "lod"
   | "texelDensity"
   | "mipLevel"
-  | "cascades";
+  | "cascades"
+  | "pathTraced";
 
 /** Each mode's code in the shader, its label, its group in a menu, and what it shows. */
 export const VIEW_MODES: readonly { readonly id: ViewMode; readonly code: number; readonly label: string; readonly group: "Lighting" | "Buffers" | "Complexity" | "Geometry"; readonly hint: string }[] = [
   { id: "lit", code: 0, label: "Lit", group: "Lighting", hint: "The frame as the game renders it." },
   { id: "unlit", code: 1, label: "Unlit", group: "Lighting", hint: "Base colour and emission, with no light." },
+  { id: "pathTraced", code: 16, label: "Path traced", group: "Lighting", hint: "The path-traced reference (F10b): the same scene, materials and lights, converging while the view holds." },
   { id: "lightingOnly", code: 7, label: "Lighting only", group: "Lighting", hint: "The light on a white, non-metal surface: direct, sky, bakes and GI." },
   { id: "baseColor", code: 2, label: "Base colour", group: "Buffers", hint: "The albedo the surface shades with (maps, blends, detail and decals applied)." },
   { id: "roughness", code: 3, label: "Roughness", group: "Buffers", hint: "Black is mirror-smooth, white fully rough." },
@@ -55,6 +60,11 @@ export const VIEW_MODES: readonly { readonly id: ViewMode; readonly code: number
   { id: "mipLevel", code: 14, label: "Mip level", group: "Geometry", hint: "The base colour's mip each pixel samples: 0 green, then yellow, red, magenta." },
   { id: "cascades", code: 15, label: "Shadow cascades", group: "Geometry", hint: "The sun's cascade each pixel is shadowed from: red, green, blue, yellow." },
 ];
+
+/** Whether a mode is a diagnostic, shown as written (F10a): every mode but the lit frame and the path-traced reference (F10b), which are light to expose and tone-map. */
+export function isDiagnosticView(mode: ViewMode | null | undefined): boolean {
+  return mode !== undefined && mode !== null && mode !== "lit" && mode !== "pathTraced";
+}
 
 /** A mode's shader code (0 for lit or anything unknown). */
 export function viewModeCode(mode: ViewMode | null | undefined): number {

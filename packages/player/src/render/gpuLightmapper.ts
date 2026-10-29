@@ -87,6 +87,7 @@ import {
   type MeshAsset,
   type Occluder,
   type OccluderSurface,
+  type Bvh,
   type ProbeVolume,
   type SceneLight,
 } from "@cartbox/editor";
@@ -254,10 +255,8 @@ export async function bakeSurfaces(mesh: MeshAsset, decode: (image: EncodedImage
   );
 }
 
-/** Flatten the occluders' BVH into the tracer's buffers. */
-export function packLightmapScene(occluders: readonly Occluder[]): PackedLightmapScene {
-  const bvh = buildBvh(occluders);
-  const triangles = bvh.order.length;
+/** A BVH's nodes as the tracers read them (see {@link PackedLightmapScene.nodes}); shared with the path-traced reference (F10b). */
+export function packBvhNodes(bvh: Bvh): Uint32Array {
   const nodeCount = bvh.meta.length / 3;
   // An empty scene still binds one node, an inside-out box no ray enters.
   const nodes = new Uint32Array(Math.max(1, nodeCount) * 8);
@@ -276,6 +275,14 @@ export function packLightmapScene(occluders: readonly Occluder[]): PackedLightma
     nodes[n * 8 + 3] = (left >= 0 ? left : -1 - bvh.meta[n * 3 + 2]!) >>> 0;
     nodes[n * 8 + 7] = bvh.meta[n * 3 + 1]! >>> 0;
   }
+  return nodes;
+}
+
+/** Flatten the occluders' BVH into the tracer's buffers. */
+export function packLightmapScene(occluders: readonly Occluder[]): PackedLightmapScene {
+  const bvh = buildBvh(occluders);
+  const triangles = bvh.order.length;
+  const nodes = packBvhNodes(bvh);
   const tris = new Float32Array(Math.max(1, triangles) * 12);
   const mats = new Float32Array(Math.max(1, triangles) * 8);
   const matBits = new Uint32Array(mats.buffer);
@@ -298,90 +305,13 @@ export function packLightmapScene(occluders: readonly Occluder[]): PackedLightma
   return { nodes, tris, mats, triangles };
 }
 
-export const LIGHTMAP_TRACE_WGSL = /* wgsl */ `
-struct Params {
-  run: vec4<u32>,   // x = first texel, y = texels, z = first sample, w = samples this pass
-  info: vec4<u32>,  // x = bounces, y = directional lights, z = sky width, w = sky height
-  total: vec4<u32>, // x = samples in all, y = point, spot and area lights (F3d-4)
-  extra: vec4<f32>, // x = a probe's depth cap (F3d-3)
-};
-@group(0) @binding(0) var<storage, read> nodes: array<vec4<u32>>;
-@group(0) @binding(1) var<storage, read> tris: array<vec4<f32>>;
-@group(0) @binding(2) var<storage, read> mats: array<vec4<f32>>;
-@group(0) @binding(3) var<storage, read> texels: array<vec4<f32>>;
-@group(0) @binding(4) var<storage, read_write> accum: array<vec4<f32>>;
-@group(0) @binding(5) var<storage, read> sky: array<vec4<f32>>;
-@group(0) @binding(6) var<uniform> params: Params;
-@group(0) @binding(7) var<storage, read> lights: array<vec4<f32>>;
-
-const PI = 3.14159265;
-// How far a ray starts off its surface, and the nearest hit it takes (metres).
-const EPS = 0.005;
-const T_MIN = 1e-4;
-const FAR = 1e30;
-
-struct Hit {
-  t: f32,
-  tri: i32,
-};
-
-// The closest hit along o + t·d within tMax (or, with anyHit, the first found).
-fn trace(o: vec3<f32>, d: vec3<f32>, tMax: f32, anyHit: bool) -> Hit {
-  var best = Hit(tMax, -1);
-  let tiny = abs(d) < vec3<f32>(1e-9);
-  let inv = 1.0 / select(d, select(vec3<f32>(-1e-9), vec3<f32>(1e-9), d >= vec3<f32>(0.0)), tiny);
-  var stack: array<u32, 64>;
-  var sp = 1u;
-  stack[0] = 0u;
-  loop {
-    if (sp == 0u) { break; }
-    sp = sp - 1u;
-    let n = stack[sp];
-    let a = nodes[n * 2u];
-    let b = nodes[n * 2u + 1u];
-    let t0 = (bitcast<vec3<f32>>(a.xyz) - o) * inv;
-    let t1 = (bitcast<vec3<f32>>(b.xyz) - o) * inv;
-    let lo = min(t0, t1);
-    let hi = max(t0, t1);
-    let tn = max(max(lo.x, lo.y), max(lo.z, 0.0));
-    let tf = min(min(hi.x, hi.y), min(hi.z, best.t));
-    if (tn > tf) { continue; }
-    let left = bitcast<i32>(a.w);
-    if (left >= 0) {
-      if (sp + 2u <= 64u) {
-        stack[sp] = u32(left);
-        stack[sp + 1u] = b.w;
-        sp = sp + 2u;
-      }
-      continue;
-    }
-    let first = b.w;
-    let count = u32(-1 - left);
-    for (var i = first; i < first + count; i = i + 1u) {
-      // Möller–Trumbore.
-      let v0 = tris[i * 3u].xyz;
-      let e1 = tris[i * 3u + 1u].xyz;
-      let e2 = tris[i * 3u + 2u].xyz;
-      let p = cross(d, e2);
-      let det = dot(e1, p);
-      if (abs(det) < 1e-12) { continue; }
-      let id = 1.0 / det;
-      let s = o - v0;
-      let u = dot(s, p) * id;
-      if (u < 0.0 || u > 1.0) { continue; }
-      let q = cross(s, e1);
-      let v = dot(d, q) * id;
-      if (v < 0.0 || u + v > 1.0) { continue; }
-      let t = dot(e2, q) * id;
-      if (t > T_MIN && t < best.t) {
-        best = Hit(t, i32(i));
-        if (anyHit) { return best; }
-      }
-    }
-  }
-  return best;
-}
-
+/**
+ * The tracers' shared sampling WGSL (F3d, and the path-traced reference, F10b):
+ * the random numbers, a cosine-weighted direction, the sky panorama's radiance
+ * (bound as `sky`, its size in `params.info.zw`), and the packed
+ * lights' falloff, weighting and sampling (bound as `lights`, {@link packBakeLights}).
+ */
+export const BAKE_SAMPLING_WGSL = /* wgsl */ `
 fn pcg(v: u32) -> u32 {
   let s = v * 747796405u + 2891336453u;
   let w = ((s >> ((s >> 28u) + 4u)) ^ s) * 277803737u;
@@ -542,7 +472,93 @@ fn localSample(l: u32, p: vec3<f32>, n: vec3<f32>) -> LightSample {
   if (cosS > 0.0 && cosL > 0.0) { out.c = rad * (cosS * cosL * area / (PI * max(d * d, 1e-4))); }
   return out;
 }
+`;
 
+export const LIGHTMAP_TRACE_WGSL = /* wgsl */ `
+struct Params {
+  run: vec4<u32>,   // x = first texel, y = texels, z = first sample, w = samples this pass
+  info: vec4<u32>,  // x = bounces, y = directional lights, z = sky width, w = sky height
+  total: vec4<u32>, // x = samples in all, y = point, spot and area lights (F3d-4)
+  extra: vec4<f32>, // x = a probe's depth cap (F3d-3)
+};
+@group(0) @binding(0) var<storage, read> nodes: array<vec4<u32>>;
+@group(0) @binding(1) var<storage, read> tris: array<vec4<f32>>;
+@group(0) @binding(2) var<storage, read> mats: array<vec4<f32>>;
+@group(0) @binding(3) var<storage, read> texels: array<vec4<f32>>;
+@group(0) @binding(4) var<storage, read_write> accum: array<vec4<f32>>;
+@group(0) @binding(5) var<storage, read> sky: array<vec4<f32>>;
+@group(0) @binding(6) var<uniform> params: Params;
+@group(0) @binding(7) var<storage, read> lights: array<vec4<f32>>;
+
+const PI = 3.14159265;
+// How far a ray starts off its surface, and the nearest hit it takes (metres).
+const EPS = 0.005;
+const T_MIN = 1e-4;
+const FAR = 1e30;
+
+struct Hit {
+  t: f32,
+  tri: i32,
+};
+
+// The closest hit along o + t·d within tMax (or, with anyHit, the first found).
+fn trace(o: vec3<f32>, d: vec3<f32>, tMax: f32, anyHit: bool) -> Hit {
+  var best = Hit(tMax, -1);
+  let tiny = abs(d) < vec3<f32>(1e-9);
+  let inv = 1.0 / select(d, select(vec3<f32>(-1e-9), vec3<f32>(1e-9), d >= vec3<f32>(0.0)), tiny);
+  var stack: array<u32, 64>;
+  var sp = 1u;
+  stack[0] = 0u;
+  loop {
+    if (sp == 0u) { break; }
+    sp = sp - 1u;
+    let n = stack[sp];
+    let a = nodes[n * 2u];
+    let b = nodes[n * 2u + 1u];
+    let t0 = (bitcast<vec3<f32>>(a.xyz) - o) * inv;
+    let t1 = (bitcast<vec3<f32>>(b.xyz) - o) * inv;
+    let lo = min(t0, t1);
+    let hi = max(t0, t1);
+    let tn = max(max(lo.x, lo.y), max(lo.z, 0.0));
+    let tf = min(min(hi.x, hi.y), min(hi.z, best.t));
+    if (tn > tf) { continue; }
+    let left = bitcast<i32>(a.w);
+    if (left >= 0) {
+      if (sp + 2u <= 64u) {
+        stack[sp] = u32(left);
+        stack[sp + 1u] = b.w;
+        sp = sp + 2u;
+      }
+      continue;
+    }
+    let first = b.w;
+    let count = u32(-1 - left);
+    for (var i = first; i < first + count; i = i + 1u) {
+      // Möller–Trumbore.
+      let v0 = tris[i * 3u].xyz;
+      let e1 = tris[i * 3u + 1u].xyz;
+      let e2 = tris[i * 3u + 2u].xyz;
+      let p = cross(d, e2);
+      let det = dot(e1, p);
+      if (abs(det) < 1e-12) { continue; }
+      let id = 1.0 / det;
+      let s = o - v0;
+      let u = dot(s, p) * id;
+      if (u < 0.0 || u > 1.0) { continue; }
+      let q = cross(s, e1);
+      let v = dot(d, q) * id;
+      if (v < 0.0 || u + v > 1.0) { continue; }
+      let t = dot(e2, q) * id;
+      if (t > T_MIN && t < best.t) {
+        best = Hit(t, i32(i));
+        if (anyHit) { return best; }
+      }
+    }
+  }
+  return best;
+}
+
+${BAKE_SAMPLING_WGSL}
 // The lights on a surface a path bounced off at p, facing n, on the channels \`mask\`: every directional light, and one
 // local light picked by localWeight (a tenth of the choice spread evenly), over the chance of picking it.
 fn lightsOn(p: vec3<f32>, n: vec3<f32>, mask: u32) -> vec3<f32> {

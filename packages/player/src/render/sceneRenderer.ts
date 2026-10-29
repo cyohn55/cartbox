@@ -20,6 +20,7 @@
  * rasteriser is a hardcoded call. See ERA_MODELS.md §5.1.
  */
 
+import type { CaptureOptions, ReferenceCapture } from "./pathTracer.js";
 import type { ViewMode } from "./viewModes.js";
 import type { SsgiFrame } from "./ssgi.js";
 import type { CameraEffects } from "./cameraEffects.js";
@@ -352,6 +353,13 @@ export interface SceneRenderer {
   /** The GPU device a {@link renderToTexture} texture belongs to, so a compositor can share it. */
   readonly gpuDevice?: unknown;
   /**
+   * The linear-light WebGPU renderer only (AAA_FIDELITY_ROADMAP.md F10b): the
+   * path-traced reference of a frame at any size up to 8K, and the samples its
+   * viewport reference holds.
+   */
+  captureReference?(instances: readonly MeshSceneInstance[], draw: GpuSceneDraw, options: CaptureOptions): Promise<ReferenceCapture>;
+  readonly referenceSamples?: number;
+  /**
    * True when it draws the sun's shadow itself from {@link SceneDraw.sunShadow}
    * (F2a: the AAA tier's GPU cascades) and ignores a CPU {@link SceneDraw.shadow}.
    */
@@ -468,6 +476,16 @@ export class CappedSceneRenderer implements SceneRenderer {
 
   get sunCascades(): boolean | undefined {
     return this.inner.sunCascades;
+  }
+
+  get referenceSamples(): number | undefined {
+    return this.inner.referenceSamples;
+  }
+
+  get captureReference(): SceneRenderer["captureReference"] {
+    const inner = this.inner;
+    // A reference is the whole scene, uncapped.
+    return inner.captureReference ? (instances, draw, options) => inner.captureReference!(instances, draw, options) : undefined;
   }
 
   get renderToTexture(): SceneRenderer["renderToTexture"] {

@@ -122,7 +122,8 @@ import type { ScreenSun } from "../fx/PostFxSurface.js";
 import type { PostVolumeFx } from "../fx/postVolumeFx.js";
 import { SoftwareSceneRenderer, type GpuSceneDraw, type SceneRenderer, type SunShadow } from "../render/sceneRenderer.js";
 import type { ReflectionCapture } from "../render/probeCapture.js";
-import type { ViewMode } from "../render/viewModes.js";
+import { isDiagnosticView, type ViewMode } from "../render/viewModes.js";
+import type { CaptureOptions, ReferenceCapture } from "../render/pathTracer.js";
 import { SUN_SOFTNESS } from "../render/cascades.js";
 import type { PresentFrame, PresentSky, PresentStats } from "../render/gpuPresent.js";
 import type { MailboxMeshCamera, MailboxMeshPose, WorldLight } from "../mailbox.js";
@@ -488,6 +489,8 @@ export class MeshOverlaySurface implements DisplaySurface {
   private quality: QualitySettings = QUALITY_PRESETS.high;
   /** What the viewport shows (F10a): the lit frame, or a diagnostic of it on the AAA tier. */
   private viewMode: ViewMode = "lit";
+  /** The last frame handed to the GPU renderer, for a reference capture of it (F10b). */
+  private lastFrame: { readonly instances: readonly MeshSceneInstance[]; readonly draw: GpuSceneDraw } | null = null;
   /** Skinned instances' live meshes (their buffers are rewritten for each pose). */
   private readonly live = new Map<number, LiveSkinnedMesh>();
   /** The skinning matrices each live mesh was last posed with (skip re-skinning the same pose). */
@@ -709,6 +712,23 @@ export class MeshOverlaySurface implements DisplaySurface {
   /** Draw holo UI documents over every frame with `draw` (null: none). */
   setHolo(draw: ((out: Uint8ClampedArray, width: number, height: number, time: number, premultiplied?: boolean) => boolean | void) | null): void {
     this.holo = draw;
+  }
+
+  /**
+   * The path-traced reference of the last frame drawn (F10b), `width` across at
+   * the frame's aspect (up to 8K a side), or null where the renderer has none
+   * (every tier but AAA) or nothing has drawn yet.
+   */
+  captureReference(options: Omit<CaptureOptions, "height"> & { readonly height?: number }): Promise<ReferenceCapture> | null {
+    const last = this.lastFrame;
+    if (!last || !this.renderer.captureReference) return null;
+    const height = options.height ?? Math.max(1, Math.round((options.width * last.draw.height) / Math.max(1, last.draw.width)));
+    return this.renderer.captureReference(last.instances, last.draw, { ...options, height });
+  }
+
+  /** Samples each pixel of the viewport's path-traced reference holds (F10b); 0 when it isn't shown. */
+  get referenceSamples(): number {
+    return this.viewMode === "pathTraced" ? (this.renderer.referenceSamples ?? 0) : 0;
   }
 
   /** Show the lit frame or a diagnostic of it (F10a; the AAA tier alone draws the diagnostics). */
@@ -1407,7 +1427,7 @@ export class MeshOverlaySurface implements DisplaySurface {
     // On the AAA tier's temporal frames the upscaler (F4b) reconstructs the display's pixels, so a preset may
     // render at a share of them too (Medium, FSR 2's quality mode).
     // A diagnostic view (F10a) on the AAA tier: shown as written, without the presenter's exposure, tone map or shafts.
-    const diagnostic = this.viewMode !== "lit" && this.renderer.sunCascades === true;
+    const diagnostic = isDiagnosticView(this.viewMode) && this.renderer.sunCascades === true;
     const temporal = this.options.temporal === true && this.quality.temporal === true;
     const upscaling = this.renderer.sunCascades === true && temporal && this.options.prepass === true;
     const dynamic = this.resolution ? this.resolution.update(this.gpuFrameMs(gpu)) : 1;
@@ -1454,8 +1474,9 @@ export class MeshOverlaySurface implements DisplaySurface {
       // Screen-space GI on the AAA tier (F3e-2): on unless the rig turns it off.
       ...(lighting && this.renderer.sunCascades === true ? { screenSpaceGi: resolveScreenSpaceGi(lighting.screenSpaceGi) } : {}),
       time,
-      ...(diagnostic ? { viewMode: this.viewMode } : {}),
+      ...(this.viewMode !== "lit" && this.renderer.sunCascades === true ? { viewMode: this.viewMode } : {}),
     };
+    this.lastFrame = { instances: job.drawn, draw };
     const scene = this.renderer.renderToTexture!(job.drawn, draw) ?? null;
     // The held weapon on its own GPU renderer, made the first time it shows (until then it isn't drawn).
     let front: unknown = null;

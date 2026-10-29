@@ -146,6 +146,7 @@ import { FrameGraph, GraphTimer, TransientPool, timingSpan, type FrameResource, 
 import { MAX_ANISOTROPY, MipmapGenerator, coverageMips, hasTransparency, mipLevelCount, uploadCompressed } from "./mipmaps.js";
 import { compressedFormatsFor } from "../lighting/webgpuDevice.js";
 import { brdfWgsl, dfgTable } from "./brdf.js";
+import { PathTracer, captureReference, type CaptureOptions, type ReferenceCapture } from "./pathTracer.js";
 import { IES_BASE, IES_MAX_PROFILES, IES_VEC4S, ltcTables, ltcWgsl } from "./ltc.js";
 import { PROBE_FACE, ProbeCapture, packCapturedProbes } from "./probeCapture.js";
 import { DECAL_BUFFER_WORDS, DECAL_TILES_AT, decalWgsl, packDecalBoxes, packDecalTiles } from "./decalBuffer.js";
@@ -2038,6 +2039,8 @@ export class WebgpuSceneRenderer implements SceneRenderer {
   private uniformBuffer: any = null;
   private uniformData = new Float32Array(0);
   private destroyed = false;
+  /** The path-traced reference (F10b), made the first time it is shown. */
+  private pathTracer: PathTracer | null = null;
 
   /**
    * The bound shadow map — the 1x1 blank when no shadow this frame, else an
@@ -3439,6 +3442,11 @@ export class WebgpuSceneRenderer implements SceneRenderer {
    */
   renderToTexture(instances: readonly MeshSceneInstance[], given: GpuSceneDraw): any | null {
     if (this.destroyed) return null;
+    // The path-traced reference (F10b) in place of the frame, accumulating while the view holds.
+    if (this.hdr && given.viewMode === "pathTraced") {
+      this.pathTracer ??= PathTracer.create(this.device);
+      return this.pathTracer.render(applyScenePasses(instances, given), given, this.width, this.height);
+    }
     const draw = this.hdr ? viewModeDraw(given) : given;
     if (draw.prepass === true) this.matchMotion(instances);
     const visible = applyScenePasses(instances, draw);
@@ -3448,6 +3456,16 @@ export class WebgpuSceneRenderer implements SceneRenderer {
       return null;
     }
     return this.frameOutput ?? this.colourTexture;
+  }
+
+  /** Samples each pixel of the path-traced reference holds (F10b); 0 when it isn't shown. */
+  get referenceSamples(): number {
+    return this.pathTracer?.samples ?? 0;
+  }
+
+  /** Render the path-traced reference of `instances` through `draw` at any size up to 8K (F10b; {@link captureReference}). */
+  captureReference(instances: readonly MeshSceneInstance[], draw: GpuSceneDraw, options: CaptureOptions): Promise<ReferenceCapture> {
+    return captureReference(this.device, applyScenePasses(instances, draw), draw, options);
   }
 
   settle(draw: SceneDraw): FrameState {
@@ -5314,6 +5332,8 @@ export class WebgpuSceneRenderer implements SceneRenderer {
   dispose(): void {
     if (this.destroyed) return;
     this.destroyed = true;
+    this.pathTracer?.destroy();
+    this.pathTracer = null;
     this.latest = null;
     this.software.dispose();
     destroySafely(this.colourTexture);

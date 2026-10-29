@@ -138,7 +138,22 @@ export {
   webgpuCanHonour,
 } from "./render/renderCaps.js";
 export type { FrameState, GpuSceneDraw, SceneDraw, SceneRenderer, SunShadow } from "./render/sceneRenderer.js";
-export { DEFAULT_TEXEL_DENSITY, VIEW_MODES, heat, readViewMode, viewModeCode, type ViewMode } from "./render/viewModes.js";
+export { DEFAULT_TEXEL_DENSITY, VIEW_MODES, heat, isDiagnosticView, readViewMode, viewModeCode, type ViewMode } from "./render/viewModes.js";
+export {
+  MAX_CAPTURE_SIDE,
+  PathTracer,
+  REFERENCE_BOUNCES,
+  captureReference,
+  packReferenceScene,
+  type CaptureOptions,
+  type ReferenceCapture,
+  type ReferenceDraw,
+  type ReferenceScene,
+  type ReferenceSettings,
+} from "./render/pathTracer.js";
+export { COLOR_CHECKER, GREY_CARD, LOOK_DEV_RIGS, lookDevStage, turnEnvironment, type LookDevMaps, type LookDevOptions, type LookDevRig, type LookDevStage } from "./render/lookDev.js";
+export { checkLookDev, lookDevDraw, type LookDevCheck } from "./render/lookDevCheck.js";
+export { LookDevView, type LookDevViewOptions } from "./render/lookDevView.js";
 // Presenting the 3D frame from the GPU (AAA_FIDELITY_ROADMAP.md F0a).
 export {
   COMPOSE_UNIFORM_FLOATS,
@@ -467,6 +482,10 @@ export function mount(container: HTMLElement, options: PlayerOptions): PlayerHan
     inspect: () => player.inspect(),
     setQuality: (choice) => player.setQuality(choice),
     setViewMode: (mode) => player.setViewMode(mode),
+    captureReference: (options) => player.captureReference(options),
+    get referenceSamples(): number {
+      return player.referenceSamples;
+    },
     supplyTextures: (textures) => player.supplyTextures(textures),
     setTimeScale: (scale) => player.setTimeScale(scale),
     timeScale: () => player.timeScale(),
