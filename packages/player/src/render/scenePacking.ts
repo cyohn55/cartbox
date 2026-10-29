@@ -122,10 +122,12 @@ import { AREA_KIND } from "./ltc.js";
  * 1008 irid0      vec4<f32>    16   x = the film's IOR, y = its thickness (nm), z = emissive strength,
  *                                    w = 1 with a UV transform
  * 1024 uvx0       vec4<f32>    16   xy = the UV transform's scale, zw = its rotation's cos and sin
- * 1040 uvx1       vec4<f32>    16   xy = its offset
+ * 1040 uvx1       vec4<f32>    16   xy = its offset, z = the share of the diffuse that scatters (F1d-2)
+ * 1056 sss0       vec4<f32>    16   rgb = how far each channel scatters, as a colour, w = its radius (m)
+ * 1072 dt0        vec4<f32>    16   rgb = the thin-surface transmission's colour, w = its share
  * ```
  *
- * 1056 bytes used, padded to a 1280-byte stride (a 256-byte multiple a dynamic
+ * 1088 bytes used, padded to a 1280-byte stride (a 256-byte multiple a dynamic
  * uniform offset can address), so one buffer still holds every draw in a
  * frame — uniforms are written per batch, not per copy, so the stride costs
  * little. The metallic-roughness inputs and the environment carry the Modern
@@ -140,7 +142,7 @@ export const UNIFORM_STRIDE = 1280;
  * bind group layout's `minBindingSize` must be: it makes a WGSL struct that
  * grows past what this module writes fail at pipeline creation.
  */
-export const UNIFORM_BYTES_USED = 1056;
+export const UNIFORM_BYTES_USED = 1088;
 /** The same stride counted in float32s, which is how `writeBuffer` sizes it. */
 export const UNIFORM_FLOATS = UNIFORM_STRIDE / 4;
 
@@ -313,6 +315,8 @@ const OFFSET_TRANS1 = 248;
 const OFFSET_IRID0 = 252;
 const OFFSET_UVX0 = 256;
 const OFFSET_UVX1 = 260;
+const OFFSET_SSS0 = 264;
+const OFFSET_DT0 = 268;
 
 /** The rasteriser's defaults, restated so an unlit draw shades identically. */
 export const DEFAULT_LIGHT: readonly [number, number, number] = [0.4, 0.8, 0.6];
@@ -647,7 +651,11 @@ function writeExtensions(target: Float32Array, base: number, e: ResolvedExtensio
   const t = e?.uvTransform ?? null;
   target.set([e?.iridescenceIor ?? 1.3, e?.iridescenceThickness ?? 400, e?.emissiveStrength ?? 1, t ? 1 : 0], base + OFFSET_IRID0);
   target.set(t ? [t.scale[0], t.scale[1], Math.cos(t.rotation), Math.sin(t.rotation)] : [1, 1, 1, 0], base + OFFSET_UVX0);
-  target.set(t ? [t.offset[0], t.offset[1], 0, 0] : [0, 0, 0, 0], base + OFFSET_UVX1);
+  target.set([t ? t.offset[0] : 0, t ? t.offset[1] : 0, e?.subsurface ?? 0, 0], base + OFFSET_UVX1);
+  const sss = e?.subsurfaceColor ?? [0, 0, 0];
+  target.set([sss[0], sss[1], sss[2], e?.subsurfaceRadius ?? 0], base + OFFSET_SSS0);
+  const dt = e?.diffuseTransmissionColor ?? [1, 1, 1];
+  target.set([dt[0], dt[1], dt[2], e?.diffuseTransmission ?? 0], base + OFFSET_DT0);
 }
 
 /**

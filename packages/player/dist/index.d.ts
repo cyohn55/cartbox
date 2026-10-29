@@ -1223,14 +1223,15 @@ interface ReferenceScene {
      */
     readonly prims: Float32Array;
     /**
-     * Per material ten vec4s:
+     * Per material eleven vec4s:
      * - its base colour factor, as authored (RGBA);
      * - its emissive factor, as authored, and its alpha mode (0 opaque, 1 mask, 2 blend, 3 additive);
      * - metalness, roughness, and its base-colour and metal/roughness maps (−1 none);
      * - its emissive map, whether it shades as PBR, its alpha cutoff, and the lighting channels it is on;
      * - the full material set (F1d; {@link extensionRows}): sheen; a dielectric's f0 and transmission; the
      *   volume's thickness and attenuation distance, and the film's strength and IOR; the attenuation colour
-     *   and the film's thickness; the UV transform; its offset, the emissive strength and whether it has one.
+     *   and the film's thickness; the UV transform; its offset, the emissive strength and whether it has one;
+     *   a thin surface's transmission colour and share (F1d-2).
      *
      * Then per map, from vec4 {@link mapTable}, one vec4 of u32 bits: its first texel in {@link texels}, its width and height.
      */
@@ -5937,6 +5938,13 @@ declare class WebgpuSceneRenderer implements SceneRenderer {
     private viewResolve;
     /** Colour motion vectors (from the velocity buffer) or overdraw (from the count in the colour's red) over the frame (F10a). */
     private addViewResolve;
+    /** Whether this frame's scattering surfaces split their diffuse for the SSS blur (F1d-2), for the frame uniform. */
+    private frameSss;
+    /** The SSS profiles by material ID (F1d-2), and the blur's pipeline and two uniform buffers (across, down). */
+    private sssProfiles;
+    private sss;
+    /** The separable SSS blur (F1d-2; subsurface.ts): across into one target, down into another, copied back over `colour`. */
+    private addSubsurface;
     /** The physical camera's passes (F4c) and what they keep between frames: their uniforms, sampler and pipelines. */
     private camera;
     /** Depth of field, then motion blur (F4c; see cameraEffects.ts), on `target` (`size`), written back into it. */
@@ -6278,10 +6286,12 @@ declare function bakeProbeVolumeGpu(device: any, min: readonly [number, number, 
  * 1008 irid0      vec4<f32>    16   x = the film's IOR, y = its thickness (nm), z = emissive strength,
  *                                    w = 1 with a UV transform
  * 1024 uvx0       vec4<f32>    16   xy = the UV transform's scale, zw = its rotation's cos and sin
- * 1040 uvx1       vec4<f32>    16   xy = its offset
+ * 1040 uvx1       vec4<f32>    16   xy = its offset, z = the share of the diffuse that scatters (F1d-2)
+ * 1056 sss0       vec4<f32>    16   rgb = how far each channel scatters, as a colour, w = its radius (m)
+ * 1072 dt0        vec4<f32>    16   rgb = the thin-surface transmission's colour, w = its share
  * ```
  *
- * 1056 bytes used, padded to a 1280-byte stride (a 256-byte multiple a dynamic
+ * 1088 bytes used, padded to a 1280-byte stride (a 256-byte multiple a dynamic
  * uniform offset can address), so one buffer still holds every draw in a
  * frame — uniforms are written per batch, not per copy, so the stride costs
  * little. The metallic-roughness inputs and the environment carry the Modern
@@ -6296,7 +6306,7 @@ declare const UNIFORM_STRIDE = 1280;
  * bind group layout's `minBindingSize` must be: it makes a WGSL struct that
  * grows past what this module writes fail at pipeline creation.
  */
-declare const UNIFORM_BYTES_USED = 1056;
+declare const UNIFORM_BYTES_USED = 1088;
 /** The same stride counted in float32s, which is how `writeBuffer` sizes it. */
 declare const UNIFORM_FLOATS: number;
 /**

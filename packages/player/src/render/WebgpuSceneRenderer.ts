@@ -148,6 +148,7 @@ import { MAX_ANISOTROPY, MipmapGenerator, coverageMips, hasTransparency, mipLeve
 import { compressedFormatsFor } from "../lighting/webgpuDevice.js";
 import { brdfLut, brdfWgsl } from "./brdf.js";
 import { MATERIAL_SET_WGSL } from "./materialSet.js";
+import { SSS_MAX_PROFILES, SSS_WGSL, packSssProfiles, type SssProfile } from "./subsurface.js";
 import { PathTracer, captureReference, type CaptureOptions, type ReferenceCapture } from "./pathTracer.js";
 import { IES_BASE, IES_MAX_PROFILES, IES_VEC4S, ltcTables, ltcWgsl } from "./ltc.js";
 import { PROBE_FACE, ProbeCapture, packCapturedProbes } from "./probeCapture.js";
@@ -544,6 +545,9 @@ struct Uniforms {
   irid0: vec4<f32>,
   uvx0: vec4<f32>,
   uvx1: vec4<f32>,
+  // Subsurface scattering and thin-surface transmission (F1d-2).
+  sss0: vec4<f32>,
+  dt0: vec4<f32>,
 };
 
 // A Modern-tier light (see packLights): d0 = dir/pos + kind, d1 = colour +
@@ -586,7 +590,7 @@ struct Frame {
   fogRight: vec4<f32>,        // F5b: its camera's right axis, w = P[0]
   fogUp: vec4<f32>,           // F5b: its up axis, w = P[5]
   fogBack: vec4<f32>,         // F5b: its back axis, w = the volume's reach
-  debug: vec4<f32>,           // F10a: x = the view mode's code (0 lit), y = the texel density on target (per metre)
+  debug: vec4<f32>,           // F10a: x = the view mode's code (0 lit), y = the texel density on target (per metre); F1d-2: z = 1 when scattering surfaces split
 };
 // One spot/point shadow tile (EP8c): world→clip, and params.xy = depth→distance terms.
 struct ShadowTile {
@@ -1118,7 +1122,7 @@ fn anisoD(rough: f32, aniso: f32, toh: f32, boh: f32, ndh: f32) -> f32 {
   return a2 * b2 * b2 / 3.14159265;
 }
 // This fragment's anisotropy frame (set in fs, read by lightTerm).
-var<private> aniso: f32;${hdr ? "\n// The multiple scattering a light's specular adds back (F1c; set in fs, read by lightTerm).\nvar<private> eComp: vec3<f32>;\n// What the sheen leaves the base beneath (F1d; set in fs, read by lightTerm).\nvar<private> sheenScale: f32 = 1.0;" : ""}
+var<private> aniso: f32;${hdr ? "\n// The multiple scattering a light's specular adds back (F1c; set in fs, read by lightTerm).\nvar<private> eComp: vec3<f32>;\n// What the sheen leaves the base beneath (F1d; set in fs, read by lightTerm).\nvar<private> sheenScale: f32 = 1.0;\n// The diffuse light the lights gave (F1d-2; set by lightTerm, read where the frame splits it for scattering).\nvar<private> diffuseLit: vec3<f32>;\n// The diffuse's whole share, before a thin surface's transmission takes its part (F1d-2).\nvar<private> kdmFull: f32;" : ""}
 var<private> aT: vec3<f32>;
 var<private> aB: vec3<f32>;
 // The clearcoat's normal and N·V (P1a): the geometric normal, which the coat lies over the bumps with.
@@ -1224,7 +1228,17 @@ ${hdr ? "  // An area light (F2e-2): its rectangle, disk or tube integrated with
   } else {
     Ld = normalize(lgt.d0.xyz);
   }
-  let ndlL = max(0.0, dot(N, Ld));
+  let ndlL = max(0.0, dot(N, Ld));${hdr ? `
+  // A thin surface lit from behind (F1d-2): what comes through, a diffuse of its own.
+  if (u.dt0.w > 0.0 && atten > 0.0 && dot(N, Ld) < 0.0) {
+    let back = -dot(N, Ld);
+    var occlB = 1.0;
+    if (lgt.d0.w < 0.5) { occlB = sf; }
+    else if (lgt.d2.w >= 0.0 && frame.localShadow.x > 0.5) { occlB = localShadow(i32(lgt.d2.w + 0.5), lgt, P, back); }
+    let through = u.dt0.w * u.dt0.rgb * albedo * kdmFull * toLinear(lgt.d1.rgb) * (lgt.d1.w * atten * back * occlB);
+    diffuseLit = diffuseLit + through;
+    return through;
+  }` : ""}
   if (ndlL <= 0.0 || atten <= 0.0) { return vec3<f32>(0.0); }
   let Hl = normalize(Ld + V);
   let ndhL = max(0.0, dot(N, Hl));
@@ -1241,7 +1255,7 @@ ${hdr
   if (lgt.d0.w < 0.5) { occl = sf; }
   else if (lgt.d2.w >= 0.0 && frame.localShadow.x > 0.5) { occl = localShadow(i32(lgt.d2.w + 0.5), lgt, P, ndlL); }
   let w = lgt.d1.w * atten * ndlL * occl;
-  let lit = (kdm * (vec3<f32>(1.0) - FL) * albedo + FL * specL${hdr ? " * eComp" : ""}) * toLinear(lgt.d1.rgb) * w${hdr ? " * sheenScale + sheenLobe(ndlL, ndv, ndhL) * toLinear(lgt.d1.rgb) * w" : ""};
+  let lit = (kdm * (vec3<f32>(1.0) - FL) * albedo + FL * specL${hdr ? " * eComp" : ""}) * toLinear(lgt.d1.rgb) * w${hdr ? " * sheenScale + sheenLobe(ndlL, ndv, ndhL) * toLinear(lgt.d1.rgb) * w" : ""};${hdr ? "\n  diffuseLit = diffuseLit + kdm * (vec3<f32>(1.0) - FL) * albedo * toLinear(lgt.d1.rgb) * w * sheenScale;" : ""}
   if (u.layer0.x > 0.0) {
     // The clearcoat's own highlight, over a base its Fresnel dims (I4).
     let c = coatTerm(coatN, coatNdv, Ld, Hl, vdhL);
@@ -1682,7 +1696,7 @@ ${hdr
     // the light (F11a): reflectivity over 1 (Beaver Creek's water is 1.3) mirrored more than came in at grazing.
     let specK = min(specE * reflectK, vec3<f32>(1.0));
 `
-  : ""}    let kdm = (1.0 - metallic)${hdr ? " * (1.0 - u.trans0.x)" : ""};                  // metals have no diffuse${hdr ? "; what is transmitted (F1d) neither" : ""}
+  : ""}    let kdm = (1.0 - metallic)${hdr ? " * (1.0 - u.trans0.x)" : ""};                  // metals have no diffuse${hdr ? "; what is transmitted (F1d) neither" : ""}${hdr ? "\n    // What a thin surface lets through (F1d-2) it doesn't reflect diffusely.\n    let kdf = kdm * (1.0 - u.dt0.w);\n    kdmFull = kdm;\n    var ambDiffuse = vec3<f32>(0.0);" : ""}
     var emis = vec3<f32>(0.0);
     let ef = u.emissive.xyz;
     if (ef.r > 0.0 || ef.g > 0.0 || ef.b > 0.0) {
@@ -1711,7 +1725,7 @@ ${reflect ? "    var envSpec = vec3<f32>(0.0);\n    var envSeen = vec3<f32>(0.0)
       if (aniso != 0.0) { rdv = dot(Rn, V); }
       let pref = envReflect(in.worldPos, 2.0 * rdv * Rn - V, rough);
 ${hdr
-  ? "      // What the environment's reflection takes, the diffuse beneath it no longer receives.\n      amb = (irr * (1.0 - ssgi.a) + ssgi.rgb) * albedo * kdm * (vec3<f32>(1.0) - specE) * aoD + pref * specK * specAo;\n      // The sheen over it (F1d), lit by the sky's irradiance.\n      amb = amb * sheenScale + irr * u.sheen0.rgb * sheenE(ndv, u.sheen0.w) * aoD;\n"
+  ? "      // What the environment's reflection takes, the diffuse beneath it no longer receives.\n      amb = (irr * (1.0 - ssgi.a) + ssgi.rgb) * albedo * kdf * (vec3<f32>(1.0) - specE) * aoD + pref * specK * specAo;\n      // The sheen over it (F1d), lit by the sky's irradiance.\n      amb = amb * sheenScale + irr * u.sheen0.rgb * sheenE(ndv, u.sheen0.w) * aoD;\n      // Its diffuse half (F1d-2), and the sky from behind through a thin surface.\n      ambDiffuse = (irr * (1.0 - ssgi.a) + ssgi.rgb) * albedo * kdf * (vec3<f32>(1.0) - specE) * aoD * sheenScale;\n      if (u.dt0.w > 0.0) {\n        let behindSky = shIrradiance(-skyN) * u.dt0.w * u.dt0.rgb * albedo * kdm * aoD;\n        amb = amb + behindSky;\n        ambDiffuse = ambDiffuse + behindSky;\n      }\n"
   : "      amb = (irr * albedo * kdm + pref * f0 * reflectK) * ao;\n"}${reflect ? `      envSpec = pref * ${hdr ? "specK * specAo" : "f0 * reflectK * ao"};\n      envSeen = pref;\n` : ""}      // The clearcoat (I4) reflects the room sharply about its own normal, and
       // what it reflects the base beneath no longer receives.
       if (u.layer0.x > 0.0) {
@@ -1720,7 +1734,7 @@ ${hdr
         amb = amb * (1.0 - coatV) + coatV * prefC * reflectK * ao;
 ${reflect ? "        envSpec = envSpec * (1.0 - coatV) + coatV * prefC * reflectK * ao;\n" : ""}      }
     } else {
-      amb = ${hdr ? "(select(toLinear(vec3<f32>(u.light.w)), bakedIrr * kdm, baked) * (1.0 - ssgi.a) + ssgi.rgb * kdm) * albedo * aoD" : "toLinear(vec3<f32>(u.light.w)) * albedo * ao"};
+      amb = ${hdr ? "(select(toLinear(vec3<f32>(u.light.w)), bakedIrr * kdm, baked) * (1.0 - ssgi.a) + ssgi.rgb * kdm) * albedo * aoD" : "toLinear(vec3<f32>(u.light.w)) * albedo * ao"};${hdr ? "\n      ambDiffuse = amb;" : ""}
     }
 ${reflect ? "    let ambRaw = amb;\n" : ""}    // A baked light map (the second UV set) scales the sky/ambient fill by how
     // much of it reaches this point, bounce included — mirroring the CPU path.
@@ -1751,7 +1765,7 @@ ${reflect ? "    // What the light map, probes and SSAO did to the fill, they do
       // The global lights (the sun, unranged lights) reach every fragment…
       let ng = i32(frame.clusterInfo.x + 0.5);
       for (var i = 0; i < ng; i = i + 1) {
-        direct = direct + lightTerm(lights[i], in.worldPos, N, V, ndv, a2, k, f0, kdm, albedo, sf);
+        direct = direct + lightTerm(lights[i], in.worldPos, N, V, ndv, a2, k, f0, ${hdr ? "kdf" : "kdm"}, albedo, sf);
       }
       vmLights = ng;
       // …the rest only the cells they touch (EP8): this fragment's cell, by pixel and depth.
@@ -1761,16 +1775,16 @@ ${reflect ? "    // What the light map, probes and SSAO did to the fill, they do
         let cell = clusterCell((slice * ${CLUSTER_Y}u + tile.y) * ${CLUSTER_X}u + tile.x);
         vmLights = vmLights + i32(cell.y);
         for (var j = 0u; j < cell.y; j = j + 1u) {
-          direct = direct + lightTerm(lights[clusterLight(cell.x + j)], in.worldPos, N, V, ndv, a2, k, f0, kdm, albedo, sf);
+          direct = direct + lightTerm(lights[clusterLight(cell.x + j)], in.worldPos, N, V, ndv, a2, k, f0, ${hdr ? "kdf" : "kdm"}, albedo, sf);
         }
       }
       lit = direct + amb + emis;
     } else if (u.layer0.x > 0.0) {
       // The clearcoat's own highlight, over a base its Fresnel dims (I4).
       let c = coatTerm(coatN, coatNdv, L, H, vdh);
-      lit = (((kdm * (vec3<f32>(1.0) - F) * albedo + F * specD${hdr ? " * eComp" : ""})${hdr ? " * sheenScale + sheenLobe(ndl, ndv, ndh)" : ""}) * ndl * (1.0 - c.y) + vec3<f32>(c.x)) * sf + amb + emis;
+      lit = (((${hdr ? "kdf" : "kdm"} * (vec3<f32>(1.0) - F) * albedo + F * specD${hdr ? " * eComp" : ""})${hdr ? " * sheenScale + sheenLobe(ndl, ndv, ndh)" : ""}) * ndl * (1.0 - c.y) + vec3<f32>(c.x)) * sf + amb + emis;
     } else {
-      lit = ((kdm * (vec3<f32>(1.0) - F) * albedo + F * specD${hdr ? " * eComp" : ""})${hdr ? " * sheenScale + sheenLobe(ndl, ndv, ndh)" : ""}) * ndl * sf + amb + emis;
+      lit = ((${hdr ? "kdf" : "kdm"} * (vec3<f32>(1.0) - F) * albedo + F * specD${hdr ? " * eComp" : ""})${hdr ? " * sheenScale + sheenLobe(ndl, ndv, ndh)" : ""}) * ndl * sf + amb + emis;${hdr ? "\n      diffuseLit = diffuseLit + kdf * (vec3<f32>(1.0) - F) * albedo * ndl * sf * sheenScale;\n      // A thin surface lit from behind (F1d-2).\n      if (u.dt0.w > 0.0 && dot(N, L) < 0.0) {\n        let through = u.dt0.w * u.dt0.rgb * albedo * kdm * (-dot(N, L)) * sf;\n        lit = lit + through;\n        diffuseLit = diffuseLit + through;\n      }" : ""}
     }
     // A fresnel rim, light at grazing angles (zero when the material has none).
     lit = lit + toLinear(u.surface2.rgb) * pow(1.0 - ndv, u.surface2.w);
@@ -1811,7 +1825,14 @@ ${hdr
       let rn = waterNormal(facingNormal(in.normal), in.worldPos);
       let b = behindColour(in.pos.xy, in.pos.z, refractOffset(rn, in.worldPos));
       if (b.a > 0.5) { return finishRefracted(shaded, colour.a, b.rgb, rn); }
-    }
+    }${hdr ? `
+    // Subsurface scattering (F1d-2; subsurface.ts): in a checkerboard, the diffuse that scatters on the even
+    // pixels and the rest on the odd, for the blur after the opaque pass to rebuild.
+    if (frame.debug.z > 0.5 && u.uvx1.z > 0.0 && u.pbr.w < 1.5 && frame.debug.x < 0.5) {
+      let scatter = (diffuseLit + ambDiffuse) * u.uvx1.z;
+      let even = ((u32(in.pos.x) + u32(in.pos.y)) & 1u) == 0u;
+      shaded = select(shaded - scatter, scatter, even);
+    }` : ""}
     return finishAlpha(shaded, colour.a);
   }
 
@@ -3638,6 +3659,8 @@ export class WebgpuSceneRenderer implements SceneRenderer {
     this.frameDepthView = this.hdr && prepass ? { viewProj, terms: [drawnProjection[10]!, drawnProjection[14]!] } : null;
     this.frameFog = this.prepareFog(draw);
     this.frameGi = this.hdr && draw.dynamicGi && draw.environment?.probeVolume ? draw.dynamicGi : null;
+    // Subsurface scattering (F1d-2): split and blurred on the AAA tier with a prepass, unless multisampled or diagnostic.
+    this.frameSss = this.hdr && prepass && draw.antialias !== true && viewModeCode(draw.viewMode) === 0 && draws.some((entry) => (entry.primitive.material.subsurface ?? 0) > 0);
     const { ordered, globalCount, clusters: cells } = this.clusterLights(localPlan ? { ...draw, lights: localPlan.lights, localShadows: null } : draw);
     this.uploadLights(packLights(ordered, this.hdr, this.hdr ? this.iesSlots(ordered) : null));
     // The fog's local lights (F5b-2): as the scene's, by the same cells and tiles.
@@ -3650,9 +3673,18 @@ export class WebgpuSceneRenderer implements SceneRenderer {
     const camera = refractionCamera(draw.view, this.height);
     // Each material its own ID in the thin G-buffer (F0c), 1 and up: 0 is "nothing drew".
     const materialIds = new Map<object, number>();
+    const sssProfiles: SssProfile[] = [];
     const materialId = (material: object): number => {
       let id = materialIds.get(material);
-      if (id === undefined) materialIds.set(material, (id = materialIds.size + 1));
+      if (id === undefined) {
+        materialIds.set(material, (id = materialIds.size + 1));
+        // Its scattering profile, by the same ID (F1d-2).
+        const m = material as MeshPrimitive["material"];
+        if (this.frameSss && (m.subsurface ?? 0) > 0) {
+          const e = resolveExtensions(m);
+          sssProfiles.push({ id, color: e.subsurfaceColor, radius: e.subsurfaceRadius });
+        }
+      }
       return id;
     };
     // Motion (F0c): each copy's clip transform now and last frame, both without
@@ -3753,6 +3785,10 @@ export class WebgpuSceneRenderer implements SceneRenderer {
       writeInstanceUniform(this.uniformData, draws.length + k, uniformOf(entry));
     });
     this.device.queue.writeBuffer(this.uniformBuffer, 0, this.uniformData, 0, (draws.length + casters.length) * UNIFORM_FLOATS);
+    if (this.frameSss) {
+      this.sssProfiles ??= this.device.createBuffer({ size: SSS_MAX_PROFILES * 16, usage: 0x80 | 0x08 });
+      this.device.queue.writeBuffer(this.sssProfiles, 0, packSssProfiles(sssProfiles));
+    }
     this.device.queue.writeBuffer(this.instanceBuffer, 0, this.instanceData, 0, nextCaster * INSTANCE_FLOATS);
     this.lastViewProj = viewProjNow;
     this.lastWind = windNow;
@@ -4067,6 +4103,8 @@ export class WebgpuSceneRenderer implements SceneRenderer {
       });
 
     scenePass("opaque", 0, opaqueEnd, false, !seeThrough);
+    // Subsurface scattering (F1d-2): the opaque scene's split diffuse blurred and rebuilt, before anything reads it.
+    if (this.frameSss && gbuffer && !msaa && this.frameDepthView) this.addSubsurface(graph, colour, depth, gbuffer, temporal ? temporal.projection : draw.projection, this.frameDepthView.terms);
     if (behind && !msaa) {
       graph.addPass("behind", "transfer", (pass) => {
         pass.read(colour, "copySrc");
@@ -4560,6 +4598,59 @@ export class WebgpuSceneRenderer implements SceneRenderer {
     });
   }
 
+  /** Whether this frame's scattering surfaces split their diffuse for the SSS blur (F1d-2), for the frame uniform. */
+  private frameSss = false;
+  /** The SSS profiles by material ID (F1d-2), and the blur's pipeline and two uniform buffers (across, down). */
+  private sssProfiles: any = null;
+  private sss: { pipeline: any; uniforms: [any, any] } | null = null;
+
+  /** The separable SSS blur (F1d-2; subsurface.ts): across into one target, down into another, copied back over `colour`. */
+  private addSubsurface(graph: FrameGraph, colour: FrameResource, depth: FrameResource, gbuffer: FrameResource, projection: Mat4, terms: readonly [number, number]): void {
+    const device = this.device;
+    this.sss ??= { pipeline: fullScreenPipeline(device, SSS_WGSL, "blur", this.colourFormat), uniforms: [device.createBuffer({ size: 32, usage: 0x40 | 0x08 }), device.createBuffer({ size: 32, usage: 0x40 | 0x08 })] };
+    const sss = this.sss;
+    // Pixels a metre spans at a distance of one: half the frame's height over the half-angle's tangent.
+    const perMetre = (projection[5]! * this.height) / 2;
+    device.queue.writeBuffer(sss.uniforms[0], 0, new Float32Array([1, 0, 0, perMetre, terms[0], terms[1], 0, 0]));
+    device.queue.writeBuffer(sss.uniforms[1], 0, new Float32Array([0, 1, 1, perMetre, terms[0], terms[1], 0, 0]));
+    const size = { width: this.width, height: this.height };
+    const across = graph.createTexture("sss.across", { format: this.colourFormat, ...size });
+    const down = graph.createTexture("sss.down", { format: this.colourFormat, ...size });
+    const blurPass = (name: string, out: FrameResource, blurred: FrameResource | null, uniforms: any) =>
+      graph.addPass(name, "render", (pass) => {
+        pass.read(colour);
+        if (blurred) pass.read(blurred);
+        pass.read(depth);
+        pass.read(gbuffer);
+        pass.write(out);
+        return (ctx) => {
+          const encoded = ctx.encoder.beginRenderPass({ colorAttachments: [{ view: ctx.texture(out).createView(), clearValue: { r: 0, g: 0, b: 0, a: 0 }, loadOp: "clear", storeOp: "store" }], ...ctx.timing });
+          encoded.setPipeline(sss.pipeline);
+          encoded.setBindGroup(0, device.createBindGroup({
+            layout: sss.pipeline.getBindGroupLayout(0),
+            entries: [
+              { binding: 0, resource: { buffer: uniforms } },
+              { binding: 1, resource: ctx.texture(colour).createView() },
+              { binding: 2, resource: ctx.texture(blurred ?? colour).createView() },
+              { binding: 3, resource: ctx.texture(depth).createView() },
+              { binding: 4, resource: ctx.texture(gbuffer).createView() },
+              { binding: 5, resource: { buffer: this.sssProfiles } },
+            ],
+          }));
+          encoded.draw(3);
+          encoded.end();
+        };
+      });
+    blurPass("sss.across", across, null, sss.uniforms[0]);
+    blurPass("sss.down", down, across, sss.uniforms[1]);
+    graph.addPass("sss.copy", "transfer", (pass) => {
+      pass.read(down, "copySrc");
+      pass.write(colour, "copyDst");
+      pass.keep();
+      return (ctx) => ctx.encoder.copyTextureToTexture({ texture: ctx.texture(down) }, { texture: ctx.texture(colour) }, size);
+    });
+  }
+
   /** The physical camera's passes (F4c) and what they keep between frames: their uniforms, sampler and pipelines. */
   private camera: { uniforms: any; data: Float32Array<ArrayBuffer>; sampler: any; frame: number; pipelines: Map<string, any> } | null = null;
 
@@ -4901,7 +4992,7 @@ export class WebgpuSceneRenderer implements SceneRenderer {
     }
     if (this.hdr) frame.set(this.aerialFrame(draw), FRAME_AERIAL);
     if (this.hdr) frame.set(packFogFrame(this.frameFog, this.fogTerms), FRAME_FOG);
-    if (this.hdr) frame.set([viewModeCode(draw.viewMode), draw.texelDensity ?? DEFAULT_TEXEL_DENSITY], FRAME_DEBUG);
+    if (this.hdr) frame.set([viewModeCode(draw.viewMode), draw.texelDensity ?? DEFAULT_TEXEL_DENSITY, this.frameSss ? 1 : 0], FRAME_DEBUG);
     this.device.queue.writeBuffer(buffers.params, 0, frame);
     this.uploadLocalShadows(local);
     return { ordered, globalCount, clusters };
@@ -5362,6 +5453,8 @@ export class WebgpuSceneRenderer implements SceneRenderer {
     this.destroyed = true;
     this.pathTracer?.destroy();
     this.pathTracer = null;
+    destroySafely(this.sssProfiles);
+    if (this.sss) for (const b of this.sss.uniforms) destroySafely(b);
     this.latest = null;
     this.software.dispose();
     destroySafely(this.colourTexture);

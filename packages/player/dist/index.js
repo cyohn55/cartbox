@@ -14675,7 +14675,7 @@ fn areaTerm(lgt: Light, P: vec3<f32>, N: vec3<f32>, V: vec3<f32>, ndv: f32, roug
 
 // src/render/scenePacking.ts
 var UNIFORM_STRIDE = 1280;
-var UNIFORM_BYTES_USED = 1056;
+var UNIFORM_BYTES_USED = 1088;
 var UNIFORM_FLOATS = UNIFORM_STRIDE / 4;
 var LIGHT_FLOATS = 20;
 var PROBE_FLOATS = 16;
@@ -14789,6 +14789,8 @@ var OFFSET_TRANS1 = 248;
 var OFFSET_IRID0 = 252;
 var OFFSET_UVX0 = 256;
 var OFFSET_UVX1 = 260;
+var OFFSET_SSS0 = 264;
+var OFFSET_DT0 = 268;
 var DEFAULT_LIGHT = [0.4, 0.8, 0.6];
 var DEFAULT_AMBIENT2 = 0.35;
 function resolveLight(direction, ambient) {
@@ -14868,7 +14870,11 @@ function writeExtensions(target, base, e) {
   const t = e?.uvTransform ?? null;
   target.set([e?.iridescenceIor ?? 1.3, e?.iridescenceThickness ?? 400, e?.emissiveStrength ?? 1, t ? 1 : 0], base + OFFSET_IRID0);
   target.set(t ? [t.scale[0], t.scale[1], Math.cos(t.rotation), Math.sin(t.rotation)] : [1, 1, 1, 0], base + OFFSET_UVX0);
-  target.set(t ? [t.offset[0], t.offset[1], 0, 0] : [0, 0, 0, 0], base + OFFSET_UVX1);
+  target.set([t ? t.offset[0] : 0, t ? t.offset[1] : 0, e?.subsurface ?? 0, 0], base + OFFSET_UVX1);
+  const sss = e?.subsurfaceColor ?? [0, 0, 0];
+  target.set([sss[0], sss[1], sss[2], e?.subsurfaceRadius ?? 0], base + OFFSET_SSS0);
+  const dt = e?.diffuseTransmissionColor ?? [1, 1, 1];
+  target.set([dt[0], dt[1], dt[2], e?.diffuseTransmission ?? 0], base + OFFSET_DT0);
 }
 function writeInstanceUniform(target, index, uniform) {
   const base = index * UNIFORM_FLOATS;
@@ -18802,6 +18808,104 @@ fn iridescenceF0(cos1: f32, baseF0: vec3<f32>) -> vec3<f32> {
 `
 );
 
+// src/render/subsurface.ts
+var SSS_MAX_PROFILES = 256;
+var SSS_TAPS = 8;
+var SSS_REACH = 3;
+function packSssProfiles(profiles) {
+  const out = new Float32Array(SSS_MAX_PROFILES * 4);
+  for (const p of profiles) {
+    if (p.id <= 0 || p.id >= SSS_MAX_PROFILES || !(p.radius > 0)) continue;
+    out.set([p.color[0] * p.radius, p.color[1] * p.radius, p.color[2] * p.radius, 1], p.id * 4);
+  }
+  return out;
+}
+var SSS_WGSL = (
+  /* wgsl */
+  `
+struct Params {
+  dir: vec4<f32>,   // xy = the step's direction, z = 1 on the second pass, w = pixels a metre spans at distance 1
+  terms: vec4<f32>, // xy = depth \u2192 distance terms (d = y / (z + x))
+};
+@group(0) @binding(0) var<uniform> params: Params;
+@group(0) @binding(1) var frameTex: texture_2d<f32>;
+@group(0) @binding(2) var blurTex: texture_2d<f32>;
+@group(0) @binding(3) var depthTex: texture_depth_2d;
+@group(0) @binding(4) var gbufferTex: texture_2d<f32>;
+@group(0) @binding(5) var<storage, read> profiles: array<vec4<f32>>;
+@vertex
+fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4<f32> {
+  let p = vec2<f32>(f32((i << 1u) & 2u), f32(i & 2u));
+  return vec4<f32>(p * 2.0 - 1.0, 0.0, 1.0);
+}
+fn idAt(p: vec2<i32>) -> u32 {
+  return u32(textureLoad(gbufferTex, p, 0).w + 0.5);
+}
+fn distanceAt(p: vec2<i32>) -> f32 {
+  return params.terms.y / (textureLoad(depthTex, p, 0) + params.terms.x);
+}
+fn profileOf(id: u32) -> vec4<f32> {
+  if (id == 0u || id >= ${SSS_MAX_PROFILES}u) { return vec4<f32>(0.0); }
+  return profiles[id];
+}
+fn evenAt(p: vec2<i32>) -> bool {
+  return ((p.x + p.y) & 1) == 0;
+}
+// The diffuse half at p: its own on an even pixel, its even neighbour's along the row otherwise.
+fn diffuseAt(p: vec2<i32>, dims: vec2<i32>) -> vec3<f32> {
+  if (evenAt(p)) { return textureLoad(frameTex, p, 0).rgb; }
+  let q = vec2<i32>(select(p.x - 1, p.x + 1, p.x == 0), p.y);
+  return textureLoad(frameTex, clamp(q, vec2<i32>(0), dims - vec2<i32>(1)), 0).rgb;
+}
+// The remainder at p: its own on an odd pixel, the mean of its odd neighbours' (on the same material) otherwise.
+fn restAt(p: vec2<i32>, dims: vec2<i32>, id: u32) -> vec3<f32> {
+  if (!evenAt(p)) { return textureLoad(frameTex, p, 0).rgb; }
+  var sum = vec3<f32>(0.0);
+  var n = 0.0;
+  let offsets = array<vec2<i32>, 4>(vec2<i32>(1, 0), vec2<i32>(-1, 0), vec2<i32>(0, 1), vec2<i32>(0, -1));
+  for (var k = 0; k < 4; k = k + 1) {
+    let q = p + offsets[k];
+    if (any(q < vec2<i32>(0)) || any(q >= dims) || idAt(q) != id) { continue; }
+    sum = sum + textureLoad(frameTex, q, 0).rgb;
+    n = n + 1.0;
+  }
+  return select(vec3<f32>(0.0), sum / max(n, 1.0), n > 0.0);
+}
+@fragment
+fn blur(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
+  let p = vec2<i32>(pos.xy);
+  let dims = vec2<i32>(textureDimensions(frameTex));
+  let own = textureLoad(frameTex, p, 0);
+  let id = idAt(p);
+  let profile = profileOf(id);
+  if (profile.w < 0.5) { return own; }
+  let second = params.dir.z > 0.5;
+  let dist = max(distanceAt(p), 1e-3);
+  // How many pixels the widest channel's reach spans here, and a step that covers it in the taps.
+  let reach = ${SSS_REACH}.0 * max(profile.r, max(profile.g, profile.b));
+  let pixels = reach * params.dir.w / dist;
+  let step = max(1.0, pixels / ${SSS_TAPS}.0);
+  var sum = vec3<f32>(0.0);
+  var weights = vec3<f32>(0.0);
+  for (var i = -${SSS_TAPS}; i <= ${SSS_TAPS}; i = i + 1) {
+    let q = p + vec2<i32>(round(params.dir.xy * f32(i) * step));
+    if (any(q < vec2<i32>(0)) || any(q >= dims) || idAt(q) != id) { continue; }
+    // The sample's distance along the surface in metres, and in depth.
+    let r = abs(f32(i)) * step * dist / params.dir.w;
+    if (abs(distanceAt(q) - dist) > reach) { continue; }
+    let w = exp(-r / profile.rgb) + exp(-r / (3.0 * profile.rgb));
+    var c: vec3<f32>;
+    if (second) { c = textureLoad(blurTex, q, 0).rgb; } else { c = diffuseAt(q, dims); }
+    sum = sum + c * w;
+    weights = weights + w;
+  }
+  let scattered = sum / max(weights, vec3<f32>(1e-6));
+  if (!second) { return vec4<f32>(scattered, own.a); }
+  return vec4<f32>(scattered + restAt(p, dims, id), own.a);
+}
+`
+);
+
 // src/render/pathTracer.ts
 import { buildBvh as buildBvh2, cameraPositionFromView as cameraPositionFromView3, resolveExtensions, multiplyMat4 as multiplyMat46 } from "@cartbox/editor";
 
@@ -20068,7 +20172,7 @@ fn shownWideWith(index: f32, x: vec3f, e: f32, s: f32, h: f32, authored: bool) -
 var REFERENCE_BOUNCES = 4;
 var REFERENCE_TEXTURE_SIDE = 1024;
 var MAX_CAPTURE_SIDE = 8192;
-var MAT_VEC4S = 10;
+var MAT_VEC4S = 11;
 var PRIM_VEC4S = 7;
 var ATTR_VEC4S = 4;
 var WORKGROUP2 = 8;
@@ -20166,7 +20270,9 @@ function extensionRows(m, pbr) {
     ...t ? [t.offset[0], t.offset[1]] : [0, 0],
     // The emissive strength applies with or without the PBR path (an emissive factor puts a material on it anyway).
     resolveExtensions(m).emissiveStrength,
-    t ? 1 : 0
+    t ? 1 : 0,
+    ...e.diffuseTransmissionColor,
+    e.diffuseTransmission
   ];
 }
 function packReferenceScene(instances) {
@@ -20461,6 +20567,9 @@ struct Surface {
   iridIor: f32,
   iridThickness: f32,
   sheenScale: f32,
+  // A thin surface's transmission (F1d-2): its share and colour.
+  dt: f32,
+  dtColor: vec3<f32>,
 };
 
 fn surfaceAt(i: u32, b: vec2<f32>) -> Surface {
@@ -20491,6 +20600,9 @@ fn surfaceAt(i: u32, b: vec2<f32>) -> Surface {
   s.iridIor = m6.w;
   s.iridThickness = m7.w;
   s.sheenScale = 1.0;
+  let m10 = mat(m, 10u);
+  s.dt = select(0.0, m10.w, s.pbr);
+  s.dtColor = m10.rgb;
   return s;
 }
 
@@ -20498,6 +20610,8 @@ fn surfaceAt(i: u32, b: vec2<f32>) -> Surface {
 // (its lights' units), and its specular with the Kulla-Conty scale.
 fn brdf(s: Surface, N: vec3<f32>, V: vec3<f32>, L: vec3<f32>) -> vec3<f32> {
   let ndl = dot(N, L);
+  // From behind, a thin surface's transmission (F1d-2): a diffuse of its own.
+  if (ndl < 0.0 && s.dt > 0.0) { return s.dt * s.dtColor * s.albedo * (1.0 - s.metal) * (1.0 - s.transmission) / PI; }
   if (ndl <= 0.0) { return vec3<f32>(0.0); }
   if (!s.pbr) { return s.albedo / PI; }
   let ndv = max(1e-4, dot(N, V));
@@ -20510,7 +20624,7 @@ fn brdf(s: Surface, N: vec3<f32>, V: vec3<f32>, L: vec3<f32>) -> vec3<f32> {
   let f0 = s.f0;
   let F = f0 + (vec3<f32>(1.0) - f0) * pow(1.0 - vdh, 5.0);
   let eComp = energyCompensation(f0, dfgAt(ndv, s.rough));
-  let diffuse = (1.0 - s.metal) * (1.0 - s.transmission) * (vec3<f32>(1.0) - F) * s.albedo / PI;
+  let diffuse = (1.0 - s.metal) * (1.0 - s.transmission) * (1.0 - s.dt) * (vec3<f32>(1.0) - F) * s.albedo / PI;
   return (diffuse + F * D * smithVisibility(ndl, ndv, a2) * eComp) * s.sheenScale + sheenBrdf(s.sheen, s.sheenRough, ndl, ndv, ndh);
 }
 
@@ -20567,17 +20681,18 @@ fn bouncePdf(s: Surface, N: vec3<f32>, V: vec3<f32>, L: vec3<f32>, ps: f32) -> f
 
 // The direct light on a surface at p facing N, seen from V: every directional light, and one point, spot or
 // area light picked by what it would give there (a tenth spread evenly), over the chance of picking it.
-fn directLight(s: Surface, p: vec3<f32>, N: vec3<f32>, V: vec3<f32>) -> vec3<f32> {
+fn directLight(s: Surface, p: vec3<f32>, N: vec3<f32>, V: vec3<f32>, pBack: vec3<f32>) -> vec3<f32> {
   var L = vec3<f32>(0.0);
   let directional = params.info.y;
   for (var l = 0u; l < directional; l = l + 1u) {
     if (!lightsMask(l, s.channels)) { continue; }
     let Ld = lightAt(l, 0u).xyz;
     let ndl = dot(N, Ld);
-    if (ndl <= 0.0) { continue; }
+    // A light behind a thin surface (F1d-2) shines through from its far side.
+    if (ndl <= 0.0 && !(s.dt > 0.0 && ndl < 0.0)) { continue; }
     let f = brdf(s, N, V, Ld);
-    if (max(f.r, max(f.g, f.b)) > 0.0 && visible(p, Ld, FAR)) {
-      L = L + f * PI * lightAt(l, 1u).rgb * ndl;
+    if (max(f.r, max(f.g, f.b)) > 0.0 && visible(select(pBack, p, ndl > 0.0), Ld, FAR)) {
+      L = L + f * PI * lightAt(l, 1u).rgb * abs(ndl);
     }
   }
   let local = params.extra.x;
@@ -20598,6 +20713,14 @@ fn directLight(s: Surface, p: vec3<f32>, N: vec3<f32>, V: vec3<f32>) -> vec3<f32
   if (pick == local - 1u) { pdf = localWeight(directional + pick, p, N, s.channels) * spread + even; }
   let l = directional + pick;
   if (!lightsMask(l, s.channels)) { return L; }
+  // From behind a thin surface (F1d-2): the same light through its far side.
+  if (s.dt > 0.0) {
+    let lb = localSample(l, pBack, -N);
+    let fb = brdf(s, N, V, lb.dir);
+    if (max(lb.c.r, max(lb.c.g, lb.c.b)) > 0.0 && max(fb.r, max(fb.g, fb.b)) > 0.0 && visible(pBack, lb.dir, lb.dist - EPS)) {
+      L = L + fb * PI * lb.c / pdf;
+    }
+  }
   let ls = localSample(l, p, N);
   if (max(ls.c.r, max(ls.c.g, ls.c.b)) <= 0.0) { return L; }
   let f = brdf(s, N, V, ls.dir);
@@ -20644,7 +20767,8 @@ fn radiance(origin: vec3<f32>, dir: vec3<f32>) -> vec4<f32> {
     let ndv0 = max(1e-4, dot(N, V));
     if (s.pbr && s.irid > 0.0) { s.f0 = mix(s.f0, iridescenceFresnel(ndv0, s.f0, s.iridIor, s.iridThickness), s.irid); }
     if (s.pbr) { s.sheenScale = 1.0 - max(s.sheen.r, max(s.sheen.g, s.sheen.b)) * sheenE(ndv0, s.sheenRough); }
-    add = s.emission + directLight(s, p, N, V);
+    let pBack = o + d * h.t - ng * EPS;
+    add = s.emission + directLight(s, p, N, V, pBack);
     add = tp * add;
     if (clampTo > 0.0 && b > 0u) { add = add * min(1.0, clampTo / max(lum(add), 1e-6)); }
     L = L + add;
@@ -20660,6 +20784,17 @@ fn radiance(origin: vec3<f32>, dir: vec3<f32>) -> vec4<f32> {
       continue;
     }
     tp = tp / (1.0 - pt);
+    // A thin surface's transmission (F1d-2): as often as it lets light through, the bounce goes out its far side.
+    let pd = select(0.0, min(0.5, s.dt), s.dt > 0.0);
+    if (pd > 0.0 && rand() < pd) {
+      let back = cosineDir(-N, vec2<f32>(rand(), rand()));
+      // f \xB7 |cos| over (pd \xB7 |cos| / \u03C0).
+      tp = tp * brdf(s, N, V, back) * PI / pd;
+      o = pBack;
+      d = back;
+      continue;
+    }
+    tp = tp / (1.0 - pd);
     // A bounce: the specular by its visible normals, or the diffuse by the cosine.
     let ps = specularChance(s, ndv);
     var next: vec3<f32>;
@@ -25006,6 +25141,9 @@ struct Uniforms {
   irid0: vec4<f32>,
   uvx0: vec4<f32>,
   uvx1: vec4<f32>,
+  // Subsurface scattering and thin-surface transmission (F1d-2).
+  sss0: vec4<f32>,
+  dt0: vec4<f32>,
 };
 
 // A Modern-tier light (see packLights): d0 = dir/pos + kind, d1 = colour +
@@ -25048,7 +25186,7 @@ struct Frame {
   fogRight: vec4<f32>,        // F5b: its camera's right axis, w = P[0]
   fogUp: vec4<f32>,           // F5b: its up axis, w = P[5]
   fogBack: vec4<f32>,         // F5b: its back axis, w = the volume's reach
-  debug: vec4<f32>,           // F10a: x = the view mode's code (0 lit), y = the texel density on target (per metre)
+  debug: vec4<f32>,           // F10a: x = the view mode's code (0 lit), y = the texel density on target (per metre); F1d-2: z = 1 when scattering surfaces split
 };
 // One spot/point shadow tile (EP8c): world\u2192clip, and params.xy = depth\u2192distance terms.
 struct ShadowTile {
@@ -25573,7 +25711,7 @@ fn anisoD(rough: f32, aniso: f32, toh: f32, boh: f32, ndh: f32) -> f32 {
   return a2 * b2 * b2 / 3.14159265;
 }
 // This fragment's anisotropy frame (set in fs, read by lightTerm).
-var<private> aniso: f32;${hdr ? "\n// The multiple scattering a light's specular adds back (F1c; set in fs, read by lightTerm).\nvar<private> eComp: vec3<f32>;\n// What the sheen leaves the base beneath (F1d; set in fs, read by lightTerm).\nvar<private> sheenScale: f32 = 1.0;" : ""}
+var<private> aniso: f32;${hdr ? "\n// The multiple scattering a light's specular adds back (F1c; set in fs, read by lightTerm).\nvar<private> eComp: vec3<f32>;\n// What the sheen leaves the base beneath (F1d; set in fs, read by lightTerm).\nvar<private> sheenScale: f32 = 1.0;\n// The diffuse light the lights gave (F1d-2; set by lightTerm, read where the frame splits it for scattering).\nvar<private> diffuseLit: vec3<f32>;\n// The diffuse's whole share, before a thin surface's transmission takes its part (F1d-2).\nvar<private> kdmFull: f32;" : ""}
 var<private> aT: vec3<f32>;
 var<private> aB: vec3<f32>;
 // The clearcoat's normal and N\xB7V (P1a): the geometric normal, which the coat lies over the bumps with.
@@ -25679,7 +25817,17 @@ ${hdr ? "  // An area light (F2e-2): its rectangle, disk or tube integrated with
   } else {
     Ld = normalize(lgt.d0.xyz);
   }
-  let ndlL = max(0.0, dot(N, Ld));
+  let ndlL = max(0.0, dot(N, Ld));${hdr ? `
+  // A thin surface lit from behind (F1d-2): what comes through, a diffuse of its own.
+  if (u.dt0.w > 0.0 && atten > 0.0 && dot(N, Ld) < 0.0) {
+    let back = -dot(N, Ld);
+    var occlB = 1.0;
+    if (lgt.d0.w < 0.5) { occlB = sf; }
+    else if (lgt.d2.w >= 0.0 && frame.localShadow.x > 0.5) { occlB = localShadow(i32(lgt.d2.w + 0.5), lgt, P, back); }
+    let through = u.dt0.w * u.dt0.rgb * albedo * kdmFull * toLinear(lgt.d1.rgb) * (lgt.d1.w * atten * back * occlB);
+    diffuseLit = diffuseLit + through;
+    return through;
+  }` : ""}
   if (ndlL <= 0.0 || atten <= 0.0) { return vec3<f32>(0.0); }
   let Hl = normalize(Ld + V);
   let ndhL = max(0.0, dot(N, Hl));
@@ -25694,7 +25842,7 @@ ${hdr ? "  // F1c: the height-correlated visibility, and \u03C0, as the diffuse 
   if (lgt.d0.w < 0.5) { occl = sf; }
   else if (lgt.d2.w >= 0.0 && frame.localShadow.x > 0.5) { occl = localShadow(i32(lgt.d2.w + 0.5), lgt, P, ndlL); }
   let w = lgt.d1.w * atten * ndlL * occl;
-  let lit = (kdm * (vec3<f32>(1.0) - FL) * albedo + FL * specL${hdr ? " * eComp" : ""}) * toLinear(lgt.d1.rgb) * w${hdr ? " * sheenScale + sheenLobe(ndlL, ndv, ndhL) * toLinear(lgt.d1.rgb) * w" : ""};
+  let lit = (kdm * (vec3<f32>(1.0) - FL) * albedo + FL * specL${hdr ? " * eComp" : ""}) * toLinear(lgt.d1.rgb) * w${hdr ? " * sheenScale + sheenLobe(ndlL, ndv, ndhL) * toLinear(lgt.d1.rgb) * w" : ""};${hdr ? "\n  diffuseLit = diffuseLit + kdm * (vec3<f32>(1.0) - FL) * albedo * toLinear(lgt.d1.rgb) * w * sheenScale;" : ""}
   if (u.layer0.x > 0.0) {
     // The clearcoat's own highlight, over a base its Fresnel dims (I4).
     let c = coatTerm(coatN, coatNdv, Ld, Hl, vdhL);
@@ -26127,7 +26275,7 @@ ${hdr ? `    // GTAO (F3c): its visibility joins the material's occlusion (diffu
     // What the environment's reflection takes, the material's reflectivity scaling it but never past all
     // the light (F11a): reflectivity over 1 (Beaver Creek's water is 1.3) mirrored more than came in at grazing.
     let specK = min(specE * reflectK, vec3<f32>(1.0));
-` : ""}    let kdm = (1.0 - metallic)${hdr ? " * (1.0 - u.trans0.x)" : ""};                  // metals have no diffuse${hdr ? "; what is transmitted (F1d) neither" : ""}
+` : ""}    let kdm = (1.0 - metallic)${hdr ? " * (1.0 - u.trans0.x)" : ""};                  // metals have no diffuse${hdr ? "; what is transmitted (F1d) neither" : ""}${hdr ? "\n    // What a thin surface lets through (F1d-2) it doesn't reflect diffusely.\n    let kdf = kdm * (1.0 - u.dt0.w);\n    kdmFull = kdm;\n    var ambDiffuse = vec3<f32>(0.0);" : ""}
     var emis = vec3<f32>(0.0);
     let ef = u.emissive.xyz;
     if (ef.r > 0.0 || ef.g > 0.0 || ef.b > 0.0) {
@@ -26155,7 +26303,7 @@ ${reflect ? "    var envSpec = vec3<f32>(0.0);\n    var envSeen = vec3<f32>(0.0)
       var rdv = ndv;
       if (aniso != 0.0) { rdv = dot(Rn, V); }
       let pref = envReflect(in.worldPos, 2.0 * rdv * Rn - V, rough);
-${hdr ? "      // What the environment's reflection takes, the diffuse beneath it no longer receives.\n      amb = (irr * (1.0 - ssgi.a) + ssgi.rgb) * albedo * kdm * (vec3<f32>(1.0) - specE) * aoD + pref * specK * specAo;\n      // The sheen over it (F1d), lit by the sky's irradiance.\n      amb = amb * sheenScale + irr * u.sheen0.rgb * sheenE(ndv, u.sheen0.w) * aoD;\n" : "      amb = (irr * albedo * kdm + pref * f0 * reflectK) * ao;\n"}${reflect ? `      envSpec = pref * ${hdr ? "specK * specAo" : "f0 * reflectK * ao"};
+${hdr ? "      // What the environment's reflection takes, the diffuse beneath it no longer receives.\n      amb = (irr * (1.0 - ssgi.a) + ssgi.rgb) * albedo * kdf * (vec3<f32>(1.0) - specE) * aoD + pref * specK * specAo;\n      // The sheen over it (F1d), lit by the sky's irradiance.\n      amb = amb * sheenScale + irr * u.sheen0.rgb * sheenE(ndv, u.sheen0.w) * aoD;\n      // Its diffuse half (F1d-2), and the sky from behind through a thin surface.\n      ambDiffuse = (irr * (1.0 - ssgi.a) + ssgi.rgb) * albedo * kdf * (vec3<f32>(1.0) - specE) * aoD * sheenScale;\n      if (u.dt0.w > 0.0) {\n        let behindSky = shIrradiance(-skyN) * u.dt0.w * u.dt0.rgb * albedo * kdm * aoD;\n        amb = amb + behindSky;\n        ambDiffuse = ambDiffuse + behindSky;\n      }\n" : "      amb = (irr * albedo * kdm + pref * f0 * reflectK) * ao;\n"}${reflect ? `      envSpec = pref * ${hdr ? "specK * specAo" : "f0 * reflectK * ao"};
       envSeen = pref;
 ` : ""}      // The clearcoat (I4) reflects the room sharply about its own normal, and
       // what it reflects the base beneath no longer receives.
@@ -26165,7 +26313,7 @@ ${hdr ? "      // What the environment's reflection takes, the diffuse beneath i
         amb = amb * (1.0 - coatV) + coatV * prefC * reflectK * ao;
 ${reflect ? "        envSpec = envSpec * (1.0 - coatV) + coatV * prefC * reflectK * ao;\n" : ""}      }
     } else {
-      amb = ${hdr ? "(select(toLinear(vec3<f32>(u.light.w)), bakedIrr * kdm, baked) * (1.0 - ssgi.a) + ssgi.rgb * kdm) * albedo * aoD" : "toLinear(vec3<f32>(u.light.w)) * albedo * ao"};
+      amb = ${hdr ? "(select(toLinear(vec3<f32>(u.light.w)), bakedIrr * kdm, baked) * (1.0 - ssgi.a) + ssgi.rgb * kdm) * albedo * aoD" : "toLinear(vec3<f32>(u.light.w)) * albedo * ao"};${hdr ? "\n      ambDiffuse = amb;" : ""}
     }
 ${reflect ? "    let ambRaw = amb;\n" : ""}    // A baked light map (the second UV set) scales the sky/ambient fill by how
     // much of it reaches this point, bounce included \u2014 mirroring the CPU path.
@@ -26194,7 +26342,7 @@ ${reflect ? "    // What the light map, probes and SSAO did to the fill, they do
       // The global lights (the sun, unranged lights) reach every fragment\u2026
       let ng = i32(frame.clusterInfo.x + 0.5);
       for (var i = 0; i < ng; i = i + 1) {
-        direct = direct + lightTerm(lights[i], in.worldPos, N, V, ndv, a2, k, f0, kdm, albedo, sf);
+        direct = direct + lightTerm(lights[i], in.worldPos, N, V, ndv, a2, k, f0, ${hdr ? "kdf" : "kdm"}, albedo, sf);
       }
       vmLights = ng;
       // \u2026the rest only the cells they touch (EP8): this fragment's cell, by pixel and depth.
@@ -26204,16 +26352,16 @@ ${reflect ? "    // What the light map, probes and SSAO did to the fill, they do
         let cell = clusterCell((slice * ${CLUSTER_Y3}u + tile.y) * ${CLUSTER_X3}u + tile.x);
         vmLights = vmLights + i32(cell.y);
         for (var j = 0u; j < cell.y; j = j + 1u) {
-          direct = direct + lightTerm(lights[clusterLight(cell.x + j)], in.worldPos, N, V, ndv, a2, k, f0, kdm, albedo, sf);
+          direct = direct + lightTerm(lights[clusterLight(cell.x + j)], in.worldPos, N, V, ndv, a2, k, f0, ${hdr ? "kdf" : "kdm"}, albedo, sf);
         }
       }
       lit = direct + amb + emis;
     } else if (u.layer0.x > 0.0) {
       // The clearcoat's own highlight, over a base its Fresnel dims (I4).
       let c = coatTerm(coatN, coatNdv, L, H, vdh);
-      lit = (((kdm * (vec3<f32>(1.0) - F) * albedo + F * specD${hdr ? " * eComp" : ""})${hdr ? " * sheenScale + sheenLobe(ndl, ndv, ndh)" : ""}) * ndl * (1.0 - c.y) + vec3<f32>(c.x)) * sf + amb + emis;
+      lit = (((${hdr ? "kdf" : "kdm"} * (vec3<f32>(1.0) - F) * albedo + F * specD${hdr ? " * eComp" : ""})${hdr ? " * sheenScale + sheenLobe(ndl, ndv, ndh)" : ""}) * ndl * (1.0 - c.y) + vec3<f32>(c.x)) * sf + amb + emis;
     } else {
-      lit = ((kdm * (vec3<f32>(1.0) - F) * albedo + F * specD${hdr ? " * eComp" : ""})${hdr ? " * sheenScale + sheenLobe(ndl, ndv, ndh)" : ""}) * ndl * sf + amb + emis;
+      lit = ((${hdr ? "kdf" : "kdm"} * (vec3<f32>(1.0) - F) * albedo + F * specD${hdr ? " * eComp" : ""})${hdr ? " * sheenScale + sheenLobe(ndl, ndv, ndh)" : ""}) * ndl * sf + amb + emis;${hdr ? "\n      diffuseLit = diffuseLit + kdf * (vec3<f32>(1.0) - F) * albedo * ndl * sf * sheenScale;\n      // A thin surface lit from behind (F1d-2).\n      if (u.dt0.w > 0.0 && dot(N, L) < 0.0) {\n        let through = u.dt0.w * u.dt0.rgb * albedo * kdm * (-dot(N, L)) * sf;\n        lit = lit + through;\n        diffuseLit = diffuseLit + through;\n      }" : ""}
     }
     // A fresnel rim, light at grazing angles (zero when the material has none).
     lit = lit + toLinear(u.surface2.rgb) * pow(1.0 - ndv, u.surface2.w);
@@ -26255,7 +26403,14 @@ ${hdr ? `    // Linear light (F0b): what the reflection adds, and what it sees, 
       let rn = waterNormal(facingNormal(in.normal), in.worldPos);
       let b = behindColour(in.pos.xy, in.pos.z, refractOffset(rn, in.worldPos));
       if (b.a > 0.5) { return finishRefracted(shaded, colour.a, b.rgb, rn); }
-    }
+    }${hdr ? `
+    // Subsurface scattering (F1d-2; subsurface.ts): in a checkerboard, the diffuse that scatters on the even
+    // pixels and the rest on the odd, for the blur after the opaque pass to rebuild.
+    if (frame.debug.z > 0.5 && u.uvx1.z > 0.0 && u.pbr.w < 1.5 && frame.debug.x < 0.5) {
+      let scatter = (diffuseLit + ambDiffuse) * u.uvx1.z;
+      let even = ((u32(in.pos.x) + u32(in.pos.y)) & 1u) == 0u;
+      shaded = select(shaded - scatter, scatter, even);
+    }` : ""}
     return finishAlpha(shaded, colour.a);
   }
 
@@ -26596,6 +26751,11 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     this.upscaler = null;
     /** The view modes' resolve (F10a): its pipeline and uniforms, made on first use. */
     this.viewResolve = null;
+    /** Whether this frame's scattering surfaces split their diffuse for the SSS blur (F1d-2), for the frame uniform. */
+    this.frameSss = false;
+    /** The SSS profiles by material ID (F1d-2), and the blur's pipeline and two uniform buffers (across, down). */
+    this.sssProfiles = null;
+    this.sss = null;
     /** The physical camera's passes (F4c) and what they keep between frames: their uniforms, sampler and pipelines. */
     this.camera = null;
     /** Pipeline variants (material graph, sample count, reflection targets), built on first use. */
@@ -27817,6 +27977,7 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     this.frameDepthView = this.hdr && prepass ? { viewProj, terms: [drawnProjection[10], drawnProjection[14]] } : null;
     this.frameFog = this.prepareFog(draw);
     this.frameGi = this.hdr && draw.dynamicGi && draw.environment?.probeVolume ? draw.dynamicGi : null;
+    this.frameSss = this.hdr && prepass && draw.antialias !== true && viewModeCode(draw.viewMode) === 0 && draws.some((entry) => (entry.primitive.material.subsurface ?? 0) > 0);
     const { ordered, globalCount, clusters: cells } = this.clusterLights(localPlan ? { ...draw, lights: localPlan.lights, localShadows: null } : draw);
     this.uploadLights(packLights(ordered, this.hdr, this.hdr ? this.iesSlots(ordered) : null));
     if (this.frameFog) {
@@ -27826,9 +27987,17 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     const lightCount = ordered.length;
     const camera = refractionCamera(draw.view, this.height);
     const materialIds = /* @__PURE__ */ new Map();
+    const sssProfiles = [];
     const materialId = (material2) => {
       let id = materialIds.get(material2);
-      if (id === void 0) materialIds.set(material2, id = materialIds.size + 1);
+      if (id === void 0) {
+        materialIds.set(material2, id = materialIds.size + 1);
+        const m = material2;
+        if (this.frameSss && (m.subsurface ?? 0) > 0) {
+          const e = resolveExtensions2(m);
+          sssProfiles.push({ id, color: e.subsurfaceColor, radius: e.subsurfaceRadius });
+        }
+      }
       return id;
     };
     const viewProjNow = multiplyMat48(draw.projection, draw.view);
@@ -27924,6 +28093,10 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
       writeInstanceUniform(this.uniformData, draws.length + k, uniformOf(entry));
     });
     this.device.queue.writeBuffer(this.uniformBuffer, 0, this.uniformData, 0, (draws.length + casters.length) * UNIFORM_FLOATS);
+    if (this.frameSss) {
+      this.sssProfiles ?? (this.sssProfiles = this.device.createBuffer({ size: SSS_MAX_PROFILES * 16, usage: 128 | 8 }));
+      this.device.queue.writeBuffer(this.sssProfiles, 0, packSssProfiles(sssProfiles));
+    }
     this.device.queue.writeBuffer(this.instanceBuffer, 0, this.instanceData, 0, nextCaster * INSTANCE_FLOATS);
     this.lastViewProj = viewProjNow;
     this.lastWind = windNow;
@@ -28178,6 +28351,7 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
       };
     });
     scenePass("opaque", 0, opaqueEnd, false, !seeThrough);
+    if (this.frameSss && gbuffer && !msaa && this.frameDepthView) this.addSubsurface(graph, colour, depth, gbuffer, temporal ? temporal.projection : draw.projection, this.frameDepthView.terms);
     if (behind && !msaa) {
       graph.addPass("behind", "transfer", (pass) => {
         pass.read(colour, "copySrc");
@@ -28602,6 +28776,50 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
       return (ctx) => ctx.encoder.copyTextureToTexture({ texture: ctx.texture(out) }, { texture: ctx.texture(colour) }, size);
     });
   }
+  /** The separable SSS blur (F1d-2; subsurface.ts): across into one target, down into another, copied back over `colour`. */
+  addSubsurface(graph, colour, depth, gbuffer, projection, terms) {
+    const device = this.device;
+    this.sss ?? (this.sss = { pipeline: fullScreenPipeline(device, SSS_WGSL, "blur", this.colourFormat), uniforms: [device.createBuffer({ size: 32, usage: 64 | 8 }), device.createBuffer({ size: 32, usage: 64 | 8 })] });
+    const sss = this.sss;
+    const perMetre = projection[5] * this.height / 2;
+    device.queue.writeBuffer(sss.uniforms[0], 0, new Float32Array([1, 0, 0, perMetre, terms[0], terms[1], 0, 0]));
+    device.queue.writeBuffer(sss.uniforms[1], 0, new Float32Array([0, 1, 1, perMetre, terms[0], terms[1], 0, 0]));
+    const size = { width: this.width, height: this.height };
+    const across = graph.createTexture("sss.across", { format: this.colourFormat, ...size });
+    const down = graph.createTexture("sss.down", { format: this.colourFormat, ...size });
+    const blurPass = (name, out, blurred, uniforms) => graph.addPass(name, "render", (pass) => {
+      pass.read(colour);
+      if (blurred) pass.read(blurred);
+      pass.read(depth);
+      pass.read(gbuffer);
+      pass.write(out);
+      return (ctx) => {
+        const encoded = ctx.encoder.beginRenderPass({ colorAttachments: [{ view: ctx.texture(out).createView(), clearValue: { r: 0, g: 0, b: 0, a: 0 }, loadOp: "clear", storeOp: "store" }], ...ctx.timing });
+        encoded.setPipeline(sss.pipeline);
+        encoded.setBindGroup(0, device.createBindGroup({
+          layout: sss.pipeline.getBindGroupLayout(0),
+          entries: [
+            { binding: 0, resource: { buffer: uniforms } },
+            { binding: 1, resource: ctx.texture(colour).createView() },
+            { binding: 2, resource: ctx.texture(blurred ?? colour).createView() },
+            { binding: 3, resource: ctx.texture(depth).createView() },
+            { binding: 4, resource: ctx.texture(gbuffer).createView() },
+            { binding: 5, resource: { buffer: this.sssProfiles } }
+          ]
+        }));
+        encoded.draw(3);
+        encoded.end();
+      };
+    });
+    blurPass("sss.across", across, null, sss.uniforms[0]);
+    blurPass("sss.down", down, across, sss.uniforms[1]);
+    graph.addPass("sss.copy", "transfer", (pass) => {
+      pass.read(down, "copySrc");
+      pass.write(colour, "copyDst");
+      pass.keep();
+      return (ctx) => ctx.encoder.copyTextureToTexture({ texture: ctx.texture(down) }, { texture: ctx.texture(colour) }, size);
+    });
+  }
   /** Depth of field, then motion blur (F4c; see cameraEffects.ts), on `target` (`size`), written back into it. */
   addCameraEffects(graph, target, size, depth, velocity, effects, terms, multisampled) {
     const device = this.device;
@@ -28911,7 +29129,7 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     }
     if (this.hdr) frame.set(this.aerialFrame(draw), FRAME_AERIAL);
     if (this.hdr) frame.set(packFogFrame(this.frameFog, this.fogTerms), FRAME_FOG);
-    if (this.hdr) frame.set([viewModeCode(draw.viewMode), draw.texelDensity ?? DEFAULT_TEXEL_DENSITY], FRAME_DEBUG);
+    if (this.hdr) frame.set([viewModeCode(draw.viewMode), draw.texelDensity ?? DEFAULT_TEXEL_DENSITY, this.frameSss ? 1 : 0], FRAME_DEBUG);
     this.device.queue.writeBuffer(buffers.params, 0, frame);
     this.uploadLocalShadows(local);
     return { ordered, globalCount, clusters };
@@ -29320,6 +29538,8 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     this.destroyed = true;
     this.pathTracer?.destroy();
     this.pathTracer = null;
+    destroySafely(this.sssProfiles);
+    if (this.sss) for (const b of this.sss.uniforms) destroySafely(b);
     this.latest = null;
     this.software.dispose();
     destroySafely(this.colourTexture);

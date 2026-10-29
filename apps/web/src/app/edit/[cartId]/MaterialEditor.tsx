@@ -1014,6 +1014,24 @@ function MaterialSet({ material, patch }: { material: MeshMaterial; patch: (chan
       <RangeControl label="UV offset U" nested min={-1} max={1} step={0.01} value={t.offset[0]} ariaLabel="UV offset U" display={t.offset[0].toFixed(2)} onChange={(value) => setTransform({ offset: [value, t.offset[1]] })} />
       <RangeControl label="UV offset V" nested min={-1} max={1} step={0.01} value={t.offset[1]} ariaLabel="UV offset V" display={t.offset[1].toFixed(2)} onChange={(value) => setTransform({ offset: [t.offset[0], value] })} />
       <RangeControl label="UV rotation" nested min={-180} max={180} step={5} value={Math.round((t.rotation * 180) / Math.PI)} ariaLabel="UV rotation" display={`${Math.round((t.rotation * 180) / Math.PI)}°`} onChange={(deg) => setTransform({ rotation: (deg * Math.PI) / 180 })} />
+      <div className={`${styles.groupLabel} ${styles.railSubLabel}`}>Subsurface</div>
+      <RangeControl label="Scattering" nested min={0} max={1} step={0.05} value={material.subsurface ?? 0} ariaLabel="Subsurface scattering" display={(material.subsurface ?? 0) > 0 ? (material.subsurface ?? 0).toFixed(2) : "none"} onChange={(value) => patch({ subsurface: value > 0 ? value : undefined })} />
+      {(material.subsurface ?? 0) > 0 && (
+        <>
+          <RangeControl label="Radius" nested min={1} max={100} step={1} value={Math.round((material.subsurfaceRadius ?? 0.012) * 1000)} ariaLabel="Subsurface radius" display={`${Math.round((material.subsurfaceRadius ?? 0.012) * 1000)} mm`} onChange={(mm) => patch({ subsurfaceRadius: mm / 1000 })} />
+          <label style={{ display: "flex", gap: 6, alignItems: "center", fontSize: 12 }}>
+            Scatter colour
+            <input type="color" aria-label="Subsurface colour" value={shownRgb(material.subsurfaceColor ?? [1, 0.37, 0.18])} onChange={(e) => patch({ subsurfaceColor: linearRgb(e.target.value) })} style={swatch} />
+          </label>
+        </>
+      )}
+      <RangeControl label="Thin transmission" nested min={0} max={1} step={0.05} value={material.diffuseTransmission ?? 0} ariaLabel="Diffuse transmission" display={(material.diffuseTransmission ?? 0) > 0 ? (material.diffuseTransmission ?? 0).toFixed(2) : "none"} onChange={(value) => patch({ diffuseTransmission: value > 0 ? value : undefined })} />
+      {(material.diffuseTransmission ?? 0) > 0 && (
+        <label style={{ display: "flex", gap: 6, alignItems: "center", fontSize: 12 }}>
+          Through colour
+          <input type="color" aria-label="Diffuse transmission colour" value={shownRgb(material.diffuseTransmissionColor ?? [1, 1, 1])} onChange={(e) => patch({ diffuseTransmissionColor: linearRgb(e.target.value) })} style={swatch} />
+        </label>
+      )}
       <RailHint>glTF&apos;s KHR material set: the AAA tier shades it, and the path-traced reference matches it.</RailHint>
     </>
   );

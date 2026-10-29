@@ -270,7 +270,7 @@ describe("wear masks in the material graph", () => {
 describe("GPU packing", () => {
   it("grows the uniform stride to 1024 for the layer (and refraction) fields", () => {
     expect(UNIFORM_STRIDE).toBe(1280);
-    expect(UNIFORM_BYTES_USED).toBe(1056);
+    expect(UNIFORM_BYTES_USED).toBe(1088);
     expect(UNIFORM_STRIDE % 256).toBe(0);
   });
 

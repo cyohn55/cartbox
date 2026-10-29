@@ -345,7 +345,7 @@ Everything else depends on this track. It contains no visible "feature", but its
       - On Dawn, the generated frame decodes a map as the derivative frame does on a plain layout (within 2%, along U and up V). A stored frame that differs is the one used, and w flips the bitangent.
       - In Chromium, Beaver Creek on the `aaa` tier draws with 64-byte pipelines and the four tangent-aware shaders, with no errors.
     - *Found, then fixed:* imported glTF UVs were stored as glTF writes them (V down) while the engine samples V up (as OBJ and its own meshes are), so an imported glTF's textures showed flipped vertically. glTF's V is now flipped on import and export (`flipV` in `gltfCodec.ts`), with the tangents' w carried over as it is. Meshes already saved in a cart keep the coordinates they were stored with; importing the file again gives the corrected ones.
-- [ ] **F1d. The full material set.**
+- [x] **F1d. The full material set.**
   - Sheen (Charlie distribution).
   - Transmission and volume (thickness, attenuation).
   - IOR and specular.
@@ -371,6 +371,20 @@ Everything else depends on this track. It contains no visible "feature", but its
       - the glTF round trip of every extension, and a texture's transform on its maps;
       - on Dawn, the renderer against the reference within 5% (8% for the film): a higher IOR and a tinted specular; a sheen over dark cloth; emission at 4× strength; glass in front of a light, clear and through two attenuation distances (a quarter); a moved texture; and a film's colour.
     - *Left for F1d:* the extensions' textures (sheen, transmission, thickness, specular and iridescence maps); refraction through a thick volume (what is behind comes through unbent, as a thin wall's would); the specular factor's scaling of the grazing reflectance.
+  - **F1d-2, subsurface scattering and thin transmission: done** on the `aaa` tier with a prepass (`player render/subsurface.ts`).
+    - **The fields:** a material's share of diffuse light that scatters, how far each channel goes (a colour × a radius in metres; skin's red-farthest profile, 1.2 cm, by default), and a thin surface's transmission share and colour. Thin transmission is `KHR_materials_diffuse_transmission`; scattering, which no ratified extension carries, rides in the material's glTF extras (`cartboxSubsurface`).
+    - **The split** (HDRP's checkerboard, so no target is added): the shader keeps the diffuse it gives (each light's, the single key light's and the sky's), and on a scattering surface writes the share that scatters on the even pixels and everything else on the odd ones.
+    - **The blur** (Jimenez et al.'s separable SSS with Burley's profile), across and then down after the opaque pass and before the see-through pass copies it:
+      - it gathers the even pixels' diffuse within three radii of the widest channel, sized on screen by the pixel's depth, weighed by `e^(−r/d) + e^(−r/3d)` per channel and normalised, so light is spread and never gained;
+      - samples on another material, or past the reach in depth, are left out, so it doesn't bleed across silhouettes;
+      - the second pass adds the remainder back: an odd pixel's own, an even pixel's from its odd neighbours.
+      - Profiles are kept per G-buffer material ID (F0c), up to 256 a frame.
+    - **Thin transmission:** a light (or the sky) behind a leaf lights its near side through it, as a diffuse of its own tinted by its colour; the front diffuse gives up that share. The path-traced reference takes the same lobe (lights from behind, and bounces out the far side).
+    - **In the editor:** a Subsurface group (scattering, radius in millimetres, scatter colour) and thin transmission with its colour.
+    - *Tests:* `Unit Tests/subsurface.test.ts` covers:
+      - the fields, skin's default profile, and the glTF form; the profiles by ID, Burley's fall-off and the checkerboard;
+      - on Dawn: under even light the scattered surface keeps its light within 2% with no checkerboard left; across a white-to-black edge, light reaches the black side, red more than half again as far as blue; a leaf lit from behind matches the reference within 5%, and is dark without transmission.
+    - *Left for later:* area lights' diffuse, and a clearcoat's, aren't split (they light a scattering surface without scattering); the blur is skipped with MSAA and without a prepass (the surface then shades as a plain diffuse one, the reference's too, which treats scattering as diffuse).
 - [ ] **F1e. Material graph, production grade.**
   - New outputs: normal, world-position offset, pixel depth offset, refraction, subsurface colour.
   - Any number of texture samplers.

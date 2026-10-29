@@ -59,7 +59,7 @@ export const REFERENCE_TEXTURE_SIDE = 1024;
 /** The largest capture, each side (8K). */
 export const MAX_CAPTURE_SIDE = 8192;
 /** A material's record: four vec4s (see {@link packReferenceScene}). */
-const MAT_VEC4S = 10;
+const MAT_VEC4S = 11;
 /** A triangle's record: its corner and edges, then its corner attributes; seven vec4s. */
 const PRIM_VEC4S = 7;
 const ATTR_VEC4S = 4;
@@ -93,14 +93,15 @@ export interface ReferenceScene {
    */
   readonly prims: Float32Array;
   /**
-   * Per material ten vec4s:
+   * Per material eleven vec4s:
    * - its base colour factor, as authored (RGBA);
    * - its emissive factor, as authored, and its alpha mode (0 opaque, 1 mask, 2 blend, 3 additive);
    * - metalness, roughness, and its base-colour and metal/roughness maps (−1 none);
    * - its emissive map, whether it shades as PBR, its alpha cutoff, and the lighting channels it is on;
    * - the full material set (F1d; {@link extensionRows}): sheen; a dielectric's f0 and transmission; the
    *   volume's thickness and attenuation distance, and the film's strength and IOR; the attenuation colour
-   *   and the film's thickness; the UV transform; its offset, the emissive strength and whether it has one.
+   *   and the film's thickness; the UV transform; its offset, the emissive strength and whether it has one;
+   *   a thin surface's transmission colour and share (F1d-2).
    *
    * Then per map, from vec4 {@link mapTable}, one vec4 of u32 bits: its first texel in {@link texels}, its width and height.
    */
@@ -184,7 +185,7 @@ function normalMatrix(m: Mat4): number[] {
   return co.map((v) => v * s);
 }
 
-/** A material's full set (F1d) as its record's last six vec4s; the defaults off the PBR path. */
+/** A material's full set (F1d) as its record's last seven vec4s; the defaults off the PBR path. */
 function extensionRows(m: MeshSceneInstance["mesh"]["primitives"][number]["material"], pbr: boolean): number[] {
   const e = resolveExtensions(pbr ? m : { name: m.name, baseColorFactor: m.baseColorFactor, baseColorImage: null });
   const t = e.uvTransform;
@@ -204,6 +205,8 @@ function extensionRows(m: MeshSceneInstance["mesh"]["primitives"][number]["mater
     // The emissive strength applies with or without the PBR path (an emissive factor puts a material on it anyway).
     resolveExtensions(m).emissiveStrength,
     t ? 1 : 0,
+    ...e.diffuseTransmissionColor,
+    e.diffuseTransmission,
   ];
 }
 
@@ -508,6 +511,9 @@ struct Surface {
   iridIor: f32,
   iridThickness: f32,
   sheenScale: f32,
+  // A thin surface's transmission (F1d-2): its share and colour.
+  dt: f32,
+  dtColor: vec3<f32>,
 };
 
 fn surfaceAt(i: u32, b: vec2<f32>) -> Surface {
@@ -538,6 +544,9 @@ fn surfaceAt(i: u32, b: vec2<f32>) -> Surface {
   s.iridIor = m6.w;
   s.iridThickness = m7.w;
   s.sheenScale = 1.0;
+  let m10 = mat(m, 10u);
+  s.dt = select(0.0, m10.w, s.pbr);
+  s.dtColor = m10.rgb;
   return s;
 }
 
@@ -545,6 +554,8 @@ fn surfaceAt(i: u32, b: vec2<f32>) -> Surface {
 // (its lights' units), and its specular with the Kulla-Conty scale.
 fn brdf(s: Surface, N: vec3<f32>, V: vec3<f32>, L: vec3<f32>) -> vec3<f32> {
   let ndl = dot(N, L);
+  // From behind, a thin surface's transmission (F1d-2): a diffuse of its own.
+  if (ndl < 0.0 && s.dt > 0.0) { return s.dt * s.dtColor * s.albedo * (1.0 - s.metal) * (1.0 - s.transmission) / PI; }
   if (ndl <= 0.0) { return vec3<f32>(0.0); }
   if (!s.pbr) { return s.albedo / PI; }
   let ndv = max(1e-4, dot(N, V));
@@ -557,7 +568,7 @@ fn brdf(s: Surface, N: vec3<f32>, V: vec3<f32>, L: vec3<f32>) -> vec3<f32> {
   let f0 = s.f0;
   let F = f0 + (vec3<f32>(1.0) - f0) * pow(1.0 - vdh, 5.0);
   let eComp = energyCompensation(f0, dfgAt(ndv, s.rough));
-  let diffuse = (1.0 - s.metal) * (1.0 - s.transmission) * (vec3<f32>(1.0) - F) * s.albedo / PI;
+  let diffuse = (1.0 - s.metal) * (1.0 - s.transmission) * (1.0 - s.dt) * (vec3<f32>(1.0) - F) * s.albedo / PI;
   return (diffuse + F * D * smithVisibility(ndl, ndv, a2) * eComp) * s.sheenScale + sheenBrdf(s.sheen, s.sheenRough, ndl, ndv, ndh);
 }
 
@@ -614,17 +625,18 @@ fn bouncePdf(s: Surface, N: vec3<f32>, V: vec3<f32>, L: vec3<f32>, ps: f32) -> f
 
 // The direct light on a surface at p facing N, seen from V: every directional light, and one point, spot or
 // area light picked by what it would give there (a tenth spread evenly), over the chance of picking it.
-fn directLight(s: Surface, p: vec3<f32>, N: vec3<f32>, V: vec3<f32>) -> vec3<f32> {
+fn directLight(s: Surface, p: vec3<f32>, N: vec3<f32>, V: vec3<f32>, pBack: vec3<f32>) -> vec3<f32> {
   var L = vec3<f32>(0.0);
   let directional = params.info.y;
   for (var l = 0u; l < directional; l = l + 1u) {
     if (!lightsMask(l, s.channels)) { continue; }
     let Ld = lightAt(l, 0u).xyz;
     let ndl = dot(N, Ld);
-    if (ndl <= 0.0) { continue; }
+    // A light behind a thin surface (F1d-2) shines through from its far side.
+    if (ndl <= 0.0 && !(s.dt > 0.0 && ndl < 0.0)) { continue; }
     let f = brdf(s, N, V, Ld);
-    if (max(f.r, max(f.g, f.b)) > 0.0 && visible(p, Ld, FAR)) {
-      L = L + f * PI * lightAt(l, 1u).rgb * ndl;
+    if (max(f.r, max(f.g, f.b)) > 0.0 && visible(select(pBack, p, ndl > 0.0), Ld, FAR)) {
+      L = L + f * PI * lightAt(l, 1u).rgb * abs(ndl);
     }
   }
   let local = params.extra.x;
@@ -645,6 +657,14 @@ fn directLight(s: Surface, p: vec3<f32>, N: vec3<f32>, V: vec3<f32>) -> vec3<f32
   if (pick == local - 1u) { pdf = localWeight(directional + pick, p, N, s.channels) * spread + even; }
   let l = directional + pick;
   if (!lightsMask(l, s.channels)) { return L; }
+  // From behind a thin surface (F1d-2): the same light through its far side.
+  if (s.dt > 0.0) {
+    let lb = localSample(l, pBack, -N);
+    let fb = brdf(s, N, V, lb.dir);
+    if (max(lb.c.r, max(lb.c.g, lb.c.b)) > 0.0 && max(fb.r, max(fb.g, fb.b)) > 0.0 && visible(pBack, lb.dir, lb.dist - EPS)) {
+      L = L + fb * PI * lb.c / pdf;
+    }
+  }
   let ls = localSample(l, p, N);
   if (max(ls.c.r, max(ls.c.g, ls.c.b)) <= 0.0) { return L; }
   let f = brdf(s, N, V, ls.dir);
@@ -691,7 +711,8 @@ fn radiance(origin: vec3<f32>, dir: vec3<f32>) -> vec4<f32> {
     let ndv0 = max(1e-4, dot(N, V));
     if (s.pbr && s.irid > 0.0) { s.f0 = mix(s.f0, iridescenceFresnel(ndv0, s.f0, s.iridIor, s.iridThickness), s.irid); }
     if (s.pbr) { s.sheenScale = 1.0 - max(s.sheen.r, max(s.sheen.g, s.sheen.b)) * sheenE(ndv0, s.sheenRough); }
-    add = s.emission + directLight(s, p, N, V);
+    let pBack = o + d * h.t - ng * EPS;
+    add = s.emission + directLight(s, p, N, V, pBack);
     add = tp * add;
     if (clampTo > 0.0 && b > 0u) { add = add * min(1.0, clampTo / max(lum(add), 1e-6)); }
     L = L + add;
@@ -707,6 +728,17 @@ fn radiance(origin: vec3<f32>, dir: vec3<f32>) -> vec4<f32> {
       continue;
     }
     tp = tp / (1.0 - pt);
+    // A thin surface's transmission (F1d-2): as often as it lets light through, the bounce goes out its far side.
+    let pd = select(0.0, min(0.5, s.dt), s.dt > 0.0);
+    if (pd > 0.0 && rand() < pd) {
+      let back = cosineDir(-N, vec2<f32>(rand(), rand()));
+      // f · |cos| over (pd · |cos| / π).
+      tp = tp * brdf(s, N, V, back) * PI / pd;
+      o = pBack;
+      d = back;
+      continue;
+    }
+    tp = tp / (1.0 - pd);
     // A bounce: the specular by its visible normals, or the diffuse by the cosine.
     let ps = specularChance(s, ndv);
     var next: vec3<f32>;
