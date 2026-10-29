@@ -33,6 +33,8 @@ export interface RenderStats {
   readonly passes?: readonly { readonly name: string; readonly ms: number }[];
   /** The size the 3D rendered at and its share of the frame's (F0d), when that isn't the cart's own. */
   readonly resolution?: { readonly width: number; readonly height: number; readonly scale: number };
+  /** Texture streaming's residency (AAA_FIDELITY_ROADMAP.md F1b), on a renderer that streams. */
+  readonly textures?: { readonly budgetMB: number; readonly residentMB: number; readonly wantedMB: number; readonly maps: number; readonly limited: number };
 }
 
 export interface SectionStats {

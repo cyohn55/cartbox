@@ -142,13 +142,14 @@ import {
 
 import { SoftwareSceneRenderer, applyScenePasses, type FrameState, type GpuSceneDraw, type SceneDraw, type SceneRenderer, type SunShadow } from "./sceneRenderer.js";
 import { webgpuCanHonour } from "./renderCaps.js";
-import { batchInstances, compositeFrame, presentFrame, softEdges, type PrimitiveTextures } from "./gpuFrame.js";
+import { batchInstances, compositeFrame, presentFrame, softEdges, type DrawBatch, type PrimitiveTextures } from "./gpuFrame.js";
 import { FrameGraph, GraphTimer, TransientPool, timingSpan, type FrameResource, type PassContext } from "./frameGraph.js";
 import { MAX_ANISOTROPY, MipmapGenerator, coverageMips, hasTransparency, mipLevelCount, uploadCompressed } from "./mipmaps.js";
 import { compressedFormatsFor } from "../lighting/webgpuDevice.js";
 import { brdfLut, brdfWgsl } from "./brdf.js";
 import { MATERIAL_SET_WGSL } from "./materialSet.js";
 import { SSS_MAX_PROFILES, SSS_WGSL, packSssProfiles, type SssProfile } from "./subsurface.js";
+import { FEEDBACK_NONE, FEEDBACK_SLOTS, TextureStreamer, feedbackWgsl, footprintLog2, type StreamingStats } from "./textureStreaming.js";
 import { PathTracer, captureReference, type CaptureOptions, type ReferenceCapture } from "./pathTracer.js";
 import { IES_BASE, IES_MAX_PROFILES, IES_VEC4S, ltcTables, ltcWgsl } from "./ltc.js";
 import { PROBE_FACE, ProbeCapture, packCapturedProbes } from "./probeCapture.js";
@@ -3613,6 +3614,10 @@ export class WebgpuSceneRenderer implements SceneRenderer {
 
   /** Encode and submit one frame, and start a readback if a buffer is free (or, with `readback` false, leave it in the colour texture). */
   private submit(instances: readonly MeshSceneInstance[], draw: GpuSceneDraw, readback = true): void {
+    // Texture streaming (F1b) on the AAA tier with mips, under the draw's budget; what the last round replaced goes now.
+    for (const t of this.retired) destroySafely(t);
+    this.retired = [];
+    if (this.hdr && this.mips && draw.textureBudget) this.ensureStreaming(draw.textureBudget);
     // Temporal anti-aliasing (I2): this frame's jittered projection and the resolve's uniforms.
     // Temporal upscaling (F4b): a linear-light temporal frame with a prepass, shown larger than it renders.
     const display = this.hdr && draw.temporal === true && draw.prepass === true && draw.upscale && (draw.upscale.width > this.width || draw.upscale.height > this.height) ? { width: draw.upscale.width, height: draw.upscale.height } : null;
@@ -3888,6 +3893,7 @@ export class WebgpuSceneRenderer implements SceneRenderer {
       triangles,
       gpuMs: this.timer?.lastMs ?? null,
       ...(this.timer && this.timer.lastPasses.length > 0 ? { passes: this.timer.lastPasses } : {}),
+      ...(this.streamer ? { textures: this.streamer.stats() } : {}),
     };
 
     // Soft edges (EP6b) need the opaque depth readable, so a frame that has
@@ -4191,6 +4197,8 @@ export class WebgpuSceneRenderer implements SceneRenderer {
       });
 
     scenePass("opaque", 0, opaqueEnd, false, !seeThrough);
+    // Texture streaming's feedback (F1b), every few frames.
+    if (this.streamer) this.addFeedback(graph, draws);
     // Subsurface scattering (F1d-2): the opaque scene's split diffuse blurred and rebuilt, before anything reads it.
     if (this.frameSss && gbuffer && !msaa && this.frameDepthView) this.addSubsurface(graph, colour, depth, gbuffer, temporal ? temporal.projection : draw.projection, this.frameDepthView.terms);
     if (behind && !msaa) {
@@ -5446,6 +5454,12 @@ export class WebgpuSceneRenderer implements SceneRenderer {
       cache.set(source, texture);
       return texture;
     }
+    // Streamed (F1b): resident at the level the feedback and the budget allow.
+    if (this.streamer && Math.max(source.width, source.height) > STREAM_MIN_SIDE) {
+      const texture = this.streamedTexture(source, colour, this.streamer.register(source, source.width, source.height));
+      cache.set(source, texture);
+      return texture;
+    }
     const levels = this.mips ? mipLevelCount(source.width, source.height) : 1;
     const texture = this.device.createTexture({
       size: { width: source.width, height: source.height },
@@ -5470,6 +5484,184 @@ export class WebgpuSceneRenderer implements SceneRenderer {
     cache.set(source, texture);
     return texture;
   }
+
+  /** Texture streaming (F1b): the residency plan, and the feedback pass's pipeline, buffers and state. */
+  private streamer: TextureStreamer | null = null;
+  private feedback: { pipeline: any; draws: any; drawCapacity: number; wanted: any; readback: any; depth: any; size: { width: number; height: number }; busy: boolean; frame: number } | null = null;
+  /** Each feedback slot's streamed maps, for the round in flight. */
+  private feedbackMaps: DecodedTexture[][] = [];
+
+  /** Start streaming (F1b) under `budgetMB`, making the feedback pass the first time. */
+  private ensureStreaming(budgetMB: number): void {
+    const bytes = budgetMB * 1024 * 1024;
+    if (this.streamer) {
+      this.streamer.budgetBytes = bytes;
+      return;
+    }
+    this.streamer = new TextureStreamer(bytes);
+    const device = this.device;
+    const module = device.createShaderModule({ code: feedbackWgsl(4) });
+    const layout = device.createBindGroupLayout({
+      entries: [
+        { binding: 0, visibility: SHADER_STAGE_VERTEX | SHADER_STAGE_FRAGMENT, buffer: { type: "uniform", hasDynamicOffset: true } },
+        { binding: 1, visibility: SHADER_STAGE_VERTEX, buffer: { type: "read-only-storage" } },
+        { binding: 2, visibility: SHADER_STAGE_FRAGMENT, buffer: { type: "storage" } },
+      ],
+    });
+    const pipeline = device.createRenderPipeline({
+      layout: device.createPipelineLayout({ bindGroupLayouts: [layout] }),
+      vertex: { module, entryPoint: "vs", buffers: [{ arrayStride: 64, attributes: [{ shaderLocation: 0, offset: 0, format: "float32x3" }, { shaderLocation: 2, offset: 24, format: "float32x2" }] }] },
+      fragment: { module, entryPoint: "fs", targets: [] },
+      primitive: { topology: "triangle-list", cullMode: "none" },
+      depthStencil: { format: "depth24plus", depthWriteEnabled: true, depthCompare: "less" },
+    });
+    this.feedback = {
+      pipeline,
+      draws: device.createBuffer({ size: 64 * 256, usage: 0x40 | 0x08 }),
+      drawCapacity: 64,
+      wanted: device.createBuffer({ size: FEEDBACK_SLOTS * 4, usage: 0x80 | 0x08 | 0x04 }),
+      readback: device.createBuffer({ size: FEEDBACK_SLOTS * 4, usage: 0x01 | 0x08 }),
+      depth: null,
+      size: { width: 0, height: 0 },
+      busy: false,
+      frame: 0,
+    };
+    // Everything uploaded whole so far is streamed from here on.
+    this.bindGroups = new WeakMap();
+    this.cutGroups = new WeakMap();
+  }
+
+  /** What streaming holds (F1b), for the profiler; null when the frame doesn't stream. */
+  get textureResidency(): StreamingStats | null {
+    return this.streamer?.stats() ?? null;
+  }
+
+  /** A map at a resident level (F1b): its size over 2^level, that level's texels (box-filtered on the CPU) and the mips below. */
+  private streamedTexture(source: DecodedTexture, colour: boolean, level: number): any {
+    const top = streamedLevel(source, level);
+    const levels = mipLevelCount(top.width, top.height);
+    const texture = this.device.createTexture({
+      size: { width: top.width, height: top.height },
+      format: "rgba8unorm",
+      usage: 0x04 | 0x02 | (levels > 1 ? 0x10 : 0),
+      ...(levels > 1 ? { mipLevelCount: levels, ...(colour ? { viewFormats: ["rgba8unorm-srgb"] } : {}) } : {}),
+    });
+    this.device.queue.writeTexture({ texture }, top.data, { bytesPerRow: top.width * 4, rowsPerImage: top.height }, { width: top.width, height: top.height });
+    if (levels > 1) this.mipmaps.generate(texture, levels, colour ? "rgba8unorm-srgb" : "rgba8unorm");
+    return texture;
+  }
+
+  /**
+   * The feedback pass (F1b; textureStreaming.ts): every {@link FEEDBACK_INTERVAL} frames the opaque batches
+   * drawn a quarter size, each pixel's footprint kept per material, read back without waiting, and the
+   * residency planned again from it.
+   */
+  private addFeedback(graph: FrameGraph, draws: readonly DrawBatch<any>[]): void {
+    const fb = this.feedback;
+    if (!fb || fb.busy || this.frameIndex % FEEDBACK_INTERVAL !== 0) return;
+    const slots = new Map<DecodedTexture, number>();
+    const maps: DecodedTexture[][] = [];
+    const drawn: { entry: DrawBatch<any>; slot: number }[] = [];
+    for (const entry of draws) {
+      if (entry.refract || entry.alpha >= 2) continue;
+      const t = entry.textures;
+      const streamed = [t.base, t.mr, t.occ, t.emis, t.normal, t.detail].filter((m): m is DecodedTexture => m !== null && Math.max(m.width, m.height) > STREAM_MIN_SIDE);
+      if (streamed.length === 0) continue;
+      const key = streamed[0]!;
+      let slot = slots.get(key);
+      if (slot === undefined) {
+        if (maps.length >= FEEDBACK_SLOTS) continue;
+        slot = maps.length;
+        slots.set(key, slot);
+        maps.push(streamed);
+      }
+      drawn.push({ entry, slot });
+    }
+    if (drawn.length === 0) return;
+    const device = this.device;
+    if (fb.drawCapacity < drawn.length) {
+      fb.draws.destroy();
+      fb.drawCapacity = Math.max(drawn.length, fb.drawCapacity * 2);
+      fb.draws = device.createBuffer({ size: fb.drawCapacity * 256, usage: 0x40 | 0x08 });
+    }
+    const params = new Uint32Array(drawn.length * 64);
+    drawn.forEach((d, i) => (params[i * 64] = d.slot));
+    device.queue.writeBuffer(fb.draws, 0, params);
+    device.queue.writeBuffer(fb.wanted, 0, new Uint32Array(FEEDBACK_SLOTS).fill(FEEDBACK_NONE));
+    const width = Math.max(1, this.width >> 2);
+    const height = Math.max(1, this.height >> 2);
+    if (fb.size.width !== width || fb.size.height !== height) {
+      fb.depth?.destroy();
+      fb.depth = device.createTexture({ size: { width, height }, format: "depth24plus", usage: 0x10 });
+      fb.size = { width, height };
+    }
+    this.feedbackMaps = maps;
+    fb.busy = true;
+    graph.addPass("texture feedback", "render", (pass) => {
+      pass.keep();
+      return (ctx) => {
+        const encoded = ctx.encoder.beginRenderPass({ colorAttachments: [], depthStencilAttachment: { view: fb.depth.createView(), depthClearValue: 1, depthLoadOp: "clear", depthStoreOp: "discard" }, ...ctx.timing });
+        encoded.setPipeline(fb.pipeline);
+        drawn.forEach(({ entry }, i) => {
+          encoded.setBindGroup(0, device.createBindGroup({
+            layout: fb.pipeline.getBindGroupLayout(0),
+            entries: [
+              { binding: 0, resource: { buffer: fb.draws, offset: 0, size: 16 } },
+              { binding: 1, resource: { buffer: this.instanceBuffer } },
+              { binding: 2, resource: { buffer: fb.wanted } },
+            ],
+          }), [i * 256]);
+          encoded.setVertexBuffer(0, entry.geometry.vertexBuffer);
+          encoded.setIndexBuffer(entry.geometry.indexBuffer, "uint32");
+          encoded.drawIndexed(entry.geometry.indexCount, entry.models.length, 0, 0, entry.first);
+        });
+        encoded.end();
+        ctx.encoder.copyBufferToBuffer(fb.wanted, 0, fb.readback, 0, maps.length * 4);
+      };
+    });
+    const count = maps.length;
+    // Read once the frame is submitted (after it, in submit's caller order), never waited on.
+    queueMicrotask(() => {
+      void fb.readback
+        .mapAsync(0x01, 0, count * 4)
+        .then(() => {
+          const fixed = new Uint32Array(fb.readback.getMappedRange(0, count * 4).slice(0));
+          fb.readback.unmap();
+          this.applyFeedback(fixed);
+        })
+        .catch(() => {})
+        .finally(() => (fb.busy = false));
+    });
+  }
+
+  /** A round of feedback into the plan; maps whose level changed are made again as their groups rebuild. */
+  private applyFeedback(fixed: Uint32Array): void {
+    const streamer = this.streamer;
+    if (!streamer || this.destroyed) return;
+    const footprints = new Map<object, number>();
+    this.feedbackMaps.forEach((maps, slot) => {
+      const f = footprintLog2(fixed[slot] ?? FEEDBACK_NONE);
+      if (f === null) return;
+      for (const m of maps) footprints.set(m, Math.min(footprints.get(m) ?? Infinity, f));
+    });
+    streamer.observe(footprints);
+    const changed = streamer.plan();
+    if (changed.size === 0) return;
+    for (const source of changed.keys()) {
+      for (const cache of [this.textures, this.colourTextures]) {
+        const old = cache.get(source as DecodedTexture);
+        if (old) {
+          this.retired.push(old);
+          cache.delete(source as DecodedTexture);
+        }
+      }
+    }
+    this.bindGroups = new WeakMap();
+    this.cutGroups = new WeakMap();
+  }
+
+  /** Textures a residency change replaced, destroyed once the next frame no longer uses them. */
+  private retired: any[] = [];
 
   /** Layer stacks uploaded once (F1e), by their layers' identities. */
   private readonly layerStacks = new Map<string, any>();
@@ -5610,6 +5802,8 @@ export class WebgpuSceneRenderer implements SceneRenderer {
     this.pathTracer?.destroy();
     this.pathTracer = null;
     destroySafely(this.sssProfiles);
+    if (this.feedback) for (const b of [this.feedback.draws, this.feedback.wanted, this.feedback.readback, this.feedback.depth]) destroySafely(b);
+    for (const t of this.retired) destroySafely(t);
     if (this.sss) for (const b of this.sss.uniforms) destroySafely(b);
     this.latest = null;
     this.software.dispose();
@@ -5755,4 +5949,36 @@ function cachedShaderModule(device: any, code: string): any {
   let module = modules.get(code);
   if (!module) modules.set(code, (module = device.createShaderModule({ code })));
   return module;
+}
+
+/** Maps no larger than this a side aren't streamed (F1b): their whole chain is cheaper than the bookkeeping. */
+const STREAM_MIN_SIDE = 256;
+/** Frames between texture feedback rounds (F1b). */
+const FEEDBACK_INTERVAL = 8;
+
+const cpuLevels = new WeakMap<DecodedTexture, Map<number, { width: number; height: number; data: Uint8Array }>>();
+/** A map's texels at `level`, box-filtered down from the level above (kept per map). */
+function streamedLevel(source: DecodedTexture, level: number): { width: number; height: number; data: Uint8Array } {
+  if (level <= 0) return { width: source.width, height: source.height, data: new Uint8Array(source.data.buffer, source.data.byteOffset, source.width * source.height * 4) };
+  let levels = cpuLevels.get(source);
+  if (!levels) cpuLevels.set(source, (levels = new Map()));
+  const hit = levels.get(level);
+  if (hit) return hit;
+  const above = streamedLevel(source, level - 1);
+  const width = Math.max(1, above.width >> 1);
+  const height = Math.max(1, above.height >> 1);
+  const data = new Uint8Array(width * height * 4);
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      const x0 = Math.min(above.width - 1, x * 2), x1 = Math.min(above.width - 1, x * 2 + 1);
+      const y0 = Math.min(above.height - 1, y * 2), y1 = Math.min(above.height - 1, y * 2 + 1);
+      for (let c = 0; c < 4; c += 1) {
+        const at = (px: number, py: number) => above.data[(py * above.width + px) * 4 + c]!;
+        data[(y * width + x) * 4 + c] = (at(x0, y0) + at(x1, y0) + at(x0, y1) + at(x1, y1) + 2) >> 2;
+      }
+    }
+  }
+  const out = { width, height, data };
+  levels.set(level, out);
+  return out;
 }

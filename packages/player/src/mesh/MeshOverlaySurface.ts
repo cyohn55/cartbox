@@ -1489,6 +1489,8 @@ export class MeshOverlaySurface implements DisplaySurface {
       ...(this.renderer.sunCascades === true && this.quality.tracedReflections === true && this.options.reflections === true && this.quality.reflections === true ? { reflectionTrace: { occluders: this.stillOccluders(), key: this.staticShadowKey() } } : {}),
       // Screen-space GI on the AAA tier (F3e-2): on unless the rig turns it off.
       ...(lighting && this.renderer.sunCascades === true ? { screenSpaceGi: resolveScreenSpaceGi(lighting.screenSpaceGi) } : {}),
+      // Texture streaming on the AAA tier (F1b), under the preset's budget.
+      ...(this.renderer.sunCascades === true ? { textureBudget: this.quality.textureBudgetMB ?? 512 } : {}),
       time,
       ...(this.viewMode !== "lit" && this.renderer.sunCascades === true ? { viewMode: this.viewMode } : {}),
     };

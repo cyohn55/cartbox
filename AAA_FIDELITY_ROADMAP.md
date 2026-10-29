@@ -302,7 +302,21 @@ Everything else depends on this track. It contains no visible "feature", but its
     - *Left for F1a:*
       - The four cut-out textures, about 175 KB of the 448, stay RGBA. Compressing them needs alpha-to-coverage (or coverage-preserving mips the encoder can't make), and that would take the measure past 4× against the one-level baseline too.
       - The N64 model's true trilinear filtering needs the software rasteriser's own mips.
-- [ ] **F1b. Texture streaming.** Mip streaming driven by GPU feedback: a sampler-feedback-style pass that records the mip each material wanted, under a texture-memory budget per scalability level, with residency in the profiler. It also covers texture arrays, or bindless where available, so materials stop competing for 16 bind slots.
+- [x] **F1b. Texture streaming.** Mip streaming driven by GPU feedback: a sampler-feedback-style pass that records the mip each material wanted, under a texture-memory budget per scalability level, with residency in the profiler. It also covers texture arrays, or bindless where available, so materials stop competing for 16 bind slots.
+  - **Done** on the `aaa` tier (`player render/textureStreaming.ts`). Every other tier, and the KTX2 maps that arrive block-compressed (F1a), keep their maps whole.
+    - **The feedback pass.** Every eighth frame the opaque batches are drawn again at a quarter of the frame's size, depth-tested, with no colour. Each pixel's UV footprint (log₂ of a 1×1 map's texels a pixel, at the frame's own size) goes into its material's slot by an atomic minimum in a storage buffer. The buffer is copied and read back without the frame waiting; a map of `size` texels then wants `footprint + log₂(size)`.
+    - **The plan** (`TextureStreamer`):
+      - each map larger than 256 texels starts at its floor (64 texels a side) and goes to the level the feedback asks for;
+      - one no pixel saw keeps its level for eight rounds, then falls back to its floor;
+      - while the total is over the budget, the map costing the most steps down a level.
+    - **The budget** is the preset's (`QualitySettings.textureBudgetMB`): 1 GB at Epic, 512 MB at High, 256 MB at Medium, 128 MB at Low.
+    - **Residency is real memory.** A map resident at level `l` is a texture of its size over 2^l with only those mips, box-filtered from the decoded map on the CPU (kept per level) and made again when the level changes. The groups that bound it rebuild, and the old texture is released the next frame. UVs are relative, so nothing that samples it changes.
+    - **In the profiler:** "Texture residency": the resident MB against the budget, the maps streamed and how many the budget holds back, and what they would take at the mips the frame wants.
+    - **Bind slots.** WebGPU has no bindless in its core. The maps that grow with content, a material graph's own images, already share one array binding (F1e); the fixed slots (base, metal/roughness, occlusion, emissive, normal, detail, light map) stay one a map.
+    - *Tests:* `Unit Tests/texture-streaming.test.ts` covers:
+      - a level's bytes, the feedback's fixed point, the level a footprint wants; a map's floor, the level asked for, holding an unseen map then letting it go; fitting the budget (the larger map gives way first); each preset's budget;
+      - on Dawn: a 1024² map on a quad 200 m off stays at its 64-texel floor; on a quad that fills a 64-pixel frame it streams to 128² (level 3, about 14 texels a pixel), and still draws its checks; under a 50 KB budget two maps are held back to fit.
+    - *Left for later:* streaming the block-compressed (KTX2) chains level by level; feedback for the maps' own UV transforms and triplanar projection (they read the base UVs' footprint).
 - [ ] **F1c. BRDF upgrade.**
   - Multiscatter GGX energy compensation (Kulla-Conty, or Fdez-Agüera's LUT).
   - A height-correlated Smith visibility term.

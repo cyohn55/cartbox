@@ -263,6 +263,11 @@ export interface SceneDraw {
   readonly viewMode?: ViewMode;
   /** The texel density the texel-density view takes as on target, per metre (512 when omitted). */
   readonly texelDensity?: number;
+  /**
+   * Texture streaming (AAA_FIDELITY_ROADMAP.md F1b) on the linear-light renderer with mips: the
+   * texture budget in MB a preset allows. Absent, every map is resident whole.
+   */
+  readonly textureBudget?: number;
   /** The scene's wind (B6): it sways primitives that carry per-vertex sway. Omitted is still air. */
   readonly wind?: SceneWind | null;
   /**

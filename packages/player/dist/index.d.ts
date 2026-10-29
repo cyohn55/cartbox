@@ -977,6 +977,8 @@ interface QualitySettings {
     readonly virtualShadows?: boolean;
     /** On the AAA tier, reflections the screen can't show traced through the still scene's BVH (F3f). */
     readonly tracedReflections?: boolean;
+    /** Texture streaming's budget on the AAA tier (AAA_FIDELITY_ROADMAP.md F1b), MB of resident maps. */
+    readonly textureBudgetMB?: number;
 }
 declare const QUALITY_PRESETS: Readonly<Record<QualityLevel, QualitySettings>>;
 /** What the browser reveals about the device (all optional: browsers differ). */
@@ -2434,6 +2436,14 @@ interface RenderStats {
         readonly width: number;
         readonly height: number;
         readonly scale: number;
+    };
+    /** Texture streaming's residency (AAA_FIDELITY_ROADMAP.md F1b), on a renderer that streams. */
+    readonly textures?: {
+        readonly budgetMB: number;
+        readonly residentMB: number;
+        readonly wantedMB: number;
+        readonly maps: number;
+        readonly limited: number;
     };
 }
 interface SectionStats {
@@ -4854,6 +4864,11 @@ interface SceneDraw {
     readonly viewMode?: ViewMode;
     /** The texel density the texel-density view takes as on target, per metre (512 when omitted). */
     readonly texelDensity?: number;
+    /**
+     * Texture streaming (AAA_FIDELITY_ROADMAP.md F1b) on the linear-light renderer with mips: the
+     * texture budget in MB a preset allows. Absent, every map is resident whole.
+     */
+    readonly textureBudget?: number;
     /** The scene's wind (B6): it sways primitives that carry per-vertex sway. Omitted is still air. */
     readonly wind?: SceneWind | null;
     /**
@@ -5541,6 +5556,17 @@ options?: {
     readonly mips?: boolean;
 }): Promise<SceneRenderer>;
 
+/** What residency looks like (for the profiler). */
+interface StreamingStats {
+    readonly budgetMB: number;
+    readonly residentMB: number;
+    /** What every map at the level it wants would take. */
+    readonly wantedMB: number;
+    readonly maps: number;
+    /** Maps held coarser than they want (by the budget). */
+    readonly limited: number;
+}
+
 /**
  * The player's WebGPU triangle path.
  *
@@ -6065,6 +6091,27 @@ declare class WebgpuSceneRenderer implements SceneRenderer {
      * its mips the encoder's. A cut-out keeps the RGBA path for its coverage.
      */
     private uploadTexture;
+    /** Texture streaming (F1b): the residency plan, and the feedback pass's pipeline, buffers and state. */
+    private streamer;
+    private feedback;
+    /** Each feedback slot's streamed maps, for the round in flight. */
+    private feedbackMaps;
+    /** Start streaming (F1b) under `budgetMB`, making the feedback pass the first time. */
+    private ensureStreaming;
+    /** What streaming holds (F1b), for the profiler; null when the frame doesn't stream. */
+    get textureResidency(): StreamingStats | null;
+    /** A map at a resident level (F1b): its size over 2^level, that level's texels (box-filtered on the CPU) and the mips below. */
+    private streamedTexture;
+    /**
+     * The feedback pass (F1b; textureStreaming.ts): every {@link FEEDBACK_INTERVAL} frames the opaque batches
+     * drawn a quarter size, each pixel's footprint kept per material, read back without waiting, and the
+     * residency planned again from it.
+     */
+    private addFeedback;
+    /** A round of feedback into the plan; maps whose level changed are made again as their groups rebuild. */
+    private applyFeedback;
+    /** Textures a residency change replaced, destroyed once the next frame no longer uses them. */
+    private retired;
     /** Layer stacks uploaded once (F1e), by their layers' identities. */
     private readonly layerStacks;
     /**
