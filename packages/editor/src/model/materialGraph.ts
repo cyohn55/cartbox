@@ -15,14 +15,29 @@
  * curvature: a "wear" node picks out convex edges (chipped paint, bare metal)
  * or cavities (grime), broken up by whatever is wired into it.
  *
+ * Production grade (AAA_FIDELITY_ROADMAP.md F1e):
+ * - more outputs: a tangent-space normal, a world-position offset (run in the
+ *   vertex stage), a pixel depth offset, refraction and a subsurface colour;
+ * - any number of texture samplers: a texture node reads the base map (slot
+ *   0) or one of the graph's own images (slots 1..{@link MAX_GRAPH_IMAGES});
+ * - material functions: reusable subgraphs, called by a "function" node and
+ *   inlined when the graph compiles;
+ * - layers: whole sets of outputs blended over the base by masks, in order,
+ *   as Unreal's Material Layers blend material attributes;
+ * - static switches: a "switch" node picks one of two branches by a named
+ *   boolean (the graph's default, or a material instance's), resolved at
+ *   compile time, so each setting is its own permutation with its own key.
+ *
  * Every value is a vec3; a scalar is the same number in all three
  * components, and a scalar input reads `.x`. That keeps the graph untyped —
  * any output plugs into any input — with no conversions to infer.
  */
 
 /** The surface inputs a material graph can drive. Unwired ones keep the material's own value. */
-export type GraphOutput = "baseColor" | "alpha" | "emissive" | "metallic" | "roughness";
-export const GRAPH_OUTPUTS: readonly GraphOutput[] = ["baseColor", "alpha", "emissive", "metallic", "roughness"];
+export type GraphOutput = "baseColor" | "alpha" | "emissive" | "metallic" | "roughness" | "normal" | "worldPositionOffset" | "pixelDepthOffset" | "refraction" | "subsurfaceColor";
+export const GRAPH_OUTPUTS: readonly GraphOutput[] = ["baseColor", "alpha", "emissive", "metallic", "roughness", "normal", "worldPositionOffset", "pixelDepthOffset", "refraction", "subsurfaceColor"];
+/** The outputs the fragment stage writes; the world-position offset is the vertex stage's (F1e). */
+export const FRAGMENT_OUTPUTS: readonly GraphOutput[] = GRAPH_OUTPUTS.filter((o) => o !== "worldPositionOffset");
 
 export type GraphOp =
   // Surface inputs
@@ -41,6 +56,14 @@ export type GraphOp =
   | "occlusion"
   | "thickness"
   | "wear"
+  // The material's own factors (F1e: what a layer blends over where the base leaves an output unwired)
+  | "materialMetallic"
+  | "materialRoughness"
+  | "materialEmissive"
+  // Composition (F1e): a function call and its inputs, and a static switch
+  | "function"
+  | "functionInput"
+  | "switch"
   // Maths
   | "add"
   | "subtract"
@@ -86,7 +109,37 @@ export interface MaterialGraph {
   readonly nodes: readonly GraphNode[];
   /** Which node drives each surface input. */
   readonly outputs: Readonly<Partial<Record<GraphOutput, string>>>;
+  /** Reusable subgraphs a "function" node calls by name (F1e). */
+  readonly functions?: readonly MaterialFunction[];
+  /** Sets of outputs blended over the base, in order, each by its mask (F1e). */
+  readonly layers?: readonly GraphLayer[];
+  /** The static switches' defaults (F1e); a material instance may set its own. */
+  readonly switches?: Readonly<Record<string, boolean>>;
 }
+
+/** A material function (F1e): a subgraph with up to four inputs ("functionInput" nodes, by index) and one output. */
+export interface MaterialFunction {
+  readonly name: string;
+  readonly nodes: readonly GraphNode[];
+  /** The node whose value the call returns. */
+  readonly output: string;
+  /** The inputs' names, for the editor (in0..in3). */
+  readonly inputs?: readonly string[];
+}
+
+/** A material layer (F1e): outputs of its own, blended over what is below by its mask (a node's value, 0..1). */
+export interface GraphLayer {
+  readonly name: string;
+  readonly mask: string;
+  readonly outputs: Readonly<Partial<Record<GraphOutput, string>>>;
+}
+
+/** The most images a graph's texture nodes may sample besides the base map (F1e). */
+export const MAX_GRAPH_IMAGES = 8;
+/** The most functions, layers and nested calls a graph holds. */
+export const MAX_GRAPH_FUNCTIONS = 16;
+export const MAX_GRAPH_LAYERS = 4;
+const MAX_CALL_DEPTH = 4;
 
 /** A default for an unwired input: a constant, or one of the surface inputs. */
 type InputDefault = number | "uv" | "position" | "curvature";
@@ -115,6 +168,12 @@ export const GRAPH_NODES: Readonly<Record<GraphOp, NodeDef>> = {
   occlusion: { label: "Occlusion", category: "input", inputs: [] },
   thickness: { label: "Thickness", category: "input", inputs: [] },
   wear: { label: "Wear mask", category: "pattern", inputs: [["curvature", "curvature"], ["breakup", 1]] },
+  materialMetallic: { label: "Material metallic", category: "input", inputs: [] },
+  materialRoughness: { label: "Material roughness", category: "input", inputs: [] },
+  materialEmissive: { label: "Material emissive", category: "input", inputs: [] },
+  function: { label: "Function", category: "pattern", inputs: [["in0", 0], ["in1", 0], ["in2", 0], ["in3", 0]] },
+  functionInput: { label: "Function input", category: "input", inputs: [] },
+  switch: { label: "Static switch", category: "maths", inputs: [["on", 1], ["off", 0]] },
   add: { label: "Add", category: "maths", inputs: [["a", 0], ["b", 0]] },
   subtract: { label: "Subtract", category: "maths", inputs: [["a", 0], ["b", 0]] },
   multiply: { label: "Multiply", category: "maths", inputs: [["a", 1], ["b", 1]] },
@@ -164,7 +223,14 @@ export function graphParams(op: GraphOp, raw: unknown): Record<string, number | 
     params.value = Array.isArray(v) && v.length === 3 && v.every(finite) ? (v as number[]).map(c) : finite(v) ? [c(v), c(v), c(v)] : [0, 0, 0];
   }
   if (op === "fresnel") params.power = finite(p.power) ? clampNum(p.power, 0.1, 16) : 5;
-  if (op === "texture") params.channel = p.channel === "a" ? "a" : "rgb";
+  if (op === "texture") {
+    params.channel = p.channel === "a" ? "a" : "rgb";
+    // Which map (F1e): 0 the base, 1.. the graph's own images.
+    params.slot = finite(p.slot) ? Math.round(clampNum(p.slot, 0, MAX_GRAPH_IMAGES)) : 0;
+  }
+  if (op === "function") params.name = typeof p.name === "string" ? p.name.slice(0, 64) : "";
+  if (op === "functionInput") params.index = finite(p.index) ? Math.round(clampNum(p.index, 0, 3)) : 0;
+  if (op === "switch") params.name = typeof p.name === "string" ? p.name.slice(0, 64) : "switch";
   if (op === "noise") {
     params.scale = finite(p.scale) ? clampNum(p.scale, 0.001, 1000) : 1;
     params.octaves = finite(p.octaves) ? Math.round(clampNum(p.octaves, 1, MAX_OCTAVES)) : 1;
@@ -179,13 +245,11 @@ export function graphParams(op: GraphOp, raw: unknown): Record<string, number | 
 }
 
 /** Read a stored graph, dropping malformed nodes, wires and params; null when nothing usable remains. */
-export function readMaterialGraph(raw: unknown): MaterialGraph | null {
-  if (!raw || typeof raw !== "object") return null;
-  const r = raw as { nodes?: unknown; outputs?: unknown };
-  if (!Array.isArray(r.nodes)) return null;
+function readNodes(raw: unknown): GraphNode[] {
   const nodes: GraphNode[] = [];
+  if (!Array.isArray(raw)) return nodes;
   const ids = new Set<string>();
-  for (const item of r.nodes.slice(0, MAX_GRAPH_NODES)) {
+  for (const item of raw.slice(0, MAX_GRAPH_NODES)) {
     if (!item || typeof item !== "object") continue;
     const n = item as Record<string, unknown>;
     if (typeof n.id !== "string" || n.id === "" || ids.has(n.id) || typeof n.op !== "string" || !OPS.has(n.op)) continue;
@@ -208,15 +272,151 @@ export function readMaterialGraph(raw: unknown): MaterialGraph | null {
       ...(finite(n.y) ? { y: n.y } : {}),
     });
   }
+  return nodes;
+}
+
+function readOutputs(raw: unknown, ids: ReadonlySet<string>): Partial<Record<GraphOutput, string>> {
   const outputs: Partial<Record<GraphOutput, string>> = {};
-  if (r.outputs && typeof r.outputs === "object") {
+  if (raw && typeof raw === "object") {
     for (const key of GRAPH_OUTPUTS) {
-      const id = (r.outputs as Record<string, unknown>)[key];
+      const id = (raw as Record<string, unknown>)[key];
       if (typeof id === "string" && ids.has(id)) outputs[key] = id;
     }
   }
+  return outputs;
+}
+
+/** Read a stored graph, dropping malformed nodes, wires and params; null when nothing usable remains. */
+export function readMaterialGraph(raw: unknown): MaterialGraph | null {
+  if (!raw || typeof raw !== "object") return null;
+  const r = raw as { nodes?: unknown; outputs?: unknown; functions?: unknown; layers?: unknown; switches?: unknown };
+  if (!Array.isArray(r.nodes)) return null;
+  const nodes = readNodes(r.nodes);
   if (nodes.length === 0) return null;
-  return { nodes, outputs };
+  const ids = new Set(nodes.map((n) => n.id));
+  const functions: MaterialFunction[] = [];
+  if (Array.isArray(r.functions)) {
+    for (const f of r.functions.slice(0, MAX_GRAPH_FUNCTIONS)) {
+      if (!f || typeof f !== "object") continue;
+      const fn = f as Record<string, unknown>;
+      const body = readNodes(fn.nodes);
+      if (typeof fn.name !== "string" || fn.name === "" || typeof fn.output !== "string" || !body.some((n) => n.id === fn.output) || functions.some((g) => g.name === fn.name)) continue;
+      const inputs = Array.isArray(fn.inputs) ? fn.inputs.filter((x): x is string => typeof x === "string").slice(0, 4) : undefined;
+      functions.push({ name: fn.name.slice(0, 64), nodes: body, output: fn.output, ...(inputs ? { inputs } : {}) });
+    }
+  }
+  const layers: GraphLayer[] = [];
+  if (Array.isArray(r.layers)) {
+    for (const l of r.layers.slice(0, MAX_GRAPH_LAYERS)) {
+      if (!l || typeof l !== "object") continue;
+      const layer = l as Record<string, unknown>;
+      if (typeof layer.mask !== "string" || !ids.has(layer.mask)) continue;
+      const outs = readOutputs(layer.outputs, ids);
+      if (Object.keys(outs).length === 0) continue;
+      layers.push({ name: typeof layer.name === "string" ? layer.name.slice(0, 64) : `layer ${layers.length + 1}`, mask: layer.mask, outputs: outs });
+    }
+  }
+  const switches: Record<string, boolean> = {};
+  if (r.switches && typeof r.switches === "object") for (const [k, v] of Object.entries(r.switches)) if (typeof v === "boolean") switches[k.slice(0, 64)] = v;
+  return {
+    nodes,
+    outputs: readOutputs(r.outputs, ids),
+    ...(functions.length > 0 ? { functions } : {}),
+    ...(layers.length > 0 ? { layers } : {}),
+    ...(Object.keys(switches).length > 0 ? { switches } : {}),
+  };
+}
+
+// --- Composing (F1e) ------------------------------------------------------------------------
+
+/**
+ * A graph with its composition resolved, ready to order: each function call
+ * inlined (its nodes prefixed by the call's id, its inputs wired to the
+ * call's), each static switch replaced by the branch `switches` picks (the
+ * graph's defaults, overridden by a material instance's), and each layer's
+ * outputs mixed over the outputs below by its mask. A plain graph comes back as it is.
+ */
+export function flattenGraph(graph: MaterialGraph, switches: Readonly<Record<string, boolean>> = {}): MaterialGraph {
+  if (!graph.functions?.length && !graph.layers?.length && !graph.nodes.some((n) => n.op === "switch" || n.op === "function")) return graph;
+  const settings = { ...(graph.switches ?? {}), ...switches };
+  const functions = new Map((graph.functions ?? []).map((f) => [f.name, f]));
+  const nodes: GraphNode[] = [];
+  // A node replaced by another's value: the call by its function's output, an input by the call's wire.
+  const alias = new Map<string, string | null>();
+  const add = (list: readonly GraphNode[], prefix: string, args: readonly (string | null)[], depth: number) => {
+    const rename = (id: string | null | undefined) => (id ? `${prefix}${id}` : null);
+    for (const node of list) {
+      const id = `${prefix}${node.id}`;
+      if (node.op === "functionInput") {
+        alias.set(id, args[(node.params?.index as number | undefined) ?? 0] ?? null);
+        continue;
+      }
+      if (node.op === "switch") {
+        const name = (node.params?.name as string | undefined) ?? "switch";
+        alias.set(id, rename(settings[name] === false ? node.inputs?.off : node.inputs?.on));
+        continue;
+      }
+      if (node.op === "function") {
+        const fn = functions.get((node.params?.name as string | undefined) ?? "");
+        if (!fn || depth >= MAX_CALL_DEPTH) {
+          alias.set(id, null);
+          continue;
+        }
+        const callArgs = ["in0", "in1", "in2", "in3"].map((k) => rename(node.inputs?.[k]));
+        add(fn.nodes, `${id}/`, callArgs, depth + 1);
+        alias.set(id, `${id}/${fn.output}`);
+        continue;
+      }
+      const inputs: Record<string, string | null> = {};
+      for (const [k, v] of Object.entries(node.inputs ?? {})) inputs[k] = rename(v);
+      nodes.push({ ...node, id, inputs });
+    }
+  };
+  add(graph.nodes, "", [], 0);
+  // Follow aliases to a real node (or nothing: the input's default).
+  const resolve = (id: string | null | undefined, seen = 0): string | null => {
+    if (!id || seen > 64) return null;
+    return alias.has(id) ? resolve(alias.get(id), seen + 1) : id;
+  };
+  const resolved = nodes.map((n) => ({ ...n, inputs: Object.fromEntries(Object.entries(n.inputs ?? {}).map(([k, v]) => [k, resolve(v)])) }));
+  const outputs: Partial<Record<GraphOutput, string>> = {};
+  for (const key of GRAPH_OUTPUTS) {
+    const id = resolve(graph.outputs[key]);
+    if (id) outputs[key] = id;
+  }
+  // Layers: each output a layer sets is mixed over what is below by the layer's mask.
+  const below: Record<GraphOutput, GraphOp | null> = {
+    baseColor: "baseColor",
+    alpha: "baseAlpha",
+    emissive: "materialEmissive",
+    metallic: "materialMetallic",
+    roughness: "materialRoughness",
+    normal: null,
+    worldPositionOffset: null,
+    pixelDepthOffset: null,
+    refraction: null,
+    subsurfaceColor: null,
+  };
+  (graph.layers ?? []).forEach((layer, li) => {
+    const mask = resolve(layer.mask);
+    if (!mask) return;
+    for (const key of GRAPH_OUTPUTS) {
+      const top = resolve(layer.outputs[key]);
+      if (!top) continue;
+      let under = outputs[key] ?? null;
+      if (!under) {
+        const op = below[key];
+        const id = `layer${li}.${key}.below`;
+        // An output nothing below drives: the material's own value, or (for the new outputs) none.
+        resolved.push(op ? { id, op, inputs: {} } : { id, op: "constant", inputs: {}, params: { value: key === "normal" ? [0, 0, 1] : [0, 0, 0] } });
+        under = id;
+      }
+      const id = `layer${li}.${key}`;
+      resolved.push({ id, op: "mix", inputs: { a: under, b: top, t: mask } });
+      outputs[key] = id;
+    }
+  });
+  return { nodes: resolved, outputs };
 }
 
 // --- Compiling ------------------------------------------------------------------------------
@@ -243,8 +443,11 @@ export interface CompiledGraph {
  * reach an output are kept; a wire to a missing node, or one that would close
  * a loop, falls back to the input's default. Null when no output is wired.
  */
-export function compileGraph(graph: MaterialGraph | null | undefined): CompiledGraph | null {
-  if (!graph) return null;
+export function compileGraph(source: MaterialGraph | null | undefined, options: { readonly switches?: Readonly<Record<string, boolean>>; readonly only?: readonly GraphOutput[] } = {}): CompiledGraph | null {
+  if (!source) return null;
+  // Functions, switches and layers resolved first (F1e).
+  const graph = flattenGraph(source, options.switches);
+  const wanted = options.only ?? GRAPH_OUTPUTS;
   const byId = new Map(graph.nodes.map((n) => [n.id, n]));
   const steps: GraphStep[] = [];
   const done = new Map<string, number>();
@@ -277,7 +480,7 @@ export function compileGraph(graph: MaterialGraph | null | undefined): CompiledG
     return index;
   };
   const outputs: Partial<Record<GraphOutput, number>> = {};
-  for (const key of GRAPH_OUTPUTS) {
+  for (const key of wanted) {
     const id = graph.outputs[key];
     if (!id) continue;
     const index = visit(id);
@@ -362,6 +565,12 @@ export interface GraphContext {
   ba: number;
   /** Sample the material's base texture at glTF UV (u, v): RGBA 0–1 (white when it has none). */
   sample: (u: number, v: number) => readonly [number, number, number, number];
+  /** Sample one of the graph's own images (slot 1..; F1e) at glTF UV; white when absent. */
+  sampleSlot?: (slot: number, u: number, v: number) => readonly [number, number, number, number];
+  /** The material's own metalness, roughness and emissive colour (F1e). */
+  metallic?: number;
+  roughness?: number;
+  emissive?: readonly [number, number, number];
 }
 
 /** A compiled graph's per-step results: 3 floats per step. */
@@ -430,8 +639,26 @@ export function evaluateGraph(graph: CompiledGraph, ctx: GraphContext, regs: Flo
         splat(Math.pow(1 - ndv, step.params.power as number));
         break;
       }
+      case "materialMetallic":
+        splat(ctx.metallic ?? 0);
+        break;
+      case "materialRoughness":
+        splat(ctx.roughness ?? 1);
+        break;
+      case "materialEmissive":
+        regs[o] = ctx.emissive?.[0] ?? 0;
+        regs[o + 1] = ctx.emissive?.[1] ?? 0;
+        regs[o + 2] = ctx.emissive?.[2] ?? 0;
+        break;
+      case "function":
+      case "functionInput":
+      case "switch":
+        // Resolved before a graph compiles (flattenGraph); never a step.
+        splat(0);
+        break;
       case "texture": {
-        const t = ctx.sample(regs[a]!, regs[a + 1]!);
+        const slot = (step.params.slot as number | undefined) ?? 0;
+        const t = slot > 0 ? (ctx.sampleSlot?.(slot, regs[a]!, regs[a + 1]!) ?? [1, 1, 1, 1]) : ctx.sample(regs[a]!, regs[a + 1]!);
         if (step.params.channel === "a") splat(t[3]);
         else {
           regs[o] = t[0];
@@ -566,6 +793,12 @@ export interface GraphShaderInputs {
   readonly baseColor: string;
   readonly baseAlpha: string;
   readonly sample: (uv: string) => string;
+  /** One of the graph's own images (slot 1..; F1e) at a glTF UV expression, a vec4; absent reads white. */
+  readonly sampleSlot?: (slot: number, uv: string) => string;
+  /** The material's own metalness, roughness (floats) and emissive colour (a vec3); absent read 0, 1 and black (F1e). */
+  readonly metallic?: string;
+  readonly roughness?: string;
+  readonly emissive?: string;
 }
 
 const num = (v: number): string => {
@@ -682,8 +915,25 @@ export function graphShaderCode(graph: CompiledGraph, lang: "wgsl" | "glsl", inp
       case "fresnel":
         e = `${v3}(pow(1.0 - clamp(dot(${inputs.normal}, ${inputs.view}), 0.0, 1.0), ${num(step.params.power as number)}))`;
         break;
-      case "texture":
-        e = step.params.channel === "a" ? `${v3}(${inputs.sample(`${a}.xy`)}.a)` : `${inputs.sample(`${a}.xy`)}.rgb`;
+      case "texture": {
+        const slot = (step.params.slot as number | undefined) ?? 0;
+        const read = slot > 0 ? (inputs.sampleSlot ? inputs.sampleSlot(slot, `${a}.xy`) : `${lang === "wgsl" ? "vec4<f32>" : "vec4"}(1.0)`) : inputs.sample(`${a}.xy`);
+        e = step.params.channel === "a" ? `${v3}(${read}.a)` : `${read}.rgb`;
+        break;
+      }
+      case "materialMetallic":
+        e = `${v3}(${inputs.metallic ?? "0.0"})`;
+        break;
+      case "materialRoughness":
+        e = `${v3}(${inputs.roughness ?? "1.0"})`;
+        break;
+      case "materialEmissive":
+        e = inputs.emissive ?? `${v3}(0.0)`;
+        break;
+      case "function":
+      case "functionInput":
+      case "switch":
+        e = `${v3}(0.0)`;
         break;
       case "noise":
         e = `${v3}(gNoise(${a} * ${num(step.params.scale as number)}, ${step.params.octaves as number}))`;
@@ -785,15 +1035,22 @@ export function graphUsesNoise(graph: CompiledGraph): boolean {
   return graph.steps.some((s) => s.op === "noise");
 }
 
-const compiled = new WeakMap<MaterialGraph, CompiledGraph | null>();
-/** A material's compiled graph (cached per graph object), or null when it has none that drives anything. */
-export function compiledGraphOf(material: { readonly graph?: MaterialGraph }): CompiledGraph | null {
+const compiled = new WeakMap<MaterialGraph, Map<string, CompiledGraph | null>>();
+/**
+ * A material's compiled graph (cached per graph object and switch setting), or
+ * null when it has none that drives anything. `only` compiles the steps some
+ * outputs need (the vertex stage's world-position offset, F1e).
+ */
+export function compiledGraphOf(material: { readonly graph?: MaterialGraph; readonly graphSwitches?: Readonly<Record<string, boolean>> }, only?: readonly GraphOutput[]): CompiledGraph | null {
   const graph = material.graph;
   if (!graph) return null;
-  let result = compiled.get(graph);
+  let byKey = compiled.get(graph);
+  if (!byKey) compiled.set(graph, (byKey = new Map()));
+  const key = JSON.stringify([material.graphSwitches ?? null, only ?? null]);
+  let result = byKey.get(key);
   if (result === undefined) {
-    result = compileGraph(graph);
-    compiled.set(graph, result);
+    result = compileGraph(graph, { ...(material.graphSwitches ? { switches: material.graphSwitches } : {}), ...(only ? { only } : {}) });
+    byKey.set(key, result);
   }
   return result;
 }

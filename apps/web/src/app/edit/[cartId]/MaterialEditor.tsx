@@ -239,6 +239,7 @@ export function MaterialEditor({ mesh, onChange, set = null, library = [], onLib
         </button>
         {material.graph && <span className={styles.hudLabel}>a graph drives {Object.keys(material.graph.outputs).length || "none"} of its inputs</span>}
       </div>
+      {material.graph && <GraphImages material={material} patch={patch} />}
       {graphOpen && material.graph && (
         <GraphEditor
           material={material}
@@ -1034,5 +1035,42 @@ function MaterialSet({ material, patch }: { material: MeshMaterial; patch: (chan
       )}
       <RailHint>glTF&apos;s KHR material set: the AAA tier shades it, and the path-traced reference matches it.</RailHint>
     </>
+  );
+}
+
+/** The images a material graph's texture nodes sample besides the base map (F1e): slot 1 up. */
+function GraphImages({ material, patch }: { material: MeshMaterial; patch: (change: Partial<MeshMaterial>) => void }) {
+  const images = material.graphImages ?? [];
+  const set = (i: number, image: EncodedImage | null) => {
+    const next = [...images];
+    while (next.length <= i) next.push(null);
+    next[i] = image;
+    while (next.length > 0 && !next[next.length - 1]) next.pop();
+    patch({ graphImages: next.length > 0 ? next : undefined });
+  };
+  return (
+    <details style={{ fontSize: 12, margin: "4px 0" }}>
+      <summary>Graph images ({images.filter(Boolean).length})</summary>
+      {Array.from({ length: Math.min(8, images.length + 1) }, (_, i) => (
+        <label key={i} style={{ display: "flex", gap: 6, alignItems: "center" }}>
+          Image {i + 1}
+          <input
+            type="file"
+            accept="image/png,image/jpeg"
+            aria-label={`Graph image ${i + 1}`}
+            onChange={async (e) => {
+              const file = e.target.files?.[0];
+              if (!file) return;
+              set(i, { mime: file.type || "image/png", bytes: new Uint8Array(await file.arrayBuffer()) });
+            }}
+          />
+          {images[i] && (
+            <button type="button" className={styles.toolBtn} onClick={() => set(i, null)}>
+              Clear
+            </button>
+          )}
+        </label>
+      ))}
+    </details>
   );
 }

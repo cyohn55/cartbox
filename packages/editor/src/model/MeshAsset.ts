@@ -373,6 +373,10 @@ export interface MeshMaterial {
    * whichever it drives. A material with a graph always takes the PBR path.
    */
   readonly graph?: MaterialGraph;
+  /** This material's settings of the graph's static switches (F1e), over the graph's defaults: a permutation of its own. */
+  readonly graphSwitches?: Readonly<Record<string, boolean>>;
+  /** The images the graph's texture nodes sample besides the base map (F1e), slot 1 first. */
+  readonly graphImages?: readonly (EncodedImage | null)[];
 }
 
 /** One triangle list with a single material. */
@@ -669,6 +673,8 @@ export interface SerializedMaterial {
   blendSharpness?: number;
   generator?: { kind: string; seed: number; scale: number; tint: [number, number, number]; size: number };
   graph?: MaterialGraph;
+  graphSwitches?: Readonly<Record<string, boolean>>;
+  graphImages?: (SerializedImage | null)[];
   instance?: { of: string; overrides: string[] };
 }
 interface SerializedPrimitive {
@@ -997,6 +1003,7 @@ export function serializeMaterial(material: MeshMaterial, table?: ImageTable): S
     ...(material.detailImage ? { detailImage: serializeImage(material.detailImage, "detailImage", table) } : {}),
     ...(material.blendImage ? { blendImage: serializeImage(material.blendImage, "blendImage", table) } : {}),
     ...(own(material.reliefImage) ? { reliefImage: serializeImage(material.reliefImage, "reliefImage", table) } : {}),
+    ...(material.graphImages?.length ? { graphImages: material.graphImages.slice(0, 8).map((image, i) => serializeImage(image, `graphImage${i}`, table)) } : {}),
     ...(material.generator ? { generator: { kind: material.generator.kind, seed: material.generator.seed, scale: material.generator.scale, tint: [material.generator.tint[0], material.generator.tint[1], material.generator.tint[2]], size: material.generator.size } } : {}),
     ...(material.instance ? { instance: { of: material.instance.of, overrides: [...material.instance.overrides] } } : {}),
     ...writeSurfaceEffects(material),
@@ -1034,6 +1041,7 @@ export function deserializeMaterial(value: unknown, table?: ImageTable): MeshMat
     ...(material.detailImage ? { detailImage: deserializeImage(material.detailImage, "detailImage", table) } : {}),
     ...(material.blendImage ? { blendImage: deserializeImage(material.blendImage, "blendImage", table) } : {}),
     ...(material.reliefImage ? { reliefImage: deserializeImage(material.reliefImage, "reliefImage", table) } : {}),
+    ...(Array.isArray(material.graphImages) && material.graphImages.length > 0 ? { graphImages: material.graphImages.slice(0, 8).map((image, i) => deserializeImage(image, `graphImage${i}`, table)) } : {}),
     ...readSurfaceEffects(material),
     ...readMaterialLayers(material),
     ...readMaterialExtensions(material),

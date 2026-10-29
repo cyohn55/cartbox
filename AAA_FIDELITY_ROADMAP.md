@@ -385,11 +385,30 @@ Everything else depends on this track. It contains no visible "feature", but its
       - the fields, skin's default profile, and the glTF form; the profiles by ID, Burley's fall-off and the checkerboard;
       - on Dawn: under even light the scattered surface keeps its light within 2% with no checkerboard left; across a white-to-black edge, light reaches the black side, red more than half again as far as blue; a leaf lit from behind matches the reference within 5%, and is dark without transmission.
     - *Left for later:* area lights' diffuse, and a clearcoat's, aren't split (they light a scattering surface without scattering); the blur is skipped with MSAA and without a prepass (the surface then shades as a plain diffuse one, the reference's too, which treats scattering as diffuse).
-- [ ] **F1e. Material graph, production grade.**
+- [x] **F1e. Material graph, production grade.**
   - New outputs: normal, world-position offset, pixel depth offset, refraction, subsurface colour.
   - Any number of texture samplers.
   - Material functions with reusable subgraphs, and layered materials that blend whole material stacks by masks (Unreal's Material Layers).
   - A static-switch permutation system, with a shader-compile cache to avoid hitches.
+  - **Done** (`editor model/materialGraph.ts`; the shader sites in `WebgpuSceneRenderer.ts`). The new outputs shade on the WebGPU tiers (the pixel depth offset on the AAA tier with a prepass); WebGL2 and the software rasteriser take the composition and ignore the new outputs.
+    - **Composition, resolved before a graph compiles** (`flattenGraph`):
+      - a **function** node calls a named subgraph of the graph's (up to sixteen, nested four deep); its nodes are inlined under the call's id and its "function input" nodes read the call's four inputs;
+      - a **static switch** takes one branch by a named boolean: the graph's default, or a material instance's (`graphSwitches`). Each setting compiles to its own permutation with its own key;
+      - **layers** (up to four) each blend outputs of their own over what is below by a mask, in order, as Unreal's Material Layers blend attributes. Where the base leaves an output unwired, the layer blends over the material's own factor (new "material metallic/roughness/emissive" inputs).
+    - **The new outputs:**
+      - a tangent-space **normal** (−1..1), in the vertex's frame, as a normal map's;
+      - a **world-position offset** in metres, run in the vertex stage from its own compiled steps (`compiledGraphOf(material, ["worldPositionOffset"])`), taken into the mesh's own space, and carried to the motion vectors' previous position;
+      - a **pixel depth offset** in metres, pushed away from the eye only: the prepass writes the pushed depth (`frag_depth`), and the opaque pass keeps only the pixels where that is what the prepass left;
+      - **refraction**: the bend, in place of the material's;
+      - **subsurface colour**: what of the diffuse scatters, per channel (F1d-2).
+    - **Samplers:** a texture node reads the base map or one of the material's own images (`graphImages`, up to eight). On the GPU they are the later layers of an array whose first layer is the blend surface's map: one binding, as the fragment stage's sixteen are all taken, resampled to one size (up to 1024) with mips.
+    - **Compiling without hitches:** shader modules are kept per device by their source, so every renderer and permutation with the same code compiles once. `prepareMaterials` compiles a new mesh's permutations with `createRenderPipelineAsync`, and the mesh overlay asks for it the first time a mesh draws; until a permutation is ready its material draws as a plain one, never stalling a frame.
+    - **In the editor:** the new outputs on the material output node; the texture node's map; function, function-input and static-switch nodes; a composition panel with the switches' defaults, "make function" from a node's upstream subgraph, and layers by mask; and the material's graph images.
+    - *Tests:* `Unit Tests/graph-production.test.ts` and `materialGraphEdit.test.ts` cover:
+      - functions inlined and nested, a missing one as the default; switches by default and by instance, each a permutation; layers over the base and over the material's own roughness; reading it all back;
+      - a graph image by slot (CPU and WGSL); the world-position offset compiled apart; the stored images and switches; the editor's function, layer and switch edits;
+      - on Dawn: a metre of world-position offset brings a quad's edge into a pixel it missed; a two-metre depth offset puts a surface behind the one it was in front of; a graph image's colour emitted; and a permutation still compiling drawn as the plain material, then as its graph.
+    - *Left for later:* textures in the vertex stage (its bindings are the fragment's); the world-position offset in the shadow casters (their depth pipeline isn't per graph); editing a function's body in place.
 - [x] **F1f. Projected decals.** Deferred, D-buffer-style box decals that modify base colour, normal, roughness and AO, with sorting, fade by angle and distance, and sharing of an atlas. They replace the quad-mesh decals for impacts, grime, leaks and road markings.
   - **F1f-1, projected box decals: done** on the `aaa` tier. They replace the decal marks' quads there; every other tier keeps the quads.
     - **Boxes** (`editor/render/projectedDecals.ts`). A mark is a box on its surface: half its size across and along (turned by its spin), and a quarter of it out of and into the surface.

@@ -1178,6 +1178,8 @@ export interface MeshSceneInstance {
   readonly detailTextures?: readonly (DecodedTexture | null)[];
   /** Decoded blend-surface maps per primitive ({@link MeshMaterial.blendImage}), or null entries. */
   readonly blendTextures?: readonly (DecodedTexture | null)[];
+  /** A material graph's own images per primitive (F1e; MeshMaterial.graphImages), decoded. */
+  readonly graphTextures?: readonly (readonly (DecodedTexture | null)[] | null)[];
   /** Decoded relief maps per primitive ({@link MeshMaterial.reliefImage}: height, curvature), or null entries. */
   readonly reliefTextures?: readonly (DecodedTexture | null)[];
   /**

@@ -23,7 +23,7 @@ export const DETAIL_FAR = 12;
 
 type SurfaceEffects = Pick<
   MeshMaterial,
-  "detailScale" | "detailStrength" | "emissiveScroll" | "emissivePulse" | "rim" | "reflectivity" | "reflectionMask" | "blendColor" | "blendRoughness" | "alphaMode" | "alphaCutoff" | "softDepth" | "refraction" | "distortion" | "water" | "triplanar" | "blendSharpness" | "macro" | "farTile" | "graph"
+  "detailScale" | "detailStrength" | "emissiveScroll" | "emissivePulse" | "rim" | "reflectivity" | "reflectionMask" | "blendColor" | "blendRoughness" | "alphaMode" | "alphaCutoff" | "softDepth" | "refraction" | "distortion" | "water" | "triplanar" | "blendSharpness" | "macro" | "farTile" | "graph" | "graphSwitches"
 >;
 
 const finite = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v);
@@ -69,6 +69,11 @@ export function readSurfaceEffects(raw: Record<string, unknown> | object): Surfa
   if (finite(r.farTile) && r.farTile > 0) out.farTile = clamp(r.farTile, 1, 100000);
   const graph = readMaterialGraph(r.graph);
   if (graph) out.graph = graph;
+  // A material instance's static switches (F1e).
+  if (graph && r.graphSwitches && typeof r.graphSwitches === "object") {
+    const switches = Object.fromEntries(Object.entries(r.graphSwitches as Record<string, unknown>).filter((e): e is [string, boolean] => typeof e[1] === "boolean"));
+    if (Object.keys(switches).length > 0) out.graphSwitches = switches;
+  }
   return out;
 }
 

@@ -1,4 +1,4 @@
-import { MeshSceneInstance, MeshAsset, Mat4, ScenePropValue, PhysicsSpec, AnimatorSpec, AttachedComponent, SceneLighting, PhysicsWorldSettings, SceneTimeline, SceneLevel, NavMesh, Terrain, SceneStreaming, ParticleEffect, DecalDef, DecalMark, RagdollBox, DebrisDef, LodChain, SceneAudio, ComponentDef, StreamGroup, JointKind, JointSpec, EnvironmentLight, SceneLight, ActionRebind, Atmosphere, SkyMoon, DecodedTexture, SkySun, BakedCloudLayer, SunShafts, ColorFilter, AccessibilitySettings, EncodedImage, UiDocument, InputAction, StringTable, ReflectionProbe, ShadowInput, ToneMap, LocalShadows, ProjectedDecal, DecalTiles, Occluder, DynamicGi, SceneFog, SceneWind, RasterStyle, HdrLightmap, LightmapLayout, ProbeVolume, OccluderSurface, MeshMaterial, ResolvedLayers, ResolvedExtensions, ResolvedRefraction, SurfaceEffect, AnimatorOp, NavGraph, AnimationCue } from '@cartbox/editor';
+import { MeshSceneInstance, MeshAsset, Mat4, ScenePropValue, PhysicsSpec, AnimatorSpec, AttachedComponent, SceneLighting, PhysicsWorldSettings, SceneTimeline, SceneLevel, NavMesh, Terrain, SceneStreaming, ParticleEffect, DecalDef, DecalMark, RagdollBox, DebrisDef, LodChain, SceneAudio, ComponentDef, StreamGroup, JointKind, JointSpec, EnvironmentLight, SceneLight, ActionRebind, Atmosphere, SkyMoon, DecodedTexture, SkySun, BakedCloudLayer, SunShafts, ColorFilter, AccessibilitySettings, EncodedImage, UiDocument, InputAction, StringTable, ReflectionProbe, ShadowInput, ToneMap, LocalShadows, ProjectedDecal, DecalTiles, Occluder, DynamicGi, SceneFog, SceneWind, MeshMaterial, RasterStyle, MeshPrimitive, HdrLightmap, LightmapLayout, ProbeVolume, OccluderSurface, ResolvedLayers, ResolvedExtensions, ResolvedRefraction, SurfaceEffect, AnimatorOp, NavGraph, AnimationCue } from '@cartbox/editor';
 
 /**
  * The runtime mesh scene: the cart's mesh sidecar resolved into placed instances
@@ -4917,6 +4917,16 @@ interface SceneRenderer {
      * viewport reference holds.
      */
     captureReference?(instances: readonly MeshSceneInstance[], draw: GpuSceneDraw, options: CaptureOptions): Promise<ReferenceCapture>;
+    /**
+     * The WebGPU renderer only (AAA_FIDELITY_ROADMAP.md F1e): compile the shader
+     * permutations these materials' graphs need in the background, drawing them
+     * as plain materials until each is ready.
+     */
+    prepareMaterials?(materials: Iterable<MeshMaterial>, options?: {
+        readonly samples?: number;
+        readonly reflect?: boolean;
+        readonly prepass?: boolean;
+    }): Promise<void>;
     readonly referenceSamples?: number;
     /**
      * True when it draws the sun's shadow itself from {@link SceneDraw.sunShadow}
@@ -4974,6 +4984,7 @@ declare class CappedSceneRenderer implements SceneRenderer {
     get textureFormats(): readonly string[] | undefined;
     get sunCascades(): boolean | undefined;
     get referenceSamples(): number | undefined;
+    get prepareMaterials(): SceneRenderer["prepareMaterials"];
     get captureReference(): SceneRenderer["captureReference"];
     get renderToTexture(): SceneRenderer["renderToTexture"];
     get resize(): SceneRenderer["resize"];
@@ -5975,6 +5986,20 @@ declare class WebgpuSceneRenderer implements SceneRenderer {
      * variant; multisampled for an anti-aliased frame (I1); writing the
      * reflection targets for a frame with reflections (I3). Built on first use.
      */
+    /** Permutations compiling in the background (F1e), by their keys. */
+    private readonly compiling;
+    /**
+     * Compile the shader permutations `materials` need (F1e), off the frame: each
+     * material graph's (with its static switches) for the sample count, reflections
+     * and prepass given, asynchronously where the device can. A material whose
+     * permutation is still compiling draws as a plain one, so a new graph never
+     * stalls a frame. Resolves when all are ready.
+     */
+    prepareMaterials(materials: Iterable<MeshPrimitive["material"]>, options?: {
+        readonly samples?: number;
+        readonly reflect?: boolean;
+        readonly prepass?: boolean;
+    }): Promise<void>;
     private pipelinesOf;
     /**
      * Order the frame's lights (global first), build the clustered cells, and
@@ -6040,6 +6065,13 @@ declare class WebgpuSceneRenderer implements SceneRenderer {
      * its mips the encoder's. A cut-out keeps the RGBA path for its coverage.
      */
     private uploadTexture;
+    /** Layer stacks uploaded once (F1e), by their layers' identities. */
+    private readonly layerStacks;
+    /**
+     * Upload (once) maps as the layers of one array (F1e): each resampled to the
+     * largest's size (at most 1024), a missing one white, with mips.
+     */
+    private uploadLayers;
     /**
      * Upload (once) an HDR directional light map (F3d, hdrLightmap.ts) as a
      * two-layer rgba16float array: the irradiance (and 1), then the dominant
@@ -8008,6 +8040,10 @@ declare class MeshOverlaySurface implements DisplaySurface {
     captureReference(options: Omit<CaptureOptions, "height"> & {
         readonly height?: number;
     }): Promise<ReferenceCapture> | null;
+    /** Meshes whose material graphs have been sent to compile (F1e). */
+    private readonly prepared;
+    /** Compile a newly seen mesh's material-graph permutations in the background (F1e), as this frame draws them. */
+    private prepareGraphs;
     /** Samples each pixel of the viewport's path-traced reference holds (F10b); 0 when it isn't shown. */
     get referenceSamples(): number;
     /** Show the lit frame or a diagnostic of it (F10a; the AAA tier alone draws the diagnostics). */

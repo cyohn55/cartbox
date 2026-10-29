@@ -35,7 +35,7 @@ import {
   type MeshSceneInstance,
   type SceneWind,
 } from "@cartbox/editor";
-import type { DynamicGi, Occluder, DecalTiles, EnvironmentLight, LocalShadows, Mat4, ProjectedDecal, RasterStyle, SceneFog, SceneLight, ShadowInput, ToneMap } from "@cartbox/editor";
+import type { DynamicGi, MeshMaterial, Occluder, DecalTiles, EnvironmentLight, LocalShadows, Mat4, ProjectedDecal, RasterStyle, SceneFog, SceneLight, ShadowInput, ToneMap } from "@cartbox/editor";
 
 import type { RenderCaps } from "../models.js";
 import type { ReflectionCapture } from "./probeCapture.js";
@@ -358,6 +358,12 @@ export interface SceneRenderer {
    * viewport reference holds.
    */
   captureReference?(instances: readonly MeshSceneInstance[], draw: GpuSceneDraw, options: CaptureOptions): Promise<ReferenceCapture>;
+  /**
+   * The WebGPU renderer only (AAA_FIDELITY_ROADMAP.md F1e): compile the shader
+   * permutations these materials' graphs need in the background, drawing them
+   * as plain materials until each is ready.
+   */
+  prepareMaterials?(materials: Iterable<MeshMaterial>, options?: { readonly samples?: number; readonly reflect?: boolean; readonly prepass?: boolean }): Promise<void>;
   readonly referenceSamples?: number;
   /**
    * True when it draws the sun's shadow itself from {@link SceneDraw.sunShadow}
@@ -480,6 +486,11 @@ export class CappedSceneRenderer implements SceneRenderer {
 
   get referenceSamples(): number | undefined {
     return this.inner.referenceSamples;
+  }
+
+  get prepareMaterials(): SceneRenderer["prepareMaterials"] {
+    const inner = this.inner;
+    return inner.prepareMaterials ? (materials, options) => inner.prepareMaterials!(materials, options) : undefined;
   }
 
   get captureReference(): SceneRenderer["captureReference"] {

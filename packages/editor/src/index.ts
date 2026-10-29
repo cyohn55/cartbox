@@ -975,9 +975,14 @@ export {
 } from "./model/materialExtensions";
 export {
   GRAPH_NODES,
+  FRAGMENT_OUTPUTS,
   GRAPH_OUTPUTS,
+  MAX_GRAPH_FUNCTIONS,
+  MAX_GRAPH_IMAGES,
+  MAX_GRAPH_LAYERS,
   MAX_GRAPH_NODES,
   compileGraph,
+  flattenGraph,
   compiledGraphOf,
   evaluateGraph,
   graphNoiseSource,
@@ -993,7 +998,9 @@ export {
   type GraphOp,
   type GraphOutput,
   type GraphShaderInputs,
+  type GraphLayer,
   type GraphStep,
+  type MaterialFunction,
   type MaterialGraph,
 } from "./model/materialGraph";
 export {

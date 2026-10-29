@@ -351,8 +351,38 @@ const SHADER_STAGE_FRAGMENT = 0x2;
  * after the base colour (where it also sets colour and alpha), where the PBR
  * metallic and roughness settle, and after the emissive. Empty for the plain shader.
  */
-function graphSites(graph: CompiledGraph | null): { fns: string; base: string; pbr: string; emis: string } {
-  if (!graph) return { fns: "", base: "", pbr: "", emis: "" };
+function graphSites(graph: CompiledGraph | null, vertex: CompiledGraph | null = null, hdr = false): { fns: string; base: string; pbr: string; emis: string; vertex: string; pdo: boolean } {
+  // The world-position offset (F1e), in the vertex stage: the graph's own steps for it, read where a vertex has them.
+  let vertexSite = "";
+  if (vertex && vertex.outputs.worldPositionOffset !== undefined) {
+    const vcode = graphShaderCode(vertex, "wgsl", {
+      uv: "uv",
+      position: "wpWorld",
+      normal: "normalize(t.nrm * normal)",
+      view: "u.view.xyz",
+      time: "u.effect1.w",
+      curvature: "0.0",
+      occlusion: "1.0",
+      thickness: "1.0",
+      baseColor: "u.base.rgb",
+      baseAlpha: "u.base.a",
+      // No map in the vertex stage: its bindings are the fragment's.
+      sample: () => "vec4<f32>(1.0)",
+      metallic: "u.pbr.x",
+      roughness: "u.pbr.y",
+      emissive: "u.emissive.xyz",
+    });
+    vertexSite = `  // The material graph's world-position offset (F1e), taken into the mesh's own space.
+  {
+    let wpWorld = (t.model * vec4<f32>(pos, 1.0)).xyz;
+${vcode.split("\n").map((l) => `    ${l}`).join("\n")}
+    let m3 = mat3x3<f32>(t.model[0].xyz, t.model[1].xyz, t.model[2].xyz);
+    wpoObj = inverse3(m3) * g${vertex.outputs.worldPositionOffset};
+    pos = pos + wpoObj;
+  }
+`;
+  }
+  if (!graph) return { fns: "", base: "", pbr: "", emis: "", vertex: vertexSite, pdo: false };
   const out = graph.outputs;
   const code = graphShaderCode(graph, "wgsl", {
     uv: "puv",
@@ -366,6 +396,11 @@ function graphSites(graph: CompiledGraph | null): { fns: string; base: string; p
     baseColor: "colour.rgb",
     baseAlpha: "colour.a",
     sample: (p) => `textureSample(tex, samp, vec2<f32>((${p}).x, 1.0 - (${p}).y))`,
+    // The graph's own images (F1e), layers of the blend surface's array after its own.
+    sampleSlot: (slot, p) => `textureSample(blendTex, samp, vec2<f32>((${p}).x, 1.0 - (${p}).y), ${slot})`,
+    metallic: "u.pbr.x",
+    roughness: "u.pbr.y",
+    emissive: "u.emissive.xyz",
   });
   const set = [
     out.baseColor !== undefined ? `colour = vec4<f32>(g${out.baseColor}, colour.a);` : "",
@@ -373,14 +408,22 @@ function graphSites(graph: CompiledGraph | null): { fns: string; base: string; p
     out.metallic !== undefined ? `gMetal = clamp(g${out.metallic}.x, 0.0, 1.0);` : "",
     out.roughness !== undefined ? `gRough = g${out.roughness}.x;` : "",
     out.emissive !== undefined ? `gEmis = max(g${out.emissive}, vec3<f32>(0.0));` : "",
+    // F1e: a tangent-space normal (−1..1) in the vertex's frame, the depth pushed away, the bend, and what scatters.
+    out.normal !== undefined ? `sNrm = mappedNormal(in.normal, ${hdr ? "in.tangent, in.frameNormal" : "vec4<f32>(0.0), in.normal"}, g${out.normal}, dp1, dp2, duv1, duv2);` : "",
+    out.pixelDepthOffset !== undefined ? `gPdo = max(g${out.pixelDepthOffset}.x, 0.0);` : "",
+    out.refraction !== undefined ? `refractBend = max(g${out.refraction}.x, 0.0);` : "",
+    out.subsurfaceColor !== undefined ? `sssTint = clamp(g${out.subsurfaceColor}, vec3<f32>(0.0), vec3<f32>(1.0));` : "",
   ].filter(Boolean);
   return {
     // The noise functions are always in the shader (refraction's warp uses them, I5).
     fns: "",
+    vertex: vertexSite,
+    pdo: hdr && out.pixelDepthOffset !== undefined,
     base: `  // The material graph (EP7).
   var gMetal = -1.0;
   var gRough = -1.0;
   var gEmis = vec3<f32>(-1.0);
+  var gPdo = 0.0;
   {
     var gN = normalize(sNrm);
     if (dot(gN, u.view.xyz) < 0.0) { gN = -gN; }
@@ -492,8 +535,8 @@ function wgslDisplay(v: string, hdr = false): string {
  * reflection targets a frame with screen-space reflections writes beside the
  * colour (see reflections.ts); the colour itself is the same.
  */
-export function sceneShader(graph: CompiledGraph | null = null, reflect = false, hdr = false): string {
-  const g = graphSites(graph);
+export function sceneShader(graph: CompiledGraph | null = null, reflect = false, hdr = false, vertex: CompiledGraph | null = null): string {
+  const g = graphSites(graph, vertex, hdr);
   const code = /* wgsl */ `
 struct Uniforms {
   mvp: mat4x4<f32>,
@@ -599,6 +642,22 @@ struct ShadowTile {
   rect: vec4<f32>, // F2d: the tile's x, y and size in the atlas (texels), on the linear-light renderer
 };
 @group(0) @binding(0) var<uniform> u: Uniforms;
+// What a material graph sets beyond its sites (F1e): the vertex's offset in its own space, the refraction's bend
+// (−1: the material's), and what of the diffuse scatters.
+var<private> wpoObj: vec3<f32>;
+var<private> refractBend: f32 = -1.0;
+var<private> sssTint: vec3<f32> = vec3<f32>(1.0);
+// A 3×3's inverse, by its adjugate.
+fn inverse3(m: mat3x3<f32>) -> mat3x3<f32> {
+  let a = m[0];
+  let b = m[1];
+  let c = m[2];
+  let r0 = cross(b, c);
+  let r1 = cross(c, a);
+  let r2 = cross(a, b);
+  let det = dot(a, r0);
+  return transpose(mat3x3<f32>(r0, r1, r2)) * (1.0 / select(det, 1e-12, abs(det) < 1e-12));
+}
 @group(0) @binding(1) var samp: sampler;
 @group(0) @binding(2) var tex: texture_2d<f32>;
 @group(0) @binding(3) var mrTex: texture_2d<f32>;
@@ -656,7 +715,8 @@ ${hdr ? "// The linear variant's probes (F3b, probeCapture.ts): each one's prefi
 // uniform's surface0.y gates it).
 @group(0) @binding(14) var detailTex: texture_2d<f32>;
 // The blend surface's map (terrain snow over rock), mixed by the vertex weight.
-@group(0) @binding(15) var blendTex: texture_2d<f32>;
+// The blend surface's map in layer 0, and a material graph's own images after it (F1e).
+@group(0) @binding(15) var blendTex: texture_2d_array<f32>;
 @group(0) @binding(16) var nrmTex: texture_2d<f32>;
 // The opaque pass's depth (EP6b), read by the see-through pass for soft edges;
 // the opaque pass binds a blank in its place.
@@ -1353,7 +1413,7 @@ fn vertexOf(position: vec3<f32>, normal: vec3<f32>, uv: vec2<f32>, uv2: vec2<f32
   var pos = position;
   let bend = windOffset(position.xz, sway);
   pos = vec3<f32>(pos.x + bend.x, pos.y, pos.z + bend.y);
-  out.pos = t.mvp * vec4<f32>(pos, 1.0);
+${g.vertex}  out.pos = t.mvp * vec4<f32>(pos, 1.0);
   out.normal = t.nrm * normal;
   out.uv = uv;
   out.uv2 = uv2;
@@ -1380,6 +1440,16 @@ fn triMap(t: texture_2d<f32>, uv: vec2<f32>, normal: vec3<f32>, objPos: vec3<f32
   w = w / max(w.x + w.y + w.z, 1e-30);
   let p = objPos * (1.0 / u.terrain0.x);
   return textureSample(t, samp, vec2<f32>(p.z, 1.0 - p.y)) * w.x + textureSample(t, samp, vec2<f32>(p.x, 1.0 - p.z)) * w.y + textureSample(t, samp, vec2<f32>(p.x, 1.0 - p.y)) * w.z;
+}
+// triMap on one layer of an array (the blend surface's, F1e).
+fn triMapLayer(t: texture_2d_array<f32>, layer: i32, uv: vec2<f32>, normal: vec3<f32>, objPos: vec3<f32>) -> vec4<f32> {
+  if (u.terrain0.x <= 0.0) { return textureSample(t, samp, uv, layer); }
+  let n = normalize(normal);
+  let a = n * n;
+  var w = a * a;
+  w = w / max(w.x + w.y + w.z, 1e-30);
+  let p = objPos * (1.0 / u.terrain0.x);
+  return textureSample(t, samp, vec2<f32>(p.z, 1.0 - p.y), layer) * w.x + textureSample(t, samp, vec2<f32>(p.x, 1.0 - p.z), layer) * w.y + textureSample(t, samp, vec2<f32>(p.x, 1.0 - p.y), layer) * w.z;
 }
 // --- Landscape materials (EDITOR_PRO_ROADMAP.md P2b): farTileBlend and macroGain, term for term ---
 // The base map tiled ${1 / FAR_TILE_SCALE}× larger, by the raw UVs or triplanar projection.
@@ -1450,7 +1520,8 @@ fn refractOffset(N: vec3<f32>, P: vec3<f32>) -> vec2<f32> {
     w = vec2<f32>(2.0 * gNoise1(vec3<f32>(P.x * f, qy, P.z * f)) - 1.0, 2.0 * gNoise1(vec3<f32>(P.x * f + 17.0, qy + 31.0, P.z * f + 47.0)) - 1.0) * warp;
   }
   let k = ${REFRACTION_SCALE.toFixed(4)} * u.refract1.w;
-  return vec2<f32>(u.refract0.x * dot(N, u.refract1.xyz) + w.x, -u.refract0.x * dot(N, u.refract2.xyz) + w.y) * k;
+  let bend = select(u.refract0.x, refractBend, refractBend >= 0.0);
+  return vec2<f32>(bend * dot(N, u.refract1.xyz) + w.x, -bend * dot(N, u.refract2.xyz) + w.y) * k;
 }
 // What a refracting fragment at screen point frag, depth z, sees (rgb, a = 1
 // when it sees anything) — refractedPixel: the pushed pixel when the opaque
@@ -1529,7 +1600,14 @@ ${hdr ? "  shadowPixel = in.pos.xy;\n  // Overdraw (F10a): every fragment shaded
   }
   // Macro variation (P2b): broad lighter and darker patches over the whole surface.
   if (u.terrain0.z > 0.0) { colour = vec4<f32>(colour.rgb * macroGain(in.objPos), colour.a); }
-${g.base}
+${g.base}${g.pdo ? `
+  // A pixel depth offset (F1e): the prepass wrote the pushed depth; here the surface keeps only the pixels
+  // where that is what the prepass left, so what it went behind shows.
+  if (gPdo > 0.0 && frame.depthTerms.z > 0.5) {
+    let dEye = frame.depthTerms.y / (in.pos.z + frame.depthTerms.x);
+    let pushed = clamp(frame.depthTerms.y / (dEye + gPdo) - frame.depthTerms.x, 0.0, 1.0);
+    if (pushed > textureLoad(sceneDepth, vec2<i32>(in.pos.xy), 0) + 1e-6) { discard; }
+  }` : ""}
   // The CPU path skips a texel whose combined alpha is below 1/255 rather than
   // blending it, so this is a discard and not an alpha-blend state.
   // Soft edges (EP6b): a see-through surface fades out as it meets the opaque
@@ -1573,7 +1651,7 @@ ${g.base}
     }
     // The blend surface's roughness, by the vertex weight (surface3.w < 0 keeps).
     // The blend surface (H4), its weight moved by the two surfaces' heights (B6).
-    let blendTexel = triMap(blendTex, uv, in.normal, in.objPos).rgb;
+    let blendTexel = triMapLayer(blendTex, 0, uv, in.normal, in.objPos).rgb;
     var bwt = in.bw;
     var bc = u.surface3.rgb;
     if (u.surface1.z > 0.5) {
@@ -1829,7 +1907,7 @@ ${hdr
     // Subsurface scattering (F1d-2; subsurface.ts): in a checkerboard, the diffuse that scatters on the even
     // pixels and the rest on the odd, for the blur after the opaque pass to rebuild.
     if (frame.debug.z > 0.5 && u.uvx1.z > 0.0 && u.pbr.w < 1.5 && frame.debug.x < 0.5) {
-      let scatter = (diffuseLit + ambDiffuse) * u.uvx1.z;
+      let scatter = (diffuseLit + ambDiffuse) * u.uvx1.z * sssTint;
       let even = ((u32(in.pos.x) + u32(in.pos.y)) & 1u) == 0u;
       shaded = select(shaded - scatter, scatter, even);
     }` : ""}
@@ -1929,12 +2007,12 @@ fn vs_prepass(
 ${hdr ? "  out.tangent = v.tangent;\n  out.frameNormal = v.frameNormal;\n" : ""}  let m = xf[u32(u.motion0.x) + instance];
   let then = windOffsetIn(u.wind1, before.xz, sway);
   out.clipNow = m.mvp * vec4<f32>(v.objPos, 1.0);
-  out.clipThen = m.lightMvp * vec4<f32>(before.x + then.x, before.y, before.z + then.y, 1.0);
+  out.clipThen = m.lightMvp * vec4<f32>(vec3<f32>(before.x + then.x, before.y, before.z + then.y)${g.vertex ? " + wpoObj" : ""}, 1.0);
   return out;
 }
 struct PrepassTargets {
   @location(0) gbuffer: vec4<f32>,
-  @location(1) velocity: vec2<f32>,
+  @location(1) velocity: vec2<f32>,${g.pdo ? "\n  // A material graph's pixel depth offset (F1e): the depth pushed away from the eye.\n  @builtin(frag_depth) depth: f32," : ""}
 };
 // The prepass draws what the opaque pipeline draws, and drops exactly the
 // pixels fs drops (the cut-out, the near-transparent, Active Camo's screen
@@ -1980,7 +2058,14 @@ ${graph ? "  if (gRough >= 0.0) { rough = gRough; }\n" : ""}  var velocity = vec
   if (in.clipNow.w > 0.0 && in.clipThen.w > 0.0) {
     velocity = (in.clipNow.xy / in.clipNow.w - in.clipThen.xy / in.clipThen.w) * vec2<f32>(0.5, -0.5);
   }
-  return PrepassTargets(vec4<f32>(octEncode(n), clamp(rough, 0.0, 1.0), u.maps0.w), velocity);
+${g.pdo
+  ? `  var depthOut = in.pos.z;
+  if (gPdo > 0.0 && frame.depthTerms.z > 0.5) {
+    let d = frame.depthTerms.y / (in.pos.z + frame.depthTerms.x);
+    depthOut = clamp(frame.depthTerms.y / (d + gPdo) - frame.depthTerms.x, 0.0, 1.0);
+  }
+  return PrepassTargets(vec4<f32>(octEncode(n), clamp(rough, 0.0, 1.0), u.maps0.w), velocity, depthOut);`
+  : "  return PrepassTargets(vec4<f32>(octEncode(n), clamp(rough, 0.0, 1.0), u.maps0.w), velocity);"}
 }
 `;
   return reflect ? withReflectionTargets(code) : code;
@@ -2049,6 +2134,7 @@ interface CachedBindGroup {
     detail: DecodedTexture | null;
     blend: DecodedTexture | null;
     normal: DecodedTexture | null;
+    graph?: readonly (DecodedTexture | null)[] | null;
   };
 }
 
@@ -2155,7 +2241,7 @@ export class WebgpuSceneRenderer implements SceneRenderer {
     private height: number,
     private readonly pipeline: PipelineSet,
     /** Build the pipelines for a shader variant (a material graph's, EP7), at a sample count (I1), with a depth prepass (F0c). */
-    private readonly pipelinesFor: (code: string, samples?: number, reflect?: boolean, prepass?: boolean) => PipelineSet,
+    private readonly pipelinesFor: (code: string, samples?: number, reflect?: boolean, prepass?: boolean, make?: (descriptor: object) => any) => PipelineSet,
     private readonly bindGroupLayout: any,
     private colourTexture: any,
     private depthTexture: any,
@@ -2878,7 +2964,7 @@ export class WebgpuSceneRenderer implements SceneRenderer {
           { binding: 13, visibility: SHADER_STAGE_FRAGMENT, buffer: { type: "read-only-storage" } },
           // The detail map, and the blend surface's map.
           { binding: 14, visibility: SHADER_STAGE_FRAGMENT, texture: { sampleType: "float" } },
-          { binding: 15, visibility: SHADER_STAGE_FRAGMENT, texture: { sampleType: "float" } },
+          { binding: 15, visibility: SHADER_STAGE_FRAGMENT, texture: { sampleType: "float", viewDimension: "2d-array" } },
           // The tangent-space normal map (P1a).
           { binding: 16, visibility: SHADER_STAGE_FRAGMENT, texture: { sampleType: "float" } },
         ],
@@ -2921,10 +3007,12 @@ export class WebgpuSceneRenderer implements SceneRenderer {
       const depthLayoutMs = device.createBindGroupLayout({ entries: depthEntries(true) });
       const layout = device.createPipelineLayout({ bindGroupLayouts: [bindGroupLayout, depthLayout] });
       const layoutMs = device.createPipelineLayout({ bindGroupLayouts: [bindGroupLayout, depthLayoutMs] });
-      const pipelinesFor = (code: string, samples = 1, reflect = false, prepass = false): PipelineSet => {
+      // `make` creates each pipeline: at once, or (F1e) asynchronously, its set then a set of promises.
+      const pipelinesFor = (code: string, samples = 1, reflect = false, prepass = false, make: (descriptor: object) => any = (d) => device.createRenderPipeline(d)): PipelineSet => {
         const multisampled = samples > 1;
-        const module = device.createShaderModule({ code: multisampled ? multisampledDepthShader(code) : code });
-        const pipelineFor = (blend: unknown, depthWrite: boolean, depthCompare = "less", gbuffer = false) => device.createRenderPipeline({
+        // One module per distinct source on the device (F1e), whichever renderer asks.
+        const module = cachedShaderModule(device, multisampled ? multisampledDepthShader(code) : code);
+        const pipelineFor = (blend: unknown, depthWrite: boolean, depthCompare = "less", gbuffer = false) => make({
           layout: multisampled ? layoutMs : layout,
           ...(multisampled ? { multisample: { count: samples } } : {}),
           vertex: {
@@ -4923,13 +5011,55 @@ export class WebgpuSceneRenderer implements SceneRenderer {
    * variant; multisampled for an anti-aliased frame (I1); writing the
    * reflection targets for a frame with reflections (I3). Built on first use.
    */
+  /** Permutations compiling in the background (F1e), by their keys. */
+  private readonly compiling = new Set<string>();
+
+  /**
+   * Compile the shader permutations `materials` need (F1e), off the frame: each
+   * material graph's (with its static switches) for the sample count, reflections
+   * and prepass given, asynchronously where the device can. A material whose
+   * permutation is still compiling draws as a plain one, so a new graph never
+   * stalls a frame. Resolves when all are ready.
+   */
+  prepareMaterials(materials: Iterable<MeshPrimitive["material"]>, options: { readonly samples?: number; readonly reflect?: boolean; readonly prepass?: boolean } = {}): Promise<void> {
+    const samples = options.samples ?? 1;
+    const reflect = options.reflect === true;
+    const prepass = options.prepass === true;
+    const jobs: Promise<void>[] = [];
+    for (const material of materials) {
+      const graph = compiledGraphOf(material);
+      if (!graph) continue;
+      const vertex = graph.outputs.worldPositionOffset !== undefined ? compiledGraphOf(material, ["worldPositionOffset"]) : null;
+      const key = `${graph.key}|${vertex?.key ?? ""}|${samples}|${reflect ? 1 : 0}|${prepass ? 1 : 0}`;
+      if (this.variants.has(key) || this.compiling.has(key)) continue;
+      if (typeof this.device.createRenderPipelineAsync !== "function") {
+        this.variants.set(key, this.pipelinesFor(sceneShader(graph, reflect, this.hdr, vertex), samples, reflect, prepass));
+        continue;
+      }
+      this.compiling.add(key);
+      const pending = this.pipelinesFor(sceneShader(graph, reflect, this.hdr, vertex), samples, reflect, prepass, (d) => this.device.createRenderPipelineAsync(d)) as unknown as Record<string, Promise<any>>;
+      jobs.push(
+        Promise.all(Object.entries(pending).map(async ([k, v]) => [k, await v] as const))
+          .then((entries) => {
+            if (!this.destroyed) this.variants.set(key, Object.fromEntries(entries) as unknown as PipelineSet);
+          })
+          .finally(() => this.compiling.delete(key)),
+      );
+    }
+    return Promise.all(jobs).then(() => undefined);
+  }
+
   private pipelinesOf(material: MeshPrimitive["material"], samples = 1, reflect = false, prepass = false): PipelineSet {
     const graph = compiledGraphOf(material);
+    // The world-position offset's own steps, for the vertex stage (F1e).
+    const vertex = graph && graph.outputs.worldPositionOffset !== undefined ? compiledGraphOf(material, ["worldPositionOffset"]) : null;
     if (!graph && samples === 1 && !reflect && !prepass) return this.pipeline;
-    const key = `${graph?.key ?? ""}|${samples}|${reflect ? 1 : 0}|${prepass ? 1 : 0}`;
+    const key = `${graph?.key ?? ""}|${vertex?.key ?? ""}|${samples}|${reflect ? 1 : 0}|${prepass ? 1 : 0}`;
     let set = this.variants.get(key);
+    // A permutation still compiling (F1e; prepareMaterials) draws as the plain material meanwhile, not with a hitch.
+    if (!set && this.compiling.has(key)) return this.pipelinesOf({ name: "", baseColorFactor: [1, 1, 1, 1], baseColorImage: null } as MeshPrimitive["material"], samples, reflect, prepass);
     if (!set) {
-      set = this.pipelinesFor(sceneShader(graph, reflect, this.hdr), samples, reflect, prepass);
+      set = this.pipelinesFor(sceneShader(graph, reflect, this.hdr, vertex), samples, reflect, prepass);
       this.variants.set(key, set);
     }
     return set;
@@ -5239,7 +5369,8 @@ export class WebgpuSceneRenderer implements SceneRenderer {
       cached.source.lmHdr === textures.lmHdr &&
       cached.source.detail === textures.detail &&
       cached.source.blend === textures.blend &&
-      cached.source.normal === textures.normal
+      cached.source.normal === textures.normal &&
+      cached.source.graph === textures.graph
     ) {
       return cached.group;
     }
@@ -5283,7 +5414,8 @@ export class WebgpuSceneRenderer implements SceneRenderer {
         { binding: 13, resource: { buffer: this.probeBuffer } },
         // The detail map (or the 1x1 white blank; the uniform gates it).
         { binding: 14, resource: view(textures.detail) },
-        { binding: 15, resource: view(textures.blend, true) },
+        // The blend surface's map, and a material graph's images as the array's later layers (F1e).
+        { binding: 15, resource: textures.graph && textures.graph.some((t) => t !== null) ? this.uploadLayers([textures.blend, ...textures.graph]).createView({ dimension: "2d-array" }) : (textures.blend ? this.uploadTexture(textures.blend, true) : this.blankTexture).createView({ dimension: "2d-array" }) },
         { binding: 16, resource: view(textures.normal) },
       ],
     });
@@ -5336,6 +5468,30 @@ export class WebgpuSceneRenderer implements SceneRenderer {
       this.mipmaps.generate(texture, levels, colour ? "rgba8unorm-srgb" : "rgba8unorm");
     }
     cache.set(source, texture);
+    return texture;
+  }
+
+  /** Layer stacks uploaded once (F1e), by their layers' identities. */
+  private readonly layerStacks = new Map<string, any>();
+
+  /**
+   * Upload (once) maps as the layers of one array (F1e): each resampled to the
+   * largest's size (at most 1024), a missing one white, with mips.
+   */
+  private uploadLayers(layers: readonly (DecodedTexture | null)[]): any {
+    const key = layers.map((l) => (l ? textureId(l) : 0)).join(",");
+    const cached = this.layerStacks.get(key);
+    if (cached) return cached;
+    const width = Math.min(1024, Math.max(1, ...layers.map((l) => l?.width ?? 1)));
+    const height = Math.min(1024, Math.max(1, ...layers.map((l) => l?.height ?? 1)));
+    const levels = this.mips ? mipLevelCount(width, height) : 1;
+    const texture = this.device.createTexture({ size: { width, height, depthOrArrayLayers: layers.length }, format: "rgba8unorm", usage: 0x04 | 0x02 | (levels > 1 ? 0x10 : 0), ...(levels > 1 ? { mipLevelCount: levels } : {}) });
+    layers.forEach((layer, z) => {
+      const data = resampleRgba(layer, width, height);
+      this.device.queue.writeTexture({ texture, origin: { x: 0, y: 0, z } }, data, { bytesPerRow: width * 4, rowsPerImage: height }, { width, height });
+    });
+    if (levels > 1) this.mipmaps.generate(texture, levels, "rgba8unorm", layers.length);
+    this.layerStacks.set(key, texture);
     return texture;
   }
 
@@ -5553,4 +5709,50 @@ function destroySafely(resource: any): void {
   } catch {
     // Already released, or a device that has gone away. Nothing to do.
   }
+}
+
+const textureIds = new WeakMap<object, number>();
+let nextTextureId = 1;
+/** A stable number for a decoded map, for keying what is built from several. */
+function textureId(t: object): number {
+  let id = textureIds.get(t);
+  if (id === undefined) textureIds.set(t, (id = nextTextureId++));
+  return id;
+}
+
+/** A map's texels at `width × height` (bilinear), or white without one (F1e's layer stacks). */
+function resampleRgba(source: DecodedTexture | null, width: number, height: number): Uint8Array {
+  const out = new Uint8Array(width * height * 4);
+  if (!source || source.width <= 0 || source.height <= 0) return out.fill(255);
+  if (source.width === width && source.height === height) {
+    out.set(source.data.subarray(0, width * height * 4));
+    return out;
+  }
+  const at = (x: number, y: number, c: number) => source.data[(Math.min(source.height - 1, Math.max(0, y)) * source.width + Math.min(source.width - 1, Math.max(0, x))) * 4 + c]!;
+  for (let y = 0; y < height; y += 1) {
+    const fy = ((y + 0.5) * source.height) / height - 0.5;
+    const y0 = Math.floor(fy);
+    const ty = fy - y0;
+    for (let x = 0; x < width; x += 1) {
+      const fx = ((x + 0.5) * source.width) / width - 0.5;
+      const x0 = Math.floor(fx);
+      const tx = fx - x0;
+      for (let c = 0; c < 4; c += 1) {
+        const top = at(x0, y0, c) * (1 - tx) + at(x0 + 1, y0, c) * tx;
+        const bottom = at(x0, y0 + 1, c) * (1 - tx) + at(x0 + 1, y0 + 1, c) * tx;
+        out[(y * width + x) * 4 + c] = Math.round(top * (1 - ty) + bottom * ty);
+      }
+    }
+  }
+  return out;
+}
+
+const shaderModules = new WeakMap<object, Map<string, any>>();
+/** A shader module for `code` on `device`, made once (F1e): every renderer and permutation with the same source shares it. */
+function cachedShaderModule(device: any, code: string): any {
+  let modules = shaderModules.get(device);
+  if (!modules) shaderModules.set(device, (modules = new Map()));
+  let module = modules.get(code);
+  if (!module) modules.set(code, (module = device.createShaderModule({ code })));
+  return module;
 }

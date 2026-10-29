@@ -21,13 +21,14 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 
-import { GRAPH_NODES, GRAPH_OUTPUTS, compileGraph, type GraphNode, type GraphOp, type GraphOutput, type MaterialGraph, type MeshMaterial } from "@cartbox/editor";
+import { GRAPH_NODES, GRAPH_OUTPUTS, MAX_GRAPH_IMAGES, compileGraph, type GraphNode, type GraphOp, type GraphOutput, type MaterialGraph, type MeshMaterial } from "@cartbox/editor";
 
 import {
   GRAPH_PRESETS,
   NODE_HEADER,
   NODE_ROW,
   NODE_WIDTH,
+  addLayer,
   addNode,
   connect,
   disconnect,
@@ -37,10 +38,13 @@ import {
   moveNode,
   outputAt,
   outputPort,
+  functionFromNode,
+  removeLayer,
   removeNode,
   renderGraphPreview,
   setOutput,
   setParams,
+  setSwitch,
 } from "@/lib/materialGraphEdit";
 import { useViewGestures } from "@/lib/useTabletGestures";
 import styles from "./editor.module.css";
@@ -51,7 +55,14 @@ const OUTPUT_LABELS: Record<GraphOutput, string> = {
   emissive: "Emissive",
   metallic: "Metallic",
   roughness: "Roughness",
+  normal: "Normal (tangent)",
+  worldPositionOffset: "World offset",
+  pixelDepthOffset: "Depth offset",
+  refraction: "Refraction",
+  subsurfaceColor: "Subsurface colour",
 };
+/** The outputs a layer may set (F1e). */
+const LAYER_OUTPUTS: readonly GraphOutput[] = ["baseColor", "roughness", "metallic", "normal", "emissive"];
 const CATEGORIES: { id: "input" | "pattern" | "maths"; label: string }[] = [
   { id: "input", label: "Inputs" },
   { id: "pattern", label: "Patterns" },
@@ -61,7 +72,7 @@ const PREVIEW = 128;
 
 /** Rows of params a node shows under its inputs. */
 function paramRows(op: GraphOp): number {
-  return op === "constant" ? 1 : op === "noise" ? 2 : op === "wear" ? 3 : op === "fresnel" || op === "texture" || op === "split" ? 1 : 0;
+  return op === "constant" ? 1 : op === "noise" || op === "texture" ? 2 : op === "wear" ? 3 : op === "fresnel" || op === "split" || op === "function" || op === "functionInput" || op === "switch" ? 1 : 0;
 }
 function nodeHeight(node: GraphNode): number {
   return NODE_HEADER + (GRAPH_NODES[node.op].inputs.length + paramRows(node.op)) * NODE_ROW + 6;
@@ -259,6 +270,7 @@ export function GraphEditor({
       <div style={{ display: "flex", flex: "1 1 auto", minHeight: 0 }}>
         <div style={{ width: 150, flex: "0 0 auto", overflowY: "auto", padding: 8, borderRight: "1px solid #223", display: "flex", flexDirection: "column", gap: 4 }}>
           <canvas ref={previewRef} width={PREVIEW} height={PREVIEW} aria-label="Preview" style={{ width: PREVIEW, height: PREVIEW, borderRadius: 6, alignSelf: "center" }} />
+          <Composition graph={graph} onChange={onChange} />
           {CATEGORIES.map((cat) => (
             <div key={cat.id} style={{ display: "flex", flexDirection: "column", gap: 3 }}>
               <div style={{ fontSize: 11, opacity: 0.6, marginTop: 6 }}>{cat.label}</div>
@@ -389,11 +401,51 @@ export function GraphEditor({
                     </>
                   )}
                   {node.op === "texture" && (
+                    <>
+                      <div style={{ height: NODE_ROW, display: "flex", alignItems: "center", gap: 4, padding: "0 6px" }}>
+                        <select aria-label="Channel" value={p.channel as string} onChange={(e) => onChange(setParams(graph, node.id, { channel: e.target.value }))} style={{ fontSize: 11 }}>
+                          <option value="rgb">colour</option>
+                          <option value="a">alpha</option>
+                        </select>
+                      </div>
+                      <div style={{ height: NODE_ROW, display: "flex", alignItems: "center", gap: 4, padding: "0 6px" }}>
+                        <select aria-label="Map" value={(p.slot as number | undefined) ?? 0} onChange={(e) => onChange(setParams(graph, node.id, { slot: Number(e.target.value) }))} style={{ fontSize: 11 }}>
+                          <option value={0}>base map</option>
+                          {Array.from({ length: MAX_GRAPH_IMAGES }, (_, i) => (
+                            <option key={i + 1} value={i + 1} disabled={!material.graphImages?.[i]}>
+                              image {i + 1}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                    </>
+                  )}
+                  {node.op === "function" && (
                     <div style={{ height: NODE_ROW, display: "flex", alignItems: "center", gap: 4, padding: "0 6px" }}>
-                      <select aria-label="Channel" value={p.channel as string} onChange={(e) => onChange(setParams(graph, node.id, { channel: e.target.value }))} style={{ fontSize: 11 }}>
-                        <option value="rgb">colour</option>
-                        <option value="a">alpha</option>
+                      <select aria-label="Function" value={p.name as string} onChange={(e) => onChange(setParams(graph, node.id, { name: e.target.value }))} style={{ fontSize: 11, maxWidth: NODE_WIDTH - 16 }}>
+                        <option value="">(none)</option>
+                        {(graph.functions ?? []).map((f) => (
+                          <option key={f.name} value={f.name}>
+                            {f.name}
+                          </option>
+                        ))}
                       </select>
+                    </div>
+                  )}
+                  {node.op === "functionInput" && (
+                    <div style={{ height: NODE_ROW, display: "flex", alignItems: "center", gap: 4, padding: "0 6px" }}>
+                      <select aria-label="Input" value={p.index as number} onChange={(e) => onChange(setParams(graph, node.id, { index: Number(e.target.value) }))} style={{ fontSize: 11 }}>
+                        {[0, 1, 2, 3].map((i) => (
+                          <option key={i} value={i}>
+                            in{i}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  )}
+                  {node.op === "switch" && (
+                    <div style={{ height: NODE_ROW, display: "flex", alignItems: "center", gap: 4, padding: "0 6px" }}>
+                      <input aria-label="Switch name" defaultValue={p.name as string} onBlur={(e) => onChange(setParams(graph, node.id, { name: e.target.value || "switch" }))} style={{ fontSize: 11, width: NODE_WIDTH - 20 }} />
                     </div>
                   )}
                   {node.op === "split" && (
@@ -433,6 +485,88 @@ export function GraphEditor({
       <div style={{ padding: "4px 10px", fontSize: 11, opacity: 0.6, borderTop: "1px solid #223" }}>
         Drag from a node&apos;s right edge to an input or a material output · click a wired input to unwire it · drag the background to pan, wheel to zoom
       </div>
+    </div>
+  );
+}
+
+/**
+ * The graph's composition (F1e): its static switches' defaults, its functions
+ * (made from a node's upstream subgraph, called by a Function node), and its
+ * layers, each blending outputs of its own over the base by a mask.
+ */
+function Composition({ graph, onChange }: { graph: MaterialGraph; onChange: (graph: MaterialGraph) => void }) {
+  const [fnFrom, setFnFrom] = useState("");
+  const [mask, setMask] = useState("");
+  const [layerOutputs, setLayerOutputs] = useState<Partial<Record<GraphOutput, string>>>({});
+  const switches = [...new Set(graph.nodes.filter((n) => n.op === "switch").map((n) => (n.params?.name as string | undefined) ?? "switch"))];
+  const pick = (value: string, set: (v: string) => void, label: string) => (
+    <select aria-label={label} value={value} onChange={(e) => set(e.target.value)} style={{ fontSize: 11, width: "100%" }}>
+      <option value="">{label}…</option>
+      {graph.nodes.map((n) => (
+        <option key={n.id} value={n.id}>
+          {n.id}
+        </option>
+      ))}
+    </select>
+  );
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 3, fontSize: 11 }}>
+      {switches.length > 0 && <div style={{ opacity: 0.6, marginTop: 6 }}>Switches</div>}
+      {switches.map((name) => (
+        <label key={name} style={{ display: "flex", gap: 4, alignItems: "center" }}>
+          <input type="checkbox" checked={graph.switches?.[name] !== false} onChange={(e) => onChange(setSwitch(graph, name, e.target.checked))} />
+          {name}
+        </label>
+      ))}
+      <div style={{ opacity: 0.6, marginTop: 6 }}>Functions</div>
+      {(graph.functions ?? []).map((f) => (
+        <div key={f.name} title={`${f.nodes.length} nodes`}>
+          ƒ {f.name}
+        </div>
+      ))}
+      {pick(fnFrom, setFnFrom, "From node")}
+      <button
+        type="button"
+        className={styles.toolBtn}
+        style={{ fontSize: 11, padding: "2px 6px" }}
+        disabled={!fnFrom}
+        onClick={() => {
+          const name = window.prompt("Function name", fnFrom) ?? "";
+          if (name) onChange(functionFromNode(graph, fnFrom, name.slice(0, 64)));
+          setFnFrom("");
+        }}
+      >
+        Make function
+      </button>
+      <div style={{ opacity: 0.6, marginTop: 6 }}>Layers</div>
+      {(graph.layers ?? []).map((l, i) => (
+        <div key={i} style={{ display: "flex", gap: 4, alignItems: "center" }}>
+          <span style={{ flex: 1 }}>
+            {l.name} ({Object.keys(l.outputs).join(", ")})
+          </span>
+          <button type="button" className={styles.toolBtn} style={{ fontSize: 10, padding: "0 4px" }} onClick={() => onChange(removeLayer(graph, i))}>
+            ✕
+          </button>
+        </div>
+      ))}
+      {pick(mask, setMask, "Mask")}
+      {LAYER_OUTPUTS.map((o) => (
+        <div key={o}>{pick(layerOutputs[o] ?? "", (v) => setLayerOutputs({ ...layerOutputs, [o]: v || undefined }), OUTPUT_LABELS[o])}</div>
+      ))}
+      <button
+        type="button"
+        className={styles.toolBtn}
+        style={{ fontSize: 11, padding: "2px 6px" }}
+        disabled={!mask || Object.values(layerOutputs).every((v) => !v)}
+        onClick={() => {
+          const outputs = Object.fromEntries(Object.entries(layerOutputs).filter(([, v]) => v)) as Partial<Record<GraphOutput, string>>;
+          onChange(addLayer(graph, { name: `layer ${(graph.layers?.length ?? 0) + 1}`, mask, outputs }));
+          setMask("");
+          setLayerOutputs({});
+        }}
+      >
+        Add layer
+      </button>
     </div>
   );
 }

@@ -726,6 +726,22 @@ export class MeshOverlaySurface implements DisplaySurface {
     return this.renderer.captureReference(last.instances, last.draw, { ...options, height });
   }
 
+  /** Meshes whose material graphs have been sent to compile (F1e). */
+  private readonly prepared = new WeakSet<object>();
+
+  /** Compile a newly seen mesh's material-graph permutations in the background (F1e), as this frame draws them. */
+  private prepareGraphs(instances: readonly MeshSceneInstance[], draw: GpuSceneDraw): void {
+    const prepare = this.renderer.prepareMaterials;
+    if (!prepare) return;
+    const materials: MeshMaterial[] = [];
+    for (const instance of instances) {
+      if (this.prepared.has(instance.mesh)) continue;
+      this.prepared.add(instance.mesh);
+      for (const p of instance.mesh.primitives) if (p.material.graph) materials.push(p.material);
+    }
+    if (materials.length > 0) void prepare(materials, { samples: draw.antialias === true ? 4 /* MSAA_SAMPLES */ : 1, reflect: draw.reflections === true, prepass: draw.prepass === true });
+  }
+
   /** Samples each pixel of the viewport's path-traced reference holds (F10b); 0 when it isn't shown. */
   get referenceSamples(): number {
     return this.viewMode === "pathTraced" ? (this.renderer.referenceSamples ?? 0) : 0;
@@ -1476,6 +1492,7 @@ export class MeshOverlaySurface implements DisplaySurface {
       time,
       ...(this.viewMode !== "lit" && this.renderer.sunCascades === true ? { viewMode: this.viewMode } : {}),
     };
+    this.prepareGraphs(job.drawn, draw);
     this.lastFrame = { instances: job.drawn, draw };
     const scene = this.renderer.renderToTexture!(job.drawn, draw) ?? null;
     // The held weapon on its own GPU renderer, made the first time it shows (until then it isn't drawn).
@@ -2624,6 +2641,24 @@ async function decodeMeshTextures(
     // A painted team-colour mask (L17): applied when the copy is tinted.
     each((m) => m.tintMaskImage),
   ]);
+  // A material graph's own images (F1e), each primitive's list.
+  const graphTextures = await Promise.all(
+    mesh.primitives.map(async (primitive) => {
+      const images = primitive.material.graphImages;
+      if (!images?.length) return null;
+      return Promise.all(
+        images.map((image) => {
+          if (!image || image.bytes.length === 0) return Promise.resolve(null);
+          let entry = cache.get(image);
+          if (!entry) {
+            entry = decode(image);
+            cache.set(image, entry);
+          }
+          return entry;
+        }),
+      );
+    }),
+  );
   // The GPU bake's HDR directional light map (F3d), which the AAA tier lights by.
   const lightmapHdrTextures = await Promise.all(
     mesh.primitives.map((primitive) => {
@@ -2645,6 +2680,7 @@ async function decodeMeshTextures(
     ...(blendTextures.some((t) => t !== null) ? { blendTextures } : {}),
     ...(reliefTextures.some((t) => t !== null) ? { reliefTextures } : {}),
     ...(tintMaskTextures.some((t) => t !== null) ? { tintMaskTextures } : {}),
+    ...(graphTextures.some((t) => t !== null) ? { graphTextures } : {}),
   };
 }
 

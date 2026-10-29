@@ -11785,6 +11785,10 @@ var CappedSceneRenderer = class {
   get referenceSamples() {
     return this.inner.referenceSamples;
   }
+  get prepareMaterials() {
+    const inner = this.inner;
+    return inner.prepareMaterials ? (materials, options) => inner.prepareMaterials(materials, options) : void 0;
+  }
   get captureReference() {
     const inner = this.inner;
     return inner.captureReference ? (instances, draw, options) => inner.captureReference(instances, draw, options) : void 0;
@@ -12165,6 +12169,8 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
     this.hudFrame = null;
     /** The playtest profiler, when it's on: shadow, sky and scene time go to it. */
     this.profiler = null;
+    /** Meshes whose material graphs have been sent to compile (F1e). */
+    this.prepared = /* @__PURE__ */ new WeakSet();
     /** Decodes a KTX2 texture (loading the decoder on first use); set by create. */
     this.decodeKtx2 = async () => null;
     /** The renderer samples compressed formats, so baked KTX2 images decode in place of their PNGs (F1a). */
@@ -12366,6 +12372,18 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
     if (!last || !this.renderer.captureReference) return null;
     const height = options.height ?? Math.max(1, Math.round(options.width * last.draw.height / Math.max(1, last.draw.width)));
     return this.renderer.captureReference(last.instances, last.draw, { ...options, height });
+  }
+  /** Compile a newly seen mesh's material-graph permutations in the background (F1e), as this frame draws them. */
+  prepareGraphs(instances, draw) {
+    const prepare = this.renderer.prepareMaterials;
+    if (!prepare) return;
+    const materials = [];
+    for (const instance of instances) {
+      if (this.prepared.has(instance.mesh)) continue;
+      this.prepared.add(instance.mesh);
+      for (const p of instance.mesh.primitives) if (p.material.graph) materials.push(p.material);
+    }
+    if (materials.length > 0) void prepare(materials, { samples: draw.antialias === true ? 4 : 1, reflect: draw.reflections === true, prepass: draw.prepass === true });
   }
   /** Samples each pixel of the viewport's path-traced reference holds (F10b); 0 when it isn't shown. */
   get referenceSamples() {
@@ -12978,6 +12996,7 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
       time,
       ...this.viewMode !== "lit" && this.renderer.sunCascades === true ? { viewMode: this.viewMode } : {}
     };
+    this.prepareGraphs(job.drawn, draw);
     this.lastFrame = { instances: job.drawn, draw };
     const scene = this.renderer.renderToTexture(job.drawn, draw) ?? null;
     let front = null;
@@ -13903,6 +13922,23 @@ async function decodeMeshTextures(mesh, decodeKtx2, cache = /* @__PURE__ */ new 
     // A painted team-colour mask (L17): applied when the copy is tinted.
     each((m) => m.tintMaskImage)
   ]);
+  const graphTextures = await Promise.all(
+    mesh.primitives.map(async (primitive) => {
+      const images = primitive.material.graphImages;
+      if (!images?.length) return null;
+      return Promise.all(
+        images.map((image) => {
+          if (!image || image.bytes.length === 0) return Promise.resolve(null);
+          let entry = cache.get(image);
+          if (!entry) {
+            entry = decode(image);
+            cache.set(image, entry);
+          }
+          return entry;
+        })
+      );
+    })
+  );
   const lightmapHdrTextures = await Promise.all(
     mesh.primitives.map((primitive) => {
       const image = primitive.material.lightmapHdrImage;
@@ -13922,7 +13958,8 @@ async function decodeMeshTextures(mesh, decodeKtx2, cache = /* @__PURE__ */ new 
     ...detailTextures.some((t) => t !== null) ? { detailTextures } : {},
     ...blendTextures.some((t) => t !== null) ? { blendTextures } : {},
     ...reliefTextures.some((t) => t !== null) ? { reliefTextures } : {},
-    ...tintMaskTextures.some((t) => t !== null) ? { tintMaskTextures } : {}
+    ...tintMaskTextures.some((t) => t !== null) ? { tintMaskTextures } : {},
+    ...graphTextures.some((t) => t !== null) ? { graphTextures } : {}
   };
 }
 var TINT_PALETTE = [
@@ -15159,7 +15196,7 @@ function packRgba([r, g, b, a]) {
   return (a << 24 | b << 16 | g << 8 | r) >>> 0;
 }
 function sameTextures(a, b) {
-  return a.base === b.base && a.mr === b.mr && a.occ === b.occ && a.emis === b.emis && a.lm === b.lm && a.lmHdr === b.lmHdr && a.detail === b.detail && a.blend === b.blend && a.relief === b.relief;
+  return a.base === b.base && a.mr === b.mr && a.occ === b.occ && a.emis === b.emis && a.lm === b.lm && a.lmHdr === b.lmHdr && a.detail === b.detail && a.blend === b.blend && a.relief === b.relief && (a.graph ?? null) === (b.graph ?? null);
 }
 var NO_OCCLUSION = {};
 var withRelief = /* @__PURE__ */ new WeakMap();
@@ -15217,7 +15254,8 @@ function batchInstances(instances, geometryOf, eye = [0, 0, 0]) {
         detail: instance.detailTextures?.[index] ?? null,
         blend: primitive.blend ? instance.blendTextures?.[index] ?? null : null,
         relief: instance.reliefTextures?.[index] ?? null,
-        normal: primitive.uvs ? instance.normalTextures?.[index] ?? null : null
+        normal: primitive.uvs ? instance.normalTextures?.[index] ?? null : null,
+        graph: instance.graphTextures?.[index] ?? null
       };
       const effect = instance.effect ?? null;
       const channels = instance.lightChannels ?? 1;
@@ -24958,8 +24996,37 @@ var FALLBACK_CASCADE_SIZE = 2048;
 var READBACK_BUFFERS2 = 3;
 var SHADER_STAGE_VERTEX = 1;
 var SHADER_STAGE_FRAGMENT = 2;
-function graphSites2(graph) {
-  if (!graph) return { fns: "", base: "", pbr: "", emis: "" };
+function graphSites2(graph, vertex = null, hdr = false) {
+  let vertexSite = "";
+  if (vertex && vertex.outputs.worldPositionOffset !== void 0) {
+    const vcode = graphShaderCode2(vertex, "wgsl", {
+      uv: "uv",
+      position: "wpWorld",
+      normal: "normalize(t.nrm * normal)",
+      view: "u.view.xyz",
+      time: "u.effect1.w",
+      curvature: "0.0",
+      occlusion: "1.0",
+      thickness: "1.0",
+      baseColor: "u.base.rgb",
+      baseAlpha: "u.base.a",
+      // No map in the vertex stage: its bindings are the fragment's.
+      sample: () => "vec4<f32>(1.0)",
+      metallic: "u.pbr.x",
+      roughness: "u.pbr.y",
+      emissive: "u.emissive.xyz"
+    });
+    vertexSite = `  // The material graph's world-position offset (F1e), taken into the mesh's own space.
+  {
+    let wpWorld = (t.model * vec4<f32>(pos, 1.0)).xyz;
+${vcode.split("\n").map((l) => `    ${l}`).join("\n")}
+    let m3 = mat3x3<f32>(t.model[0].xyz, t.model[1].xyz, t.model[2].xyz);
+    wpoObj = inverse3(m3) * g${vertex.outputs.worldPositionOffset};
+    pos = pos + wpoObj;
+  }
+`;
+  }
+  if (!graph) return { fns: "", base: "", pbr: "", emis: "", vertex: vertexSite, pdo: false };
   const out = graph.outputs;
   const code = graphShaderCode2(graph, "wgsl", {
     uv: "puv",
@@ -24972,22 +25039,35 @@ function graphSites2(graph) {
     thickness: "gThick",
     baseColor: "colour.rgb",
     baseAlpha: "colour.a",
-    sample: (p) => `textureSample(tex, samp, vec2<f32>((${p}).x, 1.0 - (${p}).y))`
+    sample: (p) => `textureSample(tex, samp, vec2<f32>((${p}).x, 1.0 - (${p}).y))`,
+    // The graph's own images (F1e), layers of the blend surface's array after its own.
+    sampleSlot: (slot, p) => `textureSample(blendTex, samp, vec2<f32>((${p}).x, 1.0 - (${p}).y), ${slot})`,
+    metallic: "u.pbr.x",
+    roughness: "u.pbr.y",
+    emissive: "u.emissive.xyz"
   });
   const set = [
     out.baseColor !== void 0 ? `colour = vec4<f32>(g${out.baseColor}, colour.a);` : "",
     out.alpha !== void 0 ? `colour.a = clamp(g${out.alpha}.x, 0.0, 1.0);` : "",
     out.metallic !== void 0 ? `gMetal = clamp(g${out.metallic}.x, 0.0, 1.0);` : "",
     out.roughness !== void 0 ? `gRough = g${out.roughness}.x;` : "",
-    out.emissive !== void 0 ? `gEmis = max(g${out.emissive}, vec3<f32>(0.0));` : ""
+    out.emissive !== void 0 ? `gEmis = max(g${out.emissive}, vec3<f32>(0.0));` : "",
+    // F1e: a tangent-space normal (−1..1) in the vertex's frame, the depth pushed away, the bend, and what scatters.
+    out.normal !== void 0 ? `sNrm = mappedNormal(in.normal, ${hdr ? "in.tangent, in.frameNormal" : "vec4<f32>(0.0), in.normal"}, g${out.normal}, dp1, dp2, duv1, duv2);` : "",
+    out.pixelDepthOffset !== void 0 ? `gPdo = max(g${out.pixelDepthOffset}.x, 0.0);` : "",
+    out.refraction !== void 0 ? `refractBend = max(g${out.refraction}.x, 0.0);` : "",
+    out.subsurfaceColor !== void 0 ? `sssTint = clamp(g${out.subsurfaceColor}, vec3<f32>(0.0), vec3<f32>(1.0));` : ""
   ].filter(Boolean);
   return {
     // The noise functions are always in the shader (refraction's warp uses them, I5).
     fns: "",
+    vertex: vertexSite,
+    pdo: hdr && out.pixelDepthOffset !== void 0,
     base: `  // The material graph (EP7).
   var gMetal = -1.0;
   var gRough = -1.0;
   var gEmis = vec3<f32>(-1.0);
+  var gPdo = 0.0;
   {
     var gN = normalize(sNrm);
     if (dot(gN, u.view.xyz) < 0.0) { gN = -gN; }
@@ -25086,8 +25166,8 @@ function wgslDisplay(v, hdr = false) {
     }`
   );
 }
-function sceneShader(graph = null, reflect = false, hdr = false) {
-  const g = graphSites2(graph);
+function sceneShader(graph = null, reflect = false, hdr = false, vertex = null) {
+  const g = graphSites2(graph, vertex, hdr);
   const code = (
     /* wgsl */
     `
@@ -25195,6 +25275,22 @@ struct ShadowTile {
   rect: vec4<f32>, // F2d: the tile's x, y and size in the atlas (texels), on the linear-light renderer
 };
 @group(0) @binding(0) var<uniform> u: Uniforms;
+// What a material graph sets beyond its sites (F1e): the vertex's offset in its own space, the refraction's bend
+// (\u22121: the material's), and what of the diffuse scatters.
+var<private> wpoObj: vec3<f32>;
+var<private> refractBend: f32 = -1.0;
+var<private> sssTint: vec3<f32> = vec3<f32>(1.0);
+// A 3\xD73's inverse, by its adjugate.
+fn inverse3(m: mat3x3<f32>) -> mat3x3<f32> {
+  let a = m[0];
+  let b = m[1];
+  let c = m[2];
+  let r0 = cross(b, c);
+  let r1 = cross(c, a);
+  let r2 = cross(a, b);
+  let det = dot(a, r0);
+  return transpose(mat3x3<f32>(r0, r1, r2)) * (1.0 / select(det, 1e-12, abs(det) < 1e-12));
+}
 @group(0) @binding(1) var samp: sampler;
 @group(0) @binding(2) var tex: texture_2d<f32>;
 @group(0) @binding(3) var mrTex: texture_2d<f32>;
@@ -25248,7 +25344,8 @@ ${hdr ? "// The linear variant's probes (F3b, probeCapture.ts): each one's prefi
 // uniform's surface0.y gates it).
 @group(0) @binding(14) var detailTex: texture_2d<f32>;
 // The blend surface's map (terrain snow over rock), mixed by the vertex weight.
-@group(0) @binding(15) var blendTex: texture_2d<f32>;
+// The blend surface's map in layer 0, and a material graph's own images after it (F1e).
+@group(0) @binding(15) var blendTex: texture_2d_array<f32>;
 @group(0) @binding(16) var nrmTex: texture_2d<f32>;
 // The opaque pass's depth (EP6b), read by the see-through pass for soft edges;
 // the opaque pass binds a blank in its place.
@@ -25940,7 +26037,7 @@ fn vertexOf(position: vec3<f32>, normal: vec3<f32>, uv: vec2<f32>, uv2: vec2<f32
   var pos = position;
   let bend = windOffset(position.xz, sway);
   pos = vec3<f32>(pos.x + bend.x, pos.y, pos.z + bend.y);
-  out.pos = t.mvp * vec4<f32>(pos, 1.0);
+${g.vertex}  out.pos = t.mvp * vec4<f32>(pos, 1.0);
   out.normal = t.nrm * normal;
   out.uv = uv;
   out.uv2 = uv2;
@@ -25967,6 +26064,16 @@ fn triMap(t: texture_2d<f32>, uv: vec2<f32>, normal: vec3<f32>, objPos: vec3<f32
   w = w / max(w.x + w.y + w.z, 1e-30);
   let p = objPos * (1.0 / u.terrain0.x);
   return textureSample(t, samp, vec2<f32>(p.z, 1.0 - p.y)) * w.x + textureSample(t, samp, vec2<f32>(p.x, 1.0 - p.z)) * w.y + textureSample(t, samp, vec2<f32>(p.x, 1.0 - p.y)) * w.z;
+}
+// triMap on one layer of an array (the blend surface's, F1e).
+fn triMapLayer(t: texture_2d_array<f32>, layer: i32, uv: vec2<f32>, normal: vec3<f32>, objPos: vec3<f32>) -> vec4<f32> {
+  if (u.terrain0.x <= 0.0) { return textureSample(t, samp, uv, layer); }
+  let n = normalize(normal);
+  let a = n * n;
+  var w = a * a;
+  w = w / max(w.x + w.y + w.z, 1e-30);
+  let p = objPos * (1.0 / u.terrain0.x);
+  return textureSample(t, samp, vec2<f32>(p.z, 1.0 - p.y), layer) * w.x + textureSample(t, samp, vec2<f32>(p.x, 1.0 - p.z), layer) * w.y + textureSample(t, samp, vec2<f32>(p.x, 1.0 - p.y), layer) * w.z;
 }
 // --- Landscape materials (EDITOR_PRO_ROADMAP.md P2b): farTileBlend and macroGain, term for term ---
 // The base map tiled ${1 / FAR_TILE_SCALE2}\xD7 larger, by the raw UVs or triplanar projection.
@@ -26037,7 +26144,8 @@ fn refractOffset(N: vec3<f32>, P: vec3<f32>) -> vec2<f32> {
     w = vec2<f32>(2.0 * gNoise1(vec3<f32>(P.x * f, qy, P.z * f)) - 1.0, 2.0 * gNoise1(vec3<f32>(P.x * f + 17.0, qy + 31.0, P.z * f + 47.0)) - 1.0) * warp;
   }
   let k = ${REFRACTION_SCALE2.toFixed(4)} * u.refract1.w;
-  return vec2<f32>(u.refract0.x * dot(N, u.refract1.xyz) + w.x, -u.refract0.x * dot(N, u.refract2.xyz) + w.y) * k;
+  let bend = select(u.refract0.x, refractBend, refractBend >= 0.0);
+  return vec2<f32>(bend * dot(N, u.refract1.xyz) + w.x, -bend * dot(N, u.refract2.xyz) + w.y) * k;
 }
 // What a refracting fragment at screen point frag, depth z, sees (rgb, a = 1
 // when it sees anything) \u2014 refractedPixel: the pushed pixel when the opaque
@@ -26114,7 +26222,14 @@ ${hdr ? "  shadowPixel = in.pos.xy;\n  // Overdraw (F10a): every fragment shaded
   }
   // Macro variation (P2b): broad lighter and darker patches over the whole surface.
   if (u.terrain0.z > 0.0) { colour = vec4<f32>(colour.rgb * macroGain(in.objPos), colour.a); }
-${g.base}
+${g.base}${g.pdo ? `
+  // A pixel depth offset (F1e): the prepass wrote the pushed depth; here the surface keeps only the pixels
+  // where that is what the prepass left, so what it went behind shows.
+  if (gPdo > 0.0 && frame.depthTerms.z > 0.5) {
+    let dEye = frame.depthTerms.y / (in.pos.z + frame.depthTerms.x);
+    let pushed = clamp(frame.depthTerms.y / (dEye + gPdo) - frame.depthTerms.x, 0.0, 1.0);
+    if (pushed > textureLoad(sceneDepth, vec2<i32>(in.pos.xy), 0) + 1e-6) { discard; }
+  }` : ""}
   // The CPU path skips a texel whose combined alpha is below 1/255 rather than
   // blending it, so this is a discard and not an alpha-blend state.
   // Soft edges (EP6b): a see-through surface fades out as it meets the opaque
@@ -26158,7 +26273,7 @@ ${g.base}
     }
     // The blend surface's roughness, by the vertex weight (surface3.w < 0 keeps).
     // The blend surface (H4), its weight moved by the two surfaces' heights (B6).
-    let blendTexel = triMap(blendTex, uv, in.normal, in.objPos).rgb;
+    let blendTexel = triMapLayer(blendTex, 0, uv, in.normal, in.objPos).rgb;
     var bwt = in.bw;
     var bc = u.surface3.rgb;
     if (u.surface1.z > 0.5) {
@@ -26407,7 +26522,7 @@ ${hdr ? `    // Linear light (F0b): what the reflection adds, and what it sees, 
     // Subsurface scattering (F1d-2; subsurface.ts): in a checkerboard, the diffuse that scatters on the even
     // pixels and the rest on the odd, for the blur after the opaque pass to rebuild.
     if (frame.debug.z > 0.5 && u.uvx1.z > 0.0 && u.pbr.w < 1.5 && frame.debug.x < 0.5) {
-      let scatter = (diffuseLit + ambDiffuse) * u.uvx1.z;
+      let scatter = (diffuseLit + ambDiffuse) * u.uvx1.z * sssTint;
       let even = ((u32(in.pos.x) + u32(in.pos.y)) & 1u) == 0u;
       shaded = select(shaded - scatter, scatter, even);
     }` : ""}
@@ -26507,12 +26622,12 @@ fn vs_prepass(
 ${hdr ? "  out.tangent = v.tangent;\n  out.frameNormal = v.frameNormal;\n" : ""}  let m = xf[u32(u.motion0.x) + instance];
   let then = windOffsetIn(u.wind1, before.xz, sway);
   out.clipNow = m.mvp * vec4<f32>(v.objPos, 1.0);
-  out.clipThen = m.lightMvp * vec4<f32>(before.x + then.x, before.y, before.z + then.y, 1.0);
+  out.clipThen = m.lightMvp * vec4<f32>(vec3<f32>(before.x + then.x, before.y, before.z + then.y)${g.vertex ? " + wpoObj" : ""}, 1.0);
   return out;
 }
 struct PrepassTargets {
   @location(0) gbuffer: vec4<f32>,
-  @location(1) velocity: vec2<f32>,
+  @location(1) velocity: vec2<f32>,${g.pdo ? "\n  // A material graph's pixel depth offset (F1e): the depth pushed away from the eye.\n  @builtin(frag_depth) depth: f32," : ""}
 };
 // The prepass draws what the opaque pipeline draws, and drops exactly the
 // pixels fs drops (the cut-out, the near-transparent, Active Camo's screen
@@ -26558,7 +26673,12 @@ ${graph ? "  if (gRough >= 0.0) { rough = gRough; }\n" : ""}  var velocity = vec
   if (in.clipNow.w > 0.0 && in.clipThen.w > 0.0) {
     velocity = (in.clipNow.xy / in.clipNow.w - in.clipThen.xy / in.clipThen.w) * vec2<f32>(0.5, -0.5);
   }
-  return PrepassTargets(vec4<f32>(octEncode(n), clamp(rough, 0.0, 1.0), u.maps0.w), velocity);
+${g.pdo ? `  var depthOut = in.pos.z;
+  if (gPdo > 0.0 && frame.depthTerms.z > 0.5) {
+    let d = frame.depthTerms.y / (in.pos.z + frame.depthTerms.x);
+    depthOut = clamp(frame.depthTerms.y / (d + gPdo) - frame.depthTerms.x, 0.0, 1.0);
+  }
+  return PrepassTargets(vec4<f32>(octEncode(n), clamp(rough, 0.0, 1.0), u.maps0.w), velocity, depthOut);` : "  return PrepassTargets(vec4<f32>(octEncode(n), clamp(rough, 0.0, 1.0), u.maps0.w), velocity);"}
 }
 `
   );
@@ -26767,12 +26887,21 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
      * them. Its colour is a frame-graph transient.
      */
     this.msaa = null;
+    /**
+     * The pipelines a material draws with: the plain shader's, or its graph's
+     * variant; multisampled for an anti-aliased frame (I1); writing the
+     * reflection targets for a frame with reflections (I3). Built on first use.
+     */
+    /** Permutations compiling in the background (F1e), by their keys. */
+    this.compiling = /* @__PURE__ */ new Set();
     /** This frame's GPU spot/point tiles (F2d), or null when it draws none. */
     this.frameLocalTiles = null;
     /** Which atlas rects hold whose map (F2d-2). */
     this.localCache = new LocalTileCache();
     /** Clears a tile's rect to the far plane (F2d-2), made on first use. */
     this.localClear = null;
+    /** Layer stacks uploaded once (F1e), by their layers' identities. */
+    this.layerStacks = /* @__PURE__ */ new Map();
     this.software = new SoftwareSceneRenderer(style);
     this.shadowTexture = blankShadow;
     this.envTexture = hdr ? blankCube(device) : blankTexture;
@@ -27326,7 +27455,7 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
           { binding: 13, visibility: SHADER_STAGE_FRAGMENT, buffer: { type: "read-only-storage" } },
           // The detail map, and the blend surface's map.
           { binding: 14, visibility: SHADER_STAGE_FRAGMENT, texture: { sampleType: "float" } },
-          { binding: 15, visibility: SHADER_STAGE_FRAGMENT, texture: { sampleType: "float" } },
+          { binding: 15, visibility: SHADER_STAGE_FRAGMENT, texture: { sampleType: "float", viewDimension: "2d-array" } },
           // The tangent-space normal map (P1a).
           { binding: 16, visibility: SHADER_STAGE_FRAGMENT, texture: { sampleType: "float" } }
         ]
@@ -27359,10 +27488,10 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
       const depthLayoutMs = device.createBindGroupLayout({ entries: depthEntries(true) });
       const layout = device.createPipelineLayout({ bindGroupLayouts: [bindGroupLayout, depthLayout] });
       const layoutMs = device.createPipelineLayout({ bindGroupLayouts: [bindGroupLayout, depthLayoutMs] });
-      const pipelinesFor = (code, samples = 1, reflect = false, prepass = false) => {
+      const pipelinesFor = (code, samples = 1, reflect = false, prepass = false, make = (d) => device.createRenderPipeline(d)) => {
         const multisampled = samples > 1;
-        const module = device.createShaderModule({ code: multisampled ? multisampledDepthShader(code) : code });
-        const pipelineFor = (blend, depthWrite, depthCompare = "less", gbuffer = false) => device.createRenderPipeline({
+        const module = cachedShaderModule(device, multisampled ? multisampledDepthShader(code) : code);
+        const pipelineFor = (blend, depthWrite, depthCompare = "less", gbuffer = false) => make({
           layout: multisampled ? layoutMs : layout,
           ...multisampled ? { multisample: { count: samples } } : {},
           vertex: {
@@ -29061,17 +29190,46 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     return this.msaa;
   }
   /**
-   * The pipelines a material draws with: the plain shader's, or its graph's
-   * variant; multisampled for an anti-aliased frame (I1); writing the
-   * reflection targets for a frame with reflections (I3). Built on first use.
+   * Compile the shader permutations `materials` need (F1e), off the frame: each
+   * material graph's (with its static switches) for the sample count, reflections
+   * and prepass given, asynchronously where the device can. A material whose
+   * permutation is still compiling draws as a plain one, so a new graph never
+   * stalls a frame. Resolves when all are ready.
    */
+  prepareMaterials(materials, options = {}) {
+    const samples = options.samples ?? 1;
+    const reflect = options.reflect === true;
+    const prepass = options.prepass === true;
+    const jobs = [];
+    for (const material2 of materials) {
+      const graph = compiledGraphOf2(material2);
+      if (!graph) continue;
+      const vertex = graph.outputs.worldPositionOffset !== void 0 ? compiledGraphOf2(material2, ["worldPositionOffset"]) : null;
+      const key = `${graph.key}|${vertex?.key ?? ""}|${samples}|${reflect ? 1 : 0}|${prepass ? 1 : 0}`;
+      if (this.variants.has(key) || this.compiling.has(key)) continue;
+      if (typeof this.device.createRenderPipelineAsync !== "function") {
+        this.variants.set(key, this.pipelinesFor(sceneShader(graph, reflect, this.hdr, vertex), samples, reflect, prepass));
+        continue;
+      }
+      this.compiling.add(key);
+      const pending = this.pipelinesFor(sceneShader(graph, reflect, this.hdr, vertex), samples, reflect, prepass, (d) => this.device.createRenderPipelineAsync(d));
+      jobs.push(
+        Promise.all(Object.entries(pending).map(async ([k, v]) => [k, await v])).then((entries) => {
+          if (!this.destroyed) this.variants.set(key, Object.fromEntries(entries));
+        }).finally(() => this.compiling.delete(key))
+      );
+    }
+    return Promise.all(jobs).then(() => void 0);
+  }
   pipelinesOf(material2, samples = 1, reflect = false, prepass = false) {
     const graph = compiledGraphOf2(material2);
+    const vertex = graph && graph.outputs.worldPositionOffset !== void 0 ? compiledGraphOf2(material2, ["worldPositionOffset"]) : null;
     if (!graph && samples === 1 && !reflect && !prepass) return this.pipeline;
-    const key = `${graph?.key ?? ""}|${samples}|${reflect ? 1 : 0}|${prepass ? 1 : 0}`;
+    const key = `${graph?.key ?? ""}|${vertex?.key ?? ""}|${samples}|${reflect ? 1 : 0}|${prepass ? 1 : 0}`;
     let set = this.variants.get(key);
+    if (!set && this.compiling.has(key)) return this.pipelinesOf({ name: "", baseColorFactor: [1, 1, 1, 1], baseColorImage: null }, samples, reflect, prepass);
     if (!set) {
-      set = this.pipelinesFor(sceneShader(graph, reflect, this.hdr), samples, reflect, prepass);
+      set = this.pipelinesFor(sceneShader(graph, reflect, this.hdr, vertex), samples, reflect, prepass);
       this.variants.set(key, set);
     }
     return set;
@@ -29339,7 +29497,7 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
   /** The bind group for one primitive, rebuilt if any of its textures changed. */
   bindGroupFor(primitive, textures) {
     const cached = this.bindGroups.get(primitive);
-    if (cached && cached.source.base === textures.base && cached.source.mr === textures.mr && cached.source.occ === textures.occ && cached.source.emis === textures.emis && cached.source.lm === textures.lm && cached.source.lmHdr === textures.lmHdr && cached.source.detail === textures.detail && cached.source.blend === textures.blend && cached.source.normal === textures.normal) {
+    if (cached && cached.source.base === textures.base && cached.source.mr === textures.mr && cached.source.occ === textures.occ && cached.source.emis === textures.emis && cached.source.lm === textures.lm && cached.source.lmHdr === textures.lmHdr && cached.source.detail === textures.detail && cached.source.blend === textures.blend && cached.source.normal === textures.normal && cached.source.graph === textures.graph) {
       return cached.group;
     }
     const view = (texture, colour = false) => (texture ? this.uploadTexture(texture, colour) : this.blankTexture).createView();
@@ -29375,7 +29533,8 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
         { binding: 13, resource: { buffer: this.probeBuffer } },
         // The detail map (or the 1x1 white blank; the uniform gates it).
         { binding: 14, resource: view(textures.detail) },
-        { binding: 15, resource: view(textures.blend, true) },
+        // The blend surface's map, and a material graph's images as the array's later layers (F1e).
+        { binding: 15, resource: textures.graph && textures.graph.some((t) => t !== null) ? this.uploadLayers([textures.blend, ...textures.graph]).createView({ dimension: "2d-array" }) : (textures.blend ? this.uploadTexture(textures.blend, true) : this.blankTexture).createView({ dimension: "2d-array" }) },
         { binding: 16, resource: view(textures.normal) }
       ]
     });
@@ -29426,6 +29585,26 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
       this.mipmaps.generate(texture, levels, colour ? "rgba8unorm-srgb" : "rgba8unorm");
     }
     cache.set(source, texture);
+    return texture;
+  }
+  /**
+   * Upload (once) maps as the layers of one array (F1e): each resampled to the
+   * largest's size (at most 1024), a missing one white, with mips.
+   */
+  uploadLayers(layers) {
+    const key = layers.map((l) => l ? textureId(l) : 0).join(",");
+    const cached = this.layerStacks.get(key);
+    if (cached) return cached;
+    const width = Math.min(1024, Math.max(1, ...layers.map((l) => l?.width ?? 1)));
+    const height = Math.min(1024, Math.max(1, ...layers.map((l) => l?.height ?? 1)));
+    const levels = this.mips ? mipLevelCount(width, height) : 1;
+    const texture = this.device.createTexture({ size: { width, height, depthOrArrayLayers: layers.length }, format: "rgba8unorm", usage: 4 | 2 | (levels > 1 ? 16 : 0), ...levels > 1 ? { mipLevelCount: levels } : {} });
+    layers.forEach((layer, z) => {
+      const data = resampleRgba(layer, width, height);
+      this.device.queue.writeTexture({ texture, origin: { x: 0, y: 0, z } }, data, { bytesPerRow: width * 4, rowsPerImage: height }, { width, height });
+    });
+    if (levels > 1) this.mipmaps.generate(texture, levels, "rgba8unorm", layers.length);
+    this.layerStacks.set(key, texture);
     return texture;
   }
   /**
@@ -29625,6 +29804,46 @@ function destroySafely(resource) {
     resource?.destroy?.();
   } catch {
   }
+}
+var textureIds = /* @__PURE__ */ new WeakMap();
+var nextTextureId = 1;
+function textureId(t) {
+  let id = textureIds.get(t);
+  if (id === void 0) textureIds.set(t, id = nextTextureId++);
+  return id;
+}
+function resampleRgba(source, width, height) {
+  const out = new Uint8Array(width * height * 4);
+  if (!source || source.width <= 0 || source.height <= 0) return out.fill(255);
+  if (source.width === width && source.height === height) {
+    out.set(source.data.subarray(0, width * height * 4));
+    return out;
+  }
+  const at = (x, y, c) => source.data[(Math.min(source.height - 1, Math.max(0, y)) * source.width + Math.min(source.width - 1, Math.max(0, x))) * 4 + c];
+  for (let y = 0; y < height; y += 1) {
+    const fy = (y + 0.5) * source.height / height - 0.5;
+    const y0 = Math.floor(fy);
+    const ty = fy - y0;
+    for (let x = 0; x < width; x += 1) {
+      const fx = (x + 0.5) * source.width / width - 0.5;
+      const x0 = Math.floor(fx);
+      const tx = fx - x0;
+      for (let c = 0; c < 4; c += 1) {
+        const top = at(x0, y0, c) * (1 - tx) + at(x0 + 1, y0, c) * tx;
+        const bottom = at(x0, y0 + 1, c) * (1 - tx) + at(x0 + 1, y0 + 1, c) * tx;
+        out[(y * width + x) * 4 + c] = Math.round(top * (1 - ty) + bottom * ty);
+      }
+    }
+  }
+  return out;
+}
+var shaderModules = /* @__PURE__ */ new WeakMap();
+function cachedShaderModule(device, code) {
+  let modules = shaderModules.get(device);
+  if (!modules) shaderModules.set(device, modules = /* @__PURE__ */ new Map());
+  let module = modules.get(code);
+  if (!module) modules.set(code, module = device.createShaderModule({ code }));
+  return module;
 }
 
 // src/render/createSceneRenderer.ts

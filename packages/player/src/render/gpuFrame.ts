@@ -107,10 +107,12 @@ export interface PrimitiveTextures {
   relief: DecodedTexture | null;
   /** The tangent-space normal map (P1a), or null (a primitive without UVs has no tangent frame for one). */
   normal: DecodedTexture | null;
+  /** A material graph's own images (F1e), slot 1 first, or null. */
+  graph?: readonly (DecodedTexture | null)[] | null;
 }
 
 export function sameTextures(a: PrimitiveTextures, b: PrimitiveTextures): boolean {
-  return a.base === b.base && a.mr === b.mr && a.occ === b.occ && a.emis === b.emis && a.lm === b.lm && a.lmHdr === b.lmHdr && a.detail === b.detail && a.blend === b.blend && a.relief === b.relief;
+  return a.base === b.base && a.mr === b.mr && a.occ === b.occ && a.emis === b.emis && a.lm === b.lm && a.lmHdr === b.lmHdr && a.detail === b.detail && a.blend === b.blend && a.relief === b.relief && (a.graph ?? null) === (b.graph ?? null);
 }
 
 const NO_OCCLUSION = {};
@@ -221,6 +223,7 @@ export function batchInstances<G extends { indexCount: number }>(
         blend: primitive.blend ? (instance.blendTextures?.[index] ?? null) : null,
         relief: instance.reliefTextures?.[index] ?? null,
         normal: primitive.uvs ? (instance.normalTextures?.[index] ?? null) : null,
+        graph: instance.graphTextures?.[index] ?? null,
       };
       const effect = instance.effect ?? null;
       const channels = instance.lightChannels ?? 1;

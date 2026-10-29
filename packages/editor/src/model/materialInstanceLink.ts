@@ -75,6 +75,8 @@ export const INSTANCE_FIELDS = [
   ["alphaCutoff", "Alpha cutoff"],
   ["softDepth", "Soft edges"],
   ["graph", "Node graph"],
+  ["graphSwitches", "Static switches"],
+  ["graphImages", "Graph images"],
   ["smartStack", "Smart material"],
 ] as const satisfies readonly (readonly [InstanceField, string])[];
 
