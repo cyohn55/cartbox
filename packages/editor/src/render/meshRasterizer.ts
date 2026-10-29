@@ -39,6 +39,7 @@ import { windOffset, windUniform, type SceneWind } from "../model/wind";
 import { DEFAULT_DETAIL_SCALE, DEFAULT_DETAIL_STRENGTH, FAR_TILE_SCALE, blendHeightOf, detailFade, emissiveAnimation, farTileBlend, heightBlend, macroGain, macroUniform, materialHasWater, triplanarUvs, triplanarWeights, waterAlong, waterTilt, waterTiltAlong, waterUniform } from "../model/materialEffects";
 import { compiledGraphOf, evaluateGraph, graphRegisters, type CompiledGraph, type GraphContext } from "../model/materialGraph";
 import { EFFECT_DISTORT_POWER, materialRefracts, refractionOffset, refracts, resolveRefraction, type ResolvedRefraction } from "./refraction";
+import { materialHasExtensions } from "../model/materialExtensions";
 import { CLEARCOAT_F0, anisotropicD, curvatureOf, materialHasLayers, parallaxRate, parallaxUv, resolveLayers, uvGradients, type ResolvedLayers } from "../model/materialLayers";
 import { type MeshAsset, type MeshBounds, computeSmoothNormals, meshBounds } from "../model/MeshAsset";
 import type { HdrLightmap } from "../model/hdrLightmap";
@@ -601,6 +602,7 @@ function buildPbrFrag(
     material.graph !== undefined ||
     relief !== null ||
     materialHasLayers(material) ||
+    materialHasExtensions(material) ||
     materialRefracts(material) ||
     materialHasWater(material);
   if (!isPbr) return null;

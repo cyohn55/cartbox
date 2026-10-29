@@ -71,6 +71,7 @@ import {
   CLEARCOAT_F0,
   PARALLAX_MIN_NDV,
   PARALLAX_STEPS,
+  resolveExtensions,
   resolveLayers,
   DISTORTION_FREQUENCY,
   DISTORTION_SPEED,
@@ -145,7 +146,8 @@ import { batchInstances, compositeFrame, presentFrame, softEdges, type Primitive
 import { FrameGraph, GraphTimer, TransientPool, timingSpan, type FrameResource, type PassContext } from "./frameGraph.js";
 import { MAX_ANISOTROPY, MipmapGenerator, coverageMips, hasTransparency, mipLevelCount, uploadCompressed } from "./mipmaps.js";
 import { compressedFormatsFor } from "../lighting/webgpuDevice.js";
-import { brdfWgsl, dfgTable } from "./brdf.js";
+import { brdfLut, brdfWgsl } from "./brdf.js";
+import { MATERIAL_SET_WGSL } from "./materialSet.js";
 import { PathTracer, captureReference, type CaptureOptions, type ReferenceCapture } from "./pathTracer.js";
 import { IES_BASE, IES_MAX_PROFILES, IES_VEC4S, ltcTables, ltcWgsl } from "./ltc.js";
 import { PROBE_FACE, ProbeCapture, packCapturedProbes } from "./probeCapture.js";
@@ -534,6 +536,14 @@ struct Uniforms {
   maps0: vec4<f32>,     // x = 1 when a normal map is bound (P1a)
   wind1: vec4<f32>,     // the previous frame's wind0, for motion vectors (F0c)
   motion0: vec4<f32>,   // x = where this frame's motion transforms start in xf (F0c), y = the draw's lighting channels (F2e)
+  // The full material set (F1d; scenePacking.ts): sheen, a dielectric's f0, transmission and volume, the film, the UV transform.
+  sheen0: vec4<f32>,
+  spec0: vec4<f32>,
+  trans0: vec4<f32>,
+  trans1: vec4<f32>,
+  irid0: vec4<f32>,
+  uvx0: vec4<f32>,
+  uvx1: vec4<f32>,
 };
 
 // A Modern-tier light (see packLights): d0 = dir/pos + kind, d1 = colour +
@@ -666,7 +676,7 @@ ${hdr ? "// The spot/point lights' depth atlas, drawn on the GPU (F2d).\n@group(
 // The opaque scene's colour (I5), copied as the see-through pass begins — what a
 // refracting surface bends (a 1×1 blank in the opaque pass, which never reads it).
 @group(1) @binding(7) var sceneColour: texture_2d<f32>;
-${hdr ? `${brdfWgsl(1, 8)}// The prefiltered cube's sampler: trilinear, so a roughness between levels blends them (F3a).
+${hdr ? `${brdfWgsl(1, 8)}${MATERIAL_SET_WGSL}// The prefiltered cube's sampler: trilinear, so a roughness between levels blends them (F3a).
 @group(1) @binding(9) var envSamp: sampler;
 ${ltcWgsl(1, 10)}
 ${decalWgsl(1, 13)}
@@ -1108,7 +1118,7 @@ fn anisoD(rough: f32, aniso: f32, toh: f32, boh: f32, ndh: f32) -> f32 {
   return a2 * b2 * b2 / 3.14159265;
 }
 // This fragment's anisotropy frame (set in fs, read by lightTerm).
-var<private> aniso: f32;${hdr ? "\n// The multiple scattering a light's specular adds back (F1c; set in fs, read by lightTerm).\nvar<private> eComp: vec3<f32>;" : ""}
+var<private> aniso: f32;${hdr ? "\n// The multiple scattering a light's specular adds back (F1c; set in fs, read by lightTerm).\nvar<private> eComp: vec3<f32>;\n// What the sheen leaves the base beneath (F1d; set in fs, read by lightTerm).\nvar<private> sheenScale: f32 = 1.0;" : ""}
 var<private> aT: vec3<f32>;
 var<private> aB: vec3<f32>;
 // The clearcoat's normal and N·V (P1a): the geometric normal, which the coat lies over the bumps with.
@@ -1231,7 +1241,7 @@ ${hdr
   if (lgt.d0.w < 0.5) { occl = sf; }
   else if (lgt.d2.w >= 0.0 && frame.localShadow.x > 0.5) { occl = localShadow(i32(lgt.d2.w + 0.5), lgt, P, ndlL); }
   let w = lgt.d1.w * atten * ndlL * occl;
-  let lit = (kdm * (vec3<f32>(1.0) - FL) * albedo + FL * specL${hdr ? " * eComp" : ""}) * toLinear(lgt.d1.rgb) * w;
+  let lit = (kdm * (vec3<f32>(1.0) - FL) * albedo + FL * specL${hdr ? " * eComp" : ""}) * toLinear(lgt.d1.rgb) * w${hdr ? " * sheenScale + sheenLobe(ndlL, ndv, ndhL) * toLinear(lgt.d1.rgb) * w" : ""};
   if (u.layer0.x > 0.0) {
     // The clearcoat's own highlight, over a base its Fresnel dims (I4).
     let c = coatTerm(coatN, coatNdv, Ld, Hl, vdhL);
@@ -1470,7 +1480,7 @@ ${hdr ? "  shadowPixel = in.pos.xy;\n  // Overdraw (F10a): every fragment shaded
   let duv2 = dpdy(in.uv);
   // Every map is sampled at puv: the interpolated UVs, or where the view ray
   // meets the relief (parallax occlusion, I4).
-  var puv = in.uv;
+  var puv = ${hdr ? "khrUv(in.uv)" : "in.uv"};
   if (u.pbr.z > 0.5 && u.layer0.w > 0.0) {
     var pn = normalize(in.normal);
     if (dot(pn, u.view.xyz) < 0.0) { pn = -pn; }
@@ -1623,7 +1633,11 @@ ${hdr
     let specD = D * smithVisibility(ndl, ndv, a2) * 3.14159265;`
   : `    let G = (ndv / (ndv * (1.0 - k) + k)) * (ndl / (ndl * (1.0 - k) + k));
     let specD = (D * G) / (4.0 * ndl * ndv + 1e-4);`}
-    let f0 = vec3<f32>(0.04) + (albedo - vec3<f32>(0.04)) * metallic;
+${hdr
+  ? `    // A dielectric's reflectance from its IOR and specular (F1d), and a thin film's over it.
+    var f0 = mix(u.spec0.rgb, albedo, metallic);
+    if (u.trans1.w > 0.0) { f0 = mix(f0, iridescenceF0(ndv, f0), u.trans1.w); }`
+  : "    let f0 = vec3<f32>(0.04) + (albedo - vec3<f32>(0.04)) * metallic;"}
     let F = f0 + (vec3<f32>(1.0) - f0) * fp;
 ${hdr
   ? `    // GTAO (F3c): its visibility joins the material's occlusion (diffuse and specular alike), and its
@@ -1640,6 +1654,8 @@ ${hdr
     eComp = energyCompensation(f0, dfg);
     let specE = specularEnergy(f0, dfg);
     var specAo = specularOcclusion(ndv, ao, rough * rough);
+    // The sheen (F1d) takes what it reflects from the layer beneath.
+    sheenScale = 1.0 - max(u.sheen0.r, max(u.sheen0.g, u.sheen0.b)) * sheenE(ndv, u.sheen0.w);
     // An HDR directional light map (F3d) lights the diffuse in place of the sky's irradiance, and its sky
     // visibility occludes the environment's reflection. Both layers are sampled whatever is bound (uniform
     // control flow); an 8-bit map's single layer stands in for the second.
@@ -1666,7 +1682,7 @@ ${hdr
     // the light (F11a): reflectivity over 1 (Beaver Creek's water is 1.3) mirrored more than came in at grazing.
     let specK = min(specE * reflectK, vec3<f32>(1.0));
 `
-  : ""}    let kdm = 1.0 - metallic;                  // metals have no diffuse
+  : ""}    let kdm = (1.0 - metallic)${hdr ? " * (1.0 - u.trans0.x)" : ""};                  // metals have no diffuse${hdr ? "; what is transmitted (F1d) neither" : ""}
     var emis = vec3<f32>(0.0);
     let ef = u.emissive.xyz;
     if (ef.r > 0.0 || ef.g > 0.0 || ef.b > 0.0) {
@@ -1675,7 +1691,7 @@ ${hdr
       emis = ef * es;
     }
 ${g.emis}
-    emis = toLinear(emis);${hdr ? "\n    emis = emis + decalGlow;" : ""}
+    emis = toLinear(emis)${hdr ? " * u.irid0.z" : ""};${hdr ? "\n    emis = emis + decalGlow;" : ""}
     // Ambient / image-based lighting, mirroring the software rasteriser: with an
     // environment, a diffuse irradiance along N + a specular reflection along R
     // blurred toward the average by roughness; without one, the flat ambient.
@@ -1695,7 +1711,7 @@ ${reflect ? "    var envSpec = vec3<f32>(0.0);\n    var envSeen = vec3<f32>(0.0)
       if (aniso != 0.0) { rdv = dot(Rn, V); }
       let pref = envReflect(in.worldPos, 2.0 * rdv * Rn - V, rough);
 ${hdr
-  ? "      // What the environment's reflection takes, the diffuse beneath it no longer receives.\n      amb = (irr * (1.0 - ssgi.a) + ssgi.rgb) * albedo * kdm * (vec3<f32>(1.0) - specE) * aoD + pref * specK * specAo;\n"
+  ? "      // What the environment's reflection takes, the diffuse beneath it no longer receives.\n      amb = (irr * (1.0 - ssgi.a) + ssgi.rgb) * albedo * kdm * (vec3<f32>(1.0) - specE) * aoD + pref * specK * specAo;\n      // The sheen over it (F1d), lit by the sky's irradiance.\n      amb = amb * sheenScale + irr * u.sheen0.rgb * sheenE(ndv, u.sheen0.w) * aoD;\n"
   : "      amb = (irr * albedo * kdm + pref * f0 * reflectK) * ao;\n"}${reflect ? `      envSpec = pref * ${hdr ? "specK * specAo" : "f0 * reflectK * ao"};\n      envSeen = pref;\n` : ""}      // The clearcoat (I4) reflects the room sharply about its own normal, and
       // what it reflects the base beneath no longer receives.
       if (u.layer0.x > 0.0) {
@@ -1752,9 +1768,9 @@ ${reflect ? "    // What the light map, probes and SSAO did to the fill, they do
     } else if (u.layer0.x > 0.0) {
       // The clearcoat's own highlight, over a base its Fresnel dims (I4).
       let c = coatTerm(coatN, coatNdv, L, H, vdh);
-      lit = ((kdm * (vec3<f32>(1.0) - F) * albedo + F * specD${hdr ? " * eComp" : ""}) * ndl * (1.0 - c.y) + vec3<f32>(c.x)) * sf + amb + emis;
+      lit = (((kdm * (vec3<f32>(1.0) - F) * albedo + F * specD${hdr ? " * eComp" : ""})${hdr ? " * sheenScale + sheenLobe(ndl, ndv, ndh)" : ""}) * ndl * (1.0 - c.y) + vec3<f32>(c.x)) * sf + amb + emis;
     } else {
-      lit = (kdm * (vec3<f32>(1.0) - F) * albedo + F * specD${hdr ? " * eComp" : ""}) * ndl * sf + amb + emis;
+      lit = ((kdm * (vec3<f32>(1.0) - F) * albedo + F * specD${hdr ? " * eComp" : ""})${hdr ? " * sheenScale + sheenLobe(ndl, ndv, ndh)" : ""}) * ndl * sf + amb + emis;
     }
     // A fresnel rim, light at grazing angles (zero when the material has none).
     lit = lit + toLinear(u.surface2.rgb) * pow(1.0 - ndv, u.surface2.w);
@@ -1779,7 +1795,18 @@ ${hdr
     reflectOut = vec4<f32>(clamp(select(weight, contribution / max(seen, vec3<f32>(1e-3)), seen > vec3<f32>(0.02)), vec3<f32>(0.0), vec3<f32>(1.0)), mix(rough, u.layer0.y, u.layer0.x));
     envOut = vec4<f32>(contribution, 1.0);` : ""}
     // Refraction (I5): what's behind is the opaque scene, bent.
-    if (camoSeen.a > 0.5) { return vec4<f32>(camoSeen.rgb, 1.0); }
+    if (camoSeen.a > 0.5) { return vec4<f32>(camoSeen.rgb, 1.0); }${hdr ? `
+    // Transmission (F1d): the light behind let through what the reflection leaves, tinted by the
+    // base colour and by the volume's absorption over its thickness (Beer–Lambert).
+    if (u.trans0.x > 0.0 && u.refract0.w > 0.5) {
+      let tb = behindColour(in.pos.xy, in.pos.z, refractOffset(facingNormal(in.normal), in.worldPos));
+      if (tb.a > 0.5) {
+        var absorb = vec3<f32>(1.0);
+        if (u.trans0.y > 0.0 && u.trans0.z > 0.0) { absorb = pow(max(u.trans1.rgb, vec3<f32>(1e-4)), vec3<f32>(u.trans0.y / u.trans0.z)); }
+        let through = u.trans0.x * (1.0 - metallic) * (vec3<f32>(1.0) - specE) * albedo * absorb * tb.rgb;
+        return vec4<f32>(shaded + through, 1.0);
+      }
+    }` : ""}
     if (u.refract0.w > 0.5) {
       let rn = waterNormal(facingNormal(in.normal), in.worldPos);
       let b = behindColour(in.pos.xy, in.pos.z, refractOffset(rn, in.worldPos));
@@ -1901,7 +1928,7 @@ fn fs_prepass(in: PrepassIn) -> PrepassTargets {
   let dp2 = dpdy(in.worldPos);
   let duv1 = dpdx(in.uv);
   let duv2 = dpdy(in.uv);
-  var puv = in.uv;
+  var puv = ${hdr ? "khrUv(in.uv)" : "in.uv"};
   if (u.pbr.z > 0.5 && u.layer0.w > 0.0) {
     var pn = normalize(in.normal);
     if (dot(pn, u.view.xyz) < 0.0) { pn = -pn; }
@@ -2959,7 +2986,7 @@ export class WebgpuSceneRenderer implements SceneRenderer {
       // Spot/point shadows (EP8c): the atlas (a 1×1 stand-in until a light casts) and the tiles' views.
       const shadowTiles = device.createBuffer({ size: Math.max(MAX_LOCAL_SHADOW_TILES, MAX_GPU_LOCAL_TILES) * LOCAL_TILE_FLOATS * 4, usage: 0x80 | 0x08 }); // STORAGE | COPY_DST
       // The split-sum DFG table (F1c), integrated once on the CPU.
-      const dfg = dfgTable();
+      const dfg = brdfLut();
       const dfgBuffer = device.createBuffer({ size: dfg.byteLength, usage: 0x80 | 0x08 }); // STORAGE | COPY_DST
       device.queue.writeBuffer(dfgBuffer, 0, dfg);
       // The linearly transformed cosines' tables (F2e-2), decoded once.
@@ -3677,6 +3704,7 @@ export class WebgpuSceneRenderer implements SceneRenderer {
           textured: entry.textures.blend !== null,
         }),
         layers: resolveLayers(entry.primitive.material, entry.textures.relief !== null),
+        extensions: resolveExtensions(entry.primitive.material),
         refraction: entry.refract ? resolveRefraction(entry.primitive.material, effectActive(entry.effect) ? entry.effect : null) : null,
         camera,
         water: waterUniform(entry.primitive.material, draw.time ?? 0),

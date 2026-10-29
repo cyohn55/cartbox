@@ -57,7 +57,7 @@ describe("uniform layout", () => {
   it("uses a stride WebGPU can address with a dynamic offset", () => {
     // A dynamic uniform offset must be a multiple of 256; the struct grew past
     // 768 bytes (the material layers, I4), so the stride is the next multiple, 1024.
-    expect(UNIFORM_STRIDE).toBe(1024);
+    expect(UNIFORM_STRIDE).toBe(1280);
     expect(UNIFORM_STRIDE % 256).toBe(0);
     expect(UNIFORM_FLOATS).toBe(UNIFORM_STRIDE / 4);
   });
@@ -70,7 +70,7 @@ describe("uniform layout", () => {
     expect(Array.from(data.subarray(112, 120))).toEqual([0.5, 0.25, 0.75, 0.125, 1, 3, 0.5, 0]);
     writeInstanceUniform(data, 0, { ...base, ...NON_PBR });
     expect(Array.from(data.subarray(112, 120))).toEqual([0, 0, 0, 0, 0, 0, 0, 0]);
-    expect(UNIFORM_BYTES_USED).toBe(944);
+    expect(UNIFORM_BYTES_USED).toBe(1056);
     expect(UNIFORM_BYTES_USED).toBeLessThanOrEqual(UNIFORM_STRIDE);
   });
 

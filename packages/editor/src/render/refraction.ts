@@ -73,8 +73,9 @@ export function refracts(r: ResolvedRefraction): boolean {
 }
 
 /** Whether a material asks to refract, which (like a layer) puts it on the PBR path. */
-export function materialRefracts(material: Pick<MeshMaterial, "refraction" | "distortion">): boolean {
-  return unit(material.refraction) > 0 || unit(material.distortion) > 0;
+export function materialRefracts(material: Pick<MeshMaterial, "refraction" | "distortion" | "transmission">): boolean {
+  // A transmitting material (F1d) sees the scene behind it as a refracting one does.
+  return unit(material.refraction) > 0 || unit(material.distortion) > 0 || unit(material.transmission) > 0;
 }
 
 /**

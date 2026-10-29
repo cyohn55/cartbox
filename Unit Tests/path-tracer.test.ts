@@ -56,7 +56,9 @@ describe("the reference's scene", () => {
       expect(bits[i * 28 + 27]).toBe(bvh.order[i]! < 2 ? 0 : 1);
     }
     // The second material: metal, its emission, and PBR.
-    expect(Array.from(scene.mats.slice(16, 32))).toEqual([0.8, 0.4, 0.2, 1, 1, 0.5, 0, 0, 1, 0.6, -1, -1, -1, 1, 0.5, 1].map((v) => Math.fround(v)));
+    expect(Array.from(scene.mats.slice(40, 56))).toEqual([0.8, 0.4, 0.2, 1, 1, 0.5, 0, 0, 1, 0.6, -1, -1, -1, 1, 0.5, 1].map((v) => Math.fround(v)));
+    // Then its full material set (F1d) at the defaults: no sheen, a 4% dielectric, no transmission or film, no transform, strength 1.
+    expect(Array.from(scene.mats.slice(56, 80))).toEqual([0, 0, 0, 0, 0.04, 0.04, 0.04, 0, 0, 0, 0, 1.3, 1, 1, 1, 400, 1, 1, 1, 0, 0, 0, 1, 0].map((v) => Math.fround(v)));
   });
 
   it("stores each map once, downsizing the largest", () => {
@@ -66,8 +68,8 @@ describe("the reference's scene", () => {
       { mesh, model: at(0, 0, 0), textures: [big] },
       { mesh, model: at(3, 0, 0), textures: [big] },
     ] as unknown as MeshSceneInstance[]);
-    expect(scene.mapTable).toBe(4);
-    expect(Array.from(new Uint32Array(scene.mats.buffer).slice(16, 20))).toEqual([0, REFERENCE_TEXTURE_SIDE, 2, 0]);
+    expect(scene.mapTable).toBe(10);
+    expect(Array.from(new Uint32Array(scene.mats.buffer).slice(40, 44))).toEqual([0, REFERENCE_TEXTURE_SIDE, 2, 0]);
     expect(scene.texels.length).toBe(REFERENCE_TEXTURE_SIDE * 2);
     // Red, opaque: r in the low byte.
     expect(scene.texels[0]).toBe(0xff0000ff);

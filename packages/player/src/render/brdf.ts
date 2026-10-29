@@ -24,6 +24,8 @@
  * from a storage buffer: the fragment stage's sampled textures are all bound.
  */
 
+import { sheenAlbedo } from "@cartbox/editor";
+
 /** The table's resolution: N·V across, roughness down, its first and last texels on 0 and 1 (F10b: a cell-centred table clamped at roughness 0.984, short of the rough end's loss by 6%). */
 export const DFG_SIZE = 32;
 /** Samples per cell. */
@@ -105,6 +107,31 @@ export function dfgTable(): Float32Array {
   return out;
 }
 
+let sheen: Float32Array | null = null;
+
+/**
+ * The sheen's directional albedo (F1d; `sheenAlbedo` in @cartbox/editor) on the
+ * same grid as the DFG table, (E, 0) pairs: what the Charlie lobe reflects of
+ * uniform light, which the base beneath gives up.
+ */
+export function sheenTable(): Float32Array {
+  if (sheen) return sheen;
+  const out = new Float32Array(DFG_SIZE * DFG_SIZE * 2);
+  for (let r = 0; r < DFG_SIZE; r += 1) {
+    for (let v = 0; v < DFG_SIZE; v += 1) out[(r * DFG_SIZE + v) * 2] = sheenAlbedo(Math.max(1e-3, v / (DFG_SIZE - 1)), r / (DFG_SIZE - 1), 1024);
+  }
+  sheen = out;
+  return out;
+}
+
+/** What the shader's table buffer holds: the DFG table, then the sheen's (F1d). */
+export function brdfLut(): Float32Array {
+  const out = new Float32Array(DFG_SIZE * DFG_SIZE * 4);
+  out.set(dfgTable(), 0);
+  out.set(sheenTable(), DFG_SIZE * DFG_SIZE * 2);
+  return out;
+}
+
 /** The table read as the shader reads it: bilinearly between its texels, clamped to 0..1. */
 export function dfgAt(lut: Float32Array, ndv: number, roughness: number): [number, number] {
   const x = Math.min(DFG_SIZE - 1, Math.max(0, ndv * (DFG_SIZE - 1)));
@@ -167,6 +194,19 @@ fn dfgAt(ndv: f32, rough: f32) -> vec2<f32> {
   let top = mix(dfgLut[y0 * ${n}u + x0], dfgLut[y0 * ${n}u + x1], fx);
   let bottom = mix(dfgLut[y1 * ${n}u + x0], dfgLut[y1 * ${n}u + x1], fx);
   return mix(top, bottom, fy);
+}
+// The sheen's directional albedo (F1d), from the table after the DFG's.
+fn sheenE(ndv: f32, rough: f32) -> f32 {
+  let x = clamp(ndv * ${n - 1}.0, 0.0, ${n - 1}.0);
+  let y = clamp(rough * ${n - 1}.0, 0.0, ${n - 1}.0);
+  let x0 = u32(x);
+  let y0 = u32(y);
+  let x1 = min(x0 + 1u, ${n - 1}u);
+  let y1 = min(y0 + 1u, ${n - 1}u);
+  let o = ${n * n}u;
+  let top = mix(dfgLut[o + y0 * ${n}u + x0].x, dfgLut[o + y0 * ${n}u + x1].x, x - f32(x0));
+  let bottom = mix(dfgLut[o + y1 * ${n}u + x0].x, dfgLut[o + y1 * ${n}u + x1].x, x - f32(x0));
+  return mix(top, bottom, y - f32(y0));
 }
 // The height-correlated Smith visibility, G2 / (4 N·L N·V), for alpha² = a2.
 fn smithVisibility(ndl: f32, ndv: f32, a2: f32) -> f32 {

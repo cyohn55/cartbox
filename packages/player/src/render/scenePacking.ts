@@ -19,6 +19,8 @@ import {
   NO_LAYERS,
   effectActive,
   emissiveAnimation,
+  materialHasExtensions,
+  type ResolvedExtensions,
   materialHasLayers,
   macroUniform,
   materialHasWater,
@@ -111,9 +113,19 @@ import { AREA_KIND } from "./ltc.js";
  * 912  wind1      vec4<f32>    16   the previous frame's wind0, for motion vectors (F0c)
  * 928  motion0    vec4<f32>    16   x = where the frame's motion transforms start in the
  *                                    instance buffer (F0c), w = the LOD level drawn (−1 without a chain; F10a)
+ * 944  sheen0     vec4<f32>    16   rgb = sheen colour (linear), w = sheen roughness (F1d;
+ *                                    materialExtensions.ts in @cartbox/editor)
+ * 960  spec0      vec4<f32>    16   rgb = a dielectric's f0 (IOR and specular applied), w = specular factor
+ * 976  trans0     vec4<f32>    16   x = transmission, y = thickness (m), z = attenuation distance
+ *                                    (0 = none), w = IOR
+ * 992  trans1     vec4<f32>    16   rgb = attenuation colour, w = iridescence
+ * 1008 irid0      vec4<f32>    16   x = the film's IOR, y = its thickness (nm), z = emissive strength,
+ *                                    w = 1 with a UV transform
+ * 1024 uvx0       vec4<f32>    16   xy = the UV transform's scale, zw = its rotation's cos and sin
+ * 1040 uvx1       vec4<f32>    16   xy = its offset
  * ```
  *
- * 944 bytes used, padded to a 1024-byte stride (a 256-byte multiple a dynamic
+ * 1056 bytes used, padded to a 1280-byte stride (a 256-byte multiple a dynamic
  * uniform offset can address), so one buffer still holds every draw in a
  * frame — uniforms are written per batch, not per copy, so the stride costs
  * little. The metallic-roughness inputs and the environment carry the Modern
@@ -122,13 +134,13 @@ import { AREA_KIND } from "./ltc.js";
  * `envMeta.w` at 0 uses the analytic gradient instead of a panorama, and
  * `shadow.x` at 0 skips the shadow test.
  */
-export const UNIFORM_STRIDE = 1024;
+export const UNIFORM_STRIDE = 1280;
 /**
  * Bytes the struct actually occupies, before the stride padding. This is what a
  * bind group layout's `minBindingSize` must be: it makes a WGSL struct that
  * grows past what this module writes fail at pipeline creation.
  */
-export const UNIFORM_BYTES_USED = 944;
+export const UNIFORM_BYTES_USED = 1056;
 /** The same stride counted in float32s, which is how `writeBuffer` sizes it. */
 export const UNIFORM_FLOATS = UNIFORM_STRIDE / 4;
 
@@ -294,6 +306,13 @@ const OFFSET_WIND0 = 220;
 const OFFSET_MAPS0 = 224;
 const OFFSET_WIND1 = 228;
 const OFFSET_MOTION0 = 232;
+const OFFSET_SHEEN0 = 236;
+const OFFSET_SPEC0 = 240;
+const OFFSET_TRANS0 = 244;
+const OFFSET_TRANS1 = 248;
+const OFFSET_IRID0 = 252;
+const OFFSET_UVX0 = 256;
+const OFFSET_UVX1 = 260;
 
 /** The rasteriser's defaults, restated so an unlit draw shades identically. */
 export const DEFAULT_LIGHT: readonly [number, number, number] = [0.4, 0.8, 0.6];
@@ -399,6 +418,7 @@ export function resolvePbr(
     (emissiveFactor !== undefined && (emissiveFactor[0]! > 0 || emissiveFactor[1]! > 0 || emissiveFactor[2]! > 0)) ||
     material.graph !== undefined ||
     materialHasLayers(material) ||
+    materialHasExtensions(material) ||
     materialRefracts(material) ||
     materialHasWater(material);
   return {
@@ -513,6 +533,8 @@ export interface InstanceUniform {
   readonly surface?: ResolvedSurface;
   /** This draw's clearcoat, anisotropy and relief (I4; see materialLayers.ts in @cartbox/editor), or omitted for none. */
   readonly layers?: ResolvedLayers;
+  /** This draw's full material set (F1d; materialExtensions.ts in @cartbox/editor), or omitted for the defaults. */
+  readonly extensions?: ResolvedExtensions;
   /** How this draw bends what's behind it (I5; refraction.ts in @cartbox/editor), or null/omitted when it doesn't. */
   readonly refraction?: ResolvedRefraction | null;
   /** The camera's right and up and the frame's height, which a refraction's offset is measured by. */
@@ -611,6 +633,21 @@ export function writeInstanceTransform(target: Float32Array, index: number, tran
     for (let row = 0; row < 3; row += 1) target[base + 48 + column * 4 + row] = transform.normalBasis[column * 3 + row]!;
     target[base + 48 + column * 4 + 3] = 0;
   }
+}
+
+/** A draw's full material set into its uniform (F1d): the defaults (a 4% dielectric of IOR 1.5, no sheen, film or transform) without one. */
+function writeExtensions(target: Float32Array, base: number, e: ResolvedExtensions | null): void {
+  const sheen = e?.sheenColor ?? [0, 0, 0];
+  target.set([sheen[0], sheen[1], sheen[2], e?.sheenRoughness ?? 0], base + OFFSET_SHEEN0);
+  const f0 = e?.dielectricF0 ?? [0.04, 0.04, 0.04];
+  target.set([f0[0], f0[1], f0[2], e?.specularFactor ?? 1], base + OFFSET_SPEC0);
+  target.set([e?.transmission ?? 0, e?.thickness ?? 0, e?.attenuationDistance ?? 0, e?.ior ?? 1.5], base + OFFSET_TRANS0);
+  const att = e?.attenuationColor ?? [1, 1, 1];
+  target.set([att[0], att[1], att[2], e?.iridescence ?? 0], base + OFFSET_TRANS1);
+  const t = e?.uvTransform ?? null;
+  target.set([e?.iridescenceIor ?? 1.3, e?.iridescenceThickness ?? 400, e?.emissiveStrength ?? 1, t ? 1 : 0], base + OFFSET_IRID0);
+  target.set(t ? [t.scale[0], t.scale[1], Math.cos(t.rotation), Math.sin(t.rotation)] : [1, 1, 1, 0], base + OFFSET_UVX0);
+  target.set(t ? [t.offset[0], t.offset[1], 0, 0] : [0, 0, 0, 0], base + OFFSET_UVX1);
 }
 
 /**
@@ -793,6 +830,8 @@ export function writeInstanceUniform(target: Float32Array, index: number, unifor
   target[base + OFFSET_LAYER1 + 1] = layers.anisotropySin;
   target[base + OFFSET_LAYER1 + 2] = layers.relief ? 1 : 0;
   target[base + OFFSET_LAYER1 + 3] = 0;
+
+  writeExtensions(target, base, uniform.extensions ?? null);
 
   const refraction = uniform.refraction ?? null;
   target[base + OFFSET_REFRACT0] = refraction ? refraction.bend : 0;

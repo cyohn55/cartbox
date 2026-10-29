@@ -17,6 +17,8 @@ import { lookDevStage, type LookDevMaps, type LookDevOptions, type LookDevStage 
 import { checkLookDev, lookDevDraw, type LookDevCheck } from "./lookDevCheck.js";
 import { captureReference, type ReferenceCapture } from "./pathTracer.js";
 import type { ToneMapper } from "./toneMappers.js";
+import { MODELS } from "../models.js";
+import { rasterStyleFor } from "./renderCaps.js";
 import { WebgpuSceneRenderer } from "./WebgpuSceneRenderer.js";
 
 export interface LookDevViewOptions extends LookDevOptions {
@@ -62,7 +64,7 @@ export class LookDevView {
     context.configure({ device, format, alphaMode: "opaque" });
     const width = Math.max(1, canvas.width);
     const height = Math.max(1, canvas.height);
-    const renderer = await WebgpuSceneRenderer.create(device, width, height, undefined, { hdr: true, mips: true });
+    const renderer = await WebgpuSceneRenderer.create(device, width, height, rasterStyleFor(MODELS.aaa.renderCaps), { hdr: true, mips: true });
     if (!renderer) return null;
     return new LookDevView(canvas, device, context, format, renderer, new GpuPresenter(device, width, height, { hdr: true }));
   }

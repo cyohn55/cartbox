@@ -28,6 +28,7 @@ import { generateTextures, isGeneratedImage, readGenerator, type TextureGenerato
 import { readInstanceLink, type MaterialInstanceLink } from "./materialInstanceLink";
 import { readSurfaceEffects, writeSurfaceEffects } from "./materialEffects";
 import { readMaterialLayers, writeMaterialLayers } from "./materialLayers";
+import { readMaterialExtensions, writeMaterialExtensions } from "./materialExtensions";
 import { readSmartStack, writeSmartStack, type SmartStack } from "./smartMaterials";
 import type { MaterialGraph } from "./materialGraph";
 import { readMeshTrails, type MeshTrail } from "../render/meshTrails";
@@ -210,6 +211,39 @@ export interface MeshMaterial {
   readonly blendImage?: EncodedImage | null;
   readonly blendColor?: readonly [number, number, number];
   readonly blendRoughness?: number;
+  // --- The full material set (AAA_FIDELITY_ROADMAP.md F1d; see materialExtensions.ts) ---
+  /** Sheen (KHR_materials_sheen): its colour, linear (absent or black is none), and roughness 0..1. */
+  readonly sheenColor?: readonly [number, number, number];
+  readonly sheenRoughness?: number;
+  /** Transmission (KHR_materials_transmission), 0..1: the share of light let through rather than diffused. */
+  readonly transmission?: number;
+  /** The volume (KHR_materials_volume): its thickness in metres (0 thin-walled), and the colour light takes after `attenuationDistance` metres (linear). */
+  readonly thickness?: number;
+  readonly attenuationDistance?: number;
+  readonly attenuationColor?: readonly [number, number, number];
+  /** The index of refraction (KHR_materials_ior, default 1.5). */
+  readonly ior?: number;
+  /** The dielectric specular's strength and colour (KHR_materials_specular, linear; default 1 and white). */
+  readonly specularFactor?: number;
+  readonly specularColor?: readonly [number, number, number];
+  /** A thin film (KHR_materials_iridescence): its strength 0..1, index (default 1.3) and thickness in nm (default 400). */
+  readonly iridescence?: number;
+  readonly iridescenceIor?: number;
+  readonly iridescenceThickness?: number;
+  /** The emission's strength past its factor (KHR_materials_emissive_strength, default 1). */
+  readonly emissiveStrength?: number;
+  /** The UVs' offset, rotation and scale (KHR_texture_transform), for every map. */
+  readonly uvTransform?: { readonly offset: readonly [number, number]; readonly rotation: number; readonly scale: readonly [number, number] };
+  /**
+   * Subsurface scattering (F1d-2), 0..1: the share of the diffuse light that spreads under the surface (skin,
+   * wax, marble, leaves), how far each channel goes as a colour (red farthest for skin), and the radius in metres.
+   */
+  readonly subsurface?: number;
+  readonly subsurfaceColor?: readonly [number, number, number];
+  readonly subsurfaceRadius?: number;
+  /** Thin-surface transmission (KHR_materials_diffuse_transmission): the share of light from behind a leaf or a lampshade that comes through, and its tint (linear). */
+  readonly diffuseTransmission?: number;
+  readonly diffuseTransmissionColor?: readonly [number, number, number];
   // --- Layers and relief (HALO_INFINITE_STYLE_ROADMAP.md I4; see materialLayers.ts) ---
   /**
    * A clearcoat: a thin glossy lacquer over the base surface (armour paint, a
@@ -599,6 +633,25 @@ export interface SerializedMaterial {
   reflectionMask?: boolean;
   blendImage?: SerializedImage | null;
   reliefImage?: SerializedImage | null;
+  sheenColor?: readonly [number, number, number];
+  sheenRoughness?: number;
+  transmission?: number;
+  thickness?: number;
+  attenuationDistance?: number;
+  attenuationColor?: readonly [number, number, number];
+  ior?: number;
+  specularFactor?: number;
+  specularColor?: readonly [number, number, number];
+  iridescence?: number;
+  iridescenceIor?: number;
+  iridescenceThickness?: number;
+  emissiveStrength?: number;
+  uvTransform?: { readonly offset: readonly [number, number]; readonly rotation: number; readonly scale: readonly [number, number] };
+  subsurface?: number;
+  subsurfaceColor?: readonly [number, number, number];
+  subsurfaceRadius?: number;
+  diffuseTransmission?: number;
+  diffuseTransmissionColor?: readonly [number, number, number];
   clearcoat?: number;
   clearcoatRoughness?: number;
   anisotropy?: number;
@@ -948,6 +1001,7 @@ export function serializeMaterial(material: MeshMaterial, table?: ImageTable): S
     ...(material.instance ? { instance: { of: material.instance.of, overrides: [...material.instance.overrides] } } : {}),
     ...writeSurfaceEffects(material),
     ...writeMaterialLayers(material),
+    ...writeMaterialExtensions(material),
     ...writeSmartStack(material),
   };
 }
@@ -982,6 +1036,7 @@ export function deserializeMaterial(value: unknown, table?: ImageTable): MeshMat
     ...(material.reliefImage ? { reliefImage: deserializeImage(material.reliefImage, "reliefImage", table) } : {}),
     ...readSurfaceEffects(material),
     ...readMaterialLayers(material),
+    ...readMaterialExtensions(material),
     ...(readSmartStack((material as { smartStack?: unknown }).smartStack) ? { smartStack: readSmartStack((material as { smartStack?: unknown }).smartStack)! } : {}),
   });
 }

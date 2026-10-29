@@ -19,6 +19,8 @@ import { multiplyMat4, type Mat4, type MeshSceneInstance } from "@cartbox/editor
 import { PathTracer } from "./pathTracer.js";
 import type { GpuSceneDraw } from "./sceneRenderer.js";
 import type { LookDevStage } from "./lookDev.js";
+import { MODELS } from "../models.js";
+import { rasterStyleFor } from "./renderCaps.js";
 import { WebgpuSceneRenderer } from "./WebgpuSceneRenderer.js";
 
 /** A frame's pixels as linear RGBA floats, top row first. */
@@ -115,7 +117,8 @@ function ballLight(image: LinearImage, viewProj: Mat4, ball: { readonly centre: 
  */
 export async function checkLookDev(device: any, stage: LookDevStage, width: number, height: number, samples = 256, wait: <T>(p: Promise<T>) => Promise<T> = (p) => p): Promise<LookDevCheck> {
   const draw = lookDevDraw(stage, width, height);
-  const renderer = await WebgpuSceneRenderer.create(device, width, height, undefined, { hdr: true });
+  // As the AAA tier makes it: textures filtered, with mips (F1a).
+  const renderer = await WebgpuSceneRenderer.create(device, width, height, rasterStyleFor(MODELS.aaa.renderCaps), { hdr: true, mips: true });
   if (!renderer) throw new Error("The look-dev check needs the linear-light WebGPU renderer.");
   const tracer = PathTracer.create(device);
   try {

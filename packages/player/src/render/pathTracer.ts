@@ -42,9 +42,10 @@
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
-import { buildBvh, cameraPositionFromView, multiplyMat4, type DecodedTexture, type EnvironmentLight, type Mat4, type MeshSceneInstance, type SceneLight } from "@cartbox/editor";
+import { buildBvh, cameraPositionFromView, resolveExtensions, multiplyMat4, type DecodedTexture, type EnvironmentLight, type Mat4, type MeshSceneInstance, type SceneLight } from "@cartbox/editor";
 
-import { brdfWgsl, dfgTable } from "./brdf.js";
+import { brdfLut, brdfWgsl } from "./brdf.js";
+import { MATERIAL_SET_FUNCTIONS_WGSL } from "./materialSet.js";
 import { BAKE_SAMPLING_WGSL, LIGHTMAP_MAX_BOUNCES, bakeLights, packBakeLights, packBvhNodes } from "./gpuLightmapper.js";
 import { environmentKey, environmentPanorama, type LinearPanorama } from "./ibl.js";
 import { resolveLight, resolvePbr } from "./scenePacking.js";
@@ -58,7 +59,7 @@ export const REFERENCE_TEXTURE_SIDE = 1024;
 /** The largest capture, each side (8K). */
 export const MAX_CAPTURE_SIDE = 8192;
 /** A material's record: four vec4s (see {@link packReferenceScene}). */
-const MAT_VEC4S = 4;
+const MAT_VEC4S = 10;
 /** A triangle's record: its corner and edges, then its corner attributes; seven vec4s. */
 const PRIM_VEC4S = 7;
 const ATTR_VEC4S = 4;
@@ -92,11 +93,14 @@ export interface ReferenceScene {
    */
   readonly prims: Float32Array;
   /**
-   * Per material four vec4s:
+   * Per material ten vec4s:
    * - its base colour factor, as authored (RGBA);
    * - its emissive factor, as authored, and its alpha mode (0 opaque, 1 mask, 2 blend, 3 additive);
    * - metalness, roughness, and its base-colour and metal/roughness maps (−1 none);
-   * - its emissive map, whether it shades as PBR, its alpha cutoff, and the lighting channels it is on.
+   * - its emissive map, whether it shades as PBR, its alpha cutoff, and the lighting channels it is on;
+   * - the full material set (F1d; {@link extensionRows}): sheen; a dielectric's f0 and transmission; the
+   *   volume's thickness and attenuation distance, and the film's strength and IOR; the attenuation colour
+   *   and the film's thickness; the UV transform; its offset, the emissive strength and whether it has one.
    *
    * Then per map, from vec4 {@link mapTable}, one vec4 of u32 bits: its first texel in {@link texels}, its width and height.
    */
@@ -180,6 +184,29 @@ function normalMatrix(m: Mat4): number[] {
   return co.map((v) => v * s);
 }
 
+/** A material's full set (F1d) as its record's last six vec4s; the defaults off the PBR path. */
+function extensionRows(m: MeshSceneInstance["mesh"]["primitives"][number]["material"], pbr: boolean): number[] {
+  const e = resolveExtensions(pbr ? m : { name: m.name, baseColorFactor: m.baseColorFactor, baseColorImage: null });
+  const t = e.uvTransform;
+  return [
+    ...e.sheenColor,
+    e.sheenRoughness,
+    ...e.dielectricF0,
+    e.transmission,
+    e.thickness,
+    e.attenuationDistance,
+    e.iridescence,
+    e.iridescenceIor,
+    ...e.attenuationColor,
+    e.iridescenceThickness,
+    ...(t ? [t.scale[0], t.scale[1], Math.cos(t.rotation), Math.sin(t.rotation)] : [1, 1, 1, 0]),
+    ...(t ? [t.offset[0], t.offset[1]] : [0, 0]),
+    // The emissive strength applies with or without the PBR path (an emissive factor puts a material on it anyway).
+    resolveExtensions(m).emissiveStrength,
+    t ? 1 : 0,
+  ];
+}
+
 /**
  * The instances as the path tracer reads them; see {@link ReferenceScene}.
  * Its triangles are in `buildBvh`'s order, so they line up with its nodes.
@@ -230,6 +257,7 @@ export function packReferenceScene(instances: readonly MeshSceneInstance[]): Ref
         pbr.isPbr ? 1 : 0,
         m.alphaCutoff ?? 0.5,
         instance.lightChannels ?? 1,
+        ...extensionRows(m, pbr.isPbr),
       ];
       const key = row.join(",");
       let mat = materialIndex.get(key);
@@ -283,7 +311,7 @@ export function packReferenceScene(instances: readonly MeshSceneInstance[]): Ref
   const mapTable = materialRows.length * MAT_VEC4S;
   const mats = new Float32Array(Math.max(1, mapTable + textureList.length) * 4);
   const matBits = new Uint32Array(mats.buffer);
-  materialRows.forEach((row, i) => mats.set(row, i * 16));
+  materialRows.forEach((row, i) => mats.set(row, i * MAT_VEC4S * 4));
   let total = 0;
   textureList.forEach((tex, i) => {
     matBits.set([total, tex.width, tex.height, 0], (mapTable + i) * 4);
@@ -324,6 +352,7 @@ const T_MIN = 1e-4;
 const FAR = 1e30;
 
 ${BAKE_SAMPLING_WGSL}
+${MATERIAL_SET_FUNCTIONS_WGSL}
 
 // A map's texel, wrapped.
 fn texFetch(m: vec4<u32>, x: i32, y: i32) -> vec4<f32> {
@@ -362,14 +391,20 @@ fn uvAt(i: u32, b: vec2<f32>) -> vec2<f32> {
   let uv0 = vec2<f32>(attr(i, 0u).w, attr(i, 1u).w);
   let uv1 = vec2<f32>(attr(i, 2u).w, attr(i, 3u).x);
   let uv2 = attr(i, 3u).yz;
-  return uv0 * (1.0 - b.x - b.y) + uv1 * b.x + uv2 * b.y;
+  let uv = uv0 * (1.0 - b.x - b.y) + uv1 * b.x + uv2 * b.y;
+  // The material's UV transform (F1d).
+  let m = matOf(i);
+  if (mat(m, 9u).w < 0.5) { return uv; }
+  return khrTransform(uv, mat(m, 8u), mat(m, 9u).xy);
 }
 
 // Whether a ray stops at triangle i at barycentrics b: an opaque surface always; a cut-out where its
-// alpha reaches the cutoff; a blended one as often as its alpha; an additive one never.
-fn stops(i: u32, b: vec2<f32>) -> bool {
+// alpha reaches the cutoff; a blended one as often as its alpha; an additive one never. A shadow ray
+// passes a transmitting surface (F1d) as often as it lets light through.
+fn stops(i: u32, b: vec2<f32>, shadow: bool) -> bool {
   let m = matOf(i);
   let mode = mat(m, 1u).w;
+  if (shadow && mat(m, 5u).w > 0.0 && rand() < mat(m, 5u).w * (1.0 - mat(m, 2u).x)) { return false; }
   if (mode < 0.5) { return true; }
   if (mode > 2.5) { return false; }
   let a = mat(m, 0u).a * texSample(mat(m, 2u).z, uvAt(i, b)).a;
@@ -431,7 +466,7 @@ fn trace(o: vec3<f32>, d: vec3<f32>, tMax: f32, anyHit: bool) -> Hit {
       let v = dot(d, q) * id;
       if (v < 0.0 || u + v > 1.0) { continue; }
       let t = dot(e2, q) * id;
-      if (t > T_MIN && t < best.t && stops(i, vec2<f32>(u, v))) {
+      if (t > T_MIN && t < best.t && stops(i, vec2<f32>(u, v), anyHit)) {
         best = Hit(t, i32(i), vec2<f32>(u, v));
         if (anyHit) { return best; }
       }
@@ -462,6 +497,17 @@ struct Surface {
   emission: vec3<f32>,
   pbr: bool,
   channels: u32,
+  // The full material set (F1d): a dielectric's f0, sheen, transmission and what the volume lets through,
+  // the film, and (set once N·V is known) the reflectance and what the sheen leaves the base.
+  f0: vec3<f32>,
+  sheen: vec3<f32>,
+  sheenRough: f32,
+  transmission: f32,
+  absorb: vec3<f32>,
+  irid: f32,
+  iridIor: f32,
+  iridThickness: f32,
+  sheenScale: f32,
 };
 
 fn surfaceAt(i: u32, b: vec2<f32>) -> Surface {
@@ -475,9 +521,23 @@ fn surfaceAt(i: u32, b: vec2<f32>) -> Surface {
   s.albedo = toLinear(base);
   s.metal = clamp(m2.x * mr.b, 0.0, 1.0);
   s.rough = clamp(m2.y * mr.g, 0.045, 1.0);
-  s.emission = toLinear(mat(m, 1u).rgb * texSample(m3.x, uv).rgb);
+  s.emission = toLinear(mat(m, 1u).rgb * texSample(m3.x, uv).rgb) * mat(m, 9u).z;
   s.pbr = m3.y > 0.5;
   s.channels = u32(m3.w + 0.5);
+  let m4 = mat(m, 4u);
+  let m5 = mat(m, 5u);
+  let m6 = mat(m, 6u);
+  let m7 = mat(m, 7u);
+  s.f0 = mix(m5.rgb, s.albedo, s.metal);
+  s.sheen = m4.rgb;
+  s.sheenRough = m4.w;
+  s.transmission = m5.w;
+  s.absorb = vec3<f32>(1.0);
+  if (m6.x > 0.0 && m6.y > 0.0) { s.absorb = pow(max(m7.rgb, vec3<f32>(1e-4)), vec3<f32>(m6.x / m6.y)); }
+  s.irid = m6.z;
+  s.iridIor = m6.w;
+  s.iridThickness = m7.w;
+  s.sheenScale = 1.0;
   return s;
 }
 
@@ -494,11 +554,11 @@ fn brdf(s: Surface, N: vec3<f32>, V: vec3<f32>, L: vec3<f32>) -> vec3<f32> {
   let a2 = s.rough * s.rough * s.rough * s.rough;
   let dd = ndh * ndh * (a2 - 1.0) + 1.0;
   let D = a2 / (PI * dd * dd + 1e-7);
-  let f0 = mix(vec3<f32>(0.04), s.albedo, s.metal);
+  let f0 = s.f0;
   let F = f0 + (vec3<f32>(1.0) - f0) * pow(1.0 - vdh, 5.0);
   let eComp = energyCompensation(f0, dfgAt(ndv, s.rough));
-  let diffuse = (1.0 - s.metal) * (vec3<f32>(1.0) - F) * s.albedo / PI;
-  return diffuse + F * D * smithVisibility(ndl, ndv, a2) * eComp;
+  let diffuse = (1.0 - s.metal) * (1.0 - s.transmission) * (vec3<f32>(1.0) - F) * s.albedo / PI;
+  return (diffuse + F * D * smithVisibility(ndl, ndv, a2) * eComp) * s.sheenScale + sheenBrdf(s.sheen, s.sheenRough, ndl, ndv, ndh);
 }
 
 // An orthonormal frame about n (Duff et al.): tangent, bitangent, n.
@@ -527,10 +587,9 @@ fn sampleVndf(Ve: vec3<f32>, alpha: f32, xi: vec2<f32>) -> vec3<f32> {
 // How likely a bounce takes the specular lobe: by the two lobes' share of what the surface reflects.
 fn specularChance(s: Surface, ndv: f32) -> f32 {
   if (!s.pbr) { return 0.0; }
-  let f0 = mix(vec3<f32>(0.04), s.albedo, s.metal);
-  let e = specularEnergy(f0, dfgAt(ndv, s.rough));
+  let e = specularEnergy(s.f0, dfgAt(ndv, s.rough));
   let ls = lum(e);
-  let ld = lum(s.albedo * (1.0 - s.metal) * (vec3<f32>(1.0) - e));
+  let ld = lum(s.albedo * (1.0 - s.metal) * (1.0 - s.transmission) * (vec3<f32>(1.0) - e) + s.sheen);
   return clamp(ls / max(ls + ld, 1e-6), 0.1, 0.9);
 }
 
@@ -618,7 +677,7 @@ fn radiance(origin: vec3<f32>, dir: vec3<f32>) -> vec4<f32> {
       break;
     }
     let i = u32(h.tri);
-    let s = surfaceAt(i, h.b);
+    var s = surfaceAt(i, h.b);
     let V = -d;
     var ng = normalize(cross(tri(i, 1u).xyz, tri(i, 2u).xyz));
     if (dot(ng, V) < 0.0) { ng = -ng; } // two-sided, as the renderer's surfaces are
@@ -628,13 +687,27 @@ fn radiance(origin: vec3<f32>, dir: vec3<f32>) -> vec4<f32> {
     if (dot(N, ng) < 0.0) { N = -N; }
     if (dot(N, V) <= 0.0) { N = ng; }
     let p = o + d * h.t + ng * EPS;
+    // What depends on N·V (F1d): the film's reflectance, and what the sheen leaves the base.
+    let ndv0 = max(1e-4, dot(N, V));
+    if (s.pbr && s.irid > 0.0) { s.f0 = mix(s.f0, iridescenceFresnel(ndv0, s.f0, s.iridIor, s.iridThickness), s.irid); }
+    if (s.pbr) { s.sheenScale = 1.0 - max(s.sheen.r, max(s.sheen.g, s.sheen.b)) * sheenE(ndv0, s.sheenRough); }
     add = s.emission + directLight(s, p, N, V);
     add = tp * add;
     if (clampTo > 0.0 && b > 0u) { add = add * min(1.0, clampTo / max(lum(add), 1e-6)); }
     L = L + add;
     if (b == params.info.x) { break; }
+    let ndv = ndv0;
+    // Transmission (F1d): as often as the surface lets light through, the path goes on through it, unbent
+    // (as the renderer shows what's behind), tinted by the base colour and the volume.
+    let pt = select(0.0, min(0.9, s.transmission * (1.0 - s.metal)), s.pbr);
+    if (pt > 0.0 && rand() < pt) {
+      let e = specularEnergy(s.f0, dfgAt(ndv, s.rough));
+      tp = tp * s.transmission * (1.0 - s.metal) * (vec3<f32>(1.0) - e) * s.albedo * s.absorb * s.sheenScale / pt;
+      o = o + d * h.t - ng * EPS;
+      continue;
+    }
+    tp = tp / (1.0 - pt);
     // A bounce: the specular by its visible normals, or the diffuse by the cosine.
-    let ndv = max(1e-4, dot(N, V));
     let ps = specularChance(s, ndv);
     var next: vec3<f32>;
     if (rand() < ps) {
@@ -774,7 +847,7 @@ class TracerCore {
   lightBuffer: any = null;
 
   constructor(readonly device: any) {
-    const table = dfgTable();
+    const table = brdfLut();
     this.dfg = device.createBuffer({ size: table.byteLength, usage: STORAGE | COPY_DST });
     device.queue.writeBuffer(this.dfg, 0, table);
   }

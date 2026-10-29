@@ -1,4 +1,4 @@
-import { MeshSceneInstance, MeshAsset, Mat4, ScenePropValue, PhysicsSpec, AnimatorSpec, AttachedComponent, SceneLighting, PhysicsWorldSettings, SceneTimeline, SceneLevel, NavMesh, Terrain, SceneStreaming, ParticleEffect, DecalDef, DecalMark, RagdollBox, DebrisDef, LodChain, SceneAudio, ComponentDef, StreamGroup, JointKind, JointSpec, EnvironmentLight, SceneLight, ActionRebind, Atmosphere, SkyMoon, DecodedTexture, SkySun, BakedCloudLayer, SunShafts, ColorFilter, AccessibilitySettings, EncodedImage, UiDocument, InputAction, StringTable, ReflectionProbe, ShadowInput, ToneMap, LocalShadows, ProjectedDecal, DecalTiles, Occluder, DynamicGi, SceneFog, SceneWind, RasterStyle, HdrLightmap, LightmapLayout, ProbeVolume, OccluderSurface, MeshMaterial, ResolvedLayers, ResolvedRefraction, SurfaceEffect, AnimatorOp, NavGraph, AnimationCue } from '@cartbox/editor';
+import { MeshSceneInstance, MeshAsset, Mat4, ScenePropValue, PhysicsSpec, AnimatorSpec, AttachedComponent, SceneLighting, PhysicsWorldSettings, SceneTimeline, SceneLevel, NavMesh, Terrain, SceneStreaming, ParticleEffect, DecalDef, DecalMark, RagdollBox, DebrisDef, LodChain, SceneAudio, ComponentDef, StreamGroup, JointKind, JointSpec, EnvironmentLight, SceneLight, ActionRebind, Atmosphere, SkyMoon, DecodedTexture, SkySun, BakedCloudLayer, SunShafts, ColorFilter, AccessibilitySettings, EncodedImage, UiDocument, InputAction, StringTable, ReflectionProbe, ShadowInput, ToneMap, LocalShadows, ProjectedDecal, DecalTiles, Occluder, DynamicGi, SceneFog, SceneWind, RasterStyle, HdrLightmap, LightmapLayout, ProbeVolume, OccluderSurface, MeshMaterial, ResolvedLayers, ResolvedExtensions, ResolvedRefraction, SurfaceEffect, AnimatorOp, NavGraph, AnimationCue } from '@cartbox/editor';
 
 /**
  * The runtime mesh scene: the cart's mesh sidecar resolved into placed instances
@@ -1223,11 +1223,14 @@ interface ReferenceScene {
      */
     readonly prims: Float32Array;
     /**
-     * Per material four vec4s:
+     * Per material ten vec4s:
      * - its base colour factor, as authored (RGBA);
      * - its emissive factor, as authored, and its alpha mode (0 opaque, 1 mask, 2 blend, 3 additive);
      * - metalness, roughness, and its base-colour and metal/roughness maps (−1 none);
-     * - its emissive map, whether it shades as PBR, its alpha cutoff, and the lighting channels it is on.
+     * - its emissive map, whether it shades as PBR, its alpha cutoff, and the lighting channels it is on;
+     * - the full material set (F1d; {@link extensionRows}): sheen; a dielectric's f0 and transmission; the
+     *   volume's thickness and attenuation distance, and the film's strength and IOR; the attenuation colour
+     *   and the film's thickness; the UV transform; its offset, the emissive strength and whether it has one.
      *
      * Then per map, from vec4 {@link mapTable}, one vec4 of u32 bits: its first texel in {@link texels}, its width and height.
      */
@@ -6266,9 +6269,19 @@ declare function bakeProbeVolumeGpu(device: any, min: readonly [number, number, 
  * 912  wind1      vec4<f32>    16   the previous frame's wind0, for motion vectors (F0c)
  * 928  motion0    vec4<f32>    16   x = where the frame's motion transforms start in the
  *                                    instance buffer (F0c), w = the LOD level drawn (−1 without a chain; F10a)
+ * 944  sheen0     vec4<f32>    16   rgb = sheen colour (linear), w = sheen roughness (F1d;
+ *                                    materialExtensions.ts in @cartbox/editor)
+ * 960  spec0      vec4<f32>    16   rgb = a dielectric's f0 (IOR and specular applied), w = specular factor
+ * 976  trans0     vec4<f32>    16   x = transmission, y = thickness (m), z = attenuation distance
+ *                                    (0 = none), w = IOR
+ * 992  trans1     vec4<f32>    16   rgb = attenuation colour, w = iridescence
+ * 1008 irid0      vec4<f32>    16   x = the film's IOR, y = its thickness (nm), z = emissive strength,
+ *                                    w = 1 with a UV transform
+ * 1024 uvx0       vec4<f32>    16   xy = the UV transform's scale, zw = its rotation's cos and sin
+ * 1040 uvx1       vec4<f32>    16   xy = its offset
  * ```
  *
- * 944 bytes used, padded to a 1024-byte stride (a 256-byte multiple a dynamic
+ * 1056 bytes used, padded to a 1280-byte stride (a 256-byte multiple a dynamic
  * uniform offset can address), so one buffer still holds every draw in a
  * frame — uniforms are written per batch, not per copy, so the stride costs
  * little. The metallic-roughness inputs and the environment carry the Modern
@@ -6277,13 +6290,13 @@ declare function bakeProbeVolumeGpu(device: any, min: readonly [number, number, 
  * `envMeta.w` at 0 uses the analytic gradient instead of a panorama, and
  * `shadow.x` at 0 skips the shadow test.
  */
-declare const UNIFORM_STRIDE = 1024;
+declare const UNIFORM_STRIDE = 1280;
 /**
  * Bytes the struct actually occupies, before the stride padding. This is what a
  * bind group layout's `minBindingSize` must be: it makes a WGSL struct that
  * grows past what this module writes fail at pipeline creation.
  */
-declare const UNIFORM_BYTES_USED = 944;
+declare const UNIFORM_BYTES_USED = 1056;
 /** The same stride counted in float32s, which is how `writeBuffer` sizes it. */
 declare const UNIFORM_FLOATS: number;
 /**
@@ -6481,6 +6494,8 @@ interface InstanceUniform {
     readonly surface?: ResolvedSurface;
     /** This draw's clearcoat, anisotropy and relief (I4; see materialLayers.ts in @cartbox/editor), or omitted for none. */
     readonly layers?: ResolvedLayers;
+    /** This draw's full material set (F1d; materialExtensions.ts in @cartbox/editor), or omitted for the defaults. */
+    readonly extensions?: ResolvedExtensions;
     /** How this draw bends what's behind it (I5; refraction.ts in @cartbox/editor), or null/omitted when it doesn't. */
     readonly refraction?: ResolvedRefraction | null;
     /** The camera's right and up and the frame's height, which a refraction's offset is measured by. */

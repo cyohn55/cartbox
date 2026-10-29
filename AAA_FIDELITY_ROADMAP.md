@@ -354,6 +354,23 @@ Everything else depends on this track. It contains no visible "feature", but its
   - Texture transforms.
 
   Each one maps to its glTF KHR extension on import and export. On top of these, separable **screen-space subsurface scattering** (Burley profile, Jimenez) for skin, wax, leaves and marble, with a transmission term for thin surfaces.
+  - **F1d-1, the KHR material set: done** on the `aaa` tier (`editor model/materialExtensions.ts`, `player render/materialSet.ts`). Every other tier ignores the new fields.
+    - **The fields** on a material, named and stored as their extensions have them (colours linear): sheen colour and roughness; transmission; thickness, attenuation distance and colour; IOR; specular factor and colour; iridescence, its IOR and thickness; emissive strength; and a UV transform. Each is read clamped, and a neutral one is dropped. Any of them puts a material on the PBR path.
+    - **glTF.** Each maps to its KHR extension on import and export: `_sheen`, `_transmission`, `_volume`, `_ior`, `_specular`, `_iridescence`, `_emissive_strength`, and `KHR_texture_transform`, written on each of the material's maps. glTF gives each texture its own transform; the engine keeps one per material, the first a material's maps carry.
+    - **In the shader** (the uniform grows to 1056 bytes, a 1280-byte stride, for seven rows):
+      - a dielectric's f0 from its IOR, scaled and tinted by its specular (IOR 1.5 and specular 1 are the 4% it had);
+      - a thin film's Fresnel at N·V over it (Belcour & Barla, as glTF's sample viewer evaluates it);
+      - the Charlie sheen with Neubelt's visibility for each light and from the sky's irradiance, the base beneath scaled by what the sheen reflects. Its directional albedo is a table integrated once on the CPU, kept after the DFG table in the same buffer;
+      - transmission: the diffuse gives up its share, and the scene behind (the refraction pass's copy, I5) comes through less what the surface reflects, tinted by the base colour and Beer–Lambert absorption over its thickness;
+      - emission times its strength, and every map at the transformed UVs.
+    - **The path-traced reference** (F10b) follows: each material record grows to ten vec4s. A path passes through a transmitting surface as often as it transmits, and so does a shadow ray.
+    - **In the editor:** a Sheen, Transmission, Specular, Thin film and Emission-and-UVs group under the material's layers.
+    - *Found, then fixed:* the look-dev stage (F10c) and its check made their renderer with the fantasy tiers' default style, which samples textures nearest; they now take the AAA model's (bilinear, with mips).
+    - *Tests:* `Unit Tests/material-set.test.ts` covers:
+      - the fields read, clamped and resolved (f0 from IOR and specular, glTF's IOR 0); UV transforms in glTF's space; the film, the sheen's albedo and absorption; the uniform's rows;
+      - the glTF round trip of every extension, and a texture's transform on its maps;
+      - on Dawn, the renderer against the reference within 5% (8% for the film): a higher IOR and a tinted specular; a sheen over dark cloth; emission at 4× strength; glass in front of a light, clear and through two attenuation distances (a quarter); a moved texture; and a film's colour.
+    - *Left for F1d:* the extensions' textures (sheen, transmission, thickness, specular and iridescence maps); refraction through a thick volume (what is behind comes through unbent, as a thin wall's would); the specular factor's scaling of the grazing reflectance.
 - [ ] **F1e. Material graph, production grade.**
   - New outputs: normal, world-position offset, pixel depth offset, refraction, subsurface colour.
   - Any number of texture samplers.

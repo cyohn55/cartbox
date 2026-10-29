@@ -182,11 +182,12 @@ export interface DrawBatch<G> {
   lod?: number;
 }
 
-/** Whether a batch refracts (I5): a PBR draw whose material or surface effect bends what's behind it. */
+/** Whether a batch refracts (I5): a PBR draw whose material or surface effect bends what's behind it, or that transmits it (F1d). */
 export function batchRefracts(primitive: MeshPrimitive, textures: PrimitiveTextures, effect: SurfaceEffect | null): boolean {
   const material = primitive.material;
   if (!resolvePbr(material, textures.mr !== null, textures.occ !== null, textures.emis !== null).isPbr) return false;
-  return refracts(resolveRefraction(material, effectActive(effect) ? effect : null));
+  // A transmitting material (F1d) reads what's behind it too, unbent.
+  return refracts(resolveRefraction(material, effectActive(effect) ? effect : null)) || (material.transmission ?? 0) > 0;
 }
 
 /**

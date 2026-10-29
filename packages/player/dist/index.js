@@ -14501,6 +14501,7 @@ import {
   NO_LAYERS,
   effectActive,
   emissiveAnimation,
+  materialHasExtensions,
   materialHasLayers,
   macroUniform,
   materialHasWater,
@@ -14673,8 +14674,8 @@ fn areaTerm(lgt: Light, P: vec3<f32>, N: vec3<f32>, V: vec3<f32>, ndv: f32, roug
 }
 
 // src/render/scenePacking.ts
-var UNIFORM_STRIDE = 1024;
-var UNIFORM_BYTES_USED = 944;
+var UNIFORM_STRIDE = 1280;
+var UNIFORM_BYTES_USED = 1056;
 var UNIFORM_FLOATS = UNIFORM_STRIDE / 4;
 var LIGHT_FLOATS = 20;
 var PROBE_FLOATS = 16;
@@ -14781,6 +14782,13 @@ var OFFSET_WIND0 = 220;
 var OFFSET_MAPS0 = 224;
 var OFFSET_WIND1 = 228;
 var OFFSET_MOTION0 = 232;
+var OFFSET_SHEEN0 = 236;
+var OFFSET_SPEC0 = 240;
+var OFFSET_TRANS0 = 244;
+var OFFSET_TRANS1 = 248;
+var OFFSET_IRID0 = 252;
+var OFFSET_UVX0 = 256;
+var OFFSET_UVX1 = 260;
 var DEFAULT_LIGHT = [0.4, 0.8, 0.6];
 var DEFAULT_AMBIENT2 = 0.35;
 function resolveLight(direction, ambient) {
@@ -14799,7 +14807,7 @@ function normalBasis3x3(model) {
 }
 function resolvePbr(material2, hasMr, hasOcc, hasEmis) {
   const emissiveFactor = material2.emissiveFactor;
-  const isPbr = hasMr || hasOcc || hasEmis || material2.metallicFactor !== void 0 || material2.roughnessFactor !== void 0 || emissiveFactor !== void 0 && (emissiveFactor[0] > 0 || emissiveFactor[1] > 0 || emissiveFactor[2] > 0) || material2.graph !== void 0 || materialHasLayers(material2) || materialRefracts(material2) || materialHasWater(material2);
+  const isPbr = hasMr || hasOcc || hasEmis || material2.metallicFactor !== void 0 || material2.roughnessFactor !== void 0 || emissiveFactor !== void 0 && (emissiveFactor[0] > 0 || emissiveFactor[1] > 0 || emissiveFactor[2] > 0) || material2.graph !== void 0 || materialHasLayers(material2) || materialHasExtensions(material2) || materialRefracts(material2) || materialHasWater(material2);
   return {
     isPbr,
     metallic: material2.metallicFactor ?? 1,
@@ -14848,6 +14856,19 @@ function writeInstanceTransform(target, index, transform3, base = index * INSTAN
     for (let row = 0; row < 3; row += 1) target[base + 48 + column * 4 + row] = transform3.normalBasis[column * 3 + row];
     target[base + 48 + column * 4 + 3] = 0;
   }
+}
+function writeExtensions(target, base, e) {
+  const sheen2 = e?.sheenColor ?? [0, 0, 0];
+  target.set([sheen2[0], sheen2[1], sheen2[2], e?.sheenRoughness ?? 0], base + OFFSET_SHEEN0);
+  const f0 = e?.dielectricF0 ?? [0.04, 0.04, 0.04];
+  target.set([f0[0], f0[1], f0[2], e?.specularFactor ?? 1], base + OFFSET_SPEC0);
+  target.set([e?.transmission ?? 0, e?.thickness ?? 0, e?.attenuationDistance ?? 0, e?.ior ?? 1.5], base + OFFSET_TRANS0);
+  const att = e?.attenuationColor ?? [1, 1, 1];
+  target.set([att[0], att[1], att[2], e?.iridescence ?? 0], base + OFFSET_TRANS1);
+  const t = e?.uvTransform ?? null;
+  target.set([e?.iridescenceIor ?? 1.3, e?.iridescenceThickness ?? 400, e?.emissiveStrength ?? 1, t ? 1 : 0], base + OFFSET_IRID0);
+  target.set(t ? [t.scale[0], t.scale[1], Math.cos(t.rotation), Math.sin(t.rotation)] : [1, 1, 1, 0], base + OFFSET_UVX0);
+  target.set(t ? [t.offset[0], t.offset[1], 0, 0] : [0, 0, 0, 0], base + OFFSET_UVX1);
 }
 function writeInstanceUniform(target, index, uniform) {
   const base = index * UNIFORM_FLOATS;
@@ -14997,6 +15018,7 @@ function writeInstanceUniform(target, index, uniform) {
   target[base + OFFSET_LAYER1 + 1] = layers.anisotropySin;
   target[base + OFFSET_LAYER1 + 2] = layers.relief ? 1 : 0;
   target[base + OFFSET_LAYER1 + 3] = 0;
+  writeExtensions(target, base, uniform.extensions ?? null);
   const refraction = uniform.refraction ?? null;
   target[base + OFFSET_REFRACT0] = refraction ? refraction.bend : 0;
   target[base + OFFSET_REFRACT0 + 1] = refraction ? refraction.warp : 0;
@@ -15167,7 +15189,7 @@ function occlusionWithRelief(occ, relief) {
 function batchRefracts(primitive, textures, effect) {
   const material2 = primitive.material;
   if (!resolvePbr(material2, textures.mr !== null, textures.occ !== null, textures.emis !== null).isPbr) return false;
-  return refracts(resolveRefraction(material2, effectActive2(effect) ? effect : null));
+  return refracts(resolveRefraction(material2, effectActive2(effect) ? effect : null)) || (material2.transmission ?? 0) > 0;
 }
 function batchInstances(instances, geometryOf, eye = [0, 0, 0]) {
   const batches = [];
@@ -18026,6 +18048,7 @@ import {
   CLEARCOAT_F0 as CLEARCOAT_F02,
   PARALLAX_MIN_NDV as PARALLAX_MIN_NDV2,
   PARALLAX_STEPS as PARALLAX_STEPS2,
+  resolveExtensions as resolveExtensions2,
   resolveLayers as resolveLayers2,
   DISTORTION_FREQUENCY as DISTORTION_FREQUENCY2,
   DISTORTION_SPEED as DISTORTION_SPEED2,
@@ -18557,6 +18580,7 @@ function uploadCompressed(device, width, height, chain) {
 }
 
 // src/render/brdf.ts
+import { sheenAlbedo } from "@cartbox/editor";
 var DFG_SIZE = 32;
 var DFG_SAMPLES = 512;
 var MIN_ROUGHNESS = 0.045;
@@ -18614,6 +18638,22 @@ function dfgTable() {
   table = out;
   return out;
 }
+var sheen = null;
+function sheenTable() {
+  if (sheen) return sheen;
+  const out = new Float32Array(DFG_SIZE * DFG_SIZE * 2);
+  for (let r = 0; r < DFG_SIZE; r += 1) {
+    for (let v = 0; v < DFG_SIZE; v += 1) out[(r * DFG_SIZE + v) * 2] = sheenAlbedo(Math.max(1e-3, v / (DFG_SIZE - 1)), r / (DFG_SIZE - 1), 1024);
+  }
+  sheen = out;
+  return out;
+}
+function brdfLut() {
+  const out = new Float32Array(DFG_SIZE * DFG_SIZE * 4);
+  out.set(dfgTable(), 0);
+  out.set(sheenTable(), DFG_SIZE * DFG_SIZE * 2);
+  return out;
+}
 function brdfWgsl(group, binding) {
   const n = DFG_SIZE;
   return (
@@ -18633,6 +18673,19 @@ fn dfgAt(ndv: f32, rough: f32) -> vec2<f32> {
   let top = mix(dfgLut[y0 * ${n}u + x0], dfgLut[y0 * ${n}u + x1], fx);
   let bottom = mix(dfgLut[y1 * ${n}u + x0], dfgLut[y1 * ${n}u + x1], fx);
   return mix(top, bottom, fy);
+}
+// The sheen's directional albedo (F1d), from the table after the DFG's.
+fn sheenE(ndv: f32, rough: f32) -> f32 {
+  let x = clamp(ndv * ${n - 1}.0, 0.0, ${n - 1}.0);
+  let y = clamp(rough * ${n - 1}.0, 0.0, ${n - 1}.0);
+  let x0 = u32(x);
+  let y0 = u32(y);
+  let x1 = min(x0 + 1u, ${n - 1}u);
+  let y1 = min(y0 + 1u, ${n - 1}u);
+  let o = ${n * n}u;
+  let top = mix(dfgLut[o + y0 * ${n}u + x0].x, dfgLut[o + y0 * ${n}u + x1].x, x - f32(x0));
+  let bottom = mix(dfgLut[o + y1 * ${n}u + x0].x, dfgLut[o + y1 * ${n}u + x1].x, x - f32(x0));
+  return mix(top, bottom, y - f32(y0));
 }
 // The height-correlated Smith visibility, G2 / (4 N\xB7L N\xB7V), for alpha\xB2 = a2.
 fn smithVisibility(ndl: f32, ndv: f32, a2: f32) -> f32 {
@@ -18661,8 +18714,96 @@ fn specularOcclusion(ndv: f32, ao: f32, alpha: f32) -> f32 {
   );
 }
 
+// src/render/materialSet.ts
+var MATERIAL_SET_FUNCTIONS_WGSL = (
+  /* wgsl */
+  `
+// KHR_texture_transform (F1d): into glTF's V-down space, offset + rotation \xB7 (scale \xD7 uv), and back.
+// xf = (scale u, scale v, cos, sin), offset = its offset.
+fn khrTransform(uv: vec2<f32>, xf: vec4<f32>, offset: vec2<f32>) -> vec2<f32> {
+  let g = vec2<f32>(uv.x, 1.0 - uv.y) * xf.xy;
+  let t = vec2<f32>(xf.z * g.x + xf.w * g.y, -xf.w * g.x + xf.z * g.y) + offset;
+  return vec2<f32>(t.x, 1.0 - t.y);
+}
+// The sheen's BRDF (Charlie, Neubelt) for colour c and roughness r, without the cosine.
+fn sheenBrdf(c: vec3<f32>, r: f32, ndl: f32, ndv: f32, ndh: f32) -> vec3<f32> {
+  if (max(c.r, max(c.g, c.b)) <= 0.0) { return vec3<f32>(0.0); }
+  let alpha = max(1e-3, r * r);
+  let inv = 1.0 / alpha;
+  let sin2 = max(0.0, 1.0 - ndh * ndh);
+  let d = (2.0 + inv) * pow(sin2, inv * 0.5) / 6.2831853;
+  let v = 1.0 / (4.0 * (ndl + ndv - ndl * ndv) + 1e-6);
+  return c * d * v;
+}
+fn ifFresnelSchlick(f0: f32, c: f32) -> f32 {
+  return f0 + (1.0 - f0) * pow(1.0 - c, 5.0);
+}
+fn ifIorToF0(n2: f32, n1: f32) -> f32 {
+  let r = (n2 - n1) / (n2 + n1);
+  return r * r;
+}
+fn ifSensitivity(opd: f32, shift: vec3<f32>) -> vec3<f32> {
+  let phase = 2.0 * 3.14159265 * opd * 1.0e-9;
+  let val = vec3<f32>(5.4856e-13, 4.4201e-13, 5.2481e-13);
+  let pos = vec3<f32>(1.6810e6, 1.7953e6, 2.2084e6);
+  let vr = vec3<f32>(4.3278e9, 9.3046e9, 6.6121e9);
+  var xyz = val * sqrt(2.0 * 3.14159265 * vr) * cos(pos * phase + shift) * exp(-phase * phase * vr);
+  xyz.x = xyz.x + 9.7470e-14 * sqrt(2.0 * 3.14159265 * 4.5282e9) * cos(2.2399e6 * phase + shift.x) * exp(-4.5282e9 * phase * phase);
+  xyz = xyz / 1.0685e-7;
+  let m = mat3x3<f32>(vec3<f32>(3.2404542, -0.9692660, 0.0556434), vec3<f32>(-1.5371385, 1.8760108, -0.2040259), vec3<f32>(-0.4985314, 0.0415560, 1.0572252));
+  return m * xyz;
+}
+// A thin film of index filmIor and thickness (nm) over a base of reflectance baseF0: its Fresnel at cos1 (Belcour & Barla).
+fn iridescenceFresnel(cos1: f32, baseF0: vec3<f32>, filmIor: f32, thickness: f32) -> vec3<f32> {
+  let t = clamp(thickness / 0.03, 0.0, 1.0);
+  let film = mix(1.0, filmIor, t * t * (3.0 - 2.0 * t));
+  let sin2Sq = (1.0 / film) * (1.0 / film) * (1.0 - cos1 * cos1);
+  let cos2Sq = 1.0 - sin2Sq;
+  if (cos2Sq < 0.0) { return vec3<f32>(1.0); }
+  let cos2 = sqrt(cos2Sq);
+  let r12 = ifFresnelSchlick(ifIorToF0(film, 1.0), cos1);
+  let t121 = 1.0 - r12;
+  let phi12 = select(0.0, 3.14159265, film < 1.0);
+  let phi21 = 3.14159265 - phi12;
+  let sf = sqrt(clamp(baseF0, vec3<f32>(0.0), vec3<f32>(0.9999)));
+  let baseIor = (vec3<f32>(1.0) + sf) / (vec3<f32>(1.0) - sf);
+  let rr = (baseIor - vec3<f32>(film)) / (baseIor + vec3<f32>(film));
+  let r1 = rr * rr;
+  let r23 = r1 + (vec3<f32>(1.0) - r1) * pow(1.0 - cos2, 5.0);
+  let phi23 = select(vec3<f32>(0.0), vec3<f32>(3.14159265), baseIor < vec3<f32>(film));
+  let opd = 2.0 * film * thickness * cos2;
+  let phi = vec3<f32>(phi21) + phi23;
+  let r123 = clamp(r12 * r23, vec3<f32>(1e-5), vec3<f32>(0.9999));
+  let root = sqrt(r123);
+  let rs = t121 * t121 * r23 / (vec3<f32>(1.0) - r123);
+  var total = r12 + rs;
+  var cm = (rs - vec3<f32>(t121)) * root;
+  total = total + cm * 2.0 * ifSensitivity(opd, phi);
+  cm = cm * root;
+  total = total + cm * 2.0 * ifSensitivity(2.0 * opd, 2.0 * phi);
+  return max(total, vec3<f32>(0.0));
+}
+`
+);
+var MATERIAL_SET_WGSL = (
+  /* wgsl */
+  `${MATERIAL_SET_FUNCTIONS_WGSL}
+fn khrUv(uv: vec2<f32>) -> vec2<f32> {
+  if (u.irid0.w < 0.5) { return uv; }
+  return khrTransform(uv, u.uvx0, u.uvx1.xy);
+}
+// The sheen's light from a light at N\xB7L, N\xB7V, N\xB7H, in the renderer's units (\xD7 \u03C0).
+fn sheenLobe(ndl: f32, ndv: f32, ndh: f32) -> vec3<f32> {
+  return sheenBrdf(u.sheen0.rgb, u.sheen0.w, ndl, ndv, ndh) * 3.14159265;
+}
+fn iridescenceF0(cos1: f32, baseF0: vec3<f32>) -> vec3<f32> {
+  return iridescenceFresnel(cos1, baseF0, u.irid0.x, u.irid0.y);
+}
+`
+);
+
 // src/render/pathTracer.ts
-import { buildBvh as buildBvh2, cameraPositionFromView as cameraPositionFromView3, multiplyMat4 as multiplyMat46 } from "@cartbox/editor";
+import { buildBvh as buildBvh2, cameraPositionFromView as cameraPositionFromView3, resolveExtensions, multiplyMat4 as multiplyMat46 } from "@cartbox/editor";
 
 // src/render/gpuLightmapper.ts
 import {
@@ -19927,7 +20068,7 @@ fn shownWideWith(index: f32, x: vec3f, e: f32, s: f32, h: f32, authored: bool) -
 var REFERENCE_BOUNCES = 4;
 var REFERENCE_TEXTURE_SIDE = 1024;
 var MAX_CAPTURE_SIDE = 8192;
-var MAT_VEC4S = 4;
+var MAT_VEC4S = 10;
 var PRIM_VEC4S = 7;
 var ATTR_VEC4S = 4;
 var WORKGROUP2 = 8;
@@ -20007,6 +20148,27 @@ function normalMatrix(m) {
   const s = det < 0 ? -1 : 1;
   return co.map((v) => v * s);
 }
+function extensionRows(m, pbr) {
+  const e = resolveExtensions(pbr ? m : { name: m.name, baseColorFactor: m.baseColorFactor, baseColorImage: null });
+  const t = e.uvTransform;
+  return [
+    ...e.sheenColor,
+    e.sheenRoughness,
+    ...e.dielectricF0,
+    e.transmission,
+    e.thickness,
+    e.attenuationDistance,
+    e.iridescence,
+    e.iridescenceIor,
+    ...e.attenuationColor,
+    e.iridescenceThickness,
+    ...t ? [t.scale[0], t.scale[1], Math.cos(t.rotation), Math.sin(t.rotation)] : [1, 1, 1, 0],
+    ...t ? [t.offset[0], t.offset[1]] : [0, 0],
+    // The emissive strength applies with or without the PBR path (an emissive factor puts a material on it anyway).
+    resolveExtensions(m).emissiveStrength,
+    t ? 1 : 0
+  ];
+}
 function packReferenceScene(instances) {
   const occluders = instances.map((i) => ({ mesh: i.mesh, model: i.model, lightChannels: i.lightChannels ?? 1 }));
   const bvh = buildBvh2(occluders);
@@ -20048,7 +20210,8 @@ function packReferenceScene(instances) {
         emis,
         pbr.isPbr ? 1 : 0,
         m.alphaCutoff ?? 0.5,
-        instance.lightChannels ?? 1
+        instance.lightChannels ?? 1,
+        ...extensionRows(m, pbr.isPbr)
       ];
       const key = row.join(",");
       let mat = materialIndex.get(key);
@@ -20100,7 +20263,7 @@ function packReferenceScene(instances) {
   const mapTable = materialRows.length * MAT_VEC4S;
   const mats = new Float32Array(Math.max(1, mapTable + textureList.length) * 4);
   const matBits = new Uint32Array(mats.buffer);
-  materialRows.forEach((row, i) => mats.set(row, i * 16));
+  materialRows.forEach((row, i) => mats.set(row, i * MAT_VEC4S * 4));
   let total = 0;
   textureList.forEach((tex, i) => {
     matBits.set([total, tex.width, tex.height, 0], (mapTable + i) * 4);
@@ -20142,6 +20305,7 @@ const T_MIN = 1e-4;
 const FAR = 1e30;
 
 ${BAKE_SAMPLING_WGSL}
+${MATERIAL_SET_FUNCTIONS_WGSL}
 
 // A map's texel, wrapped.
 fn texFetch(m: vec4<u32>, x: i32, y: i32) -> vec4<f32> {
@@ -20180,14 +20344,20 @@ fn uvAt(i: u32, b: vec2<f32>) -> vec2<f32> {
   let uv0 = vec2<f32>(attr(i, 0u).w, attr(i, 1u).w);
   let uv1 = vec2<f32>(attr(i, 2u).w, attr(i, 3u).x);
   let uv2 = attr(i, 3u).yz;
-  return uv0 * (1.0 - b.x - b.y) + uv1 * b.x + uv2 * b.y;
+  let uv = uv0 * (1.0 - b.x - b.y) + uv1 * b.x + uv2 * b.y;
+  // The material's UV transform (F1d).
+  let m = matOf(i);
+  if (mat(m, 9u).w < 0.5) { return uv; }
+  return khrTransform(uv, mat(m, 8u), mat(m, 9u).xy);
 }
 
 // Whether a ray stops at triangle i at barycentrics b: an opaque surface always; a cut-out where its
-// alpha reaches the cutoff; a blended one as often as its alpha; an additive one never.
-fn stops(i: u32, b: vec2<f32>) -> bool {
+// alpha reaches the cutoff; a blended one as often as its alpha; an additive one never. A shadow ray
+// passes a transmitting surface (F1d) as often as it lets light through.
+fn stops(i: u32, b: vec2<f32>, shadow: bool) -> bool {
   let m = matOf(i);
   let mode = mat(m, 1u).w;
+  if (shadow && mat(m, 5u).w > 0.0 && rand() < mat(m, 5u).w * (1.0 - mat(m, 2u).x)) { return false; }
   if (mode < 0.5) { return true; }
   if (mode > 2.5) { return false; }
   let a = mat(m, 0u).a * texSample(mat(m, 2u).z, uvAt(i, b)).a;
@@ -20249,7 +20419,7 @@ fn trace(o: vec3<f32>, d: vec3<f32>, tMax: f32, anyHit: bool) -> Hit {
       let v = dot(d, q) * id;
       if (v < 0.0 || u + v > 1.0) { continue; }
       let t = dot(e2, q) * id;
-      if (t > T_MIN && t < best.t && stops(i, vec2<f32>(u, v))) {
+      if (t > T_MIN && t < best.t && stops(i, vec2<f32>(u, v), anyHit)) {
         best = Hit(t, i32(i), vec2<f32>(u, v));
         if (anyHit) { return best; }
       }
@@ -20280,6 +20450,17 @@ struct Surface {
   emission: vec3<f32>,
   pbr: bool,
   channels: u32,
+  // The full material set (F1d): a dielectric's f0, sheen, transmission and what the volume lets through,
+  // the film, and (set once N\xB7V is known) the reflectance and what the sheen leaves the base.
+  f0: vec3<f32>,
+  sheen: vec3<f32>,
+  sheenRough: f32,
+  transmission: f32,
+  absorb: vec3<f32>,
+  irid: f32,
+  iridIor: f32,
+  iridThickness: f32,
+  sheenScale: f32,
 };
 
 fn surfaceAt(i: u32, b: vec2<f32>) -> Surface {
@@ -20293,9 +20474,23 @@ fn surfaceAt(i: u32, b: vec2<f32>) -> Surface {
   s.albedo = toLinear(base);
   s.metal = clamp(m2.x * mr.b, 0.0, 1.0);
   s.rough = clamp(m2.y * mr.g, 0.045, 1.0);
-  s.emission = toLinear(mat(m, 1u).rgb * texSample(m3.x, uv).rgb);
+  s.emission = toLinear(mat(m, 1u).rgb * texSample(m3.x, uv).rgb) * mat(m, 9u).z;
   s.pbr = m3.y > 0.5;
   s.channels = u32(m3.w + 0.5);
+  let m4 = mat(m, 4u);
+  let m5 = mat(m, 5u);
+  let m6 = mat(m, 6u);
+  let m7 = mat(m, 7u);
+  s.f0 = mix(m5.rgb, s.albedo, s.metal);
+  s.sheen = m4.rgb;
+  s.sheenRough = m4.w;
+  s.transmission = m5.w;
+  s.absorb = vec3<f32>(1.0);
+  if (m6.x > 0.0 && m6.y > 0.0) { s.absorb = pow(max(m7.rgb, vec3<f32>(1e-4)), vec3<f32>(m6.x / m6.y)); }
+  s.irid = m6.z;
+  s.iridIor = m6.w;
+  s.iridThickness = m7.w;
+  s.sheenScale = 1.0;
   return s;
 }
 
@@ -20312,11 +20507,11 @@ fn brdf(s: Surface, N: vec3<f32>, V: vec3<f32>, L: vec3<f32>) -> vec3<f32> {
   let a2 = s.rough * s.rough * s.rough * s.rough;
   let dd = ndh * ndh * (a2 - 1.0) + 1.0;
   let D = a2 / (PI * dd * dd + 1e-7);
-  let f0 = mix(vec3<f32>(0.04), s.albedo, s.metal);
+  let f0 = s.f0;
   let F = f0 + (vec3<f32>(1.0) - f0) * pow(1.0 - vdh, 5.0);
   let eComp = energyCompensation(f0, dfgAt(ndv, s.rough));
-  let diffuse = (1.0 - s.metal) * (vec3<f32>(1.0) - F) * s.albedo / PI;
-  return diffuse + F * D * smithVisibility(ndl, ndv, a2) * eComp;
+  let diffuse = (1.0 - s.metal) * (1.0 - s.transmission) * (vec3<f32>(1.0) - F) * s.albedo / PI;
+  return (diffuse + F * D * smithVisibility(ndl, ndv, a2) * eComp) * s.sheenScale + sheenBrdf(s.sheen, s.sheenRough, ndl, ndv, ndh);
 }
 
 // An orthonormal frame about n (Duff et al.): tangent, bitangent, n.
@@ -20345,10 +20540,9 @@ fn sampleVndf(Ve: vec3<f32>, alpha: f32, xi: vec2<f32>) -> vec3<f32> {
 // How likely a bounce takes the specular lobe: by the two lobes' share of what the surface reflects.
 fn specularChance(s: Surface, ndv: f32) -> f32 {
   if (!s.pbr) { return 0.0; }
-  let f0 = mix(vec3<f32>(0.04), s.albedo, s.metal);
-  let e = specularEnergy(f0, dfgAt(ndv, s.rough));
+  let e = specularEnergy(s.f0, dfgAt(ndv, s.rough));
   let ls = lum(e);
-  let ld = lum(s.albedo * (1.0 - s.metal) * (vec3<f32>(1.0) - e));
+  let ld = lum(s.albedo * (1.0 - s.metal) * (1.0 - s.transmission) * (vec3<f32>(1.0) - e) + s.sheen);
   return clamp(ls / max(ls + ld, 1e-6), 0.1, 0.9);
 }
 
@@ -20436,7 +20630,7 @@ fn radiance(origin: vec3<f32>, dir: vec3<f32>) -> vec4<f32> {
       break;
     }
     let i = u32(h.tri);
-    let s = surfaceAt(i, h.b);
+    var s = surfaceAt(i, h.b);
     let V = -d;
     var ng = normalize(cross(tri(i, 1u).xyz, tri(i, 2u).xyz));
     if (dot(ng, V) < 0.0) { ng = -ng; } // two-sided, as the renderer's surfaces are
@@ -20446,13 +20640,27 @@ fn radiance(origin: vec3<f32>, dir: vec3<f32>) -> vec4<f32> {
     if (dot(N, ng) < 0.0) { N = -N; }
     if (dot(N, V) <= 0.0) { N = ng; }
     let p = o + d * h.t + ng * EPS;
+    // What depends on N\xB7V (F1d): the film's reflectance, and what the sheen leaves the base.
+    let ndv0 = max(1e-4, dot(N, V));
+    if (s.pbr && s.irid > 0.0) { s.f0 = mix(s.f0, iridescenceFresnel(ndv0, s.f0, s.iridIor, s.iridThickness), s.irid); }
+    if (s.pbr) { s.sheenScale = 1.0 - max(s.sheen.r, max(s.sheen.g, s.sheen.b)) * sheenE(ndv0, s.sheenRough); }
     add = s.emission + directLight(s, p, N, V);
     add = tp * add;
     if (clampTo > 0.0 && b > 0u) { add = add * min(1.0, clampTo / max(lum(add), 1e-6)); }
     L = L + add;
     if (b == params.info.x) { break; }
+    let ndv = ndv0;
+    // Transmission (F1d): as often as the surface lets light through, the path goes on through it, unbent
+    // (as the renderer shows what's behind), tinted by the base colour and the volume.
+    let pt = select(0.0, min(0.9, s.transmission * (1.0 - s.metal)), s.pbr);
+    if (pt > 0.0 && rand() < pt) {
+      let e = specularEnergy(s.f0, dfgAt(ndv, s.rough));
+      tp = tp * s.transmission * (1.0 - s.metal) * (vec3<f32>(1.0) - e) * s.albedo * s.absorb * s.sheenScale / pt;
+      o = o + d * h.t - ng * EPS;
+      continue;
+    }
+    tp = tp / (1.0 - pt);
     // A bounce: the specular by its visible normals, or the diffuse by the cosine.
-    let ndv = max(1e-4, dot(N, V));
     let ps = specularChance(s, ndv);
     var next: vec3<f32>;
     if (rand() < ps) {
@@ -20545,7 +20753,7 @@ var TracerCore = class {
     this.scene = null;
     this.skyFor = { key: null, buffer: null, panorama: null };
     this.lightBuffer = null;
-    const table2 = dfgTable();
+    const table2 = brdfLut();
     this.dfg = device.createBuffer({ size: table2.byteLength, usage: STORAGE2 | COPY_DST2 });
     device.queue.writeBuffer(this.dfg, 0, table2);
   }
@@ -24790,6 +24998,14 @@ struct Uniforms {
   maps0: vec4<f32>,     // x = 1 when a normal map is bound (P1a)
   wind1: vec4<f32>,     // the previous frame's wind0, for motion vectors (F0c)
   motion0: vec4<f32>,   // x = where this frame's motion transforms start in xf (F0c), y = the draw's lighting channels (F2e)
+  // The full material set (F1d; scenePacking.ts): sheen, a dielectric's f0, transmission and volume, the film, the UV transform.
+  sheen0: vec4<f32>,
+  spec0: vec4<f32>,
+  trans0: vec4<f32>,
+  trans1: vec4<f32>,
+  irid0: vec4<f32>,
+  uvx0: vec4<f32>,
+  uvx1: vec4<f32>,
 };
 
 // A Modern-tier light (see packLights): d0 = dir/pos + kind, d1 = colour +
@@ -24918,7 +25134,7 @@ ${hdr ? "// The spot/point lights' depth atlas, drawn on the GPU (F2d).\n@group(
 // The opaque scene's colour (I5), copied as the see-through pass begins \u2014 what a
 // refracting surface bends (a 1\xD71 blank in the opaque pass, which never reads it).
 @group(1) @binding(7) var sceneColour: texture_2d<f32>;
-${hdr ? `${brdfWgsl(1, 8)}// The prefiltered cube's sampler: trilinear, so a roughness between levels blends them (F3a).
+${hdr ? `${brdfWgsl(1, 8)}${MATERIAL_SET_WGSL}// The prefiltered cube's sampler: trilinear, so a roughness between levels blends them (F3a).
 @group(1) @binding(9) var envSamp: sampler;
 ${ltcWgsl(1, 10)}
 ${decalWgsl(1, 13)}
@@ -25357,7 +25573,7 @@ fn anisoD(rough: f32, aniso: f32, toh: f32, boh: f32, ndh: f32) -> f32 {
   return a2 * b2 * b2 / 3.14159265;
 }
 // This fragment's anisotropy frame (set in fs, read by lightTerm).
-var<private> aniso: f32;${hdr ? "\n// The multiple scattering a light's specular adds back (F1c; set in fs, read by lightTerm).\nvar<private> eComp: vec3<f32>;" : ""}
+var<private> aniso: f32;${hdr ? "\n// The multiple scattering a light's specular adds back (F1c; set in fs, read by lightTerm).\nvar<private> eComp: vec3<f32>;\n// What the sheen leaves the base beneath (F1d; set in fs, read by lightTerm).\nvar<private> sheenScale: f32 = 1.0;" : ""}
 var<private> aT: vec3<f32>;
 var<private> aB: vec3<f32>;
 // The clearcoat's normal and N\xB7V (P1a): the geometric normal, which the coat lies over the bumps with.
@@ -25478,7 +25694,7 @@ ${hdr ? "  // F1c: the height-correlated visibility, and \u03C0, as the diffuse 
   if (lgt.d0.w < 0.5) { occl = sf; }
   else if (lgt.d2.w >= 0.0 && frame.localShadow.x > 0.5) { occl = localShadow(i32(lgt.d2.w + 0.5), lgt, P, ndlL); }
   let w = lgt.d1.w * atten * ndlL * occl;
-  let lit = (kdm * (vec3<f32>(1.0) - FL) * albedo + FL * specL${hdr ? " * eComp" : ""}) * toLinear(lgt.d1.rgb) * w;
+  let lit = (kdm * (vec3<f32>(1.0) - FL) * albedo + FL * specL${hdr ? " * eComp" : ""}) * toLinear(lgt.d1.rgb) * w${hdr ? " * sheenScale + sheenLobe(ndlL, ndv, ndhL) * toLinear(lgt.d1.rgb) * w" : ""};
   if (u.layer0.x > 0.0) {
     // The clearcoat's own highlight, over a base its Fresnel dims (I4).
     let c = coatTerm(coatN, coatNdv, Ld, Hl, vdhL);
@@ -25715,7 +25931,7 @@ ${hdr ? "  shadowPixel = in.pos.xy;\n  // Overdraw (F10a): every fragment shaded
   let duv2 = dpdy(in.uv);
   // Every map is sampled at puv: the interpolated UVs, or where the view ray
   // meets the relief (parallax occlusion, I4).
-  var puv = in.uv;
+  var puv = ${hdr ? "khrUv(in.uv)" : "in.uv"};
   if (u.pbr.z > 0.5 && u.layer0.w > 0.0) {
     var pn = normalize(in.normal);
     if (dot(pn, u.view.xyz) < 0.0) { pn = -pn; }
@@ -25866,7 +26082,9 @@ ${hdr ? `    // The AAA BRDF (F1c, brdf.ts): the height-correlated Smith visibil
     // DFG for the environment, multiple scattering and specular occlusion.
     let specD = D * smithVisibility(ndl, ndv, a2) * 3.14159265;` : `    let G = (ndv / (ndv * (1.0 - k) + k)) * (ndl / (ndl * (1.0 - k) + k));
     let specD = (D * G) / (4.0 * ndl * ndv + 1e-4);`}
-    let f0 = vec3<f32>(0.04) + (albedo - vec3<f32>(0.04)) * metallic;
+${hdr ? `    // A dielectric's reflectance from its IOR and specular (F1d), and a thin film's over it.
+    var f0 = mix(u.spec0.rgb, albedo, metallic);
+    if (u.trans1.w > 0.0) { f0 = mix(f0, iridescenceF0(ndv, f0), u.trans1.w); }` : "    let f0 = vec3<f32>(0.04) + (albedo - vec3<f32>(0.04)) * metallic;"}
     let F = f0 + (vec3<f32>(1.0) - f0) * fp;
 ${hdr ? `    // GTAO (F3c): its visibility joins the material's occlusion (diffuse and specular alike), and its
     // bent normal is where the sky's irradiance comes from.
@@ -25882,6 +26100,8 @@ ${hdr ? `    // GTAO (F3c): its visibility joins the material's occlusion (diffu
     eComp = energyCompensation(f0, dfg);
     let specE = specularEnergy(f0, dfg);
     var specAo = specularOcclusion(ndv, ao, rough * rough);
+    // The sheen (F1d) takes what it reflects from the layer beneath.
+    sheenScale = 1.0 - max(u.sheen0.r, max(u.sheen0.g, u.sheen0.b)) * sheenE(ndv, u.sheen0.w);
     // An HDR directional light map (F3d) lights the diffuse in place of the sky's irradiance, and its sky
     // visibility occludes the environment's reflection. Both layers are sampled whatever is bound (uniform
     // control flow); an 8-bit map's single layer stands in for the second.
@@ -25907,7 +26127,7 @@ ${hdr ? `    // GTAO (F3c): its visibility joins the material's occlusion (diffu
     // What the environment's reflection takes, the material's reflectivity scaling it but never past all
     // the light (F11a): reflectivity over 1 (Beaver Creek's water is 1.3) mirrored more than came in at grazing.
     let specK = min(specE * reflectK, vec3<f32>(1.0));
-` : ""}    let kdm = 1.0 - metallic;                  // metals have no diffuse
+` : ""}    let kdm = (1.0 - metallic)${hdr ? " * (1.0 - u.trans0.x)" : ""};                  // metals have no diffuse${hdr ? "; what is transmitted (F1d) neither" : ""}
     var emis = vec3<f32>(0.0);
     let ef = u.emissive.xyz;
     if (ef.r > 0.0 || ef.g > 0.0 || ef.b > 0.0) {
@@ -25916,7 +26136,7 @@ ${hdr ? `    // GTAO (F3c): its visibility joins the material's occlusion (diffu
       emis = ef * es;
     }
 ${g.emis}
-    emis = toLinear(emis);${hdr ? "\n    emis = emis + decalGlow;" : ""}
+    emis = toLinear(emis)${hdr ? " * u.irid0.z" : ""};${hdr ? "\n    emis = emis + decalGlow;" : ""}
     // Ambient / image-based lighting, mirroring the software rasteriser: with an
     // environment, a diffuse irradiance along N + a specular reflection along R
     // blurred toward the average by roughness; without one, the flat ambient.
@@ -25935,7 +26155,7 @@ ${reflect ? "    var envSpec = vec3<f32>(0.0);\n    var envSeen = vec3<f32>(0.0)
       var rdv = ndv;
       if (aniso != 0.0) { rdv = dot(Rn, V); }
       let pref = envReflect(in.worldPos, 2.0 * rdv * Rn - V, rough);
-${hdr ? "      // What the environment's reflection takes, the diffuse beneath it no longer receives.\n      amb = (irr * (1.0 - ssgi.a) + ssgi.rgb) * albedo * kdm * (vec3<f32>(1.0) - specE) * aoD + pref * specK * specAo;\n" : "      amb = (irr * albedo * kdm + pref * f0 * reflectK) * ao;\n"}${reflect ? `      envSpec = pref * ${hdr ? "specK * specAo" : "f0 * reflectK * ao"};
+${hdr ? "      // What the environment's reflection takes, the diffuse beneath it no longer receives.\n      amb = (irr * (1.0 - ssgi.a) + ssgi.rgb) * albedo * kdm * (vec3<f32>(1.0) - specE) * aoD + pref * specK * specAo;\n      // The sheen over it (F1d), lit by the sky's irradiance.\n      amb = amb * sheenScale + irr * u.sheen0.rgb * sheenE(ndv, u.sheen0.w) * aoD;\n" : "      amb = (irr * albedo * kdm + pref * f0 * reflectK) * ao;\n"}${reflect ? `      envSpec = pref * ${hdr ? "specK * specAo" : "f0 * reflectK * ao"};
       envSeen = pref;
 ` : ""}      // The clearcoat (I4) reflects the room sharply about its own normal, and
       // what it reflects the base beneath no longer receives.
@@ -25991,9 +26211,9 @@ ${reflect ? "    // What the light map, probes and SSAO did to the fill, they do
     } else if (u.layer0.x > 0.0) {
       // The clearcoat's own highlight, over a base its Fresnel dims (I4).
       let c = coatTerm(coatN, coatNdv, L, H, vdh);
-      lit = ((kdm * (vec3<f32>(1.0) - F) * albedo + F * specD${hdr ? " * eComp" : ""}) * ndl * (1.0 - c.y) + vec3<f32>(c.x)) * sf + amb + emis;
+      lit = (((kdm * (vec3<f32>(1.0) - F) * albedo + F * specD${hdr ? " * eComp" : ""})${hdr ? " * sheenScale + sheenLobe(ndl, ndv, ndh)" : ""}) * ndl * (1.0 - c.y) + vec3<f32>(c.x)) * sf + amb + emis;
     } else {
-      lit = (kdm * (vec3<f32>(1.0) - F) * albedo + F * specD${hdr ? " * eComp" : ""}) * ndl * sf + amb + emis;
+      lit = ((kdm * (vec3<f32>(1.0) - F) * albedo + F * specD${hdr ? " * eComp" : ""})${hdr ? " * sheenScale + sheenLobe(ndl, ndv, ndh)" : ""}) * ndl * sf + amb + emis;
     }
     // A fresnel rim, light at grazing angles (zero when the material has none).
     lit = lit + toLinear(u.surface2.rgb) * pow(1.0 - ndv, u.surface2.w);
@@ -26019,7 +26239,18 @@ ${hdr ? `    // Linear light (F0b): what the reflection adds, and what it sees, 
     envOut = vec4<f32>(contribution, 1.0);`
     ) : ""}
     // Refraction (I5): what's behind is the opaque scene, bent.
-    if (camoSeen.a > 0.5) { return vec4<f32>(camoSeen.rgb, 1.0); }
+    if (camoSeen.a > 0.5) { return vec4<f32>(camoSeen.rgb, 1.0); }${hdr ? `
+    // Transmission (F1d): the light behind let through what the reflection leaves, tinted by the
+    // base colour and by the volume's absorption over its thickness (Beer\u2013Lambert).
+    if (u.trans0.x > 0.0 && u.refract0.w > 0.5) {
+      let tb = behindColour(in.pos.xy, in.pos.z, refractOffset(facingNormal(in.normal), in.worldPos));
+      if (tb.a > 0.5) {
+        var absorb = vec3<f32>(1.0);
+        if (u.trans0.y > 0.0 && u.trans0.z > 0.0) { absorb = pow(max(u.trans1.rgb, vec3<f32>(1e-4)), vec3<f32>(u.trans0.y / u.trans0.z)); }
+        let through = u.trans0.x * (1.0 - metallic) * (vec3<f32>(1.0) - specE) * albedo * absorb * tb.rgb;
+        return vec4<f32>(shaded + through, 1.0);
+      }
+    }` : ""}
     if (u.refract0.w > 0.5) {
       let rn = waterNormal(facingNormal(in.normal), in.worldPos);
       let b = behindColour(in.pos.xy, in.pos.z, refractOffset(rn, in.worldPos));
@@ -26141,7 +26372,7 @@ fn fs_prepass(in: PrepassIn) -> PrepassTargets {
   let dp2 = dpdy(in.worldPos);
   let duv1 = dpdx(in.uv);
   let duv2 = dpdy(in.uv);
-  var puv = in.uv;
+  var puv = ${hdr ? "khrUv(in.uv)" : "in.uv"};
   if (u.pbr.z > 0.5 && u.layer0.w > 0.0) {
     var pn = normalize(in.normal);
     if (dot(pn, u.view.xyz) < 0.0) { pn = -pn; }
@@ -27051,7 +27282,7 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
         // UNIFORM | COPY_DST
       };
       const shadowTiles = device.createBuffer({ size: Math.max(MAX_LOCAL_SHADOW_TILES2, MAX_GPU_LOCAL_TILES) * LOCAL_TILE_FLOATS * 4, usage: 128 | 8 });
-      const dfg = dfgTable();
+      const dfg = brdfLut();
       const dfgBuffer = device.createBuffer({ size: dfg.byteLength, usage: 128 | 8 });
       device.queue.writeBuffer(dfgBuffer, 0, dfg);
       const ltc = ltcTables();
@@ -27645,6 +27876,7 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
           textured: entry.textures.blend !== null
         }),
         layers: resolveLayers2(entry.primitive.material, entry.textures.relief !== null),
+        extensions: resolveExtensions2(entry.primitive.material),
         refraction: entry.refract ? resolveRefraction3(entry.primitive.material, effectActive4(entry.effect) ? entry.effect : null) : null,
         camera,
         water: waterUniform2(entry.primitive.material, draw.time ?? 0),
@@ -33052,7 +33284,7 @@ function ballLight(image, viewProj, ball, view) {
 }
 async function checkLookDev(device, stage, width, height, samples = 256, wait = (p) => p) {
   const draw = lookDevDraw(stage, width, height);
-  const renderer = await WebgpuSceneRenderer.create(device, width, height, void 0, { hdr: true });
+  const renderer = await WebgpuSceneRenderer.create(device, width, height, rasterStyleFor(MODELS.aaa.renderCaps), { hdr: true, mips: true });
   if (!renderer) throw new Error("The look-dev check needs the linear-light WebGPU renderer.");
   const tracer = PathTracer.create(device);
   try {
@@ -33122,7 +33354,7 @@ var LookDevView = class _LookDevView {
     context.configure({ device, format, alphaMode: "opaque" });
     const width = Math.max(1, canvas.width);
     const height = Math.max(1, canvas.height);
-    const renderer = await WebgpuSceneRenderer.create(device, width, height, void 0, { hdr: true, mips: true });
+    const renderer = await WebgpuSceneRenderer.create(device, width, height, rasterStyleFor(MODELS.aaa.renderCaps), { hdr: true, mips: true });
     if (!renderer) return null;
     return new _LookDevView(canvas, device, context, format, renderer, new GpuPresenter(device, width, height, { hdr: true }));
   }

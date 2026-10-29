@@ -48,6 +48,7 @@ import {
 import { base64ToBytes } from "./base64";
 import { decompressGltf, type GltfDecoders, type MeshoptViewExtension } from "./gltfCompression";
 import { readMaterialLayers } from "./materialLayers";
+import { readGltfMaterialExtensions, writeGltfMaterialExtensions, writeGltfSubsurface, writeGltfTextureTransform, type GltfMaterialExtensions, type GltfSubsurfaceExtras, type GltfTextureTransform } from "./materialExtensions";
 import { MAX_CLIP_KEYS, MAX_CLIPS, MAX_SKIN_JOINTS, isSkinned, type AnimationClip, type ClipChannel, type MeshSkin, type SkinJoint } from "./skeleton";
 
 // --- glTF JSON shape (only the fields this codec reads/writes) -------------
@@ -83,23 +84,28 @@ interface GltfMaterial {
   name?: string;
   pbrMetallicRoughness?: {
     baseColorFactor?: number[];
-    baseColorTexture?: { index: number };
+    baseColorTexture?: GltfTextureRef;
     metallicFactor?: number;
     roughnessFactor?: number;
-    metallicRoughnessTexture?: { index: number };
+    metallicRoughnessTexture?: GltfTextureRef;
   };
-  normalTexture?: { index: number };
-  occlusionTexture?: { index: number };
-  emissiveTexture?: { index: number };
+  normalTexture?: GltfTextureRef;
+  occlusionTexture?: GltfTextureRef;
+  emissiveTexture?: GltfTextureRef;
   emissiveFactor?: number[];
   alphaMode?: "OPAQUE" | "MASK" | "BLEND";
   alphaCutoff?: number;
   /** A painted team-colour mask (L17), as a texture of the file: no glTF material has one. */
-  extras?: { tintMaskTexture?: { index: number } };
+  extras?: { tintMaskTexture?: { index: number } } & GltfSubsurfaceExtras;
   extensions?: {
     KHR_materials_clearcoat?: { clearcoatFactor?: number; clearcoatRoughnessFactor?: number };
     KHR_materials_anisotropy?: { anisotropyStrength?: number; anisotropyRotation?: number };
-  };
+  } & GltfMaterialExtensions;
+}
+/** A material's reference to a texture, with its UV transform (F1d). */
+export interface GltfTextureRef {
+  index: number;
+  extensions?: { KHR_texture_transform?: GltfTextureTransform };
 }
 export interface GltfPrimitive {
   attributes: { POSITION?: number; NORMAL?: number; TANGENT?: number; TEXCOORD_0?: number; TEXCOORD_1?: number; JOINTS_0?: number; WEIGHTS_0?: number };
@@ -461,7 +467,7 @@ function collectMeshInstances(json: GltfJson): Map<number, { world: Mat4; node: 
   return instances;
 }
 
-/** A material's clearcoat and anisotropy as glTF extensions (I4), or nothing when it has neither. */
+/** A material's clearcoat and anisotropy (I4) and its full material set (F1d) as glTF extensions, or nothing when it has none. */
 function materialLayerExtensions(material: MeshMaterial): Pick<GltfMaterial, "extensions"> {
   const extensions: NonNullable<GltfMaterial["extensions"]> = {};
   if ((material.clearcoat ?? 0) > 0) {
@@ -472,13 +478,19 @@ function materialLayerExtensions(material: MeshMaterial): Pick<GltfMaterial, "ex
   if (aniso !== 0) {
     extensions.KHR_materials_anisotropy = { anisotropyStrength: Math.abs(aniso), anisotropyRotation: (material.anisotropyRotation ?? 0) + (aniso < 0 ? Math.PI / 2 : 0) };
   }
+  // The full material set (F1d).
+  Object.assign(extensions, writeGltfMaterialExtensions(material));
   return Object.keys(extensions).length > 0 ? { extensions } : {};
 }
 
 /** The extensions a written file uses: basisu (required, when a texture is KTX2) and the material ones (optional). */
 function extensionLists(basisu: boolean, materials: readonly GltfMaterial[]): Pick<GltfJson, "extensionsUsed" | "extensionsRequired"> {
   const used = new Set<string>(basisu ? ["KHR_texture_basisu"] : []);
-  for (const m of materials) for (const name of Object.keys(m.extensions ?? {})) used.add(name);
+  for (const m of materials) {
+    for (const name of Object.keys(m.extensions ?? {})) used.add(name);
+    const refs = [m.pbrMetallicRoughness?.baseColorTexture, m.pbrMetallicRoughness?.metallicRoughnessTexture, m.normalTexture, m.occlusionTexture, m.emissiveTexture];
+    if (refs.some((r) => r?.extensions?.KHR_texture_transform)) used.add("KHR_texture_transform");
+  }
   if (used.size === 0) return {};
   return { extensionsUsed: [...used], ...(basisu ? { extensionsRequired: ["KHR_texture_basisu"] } : {}) };
 }
@@ -533,6 +545,12 @@ function readMaterial(json: GltfJson, buffers: (Uint8Array | null)[], materialIn
     // Transparency, as glTF states it (EP6).
     ...(material?.alphaMode === "MASK" ? { alphaMode: "mask" as const, alphaCutoff: typeof material.alphaCutoff === "number" ? Math.max(0, Math.min(1, material.alphaCutoff)) : 0.5 } : {}),
     ...(material?.alphaMode === "BLEND" ? { alphaMode: "blend" as const } : {}),
+    // The full material set's factors, and the first texture transform for every map (F1d).
+    ...readGltfMaterialExtensions(
+      material?.extensions,
+      [pbr?.baseColorTexture, pbr?.metallicRoughnessTexture, material?.normalTexture, material?.emissiveTexture, material?.occlusionTexture].find((r) => r?.extensions?.KHR_texture_transform)?.extensions?.KHR_texture_transform,
+      material?.extras,
+    ),
     // The clearcoat and anisotropy extensions' factors (I4); their textures are not read.
     ...readMaterialLayers({
       clearcoat: material?.extensions?.KHR_materials_clearcoat?.clearcoatFactor,
@@ -1013,24 +1031,27 @@ export function encodeGlb(mesh: MeshAsset): Uint8Array {
   const materialOf = new Map<MeshMaterial, number>();
   const addMaterial = (m: MeshMaterial): number => {
     if (materialOf.has(m)) return materialOf.get(m)!;
+    // Each of its maps carries its UV transform (F1d).
+    const transform = writeGltfTextureTransform(m);
+    const mapOf = (image: EncodedImage): GltfTextureRef => ({ ...addTexture(image), ...(transform ? { extensions: transform } : {}) });
     const gltfMaterial: GltfMaterial = {
       name: m.name,
       pbrMetallicRoughness: {
         baseColorFactor: [...m.baseColorFactor],
-        ...(m.baseColorImage ? { baseColorTexture: addTexture(m.baseColorImage) } : {}),
+        ...(m.baseColorImage ? { baseColorTexture: mapOf(m.baseColorImage) } : {}),
         ...(m.metallicFactor !== undefined ? { metallicFactor: m.metallicFactor } : {}),
         ...(m.roughnessFactor !== undefined ? { roughnessFactor: m.roughnessFactor } : {}),
-        ...(m.metallicRoughnessImage ? { metallicRoughnessTexture: addTexture(m.metallicRoughnessImage) } : {}),
+        ...(m.metallicRoughnessImage ? { metallicRoughnessTexture: mapOf(m.metallicRoughnessImage) } : {}),
       },
-      ...(m.normalImage ? { normalTexture: addTexture(m.normalImage) } : {}),
-      ...(m.occlusionImage ? { occlusionTexture: addTexture(m.occlusionImage) } : {}),
-      ...(m.emissiveImage ? { emissiveTexture: addTexture(m.emissiveImage) } : {}),
+      ...(m.normalImage ? { normalTexture: mapOf(m.normalImage) } : {}),
+      ...(m.occlusionImage ? { occlusionTexture: mapOf(m.occlusionImage) } : {}),
+      ...(m.emissiveImage ? { emissiveTexture: mapOf(m.emissiveImage) } : {}),
       ...(m.emissiveFactor ? { emissiveFactor: [...m.emissiveFactor] } : {}),
       // glTF has no additive mode: it exports as blended.
       ...(m.alphaMode === "mask" ? { alphaMode: "MASK" as const, alphaCutoff: m.alphaCutoff ?? 0.5 } : {}),
       ...(m.alphaMode === "blend" || m.alphaMode === "additive" ? { alphaMode: "BLEND" as const } : {}),
       ...materialLayerExtensions(m),
-      ...(m.tintMaskImage ? { extras: { tintMaskTexture: addTexture(m.tintMaskImage) } } : {}),
+      ...(m.tintMaskImage || writeGltfSubsurface(m) ? { extras: { ...(m.tintMaskImage ? { tintMaskTexture: addTexture(m.tintMaskImage) } : {}), ...writeGltfSubsurface(m) } } : {}),
     };
     materials.push(gltfMaterial);
     materialOf.set(m, materials.length - 1);
