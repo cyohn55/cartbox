@@ -1331,12 +1331,47 @@ Everything else depends on this track. It contains no visible "feature", but its
       - capsule colliders authored by hand (only the bones' for now);
       - the world's wind reaching a character's cloth through the player (the live copy takes a wind, which the overlay doesn't yet pass);
       - jiggle (soft-body) deformers beyond spring chains.
-- [ ] **F7e. Animation quality.**
+- [x] **F7e. Animation quality.**
   - **Motion matching:** a pose database searched every few frames.
   - Full-body IK with foot placement on terrain.
   - Physics-driven ragdoll blending (powered ragdolls).
   - Root motion, and an animation compression format.
   - It builds on the state machines, blend spaces, IK and retargeting already present.
+  - **Done** (`editor model/motionMatching.ts`, `footPlacement.ts`, `poweredRagdoll.ts`, `clipCompression.ts`).
+    - **Root motion.** `rootMotion` reads how far the root went between two times of a clip, forward, sideways and round, in its frame at the start. `inPlace` takes the travel out of a pose. The animation session reports each object's root motion over its last step, across a loop's wrap.
+    - **Motion matching** (Clavet; Holden et al.):
+      - **The database:** every clip at 30 Hz becomes a feature vector. It holds the feet's positions and velocities and the hips' velocity, root-relative, and where the root will be and face 0.33, 0.67 and 1 s on (wrapping a looping clip). Each group is normalised by its deviation and weighted (the trajectory 1.5×).
+      - `matchSetupFor` finds the hips and the feet by name.
+      - **The search** runs every 0.1 s, brute force with early-out. It builds the query from the pose playing and the trajectory asked for, and jumps only when the best frame beats the one playing by 10% (hysteresis), crossfading 0.2 s.
+      - **The trajectory:** `desiredTrajectory` integrates a critically damped spring from the character's velocity toward the one asked.
+      - In the session, `matchMotion(object, velocity, facing)` each tick drives an object's playback. The character's own velocity closes on the asked one with a 0.2 s half-life.
+    - **Foot placement** (`placeFeet`):
+      - each foot's ground comes from the caller's height-and-normal query;
+      - the pelvis drops by the most any foot must reach down, capped at 50 cm;
+      - each leg solves two-bone IK to its ground plus the height the animation held it above flat ground, so a stride's lift is kept;
+      - each foot then lies along its slope;
+      - all of it scales by a weight.
+    - **FABRIK** (`solveFabrik`) bends any chain to reach a point, backward and forward until within 0.1 mm, or points it straight when out of reach, then turns each joint along its new bone.
+    - **Powered ragdolls** (`PoweredRagdoll`), on H9's ragdoll:
+      - each step the ragdoll steps under gravity and collision, then each particle is pulled toward where the animation puts its joint, by stiffness × power;
+      - the shown pose is the ragdoll's blended into the animation's by the power;
+      - a `hit` knocks the power down and shoves the body, and the power ramps back over `recover` seconds until it hands back to the animation.
+    - **Compression:**
+      - `reduceClip` drops each channel's keys that linear interpolation (nlerp for rotations) rebuilds within a budget: 0.002 rad, 0.5 mm, 0.1% scale. A constant channel becomes one key.
+      - `packClip` stores 16-bit times, rotations as "smallest three" in 48 bits (under 0.0002 rad), and translations and scales as 16 bits over each channel's range.
+      - A 30 fps walk packs over three times smaller, every pose within the budget.
+    - *Tests:* `Unit Tests/animation-quality.test.ts` covers, on a procedural biped:
+      - root motion forward and round; the pose in place;
+      - the setup by name; the trajectory's spring; walk, idle and turn picked by what's asked, and no jumps while still asked the same; the session matching to the walk and reporting its 1.4 m/s of root motion;
+      - the pelvis dropped to the lower foot's ground, each foot on its own; a foot along a slope; FABRIK reaching and stretched straight;
+      - a powered body following at full power, shoved while weak and back in place once recovered;
+      - key reduction keeping a line's corner; quaternion packing's error; a walk three times smaller within its budget.
+    - *Left for later:*
+      - foot placement and the powered ragdoll wired into the runtime's IK and death requests (they are library calls for now);
+      - a KD-tree for databases past a few thousand frames;
+      - inertialization in place of the crossfade;
+      - storing clips packed in the mesh format;
+      - cart scripting for motion matching.
 
 ### F8. Visual effects
 

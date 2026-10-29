@@ -9420,6 +9420,23 @@ declare class AnimationSession {
     reset(object: number): void;
     /** Take any transition that's ready, then advance every playback one tick (firing clip events). */
     step(dt: number): void;
+    /**
+     * Ask an object's motion matcher (F7e) for this tick: moving at `velocity` (m/s; x sideways, z forward, in its
+     * own frame) and turning to face `facing` (radians from its heading). Ask every tick it should keep matching.
+     */
+    matchMotion(object: number, velocity: readonly [number, number], facing: number): void;
+    /** The clip an object shows now (−1 for none). */
+    currentClip(object: number): number;
+    /** How far an object's root went over the last step (F7e): forward, sideways and the turn, or null. */
+    rootMotion(object: number): {
+        readonly dx: number;
+        readonly dz: number;
+        readonly turn: number;
+    } | null;
+    /** A playback's matcher, its database built from its clips (all looping), or null without two named feet. */
+    private matcherFor;
+    /** The root's travel between two moments of the same clip (wrapping once), or null. */
+    private rootStep;
     /** How far through its cycle a track is (0..1 per pass of its clip; loops keep counting). */
     private progress;
     private transition;

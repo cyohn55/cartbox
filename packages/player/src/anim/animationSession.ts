@@ -27,6 +27,11 @@ import {
   isSkinned,
   restPose,
   sampleClip,
+  MotionMatcher,
+  buildMatchDatabase,
+  desiredTrajectory,
+  matchSetupFor,
+  rootMotion,
   stepSpringBones,
   type SpringState,
   sampleMorphs,
@@ -41,6 +46,11 @@ import type { MeshScene } from "../mesh/meshScene.js";
 import type { AnimationPlayback } from "../physics/protocol.js";
 
 /** What one layer of playback is playing: a machine state, or (state -1) a clip the cart chose. */
+/** The crossfade into a motion-matched frame (F7e), seconds. */
+const MATCH_FADE = 0.2;
+/** How quickly a matched character takes up the velocity asked (s to halve the gap). */
+const MATCH_HALF_LIFE = 0.2;
+
 interface Track {
   state: number;
   clip: number;
@@ -94,6 +104,13 @@ interface Playback {
   fired: number[];
   /** Its spring bones' tails (F7d), kept between ticks. */
   springs: SpringState;
+  /** Motion matching (F7e): its matcher, and the velocity and facing asked for this tick (null: not matching). */
+  matcher: MotionMatcher | null;
+  request: { readonly velocity: readonly [number, number]; readonly facing: number } | null;
+  /** The character's own velocity (m/s, its frame), springing toward what's asked: the trajectory starts from it. */
+  moving: [number, number];
+  /** How far the root went over the last step (F7e), in its frame at the step's start. */
+  rootDelta: { dx: number; dz: number; turn: number } | null;
 }
 
 /** The scene objects with a skeleton, in index order. */
@@ -187,7 +204,7 @@ export class AnimationSession {
     const params = new Float64Array(machine?.params.length ?? 0);
     machine?.params.forEach((p, i) => (params[i] = p.kind === "trigger" ? 0 : p.initial));
     const current = machine ? stateTrack(machine, 0) : clipTrack((inst.mesh.clips?.length ?? 0) > 0 ? 0 : -1);
-    return { mesh: inst.mesh, machine, params, current, from: null, fade: 0, fadeElapsed: 0, fired: [], springs: { tails: [], previous: [] } };
+    return { mesh: inst.mesh, machine, params, current, from: null, fade: 0, fadeElapsed: 0, fired: [], springs: { tails: [], previous: [] }, matcher: null, request: null, moving: [0, 0], rootDelta: null };
   }
 
   /** Crossfade `p` into `next` over `fade` seconds. */
@@ -235,11 +252,23 @@ export class AnimationSession {
   /** Take any transition that's ready, then advance every playback one tick (firing clip events). */
   step(dt: number): void {
     this.lastDt = dt;
-    for (const p of this.playback.values()) {
+    for (const [object, p] of this.playback) {
       p.fired = [];
+      // Motion matching (F7e): the matcher picks the clip and time, crossfaded into.
+      if (p.request) {
+        const m = (p.matcher ??= this.matcherFor(p));
+        // The character's velocity closes on what's asked (halving the gap every half-life), and the trajectory starts from it.
+        const keep = Math.exp((-Math.LN2 * dt) / MATCH_HALF_LIFE);
+        const goal = p.request.velocity;
+        p.moving = [goal[0] + (p.moving[0] - goal[0]) * keep, goal[1] + (p.moving[1] - goal[1]) * keep];
+        if (m && m.update(dt, desiredTrajectory(goal, p.request.facing, undefined, p.moving, MATCH_HALF_LIFE))) this.play(object, m.clip, MATCH_FADE, 1, true, m.time);
+        p.request = null;
+      }
       if (p.machine && p.current.state >= 0) this.transition(p);
       const before = this.cursor(p, p.current);
+      const shownBefore = this.shownClip(p, p.current);
       this.advance(p, p.current, dt);
+      p.rootDelta = this.rootStep(p, shownBefore, this.shownClip(p, p.current));
       if (p.machine) this.fireEvents(p, before, this.cursor(p, p.current));
       p.current.fresh = false;
       if (p.from) {
@@ -249,6 +278,51 @@ export class AnimationSession {
       }
     }
     this.tick += 1;
+  }
+
+  /**
+   * Ask an object's motion matcher (F7e) for this tick: moving at `velocity` (m/s; x sideways, z forward, in its
+   * own frame) and turning to face `facing` (radians from its heading). Ask every tick it should keep matching.
+   */
+  matchMotion(object: number, velocity: readonly [number, number], facing: number): void {
+    const p = this.playback.get(object);
+    if (p) p.request = { velocity, facing };
+  }
+
+  /** The clip an object shows now (−1 for none). */
+  currentClip(object: number): number {
+    const p = this.playback.get(object);
+    return p ? this.shownClip(p, p.current).clip : -1;
+  }
+
+  /** How far an object's root went over the last step (F7e): forward, sideways and the turn, or null. */
+  rootMotion(object: number): { readonly dx: number; readonly dz: number; readonly turn: number } | null {
+    return this.playback.get(object)?.rootDelta ?? null;
+  }
+
+  /** A playback's matcher, its database built from its clips (all looping), or null without two named feet. */
+  private matcherFor(p: Playback): MotionMatcher | null {
+    const skin = p.mesh.skin;
+    const clips = p.mesh.clips ?? [];
+    const setup = skin ? matchSetupFor(skin) : null;
+    if (!skin || !setup || clips.length === 0) return null;
+    const loops = clips.map(() => true);
+    return new MotionMatcher(skin, clips, buildMatchDatabase(skin, clips, setup, loops), loops);
+  }
+
+  /** The root's travel between two moments of the same clip (wrapping once), or null. */
+  private rootStep(p: Playback, a: { clip: number; time: number }, b: { clip: number; time: number }): { dx: number; dz: number; turn: number } | null {
+    const skin = p.mesh.skin;
+    const clip = a.clip >= 0 && a.clip === b.clip ? p.mesh.clips?.[a.clip] : undefined;
+    if (!skin || !clip) return null;
+    const root = Math.max(0, skin.joints.findIndex((j) => j.parent < 0));
+    if (b.time >= a.time) return rootMotion(skin, clip, a.time, b.time, root);
+    // Wrapped: to the end, then from the start, in the first part's frame.
+    const x = rootMotion(skin, clip, a.time, clip.duration, root);
+    const y = rootMotion(skin, clip, 0, b.time, root);
+    const c = Math.cos(x.turn);
+    const s = Math.sin(x.turn);
+    return { dx: x.dx + c * y.dx + s * y.dz, dz: x.dz - s * y.dx + c * y.dz, turn: x.turn + y.turn };
   }
 
   /** How far through its cycle a track is (0..1 per pass of its clip; loops keep counting). */

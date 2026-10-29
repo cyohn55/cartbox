@@ -1061,6 +1061,28 @@ export {
   type SpringState,
 } from "./model/cloth";
 export {
+  DEFAULT_HORIZON,
+  MATCH_RATE,
+  MotionMatcher,
+  buildMatchDatabase,
+  desiredTrajectory,
+  featureSize,
+  frameCost,
+  inPlace,
+  matchSetupFor,
+  nearestFrame,
+  normaliseQuery,
+  poseFeatures,
+  rootMotion,
+  rootPlace,
+  type MatchDatabase,
+  type MatchSetup,
+  type TrajectoryPoint,
+} from "./model/motionMatching";
+export { placeFeet, solveFabrik, turnJoint, type FootPlacement, type GroundQuery, type Leg } from "./model/footPlacement";
+export { PoweredRagdoll, type PoweredOptions } from "./model/poweredRagdoll";
+export { DEFAULT_TOLERANCE, clipBytes, packClip, packQuat, reduceChannel, reduceClip, unpackClip, unpackQuat, type CompressionTolerance } from "./model/clipCompression";
+export {
   GRAPH_NODES,
   FRAGMENT_OUTPUTS,
   GRAPH_OUTPUTS,
