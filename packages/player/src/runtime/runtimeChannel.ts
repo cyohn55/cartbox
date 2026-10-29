@@ -490,6 +490,15 @@ export class RuntimeChannel {
     return matrices;
   }
 
+  /** The morph weights the animated objects' clips give now (F7b; object → weights), for those being drawn. */
+  morphs(): ReadonlyMap<number, Float32Array> {
+    if (!this.animation) return new Map();
+    return this.animation.morphs((object) => {
+      const pooled = this.scene.instances[object]?.pooled;
+      return !pooled || this.active.has(pooled.root);
+    });
+  }
+
   /** Start a timeline cue on an object: a state of its state machine by that name, else a clip. */
   private cue(object: number, name: string, fade: number, loop: boolean): void {
     const inst = this.scene.instances[object];

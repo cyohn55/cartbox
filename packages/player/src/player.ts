@@ -1421,7 +1421,7 @@ export class Player {
           this.meshSurface.setLooks(this.runtime.channel.looks());
           // IK aims in world space: give it where each object is this frame.
           const placed = this.runtime.channel.needsWorld() ? this.meshSurface.currentPlacements() : null;
-          this.meshSurface.setSkinning(placed ? this.runtime.channel.skinning((o) => placed[o] ?? null) : this.runtime.channel.skinning());
+          this.meshSurface.setSkinning(placed ? this.runtime.channel.skinning((o) => placed[o] ?? null) : this.runtime.channel.skinning(), this.runtime.channel.morphs());
         }
         this.meshSurface.setCartLights(decodeWorldLights(mailbox));
         // An editor that has ejected from the game looks through its own camera.

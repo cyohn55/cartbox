@@ -50,7 +50,7 @@ import { decompressGltf, type GltfDecoders, type MeshoptViewExtension } from "./
 import { readMaterialLayers } from "./materialLayers";
 import { MAX_MORPH_TARGETS } from "./morphTargets";
 import { readGltfMaterialExtensions, writeGltfMaterialExtensions, writeGltfSubsurface, writeGltfTextureTransform, type GltfMaterialExtensions, type GltfSubsurfaceExtras, type GltfTextureTransform } from "./materialExtensions";
-import { MAX_CLIP_KEYS, MAX_CLIPS, MAX_SKIN_JOINTS, isSkinned, type AnimationClip, type ClipChannel, type MeshSkin, type SkinJoint } from "./skeleton";
+import { MAX_CLIP_KEYS, MAX_CLIPS, MAX_SKIN_JOINTS, isSkinned, type AnimationClip, type ClipChannel, type MorphChannel, type MeshSkin, type SkinJoint } from "./skeleton";
 
 // --- glTF JSON shape (only the fields this codec reads/writes) -------------
 
@@ -766,8 +766,17 @@ export function parseGltf(sourceJson: GltfJson, sourceBuffers: (Uint8Array | nul
   const variants: MeshVariant[] = variantNames.map((n, v) => ({ name: n, materials: variantMaterials[v]! })).filter((v) => v.materials.some((m) => m));
   const sets = variants.length > 0 ? { variants } : {};
   const morphs = morphWeights ? { morphWeights } : {};
-  if (!rig || !primitives.some((p) => p.joints)) return { name, primitives, ...sets, ...morphs };
-  const clips = readClips(json, buffers, rig.jointOfNode);
+  // The nodes whose meshes have morph targets, with how many: their weight channels animate a face (F7b).
+  const morphNodes = new Map<number, number>();
+  (json.nodes ?? []).forEach((node, i) => {
+    const count = node.mesh !== undefined ? Math.max(0, ...(json.meshes?.[node.mesh]?.primitives ?? []).map((p) => p.targets?.length ?? 0)) : 0;
+    if (count > 0) morphNodes.set(i, Math.min(count, MAX_MORPH_TARGETS));
+  });
+  if (!rig || !primitives.some((p) => p.joints)) {
+    const faceClips = morphNodes.size > 0 ? readClips(json, buffers, new Map(), morphNodes) : [];
+    return { name, primitives, ...(faceClips.length > 0 ? { clips: faceClips } : {}), ...sets, ...morphs };
+  }
+  const clips = readClips(json, buffers, rig.jointOfNode, morphNodes);
   return { name, primitives, skin: rig.skin, ...(clips.length > 0 ? { clips } : {}), ...sets, ...morphs };
 }
 
@@ -899,16 +908,38 @@ function nearIdentity(m: Mat4, world: Mat4): Mat4 {
   return IDENTITY4();
 }
 
-/** Every animation's joint channels as clips (weights and non-joint targets skipped). */
-function readClips(json: GltfJson, buffers: (Uint8Array | null)[], jointOfNode: ReadonlyMap<number, number>): AnimationClip[] {
+/**
+ * Every animation's joint channels as clips (other nodes' skipped), and the first channel of morph weights on a
+ * node with targets (`morphNodes`: node → its target count) as the clip's `morphs` (F7b).
+ */
+function readClips(json: GltfJson, buffers: (Uint8Array | null)[], jointOfNode: ReadonlyMap<number, number>, morphNodes: ReadonlyMap<number, number> = new Map()): AnimationClip[] {
   const clips: AnimationClip[] = [];
   let keys = 0;
   for (const [index, animation] of (json.animations ?? []).entries()) {
     if (clips.length >= MAX_CLIPS) break;
     const channels: ClipChannel[] = [];
+    let morphs: MorphChannel | null = null;
     let duration = 0;
     for (const channel of animation.channels ?? []) {
       const path = channel.target.path;
+      const targets = channel.target.node !== undefined ? morphNodes.get(channel.target.node) : undefined;
+      if (path === "weights" && targets !== undefined && !morphs) {
+        const sampler = animation.samplers?.[channel.sampler];
+        if (!sampler) continue;
+        const times = readAccessorFloats(json, buffers, sampler.input);
+        let values = readAccessorFloats(json, buffers, sampler.output);
+        if (sampler.interpolation === "CUBICSPLINE" && values.length === times.length * targets * 3) {
+          const picked = new Float32Array(times.length * targets);
+          for (let k = 0; k < times.length; k += 1) picked.set(values.subarray((k * 3 + 1) * targets, (k * 3 + 2) * targets), k * targets);
+          values = picked;
+        }
+        if (times.length === 0 || values.length !== times.length * targets) continue;
+        keys += times.length;
+        if (keys > MAX_CLIP_KEYS) throw new Error("glTF animation exceeds the supported size");
+        duration = Math.max(duration, times[times.length - 1]!);
+        morphs = { interpolation: sampler.interpolation === "STEP" ? "step" : "linear", targets, times, values };
+        continue;
+      }
       const joint = channel.target.node !== undefined ? jointOfNode.get(channel.target.node) : undefined;
       if (joint === undefined || (path !== "translation" && path !== "rotation" && path !== "scale")) continue;
       const sampler = animation.samplers?.[channel.sampler];
@@ -931,7 +962,7 @@ function readClips(json: GltfJson, buffers: (Uint8Array | null)[], jointOfNode: 
     // A length written with the clip (see encodeGlb) stands unless the keys now run past it.
     const stated = animation.extras?.duration;
     if (typeof stated === "number" && Number.isFinite(stated) && stated >= duration - 1e-5) duration = stated;
-    if (channels.length > 0) clips.push({ name: animation.name?.trim() || `clip ${index + 1}`, duration, channels });
+    if (channels.length > 0 || morphs) clips.push({ name: animation.name?.trim() || `clip ${index + 1}`, duration, channels, ...(morphs ? { morphs } : {}) });
   }
   return clips;
 }
@@ -1158,10 +1189,29 @@ export function encodeGlb(mesh: MeshAsset): Uint8Array {
     m.weights = Array.from({ length: count }, (_, t) => mesh.morphWeights?.[t] ?? 0);
     m.extras = { targetNames: Array.from({ length: count }, (_, t) => first?.morphTargets?.[t]?.name ?? `target_${t}`) };
   }
+  // A clip's morph weights (F7b): a weights channel on the first node whose mesh has targets, in the clip's
+  // animation (made for it when the clip moves no joint).
+  const faceNode = (scene.nodes ?? []).findIndex((node) => node.mesh !== undefined && scene.meshes?.[node.mesh]?.weights !== undefined);
+  const animations = [...((scene as { animations?: GltfAnimation[] }).animations ?? [])];
+  if (faceNode >= 0) {
+    for (const clip of mesh.clips ?? []) {
+      const m = clip.morphs;
+      if (!m || m.times.length === 0 || m.values.length !== m.times.length * m.targets) continue;
+      let animation = animations.find((a) => a.name === clip.name);
+      if (!animation) {
+        animation = { name: clip.name, channels: [], samplers: [] };
+        animations.push(animation);
+        if (clip.duration !== m.times[m.times.length - 1]) animation.extras = { duration: clip.duration };
+      }
+      animation.samplers.push({ input: addFloatAccessor(m.times, 1, true), output: addFloatAccessor(m.values, 1, false), interpolation: m.interpolation === "step" ? "STEP" : "LINEAR" });
+      animation.channels.push({ sampler: animation.samplers.length - 1, target: { node: faceNode, path: "weights" } });
+    }
+  }
   const json: GltfJson = {
     asset: { version: "2.0" },
     scene: 0,
     ...scene,
+    ...(animations.length > 0 ? { animations } : {}),
     accessors,
     bufferViews,
     buffers: [{ byteLength: binLength }],

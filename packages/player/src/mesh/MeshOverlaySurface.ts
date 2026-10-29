@@ -363,6 +363,9 @@ const NEAR_CASCADE_MAX = 24;
 /** Fixed downward tilt so the scene reads as a 3D object, not a flat silhouette. */
 const AUTO_ORBIT_PITCH = 0.35;
 
+/** No morph weights (F7b). */
+const NO_MORPHS: ReadonlyMap<number, Float32Array> = new Map();
+
 export class MeshOverlaySurface implements DisplaySurface {
   private frame = 0;
   private cartCamera: MailboxMeshCamera | null = null;
@@ -611,14 +614,29 @@ export class MeshOverlaySurface implements DisplaySurface {
    * AnimationSession). Each listed object's live mesh is re-skinned when its
    * matrices changed, and it counts as moving this frame for the shadow cache.
    */
-  setSkinning(skinning: ReadonlyMap<number, Float32Array>): void {
+  setSkinning(skinning: ReadonlyMap<number, Float32Array>, morphs: ReadonlyMap<number, Float32Array> = NO_MORPHS): void {
     for (const [i, matrices] of skinning) {
       const live = this.live.get(i);
-      if (!live || this.lastSkin.get(i) === matrices) continue;
-      live.update(matrices);
+      const weights = morphs.get(i);
+      if (!live || (this.lastSkin.get(i) === matrices && !weights)) continue;
+      live.update(matrices, weights ? { morphWeights: weights } : {});
       this.lastSkin.set(i, matrices);
     }
+    this.setFaces(morphs, skinning);
     this.animated = new Set([...skinning.keys()].filter((i) => this.live.has(i)));
+  }
+
+  /**
+   * Set faces' morph weights (F7b; object → weights, from a FaceDriver or a clip): each listed object's live
+   * copy re-morphed, a skinned one at its last pose. Objects `skinned` already re-skinned this frame are skipped.
+   */
+  setFaces(faces: ReadonlyMap<number, Float32Array>, skinned: ReadonlyMap<number, Float32Array> = NO_MORPHS): void {
+    for (const [i, weights] of faces) {
+      if (skinned.has(i)) continue;
+      const live = this.live.get(i);
+      if (!live) continue;
+      live.update(this.lastSkin.get(i) ?? new Float32Array(0), { morphWeights: weights });
+    }
   }
 
   /**

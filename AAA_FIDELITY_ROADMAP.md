@@ -1236,7 +1236,37 @@ Everything else depends on this track. It contains no visible "feature", but its
       - on Dawn: the compute pass's positions and normals against the CPU's, by linear blending and by dual quaternions, the bulge and the corrective on, the previous buffer holding the rest pose, the UVs untouched; the CPU copy stays in its bind pose.
     - *Found, then fixed:* the transform the importer used for directions normalises them, which would have turned a 2 cm delta into a metre; deltas now take the linear part as it is.
     - *Left for later:* the editor's UI for adding targets and drivers (they arrive by import or by script); tangents on a GPU-skinned copy (it takes the derivative frame, as the CPU copy did); compressed (quantised) deltas.
-- [ ] **F7b. Faces.** A facial rig standard (ARKit's 52 blend shapes, or FACS), with animation import, phoneme-driven lip sync from audio, and look-at with saccades.
+- [x] **F7b. Faces.** A facial rig standard (ARKit's 52 blend shapes, or FACS), with animation import, phoneme-driven lip sync from audio, and look-at with saccades.
+  - **Done** (`editor model/faces.ts`, `player anim/faceDriver.ts`), on F7a's morph targets.
+    - **The standard is ARKit's 52 shapes.** A mesh's targets are matched to them by name, forgiving the usual spellings (`eyeBlink_L`, `EyeBlinkLeft`, `eye_blink_left`, `blendShape1.eyeBlinkLeft`, `ARKit_…`). A face driven in ARKit's terms drives whichever targets the mesh has; the rest keep the mesh's own weights.
+    - **Animation in:**
+      - glTF's morph-weight channels (`weights`) import as a clip's `morphs`, beside its joint channels or alone on a mesh without a skeleton. They export the same way and are stored in the mesh format.
+      - Live Link Face's CSV recordings (timecode, then a column per shape) read as a face clip.
+      - The animation session plays a clip's weights with its joints, and the overlay re-morphs the live copy (F7a), on the GPU on `aaa`.
+    - **Lip sync** to Oculus's 15 visemes, each an ARKit mouth:
+      - **from timed phonemes** (ARPAbet, as a forced aligner or a TTS engine gives them);
+      - **or from the audio itself.** Per 20 ms frame it measures the loudness, the hiss (what a first difference keeps, 1 for white noise) and the first two formants. The formants come from 12th-order linear prediction (Levinson-Durbin) on the pre-emphasised, Hamming-windowed frame, as the peaks of its envelope. Quiet frames are silence, hissing ones SS, and the vowels are placed by F1 (open) and F2 (front): aa, E, ih, oh, ou.
+      - Each viseme eases in over 60 ms before its span and out after it, and the strongest of overlapping shapes wins, so a closure shows through the vowels round it (coarticulation).
+    - **Gaze:**
+      - the eyes turn toward a target in the head's space, clamped to their range, by saccades whose duration follows the main sequence (21 ms + 2.2 ms a degree), with a velocity profile quick out and easing in;
+      - fixations of 200 to 600 ms end in micro-saccades within half a degree of the target;
+      - blinks every 2 to 6 s;
+      - seeded, so a replay looks the same;
+      - out as ARKit's eyeLook and eyeBlink weights.
+    - **`FaceDriver`** layers an expression, a recorded face clip, the lip sync and the gaze, each shape the strongest of them, into the mesh's morph weights every frame.
+    - *Tests:* `Unit Tests/faces.test.ts` covers:
+      - the shapes and their spellings; a mesh's rig and its weights, the unnamed target kept;
+      - Live Link Face's timecodes and CSV, sampled between frames; glTF weight channels in and out, sampled, and through the mesh format;
+      - phonemes to visemes, with repeats merged; the easing across neighbours;
+      - LPC finding a synthetic vowel's formants; frames classified as silence, hiss and five vowels; a recording turned into its visemes in order;
+      - gaze angles and clamps; a 17° saccade's duration, the fixation's micro-saccades within half a degree, a blink, the same seed giving the same gaze; the eye shapes and their layering;
+      - a `FaceDriver` speaking, looking and keeping a target ARKit doesn't name; a skinned clip's weights through the animation session.
+    - *Left for later:*
+      - a cart scripting call to make a character speak, look or emote (the driver is the runtime's, not yet Lua's);
+      - FACS action units as a second standard;
+      - playing a clip of weights on a mesh without a skeleton (the animation session plays skinned objects);
+      - eye joints driven by the gaze's angles, for rigs without eyeLook shapes;
+      - a phoneme recogniser beyond the formant classes: consonants other than SS come from phonemes only.
 - [x] **F7c. Character shading.**
   - **Skin:** F1d SSS with a dual-lobe specular, micro-normal detail and cavity.
   - **Eyes:** a refractive cornea, an iris with parallax and caustic, and a wet tear line.

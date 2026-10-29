@@ -8725,6 +8725,7 @@ import {
   isSkinned,
   restPose,
   sampleClip,
+  sampleMorphs,
   skinMatrices
 } from "@cartbox/editor";
 function animatedObjects(scene) {
@@ -8961,6 +8962,20 @@ var AnimationSession = class {
       out.set(object, skinMatrices(p.mesh.skin, faded));
     }
     this.cache = { tick: this.tick, matrices: out };
+    return out;
+  }
+  /**
+   * The morph weights each animated object's clip gives now (F7b; object → weights), for the clips that carry
+   * them: the clip the current track shows, at its time. Objects whose clips have none are left out.
+   */
+  morphs(visible = () => true) {
+    const out = /* @__PURE__ */ new Map();
+    for (const [object, p] of this.playback) {
+      if (!visible(object)) continue;
+      const shown = this.shownClip(p, p.current);
+      const clip = shown.clip >= 0 ? p.mesh.clips?.[shown.clip] : void 0;
+      if (clip?.morphs) out.set(object, sampleMorphs(clip, shown.time, false));
+    }
     return out;
   }
   /** Recompute the matrices on the next request (something that shapes the pose changed). */
@@ -10357,6 +10372,14 @@ var RuntimeChannel = class {
       if (pose && mesh?.skin && world) w.position = transform2(world, jointPosition(mesh.skin, pose, w.joint));
     }
     return matrices;
+  }
+  /** The morph weights the animated objects' clips give now (F7b; object → weights), for those being drawn. */
+  morphs() {
+    if (!this.animation) return /* @__PURE__ */ new Map();
+    return this.animation.morphs((object) => {
+      const pooled = this.scene.instances[object]?.pooled;
+      return !pooled || this.active.has(pooled.root);
+    });
   }
   /** Start a timeline cue on an object: a state of its state machine by that name, else a clip. */
   cue(object, name, fade, loop) {
@@ -12027,6 +12050,7 @@ var NEAR_CASCADE_SHARE = 0.3;
 var NEAR_CASCADE_MIN = 4;
 var NEAR_CASCADE_MAX = 24;
 var AUTO_ORBIT_PITCH = 0.35;
+var NO_MORPHS = /* @__PURE__ */ new Map();
 var MeshOverlaySurface = class _MeshOverlaySurface {
   constructor(inner, width, height, scene, instances, frames, renderer, skyMap, environment, options = {}) {
     this.inner = inner;
@@ -12270,14 +12294,28 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
    * AnimationSession). Each listed object's live mesh is re-skinned when its
    * matrices changed, and it counts as moving this frame for the shadow cache.
    */
-  setSkinning(skinning) {
+  setSkinning(skinning, morphs = NO_MORPHS) {
     for (const [i, matrices] of skinning) {
       const live = this.live.get(i);
-      if (!live || this.lastSkin.get(i) === matrices) continue;
-      live.update(matrices);
+      const weights = morphs.get(i);
+      if (!live || this.lastSkin.get(i) === matrices && !weights) continue;
+      live.update(matrices, weights ? { morphWeights: weights } : {});
       this.lastSkin.set(i, matrices);
     }
+    this.setFaces(morphs, skinning);
     this.animated = new Set([...skinning.keys()].filter((i) => this.live.has(i)));
+  }
+  /**
+   * Set faces' morph weights (F7b; object → weights, from a FaceDriver or a clip): each listed object's live
+   * copy re-morphed, a skinned one at its last pose. Objects `skinned` already re-skinned this frame are skipped.
+   */
+  setFaces(faces, skinned = NO_MORPHS) {
+    for (const [i, weights] of faces) {
+      if (skinned.has(i)) continue;
+      const live = this.live.get(i);
+      if (!live) continue;
+      live.update(this.lastSkin.get(i) ?? new Float32Array(0), { morphWeights: weights });
+    }
   }
   /**
    * Apply an editor's edits to the running scene (ENGINE_PARITY_ROADMAP.md EP5):
@@ -34017,7 +34055,7 @@ var Player = class {
           this.meshSurface.setShields(this.runtime.channel.shields());
           this.meshSurface.setLooks(this.runtime.channel.looks());
           const placed = this.runtime.channel.needsWorld() ? this.meshSurface.currentPlacements() : null;
-          this.meshSurface.setSkinning(placed ? this.runtime.channel.skinning((o) => placed[o] ?? null) : this.runtime.channel.skinning());
+          this.meshSurface.setSkinning(placed ? this.runtime.channel.skinning((o) => placed[o] ?? null) : this.runtime.channel.skinning(), this.runtime.channel.morphs());
         }
         this.meshSurface.setCartLights(decodeWorldLights(mailbox));
         if (this.editorCamera) {
@@ -36102,6 +36140,69 @@ var DirectTransport = class {
   }
 };
 
+// src/anim/faceDriver.ts
+import {
+  ARKIT_SHAPES,
+  Gaze,
+  faceRig,
+  faceWeights,
+  gazeWeights,
+  layerFace,
+  lipSyncWeights,
+  sampleFace
+} from "@cartbox/editor";
+var AHEAD = [0, 0, 1];
+var FaceDriver = class {
+  constructor(mesh, seed = 1) {
+    this.mesh = mesh;
+    this.time = 0;
+    this.speech = null;
+    this.looking = null;
+    this.expression = null;
+    this.clip = null;
+    this.mouth = new Float32Array(ARKIT_SHAPES.length);
+    this.recorded = new Float32Array(ARKIT_SHAPES.length);
+    this.rig = faceRig(mesh);
+    this.gaze = new Gaze(seed);
+  }
+  /** Say a viseme track, starting `delay` seconds from now. */
+  speak(track, delay = 0) {
+    this.speech = { track, start: this.time + delay };
+  }
+  /** Look along a direction in the head's space (+z ahead, +y up, +x its left), or ahead with null. */
+  lookAt(direction) {
+    this.looking = direction;
+  }
+  /** Hold an expression (52 ARKit weights), or none. */
+  setExpression(weights) {
+    this.expression = weights ? Float32Array.from({ length: ARKIT_SHAPES.length }, (_, i) => weights[i] ?? 0) : null;
+  }
+  /** Play a recorded face clip (Live Link Face, say) from now, or stop one. */
+  play(clip, loop = false) {
+    this.clip = clip ? { clip, start: this.time, loop } : null;
+  }
+  /** Advance `dt` seconds: the mesh's morph weights now (its own weights for targets ARKit doesn't name). */
+  update(dt) {
+    this.time += Math.max(0, dt);
+    const layers = [];
+    if (this.expression) layers.push(this.expression);
+    if (this.clip) {
+      const { clip, start, loop } = this.clip;
+      let t = this.time - start;
+      if (loop && clip.duration > 0) t %= clip.duration;
+      layers.push(sampleFace(clip, t, this.recorded));
+    }
+    if (this.speech) {
+      const t = this.time - this.speech.start;
+      layers.push(lipSyncWeights(this.speech.track, t, this.mouth));
+      const end = this.speech.track.reduce((m, s) => Math.max(m, s.end), 0);
+      if (t > end + 1) this.speech = null;
+    }
+    layers.push(gazeWeights(this.gaze.update(dt, this.looking ?? AHEAD)));
+    return faceWeights(this.rig, layerFace(...layers), this.mesh.morphWeights ?? []);
+  }
+};
+
 // src/index.ts
 function mount(container, options) {
   const player = new Player(container, options);
@@ -36187,6 +36288,7 @@ export {
   FLARE_GHOSTS,
   FLARE_GHOST_GAIN,
   FLARE_SPIKE_POWER,
+  FaceDriver,
   GREY_CARD,
   GYRO_AIMS,
   GamepadInput,

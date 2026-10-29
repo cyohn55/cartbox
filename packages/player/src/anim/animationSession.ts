@@ -27,6 +27,7 @@ import {
   isSkinned,
   restPose,
   sampleClip,
+  sampleMorphs,
   skinMatrices,
   type AnimationClip,
   type AnimatorOp,
@@ -366,6 +367,21 @@ export class AnimationSession {
       out.set(object, skinMatrices(p.mesh.skin!, faded));
     }
     this.cache = { tick: this.tick, matrices: out };
+    return out;
+  }
+
+  /**
+   * The morph weights each animated object's clip gives now (F7b; object → weights), for the clips that carry
+   * them: the clip the current track shows, at its time. Objects whose clips have none are left out.
+   */
+  morphs(visible: (object: number) => boolean = () => true): Map<number, Float32Array> {
+    const out = new Map<number, Float32Array>();
+    for (const [object, p] of this.playback) {
+      if (!visible(object)) continue;
+      const shown = this.shownClip(p, p.current);
+      const clip = shown.clip >= 0 ? p.mesh.clips?.[shown.clip] : undefined;
+      if (clip?.morphs) out.set(object, sampleMorphs(clip, shown.time, false));
+    }
     return out;
   }
 

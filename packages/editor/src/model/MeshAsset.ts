@@ -40,6 +40,7 @@ import {
   MAX_SKIN_JOINTS,
   type AnimationClip,
   type ClipChannel,
+  type MorphChannel,
   type ClipKey,
   type MeshSkin,
   type SkinJoint,
@@ -727,6 +728,8 @@ interface SerializedClip {
   channels: { joint: number; path: string; interp?: string; times: string; values: string }[];
   /** The dope sheet's keys (L16): joint, time, ease (absent = linear) and a curve's handles. */
   keys?: { j: number; t: number; e?: string; c?: number[] }[];
+  /** Morph weights over time (F7b): interpolation, targets a key, times, values. */
+  morphs?: { interp?: string; targets: number; times: string; values: string };
 }
 interface SerializedMesh {
   version: number;
@@ -777,6 +780,7 @@ function serializeClip(clip: AnimationClip): SerializedClip {
     ...(clip.keys && clip.keys.length > 0
       ? { keys: clip.keys.map((k) => ({ j: k.joint, t: k.time, ...(k.ease !== "linear" ? { e: k.ease } : {}), ...(k.ease === "curve" && k.curve ? { c: [...k.curve] } : {}) })) }
       : {}),
+    ...(clip.morphs ? { morphs: { ...(clip.morphs.interpolation === "step" ? { interp: "step" } : {}), targets: clip.morphs.targets, times: f32ToBase64(clip.morphs.times), values: f32ToBase64(clip.morphs.values) } } : {}),
   };
 }
 
@@ -885,7 +889,19 @@ function deserializeClips(raw: unknown, jointCount: number): AnimationClip[] {
       }
       keys += authored.length;
     }
-    return { name: typeof clip.name === "string" ? clip.name.slice(0, 64) : "clip", duration, channels, ...(authored.length > 0 ? { keys: authored } : {}) };
+    // Morph weights over time (F7b).
+    let morphs: MorphChannel | null = null;
+    if (clip.morphs) {
+      const m = clip.morphs;
+      const times = base64ToF32(m.times);
+      const values = base64ToF32(m.values);
+      if (!Number.isInteger(m.targets) || m.targets <= 0 || m.targets > MAX_MORPH_TARGETS || times.length === 0 || values.length !== times.length * m.targets) throw new Error("Mesh asset payload is malformed");
+      if (!times.every((t, i) => Number.isFinite(t) && (i === 0 || t >= times[i - 1]!)) || !values.every(Number.isFinite)) throw new Error("Mesh asset payload is malformed");
+      keys += times.length;
+      if (keys > MAX_CLIP_KEYS) throw new Error("Mesh asset payload is malformed");
+      morphs = { interpolation: m.interp === "step" ? "step" : "linear", targets: m.targets, times, values };
+    }
+    return { name: typeof clip.name === "string" ? clip.name.slice(0, 64) : "clip", duration, channels, ...(authored.length > 0 ? { keys: authored } : {}), ...(morphs ? { morphs } : {}) };
   });
 }
 
@@ -920,6 +936,8 @@ export function serializeMeshAsset(mesh: MeshAsset): string {
     ...(mesh.dualQuaternion ? { dualQuaternion: true } : {}),
     ...(mesh.skin ? { skin: serializeSkin(mesh.skin) } : {}),
     ...(mesh.skin && mesh.clips && mesh.clips.length > 0 ? { clips: mesh.clips.map(serializeClip) } : {}),
+    // Without a skeleton, the clips of morph weights alone (F7b).
+    ...(!mesh.skin && mesh.clips?.some((c) => c.morphs) ? { clips: mesh.clips.filter((c) => c.morphs).map((c) => serializeClip({ name: c.name, duration: c.duration, channels: [], morphs: c.morphs! })) } : {}),
     ...(mesh.trails && mesh.trails.length > 0 ? { trails: mesh.trails.map((t) => ({ ...t, from: [...t.from], to: [...t.to], color: [...t.color] })) } : {}),
     // Material sets after the primitives, so an image a set shares with them is stored once.
     ...(mesh.variants && mesh.variants.length > 0
@@ -1187,7 +1205,8 @@ export function deserializeMeshAsset(json: string): MeshAsset {
   });
 
   if (primitives.length === 0) throw new Error(MALFORMED);
-  const clips = skin ? deserializeClips(raw.clips, skin.joints.length) : [];
+  // A clip of morph weights alone (F7b) needs no skeleton.
+  const clips = deserializeClips(raw.clips, skin?.joints.length ?? 0);
   const trails = readMeshTrails(raw.trails, skin?.joints.length ?? 0);
   const variants: MeshVariant[] = [];
   if (raw.variants !== undefined) {

@@ -588,6 +588,7 @@ export {
   type QualitySettings,
 } from "./quality.js";
 export { AnimationSession, animatedObjects, compileAnimator, sceneHasAnimation } from "./anim/animationSession.js";
+export { FaceDriver } from "./anim/faceDriver.js";
 export {
   PHYS_BLOCK_BYTES,
   PHYS_MAGIC,

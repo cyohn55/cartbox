@@ -75,6 +75,30 @@ export interface AnimationClip {
    * own keys, as an imported clip does.
    */
   readonly keys?: readonly ClipKey[];
+  /** The mesh's morph weights over the clip (F7b; glTF's `weights` channel): a face's animation. */
+  readonly morphs?: MorphChannel;
+}
+
+/** Morph weights over time: `targets` weights a key. */
+export interface MorphChannel {
+  readonly interpolation: "linear" | "step";
+  readonly targets: number;
+  readonly times: Float32Array;
+  readonly values: Float32Array;
+}
+
+/** A clip's morph weights at `time` seconds (looped or held as {@link clipTime} does), or an empty array when it has none. */
+export function sampleMorphs(clip: AnimationClip, time: number, loop = true): Float32Array {
+  const m = clip.morphs;
+  if (!m || m.times.length === 0 || m.targets <= 0) return new Float32Array(0);
+  const out = new Float32Array(m.targets);
+  const t = clipTime(clip, time, loop);
+  const k = keyBefore(m.times, t);
+  const next = Math.min(k + 1, m.times.length - 1);
+  const span = m.times[next]! - m.times[k]!;
+  const f = m.interpolation === "step" || span <= 0 ? 0 : Math.max(0, Math.min(1, (t - m.times[k]!) / span));
+  for (let i = 0; i < m.targets; i += 1) out[i] = m.values[k * m.targets + i]! * (1 - f) + m.values[next * m.targets + i]! * f;
+  return out;
 }
 
 /** A key of the dope sheet: one joint's pose at a moment, easing into its next key. */
