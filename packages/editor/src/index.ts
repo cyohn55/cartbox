@@ -1103,6 +1103,25 @@ export {
   type EmitterSpec,
   type SdfShape,
 } from "./model/particleGraph";
+export {
+  FluidGrid,
+  MAX_VOLUME_RESOLUTION,
+  PRESSURE_ITERATIONS,
+  bakeVolume,
+  blackbody,
+  burn,
+  divergence,
+  effectSources,
+  parseVolumeEffects,
+  project,
+  sampleField,
+  stepFluid,
+  volumeLight,
+  volumePreset,
+  type BakedVolume,
+  type FluidSource,
+  type VolumeEffect,
+} from "./model/volumetricEffects";
 export { DEFAULT_TOLERANCE, clipBytes, packClip, packQuat, reduceChannel, reduceClip, unpackClip, unpackQuat, type CompressionTolerance } from "./model/clipCompression";
 export {
   GRAPH_NODES,

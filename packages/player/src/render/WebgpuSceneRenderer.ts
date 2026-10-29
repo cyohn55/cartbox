@@ -141,6 +141,8 @@ import {
   type RasterStyle,
   type ReflectionProbeSet,
   CLOTH_GRAVITY,
+  volumeLight,
+  type VolumeEffect,
   type EmitterSpec,
   CLOTH_ITERATIONS,
   CLOTH_RELAX,
@@ -161,6 +163,7 @@ import { brdfLut, brdfWgsl } from "./brdf.js";
 import { MATERIAL_SET_WGSL } from "./materialSet.js";
 import { CHARACTER_WGSL } from "./characterShading.js";
 import { GpuParticles, type ParticleFrame } from "./gpuParticles.js";
+import { GpuVolumes } from "./volumetricEffects.js";
 import { CLOTH_FINISH_WGSL, CLOTH_PREDICT_WGSL, CLOTH_SOLVE_WGSL, CLOTH_WORKGROUP, clothParams, packCapsules, vertexTriangles } from "./clothGpu.js";
 import { SKIN_WGSL, SKIN_WORKGROUP, packBindShape, packInfluences, skinParams } from "./gpuSkinning.js";
 import { SSS_MAX_PROFILES, SSS_WGSL, packSssProfiles, type SssProfile } from "./subsurface.js";
@@ -3647,7 +3650,16 @@ export class WebgpuSceneRenderer implements SceneRenderer {
       this.pathTracer ??= PathTracer.create(this.device);
       return this.pathTracer.render(applyScenePasses(instances, given), given, this.width, this.height);
     }
-    const draw = this.hdr ? viewModeDraw(given) : given;
+    let draw = this.hdr ? viewModeDraw(given) : given;
+    // Volumetric effects (F8b): their fluids stepped, and the light a burning one casts joining the frame's.
+    if (this.volumes?.active) {
+      this.volumes.simulate(draw.particleDt ?? 1 / 60);
+      const burning = this.volumes.volumes.flatMap((v) => {
+        const light = volumeLight(v.effect, v.at, v.age);
+        return light ? [{ kind: "point" as const, position: light.position, color: light.color, intensity: light.intensity, range: light.range, falloff: "inverseSquare" as const }] : [];
+      });
+      if (burning.length > 0) draw = { ...draw, lights: [...(draw.lights ?? []), ...burning] };
+    }
     if (draw.prepass === true) this.matchMotion(instances);
     const visible = applyScenePasses(instances, draw);
     try {
@@ -4274,6 +4286,8 @@ export class WebgpuSceneRenderer implements SceneRenderer {
       });
     }
     if (seeThrough) scenePass("see-through", firstSeeThrough, draws.length, true, true);
+    // Volumetric effects (F8b): marched over the scene, to its depths, before the particles in them.
+    if (this.volumes?.active && this.hdr && prepass && !msaa) this.addVolumes(graph, colour, depth, draw, eye);
     // GPU particles (F8a): simulated against the prepass's depths, drawn over the scene before TAA's reactive mask.
     if (this.particles && this.hdr && prepass && gbuffer && !msaa && this.frameDepthView) {
       this.addParticles(graph, colour, depth, gbuffer, { draw, viewProj, eye, globalCount: cells ? globalCount : ordered.length });
@@ -5566,6 +5580,45 @@ export class WebgpuSceneRenderer implements SceneRenderer {
     }
   }
 
+  /** The volumetric effects (F8b; volumetricEffects.ts), when the scene has any. */
+  private volumes: GpuVolumes | null = null;
+
+  /** Give the renderer its volumetric effects (F8b), replacing any it had. */
+  setVolumes(effects: readonly VolumeEffect[]): void {
+    this.volumes?.dispose();
+    this.volumes = effects.length > 0 && this.hdr ? new GpuVolumes(this.device, this.colourFormat, effects) : null;
+  }
+
+  /** Start a volumetric effect at a point (its base's centre) (F8b). */
+  volumeTrigger(index: number, at: readonly number[]): void {
+    this.volumes?.trigger(index, at);
+  }
+
+  /** The live volumes (F8b), for tests and the profiler. */
+  get liveVolumes(): GpuVolumes | null {
+    return this.volumes;
+  }
+
+  /** The volumes' march over the scene (F8b): a full-screen pass reading the depths, blending colour × T + L. */
+  private addVolumes(graph: FrameGraph, colour: FrameResource, depth: FrameResource, draw: GpuSceneDraw, eye: readonly number[]): void {
+    const volumes = this.volumes!;
+    const projection = this.frameDepthView ? this.frameDepthView.viewProj : multiplyMat4(draw.projection, draw.view);
+    const inverse = invertMat4(projection) ?? projection;
+    const sun = draw.lightDirection ?? [0, 1, 0];
+    const sl = Math.hypot(sun[0]!, sun[1]!, sun[2]!) || 1;
+    const frame = { invViewProj: inverse, eye, sun: [sun[0]! / sl, sun[1]! / sl, sun[2]! / sl], sunColor: [1, 1, 1], ambient: draw.ambient ?? 0.3, depthTerms: (this.frameDepthView?.terms ?? [0, 1]) as [number, number], width: this.width, height: this.height };
+    graph.addPass("volumes", "render", (pass) => {
+      pass.read(colour, "attachment");
+      pass.write(colour);
+      pass.read(depth);
+      return (ctx) => {
+        const encoded = ctx.encoder.beginRenderPass({ colorAttachments: [{ view: ctx.texture(colour).createView(), loadOp: "load", storeOp: "store" }], ...ctx.timing });
+        volumes.march(encoded, frame, ctx.texture(depth));
+        encoded.end();
+      };
+    });
+  }
+
   /** The GPU particle system (F8a; gpuParticles.ts), when the scene has emitters. */
   private particles: GpuParticles | null = null;
   private particleTime = 0;
@@ -6083,6 +6136,8 @@ export class WebgpuSceneRenderer implements SceneRenderer {
   }
 
   dispose(): void {
+    this.volumes?.dispose();
+    this.volumes = null;
     this.particles?.dispose();
     this.particles = null;
     if (this.destroyed) return;

@@ -1,4 +1,4 @@
-import { MeshSceneInstance, MeshAsset, Mat4, ScenePropValue, PhysicsSpec, AnimatorSpec, AttachedComponent, SceneLighting, PhysicsWorldSettings, SceneTimeline, SceneLevel, NavMesh, Terrain, SceneStreaming, ParticleEffect, DecalDef, DecalMark, RagdollBox, DebrisDef, LodChain, SceneAudio, ComponentDef, StreamGroup, JointKind, JointSpec, EnvironmentLight, SceneLight, ActionRebind, Atmosphere, SkyMoon, DecodedTexture, SkySun, BakedCloudLayer, SunShafts, ColorFilter, AccessibilitySettings, EncodedImage, UiDocument, InputAction, StringTable, ReflectionProbe, ShadowInput, ToneMap, LocalShadows, ProjectedDecal, DecalTiles, Occluder, DynamicGi, SceneFog, SceneWind, MeshMaterial, EmitterSpec, RasterStyle, MeshPrimitive, HdrLightmap, LightmapLayout, ProbeVolume, OccluderSurface, ResolvedLayers, ResolvedExtensions, ResolvedRefraction, SurfaceEffect, AnimatorOp, NavGraph, AnimationCue, FaceRig, VisemeSpan, FaceClip } from '@cartbox/editor';
+import { MeshSceneInstance, MeshAsset, Mat4, ScenePropValue, PhysicsSpec, AnimatorSpec, AttachedComponent, SceneLighting, PhysicsWorldSettings, SceneTimeline, SceneLevel, NavMesh, Terrain, SceneStreaming, ParticleEffect, DecalDef, DecalMark, RagdollBox, DebrisDef, LodChain, SceneAudio, ComponentDef, StreamGroup, JointKind, JointSpec, EnvironmentLight, SceneLight, ActionRebind, Atmosphere, SkyMoon, DecodedTexture, SkySun, BakedCloudLayer, SunShafts, ColorFilter, AccessibilitySettings, EncodedImage, UiDocument, InputAction, StringTable, ReflectionProbe, ShadowInput, ToneMap, LocalShadows, ProjectedDecal, DecalTiles, Occluder, DynamicGi, SceneFog, SceneWind, MeshMaterial, EmitterSpec, RasterStyle, VolumeEffect, MeshPrimitive, HdrLightmap, LightmapLayout, ProbeVolume, OccluderSurface, ResolvedLayers, ResolvedExtensions, ResolvedRefraction, SurfaceEffect, AnimatorOp, NavGraph, AnimationCue, FaceRig, VisemeSpan, FaceClip } from '@cartbox/editor';
 
 /**
  * The runtime mesh scene: the cart's mesh sidecar resolved into placed instances
@@ -5663,6 +5663,82 @@ declare class GpuParticles {
     dispose(): void;
 }
 
+/**
+ * Volumetric effects on the linear-light renderer (AAA_FIDELITY_ROADMAP.md
+ * F8b; volumetricEffects.ts in @cartbox/editor): each live volume's fluid
+ * solved in compute, then every volume raymarched over the scene.
+ *
+ * - **The solver** runs on storage buffers, cell for cell as the CPU's: forces
+ *   (the sources, buoyancy), semi-Lagrangian advection (trilinear by hand, so
+ *   the two agree), the divergence, Jacobi iterations for the pressure, and
+ *   the gradient taken away with dissipation. A baked volume uploads its
+ *   frame instead. Either way the density and temperature land in a 3D
+ *   texture the march filters.
+ * - **The march** (a full-screen pass after the opaque scene): each pixel's
+ *   ray clipped to each volume's box and to the scene's depth, 48 steps
+ *   through it. A step's smoke scatters the sun (its light through the smoke
+ *   toward the sun, six steps) and the ambient; its fire emits a blackbody's
+ *   light by its temperature. The colour becomes colour × T + L.
+ * - **The fog** takes their light: a burning volume adds a point light to the
+ *   frame's lights (`volumeLight`), which the scene and the froxel fog (F5b)
+ *   both shade by.
+ */
+
+/** The march's uniform (vec4s): the inverse view-projection, the eye, the sun, the ambient, then per volume four vec4s. */
+declare function packMarch(frame: {
+    invViewProj: ArrayLike<number>;
+    eye: readonly number[];
+    sun: readonly number[];
+    sunColor: readonly number[];
+    ambient: number;
+    depthTerms: readonly [number, number];
+    width: number;
+    height: number;
+}, volumes: readonly {
+    at: readonly number[];
+    effect: VolumeEffect;
+    burn: number;
+    tempScale: number;
+}[]): Float32Array;
+/** The volumes: triggered, simulated each frame, marched over the scene. */
+declare class GpuVolumes {
+    private readonly device;
+    private readonly colourFormat;
+    readonly effects: readonly VolumeEffect[];
+    private readonly live;
+    private pipes;
+    private readonly baked;
+    private dummy;
+    private sampler;
+    private readonly uniform;
+    private readonly marchUniform;
+    constructor(device: any, colourFormat: string, effects: readonly VolumeEffect[]);
+    get active(): boolean;
+    /** The volumes alive, for the lights they cast and the tests. */
+    get volumes(): readonly {
+        readonly effect: VolumeEffect;
+        readonly at: readonly number[];
+        readonly age: number;
+        readonly texture: any;
+    }[];
+    /** Start effect `index` at `at` (its base's centre); the oldest goes when four are alive. */
+    trigger(index: number, at: readonly number[]): void;
+    private bake;
+    private pipelines;
+    /** Advance every live volume by `dt`: the solver's passes (one volume's uniform at a time, a submit each) or its baked frame. */
+    simulate(dt: number): void;
+    /** The solver's buffers of a live volume (velocity, density/heat), for the tests. */
+    state(k: number): {
+        velocity: any;
+        fields: any;
+        n: number;
+    } | null;
+    /** March every volume over the scene: into an open render pass whose colour is the scene and that reads its depths. */
+    march(pass: any, frame: Parameters<typeof packMarch>[0], depth: any): void;
+    private dispose1;
+    dispose(): void;
+}
+
 /** What residency looks like (for the profiler). */
 interface StreamingStats {
     readonly budgetMB: number;
@@ -6199,6 +6275,16 @@ declare class WebgpuSceneRenderer implements SceneRenderer {
      * copy's space) and written over the primitive's indices when the eye has moved a centimetre.
      */
     private sortHairCards;
+    /** The volumetric effects (F8b; volumetricEffects.ts), when the scene has any. */
+    private volumes;
+    /** Give the renderer its volumetric effects (F8b), replacing any it had. */
+    setVolumes(effects: readonly VolumeEffect[]): void;
+    /** Start a volumetric effect at a point (its base's centre) (F8b). */
+    volumeTrigger(index: number, at: readonly number[]): void;
+    /** The live volumes (F8b), for tests and the profiler. */
+    get liveVolumes(): GpuVolumes | null;
+    /** The volumes' march over the scene (F8b): a full-screen pass reading the depths, blending colour × T + L. */
+    private addVolumes;
     /** The GPU particle system (F8a; gpuParticles.ts), when the scene has emitters. */
     private particles;
     private particleTime;

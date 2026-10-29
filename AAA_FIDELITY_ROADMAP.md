@@ -1414,7 +1414,31 @@ Everything else depends on this track. It contains no visible "feature", but its
       - the flipbook's motion vectors exercised on a device;
       - particles writing velocity for TAA and motion blur;
       - measured budgets at a million particles.
-- [ ] **F8b. Volumetric effects.** Smoke, fire and explosions as raymarched 3D textures (baked simulations or a small GPU fluid solver), lit by the sun and lights, and casting into the F5b froxel fog.
+- [x] **F8b. Volumetric effects.** Smoke, fire and explosions as raymarched 3D textures (baked simulations or a small GPU fluid solver), lit by the sun and lights, and casting into the F5b froxel fog.
+  - **Done** on the `aaa` tier (`editor model/volumetricEffects.ts`, `player render/volumetricEffects.ts`).
+    - **Effects** are smoke, fire or an explosion: a cube's size, its grid (8³ to 64³), duration, buoyancy, dissipation and cooling, the smoke's colour and extinction, and the fire's peak temperature, glow and light. There are presets for each.
+    - **The solver** is Stam's stable fluids:
+      - forces: the effect's source (a ball at the base, or a short burst at the middle for an explosion), and buoyancy from the heat;
+      - semi-Lagrangian advection of velocity, density and heat, trilinear;
+      - the divergence with solid walls (the normal component mirrored);
+      - 20 Jacobi iterations for the pressure, its gradient taken away;
+      - dissipation and cooling.
+      The GPU runs it as compute passes over storage buffers, cell for cell as the CPU does (trilinear by hand, not the sampler), and writes density and heat into a 3D texture for the march.
+    - **Baked effects** are the CPU's solver run ahead at 15 fps on up to a 24³ grid, kept as 8-bit frames and played back.
+    - **The march** is a full-screen pass after the see-through scene, before the particles. Each pixel's ray is clipped to every live volume's box (up to four) and to the scene's depth, and takes 48 steps:
+      - the smoke scatters the sun, attenuated by six steps through the smoke toward it, and the ambient;
+      - the fire emits a blackbody's light by its local temperature, as bright as it burns now;
+      - the colour becomes colour × T + L, blended in one pass.
+    - **Light into the scene and the fog:** a burning volume adds a point light at its centre, coloured by its blackbody and as bright as it burns (an explosion flashes, then dies away over its life). The scene shades by it, and the froxel fog (F5b-2) scatters it.
+    - *Tests:* `Unit Tests/volumetric-effects.test.ts` covers:
+      - projection cutting a burst's divergence; heat rising, with the mass held within 20% (semi-Lagrangian isn't conservative); baking frames and the sources ending;
+      - the blackbody's colours and brightness; the burn's flash and fade and its light; stored effects read defensively;
+      - on Dawn: ten steps of a 16³ fire on the GPU within 1% of the CPU; smoke darkening a bright wall; fire brightening a black one; no validation errors.
+    - *Left for later:*
+      - the volumes' extinction in the froxel fog itself (the fog takes their light, not their shadow), and their shadows in the cascades;
+      - a cart scripting call and scene field to set off a volume (the renderer's `setVolumes` and `volumeTrigger` stand ready);
+      - vorticity confinement;
+      - temporal reprojection of the march at lower resolution.
 - [ ] **F8c. Destruction.** Voronoi pre-fracture in the editor, physics-driven chunks with debris particles and dust, decals at the breaks, and GI that updates (F3e).
 
 ### F9. The asset pipeline for AAA content
