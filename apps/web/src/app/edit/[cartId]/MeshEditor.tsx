@@ -1252,7 +1252,7 @@ export function MeshEditor({ sidecar, onSidecarChange, code, onStartPlay, modern
           <input
             ref={fileRef}
             type="file"
-            accept=".obj,.glb,.gltf,.mtl,.fbx,.usda,.usdz,.cbpk"
+            accept=".obj,.glb,.gltf,.mtl,.fbx,.usda,.usdz,.ply,.cbpk"
             multiple
             hidden
             onChange={(event) => {
@@ -1574,7 +1574,7 @@ export function MeshEditor({ sidecar, onSidecarChange, code, onStartPlay, modern
                   Replace from file…
                   <input
                     type="file"
-                    accept=".obj,.glb,.gltf,.mtl,.fbx,.usda,.usdz,.cbpk"
+                    accept=".obj,.glb,.gltf,.mtl,.fbx,.usda,.usdz,.ply,.cbpk"
                     multiple
                     hidden
                     onChange={(event) => {

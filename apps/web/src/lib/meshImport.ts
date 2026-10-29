@@ -14,7 +14,7 @@
  * or Draco-compressed glTF geometry is decoded on import (see gltfDecoders.ts).
  */
 
-import { parseFbx, parseObj, parseUsd, unpackMeshAsset, type MeshAsset, type DecodedTexture } from "@cartbox/editor";
+import { parseFbx, parseObj, parseUsd, unpackMeshAsset, type MeshAsset, type DecodedTexture, parsePly, prepareScan } from "@cartbox/editor";
 
 import { parseGlbDecoded, parseGltfTextDecoded } from "./gltfDecoders";
 import { loadKtx2Decoder } from "./ktx2Decoder";
@@ -84,7 +84,11 @@ export async function importMeshFile(file: File, companions: readonly File[] = [
       decodeIndexBuffer: (t, c, z, s) => MeshoptDecoder.decodeIndexBuffer(t, c, z, s),
     });
   }
-  throw new Error(`Unsupported 3D format ".${extension}". Import an .obj, .glb, .gltf, .fbx, .usda, .usdz or .cbpk file.`);
+  // F9c: a scan (PLY, its colour in its vertices) made a game mesh: welded, delit, simplified, auto-unwrapped and baked.
+  if (extension === "ply") {
+    return prepareScan(parsePly(new Uint8Array(await file.arrayBuffer()), name)).mesh;
+  }
+  throw new Error(`Unsupported 3D format ".${extension}". Import an .obj, .glb, .gltf, .fbx, .usda, .usdz, .ply or .cbpk file.`);
 }
 
 /**

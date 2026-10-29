@@ -1512,7 +1512,28 @@ Everything else depends on this track. It contains no visible "feature", but its
       - A painted stack shows paint on the flats and bare steel (metal 1, its roughness) at the worn edge, glow where brushed; the normals lean at the paint's edge and stay flat on the flats.
       - The set goes on a material whose stack survives a save; the presets paint.
       - UDIM tiles are found and split with UVs in 0..1, and the files are named.
-- [ ] **F9c. Scans and dense meshes.** Import of photogrammetry and scan meshes (millions of triangles), automatic delighting of albedo, auto-UV, and conversion to F6a clusters with no manual LODs. Decimation to a "game" proxy for collision.
+- [x] **F9c. Scans and dense meshes.** Import of photogrammetry and scan meshes (millions of triangles), automatic delighting of albedo, auto-UV, and conversion to F6a clusters with no manual LODs. Decimation to a "game" proxy for collision.
+  - **Done** (`editor model/scanImport.ts`; the Mesh tab imports `.ply`).
+    - **PLY in** (`parsePly`): ASCII, and binary in either byte order, with every PLY scalar type. Positions, normals and colours (8-bit, 16-bit or float) are read, and any polygon is fanned. OBJ, glTF and FBX scans come in through their codecs.
+    - **Weld:** vertices at one point (to a millionth of the scan's size) are merged, their normals and colours averaged, and the triangles that collapse dropped. Without this, a scan's duplicated seams and a sphere's poles read as borders, and the simplifier won't touch them.
+    - **Delighting:** the capture's light is fitted as L2 spherical harmonics of the normal (least squares over up to 250 000 vertices' luminance). Each colour is divided by its normal's share of that light against the mean, the share held to at least a fifth.
+    - **The game mesh:** the scan is simplified to a budget (60 000 triangles by default, QEM), and each vertex takes its nearest dense vertex's colour (a uniform grid). It is then auto-unwrapped, and the colour baked into a texture: each triangle rasterised in UV space with its corners' colours blended, then four texels of dilation past the charts.
+    - **No manual LODs:** the LOD chain is generated (`generateLods`). The collision proxy (1 000 triangles by default) is simplified straight from the welded scan, as the unwrap's seams would hold it back.
+    - **Clusters for F6a:** the triangles are grouped into 128-triangle clusters, each grown from the first unclustered triangle along a Morton curve, across shared edges, by nearest centre. A cluster is a connected patch with a bounding sphere and a normal cone. The game mesh's index buffer is kept in cluster order, ready for F6a's culling.
+    - *Tests:* `Unit Tests/scan-import.test.ts` covers:
+      - PLY in ASCII, binary little- and big-endian, alike; quads fanned; a bad file refused;
+      - delighting a two-coloured sphere lit from above: the fitted light brightest up, the shading's spread cut by over 40% (L2 can't hold the clamped light's edge, and the albedo's split takes a share of the fit), the colours kept apart;
+      - the nearest-vertex transfer; baking through UVs with dilation;
+      - clusters of at most 128, each bounding its triangles and compact, every triangle once;
+      - a 36 000-triangle scan prepared under a 4 000 budget, its proxy under 300, its LODs, clusters covering every triangle, and its texture showing both colours.
+    - *Found, then fixed:*
+      - clusters cut along the Morton curve alone could span the whole scan (a radius of 1.5 on a unit sphere): they now grow across edges;
+      - the proxy stalled at 1 158 triangles on the sphere's welded poles: collapsed triangles are dropped now.
+    - *Left for later:*
+      - the dense scan's detail baked into a normal map (highToLowBake.ts can, on request);
+      - storing the clusters in the mesh format for F6a;
+      - streaming import of files larger than memory;
+      - setting the proxy as the object's collision mesh on insert.
 - [x] **F9d. Import completeness.** (The glTF KHR material extensions are F1d's.)
   - FBX (through a WASM converter), USD/USDZ, and the full set of glTF KHR material extensions (F1d).
   - 8K textures, HDR environments (`.hdr`, `.exr`, KTX2 HDR), and IES profiles.

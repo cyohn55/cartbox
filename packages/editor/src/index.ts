@@ -1136,6 +1136,21 @@ export {
   type Chunk,
   type FracturePiece,
 } from "./model/fracture";
+export {
+  CLUSTER_TRIANGLES,
+  MAX_SCAN_VERTICES,
+  bakeVertexColors,
+  buildClusters,
+  delightColors,
+  parsePly,
+  prepareScan,
+  transferColors,
+  weldScan,
+  type Cluster,
+  type PreparedScan,
+  type ScanMesh,
+  type ScanOptions,
+} from "./model/scanImport";
 export { DEFAULT_TOLERANCE, clipBytes, packClip, packQuat, reduceChannel, reduceClip, unpackClip, unpackQuat, type CompressionTolerance } from "./model/clipCompression";
 export {
   GRAPH_NODES,
