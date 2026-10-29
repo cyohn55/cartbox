@@ -16,8 +16,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import {
+  MAX_SKY_PANORAMA_CHARS,
   Ragdoll,
   applyMeshVariant,
+  bytesToBase64,
+  defaultProceduralSky,
+  defaultSceneLighting,
+  setSceneSky,
   boxSelect,
   combineSelection,
   convertSelection,
@@ -86,6 +91,7 @@ import {
   readMeshEntry,
   type MeshSidecar,
   type MeshTransform,
+  addCredit,
 } from "@/lib/meshSidecar";
 import { withAutoLods, withEditedGeometry } from "@/lib/meshLods";
 import { describeContract, replaceModel, replacementContract } from "@/lib/meshReplace";
@@ -118,6 +124,8 @@ import type { LibraryAsset } from "@/lib/libraryManifest";
 import styles from "./editor.module.css";
 import { RailGroup, RailHint, SegmentedControl } from "./railControls";
 import { LibraryBrowser } from "./LibraryBrowser";
+import { ExternalLibraryBrowser } from "./ExternalLibraryBrowser";
+import { externalCredit, importExternalHdri, importExternalMaterial, importExternalMesh, type ExternalAsset, type ExternalKind, type ExternalResolution } from "@/lib/externalLibraries";
 import { MaterialEditor } from "./MaterialEditor";
 import { FaceEditPanel, type PickedFace } from "./FaceEditPanel";
 import { ModelingPanel } from "./ModelingPanel";
@@ -286,6 +294,8 @@ export function MeshEditor({ sidecar, onSidecarChange, code, onStartPlay, modern
   const [note, setNote] = useState<string | null>(null);
   const [textures, setTextures] = useState<(DecodedTexture | null)[] | null>(null);
   const [libraryOpen, setLibraryOpen] = useState(false);
+  // The CC0 libraries beyond the Cartbox catalogue (F9f): which kind is being browsed, if any.
+  const [externalKind, setExternalKind] = useState<ExternalKind | null>(null);
   /** "solo" previews the selected mesh alone; "scene" composes every instance. */
   const [view, setView] = useState<"solo" | "scene">("solo");
   /** The Terrain panel's tool and brush (EP10); a tool up turns the scene view's left button into a brush. */
@@ -1156,6 +1166,31 @@ export function MeshEditor({ sidecar, onSidecarChange, code, onStartPlay, modern
     setLibraryOpen(false);
   };
 
+  /** Import from a CC0 library (F9f): a model as a new object, a material onto the selected one, an HDRI as the sky; its credit kept. */
+  const importExternal = async (asset: ExternalAsset, resolution: ExternalResolution) => {
+    const fetchImpl = (url: string) => fetch(url);
+    let next: typeof sidecar;
+    if (asset.kind === "mesh") {
+      const mesh = await importExternalMesh(asset, fetchImpl, resolution);
+      const added = addMesh(sidecar, mesh, asset.name);
+      next = withAutoLods(added.sidecar, added.id);
+      setSelectedId(added.id);
+    } else if (asset.kind === "material") {
+      if (!selectedEntry || !meshAsset) return;
+      const material = await importExternalMaterial(asset, fetchImpl, resolution);
+      next = setMeshAsset(sidecar, selectedEntry.id, { ...meshAsset, primitives: meshAsset.primitives.map((p) => ({ ...p, material })) });
+    } else {
+      const { mime, bytes } = await importExternalHdri(asset, fetchImpl, resolution);
+      const data = bytesToBase64(bytes);
+      if (data.length > MAX_SKY_PANORAMA_CHARS) throw new Error("That HDRI is too large at this resolution: try 1k.");
+      const lighting = sidecar.lighting ?? defaultSceneLighting();
+      const sky = lighting.sky ?? defaultProceduralSky();
+      next = setMeshLighting(sidecar, setSceneSky(lighting, { ...sky, panorama: { mime, data, exposure: 1, yaw: 0 } }));
+    }
+    onSidecarChange(addCredit(next, externalCredit(asset)));
+    setNote(`Imported “${asset.name}” from ${asset.provenance.source} (CC0).`);
+  };
+
   const updateTransform = (patch: Partial<MeshTransform>) => {
     if (!selectedEntry) return;
     onSidecarChange(setMeshTransform(sidecar, selectedEntry.id, { ...selectedEntry.transform, ...patch }));
@@ -1247,6 +1282,15 @@ export function MeshEditor({ sidecar, onSidecarChange, code, onStartPlay, modern
                 ⧉
               </span>
               Browse library
+            </button>
+            <button type="button" className={styles.toolBtn} onClick={() => setExternalKind("mesh")} title="Search Poly Haven's CC0 models and import one">
+              CC0 models…
+            </button>
+            <button type="button" className={styles.toolBtn} disabled={!selectedEntry} onClick={() => setExternalKind("material")} title="Search Poly Haven or ambientCG for a CC0 material and put it on the selected object">
+              CC0 materials…
+            </button>
+            <button type="button" className={styles.toolBtn} onClick={() => setExternalKind("hdri")} title="Search Poly Haven or ambientCG for a CC0 HDRI and make it the sky">
+              CC0 HDRIs…
             </button>
           </div>
           <input
@@ -1669,6 +1713,7 @@ export function MeshEditor({ sidecar, onSidecarChange, code, onStartPlay, modern
         kinds={["mesh"]}
         onInsert={insertFromLibrary}
       />
+      <ExternalLibraryBrowser open={externalKind !== null} onClose={() => setExternalKind(null)} kind={externalKind ?? "mesh"} onImport={importExternal} />
     </div>
   );
 }

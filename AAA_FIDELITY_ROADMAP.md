@@ -1576,7 +1576,20 @@ Everything else depends on this track. It contains no visible "feature", but its
       - Validation passes a 2 m crate with 1024² maps at 512 px/m, and flags low and high density, names, half a PBR set, missing tangents and UVs, and each budget.
       - Uploads: the route by size, the direct ceiling, the package type, and the checksum's base64. The client goes begin → PUT → commit for a large file, sends nothing for bytes the store holds, and uses multipart for a small one.
     - *Left for F9e:* saving the editor's mesh sidecars as packages through the store (the format and upload path are ready, and the sidecar routes still take JSON); KTX2 transcoding of a package's textures on import (F9d).
-- [ ] **F9f. Asset library.** In-editor search and import from CC0 libraries (Poly Haven, ambientCG), plus a Cartbox library of scanned surfaces, props and HDRIs prepared for the tier. These are licensed for redistribution and attributed.
+- [x] **F9f. Asset library.** In-editor search and import from CC0 libraries (Poly Haven, ambientCG), plus a Cartbox library of scanned surfaces, props and HDRIs prepared for the tier. These are licensed for redistribution and attributed.
+  - **Done** (`apps/web lib/externalLibraries.ts`, `lib/zipReader.ts`; the Mesh tab's "CC0 models…", "CC0 materials…" and "CC0 HDRIs…" open `ExternalLibraryBrowser`). The Cartbox catalogue (the existing library browser) stays as it was, beside these.
+    - **Search:** Poly Haven's public listing per kind, filtered locally by every word of the query against name, tags and categories; ambientCG's v2 search with its downloads per resolution. Each result is an asset with a thumbnail and its provenance: source, authors, CC0, the asset's page.
+    - **Materials:** the PNG maps at 1K, 2K or 4K become the engine's: base colour, the OpenGL normal map, roughness and AO packed into the metal/roughness map's G and R as glTF keeps them, and height as relief. ambientCG's come as a ZIP, read in place (stored and deflated entries, through `DecompressionStream`). The material goes onto every primitive of the selected mesh.
+    - **HDRIs:** the Radiance `.hdr` panorama becomes the scene's imported sky (exposure 1, no yaw), held to the sky's size limit.
+    - **Models:** Poly Haven's glTF, with its buffers and textures fetched beside it, added as a mesh with generated LODs.
+    - **Attribution:** each import stamps its credit line ("name" by author (source, CC0) — page) into the mesh sidecar's `credits`, once, kept with the cart (up to 256 lines).
+    - Network and decoding are passed in, so all of it runs without a browser or the network.
+    - *Tests:* `Unit Tests/external-libraries.test.ts` covers, against canned API answers:
+      - Poly Haven's listing filtered by every word, with each asset's credit; ambientCG's results with their downloads;
+      - a ZIP's stored and deflated entries;
+      - a Poly Haven material (colour and normal kept, roughness and AO packed into G and R), an ambientCG material from its ZIP, an HDRI as the sky's panorama, and a model with its buffers and textures;
+      - credits kept once, through a save of the sidecar, and absent when there are none.
+    - *Left for later:* a cache of fetched assets between sessions; KTX2 transcoding of imported maps on import (F9d's encoder runs on save); ambientCG models (its API lists few, in formats the importer doesn't take).
 
 ### F10. Look development and the editor viewport
 
