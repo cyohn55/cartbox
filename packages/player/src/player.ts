@@ -1020,6 +1020,7 @@ export class Player {
       for (const b of this.runtime!.channel.takeBursts()) this.meshSurface?.burst(b.effect, b.at, b.dir, b.scale);
       for (const d of this.runtime!.channel.takeDecals()) this.meshSurface?.decal(d.decal, d.at, d.normal, d.scale);
       for (const d of this.runtime!.channel.takeDebris()) this.meshSurface?.throwDebris(d.debris, d.at, d.velocity, d.scale);
+      for (const s of this.runtime!.channel.takeShatters()) this.meshSurface?.shatter(s.object, s.at, s.strength);
       // Sounds the cart played (dropped when this frame is silent: stepping, or off 1× speed).
       for (const c of this.runtime!.channel.takeSounds()) {
         if (!this.sounds) continue;

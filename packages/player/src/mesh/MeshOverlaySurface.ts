@@ -116,6 +116,10 @@ import {
   surfelLight,
   type BounceTransfer,
   type ProbeBake,
+  breakApart,
+  chunkMatrix,
+  stepChunks,
+  type Chunk,
   emitterFromEffect,
 } from "@cartbox/editor";
 import { bounceLightsFor, bounceSignature, withCartSun, type CartSun } from "./dynamicLights.js";
@@ -788,6 +792,9 @@ export class MeshOverlaySurface implements DisplaySurface {
    * they're hidden, and left out of the shadow, until the set changes again.
    */
   setInactive(objects: ReadonlySet<number>): void {
+    this.levelInactive = objects;
+    // Broken objects (F8c) stay hidden whatever the levels do.
+    if (this.broken.size > 0) objects = new Set([...objects, ...this.broken.keys()]);
     this.inactive = objects;
     this.inactiveKey = [...objects].sort((a, b) => a - b).join(",");
     // Nothing hidden and nothing pooled keeps the fast path (the full list, by identity).
@@ -1295,6 +1302,11 @@ export class MeshOverlaySurface implements DisplaySurface {
         if (marks) drawn = [...drawn, marks];
       }
     }
+    // Broken objects' chunks (F8c), stepped on the frame clock.
+    if (this.broken.size > 0) {
+      const chunks = this.stepBroken();
+      if (chunks.length > 0) drawn = [...drawn, ...chunks];
+    }
     if (this.debris) {
       this.debris.step(1 / 60, this.debrisBoxes);
       const pieces = this.debris.instances();
@@ -1599,9 +1611,10 @@ export class MeshOverlaySurface implements DisplaySurface {
   private stillOccluders(): { mesh: MeshAsset; model: Mat4 }[] {
     if (this.still?.scene !== this.scene) {
       const occluders = this.scene.instances
-        .filter((inst) => {
+        .filter((inst, i) => {
           const body = inst.physics?.body;
-          return !(inst.pooled || isSkinned(inst.mesh) || body === "dynamic" || body === "kinematic" || body === "character");
+          // A broken object (F8c) no longer stands there.
+          return !(inst.pooled || isSkinned(inst.mesh) || body === "dynamic" || body === "kinematic" || body === "character" || this.broken.has(i));
         })
         .map((inst) => ({ mesh: inst.mesh, model: inst.model }));
       this.still = { scene: this.scene, occluders };
@@ -2400,6 +2413,53 @@ export class MeshOverlaySurface implements DisplaySurface {
   private debris: DebrisSystem | null = null;
   private debrisBoxes: RagdollBox[] = [];
   private readonly debrisLooks = new Map<MeshAsset, TexturedMesh & { readonly lod?: LodChain | null }>();
+
+  /** The objects broken (F8c): their chunks, and each piece as the mesh a chunk draws. */
+  private readonly broken = new Map<number, { chunks: Chunk[]; meshes: MeshAsset[]; sources: readonly (readonly number[])[]; scale: number; textures: readonly (DecodedTexture | null)[] }>();
+  /** The levels' hidden objects, before the broken ones join them (F8c). */
+  private levelInactive: ReadonlySet<number> = new Set();
+
+  /**
+   * Break a fractured object (cartbox.shatter, F8c): it's hidden, its pieces fly from the impact as chunks, a
+   * mark is laid and dust thrown where it was hit (the scene's effects named for it), and the still scene the
+   * live GI traces loses it.
+   */
+  shatter(object: number, at: readonly [number, number, number], strength: number): void {
+    const inst = this.scene.instances[object];
+    const pieces = inst?.mesh.fracture?.pieces;
+    if (!inst || !pieces || this.broken.has(object)) return;
+    const model = this.lastPlacement?.[object] ?? this.instances[object]!.model;
+    const scale = Math.hypot(model[0]!, model[1]!, model[2]!) || 1;
+    const chunks = breakApart(pieces, model, at, strength, object + 1);
+    const meshes = pieces.map((p, k) => ({ name: `${inst.mesh.name}:piece${k}`, primitives: p.primitives }) as MeshAsset);
+    const textures = this.instances[object]!.textures ?? [];
+    this.broken.set(object, { chunks, meshes, sources: pieces.map((p) => p.sources), scale, textures });
+    this.debrisBoxes = this.debrisBoxes.length > 0 ? this.debrisBoxes : sceneColliders(this.scene);
+    this.setInactive(this.levelInactive);
+    // The mark and the dust, when the scene has them by name.
+    const named = (list: readonly { readonly name: string }[] | undefined, pattern: RegExp) => (list ?? []).findIndex((e) => pattern.test(e.name));
+    const crack = named(this.scene.decals, /crack|break|scorch|impact/i);
+    if (crack >= 0) this.decal(crack, at, [0, 1, 0], 1);
+    const dust = named(this.scene.effects, /dust|debris|smoke/i);
+    if (dust >= 0) this.burst(dust, at, [0, 0, 0], 1.5);
+    // The live GI's still scene, again without it.
+    this.still = null;
+    this.giState = null;
+  }
+
+  /** Step every broken object's chunks; their instances to draw. */
+  private stepBroken(): MeshSceneInstance[] {
+    const out: MeshSceneInstance[] = [];
+    for (const b of this.broken.values()) {
+      stepChunks(b.chunks, 1 / 60, this.debrisBoxes);
+      for (const c of b.chunks) {
+        // Each piece's outer faces wear their source's maps; its cap, none.
+        const textures = b.sources[c.piece]!.map((s) => (s >= 0 ? (b.textures[s] ?? null) : null));
+        out.push({ mesh: b.meshes[c.piece]!, model: chunkMatrix(c, b.scale), textures } as unknown as MeshSceneInstance);
+      }
+    }
+    return out;
+  }
 
   /** Throw a copy of debris `debris` (see cartbox.debris). */
   throwDebris(debris: number, at: readonly [number, number, number], velocity: readonly [number, number, number], scale: number): void {

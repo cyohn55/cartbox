@@ -1439,7 +1439,31 @@ Everything else depends on this track. It contains no visible "feature", but its
       - a cart scripting call and scene field to set off a volume (the renderer's `setVolumes` and `volumeTrigger` stand ready);
       - vorticity confinement;
       - temporal reprojection of the march at lower resolution.
-- [ ] **F8c. Destruction.** Voronoi pre-fracture in the editor, physics-driven chunks with debris particles and dust, decals at the breaks, and GI that updates (F3e).
+- [x] **F8c. Destruction.** Voronoi pre-fracture in the editor, physics-driven chunks with debris particles and dust, decals at the breaks, and GI that updates (F3e).
+  - **Done** (`editor model/fracture.ts`; the overlay and `cartbox.shatter` in `@cartbox/player`).
+    - **Pre-fracture.** `voronoiSeeds` scatters seeds in a mesh's bounds; with an expected impact given, half are drawn toward it so the break is finer there. `fractureMesh` cuts the mesh into the seeds' Voronoi cells:
+      - triangles are clipped plane by plane (Sutherland–Hodgman, carrying normals and UVs);
+      - each cell plane is capped by the mesh's section there, clipped to the cell's other planes and fanned, in an interior material (the first one's colour darkened, rough, untextured) with planar UVs;
+      - each piece is kept about its own centre, with its volume, radius, and each primitive's source (so its outer faces wear the source's maps);
+      - pieces are exact for convex meshes (walls, pillars, crates, panels);
+      - a mesh's `fracture` is stored with it, each piece a small mesh of its own.
+    - **Breaking.** `cartbox.shatter(o, x, y, z, strength)`, generated for scenes with something fractured, breaks an object where it was hit:
+      - the object is hidden (whatever its level does);
+      - its pieces become chunks at their places, thrown from the impact at up to `strength` m/s (falling off with distance), outward and spinning;
+      - each chunk is rigid: gravity, its spin integrated, its bounding sphere against the scene's colliders (H9's boxes) with bounce and friction, and sleep once still. It is cosmetic and local, like H10's debris, so online play is unaffected.
+    - **Marks, dust and GI.** At the impact, a decal named for it (crack, break, scorch or impact) is laid, and an effect named dust, debris or smoke is thrown: on the `aaa` tier through the GPU particles (F8a). The live GI's still scene (F3e) is gathered again without the broken object, so its BVH is rebuilt and light comes through where it stood.
+    - *Tests:* `Unit Tests/fracture.test.ts` covers:
+      - seeds in bounds and denser at an impact;
+      - a 2 × 1 × 0.4 m wall cut into closed pieces, each capped, filling it to 0.0005 m³;
+      - chunks thrown from the hit, settling on a floor, their matrices orthonormal;
+      - the fracture through the mesh format; `cartbox.shatter` generated only when something can break;
+      - in the overlay: the wall gone and its pieces drawn, falling half a second on, the still scene for GI losing it, and a second break doing nothing.
+    - *Found, then fixed:* caps first took every cut point a plane made, including those beyond the cell's other planes, and the pieces held two and a half times the wall. Each cap is now the plane's section of the mesh clipped to the cell.
+    - *Left for later:*
+      - an editor button to fracture a selected mesh (the function is there; the UI isn't);
+      - chunks as physics bodies the player can push;
+      - concave meshes' caps;
+      - a GPU check that the GI's bounce changes through the opening.
 
 ### F9. The asset pipeline for AAA content
 

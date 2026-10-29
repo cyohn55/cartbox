@@ -438,6 +438,7 @@ var PHYS_OP_UI_NUM = 37;
 var PHYS_OP_UI_TEXT = 38;
 var PHYS_OP_UI_LIST = 39;
 var PHYS_OP_LOOK = 40;
+var PHYS_OP_SHATTER = 41;
 function physicsBlockAddress(layout) {
   return layout.ramSize - PHYS_BLOCK_BYTES;
 }
@@ -9205,7 +9206,7 @@ var TimelineSession = class {
 import { timelineValueNames as timelineValueNames2 } from "@cartbox/editor";
 function sceneNeedsRuntime(scene, { physics = true } = {}) {
   return Boolean(
-    scene && (physics && sceneHasPhysics(scene) || (scene.pools?.length ?? 0) > 0 || animatedObjects(scene).length > 0 || (scene.timelines?.length ?? 0) > 0 || (scene.levels?.length ?? 0) > 0 || Boolean(scene.navmesh) || Boolean(scene.streaming) || (scene.effects?.length ?? 0) > 0 || (scene.decals?.length ?? 0) > 0 || (scene.debris?.length ?? 0) > 0 || (scene.audio?.sounds.length ?? 0) > 0 || (scene.components?.length ?? 0) > 0)
+    scene && (physics && sceneHasPhysics(scene) || (scene.pools?.length ?? 0) > 0 || animatedObjects(scene).length > 0 || (scene.timelines?.length ?? 0) > 0 || (scene.levels?.length ?? 0) > 0 || Boolean(scene.navmesh) || Boolean(scene.streaming) || (scene.effects?.length ?? 0) > 0 || (scene.decals?.length ?? 0) > 0 || (scene.debris?.length ?? 0) > 0 || scene.instances.some((i) => i.mesh.fracture) || (scene.audio?.sounds.length ?? 0) > 0 || (scene.components?.length ?? 0) > 0)
   );
 }
 var luaString = (s) => JSON.stringify(s);
@@ -9266,7 +9267,7 @@ function runtimeSdkLua(scene, layout, { physics: engine = true } = {}) {
 ${physics ? PHYSICS_CALLS() : ""}
 ${pools.length > 0 ? SPAWN_CALLS(pools) : ""}
 ${ANIM_CALLS(scene)}
-${TIMELINE_CALLS(scene)}${LEVEL_CALLS(scene)}${scene.navmesh ? NAV_CALLS() : ""}${scene.streaming ? STREAM_CALLS() : ""}${BURST_CALLS(scene)}${DECAL_CALLS(scene)}${DEBRIS_CALLS(scene)}${SOUND_CALLS(scene)}${SHIELD_CALLS()}${PLACE_CALLS()}end`;
+${TIMELINE_CALLS(scene)}${LEVEL_CALLS(scene)}${scene.navmesh ? NAV_CALLS() : ""}${scene.streaming ? STREAM_CALLS() : ""}${BURST_CALLS(scene)}${DECAL_CALLS(scene)}${DEBRIS_CALLS(scene)}${SOUND_CALLS(scene)}${SHIELD_CALLS()}${PLACE_CALLS()}${SHATTER_CALLS(scene)}end`;
 }
 function PHYSICS_CALLS() {
   return `  cartbox.physics = function() return _live() end
@@ -9500,6 +9501,15 @@ function PLACE_CALLS() {
     local key = (math.floor(tint or 0) & 15) | (((front and front ~= 0) and 1 or 0) << 4)
     if _look[i] == key then return end -- it stands: send changes only
     if _cmd(${PHYS_OP_LOOK}, i | (key << 16)) then _look[i] = key end
+  end
+`;
+}
+function SHATTER_CALLS(scene) {
+  if (!scene.instances.some((i) => i.mesh.fracture)) return "";
+  return `  cartbox.shatter = function(o, x, y, z, strength)
+    local i = _obj(o)
+    if i == nil then return end
+    _cmd(${PHYS_OP_SHATTER}, i, x or 0, y or 0, z or 0, strength or 6)
   end
 `;
 }
@@ -10153,6 +10163,8 @@ var RuntimeChannel = class {
     this.decals = [];
     /** Debris the cart threw since the renderer last took it. */
     this.debris = [];
+    /** Objects the cart broke this tick (F8c). */
+    this.shatters = [];
     this.sounds = [];
     /** Standing shield effects (cartbox.shield): object → flare, shimmer, camo. */
     this.shieldStates = /* @__PURE__ */ new Map();
@@ -10265,6 +10277,8 @@ var RuntimeChannel = class {
         const key = cmd.a >>> 16 & 31;
         if (key === 0) this.lookStates.delete(object);
         else if (object < this.scene.instances.length) this.lookStates.set(object, { tint: key & 15, front: (key & 16) !== 0 });
+      } else if (cmd.op === PHYS_OP_SHATTER) {
+        if (this.shatters.length < MAX_BURSTS_QUEUED && cmd.a >= 0 && cmd.a < this.scene.instances.length) this.shatters.push({ object: cmd.a, at: [cmd.v[0], cmd.v[1], cmd.v[2]], strength: cmd.v[3] });
       } else if (cmd.op === PHYS_OP_DEBRIS) {
         if (this.debris.length < MAX_BURSTS_QUEUED)
           this.debris.push({ debris: cmd.a & 255, at: [cmd.v[0], cmd.v[1], cmd.v[2]], velocity: [cmd.v[3], cmd.v[4], cmd.v[5]], scale: (cmd.a >>> 8 & 65535) / 16 });
@@ -10385,6 +10399,12 @@ var RuntimeChannel = class {
     return out;
   }
   /** The debris thrown since the last call (the renderer simulates and draws it). */
+  /** The objects the cart broke since the last call (F8c). */
+  takeShatters() {
+    const out = this.shatters;
+    this.shatters = [];
+    return out;
+  }
   takeDebris() {
     const out = this.debris;
     this.debris = [];
@@ -11600,6 +11620,9 @@ import {
   readProbeBake,
   relightProbes,
   surfelLight,
+  breakApart,
+  chunkMatrix,
+  stepChunks,
   emitterFromEffect
 } from "@cartbox/editor";
 
@@ -12293,6 +12316,10 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
     this.debris = null;
     this.debrisBoxes = [];
     this.debrisLooks = /* @__PURE__ */ new Map();
+    /** The objects broken (F8c): their chunks, and each piece as the mesh a chunk draws. */
+    this.broken = /* @__PURE__ */ new Map();
+    /** The levels' hidden objects, before the broken ones join them (F8c). */
+    this.levelInactive = /* @__PURE__ */ new Set();
     /** Whether the scene's particle effects run on the GPU (F8a). */
     this.gpuParticles = false;
     /** Settles once the scene's reflection probes are baked and in use (tests await it). */
@@ -12519,6 +12546,8 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
    * they're hidden, and left out of the shadow, until the set changes again.
    */
   setInactive(objects) {
+    this.levelInactive = objects;
+    if (this.broken.size > 0) objects = /* @__PURE__ */ new Set([...objects, ...this.broken.keys()]);
     this.inactive = objects;
     this.inactiveKey = [...objects].sort((a, b) => a - b).join(",");
     this.unpooled = objects.size === 0 && !this.pooledRoot.some((r) => r >= 0) ? this.instances : this.instances.filter((_, i) => this.pooledRoot[i] < 0 && !objects.has(i));
@@ -12939,6 +12968,10 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
         if (marks) drawn = [...drawn, marks];
       }
     }
+    if (this.broken.size > 0) {
+      const chunks2 = this.stepBroken();
+      if (chunks2.length > 0) drawn = [...drawn, ...chunks2];
+    }
     if (this.debris) {
       this.debris.step(1 / 60, this.debrisBoxes);
       const pieces = this.debris.instances();
@@ -13184,9 +13217,9 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
   /** What stands still in the scene, as the BVH tracers take it (F3e's live GI, F3f's Epic reflections), gathered once a scene. */
   stillOccluders() {
     if (this.still?.scene !== this.scene) {
-      const occluders = this.scene.instances.filter((inst) => {
+      const occluders = this.scene.instances.filter((inst, i) => {
         const body = inst.physics?.body;
-        return !(inst.pooled || isSkinned2(inst.mesh) || body === "dynamic" || body === "kinematic" || body === "character");
+        return !(inst.pooled || isSkinned2(inst.mesh) || body === "dynamic" || body === "kinematic" || body === "character" || this.broken.has(i));
       }).map((inst) => ({ mesh: inst.mesh, model: inst.model }));
       this.still = { scene: this.scene, occluders };
     }
@@ -13857,6 +13890,43 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
     this.destroyed = true;
     this.inner.destroy();
     if (this.frontRenderer.backend !== "software") this.frontRenderer.dispose();
+  }
+  /**
+   * Break a fractured object (cartbox.shatter, F8c): it's hidden, its pieces fly from the impact as chunks, a
+   * mark is laid and dust thrown where it was hit (the scene's effects named for it), and the still scene the
+   * live GI traces loses it.
+   */
+  shatter(object, at, strength) {
+    const inst = this.scene.instances[object];
+    const pieces = inst?.mesh.fracture?.pieces;
+    if (!inst || !pieces || this.broken.has(object)) return;
+    const model = this.lastPlacement?.[object] ?? this.instances[object].model;
+    const scale = Math.hypot(model[0], model[1], model[2]) || 1;
+    const chunks2 = breakApart(pieces, model, at, strength, object + 1);
+    const meshes = pieces.map((p, k) => ({ name: `${inst.mesh.name}:piece${k}`, primitives: p.primitives }));
+    const textures = this.instances[object].textures ?? [];
+    this.broken.set(object, { chunks: chunks2, meshes, sources: pieces.map((p) => p.sources), scale, textures });
+    this.debrisBoxes = this.debrisBoxes.length > 0 ? this.debrisBoxes : sceneColliders(this.scene);
+    this.setInactive(this.levelInactive);
+    const named = (list, pattern) => (list ?? []).findIndex((e) => pattern.test(e.name));
+    const crack = named(this.scene.decals, /crack|break|scorch|impact/i);
+    if (crack >= 0) this.decal(crack, at, [0, 1, 0], 1);
+    const dust = named(this.scene.effects, /dust|debris|smoke/i);
+    if (dust >= 0) this.burst(dust, at, [0, 0, 0], 1.5);
+    this.still = null;
+    this.giState = null;
+  }
+  /** Step every broken object's chunks; their instances to draw. */
+  stepBroken() {
+    const out = [];
+    for (const b of this.broken.values()) {
+      stepChunks(b.chunks, 1 / 60, this.debrisBoxes);
+      for (const c of b.chunks) {
+        const textures = b.sources[c.piece].map((s) => s >= 0 ? b.textures[s] ?? null : null);
+        out.push({ mesh: b.meshes[c.piece], model: chunkMatrix(c, b.scale), textures });
+      }
+    }
+    return out;
   }
   /** Throw a copy of debris `debris` (see cartbox.debris). */
   throwDebris(debris, at, velocity, scale) {
@@ -35274,6 +35344,7 @@ var Player = class {
       for (const b of this.runtime.channel.takeBursts()) this.meshSurface?.burst(b.effect, b.at, b.dir, b.scale);
       for (const d of this.runtime.channel.takeDecals()) this.meshSurface?.decal(d.decal, d.at, d.normal, d.scale);
       for (const d of this.runtime.channel.takeDebris()) this.meshSurface?.throwDebris(d.debris, d.at, d.velocity, d.scale);
+      for (const s of this.runtime.channel.takeShatters()) this.meshSurface?.shatter(s.object, s.at, s.strength);
       for (const c of this.runtime.channel.takeSounds()) {
         if (!this.sounds) continue;
         if (c.kind === "play") {

@@ -1122,6 +1122,20 @@ export {
   type FluidSource,
   type VolumeEffect,
 } from "./model/volumetricEffects";
+export {
+  CHUNK_GRAVITY,
+  MAX_FRACTURE_PIECES,
+  breakApart,
+  chunkMatrix,
+  fractureMesh,
+  interiorMaterial,
+  meshBox,
+  meshVolume,
+  stepChunks,
+  voronoiSeeds,
+  type Chunk,
+  type FracturePiece,
+} from "./model/fracture";
 export { DEFAULT_TOLERANCE, clipBytes, packClip, packQuat, reduceChannel, reduceClip, unpackClip, unpackQuat, type CompressionTolerance } from "./model/clipCompression";
 export {
   GRAPH_NODES,

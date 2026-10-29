@@ -50,6 +50,7 @@ import {
   PHYS_OP_DECAL,
   PHYS_OP_RAGDOLL,
   PHYS_OP_DEBRIS,
+  PHYS_OP_SHATTER,
   PHYS_OP_MIX,
   PHYS_OP_PLACE,
   PHYS_OP_UNPLACE,
@@ -173,6 +174,8 @@ export class RuntimeChannel {
   private decals: DecalLaid[] = [];
   /** Debris the cart threw since the renderer last took it. */
   private debris: DebrisThrown[] = [];
+  /** Objects the cart broke this tick (F8c). */
+  private shatters: { object: number; at: [number, number, number]; strength: number }[] = [];
   private sounds: SoundCommand[] = [];
   /** Standing shield effects (cartbox.shield): object → flare, shimmer, camo. */
   private readonly shieldStates = new Map<number, ShieldState>();
@@ -296,6 +299,9 @@ export class RuntimeChannel {
         const key = (cmd.a >>> 16) & 0x1f;
         if (key === 0) this.lookStates.delete(object);
         else if (object < this.scene.instances.length) this.lookStates.set(object, { tint: key & 15, front: (key & 16) !== 0 });
+      }
+      else if (cmd.op === PHYS_OP_SHATTER) {
+        if (this.shatters.length < MAX_BURSTS_QUEUED && cmd.a >= 0 && cmd.a < this.scene.instances.length) this.shatters.push({ object: cmd.a, at: [cmd.v[0]!, cmd.v[1]!, cmd.v[2]!], strength: cmd.v[3]! });
       }
       else if (cmd.op === PHYS_OP_DEBRIS) {
         if (this.debris.length < MAX_BURSTS_QUEUED)
@@ -434,6 +440,13 @@ export class RuntimeChannel {
   }
 
   /** The debris thrown since the last call (the renderer simulates and draws it). */
+  /** The objects the cart broke since the last call (F8c). */
+  takeShatters(): { object: number; at: [number, number, number]; strength: number }[] {
+    const out = this.shatters;
+    this.shatters = [];
+    return out;
+  }
+
   takeDebris(): DebrisThrown[] {
     const out = this.debris;
     this.debris = [];

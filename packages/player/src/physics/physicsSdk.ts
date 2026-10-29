@@ -125,6 +125,7 @@ import {
   PHYS_OP_LOOK,
   PHYS_OP_SOUND,
   PHYS_OP_SOUND_LOOP,
+  PHYS_OP_SHATTER,
   PHYS_OP_SHIELD,
   PHYS_AGENTS,
   PHYS_AGENT_BYTES,
@@ -195,6 +196,7 @@ export function sceneNeedsRuntime(scene: MeshScene | null | undefined, { physics
         (scene.effects?.length ?? 0) > 0 ||
         (scene.decals?.length ?? 0) > 0 ||
         (scene.debris?.length ?? 0) > 0 ||
+        scene.instances.some((i) => i.mesh.fracture) ||
         (scene.audio?.sounds.length ?? 0) > 0 ||
         (scene.components?.length ?? 0) > 0),
   );
@@ -269,7 +271,7 @@ export function runtimeSdkLua(
 ${physics ? PHYSICS_CALLS() : ""}
 ${pools.length > 0 ? SPAWN_CALLS(pools) : ""}
 ${ANIM_CALLS(scene)}
-${TIMELINE_CALLS(scene)}${LEVEL_CALLS(scene)}${scene.navmesh ? NAV_CALLS() : ""}${scene.streaming ? STREAM_CALLS() : ""}${BURST_CALLS(scene)}${DECAL_CALLS(scene)}${DEBRIS_CALLS(scene)}${SOUND_CALLS(scene)}${SHIELD_CALLS()}${PLACE_CALLS()}end`;
+${TIMELINE_CALLS(scene)}${LEVEL_CALLS(scene)}${scene.navmesh ? NAV_CALLS() : ""}${scene.streaming ? STREAM_CALLS() : ""}${BURST_CALLS(scene)}${DECAL_CALLS(scene)}${DEBRIS_CALLS(scene)}${SOUND_CALLS(scene)}${SHIELD_CALLS()}${PLACE_CALLS()}${SHATTER_CALLS(scene)}end`;
 }
 
 /** The physics calls (inside the runtime block's do … end, after its helpers). */
@@ -578,6 +580,23 @@ function PLACE_CALLS(): string {
     local key = (math.floor(tint or 0) & 15) | (((front and front ~= 0) and 1 or 0) << 4)
     if _look[i] == key then return end -- it stands: send changes only
     if _cmd(${PHYS_OP_LOOK}, i | (key << 16)) then _look[i] = key end
+  end
+`;
+}
+
+/**
+ * Destruction (F8c), when the scene has something fractured:
+ *
+ *   cartbox.shatter(o, x, y, z, strength)  break object o (by name or index) where it was hit:
+ *                                     its pieces fly from (x, y, z) at up to strength m/s
+ *                                     (default 6), tumble and settle — on this machine only
+ */
+function SHATTER_CALLS(scene: MeshScene): string {
+  if (!scene.instances.some((i) => i.mesh.fracture)) return "";
+  return `  cartbox.shatter = function(o, x, y, z, strength)
+    local i = _obj(o)
+    if i == nil then return end
+    _cmd(${PHYS_OP_SHATTER}, i, x or 0, y or 0, z or 0, strength or 6)
   end
 `;
 }

@@ -8630,6 +8630,18 @@ declare class MeshOverlaySurface implements DisplaySurface {
     private debris;
     private debrisBoxes;
     private readonly debrisLooks;
+    /** The objects broken (F8c): their chunks, and each piece as the mesh a chunk draws. */
+    private readonly broken;
+    /** The levels' hidden objects, before the broken ones join them (F8c). */
+    private levelInactive;
+    /**
+     * Break a fractured object (cartbox.shatter, F8c): it's hidden, its pieces fly from the impact as chunks, a
+     * mark is laid and dust thrown where it was hit (the scene's effects named for it), and the still scene the
+     * live GI traces loses it.
+     */
+    shatter(object: number, at: readonly [number, number, number], strength: number): void;
+    /** Step every broken object's chunks; their instances to draw. */
+    private stepBroken;
     /** Throw a copy of debris `debris` (see cartbox.debris). */
     throwDebris(debris: number, at: readonly [number, number, number], velocity: readonly [number, number, number], scale: number): void;
     /** Lay decal `decal` on a surface (see cartbox.decal). */
@@ -9869,6 +9881,8 @@ declare class RuntimeChannel {
     private decals;
     /** Debris the cart threw since the renderer last took it. */
     private debris;
+    /** Objects the cart broke this tick (F8c). */
+    private shatters;
     private sounds;
     /** Standing shield effects (cartbox.shield): object → flare, shimmer, camo. */
     private readonly shieldStates;
@@ -9936,6 +9950,12 @@ declare class RuntimeChannel {
     /** The decals laid since the last call (the renderer draws them). */
     takeDecals(): DecalLaid[];
     /** The debris thrown since the last call (the renderer simulates and draws it). */
+    /** The objects the cart broke since the last call (F8c). */
+    takeShatters(): {
+        object: number;
+        at: [number, number, number];
+        strength: number;
+    }[];
     takeDebris(): DebrisThrown[];
     /** The sound commands since the last call (the sound system plays them). */
     takeSounds(): SoundCommand[];

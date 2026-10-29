@@ -30,6 +30,7 @@ import { readSurfaceEffects, writeSurfaceEffects } from "./materialEffects";
 import { readMaterialLayers, writeMaterialLayers } from "./materialLayers";
 import { MAX_MORPH_TARGETS, type MorphTarget } from "./morphTargets";
 import { readClothSettings, readSpringChains, type Capsule, type ClothSettings, type SpringChain } from "./cloth";
+import { MAX_FRACTURE_PIECES, type FracturePiece } from "./fracture";
 import { readMaterialExtensions, writeMaterialExtensions } from "./materialExtensions";
 import type { CharacterShading } from "./characterShading";
 import { readSmartStack, writeSmartStack, type SmartStack } from "./smartMaterials";
@@ -463,6 +464,8 @@ export interface MeshAsset {
   readonly dualQuaternion?: boolean;
   /** Spring bones (F7d; cloth.ts): chains of joints that trail the animation. */
   readonly springs?: readonly SpringChain[];
+  /** Its Voronoi pieces (F8c; fracture.ts), when it's been fractured to break. */
+  readonly fracture?: { readonly pieces: readonly FracturePiece[] };
   /** Animation clips that move the skeleton. */
   readonly clips?: readonly AnimationClip[];
   /** Ribbons of light the mesh leaves as parts of it sweep (I10; see meshTrails.ts). */
@@ -754,6 +757,7 @@ interface SerializedMesh {
   morphWeights?: number[];
   dualQuaternion?: boolean;
   springs?: SpringChain[];
+  fracture?: { centre: number[]; volume: number; radius: number; sources: number[]; mesh: string }[];
 }
 
 function u16ToBase64(array: Uint16Array): string {
@@ -948,6 +952,10 @@ export function serializeMeshAsset(mesh: MeshAsset): string {
     })),
     ...(mesh.morphWeights?.length ? { morphWeights: [...mesh.morphWeights] } : {}),
     ...(mesh.skin && mesh.springs?.length ? { springs: mesh.springs.map((s) => ({ ...s, joints: [...s.joints] })) } : {}),
+    // The pieces, each a small mesh of its own (F8c).
+    ...(mesh.fracture?.pieces.length
+      ? { fracture: mesh.fracture.pieces.slice(0, MAX_FRACTURE_PIECES).map((p) => ({ centre: [...p.centre], volume: p.volume, radius: p.radius, sources: [...p.sources], mesh: serializeMeshAsset({ name: "piece", primitives: p.primitives }) })) }
+      : {}),
     ...(mesh.dualQuaternion ? { dualQuaternion: true } : {}),
     ...(mesh.skin ? { skin: serializeSkin(mesh.skin) } : {}),
     ...(mesh.skin && mesh.clips && mesh.clips.length > 0 ? { clips: mesh.clips.map(serializeClip) } : {}),
@@ -1242,6 +1250,7 @@ export function deserializeMeshAsset(json: string): MeshAsset {
     ...(clips.length > 0 ? { clips } : {}),
     ...(trails.length > 0 ? { trails } : {}),
     ...(variants.length > 0 ? { variants } : {}),
+    ...readFracture(raw.fracture),
     ...(skin && Array.isArray(raw.springs) && readSpringChains(raw.springs, skin.joints.length).length > 0 ? { springs: readSpringChains(raw.springs, skin.joints.length) } : {}),
     ...(Array.isArray(raw.morphWeights) && raw.morphWeights.every((w) => typeof w === "number" && Number.isFinite(w)) ? { morphWeights: raw.morphWeights.slice(0, MAX_MORPH_TARGETS) } : {}),
     ...(raw.dualQuaternion === true ? { dualQuaternion: true } : {}),
@@ -1249,6 +1258,19 @@ export function deserializeMeshAsset(json: string): MeshAsset {
 }
 
 /** A stored primitive's morph targets (F7a), each the primitive's length; a malformed one throws. */
+/** A stored fracture (F8c): its pieces, each read as a mesh of its own; nothing when absent or malformed. */
+function readFracture(raw: SerializedMesh["fracture"]): { fracture?: { pieces: FracturePiece[] } } {
+  if (!Array.isArray(raw) || raw.length === 0 || raw.length > MAX_FRACTURE_PIECES) return {};
+  const pieces: FracturePiece[] = [];
+  for (const p of raw) {
+    if (!p || typeof p.mesh !== "string" || !Array.isArray(p.centre) || p.centre.length !== 3 || !p.centre.every(Number.isFinite)) return {};
+    const mesh = deserializeMeshAsset(p.mesh);
+    const sources = Array.isArray(p.sources) && p.sources.length === mesh.primitives.length ? p.sources.map((s) => (Number.isInteger(s) ? s : -1)) : mesh.primitives.map(() => -1);
+    pieces.push({ centre: [p.centre[0]!, p.centre[1]!, p.centre[2]!], volume: Number.isFinite(p.volume) ? p.volume : 0, radius: Number.isFinite(p.radius) ? p.radius : 0, primitives: mesh.primitives, sources });
+  }
+  return { fracture: { pieces } };
+}
+
 /** A stored cloth (F7d), or nothing when absent or malformed. */
 function readCloth(raw: SerializedMesh["primitives"][number]["cloth"], vertexCount: number): { cloth?: ClothSettings } {
   if (!raw || typeof raw.maxDistance !== "string") return {};
