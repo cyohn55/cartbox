@@ -48,6 +48,7 @@ import {
 import { base64ToBytes } from "./base64";
 import { decompressGltf, type GltfDecoders, type MeshoptViewExtension } from "./gltfCompression";
 import { readMaterialLayers } from "./materialLayers";
+import { MAX_MORPH_TARGETS } from "./morphTargets";
 import { readGltfMaterialExtensions, writeGltfMaterialExtensions, writeGltfSubsurface, writeGltfTextureTransform, type GltfMaterialExtensions, type GltfSubsurfaceExtras, type GltfTextureTransform } from "./materialExtensions";
 import { MAX_CLIP_KEYS, MAX_CLIPS, MAX_SKIN_JOINTS, isSkinned, type AnimationClip, type ClipChannel, type MeshSkin, type SkinJoint } from "./skeleton";
 
@@ -62,6 +63,8 @@ export interface GltfAccessor {
   normalized?: boolean;
   min?: number[];
   max?: number[];
+  /** Sparse values over the base (or over zeros without a buffer view): morph targets' usual form (F7a). */
+  sparse?: { count: number; indices: { bufferView: number; byteOffset?: number; componentType: number }; values: { bufferView: number; byteOffset?: number } };
 }
 export interface GltfBufferView {
   buffer: number;
@@ -111,6 +114,8 @@ export interface GltfPrimitive {
   attributes: { POSITION?: number; NORMAL?: number; TANGENT?: number; TEXCOORD_0?: number; TEXCOORD_1?: number; JOINTS_0?: number; WEIGHTS_0?: number };
   indices?: number;
   material?: number;
+  /** Morph targets (F7a): position and normal deltas. */
+  targets?: { POSITION?: number; NORMAL?: number }[];
   extensions?: {
     KHR_draco_mesh_compression?: { bufferView: number; attributes: Record<string, number> };
     /** Which material each material set (I13) puts on this primitive. */
@@ -120,6 +125,9 @@ export interface GltfPrimitive {
 export interface GltfMesh {
   name?: string;
   primitives: GltfPrimitive[];
+  /** The morph targets' default weights (F7a), and (by convention) their names. */
+  weights?: number[];
+  extras?: { targetNames?: string[] };
 }
 interface GltfNode {
   name?: string;
@@ -381,7 +389,34 @@ function bufferViewOf(json: GltfJson, index: number): GltfBufferView {
 /** Read a numeric accessor into a flat Float32Array (`count × components`). */
 function readAccessorFloats(json: GltfJson, buffers: (Uint8Array | null)[], accessorIndex: number): Float32Array {
   const accessor = json.accessors?.[accessorIndex];
-  if (!accessor || accessor.bufferView === undefined) throw new Error("glTF references a missing accessor");
+  if (!accessor) throw new Error("glTF references a missing accessor");
+  const dense = accessor.bufferView !== undefined ? readDenseFloats(json, buffers, accessor) : new Float32Array(accessor.count * (TYPE_COMPONENTS[accessor.type] ?? 1));
+  return accessor.sparse ? applySparse(json, buffers, accessor, dense) : dense;
+}
+
+/** A sparse accessor's values written over its base (F7a). */
+function applySparse(json: GltfJson, buffers: (Uint8Array | null)[], accessor: GltfAccessor, dense: Float32Array): Float32Array {
+  const sparse = accessor.sparse!;
+  const components = TYPE_COMPONENTS[accessor.type] ?? 1;
+  const indexView = bufferViewOf(json, sparse.indices.bufferView);
+  const indexBuffer = buffers[indexView.buffer];
+  const valueAccessor: GltfAccessor = { bufferView: sparse.values.bufferView, byteOffset: sparse.values.byteOffset ?? 0, componentType: accessor.componentType, count: sparse.count, type: accessor.type, ...(accessor.normalized ? { normalized: true } : {}) };
+  const values = readDenseFloats(json, buffers, valueAccessor);
+  if (!indexBuffer) throw new Error("glTF buffer is unavailable");
+  const dv = new DataView(indexBuffer.buffer, indexBuffer.byteOffset, indexBuffer.byteLength);
+  const base = (indexView.byteOffset ?? 0) + (sparse.indices.byteOffset ?? 0);
+  const size = sparse.indices.componentType === 5121 ? 1 : sparse.indices.componentType === 5123 ? 2 : 4;
+  for (let i = 0; i < sparse.count; i += 1) {
+    const at = base + i * size;
+    const index = size === 1 ? dv.getUint8(at) : size === 2 ? dv.getUint16(at, true) : dv.getUint32(at, true);
+    if (index >= accessor.count) continue;
+    for (let c = 0; c < components; c += 1) dense[index * components + c] = values[i * components + c]!;
+  }
+  return dense;
+}
+
+function readDenseFloats(json: GltfJson, buffers: (Uint8Array | null)[], accessor: GltfAccessor): Float32Array {
+  if (accessor.bufferView === undefined) throw new Error("glTF references a missing accessor");
   const components = TYPE_COMPONENTS[accessor.type];
   const comp = COMPONENT_TYPES[accessor.componentType];
   if (!components || !comp) throw new Error("Unsupported glTF accessor type");
@@ -621,6 +656,7 @@ export function parseGltf(sourceJson: GltfJson, sourceBuffers: (Uint8Array | nul
   const variantMaterials: (MeshMaterial | null)[][] = variantNames.map(() => []);
   let totalVertices = 0;
   let totalIndices = 0;
+  let morphWeights: number[] | null = null;
 
   (json.meshes ?? []).forEach((mesh, meshIndex) => {
     const worlds = instances.get(meshIndex) ?? [{ world: IDENTITY4(), node: -1 }];
@@ -692,7 +728,25 @@ export function parseGltf(sourceJson: GltfJson, sourceBuffers: (Uint8Array | nul
         if (totalVertices > MAX_MESH_VERTICES || totalIndices > MAX_MESH_INDICES) {
           throw new Error("glTF mesh exceeds the supported size");
         }
+        // Morph targets (F7a): deltas through the node's linear part (positions) and normal matrix (normals).
+        const morphTargets = (primitive.targets ?? []).slice(0, MAX_MORPH_TARGETS).map((target, t) => {
+          const dp = target.POSITION !== undefined ? readAccessorFloats(json, buffers, target.POSITION) : new Float32Array(vertexCount * 3);
+          const dn = target.NORMAL !== undefined ? readAccessorFloats(json, buffers, target.NORMAL) : null;
+          const deltas = new Float32Array(vertexCount * 3);
+          const ndeltas = dn ? new Float32Array(vertexCount * 3) : null;
+          const nm = normalMatrix(world);
+          // Rows of the node's linear part; deltas are moved, not normalised.
+          const lin = [world[0]!, world[4]!, world[8]!, world[1]!, world[5]!, world[9]!, world[2]!, world[6]!, world[10]!];
+          const apply = (r: readonly number[], x: number, y: number, z: number) => [r[0]! * x + r[1]! * y + r[2]! * z, r[3]! * x + r[4]! * y + r[5]! * z, r[6]! * x + r[7]! * y + r[8]! * z];
+          for (let v = 0; v < vertexCount; v += 1) {
+            deltas.set(apply(lin, dp[v * 3] ?? 0, dp[v * 3 + 1] ?? 0, dp[v * 3 + 2] ?? 0), v * 3);
+            if (dn && ndeltas) ndeltas.set(apply(nm, dn[v * 3] ?? 0, dn[v * 3 + 1] ?? 0, dn[v * 3 + 2] ?? 0), v * 3);
+          }
+          return { name: mesh.extras?.targetNames?.[t] ?? `target_${t}`, positions: deltas, ...(ndeltas ? { normals: ndeltas } : {}) };
+        });
+        if (morphTargets.length > 0 && mesh.weights && !morphWeights) morphWeights = mesh.weights.slice(0, MAX_MORPH_TARGETS);
         primitives.push({
+          ...(morphTargets.length > 0 ? { morphTargets } : {}),
           positions,
           normals,
           uvs: uvs ? flipV(uvs) : null,
@@ -711,9 +765,10 @@ export function parseGltf(sourceJson: GltfJson, sourceBuffers: (Uint8Array | nul
   // A set that changes nothing is dropped.
   const variants: MeshVariant[] = variantNames.map((n, v) => ({ name: n, materials: variantMaterials[v]! })).filter((v) => v.materials.some((m) => m));
   const sets = variants.length > 0 ? { variants } : {};
-  if (!rig || !primitives.some((p) => p.joints)) return { name, primitives, ...sets };
+  const morphs = morphWeights ? { morphWeights } : {};
+  if (!rig || !primitives.some((p) => p.joints)) return { name, primitives, ...sets, ...morphs };
   const clips = readClips(json, buffers, rig.jointOfNode);
-  return { name, primitives, skin: rig.skin, ...(clips.length > 0 ? { clips } : {}), ...sets };
+  return { name, primitives, skin: rig.skin, ...(clips.length > 0 ? { clips } : {}), ...sets, ...morphs };
 }
 
 interface Rig {
@@ -1087,12 +1142,22 @@ export function encodeGlb(mesh: MeshAsset): Uint8Array {
 
     const material = addMaterial(primitive.material);
     const sets = (mesh.variants ?? []).slice(0, MAX_MESH_VARIANTS).flatMap((v, k) => (v.materials[index] ? [{ material: addMaterial(v.materials[index]!), variants: [k] }] : []));
-    gltfPrimitives.push({ attributes, indices: indexAccessor, material, ...(sets.length > 0 ? { extensions: { KHR_materials_variants: { mappings: sets } } } : {}) });
+    // Morph targets (F7a), dense.
+    const targets = (primitive.morphTargets ?? []).map((t) => ({ POSITION: addFloatAccessor(t.positions, 3, true), ...(t.normals ? { NORMAL: addFloatAccessor(t.normals, 3, false) } : {}) }));
+    gltfPrimitives.push({ attributes, indices: indexAccessor, material, ...(targets.length > 0 ? { targets } : {}), ...(sets.length > 0 ? { extensions: { KHR_materials_variants: { mappings: sets } } } : {}) });
   }
 
   const scene = skin
     ? writeRig(mesh, skin, gltfPrimitives, bound, addFloatAccessor)
     : { scenes: [{ nodes: [0] }], nodes: [{ mesh: 0 }], meshes: [{ primitives: gltfPrimitives }] };
+  // Morph targets' default weights and names (F7a), on each mesh with targets.
+  for (const m of scene.meshes ?? []) {
+    const count = Math.max(0, ...m.primitives.map((p) => p.targets?.length ?? 0));
+    if (count === 0) continue;
+    const first = mesh.primitives.find((p) => (p.morphTargets?.length ?? 0) === count);
+    m.weights = Array.from({ length: count }, (_, t) => mesh.morphWeights?.[t] ?? 0);
+    m.extras = { targetNames: Array.from({ length: count }, (_, t) => first?.morphTargets?.[t]?.name ?? `target_${t}`) };
+  }
   const json: GltfJson = {
     asset: { version: "2.0" },
     scene: 0,

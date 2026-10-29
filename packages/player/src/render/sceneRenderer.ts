@@ -370,6 +370,8 @@ export interface SceneRenderer {
    */
   prepareMaterials?(materials: Iterable<MeshMaterial>, options?: { readonly samples?: number; readonly reflect?: boolean; readonly prepass?: boolean }): Promise<void>;
   readonly referenceSamples?: number;
+  /** True when it skins and morphs live meshes itself, in a compute pass (AAA_FIDELITY_ROADMAP.md F7a). */
+  readonly gpuSkinning?: boolean;
   /**
    * True when it draws the sun's shadow itself from {@link SceneDraw.sunShadow}
    * (F2a: the AAA tier's GPU cascades) and ignores a CPU {@link SceneDraw.shadow}.
@@ -487,6 +489,10 @@ export class CappedSceneRenderer implements SceneRenderer {
 
   get sunCascades(): boolean | undefined {
     return this.inner.sunCascades;
+  }
+
+  get gpuSkinning(): boolean | undefined {
+    return this.inner.gpuSkinning;
   }
 
   get referenceSamples(): number | undefined {

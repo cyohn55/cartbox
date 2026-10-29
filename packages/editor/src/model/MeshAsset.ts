@@ -28,6 +28,7 @@ import { generateTextures, isGeneratedImage, readGenerator, type TextureGenerato
 import { readInstanceLink, type MaterialInstanceLink } from "./materialInstanceLink";
 import { readSurfaceEffects, writeSurfaceEffects } from "./materialEffects";
 import { readMaterialLayers, writeMaterialLayers } from "./materialLayers";
+import { MAX_MORPH_TARGETS, type MorphTarget } from "./morphTargets";
 import { readMaterialExtensions, writeMaterialExtensions } from "./materialExtensions";
 import { readSmartStack, writeSmartStack, type SmartStack } from "./smartMaterials";
 import type { MaterialGraph } from "./materialGraph";
@@ -425,7 +426,16 @@ export interface MeshPrimitive {
    * renderers that cache uploaded geometry re-upload when `revision` changes.
    * Never serialized.
    */
-  readonly dynamic?: { revision: number };
+  readonly dynamic?: {
+    revision: number;
+    /**
+     * Skinned on the GPU (F7a; gpuSkinning.ts in @cartbox/player): the pose's joint matrices and the morph
+     * weights the renderer's compute pass applies, in place of positions rewritten on the CPU.
+     */
+    gpu?: { readonly matrices: Float32Array; readonly morphWeights: Float32Array | null; readonly dualQuaternion: boolean };
+  };
+  /** Morph targets (F7a; morphTargets.ts): deltas from this shape, blended by the mesh's weights before skinning. */
+  readonly morphTargets?: readonly MorphTarget[];
 }
 
 /** A named mesh: one or more primitives in a shared object space. */
@@ -434,6 +444,10 @@ export interface MeshAsset {
   readonly primitives: readonly MeshPrimitive[];
   /** The skeleton skinned primitives are bound to (ENGINE_ROADMAP.md, Phase 3), if any. */
   readonly skin?: MeshSkin | null;
+  /** The morph targets' default weights (F7a; glTF's mesh weights), by target index. */
+  readonly morphWeights?: readonly number[];
+  /** Skin by dual quaternions (F7a), keeping a twisting joint's volume, rather than by blending matrices. */
+  readonly dualQuaternion?: boolean;
   /** Animation clips that move the skeleton. */
   readonly clips?: readonly AnimationClip[];
   /** Ribbons of light the mesh leaves as parts of it sweep (I10; see meshTrails.ts). */
@@ -692,6 +706,8 @@ interface SerializedPrimitive {
   bone?: number;
   /** In place of joints and weights: each vertex's one joint (a byte each), every weight 1. */
   bones?: string;
+  /** Morph targets (F7a): position (and normal) deltas, and a corrective's driver. */
+  morphTargets?: { name: string; positions: string; normals?: string; driver?: { joint: number; angles: number[] } }[];
 }
 interface SerializedJoint {
   name: string;
@@ -716,6 +732,8 @@ interface SerializedMesh {
   clips?: SerializedClip[];
   trails?: MeshTrail[];
   variants?: { name: string; materials: (SerializedMaterial | null)[] }[];
+  morphWeights?: number[];
+  dualQuaternion?: boolean;
 }
 
 function u16ToBase64(array: Uint16Array): string {
@@ -883,7 +901,19 @@ export function serializeMeshAsset(mesh: MeshAsset): string {
       indices: u32ToBase64(primitive.indices),
       material: serializeMaterial(primitive.material, Object.assign(images, { primitive: index })),
       ...(primitive.joints && primitive.weights && mesh.skin ? serializeBinding(primitive.joints, primitive.weights) : {}),
+      ...(primitive.morphTargets?.length
+        ? {
+            morphTargets: primitive.morphTargets.slice(0, MAX_MORPH_TARGETS).map((t) => ({
+              name: t.name,
+              positions: f32ToBase64(t.positions),
+              ...(t.normals ? { normals: f32ToBase64(t.normals) } : {}),
+              ...(t.driver ? { driver: { joint: t.driver.joint, angles: [t.driver.angles[0], t.driver.angles[1]] } } : {}),
+            })),
+          }
+        : {}),
     })),
+    ...(mesh.morphWeights?.length ? { morphWeights: [...mesh.morphWeights] } : {}),
+    ...(mesh.dualQuaternion ? { dualQuaternion: true } : {}),
     ...(mesh.skin ? { skin: serializeSkin(mesh.skin) } : {}),
     ...(mesh.skin && mesh.clips && mesh.clips.length > 0 ? { clips: mesh.clips.map(serializeClip) } : {}),
     ...(mesh.trails && mesh.trails.length > 0 ? { trails: mesh.trails.map((t) => ({ ...t, from: [...t.from], to: [...t.to], color: [...t.color] })) } : {}),
@@ -1148,6 +1178,7 @@ export function deserializeMeshAsset(json: string): MeshAsset {
       ...(blend ? { blend } : {}),
       ...(tangents ? { tangents } : {}),
       ...(joints && weights ? { joints, weights } : {}),
+      ...readMorphTargets(entry.morphTargets, vertexCount, skin?.joints.length ?? 0),
     };
   });
 
@@ -1172,5 +1203,27 @@ export function deserializeMeshAsset(json: string): MeshAsset {
     ...(clips.length > 0 ? { clips } : {}),
     ...(trails.length > 0 ? { trails } : {}),
     ...(variants.length > 0 ? { variants } : {}),
+    ...(Array.isArray(raw.morphWeights) && raw.morphWeights.every((w) => typeof w === "number" && Number.isFinite(w)) ? { morphWeights: raw.morphWeights.slice(0, MAX_MORPH_TARGETS) } : {}),
+    ...(raw.dualQuaternion === true ? { dualQuaternion: true } : {}),
   };
+}
+
+/** A stored primitive's morph targets (F7a), each the primitive's length; a malformed one throws. */
+function readMorphTargets(raw: unknown, vertexCount: number, jointCount: number): { morphTargets?: MorphTarget[] } {
+  if (raw === undefined) return {};
+  if (!Array.isArray(raw) || raw.length > MAX_MORPH_TARGETS) throw new Error("Malformed mesh asset");
+  const targets = raw.map((t: unknown): MorphTarget => {
+    const r = t as { name?: unknown; positions?: unknown; normals?: unknown; driver?: { joint?: unknown; angles?: unknown } };
+    if (typeof r.positions !== "string") throw new Error("Malformed mesh asset");
+    const positions = base64ToF32(r.positions);
+    const normals = typeof r.normals === "string" ? base64ToF32(r.normals) : null;
+    if (positions.length !== vertexCount * 3 || (normals && normals.length !== vertexCount * 3) || !positions.every(Number.isFinite)) throw new Error("Malformed mesh asset");
+    const d = r.driver;
+    const driver =
+      d && Number.isInteger(d.joint) && (d.joint as number) >= 0 && (d.joint as number) < jointCount && Array.isArray(d.angles) && d.angles.length === 2 && d.angles.every((a) => typeof a === "number" && Number.isFinite(a))
+        ? { joint: d.joint as number, angles: [d.angles[0] as number, d.angles[1] as number] as [number, number] }
+        : undefined;
+    return { name: typeof r.name === "string" ? r.name.slice(0, 64) : "", positions, ...(normals ? { normals } : {}), ...(driver ? { driver } : {}) };
+  });
+  return targets.length > 0 ? { morphTargets: targets } : {};
 }

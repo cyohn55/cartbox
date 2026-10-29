@@ -72,6 +72,8 @@ import {
   PARALLAX_MIN_NDV,
   PARALLAX_STEPS,
   resolveExtensions,
+  morphCsr,
+  dualQuaternions,
   resolveLayers,
   DISTORTION_FREQUENCY,
   DISTORTION_SPEED,
@@ -148,6 +150,7 @@ import { MAX_ANISOTROPY, MipmapGenerator, coverageMips, hasTransparency, mipLeve
 import { compressedFormatsFor } from "../lighting/webgpuDevice.js";
 import { brdfLut, brdfWgsl } from "./brdf.js";
 import { MATERIAL_SET_WGSL } from "./materialSet.js";
+import { SKIN_WGSL, SKIN_WORKGROUP, packBindShape, packInfluences, skinParams } from "./gpuSkinning.js";
 import { SSS_MAX_PROFILES, SSS_WGSL, packSssProfiles, type SssProfile } from "./subsurface.js";
 import { FEEDBACK_NONE, FEEDBACK_SLOTS, TextureStreamer, feedbackWgsl, footprintLog2, type StreamingStats } from "./textureStreaming.js";
 import { PathTracer, captureReference, type CaptureOptions, type ReferenceCapture } from "./pathTracer.js";
@@ -2109,6 +2112,8 @@ interface GpuPrimitive {
   /** A dynamic primitive's vertices before its last upload, and the frame that upload was in (F0c's velocity). */
   previousBuffer?: any;
   movedFrame?: number;
+  /** GPU skinning's buffers (F7a): the bind shape, influences, morphs, the joints and weights written each pose, and their group. */
+  skin?: { readonly buffers: any[]; readonly joints: any; readonly weights: any; readonly params: any; readonly group: any; readonly vertices: number; readonly jointBytes: number };
 }
 
 /** What a frame's depth prepass leaves (F0c; see WebgpuSceneRenderer.prepassTargets). */
@@ -5304,6 +5309,13 @@ export class WebgpuSceneRenderer implements SceneRenderer {
       mesh.primitives.forEach((primitive, i) => {
         const gpu = cached[i];
         if (!primitive.dynamic || !gpu || gpu.revision === primitive.dynamic.revision) return;
+        // Skinned on the GPU (F7a): the last vertices kept, then the compute pass writes the new ones.
+        if (primitive.dynamic.gpu) {
+          this.skinOnGpu(primitive, gpu, primitive.dynamic.gpu);
+          gpu.revision = primitive.dynamic.revision;
+          gpu.movedFrame = this.frameIndex;
+          return;
+        }
         const normals = primitive.normals ?? computeSmoothNormals(primitive.positions, primitive.indices);
         // A live skinned copy's tangents would stay in its bind pose: it takes the derivative frame (F1c).
         const vertices = interleaveVerticesWithTangents(primitive.positions, normals, primitive.uvs, primitive.uvs2 ?? null, primitive.blend ?? null, primitive.sway ?? null, null);
@@ -5324,8 +5336,8 @@ export class WebgpuSceneRenderer implements SceneRenderer {
       const vertices = interleaveVerticesWithTangents(primitive.positions, normals, primitive.uvs, primitive.uvs2 ?? null, primitive.blend ?? null, primitive.sway ?? null, primitive.dynamic ? null : (primitive.tangents ?? null));
       const vertexBuffer = this.device.createBuffer({
         size: Math.max(40, vertices.byteLength),
-        // A dynamic one is also copied from, to keep its last vertices (F0c).
-        usage: 0x20 | 0x08 | (primitive.dynamic ? 0x04 : 0), // VERTEX | COPY_DST (| COPY_SRC)
+        // A dynamic one is also copied from, to keep its last vertices (F0c), and written by GPU skinning (F7a).
+        usage: 0x20 | 0x08 | (primitive.dynamic ? 0x04 | 0x80 : 0), // VERTEX | COPY_DST (| COPY_SRC | STORAGE)
       });
       this.device.queue.writeBuffer(vertexBuffer, 0, vertices);
 
@@ -5345,6 +5357,69 @@ export class WebgpuSceneRenderer implements SceneRenderer {
 
     this.meshes.set(mesh, uploaded);
     return uploaded;
+  }
+
+  /** The skinning pass's pipeline (F7a), made the first time a primitive skins on the GPU. */
+  private skinPipeline: any = null;
+
+  /**
+   * Skin one primitive on the GPU (F7a; gpuSkinning.ts): its last vertices copied for the motion vectors,
+   * then the compute pass morphs and skins its bind shape into its vertex buffer.
+   */
+  private skinOnGpu(primitive: MeshPrimitive, gpu: GpuPrimitive, pose: NonNullable<NonNullable<MeshPrimitive["dynamic"]>["gpu"]>): void {
+    const device = this.device;
+    const vertices = primitive.positions.length / 3;
+    const byteLength = vertices * 64;
+    if (!gpu.skin) {
+      this.skinPipeline ??= device.createComputePipeline({ layout: "auto", compute: { module: cachedShaderModule(device, SKIN_WGSL), entryPoint: "main" } });
+      const storage = (data: ArrayBufferView) => {
+        const buffer = device.createBuffer({ size: Math.max(16, Math.ceil(data.byteLength / 16) * 16), usage: 0x80 | 0x08 });
+        device.queue.writeBuffer(buffer, 0, data.buffer, data.byteOffset, data.byteLength);
+        return buffer;
+      };
+      const targets = primitive.morphTargets ?? [];
+      const csr = morphCsr(targets, vertices);
+      const influences = primitive.joints && primitive.weights ? packInfluences(primitive.joints, primitive.weights) : new Uint32Array(vertices * 8);
+      const buffers = [storage(packBindShape(primitive.positions, primitive.normals)), storage(influences), storage(csr.starts), storage(csr.entries)];
+      const jointBytes = Math.max(64, pose.matrices.length * 4);
+      const joints = device.createBuffer({ size: jointBytes, usage: 0x80 | 0x08 });
+      const weights = device.createBuffer({ size: Math.max(16, targets.length * 4), usage: 0x80 | 0x08 });
+      const params = device.createBuffer({ size: 16, usage: 0x40 | 0x08 });
+      const group = device.createBindGroup({
+        layout: this.skinPipeline.getBindGroupLayout(0),
+        entries: [
+          { binding: 0, resource: { buffer: params } },
+          { binding: 1, resource: { buffer: buffers[0] } },
+          { binding: 2, resource: { buffer: buffers[1] } },
+          { binding: 3, resource: { buffer: joints } },
+          { binding: 4, resource: { buffer: buffers[2] } },
+          { binding: 5, resource: { buffer: buffers[3] } },
+          { binding: 6, resource: { buffer: weights } },
+          { binding: 7, resource: { buffer: gpu.vertexBuffer } },
+        ],
+      });
+      gpu.skin = { buffers, joints, weights, params, group, vertices, jointBytes };
+    }
+    const skin = gpu.skin;
+    const jointData = pose.dualQuaternion ? dualQuaternions(pose.matrices) : pose.matrices;
+    if (jointData.byteLength > 0) device.queue.writeBuffer(skin.joints, 0, jointData.buffer, jointData.byteOffset, Math.min(jointData.byteLength, skin.jointBytes));
+    if (pose.morphWeights && pose.morphWeights.length > 0) device.queue.writeBuffer(skin.weights, 0, pose.morphWeights.buffer, pose.morphWeights.byteOffset, pose.morphWeights.byteLength);
+    device.queue.writeBuffer(skin.params, 0, skinParams(vertices, pose.matrices.length / 16, pose.dualQuaternion, primitive.morphTargets?.length ?? 0));
+    // VERTEX | COPY_DST | COPY_SRC: readable back, as the skinned vertices are.
+    gpu.previousBuffer ??= device.createBuffer({ size: Math.max(40, byteLength), usage: 0x20 | 0x08 | 0x04 });
+    const encoder = device.createCommandEncoder();
+    encoder.copyBufferToBuffer(gpu.vertexBuffer, 0, gpu.previousBuffer, 0, Math.max(40, byteLength));
+    const pass = encoder.beginComputePass();
+    pass.setPipeline(this.skinPipeline);
+    pass.setBindGroup(0, skin.group);
+    pass.dispatchWorkgroups(Math.ceil(vertices / SKIN_WORKGROUP));
+    pass.end();
+    device.queue.submit([encoder.finish()]);
+  }
+
+  /** Whether this renderer skins live meshes on the GPU (F7a): the linear-light one, whose frames no CPU reference has to match. */
+  get gpuSkinning(): boolean {
+    return this.hdr;
   }
 
   /** A cut-out caster's group 0 (F2a-2): the casters' uniforms and transforms, and its base map. */

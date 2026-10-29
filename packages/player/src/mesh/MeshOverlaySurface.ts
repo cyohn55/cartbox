@@ -60,6 +60,7 @@ import {
   childIndices,
   computeEnvironmentAverage,
   createLiveSkinnedMesh,
+  hasMorphTargets,
   downsamplePanorama,
   isSkinned,
   renderSkyBackground,
@@ -650,7 +651,7 @@ export class MeshOverlaySurface implements DisplaySurface {
       if (meshSignature(a.mesh) !== meshSignature(b.mesh)) {
         // New geometry or materials: decode its textures and draw it from the next frame.
         const textured = await decodeMeshTextures(b.mesh, this.decodeKtx2 ?? undefined, undefined, this.compressedTextures);
-        const skinned = isSkinned(b.mesh) ? createLiveSkinnedMesh(b.mesh) : null;
+        const skinned = liveCopy(b.mesh, this.renderer.gpuSkinning === true);
         if (skinned) this.live.set(i, skinned);
         else this.live.delete(i);
         this.lastSkin.delete(i);
@@ -820,7 +821,7 @@ export class MeshOverlaySurface implements DisplaySurface {
     for (const [i, instance] of scene.instances.entries()) {
       const textured = await texture(instance.mesh);
       // A skinned object draws its own live copy of the mesh (same textures), posed each frame.
-      const skinned = isSkinned(instance.mesh) ? createLiveSkinnedMesh(instance.mesh) : null;
+      const skinned = liveCopy(instance.mesh, renderer.gpuSkinning === true);
       if (skinned) live.set(i, skinned);
       const lod = liveLod(instance.lod, skinned);
       instances.push({
@@ -2836,4 +2837,15 @@ function meshSignature(mesh: MeshAsset): string {
       return `${p.positions.length}:${p.indices.length}:${JSON.stringify(scalars)}:${images.join(",")}`;
     })
     .join("|");
+}
+
+/**
+ * A skinned or morphing mesh's live copy (F7a): skinned and morphed by the renderer's compute pass where it
+ * has one (`gpu`), else on the CPU. A mesh that only morphs takes its default weights at once.
+ */
+function liveCopy(mesh: MeshAsset, gpu: boolean): LiveSkinnedMesh | null {
+  if (!isSkinned(mesh) && !hasMorphTargets(mesh)) return null;
+  const live = createLiveSkinnedMesh(mesh, { gpu });
+  if (!isSkinned(mesh)) live.update(new Float32Array(0));
+  return live;
 }

@@ -24,6 +24,7 @@
 
 import type { MeshAsset, MeshPrimitive } from "./MeshAsset";
 import type { EaseCurve, TimelineEase } from "./timeline";
+import { applyMorphs, correctiveWeights, dualQuaternions, skinVerticesDq } from "./morphTargets";
 
 /** One joint of a skeleton. */
 export interface SkinJoint {
@@ -327,11 +328,24 @@ export function skinVertices(
  */
 export interface LiveSkinnedMesh {
   readonly mesh: MeshAsset;
-  /** Skin every primitive for a pose (see {@link skinMatrices}). */
-  update(matrices: Float32Array): void;
+  /**
+   * Skin every primitive for a pose (see {@link skinMatrices}), its morph targets blended first (F7a): the
+   * mesh's weights, or `morphWeights`, with a corrective target's weight from `pose`.
+   */
+  update(matrices: Float32Array, options?: { readonly pose?: Float32Array; readonly morphWeights?: ArrayLike<number> }): void;
 }
 
-export function createLiveSkinnedMesh(source: MeshAsset): LiveSkinnedMesh {
+/** Whether a mesh has morph targets (F7a), so its draws need a live copy as a skinned one does. */
+export function hasMorphTargets(mesh: MeshAsset): boolean {
+  return mesh.primitives.some((p) => (p.morphTargets?.length ?? 0) > 0);
+}
+
+/**
+ * A mesh's live copy. With `gpu` (F7a), the renderer skins it in a compute pass: an update only hands it the
+ * pose's matrices and morph weights; the CPU's positions stay in the bind pose.
+ */
+export function createLiveSkinnedMesh(source: MeshAsset, mode: { readonly gpu?: boolean } = {}): LiveSkinnedMesh {
+  const liveGpu = mode.gpu === true;
   const primitives: MeshPrimitive[] = source.primitives.map((p) => ({
     ...p,
     positions: p.positions.slice(),
@@ -339,13 +353,44 @@ export function createLiveSkinnedMesh(source: MeshAsset): LiveSkinnedMesh {
     dynamic: { revision: 0 },
   }));
   const mesh: MeshAsset = { ...source, primitives };
+  const morphed = source.primitives.map((p) => (p.morphTargets?.length ? { positions: new Float32Array(p.positions.length), normals: p.normals ? new Float32Array(p.normals.length) : null } : null));
+  const quats = { matrices: null as Float32Array | null, out: null as Float32Array | null };
   return {
     mesh,
-    update(matrices) {
+    update(matrices, options = {}) {
       source.primitives.forEach((src, i) => {
         const live = primitives[i]!;
-        if (!src.joints || !src.weights) return;
-        skinVertices(src.joints, src.weights, matrices, src.positions, src.normals, live.positions, live.normals);
+        const targets = src.morphTargets ?? [];
+        if ((!src.joints || !src.weights) && targets.length === 0) return;
+        const base = options.morphWeights ?? source.morphWeights ?? [];
+        // Corrective targets from the pose, or (without one) from the joints' matrices.
+        const weights = targets.length > 0 ? (source.skin && src.joints ? correctiveWeights(source.skin, options.pose ?? null, targets, base, matrices) : Float32Array.from({ length: targets.length }, (_, t) => base[t] ?? 0)) : null;
+        if (liveGpu) {
+          live.dynamic!.gpu = { matrices: src.joints ? matrices : new Float32Array(0), morphWeights: weights, dualQuaternion: source.dualQuaternion === true };
+          live.dynamic!.revision += 1;
+          return;
+        }
+        // On the CPU: the morphs blended, then skinned (by dual quaternions if the mesh asks).
+        let positions = src.positions;
+        let normals = src.normals;
+        const m = morphed[i];
+        if (m && weights) {
+          applyMorphs(src.positions, src.normals, targets, weights, m.positions, m.normals);
+          positions = m.positions;
+          normals = m.normals;
+        }
+        if (src.joints && src.weights) {
+          if (source.dualQuaternion) {
+            if (quats.matrices !== matrices) {
+              quats.matrices = matrices;
+              quats.out = dualQuaternions(matrices);
+            }
+            skinVerticesDq(src.joints, src.weights, quats.out!, positions, normals, live.positions, live.normals);
+          } else skinVertices(src.joints, src.weights, matrices, positions, normals, live.positions, live.normals);
+        } else {
+          live.positions.set(positions);
+          if (normals && live.normals) live.normals.set(normals);
+        }
         live.dynamic!.revision += 1;
       });
     },

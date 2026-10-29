@@ -4943,6 +4943,8 @@ interface SceneRenderer {
         readonly prepass?: boolean;
     }): Promise<void>;
     readonly referenceSamples?: number;
+    /** True when it skins and morphs live meshes itself, in a compute pass (AAA_FIDELITY_ROADMAP.md F7a). */
+    readonly gpuSkinning?: boolean;
     /**
      * True when it draws the sun's shadow itself from {@link SceneDraw.sunShadow}
      * (F2a: the AAA tier's GPU cascades) and ignores a CPU {@link SceneDraw.shadow}.
@@ -4998,6 +5000,7 @@ declare class CappedSceneRenderer implements SceneRenderer {
     get gpuDevice(): unknown;
     get textureFormats(): readonly string[] | undefined;
     get sunCascades(): boolean | undefined;
+    get gpuSkinning(): boolean | undefined;
     get referenceSamples(): number | undefined;
     get prepareMaterials(): SceneRenderer["prepareMaterials"];
     get captureReference(): SceneRenderer["captureReference"];
@@ -6074,6 +6077,15 @@ declare class WebgpuSceneRenderer implements SceneRenderer {
      * buffer whenever its revision moves on.
      */
     private uploadMesh;
+    /** The skinning pass's pipeline (F7a), made the first time a primitive skins on the GPU. */
+    private skinPipeline;
+    /**
+     * Skin one primitive on the GPU (F7a; gpuSkinning.ts): its last vertices copied for the motion vectors,
+     * then the compute pass morphs and skins its bind shape into its vertex buffer.
+     */
+    private skinOnGpu;
+    /** Whether this renderer skins live meshes on the GPU (F7a): the linear-light one, whose frames no CPU reference has to match. */
+    get gpuSkinning(): boolean;
     /** A cut-out caster's group 0 (F2a-2): the casters' uniforms and transforms, and its base map. */
     private cutGroupFor;
     /** The bind group for one primitive, rebuilt if any of its textures changed. */

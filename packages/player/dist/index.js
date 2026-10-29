@@ -11479,6 +11479,7 @@ import {
   childIndices,
   computeEnvironmentAverage,
   createLiveSkinnedMesh,
+  hasMorphTargets,
   downsamplePanorama,
   isSkinned as isSkinned2,
   renderSkyBackground,
@@ -11781,6 +11782,9 @@ var CappedSceneRenderer = class {
   }
   get sunCascades() {
     return this.inner.sunCascades;
+  }
+  get gpuSkinning() {
+    return this.inner.gpuSkinning;
   }
   get referenceSamples() {
     return this.inner.referenceSamples;
@@ -12304,7 +12308,7 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
       }
       if (meshSignature(a.mesh) !== meshSignature(b.mesh)) {
         const textured = await decodeMeshTextures(b.mesh, this.decodeKtx2 ?? void 0, void 0, this.compressedTextures);
-        const skinned = isSkinned2(b.mesh) ? createLiveSkinnedMesh(b.mesh) : null;
+        const skinned = liveCopy(b.mesh, this.renderer.gpuSkinning === true);
         if (skinned) this.live.set(i, skinned);
         else this.live.delete(i);
         this.lastSkin.delete(i);
@@ -12443,7 +12447,7 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
     const live = /* @__PURE__ */ new Map();
     for (const [i, instance] of scene.instances.entries()) {
       const textured = await texture(instance.mesh);
-      const skinned = isSkinned2(instance.mesh) ? createLiveSkinnedMesh(instance.mesh) : null;
+      const skinned = liveCopy(instance.mesh, renderer.gpuSkinning === true);
       if (skinned) live.set(i, skinned);
       const lod = liveLod(instance.lod, skinned);
       instances.push({
@@ -14089,6 +14093,12 @@ function meshSignature(mesh) {
     }
     return `${p.positions.length}:${p.indices.length}:${JSON.stringify(scalars)}:${images.join(",")}`;
   }).join("|");
+}
+function liveCopy(mesh, gpu) {
+  if (!isSkinned2(mesh) && !hasMorphTargets(mesh)) return null;
+  const live = createLiveSkinnedMesh(mesh, { gpu });
+  if (!isSkinned2(mesh)) live.update(new Float32Array(0));
+  return live;
 }
 
 // src/world/worldScene.ts
@@ -18095,6 +18105,8 @@ import {
   PARALLAX_MIN_NDV as PARALLAX_MIN_NDV2,
   PARALLAX_STEPS as PARALLAX_STEPS2,
   resolveExtensions as resolveExtensions2,
+  morphCsr,
+  dualQuaternions,
   resolveLayers as resolveLayers2,
   DISTORTION_FREQUENCY as DISTORTION_FREQUENCY2,
   DISTORTION_SPEED as DISTORTION_SPEED2,
@@ -18847,6 +18859,133 @@ fn iridescenceF0(cos1: f32, baseF0: vec3<f32>) -> vec3<f32> {
 }
 `
 );
+
+// src/render/gpuSkinning.ts
+var SKIN_WORKGROUP = 64;
+function skinParams(vertices, joints, dualQuaternion, targets) {
+  return Uint32Array.from([vertices, joints, dualQuaternion ? 1 : 0, targets]);
+}
+var SKIN_WGSL = (
+  /* wgsl */
+  `
+struct Params {
+  vertices: u32,
+  joints: u32,
+  dualQuaternion: u32,
+  targets: u32,
+};
+@group(0) @binding(0) var<uniform> params: Params;
+@group(0) @binding(1) var<storage, read> bind: array<vec4<f32>>;
+@group(0) @binding(2) var<storage, read> influences: array<vec4<u32>>;
+@group(0) @binding(3) var<storage, read> joints: array<vec4<f32>>;
+@group(0) @binding(4) var<storage, read> morphStarts: array<u32>;
+@group(0) @binding(5) var<storage, read> morphEntries: array<vec4<f32>>;
+@group(0) @binding(6) var<storage, read> morphWeights: array<f32>;
+@group(0) @binding(7) var<storage, read_write> vertices: array<f32>;
+
+fn rotateByQuat(q: vec4<f32>, v: vec3<f32>) -> vec3<f32> {
+  let c = cross(q.xyz, v) + q.w * v;
+  return v + 2.0 * cross(q.xyz, c);
+}
+
+@compute @workgroup_size(${SKIN_WORKGROUP})
+fn main(@builtin(global_invocation_id) id: vec3<u32>) {
+  let v = id.x;
+  if (v >= params.vertices) { return; }
+  var p = bind[v * 2u].xyz;
+  var n = bind[v * 2u + 1u].xyz;
+  // Morph targets: the deltas that move this vertex, by their targets' weights.
+  if (params.targets > 0u) {
+    for (var e = morphStarts[v]; e < morphStarts[v + 1u]; e = e + 1u) {
+      let a = morphEntries[e * 2u];
+      let b = morphEntries[e * 2u + 1u];
+      let w = morphWeights[u32(a.x + 0.5)];
+      p = p + w * a.yzw;
+      n = n + w * b.xyz;
+    }
+    n = normalize(n + vec3<f32>(1e-12, 0.0, 0.0));
+  }
+  let js = influences[v * 2u];
+  let ws = bitcast<vec4<f32>>(influences[v * 2u + 1u]);
+  var outP = p;
+  var outN = n;
+  var total = 0.0;
+  if (params.dualQuaternion == 0u) {
+    var m0 = vec4<f32>(0.0);
+    var m1 = vec4<f32>(0.0);
+    var m2 = vec4<f32>(0.0);
+    var m3 = vec4<f32>(0.0);
+    for (var k = 0u; k < 4u; k = k + 1u) {
+      let w = ws[k];
+      let j = js[k];
+      if (w <= 0.0 || j >= params.joints) { continue; }
+      total = total + w;
+      m0 = m0 + joints[j * 4u] * w;
+      m1 = m1 + joints[j * 4u + 1u] * w;
+      m2 = m2 + joints[j * 4u + 2u] * w;
+      m3 = m3 + joints[j * 4u + 3u] * w;
+    }
+    if (total > 0.0) {
+      let m = mat4x4<f32>(m0, m1, m2, m3) * (1.0 / total);
+      outP = (m * vec4<f32>(p, 1.0)).xyz;
+      outN = normalize((m * vec4<f32>(n, 0.0)).xyz + vec3<f32>(1e-12, 0.0, 0.0));
+    }
+  } else {
+    var r = vec4<f32>(0.0);
+    var d = vec4<f32>(0.0);
+    var first = 0xffffffffu;
+    for (var k = 0u; k < 4u; k = k + 1u) {
+      let w = ws[k];
+      let j = js[k];
+      if (w <= 0.0 || j >= params.joints) { continue; }
+      if (first == 0xffffffffu) { first = j; }
+      let qr = joints[j * 2u];
+      let s = select(1.0, -1.0, dot(joints[first * 2u], qr) < 0.0);
+      r = r + qr * (w * s);
+      d = d + joints[j * 2u + 1u] * (w * s);
+      total = total + w;
+    }
+    if (total > 0.0) {
+      let len = max(length(r), 1e-12);
+      r = r / len;
+      d = d / len;
+      let t = 2.0 * (r.w * d.xyz - d.w * r.xyz + cross(r.xyz, d.xyz));
+      outP = rotateByQuat(r, p) + t;
+      outN = rotateByQuat(r, n);
+    }
+  }
+  let o = v * 16u;
+  vertices[o] = outP.x;
+  vertices[o + 1u] = outP.y;
+  vertices[o + 2u] = outP.z;
+  vertices[o + 3u] = outN.x;
+  vertices[o + 4u] = outN.y;
+  vertices[o + 5u] = outN.z;
+}
+`
+);
+function packBindShape(positions, normals) {
+  const n = positions.length / 3;
+  const out = new Float32Array(n * 8);
+  for (let v = 0; v < n; v += 1) {
+    out.set(positions.subarray(v * 3, v * 3 + 3), v * 8);
+    if (normals) out.set(normals.subarray(v * 3, v * 3 + 3), v * 8 + 4);
+    else out[v * 8 + 5] = 1;
+  }
+  return out;
+}
+function packInfluences(joints, weights) {
+  const n = joints.length / 4;
+  const out = new Uint32Array(n * 8);
+  const bits = new Float32Array(out.buffer);
+  for (let v = 0; v < n; v += 1) {
+    for (let k = 0; k < 4; k += 1) {
+      out[v * 8 + k] = joints[v * 4 + k];
+      bits[v * 8 + 4 + k] = weights[v * 4 + k];
+    }
+  }
+  return out;
+}
 
 // src/render/subsurface.ts
 var SSS_MAX_PROFILES = 256;
@@ -27064,6 +27203,8 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     this.localCache = new LocalTileCache();
     /** Clears a tile's rect to the far plane (F2d-2), made on first use. */
     this.localClear = null;
+    /** The skinning pass's pipeline (F7a), made the first time a primitive skins on the GPU. */
+    this.skinPipeline = null;
     /** Texture streaming (F1b): the residency plan, and the feedback pass's pipeline, buffers and state. */
     this.streamer = null;
     this.feedback = null;
@@ -29616,6 +29757,12 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
       mesh.primitives.forEach((primitive, i) => {
         const gpu = cached[i];
         if (!primitive.dynamic || !gpu || gpu.revision === primitive.dynamic.revision) return;
+        if (primitive.dynamic.gpu) {
+          this.skinOnGpu(primitive, gpu, primitive.dynamic.gpu);
+          gpu.revision = primitive.dynamic.revision;
+          gpu.movedFrame = this.frameIndex;
+          return;
+        }
         const normals = primitive.normals ?? computeSmoothNormals2(primitive.positions, primitive.indices);
         const vertices = interleaveVerticesWithTangents(primitive.positions, normals, primitive.uvs, primitive.uvs2 ?? null, primitive.blend ?? null, primitive.sway ?? null, null);
         gpu.previousBuffer ?? (gpu.previousBuffer = this.device.createBuffer({ size: Math.max(40, vertices.byteLength), usage: 32 | 8 }));
@@ -29633,9 +29780,9 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
       const vertices = interleaveVerticesWithTangents(primitive.positions, normals, primitive.uvs, primitive.uvs2 ?? null, primitive.blend ?? null, primitive.sway ?? null, primitive.dynamic ? null : primitive.tangents ?? null);
       const vertexBuffer = this.device.createBuffer({
         size: Math.max(40, vertices.byteLength),
-        // A dynamic one is also copied from, to keep its last vertices (F0c).
-        usage: 32 | 8 | (primitive.dynamic ? 4 : 0)
-        // VERTEX | COPY_DST (| COPY_SRC)
+        // A dynamic one is also copied from, to keep its last vertices (F0c), and written by GPU skinning (F7a).
+        usage: 32 | 8 | (primitive.dynamic ? 4 | 128 : 0)
+        // VERTEX | COPY_DST (| COPY_SRC | STORAGE)
       });
       this.device.queue.writeBuffer(vertexBuffer, 0, vertices);
       const indexBuffer = this.device.createBuffer({
@@ -29653,6 +29800,63 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     });
     this.meshes.set(mesh, uploaded);
     return uploaded;
+  }
+  /**
+   * Skin one primitive on the GPU (F7a; gpuSkinning.ts): its last vertices copied for the motion vectors,
+   * then the compute pass morphs and skins its bind shape into its vertex buffer.
+   */
+  skinOnGpu(primitive, gpu, pose) {
+    const device = this.device;
+    const vertices = primitive.positions.length / 3;
+    const byteLength = vertices * 64;
+    if (!gpu.skin) {
+      this.skinPipeline ?? (this.skinPipeline = device.createComputePipeline({ layout: "auto", compute: { module: cachedShaderModule(device, SKIN_WGSL), entryPoint: "main" } }));
+      const storage = (data) => {
+        const buffer = device.createBuffer({ size: Math.max(16, Math.ceil(data.byteLength / 16) * 16), usage: 128 | 8 });
+        device.queue.writeBuffer(buffer, 0, data.buffer, data.byteOffset, data.byteLength);
+        return buffer;
+      };
+      const targets = primitive.morphTargets ?? [];
+      const csr = morphCsr(targets, vertices);
+      const influences = primitive.joints && primitive.weights ? packInfluences(primitive.joints, primitive.weights) : new Uint32Array(vertices * 8);
+      const buffers = [storage(packBindShape(primitive.positions, primitive.normals)), storage(influences), storage(csr.starts), storage(csr.entries)];
+      const jointBytes = Math.max(64, pose.matrices.length * 4);
+      const joints = device.createBuffer({ size: jointBytes, usage: 128 | 8 });
+      const weights = device.createBuffer({ size: Math.max(16, targets.length * 4), usage: 128 | 8 });
+      const params = device.createBuffer({ size: 16, usage: 64 | 8 });
+      const group = device.createBindGroup({
+        layout: this.skinPipeline.getBindGroupLayout(0),
+        entries: [
+          { binding: 0, resource: { buffer: params } },
+          { binding: 1, resource: { buffer: buffers[0] } },
+          { binding: 2, resource: { buffer: buffers[1] } },
+          { binding: 3, resource: { buffer: joints } },
+          { binding: 4, resource: { buffer: buffers[2] } },
+          { binding: 5, resource: { buffer: buffers[3] } },
+          { binding: 6, resource: { buffer: weights } },
+          { binding: 7, resource: { buffer: gpu.vertexBuffer } }
+        ]
+      });
+      gpu.skin = { buffers, joints, weights, params, group, vertices, jointBytes };
+    }
+    const skin = gpu.skin;
+    const jointData = pose.dualQuaternion ? dualQuaternions(pose.matrices) : pose.matrices;
+    if (jointData.byteLength > 0) device.queue.writeBuffer(skin.joints, 0, jointData.buffer, jointData.byteOffset, Math.min(jointData.byteLength, skin.jointBytes));
+    if (pose.morphWeights && pose.morphWeights.length > 0) device.queue.writeBuffer(skin.weights, 0, pose.morphWeights.buffer, pose.morphWeights.byteOffset, pose.morphWeights.byteLength);
+    device.queue.writeBuffer(skin.params, 0, skinParams(vertices, pose.matrices.length / 16, pose.dualQuaternion, primitive.morphTargets?.length ?? 0));
+    gpu.previousBuffer ?? (gpu.previousBuffer = device.createBuffer({ size: Math.max(40, byteLength), usage: 32 | 8 | 4 }));
+    const encoder = device.createCommandEncoder();
+    encoder.copyBufferToBuffer(gpu.vertexBuffer, 0, gpu.previousBuffer, 0, Math.max(40, byteLength));
+    const pass = encoder.beginComputePass();
+    pass.setPipeline(this.skinPipeline);
+    pass.setBindGroup(0, skin.group);
+    pass.dispatchWorkgroups(Math.ceil(vertices / SKIN_WORKGROUP));
+    pass.end();
+    device.queue.submit([encoder.finish()]);
+  }
+  /** Whether this renderer skins live meshes on the GPU (F7a): the linear-light one, whose frames no CPU reference has to match. */
+  get gpuSkinning() {
+    return this.hdr;
   }
   /** A cut-out caster's group 0 (F2a-2): the casters' uniforms and transforms, and its base map. */
   cutGroupFor(primitive, textures) {

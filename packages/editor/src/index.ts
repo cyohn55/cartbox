@@ -668,6 +668,7 @@ export {
   blendPoses,
   clipTime,
   createLiveSkinnedMesh,
+  hasMorphTargets,
   findClip,
   isSkinned,
   jointWorldMatrices,
@@ -1788,3 +1789,16 @@ export { IES_HORIZONTAL_SAMPLES, IES_VERTICAL_SAMPLES, iesProfile, parseIes, rea
 export { decodeExr, decodeKtx2Hdr, encodeRadianceHdr, halfToFloat, type FloatImage } from "./model/exrCodec";
 export { fbxToMesh, isBinaryFbx, parseFbx, parseFbxAscii, parseFbxBinary, type FbxNode, type FbxValue } from "./model/fbxCodec";
 export { parseUsd, parseUsda, readStoredZip, usdaToMesh } from "./model/usdCodec";
+export {
+  MAX_MORPH_TARGETS,
+  applyMorphs,
+  correctiveWeights,
+  dualQuaternion,
+  dualQuaternions,
+  jointTurn,
+  jointTurnFromMatrices,
+  morphCsr,
+  skinVerticesDq,
+  type CorrectiveDriver,
+  type MorphTarget,
+} from "./model/morphTargets";

@@ -1215,10 +1215,27 @@ Everything else depends on this track. It contains no visible "feature", but its
 
 ### F7. Characters and animation
 
-- [ ] **F7a. GPU skinning and morph targets.**
+- [x] **F7a. GPU skinning and morph targets.**
   - Compute skinning, with a dual-quaternion option and writing to the velocity buffer.
   - glTF morph targets on import, with sparse deltas and GPU blending.
   - Corrective shapes driven by joint angles.
+  - **Done.** The `aaa` tier skins on the GPU (`player render/gpuSkinning.ts`); every other renderer skins the same way on the CPU (`editor model/morphTargets.ts`), which is the reference the compute pass is held to.
+    - **Compute skinning.** A live copy made with `{ gpu: true }` no longer touches its positions: an update hands the primitive the pose's matrices and its targets' weights, and the renderer's compute pass writes position and normal straight into the vertex buffer the scene draws (now `STORAGE` as well). The bind shape, the influences and the packed morphs are uploaded once per primitive; a frame writes only the joints and the weights. The overlay makes GPU copies when its renderer says `gpuSkinning`.
+    - **Motion vectors.** Before the pass writes, the vertices it had are copied to the previous-position buffer (F0c), as the CPU path's upload already did, so a skinned mesh's velocity is unchanged.
+    - **Morph targets** (`MeshPrimitive.morphTargets`): glTF's targets on import, position and normal deltas, with the mesh's default `weights` as `MeshAsset.morphWeights` and names from `extras.targetNames`.
+      - Deltas take the node's linear part without normalising, and normals its normal matrix.
+      - **Sparse accessors** are read for every float attribute, targets included.
+      - The GPU reads the deltas packed per vertex (`morphCsr`): a vertex costs only the targets that move it. Up to 64 targets a primitive.
+      - Export writes them back as dense accessors with the mesh's weights and names; the mesh format keeps them (and their drivers) in base64.
+    - **Corrective shapes.** A target with a `driver` takes its weight from a joint's turn: smoothstepped from 0 at its first angle to 1 at its second. The turn is read from the pose (against the joint's rest rotation) or, when the caller has only the skinning matrices, from them (against the parent's).
+    - **Dual quaternions** (Kavan), per mesh (`MeshAsset.dualQuaternion`), on both paths. A joint's scale is dropped; a half-twisted vertex keeps its distance from the bone where linear blending collapses it.
+    - *Tests:* `Unit Tests/gpu-skinning.test.ts` covers:
+      - blending targets (normals renormalised), the per-vertex packing, a corrective's weight from the pose and from the matrices alone, a live copy morphed then skinned;
+      - dual quaternions against linear blending for a rigid joint, and the twist that collapses one and not the other; a mesh that asks for them;
+      - targets, drivers, weights and the method through the mesh format, targets and weights through glTF, a sparse target scaled by its node;
+      - on Dawn: the compute pass's positions and normals against the CPU's, by linear blending and by dual quaternions, the bulge and the corrective on, the previous buffer holding the rest pose, the UVs untouched; the CPU copy stays in its bind pose.
+    - *Found, then fixed:* the transform the importer used for directions normalises them, which would have turned a 2 cm delta into a metre; deltas now take the linear part as it is.
+    - *Left for later:* the editor's UI for adding targets and drivers (they arrive by import or by script); tangents on a GPU-skinned copy (it takes the derivative frame, as the CPU copy did); compressed (quantised) deltas.
 - [ ] **F7b. Faces.** A facial rig standard (ARKit's 52 blend shapes, or FACS), with animation import, phoneme-driven lip sync from audio, and look-at with saccades.
 - [ ] **F7c. Character shading.**
   - **Skin:** F1d SSS with a dual-lobe specular, micro-normal detail and cavity.
