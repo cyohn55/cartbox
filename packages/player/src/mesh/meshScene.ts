@@ -49,6 +49,7 @@ import {
   decodeLods,
   applyMeshVariant,
   foliageBlocks,
+  foliageInstanceMesh,
   layerCopies,
   readSplines,
   readFoliage,
@@ -141,6 +142,13 @@ export interface MeshInstance extends MeshSceneInstance {
      * and their impostors trade places, never both, never neither.
      */
     readonly swap?: { readonly distance: number; readonly far: boolean };
+    /**
+     * The block's copies, for drawing one at a time (F6b): the layer's mesh as
+     * the AAA tier draws it (foliageInstanceMesh), each copy's matrix (in the
+     * instance's space), and, for a layer with impostors, the chain from the
+     * full mesh to its cards at the swap distance.
+     */
+    readonly copies?: { readonly mesh: MeshAsset; readonly matrices: readonly Float32Array[]; readonly lod: LodChain | null };
   };
   /** The components attached to this object (EP14), each with its field values; absent when none. */
   readonly components?: readonly AttachedComponent[];
@@ -520,6 +528,9 @@ export function parseMeshScene(raw: string | null | undefined): MeshScene | null
         cards = text ? load(text) : null;
       }
       const swap = cards ? read.layer.impostor!.distance : 0;
+      // Drawn a copy at a time on the AAA tier (F6b): the layer's mesh as it draws it, and its cards as its far level.
+      const single = foliageInstanceMesh(read.layer, mesh);
+      const chain: LodChain | null = cards ? { meshes: [single, foliageInstanceMesh({ wind: 0 }, cards)], distances: [swap] } : null;
       if (cards) {
         foliageBlocks(t, { ...read.layer, wind: 0 }, cards, copies).forEach((block, k) => {
           instances.push({
@@ -551,7 +562,7 @@ export function parseMeshScene(raw: string | null | undefined): MeshScene | null
           terrain: true,
           // On a terrain that casts, its foliage casts too (boulders shade the snow).
           ...(t.castShadows ? { casts: true as const } : {}),
-          foliage: { cull: read.layer.cull, center: block.center, radius: block.radius, ...(cards ? { swap: { distance: swap, far: false } } : {}) },
+          foliage: { cull: read.layer.cull, center: block.center, radius: block.radius, ...(cards ? { swap: { distance: swap, far: false } } : {}), copies: { mesh: single, matrices: block.matrices, lod: chain } },
         });
       });
     }

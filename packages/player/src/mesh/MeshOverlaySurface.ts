@@ -68,6 +68,7 @@ import {
   tintMaskTexture,
   composeModelMatrix,
   multiplyMat4,
+  bakeOctahedralImpostor,
   sceneLightingEnvironment,
   sceneLightingKeyDirection,
   vistaBounds,
@@ -1320,7 +1321,9 @@ export class MeshOverlaySurface implements DisplaySurface {
     }
     // Particles: stepped on the frame clock and drawn as billboards facing this camera.
     // Foliage blocks past their layer's cull distance aren't drawn (EP11).
-    let drawn: readonly MeshSceneInstance[] = this.foliage.size > 0 ? instances.filter((i) => this.foliageInReach(i)) : instances;
+    // On the AAA tier with GPU culling (F6b) a block in reach is drawn a copy at a time, each culled (and its LOD
+    // chosen, its impostor crossfaded) on the GPU; elsewhere blocks are drawn whole.
+    let drawn: readonly MeshSceneInstance[] = this.foliage.size === 0 ? instances : this.gpuFoliage ? instances.flatMap((i) => this.foliageCopies(i)) : instances.filter((i) => this.foliageInReach(i));
     // Swing trails (I10): where each trailing object is now, then the ribbons it has swept.
     let frontDrawn: readonly MeshSceneInstance[] = front;
     if (this.trails) {
@@ -2120,6 +2123,59 @@ export class MeshOverlaySurface implements DisplaySurface {
   }
   /** Foliage blocks by mesh (EP11): their cull distance and bounds. */
   private readonly foliage = new Map<MeshAsset, NonNullable<MeshInstance["foliage"]>>();
+
+  /** Whether foliage is drawn a copy at a time (F6b): on the AAA tier, which culls copies on the GPU. */
+  private get gpuFoliage(): boolean {
+    return this.options.prepass === true && this.renderer.sunCascades === true;
+  }
+
+  /** Each block's copies as instances (F6b), made once a block, model and LOD chain. */
+  private readonly blockCopies = new WeakMap<MeshAsset, { model: Mat4; lod: LodChain | null; copies: MeshSceneInstance[] }>();
+  /**
+   * Each impostor layer's chain with an octahedral impostor for its far level
+   * (F6b; bakeOctahedralImpostor), baked once, off the frame that first needs
+   * it; until it's ready, the crossed cards the layer stores serve.
+   */
+  private readonly octahedral = new WeakMap<LodChain, LodChain | "baking">();
+
+  private octahedralChain(chain: LodChain, near: MeshSceneInstance): LodChain {
+    const known = this.octahedral.get(chain);
+    if (known && known !== "baking") return known;
+    if (!known) {
+      this.octahedral.set(chain, "baking");
+      setTimeout(() => {
+        const baked = bakeOctahedralImpostor(chain.meshes[0]!, near.textures ?? []);
+        this.octahedral.set(chain, baked ? { meshes: [chain.meshes[0]!, baked.mesh], distances: chain.distances, textures: [undefined, [baked.atlas]] } : chain);
+      }, 0);
+    }
+    return chain;
+  }
+
+  /**
+   * What an instance draws as on the GPU-culled path (F6b): itself, unless it is
+   * a foliage block, which is its copies while it is in reach (its full copies'
+   * block, the impostors taken by their LOD chain), and nothing otherwise.
+   */
+  private foliageCopies(instance: MeshSceneInstance): readonly MeshSceneInstance[] {
+    const f = this.foliage.get(instance.mesh);
+    if (!f) return [instance];
+    if (!f.copies) return this.foliageInReach(instance) ? [instance] : [];
+    // The cards' blocks: their copies are the full copies' far level.
+    if (f.swap?.far || !this.eye) return [];
+    const m = instance.model;
+    const [x, y, z] = f.center;
+    const d = Math.hypot(m[0]! * x + m[4]! * y + m[8]! * z + m[12]! - this.eye[0], m[1]! * x + m[5]! * y + m[9]! * z + m[13]! - this.eye[1], m[2]! * x + m[6]! * y + m[10]! * z + m[14]! - this.eye[2]);
+    if (d - f.radius >= f.cull * this.quality.terrainDetail) return [];
+    const lod = f.copies.lod ? this.octahedralChain(f.copies.lod, instance) : null;
+    let made = this.blockCopies.get(instance.mesh);
+    if (!made || made.model !== instance.model || made.lod !== lod) {
+      const { mesh, matrices } = f.copies;
+      const copies = matrices.map((c) => ({ ...instance, mesh, model: multiplyMat4(instance.model, c as unknown as Mat4), ...(lod ? { lod } : {}) }) as MeshSceneInstance);
+      made = { model: instance.model, lod, copies };
+      this.blockCopies.set(instance.mesh, made);
+    }
+    return made.copies;
+  }
 
   /** Whether an instance is in reach of the eye: anything but a foliage block is; a block is within its cull distance. */
   private foliageInReach(instance: MeshSceneInstance): boolean {

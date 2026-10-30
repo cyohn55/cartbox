@@ -38,6 +38,8 @@ import { INSTANCE_FLOATS } from "./scenePacking.js";
 /** Bytes of one source (first, count, eligible, then its local sphere) and of one draw's entry (see the WGSL's). */
 const SOURCE_BYTES = 32;
 const ENTRY_BYTES = 64;
+/** How far either side of a LOD switch, as a share of its distance, a copy crossfades between the levels (F6b). */
+export const CROSSFADE = 0.1;
 /** The most cascades the caster cull handles (the sun's, CASCADE_COUNT in cascades.ts). */
 export const MAX_CASTER_CASCADES = 4;
 /** One batch's `drawIndexedIndirect` arguments, in u32s. */
@@ -175,17 +177,30 @@ fn test(@builtin(global_invocation_id) id: vec3<u32>) {
   flags[i] = seen;
 }
 
-/** The level a copy's distance picks (as lod.ts's selectLodIndex, clamped to the chain), its distance in the mesh's units. */
-fn levelOf(e: Entry, i: u32) -> i32 {
+/**
+ * Whether a copy draws in this draw's level (x, 1 or 0) and its crossfade there
+ * (y; F6b): the level its distance picks (as lod.ts's selectLodIndex, clamped
+ * to the chain, its distance in the mesh's units), except within
+ * ${CROSSFADE * 100}% of a switch, where both levels draw it, dithered: the
+ * coarser coming in (y > 0) as the finer goes out (y < 0), each pixel once.
+ */
+fn levelKeep(e: Entry, i: u32) -> vec2<f32> {
   let m = modelOf(i);
   let d = length(m[3].xyz - cull.eye.xyz) / max(scaleOf(m), 1e-12);
   var k = 0u;
   for (var j = 0u; j < e.switches; j = j + 1u) {
-    var at = 0.0;
-    if (j < 4u) { at = e.d0[j]; } else { at = e.d1[j - 4u]; }
-    if (d >= at) { k = j + 1u; } else { break; }
+    let at = select(e.d1[max(j, 4u) - 4u], e.d0[min(j, 3u)], j < 4u);
+    let lo = at * ${1 - CROSSFADE};
+    let hi = at * ${1 + CROSSFADE};
+    if (d > lo && d < hi && j + 1u < e.levels) {
+      let t = clamp((d - lo) / (hi - lo), 1e-4, 1.0 - 1e-4);
+      if (e.level == i32(j)) { return vec2<f32>(1.0, -t); }
+      if (e.level == i32(j + 1u)) { return vec2<f32>(1.0, t); }
+      return vec2<f32>(0.0);
+    }
+    if (d >= at) { k = j + 1u; }
   }
-  return i32(min(k, e.levels - 1u));
+  return vec2<f32>(select(0.0, 1.0, i32(min(k, e.levels - 1u)) == e.level), 0.0);
 }
 
 var<workgroup> scan: array<u32, ${WORKGROUP}>;
@@ -203,9 +218,14 @@ fn compact(@builtin(workgroup_id) group: vec3<u32>, @builtin(local_invocation_id
   for (var start = 0u; start < e.count; start = start + ${WORKGROUP}u) {
     let j = start + local.x;
     var seen = 0u;
+    var fade = 0.0;
     if (j < e.count) {
       seen = flags[e.src + j];
-      if (seen == 1u && e.level >= 0 && levelOf(e, e.src + j) != e.level) { seen = 0u; }
+      if (seen == 1u && e.level >= 0) {
+        let keep = levelKeep(e, e.src + j);
+        if (keep.x == 0.0) { seen = 0u; }
+        fade = keep.y;
+      }
     }
     scan[local.x] = seen;
     workgroupBarrier();
@@ -222,6 +242,8 @@ fn compact(@builtin(workgroup_id) group: vec3<u32>, @builtin(local_invocation_id
         xf[to * RECORD + f] = xf[src * RECORD + f];
         xf[(to + total) * RECORD + f] = xf[(src + n) * RECORD + f];
       }
+      // Its crossfade (F6b) where the shader finds it: the model's first column's w (0 in an affine model).
+      if (e.level >= 0) { xf[to * RECORD + 35u] = fade; }
     }
     kept = kept + workgroupUniformLoad(&scan[${WORKGROUP - 1}u]);
   }
@@ -315,7 +337,15 @@ export function primitiveSphere(primitive: MeshPrimitive): readonly [number, num
   if (!(lo[0]! <= hi[0]!)) s = [0, 0, 0, 0, 0];
   else {
     let sway = 0;
-    if (primitive.sway) for (const v of primitive.sway) sway = Math.max(sway, v);
+    let flex = 0;
+    if (primitive.sway)
+      for (const v of primitive.sway) {
+        if (v >= 0) sway = Math.max(sway, v);
+        else flex = Math.max(flex, -v);
+      }
+    // A plant drawn a copy at a time (F6b) stores its flexibility, negated: the shader's trunk bend (at most a quarter
+    // of the height per unit of flex), branch sway (an eighth of the reach) and flutter, at up to twice its size.
+    if (flex > 0) sway = Math.max(sway, 2 * flex * (0.25 * hi[1]! + 0.13 * Math.max(Math.abs(lo[0]!), Math.abs(hi[0]!), Math.abs(lo[2]!), Math.abs(hi[2]!)) + 0.02));
     s = [(lo[0]! + hi[0]!) / 2, (lo[1]! + hi[1]!) / 2, (lo[2]! + hi[2]!) / 2, Math.hypot(hi[0]! - lo[0]!, hi[1]! - lo[1]!, hi[2]! - lo[2]!) / 2, sway];
   }
   spheres.set(primitive, s);
@@ -344,6 +374,7 @@ export interface CullBatch {
 
 /** The most switch distances a chain may have on the GPU. */
 export const MAX_LOD_SWITCHES = 8;
+
 
 /** The culling's buffers and pipelines on one device; {@link plan} each frame, then the rounds. */
 export class GpuCulling {

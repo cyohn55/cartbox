@@ -1326,11 +1326,43 @@ Everything else depends on this track. It contains no visible "feature", but its
       - a two-phase cluster cull (last frame's visible clusters first);
       - building on a worker at import;
       - clustered copies of skinned meshes.
-- [ ] **F6b. GPU foliage.**
+- [x] **F6b. GPU foliage.**
   - Instanced foliage culled per instance on the GPU with HZB, replacing the per-48 m merged block meshes.
   - Dithered LOD crossfade, and pivot-painter-style hierarchical wind (trunk, branch, leaf).
   - Octahedral impostors, replacing two crossed cards.
   - Translucency (F1d) on leaves and grass.
+  - **Done** on the `aaa` tier with GPU culling. Every other tier draws the merged blocks as before.
+    - **A copy at a time.** Each block keeps its copies' matrices (`FoliageBlock.matrices`). On the GPU path, a block within its cull distance is drawn as its copies: the layer's own mesh (`foliageInstanceMesh`) at each copy's matrix, made once per block. The instance cull (F0e) then tests each copy against the frustum and the Hi-Z pyramid. Shadows still draw the blocks.
+    - **Wind in the world** (`bendIn` in the shader). A copy's mesh stores its layer's flexibility, negated, as its sway, and the shader bends each vertex in the world:
+      - the trunk about its copy's root, by its height above it (`foliageSway`, as blocks bake it), in the phase of where it stands;
+      - each branch about the trunk, by how far out it reaches, in its own phase;
+      - a leaf's quick, small flutter.
+      - The pivots come from the copy's own frame (its root and up axis): the vertex format has no room to paint them.
+      - The bend goes back into the copy's space through its rotation and scale, so a turned copy leans with the wind, not with its turn. Last frame's bend (motion vectors) and shadow casters use the same function.
+    - **Impostors as a LOD level, crossfaded.**
+      - An impostor layer's copies carry a two-level chain: the mesh, then its impostor at the swap distance. The GPU picks each copy's level (F0e-2).
+      - Within 10% either side of a switch, a copy is drawn in both levels, the finer going out as the coarser comes in. The cull leaves each draw's fade in the copy's record (the model's first column's `w`, 0 in an affine model), and the fragment keeps its side of an interleaved-gradient dither. Each pixel is drawn by exactly one level.
+      - A LOD level with maps of its own (an atlas) now binds them (`LodChain.textures`). Before, a sibling level drew with its first level's maps.
+    - **Octahedral impostors** (`bakeOctahedralImpostor`).
+      - 8 × 8 views of the mesh, each taken straight on and unlit from the direction its cell stands for on an octahedral map of the sphere, fitting its bounding sphere, in one atlas.
+      - Drawn on a single quad: the shader turns it to the eye about the copy's centre (keeping the world's up) and shows the cell the eye's direction, in the copy's space, falls in.
+      - The overlay bakes a layer's impostor once, off the frame that first needs it. Until then, the crossed cards the layer stores serve.
+    - **Translucent leaves and grass.** A layer's cut-out materials get F1d's diffuse transmission (0.35) unless they set their own.
+    - *Tests:*
+      - `foliage.test.ts`:
+        - blocks keep every copy's matrix;
+        - the drawn mesh's sway is its flexibility, negated, and its cut-out blades transmit;
+        - on the AAA path, no block is drawn, only the copies in reach;
+      - `gpu-culling.test.ts`: 36 copies at their switch are each drawn in both levels, each covered pixel is one level's colour (between 35% and 65% each), and together they cover what the plain mesh covers;
+      - `gpu-foliage.test.ts` (Dawn):
+        - two copies, one turned a quarter, both lean with a wind along +x, and the turned one exactly as an unturned one in its place;
+        - the octahedral map's round trip, and a bake's atlas;
+        - an impostor of a red-and-blue mesh shows red from +x and blue from −x, at 70–130% of the mesh's own coverage.
+    - *Left:*
+      - painted pivots (pivot painter's own textures), which need a vertex format with room for them;
+      - blending the three nearest impostor views (one is shown, so a view can change visibly as the eye moves);
+      - baking impostors at authoring time, not on first sight;
+      - the impostor's own normals.
 - [ ] **F6c. Terrain at scale.**
   - Clipmap or CDLOD terrain from heightfields of 4K and up, displaced in the vertex shader with no CPU meshing.
   - A **runtime virtual texture** that caches the blended terrain layers, decals and splines into pages, so terrain shading costs one sample at any layer count.

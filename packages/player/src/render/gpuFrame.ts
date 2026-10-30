@@ -281,7 +281,9 @@ export function batchInstances<G extends { indexCount: number }>(
       const geometry = geometryOf(level)[index];
       if (!primitive || !geometry || geometry.indexCount === 0) return;
       if (alphaCode(primitive.material.alphaMode) !== batch.alpha) return;
-      batches.push({ ...batch, primitive, geometry, lod: k, source: batch });
+      // A level with maps of its own (an impostor's atlas, F6b) binds them; else its copies' own.
+      const own = chain.textures?.[k]?.[index];
+      batches.push({ ...batch, primitive, geometry, lod: k, source: batch, ...(own ? { textures: { ...batch.textures, base: own } } : {}) });
     });
   }
   // See-through copies after the opaque scene, farthest first.

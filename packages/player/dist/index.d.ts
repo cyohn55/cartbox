@@ -1,4 +1,4 @@
-import { MeshSceneInstance, MeshAsset, Mat4, ScenePropValue, PhysicsSpec, AnimatorSpec, AttachedComponent, SceneLighting, PhysicsWorldSettings, SceneTimeline, SceneLevel, NavMesh, Terrain, SceneStreaming, ParticleEffect, DecalDef, DecalMark, RagdollBox, DebrisDef, LodChain, SceneAudio, ComponentDef, StreamGroup, JointKind, JointSpec, EnvironmentLight, SceneLight, ActionRebind, Atmosphere, SkyMoon, DecodedTexture, SkySun, BakedCloudLayer, SunShafts, ColorFilter, AccessibilitySettings, EncodedImage, UiDocument, InputAction, StringTable, ReflectionProbe, ShadowInput, ToneMap, LocalShadows, ProjectedDecal, DecalTiles, Occluder, DynamicGi, SceneFog, SceneWind, MeshMaterial, EmitterSpec, RasterStyle, VolumeEffect, MeshPrimitive, HdrLightmap, LightmapLayout, ProbeVolume, OccluderSurface, ResolvedLayers, ResolvedExtensions, ResolvedRefraction, SurfaceEffect, AnimatorOp, NavGraph, AnimationCue, FaceRig, VisemeSpan, FaceClip } from '@cartbox/editor';
+import { MeshSceneInstance, MeshAsset, Mat4, ScenePropValue, PhysicsSpec, AnimatorSpec, LodChain, AttachedComponent, SceneLighting, PhysicsWorldSettings, SceneTimeline, SceneLevel, NavMesh, Terrain, SceneStreaming, ParticleEffect, DecalDef, DecalMark, RagdollBox, DebrisDef, SceneAudio, ComponentDef, StreamGroup, JointKind, JointSpec, EnvironmentLight, SceneLight, ActionRebind, Atmosphere, SkyMoon, DecodedTexture, SkySun, BakedCloudLayer, SunShafts, ColorFilter, AccessibilitySettings, EncodedImage, UiDocument, InputAction, StringTable, ReflectionProbe, ShadowInput, ToneMap, LocalShadows, ProjectedDecal, DecalTiles, Occluder, DynamicGi, SceneFog, SceneWind, MeshMaterial, EmitterSpec, RasterStyle, VolumeEffect, MeshPrimitive, HdrLightmap, LightmapLayout, ProbeVolume, OccluderSurface, ResolvedLayers, ResolvedExtensions, ResolvedRefraction, SurfaceEffect, AnimatorOp, NavGraph, AnimationCue, FaceRig, VisemeSpan, FaceClip } from '@cartbox/editor';
 
 /**
  * The runtime mesh scene: the cart's mesh sidecar resolved into placed instances
@@ -82,6 +82,17 @@ interface MeshInstance extends MeshSceneInstance {
         readonly swap?: {
             readonly distance: number;
             readonly far: boolean;
+        };
+        /**
+         * The block's copies, for drawing one at a time (F6b): the layer's mesh as
+         * the AAA tier draws it (foliageInstanceMesh), each copy's matrix (in the
+         * instance's space), and, for a layer with impostors, the chain from the
+         * full mesh to its cards at the swap distance.
+         */
+        readonly copies?: {
+            readonly mesh: MeshAsset;
+            readonly matrices: readonly Float32Array[];
+            readonly lod: LodChain | null;
         };
     };
     /** The components attached to this object (EP14), each with its field values; absent when none. */
@@ -6662,7 +6673,8 @@ declare function bakeProbeVolumeGpu(device: any, min: readonly [number, number, 
  *                                    (0 none, 1 skin, 2 eye, 3 hair, 4 mouth), yzw = its terms
  * 1104 char1      vec4<f32>    16   its other terms (a hair's dither and frame, a mouth's opening)
  * 1120 cull0      vec4<f32>    16   x = where a GPU-culled draw's copies start in the instance buffer (F0e;
- *                                    gpuCulling.ts), added to `instance_index`; 0 otherwise
+ *                                    gpuCulling.ts), added to `instance_index`; 0 otherwise;
+ *                                    y = an octahedral impostor's frames a side (F6b; 0: none), z = its half-size
  * ```
  *
  * 1136 bytes used, padded to a 1280-byte stride (a 256-byte multiple a dynamic
@@ -6937,6 +6949,11 @@ interface InstanceUniform {
     readonly receivesDecals?: boolean;
     /** The LOD level its copies draw (F10a's LOD view), or −1 (the default) without a chain. */
     readonly lodLevel?: number;
+    /** An octahedral impostor's frames a side and half-size (F6b; MeshMaterial.octahedral), or null/omitted. */
+    readonly octahedral?: {
+        readonly frames: number;
+        readonly radius: number;
+    } | null;
 }
 /**
  * A draw's triplanar repeat (0 = UV mapping) and height-blend sharpness (0 = an
@@ -8619,6 +8636,23 @@ declare class MeshOverlaySurface implements DisplaySurface {
     eyePosition(): readonly [number, number, number] | null;
     /** Foliage blocks by mesh (EP11): their cull distance and bounds. */
     private readonly foliage;
+    /** Whether foliage is drawn a copy at a time (F6b): on the AAA tier, which culls copies on the GPU. */
+    private get gpuFoliage();
+    /** Each block's copies as instances (F6b), made once a block, model and LOD chain. */
+    private readonly blockCopies;
+    /**
+     * Each impostor layer's chain with an octahedral impostor for its far level
+     * (F6b; bakeOctahedralImpostor), baked once, off the frame that first needs
+     * it; until it's ready, the crossed cards the layer stores serve.
+     */
+    private readonly octahedral;
+    private octahedralChain;
+    /**
+     * What an instance draws as on the GPU-culled path (F6b): itself, unless it is
+     * a foliage block, which is its copies while it is in reach (its full copies'
+     * block, the impostors taken by their LOD chain), and nothing otherwise.
+     */
+    private foliageCopies;
     /** Whether an instance is in reach of the eye: anything but a foliage block is; a block is within its cull distance. */
     private foliageInReach;
     /**

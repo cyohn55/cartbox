@@ -371,6 +371,14 @@ export interface MeshMaterial {
   /** The alpha below which a "mask" surface is dropped (default 0.5). */
   readonly alphaCutoff?: number;
   /**
+   * An octahedral impostor's atlas (AAA_FIDELITY_ROADMAP.md F6b): its base map
+   * holds `frames` × `frames` views of a mesh, laid out over an octahedron of
+   * directions; the AAA tier turns the quad it is on to the eye and shows the
+   * view from the eye's side. `radius` is the quad's half-size. Made at run time
+   * (impostor.ts), never stored.
+   */
+  readonly octahedral?: { readonly frames: number; readonly radius: number };
+  /**
    * Soft edges (EP6b): a blended or added surface fades out over this many
    * world units as it nears the opaque surface behind it, so smoke and glows
    * meet the floor and walls without a hard line. Absent or 0 is a hard edge.

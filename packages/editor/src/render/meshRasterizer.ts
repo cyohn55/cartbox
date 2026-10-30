@@ -1128,6 +1128,12 @@ export function renderMesh(mesh: MeshAsset, options: RenderMeshOptions): void {
 export interface LodChain {
   readonly meshes: readonly MeshAsset[];
   readonly distances: readonly number[];
+  /**
+   * A level's own base-colour maps, primitive by primitive, where they aren't
+   * the first level's (an impostor's atlas, F6b); a level without an entry
+   * draws with the textures its copies carry.
+   */
+  readonly textures?: readonly (readonly (DecodedTexture | null)[] | undefined)[];
 }
 
 export interface MeshSceneInstance {

@@ -840,7 +840,7 @@ struct VSOut {
   @location(4) eyeDepth: f32,
   @location(5) @interpolate(perspective, centroid) uv2: vec2<f32>,
   @location(6) bw: f32,
-  @location(7) objPos: vec3<f32>,${hdr ? "\n  // The vertex's MikkTSpace frame in world space (F1c), each unit at the vertex: its tangent (w = 0 without one) and normal.\n  @location(8) tangent: vec4<f32>,\n  @location(9) frameNormal: vec3<f32>," : ""}
+  @location(7) objPos: vec3<f32>,${hdr ? "\n  // The vertex's MikkTSpace frame in world space (F1c), each unit at the vertex: its tangent (w = 0 without one) and normal.\n  @location(8) tangent: vec4<f32>,\n  @location(9) frameNormal: vec3<f32>,\n  // Its copy's LOD crossfade (F6b; fadeHides), or 0.\n  @location(10) @interpolate(flat) fade: f32," : ""}
 };
 
 ${hdr
@@ -1435,7 +1435,68 @@ fn windOffsetIn(w: vec4<f32>, p: vec2<f32>, sway: f32) -> vec2<f32> {
   return w.xy * (sway * s * g);
 }
 fn windOffset(p: vec2<f32>, sway: f32) -> vec2<f32> { return windOffsetIn(u.wind0, p, sway); }
-@vertex
+${hdr ? `// A plant drawn a copy at a time (F6b; foliageInstanceMesh) stores its flexibility, negated, as its sway: it bends
+// in the world, by its height above its copy's root (foliageSway), with three motions about pivots taken from the
+// copy's own frame: the trunk about its root, a branch about the trunk by how far out it reaches (each in its own
+// phase), and a leaf's quick flutter. Anything else bends as it always has. The result is in the mesh's space.
+fn foliageSwayOf(h: f32, flex: f32) -> f32 {
+  if (flex <= 0.0 || h <= 0.0) { return 0.0; }
+  return flex * 0.25 * h * h / (h + 1.0);
+}
+fn bendIn(w: vec4<f32>, p: vec3<f32>, sway: f32, m: mat4x4<f32>) -> vec3<f32> {
+  if (sway >= 0.0) {
+    let b = windOffsetIn(w, p.xz, sway);
+    return vec3<f32>(b.x, 0.0, b.y);
+  }
+  if (w.x == 0.0 && w.y == 0.0) { return vec3<f32>(0.0); }
+  let flex = -sway;
+  let world = (m * vec4<f32>(p, 1.0)).xyz;
+  let root = m[3].xyz;
+  let trunk = windOffsetIn(w, root.xz, foliageSwayOf(world.y - root.y, flex));
+  let reach = length(world.xz - root.xz);
+  let branch = w.xy * (0.12 * flex * reach * sin(6.283185307179586 * 5.0 * w.z + dot(p, vec3<f32>(1.7, 0.9, 1.3))));
+  let leaf = 0.02 * flex * length(w.xy) * min(reach, 1.0) * sin(6.283185307179586 * 31.0 * w.z + dot(world, vec3<f32>(13.1, 7.3, 11.7)));
+  let wb = vec3<f32>(trunk.x + branch.x, leaf, trunk.y + branch.y);
+  // Into the copy's space: a placed copy's model is a rotation and a uniform scale.
+  return vec3<f32>(dot(m[0].xyz, wb), dot(m[1].xyz, wb), dot(m[2].xyz, wb)) / max(dot(m[0].xyz, m[0].xyz), 1e-12);
+}
+// A copy fading between LOD levels (F6b): the dither it keeps, by interleaved gradient noise. A fade above 0 keeps the
+// pixels under it (the level coming in), below 0 those at or over its size (the level going out): between them, each
+// pixel once.
+fn fadeHides(fade: f32, p: vec2<f32>) -> bool {
+  let d = fract(52.9829189 * fract(0.06711056 * p.x + 0.00583715 * p.y));
+  return select((d < -fade), (d >= fade), fade > 0.0);
+}
+// An octahedral impostor (F6b; bakeOctahedralImpostor): its quad, around the bake's centre, turned to face the eye
+// (keeping the world's up), showing the view taken from the eye's side of the copy: the cell of the octahedral map
+// (octahedralUv) its direction, in the copy's own space, falls in. Lit as a canopy: from above, leaning to the eye.
+struct Impostor { pos: vec3<f32>, uv: vec2<f32>, normal: vec3<f32> };
+fn impostorOf(position: vec3<f32>, uv: vec2<f32>, m: mat4x4<f32>) -> Impostor {
+  let r = u.cull0.z;
+  let n = u.cull0.y;
+  let offset = vec2<f32>((uv.x - 0.5) * 2.0 * r, (0.5 - uv.y) * 2.0 * r);
+  let centre = position - vec3<f32>(offset, 0.0);
+  let s2 = max(dot(m[0].xyz, m[0].xyz), 1e-12);
+  let c = (m * vec4<f32>(centre, 1.0)).xyz;
+  let v = u.fogCam.xyz - c;
+  let toEye = normalize(v);
+  var right = cross(vec3<f32>(0.0, 1.0, 0.0), toEye);
+  if (dot(right, right) < 1e-8) { right = vec3<f32>(1.0, 0.0, 0.0); }
+  right = normalize(right);
+  let up = cross(toEye, right);
+  let w = c + (right * offset.x + up * offset.y) * sqrt(s2) - m[3].xyz;
+  var out: Impostor;
+  out.pos = vec3<f32>(dot(m[0].xyz, w), dot(m[1].xyz, w), dot(m[2].xyz, w)) / s2;
+  // The eye's direction in the copy's space, on the octahedral map (+y its top).
+  let d = normalize(vec3<f32>(dot(m[0].xyz, v), dot(m[1].xyz, v), dot(m[2].xyz, v)));
+  var p = d.xz / (abs(d.x) + abs(d.y) + abs(d.z));
+  if (d.y < 0.0) { p = (vec2<f32>(1.0) - abs(p.yx)) * select(vec2<f32>(-1.0), vec2<f32>(1.0), p >= vec2<f32>(0.0)); }
+  let cell = clamp(floor((p * 0.5 + 0.5) * n), vec2<f32>(0.0), vec2<f32>(n - 1.0));
+  out.uv = (cell + uv) / n;
+  out.normal = normalize(vec3<f32>(0.0, 1.0, 0.0) + 0.4 * toEye);
+  return out;
+}
+` : ""}@vertex
 fn vs(
   @location(0) position: vec3<f32>,
   @location(1) normal: vec3<f32>,
@@ -1452,8 +1513,7 @@ fn vertexOf(position: vec3<f32>, normal: vec3<f32>, uv: vec2<f32>, uv2: vec2<f32
   var out: VSOut;
   let t = xf[u32(u.cull0.x) + instance];
   var pos = position;
-  let bend = windOffset(position.xz, sway);
-  pos = vec3<f32>(pos.x + bend.x, pos.y, pos.z + bend.y);
+${hdr ? "  pos = pos + bendIn(u.wind0, position, sway, t.model);\n  // Its LOD crossfade (F6b): the cull leaves it in the model's first column's w, 0 in an affine model.\n  out.fade = t.model[0].w;\n  // An octahedral impostor's quad, turned to the eye (F6b).\n  var imp: Impostor;\n  if (u.cull0.y > 0.5) {\n    imp = impostorOf(position, uv, t.model);\n    pos = imp.pos;\n  }" : "  let bend = windOffset(position.xz, sway);\n  pos = vec3<f32>(pos.x + bend.x, pos.y, pos.z + bend.y);"}
 ${g.vertex}  out.pos = t.mvp * vec4<f32>(pos, 1.0);
   out.normal = t.nrm * normal;
   out.uv = uv;
@@ -1466,6 +1526,11 @@ ${g.vertex}  out.pos = t.mvp * vec4<f32>(pos, 1.0);
 ${hdr ? `  // A tangent lies in the surface, so it moves with the model's own 3×3; a mirroring one flips the bitangent.
   let m3 = mat3x3<f32>(t.model[0].xyz, t.model[1].xyz, t.model[2].xyz);
   out.tangent = vec4<f32>(normalize(m3 * tangent.xyz + vec3<f32>(1e-12, 0.0, 0.0)), tangent.w * select(1.0, -1.0, determinant(m3) < 0.0));
+  if (u.cull0.y > 0.5) {
+    out.uv = imp.uv;
+    out.normal = imp.normal;
+    out.tangent = vec4<f32>(0.0);
+  }
   out.frameNormal = normalize(out.normal);
 ` : ""}  return out;
 }
@@ -1598,7 +1663,7 @@ ${hdr
 
 @fragment
 fn fs(in: VSOut) -> @location(0) vec4<f32> {
-${hdr ? "  shadowPixel = in.pos.xy;\n  // Overdraw (F10a): every fragment shaded counts one, added up in red.\n  if (frame.debug.x > 10.5 && frame.debug.x < 11.5) { return vec4<f32>(1.0, 0.0, 0.0, 0.0); }\n" : ""}  // The surface's screen derivatives, for the UV gradients parallax and
+${hdr ? "  // A copy fading between its LOD levels (F6b) leaves the other level's pixels.\n  if (in.fade != 0.0 && fadeHides(in.fade, in.pos.xy)) { discard; }\n  shadowPixel = in.pos.xy;\n  // Overdraw (F10a): every fragment shaded counts one, added up in red.\n  if (frame.debug.x > 10.5 && frame.debug.x < 11.5) { return vec4<f32>(1.0, 0.0, 0.0, 0.0); }\n" : ""}  // The surface's screen derivatives, for the UV gradients parallax and
   // anisotropy need (I4) — taken here, in uniform control flow.
   let dp1 = dpdx(in.worldPos);
   let dp2 = dpdy(in.worldPos);
@@ -2007,9 +2072,9 @@ ${hdr ? `// --- The sun's cascades (AAA_FIDELITY_ROADMAP.md F2a) ---
 struct CasterView { viewProj: mat4x4<f32>, base: vec4<u32> };
 @group(1) @binding(12) var<uniform> cascadeView: CasterView;
 fn casterClip(position: vec3<f32>, sway: f32, instance: u32) -> vec4<f32> {
-  let bend = windOffset(position.xz, sway);
   let at = select(instance, cascadeView.base.x + u32(u.cull0.x) + instance, cascadeView.base.y != 0u);
-  return cascadeView.viewProj * xf[at].model * vec4<f32>(position.x + bend.x, position.y, position.z + bend.y, 1.0);
+  let model = xf[at].model;
+  return cascadeView.viewProj * model * vec4<f32>(position + bendIn(u.wind0, position, sway, model), 1.0);
 }
 @vertex
 fn vs_shadow(@location(0) position: vec3<f32>, @location(5) sway: f32, @builtin(instance_index) instance: u32) -> @builtin(position) vec4<f32> {
@@ -2059,7 +2124,7 @@ struct PrepassIn {
   @location(6) bw: f32,
   @location(7) objPos: vec3<f32>,
   @location(8) clipNow: vec4<f32>,
-  @location(9) clipThen: vec4<f32>,${hdr ? "\n  @location(10) tangent: vec4<f32>,\n  @location(11) frameNormal: vec3<f32>," : ""}
+  @location(9) clipThen: vec4<f32>,${hdr ? "\n  @location(10) tangent: vec4<f32>,\n  @location(11) frameNormal: vec3<f32>,\n  @location(12) @interpolate(flat) fade: f32," : ""}
 };
 @vertex
 fn vs_prepass(
@@ -2084,10 +2149,10 @@ fn vs_prepass(
   out.uv2 = v.uv2;
   out.bw = v.bw;
   out.objPos = v.objPos;
-${hdr ? "  out.tangent = v.tangent;\n  out.frameNormal = v.frameNormal;\n" : ""}  let m = xf[u32(u.motion0.x) + u32(u.cull0.x) + instance];
-  let then = windOffsetIn(u.wind1, before.xz, sway);
+${hdr ? "  out.tangent = v.tangent;\n  out.frameNormal = v.frameNormal;\n  out.fade = v.fade;\n" : ""}  let m = xf[u32(u.motion0.x) + u32(u.cull0.x) + instance];
+${hdr ? "  // Last frame's bend: its wind, about where the copy stood (the motion record's model is last frame's).\n  let thenPos = before + bendIn(u.wind1, before, sway, m.model);" : "  let then = windOffsetIn(u.wind1, before.xz, sway);\n  let thenPos = vec3<f32>(before.x + then.x, before.y, before.z + then.y);"}
   out.clipNow = m.mvp * vec4<f32>(v.objPos, 1.0);
-  out.clipThen = m.lightMvp * vec4<f32>(vec3<f32>(before.x + then.x, before.y, before.z + then.y)${g.vertex ? " + wpoObj" : ""}, 1.0);
+  out.clipThen = m.lightMvp * vec4<f32>(thenPos${g.vertex ? " + wpoObj" : ""}, 1.0);
   return out;
 }
 struct PrepassTargets {
@@ -2103,7 +2168,7 @@ struct PrepassTargets {
 // in UV units (x right, y down), so a pixel's last position is uv − velocity.
 @fragment
 fn fs_prepass(in: PrepassIn) -> PrepassTargets {
-  let dp1 = dpdx(in.worldPos);
+${hdr ? "  if (in.fade != 0.0 && fadeHides(in.fade, in.pos.xy)) { discard; }\n" : ""}  let dp1 = dpdx(in.worldPos);
   let dp2 = dpdy(in.worldPos);
   let duv1 = dpdx(in.uv);
   let duv2 = dpdy(in.uv);
@@ -3980,6 +4045,7 @@ export class WebgpuSceneRenderer implements SceneRenderer {
         windBefore: entry.primitive.sway ? windThen : null,
         motionBase: prepass ? instanceCount : 0,
         lodLevel: entry.lod ?? -1,
+        octahedral: entry.primitive.material.octahedral ?? null,
         lightChannels: entry.channels,
         ...(this.hdr ? { probeCount: this.capturedProbes, receivesDecals: entry.alpha < 2 && !entry.refract } : {}),
       };

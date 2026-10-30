@@ -131,7 +131,8 @@ import { AREA_KIND } from "./ltc.js";
  *                                    (0 none, 1 skin, 2 eye, 3 hair, 4 mouth), yzw = its terms
  * 1104 char1      vec4<f32>    16   its other terms (a hair's dither and frame, a mouth's opening)
  * 1120 cull0      vec4<f32>    16   x = where a GPU-culled draw's copies start in the instance buffer (F0e;
- *                                    gpuCulling.ts), added to `instance_index`; 0 otherwise
+ *                                    gpuCulling.ts), added to `instance_index`; 0 otherwise;
+ *                                    y = an octahedral impostor's frames a side (F6b; 0: none), z = its half-size
  * ```
  *
  * 1136 bytes used, padded to a 1280-byte stride (a 256-byte multiple a dynamic
@@ -596,6 +597,8 @@ export interface InstanceUniform {
   readonly receivesDecals?: boolean;
   /** The LOD level its copies draw (F10a's LOD view), or −1 (the default) without a chain. */
   readonly lodLevel?: number;
+  /** An octahedral impostor's frames a side and half-size (F6b; MeshMaterial.octahedral), or null/omitted. */
+  readonly octahedral?: { readonly frames: number; readonly radius: number } | null;
 }
 
 /**
@@ -904,6 +907,8 @@ export function writeInstanceUniform(target: Float32Array, index: number, unifor
   target[base + OFFSET_MOTION0 + 2] = uniform.receivesDecals ? 1 : 0;
   target[base + OFFSET_MOTION0 + 3] = uniform.lodLevel ?? -1;
   target[base + OFFSET_CULL0] = uniform.instanceBase ?? 0;
+  target[base + OFFSET_CULL0 + 1] = uniform.octahedral?.frames ?? 0;
+  target[base + OFFSET_CULL0 + 2] = uniform.octahedral?.radius ?? 0;
 }
 
 /**

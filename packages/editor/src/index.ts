@@ -509,6 +509,8 @@ export {
   eraseFoliage,
   fillCopies,
   foliageBlocks,
+  foliageInstanceMesh,
+  FOLIAGE_TRANSMISSION,
   foliageRandom,
   groundAt,
   layerCopies,
@@ -809,7 +811,7 @@ export {
   resolveLodMesh,
   applyLods,
 } from "./render/lod";
-export { bakeImpostor, type BakedImpostor } from "./render/impostor";
+export { bakeImpostor, bakeOctahedralImpostor, octahedralDirection, octahedralUv, type BakedImpostor } from "./render/impostor";
 export { KIT_PIECES, PARAMETRIC_KINDS, PARAMETRIC_SHAPES, buildKitPiece, buildParametric, defaultParametric, kitMaterial, readParametric, rebuildParametric, type KitPiece, type KitStyle, type ParametricKind, type ParametricParam, type ParametricShape } from "./model/shapeGenerators";
 export { boxSolid, brushSolid, csg, cylinderSolid, wedgeSolid, type BrushShape, type CsgMatrix, type CsgOp } from "./model/csg";
 export {

@@ -7797,6 +7797,7 @@ import {
   decodeLods,
   applyMeshVariant,
   foliageBlocks,
+  foliageInstanceMesh,
   layerCopies,
   readSplines,
   readFoliage,
@@ -8049,6 +8050,8 @@ function parseMeshScene(raw) {
         cards = text2 ? load(text2) : null;
       }
       const swap = cards ? read.layer.impostor.distance : 0;
+      const single = foliageInstanceMesh(read.layer, mesh);
+      const chain = cards ? { meshes: [single, foliageInstanceMesh({ wind: 0 }, cards)], distances: [swap] } : null;
       if (cards) {
         foliageBlocks(t, { ...read.layer, wind: 0 }, cards, copies).forEach((block, k) => {
           instances.push({
@@ -8080,7 +8083,7 @@ function parseMeshScene(raw) {
           terrain: true,
           // On a terrain that casts, its foliage casts too (boulders shade the snow).
           ...t.castShadows ? { casts: true } : {},
-          foliage: { cull: read.layer.cull, center: block.center, radius: block.radius, ...cards ? { swap: { distance: swap, far: false } } : {} }
+          foliage: { cull: read.layer.cull, center: block.center, radius: block.radius, ...cards ? { swap: { distance: swap, far: false } } : {}, copies: { mesh: single, matrices: block.matrices, lod: chain } }
         });
       });
     }
@@ -11591,6 +11594,7 @@ import {
   tintMaskTexture,
   composeModelMatrix as composeModelMatrix4,
   multiplyMat4 as multiplyMat43,
+  bakeOctahedralImpostor,
   sceneLightingEnvironment,
   sceneLightingKeyDirection,
   vistaBounds,
@@ -12377,6 +12381,14 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
     this.lastView = null;
     /** Foliage blocks by mesh (EP11): their cull distance and bounds. */
     this.foliage = /* @__PURE__ */ new Map();
+    /** Each block's copies as instances (F6b), made once a block, model and LOD chain. */
+    this.blockCopies = /* @__PURE__ */ new WeakMap();
+    /**
+     * Each impostor layer's chain with an octahedral impostor for its far level
+     * (F6b; bakeOctahedralImpostor), baked once, off the frame that first needs
+     * it; until it's ready, the crossed cards the layer stores serve.
+     */
+    this.octahedral = /* @__PURE__ */ new WeakMap();
     /** Each terrain block's world bounds, measured on first use. */
     this.blockBounds = /* @__PURE__ */ new Map();
     /** The still casters' key and this frame's movers, from the last castersNow (F2d-2). */
@@ -13056,7 +13068,7 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
       profiler.add("sky", now - mark);
       mark = now;
     }
-    let drawn = this.foliage.size > 0 ? instances.filter((i) => this.foliageInReach(i)) : instances;
+    let drawn = this.foliage.size === 0 ? instances : this.gpuFoliage ? instances.flatMap((i) => this.foliageCopies(i)) : instances.filter((i) => this.foliageInReach(i));
     let frontDrawn = front;
     if (this.trails) {
       const placed = this.placements();
@@ -13720,6 +13732,46 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
   /** Where the camera was last drawn from (null before the first frame). */
   eyePosition() {
     return this.eye;
+  }
+  /** Whether foliage is drawn a copy at a time (F6b): on the AAA tier, which culls copies on the GPU. */
+  get gpuFoliage() {
+    return this.options.prepass === true && this.renderer.sunCascades === true;
+  }
+  octahedralChain(chain, near) {
+    const known = this.octahedral.get(chain);
+    if (known && known !== "baking") return known;
+    if (!known) {
+      this.octahedral.set(chain, "baking");
+      setTimeout(() => {
+        const baked = bakeOctahedralImpostor(chain.meshes[0], near.textures ?? []);
+        this.octahedral.set(chain, baked ? { meshes: [chain.meshes[0], baked.mesh], distances: chain.distances, textures: [void 0, [baked.atlas]] } : chain);
+      }, 0);
+    }
+    return chain;
+  }
+  /**
+   * What an instance draws as on the GPU-culled path (F6b): itself, unless it is
+   * a foliage block, which is its copies while it is in reach (its full copies'
+   * block, the impostors taken by their LOD chain), and nothing otherwise.
+   */
+  foliageCopies(instance) {
+    const f3 = this.foliage.get(instance.mesh);
+    if (!f3) return [instance];
+    if (!f3.copies) return this.foliageInReach(instance) ? [instance] : [];
+    if (f3.swap?.far || !this.eye) return [];
+    const m = instance.model;
+    const [x, y, z] = f3.center;
+    const d = Math.hypot(m[0] * x + m[4] * y + m[8] * z + m[12] - this.eye[0], m[1] * x + m[5] * y + m[9] * z + m[13] - this.eye[1], m[2] * x + m[6] * y + m[10] * z + m[14] - this.eye[2]);
+    if (d - f3.radius >= f3.cull * this.quality.terrainDetail) return [];
+    const lod = f3.copies.lod ? this.octahedralChain(f3.copies.lod, instance) : null;
+    let made = this.blockCopies.get(instance.mesh);
+    if (!made || made.model !== instance.model || made.lod !== lod) {
+      const { mesh, matrices } = f3.copies;
+      const copies = matrices.map((c) => ({ ...instance, mesh, model: multiplyMat43(instance.model, c), ...lod ? { lod } : {} }));
+      made = { model: instance.model, lod, copies };
+      this.blockCopies.set(instance.mesh, made);
+    }
+    return made.copies;
   }
   /** Whether an instance is in reach of the eye: anything but a foliage block is; a block is within its cull distance. */
   foliageInReach(instance) {
@@ -15580,6 +15632,8 @@ function writeInstanceUniform(target, index, uniform) {
   target[base + OFFSET_MOTION0 + 2] = uniform.receivesDecals ? 1 : 0;
   target[base + OFFSET_MOTION0 + 3] = uniform.lodLevel ?? -1;
   target[base + OFFSET_CULL0] = uniform.instanceBase ?? 0;
+  target[base + OFFSET_CULL0 + 1] = uniform.octahedral?.frames ?? 0;
+  target[base + OFFSET_CULL0 + 2] = uniform.octahedral?.radius ?? 0;
 }
 var FRAME_UNIFORM_RANGES = [
   [OFFSET_LIGHT, 4],
@@ -15821,7 +15875,8 @@ function batchInstances(instances, geometryOf, eye = [0, 0, 0], lodSiblings = nu
       const geometry = geometryOf(level)[index];
       if (!primitive || !geometry || geometry.indexCount === 0) return;
       if (alphaCode(primitive.material.alphaMode) !== batch.alpha) return;
-      batches.push({ ...batch, primitive, geometry, lod: k, source: batch });
+      const own = chain.textures?.[k]?.[index];
+      batches.push({ ...batch, primitive, geometry, lod: k, source: batch, ...own ? { textures: { ...batch.textures, base: own } } : {} });
     });
   }
   seeThrough.sort((a, b) => b.distance - a.distance);
@@ -21102,6 +21157,7 @@ fn fs(in: Out) {
 // src/render/gpuCulling.ts
 var SOURCE_BYTES = 32;
 var ENTRY_BYTES = 64;
+var CROSSFADE = 0.1;
 var MAX_CASTER_CASCADES = 4;
 var INDIRECT_WORDS = 5;
 var UNIFORM_BYTES = 6 * 16 + 64 + 64;
@@ -21235,17 +21291,30 @@ fn test(@builtin(global_invocation_id) id: vec3<u32>) {
   flags[i] = seen;
 }
 
-/** The level a copy's distance picks (as lod.ts's selectLodIndex, clamped to the chain), its distance in the mesh's units. */
-fn levelOf(e: Entry, i: u32) -> i32 {
+/**
+ * Whether a copy draws in this draw's level (x, 1 or 0) and its crossfade there
+ * (y; F6b): the level its distance picks (as lod.ts's selectLodIndex, clamped
+ * to the chain, its distance in the mesh's units), except within
+ * ${CROSSFADE * 100}% of a switch, where both levels draw it, dithered: the
+ * coarser coming in (y > 0) as the finer goes out (y < 0), each pixel once.
+ */
+fn levelKeep(e: Entry, i: u32) -> vec2<f32> {
   let m = modelOf(i);
   let d = length(m[3].xyz - cull.eye.xyz) / max(scaleOf(m), 1e-12);
   var k = 0u;
   for (var j = 0u; j < e.switches; j = j + 1u) {
-    var at = 0.0;
-    if (j < 4u) { at = e.d0[j]; } else { at = e.d1[j - 4u]; }
-    if (d >= at) { k = j + 1u; } else { break; }
+    let at = select(e.d1[max(j, 4u) - 4u], e.d0[min(j, 3u)], j < 4u);
+    let lo = at * ${1 - CROSSFADE};
+    let hi = at * ${1 + CROSSFADE};
+    if (d > lo && d < hi && j + 1u < e.levels) {
+      let t = clamp((d - lo) / (hi - lo), 1e-4, 1.0 - 1e-4);
+      if (e.level == i32(j)) { return vec2<f32>(1.0, -t); }
+      if (e.level == i32(j + 1u)) { return vec2<f32>(1.0, t); }
+      return vec2<f32>(0.0);
+    }
+    if (d >= at) { k = j + 1u; }
   }
-  return i32(min(k, e.levels - 1u));
+  return vec2<f32>(select(0.0, 1.0, i32(min(k, e.levels - 1u)) == e.level), 0.0);
 }
 
 var<workgroup> scan: array<u32, ${WORKGROUP}>;
@@ -21263,9 +21332,14 @@ fn compact(@builtin(workgroup_id) group: vec3<u32>, @builtin(local_invocation_id
   for (var start = 0u; start < e.count; start = start + ${WORKGROUP}u) {
     let j = start + local.x;
     var seen = 0u;
+    var fade = 0.0;
     if (j < e.count) {
       seen = flags[e.src + j];
-      if (seen == 1u && e.level >= 0 && levelOf(e, e.src + j) != e.level) { seen = 0u; }
+      if (seen == 1u && e.level >= 0) {
+        let keep = levelKeep(e, e.src + j);
+        if (keep.x == 0.0) { seen = 0u; }
+        fade = keep.y;
+      }
     }
     scan[local.x] = seen;
     workgroupBarrier();
@@ -21282,6 +21356,8 @@ fn compact(@builtin(workgroup_id) group: vec3<u32>, @builtin(local_invocation_id
         xf[to * RECORD + f] = xf[src * RECORD + f];
         xf[(to + total) * RECORD + f] = xf[(src + n) * RECORD + f];
       }
+      // Its crossfade (F6b) where the shader finds it: the model's first column's w (0 in an affine model).
+      if (e.level >= 0) { xf[to * RECORD + 35u] = fade; }
     }
     kept = kept + workgroupUniformLoad(&scan[${WORKGROUP - 1}u]);
   }
@@ -21375,7 +21451,13 @@ function primitiveSphere(primitive) {
   if (!(lo[0] <= hi[0])) s = [0, 0, 0, 0, 0];
   else {
     let sway2 = 0;
-    if (primitive.sway) for (const v of primitive.sway) sway2 = Math.max(sway2, v);
+    let flex = 0;
+    if (primitive.sway)
+      for (const v of primitive.sway) {
+        if (v >= 0) sway2 = Math.max(sway2, v);
+        else flex = Math.max(flex, -v);
+      }
+    if (flex > 0) sway2 = Math.max(sway2, 2 * flex * (0.25 * hi[1] + 0.13 * Math.max(Math.abs(lo[0]), Math.abs(hi[0]), Math.abs(lo[2]), Math.abs(hi[2])) + 0.02));
     s = [(lo[0] + hi[0]) / 2, (lo[1] + hi[1]) / 2, (lo[2] + hi[2]) / 2, Math.hypot(hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]) / 2, sway2];
   }
   spheres.set(primitive, s);
@@ -28861,7 +28943,7 @@ struct VSOut {
   @location(4) eyeDepth: f32,
   @location(5) @interpolate(perspective, centroid) uv2: vec2<f32>,
   @location(6) bw: f32,
-  @location(7) objPos: vec3<f32>,${hdr ? "\n  // The vertex's MikkTSpace frame in world space (F1c), each unit at the vertex: its tangent (w = 0 without one) and normal.\n  @location(8) tangent: vec4<f32>,\n  @location(9) frameNormal: vec3<f32>," : ""}
+  @location(7) objPos: vec3<f32>,${hdr ? "\n  // The vertex's MikkTSpace frame in world space (F1c), each unit at the vertex: its tangent (w = 0 without one) and normal.\n  @location(8) tangent: vec4<f32>,\n  @location(9) frameNormal: vec3<f32>,\n  // Its copy's LOD crossfade (F6b; fadeHides), or 0.\n  @location(10) @interpolate(flat) fade: f32," : ""}
 };
 
 ${hdr ? `// The sun's shadow on the linear-light renderer: its GPU cascades (F2a), or none.
@@ -29451,7 +29533,68 @@ fn windOffsetIn(w: vec4<f32>, p: vec2<f32>, sway: f32) -> vec2<f32> {
   return w.xy * (sway * s * g);
 }
 fn windOffset(p: vec2<f32>, sway: f32) -> vec2<f32> { return windOffsetIn(u.wind0, p, sway); }
-@vertex
+${hdr ? `// A plant drawn a copy at a time (F6b; foliageInstanceMesh) stores its flexibility, negated, as its sway: it bends
+// in the world, by its height above its copy's root (foliageSway), with three motions about pivots taken from the
+// copy's own frame: the trunk about its root, a branch about the trunk by how far out it reaches (each in its own
+// phase), and a leaf's quick flutter. Anything else bends as it always has. The result is in the mesh's space.
+fn foliageSwayOf(h: f32, flex: f32) -> f32 {
+  if (flex <= 0.0 || h <= 0.0) { return 0.0; }
+  return flex * 0.25 * h * h / (h + 1.0);
+}
+fn bendIn(w: vec4<f32>, p: vec3<f32>, sway: f32, m: mat4x4<f32>) -> vec3<f32> {
+  if (sway >= 0.0) {
+    let b = windOffsetIn(w, p.xz, sway);
+    return vec3<f32>(b.x, 0.0, b.y);
+  }
+  if (w.x == 0.0 && w.y == 0.0) { return vec3<f32>(0.0); }
+  let flex = -sway;
+  let world = (m * vec4<f32>(p, 1.0)).xyz;
+  let root = m[3].xyz;
+  let trunk = windOffsetIn(w, root.xz, foliageSwayOf(world.y - root.y, flex));
+  let reach = length(world.xz - root.xz);
+  let branch = w.xy * (0.12 * flex * reach * sin(6.283185307179586 * 5.0 * w.z + dot(p, vec3<f32>(1.7, 0.9, 1.3))));
+  let leaf = 0.02 * flex * length(w.xy) * min(reach, 1.0) * sin(6.283185307179586 * 31.0 * w.z + dot(world, vec3<f32>(13.1, 7.3, 11.7)));
+  let wb = vec3<f32>(trunk.x + branch.x, leaf, trunk.y + branch.y);
+  // Into the copy's space: a placed copy's model is a rotation and a uniform scale.
+  return vec3<f32>(dot(m[0].xyz, wb), dot(m[1].xyz, wb), dot(m[2].xyz, wb)) / max(dot(m[0].xyz, m[0].xyz), 1e-12);
+}
+// A copy fading between LOD levels (F6b): the dither it keeps, by interleaved gradient noise. A fade above 0 keeps the
+// pixels under it (the level coming in), below 0 those at or over its size (the level going out): between them, each
+// pixel once.
+fn fadeHides(fade: f32, p: vec2<f32>) -> bool {
+  let d = fract(52.9829189 * fract(0.06711056 * p.x + 0.00583715 * p.y));
+  return select((d < -fade), (d >= fade), fade > 0.0);
+}
+// An octahedral impostor (F6b; bakeOctahedralImpostor): its quad, around the bake's centre, turned to face the eye
+// (keeping the world's up), showing the view taken from the eye's side of the copy: the cell of the octahedral map
+// (octahedralUv) its direction, in the copy's own space, falls in. Lit as a canopy: from above, leaning to the eye.
+struct Impostor { pos: vec3<f32>, uv: vec2<f32>, normal: vec3<f32> };
+fn impostorOf(position: vec3<f32>, uv: vec2<f32>, m: mat4x4<f32>) -> Impostor {
+  let r = u.cull0.z;
+  let n = u.cull0.y;
+  let offset = vec2<f32>((uv.x - 0.5) * 2.0 * r, (0.5 - uv.y) * 2.0 * r);
+  let centre = position - vec3<f32>(offset, 0.0);
+  let s2 = max(dot(m[0].xyz, m[0].xyz), 1e-12);
+  let c = (m * vec4<f32>(centre, 1.0)).xyz;
+  let v = u.fogCam.xyz - c;
+  let toEye = normalize(v);
+  var right = cross(vec3<f32>(0.0, 1.0, 0.0), toEye);
+  if (dot(right, right) < 1e-8) { right = vec3<f32>(1.0, 0.0, 0.0); }
+  right = normalize(right);
+  let up = cross(toEye, right);
+  let w = c + (right * offset.x + up * offset.y) * sqrt(s2) - m[3].xyz;
+  var out: Impostor;
+  out.pos = vec3<f32>(dot(m[0].xyz, w), dot(m[1].xyz, w), dot(m[2].xyz, w)) / s2;
+  // The eye's direction in the copy's space, on the octahedral map (+y its top).
+  let d = normalize(vec3<f32>(dot(m[0].xyz, v), dot(m[1].xyz, v), dot(m[2].xyz, v)));
+  var p = d.xz / (abs(d.x) + abs(d.y) + abs(d.z));
+  if (d.y < 0.0) { p = (vec2<f32>(1.0) - abs(p.yx)) * select(vec2<f32>(-1.0), vec2<f32>(1.0), p >= vec2<f32>(0.0)); }
+  let cell = clamp(floor((p * 0.5 + 0.5) * n), vec2<f32>(0.0), vec2<f32>(n - 1.0));
+  out.uv = (cell + uv) / n;
+  out.normal = normalize(vec3<f32>(0.0, 1.0, 0.0) + 0.4 * toEye);
+  return out;
+}
+` : ""}@vertex
 fn vs(
   @location(0) position: vec3<f32>,
   @location(1) normal: vec3<f32>,
@@ -29468,8 +29611,7 @@ fn vertexOf(position: vec3<f32>, normal: vec3<f32>, uv: vec2<f32>, uv2: vec2<f32
   var out: VSOut;
   let t = xf[u32(u.cull0.x) + instance];
   var pos = position;
-  let bend = windOffset(position.xz, sway);
-  pos = vec3<f32>(pos.x + bend.x, pos.y, pos.z + bend.y);
+${hdr ? "  pos = pos + bendIn(u.wind0, position, sway, t.model);\n  // Its LOD crossfade (F6b): the cull leaves it in the model's first column's w, 0 in an affine model.\n  out.fade = t.model[0].w;\n  // An octahedral impostor's quad, turned to the eye (F6b).\n  var imp: Impostor;\n  if (u.cull0.y > 0.5) {\n    imp = impostorOf(position, uv, t.model);\n    pos = imp.pos;\n  }" : "  let bend = windOffset(position.xz, sway);\n  pos = vec3<f32>(pos.x + bend.x, pos.y, pos.z + bend.y);"}
 ${g.vertex}  out.pos = t.mvp * vec4<f32>(pos, 1.0);
   out.normal = t.nrm * normal;
   out.uv = uv;
@@ -29482,6 +29624,11 @@ ${g.vertex}  out.pos = t.mvp * vec4<f32>(pos, 1.0);
 ${hdr ? `  // A tangent lies in the surface, so it moves with the model's own 3\xD73; a mirroring one flips the bitangent.
   let m3 = mat3x3<f32>(t.model[0].xyz, t.model[1].xyz, t.model[2].xyz);
   out.tangent = vec4<f32>(normalize(m3 * tangent.xyz + vec3<f32>(1e-12, 0.0, 0.0)), tangent.w * select(1.0, -1.0, determinant(m3) < 0.0));
+  if (u.cull0.y > 0.5) {
+    out.uv = imp.uv;
+    out.normal = imp.normal;
+    out.tangent = vec4<f32>(0.0);
+  }
   out.frameNormal = normalize(out.normal);
 ` : ""}  return out;
 }
@@ -29612,7 +29759,7 @@ ${hdr ? `  // A tint authored for the display (F11a): linear light mixes it as t
 
 @fragment
 fn fs(in: VSOut) -> @location(0) vec4<f32> {
-${hdr ? "  shadowPixel = in.pos.xy;\n  // Overdraw (F10a): every fragment shaded counts one, added up in red.\n  if (frame.debug.x > 10.5 && frame.debug.x < 11.5) { return vec4<f32>(1.0, 0.0, 0.0, 0.0); }\n" : ""}  // The surface's screen derivatives, for the UV gradients parallax and
+${hdr ? "  // A copy fading between its LOD levels (F6b) leaves the other level's pixels.\n  if (in.fade != 0.0 && fadeHides(in.fade, in.pos.xy)) { discard; }\n  shadowPixel = in.pos.xy;\n  // Overdraw (F10a): every fragment shaded counts one, added up in red.\n  if (frame.debug.x > 10.5 && frame.debug.x < 11.5) { return vec4<f32>(1.0, 0.0, 0.0, 0.0); }\n" : ""}  // The surface's screen derivatives, for the UV gradients parallax and
   // anisotropy need (I4) \u2014 taken here, in uniform control flow.
   let dp1 = dpdx(in.worldPos);
   let dp2 = dpdy(in.worldPos);
@@ -30014,9 +30161,9 @@ ${hdr ? `// --- The sun's cascades (AAA_FIDELITY_ROADMAP.md F2a) ---
 struct CasterView { viewProj: mat4x4<f32>, base: vec4<u32> };
 @group(1) @binding(12) var<uniform> cascadeView: CasterView;
 fn casterClip(position: vec3<f32>, sway: f32, instance: u32) -> vec4<f32> {
-  let bend = windOffset(position.xz, sway);
   let at = select(instance, cascadeView.base.x + u32(u.cull0.x) + instance, cascadeView.base.y != 0u);
-  return cascadeView.viewProj * xf[at].model * vec4<f32>(position.x + bend.x, position.y, position.z + bend.y, 1.0);
+  let model = xf[at].model;
+  return cascadeView.viewProj * model * vec4<f32>(position + bendIn(u.wind0, position, sway, model), 1.0);
 }
 @vertex
 fn vs_shadow(@location(0) position: vec3<f32>, @location(5) sway: f32, @builtin(instance_index) instance: u32) -> @builtin(position) vec4<f32> {
@@ -30066,7 +30213,7 @@ struct PrepassIn {
   @location(6) bw: f32,
   @location(7) objPos: vec3<f32>,
   @location(8) clipNow: vec4<f32>,
-  @location(9) clipThen: vec4<f32>,${hdr ? "\n  @location(10) tangent: vec4<f32>,\n  @location(11) frameNormal: vec3<f32>," : ""}
+  @location(9) clipThen: vec4<f32>,${hdr ? "\n  @location(10) tangent: vec4<f32>,\n  @location(11) frameNormal: vec3<f32>,\n  @location(12) @interpolate(flat) fade: f32," : ""}
 };
 @vertex
 fn vs_prepass(
@@ -30091,10 +30238,10 @@ fn vs_prepass(
   out.uv2 = v.uv2;
   out.bw = v.bw;
   out.objPos = v.objPos;
-${hdr ? "  out.tangent = v.tangent;\n  out.frameNormal = v.frameNormal;\n" : ""}  let m = xf[u32(u.motion0.x) + u32(u.cull0.x) + instance];
-  let then = windOffsetIn(u.wind1, before.xz, sway);
+${hdr ? "  out.tangent = v.tangent;\n  out.frameNormal = v.frameNormal;\n  out.fade = v.fade;\n" : ""}  let m = xf[u32(u.motion0.x) + u32(u.cull0.x) + instance];
+${hdr ? "  // Last frame's bend: its wind, about where the copy stood (the motion record's model is last frame's).\n  let thenPos = before + bendIn(u.wind1, before, sway, m.model);" : "  let then = windOffsetIn(u.wind1, before.xz, sway);\n  let thenPos = vec3<f32>(before.x + then.x, before.y, before.z + then.y);"}
   out.clipNow = m.mvp * vec4<f32>(v.objPos, 1.0);
-  out.clipThen = m.lightMvp * vec4<f32>(vec3<f32>(before.x + then.x, before.y, before.z + then.y)${g.vertex ? " + wpoObj" : ""}, 1.0);
+  out.clipThen = m.lightMvp * vec4<f32>(thenPos${g.vertex ? " + wpoObj" : ""}, 1.0);
   return out;
 }
 struct PrepassTargets {
@@ -30110,7 +30257,7 @@ struct PrepassTargets {
 // in UV units (x right, y down), so a pixel's last position is uv \u2212 velocity.
 @fragment
 fn fs_prepass(in: PrepassIn) -> PrepassTargets {
-  let dp1 = dpdx(in.worldPos);
+${hdr ? "  if (in.fade != 0.0 && fadeHides(in.fade, in.pos.xy)) { discard; }\n" : ""}  let dp1 = dpdx(in.worldPos);
   let dp2 = dpdy(in.worldPos);
   let duv1 = dpdx(in.uv);
   let duv2 = dpdy(in.uv);
@@ -31727,6 +31874,7 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
         windBefore: entry.primitive.sway ? windThen : null,
         motionBase: prepass ? instanceCount : 0,
         lodLevel: entry.lod ?? -1,
+        octahedral: entry.primitive.material.octahedral ?? null,
         lightChannels: entry.channels,
         ...this.hdr ? { probeCount: this.capturedProbes, receivesDecals: entry.alpha < 2 && !entry.refract } : {}
       };

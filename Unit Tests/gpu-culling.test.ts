@@ -234,8 +234,13 @@ describe.skipIf(!device)("GPU culling on a real device", { timeout: 300_000 }, (
     const lod = { meshes: [near, far], distances: [12] };
     // Each 1 m box at its distance from the eye (z = 10): the switch at 12.
     // Enough copies (GPU_LOD_MIN_COPIES) that the GPU picks their levels: 40, from 3 to 22.5 m away, all on screen.
-    const distances = Array.from({ length: 40 }, (_, i) => 3 + i * 0.5);
-    const instances = distances.map((d, i) => ({ mesh: near, lod, model: composeModelMatrix([i % 2 === 0 ? -1 : 1, (i % 5) - 2, 10 - d], [20, 30, 0], [0.5, 0.5, 0.5]) })) as unknown as MeshSceneInstance[];
+    // (None within the crossfade, F6b: 10% either side of the switch, 5.4 to 6.6 m.)
+    const distances = Array.from({ length: 48 }, (_, i) => 3 + i * 0.5);
+    const instances = distances
+      .map((d, i) => ({ mesh: near, lod, model: composeModelMatrix([i % 2 === 0 ? -1 : 1, (i % 5) - 2, 10 - d], [20, 30, 0], [0.5, 0.5, 0.5]) }))
+      .filter((inst) => Math.abs(Math.hypot(inst.model[12]!, inst.model[13]!, inst.model[14]! - 10) - 6) > 0.7)
+      .slice(0, 40) as unknown as MeshSceneInstance[];
+    expect(instances).toHaveLength(40);
     // As lod.ts picks: the distance to the copy's origin over its scale (0.5), against the switch at 12.
     const nearCount = instances.filter((inst) => Math.hypot(inst.model[12]!, inst.model[13]!, inst.model[14]! - 10) / 0.5 < 12).length;
     const draw = { width: W, height: H, view: viewMatrix([0, 0, 10], [0, 0, 0]), projection: projectionMatrix(Math.PI / 3, 1, 0.1, 50), environment: null, lights: [], ambient: 0.3, lightDirection: [0.3, 1, 0.6], prepass: true, lod: true } as any;
@@ -247,7 +252,7 @@ describe.skipIf(!device)("GPU culling on a real device", { timeout: 300_000 }, (
     // frustum keeps all; with no guess yet, the prepass draws them in its second round).
     const args = new Uint32Array(await readBuffer((renderer as any).culling.args, 3 * 2 * INDIRECT_WORDS * 4));
     const count = (round: number, indexCount: number) => [0, 1].map((b) => (round * 2 + b) * INDIRECT_WORDS).find((a) => args[a] === indexCount)!;
-    expect(nearCount).toBeGreaterThan(5);
+    expect(nearCount).toBeGreaterThan(3);
     expect(nearCount).toBeLessThan(35);
     expect(args[count(1, 36) + 1]).toBe(nearCount);
     expect(args[count(1, 24) + 1]).toBe(40 - nearCount);
@@ -255,6 +260,44 @@ describe.skipIf(!device)("GPU culling on a real device", { timeout: 300_000 }, (
     for (let i = 0; i < plain.length; i += 1) worst = Math.max(worst, Math.abs(plain[i]! - culled[i]!));
     expect(worst).toBeLessThan(1e-5);
     plainRenderer.dispose();
+    renderer.dispose();
+  });
+
+  it("crossfades a copy at its LOD switch, dithering each pixel to one level (F6b)", async () => {
+    const red = box("red");
+    const blue = box("blue");
+    (blue.primitives[0] as any).material = { ...(blue.primitives[0] as any).material, baseColorFactor: [0.1, 0.2, 0.9, 1] };
+    (red.primitives[0] as any).material = { ...(red.primitives[0] as any).material, baseColorFactor: [0.9, 0.1, 0.1, 1] };
+    const lod = { meshes: [red, blue], distances: [8] };
+    // 36 copies on a ring 8 m from the eye: each exactly at the switch, halfway through its crossfade.
+    const eye: [number, number, number] = [0, 0, 10];
+    const instances = Array.from({ length: 36 }, (_, i) => {
+      const a = (i / 36) * Math.PI * 2;
+      const dir = [Math.cos(a) * 0.35, Math.sin(a) * 0.35, -1];
+      const l = Math.hypot(...dir);
+      return { mesh: red, lod, model: composeModelMatrix([eye[0] + (dir[0]! / l) * 8, eye[1] + (dir[1]! / l) * 8, eye[2] + (dir[2]! / l) * 8], [0, 0, 0], [1, 1, 1]) };
+    }) as unknown as MeshSceneInstance[];
+    const draw = { width: W, height: H, view: viewMatrix(eye, [0, 0, 0]), projection: projectionMatrix(Math.PI / 3, 1, 0.1, 50), environment: null, lights: [], ambient: 1, lightDirection: [0.3, 1, 0.6], prepass: true, lod: true } as any;
+    const renderer = (await WebgpuSceneRenderer.create(device, W, H, rasterStyleFor(MODELS.aaa.renderCaps), { hdr: true, mips: true }))!;
+    const frame = (await readLinearTexture(device, renderer.renderToTexture(instances, { ...draw, gpuCull: true }), W, H, settled)).data;
+    // Every copy is drawn in both levels.
+    const args = new Uint32Array(await readBuffer((renderer as any).culling.args, 3 * 2 * INDIRECT_WORDS * 4));
+    expect([args[2 * 2 * INDIRECT_WORDS + 1], args[(2 * 2 + 1) * INDIRECT_WORDS + 1]]).toEqual([36, 36]);
+    // Each covered pixel is one level's colour, about half of them each; the boxes cover what they cover drawn plainly.
+    const plain = (await readLinearTexture(device, (await WebgpuSceneRenderer.create(device, W, H, rasterStyleFor(MODELS.aaa.renderCaps), { hdr: true, mips: true }))!.renderToTexture(instances.map((i) => ({ ...i, lod: undefined })) as unknown as MeshSceneInstance[], draw), W, H, settled)).data;
+    let reds = 0, blues = 0, covered = 0, plainCovered = 0;
+    for (let p = 0; p < W * H; p += 1) {
+      const [r, g, b, a] = [frame[p * 4]!, frame[p * 4 + 1]!, frame[p * 4 + 2]!, frame[p * 4 + 3]!];
+      if (plain[p * 4 + 3]! > 0.5) plainCovered += 1;
+      if (a < 0.5) continue;
+      covered += 1;
+      if (r > b) reds += 1;
+      else blues += 1;
+      expect(g).toBeLessThan(Math.max(r, b));
+    }
+    expect(covered).toBe(plainCovered);
+    expect(reds / covered).toBeGreaterThan(0.35);
+    expect(blues / covered).toBeGreaterThan(0.35);
     renderer.dispose();
   });
 
