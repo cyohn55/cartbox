@@ -129,9 +129,11 @@ import { AREA_KIND } from "./ltc.js";
  * 1088 char0      vec4<f32>    16   character shading (F7c; characterShading.ts): x = its kind
  *                                    (0 none, 1 skin, 2 eye, 3 hair, 4 mouth), yzw = its terms
  * 1104 char1      vec4<f32>    16   its other terms (a hair's dither and frame, a mouth's opening)
+ * 1120 cull0      vec4<f32>    16   x = where a GPU-culled draw's copies start in the instance buffer (F0e;
+ *                                    gpuCulling.ts), added to `instance_index`; 0 otherwise
  * ```
  *
- * 1120 bytes used, padded to a 1280-byte stride (a 256-byte multiple a dynamic
+ * 1136 bytes used, padded to a 1280-byte stride (a 256-byte multiple a dynamic
  * uniform offset can address), so one buffer still holds every draw in a
  * frame — uniforms are written per batch, not per copy, so the stride costs
  * little. The metallic-roughness inputs and the environment carry the Modern
@@ -146,7 +148,7 @@ export const UNIFORM_STRIDE = 1280;
  * bind group layout's `minBindingSize` must be: it makes a WGSL struct that
  * grows past what this module writes fail at pipeline creation.
  */
-export const UNIFORM_BYTES_USED = 1120;
+export const UNIFORM_BYTES_USED = 1136;
 /** The same stride counted in float32s, which is how `writeBuffer` sizes it. */
 export const UNIFORM_FLOATS = UNIFORM_STRIDE / 4;
 
@@ -323,6 +325,7 @@ const OFFSET_SSS0 = 264;
 const OFFSET_DT0 = 268;
 const OFFSET_CHAR0 = 272;
 const OFFSET_CHAR1 = 276;
+const OFFSET_CULL0 = 280;
 
 /** The rasteriser's defaults, restated so an unlit draw shades identically. */
 export const DEFAULT_LIGHT: readonly [number, number, number] = [0.4, 0.8, 0.6];
@@ -582,6 +585,8 @@ export interface InstanceUniform {
   readonly windBefore?: readonly [number, number, number, number] | null;
   /** Where the frame's motion transforms start in the instance buffer (F0c). */
   readonly motionBase?: number;
+  /** Where a GPU-culled draw's copies start in the instance buffer (F0e): its indirect draws start at instance 0. */
+  readonly instanceBase?: number;
   /** The lighting channels the draw's copies are on (F2e), absent the first. */
   readonly lightChannels?: number;
   /** How many probes the shader loops over, where not `environment.probes`' (the linear variant's GPU-captured ones, F3b). */
@@ -897,6 +902,7 @@ export function writeInstanceUniform(target: Float32Array, index: number, unifor
   target[base + OFFSET_MOTION0 + 1] = uniform.lightChannels ?? 1;
   target[base + OFFSET_MOTION0 + 2] = uniform.receivesDecals ? 1 : 0;
   target[base + OFFSET_MOTION0 + 3] = uniform.lodLevel ?? -1;
+  target[base + OFFSET_CULL0] = uniform.instanceBase ?? 0;
 }
 
 /** The camera's right and up in world space (the view's first two rows) and the frame's height, for refraction (I5). */

@@ -13171,7 +13171,8 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
       temporal,
       ...upscaling && (width < output.width || height < output.height) ? { upscale: { width: output.width, height: output.height } } : {},
       reflections: this.options.reflections === true && this.quality.reflections === true,
-      ...this.options.prepass === true ? { prepass: true } : {},
+      // With a prepass the AAA scene culls on the GPU (F0e): the frustum, then a Hi-Z pyramid of the prepass's depths.
+      ...this.options.prepass === true ? { prepass: true, gpuCull: true } : {},
       ...lighting ? { ...lit, localShadows: job.local, shadow: job.shadow, sunShadow: job.sunShadow, localShadowCasters: job.localShadowCasters, localShadowKey: job.localShadowKey, localShadowMoved: job.localShadowMoved, fog: lighting.fog ?? null, wind: lighting.wind ?? null } : {},
       ...job.reflectionCapture ? { reflectionCapture: job.reflectionCapture } : {},
       ...job.decals ? { decals: job.decals } : {},
@@ -15106,7 +15107,7 @@ fn areaTerm(lgt: Light, P: vec3<f32>, N: vec3<f32>, V: vec3<f32>, ndv: f32, roug
 
 // src/render/scenePacking.ts
 var UNIFORM_STRIDE = 1280;
-var UNIFORM_BYTES_USED = 1120;
+var UNIFORM_BYTES_USED = 1136;
 var UNIFORM_FLOATS = UNIFORM_STRIDE / 4;
 var LIGHT_FLOATS = 20;
 var PROBE_FLOATS = 16;
@@ -15224,6 +15225,7 @@ var OFFSET_SSS0 = 264;
 var OFFSET_DT0 = 268;
 var OFFSET_CHAR0 = 272;
 var OFFSET_CHAR1 = 276;
+var OFFSET_CULL0 = 280;
 var DEFAULT_LIGHT = [0.4, 0.8, 0.6];
 var DEFAULT_AMBIENT2 = 0.35;
 function resolveLight(direction, ambient) {
@@ -15500,6 +15502,7 @@ function writeInstanceUniform(target, index, uniform) {
   target[base + OFFSET_MOTION0 + 1] = uniform.lightChannels ?? 1;
   target[base + OFFSET_MOTION0 + 2] = uniform.receivesDecals ? 1 : 0;
   target[base + OFFSET_MOTION0 + 3] = uniform.lodLevel ?? -1;
+  target[base + OFFSET_CULL0] = uniform.instanceBase ?? 0;
 }
 function refractionCamera(view, height) {
   return { right: [view[0], view[4], view[8]], up: [view[1], view[5], view[9]], height };
@@ -20956,6 +20959,398 @@ fn fs(in: Out) {
   );
 }
 
+// src/render/gpuCulling.ts
+var ENTRY_BYTES = 32;
+var INDIRECT_WORDS = 5;
+var UNIFORM_BYTES = 6 * 16 + 64 + 32;
+var UNIFORM_STRIDE2 = 256;
+var WORKGROUP = 64;
+var STORAGE = 128;
+var COPY_DST = 8;
+var INDIRECT = 256;
+var COPY_SRC = 4;
+var UNIFORM2 = 64;
+var TEXTURE_BINDING2 = 4;
+var STORAGE_BINDING = 8;
+var COMPUTE = 4;
+var CULL_WGSL = (
+  /* wgsl */
+  `
+struct Entry { first: u32, count: u32, eligible: u32, indexCount: u32, sphere: vec4<f32> };
+struct Cull {
+  planes: array<vec4<f32>, 6>,
+  viewProj: mat4x4<f32>,
+  size: vec4<f32>,     // x, y = the depth's size; z = the pyramid's levels; w = 1 to test against it
+  counts: vec4<u32>,   // x = batches, y = copies, z = where the round's region starts, w = which round (0, 1)
+};
+@group(0) @binding(0) var<uniform> cull: Cull;
+@group(0) @binding(1) var<storage, read> entries: array<Entry>;
+@group(0) @binding(2) var<storage, read_write> xf: array<f32>;
+@group(0) @binding(3) var<storage, read_write> flags: array<u32>;
+@group(0) @binding(4) var<storage, read_write> args: array<u32>;
+@group(0) @binding(5) var hiz: texture_2d<f32>;
+
+const RECORD = ${INSTANCE_FLOATS}u;
+
+/** The batch a copy belongs to (batches are in order of their first copy). */
+fn owner(i: u32) -> u32 {
+  var lo = 0u;
+  var hi = cull.counts.x;
+  loop {
+    if (hi - lo <= 1u) { break; }
+    let mid = (lo + hi) / 2u;
+    if (entries[mid].first <= i) { lo = mid; } else { hi = mid; }
+  }
+  return lo;
+}
+
+fn hidden(c: vec3<f32>, r: f32) -> bool {
+  var lo = vec2<f32>(1e9);
+  var hi = vec2<f32>(-1e9);
+  var nearest = 1.0;
+  for (var k = 0u; k < 8u; k = k + 1u) {
+    let corner = c + r * vec3<f32>(select(-1.0, 1.0, (k & 1u) != 0u), select(-1.0, 1.0, (k & 2u) != 0u), select(-1.0, 1.0, (k & 4u) != 0u));
+    let clip = cull.viewProj * vec4<f32>(corner, 1.0);
+    // Reaching the eye's plane: no rectangle to test, so seen.
+    if (clip.w <= 1e-4) { return false; }
+    let ndc = clip.xyz / clip.w;
+    let px = vec2<f32>((ndc.x * 0.5 + 0.5) * cull.size.x, (0.5 - ndc.y * 0.5) * cull.size.y);
+    lo = min(lo, px);
+    hi = max(hi, px);
+    nearest = min(nearest, ndc.z);
+  }
+  if (nearest <= 0.0) { return false; }
+  lo = clamp(lo, vec2<f32>(0.0), cull.size.xy - 1.0);
+  hi = clamp(hi, vec2<f32>(0.0), cull.size.xy - 1.0);
+  // The level where the rectangle spans at most two texels each way.
+  let extent = max(hi.x - lo.x, hi.y - lo.y);
+  let level = min(u32(ceil(log2(max(extent, 1.0)))), u32(cull.size.z) - 1u);
+  // The level's size from the first's (asking for the level's own reads 1 on Dawn).
+  let dims = max(vec2<i32>(textureDimensions(hiz)) >> vec2<u32>(level), vec2<i32>(1));
+  let a = min(vec2<i32>(lo) >> vec2<u32>(level), dims - 1);
+  let b = min(vec2<i32>(hi) >> vec2<u32>(level), dims - 1);
+  var farthest = 0.0;
+  for (var y = a.y; y <= b.y; y = y + 1) {
+    for (var x = a.x; x <= b.x; x = x + 1) {
+      farthest = max(farthest, textureLoad(hiz, vec2<i32>(x, y), level).r);
+    }
+  }
+  return nearest > farthest;
+}
+
+@compute @workgroup_size(${WORKGROUP})
+fn test(@builtin(global_invocation_id) id: vec3<u32>) {
+  let i = id.x;
+  if (i >= cull.counts.y) { return; }
+  let e = entries[owner(i)];
+  var seen = 1u;
+  if (e.eligible != 0u) {
+    let b = i * RECORD + 32u;
+    let model = mat4x4<f32>(
+      vec4<f32>(xf[b], xf[b + 1u], xf[b + 2u], xf[b + 3u]),
+      vec4<f32>(xf[b + 4u], xf[b + 5u], xf[b + 6u], xf[b + 7u]),
+      vec4<f32>(xf[b + 8u], xf[b + 9u], xf[b + 10u], xf[b + 11u]),
+      vec4<f32>(xf[b + 12u], xf[b + 13u], xf[b + 14u], xf[b + 15u]),
+    );
+    let c = (model * vec4<f32>(e.sphere.xyz, 1.0)).xyz;
+    let r = e.sphere.w * max(length(model[0].xyz), max(length(model[1].xyz), length(model[2].xyz)));
+    for (var p = 0u; p < 6u; p = p + 1u) {
+      let plane = cull.planes[p];
+      if (dot(plane.xyz, c) + plane.w < -r) { seen = 0u; }
+    }
+    if (seen == 1u && cull.size.w > 0.5 && hidden(c, r)) { seen = 0u; }
+  }
+  flags[i] = seen;
+}
+
+var<workgroup> scan: array<u32, ${WORKGROUP}>;
+
+/** One batch a workgroup: its seen copies' records (and their motion records) packed into the round's region, in order. */
+@compute @workgroup_size(${WORKGROUP})
+fn compact(@builtin(workgroup_id) group: vec3<u32>, @builtin(local_invocation_id) local: vec3<u32>) {
+  let index = group.x + group.y * 65535u;
+  if (index >= cull.counts.x) { return; }
+  let e = entries[index];
+  let n = cull.counts.y;
+  let region = cull.counts.z;
+  var kept = 0u;
+  for (var start = 0u; start < e.count; start = start + ${WORKGROUP}u) {
+    let j = start + local.x;
+    let seen = select(0u, flags[e.first + j], j < e.count);
+    scan[local.x] = seen;
+    workgroupBarrier();
+    for (var step = 1u; step < ${WORKGROUP}u; step = step * 2u) {
+      let add = select(0u, scan[local.x - step], local.x >= step);
+      workgroupBarrier();
+      scan[local.x] = scan[local.x] + add;
+      workgroupBarrier();
+    }
+    if (seen == 1u) {
+      let to = region + e.first + kept + scan[local.x] - 1u;
+      let src = e.first + j;
+      for (var f = 0u; f < RECORD; f = f + 1u) {
+        xf[to * RECORD + f] = xf[src * RECORD + f];
+        xf[(to + n) * RECORD + f] = xf[(src + n) * RECORD + f];
+      }
+    }
+    kept = kept + workgroupUniformLoad(&scan[${WORKGROUP - 1}u]);
+  }
+  if (local.x == 0u) {
+    let a = (cull.counts.w * cull.counts.x + index) * ${INDIRECT_WORDS}u;
+    args[a] = e.indexCount;
+    args[a + 1u] = kept;
+    args[a + 2u] = 0u;
+    args[a + 3u] = 0u;
+    // Indirect draws start at instance 0 (a later one needs an optional feature): the draw's uniform adds where its copies start.
+    args[a + 4u] = 0u;
+  }
+}
+`
+);
+var HIZ_MAX_WGSL = (
+  /* wgsl */
+  `
+@group(0) @binding(0) var depth: texture_depth_2d;
+@group(0) @binding(1) var level0: texture_storage_2d<r32float, write>;
+@compute @workgroup_size(8, 8)
+fn first(@builtin(global_invocation_id) id: vec3<u32>) {
+  let size = textureDimensions(depth);
+  if (id.x >= size.x || id.y >= size.y) { return; }
+  textureStore(level0, vec2<i32>(id.xy), vec4<f32>(textureLoad(depth, vec2<i32>(id.xy), 0), 0.0, 0.0, 1.0));
+}
+`
+);
+var HIZ_DOWN_WGSL = (
+  /* wgsl */
+  `
+@group(0) @binding(0) var above: texture_2d<f32>;
+@group(0) @binding(1) var below: texture_storage_2d<r32float, write>;
+@compute @workgroup_size(8, 8)
+fn down(@builtin(global_invocation_id) id: vec3<u32>) {
+  let out = textureDimensions(below);
+  if (id.x >= out.x || id.y >= out.y) { return; }
+  let size = vec2<i32>(textureDimensions(above));
+  let p = vec2<i32>(id.xy) * 2;
+  // An odd row or column at the edge folds into the last texel, so nothing falls between the cells.
+  let ex = select(1, 2, i32(id.x) == i32(out.x) - 1 && p.x + 3 == size.x);
+  let ey = select(1, 2, i32(id.y) == i32(out.y) - 1 && p.y + 3 == size.y);
+  var z = 0.0;
+  for (var y = 0; y <= ey; y += 1) {
+    for (var x = 0; x <= ex; x += 1) {
+      z = max(z, textureLoad(above, min(p + vec2<i32>(x, y), size - 1), 0).r);
+    }
+  }
+  textureStore(below, vec2<i32>(id.xy), vec4<f32>(z, 0.0, 0.0, 1.0));
+}
+`
+);
+function frustumPlanesOf(m) {
+  const row = (r) => [m[r], m[4 + r], m[8 + r], m[12 + r]];
+  const [r0, r1, r2, r3] = [row(0), row(1), row(2), row(3)];
+  const planes = [r3.map((v, i) => v + r0[i]), r3.map((v, i) => v - r0[i]), r3.map((v, i) => v + r1[i]), r3.map((v, i) => v - r1[i]), r2, r3.map((v, i) => v - r2[i])];
+  const out = new Float32Array(24);
+  planes.forEach((p, k) => {
+    const l = Math.hypot(p[0], p[1], p[2]) || 1;
+    out.set(p.map((v) => v / l), k * 4);
+  });
+  return out;
+}
+var spheres = /* @__PURE__ */ new WeakMap();
+function primitiveSphere(primitive) {
+  let s = spheres.get(primitive);
+  if (s) return s;
+  const p = primitive.positions;
+  const lo = [Infinity, Infinity, Infinity];
+  const hi = [-Infinity, -Infinity, -Infinity];
+  for (let i = 0; i + 2 < p.length; i += 3)
+    for (let a = 0; a < 3; a += 1) {
+      lo[a] = Math.min(lo[a], p[i + a]);
+      hi[a] = Math.max(hi[a], p[i + a]);
+    }
+  if (!(lo[0] <= hi[0])) s = [0, 0, 0, 0, 0];
+  else {
+    let sway2 = 0;
+    if (primitive.sway) for (const v of primitive.sway) sway2 = Math.max(sway2, v);
+    s = [(lo[0] + hi[0]) / 2, (lo[1] + hi[1]) / 2, (lo[2] + hi[2]) / 2, Math.hypot(hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]) / 2, sway2];
+  }
+  spheres.set(primitive, s);
+  return s;
+}
+var GpuCulling = class {
+  constructor(device) {
+    this.device = device;
+    this.entries = null;
+    this.entryCapacity = 0;
+    this.flags = null;
+    this.flagCapacity = 0;
+    /** Both rounds' indirect arguments: the frustum's batches, then the occlusion's. */
+    this.args = null;
+    this.argCapacity = 0;
+    this.hiz = null;
+    this.blank = null;
+    this.frame = null;
+    this.uniforms = device.createBuffer({ size: UNIFORM_STRIDE2 * 2, usage: UNIFORM2 | COPY_DST });
+    const storage = (binding, type) => ({ binding, visibility: COMPUTE, buffer: { type } });
+    this.cullLayout = device.createBindGroupLayout({
+      entries: [
+        { binding: 0, visibility: COMPUTE, buffer: { type: "uniform" } },
+        storage(1, "read-only-storage"),
+        storage(2, "storage"),
+        storage(3, "storage"),
+        storage(4, "storage"),
+        { binding: 5, visibility: COMPUTE, texture: { sampleType: "unfilterable-float" } }
+      ]
+    });
+    this.firstLayout = device.createBindGroupLayout({
+      entries: [
+        { binding: 0, visibility: COMPUTE, texture: { sampleType: "depth" } },
+        { binding: 1, visibility: COMPUTE, storageTexture: { access: "write-only", format: "r32float" } }
+      ]
+    });
+    this.downLayout = device.createBindGroupLayout({
+      entries: [
+        { binding: 0, visibility: COMPUTE, texture: { sampleType: "unfilterable-float" } },
+        { binding: 1, visibility: COMPUTE, storageTexture: { access: "write-only", format: "r32float" } }
+      ]
+    });
+    const cull = device.createShaderModule({ code: CULL_WGSL });
+    const layout = device.createPipelineLayout({ bindGroupLayouts: [this.cullLayout] });
+    this.testPipeline = device.createComputePipeline({ layout, compute: { module: cull, entryPoint: "test" } });
+    this.compactPipeline = device.createComputePipeline({ layout, compute: { module: cull, entryPoint: "compact" } });
+    this.firstPipeline = device.createComputePipeline({ layout: device.createPipelineLayout({ bindGroupLayouts: [this.firstLayout] }), compute: { module: device.createShaderModule({ code: HIZ_MAX_WGSL }), entryPoint: "first" } });
+    this.downPipeline = device.createComputePipeline({ layout: device.createPipelineLayout({ bindGroupLayouts: [this.downLayout] }), compute: { module: device.createShaderModule({ code: HIZ_DOWN_WGSL }), entryPoint: "down" } });
+  }
+  /**
+   * The frame's batches and camera. The instance buffer holds `copies`
+   * records from 0 and their motion records from `copies`; both rounds pack
+   * theirs from `region` (each batch at its own first copy), the motion
+   * records `copies` on, so the instance buffer needs `region + 2 × copies`.
+   * The second round packs over the first's once the prepass has drawn it.
+   */
+  plan(batches, copies, region, viewProj) {
+    if (batches.length > this.entryCapacity) {
+      this.entries?.destroy();
+      this.entryCapacity = Math.max(batches.length, this.entryCapacity * 2, 16);
+      this.entries = this.device.createBuffer({ size: this.entryCapacity * ENTRY_BYTES, usage: STORAGE | COPY_DST });
+    }
+    if (copies > this.flagCapacity) {
+      this.flags?.destroy();
+      this.flagCapacity = Math.max(copies, this.flagCapacity * 2, 64);
+      this.flags = this.device.createBuffer({ size: this.flagCapacity * 4, usage: STORAGE | COPY_SRC });
+    }
+    if (batches.length * 2 > this.argCapacity) {
+      this.args?.destroy();
+      this.argCapacity = Math.max(batches.length * 2, this.argCapacity * 2, 32);
+      this.args = this.device.createBuffer({ size: this.argCapacity * INDIRECT_WORDS * 4, usage: STORAGE | INDIRECT | COPY_DST | COPY_SRC });
+    }
+    const data = new ArrayBuffer(Math.max(1, batches.length) * ENTRY_BYTES);
+    const u = new Uint32Array(data);
+    const f3 = new Float32Array(data);
+    batches.forEach((b, k) => {
+      u.set([b.first, b.count, b.sphere ? 1 : 0, b.indexCount], k * 8);
+      if (b.sphere) f3.set(b.sphere, k * 8 + 4);
+    });
+    this.device.queue.writeBuffer(this.entries, 0, data);
+    this.frame = { batches: batches.length, copies, region, planes: frustumPlanesOf(viewProj), viewProj };
+  }
+  /** Where a batch's arguments sit for a round (0: the frustum's, 1: the occlusion's), in bytes. */
+  argsOffset(round2, batch) {
+    return (round2 * (this.frame?.batches ?? 0) + batch) * INDIRECT_WORDS * 4;
+  }
+  writeUniforms(round2, size, levels, occlusion) {
+    const f3 = this.frame;
+    const data = new ArrayBuffer(UNIFORM_BYTES);
+    const floats = new Float32Array(data);
+    floats.set(f3.planes, 0);
+    floats.set(Array.from({ length: 16 }, (_, i) => f3.viewProj[i]), 24);
+    floats.set([size[0], size[1], levels, occlusion ? 1 : 0], 40);
+    new Uint32Array(data).set([f3.batches, f3.copies, f3.region, round2], 44);
+    this.device.queue.writeBuffer(this.uniforms, round2 * UNIFORM_STRIDE2, data);
+  }
+  blankHiz() {
+    this.blank ?? (this.blank = this.device.createTexture({ size: { width: 1, height: 1 }, format: "r32float", usage: TEXTURE_BINDING2 }));
+    return this.blank;
+  }
+  /** The pyramid for a depth of `width × height`. */
+  ensureHiz(width, height) {
+    if (this.hiz && this.hiz.width === width && this.hiz.height === height) return this.hiz;
+    this.hiz?.texture.destroy();
+    const levels = Math.floor(Math.log2(Math.max(width, height))) + 1;
+    const texture = this.device.createTexture({
+      size: { width, height },
+      format: "r32float",
+      mipLevelCount: levels,
+      usage: TEXTURE_BINDING2 | STORAGE_BINDING | 1
+      /* COPY_SRC, for reading it back */
+    });
+    const views = Array.from({ length: levels }, (_, level) => texture.createView({ baseMipLevel: level, mipLevelCount: 1 }));
+    this.hiz = { texture, width, height, levels, views };
+    return this.hiz;
+  }
+  round(encoder, round2, instances, hiz, timing = {}) {
+    const f3 = this.frame;
+    if (f3.batches === 0) return;
+    const group = this.device.createBindGroup({
+      layout: this.cullLayout,
+      entries: [
+        { binding: 0, resource: { buffer: this.uniforms, offset: round2 * UNIFORM_STRIDE2, size: UNIFORM_BYTES } },
+        { binding: 1, resource: { buffer: this.entries } },
+        { binding: 2, resource: { buffer: instances } },
+        { binding: 3, resource: { buffer: this.flags } },
+        { binding: 4, resource: { buffer: this.args } },
+        { binding: 5, resource: hiz }
+      ]
+    });
+    const pass = encoder.beginComputePass(timing);
+    pass.setBindGroup(0, group);
+    if (f3.copies > 0) {
+      pass.setPipeline(this.testPipeline);
+      pass.dispatchWorkgroups(Math.ceil(f3.copies / WORKGROUP));
+    }
+    pass.setPipeline(this.compactPipeline);
+    pass.dispatchWorkgroups(Math.min(f3.batches, 65535), Math.ceil(f3.batches / 65535));
+    pass.end();
+  }
+  /** The first round: the frustum, into the region and the first arguments. */
+  encodeFrustum(encoder, instances, timing) {
+    this.writeUniforms(0, [1, 1], 1, false);
+    this.round(encoder, 0, instances, this.blankHiz().createView(), timing);
+  }
+  /**
+   * The second round: the pyramid of `depth` (single-sampled; null tests the
+   * frustum alone), then the frustum's survivors against it, into the region
+   * (over the first round's) and the second arguments.
+   */
+  encodeOcclusion(encoder, instances, depth, size, timing) {
+    let view = this.blankHiz().createView();
+    let levels = 1;
+    if (depth) {
+      const hiz = this.ensureHiz(size[0], size[1]);
+      const pass = encoder.beginComputePass();
+      pass.setPipeline(this.firstPipeline);
+      pass.setBindGroup(0, this.device.createBindGroup({ layout: this.firstLayout, entries: [{ binding: 0, resource: depth.createView() }, { binding: 1, resource: hiz.views[0] }] }));
+      pass.dispatchWorkgroups(Math.ceil(size[0] / 8), Math.ceil(size[1] / 8));
+      pass.setPipeline(this.downPipeline);
+      for (let level = 1; level < hiz.levels; level += 1) {
+        const w = Math.max(1, size[0] >> level);
+        const h = Math.max(1, size[1] >> level);
+        pass.setBindGroup(0, this.device.createBindGroup({ layout: this.downLayout, entries: [{ binding: 0, resource: hiz.views[level - 1] }, { binding: 1, resource: hiz.views[level] }] }));
+        pass.dispatchWorkgroups(Math.ceil(w / 8), Math.ceil(h / 8));
+      }
+      pass.end();
+      view = hiz.texture.createView();
+      levels = hiz.levels;
+    }
+    this.writeUniforms(1, size, levels, depth !== null);
+    this.round(encoder, 1, instances, view, timing);
+  }
+  destroy() {
+    for (const b of [this.uniforms, this.entries, this.flags, this.args]) b?.destroy();
+    this.hiz?.texture.destroy();
+    this.blank?.destroy();
+  }
+};
+
 // src/render/pathTracer.ts
 import { buildBvh as buildBvh2, cameraPositionFromView as cameraPositionFromView3, resolveExtensions, multiplyMat4 as multiplyMat46 } from "@cartbox/editor";
 
@@ -20977,7 +21372,7 @@ import {
 var LIGHTMAP_MAX_BOUNCES = 8;
 var LIGHTMAP_MAX_LIGHTS = 4;
 var LIGHTMAP_MAX_LOCAL_LIGHTS = 256;
-var WORKGROUP = 64;
+var WORKGROUP2 = 64;
 var CHUNK_TEXELS = 65536;
 var PATHS_PER_SUBMIT = 1 << 19;
 function pathBudget(local) {
@@ -20987,11 +21382,11 @@ var PARAMS_BYTES = 64;
 var LIGHT_VEC4S = 5;
 var PROBE_ACC_VEC4S = 10 + PROBE_DEPTH_SIDE * PROBE_DEPTH_SIDE;
 var ACC_FLOATS = 16;
-var STORAGE = 128;
-var COPY_DST = 8;
-var COPY_SRC = 4;
+var STORAGE2 = 128;
+var COPY_DST2 = 8;
+var COPY_SRC2 = 4;
 var MAP_READ = 1;
-var UNIFORM2 = 64;
+var UNIFORM3 = 64;
 function toLinear(c) {
   const v = Math.max(0, c);
   return v <= 0.04045 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4;
@@ -21423,7 +21818,7 @@ fn pathFrom(origin: vec3<f32>, dir: vec3<f32>) -> Path {
   return out;
 }
 
-@compute @workgroup_size(${WORKGROUP})
+@compute @workgroup_size(${WORKGROUP2})
 fn main(@builtin(global_invocation_id) id: vec3<u32>) {
   if (id.x >= params.run.y) { return; }
   let j = params.run.x + id.x;
@@ -21463,7 +21858,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
 // A probe (F3d-3): rays over the whole sphere (a Fibonacci set for the bake, turned per probe about the
 // vertical), projected onto L2 SH; the sky's share; backs met; and per octahedral texel the distance the
 // first segment travelled (capped), with its square.
-@compute @workgroup_size(${WORKGROUP})
+@compute @workgroup_size(${WORKGROUP2})
 fn probeMain(@builtin(global_invocation_id) id: vec3<u32>) {
   if (id.x >= params.run.y) { return; }
   let p = params.run.x + id.x;
@@ -21532,17 +21927,17 @@ async function bakeLightmapGpu(device, layout, occluders, options = {}, progress
       }
     }
     const upload = (data) => {
-      const buffer = device.createBuffer({ size: Math.max(16, data.byteLength), usage: STORAGE | COPY_DST });
+      const buffer = device.createBuffer({ size: Math.max(16, data.byteLength), usage: STORAGE2 | COPY_DST2 });
       device.queue.writeBuffer(buffer, 0, data.buffer, data.byteOffset, data.byteLength);
       return buffer;
     };
     const skyData = sky ? sky.data : new Float32Array(4);
     const buffers = [upload(scene.nodes), upload(scene.tris), upload(scene.mats), upload(points)];
-    const accum = device.createBuffer({ size: acc.byteLength, usage: STORAGE | COPY_SRC });
+    const accum = device.createBuffer({ size: acc.byteLength, usage: STORAGE2 | COPY_SRC2 });
     const skyBuffer = upload(skyData);
     const lightBuffer = upload(lights.data);
-    const params = device.createBuffer({ size: PARAMS_BYTES, usage: UNIFORM2 | COPY_DST });
-    const readback = device.createBuffer({ size: acc.byteLength, usage: MAP_READ | COPY_DST });
+    const params = device.createBuffer({ size: PARAMS_BYTES, usage: UNIFORM3 | COPY_DST2 });
+    const readback = device.createBuffer({ size: acc.byteLength, usage: MAP_READ | COPY_DST2 });
     try {
       const pipeline = device.createComputePipeline({ layout: "auto", compute: { module: device.createShaderModule({ code: LIGHTMAP_TRACE_WGSL }), entryPoint: "main" } });
       const group = device.createBindGroup({
@@ -21563,7 +21958,7 @@ async function bakeLightmapGpu(device, layout, occluders, options = {}, progress
           const pass = encoder2.beginComputePass();
           pass.setPipeline(pipeline);
           pass.setBindGroup(0, group);
-          pass.dispatchWorkgroups(Math.ceil(texelsHere / WORKGROUP));
+          pass.dispatchWorkgroups(Math.ceil(texelsHere / WORKGROUP2));
           pass.end();
           device.queue.submit([encoder2.finish()]);
           await device.queue.onSubmittedWorkDone();
@@ -21713,12 +22108,12 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
 );
 async function denoiseLightmap(device, atlas, texel, passes = DENOISE_PASSES, sigma = DENOISE_SIGMA) {
   const { size, values, guide } = atlas;
-  const guideBuffer = device.createBuffer({ size: guide.byteLength, usage: STORAGE | COPY_DST });
+  const guideBuffer = device.createBuffer({ size: guide.byteLength, usage: STORAGE2 | COPY_DST2 });
   device.queue.writeBuffer(guideBuffer, 0, guide.buffer, guide.byteOffset, guide.byteLength);
-  const ping = [0, 1].map(() => device.createBuffer({ size: values.byteLength, usage: STORAGE | COPY_DST | COPY_SRC }));
+  const ping = [0, 1].map(() => device.createBuffer({ size: values.byteLength, usage: STORAGE2 | COPY_DST2 | COPY_SRC2 }));
   device.queue.writeBuffer(ping[0], 0, values.buffer, values.byteOffset, values.byteLength);
-  const params = device.createBuffer({ size: 16, usage: UNIFORM2 | COPY_DST });
-  const readback = device.createBuffer({ size: values.byteLength, usage: MAP_READ | COPY_DST });
+  const params = device.createBuffer({ size: 16, usage: UNIFORM3 | COPY_DST2 });
+  const readback = device.createBuffer({ size: values.byteLength, usage: MAP_READ | COPY_DST2 });
   try {
     const pipeline = device.createComputePipeline({ layout: "auto", compute: { module: device.createShaderModule({ code: LIGHTMAP_DENOISE_WGSL }), entryPoint: "main" } });
     const groups = [0, 1].map(
@@ -21793,16 +22188,16 @@ async function bakeProbeVolumeGpu(device, min, max, counts, occluders, options =
   const acc = new Float32Array(count * PROBE_ACC_VEC4S * 4);
   const scene = packLightmapScene(occluders);
   const upload = (data) => {
-    const buffer = device.createBuffer({ size: Math.max(16, data.byteLength), usage: STORAGE | COPY_DST });
+    const buffer = device.createBuffer({ size: Math.max(16, data.byteLength), usage: STORAGE2 | COPY_DST2 });
     device.queue.writeBuffer(buffer, 0, data.buffer, data.byteOffset, data.byteLength);
     return buffer;
   };
   const buffers = [upload(scene.nodes), upload(scene.tris), upload(scene.mats), upload(positions)];
-  const accum = device.createBuffer({ size: acc.byteLength, usage: STORAGE | COPY_SRC });
+  const accum = device.createBuffer({ size: acc.byteLength, usage: STORAGE2 | COPY_SRC2 });
   const skyBuffer = upload(sky ? sky.data : new Float32Array(4));
   const lightBuffer = upload(lights.data);
-  const params = device.createBuffer({ size: PARAMS_BYTES, usage: UNIFORM2 | COPY_DST });
-  const readback = device.createBuffer({ size: acc.byteLength, usage: MAP_READ | COPY_DST });
+  const params = device.createBuffer({ size: PARAMS_BYTES, usage: UNIFORM3 | COPY_DST2 });
+  const readback = device.createBuffer({ size: acc.byteLength, usage: MAP_READ | COPY_DST2 });
   try {
     const pipeline = device.createComputePipeline({ layout: "auto", compute: { module: device.createShaderModule({ code: LIGHTMAP_TRACE_WGSL }), entryPoint: "probeMain" } });
     const group = device.createBindGroup({
@@ -21817,7 +22212,7 @@ async function bakeProbeVolumeGpu(device, min, max, counts, occluders, options =
       const pass = encoder2.beginComputePass();
       pass.setPipeline(pipeline);
       pass.setBindGroup(0, group);
-      pass.dispatchWorkgroups(Math.ceil(count / WORKGROUP));
+      pass.dispatchWorkgroups(Math.ceil(count / WORKGROUP2));
       pass.end();
       device.queue.submit([encoder2.finish()]);
       await device.queue.onSubmittedWorkDone();
@@ -22225,16 +22620,16 @@ var MAX_CAPTURE_SIDE = 8192;
 var MAT_VEC4S = 11;
 var PRIM_VEC4S = 7;
 var ATTR_VEC4S = 4;
-var WORKGROUP2 = 8;
+var WORKGROUP3 = 8;
 var PARAMS_BYTES2 = 176;
 var CAPTURE_PATHS_PER_SUBMIT = 1 << 20;
-var STORAGE2 = 128;
-var COPY_DST2 = 8;
-var COPY_SRC2 = 4;
+var STORAGE3 = 128;
+var COPY_DST3 = 8;
+var COPY_SRC3 = 4;
 var MAP_READ2 = 1;
-var UNIFORM3 = 64;
-var TEXTURE_BINDING2 = 4;
-var STORAGE_BINDING = 8;
+var UNIFORM4 = 64;
+var TEXTURE_BINDING3 = 4;
+var STORAGE_BINDING2 = 8;
 var TEXTURE_COPY_SRC = 1;
 var ALPHA_MODE = { opaque: 0, mask: 1, blend: 2, additive: 3 };
 function referenceSceneKey(instances) {
@@ -22876,7 +23271,7 @@ fn unproject(ndc: vec2<f32>) -> vec3<f32> {
   return p.xyz / p.w;
 }
 
-@compute @workgroup_size(${WORKGROUP2}, ${WORKGROUP2})
+@compute @workgroup_size(${WORKGROUP3}, ${WORKGROUP3})
 fn main(@builtin(global_invocation_id) id: vec3<u32>) {
   if (id.x >= params.run.x || id.y >= params.run.y) { return; }
   let px = params.image.z + id.x;
@@ -22916,7 +23311,7 @@ var PATH_RESOLVE_WGSL = (
 @group(0) @binding(0) var<storage, read> accum: array<vec4<f32>>;
 @group(0) @binding(1) var frame: texture_storage_2d<rgba16float, write>;
 @group(0) @binding(2) var<uniform> info: vec4<u32>; // x, y = size, z = samples
-@compute @workgroup_size(${WORKGROUP2}, ${WORKGROUP2})
+@compute @workgroup_size(${WORKGROUP3}, ${WORKGROUP3})
 fn resolve(@builtin(global_invocation_id) id: vec3<u32>) {
   if (id.x >= info.x || id.y >= info.y) { return; }
   let n = max(1.0, f32(info.z));
@@ -22957,7 +23352,7 @@ var TracerCore = class {
     this.skyFor = { key: null, buffer: null, panorama: null };
     this.lightBuffer = null;
     const table2 = brdfLut();
-    this.dfg = device.createBuffer({ size: table2.byteLength, usage: STORAGE2 | COPY_DST2 });
+    this.dfg = device.createBuffer({ size: table2.byteLength, usage: STORAGE3 | COPY_DST3 });
     device.queue.writeBuffer(this.dfg, 0, table2);
   }
   get tracePipeline() {
@@ -22969,7 +23364,7 @@ var TracerCore = class {
     return this.resolvePipeline;
   }
   storage(data) {
-    const buffer = this.device.createBuffer({ size: Math.max(16, Math.ceil(data.byteLength / 16) * 16), usage: STORAGE2 | COPY_DST2 });
+    const buffer = this.device.createBuffer({ size: Math.max(16, Math.ceil(data.byteLength / 16) * 16), usage: STORAGE3 | COPY_DST3 });
     this.device.queue.writeBuffer(buffer, 0, data.buffer, data.byteOffset, data.byteLength);
     return buffer;
   }
@@ -23030,8 +23425,8 @@ var PathTracer = class _PathTracer {
     /** Samples each pixel holds. */
     this.samples = 0;
     this.core = new TracerCore(device);
-    this.params = device.createBuffer({ size: PARAMS_BYTES2, usage: UNIFORM3 | COPY_DST2 });
-    this.resolveInfo = device.createBuffer({ size: 16, usage: UNIFORM3 | COPY_DST2 });
+    this.params = device.createBuffer({ size: PARAMS_BYTES2, usage: UNIFORM4 | COPY_DST3 });
+    this.resolveInfo = device.createBuffer({ size: 16, usage: UNIFORM4 | COPY_DST3 });
   }
   static create(device) {
     return new _PathTracer(device);
@@ -23045,8 +23440,8 @@ var PathTracer = class _PathTracer {
     if (this.size.width === width && this.size.height === height && this.accum) return;
     this.accum?.destroy();
     this.frame?.destroy();
-    this.accum = this.device.createBuffer({ size: width * height * 16, usage: STORAGE2 | COPY_DST2 | COPY_SRC2 });
-    this.frame = this.device.createTexture({ size: { width, height }, format: "rgba16float", usage: TEXTURE_BINDING2 | STORAGE_BINDING | TEXTURE_COPY_SRC });
+    this.accum = this.device.createBuffer({ size: width * height * 16, usage: STORAGE3 | COPY_DST3 | COPY_SRC3 });
+    this.frame = this.device.createTexture({ size: { width, height }, format: "rgba16float", usage: TEXTURE_BINDING3 | STORAGE_BINDING2 | TEXTURE_COPY_SRC });
     this.size = { width, height };
     this.samples = 0;
   }
@@ -23078,7 +23473,7 @@ var PathTracer = class _PathTracer {
       const pass = encoder.beginComputePass();
       pass.setPipeline(this.core.tracePipeline);
       pass.setBindGroup(0, this.core.traceGroup(this.accum, this.params));
-      pass.dispatchWorkgroups(Math.ceil(width / WORKGROUP2), Math.ceil(height / WORKGROUP2));
+      pass.dispatchWorkgroups(Math.ceil(width / WORKGROUP3), Math.ceil(height / WORKGROUP3));
       pass.end();
       this.samples += take;
     }
@@ -23096,7 +23491,7 @@ var PathTracer = class _PathTracer {
         ]
       })
     );
-    resolve.dispatchWorkgroups(Math.ceil(width / WORKGROUP2), Math.ceil(height / WORKGROUP2));
+    resolve.dispatchWorkgroups(Math.ceil(width / WORKGROUP3), Math.ceil(height / WORKGROUP3));
     resolve.end();
     this.device.queue.submit([encoder.finish()]);
     return this.frame;
@@ -23113,7 +23508,7 @@ async function captureReference(device, instances, draw, options) {
   const width = Math.max(1, Math.min(MAX_CAPTURE_SIDE, Math.round(options.width)));
   const height = Math.max(1, Math.min(MAX_CAPTURE_SIDE, Math.round(options.height)));
   const samples = Math.max(1, Math.round(options.samples ?? 256));
-  const tile = Math.max(WORKGROUP2, Math.min(2048, Math.round(options.tile ?? 512)));
+  const tile = Math.max(WORKGROUP3, Math.min(2048, Math.round(options.tile ?? 512)));
   const core = new TracerCore(device);
   core.setScene(instances);
   const sky = core.setSky(draw.environment);
@@ -23121,9 +23516,9 @@ async function captureReference(device, instances, draw, options) {
   core.setLights(lights.data);
   const camera = cameraOf(draw);
   const setup = { bounces: options.bounces ?? REFERENCE_BOUNCES, sky, lights, ambient: referenceAmbient(draw), clamp: options.clamp ?? 0, background: options.background ?? true, mapTable: core.mapTable };
-  const accum = device.createBuffer({ size: tile * tile * 16, usage: STORAGE2 | COPY_DST2 | COPY_SRC2 });
-  const params = device.createBuffer({ size: PARAMS_BYTES2, usage: UNIFORM3 | COPY_DST2 });
-  const readback = device.createBuffer({ size: tile * tile * 16, usage: MAP_READ2 | COPY_DST2 });
+  const accum = device.createBuffer({ size: tile * tile * 16, usage: STORAGE3 | COPY_DST3 | COPY_SRC3 });
+  const params = device.createBuffer({ size: PARAMS_BYTES2, usage: UNIFORM4 | COPY_DST3 });
+  const readback = device.createBuffer({ size: tile * tile * 16, usage: MAP_READ2 | COPY_DST3 });
   const rgba = new Uint8ClampedArray(width * height * 4);
   const hdr = options.hdr ? new Float32Array(width * height * 4) : null;
   const exposure = options.exposure ?? 1;
@@ -23150,7 +23545,7 @@ async function captureReference(device, instances, draw, options) {
           const pass = encoder.beginComputePass();
           pass.setPipeline(core.tracePipeline);
           pass.setBindGroup(0, group);
-          pass.dispatchWorkgroups(Math.ceil(tw / WORKGROUP2), Math.ceil(th / WORKGROUP2));
+          pass.dispatchWorkgroups(Math.ceil(tw / WORKGROUP3), Math.ceil(th / WORKGROUP3));
           pass.end();
           device.queue.submit([encoder.finish()]);
           await device.queue.onSubmittedWorkDone();
@@ -24619,9 +25014,9 @@ fn resolve(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
 `
   );
 }
-var spheres = /* @__PURE__ */ new WeakMap();
+var spheres2 = /* @__PURE__ */ new WeakMap();
 function localSphere(owner) {
-  let s = spheres.get(owner);
+  let s = spheres2.get(owner);
   if (s) return s;
   const lists = "primitives" in owner ? owner.primitives.map((p) => p.positions) : [owner.positions];
   const lo = [Infinity, Infinity, Infinity];
@@ -24639,7 +25034,7 @@ function localSphere(owner) {
     const c = [0, 1, 2].map((a) => (lo[a] + hi[a]) / 2);
     s = [c[0], c[1], c[2], Math.hypot(hi[0] - c[0], hi[1] - c[1], hi[2] - c[2])];
   }
-  spheres.set(owner, s);
+  spheres2.set(owner, s);
   return s;
 }
 function worldSphere(local, m) {
@@ -25857,9 +26252,9 @@ import { PROBE_NORMAL_BIAS, PROBE_SH as PROBE_SH2, PROBE_VOLUME_SLOTS } from "@c
 var GI_UNIFORM_FLOATS = 32;
 var GI_REACH = 1.5;
 var GI_BACKFACE_LIMIT = 0.6;
-var STORAGE3 = 128;
-var COPY_DST3 = 8;
-var UNIFORM4 = 64;
+var STORAGE4 = 128;
+var COPY_DST4 = 8;
+var UNIFORM5 = 64;
 function randomRotation(u1, u2, u3) {
   const a = Math.sqrt(1 - u1), b = Math.sqrt(u1);
   const [x, y, z, w] = [a * Math.sin(2 * Math.PI * u2), a * Math.cos(2 * Math.PI * u2), b * Math.sin(2 * Math.PI * u3), b * Math.cos(2 * Math.PI * u3)];
@@ -26166,13 +26561,13 @@ var GpuProbeGi = class {
     this.target = null;
     const packed = packLightmapScene(occluders);
     const upload = (view) => {
-      const buffer = device.createBuffer({ size: Math.max(16, view.byteLength), usage: STORAGE3 | COPY_DST3 });
+      const buffer = device.createBuffer({ size: Math.max(16, view.byteLength), usage: STORAGE4 | COPY_DST4 });
       device.queue.writeBuffer(buffer, 0, view.buffer, view.byteOffset, view.byteLength);
       return buffer;
     };
     this.scene = [upload(packed.nodes), upload(packed.tris), upload(packed.mats)];
-    this.uniforms = device.createBuffer({ size: GI_UNIFORM_FLOATS * 4, usage: UNIFORM4 | COPY_DST3 });
-    this.params = device.createBuffer({ size: 64, usage: UNIFORM4 | COPY_DST3 });
+    this.uniforms = device.createBuffer({ size: GI_UNIFORM_FLOATS * 4, usage: UNIFORM5 | COPY_DST4 });
+    this.params = device.createBuffer({ size: 64, usage: UNIFORM5 | COPY_DST4 });
   }
   /**
    * Write this frame's uniforms and encode its passes into `encoder`: the
@@ -26186,7 +26581,7 @@ var GpuProbeGi = class {
     const raysBytes = count * rays * 32;
     if (!this.rays || this.rays.size < raysBytes) {
       this.rays?.destroy();
-      this.rays = device.createBuffer({ size: raysBytes, usage: STORAGE3 });
+      this.rays = device.createBuffer({ size: raysBytes, usage: STORAGE4 });
     }
     const packedLights = this.prepare(lights, sky);
     const { reach } = giSpacing(layout);
@@ -26242,13 +26637,13 @@ var GpuProbeGi = class {
     if (!this.lights || this.lightsSize < packedLights.data.byteLength) {
       this.lights?.destroy();
       this.lightsSize = Math.max(16, packedLights.data.byteLength);
-      this.lights = device.createBuffer({ size: this.lightsSize, usage: STORAGE3 | COPY_DST3 });
+      this.lights = device.createBuffer({ size: this.lightsSize, usage: STORAGE4 | COPY_DST4 });
     }
     device.queue.writeBuffer(this.lights, 0, packedLights.data);
     if (sky !== this.skySource) {
       this.sky?.destroy();
       const data = sky ? sky.data : new Float32Array(4);
-      this.sky = device.createBuffer({ size: Math.max(16, data.byteLength), usage: STORAGE3 | COPY_DST3 });
+      this.sky = device.createBuffer({ size: Math.max(16, data.byteLength), usage: STORAGE4 | COPY_DST4 });
       device.queue.writeBuffer(this.sky, 0, data);
       this.skySource = sky;
       this.skySize = sky ? [sky.width, sky.height] : [0, 0];
@@ -26269,9 +26664,9 @@ var GpuProbeGi = class {
     const device = this.device;
     const packedLights = lit ? null : this.prepare(lights, sky);
     if (packedLights) device.queue.writeBuffer(this.params, 0, lightmapParams(0, 0, 0, 1, 1, 1, sky, packedLights, 0));
-    this.reflectUniforms ?? (this.reflectUniforms = device.createBuffer({ size: this.reflectData.byteLength, usage: UNIFORM4 | COPY_DST3 }));
-    this.reflectGi ?? (this.reflectGi = device.createBuffer({ size: GI_UNIFORM_FLOATS * 4, usage: UNIFORM4 | COPY_DST3 }));
-    this.blankProbes ?? (this.blankProbes = device.createBuffer({ size: 16, usage: STORAGE3 }));
+    this.reflectUniforms ?? (this.reflectUniforms = device.createBuffer({ size: this.reflectData.byteLength, usage: UNIFORM5 | COPY_DST4 }));
+    this.reflectGi ?? (this.reflectGi = device.createBuffer({ size: GI_UNIFORM_FLOATS * 4, usage: UNIFORM5 | COPY_DST4 }));
+    this.blankProbes ?? (this.blankProbes = device.createBuffer({ size: 16, usage: STORAGE4 }));
     this.reflectData.set(frame.invViewProj, 0);
     this.reflectData.set([frame.eye[0], frame.eye[1], frame.eye[2], this.frames % 16777216], 16);
     this.reflectData.set([frame.width, frame.height, volume ? 1 : 0, frame.maxRoughness], 20);
@@ -27257,6 +27652,7 @@ struct Uniforms {
   // Character shading (F7c; characterShading.ts).
   char0: vec4<f32>,
   char1: vec4<f32>,
+  cull0: vec4<f32>,
 };
 
 // A Modern-tier light (see packLights): d0 = dir/pos + kind, d1 = colour +
@@ -28074,7 +28470,7 @@ fn vs(
 }
 fn vertexOf(position: vec3<f32>, normal: vec3<f32>, uv: vec2<f32>, uv2: vec2<f32>, bw: f32, sway: f32, tangent: vec4<f32>, instance: u32) -> VSOut {
   var out: VSOut;
-  let t = xf[instance];
+  let t = xf[u32(u.cull0.x) + instance];
   var pos = position;
   let bend = windOffset(position.xz, sway);
   pos = vec3<f32>(pos.x + bend.x, pos.y, pos.z + bend.y);
@@ -28693,7 +29089,7 @@ fn vs_prepass(
   out.uv2 = v.uv2;
   out.bw = v.bw;
   out.objPos = v.objPos;
-${hdr ? "  out.tangent = v.tangent;\n  out.frameNormal = v.frameNormal;\n" : ""}  let m = xf[u32(u.motion0.x) + instance];
+${hdr ? "  out.tangent = v.tangent;\n  out.frameNormal = v.frameNormal;\n" : ""}  let m = xf[u32(u.motion0.x) + u32(u.cull0.x) + instance];
   let then = windOffsetIn(u.wind1, before.xz, sway);
   out.clipNow = m.mvp * vec4<f32>(v.objPos, 1.0);
   out.clipThen = m.lightMvp * vec4<f32>(vec3<f32>(before.x + then.x, before.y, before.z + then.y)${g.vertex ? " + wpoObj" : ""}, 1.0);
@@ -28826,6 +29222,10 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     this.destroyed = false;
     /** The path-traced reference (F10b), made the first time it is shown. */
     this.pathTracer = null;
+    /** GPU culling (F0e), made on first use. */
+    this.culling = null;
+    /** This frame's GPU cull, while it encodes: the draws index the culling's arguments. */
+    this.frameCull = null;
     this.shadowMapSize = 0;
     /** Maps side by side in the shadow texture: 1, or 2 with a near cascade (EP8b). */
     this.shadowCascades = 1;
@@ -30149,7 +30549,9 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     this.frameVsm = this.hdr && prepass && sun !== null && cascadeFit !== null && draw.virtualShadows ? this.planVsm(draw, sun.toLight, sun.strength ?? 1, sun.softness ?? SUN_SOFTNESS, temporal ? temporal.projection : draw.projection) : null;
     this.ensureUniformCapacity(draws.length + casters.length);
     const casterBase = prepass ? instanceCount * 2 : instanceCount;
-    this.ensureInstanceCapacity(casterBase + (casting?.instanceCount ?? 0));
+    const gpuCull = this.hdr && prepass && draw.gpuCull === true;
+    const cullRegion = casterBase + (casting?.instanceCount ?? 0);
+    this.ensureInstanceCapacity(cullRegion + (gpuCull ? instanceCount * 2 : 0));
     const light = resolveLight(draw.lightDirection, draw.ambient);
     const viewDir = viewDirection(draw.view);
     const eye = cameraPositionFromView4(draw.view);
@@ -30315,7 +30717,7 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
         }
         next += 1;
       }
-      writeInstanceUniform(this.uniformData, index, uniformOf(entry));
+      writeInstanceUniform(this.uniformData, index, gpuCull ? { ...uniformOf(entry), instanceBase: cullRegion + entry.first } : uniformOf(entry));
     });
     let nextCaster = casterBase;
     casters.forEach((entry, k) => {
@@ -30332,6 +30734,18 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
       this.device.queue.writeBuffer(this.sssProfiles, 0, packSssProfiles(sssProfiles));
     }
     this.device.queue.writeBuffer(this.instanceBuffer, 0, this.instanceData, 0, nextCaster * INSTANCE_FLOATS);
+    if (gpuCull) {
+      this.culling ?? (this.culling = new GpuCulling(this.device));
+      const gust = Math.hypot(windNow[0], windNow[1]) * (1 + windNow[3]);
+      const batches = draws.map((entry) => {
+        const p = entry.primitive;
+        const moves = p.dynamic !== void 0 || entry.alpha >= 2 || entry.refract || compiledGraphOf2(p.material)?.outputs.worldPositionOffset !== void 0;
+        const s = moves ? null : primitiveSphere(p);
+        return { first: entry.first, count: entry.models.length, indexCount: entry.geometry.indexCount, sphere: s ? [s[0], s[1], s[2], s[3] + s[4] * gust] : null };
+      });
+      this.culling.plan(batches, instanceCount, cullRegion, viewProj);
+    }
+    this.frameCull = gpuCull ? this.culling : null;
     this.lastViewProj = viewProjNow;
     this.lastWind = windNow;
     let triangles = 0;
@@ -30352,6 +30766,7 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     const msaa = draw.antialias === true ? this.ensureMsaa() : null;
     const reflections = draw.reflections === true ? this.ensureReflections() : null;
     const overdraw = this.hdr && viewModeCode(draw.viewMode) === 11;
+    const cull = this.frameCull;
     const drawRange = (pass, from, to, depthGroup) => {
       pass.setBindGroup(1, depthGroup);
       let bound = null;
@@ -30366,7 +30781,8 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
         pass.setBindGroup(0, this.bindGroupFor(entry.primitive, entry.textures), [index * UNIFORM_STRIDE]);
         pass.setVertexBuffer(0, entry.geometry.vertexBuffer);
         pass.setIndexBuffer(entry.geometry.indexBuffer, "uint32");
-        pass.drawIndexed(entry.geometry.indexCount, entry.models.length, 0, 0, entry.first);
+        if (cull) pass.drawIndexedIndirect(cull.args, cull.argsOffset(1, index));
+        else pass.drawIndexed(entry.geometry.indexCount, entry.models.length, 0, 0, entry.first);
       }
     };
     const prepassRange = (pass) => {
@@ -30385,7 +30801,8 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
         const moved = entry.geometry.previousBuffer && entry.geometry.movedFrame === this.frameIndex;
         pass.setVertexBuffer(1, moved ? entry.geometry.previousBuffer : entry.geometry.vertexBuffer);
         pass.setIndexBuffer(entry.geometry.indexBuffer, "uint32");
-        pass.drawIndexed(entry.geometry.indexCount, entry.models.length, 0, 0, entry.first);
+        if (cull) pass.drawIndexedIndirect(cull.args, cull.argsOffset(0, index));
+        else pass.drawIndexed(entry.geometry.indexCount, entry.models.length, 0, 0, entry.first);
       }
     };
     const graph = new FrameGraph();
@@ -30525,6 +30942,12 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     const gbufferMs = gbuffer && msaa ? graph.createTexture("gbuffer.msaa", { format: GBUFFER_FORMAT, ...size, sampleCount: MSAA_SAMPLES }) : null;
     const velocityMs = velocity && msaa ? graph.createTexture("velocity.msaa", { format: VELOCITY_FORMAT, ...size, sampleCount: MSAA_SAMPLES }) : null;
     if (gbuffer && velocity) {
+      if (cull) {
+        graph.addPass("cull.frustum", "compute", (pass) => {
+          pass.keep();
+          return (ctx) => cull.encodeFrustum(ctx.encoder, this.instanceBuffer, ctx.timing);
+        });
+      }
       graph.addPass("prepass", "render", (pass) => {
         pass.write(depth);
         for (const [drawn, resolved] of [[gbufferMs, gbuffer], [velocityMs, velocity]]) {
@@ -30546,6 +30969,13 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
           prepassRange(encoded);
           encoded.end();
         };
+      });
+    }
+    if (cull && gbuffer) {
+      graph.addPass("cull.occlusion", "compute", (pass) => {
+        pass.read(depth);
+        pass.keep();
+        return (ctx) => cull.encodeOcclusion(ctx.encoder, this.instanceBuffer, msaa ? null : ctx.texture(depth), [this.width, this.height], ctx.timing);
       });
     }
     this.prepassed = prepass ? { depth: msaa ? msaa.depth : this.depthTexture, gbuffer: this.gbuffer, velocity: this.velocity, multisampled: msaa !== null } : null;
@@ -32218,6 +32648,7 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     if (this.destroyed) return;
     this.destroyed = true;
     this.pathTracer?.destroy();
+    this.culling?.destroy();
     this.pathTracer = null;
     destroySafely(this.sssProfiles);
     if (this.feedback) for (const b of [this.feedback.draws, this.feedback.wanted, this.feedback.readback, this.feedback.depth]) destroySafely(b);

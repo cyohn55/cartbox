@@ -168,6 +168,7 @@ import { CLOTH_FINISH_WGSL, CLOTH_PREDICT_WGSL, CLOTH_SOLVE_WGSL, CLOTH_WORKGROU
 import { SKIN_WGSL, SKIN_WORKGROUP, packBindShape, packInfluences, skinParams } from "./gpuSkinning.js";
 import { SSS_MAX_PROFILES, SSS_WGSL, packSssProfiles, type SssProfile } from "./subsurface.js";
 import { FEEDBACK_NONE, FEEDBACK_SLOTS, TextureStreamer, feedbackWgsl, footprintLog2, type StreamingStats } from "./textureStreaming.js";
+import { GpuCulling, primitiveSphere, type CullBatch } from "./gpuCulling.js";
 import { PathTracer, captureReference, type CaptureOptions, type ReferenceCapture } from "./pathTracer.js";
 import { IES_BASE, IES_MAX_PROFILES, IES_VEC4S, ltcTables, ltcWgsl } from "./ltc.js";
 import { PROBE_FACE, ProbeCapture, packCapturedProbes } from "./probeCapture.js";
@@ -613,6 +614,7 @@ struct Uniforms {
   // Character shading (F7c; characterShading.ts).
   char0: vec4<f32>,
   char1: vec4<f32>,
+  cull0: vec4<f32>,
 };
 
 // A Modern-tier light (see packLights): d0 = dir/pos + kind, d1 = colour +
@@ -1439,7 +1441,7 @@ fn vs(
 }
 fn vertexOf(position: vec3<f32>, normal: vec3<f32>, uv: vec2<f32>, uv2: vec2<f32>, bw: f32, sway: f32, tangent: vec4<f32>, instance: u32) -> VSOut {
   var out: VSOut;
-  let t = xf[instance];
+  let t = xf[u32(u.cull0.x) + instance];
   var pos = position;
   let bend = windOffset(position.xz, sway);
   pos = vec3<f32>(pos.x + bend.x, pos.y, pos.z + bend.y);
@@ -2067,7 +2069,7 @@ fn vs_prepass(
   out.uv2 = v.uv2;
   out.bw = v.bw;
   out.objPos = v.objPos;
-${hdr ? "  out.tangent = v.tangent;\n  out.frameNormal = v.frameNormal;\n" : ""}  let m = xf[u32(u.motion0.x) + instance];
+${hdr ? "  out.tangent = v.tangent;\n  out.frameNormal = v.frameNormal;\n" : ""}  let m = xf[u32(u.motion0.x) + u32(u.cull0.x) + instance];
   let then = windOffsetIn(u.wind1, before.xz, sway);
   out.clipNow = m.mvp * vec4<f32>(v.objPos, 1.0);
   out.clipThen = m.lightMvp * vec4<f32>(vec3<f32>(before.x + then.x, before.y, before.z + then.y)${g.vertex ? " + wpoObj" : ""}, 1.0);
@@ -2242,6 +2244,10 @@ export class WebgpuSceneRenderer implements SceneRenderer {
   private destroyed = false;
   /** The path-traced reference (F10b), made the first time it is shown. */
   private pathTracer: PathTracer | null = null;
+  /** GPU culling (F0e), made on first use. */
+  private culling: GpuCulling | null = null;
+  /** This frame's GPU cull, while it encodes: the draws index the culling's arguments. */
+  private frameCull: GpuCulling | null = null;
 
   /**
    * The bound shadow map — the 1x1 blank when no shadow this frame, else an
@@ -3741,7 +3747,10 @@ export class WebgpuSceneRenderer implements SceneRenderer {
     this.ensureUniformCapacity(draws.length + casters.length);
     // With a prepass, the frame's motion transforms (F0c) follow its transforms in the instance buffer; the casters' follow those.
     const casterBase = prepass ? instanceCount * 2 : instanceCount;
-    this.ensureInstanceCapacity(casterBase + (casting?.instanceCount ?? 0));
+    // GPU culling (F0e) packs each round's survivors, with their motion records, after the casters (the second round over the first's, once the prepass has drawn them).
+    const gpuCull = this.hdr && prepass && draw.gpuCull === true;
+    const cullRegion = casterBase + (casting?.instanceCount ?? 0);
+    this.ensureInstanceCapacity(cullRegion + (gpuCull ? instanceCount * 2 : 0));
     // Resolved once: the light and view direction are per frame, not per draw, and
     // normalising them per primitive would be the same answer computed many times.
     const light = resolveLight(draw.lightDirection, draw.ambient);
@@ -3942,7 +3951,8 @@ export class WebgpuSceneRenderer implements SceneRenderer {
         }
         next += 1;
       }
-      writeInstanceUniform(this.uniformData, index, uniformOf(entry));
+      // GPU culling (F0e): both rounds pack the batch's survivors at its place in their region, and its indirect draws start at 0.
+      writeInstanceUniform(this.uniformData, index, gpuCull ? { ...uniformOf(entry), instanceBase: cullRegion + entry.first } : uniformOf(entry));
     });
     // The casters (F2a): each copy's model in the instance buffer after the frame's, their uniforms after the draws'.
     let nextCaster = casterBase;
@@ -3960,6 +3970,19 @@ export class WebgpuSceneRenderer implements SceneRenderer {
       this.device.queue.writeBuffer(this.sssProfiles, 0, packSssProfiles(sssProfiles));
     }
     this.device.queue.writeBuffer(this.instanceBuffer, 0, this.instanceData, 0, nextCaster * INSTANCE_FLOATS);
+    // GPU culling (F0e): each batch's sphere, widened by the wind's furthest bend; a batch whose vertices move, or that is see-through, is drawn whole.
+    if (gpuCull) {
+      this.culling ??= new GpuCulling(this.device);
+      const gust = Math.hypot(windNow[0], windNow[1]) * (1 + windNow[3]);
+      const batches: CullBatch[] = draws.map((entry) => {
+        const p = entry.primitive;
+        const moves = p.dynamic !== undefined || entry.alpha >= 2 || entry.refract || compiledGraphOf(p.material)?.outputs.worldPositionOffset !== undefined;
+        const s = moves ? null : primitiveSphere(p);
+        return { first: entry.first, count: entry.models.length, indexCount: entry.geometry.indexCount, sphere: s ? [s[0], s[1], s[2], s[3] + s[4] * gust] : null };
+      });
+      this.culling.plan(batches, instanceCount, cullRegion, viewProj);
+    }
+    this.frameCull = gpuCull ? this.culling : null;
     this.lastViewProj = viewProjNow;
     this.lastWind = windNow;
     let triangles = 0;
@@ -3989,6 +4012,7 @@ export class WebgpuSceneRenderer implements SceneRenderer {
     const reflections = draw.reflections === true ? this.ensureReflections() : null;
     // Overdraw (F10a) adds every fragment up, depth unwritten.
     const overdraw = this.hdr && viewModeCode(draw.viewMode) === 11;
+    const cull = this.frameCull;
     const drawRange = (pass: any, from: number, to: number, depthGroup: any) => {
       pass.setBindGroup(1, depthGroup);
       let bound: any = null;
@@ -4004,7 +4028,8 @@ export class WebgpuSceneRenderer implements SceneRenderer {
         pass.setBindGroup(0, this.bindGroupFor(entry.primitive, entry.textures), [index * UNIFORM_STRIDE]);
         pass.setVertexBuffer(0, entry.geometry.vertexBuffer);
         pass.setIndexBuffer(entry.geometry.indexBuffer, "uint32");
-        pass.drawIndexed(entry.geometry.indexCount, entry.models.length, 0, 0, entry.first);
+        if (cull) pass.drawIndexedIndirect(cull.args, cull.argsOffset(1, index));
+        else pass.drawIndexed(entry.geometry.indexCount, entry.models.length, 0, 0, entry.first);
       }
     };
     // The prepass draws every batch the opaque pipeline does: opaque and cut-out, not refracting.
@@ -4025,7 +4050,8 @@ export class WebgpuSceneRenderer implements SceneRenderer {
         const moved = entry.geometry.previousBuffer && entry.geometry.movedFrame === this.frameIndex;
         pass.setVertexBuffer(1, moved ? entry.geometry.previousBuffer : entry.geometry.vertexBuffer);
         pass.setIndexBuffer(entry.geometry.indexBuffer, "uint32");
-        pass.drawIndexed(entry.geometry.indexCount, entry.models.length, 0, 0, entry.first);
+        if (cull) pass.drawIndexedIndirect(cull.args, cull.argsOffset(0, index));
+        else pass.drawIndexed(entry.geometry.indexCount, entry.models.length, 0, 0, entry.first);
       }
     };
 
@@ -4198,6 +4224,13 @@ export class WebgpuSceneRenderer implements SceneRenderer {
     const gbufferMs = gbuffer && msaa ? graph.createTexture("gbuffer.msaa", { format: GBUFFER_FORMAT, ...size, sampleCount: MSAA_SAMPLES }) : null;
     const velocityMs = velocity && msaa ? graph.createTexture("velocity.msaa", { format: VELOCITY_FORMAT, ...size, sampleCount: MSAA_SAMPLES }) : null;
     if (gbuffer && velocity) {
+      // GPU culling (F0e), first round: the frustum, for the prepass.
+      if (cull) {
+        graph.addPass("cull.frustum", "compute", (pass) => {
+          pass.keep();
+          return (ctx) => cull.encodeFrustum(ctx.encoder, this.instanceBuffer, ctx.timing);
+        });
+      }
       graph.addPass("prepass", "render", (pass) => {
         pass.write(depth);
         for (const [drawn, resolved] of [[gbufferMs, gbuffer], [velocityMs, velocity]] as const) {
@@ -4219,6 +4252,14 @@ export class WebgpuSceneRenderer implements SceneRenderer {
           prepassRange(encoded);
           encoded.end();
         };
+      });
+    }
+    // Second round: the frustum's survivors against a Hi-Z pyramid of the prepass's depths (single-sampled), for the shading passes.
+    if (cull && gbuffer) {
+      graph.addPass("cull.occlusion", "compute", (pass) => {
+        pass.read(depth);
+        pass.keep();
+        return (ctx) => cull.encodeOcclusion(ctx.encoder, this.instanceBuffer, msaa ? null : ctx.texture(depth), [this.width, this.height], ctx.timing);
       });
     }
     this.prepassed = prepass ? { depth: msaa ? msaa.depth : this.depthTexture, gbuffer: this.gbuffer!, velocity: this.velocity!, multisampled: msaa !== null } : null;
@@ -6143,6 +6184,7 @@ export class WebgpuSceneRenderer implements SceneRenderer {
     if (this.destroyed) return;
     this.destroyed = true;
     this.pathTracer?.destroy();
+    this.culling?.destroy();
     this.pathTracer = null;
     destroySafely(this.sssProfiles);
     if (this.feedback) for (const b of [this.feedback.draws, this.feedback.wanted, this.feedback.readback, this.feedback.depth]) destroySafely(b);

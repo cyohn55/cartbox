@@ -1555,7 +1555,8 @@ export class MeshOverlaySurface implements DisplaySurface {
       temporal,
       ...(upscaling && (width < output.width || height < output.height) ? { upscale: { width: output.width, height: output.height } } : {}),
       reflections: this.options.reflections === true && this.quality.reflections === true,
-      ...(this.options.prepass === true ? { prepass: true } : {}),
+      // With a prepass the AAA scene culls on the GPU (F0e): the frustum, then a Hi-Z pyramid of the prepass's depths.
+      ...(this.options.prepass === true ? { prepass: true, gpuCull: true } : {}),
       ...(lighting ? { ...lit, localShadows: job.local, shadow: job.shadow, sunShadow: job.sunShadow, localShadowCasters: job.localShadowCasters, localShadowKey: job.localShadowKey, localShadowMoved: job.localShadowMoved, fog: lighting.fog ?? null, wind: lighting.wind ?? null } : {}),
       ...(job.reflectionCapture ? { reflectionCapture: job.reflectionCapture } : {}),
       ...(job.decals ? { decals: job.decals } : {}),

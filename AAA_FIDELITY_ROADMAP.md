@@ -247,6 +247,28 @@ Everything else depends on this track. It contains no visible "feature", but its
   - **Compute:** frustum and HZB occlusion culling, LOD selection, light clustering and skinning become compute passes with indirect draws.
   - **Workers:** asset decode (PNG, KTX2 transcode, meshopt), physics and navigation move to workers.
   - *Exit:* the main thread spends under 4 ms per frame in the renderer on Beaver Creek.
+  - **F0e-1, GPU-driven culling: done** on the `aaa` tier with a prepass (`player render/gpuCulling.ts`; `SceneDraw.gpuCull`, which the mesh overlay sets with the prepass). Before it, that path culled nothing: every copy in the scene was shaded every frame, and the only occlusion cull was a software depth pre-pass on the main thread, which nothing turned on.
+    - **Bounds without CPU work per copy.** Each batch gives its primitive's sphere (the box's centre and half-diagonal in the mesh's space, cached), widened by the wind's furthest bend this frame. The compute pass makes each copy's world sphere from the model matrix already in the instance buffer.
+    - **Round one, before the prepass:** each copy against the frustum's six planes. A workgroup per batch packs the survivors (and their motion records) in order with a prefix sum, into a region after the casters, and writes the batch's `drawIndexedIndirect` arguments. The prepass draws those.
+    - **Round two, after it:** a Hi-Z pyramid of the prepass's depths (an `r32float` mip chain, each texel the farthest of the four, or at an odd edge nine, below it). Each survivor's sphere box is projected, the level where it spans at most two texels each way is read, and the copy is hidden when its nearest depth lies behind the farthest there. A box reaching the eye's plane is kept. What remains is packed over the first round's, and the shading passes draw it.
+    - **Conservative and exact.** The pyramid is this frame's own geometry, and copies keep their order, so the frame is the one drawn without culling, less what nothing could see.
+    - **Drawn whole:** batches whose vertices move (live skinning and cloth, a material graph's world-position offset), and see-through ones (drawn in order, farthest first).
+    - **Indirect draws start at instance 0.** A later first instance needs the optional `indirect-first-instance` feature, so a new uniform slot (`cull0`, bytes 1120–1135) adds where a culled batch's copies start.
+    - *Tests:* `Unit Tests/gpu-culling.test.ts` covers:
+      - the frustum's planes (inside, behind the eye, past the far plane, either side of the 30° edge), and a primitive's sphere and sway;
+      - on Dawn, a wall with 3 cubes in front, 5 behind, 1 behind but peeking past its edge, and 4 off screen: the first round keeps 9 cubes, the second 4, the wall both times, and the frame matches the unculled one to within 1e-5;
+      - a batch whose vertices move keeps all three copies, even off screen.
+    - *Found, then fixed:*
+      - indirect draws with a first instance drew nothing without the optional feature (so the prepass wrote no depth, and nothing was ever hidden);
+      - `textureDimensions(hiz, level)` read 1 at every level on Dawn: the level's size is now shifted from the first's;
+      - `from` is reserved in WGSL.
+    - *Left for F0e:*
+      - LOD selection and light clustering as compute passes;
+      - culling the shadow casters per cascade and light;
+      - a two-phase cull (last frame's visible set first) so the prepass skips hidden copies too;
+      - with MSAA, the second round tests the frustum alone (the pyramid reads single-sampled depth);
+      - decoding, physics and navigation on workers;
+      - measuring the exit on Beaver Creek.
 
 ### F1. Textures and materials
 

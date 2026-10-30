@@ -4919,6 +4919,13 @@ interface SceneDraw {
      * it is opt-in; conservative, so it never removes visible geometry.
      */
     readonly occlude?: boolean;
+    /**
+     * Cull on the GPU (F0e): with a prepass on the linear-light renderer, the
+     * frustum and a Hi-Z pyramid of the prepass's depths decide which copies the
+     * frame draws, through indirect draws. Conservative, like `occlude`, with no
+     * CPU pass; ignored elsewhere.
+     */
+    readonly gpuCull?: boolean;
 }
 /**
  * A frame drawn to stay on the GPU (AAA_FIDELITY_ROADMAP.md F0a): a
@@ -5905,6 +5912,10 @@ declare class WebgpuSceneRenderer implements SceneRenderer {
     private destroyed;
     /** The path-traced reference (F10b), made the first time it is shown. */
     private pathTracer;
+    /** GPU culling (F0e), made on first use. */
+    private culling;
+    /** This frame's GPU cull, while it encodes: the draws index the culling's arguments. */
+    private frameCull;
     /**
      * The bound shadow map — the 1x1 blank when no shadow this frame, else an
      * r32float sized to the shadow input and uploaded from the CPU-generated map.
@@ -6633,9 +6644,11 @@ declare function bakeProbeVolumeGpu(device: any, min: readonly [number, number, 
  * 1088 char0      vec4<f32>    16   character shading (F7c; characterShading.ts): x = its kind
  *                                    (0 none, 1 skin, 2 eye, 3 hair, 4 mouth), yzw = its terms
  * 1104 char1      vec4<f32>    16   its other terms (a hair's dither and frame, a mouth's opening)
+ * 1120 cull0      vec4<f32>    16   x = where a GPU-culled draw's copies start in the instance buffer (F0e;
+ *                                    gpuCulling.ts), added to `instance_index`; 0 otherwise
  * ```
  *
- * 1120 bytes used, padded to a 1280-byte stride (a 256-byte multiple a dynamic
+ * 1136 bytes used, padded to a 1280-byte stride (a 256-byte multiple a dynamic
  * uniform offset can address), so one buffer still holds every draw in a
  * frame — uniforms are written per batch, not per copy, so the stride costs
  * little. The metallic-roughness inputs and the environment carry the Modern
@@ -6650,7 +6663,7 @@ declare const UNIFORM_STRIDE = 1280;
  * bind group layout's `minBindingSize` must be: it makes a WGSL struct that
  * grows past what this module writes fail at pipeline creation.
  */
-declare const UNIFORM_BYTES_USED = 1120;
+declare const UNIFORM_BYTES_USED = 1136;
 /** The same stride counted in float32s, which is how `writeBuffer` sizes it. */
 declare const UNIFORM_FLOATS: number;
 /**
@@ -6897,6 +6910,8 @@ interface InstanceUniform {
     readonly windBefore?: readonly [number, number, number, number] | null;
     /** Where the frame's motion transforms start in the instance buffer (F0c). */
     readonly motionBase?: number;
+    /** Where a GPU-culled draw's copies start in the instance buffer (F0e): its indirect draws start at instance 0. */
+    readonly instanceBase?: number;
     /** The lighting channels the draw's copies are on (F2e), absent the first. */
     readonly lightChannels?: number;
     /** How many probes the shader loops over, where not `environment.probes`' (the linear variant's GPU-captured ones, F3b). */

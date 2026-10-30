@@ -286,6 +286,13 @@ export interface SceneDraw {
    * it is opt-in; conservative, so it never removes visible geometry.
    */
   readonly occlude?: boolean;
+  /**
+   * Cull on the GPU (F0e): with a prepass on the linear-light renderer, the
+   * frustum and a Hi-Z pyramid of the prepass's depths decide which copies the
+   * frame draws, through indirect draws. Conservative, like `occlude`, with no
+   * CPU pass; ignored elsewhere.
+   */
+  readonly gpuCull?: boolean;
 }
 
 /**
