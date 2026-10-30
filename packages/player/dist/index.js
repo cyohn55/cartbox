@@ -21690,6 +21690,124 @@ function sameKey(a, b) {
   return true;
 }
 
+// src/render/gpuTransforms.ts
+var COPY_DST3 = 8;
+var UNIFORM4 = 64;
+var WORKGROUP2 = 64;
+var UNIFORM_BYTES2 = 4 * 64 + 16;
+var TRANSFORM_WGSL = (
+  /* wgsl */
+  `
+struct Frame {
+  viewProj: mat4x4<f32>,
+  lightViewProj: mat4x4<f32>,
+  viewProjNow: mat4x4<f32>,
+  viewProjThen: mat4x4<f32>,
+  counts: vec4<u32>,   // x = copies, y = 1 with a shadow (else its matrix is zero), z = 1 with motion records (after the copies')
+};
+@group(0) @binding(0) var<uniform> frame: Frame;
+@group(0) @binding(1) var<storage, read_write> xf: array<f32>;
+
+const RECORD = ${INSTANCE_FLOATS}u;
+
+fn modelAt(i: u32) -> mat4x4<f32> {
+  let b = i * RECORD + 32u;
+  return mat4x4<f32>(
+    vec4<f32>(xf[b], xf[b + 1u], xf[b + 2u], xf[b + 3u]),
+    vec4<f32>(xf[b + 4u], xf[b + 5u], xf[b + 6u], xf[b + 7u]),
+    vec4<f32>(xf[b + 8u], xf[b + 9u], xf[b + 10u], xf[b + 11u]),
+    vec4<f32>(xf[b + 12u], xf[b + 13u], xf[b + 14u], xf[b + 15u]),
+  );
+}
+
+fn put(i: u32, at: u32, m: mat4x4<f32>) {
+  let b = i * RECORD + at;
+  for (var c = 0u; c < 4u; c = c + 1u) {
+    for (var r = 0u; r < 4u; r = r + 1u) { xf[b + c * 4u + r] = m[c][r]; }
+  }
+}
+
+@compute @workgroup_size(${WORKGROUP2})
+fn fill(@builtin(global_invocation_id) id: vec3<u32>) {
+  let i = id.x;
+  let n = frame.counts.x;
+  if (i < n) {
+    let model = modelAt(i);
+    put(i, 0u, frame.viewProj * model);
+    // With no shadow the light's matrix is zero, and so is the product.
+    put(i, 16u, frame.lightViewProj * model);
+    // The normal basis: the model's own 3\xD73, a column a vec4.
+    let b = i * RECORD + 48u;
+    for (var c = 0u; c < 3u; c = c + 1u) {
+      for (var r = 0u; r < 3u; r = r + 1u) { xf[b + c * 4u + r] = model[c][r]; }
+      xf[b + c * 4u + 3u] = 0.0;
+    }
+  } else if (frame.counts.z != 0u && i < 2u * n) {
+    // A motion record: its model slot holds last frame's model; the copy's own is its record's.
+    put(i, 0u, frame.viewProjNow * modelAt(i - n));
+    put(i, 16u, frame.viewProjThen * modelAt(i));
+  }
+}
+`
+);
+function writeInstanceModel(target, index, model) {
+  const base = index * INSTANCE_FLOATS + 32;
+  for (let i = 0; i < 16; i += 1) target[base + i] = model[i];
+}
+var GpuTransforms = class {
+  constructor(device) {
+    this.device = device;
+    this.data = new ArrayBuffer(UNIFORM_BYTES2);
+    this.copies = 0;
+    this.motion = false;
+    this.uniforms = device.createBuffer({ size: UNIFORM_BYTES2, usage: UNIFORM4 | COPY_DST3 });
+    this.layout = device.createBindGroupLayout({
+      entries: [
+        { binding: 0, visibility: 4, buffer: { type: "uniform" } },
+        { binding: 1, visibility: 4, buffer: { type: "storage" } }
+      ]
+    });
+    this.pipeline = device.createComputePipeline({
+      layout: device.createPipelineLayout({ bindGroupLayouts: [this.layout] }),
+      compute: { module: device.createShaderModule({ code: TRANSFORM_WGSL }), entryPoint: "fill" }
+    });
+  }
+  /** The frame's `copies` and matrices; their records (and motion records, `copies` on) start at 0. */
+  prepare(copies, frame) {
+    const f3 = new Float32Array(this.data);
+    const mat = (m, at) => {
+      for (let i = 0; i < 16; i += 1) f3[at + i] = m ? m[i] : 0;
+    };
+    mat(frame.viewProj, 0);
+    mat(frame.lightViewProj, 16);
+    mat(frame.motion?.now ?? null, 32);
+    mat(frame.motion?.then ?? null, 48);
+    new Uint32Array(this.data).set([copies, frame.lightViewProj ? 1 : 0, frame.motion ? 1 : 0, 0], 64);
+    this.device.queue.writeBuffer(this.uniforms, 0, this.data);
+    this.copies = copies;
+    this.motion = frame.motion !== null;
+  }
+  encode(encoder, instances) {
+    const records = this.copies * (this.motion ? 2 : 1);
+    if (records === 0) return;
+    const group = this.device.createBindGroup({
+      layout: this.layout,
+      entries: [
+        { binding: 0, resource: { buffer: this.uniforms } },
+        { binding: 1, resource: { buffer: instances } }
+      ]
+    });
+    const pass = encoder.beginComputePass();
+    pass.setPipeline(this.pipeline);
+    pass.setBindGroup(0, group);
+    pass.dispatchWorkgroups(Math.ceil(records / WORKGROUP2));
+    pass.end();
+  }
+  destroy() {
+    this.uniforms.destroy();
+  }
+};
+
 // src/render/pathTracer.ts
 import { buildBvh as buildBvh2, cameraPositionFromView as cameraPositionFromView3, resolveExtensions, multiplyMat4 as multiplyMat46 } from "@cartbox/editor";
 
@@ -21711,7 +21829,7 @@ import {
 var LIGHTMAP_MAX_BOUNCES = 8;
 var LIGHTMAP_MAX_LIGHTS = 4;
 var LIGHTMAP_MAX_LOCAL_LIGHTS = 256;
-var WORKGROUP2 = 64;
+var WORKGROUP3 = 64;
 var CHUNK_TEXELS = 65536;
 var PATHS_PER_SUBMIT = 1 << 19;
 function pathBudget(local) {
@@ -21722,10 +21840,10 @@ var LIGHT_VEC4S = 5;
 var PROBE_ACC_VEC4S = 10 + PROBE_DEPTH_SIDE * PROBE_DEPTH_SIDE;
 var ACC_FLOATS = 16;
 var STORAGE3 = 128;
-var COPY_DST3 = 8;
+var COPY_DST4 = 8;
 var COPY_SRC2 = 4;
 var MAP_READ = 1;
-var UNIFORM4 = 64;
+var UNIFORM5 = 64;
 function toLinear(c) {
   const v = Math.max(0, c);
   return v <= 0.04045 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4;
@@ -22157,7 +22275,7 @@ fn pathFrom(origin: vec3<f32>, dir: vec3<f32>) -> Path {
   return out;
 }
 
-@compute @workgroup_size(${WORKGROUP2})
+@compute @workgroup_size(${WORKGROUP3})
 fn main(@builtin(global_invocation_id) id: vec3<u32>) {
   if (id.x >= params.run.y) { return; }
   let j = params.run.x + id.x;
@@ -22197,7 +22315,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
 // A probe (F3d-3): rays over the whole sphere (a Fibonacci set for the bake, turned per probe about the
 // vertical), projected onto L2 SH; the sky's share; backs met; and per octahedral texel the distance the
 // first segment travelled (capped), with its square.
-@compute @workgroup_size(${WORKGROUP2})
+@compute @workgroup_size(${WORKGROUP3})
 fn probeMain(@builtin(global_invocation_id) id: vec3<u32>) {
   if (id.x >= params.run.y) { return; }
   let p = params.run.x + id.x;
@@ -22266,7 +22384,7 @@ async function bakeLightmapGpu(device, layout, occluders, options = {}, progress
       }
     }
     const upload = (data) => {
-      const buffer = device.createBuffer({ size: Math.max(16, data.byteLength), usage: STORAGE3 | COPY_DST3 });
+      const buffer = device.createBuffer({ size: Math.max(16, data.byteLength), usage: STORAGE3 | COPY_DST4 });
       device.queue.writeBuffer(buffer, 0, data.buffer, data.byteOffset, data.byteLength);
       return buffer;
     };
@@ -22275,8 +22393,8 @@ async function bakeLightmapGpu(device, layout, occluders, options = {}, progress
     const accum = device.createBuffer({ size: acc.byteLength, usage: STORAGE3 | COPY_SRC2 });
     const skyBuffer = upload(skyData);
     const lightBuffer = upload(lights.data);
-    const params = device.createBuffer({ size: PARAMS_BYTES, usage: UNIFORM4 | COPY_DST3 });
-    const readback = device.createBuffer({ size: acc.byteLength, usage: MAP_READ | COPY_DST3 });
+    const params = device.createBuffer({ size: PARAMS_BYTES, usage: UNIFORM5 | COPY_DST4 });
+    const readback = device.createBuffer({ size: acc.byteLength, usage: MAP_READ | COPY_DST4 });
     try {
       const pipeline = device.createComputePipeline({ layout: "auto", compute: { module: device.createShaderModule({ code: LIGHTMAP_TRACE_WGSL }), entryPoint: "main" } });
       const group = device.createBindGroup({
@@ -22297,7 +22415,7 @@ async function bakeLightmapGpu(device, layout, occluders, options = {}, progress
           const pass = encoder2.beginComputePass();
           pass.setPipeline(pipeline);
           pass.setBindGroup(0, group);
-          pass.dispatchWorkgroups(Math.ceil(texelsHere / WORKGROUP2));
+          pass.dispatchWorkgroups(Math.ceil(texelsHere / WORKGROUP3));
           pass.end();
           device.queue.submit([encoder2.finish()]);
           await device.queue.onSubmittedWorkDone();
@@ -22447,12 +22565,12 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
 );
 async function denoiseLightmap(device, atlas, texel, passes = DENOISE_PASSES, sigma = DENOISE_SIGMA) {
   const { size, values, guide } = atlas;
-  const guideBuffer = device.createBuffer({ size: guide.byteLength, usage: STORAGE3 | COPY_DST3 });
+  const guideBuffer = device.createBuffer({ size: guide.byteLength, usage: STORAGE3 | COPY_DST4 });
   device.queue.writeBuffer(guideBuffer, 0, guide.buffer, guide.byteOffset, guide.byteLength);
-  const ping = [0, 1].map(() => device.createBuffer({ size: values.byteLength, usage: STORAGE3 | COPY_DST3 | COPY_SRC2 }));
+  const ping = [0, 1].map(() => device.createBuffer({ size: values.byteLength, usage: STORAGE3 | COPY_DST4 | COPY_SRC2 }));
   device.queue.writeBuffer(ping[0], 0, values.buffer, values.byteOffset, values.byteLength);
-  const params = device.createBuffer({ size: 16, usage: UNIFORM4 | COPY_DST3 });
-  const readback = device.createBuffer({ size: values.byteLength, usage: MAP_READ | COPY_DST3 });
+  const params = device.createBuffer({ size: 16, usage: UNIFORM5 | COPY_DST4 });
+  const readback = device.createBuffer({ size: values.byteLength, usage: MAP_READ | COPY_DST4 });
   try {
     const pipeline = device.createComputePipeline({ layout: "auto", compute: { module: device.createShaderModule({ code: LIGHTMAP_DENOISE_WGSL }), entryPoint: "main" } });
     const groups = [0, 1].map(
@@ -22527,7 +22645,7 @@ async function bakeProbeVolumeGpu(device, min, max, counts, occluders, options =
   const acc = new Float32Array(count * PROBE_ACC_VEC4S * 4);
   const scene = packLightmapScene(occluders);
   const upload = (data) => {
-    const buffer = device.createBuffer({ size: Math.max(16, data.byteLength), usage: STORAGE3 | COPY_DST3 });
+    const buffer = device.createBuffer({ size: Math.max(16, data.byteLength), usage: STORAGE3 | COPY_DST4 });
     device.queue.writeBuffer(buffer, 0, data.buffer, data.byteOffset, data.byteLength);
     return buffer;
   };
@@ -22535,8 +22653,8 @@ async function bakeProbeVolumeGpu(device, min, max, counts, occluders, options =
   const accum = device.createBuffer({ size: acc.byteLength, usage: STORAGE3 | COPY_SRC2 });
   const skyBuffer = upload(sky ? sky.data : new Float32Array(4));
   const lightBuffer = upload(lights.data);
-  const params = device.createBuffer({ size: PARAMS_BYTES, usage: UNIFORM4 | COPY_DST3 });
-  const readback = device.createBuffer({ size: acc.byteLength, usage: MAP_READ | COPY_DST3 });
+  const params = device.createBuffer({ size: PARAMS_BYTES, usage: UNIFORM5 | COPY_DST4 });
+  const readback = device.createBuffer({ size: acc.byteLength, usage: MAP_READ | COPY_DST4 });
   try {
     const pipeline = device.createComputePipeline({ layout: "auto", compute: { module: device.createShaderModule({ code: LIGHTMAP_TRACE_WGSL }), entryPoint: "probeMain" } });
     const group = device.createBindGroup({
@@ -22551,7 +22669,7 @@ async function bakeProbeVolumeGpu(device, min, max, counts, occluders, options =
       const pass = encoder2.beginComputePass();
       pass.setPipeline(pipeline);
       pass.setBindGroup(0, group);
-      pass.dispatchWorkgroups(Math.ceil(count / WORKGROUP2));
+      pass.dispatchWorkgroups(Math.ceil(count / WORKGROUP3));
       pass.end();
       device.queue.submit([encoder2.finish()]);
       await device.queue.onSubmittedWorkDone();
@@ -22959,14 +23077,14 @@ var MAX_CAPTURE_SIDE = 8192;
 var MAT_VEC4S = 11;
 var PRIM_VEC4S = 7;
 var ATTR_VEC4S = 4;
-var WORKGROUP3 = 8;
+var WORKGROUP4 = 8;
 var PARAMS_BYTES2 = 176;
 var CAPTURE_PATHS_PER_SUBMIT = 1 << 20;
 var STORAGE4 = 128;
-var COPY_DST4 = 8;
+var COPY_DST5 = 8;
 var COPY_SRC3 = 4;
 var MAP_READ2 = 1;
-var UNIFORM5 = 64;
+var UNIFORM6 = 64;
 var TEXTURE_BINDING3 = 4;
 var STORAGE_BINDING2 = 8;
 var TEXTURE_COPY_SRC = 1;
@@ -23610,7 +23728,7 @@ fn unproject(ndc: vec2<f32>) -> vec3<f32> {
   return p.xyz / p.w;
 }
 
-@compute @workgroup_size(${WORKGROUP3}, ${WORKGROUP3})
+@compute @workgroup_size(${WORKGROUP4}, ${WORKGROUP4})
 fn main(@builtin(global_invocation_id) id: vec3<u32>) {
   if (id.x >= params.run.x || id.y >= params.run.y) { return; }
   let px = params.image.z + id.x;
@@ -23650,7 +23768,7 @@ var PATH_RESOLVE_WGSL = (
 @group(0) @binding(0) var<storage, read> accum: array<vec4<f32>>;
 @group(0) @binding(1) var frame: texture_storage_2d<rgba16float, write>;
 @group(0) @binding(2) var<uniform> info: vec4<u32>; // x, y = size, z = samples
-@compute @workgroup_size(${WORKGROUP3}, ${WORKGROUP3})
+@compute @workgroup_size(${WORKGROUP4}, ${WORKGROUP4})
 fn resolve(@builtin(global_invocation_id) id: vec3<u32>) {
   if (id.x >= info.x || id.y >= info.y) { return; }
   let n = max(1.0, f32(info.z));
@@ -23691,7 +23809,7 @@ var TracerCore = class {
     this.skyFor = { key: null, buffer: null, panorama: null };
     this.lightBuffer = null;
     const table2 = brdfLut();
-    this.dfg = device.createBuffer({ size: table2.byteLength, usage: STORAGE4 | COPY_DST4 });
+    this.dfg = device.createBuffer({ size: table2.byteLength, usage: STORAGE4 | COPY_DST5 });
     device.queue.writeBuffer(this.dfg, 0, table2);
   }
   get tracePipeline() {
@@ -23703,7 +23821,7 @@ var TracerCore = class {
     return this.resolvePipeline;
   }
   storage(data) {
-    const buffer = this.device.createBuffer({ size: Math.max(16, Math.ceil(data.byteLength / 16) * 16), usage: STORAGE4 | COPY_DST4 });
+    const buffer = this.device.createBuffer({ size: Math.max(16, Math.ceil(data.byteLength / 16) * 16), usage: STORAGE4 | COPY_DST5 });
     this.device.queue.writeBuffer(buffer, 0, data.buffer, data.byteOffset, data.byteLength);
     return buffer;
   }
@@ -23764,8 +23882,8 @@ var PathTracer = class _PathTracer {
     /** Samples each pixel holds. */
     this.samples = 0;
     this.core = new TracerCore(device);
-    this.params = device.createBuffer({ size: PARAMS_BYTES2, usage: UNIFORM5 | COPY_DST4 });
-    this.resolveInfo = device.createBuffer({ size: 16, usage: UNIFORM5 | COPY_DST4 });
+    this.params = device.createBuffer({ size: PARAMS_BYTES2, usage: UNIFORM6 | COPY_DST5 });
+    this.resolveInfo = device.createBuffer({ size: 16, usage: UNIFORM6 | COPY_DST5 });
   }
   static create(device) {
     return new _PathTracer(device);
@@ -23779,7 +23897,7 @@ var PathTracer = class _PathTracer {
     if (this.size.width === width && this.size.height === height && this.accum) return;
     this.accum?.destroy();
     this.frame?.destroy();
-    this.accum = this.device.createBuffer({ size: width * height * 16, usage: STORAGE4 | COPY_DST4 | COPY_SRC3 });
+    this.accum = this.device.createBuffer({ size: width * height * 16, usage: STORAGE4 | COPY_DST5 | COPY_SRC3 });
     this.frame = this.device.createTexture({ size: { width, height }, format: "rgba16float", usage: TEXTURE_BINDING3 | STORAGE_BINDING2 | TEXTURE_COPY_SRC });
     this.size = { width, height };
     this.samples = 0;
@@ -23812,7 +23930,7 @@ var PathTracer = class _PathTracer {
       const pass = encoder.beginComputePass();
       pass.setPipeline(this.core.tracePipeline);
       pass.setBindGroup(0, this.core.traceGroup(this.accum, this.params));
-      pass.dispatchWorkgroups(Math.ceil(width / WORKGROUP3), Math.ceil(height / WORKGROUP3));
+      pass.dispatchWorkgroups(Math.ceil(width / WORKGROUP4), Math.ceil(height / WORKGROUP4));
       pass.end();
       this.samples += take;
     }
@@ -23830,7 +23948,7 @@ var PathTracer = class _PathTracer {
         ]
       })
     );
-    resolve.dispatchWorkgroups(Math.ceil(width / WORKGROUP3), Math.ceil(height / WORKGROUP3));
+    resolve.dispatchWorkgroups(Math.ceil(width / WORKGROUP4), Math.ceil(height / WORKGROUP4));
     resolve.end();
     this.device.queue.submit([encoder.finish()]);
     return this.frame;
@@ -23847,7 +23965,7 @@ async function captureReference(device, instances, draw, options) {
   const width = Math.max(1, Math.min(MAX_CAPTURE_SIDE, Math.round(options.width)));
   const height = Math.max(1, Math.min(MAX_CAPTURE_SIDE, Math.round(options.height)));
   const samples = Math.max(1, Math.round(options.samples ?? 256));
-  const tile = Math.max(WORKGROUP3, Math.min(2048, Math.round(options.tile ?? 512)));
+  const tile = Math.max(WORKGROUP4, Math.min(2048, Math.round(options.tile ?? 512)));
   const core = new TracerCore(device);
   core.setScene(instances);
   const sky = core.setSky(draw.environment);
@@ -23855,9 +23973,9 @@ async function captureReference(device, instances, draw, options) {
   core.setLights(lights.data);
   const camera = cameraOf(draw);
   const setup = { bounces: options.bounces ?? REFERENCE_BOUNCES, sky, lights, ambient: referenceAmbient(draw), clamp: options.clamp ?? 0, background: options.background ?? true, mapTable: core.mapTable };
-  const accum = device.createBuffer({ size: tile * tile * 16, usage: STORAGE4 | COPY_DST4 | COPY_SRC3 });
-  const params = device.createBuffer({ size: PARAMS_BYTES2, usage: UNIFORM5 | COPY_DST4 });
-  const readback = device.createBuffer({ size: tile * tile * 16, usage: MAP_READ2 | COPY_DST4 });
+  const accum = device.createBuffer({ size: tile * tile * 16, usage: STORAGE4 | COPY_DST5 | COPY_SRC3 });
+  const params = device.createBuffer({ size: PARAMS_BYTES2, usage: UNIFORM6 | COPY_DST5 });
+  const readback = device.createBuffer({ size: tile * tile * 16, usage: MAP_READ2 | COPY_DST5 });
   const rgba = new Uint8ClampedArray(width * height * 4);
   const hdr = options.hdr ? new Float32Array(width * height * 4) : null;
   const exposure = options.exposure ?? 1;
@@ -23884,7 +24002,7 @@ async function captureReference(device, instances, draw, options) {
           const pass = encoder.beginComputePass();
           pass.setPipeline(core.tracePipeline);
           pass.setBindGroup(0, group);
-          pass.dispatchWorkgroups(Math.ceil(tw / WORKGROUP3), Math.ceil(th / WORKGROUP3));
+          pass.dispatchWorkgroups(Math.ceil(tw / WORKGROUP4), Math.ceil(th / WORKGROUP4));
           pass.end();
           device.queue.submit([encoder.finish()]);
           await device.queue.onSubmittedWorkDone();
@@ -26592,8 +26710,8 @@ var GI_UNIFORM_FLOATS = 32;
 var GI_REACH = 1.5;
 var GI_BACKFACE_LIMIT = 0.6;
 var STORAGE5 = 128;
-var COPY_DST5 = 8;
-var UNIFORM6 = 64;
+var COPY_DST6 = 8;
+var UNIFORM7 = 64;
 function randomRotation(u1, u2, u3) {
   const a = Math.sqrt(1 - u1), b = Math.sqrt(u1);
   const [x, y, z, w] = [a * Math.sin(2 * Math.PI * u2), a * Math.cos(2 * Math.PI * u2), b * Math.sin(2 * Math.PI * u3), b * Math.cos(2 * Math.PI * u3)];
@@ -26900,13 +27018,13 @@ var GpuProbeGi = class {
     this.target = null;
     const packed = packLightmapScene(occluders);
     const upload = (view) => {
-      const buffer = device.createBuffer({ size: Math.max(16, view.byteLength), usage: STORAGE5 | COPY_DST5 });
+      const buffer = device.createBuffer({ size: Math.max(16, view.byteLength), usage: STORAGE5 | COPY_DST6 });
       device.queue.writeBuffer(buffer, 0, view.buffer, view.byteOffset, view.byteLength);
       return buffer;
     };
     this.scene = [upload(packed.nodes), upload(packed.tris), upload(packed.mats)];
-    this.uniforms = device.createBuffer({ size: GI_UNIFORM_FLOATS * 4, usage: UNIFORM6 | COPY_DST5 });
-    this.params = device.createBuffer({ size: 64, usage: UNIFORM6 | COPY_DST5 });
+    this.uniforms = device.createBuffer({ size: GI_UNIFORM_FLOATS * 4, usage: UNIFORM7 | COPY_DST6 });
+    this.params = device.createBuffer({ size: 64, usage: UNIFORM7 | COPY_DST6 });
   }
   /**
    * Write this frame's uniforms and encode its passes into `encoder`: the
@@ -26976,13 +27094,13 @@ var GpuProbeGi = class {
     if (!this.lights || this.lightsSize < packedLights.data.byteLength) {
       this.lights?.destroy();
       this.lightsSize = Math.max(16, packedLights.data.byteLength);
-      this.lights = device.createBuffer({ size: this.lightsSize, usage: STORAGE5 | COPY_DST5 });
+      this.lights = device.createBuffer({ size: this.lightsSize, usage: STORAGE5 | COPY_DST6 });
     }
     device.queue.writeBuffer(this.lights, 0, packedLights.data);
     if (sky !== this.skySource) {
       this.sky?.destroy();
       const data = sky ? sky.data : new Float32Array(4);
-      this.sky = device.createBuffer({ size: Math.max(16, data.byteLength), usage: STORAGE5 | COPY_DST5 });
+      this.sky = device.createBuffer({ size: Math.max(16, data.byteLength), usage: STORAGE5 | COPY_DST6 });
       device.queue.writeBuffer(this.sky, 0, data);
       this.skySource = sky;
       this.skySize = sky ? [sky.width, sky.height] : [0, 0];
@@ -27003,8 +27121,8 @@ var GpuProbeGi = class {
     const device = this.device;
     const packedLights = lit ? null : this.prepare(lights, sky);
     if (packedLights) device.queue.writeBuffer(this.params, 0, lightmapParams(0, 0, 0, 1, 1, 1, sky, packedLights, 0));
-    this.reflectUniforms ?? (this.reflectUniforms = device.createBuffer({ size: this.reflectData.byteLength, usage: UNIFORM6 | COPY_DST5 }));
-    this.reflectGi ?? (this.reflectGi = device.createBuffer({ size: GI_UNIFORM_FLOATS * 4, usage: UNIFORM6 | COPY_DST5 }));
+    this.reflectUniforms ?? (this.reflectUniforms = device.createBuffer({ size: this.reflectData.byteLength, usage: UNIFORM7 | COPY_DST6 }));
+    this.reflectGi ?? (this.reflectGi = device.createBuffer({ size: GI_UNIFORM_FLOATS * 4, usage: UNIFORM7 | COPY_DST6 }));
     this.blankProbes ?? (this.blankProbes = device.createBuffer({ size: 16, usage: STORAGE5 }));
     this.reflectData.set(frame.invViewProj, 0);
     this.reflectData.set([frame.eye[0], frame.eye[1], frame.eye[2], this.frames % 16777216], 16);
@@ -29390,7 +29508,8 @@ fn octEncode(n: vec3<f32>) -> vec2<f32> {
 // The prepass's vertex stage: the scene's own (vertexOf, so the depth is the
 // same), plus where the vertex is on screen now and was last frame, from this
 // frame's motion transforms (xf from u.motion0.x: mvp = now, lightMvp = then,
-// both unjittered) and the vertex's previous position (a skinned mesh's last
+// both unjittered; on the AAA tier made on the GPU from the copy's model and
+// its last one, which the motion record's model holds) and the vertex's previous position (a skinned mesh's last
 // vertices; its current ones otherwise) bent by the previous frame's wind.
 struct PrepassIn {
   @builtin(position) @invariant pos: vec4<f32>,
@@ -29567,6 +29686,8 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     this.lightClusterer = null;
     /** The scene passes' recorded draws (F0e), on the GPU-culled path. */
     this.bundles = null;
+    /** Each copy's transforms made on the GPU (F0e), on the AAA tier. */
+    this.transforms = null;
     /** The LOD chains whose levels the GPU picks this frame (F0e). */
     this.frameGpuLods = null;
     this.frameLightClusters = false;
@@ -30998,7 +31119,8 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
         entry.textures.emis !== null
       );
       return {
-        mvp: multiplyMat48(viewProj, model),
+        // The uniform's clip and light transforms are never read: each copy's own come from the instance buffer (F0e).
+        mvp: model,
         normalBasis: normalBasis3x3(model),
         baseColor: entry.primitive.material.baseColorFactor,
         hasTexture: entry.textures.base !== null,
@@ -31009,7 +31131,7 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
         hasOcclusionMap: entry.textures.occ !== null,
         hasEmissiveMap: entry.textures.emis !== null,
         environment: draw.environment ?? null,
-        lightMvp: shadow ? multiplyMat48(shadow.lightViewProj, model) : null,
+        lightMvp: null,
         shadow: shadowParams,
         tonemap: draw.tonemap ?? null,
         hasSsao: ssao !== null,
@@ -31055,7 +31177,13 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
         return;
       }
       entry.first = next;
-      for (const model of entry.models) {
+      if (this.hdr) {
+        for (const model of entry.models) {
+          writeInstanceModel(this.instanceData, next, model);
+          if (prepass) writeInstanceModel(this.instanceData, instanceCount + next, this.motion.get(model) ?? model);
+          next += 1;
+        }
+      } else for (const model of entry.models) {
         writeInstanceTransform(this.instanceData, next, {
           mvp: multiplyMat48(viewProj, model),
           lightMvp: shadow ? multiplyMat48(shadow.lightViewProj, model) : null,
@@ -31089,6 +31217,13 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
       this.device.queue.writeBuffer(this.sssProfiles, 0, packSssProfiles(sssProfiles));
     }
     this.device.queue.writeBuffer(this.instanceBuffer, 0, this.instanceData, 0, nextCaster * INSTANCE_FLOATS);
+    if (this.hdr && instanceCount > 0) {
+      const transforms = this.transforms ?? (this.transforms = new GpuTransforms(this.device));
+      transforms.prepare(instanceCount, { viewProj, lightViewProj: shadow ? shadow.lightViewProj : null, motion: prepass ? { now: viewProjNow, then: viewProjThen } : null });
+      const encoder2 = this.device.createCommandEncoder();
+      transforms.encode(encoder2, this.instanceBuffer);
+      this.device.queue.submit([encoder2.finish()]);
+    }
     if (gpuCull) {
       this.culling ?? (this.culling = new GpuCulling(this.device));
       const gust = Math.hypot(windNow[0], windNow[1]) * (1 + windNow[3]);
@@ -33068,6 +33203,7 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     this.pathTracer?.destroy();
     this.culling?.destroy();
     this.lightClusterer?.destroy();
+    this.transforms?.destroy();
     this.pathTracer = null;
     destroySafely(this.sssProfiles);
     if (this.feedback) for (const b of [this.feedback.draws, this.feedback.wanted, this.feedback.readback, this.feedback.depth]) destroySafely(b);

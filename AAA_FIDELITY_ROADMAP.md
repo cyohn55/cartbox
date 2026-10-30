@@ -289,6 +289,16 @@ Everything else depends on this track. It contains no visible "feature", but its
       - culling shadow casters per cascade and light; a two-phase cull; the occlusion round with MSAA;
       - skinning as a compute pass; physics and navigation on workers;
       - measuring the exit in a browser on hardware.
+  - **F0e-3, each copy's transforms on the GPU: done** on the `aaa` tier (`render/gpuTransforms.ts`).
+    - **The CPU writes only the model.** Each copy's record gets its model matrix, and its motion record gets last frame's model in the same slot. One compute pass, submitted after the upload and before the frame, fills the rest in place: the clip transform, the light's (zero with no shadow) and the normal basis; and in the motion record, the unjittered clip transforms now and last frame. Before it the CPU multiplied four matrices a copy, every frame.
+    - Each invocation writes only its own record and reads only model slots, which nothing writes, so no copy waits on another.
+    - **The per-draw uniform's `mvp` and `lightMvp` are no longer computed.** No shader reads them; every copy's own come from the instance buffer.
+    - The fantasy tiers keep the CPU's transforms, so they stay in parity with the software rasteriser.
+    - *Tests (`gpu-transforms.test.ts`):* on Dawn, 150 copies' records match the CPU's to within 1e-6 of each matrix's largest entry, and their normal bases exactly; the light transform is zero with no shadow; the motion records match, with last frame's models moved.
+    - *Measured* as in F0e-2 (Beaver Creek, three readings): the culled path's renderer JS falls from about 14.5 ms to 5.3–6.8 ms a frame. **The exit (under 4 ms) is still not met.** What remains is spread out: packing each draw's uniforms (about 1–2 ms), planning the cull, batching, and encoding.
+    - *Left for F0e:*
+      - per-draw uniforms written only when they change;
+      - the rest of F0e-2's list.
 
 ### F1. Textures and materials
 

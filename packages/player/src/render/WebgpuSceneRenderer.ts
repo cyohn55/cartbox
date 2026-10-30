@@ -174,6 +174,7 @@ import { FEEDBACK_NONE, FEEDBACK_SLOTS, TextureStreamer, feedbackWgsl, footprint
 import { GpuCulling, primitiveSphere, type CullBatch, type CullSource } from "./gpuCulling.js";
 import { GpuLightClusters } from "./gpuLightClusters.js";
 import { BundleCache, type BundleTarget } from "./renderBundles.js";
+import { GpuTransforms, writeInstanceModel } from "./gpuTransforms.js";
 import { PathTracer, captureReference, type CaptureOptions, type ReferenceCapture } from "./pathTracer.js";
 import { IES_BASE, IES_MAX_PROFILES, IES_VEC4S, ltcTables, ltcWgsl } from "./ltc.js";
 import { PROBE_FACE, ProbeCapture, packCapturedProbes } from "./probeCapture.js";
@@ -2036,7 +2037,8 @@ fn octEncode(n: vec3<f32>) -> vec2<f32> {
 // The prepass's vertex stage: the scene's own (vertexOf, so the depth is the
 // same), plus where the vertex is on screen now and was last frame, from this
 // frame's motion transforms (xf from u.motion0.x: mvp = now, lightMvp = then,
-// both unjittered) and the vertex's previous position (a skinned mesh's last
+// both unjittered; on the AAA tier made on the GPU from the copy's model and
+// its last one, which the motion record's model holds) and the vertex's previous position (a skinned mesh's last
 // vertices; its current ones otherwise) bent by the previous frame's wind.
 struct PrepassIn {
   @builtin(position) @invariant pos: vec4<f32>,
@@ -2255,6 +2257,8 @@ export class WebgpuSceneRenderer implements SceneRenderer {
   private lightClusterer: GpuLightClusters | null = null;
   /** The scene passes' recorded draws (F0e), on the GPU-culled path. */
   private bundles: BundleCache | null = null;
+  /** Each copy's transforms made on the GPU (F0e), on the AAA tier. */
+  private transforms: GpuTransforms | null = null;
   /** The LOD chains whose levels the GPU picks this frame (F0e). */
   private frameGpuLods: ReadonlySet<LodChain> | null = null;
   private frameLightClusters = false;
@@ -3902,7 +3906,8 @@ export class WebgpuSceneRenderer implements SceneRenderer {
         entry.textures.emis !== null,
       );
       return {
-        mvp: multiplyMat4(viewProj, model),
+        // The uniform's clip and light transforms are never read: each copy's own come from the instance buffer (F0e).
+        mvp: model,
         normalBasis: normalBasis3x3(model),
         baseColor: entry.primitive.material.baseColorFactor,
         hasTexture: entry.textures.base !== null,
@@ -3913,7 +3918,7 @@ export class WebgpuSceneRenderer implements SceneRenderer {
         hasOcclusionMap: entry.textures.occ !== null,
         hasEmissiveMap: entry.textures.emis !== null,
         environment: draw.environment ?? null,
-        lightMvp: shadow ? multiplyMat4(shadow.lightViewProj, model) : null,
+        lightMvp: null,
         shadow: shadowParams,
         tonemap: draw.tonemap ?? null,
         hasSsao: ssao !== null,
@@ -3960,7 +3965,14 @@ export class WebgpuSceneRenderer implements SceneRenderer {
         return;
       }
       entry.first = next;
-      for (const model of entry.models) {
+      // On the AAA tier the GPU makes each copy's transforms from its model (F0e), and last frame's, in its motion record.
+      if (this.hdr) {
+        for (const model of entry.models) {
+          writeInstanceModel(this.instanceData, next, model);
+          if (prepass) writeInstanceModel(this.instanceData, instanceCount + next, this.motion.get(model) ?? model);
+          next += 1;
+        }
+      } else for (const model of entry.models) {
         writeInstanceTransform(this.instanceData, next, {
           mvp: multiplyMat4(viewProj, model),
           lightMvp: shadow ? multiplyMat4(shadow.lightViewProj, model) : null,
@@ -3996,6 +4008,13 @@ export class WebgpuSceneRenderer implements SceneRenderer {
       this.device.queue.writeBuffer(this.sssProfiles, 0, packSssProfiles(sssProfiles));
     }
     this.device.queue.writeBuffer(this.instanceBuffer, 0, this.instanceData, 0, nextCaster * INSTANCE_FLOATS);
+    if (this.hdr && instanceCount > 0) {
+      const transforms = (this.transforms ??= new GpuTransforms(this.device));
+      transforms.prepare(instanceCount, { viewProj, lightViewProj: shadow ? shadow.lightViewProj : null, motion: prepass ? { now: viewProjNow, then: viewProjThen } : null });
+      const encoder = this.device.createCommandEncoder();
+      transforms.encode(encoder, this.instanceBuffer);
+      this.device.queue.submit([encoder.finish()]);
+    }
     // GPU culling (F0e): each batch's sphere, widened by the wind's furthest bend; a batch whose vertices move, or that is see-through, is drawn whole.
     if (gpuCull) {
       this.culling ??= new GpuCulling(this.device);
@@ -6280,6 +6299,7 @@ export class WebgpuSceneRenderer implements SceneRenderer {
     this.pathTracer?.destroy();
     this.culling?.destroy();
     this.lightClusterer?.destroy();
+    this.transforms?.destroy();
     this.pathTracer = null;
     destroySafely(this.sssProfiles);
     if (this.feedback) for (const b of [this.feedback.draws, this.feedback.wanted, this.feedback.readback, this.feedback.depth]) destroySafely(b);
