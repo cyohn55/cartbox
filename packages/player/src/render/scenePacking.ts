@@ -932,10 +932,17 @@ export const FRAME_UNIFORM_RANGES: readonly (readonly [number, number])[] = [
   [OFFSET_REFRACT1, 8], // the camera's right, up and height
 ];
 
-/** Copy the frame's fields ({@link FRAME_UNIFORM_RANGES}) from `frame` (one draw's uniform, written this frame) into the draw at `index`. */
-export function copyFrameUniform(target: Float32Array, index: number, frame: Float32Array): void {
-  const base = index * UNIFORM_FLOATS;
-  for (const [offset, count] of FRAME_UNIFORM_RANGES) target.set(frame.subarray(offset, offset + count), base + offset);
+/** Every float {@link FRAME_UNIFORM_RANGES} covers, in one list (copied float by float, which beats a view per range). */
+const FRAME_FLOATS = Uint16Array.from(FRAME_UNIFORM_RANGES.flatMap(([offset, count]) => Array.from({ length: count }, (_, k) => offset + k)));
+
+/** Copy the frame's fields ({@link FRAME_UNIFORM_RANGES}) from the draw at `from` (written in full this frame) into the draw at `index`. */
+export function copyFrameUniform(target: Float32Array, index: number, from: number): void {
+  const to = index * UNIFORM_FLOATS;
+  const at = from * UNIFORM_FLOATS;
+  for (let i = 0; i < FRAME_FLOATS.length; i += 1) {
+    const f = FRAME_FLOATS[i]!;
+    target[to + f] = target[at + f]!;
+  }
 }
 
 /**

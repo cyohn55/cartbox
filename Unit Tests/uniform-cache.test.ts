@@ -65,12 +65,13 @@ function uniformFor(seed: number): InstanceUniform {
 describe("a draw's uniform, from frame to frame", () => {
   it("takes every change in the frame's inputs from the frame's fields alone", () => {
     for (const seed of [1, 2, 3]) {
+      // Slot 0 is written in full this frame; slot 1 kept from the last.
       const kept = new Float32Array(UNIFORM_FLOATS * 2);
       writeInstanceUniform(kept, 1, uniformFor(0));
-      const frame = new Float32Array(UNIFORM_FLOATS);
-      writeInstanceUniform(frame, 0, uniformFor(seed));
-      copyFrameUniform(kept, 1, frame);
+      writeInstanceUniform(kept, 0, uniformFor(seed));
+      copyFrameUniform(kept, 1, 0);
       const full = new Float32Array(UNIFORM_FLOATS * 2);
+      writeInstanceUniform(full, 0, uniformFor(seed));
       writeInstanceUniform(full, 1, uniformFor(seed));
       expect([...kept]).toEqual([...full]);
     }

@@ -3984,7 +3984,7 @@ export class WebgpuSceneRenderer implements SceneRenderer {
       for (let i = 0; same && i < key.length; i += 1) same = last![i] === key[i];
       for (let i = 0; same && i < 16; i += 1) same = lastModels[index * 16 + i] === Math.fround(model[i]!);
       if (same) {
-        copyFrameUniform(this.uniformData, index, this.uniformData.subarray(frameSlot * UNIFORM_FLOATS, (frameSlot + 1) * UNIFORM_FLOATS));
+        copyFrameUniform(this.uniformData, index, frameSlot);
         return;
       }
       writeInstanceUniform(this.uniformData, index, bases ? { ...uniformOf(entry), ...bases } : uniformOf(entry));

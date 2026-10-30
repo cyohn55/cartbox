@@ -297,8 +297,19 @@ Everything else depends on this track. It contains no visible "feature", but its
     - *Tests (`gpu-transforms.test.ts`):* on Dawn, 150 copies' records match the CPU's to within 1e-6 of each matrix's largest entry, and their normal bases exactly; the light transform is zero with no shadow; the motion records match, with last frame's models moved.
     - *Measured* as in F0e-2 (Beaver Creek, three readings): the culled path's renderer JS falls from about 14.5 ms to 5.3–6.8 ms a frame. **The exit (under 4 ms) is still not met.** What remains is spread out: packing each draw's uniforms (about 1–2 ms), planning the cull, batching, and encoding.
     - *Left for F0e:*
-      - per-draw uniforms written only when they change;
+      - per-draw uniforms written only when they change (F0e-4);
       - the rest of F0e-2's list.
+  - **F0e-4, per-draw uniforms kept from frame to frame: done** (every WebGPU tier).
+    - **A slot is rewritten only when its draw changes.** Each uniform slot remembers what it was written from: the primitive, its material, which maps are bound (not the texture objects, which are new each frame), the transparency, effect, LOD level, lighting channels, material ID, instance bases and the first copy's model, by value. A draw that matches, and doesn't animate by itself, takes only the frame's fields, copied from the first slot written in full this frame.
+    - **The frame's fields** (`FRAME_UNIFORM_RANGES` in `scenePacking.ts`) are the light, the view direction, the environment, the shadow's and tone map's settings, the SSAO flag, the light and probe counts, the fog and its eye, the time and the camera. Material graphs read time from these too.
+    - **What animates by itself** (`uniformAnimates`) is always written in full: wind sway, water, a scrolling or pulsing emission, a surface effect, refraction, soft edges and a character material.
+    - On Beaver Creek, 86% of draw writes keep their slot; about 56 draws a frame animate (mostly swaying foliage).
+    - *Tests (`uniform-cache.test.ts`):*
+      - changing every frame input moves only the frame's fields: a kept slot plus the copy equals a full write;
+      - which draws animate;
+      - on Dawn, six frames with a moving camera, advancing time and wind, a model changed in place and the draws reordered stage exactly the bytes of a renderer that writes every slot in full (water, scrolling emission, sway and a soft-edged glass among the draws).
+    - *Measured* as before, three readings: the culled path's renderer JS is **4.2–5.5 ms** a frame, from 5.3–6.8 ms. **The exit (under 4 ms) is close but not met** in this setup. What remains is spread thin: batching the copies, planning the cull, material IDs, uniforms for the drawn animating draws, bind groups and encoding, each under about 0.6 ms.
+    - *Left for F0e:* measuring the exit in a browser on hardware, where Node's software GPU no longer shares the timeline; the rest of F0e-2's list.
 
 ### F1. Textures and materials
 

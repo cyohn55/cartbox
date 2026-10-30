@@ -15606,9 +15606,14 @@ var FRAME_UNIFORM_RANGES = [
   [OFFSET_REFRACT1, 8]
   // the camera's right, up and height
 ];
-function copyFrameUniform(target, index, frame) {
-  const base = index * UNIFORM_FLOATS;
-  for (const [offset, count] of FRAME_UNIFORM_RANGES) target.set(frame.subarray(offset, offset + count), base + offset);
+var FRAME_FLOATS = Uint16Array.from(FRAME_UNIFORM_RANGES.flatMap(([offset, count]) => Array.from({ length: count }, (_, k) => offset + k)));
+function copyFrameUniform(target, index, from) {
+  const to = index * UNIFORM_FLOATS;
+  const at = from * UNIFORM_FLOATS;
+  for (let i = 0; i < FRAME_FLOATS.length; i += 1) {
+    const f3 = FRAME_FLOATS[i];
+    target[to + f3] = target[at + f3];
+  }
 }
 function uniformAnimates(material2, alpha, sway2, refract, effect) {
   return sway2 || refract || effectActive(effect ?? null) || alpha >= 2 && (material2.softDepth ?? 0) > 0 || materialAnimates(material2);
@@ -31234,7 +31239,7 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
       for (let i = 0; same && i < key.length; i += 1) same = last[i] === key[i];
       for (let i = 0; same && i < 16; i += 1) same = lastModels[index * 16 + i] === Math.fround(model[i]);
       if (same) {
-        copyFrameUniform(this.uniformData, index, this.uniformData.subarray(frameSlot * UNIFORM_FLOATS, (frameSlot + 1) * UNIFORM_FLOATS));
+        copyFrameUniform(this.uniformData, index, frameSlot);
         return;
       }
       writeInstanceUniform(this.uniformData, index, bases ? { ...uniformOf(entry), ...bases } : uniformOf(entry));
