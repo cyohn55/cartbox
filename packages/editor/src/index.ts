@@ -1986,3 +1986,6 @@ export {
   type CorrectiveDriver,
   type MorphTarget,
 } from "./model/morphTargets";
+export { buildClusterLod, clusterVisible, packClusterLod, projectedError, withClusterLods, CLUSTER_GROUP, DENSE_TRIANGLES, LOD_CLUSTER_FLOATS, type ClusterLod, type LodCluster } from "./model/clusterLod";
+export { simplifyPatch } from "./model/meshSimplify";
+export { readClusterLod, writeClusterLod, type SerializedClusterLod } from "./model/clusterLodCodec";

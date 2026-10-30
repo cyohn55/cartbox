@@ -542,6 +542,9 @@ export class GpuCulling {
     return this.msFirst;
   }
 
+  /** The pyramid the shading's round last built (for the cluster pass, F6a), or null. */
+  pyramid: { view: any; levels: number } | null = null;
+
   /** Whether this frame culls in two phases (see {@link plan}). */
   get twoPhase(): boolean {
     return this.frame?.twoPhase ?? false;
@@ -561,6 +564,7 @@ export class GpuCulling {
    */
   encodeOcclusion(encoder: any, instances: any, depth: any | null, size: [number, number], timing?: Record<string, unknown>, multisampled = false): void {
     const levels = depth ? this.encodePyramid(encoder, depth, size, multisampled) : 1;
+    this.pyramid = depth ? { view: this.hiz!.texture.createView(), levels } : null;
     this.writeUniforms(2, size, levels, depth !== null);
     this.round(encoder, 2, instances, depth ? this.hiz!.texture.createView() : this.blankHiz().createView(), timing);
   }

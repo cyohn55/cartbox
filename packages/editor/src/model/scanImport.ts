@@ -22,6 +22,7 @@
  *   normal cone) for cluster rendering (F6a).
  */
 
+import { buildClusterLod } from "./clusterLod";
 import { computeSmoothNormals, type EncodedImage, type MeshAsset, type MeshMaterial, type MeshPrimitive } from "./MeshAsset";
 import { generateLods, simplifyMesh, triangleCountOf } from "./meshSimplify";
 import { shBasis } from "./probeVolume";
@@ -560,7 +561,9 @@ export function prepareScan(given: ScanMesh, options: ScanOptions = {}): Prepare
     const image: EncodedImage = { mime: "image/png", bytes: encodeRgbaPng(rgba, size, size) };
     material = { ...material, baseColorImage: image, baseColorFactor: [1, 1, 1, 1] };
   }
-  const mesh: MeshAsset = { name: dense.name, primitives: [{ ...unwrapped, indices, material }] };
+  // Its cluster hierarchy (F6a): the AAA tier draws each part at the detail its size on screen needs.
+  const clusterLod = buildClusterLod({ positions: unwrapped.positions, indices });
+  const mesh: MeshAsset = { name: dense.name, primitives: [{ ...unwrapped, indices, material, clusterLod }] };
   // The proxy straight from the welded scan: collision needs no UVs, and the charts' seams would hold the simplifier back.
   const proxyBudget = options.proxyTriangles ?? 1000;
   const tris = triangleCountOf(mesh);

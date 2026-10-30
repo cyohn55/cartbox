@@ -14,7 +14,7 @@
  * or Draco-compressed glTF geometry is decoded on import (see gltfDecoders.ts).
  */
 
-import { parseFbx, parseObj, parseUsd, unpackMeshAsset, type MeshAsset, type DecodedTexture, parsePly, prepareScan } from "@cartbox/editor";
+import { parseFbx, parseObj, parseUsd, unpackMeshAsset, withClusterLods, type MeshAsset, type DecodedTexture, parsePly, prepareScan } from "@cartbox/editor";
 
 import { parseGlbDecoded, parseGltfTextDecoded } from "./gltfDecoders";
 import { loadKtx2Decoder } from "./ktx2Decoder";
@@ -53,6 +53,11 @@ function extensionOf(fileName: string): string {
  * user-facing message for unsupported or externally-referenced files.
  */
 export async function importMeshFile(file: File, companions: readonly File[] = []): Promise<MeshAsset> {
+  // A dense primitive gets its cluster hierarchy here, once (F6a): the AAA tier draws it at the detail the screen needs.
+  return withClusterLods(await parseMeshFile(file, companions));
+}
+
+async function parseMeshFile(file: File, companions: readonly File[]): Promise<MeshAsset> {
   const name = assetNameFromFile(file.name);
   const extension = extensionOf(file.name);
 

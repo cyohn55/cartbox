@@ -1282,10 +1282,50 @@ Everything else depends on this track. It contains no visible "feature", but its
 
 ### F6. Geometry at scale
 
-- [ ] **F6a. Cluster rendering.**
+- [x] **F6a. Cluster rendering.**
   - Meshes are built into 128-triangle clusters with a **cluster LOD hierarchy** (simplify groups of clusters, Nanite's DAG with an error metric), so detail is continuous and crack-free.
   - Compute culls clusters (frustum, backface cone, two-pass HZB occlusion) and selects LODs by screen-space error, then emits indirect draws.
   - Film-quality meshes (millions of triangles) become placeable without hand-made LODs. A packed 32-bit visibility buffer for micro-triangles is an experiment at the end of the phase, not a dependency.
+  - **Done** (`editor model/clusterLod.ts`, `player render/clusterRendering.ts`), on the `aaa` tier with GPU culling.
+    - **The hierarchy.**
+      - Level 0 is F9c's clusters of the mesh.
+      - Each level above groups the clusters below by the edges they share, to about four full clusters' worth.
+      - A group is simplified to half on its own, its outline held still (`simplifyPatch`, the LOD simplifier on the patch's own vertices), and split into new clusters. So a group drawn coarse still meets its neighbours drawn fine.
+      - A group's error is the farthest its original vertices lie from its simplified surface, never under its clusters' own. The sphere it is seen from holds theirs. Its clusters take it as their parent's, and the clusters made from it as their own.
+      - The levels share the mesh's vertices, so a hierarchy costs its extra indices (about as many again as the mesh's).
+    - **Grouping that keeps coarsening.** Two fixes, found by measuring a 328 000-triangle sphere:
+      - Grouped by adjacency alone, a group's own clusters regrouped and its locked outline never moved again, so a far view still drew 28 000 triangles. An edge between clusters of different origins now counts eight times, so last level's outlines fall inside the new groups.
+      - A cluster left alone (its neighbours all taken) couldn't simplify: it now joins its neighbouring group.
+      - The far view now draws 10 900 triangles.
+    - **The cut** (`clusterVisible`): a cluster is drawn when its own error, seen from the eye, is under a pixel and its parent's is not. A group and every cluster made from it decide by the same numbers, so a group is drawn whole or replaced whole: no cracks.
+    - **On the GPU** (`ClusterRendering`). Each clustered copy is a job, a batch of its own. A workgroup per cluster:
+      - makes the cut through the copy's model (errors and spheres scaled by its largest scale);
+      - tests the frustum, and the normal cone. The cone is used only on a closed mesh: the renderer draws both faces, and an open mesh's back can show;
+      - appends the cluster's triangles to the job's region of an index buffer (a slot taken by adding to the draw's index count), which one indexed indirect draw draws.
+      - Two rounds. The prepass's: the cut, frustum and cone. The shading's: also against the prepass's Hi-Z pyramid (the instance cull's, and with MSAA its farthest-sample one), over the first round's indices.
+    - **Shadows** keep drawing the mesh's own triangles: a camera cut would drop casters off screen.
+    - **Where it's built.**
+      - A scan's game mesh (F9c) gets one.
+      - Any imported primitive of 20 000 triangles or more whose vertices stay put (not skinned, morphed or cloth) gets one (`withClusterLods`).
+      - It is stored with its mesh (`clusterLodCodec.ts`: indices and five vec4s a cluster, base64).
+      - Every other tier draws the mesh's own triangles.
+    - *Measured:* building takes 2.7 s for 82 000 triangles and 15 s for 328 000 (single-threaded, on import), about 40 s a million.
+    - *Tests:*
+      - `cluster-lod.test.ts`, on a 20 480-triangle icosphere:
+        - levels of at most 128 triangles over the mesh's own vertices;
+        - errors and spheres only grow upwards;
+        - every cut from 1.5 to 400 units is closed (no edge with one triangle: no crack) and coarser with distance;
+        - the hierarchy survives the mesh format and chooses the same cuts;
+        - it is built on import only for dense, still primitives;
+      - `gpu-clusters.test.ts` (Dawn):
+        - on an open mesh the GPU keeps exactly the CPU's cut;
+        - on the closed sphere, at two distances, the frame is the one the CPU's cut draws (within 1e-5): the cone and the pyramid drop only what nobody sees;
+      - `scan-import.test.ts`: a prepared scan's game mesh carries a hierarchy whose level 0 is its triangles.
+    - *Left:*
+      - the visibility buffer for micro-triangles (the roadmap's optional experiment), not attempted;
+      - a two-phase cluster cull (last frame's visible clusters first);
+      - building on a worker at import;
+      - clustered copies of skinned meshes.
 - [ ] **F6b. GPU foliage.**
   - Instanced foliage culled per instance on the GPU with HZB, replacing the per-48 m merged block meshes.
   - Dithered LOD crossfade, and pivot-painter-style hierarchical wind (trunk, branch, leaf).

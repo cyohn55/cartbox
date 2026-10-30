@@ -24,6 +24,8 @@
  */
 
 import { bytesToBase64, base64ToBytes } from "./base64";
+import type { ClusterLod } from "./clusterLod";
+import { readClusterLod, writeClusterLod, type SerializedClusterLod } from "./clusterLodCodec";
 import { generateTextures, isGeneratedImage, readGenerator, type TextureGenerator } from "./textureGenerators";
 import { readInstanceLink, type MaterialInstanceLink } from "./materialInstanceLink";
 import { readSurfaceEffects, writeSurfaceEffects } from "./materialEffects";
@@ -432,6 +434,12 @@ export interface MeshPrimitive {
    * renderers that cache uploaded geometry re-upload when `revision` changes.
    * Never serialized.
    */
+  /**
+   * Its cluster hierarchy (AAA_FIDELITY_ROADMAP.md F6a; clusterLod.ts): built
+   * for a dense mesh, so the AAA tier draws each part at the detail its size on
+   * screen needs. Every other path draws `indices`, the mesh itself.
+   */
+  readonly clusterLod?: ClusterLod;
   readonly dynamic?: {
     revision: number;
     /**
@@ -717,6 +725,8 @@ interface SerializedPrimitive {
   uvs2?: string;
   blend?: string;
   tangents?: string;
+  /** Its cluster hierarchy (F6a). */
+  clusters?: SerializedClusterLod;
   indices: string;
   material: SerializedMaterial;
   joints?: string;
@@ -949,6 +959,8 @@ export function serializeMeshAsset(mesh: MeshAsset): string {
           }
         : {}),
       ...(primitive.cloth ? { cloth: { ...primitive.cloth, maxDistance: f32ToBase64(primitive.cloth.maxDistance) } } : {}),
+      // Its cluster hierarchy (F6a), built once on import.
+      ...(primitive.clusterLod ? { clusters: writeClusterLod(primitive.clusterLod) } : {}),
     })),
     ...(mesh.morphWeights?.length ? { morphWeights: [...mesh.morphWeights] } : {}),
     ...(mesh.skin && mesh.springs?.length ? { springs: mesh.springs.map((s) => ({ ...s, joints: [...s.joints] })) } : {}),
@@ -1173,6 +1185,7 @@ export function deserializeMeshAsset(json: string): MeshAsset {
     if (blend && (blend.length !== vertexCount || !blend.every((w) => w >= 0 && w <= 1))) throw new Error(MALFORMED);
     const tangents = typeof entry.tangents === "string" ? base64ToF32(entry.tangents) : null;
     if (tangents && (tangents.length !== vertexCount * 4 || !tangents.every(Number.isFinite))) throw new Error(MALFORMED);
+    const clusterLod = readClusterLod(entry.clusters, vertexCount);
 
     const indices = base64ToU32(entry.indices);
     if (indices.length === 0 || indices.length % 3 !== 0) throw new Error(MALFORMED);
@@ -1225,6 +1238,7 @@ export function deserializeMeshAsset(json: string): MeshAsset {
       ...(joints && weights ? { joints, weights } : {}),
       ...readMorphTargets(entry.morphTargets, vertexCount, skin?.joints.length ?? 0),
       ...readCloth(entry.cloth, vertexCount),
+      ...(clusterLod ? { clusterLod } : {}),
     };
   });
 

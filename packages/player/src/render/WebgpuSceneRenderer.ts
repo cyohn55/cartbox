@@ -175,6 +175,7 @@ import { CasterCulling, GpuCulling, primitiveSphere, type CasterBatch, type Cull
 import { GpuLightClusters } from "./gpuLightClusters.js";
 import { BundleCache, type BundleTarget } from "./renderBundles.js";
 import { GpuTransforms, writeInstanceModel } from "./gpuTransforms.js";
+import { ClusterRendering, type ClusterJob } from "./clusterRendering.js";
 import { PathTracer, captureReference, type CaptureOptions, type ReferenceCapture } from "./pathTracer.js";
 import { IES_BASE, IES_MAX_PROFILES, IES_VEC4S, ltcTables, ltcWgsl } from "./ltc.js";
 import { PROBE_FACE, ProbeCapture, packCapturedProbes } from "./probeCapture.js";
@@ -2270,6 +2271,8 @@ export class WebgpuSceneRenderer implements SceneRenderer {
   private bundles: BundleCache | null = null;
   /** The sun's casters culled per cascade on the GPU (F0e). */
   private casterCulling: CasterCulling | null = null;
+  /** Cluster hierarchies cut and culled on the GPU (F6a), made on first use. */
+  private clusterRendering: ClusterRendering | null = null;
   /** Each copy's transforms made on the GPU (F0e), on the AAA tier. */
   private transforms: GpuTransforms | null = null;
   /** The LOD chains whose levels the GPU picks this frame (F0e). */
@@ -3747,7 +3750,15 @@ export class WebgpuSceneRenderer implements SceneRenderer {
     // uniform (addressed by a dynamic offset) and one instanced draw per batch.
     // GPU culling (F0e): the frustum and a Hi-Z pyramid decide which copies draw, and each copy's LOD level.
     const gpuCull = this.hdr && prepass && draw.gpuCull === true;
-    const { batches: draws, instanceCount } = batchInstances(instances, (mesh) => this.uploadMesh(mesh), cameraPositionFromView(draw.view), gpuCull ? this.frameGpuLods : null);
+    const { batches: draws, instanceCount } = batchInstances(instances, (mesh) => this.uploadMesh(mesh), cameraPositionFromView(draw.view), gpuCull ? this.frameGpuLods : null, gpuCull);
+    // Cluster hierarchies (F6a): each clustered copy's cut chosen and culled on the GPU, by job.
+    const clusterJob = new Map<number, number>();
+    if (gpuCull) {
+      draws.forEach((entry, index) => {
+        if (!entry.primitive.clusterLod || entry.source || entry.alpha >= 2 || entry.refract || entry.models.length !== 1) return;
+        clusterJob.set(index, clusterJob.size);
+      });
+    }
     if (draws.length === 0) {
       this.prepassed = null;
       // A frame left on the GPU still has to say "nothing drew": clear it.
@@ -4069,10 +4080,12 @@ export class WebgpuSceneRenderer implements SceneRenderer {
       this.culling ??= new GpuCulling(this.device);
       const gust = Math.hypot(windNow[0], windNow[1]) * (1 + windNow[3]);
       const sources: CullSource[] = draws
-        .filter((entry) => !entry.source)
-        .map((entry) => {
+        .map((entry, index) => ({ entry, index }))
+        .filter(({ entry }) => !entry.source)
+        .map(({ entry, index }) => {
           const p = entry.primitive;
-          const moves = p.dynamic !== undefined || entry.alpha >= 2 || entry.refract || compiledGraphOf(p.material)?.outputs.worldPositionOffset !== undefined;
+          // A clustered copy is culled cluster by cluster (F6a): whole here, so its record is always packed.
+          const moves = p.dynamic !== undefined || entry.alpha >= 2 || entry.refract || clusterJob.has(index) || compiledGraphOf(p.material)?.outputs.worldPositionOffset !== undefined;
           const s = moves ? null : primitiveSphere(p);
           return { first: entry.first, count: entry.models.length, sphere: s ? [s[0], s[1], s[2], s[3] + s[4] * gust] : null };
         });
@@ -4085,6 +4098,15 @@ export class WebgpuSceneRenderer implements SceneRenderer {
       }));
       // Two phases where the pyramid can read the prepass's depths: not anti-aliased.
       this.culling.plan(sources, batches, instanceCount, cullRegion, cullTotal, viewProj, eye, draw.antialias !== true);
+      if (clusterJob.size > 0) {
+        this.clusterRendering ??= new ClusterRendering(this.device);
+        const jobs: ClusterJob[] = [];
+        for (const [index] of clusterJob) {
+          const entry = draws[index]!;
+          jobs.push({ record: entry.first, lod: entry.primitive.clusterLod!, twoSided: !entry.primitive.clusterLod!.closed });
+        }
+        this.clusterRendering.plan(jobs);
+      }
       if (casterCull) {
         this.casterCulling ??= new CasterCulling(this.device);
         const casterBatches: CasterBatch[] = casters.map((entry) => {
@@ -4129,13 +4151,17 @@ export class WebgpuSceneRenderer implements SceneRenderer {
     const cull = this.frameCull;
     // With GPU culling the scene passes' commands hold frame to frame: each is recorded once into a bundle (F0e).
     const bundles = cull ? (this.bundles ??= new BundleCache(this.device)) : null;
+    // The cluster pass's buffers this frame (F6a), when anything is clustered, and the view it cuts for:
+    // the cull's, with the eye and a radian's pixels on screen (the projection's y scale × half the height).
+    const clusters = cull && clusterJob.size > 0 ? this.clusterRendering : null;
+    const clusterView = { viewProj, eye, pixelsPerRadian: (draw.projection[5]! * this.height) / 2, size: [this.width, this.height] as [number, number] };
     const replay = (pass: any, slot: string, target: BundleTarget, key: unknown[], record: (encoder: any) => void) => {
       if (!bundles) return record(pass);
       pass.executeBundles([bundles.get(slot, target, key, record)]);
     };
     const drawRange = (pass: any, from: number, to: number, depthGroup: any, slot = "", target: BundleTarget | null = null) => {
       if (bundles && target) {
-        const key: unknown[] = [depthGroup, from, to, cull!.args, draws.length, this.uniformBuffer, this.instanceBuffer];
+        const key: unknown[] = [depthGroup, from, to, cull!.args, draws.length, this.uniformBuffer, this.instanceBuffer, clusters?.output ?? null, clusters?.args ?? null, clusterJob.size];
         for (let index = from; index < to; index += 1) {
           const entry = draws[index]!;
           const set = this.pipelinesOf(entry.primitive.material, msaa ? MSAA_SAMPLES : 1, reflections !== null, prepass);
@@ -4160,6 +4186,13 @@ export class WebgpuSceneRenderer implements SceneRenderer {
         }
         pass.setBindGroup(0, this.bindGroupFor(entry.primitive, entry.textures), [index * UNIFORM_STRIDE]);
         pass.setVertexBuffer(0, entry.geometry.vertexBuffer);
+        const job = clusterJob.get(index);
+        if (job !== undefined && clusters) {
+          // Its cut (F6a): the indices the cluster pass wrote, drawn as many as it kept.
+          pass.setIndexBuffer(clusters.output, "uint32", clusters.regionOffset(job), clusters.regionBytes(job));
+          pass.drawIndexedIndirect(clusters.args, clusters.argsOffset(job, 1));
+          continue;
+        }
         pass.setIndexBuffer(entry.geometry.indexBuffer, "uint32");
         if (cull) pass.drawIndexedIndirect(cull.args, cull.argsOffset(2, index));
         else pass.drawIndexed(entry.geometry.indexCount, entry.models.length, 0, 0, entry.first);
@@ -4169,7 +4202,7 @@ export class WebgpuSceneRenderer implements SceneRenderer {
     // With the two-phase cull (F0e) it draws twice: last frame's visible copies (round 0), then the rest it can't rule out (1).
     const prepassRange = (pass: any, target: BundleTarget | null = null, round: 0 | 1 = 0) => {
       if (bundles && target) {
-        const key: unknown[] = [(msaa ? msaa.groups : this.depthGroups).blank, cull!.args, draws.length, this.uniformBuffer, this.instanceBuffer, round];
+        const key: unknown[] = [(msaa ? msaa.groups : this.depthGroups).blank, cull!.args, draws.length, this.uniformBuffer, this.instanceBuffer, round, clusters?.output ?? null, clusters?.args ?? null, clusterJob.size];
         for (const entry of draws) {
           if (entry.refract || entry.alpha >= 2) continue;
           const moved = entry.geometry.previousBuffer && entry.geometry.movedFrame === this.frameIndex;
@@ -4196,6 +4229,14 @@ export class WebgpuSceneRenderer implements SceneRenderer {
         // Last frame's vertices: a skinned mesh's from before this frame's upload, else these.
         const moved = entry.geometry.previousBuffer && entry.geometry.movedFrame === this.frameIndex;
         pass.setVertexBuffer(1, moved ? entry.geometry.previousBuffer : entry.geometry.vertexBuffer);
+        const job = clusterJob.get(index);
+        if (job !== undefined && clusters) {
+          // Its cut before the pyramid (F6a), in the prepass's first round alone (a clustered copy is drawn whole there).
+          if (round === 1) continue;
+          pass.setIndexBuffer(clusters.output, "uint32", clusters.regionOffset(job), clusters.regionBytes(job));
+          pass.drawIndexedIndirect(clusters.args, clusters.argsOffset(job, 0));
+          continue;
+        }
         pass.setIndexBuffer(entry.geometry.indexBuffer, "uint32");
         if (cull) pass.drawIndexedIndirect(cull.args, cull.argsOffset(round, index));
         else pass.drawIndexed(entry.geometry.indexCount, entry.models.length, 0, 0, entry.first);
@@ -4400,6 +4441,13 @@ export class WebgpuSceneRenderer implements SceneRenderer {
           pass.keep();
           return (ctx) => cull.encodeFrustum(ctx.encoder, this.instanceBuffer, ctx.timing);
         });
+        // The clustered copies' cuts for the prepass (F6a): frustum and cone, no pyramid yet.
+        if (clusters) {
+          graph.addPass("cull.clusters", "compute", (pass) => {
+            pass.keep();
+            return (ctx) => clusters.encode(ctx.encoder, 0, this.instanceBuffer, clusterView, null, ctx.timing);
+          });
+        }
       }
       graph.addPass("prepass", "render", (pass) => {
         pass.write(depth);
@@ -4462,6 +4510,14 @@ export class WebgpuSceneRenderer implements SceneRenderer {
         // An anti-aliased frame's pyramid takes the farthest of each pixel's samples.
         return (ctx) => cull.encodeOcclusion(ctx.encoder, this.instanceBuffer, ctx.texture(depth), [this.width, this.height], ctx.timing, msaa !== null);
       });
+      // And the cuts for the shading, against the same pyramid (F6a).
+      if (clusters) {
+        graph.addPass("cull.clusters.occlusion", "compute", (pass) => {
+          pass.read(depth);
+          pass.keep();
+          return (ctx) => clusters.encode(ctx.encoder, 1, this.instanceBuffer, clusterView, cull.pyramid, ctx.timing);
+        });
+      }
     }
     this.prepassed = prepass ? { depth: msaa ? msaa.depth : this.depthTexture, gbuffer: this.gbuffer!, velocity: this.velocity!, multisampled: msaa !== null } : null;
     // The pages the frame's pixels want (F2b), marked from the prepass's depths and read back for a later frame.
@@ -6402,6 +6458,7 @@ export class WebgpuSceneRenderer implements SceneRenderer {
     this.lightClusterer?.destroy();
     this.transforms?.destroy();
     this.casterCulling?.destroy();
+    this.clusterRendering?.destroy();
     this.pathTracer = null;
     destroySafely(this.sssProfiles);
     if (this.feedback) for (const b of [this.feedback.draws, this.feedback.wanted, this.feedback.readback, this.feedback.depth]) destroySafely(b);

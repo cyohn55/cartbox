@@ -171,6 +171,10 @@ describe("preparing a scan", () => {
     expect(ready.stats.proxyTriangles).toBeLessThanOrEqual(330);
     expect(ready.lods?.meshes.length).toBeGreaterThan(0);
     expect(ready.clusters.length).toBeGreaterThanOrEqual(Math.ceil(ready.stats.triangles / CLUSTER_TRIANGLES));
+    // And its cluster hierarchy (F6a): level 0 is the game mesh's own triangles, with coarser levels above.
+    const lod = ready.mesh.primitives[0]!.clusterLod!;
+    expect(lod.levels).toBeGreaterThan(1);
+    expect(lod.clusters.filter((c) => c.error === 0).reduce((n, c) => n + c.triangles, 0)).toBe(ready.stats.triangles);
     expect(ready.clusters.reduce((n, c) => n + c.triangles, 0)).toBe(ready.stats.triangles);
     expect(ready.proxy.name).toBe("boulder:collision");
     // The baked texture: delit red and blue both there, at similar brightness wherever the sun stood.

@@ -216,6 +216,8 @@ export function batchInstances<G extends { indexCount: number }>(
    * its copies. The GPU then keeps each copy in the one level its distance picks.
    */
   lodSiblings: ReadonlySet<LodChain> | null = null,
+  /** Draw cluster hierarchies (F6a): a clustered primitive's copies each a batch of their own, since each takes its own cut. */
+  clusters = false,
 ): { batches: DrawBatch<G>[]; instanceCount: number } {
   const batches: DrawBatch<G>[] = [];
   const seeThrough: { batch: DrawBatch<G>; distance: number }[] = [];
@@ -258,7 +260,8 @@ export function batchInstances<G extends { indexCount: number }>(
       let list = byPrimitive.get(primitive);
       if (!list) byPrimitive.set(primitive, (list = []));
       const chain = lodSiblings && instance.lod && lodSiblings.has(instance.lod) && lod >= 0 ? instance.lod : null;
-      let batch = list.find((b) => b.effect === effect && b.channels === channels && sameTextures(b.textures, textures) && (b.lodChain ?? null) === chain);
+      const alone = clusters && primitive.clusterLod !== undefined;
+      let batch = alone ? undefined : list.find((b) => b.effect === effect && b.channels === channels && sameTextures(b.textures, textures) && (b.lodChain ?? null) === chain);
       if (!batch) {
         batch = { primitive, geometry, textures, models: [], effect, channels, alpha, refract, first: 0, lod, ...(chain ? { lodChain: chain } : {}) };
         list.push(batch);
