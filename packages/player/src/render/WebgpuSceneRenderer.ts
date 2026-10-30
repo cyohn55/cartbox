@@ -244,6 +244,8 @@ import {
   unpadRows,
   viewDirection,
   writeInstanceUniform,
+  copyFrameUniform,
+  uniformAnimates,
   INSTANCE_FLOATS,
   writeInstanceTransform,
   refractionCamera,
@@ -2248,6 +2250,10 @@ export class WebgpuSceneRenderer implements SceneRenderer {
   private uniformCapacity = 0;
   private uniformBuffer: any = null;
   private uniformData = new Float32Array(0);
+  /** What each uniform slot was last written from (F0e): its draw's inputs and first model; reset when the staging array is remade. */
+  private uniformKeys: (unknown[] | undefined)[] = [];
+  private uniformModels = new Float32Array(0);
+  private uniformKeysFor: Float32Array | null = null;
   private destroyed = false;
   /** The path-traced reference (F10b), made the first time it is shown. */
   private pathTracer: PathTracer | null = null;
@@ -3956,12 +3962,42 @@ export class WebgpuSceneRenderer implements SceneRenderer {
         ...(this.hdr ? { probeCount: this.capturedProbes, receivesDecals: entry.alpha < 2 && !entry.refract } : {}),
       };
     };
+    // Each draw's uniform is written only when its inputs change (F0e): a slot whose draw is the one it held last frame,
+    // and that doesn't animate by itself, takes just the frame's fields, from the first slot written in full this frame.
+    if (this.uniformKeysFor !== this.uniformData) {
+      this.uniformKeys = [];
+      this.uniformModels = new Float32Array(this.uniformCapacity * 16);
+      this.uniformKeysFor = this.uniformData;
+    }
+    const keys = this.uniformKeys;
+    const lastModels = this.uniformModels;
+    const motionBase = prepass ? instanceCount : 0;
+    let frameSlot = -1;
+    const writeUniform = (index: number, entry: (typeof draws)[number], bases: { instanceBase: number; motionBase: number } | null) => {
+      const model = entry.models[0]!;
+      const t = entry.textures;
+      // Which maps are bound (the uniform's flags), not the texture objects themselves.
+      const maps = (t.base !== null ? 1 : 0) | (t.mr !== null ? 2 : 0) | (t.occ !== null ? 4 : 0) | (t.emis !== null ? 8 : 0) | (t.normal !== null ? 16 : 0) | (t.lm !== null ? 32 : 0) | (t.lmHdr !== null ? 64 : 0) | (t.detail !== null ? 128 : 0) | (t.blend !== null ? 256 : 0) | (t.relief !== null ? 512 : 0);
+      const key: unknown[] = [entry.primitive, entry.primitive.material, maps, entry.alpha, entry.refract, entry.effect ?? null, entry.lod ?? -1, entry.channels, materialId(entry.primitive.material), bases?.instanceBase ?? 0, bases?.motionBase ?? motionBase, this.frameGi !== null];
+      const last = keys[index];
+      let same = !!last && frameSlot >= 0 && !uniformAnimates(entry.primitive.material, entry.alpha, entry.primitive.sway !== undefined, entry.refract, entry.effect);
+      for (let i = 0; same && i < key.length; i += 1) same = last![i] === key[i];
+      for (let i = 0; same && i < 16; i += 1) same = lastModels[index * 16 + i] === Math.fround(model[i]!);
+      if (same) {
+        copyFrameUniform(this.uniformData, index, this.uniformData.subarray(frameSlot * UNIFORM_FLOATS, (frameSlot + 1) * UNIFORM_FLOATS));
+        return;
+      }
+      writeInstanceUniform(this.uniformData, index, bases ? { ...uniformOf(entry), ...bases } : uniformOf(entry));
+      keys[index] = key;
+      lastModels.set(model, index * 16);
+      if (frameSlot < 0) frameSlot = index;
+    };
     let next = 0;
     draws.forEach((entry, index) => {
       // A LOD sibling (F0e) shares its batch's copies, and their records.
       if (entry.source) {
         entry.first = entry.source.first;
-        writeInstanceUniform(this.uniformData, index, { ...uniformOf(entry), instanceBase: cullRegion + cullDst[index]!, motionBase: cullTotal });
+        writeUniform(index, entry, { instanceBase: cullRegion + cullDst[index]!, motionBase: cullTotal });
         return;
       }
       entry.first = next;
@@ -3990,7 +4026,7 @@ export class WebgpuSceneRenderer implements SceneRenderer {
         next += 1;
       }
       // GPU culling (F0e): both rounds pack the batch's survivors at its place in their region, and its indirect draws start at 0.
-      writeInstanceUniform(this.uniformData, index, gpuCull ? { ...uniformOf(entry), instanceBase: cullRegion + cullDst[index]!, motionBase: cullTotal } : uniformOf(entry));
+      writeUniform(index, entry, gpuCull ? { instanceBase: cullRegion + cullDst[index]!, motionBase: cullTotal } : null);
     });
     // The casters (F2a): each copy's model in the instance buffer after the frame's, their uniforms after the draws'.
     let nextCaster = casterBase;
@@ -4001,6 +4037,7 @@ export class WebgpuSceneRenderer implements SceneRenderer {
         nextCaster += 1;
       }
       writeInstanceUniform(this.uniformData, draws.length + k, uniformOf(entry));
+      this.uniformKeys[draws.length + k] = undefined;
     });
     this.device.queue.writeBuffer(this.uniformBuffer, 0, this.uniformData, 0, (draws.length + casters.length) * UNIFORM_FLOATS);
     if (this.frameSss) {

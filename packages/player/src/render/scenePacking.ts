@@ -22,6 +22,7 @@ import {
   emissiveAnimation,
   materialHasExtensions,
   type ResolvedExtensions,
+  resolveExtensions,
   materialHasLayers,
   macroUniform,
   materialHasWater,
@@ -903,6 +904,59 @@ export function writeInstanceUniform(target: Float32Array, index: number, unifor
   target[base + OFFSET_MOTION0 + 2] = uniform.receivesDecals ? 1 : 0;
   target[base + OFFSET_MOTION0 + 3] = uniform.lodLevel ?? -1;
   target[base + OFFSET_CULL0] = uniform.instanceBase ?? 0;
+}
+
+/**
+ * The floats of a draw's uniform that are the frame's rather than the draw's
+ * (AAA_FIDELITY_ROADMAP.md F0e), as [offset, count]: the light, the view
+ * direction, the environment, the shadow's and tone map's settings, the SSAO
+ * flag, light and probe counts, the fog and its eye, the time and the camera.
+ * A draw whose own inputs haven't changed since last frame, and that doesn't
+ * animate by itself ({@link uniformAnimates}), takes only these from the
+ * frame's: everything else in its slot is as it was.
+ */
+export const FRAME_UNIFORM_RANGES: readonly (readonly [number, number])[] = [
+  [OFFSET_LIGHT, 4],
+  [OFFSET_VIEW, 3], // w is the draw's alpha cutoff
+  [OFFSET_ENV_SKY, 12], // sky, horizon, ground
+  [OFFSET_SHADOW, 4],
+  [OFFSET_ENV_META, 4],
+  [OFFSET_TONEMAP, 2], // z is the draw's soft-edge distance
+  [OFFSET_TONEMAP + 3, 1],
+  [OFFSET_SSAO, 2], // z is the draw's light-map flag
+  [OFFSET_SSAO + 3, 1],
+  [OFFSET_FOG, 8], // the fog and its params
+  [OFFSET_SHADOW2, 2], // zw are a soft-edged draw's depth terms
+  [OFFSET_FOG_CAM, OFFSET_EFFECT0 - OFFSET_FOG_CAM], // the eye, height fog, glow and volumes
+  [OFFSET_EFFECT1 + 3, 1], // the time
+  [OFFSET_REFRACT1, 8], // the camera's right, up and height
+];
+
+/** Copy the frame's fields ({@link FRAME_UNIFORM_RANGES}) from `frame` (one draw's uniform, written this frame) into the draw at `index`. */
+export function copyFrameUniform(target: Float32Array, index: number, frame: Float32Array): void {
+  const base = index * UNIFORM_FLOATS;
+  for (const [offset, count] of FRAME_UNIFORM_RANGES) target.set(frame.subarray(offset, offset + count), base + offset);
+}
+
+/**
+ * Whether a draw's uniform moves by itself from frame to frame, besides the
+ * frame's fields: the wind on a swaying primitive, water's drift, a scrolling
+ * or pulsing emission, a surface effect, refraction, soft edges (their depth
+ * terms follow the projection) and a hair card's dither.
+ */
+export function uniformAnimates(material: MeshMaterial, alpha: number, sway: boolean, refract: boolean, effect: SurfaceEffect | null | undefined): boolean {
+  return sway || refract || effectActive(effect ?? null) || (alpha >= 2 && (material.softDepth ?? 0) > 0) || materialAnimates(material);
+}
+
+const animating = new WeakMap<MeshMaterial, boolean>();
+/** A material's own motion: water's drift, a scrolling or pulsing emission, a hair card's dither (cached per material, as its other resolutions are). */
+function materialAnimates(material: MeshMaterial): boolean {
+  let out = animating.get(material);
+  if (out === undefined) {
+    out = materialHasWater(material) || material.emissiveScroll !== undefined || material.emissivePulse !== undefined || resolveExtensions(material).character !== null;
+    animating.set(material, out);
+  }
+  return out;
 }
 
 /** The camera's right and up in world space (the view's first two rows) and the frame's height, for refraction (I5). */

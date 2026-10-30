@@ -5909,6 +5909,10 @@ declare class WebgpuSceneRenderer implements SceneRenderer {
     private uniformCapacity;
     private uniformBuffer;
     private uniformData;
+    /** What each uniform slot was last written from (F0e): its draw's inputs and first model; reset when the staging array is remade. */
+    private uniformKeys;
+    private uniformModels;
+    private uniformKeysFor;
     private destroyed;
     /** The path-traced reference (F10b), made the first time it is shown. */
     private pathTracer;

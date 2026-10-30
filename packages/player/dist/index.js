@@ -15010,6 +15010,7 @@ import {
   effectActive,
   emissiveAnimation,
   materialHasExtensions,
+  resolveExtensions,
   materialHasLayers,
   macroUniform,
   materialHasWater,
@@ -15579,6 +15580,47 @@ function writeInstanceUniform(target, index, uniform) {
   target[base + OFFSET_MOTION0 + 2] = uniform.receivesDecals ? 1 : 0;
   target[base + OFFSET_MOTION0 + 3] = uniform.lodLevel ?? -1;
   target[base + OFFSET_CULL0] = uniform.instanceBase ?? 0;
+}
+var FRAME_UNIFORM_RANGES = [
+  [OFFSET_LIGHT, 4],
+  [OFFSET_VIEW, 3],
+  // w is the draw's alpha cutoff
+  [OFFSET_ENV_SKY, 12],
+  // sky, horizon, ground
+  [OFFSET_SHADOW, 4],
+  [OFFSET_ENV_META, 4],
+  [OFFSET_TONEMAP, 2],
+  // z is the draw's soft-edge distance
+  [OFFSET_TONEMAP + 3, 1],
+  [OFFSET_SSAO, 2],
+  // z is the draw's light-map flag
+  [OFFSET_SSAO + 3, 1],
+  [OFFSET_FOG, 8],
+  // the fog and its params
+  [OFFSET_SHADOW2, 2],
+  // zw are a soft-edged draw's depth terms
+  [OFFSET_FOG_CAM, OFFSET_EFFECT0 - OFFSET_FOG_CAM],
+  // the eye, height fog, glow and volumes
+  [OFFSET_EFFECT1 + 3, 1],
+  // the time
+  [OFFSET_REFRACT1, 8]
+  // the camera's right, up and height
+];
+function copyFrameUniform(target, index, frame) {
+  const base = index * UNIFORM_FLOATS;
+  for (const [offset, count] of FRAME_UNIFORM_RANGES) target.set(frame.subarray(offset, offset + count), base + offset);
+}
+function uniformAnimates(material2, alpha, sway2, refract, effect) {
+  return sway2 || refract || effectActive(effect ?? null) || alpha >= 2 && (material2.softDepth ?? 0) > 0 || materialAnimates(material2);
+}
+var animating = /* @__PURE__ */ new WeakMap();
+function materialAnimates(material2) {
+  let out = animating.get(material2);
+  if (out === void 0) {
+    out = materialHasWater(material2) || material2.emissiveScroll !== void 0 || material2.emissivePulse !== void 0 || resolveExtensions(material2).character !== null;
+    animating.set(material2, out);
+  }
+  return out;
 }
 function refractionCamera(view, height) {
   return { right: [view[0], view[4], view[8]], up: [view[1], view[5], view[9]], height };
@@ -18584,7 +18626,7 @@ import {
   CLEARCOAT_F0 as CLEARCOAT_F02,
   PARALLAX_MIN_NDV as PARALLAX_MIN_NDV2,
   PARALLAX_STEPS as PARALLAX_STEPS2,
-  resolveExtensions as resolveExtensions2,
+  resolveExtensions as resolveExtensions3,
   morphCsr,
   dualQuaternions,
   resolveLayers as resolveLayers2,
@@ -21809,7 +21851,7 @@ var GpuTransforms = class {
 };
 
 // src/render/pathTracer.ts
-import { buildBvh as buildBvh2, cameraPositionFromView as cameraPositionFromView3, resolveExtensions, multiplyMat4 as multiplyMat46 } from "@cartbox/editor";
+import { buildBvh as buildBvh2, cameraPositionFromView as cameraPositionFromView3, resolveExtensions as resolveExtensions2, multiplyMat4 as multiplyMat46 } from "@cartbox/editor";
 
 // src/render/gpuLightmapper.ts
 import {
@@ -23155,7 +23197,7 @@ function normalMatrix(m) {
   return co.map((v) => v * s);
 }
 function extensionRows(m, pbr) {
-  const e = resolveExtensions(pbr ? m : { name: m.name, baseColorFactor: m.baseColorFactor, baseColorImage: null });
+  const e = resolveExtensions2(pbr ? m : { name: m.name, baseColorFactor: m.baseColorFactor, baseColorImage: null });
   const t = e.uvTransform;
   return [
     ...e.sheenColor,
@@ -23171,7 +23213,7 @@ function extensionRows(m, pbr) {
     ...t ? [t.scale[0], t.scale[1], Math.cos(t.rotation), Math.sin(t.rotation)] : [1, 1, 1, 0],
     ...t ? [t.offset[0], t.offset[1]] : [0, 0],
     // The emissive strength applies with or without the PBR path (an emissive factor puts a material on it anyway).
-    resolveExtensions(m).emissiveStrength,
+    resolveExtensions2(m).emissiveStrength,
     t ? 1 : 0,
     ...e.diffuseTransmissionColor,
     e.diffuseTransmission
@@ -29677,6 +29719,10 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     this.uniformCapacity = 0;
     this.uniformBuffer = null;
     this.uniformData = new Float32Array(0);
+    /** What each uniform slot was last written from (F0e): its draw's inputs and first model; reset when the staging array is remade. */
+    this.uniformKeys = [];
+    this.uniformModels = new Float32Array(0);
+    this.uniformKeysFor = null;
     this.destroyed = false;
     /** The path-traced reference (F10b), made the first time it is shown. */
     this.pathTracer = null;
@@ -31100,7 +31146,7 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
         materialIds.set(material2, id = materialIds.size + 1);
         const m = material2;
         if (this.frameSss && (m.subsurface ?? 0) > 0) {
-          const e = resolveExtensions2(m);
+          const e = resolveExtensions3(m);
           sssProfiles.push({ id, color: e.subsurfaceColor, radius: e.subsurfaceRadius });
         }
       }
@@ -31152,7 +31198,7 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
           textured: entry.textures.blend !== null
         }),
         layers: resolveLayers2(entry.primitive.material, entry.textures.relief !== null),
-        extensions: resolveExtensions2(entry.primitive.material),
+        extensions: resolveExtensions3(entry.primitive.material),
         frame: this.frameIndex,
         refraction: entry.refract ? resolveRefraction3(entry.primitive.material, effectActive4(entry.effect) ? entry.effect : null) : null,
         camera,
@@ -31169,11 +31215,38 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
         ...this.hdr ? { probeCount: this.capturedProbes, receivesDecals: entry.alpha < 2 && !entry.refract } : {}
       };
     };
+    if (this.uniformKeysFor !== this.uniformData) {
+      this.uniformKeys = [];
+      this.uniformModels = new Float32Array(this.uniformCapacity * 16);
+      this.uniformKeysFor = this.uniformData;
+    }
+    const keys = this.uniformKeys;
+    const lastModels = this.uniformModels;
+    const motionBase = prepass ? instanceCount : 0;
+    let frameSlot = -1;
+    const writeUniform = (index, entry, bases) => {
+      const model = entry.models[0];
+      const t = entry.textures;
+      const maps = (t.base !== null ? 1 : 0) | (t.mr !== null ? 2 : 0) | (t.occ !== null ? 4 : 0) | (t.emis !== null ? 8 : 0) | (t.normal !== null ? 16 : 0) | (t.lm !== null ? 32 : 0) | (t.lmHdr !== null ? 64 : 0) | (t.detail !== null ? 128 : 0) | (t.blend !== null ? 256 : 0) | (t.relief !== null ? 512 : 0);
+      const key = [entry.primitive, entry.primitive.material, maps, entry.alpha, entry.refract, entry.effect ?? null, entry.lod ?? -1, entry.channels, materialId(entry.primitive.material), bases?.instanceBase ?? 0, bases?.motionBase ?? motionBase, this.frameGi !== null];
+      const last = keys[index];
+      let same = !!last && frameSlot >= 0 && !uniformAnimates(entry.primitive.material, entry.alpha, entry.primitive.sway !== void 0, entry.refract, entry.effect);
+      for (let i = 0; same && i < key.length; i += 1) same = last[i] === key[i];
+      for (let i = 0; same && i < 16; i += 1) same = lastModels[index * 16 + i] === Math.fround(model[i]);
+      if (same) {
+        copyFrameUniform(this.uniformData, index, this.uniformData.subarray(frameSlot * UNIFORM_FLOATS, (frameSlot + 1) * UNIFORM_FLOATS));
+        return;
+      }
+      writeInstanceUniform(this.uniformData, index, bases ? { ...uniformOf(entry), ...bases } : uniformOf(entry));
+      keys[index] = key;
+      lastModels.set(model, index * 16);
+      if (frameSlot < 0) frameSlot = index;
+    };
     let next = 0;
     draws.forEach((entry, index) => {
       if (entry.source) {
         entry.first = entry.source.first;
-        writeInstanceUniform(this.uniformData, index, { ...uniformOf(entry), instanceBase: cullRegion + cullDst[index], motionBase: cullTotal });
+        writeUniform(index, entry, { instanceBase: cullRegion + cullDst[index], motionBase: cullTotal });
         return;
       }
       entry.first = next;
@@ -31200,7 +31273,7 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
         }
         next += 1;
       }
-      writeInstanceUniform(this.uniformData, index, gpuCull ? { ...uniformOf(entry), instanceBase: cullRegion + cullDst[index], motionBase: cullTotal } : uniformOf(entry));
+      writeUniform(index, entry, gpuCull ? { instanceBase: cullRegion + cullDst[index], motionBase: cullTotal } : null);
     });
     let nextCaster = casterBase;
     casters.forEach((entry, k) => {
@@ -31210,6 +31283,7 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
         nextCaster += 1;
       }
       writeInstanceUniform(this.uniformData, draws.length + k, uniformOf(entry));
+      this.uniformKeys[draws.length + k] = void 0;
     });
     this.device.queue.writeBuffer(this.uniformBuffer, 0, this.uniformData, 0, (draws.length + casters.length) * UNIFORM_FLOATS);
     if (this.frameSss) {
