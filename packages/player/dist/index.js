@@ -3434,21 +3434,21 @@ function parseCubeLut(text) {
     const line = raw.trim();
     if (line === "" || line.startsWith("#")) continue;
     const parts = line.split(/\s+/);
-    const key = parts[0].toUpperCase();
-    if (key === "TITLE") continue;
-    if (key === "LUT_1D_SIZE") return null;
-    if (key === "LUT_3D_SIZE") {
+    const key2 = parts[0].toUpperCase();
+    if (key2 === "TITLE") continue;
+    if (key2 === "LUT_1D_SIZE") return null;
+    if (key2 === "LUT_3D_SIZE") {
       size = Number(parts[1]);
       continue;
     }
-    if (key === "DOMAIN_MIN" || key === "DOMAIN_MAX") {
+    if (key2 === "DOMAIN_MIN" || key2 === "DOMAIN_MAX") {
       const v = parts.slice(1, 4).map(Number);
       if (v.length !== 3 || !v.every(Number.isFinite)) return null;
-      if (key === "DOMAIN_MIN") min = v;
+      if (key2 === "DOMAIN_MIN") min = v;
       else max = v;
       continue;
     }
-    if (/^[A-Z_]/.test(key)) continue;
+    if (/^[A-Z_]/.test(key2)) continue;
     if (parts.length !== 3) return null;
     for (const p of parts) {
       const v = Number(p);
@@ -4328,16 +4328,16 @@ function parsePostFxSettings(value) {
     const enabled = rawEnabled[effect.id];
     if (typeof enabled === "boolean") settings.enabled[effect.id] = enabled;
     for (const param of effect.params) {
-      const key = paramKey(effect.id, param.id);
-      const raw = rawValues[key];
+      const key2 = paramKey(effect.id, param.id);
+      const raw = rawValues[key2];
       if (typeof raw === "number" && Number.isFinite(raw)) {
-        settings.values[key] = Math.min(param.max, Math.max(param.min, raw));
+        settings.values[key2] = Math.min(param.max, Math.max(param.min, raw));
       }
     }
     for (const color of effect.colors ?? []) {
-      const key = paramKey(effect.id, color.id);
-      const raw = rawColors[key];
-      if (typeof raw === "string" && HEX_COLOR.test(raw)) settings.colors[key] = raw;
+      const key2 = paramKey(effect.id, color.id);
+      const raw = rawColors[key2];
+      if (typeof raw === "string" && HEX_COLOR.test(raw)) settings.colors[key2] = raw;
     }
   }
   if (decodeLut(record.lut)) {
@@ -4532,10 +4532,10 @@ function applyPostVolumes(base, post) {
   const values = { ...base.values };
   const enabled = { ...base.enabled };
   let changed = false;
-  for (const key of ["brightness", "contrast", "saturation"]) {
-    const v = post[key];
+  for (const key2 of ["brightness", "contrast", "saturation"]) {
+    const v = post[key2];
     if (v === void 0 || v === 1) continue;
-    const k = paramKey("grade", key);
+    const k = paramKey("grade", key2);
     values[k] = (enabled.grade ? values[k] ?? 1 : 1) * v;
     enabled.grade = true;
     changed = true;
@@ -7782,6 +7782,7 @@ import {
   readLevels,
   readNavMesh,
   readTerrains,
+  meshableTerrain,
   readStreaming,
   TERRAIN_CHUNK,
   terrainChunks,
@@ -7898,12 +7899,12 @@ function parseMeshScene(raw) {
     if (!stored) return null;
     let byBase = levelCache.get(mesh);
     if (!byBase) levelCache.set(mesh, byBase = /* @__PURE__ */ new Map());
-    const key = JSON.stringify(stored);
-    if (!byBase.has(key)) {
+    const key2 = JSON.stringify(stored);
+    if (!byBase.has(key2)) {
       const chain = decodeLods(mesh, stored, (level) => resolveMeshRef(level, library));
-      byBase.set(key, chain ? { meshes: [mesh, ...chain.meshes], distances: chain.distances } : null);
+      byBase.set(key2, chain ? { meshes: [mesh, ...chain.meshes], distances: chain.distances } : null);
     }
-    return byBase.get(key) ?? null;
+    return byBase.get(key2) ?? null;
   };
   const readEntry = (record, id, parentId, identity2 = false) => {
     if (typeof record.mesh !== "string") return null;
@@ -7955,7 +7956,7 @@ function parseMeshScene(raw) {
       const root = nodes.find((n) => typeof n.parent !== "string" || !n.parent);
       if (!root || size === 0) continue;
       for (let copy = 0; copy < size; copy += 1) {
-        const idOf = (key) => `${prefab.id}#${copy}:${String(key)}`;
+        const idOf = (key2) => `${prefab.id}#${copy}:${String(key2)}`;
         const rootId = idOf(root.key);
         const made = [];
         for (const node of nodes) {
@@ -7993,22 +7994,25 @@ function parseMeshScene(raw) {
   const terrains = allTerrains.filter((t) => !t.vista);
   const identity = composeModelMatrix([0, 0, 0], [0, 0, 0], [1, 1, 1]);
   const vistas = /* @__PURE__ */ new Map();
+  const terrainModels = /* @__PURE__ */ new Map();
   for (const t of allTerrains) {
     const parent = t.parent !== void 0 ? indexOf.get(t.parent) ?? -1 : -1;
     const model = parent >= 0 ? instances[parent].model : identity;
+    terrainModels.set(t.id, model);
+    const meshed = meshableTerrain(t);
     if (t.vista) {
       const parts = [];
-      const cells = t.samples - 1;
+      const cells = meshed.samples - 1;
       for (let z0 = 0; z0 < cells; z0 += TERRAIN_CHUNK) {
         for (let x0 = 0; x0 < cells; x0 += TERRAIN_CHUNK) {
-          const mesh = terrainMesh(t, 1, [x0, z0, Math.min(cells, x0 + TERRAIN_CHUNK), Math.min(cells, z0 + TERRAIN_CHUNK)]);
+          const mesh = terrainMesh(meshed, 1, [x0, z0, Math.min(cells, x0 + TERRAIN_CHUNK), Math.min(cells, z0 + TERRAIN_CHUNK)]);
           if (mesh.primitives.length > 0) parts.push({ mesh, model });
         }
       }
-      vistas.set(t.id, { id: t.id, haze: t.vista.haze, parts });
+      vistas.set(t.id, { id: t.id, haze: t.vista.haze, parts, terrain: t, model });
       continue;
     }
-    for (const chunk of terrainChunks(t)) {
+    for (const chunk of terrainChunks(meshed)) {
       instances.push({
         mesh: chunk.mesh,
         ...chunk.lods.length > 0 ? { frames: chunk.lods } : {},
@@ -8021,6 +8025,7 @@ function parseMeshScene(raw) {
         props: {},
         physics: null,
         terrain: true,
+        ground: t.id,
         ...t.castShadows ? { casts: true } : {},
         detail: chunk.detail
       });
@@ -8130,7 +8135,7 @@ function parseMeshScene(raw) {
   return {
     instances,
     bounds: sceneBounds(placed.length > 0 ? placed : instances),
-    ...terrains.length > 0 ? { terrains, extent: sceneBounds(instances.filter((instance) => !instance.pooled)) } : {},
+    ...terrains.length > 0 ? { terrains, terrainModels, extent: sceneBounds(instances.filter((instance) => !instance.pooled)) } : {},
     ...vistas.size > 0 ? { vistas: [...vistas.values()] } : {},
     ...readStreaming(parsed.streaming) ? { streaming: readStreaming(parsed.streaming) } : {},
     ...effects.length > 0 ? { effects } : {},
@@ -9876,10 +9881,10 @@ var AgentCrowd = class {
     this.graph = new NavGraph(mesh);
   }
   /** Place an agent (creating it): a walker, or an obstacle the cart moves. */
-  place(key, pos, speed, radius, obstacle) {
-    const existing = this.agents.get(key);
+  place(key2, pos, speed, radius, obstacle) {
+    const existing = this.agents.get(key2);
     const a = existing ?? {
-      key,
+      key: key2,
       pos: [0, 0, 0],
       radius,
       speed,
@@ -9906,11 +9911,11 @@ var AgentCrowd = class {
       a.path = [];
       a.repath = 0;
     }
-    this.agents.set(key, a);
+    this.agents.set(key2, a);
   }
   /** Send an agent toward a point (speed > 0 changes its speed). */
-  goto(key, goal, speed = 0) {
-    const a = this.agents.get(key);
+  goto(key2, goal, speed = 0) {
+    const a = this.agents.get(key2);
     if (!a || a.obstacle) return;
     if (speed > 0) a.speed = speed;
     const moved = !a.goal || Math.hypot(goal[0] - a.goal[0], goal[1] - a.goal[1], goal[2] - a.goal[2]) > 0.75;
@@ -9920,15 +9925,15 @@ var AgentCrowd = class {
       a.path = [];
     }
   }
-  stop(key) {
-    const a = this.agents.get(key);
+  stop(key2) {
+    const a = this.agents.get(key2);
     if (!a) return;
     a.goal = null;
     a.path = [];
     a.noPath = false;
   }
-  remove(key) {
-    this.agents.delete(key);
+  remove(key2) {
+    this.agents.delete(key2);
   }
   /** Stand a point on the floor beneath it (or the nearest floor), unchanged when there's none. */
   settle(pos) {
@@ -10088,8 +10093,8 @@ var AgentCrowd = class {
     }));
   }
   /** One agent's current path corners (for inspection and tests). */
-  path(key) {
-    return this.agents.get(key)?.path ?? [];
+  path(key2) {
+    return this.agents.get(key2)?.path ?? [];
   }
 };
 function distanceToSegment(p, a, b) {
@@ -10277,9 +10282,9 @@ var RuntimeChannel = class {
       } else if (cmd.op === PHYS_OP_UNPLACE) this.placed.delete(cmd.a);
       else if (cmd.op === PHYS_OP_LOOK) {
         const object = cmd.a & 65535;
-        const key = cmd.a >>> 16 & 31;
-        if (key === 0) this.lookStates.delete(object);
-        else if (object < this.scene.instances.length) this.lookStates.set(object, { tint: key & 15, front: (key & 16) !== 0 });
+        const key2 = cmd.a >>> 16 & 31;
+        if (key2 === 0) this.lookStates.delete(object);
+        else if (object < this.scene.instances.length) this.lookStates.set(object, { tint: key2 & 15, front: (key2 & 16) !== 0 });
       } else if (cmd.op === PHYS_OP_SHATTER) {
         if (this.shatters.length < MAX_BURSTS_QUEUED && cmd.a >= 0 && cmd.a < this.scene.instances.length) this.shatters.push({ object: cmd.a, at: [cmd.v[0], cmd.v[1], cmd.v[2]], strength: cmd.v[3] });
       } else if (cmd.op === PHYS_OP_DEBRIS) {
@@ -10313,20 +10318,20 @@ var RuntimeChannel = class {
       this.holo.values.set(cmd.a, cmd.v[0]);
       return;
     }
-    const key = cmd.a & 65535;
+    const key2 = cmd.a & 65535;
     const chunk = cmd.a >>> 16;
     const kind = cmd.op === PHYS_OP_UI_TEXT ? "text" : "list";
-    let part = this.holoParts.get(key);
+    let part = this.holoParts.get(key2);
     if (chunk === 0) {
       part = { kind, length: Math.max(0, Math.round(cmd.v[0])), items: [...cmd.v.slice(1)] };
-      this.holoParts.set(key, part);
+      this.holoParts.set(key2, part);
     } else if (part && part.kind === kind) part.items.push(...cmd.v);
     else return;
     const have = kind === "text" ? part.items.length * 2 : part.items.length;
     if (have < part.length) return;
-    this.holoParts.delete(key);
+    this.holoParts.delete(key2);
     if (kind === "list") {
-      this.holo.values.set(key, part.items.slice(0, part.length));
+      this.holo.values.set(key2, part.items.slice(0, part.length));
       return;
     }
     const chars = [];
@@ -10334,7 +10339,7 @@ var RuntimeChannel = class {
       const c = Math.round(code);
       chars.push(c >> 8 & 255, c & 255);
     }
-    this.holo.values.set(key, String.fromCharCode(...chars.slice(0, part.length)));
+    this.holo.values.set(key2, String.fromCharCode(...chars.slice(0, part.length)));
   }
   /** Go limp (v0 = 1) with a shove, or take the animation back (v0 = 0). */
   ragdollCommand(object, v) {
@@ -10370,16 +10375,16 @@ var RuntimeChannel = class {
     return this.ragdollBoxes;
   }
   /** A navigation agent command (see PHYS_OP_AGENT). */
-  agentCommand(op, key, v) {
+  agentCommand(op, key2, v) {
     const crowd = this.crowd;
-    if (!crowd || key < 0 || key > 1023) return;
+    if (!crowd || key2 < 0 || key2 > 1023) return;
     const at = [v[0], v[1], v[2]];
     if (op === PHYS_OP_AGENT) {
-      if (crowd.state().length >= PHYS_MAX_AGENTS && !crowd.state().some((a) => a.key === key)) return;
-      crowd.place(key, at, v[3] > 0 ? v[3] : 3, v[4] > 0 ? v[4] : crowd.graph.mesh.agent.radius, v[5] >= 0.5);
-    } else if (op === PHYS_OP_AGENT_GOTO) crowd.goto(key, at, v[3]);
-    else if (op === PHYS_OP_AGENT_STOP) crowd.stop(key);
-    else crowd.remove(key);
+      if (crowd.state().length >= PHYS_MAX_AGENTS && !crowd.state().some((a) => a.key === key2)) return;
+      crowd.place(key2, at, v[3] > 0 ? v[3] : 3, v[4] > 0 ? v[4] : crowd.graph.mesh.agent.radius, v[5] >= 0.5);
+    } else if (op === PHYS_OP_AGENT_GOTO) crowd.goto(key2, at, v[3]);
+    else if (op === PHYS_OP_AGENT_STOP) crowd.stop(key2);
+    else crowd.remove(key2);
   }
   /** A level switch the cart asked for since the last call (-1 for none); the player loads and activates it. */
   takeLevelRequest() {
@@ -10552,10 +10557,10 @@ var RuntimeChannel = class {
     this.animation?.invalidate();
   }
   watch(object, joint) {
-    const key = `${object}:${joint}`;
+    const key2 = `${object}:${joint}`;
     const joints = this.scene.instances[object]?.mesh.skin?.joints.length ?? 0;
-    if (this.watched.has(key) || joint < 0 || joint >= joints || this.watched.size >= PHYS_MAX_JOINTS) return;
-    this.watched.set(key, { object, joint, position: null });
+    if (this.watched.has(key2) || joint < 0 || joint >= joints || this.watched.size >= PHYS_MAX_JOINTS) return;
+    this.watched.set(key2, { object, joint, position: null });
   }
   /** Apply an object's standing IK (first) and look-at requests to its pose, then a ragdoll over it all. */
   solve(object, mesh, pose, worldOf) {
@@ -11107,8 +11112,8 @@ function renderSceneBackdrop(out, width, height, layers, spec, frame, base) {
 }
 
 // src/scene/sceneComposite.ts
-function matchesKey(r, g, b, key, tolerance) {
-  return Math.abs(r - key[0]) <= tolerance && Math.abs(g - key[1]) <= tolerance && Math.abs(b - key[2]) <= tolerance;
+function matchesKey(r, g, b, key2, tolerance) {
+  return Math.abs(r - key2[0]) <= tolerance && Math.abs(g - key2[1]) <= tolerance && Math.abs(b - key2[2]) <= tolerance;
 }
 function compositeOverBackdrop(cartFrame, backdrop, width, height, keyRgb, tolerance = 0, out) {
   const target = out ?? new Uint8ClampedArray(width * height * 4);
@@ -11223,11 +11228,11 @@ var AnimatedForegroundSurface = class {
   }
   region(placement) {
     const { page, tile, tilesW, tilesH } = placement.region;
-    const key = `${page}:${tile}:${tilesW}:${tilesH}`;
-    let image = this.regionCache.get(key);
+    const key2 = `${page}:${tile}:${tilesW}:${tilesH}`;
+    let image = this.regionCache.get(key2);
     if (!image) {
       image = this.source.readRegion(page, tile, tilesW, tilesH);
-      this.regionCache.set(key, image);
+      this.regionCache.set(key2, image);
     }
     return image;
   }
@@ -11635,14 +11640,14 @@ import { areaAsPunctual, lightColor } from "@cartbox/editor";
 function withCartSun(lighting, sun) {
   const l = Math.hypot(...sun.direction) || 1;
   const direction = [sun.direction[0] / l, sun.direction[1] / l, sun.direction[2] / l];
-  const key = { kind: "directional", direction, color: [...sun.color], intensity: 1 };
+  const key2 = { kind: "directional", direction, color: [...sun.color], intensity: 1 };
   const at = lighting.lights.findIndex((x) => x.kind === "directional");
   const authored = at < 0 ? null : lighting.lights[at];
   const sky = lighting.sky;
   return {
     ...lighting,
     // The cart's sun is the colour it says: the key's temperature (F2e) goes with the key.
-    lights: at < 0 ? [key, ...lighting.lights] : lighting.lights.map((x, i) => i === at ? { ...withoutTemperature(x), ...key } : x),
+    lights: at < 0 ? [key2, ...lighting.lights] : lighting.lights.map((x, i) => i === at ? { ...withoutTemperature(x), ...key2 } : x),
     ...sky ? {
       sky: {
         ...sky,
@@ -11663,8 +11668,8 @@ function bounceLightsFor(authored, frame, cart) {
   const authoredKey = authored.lights.find((x) => x.kind === "directional");
   const reference = authoredKey ? lightColor(authoredKey).map((c) => c * authoredKey.intensity) : [1, 1, 1];
   const brightness = 0.2126 * reference[0] + 0.7152 * reference[1] + 0.0722 * reference[2] || 1;
-  const key = frame.lights.find((x) => x.kind === "directional");
-  const sun = key?.direction ? { direction: key.direction, color: [0, 1, 2].map((k) => reference[k] > 1e-6 ? lightColor(key)[k] * key.intensity / reference[k] : 0) } : null;
+  const key2 = frame.lights.find((x) => x.kind === "directional");
+  const sun = key2?.direction ? { direction: key2.direction, color: [0, 1, 2].map((k) => reference[k] > 1e-6 ? lightColor(key2)[k] * key2.intensity / reference[k] : 0) } : null;
   const points = [...frame.lights, ...cart].map(areaAsPunctual).filter((x) => (x.kind === "point" || x.kind === "spot") && x.position).map((x) => ({ position: x.position, color: lightColor(x).map((c) => c * x.intensity / brightness), range: x.range && x.range > 0 ? x.range : 8, ...x.falloff ? { falloff: x.falloff } : {} }));
   return { sun, points };
 }
@@ -12276,6 +12281,14 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
     /** The scene's distant vistas, textured: re-drawn into the sky whenever it is re-baked. */
     this.vistas = [];
     /**
+     * Terrains the AAA tier draws from their heightfields (F6c), vistas among
+     * them, with their layers' maps; and the meshes of the blocks (and their
+     * coarser frames) they replace, which aren't drawn or cast.
+     */
+    this.ground = [];
+    this.groundIds = /* @__PURE__ */ new Set();
+    this.groundMeshes = /* @__PURE__ */ new WeakSet();
+    /**
      * Told each frame where the sky dome's sun is on screen and how much of it is
      * unblocked, for the post-FX glare and lens flare (H8); null without a sky dome.
      */
@@ -12535,6 +12548,7 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
         this.lastSkin.delete(i);
         const lod = liveLod(b.lod, skinned);
         this.instances[i] = { ...textured, ...skinned ? { mesh: skinned.mesh } : {}, ...lod ? { lod } : {}, model: this.instances[i].model };
+        if (b.ground !== void 0 && this.groundIds.has(b.ground)) this.groundMeshes.add(this.instances[i].mesh);
         moved = true;
       } else if (lodSignature(a.lod) !== lodSignature(b.lod)) {
         const { lod: _old, ...rest } = this.instances[i];
@@ -12545,7 +12559,12 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
       }
     }
     const vistasChanged = vistaSignature(before.vistas) !== vistaSignature(next.vistas);
-    if (vistasChanged) this.vistas = await texturedVistas(next.vistas, (mesh) => decodeMeshTextures(mesh, this.decodeKtx2 ?? (() => Promise.resolve(null))));
+    if (this.groundIds.size > 0) {
+      const ground = await groundSources(next, (mesh) => decodeMeshTextures(mesh, this.decodeKtx2 ?? (() => Promise.resolve(null)), void 0, this.compressedTextures));
+      this.ground = ground.sources;
+      this.groundIds = ground.ids;
+    }
+    if (vistasChanged) this.vistas = await texturedVistas(next.vistas?.filter((v) => !this.groundIds.has(v.id)), (mesh) => decodeMeshTextures(mesh, this.decodeKtx2 ?? (() => Promise.resolve(null))));
     if (vistasChanged || JSON.stringify(before.lighting ?? null) !== JSON.stringify(next.lighting ?? null)) {
       const lighting = next.lighting;
       let environment = lighting ? sceneLightingEnvironment(lighting) : null;
@@ -12725,7 +12744,8 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
     let skyMap = null;
     let clouds = [];
     let environment = lighting ? sceneLightingEnvironment(lighting) : null;
-    const vistas = await texturedVistas(scene.vistas, texture);
+    const ground = options.prepass === true && renderer.sunCascades === true ? await groundSources(scene, texture) : null;
+    const vistas = await texturedVistas(scene.vistas?.filter((v) => !ground?.ids.has(v.id)), texture);
     let reflections = null;
     if (lighting?.sky && environment) {
       const baked = await bakeSceneSky(lighting.sky, lighting, environment, vistas, scene.bounds.center);
@@ -12739,6 +12759,15 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
     surface.skyReflections = reflections;
     surface.startBounce();
     surface.vistas = vistas;
+    if (ground) {
+      surface.ground = ground.sources;
+      surface.groundIds = ground.ids;
+      scene.instances.forEach((instance, i) => {
+        if (instance.ground === void 0 || !ground.ids.has(instance.ground)) return;
+        surface.groundMeshes.add(instances[i].mesh);
+        for (const frame of frames[i] ?? []) surface.groundMeshes.add(frame.mesh);
+      });
+    }
     surface.trailed = scene.instances.flatMap((instance, i) => instance.mesh.trails && instance.mesh.trails.length > 0 ? [i] : []);
     if (surface.trailed.length > 0) surface.trails = new TrailSystem();
     for (const [i, mesh] of live) surface.live.set(i, mesh);
@@ -12897,11 +12926,11 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
     if (!reflections || !lighting?.sky || !this.environment) return;
     if (lighting.sky.atmosphere) return this.followPhysicalSun();
     const sun = skySun(lighting.sky);
-    const key = sunKey(sun);
-    if (key === reflections.sun) return;
+    const key2 = sunKey(sun);
+    if (key2 === reflections.sun) return;
     const map = skyReflectionsWith(reflections.small, sun, this.skyClouds);
     this.environment = { ...this.environment, map, average: computeEnvironmentAverage(map) };
-    this.skyReflections = { small: reflections.small, sun: key };
+    this.skyReflections = { small: reflections.small, sun: key2 };
   }
   /**
    * A physical sky's time of day (F5a-2): when its sun (above the air) has
@@ -12922,9 +12951,9 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
       this.skyLitFor = baked ? physicalSunKey(baked) : "";
     }
     if (!this.skyRelight) {
-      const key = physicalSunKey(sun);
-      if (key === this.skyLitFor) return;
-      this.skyRelight = { key, sun, hdr: { width: SKY_RELIGHT_WIDTH, height: SKY_RELIGHT_HEIGHT, data: new Float32Array(SKY_RELIGHT_WIDTH * SKY_RELIGHT_HEIGHT * 3) }, row: 0 };
+      const key2 = physicalSunKey(sun);
+      if (key2 === this.skyLitFor) return;
+      this.skyRelight = { key: key2, sun, hdr: { width: SKY_RELIGHT_WIDTH, height: SKY_RELIGHT_HEIGHT, data: new Float32Array(SKY_RELIGHT_WIDTH * SKY_RELIGHT_HEIGHT * 3) }, row: 0 };
     }
     const job = this.skyRelight;
     atmospherePanoramaRows(atmosphereLuts(job.sun.atmosphere), job.sun.direction, job.sun.radiance, job.hdr, job.row, job.row + SKY_RELIGHT_ROWS, job.sun.moon);
@@ -13069,6 +13098,7 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
       mark = now;
     }
     let drawn = this.foliage.size === 0 ? instances : this.gpuFoliage ? instances.flatMap((i) => this.foliageCopies(i)) : instances.filter((i) => this.foliageInReach(i));
+    if (this.ground.length > 0) drawn = drawn.filter((i) => !this.groundMeshes.has(i.mesh));
     let frontDrawn = front;
     if (this.trails) {
       const placed = this.placements();
@@ -13259,6 +13289,7 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
       ...lighting ? { ...lit, localShadows: job.local, shadow: job.shadow, sunShadow: job.sunShadow, localShadowCasters: job.localShadowCasters, localShadowKey: job.localShadowKey, localShadowMoved: job.localShadowMoved, fog: lighting.fog ?? null, wind: lighting.wind ?? null } : {},
       ...job.reflectionCapture ? { reflectionCapture: job.reflectionCapture } : {},
       ...job.decals ? { decals: job.decals } : {},
+      ...this.ground.length > 0 ? { terrains: this.ground } : {},
       ...atmosphere ? { atmosphere } : {},
       ...gi ? { dynamicGi: gi.draw } : {},
       // The physical camera's depth of field and motion blur (F4c).
@@ -13451,9 +13482,9 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
       fogReach: postVolumeReach(volumes, eye, "fog")
     } : null;
     const live = fx && (fx.brightness !== void 0 || fx.contrast !== void 0 || fx.saturation !== void 0 || fx.bloomReach > 0 || fx.fogReach > 0) ? fx : null;
-    const key = live ? JSON.stringify(live, (_k, v) => typeof v === "number" ? Math.round(v * 200) / 200 : v) : "";
-    if (key === this.postKey) return;
-    this.postKey = key;
+    const key2 = live ? JSON.stringify(live, (_k, v) => typeof v === "number" ? Math.round(v * 200) / 200 : v) : "";
+    if (key2 === this.postKey) return;
+    this.postKey = key2;
     this.onPost?.(live);
   }
   /** Report the sun to {@link onSun}: its place on screen and its eased visibility. */
@@ -13477,17 +13508,17 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
    * direction nor the sun has changed.
    */
   paintSky(out, width, height, view, projection, scale, sun) {
-    const key = [width, height, scale, view[0], view[1], view[2], view[4], view[5], view[6], view[8], view[9], view[10], projection[0], projection[5]].map((n) => Math.round(n * 1e5)).join(",") + (sun ? `|${sunKey(sun)}` : "");
+    const key2 = [width, height, scale, view[0], view[1], view[2], view[4], view[5], view[6], view[8], view[9], view[10], projection[0], projection[5]].map((n) => Math.round(n * 1e5)).join(",") + (sun ? `|${sunKey(sun)}` : "");
     const cache = this.skyCache;
     const drifting = this.skyClouds.length > 0;
-    if (!drifting && cache && cache.key === key && cache.pixels.length === width * height * 4) {
+    if (!drifting && cache && cache.key === key2 && cache.pixels.length === width * height * 4) {
       out.set(cache.pixels);
       return;
     }
     renderSkyBackground(out, width, height, view, projection, this.skyMap, 8, scale, drifting ? { layers: this.skyClouds, time: this.frame / 60 } : null, sun);
     const pixels = cache && cache.pixels.length === width * height * 4 ? cache.pixels : new Uint8ClampedArray(width * height * 4);
     pixels.set(out.subarray(0, width * height * 4));
-    this.skyCache = { key, pixels };
+    this.skyCache = { key: key2, pixels };
   }
   /** The 3D render scale this frame: 1, unless the software governor has stepped down. */
   renderScale() {
@@ -13695,11 +13726,11 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
       byTint = /* @__PURE__ */ new Map();
       this.tintCache.set(mesh, byTint);
     }
-    const key = masked ? `${tint}m` : tint;
-    let out = byTint.get(key);
+    const key2 = masked ? `${tint}m` : tint;
+    let out = byTint.get(key2);
     if (!out) {
       out = tintMesh(mesh, tint, this.scene.lighting?.tints, masked);
-      byTint.set(key, out);
+      byTint.set(key2, out);
     }
     return out;
   }
@@ -13857,18 +13888,18 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
     if (!lighting.shadows || !this.quality.shadows) return null;
     const size = this.quality.shadowMapSize || SHADOW_MAP_SIZE;
     const { center, radius } = this.scene.bounds;
-    const key = this.staticShadowKey();
+    const key2 = this.staticShadowKey();
     const still = () => this.stillCasters();
     const extent = this.scene.extent;
     const reach = extent && this.scene.instances.some((inst) => inst.casts) ? Math.max(0, extent.radius * 2 - radius * 2) : 0;
-    const far = this.renderShadowLayer(this.farShadow, key, still, moved, lighting, center, radius, size, reach);
+    const far = this.renderShadowLayer(this.farShadow, key2, still, moved, lighting, center, radius, size, reach);
     if (!far) return null;
     let near = null;
     const nearRadius = Math.min(NEAR_CASCADE_MAX, Math.max(NEAR_CASCADE_MIN, radius * NEAR_CASCADE_SHARE));
     if (this.quality.shadowCascades && this.eye && nearRadius < radius * 0.7) {
       const step = nearRadius / 2;
       const c = [Math.round(this.eye[0] / step) * step, Math.round(this.eye[1] / step) * step, Math.round(this.eye[2] / step) * step];
-      const built = this.renderShadowLayer(this.nearShadow, `${key}|${c.join(",")}`, still, moved, lighting, c, nearRadius, size, Math.max(reach, radius * 2));
+      const built = this.renderShadowLayer(this.nearShadow, `${key2}|${c.join(",")}`, still, moved, lighting, c, nearRadius, size, Math.max(reach, radius * 2));
       if (built) near = { lightViewProj: built.lightViewProj, depth: built.depth, bias: built.bias ?? 3e-3, slopeBias: built.slopeBias ?? 0, dirty: built.dirty };
     }
     return { ...far, near };
@@ -13891,12 +13922,12 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
    * copies.
    */
   castersNow(moved) {
-    const key = this.staticShadowKey();
-    if (this.sunCasters?.key !== key) this.sunCasters = { key, still: this.stillCasters() };
+    const key2 = this.staticShadowKey();
+    if (this.sunCasters?.key !== key2) this.sunCasters = { key: key2, still: this.stillCasters() };
     const inReach = (list) => this.foliage.size > 0 ? list.filter((i) => this.foliageCasts(i)) : list;
     const still = inReach(this.sunCasters.still);
     const movers = inReach(moved);
-    this.castersFrame = { key: `${key}|${still.length}`, moved: movers };
+    this.castersFrame = { key: `${key2}|${still.length}`, moved: movers };
     return movers.length > 0 ? [...still, ...movers] : still;
   }
   buildSunShadow(moved, lighting) {
@@ -13931,7 +13962,7 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
       if (root >= 0) posed.add(i);
     });
     const casts = (i) => !this.scene.instances[i]?.terrain || this.scene.instances[i]?.casts === true;
-    return this.instances.filter((_, i) => !posed.has(i) && !this.everFront.has(i) && !this.inactive.has(i) && casts(i));
+    return this.instances.filter((instance, i) => !posed.has(i) && !this.everFront.has(i) && !this.inactive.has(i) && casts(i) && !this.groundMeshes.has(instance.mesh));
   }
   /**
    * Shadows from the spot and point lights that cast (EP8c): each light's
@@ -13947,11 +13978,11 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
     let slot = 0;
     for (const light of assigned.lights) {
       if (light.shadowTile === void 0) continue;
-      const key = `${JSON.stringify([light.kind, light.position, light.direction, light.range, light.innerAngle, light.outerAngle])}|${statics}`;
+      const key2 = `${JSON.stringify([light.kind, light.position, light.direction, light.range, light.innerAngle, light.outerAngle])}|${statics}`;
       let cache = this.localShadowCache[slot];
-      if (!cache || cache.key !== key) {
+      if (!cache || cache.key !== key2) {
         const built = renderLocalShadow(light, this.stillCasters());
-        cache = { key, statics: built.map((t) => t.depth), frames: built.map((t) => new Float32Array(t.depth.length)) };
+        cache = { key: key2, statics: built.map((t) => t.depth), frames: built.map((t) => new Float32Array(t.depth.length)) };
         this.localShadowCache[slot] = cache;
       }
       cache.frames.forEach((frame, i) => frame.set(cache.statics[i]));
@@ -13966,14 +13997,14 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
    * when `key` or the rig changes), copied, with this frame's movers drawn over
    * it — and the texels that changed since last frame, for a GPU's partial upload.
    */
-  renderShadowLayer(layer, key, still, moved, lighting, center, radius, size, reach) {
+  renderShadowLayer(layer, key2, still, moved, lighting, center, radius, size, reach) {
     let full = false;
-    if (!layer.staticDepth || layer.key !== key || layer.lighting !== lighting) {
+    if (!layer.staticDepth || layer.key !== key2 || layer.lighting !== lighting) {
       layer.staticDepth ?? (layer.staticDepth = new Float32Array(size * size));
       const built = buildSceneShadow(still(), lighting, center, radius, { size, depth: layer.staticDepth, reach });
       if (!built) return null;
       layer.matrix = built.lightViewProj;
-      layer.key = key;
+      layer.key = key2;
       layer.lighting = lighting;
       full = true;
     }
@@ -14126,9 +14157,9 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
       if (!token) this.envTokens.set(map, token = ++this.envCounter);
     }
     const sky = env ? map ? `${token}:${env.intensity}` : [...env.sky, ...env.horizon, ...env.ground, env.intensity].map((v) => Math.round(v * 1e3)).join(",") : "-";
-    const key = lighting.lights.find((l) => l.kind === "directional");
+    const key2 = lighting.lights.find((l) => l.kind === "directional");
     const r = (v) => Math.round(v * 100);
-    const sun = key ? [...(key.direction ?? [0, 1, 0]).map(r), ...key.color.map(r), r(key.intensity), key.temperature ?? 0].join(",") : "-";
+    const sun = key2 ? [...(key2.direction ?? [0, 1, 0]).map(r), ...key2.color.map(r), r(key2.intensity), key2.temperature ?? 0].join(",") : "-";
     return { probes, instances: this.probeScene, key: `${rig}|${sky}|${sun}|${this.staticShadowKey()}` };
   }
 };
@@ -14161,6 +14192,25 @@ async function sceneSkyEnvironment(scene) {
   if (!lighting.sky) return environment;
   const vistas = await texturedVistas(scene.vistas, (mesh) => decodeMeshTextures(mesh, () => Promise.resolve(null)));
   return litBySky(environment, await bakeSceneSky(lighting.sky, lighting, environment, vistas, scene.bounds.center));
+}
+async function groundSources(scene, texture) {
+  const placed = [
+    ...(scene.terrains ?? []).map((terrain) => ({ terrain, model: scene.terrainModels?.get(terrain.id) ?? null })),
+    ...(scene.vistas ?? []).flatMap((v) => v.terrain ? [{ terrain: v.terrain, model: v.model ?? null }] : [])
+  ];
+  const sources = [];
+  const ids2 = /* @__PURE__ */ new Set();
+  for (const { terrain, model } of placed) {
+    const m = model ?? [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1];
+    const translation = m[0] === 1 && m[1] === 0 && m[2] === 0 && m[4] === 0 && m[5] === 1 && m[6] === 0 && m[8] === 0 && m[9] === 0 && m[10] === 1;
+    if (!translation) continue;
+    const moved = m[12] !== 0 || m[13] !== 0 || m[14] !== 0;
+    const t = moved ? { ...terrain, origin: [terrain.origin[0] + m[12], terrain.origin[1] + m[13], terrain.origin[2] + m[14]] } : terrain;
+    const maps = await texture({ name: terrain.name, primitives: terrain.layers.map((l) => ({ positions: new Float32Array(0), normals: null, uvs: null, indices: new Uint32Array(0), material: l.material })) });
+    sources.push({ terrain: t, layers: terrain.layers.map((_, k) => ({ base: maps.textures?.[k] ?? null, normal: maps.normalTextures?.[k] ?? null, mr: maps.mrTextures?.[k] ?? null })) });
+    ids2.add(terrain.id);
+  }
+  return { sources, ids: ids2 };
 }
 async function texturedVistas(vistas, texture) {
   return Promise.all(
@@ -14442,9 +14492,9 @@ function meshSignature(mesh) {
   return mesh.primitives.map((p) => {
     const scalars = {};
     const images = [];
-    for (const [key, value] of Object.entries(p.material)) {
-      if (key.endsWith("Image")) images.push(value ? value.bytes?.length ?? 0 : 0);
-      else scalars[key] = value;
+    for (const [key2, value] of Object.entries(p.material)) {
+      if (key2.endsWith("Image")) images.push(value ? value.bytes?.length ?? 0 : 0);
+      else scalars[key2] = value;
     }
     return `${p.positions.length}:${p.indices.length}:${JSON.stringify(scalars)}:${images.join(",")}`;
   }).join("|");
@@ -15236,7 +15286,7 @@ fn areaTerm(lgt: Light, P: vec3<f32>, N: vec3<f32>, V: vec3<f32>, ndv: f32, roug
 
 // src/render/scenePacking.ts
 var UNIFORM_STRIDE = 1280;
-var UNIFORM_BYTES_USED = 1136;
+var UNIFORM_BYTES_USED = 1264;
 var UNIFORM_FLOATS = UNIFORM_STRIDE / 4;
 var LIGHT_FLOATS = 20;
 var PROBE_FLOATS = 16;
@@ -15355,6 +15405,7 @@ var OFFSET_DT0 = 268;
 var OFFSET_CHAR0 = 272;
 var OFFSET_CHAR1 = 276;
 var OFFSET_CULL0 = 280;
+var OFFSET_TERRAIN = 284;
 var DEFAULT_LIGHT = [0.4, 0.8, 0.6];
 var DEFAULT_AMBIENT2 = 0.35;
 function resolveLight(direction, ambient) {
@@ -15634,6 +15685,8 @@ function writeInstanceUniform(target, index, uniform) {
   target[base + OFFSET_CULL0] = uniform.instanceBase ?? 0;
   target[base + OFFSET_CULL0 + 1] = uniform.octahedral?.frames ?? 0;
   target[base + OFFSET_CULL0 + 2] = uniform.octahedral?.radius ?? 0;
+  if (uniform.terrain) target.set(uniform.terrain, base + OFFSET_TERRAIN);
+  else target.fill(0, base + OFFSET_TERRAIN, base + OFFSET_TERRAIN + 32);
 }
 var FRAME_UNIFORM_RANGES = [
   [OFFSET_LIGHT, 4],
@@ -15783,8 +15836,8 @@ function occlusionWithRelief(occ, relief) {
   if (!relief || occ?.packedWithRelief) return occ;
   let byOcc = withRelief.get(relief);
   if (!byOcc) withRelief.set(relief, byOcc = /* @__PURE__ */ new WeakMap());
-  const key = occ ?? NO_OCCLUSION;
-  const known = byOcc.get(key);
+  const key2 = occ ?? NO_OCCLUSION;
+  const known = byOcc.get(key2);
   if (known) return known;
   const bigger = occ && occ.width * occ.height > relief.width * relief.height ? occ : relief;
   const { width, height } = bigger;
@@ -15805,7 +15858,7 @@ function occlusionWithRelief(occ, relief) {
     }
   }
   const out = { width, height, data };
-  byOcc.set(key, out);
+  byOcc.set(key2, out);
   return out;
 }
 function batchRefracts(primitive, textures, effect) {
@@ -18116,15 +18169,15 @@ var WebglSceneRenderer = class _WebglSceneRenderer {
   programOf(material2, reflect = false) {
     const graph = compiledGraphOf(material2);
     if (!graph && !reflect) return this.program;
-    const key = `${graph?.key ?? ""}|${reflect ? 1 : 0}`;
-    let program = this.graphPrograms.get(key);
+    const key2 = `${graph?.key ?? ""}|${reflect ? 1 : 0}`;
+    let program = this.graphPrograms.get(key2);
     if (!program) {
       try {
         program = buildProgram2(this.gl, this.nearest, graph, reflect);
       } catch {
         program = graph && reflect ? this.programOf({ ...material2, graph: void 0 }, true) : this.program;
       }
-      this.graphPrograms.set(key, program);
+      this.graphPrograms.set(key2, program);
     }
     return program;
   }
@@ -18860,22 +18913,22 @@ var FrameGraph = class {
       for (const id of byFirst) {
         if (first.get(id) !== order) continue;
         const node = this.resources[id];
-        const key = slotKey(node.desc, node.usage);
-        const pool = free.get(key);
+        const key2 = slotKey(node.desc, node.usage);
+        const pool = free.get(key2);
         let slot = pool?.pop();
         if (slot === void 0) {
           slot = slots.length;
-          slots.push({ key, desc: node.desc, usage: node.usage });
+          slots.push({ key: key2, desc: node.desc, usage: node.usage });
         }
         slotOf.set(id, slot);
         allocations.push({ resource: node.name, slot, first: order, last: last.get(id) });
       }
       for (const id of byFirst) {
         if (last.get(id) !== order) continue;
-        const key = slots[slotOf.get(id)].key;
-        const pool = free.get(key) ?? [];
+        const key2 = slots[slotOf.get(id)].key;
+        const pool = free.get(key2) ?? [];
         pool.push(slotOf.get(id));
-        free.set(key, pool);
+        free.set(key2, pool);
       }
     }
     this.keptPasses = keptPasses;
@@ -18943,9 +18996,9 @@ var TransientPool = class {
       list[n].usedFrame = this.frame;
       return list[n].texture;
     });
-    for (const [key, list] of this.textures) {
+    for (const [key2, list] of this.textures) {
       while (list.length > 0 && this.frame - list[list.length - 1].usedFrame > this.idleFrames) list.pop().texture.destroy?.();
-      if (list.length === 0) this.textures.delete(key);
+      if (list.length === 0) this.textures.delete(key2);
     }
     return out;
   }
@@ -20023,8 +20076,8 @@ var GpuParticles = class {
   /** The draw pipeline for a blend and a kind (sprite and ribbon, or mesh). */
   drawPipeline(additive, mesh) {
     const pipes = this.pipelines();
-    const key = `${additive}:${mesh}`;
-    let pipe = pipes.draw.get(key);
+    const key2 = `${additive}:${mesh}`;
+    let pipe = pipes.draw.get(key2);
     if (pipe) return pipe;
     const device = this.device;
     const module = device.createShaderModule({ code: PARTICLE_DRAW_WGSL });
@@ -20049,7 +20102,7 @@ var GpuParticles = class {
       primitive: { topology: "triangle-list", cullMode: "none" },
       depthStencil: { format: "depth24plus", depthWriteEnabled: false, depthCompare: "less-equal" }
     });
-    pipes.draw.set(key, pipe);
+    pipes.draw.set(key2, pipe);
     return pipe;
   }
   /** The bitonic stages' uniforms, one 256-byte slot each, for rings up to `n`. */
@@ -21030,22 +21083,22 @@ var TextureStreamer = class {
     this.entries = /* @__PURE__ */ new Map();
   }
   /** Start streaming a map: resident at its floor until feedback asks for more. */
-  register(key, width, height) {
-    let entry = this.entries.get(key);
+  register(key2, width, height) {
+    let entry = this.entries.get(key2);
     if (!entry) {
       entry = { width, height, level: floorLevel(width, height), wanted: null, unseen: 0 };
-      this.entries.set(key, entry);
+      this.entries.set(key2, entry);
     }
     return entry.level;
   }
   /** The level a map is resident at (0 for one not streamed). */
-  levelOf(key) {
-    return this.entries.get(key)?.level ?? 0;
+  levelOf(key2) {
+    return this.entries.get(key2)?.level ?? 0;
   }
   /** A round of feedback: the footprint (log₂) each map's material was sampled at, absent for none seen. */
   observe(footprints) {
-    for (const [key, entry] of this.entries) {
-      const footprint = footprints.get(key);
+    for (const [key2, entry] of this.entries) {
+      const footprint = footprints.get(key2);
       if (footprint === void 0) {
         entry.unseen += 1;
         if (entry.unseen > UNSEEN_ROUNDS) entry.wanted = Math.max(entry.wanted ?? entry.level, floorLevel(entry.width, entry.height));
@@ -21063,21 +21116,21 @@ var TextureStreamer = class {
   plan() {
     const target = /* @__PURE__ */ new Map();
     let total = 0;
-    for (const [key, e] of this.entries) {
+    for (const [key2, e] of this.entries) {
       const level = e.wanted ?? e.level;
-      target.set(key, level);
+      target.set(key2, level);
       total += residentBytes(e.width, e.height, level);
     }
     while (total > this.budgetBytes) {
       let worst = null;
       let worstBytes = 0;
-      for (const [key, level2] of target) {
-        const e2 = this.entries.get(key);
+      for (const [key2, level2] of target) {
+        const e2 = this.entries.get(key2);
         if (level2 >= topLevel(e2.width, e2.height)) continue;
         const bytes = residentBytes(e2.width, e2.height, level2);
         if (bytes > worstBytes) {
           worstBytes = bytes;
-          worst = key;
+          worst = key2;
         }
       }
       if (!worst) break;
@@ -21087,18 +21140,18 @@ var TextureStreamer = class {
       target.set(worst, level);
     }
     const changed = /* @__PURE__ */ new Map();
-    for (const [key, level] of target) {
-      const e = this.entries.get(key);
+    for (const [key2, level] of target) {
+      const e = this.entries.get(key2);
       if (level !== e.level) {
         e.level = level;
-        changed.set(key, level);
+        changed.set(key2, level);
       }
     }
     return changed;
   }
   /** Stop streaming a map. */
-  forget(key) {
-    this.entries.delete(key);
+  forget(key2) {
+    this.entries.delete(key2);
   }
   stats() {
     let resident = 0;
@@ -21234,8 +21287,10 @@ fn hidden(c: vec3<f32>, r: f32) -> bool {
   let level = min(u32(ceil(log2(max(extent, 1.0)))), u32(cull.size.z) - 1u);
   // The level's size from the first's (asking for the level's own reads 1 on Dawn).
   let dims = max(vec2<i32>(textureDimensions(hiz)) >> vec2<u32>(level), vec2<i32>(1));
-  let a = min(vec2<i32>(lo) >> vec2<u32>(level), dims - 1);
-  let b = min(vec2<i32>(hi) >> vec2<u32>(level), dims - 1);
+  // Clamped both ways, and at most the two texels a side the level holds it to: a rectangle a NaN reached
+  // (a corner on the eye's plane, say) reads nothing out of bounds and loops no further.
+  let a = clamp(vec2<i32>(lo) >> vec2<u32>(level), vec2<i32>(0), dims - 1);
+  let b = clamp(vec2<i32>(hi) >> vec2<u32>(level), a, min(a + 1, dims - 1));
   var farthest = 0.0;
   for (var y = a.y; y <= b.y; y = y + 1) {
     for (var x = a.x; x <= b.x; x = x + 1) {
@@ -21344,14 +21399,15 @@ fn compact(@builtin(workgroup_id) group: vec3<u32>, @builtin(local_invocation_id
     scan[local.x] = seen;
     workgroupBarrier();
     for (var step = 1u; step < ${WORKGROUP}u; step = step * 2u) {
-      let add = select(0u, scan[local.x - step], local.x >= step);
+      let add = select(0u, scan[max(local.x, step) - step], local.x >= step);
       workgroupBarrier();
       scan[local.x] = scan[local.x] + add;
       workgroupBarrier();
     }
-    if (seen == 1u) {
-      let to = region + e.dst + kept + scan[local.x] - 1u;
-      let src = e.src + j;
+    let to = region + e.dst + kept + scan[local.x] - 1u;
+    let src = e.src + j;
+    // Every write in the instance buffer, or none (a record past its end would corrupt what follows it).
+    if (seen == 1u && (to + total + 1u) * RECORD <= arrayLength(&xf) && (src + n + 1u) * RECORD <= arrayLength(&xf)) {
       for (var f = 0u; f < RECORD; f = f + 1u) {
         xf[to * RECORD + f] = xf[src * RECORD + f];
         xf[(to + total) * RECORD + f] = xf[(src + n) * RECORD + f];
@@ -22011,10 +22067,10 @@ var BundleCache = class {
     this.recorded = 0;
   }
   /** The bundle for `slot`, recorded with `record` when `key` (or the target) differs from the last one's. */
-  get(slot, target, key, record) {
+  get(slot, target, key2, record) {
     const targetKey = `${target.colorFormats.join(",")}|${target.depthStencilFormat}|${target.sampleCount}|${target.depthReadOnly ? 1 : 0}`;
     const cached = this.slots.get(slot);
-    if (cached && cached.target === targetKey && sameKey(cached.key, key)) return cached.bundle;
+    if (cached && cached.target === targetKey && sameKey(cached.key, key2)) return cached.bundle;
     const encoder = this.device.createRenderBundleEncoder({
       colorFormats: [...target.colorFormats],
       depthStencilFormat: target.depthStencilFormat,
@@ -22024,7 +22080,7 @@ var BundleCache = class {
     });
     record(encoder);
     const bundle = encoder.finish();
-    this.slots.set(slot, { key: [...key], target: targetKey, bundle });
+    this.slots.set(slot, { key: [...key2], target: targetKey, bundle });
     this.recorded += 1;
     return bundle;
   }
@@ -22225,8 +22281,10 @@ fn hidden(c: vec3<f32>, r: f32) -> bool {
   let extent = max(hi.x - lo.x, hi.y - lo.y);
   let level = min(u32(ceil(log2(max(extent, 1.0)))), u32(frame.size.z) - 1u);
   let dims = max(vec2<i32>(textureDimensions(hiz)) >> vec2<u32>(level), vec2<i32>(1));
-  let a = min(vec2<i32>(lo) >> vec2<u32>(level), dims - 1);
-  let b = min(vec2<i32>(hi) >> vec2<u32>(level), dims - 1);
+  // Clamped both ways, and at most the two texels a side the level holds it to: a rectangle a NaN reached
+  // (a corner on the eye's plane, say) reads nothing out of bounds and loops no further.
+  let a = clamp(vec2<i32>(lo) >> vec2<u32>(level), vec2<i32>(0), dims - 1);
+  let b = clamp(vec2<i32>(hi) >> vec2<u32>(level), a, min(a + 1, dims - 1));
   var farthest = 0.0;
   for (var y = a.y; y <= b.y; y = y + 1) {
     for (var x = a.x; x <= b.x; x = x + 1) {
@@ -22429,6 +22487,580 @@ var ClusterRendering = class {
   }
 };
 
+// src/render/gpuTerrain.ts
+import { composeModelMatrix as composeModelMatrix5 } from "@cartbox/editor";
+var TERRAIN_PATCH = 16;
+var TERRAIN_RANGE = 5;
+var TERRAIN_MORPH = 0.8;
+var TERRAIN_PAGE_TEXELS = 512;
+var TERRAIN_TEXEL = 0.025;
+var NODES_PER_PAGE = 22;
+var MAX_TERRAIN_PAGES = 8;
+var PAGE_SNAP = 8;
+var MAX_TERRAIN_RELIEF = 0.5;
+function terrainPlan(t, texels = TERRAIN_PAGE_TEXELS) {
+  const page = texels * TERRAIN_TEXEL;
+  const leaf = page / NODES_PER_PAGE;
+  const extent = Math.max(t.size[0], t.size[1]);
+  const levels = Math.max(0, Math.ceil(Math.log2(extent / leaf)));
+  let eyePages = 0;
+  while (eyePages < MAX_TERRAIN_PAGES && eyePages < levels && page * 2 ** eyePages < 2 * extent) eyePages += 1;
+  return { size: [t.size[0], t.size[1]], cells: t.samples - 1, leaf, levels, page, eyePages, texels };
+}
+function encodeTerrainHeights(t) {
+  const n = t.samples;
+  let min = Infinity;
+  let max = -Infinity;
+  for (const h of t.heights) {
+    if (h < min) min = h;
+    if (h > max) max = h;
+  }
+  const range = Math.max(max - min, 0.01);
+  const data = new Uint8Array(n * n * 4);
+  const floor = t.floor ?? -Infinity;
+  for (let j = 0; j < n; j += 1) {
+    for (let i = 0; i < n; i += 1) {
+      const k = j * n + i;
+      const q = Math.max(0, Math.min(65535, Math.round((t.heights[k] - min) / range * 65535)));
+      data[k * 4] = q >> 8;
+      data[k * 4 + 1] = q & 255;
+      let cut = false;
+      if (i < n - 1 && j < n - 1) {
+        if (t.holes && t.holes[j * (n - 1) + i]) cut = true;
+        else if (floor > -Infinity) {
+          const top = Math.max(t.heights[k], t.heights[k + 1], t.heights[k + n], t.heights[k + n + 1]);
+          cut = t.origin[1] + top < floor;
+        }
+      }
+      data[k * 4 + 2] = cut ? 255 : 0;
+      data[k * 4 + 3] = 255;
+    }
+  }
+  return { data, min, range };
+}
+var TerrainTree = class {
+  constructor(t, plan, relief = 0) {
+    this.t = t;
+    this.plan = plan;
+    this.relief = relief;
+    this.mins = [];
+    this.maxs = [];
+    this.sides = [];
+    const n = t.samples;
+    const c = n - 1;
+    let side = c;
+    let mins = new Float32Array(c * c);
+    let maxs = new Float32Array(c * c);
+    for (let j = 0; j < c; j += 1) {
+      for (let i = 0; i < c; i += 1) {
+        const k = j * n + i;
+        const a = t.heights[k], b = t.heights[k + 1], d = t.heights[k + n], e = t.heights[k + n + 1];
+        mins[j * c + i] = Math.min(a, b, d, e);
+        maxs[j * c + i] = Math.max(a, b, d, e);
+      }
+    }
+    for (; ; ) {
+      this.mins.push(mins);
+      this.maxs.push(maxs);
+      this.sides.push(side);
+      if (side <= 1) break;
+      const next = Math.ceil(side / 2);
+      const nm = new Float32Array(next * next).fill(Infinity);
+      const nx = new Float32Array(next * next).fill(-Infinity);
+      for (let j = 0; j < side; j += 1) {
+        for (let i = 0; i < side; i += 1) {
+          const to = (j >> 1) * next + (i >> 1);
+          nm[to] = Math.min(nm[to], mins[j * side + i]);
+          nx[to] = Math.max(nx[to], maxs[j * side + i]);
+        }
+      }
+      mins = nm;
+      maxs = nx;
+      side = next;
+    }
+  }
+  /** The heights' range over cells [i0, i1) × [j0, j1). */
+  range(i0, j0, i1, j1) {
+    const span = Math.max(i1 - i0, j1 - j0, 1);
+    const p = Math.min(this.sides.length - 1, Math.max(0, Math.ceil(Math.log2(span)) - 1));
+    const side = this.sides[p];
+    let lo = Infinity;
+    let hi = -Infinity;
+    for (let b = j0 >> p; b <= j1 - 1 >> p && b < side; b += 1) {
+      for (let a = i0 >> p; a <= i1 - 1 >> p && a < side; a += 1) {
+        lo = Math.min(lo, this.mins[p][b * side + a]);
+        hi = Math.max(hi, this.maxs[p][b * side + a]);
+      }
+    }
+    return [lo, hi];
+  }
+  /** The nodes to draw for an eye at (x, z), metres from the terrain's corner. */
+  select(eye) {
+    const { leaf, levels, size, cells } = this.plan;
+    const dx = size[0] / cells;
+    const dz = size[1] / cells;
+    const out = [];
+    const visit = (x, z, level) => {
+      if (x >= size[0] || z >= size[1]) return;
+      const s = leaf * 2 ** level;
+      const away = Math.hypot(Math.max(x - eye[0], 0, eye[0] - (x + s)), Math.max(z - eye[1], 0, eye[1] - (z + s)));
+      if (level > 0 && away <= TERRAIN_RANGE * s / 2) {
+        const h = s / 2;
+        visit(x, z, level - 1);
+        visit(x + h, z, level - 1);
+        visit(x, z + h, level - 1);
+        visit(x + h, z + h, level - 1);
+        return;
+      }
+      const i0 = Math.max(0, Math.floor(x / dx));
+      const j0 = Math.max(0, Math.floor(z / dz));
+      const i1 = Math.min(cells, Math.max(i0 + 1, Math.ceil((x + s) / dx)));
+      const j1 = Math.min(cells, Math.max(j0 + 1, Math.ceil((z + s) / dz)));
+      const [lo, hi] = this.range(Math.min(i0, cells - 1), Math.min(j0, cells - 1), i1, j1);
+      out.push({ x, z, size: s, level, min: lo - this.relief, max: hi });
+    };
+    visit(0, 0, levels);
+    return out;
+  }
+  /** The terrain this tree was built over. */
+  get terrain() {
+    return this.t;
+  }
+};
+function pageCorners(plan, eye) {
+  return Array.from({ length: plan.eyePages }, (_, k) => {
+    const side = plan.page * 2 ** k;
+    const snap2 = side / PAGE_SNAP;
+    return [Math.round((eye[0] - side / 2) / snap2) * snap2, Math.round((eye[1] - side / 2) / snap2) * snap2];
+  });
+}
+function terrainNodeModel(t, node) {
+  return composeModelMatrix5([t.origin[0] + node.x, t.origin[1] + node.min, t.origin[2] + node.z], [0, 0, 0], [node.size, Math.max(node.max - node.min, 0.01), node.size]);
+}
+function terrainPatchMesh(name, material2) {
+  const n = TERRAIN_PATCH;
+  const positions = [];
+  const uvs = [];
+  for (let j = 0; j <= n; j += 1) {
+    for (let i = 0; i <= n; i += 1) {
+      positions.push(i / n, 0, j / n);
+      uvs.push(i / n, j / n);
+    }
+  }
+  positions.push(0, 1, 0, 1, 1, 1);
+  uvs.push(0, 0, 1, 1);
+  const indices = [];
+  for (let j = 0; j < n; j += 1) {
+    for (let i = 0; i < n; i += 1) {
+      const a = j * (n + 1) + i;
+      indices.push(a, a + n + 1, a + n + 2, a, a + n + 2, a + 1);
+    }
+  }
+  const count = positions.length / 3;
+  const normals = new Float32Array(count * 3);
+  for (let v = 0; v < count; v += 1) normals[v * 3 + 1] = 1;
+  return {
+    name,
+    primitives: [{ positions: Float32Array.from(positions), normals, uvs: Float32Array.from(uvs), indices: Uint32Array.from(indices), material: material2 }]
+  };
+}
+var TERRAIN_UNIFORM_FLOATS = 32;
+var LAYER_VEC4S = 5;
+var BAKE_BYTES = (6 + 4 * LAYER_VEC4S) * 16;
+var TERRAIN_BAKE_WGSL = (
+  /* wgsl */
+  `
+struct Layer {
+  up: vec4<f32>,      // lo, hi, 1 when set, 1 when painted only
+  height: vec4<f32>,  // lo, hi, 1 when set
+  curve: vec4<f32>,   // lo, hi, 1 when set
+  colour: vec4<f32>,  // the base colour factor (rgb), 1 with a base map
+  pbr: vec4<f32>,     // roughness, metallic, 1 with a metallic-roughness map, 1 with a normal map
+};
+struct Bake {
+  page: vec4<f32>,    // the page's corner (x, z, metres from the terrain's), side, slot in the atlas
+  size: vec4<f32>,    // the terrain's size (x, z), cells a side, texels a page side
+  height: vec4<f32>,  // the heights' min and range, the terrain's origin y, 1 when painted
+  world: vec4<f32>,   // the terrain's origin x and z, the maps' tile, 1 when triplanar
+  blend: vec4<f32>,   // the blend's up and height widths and noise (x < 0: hard edges), its sharpness
+  count: vec4<f32>,   // layers
+  layers: array<Layer, 4>,
+};
+@group(0) @binding(0) var<uniform> b: Bake;
+@group(0) @binding(1) var samp: sampler;
+@group(0) @binding(2) var heights: texture_2d<f32>;
+@group(0) @binding(3) var paint: texture_2d<f32>;
+@group(0) @binding(4) var base0: texture_2d<f32>;
+@group(0) @binding(5) var base1: texture_2d<f32>;
+@group(0) @binding(6) var base2: texture_2d<f32>;
+@group(0) @binding(7) var base3: texture_2d<f32>;
+@group(0) @binding(8) var nrm0: texture_2d<f32>;
+@group(0) @binding(9) var nrm1: texture_2d<f32>;
+@group(0) @binding(10) var nrm2: texture_2d<f32>;
+@group(0) @binding(11) var nrm3: texture_2d<f32>;
+@group(0) @binding(12) var mr0: texture_2d<f32>;
+@group(0) @binding(13) var mr1: texture_2d<f32>;
+@group(0) @binding(14) var mr2: texture_2d<f32>;
+@group(0) @binding(15) var mr3: texture_2d<f32>;
+@group(0) @binding(16) var albedoOut: texture_storage_2d<rgba8unorm, write>;
+@group(0) @binding(17) var normalOut: texture_storage_2d<rgba8unorm, write>;
+@group(0) @binding(18) var mrOut: texture_storage_2d<rgba8unorm, write>;
+@group(0) @binding(19) var occOut: texture_storage_2d<rgba8unorm, write>;
+
+// A sample's height (local), its four corners' bilinear blend, as the scene's vertex reads it.
+fn heightAt(p: vec2<f32>) -> f32 {
+  let cells = b.size.z;
+  let q = clamp(p / b.size.xy, vec2<f32>(0.0), vec2<f32>(1.0)) * cells;
+  let i = min(vec2<i32>(floor(q)), vec2<i32>(i32(cells) - 1));
+  let f = q - vec2<f32>(i);
+  let h00 = textureLoad(heights, i, 0);
+  let h10 = textureLoad(heights, i + vec2<i32>(1, 0), 0);
+  let h01 = textureLoad(heights, i + vec2<i32>(0, 1), 0);
+  let h11 = textureLoad(heights, i + vec2<i32>(1, 1), 0);
+  let d = vec4<f32>(h00.r * 65280.0 + h00.g * 255.0, h10.r * 65280.0 + h10.g * 255.0, h01.r * 65280.0 + h01.g * 255.0, h11.r * 65280.0 + h11.g * 255.0) / 65535.0;
+  return b.height.x + mix(mix(d.x, d.y, f.x), mix(d.z, d.w, f.x), f.y) * b.height.y;
+}
+fn paintAt(p: vec2<f32>) -> vec4<f32> {
+  let cells = b.size.z;
+  let q = clamp(p / b.size.xy, vec2<f32>(0.0), vec2<f32>(1.0)) * cells;
+  let i = min(vec2<i32>(floor(q)), vec2<i32>(i32(cells) - 1));
+  let f = q - vec2<f32>(i);
+  return mix(mix(textureLoad(paint, i, 0), textureLoad(paint, i + vec2<i32>(1, 0), 0), f.x), mix(textureLoad(paint, i + vec2<i32>(0, 1), 0), textureLoad(paint, i + vec2<i32>(1, 1), 0), f.x), f.y);
+}
+
+// terrain.ts's ramp, within and edgeNoise, term for term.
+fn ramp(v: f32, edge: f32, w: f32) -> f32 {
+  if (w <= 0.0) { return select(0.0, 1.0, v >= edge); }
+  let t = clamp((v - edge + w / 2.0) / w, 0.0, 1.0);
+  return t * t * (3.0 - 2.0 * t);
+}
+fn within(v: f32, range: vec4<f32>, w: f32, lo: f32, hi: f32) -> f32 {
+  if (range.z < 0.5) { return 1.0; }
+  let low = select(ramp(v, range.x, w), 1.0, range.x <= lo);
+  let high = select(1.0 - ramp(v, range.y, w), 1.0, range.y >= hi);
+  return low * high;
+}
+fn inside(v: f32, range: vec4<f32>) -> bool {
+  return range.z < 0.5 || (v >= range.x && v <= range.y);
+}
+fn cellHash(i: i32, j: i32) -> f32 {
+  var h = bitcast<u32>(i) * 374761393u + bitcast<u32>(j) * 668265263u;
+  h = (h ^ (h >> 13u)) * 1274126177u;
+  return f32(h ^ (h >> 16u)) / 4294967295.0;
+}
+fn octave(x: f32, z: f32, scale: f32) -> f32 {
+  let g = vec2<f32>(x, z) / scale;
+  let c = floor(g);
+  let f = g - c;
+  let s = f * f * (3.0 - 2.0 * f);
+  let i = i32(c.x);
+  let j = i32(c.y);
+  let top = cellHash(i, j) + (cellHash(i + 1, j) - cellHash(i, j)) * s.x;
+  let bottom = cellHash(i, j + 1) + (cellHash(i + 1, j + 1) - cellHash(i, j + 1)) * s.x;
+  return top + (bottom - top) * s.y;
+}
+fn edgeNoise(x: f32, z: f32) -> f32 {
+  return (octave(x, z, 9.0) * 0.65 + octave(x, z, 3.5) * 0.35) * 2.0 - 1.0;
+}
+
+// A layer's map at a point: by the terrain's planar UVs, or projected from three axes (triMap, term for term).
+fn mapAt(t: texture_2d<f32>, p: vec3<f32>, n: vec3<f32>, lod: f32) -> vec4<f32> {
+  if (b.world.w < 0.5) { return textureSampleLevel(t, samp, vec2<f32>(p.x, 1.0 - p.z), lod); }
+  let a = n * n;
+  var w = a * a;
+  w = w / max(w.x + w.y + w.z, 1e-30);
+  return textureSampleLevel(t, samp, vec2<f32>(p.z, 1.0 - p.y), lod) * w.x + textureSampleLevel(t, samp, vec2<f32>(p.x, 1.0 - p.z), lod) * w.y + textureSampleLevel(t, samp, vec2<f32>(p.x, 1.0 - p.y), lod) * w.z;
+}
+fn lodOf(t: texture_2d<f32>) -> f32 {
+  let texel = b.page.z / b.size.w / b.world.z;
+  return max(log2(texel * f32(textureDimensions(t).x)), 0.0);
+}
+struct Surface { colour: vec4<f32>, normal: vec3<f32>, rough: f32, metal: f32 };
+fn layerSurface(k: i32, p: vec3<f32>, n: vec3<f32>) -> Surface {
+  let l = b.layers[k];
+  var s: Surface;
+  var colour = vec4<f32>(1.0);
+  var tn = vec4<f32>(0.5, 0.5, 1.0, 1.0);
+  var mr = vec4<f32>(1.0);
+  switch k {
+    case 0: { colour = mapAt(base0, p, n, lodOf(base0)); tn = mapAt(nrm0, p, n, lodOf(nrm0)); mr = mapAt(mr0, p, n, lodOf(mr0)); }
+    case 1: { colour = mapAt(base1, p, n, lodOf(base1)); tn = mapAt(nrm1, p, n, lodOf(nrm1)); mr = mapAt(mr1, p, n, lodOf(mr1)); }
+    case 2: { colour = mapAt(base2, p, n, lodOf(base2)); tn = mapAt(nrm2, p, n, lodOf(nrm2)); mr = mapAt(mr2, p, n, lodOf(mr2)); }
+    default: { colour = mapAt(base3, p, n, lodOf(base3)); tn = mapAt(nrm3, p, n, lodOf(nrm3)); mr = mapAt(mr3, p, n, lodOf(mr3)); }
+  }
+  s.colour = vec4<f32>(l.colour.rgb, 1.0) * select(vec4<f32>(1.0), colour, l.colour.w > 0.5);
+  s.normal = select(vec3<f32>(0.0, 0.0, 1.0), tn.rgb * 2.0 - 1.0, l.pbr.w > 0.5);
+  s.rough = l.pbr.x * select(1.0, mr.g, l.pbr.z > 0.5);
+  s.metal = l.pbr.y * select(1.0, mr.b, l.pbr.z > 0.5);
+  return s;
+}
+
+@compute @workgroup_size(8, 8)
+fn main(@builtin(global_invocation_id) id: vec3<u32>) {
+  let texels = u32(b.size.w);
+  if (id.x >= texels || id.y >= texels) { return; }
+  let local = b.page.xy + (vec2<f32>(id.xy) + 0.5) / b.size.w * b.page.z;
+  let cell = b.size.xy / b.size.z;
+  let h = heightAt(local);
+  // The slope at the grid's own spacing (terrainMesh's vertex normal), and the curvature (terrainCurvature).
+  let hl = heightAt(local - vec2<f32>(cell.x, 0.0));
+  let hr = heightAt(local + vec2<f32>(cell.x, 0.0));
+  let hd = heightAt(local - vec2<f32>(0.0, cell.y));
+  let hu = heightAt(local + vec2<f32>(0.0, cell.y));
+  let n = normalize(vec3<f32>(-(hr - hl) / (2.0 * cell.x), 1.0, -(hu - hd) / (2.0 * cell.y)));
+  let curvature = (hl + hr + hd + hu) / 4.0 - h;
+  let world = vec3<f32>(b.world.x + local.x, b.height.z + h, b.world.y + local.y);
+  let count = i32(b.count.x);
+  // Each layer's weight: painted, else the rules (softly, first match winning, with the blend; else the first match).
+  var w = array<f32, 4>(0.0, 0.0, 0.0, 0.0);
+  var painted = false;
+  if (b.height.w > 0.5) {
+    let p = paintAt(local);
+    let sum = p.x + p.y + p.z + p.w;
+    if (sum > 1e-4) {
+      painted = true;
+      w = array<f32, 4>(p.x / sum, p.y / sum, p.z / sum, p.w / sum);
+    }
+  }
+  if (!painted && b.blend.x >= 0.0) {
+    let jitter = b.blend.z * edgeNoise(world.x, world.z);
+    let uu = n.y + jitter * b.blend.x;
+    let hh = world.y + jitter * b.blend.y;
+    var rest = 1.0;
+    for (var k = 0; k < count; k = k + 1) {
+      if (k == count - 1) { w[k] = rest; break; }
+      let l = b.layers[k];
+      var m = 0.0;
+      if (l.up.w < 0.5) { m = rest * within(uu, l.up, b.blend.x, 0.0, 1.0) * within(hh, l.height, b.blend.y, -1e30, 1e30) * within(curvature, l.curve, ${0.05}, -1e30, 1e30); }
+      w[k] = m;
+      rest = rest - m;
+    }
+  } else if (!painted) {
+    var chosen = count - 1;
+    for (var k = 0; k < count - 1; k = k + 1) {
+      let l = b.layers[k];
+      if (l.up.w > 0.5) { continue; }
+      if (inside(n.y, l.up) && inside(world.y, l.height) && inside(curvature, l.curve)) { chosen = k; break; }
+    }
+    w[chosen] = 1.0;
+  }
+  let p = world / b.world.z;
+  var colour = vec4<f32>(0.0);
+  var tn = vec3<f32>(0.0);
+  var rough = 0.0;
+  var metal = 0.0;
+  var relief = 0.0;
+  // The blend's sharpness lets the brighter (higher) surface through first.
+  var weights = w;
+  var total = 0.0;
+  var surfaces: array<Surface, 4>;
+  for (var k = 0; k < count; k = k + 1) {
+    if (w[k] <= 0.0) { continue; }
+    surfaces[k] = layerSurface(k, p, n);
+    let lum = dot(surfaces[k].colour.rgb, vec3<f32>(0.299, 0.587, 0.114));
+    weights[k] = w[k] * exp(4.0 * b.blend.w * (lum - 0.5));
+    total = total + weights[k];
+  }
+  for (var k = 0; k < count; k = k + 1) {
+    if (w[k] <= 0.0) { continue; }
+    let s = surfaces[k];
+    let share = weights[k] / max(total, 1e-6);
+    colour = colour + s.colour * share;
+    tn = tn + s.normal * share;
+    rough = rough + s.rough * share;
+    metal = metal + s.metal * share;
+    relief = relief + dot(s.colour.rgb, vec3<f32>(0.299, 0.587, 0.114)) * share;
+  }
+  let at = vec2<i32>(i32(b.page.w) * i32(texels) + i32(id.x), i32(id.y));
+  textureStore(albedoOut, at, vec4<f32>(colour.rgb, 1.0));
+  textureStore(normalOut, at, vec4<f32>(normalize(tn + vec3<f32>(0.0, 0.0, 1e-6)) * 0.5 + 0.5, 1.0));
+  textureStore(mrOut, at, vec4<f32>(1.0, clamp(rough, 0.0, 1.0), clamp(metal, 0.0, 1.0), 1.0));
+  // A cut cell (B of its corner's sample) leaves the occlusion's alpha at 0: the draw discards it.
+  let cells = b.size.z;
+  let ci = clamp(vec2<i32>(floor(local / b.size.xy * cells)), vec2<i32>(0), vec2<i32>(i32(cells) - 1));
+  let cut = textureLoad(heights, ci, 0).b > 0.5;
+  textureStore(occOut, at, vec4<f32>(1.0, clamp(relief, 0.0, 1.0), 0.5, select(1.0, 0.0, cut)));
+}
+`
+);
+var STORAGE_BINDING2 = 8;
+var TEXTURE_BINDING3 = 4;
+var COPY_DST5 = 2;
+var RENDER_ATTACHMENT2 = 16;
+function key(width, height, packedWithRelief = false) {
+  return { width, height, data: new Uint8ClampedArray(0), ...packedWithRelief ? { packedWithRelief: true } : {} };
+}
+var GpuTerrain = class {
+  constructor(host, terrain, texels = TERRAIN_PAGE_TEXELS) {
+    this.host = host;
+    this.terrain = terrain;
+    this.layerKey = [];
+    this.values = new Float32Array(TERRAIN_UNIFORM_FLOATS);
+    /** Bake uniforms in flight, released once their bakes are submitted. */
+    this.spent = [];
+    this.repeat = null;
+    const device = host.device;
+    const t = terrain;
+    this.plan = terrainPlan(t, texels);
+    this.relief = Math.min(MAX_TERRAIN_RELIEF, Math.max(0, t.relief ?? 0));
+    this.tree = new TerrainTree(t, this.plan, this.relief);
+    const encoded = encodeTerrainHeights(t);
+    this.min = encoded.min;
+    this.range = encoded.range;
+    const n = t.samples;
+    this.heights = device.createTexture({ size: { width: n, height: n }, format: "rgba8unorm", usage: TEXTURE_BINDING3 | COPY_DST5 });
+    device.queue.writeTexture({ texture: this.heights }, encoded.data, { bytesPerRow: n * 4, rowsPerImage: n }, { width: n, height: n });
+    this.heightView = this.heights.createView();
+    if (t.paint && t.paint.length === n * n * t.layers.length) {
+      const L = t.layers.length;
+      const data = new Uint8Array(n * n * 4);
+      for (let k = 0; k < n * n; k += 1) for (let l = 0; l < L; l += 1) data[k * 4 + l] = t.paint[k * L + l];
+      this.paint = device.createTexture({ size: { width: n, height: n }, format: "rgba8unorm", usage: TEXTURE_BINDING3 | COPY_DST5 });
+      device.queue.writeTexture({ texture: this.paint }, data, { bytesPerRow: n * 4, rowsPerImage: n }, { width: n, height: n });
+    } else this.paint = null;
+    const width = texels * (this.plan.eyePages + 1);
+    this.levels = Math.max(1, Math.log2(texels) - 1);
+    const atlas = () => device.createTexture({ size: { width, height: texels }, format: "rgba8unorm", usage: STORAGE_BINDING2 | TEXTURE_BINDING3 | COPY_DST5 | RENDER_ATTACHMENT2, mipLevelCount: this.levels });
+    this.atlases = { albedo: atlas(), normal: atlas(), mr: atlas(), occ: atlas() };
+    this.maps = { albedo: key(width, texels), normal: key(width, texels), mr: key(width, texels), occ: key(width, texels, true), relief: key(1, 1) };
+    host.adopt(this.maps.albedo, this.atlases.albedo, true);
+    host.adopt(this.maps.normal, this.atlases.normal, false);
+    host.adopt(this.maps.mr, this.atlases.mr, false);
+    host.adopt(this.maps.occ, this.atlases.occ, false);
+    const material2 = {
+      name: `${t.name} (virtual texture)`,
+      baseColorFactor: [1, 1, 1, 1],
+      baseColorImage: null,
+      metallicFactor: 1,
+      roughnessFactor: 1,
+      ...this.relief > 0 ? { parallaxDepth: this.relief } : {}
+    };
+    this.mesh = terrainPatchMesh(t.name, material2);
+    this.pipeline = device.createComputePipeline({ layout: "auto", compute: { module: device.createShaderModule({ code: TERRAIN_BAKE_WGSL }), entryPoint: "main" } });
+    this.baked = new Array(this.plan.eyePages + 1).fill(null);
+  }
+  /** The eye (world) in the terrain's ground plane, metres from its corner. */
+  eyeOf(eye) {
+    return [eye[0] - this.terrain.origin[0], eye[2] - this.terrain.origin[2]];
+  }
+  /**
+   * This frame's nodes as copies of the patch (each its own model), with the
+   * pages they shade from baked (and submitted) first. `layers` are the
+   * layers' decoded maps; a new set re-bakes every page.
+   */
+  frame(eyeWorld, layers) {
+    const eye = this.eyeOf(eyeWorld);
+    const flat = layers.flatMap((l) => [l.base, l.normal, l.mr]);
+    if (flat.length !== this.layerKey.length || flat.some((m, i) => m !== this.layerKey[i])) {
+      this.layerKey = flat;
+      this.baked.fill(null);
+    }
+    const corners = pageCorners(this.plan, eye);
+    const whole = [0, 0];
+    const wanted = [...corners, whole];
+    const changed = [];
+    wanted.forEach((c, k) => {
+      const was = this.baked[k];
+      if (!was || was[0] !== c[0] || was[1] !== c[1]) changed.push(k);
+    });
+    if (changed.length > 0) {
+      const encoder = this.host.device.createCommandEncoder();
+      for (const k of changed) this.bake(encoder, k, wanted[k], layers);
+      this.host.device.queue.submit([encoder.finish()]);
+      this.release();
+      this.host.mips(this.atlases.albedo, this.levels, "rgba8unorm");
+      this.host.mips(this.atlases.normal, this.levels, "rgba8unorm");
+      this.host.mips(this.atlases.mr, this.levels, "rgba8unorm");
+      this.host.mips(this.atlases.occ, this.levels, "rgba8unorm");
+    }
+    this.writeUniform(eye, corners);
+    const textures = [this.maps.albedo];
+    return this.tree.select(eye).map((node) => ({
+      mesh: this.mesh,
+      model: terrainNodeModel(this.terrain, node),
+      textures,
+      mrTextures: [this.maps.mr],
+      normalTextures: [this.maps.normal],
+      occlusionTextures: [this.maps.occ],
+      reliefTextures: [this.maps.relief]
+    }));
+  }
+  writeUniform(eye, corners) {
+    const t = this.terrain;
+    const v = this.values;
+    v.fill(0);
+    v.set([t.size[0], t.size[1], this.min, this.range], 0);
+    const cut = Boolean(t.holes?.some((h) => h !== 0)) || t.floor !== void 0;
+    v.set([this.plan.cells, cut ? 1 : 0, this.plan.page, this.plan.eyePages], 4);
+    v.set([t.origin[0], t.origin[1], t.origin[2], this.plan.leaf], 8);
+    v.set([eye[0], eye[1], TERRAIN_RANGE, TERRAIN_MORPH], 12);
+    corners.forEach((c, k) => v.set(c, 16 + k * 2));
+  }
+  bake(encoder, slot, corner, layers) {
+    const t = this.terrain;
+    const plan = this.plan;
+    const side = slot < plan.eyePages ? plan.page * 2 ** slot : Math.max(t.size[0], t.size[1]);
+    const data = new Float32Array(BAKE_BYTES / 4);
+    data.set([corner[0], corner[1], side, slot], 0);
+    data.set([t.size[0], t.size[1], plan.cells, plan.texels], 4);
+    data.set([this.min, this.range, t.origin[1], this.paint ? 1 : 0], 8);
+    data.set([t.origin[0], t.origin[2], t.tile && t.tile > 0 ? t.tile : 8, t.triplanar ? 1 : 0], 12);
+    data.set(t.blend ? [t.blend.up, t.blend.height, t.blend.noise ?? 0, t.blend.sharpness ?? 0] : [-1, 0, 0, 0], 16);
+    data.set([Math.min(4, t.layers.length), 0, 0, 0], 20);
+    t.layers.slice(0, 4).forEach((l, k) => {
+      const o = 24 + k * LAYER_VEC4S * 4;
+      const maps = layers[k];
+      data.set([l.up?.[0] ?? 0, l.up?.[1] ?? 0, l.up ? 1 : 0, l.paintOnly ? 1 : 0], o);
+      data.set([l.height?.[0] ?? 0, l.height?.[1] ?? 0, l.height ? 1 : 0, 0], o + 4);
+      data.set([l.curvature?.[0] ?? 0, l.curvature?.[1] ?? 0, l.curvature ? 1 : 0, 0], o + 8);
+      const c = l.material.baseColorFactor;
+      data.set([c[0], c[1], c[2], maps?.base ? 1 : 0], o + 12);
+      data.set([l.material.roughnessFactor ?? 1, l.material.metallicFactor ?? 0, maps?.mr ? 1 : 0, maps?.normal ? 1 : 0], o + 16);
+    });
+    const device = this.host.device;
+    const uniform = device.createBuffer({ size: BAKE_BYTES, usage: 64 | 8 });
+    device.queue.writeBuffer(uniform, 0, data);
+    const view = (m, colour) => (m ? this.host.upload(m, colour) : this.host.blank).createView();
+    const level0 = (texture) => texture.createView({ baseMipLevel: 0, mipLevelCount: 1 });
+    const group = device.createBindGroup({
+      layout: this.pipeline.getBindGroupLayout(0),
+      entries: [
+        { binding: 0, resource: { buffer: uniform } },
+        { binding: 1, resource: this.sampler() },
+        { binding: 2, resource: this.heightView },
+        { binding: 3, resource: (this.paint ?? this.host.blank).createView() },
+        ...[0, 1, 2, 3].map((k) => ({ binding: 4 + k, resource: view(layers[k]?.base, true) })),
+        ...[0, 1, 2, 3].map((k) => ({ binding: 8 + k, resource: view(layers[k]?.normal, false) })),
+        ...[0, 1, 2, 3].map((k) => ({ binding: 12 + k, resource: view(layers[k]?.mr, false) })),
+        { binding: 16, resource: level0(this.atlases.albedo) },
+        { binding: 17, resource: level0(this.atlases.normal) },
+        { binding: 18, resource: level0(this.atlases.mr) },
+        { binding: 19, resource: level0(this.atlases.occ) }
+      ]
+    });
+    const pass = encoder.beginComputePass();
+    pass.setPipeline(this.pipeline);
+    pass.setBindGroup(0, group);
+    const groups = Math.ceil(plan.texels / 8);
+    pass.dispatchWorkgroups(groups, groups);
+    pass.end();
+    this.baked[slot] = [corner[0], corner[1]];
+    this.spent.push(uniform);
+  }
+  release() {
+    for (const b of this.spent) b.destroy?.();
+    this.spent = [];
+  }
+  sampler() {
+    this.repeat ?? (this.repeat = this.host.device.createSampler({ magFilter: "linear", minFilter: "linear", mipmapFilter: "linear", addressModeU: "repeat", addressModeV: "repeat" }));
+    return this.repeat;
+  }
+  dispose() {
+    this.release();
+    for (const t of [this.heights, this.paint, this.atlases.albedo, this.atlases.normal, this.atlases.mr, this.atlases.occ]) t?.destroy?.();
+  }
+};
+
 // src/render/pathTracer.ts
 import { buildBvh as buildBvh2, cameraPositionFromView as cameraPositionFromView3, resolveExtensions as resolveExtensions2, multiplyMat4 as multiplyMat46 } from "@cartbox/editor";
 
@@ -22461,7 +23093,7 @@ var LIGHT_VEC4S = 5;
 var PROBE_ACC_VEC4S = 10 + PROBE_DEPTH_SIDE * PROBE_DEPTH_SIDE;
 var ACC_FLOATS = 16;
 var STORAGE4 = 128;
-var COPY_DST5 = 8;
+var COPY_DST6 = 8;
 var COPY_SRC3 = 4;
 var MAP_READ = 1;
 var UNIFORM6 = 64;
@@ -23005,7 +23637,7 @@ async function bakeLightmapGpu(device, layout, occluders, options = {}, progress
       }
     }
     const upload = (data) => {
-      const buffer = device.createBuffer({ size: Math.max(16, data.byteLength), usage: STORAGE4 | COPY_DST5 });
+      const buffer = device.createBuffer({ size: Math.max(16, data.byteLength), usage: STORAGE4 | COPY_DST6 });
       device.queue.writeBuffer(buffer, 0, data.buffer, data.byteOffset, data.byteLength);
       return buffer;
     };
@@ -23014,8 +23646,8 @@ async function bakeLightmapGpu(device, layout, occluders, options = {}, progress
     const accum = device.createBuffer({ size: acc.byteLength, usage: STORAGE4 | COPY_SRC3 });
     const skyBuffer = upload(skyData);
     const lightBuffer = upload(lights.data);
-    const params = device.createBuffer({ size: PARAMS_BYTES, usage: UNIFORM6 | COPY_DST5 });
-    const readback = device.createBuffer({ size: acc.byteLength, usage: MAP_READ | COPY_DST5 });
+    const params = device.createBuffer({ size: PARAMS_BYTES, usage: UNIFORM6 | COPY_DST6 });
+    const readback = device.createBuffer({ size: acc.byteLength, usage: MAP_READ | COPY_DST6 });
     try {
       const pipeline = device.createComputePipeline({ layout: "auto", compute: { module: device.createShaderModule({ code: LIGHTMAP_TRACE_WGSL }), entryPoint: "main" } });
       const group = device.createBindGroup({
@@ -23186,12 +23818,12 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
 );
 async function denoiseLightmap(device, atlas, texel, passes = DENOISE_PASSES, sigma = DENOISE_SIGMA) {
   const { size, values, guide } = atlas;
-  const guideBuffer = device.createBuffer({ size: guide.byteLength, usage: STORAGE4 | COPY_DST5 });
+  const guideBuffer = device.createBuffer({ size: guide.byteLength, usage: STORAGE4 | COPY_DST6 });
   device.queue.writeBuffer(guideBuffer, 0, guide.buffer, guide.byteOffset, guide.byteLength);
-  const ping = [0, 1].map(() => device.createBuffer({ size: values.byteLength, usage: STORAGE4 | COPY_DST5 | COPY_SRC3 }));
+  const ping = [0, 1].map(() => device.createBuffer({ size: values.byteLength, usage: STORAGE4 | COPY_DST6 | COPY_SRC3 }));
   device.queue.writeBuffer(ping[0], 0, values.buffer, values.byteOffset, values.byteLength);
-  const params = device.createBuffer({ size: 16, usage: UNIFORM6 | COPY_DST5 });
-  const readback = device.createBuffer({ size: values.byteLength, usage: MAP_READ | COPY_DST5 });
+  const params = device.createBuffer({ size: 16, usage: UNIFORM6 | COPY_DST6 });
+  const readback = device.createBuffer({ size: values.byteLength, usage: MAP_READ | COPY_DST6 });
   try {
     const pipeline = device.createComputePipeline({ layout: "auto", compute: { module: device.createShaderModule({ code: LIGHTMAP_DENOISE_WGSL }), entryPoint: "main" } });
     const groups = [0, 1].map(
@@ -23266,7 +23898,7 @@ async function bakeProbeVolumeGpu(device, min, max, counts, occluders, options =
   const acc = new Float32Array(count * PROBE_ACC_VEC4S * 4);
   const scene = packLightmapScene(occluders);
   const upload = (data) => {
-    const buffer = device.createBuffer({ size: Math.max(16, data.byteLength), usage: STORAGE4 | COPY_DST5 });
+    const buffer = device.createBuffer({ size: Math.max(16, data.byteLength), usage: STORAGE4 | COPY_DST6 });
     device.queue.writeBuffer(buffer, 0, data.buffer, data.byteOffset, data.byteLength);
     return buffer;
   };
@@ -23274,8 +23906,8 @@ async function bakeProbeVolumeGpu(device, min, max, counts, occluders, options =
   const accum = device.createBuffer({ size: acc.byteLength, usage: STORAGE4 | COPY_SRC3 });
   const skyBuffer = upload(sky ? sky.data : new Float32Array(4));
   const lightBuffer = upload(lights.data);
-  const params = device.createBuffer({ size: PARAMS_BYTES, usage: UNIFORM6 | COPY_DST5 });
-  const readback = device.createBuffer({ size: acc.byteLength, usage: MAP_READ | COPY_DST5 });
+  const params = device.createBuffer({ size: PARAMS_BYTES, usage: UNIFORM6 | COPY_DST6 });
+  const readback = device.createBuffer({ size: acc.byteLength, usage: MAP_READ | COPY_DST6 });
   try {
     const pipeline = device.createComputePipeline({ layout: "auto", compute: { module: device.createShaderModule({ code: LIGHTMAP_TRACE_WGSL }), entryPoint: "probeMain" } });
     const group = device.createBindGroup({
@@ -23702,12 +24334,12 @@ var WORKGROUP4 = 8;
 var PARAMS_BYTES2 = 176;
 var CAPTURE_PATHS_PER_SUBMIT = 1 << 20;
 var STORAGE5 = 128;
-var COPY_DST6 = 8;
+var COPY_DST7 = 8;
 var COPY_SRC4 = 4;
 var MAP_READ2 = 1;
 var UNIFORM7 = 64;
-var TEXTURE_BINDING3 = 4;
-var STORAGE_BINDING2 = 8;
+var TEXTURE_BINDING4 = 4;
+var STORAGE_BINDING3 = 8;
 var TEXTURE_COPY_SRC = 1;
 var ALPHA_MODE = { opaque: 0, mask: 1, blend: 2, additive: 3 };
 function referenceSceneKey(instances) {
@@ -23842,11 +24474,11 @@ function packReferenceScene(instances) {
         instance.lightChannels ?? 1,
         ...extensionRows(m, pbr.isPbr)
       ];
-      const key = row.join(",");
-      let mat = materialIndex.get(key);
+      const key2 = row.join(",");
+      let mat = materialIndex.get(key2);
       if (mat === void 0) {
         mat = materialRows.length;
-        materialIndex.set(key, mat);
+        materialIndex.set(key2, mat);
         materialRows.push(row);
       }
       const { normals, uvs, indices } = p;
@@ -24430,7 +25062,7 @@ var TracerCore = class {
     this.skyFor = { key: null, buffer: null, panorama: null };
     this.lightBuffer = null;
     const table2 = brdfLut();
-    this.dfg = device.createBuffer({ size: table2.byteLength, usage: STORAGE5 | COPY_DST6 });
+    this.dfg = device.createBuffer({ size: table2.byteLength, usage: STORAGE5 | COPY_DST7 });
     device.queue.writeBuffer(this.dfg, 0, table2);
   }
   get tracePipeline() {
@@ -24442,16 +25074,16 @@ var TracerCore = class {
     return this.resolvePipeline;
   }
   storage(data) {
-    const buffer = this.device.createBuffer({ size: Math.max(16, Math.ceil(data.byteLength / 16) * 16), usage: STORAGE5 | COPY_DST6 });
+    const buffer = this.device.createBuffer({ size: Math.max(16, Math.ceil(data.byteLength / 16) * 16), usage: STORAGE5 | COPY_DST7 });
     this.device.queue.writeBuffer(buffer, 0, data.buffer, data.byteOffset, data.byteLength);
     return buffer;
   }
   /** The scene's buffers for `instances`, packed again only when its key changes. Returns whether it did. */
-  setScene(instances, key = referenceSceneKey(instances)) {
-    if (this.scene?.key === key) return false;
+  setScene(instances, key2 = referenceSceneKey(instances)) {
+    if (this.scene?.key === key2) return false;
     for (const b of this.scene?.buffers ?? []) b.destroy();
     const packed = packReferenceScene(instances);
-    this.scene = { key, buffers: [packed.nodes, packed.prims, packed.mats, packed.texels].map((d) => this.storage(d)), mapTable: packed.mapTable };
+    this.scene = { key: key2, buffers: [packed.nodes, packed.prims, packed.mats, packed.texels].map((d) => this.storage(d)), mapTable: packed.mapTable };
     return true;
   }
   get mapTable() {
@@ -24459,12 +25091,12 @@ var TracerCore = class {
   }
   /** The sky's panorama for `environment` (null: the flat ambient), uploaded once per environment. */
   setSky(environment) {
-    const key = environment ? environmentKey(environment) : null;
+    const key2 = environment ? environmentKey(environment) : null;
     const same = (a, b) => a === null || b === null ? a === b : a.length === b.length && a.every((v, i) => v === b[i]);
-    if (this.skyFor.buffer && same(this.skyFor.key, key)) return this.skyFor.panorama;
+    if (this.skyFor.buffer && same(this.skyFor.key, key2)) return this.skyFor.panorama;
     this.skyFor.buffer?.destroy();
     const panorama = environment ? environmentPanorama(environment) : null;
-    this.skyFor = { key, panorama, buffer: this.storage(panorama?.data ?? new Float32Array(4)) };
+    this.skyFor = { key: key2, panorama, buffer: this.storage(panorama?.data ?? new Float32Array(4)) };
     return panorama;
   }
   setLights(data) {
@@ -24503,8 +25135,8 @@ var PathTracer = class _PathTracer {
     /** Samples each pixel holds. */
     this.samples = 0;
     this.core = new TracerCore(device);
-    this.params = device.createBuffer({ size: PARAMS_BYTES2, usage: UNIFORM7 | COPY_DST6 });
-    this.resolveInfo = device.createBuffer({ size: 16, usage: UNIFORM7 | COPY_DST6 });
+    this.params = device.createBuffer({ size: PARAMS_BYTES2, usage: UNIFORM7 | COPY_DST7 });
+    this.resolveInfo = device.createBuffer({ size: 16, usage: UNIFORM7 | COPY_DST7 });
   }
   static create(device) {
     return new _PathTracer(device);
@@ -24518,8 +25150,8 @@ var PathTracer = class _PathTracer {
     if (this.size.width === width && this.size.height === height && this.accum) return;
     this.accum?.destroy();
     this.frame?.destroy();
-    this.accum = this.device.createBuffer({ size: width * height * 16, usage: STORAGE5 | COPY_DST6 | COPY_SRC4 });
-    this.frame = this.device.createTexture({ size: { width, height }, format: "rgba16float", usage: TEXTURE_BINDING3 | STORAGE_BINDING2 | TEXTURE_COPY_SRC });
+    this.accum = this.device.createBuffer({ size: width * height * 16, usage: STORAGE5 | COPY_DST7 | COPY_SRC4 });
+    this.frame = this.device.createTexture({ size: { width, height }, format: "rgba16float", usage: TEXTURE_BINDING4 | STORAGE_BINDING3 | TEXTURE_COPY_SRC });
     this.size = { width, height };
     this.samples = 0;
   }
@@ -24531,9 +25163,9 @@ var PathTracer = class _PathTracer {
   render(instances, draw, width, height, settings = {}) {
     this.ensureTargets(width, height);
     const sceneChanged = this.core.setScene(instances);
-    const key = drawKey(draw, width, height, settings);
-    if (sceneChanged || key !== this.key) {
-      this.key = key;
+    const key2 = drawKey(draw, width, height, settings);
+    if (sceneChanged || key2 !== this.key) {
+      this.key = key2;
       this.samples = 0;
       this.core.setLights(referenceLights(draw).data);
     }
@@ -24594,9 +25226,9 @@ async function captureReference(device, instances, draw, options) {
   core.setLights(lights.data);
   const camera = cameraOf(draw);
   const setup = { bounces: options.bounces ?? REFERENCE_BOUNCES, sky, lights, ambient: referenceAmbient(draw), clamp: options.clamp ?? 0, background: options.background ?? true, mapTable: core.mapTable };
-  const accum = device.createBuffer({ size: tile * tile * 16, usage: STORAGE5 | COPY_DST6 | COPY_SRC4 });
-  const params = device.createBuffer({ size: PARAMS_BYTES2, usage: UNIFORM7 | COPY_DST6 });
-  const readback = device.createBuffer({ size: tile * tile * 16, usage: MAP_READ2 | COPY_DST6 });
+  const accum = device.createBuffer({ size: tile * tile * 16, usage: STORAGE5 | COPY_DST7 | COPY_SRC4 });
+  const params = device.createBuffer({ size: PARAMS_BYTES2, usage: UNIFORM7 | COPY_DST7 });
+  const readback = device.createBuffer({ size: tile * tile * 16, usage: MAP_READ2 | COPY_DST7 });
   const rgba = new Uint8ClampedArray(width * height * 4);
   const hdr = options.hdr ? new Float32Array(width * height * 4) : null;
   const exposure = options.exposure ?? 1;
@@ -25757,11 +26389,11 @@ var VirtualPagePool = class {
    * every page draw again), `moving(page)` whether something that moves stands
    * in a page now. Returns the pages to draw, at most `budget`, finest first.
    */
-  update(needed, key, moving, budget = VSM_PAGES_PER_FRAME) {
+  update(needed, key2, moving, budget = VSM_PAGES_PER_FRAME) {
     this.frame += 1;
-    if (key !== this.key) {
+    if (key2 !== this.key) {
       for (const e of this.entries.values()) e.valid = false;
-      this.key = key;
+      this.key = key2;
       this.changed = true;
     }
     const want = [];
@@ -27292,12 +27924,12 @@ var GpuAtmosphere = class {
   /** The uniforms written for `sky` where they changed; its key. */
   prepare(sky) {
     const medium = atmosphereKey(sky.atmosphere);
-    const key = [medium, sky.atmosphere.viewHeight, ...sky.sun.map((v) => v.toFixed(5)), ...sky.sunRadiance.map((v) => v.toPrecision(5))].join("|");
-    if (key !== this.uniformKey) {
+    const key2 = [medium, sky.atmosphere.viewHeight, ...sky.sun.map((v) => v.toFixed(5)), ...sky.sunRadiance.map((v) => v.toPrecision(5))].join("|");
+    if (key2 !== this.uniformKey) {
       this.device.queue.writeBuffer(this.uniforms, 0, packAtmosphereUniforms(sky, this.data));
-      this.uniformKey = key;
+      this.uniformKey = key2;
     }
-    return key;
+    return key2;
   }
   /** The transmittance and multiple-scattering passes, when the medium is new. */
   medium(encoder, sky) {
@@ -27331,7 +27963,7 @@ var GI_UNIFORM_FLOATS = 32;
 var GI_REACH = 1.5;
 var GI_BACKFACE_LIMIT = 0.6;
 var STORAGE6 = 128;
-var COPY_DST7 = 8;
+var COPY_DST8 = 8;
 var UNIFORM8 = 64;
 function randomRotation(u1, u2, u3) {
   const a = Math.sqrt(1 - u1), b = Math.sqrt(u1);
@@ -27639,13 +28271,13 @@ var GpuProbeGi = class {
     this.target = null;
     const packed = packLightmapScene(occluders);
     const upload = (view) => {
-      const buffer = device.createBuffer({ size: Math.max(16, view.byteLength), usage: STORAGE6 | COPY_DST7 });
+      const buffer = device.createBuffer({ size: Math.max(16, view.byteLength), usage: STORAGE6 | COPY_DST8 });
       device.queue.writeBuffer(buffer, 0, view.buffer, view.byteOffset, view.byteLength);
       return buffer;
     };
     this.scene = [upload(packed.nodes), upload(packed.tris), upload(packed.mats)];
-    this.uniforms = device.createBuffer({ size: GI_UNIFORM_FLOATS * 4, usage: UNIFORM8 | COPY_DST7 });
-    this.params = device.createBuffer({ size: 64, usage: UNIFORM8 | COPY_DST7 });
+    this.uniforms = device.createBuffer({ size: GI_UNIFORM_FLOATS * 4, usage: UNIFORM8 | COPY_DST8 });
+    this.params = device.createBuffer({ size: 64, usage: UNIFORM8 | COPY_DST8 });
   }
   /**
    * Write this frame's uniforms and encode its passes into `encoder`: the
@@ -27715,13 +28347,13 @@ var GpuProbeGi = class {
     if (!this.lights || this.lightsSize < packedLights.data.byteLength) {
       this.lights?.destroy();
       this.lightsSize = Math.max(16, packedLights.data.byteLength);
-      this.lights = device.createBuffer({ size: this.lightsSize, usage: STORAGE6 | COPY_DST7 });
+      this.lights = device.createBuffer({ size: this.lightsSize, usage: STORAGE6 | COPY_DST8 });
     }
     device.queue.writeBuffer(this.lights, 0, packedLights.data);
     if (sky !== this.skySource) {
       this.sky?.destroy();
       const data = sky ? sky.data : new Float32Array(4);
-      this.sky = device.createBuffer({ size: Math.max(16, data.byteLength), usage: STORAGE6 | COPY_DST7 });
+      this.sky = device.createBuffer({ size: Math.max(16, data.byteLength), usage: STORAGE6 | COPY_DST8 });
       device.queue.writeBuffer(this.sky, 0, data);
       this.skySource = sky;
       this.skySize = sky ? [sky.width, sky.height] : [0, 0];
@@ -27742,8 +28374,8 @@ var GpuProbeGi = class {
     const device = this.device;
     const packedLights = lit ? null : this.prepare(lights, sky);
     if (packedLights) device.queue.writeBuffer(this.params, 0, lightmapParams(0, 0, 0, 1, 1, 1, sky, packedLights, 0));
-    this.reflectUniforms ?? (this.reflectUniforms = device.createBuffer({ size: this.reflectData.byteLength, usage: UNIFORM8 | COPY_DST7 }));
-    this.reflectGi ?? (this.reflectGi = device.createBuffer({ size: GI_UNIFORM_FLOATS * 4, usage: UNIFORM8 | COPY_DST7 }));
+    this.reflectUniforms ?? (this.reflectUniforms = device.createBuffer({ size: this.reflectData.byteLength, usage: UNIFORM8 | COPY_DST8 }));
+    this.reflectGi ?? (this.reflectGi = device.createBuffer({ size: GI_UNIFORM_FLOATS * 4, usage: UNIFORM8 | COPY_DST8 }));
     this.blankProbes ?? (this.blankProbes = device.createBuffer({ size: 16, usage: STORAGE6 }));
     this.reflectData.set(frame.invViewProj, 0);
     this.reflectData.set([frame.eye[0], frame.eye[1], frame.eye[2], this.frames % 16777216], 16);
@@ -27914,14 +28546,14 @@ var LocalTileCache = class {
     this.entries = [];
   }
   /** Whether the tile at this rect must be drawn for `key`, `moving` saying whether a mover reaches its light now. */
-  dirty(tile, key, moving) {
+  dirty(tile, key2, moving) {
     const e = this.entries.find((c) => c.x === tile.x && c.y === tile.y && c.size === tile.size);
-    return !e || e.key !== key || moving || e.moving;
+    return !e || e.key !== key2 || moving || e.moving;
   }
   /** Record a tile drawn this frame. */
-  drawn(tile, key, moving) {
+  drawn(tile, key2, moving) {
     this.entries = this.entries.filter((c) => c.x + c.size <= tile.x || tile.x + tile.size <= c.x || c.y + c.size <= tile.y || tile.y + tile.size <= c.y);
-    this.entries.push({ x: tile.x, y: tile.y, size: tile.size, key, moving });
+    this.entries.push({ x: tile.x, y: tile.y, size: tile.size, key: key2, moving });
   }
   /** Forget everything (the atlas was remade). */
   clear() {
@@ -28338,13 +28970,13 @@ var GpuVolumetricFog = class {
    * whether the volume was remade (the scene's groups must point at it).
    */
   prepare(frame, temporal) {
-    const key = frame.grid.join("x");
+    const key2 = frame.grid.join("x");
     let remade = false;
-    if (key !== this.grid) {
+    if (key2 !== this.grid) {
       for (const t of [this.volume, ...this.light ?? []]) t.destroy?.();
       this.light = [this.texture(frame.grid), this.texture(frame.grid)];
       this.volume = this.texture(frame.grid);
-      this.grid = key;
+      this.grid = key2;
       this.previous = null;
       remade = true;
     }
@@ -28731,6 +29363,13 @@ struct Uniforms {
   char0: vec4<f32>,
   char1: vec4<f32>,
   cull0: vec4<f32>,
+  // A GPU terrain's patch (F6c; gpuTerrain.ts): its size, the heights' min and range (> 0: a terrain), its cells,
+  // cut cells, nearest page's side and eye pages, its origin and leaf size, the eye and the split and morph, the pages.
+  terrain1: vec4<f32>,
+  terrain2: vec4<f32>,
+  terrain3: vec4<f32>,
+  terrain4: vec4<f32>,
+  terrainPages: array<vec4<f32>, 4>,
 };
 
 // A Modern-tier light (see packLights): d0 = dir/pos + kind, d1 = colour +
@@ -28854,7 +29493,7 @@ ${hdr ? "// The linear variant's probes (F3b, probeCapture.ts): each one's prefi
 // The blend surface's map in layer 0, and a material graph's own images after it (F1e).
 @group(0) @binding(15) var blendTex: texture_2d_array<f32>;
 @group(0) @binding(16) var nrmTex: texture_2d<f32>;
-// The opaque pass's depth (EP6b), read by the see-through pass for soft edges;
+${hdr ? "// A GPU terrain's heights (F6c): RG = 16 bits of the height (B, its cut cells, the page bake reads).\n@group(0) @binding(17) var heightTex: texture_2d<f32>;\n" : ""}// The opaque pass's depth (EP6b), read by the see-through pass for soft edges;
 // the opaque pass binds a blank in its place.
 @group(1) @binding(0) var sceneDepth: texture_depth_2d;
 // Clustered lights (EP8): per cell (offset, count) into the index list, then the list, in one buffer
@@ -29594,6 +30233,63 @@ fn impostorOf(position: vec3<f32>, uv: vec2<f32>, m: mat4x4<f32>) -> Impostor {
   out.normal = normalize(vec3<f32>(0.0, 1.0, 0.0) + 0.4 * toEye);
   return out;
 }
+// --- Terrain at scale (AAA_FIDELITY_ROADMAP.md F6c; gpuTerrain.ts) ---
+// A height sample, and the heights' bilinear blend at a point (metres from the terrain's corner): the local height.
+fn terrainSample(i: vec2<i32>) -> f32 {
+  let t = textureLoad(heightTex, i, 0);
+  return (t.r * 65280.0 + t.g * 255.0) / 65535.0;
+}
+fn terrainHeight(p: vec2<f32>) -> f32 {
+  let cells = u.terrain2.x;
+  let q = clamp(p / u.terrain1.xy, vec2<f32>(0.0), vec2<f32>(1.0)) * cells;
+  let i = min(vec2<i32>(floor(q)), vec2<i32>(i32(cells) - 1));
+  let f = q - vec2<f32>(i);
+  let a = mix(terrainSample(i), terrainSample(i + vec2<i32>(1, 0)), f.x);
+  let b = mix(terrainSample(i + vec2<i32>(0, 1)), terrainSample(i + vec2<i32>(1, 1)), f.x);
+  return u.terrain1.z + mix(a, b, f.y) * u.terrain1.w;
+}
+// A patch vertex of a node (its model scales the unit patch to the node's square and height range, the terrain's
+// model being its origin alone): CDLOD's morph onto the coarser grid by the vertex's distance from the eye in the
+// ground plane, the height read there, the normal from the heights at the node's spacing, and the page the node
+// shades from (its level's, which its window holds; past the eye's pages, the whole terrain's) in the atlas.
+struct TerrainVertex { pos: vec3<f32>, normal: vec3<f32>, uv: vec2<f32>, morph: f32, level: f32 };
+fn terrainOf(position: vec3<f32>, m: mat4x4<f32>) -> TerrainVertex {
+  var out: TerrainVertex;
+  let s = max(m[0].x, 1e-6);
+  let r = max(m[1].y, 1e-6);
+  let corner = m[3].xyz - u.terrain3.xyz;
+  let n = ${TERRAIN_PATCH}.0;
+  let g = round(position.xz * n);
+  let d = length(corner.xz + g / n * s - u.terrain4.xy);
+  let range = u.terrain4.z * s;
+  let morph = clamp((d - u.terrain4.w * range) / ((1.0 - u.terrain4.w) * range), 0.0, 1.0);
+  let gm = g - fract(g * 0.5) * 2.0 * morph;
+  let local = clamp(corner.xz + gm / n * s, vec2<f32>(0.0), u.terrain1.xy);
+  let h = terrainHeight(local);
+  let e = s / n;
+  let hl = terrainHeight(local - vec2<f32>(e, 0.0));
+  let hr = terrainHeight(local + vec2<f32>(e, 0.0));
+  let hd = terrainHeight(local - vec2<f32>(0.0, e));
+  let hu = terrainHeight(local + vec2<f32>(0.0, e));
+  out.normal = normalize(vec3<f32>(hl - hr, 2.0 * e, hd - hu));
+  out.pos = vec3<f32>((local.x - corner.x) / s, (h - corner.y) / r, (local.y - corner.z) / s);
+  let level = clamp(round(log2(max(s / u.terrain3.w, 1.0))), 0.0, 30.0);
+  var slot = u.terrain2.w;
+  var page = vec2<f32>(0.0);
+  var side = max(u.terrain1.x, u.terrain1.y);
+  if (level < u.terrain2.w) {
+    slot = level;
+    let k = min(u32(level), 7u);
+    let pv = u.terrainPages[k / 2u];
+    page = select(pv.xy, pv.zw, (k & 1u) == 1u);
+    side = u.terrain2.z * exp2(level);
+  }
+  let pu = clamp((local - page) / side, vec2<f32>(0.0), vec2<f32>(1.0));
+  out.uv = vec2<f32>((slot + pu.x) / (u.terrain2.w + 1.0), 1.0 - pu.y);
+  out.morph = morph;
+  out.level = level;
+  return out;
+}
 ` : ""}@vertex
 fn vs(
   @location(0) position: vec3<f32>,
@@ -29611,7 +30307,7 @@ fn vertexOf(position: vec3<f32>, normal: vec3<f32>, uv: vec2<f32>, uv2: vec2<f32
   var out: VSOut;
   let t = xf[u32(u.cull0.x) + instance];
   var pos = position;
-${hdr ? "  pos = pos + bendIn(u.wind0, position, sway, t.model);\n  // Its LOD crossfade (F6b): the cull leaves it in the model's first column's w, 0 in an affine model.\n  out.fade = t.model[0].w;\n  // An octahedral impostor's quad, turned to the eye (F6b).\n  var imp: Impostor;\n  if (u.cull0.y > 0.5) {\n    imp = impostorOf(position, uv, t.model);\n    pos = imp.pos;\n  }" : "  let bend = windOffset(position.xz, sway);\n  pos = vec3<f32>(pos.x + bend.x, pos.y, pos.z + bend.y);"}
+${hdr ? "  pos = pos + bendIn(u.wind0, position, sway, t.model);\n  // Its LOD crossfade (F6b): the cull leaves it in the model's first column's w, 0 in an affine model.\n  out.fade = t.model[0].w;\n  // An octahedral impostor's quad, turned to the eye (F6b).\n  var imp: Impostor;\n  if (u.cull0.y > 0.5) {\n    imp = impostorOf(position, uv, t.model);\n    pos = imp.pos;\n  }\n  // A GPU terrain's node (F6c): the heights at its morphed vertex; the nearest nodes displaced by the relief, gone\n  // by the end of their morph so they still meet their neighbours.\n  var ter: TerrainVertex;\n  if (u.terrain1.w > 0.0) {\n    ter = terrainOf(position, t.model);\n    pos = ter.pos;\n    if (ter.level < 0.5 && u.layer0.w > 0.0) {\n      let dims = vec2<f32>(textureDimensions(occTex));\n      let texel = vec2<i32>(clamp(vec2<f32>(ter.uv.x, 1.0 - ter.uv.y) * dims, vec2<f32>(0.0), dims - 1.0));\n      pos.y = pos.y - (1.0 - textureLoad(occTex, texel, 0).g) * u.layer0.w * (1.0 - ter.morph) / max(t.model[1].y, 1e-6);\n    }\n  }" : "  let bend = windOffset(position.xz, sway);\n  pos = vec3<f32>(pos.x + bend.x, pos.y, pos.z + bend.y);"}
 ${g.vertex}  out.pos = t.mvp * vec4<f32>(pos, 1.0);
   out.normal = t.nrm * normal;
   out.uv = uv;
@@ -29630,6 +30326,15 @@ ${hdr ? `  // A tangent lies in the surface, so it moves with the model's own 3\
     out.tangent = vec4<f32>(0.0);
   }
   out.frameNormal = normalize(out.normal);
+  // The terrain's normal (its model is its origin alone), its page, and how much relief parallax adds (none where
+  // the vertex displaced it). Its tangent is the ground's +x, as a planar terrain's derivative frame has it.
+  if (u.terrain1.w > 0.0) {
+    out.normal = ter.normal;
+    out.frameNormal = ter.normal;
+    out.uv = ter.uv;
+    out.bw = select(1.0, ter.morph, ter.level < 0.5);
+    out.tangent = vec4<f32>(normalize(vec3<f32>(1.0, 0.0, 0.0) - ter.normal * ter.normal.x), 1.0);
+  }
 ` : ""}  return out;
 }
 
@@ -29759,7 +30464,7 @@ ${hdr ? `  // A tint authored for the display (F11a): linear light mixes it as t
 
 @fragment
 fn fs(in: VSOut) -> @location(0) vec4<f32> {
-${hdr ? "  // A copy fading between its LOD levels (F6b) leaves the other level's pixels.\n  if (in.fade != 0.0 && fadeHides(in.fade, in.pos.xy)) { discard; }\n  shadowPixel = in.pos.xy;\n  // Overdraw (F10a): every fragment shaded counts one, added up in red.\n  if (frame.debug.x > 10.5 && frame.debug.x < 11.5) { return vec4<f32>(1.0, 0.0, 0.0, 0.0); }\n" : ""}  // The surface's screen derivatives, for the UV gradients parallax and
+${hdr ? "  // A copy fading between its LOD levels (F6b) leaves the other level's pixels.\n  if (in.fade != 0.0 && fadeHides(in.fade, in.pos.xy)) { discard; }\n  // A GPU terrain's cut cells (F6c): its page's occlusion alpha.\n  if (u.terrain1.w > 0.0 && u.terrain2.y > 0.5 && textureSample(occTex, samp, vec2<f32>(in.uv.x, 1.0 - in.uv.y)).a < 0.5) { discard; }\n  shadowPixel = in.pos.xy;\n  // Overdraw (F10a): every fragment shaded counts one, added up in red.\n  if (frame.debug.x > 10.5 && frame.debug.x < 11.5) { return vec4<f32>(1.0, 0.0, 0.0, 0.0); }\n" : ""}  // The surface's screen derivatives, for the UV gradients parallax and
   // anisotropy need (I4) \u2014 taken here, in uniform control flow.
   let dp1 = dpdx(in.worldPos);
   let dp2 = dpdy(in.worldPos);
@@ -29773,7 +30478,7 @@ ${hdr ? "  // A copy fading between its LOD levels (F6b) leaves the other level'
     if (dot(pn, u.view.xyz) < 0.0) { pn = -pn; }
     let pg = uvGrads(pn, dp1, dp2, duv1, duv2);
     let pv = max(${PARALLAX_MIN_NDV2}, dot(pn, u.view.xyz));
-    puv = parallaxUv(in.uv, -vec2<f32>(dot(pg.gu, u.view.xyz), dot(pg.gv, u.view.xyz)) / pv, u.layer0.w);
+    puv = parallaxUv(in.uv, -vec2<f32>(dot(pg.gu, u.view.xyz), dot(pg.gv, u.view.xyz)) / pv, u.layer0.w${hdr ? " * select(1.0, in.bw, u.terrain1.w > 0.0)" : ""});
   }${hdr ? `
   // An eye (F7c): its UVs centred on the pupil; inside the iris the view refracts through the cornea and
   // lands on the iris behind it, which is where the iris is sampled.
@@ -30174,10 +30879,18 @@ struct CutOut {
   @builtin(position) pos: vec4<f32>,
   @location(0) uv: vec2<f32>,
 };
+// A cut-out caster's clip position: casterClip's, or a GPU terrain's node (F6c), whose casters draw through this
+// pipeline as it binds their heights.
+fn casterClipCut(position: vec3<f32>, sway: f32, instance: u32) -> vec4<f32> {
+  if (u.terrain1.w <= 0.0) { return casterClip(position, sway, instance); }
+  let at = select(instance, cascadeView.base.x + u32(u.cull0.x) + instance, cascadeView.base.y != 0u);
+  let model = xf[at].model;
+  return cascadeView.viewProj * model * vec4<f32>(terrainOf(position, model).pos, 1.0);
+}
 @vertex
 fn vs_shadow_cut(@location(0) position: vec3<f32>, @location(2) uv: vec2<f32>, @location(5) sway: f32, @builtin(instance_index) instance: u32) -> CutOut {
   var out: CutOut;
-  out.pos = casterClip(position, sway, instance);
+  out.pos = casterClipCut(position, sway, instance);
   out.uv = uv;
   return out;
 }
@@ -30241,7 +30954,8 @@ fn vs_prepass(
 ${hdr ? "  out.tangent = v.tangent;\n  out.frameNormal = v.frameNormal;\n  out.fade = v.fade;\n" : ""}  let m = xf[u32(u.motion0.x) + u32(u.cull0.x) + instance];
 ${hdr ? "  // Last frame's bend: its wind, about where the copy stood (the motion record's model is last frame's).\n  let thenPos = before + bendIn(u.wind1, before, sway, m.model);" : "  let then = windOffsetIn(u.wind1, before.xz, sway);\n  let thenPos = vec3<f32>(before.x + then.x, before.y, before.z + then.y);"}
   out.clipNow = m.mvp * vec4<f32>(v.objPos, 1.0);
-  out.clipThen = m.lightMvp * vec4<f32>(thenPos${g.vertex ? " + wpoObj" : ""}, 1.0);
+${hdr ? "  // A terrain stands still: its vertex where it is now (F6c).\n  let thenAt = select(thenPos, v.objPos, u.terrain1.w > 0.0);" : "  let thenAt = thenPos;"}
+  out.clipThen = m.lightMvp * vec4<f32>(thenAt${g.vertex ? " + wpoObj" : ""}, 1.0);
   return out;
 }
 struct PrepassTargets {
@@ -30257,7 +30971,7 @@ struct PrepassTargets {
 // in UV units (x right, y down), so a pixel's last position is uv \u2212 velocity.
 @fragment
 fn fs_prepass(in: PrepassIn) -> PrepassTargets {
-${hdr ? "  if (in.fade != 0.0 && fadeHides(in.fade, in.pos.xy)) { discard; }\n" : ""}  let dp1 = dpdx(in.worldPos);
+${hdr ? "  if (in.fade != 0.0 && fadeHides(in.fade, in.pos.xy)) { discard; }\n  if (u.terrain1.w > 0.0 && u.terrain2.y > 0.5 && textureSample(occTex, samp, vec2<f32>(in.uv.x, 1.0 - in.uv.y)).a < 0.5) { discard; }\n" : ""}  let dp1 = dpdx(in.worldPos);
   let dp2 = dpdy(in.worldPos);
   let duv1 = dpdx(in.uv);
   let duv2 = dpdy(in.uv);
@@ -30267,7 +30981,7 @@ ${hdr ? "  if (in.fade != 0.0 && fadeHides(in.fade, in.pos.xy)) { discard; }\n" 
     if (dot(pn, u.view.xyz) < 0.0) { pn = -pn; }
     let pg = uvGrads(pn, dp1, dp2, duv1, duv2);
     let pv = max(${PARALLAX_MIN_NDV2}, dot(pn, u.view.xyz));
-    puv = parallaxUv(in.uv, -vec2<f32>(dot(pg.gu, u.view.xyz), dot(pg.gv, u.view.xyz)) / pv, u.layer0.w);
+    puv = parallaxUv(in.uv, -vec2<f32>(dot(pg.gu, u.view.xyz), dot(pg.gv, u.view.xyz)) / pv, u.layer0.w${hdr ? " * select(1.0, in.bw, u.terrain1.w > 0.0)" : ""});
   }
   let uv = vec2<f32>(puv.x, 1.0 - puv.y);
   var sNrm = in.normal;
@@ -30385,6 +31099,10 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     this.casterCulling = null;
     /** Cluster hierarchies cut and culled on the GPU (F6a), made on first use. */
     this.clusterRendering = null;
+    /** Terrains drawn from their heightfields (F6c), by terrain, and by their patch's primitive. */
+    this.gpuTerrains = /* @__PURE__ */ new WeakMap();
+    this.terrainPatches = /* @__PURE__ */ new WeakMap();
+    this.terrainList = [];
     /** Each copy's transforms made on the GPU (F0e), on the AAA tier. */
     this.transforms = null;
     /** The LOD chains whose levels the GPU picks this frame (F0e). */
@@ -30792,9 +31510,9 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
       v.needed = markedPages(v.pending.marks, v.pending.windows);
       v.pending = null;
     }
-    const key = `${toLight.map((c) => c.toFixed(4)).join(",")}|${centre}|${draw.localShadowKey ?? `frame ${this.frameIndex}`}`;
+    const key2 = `${toLight.map((c) => c.toFixed(4)).join(",")}|${centre}|${draw.localShadowKey ?? `frame ${this.frameIndex}`}`;
     const movers = (draw.localShadowMoved ?? []).map((m) => worldSphere(localSphere(m.mesh), m.model));
-    const draws = v.pages.update(v.needed, key, (page) => movers.some((sphere) => pageTouches(page, basis, sphere)), v.views.length);
+    const draws = v.pages.update(v.needed, key2, (page) => movers.some((sphere) => pageTouches(page, basis, sphere)), v.views.length);
     const windowsKey = windows.map((w) => w.join(",")).join(";");
     if (v.pages.changed || windowsKey !== v.windowsKey) {
       device.queue.writeBuffer(v.table, 0, v.pages.table(windows, v.tableData));
@@ -30840,7 +31558,7 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
           for (const cut of [false, true]) {
             encoded.setPipeline(cut ? res.localCutPipeline : res.localPipeline);
             casters.forEach((entry, k) => {
-              if (entry.alpha === 1 !== cut) return;
+              if ((entry.alpha === 1 || this.terrainPatches.has(entry.primitive)) !== cut) return;
               const sphere = localSphere(entry.primitive);
               if (!entry.models.some((m) => pageTouches(page, basis, worldSphere(sphere, m)))) return;
               encoded.setBindGroup(0, cut ? this.cutGroupFor(entry.primitive, entry.textures) : group, [(first + k) * UNIFORM_STRIDE]);
@@ -31090,7 +31808,8 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
           // blank for all three and the shader ignores them (pbr.z = 0), so the
           // layout is one shape for every draw.
           { binding: 3, visibility: SHADER_STAGE_FRAGMENT, texture: { sampleType: "float" } },
-          { binding: 4, visibility: SHADER_STAGE_FRAGMENT, texture: { sampleType: "float" } },
+          // The occlusion map; a GPU terrain's vertices read its relief from it (F6c).
+          { binding: 4, visibility: SHADER_STAGE_VERTEX | SHADER_STAGE_FRAGMENT, texture: { sampleType: "float" } },
           { binding: 5, visibility: SHADER_STAGE_FRAGMENT, texture: { sampleType: "float" } },
           // The shadow map is r32float — not filterable — and read via textureLoad,
           // so it declares unfilterable-float and needs no sampler. The linear-light
@@ -31115,7 +31834,9 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
           { binding: 14, visibility: SHADER_STAGE_FRAGMENT, texture: { sampleType: "float" } },
           { binding: 15, visibility: SHADER_STAGE_FRAGMENT, texture: { sampleType: "float", viewDimension: "2d-array" } },
           // The tangent-space normal map (P1a).
-          { binding: 16, visibility: SHADER_STAGE_FRAGMENT, texture: { sampleType: "float" } }
+          { binding: 16, visibility: SHADER_STAGE_FRAGMENT, texture: { sampleType: "float" } },
+          // A GPU terrain's heights (F6c), read by the vertex stage.
+          ...hdr ? [{ binding: 17, visibility: SHADER_STAGE_VERTEX, texture: { sampleType: "float" } }] : []
         ]
       });
       const depthEntries = (multisampled) => [
@@ -31260,7 +31981,9 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
           { binding: 0, visibility: SHADER_STAGE_VERTEX | SHADER_STAGE_FRAGMENT, buffer: { type: "uniform", hasDynamicOffset: true, minBindingSize: UNIFORM_BYTES_USED } },
           { binding: 1, visibility: SHADER_STAGE_FRAGMENT, sampler: { type: "filtering" } },
           { binding: 2, visibility: SHADER_STAGE_FRAGMENT, texture: { sampleType: "float" } },
-          { binding: 10, visibility: SHADER_STAGE_VERTEX, buffer: { type: "read-only-storage" } }
+          { binding: 10, visibility: SHADER_STAGE_VERTEX, buffer: { type: "read-only-storage" } },
+          // A GPU terrain's heights (F6c): its casters draw through the cut-out pipeline.
+          ...hdr ? [{ binding: 17, visibility: SHADER_STAGE_VERTEX, texture: { sampleType: "float" } }] : []
         ]
       });
       const casterModule = hdr ? device.createShaderModule({ code: sceneShader(null, false, hdr) }) : null;
@@ -31520,8 +32243,8 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
    * SH the frame carries, rebuilt only when what it's made of changes.
    */
   ensureIbl(environment) {
-    const key = environment ? environmentKey(environment) : null;
-    const same = key && this.iblKey ? key.length === this.iblKey.length && key.every((v, i) => v === this.iblKey[i]) : key === this.iblKey;
+    const key2 = environment ? environmentKey(environment) : null;
+    const same = key2 && this.iblKey ? key2.length === this.iblKey.length && key2.every((v, i) => v === this.iblKey[i]) : key2 === this.iblKey;
     if (same) return;
     destroySafely(this.envTexture);
     if (environment) {
@@ -31532,7 +32255,7 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
       this.envTexture = blankCube(this.device);
       this.iblSh = new Float32Array(36);
     }
-    this.iblKey = key;
+    this.iblKey = key2;
     this.bindGroups = /* @__PURE__ */ new WeakMap();
   }
   /** The frame's projected decals (F1f) into their buffer: the boxes each frame they change, the tiles when they do. */
@@ -31661,6 +32384,14 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
       });
       if (burning.length > 0) draw = { ...draw, lights: [...draw.lights ?? [], ...burning] };
     }
+    if (this.hdr && draw.terrains && draw.terrains.length > 0) {
+      const ground = this.terrainNodes(draw);
+      instances = [...instances, ...ground.drawn];
+      if (ground.casting.length > 0) {
+        if (draw.sunShadow) draw = { ...draw, sunShadow: { ...draw.sunShadow, casters: [...draw.sunShadow.casters, ...ground.casting] } };
+        if (draw.localShadowCasters) draw = { ...draw, localShadowCasters: [...draw.localShadowCasters, ...ground.casting] };
+      }
+    }
     if (draw.prepass === true) this.matchMotion(instances);
     const gpuLod = this.hdr && draw.prepass === true && draw.gpuCull === true && draw.lod === true;
     this.frameGpuLods = gpuLod ? manyCopyChains(instances) : null;
@@ -31671,6 +32402,38 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
       return null;
     }
     return this.frameOutput ?? this.colourTexture;
+  }
+  /** This frame's nodes of each GPU terrain (F6c), drawn and (for a terrain that casts) casting. */
+  terrainNodes(draw) {
+    const eye = cameraPositionFromView4(draw.view);
+    const drawn = [];
+    const casting = [];
+    for (const source of draw.terrains ?? []) {
+      let terrain = this.gpuTerrains.get(source.terrain);
+      if (!terrain) {
+        terrain = new GpuTerrain(
+          {
+            device: this.device,
+            upload: (texture, colour) => this.uploadTexture(texture, colour),
+            mips: (texture, levels, format) => this.mipmaps.generate(texture, levels, format),
+            adopt: (key2, texture, colour) => (this.mips && colour ? this.colourTextures : this.textures).set(key2, texture),
+            blank: this.blankTexture
+          },
+          source.terrain
+        );
+        this.gpuTerrains.set(source.terrain, terrain);
+        this.terrainPatches.set(terrain.mesh.primitives[0], terrain);
+        this.terrainList.push(terrain);
+      }
+      const nodes = terrain.frame(eye, source.layers);
+      drawn.push(...nodes);
+      if (source.terrain.castShadows) casting.push(...nodes);
+    }
+    return { drawn, casting };
+  }
+  /** The heights a draw's primitive binds (F6c): a GPU terrain's patch's, else the blank. */
+  terrainHeightsOf(primitive) {
+    return this.terrainPatches.get(primitive)?.heightView ?? this.blankTexture.createView();
   }
   /** Samples each pixel of the path-traced reference holds (F10b); 0 when it isn't shown. */
   get referenceSamples() {
@@ -31875,6 +32638,7 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
         motionBase: prepass ? instanceCount : 0,
         lodLevel: entry.lod ?? -1,
         octahedral: entry.primitive.material.octahedral ?? null,
+        terrain: this.terrainPatches.get(entry.primitive)?.values ?? null,
         lightChannels: entry.channels,
         ...this.hdr ? { probeCount: this.capturedProbes, receivesDecals: entry.alpha < 2 && !entry.refract } : {}
       };
@@ -31892,17 +32656,17 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
       const model = entry.models[0];
       const t = entry.textures;
       const maps = (t.base !== null ? 1 : 0) | (t.mr !== null ? 2 : 0) | (t.occ !== null ? 4 : 0) | (t.emis !== null ? 8 : 0) | (t.normal !== null ? 16 : 0) | (t.lm !== null ? 32 : 0) | (t.lmHdr !== null ? 64 : 0) | (t.detail !== null ? 128 : 0) | (t.blend !== null ? 256 : 0) | (t.relief !== null ? 512 : 0);
-      const key = [entry.primitive, entry.primitive.material, maps, entry.alpha, entry.refract, entry.effect ?? null, entry.lod ?? -1, entry.channels, materialId(entry.primitive.material), bases?.instanceBase ?? 0, bases?.motionBase ?? motionBase, this.frameGi !== null];
+      const key2 = [entry.primitive, entry.primitive.material, maps, entry.alpha, entry.refract, entry.effect ?? null, entry.lod ?? -1, entry.channels, materialId(entry.primitive.material), bases?.instanceBase ?? 0, bases?.motionBase ?? motionBase, this.frameGi !== null];
       const last = keys[index];
-      let same = !!last && frameSlot >= 0 && !uniformAnimates(entry.primitive.material, entry.alpha, entry.primitive.sway !== void 0, entry.refract, entry.effect);
-      for (let i = 0; same && i < key.length; i += 1) same = last[i] === key[i];
+      let same = !!last && frameSlot >= 0 && !uniformAnimates(entry.primitive.material, entry.alpha, entry.primitive.sway !== void 0, entry.refract, entry.effect) && !this.terrainPatches.has(entry.primitive);
+      for (let i = 0; same && i < key2.length; i += 1) same = last[i] === key2[i];
       for (let i = 0; same && i < 16; i += 1) same = lastModels[index * 16 + i] === Math.fround(model[i]);
       if (same) {
         copyFrameUniform(this.uniformData, index, frameSlot);
         return;
       }
       writeInstanceUniform(this.uniformData, index, bases ? { ...uniformOf(entry), ...bases } : uniformOf(entry));
-      keys[index] = key;
+      keys[index] = key2;
       lastModels.set(model, index * 16);
       if (frameSlot < 0) frameSlot = index;
     };
@@ -32024,19 +32788,19 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     const bundles = cull ? this.bundles ?? (this.bundles = new BundleCache(this.device)) : null;
     const clusters = cull && clusterJob.size > 0 ? this.clusterRendering : null;
     const clusterView = { viewProj, eye, pixelsPerRadian: draw.projection[5] * this.height / 2, size: [this.width, this.height] };
-    const replay = (pass, slot2, target2, key, record) => {
+    const replay = (pass, slot2, target2, key2, record) => {
       if (!bundles) return record(pass);
-      pass.executeBundles([bundles.get(slot2, target2, key, record)]);
+      pass.executeBundles([bundles.get(slot2, target2, key2, record)]);
     };
     const drawRange = (pass, from, to, depthGroup, slot2 = "", target2 = null) => {
       if (bundles && target2) {
-        const key = [depthGroup, from, to, cull.args, draws.length, this.uniformBuffer, this.instanceBuffer, clusters?.output ?? null, clusters?.args ?? null, clusterJob.size];
+        const key2 = [depthGroup, from, to, cull.args, draws.length, this.uniformBuffer, this.instanceBuffer, clusters?.output ?? null, clusters?.args ?? null, clusterJob.size];
         for (let index = from; index < to; index += 1) {
           const entry = draws[index];
           const set = this.pipelinesOf(entry.primitive.material, msaa ? MSAA_SAMPLES : 1, reflections !== null, prepass);
-          key.push(overdraw ? set.add : entry.refract ? set.blend : entry.alpha === 3 ? set.add : entry.alpha === 2 ? set.blend : set.opaque, this.bindGroupFor(entry.primitive, entry.textures), entry.geometry.vertexBuffer, entry.geometry.indexBuffer);
+          key2.push(overdraw ? set.add : entry.refract ? set.blend : entry.alpha === 3 ? set.add : entry.alpha === 2 ? set.blend : set.opaque, this.bindGroupFor(entry.primitive, entry.textures), entry.geometry.vertexBuffer, entry.geometry.indexBuffer);
         }
-        replay(pass, slot2, target2, key, (encoder2) => drawRangeDirect(encoder2, from, to, depthGroup));
+        replay(pass, slot2, target2, key2, (encoder2) => drawRangeDirect(encoder2, from, to, depthGroup));
         return;
       }
       drawRangeDirect(pass, from, to, depthGroup);
@@ -32067,13 +32831,13 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     };
     const prepassRange = (pass, target2 = null, round2 = 0) => {
       if (bundles && target2) {
-        const key = [(msaa ? msaa.groups : this.depthGroups).blank, cull.args, draws.length, this.uniformBuffer, this.instanceBuffer, round2, clusters?.output ?? null, clusters?.args ?? null, clusterJob.size];
+        const key2 = [(msaa ? msaa.groups : this.depthGroups).blank, cull.args, draws.length, this.uniformBuffer, this.instanceBuffer, round2, clusters?.output ?? null, clusters?.args ?? null, clusterJob.size];
         for (const entry of draws) {
           if (entry.refract || entry.alpha >= 2) continue;
           const moved = entry.geometry.previousBuffer && entry.geometry.movedFrame === this.frameIndex;
-          key.push(this.pipelinesOf(entry.primitive.material, msaa ? MSAA_SAMPLES : 1, reflections !== null, true).prepass, this.bindGroupFor(entry.primitive, entry.textures), entry.geometry.vertexBuffer, moved ? entry.geometry.previousBuffer : entry.geometry.vertexBuffer, entry.geometry.indexBuffer);
+          key2.push(this.pipelinesOf(entry.primitive.material, msaa ? MSAA_SAMPLES : 1, reflections !== null, true).prepass, this.bindGroupFor(entry.primitive, entry.textures), entry.geometry.vertexBuffer, moved ? entry.geometry.previousBuffer : entry.geometry.vertexBuffer, entry.geometry.indexBuffer);
         }
-        replay(pass, `prepass${round2}`, target2, key, (encoder2) => prepassDirect(encoder2, round2));
+        replay(pass, `prepass${round2}`, target2, key2, (encoder2) => prepassDirect(encoder2, round2));
         return;
       }
       prepassDirect(pass, round2);
@@ -32167,7 +32931,7 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
             for (const cut of [false, true]) {
               encoded.setPipeline(cut ? res.cutPipeline : res.pipeline);
               casters.forEach((entry, k) => {
-                if (entry.alpha === 1 !== cut) return;
+                if ((entry.alpha === 1 || this.terrainPatches.has(entry.primitive)) !== cut) return;
                 encoded.setBindGroup(0, cut ? this.cutGroupFor(entry.primitive, entry.textures) : group, [(draws.length + k) * UNIFORM_STRIDE]);
                 encoded.setVertexBuffer(0, entry.geometry.vertexBuffer);
                 encoded.setIndexBuffer(entry.geometry.indexBuffer, "uint32");
@@ -32187,10 +32951,10 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     const movers = draw.localShadowMoved ?? [];
     const redraw = localTiles && localPlan ? localTiles.flatMap((t, i) => {
       const light2 = localPlan.lights[t.light];
-      const key = statics === null ? null : localTileKey(t, light2, statics);
+      const key2 = statics === null ? null : localTileKey(t, light2, statics);
       const moving = movers.some((m) => reachesLight(m, light2));
-      if (key !== null && !this.localCache.dirty(t, key, moving)) return [];
-      this.localCache.drawn(t, key ?? "uncached", moving || key === null);
+      if (key2 !== null && !this.localCache.dirty(t, key2, moving)) return [];
+      this.localCache.drawn(t, key2 ?? "uncached", moving || key2 === null);
       return [i];
     }) : [];
     if (localTiles && atlasTexture && redraw.length > 0) {
@@ -32225,7 +32989,7 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
             for (const cut of [false, true]) {
               encoded.setPipeline(cut ? res.localCutPipeline : res.localPipeline);
               casters.forEach((entry, k) => {
-                if (entry.alpha === 1 !== cut) return;
+                if ((entry.alpha === 1 || this.terrainPatches.has(entry.primitive)) !== cut) return;
                 encoded.setBindGroup(0, cut ? this.cutGroupFor(entry.primitive, entry.textures) : group, [(draws.length + k) * UNIFORM_STRIDE]);
                 encoded.setVertexBuffer(0, entry.geometry.vertexBuffer);
                 encoded.setIndexBuffer(entry.geometry.indexBuffer, "uint32");
@@ -32461,10 +33225,10 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     const models = /* @__PURE__ */ new Map();
     const motion = /* @__PURE__ */ new Map();
     for (const instance of instances) {
-      const key = instance.lod?.meshes[0] ?? instance.mesh;
-      let list = models.get(key);
-      if (!list) models.set(key, list = []);
-      const previous = instance.previousModel ?? this.lastModels.get(key)?.[list.length];
+      const key2 = instance.lod?.meshes[0] ?? instance.mesh;
+      let list = models.get(key2);
+      if (!list) models.set(key2, list = []);
+      const previous = instance.previousModel ?? this.lastModels.get(key2)?.[list.length];
       if (previous) motion.set(instance.model, previous);
       list.push(instance.model);
     }
@@ -32675,10 +33439,10 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     hz.valid = true;
   }
   /** The still scene's BVH tracer for `key` (F3e's, shared with the reflections' Epic trace, F3f). */
-  tracerFor(key, occluders) {
-    if (!this.probeGi || this.probeGi.key !== key) {
+  tracerFor(key2, occluders) {
+    if (!this.probeGi || this.probeGi.key !== key2) {
       this.probeGi?.gi.dispose();
-      this.probeGi = { key, gi: new GpuProbeGi(this.device, occluders) };
+      this.probeGi = { key: key2, gi: new GpuProbeGi(this.device, occluders) };
     }
     return this.probeGi.gi;
   }
@@ -33113,18 +33877,18 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
       const graph = compiledGraphOf2(material2);
       if (!graph) continue;
       const vertex = graph.outputs.worldPositionOffset !== void 0 ? compiledGraphOf2(material2, ["worldPositionOffset"]) : null;
-      const key = `${graph.key}|${vertex?.key ?? ""}|${samples}|${reflect ? 1 : 0}|${prepass ? 1 : 0}`;
-      if (this.variants.has(key) || this.compiling.has(key)) continue;
+      const key2 = `${graph.key}|${vertex?.key ?? ""}|${samples}|${reflect ? 1 : 0}|${prepass ? 1 : 0}`;
+      if (this.variants.has(key2) || this.compiling.has(key2)) continue;
       if (typeof this.device.createRenderPipelineAsync !== "function") {
-        this.variants.set(key, this.pipelinesFor(sceneShader(graph, reflect, this.hdr, vertex), samples, reflect, prepass));
+        this.variants.set(key2, this.pipelinesFor(sceneShader(graph, reflect, this.hdr, vertex), samples, reflect, prepass));
         continue;
       }
-      this.compiling.add(key);
+      this.compiling.add(key2);
       const pending = this.pipelinesFor(sceneShader(graph, reflect, this.hdr, vertex), samples, reflect, prepass, (d) => this.device.createRenderPipelineAsync(d));
       jobs.push(
         Promise.all(Object.entries(pending).map(async ([k, v]) => [k, await v])).then((entries) => {
-          if (!this.destroyed) this.variants.set(key, Object.fromEntries(entries));
-        }).finally(() => this.compiling.delete(key))
+          if (!this.destroyed) this.variants.set(key2, Object.fromEntries(entries));
+        }).finally(() => this.compiling.delete(key2))
       );
     }
     return Promise.all(jobs).then(() => void 0);
@@ -33133,12 +33897,12 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     const graph = compiledGraphOf2(material2);
     const vertex = graph && graph.outputs.worldPositionOffset !== void 0 ? compiledGraphOf2(material2, ["worldPositionOffset"]) : null;
     if (!graph && samples === 1 && !reflect && !prepass) return this.pipeline;
-    const key = `${graph?.key ?? ""}|${vertex?.key ?? ""}|${samples}|${reflect ? 1 : 0}|${prepass ? 1 : 0}`;
-    let set = this.variants.get(key);
-    if (!set && this.compiling.has(key)) return this.pipelinesOf({ name: "", baseColorFactor: [1, 1, 1, 1], baseColorImage: null }, samples, reflect, prepass);
+    const key2 = `${graph?.key ?? ""}|${vertex?.key ?? ""}|${samples}|${reflect ? 1 : 0}|${prepass ? 1 : 0}`;
+    let set = this.variants.get(key2);
+    if (!set && this.compiling.has(key2)) return this.pipelinesOf({ name: "", baseColorFactor: [1, 1, 1, 1], baseColorImage: null }, samples, reflect, prepass);
     if (!set) {
       set = this.pipelinesFor(sceneShader(graph, reflect, this.hdr, vertex), samples, reflect, prepass);
-      this.variants.set(key, set);
+      this.variants.set(key2, set);
     }
     return set;
   }
@@ -33519,9 +34283,9 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
       const inverse = invertMat4(entry.models[0]);
       if (!inverse) continue;
       const local = [0, 1, 2].map((r) => inverse[r] * eye[0] + inverse[4 + r] * eye[1] + inverse[8 + r] * eye[2] + inverse[12 + r]);
-      const key = local.map((c) => Math.round(c * 100)).join(",");
-      if (this.hairSorted.get(entry.geometry) === key) continue;
-      this.hairSorted.set(entry.geometry, key);
+      const key2 = local.map((c) => Math.round(c * 100)).join(",");
+      if (this.hairSorted.get(entry.geometry) === key2) continue;
+      this.hairSorted.set(entry.geometry, key2);
       const sorted = sortTrianglesBackToFront(entry.primitive.positions, entry.primitive.indices, local);
       this.device.queue.writeBuffer(entry.geometry.indexBuffer, 0, sorted.buffer, sorted.byteOffset, sorted.byteLength);
     }
@@ -33626,7 +34390,8 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
         { binding: 0, resource: { buffer: this.uniformBuffer, offset: 0, size: UNIFORM_STRIDE } },
         { binding: 1, resource: this.sampler },
         { binding: 2, resource: (textures.base ? this.uploadTexture(textures.base, true) : this.blankTexture).createView() },
-        { binding: 10, resource: { buffer: this.instanceBuffer } }
+        { binding: 10, resource: { buffer: this.instanceBuffer } },
+        ...this.hdr ? [{ binding: 17, resource: this.terrainHeightsOf(primitive) }] : []
       ]
     });
     this.cutGroups.set(primitive, { uniform: this.uniformBuffer, instances: this.instanceBuffer, base: textures.base, group });
@@ -33673,7 +34438,8 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
         { binding: 14, resource: view(textures.detail) },
         // The blend surface's map, and a material graph's images as the array's later layers (F1e).
         { binding: 15, resource: textures.graph && textures.graph.some((t) => t !== null) ? this.uploadLayers([textures.blend, ...textures.graph]).createView({ dimension: "2d-array" }) : (textures.blend ? this.uploadTexture(textures.blend, true) : this.blankTexture).createView({ dimension: "2d-array" }) },
-        { binding: 16, resource: view(textures.normal) }
+        { binding: 16, resource: view(textures.normal) },
+        ...this.hdr ? [{ binding: 17, resource: this.terrainHeightsOf(primitive) }] : []
       ]
     });
     this.bindGroups.set(primitive, { group, source: { ...textures } });
@@ -33802,12 +34568,12 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
       const t = entry.textures;
       const streamed = [t.base, t.mr, t.occ, t.emis, t.normal, t.detail].filter((m) => m !== null && Math.max(m.width, m.height) > STREAM_MIN_SIDE);
       if (streamed.length === 0) continue;
-      const key = streamed[0];
-      let slot = slots.get(key);
+      const key2 = streamed[0];
+      let slot = slots.get(key2);
       if (slot === void 0) {
         if (maps.length >= FEEDBACK_SLOTS) continue;
         slot = maps.length;
-        slots.set(key, slot);
+        slots.set(key2, slot);
         maps.push(streamed);
       }
       drawn.push({ entry, slot });
@@ -33894,8 +34660,8 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
    * largest's size (at most 1024), a missing one white, with mips.
    */
   uploadLayers(layers) {
-    const key = layers.map((l) => l ? textureId(l) : 0).join(",");
-    const cached = this.layerStacks.get(key);
+    const key2 = layers.map((l) => l ? textureId(l) : 0).join(",");
+    const cached = this.layerStacks.get(key2);
     if (cached) return cached;
     const width = Math.min(1024, Math.max(1, ...layers.map((l) => l?.width ?? 1)));
     const height = Math.min(1024, Math.max(1, ...layers.map((l) => l?.height ?? 1)));
@@ -33906,7 +34672,7 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
       this.device.queue.writeTexture({ texture, origin: { x: 0, y: 0, z } }, data, { bytesPerRow: width * 4, rowsPerImage: height }, { width, height });
     });
     if (levels > 1) this.mipmaps.generate(texture, levels, "rgba8unorm", layers.length);
-    this.layerStacks.set(key, texture);
+    this.layerStacks.set(key2, texture);
     return texture;
   }
   /**
@@ -34027,6 +34793,8 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     this.transforms?.destroy();
     this.casterCulling?.destroy();
     this.clusterRendering?.destroy();
+    for (const t of this.terrainList) t.dispose();
+    this.terrainList = [];
     this.pathTracer = null;
     destroySafely(this.sssProfiles);
     if (this.feedback) for (const b of [this.feedback.draws, this.feedback.wanted, this.feedback.readback, this.feedback.depth]) destroySafely(b);
@@ -34107,9 +34875,9 @@ function viewModeDraw(draw) {
   const code = viewModeCode(draw.viewMode);
   if (code === 0) return draw;
   const out = { ...draw };
-  for (const key of ["temporal", "upscale", "reflections", "camera", "reflectionTrace"]) delete out[key];
+  for (const key2 of ["temporal", "upscale", "reflections", "camera", "reflectionTrace"]) delete out[key2];
   if (code === 8) out.prepass = true;
-  if (code === 11) for (const key of ["prepass", "virtualShadows", "ambientOcclusion", "screenSpaceGi"]) delete out[key];
+  if (code === 11) for (const key2 of ["prepass", "virtualShadows", "ambientOcclusion", "screenSpaceGi"]) delete out[key2];
   return out;
 }
 function destroySafely(resource) {
@@ -34835,8 +35603,8 @@ var GpuPostFx = class {
     return texture;
   }
   pipeline(name, format, code, entry, additive) {
-    const key = `${name}|${format}|${additive}`;
-    let pipeline = this.pipelines.get(key);
+    const key2 = `${name}|${format}|${additive}`;
+    let pipeline = this.pipelines.get(key2);
     if (!pipeline) {
       const module = this.device.createShaderModule({ code });
       pipeline = this.device.createRenderPipeline({
@@ -34851,7 +35619,7 @@ var GpuPostFx = class {
         },
         primitive: { topology: "triangle-list" }
       });
-      this.pipelines.set(key, pipeline);
+      this.pipelines.set(key2, pipeline);
     }
     return pipeline;
   }
@@ -35032,11 +35800,11 @@ var HdrBloom = class {
   prepare(width, height, radius) {
     const sizes = bloomLevels(width, height, radius);
     if (sizes.length === 0) return null;
-    const key = sizes.map((s) => `${s.width}x${s.height}`).join(",");
-    if (key !== this.key) {
+    const key2 = sizes.map((s) => `${s.width}x${s.height}`).join(",");
+    if (key2 !== this.key) {
       for (const level of this.levels) level.texture.destroy?.();
       this.levels = sizes.map((s) => ({ ...s, texture: this.device.createTexture({ size: s, format: "rgba16float", usage: 16 | 4 | 1 }) }));
-      this.key = key;
+      this.key = key2;
     }
     return { texture: this.levels[0].texture, count: this.levels.length };
   }
@@ -36190,11 +36958,11 @@ var GpuPresenter = class {
   }
   /** The exposure that keeps grey where SDR shows it on an HDR display, per curve and domain (found once). */
   extendedExposure(mapper, authored = false) {
-    const key = `${mapper}|${authored}`;
-    let s = this.exposures.get(key);
+    const key2 = `${mapper}|${authored}`;
+    let s = this.exposures.get(key2);
     if (s === void 0) {
       s = extendedExposure(mapper, HDR_HEADROOM, authored);
-      this.exposures.set(key, s);
+      this.exposures.set(key2, s);
     }
     return s;
   }
@@ -36279,8 +37047,8 @@ var GpuPresenter = class {
     return texture;
   }
   pipeline(name, format, code) {
-    const key = `${name}|${format}`;
-    let pipeline = this.pipelines.get(key);
+    const key2 = `${name}|${format}`;
+    let pipeline = this.pipelines.get(key2);
     if (!pipeline) {
       const module = this.device.createShaderModule({ code });
       const layout = this.device.createPipelineLayout({ bindGroupLayouts: [this.layouts[name]] });
@@ -36291,7 +37059,7 @@ var GpuPresenter = class {
         fragment: { module, entryPoint: name, targets: name === "lens" || name === "composeBloom" ? [{ format }, { format }] : [{ format }] },
         primitive: { topology: "triangle-list" }
       });
-      this.pipelines.set(key, pipeline);
+      this.pipelines.set(key2, pipeline);
     }
     return pipeline;
   }
@@ -36948,7 +37716,7 @@ var Player = class {
             const keys = holoBindingKeys2(this.options.ui ?? []);
             const strings = this.options.strings ?? null;
             const language = playLanguage(strings, this.options.languages) ?? "";
-            const text = (key) => translate(strings, language, key);
+            const text = (key2) => translate(strings, language, key2);
             const cache = createHoloCache();
             this.meshSurface.setHolo((out, width, height, time, premultiplied) => {
               const state = runtime.channel.holo;
@@ -37790,7 +38558,7 @@ function resolveUnlockedAchievements(unlockHashes, registered) {
 }
 
 // src/render/lookDev.ts
-import { composeModelMatrix as composeModelMatrix5, multiplyMat4 as multiplyMat49, projectionMatrix as projectionMatrix4, viewMatrix as viewMatrix5 } from "@cartbox/editor";
+import { composeModelMatrix as composeModelMatrix6, multiplyMat4 as multiplyMat49, projectionMatrix as projectionMatrix4, viewMatrix as viewMatrix5 } from "@cartbox/editor";
 var GREY_CARD = 0.18;
 function authoredFromLinear(v) {
   const c = Math.min(1, Math.max(0, v));
@@ -37974,24 +38742,24 @@ function lookDevStage(asset, options, aspect = 16 / 9, maps = {}) {
   const hdriRig = options.rig === "hdri" && Boolean(options.environment);
   if (asset) {
     const spin = hdriRig ? 0 : angle * 180 / Math.PI;
-    const model = composeModelMatrix5([0, 0, 0], [0, spin, 0], [1, 1, 1]);
-    const offset = composeModelMatrix5([-centre[0], -min[1], -centre[2]], [0, 0, 0], [1, 1, 1]);
+    const model = composeModelMatrix6([0, 0, 0], [0, spin, 0], [1, 1, 1]);
+    const offset = composeModelMatrix6([-centre[0], -min[1], -centre[2]], [0, 0, 0], [1, 1, 1]);
     instances.push({ ...maps, mesh: asset, model: multiplyMat49(model, offset) });
   }
   const ball = Math.max(0.05, 0.2 * r);
   const greyBall = options.balls === false ? null : { centre: [r + 1.5 * ball, ball, 0.6 * r], radius: ball };
   const chromeBall = options.balls === false ? null : { centre: [r + 4 * ball, ball, 0.6 * r], radius: ball };
   if (greyBall && chromeBall) {
-    instances.push({ mesh: lookDevSphere("grey ball", material("grey ball", [GREY_CARD, GREY_CARD, GREY_CARD], 0, 1)), model: composeModelMatrix5(greyBall.centre, [0, 0, 0], [ball, ball, ball]) });
-    instances.push({ mesh: lookDevSphere("chrome ball", material("chrome ball", [0.95, 0.95, 0.95], 1, 0)), model: composeModelMatrix5(chromeBall.centre, [0, 0, 0], [ball, ball, ball]) });
+    instances.push({ mesh: lookDevSphere("grey ball", material("grey ball", [GREY_CARD, GREY_CARD, GREY_CARD], 0, 1)), model: composeModelMatrix6(greyBall.centre, [0, 0, 0], [ball, ball, ball]) });
+    instances.push({ mesh: lookDevSphere("chrome ball", material("chrome ball", [0.95, 0.95, 0.95], 1, 0)), model: composeModelMatrix6(chromeBall.centre, [0, 0, 0], [ball, ball, ball]) });
   }
   const patch = Math.max(0.02, 0.14 * r);
   const chartHeight = 4 * (patch * 7) / 6 + patch / 6;
   const chart = options.chart === false ? null : { centre: [-(r + 3.6 * patch), chartHeight / 2 + 0.02 * r, -0.2 * r], patch };
-  if (chart) instances.push({ mesh: lookDevChart(patch), model: composeModelMatrix5(chart.centre, [0, 20, 0], [1, 1, 1]) });
+  if (chart) instances.push({ mesh: lookDevChart(patch), model: composeModelMatrix6(chart.centre, [0, 20, 0], [1, 1, 1]) });
   if (options.floor !== false) {
     const side = 30 * r;
-    instances.push({ mesh: { name: "floor", primitives: [quadPrimitive(material("floor", [GREY_CARD, GREY_CARD, GREY_CARD], 0, 0.85), [0, 0, 0], side, side, true)] }, model: composeModelMatrix5([0, 0, 0], [0, 0, 0], [1, 1, 1]) });
+    instances.push({ mesh: { name: "floor", primitives: [quadPrimitive(material("floor", [GREY_CARD, GREY_CARD, GREY_CARD], 0, 0.85), [0, 0, 0], side, side, true)] }, model: composeModelMatrix6([0, 0, 0], [0, 0, 0], [1, 1, 1]) });
   }
   const rig = rigLights(options.rig, r, options.environment ?? null);
   const lights = hdriRig ? rig.lights.map((l) => ({ ...l, ...l.direction ? { direction: turn(l.direction, angle) } : {}, ...l.position ? { position: turn(l.position, angle) } : {} })) : rig.lights;
@@ -38394,8 +39162,8 @@ function parseTrack(raw, placementCount) {
   const keys = [];
   for (const entry of keysRaw) {
     if (keys.length >= MAX_KEYS) break;
-    const key = parseKeyframe(entry);
-    if (key) keys.push(key);
+    const key2 = parseKeyframe(entry);
+    if (key2) keys.push(key2);
   }
   if (keys.length === 0) return null;
   keys.sort((a, b) => a.t - b.t);
@@ -38663,14 +39431,14 @@ function decodeNetMessage(bytes) {
     message.e = [];
     for (let i = 0; i < count; i += 1) message.e.push([u322(), u322()]);
   }
-  for (const [flag, key] of [
+  for (const [flag, key2] of [
     [MATCH, "m"],
     [TIME, "t"],
     [PING, "pi"]
   ]) {
     if (!(flags & flag)) continue;
     if (!need(4)) return null;
-    message[key] = u322();
+    message[key2] = u322();
   }
   if (flags & PONGS) {
     if (!need(1)) return null;
@@ -39416,10 +40184,10 @@ async function runNetLab(options) {
         for (const [slot, { at, owner }] of owned) {
           if (owner === i || slot === mySlot) continue;
           const seen = options.probe.seen(mailbox, mySlot, slot);
-          const key = `${i}:${slot}`;
-          const before = lastSeen.get(key);
-          if (seen) lastSeen.set(key, seen);
-          else lastSeen.delete(key);
+          const key2 = `${i}:${slot}`;
+          const before = lastSeen.get(key2);
+          if (seen) lastSeen.set(key2, seen);
+          else lastSeen.delete(key2);
           if (!seen || !at) continue;
           const d = dist(seen, at);
           allDrift.push(d);

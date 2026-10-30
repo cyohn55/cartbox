@@ -120,8 +120,10 @@ fn hidden(c: vec3<f32>, r: f32) -> bool {
   let level = min(u32(ceil(log2(max(extent, 1.0)))), u32(cull.size.z) - 1u);
   // The level's size from the first's (asking for the level's own reads 1 on Dawn).
   let dims = max(vec2<i32>(textureDimensions(hiz)) >> vec2<u32>(level), vec2<i32>(1));
-  let a = min(vec2<i32>(lo) >> vec2<u32>(level), dims - 1);
-  let b = min(vec2<i32>(hi) >> vec2<u32>(level), dims - 1);
+  // Clamped both ways, and at most the two texels a side the level holds it to: a rectangle a NaN reached
+  // (a corner on the eye's plane, say) reads nothing out of bounds and loops no further.
+  let a = clamp(vec2<i32>(lo) >> vec2<u32>(level), vec2<i32>(0), dims - 1);
+  let b = clamp(vec2<i32>(hi) >> vec2<u32>(level), a, min(a + 1, dims - 1));
   var farthest = 0.0;
   for (var y = a.y; y <= b.y; y = y + 1) {
     for (var x = a.x; x <= b.x; x = x + 1) {
@@ -230,14 +232,15 @@ fn compact(@builtin(workgroup_id) group: vec3<u32>, @builtin(local_invocation_id
     scan[local.x] = seen;
     workgroupBarrier();
     for (var step = 1u; step < ${WORKGROUP}u; step = step * 2u) {
-      let add = select(0u, scan[local.x - step], local.x >= step);
+      let add = select(0u, scan[max(local.x, step) - step], local.x >= step);
       workgroupBarrier();
       scan[local.x] = scan[local.x] + add;
       workgroupBarrier();
     }
-    if (seen == 1u) {
-      let to = region + e.dst + kept + scan[local.x] - 1u;
-      let src = e.src + j;
+    let to = region + e.dst + kept + scan[local.x] - 1u;
+    let src = e.src + j;
+    // Every write in the instance buffer, or none (a record past its end would corrupt what follows it).
+    if (seen == 1u && (to + total + 1u) * RECORD <= arrayLength(&xf) && (src + n + 1u) * RECORD <= arrayLength(&xf)) {
       for (var f = 0u; f < RECORD; f = f + 1u) {
         xf[to * RECORD + f] = xf[src * RECORD + f];
         xf[(to + total) * RECORD + f] = xf[(src + n) * RECORD + f];

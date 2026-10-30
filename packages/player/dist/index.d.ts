@@ -57,6 +57,8 @@ interface MeshInstance extends MeshSceneInstance {
     readonly terrain?: true;
     /** On a terrain block whose terrain casts shadows ({@link Terrain.castShadows}): it goes into the shadow map. */
     readonly casts?: true;
+    /** On a terrain block: its terrain's id. The AAA tier draws that terrain from its heightfield instead (F6c). */
+    readonly ground?: string;
     /**
      * On a terrain block: how far from it full detail holds (world units). Its
      * `frames` are the half- and quarter-detail versions the renderer swaps to
@@ -120,6 +122,9 @@ interface SceneVista {
         readonly mesh: MeshAsset;
         readonly model: Mat4;
     }[];
+    /** The vista's heightfield and model: the AAA tier draws it as ground, not into the sky (F6c). */
+    readonly terrain?: Terrain;
+    readonly model?: Mat4;
 }
 interface MeshScene {
     readonly instances: readonly MeshInstance[];
@@ -144,6 +149,8 @@ interface MeshScene {
     readonly navmesh?: NavMesh;
     /** Heightfield landscapes, as authored (their geometry is among the instances). Vistas aren't. */
     readonly terrains?: readonly Terrain[];
+    /** Each terrain's model (its parent's, or the identity), by id: where the AAA tier draws its heightfield (F6c). */
+    readonly terrainModels?: ReadonlyMap<string, Mat4>;
     /**
      * Distant vistas (HALO_INFINITE_STYLE_ROADMAP.md I7): far terrains, and the
      * foliage set on them, drawn once into the sky panorama when the scene loads
@@ -4649,6 +4656,48 @@ interface ReflectionCapture {
 }
 
 /**
+ * Terrain at scale (AAA_FIDELITY_ROADMAP.md F6c): a heightfield of any size up
+ * to 4097² drawn with no CPU meshing, shaded from a runtime virtual texture.
+ *
+ * **CDLOD.** One grid patch ({@link TERRAIN_PATCH} cells a side) is the only
+ * mesh. Each frame a quadtree over the terrain (its nodes' height ranges known
+ * once, from a min/max pyramid of the cells) picks the nodes the eye needs: a
+ * node splits while the eye is within {@link TERRAIN_RANGE} of its children's
+ * size (distances in the ground plane). Each chosen node is a copy of the
+ * patch, its model scaling the patch to the node's square and height range,
+ * so the GPU culls the copies as it culls any others. The vertex shader reads
+ * the heights (`heightTex`, 16 bits a sample in red and green) at each vertex,
+ * and morphs a vertex onto its node's coarser grid as it nears the end of the
+ * node's range, so neighbouring nodes a level apart meet without cracks.
+ *
+ * **The virtual texture.** The blended layers (rules, painted weights, the
+ * blend's noise, triplanar projection, each layer's maps and factors) are
+ * baked on the GPU into pages: a square window round the eye a level, each
+ * twice the last's size, and one of the whole terrain, side by side in one
+ * atlas of albedo, normal, roughness/metal and occlusion (whose G carries a
+ * relief height for parallax, and whose alpha is 0 over cut cells). A node shades from the page of its own level,
+ * which its window is sized to hold, so terrain shading is one sample a map
+ * however many layers it blends. A window moves (and re-bakes) when the eye
+ * has moved an eighth of it.
+ *
+ * **Relief.** The nearest nodes are displaced by the page's relief (fading out
+ * with their morph, so they still meet their neighbours); the rest take it as
+ * parallax occlusion.
+ */
+
+/** The maps a layer bakes from: its base colour, normal and metallic-roughness maps (null: flat). */
+interface TerrainLayerMaps {
+    readonly base: DecodedTexture | null;
+    readonly normal: DecodedTexture | null;
+    readonly mr: DecodedTexture | null;
+}
+/** A terrain the GPU draws (F6c): its heightfield and the decoded maps of its layers, in order. */
+interface GpuTerrainSource {
+    readonly terrain: Terrain;
+    readonly layers: readonly TerrainLayerMaps[];
+}
+
+/**
  * Scene rendering: the seam between "what to draw" and "what draws it".
  *
  * Both 3D overlays — {@link MeshOverlaySurface} and {@link WorldOverlaySurface} —
@@ -4834,6 +4883,13 @@ interface SceneDraw {
         readonly boxes: readonly ProjectedDecal[];
         readonly tiles: DecalTiles;
     } | null;
+    /**
+     * Terrains drawn from their heightfields on the GPU (AAA_FIDELITY_ROADMAP.md
+     * F6c; the linear-light WebGPU renderer alone): each frame's nodes join the
+     * draws (and, for a terrain that casts, the sun's and local lights' casters).
+     * A terrain's model must be its origin alone (no parent's turn or scale).
+     */
+    readonly terrains?: readonly GpuTerrainSource[];
     /**
      * The sun's shadow rendered on the GPU in cascades (AAA_FIDELITY_ROADMAP.md
      * F2a), in place of the CPU-rasterised {@link shadow}: what casts (the whole
@@ -5937,6 +5993,10 @@ declare class WebgpuSceneRenderer implements SceneRenderer {
     private casterCulling;
     /** Cluster hierarchies cut and culled on the GPU (F6a), made on first use. */
     private clusterRendering;
+    /** Terrains drawn from their heightfields (F6c), by terrain, and by their patch's primitive. */
+    private readonly gpuTerrains;
+    private readonly terrainPatches;
+    private terrainList;
     /** Each copy's transforms made on the GPU (F0e), on the AAA tier. */
     private transforms;
     /** The LOD chains whose levels the GPU picks this frame (F0e). */
@@ -6150,6 +6210,10 @@ declare class WebgpuSceneRenderer implements SceneRenderer {
      * this frame until the next render.
      */
     renderToTexture(instances: readonly MeshSceneInstance[], given: GpuSceneDraw): any | null;
+    /** This frame's nodes of each GPU terrain (F6c), drawn and (for a terrain that casts) casting. */
+    private terrainNodes;
+    /** The heights a draw's primitive binds (F6c): a GPU terrain's patch's, else the blank. */
+    private terrainHeightsOf;
     /** Samples each pixel of the path-traced reference holds (F10b); 0 when it isn't shown. */
     get referenceSamples(): number;
     /** Render the path-traced reference of `instances` through `draw` at any size up to 8K (F10b; {@link captureReference}). */
@@ -6675,9 +6739,15 @@ declare function bakeProbeVolumeGpu(device: any, min: readonly [number, number, 
  * 1120 cull0      vec4<f32>    16   x = where a GPU-culled draw's copies start in the instance buffer (F0e;
  *                                    gpuCulling.ts), added to `instance_index`; 0 otherwise;
  *                                    y = an octahedral impostor's frames a side (F6b; 0: none), z = its half-size
+ * 1136 terrain1   vec4<f32>    16   a GPU terrain's patch (F6c; gpuTerrain.ts): its size (x, z), the heights' min and
+ *                                    range (> 0: a GPU terrain; 0 otherwise)
+ * 1152 terrain2   vec4<f32>    16   cells a side, 1 with cut cells, the nearest page's side, pages following the eye
+ * 1168 terrain3   vec4<f32>    16   the terrain's origin, the leaf node's side
+ * 1184 terrain4   vec4<f32>    16   the eye in the ground plane (x, z), the split range, the morph's start
+ * 1200 pages      vec4<f32> ×4 64   each eye-following page's corner, two a vec4
  * ```
  *
- * 1136 bytes used, padded to a 1280-byte stride (a 256-byte multiple a dynamic
+ * 1264 bytes used, padded to a 1280-byte stride (a 256-byte multiple a dynamic
  * uniform offset can address), so one buffer still holds every draw in a
  * frame — uniforms are written per batch, not per copy, so the stride costs
  * little. The metallic-roughness inputs and the environment carry the Modern
@@ -6692,7 +6762,7 @@ declare const UNIFORM_STRIDE = 1280;
  * bind group layout's `minBindingSize` must be: it makes a WGSL struct that
  * grows past what this module writes fail at pipeline creation.
  */
-declare const UNIFORM_BYTES_USED = 1136;
+declare const UNIFORM_BYTES_USED = 1264;
 /** The same stride counted in float32s, which is how `writeBuffer` sizes it. */
 declare const UNIFORM_FLOATS: number;
 /**
@@ -6954,6 +7024,8 @@ interface InstanceUniform {
         readonly frames: number;
         readonly radius: number;
     } | null;
+    /** A GPU terrain's patch (F6c; GpuTerrain.values): its 32 floats, or null/omitted. */
+    readonly terrain?: Float32Array | null;
 }
 /**
  * A draw's triplanar repeat (0 = UV mapping) and height-blend sharpness (0 = an
@@ -8247,6 +8319,14 @@ declare class MeshOverlaySurface implements DisplaySurface {
     private skyRelight;
     /** The scene's distant vistas, textured: re-drawn into the sky whenever it is re-baked. */
     private vistas;
+    /**
+     * Terrains the AAA tier draws from their heightfields (F6c), vistas among
+     * them, with their layers' maps; and the meshes of the blocks (and their
+     * coarser frames) they replace, which aren't drawn or cast.
+     */
+    private ground;
+    private groundIds;
+    private readonly groundMeshes;
     /**
      * Told each frame where the sky dome's sun is on screen and how much of it is
      * unblocked, for the post-FX glare and lens flare (H8); null without a sky dome.

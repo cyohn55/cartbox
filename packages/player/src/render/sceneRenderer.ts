@@ -40,6 +40,7 @@ import type { DynamicGi, EmitterSpec, MeshMaterial, Occluder, DecalTiles, Enviro
 import type { RenderCaps } from "../models.js";
 import type { ReflectionCapture } from "./probeCapture.js";
 import type { AtmosphereSky } from "./atmosphere.js";
+import type { GpuTerrainSource } from "./gpuTerrain.js";
 import type { RenderStats } from "../debug/profiler.js";
 import { applyRenderCaps, createTextureBudgetCache } from "./renderCaps.js";
 
@@ -202,6 +203,13 @@ export interface SceneDraw {
    * the decal marks' quads: the boxes, in drawing order, and every decal's tiles.
    */
   readonly decals?: { readonly boxes: readonly ProjectedDecal[]; readonly tiles: DecalTiles } | null;
+  /**
+   * Terrains drawn from their heightfields on the GPU (AAA_FIDELITY_ROADMAP.md
+   * F6c; the linear-light WebGPU renderer alone): each frame's nodes join the
+   * draws (and, for a terrain that casts, the sun's and local lights' casters).
+   * A terrain's model must be its origin alone (no parent's turn or scale).
+   */
+  readonly terrains?: readonly GpuTerrainSource[];
   /**
    * The sun's shadow rendered on the GPU in cascades (AAA_FIDELITY_ROADMAP.md
    * F2a), in place of the CPU-rasterised {@link shadow}: what casts (the whole

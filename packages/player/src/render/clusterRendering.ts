@@ -100,8 +100,10 @@ fn hidden(c: vec3<f32>, r: f32) -> bool {
   let extent = max(hi.x - lo.x, hi.y - lo.y);
   let level = min(u32(ceil(log2(max(extent, 1.0)))), u32(frame.size.z) - 1u);
   let dims = max(vec2<i32>(textureDimensions(hiz)) >> vec2<u32>(level), vec2<i32>(1));
-  let a = min(vec2<i32>(lo) >> vec2<u32>(level), dims - 1);
-  let b = min(vec2<i32>(hi) >> vec2<u32>(level), dims - 1);
+  // Clamped both ways, and at most the two texels a side the level holds it to: a rectangle a NaN reached
+  // (a corner on the eye's plane, say) reads nothing out of bounds and loops no further.
+  let a = clamp(vec2<i32>(lo) >> vec2<u32>(level), vec2<i32>(0), dims - 1);
+  let b = clamp(vec2<i32>(hi) >> vec2<u32>(level), a, min(a + 1, dims - 1));
   var farthest = 0.0;
   for (var y = a.y; y <= b.y; y = y + 1) {
     for (var x = a.x; x <= b.x; x = x + 1) {

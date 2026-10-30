@@ -1363,10 +1363,48 @@ Everything else depends on this track. It contains no visible "feature", but its
       - blending the three nearest impostor views (one is shown, so a view can change visibly as the eye moves);
       - baking impostors at authoring time, not on first sight;
       - the impostor's own normals.
-- [ ] **F6c. Terrain at scale.**
+- [x] **F6c. Terrain at scale.**
   - Clipmap or CDLOD terrain from heightfields of 4K and up, displaced in the vertex shader with no CPU meshing.
   - A **runtime virtual texture** that caches the blended terrain layers, decals and splines into pages, so terrain shading costs one sample at any layer count.
   - Displacement or POM on near layers, and real geometry vistas at distance in place of a panorama.
+  - *Done (gpuTerrain.ts):*
+    - **Heightfields up to 4097².** A terrain stores up to 4097 heights a side. The CPU meshes no more than 257 a side (`meshableTerrain`: every stride-th height, its paint, a coarse cell cut where any fine one is), so the other tiers draw a large terrain from a coarse copy, and collision still reads every height.
+    - **CDLOD on the GPU.** The only mesh is one patch (16 × 16 cells).
+      - A quadtree over the terrain gives each node its height range, from a min/max pyramid of the cells built once.
+      - Each frame it picks the nodes the eye needs: a node splits while the eye, in the ground plane, is within 2.5 of its sizes. Choosing from 4097² takes under 20 ms on the CPU and gives fewer than 2,500 nodes; the pyramid itself builds in under 3 s.
+      - Each node is a copy of the patch, its model scaling the unit square to the node and the unit height to its range, so the GPU culls the copies as it culls any others (and the sun's cascades take a terrain that casts).
+      - The vertex shader reads the heights (16 bits a sample in an RGBA8 texture, bilinear by `textureLoad`) at each vertex and takes the normal from the heights at the node's spacing.
+      - Past 80% of a node's range a vertex morphs onto the node's coarser grid, finishing at the range's end, so neighbours a level apart share every edge vertex. The range and morph are chosen so a node's edge with a finer neighbour never morphs, and two levels never meet.
+    - **The virtual texture.**
+      - The layers are blended on the GPU into pages, a compute pass porting `terrainLayerWeights` term for term: painted weights, the rules softly or by first match, the blend's noise, curvature, triplanar projection, each layer's base, normal and metallic-roughness maps at the mip the page's texel covers, and the blend's sharpness.
+      - Pages sit side by side in one atlas each of albedo, tangent-space normal, roughness/metal and occlusion. Occlusion's G carries a relief height for parallax; its alpha is 0 over cut cells, which the draw discards.
+      - Each eye-following page is 512² texels, the nearest 12.8 m across (2.5 cm a texel), each next twice the last, up to eight; then one page of the whole terrain.
+      - A page re-bakes when the eye has moved an eighth of it. A node shades from its own level's page, whose window is sized to hold every node of that level the eye can choose, so shading is one sample a map at any layer count.
+      - The patch's material binds the atlases through placeholder keys the renderer adopts (`TerrainHost.adopt`), so every pass that binds a material binds the pages.
+    - **Relief.** A terrain's `relief` (0..0.5 m) displaces its level-0 nodes by the page's relief height, scaled by one minus the morph so they still meet their neighbours. Beyond those nodes the same relief shows by the existing parallax occlusion (`parallaxDepth`), weighted against the displacement already applied.
+    - **Vistas as ground.** On the AAA path a vista terrain is drawn as GPU terrain (its far nodes coarse, its far pages the whole terrain's) instead of being baked into the sky panorama.
+    - **Wiring.**
+      - The overlay hands the AAA renderer each terrain whose model is a translation, with its layers' decoded maps (`GpuSceneDraw.terrains`), and stops drawing (and casting) those terrains' blocks.
+      - Heights bind at a new vertex-stage binding 17 in the scene's and the cut-out casters' layouts; terrain casters draw through the cut-out pipeline.
+      - The draw uniform gains eight vec4s (1,264 bytes used of the 1,280 stride).
+    - *Also fixed:* three robustness faults in the GPU cull's shaders.
+      - The Hi-Z test now clamps its texel rectangle both ways and to the two texels a side its level guarantees, so a NaN rectangle reads nothing out of bounds.
+      - The compaction's prefix scan no longer indexes `scan[local.x - step]` below zero (`select` evaluates both sides).
+      - Compaction writes only records that fit the instance buffer.
+    - *Tests (`gpu-terrain.test.ts`):*
+      - Heights keep to 16 bits of their range.
+      - The nodes tile a 256 m terrain once over, finest at the eye, neighbours at most a level apart, each node's range holding its heights.
+      - Every morphed edge of every pair of neighbours at different levels, for three eyes, is one line (to 0.1 mm).
+      - A 4097² terrain: plan and selection times; its eye pages holding their levels' nodes; its 257² CPU copy.
+      - `relief` round-trips, and a 300² terrain reads.
+      - On the AAA overlay, the terrain is a GPU source and its blocks neither draw nor cast; elsewhere they do.
+      - On Dawn: drawn from its heights, a 129² hillside covers what its CPU mesh covers (98% overlap), 85% of shared pixels within 0.08 of its colour; its holes stay open.
+    - *Left:*
+      - Decals and splines baked into the pages (they still draw over the terrain as they did).
+      - Toroidal page updates (a moved page re-bakes whole).
+      - A terrain on a turned or scaled parent stays on its CPU blocks.
+      - Holes still cast shadows.
+      - A fault, already on the branch before F6c: Dawn's software rasteriser (SwiftShader) dereferences a null descriptor in its compiled GPU-cull code on some frames (two plain boxes at the frustum's edge reproduce it). The terrain's Dawn tests therefore draw with the prepass but without the GPU cull; the fault hasn't been seen on hardware.
 - [ ] **F6d. World streaming.**
   - The world is divided into a grid of cells, each streamed in by distance in a worker (geometry clusters, textures by mip, foliage, probes).
   - A world-partition editor shows what is loaded.

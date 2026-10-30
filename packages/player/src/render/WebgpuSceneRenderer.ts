@@ -176,6 +176,7 @@ import { GpuLightClusters } from "./gpuLightClusters.js";
 import { BundleCache, type BundleTarget } from "./renderBundles.js";
 import { GpuTransforms, writeInstanceModel } from "./gpuTransforms.js";
 import { ClusterRendering, type ClusterJob } from "./clusterRendering.js";
+import { GpuTerrain, TERRAIN_PATCH } from "./gpuTerrain.js";
 import { PathTracer, captureReference, type CaptureOptions, type ReferenceCapture } from "./pathTracer.js";
 import { IES_BASE, IES_MAX_PROFILES, IES_VEC4S, ltcTables, ltcWgsl } from "./ltc.js";
 import { PROBE_FACE, ProbeCapture, packCapturedProbes } from "./probeCapture.js";
@@ -624,6 +625,13 @@ struct Uniforms {
   char0: vec4<f32>,
   char1: vec4<f32>,
   cull0: vec4<f32>,
+  // A GPU terrain's patch (F6c; gpuTerrain.ts): its size, the heights' min and range (> 0: a terrain), its cells,
+  // cut cells, nearest page's side and eye pages, its origin and leaf size, the eye and the split and morph, the pages.
+  terrain1: vec4<f32>,
+  terrain2: vec4<f32>,
+  terrain3: vec4<f32>,
+  terrain4: vec4<f32>,
+  terrainPages: array<vec4<f32>, 4>,
 };
 
 // A Modern-tier light (see packLights): d0 = dir/pos + kind, d1 = colour +
@@ -751,7 +759,7 @@ ${hdr ? "// The linear variant's probes (F3b, probeCapture.ts): each one's prefi
 // The blend surface's map in layer 0, and a material graph's own images after it (F1e).
 @group(0) @binding(15) var blendTex: texture_2d_array<f32>;
 @group(0) @binding(16) var nrmTex: texture_2d<f32>;
-// The opaque pass's depth (EP6b), read by the see-through pass for soft edges;
+${hdr ? "// A GPU terrain's heights (F6c): RG = 16 bits of the height (B, its cut cells, the page bake reads).\n@group(0) @binding(17) var heightTex: texture_2d<f32>;\n" : ""}// The opaque pass's depth (EP6b), read by the see-through pass for soft edges;
 // the opaque pass binds a blank in its place.
 @group(1) @binding(0) var sceneDepth: texture_depth_2d;
 // Clustered lights (EP8): per cell (offset, count) into the index list, then the list, in one buffer
@@ -1496,6 +1504,63 @@ fn impostorOf(position: vec3<f32>, uv: vec2<f32>, m: mat4x4<f32>) -> Impostor {
   out.normal = normalize(vec3<f32>(0.0, 1.0, 0.0) + 0.4 * toEye);
   return out;
 }
+// --- Terrain at scale (AAA_FIDELITY_ROADMAP.md F6c; gpuTerrain.ts) ---
+// A height sample, and the heights' bilinear blend at a point (metres from the terrain's corner): the local height.
+fn terrainSample(i: vec2<i32>) -> f32 {
+  let t = textureLoad(heightTex, i, 0);
+  return (t.r * 65280.0 + t.g * 255.0) / 65535.0;
+}
+fn terrainHeight(p: vec2<f32>) -> f32 {
+  let cells = u.terrain2.x;
+  let q = clamp(p / u.terrain1.xy, vec2<f32>(0.0), vec2<f32>(1.0)) * cells;
+  let i = min(vec2<i32>(floor(q)), vec2<i32>(i32(cells) - 1));
+  let f = q - vec2<f32>(i);
+  let a = mix(terrainSample(i), terrainSample(i + vec2<i32>(1, 0)), f.x);
+  let b = mix(terrainSample(i + vec2<i32>(0, 1)), terrainSample(i + vec2<i32>(1, 1)), f.x);
+  return u.terrain1.z + mix(a, b, f.y) * u.terrain1.w;
+}
+// A patch vertex of a node (its model scales the unit patch to the node's square and height range, the terrain's
+// model being its origin alone): CDLOD's morph onto the coarser grid by the vertex's distance from the eye in the
+// ground plane, the height read there, the normal from the heights at the node's spacing, and the page the node
+// shades from (its level's, which its window holds; past the eye's pages, the whole terrain's) in the atlas.
+struct TerrainVertex { pos: vec3<f32>, normal: vec3<f32>, uv: vec2<f32>, morph: f32, level: f32 };
+fn terrainOf(position: vec3<f32>, m: mat4x4<f32>) -> TerrainVertex {
+  var out: TerrainVertex;
+  let s = max(m[0].x, 1e-6);
+  let r = max(m[1].y, 1e-6);
+  let corner = m[3].xyz - u.terrain3.xyz;
+  let n = ${TERRAIN_PATCH}.0;
+  let g = round(position.xz * n);
+  let d = length(corner.xz + g / n * s - u.terrain4.xy);
+  let range = u.terrain4.z * s;
+  let morph = clamp((d - u.terrain4.w * range) / ((1.0 - u.terrain4.w) * range), 0.0, 1.0);
+  let gm = g - fract(g * 0.5) * 2.0 * morph;
+  let local = clamp(corner.xz + gm / n * s, vec2<f32>(0.0), u.terrain1.xy);
+  let h = terrainHeight(local);
+  let e = s / n;
+  let hl = terrainHeight(local - vec2<f32>(e, 0.0));
+  let hr = terrainHeight(local + vec2<f32>(e, 0.0));
+  let hd = terrainHeight(local - vec2<f32>(0.0, e));
+  let hu = terrainHeight(local + vec2<f32>(0.0, e));
+  out.normal = normalize(vec3<f32>(hl - hr, 2.0 * e, hd - hu));
+  out.pos = vec3<f32>((local.x - corner.x) / s, (h - corner.y) / r, (local.y - corner.z) / s);
+  let level = clamp(round(log2(max(s / u.terrain3.w, 1.0))), 0.0, 30.0);
+  var slot = u.terrain2.w;
+  var page = vec2<f32>(0.0);
+  var side = max(u.terrain1.x, u.terrain1.y);
+  if (level < u.terrain2.w) {
+    slot = level;
+    let k = min(u32(level), 7u);
+    let pv = u.terrainPages[k / 2u];
+    page = select(pv.xy, pv.zw, (k & 1u) == 1u);
+    side = u.terrain2.z * exp2(level);
+  }
+  let pu = clamp((local - page) / side, vec2<f32>(0.0), vec2<f32>(1.0));
+  out.uv = vec2<f32>((slot + pu.x) / (u.terrain2.w + 1.0), 1.0 - pu.y);
+  out.morph = morph;
+  out.level = level;
+  return out;
+}
 ` : ""}@vertex
 fn vs(
   @location(0) position: vec3<f32>,
@@ -1513,7 +1578,7 @@ fn vertexOf(position: vec3<f32>, normal: vec3<f32>, uv: vec2<f32>, uv2: vec2<f32
   var out: VSOut;
   let t = xf[u32(u.cull0.x) + instance];
   var pos = position;
-${hdr ? "  pos = pos + bendIn(u.wind0, position, sway, t.model);\n  // Its LOD crossfade (F6b): the cull leaves it in the model's first column's w, 0 in an affine model.\n  out.fade = t.model[0].w;\n  // An octahedral impostor's quad, turned to the eye (F6b).\n  var imp: Impostor;\n  if (u.cull0.y > 0.5) {\n    imp = impostorOf(position, uv, t.model);\n    pos = imp.pos;\n  }" : "  let bend = windOffset(position.xz, sway);\n  pos = vec3<f32>(pos.x + bend.x, pos.y, pos.z + bend.y);"}
+${hdr ? "  pos = pos + bendIn(u.wind0, position, sway, t.model);\n  // Its LOD crossfade (F6b): the cull leaves it in the model's first column's w, 0 in an affine model.\n  out.fade = t.model[0].w;\n  // An octahedral impostor's quad, turned to the eye (F6b).\n  var imp: Impostor;\n  if (u.cull0.y > 0.5) {\n    imp = impostorOf(position, uv, t.model);\n    pos = imp.pos;\n  }\n  // A GPU terrain's node (F6c): the heights at its morphed vertex; the nearest nodes displaced by the relief, gone\n  // by the end of their morph so they still meet their neighbours.\n  var ter: TerrainVertex;\n  if (u.terrain1.w > 0.0) {\n    ter = terrainOf(position, t.model);\n    pos = ter.pos;\n    if (ter.level < 0.5 && u.layer0.w > 0.0) {\n      let dims = vec2<f32>(textureDimensions(occTex));\n      let texel = vec2<i32>(clamp(vec2<f32>(ter.uv.x, 1.0 - ter.uv.y) * dims, vec2<f32>(0.0), dims - 1.0));\n      pos.y = pos.y - (1.0 - textureLoad(occTex, texel, 0).g) * u.layer0.w * (1.0 - ter.morph) / max(t.model[1].y, 1e-6);\n    }\n  }" : "  let bend = windOffset(position.xz, sway);\n  pos = vec3<f32>(pos.x + bend.x, pos.y, pos.z + bend.y);"}
 ${g.vertex}  out.pos = t.mvp * vec4<f32>(pos, 1.0);
   out.normal = t.nrm * normal;
   out.uv = uv;
@@ -1532,6 +1597,15 @@ ${hdr ? `  // A tangent lies in the surface, so it moves with the model's own 3�
     out.tangent = vec4<f32>(0.0);
   }
   out.frameNormal = normalize(out.normal);
+  // The terrain's normal (its model is its origin alone), its page, and how much relief parallax adds (none where
+  // the vertex displaced it). Its tangent is the ground's +x, as a planar terrain's derivative frame has it.
+  if (u.terrain1.w > 0.0) {
+    out.normal = ter.normal;
+    out.frameNormal = ter.normal;
+    out.uv = ter.uv;
+    out.bw = select(1.0, ter.morph, ter.level < 0.5);
+    out.tangent = vec4<f32>(normalize(vec3<f32>(1.0, 0.0, 0.0) - ter.normal * ter.normal.x), 1.0);
+  }
 ` : ""}  return out;
 }
 
@@ -1663,7 +1737,7 @@ ${hdr
 
 @fragment
 fn fs(in: VSOut) -> @location(0) vec4<f32> {
-${hdr ? "  // A copy fading between its LOD levels (F6b) leaves the other level's pixels.\n  if (in.fade != 0.0 && fadeHides(in.fade, in.pos.xy)) { discard; }\n  shadowPixel = in.pos.xy;\n  // Overdraw (F10a): every fragment shaded counts one, added up in red.\n  if (frame.debug.x > 10.5 && frame.debug.x < 11.5) { return vec4<f32>(1.0, 0.0, 0.0, 0.0); }\n" : ""}  // The surface's screen derivatives, for the UV gradients parallax and
+${hdr ? "  // A copy fading between its LOD levels (F6b) leaves the other level's pixels.\n  if (in.fade != 0.0 && fadeHides(in.fade, in.pos.xy)) { discard; }\n  // A GPU terrain's cut cells (F6c): its page's occlusion alpha.\n  if (u.terrain1.w > 0.0 && u.terrain2.y > 0.5 && textureSample(occTex, samp, vec2<f32>(in.uv.x, 1.0 - in.uv.y)).a < 0.5) { discard; }\n  shadowPixel = in.pos.xy;\n  // Overdraw (F10a): every fragment shaded counts one, added up in red.\n  if (frame.debug.x > 10.5 && frame.debug.x < 11.5) { return vec4<f32>(1.0, 0.0, 0.0, 0.0); }\n" : ""}  // The surface's screen derivatives, for the UV gradients parallax and
   // anisotropy need (I4) — taken here, in uniform control flow.
   let dp1 = dpdx(in.worldPos);
   let dp2 = dpdy(in.worldPos);
@@ -1677,7 +1751,7 @@ ${hdr ? "  // A copy fading between its LOD levels (F6b) leaves the other level'
     if (dot(pn, u.view.xyz) < 0.0) { pn = -pn; }
     let pg = uvGrads(pn, dp1, dp2, duv1, duv2);
     let pv = max(${PARALLAX_MIN_NDV}, dot(pn, u.view.xyz));
-    puv = parallaxUv(in.uv, -vec2<f32>(dot(pg.gu, u.view.xyz), dot(pg.gv, u.view.xyz)) / pv, u.layer0.w);
+    puv = parallaxUv(in.uv, -vec2<f32>(dot(pg.gu, u.view.xyz), dot(pg.gv, u.view.xyz)) / pv, u.layer0.w${hdr ? " * select(1.0, in.bw, u.terrain1.w > 0.0)" : ""});
   }${hdr ? `
   // An eye (F7c): its UVs centred on the pupil; inside the iris the view refracts through the cornea and
   // lands on the iris behind it, which is where the iris is sampled.
@@ -2085,10 +2159,18 @@ struct CutOut {
   @builtin(position) pos: vec4<f32>,
   @location(0) uv: vec2<f32>,
 };
+// A cut-out caster's clip position: casterClip's, or a GPU terrain's node (F6c), whose casters draw through this
+// pipeline as it binds their heights.
+fn casterClipCut(position: vec3<f32>, sway: f32, instance: u32) -> vec4<f32> {
+  if (u.terrain1.w <= 0.0) { return casterClip(position, sway, instance); }
+  let at = select(instance, cascadeView.base.x + u32(u.cull0.x) + instance, cascadeView.base.y != 0u);
+  let model = xf[at].model;
+  return cascadeView.viewProj * model * vec4<f32>(terrainOf(position, model).pos, 1.0);
+}
 @vertex
 fn vs_shadow_cut(@location(0) position: vec3<f32>, @location(2) uv: vec2<f32>, @location(5) sway: f32, @builtin(instance_index) instance: u32) -> CutOut {
   var out: CutOut;
-  out.pos = casterClip(position, sway, instance);
+  out.pos = casterClipCut(position, sway, instance);
   out.uv = uv;
   return out;
 }
@@ -2152,7 +2234,8 @@ fn vs_prepass(
 ${hdr ? "  out.tangent = v.tangent;\n  out.frameNormal = v.frameNormal;\n  out.fade = v.fade;\n" : ""}  let m = xf[u32(u.motion0.x) + u32(u.cull0.x) + instance];
 ${hdr ? "  // Last frame's bend: its wind, about where the copy stood (the motion record's model is last frame's).\n  let thenPos = before + bendIn(u.wind1, before, sway, m.model);" : "  let then = windOffsetIn(u.wind1, before.xz, sway);\n  let thenPos = vec3<f32>(before.x + then.x, before.y, before.z + then.y);"}
   out.clipNow = m.mvp * vec4<f32>(v.objPos, 1.0);
-  out.clipThen = m.lightMvp * vec4<f32>(thenPos${g.vertex ? " + wpoObj" : ""}, 1.0);
+${hdr ? "  // A terrain stands still: its vertex where it is now (F6c).\n  let thenAt = select(thenPos, v.objPos, u.terrain1.w > 0.0);" : "  let thenAt = thenPos;"}
+  out.clipThen = m.lightMvp * vec4<f32>(thenAt${g.vertex ? " + wpoObj" : ""}, 1.0);
   return out;
 }
 struct PrepassTargets {
@@ -2168,7 +2251,7 @@ struct PrepassTargets {
 // in UV units (x right, y down), so a pixel's last position is uv − velocity.
 @fragment
 fn fs_prepass(in: PrepassIn) -> PrepassTargets {
-${hdr ? "  if (in.fade != 0.0 && fadeHides(in.fade, in.pos.xy)) { discard; }\n" : ""}  let dp1 = dpdx(in.worldPos);
+${hdr ? "  if (in.fade != 0.0 && fadeHides(in.fade, in.pos.xy)) { discard; }\n  if (u.terrain1.w > 0.0 && u.terrain2.y > 0.5 && textureSample(occTex, samp, vec2<f32>(in.uv.x, 1.0 - in.uv.y)).a < 0.5) { discard; }\n" : ""}  let dp1 = dpdx(in.worldPos);
   let dp2 = dpdy(in.worldPos);
   let duv1 = dpdx(in.uv);
   let duv2 = dpdy(in.uv);
@@ -2178,7 +2261,7 @@ ${hdr ? "  if (in.fade != 0.0 && fadeHides(in.fade, in.pos.xy)) { discard; }\n" 
     if (dot(pn, u.view.xyz) < 0.0) { pn = -pn; }
     let pg = uvGrads(pn, dp1, dp2, duv1, duv2);
     let pv = max(${PARALLAX_MIN_NDV}, dot(pn, u.view.xyz));
-    puv = parallaxUv(in.uv, -vec2<f32>(dot(pg.gu, u.view.xyz), dot(pg.gv, u.view.xyz)) / pv, u.layer0.w);
+    puv = parallaxUv(in.uv, -vec2<f32>(dot(pg.gu, u.view.xyz), dot(pg.gv, u.view.xyz)) / pv, u.layer0.w${hdr ? " * select(1.0, in.bw, u.terrain1.w > 0.0)" : ""});
   }
   let uv = vec2<f32>(puv.x, 1.0 - puv.y);
   var sNrm = in.normal;
@@ -2338,6 +2421,10 @@ export class WebgpuSceneRenderer implements SceneRenderer {
   private casterCulling: CasterCulling | null = null;
   /** Cluster hierarchies cut and culled on the GPU (F6a), made on first use. */
   private clusterRendering: ClusterRendering | null = null;
+  /** Terrains drawn from their heightfields (F6c), by terrain, and by their patch's primitive. */
+  private readonly gpuTerrains = new WeakMap<object, GpuTerrain>();
+  private readonly terrainPatches = new WeakMap<MeshPrimitive, GpuTerrain>();
+  private terrainList: GpuTerrain[] = [];
   /** Each copy's transforms made on the GPU (F0e), on the AAA tier. */
   private transforms: GpuTransforms | null = null;
   /** The LOD chains whose levels the GPU picks this frame (F0e). */
@@ -2833,7 +2920,7 @@ export class WebgpuSceneRenderer implements SceneRenderer {
           for (const cut of [false, true]) {
             encoded.setPipeline(cut ? res.localCutPipeline : res.localPipeline);
             casters.forEach((entry, k) => {
-              if ((entry.alpha === 1) !== cut) return;
+              if ((entry.alpha === 1 || this.terrainPatches.has(entry.primitive)) !== cut) return;
               const sphere = localSphere(entry.primitive);
               if (!entry.models.some((m: Mat4) => pageTouches(page, basis, worldSphere(sphere, m)))) return;
               encoded.setBindGroup(0, cut ? this.cutGroupFor(entry.primitive, entry.textures) : group, [(first + k) * UNIFORM_STRIDE]);
@@ -3111,7 +3198,8 @@ export class WebgpuSceneRenderer implements SceneRenderer {
           // blank for all three and the shader ignores them (pbr.z = 0), so the
           // layout is one shape for every draw.
           { binding: 3, visibility: SHADER_STAGE_FRAGMENT, texture: { sampleType: "float" } },
-          { binding: 4, visibility: SHADER_STAGE_FRAGMENT, texture: { sampleType: "float" } },
+          // The occlusion map; a GPU terrain's vertices read its relief from it (F6c).
+          { binding: 4, visibility: SHADER_STAGE_VERTEX | SHADER_STAGE_FRAGMENT, texture: { sampleType: "float" } },
           { binding: 5, visibility: SHADER_STAGE_FRAGMENT, texture: { sampleType: "float" } },
           // The shadow map is r32float — not filterable — and read via textureLoad,
           // so it declares unfilterable-float and needs no sampler. The linear-light
@@ -3137,6 +3225,8 @@ export class WebgpuSceneRenderer implements SceneRenderer {
           { binding: 15, visibility: SHADER_STAGE_FRAGMENT, texture: { sampleType: "float", viewDimension: "2d-array" } },
           // The tangent-space normal map (P1a).
           { binding: 16, visibility: SHADER_STAGE_FRAGMENT, texture: { sampleType: "float" } },
+          // A GPU terrain's heights (F6c), read by the vertex stage.
+          ...(hdr ? [{ binding: 17, visibility: SHADER_STAGE_VERTEX, texture: { sampleType: "float" } }] : []),
         ],
       });
 
@@ -3310,6 +3400,8 @@ export class WebgpuSceneRenderer implements SceneRenderer {
           { binding: 1, visibility: SHADER_STAGE_FRAGMENT, sampler: { type: "filtering" } },
           { binding: 2, visibility: SHADER_STAGE_FRAGMENT, texture: { sampleType: "float" } },
           { binding: 10, visibility: SHADER_STAGE_VERTEX, buffer: { type: "read-only-storage" } },
+          // A GPU terrain's heights (F6c): its casters draw through the cut-out pipeline.
+          ...(hdr ? [{ binding: 17, visibility: SHADER_STAGE_VERTEX, texture: { sampleType: "float" } }] : []),
         ],
       });
       const casterModule = hdr ? device.createShaderModule({ code: sceneShader(null, false, hdr) }) : null;
@@ -3763,6 +3855,15 @@ export class WebgpuSceneRenderer implements SceneRenderer {
       });
       if (burning.length > 0) draw = { ...draw, lights: [...(draw.lights ?? []), ...burning] };
     }
+    // Terrains drawn from their heightfields (F6c): this frame's nodes, as copies of each one's patch.
+    if (this.hdr && draw.terrains && draw.terrains.length > 0) {
+      const ground = this.terrainNodes(draw);
+      instances = [...instances, ...ground.drawn];
+      if (ground.casting.length > 0) {
+        if (draw.sunShadow) draw = { ...draw, sunShadow: { ...draw.sunShadow, casters: [...draw.sunShadow.casters, ...ground.casting] } };
+        if (draw.localShadowCasters) draw = { ...draw, localShadowCasters: [...draw.localShadowCasters, ...ground.casting] };
+      }
+    }
     if (draw.prepass === true) this.matchMotion(instances);
     // With GPU culling (F0e) the GPU picks the LOD level of each copy of a chain with many copies (each level is a draw,
     // so a chain with few is cheaper chosen here).
@@ -3775,6 +3876,40 @@ export class WebgpuSceneRenderer implements SceneRenderer {
       return null;
     }
     return this.frameOutput ?? this.colourTexture;
+  }
+
+  /** This frame's nodes of each GPU terrain (F6c), drawn and (for a terrain that casts) casting. */
+  private terrainNodes(draw: GpuSceneDraw): { drawn: MeshSceneInstance[]; casting: MeshSceneInstance[] } {
+    const eye = cameraPositionFromView(draw.view);
+    const drawn: MeshSceneInstance[] = [];
+    const casting: MeshSceneInstance[] = [];
+    for (const source of draw.terrains ?? []) {
+      let terrain = this.gpuTerrains.get(source.terrain);
+      if (!terrain) {
+        terrain = new GpuTerrain(
+          {
+            device: this.device,
+            upload: (texture, colour) => this.uploadTexture(texture, colour),
+            mips: (texture, levels, format) => this.mipmaps.generate(texture, levels, format),
+            adopt: (key, texture, colour) => (this.mips && colour ? this.colourTextures : this.textures).set(key, texture),
+            blank: this.blankTexture,
+          },
+          source.terrain,
+        );
+        this.gpuTerrains.set(source.terrain, terrain);
+        this.terrainPatches.set(terrain.mesh.primitives[0]!, terrain);
+        this.terrainList.push(terrain);
+      }
+      const nodes = terrain.frame(eye, source.layers);
+      drawn.push(...nodes);
+      if (source.terrain.castShadows) casting.push(...nodes);
+    }
+    return { drawn, casting };
+  }
+
+  /** The heights a draw's primitive binds (F6c): a GPU terrain's patch's, else the blank. */
+  private terrainHeightsOf(primitive: MeshPrimitive): any {
+    return this.terrainPatches.get(primitive)?.heightView ?? this.blankTexture.createView();
   }
 
   /** Samples each pixel of the path-traced reference holds (F10b); 0 when it isn't shown. */
@@ -4046,6 +4181,7 @@ export class WebgpuSceneRenderer implements SceneRenderer {
         motionBase: prepass ? instanceCount : 0,
         lodLevel: entry.lod ?? -1,
         octahedral: entry.primitive.material.octahedral ?? null,
+        terrain: this.terrainPatches.get(entry.primitive)?.values ?? null,
         lightChannels: entry.channels,
         ...(this.hdr ? { probeCount: this.capturedProbes, receivesDecals: entry.alpha < 2 && !entry.refract } : {}),
       };
@@ -4068,7 +4204,8 @@ export class WebgpuSceneRenderer implements SceneRenderer {
       const maps = (t.base !== null ? 1 : 0) | (t.mr !== null ? 2 : 0) | (t.occ !== null ? 4 : 0) | (t.emis !== null ? 8 : 0) | (t.normal !== null ? 16 : 0) | (t.lm !== null ? 32 : 0) | (t.lmHdr !== null ? 64 : 0) | (t.detail !== null ? 128 : 0) | (t.blend !== null ? 256 : 0) | (t.relief !== null ? 512 : 0);
       const key: unknown[] = [entry.primitive, entry.primitive.material, maps, entry.alpha, entry.refract, entry.effect ?? null, entry.lod ?? -1, entry.channels, materialId(entry.primitive.material), bases?.instanceBase ?? 0, bases?.motionBase ?? motionBase, this.frameGi !== null];
       const last = keys[index];
-      let same = !!last && frameSlot >= 0 && !uniformAnimates(entry.primitive.material, entry.alpha, entry.primitive.sway !== undefined, entry.refract, entry.effect);
+      // A GPU terrain's uniform follows the eye (F6c).
+      let same = !!last && frameSlot >= 0 && !uniformAnimates(entry.primitive.material, entry.alpha, entry.primitive.sway !== undefined, entry.refract, entry.effect) && !this.terrainPatches.has(entry.primitive);
       for (let i = 0; same && i < key.length; i += 1) same = last![i] === key[i];
       for (let i = 0; same && i < 16; i += 1) same = lastModels[index * 16 + i] === Math.fround(model[i]!);
       if (same) {
@@ -4385,7 +4522,7 @@ export class WebgpuSceneRenderer implements SceneRenderer {
             for (const cut of [false, true]) {
               encoded.setPipeline(cut ? res.cutPipeline : res.pipeline);
               casters.forEach((entry, k) => {
-                if ((entry.alpha === 1) !== cut) return;
+                if ((entry.alpha === 1 || this.terrainPatches.has(entry.primitive)) !== cut) return;
                 encoded.setBindGroup(0, cut ? this.cutGroupFor(entry.primitive, entry.textures) : group, [(draws.length + k) * UNIFORM_STRIDE]);
                 encoded.setVertexBuffer(0, entry.geometry.vertexBuffer);
                 encoded.setIndexBuffer(entry.geometry.indexBuffer, "uint32");
@@ -4454,7 +4591,7 @@ export class WebgpuSceneRenderer implements SceneRenderer {
             for (const cut of [false, true]) {
               encoded.setPipeline(cut ? res.localCutPipeline : res.localPipeline);
               casters.forEach((entry, k) => {
-                if ((entry.alpha === 1) !== cut) return;
+                if ((entry.alpha === 1 || this.terrainPatches.has(entry.primitive)) !== cut) return;
                 encoded.setBindGroup(0, cut ? this.cutGroupFor(entry.primitive, entry.textures) : group, [(draws.length + k) * UNIFORM_STRIDE]);
                 encoded.setVertexBuffer(0, entry.geometry.vertexBuffer);
                 encoded.setIndexBuffer(entry.geometry.indexBuffer, "uint32");
@@ -6074,6 +6211,7 @@ export class WebgpuSceneRenderer implements SceneRenderer {
         { binding: 1, resource: this.sampler },
         { binding: 2, resource: (textures.base ? this.uploadTexture(textures.base, true) : this.blankTexture).createView() },
         { binding: 10, resource: { buffer: this.instanceBuffer } },
+        ...(this.hdr ? [{ binding: 17, resource: this.terrainHeightsOf(primitive) }] : []),
       ],
     });
     this.cutGroups.set(primitive, { uniform: this.uniformBuffer, instances: this.instanceBuffer, base: textures.base, group });
@@ -6141,6 +6279,7 @@ export class WebgpuSceneRenderer implements SceneRenderer {
         // The blend surface's map, and a material graph's images as the array's later layers (F1e).
         { binding: 15, resource: textures.graph && textures.graph.some((t) => t !== null) ? this.uploadLayers([textures.blend, ...textures.graph]).createView({ dimension: "2d-array" }) : (textures.blend ? this.uploadTexture(textures.blend, true) : this.blankTexture).createView({ dimension: "2d-array" }) },
         { binding: 16, resource: view(textures.normal) },
+        ...(this.hdr ? [{ binding: 17, resource: this.terrainHeightsOf(primitive) }] : []),
       ],
     });
     this.bindGroups.set(primitive, { group, source: { ...textures } });
@@ -6525,6 +6664,8 @@ export class WebgpuSceneRenderer implements SceneRenderer {
     this.transforms?.destroy();
     this.casterCulling?.destroy();
     this.clusterRendering?.destroy();
+    for (const t of this.terrainList) t.dispose();
+    this.terrainList = [];
     this.pathTracer = null;
     destroySafely(this.sssProfiles);
     if (this.feedback) for (const b of [this.feedback.draws, this.feedback.wanted, this.feedback.readback, this.feedback.depth]) destroySafely(b);

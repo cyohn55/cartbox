@@ -26,6 +26,7 @@ import {
   readLevels,
   readNavMesh,
   readTerrains,
+  meshableTerrain,
   readStreaming,
   type SceneStreaming,
   type StreamGroup,
@@ -119,6 +120,8 @@ export interface MeshInstance extends MeshSceneInstance {
   readonly terrain?: true;
   /** On a terrain block whose terrain casts shadows ({@link Terrain.castShadows}): it goes into the shadow map. */
   readonly casts?: true;
+  /** On a terrain block: its terrain's id. The AAA tier draws that terrain from its heightfield instead (F6c). */
+  readonly ground?: string;
   /**
    * On a terrain block: how far from it full detail holds (world units). Its
    * `frames` are the half- and quarter-detail versions the renderer swaps to
@@ -179,6 +182,9 @@ export interface SceneVista {
   readonly id: string;
   readonly haze: number;
   readonly parts: readonly { readonly mesh: MeshAsset; readonly model: Mat4 }[];
+  /** The vista's heightfield and model: the AAA tier draws it as ground, not into the sky (F6c). */
+  readonly terrain?: Terrain;
+  readonly model?: Mat4;
 }
 
 export interface MeshScene {
@@ -204,6 +210,8 @@ export interface MeshScene {
   readonly navmesh?: NavMesh;
   /** Heightfield landscapes, as authored (their geometry is among the instances). Vistas aren't. */
   readonly terrains?: readonly Terrain[];
+  /** Each terrain's model (its parent's, or the identity), by id: where the AAA tier draws its heightfield (F6c). */
+  readonly terrainModels?: ReadonlyMap<string, Mat4>;
   /**
    * Distant vistas (HALO_INFINITE_STYLE_ROADMAP.md I7): far terrains, and the
    * foliage set on them, drawn once into the sky panorama when the scene loads
@@ -462,25 +470,29 @@ export function parseMeshScene(raw: string | null | undefined): MeshScene | null
   const allTerrains = readTerrains((parsed as { terrains?: unknown }).terrains);
   const terrains = allTerrains.filter((t) => !t.vista);
   const identity = composeModelMatrix([0, 0, 0], [0, 0, 0], [1, 1, 1]);
-  const vistas = new Map<string, { id: string; haze: number; parts: { mesh: MeshAsset; model: Mat4 }[] }>();
+  const vistas = new Map<string, { id: string; haze: number; parts: { mesh: MeshAsset; model: Mat4 }[]; terrain: Terrain; model: Mat4 }>();
+  const terrainModels = new Map<string, Mat4>();
   for (const t of allTerrains) {
     // Riding on a parent: the heights are in its space (a missing parent leaves it a root).
     const parent = t.parent !== undefined ? (indexOf.get(t.parent) ?? -1) : -1;
     const model = parent >= 0 ? instances[parent]!.model : identity;
+    terrainModels.set(t.id, model);
+    // The CPU meshes a coarse copy of a heightfield past 257² (F6c): the AAA tier draws the heights themselves.
+    const meshed = meshableTerrain(t);
     if (t.vista) {
       // In blocks, so each face of the bake draws only the blocks it sees.
       const parts: { mesh: MeshAsset; model: Mat4 }[] = [];
-      const cells = t.samples - 1;
+      const cells = meshed.samples - 1;
       for (let z0 = 0; z0 < cells; z0 += TERRAIN_CHUNK) {
         for (let x0 = 0; x0 < cells; x0 += TERRAIN_CHUNK) {
-          const mesh = terrainMesh(t, 1, [x0, z0, Math.min(cells, x0 + TERRAIN_CHUNK), Math.min(cells, z0 + TERRAIN_CHUNK)]);
+          const mesh = terrainMesh(meshed, 1, [x0, z0, Math.min(cells, x0 + TERRAIN_CHUNK), Math.min(cells, z0 + TERRAIN_CHUNK)]);
           if (mesh.primitives.length > 0) parts.push({ mesh, model });
         }
       }
-      vistas.set(t.id, { id: t.id, haze: t.vista.haze, parts });
+      vistas.set(t.id, { id: t.id, haze: t.vista.haze, parts, terrain: t, model });
       continue;
     }
-    for (const chunk of terrainChunks(t)) {
+    for (const chunk of terrainChunks(meshed)) {
       instances.push({
         mesh: chunk.mesh,
         ...(chunk.lods.length > 0 ? { frames: chunk.lods } : {}),
@@ -493,6 +505,7 @@ export function parseMeshScene(raw: string | null | undefined): MeshScene | null
         props: {},
         physics: null,
         terrain: true,
+        ground: t.id,
         ...(t.castShadows ? { casts: true as const } : {}),
         detail: chunk.detail,
       });
@@ -615,7 +628,7 @@ export function parseMeshScene(raw: string | null | undefined): MeshScene | null
   return {
     instances,
     bounds: sceneBounds(placed.length > 0 ? placed : instances),
-    ...(terrains.length > 0 ? { terrains, extent: sceneBounds(instances.filter((instance) => !instance.pooled)) } : {}),
+    ...(terrains.length > 0 ? { terrains, terrainModels, extent: sceneBounds(instances.filter((instance) => !instance.pooled)) } : {}),
     ...(vistas.size > 0 ? { vistas: [...vistas.values()] } : {}),
     ...(readStreaming((parsed as { streaming?: unknown }).streaming) ? { streaming: readStreaming((parsed as { streaming?: unknown }).streaming)! } : {}),
     ...(effects.length > 0 ? { effects } : {}),

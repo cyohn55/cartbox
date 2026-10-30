@@ -437,6 +437,8 @@ export { LIGHTMAP_DIRECTION_FLOOR, decodeHdrLightmap, directionalIrradiance, enc
 export {
   MAX_TERRAIN_LAYERS,
   MAX_TERRAIN_SAMPLES,
+  MAX_MESHED_TERRAIN_SAMPLES,
+  meshableTerrain,
   MIN_TERRAIN_SAMPLES,
   TERRAIN_CHUNK,
   terrainChunks,

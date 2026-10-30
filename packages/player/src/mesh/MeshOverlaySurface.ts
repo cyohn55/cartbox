@@ -129,6 +129,7 @@ import type { ScreenSun } from "../fx/PostFxSurface.js";
 import type { PostVolumeFx } from "../fx/postVolumeFx.js";
 import { SoftwareSceneRenderer, type GpuSceneDraw, type SceneRenderer, type SunShadow } from "../render/sceneRenderer.js";
 import type { ReflectionCapture } from "../render/probeCapture.js";
+import type { GpuTerrainSource } from "../render/gpuTerrain.js";
 import { isDiagnosticView, type ViewMode } from "../render/viewModes.js";
 import type { CaptureOptions, ReferenceCapture } from "../render/pathTracer.js";
 import { decodePool } from "../render/decodeWorkers.js";
@@ -424,6 +425,14 @@ export class MeshOverlaySurface implements DisplaySurface {
   /** The scene's distant vistas, textured: re-drawn into the sky whenever it is re-baked. */
   private vistas: VistaLayer[] = [];
   /**
+   * Terrains the AAA tier draws from their heightfields (F6c), vistas among
+   * them, with their layers' maps; and the meshes of the blocks (and their
+   * coarser frames) they replace, which aren't drawn or cast.
+   */
+  private ground: readonly GpuTerrainSource[] = [];
+  private groundIds: ReadonlySet<string> = new Set();
+  private readonly groundMeshes = new WeakSet<MeshAsset>();
+  /**
    * Told each frame where the sky dome's sun is on screen and how much of it is
    * unblocked, for the post-FX glare and lens flare (H8); null without a sky dome.
    */
@@ -685,6 +694,7 @@ export class MeshOverlaySurface implements DisplaySurface {
         this.lastSkin.delete(i);
         const lod = liveLod(b.lod, skinned);
         this.instances[i] = { ...textured, ...(skinned ? { mesh: skinned.mesh } : {}), ...(lod ? { lod } : {}), model: this.instances[i]!.model };
+        if (b.ground !== undefined && this.groundIds.has(b.ground)) this.groundMeshes.add(this.instances[i]!.mesh);
         moved = true;
       } else if (lodSignature(a.lod) !== lodSignature(b.lod)) {
         // Same mesh, new levels (generated or cleared in the editor).
@@ -696,7 +706,13 @@ export class MeshOverlaySurface implements DisplaySurface {
       }
     }
     const vistasChanged = vistaSignature(before.vistas) !== vistaSignature(next.vistas);
-    if (vistasChanged) this.vistas = await texturedVistas(next.vistas, (mesh) => decodeMeshTextures(mesh, this.decodeKtx2 ?? (() => Promise.resolve(null))));
+    // Terrains the AAA tier draws from their heights (F6c) follow the edit: their new heights and layers.
+    if (this.groundIds.size > 0) {
+      const ground = await groundSources(next, (mesh) => decodeMeshTextures(mesh, this.decodeKtx2 ?? (() => Promise.resolve(null)), undefined, this.compressedTextures));
+      this.ground = ground.sources;
+      this.groundIds = ground.ids;
+    }
+    if (vistasChanged) this.vistas = await texturedVistas(next.vistas?.filter((v) => !this.groundIds.has(v.id)), (mesh) => decodeMeshTextures(mesh, this.decodeKtx2 ?? (() => Promise.resolve(null))));
     if (vistasChanged || JSON.stringify(before.lighting ?? null) !== JSON.stringify(next.lighting ?? null)) {
       // The rig (or a vista) changed: re-bake the sky dome and the light the PBR shading samples.
       const lighting = next.lighting;
@@ -911,8 +927,10 @@ export class MeshOverlaySurface implements DisplaySurface {
     let skyMap: DecodedTexture | null = null;
     let clouds: BakedCloudLayer[] = [];
     let environment: EnvironmentLight | null = lighting ? sceneLightingEnvironment(lighting) : null;
+    // Terrains the AAA tier draws from their heightfields (F6c): there, a vista is ground in the frame, not the sky.
+    const ground = options.prepass === true && renderer.sunCascades === true ? await groundSources(scene, texture) : null;
     // Distant vistas (I7) are drawn into that panorama, textured as the frame would draw them.
-    const vistas = await texturedVistas(scene.vistas, texture);
+    const vistas = await texturedVistas(scene.vistas?.filter((v) => !ground?.ids.has(v.id)), texture);
     let reflections: { small: DecodedTexture; sun: string } | null = null;
     if (lighting?.sky && environment) {
       const baked = await bakeSceneSky(lighting.sky, lighting, environment, vistas, scene.bounds.center);
@@ -926,6 +944,15 @@ export class MeshOverlaySurface implements DisplaySurface {
     surface.skyReflections = reflections;
     surface.startBounce();
     surface.vistas = vistas;
+    if (ground) {
+      surface.ground = ground.sources;
+      surface.groundIds = ground.ids;
+      scene.instances.forEach((instance, i) => {
+        if (instance.ground === undefined || !ground.ids.has(instance.ground)) return;
+        surface.groundMeshes.add(instances[i]!.mesh);
+        for (const frame of frames[i] ?? []) surface.groundMeshes.add(frame.mesh);
+      });
+    }
     surface.trailed = scene.instances.flatMap((instance, i) => (instance.mesh.trails && instance.mesh.trails.length > 0 ? [i] : []));
     if (surface.trailed.length > 0) surface.trails = new TrailSystem();
     for (const [i, mesh] of live) surface.live.set(i, mesh);
@@ -1324,6 +1351,8 @@ export class MeshOverlaySurface implements DisplaySurface {
     // On the AAA tier with GPU culling (F6b) a block in reach is drawn a copy at a time, each culled (and its LOD
     // chosen, its impostor crossfaded) on the GPU; elsewhere blocks are drawn whole.
     let drawn: readonly MeshSceneInstance[] = this.foliage.size === 0 ? instances : this.gpuFoliage ? instances.flatMap((i) => this.foliageCopies(i)) : instances.filter((i) => this.foliageInReach(i));
+    // A terrain drawn from its heights (F6c) isn't drawn from its blocks too.
+    if (this.ground.length > 0) drawn = drawn.filter((i) => !this.groundMeshes.has(i.mesh));
     // Swing trails (I10): where each trailing object is now, then the ribbons it has swept.
     let frontDrawn: readonly MeshSceneInstance[] = front;
     if (this.trails) {
@@ -1566,6 +1595,7 @@ export class MeshOverlaySurface implements DisplaySurface {
       ...(lighting ? { ...lit, localShadows: job.local, shadow: job.shadow, sunShadow: job.sunShadow, localShadowCasters: job.localShadowCasters, localShadowKey: job.localShadowKey, localShadowMoved: job.localShadowMoved, fog: lighting.fog ?? null, wind: lighting.wind ?? null } : {}),
       ...(job.reflectionCapture ? { reflectionCapture: job.reflectionCapture } : {}),
       ...(job.decals ? { decals: job.decals } : {}),
+      ...(this.ground.length > 0 ? { terrains: this.ground } : {}),
       ...(atmosphere ? { atmosphere } : {}),
       ...(gi ? { dynamicGi: gi.draw } : {}),
       // The physical camera's depth of field and motion blur (F4c).
@@ -2367,7 +2397,7 @@ export class MeshOverlaySurface implements DisplaySurface {
     // Terrain frames nothing (the map is sized to the play space) and casts
     // only when its terrain says so — its cliffs shading the deck at a low sun.
     const casts = (i: number) => !this.scene.instances[i]?.terrain || this.scene.instances[i]?.casts === true;
-    return this.instances.filter((_, i) => !posed.has(i) && !this.everFront.has(i) && !this.inactive.has(i) && casts(i));
+    return this.instances.filter((instance, i) => !posed.has(i) && !this.everFront.has(i) && !this.inactive.has(i) && casts(i) && !this.groundMeshes.has(instance.mesh));
   }
 
   /**
@@ -2664,6 +2694,31 @@ export async function sceneSkyEnvironment(scene: MeshScene): Promise<Environment
   if (!lighting.sky) return environment;
   const vistas = await texturedVistas(scene.vistas, (mesh) => decodeMeshTextures(mesh, () => Promise.resolve(null)));
   return litBySky(environment, await bakeSceneSky(lighting.sky, lighting, environment, vistas, scene.bounds.center));
+}
+
+/**
+ * The terrains (vistas among them) the AAA tier draws from their heightfields
+ * (F6c): those whose model is a translation alone, which moves their origin;
+ * each layer's base colour, normal and metallic-roughness maps decoded.
+ */
+async function groundSources(scene: MeshScene, texture: (mesh: MeshAsset) => Promise<TexturedMesh>): Promise<{ sources: GpuTerrainSource[]; ids: Set<string> }> {
+  const placed = [
+    ...(scene.terrains ?? []).map((terrain) => ({ terrain, model: scene.terrainModels?.get(terrain.id) ?? null })),
+    ...(scene.vistas ?? []).flatMap((v) => (v.terrain ? [{ terrain: v.terrain, model: v.model ?? null }] : [])),
+  ];
+  const sources: GpuTerrainSource[] = [];
+  const ids = new Set<string>();
+  for (const { terrain, model } of placed) {
+    const m = model ?? [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1];
+    const translation = m[0] === 1 && m[1] === 0 && m[2] === 0 && m[4] === 0 && m[5] === 1 && m[6] === 0 && m[8] === 0 && m[9] === 0 && m[10] === 1;
+    if (!translation) continue;
+    const moved = m[12] !== 0 || m[13] !== 0 || m[14] !== 0;
+    const t = moved ? { ...terrain, origin: [terrain.origin[0] + m[12]!, terrain.origin[1] + m[13]!, terrain.origin[2] + m[14]!] as const } : terrain;
+    const maps = await texture({ name: terrain.name, primitives: terrain.layers.map((l) => ({ positions: new Float32Array(0), normals: null, uvs: null, indices: new Uint32Array(0), material: l.material })) } as unknown as MeshAsset);
+    sources.push({ terrain: t, layers: terrain.layers.map((_, k) => ({ base: maps.textures?.[k] ?? null, normal: maps.normalTextures?.[k] ?? null, mr: maps.mrTextures?.[k] ?? null })) });
+    ids.add(terrain.id);
+  }
+  return { sources, ids };
 }
 
 async function texturedVistas(vistas: readonly SceneVista[] | undefined, texture: (mesh: MeshAsset) => Promise<TexturedMesh>): Promise<VistaLayer[]> {

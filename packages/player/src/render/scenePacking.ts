@@ -133,9 +133,15 @@ import { AREA_KIND } from "./ltc.js";
  * 1120 cull0      vec4<f32>    16   x = where a GPU-culled draw's copies start in the instance buffer (F0e;
  *                                    gpuCulling.ts), added to `instance_index`; 0 otherwise;
  *                                    y = an octahedral impostor's frames a side (F6b; 0: none), z = its half-size
+ * 1136 terrain1   vec4<f32>    16   a GPU terrain's patch (F6c; gpuTerrain.ts): its size (x, z), the heights' min and
+ *                                    range (> 0: a GPU terrain; 0 otherwise)
+ * 1152 terrain2   vec4<f32>    16   cells a side, 1 with cut cells, the nearest page's side, pages following the eye
+ * 1168 terrain3   vec4<f32>    16   the terrain's origin, the leaf node's side
+ * 1184 terrain4   vec4<f32>    16   the eye in the ground plane (x, z), the split range, the morph's start
+ * 1200 pages      vec4<f32> ×4 64   each eye-following page's corner, two a vec4
  * ```
  *
- * 1136 bytes used, padded to a 1280-byte stride (a 256-byte multiple a dynamic
+ * 1264 bytes used, padded to a 1280-byte stride (a 256-byte multiple a dynamic
  * uniform offset can address), so one buffer still holds every draw in a
  * frame — uniforms are written per batch, not per copy, so the stride costs
  * little. The metallic-roughness inputs and the environment carry the Modern
@@ -150,7 +156,7 @@ export const UNIFORM_STRIDE = 1280;
  * bind group layout's `minBindingSize` must be: it makes a WGSL struct that
  * grows past what this module writes fail at pipeline creation.
  */
-export const UNIFORM_BYTES_USED = 1136;
+export const UNIFORM_BYTES_USED = 1264;
 /** The same stride counted in float32s, which is how `writeBuffer` sizes it. */
 export const UNIFORM_FLOATS = UNIFORM_STRIDE / 4;
 
@@ -328,6 +334,7 @@ const OFFSET_DT0 = 268;
 const OFFSET_CHAR0 = 272;
 const OFFSET_CHAR1 = 276;
 const OFFSET_CULL0 = 280;
+const OFFSET_TERRAIN = 284;
 
 /** The rasteriser's defaults, restated so an unlit draw shades identically. */
 export const DEFAULT_LIGHT: readonly [number, number, number] = [0.4, 0.8, 0.6];
@@ -599,6 +606,8 @@ export interface InstanceUniform {
   readonly lodLevel?: number;
   /** An octahedral impostor's frames a side and half-size (F6b; MeshMaterial.octahedral), or null/omitted. */
   readonly octahedral?: { readonly frames: number; readonly radius: number } | null;
+  /** A GPU terrain's patch (F6c; GpuTerrain.values): its 32 floats, or null/omitted. */
+  readonly terrain?: Float32Array | null;
 }
 
 /**
@@ -909,6 +918,8 @@ export function writeInstanceUniform(target: Float32Array, index: number, unifor
   target[base + OFFSET_CULL0] = uniform.instanceBase ?? 0;
   target[base + OFFSET_CULL0 + 1] = uniform.octahedral?.frames ?? 0;
   target[base + OFFSET_CULL0 + 2] = uniform.octahedral?.radius ?? 0;
+  if (uniform.terrain) target.set(uniform.terrain, base + OFFSET_TERRAIN);
+  else target.fill(0, base + OFFSET_TERRAIN, base + OFFSET_TERRAIN + 32);
 }
 
 /**
