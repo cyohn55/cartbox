@@ -12627,15 +12627,15 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
   }
   /** Compile a newly seen mesh's material-graph permutations in the background (F1e), as this frame draws them. */
   prepareGraphs(instances, draw) {
-    const prepare = this.renderer.prepareMaterials;
-    if (!prepare) return;
+    const renderer = this.renderer;
+    if (!renderer.prepareMaterials) return;
     const materials = [];
     for (const instance of instances) {
       if (this.prepared.has(instance.mesh)) continue;
       this.prepared.add(instance.mesh);
       for (const p of instance.mesh.primitives) if (p.material.graph) materials.push(p.material);
     }
-    if (materials.length > 0) void prepare(materials, { samples: draw.antialias === true ? 4 : 1, reflect: draw.reflections === true, prepass: draw.prepass === true });
+    if (materials.length > 0) void renderer.prepareMaterials(materials, { samples: draw.antialias === true ? 4 : 1, reflect: draw.reflections === true, prepass: draw.prepass === true });
   }
   /** Samples each pixel of the viewport's path-traced reference holds (F10b); 0 when it isn't shown. */
   get referenceSamples() {
@@ -21101,8 +21101,10 @@ fn fs(in: Out) {
 // src/render/gpuCulling.ts
 var SOURCE_BYTES = 32;
 var ENTRY_BYTES = 64;
+var MAX_CASTER_CASCADES = 4;
 var INDIRECT_WORDS = 5;
 var UNIFORM_BYTES = 6 * 16 + 64 + 64;
+var ROUNDS = 3;
 var UNIFORM_STRIDE2 = 256;
 var WORKGROUP = 64;
 var STORAGE = 128;
@@ -21125,7 +21127,7 @@ struct Cull {
   viewProj: mat4x4<f32>,
   size: vec4<f32>,     // x, y = the depth's size; z = the pyramid's levels; w = 1 to test against it
   counts: vec4<u32>,   // x = draws, y = copies, z = where the region starts, w = which round (0, 1)
-  more: vec4<u32>,     // x = sources, y = the region's copies (its motion records follow them)
+  more: vec4<u32>,     // x = sources, y = the region's copies (its motion records follow them), z = 1 for the two-phase cull
   eye: vec4<f32>,
 };
 @group(0) @binding(0) var<uniform> cull: Cull;
@@ -21135,6 +21137,8 @@ struct Cull {
 @group(0) @binding(4) var<storage, read_write> args: array<u32>;
 @group(0) @binding(5) var hiz: texture_2d<f32>;
 @group(0) @binding(6) var<storage, read> entries: array<Entry>;
+// Which copies the last frame's shading drew (the two-phase cull's first guess).
+@group(0) @binding(7) var<storage, read_write> last: array<u32>;
 
 const RECORD = ${INSTANCE_FLOATS}u;
 
@@ -21214,6 +21218,19 @@ fn test(@builtin(global_invocation_id) id: vec3<u32>) {
     }
     if (seen == 1u && cull.size.w > 0.5 && hidden(c, r)) { seen = 0u; }
   }
+  // The two-phase cull: the prepass first draws what the last frame showed (round 0), then what a pyramid of that
+  // can't rule out among the rest (round 1); the shading's round (2) tests the whole prepass, and is next frame's guess.
+  // A batch drawn whole is drawn by the first round alone.
+  if (cull.more.z != 0u) {
+    let round = cull.counts.w;
+    if (round == 0u) {
+      if (s.eligible != 0u && last[i] == 0u) { seen = 0u; }
+    } else if (round == 1u) {
+      if (s.eligible == 0u || last[i] != 0u) { seen = 0u; }
+    } else {
+      last[i] = seen;
+    }
+  }
   flags[i] = seen;
 }
 
@@ -21292,6 +21309,21 @@ fn first(@builtin(global_invocation_id) id: vec3<u32>) {
 }
 `
 );
+var HIZ_MAX_MS_WGSL = (
+  /* wgsl */
+  `
+@group(0) @binding(0) var depth: texture_depth_multisampled_2d;
+@group(0) @binding(1) var level0: texture_storage_2d<r32float, write>;
+@compute @workgroup_size(8, 8)
+fn first(@builtin(global_invocation_id) id: vec3<u32>) {
+  let size = textureDimensions(depth);
+  if (id.x >= size.x || id.y >= size.y) { return; }
+  var z = 0.0;
+  for (var s = 0u; s < textureNumSamples(depth); s = s + 1u) { z = max(z, textureLoad(depth, vec2<i32>(id.xy), i32(s))); }
+  textureStore(level0, vec2<i32>(id.xy), vec4<f32>(z, 0.0, 0.0, 1.0));
+}
+`
+);
 var HIZ_DOWN_WGSL = (
   /* wgsl */
   `
@@ -21358,13 +21390,16 @@ var GpuCulling = class {
     this.entryCapacity = 0;
     this.flags = null;
     this.flagCapacity = 0;
-    /** Both rounds' indirect arguments: the frustum's draws, then the occlusion's. */
+    this.last = null;
+    this.lastCapacity = 0;
+    /** Every round's indirect arguments: the frustum's draws (the prepass), the two-phase cull's second prepass, then the shading's. */
     this.args = null;
     this.argCapacity = 0;
     this.hiz = null;
     this.blank = null;
     this.frame = null;
-    this.uniforms = device.createBuffer({ size: UNIFORM_STRIDE2 * 2, usage: UNIFORM2 | COPY_DST });
+    this.msFirst = null;
+    this.uniforms = device.createBuffer({ size: UNIFORM_STRIDE2 * ROUNDS, usage: UNIFORM2 | COPY_DST });
     const storage = (binding, type) => ({ binding, visibility: COMPUTE, buffer: { type } });
     this.cullLayout = device.createBindGroupLayout({
       entries: [
@@ -21374,7 +21409,8 @@ var GpuCulling = class {
         storage(3, "storage"),
         storage(4, "storage"),
         { binding: 5, visibility: COMPUTE, texture: { sampleType: "unfilterable-float" } },
-        storage(6, "read-only-storage")
+        storage(6, "read-only-storage"),
+        storage(7, "storage")
       ]
     });
     this.firstLayout = device.createBindGroupLayout({
@@ -21404,7 +21440,7 @@ var GpuCulling = class {
    * counted together), so the instance buffer needs `region + 2 × total`.
    * The second round packs over the first's once the prepass has drawn it.
    */
-  plan(sources, batches, copies, region, total, viewProj, eye) {
+  plan(sources, batches, copies, region, total, viewProj, eye, twoPhase = false) {
     const grow = (buffer, capacity, need, bytes, usage) => {
       if (need <= capacity && buffer) return [buffer, capacity];
       buffer?.destroy();
@@ -21414,7 +21450,12 @@ var GpuCulling = class {
     [this.sources, this.sourceCapacity] = grow(this.sources, this.sourceCapacity, sources.length, SOURCE_BYTES, STORAGE | COPY_DST);
     [this.entries, this.entryCapacity] = grow(this.entries, this.entryCapacity, batches.length, ENTRY_BYTES, STORAGE | COPY_DST);
     [this.flags, this.flagCapacity] = grow(this.flags, this.flagCapacity, Math.max(copies, 64), 4, STORAGE | COPY_SRC);
-    [this.args, this.argCapacity] = grow(this.args, this.argCapacity, Math.max(batches.length * 2, 32), INDIRECT_WORDS * 4, STORAGE | INDIRECT | COPY_DST | COPY_SRC);
+    [this.args, this.argCapacity] = grow(this.args, this.argCapacity, Math.max(batches.length * ROUNDS, 32), INDIRECT_WORDS * 4, STORAGE | INDIRECT | COPY_DST | COPY_SRC);
+    if (!this.last || copies > this.lastCapacity) {
+      this.last?.destroy();
+      this.lastCapacity = Math.max(copies, this.lastCapacity * 2, 64);
+      this.last = this.device.createBuffer({ size: this.lastCapacity * 4, usage: STORAGE });
+    }
     const s = new ArrayBuffer(Math.max(1, sources.length) * SOURCE_BYTES);
     const su = new Uint32Array(s);
     const sf = new Float32Array(s);
@@ -21436,9 +21477,9 @@ var GpuCulling = class {
       if (b.lod) ef.set(b.lod.distances.slice(0, switches), o + 8);
     });
     this.device.queue.writeBuffer(this.entries, 0, e);
-    this.frame = { batches: batches.length, sources: sources.length, copies, region, total, planes: frustumPlanesOf(viewProj), viewProj, eye };
+    this.frame = { batches: batches.length, sources: sources.length, copies, region, total, planes: frustumPlanesOf(viewProj), viewProj, eye, twoPhase };
   }
-  /** Where a draw's arguments sit for a round (0: the frustum's, 1: the occlusion's), in bytes. */
+  /** Where a draw's arguments sit for a round (0: the prepass's, 1: the two-phase cull's second prepass, 2: the shading's), in bytes. */
   argsOffset(round2, batch) {
     return (round2 * (this.frame?.batches ?? 0) + batch) * INDIRECT_WORDS * 4;
   }
@@ -21451,7 +21492,7 @@ var GpuCulling = class {
     floats.set(Array.from({ length: 16 }, (_, i) => f3.viewProj[i]), 24);
     floats.set([size[0], size[1], levels, occlusion ? 1 : 0], 40);
     words.set([f3.batches, f3.copies, f3.region, round2], 44);
-    words.set([f3.sources, f3.total, 0, 0], 48);
+    words.set([f3.sources, f3.total, f3.twoPhase ? 1 : 0, 0], 48);
     floats.set([f3.eye[0], f3.eye[1], f3.eye[2], 0], 52);
     this.device.queue.writeBuffer(this.uniforms, round2 * UNIFORM_STRIDE2, data);
   }
@@ -21487,7 +21528,8 @@ var GpuCulling = class {
         { binding: 3, resource: { buffer: this.flags } },
         { binding: 4, resource: { buffer: this.args } },
         { binding: 5, resource: hiz },
-        { binding: 6, resource: { buffer: this.entries } }
+        { binding: 6, resource: { buffer: this.entries } },
+        { binding: 7, resource: { buffer: this.last } }
       ]
     });
     const pass = encoder.beginComputePass(timing);
@@ -21505,38 +21547,212 @@ var GpuCulling = class {
     this.writeUniforms(0, [1, 1], 1, false);
     this.round(encoder, 0, instances, this.blankHiz().createView(), timing);
   }
-  /**
-   * The second round: the pyramid of `depth` (single-sampled; null tests the
-   * frustum alone), then the frustum's survivors against it, into the region
-   * (over the first round's) and the second arguments.
-   */
-  encodeOcclusion(encoder, instances, depth, size, timing) {
-    let view = this.blankHiz().createView();
-    let levels = 1;
-    if (depth) {
-      const hiz = this.ensureHiz(size[0], size[1]);
-      const pass = encoder.beginComputePass();
-      pass.setPipeline(this.firstPipeline);
-      pass.setBindGroup(0, this.device.createBindGroup({ layout: this.firstLayout, entries: [{ binding: 0, resource: depth.createView() }, { binding: 1, resource: hiz.views[0] }] }));
-      pass.dispatchWorkgroups(Math.ceil(size[0] / 8), Math.ceil(size[1] / 8));
-      pass.setPipeline(this.downPipeline);
-      for (let level = 1; level < hiz.levels; level += 1) {
-        const w = Math.max(1, size[0] >> level);
-        const h = Math.max(1, size[1] >> level);
-        pass.setBindGroup(0, this.device.createBindGroup({ layout: this.downLayout, entries: [{ binding: 0, resource: hiz.views[level - 1] }, { binding: 1, resource: hiz.views[level] }] }));
-        pass.dispatchWorkgroups(Math.ceil(w / 8), Math.ceil(h / 8));
-      }
-      pass.end();
-      view = hiz.texture.createView();
-      levels = hiz.levels;
+  /** The first level's pipeline (and its layout) for multisampled depths, made on first use. */
+  multisampledFirst() {
+    if (!this.msFirst) {
+      const layout = this.device.createBindGroupLayout({
+        entries: [
+          { binding: 0, visibility: COMPUTE, texture: { sampleType: "depth", multisampled: true } },
+          { binding: 1, visibility: COMPUTE, storageTexture: { access: "write-only", format: "r32float" } }
+        ]
+      });
+      const pipeline = this.device.createComputePipeline({
+        layout: this.device.createPipelineLayout({ bindGroupLayouts: [layout] }),
+        compute: { module: this.device.createShaderModule({ code: HIZ_MAX_MS_WGSL }), entryPoint: "first" }
+      });
+      this.msFirst = [pipeline, layout];
     }
-    this.writeUniforms(1, size, levels, depth !== null);
-    this.round(encoder, 1, instances, view, timing);
+    return this.msFirst;
+  }
+  /** Whether this frame culls in two phases (see {@link plan}). */
+  get twoPhase() {
+    return this.frame?.twoPhase ?? false;
+  }
+  /** The two-phase cull's second round: a pyramid of the first prepass's `depth`, and the copies last frame didn't show tested against it. */
+  encodeSecond(encoder, instances, depth, size, timing) {
+    const levels = this.encodePyramid(encoder, depth, size);
+    this.writeUniforms(1, size, levels, true);
+    this.round(encoder, 1, instances, this.hiz.texture.createView(), timing);
+  }
+  /**
+   * The shading's round: the pyramid of `depth` (single-sampled; null tests
+   * the frustum alone), then the frustum's survivors against it, into the
+   * region (over the prepass's) and the shading's arguments.
+   */
+  encodeOcclusion(encoder, instances, depth, size, timing, multisampled = false) {
+    const levels = depth ? this.encodePyramid(encoder, depth, size, multisampled) : 1;
+    this.writeUniforms(2, size, levels, depth !== null);
+    this.round(encoder, 2, instances, depth ? this.hiz.texture.createView() : this.blankHiz().createView(), timing);
+  }
+  /** Build the pyramid of `depth` (an anti-aliased frame's: the farthest of each pixel's samples); its levels. */
+  encodePyramid(encoder, depth, size, multisampled = false) {
+    const hiz = this.ensureHiz(size[0], size[1]);
+    const pass = encoder.beginComputePass();
+    const [first, layout] = multisampled ? this.multisampledFirst() : [this.firstPipeline, this.firstLayout];
+    pass.setPipeline(first);
+    pass.setBindGroup(0, this.device.createBindGroup({ layout, entries: [{ binding: 0, resource: depth.createView() }, { binding: 1, resource: hiz.views[0] }] }));
+    pass.dispatchWorkgroups(Math.ceil(size[0] / 8), Math.ceil(size[1] / 8));
+    pass.setPipeline(this.downPipeline);
+    for (let level = 1; level < hiz.levels; level += 1) {
+      const w = Math.max(1, size[0] >> level);
+      const h = Math.max(1, size[1] >> level);
+      pass.setBindGroup(0, this.device.createBindGroup({ layout: this.downLayout, entries: [{ binding: 0, resource: hiz.views[level - 1] }, { binding: 1, resource: hiz.views[level] }] }));
+      pass.dispatchWorkgroups(Math.ceil(w / 8), Math.ceil(h / 8));
+    }
+    pass.end();
+    return hiz.levels;
   }
   destroy() {
-    for (const b of [this.uniforms, this.entries, this.flags, this.args]) b?.destroy();
+    for (const b of [this.uniforms, this.entries, this.flags, this.args, this.last, this.sources]) b?.destroy();
     this.hiz?.texture.destroy();
     this.blank?.destroy();
+  }
+};
+var CASTER_CULL_WGSL = (
+  /* wgsl */
+  `
+struct Entry { first: u32, count: u32, dst: u32, indexCount: u32, sphere: vec4<f32>, eligible: vec4<u32> };
+struct Cull {
+  planes: array<vec4<f32>, ${MAX_CASTER_CASCADES * 6}>,
+  counts: vec4<u32>,   // x = batches, y = cascades, z = where the regions start, w = each region's copies
+};
+@group(0) @binding(0) var<uniform> cull: Cull;
+@group(0) @binding(1) var<storage, read> entries: array<Entry>;
+@group(0) @binding(2) var<storage, read_write> xf: array<f32>;
+@group(0) @binding(3) var<storage, read_write> args: array<u32>;
+
+const RECORD = ${INSTANCE_FLOATS}u;
+
+fn seen(e: Entry, cascade: u32, i: u32) -> bool {
+  if (e.eligible.x == 0u) { return true; }
+  let b = i * RECORD + 32u;
+  let model = mat4x4<f32>(
+    vec4<f32>(xf[b], xf[b + 1u], xf[b + 2u], xf[b + 3u]),
+    vec4<f32>(xf[b + 4u], xf[b + 5u], xf[b + 6u], xf[b + 7u]),
+    vec4<f32>(xf[b + 8u], xf[b + 9u], xf[b + 10u], xf[b + 11u]),
+    vec4<f32>(xf[b + 12u], xf[b + 13u], xf[b + 14u], xf[b + 15u]),
+  );
+  let c = (model * vec4<f32>(e.sphere.xyz, 1.0)).xyz;
+  let r = e.sphere.w * max(length(model[0].xyz), max(length(model[1].xyz), length(model[2].xyz)));
+  for (var p = 0u; p < 6u; p = p + 1u) {
+    if (p == 4u) { continue; } // the near plane, toward the sun
+    let plane = cull.planes[cascade * 6u + p];
+    if (dot(plane.xyz, c) + plane.w < -r) { return false; }
+  }
+  return true;
+}
+
+var<workgroup> scan: array<u32, ${WORKGROUP}>;
+
+@compute @workgroup_size(${WORKGROUP})
+fn main(@builtin(workgroup_id) group: vec3<u32>, @builtin(local_invocation_id) local: vec3<u32>) {
+  let index = group.x;
+  let cascade = group.y;
+  if (index >= cull.counts.x || cascade >= cull.counts.y) { return; }
+  let e = entries[index];
+  let region = cull.counts.z + cascade * cull.counts.w + e.dst;
+  var kept = 0u;
+  for (var start = 0u; start < e.count; start = start + ${WORKGROUP}u) {
+    let j = start + local.x;
+    var keep = 0u;
+    if (j < e.count && seen(e, cascade, e.first + j)) { keep = 1u; }
+    scan[local.x] = keep;
+    workgroupBarrier();
+    for (var step = 1u; step < ${WORKGROUP}u; step = step * 2u) {
+      var add = 0u;
+      if (local.x >= step) { add = scan[local.x - step]; }
+      workgroupBarrier();
+      scan[local.x] = scan[local.x] + add;
+      workgroupBarrier();
+    }
+    if (keep == 1u) {
+      // A caster reads only its model.
+      let to = (region + kept + scan[local.x] - 1u) * RECORD + 32u;
+      let src = (e.first + j) * RECORD + 32u;
+      for (var f = 0u; f < 16u; f = f + 1u) { xf[to + f] = xf[src + f]; }
+    }
+    kept = kept + workgroupUniformLoad(&scan[${WORKGROUP - 1}u]);
+  }
+  if (local.x == 0u) {
+    let a = (cascade * cull.counts.x + index) * ${INDIRECT_WORDS}u;
+    args[a] = e.indexCount;
+    args[a + 1u] = kept;
+    args[a + 2u] = 0u;
+    args[a + 3u] = 0u;
+    args[a + 4u] = 0u;
+  }
+}
+`
+);
+var CasterCulling = class {
+  constructor(device) {
+    this.device = device;
+    this.entries = null;
+    this.entryCapacity = 0;
+    /** Every cascade's arguments, cascade by cascade, a caster batch each. */
+    this.args = null;
+    this.argCapacity = 0;
+    this.frame = null;
+    this.uniforms = device.createBuffer({ size: MAX_CASTER_CASCADES * 6 * 16 + 16, usage: UNIFORM2 | COPY_DST });
+    const storage = (binding, type) => ({ binding, visibility: COMPUTE, buffer: { type } });
+    this.layout = device.createBindGroupLayout({ entries: [{ binding: 0, visibility: COMPUTE, buffer: { type: "uniform" } }, storage(1, "read-only-storage"), storage(2, "storage"), storage(3, "storage")] });
+    this.pipeline = device.createComputePipeline({
+      layout: device.createPipelineLayout({ bindGroupLayouts: [this.layout] }),
+      compute: { module: device.createShaderModule({ code: CASTER_CULL_WGSL }), entryPoint: "main" }
+    });
+  }
+  /** The frame's caster batches and the cascades' view-projections; each cascade's region holds `regionCopies` from `region` on. */
+  plan(batches, cascades, region, regionCopies) {
+    const count = Math.min(cascades.length, MAX_CASTER_CASCADES);
+    if (batches.length > this.entryCapacity) {
+      this.entries?.destroy();
+      this.entryCapacity = Math.max(batches.length, this.entryCapacity * 2, 16);
+      this.entries = this.device.createBuffer({ size: this.entryCapacity * 48, usage: STORAGE | COPY_DST });
+    }
+    if (batches.length * count > this.argCapacity || !this.args) {
+      this.args?.destroy();
+      this.argCapacity = Math.max(batches.length * count, this.argCapacity * 2, 16);
+      this.args = this.device.createBuffer({ size: this.argCapacity * INDIRECT_WORDS * 4, usage: STORAGE | INDIRECT | COPY_SRC });
+    }
+    const e = new ArrayBuffer(Math.max(1, batches.length) * 48);
+    const eu = new Uint32Array(e);
+    const ef = new Float32Array(e);
+    batches.forEach((b, k) => {
+      eu.set([b.first, b.count, b.dst, b.indexCount], k * 12);
+      if (b.sphere) ef.set(b.sphere, k * 12 + 4);
+      eu[k * 12 + 8] = b.sphere ? 1 : 0;
+    });
+    this.device.queue.writeBuffer(this.entries, 0, e);
+    const u = new ArrayBuffer(MAX_CASTER_CASCADES * 6 * 16 + 16);
+    const uf = new Float32Array(u);
+    for (let c = 0; c < count; c += 1) uf.set(frustumPlanesOf(cascades[c]), c * 24);
+    new Uint32Array(u).set([batches.length, count, region, regionCopies], MAX_CASTER_CASCADES * 24);
+    this.device.queue.writeBuffer(this.uniforms, 0, u);
+    this.frame = { batches: batches.length, cascades: count };
+  }
+  /** Where a caster batch's arguments sit for a cascade, in bytes. */
+  argsOffset(cascade, batch) {
+    return (cascade * (this.frame?.batches ?? 0) + batch) * INDIRECT_WORDS * 4;
+  }
+  encode(encoder, instances, timing = {}) {
+    const f3 = this.frame;
+    if (!f3 || f3.batches === 0 || f3.cascades === 0) return;
+    const pass = encoder.beginComputePass(timing);
+    pass.setPipeline(this.pipeline);
+    pass.setBindGroup(0, this.device.createBindGroup({
+      layout: this.layout,
+      entries: [
+        { binding: 0, resource: { buffer: this.uniforms } },
+        { binding: 1, resource: { buffer: this.entries } },
+        { binding: 2, resource: { buffer: instances } },
+        { binding: 3, resource: { buffer: this.args } }
+      ]
+    }));
+    pass.dispatchWorkgroups(f3.batches, f3.cascades);
+    pass.end();
+  }
+  destroy() {
+    for (const b of [this.uniforms, this.entries, this.args]) b?.destroy();
   }
 };
 
@@ -29516,10 +29732,15 @@ ${hdr ? `    // Linear light (F0b): what the reflection adds, and what it sees, 
 ${hdr ? `// --- The sun's cascades (AAA_FIDELITY_ROADMAP.md F2a) ---
 // A caster's depth as the sun sees it, through the cascade being drawn: the scene's
 // own vertex (its copy's transform, bent by the wind) and nothing else.
-@group(1) @binding(12) var<uniform> cascadeView: mat4x4<f32>;
+// The view a caster is drawn through (a cascade, a spot/point tile or a virtual page). A cascade whose casters
+// the GPU culled (F0e) draws each batch's survivors from its region: base.x is where the region starts, the
+// caster's cull0.x where its batch's copies sit in it, and base.y is 1.
+struct CasterView { viewProj: mat4x4<f32>, base: vec4<u32> };
+@group(1) @binding(12) var<uniform> cascadeView: CasterView;
 fn casterClip(position: vec3<f32>, sway: f32, instance: u32) -> vec4<f32> {
   let bend = windOffset(position.xz, sway);
-  return cascadeView * xf[instance].model * vec4<f32>(position.x + bend.x, position.y, position.z + bend.y, 1.0);
+  let at = select(instance, cascadeView.base.x + u32(u.cull0.x) + instance, cascadeView.base.y != 0u);
+  return cascadeView.viewProj * xf[at].model * vec4<f32>(position.x + bend.x, position.y, position.z + bend.y, 1.0);
 }
 @vertex
 fn vs_shadow(@location(0) position: vec3<f32>, @location(5) sway: f32, @builtin(instance_index) instance: u32) -> @builtin(position) vec4<f32> {
@@ -29737,6 +29958,8 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     this.lightClusterer = null;
     /** The scene passes' recorded draws (F0e), on the GPU-culled path. */
     this.bundles = null;
+    /** The sun's casters culled per cascade on the GPU (F0e). */
+    this.casterCulling = null;
     /** Each copy's transforms made on the GPU (F0e), on the AAA tier. */
     this.transforms = null;
     /** The LOD chains whose levels the GPU picks this frame (F0e). */
@@ -30130,7 +30353,7 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
         marking: null
       };
       for (let i = 0; i < 48; i += 1) {
-        const buffer = device.createBuffer({ size: 64, usage: 64 | 8 });
+        const buffer = device.createBuffer({ size: 80, usage: 64 | 8 });
         this.vsm.views.push({ buffer, group: device.createBindGroup({ layout, entries: [{ binding: 12, resource: { buffer } }] }) });
       }
     }
@@ -30598,7 +30821,7 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
       const sized = { depth: depthTexture, behind };
       const cascadeLayout = device.createBindGroupLayout({ entries: [{ binding: 12, visibility: SHADER_STAGE_VERTEX, buffer: { type: "uniform" } }] });
       const cascadeViews = Array.from({ length: CASCADE_COUNT }, () => {
-        const buffer = device.createBuffer({ size: 64, usage: 64 | 8 });
+        const buffer = device.createBuffer({ size: 80, usage: 64 | 8 });
         return { buffer, group: device.createBindGroup({ layout: cascadeLayout, entries: [{ binding: 12, resource: { buffer } }] }) };
       });
       const casterLayout = device.createBindGroupLayout({
@@ -30633,7 +30856,7 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
         ]
       });
       const localViews = hdr ? Array.from({ length: MAX_GPU_LOCAL_TILES }, () => {
-        const buffer = device.createBuffer({ size: 64, usage: 64 | 8 });
+        const buffer = device.createBuffer({ size: 80, usage: 64 | 8 });
         return { buffer, group: device.createBindGroup({ layout: cascadeLayout, entries: [{ binding: 12, resource: { buffer } }] }) };
       }) : [];
       const cascades = {
@@ -31073,7 +31296,10 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     const cullRegion = casterBase + (casting?.instanceCount ?? 0);
     let cullTotal = 0;
     const cullDst = gpuCull ? draws.map((entry) => (cullTotal += entry.models.length, cullTotal - entry.models.length)) : [];
-    this.ensureInstanceCapacity(cullRegion + (gpuCull ? cullTotal * 2 : 0));
+    const casterCull = gpuCull && cascadeFit !== null && casters.length > 0;
+    const casterRegion = cullRegion + (gpuCull ? cullTotal * 2 : 0);
+    const casterCopies = casting?.instanceCount ?? 0;
+    this.ensureInstanceCapacity(casterRegion + (casterCull ? cascadeFit.length * casterCopies : 0));
     const light = resolveLight(draw.lightDirection, draw.ambient);
     const viewDir = viewDirection(draw.view);
     const eye = cameraPositionFromView4(draw.view);
@@ -31287,7 +31513,7 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
         writeInstanceTransform(this.instanceData, nextCaster, { mvp: model, lightMvp: null, model, normalBasis: IDENTITY_BASIS });
         nextCaster += 1;
       }
-      writeInstanceUniform(this.uniformData, draws.length + k, uniformOf(entry));
+      writeInstanceUniform(this.uniformData, draws.length + k, casterCull ? { ...uniformOf(entry), instanceBase: entry.first - casterBase } : uniformOf(entry));
       this.uniformKeys[draws.length + k] = void 0;
     });
     this.device.queue.writeBuffer(this.uniformBuffer, 0, this.uniformData, 0, (draws.length + casters.length) * UNIFORM_FLOATS);
@@ -31319,7 +31545,17 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
         dst: cullDst[index],
         lod: entry.lodChain ? { level: entry.lod ?? 0, levels: entry.lodChain.meshes.length, distances: entry.lodChain.distances } : null
       }));
-      this.culling.plan(sources, batches, instanceCount, cullRegion, cullTotal, viewProj, eye);
+      this.culling.plan(sources, batches, instanceCount, cullRegion, cullTotal, viewProj, eye, draw.antialias !== true);
+      if (casterCull) {
+        this.casterCulling ?? (this.casterCulling = new CasterCulling(this.device));
+        const casterBatches = casters.map((entry) => {
+          const p = entry.primitive;
+          const moves = p.dynamic !== void 0 || compiledGraphOf2(p.material)?.outputs.worldPositionOffset !== void 0;
+          const sphere = moves ? null : primitiveSphere(p);
+          return { first: entry.first, count: entry.models.length, dst: entry.first - casterBase, indexCount: entry.geometry.indexCount, sphere: sphere ? [sphere[0], sphere[1], sphere[2], sphere[3] + sphere[4] * gust] : null };
+        });
+        this.casterCulling.plan(casterBatches, cascadeFit.map((c) => c.viewProj), casterRegion, casterCopies);
+      }
     }
     this.frameCull = gpuCull ? this.culling : null;
     this.lastViewProj = viewProjNow;
@@ -31375,24 +31611,24 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
         pass.setBindGroup(0, this.bindGroupFor(entry.primitive, entry.textures), [index * UNIFORM_STRIDE]);
         pass.setVertexBuffer(0, entry.geometry.vertexBuffer);
         pass.setIndexBuffer(entry.geometry.indexBuffer, "uint32");
-        if (cull) pass.drawIndexedIndirect(cull.args, cull.argsOffset(1, index));
+        if (cull) pass.drawIndexedIndirect(cull.args, cull.argsOffset(2, index));
         else pass.drawIndexed(entry.geometry.indexCount, entry.models.length, 0, 0, entry.first);
       }
     };
-    const prepassRange = (pass, target2 = null) => {
+    const prepassRange = (pass, target2 = null, round2 = 0) => {
       if (bundles && target2) {
-        const key = [(msaa ? msaa.groups : this.depthGroups).blank, cull.args, draws.length, this.uniformBuffer, this.instanceBuffer];
+        const key = [(msaa ? msaa.groups : this.depthGroups).blank, cull.args, draws.length, this.uniformBuffer, this.instanceBuffer, round2];
         for (const entry of draws) {
           if (entry.refract || entry.alpha >= 2) continue;
           const moved = entry.geometry.previousBuffer && entry.geometry.movedFrame === this.frameIndex;
           key.push(this.pipelinesOf(entry.primitive.material, msaa ? MSAA_SAMPLES : 1, reflections !== null, true).prepass, this.bindGroupFor(entry.primitive, entry.textures), entry.geometry.vertexBuffer, moved ? entry.geometry.previousBuffer : entry.geometry.vertexBuffer, entry.geometry.indexBuffer);
         }
-        replay(pass, "prepass", target2, key, (encoder2) => prepassDirect(encoder2));
+        replay(pass, `prepass${round2}`, target2, key, (encoder2) => prepassDirect(encoder2, round2));
         return;
       }
-      prepassDirect(pass);
+      prepassDirect(pass, round2);
     };
-    const prepassDirect = (pass) => {
+    const prepassDirect = (pass, round2 = 0) => {
       pass.setBindGroup(1, (msaa ? msaa.groups : this.depthGroups).blank);
       let bound = null;
       for (let index = 0; index < draws.length; index += 1) {
@@ -31408,7 +31644,7 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
         const moved = entry.geometry.previousBuffer && entry.geometry.movedFrame === this.frameIndex;
         pass.setVertexBuffer(1, moved ? entry.geometry.previousBuffer : entry.geometry.vertexBuffer);
         pass.setIndexBuffer(entry.geometry.indexBuffer, "uint32");
-        if (cull) pass.drawIndexedIndirect(cull.args, cull.argsOffset(0, index));
+        if (cull) pass.drawIndexedIndirect(cull.args, cull.argsOffset(round2, index));
         else pass.drawIndexed(entry.geometry.indexCount, entry.models.length, 0, 0, entry.first);
       }
     };
@@ -31434,7 +31670,19 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     const opaqueEnd = seeThrough ? firstSeeThrough : draws.length;
     if (cascadeFit) {
       const res = this.depthGroups.cascades;
-      cascadeFit.forEach((c, i) => this.device.queue.writeBuffer(res.views[i].buffer, 0, new Float32Array(c.viewProj)));
+      const casterCuller = casterCull ? this.casterCulling : null;
+      cascadeFit.forEach((c, i) => {
+        const view = new ArrayBuffer(80);
+        new Float32Array(view).set(c.viewProj);
+        new Uint32Array(view).set(casterCuller ? [casterRegion + i * casterCopies, 1, 0, 0] : [0, 0, 0, 0], 16);
+        this.device.queue.writeBuffer(res.views[i].buffer, 0, view);
+      });
+      if (casterCuller) {
+        graph.addPass("cull.casters", "compute", (pass) => {
+          pass.keep();
+          return (ctx) => casterCuller.encode(ctx.encoder, this.instanceBuffer, ctx.timing);
+        });
+      }
       const map = graph.importTexture("cascades", res.texture);
       graph.addPass("shadow cascades", "render", (pass) => {
         pass.write(map);
@@ -31466,7 +31714,8 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
                 encoded.setBindGroup(0, cut ? this.cutGroupFor(entry.primitive, entry.textures) : group, [(draws.length + k) * UNIFORM_STRIDE]);
                 encoded.setVertexBuffer(0, entry.geometry.vertexBuffer);
                 encoded.setIndexBuffer(entry.geometry.indexBuffer, "uint32");
-                encoded.drawIndexed(entry.geometry.indexCount, entry.models.length, 0, 0, entry.first);
+                if (casterCuller) encoded.drawIndexedIndirect(casterCuller.args, casterCuller.argsOffset(i, k));
+                else encoded.drawIndexed(entry.geometry.indexCount, entry.models.length, 0, 0, entry.first);
               });
             }
             encoded.end();
@@ -31591,11 +31840,34 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
         };
       });
     }
+    if (cull && gbuffer && velocity && cull.twoPhase) {
+      graph.addPass("cull.second", "compute", (pass) => {
+        pass.read(depth);
+        pass.keep();
+        return (ctx) => cull.encodeSecond(ctx.encoder, this.instanceBuffer, ctx.texture(depth), [this.width, this.height], ctx.timing);
+      });
+      graph.addPass("prepass.second", "render", (pass) => {
+        for (const t of [depth, gbuffer, velocity]) {
+          pass.read(t, "attachment");
+          pass.write(t);
+        }
+        return (ctx) => {
+          const kept = (t) => ({ view: ctx.texture(t).createView(), loadOp: "load", storeOp: "store" });
+          const encoded = ctx.encoder.beginRenderPass({
+            colorAttachments: [kept(gbuffer), kept(velocity)],
+            depthStencilAttachment: { view: ctx.texture(depth).createView(), depthLoadOp: "load", depthStoreOp: "store" },
+            ...ctx.timing
+          });
+          prepassRange(encoded, { colorFormats: [ctx.texture(gbuffer).format, ctx.texture(velocity).format], depthStencilFormat: ctx.texture(depth).format, sampleCount: 1, depthReadOnly: false }, 1);
+          encoded.end();
+        };
+      });
+    }
     if (cull && gbuffer) {
       graph.addPass("cull.occlusion", "compute", (pass) => {
         pass.read(depth);
         pass.keep();
-        return (ctx) => cull.encodeOcclusion(ctx.encoder, this.instanceBuffer, msaa ? null : ctx.texture(depth), [this.width, this.height], ctx.timing);
+        return (ctx) => cull.encodeOcclusion(ctx.encoder, this.instanceBuffer, ctx.texture(depth), [this.width, this.height], ctx.timing, msaa !== null);
       });
     }
     this.prepassed = prepass ? { depth: msaa ? msaa.depth : this.depthTexture, gbuffer: this.gbuffer, velocity: this.velocity, multisampled: msaa !== null } : null;
@@ -33283,6 +33555,7 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     this.culling?.destroy();
     this.lightClusterer?.destroy();
     this.transforms?.destroy();
+    this.casterCulling?.destroy();
     this.pathTracer = null;
     destroySafely(this.sssProfiles);
     if (this.feedback) for (const b of [this.feedback.draws, this.feedback.wanted, this.feedback.readback, this.feedback.depth]) destroySafely(b);

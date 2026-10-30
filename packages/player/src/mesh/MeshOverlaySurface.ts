@@ -799,15 +799,16 @@ export class MeshOverlaySurface implements DisplaySurface {
 
   /** Compile a newly seen mesh's material-graph permutations in the background (F1e), as this frame draws them. */
   private prepareGraphs(instances: readonly MeshSceneInstance[], draw: GpuSceneDraw): void {
-    const prepare = this.renderer.prepareMaterials;
-    if (!prepare) return;
+    // Called on the renderer, not taken off it: a class's method loses its `this` when called bare.
+    const renderer = this.renderer;
+    if (!renderer.prepareMaterials) return;
     const materials: MeshMaterial[] = [];
     for (const instance of instances) {
       if (this.prepared.has(instance.mesh)) continue;
       this.prepared.add(instance.mesh);
       for (const p of instance.mesh.primitives) if (p.material.graph) materials.push(p.material);
     }
-    if (materials.length > 0) void prepare(materials, { samples: draw.antialias === true ? 4 /* MSAA_SAMPLES */ : 1, reflect: draw.reflections === true, prepass: draw.prepass === true });
+    if (materials.length > 0) void renderer.prepareMaterials(materials, { samples: draw.antialias === true ? 4 /* MSAA_SAMPLES */ : 1, reflect: draw.reflections === true, prepass: draw.prepass === true });
   }
 
   /** Samples each pixel of the viewport's path-traced reference holds (F10b); 0 when it isn't shown. */

@@ -148,31 +148,77 @@ describe.skipIf(!device)("GPU culling on a real device", { timeout: 300_000 }, (
 
     const plainRenderer = (await WebgpuSceneRenderer.create(device, W, H, rasterStyleFor(MODELS.aaa.renderCaps), { hdr: true, mips: true }))!;
     const plain = (await readLinearTexture(device, plainRenderer.renderToTexture(instances, draw), W, H, settled)).data;
+    // A renderer's second frame differs a little from its first (what it carries between frames), so each frame is
+    // held to the unculled renderer's frame of the same number.
+    const plainSecond = (await readLinearTexture(device, plainRenderer.renderToTexture(instances, draw), W, H, settled)).data;
 
+    const renderer = (await WebgpuSceneRenderer.create(device, W, H, rasterStyleFor(MODELS.aaa.renderCaps), { hdr: true, mips: true }))!;
+    const culling = () => (renderer as any).culling;
+    // Every round's arguments (the prepass's two, then the shading's): the wall's batch and the cubes'.
+    const rounds = async () => {
+      const args = new Uint32Array(await readBuffer(culling().args, 3 * 2 * INDIRECT_WORDS * 4));
+      return [0, 1, 2].map((round) =>
+        [0, 1].map((batch) => {
+          const a = (round * 2 + batch) * INDIRECT_WORDS;
+          return { indexCount: args[a]!, count: args[a + 1]! };
+        }),
+      );
+    };
+    const counts = (r: { indexCount: number; count: number }[][], round: number) => ({ cubes: r[round]!.find((b) => b.indexCount === 36)!.count, walls: r[round]!.find((b) => b.indexCount === 6)!.count });
+    // Two frames: the first with no guess from a last one, the second guessing from the first.
+    for (const frame of [1, 2]) {
+      device.pushErrorScope("validation");
+      const culled = (await readLinearTexture(device, renderer.renderToTexture(instances, { ...draw, gpuCull: true }), W, H, settled)).data;
+      const error = await settled(device.popErrorScope());
+      expect(error).toBeNull();
+      expect(culling().twoPhase).toBe(true);
+      const r = await rounds();
+      if (frame === 1) {
+        // No guess: the prepass's first round draws nothing, its second all the frustum keeps (9 cubes and the wall).
+        expect(counts(r, 0)).toEqual({ cubes: 0, walls: 0 });
+        expect(counts(r, 1)).toEqual({ cubes: 9, walls: 1 });
+      } else {
+        // Last frame's shading as the guess: the wall and the 4 cubes seen; nothing else gets past their depths.
+        expect(counts(r, 0)).toEqual({ cubes: 4, walls: 1 });
+        expect(counts(r, 1)).toEqual({ cubes: 0, walls: 0 });
+      }
+      // The shading: the pyramid of the whole prepass drops the 5 behind the wall.
+      expect(counts(r, 2)).toEqual({ cubes: 4, walls: 1 });
+
+      // The frame is the same, less nothing anyone could see.
+      const reference = frame === 1 ? plain : plainSecond;
+      let worst = 0;
+      for (let i = 0; i < reference.length; i += 1) worst = Math.max(worst, Math.abs(reference[i]! - culled[i]!));
+      expect(worst).toBeLessThan(1e-5);
+    }
+    plainRenderer.dispose();
+    renderer.dispose();
+  });
+
+  it("tests an anti-aliased frame against the farthest of each pixel's samples", async () => {
+    const cube = box("cube");
+    const at = (x: number, y: number, z: number) => composeModelMatrix([x, y, z], [20, 30, 0], [0.5, 0.5, 0.5]);
+    const instances = [
+      { mesh: wall(), model: composeModelMatrix([0, 0, 0], [0, 0, 0], [1, 1, 1]) },
+      ...[-2, 0, 2].map((x) => ({ mesh: cube, model: at(x, 0, 2) })),
+      ...[-2, -1, 0, 1, 2].map((x) => ({ mesh: cube, model: at(x, 0.5, -3) })),
+    ] as unknown as MeshSceneInstance[];
+    const draw = { width: W, height: H, view: viewMatrix([0, 0, 10], [0, 0, 0]), projection: projectionMatrix(Math.PI / 3, 1, 0.1, 50), environment: null, lights: [], ambient: 0.3, lightDirection: [0.3, 1, 0.6], prepass: true, antialias: true } as any;
+    const plainRenderer = (await WebgpuSceneRenderer.create(device, W, H, rasterStyleFor(MODELS.aaa.renderCaps), { hdr: true, mips: true }))!;
+    const plain = (await readLinearTexture(device, plainRenderer.renderToTexture(instances, draw), W, H, settled)).data;
     const renderer = (await WebgpuSceneRenderer.create(device, W, H, rasterStyleFor(MODELS.aaa.renderCaps), { hdr: true, mips: true }))!;
     device.pushErrorScope("validation");
     const culled = (await readLinearTexture(device, renderer.renderToTexture(instances, { ...draw, gpuCull: true }), W, H, settled)).data;
-    const error = await settled(device.popErrorScope());
-    expect(error).toBeNull();
-
-    // Both rounds' arguments: the wall's batch and the cubes'.
+    const failure = await settled(device.popErrorScope());
+    expect(failure ? String((failure as any).message) : null).toBeNull();
     const culling = (renderer as any).culling;
-    const args = new Uint32Array(await readBuffer(culling.args, 2 * 2 * INDIRECT_WORDS * 4));
-    const rounds = [0, 1].map((round) =>
-      [0, 1].map((batch) => {
-        const a = (round * 2 + batch) * INDIRECT_WORDS;
-        return { indexCount: args[a]!, count: args[a + 1]! };
-      }),
-    );
-    const cubes = (round: number) => rounds[round]!.find((b) => b.indexCount === 36)!.count;
-    const walls = (round: number) => rounds[round]!.find((b) => b.indexCount === 6)!.count;
-    // The frustum keeps the 9 on screen; the pyramid then drops the 5 behind the wall.
-    expect(cubes(0)).toBe(9);
-    expect(cubes(1)).toBe(4);
-    expect(walls(0)).toBe(1);
-    expect(walls(1)).toBe(1);
-
-    // The frame is the same, less nothing anyone could see.
+    // One phase (the pyramid of a multisampled depth is built for the shading alone): the frustum keeps all 8 cubes,
+    // the shading's round drops the 5 behind the wall.
+    expect(culling.twoPhase).toBe(false);
+    const args = new Uint32Array(await readBuffer(culling.args, 3 * 2 * INDIRECT_WORDS * 4));
+    const cubes = (round: number) => args[[0, 1].map((b) => (round * 2 + b) * INDIRECT_WORDS).find((a) => args[a] === 36)! + 1];
+    expect(cubes(0)).toBe(8);
+    expect(cubes(2)).toBe(3);
     let worst = 0;
     for (let i = 0; i < plain.length; i += 1) worst = Math.max(worst, Math.abs(plain[i]! - culled[i]!));
     expect(worst).toBeLessThan(1e-5);
@@ -197,13 +243,67 @@ describe.skipIf(!device)("GPU culling on a real device", { timeout: 300_000 }, (
     const plain = (await readLinearTexture(device, plainRenderer.renderToTexture(instances, draw), W, H, settled)).data;
     const renderer = (await WebgpuSceneRenderer.create(device, W, H, rasterStyleFor(MODELS.aaa.renderCaps), { hdr: true, mips: true }))!;
     const culled = (await readLinearTexture(device, renderer.renderToTexture(instances, { ...draw, gpuCull: true }), W, H, settled)).data;
-    // Two draws, one per level, sharing the 40 copies' records: those near the eye, and those past the switch (the frustum keeps all).
-    const args = new Uint32Array(await readBuffer((renderer as any).culling.args, 2 * 2 * INDIRECT_WORDS * 4));
+    // Two draws, one per level, sharing the 40 copies' records: those near the eye, and those past the switch (the
+    // frustum keeps all; with no guess yet, the prepass draws them in its second round).
+    const args = new Uint32Array(await readBuffer((renderer as any).culling.args, 3 * 2 * INDIRECT_WORDS * 4));
     const count = (round: number, indexCount: number) => [0, 1].map((b) => (round * 2 + b) * INDIRECT_WORDS).find((a) => args[a] === indexCount)!;
     expect(nearCount).toBeGreaterThan(5);
     expect(nearCount).toBeLessThan(35);
-    expect(args[count(0, 36) + 1]).toBe(nearCount);
-    expect(args[count(0, 24) + 1]).toBe(40 - nearCount);
+    expect(args[count(1, 36) + 1]).toBe(nearCount);
+    expect(args[count(1, 24) + 1]).toBe(40 - nearCount);
+    let worst = 0;
+    for (let i = 0; i < plain.length; i += 1) worst = Math.max(worst, Math.abs(plain[i]! - culled[i]!));
+    expect(worst).toBeLessThan(1e-5);
+    plainRenderer.dispose();
+    renderer.dispose();
+  });
+
+  it("culls the sun's casters per cascade, drawing the same shadowed frame", async () => {
+    const SUN: [number, number, number] = [0.3, 1, 0.2];
+    const floor = wall();
+    const ground = { mesh: floor, model: composeModelMatrix([0, 0, 0], [-90, 0, 0], [3, 3, 3]) };
+    const cube = box("caster");
+    // Six cubes over the floor, in view; six far off past every cascade, which cast nothing anyone sees.
+    const near = [-3, -1.5, 0, 1.5, 3, 4.5].map((x) => ({ mesh: cube, model: composeModelMatrix([x, 1.5, -1], [10, 20, 0], [0.6, 0.6, 0.6]) }));
+    const far = [0, 1, 2, 3, 4, 5].map((k) => ({ mesh: cube, model: composeModelMatrix([400 + k * 3, 1.5, -400], [0, 0, 0], [0.6, 0.6, 0.6]) }));
+    const instances = [ground, ...near, ...far] as unknown as MeshSceneInstance[];
+    const draw = {
+      width: W,
+      height: H,
+      view: viewMatrix([0, 7, 9], [0, 0, 0]),
+      projection: projectionMatrix(Math.PI / 3, 1, 0.1, 60),
+      environment: null,
+      ambient: 0.1,
+      lightDirection: SUN,
+      lights: [{ kind: "directional", direction: SUN, color: [1, 1, 1], intensity: 1 }],
+      sunShadow: { casters: instances, toLight: SUN, distance: 30, size: 1024, reach: 20 },
+      prepass: true,
+    } as any;
+    const plainRenderer = (await WebgpuSceneRenderer.create(device, W, H, rasterStyleFor(MODELS.aaa.renderCaps), { hdr: true, mips: true }))!;
+    const plain = (await readLinearTexture(device, plainRenderer.renderToTexture(instances, draw), W, H, settled)).data;
+    const renderer = (await WebgpuSceneRenderer.create(device, W, H, rasterStyleFor(MODELS.aaa.renderCaps), { hdr: true, mips: true }))!;
+    device.pushErrorScope("validation");
+    const culled = (await readLinearTexture(device, renderer.renderToTexture(instances, { ...draw, gpuCull: true }), W, H, settled)).data;
+    const failure = await settled(device.popErrorScope());
+    expect(failure ? String((failure as any).message) : null).toBeNull();
+    // The casters' batches: the floor's, and the cubes' (12 copies); in every cascade the far six are gone.
+    const cull = (renderer as any).casterCulling;
+    expect(cull).toBeTruthy();
+    const cascades = cull.frame.cascades as number;
+    const batches = cull.frame.batches as number;
+    const args = new Uint32Array(await readBuffer(cull.args, cascades * batches * INDIRECT_WORDS * 4));
+    let cubesDrawn = 0;
+    for (let c = 0; c < cascades; c += 1) {
+      for (let b = 0; b < batches; b += 1) {
+        const a = (c * batches + b) * INDIRECT_WORDS;
+        if (args[a] === 36) {
+          expect(args[a + 1]).toBeLessThanOrEqual(6);
+          cubesDrawn += args[a + 1]!;
+        }
+      }
+    }
+    expect(cubesDrawn).toBeGreaterThan(0);
+    // The shadows are the ones drawn from every caster.
     let worst = 0;
     for (let i = 0; i < plain.length; i += 1) worst = Math.max(worst, Math.abs(plain[i]! - culled[i]!));
     expect(worst).toBeLessThan(1e-5);
@@ -218,9 +318,11 @@ describe.skipIf(!device)("GPU culling on a real device", { timeout: 300_000 }, (
     const instances = [-50, 0, 50].map((x) => ({ mesh: live, model: composeModelMatrix([x, 0, 0], [0, 0, 0], [1, 1, 1]) })) as unknown as MeshSceneInstance[];
     const draw = { width: W, height: H, view: viewMatrix([0, 0, 10], [0, 0, 0]), projection: projectionMatrix(Math.PI / 3, 1, 0.1, 50), environment: null, lights: [], ambient: 0.3, prepass: true, gpuCull: true } as any;
     await readLinearTexture(device, renderer.renderToTexture(instances, draw), W, H, settled);
-    const args = new Uint32Array(await readBuffer((renderer as any).culling.args, 2 * INDIRECT_WORDS * 4));
+    // Drawn whole: in the prepass's first round and the shading's, and not again in the prepass's second.
+    const args = new Uint32Array(await readBuffer((renderer as any).culling.args, 3 * INDIRECT_WORDS * 4));
     expect(args[1]).toBe(3);
-    expect(args[INDIRECT_WORDS + 1]).toBe(3);
+    expect(args[INDIRECT_WORDS + 1]).toBe(0);
+    expect(args[2 * INDIRECT_WORDS + 1]).toBe(3);
     renderer.dispose();
   });
 });

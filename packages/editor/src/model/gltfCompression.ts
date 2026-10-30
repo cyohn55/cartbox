@@ -54,6 +54,42 @@ export interface GltfDecoders {
 
 const TYPE_COMPONENTS: Record<string, number> = { SCALAR: 1, VEC2: 2, VEC3: 3, VEC4: 4, MAT4: 16 };
 
+/** One `EXT_meshopt_compression` view's decode: what meshoptimizer's decodeGltfBuffer takes (bar its target). */
+export interface MeshoptCall {
+  readonly count: number;
+  readonly size: number;
+  readonly source: Uint8Array;
+  readonly mode: string;
+  readonly filter: string;
+}
+
+/**
+ * The meshopt decodes {@link decompressGltf} makes for this document, in its
+ * order (AAA_FIDELITY_ROADMAP.md F0e): so they can run beforehand on workers,
+ * and {@link replayMeshopt} hand back their results as it asks.
+ */
+export function meshoptCalls(json: GltfJson, buffers: readonly (Uint8Array | null)[]): MeshoptCall[] {
+  const calls: MeshoptCall[] = [];
+  for (const view of json.bufferViews ?? []) {
+    const ext = view.extensions?.EXT_meshopt_compression;
+    const source = ext ? buffers[ext.buffer] : null;
+    if (!ext || !source) continue;
+    const start = ext.byteOffset ?? 0;
+    calls.push({ count: ext.count, size: ext.byteStride, source: source.subarray(start, start + ext.byteLength), mode: ext.mode, filter: ext.filter ?? "NONE" });
+  }
+  return calls;
+}
+
+/** A meshopt decoder that writes `decoded` (each {@link meshoptCalls} entry's result, in order) as its calls come. */
+export function replayMeshopt(decoded: readonly Uint8Array[]): NonNullable<GltfDecoders["meshopt"]> {
+  let next = 0;
+  return (target) => {
+    const bytes = decoded[next++];
+    if (!bytes || bytes.byteLength !== target.byteLength) throw new Error("meshopt decode out of step with the file");
+    target.set(bytes);
+  };
+}
+
 /** Which compression a glTF document's geometry uses (and whether it can't import without the decoder). */
 export function gltfCompression(json: GltfJson): { meshopt: boolean; draco: boolean; required: boolean } {
   const used = new Set([...(json.extensionsUsed ?? []), ...(json.extensionsRequired ?? [])]);

@@ -5922,6 +5922,8 @@ declare class WebgpuSceneRenderer implements SceneRenderer {
     private lightClusterer;
     /** The scene passes' recorded draws (F0e), on the GPU-culled path. */
     private bundles;
+    /** The sun's casters culled per cascade on the GPU (F0e). */
+    private casterCulling;
     /** Each copy's transforms made on the GPU (F0e), on the AAA tier. */
     private transforms;
     /** The LOD chains whose levels the GPU picks this frame (F0e). */

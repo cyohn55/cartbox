@@ -171,7 +171,7 @@ import { CLOTH_FINISH_WGSL, CLOTH_PREDICT_WGSL, CLOTH_SOLVE_WGSL, CLOTH_WORKGROU
 import { SKIN_WGSL, SKIN_WORKGROUP, packBindShape, packInfluences, skinParams } from "./gpuSkinning.js";
 import { SSS_MAX_PROFILES, SSS_WGSL, packSssProfiles, type SssProfile } from "./subsurface.js";
 import { FEEDBACK_NONE, FEEDBACK_SLOTS, TextureStreamer, feedbackWgsl, footprintLog2, type StreamingStats } from "./textureStreaming.js";
-import { GpuCulling, primitiveSphere, type CullBatch, type CullSource } from "./gpuCulling.js";
+import { CasterCulling, GpuCulling, primitiveSphere, type CasterBatch, type CullBatch, type CullSource } from "./gpuCulling.js";
 import { GpuLightClusters } from "./gpuLightClusters.js";
 import { BundleCache, type BundleTarget } from "./renderBundles.js";
 import { GpuTransforms, writeInstanceModel } from "./gpuTransforms.js";
@@ -2000,10 +2000,15 @@ ${hdr
 ${hdr ? `// --- The sun's cascades (AAA_FIDELITY_ROADMAP.md F2a) ---
 // A caster's depth as the sun sees it, through the cascade being drawn: the scene's
 // own vertex (its copy's transform, bent by the wind) and nothing else.
-@group(1) @binding(12) var<uniform> cascadeView: mat4x4<f32>;
+// The view a caster is drawn through (a cascade, a spot/point tile or a virtual page). A cascade whose casters
+// the GPU culled (F0e) draws each batch's survivors from its region: base.x is where the region starts, the
+// caster's cull0.x where its batch's copies sit in it, and base.y is 1.
+struct CasterView { viewProj: mat4x4<f32>, base: vec4<u32> };
+@group(1) @binding(12) var<uniform> cascadeView: CasterView;
 fn casterClip(position: vec3<f32>, sway: f32, instance: u32) -> vec4<f32> {
   let bend = windOffset(position.xz, sway);
-  return cascadeView * xf[instance].model * vec4<f32>(position.x + bend.x, position.y, position.z + bend.y, 1.0);
+  let at = select(instance, cascadeView.base.x + u32(u.cull0.x) + instance, cascadeView.base.y != 0u);
+  return cascadeView.viewProj * xf[at].model * vec4<f32>(position.x + bend.x, position.y, position.z + bend.y, 1.0);
 }
 @vertex
 fn vs_shadow(@location(0) position: vec3<f32>, @location(5) sway: f32, @builtin(instance_index) instance: u32) -> @builtin(position) vec4<f32> {
@@ -2263,6 +2268,8 @@ export class WebgpuSceneRenderer implements SceneRenderer {
   private lightClusterer: GpuLightClusters | null = null;
   /** The scene passes' recorded draws (F0e), on the GPU-culled path. */
   private bundles: BundleCache | null = null;
+  /** The sun's casters culled per cascade on the GPU (F0e). */
+  private casterCulling: CasterCulling | null = null;
   /** Each copy's transforms made on the GPU (F0e), on the AAA tier. */
   private transforms: GpuTransforms | null = null;
   /** The LOD chains whose levels the GPU picks this frame (F0e). */
@@ -2693,7 +2700,7 @@ export class WebgpuSceneRenderer implements SceneRenderer {
         marking: null,
       };
       for (let i = 0; i < 48; i += 1) {
-        const buffer = device.createBuffer({ size: 64, usage: 0x40 | 0x08 });
+        const buffer = device.createBuffer({ size: 80, usage: 0x40 | 0x08 }); // a CasterView, never culled
         this.vsm.views.push({ buffer, group: device.createBindGroup({ layout, entries: [{ binding: 12, resource: { buffer } }] }) });
       }
     }
@@ -3219,7 +3226,7 @@ export class WebgpuSceneRenderer implements SceneRenderer {
       // depth-only pipeline that draws them (the linear-light renderer's alone).
       const cascadeLayout = device.createBindGroupLayout({ entries: [{ binding: 12, visibility: SHADER_STAGE_VERTEX, buffer: { type: "uniform" } }] });
       const cascadeViews = Array.from({ length: CASCADE_COUNT }, () => {
-        const buffer = device.createBuffer({ size: 64, usage: 0x40 | 0x08 }); // UNIFORM | COPY_DST
+        const buffer = device.createBuffer({ size: 80, usage: 0x40 | 0x08 }); // UNIFORM | COPY_DST: a CasterView
         return { buffer, group: device.createBindGroup({ layout: cascadeLayout, entries: [{ binding: 12, resource: { buffer } }] }) };
       });
       const casterLayout = device.createBindGroupLayout({
@@ -3258,7 +3265,7 @@ export class WebgpuSceneRenderer implements SceneRenderer {
       });
       const localViews = hdr
         ? Array.from({ length: MAX_GPU_LOCAL_TILES }, () => {
-            const buffer = device.createBuffer({ size: 64, usage: 0x40 | 0x08 }); // UNIFORM | COPY_DST
+            const buffer = device.createBuffer({ size: 80, usage: 0x40 | 0x08 }); // UNIFORM | COPY_DST: a CasterView
             return { buffer, group: device.createBindGroup({ layout: cascadeLayout, entries: [{ binding: 12, resource: { buffer } }] }) };
           })
         : [];
@@ -3780,7 +3787,11 @@ export class WebgpuSceneRenderer implements SceneRenderer {
     // Each draw's place in the region (a LOD sibling's copies count again: each level packs its own), and the region's copies.
     let cullTotal = 0;
     const cullDst = gpuCull ? draws.map((entry) => ((cullTotal += entry.models.length), cullTotal - entry.models.length)) : [];
-    this.ensureInstanceCapacity(cullRegion + (gpuCull ? cullTotal * 2 : 0));
+    // With GPU culling, the sun's casters are culled per cascade too (F0e): each cascade's survivors after the region's.
+    const casterCull = gpuCull && cascadeFit !== null && casters.length > 0;
+    const casterRegion = cullRegion + (gpuCull ? cullTotal * 2 : 0);
+    const casterCopies = casting?.instanceCount ?? 0;
+    this.ensureInstanceCapacity(casterRegion + (casterCull ? cascadeFit!.length * casterCopies : 0));
     // Resolved once: the light and view direction are per frame, not per draw, and
     // normalising them per primitive would be the same answer computed many times.
     const light = resolveLight(draw.lightDirection, draw.ambient);
@@ -4036,7 +4047,8 @@ export class WebgpuSceneRenderer implements SceneRenderer {
         writeInstanceTransform(this.instanceData, nextCaster, { mvp: model, lightMvp: null, model, normalBasis: IDENTITY_BASIS });
         nextCaster += 1;
       }
-      writeInstanceUniform(this.uniformData, draws.length + k, uniformOf(entry));
+      // A culled caster's batch sits at its own place in each cascade's region (F0e).
+      writeInstanceUniform(this.uniformData, draws.length + k, casterCull ? { ...uniformOf(entry), instanceBase: entry.first - casterBase } : uniformOf(entry));
       this.uniformKeys[draws.length + k] = undefined;
     });
     this.device.queue.writeBuffer(this.uniformBuffer, 0, this.uniformData, 0, (draws.length + casters.length) * UNIFORM_FLOATS);
@@ -4071,7 +4083,18 @@ export class WebgpuSceneRenderer implements SceneRenderer {
         dst: cullDst[index]!,
         lod: entry.lodChain ? { level: entry.lod ?? 0, levels: entry.lodChain.meshes.length, distances: entry.lodChain.distances } : null,
       }));
-      this.culling.plan(sources, batches, instanceCount, cullRegion, cullTotal, viewProj, eye);
+      // Two phases where the pyramid can read the prepass's depths: not anti-aliased.
+      this.culling.plan(sources, batches, instanceCount, cullRegion, cullTotal, viewProj, eye, draw.antialias !== true);
+      if (casterCull) {
+        this.casterCulling ??= new CasterCulling(this.device);
+        const casterBatches: CasterBatch[] = casters.map((entry) => {
+          const p = entry.primitive;
+          const moves = p.dynamic !== undefined || compiledGraphOf(p.material)?.outputs.worldPositionOffset !== undefined;
+          const sphere = moves ? null : primitiveSphere(p);
+          return { first: entry.first, count: entry.models.length, dst: entry.first - casterBase, indexCount: entry.geometry.indexCount, sphere: sphere ? [sphere[0], sphere[1], sphere[2], sphere[3] + sphere[4] * gust] : null };
+        });
+        this.casterCulling.plan(casterBatches, cascadeFit!.map((c) => c.viewProj), casterRegion, casterCopies);
+      }
     }
     this.frameCull = gpuCull ? this.culling : null;
     this.lastViewProj = viewProjNow;
@@ -4138,25 +4161,26 @@ export class WebgpuSceneRenderer implements SceneRenderer {
         pass.setBindGroup(0, this.bindGroupFor(entry.primitive, entry.textures), [index * UNIFORM_STRIDE]);
         pass.setVertexBuffer(0, entry.geometry.vertexBuffer);
         pass.setIndexBuffer(entry.geometry.indexBuffer, "uint32");
-        if (cull) pass.drawIndexedIndirect(cull.args, cull.argsOffset(1, index));
+        if (cull) pass.drawIndexedIndirect(cull.args, cull.argsOffset(2, index));
         else pass.drawIndexed(entry.geometry.indexCount, entry.models.length, 0, 0, entry.first);
       }
     };
     // The prepass draws every batch the opaque pipeline does: opaque and cut-out, not refracting.
-    const prepassRange = (pass: any, target: BundleTarget | null = null) => {
+    // With the two-phase cull (F0e) it draws twice: last frame's visible copies (round 0), then the rest it can't rule out (1).
+    const prepassRange = (pass: any, target: BundleTarget | null = null, round: 0 | 1 = 0) => {
       if (bundles && target) {
-        const key: unknown[] = [(msaa ? msaa.groups : this.depthGroups).blank, cull!.args, draws.length, this.uniformBuffer, this.instanceBuffer];
+        const key: unknown[] = [(msaa ? msaa.groups : this.depthGroups).blank, cull!.args, draws.length, this.uniformBuffer, this.instanceBuffer, round];
         for (const entry of draws) {
           if (entry.refract || entry.alpha >= 2) continue;
           const moved = entry.geometry.previousBuffer && entry.geometry.movedFrame === this.frameIndex;
           key.push(this.pipelinesOf(entry.primitive.material, msaa ? MSAA_SAMPLES : 1, reflections !== null, true).prepass, this.bindGroupFor(entry.primitive, entry.textures), entry.geometry.vertexBuffer, moved ? entry.geometry.previousBuffer : entry.geometry.vertexBuffer, entry.geometry.indexBuffer);
         }
-        replay(pass, "prepass", target, key, (encoder) => prepassDirect(encoder));
+        replay(pass, `prepass${round}`, target, key, (encoder) => prepassDirect(encoder, round));
         return;
       }
-      prepassDirect(pass);
+      prepassDirect(pass, round);
     };
-    const prepassDirect = (pass: any) => {
+    const prepassDirect = (pass: any, round: 0 | 1 = 0) => {
       pass.setBindGroup(1, (msaa ? msaa.groups : this.depthGroups).blank);
       let bound: any = null;
       for (let index = 0; index < draws.length; index += 1) {
@@ -4173,7 +4197,7 @@ export class WebgpuSceneRenderer implements SceneRenderer {
         const moved = entry.geometry.previousBuffer && entry.geometry.movedFrame === this.frameIndex;
         pass.setVertexBuffer(1, moved ? entry.geometry.previousBuffer : entry.geometry.vertexBuffer);
         pass.setIndexBuffer(entry.geometry.indexBuffer, "uint32");
-        if (cull) pass.drawIndexedIndirect(cull.args, cull.argsOffset(0, index));
+        if (cull) pass.drawIndexedIndirect(cull.args, cull.argsOffset(round, index));
         else pass.drawIndexed(entry.geometry.indexCount, entry.models.length, 0, 0, entry.first);
       }
     };
@@ -4212,7 +4236,20 @@ export class WebgpuSceneRenderer implements SceneRenderer {
     // anything shades against it. The scene passes read it through group 1, so the graph keeps it.
     if (cascadeFit) {
       const res = this.depthGroups.cascades;
-      cascadeFit.forEach((c, i) => this.device.queue.writeBuffer(res.views[i]!.buffer, 0, new Float32Array(c.viewProj)));
+      const casterCuller = casterCull ? this.casterCulling : null;
+      cascadeFit.forEach((c, i) => {
+        // The view, then where its culled casters start (F0e), or 0 and not culled.
+        const view = new ArrayBuffer(80);
+        new Float32Array(view).set(c.viewProj);
+        new Uint32Array(view).set(casterCuller ? [casterRegion + i * casterCopies, 1, 0, 0] : [0, 0, 0, 0], 16);
+        this.device.queue.writeBuffer(res.views[i]!.buffer, 0, view);
+      });
+      if (casterCuller) {
+        graph.addPass("cull.casters", "compute", (pass) => {
+          pass.keep();
+          return (ctx) => casterCuller.encode(ctx.encoder, this.instanceBuffer, ctx.timing);
+        });
+      }
       const map = graph.importTexture("cascades", res.texture);
       graph.addPass("shadow cascades", "render", (pass) => {
         pass.write(map);
@@ -4245,7 +4282,8 @@ export class WebgpuSceneRenderer implements SceneRenderer {
                 encoded.setBindGroup(0, cut ? this.cutGroupFor(entry.primitive, entry.textures) : group, [(draws.length + k) * UNIFORM_STRIDE]);
                 encoded.setVertexBuffer(0, entry.geometry.vertexBuffer);
                 encoded.setIndexBuffer(entry.geometry.indexBuffer, "uint32");
-                encoded.drawIndexed(entry.geometry.indexCount, entry.models.length, 0, 0, entry.first);
+                if (casterCuller) encoded.drawIndexedIndirect(casterCuller.args, casterCuller.argsOffset(i, k));
+                else encoded.drawIndexed(entry.geometry.indexCount, entry.models.length, 0, 0, entry.first);
               });
             }
             encoded.end();
@@ -4391,12 +4429,38 @@ export class WebgpuSceneRenderer implements SceneRenderer {
         };
       });
     }
-    // Second round: the frustum's survivors against a Hi-Z pyramid of the prepass's depths (single-sampled), for the shading passes.
+    // The two-phase cull (F0e): a pyramid of what the prepass drew from last frame's guess, the rest tested against it,
+    // and what it can't rule out drawn into the prepass too.
+    if (cull && gbuffer && velocity && cull.twoPhase) {
+      graph.addPass("cull.second", "compute", (pass) => {
+        pass.read(depth);
+        pass.keep();
+        return (ctx) => cull.encodeSecond(ctx.encoder, this.instanceBuffer, ctx.texture(depth), [this.width, this.height], ctx.timing);
+      });
+      graph.addPass("prepass.second", "render", (pass) => {
+        for (const t of [depth, gbuffer, velocity]) {
+          pass.read(t, "attachment");
+          pass.write(t);
+        }
+        return (ctx) => {
+          const kept = (t: FrameResource) => ({ view: ctx.texture(t).createView(), loadOp: "load", storeOp: "store" });
+          const encoded = ctx.encoder.beginRenderPass({
+            colorAttachments: [kept(gbuffer), kept(velocity)],
+            depthStencilAttachment: { view: ctx.texture(depth).createView(), depthLoadOp: "load", depthStoreOp: "store" },
+            ...ctx.timing,
+          });
+          prepassRange(encoded, { colorFormats: [ctx.texture(gbuffer).format, ctx.texture(velocity).format], depthStencilFormat: ctx.texture(depth).format, sampleCount: 1, depthReadOnly: false }, 1);
+          encoded.end();
+        };
+      });
+    }
+    // The shading's round: the frustum's survivors against a Hi-Z pyramid of the prepass's depths (single-sampled).
     if (cull && gbuffer) {
       graph.addPass("cull.occlusion", "compute", (pass) => {
         pass.read(depth);
         pass.keep();
-        return (ctx) => cull.encodeOcclusion(ctx.encoder, this.instanceBuffer, msaa ? null : ctx.texture(depth), [this.width, this.height], ctx.timing);
+        // An anti-aliased frame's pyramid takes the farthest of each pixel's samples.
+        return (ctx) => cull.encodeOcclusion(ctx.encoder, this.instanceBuffer, ctx.texture(depth), [this.width, this.height], ctx.timing, msaa !== null);
       });
     }
     this.prepassed = prepass ? { depth: msaa ? msaa.depth : this.depthTexture, gbuffer: this.gbuffer!, velocity: this.velocity!, multisampled: msaa !== null } : null;
@@ -6337,6 +6401,7 @@ export class WebgpuSceneRenderer implements SceneRenderer {
     this.culling?.destroy();
     this.lightClusterer?.destroy();
     this.transforms?.destroy();
+    this.casterCulling?.destroy();
     this.pathTracer = null;
     destroySafely(this.sssProfiles);
     if (this.feedback) for (const b of [this.feedback.draws, this.feedback.wanted, this.feedback.readback, this.feedback.depth]) destroySafely(b);

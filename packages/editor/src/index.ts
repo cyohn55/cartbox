@@ -283,7 +283,7 @@ export {
   type MeshBounds,
 } from "./model/MeshAsset";
 export { parseObj, encodeObj, type ParseObjOptions, type ObjFiles } from "./model/objCodec";
-export { parseGlb, parseGltf, parseGltfText, encodeGlb, isKtx2, readGlb } from "./model/gltfCodec";
+export { parseGlb, parseGltf, parseGltfText, encodeGlb, isKtx2, readGlb, readGltfText } from "./model/gltfCodec";
 export type { GltfJson } from "./model/gltfCodec";
 export { MAX_LEVELS, effectiveLevels, readLevels, type SceneLevel } from "./model/levels";
 export {
@@ -620,7 +620,7 @@ export {
   type HeldControls,
   type InputAction,
 } from "./model/inputActions";
-export { decompressGltf, gltfCompression, type DracoAttributeRequest, type DracoDecoded, type GltfDecoders } from "./model/gltfCompression";
+export { decompressGltf, gltfCompression, meshoptCalls, replayMeshopt, type DracoAttributeRequest, type DracoDecoded, type GltfDecoders, type MeshoptCall } from "./model/gltfCompression";
 export {
   ANIMATOR_LIMITS,
   ANIMATOR_OPS,

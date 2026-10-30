@@ -310,6 +310,30 @@ Everything else depends on this track. It contains no visible "feature", but its
       - on Dawn, six frames with a moving camera, advancing time and wind, a model changed in place and the draws reordered stage exactly the bytes of a renderer that writes every slot in full (water, scrolling emission, sway and a soft-edged glass among the draws).
     - *Measured* as before, three readings: the culled path's renderer JS is **4.2–5.5 ms** a frame, from 5.3–6.8 ms. **The exit (under 4 ms) is close but not met** in this setup. What remains is spread thin: batching the copies, planning the cull, material IDs, uniforms for the drawn animating draws, bind groups and encoding, each under about 0.6 ms.
     - *Left for F0e:* measuring the exit in a browser on hardware, where Node's software GPU no longer shares the timeline; the rest of F0e-2's list.
+  - **F0e-5, the rest of the cull, meshopt on workers, and a fix that let Beaver Creek play on `aaa`: done.**
+    - **The sun's casters, culled per cascade** (`CasterCulling` in `gpuCulling.ts`). Before it, every caster was drawn into every cascade.
+      - A workgroup per caster batch and cascade keeps the copies whose sphere reaches the cascade's box, packs their models into the cascade's region (at the batch's place in it), and writes that draw's indirect arguments.
+      - The box's near plane, toward the sun, is left out: what stands between the sun and the box still shadows it.
+      - The caster shader reads its copy through the view it is drawn with. A caster view (a cascade, a spot/point tile or a virtual page) is now its matrix and a `base`: a culled cascade reads `base + cull0 + instance`, and the tiles and pages are drawn as before.
+    - **A two-phase cull** (without MSAA). The prepass draws last frame's visible copies first (round 0). A pyramid of that depth then tests the rest, and the prepass draws what it can't rule out (round 1). The shading's round (2) tests the whole prepass as before, and becomes next frame's guess.
+      - The prepass skips copies hidden last frame, and the frame is still exactly the unculled one: the first pyramid is of a subset of the scene, so it can only keep too much.
+      - A new renderer guesses nothing: its first frame's prepass draws in round 1 alone.
+    - **MSAA frames are occlusion-culled too.** The pyramid's first level takes the farthest of each pixel's samples. The prepass draws in one phase there.
+    - **Skinning on the GPU** was F7a's.
+    - **meshopt off the main thread** (`gltfDecoders.ts`). A compressed import's buffers are decoded first on meshoptimizer's own workers (two), then handed to the parse in order (`meshoptCalls`, `replayMeshopt`). PNG, JPEG, WebP and KTX2 were F0e-2's.
+    - **Physics and navigation stay on the main thread.**
+      - Both are steps of the deterministic tick that netplay replays. A worker's answer can't be promised by a fixed tick without blocking for it.
+      - Neither shipped map has physics bodies.
+      - Navigation runs only when a cart sends agents.
+    - **Fixed: an `aaa` match on a map with material graphs never started.** The mesh overlay took `prepareMaterials` off the WebGPU renderer and called it bare, so it lost its `this` and threw ("reading 'variants'"). Beaver Creek on `/lockout?hdr=1` showed the error in place of the match. It is now called on the renderer.
+    - *Tests:*
+      - `gpu-culling.test.ts`:
+        - twelve casters, six far past every cascade: none of those drawn into any cascade, and the shadowed frame is the unculled one to within 1e-5;
+        - two frames of the wall scene: the first frame's prepass draws everything in round 1; the second draws the wall and its 4 visible cubes in round 0 and nothing in round 1; both frames match the unculled renderer's frames of the same number;
+        - an MSAA frame drops the 5 cubes behind the wall and matches;
+      - `gltf-compression.test.ts`: buffers decoded ahead parse to the same mesh, and a decode out of step is an error;
+      - `mesh-overlay-prepare.test.ts`: the graphs are compiled through the renderer; the old call fails it.
+    - *Measured:* `scripts/measure-main-thread.mjs` reads the player's own profile of its 3D section from `/lockout?map=beaver&hdr=1` in Chromium, at the three capture views, a sample just after each frame lands. In Chromium on SwiftShader here, Beaver Creek's first `aaa` frame (every pipeline compiled in software) had not finished after five minutes, so there is no browser reading yet. It needs the script run with `CBX_GPU=1` on hardware. In Node (F0e-4) the renderer's JS was 4.2–5.5 ms a frame.
 
 ### F1. Textures and materials
 

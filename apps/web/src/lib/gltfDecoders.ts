@@ -9,25 +9,41 @@
 
 import {
   gltfCompression,
-  parseGlb,
-  parseGltfText,
+  meshoptCalls,
+  parseGltf,
   readGlb,
+  readGltfText,
+  replayMeshopt,
   type DracoAttributeRequest,
   type DracoDecoded,
   type GltfDecoders,
+  type GltfJson,
   type MeshAsset,
+  type MeshoptCall,
 } from "@cartbox/editor";
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
-let meshopt: Promise<NonNullable<GltfDecoders["meshopt"]>> | null = null;
+/** meshoptimizer's decoder: a buffer at a time, here or (where the browser has workers) on its own pool of them. */
+interface Meshopt {
+  readonly decode: NonNullable<GltfDecoders["meshopt"]>;
+  readonly decodeOffThread: ((call: MeshoptCall) => Promise<Uint8Array>) | null;
+}
+
+let meshopt: Promise<Meshopt> | null = null;
 let draco: Promise<NonNullable<GltfDecoders["draco"]>> | null = null;
 
-function loadMeshopt(): Promise<NonNullable<GltfDecoders["meshopt"]>> {
+function loadMeshopt(): Promise<Meshopt> {
   meshopt ??= (async () => {
     const { MeshoptDecoder } = await import("meshoptimizer/decoder");
     await MeshoptDecoder.ready;
-    return (target, count, size, source, mode, filter) => MeshoptDecoder.decodeGltfBuffer(target, count, size, source, mode, filter);
+    // Off the main thread (AAA_FIDELITY_ROADMAP.md F0e): the decoder's own workers, two of them, where there are workers.
+    const workers = typeof Worker === "function";
+    if (workers) MeshoptDecoder.useWorkers(2);
+    return {
+      decode: (target, count, size, source, mode, filter) => MeshoptDecoder.decodeGltfBuffer(target, count, size, source, mode, filter),
+      decodeOffThread: workers ? (c) => MeshoptDecoder.decodeGltfBufferAsync(c.count, c.size, c.source, c.mode, c.filter) : null,
+    };
   })();
   meshopt.catch(() => {
     meshopt = null; // let a later import try again
@@ -56,21 +72,34 @@ function loadDraco(): Promise<NonNullable<GltfDecoders["draco"]>> {
 /** The decoders a file needs (only those are loaded). */
 export async function loadGltfDecoders(needs: { meshopt: boolean; draco: boolean }): Promise<GltfDecoders> {
   const [m, d] = await Promise.all([needs.meshopt ? loadMeshopt() : undefined, needs.draco ? loadDraco() : undefined]);
-  return { ...(m ? { meshopt: m } : {}), ...(d ? { draco: d } : {}) };
+  return { ...(m ? { meshopt: m.decode } : {}), ...(d ? { draco: d } : {}) };
+}
+
+/**
+ * The decoders for one document: its meshopt buffers decoded first on the
+ * decoder's workers where there are any (F0e), then handed back as the parse
+ * asks for them.
+ */
+async function decodersFor(json: GltfJson, buffers: readonly (Uint8Array | null)[]): Promise<GltfDecoders> {
+  const compression = gltfCompression(json);
+  if (!compression.meshopt && !compression.draco) return {};
+  const decoders = await loadGltfDecoders(compression);
+  const offThread = compression.meshopt ? (await loadMeshopt()).decodeOffThread : null;
+  if (!offThread) return decoders;
+  const decoded = await Promise.all(meshoptCalls(json, buffers).map(offThread));
+  return { ...decoders, meshopt: replayMeshopt(decoded) };
 }
 
 /** Parse a `.glb`, loading whichever geometry decoders it needs first. */
 export async function parseGlbDecoded(bytes: Uint8Array, name: string): Promise<MeshAsset> {
-  const compression = gltfCompression(readGlb(bytes).json);
-  const decoders = compression.meshopt || compression.draco ? await loadGltfDecoders(compression) : {};
-  return parseGlb(bytes, name, decoders);
+  const { json, buffers } = readGlb(bytes);
+  return parseGltf(json, buffers, name, await decodersFor(json, buffers));
 }
 
 /** Parse a self-contained `.gltf`, loading whichever geometry decoders it needs first. */
 export async function parseGltfTextDecoded(text: string, name: string): Promise<MeshAsset> {
-  const compression = gltfCompression(JSON.parse(text) as Parameters<typeof gltfCompression>[0]);
-  const decoders = compression.meshopt || compression.draco ? await loadGltfDecoders(compression) : {};
-  return parseGltfText(text, name, decoders);
+  const { json, buffers } = readGltfText(text);
+  return parseGltf(json, buffers, name, await decodersFor(json, buffers));
 }
 
 const DRACO_TYPES: Record<number, { key: string; array: any }> = {

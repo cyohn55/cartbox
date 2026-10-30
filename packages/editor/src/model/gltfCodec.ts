@@ -1018,6 +1018,12 @@ export function readGlb(bytes: Uint8Array): { json: GltfJson; buffers: (Uint8Arr
  * {@link parseGltf} directly with the buffers it read.
  */
 export function parseGltfText(text: string, name = "mesh", decoders: GltfDecoders = {}): MeshAsset {
+  const { json, buffers } = readGltfText(text);
+  return parseGltf(json, buffers, name, decoders);
+}
+
+/** A self-contained `.gltf`'s JSON and its buffers, read from their data URIs (as {@link readGlb} reads a `.glb`). */
+export function readGltfText(text: string): { json: GltfJson; buffers: (Uint8Array | null)[] } {
   const json = JSON.parse(text) as GltfJson;
   const buffers = (json.buffers ?? []).map((buffer) => {
     // A meshopt fallback buffer may have no data at all: the compressed views carry it.
@@ -1029,7 +1035,7 @@ export function parseGltfText(text: string, name = "mesh", decoders: GltfDecoder
     if (!bytes) throw new Error("This .gltf references external buffer files; import the .glb form instead");
     return bytes;
   });
-  return parseGltf(json, buffers, name, decoders);
+  return { json, buffers };
 }
 
 // --- Encode ----------------------------------------------------------------
