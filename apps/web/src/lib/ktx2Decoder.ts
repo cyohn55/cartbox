@@ -64,6 +64,75 @@ export function loadKtx2Decoder(): Promise<Ktx2Decode> {
   return loading;
 }
 
+/** What a worker can answer with: the texture as it came back, or null. */
+export type Ktx2DecodeAsync = (bytes: Uint8Array, options?: Ktx2DecodeOptions) => Promise<DecodedTexture | null>;
+
+/** What a decoder's worker needs of a Worker (or a stand-in). */
+export interface Ktx2WorkerLike {
+  postMessage(message: unknown, transfer?: Transferable[]): void;
+  onmessage: ((event: { data: any }) => void) | null;
+  onerror: ((event: unknown) => void) | null;
+}
+
+/** The buffers a decoded texture can hand over rather than copy: its pixels and its compressed levels. */
+export function ktx2Transfers(texture: DecodedTexture): ArrayBuffer[] {
+  const out = new Set<ArrayBuffer>([texture.data.buffer as ArrayBuffer]);
+  for (const level of (texture as { gpu?: CompressedTexture | null }).gpu?.levels ?? []) out.add(level.data.buffer as ArrayBuffer);
+  return [...out];
+}
+
+/**
+ * A decoder that transcodes on `worker` (F0e): each file posted with an id and
+ * answered with its texture. A worker that fails (it couldn't load the
+ * transcoder, say) hands this and every later file to `fallback`, here.
+ */
+export function workerKtx2Decoder(worker: Ktx2WorkerLike, fallback: () => Promise<Ktx2Decode>): Ktx2DecodeAsync {
+  const pending = new Map<number, { bytes: Uint8Array; options?: Ktx2DecodeOptions; resolve: (texture: DecodedTexture | null) => void }>();
+  let nextId = 1;
+  let broken = false;
+  const onMain = (bytes: Uint8Array, options?: Ktx2DecodeOptions) => fallback().then((decode) => decode(bytes, options));
+  const fail = () => {
+    broken = true;
+    for (const job of pending.values()) void onMain(job.bytes, job.options).then(job.resolve, () => job.resolve(null));
+    pending.clear();
+  };
+  worker.onmessage = (event) => {
+    const { id, texture, error } = event.data ?? {};
+    const job = pending.get(id);
+    if (!job) return;
+    pending.delete(id);
+    if (error) void onMain(job.bytes, job.options).then(job.resolve, () => job.resolve(null));
+    else job.resolve(texture ?? null);
+  };
+  worker.onerror = fail;
+  return (bytes, options) => {
+    if (broken) return onMain(bytes, options);
+    const id = nextId++;
+    return new Promise((resolve) => {
+      pending.set(id, { bytes, ...(options ? { options } : {}), resolve });
+      worker.postMessage({ id, bytes, ...(options ? { options } : {}) });
+    });
+  };
+}
+
+let offThread: Promise<Ktx2DecodeAsync> | null = null;
+
+/**
+ * The KTX2 decoder on a worker where the browser has them (F0e), so a scene's
+ * textures transcode while the game draws; on the main thread otherwise.
+ */
+export function loadKtx2DecoderOffThread(): Promise<Ktx2DecodeAsync> {
+  offThread ??= (async () => {
+    if (typeof Worker !== "function") {
+      const decode = await loadKtx2Decoder();
+      return async (bytes: Uint8Array, options?: Ktx2DecodeOptions) => decode(bytes, options);
+    }
+    const worker = new Worker(new URL("./ktx2Worker.ts", import.meta.url), { type: "module" });
+    return workerKtx2Decoder(worker as unknown as Ktx2WorkerLike, loadKtx2Decoder);
+  })();
+  return offThread;
+}
+
 /**
  * Transcode a KTX2 file's top mip to RGBA with an initialised Basis module, and,
  * given `gpuFormats`, its whole chain to the first of them it can (see

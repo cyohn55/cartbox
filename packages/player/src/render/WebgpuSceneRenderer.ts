@@ -119,6 +119,9 @@ import {
   CLUSTER_Y,
   CLUSTER_Z,
   buildLightClusters,
+  clusterGrid,
+  resolveLodMesh,
+  type LodChain,
   orderLights,
   graphNoiseSource,
   WATER_PERIOD,
@@ -168,7 +171,9 @@ import { CLOTH_FINISH_WGSL, CLOTH_PREDICT_WGSL, CLOTH_SOLVE_WGSL, CLOTH_WORKGROU
 import { SKIN_WGSL, SKIN_WORKGROUP, packBindShape, packInfluences, skinParams } from "./gpuSkinning.js";
 import { SSS_MAX_PROFILES, SSS_WGSL, packSssProfiles, type SssProfile } from "./subsurface.js";
 import { FEEDBACK_NONE, FEEDBACK_SLOTS, TextureStreamer, feedbackWgsl, footprintLog2, type StreamingStats } from "./textureStreaming.js";
-import { GpuCulling, primitiveSphere, type CullBatch } from "./gpuCulling.js";
+import { GpuCulling, primitiveSphere, type CullBatch, type CullSource } from "./gpuCulling.js";
+import { GpuLightClusters } from "./gpuLightClusters.js";
+import { BundleCache, type BundleTarget } from "./renderBundles.js";
 import { PathTracer, captureReference, type CaptureOptions, type ReferenceCapture } from "./pathTracer.js";
 import { IES_BASE, IES_MAX_PROFILES, IES_VEC4S, ltcTables, ltcWgsl } from "./ltc.js";
 import { PROBE_FACE, ProbeCapture, packCapturedProbes } from "./probeCapture.js";
@@ -2246,6 +2251,13 @@ export class WebgpuSceneRenderer implements SceneRenderer {
   private pathTracer: PathTracer | null = null;
   /** GPU culling (F0e), made on first use. */
   private culling: GpuCulling | null = null;
+  /** The clustered lights built on the GPU (F0e), made on first use; set for a frame that builds them there. */
+  private lightClusterer: GpuLightClusters | null = null;
+  /** The scene passes' recorded draws (F0e), on the GPU-culled path. */
+  private bundles: BundleCache | null = null;
+  /** The LOD chains whose levels the GPU picks this frame (F0e). */
+  private frameGpuLods: ReadonlySet<LodChain> | null = null;
+  private frameLightClusters = false;
   /** This frame's GPU cull, while it encodes: the draws index the culling's arguments. */
   private frameCull: GpuCulling | null = null;
 
@@ -3667,7 +3679,11 @@ export class WebgpuSceneRenderer implements SceneRenderer {
       if (burning.length > 0) draw = { ...draw, lights: [...(draw.lights ?? []), ...burning] };
     }
     if (draw.prepass === true) this.matchMotion(instances);
-    const visible = applyScenePasses(instances, draw);
+    // With GPU culling (F0e) the GPU picks the LOD level of each copy of a chain with many copies (each level is a draw,
+    // so a chain with few is cheaper chosen here).
+    const gpuLod = this.hdr && draw.prepass === true && draw.gpuCull === true && draw.lod === true;
+    this.frameGpuLods = gpuLod ? manyCopyChains(instances) : null;
+    const visible = gpuLod ? applyScenePasses(lodsBesides(instances, this.frameGpuLods!, cameraPositionFromView(draw.view)), { ...draw, lod: false }) : applyScenePasses(instances, draw);
     try {
       this.submit(visible, draw, false);
     } catch {
@@ -3712,7 +3728,9 @@ export class WebgpuSceneRenderer implements SceneRenderer {
     const prepass = draw.prepass === true;
     // Batch the copies of each primitive that bind the same textures: one
     // uniform (addressed by a dynamic offset) and one instanced draw per batch.
-    const { batches: draws, instanceCount } = batchInstances(instances, (mesh) => this.uploadMesh(mesh), cameraPositionFromView(draw.view));
+    // GPU culling (F0e): the frustum and a Hi-Z pyramid decide which copies draw, and each copy's LOD level.
+    const gpuCull = this.hdr && prepass && draw.gpuCull === true;
+    const { batches: draws, instanceCount } = batchInstances(instances, (mesh) => this.uploadMesh(mesh), cameraPositionFromView(draw.view), gpuCull ? this.frameGpuLods : null);
     if (draws.length === 0) {
       this.prepassed = null;
       // A frame left on the GPU still has to say "nothing drew": clear it.
@@ -3748,9 +3766,11 @@ export class WebgpuSceneRenderer implements SceneRenderer {
     // With a prepass, the frame's motion transforms (F0c) follow its transforms in the instance buffer; the casters' follow those.
     const casterBase = prepass ? instanceCount * 2 : instanceCount;
     // GPU culling (F0e) packs each round's survivors, with their motion records, after the casters (the second round over the first's, once the prepass has drawn them).
-    const gpuCull = this.hdr && prepass && draw.gpuCull === true;
     const cullRegion = casterBase + (casting?.instanceCount ?? 0);
-    this.ensureInstanceCapacity(cullRegion + (gpuCull ? instanceCount * 2 : 0));
+    // Each draw's place in the region (a LOD sibling's copies count again: each level packs its own), and the region's copies.
+    let cullTotal = 0;
+    const cullDst = gpuCull ? draws.map((entry) => ((cullTotal += entry.models.length), cullTotal - entry.models.length)) : [];
+    this.ensureInstanceCapacity(cullRegion + (gpuCull ? cullTotal * 2 : 0));
     // Resolved once: the light and view direction are per frame, not per draw, and
     // normalising them per primitive would be the same answer computed many times.
     const light = resolveLight(draw.lightDirection, draw.ambient);
@@ -3933,6 +3953,12 @@ export class WebgpuSceneRenderer implements SceneRenderer {
     };
     let next = 0;
     draws.forEach((entry, index) => {
+      // A LOD sibling (F0e) shares its batch's copies, and their records.
+      if (entry.source) {
+        entry.first = entry.source.first;
+        writeInstanceUniform(this.uniformData, index, { ...uniformOf(entry), instanceBase: cullRegion + cullDst[index]!, motionBase: cullTotal });
+        return;
+      }
       entry.first = next;
       for (const model of entry.models) {
         writeInstanceTransform(this.instanceData, next, {
@@ -3952,7 +3978,7 @@ export class WebgpuSceneRenderer implements SceneRenderer {
         next += 1;
       }
       // GPU culling (F0e): both rounds pack the batch's survivors at its place in their region, and its indirect draws start at 0.
-      writeInstanceUniform(this.uniformData, index, gpuCull ? { ...uniformOf(entry), instanceBase: cullRegion + entry.first } : uniformOf(entry));
+      writeInstanceUniform(this.uniformData, index, gpuCull ? { ...uniformOf(entry), instanceBase: cullRegion + cullDst[index]!, motionBase: cullTotal } : uniformOf(entry));
     });
     // The casters (F2a): each copy's model in the instance buffer after the frame's, their uniforms after the draws'.
     let nextCaster = casterBase;
@@ -3974,19 +4000,28 @@ export class WebgpuSceneRenderer implements SceneRenderer {
     if (gpuCull) {
       this.culling ??= new GpuCulling(this.device);
       const gust = Math.hypot(windNow[0], windNow[1]) * (1 + windNow[3]);
-      const batches: CullBatch[] = draws.map((entry) => {
-        const p = entry.primitive;
-        const moves = p.dynamic !== undefined || entry.alpha >= 2 || entry.refract || compiledGraphOf(p.material)?.outputs.worldPositionOffset !== undefined;
-        const s = moves ? null : primitiveSphere(p);
-        return { first: entry.first, count: entry.models.length, indexCount: entry.geometry.indexCount, sphere: s ? [s[0], s[1], s[2], s[3] + s[4] * gust] : null };
-      });
-      this.culling.plan(batches, instanceCount, cullRegion, viewProj);
+      const sources: CullSource[] = draws
+        .filter((entry) => !entry.source)
+        .map((entry) => {
+          const p = entry.primitive;
+          const moves = p.dynamic !== undefined || entry.alpha >= 2 || entry.refract || compiledGraphOf(p.material)?.outputs.worldPositionOffset !== undefined;
+          const s = moves ? null : primitiveSphere(p);
+          return { first: entry.first, count: entry.models.length, sphere: s ? [s[0], s[1], s[2], s[3] + s[4] * gust] : null };
+        });
+      const batches: CullBatch[] = draws.map((entry, index) => ({
+        first: entry.first,
+        count: entry.models.length,
+        indexCount: entry.geometry.indexCount,
+        dst: cullDst[index]!,
+        lod: entry.lodChain ? { level: entry.lod ?? 0, levels: entry.lodChain.meshes.length, distances: entry.lodChain.distances } : null,
+      }));
+      this.culling.plan(sources, batches, instanceCount, cullRegion, cullTotal, viewProj, eye);
     }
     this.frameCull = gpuCull ? this.culling : null;
     this.lastViewProj = viewProjNow;
     this.lastWind = windNow;
     let triangles = 0;
-    for (const entry of draws) triangles += (entry.geometry.indexCount / 3) * entry.models.length;
+    for (const entry of draws) if (!entry.source) triangles += (entry.geometry.indexCount / 3) * entry.models.length;
     this.lastFrameStats = {
       drawCalls: draws.length,
       instances: instanceCount,
@@ -4013,7 +4048,26 @@ export class WebgpuSceneRenderer implements SceneRenderer {
     // Overdraw (F10a) adds every fragment up, depth unwritten.
     const overdraw = this.hdr && viewModeCode(draw.viewMode) === 11;
     const cull = this.frameCull;
-    const drawRange = (pass: any, from: number, to: number, depthGroup: any) => {
+    // With GPU culling the scene passes' commands hold frame to frame: each is recorded once into a bundle (F0e).
+    const bundles = cull ? (this.bundles ??= new BundleCache(this.device)) : null;
+    const replay = (pass: any, slot: string, target: BundleTarget, key: unknown[], record: (encoder: any) => void) => {
+      if (!bundles) return record(pass);
+      pass.executeBundles([bundles.get(slot, target, key, record)]);
+    };
+    const drawRange = (pass: any, from: number, to: number, depthGroup: any, slot = "", target: BundleTarget | null = null) => {
+      if (bundles && target) {
+        const key: unknown[] = [depthGroup, from, to, cull!.args, draws.length, this.uniformBuffer, this.instanceBuffer];
+        for (let index = from; index < to; index += 1) {
+          const entry = draws[index]!;
+          const set = this.pipelinesOf(entry.primitive.material, msaa ? MSAA_SAMPLES : 1, reflections !== null, prepass);
+          key.push(overdraw ? set.add : entry.refract ? set.blend : entry.alpha === 3 ? set.add : entry.alpha === 2 ? set.blend : set.opaque, this.bindGroupFor(entry.primitive, entry.textures), entry.geometry.vertexBuffer, entry.geometry.indexBuffer);
+        }
+        replay(pass, slot, target, key, (encoder) => drawRangeDirect(encoder, from, to, depthGroup));
+        return;
+      }
+      drawRangeDirect(pass, from, to, depthGroup);
+    };
+    const drawRangeDirect = (pass: any, from: number, to: number, depthGroup: any) => {
       pass.setBindGroup(1, depthGroup);
       let bound: any = null;
       for (let index = from; index < to; index += 1) {
@@ -4033,7 +4087,20 @@ export class WebgpuSceneRenderer implements SceneRenderer {
       }
     };
     // The prepass draws every batch the opaque pipeline does: opaque and cut-out, not refracting.
-    const prepassRange = (pass: any) => {
+    const prepassRange = (pass: any, target: BundleTarget | null = null) => {
+      if (bundles && target) {
+        const key: unknown[] = [(msaa ? msaa.groups : this.depthGroups).blank, cull!.args, draws.length, this.uniformBuffer, this.instanceBuffer];
+        for (const entry of draws) {
+          if (entry.refract || entry.alpha >= 2) continue;
+          const moved = entry.geometry.previousBuffer && entry.geometry.movedFrame === this.frameIndex;
+          key.push(this.pipelinesOf(entry.primitive.material, msaa ? MSAA_SAMPLES : 1, reflections !== null, true).prepass, this.bindGroupFor(entry.primitive, entry.textures), entry.geometry.vertexBuffer, moved ? entry.geometry.previousBuffer : entry.geometry.vertexBuffer, entry.geometry.indexBuffer);
+        }
+        replay(pass, "prepass", target, key, (encoder) => prepassDirect(encoder));
+        return;
+      }
+      prepassDirect(pass);
+    };
+    const prepassDirect = (pass: any) => {
       pass.setBindGroup(1, (msaa ? msaa.groups : this.depthGroups).blank);
       let bound: any = null;
       for (let index = 0; index < draws.length; index += 1) {
@@ -4061,6 +4128,15 @@ export class WebgpuSceneRenderer implements SceneRenderer {
     // frame), and times every pass.
     const graph = new FrameGraph();
     const size = { width: this.width, height: this.height };
+    // The clustered lights built on the GPU (F0e), before anything reads them.
+    if (this.frameLightClusters) {
+      const clusterer = this.lightClusterer!;
+      const data = this.depthGroups.clusters.data;
+      graph.addPass("lights.cluster", "compute", (pass) => {
+        pass.keep();
+        return (ctx) => clusterer.encode(ctx.encoder, this.lightBuffer, data, ctx.timing);
+      });
+    }
     const colour = graph.importTexture("colour", this.colourTexture);
     // The depth stays the renderer's own: the see-through pass's bind groups sample it.
     const depth = graph.importTexture("depth", msaa ? msaa.depth : this.depthTexture);
@@ -4249,7 +4325,12 @@ export class WebgpuSceneRenderer implements SceneRenderer {
             depthStencilAttachment: { view: ctx.texture(depth).createView(), depthClearValue: 1, depthLoadOp: "clear", depthStoreOp: "store" },
             ...ctx.timing,
           });
-          prepassRange(encoded);
+          prepassRange(encoded, {
+            colorFormats: [ctx.texture(gbufferMs ?? gbuffer).format, ctx.texture(velocityMs ?? velocity).format],
+            depthStencilFormat: ctx.texture(depth).format,
+            sampleCount: msaa ? MSAA_SAMPLES : 1,
+            depthReadOnly: false,
+          });
           encoded.end();
         };
       });
@@ -4309,7 +4390,12 @@ export class WebgpuSceneRenderer implements SceneRenderer {
                 : { view: ctx.texture(depth).createView(), depthClearValue: 1, depthLoadOp: "clear", depthStoreOp: "store" },
             ...ctx.timing,
           });
-          drawRange(encoded, from, to, load ? groups.scene : readDepths ? groups.opaque : groups.blank);
+          drawRange(encoded, from, to, load ? groups.scene : readDepths ? groups.opaque : groups.blank, name, {
+            colorFormats: [target, ...rayTargets].map((t) => ctx.texture(t).format),
+            depthStencilFormat: ctx.texture(depth).format,
+            sampleCount: msaa ? MSAA_SAMPLES : 1,
+            depthReadOnly: load || readDepths,
+          });
           encoded.end();
         };
       });
@@ -5203,9 +5289,17 @@ export class WebgpuSceneRenderer implements SceneRenderer {
    */
   private clusterLights(draw: GpuSceneDraw) {
     const { ordered, globalCount } = orderLights(draw.lights ?? []);
-    const clusters = ordered.length > globalCount ? buildLightClusters(ordered, globalCount, draw.view, draw.projection, this.width, this.height) : null;
+    // With GPU culling (F0e) the cells are built on the GPU too, from the packed lights; else here.
+    const onGpu = this.hdr && draw.gpuCull === true;
+    const cellGrid = onGpu && ordered.length > globalCount ? clusterGrid(draw.projection, this.width, this.height) : null;
+    this.frameLightClusters = cellGrid !== null;
+    if (cellGrid) {
+      this.lightClusterer ??= new GpuLightClusters(this.device);
+      this.lightClusterer.prepare(cellGrid, draw.view, this.width, this.height, globalCount, ordered.length);
+    }
+    const clusters = cellGrid ? { params: GpuLightClusters.params(cellGrid), table: null } : !onGpu && ordered.length > globalCount ? buildLightClusters(ordered, globalCount, draw.view, draw.projection, this.width, this.height) : null;
     const buffers = this.depthGroups.clusters;
-    if (clusters) {
+    if (clusters?.table) {
       this.device.queue.writeBuffer(buffers.data, 0, clusters.table);
       this.device.queue.writeBuffer(buffers.data, CLUSTER_CELLS * 8, clusters.indices, 0, Math.max(4, Math.ceil(clusters.used / 4) * 4));
     }
@@ -6185,6 +6279,7 @@ export class WebgpuSceneRenderer implements SceneRenderer {
     this.destroyed = true;
     this.pathTracer?.destroy();
     this.culling?.destroy();
+    this.lightClusterer?.destroy();
     this.pathTracer = null;
     destroySafely(this.sssProfiles);
     if (this.feedback) for (const b of [this.feedback.draws, this.feedback.wanted, this.feedback.readback, this.feedback.depth]) destroySafely(b);
@@ -6366,4 +6461,25 @@ function streamedLevel(source: DecodedTexture, level: number): { width: number; 
   const out = { width, height, data };
   levels.set(level, out);
   return out;
+}
+
+/** The fewest copies of a LOD chain for which the GPU picks levels (F0e): each level is a draw of its own. */
+export const GPU_LOD_MIN_COPIES = 32;
+
+/** The LOD chains with at least {@link GPU_LOD_MIN_COPIES} copies among `instances`. */
+export function manyCopyChains(instances: readonly MeshSceneInstance[]): ReadonlySet<LodChain> {
+  const counts = new Map<LodChain, number>();
+  for (const instance of instances) if (instance.lod && instance.lod.meshes.length > 1) counts.set(instance.lod, (counts.get(instance.lod) ?? 0) + 1);
+  return new Set([...counts].filter(([, n]) => n >= GPU_LOD_MIN_COPIES).map(([chain]) => chain));
+}
+
+/** `instances` with the CPU's LOD choice made for every copy whose chain isn't in `gpu` (as lod.ts's applyLods). */
+function lodsBesides(instances: readonly MeshSceneInstance[], gpu: ReadonlySet<LodChain>, eye: readonly [number, number, number]): readonly MeshSceneInstance[] {
+  return instances.map((instance) => {
+    if (!instance.lod || gpu.has(instance.lod)) return instance;
+    const m = instance.model;
+    const scale = Math.max(Math.hypot(m[0]!, m[1]!, m[2]!), Math.hypot(m[4]!, m[5]!, m[6]!), Math.hypot(m[8]!, m[9]!, m[10]!)) || 1;
+    const mesh = resolveLodMesh(instance, Math.hypot(m[12]! - eye[0], m[13]! - eye[1], m[14]! - eye[2]) / scale);
+    return mesh === instance.mesh ? instance : { ...instance, mesh };
+  });
 }

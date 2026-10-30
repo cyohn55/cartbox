@@ -3769,7 +3769,7 @@ interface PlayerOptions {
      * that has KTX2 textures; without it they render as their flat base colour.
      * The web app passes one that fetches the transcoder on demand.
      */
-    ktx2?: () => Promise<(bytes: Uint8Array) => DecodedTexture | null>;
+    ktx2?: () => Promise<(bytes: Uint8Array) => DecodedTexture | null | Promise<DecodedTexture | null>>;
     /**
      * Loads a level's assets before a switch to it (`cartbox.level`), reporting
      * progress 0..1; the switch happens when it settles. Without it, switches are
@@ -5914,6 +5914,13 @@ declare class WebgpuSceneRenderer implements SceneRenderer {
     private pathTracer;
     /** GPU culling (F0e), made on first use. */
     private culling;
+    /** The clustered lights built on the GPU (F0e), made on first use; set for a frame that builds them there. */
+    private lightClusterer;
+    /** The scene passes' recorded draws (F0e), on the GPU-culled path. */
+    private bundles;
+    /** The LOD chains whose levels the GPU picks this frame (F0e). */
+    private frameGpuLods;
+    private frameLightClusters;
     /** This frame's GPU cull, while it encodes: the draws index the culling's arguments. */
     private frameCull;
     /**
@@ -8143,9 +8150,10 @@ interface GpuPresentTarget {
  * `gpuFormats`, the decoder also transcodes into the first of them it can
  * (F1a; see DecodedTexture.gpu).
  */
+/** A KTX2 decoder: it may answer at once, or later (one that transcodes on a worker, F0e). */
 type Ktx2DecoderLoader = () => Promise<(bytes: Uint8Array, options?: {
     readonly gpuFormats?: readonly string[];
-}) => DecodedTexture | null>;
+}) => DecodedTexture | null | Promise<DecodedTexture | null>>;
 declare class MeshOverlaySurface implements DisplaySurface {
     private readonly inner;
     private readonly width;

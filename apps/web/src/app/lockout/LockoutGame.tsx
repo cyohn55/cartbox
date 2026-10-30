@@ -51,7 +51,7 @@ import { loadCartDraft } from "@/lib/localCartStore";
 import { lockoutSidecarWithAssets, type LockoutAssetOverlay } from "@/lib/lockoutAssets";
 import { perfLine } from "@/lib/perfReadout";
 import { playableArena } from "@/lib/savedArena";
-import { loadKtx2Decoder } from "@/lib/ktx2Decoder";
+import { loadKtx2DecoderOffThread } from "@/lib/ktx2Decoder";
 
 /** Where Lockout keeps its career record (it has no cart row, so it stays in this browser). */
 const LOCKOUT_SAVE_KEY = saveKey("lockout");
@@ -308,7 +308,7 @@ export function LockoutGame() {
         ...(new URLSearchParams(window.location.search).get("present") === "gpu" ? { gpuPresent: true } : {}),
         ...(new URLSearchParams(window.location.search).get("hdr") === "1" ? { gpuPresent: true, linearHdr: true, prepass: true, mipmaps: true, nativeResolution: true, dynamicResolution: new URLSearchParams(window.location.search).get("dynres") !== "0" } : {}),
         // KTX2: the transcoder loads only if a texture needs it — Beaver Creek's baked images, on a renderer that samples compressed formats (F1a).
-        ktx2: loadKtx2Decoder,
+        ktx2: loadKtx2DecoderOffThread,
         autostart: true,
         record: false,
         controls: "auto",

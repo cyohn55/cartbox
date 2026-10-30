@@ -134,7 +134,7 @@ export interface PlayerOptions {
    * that has KTX2 textures; without it they render as their flat base colour.
    * The web app passes one that fetches the transcoder on demand.
    */
-  ktx2?: () => Promise<(bytes: Uint8Array) => DecodedTexture | null>;
+  ktx2?: () => Promise<(bytes: Uint8Array) => DecodedTexture | null | Promise<DecodedTexture | null>>;
   /**
    * Loads a level's assets before a switch to it (`cartbox.level`), reporting
    * progress 0..1; the switch happens when it settles. Without it, switches are

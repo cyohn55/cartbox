@@ -130,6 +130,7 @@ import { SoftwareSceneRenderer, type GpuSceneDraw, type SceneRenderer, type SunS
 import type { ReflectionCapture } from "../render/probeCapture.js";
 import { isDiagnosticView, type ViewMode } from "../render/viewModes.js";
 import type { CaptureOptions, ReferenceCapture } from "../render/pathTracer.js";
+import { decodePool } from "../render/decodeWorkers.js";
 import { sampleShot, sequenceTimes, shotMatrices } from "@cartbox/editor";
 import type { SequenceOptions } from "../types.js";
 import { SUN_SOFTNESS } from "../render/cascades.js";
@@ -252,7 +253,8 @@ export interface GpuPresentTarget {
  * `gpuFormats`, the decoder also transcodes into the first of them it can
  * (F1a; see DecodedTexture.gpu).
  */
-export type Ktx2DecoderLoader = () => Promise<(bytes: Uint8Array, options?: { readonly gpuFormats?: readonly string[] }) => DecodedTexture | null>;
+/** A KTX2 decoder: it may answer at once, or later (one that transcodes on a worker, F0e). */
+export type Ktx2DecoderLoader = () => Promise<(bytes: Uint8Array, options?: { readonly gpuFormats?: readonly string[] }) => DecodedTexture | null | Promise<DecodedTexture | null>>;
 
 /** A rectangle of shadow-map texels. */
 interface TexelRect {
@@ -2884,6 +2886,12 @@ export function tintMesh(mesh: MeshAsset, tint: number, overrides?: SceneLightin
  * then renders with its flat base colour.
  */
 async function decodeTexture(mime: string, bytes: Uint8Array): Promise<DecodedTexture | null> {
+  // Off the main thread where workers can (F0e); here otherwise.
+  const pool = decodePool();
+  if (pool) {
+    const decoded = await pool.decode(mime, bytes);
+    if (decoded) return decoded;
+  }
   if (typeof createImageBitmap !== "function" || typeof OffscreenCanvas !== "function") return null;
   try {
     // The cast is safe: these are ordinary image bytes; TS only flags the

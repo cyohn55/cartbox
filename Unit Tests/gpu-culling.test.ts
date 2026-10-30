@@ -180,6 +180,37 @@ describe.skipIf(!device)("GPU culling on a real device", { timeout: 300_000 }, (
     renderer.dispose();
   });
 
+  it("picks each copy's LOD level on the GPU as the CPU does, drawing the same frame", async () => {
+    const near = box("near");
+    // The far level: a flattened box (its own index count tells it apart).
+    const far = box("far");
+    (far.primitives[0] as any).indices = (far.primitives[0] as any).indices.slice(0, 24);
+    const lod = { meshes: [near, far], distances: [12] };
+    // Each 1 m box at its distance from the eye (z = 10): the switch at 12.
+    // Enough copies (GPU_LOD_MIN_COPIES) that the GPU picks their levels: 40, from 3 to 22.5 m away, all on screen.
+    const distances = Array.from({ length: 40 }, (_, i) => 3 + i * 0.5);
+    const instances = distances.map((d, i) => ({ mesh: near, lod, model: composeModelMatrix([i % 2 === 0 ? -1 : 1, (i % 5) - 2, 10 - d], [20, 30, 0], [0.5, 0.5, 0.5]) })) as unknown as MeshSceneInstance[];
+    // As lod.ts picks: the distance to the copy's origin over its scale (0.5), against the switch at 12.
+    const nearCount = instances.filter((inst) => Math.hypot(inst.model[12]!, inst.model[13]!, inst.model[14]! - 10) / 0.5 < 12).length;
+    const draw = { width: W, height: H, view: viewMatrix([0, 0, 10], [0, 0, 0]), projection: projectionMatrix(Math.PI / 3, 1, 0.1, 50), environment: null, lights: [], ambient: 0.3, lightDirection: [0.3, 1, 0.6], prepass: true, lod: true } as any;
+    const plainRenderer = (await WebgpuSceneRenderer.create(device, W, H, rasterStyleFor(MODELS.aaa.renderCaps), { hdr: true, mips: true }))!;
+    const plain = (await readLinearTexture(device, plainRenderer.renderToTexture(instances, draw), W, H, settled)).data;
+    const renderer = (await WebgpuSceneRenderer.create(device, W, H, rasterStyleFor(MODELS.aaa.renderCaps), { hdr: true, mips: true }))!;
+    const culled = (await readLinearTexture(device, renderer.renderToTexture(instances, { ...draw, gpuCull: true }), W, H, settled)).data;
+    // Two draws, one per level, sharing the 40 copies' records: those near the eye, and those past the switch (the frustum keeps all).
+    const args = new Uint32Array(await readBuffer((renderer as any).culling.args, 2 * 2 * INDIRECT_WORDS * 4));
+    const count = (round: number, indexCount: number) => [0, 1].map((b) => (round * 2 + b) * INDIRECT_WORDS).find((a) => args[a] === indexCount)!;
+    expect(nearCount).toBeGreaterThan(5);
+    expect(nearCount).toBeLessThan(35);
+    expect(args[count(0, 36) + 1]).toBe(nearCount);
+    expect(args[count(0, 24) + 1]).toBe(40 - nearCount);
+    let worst = 0;
+    for (let i = 0; i < plain.length; i += 1) worst = Math.max(worst, Math.abs(plain[i]! - culled[i]!));
+    expect(worst).toBeLessThan(1e-5);
+    plainRenderer.dispose();
+    renderer.dispose();
+  });
+
   it("keeps every copy of a batch whose vertices move on the GPU", async () => {
     const renderer = (await WebgpuSceneRenderer.create(device, W, H, rasterStyleFor(MODELS.aaa.renderCaps), { hdr: true, mips: true }))!;
     const live = box("live");

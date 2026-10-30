@@ -21,7 +21,7 @@ import { appendConsole, traceColor, type ConsoleEntry } from "./consoleLog";
 import { ProfilerPanel } from "./ProfilerPanel";
 import { DebuggerPanel } from "./DebuggerPanel";
 import { toggleBreakpoint } from "./debuggerView";
-import { loadKtx2Decoder } from "@/lib/ktx2Decoder";
+import { loadKtx2DecoderOffThread } from "@/lib/ktx2Decoder";
 import { rapierPhysics } from "@/lib/physicsRapier";
 import { WebmRecorder, canEncodeVideo } from "@/lib/videoEncode";
 
@@ -250,7 +250,7 @@ export function RunOverlay({
         : {}),
       physics: rapierPhysics(),
       // KTX2 textures: the transcoder is fetched only if the scene has one.
-      ktx2: loadKtx2Decoder,
+      ktx2: loadKtx2DecoderOffThread,
       // Playtest the cart's HD-2D world: 3D terrain with the cart's 2D character
       // sprites standing in it as depth-composited billboards.
       world,

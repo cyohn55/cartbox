@@ -20,6 +20,10 @@
  *   is truly behind something is dropped; a sphere crossing the near plane is
  *   kept. Copies keep their order (a workgroup's prefix sum per batch), so the
  *   frame draws them as it would have, less the hidden ones.
+ * - **Levels of detail.** A batch whose copies share a LOD chain is drawn
+ *   once per level, every level sharing the copies' instance records; each
+ *   keeps the copies its distance picks (as lod.ts does, measured to the
+ *   copy's origin in the mesh's units), so the CPU doesn't choose levels.
  * - **What it leaves alone.** Batches whose vertices move on the GPU or in a
  *   graph (live skinning, cloth, a world-position offset), and see-through
  *   batches (drawn in order, farthest first), are copied whole.
@@ -31,11 +35,12 @@ import { INSTANCE_FLOATS } from "./scenePacking.js";
 
 /* eslint-disable @typescript-eslint/no-explicit-any -- WebGPU handles aren't typed in this build */
 
-/** Bytes of one batch's entry: first, count, eligible, index count, then the local sphere. */
-const ENTRY_BYTES = 32;
+/** Bytes of one source (first, count, eligible, then its local sphere) and of one draw's entry (see the WGSL's). */
+const SOURCE_BYTES = 32;
+const ENTRY_BYTES = 64;
 /** One batch's `drawIndexedIndirect` arguments, in u32s. */
 export const INDIRECT_WORDS = 5;
-const UNIFORM_BYTES = 6 * 16 + 64 + 32;
+const UNIFORM_BYTES = 6 * 16 + 64 + 64;
 /** The rounds' uniforms sit a dynamic-offset alignment apart. */
 const UNIFORM_STRIDE = 256;
 const WORKGROUP = 64;
@@ -50,30 +55,36 @@ const STORAGE_BINDING = 0x08;
 const COMPUTE = 0x4;
 
 export const CULL_WGSL = /* wgsl */ `
-struct Entry { first: u32, count: u32, eligible: u32, indexCount: u32, sphere: vec4<f32> };
+/** A run of copies with their instance records (a batch, and every LOD sibling sharing it). */
+struct Source { first: u32, count: u32, eligible: u32, pad: u32, sphere: vec4<f32> };
+/** A draw: its copies (a source's), where it packs the ones it keeps, and, with a LOD chain, the level it draws and the switch distances. */
+struct Entry { src: u32, count: u32, dst: u32, indexCount: u32, level: i32, levels: u32, switches: u32, pad: u32, d0: vec4<f32>, d1: vec4<f32> };
 struct Cull {
   planes: array<vec4<f32>, 6>,
   viewProj: mat4x4<f32>,
   size: vec4<f32>,     // x, y = the depth's size; z = the pyramid's levels; w = 1 to test against it
-  counts: vec4<u32>,   // x = batches, y = copies, z = where the round's region starts, w = which round (0, 1)
+  counts: vec4<u32>,   // x = draws, y = copies, z = where the region starts, w = which round (0, 1)
+  more: vec4<u32>,     // x = sources, y = the region's copies (its motion records follow them)
+  eye: vec4<f32>,
 };
 @group(0) @binding(0) var<uniform> cull: Cull;
-@group(0) @binding(1) var<storage, read> entries: array<Entry>;
+@group(0) @binding(1) var<storage, read> sources: array<Source>;
 @group(0) @binding(2) var<storage, read_write> xf: array<f32>;
 @group(0) @binding(3) var<storage, read_write> flags: array<u32>;
 @group(0) @binding(4) var<storage, read_write> args: array<u32>;
 @group(0) @binding(5) var hiz: texture_2d<f32>;
+@group(0) @binding(6) var<storage, read> entries: array<Entry>;
 
 const RECORD = ${INSTANCE_FLOATS}u;
 
-/** The batch a copy belongs to (batches are in order of their first copy). */
+/** The source a copy belongs to (sources are in order of their first copy). */
 fn owner(i: u32) -> u32 {
   var lo = 0u;
-  var hi = cull.counts.x;
+  var hi = cull.more.x;
   loop {
     if (hi - lo <= 1u) { break; }
     let mid = (lo + hi) / 2u;
-    if (entries[mid].first <= i) { lo = mid; } else { hi = mid; }
+    if (sources[mid].first <= i) { lo = mid; } else { hi = mid; }
   }
   return lo;
 }
@@ -112,22 +123,30 @@ fn hidden(c: vec3<f32>, r: f32) -> bool {
   return nearest > farthest;
 }
 
+fn modelOf(i: u32) -> mat4x4<f32> {
+  let b = i * RECORD + 32u;
+  return mat4x4<f32>(
+    vec4<f32>(xf[b], xf[b + 1u], xf[b + 2u], xf[b + 3u]),
+    vec4<f32>(xf[b + 4u], xf[b + 5u], xf[b + 6u], xf[b + 7u]),
+    vec4<f32>(xf[b + 8u], xf[b + 9u], xf[b + 10u], xf[b + 11u]),
+    vec4<f32>(xf[b + 12u], xf[b + 13u], xf[b + 14u], xf[b + 15u]),
+  );
+}
+
+fn scaleOf(m: mat4x4<f32>) -> f32 {
+  return max(length(m[0].xyz), max(length(m[1].xyz), length(m[2].xyz)));
+}
+
 @compute @workgroup_size(${WORKGROUP})
 fn test(@builtin(global_invocation_id) id: vec3<u32>) {
   let i = id.x;
   if (i >= cull.counts.y) { return; }
-  let e = entries[owner(i)];
+  let s = sources[owner(i)];
   var seen = 1u;
-  if (e.eligible != 0u) {
-    let b = i * RECORD + 32u;
-    let model = mat4x4<f32>(
-      vec4<f32>(xf[b], xf[b + 1u], xf[b + 2u], xf[b + 3u]),
-      vec4<f32>(xf[b + 4u], xf[b + 5u], xf[b + 6u], xf[b + 7u]),
-      vec4<f32>(xf[b + 8u], xf[b + 9u], xf[b + 10u], xf[b + 11u]),
-      vec4<f32>(xf[b + 12u], xf[b + 13u], xf[b + 14u], xf[b + 15u]),
-    );
-    let c = (model * vec4<f32>(e.sphere.xyz, 1.0)).xyz;
-    let r = e.sphere.w * max(length(model[0].xyz), max(length(model[1].xyz), length(model[2].xyz)));
+  if (s.eligible != 0u) {
+    let model = modelOf(i);
+    let c = (model * vec4<f32>(s.sphere.xyz, 1.0)).xyz;
+    let r = s.sphere.w * scaleOf(model);
     for (var p = 0u; p < 6u; p = p + 1u) {
       let plane = cull.planes[p];
       if (dot(plane.xyz, c) + plane.w < -r) { seen = 0u; }
@@ -137,20 +156,38 @@ fn test(@builtin(global_invocation_id) id: vec3<u32>) {
   flags[i] = seen;
 }
 
+/** The level a copy's distance picks (as lod.ts's selectLodIndex, clamped to the chain), its distance in the mesh's units. */
+fn levelOf(e: Entry, i: u32) -> i32 {
+  let m = modelOf(i);
+  let d = length(m[3].xyz - cull.eye.xyz) / max(scaleOf(m), 1e-12);
+  var k = 0u;
+  for (var j = 0u; j < e.switches; j = j + 1u) {
+    var at = 0.0;
+    if (j < 4u) { at = e.d0[j]; } else { at = e.d1[j - 4u]; }
+    if (d >= at) { k = j + 1u; } else { break; }
+  }
+  return i32(min(k, e.levels - 1u));
+}
+
 var<workgroup> scan: array<u32, ${WORKGROUP}>;
 
-/** One batch a workgroup: its seen copies' records (and their motion records) packed into the round's region, in order. */
+/** One draw a workgroup: its kept copies' records (and their motion records) packed at its place in the region, in order. */
 @compute @workgroup_size(${WORKGROUP})
 fn compact(@builtin(workgroup_id) group: vec3<u32>, @builtin(local_invocation_id) local: vec3<u32>) {
   let index = group.x + group.y * 65535u;
   if (index >= cull.counts.x) { return; }
   let e = entries[index];
   let n = cull.counts.y;
+  let total = cull.more.y;
   let region = cull.counts.z;
   var kept = 0u;
   for (var start = 0u; start < e.count; start = start + ${WORKGROUP}u) {
     let j = start + local.x;
-    let seen = select(0u, flags[e.first + j], j < e.count);
+    var seen = 0u;
+    if (j < e.count) {
+      seen = flags[e.src + j];
+      if (seen == 1u && e.level >= 0 && levelOf(e, e.src + j) != e.level) { seen = 0u; }
+    }
     scan[local.x] = seen;
     workgroupBarrier();
     for (var step = 1u; step < ${WORKGROUP}u; step = step * 2u) {
@@ -160,11 +197,11 @@ fn compact(@builtin(workgroup_id) group: vec3<u32>, @builtin(local_invocation_id
       workgroupBarrier();
     }
     if (seen == 1u) {
-      let to = region + e.first + kept + scan[local.x] - 1u;
-      let src = e.first + j;
+      let to = region + e.dst + kept + scan[local.x] - 1u;
+      let src = e.src + j;
       for (var f = 0u; f < RECORD; f = f + 1u) {
         xf[to * RECORD + f] = xf[src * RECORD + f];
-        xf[(to + n) * RECORD + f] = xf[(src + n) * RECORD + f];
+        xf[(to + total) * RECORD + f] = xf[(src + n) * RECORD + f];
       }
     }
     kept = kept + workgroupUniformLoad(&scan[${WORKGROUP - 1}u]);
@@ -252,23 +289,39 @@ export function primitiveSphere(primitive: MeshPrimitive): readonly [number, num
   return s;
 }
 
-/** One batch, as the cull sees it. */
+/** A run of copies and their instance records: a batch, shared by its LOD siblings. */
+export interface CullSource {
+  readonly first: number;
+  readonly count: number;
+  /** Null: every copy is seen (its vertices move, or it's see-through). */
+  readonly sphere: readonly [number, number, number, number] | null;
+}
+
+/** One draw, as the cull sees it. */
 export interface CullBatch {
+  /** Its source's first copy. */
   readonly first: number;
   readonly count: number;
   readonly indexCount: number;
-  /** Null: drawn whole (its vertices move, or it's see-through). */
-  readonly sphere: readonly [number, number, number, number] | null;
+  /** Where its kept copies go, from the region's start. */
+  readonly dst: number;
+  /** The LOD level it draws and its chain's switch distances (in the mesh's units), or null to keep every seen copy. */
+  readonly lod: { readonly level: number; readonly levels: number; readonly distances: readonly number[] } | null;
 }
+
+/** The most switch distances a chain may have on the GPU. */
+export const MAX_LOD_SWITCHES = 8;
 
 /** The culling's buffers and pipelines on one device; {@link plan} each frame, then the rounds. */
 export class GpuCulling {
   private readonly uniforms: any;
+  private sources: any = null;
+  private sourceCapacity = 0;
   private entries: any = null;
   private entryCapacity = 0;
   private flags: any = null;
   private flagCapacity = 0;
-  /** Both rounds' indirect arguments: the frustum's batches, then the occlusion's. */
+  /** Both rounds' indirect arguments: the frustum's draws, then the occlusion's. */
   args: any = null;
   private argCapacity = 0;
   private readonly testPipeline: any;
@@ -280,7 +333,7 @@ export class GpuCulling {
   private readonly downLayout: any;
   private hiz: { texture: any; width: number; height: number; levels: number; views: any[] } | null = null;
   private blank: any = null;
-  private frame: { batches: number; copies: number; region: number; planes: Float32Array; viewProj: ArrayLike<number> } | null = null;
+  private frame: { batches: number; sources: number; copies: number; region: number; total: number; planes: Float32Array; viewProj: ArrayLike<number>; eye: readonly number[] } | null = null;
 
   constructor(private readonly device: any) {
     this.uniforms = device.createBuffer({ size: UNIFORM_STRIDE * 2, usage: UNIFORM | COPY_DST });
@@ -293,6 +346,7 @@ export class GpuCulling {
         storage(3, "storage"),
         storage(4, "storage"),
         { binding: 5, visibility: COMPUTE, texture: { sampleType: "unfilterable-float" } },
+        storage(6, "read-only-storage"),
       ],
     });
     this.firstLayout = device.createBindGroupLayout({
@@ -316,40 +370,49 @@ export class GpuCulling {
   }
 
   /**
-   * The frame's batches and camera. The instance buffer holds `copies`
-   * records from 0 and their motion records from `copies`; both rounds pack
-   * theirs from `region` (each batch at its own first copy), the motion
-   * records `copies` on, so the instance buffer needs `region + 2 × copies`.
+   * The frame's sources (in order of their first copy), draws and camera. The
+   * instance buffer holds `copies` records from 0 and their motion records
+   * from `copies`; both rounds pack each draw's kept copies at
+   * `region + dst`, their motion records `total` on (the draws' copies
+   * counted together), so the instance buffer needs `region + 2 × total`.
    * The second round packs over the first's once the prepass has drawn it.
    */
-  plan(batches: readonly CullBatch[], copies: number, region: number, viewProj: ArrayLike<number>): void {
-    if (batches.length > this.entryCapacity) {
-      this.entries?.destroy();
-      this.entryCapacity = Math.max(batches.length, this.entryCapacity * 2, 16);
-      this.entries = this.device.createBuffer({ size: this.entryCapacity * ENTRY_BYTES, usage: STORAGE | COPY_DST });
-    }
-    if (copies > this.flagCapacity) {
-      this.flags?.destroy();
-      this.flagCapacity = Math.max(copies, this.flagCapacity * 2, 64);
-      this.flags = this.device.createBuffer({ size: this.flagCapacity * 4, usage: STORAGE | COPY_SRC });
-    }
-    if (batches.length * 2 > this.argCapacity) {
-      this.args?.destroy();
-      this.argCapacity = Math.max(batches.length * 2, this.argCapacity * 2, 32);
-      this.args = this.device.createBuffer({ size: this.argCapacity * INDIRECT_WORDS * 4, usage: STORAGE | INDIRECT | COPY_DST | COPY_SRC });
-    }
-    const data = new ArrayBuffer(Math.max(1, batches.length) * ENTRY_BYTES);
-    const u = new Uint32Array(data);
-    const f = new Float32Array(data);
-    batches.forEach((b, k) => {
-      u.set([b.first, b.count, b.sphere ? 1 : 0, b.indexCount], k * 8);
-      if (b.sphere) f.set(b.sphere, k * 8 + 4);
+  plan(sources: readonly CullSource[], batches: readonly CullBatch[], copies: number, region: number, total: number, viewProj: ArrayLike<number>, eye: readonly number[]): void {
+    const grow = (buffer: any, capacity: number, need: number, bytes: number, usage: number): [any, number] => {
+      if (need <= capacity && buffer) return [buffer, capacity];
+      buffer?.destroy();
+      const next = Math.max(need, capacity * 2, 16);
+      return [this.device.createBuffer({ size: next * bytes, usage }), next];
+    };
+    [this.sources, this.sourceCapacity] = grow(this.sources, this.sourceCapacity, sources.length, SOURCE_BYTES, STORAGE | COPY_DST);
+    [this.entries, this.entryCapacity] = grow(this.entries, this.entryCapacity, batches.length, ENTRY_BYTES, STORAGE | COPY_DST);
+    [this.flags, this.flagCapacity] = grow(this.flags, this.flagCapacity, Math.max(copies, 64), 4, STORAGE | COPY_SRC);
+    [this.args, this.argCapacity] = grow(this.args, this.argCapacity, Math.max(batches.length * 2, 32), INDIRECT_WORDS * 4, STORAGE | INDIRECT | COPY_DST | COPY_SRC);
+    const s = new ArrayBuffer(Math.max(1, sources.length) * SOURCE_BYTES);
+    const su = new Uint32Array(s);
+    const sf = new Float32Array(s);
+    sources.forEach((b, k) => {
+      su.set([b.first, b.count, b.sphere ? 1 : 0, 0], k * 8);
+      if (b.sphere) sf.set(b.sphere, k * 8 + 4);
     });
-    this.device.queue.writeBuffer(this.entries, 0, data);
-    this.frame = { batches: batches.length, copies, region, planes: frustumPlanesOf(viewProj), viewProj };
+    this.device.queue.writeBuffer(this.sources, 0, s);
+    const e = new ArrayBuffer(Math.max(1, batches.length) * ENTRY_BYTES);
+    const eu = new Uint32Array(e);
+    const ei = new Int32Array(e);
+    const ef = new Float32Array(e);
+    batches.forEach((b, k) => {
+      const o = k * (ENTRY_BYTES / 4);
+      eu.set([b.first, b.count, b.dst, b.indexCount], o);
+      const switches = b.lod ? Math.min(MAX_LOD_SWITCHES, b.lod.distances.length) : 0;
+      ei[o + 4] = b.lod ? b.lod.level : -1;
+      eu.set([b.lod ? b.lod.levels : 1, switches, 0], o + 5);
+      if (b.lod) ef.set(b.lod.distances.slice(0, switches), o + 8);
+    });
+    this.device.queue.writeBuffer(this.entries, 0, e);
+    this.frame = { batches: batches.length, sources: sources.length, copies, region, total, planes: frustumPlanesOf(viewProj), viewProj, eye };
   }
 
-  /** Where a batch's arguments sit for a round (0: the frustum's, 1: the occlusion's), in bytes. */
+  /** Where a draw's arguments sit for a round (0: the frustum's, 1: the occlusion's), in bytes. */
   argsOffset(round: 0 | 1, batch: number): number {
     return (round * (this.frame?.batches ?? 0) + batch) * INDIRECT_WORDS * 4;
   }
@@ -358,10 +421,13 @@ export class GpuCulling {
     const f = this.frame!;
     const data = new ArrayBuffer(UNIFORM_BYTES);
     const floats = new Float32Array(data);
+    const words = new Uint32Array(data);
     floats.set(f.planes, 0);
     floats.set(Array.from({ length: 16 }, (_, i) => f.viewProj[i]!), 24);
     floats.set([size[0], size[1], levels, occlusion ? 1 : 0], 40);
-    new Uint32Array(data).set([f.batches, f.copies, f.region, round], 44);
+    words.set([f.batches, f.copies, f.region, round], 44);
+    words.set([f.sources, f.total, 0, 0], 48);
+    floats.set([f.eye[0]!, f.eye[1]!, f.eye[2]!, 0], 52);
     this.device.queue.writeBuffer(this.uniforms, round * UNIFORM_STRIDE, data);
   }
 
@@ -388,16 +454,17 @@ export class GpuCulling {
       layout: this.cullLayout,
       entries: [
         { binding: 0, resource: { buffer: this.uniforms, offset: round * UNIFORM_STRIDE, size: UNIFORM_BYTES } },
-        { binding: 1, resource: { buffer: this.entries } },
+        { binding: 1, resource: { buffer: this.sources } },
         { binding: 2, resource: { buffer: instances } },
         { binding: 3, resource: { buffer: this.flags } },
         { binding: 4, resource: { buffer: this.args } },
         { binding: 5, resource: hiz },
+        { binding: 6, resource: { buffer: this.entries } },
       ],
     });
     const pass = encoder.beginComputePass(timing);
     pass.setBindGroup(0, group);
-    if (f.copies > 0) {
+    if (f.copies > 0 && f.sources > 0) {
       pass.setPipeline(this.testPipeline);
       pass.dispatchWorkgroups(Math.ceil(f.copies / WORKGROUP));
     }

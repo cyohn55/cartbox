@@ -269,6 +269,26 @@ Everything else depends on this track. It contains no visible "feature", but its
       - with MSAA, the second round tests the frustum alone (the pyramid reads single-sampled depth);
       - decoding, physics and navigation on workers;
       - measuring the exit on Beaver Creek.
+  - **F0e-2, LOD and lights on the GPU, recorded draws, decoding on workers: done** on the GPU-culled path.
+    - **LOD selection in the cull.** A chain with at least 32 copies (`GPU_LOD_MIN_COPIES`) is drawn once per level, every level sharing the copies' instance records; the compaction keeps, for each level, the copies its distance picks (as lod.ts does: to the copy's origin, over its largest scale, up to 8 switches). A chain with fewer copies is still chosen on the CPU, since each level is a draw of its own.
+      - The cull's inputs split into *sources* (a run of copies and their sphere) and *draws* (a source, where its kept copies pack, and its level), so siblings pack apart and their motion records follow the region's total.
+    - **Clustered lights on the GPU** (`render/gpuLightClusters.ts`). Three compute passes build lightClusters.ts's table and index list from the packed lights: each cell lists the lights whose sphere touches its box, in light order; one workgroup scans the counts into starts (held to the CPU's caps); each cell copies its row there. The sphere is widened slightly more than the CPU's, so rounding can add a light to a cell but never drop one. `clusterGrid` is now shared with the CPU builder.
+    - **Recorded draws** (`render/renderBundles.ts`). With GPU culling a pass's commands hold from frame to frame (counts live in the indirect buffer), so the prepass and the opaque and see-through passes are recorded into render bundles and replayed. A bundle is recorded again only when something its commands name changes (a pipeline, bind group, buffer or range), compared by identity.
+    - **Decoding on workers.** PNG, JPEG and WebP decode in a small worker pool (`render/decodeWorkers.ts`, an inline Blob script, so nothing extra is served), and KTX2 transcodes on a worker (`ktx2Worker.ts`, `loadKtx2DecoderOffThread`), handing back its pixels and compressed levels by transfer. A failed worker hands that file, and every later one, back to the main thread.
+    - *Tests:*
+      - `gpu-culling.test.ts`: 40 copies of a two-level chain from 3 to 22.5 m pick the same levels on the GPU as the CPU, and draw the same frame to within 1e-5;
+      - `gpu-light-clusters.test.ts`: the GPU lists every light the CPU lists, in the same order, and the lit frame matches;
+      - `decode-workers.test.ts`: the pool's balancing, transfers and failures; the worker script; the KTX2 worker's fallback.
+    - *Found, then fixed:* the LOD test first put its nearest copy outside the frustum, so the GPU (correctly) drew one fewer near copy than the test expected.
+    - *Measured* on Beaver Creek (168 copies, 4 lights; 1280×720; Node on SwiftShader, V8's profiler, self-time in JS only): the renderer spends about 14.5 ms of JS a frame on the culled path, against 13.5 ms without it. **The exit (under 4 ms) is not met.**
+      - Bundles replay for about 0.3 ms with a camera that moves smoothly. A benchmark that jumps between distant views every frame re-records them every frame (the CPU's LOD picks and the see-through order change), which costs about 9 ms.
+      - What remains: each copy's `mvp` and `lightMvp` multiplied on the CPU (about 3.7 ms), packing each draw's uniforms (about 5 ms), and planning the cull.
+    - *Left for F0e:*
+      - the model-view-projection products on the GPU (the instance record has the model; the shaders can multiply);
+      - per-draw uniforms written only when they change;
+      - culling shadow casters per cascade and light; a two-phase cull; the occlusion round with MSAA;
+      - skinning as a compute pass; physics and navigation on workers;
+      - measuring the exit in a browser on hardware.
 
 ### F1. Textures and materials
 

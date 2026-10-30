@@ -5,7 +5,7 @@
  * warming up on the software rasteriser before the first one lands.
  */
 
-import { depthLinearTerms, effectActive, refracts, resolveRefraction, type DecodedTexture, type HdrLightmap, type Mat4, type MeshAsset, type MeshPrimitive, type MeshSceneInstance, type SurfaceEffect } from "@cartbox/editor";
+import { depthLinearTerms, effectActive, refracts, resolveRefraction, type DecodedTexture, type HdrLightmap, type LodChain, type Mat4, type MeshAsset, type MeshPrimitive, type MeshSceneInstance, type SurfaceEffect } from "@cartbox/editor";
 
 import type { SceneDraw, SoftwareSceneRenderer } from "./sceneRenderer.js";
 import { resolvePbr } from "./scenePacking.js";
@@ -182,6 +182,13 @@ export interface DrawBatch<G> {
   first: number;
   /** The LOD level its copies draw (F10a), or −1 without a chain. */
   lod?: number;
+  /**
+   * With LOD siblings (F0e): the chain every copy shares, which the GPU picks
+   * each copy's level from, and, for a sibling (one of the chain's other
+   * levels), the batch whose copies (and instance records) it shares.
+   */
+  lodChain?: LodChain | null;
+  source?: DrawBatch<G>;
 }
 
 /** Whether a batch refracts (I5): a PBR draw whose material or surface effect bends what's behind it, or that transmits it (F1d). */
@@ -202,10 +209,18 @@ export function batchInstances<G extends { indexCount: number }>(
   geometryOf: (mesh: MeshAsset) => readonly (G | undefined)[],
   /** The camera's world position, to draw see-through copies farthest first. */
   eye: readonly [number, number, number] = [0, 0, 0],
+  /**
+   * Leave the LOD choice to the GPU (F0e) for these chains: copies with one batch only with
+   * copies of the same chain, and each such batch gains a sibling for each of
+   * the chain's other levels (the same primitive of that level's mesh) sharing
+   * its copies. The GPU then keeps each copy in the one level its distance picks.
+   */
+  lodSiblings: ReadonlySet<LodChain> | null = null,
 ): { batches: DrawBatch<G>[]; instanceCount: number } {
   const batches: DrawBatch<G>[] = [];
   const seeThrough: { batch: DrawBatch<G>; distance: number }[] = [];
   const byPrimitive = new Map<MeshPrimitive, DrawBatch<G>[]>();
+  const chained: { batch: DrawBatch<G>; mesh: MeshAsset; index: number }[] = [];
   let instanceCount = 0;
   for (const instance of instances) {
     const geometries = geometryOf(instance.mesh);
@@ -242,14 +257,28 @@ export function batchInstances<G extends { indexCount: number }>(
       }
       let list = byPrimitive.get(primitive);
       if (!list) byPrimitive.set(primitive, (list = []));
-      let batch = list.find((b) => b.effect === effect && b.channels === channels && sameTextures(b.textures, textures));
+      const chain = lodSiblings && instance.lod && lodSiblings.has(instance.lod) && lod >= 0 ? instance.lod : null;
+      let batch = list.find((b) => b.effect === effect && b.channels === channels && sameTextures(b.textures, textures) && (b.lodChain ?? null) === chain);
       if (!batch) {
-        batch = { primitive, geometry, textures, models: [], effect, channels, alpha, refract, first: 0, lod };
+        batch = { primitive, geometry, textures, models: [], effect, channels, alpha, refract, first: 0, lod, ...(chain ? { lodChain: chain } : {}) };
         list.push(batch);
         batches.push(batch);
+        if (chain) chained.push({ batch, mesh: instance.mesh, index });
       }
       batch.models.push(instance.model);
       instanceCount += 1;
+    });
+  }
+  // The chains' other levels (F0e): the same primitive of each level's mesh, sharing the batch's copies.
+  for (const { batch, mesh, index } of chained) {
+    const chain = batch.lodChain!;
+    chain.meshes.forEach((level, k) => {
+      if (level === mesh) return;
+      const primitive = level.primitives[index];
+      const geometry = geometryOf(level)[index];
+      if (!primitive || !geometry || geometry.indexCount === 0) return;
+      if (alphaCode(primitive.material.alphaMode) !== batch.alpha) return;
+      batches.push({ ...batch, primitive, geometry, lod: k, source: batch });
     });
   }
   // See-through copies after the opaque scene, farthest first.

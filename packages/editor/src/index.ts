@@ -772,6 +772,8 @@ export {
   CLUSTER_Y,
   CLUSTER_Z,
   buildLightClusters,
+  clusterGrid,
+  type ClusterGrid,
   clusterSlice,
   clusterTile,
   lightBounded,
