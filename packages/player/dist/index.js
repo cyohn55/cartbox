@@ -4679,6 +4679,7 @@ function browserDeviceHints(webgpu) {
     ...webgpu === void 0 ? {} : { webgpu }
   };
 }
+var PAUSE_MS = 3e3;
 var QualityGovernor = class {
   constructor(slowMs = 25, windowMs = 1500, settleMs = 3e3, busyShare = 0.6) {
     this.slowMs = slowMs;
@@ -4706,7 +4707,7 @@ var QualityGovernor = class {
    * `level`, or null to stay.
    */
   feed(ms, busyMs, now, level) {
-    if (now < this.holdUntil || !(ms > 0) || ms > 500) return null;
+    if (now < this.holdUntil || !(ms > 0) || ms > PAUSE_MS) return null;
     const k = 1 / Math.min(this.frames + 1, 30);
     this.average += (ms - this.average) * k;
     this.busy += (Math.min(busyMs, ms) - this.busy) * k;
@@ -11556,6 +11557,188 @@ var DynamicResolution = class {
   }
 };
 
+// src/render/gpuPacing.ts
+var GPU_RENDER_SCALES = [1, 0.85, 0.7, 0.6, 0.5, 0.42, 0.35];
+var GPU_SLOW_MS = 45;
+var GPU_FAST_MS = 22;
+var GPU_CLIMB_MS = 3e3;
+var GPU_TARGET_MS = 30;
+var SETTLE_MS = 600;
+var SETTLE_LANDINGS = 2;
+var STALL_MS = 1200;
+var BEHIND_RATIO = 1.4;
+var BEHIND_SLACK_MS = 4;
+var SMOOTHING2 = 0.3;
+function stepFor(scale, ms, targetMs) {
+  const wanted = scale * Math.sqrt(targetMs / Math.max(ms, 1e-3));
+  const index = GPU_RENDER_SCALES.findIndex((s) => s <= wanted + 1e-6);
+  return index < 0 ? GPU_RENDER_SCALES.length - 1 : index;
+}
+var GpuPacer = class {
+  constructor() {
+    /** The current step of {@link GPU_RENDER_SCALES}. */
+    this.step = 0;
+    /** Smoothed time between landed frames (ms), and between presented ones. */
+    this.landMs = null;
+    this.presentMs = null;
+    this.lastLanded = -1;
+    this.lastLandAt = 0;
+    this.lastPresentAt = 0;
+    this.changedAt = 0;
+    this.landingsSinceChange = 0;
+    this.fastSince = null;
+  }
+  get scale() {
+    return GPU_RENDER_SCALES[this.step];
+  }
+  /**
+   * How slow the GPU is (ms per frame) when it's what holds the 3D back, else
+   * null: the smoothed landed interval, or the current stall if longer.
+   */
+  gpuBoundMs(now) {
+    if (this.landMs === null || this.presentMs === null) return null;
+    const ms = Math.max(this.landMs, now - this.lastLandAt);
+    return ms > this.presentMs * BEHIND_RATIO + BEHIND_SLACK_MS ? ms : null;
+  }
+  /** Start afresh (a new scene, a resume after a pause): the scale stays, the timings go. */
+  reset(now) {
+    this.landMs = null;
+    this.presentMs = null;
+    this.lastLanded = -1;
+    this.lastPresentAt = 0;
+    this.lastLandAt = now;
+    this.changedAt = now;
+    this.landingsSinceChange = 0;
+    this.fastSince = null;
+  }
+  /**
+   * One presented frame at `now`, `landed` GPU frames having come back so far:
+   * the step to render the next at.
+   */
+  update(now, landed) {
+    if (this.lastPresentAt > 0) {
+      const ms = now - this.lastPresentAt;
+      if (ms > 1e3) {
+        this.reset(now);
+        this.lastPresentAt = now;
+        this.lastLanded = landed;
+        return this.step;
+      }
+      this.presentMs = this.presentMs === null ? ms : this.presentMs + (ms - this.presentMs) * SMOOTHING2;
+    }
+    this.lastPresentAt = now;
+    if (this.lastLanded < 0) {
+      this.lastLanded = landed;
+      this.lastLandAt = now;
+      return this.step;
+    }
+    if (landed > this.lastLanded) {
+      const ms = (now - this.lastLandAt) / (landed - this.lastLanded);
+      this.landMs = this.landMs === null ? ms : this.landMs + (ms - this.landMs) * SMOOTHING2;
+      this.landingsSinceChange += landed - this.lastLanded;
+      this.lastLanded = landed;
+      this.lastLandAt = now;
+    }
+    const sinceChange = now - this.changedAt;
+    const stalled = now - this.lastLandAt;
+    const bound = this.gpuBoundMs(now) ?? (this.presentMs !== null && stalled > STALL_MS ? stalled : null);
+    if (bound !== null && bound > GPU_SLOW_MS && this.step < GPU_RENDER_SCALES.length - 1) {
+      const settled = sinceChange >= SETTLE_MS && (this.landingsSinceChange >= SETTLE_LANDINGS || stalled > STALL_MS);
+      if (settled) this.change(Math.max(this.step + 1, stepFor(this.scale, bound, GPU_TARGET_MS)), now);
+      return this.step;
+    }
+    const fast = this.step > 0 && this.landMs !== null && this.landMs < GPU_FAST_MS && stalled < GPU_FAST_MS * 3;
+    if (!fast) this.fastSince = null;
+    else if (this.fastSince === null) this.fastSince = now;
+    else if (now - this.fastSince >= GPU_CLIMB_MS && sinceChange >= GPU_CLIMB_MS) this.change(this.step - 1, now);
+    return this.step;
+  }
+  change(step, now) {
+    step = Math.min(GPU_RENDER_SCALES.length - 1, Math.max(0, step));
+    if (step === this.step) return;
+    this.step = step;
+    this.changedAt = now;
+    this.landingsSinceChange = 0;
+    this.fastSince = null;
+    this.landMs = null;
+  }
+};
+function expandBilinear(src, sw, sh, dst, dw, dh) {
+  const from = new Uint32Array(src.buffer, src.byteOffset, sw * sh);
+  const to = new Uint32Array(dst.buffer, dst.byteOffset, dw * dh);
+  const x0 = new Int32Array(dw);
+  const x1 = new Int32Array(dw);
+  const wx = new Int32Array(dw);
+  for (let x = 0; x < dw; x += 1) {
+    const sx = Math.min(sw - 1, Math.max(0, (x + 0.5) * sw / dw - 0.5));
+    const i = Math.floor(sx);
+    x0[x] = i;
+    x1[x] = Math.min(sw - 1, i + 1);
+    wx[x] = Math.round((sx - i) * 256);
+  }
+  const rows = [new Uint32Array(dw), new Uint32Array(dw)];
+  const ids2 = [-1, -1];
+  const across = (sy, row) => {
+    const base = sy * sw;
+    for (let x = 0; x < dw; x += 1) {
+      const a = from[base + x0[x]];
+      const b = from[base + x1[x]];
+      const w = wx[x];
+      if (w === 0 || a === b) {
+        row[x] = a;
+        continue;
+      }
+      const iw = 256 - w;
+      const rb = (a & 16711935) * iw + (b & 16711935) * w >>> 8 & 16711935;
+      const ga = (a >>> 8 & 16711935) * iw + (b >>> 8 & 16711935) * w >>> 8 & 16711935;
+      row[x] = (rb | ga << 8) >>> 0;
+    }
+  };
+  const rowFor = (sy) => {
+    if (ids2[0] === sy) return rows[0];
+    if (ids2[1] === sy) return rows[1];
+    const slot = ids2[0] === sy - 1 ? 1 : 0;
+    across(sy, rows[slot]);
+    ids2[slot] = sy;
+    return rows[slot];
+  };
+  for (let y = 0; y < dh; y += 1) {
+    const sy = Math.min(sh - 1, Math.max(0, (y + 0.5) * sh / dh - 0.5));
+    const i = Math.floor(sy);
+    const j = Math.min(sh - 1, i + 1);
+    const w = Math.round((sy - i) * 256);
+    const out = y * dw;
+    const top = rowFor(i);
+    if (w === 0 || i === j) {
+      to.set(top, out);
+      continue;
+    }
+    const bottom = rowFor(j);
+    const iw = 256 - w;
+    for (let x = 0; x < dw; x += 1) {
+      const a = top[x];
+      const b = bottom[x];
+      if (a === b) {
+        to[out + x] = a;
+        continue;
+      }
+      const rb = (a & 16711935) * iw + (b & 16711935) * w >>> 8 & 16711935;
+      const ga = (a >>> 8 & 16711935) * iw + (b >>> 8 & 16711935) * w >>> 8 & 16711935;
+      to[out + x] = (rb | ga << 8) >>> 0;
+    }
+  }
+}
+function resampleNearest(src, sw, sh, dw, dh) {
+  const out = new Uint8Array(dw * dh * 4);
+  const from = new Uint32Array(src.buffer, src.byteOffset, sw * sh);
+  const to = new Uint32Array(out.buffer);
+  for (let y = 0; y < dh; y += 1) {
+    const sy = Math.min(sh - 1, Math.floor(y * sh / dh));
+    for (let x = 0; x < dw; x += 1) to[y * dw + x] = from[sy * sw + Math.min(sw - 1, Math.floor(x * sw / dw))];
+  }
+  return out;
+}
+
 // src/mesh/MeshOverlaySurface.ts
 import {
   atmosphereLighting,
@@ -11932,6 +12115,9 @@ var CappedSceneRenderer = class {
     const inner = this.inner;
     return inner.resize ? (width, height) => inner.resize(width, height) : void 0;
   }
+  get framesLanded() {
+    return this.inner.framesLanded;
+  }
   dispose() {
     this.inner.dispose();
   }
@@ -12263,6 +12449,8 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
     this.frameMs = 0;
     this.framesAtStep = 0;
     this.low = null;
+    /** A GPU that reads its frames back: paced by how often they land (gpuPacing.ts), made with the first frame. */
+    this.gpuPacer = null;
     /** The last sky backdrop and the view it was painted for (it depends only on
      *  where the camera points, so walking without turning reuses it). */
     this.skyCache = null;
@@ -13074,8 +13262,10 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
   }
   /** What the renderer drew last frame. */
   renderStats() {
-    const raw = this.renderer.lastFrameStats ?? null;
-    const rendered = this.rendered && this.gpuTarget() && (this.rendered.width !== this.width || this.rendered.height !== this.height) ? this.rendered : null;
+    const base = this.renderer.lastFrameStats ?? null;
+    const raw = base && this.gpuPacer?.landMs != null ? { ...base, frameMs: this.gpuPacer.landMs } : base;
+    const paced = this.low && this.gpuPaced() && this.gpuPacer && this.gpuPacer.scale < 1 ? { width: this.low.width, height: this.low.height, scale: this.low.width / this.width } : null;
+    const rendered = this.rendered && this.gpuTarget() && (this.rendered.width !== this.width || this.rendered.height !== this.height) ? this.rendered : paced;
     const stats2 = raw && rendered ? { ...raw, resolution: rendered } : raw;
     const present = this.gpuTarget()?.stats;
     if (!stats2 || !present?.passes) return stats2;
@@ -13219,6 +13409,7 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
       this.frame += 1;
       return;
     }
+    if (this.gpuPaced()) this.renderer.resize?.(width, height);
     this.renderer.render(drawn, {
       width,
       height,
@@ -13266,6 +13457,7 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
     if (frontDrawn.length > 0) {
       this.requestFrontRenderer();
       const onGpu = this.frontRenderer.backend !== "software";
+      if (onGpu) this.frontRenderer.resize?.(width, height);
       this.frontRenderer.render(onGpu ? frontDrawn.map((i) => this.withoutRefraction(i)) : frontDrawn, {
         width,
         height,
@@ -13289,12 +13481,13 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
       }
     }
     if (profiler) profiler.add("scene", performance.now() - mark);
-    if (target) expandNearest(target.out, target.width, target.height, this.output, this.width, this.height);
+    if (target) (this.gpuPaced() ? expandBilinear : expandNearest)(target.out, target.width, target.height, this.output, this.width, this.height);
     if (this.hud && this.hudFrame) compositeHudOverScene(this.output, this.hudFrame, this.width * this.height);
     if (this.holo) this.holo(this.output, this.width, this.height, this.frame / 60);
     this.frame += 1;
     this.inner.blit(this.presented);
     this.pace(performance.now() - started);
+    this.paceGpu();
   }
   /** The GPU presenter this frame goes to, when there is one and the renderer can keep its frame on the GPU (F0a). */
   gpuTarget() {
@@ -13576,10 +13769,36 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
     pixels.set(out.subarray(0, width * height * 4));
     this.skyCache = { key: key2, pixels };
   }
-  /** The 3D render scale this frame: 1, unless the software governor has stepped down. */
+  /** The 3D render scale this frame: 1, unless the software governor or the GPU's pacing has stepped down. */
   renderScale() {
+    if (this.gpuPaced()) return this.gpuPacer?.scale ?? 1;
     if (!this.governed()) return 1;
     return Math.min(SOFTWARE_SCALES[this.scaleStep], this.quality.maxRenderScale);
+  }
+  /** Whether this frame's 3D is on a GPU that reads its frames back (not presented on the GPU): one gpuPacing.ts measures. */
+  gpuReadback() {
+    return this.renderer.backend !== "software" && this.renderer.framesLanded !== void 0 && this.gpuTarget() === null;
+  }
+  /**
+   * Whether the GPU's pacing sets the render size: a large first-person view (as the software governor's) on a GPU
+   * that reads its frames back and can render at another size.
+   */
+  gpuPaced() {
+    return this.options.adaptiveResolution !== false && this.hud && this.gpuReadback() && this.renderer.resize !== void 0 && this.width * this.height >= 640 * 360;
+  }
+  /** Time the frames landing from the GPU, and choose the next frame's render size from them. */
+  paceGpu() {
+    if (!this.gpuReadback()) return;
+    this.gpuPacer ?? (this.gpuPacer = new GpuPacer());
+    const step = this.gpuPacer.update(performance.now(), this.renderer.framesLanded ?? 0);
+    if (!this.gpuPaced() && step !== 0) this.gpuPacer.step = 0;
+  }
+  /**
+   * When the GPU is what holds the 3D back (its frames land well behind the run loop), how long each takes to come
+   * back (ms); else null. The quality governor steps the preset down on it, as it does on slow frames.
+   */
+  gpuBoundMs() {
+    return this.gpuReadback() ? this.gpuPacer?.gpuBoundMs(performance.now()) ?? null : null;
   }
   /** Whether the resolution governor applies: a large first-person view on the CPU rasteriser. */
   governed() {
@@ -15852,7 +16071,7 @@ function trianglesIn(instances) {
   return total;
 }
 function presentFrame(latest, visible, draw, software) {
-  if (latest) {
+  if (latest && latest.length === draw.width * draw.height * 4) {
     compositeFrame(latest, draw);
   } else if (draw.width * draw.height <= SOFTWARE_WARMUP_PIXELS && trianglesIn(visible) <= SOFTWARE_WARMUP_TRIANGLES) {
     software.render(visible, draw);
@@ -17735,6 +17954,8 @@ var WebglSceneRenderer = class _WebglSceneRenderer {
     this.readSeq = 0;
     /** What the last submitted frame drew (for the profiler and tests); GPU time when the browser can time it. */
     this.lastFrameStats = { drawCalls: 0, instances: 0, triangles: 0, gpuMs: null };
+    /** Readbacks that have landed (gpuPacing.ts paces the render size by them). */
+    this.framesLanded = 0;
     /** The clustered lights' params and info this frame (EP8; see the shader's clusterParams/clusterInfo). */
     this.clusterParams = new Float32Array(4);
     this.clusterInfo = new Float32Array(4);
@@ -17884,6 +18105,98 @@ var WebglSceneRenderer = class _WebglSceneRenderer {
       gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null);
       this.latest = bytes;
       this.latestSeq = slot.seq;
+      this.framesLanded += 1;
+    }
+  }
+  /**
+   * Render at `width × height` from the next frame on (gpuPacing.ts: a GPU that
+   * can't keep up renders smaller). The colour and depth are re-stored in place,
+   * so the framebuffer keeps them; the targets made on first use (multisampled,
+   * reflection, temporal, scene copies, SSAO) are released and made again at the
+   * new size when next used. Readbacks in flight are dropped; the newest frame
+   * keeps showing, resampled, until one at the new size lands.
+   */
+  resize(width, height) {
+    width = Math.max(1, Math.round(width));
+    height = Math.max(1, Math.round(height));
+    if (this.destroyed || this.lost || width === this.width && height === this.height) return;
+    const gl = this.gl;
+    try {
+      this.latest = this.latest && this.latest.length === this.width * this.height * 4 ? resampleNearest(this.latest, this.width, this.height, width, height) : null;
+      this.width = width;
+      this.height = height;
+      gl.bindRenderbuffer(gl.RENDERBUFFER, this.attachments[0]);
+      gl.renderbufferStorage(gl.RENDERBUFFER, gl.RGBA8, width, height);
+      gl.bindRenderbuffer(gl.RENDERBUFFER, this.attachments[1]);
+      gl.renderbufferStorage(gl.RENDERBUFFER, gl.DEPTH_COMPONENT24, width, height);
+      gl.bindRenderbuffer(gl.RENDERBUFFER, null);
+      this.releaseSized();
+      this.temporalState.reset();
+      for (const slot of this.pending) {
+        if (slot.fence) gl.deleteSync(slot.fence);
+        slot.fence = null;
+      }
+      this.pending.length = 0;
+      for (const slot of this.readback) {
+        gl.bindBuffer(gl.PIXEL_PACK_BUFFER, slot.buffer);
+        gl.bufferData(gl.PIXEL_PACK_BUFFER, width * height * 4, gl.STREAM_READ);
+      }
+      gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null);
+      this.latestSeq = this.submitted;
+      this.readSeq = this.submitted;
+    } catch {
+      this.latest = null;
+      if (gl.isContextLost?.()) this.lost = true;
+    }
+  }
+  /** Delete the targets sized to the frame that are made on first use, so the next use makes them at the current size. */
+  releaseSized() {
+    const gl = this.gl;
+    if (this.msaa) {
+      gl.deleteFramebuffer(this.msaa.framebuffer);
+      for (const rb of this.msaa.attachments) gl.deleteRenderbuffer(rb);
+      this.msaa = null;
+    }
+    if (this.reflections) {
+      for (const t of this.reflections.textures) gl.deleteTexture(t);
+      gl.deleteFramebuffer(this.reflections.framebuffer);
+      if (this.reflections.msaa) {
+        gl.deleteFramebuffer(this.reflections.msaa.framebuffer);
+        for (const b of this.reflections.msaa.buffers) gl.deleteRenderbuffer(b);
+      }
+      gl.deleteTexture(this.reflections.copy.texture);
+      gl.deleteFramebuffer(this.reflections.copy.framebuffer);
+      gl.deleteProgram(this.reflections.program.handle);
+      gl.deleteSampler(this.reflections.nearest);
+      this.reflections = null;
+    }
+    if (this.taa) {
+      for (const t of [this.taa.current, ...this.taa.history]) {
+        gl.deleteTexture(t.texture);
+        gl.deleteFramebuffer(t.framebuffer);
+      }
+      gl.deleteProgram(this.taa.resolve.program);
+      gl.deleteProgram(this.taa.sharpen.program);
+      gl.deleteSampler(this.taa.linear);
+      gl.deleteSampler(this.taa.nearest);
+      this.taa = null;
+    }
+    if (this.sceneDepth) {
+      gl.deleteTexture(this.sceneDepth.texture);
+      gl.deleteFramebuffer(this.sceneDepth.framebuffer);
+      this.sceneDepth = null;
+    }
+    if (this.sceneCopy) {
+      for (const t of [this.sceneCopy.colour, this.sceneCopy.packed]) {
+        gl.deleteTexture(t.texture);
+        gl.deleteFramebuffer(t.framebuffer);
+      }
+      gl.deleteProgram(this.sceneCopy.program);
+      this.sceneCopy = null;
+    }
+    if (this.ssaoTexture) {
+      gl.deleteTexture(this.ssaoTexture);
+      this.ssaoTexture = null;
     }
   }
   /** Whether a finished GPU frame exists to show (false until the first readback lands). */
@@ -17893,7 +18206,7 @@ var WebglSceneRenderer = class _WebglSceneRenderer {
   settle(draw) {
     if (this.destroyed || this.lost) return "current";
     this.collect();
-    if (this.latest) compositeFrame(this.latest, draw);
+    if (this.latest && this.latest.length === draw.width * draw.height * 4) compositeFrame(this.latest, draw);
     if (this.latestSeq >= this.submitted) return "current";
     return this.readSeq >= this.submitted ? "pending" : "stale";
   }
@@ -18716,50 +19029,14 @@ var WebglSceneRenderer = class _WebglSceneRenderer {
       gl.deleteBuffer(this.uniformBuffer);
       gl.deleteBuffer(this.instanceBuffer);
       gl.deleteBuffer(this.lightBuffer);
-      for (const t of [this.blankTexture, this.blankFloat, this.shadowTexture, this.envTexture, this.probeTexture, this.ssaoTexture]) if (t) gl.deleteTexture(t);
+      for (const t of [this.blankTexture, this.blankFloat, this.shadowTexture, this.envTexture, this.probeTexture]) if (t) gl.deleteTexture(t);
       gl.deleteFramebuffer(this.framebuffer);
-      if (this.msaa) {
-        gl.deleteFramebuffer(this.msaa.framebuffer);
-        for (const rb of this.msaa.attachments) gl.deleteRenderbuffer(rb);
-      }
+      this.releaseSized();
       if (this.localAtlas) gl.deleteTexture(this.localAtlas);
       if (this.gridTexture) gl.deleteTexture(this.gridTexture);
       if (this.gridBlank) gl.deleteTexture(this.gridBlank);
       if (this.clusterTexture) {
         gl.deleteTexture(this.clusterTexture);
-      }
-      if (this.reflections) {
-        for (const t of this.reflections.textures) gl.deleteTexture(t);
-        gl.deleteFramebuffer(this.reflections.framebuffer);
-        if (this.reflections.msaa) {
-          gl.deleteFramebuffer(this.reflections.msaa.framebuffer);
-          for (const b of this.reflections.msaa.buffers) gl.deleteRenderbuffer(b);
-        }
-        gl.deleteTexture(this.reflections.copy.texture);
-        gl.deleteFramebuffer(this.reflections.copy.framebuffer);
-        gl.deleteProgram(this.reflections.program.handle);
-        gl.deleteSampler(this.reflections.nearest);
-      }
-      if (this.taa) {
-        for (const t of [this.taa.current, ...this.taa.history]) {
-          gl.deleteTexture(t.texture);
-          gl.deleteFramebuffer(t.framebuffer);
-        }
-        gl.deleteProgram(this.taa.resolve.program);
-        gl.deleteProgram(this.taa.sharpen.program);
-        gl.deleteSampler(this.taa.linear);
-        gl.deleteSampler(this.taa.nearest);
-      }
-      if (this.sceneDepth) {
-        gl.deleteTexture(this.sceneDepth.texture);
-        gl.deleteFramebuffer(this.sceneDepth.framebuffer);
-      }
-      if (this.sceneCopy) {
-        for (const t of [this.sceneCopy.colour, this.sceneCopy.packed]) {
-          gl.deleteTexture(t.texture);
-          gl.deleteFramebuffer(t.framebuffer);
-        }
-        gl.deleteProgram(this.sceneCopy.program);
       }
       this.timer?.destroy();
       for (const rb of this.attachments) gl.deleteRenderbuffer(rb);
@@ -31128,6 +31405,10 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     this.cutGroups = /* @__PURE__ */ new WeakMap();
     /** Most recent completed readback, or null before the first one lands. */
     this.latest = null;
+    /** Readbacks that have landed (gpuPacing.ts paces the render size by them). */
+    this.framesLanded = 0;
+    /** Whether the frame being drawn has a prepass, whose velocity needs a re-uploaded mesh's last vertices (F0c). */
+    this.keepsPrevious = false;
     /** Frames submitted, the one `latest` holds, and the newest that got a readback (see settle). */
     this.submitted = 0;
     this.latestSeq = 0;
@@ -32514,7 +32795,7 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
   }
   settle(draw) {
     if (this.destroyed) return "current";
-    if (this.latest) compositeFrame(this.latest, draw);
+    if (this.latest && this.latest.length === draw.width * draw.height * 4) compositeFrame(this.latest, draw);
     if (this.latestSeq >= this.submitted) return "current";
     return this.readSeq >= this.submitted ? "pending" : "stale";
   }
@@ -32530,6 +32811,7 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     const viewProj = multiplyMat48(temporal ? temporal.projection : draw.projection, draw.view);
     this.frameIndex += 1;
     const prepass = draw.prepass === true;
+    this.keepsPrevious = prepass;
     const gpuCull = this.hdr && prepass && draw.gpuCull === true;
     const { batches: draws, instanceCount } = batchInstances(instances, (mesh) => this.uploadMesh(mesh), cameraPositionFromView4(draw.view), gpuCull ? this.frameGpuLods : null, gpuCull);
     const clusterJob = /* @__PURE__ */ new Map();
@@ -34142,13 +34424,15 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
       if (this.destroyed) return;
       if ((slot.seq ?? 0) >= this.latestSeq && slot.buffer.size === this.bytesPerRow * this.height) {
         const padded = new Uint8Array(slot.buffer.getMappedRange());
-        this.latest = unpadRows(padded, this.width, this.height, this.bytesPerRow, this.latest);
+        this.latest = unpadRows(padded, this.width, this.height, this.bytesPerRow, this.latest && this.latest.length === this.width * this.height * 4 ? this.latest : null);
         this.latestSeq = slot.seq ?? 0;
       }
       slot.buffer.unmap();
+      this.framesLanded += 1;
     } catch {
     } finally {
       slot.busy = false;
+      if (!this.readback.includes(slot)) destroySafely(slot.buffer);
     }
   }
   /** Grow the per-draw uniform buffer to hold at least `count` draws. */
@@ -34196,10 +34480,15 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
         }
         const normals = primitive.normals ?? computeSmoothNormals2(primitive.positions, primitive.indices);
         const vertices = interleaveVerticesWithTangents(primitive.positions, normals, primitive.uvs, primitive.uvs2 ?? null, primitive.blend ?? null, primitive.sway ?? null, null);
-        gpu.previousBuffer ?? (gpu.previousBuffer = this.device.createBuffer({ size: Math.max(40, vertices.byteLength), usage: 32 | 8 }));
-        const encoder = this.device.createCommandEncoder();
-        encoder.copyBufferToBuffer(gpu.vertexBuffer, 0, gpu.previousBuffer, 0, Math.max(40, vertices.byteLength));
-        this.device.queue.submit([encoder.finish()]);
+        if (this.keepsPrevious) {
+          gpu.previousBuffer ?? (gpu.previousBuffer = this.device.createBuffer({ size: Math.max(40, vertices.byteLength), usage: 32 | 8 }));
+          const encoder = this.device.createCommandEncoder();
+          encoder.copyBufferToBuffer(gpu.vertexBuffer, 0, gpu.previousBuffer, 0, Math.max(40, vertices.byteLength));
+          this.device.queue.submit([encoder.finish()]);
+        } else if (gpu.previousBuffer) {
+          destroySafely(gpu.previousBuffer);
+          gpu.previousBuffer = void 0;
+        }
         this.device.queue.writeBuffer(gpu.vertexBuffer, 0, vertices);
         gpu.revision = primitive.dynamic.revision;
         gpu.movedFrame = this.frameIndex;
@@ -34785,6 +35074,7 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     height = Math.max(1, Math.round(height));
     if (this.destroyed || width === this.width && height === this.height) return;
     const device = this.device;
+    const previous = this.latest && this.latest.length === this.width * this.height * 4 ? { width: this.width, height: this.height } : null;
     this.width = width;
     this.height = height;
     const size = { width, height };
@@ -34846,7 +35136,7 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
       buffer: device.createBuffer({ size: this.bytesPerRow * height, usage: 8 | 1 }),
       busy: false
     }));
-    this.latest = null;
+    this.latest = this.latest && !this.hdr && previous ? resampleNearest(this.latest, previous.width, previous.height, width, height) : null;
     this.bindGroups = /* @__PURE__ */ new WeakMap();
   }
   dispose() {
@@ -38162,11 +38452,14 @@ var Player = class {
    * "auto" by measurement: a 3D scene whose frames keep coming slower than
    * about 40 fps steps down a preset (high → medium → low; under 20 fps,
    * straight to low). The device hints "auto" starts from can't tell a strong
-   * GPU from a weak one.
+   * GPU from a weak one. A GPU that reads its frames back can fall behind
+   * while the run loop keeps time (it skips frames it can't read back), so
+   * when the GPU is what holds the 3D back its frames' time counts instead.
    */
   governQuality(sinceLast, busy, now) {
     if (this.qualityChoice !== void 0 && this.qualityChoice !== "auto" || !this.meshSurface) return;
-    const step = this.qualityGovernor.feed(sinceLast, busy, now, this.qualitySettings.level);
+    const gpuMs = this.meshSurface.gpuBoundMs();
+    const step = gpuMs !== null && gpuMs > sinceLast ? this.qualityGovernor.feed(gpuMs, gpuMs, now, this.qualitySettings.level) : this.qualityGovernor.feed(sinceLast, busy, now, this.qualitySettings.level);
     if (step) this.applyQuality(QUALITY_PRESETS[step]);
   }
   /**

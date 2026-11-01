@@ -159,6 +159,7 @@ import {
 import { SoftwareSceneRenderer, applyScenePasses, type FrameState, type GpuSceneDraw, type SceneDraw, type SceneRenderer, type SunShadow } from "./sceneRenderer.js";
 import { webgpuCanHonour } from "./renderCaps.js";
 import { batchInstances, compositeFrame, presentFrame, softEdges, type DrawBatch, type PrimitiveTextures } from "./gpuFrame.js";
+import { resampleNearest } from "./gpuPacing.js";
 import { FrameGraph, GraphTimer, TransientPool, timingSpan, type FrameResource, type PassContext } from "./frameGraph.js";
 import { MAX_ANISOTROPY, MipmapGenerator, coverageMips, hasTransparency, mipLevelCount, uploadCompressed } from "./mipmaps.js";
 import { compressedFormatsFor } from "../lighting/webgpuDevice.js";
@@ -2394,6 +2395,10 @@ export class WebgpuSceneRenderer implements SceneRenderer {
 
   /** Most recent completed readback, or null before the first one lands. */
   private latest: Uint8Array | null = null;
+  /** Readbacks that have landed (gpuPacing.ts paces the render size by them). */
+  framesLanded = 0;
+  /** Whether the frame being drawn has a prepass, whose velocity needs a re-uploaded mesh's last vertices (F0c). */
+  private keepsPrevious = false;
   /** Frames submitted, the one `latest` holds, and the newest that got a readback (see settle). */
   private submitted = 0;
   private latestSeq = 0;
@@ -3939,7 +3944,7 @@ export class WebgpuSceneRenderer implements SceneRenderer {
 
   settle(draw: SceneDraw): FrameState {
     if (this.destroyed) return "current";
-    if (this.latest) compositeFrame(this.latest, draw);
+    if (this.latest && this.latest.length === draw.width * draw.height * 4) compositeFrame(this.latest, draw);
     if (this.latestSeq >= this.submitted) return "current";
     return this.readSeq >= this.submitted ? "pending" : "stale";
   }
@@ -3961,6 +3966,7 @@ export class WebgpuSceneRenderer implements SceneRenderer {
     // A new frame: a skinned mesh re-uploaded now keeps last frame's vertices for the velocity buffer (F0c).
     this.frameIndex += 1;
     const prepass = draw.prepass === true;
+    this.keepsPrevious = prepass;
     // Batch the copies of each primitive that bind the same textures: one
     // uniform (addressed by a dynamic offset) and one instanced draw per batch.
     // GPU culling (F0e): the frustum and a Hi-Z pyramid decide which copies draw, and each copy's LOD level.
@@ -5866,14 +5872,17 @@ export class WebgpuSceneRenderer implements SceneRenderer {
       // Readbacks can land out of order; an older one never replaces a newer frame.
       if ((slot.seq ?? 0) >= this.latestSeq && slot.buffer.size === this.bytesPerRow * this.height) {
         const padded = new Uint8Array(slot.buffer.getMappedRange());
-        this.latest = unpadRows(padded, this.width, this.height, this.bytesPerRow, this.latest);
+        this.latest = unpadRows(padded, this.width, this.height, this.bytesPerRow, this.latest && this.latest.length === this.width * this.height * 4 ? this.latest : null);
         this.latestSeq = slot.seq ?? 0;
       }
       slot.buffer.unmap();
+      this.framesLanded += 1;
     } catch {
       // A failed map just means no new frame; the previous one keeps showing.
     } finally {
       slot.busy = false;
+      // A buffer a resize left behind (it was in flight) goes once it has landed.
+      if (!this.readback.includes(slot)) destroySafely(slot.buffer);
     }
   }
 
@@ -5926,11 +5935,18 @@ export class WebgpuSceneRenderer implements SceneRenderer {
         const normals = primitive.normals ?? computeSmoothNormals(primitive.positions, primitive.indices);
         // A live skinned copy's tangents would stay in its bind pose: it takes the derivative frame (F1c).
         const vertices = interleaveVerticesWithTangents(primitive.positions, normals, primitive.uvs, primitive.uvs2 ?? null, primitive.blend ?? null, primitive.sway ?? null, null);
-        // Keep the vertices it had (F0c): copied before this upload lands, which the queue keeps in order.
-        gpu.previousBuffer ??= this.device.createBuffer({ size: Math.max(40, vertices.byteLength), usage: 0x20 | 0x08 }); // VERTEX | COPY_DST
-        const encoder = this.device.createCommandEncoder();
-        encoder.copyBufferToBuffer(gpu.vertexBuffer, 0, gpu.previousBuffer, 0, Math.max(40, vertices.byteLength));
-        this.device.queue.submit([encoder.finish()]);
+        // Keep the vertices it had (F0c): copied before this upload lands, which the queue keeps in order. Only a
+        // frame with a prepass reads them (its velocity); without one, a copy and a submit per skinned primitive
+        // per frame (an arena's Spartans: hundreds) is work for nothing.
+        if (this.keepsPrevious) {
+          gpu.previousBuffer ??= this.device.createBuffer({ size: Math.max(40, vertices.byteLength), usage: 0x20 | 0x08 }); // VERTEX | COPY_DST
+          const encoder = this.device.createCommandEncoder();
+          encoder.copyBufferToBuffer(gpu.vertexBuffer, 0, gpu.previousBuffer, 0, Math.max(40, vertices.byteLength));
+          this.device.queue.submit([encoder.finish()]);
+        } else if (gpu.previousBuffer) {
+          destroySafely(gpu.previousBuffer);
+          gpu.previousBuffer = undefined;
+        }
         this.device.queue.writeBuffer(gpu.vertexBuffer, 0, vertices);
         gpu.revision = primitive.dynamic.revision;
         gpu.movedFrame = this.frameIndex;
@@ -6600,6 +6616,7 @@ export class WebgpuSceneRenderer implements SceneRenderer {
     height = Math.max(1, Math.round(height));
     if (this.destroyed || (width === this.width && height === this.height)) return;
     const device = this.device;
+    const previous = this.latest && this.latest.length === this.width * this.height * 4 ? { width: this.width, height: this.height } : null;
     this.width = width;
     this.height = height;
     const size = { width, height };
@@ -6662,7 +6679,8 @@ export class WebgpuSceneRenderer implements SceneRenderer {
       buffer: device.createBuffer({ size: this.bytesPerRow * height, usage: 0x08 | 0x01 }),
       busy: false,
     }));
-    this.latest = null;
+    // A frame read back keeps showing, resampled, until the first at the new size lands (no flash of the sky).
+    this.latest = this.latest && !this.hdr && previous ? resampleNearest(this.latest, previous.width, previous.height, width, height) : null;
     this.bindGroups = new WeakMap();
   }
 

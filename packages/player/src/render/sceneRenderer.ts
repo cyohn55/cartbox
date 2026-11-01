@@ -370,10 +370,16 @@ export interface SceneRenderer {
   renderToTexture?(instances: readonly MeshSceneInstance[], draw: GpuSceneDraw): unknown;
   /**
    * Render at a new size from the next frame on (AAA_FIDELITY_ROADMAP.md F0d):
-   * the frame's own targets are remade, its meshes and pipelines kept. Only the
-   * renderers whose frames stay on the GPU have it.
+   * the frame's own targets are remade, its meshes and pipelines kept. The GPU
+   * renderers have it: the AAA tier's frame follows its display, and a renderer
+   * that reads its frames back renders smaller when it can't keep up (gpuPacing.ts).
    */
   resize?(width: number, height: number): void;
+  /**
+   * How many frames have come back from the GPU so far, on a renderer that
+   * reads its frames back (gpuPacing.ts paces by it). Absent elsewhere.
+   */
+  readonly framesLanded?: number;
   /** The GPU device a {@link renderToTexture} texture belongs to, so a compositor can share it. */
   readonly gpuDevice?: unknown;
   /**
@@ -556,6 +562,10 @@ export class CappedSceneRenderer implements SceneRenderer {
   get resize(): SceneRenderer["resize"] {
     const inner = this.inner;
     return inner.resize ? (width, height) => inner.resize!(width, height) : undefined;
+  }
+
+  get framesLanded(): number | undefined {
+    return this.inner.framesLanded;
   }
 
   dispose(): void {

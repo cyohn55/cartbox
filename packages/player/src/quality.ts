@@ -129,6 +129,9 @@ export function browserDeviceHints(webgpu?: boolean): DeviceHints {
  * first, slower frames (loading, shaders building) to pass; gaps over half a
  * second — a hidden tab, a breakpoint — don't count.
  */
+/** A gap between frames longer than this (ms) is a pause, not a slow frame. */
+const PAUSE_MS = 3000;
+
 export class QualityGovernor {
   /** Smoothed time between frames and time spent on them (ms), how many frames and how long that covers. */
   private average = 0;
@@ -163,7 +166,9 @@ export class QualityGovernor {
    * `level`, or null to stay.
    */
   feed(ms: number, busyMs: number, now: number, level: QualityLevel): QualityLevel | null {
-    if (now < this.holdUntil || !(ms > 0) || ms > 500) return null;
+    // Past a few seconds a frame is a pause (a hidden tab, a debugger), not a frame time; a second-long frame,
+    // though, is exactly what this is for (it once ignored anything past half a second, so a scene at 1 fps never stepped down).
+    if (now < this.holdUntil || !(ms > 0) || ms > PAUSE_MS) return null;
     const k = 1 / Math.min(this.frames + 1, 30);
     this.average += (ms - this.average) * k;
     this.busy += (Math.min(busyMs, ms) - this.busy) * k;

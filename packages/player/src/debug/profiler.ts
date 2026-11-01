@@ -31,6 +31,11 @@ export interface RenderStats {
   readonly gpuMs: number | null;
   /** Each pass's GPU time (AAA_FIDELITY_ROADMAP.md F0c), on a renderer that times them one by one. */
   readonly passes?: readonly { readonly name: string; readonly ms: number }[];
+  /**
+   * On a renderer that reads its frames back, the time between frames coming back from the GPU (ms): what the
+   * 3D's own frame rate is, which the run loop's can hide (gpuPacing.ts).
+   */
+  readonly frameMs?: number;
   /** The size the 3D rendered at and its share of the frame's (F0d), when that isn't the cart's own. */
   readonly resolution?: { readonly width: number; readonly height: number; readonly scale: number };
   /** Texture streaming's residency (AAA_FIDELITY_ROADMAP.md F1b), on a renderer that streams. */

@@ -1014,18 +1014,6 @@ declare function detectQuality(hints: DeviceHints): QualityLevel;
 declare function resolveQuality(choice: QualityChoice | undefined, hints: DeviceHints): QualitySettings;
 /** This browser's hints (in a browser; empty elsewhere). */
 declare function browserDeviceHints(webgpu?: boolean): DeviceHints;
-/**
- * "auto" by measurement: fed the time between shown frames and how much of it
- * the player spent working, it says when to step down a preset. A device that
- * can't hold about 40 fps over a second and a half, while busy for most of
- * each frame, steps down a preset (high → medium → low); one that can't hold
- * 20 fps goes straight to low. It never steps back up, so the picture doesn't
- * flicker between presets. (Busy matters: a browser saving power may show only
- * 30 frames a second however light they are, and that's no reason to draw them
- * worse.) After a change, a resume or the start it waits a few seconds for the
- * first, slower frames (loading, shaders building) to pass; gaps over half a
- * second — a hidden tab, a breakpoint — don't count.
- */
 declare class QualityGovernor {
     /** Frames slower than this on average (ms) step the preset down; twice as slow goes straight to low. */
     private readonly slowMs;
@@ -2454,6 +2442,11 @@ interface RenderStats {
         readonly name: string;
         readonly ms: number;
     }[];
+    /**
+     * On a renderer that reads its frames back, the time between frames coming back from the GPU (ms): what the
+     * 3D's own frame rate is, which the run loop's can hide (gpuPacing.ts).
+     */
+    readonly frameMs?: number;
     /** The size the 3D rendered at and its share of the frame's (F0d), when that isn't the cart's own. */
     readonly resolution?: {
         readonly width: number;
@@ -5030,10 +5023,16 @@ interface SceneRenderer {
     renderToTexture?(instances: readonly MeshSceneInstance[], draw: GpuSceneDraw): unknown;
     /**
      * Render at a new size from the next frame on (AAA_FIDELITY_ROADMAP.md F0d):
-     * the frame's own targets are remade, its meshes and pipelines kept. Only the
-     * renderers whose frames stay on the GPU have it.
+     * the frame's own targets are remade, its meshes and pipelines kept. The GPU
+     * renderers have it: the AAA tier's frame follows its display, and a renderer
+     * that reads its frames back renders smaller when it can't keep up (gpuPacing.ts).
      */
     resize?(width: number, height: number): void;
+    /**
+     * How many frames have come back from the GPU so far, on a renderer that
+     * reads its frames back (gpuPacing.ts paces by it). Absent elsewhere.
+     */
+    readonly framesLanded?: number;
     /** The GPU device a {@link renderToTexture} texture belongs to, so a compositor can share it. */
     readonly gpuDevice?: unknown;
     /**
@@ -5124,6 +5123,7 @@ declare class CappedSceneRenderer implements SceneRenderer {
     get captureReference(): SceneRenderer["captureReference"];
     get renderToTexture(): SceneRenderer["renderToTexture"];
     get resize(): SceneRenderer["resize"];
+    get framesLanded(): number | undefined;
     dispose(): void;
 }
 /** True when a model's caps constrain the scene, so wrapping would do something. */
@@ -5458,8 +5458,8 @@ declare const WEBGL_MAX_LIGHTS = 128;
 type GlContextProvider = () => any | null;
 declare class WebglSceneRenderer implements SceneRenderer {
     private readonly gl;
-    private readonly width;
-    private readonly height;
+    private width;
+    private height;
     private readonly program;
     private readonly framebuffer;
     private readonly attachments;
@@ -5521,6 +5521,19 @@ declare class WebglSceneRenderer implements SceneRenderer {
     render(instances: readonly MeshSceneInstance[], draw: SceneDraw): void;
     /** Take the newest finished readback, if any (never waits). */
     private collect;
+    /** Readbacks that have landed (gpuPacing.ts paces the render size by them). */
+    framesLanded: number;
+    /**
+     * Render at `width × height` from the next frame on (gpuPacing.ts: a GPU that
+     * can't keep up renders smaller). The colour and depth are re-stored in place,
+     * so the framebuffer keeps them; the targets made on first use (multisampled,
+     * reflection, temporal, scene copies, SSAO) are released and made again at the
+     * new size when next used. Readbacks in flight are dropped; the newest frame
+     * keeps showing, resampled, until one at the new size lands.
+     */
+    resize(width: number, height: number): void;
+    /** Delete the targets sized to the frame that are made on first use, so the next use makes them at the current size. */
+    private releaseSized;
     /** Whether a finished GPU frame exists to show (false until the first readback lands). */
     get ready(): boolean;
     settle(draw: SceneDraw): FrameState;
@@ -5969,6 +5982,10 @@ declare class WebgpuSceneRenderer implements SceneRenderer {
     private cutGroups;
     /** Most recent completed readback, or null before the first one lands. */
     private latest;
+    /** Readbacks that have landed (gpuPacing.ts paces the render size by them). */
+    framesLanded: number;
+    /** Whether the frame being drawn has a prepass, whose velocity needs a re-uploaded mesh's last vertices (F0c). */
+    private keepsPrevious;
     /** Frames submitted, the one `latest` holds, and the newest that got a readback (see settle). */
     private submitted;
     private latestSeq;
@@ -8304,6 +8321,8 @@ declare class MeshOverlaySurface implements DisplaySurface {
     private frameMs;
     private framesAtStep;
     private low;
+    /** A GPU that reads its frames back: paced by how often they land (gpuPacing.ts), made with the first frame. */
+    private gpuPacer;
     /** The last sky backdrop and the view it was painted for (it depends only on
      *  where the camera points, so walking without turning reuses it). */
     private skyCache;
@@ -8677,8 +8696,22 @@ declare class MeshOverlaySurface implements DisplaySurface {
      * direction nor the sun has changed.
      */
     private paintSky;
-    /** The 3D render scale this frame: 1, unless the software governor has stepped down. */
+    /** The 3D render scale this frame: 1, unless the software governor or the GPU's pacing has stepped down. */
     private renderScale;
+    /** Whether this frame's 3D is on a GPU that reads its frames back (not presented on the GPU): one gpuPacing.ts measures. */
+    private gpuReadback;
+    /**
+     * Whether the GPU's pacing sets the render size: a large first-person view (as the software governor's) on a GPU
+     * that reads its frames back and can render at another size.
+     */
+    private gpuPaced;
+    /** Time the frames landing from the GPU, and choose the next frame's render size from them. */
+    private paceGpu;
+    /**
+     * When the GPU is what holds the 3D back (its frames land well behind the run loop), how long each takes to come
+     * back (ms); else null. The quality governor steps the preset down on it, as it does on slow frames.
+     */
+    gpuBoundMs(): number | null;
     /** Whether the resolution governor applies: a large first-person view on the CPU rasteriser. */
     private governed;
     /** Step the software render scale by how long frames are taking. */

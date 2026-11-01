@@ -1133,11 +1133,17 @@ export class Player {
    * "auto" by measurement: a 3D scene whose frames keep coming slower than
    * about 40 fps steps down a preset (high → medium → low; under 20 fps,
    * straight to low). The device hints "auto" starts from can't tell a strong
-   * GPU from a weak one.
+   * GPU from a weak one. A GPU that reads its frames back can fall behind
+   * while the run loop keeps time (it skips frames it can't read back), so
+   * when the GPU is what holds the 3D back its frames' time counts instead.
    */
   private governQuality(sinceLast: number, busy: number, now: number): void {
     if ((this.qualityChoice !== undefined && this.qualityChoice !== "auto") || !this.meshSurface) return;
-    const step = this.qualityGovernor.feed(sinceLast, busy, now, this.qualitySettings.level);
+    const gpuMs = this.meshSurface.gpuBoundMs();
+    const step =
+      gpuMs !== null && gpuMs > sinceLast
+        ? this.qualityGovernor.feed(gpuMs, gpuMs, now, this.qualitySettings.level)
+        : this.qualityGovernor.feed(sinceLast, busy, now, this.qualitySettings.level);
     if (step) this.applyQuality(QUALITY_PRESETS[step]);
   }
 

@@ -46,7 +46,8 @@ export function presentFrame(
   draw: SceneDraw,
   software: SoftwareSceneRenderer,
 ): void {
-  if (latest) {
+  // A frame from before a resize, at its old size, is not this frame's (the renderers resample theirs; this is the guard).
+  if (latest && latest.length === draw.width * draw.height * 4) {
     compositeFrame(latest, draw);
   } else if (draw.width * draw.height <= SOFTWARE_WARMUP_PIXELS && trianglesIn(visible) <= SOFTWARE_WARMUP_TRIANGLES) {
     software.render(visible, draw);

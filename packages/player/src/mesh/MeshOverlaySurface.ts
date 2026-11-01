@@ -23,6 +23,7 @@
  */
 
 import { DynamicResolution, scaledSize } from "../render/dynamicResolution.js";
+import { GpuPacer, expandBilinear } from "../render/gpuPacing.js";
 import {
   atmosphereLighting,
   atmosphereLuts,
@@ -404,6 +405,8 @@ export class MeshOverlaySurface implements DisplaySurface {
   private frameMs = 0;
   private framesAtStep = 0;
   private low: { width: number; height: number; out: Uint8ClampedArray; depth: Float32Array } | null = null;
+  /** A GPU that reads its frames back: paced by how often they land (gpuPacing.ts), made with the first frame. */
+  private gpuPacer: GpuPacer | null = null;
   /** The last sky backdrop and the view it was painted for (it depends only on
    *  where the camera points, so walking without turning reuses it). */
   private skyCache: { key: string; pixels: Uint8ClampedArray } | null = null;
@@ -1297,9 +1300,12 @@ export class MeshOverlaySurface implements DisplaySurface {
 
   /** What the renderer drew last frame. */
   renderStats(): RenderStats | null {
-    const raw = this.renderer.lastFrameStats ?? null;
-    // A GPU-presented frame's 3D size, when it isn't the cart's own (F0d).
-    const rendered = this.rendered && this.gpuTarget() && (this.rendered.width !== this.width || this.rendered.height !== this.height) ? this.rendered : null;
+    const base = this.renderer.lastFrameStats ?? null;
+    // A GPU that reads its frames back: how often they come back (gpuPacing.ts).
+    const raw = base && this.gpuPacer?.landMs != null ? { ...base, frameMs: this.gpuPacer.landMs } : base;
+    // A GPU-presented frame's 3D size, when it isn't the cart's own (F0d); or a paced one's, when it renders smaller.
+    const paced = this.low && this.gpuPaced() && this.gpuPacer && this.gpuPacer.scale < 1 ? { width: this.low.width, height: this.low.height, scale: this.low.width / this.width } : null;
+    const rendered = this.rendered && this.gpuTarget() && (this.rendered.width !== this.width || this.rendered.height !== this.height) ? this.rendered : paced;
     const stats = raw && rendered ? { ...raw, resolution: rendered } : raw;
     // A GPU-presented frame's presenter passes follow the scene's (F4e).
     const present = this.gpuTarget()?.stats;
@@ -1478,6 +1484,8 @@ export class MeshOverlaySurface implements DisplaySurface {
       this.frame += 1;
       return;
     }
+    // A GPU paced to a smaller frame renders at its size (and back at full size once it keeps up).
+    if (this.gpuPaced()) this.renderer.resize?.(width, height);
     this.renderer.render(drawn, {
       width,
       height,
@@ -1536,6 +1544,7 @@ export class MeshOverlaySurface implements DisplaySurface {
     if (frontDrawn.length > 0) {
       this.requestFrontRenderer();
       const onGpu = this.frontRenderer.backend !== "software";
+      if (onGpu) this.frontRenderer.resize?.(width, height);
       this.frontRenderer.render(onGpu ? frontDrawn.map((i) => this.withoutRefraction(i)) : frontDrawn, {
         width,
         height,
@@ -1562,7 +1571,8 @@ export class MeshOverlaySurface implements DisplaySurface {
       }
     }
     if (profiler) profiler.add("scene", performance.now() - mark);
-    if (target) expandNearest(target.out, target.width, target.height, this.output, this.width, this.height);
+    // A paced GPU's smaller frame is filtered up (it may be most of the frame for a while); the software path's stays blocky and cheap.
+    if (target) (this.gpuPaced() ? expandBilinear : expandNearest)(target.out, target.width, target.height, this.output, this.width, this.height);
     // Lay the cart's 2D frame over the rendered scene as a HUD (first-person).
     if (this.hud && this.hudFrame) compositeHudOverScene(this.output, this.hudFrame, this.width * this.height);
     // Holo UI documents (I12): drawn over everything, in true colour.
@@ -1570,6 +1580,7 @@ export class MeshOverlaySurface implements DisplaySurface {
     this.frame += 1; // advance in lockstep with the run loop's present cadence
     this.inner.blit(this.presented);
     this.pace(performance.now() - started);
+    this.paceGpu();
   }
 
   /** The GPU presenter this frame goes to, when there is one and the renderer can keep its frame on the GPU (F0a). */
@@ -1924,10 +1935,41 @@ export class MeshOverlaySurface implements DisplaySurface {
     this.skyCache = { key, pixels };
   }
 
-  /** The 3D render scale this frame: 1, unless the software governor has stepped down. */
+  /** The 3D render scale this frame: 1, unless the software governor or the GPU's pacing has stepped down. */
   private renderScale(): number {
+    if (this.gpuPaced()) return this.gpuPacer?.scale ?? 1;
     if (!this.governed()) return 1;
     return Math.min(SOFTWARE_SCALES[this.scaleStep]!, this.quality.maxRenderScale);
+  }
+
+  /** Whether this frame's 3D is on a GPU that reads its frames back (not presented on the GPU): one gpuPacing.ts measures. */
+  private gpuReadback(): boolean {
+    return this.renderer.backend !== "software" && this.renderer.framesLanded !== undefined && this.gpuTarget() === null;
+  }
+
+  /**
+   * Whether the GPU's pacing sets the render size: a large first-person view (as the software governor's) on a GPU
+   * that reads its frames back and can render at another size.
+   */
+  private gpuPaced(): boolean {
+    return this.options.adaptiveResolution !== false && this.hud && this.gpuReadback() && this.renderer.resize !== undefined && this.width * this.height >= 640 * 360;
+  }
+
+  /** Time the frames landing from the GPU, and choose the next frame's render size from them. */
+  private paceGpu(): void {
+    if (!this.gpuReadback()) return;
+    this.gpuPacer ??= new GpuPacer();
+    const step = this.gpuPacer.update(performance.now(), this.renderer.framesLanded ?? 0);
+    // Measured always (the quality governor reads it), applied only where the size can change.
+    if (!this.gpuPaced() && step !== 0) this.gpuPacer.step = 0;
+  }
+
+  /**
+   * When the GPU is what holds the 3D back (its frames land well behind the run loop), how long each takes to come
+   * back (ms); else null. The quality governor steps the preset down on it, as it does on slow frames.
+   */
+  gpuBoundMs(): number | null {
+    return this.gpuReadback() ? (this.gpuPacer?.gpuBoundMs(performance.now()) ?? null) : null;
   }
 
   /** Whether the resolution governor applies: a large first-person view on the CPU rasteriser. */
