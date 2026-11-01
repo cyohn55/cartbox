@@ -137,6 +137,15 @@ describe.skipIf(!chromiumPath)("WebGL2 parity in a real browser", () => {
     }
   }, 120_000);
 
+  it("filters trilinearly like the software rasteriser: the same mip chain, the level by the UVs' footprint (F1a)", async () => {
+    const result = await run("trilinear");
+    if ("error" in result) throw new Error(result.error);
+    // The GPU picks a 2×2 quad's level from finite differences, the rasteriser each pixel's from its exact
+    // derivatives: they can fall either side of a level boundary on the horizon, a blend step apart.
+    expect(result.drawn).toBeGreaterThan(100);
+    expect(result.far / result.drawn).toBeLessThan(0.05);
+  });
+
   it("renders the fantasy path byte-identically", async () => {
     const result = await run("fantasy");
     expect(result.backend).toBe("webgl2");

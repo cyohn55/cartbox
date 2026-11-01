@@ -291,11 +291,10 @@ describe("rasterStyleFor", () => {
     });
   });
 
-  it("maps trilinear to bilinear, identically for both backends", () => {
-    // No mip chain exists on either path yet. Mapping it the same way in both
-    // is what keeps an N64-era model looking the same with and without WebGPU —
-    // and both gain real trilinear at once when mips land.
-    expect(rasterStyleFor(caps({ textureFiltering: "trilinear" })).textureFiltering).toBe("bilinear");
+  it("passes the declared filtering through, trilinear included, identically for every backend", () => {
+    // Every backend builds the same mip chain (F1a), so an N64-era model looks the
+    // same with and without WebGPU (trilinear.test.ts holds them to it).
+    expect(rasterStyleFor(caps({ textureFiltering: "trilinear" })).textureFiltering).toBe("trilinear");
     expect(rasterStyleFor(caps({ textureFiltering: "bilinear" })).textureFiltering).toBe("bilinear");
     expect(rasterStyleFor(caps({ textureFiltering: "none" })).textureFiltering).toBe("none");
   });

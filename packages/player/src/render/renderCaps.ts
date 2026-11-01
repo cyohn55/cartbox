@@ -225,20 +225,20 @@ export function applyRenderCaps(
 
 
 /**
- * The rasteriser style a model's caps ask for.
- *
- * `trilinear` maps to bilinear because the fantasy tiers have no mip chain on
- * any backend (the software rasteriser has none). Mapping it the same way in
- * all of them is the point: an N64-era model then renders identically whether
- * or not the viewer has WebGPU. The AAA tier's `mipmaps` cap is what turns real
- * trilinear (and 16× anisotropic) filtering on, on WebGPU (F1a).
+ * The rasteriser style a model's caps ask for, filtering included as declared:
+ * `trilinear` (the N64 onward) is real trilinear filtering on every backend
+ * (F1a). The software rasteriser builds a texture's chain and picks each
+ * pixel's level from its UV derivatives; WebGL2 and WebGPU upload that same
+ * chain and sample it trilinearly, so an N64-era model renders alike whether
+ * or not the viewer has a GPU. The AAA tier's `mipmaps` cap adds its own chains
+ * (made on the GPU, in linear light) and 16× anisotropy.
  */
 export function rasterStyleFor(caps: RenderCaps): RasterStyle {
   return {
     zBuffer: caps.zBuffer,
     perspectiveCorrect: caps.perspectiveCorrect,
     vertexPrecision: caps.vertexPrecision,
-    textureFiltering: caps.textureFiltering === "none" ? "none" : "bilinear",
+    textureFiltering: caps.textureFiltering,
   };
 }
 

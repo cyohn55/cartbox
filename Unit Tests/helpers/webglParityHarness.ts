@@ -5,6 +5,7 @@
  */
 
 import {
+  DEFAULT_RASTER_STYLE,
   composeModelMatrix,
   orthographicMatrix,
   projectionMatrix,
@@ -13,6 +14,7 @@ import {
   type DecodedTexture,
   type MeshAsset,
   type MeshSceneInstance,
+  type RasterStyle,
   type SceneLight,
 } from "@cartbox/editor";
 
@@ -93,6 +95,8 @@ function baseDraw(): SceneDraw {
 interface Scene {
   instances: MeshSceneInstance[];
   draw: () => SceneDraw;
+  /** The era to draw in (default the rasteriser's own). */
+  style?: RasterStyle;
 }
 
 function scenes(): Record<string, Scene> {
@@ -118,7 +122,31 @@ function scenes(): Record<string, Scene> {
     // Physical falloff (F0b): 1/d², windowed to its range.
     { kind: "point", position: [-1, 1, 1.5], color: [1, 0.6, 0.2], intensity: 3, range: 6, falloff: "inverseSquare" },
   ];
+  // A receding floor of a fine checker (F1a): trilinear, as the N64 onward filter.
+  const checker = (() => {
+    const n = 32;
+    const data = new Uint8ClampedArray(n * n * 4);
+    for (let y = 0; y < n; y += 1) for (let x = 0; x < n; x += 1) data.set((x + y) % 2 ? [230, 200, 60, 255] : [30, 60, 160, 255], (y * n + x) * 4);
+    return { width: n, height: n, data };
+  })();
+  const checkerFloor: MeshAsset = {
+    name: "floor",
+    primitives: [
+      {
+        positions: Float32Array.from([-1, 0, -1, 1, 0, -1, 1, 0, 1, -1, 0, 1]),
+        normals: Float32Array.from([0, 1, 0, 0, 1, 0, 0, 1, 0, 0, 1, 0]),
+        uvs: Float32Array.from([0, 0, 12, 0, 12, 12, 0, 12]),
+        indices: Uint32Array.from([0, 2, 1, 0, 3, 2]),
+        material: { name: "checker", baseColorFactor: [1, 1, 1, 1], baseColorImage: null },
+      },
+    ],
+  } as unknown as MeshAsset;
   return {
+    trilinear: {
+      instances: [{ mesh: checkerFloor, model: composeModelMatrix([0, 0, -6], [0, 0, 0], [8, 1, 8]), textures: [checker] }],
+      draw: () => ({ ...baseDraw(), view: viewMatrix([0, 1.2, 2], [0, 0, -8]) }),
+      style: { ...DEFAULT_RASTER_STYLE, textureFiltering: "trilinear" },
+    },
     fantasy: {
       instances: [
         { mesh: quad(), model: composeModelMatrix([0, 0, 0], [0, 30, 0], [1.4, 1.4, 1.4]), textures: null },
@@ -303,7 +331,7 @@ function cascadeScene(soft = false): Scene {
 async function run(name: string): Promise<{ drawn: number; differing: number; maxDelta: number; coverage: number; far: number; stats: unknown; backend: string; diffs: string[] } | { error: string }> {
   const scene = scenes()[name];
   if (!scene) return { error: `no scene ${name}` };
-  const renderer = WebglSceneRenderer.create(W, H);
+  const renderer = WebglSceneRenderer.create(W, H, scene.style);
   if (!renderer) return { error: "WebGL2 renderer did not build" };
   renderer.render(scene.instances, scene.draw());
   // Up to 10 s: a cold shader compile (a material graph, a busy machine) can take seconds.
@@ -316,7 +344,7 @@ async function run(name: string): Promise<{ drawn: number; differing: number; ma
   const gpu = scene.draw();
   renderer.render(scene.instances, gpu);
   const software = scene.draw();
-  new SoftwareSceneRenderer().render(scene.instances, software);
+  new SoftwareSceneRenderer(scene.style).render(scene.instances, software);
   let drawn = 0;
   let differing = 0;
   let maxDelta = 0;

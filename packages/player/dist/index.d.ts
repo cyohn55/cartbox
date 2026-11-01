@@ -5274,13 +5274,13 @@ declare function capTextures(instances: readonly MeshSceneInstance[], budgetByte
 /** Apply every scene-level cap a model declares. */
 declare function applyRenderCaps(instances: readonly MeshSceneInstance[], caps: RenderCaps, cache: TextureBudgetCache): readonly MeshSceneInstance[];
 /**
- * The rasteriser style a model's caps ask for.
- *
- * `trilinear` maps to bilinear because the fantasy tiers have no mip chain on
- * any backend (the software rasteriser has none). Mapping it the same way in
- * all of them is the point: an N64-era model then renders identically whether
- * or not the viewer has WebGPU. The AAA tier's `mipmaps` cap is what turns real
- * trilinear (and 16× anisotropic) filtering on, on WebGPU (F1a).
+ * The rasteriser style a model's caps ask for, filtering included as declared:
+ * `trilinear` (the N64 onward) is real trilinear filtering on every backend
+ * (F1a). The software rasteriser builds a texture's chain and picks each
+ * pixel's level from its UV derivatives; WebGL2 and WebGPU upload that same
+ * chain and sample it trilinearly, so an N64-era model renders alike whether
+ * or not the viewer has a GPU. The AAA tier's `mipmaps` cap adds its own chains
+ * (made on the GPU, in linear light) and 16× anisotropy.
  */
 declare function rasterStyleFor(caps: RenderCaps): RasterStyle;
 /**
@@ -5593,6 +5593,8 @@ declare class WebglSceneRenderer implements SceneRenderer {
     private readonly timer;
     /** Whether the era samples nearest (it shapes every program variant). */
     private readonly nearest;
+    /** Whether it filters trilinearly (F1a): maps take the software rasteriser's mip chain. */
+    private readonly trilinear;
     private constructor();
     /**
      * Build the renderer for one framebuffer size, or null when WebGL2 is missing,
@@ -6564,6 +6566,10 @@ declare class WebgpuSceneRenderer implements SceneRenderer {
      * samples (a KTX2 one, F1a) uploads that instead: a quarter of the memory,
      * its mips the encoder's. A cut-out keeps the RGBA path for its coverage.
      */
+    /** A fantasy era's trilinear filtering (F1a): maps upload with {@link textureMips}'s chain. */
+    private readonly trilinear;
+    /** Whether a colour map is a cut-out that uploads block-compressed (F1a): its draws take the hashed cut-out test. */
+    private compressedCutout;
     private uploadTexture;
     /** Texture streaming (F1b): the residency plan, and the feedback pass's pipeline, buffers and state. */
     private streamer;

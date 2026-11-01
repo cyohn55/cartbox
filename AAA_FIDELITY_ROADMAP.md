@@ -337,7 +337,7 @@ Everything else depends on this track. It contains no visible "feature", but its
 
 ### F1. Textures and materials
 
-- [ ] **F1a. Mips, anisotropy and GPU compression.**
+- [x] **F1a. Mips, anisotropy and GPU compression.**
   - Full mip chains, generated on the GPU, or kept from KTX2.
   - Trilinear filtering with 16× anisotropy.
   - KTX2/Basis is transcoded to the **native GPU format** rather than RGBA: BC7/BC5/BC4 on desktop, ASTC on Apple, ETC2 as the fallback.
@@ -348,7 +348,7 @@ Everything else depends on this track. It contains no visible "feature", but its
       - Colour maps (base, emissive, blend surface) go through an `rgba8unorm-srgb` view, so they average in linear light. A distant black-and-white checker reads as the grey it looks like (188), not the darker byte average (128).
       - Data maps (metal-roughness, occlusion and relief, normal, light map, detail) average as stored.
     - **Cut-outs keep their coverage.** A colour map with see-through texels is mipped on the CPU instead. Each level's alpha is rescaled so the share of texels passing the cutoff matches full size (Castaño), and transparent texels take the level's mean colour so edges don't fringe dark. Plain averaging would thin foliage cards away with distance.
-    - **Where it applies.** The fantasy tiers are untouched, so they keep parity with the software rasteriser, which has no mips; `trilinear` still means bilinear there.
+    - **Where it applies.** The `aaa` tier. The fantasy tiers that declare `trilinear` (the N64 onward) gained their own chains with the software rasteriser's in F1a-4.
     - *Tests:* `mipmaps.test.ts` covers:
       - the chain arithmetic;
       - linear-light versus byte averaging on Dawn;
@@ -386,9 +386,17 @@ Everything else depends on this track. It contains no visible "feature", but its
       - `beaver-texture-memory.test.ts` measures that drop.
       - `ktx2-native.test.ts` checks the half-byte formats: opaque ETC1S goes to BC1 or ETC2 RGB, while data and alpha keep BC7.
       - In Chromium, Beaver Creek's light map and terrain upload as BC1, with no errors.
-    - *Left for F1a:*
-      - The four cut-out textures, about 175 KB of the 448, stay RGBA. Compressing them needs alpha-to-coverage (or coverage-preserving mips the encoder can't make), and that would take the measure past 4× against the one-level baseline too.
-      - The N64 model's true trilinear filtering needs the software rasteriser's own mips.
+  - **F1a-4, the leftovers: done.**
+    - **The cut-outs compressed too.** The texture bake now encodes the four cut-out colour maps with the rest, so every Beaver Creek texture reaches the GPU block-compressed (BC7 for alpha).
+      - **Coverage without coverage mips.** The encoder's plain mips thin a cut-out's alpha with distance, so past the top level the `aaa` shaders swap the fixed cutoff for a **hashed alpha test** (Wyman and McGuire): a stable per-pixel threshold, blended in by the mip level read from the UV derivatives (`cutoutLod`, `cutoutDrops`). A pixel then survives with probability equal to its filtered alpha, so a far card keeps its average coverage instead of vanishing; TAA resolves the dither. The opaque prepass, the main pass and the shadow casters all use the same test, so depth, colour and shadows agree.
+      - Only a compressed cut-out on `aaa` takes the hashed test (alpha mode 1.25); every other path keeps the fixed cutoff and its CPU coverage mips.
+      - **What it saves.** Beaver Creek's textures are now **317 KB**, down from 448: **4.96×** less than the one-level RGBA before F1a, and **6.61×** less than RGBA with mips. The 4× exit now holds against either baseline.
+      - *Tests:* `beaver-texture-memory.test.ts` holds both ratios; `ktx2-native.test.ts` checks a cut-out's colour map transcodes to BC7 with the encoder's thinning mips, and on Dawn draws a far field of compressed cards at about half coverage.
+    - **True trilinear on the fantasy tiers.** The N64 and the 360 declare `trilinear`, and `rasterStyleFor` now passes it through instead of collapsing it to bilinear.
+      - **The software rasteriser** (`meshRasterizer.ts`) builds each texture's chain once (`textureMips`: 2×2 rounded byte means down to 1×1, cached per texture). Each pixel's UV derivatives come analytically from the perspective-correct interpolants (the quotient rule on N/D), and its level is log₂ of the footprint's longer axis in texels (`mipLevelOf`), scaled for tiled detail and far maps. Magnified pixels read the top level bilinearly, exactly as before.
+      - **WebGPU and WebGL2** upload that same chain (byte averages, as the rasteriser, not linear-light) and sample it with a linear mip filter. The triplanar taps and light maps stay on the top level on both, as in the rasteriser.
+      - *Tests:* `trilinear.test.ts` covers the chain and the level arithmetic and that the N64 and 360 caps ask for trilinear. In the software rasteriser, a fine checker floor's shimmer between two eyes 3 cm apart falls to under a third of bilinear's, the far floor reads the close-up rows' mean, and magnified pixels match bilinear byte for byte. On Dawn, WebGPU matches the rasteriser on 95% of floor pixels within 8 levels. In Chromium, WebGL2 does the same (`webgl-parity.test.ts`).
+      - *Remaining difference:* the GPU takes a 2×2 quad's level from finite differences and the rasteriser takes each pixel's exactly, so near a level boundary on the horizon they can land a blend step apart.
 - [x] **F1b. Texture streaming.** Mip streaming driven by GPU feedback: a sampler-feedback-style pass that records the mip each material wanted, under a texture-memory budget per scalability level, with residency in the profiler. It also covers texture arrays, or bindless where available, so materials stop competing for 16 bind slots.
   - **Done** on the `aaa` tier (`player render/textureStreaming.ts`). Every other tier, and the KTX2 maps that arrive block-compressed (F1a), keep their maps whole.
     - **The feedback pass.** Every eighth frame the opaque batches are drawn again at a quarter of the frame's size, depth-tested, with no colour. Each pixel's UV footprint (log₂ of a 1×1 map's texels a pixel, at the frame's own size) goes into its material's slot by an atomic minimum in a storage buffer. The buffer is copied and read back without the frame waiting; a map of `size` texels then wants `footprint + log₂(size)`.

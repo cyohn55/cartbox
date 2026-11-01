@@ -751,6 +751,8 @@ export {
   lightsChannel,
   lightsOnChannels,
   lightColor,
+  textureMips,
+  mipLevelOf,
 } from "./render/meshRasterizer";
 export {
   MIN_AREA_SIZE,

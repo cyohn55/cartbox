@@ -90,6 +90,7 @@ import {
   type MeshSceneInstance,
   type RasterStyle,
   type ReflectionProbeSet,
+  textureMips,
 } from "@cartbox/editor";
 
 import { batchInstances, compositeFrame, presentFrame, softEdges, type PrimitiveTextures } from "./gpuFrame.js";
@@ -801,6 +802,8 @@ vec3 lightTerm(Light lgt, vec3 P, vec3 N, vec3 V, float ndv, float a2, float k, 
 ${graphNoiseSource("glsl")}
 // --- Living terrain (BEAVER_CREEK_ROADMAP.md B6): sampleTriplanar and heightBlend, term for term ---
 // A map by the UVs, or by triplanar projection in the mesh's space off the geometric normal.
+// A triplanar projection's taps read the top level (F1a): its footprint isn't the UVs', so trilinear filtering keeps
+// to the UVs, as the software rasteriser does.
 vec4 triMap(sampler2D s, vec2 uv) {
   if (u.terrain0.x <= 0.0) { return sampleMap(s, uv); }
   vec3 n = normalize(vNormal);
@@ -808,7 +811,12 @@ vec4 triMap(sampler2D s, vec2 uv) {
   vec3 w = a * a;
   w = w / max(w.x + w.y + w.z, 1e-30);
   vec3 p = vObjPos * (1.0 / u.terrain0.x);
-  return sampleMap(s, vec2(p.z, 1.0 - p.y)) * w.x + sampleMap(s, vec2(p.x, 1.0 - p.z)) * w.y + sampleMap(s, vec2(p.x, 1.0 - p.y)) * w.z;
+  return sampleMapLod(s, vec2(p.z, 1.0 - p.y)) * w.x + sampleMapLod(s, vec2(p.x, 1.0 - p.z)) * w.y + sampleMapLod(s, vec2(p.x, 1.0 - p.y)) * w.z;
+}
+// The blend surface's map, at its top level throughout (WebGPU keeps it in a one-level layer stack).
+vec4 triMapTop(sampler2D s, vec2 uv) {
+  if (u.terrain0.x <= 0.0) { return sampleMapLod(s, uv); }
+  return triMap(s, uv);
 }
 // --- Landscape materials (EDITOR_PRO_ROADMAP.md P2b): farTileBlend and macroGain, term for term ---
 // The base map tiled ${1 / FAR_TILE_SCALE}× larger, by the raw UVs or triplanar projection.
@@ -819,7 +827,7 @@ vec4 triMapFar(sampler2D s, vec2 p0) {
   vec3 w = a * a;
   w = w / max(w.x + w.y + w.z, 1e-30);
   vec3 p = vObjPos * (1.0 / (u.terrain0.x / ${FAR_TILE_SCALE.toFixed(4)}));
-  return sampleMap(s, vec2(p.z, 1.0 - p.y)) * w.x + sampleMap(s, vec2(p.x, 1.0 - p.z)) * w.y + sampleMap(s, vec2(p.x, 1.0 - p.y)) * w.z;
+  return sampleMapLod(s, vec2(p.z, 1.0 - p.y)) * w.x + sampleMapLod(s, vec2(p.x, 1.0 - p.z)) * w.y + sampleMapLod(s, vec2(p.x, 1.0 - p.y)) * w.z;
 }
 float farTileBlend(float depth, float distance) {
   float t = clamp((depth - distance * 0.25) / (distance * 0.75), 0.0, 1.0);
@@ -1000,7 +1008,7 @@ ${g.base}
     float bwt = vBw;
     vec3 bc = u.surface3.rgb;
     if (u.surface1.z > 0.5) {
-      if (u.surface1.w > 0.5) { bc = bc * triMap(blendTex, uv).rgb; }
+      if (u.surface1.w > 0.5) { bc = bc * triMapTop(blendTex, uv).rgb; }
       if (u.terrain0.y > 0.0) { bwt = heightBlend(vBw, blendHeightOf(colour.rgb), blendHeightOf(bc), u.terrain0.y); }
     }
     if (u.surface1.z > 0.5 && u.surface3.w >= 0.0) { rough = mix(rough, u.surface3.w, bwt); }
@@ -1086,7 +1094,7 @@ ${reflect ? "        envSpec = envSpec * (1.0 - coatV) + coatV * prefC * reflect
 ${reflect ? "    vec3 ambRaw = amb;\n" : ""}    // A baked light map (the second UV set) scales the sky/ambient fill,
     // mirroring the CPU path.
     if (u.ssaoMeta.z > 0.5) {
-      amb = amb * texture(lmTex, vec2(vUv2.x, 1.0 - vUv2.y)).rgb * ${LIGHTMAP_RANGE.toFixed(4)};
+      amb = amb * textureLod(lmTex, vec2(vUv2.x, 1.0 - vUv2.y), 0.0).rgb * ${LIGHTMAP_RANGE.toFixed(4)};
     } else if (probeGridMin.w > 0.5) {
       amb = amb * probeLight(vWorldPos, N); // EP9: no light map, the probes light it
     }
@@ -1287,6 +1295,8 @@ export class WebglSceneRenderer implements SceneRenderer {
   private readonly timer: WebglPassTimer | null;
   /** Whether the era samples nearest (it shapes every program variant). */
   private readonly nearest: boolean;
+  /** Whether it filters trilinearly (F1a): maps take the software rasteriser's mip chain. */
+  private readonly trilinear: boolean;
 
   private constructor(
     private readonly gl: any,
@@ -1304,6 +1314,7 @@ export class WebglSceneRenderer implements SceneRenderer {
   ) {
     this.software = new SoftwareSceneRenderer(style);
     this.nearest = style.textureFiltering === "none";
+    this.trilinear = style.textureFiltering === "trilinear";
     this.uniformBuffer = gl.createBuffer();
     this.instanceBuffer = gl.createBuffer();
     this.lightBuffer = gl.createBuffer();
@@ -1351,7 +1362,8 @@ export class WebglSceneRenderer implements SceneRenderer {
       // The era decides filtering, as for WebGPU's sampler: nearest for machines that couldn't filter.
       const filter = style.textureFiltering === "none" ? gl.NEAREST : gl.LINEAR;
       const sampler = gl.createSampler();
-      gl.samplerParameteri(sampler, gl.TEXTURE_MIN_FILTER, filter);
+      // Trilinear (F1a): the chain's two nearest levels, blended.
+      gl.samplerParameteri(sampler, gl.TEXTURE_MIN_FILTER, style.textureFiltering === "trilinear" ? gl.LINEAR_MIPMAP_LINEAR : filter);
       gl.samplerParameteri(sampler, gl.TEXTURE_MAG_FILTER, filter);
       gl.samplerParameteri(sampler, gl.TEXTURE_WRAP_S, gl.REPEAT);
       gl.samplerParameteri(sampler, gl.TEXTURE_WRAP_T, gl.REPEAT);
@@ -2337,7 +2349,17 @@ export class WebglSceneRenderer implements SceneRenderer {
     if (!source) return this.blankTexture;
     let texture = this.textures.get(source);
     if (!texture) {
-      texture = createTexture(this.gl, source.width, source.height, this.gl.RGBA8, this.gl.RGBA, this.gl.UNSIGNED_BYTE, toBytes(source.data));
+      const gl = this.gl;
+      if (this.trilinear) {
+        // A trilinear era (F1a): the software rasteriser's chain (textureMips), level for level.
+        const chain = textureMips(source);
+        texture = gl.createTexture();
+        gl.bindTexture(gl.TEXTURE_2D, texture);
+        chain.forEach((level, i) => gl.texImage2D(gl.TEXTURE_2D, i, gl.RGBA8, level.width, level.height, 0, gl.RGBA, gl.UNSIGNED_BYTE, toBytes(level.data)));
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAX_LEVEL, chain.length - 1);
+      } else {
+        texture = createTexture(gl, source.width, source.height, gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE, toBytes(source.data));
+      }
       this.textures.set(source, texture);
     }
     return texture;
