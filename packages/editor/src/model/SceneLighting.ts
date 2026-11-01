@@ -20,6 +20,7 @@ import { parsePhysicalCamera, type PhysicalCameraSettings } from "./physicalCame
 import { readIesProfile } from "./iesProfile";
 import { parseVolumetricFog } from "./volumetricFog";
 import { canRelight, parsePhysicalRelight, physicalRelight, type PhysicalRelightSettings } from "./physicalRelight";
+import { parseAlbedoCalibration, type AlbedoCalibration } from "./albedoCalibration";
 import { parseDynamicGi, parseScreenSpaceGi, type DynamicGiSettings, type ScreenSpaceGiSettings } from "./dynamicGi";
 import { parseAtmosphere } from "./atmosphere";
 import { parseWeather, type WeatherSettings } from "./weather";
@@ -173,6 +174,13 @@ export interface SceneLighting {
    * Every other tier lights by the rig as authored. Absent: the same rig everywhere.
    */
   readonly aaa?: SceneLightingOverride | null;
+  /**
+   * Calibrate the materials' albedos at load (AAA_FIDELITY_ROADMAP.md
+   * F11a-13; albedoCalibration.ts): each opaque material's base colour scaled
+   * into the physical range, or onto a measured target by name. A physical
+   * re-light sets it, so only the AAA tier takes it. Absent: as authored.
+   */
+  readonly materialAlbedo?: AlbedoCalibration | null;
 }
 
 /**
@@ -292,6 +300,7 @@ export function parseSceneLighting(raw: unknown): SceneLighting | null {
   const autoExposure = readAutoExposure(record.autoExposure);
   const camera = parsePhysicalCamera(record.camera);
   const aaa = parseLightingOverride(record, record.aaa);
+  const materialAlbedo = parseAlbedoCalibration(record.materialAlbedo);
 
   return {
     environment: {
@@ -327,6 +336,7 @@ export function parseSceneLighting(raw: unknown): SceneLighting | null {
     ...(camera ? { camera } : {}),
     ...(record.units === "physical" ? { units: "physical" as const } : {}),
     ...(aaa ? { aaa } : {}),
+    ...(materialAlbedo ? { materialAlbedo } : {}),
   };
 }
 
@@ -373,7 +383,7 @@ export function aaaLighting(lighting: SceneLighting): SceneLighting {
   if (cached) return cached;
   // A physical re-light is derived from the rig as it stands, so it follows edits to its lights and sky.
   const { physical, ...keys } = patch;
-  const derived = physical && canRelight(lighting) ? physicalRelight(lighting, physical.atmosphere, physical.volumetric) : {};
+  const derived = physical && canRelight(lighting) ? physicalRelight(lighting, physical.atmosphere, physical.volumetric, physical.albedo) : {};
   const out: Record<string, unknown> = { ...lighting, ...derived, ...keys };
   delete out.aaa;
   for (const [key, value] of Object.entries({ ...derived, ...keys })) if (value === null) delete out[key];
@@ -656,7 +666,7 @@ export function aaaRelightKeys(lighting: SceneLighting): string[] {
   const patch = lighting.aaa;
   if (!patch) return [];
   const { physical, ...keys } = patch;
-  const derived = physical && canRelight(lighting) ? Object.keys(physicalRelight(lighting, physical.atmosphere, physical.volumetric)) : [];
+  const derived = physical && canRelight(lighting) ? Object.keys(physicalRelight(lighting, physical.atmosphere, physical.volumetric, physical.albedo)) : [];
   return [...new Set([...derived, ...Object.keys(keys)])];
 }
 

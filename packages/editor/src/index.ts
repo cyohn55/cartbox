@@ -335,7 +335,7 @@ export {
   type SeamSample,
 } from "./model/lightmap";
 export { footprintMean, linearToAuthored, type OccluderSurface } from "./model/bakeSurface";
-export { dynamicGiGrid, parseDynamicGi, parseScreenSpaceGi, resolveDynamicGi, resolveScreenSpaceGi, type DynamicGi, type DynamicGiSettings, type ScreenSpaceGiSettings } from "./model/dynamicGi";
+export { dynamicGiGrid, giFramesToRefresh, giWindow, parseDynamicGi, parseScreenSpaceGi, resolveDynamicGi, resolveScreenSpaceGi, type DynamicGi, type DynamicGiSettings, type ScreenSpaceGiSettings } from "./model/dynamicGi";
 export {
   FOG_MAX_X,
   FOG_MAX_Y,
@@ -903,6 +903,7 @@ export {
   withLightFalloff,
   type LightUnit,
 } from "./model/physicalLight";
+export { PHYSICAL_ALBEDO, albedoLuminance, calibratedBaseFactor, meanAlbedo, meanMetalness, parseAlbedoCalibration, type AlbedoCalibration } from "./model/albedoCalibration";
 export { SUN_ABOVE_AIR, canRelight, groundSun, parsePhysicalRelight, physicalRelight, type PhysicalRelightSettings } from "./model/physicalRelight";
 export {
   DEFAULT_DETAIL_SCALE,

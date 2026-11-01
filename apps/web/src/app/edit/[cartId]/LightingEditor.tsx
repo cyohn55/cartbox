@@ -1226,6 +1226,18 @@ function DynamicGiControls({ lighting, onChange }: LightingEditorProps & { light
           <RangeControl label="Rays per probe" nested min={16} max={256} step={16} value={gi.rays ?? 64} ariaLabel="GI rays per probe" display={`${gi.rays ?? 64}`} onChange={(rays) => set({ rays })} />
           <RangeControl label="Steadiness" nested min={0.5} max={0.99} step={0.01} value={gi.hysteresis ?? 0.97} ariaLabel="GI hysteresis" display={(gi.hysteresis ?? 0.97).toFixed(2)} onChange={(hysteresis) => set({ hysteresis })} />
           <RangeControl label="Probe spacing" nested min={1} max={10} step={0.5} value={gi.spacing ?? 3} ariaLabel="GI probe spacing" display={`${(gi.spacing ?? 3).toFixed(1)} m`} onChange={(spacing) => set({ spacing })} />
+          <RangeControl
+            label="Probes a frame"
+            nested
+            min={0}
+            max={2048}
+            step={32}
+            value={gi.probesPerFrame ?? 0}
+            ariaLabel="GI probes traced a frame"
+            display={gi.probesPerFrame ? `${gi.probesPerFrame}` : "All"}
+            onChange={(n) => set({ probesPerFrame: n > 0 ? n : undefined })}
+          />
+          <RailHint>Probes a frame bounds the GI&apos;s cost: the volume is traced that many probes at a time, round-robin, and lower quality presets trace a share of it. All traces every probe every frame.</RailHint>
         </>
       )}
       <SegmentedControl

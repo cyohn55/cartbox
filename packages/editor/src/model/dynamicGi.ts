@@ -23,6 +23,12 @@ export interface DynamicGiSettings {
   readonly hysteresis?: number;
   /** About how far apart the probes stand, metres, when the rig has no baked volume to take its grid from. */
   readonly spacing?: number;
+  /**
+   * The most probes traced a frame (F11a-12): the volume is traced a window at
+   * a time, round-robin, so its cost is bounded whatever the map's size. Absent
+   * or 0: every probe, every frame.
+   */
+  readonly probesPerFrame?: number;
 }
 
 /** The settings with their defaults. */
@@ -30,6 +36,8 @@ export interface DynamicGi {
   readonly rays: number;
   readonly hysteresis: number;
   readonly spacing: number;
+  /** The most probes traced a frame; 0 for all. */
+  readonly probesPerFrame: number;
 }
 
 const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v));
@@ -38,16 +46,37 @@ const clamp = (v: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, v
 export function parseDynamicGi(value: unknown): DynamicGiSettings | null {
   if (!value || typeof value !== "object") return null;
   const raw = value as Record<string, unknown>;
-  const out: { rays?: number; hysteresis?: number; spacing?: number } = {};
+  const out: { rays?: number; hysteresis?: number; spacing?: number; probesPerFrame?: number } = {};
   if (typeof raw.rays === "number" && Number.isFinite(raw.rays)) out.rays = Math.round(clamp(raw.rays, 16, 256));
   if (typeof raw.hysteresis === "number" && Number.isFinite(raw.hysteresis)) out.hysteresis = clamp(raw.hysteresis, 0, 0.995);
   if (typeof raw.spacing === "number" && Number.isFinite(raw.spacing)) out.spacing = clamp(raw.spacing, 0.5, 20);
+  if (typeof raw.probesPerFrame === "number" && Number.isFinite(raw.probesPerFrame) && raw.probesPerFrame > 0) {
+    out.probesPerFrame = Math.round(clamp(raw.probesPerFrame, 8, 65536));
+  }
   return out;
 }
 
 export function resolveDynamicGi(settings: DynamicGiSettings | null | undefined): DynamicGi | null {
   if (!settings) return null;
-  return { rays: settings.rays ?? 64, hysteresis: settings.hysteresis ?? 0.97, spacing: settings.spacing ?? 3 };
+  return { rays: settings.rays ?? 64, hysteresis: settings.hysteresis ?? 0.97, spacing: settings.spacing ?? 3, probesPerFrame: settings.probesPerFrame ?? 0 };
+}
+
+/**
+ * The window of probes a frame traces (F11a-12): `budget` of `count` from
+ * `cursor`, wrapping round. A budget of 0, or one past the count, takes them all.
+ */
+export function giWindow(count: number, budget: number, cursor: number): { first: number; size: number } {
+  const size = budget > 0 ? Math.min(count, Math.round(budget)) : count;
+  return { first: size >= count ? 0 : ((cursor % count) + count) % count, size };
+}
+
+/**
+ * Frames for every probe to be traced once, `size` a frame of `count`. Each
+ * probe keeps its hysteresis per update, so it converges in the same number of
+ * its own updates as before, and the volume in this many times as many frames.
+ */
+export function giFramesToRefresh(count: number, size: number): number {
+  return size >= count || size <= 0 ? 1 : Math.ceil(count / size);
 }
 
 /**

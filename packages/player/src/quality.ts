@@ -72,13 +72,19 @@ export interface QualitySettings {
   readonly tracedReflections?: boolean;
   /** Texture streaming's budget on the AAA tier (AAA_FIDELITY_ROADMAP.md F1b), MB of resident maps. */
   readonly textureBudgetMB?: number;
+  /**
+   * The share of the rig's live GI probes traced a frame on the AAA tier
+   * (AAA_FIDELITY_ROADMAP.md F11a-12): its budget (or the whole volume) times
+   * this. Absent: 1.
+   */
+  readonly giShare?: number;
 }
 
 export const QUALITY_PRESETS: Readonly<Record<QualityLevel, QualitySettings>> = {
   epic: { level: "epic", shadows: true, shadowMapSize: 1024, shadowCascades: true, cascadeMapSize: 4096, maxRenderScale: 1, disabledEffects: [], terrainDetail: 1, antialias: true, temporal: true, reflections: true, skyScale: 3, tracedReflections: true, virtualShadows: true, textureBudgetMB: 1024 },
   high: { level: "high", shadows: true, shadowMapSize: 1024, shadowCascades: true, cascadeMapSize: 4096, maxRenderScale: 1, disabledEffects: [], terrainDetail: 1, antialias: true, temporal: true, reflections: true, skyScale: 3, virtualShadows: true, textureBudgetMB: 512 },
-  medium: { level: "medium", shadows: true, shadowMapSize: 512, cascadeMapSize: 2048, maxRenderScale: 0.75, disabledEffects: [], terrainDetail: 0.6, antialias: true, temporal: true, reflections: true, skyScale: 3, renderScale: 2 / 3, textureBudgetMB: 256 },
-  low: { level: "low", shadows: false, shadowMapSize: 512, maxRenderScale: 0.5, disabledEffects: ["bloom", "chroma"], terrainDetail: 0.3, antialias: false, temporal: false, reflections: false, skyScale: 4, textureBudgetMB: 128 },
+  medium: { level: "medium", shadows: true, shadowMapSize: 512, cascadeMapSize: 2048, maxRenderScale: 0.75, disabledEffects: [], terrainDetail: 0.6, antialias: true, temporal: true, reflections: true, skyScale: 3, renderScale: 2 / 3, textureBudgetMB: 256, giShare: 0.5 },
+  low: { level: "low", shadows: false, shadowMapSize: 512, maxRenderScale: 0.5, disabledEffects: ["bloom", "chroma"], terrainDetail: 0.3, antialias: false, temporal: false, reflections: false, skyScale: 4, textureBudgetMB: 128, giShare: 0.25 },
 };
 
 /** What the browser reveals about the device (all optional: browsers differ). */

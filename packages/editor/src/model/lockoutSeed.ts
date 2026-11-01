@@ -3491,6 +3491,10 @@ export function lockoutRelight(): SceneLightingOverride {
     physical: {
       atmosphere: { altitude: 3000, clouds: { coverage: 0.3, base: 3, thickness: 1.2, density: 30, type: 0.35, scale: 12, windSpeed: 10, windDirection: 20, shadows: 0.5 } },
       volumetric: { albedo: [0.95, 0.96, 0.98], anisotropy: 0.6, distance: 80, ambient: 1 },
+      // Measured references for linear light (F11a-13): fresh snow reflects 80–90%, so the arena's snow, its
+      // drifts and the peaks' all take 0.8; the peaks' rock (painted at 1.5%, darker than charcoal) takes 0.15,
+      // in rock's 10–35% (dark basalt to granite).
+      albedo: { snow: 0.8, drift: 0.8, "terrain-snow": 0.8, "terrain-rock": 0.15 },
     },
   };
 }

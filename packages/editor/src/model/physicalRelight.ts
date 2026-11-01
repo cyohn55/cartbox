@@ -29,6 +29,7 @@
 import { lightColor, type SceneLight } from "../render/meshRasterizer";
 import { integrateTransmittance, parseAtmosphere, resolveAtmosphere, type AtmosphereSettings } from "./atmosphere";
 import { luxToUnits } from "./physicalLight";
+import { PHYSICAL_ALBEDO, parseAlbedoCalibration } from "./albedoCalibration";
 import type { SceneLighting, SceneLightingOverride } from "./SceneLighting";
 import { parseVolumetricFog, type VolumetricFogSettings } from "./volumetricFog";
 
@@ -38,13 +39,16 @@ export interface PhysicalRelightSettings {
   readonly atmosphere: AtmosphereSettings;
   /** How the rig's fog scatters as a volume. */
   readonly volumetric: VolumetricFogSettings;
+  /** Measured mean linear albedos by material name (F11a-13), in place of the physical range for those materials. */
+  readonly albedo?: Readonly<Record<string, number>>;
 }
 
 /** A stored physical re-light, read defensively; null when it isn't one. */
 export function parsePhysicalRelight(value: unknown): PhysicalRelightSettings | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const raw = value as Record<string, unknown>;
-  return { atmosphere: parseAtmosphere(raw.atmosphere) ?? {}, volumetric: parseVolumetricFog(raw.volumetric) ?? {} };
+  const targets = parseAlbedoCalibration({ targets: raw.albedo })?.targets;
+  return { atmosphere: parseAtmosphere(raw.atmosphere) ?? {}, volumetric: parseVolumetricFog(raw.volumetric) ?? {}, ...(targets ? { albedo: targets } : {}) };
 }
 
 /** Whether a rig can be re-lit physically: it has a key light to become the sun and a sky to make physical. */
@@ -77,7 +81,13 @@ export function groundSun(atmosphere: AtmosphereSettings, direction: readonly nu
  * of the painted gradient (keeping its objects and landscape as art), EV100 15,
  * the local lights in proportion, real-time GI and volumetric fog.
  */
-export function physicalRelight(rig: SceneLighting, atmosphere: AtmosphereSettings, volumetric: VolumetricFogSettings): Omit<SceneLightingOverride, "physical"> {
+export function physicalRelight(
+  rig: SceneLighting,
+  atmosphere: AtmosphereSettings,
+  volumetric: VolumetricFogSettings,
+  /** Measured albedos by material name (F11a-13). */
+  albedo?: Readonly<Record<string, number>>,
+): Omit<SceneLightingOverride, "physical"> {
   const key = rig.lights.find((l) => l.kind === "directional" && l.direction);
   if (!key?.direction || !rig.sky) throw new Error("a physical re-light needs a key light and a sky (canRelight)");
   const settings: AtmosphereSettings = { ...atmosphere, landscape: atmosphere.landscape ?? true };
@@ -103,7 +113,10 @@ export function physicalRelight(rig: SceneLighting, atmosphere: AtmosphereSettin
     units: "physical",
     ...(rig.fog ? { fog: { ...rig.fog, volumetric } } : {}),
     shafts: null,
-    dynamicGi: {},
+    // About a sixth of either map's probes a frame: a sweep in five or six frames, the cost bounded (F11a-12).
+    dynamicGi: { probesPerFrame: 256 },
+    // The materials' albedos re-measured for linear light (F11a-13).
+    materialAlbedo: { ...PHYSICAL_ALBEDO, ...(albedo ? { targets: albedo } : {}) },
     lightProbes: null,
   };
 }

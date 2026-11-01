@@ -997,6 +997,12 @@ interface QualitySettings {
     readonly tracedReflections?: boolean;
     /** Texture streaming's budget on the AAA tier (AAA_FIDELITY_ROADMAP.md F1b), MB of resident maps. */
     readonly textureBudgetMB?: number;
+    /**
+     * The share of the rig's live GI probes traced a frame on the AAA tier
+     * (AAA_FIDELITY_ROADMAP.md F11a-12): its budget (or the whole volume) times
+     * this. Absent: 1.
+     */
+    readonly giShare?: number;
 }
 declare const QUALITY_PRESETS: Readonly<Record<QualityLevel, QualitySettings>>;
 /** What the browser reveals about the device (all optional: browsers differ). */

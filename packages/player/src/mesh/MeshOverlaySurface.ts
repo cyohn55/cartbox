@@ -28,6 +28,8 @@ import type { WaterFrame } from "../render/waterLook.js";
 import {
   aaaLighting,
   atmosphereLighting,
+  calibratedBaseFactor,
+  type AlbedoCalibration,
   atmosphereLuts,
   atmosphereKey,
   cloudShadedLighting,
@@ -1072,10 +1074,13 @@ export class MeshOverlaySurface implements DisplaySurface {
       return ktx2.then((decode) => (decode ? decode(bytes, gpuFormats.length > 0 ? { gpuFormats } : undefined) : null));
     };
     const images = new Map<EncodedImage, Promise<DecodedTexture | null>>();
+    // The AAA re-light's albedos re-measured for linear light (F11a-13), once each mesh's maps are decoded.
+    const calibration = scene.lighting?.materialAlbedo ?? null;
     const texture = (mesh: MeshAsset): Promise<TexturedMesh> => {
       let entry = decoded.get(mesh);
       if (!entry) {
-        entry = decodeMeshTextures(mesh, decodeKtx2, images, gpuFormats.length > 0);
+        const raw = decodeMeshTextures(mesh, decodeKtx2, images, gpuFormats.length > 0);
+        entry = calibration ? raw.then((t) => calibrateTextured(t, calibration)) : raw;
         decoded.set(mesh, entry);
       }
       return entry;
@@ -1088,7 +1093,7 @@ export class MeshOverlaySurface implements DisplaySurface {
     for (const [i, instance] of scene.instances.entries()) {
       const textured = streamed?.has(i) ? { mesh: instance.mesh } : await texture(instance.mesh);
       // A skinned object draws its own live copy of the mesh (same textures), posed each frame.
-      const skinned = liveCopy(instance.mesh, renderer.gpuSkinning === true);
+      const skinned = liveCopy(textured.mesh ?? instance.mesh, renderer.gpuSkinning === true);
       if (skinned) live.set(i, skinned);
       const lod = liveLod(instance.lod, skinned);
       instances.push({
@@ -1884,7 +1889,12 @@ export class MeshOverlaySurface implements DisplaySurface {
     }
     const state = this.giState;
     if (state.env?.source !== env) state.env = { source: env, value: { ...env, probeVolume: env.probeVolume ?? state.empty } };
-    return { draw: { occluders: state.occluders, key: this.staticShadowKey(), settings }, environment: state.env.value };
+    // The probes a frame traces (F11a-12): the rig's budget (or the whole volume), times the quality's share.
+    const counts = state.env.value.probeVolume!.counts;
+    const share = this.quality.giShare ?? 1;
+    const budget = share >= 1 ? settings.probesPerFrame : Math.max(8, Math.round((settings.probesPerFrame || counts[0] * counts[1] * counts[2]) * share));
+    const traced = budget === settings.probesPerFrame ? settings : { ...settings, probesPerFrame: budget };
+    return { draw: { occluders: state.occluders, key: this.staticShadowKey(), settings: traced }, environment: state.env.value };
   }
   /** What stands still in the scene, as the BVH tracers take it (F3e's live GI, F3f's Epic reflections), gathered once a scene. */
   private stillOccluders(): { mesh: MeshAsset; model: Mat4 }[] {
@@ -3115,6 +3125,23 @@ function sunKey(sun: SkySun): string {
 /** The scene as `renderer` lights it: the AAA tier takes the rig's physical re-light (F11a-10), every other its rig as authored. */
 function relitFor(scene: MeshScene, renderer: SceneRenderer): MeshScene {
   return renderer.sunCascades === true && scene.lighting?.aaa ? { ...scene, lighting: aaaLighting(scene.lighting) } : scene;
+}
+
+/**
+ * A decoded mesh with its materials' albedos calibrated (F11a-13): each opaque
+ * material's base colour factor scaled into the calibration's range by its
+ * map's mean. The same object when nothing changes.
+ */
+function calibrateTextured(textured: TexturedMesh, calibration: AlbedoCalibration): TexturedMesh {
+  const mesh = textured.mesh;
+  let changed = false;
+  const primitives = mesh.primitives.map((primitive, i) => {
+    const factor = calibratedBaseFactor(primitive.material, textured.textures?.[i], textured.mrTextures?.[i], calibration);
+    if (!factor) return primitive;
+    changed = true;
+    return { ...primitive, material: { ...primitive.material, baseColorFactor: factor } };
+  });
+  return changed ? { ...textured, mesh: { ...mesh, primitives } } : textured;
 }
 
 /** A mesh with every material map decoded — what an instance (or a frame) draws with. */

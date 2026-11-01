@@ -23,7 +23,7 @@
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
-import { PROBE_NORMAL_BIAS, PROBE_SH, PROBE_VOLUME_SLOTS, type DynamicGi, type Occluder, type ProbeVolume, type SceneLight } from "@cartbox/editor";
+import { PROBE_NORMAL_BIAS, PROBE_SH, PROBE_VOLUME_SLOTS, giWindow, type DynamicGi, type Occluder, type ProbeVolume, type SceneLight } from "@cartbox/editor";
 
 import { LIGHTMAP_TRACE_WGSL, bakeLights, lightmapParams, packBakeLights, packLightmapScene } from "./gpuLightmapper.js";
 import type { LinearPanorama } from "./ibl.js";
@@ -62,7 +62,16 @@ export function giSpacing(volume: Pick<ProbeVolume, "min" | "max" | "counts">): 
  * this frame's rotation (row 0's w its seed), the depth cap, the backface
  * limit, and whether the volume yet lights what the rays hit.
  */
-export function packGiUniforms(volume: Pick<ProbeVolume, "min" | "max" | "counts">, gi: DynamicGi, rotation: readonly (readonly number[])[], seed: number, bounce: boolean, out = new Float32Array(GI_UNIFORM_FLOATS)): Float32Array {
+export function packGiUniforms(
+  volume: Pick<ProbeVolume, "min" | "max" | "counts">,
+  gi: DynamicGi,
+  rotation: readonly (readonly number[])[],
+  seed: number,
+  bounce: boolean,
+  out = new Float32Array(GI_UNIFORM_FLOATS),
+  /** The probes this frame traces (F11a-12): the first and how many; absent, all of them. */
+  window: { readonly first: number; readonly size: number } | null = null,
+): Float32Array {
   const { spacing, reach } = giSpacing(volume);
   out.set([...volume.min, gi.rays], 0);
   out.set([...spacing.map((s) => 1 / s), gi.hysteresis], 4);
@@ -71,6 +80,8 @@ export function packGiUniforms(volume: Pick<ProbeVolume, "min" | "max" | "counts
   out.set([...rotation[1]!, 0], 16);
   out.set([...rotation[2]!, 0], 20);
   out.set([reach, GI_BACKFACE_LIMIT, bounce ? 1 : 0, PROBE_NORMAL_BIAS * Math.min(...spacing)], 24);
+  const count = volume.counts[0] * volume.counts[1] * volume.counts[2];
+  out.set([window?.first ?? 0, window?.size ?? count, count, 0], 28);
   return out;
 }
 
@@ -85,6 +96,7 @@ struct Gi {
   rot1: vec4<f32>,
   rot2: vec4<f32>,
   info: vec4<f32>,   // the depth cap, the backface limit, 1 when the volume lights hits, the normal bias
+  window: vec4<f32>, // F11a-12: the first probe this frame traces, how many, of how many
 };
 @group(0) @binding(8) var<storage, read_write> probeData: array<vec4<f32>>;
 @group(0) @binding(9) var<uniform> gi: Gi;
@@ -156,10 +168,11 @@ fn giRay(r: u32, rays: u32) -> vec3<f32> {
 
 @compute @workgroup_size(64)
 fn giTrace(@builtin(global_invocation_id) id: vec3<u32>) {
-  let n = giCount();
   let rays = u32(gi.min.w + 0.5);
-  let p = id.x / rays;
-  if (p >= n.x * n.y * n.z) { return; }
+  // This frame's window of probes (F11a-12): the j-th of them is probe (first + j) round the volume.
+  let j = id.x / rays;
+  if (j >= u32(gi.window.y + 0.5)) { return; }
+  let p = (u32(gi.window.x + 0.5) + j) % u32(gi.window.z + 0.5);
   let r = id.x % rays;
   rng = pcg(id.x ^ pcg(u32(gi.rot0.w)));
   let P = giAt(giProbe(p));
@@ -272,12 +285,12 @@ fn giReflect(@builtin(global_invocation_id) id: vec3<u32>) {
 
 @compute @workgroup_size(64)
 fn giUpdate(@builtin(global_invocation_id) id: vec3<u32>) {
-  let n = giCount();
-  let p = id.x / ${PROBE_VOLUME_SLOTS}u;
-  if (p >= n.x * n.y * n.z) { return; }
+  let j = id.x / ${PROBE_VOLUME_SLOTS}u;
+  if (j >= u32(gi.window.y + 0.5)) { return; }
+  let p = (u32(gi.window.x + 0.5) + j) % u32(gi.window.z + 0.5);
   let slot = id.x % ${PROBE_VOLUME_SLOTS}u;
   let rays = u32(gi.min.w + 0.5);
-  let base = p * rays;
+  let base = j * rays;
   let at = giSlot(slot, giProbe(p));
   let old = probeData[at];
   let h = gi.scale.w;
@@ -359,6 +372,8 @@ export class GpuProbeGi {
   private readonly reflectData = new Float32Array(24);
   private readonly random = mulberry(0x5eed);
   private frames = 0;
+  /** The next probe a windowed frame starts at (F11a-12). */
+  private cursor = 0;
   /** The probe buffer the passes last wrote into, so a new one (a re-uploaded volume) starts its bounce afresh. */
   private target: any = null;
 
@@ -386,7 +401,10 @@ export class GpuProbeGi {
     const device = this.device;
     const count = layout.counts[0] * layout.counts[1] * layout.counts[2];
     const rays = settings.rays;
-    const raysBytes = count * rays * 32;
+    // The window of probes this frame traces (F11a-12), round-robin through the volume.
+    const window = giWindow(count, settings.probesPerFrame, this.cursor);
+    this.cursor = (window.first + window.size) % count;
+    const raysBytes = window.size * rays * 32;
     if (!this.rays || this.rays.size < raysBytes) {
       this.rays?.destroy();
       this.rays = device.createBuffer({ size: raysBytes, usage: STORAGE });
@@ -399,7 +417,7 @@ export class GpuProbeGi {
     this.target = probes;
     const rotation = randomRotation(this.random(), this.random(), this.random());
     // The frame's seed, a whole number a float holds exactly.
-    device.queue.writeBuffer(this.uniforms, 0, packGiUniforms(layout, settings, rotation, this.frames % 16777216, bounce, this.data));
+    device.queue.writeBuffer(this.uniforms, 0, packGiUniforms(layout, settings, rotation, this.frames % 16777216, bounce, this.data, window));
     this.frames += 1;
     const pipeline = (entryPoint: string) => device.createComputePipeline({ layout: "auto", compute: { module: device.createShaderModule({ code: GI_WGSL }), entryPoint } });
     this.pipelines ??= { trace: pipeline("giTrace"), update: pipeline("giUpdate") };
@@ -422,7 +440,7 @@ export class GpuProbeGi {
         ],
       }),
     );
-    pass.dispatchWorkgroups(Math.ceil((count * rays) / 64));
+    pass.dispatchWorkgroups(Math.ceil((window.size * rays) / 64));
     pass.setPipeline(this.pipelines.update);
     pass.setBindGroup(
       0,
@@ -437,7 +455,7 @@ export class GpuProbeGi {
         ],
       }),
     );
-    pass.dispatchWorkgroups(Math.ceil((count * PROBE_VOLUME_SLOTS) / 64));
+    pass.dispatchWorkgroups(Math.ceil((window.size * PROBE_VOLUME_SLOTS) / 64));
     pass.end();
   }
 
@@ -491,7 +509,7 @@ export class GpuProbeGi {
     this.reflectData.set([frame.eye[0]!, frame.eye[1]!, frame.eye[2]!, this.frames % 16777216], 16);
     this.reflectData.set([frame.width, frame.height, volume ? 1 : 0, frame.maxRoughness], 20);
     device.queue.writeBuffer(this.reflectUniforms, 0, this.reflectData);
-    if (volume) device.queue.writeBuffer(this.reflectGi, 0, packGiUniforms(volume.layout, { rays: 1, hysteresis: 0, spacing: 1 }, [[1, 0, 0], [0, 1, 0], [0, 0, 1]], 0, true));
+    if (volume) device.queue.writeBuffer(this.reflectGi, 0, packGiUniforms(volume.layout, { rays: 1, hysteresis: 0, spacing: 1, probesPerFrame: 0 }, [[1, 0, 0], [0, 1, 0], [0, 0, 1]], 0, true));
     if (!lit) this.frames += 1;
     this.reflectPipeline ??= device.createComputePipeline({ layout: "auto", compute: { module: device.createShaderModule({ code: GI_WGSL }), entryPoint: "giReflect" } });
     const pass = encoder.beginComputePass(timing);

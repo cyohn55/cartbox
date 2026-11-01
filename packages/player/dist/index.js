@@ -4656,8 +4656,8 @@ var QUALITY_LEVELS = ["low", "medium", "high", "epic"];
 var QUALITY_PRESETS = {
   epic: { level: "epic", shadows: true, shadowMapSize: 1024, shadowCascades: true, cascadeMapSize: 4096, maxRenderScale: 1, disabledEffects: [], terrainDetail: 1, antialias: true, temporal: true, reflections: true, skyScale: 3, tracedReflections: true, virtualShadows: true, textureBudgetMB: 1024 },
   high: { level: "high", shadows: true, shadowMapSize: 1024, shadowCascades: true, cascadeMapSize: 4096, maxRenderScale: 1, disabledEffects: [], terrainDetail: 1, antialias: true, temporal: true, reflections: true, skyScale: 3, virtualShadows: true, textureBudgetMB: 512 },
-  medium: { level: "medium", shadows: true, shadowMapSize: 512, cascadeMapSize: 2048, maxRenderScale: 0.75, disabledEffects: [], terrainDetail: 0.6, antialias: true, temporal: true, reflections: true, skyScale: 3, renderScale: 2 / 3, textureBudgetMB: 256 },
-  low: { level: "low", shadows: false, shadowMapSize: 512, maxRenderScale: 0.5, disabledEffects: ["bloom", "chroma"], terrainDetail: 0.3, antialias: false, temporal: false, reflections: false, skyScale: 4, textureBudgetMB: 128 }
+  medium: { level: "medium", shadows: true, shadowMapSize: 512, cascadeMapSize: 2048, maxRenderScale: 0.75, disabledEffects: [], terrainDetail: 0.6, antialias: true, temporal: true, reflections: true, skyScale: 3, renderScale: 2 / 3, textureBudgetMB: 256, giShare: 0.5 },
+  low: { level: "low", shadows: false, shadowMapSize: 512, maxRenderScale: 0.5, disabledEffects: ["bloom", "chroma"], terrainDetail: 0.3, antialias: false, temporal: false, reflections: false, skyScale: 4, textureBudgetMB: 128, giShare: 0.25 }
 };
 function detectQuality(hints) {
   if (hints.cores !== void 0 && hints.cores <= 2 || hints.memoryGB !== void 0 && hints.memoryGB <= 2) return "low";
@@ -11743,6 +11743,7 @@ function resampleNearest(src, sw, sh, dw, dh) {
 import {
   aaaLighting,
   atmosphereLighting,
+  calibratedBaseFactor,
   atmosphereLuts,
   atmosphereKey,
   cloudShadedLighting,
@@ -13071,10 +13072,12 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
       return ktx2.then((decode) => decode ? decode(bytes, gpuFormats.length > 0 ? { gpuFormats } : void 0) : null);
     };
     const images = /* @__PURE__ */ new Map();
+    const calibration = scene.lighting?.materialAlbedo ?? null;
     const texture = (mesh) => {
       let entry = decoded.get(mesh);
       if (!entry) {
-        entry = decodeMeshTextures(mesh, decodeKtx2, images, gpuFormats.length > 0);
+        const raw = decodeMeshTextures(mesh, decodeKtx2, images, gpuFormats.length > 0);
+        entry = calibration ? raw.then((t) => calibrateTextured(t, calibration)) : raw;
         decoded.set(mesh, entry);
       }
       return entry;
@@ -13085,7 +13088,7 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
     const streamed = scene.streaming?.cell ? new Set(streamGroups(scene).flatMap((g) => g.members)) : null;
     for (const [i, instance] of scene.instances.entries()) {
       const textured = streamed?.has(i) ? { mesh: instance.mesh } : await texture(instance.mesh);
-      const skinned = liveCopy(instance.mesh, renderer.gpuSkinning === true);
+      const skinned = liveCopy(textured.mesh ?? instance.mesh, renderer.gpuSkinning === true);
       if (skinned) live.set(i, skinned);
       const lod = liveLod(instance.lod, skinned);
       instances.push({
@@ -13743,7 +13746,11 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
     }
     const state = this.giState;
     if (state.env?.source !== env) state.env = { source: env, value: { ...env, probeVolume: env.probeVolume ?? state.empty } };
-    return { draw: { occluders: state.occluders, key: this.staticShadowKey(), settings }, environment: state.env.value };
+    const counts = state.env.value.probeVolume.counts;
+    const share = this.quality.giShare ?? 1;
+    const budget = share >= 1 ? settings.probesPerFrame : Math.max(8, Math.round((settings.probesPerFrame || counts[0] * counts[1] * counts[2]) * share));
+    const traced = budget === settings.probesPerFrame ? settings : { ...settings, probesPerFrame: budget };
+    return { draw: { occluders: state.occluders, key: this.staticShadowKey(), settings: traced }, environment: state.env.value };
   }
   /** What stands still in the scene, as the BVH tracers take it (F3e's live GI, F3f's Epic reflections), gathered once a scene. */
   stillOccluders() {
@@ -14729,6 +14736,17 @@ function sunKey(sun) {
 }
 function relitFor(scene, renderer) {
   return renderer.sunCascades === true && scene.lighting?.aaa ? { ...scene, lighting: aaaLighting(scene.lighting) } : scene;
+}
+function calibrateTextured(textured, calibration) {
+  const mesh = textured.mesh;
+  let changed = false;
+  const primitives = mesh.primitives.map((primitive, i) => {
+    const factor = calibratedBaseFactor(primitive.material, textured.textures?.[i], textured.mrTextures?.[i], calibration);
+    if (!factor) return primitive;
+    changed = true;
+    return { ...primitive, material: { ...primitive.material, baseColorFactor: factor } };
+  });
+  return changed ? { ...textured, mesh: { ...mesh, primitives } } : textured;
 }
 var hdrLightmapDecodes = /* @__PURE__ */ new WeakMap();
 function decodeHdrLightmapOnce(image) {
@@ -28519,7 +28537,7 @@ var GpuAtmosphere = class {
 };
 
 // src/render/dynamicGi.ts
-import { PROBE_NORMAL_BIAS, PROBE_SH as PROBE_SH2, PROBE_VOLUME_SLOTS } from "@cartbox/editor";
+import { PROBE_NORMAL_BIAS, PROBE_SH as PROBE_SH2, PROBE_VOLUME_SLOTS, giWindow } from "@cartbox/editor";
 var GI_UNIFORM_FLOATS = 32;
 var GI_REACH = 1.5;
 var GI_BACKFACE_LIMIT = 0.6;
@@ -28539,7 +28557,7 @@ function giSpacing(volume) {
   const spacing = [0, 1, 2].map((a) => (volume.max[a] - volume.min[a]) / Math.max(1, volume.counts[a] - 1) || 1);
   return { spacing, reach: GI_REACH * Math.max(...spacing) };
 }
-function packGiUniforms(volume, gi, rotation, seed, bounce, out = new Float32Array(GI_UNIFORM_FLOATS)) {
+function packGiUniforms(volume, gi, rotation, seed, bounce, out = new Float32Array(GI_UNIFORM_FLOATS), window2 = null) {
   const { spacing, reach } = giSpacing(volume);
   out.set([...volume.min, gi.rays], 0);
   out.set([...spacing.map((s) => 1 / s), gi.hysteresis], 4);
@@ -28548,6 +28566,8 @@ function packGiUniforms(volume, gi, rotation, seed, bounce, out = new Float32Arr
   out.set([...rotation[1], 0], 16);
   out.set([...rotation[2], 0], 20);
   out.set([reach, GI_BACKFACE_LIMIT, bounce ? 1 : 0, PROBE_NORMAL_BIAS * Math.min(...spacing)], 24);
+  const count = volume.counts[0] * volume.counts[1] * volume.counts[2];
+  out.set([window2?.first ?? 0, window2?.size ?? count, count, 0], 28);
   return out;
 }
 var GI_WGSL = (
@@ -28562,6 +28582,7 @@ struct Gi {
   rot1: vec4<f32>,
   rot2: vec4<f32>,
   info: vec4<f32>,   // the depth cap, the backface limit, 1 when the volume lights hits, the normal bias
+  window: vec4<f32>, // F11a-12: the first probe this frame traces, how many, of how many
 };
 @group(0) @binding(8) var<storage, read_write> probeData: array<vec4<f32>>;
 @group(0) @binding(9) var<uniform> gi: Gi;
@@ -28633,10 +28654,11 @@ fn giRay(r: u32, rays: u32) -> vec3<f32> {
 
 @compute @workgroup_size(64)
 fn giTrace(@builtin(global_invocation_id) id: vec3<u32>) {
-  let n = giCount();
   let rays = u32(gi.min.w + 0.5);
-  let p = id.x / rays;
-  if (p >= n.x * n.y * n.z) { return; }
+  // This frame's window of probes (F11a-12): the j-th of them is probe (first + j) round the volume.
+  let j = id.x / rays;
+  if (j >= u32(gi.window.y + 0.5)) { return; }
+  let p = (u32(gi.window.x + 0.5) + j) % u32(gi.window.z + 0.5);
   let r = id.x % rays;
   rng = pcg(id.x ^ pcg(u32(gi.rot0.w)));
   let P = giAt(giProbe(p));
@@ -28749,12 +28771,12 @@ fn giReflect(@builtin(global_invocation_id) id: vec3<u32>) {
 
 @compute @workgroup_size(64)
 fn giUpdate(@builtin(global_invocation_id) id: vec3<u32>) {
-  let n = giCount();
-  let p = id.x / ${PROBE_VOLUME_SLOTS}u;
-  if (p >= n.x * n.y * n.z) { return; }
+  let j = id.x / ${PROBE_VOLUME_SLOTS}u;
+  if (j >= u32(gi.window.y + 0.5)) { return; }
+  let p = (u32(gi.window.x + 0.5) + j) % u32(gi.window.z + 0.5);
   let slot = id.x % ${PROBE_VOLUME_SLOTS}u;
   let rays = u32(gi.min.w + 0.5);
-  let base = p * rays;
+  let base = j * rays;
   let at = giSlot(slot, giProbe(p));
   let old = probeData[at];
   let h = gi.scale.w;
@@ -28828,6 +28850,8 @@ var GpuProbeGi = class {
     this.reflectData = new Float32Array(24);
     this.random = mulberry(24301);
     this.frames = 0;
+    /** The next probe a windowed frame starts at (F11a-12). */
+    this.cursor = 0;
     /** The probe buffer the passes last wrote into, so a new one (a re-uploaded volume) starts its bounce afresh. */
     this.target = null;
     const packed = packLightmapScene(occluders);
@@ -28849,7 +28873,9 @@ var GpuProbeGi = class {
     const device = this.device;
     const count = layout.counts[0] * layout.counts[1] * layout.counts[2];
     const rays = settings.rays;
-    const raysBytes = count * rays * 32;
+    const window2 = giWindow(count, settings.probesPerFrame, this.cursor);
+    this.cursor = (window2.first + window2.size) % count;
+    const raysBytes = window2.size * rays * 32;
     if (!this.rays || this.rays.size < raysBytes) {
       this.rays?.destroy();
       this.rays = device.createBuffer({ size: raysBytes, usage: STORAGE6 });
@@ -28860,7 +28886,7 @@ var GpuProbeGi = class {
     const bounce = this.target === probes;
     this.target = probes;
     const rotation = randomRotation(this.random(), this.random(), this.random());
-    device.queue.writeBuffer(this.uniforms, 0, packGiUniforms(layout, settings, rotation, this.frames % 16777216, bounce, this.data));
+    device.queue.writeBuffer(this.uniforms, 0, packGiUniforms(layout, settings, rotation, this.frames % 16777216, bounce, this.data, window2));
     this.frames += 1;
     const pipeline = (entryPoint) => device.createComputePipeline({ layout: "auto", compute: { module: device.createShaderModule({ code: GI_WGSL }), entryPoint } });
     this.pipelines ?? (this.pipelines = { trace: pipeline("giTrace"), update: pipeline("giUpdate") });
@@ -28883,7 +28909,7 @@ var GpuProbeGi = class {
         ]
       })
     );
-    pass.dispatchWorkgroups(Math.ceil(count * rays / 64));
+    pass.dispatchWorkgroups(Math.ceil(window2.size * rays / 64));
     pass.setPipeline(this.pipelines.update);
     pass.setBindGroup(
       0,
@@ -28898,7 +28924,7 @@ var GpuProbeGi = class {
         ]
       })
     );
-    pass.dispatchWorkgroups(Math.ceil(count * PROBE_VOLUME_SLOTS / 64));
+    pass.dispatchWorkgroups(Math.ceil(window2.size * PROBE_VOLUME_SLOTS / 64));
     pass.end();
   }
   /** Upload the frame's lights and (when it changed) the sky the tracer lights its hits by. */
@@ -28942,7 +28968,7 @@ var GpuProbeGi = class {
     this.reflectData.set([frame.eye[0], frame.eye[1], frame.eye[2], this.frames % 16777216], 16);
     this.reflectData.set([frame.width, frame.height, volume ? 1 : 0, frame.maxRoughness], 20);
     device.queue.writeBuffer(this.reflectUniforms, 0, this.reflectData);
-    if (volume) device.queue.writeBuffer(this.reflectGi, 0, packGiUniforms(volume.layout, { rays: 1, hysteresis: 0, spacing: 1 }, [[1, 0, 0], [0, 1, 0], [0, 0, 1]], 0, true));
+    if (volume) device.queue.writeBuffer(this.reflectGi, 0, packGiUniforms(volume.layout, { rays: 1, hysteresis: 0, spacing: 1, probesPerFrame: 0 }, [[1, 0, 0], [0, 1, 0], [0, 0, 1]], 0, true));
     if (!lit) this.frames += 1;
     this.reflectPipeline ?? (this.reflectPipeline = device.createComputePipeline({ layout: "auto", compute: { module: device.createShaderModule({ code: GI_WGSL }), entryPoint: "giReflect" } }));
     const pass = encoder.beginComputePass(timing);
