@@ -11821,6 +11821,10 @@ import {
   stepChunks,
   emitterFromEffect,
   precipitationOrigin,
+  lightColor as lightColor2,
+  Ocean,
+  RippleField,
+  resolveWaterLook,
   resolveWeather,
   weatherActive,
   weatherEmitters
@@ -12462,6 +12466,12 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
     this.low = null;
     /** A GPU that reads its frames back: paced by how often they land (gpuPacing.ts), made with the first frame. */
     this.gpuPacer = null;
+    /** The scene's water body (F5d), found once; its FFT ocean, and the ripples round the eye. */
+    this.waterBodyCache = void 0;
+    this.ocean = null;
+    this.oceanSlopes = null;
+    this.ripples = new RippleField();
+    this.waded = null;
     /** The upper sky's mean light for F5c's clouds, and the sun it was found for. */
     this.cloudAmbient = null;
     /** The last sky backdrop and the view it was painted for (it depends only on
@@ -12657,6 +12667,83 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
       children: childIndices(parents),
       locals: scene.instances.map((instance) => instance.local ?? instance.model)
     } : null;
+  }
+  /** Disturb the water at world (x, z) (F5d): a ring `strength` metres deep spreads from it. */
+  splash(x, z, strength = 0.05) {
+    this.ripples.impulse(x, z, strength);
+  }
+  /** The first water surface in the scene (a refracting material with ripples): its top, its extent and its material. */
+  waterBody() {
+    if (this.waterBodyCache !== void 0) return this.waterBodyCache;
+    this.waterBodyCache = null;
+    for (const instance of this.scene.instances) {
+      const primitive = instance.mesh.primitives.find((p) => (p.material.water?.strength ?? 0) > 0);
+      if (!primitive) continue;
+      const m = instance.model;
+      let top = -Infinity, x0 = Infinity, z0 = Infinity, x1 = -Infinity, z1 = -Infinity;
+      for (const p of instance.mesh.primitives) {
+        for (let i = 0; i < p.positions.length; i += 3) {
+          const x = p.positions[i], y = p.positions[i + 1], z = p.positions[i + 2];
+          const wx = m[0] * x + m[4] * y + m[8] * z + m[12];
+          const wy = m[1] * x + m[5] * y + m[9] * z + m[13];
+          const wz = m[2] * x + m[6] * y + m[10] * z + m[14];
+          top = Math.max(top, wy);
+          x0 = Math.min(x0, wx);
+          z0 = Math.min(z0, wz);
+          x1 = Math.max(x1, wx);
+          z1 = Math.max(z1, wz);
+        }
+      }
+      this.waterBodyCache = { plane: top, bounds: [x0, z0, x1, z1], material: primitive.material };
+      break;
+    }
+    return this.waterBodyCache;
+  }
+  /**
+   * This frame's water (F5d): the body's plane and look, the light reaching into it, whether the eye is under it,
+   * the FFT ocean's slopes (when a water surface asks for an ocean) and the ripples round the eye (a wading eye
+   * makes them as it moves).
+   */
+  frameWater(lighting, time) {
+    const body = this.waterBody();
+    if (!body) return null;
+    const look = resolveWaterLook(body.material.water ?? null);
+    const eye = this.eye;
+    const [x0, z0, x1, z1] = body.bounds;
+    const inside = eye !== null && eye[0] >= x0 && eye[0] <= x1 && eye[2] >= z0 && eye[2] <= z1;
+    const key2 = lighting?.lights.find((l) => l.kind === "directional" && l.direction) ?? null;
+    const kd = key2?.direction ?? [0, 1, 0];
+    const kl = Math.hypot(kd[0], kd[1], kd[2]) || 1;
+    const kc = key2 ? lightColor2(key2) : [1, 1, 1];
+    const ambient = lighting?.ambient ?? 0.3;
+    const light = [0, 1, 2].map((c) => (key2 ? kc[c] * key2.intensity * Math.max(0, kd[1] / kl) : 0) + ambient);
+    if ((body.material.water?.ocean ?? 0) > 0) {
+      const wind = lighting?.wind ? [Math.cos(lighting.wind.direction) * 6 * (1 + lighting.wind.strength), Math.sin(lighting.wind.direction) * 6 * (1 + lighting.wind.strength)] : [8, 3];
+      if (!this.ocean || this.ocean.wind[0] !== wind[0] || this.ocean.wind[1] !== wind[1]) this.ocean = new Ocean(wind);
+      if (!this.oceanSlopes || this.frame % 2 === 0) this.oceanSlopes = this.ocean.slopes(time, this.oceanSlopes ?? void 0);
+    }
+    if (eye) {
+      this.ripples.follow(eye[0], eye[2]);
+      if (inside && Math.abs(eye[1] - body.plane) < 2) {
+        if (!this.waded || Math.hypot(eye[0] - this.waded[0], eye[2] - this.waded[1]) > 0.4) {
+          if (this.waded) this.ripples.impulse(eye[0], eye[2], 0.03, 0.5);
+          this.waded = [eye[0], eye[2]];
+        }
+      } else this.waded = null;
+    }
+    this.ripples.step(1 / 60);
+    const moving = this.ripples.active;
+    return {
+      plane: body.plane,
+      bounds: body.bounds,
+      absorption: look.absorption,
+      scattering: look.scattering,
+      light,
+      underwater: inside && eye !== null && eye[1] < body.plane,
+      ocean: this.oceanSlopes,
+      ripples: moving ? { heights: this.ripples.heights, origin: this.ripples.origin } : null,
+      time
+    };
   }
   /**
    * Set the world matrices of the objects physics moves (object index → matrix),
@@ -13561,6 +13648,8 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
       ...lighting ? { ...lit, localShadows: job.local, shadow: job.shadow, sunShadow: job.sunShadow, localShadowCasters: job.localShadowCasters, localShadowKey: job.localShadowKey, localShadowMoved: job.localShadowMoved, fog: lighting.fog ?? null, wind: lighting.wind ?? null } : {},
       // The weather (F5e): its layers over every surface.
       weather,
+      // The water body (F5d): its depth, waves, ripples and caustics, and the water round an eye under it.
+      water: this.frameWater(lighting, time),
       ...job.reflectionCapture ? { reflectionCapture: job.reflectionCapture } : {},
       ...job.decals ? { decals: job.decals } : {},
       ...this.ground.length > 0 ? { terrains: this.ground } : {},
@@ -15462,7 +15551,7 @@ import {
   materialHasWater,
   materialRefracts,
   spotCone,
-  lightColor as lightColor2,
+  lightColor as lightColor3,
   lightChannelMask as lightChannelMask2,
   areaAsPunctual as areaAsPunctual2,
   areaFrame as areaFrame2,
@@ -15630,7 +15719,7 @@ fn areaTerm(lgt: Light, P: vec3<f32>, N: vec3<f32>, V: vec3<f32>, ndv: f32, roug
 
 // src/render/scenePacking.ts
 var UNIFORM_STRIDE = 1280;
-var UNIFORM_BYTES_USED = 1264;
+var UNIFORM_BYTES_USED = 1280;
 var UNIFORM_FLOATS = UNIFORM_STRIDE / 4;
 var LIGHT_FLOATS = 20;
 var PROBE_FLOATS = 16;
@@ -15657,7 +15746,7 @@ function packLights(lights, area = false, iesIndex = null) {
     out[base + 1] = v[1];
     out[base + 2] = v[2];
     out[base + 3] = light.kind === "area" ? AREA_KIND[light.shape ?? "rect"] : light.kind === "spot" ? 2 : placed ? 1 : 0;
-    const color = lightColor2(light);
+    const color = lightColor3(light);
     out[base + 4] = color[0];
     out[base + 5] = color[1];
     out[base + 6] = color[2];
@@ -15750,6 +15839,7 @@ var OFFSET_CHAR0 = 272;
 var OFFSET_CHAR1 = 276;
 var OFFSET_CULL0 = 280;
 var OFFSET_TERRAIN = 284;
+var OFFSET_WATER_LOOK = 316;
 var DEFAULT_LIGHT = [0.4, 0.8, 0.6];
 var DEFAULT_AMBIENT2 = 0.35;
 function resolveLight(direction, ambient) {
@@ -16006,6 +16096,7 @@ function writeInstanceUniform(target, index, uniform) {
   target[base + OFFSET_WATER0 + 1] = water ? water[1] : 0;
   target[base + OFFSET_WATER0 + 2] = water ? water[2] : 0;
   target[base + OFFSET_WATER0 + 3] = water ? water[3] : 0;
+  target.set(uniform.waterLook ?? [0, 0, 0, 0], base + OFFSET_WATER_LOOK);
   const mapping = uniform.mapping ?? null;
   target[base + OFFSET_TERRAIN0] = mapping ? mapping.triplanar : 0;
   target[base + OFFSET_TERRAIN0 + 1] = mapping ? mapping.blendSharpness : 0;
@@ -16121,6 +16212,11 @@ function unpadRows(padded, width, height, bytesPerRow, reuse = null) {
     out.set(padded.subarray(y * bytesPerRow, y * bytesPerRow + rowBytes), y * rowBytes);
   }
   return out;
+}
+function waterLookUniform(material2) {
+  const w = material2.water;
+  if (!w || !(w.strength > 0)) return null;
+  return [w.foam ?? 0.5, w.waves ?? 0, w.ocean ?? 0, 1];
 }
 
 // src/render/gpuFrame.ts
@@ -23504,7 +23600,7 @@ import {
   buildBvh,
   dilateLightmapValues,
   lightChannelMask as lightChannelMask3,
-  lightColor as lightColor3,
+  lightColor as lightColor4,
   lightmapTexels,
   spotCone as spotCone2,
   stitchLightmapSeams
@@ -23533,7 +23629,7 @@ function toLinear(c) {
 }
 function bakeLights(lights) {
   return lights.map((l) => {
-    const c = lightColor3(l);
+    const c = lightColor4(l);
     return { ...l, radiance: [toLinear(c[0]) * l.intensity, toLinear(c[1]) * l.intensity, toLinear(c[2]) * l.intensity] };
   });
 }
@@ -29605,6 +29701,160 @@ const WATER_F0 = ${WATER_F0};
 `
 );
 
+// src/render/waterLook.ts
+import { OCEAN_PATCH, OCEAN_SIZE, RIPPLE_CELL, RIPPLE_SIZE } from "@cartbox/editor";
+var TERMS = 6;
+var OCEAN_WORDS = OCEAN_SIZE * OCEAN_SIZE;
+var RIPPLE_WORDS = RIPPLE_SIZE * RIPPLE_SIZE / 2;
+var WATER_FRAME_FLOATS = TERMS * 4 + OCEAN_WORDS + RIPPLE_WORDS;
+var f322 = new Float32Array(1);
+var u322 = new Uint32Array(f322.buffer);
+function toHalf3(v) {
+  f322[0] = v;
+  const x = u322[0];
+  const sign = x >>> 16 & 32768;
+  const e = (x >>> 23 & 255) - 127 + 15;
+  const m = x & 8388607;
+  if (e <= 0) return sign;
+  if (e >= 31) return sign | 31743;
+  const half2 = sign | e << 10 | m >>> 13;
+  return (m & 4096) !== 0 ? half2 + 1 : half2;
+}
+function packWaterFrame(water, out = new Float32Array(WATER_FRAME_FLOATS)) {
+  out.fill(0);
+  if (!water) return out;
+  const words = new Uint32Array(out.buffer, out.byteOffset, out.length);
+  out.set([water.plane, water.underwater ? 1 : 0, water.time % 600, 1], 0);
+  out.set(water.bounds, 4);
+  out.set([...water.absorption, water.ocean ? 1 : 0], 8);
+  out.set([...water.scattering, water.ripples ? 1 : 0], 12);
+  out.set([...water.light, OCEAN_PATCH], 16);
+  out.set([water.ripples ? water.ripples.origin[0] : 0, water.ripples ? water.ripples.origin[1] : 0, RIPPLE_CELL, 0], 20);
+  const base = TERMS * 4;
+  if (water.ocean) {
+    for (let p = 0; p < OCEAN_SIZE * OCEAN_SIZE; p += 1) words[base + p] = (toHalf3(water.ocean[p * 2]) | toHalf3(water.ocean[p * 2 + 1]) << 16) >>> 0;
+  }
+  if (water.ripples) {
+    const h = water.ripples.heights;
+    for (let p = 0; p < RIPPLE_WORDS; p += 1) words[base + OCEAN_WORDS + p] = (toHalf3(h[p * 2]) | toHalf3(h[p * 2 + 1]) << 16) >>> 0;
+  }
+  return out;
+}
+var WATER_FRAME_WGSL_FIELDS = (
+  /* wgsl */
+  `
+  water0: vec4<f32>,          // F5d: the water plane's height, 1 under water, the seconds, 1 with a water body
+  waterBounds: vec4<f32>,     // F5d: its extent: min x, min z, max x, max z
+  water1: vec4<f32>,          // F5d: absorption per metre, w = 1 with an ocean
+  water2: vec4<f32>,          // F5d: scattering per metre, w = 1 with ripples
+  water3: vec4<f32>,          // F5d: the light reaching into it, w = the ocean's patch (m)
+  water4: vec4<f32>,          // F5d: the ripples' corner cell (x, z), the cell (m)
+  waterGrid: array<vec4<u32>, ${(OCEAN_WORDS + RIPPLE_WORDS) / 4}>, // F5d: the ocean's slopes, then the ripples' heights, half floats`
+);
+var WATER_WGSL = (
+  /* wgsl */
+  `
+fn waterWord(i: u32) -> u32 { return frame.waterGrid[i / 4u][i % 4u]; }
+fn oceanAt(i: i32, j: i32) -> vec2<f32> {
+  let n = ${OCEAN_SIZE};
+  let ii = ((i % n) + n) % n;
+  let jj = ((j % n) + n) % n;
+  return unpack2x16float(waterWord(u32(jj * n + ii)));
+}
+// The FFT ocean's slope at world (x, z), bilinear and tiled (mirrors sampleSlopes).
+fn oceanSlope(x: f32, z: f32) -> vec2<f32> {
+  let gx = x / frame.water3.w * ${OCEAN_SIZE}.0 - 0.5;
+  let gz = z / frame.water3.w * ${OCEAN_SIZE}.0 - 0.5;
+  let ix = i32(floor(gx));
+  let iz = i32(floor(gz));
+  let fx = gx - floor(gx);
+  let fz = gz - floor(gz);
+  return mix(mix(oceanAt(ix, iz), oceanAt(ix + 1, iz), fx), mix(oceanAt(ix, iz + 1), oceanAt(ix + 1, iz + 1), fx), fz);
+}
+fn rippleAt(i: i32, j: i32) -> f32 {
+  if (i < 0 || j < 0 || i >= ${RIPPLE_SIZE} || j >= ${RIPPLE_SIZE}) { return 0.0; }
+  let k = u32(j * ${RIPPLE_SIZE} + i);
+  let w = unpack2x16float(waterWord(${OCEAN_WORDS}u + k / 2u));
+  return select(w.x, w.y, (k & 1u) == 1u);
+}
+fn rippleCellSlope(i: i32, j: i32) -> vec2<f32> {
+  let c = frame.water4.z;
+  return vec2<f32>((rippleAt(i + 1, j) - rippleAt(i - 1, j)) / (2.0 * c), (rippleAt(i, j + 1) - rippleAt(i, j - 1)) / (2.0 * c));
+}
+// The ripples' slope at world (x, z) (mirrors RippleField.slope); flat outside the grid.
+fn rippleSlope(x: f32, z: f32) -> vec2<f32> {
+  if (frame.water2.w < 0.5) { return vec2<f32>(0.0); }
+  let gx = x / frame.water4.z - frame.water4.x - 0.5;
+  let gz = z / frame.water4.z - frame.water4.y - 0.5;
+  let ix = i32(floor(gx));
+  let iz = i32(floor(gz));
+  let fx = gx - floor(gx);
+  let fz = gz - floor(gz);
+  return mix(mix(rippleCellSlope(ix, iz), rippleCellSlope(ix + 1, iz), fx), mix(rippleCellSlope(ix, iz + 1), rippleCellSlope(ix + 1, iz + 1), fx), fz);
+}
+// The four Gerstner waves along the flow (mirrors gerstnerSlope).
+fn gerstnerSlope(x: f32, z: f32, time: f32, height: f32, flow: f32) -> vec2<f32> {
+  if (height <= 0.0) { return vec2<f32>(0.0); }
+  var s = vec2<f32>(0.0);
+  let waves = array<vec3<f32>, 4>(vec3<f32>(0.45, 6.0, 0.0), vec3<f32>(0.25, 3.1, 0.6), vec3<f32>(0.18, 1.7, -0.9), vec3<f32>(0.12, 0.9, 1.7));
+  for (var i = 0; i < 4; i = i + 1) {
+    let w = waves[i];
+    let k = 6.28318531 / w.y;
+    let omega = sqrt(9.81 * k);
+    let d = vec2<f32>(cos(flow + w.z), sin(flow + w.z));
+    let a = height * w.x / 2.0;
+    let phase = k * (d.x * x + d.y * z) - omega * time;
+    s = s + a * k * cos(phase) * d;
+  }
+  return s;
+}
+fn waterHash(x: f32, y: f32) -> f32 {
+  var h = (bitcast<u32>(i32(x)) * 0x8da6b343u) ^ (bitcast<u32>(i32(y)) * 0xd8163841u) ^ 0x5bd1e995u;
+  h = (h ^ (h >> 16u)) * 0x7feb352du;
+  h = (h ^ (h >> 15u)) * 0x846ca68bu;
+  return f32(h ^ (h >> 16u)) / 4294967296.0;
+}
+fn waterNoise(x: f32, y: f32) -> f32 {
+  let ix = floor(x);
+  let iy = floor(y);
+  let fx = x - ix;
+  let fy = y - iy;
+  let sx = fx * fx * (3.0 - 2.0 * fx);
+  let sy = fy * fy * (3.0 - 2.0 * fy);
+  return mix(mix(waterHash(ix, iy), waterHash(ix + 1.0, iy), sx), mix(waterHash(ix, iy + 1.0), waterHash(ix + 1.0, iy + 1.0), sx), sy);
+}
+// Foam over this much water (mirrors shoreFoam).
+fn shoreFoam(metres: f32, x: f32, z: f32, time: f32, foam: f32) -> f32 {
+  if (foam <= 0.0) { return 0.0; }
+  let edge = 1.0 - smoothstep(0.0, 0.5 * foam + 0.05, metres);
+  if (edge <= 0.0) { return 0.0; }
+  let n = waterNoise(x * 3.0 + time * 0.3, z * 3.0 - time * 0.2) * 0.6 + waterNoise(x * 7.0 - time * 0.5, z * 7.0) * 0.4;
+  return clamp(edge * smoothstep(0.35, 0.65, n + edge * 0.4) * foam, 0.0, 1.0);
+}
+// What is seen through this much water (mirrors throughWater).
+fn throughWater(behind: vec3<f32>, metres: f32) -> vec3<f32> {
+  let ext = max(frame.water1.rgb + frame.water2.rgb, vec3<f32>(1e-6));
+  let t = exp(-ext * max(0.0, metres));
+  return behind * t + frame.water2.rgb / ext * (vec3<f32>(1.0) - t) * frame.water3.rgb;
+}
+// The sun focused through the waves onto a point this deep (mirrors caustics).
+fn caustics(x: f32, z: f32, time: f32, depth: f32) -> f32 {
+  if (depth <= 0.0) { return 1.0; }
+  let a = 1.0 - abs(waterNoise(x * 1.7 + time * 0.35, z * 1.7 - time * 0.35 * 0.7) * 2.0 - 1.0);
+  let b = 1.0 - abs(waterNoise(x * 2.3 + 5.3 - time * 0.28, z * 2.3 + 1.9 + time * 0.28 * 0.7) * 2.0 - 1.0);
+  let sharp = pow(a * b, 4.0) * 4.5;
+  return 1.0 + (sharp - 0.55) * exp(-depth * 0.35);
+}
+// Whether world point p lies in the water body's extent, and how deep under its plane (0 above it).
+fn underPlane(p: vec3<f32>) -> f32 {
+  if (frame.water0.w < 0.5) { return 0.0; }
+  let b = frame.waterBounds;
+  if (p.x < b.x || p.z < b.y || p.x > b.z || p.z > b.w) { return 0.0; }
+  return max(0.0, frame.water0.x - p.y);
+}
+`
+);
+
 // src/render/WebgpuSceneRenderer.ts
 var GBUFFER_FORMAT = "rgba16float";
 var VELOCITY_FORMAT = "rg16float";
@@ -29669,7 +29919,8 @@ var VIEW_MODE_SHADE = (
     }
 `
 );
-var FRAME_BYTES2 = 928;
+var FRAME_BYTES2 = 928 + WATER_FRAME_FLOATS * 4;
+var FRAME_WATER = 232;
 var FRAME_WEATHER = 224;
 var FRAME_DEBUG = 220;
 var FRAME_CASCADES = 84;
@@ -29812,7 +30063,9 @@ function wgslDisplay(v, hdr = false) {
     if (frame.aerialEye.w > 0.5) {
       let air = aerialAt(in.worldPos);
       ${v} = ${v} * air.a + select(air.rgb, vec3<f32>(0.0), u.pbr.w > 2.5);
-    }`
+    }
+    // Under water (F5d): the water between the surface and the eye, in place of air.
+    if (frame.water0.y > 0.5) { ${v} = throughWater(${v}, in.eyeDepth); }`
     );
   }
   return (
@@ -29919,6 +30172,8 @@ struct Uniforms {
   terrain3: vec4<f32>,
   terrain4: vec4<f32>,
   terrainPages: array<vec4<f32>, 4>,
+  // A water surface's F5d terms (waterLook.ts): foam, Gerstner waves' height, the ocean's share, 1 with them.
+  wlook0: vec4<f32>,
 };
 
 // A Modern-tier light (see packLights): d0 = dir/pos + kind, d1 = colour +
@@ -29964,6 +30219,7 @@ struct Frame {
   debug: vec4<f32>,           // F10a: x = the view mode's code (0 lit), y = the texel density on target (per metre); F1d-2: z = 1 when scattering surfaces split
   weather0: vec4<f32>,        // F5e: wetness, puddles, snow, rain
   weather1: vec4<f32>,        // F5e: the snow line, the rain's seconds, the patches' size, 1 when there is weather
+${WATER_FRAME_WGSL_FIELDS}
 };
 // One spot/point shadow tile (EP8c): world\u2192clip, and params.xy = depth\u2192distance terms.
 struct ShadowTile {
@@ -30081,7 +30337,31 @@ ${AERIAL_SAMPLE_WGSL}
 @group(1) @binding(6) var fogVolume: texture_3d<f32>;
 ${FOG_SAMPLE_WGSL}
 // The weather (F5e, weather.ts).
-${WEATHER_WGSL}` : ""}
+${WEATHER_WGSL}
+// Water (F5d, waterLook.ts).
+${WATER_WGSL}
+// A water surface's waves (F5d): Gerstner along its flow, the FFT ocean's share and the ripples, tilting n.
+fn waterWaves(n: vec3<f32>, p: vec3<f32>) -> vec3<f32> {
+  if (u.water0.x <= 0.0 || frame.water0.w < 0.5) { return n; }
+  let s = gerstnerSlope(p.x, p.z, frame.water0.z, u.wlook0.y, u.water0.w) + oceanSlope(p.x, p.z) * u.wlook0.z * frame.water1.w + rippleSlope(p.x, p.z);
+  return normalize(n + vec3<f32>(-s.x, 0.0, -s.y));
+}
+// The depth behind a refracting fragment, at the pixel behindColour reads.
+fn behindDepth(frag: vec2<f32>, z: f32, off: vec2<f32>) -> f32 {
+  let dims = vec2<f32>(textureDimensions(sceneColour, 0));
+  let s = vec2<i32>(clamp(floor(frag + off), vec2<f32>(0.0), dims - vec2<f32>(1.0)));
+  if (textureLoad(sceneColour, s, 0).a > 0.5 && textureLoad(sceneDepth, s, 0) >= z) { return textureLoad(sceneDepth, s, 0); }
+  return textureLoad(sceneDepth, vec2<i32>(floor(frag)), 0);
+}
+// The sun under a water plane (F5d): through the water above, and focused by the waves into caustics.
+fn underwaterSun(p: vec3<f32>) -> f32 {
+  if (u.water0.x > 0.0) { return 1.0; }
+  let depth = underPlane(p);
+  if (depth <= 0.0) { return 1.0; }
+  let ext = frame.water1.rgb + frame.water2.rgb;
+  let through = exp(-dot(ext, vec3<f32>(0.2126, 0.7152, 0.0722)) * depth / max(0.2, u.light.y));
+  return through * caustics(p.x, p.z, frame.water0.z, depth);
+}` : ""}
 // Optical depth of a fog layer thinning above base, along the ray from the eye
 // (height cy, rise dy, length len) over t in [t0, t1] \u2014 fogLayerDepth in skyDome.ts.
 fn fogLayer(d: f32, k: f32, base: f32, cy: f32, dy: f32, len: f32, t0: f32, t1: f32) -> f32 {
@@ -31116,6 +31396,7 @@ ${g.base}${g.pdo ? `
     var N = normalize(sNrm);
     if (dot(N, u.view.xyz) < 0.0) { N = -N; } // two-sided: flip toward the viewer
     N = waterNormal(N, in.worldPos);${hdr ? `
+    N = waterWaves(N, in.worldPos);
     // Character shading (F7c): skin's pores tilt the normal; a hair card's strands run along V; a mouth
     // darkens behind its opening.
     if (charKind() == 1 && u.char1.y > 0.0) {
@@ -31338,7 +31619,7 @@ ${hdr ? `    // (An HDR one, F3d, lit the fill above.)
       amb = amb * ssaoTexel(vec2<i32>(in.pos.xy)).r;
     }
 ${reflect ? "    // What the light map, probes and SSAO did to the fill, they do to its reflection.\n    let occl = select(vec3<f32>(1.0), amb / max(ambRaw, vec3<f32>(1e-6)), ambRaw > vec3<f32>(1e-6));\n    envSpec = envSpec * occl;\n" : ""}    // The direct light is what a shadow occludes; ambient/IBL still fills it.
-    let sf = shadowFactor(in.lightClip, in.worldPos, abs(dot(normalize(in.normal), u.light.xyz)));
+    let sf = shadowFactor(in.lightClip, in.worldPos, abs(dot(normalize(in.normal), u.light.xyz)))${hdr ? " * underwaterSun(in.worldPos)" : ""};
     let lc = i32(u.ssaoMeta.y + 0.5);
     var lit: vec3<f32>;
     var vmLights = 0;
@@ -31408,8 +31689,19 @@ ${hdr ? `    // Linear light (F0b): what the reflection adds, and what it sees, 
       }
     }` : ""}
     if (u.refract0.w > 0.5) {
-      let rn = waterNormal(facingNormal(in.normal), in.worldPos);
-      let b = behindColour(in.pos.xy, in.pos.z, refractOffset(rn, in.worldPos));
+      let rn = ${hdr ? "waterWaves(waterNormal(facingNormal(in.normal), in.worldPos), in.worldPos)" : "waterNormal(facingNormal(in.normal), in.worldPos)"};
+      let roff = refractOffset(rn, in.worldPos);
+      var b = behindColour(in.pos.xy, in.pos.z, roff);${hdr ? `
+      // A water surface's depth (F5d): what is seen through it loses light to the water between and gathers its
+      // colour; where the water is shallow over something, foam.
+      if (b.a > 0.5 && u.water0.x > 0.0 && frame.water0.w > 0.5 && frame.depthTerms.y != 0.0) {
+        let dz = behindDepth(in.pos.xy, in.pos.z, roff);
+        let thick = max(0.0, frame.depthTerms.y / (dz + frame.depthTerms.x) - frame.depthTerms.y / (in.pos.z + frame.depthTerms.x));
+        let foam = shoreFoam(thick * max(0.05, dot(facingNormal(in.normal), u.view.xyz)), in.worldPos.x, in.worldPos.z, frame.water0.z, u.wlook0.x);
+        let foamLit = frame.water3.rgb * 0.8;
+        b = vec4<f32>(mix(throughWater(b.rgb, thick), foamLit, foam), 1.0);
+        shaded = mix(shaded, foamLit, foam);
+      }` : ""}
       if (b.a > 0.5) { return finishRefracted(shaded, colour.a, b.rgb, rn); }
     }${hdr ? `
     // Subsurface scattering (F1d-2; subsurface.ts): in a checkerboard, the diffuse that scatters on the even
@@ -31752,6 +32044,7 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     this.volumetricFog = null;
     this.fogTerms = new Float32Array(FOG_FRAME_FLOATS);
     this.weatherTerms = new Float32Array(WEATHER_FRAME_FLOATS);
+    this.waterTerms = new Float32Array(WATER_FRAME_FLOATS);
     /** The physical sky's LUTs (F5a-2), made when a draw first brings one, and the frame's aerial terms. */
     this.atmosphere = null;
     this.aerialTerms = new Float32Array(AERIAL_FRAME_FLOATS);
@@ -33223,6 +33516,7 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
         refraction: entry.refract ? resolveRefraction3(entry.primitive.material, effectActive4(entry.effect) ? entry.effect : null) : null,
         camera,
         water: waterUniform2(entry.primitive.material, draw.time ?? 0),
+        waterLook: this.hdr ? waterLookUniform(entry.primitive.material) : null,
         waterAlong: waterAlong2(entry.primitive.material),
         mapping: resolveMapping(entry.primitive.material),
         hasNormalMap: entry.textures.normal !== null,
@@ -34562,6 +34856,7 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     if (this.hdr) frame.set(packFogFrame(this.frameFog, this.fogTerms), FRAME_FOG);
     if (this.hdr) frame.set([viewModeCode(draw.viewMode), draw.texelDensity ?? DEFAULT_TEXEL_DENSITY, this.frameSss ? 1 : 0], FRAME_DEBUG);
     if (this.hdr) frame.set(packWeatherFrame(draw.weather, draw.time ?? 0, this.weatherTerms), FRAME_WEATHER);
+    if (this.hdr) frame.set(packWaterFrame(draw.water ?? null, this.waterTerms), FRAME_WATER);
     this.device.queue.writeBuffer(buffers.params, 0, frame);
     this.uploadLocalShadows(local);
     return { ordered, globalCount, clusters };
@@ -39006,6 +39301,9 @@ var Player = class {
     this.qualityGovernor.reset(this.view.performance.now());
     this.applyQuality(resolveQuality(choice, browserDeviceHints(this.sceneRenderer ? this.sceneRenderer.backend !== "software" : void 0)));
   }
+  splash(x, z, strength) {
+    this.meshSurface?.splash(x, z, strength);
+  }
   setWeather(settings) {
     this.weather = settings;
     this.meshSurface?.setWeather(settings);
@@ -40346,7 +40644,7 @@ function encodeNetMessage(message) {
   const view = new DataView(bytes.buffer);
   let at = 0;
   bytes[at++] = (states.length ? STATES : 0) | (events.length ? EVENTS : 0) | (hasMatch ? MATCH : 0) | (hasTime ? TIME : 0) | (hasPing ? PING : 0) | (pongs.length ? PONGS : 0) | (roster.length ? ROSTER : 0);
-  const u322 = (v) => {
+  const u323 = (v) => {
     view.setUint32(at, v >>> 0, true);
     at += 4;
   };
@@ -40355,10 +40653,10 @@ function encodeNetMessage(message) {
     bytes[at++] = states.length;
     for (const [slot, a, b, c, d] of states) {
       bytes[at++] = slot & 255;
-      u322(a);
-      u322(b);
-      u322(c);
-      u322(d);
+      u323(a);
+      u323(b);
+      u323(c);
+      u323(d);
     }
   }
   if (events.length) {
@@ -40366,21 +40664,21 @@ function encodeNetMessage(message) {
     view.setUint16(at, events.length, true);
     at += 2;
     for (const [a, b] of events) {
-      u322(a);
-      u322(b);
+      u323(a);
+      u323(b);
     }
   }
-  if (hasMatch) u322(message.m);
-  if (hasTime) u322(message.t);
-  if (hasPing) u322(message.pi);
+  if (hasMatch) u323(message.m);
+  if (hasTime) u323(message.t);
+  if (hasPing) u323(message.pi);
   if (pongs.length) {
     if (pongs.length > 255) throw new Error("too many pongs in one message");
     bytes[at++] = pongs.length;
     for (const [slot, t0, t1, t2] of pongs) {
       bytes[at++] = slot & 255;
-      u322(t0);
-      u322(t1);
-      u322(t2);
+      u323(t0);
+      u323(t1);
+      u323(t2);
     }
   }
   if (roster.length) {
@@ -40402,7 +40700,7 @@ function decodeNetMessage(bytes) {
   if (flags & ~(STATES | EVENTS | MATCH | TIME | PING | PONGS | ROSTER)) return null;
   let at = 1;
   const need = (n) => at + n <= bytes.length;
-  const u322 = () => {
+  const u323 = () => {
     const v = view.getUint32(at, true);
     at += 4;
     return v;
@@ -40415,7 +40713,7 @@ function decodeNetMessage(bytes) {
     message.s = [];
     for (let i = 0; i < count; i += 1) {
       const slot = bytes[at++];
-      message.s.push([slot, u322(), u322(), u322(), u322()]);
+      message.s.push([slot, u323(), u323(), u323(), u323()]);
     }
   }
   if (flags & EVENTS) {
@@ -40424,7 +40722,7 @@ function decodeNetMessage(bytes) {
     at += 2;
     if (!need(count * 8)) return null;
     message.e = [];
-    for (let i = 0; i < count; i += 1) message.e.push([u322(), u322()]);
+    for (let i = 0; i < count; i += 1) message.e.push([u323(), u323()]);
   }
   for (const [flag, key2] of [
     [MATCH, "m"],
@@ -40433,7 +40731,7 @@ function decodeNetMessage(bytes) {
   ]) {
     if (!(flags & flag)) continue;
     if (!need(4)) return null;
-    message[key2] = u322();
+    message[key2] = u323();
   }
   if (flags & PONGS) {
     if (!need(1)) return null;
@@ -40442,7 +40740,7 @@ function decodeNetMessage(bytes) {
     message.po = [];
     for (let i = 0; i < count; i += 1) {
       const slot = bytes[at++];
-      message.po.push([slot, u322(), u322(), u322()]);
+      message.po.push([slot, u323(), u323(), u323()]);
     }
   }
   if (flags & ROSTER) {
@@ -41513,6 +41811,7 @@ function mount(container, options) {
     setQuality: (choice) => player.setQuality(choice),
     setViewMode: (mode) => player.setViewMode(mode),
     setWeather: (settings) => player.setWeather(settings),
+    splash: (x, z, strength) => player.splash(x, z, strength),
     captureReference: (options2) => player.captureReference(options2),
     renderSequence: (options2) => player.renderSequence(options2),
     get referenceSamples() {

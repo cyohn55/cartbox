@@ -484,6 +484,7 @@ export function mount(container: HTMLElement, options: PlayerOptions): PlayerHan
     setQuality: (choice) => player.setQuality(choice),
     setViewMode: (mode) => player.setViewMode(mode),
     setWeather: (settings) => player.setWeather(settings),
+    splash: (x, z, strength) => player.splash(x, z, strength),
     captureReference: (options) => player.captureReference(options),
     renderSequence: (options) => player.renderSequence(options),
     get referenceSamples(): number {

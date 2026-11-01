@@ -217,6 +217,7 @@ import { AERIAL_FRAME_FLOATS, AERIAL_LUT_BYTES, AERIAL_SAMPLE_WGSL, GpuAtmospher
 import { GpuProbeGi } from "./dynamicGi.js";
 import { FOG_FORMAT, FOG_FRAME_FLOATS, FOG_SAMPLE_WGSL, GpuVolumetricFog, fogCamera, packFogFrame, type FogFrame } from "./volumetricFog.js";
 import { WEATHER_FRAME_FLOATS, WEATHER_WGSL, packWeatherFrame } from "./weather.js";
+import { WATER_FRAME_FLOATS, WATER_FRAME_WGSL_FIELDS, WATER_WGSL, packWaterFrame } from "./waterLook.js";
 import {
   LOCAL_ATLAS_SIZE,
   LOCAL_CLEAR_WGSL,
@@ -253,6 +254,7 @@ import {
   INSTANCE_FLOATS,
   writeInstanceTransform,
   refractionCamera,
+  waterLookUniform,
 } from "./scenePacking.js";
 
 /** The sun's GPU cascades (F2a): their depth array, its comparison sampler, each cascade's light view, and the depth-only pipeline. */
@@ -355,7 +357,10 @@ const VIEW_MODE_SHADE = /* wgsl */ `    let vm = i32(frame.debug.x + 0.5);
 `;
 
 /** The per-frame globals' bytes (WGSL `Frame`): cluster params and info, the near cascade's matrix and params, the sun's GPU cascades (F2a), the aerial perspective's camera (F5a-2) and the fog's (F5b). */
-const FRAME_BYTES = 928;
+const FRAME_BYTES = 928 + WATER_FRAME_FLOATS * 4;
+
+/** Floats into `Frame` where the water's terms and grids start (F5d). */
+const FRAME_WATER = 232;
 
 /** Floats into `Frame` where the weather's terms sit (F5e). */
 const FRAME_WEATHER = 224;
@@ -530,7 +535,9 @@ function wgslDisplay(v: string, hdr = false): string {
     if (frame.aerialEye.w > 0.5) {
       let air = aerialAt(in.worldPos);
       ${v} = ${v} * air.a + select(air.rgb, vec3<f32>(0.0), u.pbr.w > 2.5);
-    }`;
+    }
+    // Under water (F5d): the water between the surface and the eye, in place of air.
+    if (frame.water0.y > 0.5) { ${v} = throughWater(${v}, in.eyeDepth); }`;
   }
   return /* wgsl */ `    if (u.tonemap.x > 0.5) {
       let e = u.tonemap.y;
@@ -637,6 +644,8 @@ struct Uniforms {
   terrain3: vec4<f32>,
   terrain4: vec4<f32>,
   terrainPages: array<vec4<f32>, 4>,
+  // A water surface's F5d terms (waterLook.ts): foam, Gerstner waves' height, the ocean's share, 1 with them.
+  wlook0: vec4<f32>,
 };
 
 // A Modern-tier light (see packLights): d0 = dir/pos + kind, d1 = colour +
@@ -682,6 +691,7 @@ struct Frame {
   debug: vec4<f32>,           // F10a: x = the view mode's code (0 lit), y = the texel density on target (per metre); F1d-2: z = 1 when scattering surfaces split
   weather0: vec4<f32>,        // F5e: wetness, puddles, snow, rain
   weather1: vec4<f32>,        // F5e: the snow line, the rain's seconds, the patches' size, 1 when there is weather
+${WATER_FRAME_WGSL_FIELDS}
 };
 // One spot/point shadow tile (EP8c): world→clip, and params.xy = depth→distance terms.
 struct ShadowTile {
@@ -803,7 +813,31 @@ ${AERIAL_SAMPLE_WGSL}
 @group(1) @binding(6) var fogVolume: texture_3d<f32>;
 ${FOG_SAMPLE_WGSL}
 // The weather (F5e, weather.ts).
-${WEATHER_WGSL}` : ""}
+${WEATHER_WGSL}
+// Water (F5d, waterLook.ts).
+${WATER_WGSL}
+// A water surface's waves (F5d): Gerstner along its flow, the FFT ocean's share and the ripples, tilting n.
+fn waterWaves(n: vec3<f32>, p: vec3<f32>) -> vec3<f32> {
+  if (u.water0.x <= 0.0 || frame.water0.w < 0.5) { return n; }
+  let s = gerstnerSlope(p.x, p.z, frame.water0.z, u.wlook0.y, u.water0.w) + oceanSlope(p.x, p.z) * u.wlook0.z * frame.water1.w + rippleSlope(p.x, p.z);
+  return normalize(n + vec3<f32>(-s.x, 0.0, -s.y));
+}
+// The depth behind a refracting fragment, at the pixel behindColour reads.
+fn behindDepth(frag: vec2<f32>, z: f32, off: vec2<f32>) -> f32 {
+  let dims = vec2<f32>(textureDimensions(sceneColour, 0));
+  let s = vec2<i32>(clamp(floor(frag + off), vec2<f32>(0.0), dims - vec2<f32>(1.0)));
+  if (textureLoad(sceneColour, s, 0).a > 0.5 && textureLoad(sceneDepth, s, 0) >= z) { return textureLoad(sceneDepth, s, 0); }
+  return textureLoad(sceneDepth, vec2<i32>(floor(frag)), 0);
+}
+// The sun under a water plane (F5d): through the water above, and focused by the waves into caustics.
+fn underwaterSun(p: vec3<f32>) -> f32 {
+  if (u.water0.x > 0.0) { return 1.0; }
+  let depth = underPlane(p);
+  if (depth <= 0.0) { return 1.0; }
+  let ext = frame.water1.rgb + frame.water2.rgb;
+  let through = exp(-dot(ext, vec3<f32>(0.2126, 0.7152, 0.0722)) * depth / max(0.2, u.light.y));
+  return through * caustics(p.x, p.z, frame.water0.z, depth);
+}` : ""}
 // Optical depth of a fog layer thinning above base, along the ray from the eye
 // (height cy, rise dy, length len) over t in [t0, t1] — fogLayerDepth in skyDome.ts.
 fn fogLayer(d: f32, k: f32, base: f32, cy: f32, dy: f32, len: f32, t0: f32, t1: f32) -> f32 {
@@ -1845,6 +1879,7 @@ ${g.base}${g.pdo ? `
     var N = normalize(sNrm);
     if (dot(N, u.view.xyz) < 0.0) { N = -N; } // two-sided: flip toward the viewer
     N = waterNormal(N, in.worldPos);${hdr ? `
+    N = waterWaves(N, in.worldPos);
     // Character shading (F7c): skin's pores tilt the normal; a hair card's strands run along V; a mouth
     // darkens behind its opening.
     if (charKind() == 1 && u.char1.y > 0.0) {
@@ -2075,7 +2110,7 @@ ${hdr
       amb = amb * ssaoTexel(vec2<i32>(in.pos.xy)).r;
     }
 ${reflect ? "    // What the light map, probes and SSAO did to the fill, they do to its reflection.\n    let occl = select(vec3<f32>(1.0), amb / max(ambRaw, vec3<f32>(1e-6)), ambRaw > vec3<f32>(1e-6));\n    envSpec = envSpec * occl;\n" : ""}    // The direct light is what a shadow occludes; ambient/IBL still fills it.
-    let sf = shadowFactor(in.lightClip, in.worldPos, abs(dot(normalize(in.normal), u.light.xyz)));
+    let sf = shadowFactor(in.lightClip, in.worldPos, abs(dot(normalize(in.normal), u.light.xyz)))${hdr ? " * underwaterSun(in.worldPos)" : ""};
     let lc = i32(u.ssaoMeta.y + 0.5);
     var lit: vec3<f32>;
     var vmLights = 0;
@@ -2144,8 +2179,19 @@ ${hdr
       }
     }` : ""}
     if (u.refract0.w > 0.5) {
-      let rn = waterNormal(facingNormal(in.normal), in.worldPos);
-      let b = behindColour(in.pos.xy, in.pos.z, refractOffset(rn, in.worldPos));
+      let rn = ${hdr ? "waterWaves(waterNormal(facingNormal(in.normal), in.worldPos), in.worldPos)" : "waterNormal(facingNormal(in.normal), in.worldPos)"};
+      let roff = refractOffset(rn, in.worldPos);
+      var b = behindColour(in.pos.xy, in.pos.z, roff);${hdr ? `
+      // A water surface's depth (F5d): what is seen through it loses light to the water between and gathers its
+      // colour; where the water is shallow over something, foam.
+      if (b.a > 0.5 && u.water0.x > 0.0 && frame.water0.w > 0.5 && frame.depthTerms.y != 0.0) {
+        let dz = behindDepth(in.pos.xy, in.pos.z, roff);
+        let thick = max(0.0, frame.depthTerms.y / (dz + frame.depthTerms.x) - frame.depthTerms.y / (in.pos.z + frame.depthTerms.x));
+        let foam = shoreFoam(thick * max(0.05, dot(facingNormal(in.normal), u.view.xyz)), in.worldPos.x, in.worldPos.z, frame.water0.z, u.wlook0.x);
+        let foamLit = frame.water3.rgb * 0.8;
+        b = vec4<f32>(mix(throughWater(b.rgb, thick), foamLit, foam), 1.0);
+        shaded = mix(shaded, foamLit, foam);
+      }` : ""}
       if (b.a > 0.5) { return finishRefracted(shaded, colour.a, b.rgb, rn); }
     }${hdr ? `
     // Subsurface scattering (F1d-2; subsurface.ts): in a checkerboard, the diffuse that scatters on the even
@@ -2660,6 +2706,7 @@ export class WebgpuSceneRenderer implements SceneRenderer {
   private volumetricFog: GpuVolumetricFog | null = null;
   private readonly fogTerms = new Float32Array(FOG_FRAME_FLOATS);
   private readonly weatherTerms = new Float32Array(WEATHER_FRAME_FLOATS);
+  private readonly waterTerms = new Float32Array(WATER_FRAME_FLOATS);
   /** The physical sky's LUTs (F5a-2), made when a draw first brings one, and the frame's aerial terms. */
   private atmosphere: GpuAtmosphere | null = null;
   private readonly aerialTerms = new Float32Array(AERIAL_FRAME_FLOATS);
@@ -4224,6 +4271,7 @@ export class WebgpuSceneRenderer implements SceneRenderer {
         refraction: entry.refract ? resolveRefraction(entry.primitive.material, effectActive(entry.effect) ? entry.effect : null) : null,
         camera,
         water: waterUniform(entry.primitive.material, draw.time ?? 0),
+        waterLook: this.hdr ? waterLookUniform(entry.primitive.material) : null,
         waterAlong: waterAlong(entry.primitive.material),
         mapping: resolveMapping(entry.primitive.material),
         hasNormalMap: entry.textures.normal !== null,
@@ -5781,6 +5829,7 @@ export class WebgpuSceneRenderer implements SceneRenderer {
     if (this.hdr) frame.set(packFogFrame(this.frameFog, this.fogTerms), FRAME_FOG);
     if (this.hdr) frame.set([viewModeCode(draw.viewMode), draw.texelDensity ?? DEFAULT_TEXEL_DENSITY, this.frameSss ? 1 : 0], FRAME_DEBUG);
     if (this.hdr) frame.set(packWeatherFrame(draw.weather, draw.time ?? 0, this.weatherTerms), FRAME_WEATHER);
+    if (this.hdr) frame.set(packWaterFrame(draw.water ?? null, this.waterTerms), FRAME_WATER);
     this.device.queue.writeBuffer(buffers.params, 0, frame);
     this.uploadLocalShadows(local);
     return { ordered, globalCount, clusters };

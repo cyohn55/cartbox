@@ -4097,6 +4097,8 @@ interface PlayerHandle {
     setViewMode(mode: ViewMode): void;
     /** Set the weather at run time (AAA_FIDELITY_ROADMAP.md F5e): wetness, puddles, snow, rain and snowfall over the rig's; null goes back to the rig's. */
     setWeather(settings: WeatherSettings | null): void;
+    /** Disturb the scene's water at world (x, z) (F5d): a ring `strength` metres deep spreads from it. */
+    splash(x: number, z: number, strength?: number): void;
     /**
      * Render the path-traced reference of the 3D frame shown (F10b), `width`
      * across at its aspect (up to 8K a side), accumulated over `samples` a pixel
@@ -4654,6 +4656,39 @@ interface CameraEffects {
 }
 
 /**
+ * Water on the AAA tier (AAA_FIDELITY_ROADMAP.md F5d): the frame's water body
+ * and its grids, packed into the frame's uniforms, and the WGSL the
+ * linear-light scene shader reads them with, mirroring water.ts in
+ * @cartbox/editor.
+ *
+ * The scene shader already binds every sampled texture a stage gets, so the
+ * FFT ocean's slopes (64², two halves a point) and the ripples' heights (64²)
+ * ride in the frame's uniform buffer as half floats, filtered by hand, as the
+ * aerial perspective's froxels do (F5a-2).
+ */
+/** The water body a frame lights by (its first water surface's), or none. */
+interface WaterFrame {
+    /** Its surface's height, and its extent in x and z (min x, min z, max x, max z). */
+    readonly plane: number;
+    readonly bounds: readonly [number, number, number, number];
+    /** Its absorption and scattering per metre. */
+    readonly absorption: readonly [number, number, number];
+    readonly scattering: readonly [number, number, number];
+    /** The light that reaches into it (sun and sky), for its in-scattering and its fog under water. */
+    readonly light: readonly [number, number, number];
+    /** Whether the eye is under it. */
+    readonly underwater: boolean;
+    /** The FFT ocean's slopes ({@link Ocean.slopes}), or null without an ocean surface. */
+    readonly ocean: Float32Array | null;
+    /** The ripples' heights and their grid's corner cell, or null while the water is still. */
+    readonly ripples: {
+        readonly heights: Float32Array;
+        readonly origin: readonly [number, number];
+    } | null;
+    readonly time: number;
+}
+
+/**
  * HDR reflection probes on the AAA tier (AAA_FIDELITY_ROADMAP.md F3b): each
  * probe captured on the GPU as a cube of the scene in linear light, and
  * prefiltered into the GGX lobes of rising roughness, as the sky's own cube is
@@ -5008,6 +5043,8 @@ interface SceneDraw {
      * reaches. Absent or all zero, surfaces are as authored.
      */
     readonly weather?: Weather | null;
+    /** The water body the frame lights by (F5d; waterLook.ts): its depth, ocean, ripples, caustics and whether the eye is under it. */
+    readonly water?: WaterFrame | null;
     /**
      * Skip instances whose world AABB is entirely outside the camera frustum. A
      * correct cull is output-identical, so it is a pure perf win; default off.
@@ -6160,6 +6197,7 @@ declare class WebgpuSceneRenderer implements SceneRenderer {
     private volumetricFog;
     private readonly fogTerms;
     private readonly weatherTerms;
+    private readonly waterTerms;
     /** The physical sky's LUTs (F5a-2), made when a draw first brings one, and the frame's aerial terms. */
     private atmosphere;
     private readonly aerialTerms;
@@ -6816,9 +6854,11 @@ declare function bakeProbeVolumeGpu(device: any, min: readonly [number, number, 
  * 1168 terrain3   vec4<f32>    16   the terrain's origin, the leaf node's side
  * 1184 terrain4   vec4<f32>    16   the eye in the ground plane (x, z), the split range, the morph's start
  * 1200 pages      vec4<f32> ×4 64   each eye-following page's corner, two a vec4
+ * 1264 wlook0     vec4<f32>    16   a water surface's F5d terms (water.ts): x = shore foam, y = Gerstner waves'
+ *                                    height (m), z = the FFT ocean's share, w = 1 when it has them
  * ```
  *
- * 1264 bytes used, padded to a 1280-byte stride (a 256-byte multiple a dynamic
+ * 1280 bytes used, filling the 1280-byte stride (a 256-byte multiple a dynamic
  * uniform offset can address), so one buffer still holds every draw in a
  * frame — uniforms are written per batch, not per copy, so the stride costs
  * little. The metallic-roughness inputs and the environment carry the Modern
@@ -6833,7 +6873,7 @@ declare const UNIFORM_STRIDE = 1280;
  * bind group layout's `minBindingSize` must be: it makes a WGSL struct that
  * grows past what this module writes fail at pipeline creation.
  */
-declare const UNIFORM_BYTES_USED = 1264;
+declare const UNIFORM_BYTES_USED = 1280;
 /** The same stride counted in float32s, which is how `writeBuffer` sizes it. */
 declare const UNIFORM_FLOATS: number;
 /**
@@ -7066,6 +7106,8 @@ interface InstanceUniform {
     };
     /** Moving water (B5): the material's waterUniform this frame, or null/omitted for none. */
     readonly water?: readonly [number, number, number, number] | null;
+    /** A water surface's F5d terms (waterLookUniform), or null. */
+    readonly waterLook?: readonly [number, number, number, number] | null;
     /** The water's ripples flow along the UVs (EDITOR_PRO_ROADMAP.md P3), not the world's X and Z. */
     readonly waterAlong?: boolean;
     /** Triplanar mapping and height blending (B6), from {@link resolveMapping}, or null/omitted for neither. */
@@ -8372,6 +8414,22 @@ declare class MeshOverlaySurface implements DisplaySurface {
     private low;
     /** A GPU that reads its frames back: paced by how often they land (gpuPacing.ts), made with the first frame. */
     private gpuPacer;
+    /** The scene's water body (F5d), found once; its FFT ocean, and the ripples round the eye. */
+    private waterBodyCache;
+    private ocean;
+    private oceanSlopes;
+    private readonly ripples;
+    private waded;
+    /** Disturb the water at world (x, z) (F5d): a ring `strength` metres deep spreads from it. */
+    splash(x: number, z: number, strength?: number): void;
+    /** The first water surface in the scene (a refracting material with ripples): its top, its extent and its material. */
+    private waterBody;
+    /**
+     * This frame's water (F5d): the body's plane and look, the light reaching into it, whether the eye is under it,
+     * the FFT ocean's slopes (when a water surface asks for an ocean) and the ripples round the eye (a wading eye
+     * makes them as it moves).
+     */
+    private frameWater;
     /** The upper sky's mean light for F5c's clouds, and the sun it was found for. */
     private cloudAmbient;
     /** The last sky backdrop and the view it was painted for (it depends only on

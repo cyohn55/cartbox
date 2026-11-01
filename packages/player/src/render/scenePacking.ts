@@ -139,9 +139,11 @@ import { AREA_KIND } from "./ltc.js";
  * 1168 terrain3   vec4<f32>    16   the terrain's origin, the leaf node's side
  * 1184 terrain4   vec4<f32>    16   the eye in the ground plane (x, z), the split range, the morph's start
  * 1200 pages      vec4<f32> ×4 64   each eye-following page's corner, two a vec4
+ * 1264 wlook0     vec4<f32>    16   a water surface's F5d terms (water.ts): x = shore foam, y = Gerstner waves'
+ *                                    height (m), z = the FFT ocean's share, w = 1 when it has them
  * ```
  *
- * 1264 bytes used, padded to a 1280-byte stride (a 256-byte multiple a dynamic
+ * 1280 bytes used, filling the 1280-byte stride (a 256-byte multiple a dynamic
  * uniform offset can address), so one buffer still holds every draw in a
  * frame — uniforms are written per batch, not per copy, so the stride costs
  * little. The metallic-roughness inputs and the environment carry the Modern
@@ -156,7 +158,7 @@ export const UNIFORM_STRIDE = 1280;
  * bind group layout's `minBindingSize` must be: it makes a WGSL struct that
  * grows past what this module writes fail at pipeline creation.
  */
-export const UNIFORM_BYTES_USED = 1264;
+export const UNIFORM_BYTES_USED = 1280;
 /** The same stride counted in float32s, which is how `writeBuffer` sizes it. */
 export const UNIFORM_FLOATS = UNIFORM_STRIDE / 4;
 
@@ -335,6 +337,8 @@ const OFFSET_CHAR0 = 272;
 const OFFSET_CHAR1 = 276;
 const OFFSET_CULL0 = 280;
 const OFFSET_TERRAIN = 284;
+/** A water surface's F5d terms (foam, waves, ocean, on). */
+const OFFSET_WATER_LOOK = 316;
 
 /** The rasteriser's defaults, restated so an unlit draw shades identically. */
 export const DEFAULT_LIGHT: readonly [number, number, number] = [0.4, 0.8, 0.6];
@@ -580,6 +584,8 @@ export interface InstanceUniform {
   readonly soft?: { readonly distance: number; readonly linear: readonly [number, number] };
   /** Moving water (B5): the material's waterUniform this frame, or null/omitted for none. */
   readonly water?: readonly [number, number, number, number] | null;
+  /** A water surface's F5d terms (waterLookUniform), or null. */
+  readonly waterLook?: readonly [number, number, number, number] | null;
   /** The water's ripples flow along the UVs (EDITOR_PRO_ROADMAP.md P3), not the world's X and Z. */
   readonly waterAlong?: boolean;
   /** Triplanar mapping and height blending (B6), from {@link resolveMapping}, or null/omitted for neither. */
@@ -891,6 +897,7 @@ export function writeInstanceUniform(target: Float32Array, index: number, unifor
   target[base + OFFSET_WATER0 + 1] = water ? water[1] : 0;
   target[base + OFFSET_WATER0 + 2] = water ? water[2] : 0;
   target[base + OFFSET_WATER0 + 3] = water ? water[3] : 0;
+  target.set(uniform.waterLook ?? [0, 0, 0, 0], base + OFFSET_WATER_LOOK);
 
   const mapping = uniform.mapping ?? null;
   target[base + OFFSET_TERRAIN0] = mapping ? mapping.triplanar : 0;
@@ -1074,4 +1081,11 @@ export function unpadRows(
     out.set(padded.subarray(y * bytesPerRow, y * bytesPerRow + rowBytes), y * rowBytes);
   }
   return out;
+}
+
+/** A water material's F5d terms for the per-draw uniform: foam, Gerstner height, the ocean's share, and 1; null without water. */
+export function waterLookUniform(material: Pick<MeshMaterial, "water">): [number, number, number, number] | null {
+  const w = material.water;
+  if (!w || !(w.strength > 0)) return null;
+  return [w.foam ?? 0.5, w.waves ?? 0, w.ocean ?? 0, 1];
 }

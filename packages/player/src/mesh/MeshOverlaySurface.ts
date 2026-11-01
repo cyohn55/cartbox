@@ -24,6 +24,7 @@
 
 import { DynamicResolution, scaledSize } from "../render/dynamicResolution.js";
 import { GpuPacer, expandBilinear } from "../render/gpuPacing.js";
+import type { WaterFrame } from "../render/waterLook.js";
 import {
   atmosphereLighting,
   atmosphereLuts,
@@ -128,6 +129,10 @@ import {
   type Chunk,
   emitterFromEffect,
   precipitationOrigin,
+  lightColor,
+  Ocean,
+  RippleField,
+  resolveWaterLook,
   resolveWeather,
   weatherActive,
   weatherEmitters,
@@ -418,6 +423,98 @@ export class MeshOverlaySurface implements DisplaySurface {
   private low: { width: number; height: number; out: Uint8ClampedArray; depth: Float32Array } | null = null;
   /** A GPU that reads its frames back: paced by how often they land (gpuPacing.ts), made with the first frame. */
   private gpuPacer: GpuPacer | null = null;
+  /** The scene's water body (F5d), found once; its FFT ocean, and the ripples round the eye. */
+  private waterBodyCache: { plane: number; bounds: [number, number, number, number]; material: MeshMaterial } | null | undefined = undefined;
+  private ocean: Ocean | null = null;
+  private oceanSlopes: Float32Array<ArrayBuffer> | null = null;
+  private readonly ripples = new RippleField();
+  private waded: [number, number] | null = null;
+
+  /** Disturb the water at world (x, z) (F5d): a ring `strength` metres deep spreads from it. */
+  splash(x: number, z: number, strength = 0.05): void {
+    this.ripples.impulse(x, z, strength);
+  }
+
+  /** The first water surface in the scene (a refracting material with ripples): its top, its extent and its material. */
+  private waterBody(): { plane: number; bounds: [number, number, number, number]; material: MeshMaterial } | null {
+    if (this.waterBodyCache !== undefined) return this.waterBodyCache;
+    this.waterBodyCache = null;
+    for (const instance of this.scene.instances) {
+      const primitive = instance.mesh.primitives.find((p) => (p.material.water?.strength ?? 0) > 0);
+      if (!primitive) continue;
+      const m = instance.model;
+      let top = -Infinity, x0 = Infinity, z0 = Infinity, x1 = -Infinity, z1 = -Infinity;
+      for (const p of instance.mesh.primitives) {
+        for (let i = 0; i < p.positions.length; i += 3) {
+          const x = p.positions[i]!, y = p.positions[i + 1]!, z = p.positions[i + 2]!;
+          const wx = m[0]! * x + m[4]! * y + m[8]! * z + m[12]!;
+          const wy = m[1]! * x + m[5]! * y + m[9]! * z + m[13]!;
+          const wz = m[2]! * x + m[6]! * y + m[10]! * z + m[14]!;
+          top = Math.max(top, wy);
+          x0 = Math.min(x0, wx);
+          z0 = Math.min(z0, wz);
+          x1 = Math.max(x1, wx);
+          z1 = Math.max(z1, wz);
+        }
+      }
+      this.waterBodyCache = { plane: top, bounds: [x0, z0, x1, z1], material: primitive.material };
+      break;
+    }
+    return this.waterBodyCache;
+  }
+
+  /**
+   * This frame's water (F5d): the body's plane and look, the light reaching into it, whether the eye is under it,
+   * the FFT ocean's slopes (when a water surface asks for an ocean) and the ripples round the eye (a wading eye
+   * makes them as it moves).
+   */
+  private frameWater(lighting: SceneLighting | null, time: number): WaterFrame | null {
+    const body = this.waterBody();
+    if (!body) return null;
+    const look = resolveWaterLook(body.material.water ?? null);
+    const eye = this.eye;
+    const [x0, z0, x1, z1] = body.bounds;
+    const inside = eye !== null && eye[0] >= x0 && eye[0] <= x1 && eye[2] >= z0 && eye[2] <= z1;
+    // The light that reaches into it: the key light's on the surface, and the ambient fill.
+    const key = lighting?.lights.find((l) => l.kind === "directional" && l.direction) ?? null;
+    const kd = key?.direction ?? [0, 1, 0];
+    const kl = Math.hypot(kd[0], kd[1], kd[2]) || 1;
+    const kc = key ? lightColor(key) : ([1, 1, 1] as const);
+    const ambient = lighting?.ambient ?? 0.3;
+    const light: [number, number, number] = [0, 1, 2].map((c) => (key ? kc[c]! * key.intensity * Math.max(0, kd[1] / kl) : 0) + ambient) as [number, number, number];
+    // The ocean, when a water surface wants one.
+    if ((body.material.water?.ocean ?? 0) > 0) {
+      const wind = lighting?.wind ? ([Math.cos(lighting.wind.direction) * 6 * (1 + lighting.wind.strength), Math.sin(lighting.wind.direction) * 6 * (1 + lighting.wind.strength)] as [number, number]) : ([8, 3] as [number, number]);
+      if (!this.ocean || this.ocean.wind[0] !== wind[0] || this.ocean.wind[1] !== wind[1]) this.ocean = new Ocean(wind);
+      // Every other frame: the waves move slowly against the frame rate.
+      if (!this.oceanSlopes || this.frame % 2 === 0) this.oceanSlopes = this.ocean.slopes(time, this.oceanSlopes ?? undefined);
+    }
+    // The ripples follow the eye; a wading eye (inside the water's extent, within two metres of its surface) rings
+    // it every 40 cm it moves.
+    if (eye) {
+      this.ripples.follow(eye[0], eye[2]);
+      if (inside && Math.abs(eye[1] - body.plane) < 2) {
+        if (!this.waded || Math.hypot(eye[0] - this.waded[0], eye[2] - this.waded[1]) > 0.4) {
+          if (this.waded) this.ripples.impulse(eye[0], eye[2], 0.03, 0.5);
+          this.waded = [eye[0], eye[2]];
+        }
+      } else this.waded = null;
+    }
+    this.ripples.step(1 / 60);
+    const moving = this.ripples.active;
+    return {
+      plane: body.plane,
+      bounds: body.bounds,
+      absorption: look.absorption,
+      scattering: look.scattering,
+      light,
+      underwater: inside && eye !== null && eye[1] < body.plane,
+      ocean: this.oceanSlopes,
+      ripples: moving ? { heights: this.ripples.heights, origin: this.ripples.origin } : null,
+      time,
+    };
+  }
+
   /** The upper sky's mean light for F5c's clouds, and the sun it was found for. */
   private cloudAmbient: { key: string; value: [number, number, number] } | null = null;
   /** The last sky backdrop and the view it was painted for (it depends only on
@@ -1682,6 +1779,8 @@ export class MeshOverlaySurface implements DisplaySurface {
       ...(lighting ? { ...lit, localShadows: job.local, shadow: job.shadow, sunShadow: job.sunShadow, localShadowCasters: job.localShadowCasters, localShadowKey: job.localShadowKey, localShadowMoved: job.localShadowMoved, fog: lighting.fog ?? null, wind: lighting.wind ?? null } : {}),
       // The weather (F5e): its layers over every surface.
       weather,
+      // The water body (F5d): its depth, waves, ripples and caustics, and the water round an eye under it.
+      water: this.frameWater(lighting, time),
       ...(job.reflectionCapture ? { reflectionCapture: job.reflectionCapture } : {}),
       ...(job.decals ? { decals: job.decals } : {}),
       ...(this.ground.length > 0 ? { terrains: this.ground } : {}),

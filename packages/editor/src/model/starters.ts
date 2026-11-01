@@ -6,6 +6,7 @@
  * editor boot all read from it, so adding a starter is a one-line change here.
  */
 
+import { RUIN_CODE, ruinSidecar } from "./ruinScene";
 import type { CartEngine } from "../engine/CartEngine";
 import type { CollisionData } from "./CollisionMap";
 import { seedDemoCart } from "./seed";
@@ -14,7 +15,7 @@ import { seedPlatformerCart, PLATFORMER_COLLISION } from "./platformerSeed";
 import { seedPs1Cart, PS1_MESH_SIDECAR, PS1_ASSETS_SIDECAR } from "./ps1Seed";
 import { seedN64Cart, N64_MESH_SIDECAR, N64_ASSETS_SIDECAR } from "./n64Seed";
 import { seedXbox360Cart, XBOX360_MESH_SIDECAR, XBOX360_ASSETS_SIDECAR } from "./xbox360Seed";
-import { seedArenaCart, seedLockoutCart, lockoutMeshSidecar, LOCKOUT_FX } from "./lockoutSeed";
+import { arenaSoldierForScene, seedArenaCart, seedLockoutCart, lockoutMeshSidecar, LOCKOUT_FX } from "./lockoutSeed";
 import { arenaMap, arenaMapCode } from "./arenaMaps";
 
 /** Applies starter content to a cart's engine, in place. */
@@ -144,6 +145,20 @@ export const CART_STARTERS: readonly [CartStarter, ...CartStarter[]] = [
       return arenaMap("beaver").sidecar();
     },
     fx: LOCKOUT_FX,
+  },
+  {
+    // The AAA tier's reference scene (AAA_FIDELITY_ROADMAP.md F11b): built entirely through the pipeline.
+    id: "ruin",
+    label: "Forerunner ruin (AAA reference)",
+    description:
+      "The AAA tier's reference scene — a Forerunner ruin in a misty gorge at dusk: eroded terrain, a cluster-rendered cliff, a scanned boulder, a pylon baked from high-poly, a creek, volumetric clouds and fog, and a Spartan.",
+    seed: (engine) => {
+      engine.setLanguage("lua");
+      engine.setCode(RUIN_CODE);
+    },
+    get mesh() {
+      return ruinSidecar(arenaSoldierForScene());
+    },
   },
 ];
 

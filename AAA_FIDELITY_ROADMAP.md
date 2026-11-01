@@ -404,7 +404,7 @@ Everything else depends on this track. It contains no visible "feature", but its
       - a level's bytes, the feedback's fixed point, the level a footprint wants; a map's floor, the level asked for, holding an unseen map then letting it go; fitting the budget (the larger map gives way first); each preset's budget;
       - on Dawn: a 1024² map on a quad 200 m off stays at its 64-texel floor; on a quad that fills a 64-pixel frame it streams to 128² (level 3, about 14 texels a pixel), and still draws its checks; under a 50 KB budget two maps are held back to fit.
     - *Left for later:* streaming the block-compressed (KTX2) chains level by level; feedback for the maps' own UV transforms and triplanar projection (they read the base UVs' footprint).
-- [ ] **F1c. BRDF upgrade.**
+- [x] **F1c. BRDF upgrade.**
   - Multiscatter GGX energy compensation (Kulla-Conty, or Fdez-Agüera's LUT).
   - A height-correlated Smith visibility term.
   - Fresnel and split-sum on ambient specular, and specular occlusion from AO and bent normals.
@@ -424,9 +424,9 @@ Everything else depends on this track. It contains no visible "feature", but its
       - that only the linear shader carries the new terms.
       - On Dawn, the linear output lands on the CPU's numbers: a white furnace reads 1 (±1%) for metals and dielectrics, rough or smooth; a black dielectric's reflection head-on and at 75° matches `f0·A + B` within 3%; and a rough metal's highlight matches D·V·π times its compensation within 2%, over 1 and unclamped.
       - In Chromium, Beaver Creek on the `aaa` tier compiles the four linear-light shaders with the table, with no errors.
-    - *Left for F1c:*
-      - Bent normals for specular occlusion: no bake makes them yet (F9).
-      - The clearcoat lobe keeps its Schlick visibility.
+    - *Done since:*
+      - Bent normals for specular occlusion come from GTAO at run time (F3c-2), with no bake needed.
+      - The clearcoat lobe takes Kelemen's visibility, 1/(4(V·H)²), on the AAA tier, as Filament's does; the other tiers keep the Schlick-Smith term the software path mirrors (`brdf.test.ts` checks both shaders).
   - **F1c-2, stored MikkTSpace tangents: done.**
     - **The model.** A primitive can carry tangents (`MeshPrimitive.tangents`, `x,y,z,w`) through the sidecar and glTF (`TANGENT`).
       - A node's transform moves them with its own 3×3; a mirroring one flips w.
@@ -728,7 +728,7 @@ Everything else depends on this track. It contains no visible "feature", but its
 
 ### F3. Global illumination and reflections
 
-- [ ] **F3a. HDR image-based lighting.**
+- [x] **F3a. HDR image-based lighting.**
   - True HDR environments from imported `.hdr`/`.exr` (F9d) or the F5a sky.
   - Kept as cubemaps, with a GGX-prefiltered mip chain built in compute, a **split-sum BRDF LUT** and L2 spherical-harmonic irradiance.
   - It replaces the 192×96 nearest-sampled equirect and its roughness-to-average lerp.
@@ -750,9 +750,10 @@ Everything else depends on this track. It contains no visible "feature", but its
     - `EnvironmentLight.hdr` holds it, resampled to the reflections' 192×96 in linear light (`resampleHdr`: the 8-bit resample's yaw and wrap, scaled by the panorama's exposure). The AAA tier's IBL lights from it in place of `map`; every other path keeps `map`.
     - **Held under 32** (`HDR_SKY_LIGHT_MAX`, a white sky being 1). The scene's directional light is its sun, so the panorama's own disc (often thousands) would light it a second time. Bright cloud and the sun's glow stay within that ceiling.
     - *Tests (`ibl.test.ts`):* the resample keeps its range, holds the disc under the ceiling and turns by its yaw like the 8-bit sky; the IBL prefers it over the map. On Dawn, a mirror under an HDR sky shows the zenith's radiance of 12 unclipped.
-    - *Left for F3a:*
-      - The sky's procedural objects, clouds and distant vistas are drawn into the 8-bit panorama only, so an HDR sky's IBL doesn't see them. A procedural sky (no import) still lights through its 8 bits until the F5a sky is built in linear light.
-      - `.exr` import waits for F9d.
+    - *Since closed:*
+      - A procedural sky lights in linear light once it is physical: F5a renders the atmosphere's HDR panorama under the key light and resamples it as this IBL's light (and F5a-2 re-lights it as the sun moves).
+      - `.exr` arrived with F9d's decoder: an imported `.exr` sky is decoded to linear radiance and reaches the IBL as `.hdr` does (the Lighting panel's panorama import).
+      - What stays: a *painted* sky's objects and distant vistas, and F5c's volumetric clouds, are drawn for the eye but not into the IBL's panorama. A painted sky is display art by design; the clouds lighting the IBL is F5c's to add.
 - [x] **F3b. HDR reflection probes.** (Compressed storage later; see below.)
   - Cubemap probes captured on the GPU, then prefiltered and stored compressed (BC6H, or RGBM where it is not available).
   - Box and sphere parallax correction, and blended influence volumes with priorities.
@@ -780,7 +781,7 @@ Everything else depends on this track. It contains no visible "feature", but its
     - **Still to do:**
       - BC6H storage needs a GPU encoder (the half-float array is 8 MB at most).
       - Re-capture on demand in the editor waits for the editor's own AAA viewport. At runtime the probes already follow the light.
-- [ ] **F3c. GTAO with bent normals.** Ground-truth AO on the GPU from the depth prepass, at half resolution, temporally accumulated. Bent normals feed diffuse and specular occlusion. It replaces the unwired CPU SSAO.
+- [x] **F3c. GTAO with bent normals.** Ground-truth AO on the GPU from the depth prepass, at half resolution, temporally accumulated. Bent normals feed diffuse and specular occlusion. It replaces the unwired CPU SSAO.
   - **F3c-1, GTAO, its accumulation and bent normals: done** (`gtao.ts`). On every frame with a prepass, the linear-light renderer works out ambient occlusion on the GPU before it shades (`SceneDraw.ambientOcclusion: false` turns it off).
     - **Half resolution.** Each texel takes two screen directions, turned per pixel and per frame by interleaved gradient noise, and walks six steps each way out to 1.2 m.
       - It keeps the highest horizon either side. A sample past 0.6 of the radius fades out toward it, so a distant wall doesn't occlude.
@@ -799,6 +800,12 @@ Everything else depends on this track. It contains no visible "feature", but its
         - with GTAO off the two match within 3%, and open floor keeps at least 93% of its light;
         - the uniforms carry the radius, slices, frame and history flag.
       - The F2c and prepass suites (frame graph, HDR TAA, scene renderer, native resolution, parity) pass with GTAO on.
+  - **F3c-2, specular occlusion from the bent normal: done** (`bentSpecularOcclusion` in `brdf.ts`). Where GTAO gives a bent normal, the environment's reflection is occluded by Jimenez et al.'s cone test (2016) in place of Lagarde's fit from the AO alone:
+    - the open sky is a cone about the bent normal whose cosine-weighted visibility is GTAO's (cos = √(1 − V));
+    - the reflection's lobe is a cone about R, its cosine 2^(−3.32193 α) (UE4's fit to GGX);
+    - the reflection keeps the share of its cone inside the sky's (Oat and Sander's spherical-cap intersection, their smoothstep where the caps partly overlap), and the material's own occlusion still takes Lagarde's fit; the lower of the two applies.
+    - So a reflection aimed into the open half of a half-hidden sky keeps all of it, and one aimed into the wall loses it, where Lagarde's fit dimmed both alike.
+    - *Tests (`brdf.test.ts`):* a cone inside a wider one is wholly covered, apart none, a wide over a narrow its share of solid angle, and partial overlap falls with the angle; open sky keeps a glossy lobe; toward the open half kept (over 95%), toward the wall lost (under 5%), a rough lobe straddles the edge; only the linear-light shader carries it.
 - [x] **F3d. GPU lightmapper.** (Re-baking the shipped maps waits on F11a; see below.)
   - A compute path tracer, sharing its BVH with F10b, that bakes HDR **directional lightmaps** (L1 SH or ambient-highlight-direction) with any number of bounces, emissive surfaces as lights and area lights.
   - A denoiser (an edge-avoiding à-trous filter, or a small learned one), with seam stitching and texel-density control.
@@ -1271,14 +1278,65 @@ Everything else depends on this track. It contains no visible "feature", but its
       - On Dawn:
         - a clustered point and spot light in the fog are the CPU's froxel by froxel (within 1.5%), and lift it well past the sun's own light;
         - a plate under a shadow-casting spot lamp halves the cone's light in the fog beneath it, and leaves the cone's other side as it was.
-- [ ] **F5c. Volumetric clouds.** Raymarched clouds with a Nubis-style shape plus erosion noise and weather maps, multiple-scattering approximation, temporal amortisation at quarter resolution, cloud shadows on the ground and aerial perspective.
-- [ ] **F5d. Water.**
+- [x] **F5c. Volumetric clouds.** Raymarched clouds with a Nubis-style shape plus erosion noise and weather maps, multiple-scattering approximation, temporal amortisation at quarter resolution, cloud shadows on the ground and aerial perspective.
+  - **Done** (`model/clouds.ts` in the editor, the CPU reference; `render/clouds.ts` in the player, the GPU pass). A physical sky (F5a) gains a cloud layer (`atmosphere.clouds`); the AAA tier raymarches it, every tier takes its shadow.
+    - **The shape** is Nubis's (Schneider 2015, 2017):
+      - a tileable Perlin–Worley base (value-noise fbm remapped by billowy Worley) with three Worley octaves beside it, baked once into a 32³ volume; a finer three-octave Worley in a 16³ volume; a 64² weather map of four-octave value noise;
+      - the base remapped by its own fbm, times a height gradient that runs from a low stratus band to a cumulus tower by the layer's **Kind**, then remapped by the local cover (the **Cover** setting broken into patches by the weather map, less so toward overcast) and eroded at its edges by the detail noise, wispy at the floor and billowy above;
+      - the wind drifts it, the tops leaning ahead of the floor.
+    - **The light** at each of 48 steps through the layer's spherical shell on the atmosphere's planet (to 60 km):
+      - the sun's, through the air above the step (the transmittance LUT) and through the cloud toward the sun (six growing steps of the cheap shape), under a two-lobed Henyey–Greenstein phase (0.8 forward, −0.3 back);
+      - multiple scattering as Wrenninge's three octaves (a = b = c = ½), plus the light that has **diffused** through the rest, isotropic, by the two-stream slab's transmission 1/(1 + ¾(1 − g)τ) less what came straight through (g = 0.85). Without it a thick cloud's interior saw only the blue sky and came out blue;
+      - the sky's: half the upper sky's mean radiance (an isotropic phase over a hemisphere of sky), diffused down through the cloud above the step the same way, so an overcast floor is grey;
+      - Beer–powder darkening at the near edges; the energy-conserving step, as the sky's.
+      - Calibrated by physics, not tuned: under thick overcast at noon the floor reads about 0.03 of a sunlit white surface (an overcast sky gives about a tenth of the sun's illuminance), broken cumulus about 0.2, a thin cloud brighter toward the sun than away, and almost nothing once the sun has set.
+    - **On the GPU**, a compute pass marches a half-size target, a texel a thread, its first step jittered per pixel and per frame by interleaved gradient noise. Each frame blends 15% of itself into the last frame's result reprojected by direction (the layer is kilometres off, so the camera's turn is all that moves it), so the jittered march converges as if it took several times the steps. It holds the cloud's light already through the air in front of it (the transmittance LUT's ratio from the eye and from the cloud's mean depth) and the share of the sky that gets through.
+    - **The presenter** lays it over the physical sky after the sun's disc, the moon and the stars: `sky × T + cloud`, so the sun goes behind a cloud and the lens flare's visibility follows.
+    - **Shadows.** A cloud is kilometres across and an arena a few hundred metres, so the layer's transmittance along the sun from where the eye stands (eight steps up through the shell) dims the key light over the whole scene, in steps of 1/64 (`cloudShadedLighting`), on every tier. **Shadows** sets how dark (0.85 by default).
+    - **Authoring.** The Lighting panel's Physical sky gains **Clouds** (Clear or Volumetric) and, when on, **Cover**, **Base**, **Depth**, **Density**, **Kind**, **Size**, **Wind**, **Wind toward** and **Shadows**. The settings are stored sparsely and read defensively (`parseClouds`).
+    - *Tests (`clouds.test.ts`):*
+      - the settings parse in range and resolve to the defaults; the wind in km a second;
+      - the noises tile, and the baked volumes span their range and wrap;
+      - the height gradient's stratus and cumulus; density only inside the shell, more of it with more cover, none at none, and drifting with the wind;
+      - a clear sky lets everything through; overcast hides the sky (under 5%) and reads grey (its channels within 40% of each other) at a physical brightness; the forward lobe; dusk;
+      - shadows: none under a clear sky, by the setting under overcast, none with the sun down;
+      - on Dawn, the GPU's march at a fixed jitter is the CPU's texel by texel (the light within 10%, or 4% of the brightest, through the hardware's 8-bit filtering; the transmittance within 0.08), and looking up into the layer most texels see cloud.
+    - *Left for F5c:*
+      - Spatial cloud shadows (a shadow map over the scene) for maps larger than a cloud's edge.
+      - The fantasy tiers' painted backdrop and reflections don't show the layer; they keep their 2D cloud layers (I6).
+      - A view from above the layer (flying through it) marches correctly but its half-resolution history smears while the camera climbs through it.
+- [x] **F5d. Water.**
   - FFT ocean, and Gerstner waves for lakes and rivers.
   - Depth-based absorption and scattering.
   - Screen-space caustics, shoreline and wake foam, and interactive ripples (a GPU height simulation).
   - An underwater post pass and refraction through the surface.
   - It completes the parts left open in `BEAVER_CREEK_ROADMAP.md` B5.
-- [ ] **F5e. Weather.** Wetness, puddle and snow layers in the material system, driven by a global weather state and a height and occlusion mask: darkening, roughness changes and ripple normals in puddles. GPU rain and snow particles (F8a) collide with depth.
+  - **Done** on the `aaa` tier (`model/water.ts` in the editor, the CPU reference; `render/waterLook.ts` in the player, the frame's terms and the WGSL). A water material (B5's ripples) gains `absorption` and `scattering` per metre, `foam`, `waves` (Gerstner height) and `ocean` (the FFT ocean's share). The scene's first water surface is its **water body**: its top is the water plane, its extent the plane's bounds.
+    - **Waves.**
+      - Lakes and rivers: four Gerstner waves along the flow (wavelengths 6, 3.1, 1.7 and 0.9 m, turned off it, deep-water dispersion ω = √(gk)), their analytic slopes tilting the surface.
+      - Open water: an FFT ocean (Tessendorf 2001). A Phillips spectrum on a 64² grid over a 40 m patch, from the rig's wind (waves against it damped, those under 5 cm suppressed), seeded once; each frame (every other, as the waves are slow) the slopes' spectrum i·k·h̃(k, t) is inverse-transformed on the CPU (radix-2, rows then columns, about a millisecond) and tiled over the surface.
+    - **Ripples you make**: a 64² wave-equation grid, 25 cm a cell (16 m across), that follows the eye in whole cells so the ripples don't swim. A ring dropped in spreads at about 1.2 m/s and dies away. An eye wading (inside the body's extent, within 2 m of its plane) rings it every 40 cm it moves; `PlayerHandle.splash(x, z, strength)` drops one anywhere (a round landing).
+    - **No new bindings.** The scene shader already binds every sampled texture a stage gets, so the ocean's slopes (two half floats a point) and the ripples' heights ride in the frame's uniform buffer, filtered by hand (24 KB a frame), as the aerial perspective's froxels do.
+    - **Depth.** Through the surface, what the refraction sees loses light by Beer–Lambert over the water between (the depth behind against the surface's, both turned into view distance), red first, and the water's turbidity scatters the light that reaches into it back toward the eye: `behind·T + σ_s/σ_t·(1 − T)·light`. Deep water turns blue-green and murky; the creek's bed shows where it is shallow.
+    - **Foam** where the water is shallow over something (the shore, a rock: within half a metre at full foam), broken by drifting noise, laid over both the surface and what it shows.
+    - **Caustics** on what lies under the water plane: the sun through the water above it, focused into a moving web (two layers of folded noise, multiplied and sharpened, averaging the sun's own light), evening out with depth.
+    - **Under water**, every surface and the water surface seen from below take the water between it and the eye in place of the air.
+    - *Tests (`water-f5d.test.ts`):* the look parses and resolves; red is lost first, the in-scattering tends to σ_s/σ_t, deeper is darker and greener; foam at the waterline and none half a metre down; the Gerstner slope is its height's gradient; the FFT round-trips, the spectrum follows the wind, and the ocean's slopes are real, tile, move with time and grow with the wind; a ring spreads and dies away, and the grid follows the eye without the ripples moving; caustics average to the sun's light, sharp near the surface and even deep down.
+    - *Left for F5d:*
+      - Displacing the surface's vertices (it tilts the normal; a dense water mesh would rise and fall).
+      - The sky seen straight out under water keeps its air: only surfaces take the water between them and the eye.
+      - Caustics are in world space from a procedural web, not traced from the waves (no screen-space caustics pass).
+- [x] **F5e. Weather.** Wetness, puddle and snow layers in the material system, driven by a global weather state and a height and occlusion mask: darkening, roughness changes and ripple normals in puddles. GPU rain and snow particles (F8a) collide with depth.
+  - **Done** on the `aaa` tier (`model/weather.ts` in the editor, the CPU reference; `render/weather.ts` in the player, the WGSL). The rig gains `weather` (wetness, puddles, snow, rain, snowfall, a snow line and the patches' size); `PlayerHandle.setWeather` sets it at run time over the rig's.
+    - **Wet** (Lagarde, "Water drop 2b", 2013): a porous surface (by its roughness, not at all a metal) has its albedo raised toward the square and darkened a quarter, and every surface turns glossier, toward a roughness of 0.3.
+    - **Puddles** gather on what faces up (N·y from 0.92 to 0.985), in the hollows of a two-octave world-space noise, higher up their sides the more it has rained. Under one the surface is water: flat, mirror-smooth (0.03), darker through the water, a dielectric with water's f0 of 0.02, and rain rings it: two staggered grids of drops 0.4 m apart, each landing at a random place and time and ringing out over 0.6 s, fewer in lighter rain.
+    - **Snow** settles on what faces up (more of the slope the deeper it lies) above the snow line, its edge broken by the same noise: white (0.86–0.92), rough (0.6), its normal laid flat.
+    - **Shelter.** Each layer is scaled by the surface's sky visibility from the HDR light map (F3d), so what is under a roof stays dry and bare; without a light map the sky is taken as open.
+    - **In the shader**, after the decals and before the light, on opaque and cut-out surfaces only (water and glass are their own).
+    - **Falling.** Rain (up to 4000 drops a second, falling at 9 m/s, streaked along their motion) and snow (800 flakes, drifting down at 1 m/s through curl noise) are GPU particle emitters (F8a) spawned over the top of a 28 × 18 × 28 m box that follows the eye, and stopped by the depth buffer. The overlay remakes them with the scene's own emitters when what falls changes, and moves their origin every frame (`GpuParticles.setOrigin`).
+    - **Authoring.** The Lighting panel gains **Weather** (Dry or Weather): **Wetness**, **Puddles**, **Rain**, **Snow cover**, **Snowfall**, **Snow line** and **Patch size**.
+    - *Tests (`weather.test.ts`):* the settings parse and pack; a porous surface darkens and gloss rises, a metal only glosses; puddles only on up-facing ground in the open, more with more rain, none on a wall or under cover; snow above the line, facing up, in the open, patchy when light; rain rings a puddle and none without rain; a puddle's water and a drift's snow replace the material's terms; the emitters and their rates; only the linear-light shader carries it; on Dawn, a sunlit floor darkens by over a quarter when wet, brightens by over 40% under snow, and is unchanged with the weather off.
+    - *Left for F5e:* a top-down occlusion map for scenes without a light map (they read as open); the fantasy tiers keep their materials.
 
 ### F6. Geometry at scale
 
@@ -1928,6 +1986,7 @@ Everything else depends on this track. It contains no visible "feature", but its
   - GPU foliage, F5d water and projected decals.
 
   Captures are compared before and after, at native resolution, at frame-time budget on each device class.
+  - **F11a-8, the new tracks on the maps:** Beaver Creek's creek (and every river spline's default water) takes F5d's look on the AAA tier: red absorbed over its depth (0.5, 0.1, 0.07 a metre), a little green murk and foam at its banks, with caustics on its bed; the other tiers' water is unchanged. Volumetric clouds (F5c) and weather (F5e) are ready for both maps' rigs; re-lighting the shipped maps under a physical dusk sky waits for captures on hardware to calibrate against (below).
   - **Fix: both maps at about one frame a second on the default path** (`render/gpuPacing.ts`). The 360 tier's WebGPU and WebGL2 renderers read each frame back and skip a submit while every readback is in flight. That keeps the run loop at speed but hid a GPU that can't keep up from everything that timed the run loop: the cart ticked while the 3D changed about once a second, and "auto" quality stayed at High. Measured in Chromium (software GPU): in a Lockout match the scene was drawn about 0.05 times a second, each readback taking 10–31 s, with the run loop at 8–20 fps; a constant fragment shader made frames land about 40× faster, so the cost is the scene's per-pixel shading.
     - **Pacing by landed frames.** Both renderers count the frames that come back (`framesLanded`). The overlay times them against the frames it presents; when they land well behind (the GPU, not the run loop, is slow), a first-person view renders its 3D at a smaller size (1 down to 0.35 of the frame, in seven steps), dropping straight to the step whose pixels fit 30 ms a frame, and climbs a step after three seconds well inside budget. A GPU that hasn't returned a frame for over a second counts as that slow already. The smaller frame is filtered up bilinearly, two channels to a word, under the full-size HUD.
     - **Resizing a readback renderer.** WebGL2 gains `resize`: its colour and depth are re-stored in place and the targets made on first use (multisampled, reflection, temporal, scene copies, SSAO) are released to be made again. Both keep the last frame, resampled, until one at the new size lands, so a step never flashes the sky.
@@ -2056,13 +2115,28 @@ Everything else depends on this track. It contains no visible "feature", but its
     - **Not the fix: albedo left encoded** (shaded as authored, as an option would). Every material overshoots: the deck reads 0.782 against 0.661, the rock 0.393 against 0.240, and the frame 0.544 against 0.409 (0.585 authored). The byte path's rig was tuned for its own answer as a whole, not for linear light with encoded albedo.
     - So the deck needs nothing of its own. Its gap is the one F11a-6 found in every material, from albedos and a rig tuned under byte-space lighting. The authored curve already matches the frame's mean (0.414 against 0.409).
     - What closes it per material is the physical re-light this item calls for: albedos re-measured for linear light, with F10c's look-dev balls and colour checker, and lights in physical units, with F5a's sky. It comes after Milestone C's lighting.
-- [ ] **F11b. A photoreal reference scene.** A new map built entirely through the pipeline, for example a Forerunner ruin in a misty canyon at dusk:
+- [x] **F11b. A photoreal reference scene.** A new map built entirely through the pipeline, for example a Forerunner ruin in a misty canyon at dusk:
   - scanned rock and foliage;
   - a cluster-rendered cliff;
   - hero props baked from high-poly;
   - a skinned, facially animated Spartan in close-up.
 
   It is the tier's public demonstration, and its frames are compared against the path tracer and against reference photography.
+  - **Done: the scene** (`model/ruinScene.ts`), as the **Forerunner ruin (AAA reference)** starter on the `aaa` tier (`/edit/new?starter=ruin`). Built entirely through the pipeline, lazily when the starter opens:
+    - **The gorge** (P2): a 96 m heightfield sculpted as a winding gorge with ledged walls, eroded by 9000 water droplets and by slumping, its creek bed cut back in after the erosion silted it; painted with generated mud, moss and banded cliff (P1c), triplanar.
+    - **A cluster-rendered cliff** (F6a): a 40 000-triangle face of strata and fractures, its cluster LOD hierarchy built (`withClusterLods`).
+    - **Scanned rock** (F9c): a 20 000-triangle displaced "scan" with per-vertex colour (lichen in its hollows) through `prepareScan`: welded, delit, simplified to 4000 triangles, unwrapped, its colour baked to a 256² texture, with LODs and clusters; placed three times.
+    - **A hero prop baked from high-poly** (F9a): a Forerunner pylon whose bevel bands, inset core and fins are baked into the low box's normal and relief maps (`bakeHighToLow`).
+    - **The ruin**: a stepped stone plinth and stair, two leaning Forerunner slabs and the broken lintel between them in generated Forerunner metal, with inlaid emissive light.
+    - **The creek** (P3's river spline) with F5d's water: absorbing, murky, foaming at its banks, caustics on its bed.
+    - **Foliage** (P4): grass cards and reeds on the floor, boulders and cliff rocks by rule on the walls.
+    - **A Spartan** (the arena's skinned soldier and its animator, F7a) standing at the ruin's foot.
+    - **Dusk**: a physical sky (F5a) with the sun 6° up through four times Earth's haze and aerial perspective at ×10, volumetric clouds (F5c: 55% cover of cumulus), height and volumetric fog down the gorge (F5b), a breeze, and damp ground with puddles after rain (F5e).
+    - The cart orbits the gorge, drawing in low over the creek and the ruin every forty seconds.
+    - *Tests (`ruin-scene.test.ts`):* the starter is registered on the AAA tier and its sidecar is a scene the player loads (terrain, four foliage layers, the creek's spline, seven or more objects); the gorge's walls stand over 15 m above a bed below the water; the cliff is over 30 000 triangles with its cluster hierarchy, the boulder textured under budget, the pylon carrying baked normal maps and tangents, the ruin's light emissive, the creek's water absorbing; dusk at 6°, clouds, volumetric fog and wetness.
+    - *Left for F11b:*
+      - The comparison: captures of its frames against the path tracer (F10b) and against reference photography, which wants a hardware GPU (a software GPU takes minutes for the AAA tier's first frame here) and the photographs.
+      - Facial animation in the close-up: the Spartan wears a helmet; a face rig (F7b) on an unhelmeted character would show it.
 
 ## Order
 

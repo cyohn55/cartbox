@@ -416,6 +416,8 @@ export interface PlayerHandle {
   setViewMode(mode: ViewMode): void;
   /** Set the weather at run time (AAA_FIDELITY_ROADMAP.md F5e): wetness, puddles, snow, rain and snowfall over the rig's; null goes back to the rig's. */
   setWeather(settings: WeatherSettings | null): void;
+  /** Disturb the scene's water at world (x, z) (F5d): a ring `strength` metres deep spreads from it. */
+  splash(x: number, z: number, strength?: number): void;
   /**
    * Render the path-traced reference of the 3D frame shown (F10b), `width`
    * across at its aspect (up to 8K a side), accumulated over `samples` a pixel

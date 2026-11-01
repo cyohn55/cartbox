@@ -312,6 +312,12 @@ export interface MeshMaterial {
      * V — down a river spline's course, round every bend.
      */
     readonly along?: boolean;
+    /** F5d (water.ts): absorption and scattering per metre (RGB), shore foam (0..1), Gerstner waves' height (m), the FFT ocean's share (0..1). */
+    readonly absorption?: readonly [number, number, number];
+    readonly scattering?: readonly [number, number, number];
+    readonly foam?: number;
+    readonly waves?: number;
+    readonly ocean?: number;
   };
   // --- Texture generators (EDITOR_PRO_ROADMAP.md P1c; see textureGenerators.ts) ---
   /**
@@ -717,7 +723,7 @@ export interface SerializedMaterial {
   softDepth?: number;
   refraction?: number;
   distortion?: number;
-  water?: { strength: number; scale: number; speed: number; flow: number };
+  water?: { strength: number; scale: number; speed: number; flow: number; absorption?: [number, number, number]; scattering?: [number, number, number]; foam?: number; waves?: number; ocean?: number };
   triplanar?: number;
   blendSharpness?: number;
   generator?: { kind: string; seed: number; scale: number; tint: [number, number, number]; size: number };

@@ -64,6 +64,7 @@ import {
   type MeshMaterial,
   nitsToUnits,
   unitsToNits,
+  WATER_LOOK_DEFAULTS,
 } from "@cartbox/editor";
 
 import { starterGraph, wornEdgesGraph } from "@/lib/materialGraphEdit";
@@ -396,6 +397,32 @@ export function MaterialEditor({ mesh, onChange, set = null, library = [], onLib
             display={`${Math.round((material.water.flow * 180) / Math.PI)}°`}
             onChange={(value) => patch({ water: { ...material.water!, flow: (value * Math.PI) / 180 } })}
           />
+          {/* F5d (AAA tier): depth absorption and murk against clear river water's, shore foam, waves and an FFT ocean. */}
+          <RangeControl
+            label="Depth tint"
+            nested
+            min={0}
+            max={4}
+            step={0.05}
+            value={(material.water.absorption?.[0] ?? WATER_LOOK_DEFAULTS.absorption[0]) / WATER_LOOK_DEFAULTS.absorption[0]}
+            ariaLabel="Water depth absorption"
+            display={`×${((material.water.absorption?.[0] ?? WATER_LOOK_DEFAULTS.absorption[0]) / WATER_LOOK_DEFAULTS.absorption[0]).toFixed(2)}`}
+            onChange={(value) => patch({ water: { ...material.water!, absorption: WATER_LOOK_DEFAULTS.absorption.map((c) => c * value) as [number, number, number] } })}
+          />
+          <RangeControl
+            label="Murk"
+            nested
+            min={0}
+            max={10}
+            step={0.1}
+            value={(material.water.scattering?.[1] ?? WATER_LOOK_DEFAULTS.scattering[1]) / WATER_LOOK_DEFAULTS.scattering[1]}
+            ariaLabel="Water turbidity"
+            display={`×${((material.water.scattering?.[1] ?? WATER_LOOK_DEFAULTS.scattering[1]) / WATER_LOOK_DEFAULTS.scattering[1]).toFixed(1)}`}
+            onChange={(value) => patch({ water: { ...material.water!, scattering: WATER_LOOK_DEFAULTS.scattering.map((c) => c * value) as [number, number, number] } })}
+          />
+          <RangeControl label="Foam" nested min={0} max={1} step={0.05} value={material.water.foam ?? WATER_LOOK_DEFAULTS.foam} ariaLabel="Shore foam" display={`${Math.round((material.water.foam ?? WATER_LOOK_DEFAULTS.foam) * 100)}%`} onChange={(value) => patch({ water: { ...material.water!, foam: value } })} />
+          <RangeControl label="Waves" nested min={0} max={2} step={0.02} value={material.water.waves ?? 0} ariaLabel="Gerstner wave height" display={material.water.waves ? `${material.water.waves.toFixed(2)} m` : "none"} onChange={(value) => patch({ water: { ...material.water!, waves: value } })} />
+          <RangeControl label="Ocean" nested min={0} max={1} step={0.05} value={material.water.ocean ?? 0} ariaLabel="FFT ocean share" display={material.water.ocean ? `${Math.round(material.water.ocean * 100)}%` : "none"} onChange={(value) => patch({ water: { ...material.water!, ocean: value } })} />
         </>
       )}
       <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>

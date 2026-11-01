@@ -35,6 +35,7 @@ import {
   type MeshSceneInstance,
   type SceneWind,
 } from "@cartbox/editor";
+import type { WaterFrame } from "./waterLook.js";
 import type { DynamicGi, EmitterSpec, MeshAsset, MeshMaterial, Occluder, DecalTiles, EnvironmentLight, LocalShadows, Mat4, ProjectedDecal, RasterStyle, SceneFog, SceneLight, ShadowInput, ToneMap, Weather } from "@cartbox/editor";
 
 import type { RenderCaps } from "../models.js";
@@ -288,6 +289,8 @@ export interface SceneDraw {
    * reaches. Absent or all zero, surfaces are as authored.
    */
   readonly weather?: Weather | null;
+  /** The water body the frame lights by (F5d; waterLook.ts): its depth, ocean, ripples, caustics and whether the eye is under it. */
+  readonly water?: WaterFrame | null;
   /**
    * Skip instances whose world AABB is entirely outside the camera frustum. A
    * correct cull is output-identical, so it is a pure perf win; default off.

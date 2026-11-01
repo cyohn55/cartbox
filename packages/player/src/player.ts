@@ -1096,6 +1096,10 @@ export class Player {
   /** The weather a cart or the editor set at run time (F5e), over the rig's. */
   private weather: WeatherSettings | null = null;
 
+  splash(x: number, z: number, strength?: number): void {
+    this.meshSurface?.splash(x, z, strength);
+  }
+
   setWeather(settings: WeatherSettings | null): void {
     this.weather = settings;
     this.meshSurface?.setWeather(settings);

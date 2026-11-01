@@ -2043,3 +2043,28 @@ export {
   type Weather,
   type WeatherSettings,
 } from "./model/weather";
+export {
+  GERSTNER_WAVES,
+  OCEAN_PATCH,
+  OCEAN_SIZE,
+  Ocean,
+  RIPPLE_CELL,
+  RIPPLE_SIZE,
+  RippleField,
+  WATER_DEFAULTS as WATER_LOOK_DEFAULTS,
+  caustics,
+  fft,
+  gerstnerHeight,
+  gerstnerSlope,
+  parseWaterLook,
+  phillips,
+  resolveWaterLook,
+  sampleSlopes,
+  shoreFoam,
+  throughWater,
+  waterInscatter,
+  waterTransmittance,
+  type WaterLook,
+} from "./model/water";
+export { RUIN_CODE, RUIN_CREEK, ruinFoliage, ruinLighting, ruinSidecar, ruinTerrain } from "./model/ruinScene";
+export { arenaSoldierForScene } from "./model/lockoutSeed";
