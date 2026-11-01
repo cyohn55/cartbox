@@ -814,6 +814,19 @@ ${AERIAL_SAMPLE_WGSL}
 ${FOG_SAMPLE_WGSL}
 // The weather (F5e, weather.ts).
 ${WEATHER_WGSL}
+// A compressed cut-out (F1a; alpha mode 1.25): the encoder's mips average its alpha, which would thin it with
+// distance against a fixed threshold, so as its sampled level passes the top one the test turns hashed: a texel is
+// kept where its alpha beats a per-pixel threshold (interleaved gradient noise, which TAA's jitter averages), so the
+// share covered is the mean alpha a level holds: the cut-out's coverage, at any distance. Other cut-outs keep theirs.
+fn cutoutLod(duvx: vec2<f32>, duvy: vec2<f32>) -> f32 {
+  let dims = vec2<f32>(textureDimensions(tex, 0));
+  return log2(max(max(length(duvx * dims), length(duvy * dims)), 1e-8));
+}
+fn cutoutDrops(alpha: f32, lod: f32, pixel: vec2<f32>) -> bool {
+  if (u.pbr.w < 1.2) { return alpha < u.view.w; }
+  let hashed = fract(52.9829189 * fract(pixel.x * 0.06711056 + pixel.y * 0.00583715));
+  return alpha < mix(u.view.w, hashed, clamp(lod, 0.0, 1.0));
+}
 // Water (F5d, waterLook.ts).
 ${WATER_WGSL}
 // A water surface's waves (F5d): Gerstner along its flow, the FFT ocean's share and the ripples, tilting n.
@@ -1859,7 +1872,7 @@ ${g.base}${g.pdo ? `
   }
   if (colour.a * 255.0 < 1.0) { discard; }
   // A cut-out surface (EP6) drops what's below its threshold.
-  if (u.pbr.w > 0.5 && u.pbr.w < 1.5 && ${hdr ? "select((colour.a < u.view.w), !charDitherKeeps(colour.a, in.pos.xy), u.char1.x > 0.5 && charKind() == 3)" : "colour.a < u.view.w"}) { discard; }
+  if (u.pbr.w > 0.5 && u.pbr.w < 1.5 && ${hdr ? "select(cutoutDrops(colour.a, cutoutLod(duv1, duv2), in.pos.xy), !charDitherKeeps(colour.a, in.pos.xy), u.char1.x > 0.5 && charKind() == 3)" : "colour.a < u.view.w"}) { discard; }
 
   if (u.pbr.z > 0.5) {
     // Active Camo (H11): screen-door transparency, as the rasteriser drops pixels.
@@ -2251,12 +2264,14 @@ fn vs_shadow_cut(@location(0) position: vec3<f32>, @location(2) uv: vec2<f32>, @
   out.uv = uv;
   return out;
 }
-// The scene's own cut-out test: the base colour's alpha, times its map's, against the material's threshold.
+// The scene's own cut-out test: the base colour's alpha, times its map's, against the material's threshold
+// (hashed past a compressed cut-out's top level, as the scene's is: F1a).
 @fragment
 fn fs_shadow_cut(in: CutOut) {
+  let lod = cutoutLod(dpdx(in.uv), dpdy(in.uv));
   var a = u.base.a;
   if (u.texflags.x > 0.5) { a = a * textureSample(tex, samp, vec2<f32>(in.uv.x, 1.0 - in.uv.y)).a; }
-  if (a < u.view.w) { discard; }
+  if (cutoutDrops(a, lod, in.pos.xy)) { discard; }
 }
 ` : ""}
 // --- The depth prepass and thin G-buffer (AAA_FIDELITY_ROADMAP.md F0c) ---
@@ -2353,7 +2368,7 @@ ${hdr ? "  if (in.fade != 0.0 && fadeHides(in.fade, in.pos.xy)) { discard; }\n  
   let mr = textureSample(mrTex, samp, uv);
 ${g.base}
   if (colour.a * 255.0 < 1.0) { discard; }
-  if (u.pbr.w > 0.5 && u.pbr.w < 1.5 && ${hdr ? "select((colour.a < u.view.w), !charDitherKeeps(colour.a, in.pos.xy), u.char1.x > 0.5 && charKind() == 3)" : "colour.a < u.view.w"}) { discard; }
+  if (u.pbr.w > 0.5 && u.pbr.w < 1.5 && ${hdr ? "select(cutoutDrops(colour.a, cutoutLod(duv1, duv2), in.pos.xy), !charDitherKeeps(colour.a, in.pos.xy), u.char1.x > 0.5 && charKind() == 3)" : "colour.a < u.view.w"}) { discard; }
   if (u.pbr.z > 0.5 && u.effect0.w > 0.0 && camoThreshold(in.pos.xy, u.effect1.w) < u.effect0.w) { discard; }
   var n = normalize(sNrm);
   if (dot(n, u.view.xyz) < 0.0) { n = -n; }
@@ -4259,7 +4274,8 @@ export class WebgpuSceneRenderer implements SceneRenderer {
         eye,
         effect: entry.effect ?? null,
         time: draw.time ?? 0,
-        alpha: { mode: entry.alpha, cutoff: entry.primitive.material.alphaCutoff ?? 0.5 },
+        // A cut-out whose map uploads compressed takes the hashed test (mode 1.25, still a cut-out to every other test: F1a).
+        alpha: { mode: entry.alpha === 1 && this.compressedCutout(entry.textures.base) ? 1.25 : entry.alpha, cutoff: entry.primitive.material.alphaCutoff ?? 0.5 },
         soft: softEdges(entry.primitive.material, entry.alpha, draw.projection),
         surface: resolveSurface(entry.primitive.material, draw.time ?? 0, entry.textures.detail !== null, entry.textures.mr !== null, {
           weights: entry.primitive.blend !== undefined,
@@ -6415,12 +6431,20 @@ export class WebgpuSceneRenderer implements SceneRenderer {
    * samples (a KTX2 one, F1a) uploads that instead: a quarter of the memory,
    * its mips the encoder's. A cut-out keeps the RGBA path for its coverage.
    */
+  /** Whether a colour map is a cut-out that uploads block-compressed (F1a): its draws take the hashed cut-out test. */
+  private compressedCutout(source: DecodedTexture | null): boolean {
+    return source !== null && this.hdr && this.mips && source.gpu !== undefined && source.gpu !== null && this.textureFormats.includes(source.gpu.format) && hasTransparency(source);
+  }
+
   private uploadTexture(source: DecodedTexture, colour = false): any {
     const cache = this.mips && colour ? this.colourTextures : this.textures;
     const cached = cache.get(source);
     if (cached) return cached;
 
-    const compressed = this.mips && source.gpu && this.textureFormats.includes(source.gpu.format) && !(colour && hasTransparency(source)) ? source.gpu : null;
+    // A cut-out's colour map uploads compressed too (F1a): its draws take the hashed test past the top level, which
+    // keeps its coverage where the encoder's averaged mips alone would thin it.
+    // (Only the linear-light renderer has the hashed test; elsewhere a cut-out keeps its coverage mips, uncompressed.)
+    const compressed = this.mips && source.gpu && this.textureFormats.includes(source.gpu.format) && (this.hdr || !(colour && hasTransparency(source))) ? source.gpu : null;
     if (compressed) {
       const texture = uploadCompressed(this.device, source.width, source.height, compressed);
       cache.set(source, texture);

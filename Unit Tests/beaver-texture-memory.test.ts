@@ -68,7 +68,7 @@ describe("Beaver Creek's textures on the AAA tier", () => {
     expect(textures.filter((t) => t.image.ktx2Relief).length).toBe(3);
   });
 
-  it("take at least 4× less GPU memory than with RGBA mip chains, and 2.5× less than before F1a's mips", async () => {
+  it("take at least 4× less GPU memory than before F1a, and 6× less than with RGBA mip chains (the cut-outs compressed too)", async () => {
     const transcoder = await transcoderModule();
     let before = 0; // RGBA, one level: what the GPU held before F1a
     let mipped = 0; // RGBA with its mips (F1a-1, before compression)
@@ -86,7 +86,7 @@ describe("Beaver Creek's textures on the AAA tier", () => {
       rows.push(`${width}×${height} ${gpu?.format ?? "rgba8unorm"} ${bytes}`);
     }
     console.log(`Beaver Creek textures: before ${before}, RGBA with mips ${mipped}, now ${now} (${(before / now).toFixed(2)}× / ${(mipped / now).toFixed(2)}×)\n${rows.join("\n")}`);
-    expect(mipped / now).toBeGreaterThanOrEqual(4);
-    expect(before / now).toBeGreaterThanOrEqual(2.5);
+    expect(mipped / now).toBeGreaterThanOrEqual(6);
+    expect(before / now).toBeGreaterThanOrEqual(4);
   });
 });
