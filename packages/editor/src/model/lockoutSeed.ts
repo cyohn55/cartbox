@@ -29,7 +29,7 @@ import type { CartEngine } from "../engine/CartEngine";
 import { encodeRgbaPng } from "./png";
 import { meshBounds, serializeMaterial, serializeMeshAsset, type EncodedImage, type MeshAsset, type MeshMaterial, type MeshPrimitive, type MeshVariant } from "./MeshAsset";
 import type { AnimationClip, ClipChannel, SkinJoint } from "./skeleton";
-import { INFINITE_TINTS, type SceneLighting } from "./SceneLighting";
+import { INFINITE_TINTS, type SceneLighting, type SceneLightingOverride } from "./SceneLighting";
 import { plasmaMaterial, type PlasmaLook } from "./plasma";
 import type { MeshTrail } from "../render/meshTrails";
 import type { SceneLight } from "../render/meshRasterizer";
@@ -3481,6 +3481,21 @@ export const LOCKOUT_LIGHTING: SceneLighting = {
 };
 
 /**
+ * Lockout re-lit in physical units on the AAA tier (AAA_FIDELITY_ROADMAP.md
+ * F11a-11; see physicalRelight.ts): noon sun above the air at 3 km up, a thin
+ * high cloud deck drifting over, the ring, the peaks and the glacier mist kept
+ * as the backdrop, and the chasm's mist a medium the sun lights.
+ */
+export function lockoutRelight(): SceneLightingOverride {
+  return {
+    physical: {
+      atmosphere: { altitude: 3000, clouds: { coverage: 0.3, base: 3, thickness: 1.2, density: 30, type: 0.35, scale: 12, windSpeed: 10, windDirection: 20, shadows: 0.5 } },
+      volumetric: { albedo: [0.95, 0.96, 0.98], anisotropy: 0.6, distance: 80, ambient: 1 },
+    },
+  };
+}
+
+/**
  * The arena's post-FX stack — the cold Halo-era grade: bloom so the cyan energy
  * and sun-lit snow glow past their edges, a touch more contrast and a touch less
  * saturation, a split tone that pushes shadows toward steel blue while keeping
@@ -3838,7 +3853,8 @@ export const LOCKOUT_SCENE: ArenaScene = {
   parts: () => ({
     mesh: litMapMesh(),
     // The baked light probes (EP9) light the soldiers as they cross shade and bounce.
-    lighting: { ...LOCKOUT_LIGHTING, ...(lockoutProbes() ? { lightProbes: lockoutProbes() } : {}) },
+    // On the AAA tier, re-lit in physical units (F11a-11).
+    lighting: { ...LOCKOUT_LIGHTING, ...(lockoutProbes() ? { lightProbes: lockoutProbes() } : {}), aaa: lockoutRelight() },
     navmesh: lockoutNavMesh(),
     terrains: [lockoutTerrain(), lockoutVista()],
     timelines: [LOCKOUT_INTRO],

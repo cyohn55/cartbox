@@ -11741,6 +11741,7 @@ function resampleNearest(src, sw, sh, dw, dh) {
 
 // src/mesh/MeshOverlaySurface.ts
 import {
+  aaaLighting,
   atmosphereLighting,
   atmosphereLuts,
   atmosphereKey,
@@ -12485,6 +12486,8 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
      * moves the sun the metals reflect too.
      */
     this.skyReflections = null;
+    /** A physical sky's painted objects and landscape with their coverage (F11a-9), which the AAA backdrop lays over the air. */
+    this.skyFeatures = null;
     /**
      * A physical sky's time of day (F5a-2): the sun its light was last rendered
      * for (null until the first frame takes the bake's), and the re-render under
@@ -12824,6 +12827,7 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
    * change applies on the next run). Physics bodies keep simulating where they are.
    */
   async applySceneEdits(next) {
+    next = relitFor(next, this.renderer);
     const before = this.scene;
     if (next.instances.length !== before.instances.length) return false;
     for (let i = 0; i < next.instances.length; i += 1) {
@@ -12872,10 +12876,12 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
       let environment = lighting ? sceneLightingEnvironment(lighting) : null;
       let skyMap = null;
       let clouds = [];
+      let skyFeatures = null;
       if (lighting?.sky && environment) {
         const baked = await bakeSceneSky(lighting.sky, lighting, environment, this.vistas, next.bounds.center);
         skyMap = baked.map;
         clouds = baked.clouds;
+        skyFeatures = baked.features;
         environment = litBySky(environment, baked);
         this.skyReflections = { small: baked.small, sun: sunKey(skySun(lighting.sky)) };
       } else {
@@ -12885,6 +12891,7 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
       this.skyRelight = null;
       this.environment = environment;
       this.skyMap = skyMap;
+      this.skyFeatures = skyFeatures;
       this.startBounce();
       this.skyClouds = clouds;
       this.skyCache = null;
@@ -13055,6 +13062,7 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
    * bad image never blocks the cart — the mesh still renders, just untextured.
    */
   static async create(inner, width, height, scene, renderer = new SoftwareSceneRenderer(), options = {}) {
+    scene = relitFor(scene, renderer);
     const decoded = /* @__PURE__ */ new Map();
     let ktx2 = null;
     const gpuFormats = renderer.textureFormats ?? [];
@@ -13091,6 +13099,7 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
     }
     const lighting = scene.lighting;
     let skyMap = null;
+    let skyFeatures = null;
     let clouds = [];
     let environment = lighting ? sceneLightingEnvironment(lighting) : null;
     const ground = options.prepass === true && renderer.sunCascades === true ? await groundSources(scene, texture) : null;
@@ -13100,11 +13109,13 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
       const baked = await bakeSceneSky(lighting.sky, lighting, environment, vistas, scene.bounds.center);
       skyMap = baked.map;
       clouds = baked.clouds;
+      skyFeatures = baked.features;
       environment = litBySky(environment, baked);
       reflections = { small: baked.small, sun: sunKey(skySun(lighting.sky)) };
     }
     const surface = new _MeshOverlaySurface(inner, width, height, scene, instances, frames, renderer, skyMap, environment, options);
     surface.skyClouds = clouds;
+    surface.skyFeatures = skyFeatures;
     surface.skyReflections = reflections;
     surface.startBounce();
     surface.vistas = vistas;
@@ -13757,7 +13768,7 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
     const moonDisc = t ? [0, 1, 2].map((c) => MOON_ALBEDO * scale * sun.radiance[c] * t[c]) : null;
     const cloudSettings = lighting.sky?.atmosphere?.clouds;
     const clouds = cloudSettings ? { clouds: resolveClouds(cloudSettings), ambient: this.cloudAmbientFor(luts, sun.direction, sun.radiance), time: this.frame / 60 } : null;
-    return { atmosphere: sun.atmosphere, sun: sun.direction, sunRadiance: sun.radiance, disc, moon: sun.moon, stars: sun.stars, moonDisc, clouds };
+    return { atmosphere: sun.atmosphere, sun: sun.direction, sunRadiance: sun.radiance, disc, moon: sun.moon, stars: sun.stars, moonDisc, clouds, features: this.skyFeatures };
   }
   /** The upper sky's mean radiance under this sun (F5c's clouds take their sky light from it), kept while the sun holds still. */
   cloudAmbientFor(luts, sun, radiance) {
@@ -14676,7 +14687,9 @@ async function bakeSceneSky(sky, lighting, environment, vistas, eye) {
       imported = null;
     }
   }
-  let map = bakeSkyPanorama(sky, SKY_PANORAMA_WIDTH, SKY_PANORAMA_HEIGHT, imported, { sunLayer: true });
+  const painted = physical && ((sky.objects?.length ?? 0) > 0 || sky.atmosphere?.landscape === true);
+  const features = painted ? bakeSkyPanorama(sky, SKY_PANORAMA_WIDTH, SKY_PANORAMA_HEIGHT, imported, { sunLayer: true, coverage: true }) : null;
+  let map = features ? { ...features, data: features.data.map((v, i) => (i & 3) === 3 ? 0 : v) } : bakeSkyPanorama(sky, SKY_PANORAMA_WIDTH, SKY_PANORAMA_HEIGHT, imported, { sunLayer: true });
   const bounds = vistas.length > 0 ? vistaBounds(vistas) : null;
   if (bounds) {
     const light = panoramaWithSun(downsamplePanorama(map, SKY_IBL_DOWNSAMPLE), skySun(sky), SKY_IBL_SUN_SAMPLES);
@@ -14702,7 +14715,7 @@ async function bakeSceneSky(sky, lighting, environment, vistas, eye) {
   }
   const clouds = (sky.cloudLayers ?? []).map(bakeCloudLayer);
   const small = downsamplePanorama(map, SKY_IBL_DOWNSAMPLE);
-  return { map, small, reflections: skyReflectionsWith(small, skySun(sky), clouds), clouds, hdr: hdrLight };
+  return { map, small, reflections: skyReflectionsWith(small, skySun(sky), clouds), clouds, hdr: hdrLight, features };
 }
 function skyReflectionsWith(small, sun, clouds) {
   return panoramaWithClouds(panoramaWithSun(small, sun, SKY_IBL_SUN_SAMPLES), clouds, 0);
@@ -14713,6 +14726,9 @@ function physicalSunKey(sun) {
 function sunKey(sun) {
   const l = Math.hypot(sun.direction[0], sun.direction[1], sun.direction[2]) || 1;
   return `${sun.direction.map((v) => Math.round(v / l * 100)).join(",")}:${sun.color.map((v) => Math.round(v * 50)).join(",")}`;
+}
+function relitFor(scene, renderer) {
+  return renderer.sunCascades === true && scene.lighting?.aaa ? { ...scene, lighting: aaaLighting(scene.lighting) } : scene;
 }
 var hdrLightmapDecodes = /* @__PURE__ */ new WeakMap();
 function decodeHdrLightmapOnce(image) {
@@ -37180,7 +37196,7 @@ var ATMOSPHERE_SKY_UNIFORM_FLOATS = 40;
 var STAR_CELLS = 512;
 var STAR_DENSITY = 9e3 / (6 * STAR_CELLS * STAR_CELLS);
 var SUN_DISC_MAX = 3e4;
-function packAtmosphereSkyUniforms(sky, width, height, out = new Float32Array(ATMOSPHERE_SKY_UNIFORM_FLOATS)) {
+function packAtmosphereSkyUniforms(sky, width, height, out = new Float32Array(ATMOSPHERE_SKY_UNIFORM_FLOATS), exposure = null, authored = false) {
   const v = sky.view;
   const p = sky.projection;
   const atm = sky.atmosphere;
@@ -37200,7 +37216,7 @@ function packAtmosphereSkyUniforms(sky, width, height, out = new Float32Array(AT
   }
   const stars = atm.stars ?? 1;
   out.set([stars, 2 / (height * Math.abs(p[5])), NIGHT_SKY_RADIANCE * stars, a.top], 32);
-  out.set([Math.sin(MOON_RADIUS), moon && atm.moonDisc ? 1 : 0, 0, 0], 36);
+  out.set([Math.sin(MOON_RADIUS), moon && atm.moonDisc ? 1 : 0, exposure !== null && exposure > 0 ? exposure : 0, atm.features ? authored ? 2 : 1 : 0], 36);
   return out;
 }
 function shaftGrid(width, height) {
@@ -37386,7 +37402,7 @@ struct AtmSky {
   moon: vec4f,    // F5a-3: toward it, w the cosine of its radius
   moonLit: vec4f, // its disc's light per unit of the sun on it; w = 1 while its sky view is lit
   stars: vec4f,   // their scale, a pixel's angle, the night sky's glow, the atmosphere's top (km)
-  moonInfo: vec4f, // the sine of its radius, 1 with a moon
+  moonInfo: vec4f, // the sine of its radius, 1 with a moon, the frame's exposure (0: unmapped), 1 with features (2: the authored curve)
 };
 @group(0) @binding(0) var<uniform> s: AtmSky;
 @group(0) @binding(1) var skyView: texture_2d<f32>;
@@ -37395,7 +37411,11 @@ struct AtmSky {
 @group(0) @binding(4) var transmittanceLut: texture_2d<f32>;
 // The volumetric clouds (F5c), at half size: their light through the air in rgb, what of the sky gets through in a.
 @group(0) @binding(5) var cloudTex: texture_2d<f32>;
+// The painted sky's features (F11a-9): equirectangular, alpha their coverage.
+@group(0) @binding(6) var features: texture_2d<f32>;
+@group(0) @binding(7) var featureSampler: sampler;
 ${FULLSCREEN_VS2}
+${SRGB_WGSL}
 ${SKY_VIEW_UV_WGSL}
 // The transmittance from the viewer along d to the top of the air (Bruneton's mapping); 0 into the ground.
 fn viewTransmittance(d: vec3f) -> vec3f {
@@ -37475,6 +37495,23 @@ fn starlight(n: vec3f) -> f32 {
     onMoon = true;
   }
   if (!onMoon && s.stars.x > 0.0) { rgb = rgb + T * (starlight(n) * s.stars.x + s.stars.z); }
+  // The painted features in front of the air (F11a-9), as the painted sky shows them (SKY_WGSL's
+  // inverse): the light that shows as painted under the frame's exposure and curve.
+  if (s.moonInfo.w > 0.5) {
+    let u = atan2(n.z, n.x) / 6.28318531 + 0.5;
+    let v = acos(clamp(n.y, -1.0, 1.0)) / 3.14159265;
+    let f = textureSampleLevel(features, featureSampler, vec2f(u, v), 0.0);
+    if (f.a > 0.0) {
+      var painted = f.rgb;
+      if (s.moonInfo.w > 1.5 && s.moonInfo.z > 0.0) {
+        painted = toLinear(filmicInverse(painted) / s.moonInfo.z);
+      } else {
+        painted = toLinear(painted);
+        if (s.moonInfo.z > 0.0) { painted = filmicInverse(painted) / s.moonInfo.z; }
+      }
+      rgb = mix(rgb, painted, f.a);
+    }
+  }
   // The clouds over all of it (F5c): the sun, the moon and the stars go behind them. None bound: (0, 0, 0, 1).
   let cloud = textureSampleLevel(cloudTex, viewSampler, pos.xy / s.size.xy, 0.0);
   rgb = rgb * cloud.a + cloud.rgb;
@@ -37892,7 +37929,7 @@ var GpuPresenter = class {
     const compose = layout([uni(), tex(1), tex(2), tex(3), samp(4), tex(5), tex(6), tex(7), tex(8)]);
     this.layouts = {
       sky: layout([uni(), tex(1), samp(2), tex(3, STAGE_FRAGMENT2, "2d-array"), samp(4)]),
-      atmosphere: layout([uni(), tex(1), samp(2), tex(3), tex(4), tex(5)]),
+      atmosphere: layout([uni(), tex(1), samp(2), tex(3), tex(4), tex(5), tex(6), samp(7)]),
       mask: layout([uni(), tex(1), tex(2)]),
       gather: layout([uni(), tex(1)]),
       compose,
@@ -37981,7 +38018,11 @@ var GpuPresenter = class {
           const atmosphere = this.hdr && sky.atmosphere ? sky.atmosphere : null;
           if (atmosphere) {
             (this.atmosphereLuts ?? (this.atmosphereLuts = new GpuAtmosphere(device))).update(atmosphere);
-            device.queue.writeBuffer(this.uniforms.atmosphere, 0, packAtmosphereSkyUniforms({ ...sky, atmosphere }, width, height, this.data.atmosphere));
+            device.queue.writeBuffer(
+              this.uniforms.atmosphere,
+              0,
+              packAtmosphereSkyUniforms({ ...sky, atmosphere }, width, height, this.data.atmosphere, frame.tonemap ? frame.tonemap.exposure : null, frame.tonemap?.authored ?? false)
+            );
             const cloudView = atmosphere.clouds ? (this.cloudPass ?? (this.cloudPass = new GpuClouds(device))).march(ctx.encoder, atmosphere, atmosphere.clouds, sky.view, sky.projection, this.atmosphereLuts.transmittance, width, height).createView() : this.noClouds().createView();
             this.fullScreen(
               ctx.encoder,
@@ -37995,7 +38036,9 @@ var GpuPresenter = class {
                 { binding: 2, resource: this.linear.clamp },
                 { binding: 3, resource: this.atmosphereLuts.moonView.createView() },
                 { binding: 4, resource: this.atmosphereLuts.transmittance.createView() },
-                { binding: 5, resource: cloudView }
+                { binding: 5, resource: cloudView },
+                { binding: 6, resource: (atmosphere.features ? this.panoramaFor(atmosphere.features) : this.blank).createView() },
+                { binding: 7, resource: this.linear.wrapU }
               ],
               ctx.timing
             );
@@ -42157,6 +42200,7 @@ export {
   normalBasis3x3,
   normalVector,
   orbitPitchAboveTerrain,
+  packAtmosphereSkyUniforms,
   packComposeUniforms,
   packLights,
   packMeasureUniforms,

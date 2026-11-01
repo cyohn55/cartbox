@@ -99,6 +99,7 @@ export {
   bakeLockoutLightmap,
   lockoutTerrainTriangles,
   LOCKOUT_LIGHTING,
+  lockoutRelight,
   bakeLockoutProbes,
   LOCKOUT_SCENE_TRIANGLES,
   LOCKOUT_CENTER_X,
@@ -127,7 +128,7 @@ export {
   type StoredArenaMap,
 } from "./model/arenaMarkup";
 export { arenaNavMesh, validateArenaMap, type ArenaIssue, type ArenaIssueKind, type ArenaValidateOptions } from "./model/arenaValidate";
-export { BEAVER_CREEK_SPLINE, BEAVER_GROUND, BEAVER_LIGHTING, BEAVER_MAP, BEAVER_SCENE, beaverCenter, beaverFoliage, beaverMapLayout, beaverNavMesh, beaverTerrain } from "./model/beaverCreekSeed";
+export { BEAVER_CREEK_SPLINE, BEAVER_GROUND, BEAVER_LIGHTING, BEAVER_MAP, BEAVER_SCENE, beaverRelight, beaverCenter, beaverFoliage, beaverMapLayout, beaverNavMesh, beaverTerrain } from "./model/beaverCreekSeed";
 export { ARENA_MAPS, arenaMap, arenaMapCartridge, arenaMapCode, type ArenaMapEntry } from "./model/arenaMaps";
 export { MAP_BAKES, MAP_BAKE_PARTS, bakeMapKitSource, bakeMapLightmapSource, bakeMapProbesSource, bakeMapTexturesSource, mapBakeStatus, type MapBakeFile, type MapBakePart, type MapBakes } from "./model/mapBakes";
 export { compressedImagesCurrent, imageKey, pairKey, sidecarImages, sidecarPairs, withCompressedImages, type CompressedImageKind, type CompressedImageTable, type SidecarImage, type SidecarPair } from "./model/compressedImages";
@@ -853,6 +854,9 @@ export {
   SCENE_LIGHTING_VERSION,
   defaultSceneLighting,
   infiniteDaylightLighting,
+  aaaLighting,
+  aaaRelightKeys,
+  clearAaaRelight,
   INFINITE_TINTS,
   MAX_SCENE_TINTS,
   parseSceneLighting,
@@ -881,6 +885,7 @@ export {
   setSceneAutoExposure,
   setSceneUnits,
   type SceneLighting,
+  type SceneLightingOverride,
   type SceneEnvironment,
 } from "./model/SceneLighting";
 export {
@@ -898,6 +903,7 @@ export {
   withLightFalloff,
   type LightUnit,
 } from "./model/physicalLight";
+export { SUN_ABOVE_AIR, canRelight, groundSun, parsePhysicalRelight, physicalRelight, type PhysicalRelightSettings } from "./model/physicalRelight";
 export {
   DEFAULT_DETAIL_SCALE,
   DEFAULT_DETAIL_STRENGTH,

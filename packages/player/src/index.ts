@@ -160,6 +160,7 @@ export {
   COMPOSE_UNIFORM_FLOATS,
   GpuPresenter,
   SKY_UNIFORM_FLOATS,
+  packAtmosphereSkyUniforms,
   packComposeUniforms,
   packMeasureUniforms,
   packShaftUniforms,

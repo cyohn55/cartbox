@@ -418,3 +418,20 @@ describe.skipIf(!device)("the GPU bake under a physical sky", { timeout: 300_000
     expect(map.irradiance[i + 2]!).toBeGreaterThan(1.5 * map.irradiance[i]!);
   });
 });
+
+describe("the LUT cache", () => {
+  it("shares one medium's tables between altitudes, yet lights each from its own height", () => {
+    const low = resolveAtmosphere({ altitude: 600 });
+    const high = resolveAtmosphere({ altitude: 3000 });
+    const a = atmosphereLuts(low);
+    const b = atmosphereLuts(high);
+    expect(b.transmittance).toBe(a.transmittance);
+    expect(b.atmosphere.viewHeight).toBeCloseTo(3, 9);
+    expect(atmosphereLuts(low).atmosphere.viewHeight).toBeCloseTo(0.6, 9);
+    // Less air above 3 km: the sun comes through stronger and less reddened.
+    const up = [0.42, 0.8, -0.46];
+    const tLow = sunTransmittance(a, up);
+    const tHigh = sunTransmittance(b, up);
+    expect(tHigh[2]).toBeGreaterThan(tLow[2] + 0.02);
+  });
+});
