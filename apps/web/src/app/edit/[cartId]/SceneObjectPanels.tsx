@@ -40,6 +40,7 @@ import {
   setMeshProp,
   setMeshTags,
   setMeshLightChannels,
+  setMeshLightmapScale,
   type MeshSidecar,
   type MeshSidecarEntry,
 } from "@/lib/meshSidecar";
@@ -251,6 +252,17 @@ export function LightChannelEditor({ sidecar, entry, onChange }: { sidecar: Mesh
     <>
       <ChannelMask label="Lit on channels" value={entry.lightChannels ?? 1} onChange={(mask) => onChange(setMeshLightChannels(sidecar, entry.id, mask))} />
       <RailHint>A light lights it when they share a channel. Ambient and sky light reach it whatever its channels.</RailHint>
+      <RangeControl
+        label="Light map detail"
+        min={-2}
+        max={2}
+        step={1}
+        value={Math.log2(entry.lightmapScale ?? 1)}
+        onChange={(log) => onChange(setMeshLightmapScale(sidecar, entry.id, 2 ** log))}
+        ariaLabel="Light map texel density"
+        display={`×${entry.lightmapScale ?? 1}`}
+      />
+      <RailHint>Its baked light map's texels against the bake's Detail: more for a piece seen close, fewer for one seen from afar. Rebake to apply.</RailHint>
     </>
   );
 }

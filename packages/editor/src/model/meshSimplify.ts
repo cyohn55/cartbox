@@ -304,6 +304,33 @@ function collapse(positions: Float32Array, indices: Uint32Array, ratio: number, 
   return out;
 }
 
+/**
+ * Simplify a few of a mesh's triangles on their own (AAA_FIDELITY_ROADMAP.md
+ * F6a's cluster groups): to about `ratio` of them, their outline and seams
+ * held still, so what they meet along it still meets. Their vertices are
+ * remapped to a local set first, so the cost is the patch's, not the mesh's;
+ * the triangles returned index `positions` as the given ones do.
+ */
+export function simplifyPatch(positions: Float32Array, indices: Uint32Array, ratio: number): Uint32Array {
+  const local = new Map<number, number>();
+  const global: number[] = [];
+  const remapped = new Uint32Array(indices.length);
+  for (let i = 0; i < indices.length; i += 1) {
+    const v = indices[i]!;
+    let l = local.get(v);
+    if (l === undefined) {
+      l = global.length;
+      local.set(v, l);
+      global.push(v);
+    }
+    remapped[i] = l;
+  }
+  const points = new Float32Array(global.length * 3);
+  global.forEach((v, l) => points.set(positions.subarray(v * 3, v * 3 + 3), l * 3));
+  const out = collapse(points, remapped, ratio, true, Infinity);
+  return Uint32Array.from(out, (l) => global[l]!);
+}
+
 /** Whether a primitive can be simplified across its creases (see {@link simplifyIndices}): it has normals and nothing a UV seam would tear. */
 function canWeld(p: MeshPrimitive): boolean {
   if (!p.normals || p.uvs2 || p.blend) return false;

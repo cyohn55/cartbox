@@ -5,7 +5,7 @@
  * warming up on the software rasteriser before the first one lands.
  */
 
-import { depthLinearTerms, effectActive, refracts, resolveRefraction, type DecodedTexture, type Mat4, type MeshAsset, type MeshPrimitive, type MeshSceneInstance, type SurfaceEffect } from "@cartbox/editor";
+import { depthLinearTerms, effectActive, refracts, resolveRefraction, type DecodedTexture, type HdrLightmap, type LodChain, type Mat4, type MeshAsset, type MeshPrimitive, type MeshSceneInstance, type SurfaceEffect } from "@cartbox/editor";
 
 import type { SceneDraw, SoftwareSceneRenderer } from "./sceneRenderer.js";
 import { resolvePbr } from "./scenePacking.js";
@@ -46,7 +46,8 @@ export function presentFrame(
   draw: SceneDraw,
   software: SoftwareSceneRenderer,
 ): void {
-  if (latest) {
+  // A frame from before a resize, at its old size, is not this frame's (the renderers resample theirs; this is the guard).
+  if (latest && latest.length === draw.width * draw.height * 4) {
     compositeFrame(latest, draw);
   } else if (draw.width * draw.height <= SOFTWARE_WARMUP_PIXELS && trianglesIn(visible) <= SOFTWARE_WARMUP_TRIANGLES) {
     software.render(visible, draw);
@@ -97,6 +98,8 @@ export interface PrimitiveTextures {
   occ: DecodedTexture | null;
   emis: DecodedTexture | null;
   lm: DecodedTexture | null;
+  /** The HDR directional light map (AAA_FIDELITY_ROADMAP.md F3d), or null: what the AAA tier lights by in place of {@link lm}. */
+  lmHdr: HdrLightmap | null;
   /** The detail map (HALO2_STYLE_ROADMAP.md H3), or null. */
   detail: DecodedTexture | null;
   /** The blend surface's map (H4), or null. */
@@ -105,10 +108,12 @@ export interface PrimitiveTextures {
   relief: DecodedTexture | null;
   /** The tangent-space normal map (P1a), or null (a primitive without UVs has no tangent frame for one). */
   normal: DecodedTexture | null;
+  /** A material graph's own images (F1e), slot 1 first, or null. */
+  graph?: readonly (DecodedTexture | null)[] | null;
 }
 
 export function sameTextures(a: PrimitiveTextures, b: PrimitiveTextures): boolean {
-  return a.base === b.base && a.mr === b.mr && a.occ === b.occ && a.emis === b.emis && a.lm === b.lm && a.detail === b.detail && a.blend === b.blend && a.relief === b.relief;
+  return a.base === b.base && a.mr === b.mr && a.occ === b.occ && a.emis === b.emis && a.lm === b.lm && a.lmHdr === b.lmHdr && a.detail === b.detail && a.blend === b.blend && a.relief === b.relief && (a.graph ?? null) === (b.graph ?? null);
 }
 
 const NO_OCCLUSION = {};
@@ -176,13 +181,23 @@ export interface DrawBatch<G> {
   refract: boolean;
   /** Index of the batch's first copy in the instance data (set by the renderer). */
   first: number;
+  /** The LOD level its copies draw (F10a), or −1 without a chain. */
+  lod?: number;
+  /**
+   * With LOD siblings (F0e): the chain every copy shares, which the GPU picks
+   * each copy's level from, and, for a sibling (one of the chain's other
+   * levels), the batch whose copies (and instance records) it shares.
+   */
+  lodChain?: LodChain | null;
+  source?: DrawBatch<G>;
 }
 
-/** Whether a batch refracts (I5): a PBR draw whose material or surface effect bends what's behind it. */
+/** Whether a batch refracts (I5): a PBR draw whose material or surface effect bends what's behind it, or that transmits it (F1d). */
 export function batchRefracts(primitive: MeshPrimitive, textures: PrimitiveTextures, effect: SurfaceEffect | null): boolean {
   const material = primitive.material;
   if (!resolvePbr(material, textures.mr !== null, textures.occ !== null, textures.emis !== null).isPbr) return false;
-  return refracts(resolveRefraction(material, effectActive(effect) ? effect : null));
+  // A transmitting material (F1d) reads what's behind it too, unbent.
+  return refracts(resolveRefraction(material, effectActive(effect) ? effect : null)) || (material.transmission ?? 0) > 0;
 }
 
 /**
@@ -195,10 +210,20 @@ export function batchInstances<G extends { indexCount: number }>(
   geometryOf: (mesh: MeshAsset) => readonly (G | undefined)[],
   /** The camera's world position, to draw see-through copies farthest first. */
   eye: readonly [number, number, number] = [0, 0, 0],
+  /**
+   * Leave the LOD choice to the GPU (F0e) for these chains: copies with one batch only with
+   * copies of the same chain, and each such batch gains a sibling for each of
+   * the chain's other levels (the same primitive of that level's mesh) sharing
+   * its copies. The GPU then keeps each copy in the one level its distance picks.
+   */
+  lodSiblings: ReadonlySet<LodChain> | null = null,
+  /** Draw cluster hierarchies (F6a): a clustered primitive's copies each a batch of their own, since each takes its own cut. */
+  clusters = false,
 ): { batches: DrawBatch<G>[]; instanceCount: number } {
   const batches: DrawBatch<G>[] = [];
   const seeThrough: { batch: DrawBatch<G>; distance: number }[] = [];
   const byPrimitive = new Map<MeshPrimitive, DrawBatch<G>[]>();
+  const chained: { batch: DrawBatch<G>; mesh: MeshAsset; index: number }[] = [];
   let instanceCount = 0;
   for (const instance of instances) {
     const geometries = geometryOf(instance.mesh);
@@ -211,35 +236,55 @@ export function batchInstances<G extends { indexCount: number }>(
         occ: occlusionWithRelief(instance.occlusionTextures?.[index] ?? null, instance.reliefTextures?.[index] ?? null),
         emis: instance.emissiveTextures?.[index] ?? null,
         lm: primitive.uvs2 ? (instance.lightmapTextures?.[index] ?? null) : null,
+        lmHdr: primitive.uvs2 ? (instance.lightmapHdrTextures?.[index] ?? null) : null,
         detail: instance.detailTextures?.[index] ?? null,
         blend: primitive.blend ? (instance.blendTextures?.[index] ?? null) : null,
         relief: instance.reliefTextures?.[index] ?? null,
         normal: primitive.uvs ? (instance.normalTextures?.[index] ?? null) : null,
+        graph: instance.graphTextures?.[index] ?? null,
       };
       const effect = instance.effect ?? null;
       const channels = instance.lightChannels ?? 1;
       const alpha = alphaCode(primitive.material.alphaMode);
       const refract = batchRefracts(primitive, textures, effect);
+      const lod = instance.lod ? instance.lod.meshes.indexOf(instance.mesh) : -1;
       if (alpha >= 2 || refract) {
         const c = primitiveCentre(primitive);
         const m = instance.model;
         const x = m[0]! * c[0] + m[4]! * c[1] + m[8]! * c[2] + m[12]! - eye[0];
         const y = m[1]! * c[0] + m[5]! * c[1] + m[9]! * c[2] + m[13]! - eye[1];
         const z = m[2]! * c[0] + m[6]! * c[1] + m[10]! * c[2] + m[14]! - eye[2];
-        seeThrough.push({ batch: { primitive, geometry, textures, models: [instance.model], effect, channels, alpha, refract, first: 0 }, distance: x * x + y * y + z * z });
+        seeThrough.push({ batch: { primitive, geometry, textures, models: [instance.model], effect, channels, alpha, refract, first: 0, lod }, distance: x * x + y * y + z * z });
         instanceCount += 1;
         return;
       }
       let list = byPrimitive.get(primitive);
       if (!list) byPrimitive.set(primitive, (list = []));
-      let batch = list.find((b) => b.effect === effect && b.channels === channels && sameTextures(b.textures, textures));
+      const chain = lodSiblings && instance.lod && lodSiblings.has(instance.lod) && lod >= 0 ? instance.lod : null;
+      const alone = clusters && primitive.clusterLod !== undefined;
+      let batch = alone ? undefined : list.find((b) => b.effect === effect && b.channels === channels && sameTextures(b.textures, textures) && (b.lodChain ?? null) === chain);
       if (!batch) {
-        batch = { primitive, geometry, textures, models: [], effect, channels, alpha, refract, first: 0 };
+        batch = { primitive, geometry, textures, models: [], effect, channels, alpha, refract, first: 0, lod, ...(chain ? { lodChain: chain } : {}) };
         list.push(batch);
         batches.push(batch);
+        if (chain) chained.push({ batch, mesh: instance.mesh, index });
       }
       batch.models.push(instance.model);
       instanceCount += 1;
+    });
+  }
+  // The chains' other levels (F0e): the same primitive of each level's mesh, sharing the batch's copies.
+  for (const { batch, mesh, index } of chained) {
+    const chain = batch.lodChain!;
+    chain.meshes.forEach((level, k) => {
+      if (level === mesh) return;
+      const primitive = level.primitives[index];
+      const geometry = geometryOf(level)[index];
+      if (!primitive || !geometry || geometry.indexCount === 0) return;
+      if (alphaCode(primitive.material.alphaMode) !== batch.alpha) return;
+      // A level with maps of its own (an impostor's atlas, F6b) binds them; else its copies' own.
+      const own = chain.textures?.[k]?.[index];
+      batches.push({ ...batch, primitive, geometry, lod: k, source: batch, ...(own ? { textures: { ...batch.textures, base: own } } : {}) });
     });
   }
   // See-through copies after the opaque scene, farthest first.

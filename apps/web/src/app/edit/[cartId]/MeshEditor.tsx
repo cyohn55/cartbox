@@ -16,8 +16,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import {
+  MAX_SKY_PANORAMA_CHARS,
   Ragdoll,
   applyMeshVariant,
+  bytesToBase64,
+  defaultProceduralSky,
+  defaultSceneLighting,
+  setSceneSky,
   boxSelect,
   combineSelection,
   convertSelection,
@@ -86,6 +91,7 @@ import {
   readMeshEntry,
   type MeshSidecar,
   type MeshTransform,
+  addCredit,
 } from "@/lib/meshSidecar";
 import { withAutoLods, withEditedGeometry } from "@/lib/meshLods";
 import { describeContract, replaceModel, replacementContract } from "@/lib/meshReplace";
@@ -112,12 +118,14 @@ import { importMeshFile, importSummary, decodeImage, decodeMeshTextures } from "
 import { loadKtx2Encoder } from "@/lib/ktx2Encoder";
 import { loadMikkTSpace } from "@/lib/mikktspace";
 import { loadKtx2Decoder } from "@/lib/ktx2Decoder";
-import { KTX2_TRANSCODER_TRANSFER_BYTES, encodePngInBrowser, hasKtx2, sceneHasKtx2, settleKtx2Textures, compressMeshTextures } from "@/lib/ktx2Policy";
+import { KTX2_TRANSCODER_TRANSFER_BYTES, encodePngInBrowser, hasKtx2, sceneHasKtx2, settleKtx2Textures, compressMeshTextures, type TexturePlatform } from "@/lib/ktx2Policy";
 import { fetchLibraryMesh } from "@/lib/libraryClient";
 import type { LibraryAsset } from "@/lib/libraryManifest";
 import styles from "./editor.module.css";
 import { RailGroup, RailHint, SegmentedControl } from "./railControls";
 import { LibraryBrowser } from "./LibraryBrowser";
+import { ExternalLibraryBrowser } from "./ExternalLibraryBrowser";
+import { externalCredit, importExternalHdri, importExternalMaterial, importExternalMesh, type ExternalAsset, type ExternalKind, type ExternalResolution } from "@/lib/externalLibraries";
 import { MaterialEditor } from "./MaterialEditor";
 import { FaceEditPanel, type PickedFace } from "./FaceEditPanel";
 import { ModelingPanel } from "./ModelingPanel";
@@ -125,6 +133,9 @@ import { drawBrush, drawGizmo, drawHeatMap, drawModelOverlay, drawSkeleton, gizm
 import { PosePanel, WeightPaintPanel, type BrushSettings } from "./RiggingPanels";
 import { DopeSheet } from "./DopeSheet";
 import { TexturePaintPanel, useTexturePaint } from "./TexturePaintPanel";
+import { SmartMaterialPanel } from "./SmartMaterialPanel";
+import { AssetCheckPanel } from "./AssetCheckPanel";
+import { LookDevPanel } from "./LookDevPanel";
 import { BakePanel } from "./BakePanel";
 import { AnimatorPanel } from "./AnimatorPanel";
 import { LightingEditor } from "./LightingEditor";
@@ -283,6 +294,8 @@ export function MeshEditor({ sidecar, onSidecarChange, code, onStartPlay, modern
   const [note, setNote] = useState<string | null>(null);
   const [textures, setTextures] = useState<(DecodedTexture | null)[] | null>(null);
   const [libraryOpen, setLibraryOpen] = useState(false);
+  // The CC0 libraries beyond the Cartbox catalogue (F9f): which kind is being browsed, if any.
+  const [externalKind, setExternalKind] = useState<ExternalKind | null>(null);
   /** "solo" previews the selected mesh alone; "scene" composes every instance. */
   const [view, setView] = useState<"solo" | "scene">("solo");
   /** The Terrain panel's tool and brush (EP10); a tool up turns the scene view's left button into a brush. */
@@ -1047,8 +1060,10 @@ export function MeshEditor({ sidecar, onSidecarChange, code, onStartPlay, modern
    * Read model files the way an import does: parsed, KTX2 settled, textures
    * compressed — the asset ready to place, and what happened to its textures.
    */
+  /** The platform imported textures are compressed for (F9d). */
+  const [texturePlatform, setTexturePlatform] = useState<TexturePlatform>("desktop");
   const prepareImport = async (all: File[]) => {
-    const primary = all.find((file) => /\.(obj|glb|gltf)$/i.test(file.name)) ?? all[0]!;
+    const primary = all.find((file) => /\.(obj|glb|gltf|fbx|usda|usdz|usd|cbpk)$/i.test(file.name)) ?? all[0]!;
     const read = await importMeshFile(primary, all.filter((file) => file !== primary));
     // Normal maps decode in the frame they were baked in (F1c): MikkTSpace where the file has no tangents.
     const parsed = read.primitives.some(needsTangents) ? withMeshTangents(read, await loadMikkTSpace()) : read;
@@ -1066,6 +1081,7 @@ export function MeshEditor({ sidecar, onSidecarChange, code, onStartPlay, modern
       sceneHasKtx2: sceneKtx2 || settled.outcome === "kept",
       decode: (image, raw) => decodeImage(image.bytes, image.mime, raw),
       encoder: loadKtx2Encoder,
+      platform: texturePlatform,
     });
     return { mesh: compressed.mesh, settled, compressed };
   };
@@ -1148,6 +1164,31 @@ export function MeshEditor({ sidecar, onSidecarChange, code, onStartPlay, modern
       `Inserted “${asset.name}” from the library — ${meshTriangleCount(mesh).toLocaleString()} triangles.`,
     );
     setLibraryOpen(false);
+  };
+
+  /** Import from a CC0 library (F9f): a model as a new object, a material onto the selected one, an HDRI as the sky; its credit kept. */
+  const importExternal = async (asset: ExternalAsset, resolution: ExternalResolution) => {
+    const fetchImpl = (url: string) => fetch(url);
+    let next: typeof sidecar;
+    if (asset.kind === "mesh") {
+      const mesh = await importExternalMesh(asset, fetchImpl, resolution);
+      const added = addMesh(sidecar, mesh, asset.name);
+      next = withAutoLods(added.sidecar, added.id);
+      setSelectedId(added.id);
+    } else if (asset.kind === "material") {
+      if (!selectedEntry || !meshAsset) return;
+      const material = await importExternalMaterial(asset, fetchImpl, resolution);
+      next = setMeshAsset(sidecar, selectedEntry.id, { ...meshAsset, primitives: meshAsset.primitives.map((p) => ({ ...p, material })) });
+    } else {
+      const { mime, bytes } = await importExternalHdri(asset, fetchImpl, resolution);
+      const data = bytesToBase64(bytes);
+      if (data.length > MAX_SKY_PANORAMA_CHARS) throw new Error("That HDRI is too large at this resolution: try 1k.");
+      const lighting = sidecar.lighting ?? defaultSceneLighting();
+      const sky = lighting.sky ?? defaultProceduralSky();
+      next = setMeshLighting(sidecar, setSceneSky(lighting, { ...sky, panorama: { mime, data, exposure: 1, yaw: 0 } }));
+    }
+    onSidecarChange(addCredit(next, externalCredit(asset)));
+    setNote(`Imported “${asset.name}” from ${asset.provenance.source} (CC0).`);
   };
 
   const updateTransform = (patch: Partial<MeshTransform>) => {
@@ -1242,11 +1283,20 @@ export function MeshEditor({ sidecar, onSidecarChange, code, onStartPlay, modern
               </span>
               Browse library
             </button>
+            <button type="button" className={styles.toolBtn} onClick={() => setExternalKind("mesh")} title="Search Poly Haven's CC0 models and import one">
+              CC0 models…
+            </button>
+            <button type="button" className={styles.toolBtn} disabled={!selectedEntry} onClick={() => setExternalKind("material")} title="Search Poly Haven or ambientCG for a CC0 material and put it on the selected object">
+              CC0 materials…
+            </button>
+            <button type="button" className={styles.toolBtn} onClick={() => setExternalKind("hdri")} title="Search Poly Haven or ambientCG for a CC0 HDRI and make it the sky">
+              CC0 HDRIs…
+            </button>
           </div>
           <input
             ref={fileRef}
             type="file"
-            accept=".obj,.glb,.gltf,.mtl"
+            accept=".obj,.glb,.gltf,.mtl,.fbx,.usda,.usdz,.ply,.cbpk"
             multiple
             hidden
             onChange={(event) => {
@@ -1254,7 +1304,14 @@ export function MeshEditor({ sidecar, onSidecarChange, code, onStartPlay, modern
               event.target.value = "";
             }}
           />
-          <RailHint>OBJ, glTF, or GLB (meshopt- and Draco-compressed too), with its skeleton, clips, PBR maps and material sets; maps are compressed to KTX2 when that is lighter. For OBJ, select its .mtl alongside to keep colours. See BLENDER_WORKFLOW.md.</RailHint>
+          <label style={{ fontSize: 12, display: "flex", gap: 6, alignItems: "center" }} title="How imported maps are compressed: a desktop's take UASTC colour up to 8K; a phone's take ETC1S colour, every map held to 2048 across">
+            Textures for
+            <select aria-label="Texture platform" value={texturePlatform} onChange={(e) => setTexturePlatform(e.target.value as TexturePlatform)}>
+              <option value="desktop">Desktop</option>
+              <option value="mobile">Mobile</option>
+            </select>
+          </label>
+          <RailHint>OBJ, glTF, GLB (meshopt- and Draco-compressed too), FBX, USDA/USDZ or a .cbpk package, with its skeleton, clips, PBR maps and material sets; maps are compressed to KTX2 for the platform when that is lighter. For OBJ, select its .mtl alongside to keep colours. See BLENDER_WORKFLOW.md.</RailHint>
           {note && <RailHint>{note}</RailHint>}
         </RailGroup>
 
@@ -1527,6 +1584,12 @@ export function MeshEditor({ sidecar, onSidecarChange, code, onStartPlay, modern
 
             {meshAsset && <BakePanel mesh={meshAsset} onBaked={applyGeometryEdit} />}
 
+            {meshAsset && <SmartMaterialPanel mesh={meshAsset} onEdit={applyGeometryEdit} />}
+
+            {meshAsset && <AssetCheckPanel mesh={meshAsset} />}
+
+            {meshAsset && <LookDevPanel mesh={meshAsset} environment={sidecar.lighting ? sceneLightingEnvironment(sidecar.lighting) : null} />}
+
             {meshAsset && texturing && <TexturePaintPanel mesh={meshAsset} set={variant ?? null} paint={paint} onEdit={applyGeometryEdit} />}
 
             {meshAsset && (
@@ -1555,7 +1618,7 @@ export function MeshEditor({ sidecar, onSidecarChange, code, onStartPlay, modern
                   Replace from file…
                   <input
                     type="file"
-                    accept=".obj,.glb,.gltf,.mtl"
+                    accept=".obj,.glb,.gltf,.mtl,.fbx,.usda,.usdz,.ply,.cbpk"
                     multiple
                     hidden
                     onChange={(event) => {
@@ -1650,6 +1713,7 @@ export function MeshEditor({ sidecar, onSidecarChange, code, onStartPlay, modern
         kinds={["mesh"]}
         onInsert={insertFromLibrary}
       />
+      <ExternalLibraryBrowser open={externalKind !== null} onClose={() => setExternalKind(null)} kind={externalKind ?? "mesh"} onImport={importExternal} />
     </div>
   );
 }

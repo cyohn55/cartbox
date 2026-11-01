@@ -57,6 +57,23 @@ import {
   updateSceneEnvironment,
   updateSceneLight,
   type ProceduralSky,
+  type AtmosphereSettings,
+  type CloudSettings,
+  CLOUD_DEFAULTS,
+  type WeatherSettings,
+  WEATHER_DEFAULTS,
+  type VolumetricFogSettings,
+  type DynamicGiSettings,
+  type ScreenSpaceGiSettings,
+  decodeExr,
+  decodeKtx2Hdr,
+  encodeRadianceHdr,
+  iesProfile,
+  type PhysicalCameraSettings,
+  type ExposureMode,
+  type MeteringMode,
+  cameraEv100,
+  resolvePhysicalCamera,
   type ReflectionProbe,
   type SceneFog,
   type SceneLight,
@@ -254,7 +271,10 @@ export function LightingEditor({ lighting, onChange }: LightingEditorProps) {
 
       <SkyDomeControls lighting={lighting} onChange={onChange} />
       <FogControls lighting={lighting} onChange={onChange} />
+      <DynamicGiControls lighting={lighting} onChange={onChange} />
+      <CameraControls lighting={lighting} onChange={onChange} />
       <WindControls lighting={lighting} onChange={onChange} />
+      <WeatherControls lighting={lighting} onChange={onChange} />
       <ShaftControls lighting={lighting} onChange={onChange} />
       <ProbeControls lighting={lighting} onChange={onChange} />
       <PostVolumeControls lighting={lighting} onChange={onChange} />
@@ -550,6 +570,32 @@ export function LightingEditor({ lighting, onChange }: LightingEditorProps) {
                   { id: "on", label: "Cast", hint: "This light throws shadows (it needs a range); a spot takes one shadow map, a point light six" },
                 ]}
               />
+              <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
+                <label className={styles.toolBtn} title="A real fixture's light distribution (an IESNA LM-63 .ies file): the AAA tier shapes this light by it about its axis">
+                  {light.ies ? "Replace IES…" : "IES profile…"}
+                  <input
+                    type="file"
+                    accept=".ies"
+                    style={{ display: "none" }}
+                    aria-label={`Light ${index + 1} IES profile`}
+                    onChange={async (event) => {
+                      const file = event.target.files?.[0];
+                      event.target.value = "";
+                      if (!file) return;
+                      try {
+                        onChange(updateSceneLight(lighting, index, { ies: iesProfile(await file.text()) }));
+                      } catch {
+                        // Not a profile: leave the light as it was.
+                      }
+                    }}
+                  />
+                </label>
+                {light.ies && (
+                  <button type="button" className={styles.toolBtn} onClick={() => onChange(updateSceneLight(lighting, index, { ies: undefined }))}>
+                    {light.ies.label ? `${light.ies.label} ✕` : "Clear IES ✕"}
+                  </button>
+                )}
+              </div>
               </>
               )}
               {light.kind === "spot" && (
@@ -693,7 +739,8 @@ function TintControls({ lighting, onChange }: LightingEditorProps & { lighting: 
 
 /**
  * The procedural sky dome: a baked panorama (clouds + mountain rings) drawn
- * behind a first-person view and used as the image-based light. The rig stores
+ * behind a first-person view and used as the image-based light, or a physical
+ * atmosphere (AAA_FIDELITY_ROADMAP.md F5a) lit by the key light. The rig stores
  * only these parameters; the runtime bakes the pixels at load.
  */
 function SkyDomeControls({ lighting, onChange }: LightingEditorProps & { lighting: SceneLighting }) {
@@ -705,14 +752,20 @@ function SkyDomeControls({ lighting, onChange }: LightingEditorProps & { lightin
       <SegmentedControl
         label="Sky dome"
         ariaLabel="Sky dome"
-        selected={sky ? "on" : "off"}
-        onSelect={(id) => onChange(setSceneSky(lighting, id === "on" ? (sky ?? defaultProceduralSky()) : null))}
+        selected={!sky ? "off" : sky.atmosphere ? "physical" : "on"}
+        onSelect={(id) => {
+          if (id === "off") return onChange(setSceneSky(lighting, null));
+          const { atmosphere: _atmosphere, ...painted } = sky ?? defaultProceduralSky();
+          onChange(setSceneSky(lighting, id === "physical" ? { ...painted, atmosphere: sky?.atmosphere ?? {} } : painted));
+        }}
         options={[
           { id: "off", label: "Gradient" },
           { id: "on", label: "Mountains" },
+          { id: "physical", label: "Physical", hint: "A physically based atmosphere lit by the key light, which it tints by the air between: blue at noon, orange at sunset. It lights the scene and the bake too" },
         ]}
       />
-      {sky && (
+      {sky?.atmosphere && <AtmosphereControls settings={sky.atmosphere} patch={(atmosphere) => patch({ atmosphere })} />}
+      {sky && !sky.atmosphere && (
         <>
           <ColorRow label="Zenith" value={sky.zenith} onChange={(zenith) => patch({ zenith })} />
           <ColorRow label="Sky horizon" value={sky.horizon} onChange={(horizon) => patch({ horizon })} />
@@ -778,8 +831,66 @@ function SkyDomeControls({ lighting, onChange }: LightingEditorProps & { lightin
   );
 }
 
+/** A physical atmosphere's settings (F5a): each against Earth's, which is where they start. */
+function AtmosphereControls({ settings, patch }: { settings: AtmosphereSettings; patch: (next: AtmosphereSettings) => void }) {
+  const set = (key: keyof AtmosphereSettings, value: number) => patch({ ...settings, [key]: value });
+  return (
+    <>
+      <RailHint>The sun is the key light: aim it and set its brightness under Lights. 1 is Earth&apos;s for each of these.</RailHint>
+      <RangeControl label="Air (Rayleigh)" nested min={0} max={4} step={0.05} value={settings.rayleigh ?? 1} ariaLabel="Rayleigh scattering" display={`×${(settings.rayleigh ?? 1).toFixed(2)}`} onChange={(v) => set("rayleigh", v)} />
+      <RangeControl label="Haze (Mie)" nested min={0} max={20} step={0.1} value={settings.mie ?? 1} ariaLabel="Mie scattering" display={`×${(settings.mie ?? 1).toFixed(1)}`} onChange={(v) => set("mie", v)} />
+      <RangeControl label="Ozone" nested min={0} max={4} step={0.05} value={settings.ozone ?? 1} ariaLabel="Ozone" display={`×${(settings.ozone ?? 1).toFixed(2)}`} onChange={(v) => set("ozone", v)} />
+      <RangeControl label="Sun glow" nested min={0} max={0.95} step={0.01} value={settings.mieAnisotropy ?? 0.8} ariaLabel="Mie anisotropy" display={(settings.mieAnisotropy ?? 0.8).toFixed(2)} onChange={(v) => set("mieAnisotropy", v)} />
+      <RangeControl label="Ground albedo" nested min={0} max={1} step={0.01} value={settings.groundAlbedo ?? 0.3} ariaLabel="Ground albedo" display={(settings.groundAlbedo ?? 0.3).toFixed(2)} onChange={(v) => set("groundAlbedo", v)} />
+      <RangeControl label="Altitude" nested min={0} max={8000} step={50} value={settings.altitude ?? 0} ariaLabel="Altitude" display={`${Math.round(settings.altitude ?? 0)} m`} onChange={(v) => set("altitude", v)} />
+      <RangeControl label="Sun size" nested min={0.1} max={5} step={0.05} value={settings.sunSize ?? 0.545} ariaLabel="Sun angular diameter" display={`${(settings.sunSize ?? 0.545).toFixed(2)}°`} onChange={(v) => set("sunSize", v)} />
+      <RangeControl label="Aerial distance" nested min={0} max={50} step={0.5} value={settings.aerialScale ?? 1} ariaLabel="Aerial perspective distance scale" display={(settings.aerialScale ?? 1) === 0 ? "Off" : `×${(settings.aerialScale ?? 1).toFixed(1)}`} onChange={(v) => set("aerialScale", v)} />
+      <RangeControl label="Moon" nested min={0} max={1000} step={1} value={settings.moon ?? 1} ariaLabel="Moon brightness" display={(settings.moon ?? 1) === 0 ? "None" : `×${Math.round(settings.moon ?? 1)}`} onChange={(v) => set("moon", v)} />
+      <RangeControl label="Stars" nested min={0} max={1000} step={1} value={settings.stars ?? 1} ariaLabel="Star brightness" display={(settings.stars ?? 1) === 0 ? "None" : `×${Math.round(settings.stars ?? 1)}`} onChange={(v) => set("stars", v)} />
+      <RailHint>The moon stands opposite the sun (full) and lights the scene once the sun has set; ×1 is the real moon and stars, which want eye adaptation (or a raised exposure) to be seen.</RailHint>
+      <RailHint>Aerial distance hazes the scene by the air between it and the eye (AAA tier). At ×1 a metre is a metre, so only kilometres haze over; more lays a landscape&apos;s haze over a small map.</RailHint>
+      <VolumetricCloudControls clouds={settings.clouds ?? null} patch={(clouds) => patch({ ...settings, clouds: clouds ?? undefined })} />
+    </>
+  );
+}
+
+/** A physical sky's volumetric cloud layer (F5c): off, or its cover, height, depth, density, kind, size, wind and shadows. */
+function VolumetricCloudControls({ clouds, patch }: { clouds: CloudSettings | null; patch: (next: CloudSettings | null) => void }) {
+  const on = clouds !== null;
+  const c = { ...CLOUD_DEFAULTS, ...(clouds ?? {}) };
+  const set = (key: keyof CloudSettings, value: number) => patch({ ...(clouds ?? {}), [key]: value });
+  return (
+    <>
+      <SegmentedControl
+        label="Clouds"
+        ariaLabel="Volumetric clouds"
+        selected={on ? "on" : "off"}
+        onSelect={(v) => patch(v === "on" ? (clouds ?? {}) : null)}
+        options={[
+          { id: "off", label: "Clear", hint: "No cloud layer in the air" },
+          { id: "on", label: "Volumetric", hint: "A raymarched cloud layer in the physical sky, with its shadows" },
+        ]}
+      />
+      {on && (
+        <>
+          <RangeControl label="Cover" nested min={0} max={1} step={0.01} value={c.coverage} ariaLabel="Cloud cover" display={`${Math.round(c.coverage * 100)}%`} onChange={(v) => set("coverage", v)} />
+          <RangeControl label="Base" nested min={0.1} max={8} step={0.1} value={c.base} ariaLabel="Cloud base height" display={`${c.base.toFixed(1)} km`} onChange={(v) => set("base", v)} />
+          <RangeControl label="Depth" nested min={0.1} max={6} step={0.1} value={c.thickness} ariaLabel="Cloud layer depth" display={`${c.thickness.toFixed(1)} km`} onChange={(v) => set("thickness", v)} />
+          <RangeControl label="Density" nested min={1} max={200} step={1} value={c.density} ariaLabel="Cloud density" display={`${Math.round(c.density)}/km`} onChange={(v) => set("density", v)} />
+          <RangeControl label="Kind" nested min={0} max={1} step={0.01} value={c.type} ariaLabel="Cloud kind, stratus to cumulus" display={c.type < 0.3 ? "Stratus" : c.type < 0.7 ? "Mixed" : "Cumulus"} onChange={(v) => set("type", v)} />
+          <RangeControl label="Size" nested min={2} max={60} step={1} value={c.scale} ariaLabel="Cloud feature size" display={`${Math.round(c.scale)} km`} onChange={(v) => set("scale", v)} />
+          <RangeControl label="Wind" nested min={0} max={60} step={1} value={c.windSpeed} ariaLabel="Cloud wind speed" display={`${Math.round(c.windSpeed)} m/s`} onChange={(v) => set("windSpeed", v)} />
+          <RangeControl label="Wind toward" nested min={0} max={359} step={1} value={((c.windDirection % 360) + 360) % 360} ariaLabel="Cloud wind direction" display={`${Math.round(((c.windDirection % 360) + 360) % 360)}°`} onChange={(v) => set("windDirection", v)} />
+          <RangeControl label="Shadows" nested min={0} max={1} step={0.01} value={c.shadows} ariaLabel="Cloud shadow strength" display={`${Math.round(c.shadows * 100)}%`} onChange={(v) => set("shadows", v)} />
+          <RailHint>Raymarched through the air on the AAA tier, at half resolution and refined over a few frames. Their shadow dims the sun on every tier as they pass over.</RailHint>
+        </>
+      )}
+    </>
+  );
+}
+
 /** The file types a sky panorama may be, by extension. */
-const PANORAMA_TYPES: Record<string, string> = { png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", hdr: "image/vnd.radiance" };
+const PANORAMA_TYPES: Record<string, string> = { png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", hdr: "image/vnd.radiance", exr: "image/x-exr", ktx2: "image/ktx2" };
 
 /**
  * An imported sky (HALO_INFINITE_STYLE_ROADMAP.md I6): an equirectangular PNG,
@@ -796,18 +907,29 @@ function SkyPanoramaControls({ sky, patch }: { sky: ProceduralSky; patch: (next:
           {panorama ? "Replace panorama…" : "Import panorama…"}
           <input
             type="file"
-            accept=".png,.jpg,.jpeg,.hdr"
+            accept=".png,.jpg,.jpeg,.hdr,.exr,.ktx2"
             style={{ display: "none" }}
             onChange={async (event) => {
               const file = event.target.files?.[0];
               event.target.value = "";
               if (!file) return;
               const mime = PANORAMA_TYPES[file.name.split(".").pop()?.toLowerCase() ?? ""];
-              if (!mime) return setError("Use a .png, .jpg or .hdr panorama.");
-              const data = bytesToBase64(new Uint8Array(await file.arrayBuffer()));
+              if (!mime) return setError("Use a .png, .jpg, .hdr, .exr or float .ktx2 panorama.");
+              let bytes: Uint8Array = new Uint8Array(await file.arrayBuffer());
+              let stored = mime;
+              // OpenEXR and float KTX2 (F9d) travel as the Radiance HDR the sky reads.
+              if (mime === "image/x-exr" || mime === "image/ktx2") {
+                try {
+                  bytes = encodeRadianceHdr(mime === "image/x-exr" ? await decodeExr(bytes) : decodeKtx2Hdr(bytes));
+                  stored = "image/vnd.radiance";
+                } catch (e) {
+                  return setError(e instanceof Error ? e.message : "That panorama couldn't be read.");
+                }
+              }
+              const data = bytesToBase64(bytes);
               if (data.length > MAX_SKY_PANORAMA_CHARS) return setError("That panorama is too large (about 6 MB at most).");
               setError(null);
-              patch({ panorama: { mime, data, exposure: 1, yaw: 0 } });
+              patch({ panorama: { mime: stored, data, exposure: 1, yaw: 0 } });
             }}
           />
         </label>
@@ -941,6 +1063,40 @@ function WindControls({ lighting, onChange }: LightingEditorProps & { lighting: 
   );
 }
 
+/** The weather (F5e): wet, puddled and snowy surfaces where the sky reaches, and rain and snow falling (AAA tier). */
+function WeatherControls({ lighting, onChange }: LightingEditorProps & { lighting: SceneLighting }) {
+  const weather = lighting.weather ?? null;
+  const w = { ...WEATHER_DEFAULTS, ...(weather ?? {}) };
+  const set = (key: keyof WeatherSettings, value: number) => onChange(patchSceneLighting(lighting, { weather: { ...(weather ?? {}), [key]: value } }));
+  const pct = (v: number) => `${Math.round(v * 100)}%`;
+  return (
+    <>
+      <SegmentedControl
+        label="Weather"
+        ariaLabel="Weather"
+        selected={weather ? "on" : "off"}
+        onSelect={(id) => onChange(patchSceneLighting(lighting, { weather: id === "on" ? (weather ?? { wetness: 0.6, puddles: 0.35, rain: 0.6 }) : null }))}
+        options={[
+          { id: "off", label: "Dry" },
+          { id: "on", label: "Weather" },
+        ]}
+      />
+      {weather && (
+        <>
+          <RangeControl label="Wetness" nested min={0} max={1} step={0.01} value={w.wetness} ariaLabel="Surface wetness" display={pct(w.wetness)} onChange={(v) => set("wetness", v)} />
+          <RangeControl label="Puddles" nested min={0} max={1} step={0.01} value={w.puddles} ariaLabel="Puddles" display={pct(w.puddles)} onChange={(v) => set("puddles", v)} />
+          <RangeControl label="Rain" nested min={0} max={1} step={0.01} value={w.rain} ariaLabel="Rain" display={pct(w.rain)} onChange={(v) => set("rain", v)} />
+          <RangeControl label="Snow cover" nested min={0} max={1} step={0.01} value={w.snow} ariaLabel="Snow cover" display={pct(w.snow)} onChange={(v) => set("snow", v)} />
+          <RangeControl label="Snowfall" nested min={0} max={1} step={0.01} value={w.snowfall} ariaLabel="Snowfall" display={pct(w.snowfall)} onChange={(v) => set("snowfall", v)} />
+          <RangeControl label="Snow line" nested min={-50} max={200} step={1} value={Math.max(-50, w.snowLine)} ariaLabel="Snow line height" display={w.snowLine <= -50 ? "Everywhere" : `${Math.round(w.snowLine)} m`} onChange={(v) => set("snowLine", v <= -50 ? -1000 : v)} />
+          <RangeControl label="Patch size" nested min={0.5} max={20} step={0.5} value={w.scale} ariaLabel="Puddle and snow patch size" display={`${w.scale.toFixed(1)} m`} onChange={(v) => set("scale", v)} />
+          <RailHint>Surfaces the sky can&apos;t see (under a roof, in the light map&apos;s shelter) stay dry and bare. Shown on the AAA tier; rain and snow fall as GPU particles round the camera.</RailHint>
+        </>
+      )}
+    </>
+  );
+}
+
 /** Distance fog over PBR geometry, faded in display space after tone mapping. */
 function FogControls({ lighting, onChange }: LightingEditorProps & { lighting: SceneLighting }) {
   const fog = lighting.fog ?? null;
@@ -1001,6 +1157,177 @@ function FogControls({ lighting, onChange }: LightingEditorProps & { lighting: S
             onChange={(max) => patch({ max })}
           />
           <FogLayerControls fog={fog} patch={patch} />
+          <VolumetricFogControls fog={fog} patch={patch} />
+        </>
+      )}
+    </>
+  );
+}
+
+/**
+ * Real-time GI (AAA_FIDELITY_ROADMAP.md F3e): on the AAA tier a probe volume
+ * traced and relit every frame, so moving lights and a time of day bounce
+ * without a bake; light-mapped surfaces take it too while it is on.
+ */
+function DynamicGiControls({ lighting, onChange }: LightingEditorProps & { lighting: SceneLighting }) {
+  const gi = lighting.dynamicGi ?? null;
+  const set = (next: Partial<DynamicGiSettings>) => gi && onChange({ ...lighting, dynamicGi: { ...gi, ...next } });
+  // Screen-space GI (F3e-2): on unless the rig turns it off.
+  const ssgi = lighting.screenSpaceGi ?? null;
+  const ssgiOn = ssgi?.enabled !== false;
+  const setSsgi = (next: Partial<ScreenSpaceGiSettings>) => onChange({ ...lighting, screenSpaceGi: { ...(ssgi ?? {}), ...next } });
+  return (
+    <>
+      <SegmentedControl
+        label="Global illumination (AAA)"
+        ariaLabel="Global illumination"
+        selected={gi ? "live" : "baked"}
+        onSelect={(id) => onChange({ ...lighting, dynamicGi: id === "live" ? (gi ?? {}) : null })}
+        options={[
+          { id: "baked", label: "Baked" },
+          { id: "live", label: "Real-time", hint: "On the AAA tier, probes are traced through the still scene every frame, so light that moves bounces without a bake. A baked probe volume is its starting point; light maps step aside while it is on" },
+        ]}
+      />
+      {gi && (
+        <>
+          <RangeControl label="Rays per probe" nested min={16} max={256} step={16} value={gi.rays ?? 64} ariaLabel="GI rays per probe" display={`${gi.rays ?? 64}`} onChange={(rays) => set({ rays })} />
+          <RangeControl label="Steadiness" nested min={0.5} max={0.99} step={0.01} value={gi.hysteresis ?? 0.97} ariaLabel="GI hysteresis" display={(gi.hysteresis ?? 0.97).toFixed(2)} onChange={(hysteresis) => set({ hysteresis })} />
+          <RangeControl label="Probe spacing" nested min={1} max={10} step={0.5} value={gi.spacing ?? 3} ariaLabel="GI probe spacing" display={`${(gi.spacing ?? 3).toFixed(1)} m`} onChange={(spacing) => set({ spacing })} />
+        </>
+      )}
+      <SegmentedControl
+        label="Screen-space GI (AAA)"
+        ariaLabel="Screen-space GI"
+        selected={ssgiOn ? "on" : "off"}
+        onSelect={(id) => setSsgi({ enabled: id === "on" })}
+        options={[
+          { id: "off", label: "Off" },
+          { id: "on", label: "On", hint: "On the AAA tier, rays across the screen bring back the light nearby surfaces sent last frame, so a lit wall bleeds its colour onto the floor beside it. It fills in the detail the probes are too coarse to hold" },
+        ]}
+      />
+      {ssgiOn && (
+        <>
+          <RangeControl label="Reach" nested min={0.5} max={16} step={0.5} value={ssgi?.radius ?? 4} ariaLabel="Screen-space GI reach" display={`${(ssgi?.radius ?? 4).toFixed(1)} m`} onChange={(radius) => setSsgi({ radius })} />
+          <RangeControl label="Strength" nested min={0} max={4} step={0.05} value={ssgi?.intensity ?? 1} ariaLabel="Screen-space GI strength" display={`×${(ssgi?.intensity ?? 1).toFixed(2)}`} onChange={(intensity) => setSsgi({ intensity })} />
+        </>
+      )}
+    </>
+  );
+}
+
+/**
+ * The physical camera (AAA_FIDELITY_ROADMAP.md F4c): aperture, shutter and ISO
+ * set the exposure (manual) or eye adaptation's metering and compensation
+ * (auto), and on the AAA tier drive bokeh depth of field and motion blur.
+ */
+function CameraControls({ lighting, onChange }: LightingEditorProps & { lighting: SceneLighting }) {
+  const cam = lighting.camera ?? null;
+  const on = cam !== null;
+  const set = (next: Partial<PhysicalCameraSettings>) => onChange({ ...lighting, camera: { ...(cam ?? {}), ...next } });
+  const c = resolvePhysicalCamera(cam);
+  const ev = cameraEv100(c.aperture, c.shutter, c.iso);
+  return (
+    <>
+      <SegmentedControl
+        label="Physical camera"
+        ariaLabel="Physical camera"
+        selected={on ? "on" : "off"}
+        onSelect={(id) => onChange({ ...lighting, camera: id === "on" ? (cam ?? {}) : null })}
+        options={[
+          { id: "off", label: "Off" },
+          { id: "on", label: "On", hint: "Aperture, shutter and ISO set the exposure as a camera's do; on the AAA tier they also drive depth of field and motion blur" },
+        ]}
+      />
+      {on && (
+        <>
+          <SegmentedControl
+            label="Exposure"
+            ariaLabel="Camera exposure mode"
+            selected={c.exposure}
+            onSelect={(id) => set({ exposure: id as ExposureMode })}
+            options={[
+              { id: "auto", label: "Auto", hint: "Eye adaptation meters the frame; compensation shifts it" },
+              { id: "manual", label: "Manual", hint: `Set by aperture, shutter and ISO: EV100 ${ev.toFixed(1)}` },
+            ]}
+          />
+          <RangeControl label="Aperture" nested min={1.2} max={22} step={0.1} value={c.aperture} ariaLabel="Camera aperture" display={`f/${c.aperture.toFixed(1)}`} onChange={(aperture) => set({ aperture })} />
+          <RangeControl label="Shutter" nested min={-13} max={0} step={0.5} value={Math.log2(c.shutter)} ariaLabel="Camera shutter" display={c.shutter >= 0.5 ? `${c.shutter.toFixed(1)} s` : `1/${Math.round(1 / c.shutter)} s`} onChange={(v) => set({ shutter: 2 ** v })} />
+          <RangeControl label="ISO" nested min={Math.log2(50)} max={Math.log2(12800)} step={1 / 3} value={Math.log2(c.iso)} ariaLabel="Camera ISO" display={`${Math.round(c.iso)}`} onChange={(v) => set({ iso: Math.round(2 ** v) })} />
+          {c.exposure === "auto" && (
+            <>
+              <RangeControl label="Compensation" nested min={-4} max={4} step={0.1} value={c.compensation} ariaLabel="Exposure compensation" display={`${c.compensation >= 0 ? "+" : ""}${c.compensation.toFixed(1)} EV`} onChange={(compensation) => set({ compensation })} />
+              <SegmentedControl
+                label="Metering"
+                ariaLabel="Camera metering"
+                selected={c.metering}
+                onSelect={(id) => set({ metering: id as MeteringMode })}
+                options={[
+                  { id: "average", label: "Average" },
+                  { id: "centre", label: "Centre" },
+                  { id: "spot", label: "Spot" },
+                ]}
+              />
+            </>
+          )}
+          <SegmentedControl
+            label="Depth of field (AAA)"
+            ariaLabel="Depth of field"
+            selected={c.depthOfField ? "on" : "off"}
+            onSelect={(id) => set({ depthOfField: id === "on" })}
+            options={[
+              { id: "off", label: "Off" },
+              { id: "on", label: "Bokeh", hint: "What is nearer or farther than the focus blurs as the lens and aperture make it, shaped by the aperture's blades" },
+            ]}
+          />
+          {c.depthOfField && (
+            <>
+              <RangeControl label="Focus" nested min={Math.log2(0.1)} max={Math.log2(500)} step={0.05} value={Math.log2(c.focusDistance)} ariaLabel="Focus distance" display={`${c.focusDistance < 10 ? c.focusDistance.toFixed(2) : Math.round(c.focusDistance)} m`} onChange={(v) => set({ focusDistance: 2 ** v })} />
+              <RangeControl label="Focal length" nested min={8} max={400} step={1} value={c.focalLength} ariaLabel="Focal length" display={`${Math.round(c.focalLength)} mm`} onChange={(focalLength) => set({ focalLength })} />
+              <RangeControl label="Blades" nested min={4} max={9} step={1} value={c.blades === 0 ? 4 : c.blades} ariaLabel="Aperture blades" display={c.blades === 0 ? "round" : `${c.blades}`} onChange={(blades) => set({ blades: blades < 5 ? 0 : blades })} />
+            </>
+          )}
+          <SegmentedControl
+            label="Motion blur (AAA)"
+            ariaLabel="Motion blur"
+            selected={c.motionBlur ? "on" : "off"}
+            onSelect={(id) => set({ motionBlur: id === "on" })}
+            options={[
+              { id: "off", label: "Off" },
+              { id: "on", label: "On", hint: "What moves on screen blurs over the share of the frame the shutter is open" },
+            ]}
+          />
+        </>
+      )}
+    </>
+  );
+}
+
+/**
+ * Volumetric fog (AAA_FIDELITY_ROADMAP.md F5b): on the AAA tier the densities
+ * above become a medium the sun and sky light scatter in, shadowed into
+ * shafts, in place of the fade toward the fog colour (which the other tiers keep).
+ */
+function VolumetricFogControls({ fog, patch }: { fog: SceneFog; patch: (next: Partial<SceneFog>) => void }) {
+  const v = fog.volumetric ?? null;
+  const set = (next: Partial<VolumetricFogSettings>) => v && patch({ volumetric: { ...v, ...next } });
+  return (
+    <>
+      <SegmentedControl
+        label="Volumetric (AAA)"
+        ariaLabel="Volumetric fog"
+        selected={v ? "on" : "off"}
+        onSelect={(id) => patch({ volumetric: id === "on" ? (v ?? {}) : null })}
+        options={[
+          { id: "off", label: "Painted" },
+          { id: "on", label: "Volumetric", hint: "On the AAA tier, the fog's densities become a medium lit by the sun (through its shadows, so shafts of light appear) and the sky. Start and Max don't apply to it; the other tiers keep the painted fade" },
+        ]}
+      />
+      {v && (
+        <>
+          <ColorRow label="Scattering" value={v.albedo ?? [1, 1, 1]} onChange={(albedo) => set({ albedo })} />
+          <RangeControl label="Toward the sun" nested min={-0.5} max={0.95} step={0.01} value={v.anisotropy ?? 0.6} ariaLabel="Fog anisotropy" display={(v.anisotropy ?? 0.6).toFixed(2)} onChange={(anisotropy) => set({ anisotropy })} />
+          <RangeControl label="Reach" nested min={16} max={500} step={4} value={v.distance ?? 96} ariaLabel="Volumetric fog reach" display={`${Math.round(v.distance ?? 96)} m`} onChange={(distance) => set({ distance })} />
+          <RangeControl label="Sky light" nested min={0} max={4} step={0.05} value={v.ambient ?? 1} ariaLabel="Volumetric fog sky light" display={`×${(v.ambient ?? 1).toFixed(2)}`} onChange={(ambient) => set({ ambient })} />
         </>
       )}
     </>
@@ -1331,13 +1658,17 @@ function AutoExposureControls({ lighting, onChange }: LightingEditorProps & { li
 }
 
 /** The overrides a post volume may set, with their ranges and neutral values. */
-const POST_FIELDS: readonly { readonly key: "exposure" | "brightness" | "contrast" | "saturation" | "bloom" | "fog"; readonly label: string; readonly min: number; readonly max: number; readonly step: number; readonly neutral: number }[] = [
+const POST_FIELDS: readonly { readonly key: "exposure" | "brightness" | "contrast" | "saturation" | "bloom" | "fog" | "aperture" | "focusDistance" | "motionBlur"; readonly label: string; readonly min: number; readonly max: number; readonly step: number; readonly neutral: number }[] = [
   { key: "exposure", label: "Exposure (stops)", min: -4, max: 4, step: 0.1, neutral: 0 },
   { key: "brightness", label: "Brightness", min: 0.5, max: 1.5, step: 0.01, neutral: 1 },
   { key: "contrast", label: "Contrast", min: 0.5, max: 1.5, step: 0.01, neutral: 1 },
   { key: "saturation", label: "Saturation", min: 0, max: 2, step: 0.01, neutral: 1 },
   { key: "bloom", label: "Bloom", min: 0, max: 1.5, step: 0.01, neutral: 0.6 },
   { key: "fog", label: "Fog density", min: 0, max: 1, step: 0.01, neutral: 0.35 },
+  // The physical camera's (F4c, the AAA tier): the depth of field's aperture and focus, the motion blur's strength.
+  { key: "aperture", label: "Aperture (f/)", min: 1.2, max: 22, step: 0.1, neutral: 4 },
+  { key: "focusDistance", label: "Focus (m)", min: 0.1, max: 200, step: 0.1, neutral: 5 },
+  { key: "motionBlur", label: "Motion blur", min: 0, max: 2, step: 0.05, neutral: 1 },
 ];
 
 /**

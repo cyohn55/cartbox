@@ -22,7 +22,10 @@ import type { DecodedTexture } from "@cartbox/editor";
 /** What a texture holds, which decides how it is encoded; "light" is a light map: colour, but linear (ETC1S, not sRGB). */
 export type TextureKind = "color" | "light" | "data" | "normal";
 
-export type Ktx2Encode = (texture: DecodedTexture, kind: TextureKind) => Uint8Array | null;
+/** Which Basis codec (F9d's per-platform plan): ETC1S, smallest; or UASTC, near-lossless (BC7 and ASTC on the GPU). */
+export type Ktx2Codec = "etc1s" | "uastc";
+
+export type Ktx2Encode = (texture: DecodedTexture, kind: TextureKind, codec?: Ktx2Codec) => Uint8Array | null;
 
 /** ETC1S quality (1–255) for colour maps. */
 export const KTX2_COLOR_QUALITY = 192;
@@ -43,7 +46,7 @@ export function loadKtx2Encoder(): Promise<Ktx2Encode> {
     ]);
     const basis = await createBasis({ wasmBinary: wasm });
     basis.initializeBasis();
-    return (texture: DecodedTexture, kind: TextureKind) => encodeKtx2(basis, texture, kind);
+    return (texture: DecodedTexture, kind: TextureKind, codec?: Ktx2Codec) => encodeKtx2(basis, texture, kind, codec);
   })();
   loading.catch(() => {
     loading = null;
@@ -52,7 +55,7 @@ export function loadKtx2Encoder(): Promise<Ktx2Encode> {
 }
 
 /** Encode RGBA to a KTX2 file with an initialised Basis encoder module; null when it can't. */
-export function encodeKtx2(basis: any, texture: DecodedTexture, kind: TextureKind): Uint8Array | null {
+export function encodeKtx2(basis: any, texture: DecodedTexture, kind: TextureKind, codec?: Ktx2Codec): Uint8Array | null {
   const { width, height } = texture;
   if (width <= 0 || height <= 0 || width * height > KTX2_MAX_TEXELS) return null;
   const encoder = new basis.BasisEncoder();
@@ -66,7 +69,8 @@ export function encodeKtx2(basis: any, texture: DecodedTexture, kind: TextureKin
     encoder.setKTX2AndBasisSRGBTransferFunc(colour);
     encoder.setPerceptual(colour);
     // A light map is smooth colour: ETC1S holds it well, in linear (its bytes are light, not sRGB).
-    if (colour || kind === "light") {
+    // A colour map ETC1S unless the platform's plan asks for UASTC (F9d); data always UASTC.
+    if ((colour || kind === "light") && codec !== "uastc") {
       encoder.setUASTC(false);
       encoder.setQualityLevel(KTX2_COLOR_QUALITY);
     } else {

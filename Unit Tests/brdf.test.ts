@@ -11,7 +11,7 @@ import { describe, expect, it } from "vitest";
 import { composeModelMatrix, projectionMatrix, viewMatrix, type EnvironmentLight, type MeshAsset, type MeshSceneInstance } from "@cartbox/editor";
 import { WebgpuSceneRenderer } from "@cartbox/player";
 import { sceneShader } from "../packages/player/src/render/WebgpuSceneRenderer";
-import { DFG_SIZE, dfgAt, dfgTable, energyCompensation, integrateDfg, smithVisibility, specularEnergy, specularOcclusion } from "../packages/player/src/render/brdf";
+import { DFG_SIZE, bentSpecularOcclusion, capCoverage, dfgAt, dfgTable, energyCompensation, integrateDfg, smithVisibility, specularConeCos, specularEnergy, specularOcclusion } from "../packages/player/src/render/brdf";
 
 /** The BRDF's hemispherical integral for f0 = 1 (A + B), by brute force over L. */
 function bruteForce(ndv: number, roughness: number, n = 400): number {
@@ -229,5 +229,51 @@ describe.skipIf(!device)("on a real device, in linear light", { timeout: 60_000 
       // A tighter lobe's peak is over 1, and kept: linear light reaches the tone map unclamped.
       if (rough === 0.5) expect(v).toBeGreaterThan(4);
     }
+  });
+});
+
+describe("specular occlusion from a bent normal (F3c, F1c)", () => {
+  it("measures one cone's share inside another", () => {
+    // Inside a wider cone on the same axis: all of it; far apart: none; a cone against itself: all.
+    expect(capCoverage(Math.cos(0.2), Math.cos(0.6), 1)).toBeCloseTo(1, 9);
+    expect(capCoverage(Math.cos(0.2), Math.cos(0.3), Math.cos(1.2))).toBe(0);
+    expect(capCoverage(Math.cos(0.4), Math.cos(0.4), 1)).toBeCloseTo(1, 9);
+    // A wide cone over a narrow one covers the narrow one's share of it.
+    const share = capCoverage(Math.cos(0.6), Math.cos(0.2), 1);
+    expect(share).toBeCloseTo((1 - Math.cos(0.2)) / (1 - Math.cos(0.6)), 6);
+    // Partly overlapping: between, and less the further apart.
+    const a = capCoverage(Math.cos(0.3), Math.cos(0.3), Math.cos(0.2));
+    const b = capCoverage(Math.cos(0.3), Math.cos(0.3), Math.cos(0.4));
+    expect(a).toBeGreaterThan(b);
+    expect(a).toBeLessThan(1);
+    expect(b).toBeGreaterThan(0);
+  });
+
+  it("leaves a reflection into open sky alone and occludes one into a wall", () => {
+    const up: [number, number, number] = [0, 1, 0];
+    // Open sky (visibility 1): the visibility cone is the hemisphere, which takes a glossy lobe whole.
+    expect(bentSpecularOcclusion(up, 1, [0.3, 0.95, 0], 0.05)).toBeCloseTo(1, 6);
+    // Half the sky hidden, its open half toward +x: a reflection toward +x is kept, one toward −x is lost.
+    const bent: [number, number, number] = [0.6, 0.8, 0];
+    const toward = bentSpecularOcclusion(bent, 0.5, [0.6, 0.8, 0], 0.05);
+    const away = bentSpecularOcclusion(bent, 0.5, [-0.8, 0.6, 0], 0.05);
+    expect(toward).toBeGreaterThan(0.95);
+    expect(away).toBeLessThan(0.05);
+    // A rougher lobe is wider, so it straddles the edge: some of it gets through either way.
+    expect(bentSpecularOcclusion(bent, 0.5, [-0.2, 0.98, 0], 0.6)).toBeGreaterThan(0.05);
+    expect(bentSpecularOcclusion(bent, 0.5, [-0.2, 0.98, 0], 0.6)).toBeLessThan(0.95);
+    // The lobe's cone narrows as the surface smooths.
+    expect(specularConeCos(0.01)).toBeGreaterThan(specularConeCos(0.5));
+  });
+
+  it("is what the linear-light shader uses where GTAO has a bent normal, and the coat takes Kelemen's visibility", () => {
+    const code = sceneShader(null, false, true);
+    expect(code).toContain("fn bentSpecularOcclusion(");
+    expect(code).toContain("bentSpecularOcclusion(gt.xyz, gt.w, reflect(-V, N), rough * rough)");
+    expect(code).toContain("D * 0.25 / max(vdh * vdh, 1e-4)");
+    // The byte-space shader keeps Lagarde's fit and the Schlick-Smith coat.
+    const plain = sceneShader(null, false, false);
+    expect(plain).not.toContain("bentSpecularOcclusion(gt.xyz");
+    expect(plain).toContain("(D * G) / (4.0 * ndl * ndv + 1e-4)");
   });
 });

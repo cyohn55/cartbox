@@ -44,6 +44,27 @@ export interface CameraKey {
   readonly fov: number;
   readonly ease: TimelineEase;
   readonly curve?: EaseCurve;
+  /** The lens (F10d, see cinematics.ts): focal length (mm, full frame; sets the field of view), f-stop, focus distance (m). */
+  readonly focalLength?: number;
+  readonly fStop?: number;
+  readonly focus?: number;
+  /** Focus on an object (its distance from the eye) rather than a fixed distance. */
+  readonly focusOn?: string;
+  /** Roll about the view, degrees. */
+  readonly roll?: number;
+  /** How far along the track's rail (0..1) the eye is. */
+  readonly along?: number;
+  /** How much of the track's shake (0..1). */
+  readonly shake?: number;
+}
+
+/** A camera track's film-camera extras (F10d): a rail for the eye, and shake. */
+export interface CameraRig {
+  /** Points of a Catmull-Rom rail the eye rides (keys give how far along). */
+  readonly rail?: readonly V3[];
+  /** Shake amplitude (degrees) and frequency (Hz), scaled by each key's shake. */
+  readonly shakeAmplitude?: number;
+  readonly shakeFrequency?: number;
 }
 
 export interface TransformKey {
@@ -73,7 +94,7 @@ export interface AnimationCue {
 }
 
 export type TimelineTrack =
-  | { readonly kind: "camera"; readonly keys: readonly CameraKey[] }
+  | ({ readonly kind: "camera"; readonly keys: readonly CameraKey[] } & CameraRig)
   | { readonly kind: "object"; readonly object: string; readonly keys: readonly TransformKey[] }
   | { readonly kind: "animation"; readonly object: string; readonly cues: readonly AnimationCue[] }
   | { readonly kind: "events"; readonly events: readonly { readonly time: number; readonly name: string }[] }
@@ -120,6 +141,33 @@ const list = (v: unknown, max: number): Record<string, unknown>[] =>
   Array.isArray(v) ? (v.slice(0, max).filter((x) => typeof x === "object" && x !== null) as Record<string, unknown>[]) : [];
 const byTime = <T extends { time: number }>(items: T[]): T[] => items.sort((a, b) => a.time - b.time);
 
+const opt = (v: unknown, lo: number, hi: number): number | undefined => (typeof v === "number" && Number.isFinite(v) ? Math.max(lo, Math.min(hi, v)) : undefined);
+/** A camera key's optional lens, roll, rail position and shake (only those given). */
+function lensOf(k: Record<string, unknown>): Partial<CameraKey> {
+  const out: Record<string, unknown> = {
+    focalLength: opt(k.focalLength, 4, 1200),
+    fStop: opt(k.fStop, 0.7, 64),
+    focus: opt(k.focus, 0.05, 1e5),
+    focusOn: typeof k.focusOn === "string" && k.focusOn ? k.focusOn.slice(0, 128) : undefined,
+    roll: opt(k.roll, -180, 180),
+    along: opt(k.along, 0, 1),
+    shake: opt(k.shake, 0, 1),
+  };
+  for (const key of Object.keys(out)) if (out[key] === undefined) delete out[key];
+  return out as Partial<CameraKey>;
+}
+/** A camera track's rail and shake (only those given). */
+function rigOf(raw: Record<string, unknown>): CameraRig {
+  const rail = Array.isArray(raw.rail) ? raw.rail.slice(0, TIMELINE_LIMITS.keys).filter((p) => vec(p, [NaN, NaN, NaN]).every(Number.isFinite)).map((p) => vec(p, [0, 0, 0])) : [];
+  const amplitude = opt(raw.shakeAmplitude, 0, 30);
+  const frequency = opt(raw.shakeFrequency, 0.05, 60);
+  return {
+    ...(rail.length >= 2 ? { rail } : {}),
+    ...(amplitude !== undefined ? { shakeAmplitude: amplitude } : {}),
+    ...(frequency !== undefined ? { shakeFrequency: frequency } : {}),
+  };
+}
+
 function readTrack(raw: Record<string, unknown>, duration: number): TimelineTrack | null {
   const time = (v: unknown) => num(v, 0, duration, 0);
   switch (raw.kind) {
@@ -133,8 +181,10 @@ function readTrack(raw: Record<string, unknown>, duration: number): TimelineTrac
             target: vec(k.target, [0, 0, 0]),
             fov: num(k.fov, 5, 150, DEFAULT_TIMELINE_FOV),
             ...easeOf(k),
+            ...lensOf(k),
           })),
         ),
+        ...rigOf(raw),
       };
     case "object": {
       const object = typeof raw.object === "string" && raw.object ? raw.object.slice(0, 128) : null;
@@ -275,9 +325,20 @@ export function sampleCamera(timeline: SceneTimeline, t: number): { eye: V3; tar
   return {
     eye: interpolate(track.keys.map((k) => k.eye), s.i, s.j, s.u, smooth),
     target: interpolate(track.keys.map((k) => k.target), s.i, s.j, s.u, smooth),
-    fov: a.fov + (b.fov - a.fov) * s.u,
+    // A key with a focal length (F10d) sets the field of view by it.
+    fov: keyFov(a) + (keyFov(b) - keyFov(a)) * s.u,
   };
 }
+
+/** The sensor focal lengths are on (F10d): full frame, 36 × 24 mm. */
+export const SENSOR_HEIGHT_MM = 24;
+
+/** The vertical field of view (degrees) of a focal length (mm). */
+export function focalLengthToFov(mm: number): number {
+  return (2 * Math.atan(SENSOR_HEIGHT_MM / (2 * Math.max(1, mm))) * 180) / Math.PI;
+}
+
+const keyFov = (k: CameraKey): number => (k.focalLength !== undefined ? focalLengthToFov(k.focalLength) : k.fov);
 
 /** Every object track's transform at `t` (object id → position, rotation, scale). */
 export function sampleObjects(timeline: SceneTimeline, t: number): Map<string, { position: V3; rotation: V3; scale: V3 }> {

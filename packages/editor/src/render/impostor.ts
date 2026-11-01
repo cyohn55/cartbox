@@ -171,3 +171,84 @@ export function bakeImpostor(mesh: MeshAsset, textures: readonly (DecodedTexture
   const primitive: MeshPrimitive = { positions: Float32Array.from(positions), normals: Float32Array.from(normals), uvs: Float32Array.from(uvs), indices: Uint32Array.from(indices), material };
   return { mesh: { name: `${mesh.name} impostor`, primitives: [primitive] }, width: atlasW, height: cellH };
 }
+
+/** The direction a point of the octahedral map stands for (`u`, `v` in 0..1; +y the octahedron's top). */
+export function octahedralDirection(u: number, v: number): [number, number, number] {
+  const px = u * 2 - 1;
+  const pz = v * 2 - 1;
+  let x = px;
+  let z = pz;
+  const y = 1 - Math.abs(px) - Math.abs(pz);
+  if (y < 0) {
+    x = (1 - Math.abs(pz)) * (px >= 0 ? 1 : -1);
+    z = (1 - Math.abs(px)) * (pz >= 0 ? 1 : -1);
+  }
+  const l = Math.hypot(x, y, z) || 1;
+  return [x / l, y / l, z / l];
+}
+
+/** Where a direction falls on the octahedral map (the inverse of {@link octahedralDirection}, as the AAA shader finds it). */
+export function octahedralUv(d: readonly [number, number, number]): [number, number] {
+  const s = Math.abs(d[0]) + Math.abs(d[1]) + Math.abs(d[2]) || 1;
+  let px = d[0] / s;
+  let pz = d[2] / s;
+  if (d[1] < 0) {
+    const ox = px;
+    px = (1 - Math.abs(pz)) * (ox >= 0 ? 1 : -1);
+    pz = (1 - Math.abs(ox)) * (pz >= 0 ? 1 : -1);
+  }
+  return [px * 0.5 + 0.5, pz * 0.5 + 0.5];
+}
+
+/**
+ * Bake a mesh into an octahedral impostor (AAA_FIDELITY_ROADMAP.md F6b):
+ * `frames` × `frames` views, each from the direction its cell's centre stands
+ * for on the octahedral map ({@link octahedralDirection}), straight on and
+ * unlit, fitting the mesh's bounding sphere, in one square atlas of `size`
+ * pixels a view; on a single quad the AAA tier turns to the eye. Null for a
+ * mesh with no extent.
+ */
+export function bakeOctahedralImpostor(mesh: MeshAsset, textures: readonly (DecodedTexture | null)[] = [], frames = 8, size = 64): { readonly mesh: MeshAsset; readonly atlas: DecodedTexture } | null {
+  const bounds = meshBounds(mesh);
+  if (!bounds) return null;
+  const centre: [number, number, number] = [0, 1, 2].map((k) => (bounds.min[k]! + bounds.max[k]!) / 2) as [number, number, number];
+  const radius = Math.hypot(bounds.max[0] - bounds.min[0], bounds.max[1] - bounds.min[1], bounds.max[2] - bounds.min[2]) / 2;
+  if (!(radius > 0)) return null;
+  const side = frames * size;
+  const atlas = new Uint8ClampedArray(side * side * 4);
+  const bake = { ...mesh, primitives: mesh.primitives.map((p) => ({ ...p, material: unlit(p.material) })) };
+  const reach = radius * 3;
+  const projection = ortho(radius * 2, radius * 2, 0.01, reach * 2);
+  const identity = Float64Array.from([1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]);
+  for (let j = 0; j < frames; j += 1) {
+    for (let i = 0; i < frames; i += 1) {
+      const d = octahedralDirection((i + 0.5) / frames, (j + 0.5) / frames);
+      const eye: [number, number, number] = [centre[0] + d[0] * reach, centre[1] + d[1] * reach, centre[2] + d[2] * reach];
+      // Up is the mesh's up, as the shader's billboard keeps the world's (straight above or below, +z instead).
+      const view = viewMatrix(eye, centre, Math.abs(d[1]) > 0.999 ? [0, 0, d[1] > 0 ? -1 : 1] : [0, 1, 0]);
+      const out = new Uint8ClampedArray(size * size * 4);
+      renderMeshScene([{ mesh: bake, model: identity, textures, emissiveTextures: textures }], { width: size, height: size, out, depth: new Float32Array(size * size), view, projection, background: [0, 0, 0, 0], ambient: 0, lightDirection: [0, 1, 0] });
+      for (let y = 0; y < size; y += 1) atlas.set(out.subarray(y * size * 4, (y + 1) * size * 4), ((j * size + y) * side + i * size) * 4);
+    }
+  }
+  const material: MeshMaterial = {
+    name: `${mesh.name} octahedral impostor`,
+    baseColorFactor: [1, 1, 1, 1],
+    baseColorImage: { mime: "image/png", bytes: encodeRgbaPng(atlas, side, side, { compress: true }) },
+    metallicFactor: 0,
+    roughnessFactor: 0.9,
+    alphaMode: "mask",
+    alphaCutoff: 0.5,
+    octahedral: { frames, radius },
+  };
+  // One quad around the centre, its UVs where in it each corner sits (the shader adds the view's cell).
+  const positions: number[] = [];
+  const uvs: number[] = [];
+  for (const [u, v] of [[0, 1], [1, 1], [1, 0], [0, 0]] as const) {
+    positions.push(centre[0] + (u - 0.5) * 2 * radius, centre[1] + (0.5 - v) * 2 * radius, centre[2]);
+    uvs.push(u, v);
+  }
+  const primitive: MeshPrimitive = { positions: Float32Array.from(positions), normals: Float32Array.from([0, 0, 1, 0, 0, 1, 0, 0, 1, 0, 0, 1]), uvs: Float32Array.from(uvs), indices: Uint32Array.from([0, 1, 2, 0, 2, 3]), material };
+  // The atlas decoded too, so a renderer binds it without decoding the PNG back.
+  return { mesh: { name: `${mesh.name} octahedral impostor`, primitives: [primitive] }, atlas: { width: side, height: side, data: atlas } };
+}

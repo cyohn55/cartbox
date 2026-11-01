@@ -8,6 +8,7 @@
  * each draw's uniforms, so all three agree.
  */
 
+import { parseWaterLook } from "./water";
 import type { EncodedImage, MeshMaterial } from "./MeshAsset";
 import { readMaterialGraph, valueNoise } from "./materialGraph";
 import { encodeRgbaPng } from "./png";
@@ -23,7 +24,7 @@ export const DETAIL_FAR = 12;
 
 type SurfaceEffects = Pick<
   MeshMaterial,
-  "detailScale" | "detailStrength" | "emissiveScroll" | "emissivePulse" | "rim" | "reflectivity" | "reflectionMask" | "blendColor" | "blendRoughness" | "alphaMode" | "alphaCutoff" | "softDepth" | "refraction" | "distortion" | "water" | "triplanar" | "blendSharpness" | "macro" | "farTile" | "graph"
+  "detailScale" | "detailStrength" | "emissiveScroll" | "emissivePulse" | "rim" | "reflectivity" | "reflectionMask" | "blendColor" | "blendRoughness" | "alphaMode" | "alphaCutoff" | "softDepth" | "refraction" | "distortion" | "water" | "triplanar" | "blendSharpness" | "macro" | "farTile" | "graph" | "graphSwitches"
 >;
 
 const finite = (v: unknown): v is number => typeof v === "number" && Number.isFinite(v);
@@ -58,7 +59,7 @@ export function readSurfaceEffects(raw: Record<string, unknown> | object): Surfa
   if (finite(r.distortion) && r.distortion > 0) out.distortion = clamp(r.distortion, 0, 1);
   const water = r.water as Record<string, unknown> | undefined;
   if (water && typeof water === "object" && finite(water.strength) && water.strength > 0 && finite(water.scale) && finite(water.speed) && finite(water.flow)) {
-    out.water = { strength: clamp(water.strength, 0, 2), scale: clamp(water.scale, 0.05, 8), speed: clamp(water.speed, 0, 4), flow: clamp(water.flow, -Math.PI, Math.PI), ...(water.along === true ? { along: true } : {}) };
+    out.water = { strength: clamp(water.strength, 0, 2), scale: clamp(water.scale, 0.05, 8), speed: clamp(water.speed, 0, 4), flow: clamp(water.flow, -Math.PI, Math.PI), ...(water.along === true ? { along: true } : {}), ...(parseWaterLook(water) ?? {}) };
   }
   if (finite(r.triplanar) && r.triplanar > 0) out.triplanar = clamp(r.triplanar, 0.05, 1000);
   if (finite(r.blendSharpness) && r.blendSharpness > 0) out.blendSharpness = clamp(r.blendSharpness, 0, 1);
@@ -69,6 +70,11 @@ export function readSurfaceEffects(raw: Record<string, unknown> | object): Surfa
   if (finite(r.farTile) && r.farTile > 0) out.farTile = clamp(r.farTile, 1, 100000);
   const graph = readMaterialGraph(r.graph);
   if (graph) out.graph = graph;
+  // A material instance's static switches (F1e).
+  if (graph && r.graphSwitches && typeof r.graphSwitches === "object") {
+    const switches = Object.fromEntries(Object.entries(r.graphSwitches as Record<string, unknown>).filter((e): e is [string, boolean] => typeof e[1] === "boolean"));
+    if (Object.keys(switches).length > 0) out.graphSwitches = switches;
+  }
   return out;
 }
 

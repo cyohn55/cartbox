@@ -21,6 +21,7 @@ export type {
   PlayerHandle,
   PlayerOptions,
   ScaleMode,
+  SequenceOptions,
 } from "./types.js";
 export { ConsoleButton } from "./types.js";
 export { CartridgeLoadError } from "./cartridge.js";
@@ -138,6 +139,22 @@ export {
   webgpuCanHonour,
 } from "./render/renderCaps.js";
 export type { FrameState, GpuSceneDraw, SceneDraw, SceneRenderer, SunShadow } from "./render/sceneRenderer.js";
+export { DEFAULT_TEXEL_DENSITY, VIEW_MODES, heat, isDiagnosticView, readViewMode, viewModeCode, type ViewMode } from "./render/viewModes.js";
+export {
+  MAX_CAPTURE_SIDE,
+  PathTracer,
+  REFERENCE_BOUNCES,
+  captureReference,
+  packReferenceScene,
+  type CaptureOptions,
+  type ReferenceCapture,
+  type ReferenceDraw,
+  type ReferenceScene,
+  type ReferenceSettings,
+} from "./render/pathTracer.js";
+export { COLOR_CHECKER, GREY_CARD, LOOK_DEV_RIGS, lookDevStage, turnEnvironment, type LookDevMaps, type LookDevOptions, type LookDevRig, type LookDevStage } from "./render/lookDev.js";
+export { checkLookDev, lookDevDraw, type LookDevCheck } from "./render/lookDevCheck.js";
+export { LookDevView, type LookDevViewOptions } from "./render/lookDevView.js";
 // Presenting the 3D frame from the GPU (AAA_FIDELITY_ROADMAP.md F0a).
 export {
   COMPOSE_UNIFORM_FLOATS,
@@ -153,6 +170,19 @@ export type { PresentBase, PresentFrame, PresentSky, PresentStats } from "./rend
 export { GpuCanvasSurface, framePixels, type CapturedFrame } from "./render/GpuCanvasSurface.js";
 export { createSceneRenderer } from "./render/createSceneRenderer.js";
 export { WebgpuSceneRenderer } from "./render/WebgpuSceneRenderer.js";
+export {
+  LIGHTMAP_MAX_BOUNCES,
+  LIGHTMAP_MAX_LIGHTS,
+  LIGHTMAP_MAX_LOCAL_LIGHTS,
+  bakeLightmapGpu,
+  bakeLights,
+  bakeProbeVolumeGpu,
+  bakeSurfaces,
+  type BakeLight,
+  type GpuLightBakeOptions,
+  type GpuLightmapBake,
+} from "./render/gpuLightmapper.js";
+export { environmentPanorama, environmentSh, shIrradiance, type LinearPanorama } from "./render/ibl.js";
 export { WEBGL_INSTANCES_PER_DRAW, WEBGL_MAX_LIGHTS, WebglSceneRenderer, type GlContextProvider } from "./render/WebglSceneRenderer.js";
 export {
   DEFAULT_AMBIENT,
@@ -358,7 +388,7 @@ export type {
 // geometry with placement transforms); the player rasterises it over each frame
 // with a pure software rasteriser — the runtime has no GPU triangle path — no cart
 // code needed. Phase 2 of the mesh asset feature.
-export { MeshOverlaySurface, TINT_PALETTE, smoothFrontEdges, parseMeshScene, buildOrbitCamera, orbitPitchAboveTerrain, streamGroups, sceneObjectsSdkLua } from "./mesh/index.js";
+export { MeshOverlaySurface, TINT_PALETTE, sceneSkyEnvironment, smoothFrontEdges, parseMeshScene, buildOrbitCamera, orbitPitchAboveTerrain, streamGroups, sceneObjectsSdkLua } from "./mesh/index.js";
 export { readSidecarUi, uiSdkLua } from "./uiSdk.js";
 export { INPUT_SETTINGS, playLanguage, stringsSdkLua, writeInputSettings } from "./stringsSdk.js";
 export { componentsSdkLua } from "./componentsSdk.js";
@@ -452,6 +482,14 @@ export function mount(container: HTMLElement, options: PlayerOptions): PlayerHan
     editTouchLayout: () => player.editTouchLayout(),
     inspect: () => player.inspect(),
     setQuality: (choice) => player.setQuality(choice),
+    setViewMode: (mode) => player.setViewMode(mode),
+    setWeather: (settings) => player.setWeather(settings),
+    splash: (x, z, strength) => player.splash(x, z, strength),
+    captureReference: (options) => player.captureReference(options),
+    renderSequence: (options) => player.renderSequence(options),
+    get referenceSamples(): number {
+      return player.referenceSamples;
+    },
     supplyTextures: (textures) => player.supplyTextures(textures),
     setTimeScale: (scale) => player.setTimeScale(scale),
     timeScale: () => player.timeScale(),
@@ -554,6 +592,7 @@ export {
   type QualitySettings,
 } from "./quality.js";
 export { AnimationSession, animatedObjects, compileAnimator, sceneHasAnimation } from "./anim/animationSession.js";
+export { FaceDriver } from "./anim/faceDriver.js";
 export {
   PHYS_BLOCK_BYTES,
   PHYS_MAGIC,

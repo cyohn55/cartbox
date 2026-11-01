@@ -135,3 +135,33 @@ describe("preview", () => {
     expect(Array.from(plain.subarray(0, 3))).toEqual([70, 70, 78]);
   });
 });
+
+describe("composing a graph in the editor (F1e)", () => {
+  const base: MaterialGraph = {
+    nodes: [
+      { id: "a", op: "constant", params: { value: [1, 0, 0] } },
+      { id: "b", op: "constant", params: { value: [0, 0, 1] } },
+      { id: "m", op: "mix", inputs: { a: "a", b: "b" } },
+      { id: "half", op: "constant", params: { value: [0.5, 0.5, 0.5] } },
+    ],
+    outputs: { baseColor: "a" },
+  };
+
+  it("makes a function from a node's upstream subgraph", async () => {
+    const { functionFromNode } = await import("@/lib/materialGraphEdit");
+    const graph = functionFromNode(base, "m", "blend");
+    expect(graph.functions![0]!.name).toBe("blend");
+    expect(graph.functions![0]!.nodes.map((n) => n.id).sort()).toEqual(["a", "b", "m"]);
+    // Called, it gives the mix.
+    const called = { ...graph, nodes: [...graph.nodes, { id: "f", op: "function" as const, params: { name: "blend" } }], outputs: { baseColor: "f" } };
+    expect(compileGraph(called)!.steps.some((s) => s.op === "mix")).toBe(true);
+  });
+
+  it("adds and removes layers, and sets a switch's default", async () => {
+    const { addLayer, removeLayer, setSwitch } = await import("@/lib/materialGraphEdit");
+    const layered = addLayer(base, { name: "blue", mask: "half", outputs: { baseColor: "b" } });
+    expect(readMaterialGraph(layered)!.layers).toHaveLength(1);
+    expect(removeLayer(layered, 0).layers).toBeUndefined();
+    expect(setSwitch(base, "wet", false).switches).toEqual({ wet: false });
+  });
+});

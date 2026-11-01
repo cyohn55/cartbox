@@ -17,6 +17,8 @@ import { LitCanvasSurface } from "./lighting/LitCanvasSurface.js";
 import { PostFxSurface } from "./fx/PostFxSurface.js";
 import { anyPostFxEnabled, type PostFxSettings } from "./fx/postfx.js";
 import { applyPostVolumes, type PostVolumeFx } from "./fx/postVolumeFx.js";
+import { isDiagnosticView, type ViewMode } from "./render/viewModes.js";
+import type { ReferenceCapture } from "./render/pathTracer.js";
 import { QUALITY_PRESETS, QualityGovernor, applyQualityToPostFx, browserDeviceHints, resolveQuality, type QualityChoice, type QualityLevel, type QualitySettings } from "./quality.js";
 import { createConsole, instantiateEngineModule, loadEngineModule, type ConsoleInstance } from "./engine.js";
 import { createDirectConsole, runsOnDirectCore, type DirectConsole } from "./directConsole.js";
@@ -103,8 +105,8 @@ import { createSceneRenderer } from "./render/createSceneRenderer.js";
 import { GpuCanvasSurface, type CapturedFrame } from "./render/GpuCanvasSurface.js";
 import type { SceneRenderer } from "./render/sceneRenderer.js";
 import type { TextureLookup } from "./world/worldScene.js";
-import { SpatialLoader, actionMask, createHoloCache, holoBindingKeys, holoDocuments, renderHoloDocument, translate, reboundActions, type DecodedTexture, type EncodedImage, type InputAction, type Mat4, colorFilterSvg, DEFAULT_ACCESSIBILITY, type AccessibilitySettings, type ColorFilter } from "@cartbox/editor";
-import type { ControlScheme, InspectedObject, PlayerOptions } from "./types.js";
+import { SpatialLoader, WorldPartition, partitionWorld, actionMask, createHoloCache, holoBindingKeys, holoDocuments, renderHoloDocument, translate, reboundActions, type DecodedTexture, type EncodedImage, type InputAction, type Mat4, colorFilterSvg, DEFAULT_ACCESSIBILITY, type AccessibilitySettings, type ColorFilter, type WeatherSettings } from "@cartbox/editor";
+import type { ControlScheme, InspectedObject, PlayerOptions, SequenceOptions } from "./types.js";
 
 /**
  * Decides whether to show the on-screen gamepad. "auto" shows it on any device
@@ -153,6 +155,7 @@ export class Player {
   private qualitySettings: QualitySettings = QUALITY_PRESETS.high;
   /** "auto" (or no choice) steps the preset down while frames run long (see QualityGovernor). */
   private qualityChoice: QualityChoice | undefined;
+  private viewMode: ViewMode = "lit";
   private readonly qualityGovernor = new QualityGovernor();
   private basePostFx?: PostFxSettings;
   /** The animation's post-FX values this frame, and the post volumes' look (P6). */
@@ -643,6 +646,8 @@ export class Player {
             },
           );
           this.meshSurface.setQuality(this.qualitySettings);
+          this.meshSurface.setViewMode(this.viewMode);
+          this.meshSurface.setWeather(this.weather);
           this.meshSurface.setProfiler(this.profiler);
           // Holo UI documents (I12): the host draws them from what the cart sends.
           const holoDocs = holoDocuments(this.options.ui ?? []);
@@ -672,9 +677,14 @@ export class Player {
           // A scene with levels starts in its first; the others wait, hidden.
           if ((mesh.levels?.length ?? 0) > 0) this.activateLevel(0);
           // A scene that streams by distance loads what's near the focus each tick.
+          // With a cell size, a world partition (F6d): a grid cell at a time, each prepared before it shows.
           if (mesh.streaming) {
             const groups = streamGroups(mesh);
-            if (groups.length > 0) this.spatial = { loader: new SpatialLoader(groups, mesh.streaming), unloaded: new Set() };
+            if (groups.length > 0 && mesh.streaming.cell) {
+              const world = new WorldPartition(partitionWorld(groups, mesh.streaming.cell), mesh.streaming);
+              this.partition = { world, unloaded: world.unloaded() };
+              this.applyInactive();
+            } else if (groups.length > 0) this.spatial = { loader: new SpatialLoader(groups, mesh.streaming), unloaded: new Set() };
           }
         }
         // The HD-2D world composites a 3D tile terrain plus the cart's 2D character
@@ -1016,6 +1026,7 @@ export class Player {
       for (const b of this.runtime!.channel.takeBursts()) this.meshSurface?.burst(b.effect, b.at, b.dir, b.scale);
       for (const d of this.runtime!.channel.takeDecals()) this.meshSurface?.decal(d.decal, d.at, d.normal, d.scale);
       for (const d of this.runtime!.channel.takeDebris()) this.meshSurface?.throwDebris(d.debris, d.at, d.velocity, d.scale);
+      for (const s of this.runtime!.channel.takeShatters()) this.meshSurface?.shatter(s.object, s.at, s.strength);
       // Sounds the cart played (dropped when this frame is silent: stepping, or off 1× speed).
       for (const c of this.runtime!.channel.takeSounds()) {
         if (!this.sounds) continue;
@@ -1081,6 +1092,40 @@ export class Player {
     this.applyQuality(resolveQuality(choice, browserDeviceHints(this.sceneRenderer ? this.sceneRenderer.backend !== "software" : undefined)));
   }
 
+  /** What the 3D viewport shows (F10a): the lit frame, or a diagnostic of it on the AAA tier. */
+  /** The weather a cart or the editor set at run time (F5e), over the rig's. */
+  private weather: WeatherSettings | null = null;
+
+  splash(x: number, z: number, strength?: number): void {
+    this.meshSurface?.splash(x, z, strength);
+  }
+
+  setWeather(settings: WeatherSettings | null): void {
+    this.weather = settings;
+    this.meshSurface?.setWeather(settings);
+  }
+
+  setViewMode(mode: ViewMode): void {
+    this.viewMode = mode;
+    this.meshSurface?.setViewMode(mode);
+    this.showPostFx();
+  }
+
+  /** The path-traced reference of the 3D frame shown (F10b), `width` across at its aspect; null without one (every tier but AAA). */
+  captureReference(options: { readonly width: number; readonly samples?: number; readonly progress?: (done: number) => void }): Promise<ReferenceCapture> | null {
+    return this.meshSurface?.captureReference(options) ?? null;
+  }
+
+  /** Render a timeline offline, frame by frame through the path tracer (F10d). */
+  renderSequence(options: SequenceOptions): Promise<number> | null {
+    return this.meshSurface?.renderSequence(options) ?? null;
+  }
+
+  /** Samples each pixel of the viewport's path-traced reference holds (F10b). */
+  get referenceSamples(): number {
+    return this.meshSurface?.referenceSamples ?? 0;
+  }
+
   private applyQuality(settings: QualitySettings): void {
     this.qualitySettings = settings;
     this.meshSurface?.setQuality(this.qualitySettings);
@@ -1092,18 +1137,26 @@ export class Player {
     const fx = this.postFxSurface ?? this.gpuPostFx;
     if (!fx || !this.basePostFx) return;
     const base = this.animPostFx ? { ...this.basePostFx, values: { ...this.basePostFx.values, ...this.animPostFx } } : this.basePostFx;
-    fx.setSettings(applyQualityToPostFx(applyPostVolumes(base, this.volumePost), this.qualitySettings));
+    const settings = applyQualityToPostFx(applyPostVolumes(base, this.volumePost), this.qualitySettings);
+    // A diagnostic view (F10a) is shown as written: no effect over it.
+    fx.setSettings(!isDiagnosticView(this.viewMode) ? settings : { ...settings, enabled: Object.fromEntries(Object.keys(settings.enabled).map((id) => [id, false])) as typeof settings.enabled });
   }
 
   /**
    * "auto" by measurement: a 3D scene whose frames keep coming slower than
    * about 40 fps steps down a preset (high → medium → low; under 20 fps,
    * straight to low). The device hints "auto" starts from can't tell a strong
-   * GPU from a weak one.
+   * GPU from a weak one. A GPU that reads its frames back can fall behind
+   * while the run loop keeps time (it skips frames it can't read back), so
+   * when the GPU is what holds the 3D back its frames' time counts instead.
    */
   private governQuality(sinceLast: number, busy: number, now: number): void {
     if ((this.qualityChoice !== undefined && this.qualityChoice !== "auto") || !this.meshSurface) return;
-    const step = this.qualityGovernor.feed(sinceLast, busy, now, this.qualitySettings.level);
+    const gpuMs = this.meshSurface.gpuBoundMs();
+    const step =
+      gpuMs !== null && gpuMs > sinceLast
+        ? this.qualityGovernor.feed(gpuMs, gpuMs, now, this.qualitySettings.level)
+        : this.qualityGovernor.feed(sinceLast, busy, now, this.qualitySettings.level);
     if (step) this.applyQuality(QUALITY_PRESETS[step]);
   }
 
@@ -1153,10 +1206,12 @@ export class Player {
   private levelInactive: ReadonlySet<number> = new Set();
   /** Spatial loading, when the scene streams by distance: the loader and what it has unloaded. */
   private spatial: { loader: SpatialLoader; unloaded: ReadonlySet<number> } | null = null;
+  /** The world partition (F6d), when the scene streams by cells: the cells and what isn't loaded. */
+  private partition: { world: WorldPartition; unloaded: ReadonlySet<number> } | null = null;
 
   /** Hide (and take out of physics) everything a level or spatial loading has out. */
   private applyInactive(): void {
-    const inactive = new Set([...this.levelInactive, ...(this.spatial?.unloaded ?? [])]);
+    const inactive = new Set([...this.levelInactive, ...(this.spatial?.unloaded ?? []), ...(this.partition?.unloaded ?? [])]);
     this.meshSurface?.setInactive(inactive);
     this.runtime?.physics?.setInactive(inactive);
   }
@@ -1167,6 +1222,7 @@ export class Player {
    * objects coming near.
    */
   private updateSpatialLoading(): void {
+    this.updatePartition();
     const spatial = this.spatial;
     const scene = this.options.mesh;
     if (!spatial || !scene) return;
@@ -1188,6 +1244,42 @@ export class Player {
     if (approached.length > 0 && this.options.streamAssets) {
       this.options.streamAssets(approached.map((g) => scene.instances[spatial.loader.groups[g]!.members[0]!]!.id));
     }
+  }
+
+  /**
+   * The world partition (F6d): cells leaving range unload (their maps and GPU
+   * geometry given back); cells coming in, nearest first and a few at a time,
+   * have the host fetch their assets and the overlay decode their maps (in its
+   * decode workers), and show once that's done.
+   */
+  private updatePartition(): void {
+    const partition = this.partition;
+    const scene = this.options.mesh;
+    if (!partition || !scene) return;
+    const focus = this.runtime?.channel.streamFocus() ?? this.meshSurface?.eyePosition() ?? scene.bounds.center;
+    const { world } = partition;
+    const { load, unload } = world.update(focus);
+    for (const k of unload) this.meshSurface?.unloadCell(world.cells[k]!.members);
+    if (unload.length > 0) {
+      partition.unloaded = world.unloaded();
+      this.applyInactive();
+    }
+    for (const k of load) {
+      const members = world.cells[k]!.members;
+      if (this.options.streamAssets) this.options.streamAssets(members.map((i) => scene.instances[i]!.id));
+      void (this.meshSurface?.loadCell(members) ?? Promise.resolve()).then(() => {
+        if (this.partition !== partition || !world.finished(k)) return;
+        partition.unloaded = world.unloaded();
+        this.applyInactive();
+      });
+    }
+  }
+
+  /** The world partition's cells and their states (F6d), for a view of what is loaded; null without one. */
+  worldPartition(): { cells: readonly { i: number; j: number; state: string; distance: number; objects: number }[] } | null {
+    const world = this.partition?.world;
+    if (!world) return null;
+    return { cells: world.cells.map((c, k) => ({ i: c.i, j: c.j, state: world.state(k), distance: world.distance(k), objects: c.members.length })) };
   }
 
   /** Make a level current: its objects (and the always-loaded ones) show and simulate; the rest are hidden. */
@@ -1398,7 +1490,7 @@ export class Player {
           this.meshSurface.setLooks(this.runtime.channel.looks());
           // IK aims in world space: give it where each object is this frame.
           const placed = this.runtime.channel.needsWorld() ? this.meshSurface.currentPlacements() : null;
-          this.meshSurface.setSkinning(placed ? this.runtime.channel.skinning((o) => placed[o] ?? null) : this.runtime.channel.skinning());
+          this.meshSurface.setSkinning(placed ? this.runtime.channel.skinning((o) => placed[o] ?? null) : this.runtime.channel.skinning(), this.runtime.channel.morphs());
         }
         this.meshSurface.setCartLights(decodeWorldLights(mailbox));
         // An editor that has ejected from the game looks through its own camera.

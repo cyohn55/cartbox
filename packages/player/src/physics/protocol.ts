@@ -316,6 +316,8 @@ export const PHYS_OP_UI_LIST = 39;
  * placements and looks have no such cap).
  */
 export const PHYS_OP_LOOK = 40;
+/** Break a fractured object (cartbox.shatter, F8c): a = the object; v0..v2 = the impact, v3 = how hard (m/s at the impact). */
+export const PHYS_OP_SHATTER = 41;
 
 /** Where the physics block starts in Lua's RAM space for a model. */
 export function physicsBlockAddress(layout: RamLayout): number {

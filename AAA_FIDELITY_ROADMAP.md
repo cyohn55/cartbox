@@ -247,6 +247,93 @@ Everything else depends on this track. It contains no visible "feature", but its
   - **Compute:** frustum and HZB occlusion culling, LOD selection, light clustering and skinning become compute passes with indirect draws.
   - **Workers:** asset decode (PNG, KTX2 transcode, meshopt), physics and navigation move to workers.
   - *Exit:* the main thread spends under 4 ms per frame in the renderer on Beaver Creek.
+  - **F0e-1, GPU-driven culling: done** on the `aaa` tier with a prepass (`player render/gpuCulling.ts`; `SceneDraw.gpuCull`, which the mesh overlay sets with the prepass). Before it, that path culled nothing: every copy in the scene was shaded every frame, and the only occlusion cull was a software depth pre-pass on the main thread, which nothing turned on.
+    - **Bounds without CPU work per copy.** Each batch gives its primitive's sphere (the box's centre and half-diagonal in the mesh's space, cached), widened by the wind's furthest bend this frame. The compute pass makes each copy's world sphere from the model matrix already in the instance buffer.
+    - **Round one, before the prepass:** each copy against the frustum's six planes. A workgroup per batch packs the survivors (and their motion records) in order with a prefix sum, into a region after the casters, and writes the batch's `drawIndexedIndirect` arguments. The prepass draws those.
+    - **Round two, after it:** a Hi-Z pyramid of the prepass's depths (an `r32float` mip chain, each texel the farthest of the four, or at an odd edge nine, below it). Each survivor's sphere box is projected, the level where it spans at most two texels each way is read, and the copy is hidden when its nearest depth lies behind the farthest there. A box reaching the eye's plane is kept. What remains is packed over the first round's, and the shading passes draw it.
+    - **Conservative and exact.** The pyramid is this frame's own geometry, and copies keep their order, so the frame is the one drawn without culling, less what nothing could see.
+    - **Drawn whole:** batches whose vertices move (live skinning and cloth, a material graph's world-position offset), and see-through ones (drawn in order, farthest first).
+    - **Indirect draws start at instance 0.** A later first instance needs the optional `indirect-first-instance` feature, so a new uniform slot (`cull0`, bytes 1120–1135) adds where a culled batch's copies start.
+    - *Tests:* `Unit Tests/gpu-culling.test.ts` covers:
+      - the frustum's planes (inside, behind the eye, past the far plane, either side of the 30° edge), and a primitive's sphere and sway;
+      - on Dawn, a wall with 3 cubes in front, 5 behind, 1 behind but peeking past its edge, and 4 off screen: the first round keeps 9 cubes, the second 4, the wall both times, and the frame matches the unculled one to within 1e-5;
+      - a batch whose vertices move keeps all three copies, even off screen.
+    - *Found, then fixed:*
+      - indirect draws with a first instance drew nothing without the optional feature (so the prepass wrote no depth, and nothing was ever hidden);
+      - `textureDimensions(hiz, level)` read 1 at every level on Dawn: the level's size is now shifted from the first's;
+      - `from` is reserved in WGSL.
+    - *Left for F0e:*
+      - LOD selection and light clustering as compute passes;
+      - culling the shadow casters per cascade and light;
+      - a two-phase cull (last frame's visible set first) so the prepass skips hidden copies too;
+      - with MSAA, the second round tests the frustum alone (the pyramid reads single-sampled depth);
+      - decoding, physics and navigation on workers;
+      - measuring the exit on Beaver Creek.
+  - **F0e-2, LOD and lights on the GPU, recorded draws, decoding on workers: done** on the GPU-culled path.
+    - **LOD selection in the cull.** A chain with at least 32 copies (`GPU_LOD_MIN_COPIES`) is drawn once per level, every level sharing the copies' instance records; the compaction keeps, for each level, the copies its distance picks (as lod.ts does: to the copy's origin, over its largest scale, up to 8 switches). A chain with fewer copies is still chosen on the CPU, since each level is a draw of its own.
+      - The cull's inputs split into *sources* (a run of copies and their sphere) and *draws* (a source, where its kept copies pack, and its level), so siblings pack apart and their motion records follow the region's total.
+    - **Clustered lights on the GPU** (`render/gpuLightClusters.ts`). Three compute passes build lightClusters.ts's table and index list from the packed lights: each cell lists the lights whose sphere touches its box, in light order; one workgroup scans the counts into starts (held to the CPU's caps); each cell copies its row there. The sphere is widened slightly more than the CPU's, so rounding can add a light to a cell but never drop one. `clusterGrid` is now shared with the CPU builder.
+    - **Recorded draws** (`render/renderBundles.ts`). With GPU culling a pass's commands hold from frame to frame (counts live in the indirect buffer), so the prepass and the opaque and see-through passes are recorded into render bundles and replayed. A bundle is recorded again only when something its commands name changes (a pipeline, bind group, buffer or range), compared by identity.
+    - **Decoding on workers.** PNG, JPEG and WebP decode in a small worker pool (`render/decodeWorkers.ts`, an inline Blob script, so nothing extra is served), and KTX2 transcodes on a worker (`ktx2Worker.ts`, `loadKtx2DecoderOffThread`), handing back its pixels and compressed levels by transfer. A failed worker hands that file, and every later one, back to the main thread.
+    - *Tests:*
+      - `gpu-culling.test.ts`: 40 copies of a two-level chain from 3 to 22.5 m pick the same levels on the GPU as the CPU, and draw the same frame to within 1e-5;
+      - `gpu-light-clusters.test.ts`: the GPU lists every light the CPU lists, in the same order, and the lit frame matches;
+      - `decode-workers.test.ts`: the pool's balancing, transfers and failures; the worker script; the KTX2 worker's fallback.
+    - *Found, then fixed:* the LOD test first put its nearest copy outside the frustum, so the GPU (correctly) drew one fewer near copy than the test expected.
+    - *Measured* on Beaver Creek (168 copies, 4 lights; 1280×720; Node on SwiftShader, V8's profiler, self-time in JS only): the renderer spends about 14.5 ms of JS a frame on the culled path, against 13.5 ms without it. **The exit (under 4 ms) is not met.**
+      - Bundles replay for about 0.3 ms with a camera that moves smoothly. A benchmark that jumps between distant views every frame re-records them every frame (the CPU's LOD picks and the see-through order change), which costs about 9 ms.
+      - What remains: each copy's `mvp` and `lightMvp` multiplied on the CPU (about 3.7 ms), packing each draw's uniforms (about 5 ms), and planning the cull.
+    - *Left for F0e:*
+      - the model-view-projection products on the GPU (the instance record has the model; the shaders can multiply);
+      - per-draw uniforms written only when they change;
+      - culling shadow casters per cascade and light; a two-phase cull; the occlusion round with MSAA;
+      - skinning as a compute pass; physics and navigation on workers;
+      - measuring the exit in a browser on hardware.
+  - **F0e-3, each copy's transforms on the GPU: done** on the `aaa` tier (`render/gpuTransforms.ts`).
+    - **The CPU writes only the model.** Each copy's record gets its model matrix, and its motion record gets last frame's model in the same slot. One compute pass, submitted after the upload and before the frame, fills the rest in place: the clip transform, the light's (zero with no shadow) and the normal basis; and in the motion record, the unjittered clip transforms now and last frame. Before it the CPU multiplied four matrices a copy, every frame.
+    - Each invocation writes only its own record and reads only model slots, which nothing writes, so no copy waits on another.
+    - **The per-draw uniform's `mvp` and `lightMvp` are no longer computed.** No shader reads them; every copy's own come from the instance buffer.
+    - The fantasy tiers keep the CPU's transforms, so they stay in parity with the software rasteriser.
+    - *Tests (`gpu-transforms.test.ts`):* on Dawn, 150 copies' records match the CPU's to within 1e-6 of each matrix's largest entry, and their normal bases exactly; the light transform is zero with no shadow; the motion records match, with last frame's models moved.
+    - *Measured* as in F0e-2 (Beaver Creek, three readings): the culled path's renderer JS falls from about 14.5 ms to 5.3–6.8 ms a frame. **The exit (under 4 ms) is still not met.** What remains is spread out: packing each draw's uniforms (about 1–2 ms), planning the cull, batching, and encoding.
+    - *Left for F0e:*
+      - per-draw uniforms written only when they change (F0e-4);
+      - the rest of F0e-2's list.
+  - **F0e-4, per-draw uniforms kept from frame to frame: done** (every WebGPU tier).
+    - **A slot is rewritten only when its draw changes.** Each uniform slot remembers what it was written from: the primitive, its material, which maps are bound (not the texture objects, which are new each frame), the transparency, effect, LOD level, lighting channels, material ID, instance bases and the first copy's model, by value. A draw that matches, and doesn't animate by itself, takes only the frame's fields, copied from the first slot written in full this frame.
+    - **The frame's fields** (`FRAME_UNIFORM_RANGES` in `scenePacking.ts`) are the light, the view direction, the environment, the shadow's and tone map's settings, the SSAO flag, the light and probe counts, the fog and its eye, the time and the camera. Material graphs read time from these too.
+    - **What animates by itself** (`uniformAnimates`) is always written in full: wind sway, water, a scrolling or pulsing emission, a surface effect, refraction, soft edges and a character material.
+    - On Beaver Creek, 86% of draw writes keep their slot; about 56 draws a frame animate (mostly swaying foliage).
+    - *Tests (`uniform-cache.test.ts`):*
+      - changing every frame input moves only the frame's fields: a kept slot plus the copy equals a full write;
+      - which draws animate;
+      - on Dawn, six frames with a moving camera, advancing time and wind, a model changed in place and the draws reordered stage exactly the bytes of a renderer that writes every slot in full (water, scrolling emission, sway and a soft-edged glass among the draws).
+    - *Measured* as before, three readings: the culled path's renderer JS is **4.2–5.5 ms** a frame, from 5.3–6.8 ms. **The exit (under 4 ms) is close but not met** in this setup. What remains is spread thin: batching the copies, planning the cull, material IDs, uniforms for the drawn animating draws, bind groups and encoding, each under about 0.6 ms.
+    - *Left for F0e:* measuring the exit in a browser on hardware, where Node's software GPU no longer shares the timeline; the rest of F0e-2's list.
+  - **F0e-5, the rest of the cull, meshopt on workers, and a fix that let Beaver Creek play on `aaa`: done.**
+    - **The sun's casters, culled per cascade** (`CasterCulling` in `gpuCulling.ts`). Before it, every caster was drawn into every cascade.
+      - A workgroup per caster batch and cascade keeps the copies whose sphere reaches the cascade's box, packs their models into the cascade's region (at the batch's place in it), and writes that draw's indirect arguments.
+      - The box's near plane, toward the sun, is left out: what stands between the sun and the box still shadows it.
+      - The caster shader reads its copy through the view it is drawn with. A caster view (a cascade, a spot/point tile or a virtual page) is now its matrix and a `base`: a culled cascade reads `base + cull0 + instance`, and the tiles and pages are drawn as before.
+    - **A two-phase cull** (without MSAA). The prepass draws last frame's visible copies first (round 0). A pyramid of that depth then tests the rest, and the prepass draws what it can't rule out (round 1). The shading's round (2) tests the whole prepass as before, and becomes next frame's guess.
+      - The prepass skips copies hidden last frame, and the frame is still exactly the unculled one: the first pyramid is of a subset of the scene, so it can only keep too much.
+      - A new renderer guesses nothing: its first frame's prepass draws in round 1 alone.
+    - **MSAA frames are occlusion-culled too.** The pyramid's first level takes the farthest of each pixel's samples. The prepass draws in one phase there.
+    - **Skinning on the GPU** was F7a's.
+    - **meshopt off the main thread** (`gltfDecoders.ts`). A compressed import's buffers are decoded first on meshoptimizer's own workers (two), then handed to the parse in order (`meshoptCalls`, `replayMeshopt`). PNG, JPEG, WebP and KTX2 were F0e-2's.
+    - **Physics and navigation stay on the main thread.**
+      - Both are steps of the deterministic tick that netplay replays. A worker's answer can't be promised by a fixed tick without blocking for it.
+      - Neither shipped map has physics bodies.
+      - Navigation runs only when a cart sends agents.
+    - **Fixed: an `aaa` match on a map with material graphs never started.** The mesh overlay took `prepareMaterials` off the WebGPU renderer and called it bare, so it lost its `this` and threw ("reading 'variants'"). Beaver Creek on `/lockout?hdr=1` showed the error in place of the match. It is now called on the renderer.
+    - *Tests:*
+      - `gpu-culling.test.ts`:
+        - twelve casters, six far past every cascade: none of those drawn into any cascade, and the shadowed frame is the unculled one to within 1e-5;
+        - two frames of the wall scene: the first frame's prepass draws everything in round 1; the second draws the wall and its 4 visible cubes in round 0 and nothing in round 1; both frames match the unculled renderer's frames of the same number;
+        - an MSAA frame drops the 5 cubes behind the wall and matches;
+      - `gltf-compression.test.ts`: buffers decoded ahead parse to the same mesh, and a decode out of step is an error;
+      - `mesh-overlay-prepare.test.ts`: the graphs are compiled through the renderer; the old call fails it.
+    - *Measured:* `scripts/measure-main-thread.mjs` reads the player's own profile of its 3D section from `/lockout?map=beaver&hdr=1` in Chromium, at the three capture views, a sample just after each frame lands. In Chromium on SwiftShader here, Beaver Creek's first `aaa` frame (every pipeline compiled in software) had not finished after five minutes, so there is no browser reading yet. It needs the script run with `CBX_GPU=1` on hardware. In Node (F0e-4) the renderer's JS was 4.2–5.5 ms a frame.
 
 ### F1. Textures and materials
 
@@ -302,8 +389,22 @@ Everything else depends on this track. It contains no visible "feature", but its
     - *Left for F1a:*
       - The four cut-out textures, about 175 KB of the 448, stay RGBA. Compressing them needs alpha-to-coverage (or coverage-preserving mips the encoder can't make), and that would take the measure past 4× against the one-level baseline too.
       - The N64 model's true trilinear filtering needs the software rasteriser's own mips.
-- [ ] **F1b. Texture streaming.** Mip streaming driven by GPU feedback: a sampler-feedback-style pass that records the mip each material wanted, under a texture-memory budget per scalability level, with residency in the profiler. It also covers texture arrays, or bindless where available, so materials stop competing for 16 bind slots.
-- [ ] **F1c. BRDF upgrade.**
+- [x] **F1b. Texture streaming.** Mip streaming driven by GPU feedback: a sampler-feedback-style pass that records the mip each material wanted, under a texture-memory budget per scalability level, with residency in the profiler. It also covers texture arrays, or bindless where available, so materials stop competing for 16 bind slots.
+  - **Done** on the `aaa` tier (`player render/textureStreaming.ts`). Every other tier, and the KTX2 maps that arrive block-compressed (F1a), keep their maps whole.
+    - **The feedback pass.** Every eighth frame the opaque batches are drawn again at a quarter of the frame's size, depth-tested, with no colour. Each pixel's UV footprint (log₂ of a 1×1 map's texels a pixel, at the frame's own size) goes into its material's slot by an atomic minimum in a storage buffer. The buffer is copied and read back without the frame waiting; a map of `size` texels then wants `footprint + log₂(size)`.
+    - **The plan** (`TextureStreamer`):
+      - each map larger than 256 texels starts at its floor (64 texels a side) and goes to the level the feedback asks for;
+      - one no pixel saw keeps its level for eight rounds, then falls back to its floor;
+      - while the total is over the budget, the map costing the most steps down a level.
+    - **The budget** is the preset's (`QualitySettings.textureBudgetMB`): 1 GB at Epic, 512 MB at High, 256 MB at Medium, 128 MB at Low.
+    - **Residency is real memory.** A map resident at level `l` is a texture of its size over 2^l with only those mips, box-filtered from the decoded map on the CPU (kept per level) and made again when the level changes. The groups that bound it rebuild, and the old texture is released the next frame. UVs are relative, so nothing that samples it changes.
+    - **In the profiler:** "Texture residency": the resident MB against the budget, the maps streamed and how many the budget holds back, and what they would take at the mips the frame wants.
+    - **Bind slots.** WebGPU has no bindless in its core. The maps that grow with content, a material graph's own images, already share one array binding (F1e); the fixed slots (base, metal/roughness, occlusion, emissive, normal, detail, light map) stay one a map.
+    - *Tests:* `Unit Tests/texture-streaming.test.ts` covers:
+      - a level's bytes, the feedback's fixed point, the level a footprint wants; a map's floor, the level asked for, holding an unseen map then letting it go; fitting the budget (the larger map gives way first); each preset's budget;
+      - on Dawn: a 1024² map on a quad 200 m off stays at its 64-texel floor; on a quad that fills a 64-pixel frame it streams to 128² (level 3, about 14 texels a pixel), and still draws its checks; under a 50 KB budget two maps are held back to fit.
+    - *Left for later:* streaming the block-compressed (KTX2) chains level by level; feedback for the maps' own UV transforms and triplanar projection (they read the base UVs' footprint).
+- [x] **F1c. BRDF upgrade.**
   - Multiscatter GGX energy compensation (Kulla-Conty, or Fdez-Agüera's LUT).
   - A height-correlated Smith visibility term.
   - Fresnel and split-sum on ambient specular, and specular occlusion from AO and bent normals.
@@ -323,9 +424,9 @@ Everything else depends on this track. It contains no visible "feature", but its
       - that only the linear shader carries the new terms.
       - On Dawn, the linear output lands on the CPU's numbers: a white furnace reads 1 (±1%) for metals and dielectrics, rough or smooth; a black dielectric's reflection head-on and at 75° matches `f0·A + B` within 3%; and a rough metal's highlight matches D·V·π times its compensation within 2%, over 1 and unclamped.
       - In Chromium, Beaver Creek on the `aaa` tier compiles the four linear-light shaders with the table, with no errors.
-    - *Left for F1c:*
-      - Bent normals for specular occlusion: no bake makes them yet (F9).
-      - The clearcoat lobe keeps its Schlick visibility.
+    - *Done since:*
+      - Bent normals for specular occlusion come from GTAO at run time (F3c-2), with no bake needed.
+      - The clearcoat lobe takes Kelemen's visibility, 1/(4(V·H)²), on the AAA tier, as Filament's does; the other tiers keep the Schlick-Smith term the software path mirrors (`brdf.test.ts` checks both shaders).
   - **F1c-2, stored MikkTSpace tangents: done.**
     - **The model.** A primitive can carry tangents (`MeshPrimitive.tangents`, `x,y,z,w`) through the sidecar and glTF (`TANGENT`).
       - A node's transform moves them with its own 3×3; a mirroring one flips w.
@@ -345,7 +446,7 @@ Everything else depends on this track. It contains no visible "feature", but its
       - On Dawn, the generated frame decodes a map as the derivative frame does on a plain layout (within 2%, along U and up V). A stored frame that differs is the one used, and w flips the bitangent.
       - In Chromium, Beaver Creek on the `aaa` tier draws with 64-byte pipelines and the four tangent-aware shaders, with no errors.
     - *Found, then fixed:* imported glTF UVs were stored as glTF writes them (V down) while the engine samples V up (as OBJ and its own meshes are), so an imported glTF's textures showed flipped vertically. glTF's V is now flipped on import and export (`flipV` in `gltfCodec.ts`), with the tangents' w carried over as it is. Meshes already saved in a cart keep the coordinates they were stored with; importing the file again gives the corrected ones.
-- [ ] **F1d. The full material set.**
+- [x] **F1d. The full material set.**
   - Sheen (Charlie distribution).
   - Transmission and volume (thickness, attenuation).
   - IOR and specular.
@@ -354,11 +455,61 @@ Everything else depends on this track. It contains no visible "feature", but its
   - Texture transforms.
 
   Each one maps to its glTF KHR extension on import and export. On top of these, separable **screen-space subsurface scattering** (Burley profile, Jimenez) for skin, wax, leaves and marble, with a transmission term for thin surfaces.
-- [ ] **F1e. Material graph, production grade.**
+  - **F1d-1, the KHR material set: done** on the `aaa` tier (`editor model/materialExtensions.ts`, `player render/materialSet.ts`). Every other tier ignores the new fields.
+    - **The fields** on a material, named and stored as their extensions have them (colours linear): sheen colour and roughness; transmission; thickness, attenuation distance and colour; IOR; specular factor and colour; iridescence, its IOR and thickness; emissive strength; and a UV transform. Each is read clamped, and a neutral one is dropped. Any of them puts a material on the PBR path.
+    - **glTF.** Each maps to its KHR extension on import and export: `_sheen`, `_transmission`, `_volume`, `_ior`, `_specular`, `_iridescence`, `_emissive_strength`, and `KHR_texture_transform`, written on each of the material's maps. glTF gives each texture its own transform; the engine keeps one per material, the first a material's maps carry.
+    - **In the shader** (the uniform grows to 1056 bytes, a 1280-byte stride, for seven rows):
+      - a dielectric's f0 from its IOR, scaled and tinted by its specular (IOR 1.5 and specular 1 are the 4% it had);
+      - a thin film's Fresnel at N·V over it (Belcour & Barla, as glTF's sample viewer evaluates it);
+      - the Charlie sheen with Neubelt's visibility for each light and from the sky's irradiance, the base beneath scaled by what the sheen reflects. Its directional albedo is a table integrated once on the CPU, kept after the DFG table in the same buffer;
+      - transmission: the diffuse gives up its share, and the scene behind (the refraction pass's copy, I5) comes through less what the surface reflects, tinted by the base colour and Beer–Lambert absorption over its thickness;
+      - emission times its strength, and every map at the transformed UVs.
+    - **The path-traced reference** (F10b) follows: each material record grows to ten vec4s. A path passes through a transmitting surface as often as it transmits, and so does a shadow ray.
+    - **In the editor:** a Sheen, Transmission, Specular, Thin film and Emission-and-UVs group under the material's layers.
+    - *Found, then fixed:* the look-dev stage (F10c) and its check made their renderer with the fantasy tiers' default style, which samples textures nearest; they now take the AAA model's (bilinear, with mips).
+    - *Tests:* `Unit Tests/material-set.test.ts` covers:
+      - the fields read, clamped and resolved (f0 from IOR and specular, glTF's IOR 0); UV transforms in glTF's space; the film, the sheen's albedo and absorption; the uniform's rows;
+      - the glTF round trip of every extension, and a texture's transform on its maps;
+      - on Dawn, the renderer against the reference within 5% (8% for the film): a higher IOR and a tinted specular; a sheen over dark cloth; emission at 4× strength; glass in front of a light, clear and through two attenuation distances (a quarter); a moved texture; and a film's colour.
+    - *Left for F1d:* the extensions' textures (sheen, transmission, thickness, specular and iridescence maps); refraction through a thick volume (what is behind comes through unbent, as a thin wall's would); the specular factor's scaling of the grazing reflectance.
+  - **F1d-2, subsurface scattering and thin transmission: done** on the `aaa` tier with a prepass (`player render/subsurface.ts`).
+    - **The fields:** a material's share of diffuse light that scatters, how far each channel goes (a colour × a radius in metres; skin's red-farthest profile, 1.2 cm, by default), and a thin surface's transmission share and colour. Thin transmission is `KHR_materials_diffuse_transmission`; scattering, which no ratified extension carries, rides in the material's glTF extras (`cartboxSubsurface`).
+    - **The split** (HDRP's checkerboard, so no target is added): the shader keeps the diffuse it gives (each light's, the single key light's and the sky's), and on a scattering surface writes the share that scatters on the even pixels and everything else on the odd ones.
+    - **The blur** (Jimenez et al.'s separable SSS with Burley's profile), across and then down after the opaque pass and before the see-through pass copies it:
+      - it gathers the even pixels' diffuse within three radii of the widest channel, sized on screen by the pixel's depth, weighed by `e^(−r/d) + e^(−r/3d)` per channel and normalised, so light is spread and never gained;
+      - samples on another material, or past the reach in depth, are left out, so it doesn't bleed across silhouettes;
+      - the second pass adds the remainder back: an odd pixel's own, an even pixel's from its odd neighbours.
+      - Profiles are kept per G-buffer material ID (F0c), up to 256 a frame.
+    - **Thin transmission:** a light (or the sky) behind a leaf lights its near side through it, as a diffuse of its own tinted by its colour; the front diffuse gives up that share. The path-traced reference takes the same lobe (lights from behind, and bounces out the far side).
+    - **In the editor:** a Subsurface group (scattering, radius in millimetres, scatter colour) and thin transmission with its colour.
+    - *Tests:* `Unit Tests/subsurface.test.ts` covers:
+      - the fields, skin's default profile, and the glTF form; the profiles by ID, Burley's fall-off and the checkerboard;
+      - on Dawn: under even light the scattered surface keeps its light within 2% with no checkerboard left; across a white-to-black edge, light reaches the black side, red more than half again as far as blue; a leaf lit from behind matches the reference within 5%, and is dark without transmission.
+    - *Left for later:* area lights' diffuse, and a clearcoat's, aren't split (they light a scattering surface without scattering); the blur is skipped with MSAA and without a prepass (the surface then shades as a plain diffuse one, the reference's too, which treats scattering as diffuse).
+- [x] **F1e. Material graph, production grade.**
   - New outputs: normal, world-position offset, pixel depth offset, refraction, subsurface colour.
   - Any number of texture samplers.
   - Material functions with reusable subgraphs, and layered materials that blend whole material stacks by masks (Unreal's Material Layers).
   - A static-switch permutation system, with a shader-compile cache to avoid hitches.
+  - **Done** (`editor model/materialGraph.ts`; the shader sites in `WebgpuSceneRenderer.ts`). The new outputs shade on the WebGPU tiers (the pixel depth offset on the AAA tier with a prepass); WebGL2 and the software rasteriser take the composition and ignore the new outputs.
+    - **Composition, resolved before a graph compiles** (`flattenGraph`):
+      - a **function** node calls a named subgraph of the graph's (up to sixteen, nested four deep); its nodes are inlined under the call's id and its "function input" nodes read the call's four inputs;
+      - a **static switch** takes one branch by a named boolean: the graph's default, or a material instance's (`graphSwitches`). Each setting compiles to its own permutation with its own key;
+      - **layers** (up to four) each blend outputs of their own over what is below by a mask, in order, as Unreal's Material Layers blend attributes. Where the base leaves an output unwired, the layer blends over the material's own factor (new "material metallic/roughness/emissive" inputs).
+    - **The new outputs:**
+      - a tangent-space **normal** (−1..1), in the vertex's frame, as a normal map's;
+      - a **world-position offset** in metres, run in the vertex stage from its own compiled steps (`compiledGraphOf(material, ["worldPositionOffset"])`), taken into the mesh's own space, and carried to the motion vectors' previous position;
+      - a **pixel depth offset** in metres, pushed away from the eye only: the prepass writes the pushed depth (`frag_depth`), and the opaque pass keeps only the pixels where that is what the prepass left;
+      - **refraction**: the bend, in place of the material's;
+      - **subsurface colour**: what of the diffuse scatters, per channel (F1d-2).
+    - **Samplers:** a texture node reads the base map or one of the material's own images (`graphImages`, up to eight). On the GPU they are the later layers of an array whose first layer is the blend surface's map: one binding, as the fragment stage's sixteen are all taken, resampled to one size (up to 1024) with mips.
+    - **Compiling without hitches:** shader modules are kept per device by their source, so every renderer and permutation with the same code compiles once. `prepareMaterials` compiles a new mesh's permutations with `createRenderPipelineAsync`, and the mesh overlay asks for it the first time a mesh draws; until a permutation is ready its material draws as a plain one, never stalling a frame.
+    - **In the editor:** the new outputs on the material output node; the texture node's map; function, function-input and static-switch nodes; a composition panel with the switches' defaults, "make function" from a node's upstream subgraph, and layers by mask; and the material's graph images.
+    - *Tests:* `Unit Tests/graph-production.test.ts` and `materialGraphEdit.test.ts` cover:
+      - functions inlined and nested, a missing one as the default; switches by default and by instance, each a permutation; layers over the base and over the material's own roughness; reading it all back;
+      - a graph image by slot (CPU and WGSL); the world-position offset compiled apart; the stored images and switches; the editor's function, layer and switch edits;
+      - on Dawn: a metre of world-position offset brings a quad's edge into a pixel it missed; a two-metre depth offset puts a surface behind the one it was in front of; a graph image's colour emitted; and a permutation still compiling drawn as the plain material, then as its graph.
+    - *Left for later:* textures in the vertex stage (its bindings are the fragment's); the world-position offset in the shadow casters (their depth pipeline isn't per graph); editing a function's body in place.
 - [x] **F1f. Projected decals.** Deferred, D-buffer-style box decals that modify base colour, normal, roughness and AO, with sorting, fade by angle and distance, and sharing of an atlas. They replace the quad-mesh decals for impacts, grime, leaks and road markings.
   - **F1f-1, projected box decals: done** on the `aaa` tier. They replace the decal marks' quads there; every other tier keeps the quads.
     - **Boxes** (`editor/render/projectedDecals.ts`). A mark is a box on its surface: half its size across and along (turned by its spin), and a quarter of it out of and into the surface.
@@ -430,9 +581,26 @@ Everything else depends on this track. It contains no visible "feature", but its
         - a card opaque on one half and clear on the other shadows only under its opaque half (fails without the cut-out's discard).
       - `cascades.test.ts`: a metre toward the sun moves a point's depth by one metre's share of its cascade's span.
       - `shadowCascade.test.ts`: the high preset casts 4096² maps and medium 2048²; the real sun's size, four times it with soft shadows.
-- [ ] **F2b. Virtual shadow maps.**
+- [x] **F2b. Virtual shadow maps.** (GPU-side page allocation, and the cascades' retirement where every pixel has a page, later; see below.)
   - A 16K virtual shadow map, paged from a physical pool, with pages marked by the depth buffer and cached between frames for static geometry.
   - This is what makes shadow detail hold at every distance in UE5. It falls back to F2a on Medium and below.
+  - **F2b-1: done** (`render/virtualShadows.ts`). On the AAA tier at High and Epic (`QualitySettings.virtualShadows`; Medium and Low keep the cascades alone), the sun's shadow on what the prepass holds comes from a virtual map.
+    - **The virtual map.** A clipmap of six levels round the camera. Each level is a virtual 16384² map (128² pages of 128² texels), its texels twice the level below's: 2 mm at level 0, 6.4 cm at level 5.
+      - A page always holds the same square of the sun's view: the light-space grid is fixed, each level's window wraps over it, and the depth range (±1 km along the sun) moves only in 250 m steps. So a page drawn once stays good as the camera moves.
+    - **Marking.** A compute pass over the prepass's depths finds each pixel's finest level whose texels are no larger than the pixel (or the first whose window holds it). It sets a bit for each page the filter reaches at that level and two above.
+    - **The pool.** The marks are copied out and read back a frame or two late (three staging buffers, each remembering the windows it was marked under). The CPU's `VirtualPagePool` gives each marked page a page of a 4096² depth32float pool (1024 pages, 64 MB), evicting the least recently needed and never one needed this frame.
+      - A page is drawn when first given out, when the key changes (the sun's direction to 1e-4, the depth range, the still casters' key), and while something that moves stands in it or did when it was last drawn. The player now hands the still casters' key and movers over whenever the sun casts.
+      - At most 48 pages are drawn a frame, missing pages before stale ones and finest first. Each is cleared and drawn through its own view by the local tiles' depth32float pipelines, with only the casters whose bounding sphere can shade it.
+      - The page table (per level, the wrapped window's physical page + 1) is uploaded when a page changes or a window moves.
+    - **Sampling.** A full-screen pass writes each pixel's sun light into the screen-shading target's **third layer**, before the scene shades. It uses the finest level with resident pages round the pixel, pushed off the surface by a texel or more as the light grazes.
+      - The filter is PCSS: a 12-tap blocker search and a 12-tap filter, as wide as the sun's size makes the penumbra, up to 12 texels. A wider penumbra is filtered two levels up.
+      - It writes −1 where no page is resident yet, and the shader falls back to the cascades there, as it always does for see-through surfaces, which the prepass doesn't hold. The contact shadows (F2c) still multiply in.
+    - *Tests (`virtual-shadows.test.ts`):*
+      - The levels, the sun's frame, a page's view (its square to −1..1, its depth sunward to 0) and the windows.
+      - The pool: gives out, keeps while the key holds, redraws for a new key or a mover (and once after it leaves), evicts the least recently needed, keeps to its budget finest first, lays out its wrapped table, and reads marks back to pages.
+      - The presets, and the player's hand-off at High and none at Medium.
+      - On Dawn: a rod 2 cm thick a metre above the floor, under a sun straight above. The cascades (256² here, for a hard case) lose its line entirely (above 0.85 of the lit floor). The virtual map shows it dark (under 0.3) once its pages are marked, read back and drawn. The first frame, with no pages yet, is the cascades' frame.
+    - *Left for F2b:* allocating pages on the GPU, so newly seen ground needs no read-back frame; the volumetric fog and see-through surfaces sampling the pages too; and then rendering the cascades only where the pool can't serve.
 - [x] **F2c. Contact shadows.** A screen-space ray march toward each light against the depth prepass, so small-scale contact (feet, foliage, props) grounds every object. It closes EDITOR_PRO P6's deferred item.
   - **F2c-1, the sun's contact shadows: done.** After the depth prepass, a full-screen pass (`contactShadows.ts`) marches each pixel 0.6 m toward the sun across the prepass's depths in 16 steps, jittered per pixel so TAA resolves the banding.
     - **The hit test.** A step is in shadow when the depth buffer holds a surface in front of it by no more than a thickness (0.2 m, plus the step and a share of the distance). So it neither misses a thin caster nor shadows what is merely behind a wall.
@@ -553,11 +721,14 @@ Everything else depends on this track. It contains no visible "feature", but its
     - IES profiles wait on their importer (F9d).
     - GPU clustering is F0e's.
     - Area-light shadows.
-- [ ] **F2f. Emissive surfaces that light.** Emissive meshes contribute through GI (F3d and F3e), so the energy trim on a Forerunner wall lights the floor in front of it.
+- [x] **F2f. Emissive surfaces that light.** Emissive meshes contribute through GI (F3d and F3e), so the energy trim on a Forerunner wall lights the floor in front of it.
+  - **F2f-1: done.** Both tracers take a surface's emission as light: the GPU bake's paths (F3d) and the live volume's rays (F3e-1). Each takes the material's emissive colour in linear light, as the renderer's shading does, so what glows on screen lights by the same amount.
+    - *Tests (`emissive-light.test.ts`):* the closed form for a point facing a glowing plane that fills its view is irradiance over π = the plane's radiance. Every probe a metre or two above a vast glowing black floor (with no sky and no lights) takes it within 10%, both from the GPU bake and from 30 frames of the live volume, and is nearly dark facing away.
+    - *Left:* the tracers take the emissive factor alone, not an emissive map's texels or a material graph's emissive output. A glowing pattern lights as its factor's flat colour.
 
 ### F3. Global illumination and reflections
 
-- [ ] **F3a. HDR image-based lighting.**
+- [x] **F3a. HDR image-based lighting.**
   - True HDR environments from imported `.hdr`/`.exr` (F9d) or the F5a sky.
   - Kept as cubemaps, with a GGX-prefiltered mip chain built in compute, a **split-sum BRDF LUT** and L2 spherical-harmonic irradiance.
   - It replaces the 192×96 nearest-sampled equirect and its roughness-to-average lerp.
@@ -579,9 +750,10 @@ Everything else depends on this track. It contains no visible "feature", but its
     - `EnvironmentLight.hdr` holds it, resampled to the reflections' 192×96 in linear light (`resampleHdr`: the 8-bit resample's yaw and wrap, scaled by the panorama's exposure). The AAA tier's IBL lights from it in place of `map`; every other path keeps `map`.
     - **Held under 32** (`HDR_SKY_LIGHT_MAX`, a white sky being 1). The scene's directional light is its sun, so the panorama's own disc (often thousands) would light it a second time. Bright cloud and the sun's glow stay within that ceiling.
     - *Tests (`ibl.test.ts`):* the resample keeps its range, holds the disc under the ceiling and turns by its yaw like the 8-bit sky; the IBL prefers it over the map. On Dawn, a mirror under an HDR sky shows the zenith's radiance of 12 unclipped.
-    - *Left for F3a:*
-      - The sky's procedural objects, clouds and distant vistas are drawn into the 8-bit panorama only, so an HDR sky's IBL doesn't see them. A procedural sky (no import) still lights through its 8 bits until the F5a sky is built in linear light.
-      - `.exr` import waits for F9d.
+    - *Since closed:*
+      - A procedural sky lights in linear light once it is physical: F5a renders the atmosphere's HDR panorama under the key light and resamples it as this IBL's light (and F5a-2 re-lights it as the sun moves).
+      - `.exr` arrived with F9d's decoder: an imported `.exr` sky is decoded to linear radiance and reaches the IBL as `.hdr` does (the Lighting panel's panorama import).
+      - What stays: a *painted* sky's objects and distant vistas, and F5c's volumetric clouds, are drawn for the eye but not into the IBL's panorama. A painted sky is display art by design; the clouds lighting the IBL is F5c's to add.
 - [x] **F3b. HDR reflection probes.** (Compressed storage later; see below.)
   - Cubemap probes captured on the GPU, then prefiltered and stored compressed (BC6H, or RGBM where it is not available).
   - Box and sphere parallax correction, and blended influence volumes with priorities.
@@ -609,7 +781,7 @@ Everything else depends on this track. It contains no visible "feature", but its
     - **Still to do:**
       - BC6H storage needs a GPU encoder (the half-float array is 8 MB at most).
       - Re-capture on demand in the editor waits for the editor's own AAA viewport. At runtime the probes already follow the light.
-- [ ] **F3c. GTAO with bent normals.** Ground-truth AO on the GPU from the depth prepass, at half resolution, temporally accumulated. Bent normals feed diffuse and specular occlusion. It replaces the unwired CPU SSAO.
+- [x] **F3c. GTAO with bent normals.** Ground-truth AO on the GPU from the depth prepass, at half resolution, temporally accumulated. Bent normals feed diffuse and specular occlusion. It replaces the unwired CPU SSAO.
   - **F3c-1, GTAO, its accumulation and bent normals: done** (`gtao.ts`). On every frame with a prepass, the linear-light renderer works out ambient occlusion on the GPU before it shades (`SceneDraw.ambientOcclusion: false` turns it off).
     - **Half resolution.** Each texel takes two screen directions, turned per pixel and per frame by interleaved gradient noise, and walks six steps each way out to 1.2 m.
       - It keeps the highest horizon either side. A sample past 0.6 of the radius fades out toward it, so a distant wall doesn't occlude.
@@ -628,19 +800,213 @@ Everything else depends on this track. It contains no visible "feature", but its
         - with GTAO off the two match within 3%, and open floor keeps at least 93% of its light;
         - the uniforms carry the radius, slices, frame and history flag.
       - The F2c and prepass suites (frame graph, HDR TAA, scene renderer, native resolution, parity) pass with GTAO on.
-- [ ] **F3d. GPU lightmapper.**
+  - **F3c-2, specular occlusion from the bent normal: done** (`bentSpecularOcclusion` in `brdf.ts`). Where GTAO gives a bent normal, the environment's reflection is occluded by Jimenez et al.'s cone test (2016) in place of Lagarde's fit from the AO alone:
+    - the open sky is a cone about the bent normal whose cosine-weighted visibility is GTAO's (cos = √(1 − V));
+    - the reflection's lobe is a cone about R, its cosine 2^(−3.32193 α) (UE4's fit to GGX);
+    - the reflection keeps the share of its cone inside the sky's (Oat and Sander's spherical-cap intersection, their smoothstep where the caps partly overlap), and the material's own occlusion still takes Lagarde's fit; the lower of the two applies.
+    - So a reflection aimed into the open half of a half-hidden sky keeps all of it, and one aimed into the wall loses it, where Lagarde's fit dimmed both alike.
+    - *Tests (`brdf.test.ts`):* a cone inside a wider one is wholly covered, apart none, a wide over a narrow its share of solid angle, and partial overlap falls with the angle; open sky keeps a glossy lobe; toward the open half kept (over 95%), toward the wall lost (under 5%), a rough lobe straddles the edge; only the linear-light shader carries it.
+- [x] **F3d. GPU lightmapper.** (Re-baking the shipped maps waits on F11a; see below.)
   - A compute path tracer, sharing its BVH with F10b, that bakes HDR **directional lightmaps** (L1 SH or ambient-highlight-direction) with any number of bounces, emissive surfaces as lights and area lights.
   - A denoiser (an edge-avoiding à-trous filter, or a small learned one), with seam stitching and texel-density control.
   - Baked **probe volumes** with L2 SH and visibility (to stop leaks) light dynamic objects.
   - Minutes in the browser rather than CPU-bound bakes in node, with `bake:map` kept for CI.
-- [ ] **F3e. Real-time GI.**
+  - **F3d-1, the GPU path tracer and HDR directional light maps: done** (`render/gpuLightmapper.ts`, `model/hdrLightmap.ts`). With WebGPU, the editor's Bake lighting runs on the GPU and gives each still object the AAA tier's HDR light map beside the 8-bit one every other tier reads. Without WebGPU, and in `bake:map`, the CPU bake runs as before.
+    - **The scene** is the CPU bake's own triangle BVH (`buildBvh`, now carrying each triangle's emissive colour), flattened into storage buffers: two words per node, a corner and two edges per triangle, and its albedo and emission in linear light.
+    - **The texels** are the CPU bake's (`lightmapTexels`, split out of `bakeLightmap`, whose output is byte-identical): each one's surface point and interpolated normal.
+    - **The paths.** Each leaves its texel along a cosine-weighted direction (the first stratified over the bake and turned per texel) and bounces diffusely up to `bounces` times (0–8).
+      - Open sky gives the sky's radiance, the IBL's own linear panorama (F3a).
+      - A surface gives its emission, so emissive meshes light what sees them.
+      - Each surface a path bounces off is lit by the rig's directional lights (up to four), a shadow ray each.
+      - The texel's own sunlight is left out: the live cascades (F2a) draw it, as Unreal's stationary lights do.
+      - Dispatches are bounded (64 Ki texels, 512 Ki paths a submit), so none nears a GPU's watchdog.
+    - **What a texel keeps.**
+      - Its irradiance over π in linear light, in the sky's SH irradiance's units.
+      - The light's dominant direction (luminance-weighted and cosine-weighted, so ⅔ of the normal under a uniform sky).
+      - The share of the sky's light that came through unblocked.
+      - The 8-bit ambient scale, which is the irradiance over the open sky's, per channel, so the fantasy tiers' maps carry the bounce's tint as before.
+      - The maps are blurred within each chart and grown past its edges, as the CPU bake's are.
+    - **Storage.** `MeshMaterial.lightmapHdrImage` is one 8-bit PNG twice the atlas's height: Radiance RGBE irradiance over the direction (xyz · 0.5 + 0.5) and visibility.
+      - It is decoded by our own PNG decoder (`decodePngRgba`, new), because a browser's premultiplied alpha would wreck the exponent.
+      - It is stripped wherever the 8-bit map is (a topology edit, a re-layout, a material instance's parent, a clear), and a CPU rebake drops it.
+      - It is never re-encoded as KTX2.
+    - **Shading (AAA tier).** Binding 11 becomes a texture array in the linear variant: the HDR map's two rgba16float layers, or the 8-bit map as one layer (`ssaoMeta.z` = 2 or 1).
+      - With an HDR map, the diffuse fill is its irradiance in place of the sky's SH irradiance, rebalanced for the shading normal by a half-Lambert about the dominant direction. This is exact at the baked normal, so a normal map still reads under baked light (`directionalIrradiance` mirrors it).
+      - The sky visibility joins the specular occlusion of the environment's reflection. GTAO stays on top for near-field contact.
+      - Without one, the 8-bit map scales the fill as before. The byte variant and the other renderers never read the HDR map.
+    - **In the editor.** Up to eight bounces on the GPU (three on the CPU), four paths for each of the CPU's rays, and "Baking on the GPU…" while it runs.
+    - *Tests (`gpu-lightmapper.test.ts`):*
+      - RGBE and the stored PNG round-trip, and `decodePngRgba` keeps alpha exactly.
+      - The directional rebalance is exact at the baked normal, brighter toward the light and flat without one.
+      - The BVH flattens with its leaves and linear materials.
+      - On Dawn:
+        - open floor under a uniform sky reads the sky's radiance, all of the sky and the ⅔ direction;
+        - the floor at a tall black wall's foot gets half the sky (0.47–0.53), from the open side;
+        - a dark box's floor is lit by its glowing ceiling at the analytic view factor (±5%);
+        - a sunlit red wall bleeds red onto the floor with one bounce and not with none;
+        - three bounces in a white pit give more than 1.5× no bounce;
+        - a bake is deterministic.
+      - In the renderer, the HDR map's irradiance replaces the sky's linearly and in its colour, its visibility occludes the reflection, an 8-bit map still scales the fill on the AAA tier, and the byte path ignores the HDR map.
+      - The editor's scene bake on the GPU gives every still object both maps, and a CPU rebake or a clear takes the HDR one away.
+      - `lightmap.test.ts` and the map bakes pass unchanged.
+  - **F3d-2, finishing the bake: done.** The GPU bake's maps are now finished, in order, by dropping texels inside geometry, denoising on the GPU, growing past chart edges, and stitching seams (`gpuLightmapper.ts`, `lightmap.ts`). It replaces F3d-1's two 3×3 blurs. The CPU bake is unchanged.
+    - **Texels inside geometry.**
+      - The BVH now carries the side each triangle faces by its authored normals (`Bvh.front`, the mean of its corners' normals, else its winding's).
+      - The tracer counts a texel's first rays that meet the back of a surface. Past 60% of them (`backfaceLimit`), the texel lies inside something, such as a floor texel under a box's foot, and is dropped.
+      - It is filled from its valid neighbours by the dilation, so the floor beside the box neither darkens nor lets the box's dark inside out. Under a 1 m box at 8 texels a metre, all 64 texels under it are dropped, and the texel just inside its edge reads 0.99 of the one just outside, against 0 when kept.
+      - A floor behind a one-sided wall loses nothing: at most half its rays meet the wall's back.
+    - **The denoiser** is an edge-avoiding à-trous wavelet (Dammertz et al. 2010) in compute: four passes 1, 2, 4 and 8 texels apart, with a B3-spline kernel.
+      - A neighbour is weighed by how near its normal is (to the 32nd power) and how near it lies to this texel's plane, so a corner doesn't blur across.
+      - A neighbour farther in the world than its atlas step allows is skipped: another chart that merely sits beside this one in the atlas.
+      - A neighbour is also weighed by how near its luminance is, against 1.5 standard deviations of this texel's mean. The tracer now sums each path's squared luminance for that variance, prefiltered over the texel's 3×3 as in SVGF, and the variance is filtered through the passes too. A well-converged texel is therefore left nearly as it is.
+      - **Measured** on a sunlit red wall's two-bounce light on the floor: at 8 paths a texel, the error against a 1024-path bake fell to 0.45 of the raw bake's, and at 32 paths to 0.53.
+      - A wider luminance stop blurred more real gradient than it removed noise (4σ over five passes left 0.74 of the error). The cost is a little bias on smooth peaks: the glowing ceiling's view factor at the floor's centre now reads 0.97 of the analytic one, against 0.995 raw.
+    - **Seams.** `lightmapSeams` finds every edge two triangles share in the world that sits in two places in the atlas: two charts' borders, or a curved patch's triangles, each its own chart. It samples each seam about every half texel along its longer side, as four bilinear taps either side.
+      - `stitchLightmapSeams` solves least squares by conjugate gradients, for every channel: the lookups either side agree, and each texel stays near its value (stiffness 0.01).
+      - A hinge between a black floor and a white wall closes from a step of over 0.9 to under 0.1. Texels no seam touches keep their values exactly.
+    - **Texel density per object.** `MeshSidecarEntry.lightmapScale` (¼ to 4×, powers of two, stored only when not 1) multiplies the bake's Detail for that object. The object's lighting panel gains a "Light map detail" slider, so a piece seen up close takes more texels and a far wall fewer.
+    - *Tests (`lightmap-finish.test.ts`):*
+      - Seams are found on a hinge and not on a flat quad, and stitching closes them while leaving untouched texels alone.
+      - The density snaps, survives a save, stores nothing at 1 and scales the baked atlas.
+      - On Dawn:
+        - the box's foot (about 64 texels dropped, the edge kept bright, and dark without the limit);
+        - the one-sided wall (none dropped);
+        - the red wall's bounce denoised to under 0.6 of the noisy error;
+        - a synthetic floor beside a wall in the atlas and the world: noise halved, mean kept, nothing crossing the corner, unbaked texels left alone.
+      - F3d-1's suite passes with the finish on.
+  - **F3d-3, baked probe volumes: done** (`model/probeVolume.ts`, `bakeProbeVolumeGpu`). With WebGPU, the editor's bake makes its light probes a probe volume, which the AAA tier lights everything without a light map by: characters, physics bodies, what moves. The other tiers get their ambient cubes derived from the same bake. Without WebGPU, the CPU's ambient cubes are baked as before.
+    - **The bake.** Each probe casts rays over the whole sphere: a Fibonacci set over the bake, turned per probe about the vertical. They run through the same paths as a light map's texels (the tracer's path is now one function, `pathFrom`, shared by both kernels).
+      - The radiance is projected onto L2 SH, convolved with the clamped cosine and over π, as the sky's is (F3a). Unlike a texel's, a probe's light includes the sun on the surfaces it sees: those are what light a mover beside them.
+      - It also keeps the share of the sky's light that reached it.
+      - A probe is dropped as invalid when over 60% of its rays meet the backs of surfaces.
+      - Like DDGI (Majercik et al. 2019), it keeps the mean distance each 8 × 8 octahedral texel's rays travelled, and the mean of its square, capped at 1.5 times the spacing.
+      - The grid is planned at most 49 probes a side (`planProbeVolume`), so the volume texture stays within a 3D texture's width, and 4096 probes in all.
+    - **Storage.** `SceneLighting.probeVolume` stores half floats per probe: 27 SH values, visibility, validity and 128 depth moments. The scene's environment decodes it once per stored object.
+    - **Shading (AAA tier).** The volume rides in the probe grid's own 3D texture (group 1 binding 6), 41 texels a probe along x. `probeMin.w` = 2 marks it, so no binding is added; the fragment stage's storage buffers are all taken.
+      - A surface without a light map blends the eight probes round it, pushed out along its normal by 0.3 of the spacing.
+      - Each probe is weighed trilinearly, by a wrapped cosine toward it (DDGI's (½(1 + cos))² + 0.2), and by Chebyshev's bound on that probe seeing the point, cubed. A bright room's probes therefore don't light a point behind the wall they see.
+      - The result replaces the sky's SH irradiance in the diffuse, and its sky visibility joins the reflection's specular occlusion, as an HDR light map's do (F3d-1).
+      - With no valid probe seeing the point, the sky lights it.
+      - `sampleProbeVolume` is the CPU mirror, and the shader matches it.
+    - **The other tiers' ambient cubes** (`ambientCubesFromVolume`): each face is the probe's irradiance along it over the open sky's (the rig's sky SH), per channel, as a light map's ambient scale is. An invalid probe takes its valid neighbours' mean. The byte variant and the other renderers read only them.
+    - **In the editor.** Sixteen rays a probe for each of the CPU's rays, the same bounces as the light maps. A CPU rebake drops a stale volume, and Clear takes it with the cubes.
+    - *Tests (`probe-volume.test.ts`):*
+      - The plan's axis cap; the octahedral map covers every texel, and its inverse round-trips.
+      - Storage round-trips as halves, and a malformed volume is refused.
+      - The sampling is trilinear between probes that see the point. A wall the bright probes see 1 m off keeps their light from a point behind it (0.3 or more open, under 0.05 walled). Invalid probes are skipped, and null comes back with none.
+      - The ambient cubes are ratios over the sky, and an invalid probe is filled from its neighbours.
+      - On Dawn:
+        - an empty uniform sky gives its radiance every way, all of the sky, and depths at the cap;
+        - a metre above a wide grey floor, the sky is above (±7%), the floor's bounce below at its linear albedo (±15%), half the sky is visible, and the floor reads a metre down;
+        - a probe inside a closed box is dropped;
+        - the renderer lights a floor without a light map as the mirror says, within the reflection's few %, and keeps the light behind the wall, while the byte path is unchanged;
+        - the editor's GPU bake stores the volume and the cubes, the environment hands the volume over, and a CPU rebake or a clear takes it away.
+  - **F3d-4, what the renderer lights by: done** (`gpuLightmapper.ts`, `model/bakeSurface.ts`, `sceneSkyEnvironment`). The GPU bake now takes every light of the rig, each surface's textured albedo and metalness, and the sky the player draws. Light maps and the probe volume take them alike, through the shared `pathFrom`. The CPU bake is unchanged.
+    - **Local lights' bounce.** The lights move from the uniform to a storage buffer (group 0 binding 7, five vec4s a light): up to four directional, then up to 256 point, spot and area lights (`packBakeLights`, `bakeLights`).
+      - At each surface a path bounces off, every directional light is traced as before. One local light is picked by what it would give there unshadowed, with a tenth of the choice spread evenly so that no light is ever unpickable. Its light over the chance of picking it comes through one shadow ray.
+      - With many lights that is one ray where each light's would be many, and the estimate stays unbiased: one bright, seven dim and one out-of-reach light give the single light's 0.4 ρI within 5%.
+      - A point or spot light falls off as `distanceFalloff` does (inverse square windowed to its range, or (1 − d/range)²), and a spot narrows by the shader's smoothstep cone.
+      - An area light (F2e-2) is sampled at one point on its rectangle or disk, or on the rectangle a tube shows the point, as the LTC shader takes it. That point gives luminance × both cosines × area / π d², the renderer's diffuse units, from its lit face only.
+      - A light lights only what shares one of its lighting channels (F2e). The triangle's channels ride in its albedo's w, from `Occluder.lightChannels`.
+      - As with the sun, the texel's own direct light from them is left out, because the live lights draw it.
+    - **Metalness.** A surface bounces albedo × (1 − metalness), as the renderer's diffuse does. It adds a metal's own colour as far as the metal is rough: a rough metal's reflection is spread the way a diffuser's is, while a mirror's goes one way and is the reflection probes' (F3b) to carry.
+      - The metalness and roughness are the renderer's own (`resolvePbr`). A material that isn't shaded as PBR has none.
+    - **Textured albedo.** `Occluder.surfaces` carries each primitive's decoded base-colour and metal/roughness maps (`bakeSurfaces`). `buildBvh` reads each triangle's albedo from its map, in place of the factor × 0.55.
+      - The read is the map's mean over the triangle's UV footprint: the mip level whose texel is about the footprint's size, read trilinearly at the centroid with wrap (`footprintMean`), in linear light for a base-colour map and as data for a metal/roughness map.
+      - A triangle that tiles the map reads its mean; a sliver of a trim sheet reads its strip.
+      - The editor decodes PNGs with our own decoder and anything else with the browser's (KTX2 through the transcoder). A map neither can read keeps the old factor.
+    - **The sky the player draws.** `sceneSkyEnvironment` gives the environment the surface lights by: the rig's gradient, or its procedural or imported sky baked with its objects, clouds and vistas (I6, I7), carrying an HDR sky's own light (F3a-2).
+      - The surface's two sky bakes now share `litBySky` with it. The light maps, the probe volume and the other tiers' ambient cubes all take this sky in place of the gradient.
+    - *Tests (`bake-lights.test.ts`):*
+      - A map's footprint mean: its whole mean, a sliver's strip, a tiled triangle's mean, and sRGB decoded only for colour.
+      - `buildBvh` per triangle under a map: its albedo, metalness and channels. Without one, the plain BVH is unchanged (× 0.55, no metal).
+      - The bounce share at each metalness and roughness, and the channels in the packed material.
+      - `bakeSurfaces` resolves as the renderer does and asks for the metal/roughness map as data.
+      - The packed light records, and a rig's lights in linear light with their temperature.
+      - On Dawn, a black floor under a wide grey ceiling (ρ = 0.5) 1 m up, lit by a light just above the floor, so only the ceiling's bounce reaches the floor. Each case is checked against the closed-form integral 2ρ ∫ r · E(d) / d⁴ dr:
+        - an inverse-square point light gives 0.4 ρI, and a ranged one its (1 − d/range)² integral, each within 4%;
+        - a spot light gives its cone's integral within 5%, and none when it points away;
+        - a 10 cm rectangle and a disk of the same area give ρLA / 3π within 5%, and the rectangle none when it faces away;
+        - a light on another channel gives none, and the same light on a shared channel gives the full bounce;
+        - nine lights picked among give the sum without bias;
+        - a mirror metal gives none, and a half-rough metal half the dielectric's bounce;
+        - a white-factored ceiling with a red map bleeds red, where without its decoded map it bled the factor × 0.55's grey.
+      - The editor's scene bake under an orange procedural sky over a blue gradient: the floor reads the drawn sky's cosine integral within 5% in every channel.
+      - The F3d-1 to F3d-3 suites pass unchanged.
+    - *Left for F3d:*
+      - Re-baking Lockout and Beaver Creek with HDR maps, which waits on F11a's physical re-light.
+      - The CPU bake could take the seam stitching, the local lights and the maps too. It is left byte-identical for now, so `bake:map`'s stored maps don't move.
+      - Emissive maps (the bake takes the emissive factor) and a smooth surface's specular bounce (caustics) are not baked.
+- [x] **F3e. Real-time GI.** (Moving occluders in the BVH, and a per-frame probe budget, later; see below.)
   - **DDGI**: a probe grid whose irradiance and visibility are updated every frame by software ray tracing in compute, against a scene BVH or a global signed distance field.
   - **SSGI** for near-field detail on top.
   - Together they give moving lights, time of day and destructible scenery correct bounce light without a bake: the Lumen-class result, built from techniques WebGPU can run.
-- [ ] **F3f. Reflections.**
+  - **F3e-1, DDGI over the probe volume: done** (`model/dynamicGi.ts`, `render/dynamicGi.ts`). On the AAA tier, a rig can ask for real-time GI (`SceneLighting.dynamicGi`). The probe volume every surface takes its diffuse light from (F3d-3) is then traced and relit every frame on the GPU, so moving lights, the time of day (F5a-2) and a cart's sun bounce without a bake.
+    - **The volume** is the rig's baked one where it has one, as the starting point. Otherwise it is an empty one (no light, open, valid) laid a little past the scene's bounds at the set spacing (3 m by default), within the probe limits.
+      - It is the same buffer the scene shader reads (F5b-0 made it storage), written in place.
+      - While it is live, light-mapped surfaces read it too, so a moving sun doesn't leave baked light behind.
+    - **Trace** (a thread a ray, in compute, through the GPU lightmapper's own BVH tracer, built once from the still scene):
+      - each probe casts its rays (64 by default) over the sphere, a Fibonacci set turned by a fresh uniformly random rotation each frame;
+      - a miss takes the sky (the IBL's panorama);
+      - a hit takes its emission, plus its albedo × the light on it: the directional lights through a shadow ray, one local light picked by what it would give (as the bake picks it), and the volume's own irradiance there. So light bounces once more each frame, without end;
+      - a hit on a surface's back is dark and counted, and its distance cut to a fifth, so the visibility keeps light from leaking through walls.
+    - **Update** (a thread a probe's slot):
+      - the rays projected onto L2 SH as irradiance over π, the bake's own estimator;
+      - the probe's validity (most rays on backs means it is inside something) and its sky visibility;
+      - per octahedral texel, the mean distance and its square where this frame's rays fell;
+      - each blended into what the probe held by the hysteresis (0.97 by default).
+    - **Authoring.** The Lighting panel gains **Global illumination (AAA)**: Baked or Real-time, with Rays per probe, Steadiness and Probe spacing.
+    - *Tests (`dynamic-gi.test.ts`):*
+      - Settings read in range and survive a save. The grid lies past the bounds within the probe limits. The frames' rotations are orthonormal.
+      - The player hands the AAA renderer the still scene and one volume over its bounds, the same object frame after frame, and hands it nothing on other renderers.
+      - On Dawn:
+        - from nothing, the live volume converges within 8% on what the GPU bake (4096 rays, 4 bounces) gives the same floor under the sky and sun;
+        - in a closed room, a lamp switched on more than doubles the light at the probe beside it and lifts the room's far corner by bounce. Switched off, the probes fall back within 15% of the dark room's;
+        - the AAA renderer's wall gains the room's bounce over the frames: brighter after one frame than its direct light alone, and brighter still after sixteen.
+    - *Left for F3e:*
+      - **F3e-2:** SSGI for near-field detail, from the prepass's depths and the frame before (done; below).
+      - What moves isn't in the BVH: characters and physics bodies are lit by the volume but don't block or bounce its light. A refit BVH, or an SDF, would bring them in.
+      - The reflection probes capture with the volume as it was given, not as it is live. All probes update every frame. A budget per frame, and probe relocation out of walls, would scale it to large maps.
+  - **F3e-2, screen-space GI: done** (`render/ssgi.ts`). On the AAA tier, the near field's bounce the probes are too coarse to hold: a lit wall bleeds its colour onto the floor beside it.
+    - **When it runs.** A temporal frame with a prepass after another (it lights by last frame's image), unless the rig turns it off (`SceneLighting.screenSpaceGi`, on by default, with its reach and strength).
+    - **Trace** (half resolution, after the prepass): each pixel casts two rays over the cosine-weighted hemisphere about its G-buffer normal, turned per pixel and frame by interleaved gradient noise, and marches each 12 steps across the depths out to the reach (4 m by default).
+      - A step behind a surface by no more than a thickness is a hit. It takes what that surface sent the camera last frame: the TAA history (linear light before any tone map), found through the velocity buffer. So last frame's bounce is in it, and light bounces once more each frame.
+      - A hit on a surface's back is dark. Misses (off screen, past the reach) count as none. The screen's edge and the reach's end fade a hit; radiance is held to 32, so a glint doesn't speckle.
+      - It returns the rays' mean radiance (for cosine-weighted rays, the irradiance over π the shader lights its diffuse by) and the share that hit.
+    - **Accumulate:** into a history reprojected through the velocity buffer, held within two spreads of the neighbourhood's mean, at a tenth a frame.
+    - **Resolve:** to full resolution by a joint bilateral filter over the 3×3 half-resolution texels round each pixel (weighted by distance, depth and normal), times the strength, into the **second layer** of the screen-shading target. Binding 8 becomes an array in the linear variant, so no texture slot is spent.
+    - **Shading.** An opaque or cut-out surface takes its far-field irradiance (the sky's, the light map's or the probe volume's) only from the directions the rays left open, and the rays' light from the rest: `irr × (1 − a) + rgb`. The hits already hold the near-field occlusion GTAO measures, so with SSGI GTAO darkens only the specular.
+    - **Authoring.** The Lighting panel gains **Screen-space GI (AAA)**: On or Off, with Reach and Strength.
+    - *Tests (`ssgi.test.ts`, `dynamic-gi.test.ts`):*
+      - The settings read in range, default on, turn off and survive a save; the uniforms carry them.
+      - The player hands the AAA renderer the defaults, none on other renderers, and null when the rig turns it off.
+      - On Dawn: a glowing red wall beside a grey floor. After 24 frames the floor beside it reads 5.7× the red it had without SSGI (0.132 against 0.023), and less green, as the black wall hides the sky there. The floor 3 m away keeps its grey. The first frame, with nothing yet to light by, matches the frame without it.
+- [x] **F3f. Reflections.** (Reprojecting by the hit's own motion, and the BVH's moving objects, later; see below.)
   - Hierarchical-Z SSR with GGX importance sampling and a temporal denoiser.
   - Rough reflections that blend into F3b probes.
   - On Epic, ray-traced reflections from a low-resolution software BVH trace for off-screen objects.
+  - **F3f-1: done** (`render/hizReflections.ts`; the BVH kernel `giReflect` in `render/dynamicGi.ts`). On the AAA tier, a frame with reflections and the prepass's G-buffer traces them through a Hi-Z chain in place of I3's mirror march, which the other tiers keep.
+    - **The chain.** The prepass's depths are copied to an r32float chain (up to 10 mips). Each mip holds the nearest depth of the four texels under it, and of the odd row or column at an edge, so nothing falls between cells.
+    - **The ray** (one a pixel, full resolution). Normal and roughness come from the G-buffer. The view is reflected about a microfacet normal drawn from GGX's visible normals (Heitz 2018) for the roughness, turned per pixel and frame; a mirror's is the plain reflection.
+    - **The walk** (Uludag, GPU Pro 5). The ray is projected to the screen, where NDC depth runs linear along it, and clipped to the screen and short of the near plane (120 m reach).
+      - Up a level past a cell it is wholly in front of; down a level into one it may pass behind.
+      - At the finest level, a hit is where it passes behind the surface by no more than a thickness (0.3 m, plus 1% of the distance). Otherwise it steps on, at most 96 times.
+      - The hit gives that pixel's colour. Its confidence fades toward the screen's edges, toward the reach, for rays turning back toward the camera, and to nothing on a surface's back.
+    - **Denoise.**
+      - The trace is blended (tone mapped, Karis) into a history reprojected through the velocity buffer, held to the neighbourhood's box. Rougher surfaces keep more frames (from 0.3 of each new frame down to 0.06) and a wider box.
+      - It is then filtered over an 8-tap disc that grows with the roughness (to 7 px), weighted by depth, normal, roughness and each tap's confidence.
+    - **Composite** (as I3's): `colour − confidence · env + confidence · weight · hit`. The probes' reflection (F3b) gives way where the trace is sure and stays where it isn't, and the trace fades out from 0.56 to 0.8 roughness, so rough reflections blend into the probes.
+    - **Epic.** The player gains an **Epic** quality level (above High, never picked by "auto"; in the run overlay's and Lockout's menus) that sets `tracedReflections`.
+      - On the AAA tier the player then hands the renderer the still scene (`SceneDraw.reflectionTrace`). It is the same occluders and key as the live GI's, so the two share one tracer.
+      - A half-resolution compute pass traces each pixel's own GGX-sampled ray through the BVH from its depth and G-buffer. Each hit is lit as the live GI lights its own: emission, plus albedo × (the lights through shadow rays, and the probe volume's irradiance where there is one). A miss takes the sky.
+      - The screen trace then takes the BVH's light wherever its own confidence falls short, so what lies off screen still shows in a mirror.
+    - *Tests (`hiz-reflections.test.ts`):*
+      - The levels and uniforms; Epic sets the BVH trace and High doesn't. The player hands the still scene over at Epic on the AAA tier alone.
+      - On Dawn: each level of the chain is the nearest of the four texels under it.
+      - A mirror floor shows a glowing red block standing on it: 0.87 at its mirror image against the block's own 1.0, where without reflections it showed the probe's black sky (0.026).
+      - At roughness 0.35 the image spreads (0.47 at its middle); at 0.95 the probes' reflection is left as it was.
+      - At Epic, a red panel above the screen's top shows in the mirror (0.55), where the screen trace alone leaves the sky (0.026).
+    - *Left for F3f:* reprojecting the history by the reflected point's motion (the surface's own motion smears a mirror's reflection of something moving); moving objects in the BVH (as F3e).
 
 ### F4. Image quality and the camera
 
@@ -660,13 +1026,46 @@ Everything else depends on this track. It contains no visible "feature", but its
       - the mask marks what the see-through pass changed and nothing else.
       - Through the renderer: a still HDR scene converges to itself within 2%; a moving square leaves no trail; a see-through pane whose glow changes every frame shows the current frame's.
       - In Chromium, Beaver Creek on `aaa` runs the HDR resolve and its reactive mask with no errors.
-- [ ] **F4b. Temporal upscaling.** An FSR 2-class upscaler built on F4a. It renders at 50–77% scale, reconstructs at native resolution and pairs with dynamic resolution (F0d). It is how integrated GPUs and phones reach the tier.
-- [ ] **F4c. Physical camera.**
+- [x] **F4b. Temporal upscaling.** An FSR 2-class upscaler built on F4a. It renders at 50–77% scale, reconstructs at native resolution and pairs with dynamic resolution (F0d). It is how integrated GPUs and phones reach the tier.
+  - **F4b-1: done** (`render/upscaler.ts`). On the AAA tier's temporal frames with a prepass, a frame shown larger than it renders (`SceneDraw.upscale`, the display's size) is reconstructed at the display's size in place of F4a's resolve. `renderToTexture` then returns the upscaled frame.
+    - **Jitter.** The sequence lengthens by the display pixels a render pixel covers (FSR 2's rule): 8 × ratio² phases, so every display pixel gets samples (32 at half scale).
+    - **Gather.** The jitter moves what a render pixel shows by (jx, −jy) on screen, so render pixel q's sample stands at q + ½ − (jx, −jy). Each display pixel gathers the 3×3 render samples round its own position, each weighted by a Gaussian of its distance from the display pixel's centre (σ half a render pixel).
+    - **Blend.** The new frame's share is 0.1 × the nearest sample's weight: a display pixel no sample came near keeps its history, one a sample fell right on takes the full share. With no history the gathered samples stand alone, a plain filtered upsample.
+      - The history (display-sized, linear HDR) is reprojected through the nearest surface's velocity in the 3×3, read Catmull-Rom, and clipped to the render samples' variance box in YCoCg on Karis's tone map (γ 1.25), grown to hold the gathered colour. The reactive mask (F4a) takes more of the new frame.
+      - The blend itself is in linear light. A display pixel's samples come and go over the sequence, and a mean on the tone map lost half of thin highlights' light in the first test.
+    - **Sharpen.** F4a's contrast-limited pass, at the display's size (0.3).
+    - **Sizes.** The TAA history follows the display's size, and starts afresh when a frame changes between upscaled and not. SSGI (F3e-2), which reads it by UV, needs no change.
+    - **Player.** On the AAA tier's temporal frames with a prepass, the render scale is the lesser of dynamic resolution's (F0d, down to a half) and the preset's new `renderScale`: Medium renders at two-thirds (FSR 2's quality mode), High and Epic at full size until the GPU falls behind. The draw asks for the display's size back whenever the render is smaller.
+    - *Tests (`upscale.test.ts`):*
+      - The jitter sequence's length and range, and the uniforms.
+      - The player: Medium renders an AAA frame at two-thirds and asks for the display's size back, High renders at full size, and another tier never upscales.
+      - On Dawn: a fan of glowing slivers finer than the render's pixels, at half the display's size, reconstructed over 96 frames. It comes back at the display's size with a mean error against the native TAA frame of 0.0085, against a plain upsample's 0.0125, and the same total light (122.5 against 123).
+- [x] **F4c. Physical camera.**
   - Aperture, shutter speed and ISO drive both exposure and effects:
     - **bokeh depth of field** (gather-based, with near/far fields and a shaped aperture);
     - **per-object motion blur** (McGuire-style tile max on velocity);
     - histogram **auto-exposure** on the GPU, with metering modes and exposure compensation, replacing the CPU 8-bit luminance read.
   - Post volumes (P6) blend all of it.
+  - **F4c-1: done** (`editor model/physicalCamera.ts`, `player render/cameraEffects.ts`). A rig gains a physical camera (`SceneLighting.camera`; the Lighting panel's **Physical camera**).
+    - **Exposure.** EV100 = log2(N² / t · 100 / S), and physicalLight.ts's calibration makes that exposure 2^(15 − EV100) ("sunny 16" is exposure 1.02).
+      - In manual mode it replaces the rig's exposure, and post volumes' stops still add.
+      - In auto mode eye adaptation drives it (the rig's, or the default's), its key shifted by the compensation, metered as the camera says.
+    - **Metering** (the presenter's measure pass, on the AAA tier's linear frame). A 64-bin histogram of log2 luminance (−12..+8 EV) in workgroup memory, each sample weighted by the mode: alike everywhere (average), up to 4× toward the centre (centre), or a spot of a fifth of the frame's height (spot). The darkest and brightest tenth are dropped, and the rest's mean taken. Without a camera the plain log-average stays.
+    - **Depth of field** (half resolution, on the resolved HDR frame after TAA and the upscaler).
+      - Each pixel's circle of confusion comes from its depth by the thin lens: A·f/(s − f)/sensor · (1 − s/d), signed, held to 2.5% of the frame's width.
+      - The half-resolution frame weights each pixel by its own blur, so what is in focus stays out of it.
+      - The gather walks 48 taps in three rings, reshaped to the aperture's polygon (its blades). A tap counts where its own blur reaches back (scatter as gather), by the inverse of its blur's area. A tap behind spreads no further than the pixel's own blur; one in front spreads freely (the near field), and its cover is kept.
+      - The composite blends the sharp frame toward the gathered one by the pixel's blur or the near field's cover, upsampling the four nearest texels by how alike their blur is to the pixel's (so an in-focus edge doesn't bleed).
+    - **Motion blur** (McGuire et al. 2012). The velocity times the shutter's share of a 60 Hz frame (and a volume's strength), its largest per 16-px tile and over each tile's neighbours, then 12 jittered taps along it. A tap in front smears by its own motion's cone, one behind by the pixel's, plus both cylinders.
+    - **Post volumes** gain Aperture, Focus and Motion blur, pulled from the camera's own values as the grade is from neutral.
+    - *Tests (`physical-camera.test.ts`):*
+      - Sunny 16, a stop of aperture or ISO is a stop of exposure. The circle of confusion is none at the focus, negative nearer and limited far off, and stopping down a stop narrows it by √2. Parsing and saving; the volumes' pull.
+      - The player: manual exposure in the tone map, and the depth of field and motion blur handed over; the metering handed to the presenter in auto mode.
+      - On Dawn:
+        - The histogram's spot reads a bright disc at the centre (4 within a bin), the average drops it as the brightest tenth (under 0.065 against the plain log-average's higher reading), and centre-weighted lies between.
+        - Bars 20 m off lose their edges (sharpness 0.19 against 1.01) while bars 2 m off, in focus, keep theirs, and the far bars' light is kept within 15%.
+        - A bar sweeping 10 px a frame smears along its motion while one standing still keeps its edges.
+    - *Left for F4c:* exposure adapting on the GPU without the read-back; a focus pull from the camera's aim (autofocus); DOF and motion blur on the other tiers.
 - [x] **F4d. Tone mapping and output.**
   - Tone mappers: AgX, ACES 1.3 RRT/ODT and Khronos PBR Neutral, selectable per scene.
   - Grading in log or ACEScct space, and LUTs applied in the right space.
@@ -731,105 +1130,852 @@ Everything else depends on this track. It contains no visible "feature", but its
 
 ### F5. Atmosphere, weather and water
 
-- [ ] **F5a. Physically based sky.**
+- [x] **F5a. Physically based sky.**
   - Hillaire's 2020 atmosphere: transmittance, multiple-scattering, sky-view and aerial-perspective LUTs.
   - Rayleigh, Mie and ozone parameters, a planet radius, and a sun and moon in physical units.
   - Time of day drives the sun, sky, IBL (F3a) and fog together.
   - The stylised dome and rings stay as a "painted sky" option.
-- [ ] **F5b. Volumetric fog.** A froxel grid (for example 160×90×64) of scattering and extinction from height fog, local fog volumes and particles. It is lit by the sun with its shadow map, and by local lights with theirs, then temporally reprojected and integrated. **God rays emerge from it**, so the CPU screen-space shafts retire.
-- [ ] **F5c. Volumetric clouds.** Raymarched clouds with a Nubis-style shape plus erosion noise and weather maps, multiple-scattering approximation, temporal amortisation at quarter resolution, cloud shadows on the ground and aerial perspective.
-- [ ] **F5d. Water.**
+  - **F5a-1, Hillaire's atmosphere and its sky: done** (`model/atmosphere.ts`, `render/atmosphere.ts`). A sky dome gains a Physical mode (`ProceduralSky.atmosphere`) beside Gradient and Mountains. The AAA tier draws it per pixel in physical units; every tier is lit by it.
+    - **The medium** is Earth's by default (Hillaire 2020, in km):
+      - Rayleigh scattering (5.802, 13.558, 33.1)·10⁻³ with an 8 km scale height;
+      - Mie scattering 3.996·10⁻³ and absorption 4.4·10⁻³ with 1.2 km, Cornette–Shanks's phase at g = 0.8;
+      - ozone absorption (0.65, 1.881, 0.085)·10⁻³ in a tent 30 km wide about 25 km up;
+      - a 6360 km planet with 100 km of air and a ground albedo of 0.3.
+      - A creator scales the air, haze and ozone against Earth's, and sets the Mie anisotropy, the ground's albedo, the altitude, the planet's radius and the sun's size. The settings are stored sparsely and read defensively (`parseAtmosphere`).
+    - **The sun is the key light above the air.** Its linear colour × intensity is the sun's radiance in the renderer's units, so 1 is about 123.5 klx (F0b-2). The scattering takes π times that, because the renderer's diffuse carries no 1/π.
+      - `atmosphereLighting` tints the key light by the transmittance toward it, folding in its temperature: 0.94, 0.86, 0.76 at noon, orange near the horizon, and black once the sun has set.
+      - It aims the sky's own sun along the key light, so the shafts and the lens flare follow it. The player's frame lighting and the light bake both take it.
+    - **The CPU reference** builds the LUTs once per medium, in about 0.8 s:
+      - the transmittance LUT (256 × 64, Bruneton's mapping, 128 steps a ray);
+      - the multiple-scattering LUT (32 × 32: Ψ_ms over the sun's zenith cosine and the height, 64 Fibonacci directions of 20 steps, L₂ / (1 − f_ms));
+      - and `skyRadiance` from them: single scattering under both phases, the multiple scattering, and the lit ground, in 32 quadratically spaced steps with Hillaire's energy-conserving integration.
+    - **On the GPU** (`GpuAtmosphere`) the same three passes run in compute, line for line: the transmittance and multiple-scattering LUTs once per medium, and the sky view (192 × 108, Hillaire's mapping: finer toward the sun and the horizon) whenever the sun moves.
+    - **The AAA backdrop.** On a linear frame, the presenter's sky pass reads the sky view per pixel and adds the sun's disc: its illuminance over its solid angle through the air, held under 30 000. The frame tone-maps it with the scene. A byte-space frame draws the painted copy as before.
+    - **Every tier's light** comes through the imported-sky path (I6). The atmosphere renders an HDR panorama (256 × 128) under the key light:
+      - exposed into the 8-bit copy at the rig's exposure, the other tiers' backdrop and reflections;
+      - resampled as the AAA tier's IBL light (F3a-2);
+      - and, through `sceneSkyEnvironment`, the light bake's sky (F3d-4).
+    - **Authoring.** The Lighting panel's Sky dome gains Physical, with Air, Haze, Ozone, Sun glow, Ground albedo, Altitude and Sun size. The painted controls hide, and the painted sky's settings are kept for switching back.
+    - *Tests (`atmosphere.test.ts`):*
+      - Settings parse, resolve to Earth and survive a save.
+      - The transmittance LUT maps both ways, and the zenith's optical depth matches its closed form within 0.1%.
+      - Both phases integrate to 1 over the sphere.
+      - The sky is blue overhead at noon, red toward a setting sun and under 2% of noon once the sun has set. The noon horizon is brighter than the zenith.
+      - A high sun's clear-sky diffuse light is 6–25% of the direct beam, and haze whitens the horizon.
+      - The key light is tinted (orange at 3°) with the other lights left alone, and the disc's radiance × its solid angle is π × the transmitted sun.
+      - The sky view maps both ways, with the horizon at its middle row.
+      - On Dawn:
+        - the GPU's transmittance, multiple-scattering and sky-view LUTs match the CPU's texel by texel within 0.5%, 1% and 2%, and are not rebuilt for an unchanged sun;
+        - the presenter's backdrop is the CPU's sky radiance per pixel within 4/255, with the disc past white where the sun is;
+        - the GPU bake lights an open floor by the atmosphere's sky within 5%, blue where the gradient was not.
+      - The scene's environment carries the atmosphere's HDR light, and its 8-bit copy is blue overhead.
+      - The player hands the presenter the atmosphere, its sun above the air and the disc, and lights the renderer by the tinted key light and the atmosphere's light.
+  - **F5a-2, aerial perspective and the time of day: done** (`aerialColumn` and `bakeAerialPerspective` in `model/atmosphere.ts`; `AERIAL_WGSL` and `GpuAtmosphere.aerial` in `render/atmosphere.ts`). On the AAA tier, every surface stands behind the air between it and the eye, and a sun that moves re-lights the sky's light.
+    - **The volume** is Hillaire's froxel LUT over the camera's frustum:
+      - 16 × 16 columns across the screen, each a view ray through its centre;
+      - 32 slices along each, spaced quadratically out to 32 km, so the first slice's centre is 8 m out and half the slices fall inside 8 km;
+      - each froxel holds the light the air scatters toward the eye up to it, and the mean transmittance to it.
+      - A column is integrated slice after slice (4 steps a slice) with the sky's own energy-conserving step, over the transmittance and multiple-scattering LUTs. It is rebuilt in compute for every camera that draws, one thread a column, so the probes' cube faces get their own.
+      - The ray passes under the planet's ground as air at its foot, since the scene's ground is the scene's. Looking down from a ridge still hazes the valley.
+    - **Why a uniform buffer.** The AAA scene shader already binds the 16 sampled textures and 8 storage buffers a stage gets on every device. So the volume is kept as half floats in one 64 KB uniform buffer (two froxels a `vec4<u32>`), and filtered trilinearly by hand.
+    - **In the shader**, after the fog, each fragment finds its froxel from its world position through the camera's axes and focal terms, and its slice from its distance.
+      - The colour becomes colour × T + L, with L taken by coverage, since it is premultiplied after.
+      - An additive surface is only dimmed.
+      - Nearer than the first slice's centre, the air fades toward none.
+    - **Scale.** At ×1 a metre is a metre, so only kilometres haze over. The Lighting panel's **Aerial distance** (0–50, stored as `aerialScale`, 0 to 100) lays the haze of a large landscape over a small map. 0 turns it off.
+    - **Time of day.** When the key light above the air turns past about half a degree, or brightens or reddens a step (`physicalSunKey`, a cart's `cartbox.sun3d` included), the player re-renders the atmosphere's light for where the sun now is:
+      - 96 × 48, a row a frame (about 1.5 ms of CPU), so a sunset re-lights in under a second;
+      - then it is upsampled to the IBL's 192 × 96 and swapped in whole, never half done.
+      - The AAA tier rebuilds its prefiltered IBL and SH from it. Its reflection probes re-capture, as their key follows the environment.
+      - The other tiers' 8-bit reflections copy is made from it.
+    - *Tests (`aerial-perspective.test.ts`):*
+      - The setting parses in range, defaults to Earth's ×1 and survives a save. The slices map both ways, and a froxel column points along its camera ray.
+      - A short level stretch passes light as `exp(−σ_t d)` of the air at the eye's height (to 0.05%), and gathers a uniform slab's closed form `S/σ_t (1 − e^{−σ_t d})` (to 5%).
+      - Straight up, the volume thickens with each slice and its far end is 90–102% of the zenith's sky. Distant things go blue; tenfold aerosol hazes more; a set sun leaves the air dark.
+      - The volume is laid out as the shader reads it, a froxel's centre samples as itself, and the eye sees clear air. The frame's terms are off without a sky, for an orthographic camera, or at ×0.
+      - The player hands the AAA scene the air. After `cartbox.sun3d` lowers the sun, the environment keeps its old light until every row is drawn, then takes the new sky whole: within 5% of `skyRadiance` for the new sun, dimmer than at 40°, and with a new 8-bit copy.
+      - On Dawn:
+        - the GPU's volume is the CPU's froxel by froxel, within 1% for the light and 0.002 for the transmittance;
+        - a grey wall 3 km of air away (300 m at ×10) is colour × T + L of the CPU's volume within 2%, bluer for it, and is untouched at ×0 or without a sky.
+    - *Left for F5a:*
+      - The fantasy tiers' backdrop (the 1536 × 768 painted copy) keeps the sun it was baked for. Only their reflections follow the time of day.
+      - A time-of-day re-light drops the distant vistas from the reflections copy, which are drawn only at load.
+      - The probe volume and light maps are baked for one sun. Re-lighting them as the sun moves is real-time GI (F3e).
+      - The volume carries no shadows: the air in a mountain's shadow still glows. F5b's froxel fog, which marches the sun's cascades, will bring them.
+  - **F5a-3, the moon and the night sky: done** (`moonPhase`, `moonRadiance`, `moonLight` in `model/atmosphere.ts`; the moon's sky view in `GpuAtmosphere`; the backdrop in `gpuPresent.ts`). Every number comes from the moon's and the stars' physics, in the renderer's units, with no tuning.
+    - **The moon** stands opposite the sun by default (full), or wherever `moonDirection` puts it. It is a Lambertian sphere of albedo 0.12 and angular radius 0.26°.
+      - Its phase is the Lambert sphere's law: 1 full, 1/π at quarter, 0 new.
+      - As a light above the air it is albedo × Ω / π × the phase × the sun. For a sun of 1 (123.5 klx), a full moon gives about a quarter of a lux.
+      - `moon` scales it (0 removes it).
+    - **Among the rig's lights**, the moon is a directional light of its own, through the air toward it (`moonLight`).
+      - By day it comes after the sun, about a millionth of it, and adds nothing while it is set.
+      - Once the sun has set (its transmittance under 10⁻⁴), the moon becomes the key. So the GPU cascades, the volumetric fog and the light bake follow it.
+    - **The night sky** is the moon's light scattered by the same atmosphere, which is linear in its radiance.
+      - The CPU panorama adds it once the sun is down (`moonLightsSky`), when it no longer drowns in the day's.
+      - The AAA backdrop reads a second sky-view LUT built with the moon in the sun's place.
+    - **The AAA backdrop**, past the air:
+      - the moon's disc, each pixel the point of its near face that the ray meets, lit by the sun as a Lambertian sphere, through the air toward it;
+      - **stars**: a cube of cells over the sky (512 per face edge), about 9000 in all to magnitude 6.5. Each has a magnitude drawn so the count brighter than m grows threefold a magnitude, and an illuminance of 2.54 µlx × 10^(−0.4m). Each spreads over a Gaussian three-quarters of a pixel wide, so it keeps its illuminance at any resolution, through the air along the view;
+      - the night sky's own glow (airglow and unresolved stars, about 21.8 mag/arcsec²).
+      - `stars` scales both. At ×1 they want eye adaptation (or a raised exposure) to be seen, as at night.
+    - **Authoring.** The Physical sky gains **Moon** and **Stars**.
+    - *Tests (`night-sky.test.ts`):*
+      - The phase is 1, 1/π and 0 at full, quarter and new. A full moon gives 0.2–0.35 lx from its albedo and size, a magnitude-0 star 2.54 µlx, and the night glow is a millionth of the day sky. Settings read in range, and a direction given is kept.
+      - By day the sun stays the key. By night (the sun 30° down) the moon 30° up is the key, at its radiance through the air, with the set sun after it, dark.
+      - The night panorama adds exactly the moon's `skyRadiance`: blue, and under 10⁻⁴ of the day's.
+      - On Dawn:
+        - the backdrop's moon is the CPU's moonlit air plus albedo × transmittance × N·L at the pixel's point of its face, within 3%; off the disc, the moonlit air alone;
+        - stars stand over a hundred times the night glow, yet four-fifths of the sky has no star and is the glow alone.
+    - *Left for F5a:*
+      - The other tiers' painted copy of the night sky has the moonlit air but no disc or stars.
+      - The stars don't turn with the hour, and the moon has no texture (maria) or earthshine.
+      - The painted sky's objects, cloud layers and distant vistas draw over the other tiers' copy of the physical sky, but not over the AAA backdrop. F5c's clouds and a composite of the vistas will bring them back there.
+      - The CPU LUTs take about 0.8 s at load. A worker, or reading the GPU's LUTs back on the AAA tier, would hide that.
+- [x] **F5b. Volumetric fog.** (Particles adding density waits on GPU particles, F8a.) A froxel grid (for example 160×90×64) of scattering and extinction from height fog, local fog volumes and particles. It is lit by the sun with its shadow map, and by local lights with theirs, then temporally reprojected and integrated. **God rays emerge from it**, so the CPU screen-space shafts retire.
+  - **F5b-0, room in the scene shader: done** (`WebgpuSceneRenderer.ts`). The AAA scene shader bound the 16 sampled textures and 8 storage buffers a stage gets on every device, so a froxel volume had nowhere to go.
+    - The clustered lights' cell table and index list now share one storage buffer, the table first. That frees a storage slot.
+    - The probe grid and probe volume move from a 3D texture, which was only ever read texel by texel, into that slot, as a storage buffer indexed by the probe stride (`probeCount.w`). That frees a sampled texture for the fog.
+    - The image is unchanged: the probe, probe-volume, clustered-light and parity suites pass as they did, on Dawn as well.
+  - **F5b-1, the sun and sky through the fog: done** (`model/volumetricFog.ts`, `render/volumetricFog.ts`). On the AAA tier, a rig's fog can be volumetric (`SceneFog.volumetric`). Its densities become a medium that the sun lights through its cascades and the sky lights evenly. That light is integrated over a froxel grid and laid over every surface.
+    - **The medium** is the fog the rig already authors, read as extinction per metre:
+      - the distance fog's density everywhere;
+      - the height fog's density, thinning above its base;
+      - each fog box's density, thinning above its floor.
+      - The painted fade's start and maximum don't apply. The other tiers keep the fade unchanged.
+    - **The settings** are the albedo (what share of the light taken out is scattered, and in what colour), Henyey–Greenstein's anisotropy (0.6 by default: bright toward the sun), the reach (96 m by default, 8–1000) and the sky light's scale.
+    - **The grid** is a column every 12 pixels (at least 8, at most 160 × 90) and 64 slices spaced quadratically out to the reach.
+    - **Inject** (a thread a froxel, compute) takes the medium's extinction at the froxel and the light it scatters toward the eye:
+      - the sun's π E through the phase, and one comparison tap of the first cascade that holds the point, a texel and a half toward the sun;
+      - the sky's mean radiance (the IBL's L0) times the sky-light setting;
+      - both times the albedo and the extinction.
+    - **Temporal accumulation**, with TAA on: each frame jitters the sample within its froxel (Halton 2, 3, 5) and blends it 9 parts to 1 into the froxel's history, reprojected through the last frame's camera. So the shafts settle on their froxels' means rather than crawling. Without TAA, the froxels' centres are taken as they are.
+    - **Integrate** (a thread a column) runs front to back with the energy-conserving step, writing the light so far and the transmittance at each slice's centre.
+    - **In the scene shader**, after the painted fog (now turned off) and before the aerial perspective:
+      - each fragment finds its froxel through the camera's axes;
+      - the colour becomes colour × T + L, filtered by the hardware in the freed 3D texture;
+      - an additive surface is only dimmed, and nearer than the first slice's centre the fog fades toward none.
+    - **God rays** are the sun's shadow seen through the fog. With volumetric fog on, the AAA tier retires the screen-space shafts.
+    - **Authoring.** The Lighting panel's fog gains **Volumetric (AAA)**, with Scattering, Toward the sun, Reach and Sky light.
+    - *Tests (`volumetric-fog.test.ts`):*
+      - The settings parse in range, survive a save and resolve their defaults. The medium is the distance fog, the height fog and each box's own. Henyey–Greenstein's phase integrates to 1 and is even at g = 0. The grid is as stated at 1080p, 720p and small sizes.
+      - In an even fog lit by the sky alone, a column is the closed form `L = albedo × sky × (1 − e^{−σt})` to 6 places. It glows toward the sun, and where the sun is shadowed it is lit by the sky alone. The key light is read in linear light.
+      - The frame's terms are off without fog, and the jitter stays in its froxel with a mean of zero.
+      - On Dawn:
+        - the GPU's froxels, under height fog and a box, are the CPU's within 1% (and 0.003 for the transmittance);
+        - a grey wall 40 m into the fog is colour × T + L of the CPU's volume within 2%, and a volumetric fog with no medium leaves it as it was, so the painted fade has given way;
+        - 24 jittered frames of history converge on the centre-sampled volume within 5%;
+        - a roof between a low sun and the fog halves the light deep in the fog beneath it, while the fog beside it is lit as without the roof: a shaft's edge, from the real cascades.
+    - *Left for F5b:*
+      - The sky backdrop isn't fogged: it is drawn by the presenter, past the last slice.
+      - Scalability levels for the grid (fewer slices on phones), and per-pass timing in the budgets.
+  - **F5b-2, spot and point lights in the fog: done** (`fogLocalLight`; `localLights` in the inject pass). The fog is lit by the scene's spot and point lights as its surfaces are, so a lamp in mist casts a cone, and what stands under it casts a shadow into it.
+    - **The light** is each one's π × linear colour × intensity, its falloff (windowed inverse square, or the default curve) and its cone, through the fog's phase. Only lights in the default lighting channel take part. Area lights do not yet.
+    - **Which lights**: the ones every point takes (unranged), then those of the froxel's clustered-light cell. The froxel finds its cell by the pixel and view depth it stands at, as a fragment does, so the fog's cost per froxel is the scene's per pixel.
+    - **Their shadows**: a light with a tile in the spot/point atlas (F2d) shadows the fog by one hardware comparison in it (a point light's face by its dominant axis), with the tiles' world bias.
+    - So the fog pass now runs after the tiles are drawn, and before the prepass.
+    - *Tests:*
+      - CPU: a point light brings π I / d² × the phase, and a spot light the same inside its cone. Outside its cone, in another channel, or the sun: nothing.
+      - On Dawn:
+        - a clustered point and spot light in the fog are the CPU's froxel by froxel (within 1.5%), and lift it well past the sun's own light;
+        - a plate under a shadow-casting spot lamp halves the cone's light in the fog beneath it, and leaves the cone's other side as it was.
+- [x] **F5c. Volumetric clouds.** Raymarched clouds with a Nubis-style shape plus erosion noise and weather maps, multiple-scattering approximation, temporal amortisation at quarter resolution, cloud shadows on the ground and aerial perspective.
+  - **Done** (`model/clouds.ts` in the editor, the CPU reference; `render/clouds.ts` in the player, the GPU pass). A physical sky (F5a) gains a cloud layer (`atmosphere.clouds`); the AAA tier raymarches it, every tier takes its shadow.
+    - **The shape** is Nubis's (Schneider 2015, 2017):
+      - a tileable Perlin–Worley base (value-noise fbm remapped by billowy Worley) with three Worley octaves beside it, baked once into a 32³ volume; a finer three-octave Worley in a 16³ volume; a 64² weather map of four-octave value noise;
+      - the base remapped by its own fbm, times a height gradient that runs from a low stratus band to a cumulus tower by the layer's **Kind**, then remapped by the local cover (the **Cover** setting broken into patches by the weather map, less so toward overcast) and eroded at its edges by the detail noise, wispy at the floor and billowy above;
+      - the wind drifts it, the tops leaning ahead of the floor.
+    - **The light** at each of 48 steps through the layer's spherical shell on the atmosphere's planet (to 60 km):
+      - the sun's, through the air above the step (the transmittance LUT) and through the cloud toward the sun (six growing steps of the cheap shape), under a two-lobed Henyey–Greenstein phase (0.8 forward, −0.3 back);
+      - multiple scattering as Wrenninge's three octaves (a = b = c = ½), plus the light that has **diffused** through the rest, isotropic, by the two-stream slab's transmission 1/(1 + ¾(1 − g)τ) less what came straight through (g = 0.85). Without it a thick cloud's interior saw only the blue sky and came out blue;
+      - the sky's: half the upper sky's mean radiance (an isotropic phase over a hemisphere of sky), diffused down through the cloud above the step the same way, so an overcast floor is grey;
+      - Beer–powder darkening at the near edges; the energy-conserving step, as the sky's.
+      - Calibrated by physics, not tuned: under thick overcast at noon the floor reads about 0.03 of a sunlit white surface (an overcast sky gives about a tenth of the sun's illuminance), broken cumulus about 0.2, a thin cloud brighter toward the sun than away, and almost nothing once the sun has set.
+    - **On the GPU**, a compute pass marches a half-size target, a texel a thread, its first step jittered per pixel and per frame by interleaved gradient noise. Each frame blends 15% of itself into the last frame's result reprojected by direction (the layer is kilometres off, so the camera's turn is all that moves it), so the jittered march converges as if it took several times the steps. It holds the cloud's light already through the air in front of it (the transmittance LUT's ratio from the eye and from the cloud's mean depth) and the share of the sky that gets through.
+    - **The presenter** lays it over the physical sky after the sun's disc, the moon and the stars: `sky × T + cloud`, so the sun goes behind a cloud and the lens flare's visibility follows.
+    - **Shadows.** A cloud is kilometres across and an arena a few hundred metres, so the layer's transmittance along the sun from where the eye stands (eight steps up through the shell) dims the key light over the whole scene, in steps of 1/64 (`cloudShadedLighting`), on every tier. **Shadows** sets how dark (0.85 by default).
+    - **Authoring.** The Lighting panel's Physical sky gains **Clouds** (Clear or Volumetric) and, when on, **Cover**, **Base**, **Depth**, **Density**, **Kind**, **Size**, **Wind**, **Wind toward** and **Shadows**. The settings are stored sparsely and read defensively (`parseClouds`).
+    - *Tests (`clouds.test.ts`):*
+      - the settings parse in range and resolve to the defaults; the wind in km a second;
+      - the noises tile, and the baked volumes span their range and wrap;
+      - the height gradient's stratus and cumulus; density only inside the shell, more of it with more cover, none at none, and drifting with the wind;
+      - a clear sky lets everything through; overcast hides the sky (under 5%) and reads grey (its channels within 40% of each other) at a physical brightness; the forward lobe; dusk;
+      - shadows: none under a clear sky, by the setting under overcast, none with the sun down;
+      - on Dawn, the GPU's march at a fixed jitter is the CPU's texel by texel (the light within 10%, or 4% of the brightest, through the hardware's 8-bit filtering; the transmittance within 0.08), and looking up into the layer most texels see cloud.
+    - *Left for F5c:*
+      - Spatial cloud shadows (a shadow map over the scene) for maps larger than a cloud's edge.
+      - The fantasy tiers' painted backdrop and reflections don't show the layer; they keep their 2D cloud layers (I6).
+      - A view from above the layer (flying through it) marches correctly but its half-resolution history smears while the camera climbs through it.
+- [x] **F5d. Water.**
   - FFT ocean, and Gerstner waves for lakes and rivers.
   - Depth-based absorption and scattering.
   - Screen-space caustics, shoreline and wake foam, and interactive ripples (a GPU height simulation).
   - An underwater post pass and refraction through the surface.
   - It completes the parts left open in `BEAVER_CREEK_ROADMAP.md` B5.
-- [ ] **F5e. Weather.** Wetness, puddle and snow layers in the material system, driven by a global weather state and a height and occlusion mask: darkening, roughness changes and ripple normals in puddles. GPU rain and snow particles (F8a) collide with depth.
+  - **Done** on the `aaa` tier (`model/water.ts` in the editor, the CPU reference; `render/waterLook.ts` in the player, the frame's terms and the WGSL). A water material (B5's ripples) gains `absorption` and `scattering` per metre, `foam`, `waves` (Gerstner height) and `ocean` (the FFT ocean's share). The scene's first water surface is its **water body**: its top is the water plane, its extent the plane's bounds.
+    - **Waves.**
+      - Lakes and rivers: four Gerstner waves along the flow (wavelengths 6, 3.1, 1.7 and 0.9 m, turned off it, deep-water dispersion ω = √(gk)), their analytic slopes tilting the surface.
+      - Open water: an FFT ocean (Tessendorf 2001). A Phillips spectrum on a 64² grid over a 40 m patch, from the rig's wind (waves against it damped, those under 5 cm suppressed), seeded once; each frame (every other, as the waves are slow) the slopes' spectrum i·k·h̃(k, t) is inverse-transformed on the CPU (radix-2, rows then columns, about a millisecond) and tiled over the surface.
+    - **Ripples you make**: a 64² wave-equation grid, 25 cm a cell (16 m across), that follows the eye in whole cells so the ripples don't swim. A ring dropped in spreads at about 1.2 m/s and dies away. An eye wading (inside the body's extent, within 2 m of its plane) rings it every 40 cm it moves; `PlayerHandle.splash(x, z, strength)` drops one anywhere (a round landing).
+    - **No new bindings.** The scene shader already binds every sampled texture a stage gets, so the ocean's slopes (two half floats a point) and the ripples' heights ride in the frame's uniform buffer, filtered by hand (24 KB a frame), as the aerial perspective's froxels do.
+    - **Depth.** Through the surface, what the refraction sees loses light by Beer–Lambert over the water between (the depth behind against the surface's, both turned into view distance), red first, and the water's turbidity scatters the light that reaches into it back toward the eye: `behind·T + σ_s/σ_t·(1 − T)·light`. Deep water turns blue-green and murky; the creek's bed shows where it is shallow.
+    - **Foam** where the water is shallow over something (the shore, a rock: within half a metre at full foam), broken by drifting noise, laid over both the surface and what it shows.
+    - **Caustics** on what lies under the water plane: the sun through the water above it, focused into a moving web (two layers of folded noise, multiplied and sharpened, averaging the sun's own light), evening out with depth.
+    - **Under water**, every surface and the water surface seen from below take the water between it and the eye in place of the air.
+    - *Tests (`water-f5d.test.ts`):* the look parses and resolves; red is lost first, the in-scattering tends to σ_s/σ_t, deeper is darker and greener; foam at the waterline and none half a metre down; the Gerstner slope is its height's gradient; the FFT round-trips, the spectrum follows the wind, and the ocean's slopes are real, tile, move with time and grow with the wind; a ring spreads and dies away, and the grid follows the eye without the ripples moving; caustics average to the sun's light, sharp near the surface and even deep down.
+    - *Left for F5d:*
+      - Displacing the surface's vertices (it tilts the normal; a dense water mesh would rise and fall).
+      - The sky seen straight out under water keeps its air: only surfaces take the water between them and the eye.
+      - Caustics are in world space from a procedural web, not traced from the waves (no screen-space caustics pass).
+- [x] **F5e. Weather.** Wetness, puddle and snow layers in the material system, driven by a global weather state and a height and occlusion mask: darkening, roughness changes and ripple normals in puddles. GPU rain and snow particles (F8a) collide with depth.
+  - **Done** on the `aaa` tier (`model/weather.ts` in the editor, the CPU reference; `render/weather.ts` in the player, the WGSL). The rig gains `weather` (wetness, puddles, snow, rain, snowfall, a snow line and the patches' size); `PlayerHandle.setWeather` sets it at run time over the rig's.
+    - **Wet** (Lagarde, "Water drop 2b", 2013): a porous surface (by its roughness, not at all a metal) has its albedo raised toward the square and darkened a quarter, and every surface turns glossier, toward a roughness of 0.3.
+    - **Puddles** gather on what faces up (N·y from 0.92 to 0.985), in the hollows of a two-octave world-space noise, higher up their sides the more it has rained. Under one the surface is water: flat, mirror-smooth (0.03), darker through the water, a dielectric with water's f0 of 0.02, and rain rings it: two staggered grids of drops 0.4 m apart, each landing at a random place and time and ringing out over 0.6 s, fewer in lighter rain.
+    - **Snow** settles on what faces up (more of the slope the deeper it lies) above the snow line, its edge broken by the same noise: white (0.86–0.92), rough (0.6), its normal laid flat.
+    - **Shelter.** Each layer is scaled by the surface's sky visibility from the HDR light map (F3d), so what is under a roof stays dry and bare; without a light map the sky is taken as open.
+    - **In the shader**, after the decals and before the light, on opaque and cut-out surfaces only (water and glass are their own).
+    - **Falling.** Rain (up to 4000 drops a second, falling at 9 m/s, streaked along their motion) and snow (800 flakes, drifting down at 1 m/s through curl noise) are GPU particle emitters (F8a) spawned over the top of a 28 × 18 × 28 m box that follows the eye, and stopped by the depth buffer. The overlay remakes them with the scene's own emitters when what falls changes, and moves their origin every frame (`GpuParticles.setOrigin`).
+    - **Authoring.** The Lighting panel gains **Weather** (Dry or Weather): **Wetness**, **Puddles**, **Rain**, **Snow cover**, **Snowfall**, **Snow line** and **Patch size**.
+    - *Tests (`weather.test.ts`):* the settings parse and pack; a porous surface darkens and gloss rises, a metal only glosses; puddles only on up-facing ground in the open, more with more rain, none on a wall or under cover; snow above the line, facing up, in the open, patchy when light; rain rings a puddle and none without rain; a puddle's water and a drift's snow replace the material's terms; the emitters and their rates; only the linear-light shader carries it; on Dawn, a sunlit floor darkens by over a quarter when wet, brightens by over 40% under snow, and is unchanged with the weather off.
+    - *Left for F5e:* a top-down occlusion map for scenes without a light map (they read as open); the fantasy tiers keep their materials.
 
 ### F6. Geometry at scale
 
-- [ ] **F6a. Cluster rendering.**
+- [x] **F6a. Cluster rendering.**
   - Meshes are built into 128-triangle clusters with a **cluster LOD hierarchy** (simplify groups of clusters, Nanite's DAG with an error metric), so detail is continuous and crack-free.
   - Compute culls clusters (frustum, backface cone, two-pass HZB occlusion) and selects LODs by screen-space error, then emits indirect draws.
   - Film-quality meshes (millions of triangles) become placeable without hand-made LODs. A packed 32-bit visibility buffer for micro-triangles is an experiment at the end of the phase, not a dependency.
-- [ ] **F6b. GPU foliage.**
+  - **Done** (`editor model/clusterLod.ts`, `player render/clusterRendering.ts`), on the `aaa` tier with GPU culling.
+    - **The hierarchy.**
+      - Level 0 is F9c's clusters of the mesh.
+      - Each level above groups the clusters below by the edges they share, to about four full clusters' worth.
+      - A group is simplified to half on its own, its outline held still (`simplifyPatch`, the LOD simplifier on the patch's own vertices), and split into new clusters. So a group drawn coarse still meets its neighbours drawn fine.
+      - A group's error is the farthest its original vertices lie from its simplified surface, never under its clusters' own. The sphere it is seen from holds theirs. Its clusters take it as their parent's, and the clusters made from it as their own.
+      - The levels share the mesh's vertices, so a hierarchy costs its extra indices (about as many again as the mesh's).
+    - **Grouping that keeps coarsening.** Two fixes, found by measuring a 328 000-triangle sphere:
+      - Grouped by adjacency alone, a group's own clusters regrouped and its locked outline never moved again, so a far view still drew 28 000 triangles. An edge between clusters of different origins now counts eight times, so last level's outlines fall inside the new groups.
+      - A cluster left alone (its neighbours all taken) couldn't simplify: it now joins its neighbouring group.
+      - The far view now draws 10 900 triangles.
+    - **The cut** (`clusterVisible`): a cluster is drawn when its own error, seen from the eye, is under a pixel and its parent's is not. A group and every cluster made from it decide by the same numbers, so a group is drawn whole or replaced whole: no cracks.
+    - **On the GPU** (`ClusterRendering`). Each clustered copy is a job, a batch of its own. A workgroup per cluster:
+      - makes the cut through the copy's model (errors and spheres scaled by its largest scale);
+      - tests the frustum, and the normal cone. The cone is used only on a closed mesh: the renderer draws both faces, and an open mesh's back can show;
+      - appends the cluster's triangles to the job's region of an index buffer (a slot taken by adding to the draw's index count), which one indexed indirect draw draws.
+      - Two rounds. The prepass's: the cut, frustum and cone. The shading's: also against the prepass's Hi-Z pyramid (the instance cull's, and with MSAA its farthest-sample one), over the first round's indices.
+    - **Shadows** keep drawing the mesh's own triangles: a camera cut would drop casters off screen.
+    - **Where it's built.**
+      - A scan's game mesh (F9c) gets one.
+      - Any imported primitive of 20 000 triangles or more whose vertices stay put (not skinned, morphed or cloth) gets one (`withClusterLods`).
+      - It is stored with its mesh (`clusterLodCodec.ts`: indices and five vec4s a cluster, base64).
+      - Every other tier draws the mesh's own triangles.
+    - *Measured:* building takes 2.7 s for 82 000 triangles and 15 s for 328 000 (single-threaded, on import), about 40 s a million.
+    - *Tests:*
+      - `cluster-lod.test.ts`, on a 20 480-triangle icosphere:
+        - levels of at most 128 triangles over the mesh's own vertices;
+        - errors and spheres only grow upwards;
+        - every cut from 1.5 to 400 units is closed (no edge with one triangle: no crack) and coarser with distance;
+        - the hierarchy survives the mesh format and chooses the same cuts;
+        - it is built on import only for dense, still primitives;
+      - `gpu-clusters.test.ts` (Dawn):
+        - on an open mesh the GPU keeps exactly the CPU's cut;
+        - on the closed sphere, at two distances, the frame is the one the CPU's cut draws (within 1e-5): the cone and the pyramid drop only what nobody sees;
+      - `scan-import.test.ts`: a prepared scan's game mesh carries a hierarchy whose level 0 is its triangles.
+    - *Left:*
+      - the visibility buffer for micro-triangles (the roadmap's optional experiment), not attempted;
+      - a two-phase cluster cull (last frame's visible clusters first);
+      - building on a worker at import;
+      - clustered copies of skinned meshes.
+- [x] **F6b. GPU foliage.**
   - Instanced foliage culled per instance on the GPU with HZB, replacing the per-48 m merged block meshes.
   - Dithered LOD crossfade, and pivot-painter-style hierarchical wind (trunk, branch, leaf).
   - Octahedral impostors, replacing two crossed cards.
   - Translucency (F1d) on leaves and grass.
-- [ ] **F6c. Terrain at scale.**
+  - **Done** on the `aaa` tier with GPU culling. Every other tier draws the merged blocks as before.
+    - **A copy at a time.** Each block keeps its copies' matrices (`FoliageBlock.matrices`). On the GPU path, a block within its cull distance is drawn as its copies: the layer's own mesh (`foliageInstanceMesh`) at each copy's matrix, made once per block. The instance cull (F0e) then tests each copy against the frustum and the Hi-Z pyramid. Shadows still draw the blocks.
+    - **Wind in the world** (`bendIn` in the shader). A copy's mesh stores its layer's flexibility, negated, as its sway, and the shader bends each vertex in the world:
+      - the trunk about its copy's root, by its height above it (`foliageSway`, as blocks bake it), in the phase of where it stands;
+      - each branch about the trunk, by how far out it reaches, in its own phase;
+      - a leaf's quick, small flutter.
+      - The pivots come from the copy's own frame (its root and up axis): the vertex format has no room to paint them.
+      - The bend goes back into the copy's space through its rotation and scale, so a turned copy leans with the wind, not with its turn. Last frame's bend (motion vectors) and shadow casters use the same function.
+    - **Impostors as a LOD level, crossfaded.**
+      - An impostor layer's copies carry a two-level chain: the mesh, then its impostor at the swap distance. The GPU picks each copy's level (F0e-2).
+      - Within 10% either side of a switch, a copy is drawn in both levels, the finer going out as the coarser comes in. The cull leaves each draw's fade in the copy's record (the model's first column's `w`, 0 in an affine model), and the fragment keeps its side of an interleaved-gradient dither. Each pixel is drawn by exactly one level.
+      - A LOD level with maps of its own (an atlas) now binds them (`LodChain.textures`). Before, a sibling level drew with its first level's maps.
+    - **Octahedral impostors** (`bakeOctahedralImpostor`).
+      - 8 × 8 views of the mesh, each taken straight on and unlit from the direction its cell stands for on an octahedral map of the sphere, fitting its bounding sphere, in one atlas.
+      - Drawn on a single quad: the shader turns it to the eye about the copy's centre (keeping the world's up) and shows the cell the eye's direction, in the copy's space, falls in.
+      - The overlay bakes a layer's impostor once, off the frame that first needs it. Until then, the crossed cards the layer stores serve.
+    - **Translucent leaves and grass.** A layer's cut-out materials get F1d's diffuse transmission (0.35) unless they set their own.
+    - *Tests:*
+      - `foliage.test.ts`:
+        - blocks keep every copy's matrix;
+        - the drawn mesh's sway is its flexibility, negated, and its cut-out blades transmit;
+        - on the AAA path, no block is drawn, only the copies in reach;
+      - `gpu-culling.test.ts`: 36 copies at their switch are each drawn in both levels, each covered pixel is one level's colour (between 35% and 65% each), and together they cover what the plain mesh covers;
+      - `gpu-foliage.test.ts` (Dawn):
+        - two copies, one turned a quarter, both lean with a wind along +x, and the turned one exactly as an unturned one in its place;
+        - the octahedral map's round trip, and a bake's atlas;
+        - an impostor of a red-and-blue mesh shows red from +x and blue from −x, at 70–130% of the mesh's own coverage.
+    - *Left:*
+      - painted pivots (pivot painter's own textures), which need a vertex format with room for them;
+      - blending the three nearest impostor views (one is shown, so a view can change visibly as the eye moves);
+      - baking impostors at authoring time, not on first sight;
+      - the impostor's own normals.
+- [x] **F6c. Terrain at scale.**
   - Clipmap or CDLOD terrain from heightfields of 4K and up, displaced in the vertex shader with no CPU meshing.
   - A **runtime virtual texture** that caches the blended terrain layers, decals and splines into pages, so terrain shading costs one sample at any layer count.
   - Displacement or POM on near layers, and real geometry vistas at distance in place of a panorama.
-- [ ] **F6d. World streaming.**
+  - *Done (gpuTerrain.ts):*
+    - **Heightfields up to 4097².** A terrain stores up to 4097 heights a side. The CPU meshes no more than 257 a side (`meshableTerrain`: every stride-th height, its paint, a coarse cell cut where any fine one is), so the other tiers draw a large terrain from a coarse copy, and collision still reads every height.
+    - **CDLOD on the GPU.** The only mesh is one patch (16 × 16 cells).
+      - A quadtree over the terrain gives each node its height range, from a min/max pyramid of the cells built once.
+      - Each frame it picks the nodes the eye needs: a node splits while the eye, in the ground plane, is within 2.5 of its sizes. Choosing from 4097² takes under 20 ms on the CPU and gives fewer than 2,500 nodes; the pyramid itself builds in under 3 s.
+      - Each node is a copy of the patch, its model scaling the unit square to the node and the unit height to its range, so the GPU culls the copies as it culls any others (and the sun's cascades take a terrain that casts).
+      - The vertex shader reads the heights (16 bits a sample in an RGBA8 texture, bilinear by `textureLoad`) at each vertex and takes the normal from the heights at the node's spacing.
+      - Past 80% of a node's range a vertex morphs onto the node's coarser grid, finishing at the range's end, so neighbours a level apart share every edge vertex. The range and morph are chosen so a node's edge with a finer neighbour never morphs, and two levels never meet.
+    - **The virtual texture.**
+      - The layers are blended on the GPU into pages, a compute pass porting `terrainLayerWeights` term for term: painted weights, the rules softly or by first match, the blend's noise, curvature, triplanar projection, each layer's base, normal and metallic-roughness maps at the mip the page's texel covers, and the blend's sharpness.
+      - Pages sit side by side in one atlas each of albedo, tangent-space normal, roughness/metal and occlusion. Occlusion's G carries a relief height for parallax; its alpha is 0 over cut cells, which the draw discards.
+      - Each eye-following page is 512² texels, the nearest 12.8 m across (2.5 cm a texel), each next twice the last, up to eight; then one page of the whole terrain.
+      - A page re-bakes when the eye has moved an eighth of it. A node shades from its own level's page, whose window is sized to hold every node of that level the eye can choose, so shading is one sample a map at any layer count.
+      - The patch's material binds the atlases through placeholder keys the renderer adopts (`TerrainHost.adopt`), so every pass that binds a material binds the pages.
+    - **Relief.** A terrain's `relief` (0..0.5 m) displaces its level-0 nodes by the page's relief height, scaled by one minus the morph so they still meet their neighbours. Beyond those nodes the same relief shows by the existing parallax occlusion (`parallaxDepth`), weighted against the displacement already applied.
+    - **Vistas as ground.** On the AAA path a vista terrain is drawn as GPU terrain (its far nodes coarse, its far pages the whole terrain's) instead of being baked into the sky panorama.
+    - **Wiring.**
+      - The overlay hands the AAA renderer each terrain whose model is a translation, with its layers' decoded maps (`GpuSceneDraw.terrains`), and stops drawing (and casting) those terrains' blocks.
+      - Heights bind at a new vertex-stage binding 17 in the scene's and the cut-out casters' layouts; terrain casters draw through the cut-out pipeline.
+      - The draw uniform gains eight vec4s (1,264 bytes used of the 1,280 stride).
+    - *Also fixed:* three robustness faults in the GPU cull's shaders.
+      - The Hi-Z test now clamps its texel rectangle both ways and to the two texels a side its level guarantees, so a NaN rectangle reads nothing out of bounds.
+      - The compaction's prefix scan no longer indexes `scan[local.x - step]` below zero (`select` evaluates both sides).
+      - Compaction writes only records that fit the instance buffer.
+    - *Tests (`gpu-terrain.test.ts`):*
+      - Heights keep to 16 bits of their range.
+      - The nodes tile a 256 m terrain once over, finest at the eye, neighbours at most a level apart, each node's range holding its heights.
+      - Every morphed edge of every pair of neighbours at different levels, for three eyes, is one line (to 0.1 mm).
+      - A 4097² terrain: plan and selection times; its eye pages holding their levels' nodes; its 257² CPU copy.
+      - `relief` round-trips, and a 300² terrain reads.
+      - On the AAA overlay, the terrain is a GPU source and its blocks neither draw nor cast; elsewhere they do.
+      - On Dawn: drawn from its heights, a 129² hillside covers what its CPU mesh covers (98% overlap), 85% of shared pixels within 0.08 of its colour; its holes stay open.
+    - *Left:*
+      - Decals and splines baked into the pages (they still draw over the terrain as they did).
+      - Toroidal page updates (a moved page re-bakes whole).
+      - A terrain on a turned or scaled parent stays on its CPU blocks.
+      - Holes still cast shadows.
+      - A fault, already on the branch before F6c: Dawn's software rasteriser (SwiftShader) dereferences a null descriptor in its compiled GPU-cull code on some frames (two plain boxes at the frustum's edge reproduce it). The terrain's Dawn tests therefore draw with the prepass but without the GPU cull; the fault hasn't been seen on hardware.
+- [x] **F6d. World streaming.**
   - The world is divided into a grid of cells, each streamed in by distance in a worker (geometry clusters, textures by mip, foliage, probes).
   - A world-partition editor shows what is loaded.
   - It builds on the distance-group streaming of `streaming.ts`.
+  - *Done (worldPartition.ts):*
+    - **Cells.** A streaming scene with a cell size (`streaming.cell`, 8–1024 units) puts each stream group (an object and its children, as before) in the grid cell its box's centre falls in. A cell's box is the union of its groups', so a tower in range by its top is in range.
+    - **Loading by cell.**
+      - A cell coming within range is requested: the host fetches its objects' assets (`streamAssets`, as for spatial loading), and the overlay decodes their maps in its decode workers (`loadCell`). Only then is the cell loaded and its objects shown and simulated.
+      - At most two cells prepare at once, nearest first, so a fast focus fills in round itself.
+      - A cell past range by the unload margin unloads, cancelling a preparation in flight (one that finishes later shows nothing).
+      - Unloading puts its objects back to bare (no maps) and gives back the GPU geometry of every mesh no loaded object still uses (`releaseMeshes`; a skinned or cloth mesh stays). It uploads again if the cell returns, cluster hierarchies (F6a) included. The images the cells shared go when no cell holds an object.
+      - Until its cell loads, a streamed object isn't decoded at all, so a world's start-up cost is its loaded cells', not its whole map's.
+    - **Foliage** blocks stream with their cells, where before terrain-borne objects never streamed.
+    - **The editor.** The Streaming panel turns on loading by grid cells, sets the cell size, and draws the partition from above: each cell with its object count, shaded loaded, held (past range, inside the margin) or out for a focus you click on the map, with the range's circle. `Player.worldPartition()` reports the running cells' states and distances.
+    - *Tests (`world-partition.test.ts`):*
+      - Groups land in the cell their centre falls in, the cell's box the union of theirs.
+      - Cells load nearest first, two at a time; a cell shows only once prepared; one leaving range mid-preparation unloads, and its late finish shows nothing; a loaded cell holds within the margin.
+      - The cell size reads, clamps and round-trips through the sidecar.
+      - A streamed object stays bare until its cell loads; unloading one of two objects that share a mesh keeps it, and unloading the second gives it back.
+      - Foliage streams with cells only when there are cells.
+      - The editor's cells and their loaded, held and out states for a focus.
+    - *Left:*
+      - Textures by mip per cell (the AAA tier's feedback streamer, F1b, already loads mips by what the frame samples, cells or not).
+      - Reflection probes by cell (they capture once and stay).
+      - Fetching each cell's geometry from its own file (the sidecar is still one file; the cell decodes and uploads it lazily).
 
 ### F7. Characters and animation
 
-- [ ] **F7a. GPU skinning and morph targets.**
+- [x] **F7a. GPU skinning and morph targets.**
   - Compute skinning, with a dual-quaternion option and writing to the velocity buffer.
   - glTF morph targets on import, with sparse deltas and GPU blending.
   - Corrective shapes driven by joint angles.
-- [ ] **F7b. Faces.** A facial rig standard (ARKit's 52 blend shapes, or FACS), with animation import, phoneme-driven lip sync from audio, and look-at with saccades.
-- [ ] **F7c. Character shading.**
+  - **Done.** The `aaa` tier skins on the GPU (`player render/gpuSkinning.ts`); every other renderer skins the same way on the CPU (`editor model/morphTargets.ts`), which is the reference the compute pass is held to.
+    - **Compute skinning.** A live copy made with `{ gpu: true }` no longer touches its positions: an update hands the primitive the pose's matrices and its targets' weights, and the renderer's compute pass writes position and normal straight into the vertex buffer the scene draws (now `STORAGE` as well). The bind shape, the influences and the packed morphs are uploaded once per primitive; a frame writes only the joints and the weights. The overlay makes GPU copies when its renderer says `gpuSkinning`.
+    - **Motion vectors.** Before the pass writes, the vertices it had are copied to the previous-position buffer (F0c), as the CPU path's upload already did, so a skinned mesh's velocity is unchanged.
+    - **Morph targets** (`MeshPrimitive.morphTargets`): glTF's targets on import, position and normal deltas, with the mesh's default `weights` as `MeshAsset.morphWeights` and names from `extras.targetNames`.
+      - Deltas take the node's linear part without normalising, and normals its normal matrix.
+      - **Sparse accessors** are read for every float attribute, targets included.
+      - The GPU reads the deltas packed per vertex (`morphCsr`): a vertex costs only the targets that move it. Up to 64 targets a primitive.
+      - Export writes them back as dense accessors with the mesh's weights and names; the mesh format keeps them (and their drivers) in base64.
+    - **Corrective shapes.** A target with a `driver` takes its weight from a joint's turn: smoothstepped from 0 at its first angle to 1 at its second. The turn is read from the pose (against the joint's rest rotation) or, when the caller has only the skinning matrices, from them (against the parent's).
+    - **Dual quaternions** (Kavan), per mesh (`MeshAsset.dualQuaternion`), on both paths. A joint's scale is dropped; a half-twisted vertex keeps its distance from the bone where linear blending collapses it.
+    - *Tests:* `Unit Tests/gpu-skinning.test.ts` covers:
+      - blending targets (normals renormalised), the per-vertex packing, a corrective's weight from the pose and from the matrices alone, a live copy morphed then skinned;
+      - dual quaternions against linear blending for a rigid joint, and the twist that collapses one and not the other; a mesh that asks for them;
+      - targets, drivers, weights and the method through the mesh format, targets and weights through glTF, a sparse target scaled by its node;
+      - on Dawn: the compute pass's positions and normals against the CPU's, by linear blending and by dual quaternions, the bulge and the corrective on, the previous buffer holding the rest pose, the UVs untouched; the CPU copy stays in its bind pose.
+    - *Found, then fixed:* the transform the importer used for directions normalises them, which would have turned a 2 cm delta into a metre; deltas now take the linear part as it is.
+    - *Left for later:* the editor's UI for adding targets and drivers (they arrive by import or by script); tangents on a GPU-skinned copy (it takes the derivative frame, as the CPU copy did); compressed (quantised) deltas.
+- [x] **F7b. Faces.** A facial rig standard (ARKit's 52 blend shapes, or FACS), with animation import, phoneme-driven lip sync from audio, and look-at with saccades.
+  - **Done** (`editor model/faces.ts`, `player anim/faceDriver.ts`), on F7a's morph targets.
+    - **The standard is ARKit's 52 shapes.** A mesh's targets are matched to them by name, forgiving the usual spellings (`eyeBlink_L`, `EyeBlinkLeft`, `eye_blink_left`, `blendShape1.eyeBlinkLeft`, `ARKit_…`). A face driven in ARKit's terms drives whichever targets the mesh has; the rest keep the mesh's own weights.
+    - **Animation in:**
+      - glTF's morph-weight channels (`weights`) import as a clip's `morphs`, beside its joint channels or alone on a mesh without a skeleton. They export the same way and are stored in the mesh format.
+      - Live Link Face's CSV recordings (timecode, then a column per shape) read as a face clip.
+      - The animation session plays a clip's weights with its joints, and the overlay re-morphs the live copy (F7a), on the GPU on `aaa`.
+    - **Lip sync** to Oculus's 15 visemes, each an ARKit mouth:
+      - **from timed phonemes** (ARPAbet, as a forced aligner or a TTS engine gives them);
+      - **or from the audio itself.** Per 20 ms frame it measures the loudness, the hiss (what a first difference keeps, 1 for white noise) and the first two formants. The formants come from 12th-order linear prediction (Levinson-Durbin) on the pre-emphasised, Hamming-windowed frame, as the peaks of its envelope. Quiet frames are silence, hissing ones SS, and the vowels are placed by F1 (open) and F2 (front): aa, E, ih, oh, ou.
+      - Each viseme eases in over 60 ms before its span and out after it, and the strongest of overlapping shapes wins, so a closure shows through the vowels round it (coarticulation).
+    - **Gaze:**
+      - the eyes turn toward a target in the head's space, clamped to their range, by saccades whose duration follows the main sequence (21 ms + 2.2 ms a degree), with a velocity profile quick out and easing in;
+      - fixations of 200 to 600 ms end in micro-saccades within half a degree of the target;
+      - blinks every 2 to 6 s;
+      - seeded, so a replay looks the same;
+      - out as ARKit's eyeLook and eyeBlink weights.
+    - **`FaceDriver`** layers an expression, a recorded face clip, the lip sync and the gaze, each shape the strongest of them, into the mesh's morph weights every frame.
+    - *Tests:* `Unit Tests/faces.test.ts` covers:
+      - the shapes and their spellings; a mesh's rig and its weights, the unnamed target kept;
+      - Live Link Face's timecodes and CSV, sampled between frames; glTF weight channels in and out, sampled, and through the mesh format;
+      - phonemes to visemes, with repeats merged; the easing across neighbours;
+      - LPC finding a synthetic vowel's formants; frames classified as silence, hiss and five vowels; a recording turned into its visemes in order;
+      - gaze angles and clamps; a 17° saccade's duration, the fixation's micro-saccades within half a degree, a blink, the same seed giving the same gaze; the eye shapes and their layering;
+      - a `FaceDriver` speaking, looking and keeping a target ARKit doesn't name; a skinned clip's weights through the animation session.
+    - *Left for later:*
+      - a cart scripting call to make a character speak, look or emote (the driver is the runtime's, not yet Lua's);
+      - FACS action units as a second standard;
+      - playing a clip of weights on a mesh without a skeleton (the animation session plays skinned objects);
+      - eye joints driven by the gaze's angles, for rigs without eyeLook shapes;
+      - a phoneme recogniser beyond the formant classes: consonants other than SS come from phonemes only.
+- [x] **F7c. Character shading.**
   - **Skin:** F1d SSS with a dual-lobe specular, micro-normal detail and cavity.
   - **Eyes:** a refractive cornea, an iris with parallax and caustic, and a wet tear line.
   - **Hair:** strand cards with Marschner or Kajiya-Kay anisotropic shading, alpha-to-coverage with TAA, depth-sorted opacity and shadowing.
   - **Teeth and mouth:** occlusion.
-- [ ] **F7d. Cloth and secondary motion.** A GPU position-based dynamics cloth with skinned constraints, colliders from the ragdoll shapes and wind, plus jiggle and spring bones for straps, antennas and hair.
-- [ ] **F7e. Animation quality.**
+  - **Done** on the `aaa` tier. A material's `character` (`editor model/characterShading.ts`) names its shading model, `skin`, `eye`, `hair` or `mouth`, with its terms; every term has a default. The linear-light shader lights it with its own lobes (`player render/characterShading.ts`), under each light's falloff and shadows like any other surface. The other renderers draw it as its ordinary PBR; skin keeps its F1d scattering everywhere.
+    - **Skin:**
+      - two GGX lobes, as Unreal ships them: at 0.75× and 1.3× the material's roughness, the broader one 15%, so the oily sheen and the skin's own roughness both show;
+      - pores: a value-noise micro-normal tiled finely in UV (96 a UV unit by default);
+      - the occlusion map's cavities darken the specular as well as the diffuse, for every light and the environment;
+      - the F1d subsurface scattering carries on underneath, its diffuse split out as before.
+    - **Eyes:** one mesh whose UVs are centred on the pupil.
+      - Inside the iris radius the surface is the cornea, smooth (roughness 0.06) as its tear film keeps it.
+      - The view refracts through it (IOR 1.376) to the iris plane `irisDepth` behind, along the eye's axis (the mesh's +Z), and the iris is sampled where it lands: parallax that moves with the eye and the viewer.
+      - Each light refracts too: the iris takes its light through the cornea, gathered on its far side (the caustic).
+      - A dark limbus ring rims it.
+    - **Hair:** strand cards whose strands run along V.
+      - The diffuse is wrapped. The specular is Kajiya-Kay's along the strand, two lobes shifted along the normal as Scheuermann shifts them: the white R toward the tip, and the coloured, broader TRT toward the root. Light from behind scatters through toward the viewer (TT).
+      - **Coverage.** A masked card's alpha becomes a dither, Interleaved Gradient Noise moved every frame. TAA averages the frames into the fraction: alpha-to-coverage without MSAA. The depth prepass dithers alike, so the two agree.
+      - A blended card draws its triangles back to front from the eye: sorted on the CPU in its mesh's space and written over its indices whenever the eye moves a centimetre.
+      - Its shadow is the cut-out caster's (F2a-2).
+    - **Mouth:** teeth, gums and tongue darken with distance behind the opening, a point in the mesh's space, to `occlusion` at `depth`, and less as `open` (set by the cart) opens it. Diffuse, specular and the environment alike.
+    - **Files:** the field is stored with the material, inherited by instances, and written to glTF in the material's extras (`cartboxCharacter`, beside F1d's `cartboxSubsurface`).
+    - *Tests:* `Unit Tests/character-shading.test.ts` covers:
+      - reading and clamping the field; its defaults; that it puts a material on the PBR path; the mesh format and glTF;
+      - the dual lobe against one; the pores' tilt; the cavity;
+      - the iris's mask and limbus; Snell's law and total internal reflection; the parallax's direction and its growth with depth; the caustic's side;
+      - Kajiya-Kay across a strand against along it, the shifted tangent, the forward scatter, the dither averaging to alpha over 64 frames, sorting triangles;
+      - the mouth's occlusion with depth and opening;
+      - on Dawn: skin's two lobes against one at the highlight and off it, and its pores; the iris seen shifted from the side (a split map turns from blue to red); a hair card lit across its strands, not along them, and through it from behind; a masked card's coverage near its alpha, with a new pattern each frame; a blended card's near strands over its far ones although listed first; a mouth darker deeper in, and less so open.
+    - *Left for later:*
+      - a separate wet tear-line mesh: the cornea's smoothness stands in for now;
+      - deep opacity maps for hair's self-shadowing;
+      - Marschner's full longitudinal and azimuthal terms;
+      - dual-lobe reflection of the environment, which takes one lobe at the material's roughness;
+      - the path-traced reference's character models;
+      - UI for the field: it arrives by import or by script.
+- [x] **F7d. Cloth and secondary motion.** A GPU position-based dynamics cloth with skinned constraints, colliders from the ragdoll shapes and wind, plus jiggle and spring bones for straps, antennas and hair.
+  - **Done** (`editor model/cloth.ts`, `player render/clothGpu.ts`).
+    - **Cloth** is a primitive's `cloth`: each vertex's `maxDistance` from where skinning puts it, plus the material (stretch, bend, damping, wind response, thickness).
+      - The vertices are particles in the mesh's space, with the skinned shape as their anchor. Each step predicts them from their velocity, gravity and the wind. Then 16 sweeps pull them toward their rest lengths along the triangles' edges (stretch) and across each edge's two triangles (bend), each sweep ending with the skinned constraint and the colliders.
+      - **The solve is Jacobi**, over-relaxed by 1.5: each particle averages its constraints' corrections from the same positions. The CPU and the GPU run it alike, the GPU a thread a particle, ping-ponging two buffers.
+      - **Skinned constraints:** a particle keeps within its distance of its skinned place, and 0 pins it there. `clothFromHeight` authors the distances: a collar or waist held, freer toward the hem.
+      - **Colliders** are capsules along the bones (joint to first child), sized by the ragdoll's radii (H9), measured without the cloth, and recomputed from each frame's skinning matrices.
+      - **Wind** pushes a particle by its speed relative to the air, scaled by how squarely its surface faces it.
+      - **On the GPU** (`aaa`), in GPU skinning's compute pass (F7a): predict reads the skinned vertices, the sweeps follow, and finish writes the positions and area-weighted normals back. Motion vectors keep the vertices from before the frame, as skinning does.
+      - On the CPU (every other renderer) the live copy steps the same solve after skinning and recomputes its normals.
+    - **Spring bones** are a mesh's `springs`, chains of joints as VRM's spring bones are.
+      - Each joint's tail (the next in the chain) is a Verlet particle: dragged, pulled back toward where the animation holds it (stiffness a second), pulled by gravity, kept at the bone's length and out of the capsules. The joint then turns toward it in its parent's frame.
+      - The animation session steps them once a tick, after the clips, the blend and IK.
+    - Both are stored in the mesh format.
+    - *Tests:* `Unit Tests/cloth.test.ts` covers:
+      - a sheet's stretch and bend links; pushing out of a capsule; distances by height;
+      - a sheet laid flat swinging down from its pinned row, its edges within 8% of their length; a sheet held within its distance, kept off a capsule behind it and blown forward;
+      - capsules along the arm's bones, moved with the skeleton; a spring chain lagging a moving root and settling back;
+      - cloth and springs through the mesh format; a live copy's cape with its collar moved with the root and its hem lagging;
+      - on Dawn: the cape simulated on the GPU within 5 mm of the CPU after 20 frames (f32 against f64), its hem off its skinned place and its normals unit length.
+    - *Left for later:*
+      - self-collision;
+      - tearing;
+      - long-range attachments for very long cloth;
+      - capsule colliders authored by hand (only the bones' for now);
+      - the world's wind reaching a character's cloth through the player (the live copy takes a wind, which the overlay doesn't yet pass);
+      - jiggle (soft-body) deformers beyond spring chains.
+- [x] **F7e. Animation quality.**
   - **Motion matching:** a pose database searched every few frames.
   - Full-body IK with foot placement on terrain.
   - Physics-driven ragdoll blending (powered ragdolls).
   - Root motion, and an animation compression format.
   - It builds on the state machines, blend spaces, IK and retargeting already present.
+  - **Done** (`editor model/motionMatching.ts`, `footPlacement.ts`, `poweredRagdoll.ts`, `clipCompression.ts`).
+    - **Root motion.** `rootMotion` reads how far the root went between two times of a clip, forward, sideways and round, in its frame at the start. `inPlace` takes the travel out of a pose. The animation session reports each object's root motion over its last step, across a loop's wrap.
+    - **Motion matching** (Clavet; Holden et al.):
+      - **The database:** every clip at 30 Hz becomes a feature vector. It holds the feet's positions and velocities and the hips' velocity, root-relative, and where the root will be and face 0.33, 0.67 and 1 s on (wrapping a looping clip). Each group is normalised by its deviation and weighted (the trajectory 1.5×).
+      - `matchSetupFor` finds the hips and the feet by name.
+      - **The search** runs every 0.1 s, brute force with early-out. It builds the query from the pose playing and the trajectory asked for, and jumps only when the best frame beats the one playing by 10% (hysteresis), crossfading 0.2 s.
+      - **The trajectory:** `desiredTrajectory` integrates a critically damped spring from the character's velocity toward the one asked.
+      - In the session, `matchMotion(object, velocity, facing)` each tick drives an object's playback. The character's own velocity closes on the asked one with a 0.2 s half-life.
+    - **Foot placement** (`placeFeet`):
+      - each foot's ground comes from the caller's height-and-normal query;
+      - the pelvis drops by the most any foot must reach down, capped at 50 cm;
+      - each leg solves two-bone IK to its ground plus the height the animation held it above flat ground, so a stride's lift is kept;
+      - each foot then lies along its slope;
+      - all of it scales by a weight.
+    - **FABRIK** (`solveFabrik`) bends any chain to reach a point, backward and forward until within 0.1 mm, or points it straight when out of reach, then turns each joint along its new bone.
+    - **Powered ragdolls** (`PoweredRagdoll`), on H9's ragdoll:
+      - each step the ragdoll steps under gravity and collision, then each particle is pulled toward where the animation puts its joint, by stiffness × power;
+      - the shown pose is the ragdoll's blended into the animation's by the power;
+      - a `hit` knocks the power down and shoves the body, and the power ramps back over `recover` seconds until it hands back to the animation.
+    - **Compression:**
+      - `reduceClip` drops each channel's keys that linear interpolation (nlerp for rotations) rebuilds within a budget: 0.002 rad, 0.5 mm, 0.1% scale. A constant channel becomes one key.
+      - `packClip` stores 16-bit times, rotations as "smallest three" in 48 bits (under 0.0002 rad), and translations and scales as 16 bits over each channel's range.
+      - A 30 fps walk packs over three times smaller, every pose within the budget.
+    - *Tests:* `Unit Tests/animation-quality.test.ts` covers, on a procedural biped:
+      - root motion forward and round; the pose in place;
+      - the setup by name; the trajectory's spring; walk, idle and turn picked by what's asked, and no jumps while still asked the same; the session matching to the walk and reporting its 1.4 m/s of root motion;
+      - the pelvis dropped to the lower foot's ground, each foot on its own; a foot along a slope; FABRIK reaching and stretched straight;
+      - a powered body following at full power, shoved while weak and back in place once recovered;
+      - key reduction keeping a line's corner; quaternion packing's error; a walk three times smaller within its budget.
+    - *Left for later:*
+      - foot placement and the powered ragdoll wired into the runtime's IK and death requests (they are library calls for now);
+      - a KD-tree for databases past a few thousand frames;
+      - inertialization in place of the crossfade;
+      - storing clips packed in the mesh format;
+      - cart scripting for motion matching.
 
 ### F8. Visual effects
 
-- [ ] **F8a. GPU particles.**
+- [x] **F8a. GPU particles.**
   - Compute-simulated particles in the millions, with emitters, forces, curl noise, and collisions against the depth buffer and SDF.
   - GPU sorting for blended particles, and lighting from clustered lights and probes.
   - Flipbooks with motion-vector blending, mesh particles and GPU ribbons.
   - It replaces the CPU billboard system at 512 per effect. A node graph authors emitters (Niagara-lite).
-- [ ] **F8b. Volumetric effects.** Smoke, fire and explosions as raymarched 3D textures (baked simulations or a small GPU fluid solver), lit by the sun and lights, and casting into the F5b froxel fog.
-- [ ] **F8c. Destruction.** Voronoi pre-fracture in the editor, physics-driven chunks with debris particles and dust, decals at the breaks, and GI that updates (F3e).
+  - **Done** on the `aaa` tier (`editor model/particleGraph.ts`, `player render/gpuParticles.ts`). Every other tier keeps H5's billboards.
+    - **Emitters** are a stack of modules, Niagara-lite: spawn rate and burst, shape (point, sphere, cone, box), velocity, lifetime, size and colour over life, gravity, drag, curl noise, an attractor and a vortex, collision with the depth buffer and with distance shapes, and the renderer. `compileEmitter` flattens the stack, later modules winning and every value clamped. H5's effects compile to emitters (`emitterFromEffect`), so a cart's `cartbox.burst` draws on the GPU unchanged.
+    - **The ring.** An emitter's particles live in a power-of-two ring of up to 2²⁰ slots. A frame's spawns (each burst, and the rate's carry) take the next run of slots, the oldest recycled. There is no free list and no atomics, and ribbons keep their birth order. Each particle's random numbers are a PCG hash of its birth, alike on the CPU and the GPU.
+    - **Compute passes:**
+      - **spawn** places the frame's new particles (a request's run found by scanning the frame's requests);
+      - **update** integrates every slot: gravity; drag; curl noise (the curl of a trigonometric vector potential, so divergence-free); the attractor and vortex; the spheres, boxes and planes, with restitution and friction;
+      - **the depth buffer:** a particle in front of the prepass's surface a step ago and behind it now, or just behind within 25 cm, steps back and bounces off the G-buffer's normal;
+      - **keys** and a **bitonic sort** order a blended emitter back to front (dead particles last), with one 256-byte uniform slot per (k, j) stage.
+    - **Drawing**, after the see-through scene and before TAA's reactive mask, against the prepass's depths read-only:
+      - sprites face the camera, stretch along their velocity on screen, and fade where they meet the scene (soft particles);
+      - a flipbook atlas plays over a particle's life, blended between frames, each pushed along its motion vectors toward the in-between; without an atlas, a soft disc;
+      - mesh particles are instanced, turned along their velocity;
+      - ribbons are a strip through each run of consecutive births;
+      - additive or blended (premultiplied);
+      - lit by the key light (half-Lambert, as light passes through), the frame's global lights and the ambient, or emissive by their glow.
+    - **The reference:** `CpuEmitter` runs the same spawn and update (the depth buffer aside), term for term.
+    - *Tests:* `Unit Tests/gpu-particles.test.ts` covers:
+      - compiling a stack (the ring's size, overrides, clamps); an H5 effect as an emitter; stored emitters read defensively;
+      - the hash; curl noise's zero divergence; the distance shapes; the ring's spawning and recycling, falling and bouncing off a plane; the rate's carry; flipbook frames; the bitonic stages;
+      - on Dawn:
+        - a second of a fountain (cone, gravity, drag, curl noise, a plane) on the GPU within 5 mm of the reference, ages exact, dead slots dead;
+        - a blended emitter's 300 particles sorted back to front with the dead after;
+        - glowing sparks drawn into a frame and coming to rest on a floor through the depth buffer;
+        - mesh particles lit warm and a glowing ribbon drawn with no validation errors.
+    - *Found, then fixed:*
+      - a falling particle, seen at a grazing angle, ended a step deeper behind the floor than any fixed thickness. The test is now swept: in front a step ago and behind now.
+      - mesh and sprite pipelines need one explicit bind group layout: the mesh's shaders leave bindings unused, which an automatic layout drops.
+    - *Left for later:*
+      - the clustered lights' cells and the probes (particles take the global lights and the ambient);
+      - an editor panel for the module stack (emitters are data for now, from carts and H5's effects);
+      - collision against a scene SDF (analytic shapes only);
+      - the flipbook's motion vectors exercised on a device;
+      - particles writing velocity for TAA and motion blur;
+      - measured budgets at a million particles.
+- [x] **F8b. Volumetric effects.** Smoke, fire and explosions as raymarched 3D textures (baked simulations or a small GPU fluid solver), lit by the sun and lights, and casting into the F5b froxel fog.
+  - **Done** on the `aaa` tier (`editor model/volumetricEffects.ts`, `player render/volumetricEffects.ts`).
+    - **Effects** are smoke, fire or an explosion: a cube's size, its grid (8³ to 64³), duration, buoyancy, dissipation and cooling, the smoke's colour and extinction, and the fire's peak temperature, glow and light. There are presets for each.
+    - **The solver** is Stam's stable fluids:
+      - forces: the effect's source (a ball at the base, or a short burst at the middle for an explosion), and buoyancy from the heat;
+      - semi-Lagrangian advection of velocity, density and heat, trilinear;
+      - the divergence with solid walls (the normal component mirrored);
+      - 20 Jacobi iterations for the pressure, its gradient taken away;
+      - dissipation and cooling.
+      The GPU runs it as compute passes over storage buffers, cell for cell as the CPU does (trilinear by hand, not the sampler), and writes density and heat into a 3D texture for the march.
+    - **Baked effects** are the CPU's solver run ahead at 15 fps on up to a 24³ grid, kept as 8-bit frames and played back.
+    - **The march** is a full-screen pass after the see-through scene, before the particles. Each pixel's ray is clipped to every live volume's box (up to four) and to the scene's depth, and takes 48 steps:
+      - the smoke scatters the sun, attenuated by six steps through the smoke toward it, and the ambient;
+      - the fire emits a blackbody's light by its local temperature, as bright as it burns now;
+      - the colour becomes colour × T + L, blended in one pass.
+    - **Light into the scene and the fog:** a burning volume adds a point light at its centre, coloured by its blackbody and as bright as it burns (an explosion flashes, then dies away over its life). The scene shades by it, and the froxel fog (F5b-2) scatters it.
+    - *Tests:* `Unit Tests/volumetric-effects.test.ts` covers:
+      - projection cutting a burst's divergence; heat rising, with the mass held within 20% (semi-Lagrangian isn't conservative); baking frames and the sources ending;
+      - the blackbody's colours and brightness; the burn's flash and fade and its light; stored effects read defensively;
+      - on Dawn: ten steps of a 16³ fire on the GPU within 1% of the CPU; smoke darkening a bright wall; fire brightening a black one; no validation errors.
+    - *Left for later:*
+      - the volumes' extinction in the froxel fog itself (the fog takes their light, not their shadow), and their shadows in the cascades;
+      - a cart scripting call and scene field to set off a volume (the renderer's `setVolumes` and `volumeTrigger` stand ready);
+      - vorticity confinement;
+      - temporal reprojection of the march at lower resolution.
+- [x] **F8c. Destruction.** Voronoi pre-fracture in the editor, physics-driven chunks with debris particles and dust, decals at the breaks, and GI that updates (F3e).
+  - **Done** (`editor model/fracture.ts`; the overlay and `cartbox.shatter` in `@cartbox/player`).
+    - **Pre-fracture.** `voronoiSeeds` scatters seeds in a mesh's bounds; with an expected impact given, half are drawn toward it so the break is finer there. `fractureMesh` cuts the mesh into the seeds' Voronoi cells:
+      - triangles are clipped plane by plane (Sutherland–Hodgman, carrying normals and UVs);
+      - each cell plane is capped by the mesh's section there, clipped to the cell's other planes and fanned, in an interior material (the first one's colour darkened, rough, untextured) with planar UVs;
+      - each piece is kept about its own centre, with its volume, radius, and each primitive's source (so its outer faces wear the source's maps);
+      - pieces are exact for convex meshes (walls, pillars, crates, panels);
+      - a mesh's `fracture` is stored with it, each piece a small mesh of its own.
+    - **Breaking.** `cartbox.shatter(o, x, y, z, strength)`, generated for scenes with something fractured, breaks an object where it was hit:
+      - the object is hidden (whatever its level does);
+      - its pieces become chunks at their places, thrown from the impact at up to `strength` m/s (falling off with distance), outward and spinning;
+      - each chunk is rigid: gravity, its spin integrated, its bounding sphere against the scene's colliders (H9's boxes) with bounce and friction, and sleep once still. It is cosmetic and local, like H10's debris, so online play is unaffected.
+    - **Marks, dust and GI.** At the impact, a decal named for it (crack, break, scorch or impact) is laid, and an effect named dust, debris or smoke is thrown: on the `aaa` tier through the GPU particles (F8a). The live GI's still scene (F3e) is gathered again without the broken object, so its BVH is rebuilt and light comes through where it stood.
+    - *Tests:* `Unit Tests/fracture.test.ts` covers:
+      - seeds in bounds and denser at an impact;
+      - a 2 × 1 × 0.4 m wall cut into closed pieces, each capped, filling it to 0.0005 m³;
+      - chunks thrown from the hit, settling on a floor, their matrices orthonormal;
+      - the fracture through the mesh format; `cartbox.shatter` generated only when something can break;
+      - in the overlay: the wall gone and its pieces drawn, falling half a second on, the still scene for GI losing it, and a second break doing nothing.
+    - *Found, then fixed:* caps first took every cut point a plane made, including those beyond the cell's other planes, and the pieces held two and a half times the wall. Each cap is now the plane's section of the mesh clipped to the cell.
+    - *Left for later:*
+      - an editor button to fracture a selected mesh (the function is there; the UI isn't);
+      - chunks as physics bodies the player can push;
+      - concave meshes' caps;
+      - a GPU check that the GI's bounce changes through the opening.
 
 ### F9. The asset pipeline for AAA content
 
-- [ ] **F9a. High-to-low baking.**
+- [x] **F9a. High-to-low baking.** (On the CPU; a GPU bake over the F3d tracer for multi-million-triangle sources later.)
   - Normal, AO, curvature, thickness, position and ID maps baked from a high-poly mesh onto a low-poly one.
   - Cages or ray distances, MikkTSpace-synced so bakes match F1c tangents, with anti-aliased supersampling.
   - This is the Marmoset and Substance baker workflow, and the foundation of every AAA prop.
-- [ ] **F9b. Smart materials.**
+  - **F9a-1: done** (`editor model/highToLowBake.ts`; the Mesh tab's Bake maps panel).
+    - **Projection.** Each low texel's subsamples (2×2 by default, so the maps are anti-aliased) cast a ray toward the high mesh, through the same BVH tracer as the light bakes. With a cage (the low mesh's topology pushed out), rays run from the cage to the low surface. Without one, they run from `front` above the low surface to `back` below it, along its interpolated normal.
+      - The first hit is what the texel shows. A ray that slips along an edge between two high triangles is nudged and tried again; one that still finds nothing tries outward. A texel no ray reaches keeps the low surface's own, and the bake reports the share found.
+    - **Synced to F1c.** The low mesh's tangents (MikkTSpace through the caller's `mikk` when it has none, else a per-vertex frame from its UVs, Lengyel's) are written to it, so every renderer decodes in the frame the bake used.
+      - The baked normal solves [t b n]·x = N_high in the shader's own frame: the interpolated unit tangent and normal, unrenormalised, and the bitangent w·(n × t). So it decodes to exactly the high mesh's smooth normal, not its projection on an orthonormal frame.
+    - **The maps.**
+      - A tangent-space normal map.
+      - Occlusion, curvature and thickness of the high mesh at the hit, with the same-mesh bake's estimators (`EdgeField`, `hemisphere`, now exported).
+      - The high surface's height over the low (the relief map's R, beside curvature and thinness).
+      - Its position over its bounds.
+      - An ID map: a golden-ratio colour per high primitive, the masks smart materials pick from (F9b).
+      - Charts grow four texels into the gaps.
+    - **The panel.** A high mesh (OBJ or GLB) loads beside the same-mesh bake, with Ray front and back. One button bakes and sets the normal, occlusion and relief maps on the mesh, with thumbnails of the normal, height and ID maps.
+    - *Tests (`high-to-low.test.ts`):* a flat 2×2 quad baked from a finely tessellated dome.
+      - Decoded as the AAA shader decodes it, its normal map gives back the dome's analytic normals within 5°, with full coverage.
+      - Its height rises by the dome's 0.3 over the quad's mid-grey.
+      - Its ID map tells the high mesh's two halves apart.
+      - A cage bakes the same normals as ray distances (within 2 of 255).
+      - A trench in the high mesh darkens the occlusion while open ground reads open.
+      - The low mesh comes back with its tangents and maps.
+- [x] **F9b. Smart materials.** (Painting live on the 3D view, and on the GPU, later; see below.)
   - Layer-based texturing in the Mesh tab: fill layers, masks generated from bakes (edge wear from curvature, dirt from AO, rust from position and gravity), anchors and brush strokes.
   - Exports to 4K texture sets, with UDIM support for heroes.
   - It turns the P1 texture generators and the I15 bakes into a Substance Painter-class workflow.
-- [ ] **F9c. Scans and dense meshes.** Import of photogrammetry and scan meshes (millions of triangles), automatic delighting of albedo, auto-UV, and conversion to F6a clusters with no manual LODs. Decimation to a "game" proxy for collision.
-- [ ] **F9d. Import completeness.**
+  - **F9b-1: done** (`editor model/smartMaterials.ts`; the Mesh tab's **Smart material** panel). A stack of layers paints a texture set from the bottom up.
+    - **Layers.** Each fills the channels it sets (colour mixed in linear light, metalness, roughness, a height, a glow) through its opacity and its mask.
+    - **Masks.** Each has a level, a width, a break-up by tileable fBm noise and an invert.
+      - **Generated from the bakes:** edge wear from convex curvature (the relief map's G); dirt from occlusion and cavities; rust from the position map's height (gravity) and occlusion, streaked downward; an ID map colour pick (F9a); noise.
+      - **Brush strokes:** dabs in texture space, hard or soft, adding or erasing, over any mask or alone.
+      - **Anchors:** a layer's mask is an earlier layer's, or its inverse, so the paint wears through exactly where the edge-wear layer says.
+    - **Height.** Heights sum into one field whose slope bends the baked normal map (a whiteout-style detail), so worn paint has an edge.
+    - **The set.** Up to 4096²: sRGB base colour, glTF metal/roughness, tangent normal, emissive. `applyTextureSet` puts it in the material's slots with its factors at one, and the material keeps its stack (`MeshMaterial.smartStack`, saved and loaded; an instance can override it) so it can be painted again.
+    - **UDIM.** `udimTile` numbers tiles 1001 + u + 10·v. `splitUdim` splits a primitive spanning several into one a tile, its UVs moved into 0..1 and its material named for the tile, so each takes its own set. `textureSetFiles` names exports `name_Channel.1001.png`.
+    - **Presets.** Worn painted metal (an edge-wear layer the paint is anchored to, inverted, with dirt over it) and rusted iron.
+    - **The panel.** Per part: a preset, fill and brush layers (reorder, hide, remove), each layer's channels and mask, the set's size, Paint (from the part's baked occlusion, relief and normal maps), a texture-space canvas to brush the selected layer's mask, Export PNGs, and Split UDIM tiles when the UVs span several.
+    - *Tests (`smart-materials.test.ts`):*
+      - Edge wear takes the convex band and not a concave seam; dirt takes occlusion and cavities; rust runs to the low ground; an ID pick takes one part.
+      - Strokes paint and erase, hard and soft; an anchor inverts its layer's mask.
+      - A painted stack shows paint on the flats and bare steel (metal 1, its roughness) at the worn edge, glow where brushed; the normals lean at the paint's edge and stay flat on the flats.
+      - The set goes on a material whose stack survives a save; the presets paint.
+      - UDIM tiles are found and split with UVs in 0..1, and the files are named.
+- [x] **F9c. Scans and dense meshes.** Import of photogrammetry and scan meshes (millions of triangles), automatic delighting of albedo, auto-UV, and conversion to F6a clusters with no manual LODs. Decimation to a "game" proxy for collision.
+  - **Done** (`editor model/scanImport.ts`; the Mesh tab imports `.ply`).
+    - **PLY in** (`parsePly`): ASCII, and binary in either byte order, with every PLY scalar type. Positions, normals and colours (8-bit, 16-bit or float) are read, and any polygon is fanned. OBJ, glTF and FBX scans come in through their codecs.
+    - **Weld:** vertices at one point (to a millionth of the scan's size) are merged, their normals and colours averaged, and the triangles that collapse dropped. Without this, a scan's duplicated seams and a sphere's poles read as borders, and the simplifier won't touch them.
+    - **Delighting:** the capture's light is fitted as L2 spherical harmonics of the normal (least squares over up to 250 000 vertices' luminance). Each colour is divided by its normal's share of that light against the mean, the share held to at least a fifth.
+    - **The game mesh:** the scan is simplified to a budget (60 000 triangles by default, QEM), and each vertex takes its nearest dense vertex's colour (a uniform grid). It is then auto-unwrapped, and the colour baked into a texture: each triangle rasterised in UV space with its corners' colours blended, then four texels of dilation past the charts.
+    - **No manual LODs:** the LOD chain is generated (`generateLods`). The collision proxy (1 000 triangles by default) is simplified straight from the welded scan, as the unwrap's seams would hold it back.
+    - **Clusters for F6a:** the triangles are grouped into 128-triangle clusters, each grown from the first unclustered triangle along a Morton curve, across shared edges, by nearest centre. A cluster is a connected patch with a bounding sphere and a normal cone. The game mesh's index buffer is kept in cluster order, ready for F6a's culling.
+    - *Tests:* `Unit Tests/scan-import.test.ts` covers:
+      - PLY in ASCII, binary little- and big-endian, alike; quads fanned; a bad file refused;
+      - delighting a two-coloured sphere lit from above: the fitted light brightest up, the shading's spread cut by over 40% (L2 can't hold the clamped light's edge, and the albedo's split takes a share of the fit), the colours kept apart;
+      - the nearest-vertex transfer; baking through UVs with dilation;
+      - clusters of at most 128, each bounding its triangles and compact, every triangle once;
+      - a 36 000-triangle scan prepared under a 4 000 budget, its proxy under 300, its LODs, clusters covering every triangle, and its texture showing both colours.
+    - *Found, then fixed:*
+      - clusters cut along the Morton curve alone could span the whole scan (a radius of 1.5 on a unit sphere): they now grow across edges;
+      - the proxy stalled at 1 158 triangles on the sphere's welded poles: collapsed triangles are dropped now.
+    - *Left for later:*
+      - the dense scan's detail baked into a normal map (highToLowBake.ts can, on request);
+      - storing the clusters in the mesh format for F6a;
+      - streaming import of files larger than memory;
+      - setting the proxy as the object's collision mesh on insert.
+- [x] **F9d. Import completeness.** (The glTF KHR material extensions are F1d's.)
   - FBX (through a WASM converter), USD/USDZ, and the full set of glTF KHR material extensions (F1d).
   - 8K textures, HDR environments (`.hdr`, `.exr`, KTX2 HDR), and IES profiles.
   - Per-platform texture compression on import.
-- [ ] **F9e. Packaging and storage.**
+  - **Done.**
+    - **FBX** (`editor model/fbxCodec.ts`), read directly rather than through a WASM converter: binary 7.x (32- and 64-bit records, zlib arrays) and ASCII.
+      - Each Mesh geometry's polygons (fan-triangulated), normals and first UV set by any mapping and reference, placed by its Model up the parent chain (translation, XYZ rotation, scale), with its Materials' diffuse colours; `UnitScaleFactor` to metres.
+    - **USD** (`usdCodec.ts`): USDA, and USDZ packages holding a USDA layer.
+      - Mesh prims' points, faces, normals, `primvars:st` (indexed or not) and display colour, placed by their and their Xforms' translate, rotateXYZ and scale; `metersPerUnit` and Z-up honoured.
+      - The binary crate (`.usdc`) is refused with a message to export USDA.
+    - **HDR environments** (`exrCodec.ts`): OpenEXR scanline images (half or float; NONE, RLE, ZIPS, ZIP) and uncompressed float KTX2 (RGBA16F/32F, B10G11R11, E5B9G9R9) decode to linear floats and are stored as Radiance, so they light the sky as `.hdr` does.
+    - **IES profiles** (`iesProfile.ts`): LM-63 (1986 to 2002, TILT included), unfolded by symmetry and resampled to 32 × 16 about the light's axis, normalised with the peak candela kept.
+      - Lighting panel: a profile per point or spot light. The AAA renderer keeps up to 16 profiles after the LTC tables in their storage buffer, and a light's slot rides in its d4.w.
+    - **Per-platform textures** (`apps/web lib/ktx2Policy.ts`): a "Textures for" choice in the mesh editor. Desktop keeps 8K and UASTC; mobile holds every map to 2048 and colour to ETC1S. Packages (`.cbpk`) import too.
+    - Tests: `Unit Tests/import-formats.test.ts` (built EXR, KTX2, FBX binary and ASCII, USDA and USDZ; IES on Dawn).
+    - *Left for later:* EXR's PIZ, PXR24, B44 and DWA codecs, tiled and multi-part files; USDC; FBX skinning and animation (the glTF path has them); IES on the non-AAA tiers.
+- [x] **F9e. Packaging and storage.** (Moving the existing mesh sidecars onto packages is a migration of its own; see below.)
   - A binary package format (chunked geometry, KTX2 and meshopt, a manifest), replacing base64 JSON sidecars.
   - **Direct-to-storage uploads**, past the 4.5 MB request body, with dedupe by content hash.
   - Asset validation: texel density, naming, budgets, missing maps.
-- [ ] **F9f. Asset library.** In-editor search and import from CC0 libraries (Poly Haven, ambientCG), plus a Cartbox library of scanned surfaces, props and HDRIs prepared for the tier. These are licensed for redistribution and attributed.
+  - **F9e-1: done.**
+    - **The package** (`editor model/cartPackage.ts`).
+      - Layout: `CBPK`, a version, a JSON manifest, then chunks, each on a 16-byte boundary so a typed array can view it in place.
+      - The manifest holds per chunk its role, encoding, offset, length, raw length, count, stride, type and SHA-256; per primitive its streams and material; the materials serialised without their images; and the mesh's skin, clips, trails and variants as the JSON codec stores them.
+      - Streams (positions through joints and indices) are stored raw or squeezed with meshoptimizer's vertex and index codecs, whichever is smaller. The codecs are handed in, as the glTF decoders are. Images keep their encoding (PNG, KTX2).
+      - Reading checks the magic, the version, every chunk's bounds and (by default) its hash, so a truncated, tampered or newer package fails loudly.
+      - The asset store accepts it (`application/vnd.cartbox.package`), and the Mesh tab's **Asset check** downloads one (`.cbpk`).
+    - **Direct-to-storage uploads.** Past 4 MB, the client (`assetUploadClient.ts`) sends a file straight to R2 instead of through the API's multipart route; the Files tab uses it for every upload. The flow is `/api/carts/[cartId]/assets/direct`:
+      - **begin:** the same checks as multipart (name, type, the model's budget), against a 256 MB direct ceiling. Bytes the store already holds (from any cart) are referenced at once, and nothing is sent.
+      - Otherwise **a presigned PUT**, bound by the signature to its type, its length and an `x-amz-checksum-sha256` of the hash, so R2 itself refuses bytes that aren't the hash's.
+      - **commit**, after the PUT: the object's size is confirmed with a HEAD, then the row is written, then the manifest. That is blob, row, manifest, the order the multipart path keeps.
+    - **Validation** (`editor model/assetValidation.ts`; the Mesh tab's **Asset check**, with a texel-density aim).
+      - Each primitive's texel density (its UV area over its surface area, times its base map's size) is checked against the aim within a factor, and its spread across triangles (10th to 90th area-weighted percentile).
+      - Names; whole triangles; normals; maps without UVs; a PBR set half there; a normal map without tangents.
+      - Map sizes, read from PNG, JPEG and KTX2 headers, against a maximum. Budgets for triangles and texture memory (RGBA8 with mips).
+    - *Tests (`asset-packaging.test.ts`):*
+      - SHA-256's test vectors.
+      - A grid round-trips raw and meshopt-squeezed: positions, indices, UVs, tangents, u16 joints, its PNG, its factors and its smart stack, with chunks on 16-byte boundaries.
+      - meshopt halves its size, and needs the decoder to read. A non-package, a truncated one, a tampered one and another version are each refused.
+      - Validation passes a 2 m crate with 1024² maps at 512 px/m, and flags low and high density, names, half a PBR set, missing tangents and UVs, and each budget.
+      - Uploads: the route by size, the direct ceiling, the package type, and the checksum's base64. The client goes begin → PUT → commit for a large file, sends nothing for bytes the store holds, and uses multipart for a small one.
+    - *Left for F9e:* saving the editor's mesh sidecars as packages through the store (the format and upload path are ready, and the sidecar routes still take JSON); KTX2 transcoding of a package's textures on import (F9d).
+- [x] **F9f. Asset library.** In-editor search and import from CC0 libraries (Poly Haven, ambientCG), plus a Cartbox library of scanned surfaces, props and HDRIs prepared for the tier. These are licensed for redistribution and attributed.
+  - **Done** (`apps/web lib/externalLibraries.ts`, `lib/zipReader.ts`; the Mesh tab's "CC0 models…", "CC0 materials…" and "CC0 HDRIs…" open `ExternalLibraryBrowser`). The Cartbox catalogue (the existing library browser) stays as it was, beside these.
+    - **Search:** Poly Haven's public listing per kind, filtered locally by every word of the query against name, tags and categories; ambientCG's v2 search with its downloads per resolution. Each result is an asset with a thumbnail and its provenance: source, authors, CC0, the asset's page.
+    - **Materials:** the PNG maps at 1K, 2K or 4K become the engine's: base colour, the OpenGL normal map, roughness and AO packed into the metal/roughness map's G and R as glTF keeps them, and height as relief. ambientCG's come as a ZIP, read in place (stored and deflated entries, through `DecompressionStream`). The material goes onto every primitive of the selected mesh.
+    - **HDRIs:** the Radiance `.hdr` panorama becomes the scene's imported sky (exposure 1, no yaw), held to the sky's size limit.
+    - **Models:** Poly Haven's glTF, with its buffers and textures fetched beside it, added as a mesh with generated LODs.
+    - **Attribution:** each import stamps its credit line ("name" by author (source, CC0) — page) into the mesh sidecar's `credits`, once, kept with the cart (up to 256 lines).
+    - Network and decoding are passed in, so all of it runs without a browser or the network.
+    - *Tests:* `Unit Tests/external-libraries.test.ts` covers, against canned API answers:
+      - Poly Haven's listing filtered by every word, with each asset's credit; ambientCG's results with their downloads;
+      - a ZIP's stored and deflated entries;
+      - a Poly Haven material (colour and normal kept, roughness and AO packed into G and R), an ambientCG material from its ZIP, an HDRI as the sky's panorama, and a model with its buffers and textures;
+      - credits kept once, through a save of the sidecar, and absent when there are none.
+    - *Left for later:* a cache of fetched assets between sessions; KTX2 transcoding of imported maps on import (F9d's encoder runs on save); ambientCG models (its API lists few, in formats the importer doesn't take).
 
 ### F10. Look development and the editor viewport
 
-- [ ] **F10a. View modes.** The viewport shows exactly what the game renders, plus diagnostic views:
+- [x] **F10a. View modes.** The viewport shows exactly what the game renders, plus diagnostic views:
   - single buffers: lit, unlit, base colour, roughness, metallic, normals, AO, lighting only;
   - motion vectors;
   - complexity: shader complexity, light complexity, overdraw;
   - geometry and textures: LOD and cluster colouring, texel density, mip residency;
   - shadow cascades.
-- [ ] **F10b. Path-traced reference.**
+  - **Done** on the `aaa` tier (`player render/viewModes.ts`). Every other tier draws the lit frame.
+    - **In the scene's own shader.** A view code in the frame's uniforms (`Frame.debug`) swaps the lit colour for what the shader shades with:
+      - the buffers: unlit, base colour (maps, blends, detail and decals applied), roughness, metallic, the world-space shading normal, and AO (the material's times GTAO's);
+      - lighting only: the same light on a white dielectric;
+      - shader complexity: an estimate from the maps, layers, features and lights a pixel runs;
+      - light complexity: the lights it loops over, global and clustered;
+      - LOD: the level each batch draws, carried in its uniforms (`motion0.w`);
+      - texel density: base-colour texels per metre against a target (512 by default, `SceneDraw.texelDensity`);
+      - mip level: the base colour's mip, from the UV derivatives;
+      - shadow cascades: the sun's cascade by view depth.
+    - **From the whole frame.**
+      - Motion vectors come from the prepass's velocity buffer (forced on): hue for direction, brightness for speed.
+      - Overdraw draws every batch additively with depth unwritten and the prepass off, counting fragments, then maps the count to the heat ramp.
+      - A resolve pass colours both and copies them over the frame.
+    - **Shown as written.** A diagnostic frame drops TAA and upscaling, reflections and the camera's effects. The presenter shows it over black, without exposure, tone map, shafts or metering, and the cart's post-FX stage turns its effects off.
+    - **In the editor.** A "View" picker in the playtest bar, grouped Lighting / Buffers / Complexity / Geometry (`PlayerHandle.setViewMode`).
+    - Tests: `Unit Tests/view-modes.test.ts`. On Dawn, each buffer reads its material's values, lighting only lights white, light count, LOD level, texel density (under, on, over), the mip, overdraw's count of three, and motion against a still frame.
+    - *Left for later:* cluster colouring waits for F6a's clusters, and true mip *residency* for F1b's streaming (the mip view shows the mip wanted).
+- [x] **F10b. Path-traced reference.**
   - A progressive WebGPU compute path tracer over the scene BVH, using the same materials and lights. It is the ground truth for F0–F5 parity tests, the look-dev check, and the source for F3d bakes.
   - A **high-resolution capture** mode (accumulated, up to 8K) for marketing shots and the roadmap's reference images.
-- [ ] **F10c. Look-dev stage.** A neutral scene with an HDRI turntable, a calibrated grey and chrome ball, a colour checker and light rigs, where any asset is checked under standard lighting before it ships.
-- [ ] **F10d. Cinematics.** Timeline sequences (from the existing timeline) with the physical camera (F4c), focus pulls, camera shake and rails, plus offline rendering to video through F10b accumulation.
+  - **Done** on the `aaa` tier (`player render/pathTracer.ts`).
+    - **The scene** is the lightmapper's own BVH (`buildBvh`, its nodes packed by `packBvhNodes`, now shared with F3d). Each triangle carries its corners, their normals and UVs, and its material, in seven vec4s.
+    - **The materials** are the renderer's:
+      - base colour, metal/roughness and emissive factors times their maps, from one texel store (each map once, at most 1024 a side), filtered by hand at the renderer's (u, 1 − v);
+      - authored colour into linear light as the shader's `toLinear` takes it;
+      - a cut-out lets rays through its clear texels, a blended surface as often as its alpha, an additive one always.
+    - **The BRDF** is the AAA shader's (F1c) term for term: GGX with the height-correlated visibility, Schlick's Fresnel, the Kulla-Conty scale, and a diffuse of `(1 − metal)(1 − F)·albedo`. In the renderer's units a light of radiance `c` gives `f·π·c·N·L`, and each light here does too; the sky and emission are radiance as they are.
+    - **Each path** leaves the eye through a jittered point of its pixel. At every surface it gathers:
+      - the surface's emission;
+      - every directional light, and one point, spot or area light picked as the lightmapper picks them, each through a shadow ray (the light sampling is the lightmapper's WGSL, `BAKE_SAMPLING_WGSL`).
+      - It then bounces by one sample of the BRDF, the specular by its visible normals (Heitz 2018) or the diffuse by the cosine, weighed by the two lobes' mixed density. Russian roulette ends it after the third bounce.
+      - A miss sees the environment's panorama (F3a), or without one the flat ambient as a uniform sky, as the shader's fill is.
+    - **Progressive.** A pixel's sums stay in a storage buffer while the scene, camera, lights and sky hold; a resolve pass writes the mean to a half-float texture, premultiplied, alpha 0 where the eye saw nothing (the presenter's sky shows, as with the raster).
+    - **Capture** (`captureReference`): any size up to 8K a side, a tile at a time, each tile's samples over submits of at most a million paths. It returns sRGB bytes tone-mapped (ACES by default) and, if asked, the linear image. The random numbers are seeded by the pixel's place in the whole image, so a capture in tiles is the same image as one in a piece.
+    - **In the editor.** "Path traced" in the playtest bar's View picker, exposed and tone-mapped as the lit frame (not a diagnostic), with its samples per pixel and a "Capture 4K" button that downloads a PNG (`PlayerHandle.captureReference`).
+    - *Found, then fixed:* the DFG table (F1c) was read between cell centres and clamped at roughness 0.984, so a fully rough surface took the compensation of a slightly smoother one, and a rough white metal in a white furnace came back 6% dark. The table now spans 0 to 1 inclusive (`brdf.ts`), for the renderer and the reference alike.
+    - *Tests:* `Unit Tests/path-tracer.test.ts` covers:
+      - the packed scene: corners in the BVH's order with their normals, UVs and materials; maps stored once and downsized; the scene's key; the lights and the ambient sky;
+      - on Dawn: a white furnace (a rough white metal under a uniform sky) within 4%; the renderer's key light, an inverse-square point light and a textured base colour, matched within 3% (the first reference-image comparisons the ground rules call for);
+      - a shadow, emission as it is, a cut-out's clear texels; accumulation and its restart when the view moves; and a capture in 8-pixel tiles matching one in a piece.
+    - *Left for later:*
+      - normal maps, clearcoat, anisotropy, refraction, layers, the graph's outputs and IES profiles in the reference (each joins when the material work, F1d and F1e, lands);
+      - the sun's angular size (the raster's soft penumbra); the reference's sun is a point;
+      - comparisons of the whole frame for each F0–F5 feature, held as each is next touched.
+- [x] **F10c. Look-dev stage.** A neutral scene with an HDRI turntable, a calibrated grey and chrome ball, a colour checker and light rigs, where any asset is checked under standard lighting before it ships.
+  - **Done** on the `aaa` tier (`player render/lookDev.ts`, `lookDevCheck.ts`, `lookDevView.ts`).
+    - **The stage.** The asset stands at its own scale with its feet on the floor at the origin. Its props are sized to it:
+      - a grey ball of 18% reflectance, fully rough (a grey card made round), and a chrome ball, a mirror metal;
+      - the ColorChecker Classic's 24 patches (X-Rite's sRGB values) on a black card;
+      - an 18% grey floor to catch its shadow and bounce.
+    - **The rigs**, in the renderer's units:
+      - Studio: a key, a fill and a rim, area lights (F2e-2) three of the asset's sizes off, under a dim cyclorama;
+      - Noon: a high sun under a blue sky;
+      - Overcast: a soft white sky and no sun;
+      - Golden hour: a low warm sun under a cooling sky;
+      - Night: a cold moon over a dark sky;
+      - HDRI: the cart's own environment (the studio stands in without one).
+      - Each suggests the exposure that brings a level grey card to middle grey; the view adds stops over it.
+    - **The turntable** turns the asset, or with the HDRI rig turns the light about a still asset: the panorama's columns shifted (`turnEnvironment`), its lights turned with it.
+    - **The check** (`checkLookDev`) draws the stage with the linear-light renderer and with the path-traced reference (F10b) at the same size, and reports:
+      - the grey and chrome balls' mean light in each (the middle 60% of each disc on screen);
+      - the mean relative difference in luminance over the frame, and the share of pixels more than 10% apart.
+    - **In the editor.** A "Look dev" group in the Mesh tab opens the stage (`LookDevView` on a canvas, through the AAA presenter with the rig's exposure and ACES): rig, renderer or reference, exposure in stops, turntable, Check, and Capture 4K (the reference, downloaded as a PNG).
+    - *Tests:* `Unit Tests/look-dev.test.ts` covers:
+      - the chart's 24 patches and the grey card; the asset on the floor at the origin with the props beside it, all in frame; each rig lit with an exposure (night's far over noon's); the turntable turning the asset, and the HDRI turning about a still one; the draw the stage is seen through;
+      - on Dawn, the check under the overcast rig: the grey ball reads 0.130 in the renderer against 0.113 in the reference, and the frame is 8% apart on average.
+    - *Found:* the check's first finding. Under an overcast sky the renderer's grey ball is about 15% brighter than the reference's, and the chrome ball 33%: the sky's irradiance and reflection light the balls' undersides from the open ground, where the reference sees the darker floor. GTAO takes back only the near field. The reflection probes (F3b) or DDGI (F3e) placed on the stage would close it, as they do in a level.
+    - *Left for later:* per-patch readouts of the checker against its known reflectances; a stage saved with the asset (its rig and turntable angle) for review.
+- [x] **F10d. Cinematics.** Timeline sequences (from the existing timeline) with the physical camera (F4c), focus pulls, camera shake and rails, plus offline rendering to video through F10b accumulation.
+  - **Done** (`editor model/cinematics.ts`; camera keys and tracks in `model/timeline.ts`; the path tracer's thin lens; `PlayerHandle.renderSequence`; `apps/web lib/webmMuxer.ts` and `lib/videoEncode.ts`; the Timelines panel and the run overlay).
+    - **The film camera.** A camera key may give:
+      - a focal length (mm on a 36 × 24 mm sensor, which sets the field of view, in live playback too);
+      - an f-stop and a focus distance, or an object to focus on (its distance from the eye at that moment), for the thin lens of aperture radius f / 2N;
+      - a roll about the view, how far along the track's rail the eye is, and how much of the track's shake.
+      - Between keys these ease as the eye does. A focus pull is two keys' focus.
+    - **Shake:** the track's amplitude (°) and frequency (Hz), scaled by each key's shake. It is smooth noise on yaw, pitch and roll, three octaves of incommensurate sines, turning the view about the eye without moving it.
+    - **Rails:** a Catmull-Rom curve through points. The panel's "Rail through keys" lays one through the keys' eyes and spaces their positions along it, so the camera glides on the curve between keys.
+    - **The thin lens in the path tracer** (`Params.lens`, where the spare vec4 was): each sample's ray leaves a point on the aperture's disc, aimed at where the pinhole ray meets the focus plane, at the focus distance along the view. A pinhole draws exactly as before, with no extra random numbers.
+    - **The offline render:** `renderSequence` takes the timeline at its frame rate (24 by default, the last frame included). Each frame's shot becomes a view (its roll inside) and projection, and is path-traced at the size asked through `captureReference`, the scene as last drawn, then handed on in order; it can be aborted.
+    - **Video in the browser:** frames go to WebCodecs' VideoEncoder (VP9, else VP8; a key frame every two seconds), and the chunks are muxed into a WebM: the EBML header, Info, one video track, and Clusters of SimpleBlocks, a new Cluster at each key frame or before a block's 16-bit offset would overflow.
+    - **The run overlay:** in the path-traced view, a timeline with camera keys can be rendered at 1080p, 64 samples a pixel, and downloaded as a WebM; the button stops it.
+    - *Tests:* `Unit Tests/cinematics.test.ts` covers:
+      - focal length to field of view (24 mm: 53.1°; 50 mm: 27.0°) and f-stop to aperture;
+      - shake still at no amplitude, bounded, smooth over a millisecond, and centred;
+      - rails through every point;
+      - the keys' fields read and clamped, absent ones left out, a one-point rail refused;
+      - a shot's field of view (live playback's too), a focus pull halfway, focus on an object, the eye halfway along its rail, a pinhole without lens keys, no shot without keys;
+      - a quarter roll turning up to the side, shake turning the view without moving it;
+      - the matrices (plain ones match `viewMatrix` and the projection; a roll lands "above" to the side);
+      - the frame times;
+      - the WebM's structure (EBML header and doc type, Info, the VP9 track at its size, Clusters at key frames with their blocks' offsets and flags), and a new Cluster before an offset overflows;
+      - on Dawn, the edges of a glowing card at 3 m: 2 px of blur through a pinhole, 9 with the lens focused at 30 m, 2 again focused on it.
+    - *Found, then fixed:*
+      - the Timelines panel rebuilt the camera track from its keys alone, which would have dropped the rail and shake;
+      - an aperture of 0.15 m blurred the card's edges less than estimated (5 px across both): the test opens it to 0.3 m.
+    - *Left for later:*
+      - objects a timeline moves stay where they were last drawn in an offline render (the render takes the last frame's scene);
+      - live playback drives the field of view but not F4c's raster depth of field from the keys' lens;
+      - audio in the video;
+      - the raster frame as a fast preview render.
 
 ### F11. Showcase and acceptance
 
@@ -840,6 +1986,16 @@ Everything else depends on this track. It contains no visible "feature", but its
   - GPU foliage, F5d water and projected decals.
 
   Captures are compared before and after, at native resolution, at frame-time budget on each device class.
+  - **F11a-8, the new tracks on the maps:** Beaver Creek's creek (and every river spline's default water) takes F5d's look on the AAA tier: red absorbed over its depth (0.5, 0.1, 0.07 a metre), a little green murk and foam at its banks, with caustics on its bed; the other tiers' water is unchanged. Volumetric clouds (F5c) and weather (F5e) are ready for both maps' rigs; re-lighting the shipped maps under a physical dusk sky waits for captures on hardware to calibrate against (below).
+  - **Fix: both maps at about one frame a second on the default path** (`render/gpuPacing.ts`). The 360 tier's WebGPU and WebGL2 renderers read each frame back and skip a submit while every readback is in flight. That keeps the run loop at speed but hid a GPU that can't keep up from everything that timed the run loop: the cart ticked while the 3D changed about once a second, and "auto" quality stayed at High. Measured in Chromium (software GPU): in a Lockout match the scene was drawn about 0.05 times a second, each readback taking 10–31 s, with the run loop at 8–20 fps; a constant fragment shader made frames land about 40× faster, so the cost is the scene's per-pixel shading.
+    - **Pacing by landed frames.** Both renderers count the frames that come back (`framesLanded`). The overlay times them against the frames it presents; when they land well behind (the GPU, not the run loop, is slow), a first-person view renders its 3D at a smaller size (1 down to 0.35 of the frame, in seven steps), dropping straight to the step whose pixels fit 30 ms a frame, and climbs a step after three seconds well inside budget. A GPU that hasn't returned a frame for over a second counts as that slow already. The smaller frame is filtered up bilinearly, two channels to a word, under the full-size HUD.
+    - **Resizing a readback renderer.** WebGL2 gains `resize`: its colour and depth are re-stored in place and the targets made on first use (multisampled, reflection, temporal, scene copies, SSAO) are released to be made again. Both keep the last frame, resampled, until one at the new size lands, so a step never flashes the sky.
+    - **The quality governor sees it.** When the GPU is what holds the 3D back, its frames' time is what "auto" measures, so a weak GPU also steps down to Low (no shadows, AA or reflections). A frame over 500 ms used to be ignored as a gap, so a scene at 1 fps never stepped down at all; only gaps over 3 s are pauses now.
+    - **Skinned meshes stopped submitting per primitive.** Each CPU-skinned primitive copied its last vertices for the velocity buffer in its own command buffer and submit, every frame, on every path: about 250 submits a frame in a Lockout match. Only a frame with a prepass reads them, so only such a frame copies them.
+    - **The readout** (Show FPS) adds the 3D's own frame rate and its render size when smaller.
+    - **Also fixed:** `clusterLod.ts` read `scanImport.ts`'s `CLUSTER_TRIANGLES` at module load while `scanImport` imports `clusterLod`, so a bundle that loaded `clusterLod` first threw before the Lockout page could start.
+    - *Measured* (same Chromium, Lockout match): the pacing settles at 448×252 and Low; scene draws per second rise about 3–4×, and queue submits fall from about 1,100 a second to a handful. A software GPU's opaque pass barely shrinks with the pixels, so the real gain needs hardware to read.
+    - *Tests:* `gpu-pacing.test.ts` (a GPU that keeps up stays at full size; a slow run loop doesn't shrink it; a frame a second drops to the smallest step within a couple of seconds; a stall acts before any frame lands; a GPU a little behind holds where it keeps up; climbing back a step at a time; pauses ignored; the bilinear filter against a direct one; the resample), and `quality-presets.test.ts` (a scene at 1 fps steps to Low; only multi-second gaps are ignored).
   - **F11a-1, the Milestone A captures: done.** `captures/f11a/` holds Lockout and Beaver Creek from seven fixed views. Each is shown before (the Xbox 360 tier's shading at its 1280×720 frame) and after (the AAA tier's Milestone A path at the display's resolution, 1920×1080 here), with what each frame measured (`report.json`) and a README with the findings.
     - **How they are made** (`scripts/capture-aaa.mjs`):
       - `/lockout?capture=1` hands the script the player.
@@ -959,13 +2115,28 @@ Everything else depends on this track. It contains no visible "feature", but its
     - **Not the fix: albedo left encoded** (shaded as authored, as an option would). Every material overshoots: the deck reads 0.782 against 0.661, the rock 0.393 against 0.240, and the frame 0.544 against 0.409 (0.585 authored). The byte path's rig was tuned for its own answer as a whole, not for linear light with encoded albedo.
     - So the deck needs nothing of its own. Its gap is the one F11a-6 found in every material, from albedos and a rig tuned under byte-space lighting. The authored curve already matches the frame's mean (0.414 against 0.409).
     - What closes it per material is the physical re-light this item calls for: albedos re-measured for linear light, with F10c's look-dev balls and colour checker, and lights in physical units, with F5a's sky. It comes after Milestone C's lighting.
-- [ ] **F11b. A photoreal reference scene.** A new map built entirely through the pipeline, for example a Forerunner ruin in a misty canyon at dusk:
+- [x] **F11b. A photoreal reference scene.** A new map built entirely through the pipeline, for example a Forerunner ruin in a misty canyon at dusk:
   - scanned rock and foliage;
   - a cluster-rendered cliff;
   - hero props baked from high-poly;
   - a skinned, facially animated Spartan in close-up.
 
   It is the tier's public demonstration, and its frames are compared against the path tracer and against reference photography.
+  - **Done: the scene** (`model/ruinScene.ts`), as the **Forerunner ruin (AAA reference)** starter on the `aaa` tier (`/edit/new?starter=ruin`). Built entirely through the pipeline, lazily when the starter opens:
+    - **The gorge** (P2): a 96 m heightfield sculpted as a winding gorge with ledged walls, eroded by 9000 water droplets and by slumping, its creek bed cut back in after the erosion silted it; painted with generated mud, moss and banded cliff (P1c), triplanar.
+    - **A cluster-rendered cliff** (F6a): a 40 000-triangle face of strata and fractures, its cluster LOD hierarchy built (`withClusterLods`).
+    - **Scanned rock** (F9c): a 20 000-triangle displaced "scan" with per-vertex colour (lichen in its hollows) through `prepareScan`: welded, delit, simplified to 4000 triangles, unwrapped, its colour baked to a 256² texture, with LODs and clusters; placed three times.
+    - **A hero prop baked from high-poly** (F9a): a Forerunner pylon whose bevel bands, inset core and fins are baked into the low box's normal and relief maps (`bakeHighToLow`).
+    - **The ruin**: a stepped stone plinth and stair, two leaning Forerunner slabs and the broken lintel between them in generated Forerunner metal, with inlaid emissive light.
+    - **The creek** (P3's river spline) with F5d's water: absorbing, murky, foaming at its banks, caustics on its bed.
+    - **Foliage** (P4): grass cards and reeds on the floor, boulders and cliff rocks by rule on the walls.
+    - **A Spartan** (the arena's skinned soldier and its animator, F7a) standing at the ruin's foot.
+    - **Dusk**: a physical sky (F5a) with the sun 6° up through four times Earth's haze and aerial perspective at ×10, volumetric clouds (F5c: 55% cover of cumulus), height and volumetric fog down the gorge (F5b), a breeze, and damp ground with puddles after rain (F5e).
+    - The cart orbits the gorge, drawing in low over the creek and the ruin every forty seconds.
+    - *Tests (`ruin-scene.test.ts`):* the starter is registered on the AAA tier and its sidecar is a scene the player loads (terrain, four foliage layers, the creek's spline, seven or more objects); the gorge's walls stand over 15 m above a bed below the water; the cliff is over 30 000 triangles with its cluster hierarchy, the boulder textured under budget, the pylon carrying baked normal maps and tangents, the ruin's light emissive, the creek's water absorbing; dusk at 6°, clouds, volumetric fog and wetness.
+    - *Left for F11b:*
+      - The comparison: captures of its frames against the path tracer (F10b) and against reference photography, which wants a hardware GPU (a software GPU takes minutes for the AAA tier's first frame here) and the photographs.
+      - Facial animation in the close-up: the Spartan wears a helmet; a face rig (F7b) on an unhelmeted character would show it.
 
 ## Order
 

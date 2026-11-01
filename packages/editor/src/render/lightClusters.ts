@@ -62,6 +62,27 @@ export function clusterSlice(params: LightClusters["params"], depth: number): nu
   return Math.min(CLUSTER_Z - 1, Math.floor(Math.log(depth / params[2]) * params[3]));
 }
 
+/** The cells' grid for a perspective camera: its near and far planes, the projection's x and y scales, a tile's size and the slice scale. Null for an orthographic one. */
+export interface ClusterGrid {
+  readonly near: number;
+  readonly far: number;
+  readonly sx: number;
+  readonly sy: number;
+  readonly tileW: number;
+  readonly tileH: number;
+  readonly scale: number;
+}
+
+export function clusterGrid(projection: Mat4, width: number, height: number): ClusterGrid | null {
+  if (projection[15] !== 0) return null;
+  const p10 = projection[10]!;
+  const p14 = projection[14]!;
+  const near = p14 / (p10 - 1);
+  const far = p14 / (p10 + 1);
+  if (!(near > 0) || !(far > near)) return null;
+  return { near, far, sx: projection[0]!, sy: projection[5]!, tileW: Math.ceil(width / CLUSTER_X), tileH: Math.ceil(height / CLUSTER_Y), scale: CLUSTER_Z / Math.log(far / near) };
+}
+
 /**
  * Sort the clustered lights (`ordered` from {@link orderLights}, past
  * `globalCount`) into cells, for a perspective camera. Null for an
@@ -75,17 +96,9 @@ export function buildLightClusters(
   width: number,
   height: number,
 ): LightClusters | null {
-  if (projection[15] !== 0) return null;
-  const p10 = projection[10]!;
-  const p14 = projection[14]!;
-  const near = p14 / (p10 - 1);
-  const far = p14 / (p10 + 1);
-  if (!(near > 0) || !(far > near)) return null;
-  const sx = projection[0]!;
-  const sy = projection[5]!;
-  const tileW = Math.ceil(width / CLUSTER_X);
-  const tileH = Math.ceil(height / CLUSTER_Y);
-  const scale = CLUSTER_Z / Math.log(far / near);
+  const grid = clusterGrid(projection, width, height);
+  if (!grid) return null;
+  const { near, far, sx, sy, tileW, tileH, scale } = grid;
   const sliceDepth = (k: number) => near * Math.exp(k / scale);
 
   // Each tile's NDC extent; tile rows run top-down, as pixel rows do.

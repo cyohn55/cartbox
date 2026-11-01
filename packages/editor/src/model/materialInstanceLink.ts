@@ -10,7 +10,7 @@
 import type { MeshMaterial } from "./MeshAsset";
 
 /** A material field an instance can take from its parent or override. */
-export type InstanceField = Exclude<keyof MeshMaterial, "name" | "instance" | "lightmapImage" | "textureSprite">;
+export type InstanceField = Exclude<keyof MeshMaterial, "name" | "instance" | "lightmapImage" | "lightmapHdrImage" | "textureSprite" | "octahedral">;
 
 /** Every field an instance inherits, in the order the material panel lists them, with a label. */
 export const INSTANCE_FIELDS = [
@@ -42,6 +42,26 @@ export const INSTANCE_FIELDS = [
   ["clearcoatRoughness", "Clearcoat roughness"],
   ["anisotropy", "Anisotropy"],
   ["anisotropyRotation", "Anisotropy rotation"],
+  ["sheenColor", "Sheen colour"],
+  ["sheenRoughness", "Sheen roughness"],
+  ["transmission", "Transmission"],
+  ["thickness", "Thickness"],
+  ["attenuationDistance", "Attenuation distance"],
+  ["attenuationColor", "Attenuation colour"],
+  ["ior", "Index of refraction"],
+  ["specularFactor", "Specular"],
+  ["specularColor", "Specular colour"],
+  ["iridescence", "Iridescence"],
+  ["iridescenceIor", "Iridescence IOR"],
+  ["iridescenceThickness", "Iridescence thickness"],
+  ["emissiveStrength", "Emissive strength"],
+  ["uvTransform", "UV transform"],
+  ["subsurface", "Subsurface"],
+  ["subsurfaceColor", "Subsurface colour"],
+  ["subsurfaceRadius", "Subsurface radius"],
+  ["diffuseTransmission", "Diffuse transmission"],
+  ["diffuseTransmissionColor", "Diffuse transmission colour"],
+  ["character", "Character shading"],
   ["reliefImage", "Relief map"],
   ["parallaxDepth", "Parallax depth"],
   ["refraction", "Refraction"],
@@ -56,6 +76,9 @@ export const INSTANCE_FIELDS = [
   ["alphaCutoff", "Alpha cutoff"],
   ["softDepth", "Soft edges"],
   ["graph", "Node graph"],
+  ["graphSwitches", "Static switches"],
+  ["graphImages", "Graph images"],
+  ["smartStack", "Smart material"],
 ] as const satisfies readonly (readonly [InstanceField, string])[];
 
 // Every inheritable field is listed (a new material field must be added above).

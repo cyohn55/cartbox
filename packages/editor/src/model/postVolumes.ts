@@ -36,6 +36,12 @@ export interface PostVolume {
   readonly bloom?: number;
   /** Fog density (0..1). */
   readonly fog?: number;
+  /** The physical camera's f-number here (F4c; 1.2..22). */
+  readonly aperture?: number;
+  /** Metres to the plane in focus here (F4c). */
+  readonly focusDistance?: number;
+  /** The motion blur's strength here, times the shutter's (F4c; 0..2). */
+  readonly motionBlur?: number;
 }
 
 /** What the volumes around the camera make of the picture: each field only where a volume sets it. */
@@ -47,6 +53,10 @@ export interface PostBlend {
   readonly saturation?: number;
   readonly bloom?: number;
   readonly fog?: number;
+  /** The camera's (F4c): blended from the camera's own values, each set only where a volume sets it. */
+  readonly aperture?: number;
+  readonly focusDistance?: number;
+  readonly motionBlur?: number;
 }
 
 /** The neutral value of each grade field: what "no volume" means for it. */
@@ -71,8 +81,13 @@ export function volumeWeight(v: Pick<PostVolume, "center" | "size" | "blend">, p
  * pulling every field it sets toward its own value by its weight (from the
  * neutral value, for the grade, or from what lower volumes made of it).
  */
-export function blendPostVolumes(volumes: readonly PostVolume[] | undefined, eye: readonly [number, number, number]): PostBlend {
-  const out: { exposure: number; brightness?: number; contrast?: number; saturation?: number; bloom?: number; fog?: number } = { exposure: 0 };
+export function blendPostVolumes(
+  volumes: readonly PostVolume[] | undefined,
+  eye: readonly [number, number, number],
+  /** The physical camera's own aperture, focus and motion blur (F4c), which a volume pulls away from. */
+  camera: { readonly aperture: number; readonly focusDistance: number; readonly motionBlur: number } = { aperture: 16, focusDistance: 10, motionBlur: 1 },
+): PostBlend {
+  const out: { exposure: number; brightness?: number; contrast?: number; saturation?: number; bloom?: number; fog?: number; aperture?: number; focusDistance?: number; motionBlur?: number } = { exposure: 0 };
   if (!volumes || volumes.length === 0) return out;
   const ordered = [...volumes].sort((a, b) => (a.priority ?? 0) - (b.priority ?? 0));
   for (const v of ordered) {
@@ -87,6 +102,11 @@ export function blendPostVolumes(volumes: readonly PostVolume[] | undefined, eye
     // passes its weight on, so the player mixes them with the cart's own values.
     if (v.bloom !== undefined) out.bloom = v.bloom * w + (out.bloom ?? 0) * (1 - w);
     if (v.fog !== undefined) out.fog = v.fog * w + (out.fog ?? 0) * (1 - w);
+    // The camera's (F4c), pulled from the camera's own values as the grade is from neutral.
+    for (const key of ["aperture", "focusDistance", "motionBlur"] as const) {
+      const value = v[key];
+      if (value !== undefined) out[key] = (out[key] ?? camera[key]) + (value - (out[key] ?? camera[key])) * w;
+    }
   }
   return out;
 }
@@ -186,6 +206,9 @@ export function readPostVolumes(value: unknown): PostVolume[] {
       ...opt("saturation", 0, 2),
       ...opt("bloom", 0, 1.5),
       ...opt("fog", 0, 1),
+      ...opt("aperture", 1.2, 22),
+      ...opt("focusDistance", 0.05, 10000),
+      ...opt("motionBlur", 0, 2),
     });
   }
   return out;

@@ -11,7 +11,7 @@ import { MeshoptDecoder } from "meshoptimizer/decoder";
 import { MeshoptEncoder } from "meshoptimizer/encoder";
 import { describe, expect, it } from "vitest";
 
-import { gltfCompression, parseGltf, type GltfDecoders, type MeshAsset } from "@cartbox/editor";
+import { gltfCompression, meshoptCalls, parseGltf, replayMeshopt, type GltfDecoders, type MeshAsset } from "@cartbox/editor";
 import { decodeDracoPrimitive } from "../apps/web/src/lib/gltfDecoders";
 
 const require = createRequire(import.meta.url);
@@ -151,6 +151,21 @@ describe("meshopt-compressed glTF", () => {
     // The index codec may rotate a triangle's corners (keeping its winding).
     expect(mesh.primitives[0]!.indices.length).toBe(INDICES.length);
     expect(triangles(mesh)).toEqual(triangles(plainMesh()));
+  });
+
+  it("decodes its buffers ahead of the parse (as on workers, F0e) to the same mesh", async () => {
+    await MeshoptDecoder.ready;
+    const { json, buffers } = await meshoptFile();
+    // The calls the parse would make, in its order: the vertices, then the indices.
+    const calls = meshoptCalls(json, buffers);
+    expect(calls.map((c) => [c.count, c.size, c.mode])).toEqual([[5, 12, "ATTRIBUTES"], [12, 4, "TRIANGLES"]]);
+    const decoded = await Promise.all(calls.map((c) => MeshoptDecoder.decodeGltfBufferAsync(c.count, c.size, c.source, c.mode, c.filter)));
+    const ahead = parseGltf(json, buffers, "packed", { meshopt: replayMeshopt(decoded) });
+    const direct = parseGltf(json, buffers, "packed", { meshopt: MeshoptDecoder.decodeGltfBuffer });
+    expect(Array.from(ahead.primitives[0]!.positions)).toEqual(Array.from(direct.primitives[0]!.positions));
+    expect(Array.from(ahead.primitives[0]!.indices)).toEqual(Array.from(direct.primitives[0]!.indices));
+    // Out of step with the file: an error, not wrong geometry.
+    expect(() => parseGltf(json, buffers, "packed", { meshopt: replayMeshopt(decoded.slice(1)) })).toThrow(/out of step/);
   });
 
   it("says what's missing without the decoder", async () => {

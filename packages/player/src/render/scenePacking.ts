@@ -10,6 +10,7 @@
  * are the parts covered by tests.
  */
 
+import { packCharacter } from "./characterShading.js";
 import {
   DEFAULT_DETAIL_SCALE,
   DEFAULT_DETAIL_STRENGTH,
@@ -19,6 +20,9 @@ import {
   NO_LAYERS,
   effectActive,
   emissiveAnimation,
+  materialHasExtensions,
+  type ResolvedExtensions,
+  resolveExtensions,
   materialHasLayers,
   macroUniform,
   materialHasWater,
@@ -110,10 +114,36 @@ import { AREA_KIND } from "./ltc.js";
  *                                    w = the material's ID in the thin G-buffer (F0c)
  * 912  wind1      vec4<f32>    16   the previous frame's wind0, for motion vectors (F0c)
  * 928  motion0    vec4<f32>    16   x = where the frame's motion transforms start in the
- *                                    instance buffer (F0c)
+ *                                    instance buffer (F0c), w = the LOD level drawn (−1 without a chain; F10a)
+ * 944  sheen0     vec4<f32>    16   rgb = sheen colour (linear), w = sheen roughness (F1d;
+ *                                    materialExtensions.ts in @cartbox/editor)
+ * 960  spec0      vec4<f32>    16   rgb = a dielectric's f0 (IOR and specular applied), w = specular factor
+ * 976  trans0     vec4<f32>    16   x = transmission, y = thickness (m), z = attenuation distance
+ *                                    (0 = none), w = IOR
+ * 992  trans1     vec4<f32>    16   rgb = attenuation colour, w = iridescence
+ * 1008 irid0      vec4<f32>    16   x = the film's IOR, y = its thickness (nm), z = emissive strength,
+ *                                    w = 1 with a UV transform
+ * 1024 uvx0       vec4<f32>    16   xy = the UV transform's scale, zw = its rotation's cos and sin
+ * 1040 uvx1       vec4<f32>    16   xy = its offset, z = the share of the diffuse that scatters (F1d-2)
+ * 1056 sss0       vec4<f32>    16   rgb = how far each channel scatters, as a colour, w = its radius (m)
+ * 1072 dt0        vec4<f32>    16   rgb = the thin-surface transmission's colour, w = its share
+ * 1088 char0      vec4<f32>    16   character shading (F7c; characterShading.ts): x = its kind
+ *                                    (0 none, 1 skin, 2 eye, 3 hair, 4 mouth), yzw = its terms
+ * 1104 char1      vec4<f32>    16   its other terms (a hair's dither and frame, a mouth's opening)
+ * 1120 cull0      vec4<f32>    16   x = where a GPU-culled draw's copies start in the instance buffer (F0e;
+ *                                    gpuCulling.ts), added to `instance_index`; 0 otherwise;
+ *                                    y = an octahedral impostor's frames a side (F6b; 0: none), z = its half-size
+ * 1136 terrain1   vec4<f32>    16   a GPU terrain's patch (F6c; gpuTerrain.ts): its size (x, z), the heights' min and
+ *                                    range (> 0: a GPU terrain; 0 otherwise)
+ * 1152 terrain2   vec4<f32>    16   cells a side, 1 with cut cells, the nearest page's side, pages following the eye
+ * 1168 terrain3   vec4<f32>    16   the terrain's origin, the leaf node's side
+ * 1184 terrain4   vec4<f32>    16   the eye in the ground plane (x, z), the split range, the morph's start
+ * 1200 pages      vec4<f32> ×4 64   each eye-following page's corner, two a vec4
+ * 1264 wlook0     vec4<f32>    16   a water surface's F5d terms (water.ts): x = shore foam, y = Gerstner waves'
+ *                                    height (m), z = the FFT ocean's share, w = 1 when it has them
  * ```
  *
- * 944 bytes used, padded to a 1024-byte stride (a 256-byte multiple a dynamic
+ * 1280 bytes used, filling the 1280-byte stride (a 256-byte multiple a dynamic
  * uniform offset can address), so one buffer still holds every draw in a
  * frame — uniforms are written per batch, not per copy, so the stride costs
  * little. The metallic-roughness inputs and the environment carry the Modern
@@ -122,13 +152,13 @@ import { AREA_KIND } from "./ltc.js";
  * `envMeta.w` at 0 uses the analytic gradient instead of a panorama, and
  * `shadow.x` at 0 skips the shadow test.
  */
-export const UNIFORM_STRIDE = 1024;
+export const UNIFORM_STRIDE = 1280;
 /**
  * Bytes the struct actually occupies, before the stride padding. This is what a
  * bind group layout's `minBindingSize` must be: it makes a WGSL struct that
  * grows past what this module writes fail at pipeline creation.
  */
-export const UNIFORM_BYTES_USED = 944;
+export const UNIFORM_BYTES_USED = 1280;
 /** The same stride counted in float32s, which is how `writeBuffer` sizes it. */
 export const UNIFORM_FLOATS = UNIFORM_STRIDE / 4;
 
@@ -187,6 +217,8 @@ export interface PackableLight {
   readonly shadowTile?: number;
   readonly temperature?: number;
   readonly channels?: number;
+  /** An IES profile (F9d): the renderer gives each distinct one a slot. */
+  readonly ies?: object | null;
 }
 
 /**
@@ -196,7 +228,7 @@ export interface PackableLight {
  * false (every shader but the linear-light one), an area light (F2e-2) packs
  * as the punctual light it is from far off.
  */
-export function packLights(lights: readonly PackableLight[], area = false): Float32Array {
+export function packLights(lights: readonly PackableLight[], area = false, iesIndex: ((light: PackableLight) => number) | null = null): Float32Array {
   const out = new Float32Array(Math.max(1, lights.length) * LIGHT_FLOATS);
   lights.forEach((authored, i) => {
     const light: PackableLight = area ? authored : areaAsPunctual(authored as SceneLight);
@@ -216,6 +248,15 @@ export function packLights(lights: readonly PackableLight[], area = false): Floa
     out[base + 8] = light.range ?? 0;
     out[base + 11] = light.shadowTile ?? -1;
     out[base + 15] = (placed && light.falloff === "inverseSquare" ? 1 : 0) + 2 * lightChannelMask(light.channels ?? 1);
+    // d4.w: an IES profile's slot (F9d), or −1; its axis in d3 (a spot's direction, else straight down).
+    out[base + 19] = -1;
+    const profile = iesIndex && (light.kind === "point" || light.kind === "spot") ? iesIndex(authored) : -1;
+    if (profile >= 0) {
+      out[base + 19] = profile;
+      const axis = light.direction ?? [0, -1, 0];
+      const len = Math.hypot(axis[0]!, axis[1]!, axis[2]!) || 1;
+      out.set([axis[0]! / len, axis[1]! / len, axis[2]! / len], base + 12);
+    }
     if (light.kind === "area") {
       const [w, h] = areaSize(light);
       const frame = areaFrame(light);
@@ -283,6 +324,21 @@ const OFFSET_WIND0 = 220;
 const OFFSET_MAPS0 = 224;
 const OFFSET_WIND1 = 228;
 const OFFSET_MOTION0 = 232;
+const OFFSET_SHEEN0 = 236;
+const OFFSET_SPEC0 = 240;
+const OFFSET_TRANS0 = 244;
+const OFFSET_TRANS1 = 248;
+const OFFSET_IRID0 = 252;
+const OFFSET_UVX0 = 256;
+const OFFSET_UVX1 = 260;
+const OFFSET_SSS0 = 264;
+const OFFSET_DT0 = 268;
+const OFFSET_CHAR0 = 272;
+const OFFSET_CHAR1 = 276;
+const OFFSET_CULL0 = 280;
+const OFFSET_TERRAIN = 284;
+/** A water surface's F5d terms (foam, waves, ocean, on). */
+const OFFSET_WATER_LOOK = 316;
 
 /** The rasteriser's defaults, restated so an unlit draw shades identically. */
 export const DEFAULT_LIGHT: readonly [number, number, number] = [0.4, 0.8, 0.6];
@@ -388,6 +444,7 @@ export function resolvePbr(
     (emissiveFactor !== undefined && (emissiveFactor[0]! > 0 || emissiveFactor[1]! > 0 || emissiveFactor[2]! > 0)) ||
     material.graph !== undefined ||
     materialHasLayers(material) ||
+    materialHasExtensions(material) ||
     materialRefracts(material) ||
     materialHasWater(material);
   return {
@@ -492,6 +549,8 @@ export interface InstanceUniform {
   readonly hasSsao: boolean;
   /** A baked light map is bound (it scales the ambient/IBL term, PBR draws only). */
   readonly hasLightmap?: boolean;
+  /** The bound light map is an HDR directional one (F3d), which the linear-light shader lights by in place of the sky's irradiance. */
+  readonly hdrLightmap?: boolean;
   /** This draw's world matrix, for point-light world position in the shader. */
   readonly model: Mat4 | null;
   /** Number of lights in the shared storage buffer, or 0 for the single key light. */
@@ -500,6 +559,10 @@ export interface InstanceUniform {
   readonly surface?: ResolvedSurface;
   /** This draw's clearcoat, anisotropy and relief (I4; see materialLayers.ts in @cartbox/editor), or omitted for none. */
   readonly layers?: ResolvedLayers;
+  /** This draw's full material set (F1d; materialExtensions.ts in @cartbox/editor), or omitted for the defaults. */
+  readonly extensions?: ResolvedExtensions;
+  /** The frame's count, which moves a hair's dither (F7c). */
+  readonly frame?: number;
   /** How this draw bends what's behind it (I5; refraction.ts in @cartbox/editor), or null/omitted when it doesn't. */
   readonly refraction?: ResolvedRefraction | null;
   /** The camera's right and up and the frame's height, which a refraction's offset is measured by. */
@@ -521,6 +584,8 @@ export interface InstanceUniform {
   readonly soft?: { readonly distance: number; readonly linear: readonly [number, number] };
   /** Moving water (B5): the material's waterUniform this frame, or null/omitted for none. */
   readonly water?: readonly [number, number, number, number] | null;
+  /** A water surface's F5d terms (waterLookUniform), or null. */
+  readonly waterLook?: readonly [number, number, number, number] | null;
   /** The water's ripples flow along the UVs (EDITOR_PRO_ROADMAP.md P3), not the world's X and Z. */
   readonly waterAlong?: boolean;
   /** Triplanar mapping and height blending (B6), from {@link resolveMapping}, or null/omitted for neither. */
@@ -535,12 +600,20 @@ export interface InstanceUniform {
   readonly windBefore?: readonly [number, number, number, number] | null;
   /** Where the frame's motion transforms start in the instance buffer (F0c). */
   readonly motionBase?: number;
+  /** Where a GPU-culled draw's copies start in the instance buffer (F0e): its indirect draws start at instance 0. */
+  readonly instanceBase?: number;
   /** The lighting channels the draw's copies are on (F2e), absent the first. */
   readonly lightChannels?: number;
   /** How many probes the shader loops over, where not `environment.probes`' (the linear variant's GPU-captured ones, F3b). */
   readonly probeCount?: number;
   /** The draw takes the frame's projected decals (F1f): an opaque or cut-out surface that doesn't refract. */
   readonly receivesDecals?: boolean;
+  /** The LOD level its copies draw (F10a's LOD view), or −1 (the default) without a chain. */
+  readonly lodLevel?: number;
+  /** An octahedral impostor's frames a side and half-size (F6b; MeshMaterial.octahedral), or null/omitted. */
+  readonly octahedral?: { readonly frames: number; readonly radius: number } | null;
+  /** A GPU terrain's patch (F6c; GpuTerrain.values): its 32 floats, or null/omitted. */
+  readonly terrain?: Float32Array | null;
 }
 
 /**
@@ -596,6 +669,29 @@ export function writeInstanceTransform(target: Float32Array, index: number, tran
     for (let row = 0; row < 3; row += 1) target[base + 48 + column * 4 + row] = transform.normalBasis[column * 3 + row]!;
     target[base + 48 + column * 4 + 3] = 0;
   }
+}
+
+/** A draw's full material set into its uniform (F1d): the defaults (a 4% dielectric of IOR 1.5, no sheen, film or transform) without one. */
+function writeExtensions(target: Float32Array, base: number, e: ResolvedExtensions | null, alphaMode: number, frame: number): void {
+  const sheen = e?.sheenColor ?? [0, 0, 0];
+  target.set([sheen[0], sheen[1], sheen[2], e?.sheenRoughness ?? 0], base + OFFSET_SHEEN0);
+  const f0 = e?.dielectricF0 ?? [0.04, 0.04, 0.04];
+  target.set([f0[0], f0[1], f0[2], e?.specularFactor ?? 1], base + OFFSET_SPEC0);
+  target.set([e?.transmission ?? 0, e?.thickness ?? 0, e?.attenuationDistance ?? 0, e?.ior ?? 1.5], base + OFFSET_TRANS0);
+  const att = e?.attenuationColor ?? [1, 1, 1];
+  target.set([att[0], att[1], att[2], e?.iridescence ?? 0], base + OFFSET_TRANS1);
+  const t = e?.uvTransform ?? null;
+  target.set([e?.iridescenceIor ?? 1.3, e?.iridescenceThickness ?? 400, e?.emissiveStrength ?? 1, t ? 1 : 0], base + OFFSET_IRID0);
+  target.set(t ? [t.scale[0], t.scale[1], Math.cos(t.rotation), Math.sin(t.rotation)] : [1, 1, 1, 0], base + OFFSET_UVX0);
+  target.set([t ? t.offset[0] : 0, t ? t.offset[1] : 0, e?.subsurface ?? 0, 0], base + OFFSET_UVX1);
+  const sss = e?.subsurfaceColor ?? [0, 0, 0];
+  target.set([sss[0], sss[1], sss[2], e?.subsurfaceRadius ?? 0], base + OFFSET_SSS0);
+  const dt = e?.diffuseTransmissionColor ?? [1, 1, 1];
+  target.set([dt[0], dt[1], dt[2], e?.diffuseTransmission ?? 0], base + OFFSET_DT0);
+  // Character shading (F7c): a masked hair card dithers its alpha.
+  const [char0, char1] = packCharacter(e?.character ?? null, alphaMode === 1, frame);
+  target.set(char0, base + OFFSET_CHAR0);
+  target.set(char1, base + OFFSET_CHAR1);
 }
 
 /**
@@ -690,7 +786,7 @@ export function writeInstanceUniform(target: Float32Array, index: number, unifor
 
   target[base + OFFSET_SSAO] = uniform.hasSsao ? 1 : 0;
   target[base + OFFSET_SSAO + 1] = uniform.lightCount; // light count for the storage-buffer loop
-  target[base + OFFSET_SSAO + 2] = uniform.hasLightmap ? 1 : 0;
+  target[base + OFFSET_SSAO + 2] = uniform.hdrLightmap ? 2 : uniform.hasLightmap ? 1 : 0;
   target[base + OFFSET_SSAO + 3] = uniform.probeCount ?? (env?.probes ? Math.min(env.probes.probes.length, MAX_REFLECTION_PROBES) : 0);
 
   const model = uniform.model;
@@ -779,6 +875,8 @@ export function writeInstanceUniform(target: Float32Array, index: number, unifor
   target[base + OFFSET_LAYER1 + 2] = layers.relief ? 1 : 0;
   target[base + OFFSET_LAYER1 + 3] = 0;
 
+  writeExtensions(target, base, uniform.extensions ?? null, uniform.alpha?.mode ?? 0, uniform.frame ?? 0);
+
   const refraction = uniform.refraction ?? null;
   target[base + OFFSET_REFRACT0] = refraction ? refraction.bend : 0;
   target[base + OFFSET_REFRACT0 + 1] = refraction ? refraction.warp : 0;
@@ -799,6 +897,7 @@ export function writeInstanceUniform(target: Float32Array, index: number, unifor
   target[base + OFFSET_WATER0 + 1] = water ? water[1] : 0;
   target[base + OFFSET_WATER0 + 2] = water ? water[2] : 0;
   target[base + OFFSET_WATER0 + 3] = water ? water[3] : 0;
+  target.set(uniform.waterLook ?? [0, 0, 0, 0], base + OFFSET_WATER_LOOK);
 
   const mapping = uniform.mapping ?? null;
   target[base + OFFSET_TERRAIN0] = mapping ? mapping.triplanar : 0;
@@ -822,7 +921,72 @@ export function writeInstanceUniform(target: Float32Array, index: number, unifor
   target[base + OFFSET_MOTION0] = uniform.motionBase ?? 0;
   target[base + OFFSET_MOTION0 + 1] = uniform.lightChannels ?? 1;
   target[base + OFFSET_MOTION0 + 2] = uniform.receivesDecals ? 1 : 0;
-  target[base + OFFSET_MOTION0 + 3] = 0;
+  target[base + OFFSET_MOTION0 + 3] = uniform.lodLevel ?? -1;
+  target[base + OFFSET_CULL0] = uniform.instanceBase ?? 0;
+  target[base + OFFSET_CULL0 + 1] = uniform.octahedral?.frames ?? 0;
+  target[base + OFFSET_CULL0 + 2] = uniform.octahedral?.radius ?? 0;
+  if (uniform.terrain) target.set(uniform.terrain, base + OFFSET_TERRAIN);
+  else target.fill(0, base + OFFSET_TERRAIN, base + OFFSET_TERRAIN + 32);
+}
+
+/**
+ * The floats of a draw's uniform that are the frame's rather than the draw's
+ * (AAA_FIDELITY_ROADMAP.md F0e), as [offset, count]: the light, the view
+ * direction, the environment, the shadow's and tone map's settings, the SSAO
+ * flag, light and probe counts, the fog and its eye, the time and the camera.
+ * A draw whose own inputs haven't changed since last frame, and that doesn't
+ * animate by itself ({@link uniformAnimates}), takes only these from the
+ * frame's: everything else in its slot is as it was.
+ */
+export const FRAME_UNIFORM_RANGES: readonly (readonly [number, number])[] = [
+  [OFFSET_LIGHT, 4],
+  [OFFSET_VIEW, 3], // w is the draw's alpha cutoff
+  [OFFSET_ENV_SKY, 12], // sky, horizon, ground
+  [OFFSET_SHADOW, 4],
+  [OFFSET_ENV_META, 4],
+  [OFFSET_TONEMAP, 2], // z is the draw's soft-edge distance
+  [OFFSET_TONEMAP + 3, 1],
+  [OFFSET_SSAO, 2], // z is the draw's light-map flag
+  [OFFSET_SSAO + 3, 1],
+  [OFFSET_FOG, 8], // the fog and its params
+  [OFFSET_SHADOW2, 2], // zw are a soft-edged draw's depth terms
+  [OFFSET_FOG_CAM, OFFSET_EFFECT0 - OFFSET_FOG_CAM], // the eye, height fog, glow and volumes
+  [OFFSET_EFFECT1 + 3, 1], // the time
+  [OFFSET_REFRACT1, 8], // the camera's right, up and height
+];
+
+/** Every float {@link FRAME_UNIFORM_RANGES} covers, in one list (copied float by float, which beats a view per range). */
+const FRAME_FLOATS = Uint16Array.from(FRAME_UNIFORM_RANGES.flatMap(([offset, count]) => Array.from({ length: count }, (_, k) => offset + k)));
+
+/** Copy the frame's fields ({@link FRAME_UNIFORM_RANGES}) from the draw at `from` (written in full this frame) into the draw at `index`. */
+export function copyFrameUniform(target: Float32Array, index: number, from: number): void {
+  const to = index * UNIFORM_FLOATS;
+  const at = from * UNIFORM_FLOATS;
+  for (let i = 0; i < FRAME_FLOATS.length; i += 1) {
+    const f = FRAME_FLOATS[i]!;
+    target[to + f] = target[at + f]!;
+  }
+}
+
+/**
+ * Whether a draw's uniform moves by itself from frame to frame, besides the
+ * frame's fields: the wind on a swaying primitive, water's drift, a scrolling
+ * or pulsing emission, a surface effect, refraction, soft edges (their depth
+ * terms follow the projection) and a hair card's dither.
+ */
+export function uniformAnimates(material: MeshMaterial, alpha: number, sway: boolean, refract: boolean, effect: SurfaceEffect | null | undefined): boolean {
+  return sway || refract || effectActive(effect ?? null) || (alpha >= 2 && (material.softDepth ?? 0) > 0) || materialAnimates(material);
+}
+
+const animating = new WeakMap<MeshMaterial, boolean>();
+/** A material's own motion: water's drift, a scrolling or pulsing emission, a hair card's dither (cached per material, as its other resolutions are). */
+function materialAnimates(material: MeshMaterial): boolean {
+  let out = animating.get(material);
+  if (out === undefined) {
+    out = materialHasWater(material) || material.emissiveScroll !== undefined || material.emissivePulse !== undefined || resolveExtensions(material).character !== null;
+    animating.set(material, out);
+  }
+  return out;
 }
 
 /** The camera's right and up in world space (the view's first two rows) and the frame's height, for refraction (I5). */
@@ -917,4 +1081,11 @@ export function unpadRows(
     out.set(padded.subarray(y * bytesPerRow, y * bytesPerRow + rowBytes), y * rowBytes);
   }
   return out;
+}
+
+/** A water material's F5d terms for the per-draw uniform: foam, Gerstner height, the ocean's share, and 1; null without water. */
+export function waterLookUniform(material: Pick<MeshMaterial, "water">): [number, number, number, number] | null {
+  const w = material.water;
+  if (!w || !(w.strength > 0)) return null;
+  return [w.foam ?? 0.5, w.waves ?? 0, w.ocean ?? 0, 1];
 }

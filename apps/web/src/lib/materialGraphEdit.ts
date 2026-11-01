@@ -15,6 +15,7 @@ import {
   viewMatrix,
   type GraphNode,
   type GraphOp,
+  type GraphLayer,
   type GraphOutput,
   type MaterialGraph,
   type MeshAsset,
@@ -314,6 +315,40 @@ function previewSphere(): MeshAsset {
     ],
   };
   return sphere;
+}
+
+/**
+ * A material function (F1e) from the subgraph upstream of `id`: every node it
+ * reads, directly or through others, copied under `name` with `id` as its
+ * output. The graph keeps its own nodes; a "function" node calls the copy.
+ */
+export function functionFromNode(graph: MaterialGraph, id: string, name: string): MaterialGraph {
+  const byId = new Map(graph.nodes.map((n) => [n.id, n]));
+  const keep = new Set<string>();
+  const visit = (n: string) => {
+    if (keep.has(n) || !byId.has(n)) return;
+    keep.add(n);
+    for (const wire of Object.values(byId.get(n)!.inputs ?? {})) if (wire) visit(wire);
+  };
+  visit(id);
+  if (keep.size === 0) return graph;
+  const fn = { name, output: id, nodes: graph.nodes.filter((n) => keep.has(n.id)) };
+  return { ...graph, functions: [...(graph.functions ?? []).filter((f) => f.name !== name), fn] };
+}
+
+/** Add a layer (F1e) over the graph's outputs, or drop one. */
+export function addLayer(graph: MaterialGraph, layer: GraphLayer): MaterialGraph {
+  return { ...graph, layers: [...(graph.layers ?? []), layer] };
+}
+export function removeLayer(graph: MaterialGraph, index: number): MaterialGraph {
+  const layers = (graph.layers ?? []).filter((_, i) => i !== index);
+  const { layers: _drop, ...rest } = graph;
+  return layers.length > 0 ? { ...rest, layers } : rest;
+}
+
+/** A static switch's default (F1e). */
+export function setSwitch(graph: MaterialGraph, name: string, on: boolean): MaterialGraph {
+  return { ...graph, switches: { ...(graph.switches ?? {}), [name]: on } };
 }
 
 /** Render a material (graph and all) on a lit sphere over a checker, `size`² RGBA. */

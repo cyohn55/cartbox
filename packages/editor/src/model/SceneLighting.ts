@@ -16,8 +16,15 @@
  * multiple lights, tone mapping, and shadows (see AAA_TIER_ROADMAP.md).
  */
 
+import { parsePhysicalCamera, type PhysicalCameraSettings } from "./physicalCamera";
+import { readIesProfile } from "./iesProfile";
+import { parseVolumetricFog } from "./volumetricFog";
+import { parseDynamicGi, parseScreenSpaceGi, type DynamicGiSettings, type ScreenSpaceGiSettings } from "./dynamicGi";
+import { parseAtmosphere } from "./atmosphere";
+import { parseWeather, type WeatherSettings } from "./weather";
 import { parseWind, type SceneWind } from "./wind";
 import { decodeLightProbes, type LightProbeGrid, type StoredLightProbes } from "./lightProbes";
+import { decodeProbeVolume, type ProbeVolume, type StoredProbeVolume } from "./probeVolume";
 import { readAutoExposure, readPostVolumes, type AutoExposure, type PostVolume } from "./postVolumes";
 import { MAX_LIGHT_TEMPERATURE, MIN_LIGHT_TEMPERATURE } from "../render/lightTemperature";
 import { areaSize } from "../render/areaLights";
@@ -91,6 +98,8 @@ export interface SceneLighting {
   readonly fog?: SceneFog | null;
   /** The scene's wind (B6; see wind.ts): it sways foliage. Absent = still air. */
   readonly wind?: SceneWind | null;
+  /** The weather (AAA_FIDELITY_ROADMAP.md F5e; see weather.ts): wet, puddled and snowy surfaces, and rain and snow falling. Absent = dry and clear. */
+  readonly weather?: WeatherSettings | null;
   /** Soft sun shadows (B7): 4×4-filtered penumbrae instead of 2×2. Absent = 2×2. */
   readonly softShadows?: boolean;
   /**
@@ -110,6 +119,24 @@ export interface SceneLighting {
    */
   readonly lightProbes?: StoredLightProbes | null;
   /**
+   * The GPU bake's probe volume (AAA_FIDELITY_ROADMAP.md F3d-3; see
+   * probeVolume.ts): L2 SH irradiance and visibility per probe, which the AAA
+   * tier lights things without a light map by. Absent = none.
+   */
+  readonly probeVolume?: StoredProbeVolume | null;
+  /**
+   * Real-time global illumination (AAA_FIDELITY_ROADMAP.md F3e; dynamicGi.ts):
+   * on the AAA tier, a probe volume traced and relit every frame, so moving
+   * lights and a time of day bounce without a bake. Absent = the baked light.
+   */
+  readonly dynamicGi?: DynamicGiSettings | null;
+  /**
+   * Screen-space GI (AAA_FIDELITY_ROADMAP.md F3e-2; dynamicGi.ts): on the AAA
+   * tier, the near field's bounce from the depth buffer and last frame's
+   * image. Absent = on, with its defaults.
+   */
+  readonly screenSpaceGi?: ScreenSpaceGiSettings | null;
+  /**
    * The armour colours for this scene (HALO_INFINITE_STYLE_ROADMAP.md I8): entry
    * k replaces tint k of the runtime's palette (1..15; entry 0 is unused), null
    * keeping the built-in colour — so a scene lit brighter can carry team
@@ -124,6 +151,12 @@ export interface SceneLighting {
   readonly postVolumes?: readonly PostVolume[];
   /** Eye adaptation: the exposure follows what the camera sees. Absent = a fixed exposure. */
   readonly autoExposure?: AutoExposure | null;
+  /**
+   * The physical camera (AAA_FIDELITY_ROADMAP.md F4c; physicalCamera.ts):
+   * aperture, shutter and ISO set the exposure (in manual mode) and drive the
+   * AAA tier's depth of field and motion blur. Absent = none.
+   */
+  readonly camera?: PhysicalCameraSettings | null;
   /**
    * The units the editor shows this rig in (AAA_FIDELITY_ROADMAP.md F0b):
    * "physical" for lux, candela, nits and EV100 (see physicalLight.ts).
@@ -178,6 +211,9 @@ function parseLight(value: unknown): SceneLight | null {
       : {};
   const mask = raw.channels === undefined ? 1 : lightChannelMask(raw.channels);
   const physical = { ...temperature, ...(mask !== 1 ? { channels: mask } : {}) };
+  // An IES profile (F9d), for a point or spot light.
+  const profile = readIesProfile(raw.ies);
+  const ies = profile ? { ies: profile } : {};
   if (kind === "directional") {
     const direction = isFiniteTriple(raw.direction) ? raw.direction : ([0.4, 0.8, 0.6] as [number, number, number]);
     return { kind, direction, color, intensity, ...physical };
@@ -199,9 +235,10 @@ function parseLight(value: unknown): SceneLight | null {
     const angle = (v: unknown, fallback: number) => (typeof v === "number" && Number.isFinite(v) ? Math.min(89, Math.max(0, v)) : fallback);
     const outerAngle = Math.max(1, angle(raw.outerAngle, 30));
     const innerAngle = Math.min(outerAngle, angle(raw.innerAngle, outerAngle * 0.75));
-    return { kind, position, direction, color, intensity, range, innerAngle, outerAngle, ...falloff, ...(raw.castShadows === true ? { castShadows: true } : {}), ...physical };
+    return { kind, position, direction, color, intensity, range, innerAngle, outerAngle, ...falloff, ...(raw.castShadows === true ? { castShadows: true } : {}), ...physical, ...ies };
   }
-  return { kind, position, color, intensity, range, ...falloff, ...(raw.castShadows === true ? { castShadows: true } : {}), ...physical };
+  const axis = ies.ies && isFiniteTriple(raw.direction) ? { direction: raw.direction } : {};
+  return { kind, position, ...axis, color, intensity, range, ...falloff, ...(raw.castShadows === true ? { castShadows: true } : {}), ...physical, ...ies };
 }
 
 /**
@@ -220,10 +257,14 @@ export function parseSceneLighting(raw: unknown): SceneLighting | null {
   const sky = parseSky(record.sky);
   const fog = parseFog(record.fog);
   const wind = parseWind(record.wind);
+  const weather = parseWeather(record.weather);
   const probes = parseReflectionProbes(record.probes);
   const shafts = parseShafts(record.shafts);
   // Kept only when it decodes: a bad grid is dropped, never half-used.
   const lightProbes = decodeLightProbes(record.lightProbes) ? (record.lightProbes as StoredLightProbes) : null;
+  const probeVolume = decodeProbeVolume(record.probeVolume) ? (record.probeVolume as StoredProbeVolume) : null;
+  const dynamicGi = parseDynamicGi(record.dynamicGi);
+  const screenSpaceGi = parseScreenSpaceGi(record.screenSpaceGi);
 
   const lights = Array.isArray(record.lights)
     ? record.lights.map(parseLight).filter((l): l is SceneLight => l !== null)
@@ -231,6 +272,7 @@ export function parseSceneLighting(raw: unknown): SceneLighting | null {
   const tints = parseTints(record.tints);
   const postVolumes = readPostVolumes(record.postVolumes);
   const autoExposure = readAutoExposure(record.autoExposure);
+  const camera = parsePhysicalCamera(record.camera);
 
   return {
     environment: {
@@ -252,13 +294,18 @@ export function parseSceneLighting(raw: unknown): SceneLighting | null {
     ...(sky ? { sky } : {}),
     ...(fog ? { fog } : {}),
     ...(wind ? { wind } : {}),
+    ...(weather && Object.keys(weather).length > 0 ? { weather } : {}),
     ...(record.softShadows === true ? { softShadows: true } : {}),
     ...(probes.length > 0 ? { probes } : {}),
     ...(shafts ? { shafts } : {}),
     ...(lightProbes ? { lightProbes } : {}),
+    ...(probeVolume ? { probeVolume } : {}),
+    ...(dynamicGi ? { dynamicGi } : {}),
+    ...(screenSpaceGi ? { screenSpaceGi } : {}),
     ...(tints ? { tints } : {}),
     ...(postVolumes.length > 0 ? { postVolumes } : {}),
     ...(autoExposure ? { autoExposure } : {}),
+    ...(camera ? { camera } : {}),
     ...(record.units === "physical" ? { units: "physical" as const } : {}),
   };
 }
@@ -379,8 +426,10 @@ export function parseSky(value: unknown): ProceduralSky | null {
   const objects = Array.isArray(raw.objects) ? raw.objects.map(parseSkyObject).filter((o): o is SkyObject => o !== null).slice(0, MAX_SKY_OBJECTS) : [];
   const cloudLayers = Array.isArray(raw.cloudLayers) ? raw.cloudLayers.map(parseCloudLayer).filter((l): l is SkyCloudLayer => l !== null).slice(0, MAX_CLOUD_LAYERS) : [];
   const panorama = parsePanorama(raw.panorama);
+  const atmosphere = parseAtmosphere(raw.atmosphere);
   return {
     ...(panorama ? { panorama } : {}),
+    ...(atmosphere ? { atmosphere } : {}),
     ...(objects.length > 0 ? { objects } : {}),
     ...(cloudLayers.length > 0 ? { cloudLayers } : {}),
     zenith: tripleOr(raw.zenith, base.zenith),
@@ -470,6 +519,7 @@ export function parseFog(value: unknown): SceneFog | null {
   const base = defaultSceneFog();
   const h = raw.height && typeof raw.height === "object" ? (raw.height as Record<string, unknown>) : null;
   const g = raw.glow && typeof raw.glow === "object" ? (raw.glow as Record<string, unknown>) : null;
+  const volumetric = parseVolumetricFog(raw.volumetric);
   const volumes = Array.isArray(raw.volumes)
     ? raw.volumes.map(parseFogVolume).filter((v): v is FogVolume => v !== null).slice(0, MAX_FOG_VOLUMES)
     : [];
@@ -490,6 +540,7 @@ export function parseFog(value: unknown): SceneFog | null {
       : {}),
     ...(volumes.length > 0 ? { volumes } : {}),
     ...(g ? { glow: { color: tripleOr(g.color, [1, 0.9, 0.7]), strength: Math.max(0, Math.min(2, finiteOr(g.strength, 0.6))) } } : {}),
+    ...(volumetric ? { volumetric } : {}),
   };
 }
 
@@ -513,7 +564,7 @@ export function defaultSunShafts(): SunShafts {
 /** Patch the top-level scalar/flag fields (ambient, exposure, tonemap, shadows). */
 export function patchSceneLighting(
   lighting: SceneLighting,
-  patch: Partial<Pick<SceneLighting, "ambient" | "exposure" | "tonemap" | "tonemapper" | "authoredCurve" | "shadows" | "shadowDistance" | "wind" | "softShadows">>,
+  patch: Partial<Pick<SceneLighting, "ambient" | "exposure" | "tonemap" | "tonemapper" | "authoredCurve" | "shadows" | "shadowDistance" | "wind" | "softShadows" | "weather">>,
 ): SceneLighting {
   const next = { ...lighting, ...patch };
   // A cleared distance goes back to fitting the scene, rather than staying as undefined.
@@ -591,13 +642,26 @@ export function removeSceneLight(lighting: SceneLighting, index: number): SceneL
 /** The authored gradient as an {@link EnvironmentLight} the rasteriser samples. */
 export function sceneLightingEnvironment(lighting: SceneLighting): EnvironmentLight {
   const grid = lighting.lightProbes ? decodedProbes(lighting.lightProbes) : null;
+  const volume = lighting.probeVolume ? decodedVolume(lighting.probeVolume) : null;
   return {
     sky: lighting.environment.sky,
     horizon: lighting.environment.horizon,
     ground: lighting.environment.ground,
     intensity: lighting.environment.intensity,
     ...(grid ? { lightProbes: grid } : {}),
+    ...(volume ? { probeVolume: volume } : {}),
   };
+}
+
+const decodedVolumes = new WeakMap<StoredProbeVolume, ProbeVolume | null>();
+/** A stored probe volume (F3d-3), decoded once per stored object. */
+function decodedVolume(stored: StoredProbeVolume): ProbeVolume | null {
+  let volume = decodedVolumes.get(stored);
+  if (volume === undefined) {
+    volume = decodeProbeVolume(stored);
+    decodedVolumes.set(stored, volume);
+  }
+  return volume;
 }
 
 const decoded = new WeakMap<StoredLightProbes, LightProbeGrid | null>();

@@ -20,6 +20,10 @@
  * rasteriser is a hardcoded call. See ERA_MODELS.md §5.1.
  */
 
+import type { CaptureOptions, ReferenceCapture } from "./pathTracer.js";
+import type { ViewMode } from "./viewModes.js";
+import type { SsgiFrame } from "./ssgi.js";
+import type { CameraEffects } from "./cameraEffects.js";
 import {
   DEFAULT_RASTER_STYLE,
   applyLods,
@@ -31,10 +35,13 @@ import {
   type MeshSceneInstance,
   type SceneWind,
 } from "@cartbox/editor";
-import type { DecalTiles, EnvironmentLight, LocalShadows, Mat4, ProjectedDecal, RasterStyle, SceneFog, SceneLight, ShadowInput, ToneMap } from "@cartbox/editor";
+import type { WaterFrame } from "./waterLook.js";
+import type { DynamicGi, EmitterSpec, MeshAsset, MeshMaterial, Occluder, DecalTiles, EnvironmentLight, LocalShadows, Mat4, ProjectedDecal, RasterStyle, SceneFog, SceneLight, ShadowInput, ToneMap, Weather } from "@cartbox/editor";
 
 import type { RenderCaps } from "../models.js";
 import type { ReflectionCapture } from "./probeCapture.js";
+import type { AtmosphereSky } from "./atmosphere.js";
+import type { GpuTerrainSource } from "./gpuTerrain.js";
 import type { RenderStats } from "../debug/profiler.js";
 import { applyRenderCaps, createTextureBudgetCache } from "./renderCaps.js";
 
@@ -63,6 +70,8 @@ export interface SunShadow {
 /** One frame's worth of drawing parameters — mirrors `renderMeshScene`'s options. */
 export interface SceneDraw {
   readonly width: number;
+  /** Seconds the GPU particles (F8a) step this frame (default a 60th). */
+  readonly particleDt?: number;
   readonly height: number;
   /** The framebuffer to composite into, RGBA8, `width * height * 4`. */
   readonly out: Uint8ClampedArray;
@@ -77,6 +86,8 @@ export interface SceneDraw {
   readonly depth: Float32Array;
   readonly view: Mat4;
   readonly projection: Mat4;
+  /** The path-traced reference's thin lens (F10d): aperture radius and focus distance (m); the raster ignores it. */
+  readonly lens?: { readonly aperture: number; readonly focus: number } | null;
   /**
    * Clear colour, or null to composite over whatever `out` already holds (the
    * cart's own frame). Null is what makes these surfaces overlays.
@@ -120,6 +131,12 @@ export interface SceneDraw {
    * false turns it off.
    */
   readonly ambientOcclusion?: boolean;
+  /**
+   * Screen-space GI from the prepass (AAA_FIDELITY_ROADMAP.md F3e-2; ssgi.ts):
+   * the near field's bounce, lit by last frame's image, on the linear-light
+   * renderer's temporal frames with a prepass. Absent = none.
+   */
+  readonly screenSpaceGi?: SsgiFrame | null;
   /**
    * Key light direction, or omitted for the rasteriser's default. The world
    * overlay publishes a cart-driven sun here, so it changes per frame.
@@ -188,6 +205,13 @@ export interface SceneDraw {
    */
   readonly decals?: { readonly boxes: readonly ProjectedDecal[]; readonly tiles: DecalTiles } | null;
   /**
+   * Terrains drawn from their heightfields on the GPU (AAA_FIDELITY_ROADMAP.md
+   * F6c; the linear-light WebGPU renderer alone): each frame's nodes join the
+   * draws (and, for a terrain that casts, the sun's and local lights' casters).
+   * A terrain's model must be its origin alone (no parent's turn or scale).
+   */
+  readonly terrains?: readonly GpuTerrainSource[];
+  /**
    * The sun's shadow rendered on the GPU in cascades (AAA_FIDELITY_ROADMAP.md
    * F2a), in place of the CPU-rasterised {@link shadow}: what casts (the whole
    * scene's casters, not just what the camera sees), the direction toward the
@@ -197,6 +221,47 @@ export interface SceneDraw {
    */
   readonly sunShadow?: SunShadow | null;
   /**
+   * Real-time GI (AAA_FIDELITY_ROADMAP.md F3e) on the linear-light (AAA)
+   * WebGPU renderer: the still scene its probes trace (a key that changes
+   * with it), and the settings. The volume it relights is the environment's
+   * probe volume, which every surface then takes its diffuse light from, the
+   * light-mapped ones too. The others ignore it.
+   */
+  readonly dynamicGi?: { readonly occluders: readonly Occluder[]; readonly key: string; readonly settings: DynamicGi } | null;
+  /**
+   * On the AAA tier at Epic (AAA_FIDELITY_ROADMAP.md F3f), the still scene
+   * whose BVH the reflections trace where the screen has nothing to show,
+   * keyed as `dynamicGi`'s (the two share one tracer when both are given).
+   */
+  /**
+   * Virtual shadow maps for the sun (AAA_FIDELITY_ROADMAP.md F2b;
+   * virtualShadows.ts) on the linear-light renderer with a prepass and its
+   * cascades, at High and Epic: the physical pool's edge in texels. Absent =
+   * the cascades alone.
+   */
+  readonly virtualShadows?: { readonly poolSize: number } | null;
+  /**
+   * Temporal upscaling (AAA_FIDELITY_ROADMAP.md F4b; upscaler.ts): on the
+   * linear-light renderer's temporal frames with a prepass, the size the frame
+   * is shown at, when larger than it renders. The frame then returns a texture
+   * of that size, reconstructed over the frames. Absent = shown as rendered.
+   */
+  readonly upscale?: { readonly width: number; readonly height: number } | null;
+  /**
+   * The physical camera's depth of field and motion blur (AAA_FIDELITY_ROADMAP.md
+   * F4c; cameraEffects.ts), on the linear-light renderer's frames with a
+   * prepass. Absent = neither.
+   */
+  readonly camera?: CameraEffects | null;
+  readonly reflectionTrace?: { readonly occluders: readonly Occluder[]; readonly key: string } | null;
+  /**
+   * A physical sky's air (AAA_FIDELITY_ROADMAP.md F5a-2): the medium and its
+   * sun above the air, whose aerial perspective the linear-light (AAA) WebGPU
+   * renderer lays over every surface, built for this draw's camera. The others
+   * ignore it.
+   */
+  readonly atmosphere?: AtmosphereSky | null;
+  /**
    * Distance fog for PBR (Modern-tier) materials, applied after tone mapping, or
    * omitted for none. Both backends fade by the fragment's eye depth. See
    * {@link SceneFog}.
@@ -204,8 +269,28 @@ export interface SceneDraw {
   readonly fog?: SceneFog | null;
   /** Seconds since the scene started, for animated emissive (scroll and pulse). */
   readonly time?: number;
+  /**
+   * What the viewport shows (AAA_FIDELITY_ROADMAP.md F10a; viewModes.ts): the lit frame (the default), or a
+   * diagnostic of it, on the linear-light renderer. Every other renderer draws the lit frame.
+   */
+  readonly viewMode?: ViewMode;
+  /** The texel density the texel-density view takes as on target, per metre (512 when omitted). */
+  readonly texelDensity?: number;
+  /**
+   * Texture streaming (AAA_FIDELITY_ROADMAP.md F1b) on the linear-light renderer with mips: the
+   * texture budget in MB a preset allows. Absent, every map is resident whole.
+   */
+  readonly textureBudget?: number;
   /** The scene's wind (B6): it sways primitives that carry per-vertex sway. Omitted is still air. */
   readonly wind?: SceneWind | null;
+  /**
+   * The weather (AAA_FIDELITY_ROADMAP.md F5e): the linear-light renderer lays
+   * wetness, puddles (rippled by the rain) and snow over every surface the sky
+   * reaches. Absent or all zero, surfaces are as authored.
+   */
+  readonly weather?: Weather | null;
+  /** The water body the frame lights by (F5d; waterLook.ts): its depth, ocean, ripples, caustics and whether the eye is under it. */
+  readonly water?: WaterFrame | null;
   /**
    * Skip instances whose world AABB is entirely outside the camera frustum. A
    * correct cull is output-identical, so it is a pure perf win; default off.
@@ -218,6 +303,13 @@ export interface SceneDraw {
    * it is opt-in; conservative, so it never removes visible geometry.
    */
   readonly occlude?: boolean;
+  /**
+   * Cull on the GPU (F0e): with a prepass on the linear-light renderer, the
+   * frustum and a Hi-Z pyramid of the prepass's depths decide which copies the
+   * frame draws, through indirect draws. Conservative, like `occlude`, with no
+   * CPU pass; ignored elsewhere.
+   */
+  readonly gpuCull?: boolean;
 }
 
 /**
@@ -287,17 +379,45 @@ export interface SceneRenderer {
   renderToTexture?(instances: readonly MeshSceneInstance[], draw: GpuSceneDraw): unknown;
   /**
    * Render at a new size from the next frame on (AAA_FIDELITY_ROADMAP.md F0d):
-   * the frame's own targets are remade, its meshes and pipelines kept. Only the
-   * renderers whose frames stay on the GPU have it.
+   * the frame's own targets are remade, its meshes and pipelines kept. The GPU
+   * renderers have it: the AAA tier's frame follows its display, and a renderer
+   * that reads its frames back renders smaller when it can't keep up (gpuPacing.ts).
    */
   resize?(width: number, height: number): void;
+  /**
+   * How many frames have come back from the GPU so far, on a renderer that
+   * reads its frames back (gpuPacing.ts paces by it). Absent elsewhere.
+   */
+  readonly framesLanded?: number;
   /** The GPU device a {@link renderToTexture} texture belongs to, so a compositor can share it. */
   readonly gpuDevice?: unknown;
+  /**
+   * The linear-light WebGPU renderer only (AAA_FIDELITY_ROADMAP.md F10b): the
+   * path-traced reference of a frame at any size up to 8K, and the samples its
+   * viewport reference holds.
+   */
+  captureReference?(instances: readonly MeshSceneInstance[], draw: GpuSceneDraw, options: CaptureOptions): Promise<ReferenceCapture>;
+  /**
+   * The WebGPU renderer only (AAA_FIDELITY_ROADMAP.md F1e): compile the shader
+   * permutations these materials' graphs need in the background, drawing them
+   * as plain materials until each is ready.
+   */
+  prepareMaterials?(materials: Iterable<MeshMaterial>, options?: { readonly samples?: number; readonly reflect?: boolean; readonly prepass?: boolean }): Promise<void>;
+  readonly referenceSamples?: number;
+  /** True when it skins and morphs live meshes itself, in a compute pass (AAA_FIDELITY_ROADMAP.md F7a). */
+  readonly gpuSkinning?: boolean;
+  /** GPU particles (AAA_FIDELITY_ROADMAP.md F8a): its emitters, and a burst of one. */
+  setParticles?(specs: readonly EmitterSpec[]): void;
+  particleBurst?(index: number, at: readonly number[], dir?: readonly number[], scale?: number): void;
+  /** Move where an emitter's rate spawns (F5e: rain and snow over the eye). */
+  particleOrigin?(index: number, at: readonly number[]): void;
   /**
    * True when it draws the sun's shadow itself from {@link SceneDraw.sunShadow}
    * (F2a: the AAA tier's GPU cascades) and ignores a CPU {@link SceneDraw.shadow}.
    */
   readonly sunCascades?: boolean;
+  /** Give back the GPU geometry of meshes nothing will draw for now (F6d: an unloaded world partition cell's); drawn again, they upload again. */
+  releaseMeshes?(meshes: readonly MeshAsset[]): void;
   /**
    * The block-compressed formats this renderer uploads a texture's
    * {@link DecodedTexture.gpu} chain in, preferred first (AAA_FIDELITY_ROADMAP.md
@@ -412,6 +532,41 @@ export class CappedSceneRenderer implements SceneRenderer {
     return this.inner.sunCascades;
   }
 
+  releaseMeshes(meshes: readonly MeshAsset[]): void {
+    this.inner.releaseMeshes?.(meshes);
+  }
+
+  get gpuSkinning(): boolean | undefined {
+    return this.inner.gpuSkinning;
+  }
+
+  setParticles(specs: readonly EmitterSpec[]): void {
+    this.inner.setParticles?.(specs);
+  }
+
+  particleBurst(index: number, at: readonly number[], dir?: readonly number[], scale?: number): void {
+    this.inner.particleBurst?.(index, at, dir, scale);
+  }
+
+  particleOrigin(index: number, at: readonly number[]): void {
+    this.inner.particleOrigin?.(index, at);
+  }
+
+  get referenceSamples(): number | undefined {
+    return this.inner.referenceSamples;
+  }
+
+  get prepareMaterials(): SceneRenderer["prepareMaterials"] {
+    const inner = this.inner;
+    return inner.prepareMaterials ? (materials, options) => inner.prepareMaterials!(materials, options) : undefined;
+  }
+
+  get captureReference(): SceneRenderer["captureReference"] {
+    const inner = this.inner;
+    // A reference is the whole scene, uncapped.
+    return inner.captureReference ? (instances, draw, options) => inner.captureReference!(instances, draw, options) : undefined;
+  }
+
   get renderToTexture(): SceneRenderer["renderToTexture"] {
     const inner = this.inner;
     if (!inner.renderToTexture) return undefined;
@@ -422,6 +577,10 @@ export class CappedSceneRenderer implements SceneRenderer {
   get resize(): SceneRenderer["resize"] {
     const inner = this.inner;
     return inner.resize ? (width, height) => inner.resize!(width, height) : undefined;
+  }
+
+  get framesLanded(): number | undefined {
+    return this.inner.framesLanded;
   }
 
   dispose(): void {

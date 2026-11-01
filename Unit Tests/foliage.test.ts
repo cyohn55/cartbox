@@ -15,6 +15,8 @@ import {
   eraseFoliage,
   fillCopies,
   foliageBlocks,
+  foliageInstanceMesh,
+  FOLIAGE_TRANSMISSION,
   foliagePreset,
   layerCopies,
   lockoutMeshSidecar,
@@ -31,6 +33,7 @@ import {
   type Terrain,
 } from "@cartbox/editor";
 import { MeshOverlaySurface, parseMeshScene, type SceneRenderer } from "@cartbox/player";
+import type { MeshSceneInstance } from "@cartbox/editor";
 import { addMesh, decodeMeshSidecar, emptyMeshSidecar, encodeMeshSidecar } from "../apps/web/src/lib/meshSidecar";
 import { addTerrain, removeTerrain, replaceTerrain, findTerrain } from "../apps/web/src/lib/terrainEdit";
 import { addFoliage, findFoliage, foliageOn, replaceFoliage } from "../apps/web/src/lib/foliageEdit";
@@ -200,6 +203,50 @@ describe("the editor and the runtime", () => {
     const terrainBlocks = scene.instances.filter((i) => i.terrain && !i.foliage).length;
     expect(drawn.at(-1)!).toBeLessThan(terrainBlocks + blocks.length);
     expect(drawn.at(-1)!).toBeGreaterThan(terrainBlocks);
+  });
+});
+
+describe("foliage a copy at a time (F6b)", () => {
+  it("keeps each block's copies and makes the layer's mesh for drawing them", () => {
+    const t = hillside();
+    const l = layer({ terrain: t.id, density: 0.4, wind: 2, fill: { seed: 3 } } as Partial<FoliageLayer>);
+    const preset = foliagePreset("grassCards").mesh;
+    const blocks = foliageBlocks(t, l, preset);
+    const copies = layerCopies(t, l);
+    expect(blocks.reduce((n, b) => n + b.matrices.length, 0)).toBe(copies.length);
+    expect(blocks.every((b) => b.matrices.length === b.copies)).toBe(true);
+    const single = foliageInstanceMesh(l, preset);
+    for (const p of single.primitives) {
+      // The flexibility, negated: the shader bends it by each copy's height in the world.
+      expect(p.sway).toBeDefined();
+      expect(Array.from(p.sway!).every((v) => v === -2)).toBe(true);
+      // Cut-out blades let light through (F1d), unless their material says how much.
+      if (p.material.alphaMode === "mask") expect(p.material.diffuseTransmission).toBe(FOLIAGE_TRANSMISSION);
+    }
+    // Stiff: no sway at all.
+    expect(foliageInstanceMesh({ wind: 0 }, preset).primitives.every((p) => p.sway === undefined)).toBe(true);
+  });
+
+  it("draws the copies of the blocks in reach on the AAA tier, its impostors as their far LOD level", async () => {
+    let sc = addTerrain(emptyMeshSidecar(), { size: 400, samples: 33 }).sidecar;
+    const id = sc.terrains![0]!.id;
+    sc = addFoliage(sc, id, { preset: "boulder" })!.sidecar;
+    const found = foliageOn(sc, id)[0]!;
+    sc = replaceFoliage(sc, { ...found.layer, density: 0.5, cull: 60, fill: { seed: 1 } }, found.mesh);
+    const scene = parseMeshScene(encodeMeshSidecar(sc))!;
+    const blocks = scene.instances.filter((i) => i.foliage);
+    const drawn: MeshSceneInstance[][] = [];
+    const renderer = { backend: "webgpu", sunCascades: true, render: (instances: readonly MeshSceneInstance[]) => void drawn.push([...instances]), dispose: () => {} } as unknown as SceneRenderer;
+    const surface = await MeshOverlaySurface.create({ blit() {}, destroy() {} }, 16, 16, scene, renderer, { prepass: true });
+    surface.setCameraOverride({ yaw: 0, pitch: 0.3, distance: 5, target: [0, 0, 0], fov: null, hud: false });
+    surface.blit(new Uint8Array(16 * 16 * 4));
+    const frame = drawn.at(-1)!;
+    // No merged block is drawn: their copies are, each once, the layer's own mesh at the copy's matrix.
+    const blockMeshes = new Set(blocks.map((b) => b.mesh));
+    expect(frame.some((i) => blockMeshes.has(i.mesh))).toBe(false);
+    const copies = frame.filter((i) => i.mesh === blocks[0]!.foliage!.copies!.mesh);
+    expect(copies.length).toBeGreaterThan(0);
+    expect(copies.length).toBeLessThan(blocks.reduce((n, b) => n + b.foliage!.copies!.matrices.length, 0));
   });
 });
 

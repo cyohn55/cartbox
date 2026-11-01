@@ -114,7 +114,13 @@ describe("auto by measurement (QualityGovernor)", () => {
   it("doesn't count gaps: a hidden tab, a breakpoint, a load", () => {
     const governor = new QualityGovernor();
     governor.reset(0);
-    expect(run(governor, "high", 500, 1000, 1000).steps).toEqual([]);
+    expect(run(governor, "high", 500, 5000, 5000).steps).toEqual([]);
+  });
+
+  it("steps a scene running at 1 fps down to low (a second-long frame once counted as a gap, so it never did)", () => {
+    const governor = new QualityGovernor();
+    governor.reset(0);
+    expect(run(governor, "high", 20, 1000, 1000).steps.map((s) => s.level)).toEqual(["low"]);
   });
 
   it("still steps down a device crawling at 3 fps", () => {

@@ -3607,6 +3607,15 @@ export interface ArenaScene {
   };
 }
 
+/**
+ * The arena's skinned soldier, as a scene instance stores it (its flat-shaded plates without normals) with its
+ * animator: what the AAA reference scene (F11b, ruinScene.ts) stands at its ruin.
+ */
+export function arenaSoldierForScene(): { mesh: string; animator: unknown } {
+  const asset = soldierMesh();
+  return { mesh: serializeMeshAsset({ ...asset, primitives: asset.primitives.map((p) => ({ ...p, normals: null })) }), animator: LOCKOUT_SOLDIER_ANIMATOR };
+}
+
 /** A sidecar instance as the arena writes it. */
 type ArenaInstance = { id: string; name: string; mesh: string; variant?: string; lods?: StoredLods; animator?: unknown; transform: unknown; components?: unknown };
 

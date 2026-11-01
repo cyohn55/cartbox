@@ -85,6 +85,22 @@ export interface TimelinePreview {
   readonly locals: ReadonlyMap<string, Mat4>;
 }
 
+/** A number that may be left blank (blank: unset). */
+function OptNum({ label, value, step = 0.1, width = 48, placeholder, onChange }: { label: string; value: number | undefined; step?: number; width?: number; placeholder: string; onChange: (v: number | undefined) => void }) {
+  return (
+    <input
+      type="number"
+      step={step}
+      aria-label={label}
+      title={label}
+      placeholder={placeholder}
+      value={value === undefined ? "" : fmt(value)}
+      onChange={(e) => onChange(e.target.value === "" || !Number.isFinite(Number(e.target.value)) ? undefined : Number(e.target.value))}
+      style={{ ...input, width, flex: "none" }}
+    />
+  );
+}
+
 function Num({ label, value, step = 0.1, width = 56, onChange }: { label: string; value: number; step?: number; width?: number; onChange: (v: number) => void }) {
   return (
     <input
@@ -212,7 +228,7 @@ export function TimelinePanel({
     if (!view) return;
     const key: CameraKey = { time, eye: view.eye, target: view.target, fov: view.fov, ease: "smooth" };
     if (!camTrack) setTracks([{ kind: "camera", keys: [key] }, ...tracks]);
-    else replaceTrack(camTrack, { kind: "camera", keys: [...camTrack.keys.filter((k) => Math.abs(k.time - time) > 1e-3), key] });
+    else replaceTrack(camTrack, { ...camTrack, keys: [...camTrack.keys.filter((k) => Math.abs(k.time - time) > 1e-3), key] });
   };
   const eventTrack = tracks.find((t): t is EventTrack => t.kind === "events");
   const unique = (base: string) => {
@@ -325,19 +341,77 @@ export function TimelinePanel({
       </button>
       {(camTrack?.keys ?? []).map((k, i) => (
         <div key={i} style={{ ...row, flexWrap: "wrap" }}>
-          <Num label="Camera key time" value={k.time} onChange={(v) => replaceTrack(camTrack!, { kind: "camera", keys: camTrack!.keys.map((q, j) => (j === i ? { ...q, time: v } : q)) })} />
+          <Num label="Camera key time" value={k.time} onChange={(v) => replaceTrack(camTrack!, { ...camTrack!, keys: camTrack!.keys.map((q, j) => (j === i ? { ...q, time: v } : q)) })} />
           <span style={{ opacity: 0.75, overflow: "hidden", whiteSpace: "nowrap", textOverflow: "ellipsis" }} title={`eye ${k.eye.map(fmt).join(", ")} → ${k.target.map(fmt).join(", ")}`}>
             {k.eye.map(fmt).join(",")}
           </span>
-          <EaseSelect value={k.ease} onChange={(ease) => replaceTrack(camTrack!, { kind: "camera", keys: camTrack!.keys.map((q, j) => (j === i ? withEase(q, ease) : q)) })} />
-          <Remove label="Remove camera key" onClick={() => replaceTrack(camTrack!, { kind: "camera", keys: camTrack!.keys.filter((_, j) => j !== i) })} />
+          <EaseSelect value={k.ease} onChange={(ease) => replaceTrack(camTrack!, { ...camTrack!, keys: camTrack!.keys.map((q, j) => (j === i ? withEase(q, ease) : q)) })} />
+          <Remove label="Remove camera key" onClick={() => replaceTrack(camTrack!, { ...camTrack!, keys: camTrack!.keys.filter((_, j) => j !== i) })} />
           {k.ease === "curve" && (
             <div style={{ flexBasis: "100%" }}>
-              <CurveEditor curve={k.curve ?? DEFAULT_EASE_CURVE} onChange={(curve) => replaceTrack(camTrack!, { kind: "camera", keys: camTrack!.keys.map((q, j) => (j === i ? { ...q, curve } : q)) })} />
+              <CurveEditor curve={k.curve ?? DEFAULT_EASE_CURVE} onChange={(curve) => replaceTrack(camTrack!, { ...camTrack!, keys: camTrack!.keys.map((q, j) => (j === i ? { ...q, curve } : q)) })} />
             </div>
           )}
+          <div style={{ ...row, flexBasis: "100%" }} title="The film camera (path-traced renders): focal length (mm) sets the field of view; f-stop and focus (m) the depth of field; roll (°); shake (0–1 of the track's)">
+            {(
+              [
+                ["focalLength", "mm", 1],
+                ["fStop", "f/", 0.1],
+                ["focus", "focus m", 0.1],
+                ["roll", "roll°", 1],
+                ["shake", "shake", 0.1],
+              ] as const
+            ).map(([field, placeholder, step]) => (
+              <OptNum
+                key={field}
+                label={`Camera key ${placeholder}`}
+                placeholder={placeholder}
+                step={step}
+                value={k[field]}
+                onChange={(v) =>
+                  replaceTrack(camTrack!, {
+                    ...camTrack!,
+                    keys: camTrack!.keys.map((q, j) => {
+                      if (j !== i) return q;
+                      const next: Record<string, unknown> = { ...q, [field]: v };
+                      if (v === undefined) delete next[field];
+                      return next as unknown as CameraKey;
+                    }),
+                  })
+                }
+              />
+            ))}
+          </div>
         </div>
       ))}
+      {camTrack && camTrack.keys.length > 0 && (
+        <div style={{ ...row, flexWrap: "wrap" }}>
+          <span style={{ flex: "none" }} title="Shake amplitude (°) and frequency (Hz), scaled by each key's shake">
+            Shake
+          </span>
+          <OptNum label="Shake amplitude (degrees)" placeholder="°" value={camTrack.shakeAmplitude} onChange={(v) => replaceTrack(camTrack, { ...camTrack, shakeAmplitude: v })} />
+          <OptNum label="Shake frequency (Hz)" placeholder="Hz" value={camTrack.shakeFrequency} onChange={(v) => replaceTrack(camTrack, { ...camTrack, shakeFrequency: v })} />
+          <button
+            type="button"
+            className={styles.toolBtn}
+            style={{ fontSize: 12 }}
+            disabled={!camTrack.rail && camTrack.keys.length < 2}
+            title="Lay a rail through the keys' eyes (in time order), so the camera glides along a curve between them; again to take it away"
+            onClick={() => {
+              if (camTrack.rail) {
+                const { rail: _rail, ...rest } = camTrack;
+                void _rail;
+                replaceTrack(camTrack, { ...rest, keys: camTrack.keys.map(({ along: _along, ...q }) => q) });
+                return;
+              }
+              const keys = [...camTrack.keys].sort((a, b) => a.time - b.time);
+              replaceTrack(camTrack, { ...camTrack, rail: keys.map((q) => q.eye), keys: keys.map((q, j) => ({ ...q, along: j / (keys.length - 1) })) });
+            }}
+          >
+            {camTrack.rail ? "Remove rail" : "Rail through keys"}
+          </button>
+        </div>
+      )}
       {!view && <RailHint>Switch to the Scene view to key the camera from it.</RailHint>}
 
       <div style={sub}>Objects</div>

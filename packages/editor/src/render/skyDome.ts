@@ -18,6 +18,8 @@
  * the same pixels in the editor preview, the runtime, and tests.
  */
 
+import type { AtmosphereSettings } from "../model/atmosphere";
+import type { VolumetricFogSettings } from "../model/volumetricFog";
 import type { DecodedTexture, Mat4 } from "./meshRasterizer";
 import { cloudPlane, overClouds, prepareSkyObjects, resamplePanorama, skyObjectsAt, type BakedCloudLayer, type SkyCloudLayer, type SkyObject } from "./skyLayers";
 
@@ -69,6 +71,13 @@ export interface ProceduralSky {
   readonly objects?: readonly SkyObject[];
   /** Cloud layers drifting overhead, drawn over the backdrop each frame (I6). */
   readonly cloudLayers?: readonly SkyCloudLayer[];
+  /**
+   * A physically based atmosphere (AAA_FIDELITY_ROADMAP.md F5a; atmosphere.ts)
+   * in place of the painted gradient, glow and mountains, as an imported
+   * panorama is: its sun is the rig's key light, and it tints that light by the
+   * air between. The painted sky stays when this is absent.
+   */
+  readonly atmosphere?: AtmosphereSettings | null;
 }
 
 /**
@@ -141,6 +150,13 @@ export interface SceneFog {
   readonly volumes?: readonly FogVolume[];
   /** Brightening toward the sun, or absent for none. */
   readonly glow?: FogGlow | null;
+  /**
+   * Volumetric fog (AAA_FIDELITY_ROADMAP.md F5b), or absent for the painted
+   * fade: on the AAA tier, the densities above become a medium the sun and
+   * sky light scatter in, shadowed, and the fade toward the colour gives way
+   * to it. The other tiers keep the fade.
+   */
+  readonly volumetric?: VolumetricFogSettings | null;
 }
 
 /** Fog amount (0..1) for a fragment at view depth `distance`. */

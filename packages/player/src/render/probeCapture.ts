@@ -265,6 +265,8 @@ export class ProbeCapture {
         prepass: false,
         tonemap: null,
         reflectionCapture: null,
+        // The live GI's volume is the main renderer's; a capture takes the probes' light as they were given.
+        dynamicGi: null,
         environment: draw.environment ? { ...draw.environment, probes: null } : null,
         ...(draw.sunShadow ? { sunShadow: { ...draw.sunShadow, casters: instances } } : {}),
         ...(draw.localShadowCasters ? { localShadowCasters: instances, localShadowKey: `probe:${this.key}`, localShadowMoved: [] } : {}),

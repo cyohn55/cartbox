@@ -417,7 +417,7 @@ describe.skipIf(!device)("GPU presentation, on a real device", () => {
   });
 });
 
-describe.skipIf(!device)("linear HDR (AAA_FIDELITY_ROADMAP.md F0b), on a real device", () => {
+describe.skipIf(!device)("linear HDR (AAA_FIDELITY_ROADMAP.md F0b), on a real device", { timeout: 60_000 }, () => { // the first frame compiles the linear-light shader on a software device
   const target = () => device.createTexture({ size: { width: W, height: H }, format: "rgba8unorm", usage: 0x10 | 0x01 });
   /** A half-float texture of one linear colour (alpha 1), as an HDR scene renderer leaves it. */
   function linearScene(value: number): any {

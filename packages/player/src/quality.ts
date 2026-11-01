@@ -8,6 +8,9 @@
  *   behaviour before presets existed.
  * - **medium**: half-resolution shadow maps; the first-person software view
  *   starts at three-quarter size.
+ * - **epic** (AAA_FIDELITY_ROADMAP.md's top scalability level): high, plus the
+ *   AAA tier's costliest paths — reflections traced through the scene's BVH
+ *   where the screen has nothing to show (F3f). Never picked by "auto".
  * - **low**: no shadows, no bloom or chromatic aberration (the multi-pass
  *   effects; cheap per-pixel looks like grading, CRT or dithering stay), no
  *   anti-aliasing, and the first-person software view capped at half size.
@@ -25,9 +28,9 @@
 
 import type { PostFxSettings } from "./fx/postfx.js";
 
-export type QualityLevel = "low" | "medium" | "high";
+export type QualityLevel = "low" | "medium" | "high" | "epic";
 export type QualityChoice = QualityLevel | "auto";
-export const QUALITY_LEVELS: readonly QualityLevel[] = ["low", "medium", "high"];
+export const QUALITY_LEVELS: readonly QualityLevel[] = ["low", "medium", "high", "epic"];
 
 export interface QualitySettings {
   readonly level: QualityLevel;
@@ -61,12 +64,21 @@ export interface QualitySettings {
    * expanded in blocks, so much past 4 shows on cloud edges.)
    */
   readonly skyScale?: number;
+  /** On the AAA tier's temporal frames, the share of the display's pixels across that renders; the upscaler (F4b) makes up the rest. */
+  readonly renderScale?: number;
+  /** On the AAA tier, the sun's virtual shadow maps over its cascades (F2b). */
+  readonly virtualShadows?: boolean;
+  /** On the AAA tier, reflections the screen can't show traced through the still scene's BVH (F3f). */
+  readonly tracedReflections?: boolean;
+  /** Texture streaming's budget on the AAA tier (AAA_FIDELITY_ROADMAP.md F1b), MB of resident maps. */
+  readonly textureBudgetMB?: number;
 }
 
 export const QUALITY_PRESETS: Readonly<Record<QualityLevel, QualitySettings>> = {
-  high: { level: "high", shadows: true, shadowMapSize: 1024, shadowCascades: true, cascadeMapSize: 4096, maxRenderScale: 1, disabledEffects: [], terrainDetail: 1, antialias: true, temporal: true, reflections: true, skyScale: 3 },
-  medium: { level: "medium", shadows: true, shadowMapSize: 512, cascadeMapSize: 2048, maxRenderScale: 0.75, disabledEffects: [], terrainDetail: 0.6, antialias: true, temporal: true, reflections: true, skyScale: 3 },
-  low: { level: "low", shadows: false, shadowMapSize: 512, maxRenderScale: 0.5, disabledEffects: ["bloom", "chroma"], terrainDetail: 0.3, antialias: false, temporal: false, reflections: false, skyScale: 4 },
+  epic: { level: "epic", shadows: true, shadowMapSize: 1024, shadowCascades: true, cascadeMapSize: 4096, maxRenderScale: 1, disabledEffects: [], terrainDetail: 1, antialias: true, temporal: true, reflections: true, skyScale: 3, tracedReflections: true, virtualShadows: true, textureBudgetMB: 1024 },
+  high: { level: "high", shadows: true, shadowMapSize: 1024, shadowCascades: true, cascadeMapSize: 4096, maxRenderScale: 1, disabledEffects: [], terrainDetail: 1, antialias: true, temporal: true, reflections: true, skyScale: 3, virtualShadows: true, textureBudgetMB: 512 },
+  medium: { level: "medium", shadows: true, shadowMapSize: 512, cascadeMapSize: 2048, maxRenderScale: 0.75, disabledEffects: [], terrainDetail: 0.6, antialias: true, temporal: true, reflections: true, skyScale: 3, renderScale: 2 / 3, textureBudgetMB: 256 },
+  low: { level: "low", shadows: false, shadowMapSize: 512, maxRenderScale: 0.5, disabledEffects: ["bloom", "chroma"], terrainDetail: 0.3, antialias: false, temporal: false, reflections: false, skyScale: 4, textureBudgetMB: 128 },
 };
 
 /** What the browser reveals about the device (all optional: browsers differ). */
@@ -117,6 +129,9 @@ export function browserDeviceHints(webgpu?: boolean): DeviceHints {
  * first, slower frames (loading, shaders building) to pass; gaps over half a
  * second — a hidden tab, a breakpoint — don't count.
  */
+/** A gap between frames longer than this (ms) is a pause, not a slow frame. */
+const PAUSE_MS = 3000;
+
 export class QualityGovernor {
   /** Smoothed time between frames and time spent on them (ms), how many frames and how long that covers. */
   private average = 0;
@@ -151,7 +166,9 @@ export class QualityGovernor {
    * `level`, or null to stay.
    */
   feed(ms: number, busyMs: number, now: number, level: QualityLevel): QualityLevel | null {
-    if (now < this.holdUntil || !(ms > 0) || ms > 500) return null;
+    // Past a few seconds a frame is a pause (a hidden tab, a debugger), not a frame time; a second-long frame,
+    // though, is exactly what this is for (it once ignored anything past half a second, so a scene at 1 fps never stepped down).
+    if (now < this.holdUntil || !(ms > 0) || ms > PAUSE_MS) return null;
     const k = 1 / Math.min(this.frames + 1, 30);
     this.average += (ms - this.average) * k;
     this.busy += (Math.min(busyMs, ms) - this.busy) * k;

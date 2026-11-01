@@ -1,6 +1,8 @@
-import type { AccessibilitySettings, ColorFilter, DecodedTexture, EncodedImage, InputAction, SceneLevel, StringTable, UiDocument } from "@cartbox/editor";
+import type { AccessibilitySettings, ColorFilter, DecodedTexture, EncodedImage, InputAction, SceneLevel, StringTable, UiDocument, WeatherSettings } from "@cartbox/editor";
 import type { PhysicsBackend } from "./physics/physicsSession.js";
 import type { QualityChoice, QualityLevel } from "./quality.js";
+import type { ViewMode } from "./render/viewModes.js";
+import type { ReferenceCapture } from "./render/pathTracer.js";
 /**
  * Public and shared types for @cartbox/player.
  *
@@ -132,7 +134,7 @@ export interface PlayerOptions {
    * that has KTX2 textures; without it they render as their flat base colour.
    * The web app passes one that fetches the transcoder on demand.
    */
-  ktx2?: () => Promise<(bytes: Uint8Array) => DecodedTexture | null>;
+  ktx2?: () => Promise<(bytes: Uint8Array) => DecodedTexture | null | Promise<DecodedTexture | null>>;
   /**
    * Loads a level's assets before a switch to it (`cartbox.level`), reporting
    * progress 0..1; the switch happens when it settles. Without it, switches are
@@ -341,6 +343,24 @@ export interface PlayerOptions {
 }
 
 /** Handle returned by {@link mount} for controlling a live player instance. */
+/** An offline render of a timeline (F10d; see {@link PlayerHandle.renderSequence}). */
+export interface SequenceOptions {
+  /** The timeline's name. */
+  readonly timeline: string;
+  readonly width: number;
+  /** Default: the shown frame's aspect. */
+  readonly height?: number;
+  /** Frames a second (default 24, up to 120). */
+  readonly fps?: number;
+  /** Samples a pixel takes each frame (default 64). */
+  readonly samples?: number;
+  /** Hears the share done, 0..1. */
+  readonly progress?: (done: number) => void;
+  /** Stops after the frame in hand. */
+  readonly signal?: AbortSignal;
+  readonly onFrame: (frame: ReferenceCapture, index: number, count: number) => void | Promise<void>;
+}
+
 export interface PlayerHandle {
   /** Halt the run loop and silence audio without tearing down the instance. */
   pause(): void;
@@ -392,6 +412,28 @@ export interface PlayerHandle {
   inspect(): InspectedObject[];
   /** Change the graphics preset live: "low" | "medium" | "high" | "auto" (see quality.ts). */
   setQuality(choice: QualityChoice): void;
+  /** Show the 3D scene lit (the default) or as a diagnostic view (F10a; the AAA tier alone draws them). */
+  setViewMode(mode: ViewMode): void;
+  /** Set the weather at run time (AAA_FIDELITY_ROADMAP.md F5e): wetness, puddles, snow, rain and snowfall over the rig's; null goes back to the rig's. */
+  setWeather(settings: WeatherSettings | null): void;
+  /** Disturb the scene's water at world (x, z) (F5d): a ring `strength` metres deep spreads from it. */
+  splash(x: number, z: number, strength?: number): void;
+  /**
+   * Render the path-traced reference of the 3D frame shown (F10b), `width`
+   * across at its aspect (up to 8K a side), accumulated over `samples` a pixel
+   * (default 256): a display image and, if asked, the linear one. Null on every
+   * tier but AAA, or before a frame has drawn.
+   */
+  captureReference(options: { readonly width: number; readonly samples?: number; readonly progress?: (done: number) => void }): Promise<ReferenceCapture> | null;
+  /** Samples each pixel of the viewport's path-traced reference holds (F10b; 0 when it isn't shown). */
+  readonly referenceSamples: number;
+  /**
+   * Render a timeline offline (F10d): every frame at its frame rate path-traced
+   * through the timeline's film camera, handed to `onFrame` in order. Resolves
+   * to the frames rendered; null on every tier but AAA, before a frame has
+   * drawn, or for a timeline without camera keys.
+   */
+  renderSequence(options: SequenceOptions): Promise<number> | null;
   /**
    * Hand the running scene streamed textures, keyed by the `ref` of the
    * placeholder each fills (an asset-backed texture's content hash). Safe to

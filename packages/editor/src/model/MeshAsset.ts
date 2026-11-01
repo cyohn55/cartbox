@@ -24,10 +24,18 @@
  */
 
 import { bytesToBase64, base64ToBytes } from "./base64";
+import type { ClusterLod } from "./clusterLod";
+import { readClusterLod, writeClusterLod, type SerializedClusterLod } from "./clusterLodCodec";
 import { generateTextures, isGeneratedImage, readGenerator, type TextureGenerator } from "./textureGenerators";
 import { readInstanceLink, type MaterialInstanceLink } from "./materialInstanceLink";
 import { readSurfaceEffects, writeSurfaceEffects } from "./materialEffects";
 import { readMaterialLayers, writeMaterialLayers } from "./materialLayers";
+import { MAX_MORPH_TARGETS, type MorphTarget } from "./morphTargets";
+import { readClothSettings, readSpringChains, type Capsule, type ClothSettings, type SpringChain } from "./cloth";
+import { MAX_FRACTURE_PIECES, type FracturePiece } from "./fracture";
+import { readMaterialExtensions, writeMaterialExtensions } from "./materialExtensions";
+import type { CharacterShading } from "./characterShading";
+import { readSmartStack, writeSmartStack, type SmartStack } from "./smartMaterials";
 import type { MaterialGraph } from "./materialGraph";
 import { readMeshTrails, type MeshTrail } from "../render/meshTrails";
 import {
@@ -36,6 +44,7 @@ import {
   MAX_SKIN_JOINTS,
   type AnimationClip,
   type ClipChannel,
+  type MorphChannel,
   type ClipKey,
   type MeshSkin,
   type SkinJoint,
@@ -137,6 +146,14 @@ export interface MeshMaterial {
    * Null/absent: lit only by the scene's live lighting.
    */
   readonly lightmapImage?: EncodedImage | null;
+  /**
+   * The same bake as an HDR directional light map (AAA_FIDELITY_ROADMAP.md
+   * F3d; see hdrLightmap.ts): the irradiance in linear light, where it comes
+   * from, and how much sky reaches the point. The AAA tier lights by it in
+   * place of the sky's irradiance; every other tier reads
+   * {@link lightmapImage}. Null/absent: no GPU bake.
+   */
+  readonly lightmapHdrImage?: EncodedImage | null;
   /** Scalar metalness multiplier, glTF's `metallicFactor` (default 1). */
   readonly metallicFactor?: number;
   /** Scalar roughness multiplier, glTF's `roughnessFactor` (default 1). */
@@ -201,6 +218,41 @@ export interface MeshMaterial {
   readonly blendImage?: EncodedImage | null;
   readonly blendColor?: readonly [number, number, number];
   readonly blendRoughness?: number;
+  // --- The full material set (AAA_FIDELITY_ROADMAP.md F1d; see materialExtensions.ts) ---
+  /** Sheen (KHR_materials_sheen): its colour, linear (absent or black is none), and roughness 0..1. */
+  readonly sheenColor?: readonly [number, number, number];
+  readonly sheenRoughness?: number;
+  /** Transmission (KHR_materials_transmission), 0..1: the share of light let through rather than diffused. */
+  readonly transmission?: number;
+  /** The volume (KHR_materials_volume): its thickness in metres (0 thin-walled), and the colour light takes after `attenuationDistance` metres (linear). */
+  readonly thickness?: number;
+  readonly attenuationDistance?: number;
+  readonly attenuationColor?: readonly [number, number, number];
+  /** The index of refraction (KHR_materials_ior, default 1.5). */
+  readonly ior?: number;
+  /** The dielectric specular's strength and colour (KHR_materials_specular, linear; default 1 and white). */
+  readonly specularFactor?: number;
+  readonly specularColor?: readonly [number, number, number];
+  /** A thin film (KHR_materials_iridescence): its strength 0..1, index (default 1.3) and thickness in nm (default 400). */
+  readonly iridescence?: number;
+  readonly iridescenceIor?: number;
+  readonly iridescenceThickness?: number;
+  /** The emission's strength past its factor (KHR_materials_emissive_strength, default 1). */
+  readonly emissiveStrength?: number;
+  /** The UVs' offset, rotation and scale (KHR_texture_transform), for every map. */
+  readonly uvTransform?: { readonly offset: readonly [number, number]; readonly rotation: number; readonly scale: readonly [number, number] };
+  /**
+   * Subsurface scattering (F1d-2), 0..1: the share of the diffuse light that spreads under the surface (skin,
+   * wax, marble, leaves), how far each channel goes as a colour (red farthest for skin), and the radius in metres.
+   */
+  readonly subsurface?: number;
+  readonly subsurfaceColor?: readonly [number, number, number];
+  readonly subsurfaceRadius?: number;
+  /** Thin-surface transmission (KHR_materials_diffuse_transmission): the share of light from behind a leaf or a lampshade that comes through, and its tint (linear). */
+  readonly diffuseTransmission?: number;
+  readonly diffuseTransmissionColor?: readonly [number, number, number];
+  /** Character shading (F7c; characterShading.ts): skin, an eye, hair or a mouth, on the `aaa` tier. */
+  readonly character?: CharacterShading;
   // --- Layers and relief (HALO_INFINITE_STYLE_ROADMAP.md I4; see materialLayers.ts) ---
   /**
    * A clearcoat: a thin glossy lacquer over the base surface (armour paint, a
@@ -225,6 +277,11 @@ export interface MeshMaterial {
    * height gives panel seams depth by parallax occlusion ({@link parallaxDepth});
    * its curvature drives the material graph's wear masks.
    */
+  /**
+   * The smart-material stack that painted this material's maps (AAA_FIDELITY_ROADMAP.md
+   * F9b; smartMaterials.ts), kept so it can be edited and painted again. Absent = none.
+   */
+  readonly smartStack?: SmartStack;
   readonly reliefImage?: EncodedImage | null;
   /** How deep the relief's darkest point sits, in world units (0..0.25); absent or 0 is flat. */
   readonly parallaxDepth?: number;
@@ -255,6 +312,12 @@ export interface MeshMaterial {
      * V — down a river spline's course, round every bend.
      */
     readonly along?: boolean;
+    /** F5d (water.ts): absorption and scattering per metre (RGB), shore foam (0..1), Gerstner waves' height (m), the FFT ocean's share (0..1). */
+    readonly absorption?: readonly [number, number, number];
+    readonly scattering?: readonly [number, number, number];
+    readonly foam?: number;
+    readonly waves?: number;
+    readonly ocean?: number;
   };
   // --- Texture generators (EDITOR_PRO_ROADMAP.md P1c; see textureGenerators.ts) ---
   /**
@@ -314,6 +377,14 @@ export interface MeshMaterial {
   /** The alpha below which a "mask" surface is dropped (default 0.5). */
   readonly alphaCutoff?: number;
   /**
+   * An octahedral impostor's atlas (AAA_FIDELITY_ROADMAP.md F6b): its base map
+   * holds `frames` × `frames` views of a mesh, laid out over an octahedron of
+   * directions; the AAA tier turns the quad it is on to the eye and shows the
+   * view from the eye's side. `radius` is the quad's half-size. Made at run time
+   * (impostor.ts), never stored.
+   */
+  readonly octahedral?: { readonly frames: number; readonly radius: number };
+  /**
    * Soft edges (EP6b): a blended or added surface fades out over this many
    * world units as it nears the opaque surface behind it, so smoke and glows
    * meet the floor and walls without a hard line. Absent or 0 is a hard edge.
@@ -325,6 +396,10 @@ export interface MeshMaterial {
    * whichever it drives. A material with a graph always takes the PBR path.
    */
   readonly graph?: MaterialGraph;
+  /** This material's settings of the graph's static switches (F1e), over the graph's defaults: a permutation of its own. */
+  readonly graphSwitches?: Readonly<Record<string, boolean>>;
+  /** The images the graph's texture nodes sample besides the base map (F1e), slot 1 first. */
+  readonly graphImages?: readonly (EncodedImage | null)[];
 }
 
 /** One triangle list with a single material. */
@@ -373,7 +448,30 @@ export interface MeshPrimitive {
    * renderers that cache uploaded geometry re-upload when `revision` changes.
    * Never serialized.
    */
-  readonly dynamic?: { revision: number };
+  /**
+   * Its cluster hierarchy (AAA_FIDELITY_ROADMAP.md F6a; clusterLod.ts): built
+   * for a dense mesh, so the AAA tier draws each part at the detail its size on
+   * screen needs. Every other path draws `indices`, the mesh itself.
+   */
+  readonly clusterLod?: ClusterLod;
+  readonly dynamic?: {
+    revision: number;
+    /**
+     * Skinned on the GPU (F7a; gpuSkinning.ts in @cartbox/player): the pose's joint matrices and the morph
+     * weights the renderer's compute pass applies, in place of positions rewritten on the CPU.
+     */
+    gpu?: {
+      readonly matrices: Float32Array;
+      readonly morphWeights: Float32Array | null;
+      readonly dualQuaternion: boolean;
+      /** Cloth (F7d): the body's capsules this frame, the step, and the wind (mesh space). */
+      readonly cloth?: { readonly capsules: readonly Capsule[]; readonly dt: number; readonly wind: readonly [number, number, number] };
+    };
+  };
+  /** Morph targets (F7a; morphTargets.ts): deltas from this shape, blended by the mesh's weights before skinning. */
+  readonly morphTargets?: readonly MorphTarget[];
+  /** Cloth (F7d; cloth.ts): how far each vertex may leave its skinned place, and the material it simulates as. */
+  readonly cloth?: ClothSettings;
 }
 
 /** A named mesh: one or more primitives in a shared object space. */
@@ -382,6 +480,14 @@ export interface MeshAsset {
   readonly primitives: readonly MeshPrimitive[];
   /** The skeleton skinned primitives are bound to (ENGINE_ROADMAP.md, Phase 3), if any. */
   readonly skin?: MeshSkin | null;
+  /** The morph targets' default weights (F7a; glTF's mesh weights), by target index. */
+  readonly morphWeights?: readonly number[];
+  /** Skin by dual quaternions (F7a), keeping a twisting joint's volume, rather than by blending matrices. */
+  readonly dualQuaternion?: boolean;
+  /** Spring bones (F7d; cloth.ts): chains of joints that trail the animation. */
+  readonly springs?: readonly SpringChain[];
+  /** Its Voronoi pieces (F8c; fracture.ts), when it's been fractured to break. */
+  readonly fracture?: { readonly pieces: readonly FracturePiece[] };
   /** Animation clips that move the skeleton. */
   readonly clips?: readonly AnimationClip[];
   /** Ribbons of light the mesh leaves as parts of it sweep (I10; see meshTrails.ts). */
@@ -567,6 +673,7 @@ export interface SerializedMaterial {
   occlusionImage?: SerializedImage | null;
   emissiveImage?: SerializedImage | null;
   lightmapImage?: SerializedImage | null;
+  lightmapHdrImage?: SerializedImage | null;
   metallicFactor?: number;
   roughnessFactor?: number;
   emissiveFactor?: [number, number, number];
@@ -584,6 +691,26 @@ export interface SerializedMaterial {
   reflectionMask?: boolean;
   blendImage?: SerializedImage | null;
   reliefImage?: SerializedImage | null;
+  sheenColor?: readonly [number, number, number];
+  sheenRoughness?: number;
+  transmission?: number;
+  thickness?: number;
+  attenuationDistance?: number;
+  attenuationColor?: readonly [number, number, number];
+  ior?: number;
+  specularFactor?: number;
+  specularColor?: readonly [number, number, number];
+  iridescence?: number;
+  iridescenceIor?: number;
+  iridescenceThickness?: number;
+  emissiveStrength?: number;
+  uvTransform?: { readonly offset: readonly [number, number]; readonly rotation: number; readonly scale: readonly [number, number] };
+  subsurface?: number;
+  subsurfaceColor?: readonly [number, number, number];
+  subsurfaceRadius?: number;
+  diffuseTransmission?: number;
+  diffuseTransmissionColor?: readonly [number, number, number];
+  character?: CharacterShading;
   clearcoat?: number;
   clearcoatRoughness?: number;
   anisotropy?: number;
@@ -596,11 +723,13 @@ export interface SerializedMaterial {
   softDepth?: number;
   refraction?: number;
   distortion?: number;
-  water?: { strength: number; scale: number; speed: number; flow: number };
+  water?: { strength: number; scale: number; speed: number; flow: number; absorption?: [number, number, number]; scattering?: [number, number, number]; foam?: number; waves?: number; ocean?: number };
   triplanar?: number;
   blendSharpness?: number;
   generator?: { kind: string; seed: number; scale: number; tint: [number, number, number]; size: number };
   graph?: MaterialGraph;
+  graphSwitches?: Readonly<Record<string, boolean>>;
+  graphImages?: (SerializedImage | null)[];
   instance?: { of: string; overrides: string[] };
 }
 interface SerializedPrimitive {
@@ -610,6 +739,8 @@ interface SerializedPrimitive {
   uvs2?: string;
   blend?: string;
   tangents?: string;
+  /** Its cluster hierarchy (F6a). */
+  clusters?: SerializedClusterLod;
   indices: string;
   material: SerializedMaterial;
   joints?: string;
@@ -618,6 +749,9 @@ interface SerializedPrimitive {
   bone?: number;
   /** In place of joints and weights: each vertex's one joint (a byte each), every weight 1. */
   bones?: string;
+  /** Morph targets (F7a): position (and normal) deltas, and a corrective's driver. */
+  morphTargets?: { name: string; positions: string; normals?: string; driver?: { joint: number; angles: number[] } }[];
+  cloth?: { maxDistance: string; stretch?: number; bend?: number; damping?: number; windResponse?: number; thickness?: number };
 }
 interface SerializedJoint {
   name: string;
@@ -633,6 +767,8 @@ interface SerializedClip {
   channels: { joint: number; path: string; interp?: string; times: string; values: string }[];
   /** The dope sheet's keys (L16): joint, time, ease (absent = linear) and a curve's handles. */
   keys?: { j: number; t: number; e?: string; c?: number[] }[];
+  /** Morph weights over time (F7b): interpolation, targets a key, times, values. */
+  morphs?: { interp?: string; targets: number; times: string; values: string };
 }
 interface SerializedMesh {
   version: number;
@@ -642,6 +778,10 @@ interface SerializedMesh {
   clips?: SerializedClip[];
   trails?: MeshTrail[];
   variants?: { name: string; materials: (SerializedMaterial | null)[] }[];
+  morphWeights?: number[];
+  dualQuaternion?: boolean;
+  springs?: SpringChain[];
+  fracture?: { centre: number[]; volume: number; radius: number; sources: number[]; mesh: string }[];
 }
 
 function u16ToBase64(array: Uint16Array): string {
@@ -681,6 +821,7 @@ function serializeClip(clip: AnimationClip): SerializedClip {
     ...(clip.keys && clip.keys.length > 0
       ? { keys: clip.keys.map((k) => ({ j: k.joint, t: k.time, ...(k.ease !== "linear" ? { e: k.ease } : {}), ...(k.ease === "curve" && k.curve ? { c: [...k.curve] } : {}) })) }
       : {}),
+    ...(clip.morphs ? { morphs: { ...(clip.morphs.interpolation === "step" ? { interp: "step" } : {}), targets: clip.morphs.targets, times: f32ToBase64(clip.morphs.times), values: f32ToBase64(clip.morphs.values) } } : {}),
   };
 }
 
@@ -789,7 +930,19 @@ function deserializeClips(raw: unknown, jointCount: number): AnimationClip[] {
       }
       keys += authored.length;
     }
-    return { name: typeof clip.name === "string" ? clip.name.slice(0, 64) : "clip", duration, channels, ...(authored.length > 0 ? { keys: authored } : {}) };
+    // Morph weights over time (F7b).
+    let morphs: MorphChannel | null = null;
+    if (clip.morphs) {
+      const m = clip.morphs;
+      const times = base64ToF32(m.times);
+      const values = base64ToF32(m.values);
+      if (!Number.isInteger(m.targets) || m.targets <= 0 || m.targets > MAX_MORPH_TARGETS || times.length === 0 || values.length !== times.length * m.targets) throw new Error("Mesh asset payload is malformed");
+      if (!times.every((t, i) => Number.isFinite(t) && (i === 0 || t >= times[i - 1]!)) || !values.every(Number.isFinite)) throw new Error("Mesh asset payload is malformed");
+      keys += times.length;
+      if (keys > MAX_CLIP_KEYS) throw new Error("Mesh asset payload is malformed");
+      morphs = { interpolation: m.interp === "step" ? "step" : "linear", targets: m.targets, times, values };
+    }
+    return { name: typeof clip.name === "string" ? clip.name.slice(0, 64) : "clip", duration, channels, ...(authored.length > 0 ? { keys: authored } : {}), ...(morphs ? { morphs } : {}) };
   });
 }
 
@@ -809,9 +962,31 @@ export function serializeMeshAsset(mesh: MeshAsset): string {
       indices: u32ToBase64(primitive.indices),
       material: serializeMaterial(primitive.material, Object.assign(images, { primitive: index })),
       ...(primitive.joints && primitive.weights && mesh.skin ? serializeBinding(primitive.joints, primitive.weights) : {}),
+      ...(primitive.morphTargets?.length
+        ? {
+            morphTargets: primitive.morphTargets.slice(0, MAX_MORPH_TARGETS).map((t) => ({
+              name: t.name,
+              positions: f32ToBase64(t.positions),
+              ...(t.normals ? { normals: f32ToBase64(t.normals) } : {}),
+              ...(t.driver ? { driver: { joint: t.driver.joint, angles: [t.driver.angles[0], t.driver.angles[1]] } } : {}),
+            })),
+          }
+        : {}),
+      ...(primitive.cloth ? { cloth: { ...primitive.cloth, maxDistance: f32ToBase64(primitive.cloth.maxDistance) } } : {}),
+      // Its cluster hierarchy (F6a), built once on import.
+      ...(primitive.clusterLod ? { clusters: writeClusterLod(primitive.clusterLod) } : {}),
     })),
+    ...(mesh.morphWeights?.length ? { morphWeights: [...mesh.morphWeights] } : {}),
+    ...(mesh.skin && mesh.springs?.length ? { springs: mesh.springs.map((s) => ({ ...s, joints: [...s.joints] })) } : {}),
+    // The pieces, each a small mesh of its own (F8c).
+    ...(mesh.fracture?.pieces.length
+      ? { fracture: mesh.fracture.pieces.slice(0, MAX_FRACTURE_PIECES).map((p) => ({ centre: [...p.centre], volume: p.volume, radius: p.radius, sources: [...p.sources], mesh: serializeMeshAsset({ name: "piece", primitives: p.primitives }) })) }
+      : {}),
+    ...(mesh.dualQuaternion ? { dualQuaternion: true } : {}),
     ...(mesh.skin ? { skin: serializeSkin(mesh.skin) } : {}),
     ...(mesh.skin && mesh.clips && mesh.clips.length > 0 ? { clips: mesh.clips.map(serializeClip) } : {}),
+    // Without a skeleton, the clips of morph weights alone (F7b).
+    ...(!mesh.skin && mesh.clips?.some((c) => c.morphs) ? { clips: mesh.clips.filter((c) => c.morphs).map((c) => serializeClip({ name: c.name, duration: c.duration, channels: [], morphs: c.morphs! })) } : {}),
     ...(mesh.trails && mesh.trails.length > 0 ? { trails: mesh.trails.map((t) => ({ ...t, from: [...t.from], to: [...t.to], color: [...t.color] })) } : {}),
     // Material sets after the primitives, so an image a set shares with them is stored once.
     ...(mesh.variants && mesh.variants.length > 0
@@ -918,6 +1093,7 @@ export function serializeMaterial(material: MeshMaterial, table?: ImageTable): S
     occlusionImage: serializeImage(material.occlusionImage, "occlusionImage", table),
     emissiveImage: serializeImage(material.emissiveImage, "emissiveImage", table),
     ...(material.lightmapImage ? { lightmapImage: serializeImage(material.lightmapImage, "lightmapImage", table) } : {}),
+    ...(material.lightmapHdrImage ? { lightmapHdrImage: serializeImage(material.lightmapHdrImage, "lightmapHdrImage", table) } : {}),
     metallicFactor: material.metallicFactor,
     roughnessFactor: material.roughnessFactor,
     emissiveFactor: material.emissiveFactor ? [...material.emissiveFactor] : undefined,
@@ -928,10 +1104,13 @@ export function serializeMaterial(material: MeshMaterial, table?: ImageTable): S
     ...(material.detailImage ? { detailImage: serializeImage(material.detailImage, "detailImage", table) } : {}),
     ...(material.blendImage ? { blendImage: serializeImage(material.blendImage, "blendImage", table) } : {}),
     ...(own(material.reliefImage) ? { reliefImage: serializeImage(material.reliefImage, "reliefImage", table) } : {}),
+    ...(material.graphImages?.length ? { graphImages: material.graphImages.slice(0, 8).map((image, i) => serializeImage(image, `graphImage${i}`, table)) } : {}),
     ...(material.generator ? { generator: { kind: material.generator.kind, seed: material.generator.seed, scale: material.generator.scale, tint: [material.generator.tint[0], material.generator.tint[1], material.generator.tint[2]], size: material.generator.size } } : {}),
     ...(material.instance ? { instance: { of: material.instance.of, overrides: [...material.instance.overrides] } } : {}),
     ...writeSurfaceEffects(material),
     ...writeMaterialLayers(material),
+    ...writeMaterialExtensions(material),
+    ...writeSmartStack(material),
   };
 }
 
@@ -952,6 +1131,7 @@ export function deserializeMaterial(value: unknown, table?: ImageTable): MeshMat
     occlusionImage: deserializeImage(material.occlusionImage, "occlusionImage", table),
     emissiveImage: deserializeImage(material.emissiveImage, "emissiveImage", table),
     ...(material.lightmapImage ? { lightmapImage: deserializeImage(material.lightmapImage, "lightmapImage", table) } : {}),
+    ...(material.lightmapHdrImage ? { lightmapHdrImage: deserializeImage(material.lightmapHdrImage, "lightmapHdrImage", table) } : {}),
     metallicFactor: typeof material.metallicFactor === "number" ? material.metallicFactor : undefined,
     roughnessFactor: typeof material.roughnessFactor === "number" ? material.roughnessFactor : undefined,
     emissiveFactor: toEmissiveFactor(material.emissiveFactor),
@@ -962,8 +1142,11 @@ export function deserializeMaterial(value: unknown, table?: ImageTable): MeshMat
     ...(material.detailImage ? { detailImage: deserializeImage(material.detailImage, "detailImage", table) } : {}),
     ...(material.blendImage ? { blendImage: deserializeImage(material.blendImage, "blendImage", table) } : {}),
     ...(material.reliefImage ? { reliefImage: deserializeImage(material.reliefImage, "reliefImage", table) } : {}),
+    ...(Array.isArray(material.graphImages) && material.graphImages.length > 0 ? { graphImages: material.graphImages.slice(0, 8).map((image, i) => deserializeImage(image, `graphImage${i}`, table)) } : {}),
     ...readSurfaceEffects(material),
     ...readMaterialLayers(material),
+    ...readMaterialExtensions(material),
+    ...(readSmartStack((material as { smartStack?: unknown }).smartStack) ? { smartStack: readSmartStack((material as { smartStack?: unknown }).smartStack)! } : {}),
   });
 }
 
@@ -1016,6 +1199,7 @@ export function deserializeMeshAsset(json: string): MeshAsset {
     if (blend && (blend.length !== vertexCount || !blend.every((w) => w >= 0 && w <= 1))) throw new Error(MALFORMED);
     const tangents = typeof entry.tangents === "string" ? base64ToF32(entry.tangents) : null;
     if (tangents && (tangents.length !== vertexCount * 4 || !tangents.every(Number.isFinite))) throw new Error(MALFORMED);
+    const clusterLod = readClusterLod(entry.clusters, vertexCount);
 
     const indices = base64ToU32(entry.indices);
     if (indices.length === 0 || indices.length % 3 !== 0) throw new Error(MALFORMED);
@@ -1066,11 +1250,15 @@ export function deserializeMeshAsset(json: string): MeshAsset {
       ...(blend ? { blend } : {}),
       ...(tangents ? { tangents } : {}),
       ...(joints && weights ? { joints, weights } : {}),
+      ...readMorphTargets(entry.morphTargets, vertexCount, skin?.joints.length ?? 0),
+      ...readCloth(entry.cloth, vertexCount),
+      ...(clusterLod ? { clusterLod } : {}),
     };
   });
 
   if (primitives.length === 0) throw new Error(MALFORMED);
-  const clips = skin ? deserializeClips(raw.clips, skin.joints.length) : [];
+  // A clip of morph weights alone (F7b) needs no skeleton.
+  const clips = deserializeClips(raw.clips, skin?.joints.length ?? 0);
   const trails = readMeshTrails(raw.trails, skin?.joints.length ?? 0);
   const variants: MeshVariant[] = [];
   if (raw.variants !== undefined) {
@@ -1090,5 +1278,49 @@ export function deserializeMeshAsset(json: string): MeshAsset {
     ...(clips.length > 0 ? { clips } : {}),
     ...(trails.length > 0 ? { trails } : {}),
     ...(variants.length > 0 ? { variants } : {}),
+    ...readFracture(raw.fracture),
+    ...(skin && Array.isArray(raw.springs) && readSpringChains(raw.springs, skin.joints.length).length > 0 ? { springs: readSpringChains(raw.springs, skin.joints.length) } : {}),
+    ...(Array.isArray(raw.morphWeights) && raw.morphWeights.every((w) => typeof w === "number" && Number.isFinite(w)) ? { morphWeights: raw.morphWeights.slice(0, MAX_MORPH_TARGETS) } : {}),
+    ...(raw.dualQuaternion === true ? { dualQuaternion: true } : {}),
   };
+}
+
+/** A stored primitive's morph targets (F7a), each the primitive's length; a malformed one throws. */
+/** A stored fracture (F8c): its pieces, each read as a mesh of its own; nothing when absent or malformed. */
+function readFracture(raw: SerializedMesh["fracture"]): { fracture?: { pieces: FracturePiece[] } } {
+  if (!Array.isArray(raw) || raw.length === 0 || raw.length > MAX_FRACTURE_PIECES) return {};
+  const pieces: FracturePiece[] = [];
+  for (const p of raw) {
+    if (!p || typeof p.mesh !== "string" || !Array.isArray(p.centre) || p.centre.length !== 3 || !p.centre.every(Number.isFinite)) return {};
+    const mesh = deserializeMeshAsset(p.mesh);
+    const sources = Array.isArray(p.sources) && p.sources.length === mesh.primitives.length ? p.sources.map((s) => (Number.isInteger(s) ? s : -1)) : mesh.primitives.map(() => -1);
+    pieces.push({ centre: [p.centre[0]!, p.centre[1]!, p.centre[2]!], volume: Number.isFinite(p.volume) ? p.volume : 0, radius: Number.isFinite(p.radius) ? p.radius : 0, primitives: mesh.primitives, sources });
+  }
+  return { fracture: { pieces } };
+}
+
+/** A stored cloth (F7d), or nothing when absent or malformed. */
+function readCloth(raw: SerializedMesh["primitives"][number]["cloth"], vertexCount: number): { cloth?: ClothSettings } {
+  if (!raw || typeof raw.maxDistance !== "string") return {};
+  const cloth = readClothSettings(raw, base64ToF32(raw.maxDistance), vertexCount);
+  return cloth ? { cloth } : {};
+}
+
+function readMorphTargets(raw: unknown, vertexCount: number, jointCount: number): { morphTargets?: MorphTarget[] } {
+  if (raw === undefined) return {};
+  if (!Array.isArray(raw) || raw.length > MAX_MORPH_TARGETS) throw new Error("Malformed mesh asset");
+  const targets = raw.map((t: unknown): MorphTarget => {
+    const r = t as { name?: unknown; positions?: unknown; normals?: unknown; driver?: { joint?: unknown; angles?: unknown } };
+    if (typeof r.positions !== "string") throw new Error("Malformed mesh asset");
+    const positions = base64ToF32(r.positions);
+    const normals = typeof r.normals === "string" ? base64ToF32(r.normals) : null;
+    if (positions.length !== vertexCount * 3 || (normals && normals.length !== vertexCount * 3) || !positions.every(Number.isFinite)) throw new Error("Malformed mesh asset");
+    const d = r.driver;
+    const driver =
+      d && Number.isInteger(d.joint) && (d.joint as number) >= 0 && (d.joint as number) < jointCount && Array.isArray(d.angles) && d.angles.length === 2 && d.angles.every((a) => typeof a === "number" && Number.isFinite(a))
+        ? { joint: d.joint as number, angles: [d.angles[0] as number, d.angles[1] as number] as [number, number] }
+        : undefined;
+    return { name: typeof r.name === "string" ? r.name.slice(0, 64) : "", positions, ...(normals ? { normals } : {}), ...(driver ? { driver } : {}) };
+  });
+  return targets.length > 0 ? { morphTargets: targets } : {};
 }

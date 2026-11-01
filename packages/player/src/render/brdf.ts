@@ -24,7 +24,9 @@
  * from a storage buffer: the fragment stage's sampled textures are all bound.
  */
 
-/** The table's resolution: N·V across, roughness down, cell-centred. */
+import { sheenAlbedo } from "@cartbox/editor";
+
+/** The table's resolution: N·V across, roughness down, its first and last texels on 0 and 1 (F10b: a cell-centred table clamped at roughness 0.984, short of the rough end's loss by 6%). */
 export const DFG_SIZE = 32;
 /** Samples per cell. */
 const DFG_SAMPLES = 512;
@@ -89,14 +91,14 @@ let table: Float32Array | null = null;
 
 /**
  * The DFG table the shader reads: `DFG_SIZE²` pairs (A, B), row by roughness
- * and column by N·V, each at its cell's centre. Integrated once and kept.
+ * and column by N·V, from 0 to 1 inclusive. Integrated once and kept.
  */
 export function dfgTable(): Float32Array {
   if (table) return table;
   const out = new Float32Array(DFG_SIZE * DFG_SIZE * 2);
   for (let r = 0; r < DFG_SIZE; r += 1) {
     for (let v = 0; v < DFG_SIZE; v += 1) {
-      const [a, b] = integrateDfg((v + 0.5) / DFG_SIZE, (r + 0.5) / DFG_SIZE);
+      const [a, b] = integrateDfg(Math.max(1e-3, v / (DFG_SIZE - 1)), r / (DFG_SIZE - 1));
       out[(r * DFG_SIZE + v) * 2] = a;
       out[(r * DFG_SIZE + v) * 2 + 1] = b;
     }
@@ -105,10 +107,35 @@ export function dfgTable(): Float32Array {
   return out;
 }
 
-/** The table read as the shader reads it: bilinearly between cell centres, clamped at the edges. */
+let sheen: Float32Array | null = null;
+
+/**
+ * The sheen's directional albedo (F1d; `sheenAlbedo` in @cartbox/editor) on the
+ * same grid as the DFG table, (E, 0) pairs: what the Charlie lobe reflects of
+ * uniform light, which the base beneath gives up.
+ */
+export function sheenTable(): Float32Array {
+  if (sheen) return sheen;
+  const out = new Float32Array(DFG_SIZE * DFG_SIZE * 2);
+  for (let r = 0; r < DFG_SIZE; r += 1) {
+    for (let v = 0; v < DFG_SIZE; v += 1) out[(r * DFG_SIZE + v) * 2] = sheenAlbedo(Math.max(1e-3, v / (DFG_SIZE - 1)), r / (DFG_SIZE - 1), 1024);
+  }
+  sheen = out;
+  return out;
+}
+
+/** What the shader's table buffer holds: the DFG table, then the sheen's (F1d). */
+export function brdfLut(): Float32Array {
+  const out = new Float32Array(DFG_SIZE * DFG_SIZE * 4);
+  out.set(dfgTable(), 0);
+  out.set(sheenTable(), DFG_SIZE * DFG_SIZE * 2);
+  return out;
+}
+
+/** The table read as the shader reads it: bilinearly between its texels, clamped to 0..1. */
 export function dfgAt(lut: Float32Array, ndv: number, roughness: number): [number, number] {
-  const x = Math.min(DFG_SIZE - 1, Math.max(0, ndv * DFG_SIZE - 0.5));
-  const y = Math.min(DFG_SIZE - 1, Math.max(0, roughness * DFG_SIZE - 0.5));
+  const x = Math.min(DFG_SIZE - 1, Math.max(0, ndv * (DFG_SIZE - 1)));
+  const y = Math.min(DFG_SIZE - 1, Math.max(0, roughness * (DFG_SIZE - 1)));
   const x0 = Math.floor(x);
   const y0 = Math.floor(y);
   const x1 = Math.min(x0 + 1, DFG_SIZE - 1);
@@ -147,6 +174,48 @@ export function specularOcclusion(ndv: number, ao: number, alpha: number): numbe
 }
 
 /**
+ * The share of a cone of half-angle acos(`cosA`) that a cone of half-angle
+ * acos(`cosB`) covers when their axes are acos(`cosD`) apart, as a solid angle
+ * over the first's (Oat and Sander's spherical-cap intersection, with their
+ * smoothstep for the partly overlapping case).
+ */
+export function capCoverage(cosA: number, cosB: number, cosD: number): number {
+  const a = Math.acos(Math.min(1, Math.max(-1, cosA)));
+  const b = Math.acos(Math.min(1, Math.max(-1, cosB)));
+  const d = Math.acos(Math.min(1, Math.max(-1, cosD)));
+  const areaA = 2 * Math.PI * (1 - cosA);
+  if (areaA <= 1e-9) return d <= b ? 1 : 0;
+  let area: number;
+  if (d <= Math.abs(a - b)) area = 2 * Math.PI * (1 - Math.max(cosA, cosB));
+  else if (d >= a + b) area = 0;
+  else {
+    const diff = Math.abs(a - b);
+    const x = 1 - Math.min(1, Math.max(0, (d - diff) / Math.max(1e-6, a + b - diff)));
+    area = x * x * (3 - 2 * x) * 2 * Math.PI * (1 - Math.max(cosA, cosB));
+  }
+  return Math.min(1, Math.max(0, area / areaA));
+}
+
+/** The cosine of the specular lobe's cone (UE4's fit to GGX, for α = roughness²). */
+export function specularConeCos(alpha: number): number {
+  return 2 ** (-3.32193 * alpha);
+}
+
+/**
+ * Specular occlusion from a bent normal (Jimenez et al. 2016, "Practical
+ * realtime strategies for accurate indirect occlusion"): the open sky is a cone
+ * about the bent normal whose cosine-weighted visibility is `visibility`
+ * (cos = √(1 − visibility)), and the reflection takes the share of its lobe's
+ * cone about R that falls inside it.
+ */
+export function bentSpecularOcclusion(bent: readonly [number, number, number], visibility: number, r: readonly [number, number, number], alpha: number): number {
+  const lb = Math.hypot(bent[0], bent[1], bent[2]) || 1;
+  const lr = Math.hypot(r[0], r[1], r[2]) || 1;
+  const cosD = (bent[0] * r[0] + bent[1] * r[1] + bent[2] * r[2]) / (lb * lr);
+  return capCoverage(specularConeCos(alpha), Math.sqrt(Math.max(0, 1 - visibility)), cosD);
+}
+
+/**
  * The WGSL the linear-light shader declares: the DFG table's binding and the
  * functions mirroring the ones above.
  */
@@ -156,8 +225,8 @@ export function brdfWgsl(group: number, binding: number): string {
 // The split-sum DFG table (F1c, brdf.ts): (A, B) by roughness row and N·V column.
 @group(${group}) @binding(${binding}) var<storage, read> dfgLut: array<vec2<f32>>;
 fn dfgAt(ndv: f32, rough: f32) -> vec2<f32> {
-  let x = clamp(ndv * ${n}.0 - 0.5, 0.0, ${n - 1}.0);
-  let y = clamp(rough * ${n}.0 - 0.5, 0.0, ${n - 1}.0);
+  let x = clamp(ndv * ${n - 1}.0, 0.0, ${n - 1}.0);
+  let y = clamp(rough * ${n - 1}.0, 0.0, ${n - 1}.0);
   let x0 = u32(x);
   let y0 = u32(y);
   let x1 = min(x0 + 1u, ${n - 1}u);
@@ -167,6 +236,19 @@ fn dfgAt(ndv: f32, rough: f32) -> vec2<f32> {
   let top = mix(dfgLut[y0 * ${n}u + x0], dfgLut[y0 * ${n}u + x1], fx);
   let bottom = mix(dfgLut[y1 * ${n}u + x0], dfgLut[y1 * ${n}u + x1], fx);
   return mix(top, bottom, fy);
+}
+// The sheen's directional albedo (F1d), from the table after the DFG's.
+fn sheenE(ndv: f32, rough: f32) -> f32 {
+  let x = clamp(ndv * ${n - 1}.0, 0.0, ${n - 1}.0);
+  let y = clamp(rough * ${n - 1}.0, 0.0, ${n - 1}.0);
+  let x0 = u32(x);
+  let y0 = u32(y);
+  let x1 = min(x0 + 1u, ${n - 1}u);
+  let y1 = min(y0 + 1u, ${n - 1}u);
+  let o = ${n * n}u;
+  let top = mix(dfgLut[o + y0 * ${n}u + x0].x, dfgLut[o + y0 * ${n}u + x1].x, x - f32(x0));
+  let bottom = mix(dfgLut[o + y1 * ${n}u + x0].x, dfgLut[o + y1 * ${n}u + x1].x, x - f32(x0));
+  return mix(top, bottom, y - f32(y0));
 }
 // The height-correlated Smith visibility, G2 / (4 N·L N·V), for alpha² = a2.
 fn smithVisibility(ndl: f32, ndv: f32, a2: f32) -> f32 {
@@ -190,6 +272,28 @@ fn energyCompensation(f0: vec3<f32>, dfg: vec2<f32>) -> vec3<f32> {
 // Specular occlusion from ambient occlusion (Lagarde), for alpha = roughness².
 fn specularOcclusion(ndv: f32, ao: f32, alpha: f32) -> f32 {
   return clamp(pow(ndv + ao, exp2(-16.0 * alpha - 1.0)) - 1.0 + ao, 0.0, 1.0);
+}
+// The share of cone A (cosine cosA) that cone B covers, their axes cosD apart (Oat and Sander; mirrors capCoverage).
+fn capCoverage(cosA: f32, cosB: f32, cosD: f32) -> f32 {
+  let a = acos(clamp(cosA, -1.0, 1.0));
+  let b = acos(clamp(cosB, -1.0, 1.0));
+  let d = acos(clamp(cosD, -1.0, 1.0));
+  let areaA = 6.28318531 * (1.0 - cosA);
+  if (areaA <= 1e-6) { return select(0.0, 1.0, d <= b); }
+  let full = 6.28318531 * (1.0 - max(cosA, cosB));
+  var area = 0.0;
+  if (d <= abs(a - b)) { area = full; }
+  else if (d < a + b) {
+    let diff = abs(a - b);
+    let x = 1.0 - clamp((d - diff) / max(1e-6, a + b - diff), 0.0, 1.0);
+    area = x * x * (3.0 - 2.0 * x) * full;
+  }
+  return clamp(area / areaA, 0.0, 1.0);
+}
+// Specular occlusion from a bent normal (Jimenez et al. 2016; mirrors bentSpecularOcclusion): the lobe's cone about R
+// against the open sky's cone about the bent normal, whose aperture its visibility gives.
+fn bentSpecularOcclusion(bent: vec3<f32>, visibility: f32, R: vec3<f32>, alpha: f32) -> f32 {
+  return capCoverage(exp2(-3.32193 * alpha), sqrt(max(0.0, 1.0 - visibility)), dot(normalize(bent), normalize(R)));
 }
 `;
 }

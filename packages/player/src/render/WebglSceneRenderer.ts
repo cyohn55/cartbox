@@ -93,6 +93,7 @@ import {
 } from "@cartbox/editor";
 
 import { batchInstances, compositeFrame, presentFrame, softEdges, type PrimitiveTextures } from "./gpuFrame.js";
+import { resampleNearest } from "./gpuPacing.js";
 import { TEMPORAL_RESOLVE_GLSL, TEMPORAL_SHARPEN_GLSL, TEMPORAL_VERTEX_GLSL, TemporalState } from "./temporal.js";
 import { REFLECTION_GLSL, reflectionUniforms } from "./reflections.js";
 import { WebglPassTimer } from "./gpuTimer.js";
@@ -1289,8 +1290,8 @@ export class WebglSceneRenderer implements SceneRenderer {
 
   private constructor(
     private readonly gl: any,
-    private readonly width: number,
-    private readonly height: number,
+    private width: number,
+    private height: number,
     private readonly program: any,
     private readonly framebuffer: any,
     private readonly attachments: any[],
@@ -1410,6 +1411,103 @@ export class WebglSceneRenderer implements SceneRenderer {
       gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null);
       this.latest = bytes;
       this.latestSeq = slot.seq;
+      this.framesLanded += 1;
+    }
+  }
+
+  /** Readbacks that have landed (gpuPacing.ts paces the render size by them). */
+  framesLanded = 0;
+
+  /**
+   * Render at `width × height` from the next frame on (gpuPacing.ts: a GPU that
+   * can't keep up renders smaller). The colour and depth are re-stored in place,
+   * so the framebuffer keeps them; the targets made on first use (multisampled,
+   * reflection, temporal, scene copies, SSAO) are released and made again at the
+   * new size when next used. Readbacks in flight are dropped; the newest frame
+   * keeps showing, resampled, until one at the new size lands.
+   */
+  resize(width: number, height: number): void {
+    width = Math.max(1, Math.round(width));
+    height = Math.max(1, Math.round(height));
+    if (this.destroyed || this.lost || (width === this.width && height === this.height)) return;
+    const gl = this.gl;
+    try {
+      this.latest = this.latest && this.latest.length === this.width * this.height * 4 ? resampleNearest(this.latest, this.width, this.height, width, height) : null;
+      this.width = width;
+      this.height = height;
+      gl.bindRenderbuffer(gl.RENDERBUFFER, this.attachments[0]);
+      gl.renderbufferStorage(gl.RENDERBUFFER, gl.RGBA8, width, height);
+      gl.bindRenderbuffer(gl.RENDERBUFFER, this.attachments[1]);
+      gl.renderbufferStorage(gl.RENDERBUFFER, gl.DEPTH_COMPONENT24, width, height);
+      gl.bindRenderbuffer(gl.RENDERBUFFER, null);
+      this.releaseSized();
+      this.temporalState.reset();
+      for (const slot of this.pending) {
+        if (slot.fence) gl.deleteSync(slot.fence);
+        slot.fence = null;
+      }
+      this.pending.length = 0;
+      for (const slot of this.readback) {
+        gl.bindBuffer(gl.PIXEL_PACK_BUFFER, slot.buffer);
+        gl.bufferData(gl.PIXEL_PACK_BUFFER, width * height * 4, gl.STREAM_READ);
+      }
+      gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null);
+      this.latestSeq = this.submitted;
+      this.readSeq = this.submitted;
+    } catch {
+      this.latest = null;
+      if (gl.isContextLost?.()) this.lost = true;
+    }
+  }
+
+  /** Delete the targets sized to the frame that are made on first use, so the next use makes them at the current size. */
+  private releaseSized(): void {
+    const gl = this.gl;
+    if (this.msaa) {
+      gl.deleteFramebuffer(this.msaa.framebuffer);
+      for (const rb of this.msaa.attachments) gl.deleteRenderbuffer(rb);
+      this.msaa = null;
+    }
+    if (this.reflections) {
+      for (const t of this.reflections.textures) gl.deleteTexture(t);
+      gl.deleteFramebuffer(this.reflections.framebuffer);
+      if (this.reflections.msaa) {
+        gl.deleteFramebuffer(this.reflections.msaa.framebuffer);
+        for (const b of this.reflections.msaa.buffers) gl.deleteRenderbuffer(b);
+      }
+      gl.deleteTexture(this.reflections.copy.texture);
+      gl.deleteFramebuffer(this.reflections.copy.framebuffer);
+      gl.deleteProgram(this.reflections.program.handle);
+      gl.deleteSampler(this.reflections.nearest);
+      this.reflections = null;
+    }
+    if (this.taa) {
+      for (const t of [this.taa.current, ...this.taa.history]) {
+        gl.deleteTexture(t.texture);
+        gl.deleteFramebuffer(t.framebuffer);
+      }
+      gl.deleteProgram(this.taa.resolve.program);
+      gl.deleteProgram(this.taa.sharpen.program);
+      gl.deleteSampler(this.taa.linear);
+      gl.deleteSampler(this.taa.nearest);
+      this.taa = null;
+    }
+    if (this.sceneDepth) {
+      gl.deleteTexture(this.sceneDepth.texture);
+      gl.deleteFramebuffer(this.sceneDepth.framebuffer);
+      this.sceneDepth = null;
+    }
+    if (this.sceneCopy) {
+      for (const t of [this.sceneCopy.colour, this.sceneCopy.packed]) {
+        gl.deleteTexture(t.texture);
+        gl.deleteFramebuffer(t.framebuffer);
+      }
+      gl.deleteProgram(this.sceneCopy.program);
+      this.sceneCopy = null;
+    }
+    if (this.ssaoTexture) {
+      gl.deleteTexture(this.ssaoTexture);
+      this.ssaoTexture = null;
     }
   }
 
@@ -1421,7 +1519,7 @@ export class WebglSceneRenderer implements SceneRenderer {
   settle(draw: SceneDraw): FrameState {
     if (this.destroyed || this.lost) return "current";
     this.collect();
-    if (this.latest) compositeFrame(this.latest, draw);
+    if (this.latest && this.latest.length === draw.width * draw.height * 4) compositeFrame(this.latest, draw);
     if (this.latestSeq >= this.submitted) return "current";
     return this.readSeq >= this.submitted ? "pending" : "stale";
   }
@@ -2386,50 +2484,14 @@ export class WebglSceneRenderer implements SceneRenderer {
       gl.deleteBuffer(this.uniformBuffer);
       gl.deleteBuffer(this.instanceBuffer);
       gl.deleteBuffer(this.lightBuffer);
-      for (const t of [this.blankTexture, this.blankFloat, this.shadowTexture, this.envTexture, this.probeTexture, this.ssaoTexture]) if (t) gl.deleteTexture(t);
+      for (const t of [this.blankTexture, this.blankFloat, this.shadowTexture, this.envTexture, this.probeTexture]) if (t) gl.deleteTexture(t);
       gl.deleteFramebuffer(this.framebuffer);
-      if (this.msaa) {
-        gl.deleteFramebuffer(this.msaa.framebuffer);
-        for (const rb of this.msaa.attachments) gl.deleteRenderbuffer(rb);
-      }
+      this.releaseSized();
       if (this.localAtlas) gl.deleteTexture(this.localAtlas);
       if (this.gridTexture) gl.deleteTexture(this.gridTexture);
       if (this.gridBlank) gl.deleteTexture(this.gridBlank);
       if (this.clusterTexture) {
         gl.deleteTexture(this.clusterTexture);
-      }
-      if (this.reflections) {
-        for (const t of this.reflections.textures) gl.deleteTexture(t);
-        gl.deleteFramebuffer(this.reflections.framebuffer);
-        if (this.reflections.msaa) {
-          gl.deleteFramebuffer(this.reflections.msaa.framebuffer);
-          for (const b of this.reflections.msaa.buffers) gl.deleteRenderbuffer(b);
-        }
-        gl.deleteTexture(this.reflections.copy.texture);
-        gl.deleteFramebuffer(this.reflections.copy.framebuffer);
-        gl.deleteProgram(this.reflections.program.handle);
-        gl.deleteSampler(this.reflections.nearest);
-      }
-      if (this.taa) {
-        for (const t of [this.taa.current, ...this.taa.history]) {
-          gl.deleteTexture(t.texture);
-          gl.deleteFramebuffer(t.framebuffer);
-        }
-        gl.deleteProgram(this.taa.resolve.program);
-        gl.deleteProgram(this.taa.sharpen.program);
-        gl.deleteSampler(this.taa.linear);
-        gl.deleteSampler(this.taa.nearest);
-      }
-      if (this.sceneDepth) {
-        gl.deleteTexture(this.sceneDepth.texture);
-        gl.deleteFramebuffer(this.sceneDepth.framebuffer);
-      }
-      if (this.sceneCopy) {
-        for (const t of [this.sceneCopy.colour, this.sceneCopy.packed]) {
-          gl.deleteTexture(t.texture);
-          gl.deleteFramebuffer(t.framebuffer);
-        }
-        gl.deleteProgram(this.sceneCopy.program);
       }
       this.timer?.destroy();
       for (const rb of this.attachments) gl.deleteRenderbuffer(rb);

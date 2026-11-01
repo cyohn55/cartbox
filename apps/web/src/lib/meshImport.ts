@@ -14,7 +14,7 @@
  * or Draco-compressed glTF geometry is decoded on import (see gltfDecoders.ts).
  */
 
-import { parseObj, type MeshAsset, type DecodedTexture } from "@cartbox/editor";
+import { parseFbx, parseObj, parseUsd, unpackMeshAsset, withClusterLods, type MeshAsset, type DecodedTexture, parsePly, prepareScan } from "@cartbox/editor";
 
 import { parseGlbDecoded, parseGltfTextDecoded } from "./gltfDecoders";
 import { loadKtx2Decoder } from "./ktx2Decoder";
@@ -53,6 +53,11 @@ function extensionOf(fileName: string): string {
  * user-facing message for unsupported or externally-referenced files.
  */
 export async function importMeshFile(file: File, companions: readonly File[] = []): Promise<MeshAsset> {
+  // A dense primitive gets its cluster hierarchy here, once (F6a): the AAA tier draws it at the detail the screen needs.
+  return withClusterLods(await parseMeshFile(file, companions));
+}
+
+async function parseMeshFile(file: File, companions: readonly File[]): Promise<MeshAsset> {
   const name = assetNameFromFile(file.name);
   const extension = extensionOf(file.name);
 
@@ -67,7 +72,28 @@ export async function importMeshFile(file: File, companions: readonly File[] = [
     const mtl = mtlFile ? await mtlFile.text() : undefined;
     return parseObj(await file.text(), { mtl, name });
   }
-  throw new Error(`Unsupported 3D format ".${extension}". Import an .obj, .glb, or .gltf file.`);
+  // F9d: FBX (binary or ASCII), USD (USDA, or a USDZ holding one), and the binary package (F9e).
+  if (extension === "fbx") {
+    return parseFbx(new Uint8Array(await file.arrayBuffer()), name);
+  }
+  if (extension === "usda" || extension === "usdz" || extension === "usd") {
+    return parseUsd(new Uint8Array(await file.arrayBuffer()), name);
+  }
+  if (extension === "cbpk") {
+    const { MeshoptDecoder } = await import("meshoptimizer/decoder");
+    await MeshoptDecoder.ready;
+    return unpackMeshAsset(new Uint8Array(await file.arrayBuffer()), {
+      encodeVertexBuffer: () => new Uint8Array(0),
+      encodeIndexBuffer: () => new Uint8Array(0),
+      decodeVertexBuffer: (t, c, z, s) => MeshoptDecoder.decodeVertexBuffer(t, c, z, s),
+      decodeIndexBuffer: (t, c, z, s) => MeshoptDecoder.decodeIndexBuffer(t, c, z, s),
+    });
+  }
+  // F9c: a scan (PLY, its colour in its vertices) made a game mesh: welded, delit, simplified, auto-unwrapped and baked.
+  if (extension === "ply") {
+    return prepareScan(parsePly(new Uint8Array(await file.arrayBuffer()), name)).mesh;
+  }
+  throw new Error(`Unsupported 3D format ".${extension}". Import an .obj, .glb, .gltf, .fbx, .usda, .usdz, .ply or .cbpk file.`);
 }
 
 /**

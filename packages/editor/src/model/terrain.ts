@@ -94,10 +94,24 @@ export interface Terrain {
    * dome to be drawn into, and nothing stands on it or collides with it.
    */
   readonly vista?: { readonly haze: number };
+  /**
+   * How deep the ground's relief reads, in metres (AAA_FIDELITY_ROADMAP.md F6c;
+   * 0..0.5): on the AAA tier, where the terrain is drawn from its heightfield
+   * on the GPU, its blended layers' relief displaces the nearest ground and
+   * shows by parallax beyond. Absent or 0 is flat.
+   */
+  readonly relief?: number;
 }
 
 export const MIN_TERRAIN_SAMPLES = 2;
-export const MAX_TERRAIN_SAMPLES = 257;
+/**
+ * Heights a side, at most: 4097² (AAA_FIDELITY_ROADMAP.md F6c), which the AAA
+ * tier draws from the heightfield on the GPU. The CPU meshes no more than
+ * {@link MAX_MESHED_TERRAIN_SAMPLES} a side ({@link meshableTerrain}).
+ */
+export const MAX_TERRAIN_SAMPLES = 4097;
+/** Heights a side the CPU builds meshes from; a larger terrain is meshed from a coarser copy. */
+export const MAX_MESHED_TERRAIN_SAMPLES = 257;
 export const MAX_TERRAIN_LAYERS = 4;
 /** Heights are stored to this precision (world units). */
 const HEIGHT_STEP = 0.05;
@@ -503,6 +517,7 @@ export interface SerializedTerrain {
   /** Holes as bits, one per cell (least significant first), base64. */
   holes?: string;
   vista?: { haze: number };
+  relief?: number;
 }
 
 export function serializeTerrain(t: Terrain): SerializedTerrain {
@@ -525,6 +540,7 @@ export function serializeTerrain(t: Terrain): SerializedTerrain {
     ...(t.paint && t.paint.length === t.samples * t.samples * t.layers.length ? { paint: bytesToBase64(t.paint) } : {}),
     ...(t.holes && t.holes.some((v) => v !== 0) ? { holes: packBits(t.holes) } : {}),
     ...(t.vista ? { vista: { haze: t.vista.haze } } : {}),
+    ...(t.relief ? { relief: t.relief } : {}),
   };
 }
 
@@ -607,6 +623,47 @@ export function readTerrain(value: unknown): Terrain | null {
     ...readPaint(r.paint, n * n * layers.length),
     ...(typeof r.holes === "string" && unpackBits(r.holes, (n - 1) * (n - 1)) ? { holes: unpackBits(r.holes, (n - 1) * (n - 1))! } : {}),
     ...readVista(r.vista),
+    ...(finite(r.relief) && r.relief > 0 ? { relief: Math.min(0.5, r.relief) } : {}),
+  };
+}
+
+/**
+ * The terrain the CPU meshes (F6c): itself up to {@link MAX_MESHED_TERRAIN_SAMPLES}
+ * heights a side, else every stride-th height (and its paint), a coarse cell
+ * cut where any of its fine cells is. A grid whose cells don't divide evenly
+ * loses its last few, and its size with them.
+ */
+export function meshableTerrain(t: Terrain, max = MAX_MESHED_TERRAIN_SAMPLES): Terrain {
+  const n = t.samples;
+  if (n <= max) return t;
+  const stride = Math.ceil((n - 1) / (max - 1));
+  const m = Math.floor((n - 1) / stride) + 1;
+  const heights = new Float32Array(m * m);
+  for (let j = 0; j < m; j += 1) for (let i = 0; i < m; i += 1) heights[j * m + i] = t.heights[j * stride * n + i * stride]!;
+  const L = t.layers.length;
+  let paint: Uint8Array | undefined;
+  if (t.paint && t.paint.length === n * n * L) {
+    paint = new Uint8Array(m * m * L);
+    for (let j = 0; j < m; j += 1) for (let i = 0; i < m; i += 1) for (let k = 0; k < L; k += 1) paint[(j * m + i) * L + k] = t.paint[(j * stride * n + i * stride) * L + k]!;
+  }
+  let holes: Uint8Array | undefined;
+  if (t.holes) {
+    holes = new Uint8Array((m - 1) * (m - 1));
+    for (let j = 0; j < m - 1; j += 1)
+      for (let i = 0; i < m - 1; i += 1) {
+        let cut = 0;
+        for (let b = 0; b < stride && !cut; b += 1) for (let a = 0; a < stride && !cut; a += 1) cut = t.holes[(j * stride + b) * (n - 1) + i * stride + a] ?? 0;
+        holes[j * (m - 1) + i] = cut ? 1 : 0;
+      }
+  }
+  const kept = ((m - 1) * stride) / (n - 1);
+  return {
+    ...t,
+    samples: m,
+    size: [t.size[0] * kept, t.size[1] * kept],
+    heights,
+    ...(paint ? { paint } : { paint: undefined }),
+    ...(holes ? { holes } : { holes: undefined }),
   };
 }
 

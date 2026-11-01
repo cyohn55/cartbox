@@ -71,6 +71,9 @@ import {
   CLEARCOAT_F0,
   PARALLAX_MIN_NDV,
   PARALLAX_STEPS,
+  resolveExtensions,
+  morphCsr,
+  dualQuaternions,
   resolveLayers,
   DISTORTION_FREQUENCY,
   DISTORTION_SPEED,
@@ -78,7 +81,18 @@ import {
   REFRACTION_SCALE,
   effectActive,
   resolveRefraction,
+  LIGHTMAP_DIRECTION_FLOOR,
   LIGHTMAP_RANGE,
+  PROBE_DEPTH_SIDE,
+  PROBE_NORMAL_BIAS,
+  PROBE_SH,
+  PROBE_VOLUME_SLOTS,
+  probeVolumeTexels,
+  aerialCamera,
+  fogGrid,
+  fogSun,
+  resolveVolumetricFog,
+  type ProbeVolume,
   MAX_REFLECTION_PROBES,
   PROBE_FADE,
   FOG_GLOW_POWER,
@@ -105,6 +119,9 @@ import {
   CLUSTER_Y,
   CLUSTER_Z,
   buildLightClusters,
+  clusterGrid,
+  resolveLodMesh,
+  type LodChain,
   orderLights,
   graphNoiseSource,
   WATER_PERIOD,
@@ -118,30 +135,89 @@ import {
   type CompiledGraph,
   type DecodedTexture,
   type EnvironmentLight,
+  type HdrLightmap,
   type Mat4,
   type MeshPrimitive,
   type MeshAsset,
   type MeshSceneInstance,
+  type Occluder,
   type RasterStyle,
   type ReflectionProbeSet,
+  CLOTH_GRAVITY,
+  volumeLight,
+  type VolumeEffect,
+  type EmitterSpec,
+  CLOTH_ITERATIONS,
+  CLOTH_RELAX,
+  CORNEA_ROUGHNESS,
+  MAX_CLOTH_CAPSULES,
+  clothTopology,
+  type Capsule,
+  sortTrianglesBackToFront,
 } from "@cartbox/editor";
 
 import { SoftwareSceneRenderer, applyScenePasses, type FrameState, type GpuSceneDraw, type SceneDraw, type SceneRenderer, type SunShadow } from "./sceneRenderer.js";
 import { webgpuCanHonour } from "./renderCaps.js";
-import { batchInstances, compositeFrame, presentFrame, softEdges, type PrimitiveTextures } from "./gpuFrame.js";
+import { batchInstances, compositeFrame, presentFrame, softEdges, type DrawBatch, type PrimitiveTextures } from "./gpuFrame.js";
+import { resampleNearest } from "./gpuPacing.js";
 import { FrameGraph, GraphTimer, TransientPool, timingSpan, type FrameResource, type PassContext } from "./frameGraph.js";
 import { MAX_ANISOTROPY, MipmapGenerator, coverageMips, hasTransparency, mipLevelCount, uploadCompressed } from "./mipmaps.js";
 import { compressedFormatsFor } from "../lighting/webgpuDevice.js";
-import { brdfWgsl, dfgTable } from "./brdf.js";
-import { ltcTables, ltcWgsl } from "./ltc.js";
+import { brdfLut, brdfWgsl } from "./brdf.js";
+import { MATERIAL_SET_WGSL } from "./materialSet.js";
+import { CHARACTER_WGSL } from "./characterShading.js";
+import { GpuParticles, type ParticleFrame } from "./gpuParticles.js";
+import { GpuVolumes } from "./volumetricEffects.js";
+import { CLOTH_FINISH_WGSL, CLOTH_PREDICT_WGSL, CLOTH_SOLVE_WGSL, CLOTH_WORKGROUP, clothParams, packCapsules, vertexTriangles } from "./clothGpu.js";
+import { SKIN_WGSL, SKIN_WORKGROUP, packBindShape, packInfluences, skinParams } from "./gpuSkinning.js";
+import { SSS_MAX_PROFILES, SSS_WGSL, packSssProfiles, type SssProfile } from "./subsurface.js";
+import { FEEDBACK_NONE, FEEDBACK_SLOTS, TextureStreamer, feedbackWgsl, footprintLog2, type StreamingStats } from "./textureStreaming.js";
+import { CasterCulling, GpuCulling, primitiveSphere, type CasterBatch, type CullBatch, type CullSource } from "./gpuCulling.js";
+import { GpuLightClusters } from "./gpuLightClusters.js";
+import { BundleCache, type BundleTarget } from "./renderBundles.js";
+import { GpuTransforms, writeInstanceModel } from "./gpuTransforms.js";
+import { ClusterRendering, type ClusterJob } from "./clusterRendering.js";
+import { GpuTerrain, TERRAIN_PATCH } from "./gpuTerrain.js";
+import { PathTracer, captureReference, type CaptureOptions, type ReferenceCapture } from "./pathTracer.js";
+import { IES_BASE, IES_MAX_PROFILES, IES_VEC4S, ltcTables, ltcWgsl } from "./ltc.js";
 import { PROBE_FACE, ProbeCapture, packCapturedProbes } from "./probeCapture.js";
 import { DECAL_BUFFER_WORDS, DECAL_TILES_AT, decalWgsl, packDecalBoxes, packDecalTiles } from "./decalBuffer.js";
-import { IBL_LEVELS, IblBuilder, SH_IRRADIANCE_WGSL, environmentKey, environmentPanorama, environmentSh } from "./ibl.js";
+import { IBL_LEVELS, IblBuilder, SH_IRRADIANCE_WGSL, environmentKey, environmentPanorama, environmentSh, toHalf } from "./ibl.js";
 import { CASCADE_COUNT, CASCADE_FORMAT, CASCADE_SHADOW_WGSL, SUN_SOFTNESS, fitCascades, type Cascade } from "./cascades.js";
-import { REACTIVE_MASK_WGSL, TEMPORAL_SHARPEN_WGSL, TemporalState, hdrTemporalShaderWgsl, temporalShaderWgsl } from "./temporal.js";
+import { REACTIVE_MASK_WGSL, TEMPORAL_SHARPEN_WGSL, TemporalState, hdrTemporalShaderWgsl, invertMat4, temporalShaderWgsl } from "./temporal.js";
 import { reflectionShaderWgsl, reflectionUniforms } from "./reflections.js";
 import { CONTACT_UNIFORM_FLOATS, SCREEN_SHADING_FORMAT, contactShaderWgsl, contactUniforms } from "./contactShadows.js";
 import { GTAO_UNIFORM_FLOATS, gtaoShaderWgsl, gtaoTemporalWgsl, gtaoUniforms } from "./gtao.js";
+import { HIZ_MAX_ROUGHNESS, HIZ_REDUCE_WGSL, HIZ_RESOLVE_WGSL, HIZ_TEMPORAL_WGSL, HIZ_TRACE_WGSL, HIZ_UNIFORM_FLOATS, hizCopyWgsl, hizLevels, hizUniforms } from "./hizReflections.js";
+import {
+  VSM_MARK_WORDS,
+  VSM_PAGES,
+  VSM_UNIFORM_FLOATS,
+  VSM_LEVELS,
+  VirtualPagePool,
+  localSphere,
+  markedPages,
+  pageTouches,
+  physicalCorner,
+  vsmDepthCentre,
+  vsmLightBasis,
+  vsmMarkWgsl,
+  vsmPageViewProj,
+  vsmResolveWgsl,
+  vsmUniforms,
+  vsmWindows,
+  worldSphere,
+  type PageDraw,
+} from "./virtualShadows.js";
+import { CAMERA_UNIFORM_FLOATS, DOF_GATHER_WGSL, MOTION_NEIGHBOURS_WGSL, MOTION_TILE, MOTION_TILES_WGSL, cameraUniforms, dofCompositeWgsl, dofPrefilterWgsl, motionGatherWgsl, type CameraEffects } from "./cameraEffects.js";
+import { UPSCALE_SHARPEN_WGSL, UPSCALE_UNIFORM_FLOATS, upscaleJitterPhases, upscaleShaderWgsl, upscaleUniforms } from "./upscaler.js";
+import { DEFAULT_TEXEL_DENSITY, LIGHT_COMPLEXITY_FULL, OVERDRAW_FULL, SHADER_COMPLEXITY_FULL, VIEW_MODE_WGSL, VIEW_RESOLVE_WGSL, viewModeCode } from "./viewModes.js";
+import { SSGI_UNIFORM_FLOATS, ssgiResolveWgsl, ssgiTemporalWgsl, ssgiTraceWgsl, ssgiUniforms, type SsgiFrame } from "./ssgi.js";
+import { AERIAL_FRAME_FLOATS, AERIAL_LUT_BYTES, AERIAL_SAMPLE_WGSL, GpuAtmosphere, packAerialFrame } from "./atmosphere.js";
+import { GpuProbeGi } from "./dynamicGi.js";
+import { FOG_FORMAT, FOG_FRAME_FLOATS, FOG_SAMPLE_WGSL, GpuVolumetricFog, fogCamera, packFogFrame, type FogFrame } from "./volumetricFog.js";
+import { WEATHER_FRAME_FLOATS, WEATHER_WGSL, packWeatherFrame } from "./weather.js";
+import { WATER_FRAME_FLOATS, WATER_FRAME_WGSL_FIELDS, WATER_WGSL, packWaterFrame } from "./waterLook.js";
 import {
   LOCAL_ATLAS_SIZE,
   LOCAL_CLEAR_WGSL,
@@ -173,9 +249,12 @@ import {
   unpadRows,
   viewDirection,
   writeInstanceUniform,
+  copyFrameUniform,
+  uniformAnimates,
   INSTANCE_FLOATS,
   writeInstanceTransform,
   refractionCamera,
+  waterLookUniform,
 } from "./scenePacking.js";
 
 /** The sun's GPU cascades (F2a): their depth array, its comparison sampler, each cascade's light view, and the depth-only pipeline. */
@@ -217,11 +296,84 @@ export const GBUFFER_FORMAT = "rgba16float";
 /** The velocity buffer's format (F0c): screen motion since last frame, in UV units. */
 export const VELOCITY_FORMAT = "rg16float";
 
-/** The per-frame globals' bytes (WGSL `Frame`): cluster params and info, the near cascade's matrix and params, and the sun's GPU cascades (F2a). */
-const FRAME_BYTES = 752;
+/** The linear-light shader's view modes (F10a; viewModes.ts): a diagnostic of what it shades with, in place of the lit colour. */
+const VIEW_MODE_SHADE = /* wgsl */ `    let vm = i32(frame.debug.x + 0.5);
+    if (vm > 0) {
+      // Palettes and ramps are display colours, shaded a little by the sun so the forms still read.
+      let form = 0.55 + 0.45 * max(0.0, dot(N, L));
+      let texels = vec2<f32>(textureDimensions(tex));
+      var d = vec3<f32>(0.0);
+      if (vm == 1) { d = vmAlbedo + emis; }
+      else if (vm == 2) { d = vmAlbedo; }
+      else if (vm == 3) { d = vmLight(vec3<f32>(rough)); }
+      else if (vm == 4) { d = vmLight(vec3<f32>(vmMetallic)); }
+      else if (vm == 5) { d = vmLight(N * 0.5 + vec3<f32>(0.5)); }
+      else if (vm == 6) { d = vmLight(vec3<f32>(ao)); }
+      else if (vm == 7) { d = lit; }
+      else if (vm == 9) {
+        // An estimate of the pixel's shading work: its maps, its layers and features, and its lights.
+        var cost = 4.0 + u.texflags.x + u.texflags.y + u.texflags.z + u.texflags.w;
+        if (u.maps0.x > 0.5) { cost = cost + 2.0; }
+        if (u.layer0.w > 0.0) { cost = cost + 8.0; }
+        if (u.layer0.x > 0.0) { cost = cost + 3.0; }
+        if (u.layer0.z != 0.0) { cost = cost + 2.0; }
+        if (u.refract0.w > 0.5) { cost = cost + 4.0; }
+        if (u.surface1.z > 0.5) { cost = cost + 2.0; }
+        if (u.surface0.y > 0.0) { cost = cost + 1.0; }
+        if (u.terrain0.x > 0.0) { cost = cost + 4.0; }
+        if (u.motion0.z > 0.5) { cost = cost + 2.0; }
+        if (u.envSky.w > 0.5) { cost = cost + 2.0; }
+        cost = cost + 1.5 * f32(vmLights);
+        d = vmLight(vmHeat(cost / ${SHADER_COMPLEXITY_FULL.toFixed(1)}));
+      }
+      else if (vm == 10) { d = vmLight(vmHeat(f32(vmLights) / ${LIGHT_COMPLEXITY_FULL.toFixed(1)}) * form); }
+      else if (vm == 12) { d = vmLight(select(vec3<f32>(1.0), vmPalette(i32(u.motion0.w + 0.5)), u.motion0.w > -0.5) * form); }
+      else if (vm == 13) {
+        // Base-colour texels per metre: the UV footprint's texels over the surface's.
+        if (u.texflags.x > 0.5) {
+          let uvArea = abs(duv1.x * duv2.y - duv1.y * duv2.x) * texels.x * texels.y;
+          let density = sqrt(uvArea / max(length(cross(dp1, dp2)), 1e-12));
+          let t = clamp(log2(density / frame.debug.y) * 0.25 + 0.5, 0.0, 1.0);
+          d = vmLight(select(mix(vec3<f32>(0.0, 0.85, 0.2), vec3<f32>(1.0, 0.1, 0.0), t * 2.0 - 1.0), mix(vec3<f32>(0.1, 0.3, 1.0), vec3<f32>(0.0, 0.85, 0.2), t * 2.0), t < 0.5) * form);
+        } else { d = vmLight(vec3<f32>(0.3) * form); }
+      }
+      else if (vm == 14) {
+        // The mip the base colour samples: green at 0, then yellow, red and magenta.
+        let fx = duv1 * texels;
+        let fy = duv2 * texels;
+        let mip = max(0.0, 0.5 * log2(max(max(dot(fx, fx), dot(fy, fy)), 1e-8)));
+        var ramp = array<vec3<f32>, 4>(vec3<f32>(0.1, 0.85, 0.2), vec3<f32>(1.0, 0.9, 0.1), vec3<f32>(1.0, 0.15, 0.1), vec3<f32>(0.9, 0.2, 1.0));
+        let m = min(mip, 3.0);
+        let i = min(2, i32(floor(m)));
+        d = select(vmLight(vec3<f32>(0.3) * form), vmLight(mix(ramp[i], ramp[i + 1], m - f32(i)) * form), u.texflags.x > 0.5);
+      }
+      else if (vm == 15) {
+        var ci = 0;
+        for (var c = 0; c < ${CASCADE_COUNT}; c = c + 1) { if (in.eyeDepth > frame.cascadeFar[c]) { ci = ci + 1; } }
+        d = vmLight(select(vec3<f32>(0.3), vmPalette(ci), frame.cascadeInfo.x > 0.5 && ci < ${CASCADE_COUNT}) * form);
+      }
+      shaded = d;
+    }
+`;
+
+/** The per-frame globals' bytes (WGSL `Frame`): cluster params and info, the near cascade's matrix and params, the sun's GPU cascades (F2a), the aerial perspective's camera (F5a-2) and the fog's (F5b). */
+const FRAME_BYTES = 928 + WATER_FRAME_FLOATS * 4;
+
+/** Floats into `Frame` where the water's terms and grids start (F5d). */
+const FRAME_WATER = 232;
+
+/** Floats into `Frame` where the weather's terms sit (F5e). */
+const FRAME_WEATHER = 224;
+
+/** Floats into `Frame` where the view mode (F10a) sits. */
+const FRAME_DEBUG = 220;
 
 /** Floats into `Frame` where the sun's GPU cascades start (F2a): four matrices, then the slices' far depths, the flags and the texels. */
 const FRAME_CASCADES = 84;
+
+/** Floats into `Frame` where the aerial perspective's camera starts (F5a-2), and the volumetric fog's (F5b). */
+const FRAME_AERIAL = FRAME_CASCADES + 104;
+const FRAME_FOG = FRAME_AERIAL + 16;
 
 /** The cascades the linear-light renderer gives a caller that passes only a CPU shadow map (F2a): how far they reach, and their size. */
 const FALLBACK_CASCADE_DISTANCE = 80;
@@ -239,8 +391,38 @@ const SHADER_STAGE_FRAGMENT = 0x2;
  * after the base colour (where it also sets colour and alpha), where the PBR
  * metallic and roughness settle, and after the emissive. Empty for the plain shader.
  */
-function graphSites(graph: CompiledGraph | null): { fns: string; base: string; pbr: string; emis: string } {
-  if (!graph) return { fns: "", base: "", pbr: "", emis: "" };
+function graphSites(graph: CompiledGraph | null, vertex: CompiledGraph | null = null, hdr = false): { fns: string; base: string; pbr: string; emis: string; vertex: string; pdo: boolean } {
+  // The world-position offset (F1e), in the vertex stage: the graph's own steps for it, read where a vertex has them.
+  let vertexSite = "";
+  if (vertex && vertex.outputs.worldPositionOffset !== undefined) {
+    const vcode = graphShaderCode(vertex, "wgsl", {
+      uv: "uv",
+      position: "wpWorld",
+      normal: "normalize(t.nrm * normal)",
+      view: "u.view.xyz",
+      time: "u.effect1.w",
+      curvature: "0.0",
+      occlusion: "1.0",
+      thickness: "1.0",
+      baseColor: "u.base.rgb",
+      baseAlpha: "u.base.a",
+      // No map in the vertex stage: its bindings are the fragment's.
+      sample: () => "vec4<f32>(1.0)",
+      metallic: "u.pbr.x",
+      roughness: "u.pbr.y",
+      emissive: "u.emissive.xyz",
+    });
+    vertexSite = `  // The material graph's world-position offset (F1e), taken into the mesh's own space.
+  {
+    let wpWorld = (t.model * vec4<f32>(pos, 1.0)).xyz;
+${vcode.split("\n").map((l) => `    ${l}`).join("\n")}
+    let m3 = mat3x3<f32>(t.model[0].xyz, t.model[1].xyz, t.model[2].xyz);
+    wpoObj = inverse3(m3) * g${vertex.outputs.worldPositionOffset};
+    pos = pos + wpoObj;
+  }
+`;
+  }
+  if (!graph) return { fns: "", base: "", pbr: "", emis: "", vertex: vertexSite, pdo: false };
   const out = graph.outputs;
   const code = graphShaderCode(graph, "wgsl", {
     uv: "puv",
@@ -254,6 +436,11 @@ function graphSites(graph: CompiledGraph | null): { fns: string; base: string; p
     baseColor: "colour.rgb",
     baseAlpha: "colour.a",
     sample: (p) => `textureSample(tex, samp, vec2<f32>((${p}).x, 1.0 - (${p}).y))`,
+    // The graph's own images (F1e), layers of the blend surface's array after its own.
+    sampleSlot: (slot, p) => `textureSample(blendTex, samp, vec2<f32>((${p}).x, 1.0 - (${p}).y), ${slot})`,
+    metallic: "u.pbr.x",
+    roughness: "u.pbr.y",
+    emissive: "u.emissive.xyz",
   });
   const set = [
     out.baseColor !== undefined ? `colour = vec4<f32>(g${out.baseColor}, colour.a);` : "",
@@ -261,14 +448,22 @@ function graphSites(graph: CompiledGraph | null): { fns: string; base: string; p
     out.metallic !== undefined ? `gMetal = clamp(g${out.metallic}.x, 0.0, 1.0);` : "",
     out.roughness !== undefined ? `gRough = g${out.roughness}.x;` : "",
     out.emissive !== undefined ? `gEmis = max(g${out.emissive}, vec3<f32>(0.0));` : "",
+    // F1e: a tangent-space normal (−1..1) in the vertex's frame, the depth pushed away, the bend, and what scatters.
+    out.normal !== undefined ? `sNrm = mappedNormal(in.normal, ${hdr ? "in.tangent, in.frameNormal" : "vec4<f32>(0.0), in.normal"}, g${out.normal}, dp1, dp2, duv1, duv2);` : "",
+    out.pixelDepthOffset !== undefined ? `gPdo = max(g${out.pixelDepthOffset}.x, 0.0);` : "",
+    out.refraction !== undefined ? `refractBend = max(g${out.refraction}.x, 0.0);` : "",
+    out.subsurfaceColor !== undefined ? `sssTint = clamp(g${out.subsurfaceColor}, vec3<f32>(0.0), vec3<f32>(1.0));` : "",
   ].filter(Boolean);
   return {
     // The noise functions are always in the shader (refraction's warp uses them, I5).
     fns: "",
+    vertex: vertexSite,
+    pdo: hdr && out.pixelDepthOffset !== undefined,
     base: `  // The material graph (EP7).
   var gMetal = -1.0;
   var gRough = -1.0;
   var gEmis = vec3<f32>(-1.0);
+  var gPdo = 0.0;
   {
     var gN = normalize(sNrm);
     if (dot(gN, u.view.xyz) < 0.0) { gN = -gN; }
@@ -329,7 +524,20 @@ function wgslDisplay(v: string, hdr = false): string {
         }
       }
       ${v} = mixAsShown(${v}, fc, f);
-    }`;
+    }
+    // The volumetric fog between the surface and the eye (F5b), as the air below: dimmed, and its light added.
+    if (frame.fogEye.w > 0.5) {
+      let mist = fogAt(in.worldPos);
+      ${v} = ${v} * mist.a + select(mist.rgb, vec3<f32>(0.0), u.pbr.w > 2.5);
+    }
+    // The physical sky's air between the surface and the eye (F5a-2): what lies beyond it dimmed, the light it
+    // scatters toward the eye added (by coverage, as the colour is premultiplied after; an additive surface only dims).
+    if (frame.aerialEye.w > 0.5) {
+      let air = aerialAt(in.worldPos);
+      ${v} = ${v} * air.a + select(air.rgb, vec3<f32>(0.0), u.pbr.w > 2.5);
+    }
+    // Under water (F5d): the water between the surface and the eye, in place of air.
+    if (frame.water0.y > 0.5) { ${v} = throughWater(${v}, in.eyeDepth); }`;
   }
   return /* wgsl */ `    if (u.tonemap.x > 0.5) {
       let e = u.tonemap.y;
@@ -369,8 +577,8 @@ function wgslDisplay(v: string, hdr = false): string {
  * reflection targets a frame with screen-space reflections writes beside the
  * colour (see reflections.ts); the colour itself is the same.
  */
-export function sceneShader(graph: CompiledGraph | null = null, reflect = false, hdr = false): string {
-  const g = graphSites(graph);
+export function sceneShader(graph: CompiledGraph | null = null, reflect = false, hdr = false, vertex: CompiledGraph | null = null): string {
+  const g = graphSites(graph, vertex, hdr);
   const code = /* wgsl */ `
 struct Uniforms {
   mvp: mat4x4<f32>,
@@ -388,7 +596,7 @@ struct Uniforms {
   shadow: vec4<f32>,    // x = 1 when shadowed, y = map size, z = bias, w = strength
   envMeta: vec4<f32>,   // xyz = env-map mean radiance, w = 1 when an env map is bound
   tonemap: vec4<f32>,   // x = 1 when tone-mapping, y = exposure, z = soft edge, w = 1 for the curve as authored (F11a-5)
-  ssaoMeta: vec4<f32>,  // x = 1 when an SSAO buffer is bound, y = light count, z = 1 when a light map is bound
+  ssaoMeta: vec4<f32>,  // x = 1 when an SSAO buffer is bound, y = light count, z = 1 when a light map is bound (2: an HDR directional one, F3d)
   model: mat4x4<f32>,   // this draw's world matrix (point-light world position)
   fog: vec4<f32>,       // rgb = fog colour, w = density
   fogParams: vec4<f32>, // x = 1 when fogged, y = start distance, z = max amount
@@ -414,6 +622,30 @@ struct Uniforms {
   maps0: vec4<f32>,     // x = 1 when a normal map is bound (P1a)
   wind1: vec4<f32>,     // the previous frame's wind0, for motion vectors (F0c)
   motion0: vec4<f32>,   // x = where this frame's motion transforms start in xf (F0c), y = the draw's lighting channels (F2e)
+  // The full material set (F1d; scenePacking.ts): sheen, a dielectric's f0, transmission and volume, the film, the UV transform.
+  sheen0: vec4<f32>,
+  spec0: vec4<f32>,
+  trans0: vec4<f32>,
+  trans1: vec4<f32>,
+  irid0: vec4<f32>,
+  uvx0: vec4<f32>,
+  uvx1: vec4<f32>,
+  // Subsurface scattering and thin-surface transmission (F1d-2).
+  sss0: vec4<f32>,
+  dt0: vec4<f32>,
+  // Character shading (F7c; characterShading.ts).
+  char0: vec4<f32>,
+  char1: vec4<f32>,
+  cull0: vec4<f32>,
+  // A GPU terrain's patch (F6c; gpuTerrain.ts): its size, the heights' min and range (> 0: a terrain), its cells,
+  // cut cells, nearest page's side and eye pages, its origin and leaf size, the eye and the split and morph, the pages.
+  terrain1: vec4<f32>,
+  terrain2: vec4<f32>,
+  terrain3: vec4<f32>,
+  terrain4: vec4<f32>,
+  terrainPages: array<vec4<f32>, 4>,
+  // A water surface's F5d terms (waterLook.ts): foam, Gerstner waves' height, the ocean's share, 1 with them.
+  wlook0: vec4<f32>,
 };
 
 // A Modern-tier light (see packLights): d0 = dir/pos + kind, d1 = colour +
@@ -437,7 +669,7 @@ struct Frame {
   localShadow: vec4<f32>, // EP8c: x = 1 when spot/point shadows are on, y = bias, z = slope bias (world units)
   probeMin: vec4<f32>,    // EP9: the probe grid's corner, w = 1 when a grid is bound
   probeScale: vec4<f32>,  // world → grid units per axis: (count − 1) / (max − min)
-  probeCount: vec4<f32>,  // probes per axis
+  probeCount: vec4<f32>,  // probes per axis; w = the slots a probe takes along x (F5b-0)
   envSh: array<vec4<f32>, 9>, // F3a: the environment's L2 SH irradiance over π (linear variant)
   envInfo: vec4<f32>,         // F3a: x = the prefiltered cube's top mip
   cascadeVp: array<mat4x4<f32>, ${CASCADE_COUNT}>, // F2a: the sun's cascades, world → light clip (depth 0..1)
@@ -445,9 +677,21 @@ struct Frame {
   cascadeInfo: vec4<f32>,     // F2a: x = 1 with GPU cascades, y = map size, z = strength, w = the last cascade's far depth
   cascadeTexel: vec4<f32>,    // F2a: each cascade's texel in world units
   cascadeDepth: vec4<f32>,    // F2a-2: the world distance each cascade's depth 0..1 spans
-  cascadeSoft: vec4<f32>,     // F2a-2: x = the sun's size (its angular diameter's tangent), for the penumbrae; F2c: y = 1 with contact shadows; F3c: z = 1 with GTAO
+  cascadeSoft: vec4<f32>,     // F2a-2: x = the sun's size (its angular diameter's tangent), for the penumbrae; F2c: y = 1 with contact shadows; F3c: z = 1 with GTAO; F3e-2: w = 1 with SSGI
   viewProj: mat4x4<f32>,      // F2d-3: world → clip as drawn (jittered with TAA), for marching the prepass's depths
-  depthTerms: vec4<f32>,      // F2d-3: xy = view distance from depth (d = y / (z + x)); z = 1 when the depths are readable as the scene shades
+  depthTerms: vec4<f32>,      // F2d-3: xy = view distance from depth (d = y / (z + x)); z = 1 when the depths are readable as the scene shades; F2b: w = 1 with virtual shadow maps
+  aerialEye: vec4<f32>,       // F5a-2: the eye the aerial perspective was built from, w = 1 when it is on
+  aerialRight: vec4<f32>,     // F5a-2: its camera's right axis, w = P[0]
+  aerialUp: vec4<f32>,        // F5a-2: its up axis, w = P[5]
+  aerialBack: vec4<f32>,      // F5a-2: its back axis, w = km of air per world unit
+  fogEye: vec4<f32>,          // F5b: the eye the volumetric fog was built from, w = 1 when it is on
+  fogRight: vec4<f32>,        // F5b: its camera's right axis, w = P[0]
+  fogUp: vec4<f32>,           // F5b: its up axis, w = P[5]
+  fogBack: vec4<f32>,         // F5b: its back axis, w = the volume's reach
+  debug: vec4<f32>,           // F10a: x = the view mode's code (0 lit), y = the texel density on target (per metre); F1d-2: z = 1 when scattering surfaces split
+  weather0: vec4<f32>,        // F5e: wetness, puddles, snow, rain
+  weather1: vec4<f32>,        // F5e: the snow line, the rain's seconds, the patches' size, 1 when there is weather
+${WATER_FRAME_WGSL_FIELDS}
 };
 // One spot/point shadow tile (EP8c): world→clip, and params.xy = depth→distance terms.
 struct ShadowTile {
@@ -456,6 +700,22 @@ struct ShadowTile {
   rect: vec4<f32>, // F2d: the tile's x, y and size in the atlas (texels), on the linear-light renderer
 };
 @group(0) @binding(0) var<uniform> u: Uniforms;
+// What a material graph sets beyond its sites (F1e): the vertex's offset in its own space, the refraction's bend
+// (−1: the material's), and what of the diffuse scatters.
+var<private> wpoObj: vec3<f32>;
+var<private> refractBend: f32 = -1.0;
+var<private> sssTint: vec3<f32> = vec3<f32>(1.0);
+// A 3×3's inverse, by its adjugate.
+fn inverse3(m: mat3x3<f32>) -> mat3x3<f32> {
+  let a = m[0];
+  let b = m[1];
+  let c = m[2];
+  let r0 = cross(b, c);
+  let r1 = cross(c, a);
+  let r2 = cross(a, b);
+  let det = dot(a, r0);
+  return transpose(mat3x3<f32>(r0, r1, r2)) * (1.0 / select(det, 1e-12, abs(det) < 1e-12));
+}
 @group(0) @binding(1) var samp: sampler;
 @group(0) @binding(2) var tex: texture_2d<f32>;
 @group(0) @binding(3) var mrTex: texture_2d<f32>;
@@ -479,7 +739,10 @@ ${hdr
 // The screen-space AO buffer (CPU-generated by computeSsao, uploaded r32float),
 // sampled per fragment by its framebuffer pixel — the same buffer the software
 // path multiplies its ambient by. Bound to a 1x1 blank when unused.
-@group(0) @binding(8) var ssaoMap: texture_2d<f32>;
+// The linear variant binds an array: the screen-space shading target's two layers (F2c, F3c; F3e-2's SSGI in
+// the second), or the AO buffer as one layer.
+@group(0) @binding(8) var ssaoMap: ${hdr ? "texture_2d_array<f32>" : "texture_2d<f32>"};
+fn ssaoTexel(p: vec2<i32>) -> vec4<f32> { return textureLoad(ssaoMap, p, ${hdr ? "0, " : ""}0); }
 // The Modern-tier light list (packLights); the uniform's ssaoMeta.y bounds the
 // loop, so a spare 1-light buffer is bound when there are none.
 @group(0) @binding(9) var<storage, read> lights: array<Light>;
@@ -492,8 +755,9 @@ struct InstanceXf {
   nrm: mat3x3<f32>,
 };
 @group(0) @binding(10) var<storage, read> xf: array<InstanceXf>;
-// A baked light map, sampled with the second UV set (1x1 white when none).
-@group(0) @binding(11) var lmTex: texture_2d<f32>;
+// A baked light map, sampled with the second UV set (1x1 white when none). The linear variant binds an
+// array: an HDR directional map's two layers (F3d: irradiance; direction and sky visibility), or an 8-bit map's one.
+@group(0) @binding(11) var lmTex: ${hdr ? "texture_2d_array<f32>" : "texture_2d<f32>"};
 // Reflection probes (probeSampling.ts in @cartbox/editor): every probe's
 // panorama stacked in one atlas, and each one's box, capture point and mean
 // colour; the uniform's ssaoMeta.w counts them (a zeroed slot when none).
@@ -509,31 +773,71 @@ ${hdr ? "// The linear variant's probes (F3b, probeCapture.ts): each one's prefi
 // uniform's surface0.y gates it).
 @group(0) @binding(14) var detailTex: texture_2d<f32>;
 // The blend surface's map (terrain snow over rock), mixed by the vertex weight.
-@group(0) @binding(15) var blendTex: texture_2d<f32>;
+// The blend surface's map in layer 0, and a material graph's own images after it (F1e).
+@group(0) @binding(15) var blendTex: texture_2d_array<f32>;
 @group(0) @binding(16) var nrmTex: texture_2d<f32>;
-// The opaque pass's depth (EP6b), read by the see-through pass for soft edges;
+${hdr ? "// A GPU terrain's heights (F6c): RG = 16 bits of the height (B, its cut cells, the page bake reads).\n@group(0) @binding(17) var heightTex: texture_2d<f32>;\n" : ""}// The opaque pass's depth (EP6b), read by the see-through pass for soft edges;
 // the opaque pass binds a blank in its place.
 @group(1) @binding(0) var sceneDepth: texture_depth_2d;
-// Clustered lights (EP8): per cell (offset, count) into the index list.
-@group(1) @binding(1) var<storage, read> clusterTable: array<vec2<u32>>;
-@group(1) @binding(2) var<storage, read> clusterIndex: array<u32>;
+// Clustered lights (EP8): per cell (offset, count) into the index list, then the list, in one buffer
+// (F5b-0: the stage's eight storage buffers are all in use, so the two share one).
+@group(1) @binding(1) var<storage, read> clusterData: array<u32>;
+fn clusterCell(i: u32) -> vec2<u32> { return vec2<u32>(clusterData[i * 2u], clusterData[i * 2u + 1u]); }
+fn clusterLight(j: u32) -> u32 { return clusterData[${CLUSTER_CELLS * 2}u + j]; }
+// Light probes (EP9) and the probe volume (F3d-3): slot f's probes at x = f · nx + probe x, in a buffer
+// (F5b-0: it was a 3D texture read texel by texel, and the stage's sixteen sampled textures are all in use).
+@group(1) @binding(2) var<storage, read> probeData: array<vec4<f32>>;
+fn probeTexel(p: vec3<i32>) -> vec4<f32> {
+  let w = i32(frame.probeCount.x * frame.probeCount.w + 0.5);
+  return probeData[(p.z * i32(frame.probeCount.y + 0.5) + p.y) * w + p.x];
+}
 @group(1) @binding(3) var<uniform> frame: Frame;
 // Spot and point light shadows (EP8c): the tile atlas and each tile's view.
 ${hdr ? "// The spot/point lights' depth atlas, drawn on the GPU (F2d).\n@group(1) @binding(4) var localDepth: texture_depth_2d;" : "@group(1) @binding(4) var localAtlas: texture_2d<f32>;"}
 @group(1) @binding(5) var<storage, read> shadowTiles: array<ShadowTile>;
-// Light probes (EP9): the grid as a 3D texture, face f's probes at x = f · nx + probe x.
-@group(1) @binding(6) var probeGrid: texture_3d<f32>;
 // The opaque scene's colour (I5), copied as the see-through pass begins — what a
 // refracting surface bends (a 1×1 blank in the opaque pass, which never reads it).
 @group(1) @binding(7) var sceneColour: texture_2d<f32>;
-${hdr ? `${brdfWgsl(1, 8)}// The prefiltered cube's sampler: trilinear, so a roughness between levels blends them (F3a).
+${hdr ? `${brdfWgsl(1, 8)}${MATERIAL_SET_WGSL}${CHARACTER_WGSL}// The prefiltered cube's sampler: trilinear, so a roughness between levels blends them (F3a).
 @group(1) @binding(9) var envSamp: sampler;
 ${ltcWgsl(1, 10)}
 ${decalWgsl(1, 13)}
 ${SH_IRRADIANCE_WGSL}
 // The comparison sampler that filters the cascades' tests (F2a).
 @group(1) @binding(11) var cascadeSamp: sampler_comparison;
-${CASCADE_SHADOW_WGSL}` : ""}
+${CASCADE_SHADOW_WGSL}
+// The physical sky's aerial perspective (F5a-2, atmosphere.ts): its froxels as half floats, two a vec4.
+@group(1) @binding(14) var<uniform> aerialLut: array<vec4<u32>, ${AERIAL_LUT_BYTES / 16}>;
+${AERIAL_SAMPLE_WGSL}
+// The volumetric fog (F5b, volumetricFog.ts): its light and transmittance, integrated over the froxels.
+@group(1) @binding(6) var fogVolume: texture_3d<f32>;
+${FOG_SAMPLE_WGSL}
+// The weather (F5e, weather.ts).
+${WEATHER_WGSL}
+// Water (F5d, waterLook.ts).
+${WATER_WGSL}
+// A water surface's waves (F5d): Gerstner along its flow, the FFT ocean's share and the ripples, tilting n.
+fn waterWaves(n: vec3<f32>, p: vec3<f32>) -> vec3<f32> {
+  if (u.water0.x <= 0.0 || frame.water0.w < 0.5) { return n; }
+  let s = gerstnerSlope(p.x, p.z, frame.water0.z, u.wlook0.y, u.water0.w) + oceanSlope(p.x, p.z) * u.wlook0.z * frame.water1.w + rippleSlope(p.x, p.z);
+  return normalize(n + vec3<f32>(-s.x, 0.0, -s.y));
+}
+// The depth behind a refracting fragment, at the pixel behindColour reads.
+fn behindDepth(frag: vec2<f32>, z: f32, off: vec2<f32>) -> f32 {
+  let dims = vec2<f32>(textureDimensions(sceneColour, 0));
+  let s = vec2<i32>(clamp(floor(frag + off), vec2<f32>(0.0), dims - vec2<f32>(1.0)));
+  if (textureLoad(sceneColour, s, 0).a > 0.5 && textureLoad(sceneDepth, s, 0) >= z) { return textureLoad(sceneDepth, s, 0); }
+  return textureLoad(sceneDepth, vec2<i32>(floor(frag)), 0);
+}
+// The sun under a water plane (F5d): through the water above, and focused by the waves into caustics.
+fn underwaterSun(p: vec3<f32>) -> f32 {
+  if (u.water0.x > 0.0) { return 1.0; }
+  let depth = underPlane(p);
+  if (depth <= 0.0) { return 1.0; }
+  let ext = frame.water1.rgb + frame.water2.rgb;
+  let through = exp(-dot(ext, vec3<f32>(0.2126, 0.7152, 0.0722)) * depth / max(0.2, u.light.y));
+  return through * caustics(p.x, p.z, frame.water0.z, depth);
+}` : ""}
 // Optical depth of a fog layer thinning above base, along the ray from the eye
 // (height cy, rise dy, length len) over t in [t0, t1] — fogLayerDepth in skyDome.ts.
 fn fogLayer(d: f32, k: f32, base: f32, cy: f32, dy: f32, len: f32, t0: f32, t1: f32) -> f32 {
@@ -587,7 +891,7 @@ struct VSOut {
   @location(4) eyeDepth: f32,
   @location(5) @interpolate(perspective, centroid) uv2: vec2<f32>,
   @location(6) bw: f32,
-  @location(7) objPos: vec3<f32>,${hdr ? "\n  // The vertex's MikkTSpace frame in world space (F1c), each unit at the vertex: its tangent (w = 0 without one) and normal.\n  @location(8) tangent: vec4<f32>,\n  @location(9) frameNormal: vec3<f32>," : ""}
+  @location(7) objPos: vec3<f32>,${hdr ? "\n  // The vertex's MikkTSpace frame in world space (F1c), each unit at the vertex: its tangent (w = 0 without one) and normal.\n  @location(8) tangent: vec4<f32>,\n  @location(9) frameNormal: vec3<f32>,\n  // Its copy's LOD crossfade (F6b; fadeHides), or 0.\n  @location(10) @interpolate(flat) fade: f32," : ""}
 };
 
 ${hdr
@@ -596,13 +900,18 @@ ${hdr
 var<private> shadowPixel: vec2<f32>;
 fn shadowFactor(lightClip: vec4<f32>, worldPos: vec3<f32>, cosL: f32) -> f32 {
   if (frame.cascadeInfo.x < 0.5) { return 1.0; }
+  // The virtual shadow maps (F2b) for what the prepass holds, where a page is resident; the cascades elsewhere.
+  if (frame.depthTerms.w > 0.5 && u.pbr.w < 1.5) {
+    let v = textureLoad(ssaoMap, vec2<i32>(shadowPixel), 2, 0).r;
+    if (v >= 0.0) { return v * contactAt(shadowPixel); }
+  }
   return cascadeShadow(worldPos, cosL, shadowPixel) * contactAt(shadowPixel);
 }
 // The sun's contact shadow at this pixel (F2c), from the pass after the prepass: an opaque or
 // cut-out surface's alone, as only they are in its depths.
 fn contactAt(pixel: vec2<f32>) -> f32 {
   if (frame.cascadeSoft.y < 0.5 || u.pbr.w > 1.5) { return 1.0; }
-  return textureLoad(ssaoMap, vec2<i32>(pixel), 0).g;
+  return ssaoTexel(vec2<i32>(pixel)).g;
 }
 fn screenOctDecode(e: vec2<f32>) -> vec3<f32> {
   var n = vec3<f32>(e.x, e.y, 1.0 - abs(e.x) - abs(e.y));
@@ -615,8 +924,14 @@ fn screenOctDecode(e: vec2<f32>) -> vec3<f32> {
 // cut-out surface (the only ones in the prepass it reads).
 fn gtaoAt(pixel: vec2<f32>) -> vec4<f32> {
   if (frame.cascadeSoft.z < 0.5 || u.pbr.w > 1.5) { return vec4<f32>(0.0, 0.0, 0.0, 1.0); }
-  let t = textureLoad(ssaoMap, vec2<i32>(pixel), 0);
+  let t = ssaoTexel(vec2<i32>(pixel));
   return vec4<f32>(screenOctDecode(t.zw), t.x);
+}
+// SSGI at this pixel (F3e-2), from the screen-shading target's second layer: rgb the near field's light
+// (irradiance over π), a the share of directions it fills; none for what isn't in the prepass.
+fn ssgiAt(pixel: vec2<f32>) -> vec4<f32> {
+  if (frame.cascadeSoft.w < 0.5 || u.pbr.w > 1.5) { return vec4<f32>(0.0); }
+  return textureLoad(ssaoMap, vec2<i32>(pixel), 1, 0);
 }
 // Light bouncing between the occluders brings some back (Jimenez's fit), the more the brighter the albedo.
 fn gtaoBounce(v: f32, albedo: f32) -> f32 {
@@ -746,6 +1061,7 @@ fn camoThreshold(p: vec2<f32>, time: f32) -> f32 {
 // pixel (alpha 1); a blended one leaves premultiplied colour and its coverage
 // (the pipeline blends it over what's there); an added one leaves its light
 // and no coverage (the pipeline adds it). compositeFrame reads the same codes.
+${hdr ? VIEW_MODE_WGSL : ""}
 fn finishAlpha(rgb: vec3<f32>, a: f32) -> vec4<f32> {
   // Linear light (F0b) keeps what is over 1 — a highlight, the sun on water — for the presenter's tone map.
   let c = ${hdr ? "max(rgb, vec3<f32>(0.0))" : "clamp(rgb, vec3<f32>(0.0), vec3<f32>(1.0))"};
@@ -795,10 +1111,10 @@ fn localShadow(first: i32, lgt: Light, P: vec3<f32>, cosL: f32) -> f32 {
 // One ambient-cube face of the probe grid at grid cell i + fraction f (trilinear).
 fn probeFace(face: i32, i: vec3<i32>, f: vec3<f32>) -> vec3<f32> {
   let o = i + vec3<i32>(face * i32(frame.probeCount.x + 0.5), 0, 0);
-  let x00 = mix(textureLoad(probeGrid, o, 0).rgb, textureLoad(probeGrid, o + vec3<i32>(1, 0, 0), 0).rgb, f.x);
-  let x10 = mix(textureLoad(probeGrid, o + vec3<i32>(0, 1, 0), 0).rgb, textureLoad(probeGrid, o + vec3<i32>(1, 1, 0), 0).rgb, f.x);
-  let x01 = mix(textureLoad(probeGrid, o + vec3<i32>(0, 0, 1), 0).rgb, textureLoad(probeGrid, o + vec3<i32>(1, 0, 1), 0).rgb, f.x);
-  let x11 = mix(textureLoad(probeGrid, o + vec3<i32>(0, 1, 1), 0).rgb, textureLoad(probeGrid, o + vec3<i32>(1, 1, 1), 0).rgb, f.x);
+  let x00 = mix(probeTexel(o).rgb, probeTexel(o + vec3<i32>(1, 0, 0)).rgb, f.x);
+  let x10 = mix(probeTexel(o + vec3<i32>(0, 1, 0)).rgb, probeTexel(o + vec3<i32>(1, 1, 0)).rgb, f.x);
+  let x01 = mix(probeTexel(o + vec3<i32>(0, 0, 1)).rgb, probeTexel(o + vec3<i32>(1, 0, 1)).rgb, f.x);
+  let x11 = mix(probeTexel(o + vec3<i32>(0, 1, 1)).rgb, probeTexel(o + vec3<i32>(1, 1, 1)).rgb, f.x);
   return mix(mix(x00, x10, f.y), mix(x01, x11, f.y), f.z);
 }
 // The ambient scale from the probe grid at P for normal N (mirrors sampleLightProbes).
@@ -813,6 +1129,72 @@ fn probeLight(P: vec3<f32>, N: vec3<f32>) -> vec3<f32> {
        + w.y * probeFace(select(3, 2, nn.y >= 0.0), i, f)
        + w.z * probeFace(select(5, 4, nn.z >= 0.0), i, f);
 }
+${hdr ? /* wgsl */ `
+// --- The probe volume (F3d-3; probeVolume.ts, whose sampleProbeVolume this mirrors) ---
+// One probe's slot of the volume texture: slots 0–8 its SH (slot 0's alpha its validity, slot 1's its sky
+// visibility), slots 9–40 its octahedral depths, two texels each.
+fn volumeSlot(slot: i32, i: vec3<i32>) -> vec4<f32> {
+  return probeTexel(i + vec3<i32>(slot * i32(frame.probeCount.x + 0.5), 0, 0));
+}
+fn volumeOctTexel(d: vec3<f32>) -> i32 {
+  var e = d.xz / (abs(d.x) + abs(d.y) + abs(d.z));
+  if (d.y < 0.0) { e = (vec2<f32>(1.0) - abs(e.yx)) * select(vec2<f32>(-1.0), vec2<f32>(1.0), e >= vec2<f32>(0.0)); }
+  let uv = e * 0.5 + vec2<f32>(0.5);
+  let x = min(i32(uv.x * ${PROBE_DEPTH_SIDE}.0), ${PROBE_DEPTH_SIDE - 1});
+  let y = min(i32(uv.y * ${PROBE_DEPTH_SIDE}.0), ${PROBE_DEPTH_SIDE - 1});
+  return y * ${PROBE_DEPTH_SIDE} + x;
+}
+// The irradiance (over π) and sky visibility the volume gives P with normal N: the eight probes round it,
+// weighed trilinearly, by a wrapped cosine toward each, and by Chebyshev's bound on each seeing P (DDGI).
+// w < 0 when no probe is valid or sees it.
+fn probeVolumeAt(P: vec3<f32>, N: vec3<f32>) -> vec4<f32> {
+  let n = frame.probeCount.xyz;
+  let spacing = 1.0 / max(frame.probeScale.xyz, vec3<f32>(1e-6));
+  let Pb = P + N * (${PROBE_NORMAL_BIAS} * min(spacing.x, min(spacing.y, spacing.z)));
+  let g = clamp((Pb - frame.probeMin.xyz) * frame.probeScale.xyz, vec3<f32>(0.0), n - vec3<f32>(1.0));
+  let i0 = min(vec3<i32>(floor(g)), vec3<i32>(n + vec3<f32>(0.5)) - vec3<i32>(2));
+  let f = g - vec3<f32>(i0);
+  var sum = vec3<f32>(0.0);
+  var vis = 0.0;
+  var wsum = 0.0;
+  for (var c = 0; c < 8; c = c + 1) {
+    let o = vec3<i32>(c & 1, (c >> 1) & 1, (c >> 2) & 1);
+    let i = i0 + o;
+    let s0 = volumeSlot(0, i);
+    if (s0.w < 0.5) { continue; }
+    let tri = select(vec3<f32>(1.0) - f, f, o == vec3<i32>(1));
+    let at = frame.probeMin.xyz + vec3<f32>(i) * spacing;
+    let to = at - P;
+    let wrap = (dot(to, N) / max(length(to), 1e-6) + 1.0) * 0.5;
+    var w = wrap * wrap + 0.2;
+    let off = Pb - at;
+    let dist = length(off);
+    if (dist > 1e-4) {
+      let k = volumeOctTexel(off / dist);
+      let pair = volumeSlot(${PROBE_SH} + k / 2, i);
+      let m = select(pair.xy, pair.zw, (k & 1) == 1);
+      if (dist > m.x) {
+        let variance = max(m.y - m.x * m.x, 1e-4);
+        let cheb = variance / (variance + (dist - m.x) * (dist - m.x));
+        w = w * cheb * cheb * cheb;
+      }
+    }
+    w = w * tri.x * tri.y * tri.z;
+    if (w <= 1e-6) { continue; }
+    let s1 = volumeSlot(1, i);
+    let e = s0.xyz * 0.282095
+      + (s1.xyz * N.y + volumeSlot(2, i).xyz * N.z + volumeSlot(3, i).xyz * N.x) * 0.488603
+      + (volumeSlot(4, i).xyz * (N.x * N.y) + volumeSlot(5, i).xyz * (N.y * N.z) + volumeSlot(7, i).xyz * (N.x * N.z)) * 1.092548
+      + volumeSlot(6, i).xyz * (0.315392 * (3.0 * N.z * N.z - 1.0))
+      + volumeSlot(8, i).xyz * (0.546274 * (N.x * N.x - N.y * N.y));
+    sum = sum + max(e, vec3<f32>(0.0)) * w;
+    vis = vis + s1.w * w;
+    wsum = wsum + w;
+  }
+  if (wsum <= 1e-6) { return vec4<f32>(0.0, 0.0, 0.0, -1.0); }
+  return vec4<f32>(sum / wsum, vis / wsum);
+}
+` : ""}
 
 
 // --- Layers and relief (HALO_INFINITE_STYLE_ROADMAP.md I4; materialLayers.ts) ---
@@ -884,7 +1266,7 @@ fn anisoD(rough: f32, aniso: f32, toh: f32, boh: f32, ndh: f32) -> f32 {
   return a2 * b2 * b2 / 3.14159265;
 }
 // This fragment's anisotropy frame (set in fs, read by lightTerm).
-var<private> aniso: f32;${hdr ? "\n// The multiple scattering a light's specular adds back (F1c; set in fs, read by lightTerm).\nvar<private> eComp: vec3<f32>;" : ""}
+var<private> aniso: f32;${hdr ? "\n// The multiple scattering a light's specular adds back (F1c; set in fs, read by lightTerm).\nvar<private> eComp: vec3<f32>;\n// What the sheen leaves the base beneath (F1d; set in fs, read by lightTerm).\nvar<private> sheenScale: f32 = 1.0;\n// The diffuse light the lights gave (F1d-2; set by lightTerm, read where the frame splits it for scattering).\nvar<private> diffuseLit: vec3<f32>;\n// The diffuse's whole share, before a thin surface's transmission takes its part (F1d-2).\nvar<private> kdmFull: f32;" : ""}
 var<private> aT: vec3<f32>;
 var<private> aB: vec3<f32>;
 // The clearcoat's normal and N·V (P1a): the geometric normal, which the coat lies over the bumps with.
@@ -901,7 +1283,9 @@ fn coatTerm(N: vec3<f32>, ndv: f32, Ld: vec3<f32>, H: vec3<f32>, vdh: f32) -> ve
   let D = ac2 / (3.14159265 * dd * dd + 1e-7);
   let G = (ndv / (ndv * (1.0 - kc) + kc)) * (ndl / (ndl * (1.0 - kc) + kc));
   let fc = ${CLEARCOAT_F0} + (1.0 - ${CLEARCOAT_F0}) * pow(1.0 - vdh, 5.0);
-  return vec2<f32>(u.layer0.x * fc * (D * G) / (4.0 * ndl * ndv + 1e-4) * ndl${hdr ? " * 3.14159265" : ""}, u.layer0.x * fc);
+  // The AAA tier's coat takes Kelemen's visibility, 1/(4·(V·H)²), as Filament's does (F1c): cheap, and right for a
+  // smooth layer; the other tiers keep the Schlick-Smith term the software path mirrors.
+  return vec2<f32>(u.layer0.x * fc * ${hdr ? "D * 0.25 / max(vdh * vdh, 1e-4)" : "(D * G) / (4.0 * ndl * ndv + 1e-4)"} * ndl${hdr ? " * 3.14159265" : ""}, u.layer0.x * fc);
 }
 // The environment's reflection along R from P, blurred toward its average by
 // roughness: inside a reflection probe's box (the smallest first), the room
@@ -986,11 +1370,29 @@ ${hdr ? "  // An area light (F2e-2): its rectangle, disk or tube integrated with
     if (lgt.d0.w > 1.5) {
       let ct = clamp((-dot(Ld, lgt.d3.xyz) - lgt.d2.y) / (lgt.d2.z - lgt.d2.y), 0.0, 1.0);
       atten = atten * ct * ct * (3.0 - 2.0 * ct);
-    }
+    }${hdr ? "\n    // An IES profile (F9d): the fixture's measured distribution about its axis.\n    if (lgt.d4.w > -0.5) { atten = atten * iesFactor(u32(lgt.d4.w + 0.5), lgt.d3.xyz, -Ld); }" : ""}
   } else {
     Ld = normalize(lgt.d0.xyz);
   }
-  let ndlL = max(0.0, dot(N, Ld));
+  let ndlL = max(0.0, dot(N, Ld));${hdr ? `
+  // Character shading (F7c): its own lobes, under the light's falloff and shadow as any surface's.
+  if (charKind() > 0) {
+    if (atten <= 0.0) { return vec3<f32>(0.0); }
+    var occlC = 1.0;
+    if (lgt.d0.w < 0.5) { occlC = sf; }
+    else if (lgt.d2.w >= 0.0 && frame.localShadow.x > 0.5) { occlC = localShadow(i32(lgt.d2.w + 0.5), lgt, P, abs(dot(N, Ld))); }
+    return charLight(Ld, N, V, ndv, sqrt(sqrt(a2)), f0, kdm, albedo) * toLinear(lgt.d1.rgb) * (lgt.d1.w * atten * occlC);
+  }
+  // A thin surface lit from behind (F1d-2): what comes through, a diffuse of its own.
+  if (u.dt0.w > 0.0 && atten > 0.0 && dot(N, Ld) < 0.0) {
+    let back = -dot(N, Ld);
+    var occlB = 1.0;
+    if (lgt.d0.w < 0.5) { occlB = sf; }
+    else if (lgt.d2.w >= 0.0 && frame.localShadow.x > 0.5) { occlB = localShadow(i32(lgt.d2.w + 0.5), lgt, P, back); }
+    let through = u.dt0.w * u.dt0.rgb * albedo * kdmFull * toLinear(lgt.d1.rgb) * (lgt.d1.w * atten * back * occlB);
+    diffuseLit = diffuseLit + through;
+    return through;
+  }` : ""}
   if (ndlL <= 0.0 || atten <= 0.0) { return vec3<f32>(0.0); }
   let Hl = normalize(Ld + V);
   let ndhL = max(0.0, dot(N, Hl));
@@ -1007,7 +1409,7 @@ ${hdr
   if (lgt.d0.w < 0.5) { occl = sf; }
   else if (lgt.d2.w >= 0.0 && frame.localShadow.x > 0.5) { occl = localShadow(i32(lgt.d2.w + 0.5), lgt, P, ndlL); }
   let w = lgt.d1.w * atten * ndlL * occl;
-  let lit = (kdm * (vec3<f32>(1.0) - FL) * albedo + FL * specL${hdr ? " * eComp" : ""}) * toLinear(lgt.d1.rgb) * w;
+  let lit = (kdm * (vec3<f32>(1.0) - FL) * albedo + FL * specL${hdr ? " * eComp" : ""}) * toLinear(lgt.d1.rgb) * w${hdr ? " * sheenScale + sheenLobe(ndlL, ndv, ndhL) * toLinear(lgt.d1.rgb) * w" : ""};${hdr ? "\n  diffuseLit = diffuseLit + kdm * (vec3<f32>(1.0) - FL) * albedo * toLinear(lgt.d1.rgb) * w * sheenScale;" : ""}
   if (u.layer0.x > 0.0) {
     // The clearcoat's own highlight, over a base its Fresnel dims (I4).
     let c = coatTerm(coatN, coatNdv, Ld, Hl, vdhL);
@@ -1025,7 +1427,15 @@ fn envAverage() -> vec3<f32> {
 // stays in the space it was authored in.
 fn toLinear(c: vec3<f32>) -> vec3<f32> {
 ${hdr ? "  let v = max(c, vec3<f32>(0.0));\n  return select(pow((v + vec3<f32>(0.055)) / 1.055, vec3<f32>(2.4)), v / 12.92, v <= vec3<f32>(0.04045));" : "  return c;"}
-}
+}${hdr ? `
+// An HDR directional light map's irradiance at the shading normal N (F3d; mirrors directionalIrradiance in
+// hdrLightmap.ts): the baked irradiance e rebalanced by a half-Lambert about its dominant direction d, exact at
+// the normal it was baked for (the interpolated vertex normal, on the side N faces).
+fn lightmapIrradiance(e: vec3<f32>, d: vec3<f32>, N: vec3<f32>, vn: vec3<f32>) -> vec3<f32> {
+  var ng = normalize(vn);
+  if (dot(ng, N) < 0.0) { ng = -ng; }
+  return e * (0.5 + 0.5 * dot(N, d)) / max(${LIGHTMAP_DIRECTION_FLOOR}, 0.5 + 0.5 * dot(ng, d));
+}` : ""}
 // ACES filmic tone map (Narkowicz), per channel, mirroring acesFilmic in
 // meshRasterizer.ts. Applied only to the Modern-tier PBR radiance.
 fn aces(x: f32) -> f32 {
@@ -1078,7 +1488,125 @@ fn windOffsetIn(w: vec4<f32>, p: vec2<f32>, sway: f32) -> vec2<f32> {
   return w.xy * (sway * s * g);
 }
 fn windOffset(p: vec2<f32>, sway: f32) -> vec2<f32> { return windOffsetIn(u.wind0, p, sway); }
-@vertex
+${hdr ? `// A plant drawn a copy at a time (F6b; foliageInstanceMesh) stores its flexibility, negated, as its sway: it bends
+// in the world, by its height above its copy's root (foliageSway), with three motions about pivots taken from the
+// copy's own frame: the trunk about its root, a branch about the trunk by how far out it reaches (each in its own
+// phase), and a leaf's quick flutter. Anything else bends as it always has. The result is in the mesh's space.
+fn foliageSwayOf(h: f32, flex: f32) -> f32 {
+  if (flex <= 0.0 || h <= 0.0) { return 0.0; }
+  return flex * 0.25 * h * h / (h + 1.0);
+}
+fn bendIn(w: vec4<f32>, p: vec3<f32>, sway: f32, m: mat4x4<f32>) -> vec3<f32> {
+  if (sway >= 0.0) {
+    let b = windOffsetIn(w, p.xz, sway);
+    return vec3<f32>(b.x, 0.0, b.y);
+  }
+  if (w.x == 0.0 && w.y == 0.0) { return vec3<f32>(0.0); }
+  let flex = -sway;
+  let world = (m * vec4<f32>(p, 1.0)).xyz;
+  let root = m[3].xyz;
+  let trunk = windOffsetIn(w, root.xz, foliageSwayOf(world.y - root.y, flex));
+  let reach = length(world.xz - root.xz);
+  let branch = w.xy * (0.12 * flex * reach * sin(6.283185307179586 * 5.0 * w.z + dot(p, vec3<f32>(1.7, 0.9, 1.3))));
+  let leaf = 0.02 * flex * length(w.xy) * min(reach, 1.0) * sin(6.283185307179586 * 31.0 * w.z + dot(world, vec3<f32>(13.1, 7.3, 11.7)));
+  let wb = vec3<f32>(trunk.x + branch.x, leaf, trunk.y + branch.y);
+  // Into the copy's space: a placed copy's model is a rotation and a uniform scale.
+  return vec3<f32>(dot(m[0].xyz, wb), dot(m[1].xyz, wb), dot(m[2].xyz, wb)) / max(dot(m[0].xyz, m[0].xyz), 1e-12);
+}
+// A copy fading between LOD levels (F6b): the dither it keeps, by interleaved gradient noise. A fade above 0 keeps the
+// pixels under it (the level coming in), below 0 those at or over its size (the level going out): between them, each
+// pixel once.
+fn fadeHides(fade: f32, p: vec2<f32>) -> bool {
+  let d = fract(52.9829189 * fract(0.06711056 * p.x + 0.00583715 * p.y));
+  return select((d < -fade), (d >= fade), fade > 0.0);
+}
+// An octahedral impostor (F6b; bakeOctahedralImpostor): its quad, around the bake's centre, turned to face the eye
+// (keeping the world's up), showing the view taken from the eye's side of the copy: the cell of the octahedral map
+// (octahedralUv) its direction, in the copy's own space, falls in. Lit as a canopy: from above, leaning to the eye.
+struct Impostor { pos: vec3<f32>, uv: vec2<f32>, normal: vec3<f32> };
+fn impostorOf(position: vec3<f32>, uv: vec2<f32>, m: mat4x4<f32>) -> Impostor {
+  let r = u.cull0.z;
+  let n = u.cull0.y;
+  let offset = vec2<f32>((uv.x - 0.5) * 2.0 * r, (0.5 - uv.y) * 2.0 * r);
+  let centre = position - vec3<f32>(offset, 0.0);
+  let s2 = max(dot(m[0].xyz, m[0].xyz), 1e-12);
+  let c = (m * vec4<f32>(centre, 1.0)).xyz;
+  let v = u.fogCam.xyz - c;
+  let toEye = normalize(v);
+  var right = cross(vec3<f32>(0.0, 1.0, 0.0), toEye);
+  if (dot(right, right) < 1e-8) { right = vec3<f32>(1.0, 0.0, 0.0); }
+  right = normalize(right);
+  let up = cross(toEye, right);
+  let w = c + (right * offset.x + up * offset.y) * sqrt(s2) - m[3].xyz;
+  var out: Impostor;
+  out.pos = vec3<f32>(dot(m[0].xyz, w), dot(m[1].xyz, w), dot(m[2].xyz, w)) / s2;
+  // The eye's direction in the copy's space, on the octahedral map (+y its top).
+  let d = normalize(vec3<f32>(dot(m[0].xyz, v), dot(m[1].xyz, v), dot(m[2].xyz, v)));
+  var p = d.xz / (abs(d.x) + abs(d.y) + abs(d.z));
+  if (d.y < 0.0) { p = (vec2<f32>(1.0) - abs(p.yx)) * select(vec2<f32>(-1.0), vec2<f32>(1.0), p >= vec2<f32>(0.0)); }
+  let cell = clamp(floor((p * 0.5 + 0.5) * n), vec2<f32>(0.0), vec2<f32>(n - 1.0));
+  out.uv = (cell + uv) / n;
+  out.normal = normalize(vec3<f32>(0.0, 1.0, 0.0) + 0.4 * toEye);
+  return out;
+}
+// --- Terrain at scale (AAA_FIDELITY_ROADMAP.md F6c; gpuTerrain.ts) ---
+// A height sample, and the heights' bilinear blend at a point (metres from the terrain's corner): the local height.
+fn terrainSample(i: vec2<i32>) -> f32 {
+  let t = textureLoad(heightTex, i, 0);
+  return (t.r * 65280.0 + t.g * 255.0) / 65535.0;
+}
+fn terrainHeight(p: vec2<f32>) -> f32 {
+  let cells = u.terrain2.x;
+  let q = clamp(p / u.terrain1.xy, vec2<f32>(0.0), vec2<f32>(1.0)) * cells;
+  let i = min(vec2<i32>(floor(q)), vec2<i32>(i32(cells) - 1));
+  let f = q - vec2<f32>(i);
+  let a = mix(terrainSample(i), terrainSample(i + vec2<i32>(1, 0)), f.x);
+  let b = mix(terrainSample(i + vec2<i32>(0, 1)), terrainSample(i + vec2<i32>(1, 1)), f.x);
+  return u.terrain1.z + mix(a, b, f.y) * u.terrain1.w;
+}
+// A patch vertex of a node (its model scales the unit patch to the node's square and height range, the terrain's
+// model being its origin alone): CDLOD's morph onto the coarser grid by the vertex's distance from the eye in the
+// ground plane, the height read there, the normal from the heights at the node's spacing, and the page the node
+// shades from (its level's, which its window holds; past the eye's pages, the whole terrain's) in the atlas.
+struct TerrainVertex { pos: vec3<f32>, normal: vec3<f32>, uv: vec2<f32>, morph: f32, level: f32 };
+fn terrainOf(position: vec3<f32>, m: mat4x4<f32>) -> TerrainVertex {
+  var out: TerrainVertex;
+  let s = max(m[0].x, 1e-6);
+  let r = max(m[1].y, 1e-6);
+  let corner = m[3].xyz - u.terrain3.xyz;
+  let n = ${TERRAIN_PATCH}.0;
+  let g = round(position.xz * n);
+  let d = length(corner.xz + g / n * s - u.terrain4.xy);
+  let range = u.terrain4.z * s;
+  let morph = clamp((d - u.terrain4.w * range) / ((1.0 - u.terrain4.w) * range), 0.0, 1.0);
+  let gm = g - fract(g * 0.5) * 2.0 * morph;
+  let local = clamp(corner.xz + gm / n * s, vec2<f32>(0.0), u.terrain1.xy);
+  let h = terrainHeight(local);
+  let e = s / n;
+  let hl = terrainHeight(local - vec2<f32>(e, 0.0));
+  let hr = terrainHeight(local + vec2<f32>(e, 0.0));
+  let hd = terrainHeight(local - vec2<f32>(0.0, e));
+  let hu = terrainHeight(local + vec2<f32>(0.0, e));
+  out.normal = normalize(vec3<f32>(hl - hr, 2.0 * e, hd - hu));
+  out.pos = vec3<f32>((local.x - corner.x) / s, (h - corner.y) / r, (local.y - corner.z) / s);
+  let level = clamp(round(log2(max(s / u.terrain3.w, 1.0))), 0.0, 30.0);
+  var slot = u.terrain2.w;
+  var page = vec2<f32>(0.0);
+  var side = max(u.terrain1.x, u.terrain1.y);
+  if (level < u.terrain2.w) {
+    slot = level;
+    let k = min(u32(level), 7u);
+    let pv = u.terrainPages[k / 2u];
+    page = select(pv.xy, pv.zw, (k & 1u) == 1u);
+    side = u.terrain2.z * exp2(level);
+  }
+  let pu = clamp((local - page) / side, vec2<f32>(0.0), vec2<f32>(1.0));
+  out.uv = vec2<f32>((slot + pu.x) / (u.terrain2.w + 1.0), 1.0 - pu.y);
+  out.morph = morph;
+  out.level = level;
+  return out;
+}
+` : ""}@vertex
 fn vs(
   @location(0) position: vec3<f32>,
   @location(1) normal: vec3<f32>,
@@ -1093,11 +1621,10 @@ fn vs(
 }
 fn vertexOf(position: vec3<f32>, normal: vec3<f32>, uv: vec2<f32>, uv2: vec2<f32>, bw: f32, sway: f32, tangent: vec4<f32>, instance: u32) -> VSOut {
   var out: VSOut;
-  let t = xf[instance];
+  let t = xf[u32(u.cull0.x) + instance];
   var pos = position;
-  let bend = windOffset(position.xz, sway);
-  pos = vec3<f32>(pos.x + bend.x, pos.y, pos.z + bend.y);
-  out.pos = t.mvp * vec4<f32>(pos, 1.0);
+${hdr ? "  pos = pos + bendIn(u.wind0, position, sway, t.model);\n  // Its LOD crossfade (F6b): the cull leaves it in the model's first column's w, 0 in an affine model.\n  out.fade = t.model[0].w;\n  // An octahedral impostor's quad, turned to the eye (F6b).\n  var imp: Impostor;\n  if (u.cull0.y > 0.5) {\n    imp = impostorOf(position, uv, t.model);\n    pos = imp.pos;\n  }\n  // A GPU terrain's node (F6c): the heights at its morphed vertex; the nearest nodes displaced by the relief, gone\n  // by the end of their morph so they still meet their neighbours.\n  var ter: TerrainVertex;\n  if (u.terrain1.w > 0.0) {\n    ter = terrainOf(position, t.model);\n    pos = ter.pos;\n    if (ter.level < 0.5 && u.layer0.w > 0.0) {\n      let dims = vec2<f32>(textureDimensions(occTex));\n      let texel = vec2<i32>(clamp(vec2<f32>(ter.uv.x, 1.0 - ter.uv.y) * dims, vec2<f32>(0.0), dims - 1.0));\n      pos.y = pos.y - (1.0 - textureLoad(occTex, texel, 0).g) * u.layer0.w * (1.0 - ter.morph) / max(t.model[1].y, 1e-6);\n    }\n  }" : "  let bend = windOffset(position.xz, sway);\n  pos = vec3<f32>(pos.x + bend.x, pos.y, pos.z + bend.y);"}
+${g.vertex}  out.pos = t.mvp * vec4<f32>(pos, 1.0);
   out.normal = t.nrm * normal;
   out.uv = uv;
   out.uv2 = uv2;
@@ -1109,7 +1636,21 @@ fn vertexOf(position: vec3<f32>, normal: vec3<f32>, uv: vec2<f32>, uv2: vec2<f32
 ${hdr ? `  // A tangent lies in the surface, so it moves with the model's own 3×3; a mirroring one flips the bitangent.
   let m3 = mat3x3<f32>(t.model[0].xyz, t.model[1].xyz, t.model[2].xyz);
   out.tangent = vec4<f32>(normalize(m3 * tangent.xyz + vec3<f32>(1e-12, 0.0, 0.0)), tangent.w * select(1.0, -1.0, determinant(m3) < 0.0));
+  if (u.cull0.y > 0.5) {
+    out.uv = imp.uv;
+    out.normal = imp.normal;
+    out.tangent = vec4<f32>(0.0);
+  }
   out.frameNormal = normalize(out.normal);
+  // The terrain's normal (its model is its origin alone), its page, and how much relief parallax adds (none where
+  // the vertex displaced it). Its tangent is the ground's +x, as a planar terrain's derivative frame has it.
+  if (u.terrain1.w > 0.0) {
+    out.normal = ter.normal;
+    out.frameNormal = ter.normal;
+    out.uv = ter.uv;
+    out.bw = select(1.0, ter.morph, ter.level < 0.5);
+    out.tangent = vec4<f32>(normalize(vec3<f32>(1.0, 0.0, 0.0) - ter.normal * ter.normal.x), 1.0);
+  }
 ` : ""}  return out;
 }
 
@@ -1124,6 +1665,16 @@ fn triMap(t: texture_2d<f32>, uv: vec2<f32>, normal: vec3<f32>, objPos: vec3<f32
   w = w / max(w.x + w.y + w.z, 1e-30);
   let p = objPos * (1.0 / u.terrain0.x);
   return textureSample(t, samp, vec2<f32>(p.z, 1.0 - p.y)) * w.x + textureSample(t, samp, vec2<f32>(p.x, 1.0 - p.z)) * w.y + textureSample(t, samp, vec2<f32>(p.x, 1.0 - p.y)) * w.z;
+}
+// triMap on one layer of an array (the blend surface's, F1e).
+fn triMapLayer(t: texture_2d_array<f32>, layer: i32, uv: vec2<f32>, normal: vec3<f32>, objPos: vec3<f32>) -> vec4<f32> {
+  if (u.terrain0.x <= 0.0) { return textureSample(t, samp, uv, layer); }
+  let n = normalize(normal);
+  let a = n * n;
+  var w = a * a;
+  w = w / max(w.x + w.y + w.z, 1e-30);
+  let p = objPos * (1.0 / u.terrain0.x);
+  return textureSample(t, samp, vec2<f32>(p.z, 1.0 - p.y), layer) * w.x + textureSample(t, samp, vec2<f32>(p.x, 1.0 - p.z), layer) * w.y + textureSample(t, samp, vec2<f32>(p.x, 1.0 - p.y), layer) * w.z;
 }
 // --- Landscape materials (EDITOR_PRO_ROADMAP.md P2b): farTileBlend and macroGain, term for term ---
 // The base map tiled ${1 / FAR_TILE_SCALE}× larger, by the raw UVs or triplanar projection.
@@ -1194,7 +1745,8 @@ fn refractOffset(N: vec3<f32>, P: vec3<f32>) -> vec2<f32> {
     w = vec2<f32>(2.0 * gNoise1(vec3<f32>(P.x * f, qy, P.z * f)) - 1.0, 2.0 * gNoise1(vec3<f32>(P.x * f + 17.0, qy + 31.0, P.z * f + 47.0)) - 1.0) * warp;
   }
   let k = ${REFRACTION_SCALE.toFixed(4)} * u.refract1.w;
-  return vec2<f32>(u.refract0.x * dot(N, u.refract1.xyz) + w.x, -u.refract0.x * dot(N, u.refract2.xyz) + w.y) * k;
+  let bend = select(u.refract0.x, refractBend, refractBend >= 0.0);
+  return vec2<f32>(bend * dot(N, u.refract1.xyz) + w.x, -bend * dot(N, u.refract2.xyz) + w.y) * k;
 }
 // What a refracting fragment at screen point frag, depth z, sees (rgb, a = 1
 // when it sees anything) — refractedPixel: the pushed pixel when the opaque
@@ -1230,7 +1782,7 @@ ${hdr
 
 @fragment
 fn fs(in: VSOut) -> @location(0) vec4<f32> {
-${hdr ? "  shadowPixel = in.pos.xy;\n" : ""}  // The surface's screen derivatives, for the UV gradients parallax and
+${hdr ? "  // A copy fading between its LOD levels (F6b) leaves the other level's pixels.\n  if (in.fade != 0.0 && fadeHides(in.fade, in.pos.xy)) { discard; }\n  // A GPU terrain's cut cells (F6c): its page's occlusion alpha.\n  if (u.terrain1.w > 0.0 && u.terrain2.y > 0.5 && textureSample(occTex, samp, vec2<f32>(in.uv.x, 1.0 - in.uv.y)).a < 0.5) { discard; }\n  shadowPixel = in.pos.xy;\n  // Overdraw (F10a): every fragment shaded counts one, added up in red.\n  if (frame.debug.x > 10.5 && frame.debug.x < 11.5) { return vec4<f32>(1.0, 0.0, 0.0, 0.0); }\n" : ""}  // The surface's screen derivatives, for the UV gradients parallax and
   // anisotropy need (I4) — taken here, in uniform control flow.
   let dp1 = dpdx(in.worldPos);
   let dp2 = dpdy(in.worldPos);
@@ -1238,14 +1790,28 @@ ${hdr ? "  shadowPixel = in.pos.xy;\n" : ""}  // The surface's screen derivative
   let duv2 = dpdy(in.uv);
   // Every map is sampled at puv: the interpolated UVs, or where the view ray
   // meets the relief (parallax occlusion, I4).
-  var puv = in.uv;
+  var puv = ${hdr ? "khrUv(in.uv)" : "in.uv"};
   if (u.pbr.z > 0.5 && u.layer0.w > 0.0) {
     var pn = normalize(in.normal);
     if (dot(pn, u.view.xyz) < 0.0) { pn = -pn; }
     let pg = uvGrads(pn, dp1, dp2, duv1, duv2);
     let pv = max(${PARALLAX_MIN_NDV}, dot(pn, u.view.xyz));
-    puv = parallaxUv(in.uv, -vec2<f32>(dot(pg.gu, u.view.xyz), dot(pg.gv, u.view.xyz)) / pv, u.layer0.w);
-  }
+    puv = parallaxUv(in.uv, -vec2<f32>(dot(pg.gu, u.view.xyz), dot(pg.gv, u.view.xyz)) / pv, u.layer0.w${hdr ? " * select(1.0, in.bw, u.terrain1.w > 0.0)" : ""});
+  }${hdr ? `
+  // An eye (F7c): its UVs centred on the pupil; inside the iris the view refracts through the cornea and
+  // lands on the iris behind it, which is where the iris is sampled.
+  if (u.pbr.z > 0.5 && charKind() == 2) {
+    var en = normalize(in.normal);
+    if (dot(en, u.view.xyz) < 0.0) { en = -en; }
+    let eg = uvGrads(en, dp1, dp2, duv1, duv2);
+    charT = eg.gu / max(length(eg.gu), 1e-12);
+    charB = eg.gv / max(length(eg.gv), 1e-12);
+    charFwd = normalize((u.model * vec4<f32>(0.0, 0.0, 1.0, 0.0)).xyz);
+    charR = length(puv - vec2<f32>(0.5));
+    charMask = charIrisMask(charR);
+    puv = puv + charIrisParallax(u.view.xyz, en) * charMask;
+    charOff = (puv.x - 0.5) * charT + (puv.y - 0.5) * charB;
+  }` : ""}
   // glTF's V origin is top-left, so flip; the sampler wraps and (per era) filters.
   let uv = vec2<f32>(puv.x, 1.0 - puv.y);
   wUv = puv;
@@ -1272,8 +1838,17 @@ ${hdr ? "  shadowPixel = in.pos.xy;\n" : ""}  // The surface's screen derivative
     colour = colour * texel;
   }
   // Macro variation (P2b): broad lighter and darker patches over the whole surface.
-  if (u.terrain0.z > 0.0) { colour = vec4<f32>(colour.rgb * macroGain(in.objPos), colour.a); }
-${g.base}
+  if (u.terrain0.z > 0.0) { colour = vec4<f32>(colour.rgb * macroGain(in.objPos), colour.a); }${hdr ? `
+  // The limbus's dark ring round the iris (F7c).
+  if (u.pbr.z > 0.5 && charKind() == 2) { colour = vec4<f32>(colour.rgb * charLimbus(charR), colour.a); }` : ""}
+${g.base}${g.pdo ? `
+  // A pixel depth offset (F1e): the prepass wrote the pushed depth; here the surface keeps only the pixels
+  // where that is what the prepass left, so what it went behind shows.
+  if (gPdo > 0.0 && frame.depthTerms.z > 0.5) {
+    let dEye = frame.depthTerms.y / (in.pos.z + frame.depthTerms.x);
+    let pushed = clamp(frame.depthTerms.y / (dEye + gPdo) - frame.depthTerms.x, 0.0, 1.0);
+    if (pushed > textureLoad(sceneDepth, vec2<i32>(in.pos.xy), 0) + 1e-6) { discard; }
+  }` : ""}
   // The CPU path skips a texel whose combined alpha is below 1/255 rather than
   // blending it, so this is a discard and not an alpha-blend state.
   // Soft edges (EP6b): a see-through surface fades out as it meets the opaque
@@ -1284,7 +1859,7 @@ ${g.base}
   }
   if (colour.a * 255.0 < 1.0) { discard; }
   // A cut-out surface (EP6) drops what's below its threshold.
-  if (u.pbr.w > 0.5 && u.pbr.w < 1.5 && colour.a < u.view.w) { discard; }
+  if (u.pbr.w > 0.5 && u.pbr.w < 1.5 && ${hdr ? "select((colour.a < u.view.w), !charDitherKeeps(colour.a, in.pos.xy), u.char1.x > 0.5 && charKind() == 3)" : "colour.a < u.view.w"}) { discard; }
 
   if (u.pbr.z > 0.5) {
     // Active Camo (H11): screen-door transparency, as the rasteriser drops pixels.
@@ -1303,7 +1878,21 @@ ${g.base}
     // variant (the AAA tier) departs from it for the AAA BRDF (F1c, brdf.ts).
     var N = normalize(sNrm);
     if (dot(N, u.view.xyz) < 0.0) { N = -N; } // two-sided: flip toward the viewer
-    N = waterNormal(N, in.worldPos);
+    N = waterNormal(N, in.worldPos);${hdr ? `
+    N = waterWaves(N, in.worldPos);
+    // Character shading (F7c): skin's pores tilt the normal; a hair card's strands run along V; a mouth
+    // darkens behind its opening.
+    if (charKind() == 1 && u.char1.y > 0.0) {
+      let mg = uvGrads(N, dp1, dp2, duv1, duv2);
+      let tilt = charMicroTilt(puv);
+      N = normalize(N + tilt.x * mg.gu / max(length(mg.gu), 1e-12) + tilt.y * mg.gv / max(length(mg.gv), 1e-12));
+    }
+    if (charKind() == 3) {
+      let hg = uvGrads(N, dp1, dp2, duv1, duv2);
+      let t0 = hg.gv - N * dot(hg.gv, N);
+      charT = select(normalize(cross(N, vec3<f32>(1.0, 0.0, 0.0)) + vec3<f32>(1e-6)), t0 / max(length(t0), 1e-12), length(t0) > 1e-12);
+    }
+    if (charKind() == 4) { charLit = charMouth(in.objPos); }` : ""}
     coatN = waterNormal(facingNormal(in.normal), in.worldPos);
     coatNdv = max(1e-4, dot(coatN, u.view.xyz));
     var metallic = u.pbr.x;
@@ -1317,7 +1906,7 @@ ${g.base}
     }
     // The blend surface's roughness, by the vertex weight (surface3.w < 0 keeps).
     // The blend surface (H4), its weight moved by the two surfaces' heights (B6).
-    let blendTexel = triMap(blendTex, uv, in.normal, in.objPos).rgb;
+    let blendTexel = triMapLayer(blendTex, 0, uv, in.normal, in.objPos).rgb;
     var bwt = in.bw;
     var bc = u.surface3.rgb;
     if (u.surface1.z > 0.5) {
@@ -1328,7 +1917,11 @@ ${g.base}
 ${g.pbr}
     rough = clamp(rough, 0.045, 1.0); // a perfectly-smooth NDF blows up
     var ao = 1.0;
-    if (u.texflags.z > 0.5) { ao = textureSample(occTex, samp, uv).r; }
+    if (u.texflags.z > 0.5) { ao = textureSample(occTex, samp, uv).r; }${hdr ? `
+    // The cornea's tear film is smooth (F7c); skin's cavities keep the specular out; a mouth's depth dims all.
+    if (charKind() == 2) { rough = mix(rough, ${CORNEA_ROUGHNESS}, charMask); }
+    if (charKind() == 1) { charSpec = 1.0 - u.char1.z * (1.0 - ao); }
+    ao = ao * charLit;` : ""}
     // Anisotropy (I4): the grain's tangent, U's gradient laid in the surface and
     // turned about N, and the bitangent across it (round without a gradient).
     aniso = 0.0;
@@ -1363,6 +1956,27 @@ ${hdr ? `    // Projected decals (F1f): the boxes round this point, laid over th
       N = dc.N;
       decalGlow = dc.glow;
     }
+    // Weather (F5e, weather.ts): wet, puddled and snowy where the sky reaches it (the HDR light map's sky
+    // visibility; open without one), on opaque and cut-out surfaces. Sampled whatever is bound (uniform control flow).
+    var wPuddle = 0.0;
+    var wSnowCover = 0.0;
+    let wSky = select(1.0, textureSample(lmTex, samp, vec2<f32>(in.uv2.x, 1.0 - in.uv2.y), 1).w, u.ssaoMeta.z > 1.5);
+    if (frame.weather1.w > 0.5 && u.pbr.w < 1.5) {
+      let ws = weatherSurface(in.worldPos, N, wSky, albedo, rough, metallic);
+      albedo = ws.albedo;
+      rough = max(ws.rough, 0.045);
+      metallic = ws.metallic;
+      N = ws.N;
+      wPuddle = ws.puddle;
+      wSnowCover = ws.snow;
+    }
+    // View modes (F10a): the albedo as it shades, and lighting only's white dielectric in its place.
+    let vmAlbedo = albedo;
+    let vmMetallic = metallic;
+    if (frame.debug.x > 6.5 && frame.debug.x < 7.5) {
+      albedo = vec3<f32>(1.0);
+      metallic = 0.0;
+    }
 ` : ""}
     let L = u.light.xyz;
     let V = u.view.xyz;
@@ -1384,23 +1998,62 @@ ${hdr
     let specD = D * smithVisibility(ndl, ndv, a2) * 3.14159265;`
   : `    let G = (ndv / (ndv * (1.0 - k) + k)) * (ndl / (ndl * (1.0 - k) + k));
     let specD = (D * G) / (4.0 * ndl * ndv + 1e-4);`}
-    let f0 = vec3<f32>(0.04) + (albedo - vec3<f32>(0.04)) * metallic;
+${hdr
+  ? `    // A dielectric's reflectance from its IOR and specular (F1d), and a thin film's over it.
+    var f0 = mix(u.spec0.rgb, albedo, metallic);
+    if (u.trans1.w > 0.0) { f0 = mix(f0, iridescenceF0(ndv, f0), u.trans1.w); }
+    // Water's reflectance where a puddle lies, a dielectric's where snow does (F5e).
+    f0 = mix(mix(f0, vec3<f32>(WATER_F0), wPuddle), vec3<f32>(0.04), wSnowCover);`
+  : "    let f0 = vec3<f32>(0.04) + (albedo - vec3<f32>(0.04)) * metallic;"}
     let F = f0 + (vec3<f32>(1.0) - f0) * fp;
 ${hdr
   ? `    // GTAO (F3c): its visibility joins the material's occlusion (diffuse and specular alike), and its
     // bent normal is where the sky's irradiance comes from.
     let gt = gtaoAt(in.pos.xy);
+    let matAo = ao;
     ao = ao * gtaoBounce(gt.w, dot(albedo, vec3<f32>(0.2126, 0.7152, 0.0722)));
+    // SSGI (F3e-2): the near field's own light where its rays met something, the far field's where they
+    // didn't. The rays' hits already hold the occlusion GTAO measures, so the diffuse then takes only the material's.
+    let ssgi = ssgiAt(in.pos.xy);
+    let aoD = select(ao, matAo, frame.cascadeSoft.w > 0.5 && u.pbr.w < 1.5);
     let skyN = select(N, gt.xyz, dot(gt.xyz, gt.xyz) > 0.25);
     let dfg = dfgAt(ndv, rough);
     eComp = energyCompensation(f0, dfg);
     let specE = specularEnergy(f0, dfg);
-    let specAo = specularOcclusion(ndv, ao, rough * rough);
+    // Specular occlusion (F3c, F1c): with GTAO's bent normal, the reflection's lobe against the open sky's cone
+    // (Jimenez), the material's own occlusion still taken by Lagarde's fit; without one, Lagarde's from the AO alone.
+    let hasBent = dot(gt.xyz, gt.xyz) > 0.25;
+    let soBent = min(specularOcclusion(ndv, matAo, rough * rough), bentSpecularOcclusion(gt.xyz, gt.w, reflect(-V, N), rough * rough));
+    var specAo = select(specularOcclusion(ndv, ao, rough * rough), soBent, hasBent) * charSpec;
+    // The sheen (F1d) takes what it reflects from the layer beneath.
+    sheenScale = 1.0 - max(u.sheen0.r, max(u.sheen0.g, u.sheen0.b)) * sheenE(ndv, u.sheen0.w);
+    // An HDR directional light map (F3d) lights the diffuse in place of the sky's irradiance, and its sky
+    // visibility occludes the environment's reflection. Both layers are sampled whatever is bound (uniform
+    // control flow); an 8-bit map's single layer stands in for the second.
+    let lmUv = vec2<f32>(in.uv2.x, 1.0 - in.uv2.y);
+    let lm0 = textureSample(lmTex, samp, lmUv, 0);
+    let lm1 = textureSample(lmTex, samp, lmUv, 1);
+    let lmHdr = u.ssaoMeta.z > 1.5;
+    // Baked diffuse light in place of the sky's: the HDR light map's, or, for a surface without a light map,
+    // the probe volume's (F3d-3), with its sky visibility.
+    var baked = lmHdr;
+    var bakedIrr = vec3<f32>(0.0);
+    if (lmHdr) {
+      bakedIrr = lightmapIrradiance(lm0.rgb, lm1.xyz, N, in.normal);
+      specAo = specAo * lm1.w;
+    } else if (u.ssaoMeta.z < 0.5 && frame.probeMin.w > 1.5) {
+      let pv = probeVolumeAt(in.worldPos, N);
+      if (pv.w >= 0.0) {
+        baked = true;
+        bakedIrr = pv.rgb;
+        specAo = specAo * pv.w;
+      }
+    }
     // What the environment's reflection takes, the material's reflectivity scaling it but never past all
     // the light (F11a): reflectivity over 1 (Beaver Creek's water is 1.3) mirrored more than came in at grazing.
     let specK = min(specE * reflectK, vec3<f32>(1.0));
 `
-  : ""}    let kdm = 1.0 - metallic;                  // metals have no diffuse
+  : ""}    let kdm = (1.0 - metallic)${hdr ? " * (1.0 - u.trans0.x)" : ""};                  // metals have no diffuse${hdr ? "; what is transmitted (F1d) neither" : ""}${hdr ? "\n    // What a thin surface lets through (F1d-2) it doesn't reflect diffusely.\n    let kdf = kdm * (1.0 - u.dt0.w);\n    kdmFull = kdm;\n    var ambDiffuse = vec3<f32>(0.0);" : ""}
     var emis = vec3<f32>(0.0);
     let ef = u.emissive.xyz;
     if (ef.r > 0.0 || ef.g > 0.0 || ef.b > 0.0) {
@@ -1409,15 +2062,15 @@ ${hdr
       emis = ef * es;
     }
 ${g.emis}
-    emis = toLinear(emis);${hdr ? "\n    emis = emis + decalGlow;" : ""}
+    emis = toLinear(emis)${hdr ? " * u.irid0.z" : ""};${hdr ? "\n    emis = emis + decalGlow;" : ""}
     // Ambient / image-based lighting, mirroring the software rasteriser: with an
     // environment, a diffuse irradiance along N + a specular reflection along R
     // blurred toward the average by roughness; without one, the flat ambient.
 ${reflect ? "    var envSpec = vec3<f32>(0.0);\n    var envSeen = vec3<f32>(0.0);\n" : ""}    var amb: vec3<f32>;
     var coatV = 0.0;
     if (u.envSky.w > 0.5) {
-      ${hdr ? `// The irradiance over the hemisphere (F3a), not the radiance along N.
-      let irr = shIrradiance(skyN);` : "let irr = envColorDir(N);"}
+      ${hdr ? `// The irradiance over the hemisphere (F3a), not the radiance along N; or the light map's (F3d).
+      let irr = select(shIrradiance(skyN), bakedIrr, baked);` : "let irr = envColorDir(N);"}
       // Brushed metal (I4) reflects about a normal bent across its grain.
       var Rn = N;
       if (aniso != 0.0) {
@@ -1429,7 +2082,7 @@ ${reflect ? "    var envSpec = vec3<f32>(0.0);\n    var envSeen = vec3<f32>(0.0)
       if (aniso != 0.0) { rdv = dot(Rn, V); }
       let pref = envReflect(in.worldPos, 2.0 * rdv * Rn - V, rough);
 ${hdr
-  ? "      // What the environment's reflection takes, the diffuse beneath it no longer receives.\n      amb = irr * albedo * kdm * (vec3<f32>(1.0) - specE) * ao + pref * specK * specAo;\n"
+  ? "      // What the environment's reflection takes, the diffuse beneath it no longer receives.\n      amb = (irr * (1.0 - ssgi.a) + ssgi.rgb) * albedo * kdf * (vec3<f32>(1.0) - specE) * aoD + pref * specK * specAo;\n      // The sheen over it (F1d), lit by the sky's irradiance.\n      amb = amb * sheenScale + irr * u.sheen0.rgb * sheenE(ndv, u.sheen0.w) * aoD;\n      // Its diffuse half (F1d-2), and the sky from behind through a thin surface.\n      ambDiffuse = (irr * (1.0 - ssgi.a) + ssgi.rgb) * albedo * kdf * (vec3<f32>(1.0) - specE) * aoD * sheenScale;\n      if (u.dt0.w > 0.0) {\n        let behindSky = shIrradiance(-skyN) * u.dt0.w * u.dt0.rgb * albedo * kdm * aoD;\n        amb = amb + behindSky;\n        ambDiffuse = ambDiffuse + behindSky;\n      }\n"
   : "      amb = (irr * albedo * kdm + pref * f0 * reflectK) * ao;\n"}${reflect ? `      envSpec = pref * ${hdr ? "specK * specAo" : "f0 * reflectK * ao"};\n      envSeen = pref;\n` : ""}      // The clearcoat (I4) reflects the room sharply about its own normal, and
       // what it reflects the base beneath no longer receives.
       if (u.layer0.x > 0.0) {
@@ -1438,25 +2091,29 @@ ${hdr
         amb = amb * (1.0 - coatV) + coatV * prefC * reflectK * ao;
 ${reflect ? "        envSpec = envSpec * (1.0 - coatV) + coatV * prefC * reflectK * ao;\n" : ""}      }
     } else {
-      amb = toLinear(vec3<f32>(u.light.w)) * albedo * ao;
+      amb = ${hdr ? "(select(toLinear(vec3<f32>(u.light.w)), bakedIrr * kdm, baked) * (1.0 - ssgi.a) + ssgi.rgb * kdm) * albedo * aoD" : "toLinear(vec3<f32>(u.light.w)) * albedo * ao"};${hdr ? "\n      ambDiffuse = amb;" : ""}
     }
 ${reflect ? "    let ambRaw = amb;\n" : ""}    // A baked light map (the second UV set) scales the sky/ambient fill by how
     // much of it reaches this point, bounce included — mirroring the CPU path.
     // Sampled unconditionally (uniform control flow), applied when bound.
-    let lmUv = vec2<f32>(in.uv2.x, 1.0 - in.uv2.y);
+${hdr
+  ? `    // (An HDR one, F3d, lit the fill above.)
+    if (u.ssaoMeta.z > 0.5) { if (!lmHdr) { amb = amb * lm0.rgb * ${LIGHTMAP_RANGE}; } }`
+  : `    let lmUv = vec2<f32>(in.uv2.x, 1.0 - in.uv2.y);
     let lm = textureSample(lmTex, samp, lmUv).rgb * ${LIGHTMAP_RANGE};
-    if (u.ssaoMeta.z > 0.5) { amb = amb * lm; }
-    else if (frame.probeMin.w > 0.5) { amb = amb * probeLight(in.worldPos, N); } // EP9: no light map, the probes light it
+    if (u.ssaoMeta.z > 0.5) { amb = amb * lm; }`}
+    else if (frame.probeMin.w > 0.5 && frame.probeMin.w < 1.5) { amb = amb * probeLight(in.worldPos, N); } // EP9: no light map, the probes light it
     // Screen-space AO darkens only the ambient fill, sampled at this fragment's
     // framebuffer pixel (matching the software path's ssao[di]).
     // (With GTAO, F3c, the slot holds its visibility instead, already in the occlusion above.)
     if (u.ssaoMeta.x > 0.5 && frame.cascadeSoft.z < 0.5) {
-      amb = amb * textureLoad(ssaoMap, vec2<i32>(in.pos.xy), 0).r;
+      amb = amb * ssaoTexel(vec2<i32>(in.pos.xy)).r;
     }
 ${reflect ? "    // What the light map, probes and SSAO did to the fill, they do to its reflection.\n    let occl = select(vec3<f32>(1.0), amb / max(ambRaw, vec3<f32>(1e-6)), ambRaw > vec3<f32>(1e-6));\n    envSpec = envSpec * occl;\n" : ""}    // The direct light is what a shadow occludes; ambient/IBL still fills it.
-    let sf = shadowFactor(in.lightClip, in.worldPos, abs(dot(normalize(in.normal), u.light.xyz)));
+    let sf = shadowFactor(in.lightClip, in.worldPos, abs(dot(normalize(in.normal), u.light.xyz)))${hdr ? " * underwaterSun(in.worldPos)" : ""};
     let lc = i32(u.ssaoMeta.y + 0.5);
     var lit: vec3<f32>;
+    var vmLights = 0;
     if (lc > 0) {
       // --- Multi-light forward accumulation (Modern tier) ---
       // Mirrors meshRasterizer.ts: each light re-evaluates the direct term with
@@ -1465,24 +2122,26 @@ ${reflect ? "    // What the light map, probes and SSAO did to the fill, they do
       // The global lights (the sun, unranged lights) reach every fragment…
       let ng = i32(frame.clusterInfo.x + 0.5);
       for (var i = 0; i < ng; i = i + 1) {
-        direct = direct + lightTerm(lights[i], in.worldPos, N, V, ndv, a2, k, f0, kdm, albedo, sf);
+        direct = direct + lightTerm(lights[i], in.worldPos, N, V, ndv, a2, k, f0, ${hdr ? "kdf" : "kdm"}, albedo, sf);
       }
+      vmLights = ng;
       // …the rest only the cells they touch (EP8): this fragment's cell, by pixel and depth.
       if (frame.clusterInfo.y > 0.5 && in.eyeDepth >= frame.clusterParams.z) {
         let tile = min(vec2<u32>(in.pos.xy / frame.clusterParams.xy), vec2<u32>(${CLUSTER_X - 1}u, ${CLUSTER_Y - 1}u));
         let slice = min(u32(log(in.eyeDepth / frame.clusterParams.z) * frame.clusterParams.w), ${CLUSTER_Z - 1}u);
-        let cell = clusterTable[(slice * ${CLUSTER_Y}u + tile.y) * ${CLUSTER_X}u + tile.x];
+        let cell = clusterCell((slice * ${CLUSTER_Y}u + tile.y) * ${CLUSTER_X}u + tile.x);
+        vmLights = vmLights + i32(cell.y);
         for (var j = 0u; j < cell.y; j = j + 1u) {
-          direct = direct + lightTerm(lights[clusterIndex[cell.x + j]], in.worldPos, N, V, ndv, a2, k, f0, kdm, albedo, sf);
+          direct = direct + lightTerm(lights[clusterLight(cell.x + j)], in.worldPos, N, V, ndv, a2, k, f0, ${hdr ? "kdf" : "kdm"}, albedo, sf);
         }
       }
       lit = direct + amb + emis;
-    } else if (u.layer0.x > 0.0) {
+    }${hdr ? " else if (charKind() > 0) {\n      // Character shading (F7c) under the key light.\n      lit = charLight(L, N, V, ndv, rough, f0, kdf, albedo) * sf + amb + emis;\n    }" : ""} else if (u.layer0.x > 0.0) {
       // The clearcoat's own highlight, over a base its Fresnel dims (I4).
       let c = coatTerm(coatN, coatNdv, L, H, vdh);
-      lit = ((kdm * (vec3<f32>(1.0) - F) * albedo + F * specD${hdr ? " * eComp" : ""}) * ndl * (1.0 - c.y) + vec3<f32>(c.x)) * sf + amb + emis;
+      lit = (((${hdr ? "kdf" : "kdm"} * (vec3<f32>(1.0) - F) * albedo + F * specD${hdr ? " * eComp" : ""})${hdr ? " * sheenScale + sheenLobe(ndl, ndv, ndh)" : ""}) * ndl * (1.0 - c.y) + vec3<f32>(c.x)) * sf + amb + emis;
     } else {
-      lit = (kdm * (vec3<f32>(1.0) - F) * albedo + F * specD${hdr ? " * eComp" : ""}) * ndl * sf + amb + emis;
+      lit = ((${hdr ? "kdf" : "kdm"} * (vec3<f32>(1.0) - F) * albedo + F * specD${hdr ? " * eComp" : ""})${hdr ? " * sheenScale + sheenLobe(ndl, ndv, ndh)" : ""}) * ndl * sf + amb + emis;${hdr ? "\n      diffuseLit = diffuseLit + kdf * (vec3<f32>(1.0) - F) * albedo * ndl * sf * sheenScale;\n      // A thin surface lit from behind (F1d-2).\n      if (u.dt0.w > 0.0 && dot(N, L) < 0.0) {\n        let through = u.dt0.w * u.dt0.rgb * albedo * kdm * (-dot(N, L)) * sf;\n        lit = lit + through;\n        diffuseLit = diffuseLit + through;\n      }" : ""}
     }
     // A fresnel rim, light at grazing angles (zero when the material has none).
     lit = lit + toLinear(u.surface2.rgb) * pow(1.0 - ndv, u.surface2.w);
@@ -1491,7 +2150,7 @@ ${reflect ? "    // What the light map, probes and SSAO did to the fill, they do
     lit = lit + toLinear(u.effect0.rgb) + toLinear(u.effect1.rgb) * band;
     // HDR: expose + ACES roll-off, or write the linear colour straight through.
     var shaded = lit;
-${wgslDisplay("shaded", hdr)}${reflect ? /* wgsl */ `
+${wgslDisplay("shaded", hdr)}${hdr ? VIEW_MODE_SHADE : ""}${reflect ? /* wgsl */ `
     // Reflections (I3): the same without the environment's reflection, so the pass can take it away.
     var without = lit - envSpec;
 ${wgslDisplay("without", hdr)}
@@ -1507,12 +2166,41 @@ ${hdr
     reflectOut = vec4<f32>(clamp(select(weight, contribution / max(seen, vec3<f32>(1e-3)), seen > vec3<f32>(0.02)), vec3<f32>(0.0), vec3<f32>(1.0)), mix(rough, u.layer0.y, u.layer0.x));
     envOut = vec4<f32>(contribution, 1.0);` : ""}
     // Refraction (I5): what's behind is the opaque scene, bent.
-    if (camoSeen.a > 0.5) { return vec4<f32>(camoSeen.rgb, 1.0); }
+    if (camoSeen.a > 0.5) { return vec4<f32>(camoSeen.rgb, 1.0); }${hdr ? `
+    // Transmission (F1d): the light behind let through what the reflection leaves, tinted by the
+    // base colour and by the volume's absorption over its thickness (Beer–Lambert).
+    if (u.trans0.x > 0.0 && u.refract0.w > 0.5) {
+      let tb = behindColour(in.pos.xy, in.pos.z, refractOffset(facingNormal(in.normal), in.worldPos));
+      if (tb.a > 0.5) {
+        var absorb = vec3<f32>(1.0);
+        if (u.trans0.y > 0.0 && u.trans0.z > 0.0) { absorb = pow(max(u.trans1.rgb, vec3<f32>(1e-4)), vec3<f32>(u.trans0.y / u.trans0.z)); }
+        let through = u.trans0.x * (1.0 - metallic) * (vec3<f32>(1.0) - specE) * albedo * absorb * tb.rgb;
+        return vec4<f32>(shaded + through, 1.0);
+      }
+    }` : ""}
     if (u.refract0.w > 0.5) {
-      let rn = waterNormal(facingNormal(in.normal), in.worldPos);
-      let b = behindColour(in.pos.xy, in.pos.z, refractOffset(rn, in.worldPos));
+      let rn = ${hdr ? "waterWaves(waterNormal(facingNormal(in.normal), in.worldPos), in.worldPos)" : "waterNormal(facingNormal(in.normal), in.worldPos)"};
+      let roff = refractOffset(rn, in.worldPos);
+      var b = behindColour(in.pos.xy, in.pos.z, roff);${hdr ? `
+      // A water surface's depth (F5d): what is seen through it loses light to the water between and gathers its
+      // colour; where the water is shallow over something, foam.
+      if (b.a > 0.5 && u.water0.x > 0.0 && frame.water0.w > 0.5 && frame.depthTerms.y != 0.0) {
+        let dz = behindDepth(in.pos.xy, in.pos.z, roff);
+        let thick = max(0.0, frame.depthTerms.y / (dz + frame.depthTerms.x) - frame.depthTerms.y / (in.pos.z + frame.depthTerms.x));
+        let foam = shoreFoam(thick * max(0.05, dot(facingNormal(in.normal), u.view.xyz)), in.worldPos.x, in.worldPos.z, frame.water0.z, u.wlook0.x);
+        let foamLit = frame.water3.rgb * 0.8;
+        b = vec4<f32>(mix(throughWater(b.rgb, thick), foamLit, foam), 1.0);
+        shaded = mix(shaded, foamLit, foam);
+      }` : ""}
       if (b.a > 0.5) { return finishRefracted(shaded, colour.a, b.rgb, rn); }
-    }
+    }${hdr ? `
+    // Subsurface scattering (F1d-2; subsurface.ts): in a checkerboard, the diffuse that scatters on the even
+    // pixels and the rest on the odd, for the blur after the opaque pass to rebuild.
+    if (frame.debug.z > 0.5 && u.uvx1.z > 0.0 && u.pbr.w < 1.5 && frame.debug.x < 0.5) {
+      let scatter = (diffuseLit + ambDiffuse) * u.uvx1.z * sssTint;
+      let even = ((u32(in.pos.x) + u32(in.pos.y)) & 1u) == 0u;
+      shaded = select(shaded - scatter, scatter, even);
+    }` : ""}
     return finishAlpha(shaded, colour.a);
   }
 
@@ -1529,10 +2217,15 @@ ${hdr
 ${hdr ? `// --- The sun's cascades (AAA_FIDELITY_ROADMAP.md F2a) ---
 // A caster's depth as the sun sees it, through the cascade being drawn: the scene's
 // own vertex (its copy's transform, bent by the wind) and nothing else.
-@group(1) @binding(12) var<uniform> cascadeView: mat4x4<f32>;
+// The view a caster is drawn through (a cascade, a spot/point tile or a virtual page). A cascade whose casters
+// the GPU culled (F0e) draws each batch's survivors from its region: base.x is where the region starts, the
+// caster's cull0.x where its batch's copies sit in it, and base.y is 1.
+struct CasterView { viewProj: mat4x4<f32>, base: vec4<u32> };
+@group(1) @binding(12) var<uniform> cascadeView: CasterView;
 fn casterClip(position: vec3<f32>, sway: f32, instance: u32) -> vec4<f32> {
-  let bend = windOffset(position.xz, sway);
-  return cascadeView * xf[instance].model * vec4<f32>(position.x + bend.x, position.y, position.z + bend.y, 1.0);
+  let at = select(instance, cascadeView.base.x + u32(u.cull0.x) + instance, cascadeView.base.y != 0u);
+  let model = xf[at].model;
+  return cascadeView.viewProj * model * vec4<f32>(position + bendIn(u.wind0, position, sway, model), 1.0);
 }
 @vertex
 fn vs_shadow(@location(0) position: vec3<f32>, @location(5) sway: f32, @builtin(instance_index) instance: u32) -> @builtin(position) vec4<f32> {
@@ -1543,10 +2236,18 @@ struct CutOut {
   @builtin(position) pos: vec4<f32>,
   @location(0) uv: vec2<f32>,
 };
+// A cut-out caster's clip position: casterClip's, or a GPU terrain's node (F6c), whose casters draw through this
+// pipeline as it binds their heights.
+fn casterClipCut(position: vec3<f32>, sway: f32, instance: u32) -> vec4<f32> {
+  if (u.terrain1.w <= 0.0) { return casterClip(position, sway, instance); }
+  let at = select(instance, cascadeView.base.x + u32(u.cull0.x) + instance, cascadeView.base.y != 0u);
+  let model = xf[at].model;
+  return cascadeView.viewProj * model * vec4<f32>(terrainOf(position, model).pos, 1.0);
+}
 @vertex
 fn vs_shadow_cut(@location(0) position: vec3<f32>, @location(2) uv: vec2<f32>, @location(5) sway: f32, @builtin(instance_index) instance: u32) -> CutOut {
   var out: CutOut;
-  out.pos = casterClip(position, sway, instance);
+  out.pos = casterClipCut(position, sway, instance);
   out.uv = uv;
   return out;
 }
@@ -1568,7 +2269,8 @@ fn octEncode(n: vec3<f32>) -> vec2<f32> {
 // The prepass's vertex stage: the scene's own (vertexOf, so the depth is the
 // same), plus where the vertex is on screen now and was last frame, from this
 // frame's motion transforms (xf from u.motion0.x: mvp = now, lightMvp = then,
-// both unjittered) and the vertex's previous position (a skinned mesh's last
+// both unjittered; on the AAA tier made on the GPU from the copy's model and
+// its last one, which the motion record's model holds) and the vertex's previous position (a skinned mesh's last
 // vertices; its current ones otherwise) bent by the previous frame's wind.
 struct PrepassIn {
   @builtin(position) @invariant pos: vec4<f32>,
@@ -1581,7 +2283,7 @@ struct PrepassIn {
   @location(6) bw: f32,
   @location(7) objPos: vec3<f32>,
   @location(8) clipNow: vec4<f32>,
-  @location(9) clipThen: vec4<f32>,${hdr ? "\n  @location(10) tangent: vec4<f32>,\n  @location(11) frameNormal: vec3<f32>," : ""}
+  @location(9) clipThen: vec4<f32>,${hdr ? "\n  @location(10) tangent: vec4<f32>,\n  @location(11) frameNormal: vec3<f32>,\n  @location(12) @interpolate(flat) fade: f32," : ""}
 };
 @vertex
 fn vs_prepass(
@@ -1606,15 +2308,16 @@ fn vs_prepass(
   out.uv2 = v.uv2;
   out.bw = v.bw;
   out.objPos = v.objPos;
-${hdr ? "  out.tangent = v.tangent;\n  out.frameNormal = v.frameNormal;\n" : ""}  let m = xf[u32(u.motion0.x) + instance];
-  let then = windOffsetIn(u.wind1, before.xz, sway);
+${hdr ? "  out.tangent = v.tangent;\n  out.frameNormal = v.frameNormal;\n  out.fade = v.fade;\n" : ""}  let m = xf[u32(u.motion0.x) + u32(u.cull0.x) + instance];
+${hdr ? "  // Last frame's bend: its wind, about where the copy stood (the motion record's model is last frame's).\n  let thenPos = before + bendIn(u.wind1, before, sway, m.model);" : "  let then = windOffsetIn(u.wind1, before.xz, sway);\n  let thenPos = vec3<f32>(before.x + then.x, before.y, before.z + then.y);"}
   out.clipNow = m.mvp * vec4<f32>(v.objPos, 1.0);
-  out.clipThen = m.lightMvp * vec4<f32>(before.x + then.x, before.y, before.z + then.y, 1.0);
+${hdr ? "  // A terrain stands still: its vertex where it is now (F6c).\n  let thenAt = select(thenPos, v.objPos, u.terrain1.w > 0.0);" : "  let thenAt = thenPos;"}
+  out.clipThen = m.lightMvp * vec4<f32>(thenAt${g.vertex ? " + wpoObj" : ""}, 1.0);
   return out;
 }
 struct PrepassTargets {
   @location(0) gbuffer: vec4<f32>,
-  @location(1) velocity: vec2<f32>,
+  @location(1) velocity: vec2<f32>,${g.pdo ? "\n  // A material graph's pixel depth offset (F1e): the depth pushed away from the eye.\n  @builtin(frag_depth) depth: f32," : ""}
 };
 // The prepass draws what the opaque pipeline draws, and drops exactly the
 // pixels fs drops (the cut-out, the near-transparent, Active Camo's screen
@@ -1625,17 +2328,17 @@ struct PrepassTargets {
 // in UV units (x right, y down), so a pixel's last position is uv − velocity.
 @fragment
 fn fs_prepass(in: PrepassIn) -> PrepassTargets {
-  let dp1 = dpdx(in.worldPos);
+${hdr ? "  if (in.fade != 0.0 && fadeHides(in.fade, in.pos.xy)) { discard; }\n  if (u.terrain1.w > 0.0 && u.terrain2.y > 0.5 && textureSample(occTex, samp, vec2<f32>(in.uv.x, 1.0 - in.uv.y)).a < 0.5) { discard; }\n" : ""}  let dp1 = dpdx(in.worldPos);
   let dp2 = dpdy(in.worldPos);
   let duv1 = dpdx(in.uv);
   let duv2 = dpdy(in.uv);
-  var puv = in.uv;
+  var puv = ${hdr ? "khrUv(in.uv)" : "in.uv"};
   if (u.pbr.z > 0.5 && u.layer0.w > 0.0) {
     var pn = normalize(in.normal);
     if (dot(pn, u.view.xyz) < 0.0) { pn = -pn; }
     let pg = uvGrads(pn, dp1, dp2, duv1, duv2);
     let pv = max(${PARALLAX_MIN_NDV}, dot(pn, u.view.xyz));
-    puv = parallaxUv(in.uv, -vec2<f32>(dot(pg.gu, u.view.xyz), dot(pg.gv, u.view.xyz)) / pv, u.layer0.w);
+    puv = parallaxUv(in.uv, -vec2<f32>(dot(pg.gu, u.view.xyz), dot(pg.gv, u.view.xyz)) / pv, u.layer0.w${hdr ? " * select(1.0, in.bw, u.terrain1.w > 0.0)" : ""});
   }
   let uv = vec2<f32>(puv.x, 1.0 - puv.y);
   var sNrm = in.normal;
@@ -1650,7 +2353,7 @@ fn fs_prepass(in: PrepassIn) -> PrepassTargets {
   let mr = textureSample(mrTex, samp, uv);
 ${g.base}
   if (colour.a * 255.0 < 1.0) { discard; }
-  if (u.pbr.w > 0.5 && u.pbr.w < 1.5 && colour.a < u.view.w) { discard; }
+  if (u.pbr.w > 0.5 && u.pbr.w < 1.5 && ${hdr ? "select((colour.a < u.view.w), !charDitherKeeps(colour.a, in.pos.xy), u.char1.x > 0.5 && charKind() == 3)" : "colour.a < u.view.w"}) { discard; }
   if (u.pbr.z > 0.5 && u.effect0.w > 0.0 && camoThreshold(in.pos.xy, u.effect1.w) < u.effect0.w) { discard; }
   var n = normalize(sNrm);
   if (dot(n, u.view.xyz) < 0.0) { n = -n; }
@@ -1660,7 +2363,14 @@ ${graph ? "  if (gRough >= 0.0) { rough = gRough; }\n" : ""}  var velocity = vec
   if (in.clipNow.w > 0.0 && in.clipThen.w > 0.0) {
     velocity = (in.clipNow.xy / in.clipNow.w - in.clipThen.xy / in.clipThen.w) * vec2<f32>(0.5, -0.5);
   }
-  return PrepassTargets(vec4<f32>(octEncode(n), clamp(rough, 0.0, 1.0), u.maps0.w), velocity);
+${g.pdo
+  ? `  var depthOut = in.pos.z;
+  if (gPdo > 0.0 && frame.depthTerms.z > 0.5) {
+    let d = frame.depthTerms.y / (in.pos.z + frame.depthTerms.x);
+    depthOut = clamp(frame.depthTerms.y / (d + gPdo) - frame.depthTerms.x, 0.0, 1.0);
+  }
+  return PrepassTargets(vec4<f32>(octEncode(n), clamp(rough, 0.0, 1.0), u.maps0.w), velocity, depthOut);`
+  : "  return PrepassTargets(vec4<f32>(octEncode(n), clamp(rough, 0.0, 1.0), u.maps0.w), velocity);"}
 }
 `;
   return reflect ? withReflectionTargets(code) : code;
@@ -1703,6 +2413,10 @@ interface GpuPrimitive {
   /** A dynamic primitive's vertices before its last upload, and the frame that upload was in (F0c's velocity). */
   previousBuffer?: any;
   movedFrame?: number;
+  /** GPU skinning's buffers (F7a): the bind shape, influences, morphs, the joints and weights written each pose, and their group. */
+  skin?: { readonly buffers: any[]; readonly joints: any; readonly weights: any; readonly params: any; readonly group: any; readonly vertices: number; readonly jointBytes: number };
+  /** GPU cloth's buffers and groups (F7d): predict, the solve both ways, and finish. */
+  cloth?: { readonly params: any; readonly capsules: any; readonly groups: readonly [any, any, any, any]; readonly buffers: any[] };
 }
 
 /** What a frame's depth prepass leaves (F0c; see WebgpuSceneRenderer.prepassTargets). */
@@ -1725,9 +2439,11 @@ interface CachedBindGroup {
     occ: DecodedTexture | null;
     emis: DecodedTexture | null;
     lm: DecodedTexture | null;
+    lmHdr: HdrLightmap | null;
     detail: DecodedTexture | null;
     blend: DecodedTexture | null;
     normal: DecodedTexture | null;
+    graph?: readonly (DecodedTexture | null)[] | null;
   };
 }
 
@@ -1741,6 +2457,8 @@ export class WebgpuSceneRenderer implements SceneRenderer {
   private readonly textures = new WeakMap<DecodedTexture, any>();
   /** With mips (F1a), colour maps upload apart: their chain is averaged in linear light. */
   private readonly colourTextures = new WeakMap<DecodedTexture, any>();
+  /** HDR directional light maps (F3d), uploaded once each as two rgba16float layers. */
+  private readonly hdrLightmaps = new WeakMap<HdrLightmap, any>();
   /** Draws a texture's mip chain on the GPU (F1a). */
   private readonly mipmaps: MipmapGenerator;
   /** The block-compressed formats this renderer uploads a texture's `gpu` chain in, preferred first (F1a). */
@@ -1753,6 +2471,10 @@ export class WebgpuSceneRenderer implements SceneRenderer {
 
   /** Most recent completed readback, or null before the first one lands. */
   private latest: Uint8Array | null = null;
+  /** Readbacks that have landed (gpuPacing.ts paces the render size by them). */
+  framesLanded = 0;
+  /** Whether the frame being drawn has a prepass, whose velocity needs a re-uploaded mesh's last vertices (F0c). */
+  private keepsPrevious = false;
   /** Frames submitted, the one `latest` holds, and the newest that got a readback (see settle). */
   private submitted = 0;
   private latestSeq = 0;
@@ -1763,7 +2485,34 @@ export class WebgpuSceneRenderer implements SceneRenderer {
   private uniformCapacity = 0;
   private uniformBuffer: any = null;
   private uniformData = new Float32Array(0);
+  /** What each uniform slot was last written from (F0e): its draw's inputs and first model; reset when the staging array is remade. */
+  private uniformKeys: (unknown[] | undefined)[] = [];
+  private uniformModels = new Float32Array(0);
+  private uniformKeysFor: Float32Array | null = null;
   private destroyed = false;
+  /** The path-traced reference (F10b), made the first time it is shown. */
+  private pathTracer: PathTracer | null = null;
+  /** GPU culling (F0e), made on first use. */
+  private culling: GpuCulling | null = null;
+  /** The clustered lights built on the GPU (F0e), made on first use; set for a frame that builds them there. */
+  private lightClusterer: GpuLightClusters | null = null;
+  /** The scene passes' recorded draws (F0e), on the GPU-culled path. */
+  private bundles: BundleCache | null = null;
+  /** The sun's casters culled per cascade on the GPU (F0e). */
+  private casterCulling: CasterCulling | null = null;
+  /** Cluster hierarchies cut and culled on the GPU (F6a), made on first use. */
+  private clusterRendering: ClusterRendering | null = null;
+  /** Terrains drawn from their heightfields (F6c), by terrain, and by their patch's primitive. */
+  private readonly gpuTerrains = new WeakMap<object, GpuTerrain>();
+  private readonly terrainPatches = new WeakMap<MeshPrimitive, GpuTerrain>();
+  private terrainList: GpuTerrain[] = [];
+  /** Each copy's transforms made on the GPU (F0e), on the AAA tier. */
+  private transforms: GpuTransforms | null = null;
+  /** The LOD chains whose levels the GPU picks this frame (F0e). */
+  private frameGpuLods: ReadonlySet<LodChain> | null = null;
+  private frameLightClusters = false;
+  /** This frame's GPU cull, while it encodes: the draws index the culling's arguments. */
+  private frameCull: GpuCulling | null = null;
 
   /**
    * The bound shadow map — the 1x1 blank when no shadow this frame, else an
@@ -1830,7 +2579,7 @@ export class WebgpuSceneRenderer implements SceneRenderer {
     private height: number,
     private readonly pipeline: PipelineSet,
     /** Build the pipelines for a shader variant (a material graph's, EP7), at a sample count (I1), with a depth prepass (F0c). */
-    private readonly pipelinesFor: (code: string, samples?: number, reflect?: boolean, prepass?: boolean) => PipelineSet,
+    private readonly pipelinesFor: (code: string, samples?: number, reflect?: boolean, prepass?: boolean, make?: (descriptor: object) => any) => PipelineSet,
     private readonly bindGroupLayout: any,
     private colourTexture: any,
     private depthTexture: any,
@@ -1845,7 +2594,7 @@ export class WebgpuSceneRenderer implements SceneRenderer {
       /** The frame-sized targets the groups bind (remade on a resize): the depth, and the refraction copy. */
       readonly sized: { depth: any; behind: any };
       readonly behindBlank: any;
-      readonly clusters: { readonly table: any; readonly index: any; readonly params: any };
+      readonly clusters: { readonly data: any; readonly params: any };
       readonly shadowTiles: any;
       /** The split-sum DFG table (F1c). */
       readonly dfg: any;
@@ -1853,11 +2602,15 @@ export class WebgpuSceneRenderer implements SceneRenderer {
       readonly ltc: any;
       /** The projected decals' boxes and tiles (F1f). */
       readonly decals: any;
+      /** The physical sky's aerial perspective (F5a-2), as the linear-light shader reads it. */
+      readonly aerial: any;
+      /** The volume the groups bind for the volumetric fog (F5b): point it at a new one, then remake the groups. */
+      readonly fogVolume: { texture: any };
       atlas: any;
       atlasBlank: boolean;
       probes: any;
       probesBlank: boolean;
-      probeSource: LightProbeGrid | null;
+      probeSource: LightProbeGrid | ProbeVolume | null;
       /** The sun's GPU cascades (F2a). */
       readonly cascades: CascadeResources;
       readonly makeGroups: (atlas: any, probes: any) => { blank: any; scene: any; opaque: any };
@@ -1919,10 +2672,14 @@ export class WebgpuSceneRenderer implements SceneRenderer {
     }
   }
 
-  /** The screen-space shading target (F2c, F3c): rgba16float at the frame's size, AO in r, the sun's contact in g, the bent normal in ba. */
+  /**
+   * The screen-space shading target (F2c, F3c): rgba16float at the frame's size, AO in r, the sun's contact
+   * in g, the bent normal in ba; in its second layer, SSGI (F3e-2): the near field's light in rgb, its share in a;
+   * and in its third, the sun's light through the virtual shadow maps (F2b) in r, −1 where no page is resident.
+   */
   private contactTexture: any = null;
   private ensureContact(): any {
-    this.contactTexture ??= this.device.createTexture({ size: { width: this.width, height: this.height }, format: SCREEN_SHADING_FORMAT, usage: 0x10 | 0x04 | 0x01 }); // RENDER_ATTACHMENT | TEXTURE_BINDING | COPY_SRC (for captures)
+    this.contactTexture ??= this.device.createTexture({ size: { width: this.width, height: this.height, depthOrArrayLayers: 3 }, format: SCREEN_SHADING_FORMAT, usage: 0x10 | 0x04 | 0x01 }); // RENDER_ATTACHMENT | TEXTURE_BINDING | COPY_SRC (for captures)
     return this.contactTexture;
   }
   /** The resolve's uniforms and pipelines (one per depth sample count), made on first use. */
@@ -1933,6 +2690,26 @@ export class WebgpuSceneRenderer implements SceneRenderer {
   private frameDepthView: { readonly viewProj: Mat4; readonly terms: readonly [number, number] } | null = null;
   /** Whether this frame's ambient light takes GTAO (F3c), for the frame uniform. */
   private frameGtao = false;
+  /** This frame's SSGI (F3e-2), when it has one, for the frame uniform and the screen-space shading. */
+  private frameSsgi: SsgiFrame | null = null;
+  /**
+   * SSGI's resources (F3e-2): its uniforms, the half-resolution history (two, one read and one written,
+   * swapping each frame), and its pipelines.
+   */
+  private ssgi: { uniforms: any; data: Float32Array<ArrayBuffer>; history: [any, any]; index: number; valid: boolean; frame: number; sampler: any; trace: [any, any]; resolve: [any, any]; accumulate: any } | null = null;
+  /** This frame's real-time GI (F3e), its tracer for the still scene it was made for, and the sky it traces. */
+  private frameGi: GpuSceneDraw["dynamicGi"] | null = null;
+  private probeGi: { readonly key: string; readonly gi: GpuProbeGi } | null = null;
+  private giSky: { readonly source: object; readonly sky: ReturnType<typeof environmentPanorama> } | null = null;
+  /** This frame's volumetric fog (F5b), its volumes (made when a frame first has some) and the shader's terms. */
+  private frameFog: FogFrame | null = null;
+  private volumetricFog: GpuVolumetricFog | null = null;
+  private readonly fogTerms = new Float32Array(FOG_FRAME_FLOATS);
+  private readonly weatherTerms = new Float32Array(WEATHER_FRAME_FLOATS);
+  private readonly waterTerms = new Float32Array(WATER_FRAME_FLOATS);
+  /** The physical sky's LUTs (F5a-2), made when a draw first brings one, and the frame's aerial terms. */
+  private atmosphere: GpuAtmosphere | null = null;
+  private readonly aerialTerms = new Float32Array(AERIAL_FRAME_FLOATS);
   /**
    * GTAO's resources (F3c): its uniforms, the half-resolution history (two,
    * one read and one written, swapping each frame), and its pipelines.
@@ -2040,6 +2817,9 @@ export class WebgpuSceneRenderer implements SceneRenderer {
       // A frame without it: the next one with it starts its history afresh.
       this.gtao.valid = false;
     }
+    if (this.frameVsm && gbuffer) this.addVsmResolve(graph, depth, gbuffer, multisampled);
+    if (this.frameSsgi && gbuffer && velocity && this.taa) this.addSsgi(graph, depth, gbuffer, velocity, view, projection, this.frameSsgi, multisampled);
+    else if (this.ssgi) this.ssgi.valid = false;
     this.contact ??= { uniforms: device.createBuffer({ size: CONTACT_UNIFORM_FLOATS * 4, usage: 0x40 | 0x08 }), data: new Float32Array(CONTACT_UNIFORM_FLOATS), pipelines: [null, null] };
     const contact = this.contact;
     contact.pipelines[k] ??= fullScreenPipeline(device, contactShaderWgsl(multisampled), "contactPass", SCREEN_SHADING_FORMAT);
@@ -2056,7 +2836,7 @@ export class WebgpuSceneRenderer implements SceneRenderer {
       pass.keep();
       return (ctx) => {
         const encoded = ctx.encoder.beginRenderPass({
-          colorAttachments: [{ view: ctx.texture(target).createView(), clearValue: { r: 1, g: 1, b: 0, a: 1 }, loadOp: "clear", storeOp: "store" }],
+          colorAttachments: [{ view: ctx.texture(target).createView({ dimension: "2d", baseArrayLayer: 0, arrayLayerCount: 1 }), clearValue: { r: 1, g: 1, b: 0, a: 1 }, loadOp: "clear", storeOp: "store" }],
           ...ctx.timing,
         });
         encoded.setPipeline(pipeline);
@@ -2074,8 +2854,371 @@ export class WebgpuSceneRenderer implements SceneRenderer {
       };
     });
   }
+  /** The IES profiles in the LTC buffer's slots (F9d), by identity. */
+  private readonly iesHeld: (object | null)[] = Array.from({ length: IES_MAX_PROFILES }, () => null);
+
+  /**
+   * Each distinct IES profile among the frame's lights a slot (F9d), uploaded when it first takes it; the
+   * light's slot, or −1 (no profile, or more profiles than slots).
+   */
+  private iesSlots(lights: readonly { readonly ies?: object | null }[]): (light: { readonly ies?: object | null }) => number {
+    const wanted = new Set(lights.map((l) => l.ies).filter((p): p is object => Boolean(p)));
+    // Free the slots of profiles no light uses now.
+    this.iesHeld.forEach((p, i) => {
+      if (p && !wanted.has(p)) this.iesHeld[i] = null;
+    });
+    for (const profile of wanted) {
+      if (this.iesHeld.includes(profile)) continue;
+      const slot = this.iesHeld.indexOf(null);
+      if (slot < 0) break;
+      this.iesHeld[slot] = profile;
+      const samples = (profile as { samples?: readonly number[] }).samples ?? [];
+      this.device.queue.writeBuffer(this.depthGroups.ltc, (IES_BASE + slot * IES_VEC4S) * 16, Float32Array.from(samples.slice(0, IES_VEC4S * 4)));
+    }
+    return (light) => (light.ies ? this.iesHeld.indexOf(light.ies) : -1);
+  }
+
   /** A 1×1 stand-in for GTAO's history when the frame has none (F3c). */
   private gtaoBlank: any = null;
+
+  /** This frame's virtual shadow maps (F2b): the pages it draws, when it has them. */
+  private frameVsm: { readonly draws: readonly PageDraw[]; readonly basis: ReturnType<typeof vsmLightBasis>; readonly centre: number } | null = null;
+  /**
+   * The virtual shadow maps' resources (F2b): the physical pool and its bookkeeping, the marks and the
+   * buffers they are read back through (each with the windows it was marked under), the page table, the
+   * passes' uniforms, a view uniform a page drawn a frame, and the pipelines.
+   */
+  private vsm: {
+    pool: any;
+    poolSize: number;
+    pages: VirtualPagePool;
+    marks: any;
+    staging: { buffer: any; busy: boolean; windows: [number, number][] }[];
+    pending: { marks: Uint32Array; windows: [number, number][] } | null;
+    needed: ReturnType<typeof markedPages>;
+    table: any;
+    tableData: Uint32Array;
+    windowsKey: string;
+    windows: [number, number][];
+    uniforms: any;
+    data: Float32Array<ArrayBuffer>;
+    views: { buffer: any; group: any }[];
+    sampler: any;
+    mark: [any, any];
+    resolve: [any, any];
+    marking: { buffer: any; busy: boolean; windows: [number, number][] } | null;
+  } | null = null;
+
+  /** Plan the frame's virtual shadow maps (F2b): see virtualShadows.ts. */
+  private planVsm(draw: GpuSceneDraw, toLight: readonly [number, number, number], strength: number, softness: number, projection: Mat4): NonNullable<WebgpuSceneRenderer["frameVsm"]> {
+    const device = this.device;
+    const poolSize = Math.max(VSM_PAGES, Math.floor((draw.virtualShadows?.poolSize ?? 4096) / VSM_PAGES) * VSM_PAGES);
+    if (this.vsm && this.vsm.poolSize !== poolSize) this.disposeVsm();
+    if (!this.vsm) {
+      const capacity = (poolSize / VSM_PAGES) ** 2;
+      const layout = this.depthGroups.cascades.localPipeline.getBindGroupLayout(1);
+      this.vsm = {
+        pool: device.createTexture({ size: { width: poolSize, height: poolSize }, format: "depth32float", usage: 0x10 | 0x04 }),
+        poolSize,
+        pages: new VirtualPagePool(capacity),
+        marks: device.createBuffer({ size: VSM_MARK_WORDS * 4, usage: 0x80 | 0x04 | 0x08 }), // STORAGE | COPY_SRC | COPY_DST
+        staging: Array.from({ length: 3 }, () => ({ buffer: device.createBuffer({ size: VSM_MARK_WORDS * 4, usage: 0x01 | 0x08 }), busy: false, windows: [] as [number, number][] })),
+        pending: null,
+        needed: [],
+        table: device.createBuffer({ size: VSM_LEVELS * VSM_PAGES * VSM_PAGES * 4, usage: 0x80 | 0x08 }),
+        tableData: new Uint32Array(VSM_LEVELS * VSM_PAGES * VSM_PAGES),
+        windowsKey: "",
+        windows: [],
+        uniforms: device.createBuffer({ size: VSM_UNIFORM_FLOATS * 4, usage: 0x40 | 0x08 }),
+        data: new Float32Array(VSM_UNIFORM_FLOATS),
+        views: [],
+        sampler: device.createSampler({ compare: "less-equal", magFilter: "linear", minFilter: "linear", addressModeU: "clamp-to-edge", addressModeV: "clamp-to-edge" }),
+        mark: [null, null],
+        resolve: [null, null],
+        marking: null,
+      };
+      for (let i = 0; i < 48; i += 1) {
+        const buffer = device.createBuffer({ size: 80, usage: 0x40 | 0x08 }); // a CasterView, never culled
+        this.vsm.views.push({ buffer, group: device.createBindGroup({ layout, entries: [{ binding: 12, resource: { buffer } }] }) });
+      }
+    }
+    const v = this.vsm;
+    const eyeM = invertMat4(draw.view) ?? draw.view;
+    const eye: [number, number, number] = [eyeM[12]!, eyeM[13]!, eyeM[14]!];
+    const basis = vsmLightBasis(toLight);
+    const centre = vsmDepthCentre(eye, basis);
+    const windows = vsmWindows(eye, basis);
+    // What the newest marks read back asked for, in the windows they were marked under.
+    if (v.pending) {
+      v.needed = markedPages(v.pending.marks, v.pending.windows);
+      v.pending = null;
+    }
+    const key = `${toLight.map((c) => c.toFixed(4)).join(",")}|${centre}|${draw.localShadowKey ?? `frame ${this.frameIndex}`}`;
+    const movers = (draw.localShadowMoved ?? []).map((m) => worldSphere(localSphere(m.mesh), m.model));
+    const draws = v.pages.update(v.needed, key, (page) => movers.some((sphere) => pageTouches(page, basis, sphere)), v.views.length);
+    const windowsKey = windows.map((w) => w.join(",")).join(";");
+    if (v.pages.changed || windowsKey !== v.windowsKey) {
+      device.queue.writeBuffer(v.table, 0, v.pages.table(windows, v.tableData));
+      v.windowsKey = windowsKey;
+    }
+    v.windows = windows;
+    draws.forEach((d, i) => device.queue.writeBuffer(v.views[i]!.buffer, 0, vsmPageViewProj(d.level, d.gx, d.gy, basis, centre)));
+    const viewProj = multiplyMat4(projection, draw.view);
+    device.queue.writeBuffer(
+      v.uniforms,
+      0,
+      vsmUniforms({ invViewProj: invertMat4(viewProj) ?? viewProj, eye, basis, centre, windows, pixelAngle: 2 / ((projection[5] || 1) * this.height), width: this.width, height: this.height, poolSize: v.poolSize, softness, strength, view: draw.view }, v.data),
+    );
+    return { draws, basis, centre };
+  }
+
+  /** Draw the frame's pages (F2b): each cleared, then the casters whose shadow can reach it, through its own view. */
+  private addVsmPages(graph: FrameGraph, pages: readonly PageDraw[], casters: readonly any[], first: number): void {
+    const v = this.vsm!;
+    const res = this.depthGroups.cascades;
+    const basis = this.frameVsm!.basis;
+    const pool = graph.importTexture("vsm.pool", v.pool);
+    const clearPipeline = this.localClearPipeline();
+    graph.addPass("virtual shadows", "render", (pass) => {
+      // The pages not drawn this frame keep their maps.
+      pass.read(pool, "attachment");
+      pass.write(pool);
+      pass.keep();
+      return (ctx) => {
+        const group = this.device.createBindGroup({
+          layout: res.casterLayout,
+          entries: [
+            { binding: 0, resource: { buffer: this.uniformBuffer, offset: 0, size: UNIFORM_STRIDE } },
+            { binding: 10, resource: { buffer: this.instanceBuffer } },
+          ],
+        });
+        const encoded = ctx.encoder.beginRenderPass({ colorAttachments: [], depthStencilAttachment: { view: ctx.texture(pool).createView(), depthLoadOp: "load", depthStoreOp: "store" }, ...ctx.timing });
+        pages.forEach((page, i) => {
+          const [x, y] = physicalCorner(page.physical, v.poolSize);
+          encoded.setViewport(x, y, VSM_PAGES, VSM_PAGES, 0, 1);
+          encoded.setScissorRect(x, y, VSM_PAGES, VSM_PAGES);
+          encoded.setPipeline(clearPipeline);
+          encoded.draw(3);
+          encoded.setBindGroup(1, v.views[i]!.group);
+          for (const cut of [false, true]) {
+            encoded.setPipeline(cut ? res.localCutPipeline : res.localPipeline);
+            casters.forEach((entry, k) => {
+              if ((entry.alpha === 1 || this.terrainPatches.has(entry.primitive)) !== cut) return;
+              const sphere = localSphere(entry.primitive);
+              if (!entry.models.some((m: Mat4) => pageTouches(page, basis, worldSphere(sphere, m)))) return;
+              encoded.setBindGroup(0, cut ? this.cutGroupFor(entry.primitive, entry.textures) : group, [(first + k) * UNIFORM_STRIDE]);
+              encoded.setVertexBuffer(0, entry.geometry.vertexBuffer);
+              encoded.setIndexBuffer(entry.geometry.indexBuffer, "uint32");
+              encoded.drawIndexed(entry.geometry.indexCount, entry.models.length, 0, 0, entry.first);
+            });
+          }
+        });
+        encoded.end();
+      };
+    });
+  }
+
+  /** Mark the pages the frame's pixels want (F2b), and copy the marks out to be read back. */
+  private addVsmMarks(graph: FrameGraph, depth: FrameResource, multisampled: boolean): void {
+    const v = this.vsm!;
+    const k = multisampled ? 1 : 0;
+    v.mark[k] ??= this.device.createComputePipeline({ layout: "auto", compute: { module: this.device.createShaderModule({ code: vsmMarkWgsl(multisampled) }), entryPoint: "markPages" } });
+    const pipeline = v.mark[k];
+    const slot = v.staging.find((s) => !s.busy) ?? null;
+    if (slot) {
+      slot.busy = true;
+      slot.windows = v.windows;
+    }
+    v.marking = slot;
+    graph.addPass("vsm.mark", "compute", (pass) => {
+      pass.read(depth);
+      pass.keep();
+      return (ctx) => {
+        ctx.encoder.clearBuffer(v.marks);
+        const encoded = ctx.encoder.beginComputePass(ctx.timing);
+        encoded.setPipeline(pipeline);
+        encoded.setBindGroup(0, this.device.createBindGroup({
+          layout: pipeline.getBindGroupLayout(0),
+          entries: [
+            { binding: 0, resource: { buffer: v.uniforms } },
+            { binding: 1, resource: ctx.texture(depth).createView() },
+            { binding: 2, resource: { buffer: v.marks } },
+          ],
+        }));
+        encoded.dispatchWorkgroups(Math.ceil(this.width / 8), Math.ceil(this.height / 8));
+        encoded.end();
+        if (slot) ctx.encoder.copyBufferToBuffer(v.marks, 0, slot.buffer, 0, VSM_MARK_WORDS * 4);
+      };
+    });
+  }
+
+  /** The sun's light through the virtual map at each pixel (F2b), into the screen-shading target's third layer. */
+  private addVsmResolve(graph: FrameGraph, depth: FrameResource, gbuffer: FrameResource, multisampled: boolean): void {
+    const v = this.vsm!;
+    const k = multisampled ? 1 : 0;
+    v.resolve[k] ??= fullScreenPipeline(this.device, vsmResolveWgsl(multisampled), "resolve", SCREEN_SHADING_FORMAT);
+    const pipeline = v.resolve[k];
+    const target = graph.importTexture("vsm.target", this.ensureContact());
+    const pool = graph.importTexture("vsm.sampled", v.pool);
+    graph.addPass("vsm.resolve", "render", (pass) => {
+      pass.read(depth);
+      pass.read(gbuffer);
+      pass.read(pool);
+      pass.write(target);
+      pass.keep();
+      return (ctx) => {
+        const encoded = ctx.encoder.beginRenderPass({
+          colorAttachments: [{ view: ctx.texture(target).createView({ dimension: "2d", baseArrayLayer: 2, arrayLayerCount: 1 }), clearValue: { r: -1, g: 0, b: 0, a: 1 }, loadOp: "clear", storeOp: "store" }],
+          ...ctx.timing,
+        });
+        encoded.setPipeline(pipeline);
+        encoded.setBindGroup(0, this.device.createBindGroup({
+          layout: pipeline.getBindGroupLayout(0),
+          entries: [
+            { binding: 0, resource: { buffer: v.uniforms } },
+            { binding: 1, resource: ctx.texture(depth).createView() },
+            { binding: 2, resource: { buffer: v.table } },
+            { binding: 3, resource: v.pool.createView() },
+            { binding: 4, resource: v.sampler },
+            { binding: 5, resource: ctx.texture(gbuffer).createView() },
+          ],
+        }));
+        encoded.draw(3);
+        encoded.end();
+      };
+    });
+  }
+
+  /** Read back the marks the frame just copied out (F2b); they reach a later frame's plan. */
+  private readVsmMarks(): void {
+    const v = this.vsm;
+    const slot = v?.marking ?? null;
+    if (!v || !slot) return;
+    v.marking = null;
+    void slot.buffer.mapAsync(0x01).then(
+      () => {
+        if (this.vsm === v) v.pending = { marks: new Uint32Array(slot.buffer.getMappedRange().slice(0)), windows: slot.windows };
+        slot.buffer.unmap();
+        slot.busy = false;
+      },
+      () => {
+        slot.busy = false;
+      },
+    );
+  }
+
+  private disposeVsm(): void {
+    const v = this.vsm;
+    if (!v) return;
+    for (const b of [v.pool, v.marks, v.table, v.uniforms, ...v.staging.map((s) => s.buffer), ...v.views.map((w) => w.buffer)]) destroySafely(b);
+    this.vsm = null;
+  }
+
+  /** Clears a rect of a depth32float map to the far plane (F2d-2's, shared with F2b's pages). */
+  private localClearPipeline(): any {
+    this.localClear ??= this.device.createRenderPipeline({
+      layout: "auto",
+      vertex: { module: this.device.createShaderModule({ code: LOCAL_CLEAR_WGSL }), entryPoint: "vs" },
+      fragment: { module: this.device.createShaderModule({ code: LOCAL_CLEAR_WGSL }), entryPoint: "clear", targets: [] },
+      primitive: { topology: "triangle-list" },
+      depthStencil: { format: "depth32float", depthWriteEnabled: true, depthCompare: "always" },
+    });
+    return this.localClear;
+  }
+
+  /**
+   * SSGI (F3e-2): at half resolution its trace against the prepass's depths, lit by last frame's resolved
+   * image (the TAA history), accumulated over frames through the velocity buffer, then filtered up to full
+   * resolution into the screen-shading target's second layer.
+   */
+  private addSsgi(graph: FrameGraph, depth: FrameResource, gbuffer: FrameResource, velocity: FrameResource, view: Mat4, projection: Mat4, settings: SsgiFrame, multisampled: boolean): void {
+    const device = this.device;
+    const k = multisampled ? 1 : 0;
+    const half = { width: Math.max(1, Math.ceil(this.width / 2)), height: Math.max(1, Math.ceil(this.height / 2)) };
+    if (!this.ssgi) {
+      const made = () => device.createTexture({ size: half, format: SCREEN_SHADING_FORMAT, usage: 0x10 | 0x04 | 0x01 });
+      this.ssgi = {
+        uniforms: device.createBuffer({ size: SSGI_UNIFORM_FLOATS * 4, usage: 0x40 | 0x08 }),
+        data: new Float32Array(SSGI_UNIFORM_FLOATS),
+        history: [made(), made()],
+        index: 0,
+        valid: false,
+        frame: 0,
+        sampler: device.createSampler({ magFilter: "linear", minFilter: "linear", addressModeU: "clamp-to-edge", addressModeV: "clamp-to-edge" }),
+        trace: [null, null],
+        resolve: [null, null],
+        accumulate: fullScreenPipeline(device, ssgiTemporalWgsl(), "accumulate", SCREEN_SHADING_FORMAT),
+      };
+    }
+    const gi = this.ssgi;
+    gi.trace[k] ??= fullScreenPipeline(device, ssgiTraceWgsl(multisampled), "ssgiTrace", SCREEN_SHADING_FORMAT);
+    gi.resolve[k] ??= fullScreenPipeline(device, ssgiResolveWgsl(multisampled), "resolve", SCREEN_SHADING_FORMAT);
+    const trace = gi.trace[k];
+    const resolve = gi.resolve[k];
+    const current = graph.createTexture("ssgi", { format: SCREEN_SHADING_FORMAT, ...half });
+    const then = graph.importTexture("ssgi.then", gi.history[gi.index]!);
+    const now = graph.importTexture("ssgi.now", gi.history[1 - gi.index]!);
+    // Last frame's resolved image: the TAA history it wrote, linear light before any tone map.
+    const radiance = graph.importTexture("ssgi.radiance", this.taa!.history[this.taa!.index]);
+    const target = graph.importTexture("ssgi.target", this.ensureContact());
+    device.queue.writeBuffer(gi.uniforms, 0, ssgiUniforms(view, projection, gi.frame, gi.valid, settings, gi.data));
+    gi.frame += 1;
+    const draw = (ctx: any, pipeline: any, into: any, entries: { binding: number; resource: any }[]) => {
+      const encoded = ctx.encoder.beginRenderPass({
+        colorAttachments: [{ view: into, clearValue: { r: 0, g: 0, b: 0, a: 0 }, loadOp: "clear", storeOp: "store" }],
+        ...ctx.timing,
+      });
+      encoded.setPipeline(pipeline);
+      encoded.setBindGroup(0, device.createBindGroup({ layout: pipeline.getBindGroupLayout(0), entries: [{ binding: 0, resource: { buffer: gi.uniforms } }, ...entries] }));
+      encoded.draw(3);
+      encoded.end();
+    };
+    graph.addPass("ssgi", "render", (pass) => {
+      pass.read(depth);
+      pass.read(gbuffer);
+      pass.read(velocity);
+      pass.read(radiance);
+      pass.write(current);
+      return (ctx) =>
+        draw(ctx, trace, ctx.texture(current).createView(), [
+          { binding: 1, resource: ctx.texture(depth).createView() },
+          { binding: 2, resource: ctx.texture(gbuffer).createView() },
+          { binding: 3, resource: ctx.texture(velocity).createView() },
+          { binding: 4, resource: ctx.texture(radiance).createView() },
+          { binding: 5, resource: gi.sampler },
+        ]);
+    });
+    graph.addPass("ssgi.accumulate", "render", (pass) => {
+      pass.read(current);
+      pass.read(then);
+      pass.read(velocity);
+      pass.write(now);
+      pass.keep();
+      return (ctx) =>
+        draw(ctx, gi.accumulate, ctx.texture(now).createView(), [
+          { binding: 1, resource: ctx.texture(current).createView() },
+          { binding: 2, resource: ctx.texture(then).createView() },
+          { binding: 3, resource: ctx.texture(velocity).createView() },
+          { binding: 4, resource: gi.sampler },
+        ]);
+    });
+    graph.addPass("ssgi.resolve", "render", (pass) => {
+      pass.read(depth);
+      pass.read(gbuffer);
+      pass.read(now);
+      pass.write(target);
+      // The scene passes read it through their group 0, which the graph doesn't see.
+      pass.keep();
+      return (ctx) =>
+        draw(ctx, resolve, ctx.texture(target).createView({ dimension: "2d", baseArrayLayer: 1, arrayLayerCount: 1 }), [
+          { binding: 1, resource: ctx.texture(depth).createView() },
+          { binding: 2, resource: ctx.texture(gbuffer).createView() },
+          { binding: 3, resource: ctx.texture(now).createView() },
+        ]);
+    });
+    gi.index = 1 - gi.index;
+    gi.valid = true;
+  }
 
   /**
    * Upload the packed light list, growing the storage buffer when it needs more
@@ -2138,7 +3281,8 @@ export class WebgpuSceneRenderer implements SceneRenderer {
           // blank for all three and the shader ignores them (pbr.z = 0), so the
           // layout is one shape for every draw.
           { binding: 3, visibility: SHADER_STAGE_FRAGMENT, texture: { sampleType: "float" } },
-          { binding: 4, visibility: SHADER_STAGE_FRAGMENT, texture: { sampleType: "float" } },
+          // The occlusion map; a GPU terrain's vertices read its relief from it (F6c).
+          { binding: 4, visibility: SHADER_STAGE_VERTEX | SHADER_STAGE_FRAGMENT, texture: { sampleType: "float" } },
           { binding: 5, visibility: SHADER_STAGE_FRAGMENT, texture: { sampleType: "float" } },
           // The shadow map is r32float — not filterable — and read via textureLoad,
           // so it declares unfilterable-float and needs no sampler. The linear-light
@@ -2148,20 +3292,24 @@ export class WebgpuSceneRenderer implements SceneRenderer {
           // The environment: its panorama, or (linear variant, F3a) its prefiltered cube.
           { binding: 7, visibility: SHADER_STAGE_FRAGMENT, texture: hdr ? { sampleType: "float", viewDimension: "cube" } : { sampleType: "float" } },
           // The SSAO buffer (r32float), read per fragment via textureLoad.
-          { binding: 8, visibility: SHADER_STAGE_FRAGMENT, texture: { sampleType: "unfilterable-float" } },
+          // The linear variant's is an array: the screen-space shading target's two layers (F3e-2).
+          { binding: 8, visibility: SHADER_STAGE_FRAGMENT, texture: hdr ? { sampleType: "unfilterable-float", viewDimension: "2d-array" } : { sampleType: "unfilterable-float" } },
           // The Modern-tier light list, read-only storage.
           { binding: 9, visibility: SHADER_STAGE_FRAGMENT, buffer: { type: "read-only-storage" } },
           // Per-instance transforms, read by the vertex stage.
           { binding: 10, visibility: SHADER_STAGE_VERTEX, buffer: { type: "read-only-storage" } },
-          { binding: 11, visibility: SHADER_STAGE_FRAGMENT, texture: { sampleType: "float" } },
+          // The baked light map: an array in the linear variant, for an HDR directional map's two layers (F3d).
+          { binding: 11, visibility: SHADER_STAGE_FRAGMENT, texture: hdr ? { sampleType: "float", viewDimension: "2d-array" } : { sampleType: "float" } },
           // Reflection probes: the panorama atlas (read via textureLoad), or the linear variant's cube array (F3b); and their boxes.
           { binding: 12, visibility: SHADER_STAGE_FRAGMENT, texture: hdr ? { sampleType: "float", viewDimension: "cube-array" } : { sampleType: "float" } },
           { binding: 13, visibility: SHADER_STAGE_FRAGMENT, buffer: { type: "read-only-storage" } },
           // The detail map, and the blend surface's map.
           { binding: 14, visibility: SHADER_STAGE_FRAGMENT, texture: { sampleType: "float" } },
-          { binding: 15, visibility: SHADER_STAGE_FRAGMENT, texture: { sampleType: "float" } },
+          { binding: 15, visibility: SHADER_STAGE_FRAGMENT, texture: { sampleType: "float", viewDimension: "2d-array" } },
           // The tangent-space normal map (P1a).
           { binding: 16, visibility: SHADER_STAGE_FRAGMENT, texture: { sampleType: "float" } },
+          // A GPU terrain's heights (F6c), read by the vertex stage.
+          ...(hdr ? [{ binding: 17, visibility: SHADER_STAGE_VERTEX, texture: { sampleType: "float" } }] : []),
         ],
       });
 
@@ -2176,13 +3324,13 @@ export class WebgpuSceneRenderer implements SceneRenderer {
       // same group with binding 0 declared multisampled.
       const depthEntries = (multisampled: boolean) => [
         { binding: 0, visibility: SHADER_STAGE_FRAGMENT, texture: multisampled ? { sampleType: "depth", multisampled: true } : { sampleType: "depth" } },
+        // The clustered lights' table and index list (EP8), then the probes (EP9, F3d-3), both in storage (F5b-0).
         { binding: 1, visibility: SHADER_STAGE_FRAGMENT, buffer: { type: "read-only-storage" } },
         { binding: 2, visibility: SHADER_STAGE_FRAGMENT, buffer: { type: "read-only-storage" } },
         { binding: 3, visibility: SHADER_STAGE_FRAGMENT, buffer: { type: "uniform" } },
         // The spot/point shadow atlas: the CPU's r32float distances, or the linear-light renderer's GPU depths (F2d).
         { binding: 4, visibility: SHADER_STAGE_FRAGMENT, texture: hdr ? { sampleType: "depth" } : { sampleType: "unfilterable-float" } },
         { binding: 5, visibility: SHADER_STAGE_FRAGMENT, buffer: { type: "read-only-storage" } },
-        { binding: 6, visibility: SHADER_STAGE_FRAGMENT, texture: { sampleType: "unfilterable-float", viewDimension: "3d" } },
         // The opaque scene's colour, for refraction (I5).
         { binding: 7, visibility: SHADER_STAGE_FRAGMENT, texture: { sampleType: "unfilterable-float" } },
         // The split-sum DFG table (F1c), read by the linear-light shader.
@@ -2195,15 +3343,19 @@ export class WebgpuSceneRenderer implements SceneRenderer {
         { binding: 13, visibility: SHADER_STAGE_FRAGMENT, buffer: { type: "read-only-storage" } },
         // The comparison sampler that filters the sun's GPU cascades (F2a; group 0 binds the cascades).
         { binding: 11, visibility: SHADER_STAGE_FRAGMENT, sampler: { type: "comparison" } },
+        // The physical sky's aerial perspective (F5a-2), and the volumetric fog (F5b), read by the linear-light shader.
+        ...(hdr ? [{ binding: 14, visibility: SHADER_STAGE_FRAGMENT, buffer: { type: "uniform" } }, { binding: 6, visibility: SHADER_STAGE_FRAGMENT, texture: { sampleType: "float", viewDimension: "3d" } }] : []),
       ];
       const depthLayout = device.createBindGroupLayout({ entries: depthEntries(false) });
       const depthLayoutMs = device.createBindGroupLayout({ entries: depthEntries(true) });
       const layout = device.createPipelineLayout({ bindGroupLayouts: [bindGroupLayout, depthLayout] });
       const layoutMs = device.createPipelineLayout({ bindGroupLayouts: [bindGroupLayout, depthLayoutMs] });
-      const pipelinesFor = (code: string, samples = 1, reflect = false, prepass = false): PipelineSet => {
+      // `make` creates each pipeline: at once, or (F1e) asynchronously, its set then a set of promises.
+      const pipelinesFor = (code: string, samples = 1, reflect = false, prepass = false, make: (descriptor: object) => any = (d) => device.createRenderPipeline(d)): PipelineSet => {
         const multisampled = samples > 1;
-        const module = device.createShaderModule({ code: multisampled ? multisampledDepthShader(code) : code });
-        const pipelineFor = (blend: unknown, depthWrite: boolean, depthCompare = "less", gbuffer = false) => device.createRenderPipeline({
+        // One module per distinct source on the device (F1e), whichever renderer asks.
+        const module = cachedShaderModule(device, multisampled ? multisampledDepthShader(code) : code);
+        const pipelineFor = (blend: unknown, depthWrite: boolean, depthCompare = "less", gbuffer = false) => make({
           layout: multisampled ? layoutMs : layout,
           ...(multisampled ? { multisample: { count: samples } } : {}),
           vertex: {
@@ -2279,27 +3431,32 @@ export class WebgpuSceneRenderer implements SceneRenderer {
         usage: 0x10 | 0x04, // RENDER_ATTACHMENT | TEXTURE_BINDING
       });
       const clusterBuffers = {
-        table: device.createBuffer({ size: CLUSTER_CELLS * 8, usage: 0x80 | 0x08 }), // STORAGE | COPY_DST
-        index: device.createBuffer({ size: CLUSTER_INDEX_CAP * 4, usage: 0x80 | 0x08 }),
+        // The cells' table, then the index list after it (F5b-0).
+        data: device.createBuffer({ size: CLUSTER_CELLS * 8 + CLUSTER_INDEX_CAP * 4, usage: 0x80 | 0x08 }), // STORAGE | COPY_DST
         params: device.createBuffer({ size: FRAME_BYTES, usage: 0x40 | 0x08 }), // UNIFORM | COPY_DST
       };
       // Spot/point shadows (EP8c): the atlas (a 1×1 stand-in until a light casts) and the tiles' views.
       const shadowTiles = device.createBuffer({ size: Math.max(MAX_LOCAL_SHADOW_TILES, MAX_GPU_LOCAL_TILES) * LOCAL_TILE_FLOATS * 4, usage: 0x80 | 0x08 }); // STORAGE | COPY_DST
       // The split-sum DFG table (F1c), integrated once on the CPU.
-      const dfg = dfgTable();
+      const dfg = brdfLut();
       const dfgBuffer = device.createBuffer({ size: dfg.byteLength, usage: 0x80 | 0x08 }); // STORAGE | COPY_DST
       device.queue.writeBuffer(dfgBuffer, 0, dfg);
       // The linearly transformed cosines' tables (F2e-2), decoded once.
       const ltc = ltcTables();
-      const ltcBuffer = device.createBuffer({ size: ltc.byteLength, usage: 0x80 | 0x08 }); // STORAGE | COPY_DST
+      // The IES profiles (F9d) follow the tables in the same buffer.
+      const ltcBuffer = device.createBuffer({ size: ltc.byteLength + IES_MAX_PROFILES * IES_VEC4S * 16, usage: 0x80 | 0x08 }); // STORAGE | COPY_DST
       device.queue.writeBuffer(ltcBuffer, 0, ltc);
       // The projected decals (F1f): a fixed buffer, zeroed (no boxes) until a frame has some.
       const decalBuffer = device.createBuffer({ size: DECAL_BUFFER_WORDS * 4, usage: 0x80 | 0x08 }); // STORAGE | COPY_DST
+      // The aerial perspective (F5a-2): written in compute for each camera, read as a uniform by the scene.
+      const aerialBuffer = device.createBuffer({ size: AERIAL_LUT_BYTES, usage: 0x40 | 0x80 | 0x04 }); // UNIFORM | STORAGE | COPY_SRC (read back by its tests)
+      // The volumetric fog's volume (F5b): a 1³ stand-in until a frame has fog, then the fog's own.
+      const fogVolume = { texture: device.createTexture({ size: { width: 1, height: 1, depthOrArrayLayers: 1 }, dimension: "3d", format: FOG_FORMAT, usage: 0x04 }) };
       const iblSampler = device.createSampler({ magFilter: "linear", minFilter: "linear", mipmapFilter: "linear", addressModeU: "clamp-to-edge", addressModeV: "clamp-to-edge", addressModeW: "clamp-to-edge" });
       const atlasBlank = hdr
         ? device.createTexture({ size: { width: 1, height: 1 }, format: "depth32float", usage: 0x04 | 0x10 }) // TEXTURE_BINDING | RENDER_ATTACHMENT
         : device.createTexture({ size: { width: 1, height: 1 }, format: "r32float", usage: 0x04 | 0x02 });
-      const probesBlank = device.createTexture({ size: { width: 1, height: 1, depthOrArrayLayers: 1 }, dimension: "3d", format: "rgba32float", usage: 0x04 | 0x02 });
+      const probesBlank = device.createBuffer({ size: 16, usage: 0x80 | 0x08 }); // STORAGE | COPY_DST: one zeroed texel
       // Refraction (I5): the opaque scene's colour, copied (or resolved) into this as the
       // see-through pass begins; a 1×1 blank stands in for it in the opaque pass.
       const behind = device.createTexture({ size: { width, height }, format: colourFormat, usage: 0x04 | 0x02 | 0x10 }); // TEXTURE_BINDING | COPY_DST | RENDER_ATTACHMENT (a resolve target)
@@ -2310,7 +3467,7 @@ export class WebgpuSceneRenderer implements SceneRenderer {
       // depth-only pipeline that draws them (the linear-light renderer's alone).
       const cascadeLayout = device.createBindGroupLayout({ entries: [{ binding: 12, visibility: SHADER_STAGE_VERTEX, buffer: { type: "uniform" } }] });
       const cascadeViews = Array.from({ length: CASCADE_COUNT }, () => {
-        const buffer = device.createBuffer({ size: 64, usage: 0x40 | 0x08 }); // UNIFORM | COPY_DST
+        const buffer = device.createBuffer({ size: 80, usage: 0x40 | 0x08 }); // UNIFORM | COPY_DST: a CasterView
         return { buffer, group: device.createBindGroup({ layout: cascadeLayout, entries: [{ binding: 12, resource: { buffer } }] }) };
       });
       const casterLayout = device.createBindGroupLayout({
@@ -2326,6 +3483,8 @@ export class WebgpuSceneRenderer implements SceneRenderer {
           { binding: 1, visibility: SHADER_STAGE_FRAGMENT, sampler: { type: "filtering" } },
           { binding: 2, visibility: SHADER_STAGE_FRAGMENT, texture: { sampleType: "float" } },
           { binding: 10, visibility: SHADER_STAGE_VERTEX, buffer: { type: "read-only-storage" } },
+          // A GPU terrain's heights (F6c): its casters draw through the cut-out pipeline.
+          ...(hdr ? [{ binding: 17, visibility: SHADER_STAGE_VERTEX, texture: { sampleType: "float" } }] : []),
         ],
       });
       const casterModule = hdr ? device.createShaderModule({ code: sceneShader(null, false, hdr) }) : null;
@@ -2349,7 +3508,7 @@ export class WebgpuSceneRenderer implements SceneRenderer {
       });
       const localViews = hdr
         ? Array.from({ length: MAX_GPU_LOCAL_TILES }, () => {
-            const buffer = device.createBuffer({ size: 64, usage: 0x40 | 0x08 }); // UNIFORM | COPY_DST
+            const buffer = device.createBuffer({ size: 80, usage: 0x40 | 0x08 }); // UNIFORM | COPY_DST: a CasterView
             return { buffer, group: device.createBindGroup({ layout: cascadeLayout, entries: [{ binding: 12, resource: { buffer } }] }) };
           })
         : [];
@@ -2415,17 +3574,17 @@ export class WebgpuSceneRenderer implements SceneRenderer {
       };
       const makeGroups = (atlas: any, probes: any) => {
         const shared = [
-          { binding: 1, resource: { buffer: clusterBuffers.table } },
-          { binding: 2, resource: { buffer: clusterBuffers.index } },
+          { binding: 1, resource: { buffer: clusterBuffers.data } },
+          { binding: 2, resource: { buffer: probes } },
           { binding: 3, resource: { buffer: clusterBuffers.params } },
           { binding: 4, resource: atlas.createView() },
           { binding: 5, resource: { buffer: shadowTiles } },
-          { binding: 6, resource: probes.createView({ dimension: "3d" }) },
           { binding: 8, resource: { buffer: dfgBuffer } },
           { binding: 9, resource: iblSampler },
           { binding: 10, resource: { buffer: ltcBuffer } },
           { binding: 13, resource: { buffer: decalBuffer } },
           { binding: 11, resource: cascades.sampler },
+          ...(hdr ? [{ binding: 14, resource: { buffer: aerialBuffer } }, { binding: 6, resource: fogVolume.texture.createView({ dimension: "3d" }) }] : []),
         ];
         return {
           blank: device.createBindGroup({ layout: depthLayout, entries: [{ binding: 0, resource: blankDepth.createView() }, ...shared, { binding: 7, resource: behindBlank.createView() }] }),
@@ -2436,17 +3595,17 @@ export class WebgpuSceneRenderer implements SceneRenderer {
       };
       const makeGroupsMs = (atlas: any, probes: any, blank: any, depth: any) => {
         const shared = [
-          { binding: 1, resource: { buffer: clusterBuffers.table } },
-          { binding: 2, resource: { buffer: clusterBuffers.index } },
+          { binding: 1, resource: { buffer: clusterBuffers.data } },
+          { binding: 2, resource: { buffer: probes } },
           { binding: 3, resource: { buffer: clusterBuffers.params } },
           { binding: 4, resource: atlas.createView() },
           { binding: 5, resource: { buffer: shadowTiles } },
-          { binding: 6, resource: probes.createView({ dimension: "3d" }) },
           { binding: 8, resource: { buffer: dfgBuffer } },
           { binding: 9, resource: iblSampler },
           { binding: 10, resource: { buffer: ltcBuffer } },
           { binding: 13, resource: { buffer: decalBuffer } },
           { binding: 11, resource: cascades.sampler },
+          ...(hdr ? [{ binding: 14, resource: { buffer: aerialBuffer } }, { binding: 6, resource: fogVolume.texture.createView({ dimension: "3d" }) }] : []),
         ];
         return {
           blank: device.createBindGroup({ layout: depthLayoutMs, entries: [{ binding: 0, resource: blank.createView() }, ...shared, { binding: 7, resource: behindBlank.createView() }] }),
@@ -2464,6 +3623,8 @@ export class WebgpuSceneRenderer implements SceneRenderer {
         dfg: dfgBuffer,
         ltc: ltcBuffer,
         decals: decalBuffer,
+        aerial: aerialBuffer,
+        fogVolume,
         atlas: atlasBlank,
         atlasBlank: true,
         probes: probesBlank,
@@ -2760,38 +3921,143 @@ export class WebgpuSceneRenderer implements SceneRenderer {
    * texture is premultiplied RGBA8 with alpha 0 where nothing drew, and holds
    * this frame until the next render.
    */
-  renderToTexture(instances: readonly MeshSceneInstance[], draw: GpuSceneDraw): any | null {
+  renderToTexture(instances: readonly MeshSceneInstance[], given: GpuSceneDraw): any | null {
     if (this.destroyed) return null;
+    // The path-traced reference (F10b) in place of the frame, accumulating while the view holds.
+    if (this.hdr && given.viewMode === "pathTraced") {
+      this.pathTracer ??= PathTracer.create(this.device);
+      return this.pathTracer.render(applyScenePasses(instances, given), given, this.width, this.height);
+    }
+    let draw = this.hdr ? viewModeDraw(given) : given;
+    // Volumetric effects (F8b): their fluids stepped, and the light a burning one casts joining the frame's.
+    if (this.volumes?.active) {
+      this.volumes.simulate(draw.particleDt ?? 1 / 60);
+      const burning = this.volumes.volumes.flatMap((v) => {
+        const light = volumeLight(v.effect, v.at, v.age);
+        return light ? [{ kind: "point" as const, position: light.position, color: light.color, intensity: light.intensity, range: light.range, falloff: "inverseSquare" as const }] : [];
+      });
+      if (burning.length > 0) draw = { ...draw, lights: [...(draw.lights ?? []), ...burning] };
+    }
+    // Terrains drawn from their heightfields (F6c): this frame's nodes, as copies of each one's patch.
+    if (this.hdr && draw.terrains && draw.terrains.length > 0) {
+      const ground = this.terrainNodes(draw);
+      instances = [...instances, ...ground.drawn];
+      if (ground.casting.length > 0) {
+        if (draw.sunShadow) draw = { ...draw, sunShadow: { ...draw.sunShadow, casters: [...draw.sunShadow.casters, ...ground.casting] } };
+        if (draw.localShadowCasters) draw = { ...draw, localShadowCasters: [...draw.localShadowCasters, ...ground.casting] };
+      }
+    }
     if (draw.prepass === true) this.matchMotion(instances);
-    const visible = applyScenePasses(instances, draw);
+    // With GPU culling (F0e) the GPU picks the LOD level of each copy of a chain with many copies (each level is a draw,
+    // so a chain with few is cheaper chosen here).
+    const gpuLod = this.hdr && draw.prepass === true && draw.gpuCull === true && draw.lod === true;
+    this.frameGpuLods = gpuLod ? manyCopyChains(instances) : null;
+    const visible = gpuLod ? applyScenePasses(lodsBesides(instances, this.frameGpuLods!, cameraPositionFromView(draw.view)), { ...draw, lod: false }) : applyScenePasses(instances, draw);
     try {
       this.submit(visible, draw, false);
     } catch {
       return null;
     }
-    return this.colourTexture;
+    return this.frameOutput ?? this.colourTexture;
+  }
+
+  /** This frame's nodes of each GPU terrain (F6c), drawn and (for a terrain that casts) casting. */
+  private terrainNodes(draw: GpuSceneDraw): { drawn: MeshSceneInstance[]; casting: MeshSceneInstance[] } {
+    const eye = cameraPositionFromView(draw.view);
+    const drawn: MeshSceneInstance[] = [];
+    const casting: MeshSceneInstance[] = [];
+    for (const source of draw.terrains ?? []) {
+      let terrain = this.gpuTerrains.get(source.terrain);
+      if (!terrain) {
+        terrain = new GpuTerrain(
+          {
+            device: this.device,
+            upload: (texture, colour) => this.uploadTexture(texture, colour),
+            mips: (texture, levels, format) => this.mipmaps.generate(texture, levels, format),
+            adopt: (key, texture, colour) => (this.mips && colour ? this.colourTextures : this.textures).set(key, texture),
+            blank: this.blankTexture,
+          },
+          source.terrain,
+        );
+        this.gpuTerrains.set(source.terrain, terrain);
+        this.terrainPatches.set(terrain.mesh.primitives[0]!, terrain);
+        this.terrainList.push(terrain);
+      }
+      const nodes = terrain.frame(eye, source.layers);
+      drawn.push(...nodes);
+      if (source.terrain.castShadows) casting.push(...nodes);
+    }
+    return { drawn, casting };
+  }
+
+  /** Give back meshes' GPU geometry (F6d): their buffers go once the queued frames are done with them, and a later draw uploads them again. */
+  releaseMeshes(meshes: readonly MeshAsset[]): void {
+    for (const mesh of meshes) {
+      const primitives = this.meshes.get(mesh);
+      // A skinned or cloth mesh is live: it stays.
+      if (!primitives || primitives.some((p) => p.skin || p.cloth)) continue;
+      this.meshes.delete(mesh);
+      for (const p of primitives) {
+        destroySafely(p.vertexBuffer);
+        destroySafely(p.indexBuffer);
+        if (p.previousBuffer) destroySafely(p.previousBuffer);
+      }
+    }
+  }
+
+  /** The heights a draw's primitive binds (F6c): a GPU terrain's patch's, else the blank. */
+  private terrainHeightsOf(primitive: MeshPrimitive): any {
+    return this.terrainPatches.get(primitive)?.heightView ?? this.blankTexture.createView();
+  }
+
+  /** Samples each pixel of the path-traced reference holds (F10b); 0 when it isn't shown. */
+  get referenceSamples(): number {
+    return this.pathTracer?.samples ?? 0;
+  }
+
+  /** Render the path-traced reference of `instances` through `draw` at any size up to 8K (F10b; {@link captureReference}). */
+  captureReference(instances: readonly MeshSceneInstance[], draw: GpuSceneDraw, options: CaptureOptions): Promise<ReferenceCapture> {
+    return captureReference(this.device, applyScenePasses(instances, draw), draw, options);
   }
 
   settle(draw: SceneDraw): FrameState {
     if (this.destroyed) return "current";
-    if (this.latest) compositeFrame(this.latest, draw);
+    if (this.latest && this.latest.length === draw.width * draw.height * 4) compositeFrame(this.latest, draw);
     if (this.latestSeq >= this.submitted) return "current";
     return this.readSeq >= this.submitted ? "pending" : "stale";
   }
 
   /** Encode and submit one frame, and start a readback if a buffer is free (or, with `readback` false, leave it in the colour texture). */
   private submit(instances: readonly MeshSceneInstance[], draw: GpuSceneDraw, readback = true): void {
+    // Texture streaming (F1b) on the AAA tier with mips, under the draw's budget; what the last round replaced goes now.
+    for (const t of this.retired) destroySafely(t);
+    this.retired = [];
+    if (this.hdr && this.mips && draw.textureBudget) this.ensureStreaming(draw.textureBudget);
     // Temporal anti-aliasing (I2): this frame's jittered projection and the resolve's uniforms.
-    const temporal = draw.temporal === true ? this.temporalState.begin(draw.view, draw.projection, this.width, this.height) : null;
+    // Temporal upscaling (F4b): a linear-light temporal frame with a prepass, shown larger than it renders.
+    const display = this.hdr && draw.temporal === true && draw.prepass === true && draw.upscale && (draw.upscale.width > this.width || draw.upscale.height > this.height) ? { width: draw.upscale.width, height: draw.upscale.height } : null;
+    const temporal = draw.temporal === true ? this.temporalState.begin(draw.view, draw.projection, this.width, this.height, display ? upscaleJitterPhases(this.width, display.width) : undefined) : null;
     if (!temporal) this.temporalState.reset();
+    this.frameOutput = null;
     const viewProj = multiplyMat4(temporal ? temporal.projection : draw.projection, draw.view);
 
     // A new frame: a skinned mesh re-uploaded now keeps last frame's vertices for the velocity buffer (F0c).
     this.frameIndex += 1;
     const prepass = draw.prepass === true;
+    this.keepsPrevious = prepass;
     // Batch the copies of each primitive that bind the same textures: one
     // uniform (addressed by a dynamic offset) and one instanced draw per batch.
-    const { batches: draws, instanceCount } = batchInstances(instances, (mesh) => this.uploadMesh(mesh), cameraPositionFromView(draw.view));
+    // GPU culling (F0e): the frustum and a Hi-Z pyramid decide which copies draw, and each copy's LOD level.
+    const gpuCull = this.hdr && prepass && draw.gpuCull === true;
+    const { batches: draws, instanceCount } = batchInstances(instances, (mesh) => this.uploadMesh(mesh), cameraPositionFromView(draw.view), gpuCull ? this.frameGpuLods : null, gpuCull);
+    // Cluster hierarchies (F6a): each clustered copy's cut chosen and culled on the GPU, by job.
+    const clusterJob = new Map<number, number>();
+    if (gpuCull) {
+      draws.forEach((entry, index) => {
+        if (!entry.primitive.clusterLod || entry.source || entry.alpha >= 2 || entry.refract || entry.models.length !== 1) return;
+        clusterJob.set(index, clusterJob.size);
+      });
+    }
     if (draws.length === 0) {
       this.prepassed = null;
       // A frame left on the GPU still has to say "nothing drew": clear it.
@@ -2820,11 +4086,22 @@ export class WebgpuSceneRenderer implements SceneRenderer {
     const cascadeFit = sun && casters.length > 0 ? fitCascades({ view: draw.view, projection: draw.projection, toLight: sun.toLight, distance: sun.distance, size: sun.size, reach: sun.reach }) : null;
     this.frameCascades = cascadeFit && sun ? { cascades: cascadeFit, size: sun.size, strength: sun.strength ?? 1, softness: sun.softness ?? SUN_SOFTNESS } : null;
     if (cascadeFit && sun) this.ensureCascadeTexture(sun.size);
+    // Virtual shadow maps (F2b): the pages the last marks asked for, given out and drawn as the pool allows.
+    this.frameVsm = this.hdr && prepass && sun !== null && cascadeFit !== null && draw.virtualShadows ? this.planVsm(draw, sun.toLight, sun.strength ?? 1, sun.softness ?? SUN_SOFTNESS, temporal ? temporal.projection : draw.projection) : null;
 
     this.ensureUniformCapacity(draws.length + casters.length);
     // With a prepass, the frame's motion transforms (F0c) follow its transforms in the instance buffer; the casters' follow those.
     const casterBase = prepass ? instanceCount * 2 : instanceCount;
-    this.ensureInstanceCapacity(casterBase + (casting?.instanceCount ?? 0));
+    // GPU culling (F0e) packs each round's survivors, with their motion records, after the casters (the second round over the first's, once the prepass has drawn them).
+    const cullRegion = casterBase + (casting?.instanceCount ?? 0);
+    // Each draw's place in the region (a LOD sibling's copies count again: each level packs its own), and the region's copies.
+    let cullTotal = 0;
+    const cullDst = gpuCull ? draws.map((entry) => ((cullTotal += entry.models.length), cullTotal - entry.models.length)) : [];
+    // With GPU culling, the sun's casters are culled per cascade too (F0e): each cascade's survivors after the region's.
+    const casterCull = gpuCull && cascadeFit !== null && casters.length > 0;
+    const casterRegion = cullRegion + (gpuCull ? cullTotal * 2 : 0);
+    const casterCopies = casting?.instanceCount ?? 0;
+    this.ensureInstanceCapacity(casterRegion + (casterCull ? cascadeFit!.length * casterCopies : 0));
     // Resolved once: the light and view direction are per frame, not per draw, and
     // normalising them per primitive would be the same answer computed many times.
     const light = resolveLight(draw.lightDirection, draw.ambient);
@@ -2898,7 +4175,9 @@ export class WebgpuSceneRenderer implements SceneRenderer {
     // Contact shadows (F2c) need the prepass's depths and a sun whose shadow they finish; GTAO (F3c) the depths alone.
     this.frameContact = this.hdr && prepass && this.frameCascades !== null && Boolean(draw.lightDirection);
     this.frameGtao = this.hdr && prepass && draw.ambientOcclusion !== false;
-    this.bindSsao(ssao, this.frameContact || this.frameGtao);
+    // SSGI (F3e-2) reads last frame's resolved image: a temporal frame after another.
+    this.frameSsgi = this.hdr && prepass && temporal !== null && temporal.uniforms[18] === 1 && this.taa !== null && draw.screenSpaceGi ? draw.screenSpaceGi : null;
+    this.bindSsao(ssao, this.frameContact || this.frameGtao || this.frameSsgi !== null);
 
     // Modern-tier lights: packed global-first for the WGSL loop, the rest
     // sorted into the view's cells (EP8) so each fragment shades only its own.
@@ -2906,16 +4185,35 @@ export class WebgpuSceneRenderer implements SceneRenderer {
     // With a prepass the scene shades with its depths bound (F2d-3): how to read them.
     const drawnProjection = temporal ? temporal.projection : draw.projection;
     this.frameDepthView = this.hdr && prepass ? { viewProj, terms: [drawnProjection[10]!, drawnProjection[14]!] } : null;
-    const { ordered } = this.clusterLights(localPlan ? { ...draw, lights: localPlan.lights, localShadows: null } : draw);
-    this.uploadLights(packLights(ordered, this.hdr));
+    this.frameFog = this.prepareFog(draw);
+    this.frameGi = this.hdr && draw.dynamicGi && draw.environment?.probeVolume ? draw.dynamicGi : null;
+    // Subsurface scattering (F1d-2): split and blurred on the AAA tier with a prepass, unless multisampled or diagnostic.
+    this.frameSss = this.hdr && prepass && draw.antialias !== true && viewModeCode(draw.viewMode) === 0 && draws.some((entry) => (entry.primitive.material.subsurface ?? 0) > 0);
+    if (this.hdr) this.sortHairCards(draws, eye);
+    const { ordered, globalCount, clusters: cells } = this.clusterLights(localPlan ? { ...draw, lights: localPlan.lights, localShadows: null } : draw);
+    this.uploadLights(packLights(ordered, this.hdr, this.hdr ? this.iesSlots(ordered) : null));
+    // The fog's local lights (F5b-2): as the scene's, by the same cells and tiles.
+    if (this.frameFog) {
+      const tiles = this.frameLocalTiles !== null && this.frameLocalTiles.length > 0;
+      this.volumetricFog!.lights({ clusterParams: cells?.params ?? [1, 1, 1, 1], globalCount: cells ? globalCount : ordered.length, clustered: cells !== null, width: this.width, height: this.height, shadowBias: tiles ? LOCAL_SHADOW_BIAS : null });
+    }
     const lightCount = ordered.length;
 
     const camera = refractionCamera(draw.view, this.height);
     // Each material its own ID in the thin G-buffer (F0c), 1 and up: 0 is "nothing drew".
     const materialIds = new Map<object, number>();
+    const sssProfiles: SssProfile[] = [];
     const materialId = (material: object): number => {
       let id = materialIds.get(material);
-      if (id === undefined) materialIds.set(material, (id = materialIds.size + 1));
+      if (id === undefined) {
+        materialIds.set(material, (id = materialIds.size + 1));
+        // Its scattering profile, by the same ID (F1d-2).
+        const m = material as MeshPrimitive["material"];
+        if (this.frameSss && (m.subsurface ?? 0) > 0) {
+          const e = resolveExtensions(m);
+          sssProfiles.push({ id, color: e.subsurfaceColor, radius: e.subsurfaceRadius });
+        }
+      }
       return id;
     };
     // Motion (F0c): each copy's clip transform now and last frame, both without
@@ -2935,7 +4233,8 @@ export class WebgpuSceneRenderer implements SceneRenderer {
         entry.textures.emis !== null,
       );
       return {
-        mvp: multiplyMat4(viewProj, model),
+        // The uniform's clip and light transforms are never read: each copy's own come from the instance buffer (F0e).
+        mvp: model,
         normalBasis: normalBasis3x3(model),
         baseColor: entry.primitive.material.baseColorFactor,
         hasTexture: entry.textures.base !== null,
@@ -2946,14 +4245,17 @@ export class WebgpuSceneRenderer implements SceneRenderer {
         hasOcclusionMap: entry.textures.occ !== null,
         hasEmissiveMap: entry.textures.emis !== null,
         environment: draw.environment ?? null,
-        lightMvp: shadow ? multiplyMat4(shadow.lightViewProj, model) : null,
+        lightMvp: null,
         shadow: shadowParams,
         tonemap: draw.tonemap ?? null,
         hasSsao: ssao !== null,
-        hasLightmap: entry.textures.lm !== null,
+        // With real-time GI (F3e) every surface takes the live volume's light, a light-mapped one too.
+        hasLightmap: !this.frameGi && (entry.textures.lm !== null || (this.hdr && entry.textures.lmHdr !== null)),
+        hdrLightmap: !this.frameGi && this.hdr && entry.textures.lmHdr !== null,
         model,
         lightCount,
-        fog: draw.fog ?? null,
+        // A volumetric fog (F5b) takes the place of the painted fade.
+        fog: this.frameFog ? null : (draw.fog ?? null),
         eye,
         effect: entry.effect ?? null,
         time: draw.time ?? 0,
@@ -2964,9 +4266,12 @@ export class WebgpuSceneRenderer implements SceneRenderer {
           textured: entry.textures.blend !== null,
         }),
         layers: resolveLayers(entry.primitive.material, entry.textures.relief !== null),
+        extensions: resolveExtensions(entry.primitive.material),
+        frame: this.frameIndex,
         refraction: entry.refract ? resolveRefraction(entry.primitive.material, effectActive(entry.effect) ? entry.effect : null) : null,
         camera,
         water: waterUniform(entry.primitive.material, draw.time ?? 0),
+        waterLook: this.hdr ? waterLookUniform(entry.primitive.material) : null,
         waterAlong: waterAlong(entry.primitive.material),
         mapping: resolveMapping(entry.primitive.material),
         hasNormalMap: entry.textures.normal !== null,
@@ -2974,14 +4279,61 @@ export class WebgpuSceneRenderer implements SceneRenderer {
         materialId: materialId(entry.primitive.material),
         windBefore: entry.primitive.sway ? windThen : null,
         motionBase: prepass ? instanceCount : 0,
+        lodLevel: entry.lod ?? -1,
+        octahedral: entry.primitive.material.octahedral ?? null,
+        terrain: this.terrainPatches.get(entry.primitive)?.values ?? null,
         lightChannels: entry.channels,
         ...(this.hdr ? { probeCount: this.capturedProbes, receivesDecals: entry.alpha < 2 && !entry.refract } : {}),
       };
     };
+    // Each draw's uniform is written only when its inputs change (F0e): a slot whose draw is the one it held last frame,
+    // and that doesn't animate by itself, takes just the frame's fields, from the first slot written in full this frame.
+    if (this.uniformKeysFor !== this.uniformData) {
+      this.uniformKeys = [];
+      this.uniformModels = new Float32Array(this.uniformCapacity * 16);
+      this.uniformKeysFor = this.uniformData;
+    }
+    const keys = this.uniformKeys;
+    const lastModels = this.uniformModels;
+    const motionBase = prepass ? instanceCount : 0;
+    let frameSlot = -1;
+    const writeUniform = (index: number, entry: (typeof draws)[number], bases: { instanceBase: number; motionBase: number } | null) => {
+      const model = entry.models[0]!;
+      const t = entry.textures;
+      // Which maps are bound (the uniform's flags), not the texture objects themselves.
+      const maps = (t.base !== null ? 1 : 0) | (t.mr !== null ? 2 : 0) | (t.occ !== null ? 4 : 0) | (t.emis !== null ? 8 : 0) | (t.normal !== null ? 16 : 0) | (t.lm !== null ? 32 : 0) | (t.lmHdr !== null ? 64 : 0) | (t.detail !== null ? 128 : 0) | (t.blend !== null ? 256 : 0) | (t.relief !== null ? 512 : 0);
+      const key: unknown[] = [entry.primitive, entry.primitive.material, maps, entry.alpha, entry.refract, entry.effect ?? null, entry.lod ?? -1, entry.channels, materialId(entry.primitive.material), bases?.instanceBase ?? 0, bases?.motionBase ?? motionBase, this.frameGi !== null];
+      const last = keys[index];
+      // A GPU terrain's uniform follows the eye (F6c).
+      let same = !!last && frameSlot >= 0 && !uniformAnimates(entry.primitive.material, entry.alpha, entry.primitive.sway !== undefined, entry.refract, entry.effect) && !this.terrainPatches.has(entry.primitive);
+      for (let i = 0; same && i < key.length; i += 1) same = last![i] === key[i];
+      for (let i = 0; same && i < 16; i += 1) same = lastModels[index * 16 + i] === Math.fround(model[i]!);
+      if (same) {
+        copyFrameUniform(this.uniformData, index, frameSlot);
+        return;
+      }
+      writeInstanceUniform(this.uniformData, index, bases ? { ...uniformOf(entry), ...bases } : uniformOf(entry));
+      keys[index] = key;
+      lastModels.set(model, index * 16);
+      if (frameSlot < 0) frameSlot = index;
+    };
     let next = 0;
     draws.forEach((entry, index) => {
+      // A LOD sibling (F0e) shares its batch's copies, and their records.
+      if (entry.source) {
+        entry.first = entry.source.first;
+        writeUniform(index, entry, { instanceBase: cullRegion + cullDst[index]!, motionBase: cullTotal });
+        return;
+      }
       entry.first = next;
-      for (const model of entry.models) {
+      // On the AAA tier the GPU makes each copy's transforms from its model (F0e), and last frame's, in its motion record.
+      if (this.hdr) {
+        for (const model of entry.models) {
+          writeInstanceModel(this.instanceData, next, model);
+          if (prepass) writeInstanceModel(this.instanceData, instanceCount + next, this.motion.get(model) ?? model);
+          next += 1;
+        }
+      } else for (const model of entry.models) {
         writeInstanceTransform(this.instanceData, next, {
           mvp: multiplyMat4(viewProj, model),
           lightMvp: shadow ? multiplyMat4(shadow.lightViewProj, model) : null,
@@ -2998,7 +4350,8 @@ export class WebgpuSceneRenderer implements SceneRenderer {
         }
         next += 1;
       }
-      writeInstanceUniform(this.uniformData, index, uniformOf(entry));
+      // GPU culling (F0e): both rounds pack the batch's survivors at its place in their region, and its indirect draws start at 0.
+      writeUniform(index, entry, gpuCull ? { instanceBase: cullRegion + cullDst[index]!, motionBase: cullTotal } : null);
     });
     // The casters (F2a): each copy's model in the instance buffer after the frame's, their uniforms after the draws'.
     let nextCaster = casterBase;
@@ -3008,20 +4361,78 @@ export class WebgpuSceneRenderer implements SceneRenderer {
         writeInstanceTransform(this.instanceData, nextCaster, { mvp: model, lightMvp: null, model, normalBasis: IDENTITY_BASIS });
         nextCaster += 1;
       }
-      writeInstanceUniform(this.uniformData, draws.length + k, uniformOf(entry));
+      // A culled caster's batch sits at its own place in each cascade's region (F0e).
+      writeInstanceUniform(this.uniformData, draws.length + k, casterCull ? { ...uniformOf(entry), instanceBase: entry.first - casterBase } : uniformOf(entry));
+      this.uniformKeys[draws.length + k] = undefined;
     });
     this.device.queue.writeBuffer(this.uniformBuffer, 0, this.uniformData, 0, (draws.length + casters.length) * UNIFORM_FLOATS);
+    if (this.frameSss) {
+      this.sssProfiles ??= this.device.createBuffer({ size: SSS_MAX_PROFILES * 16, usage: 0x80 | 0x08 });
+      this.device.queue.writeBuffer(this.sssProfiles, 0, packSssProfiles(sssProfiles));
+    }
     this.device.queue.writeBuffer(this.instanceBuffer, 0, this.instanceData, 0, nextCaster * INSTANCE_FLOATS);
+    if (this.hdr && instanceCount > 0) {
+      const transforms = (this.transforms ??= new GpuTransforms(this.device));
+      transforms.prepare(instanceCount, { viewProj, lightViewProj: shadow ? shadow.lightViewProj : null, motion: prepass ? { now: viewProjNow, then: viewProjThen } : null });
+      const encoder = this.device.createCommandEncoder();
+      transforms.encode(encoder, this.instanceBuffer);
+      this.device.queue.submit([encoder.finish()]);
+    }
+    // GPU culling (F0e): each batch's sphere, widened by the wind's furthest bend; a batch whose vertices move, or that is see-through, is drawn whole.
+    if (gpuCull) {
+      this.culling ??= new GpuCulling(this.device);
+      const gust = Math.hypot(windNow[0], windNow[1]) * (1 + windNow[3]);
+      const sources: CullSource[] = draws
+        .map((entry, index) => ({ entry, index }))
+        .filter(({ entry }) => !entry.source)
+        .map(({ entry, index }) => {
+          const p = entry.primitive;
+          // A clustered copy is culled cluster by cluster (F6a): whole here, so its record is always packed.
+          const moves = p.dynamic !== undefined || entry.alpha >= 2 || entry.refract || clusterJob.has(index) || compiledGraphOf(p.material)?.outputs.worldPositionOffset !== undefined;
+          const s = moves ? null : primitiveSphere(p);
+          return { first: entry.first, count: entry.models.length, sphere: s ? [s[0], s[1], s[2], s[3] + s[4] * gust] : null };
+        });
+      const batches: CullBatch[] = draws.map((entry, index) => ({
+        first: entry.first,
+        count: entry.models.length,
+        indexCount: entry.geometry.indexCount,
+        dst: cullDst[index]!,
+        lod: entry.lodChain ? { level: entry.lod ?? 0, levels: entry.lodChain.meshes.length, distances: entry.lodChain.distances } : null,
+      }));
+      // Two phases where the pyramid can read the prepass's depths: not anti-aliased.
+      this.culling.plan(sources, batches, instanceCount, cullRegion, cullTotal, viewProj, eye, draw.antialias !== true);
+      if (clusterJob.size > 0) {
+        this.clusterRendering ??= new ClusterRendering(this.device);
+        const jobs: ClusterJob[] = [];
+        for (const [index] of clusterJob) {
+          const entry = draws[index]!;
+          jobs.push({ record: entry.first, lod: entry.primitive.clusterLod!, twoSided: !entry.primitive.clusterLod!.closed });
+        }
+        this.clusterRendering.plan(jobs);
+      }
+      if (casterCull) {
+        this.casterCulling ??= new CasterCulling(this.device);
+        const casterBatches: CasterBatch[] = casters.map((entry) => {
+          const p = entry.primitive;
+          const moves = p.dynamic !== undefined || compiledGraphOf(p.material)?.outputs.worldPositionOffset !== undefined;
+          const sphere = moves ? null : primitiveSphere(p);
+          return { first: entry.first, count: entry.models.length, dst: entry.first - casterBase, indexCount: entry.geometry.indexCount, sphere: sphere ? [sphere[0], sphere[1], sphere[2], sphere[3] + sphere[4] * gust] : null };
+        });
+        this.casterCulling.plan(casterBatches, cascadeFit!.map((c) => c.viewProj), casterRegion, casterCopies);
+      }
+    }
+    this.frameCull = gpuCull ? this.culling : null;
     this.lastViewProj = viewProjNow;
     this.lastWind = windNow;
     let triangles = 0;
-    for (const entry of draws) triangles += (entry.geometry.indexCount / 3) * entry.models.length;
+    for (const entry of draws) if (!entry.source) triangles += (entry.geometry.indexCount / 3) * entry.models.length;
     this.lastFrameStats = {
       drawCalls: draws.length,
       instances: instanceCount,
       triangles,
       gpuMs: this.timer?.lastMs ?? null,
       ...(this.timer && this.timer.lastPasses.length > 0 ? { passes: this.timer.lastPasses } : {}),
+      ...(this.streamer ? { textures: this.streamer.stats() } : {}),
     };
 
     // Soft edges (EP6b) need the opaque depth readable, so a frame that has
@@ -3038,26 +4449,74 @@ export class WebgpuSceneRenderer implements SceneRenderer {
     // Anti-aliased (I1): draw into multisampled targets and resolve into the colour texture as the last scene pass ends.
     const msaa = draw.antialias === true ? this.ensureMsaa() : null;
     const reflections = draw.reflections === true ? this.ensureReflections() : null;
-    const drawRange = (pass: any, from: number, to: number, depthGroup: any) => {
+    // Overdraw (F10a) adds every fragment up, depth unwritten.
+    const overdraw = this.hdr && viewModeCode(draw.viewMode) === 11;
+    const cull = this.frameCull;
+    // With GPU culling the scene passes' commands hold frame to frame: each is recorded once into a bundle (F0e).
+    const bundles = cull ? (this.bundles ??= new BundleCache(this.device)) : null;
+    // The cluster pass's buffers this frame (F6a), when anything is clustered, and the view it cuts for:
+    // the cull's, with the eye and a radian's pixels on screen (the projection's y scale × half the height).
+    const clusters = cull && clusterJob.size > 0 ? this.clusterRendering : null;
+    const clusterView = { viewProj, eye, pixelsPerRadian: (draw.projection[5]! * this.height) / 2, size: [this.width, this.height] as [number, number] };
+    const replay = (pass: any, slot: string, target: BundleTarget, key: unknown[], record: (encoder: any) => void) => {
+      if (!bundles) return record(pass);
+      pass.executeBundles([bundles.get(slot, target, key, record)]);
+    };
+    const drawRange = (pass: any, from: number, to: number, depthGroup: any, slot = "", target: BundleTarget | null = null) => {
+      if (bundles && target) {
+        const key: unknown[] = [depthGroup, from, to, cull!.args, draws.length, this.uniformBuffer, this.instanceBuffer, clusters?.output ?? null, clusters?.args ?? null, clusterJob.size];
+        for (let index = from; index < to; index += 1) {
+          const entry = draws[index]!;
+          const set = this.pipelinesOf(entry.primitive.material, msaa ? MSAA_SAMPLES : 1, reflections !== null, prepass);
+          key.push(overdraw ? set.add : entry.refract ? set.blend : entry.alpha === 3 ? set.add : entry.alpha === 2 ? set.blend : set.opaque, this.bindGroupFor(entry.primitive, entry.textures), entry.geometry.vertexBuffer, entry.geometry.indexBuffer);
+        }
+        replay(pass, slot, target, key, (encoder) => drawRangeDirect(encoder, from, to, depthGroup));
+        return;
+      }
+      drawRangeDirect(pass, from, to, depthGroup);
+    };
+    const drawRangeDirect = (pass: any, from: number, to: number, depthGroup: any) => {
       pass.setBindGroup(1, depthGroup);
       let bound: any = null;
       for (let index = from; index < to; index += 1) {
         const entry = draws[index]!;
         const set = this.pipelinesOf(entry.primitive.material, msaa ? MSAA_SAMPLES : 1, reflections !== null, prepass);
         // A refracting draw covers what it bends (premultiplied, alpha 1), or blends or adds as usual where it bends nothing.
-        const wanted = entry.refract ? set.blend : entry.alpha === 3 ? set.add : entry.alpha === 2 ? set.blend : set.opaque;
+        const wanted = overdraw ? set.add : entry.refract ? set.blend : entry.alpha === 3 ? set.add : entry.alpha === 2 ? set.blend : set.opaque;
         if (wanted !== bound) {
           pass.setPipeline(wanted);
           bound = wanted;
         }
         pass.setBindGroup(0, this.bindGroupFor(entry.primitive, entry.textures), [index * UNIFORM_STRIDE]);
         pass.setVertexBuffer(0, entry.geometry.vertexBuffer);
+        const job = clusterJob.get(index);
+        if (job !== undefined && clusters) {
+          // Its cut (F6a): the indices the cluster pass wrote, drawn as many as it kept.
+          pass.setIndexBuffer(clusters.output, "uint32", clusters.regionOffset(job), clusters.regionBytes(job));
+          pass.drawIndexedIndirect(clusters.args, clusters.argsOffset(job, 1));
+          continue;
+        }
         pass.setIndexBuffer(entry.geometry.indexBuffer, "uint32");
-        pass.drawIndexed(entry.geometry.indexCount, entry.models.length, 0, 0, entry.first);
+        if (cull) pass.drawIndexedIndirect(cull.args, cull.argsOffset(2, index));
+        else pass.drawIndexed(entry.geometry.indexCount, entry.models.length, 0, 0, entry.first);
       }
     };
     // The prepass draws every batch the opaque pipeline does: opaque and cut-out, not refracting.
-    const prepassRange = (pass: any) => {
+    // With the two-phase cull (F0e) it draws twice: last frame's visible copies (round 0), then the rest it can't rule out (1).
+    const prepassRange = (pass: any, target: BundleTarget | null = null, round: 0 | 1 = 0) => {
+      if (bundles && target) {
+        const key: unknown[] = [(msaa ? msaa.groups : this.depthGroups).blank, cull!.args, draws.length, this.uniformBuffer, this.instanceBuffer, round, clusters?.output ?? null, clusters?.args ?? null, clusterJob.size];
+        for (const entry of draws) {
+          if (entry.refract || entry.alpha >= 2) continue;
+          const moved = entry.geometry.previousBuffer && entry.geometry.movedFrame === this.frameIndex;
+          key.push(this.pipelinesOf(entry.primitive.material, msaa ? MSAA_SAMPLES : 1, reflections !== null, true).prepass, this.bindGroupFor(entry.primitive, entry.textures), entry.geometry.vertexBuffer, moved ? entry.geometry.previousBuffer : entry.geometry.vertexBuffer, entry.geometry.indexBuffer);
+        }
+        replay(pass, `prepass${round}`, target, key, (encoder) => prepassDirect(encoder, round));
+        return;
+      }
+      prepassDirect(pass, round);
+    };
+    const prepassDirect = (pass: any, round: 0 | 1 = 0) => {
       pass.setBindGroup(1, (msaa ? msaa.groups : this.depthGroups).blank);
       let bound: any = null;
       for (let index = 0; index < draws.length; index += 1) {
@@ -3073,8 +4532,17 @@ export class WebgpuSceneRenderer implements SceneRenderer {
         // Last frame's vertices: a skinned mesh's from before this frame's upload, else these.
         const moved = entry.geometry.previousBuffer && entry.geometry.movedFrame === this.frameIndex;
         pass.setVertexBuffer(1, moved ? entry.geometry.previousBuffer : entry.geometry.vertexBuffer);
+        const job = clusterJob.get(index);
+        if (job !== undefined && clusters) {
+          // Its cut before the pyramid (F6a), in the prepass's first round alone (a clustered copy is drawn whole there).
+          if (round === 1) continue;
+          pass.setIndexBuffer(clusters.output, "uint32", clusters.regionOffset(job), clusters.regionBytes(job));
+          pass.drawIndexedIndirect(clusters.args, clusters.argsOffset(job, 0));
+          continue;
+        }
         pass.setIndexBuffer(entry.geometry.indexBuffer, "uint32");
-        pass.drawIndexed(entry.geometry.indexCount, entry.models.length, 0, 0, entry.first);
+        if (cull) pass.drawIndexedIndirect(cull.args, cull.argsOffset(round, index));
+        else pass.drawIndexed(entry.geometry.indexCount, entry.models.length, 0, 0, entry.first);
       }
     };
 
@@ -3084,6 +4552,15 @@ export class WebgpuSceneRenderer implements SceneRenderer {
     // frame), and times every pass.
     const graph = new FrameGraph();
     const size = { width: this.width, height: this.height };
+    // The clustered lights built on the GPU (F0e), before anything reads them.
+    if (this.frameLightClusters) {
+      const clusterer = this.lightClusterer!;
+      const data = this.depthGroups.clusters.data;
+      graph.addPass("lights.cluster", "compute", (pass) => {
+        pass.keep();
+        return (ctx) => clusterer.encode(ctx.encoder, this.lightBuffer, data, ctx.timing);
+      });
+    }
     const colour = graph.importTexture("colour", this.colourTexture);
     // The depth stays the renderer's own: the see-through pass's bind groups sample it.
     const depth = graph.importTexture("depth", msaa ? msaa.depth : this.depthTexture);
@@ -3103,7 +4580,20 @@ export class WebgpuSceneRenderer implements SceneRenderer {
     // anything shades against it. The scene passes read it through group 1, so the graph keeps it.
     if (cascadeFit) {
       const res = this.depthGroups.cascades;
-      cascadeFit.forEach((c, i) => this.device.queue.writeBuffer(res.views[i]!.buffer, 0, new Float32Array(c.viewProj)));
+      const casterCuller = casterCull ? this.casterCulling : null;
+      cascadeFit.forEach((c, i) => {
+        // The view, then where its culled casters start (F0e), or 0 and not culled.
+        const view = new ArrayBuffer(80);
+        new Float32Array(view).set(c.viewProj);
+        new Uint32Array(view).set(casterCuller ? [casterRegion + i * casterCopies, 1, 0, 0] : [0, 0, 0, 0], 16);
+        this.device.queue.writeBuffer(res.views[i]!.buffer, 0, view);
+      });
+      if (casterCuller) {
+        graph.addPass("cull.casters", "compute", (pass) => {
+          pass.keep();
+          return (ctx) => casterCuller.encode(ctx.encoder, this.instanceBuffer, ctx.timing);
+        });
+      }
       const map = graph.importTexture("cascades", res.texture);
       graph.addPass("shadow cascades", "render", (pass) => {
         pass.write(map);
@@ -3132,11 +4622,12 @@ export class WebgpuSceneRenderer implements SceneRenderer {
             for (const cut of [false, true]) {
               encoded.setPipeline(cut ? res.cutPipeline : res.pipeline);
               casters.forEach((entry, k) => {
-                if ((entry.alpha === 1) !== cut) return;
+                if ((entry.alpha === 1 || this.terrainPatches.has(entry.primitive)) !== cut) return;
                 encoded.setBindGroup(0, cut ? this.cutGroupFor(entry.primitive, entry.textures) : group, [(draws.length + k) * UNIFORM_STRIDE]);
                 encoded.setVertexBuffer(0, entry.geometry.vertexBuffer);
                 encoded.setIndexBuffer(entry.geometry.indexBuffer, "uint32");
-                encoded.drawIndexed(entry.geometry.indexCount, entry.models.length, 0, 0, entry.first);
+                if (casterCuller) encoded.drawIndexedIndirect(casterCuller.args, casterCuller.argsOffset(i, k));
+                else encoded.drawIndexed(entry.geometry.indexCount, entry.models.length, 0, 0, entry.first);
               });
             }
             encoded.end();
@@ -3144,6 +4635,8 @@ export class WebgpuSceneRenderer implements SceneRenderer {
         };
       });
     }
+
+    if (this.frameVsm && this.frameVsm.draws.length > 0) this.addVsmPages(graph, this.frameVsm.draws, casters, draws.length);
 
     // The spot/point lights' tiles (F2d): the casters drawn through each tile's face into its rect of the atlas.
     // The atlas is kept from frame to frame (F2d-2): a tile is drawn again only when its light, rect or the
@@ -3168,14 +4661,7 @@ export class WebgpuSceneRenderer implements SceneRenderer {
       const res = this.depthGroups.cascades;
       redraw.forEach((i) => this.device.queue.writeBuffer(res.localViews[i]!.buffer, 0, new Float32Array(localTiles[i]!.drawViewProj)));
       const map = graph.importTexture("local shadows", atlasTexture);
-      this.localClear ??= this.device.createRenderPipeline({
-        layout: "auto",
-        vertex: { module: this.device.createShaderModule({ code: LOCAL_CLEAR_WGSL }), entryPoint: "vs" },
-        fragment: { module: this.device.createShaderModule({ code: LOCAL_CLEAR_WGSL }), entryPoint: "clear", targets: [] },
-        primitive: { topology: "triangle-list" },
-        depthStencil: { format: "depth32float", depthWriteEnabled: true, depthCompare: "always" },
-      });
-      const clearPipeline = this.localClear;
+      const clearPipeline = this.localClearPipeline();
       graph.addPass("local shadows", "render", (pass) => {
         // The tiles not drawn this frame keep their maps.
         pass.read(map, "attachment");
@@ -3205,7 +4691,7 @@ export class WebgpuSceneRenderer implements SceneRenderer {
             for (const cut of [false, true]) {
               encoded.setPipeline(cut ? res.localCutPipeline : res.localPipeline);
               casters.forEach((entry, k) => {
-                if ((entry.alpha === 1) !== cut) return;
+                if ((entry.alpha === 1 || this.terrainPatches.has(entry.primitive)) !== cut) return;
                 encoded.setBindGroup(0, cut ? this.cutGroupFor(entry.primitive, entry.textures) : group, [(draws.length + k) * UNIFORM_STRIDE]);
                 encoded.setVertexBuffer(0, entry.geometry.vertexBuffer);
                 encoded.setIndexBuffer(entry.geometry.indexBuffer, "uint32");
@@ -3218,6 +4704,33 @@ export class WebgpuSceneRenderer implements SceneRenderer {
       });
     }
 
+    // The volumetric fog (F5b): its froxels lit through the cascades and the spot/point tiles just drawn, then
+    // integrated, before the scene samples it.
+    const fog = this.frameFog ? this.volumetricFog : null;
+    if (fog) {
+      const groups = this.depthGroups;
+      graph.addPass("volumetric fog", "compute", (pass) => {
+        pass.keep();
+        return (ctx) =>
+          fog.encode(ctx.encoder, { cascades: groups.cascades.texture, sampler: groups.cascades.sampler, lights: this.lightBuffer, clusters: groups.clusters.data, tiles: groups.shadowTiles, atlas: groups.atlas }, ctx.timing);
+      });
+    }
+
+    // Real-time GI (F3e): the probe volume the scene reads, traced and relit before anything shades by it.
+    const liveGi = this.frameGi;
+    const volume = draw.environment?.probeVolume ?? null;
+    if (liveGi && volume) {
+      const gi = this.tracerFor(liveGi.key, liveGi.occluders);
+      const env = draw.environment!;
+      if (this.giSky?.source !== env) this.giSky = { source: env, sky: environmentPanorama(env) };
+      const sky = this.giSky.sky;
+      const groups = this.depthGroups;
+      graph.addPass("dynamic gi", "compute", (pass) => {
+        pass.keep();
+        return (ctx) => gi.update(ctx.encoder, groups.probes, volume, liveGi.settings, draw.lights ?? [], sky, ctx.timing);
+      });
+    }
+
     // The depth prepass and thin G-buffer (F0c): the opaque depth, and the
     // G-buffer (the renderer's own, so it outlives the frame for what reads it).
     const gbuffer = prepass ? graph.importTexture("gbuffer", this.ensureGbuffer()) : null;
@@ -3225,6 +4738,20 @@ export class WebgpuSceneRenderer implements SceneRenderer {
     const gbufferMs = gbuffer && msaa ? graph.createTexture("gbuffer.msaa", { format: GBUFFER_FORMAT, ...size, sampleCount: MSAA_SAMPLES }) : null;
     const velocityMs = velocity && msaa ? graph.createTexture("velocity.msaa", { format: VELOCITY_FORMAT, ...size, sampleCount: MSAA_SAMPLES }) : null;
     if (gbuffer && velocity) {
+      // GPU culling (F0e), first round: the frustum, for the prepass.
+      if (cull) {
+        graph.addPass("cull.frustum", "compute", (pass) => {
+          pass.keep();
+          return (ctx) => cull.encodeFrustum(ctx.encoder, this.instanceBuffer, ctx.timing);
+        });
+        // The clustered copies' cuts for the prepass (F6a): frustum and cone, no pyramid yet.
+        if (clusters) {
+          graph.addPass("cull.clusters", "compute", (pass) => {
+            pass.keep();
+            return (ctx) => clusters.encode(ctx.encoder, 0, this.instanceBuffer, clusterView, null, ctx.timing);
+          });
+        }
+      }
       graph.addPass("prepass", "render", (pass) => {
         pass.write(depth);
         for (const [drawn, resolved] of [[gbufferMs, gbuffer], [velocityMs, velocity]] as const) {
@@ -3243,14 +4770,64 @@ export class WebgpuSceneRenderer implements SceneRenderer {
             depthStencilAttachment: { view: ctx.texture(depth).createView(), depthClearValue: 1, depthLoadOp: "clear", depthStoreOp: "store" },
             ...ctx.timing,
           });
-          prepassRange(encoded);
+          prepassRange(encoded, {
+            colorFormats: [ctx.texture(gbufferMs ?? gbuffer).format, ctx.texture(velocityMs ?? velocity).format],
+            depthStencilFormat: ctx.texture(depth).format,
+            sampleCount: msaa ? MSAA_SAMPLES : 1,
+            depthReadOnly: false,
+          });
           encoded.end();
         };
       });
     }
+    // The two-phase cull (F0e): a pyramid of what the prepass drew from last frame's guess, the rest tested against it,
+    // and what it can't rule out drawn into the prepass too.
+    if (cull && gbuffer && velocity && cull.twoPhase) {
+      graph.addPass("cull.second", "compute", (pass) => {
+        pass.read(depth);
+        pass.keep();
+        return (ctx) => cull.encodeSecond(ctx.encoder, this.instanceBuffer, ctx.texture(depth), [this.width, this.height], ctx.timing);
+      });
+      graph.addPass("prepass.second", "render", (pass) => {
+        for (const t of [depth, gbuffer, velocity]) {
+          pass.read(t, "attachment");
+          pass.write(t);
+        }
+        return (ctx) => {
+          const kept = (t: FrameResource) => ({ view: ctx.texture(t).createView(), loadOp: "load", storeOp: "store" });
+          const encoded = ctx.encoder.beginRenderPass({
+            colorAttachments: [kept(gbuffer), kept(velocity)],
+            depthStencilAttachment: { view: ctx.texture(depth).createView(), depthLoadOp: "load", depthStoreOp: "store" },
+            ...ctx.timing,
+          });
+          prepassRange(encoded, { colorFormats: [ctx.texture(gbuffer).format, ctx.texture(velocity).format], depthStencilFormat: ctx.texture(depth).format, sampleCount: 1, depthReadOnly: false }, 1);
+          encoded.end();
+        };
+      });
+    }
+    // The shading's round: the frustum's survivors against a Hi-Z pyramid of the prepass's depths (single-sampled).
+    if (cull && gbuffer) {
+      graph.addPass("cull.occlusion", "compute", (pass) => {
+        pass.read(depth);
+        pass.keep();
+        // An anti-aliased frame's pyramid takes the farthest of each pixel's samples.
+        return (ctx) => cull.encodeOcclusion(ctx.encoder, this.instanceBuffer, ctx.texture(depth), [this.width, this.height], ctx.timing, msaa !== null);
+      });
+      // And the cuts for the shading, against the same pyramid (F6a).
+      if (clusters) {
+        graph.addPass("cull.clusters.occlusion", "compute", (pass) => {
+          pass.read(depth);
+          pass.keep();
+          return (ctx) => clusters.encode(ctx.encoder, 1, this.instanceBuffer, clusterView, cull.pyramid, ctx.timing);
+        });
+      }
+    }
     this.prepassed = prepass ? { depth: msaa ? msaa.depth : this.depthTexture, gbuffer: this.gbuffer!, velocity: this.velocity!, multisampled: msaa !== null } : null;
-    // Contact shadows (F2c) and GTAO (F3c) read the prepass's depths, before anything shades against them.
-    if (this.frameContact || this.frameGtao) {
+    // The pages the frame's pixels want (F2b), marked from the prepass's depths and read back for a later frame.
+    if (this.frameVsm) this.addVsmMarks(graph, depth, msaa !== null);
+    // Contact shadows (F2c), GTAO (F3c), SSGI (F3e-2) and the virtual shadow maps' sampling (F2b) read the
+    // prepass's depths, before anything shades against them.
+    if (this.frameContact || this.frameGtao || this.frameSsgi || this.frameVsm) {
       this.addScreenShading(graph, depth, gbuffer, velocity, draw.view, temporal ? temporal.projection : draw.projection, this.frameContact ? draw.lightDirection ?? null : null, ssao !== null, msaa !== null);
     }
 
@@ -3292,12 +4869,21 @@ export class WebgpuSceneRenderer implements SceneRenderer {
                 : { view: ctx.texture(depth).createView(), depthClearValue: 1, depthLoadOp: "clear", depthStoreOp: "store" },
             ...ctx.timing,
           });
-          drawRange(encoded, from, to, load ? groups.scene : readDepths ? groups.opaque : groups.blank);
+          drawRange(encoded, from, to, load ? groups.scene : readDepths ? groups.opaque : groups.blank, name, {
+            colorFormats: [target, ...rayTargets].map((t) => ctx.texture(t).format),
+            depthStencilFormat: ctx.texture(depth).format,
+            sampleCount: msaa ? MSAA_SAMPLES : 1,
+            depthReadOnly: load || readDepths,
+          });
           encoded.end();
         };
       });
 
     scenePass("opaque", 0, opaqueEnd, false, !seeThrough);
+    // Texture streaming's feedback (F1b), every few frames.
+    if (this.streamer) this.addFeedback(graph, draws);
+    // Subsurface scattering (F1d-2): the opaque scene's split diffuse blurred and rebuilt, before anything reads it.
+    if (this.frameSss && gbuffer && !msaa && this.frameDepthView) this.addSubsurface(graph, colour, depth, gbuffer, temporal ? temporal.projection : draw.projection, this.frameDepthView.terms);
     if (behind && !msaa) {
       graph.addPass("behind", "transfer", (pass) => {
         pass.read(colour, "copySrc");
@@ -3306,10 +4892,27 @@ export class WebgpuSceneRenderer implements SceneRenderer {
       });
     }
     if (seeThrough) scenePass("see-through", firstSeeThrough, draws.length, true, true);
+    // Volumetric effects (F8b): marched over the scene, to its depths, before the particles in them.
+    if (this.volumes?.active && this.hdr && prepass && !msaa) this.addVolumes(graph, colour, depth, draw, eye);
+    // GPU particles (F8a): simulated against the prepass's depths, drawn over the scene before TAA's reactive mask.
+    if (this.particles && this.hdr && prepass && gbuffer && !msaa && this.frameDepthView) {
+      this.addParticles(graph, colour, depth, gbuffer, { draw, viewProj, eye, globalCount: cells ? globalCount : ordered.length });
+    }
     // Before the reflections land on the opaque scene: what the see-through draws alone changed (F4a).
     const reactive = hdrTaa && seeThrough && behind ? this.addReactiveMask(graph, behind, colour) : null;
-    if (reflections) this.addReflections(graph, reflections, colour, depth, rays, temporal ? temporal.projection : draw.projection, msaa !== null);
-    if (temporal) this.addTemporal(graph, temporal.uniforms, colour, depth, msaa !== null, hdrTaa ? velocity : null, reactive);
+    // On the AAA tier, with the prepass's G-buffer, reflections trace the Hi-Z chain (F3f); elsewhere I3's march.
+    if (reflections && this.hdr && gbuffer && velocity) this.addHizReflections(graph, colour, depth, gbuffer, velocity, rays, draw, temporal ? temporal.projection : draw.projection, msaa !== null);
+    else if (reflections) this.addReflections(graph, reflections, colour, depth, rays, temporal ? temporal.projection : draw.projection, msaa !== null);
+    // Motion vectors and overdraw (F10a) are coloured from the whole frame.
+    const viewCode = this.hdr ? viewModeCode(draw.viewMode) : 0;
+    if ((viewCode === 8 && velocity && gbuffer) || viewCode === 11) this.addViewResolve(graph, colour, velocity, gbuffer, viewCode);
+    let shown = colour;
+    if (temporal && display && velocity) shown = this.addUpscale(graph, temporal, colour, depth, velocity, reactive, display, msaa !== null);
+    else if (temporal) this.addTemporal(graph, temporal.uniforms, colour, depth, msaa !== null, hdrTaa ? velocity : null, reactive);
+    // The physical camera's depth of field and motion blur (F4c), on the resolved frame.
+    if (this.hdr && draw.camera && this.frameDepthView && velocity && (draw.camera.dof || draw.camera.motionBlur)) {
+      this.addCameraEffects(graph, shown, display ?? { width: this.width, height: this.height }, depth, velocity, draw.camera, this.frameDepthView.terms, msaa !== null);
+    }
 
     const slot = readback ? this.readback.find((entry) => !entry.busy) : undefined;
     if (slot) {
@@ -3329,6 +4932,7 @@ export class WebgpuSceneRenderer implements SceneRenderer {
     graph.run(encoder, this.transients, this.timer);
     this.device.queue.submit([encoder.finish()]);
     this.timer?.read();
+    this.readVsmMarks();
     if (!readback) return;
     this.submitted += 1;
     if (slot) {
@@ -3474,6 +5078,162 @@ export class WebgpuSceneRenderer implements SceneRenderer {
     });
   }
 
+  /**
+   * The AAA tier's reflections (F3f): the Hi-Z chain (sized to the frame), the accumulation's history (two,
+   * swapping), the Epic trace's half-resolution target, the uniforms and the pipelines. Made on first use.
+   */
+  private hiz: { chain: any; levels: number; history: [any, any]; index: number; valid: boolean; frame: number; traced: any; blank: any; uniforms: any; data: Float32Array<ArrayBuffer>; sampler: any; copy: [any, any]; reduce: any; trace: any; accumulate: any; resolve: any } | null = null;
+
+  private addHizReflections(graph: FrameGraph, colour: FrameResource, depth: FrameResource, gbuffer: FrameResource, velocity: FrameResource, rays: readonly FrameResource[], draw: GpuSceneDraw, projection: Mat4, multisampled: boolean): void {
+    const device = this.device;
+    const k = multisampled ? 1 : 0;
+    const format = this.colourFormat;
+    if (!this.hiz) {
+      const levels = hizLevels(this.width, this.height);
+      const full = { width: this.width, height: this.height };
+      const history = () => device.createTexture({ size: full, format: "rgba16float", usage: 0x10 | 0x04 });
+      this.hiz = {
+        chain: device.createTexture({ size: full, format: "r32float", mipLevelCount: levels, usage: 0x10 | 0x04 | 0x01 }), // RENDER_ATTACHMENT | TEXTURE_BINDING | COPY_SRC (for captures)
+        levels,
+        history: [history(), history()],
+        index: 0,
+        valid: false,
+        frame: 0,
+        traced: null,
+        blank: device.createTexture({ size: { width: 1, height: 1 }, format: "rgba16float", usage: 0x04 }),
+        uniforms: device.createBuffer({ size: HIZ_UNIFORM_FLOATS * 4, usage: 0x40 | 0x08 }),
+        data: new Float32Array(HIZ_UNIFORM_FLOATS),
+        sampler: device.createSampler({ magFilter: "linear", minFilter: "linear", addressModeU: "clamp-to-edge", addressModeV: "clamp-to-edge" }),
+        copy: [null, null],
+        reduce: fullScreenPipeline(device, HIZ_REDUCE_WGSL, "reduce", "r32float"),
+        trace: fullScreenPipeline(device, HIZ_TRACE_WGSL, "trace", "rgba16float"),
+        accumulate: fullScreenPipeline(device, HIZ_TEMPORAL_WGSL, "accumulate", "rgba16float"),
+        resolve: fullScreenPipeline(device, HIZ_RESOLVE_WGSL, "resolve", format),
+      };
+    }
+    const hz = this.hiz;
+    hz.copy[k] ??= fullScreenPipeline(device, hizCopyWgsl(multisampled), "copyDepth", "r32float");
+    const copy = hz.copy[k];
+    // Epic: what the screen can't show, traced through the still scene's BVH at half resolution.
+    const tracer = draw.reflectionTrace ? this.tracerFor(draw.reflectionTrace.key, draw.reflectionTrace.occluders) : null;
+    if (tracer && !hz.traced) hz.traced = device.createTexture({ size: { width: Math.max(1, Math.ceil(this.width / 2)), height: Math.max(1, Math.ceil(this.height / 2)) }, format: "rgba16float", usage: 0x08 | 0x04 }); // STORAGE_BINDING | TEXTURE_BINDING
+    const chain = graph.importTexture("hiz", hz.chain);
+    const then = graph.importTexture("hiz.then", hz.history[hz.index]);
+    const now = graph.importTexture("hiz.now", hz.history[1 - hz.index]);
+    const traced = tracer ? graph.importTexture("hiz.traced", hz.traced) : null;
+    const traceOut = graph.createTexture("hiz.trace", { format: "rgba16float", width: this.width, height: this.height });
+    const out = graph.createTexture("reflect.out", { format, width: this.width, height: this.height });
+    device.queue.writeBuffer(hz.uniforms, 0, hizUniforms(draw.view, projection, hz.frame, hz.levels, tracer !== null, hz.valid, hz.data));
+    hz.frame += 1;
+    const fullScreen = (ctx: any, pipeline: any, into: any, entries: { binding: number; resource: any }[], uniforms = true) => {
+      const encoded = ctx.encoder.beginRenderPass({ colorAttachments: [{ view: into, clearValue: { r: 0, g: 0, b: 0, a: 0 }, loadOp: "clear", storeOp: "store" }], ...ctx.timing });
+      encoded.setPipeline(pipeline);
+      encoded.setBindGroup(0, device.createBindGroup({ layout: pipeline.getBindGroupLayout(0), entries: uniforms ? [{ binding: 0, resource: { buffer: hz.uniforms } }, ...entries] : entries }));
+      encoded.draw(3);
+      encoded.end();
+    };
+    const mip = (level: number) => hz.chain.createView({ baseMipLevel: level, mipLevelCount: 1 });
+    graph.addPass("hiz", "render", (pass) => {
+      pass.read(depth);
+      pass.write(chain);
+      return (ctx) => {
+        fullScreen(ctx, copy, mip(0), [{ binding: 0, resource: ctx.texture(depth).createView() }], false);
+        for (let level = 1; level < hz.levels; level += 1) fullScreen(ctx, hz.reduce, mip(level), [{ binding: 0, resource: mip(level - 1) }], false);
+      };
+    });
+    if (tracer && traced) {
+      const env = draw.environment ?? null;
+      if (env && this.giSky?.source !== env) this.giSky = { source: env, sky: environmentPanorama(env) };
+      const sky = env ? this.giSky!.sky : null;
+      const volume = draw.environment?.probeVolume ?? null;
+      const viewProj = multiplyMat4(projection, draw.view);
+      const inverse = invertMat4(viewProj) ?? viewProj;
+      const eye = invertMat4(draw.view) ?? draw.view;
+      const lit = this.frameGi !== null && this.probeGi?.gi === tracer;
+      const groups = this.depthGroups;
+      graph.addPass("reflections.bvh", "compute", (pass) => {
+        pass.read(chain);
+        pass.read(gbuffer);
+        pass.write(traced, "storage");
+        return (ctx) =>
+          tracer.traceReflections(
+            ctx.encoder,
+            { depth: mip(0), gbuffer: ctx.texture(gbuffer).createView(), out: hz.traced.createView(), invViewProj: inverse, eye: [eye[12]!, eye[13]!, eye[14]!], width: this.width, height: this.height, maxRoughness: HIZ_MAX_ROUGHNESS },
+            draw.lights ?? [],
+            sky,
+            volume ? { buffer: groups.probes, layout: volume } : null,
+            lit,
+            ctx.timing,
+          );
+      });
+    }
+    graph.addPass("reflections.trace", "render", (pass) => {
+      pass.read(colour);
+      pass.read(chain);
+      pass.read(gbuffer);
+      pass.read(rays[0]!);
+      if (traced) pass.read(traced);
+      pass.write(traceOut);
+      return (ctx) =>
+        fullScreen(ctx, hz.trace, ctx.texture(traceOut).createView(), [
+          { binding: 1, resource: ctx.texture(colour).createView() },
+          { binding: 2, resource: hz.chain.createView() },
+          { binding: 3, resource: ctx.texture(gbuffer).createView() },
+          { binding: 4, resource: ctx.texture(rays[0]!).createView() },
+          { binding: 5, resource: (traced ? hz.traced : hz.blank).createView() },
+        ]);
+    });
+    graph.addPass("reflections.accumulate", "render", (pass) => {
+      pass.read(traceOut);
+      pass.read(then);
+      pass.read(velocity);
+      pass.read(rays[0]!);
+      pass.write(now);
+      pass.keep();
+      return (ctx) =>
+        fullScreen(ctx, hz.accumulate, ctx.texture(now).createView(), [
+          { binding: 1, resource: ctx.texture(traceOut).createView() },
+          { binding: 2, resource: ctx.texture(then).createView() },
+          { binding: 3, resource: ctx.texture(velocity).createView() },
+          { binding: 4, resource: ctx.texture(rays[0]!).createView() },
+          { binding: 5, resource: hz.sampler },
+        ]);
+    });
+    graph.addPass("reflections", "render", (pass) => {
+      pass.read(colour);
+      pass.read(now);
+      pass.read(chain);
+      pass.read(gbuffer);
+      for (const ray of rays) pass.read(ray);
+      pass.write(out);
+      return (ctx) =>
+        fullScreen(ctx, hz.resolve, ctx.texture(out).createView(), [
+          { binding: 1, resource: ctx.texture(colour).createView() },
+          { binding: 2, resource: ctx.texture(now).createView() },
+          { binding: 3, resource: hz.chain.createView() },
+          { binding: 4, resource: ctx.texture(gbuffer).createView() },
+          { binding: 5, resource: ctx.texture(rays[0]!).createView() },
+          { binding: 6, resource: ctx.texture(rays[1]!).createView() },
+        ]);
+    });
+    graph.addPass("reflections.copy", "transfer", (pass) => {
+      pass.read(out, "copySrc");
+      pass.write(colour, "copyDst");
+      return (ctx) => ctx.encoder.copyTextureToTexture({ texture: ctx.texture(out) }, { texture: ctx.texture(colour) }, { width: this.width, height: this.height });
+    });
+    hz.index = 1 - hz.index;
+    hz.valid = true;
+  }
+
+  /** The still scene's BVH tracer for `key` (F3e's, shared with the reflections' Epic trace, F3f). */
+  private tracerFor(key: string, occluders: readonly Occluder[]): GpuProbeGi {
+    if (!this.probeGi || this.probeGi.key !== key) {
+      this.probeGi?.gi.dispose();
+      this.probeGi = { key, gi: new GpuProbeGi(this.device, occluders) };
+    }
+    return this.probeGi.gi;
+  }
+
   private readonly temporalState = new TemporalState("ndc");
   /**
    * The temporal resolve's resources (I2): two history images (one read, one
@@ -3482,6 +5242,326 @@ export class WebgpuSceneRenderer implements SceneRenderer {
    */
   private taa: { history: [any, any]; index: number; uniforms: any; sampler: any; resolve: [any, any]; hdrResolve: [any, any]; sharpen: any } | null = null;
   private reactivePipeline: any = null;
+  /** This frame's output when it isn't the colour texture: the upscaled frame (F4b). */
+  private frameOutput: any = null;
+  /** The upscaler's display-sized output and pipelines (F4b); its history is the TAA's, made at the display's size. */
+  private upscaler: { output: any; width: number; height: number; uniforms: any; data: Float32Array<ArrayBuffer>; resolve: [any, any]; sharpen: any } | null = null;
+
+  /**
+   * Temporal upscaling (F4b): the render-sized frame resolved into the TAA history at the display's size (see
+   * upscaler.ts), then sharpened into the upscaled output the frame returns.
+   */
+  private addUpscale(graph: FrameGraph, temporal: { readonly uniforms: Float32Array; readonly jitter: readonly [number, number] }, colour: FrameResource, depth: FrameResource, velocity: FrameResource, reactive: FrameResource | null, display: { width: number; height: number }, multisampled: boolean): FrameResource {
+    const device = this.device;
+    const size = { width: display.width, height: display.height };
+    if (this.taa && (this.taa.history[0].width !== size.width || this.taa.history[0].height !== size.height)) {
+      destroySafely(this.taa.history[0]);
+      destroySafely(this.taa.history[1]);
+      destroySafely(this.taa.uniforms);
+      this.taa = null;
+    }
+    const fresh = !this.taa;
+    if (!this.taa) {
+      const history = () => device.createTexture({ size, format: "rgba16float", usage: 0x10 | 0x04 });
+      this.taa = {
+        history: [history(), history()],
+        index: 0,
+        uniforms: device.createBuffer({ size: temporal.uniforms.byteLength, usage: 0x40 | 0x08 }),
+        sampler: device.createSampler({ magFilter: "linear", minFilter: "linear", addressModeU: "clamp-to-edge", addressModeV: "clamp-to-edge" }),
+        resolve: [null, null],
+        hdrResolve: [null, null],
+        sharpen: fullScreenPipeline(device, TEMPORAL_SHARPEN_WGSL, "sharpen", this.colourFormat),
+      };
+    }
+    if (this.upscaler && (this.upscaler.width !== size.width || this.upscaler.height !== size.height)) {
+      destroySafely(this.upscaler.output);
+      this.upscaler.output = device.createTexture({ size, format: this.colourFormat, usage: 0x10 | 0x04 | 0x01 | 0x02 });
+      this.upscaler.width = size.width;
+      this.upscaler.height = size.height;
+    }
+    this.upscaler ??= {
+      output: device.createTexture({ size, format: this.colourFormat, usage: 0x10 | 0x04 | 0x01 | 0x02 }), // RENDER_ATTACHMENT | TEXTURE_BINDING | COPY_SRC | COPY_DST (F4c lands in it)
+      width: size.width,
+      height: size.height,
+      uniforms: device.createBuffer({ size: UPSCALE_UNIFORM_FLOATS * 4, usage: 0x40 | 0x08 }),
+      data: new Float32Array(UPSCALE_UNIFORM_FLOATS),
+      resolve: [null, null],
+      sharpen: fullScreenPipeline(device, UPSCALE_SHARPEN_WGSL, "sharpen", this.colourFormat),
+    };
+    const taa = this.taa;
+    const ups = this.upscaler;
+    const k = multisampled ? 1 : 0;
+    ups.resolve[k] ??= fullScreenPipeline(device, upscaleShaderWgsl(multisampled), "resolve", "rgba16float");
+    const resolve = ups.resolve[k];
+    const read = graph.importTexture("taa.history", taa.history[taa.index]);
+    const write = graph.importTexture("taa.next", taa.history[1 - taa.index]);
+    const output = graph.importTexture("upscaled", ups.output);
+    taa.index = 1 - taa.index;
+    device.queue.writeBuffer(ups.uniforms, 0, upscaleUniforms(temporal.jitter, { width: this.width, height: this.height }, display, !fresh && temporal.uniforms[18] === 1, ups.data));
+    const fullScreen = (ctx: PassContext, pipeline: any, target: FrameResource, entries: any[]) => {
+      const encoded = ctx.encoder.beginRenderPass({
+        colorAttachments: [{ view: ctx.texture(target).createView(), clearValue: { r: 0, g: 0, b: 0, a: 0 }, loadOp: "clear", storeOp: "store" }],
+        ...ctx.timing,
+      });
+      encoded.setPipeline(pipeline);
+      encoded.setBindGroup(0, device.createBindGroup({ layout: pipeline.getBindGroupLayout(0), entries }));
+      encoded.draw(3);
+      encoded.end();
+    };
+    graph.addPass("upscale.resolve", "render", (pass) => {
+      pass.read(colour);
+      pass.read(read);
+      pass.read(depth);
+      pass.read(velocity);
+      if (reactive) pass.read(reactive);
+      pass.write(write);
+      return (ctx) =>
+        fullScreen(ctx, resolve, write, [
+          { binding: 0, resource: { buffer: ups.uniforms } },
+          { binding: 1, resource: ctx.texture(colour).createView() },
+          { binding: 2, resource: ctx.texture(read).createView() },
+          { binding: 3, resource: taa.sampler },
+          { binding: 4, resource: ctx.texture(depth).createView() },
+          { binding: 5, resource: ctx.texture(velocity).createView() },
+          { binding: 6, resource: reactive ? ctx.texture(reactive).createView() : this.blankTexture.createView() },
+        ]);
+    });
+    graph.addPass("upscale.sharpen", "render", (pass) => {
+      pass.read(write);
+      pass.write(output);
+      pass.keep();
+      return (ctx) =>
+        fullScreen(ctx, ups.sharpen, output, [
+          { binding: 0, resource: { buffer: ups.uniforms } },
+          { binding: 1, resource: ctx.texture(write).createView() },
+        ]);
+    });
+    this.frameOutput = ups.output;
+    return output;
+  }
+
+  /** The view modes' resolve (F10a): its pipeline and uniforms, made on first use. */
+  private viewResolve: { pipeline: any; uniforms: any } | null = null;
+
+  /** Colour motion vectors (from the velocity buffer) or overdraw (from the count in the colour's red) over the frame (F10a). */
+  private addViewResolve(graph: FrameGraph, colour: FrameResource, velocity: FrameResource | null, gbuffer: FrameResource | null, code: number): void {
+    const device = this.device;
+    this.viewResolve ??= { pipeline: fullScreenPipeline(device, VIEW_RESOLVE_WGSL, "resolve", this.colourFormat), uniforms: device.createBuffer({ size: 16, usage: 0x40 | 0x08 }) };
+    const vr = this.viewResolve;
+    device.queue.writeBuffer(vr.uniforms, 0, new Float32Array([code, OVERDRAW_FULL, 0, 0]));
+    const size = { width: this.width, height: this.height };
+    const out = graph.createTexture("view mode", { format: this.colourFormat, ...size });
+    graph.addPass("view mode", "render", (pass) => {
+      pass.read(colour);
+      if (velocity) pass.read(velocity);
+      if (gbuffer) pass.read(gbuffer);
+      pass.write(out);
+      return (ctx) => {
+        const encoded = ctx.encoder.beginRenderPass({
+          colorAttachments: [{ view: ctx.texture(out).createView(), clearValue: { r: 0, g: 0, b: 0, a: 0 }, loadOp: "clear", storeOp: "store" }],
+          ...ctx.timing,
+        });
+        encoded.setPipeline(vr.pipeline);
+        encoded.setBindGroup(0, device.createBindGroup({
+          layout: vr.pipeline.getBindGroupLayout(0),
+          entries: [
+            { binding: 0, resource: { buffer: vr.uniforms } },
+            { binding: 1, resource: ctx.texture(colour).createView() },
+            { binding: 2, resource: velocity ? ctx.texture(velocity).createView() : this.blankTexture.createView() },
+            { binding: 3, resource: gbuffer ? ctx.texture(gbuffer).createView() : this.blankTexture.createView() },
+          ],
+        }));
+        encoded.draw(3);
+        encoded.end();
+      };
+    });
+    graph.addPass("view mode.copy", "transfer", (pass) => {
+      pass.read(out, "copySrc");
+      pass.write(colour, "copyDst");
+      pass.keep();
+      return (ctx) => ctx.encoder.copyTextureToTexture({ texture: ctx.texture(out) }, { texture: ctx.texture(colour) }, size);
+    });
+  }
+
+  /** Whether this frame's scattering surfaces split their diffuse for the SSS blur (F1d-2), for the frame uniform. */
+  private frameSss = false;
+  /** The SSS profiles by material ID (F1d-2), and the blur's pipeline and two uniform buffers (across, down). */
+  private sssProfiles: any = null;
+  private sss: { pipeline: any; uniforms: [any, any] } | null = null;
+
+  /** The separable SSS blur (F1d-2; subsurface.ts): across into one target, down into another, copied back over `colour`. */
+  private addSubsurface(graph: FrameGraph, colour: FrameResource, depth: FrameResource, gbuffer: FrameResource, projection: Mat4, terms: readonly [number, number]): void {
+    const device = this.device;
+    this.sss ??= { pipeline: fullScreenPipeline(device, SSS_WGSL, "blur", this.colourFormat), uniforms: [device.createBuffer({ size: 32, usage: 0x40 | 0x08 }), device.createBuffer({ size: 32, usage: 0x40 | 0x08 })] };
+    const sss = this.sss;
+    // Pixels a metre spans at a distance of one: half the frame's height over the half-angle's tangent.
+    const perMetre = (projection[5]! * this.height) / 2;
+    device.queue.writeBuffer(sss.uniforms[0], 0, new Float32Array([1, 0, 0, perMetre, terms[0], terms[1], 0, 0]));
+    device.queue.writeBuffer(sss.uniforms[1], 0, new Float32Array([0, 1, 1, perMetre, terms[0], terms[1], 0, 0]));
+    const size = { width: this.width, height: this.height };
+    const across = graph.createTexture("sss.across", { format: this.colourFormat, ...size });
+    const down = graph.createTexture("sss.down", { format: this.colourFormat, ...size });
+    const blurPass = (name: string, out: FrameResource, blurred: FrameResource | null, uniforms: any) =>
+      graph.addPass(name, "render", (pass) => {
+        pass.read(colour);
+        if (blurred) pass.read(blurred);
+        pass.read(depth);
+        pass.read(gbuffer);
+        pass.write(out);
+        return (ctx) => {
+          const encoded = ctx.encoder.beginRenderPass({ colorAttachments: [{ view: ctx.texture(out).createView(), clearValue: { r: 0, g: 0, b: 0, a: 0 }, loadOp: "clear", storeOp: "store" }], ...ctx.timing });
+          encoded.setPipeline(sss.pipeline);
+          encoded.setBindGroup(0, device.createBindGroup({
+            layout: sss.pipeline.getBindGroupLayout(0),
+            entries: [
+              { binding: 0, resource: { buffer: uniforms } },
+              { binding: 1, resource: ctx.texture(colour).createView() },
+              { binding: 2, resource: ctx.texture(blurred ?? colour).createView() },
+              { binding: 3, resource: ctx.texture(depth).createView() },
+              { binding: 4, resource: ctx.texture(gbuffer).createView() },
+              { binding: 5, resource: { buffer: this.sssProfiles } },
+            ],
+          }));
+          encoded.draw(3);
+          encoded.end();
+        };
+      });
+    blurPass("sss.across", across, null, sss.uniforms[0]);
+    blurPass("sss.down", down, across, sss.uniforms[1]);
+    graph.addPass("sss.copy", "transfer", (pass) => {
+      pass.read(down, "copySrc");
+      pass.write(colour, "copyDst");
+      pass.keep();
+      return (ctx) => ctx.encoder.copyTextureToTexture({ texture: ctx.texture(down) }, { texture: ctx.texture(colour) }, size);
+    });
+  }
+
+  /** The physical camera's passes (F4c) and what they keep between frames: their uniforms, sampler and pipelines. */
+  private camera: { uniforms: any; data: Float32Array<ArrayBuffer>; sampler: any; frame: number; pipelines: Map<string, any> } | null = null;
+
+  /** Depth of field, then motion blur (F4c; see cameraEffects.ts), on `target` (`size`), written back into it. */
+  private addCameraEffects(graph: FrameGraph, target: FrameResource, size: { width: number; height: number }, depth: FrameResource, velocity: FrameResource, effects: CameraEffects, terms: readonly [number, number], multisampled: boolean): void {
+    const device = this.device;
+    this.camera ??= {
+      uniforms: device.createBuffer({ size: CAMERA_UNIFORM_FLOATS * 4, usage: 0x40 | 0x08 }),
+      data: new Float32Array(CAMERA_UNIFORM_FLOATS),
+      sampler: device.createSampler({ magFilter: "linear", minFilter: "linear", addressModeU: "clamp-to-edge", addressModeV: "clamp-to-edge" }),
+      frame: 0,
+      pipelines: new Map(),
+    };
+    const cam = this.camera;
+    const k = multisampled ? "ms" : "";
+    const pipeline = (name: string, code: () => string, entry: string, formats: string[]) => {
+      let made = cam.pipelines.get(name + k);
+      if (!made) {
+        const module = device.createShaderModule({ code: code() });
+        made = device.createRenderPipeline({ layout: "auto", vertex: { module, entryPoint: "vs" }, fragment: { module, entryPoint: entry, targets: formats.map((format) => ({ format })) }, primitive: { topology: "triangle-list" } });
+        cam.pipelines.set(name + k, made);
+      }
+      return made;
+    };
+    device.queue.writeBuffer(cam.uniforms, 0, cameraUniforms(effects, terms, size, { width: this.width, height: this.height }, cam.frame, cam.data));
+    cam.frame += 1;
+    const draw = (ctx: PassContext, pipe: any, targets: FrameResource[], entries: { binding: number; resource: any }[]) => {
+      const encoded = ctx.encoder.beginRenderPass({
+        colorAttachments: targets.map((t) => ({ view: ctx.texture(t).createView(), clearValue: { r: 0, g: 0, b: 0, a: 0 }, loadOp: "clear", storeOp: "store" })),
+        ...ctx.timing,
+      });
+      encoded.setPipeline(pipe);
+      encoded.setBindGroup(0, device.createBindGroup({ layout: pipe.getBindGroupLayout(0), entries: [{ binding: 0, resource: { buffer: cam.uniforms } }, ...entries] }));
+      encoded.draw(3);
+      encoded.end();
+    };
+    const copyBack = (from: FrameResource) =>
+      graph.addPass(`${from.name}.copy`, "transfer", (pass) => {
+        pass.read(from, "copySrc");
+        pass.write(target, "copyDst");
+        return (ctx) => ctx.encoder.copyTextureToTexture({ texture: ctx.texture(from) }, { texture: ctx.texture(target) }, size);
+      });
+    const half = { width: Math.max(1, Math.ceil(size.width / 2)), height: Math.max(1, Math.ceil(size.height / 2)) };
+    if (effects.dof) {
+      const halfColour = graph.createTexture("dof.colour", { format: "rgba16float", ...half });
+      const halfCoc = graph.createTexture("dof.coc", { format: "r16float", ...half });
+      const blurred = graph.createTexture("dof.blurred", { format: "rgba16float", ...half });
+      const near = graph.createTexture("dof.near", { format: "r16float", ...half });
+      const out = graph.createTexture("dof.out", { format: this.colourFormat, ...size });
+      const prefilter = pipeline("dof.prefilter", () => dofPrefilterWgsl(multisampled), "prefilter", ["rgba16float", "r16float"]);
+      const gather = pipeline("dof.gather", () => DOF_GATHER_WGSL, "gather", ["rgba16float", "r16float"]);
+      const composite = pipeline("dof.composite", () => dofCompositeWgsl(multisampled), "composite", [this.colourFormat]);
+      graph.addPass("dof.prefilter", "render", (pass) => {
+        pass.read(target);
+        pass.read(depth);
+        pass.write(halfColour);
+        pass.write(halfCoc);
+        return (ctx) => draw(ctx, prefilter, [halfColour, halfCoc], [{ binding: 1, resource: ctx.texture(depth).createView() }, { binding: 2, resource: ctx.texture(target).createView() }]);
+      });
+      graph.addPass("dof.gather", "render", (pass) => {
+        pass.read(halfColour);
+        pass.read(halfCoc);
+        pass.write(blurred);
+        pass.write(near);
+        return (ctx) => draw(ctx, gather, [blurred, near], [{ binding: 1, resource: ctx.texture(halfColour).createView() }, { binding: 2, resource: ctx.texture(halfCoc).createView() }]);
+      });
+      graph.addPass("dof.composite", "render", (pass) => {
+        pass.read(target);
+        pass.read(depth);
+        pass.read(blurred);
+        pass.read(near);
+        pass.read(halfCoc);
+        pass.write(out);
+        return (ctx) =>
+          draw(ctx, composite, [out], [
+            { binding: 1, resource: ctx.texture(depth).createView() },
+            { binding: 2, resource: ctx.texture(target).createView() },
+            { binding: 3, resource: ctx.texture(blurred).createView() },
+            { binding: 4, resource: ctx.texture(near).createView() },
+            { binding: 5, resource: cam.sampler },
+            { binding: 6, resource: ctx.texture(halfCoc).createView() },
+          ]);
+      });
+      copyBack(out);
+    }
+    if (effects.motionBlur && effects.motionBlur.fraction > 0) {
+      const tileSize = { width: Math.max(1, Math.ceil(size.width / MOTION_TILE)), height: Math.max(1, Math.ceil(size.height / MOTION_TILE)) };
+      const tiles = graph.createTexture("motion.tiles", { format: "rg16float", ...tileSize });
+      const neighbours = graph.createTexture("motion.neighbours", { format: "rg16float", ...tileSize });
+      const out = graph.createTexture("motion.out", { format: this.colourFormat, ...size });
+      const tilePipe = pipeline("motion.tiles", () => MOTION_TILES_WGSL, "tiles", ["rg16float"]);
+      const neighbourPipe = pipeline("motion.neighbours", () => MOTION_NEIGHBOURS_WGSL, "neighbours", ["rg16float"]);
+      const gatherPipe = pipeline("motion.gather", () => motionGatherWgsl(multisampled), "gather", [this.colourFormat]);
+      graph.addPass("motion.tiles", "render", (pass) => {
+        pass.read(velocity);
+        pass.write(tiles);
+        return (ctx) => draw(ctx, tilePipe, [tiles], [{ binding: 1, resource: ctx.texture(velocity).createView() }]);
+      });
+      graph.addPass("motion.neighbours", "render", (pass) => {
+        pass.read(tiles);
+        pass.write(neighbours);
+        return (ctx) => {
+          const encoded = ctx.encoder.beginRenderPass({ colorAttachments: [{ view: ctx.texture(neighbours).createView(), clearValue: { r: 0, g: 0, b: 0, a: 0 }, loadOp: "clear", storeOp: "store" }], ...ctx.timing });
+          encoded.setPipeline(neighbourPipe);
+          encoded.setBindGroup(0, device.createBindGroup({ layout: neighbourPipe.getBindGroupLayout(0), entries: [{ binding: 0, resource: ctx.texture(tiles).createView() }] }));
+          encoded.draw(3);
+          encoded.end();
+        };
+      });
+      graph.addPass("motion.gather", "render", (pass) => {
+        pass.read(target);
+        pass.read(depth);
+        pass.read(velocity);
+        pass.read(neighbours);
+        pass.write(out);
+        return (ctx) =>
+          draw(ctx, gatherPipe, [out], [
+            { binding: 1, resource: ctx.texture(depth).createView() },
+            { binding: 2, resource: ctx.texture(target).createView() },
+            { binding: 3, resource: ctx.texture(velocity).createView() },
+            { binding: 4, resource: ctx.texture(neighbours).createView() },
+          ]);
+      });
+      copyBack(out);
+    }
+  }
 
   /**
    * The reactive mask (F4a): how much the see-through pass changed each pixel,
@@ -3525,6 +5605,13 @@ export class WebgpuSceneRenderer implements SceneRenderer {
    */
   private addTemporal(graph: FrameGraph, uniforms: Float32Array, colour: FrameResource, depth: FrameResource, multisampled: boolean, velocity: FrameResource | null = null, reactive: FrameResource | null = null): void {
     const device = this.device;
+    // After upscaled frames (F4b) the history is the display's size: start afresh at the frame's.
+    if (this.taa && (this.taa.history[0].width !== this.width || this.taa.history[0].height !== this.height)) {
+      destroySafely(this.taa.history[0]);
+      destroySafely(this.taa.history[1]);
+      destroySafely(this.taa.uniforms);
+      this.taa = null;
+    }
     if (!this.taa) {
       const size = { width: this.width, height: this.height };
       const history = () => device.createTexture({ size, format: "rgba16float", usage: 0x10 | 0x04 }); // RENDER_ATTACHMENT | TEXTURE_BINDING
@@ -3621,13 +5708,55 @@ export class WebgpuSceneRenderer implements SceneRenderer {
    * variant; multisampled for an anti-aliased frame (I1); writing the
    * reflection targets for a frame with reflections (I3). Built on first use.
    */
+  /** Permutations compiling in the background (F1e), by their keys. */
+  private readonly compiling = new Set<string>();
+
+  /**
+   * Compile the shader permutations `materials` need (F1e), off the frame: each
+   * material graph's (with its static switches) for the sample count, reflections
+   * and prepass given, asynchronously where the device can. A material whose
+   * permutation is still compiling draws as a plain one, so a new graph never
+   * stalls a frame. Resolves when all are ready.
+   */
+  prepareMaterials(materials: Iterable<MeshPrimitive["material"]>, options: { readonly samples?: number; readonly reflect?: boolean; readonly prepass?: boolean } = {}): Promise<void> {
+    const samples = options.samples ?? 1;
+    const reflect = options.reflect === true;
+    const prepass = options.prepass === true;
+    const jobs: Promise<void>[] = [];
+    for (const material of materials) {
+      const graph = compiledGraphOf(material);
+      if (!graph) continue;
+      const vertex = graph.outputs.worldPositionOffset !== undefined ? compiledGraphOf(material, ["worldPositionOffset"]) : null;
+      const key = `${graph.key}|${vertex?.key ?? ""}|${samples}|${reflect ? 1 : 0}|${prepass ? 1 : 0}`;
+      if (this.variants.has(key) || this.compiling.has(key)) continue;
+      if (typeof this.device.createRenderPipelineAsync !== "function") {
+        this.variants.set(key, this.pipelinesFor(sceneShader(graph, reflect, this.hdr, vertex), samples, reflect, prepass));
+        continue;
+      }
+      this.compiling.add(key);
+      const pending = this.pipelinesFor(sceneShader(graph, reflect, this.hdr, vertex), samples, reflect, prepass, (d) => this.device.createRenderPipelineAsync(d)) as unknown as Record<string, Promise<any>>;
+      jobs.push(
+        Promise.all(Object.entries(pending).map(async ([k, v]) => [k, await v] as const))
+          .then((entries) => {
+            if (!this.destroyed) this.variants.set(key, Object.fromEntries(entries) as unknown as PipelineSet);
+          })
+          .finally(() => this.compiling.delete(key)),
+      );
+    }
+    return Promise.all(jobs).then(() => undefined);
+  }
+
   private pipelinesOf(material: MeshPrimitive["material"], samples = 1, reflect = false, prepass = false): PipelineSet {
     const graph = compiledGraphOf(material);
+    // The world-position offset's own steps, for the vertex stage (F1e).
+    const vertex = graph && graph.outputs.worldPositionOffset !== undefined ? compiledGraphOf(material, ["worldPositionOffset"]) : null;
     if (!graph && samples === 1 && !reflect && !prepass) return this.pipeline;
-    const key = `${graph?.key ?? ""}|${samples}|${reflect ? 1 : 0}|${prepass ? 1 : 0}`;
+    const key = `${graph?.key ?? ""}|${vertex?.key ?? ""}|${samples}|${reflect ? 1 : 0}|${prepass ? 1 : 0}`;
     let set = this.variants.get(key);
+    // A permutation still compiling (F1e; prepareMaterials) draws as the plain material meanwhile, not with a hitch.
+    if (!set && this.compiling.has(key)) return this.pipelinesOf({ name: "", baseColorFactor: [1, 1, 1, 1], baseColorImage: null } as MeshPrimitive["material"], samples, reflect, prepass);
     if (!set) {
-      set = this.pipelinesFor(sceneShader(graph, reflect, this.hdr), samples, reflect, prepass);
+      set = this.pipelinesFor(sceneShader(graph, reflect, this.hdr, vertex), samples, reflect, prepass);
       this.variants.set(key, set);
     }
     return set;
@@ -3639,11 +5768,19 @@ export class WebgpuSceneRenderer implements SceneRenderer {
    */
   private clusterLights(draw: GpuSceneDraw) {
     const { ordered, globalCount } = orderLights(draw.lights ?? []);
-    const clusters = ordered.length > globalCount ? buildLightClusters(ordered, globalCount, draw.view, draw.projection, this.width, this.height) : null;
+    // With GPU culling (F0e) the cells are built on the GPU too, from the packed lights; else here.
+    const onGpu = this.hdr && draw.gpuCull === true;
+    const cellGrid = onGpu && ordered.length > globalCount ? clusterGrid(draw.projection, this.width, this.height) : null;
+    this.frameLightClusters = cellGrid !== null;
+    if (cellGrid) {
+      this.lightClusterer ??= new GpuLightClusters(this.device);
+      this.lightClusterer.prepare(cellGrid, draw.view, this.width, this.height, globalCount, ordered.length);
+    }
+    const clusters = cellGrid ? { params: GpuLightClusters.params(cellGrid), table: null } : !onGpu && ordered.length > globalCount ? buildLightClusters(ordered, globalCount, draw.view, draw.projection, this.width, this.height) : null;
     const buffers = this.depthGroups.clusters;
-    if (clusters) {
-      this.device.queue.writeBuffer(buffers.table, 0, clusters.table);
-      this.device.queue.writeBuffer(buffers.index, 0, clusters.indices, 0, Math.max(4, Math.ceil(clusters.used / 4) * 4));
+    if (clusters?.table) {
+      this.device.queue.writeBuffer(buffers.data, 0, clusters.table);
+      this.device.queue.writeBuffer(buffers.data, CLUSTER_CELLS * 8, clusters.indices, 0, Math.max(4, Math.ceil(clusters.used / 4) * 4));
     }
     const near = draw.shadow?.near ?? null;
     const frame = new Float32Array(FRAME_BYTES / 4);
@@ -3658,12 +5795,16 @@ export class WebgpuSceneRenderer implements SceneRenderer {
       this.uploadLocalTiles(this.frameLocalTiles);
       frame.set([1, LOCAL_SHADOW_BIAS, LOCAL_SHADOW_SLOPE_BIAS], 28);
     } else if (local && local.tiles.length > 0) frame.set([1, local.bias, local.slopeBias], 28);
-    const grid = draw.environment?.lightProbes ?? null;
+    // The AAA tier lights by the GPU bake's probe volume where there is one (F3d-3, probeMin.w = 2); else the ambient cubes.
+    const volume = this.hdr ? (draw.environment?.probeVolume ?? null) : null;
+    const grid = volume ?? draw.environment?.lightProbes ?? null;
     if (grid) {
-      this.uploadProbeGrid(grid);
-      frame.set([...grid.min, 1], 32);
+      if (volume) this.uploadProbeTexture(volume, probeVolumeTexels(volume), PROBE_VOLUME_SLOTS);
+      else this.uploadProbeTexture(grid, lightProbeTexels(grid as LightProbeGrid), 6);
+      frame.set([...grid.min, volume ? 2 : 1], 32);
       frame.set([0, 1, 2].map((a) => (grid.counts[a]! - 1) / (grid.max[a]! - grid.min[a]! || 1)), 36);
-      frame.set(grid.counts, 40);
+      // w: the slots a probe takes along x, by which the shader strides the probe buffer (F5b-0).
+      frame.set([...grid.counts, volume ? PROBE_VOLUME_SLOTS : 6], 40);
     }
     if (this.hdr) {
       frame.set(this.iblSh, 44);
@@ -3678,27 +5819,77 @@ export class WebgpuSceneRenderer implements SceneRenderer {
       frame.set(sun.cascades.map((c) => c.texel), FRAME_CASCADES + 72);
       frame.set(sun.cascades.map((c) => c.depth), FRAME_CASCADES + 76);
     }
-    frame.set([sun?.softness ?? 0, this.frameContact ? 1 : 0, this.frameGtao ? 1 : 0, 0], FRAME_CASCADES + 80);
+    frame.set([sun?.softness ?? 0, this.frameContact ? 1 : 0, this.frameGtao ? 1 : 0, this.frameSsgi ? 1 : 0], FRAME_CASCADES + 80);
     // The prepass's depths, readable as the opaque pass shades (F2d-3), for the local lights' contact shadows.
     if (this.frameDepthView) {
       frame.set(this.frameDepthView.viewProj, FRAME_CASCADES + 84);
-      frame.set([this.frameDepthView.terms[0], this.frameDepthView.terms[1], 1, 0], FRAME_CASCADES + 100);
+      frame.set([this.frameDepthView.terms[0], this.frameDepthView.terms[1], 1, this.frameVsm ? 1 : 0], FRAME_CASCADES + 100);
     }
+    if (this.hdr) frame.set(this.aerialFrame(draw), FRAME_AERIAL);
+    if (this.hdr) frame.set(packFogFrame(this.frameFog, this.fogTerms), FRAME_FOG);
+    if (this.hdr) frame.set([viewModeCode(draw.viewMode), draw.texelDensity ?? DEFAULT_TEXEL_DENSITY, this.frameSss ? 1 : 0], FRAME_DEBUG);
+    if (this.hdr) frame.set(packWeatherFrame(draw.weather, draw.time ?? 0, this.weatherTerms), FRAME_WEATHER);
+    if (this.hdr) frame.set(packWaterFrame(draw.water ?? null, this.waterTerms), FRAME_WATER);
     this.device.queue.writeBuffer(buffers.params, 0, frame);
     this.uploadLocalShadows(local);
     return { ordered, globalCount, clusters };
   }
 
-  /** Upload a probe grid (EP9) as a 3D texture, once per grid, rebuilding group 1 to point at it. */
-  private uploadProbeGrid(grid: LightProbeGrid): void {
+  /**
+   * This draw's volumetric fog (F5b), on the linear-light renderer, for a
+   * perspective camera under a rig whose fog is volumetric: the grid for the
+   * frame's size, the sun (shadowed by its cascades when it casts) and the
+   * sky's mean radiance, and the camera, uniforms written. Null (and the
+   * history dropped) otherwise.
+   */
+  private prepareFog(draw: GpuSceneDraw): FogFrame | null {
+    const settings = this.hdr && draw.projection[15] === 0 ? resolveVolumetricFog(draw.fog) : null;
+    if (!settings) {
+      this.volumetricFog?.reset();
+      return null;
+    }
+    const fog = (this.volumetricFog ??= new GpuVolumetricFog(this.device));
+    // The sky's mean radiance: its L0 irradiance over π (zero without an environment).
+    const sky = [0, 1, 2].map((c) => Math.max(0, this.iblSh[c]! * 0.282095));
+    const cascades = this.frameCascades ? { cascades: this.frameCascades.cascades, strength: this.frameCascades.strength } : null;
+    const { frame, remade } = fog.prepare(
+      { fog: settings, light: { sun: fogSun(draw.lights), sky }, grid: fogGrid(this.width, this.height), camera: fogCamera(draw.view, draw.projection), cascades },
+      draw.temporal === true,
+    );
+    if (remade) {
+      const groups = this.depthGroups;
+      groups.fogVolume.texture = fog.volume;
+      Object.assign(groups, groups.makeGroups(groups.atlas, groups.probes));
+      if (this.msaa) this.msaa.groups = groups.makeGroupsMs(groups.atlas, groups.probes, this.msaa.blank, this.msaa.depth);
+    }
+    return frame;
+  }
+
+  /**
+   * The physical sky's aerial perspective for this draw's camera (F5a-2): its
+   * froxels built in compute ahead of the frame, and the terms the shader
+   * finds a fragment's with; all zero (off) without one.
+   */
+  private aerialFrame(draw: GpuSceneDraw): Float32Array {
+    const sky = draw.atmosphere ?? null;
+    const terms = packAerialFrame(sky, draw.view, draw.projection, this.aerialTerms);
+    if (sky && terms[3] === 1) (this.atmosphere ??= new GpuAtmosphere(this.device)).aerial(sky, aerialCamera(draw.view, draw.projection), this.depthGroups.aerial);
+    return terms;
+  }
+
+  /**
+   * Upload a probe grid (EP9) or volume (F3d-3) as a 3D texture, `slots` texels
+   * a probe along x, once per grid, rebuilding group 1 to point at it.
+   */
+  private uploadProbeTexture(grid: LightProbeGrid | ProbeVolume, texels: Float32Array, slots: number): void {
     const groups = this.depthGroups;
     if (groups.probeSource === grid) return;
     const [nx, ny, nz] = grid.counts;
     if (!groups.probesBlank) destroySafely(groups.probes);
-    groups.probes = this.device.createTexture({ size: { width: nx * 6, height: ny, depthOrArrayLayers: nz }, dimension: "3d", format: "rgba32float", usage: 0x04 | 0x02 });
+    groups.probes = this.device.createBuffer({ size: nx * slots * ny * nz * 16, usage: 0x80 | 0x08 }); // STORAGE | COPY_DST
     groups.probesBlank = false;
     groups.probeSource = grid;
-    this.device.queue.writeTexture({ texture: groups.probes }, lightProbeTexels(grid), { bytesPerRow: nx * 6 * 16, rowsPerImage: ny }, { width: nx * 6, height: ny, depthOrArrayLayers: nz });
+    this.device.queue.writeBuffer(groups.probes, 0, texels, 0, nx * slots * ny * nz * 4);
     Object.assign(groups, groups.makeGroups(groups.atlas, groups.probes));
     if (this.msaa) this.msaa.groups = groups.makeGroupsMs(groups.atlas, groups.probes, this.msaa.blank, this.msaa.depth);
   }
@@ -3762,14 +5953,17 @@ export class WebgpuSceneRenderer implements SceneRenderer {
       // Readbacks can land out of order; an older one never replaces a newer frame.
       if ((slot.seq ?? 0) >= this.latestSeq && slot.buffer.size === this.bytesPerRow * this.height) {
         const padded = new Uint8Array(slot.buffer.getMappedRange());
-        this.latest = unpadRows(padded, this.width, this.height, this.bytesPerRow, this.latest);
+        this.latest = unpadRows(padded, this.width, this.height, this.bytesPerRow, this.latest && this.latest.length === this.width * this.height * 4 ? this.latest : null);
         this.latestSeq = slot.seq ?? 0;
       }
       slot.buffer.unmap();
+      this.framesLanded += 1;
     } catch {
       // A failed map just means no new frame; the previous one keeps showing.
     } finally {
       slot.busy = false;
+      // A buffer a resize left behind (it was in flight) goes once it has landed.
+      if (!this.readback.includes(slot)) destroySafely(slot.buffer);
     }
   }
 
@@ -3812,14 +6006,28 @@ export class WebgpuSceneRenderer implements SceneRenderer {
       mesh.primitives.forEach((primitive, i) => {
         const gpu = cached[i];
         if (!primitive.dynamic || !gpu || gpu.revision === primitive.dynamic.revision) return;
+        // Skinned on the GPU (F7a): the last vertices kept, then the compute pass writes the new ones.
+        if (primitive.dynamic.gpu) {
+          this.skinOnGpu(primitive, gpu, primitive.dynamic.gpu);
+          gpu.revision = primitive.dynamic.revision;
+          gpu.movedFrame = this.frameIndex;
+          return;
+        }
         const normals = primitive.normals ?? computeSmoothNormals(primitive.positions, primitive.indices);
         // A live skinned copy's tangents would stay in its bind pose: it takes the derivative frame (F1c).
         const vertices = interleaveVerticesWithTangents(primitive.positions, normals, primitive.uvs, primitive.uvs2 ?? null, primitive.blend ?? null, primitive.sway ?? null, null);
-        // Keep the vertices it had (F0c): copied before this upload lands, which the queue keeps in order.
-        gpu.previousBuffer ??= this.device.createBuffer({ size: Math.max(40, vertices.byteLength), usage: 0x20 | 0x08 }); // VERTEX | COPY_DST
-        const encoder = this.device.createCommandEncoder();
-        encoder.copyBufferToBuffer(gpu.vertexBuffer, 0, gpu.previousBuffer, 0, Math.max(40, vertices.byteLength));
-        this.device.queue.submit([encoder.finish()]);
+        // Keep the vertices it had (F0c): copied before this upload lands, which the queue keeps in order. Only a
+        // frame with a prepass reads them (its velocity); without one, a copy and a submit per skinned primitive
+        // per frame (an arena's Spartans: hundreds) is work for nothing.
+        if (this.keepsPrevious) {
+          gpu.previousBuffer ??= this.device.createBuffer({ size: Math.max(40, vertices.byteLength), usage: 0x20 | 0x08 }); // VERTEX | COPY_DST
+          const encoder = this.device.createCommandEncoder();
+          encoder.copyBufferToBuffer(gpu.vertexBuffer, 0, gpu.previousBuffer, 0, Math.max(40, vertices.byteLength));
+          this.device.queue.submit([encoder.finish()]);
+        } else if (gpu.previousBuffer) {
+          destroySafely(gpu.previousBuffer);
+          gpu.previousBuffer = undefined;
+        }
         this.device.queue.writeBuffer(gpu.vertexBuffer, 0, vertices);
         gpu.revision = primitive.dynamic.revision;
         gpu.movedFrame = this.frameIndex;
@@ -3832,8 +6040,8 @@ export class WebgpuSceneRenderer implements SceneRenderer {
       const vertices = interleaveVerticesWithTangents(primitive.positions, normals, primitive.uvs, primitive.uvs2 ?? null, primitive.blend ?? null, primitive.sway ?? null, primitive.dynamic ? null : (primitive.tangents ?? null));
       const vertexBuffer = this.device.createBuffer({
         size: Math.max(40, vertices.byteLength),
-        // A dynamic one is also copied from, to keep its last vertices (F0c).
-        usage: 0x20 | 0x08 | (primitive.dynamic ? 0x04 : 0), // VERTEX | COPY_DST (| COPY_SRC)
+        // A dynamic one is also copied from, to keep its last vertices (F0c), and written by GPU skinning (F7a).
+        usage: 0x20 | 0x08 | (primitive.dynamic ? 0x04 | 0x80 : 0), // VERTEX | COPY_DST (| COPY_SRC | STORAGE)
       });
       this.device.queue.writeBuffer(vertexBuffer, 0, vertices);
 
@@ -3855,6 +6063,260 @@ export class WebgpuSceneRenderer implements SceneRenderer {
     return uploaded;
   }
 
+  /** The skinning pass's pipeline (F7a), made the first time a primitive skins on the GPU. */
+  private skinPipeline: any = null;
+
+  /**
+   * Skin one primitive on the GPU (F7a; gpuSkinning.ts): its last vertices copied for the motion vectors,
+   * then the compute pass morphs and skins its bind shape into its vertex buffer.
+   */
+  private skinOnGpu(primitive: MeshPrimitive, gpu: GpuPrimitive, pose: NonNullable<NonNullable<MeshPrimitive["dynamic"]>["gpu"]>): void {
+    const device = this.device;
+    const vertices = primitive.positions.length / 3;
+    const byteLength = vertices * 64;
+    if (!gpu.skin) {
+      this.skinPipeline ??= device.createComputePipeline({ layout: "auto", compute: { module: cachedShaderModule(device, SKIN_WGSL), entryPoint: "main" } });
+      const storage = (data: ArrayBufferView) => {
+        const buffer = device.createBuffer({ size: Math.max(16, Math.ceil(data.byteLength / 16) * 16), usage: 0x80 | 0x08 });
+        device.queue.writeBuffer(buffer, 0, data.buffer, data.byteOffset, data.byteLength);
+        return buffer;
+      };
+      const targets = primitive.morphTargets ?? [];
+      const csr = morphCsr(targets, vertices);
+      const influences = primitive.joints && primitive.weights ? packInfluences(primitive.joints, primitive.weights) : new Uint32Array(vertices * 8);
+      const buffers = [storage(packBindShape(primitive.positions, primitive.normals)), storage(influences), storage(csr.starts), storage(csr.entries)];
+      const jointBytes = Math.max(64, pose.matrices.length * 4);
+      const joints = device.createBuffer({ size: jointBytes, usage: 0x80 | 0x08 });
+      const weights = device.createBuffer({ size: Math.max(16, targets.length * 4), usage: 0x80 | 0x08 });
+      const params = device.createBuffer({ size: 16, usage: 0x40 | 0x08 });
+      const group = device.createBindGroup({
+        layout: this.skinPipeline.getBindGroupLayout(0),
+        entries: [
+          { binding: 0, resource: { buffer: params } },
+          { binding: 1, resource: { buffer: buffers[0] } },
+          { binding: 2, resource: { buffer: buffers[1] } },
+          { binding: 3, resource: { buffer: joints } },
+          { binding: 4, resource: { buffer: buffers[2] } },
+          { binding: 5, resource: { buffer: buffers[3] } },
+          { binding: 6, resource: { buffer: weights } },
+          { binding: 7, resource: { buffer: gpu.vertexBuffer } },
+        ],
+      });
+      gpu.skin = { buffers, joints, weights, params, group, vertices, jointBytes };
+    }
+    const skin = gpu.skin;
+    const jointData = pose.dualQuaternion ? dualQuaternions(pose.matrices) : pose.matrices;
+    if (jointData.byteLength > 0) device.queue.writeBuffer(skin.joints, 0, jointData.buffer, jointData.byteOffset, Math.min(jointData.byteLength, skin.jointBytes));
+    if (pose.morphWeights && pose.morphWeights.length > 0) device.queue.writeBuffer(skin.weights, 0, pose.morphWeights.buffer, pose.morphWeights.byteOffset, pose.morphWeights.byteLength);
+    device.queue.writeBuffer(skin.params, 0, skinParams(vertices, pose.matrices.length / 16, pose.dualQuaternion, primitive.morphTargets?.length ?? 0));
+    // VERTEX | COPY_DST | COPY_SRC: readable back, as the skinned vertices are.
+    gpu.previousBuffer ??= device.createBuffer({ size: Math.max(40, byteLength), usage: 0x20 | 0x08 | 0x04 });
+    const encoder = device.createCommandEncoder();
+    encoder.copyBufferToBuffer(gpu.vertexBuffer, 0, gpu.previousBuffer, 0, Math.max(40, byteLength));
+    const pass = encoder.beginComputePass();
+    pass.setPipeline(this.skinPipeline);
+    pass.setBindGroup(0, skin.group);
+    pass.dispatchWorkgroups(Math.ceil(vertices / SKIN_WORKGROUP));
+    // Cloth (F7d) over the skinned vertices, in the same pass: each dispatch sees the last's writes.
+    if (pose.cloth && primitive.cloth) this.clothOnGpu(pass, primitive, gpu, pose.cloth);
+    pass.end();
+    device.queue.submit([encoder.finish()]);
+  }
+
+  /** GPU cloth's pipelines (F7d; clothGpu.ts), made the first time a cloth simulates. */
+  private clothPipelines: { predict: any; solve: any; finish: any } | null = null;
+
+  /** One step of a primitive's cloth on the GPU (F7d): predict, the Jacobi sweeps, then positions and normals into its vertices. */
+  private clothOnGpu(pass: any, primitive: MeshPrimitive, gpu: GpuPrimitive, step: { readonly capsules: readonly Capsule[]; readonly dt: number; readonly wind: readonly [number, number, number] }): void {
+    const device = this.device;
+    const settings = primitive.cloth!;
+    const count = primitive.positions.length / 3;
+    const pipeline = (code: string) => device.createComputePipeline({ layout: "auto", compute: { module: cachedShaderModule(device, code), entryPoint: "main" } });
+    this.clothPipelines ??= { predict: pipeline(CLOTH_PREDICT_WGSL), solve: pipeline(CLOTH_SOLVE_WGSL), finish: pipeline(CLOTH_FINISH_WGSL) };
+    const pipes = this.clothPipelines;
+    if (!gpu.cloth) {
+      const storage = (data: ArrayBufferView) => {
+        const buffer = device.createBuffer({ size: Math.max(16, Math.ceil(data.byteLength / 16) * 16), usage: 0x80 | 0x08 });
+        device.queue.writeBuffer(buffer, 0, data.buffer, data.byteOffset, data.byteLength);
+        return buffer;
+      };
+      const topology = clothTopology(primitive.positions, primitive.indices, settings);
+      // The particles start at the bind shape, as the CPU's do.
+      const rest = new Float32Array(count * 4);
+      for (let v = 0; v < count; v += 1) rest.set(primitive.positions.subarray(v * 3, v * 3 + 3), v * 4);
+      const particles = new Float32Array(count * 2);
+      for (let v = 0; v < count; v += 1) particles.set([topology.invMass[v]!, topology.maxDistance[v]!], v * 2);
+      const triangles = vertexTriangles(primitive.indices, count);
+      const [posA, posB, previous, particle, starts, entries, triStarts, tris, indices] = [rest, rest, rest, particles, topology.starts, topology.entries, triangles.starts, triangles.tris, primitive.indices].map(storage);
+      const params = device.createBuffer({ size: 64, usage: 0x40 | 0x08 });
+      const capsules = device.createBuffer({ size: MAX_CLOTH_CAPSULES * 32, usage: 0x80 | 0x08 });
+      const group = (pipe: any, buffers: any[]) => device.createBindGroup({ layout: pipe.getBindGroupLayout(0), entries: [params, ...buffers].map((buffer, binding) => ({ binding, resource: { buffer } })) });
+      gpu.cloth = {
+        params,
+        capsules,
+        groups: [
+          group(pipes.predict, [gpu.vertexBuffer, posA, previous, particle]),
+          group(pipes.solve, [posA, posB, starts, entries, particle, gpu.vertexBuffer, capsules]),
+          group(pipes.solve, [posB, posA, starts, entries, particle, gpu.vertexBuffer, capsules]),
+          group(pipes.finish, [gpu.vertexBuffer, posA, triStarts, tris, indices]),
+        ],
+        buffers: [posA, posB, previous, particle, starts, entries, triStarts, tris, indices],
+      };
+    }
+    const cloth = gpu.cloth;
+    const capsules = step.capsules.slice(0, MAX_CLOTH_CAPSULES);
+    device.queue.writeBuffer(cloth.params, 0, clothParams(count, capsules.length, step.dt, settings.damping ?? 0.02, settings.stretch ?? 1, settings.bend ?? 0.3, settings.windResponse ?? 1, settings.thickness ?? 0.01, CLOTH_RELAX, step.wind, CLOTH_GRAVITY));
+    if (capsules.length > 0) {
+      const packed = packCapsules(capsules);
+      device.queue.writeBuffer(cloth.capsules, 0, packed.buffer, packed.byteOffset, packed.byteLength);
+    }
+    const groups = Math.ceil(count / CLOTH_WORKGROUP);
+    pass.setPipeline(pipes.predict);
+    pass.setBindGroup(0, cloth.groups[0]);
+    pass.dispatchWorkgroups(groups);
+    // An even number of sweeps, so the last lands back in the first buffer.
+    pass.setPipeline(pipes.solve);
+    for (let it = 0; it < CLOTH_ITERATIONS; it += 1) {
+      pass.setBindGroup(0, cloth.groups[1 + (it & 1)]);
+      pass.dispatchWorkgroups(groups);
+    }
+    pass.setPipeline(pipes.finish);
+    pass.setBindGroup(0, cloth.groups[3]);
+    pass.dispatchWorkgroups(groups);
+  }
+
+  /** Where each blended hair primitive's triangles were last sorted from (F7c), in its mesh's space. */
+  private readonly hairSorted = new WeakMap<object, string>();
+
+  /**
+   * Blended hair cards (F7c) draw their triangles back to front from the eye, sorted on the CPU (in the first
+   * copy's space) and written over the primitive's indices when the eye has moved a centimetre.
+   */
+  private sortHairCards(draws: readonly { readonly alpha: number; readonly primitive: MeshPrimitive; readonly geometry: GpuPrimitive; readonly models: readonly Mat4[] }[], eye: readonly number[]): void {
+    for (const entry of draws) {
+      if (entry.alpha !== 2 || entry.primitive.material.character?.kind !== "hair") continue;
+      const inverse = invertMat4(entry.models[0]!);
+      if (!inverse) continue;
+      const local = [0, 1, 2].map((r) => inverse[r]! * eye[0]! + inverse[4 + r]! * eye[1]! + inverse[8 + r]! * eye[2]! + inverse[12 + r]!);
+      const key = local.map((c) => Math.round(c * 100)).join(",");
+      if (this.hairSorted.get(entry.geometry) === key) continue;
+      this.hairSorted.set(entry.geometry, key);
+      const sorted = sortTrianglesBackToFront(entry.primitive.positions, entry.primitive.indices, local);
+      this.device.queue.writeBuffer(entry.geometry.indexBuffer, 0, sorted.buffer, sorted.byteOffset, sorted.byteLength);
+    }
+  }
+
+  /** The volumetric effects (F8b; volumetricEffects.ts), when the scene has any. */
+  private volumes: GpuVolumes | null = null;
+
+  /** Give the renderer its volumetric effects (F8b), replacing any it had. */
+  setVolumes(effects: readonly VolumeEffect[]): void {
+    this.volumes?.dispose();
+    this.volumes = effects.length > 0 && this.hdr ? new GpuVolumes(this.device, this.colourFormat, effects) : null;
+  }
+
+  /** Start a volumetric effect at a point (its base's centre) (F8b). */
+  volumeTrigger(index: number, at: readonly number[]): void {
+    this.volumes?.trigger(index, at);
+  }
+
+  /** The live volumes (F8b), for tests and the profiler. */
+  get liveVolumes(): GpuVolumes | null {
+    return this.volumes;
+  }
+
+  /** The volumes' march over the scene (F8b): a full-screen pass reading the depths, blending colour × T + L. */
+  private addVolumes(graph: FrameGraph, colour: FrameResource, depth: FrameResource, draw: GpuSceneDraw, eye: readonly number[]): void {
+    const volumes = this.volumes!;
+    const projection = this.frameDepthView ? this.frameDepthView.viewProj : multiplyMat4(draw.projection, draw.view);
+    const inverse = invertMat4(projection) ?? projection;
+    const sun = draw.lightDirection ?? [0, 1, 0];
+    const sl = Math.hypot(sun[0]!, sun[1]!, sun[2]!) || 1;
+    const frame = { invViewProj: inverse, eye, sun: [sun[0]! / sl, sun[1]! / sl, sun[2]! / sl], sunColor: [1, 1, 1], ambient: draw.ambient ?? 0.3, depthTerms: (this.frameDepthView?.terms ?? [0, 1]) as [number, number], width: this.width, height: this.height };
+    graph.addPass("volumes", "render", (pass) => {
+      pass.read(colour, "attachment");
+      pass.write(colour);
+      pass.read(depth);
+      return (ctx) => {
+        const encoded = ctx.encoder.beginRenderPass({ colorAttachments: [{ view: ctx.texture(colour).createView(), loadOp: "load", storeOp: "store" }], ...ctx.timing });
+        volumes.march(encoded, frame, ctx.texture(depth));
+        encoded.end();
+      };
+    });
+  }
+
+  /** The GPU particle system (F8a; gpuParticles.ts), when the scene has emitters. */
+  private particles: GpuParticles | null = null;
+  private particleTime = 0;
+
+  /** Give the renderer its particle emitters (F8a), replacing any it had; none clears them. */
+  setParticles(specs: readonly EmitterSpec[], looks: ConstructorParameters<typeof GpuParticles>[3] = []): void {
+    this.particles?.dispose();
+    this.particles = specs.length > 0 && this.hdr ? new GpuParticles(this.device, this.colourFormat, specs, looks) : null;
+  }
+
+  /** Move where an emitter's rate spawns (F5e: rain and snow over the eye). */
+  particleOrigin(index: number, at: readonly number[]): void {
+    this.particles?.setOrigin(index, at);
+  }
+
+  /** Fire an emitter's burst (F8a). */
+  particleBurst(index: number, at: readonly number[], dir: readonly number[] = [0, 0, 0], scale = 1): void {
+    this.particles?.burst(index, at, dir, scale);
+  }
+
+  /** An emitter's ring (F8a): its particles' buffer, for tests and the profiler. */
+  particleRing(index: number): { buffer: any; capacity: number; born: number } | null {
+    return this.particles?.ring(index) ?? null;
+  }
+
+  /** The particles' frame: simulated after the prepass, drawn after the see-through scene (F8a). */
+  private addParticles(graph: FrameGraph, colour: FrameResource, depth: FrameResource, gbuffer: FrameResource, f: { draw: GpuSceneDraw; viewProj: Mat4; eye: readonly number[]; globalCount: number }): void {
+    const particles = this.particles!;
+    const view = f.draw.view;
+    const dt = f.draw.particleDt ?? 1 / 60;
+    this.particleTime += dt;
+    const sun = f.draw.lightDirection ?? [0, 1, 0];
+    const sl = Math.hypot(sun[0]!, sun[1]!, sun[2]!) || 1;
+    const frame: ParticleFrame = {
+      dt,
+      time: this.particleTime,
+      viewProj: f.viewProj,
+      width: this.width,
+      height: this.height,
+      depthTerms: this.frameDepthView!.terms as [number, number],
+      eye: f.eye,
+      right: [view[0]!, view[4]!, view[8]!],
+      up: [view[1]!, view[5]!, view[9]!],
+      light: { direction: [sun[0]! / sl, sun[1]! / sl, sun[2]! / sl], color: [1, 1, 1], ambient: f.draw.ambient ?? 0.3, lights: f.globalCount },
+    };
+    graph.addPass("particles.simulate", "compute", (pass) => {
+      pass.read(depth);
+      pass.read(gbuffer);
+      pass.keep();
+      return (ctx) => particles.simulate(ctx.encoder, frame, ctx.texture(depth), ctx.texture(gbuffer));
+    });
+    graph.addPass("particles", "render", (pass) => {
+      pass.read(colour, "attachment");
+      pass.write(colour);
+      pass.read(depth, "attachment");
+      return (ctx) => {
+        const encoded = ctx.encoder.beginRenderPass({
+          colorAttachments: [{ view: ctx.texture(colour).createView(), loadOp: "load", storeOp: "store" }],
+          depthStencilAttachment: { view: ctx.texture(depth).createView(), depthReadOnly: true },
+          ...ctx.timing,
+        });
+        particles.draw(encoded, frame, this.lightBuffer, ctx.texture(depth));
+        encoded.end();
+      };
+    });
+  }
+
+  /** Whether this renderer skins live meshes on the GPU (F7a): the linear-light one, whose frames no CPU reference has to match. */
+  get gpuSkinning(): boolean {
+    return this.hdr;
+  }
+
   /** A cut-out caster's group 0 (F2a-2): the casters' uniforms and transforms, and its base map. */
   private cutGroupFor(primitive: MeshPrimitive, textures: PrimitiveTextures): any {
     const cached = this.cutGroups.get(primitive);
@@ -3866,6 +6328,7 @@ export class WebgpuSceneRenderer implements SceneRenderer {
         { binding: 1, resource: this.sampler },
         { binding: 2, resource: (textures.base ? this.uploadTexture(textures.base, true) : this.blankTexture).createView() },
         { binding: 10, resource: { buffer: this.instanceBuffer } },
+        ...(this.hdr ? [{ binding: 17, resource: this.terrainHeightsOf(primitive) }] : []),
       ],
     });
     this.cutGroups.set(primitive, { uniform: this.uniformBuffer, instances: this.instanceBuffer, base: textures.base, group });
@@ -3882,9 +6345,11 @@ export class WebgpuSceneRenderer implements SceneRenderer {
       cached.source.occ === textures.occ &&
       cached.source.emis === textures.emis &&
       cached.source.lm === textures.lm &&
+      cached.source.lmHdr === textures.lmHdr &&
       cached.source.detail === textures.detail &&
       cached.source.blend === textures.blend &&
-      cached.source.normal === textures.normal
+      cached.source.normal === textures.normal &&
+      cached.source.graph === textures.graph
     ) {
       return cached.group;
     }
@@ -3908,20 +6373,30 @@ export class WebgpuSceneRenderer implements SceneRenderer {
         // The active env map (or the 1x1 white blank); likewise cache-invalidated.
         { binding: 7, resource: this.hdr ? this.envTexture.createView({ dimension: "cube" }) : this.envTexture.createView() },
         // The active SSAO buffer (or the 1x1 blank); likewise cache-invalidated.
-        { binding: 8, resource: this.ssaoBound.createView() },
+        { binding: 8, resource: this.hdr ? this.ssaoBound.createView({ dimension: "2d-array" }) : this.ssaoBound.createView() },
         // The light storage buffer; a grow changes identity and invalidates the cache.
         { binding: 9, resource: { buffer: this.lightBuffer } },
         // The instance transforms; a grow changes identity and invalidates the cache.
         { binding: 10, resource: { buffer: this.instanceBuffer } },
-        // The baked light map (or the 1x1 white blank; the uniform flag gates it).
-        { binding: 11, resource: view(textures.lm) },
+        // The baked light map (or the 1x1 white blank; the uniform flag gates it). The linear variant binds an
+        // array: an HDR directional map (F3d) where there is one, else the 8-bit map as one layer.
+        {
+          binding: 11,
+          resource: !this.hdr
+            ? view(textures.lm)
+            : textures.lmHdr
+              ? this.uploadHdrLightmap(textures.lmHdr).createView({ dimension: "2d-array" })
+              : (textures.lm ? this.uploadTexture(textures.lm) : this.blankTexture).createView({ dimension: "2d-array" }),
+        },
         // The probe atlas (or the blank) and boxes; a change invalidates the cache.
         { binding: 12, resource: this.hdr ? (this.probeCapture?.cubes ?? this.blankProbeCubes).createView({ dimension: "cube-array" }) : this.probeTexture.createView() },
         { binding: 13, resource: { buffer: this.probeBuffer } },
         // The detail map (or the 1x1 white blank; the uniform gates it).
         { binding: 14, resource: view(textures.detail) },
-        { binding: 15, resource: view(textures.blend, true) },
+        // The blend surface's map, and a material graph's images as the array's later layers (F1e).
+        { binding: 15, resource: textures.graph && textures.graph.some((t) => t !== null) ? this.uploadLayers([textures.blend, ...textures.graph]).createView({ dimension: "2d-array" }) : (textures.blend ? this.uploadTexture(textures.blend, true) : this.blankTexture).createView({ dimension: "2d-array" }) },
         { binding: 16, resource: view(textures.normal) },
+        ...(this.hdr ? [{ binding: 17, resource: this.terrainHeightsOf(primitive) }] : []),
       ],
     });
     this.bindGroups.set(primitive, { group, source: { ...textures } });
@@ -3951,6 +6426,12 @@ export class WebgpuSceneRenderer implements SceneRenderer {
       cache.set(source, texture);
       return texture;
     }
+    // Streamed (F1b): resident at the level the feedback and the budget allow.
+    if (this.streamer && Math.max(source.width, source.height) > STREAM_MIN_SIDE) {
+      const texture = this.streamedTexture(source, colour, this.streamer.register(source, source.width, source.height));
+      cache.set(source, texture);
+      return texture;
+    }
     const levels = this.mips ? mipLevelCount(source.width, source.height) : 1;
     const texture = this.device.createTexture({
       size: { width: source.width, height: source.height },
@@ -3976,6 +6457,232 @@ export class WebgpuSceneRenderer implements SceneRenderer {
     return texture;
   }
 
+  /** Texture streaming (F1b): the residency plan, and the feedback pass's pipeline, buffers and state. */
+  private streamer: TextureStreamer | null = null;
+  private feedback: { pipeline: any; draws: any; drawCapacity: number; wanted: any; readback: any; depth: any; size: { width: number; height: number }; busy: boolean; frame: number } | null = null;
+  /** Each feedback slot's streamed maps, for the round in flight. */
+  private feedbackMaps: DecodedTexture[][] = [];
+
+  /** Start streaming (F1b) under `budgetMB`, making the feedback pass the first time. */
+  private ensureStreaming(budgetMB: number): void {
+    const bytes = budgetMB * 1024 * 1024;
+    if (this.streamer) {
+      this.streamer.budgetBytes = bytes;
+      return;
+    }
+    this.streamer = new TextureStreamer(bytes);
+    const device = this.device;
+    const module = device.createShaderModule({ code: feedbackWgsl(4) });
+    const layout = device.createBindGroupLayout({
+      entries: [
+        { binding: 0, visibility: SHADER_STAGE_VERTEX | SHADER_STAGE_FRAGMENT, buffer: { type: "uniform", hasDynamicOffset: true } },
+        { binding: 1, visibility: SHADER_STAGE_VERTEX, buffer: { type: "read-only-storage" } },
+        { binding: 2, visibility: SHADER_STAGE_FRAGMENT, buffer: { type: "storage" } },
+      ],
+    });
+    const pipeline = device.createRenderPipeline({
+      layout: device.createPipelineLayout({ bindGroupLayouts: [layout] }),
+      vertex: { module, entryPoint: "vs", buffers: [{ arrayStride: 64, attributes: [{ shaderLocation: 0, offset: 0, format: "float32x3" }, { shaderLocation: 2, offset: 24, format: "float32x2" }] }] },
+      fragment: { module, entryPoint: "fs", targets: [] },
+      primitive: { topology: "triangle-list", cullMode: "none" },
+      depthStencil: { format: "depth24plus", depthWriteEnabled: true, depthCompare: "less" },
+    });
+    this.feedback = {
+      pipeline,
+      draws: device.createBuffer({ size: 64 * 256, usage: 0x40 | 0x08 }),
+      drawCapacity: 64,
+      wanted: device.createBuffer({ size: FEEDBACK_SLOTS * 4, usage: 0x80 | 0x08 | 0x04 }),
+      readback: device.createBuffer({ size: FEEDBACK_SLOTS * 4, usage: 0x01 | 0x08 }),
+      depth: null,
+      size: { width: 0, height: 0 },
+      busy: false,
+      frame: 0,
+    };
+    // Everything uploaded whole so far is streamed from here on.
+    this.bindGroups = new WeakMap();
+    this.cutGroups = new WeakMap();
+  }
+
+  /** What streaming holds (F1b), for the profiler; null when the frame doesn't stream. */
+  get textureResidency(): StreamingStats | null {
+    return this.streamer?.stats() ?? null;
+  }
+
+  /** A map at a resident level (F1b): its size over 2^level, that level's texels (box-filtered on the CPU) and the mips below. */
+  private streamedTexture(source: DecodedTexture, colour: boolean, level: number): any {
+    const top = streamedLevel(source, level);
+    const levels = mipLevelCount(top.width, top.height);
+    const texture = this.device.createTexture({
+      size: { width: top.width, height: top.height },
+      format: "rgba8unorm",
+      usage: 0x04 | 0x02 | (levels > 1 ? 0x10 : 0),
+      ...(levels > 1 ? { mipLevelCount: levels, ...(colour ? { viewFormats: ["rgba8unorm-srgb"] } : {}) } : {}),
+    });
+    this.device.queue.writeTexture({ texture }, top.data, { bytesPerRow: top.width * 4, rowsPerImage: top.height }, { width: top.width, height: top.height });
+    if (levels > 1) this.mipmaps.generate(texture, levels, colour ? "rgba8unorm-srgb" : "rgba8unorm");
+    return texture;
+  }
+
+  /**
+   * The feedback pass (F1b; textureStreaming.ts): every {@link FEEDBACK_INTERVAL} frames the opaque batches
+   * drawn a quarter size, each pixel's footprint kept per material, read back without waiting, and the
+   * residency planned again from it.
+   */
+  private addFeedback(graph: FrameGraph, draws: readonly DrawBatch<any>[]): void {
+    const fb = this.feedback;
+    if (!fb || fb.busy || this.frameIndex % FEEDBACK_INTERVAL !== 0) return;
+    const slots = new Map<DecodedTexture, number>();
+    const maps: DecodedTexture[][] = [];
+    const drawn: { entry: DrawBatch<any>; slot: number }[] = [];
+    for (const entry of draws) {
+      if (entry.refract || entry.alpha >= 2) continue;
+      const t = entry.textures;
+      const streamed = [t.base, t.mr, t.occ, t.emis, t.normal, t.detail].filter((m): m is DecodedTexture => m !== null && Math.max(m.width, m.height) > STREAM_MIN_SIDE);
+      if (streamed.length === 0) continue;
+      const key = streamed[0]!;
+      let slot = slots.get(key);
+      if (slot === undefined) {
+        if (maps.length >= FEEDBACK_SLOTS) continue;
+        slot = maps.length;
+        slots.set(key, slot);
+        maps.push(streamed);
+      }
+      drawn.push({ entry, slot });
+    }
+    if (drawn.length === 0) return;
+    const device = this.device;
+    if (fb.drawCapacity < drawn.length) {
+      fb.draws.destroy();
+      fb.drawCapacity = Math.max(drawn.length, fb.drawCapacity * 2);
+      fb.draws = device.createBuffer({ size: fb.drawCapacity * 256, usage: 0x40 | 0x08 });
+    }
+    const params = new Uint32Array(drawn.length * 64);
+    drawn.forEach((d, i) => (params[i * 64] = d.slot));
+    device.queue.writeBuffer(fb.draws, 0, params);
+    device.queue.writeBuffer(fb.wanted, 0, new Uint32Array(FEEDBACK_SLOTS).fill(FEEDBACK_NONE));
+    const width = Math.max(1, this.width >> 2);
+    const height = Math.max(1, this.height >> 2);
+    if (fb.size.width !== width || fb.size.height !== height) {
+      fb.depth?.destroy();
+      fb.depth = device.createTexture({ size: { width, height }, format: "depth24plus", usage: 0x10 });
+      fb.size = { width, height };
+    }
+    this.feedbackMaps = maps;
+    fb.busy = true;
+    graph.addPass("texture feedback", "render", (pass) => {
+      pass.keep();
+      return (ctx) => {
+        const encoded = ctx.encoder.beginRenderPass({ colorAttachments: [], depthStencilAttachment: { view: fb.depth.createView(), depthClearValue: 1, depthLoadOp: "clear", depthStoreOp: "discard" }, ...ctx.timing });
+        encoded.setPipeline(fb.pipeline);
+        drawn.forEach(({ entry }, i) => {
+          encoded.setBindGroup(0, device.createBindGroup({
+            layout: fb.pipeline.getBindGroupLayout(0),
+            entries: [
+              { binding: 0, resource: { buffer: fb.draws, offset: 0, size: 16 } },
+              { binding: 1, resource: { buffer: this.instanceBuffer } },
+              { binding: 2, resource: { buffer: fb.wanted } },
+            ],
+          }), [i * 256]);
+          encoded.setVertexBuffer(0, entry.geometry.vertexBuffer);
+          encoded.setIndexBuffer(entry.geometry.indexBuffer, "uint32");
+          encoded.drawIndexed(entry.geometry.indexCount, entry.models.length, 0, 0, entry.first);
+        });
+        encoded.end();
+        ctx.encoder.copyBufferToBuffer(fb.wanted, 0, fb.readback, 0, maps.length * 4);
+      };
+    });
+    const count = maps.length;
+    // Read once the frame is submitted (after it, in submit's caller order), never waited on.
+    queueMicrotask(() => {
+      void fb.readback
+        .mapAsync(0x01, 0, count * 4)
+        .then(() => {
+          const fixed = new Uint32Array(fb.readback.getMappedRange(0, count * 4).slice(0));
+          fb.readback.unmap();
+          this.applyFeedback(fixed);
+        })
+        .catch(() => {})
+        .finally(() => (fb.busy = false));
+    });
+  }
+
+  /** A round of feedback into the plan; maps whose level changed are made again as their groups rebuild. */
+  private applyFeedback(fixed: Uint32Array): void {
+    const streamer = this.streamer;
+    if (!streamer || this.destroyed) return;
+    const footprints = new Map<object, number>();
+    this.feedbackMaps.forEach((maps, slot) => {
+      const f = footprintLog2(fixed[slot] ?? FEEDBACK_NONE);
+      if (f === null) return;
+      for (const m of maps) footprints.set(m, Math.min(footprints.get(m) ?? Infinity, f));
+    });
+    streamer.observe(footprints);
+    const changed = streamer.plan();
+    if (changed.size === 0) return;
+    for (const source of changed.keys()) {
+      for (const cache of [this.textures, this.colourTextures]) {
+        const old = cache.get(source as DecodedTexture);
+        if (old) {
+          this.retired.push(old);
+          cache.delete(source as DecodedTexture);
+        }
+      }
+    }
+    this.bindGroups = new WeakMap();
+    this.cutGroups = new WeakMap();
+  }
+
+  /** Textures a residency change replaced, destroyed once the next frame no longer uses them. */
+  private retired: any[] = [];
+
+  /** Layer stacks uploaded once (F1e), by their layers' identities. */
+  private readonly layerStacks = new Map<string, any>();
+
+  /**
+   * Upload (once) maps as the layers of one array (F1e): each resampled to the
+   * largest's size (at most 1024), a missing one white, with mips.
+   */
+  private uploadLayers(layers: readonly (DecodedTexture | null)[]): any {
+    const key = layers.map((l) => (l ? textureId(l) : 0)).join(",");
+    const cached = this.layerStacks.get(key);
+    if (cached) return cached;
+    const width = Math.min(1024, Math.max(1, ...layers.map((l) => l?.width ?? 1)));
+    const height = Math.min(1024, Math.max(1, ...layers.map((l) => l?.height ?? 1)));
+    const levels = this.mips ? mipLevelCount(width, height) : 1;
+    const texture = this.device.createTexture({ size: { width, height, depthOrArrayLayers: layers.length }, format: "rgba8unorm", usage: 0x04 | 0x02 | (levels > 1 ? 0x10 : 0), ...(levels > 1 ? { mipLevelCount: levels } : {}) });
+    layers.forEach((layer, z) => {
+      const data = resampleRgba(layer, width, height);
+      this.device.queue.writeTexture({ texture, origin: { x: 0, y: 0, z } }, data, { bytesPerRow: width * 4, rowsPerImage: height }, { width, height });
+    });
+    if (levels > 1) this.mipmaps.generate(texture, levels, "rgba8unorm", layers.length);
+    this.layerStacks.set(key, texture);
+    return texture;
+  }
+
+  /**
+   * Upload (once) an HDR directional light map (F3d, hdrLightmap.ts) as a
+   * two-layer rgba16float array: the irradiance (and 1), then the dominant
+   * direction and the sky's visibility. One level: a light map's texels are
+   * already a few centimetres to metres apart.
+   */
+  private uploadHdrLightmap(map: HdrLightmap): any {
+    const cached = this.hdrLightmaps.get(map);
+    if (cached) return cached;
+    const { width, height } = map;
+    const texels = width * height;
+    const halves = new Uint16Array(texels * 8);
+    const one = toHalf(1);
+    for (let i = 0; i < texels; i += 1) {
+      for (let c = 0; c < 3; c += 1) halves[i * 4 + c] = toHalf(map.irradiance[i * 3 + c]!);
+      halves[i * 4 + 3] = one;
+      for (let c = 0; c < 4; c += 1) halves[(texels + i) * 4 + c] = toHalf(map.direction[i * 4 + c]!);
+    }
+    const texture = this.device.createTexture({ size: { width, height, depthOrArrayLayers: 2 }, format: "rgba16float", usage: 0x04 | 0x02 });
+    this.device.queue.writeTexture({ texture }, halves, { bytesPerRow: width * 8, rowsPerImage: height }, { width, height, depthOrArrayLayers: 2 });
+    this.hdrLightmaps.set(map, texture);
+    return texture;
+  }
+
   /** The size frames render at now. */
   get size(): { readonly width: number; readonly height: number } {
     return { width: this.width, height: this.height };
@@ -3995,6 +6702,7 @@ export class WebgpuSceneRenderer implements SceneRenderer {
     height = Math.max(1, Math.round(height));
     if (this.destroyed || (width === this.width && height === this.height)) return;
     const device = this.device;
+    const previous = this.latest && this.latest.length === this.width * this.height * 4 ? { width: this.width, height: this.height } : null;
     this.width = width;
     this.height = height;
     const size = { width, height };
@@ -4033,6 +6741,16 @@ export class WebgpuSceneRenderer implements SceneRenderer {
       destroySafely(this.gtao.uniforms);
       this.gtao = null;
     }
+    if (this.hiz) {
+      for (const t of [this.hiz.chain, this.hiz.history[0], this.hiz.history[1], this.hiz.traced, this.hiz.blank, this.hiz.uniforms]) destroySafely(t);
+      this.hiz = null;
+    }
+    if (this.ssgi) {
+      destroySafely(this.ssgi.history[0]);
+      destroySafely(this.ssgi.history[1]);
+      destroySafely(this.ssgi.uniforms);
+      this.ssgi = null;
+    }
     if (this.taa) {
       destroySafely(this.taa.history[0]);
       destroySafely(this.taa.history[1]);
@@ -4047,13 +6765,31 @@ export class WebgpuSceneRenderer implements SceneRenderer {
       buffer: device.createBuffer({ size: this.bytesPerRow * height, usage: 0x08 | 0x01 }),
       busy: false,
     }));
-    this.latest = null;
+    // A frame read back keeps showing, resampled, until the first at the new size lands (no flash of the sky).
+    this.latest = this.latest && !this.hdr && previous ? resampleNearest(this.latest, previous.width, previous.height, width, height) : null;
     this.bindGroups = new WeakMap();
   }
 
   dispose(): void {
+    this.volumes?.dispose();
+    this.volumes = null;
+    this.particles?.dispose();
+    this.particles = null;
     if (this.destroyed) return;
     this.destroyed = true;
+    this.pathTracer?.destroy();
+    this.culling?.destroy();
+    this.lightClusterer?.destroy();
+    this.transforms?.destroy();
+    this.casterCulling?.destroy();
+    this.clusterRendering?.destroy();
+    for (const t of this.terrainList) t.dispose();
+    this.terrainList = [];
+    this.pathTracer = null;
+    destroySafely(this.sssProfiles);
+    if (this.feedback) for (const b of [this.feedback.draws, this.feedback.wanted, this.feedback.readback, this.feedback.depth]) destroySafely(b);
+    for (const t of this.retired) destroySafely(t);
+    if (this.sss) for (const b of this.sss.uniforms) destroySafely(b);
     this.latest = null;
     this.software.dispose();
     destroySafely(this.colourTexture);
@@ -4076,13 +6812,13 @@ export class WebgpuSceneRenderer implements SceneRenderer {
     destroySafely(this.depthGroups.blankTexture);
     destroySafely(this.depthGroups.sized.behind);
     destroySafely(this.depthGroups.behindBlank);
-    destroySafely(this.depthGroups.clusters.table);
-    destroySafely(this.depthGroups.clusters.index);
+    destroySafely(this.depthGroups.clusters.data);
     destroySafely(this.depthGroups.clusters.params);
     destroySafely(this.depthGroups.shadowTiles);
     destroySafely(this.depthGroups.dfg);
     destroySafely(this.depthGroups.ltc);
     destroySafely(this.depthGroups.decals);
+    destroySafely(this.depthGroups.aerial);
     destroySafely(this.depthGroups.atlas);
     destroySafely(this.depthGroups.probes);
     destroySafely(this.blankTexture);
@@ -4091,6 +6827,16 @@ export class WebgpuSceneRenderer implements SceneRenderer {
     if (this.envTexture !== this.blankTexture) destroySafely(this.envTexture);
     if (this.probeTexture !== this.blankTexture) destroySafely(this.probeTexture);
     this.probeCapture?.dispose();
+    this.atmosphere?.dispose();
+    this.volumetricFog?.dispose();
+    this.probeGi?.gi.dispose();
+    this.disposeVsm();
+    if (this.upscaler) {
+      destroySafely(this.upscaler.output);
+      destroySafely(this.upscaler.uniforms);
+      this.upscaler = null;
+    }
+    destroySafely(this.depthGroups.fogVolume.texture);
     destroySafely(this.blankProbeCubes);
     destroySafely(this.probeBuffer);
     destroySafely(this.ssaoTexture);
@@ -4120,6 +6866,21 @@ function fullScreenPipeline(device: any, code: string, entryPoint: string, forma
   });
 }
 
+/**
+ * A draw as its view mode (F10a) shows it: a diagnostic frame without what would change its values
+ * (temporal accumulation and upscaling, reflections, the camera's effects), with the prepass motion
+ * vectors need, and without the depths overdraw ignores (nor what reads them).
+ */
+function viewModeDraw(draw: GpuSceneDraw): GpuSceneDraw {
+  const code = viewModeCode(draw.viewMode);
+  if (code === 0) return draw;
+  const out: Record<string, unknown> = { ...draw };
+  for (const key of ["temporal", "upscale", "reflections", "camera", "reflectionTrace"]) delete out[key];
+  if (code === 8) out.prepass = true;
+  if (code === 11) for (const key of ["prepass", "virtualShadows", "ambientOcclusion", "screenSpaceGi"]) delete out[key];
+  return out as unknown as GpuSceneDraw;
+}
+
 /** Release a GPU resource without caring whether it exists or supports destroy. */
 function destroySafely(resource: any): void {
   try {
@@ -4127,4 +6888,103 @@ function destroySafely(resource: any): void {
   } catch {
     // Already released, or a device that has gone away. Nothing to do.
   }
+}
+
+const textureIds = new WeakMap<object, number>();
+let nextTextureId = 1;
+/** A stable number for a decoded map, for keying what is built from several. */
+function textureId(t: object): number {
+  let id = textureIds.get(t);
+  if (id === undefined) textureIds.set(t, (id = nextTextureId++));
+  return id;
+}
+
+/** A map's texels at `width × height` (bilinear), or white without one (F1e's layer stacks). */
+function resampleRgba(source: DecodedTexture | null, width: number, height: number): Uint8Array {
+  const out = new Uint8Array(width * height * 4);
+  if (!source || source.width <= 0 || source.height <= 0) return out.fill(255);
+  if (source.width === width && source.height === height) {
+    out.set(source.data.subarray(0, width * height * 4));
+    return out;
+  }
+  const at = (x: number, y: number, c: number) => source.data[(Math.min(source.height - 1, Math.max(0, y)) * source.width + Math.min(source.width - 1, Math.max(0, x))) * 4 + c]!;
+  for (let y = 0; y < height; y += 1) {
+    const fy = ((y + 0.5) * source.height) / height - 0.5;
+    const y0 = Math.floor(fy);
+    const ty = fy - y0;
+    for (let x = 0; x < width; x += 1) {
+      const fx = ((x + 0.5) * source.width) / width - 0.5;
+      const x0 = Math.floor(fx);
+      const tx = fx - x0;
+      for (let c = 0; c < 4; c += 1) {
+        const top = at(x0, y0, c) * (1 - tx) + at(x0 + 1, y0, c) * tx;
+        const bottom = at(x0, y0 + 1, c) * (1 - tx) + at(x0 + 1, y0 + 1, c) * tx;
+        out[(y * width + x) * 4 + c] = Math.round(top * (1 - ty) + bottom * ty);
+      }
+    }
+  }
+  return out;
+}
+
+const shaderModules = new WeakMap<object, Map<string, any>>();
+/** A shader module for `code` on `device`, made once (F1e): every renderer and permutation with the same source shares it. */
+function cachedShaderModule(device: any, code: string): any {
+  let modules = shaderModules.get(device);
+  if (!modules) shaderModules.set(device, (modules = new Map()));
+  let module = modules.get(code);
+  if (!module) modules.set(code, (module = device.createShaderModule({ code })));
+  return module;
+}
+
+/** Maps no larger than this a side aren't streamed (F1b): their whole chain is cheaper than the bookkeeping. */
+const STREAM_MIN_SIDE = 256;
+/** Frames between texture feedback rounds (F1b). */
+const FEEDBACK_INTERVAL = 8;
+
+const cpuLevels = new WeakMap<DecodedTexture, Map<number, { width: number; height: number; data: Uint8Array }>>();
+/** A map's texels at `level`, box-filtered down from the level above (kept per map). */
+function streamedLevel(source: DecodedTexture, level: number): { width: number; height: number; data: Uint8Array } {
+  if (level <= 0) return { width: source.width, height: source.height, data: new Uint8Array(source.data.buffer, source.data.byteOffset, source.width * source.height * 4) };
+  let levels = cpuLevels.get(source);
+  if (!levels) cpuLevels.set(source, (levels = new Map()));
+  const hit = levels.get(level);
+  if (hit) return hit;
+  const above = streamedLevel(source, level - 1);
+  const width = Math.max(1, above.width >> 1);
+  const height = Math.max(1, above.height >> 1);
+  const data = new Uint8Array(width * height * 4);
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      const x0 = Math.min(above.width - 1, x * 2), x1 = Math.min(above.width - 1, x * 2 + 1);
+      const y0 = Math.min(above.height - 1, y * 2), y1 = Math.min(above.height - 1, y * 2 + 1);
+      for (let c = 0; c < 4; c += 1) {
+        const at = (px: number, py: number) => above.data[(py * above.width + px) * 4 + c]!;
+        data[(y * width + x) * 4 + c] = (at(x0, y0) + at(x1, y0) + at(x0, y1) + at(x1, y1) + 2) >> 2;
+      }
+    }
+  }
+  const out = { width, height, data };
+  levels.set(level, out);
+  return out;
+}
+
+/** The fewest copies of a LOD chain for which the GPU picks levels (F0e): each level is a draw of its own. */
+export const GPU_LOD_MIN_COPIES = 32;
+
+/** The LOD chains with at least {@link GPU_LOD_MIN_COPIES} copies among `instances`. */
+export function manyCopyChains(instances: readonly MeshSceneInstance[]): ReadonlySet<LodChain> {
+  const counts = new Map<LodChain, number>();
+  for (const instance of instances) if (instance.lod && instance.lod.meshes.length > 1) counts.set(instance.lod, (counts.get(instance.lod) ?? 0) + 1);
+  return new Set([...counts].filter(([, n]) => n >= GPU_LOD_MIN_COPIES).map(([chain]) => chain));
+}
+
+/** `instances` with the CPU's LOD choice made for every copy whose chain isn't in `gpu` (as lod.ts's applyLods). */
+function lodsBesides(instances: readonly MeshSceneInstance[], gpu: ReadonlySet<LodChain>, eye: readonly [number, number, number]): readonly MeshSceneInstance[] {
+  return instances.map((instance) => {
+    if (!instance.lod || gpu.has(instance.lod)) return instance;
+    const m = instance.model;
+    const scale = Math.max(Math.hypot(m[0]!, m[1]!, m[2]!), Math.hypot(m[4]!, m[5]!, m[6]!), Math.hypot(m[8]!, m[9]!, m[10]!)) || 1;
+    const mesh = resolveLodMesh(instance, Math.hypot(m[12]! - eye[0], m[13]! - eye[1], m[14]! - eye[2]) / scale);
+    return mesh === instance.mesh ? instance : { ...instance, mesh };
+  });
 }

@@ -301,7 +301,7 @@ export function editFace(p: MeshPrimitive, triangles: readonly number[], edit: F
     }
     indices.push(i);
   }
-  const { lightmapImage: _lightmap, ...material } = p.material;
+  const { lightmapImage: _lightmap, lightmapHdrImage: _hdr, ...material } = p.material;
   return {
     positions: Float32Array.from(positions),
     normals: Float32Array.from(normals),

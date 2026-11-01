@@ -1,4 +1,4 @@
-import { MeshSceneInstance, MeshAsset, Mat4, ScenePropValue, PhysicsSpec, AnimatorSpec, AttachedComponent, SceneLighting, PhysicsWorldSettings, SceneTimeline, SceneLevel, NavMesh, Terrain, SceneStreaming, ParticleEffect, DecalDef, DecalMark, RagdollBox, DebrisDef, LodChain, SceneAudio, ComponentDef, StreamGroup, JointKind, JointSpec, ActionRebind, DecodedTexture, SkySun, BakedCloudLayer, SunShafts, ColorFilter, AccessibilitySettings, EncodedImage, UiDocument, InputAction, StringTable, ReflectionProbe, EnvironmentLight, ShadowInput, ToneMap, SceneLight, LocalShadows, ProjectedDecal, DecalTiles, SceneFog, SceneWind, RasterStyle, MeshMaterial, ResolvedLayers, ResolvedRefraction, SurfaceEffect, AnimatorOp, NavGraph, AnimationCue } from '@cartbox/editor';
+import { MeshSceneInstance, MeshAsset, Mat4, ScenePropValue, PhysicsSpec, AnimatorSpec, LodChain, AttachedComponent, SceneLighting, PhysicsWorldSettings, SceneTimeline, SceneLevel, NavMesh, Terrain, SceneStreaming, ParticleEffect, DecalDef, DecalMark, RagdollBox, DebrisDef, SceneAudio, ComponentDef, StreamGroup, JointKind, JointSpec, EnvironmentLight, SceneLight, ActionRebind, Atmosphere, SkyMoon, Clouds, DecodedTexture, SkySun, BakedCloudLayer, SunShafts, ColorFilter, AccessibilitySettings, WeatherSettings, EncodedImage, UiDocument, InputAction, StringTable, ReflectionProbe, ShadowInput, ToneMap, LocalShadows, ProjectedDecal, DecalTiles, Occluder, DynamicGi, SceneFog, SceneWind, Weather, MeshMaterial, EmitterSpec, RasterStyle, VolumeEffect, MeshPrimitive, HdrLightmap, LightmapLayout, ProbeVolume, OccluderSurface, ResolvedLayers, ResolvedExtensions, ResolvedRefraction, SurfaceEffect, AnimatorOp, NavGraph, AnimationCue, FaceRig, VisemeSpan, FaceClip } from '@cartbox/editor';
 
 /**
  * The runtime mesh scene: the cart's mesh sidecar resolved into placed instances
@@ -57,6 +57,8 @@ interface MeshInstance extends MeshSceneInstance {
     readonly terrain?: true;
     /** On a terrain block whose terrain casts shadows ({@link Terrain.castShadows}): it goes into the shadow map. */
     readonly casts?: true;
+    /** On a terrain block: its terrain's id. The AAA tier draws that terrain from its heightfield instead (F6c). */
+    readonly ground?: string;
     /**
      * On a terrain block: how far from it full detail holds (world units). Its
      * `frames` are the half- and quarter-detail versions the renderer swaps to
@@ -82,6 +84,17 @@ interface MeshInstance extends MeshSceneInstance {
         readonly swap?: {
             readonly distance: number;
             readonly far: boolean;
+        };
+        /**
+         * The block's copies, for drawing one at a time (F6b): the layer's mesh as
+         * the AAA tier draws it (foliageInstanceMesh), each copy's matrix (in the
+         * instance's space), and, for a layer with impostors, the chain from the
+         * full mesh to its cards at the swap distance.
+         */
+        readonly copies?: {
+            readonly mesh: MeshAsset;
+            readonly matrices: readonly Float32Array[];
+            readonly lod: LodChain | null;
         };
     };
     /** The components attached to this object (EP14), each with its field values; absent when none. */
@@ -109,6 +122,9 @@ interface SceneVista {
         readonly mesh: MeshAsset;
         readonly model: Mat4;
     }[];
+    /** The vista's heightfield and model: the AAA tier draws it as ground, not into the sky (F6c). */
+    readonly terrain?: Terrain;
+    readonly model?: Mat4;
 }
 interface MeshScene {
     readonly instances: readonly MeshInstance[];
@@ -133,6 +149,8 @@ interface MeshScene {
     readonly navmesh?: NavMesh;
     /** Heightfield landscapes, as authored (their geometry is among the instances). Vistas aren't. */
     readonly terrains?: readonly Terrain[];
+    /** Each terrain's model (its parent's, or the identity), by id: where the AAA tier draws its heightfield (F6c). */
+    readonly terrainModels?: ReadonlyMap<string, Mat4>;
     /**
      * Distant vistas (HALO_INFINITE_STYLE_ROADMAP.md I7): far terrains, and the
      * foliage set on them, drawn once into the sky panorama when the scene loads
@@ -918,6 +936,9 @@ declare function uniformsFromSettings(settings: PostFxSettings): PostFxUniforms;
  *   behaviour before presets existed.
  * - **medium**: half-resolution shadow maps; the first-person software view
  *   starts at three-quarter size.
+ * - **epic** (AAA_FIDELITY_ROADMAP.md's top scalability level): high, plus the
+ *   AAA tier's costliest paths — reflections traced through the scene's BVH
+ *   where the screen has nothing to show (F3f). Never picked by "auto".
  * - **low**: no shadows, no bloom or chromatic aberration (the multi-pass
  *   effects; cheap per-pixel looks like grading, CRT or dithering stay), no
  *   anti-aliasing, and the first-person software view capped at half size.
@@ -933,7 +954,7 @@ declare function uniformsFromSettings(settings: PostFxSettings): PostFxUniforms;
  * keep running long.
  */
 
-type QualityLevel = "low" | "medium" | "high";
+type QualityLevel = "low" | "medium" | "high" | "epic";
 type QualityChoice = QualityLevel | "auto";
 declare const QUALITY_LEVELS: readonly QualityLevel[];
 interface QualitySettings {
@@ -968,6 +989,14 @@ interface QualitySettings {
      * expanded in blocks, so much past 4 shows on cloud edges.)
      */
     readonly skyScale?: number;
+    /** On the AAA tier's temporal frames, the share of the display's pixels across that renders; the upscaler (F4b) makes up the rest. */
+    readonly renderScale?: number;
+    /** On the AAA tier, the sun's virtual shadow maps over its cascades (F2b). */
+    readonly virtualShadows?: boolean;
+    /** On the AAA tier, reflections the screen can't show traced through the still scene's BVH (F3f). */
+    readonly tracedReflections?: boolean;
+    /** Texture streaming's budget on the AAA tier (AAA_FIDELITY_ROADMAP.md F1b), MB of resident maps. */
+    readonly textureBudgetMB?: number;
 }
 declare const QUALITY_PRESETS: Readonly<Record<QualityLevel, QualitySettings>>;
 /** What the browser reveals about the device (all optional: browsers differ). */
@@ -985,18 +1014,6 @@ declare function detectQuality(hints: DeviceHints): QualityLevel;
 declare function resolveQuality(choice: QualityChoice | undefined, hints: DeviceHints): QualitySettings;
 /** This browser's hints (in a browser; empty elsewhere). */
 declare function browserDeviceHints(webgpu?: boolean): DeviceHints;
-/**
- * "auto" by measurement: fed the time between shown frames and how much of it
- * the player spent working, it says when to step down a preset. A device that
- * can't hold about 40 fps over a second and a half, while busy for most of
- * each frame, steps down a preset (high → medium → low); one that can't hold
- * 20 fps goes straight to low. It never steps back up, so the picture doesn't
- * flicker between presets. (Busy matters: a browser saving power may show only
- * 30 frames a second however light they are, and that's no reason to draw them
- * worse.) After a change, a resume or the start it waits a few seconds for the
- * first, slower frames (loading, shaders building) to pass; gaps over half a
- * second — a hidden tab, a breakpoint — don't count.
- */
 declare class QualityGovernor {
     /** Frames slower than this on average (ms) step the preset down; twice as slow goes straight to low. */
     private readonly slowMs;
@@ -1038,6 +1055,290 @@ declare class QualityGovernor {
 declare function isMobileAgent(userAgent: string, maxTouchPoints?: number): boolean;
 /** Post-effect settings with a preset's costly effects switched off (the same object when none apply). */
 declare function applyQualityToPostFx(settings: PostFxSettings, quality: QualitySettings): PostFxSettings;
+
+/**
+ * View modes (AAA_FIDELITY_ROADMAP.md F10a): the viewport shows the frame the
+ * game renders ("lit"), or a diagnostic of it, on the linear-light renderer.
+ *
+ * Most are written by the scene's own fragment shader in place of its lit
+ * colour, from the very values it shades with: the single buffers (unlit, base
+ * colour, roughness, metallic, normals, AO, lighting only), the complexity
+ * views (an estimate of the shading work a pixel runs, and the lights it
+ * loops over), and the geometry and texture views (the LOD level drawn, texel
+ * density against a target, the mip a pixel samples, and the sun's cascade).
+ * Two need the whole frame: motion vectors are drawn from the prepass's
+ * velocity buffer, and overdraw counts every fragment the scene shades
+ * (additively, depth unwritten) before both are coloured in a resolve pass.
+ *
+ * The path-traced reference (F10b; pathTracer.ts) replaces the frame instead,
+ * and is exposed and tone-mapped as the lit frame is.
+ *
+ * A diagnostic frame skips what would change its values: temporal
+ * accumulation and upscaling, reflections, the camera's effects, fog and the
+ * presenter's exposure, tone map and post stack. Its colours are written as
+ * linear light that encodes to the intended display colour.
+ */
+type ViewMode = "lit" | "unlit" | "baseColor" | "roughness" | "metallic" | "normals" | "ambientOcclusion" | "lightingOnly" | "motion" | "shaderComplexity" | "lightComplexity" | "overdraw" | "lod" | "texelDensity" | "mipLevel" | "cascades" | "pathTraced";
+/** Each mode's code in the shader, its label, its group in a menu, and what it shows. */
+declare const VIEW_MODES: readonly {
+    readonly id: ViewMode;
+    readonly code: number;
+    readonly label: string;
+    readonly group: "Lighting" | "Buffers" | "Complexity" | "Geometry";
+    readonly hint: string;
+}[];
+/** Whether a mode is a diagnostic, shown as written (F10a): every mode but the lit frame and the path-traced reference (F10b), which are light to expose and tone-map. */
+declare function isDiagnosticView(mode: ViewMode | null | undefined): boolean;
+/** A mode's shader code (0 for lit or anything unknown). */
+declare function viewModeCode(mode: ViewMode | null | undefined): number;
+/** Read a stored mode defensively; "lit" when unknown. */
+declare function readViewMode(raw: unknown): ViewMode;
+/** The texel density the density view takes as on target (texels per metre), unless the draw names one. */
+declare const DEFAULT_TEXEL_DENSITY = 512;
+/** The heat ramp the complexity views share (0 → 1): black, blue, green, yellow, red, white; display colour. */
+declare function heat(t: number): [number, number, number];
+
+/**
+ * Image-based lighting on the GPU (AAA_FIDELITY_ROADMAP.md F3a): the AAA tier's
+ * environment as a cubemap whose mips are the GGX-prefiltered reflection at
+ * rising roughness, and its diffuse light as L2 spherical harmonics. Together
+ * with the split-sum DFG (brdf.ts) they are Karis's split-sum IBL.
+ *
+ * They replace what the Modern tier keeps for its parity with the software
+ * rasteriser: the 192×96 panorama read nearest, a reflection "blurred" by
+ * lerping toward the environment's average, and a diffuse light that was the
+ * radiance straight along the normal rather than the irradiance over its
+ * hemisphere.
+ *
+ * - **The source** is the environment in linear light ({@link environmentPanorama}):
+ *   an imported HDR sky's own radiance, else its panorama, or its
+ *   sky/horizon/ground gradient, decoded and scaled by its intensity as the
+ *   shader's `envColorDir` does.
+ * - **The cube** is drawn from it in compute, each mip level the GGX lobe of
+ *   its roughness (level / (levels − 1)) importance-sampled around the
+ *   direction, with mip-filtered samples (Křivánek and Colbert) from the
+ *   source's own mips, so a few hundred samples don't alias.
+ * - **The irradiance** is projected on the CPU into nine coefficients
+ *   (Ramamoorthi and Hanrahan), already convolved with the clamped cosine and
+ *   divided by π, so a constant environment of radiance L lights white at L.
+ */
+
+/** An environment in linear light: RGBA floats, equirectangular (u = longitude, v = 0 at the zenith). */
+interface LinearPanorama {
+    readonly width: number;
+    readonly height: number;
+    readonly data: Float32Array;
+}
+/**
+ * The environment as the linear shader sees it: its HDR light when it has one
+ * (an imported `.hdr` sky, F3a), else its panorama, or its gradient by a
+ * direction's height (envGradient), each decoded from authored colour; all
+ * scaled by the intensity.
+ */
+declare function environmentPanorama(env: EnvironmentLight): LinearPanorama;
+/**
+ * The panorama's irradiance as L2 spherical harmonics: nine RGB coefficients
+ * (as vec4s, 36 floats), convolved with the clamped cosine and over π, so
+ * {@link shIrradiance} gives the radiance a white Lambertian surface reflects.
+ */
+declare function environmentSh(pano: LinearPanorama): Float32Array;
+/** The SH irradiance (over π) at a unit normal, as the shader evaluates it. */
+declare function shIrradiance(sh: Float32Array, n: readonly [number, number, number]): [number, number, number];
+
+/**
+ * The AAA tier's tone mappers (AAA_FIDELITY_ROADMAP.md F4d): the curve that
+ * takes the linear HDR frame, exposed, into the display's 0..1, chosen per
+ * scene (`SceneLighting.tonemapper`). Each is here twice, as WGSL for the
+ * presenter and as TypeScript for the tests, term for term.
+ *
+ * - **filmic**: Narkowicz's fit of the ACES curve, per channel: what every
+ *   tier has used since F0b, and still the default, so a scene looks as it did.
+ * - **aces**: Hill's fit of the ACES RRT and ODT, through the AP1 working
+ *   space: the reference ACES look, desaturating highlights toward white.
+ * - **agx**: Sobotka's AgX (Wrensch's minimal fit), which compresses in a
+ *   log space rotated off the primaries, so a saturated light goes to white
+ *   without the hue skew per-channel curves give it.
+ * - **neutral**: Khronos PBR Neutral, which leaves colours under 0.76 as
+ *   they are (so a material's base colour shows as authored) and rolls off
+ *   above it.
+ *
+ * Each maps in one of two domains (F11a-5). **Physical**: the curve on the
+ * exposed light, then the sRGB encode, as a linear pipeline does. **As
+ * authored**: the curve on the light's sRGB encoding, as the byte path's
+ * shader maps its display-space shading, so a map tuned there shows as tuned;
+ * its shadows and midtones lift and its highlights hold lower.
+ */
+/** The curves, in the order the presenter's uniform names them. */
+declare const TONE_MAPPERS: readonly ["filmic", "aces", "agx", "neutral"];
+type ToneMapper = (typeof TONE_MAPPERS)[number];
+
+/**
+ * The path-traced reference (AAA_FIDELITY_ROADMAP.md F10b): a progressive
+ * WebGPU compute path tracer over the scene's BVH, with the materials and
+ * lights the linear-light (AAA) renderer shades with. It is the ground truth
+ * the raster's parity tests, the look-dev stage and the bakes are held to.
+ *
+ * - **The scene** is the lightmapper's own triangle BVH (`buildBvh`, packed by
+ *   `packBvhNodes`, F3d), with what a camera path needs on top: each
+ *   triangle's corner normals and UVs, and its material.
+ * - **The materials** are the renderer's: base colour, metal/roughness and
+ *   emissive factors times their maps (read from one texel store, filtered by
+ *   hand, at the renderer's (u, 1 − v)), authored colour into linear light as
+ *   the shader's `toLinear` takes it, and cut-outs and blended surfaces
+ *   (stochastically, by their alpha) letting rays through.
+ * - **The BRDF** is the AAA shader's (brdf.ts, F1c), term for term: GGX with
+ *   the height-correlated Smith visibility, Schlick's Fresnel, the
+ *   Kulla-Conty compensation on the specular, and a diffuse of
+ *   `(1 − metal)(1 − F)·albedo`. In the renderer's units a light of radiance
+ *   `c` gives `f·π·c·N·L` (its diffuse is albedo, not albedo / π), and so
+ *   does each light here; the sky and emissive surfaces are radiance as they
+ *   are.
+ * - **Each path** leaves the eye through a jittered point of its pixel. At
+ *   every surface it gathers the surface's emission, every directional light
+ *   and one point, spot or area light (picked as the lightmapper picks them),
+ *   each through a shadow ray, then bounces by one sample of the BRDF (the
+ *   specular by its visible normals, Heitz 2018, or the diffuse by the
+ *   cosine), weighed by the two lobes' mixed density. Russian roulette ends it
+ *   after the third bounce. A miss sees the sky: the environment's panorama
+ *   (F3a), or without one the flat ambient as a uniform sky, as the shader's
+ *   fill is.
+ * - **Accumulation.** The sums of every sample a pixel has taken stay in a
+ *   storage buffer while the view and scene hold; each frame adds samples and
+ *   a resolve pass writes the mean to a half-float texture the presenter
+ *   shows (premultiplied, alpha 0 where the eye saw nothing, as the raster's).
+ * - **The random numbers** are seeded by the pixel's place in the whole
+ *   image and the sample's index, so a capture in tiles is the same image as
+ *   one in a piece.
+ *
+ * {@link captureReference} renders it at any size up to 8K, a tile at a time,
+ * for marketing shots and the roadmap's reference images.
+ */
+
+/** Bounces after the surface the eye sees, by default. */
+declare const REFERENCE_BOUNCES = 4;
+/** The largest capture, each side (8K). */
+declare const MAX_CAPTURE_SIDE = 8192;
+/** The scene as the path tracer reads it. */
+interface ReferenceScene {
+    /** The BVH's nodes ({@link packBvhNodes}). */
+    readonly nodes: Uint32Array;
+    /**
+     * Per triangle seven vec4s:
+     * - a corner and its two edges (as the lightmapper's);
+     * - the corners' normals (zero without one) with the UVs threaded through
+     *   their w's, and the last's w the material's index (u32 bits):
+     *   (n0, u0), (n1, v0), (n2, u1), (v1, u2, v2, material).
+     */
+    readonly prims: Float32Array;
+    /**
+     * Per material eleven vec4s:
+     * - its base colour factor, as authored (RGBA);
+     * - its emissive factor, as authored, and its alpha mode (0 opaque, 1 mask, 2 blend, 3 additive);
+     * - metalness, roughness, and its base-colour and metal/roughness maps (−1 none);
+     * - its emissive map, whether it shades as PBR, its alpha cutoff, and the lighting channels it is on;
+     * - the full material set (F1d; {@link extensionRows}): sheen; a dielectric's f0 and transmission; the
+     *   volume's thickness and attenuation distance, and the film's strength and IOR; the attenuation colour
+     *   and the film's thickness; the UV transform; its offset, the emissive strength and whether it has one;
+     *   a thin surface's transmission colour and share (F1d-2).
+     *
+     * Then per map, from vec4 {@link mapTable}, one vec4 of u32 bits: its first texel in {@link texels}, its width and height.
+     */
+    readonly mats: Float32Array;
+    readonly mapTable: number;
+    /** Every map's texels, RGBA8 a word. */
+    readonly texels: Uint32Array;
+    readonly triangles: number;
+    readonly materials: number;
+}
+/**
+ * The instances as the path tracer reads them; see {@link ReferenceScene}.
+ * Its triangles are in `buildBvh`'s order, so they line up with its nodes.
+ */
+declare function packReferenceScene(instances: readonly MeshSceneInstance[]): ReferenceScene;
+/** What the reference is lit by and seen through: the parts of a draw it reads. */
+interface ReferenceDraw {
+    readonly view: Mat4;
+    readonly projection: Mat4;
+    readonly lightDirection?: readonly [number, number, number];
+    readonly ambient?: number;
+    readonly environment?: EnvironmentLight | null;
+    readonly lights?: readonly SceneLight[] | null;
+    /** A thin lens (F10d): its aperture radius and focus distance (m); absent, a pinhole. */
+    readonly lens?: {
+        readonly aperture: number;
+        readonly focus: number;
+    } | null;
+}
+interface ReferenceSettings {
+    /** Bounces after the surface the eye sees (0..8, default {@link REFERENCE_BOUNCES}). */
+    readonly bounces?: number;
+    /** Samples a pixel takes each frame (default 1). */
+    readonly samplesPerFrame?: number;
+    /** Where a pixel stops taking samples (default 4096). */
+    readonly maxSamples?: number;
+    /** The most a bounce may bring back, by luminance (0 = no clamp, the default; a viewport may trade bias for fewer fireflies). */
+    readonly clamp?: number;
+    /** Whether a miss from the eye shows the sky (default false: alpha 0, so the presenter's sky shows, as with the raster). */
+    readonly background?: boolean;
+}
+/**
+ * The progressive reference for a viewport (F10b): each {@link render} adds
+ * samples to every pixel while the scene, camera, lights and sky hold, and
+ * starts again when any changes.
+ */
+declare class PathTracer {
+    readonly device: any;
+    private readonly core;
+    private accum;
+    private frame;
+    private readonly params;
+    private readonly resolveInfo;
+    private size;
+    private key;
+    /** Samples each pixel holds. */
+    samples: number;
+    private constructor();
+    static create(device: any): PathTracer;
+    /** Start accumulating again. */
+    reset(): void;
+    private ensureTargets;
+    /**
+     * Add a frame's samples of `instances` seen through `draw` at `width × height`,
+     * and return the mean so far: an rgba16float texture, premultiplied, alpha
+     * 0 where the eye saw nothing (unless `background`).
+     */
+    render(instances: readonly MeshSceneInstance[], draw: ReferenceDraw, width: number, height: number, settings?: ReferenceSettings): any;
+    destroy(): void;
+}
+interface CaptureOptions extends ReferenceSettings {
+    readonly width: number;
+    readonly height: number;
+    /** Samples a pixel takes (default 256). */
+    readonly samples?: number;
+    /** The tile's side in pixels (default 512). */
+    readonly tile?: number;
+    /** Keep the linear HDR image too (RGBA floats; 16 bytes a pixel). */
+    readonly hdr?: boolean;
+    /** The display image's exposure and tone map (default 1, ACES). */
+    readonly exposure?: number;
+    readonly toneMapper?: ToneMapper;
+    /** Hears the share done, 0..1, after each submit. */
+    readonly progress?: (done: number) => void;
+}
+/** A finished capture: the display image (sRGB bytes, tone-mapped), and the linear one if asked. */
+interface ReferenceCapture {
+    readonly width: number;
+    readonly height: number;
+    readonly rgba: Uint8ClampedArray;
+    readonly hdr: Float32Array | null;
+}
+/**
+ * Render the reference at `width × height` (up to {@link MAX_CAPTURE_SIDE} a
+ * side) a tile at a time, each tile's samples spread over submits small
+ * enough for any watchdog. A miss from the eye shows the sky unless the
+ * options say otherwise.
+ */
+declare function captureReference(device: any, instances: readonly MeshSceneInstance[], draw: ReferenceDraw, options: CaptureOptions): Promise<ReferenceCapture>;
 
 /**
  * Netplay — online multiplayer for carts, relayed by the host page.
@@ -2141,11 +2442,24 @@ interface RenderStats {
         readonly name: string;
         readonly ms: number;
     }[];
+    /**
+     * On a renderer that reads its frames back, the time between frames coming back from the GPU (ms): what the
+     * 3D's own frame rate is, which the run loop's can hide (gpuPacing.ts).
+     */
+    readonly frameMs?: number;
     /** The size the 3D rendered at and its share of the frame's (F0d), when that isn't the cart's own. */
     readonly resolution?: {
         readonly width: number;
         readonly height: number;
         readonly scale: number;
+    };
+    /** Texture streaming's residency (AAA_FIDELITY_ROADMAP.md F1b), on a renderer that streams. */
+    readonly textures?: {
+        readonly budgetMB: number;
+        readonly residentMB: number;
+        readonly wantedMB: number;
+        readonly maps: number;
+        readonly limited: number;
     };
 }
 interface SectionStats {
@@ -2324,37 +2638,78 @@ declare class PostFxSurface implements DisplaySurface {
     private applyScale;
 }
 
-/**
- * The AAA tier's tone mappers (AAA_FIDELITY_ROADMAP.md F4d): the curve that
- * takes the linear HDR frame, exposed, into the display's 0..1, chosen per
- * scene (`SceneLighting.tonemapper`). Each is here twice, as WGSL for the
- * presenter and as TypeScript for the tests, term for term.
- *
- * - **filmic**: Narkowicz's fit of the ACES curve, per channel: what every
- *   tier has used since F0b, and still the default, so a scene looks as it did.
- * - **aces**: Hill's fit of the ACES RRT and ODT, through the AP1 working
- *   space: the reference ACES look, desaturating highlights toward white.
- * - **agx**: Sobotka's AgX (Wrensch's minimal fit), which compresses in a
- *   log space rotated off the primaries, so a saturated light goes to white
- *   without the hue skew per-channel curves give it.
- * - **neutral**: Khronos PBR Neutral, which leaves colours under 0.76 as
- *   they are (so a material's base colour shows as authored) and rolls off
- *   above it.
- *
- * Each maps in one of two domains (F11a-5). **Physical**: the curve on the
- * exposed light, then the sRGB encode, as a linear pipeline does. **As
- * authored**: the curve on the light's sRGB encoding, as the byte path's
- * shader maps its display-space shading, so a map tuned there shows as tuned;
- * its shadows and midtones lift and its highlights hold lower.
- */
-/** The curves, in the order the presenter's uniform names them. */
-declare const TONE_MAPPERS: readonly ["filmic", "aces", "agx", "neutral"];
-type ToneMapper = (typeof TONE_MAPPERS)[number];
-
 /** One pass's GPU time. */
 interface PassTime {
     readonly name: string;
     readonly ms: number;
+}
+
+/**
+ * The physically based sky on the GPU (AAA_FIDELITY_ROADMAP.md F5a): Hillaire's
+ * three LUTs in compute, mirroring the CPU reference in @cartbox/editor
+ * (atmosphere.ts) step for step, so each can be held to the other.
+ *
+ * - **Transmittance** (256 × 64): to the top of the atmosphere, over a point's
+ *   radius and the ray's zenith cosine (Bruneton's mapping), 128 steps a ray.
+ *   Built once per medium.
+ * - **Multiple scattering** (32 × 32): Hillaire's Ψ_ms over the sun's zenith
+ *   cosine and the height, 64 directions of 20 steps a texel. Built once per
+ *   medium.
+ * - **Sky view** (192 × 108): the sky's radiance from the scene, over the
+ *   azimuth from the sun (finer toward it) and the zenith angle (finer toward
+ *   the horizon, which sits at v = ½), 32 steps a ray spaced quadratically.
+ *   Rebuilt when the sun moves, so a time of day is a few hundred microseconds
+ *   of compute.
+ * - **Aerial perspective** (16 × 16 × 32, F5a-2): Hillaire's froxel volume
+ *   over a camera's frustum, the air's in-scattered light and transmittance
+ *   out to each of 32 slices spaced quadratically to 32 km. Rebuilt for every
+ *   camera that draws (a column a thread), and read by the AAA scene shader
+ *   per fragment. It is kept in a uniform buffer as half floats, not a 3D
+ *   texture: the scene shader already binds the 16 sampled textures and 8
+ *   storage buffers a stage may have on every device, so the volume is
+ *   filtered by hand.
+ *
+ * The presenter (gpuPresent.ts) draws the AAA tier's backdrop from the sky
+ * view per pixel, and the sun's disc over it, in the renderer's units of
+ * linear light, which the frame then tone-maps with the scene.
+ */
+
+/** A physical sky as a frame draws it: the medium, the sun toward it and its radiance above the air (linear units). */
+interface AtmosphereSky {
+    readonly atmosphere: Atmosphere;
+    readonly sun: readonly [number, number, number];
+    readonly sunRadiance: readonly [number, number, number];
+    /** The moon (F5a-3): toward it and its radiance above the air, or none. */
+    readonly moon?: SkyMoon | null;
+    /** The stars' and night sky's brightness against the real ones' (F5a-3; 1 when absent). */
+    readonly stars?: number;
+}
+
+/**
+ * Volumetric clouds on the AAA tier (AAA_FIDELITY_ROADMAP.md F5c): the cloud
+ * layer of a physical sky, raymarched on the GPU, mirroring the CPU reference
+ * in @cartbox/editor (clouds.ts) step for step.
+ *
+ * - **Half resolution, amortised.** A compute pass marches a ray a texel of a
+ *   half-size target, its first step jittered per pixel and per frame, and
+ *   blends it into the last frame's result reprojected by direction (the
+ *   clouds are kilometres off, so the camera's turn is all that moves them on
+ *   screen). The history converges on the jittered march's mean, so 48 steps
+ *   read as many more.
+ * - **What it holds**: the light the layer sends toward the eye, already
+ *   through the air between them (the transmittance LUT's ratio from the eye
+ *   and from the cloud), in rgb, and the share of the sky behind that gets
+ *   through, in a.
+ * - **The presenter** lays it over the physical sky (`rgb × a + cloud`), the
+ *   sun's disc, the moon and the stars included, so the sun goes behind a
+ *   cloud.
+ */
+
+/** A frame's clouds: the layer, the upper sky's mean radiance it takes light from, and the seconds the wind has blown. */
+interface CloudFrame {
+    readonly clouds: Clouds;
+    readonly ambient: readonly [number, number, number];
+    readonly time: number;
 }
 
 /**
@@ -2371,7 +2726,9 @@ interface PassTime {
  * canvas's texture):
  *
  * 1. **Sky:** the equirectangular dome, its sun's glow and its drifting cloud
- *    layers, per pixel through the camera (`renderSkyBackground`'s maths).
+ *    layers, per pixel through the camera (`renderSkyBackground`'s maths); or,
+ *    on a linear frame with a physical sky (F5a), the atmosphere's sky view
+ *    and the sun's disc, in the renderer's units (atmosphere.ts).
  * 2. **Sun shafts:** the light-source mask at reduced resolution (open sky that
  *    is bright and near the sun), then the gather along the line to the sun
  *    (`applySunShafts`'s maths).
@@ -2409,6 +2766,16 @@ interface PresentSky {
     /** Drifting cloud layers (I6), and the seconds they have drifted. */
     readonly clouds: readonly BakedCloudLayer[];
     readonly time: number;
+    /**
+     * A physical sky (F5a), which a linear frame draws in place of the panorama:
+     * the medium and its sun, and the sun disc's radiance as the eye sees it
+     * (sunDiscRadiance). A byte-space frame draws the panorama regardless.
+     */
+    readonly atmosphere?: (AtmosphereSky & {
+        readonly disc: Rgb$2;
+        readonly moonDisc?: Rgb$2 | null;
+        readonly clouds?: CloudFrame | null;
+    }) | null;
 }
 /** What a frame's scene draws over. */
 type PresentBase = {
@@ -2470,6 +2837,11 @@ interface PresentFrame {
             readonly x: number;
             readonly y: number;
         } | null;
+        /**
+         * A linear frame's metering (F4c): a histogram of its light, its darkest and brightest tenth dropped,
+         * weighted over the whole frame, toward its centre, or on a spot there. Absent = the plain log-average.
+         */
+        readonly metering?: "average" | "centre" | "spot";
     } | null;
 }
 /** The newest measurements to arrive (see {@link PresentFrame.measure}); `seq` counts arrivals. */
@@ -2537,6 +2909,13 @@ declare class GpuPresenter {
     private readonly uniforms;
     private readonly data;
     private postFx;
+    /** The physical sky's LUTs (F5a), made when a linear frame first draws one. */
+    private atmosphereLuts;
+    /** The volumetric clouds' pass (F5c), made with the first frame that has a layer; and the clear sky's stand-in. */
+    private cloudPass;
+    private clearClouds;
+    /** A 1×1 cloud target that lets the whole sky through. */
+    private noClouds;
     /** The HDR bloom's chain (F4d), made when a linear frame first blooms. */
     private bloom;
     /** The frame graph's transients (the sky, the shafts, the composites), kept from frame to frame. */
@@ -3434,7 +3813,7 @@ interface PlayerOptions {
      * that has KTX2 textures; without it they render as their flat base colour.
      * The web app passes one that fetches the transcoder on demand.
      */
-    ktx2?: () => Promise<(bytes: Uint8Array) => DecodedTexture | null>;
+    ktx2?: () => Promise<(bytes: Uint8Array) => DecodedTexture | null | Promise<DecodedTexture | null>>;
     /**
      * Loads a level's assets before a switch to it (`cartbox.level`), reporting
      * progress 0..1; the switch happens when it settles. Without it, switches are
@@ -3646,6 +4025,23 @@ interface PlayerOptions {
     };
 }
 /** Handle returned by {@link mount} for controlling a live player instance. */
+/** An offline render of a timeline (F10d; see {@link PlayerHandle.renderSequence}). */
+interface SequenceOptions {
+    /** The timeline's name. */
+    readonly timeline: string;
+    readonly width: number;
+    /** Default: the shown frame's aspect. */
+    readonly height?: number;
+    /** Frames a second (default 24, up to 120). */
+    readonly fps?: number;
+    /** Samples a pixel takes each frame (default 64). */
+    readonly samples?: number;
+    /** Hears the share done, 0..1. */
+    readonly progress?: (done: number) => void;
+    /** Stops after the frame in hand. */
+    readonly signal?: AbortSignal;
+    readonly onFrame: (frame: ReferenceCapture, index: number, count: number) => void | Promise<void>;
+}
 interface PlayerHandle {
     /** Halt the run loop and silence audio without tearing down the instance. */
     pause(): void;
@@ -3697,6 +4093,32 @@ interface PlayerHandle {
     inspect(): InspectedObject[];
     /** Change the graphics preset live: "low" | "medium" | "high" | "auto" (see quality.ts). */
     setQuality(choice: QualityChoice): void;
+    /** Show the 3D scene lit (the default) or as a diagnostic view (F10a; the AAA tier alone draws them). */
+    setViewMode(mode: ViewMode): void;
+    /** Set the weather at run time (AAA_FIDELITY_ROADMAP.md F5e): wetness, puddles, snow, rain and snowfall over the rig's; null goes back to the rig's. */
+    setWeather(settings: WeatherSettings | null): void;
+    /** Disturb the scene's water at world (x, z) (F5d): a ring `strength` metres deep spreads from it. */
+    splash(x: number, z: number, strength?: number): void;
+    /**
+     * Render the path-traced reference of the 3D frame shown (F10b), `width`
+     * across at its aspect (up to 8K a side), accumulated over `samples` a pixel
+     * (default 256): a display image and, if asked, the linear one. Null on every
+     * tier but AAA, or before a frame has drawn.
+     */
+    captureReference(options: {
+        readonly width: number;
+        readonly samples?: number;
+        readonly progress?: (done: number) => void;
+    }): Promise<ReferenceCapture> | null;
+    /** Samples each pixel of the viewport's path-traced reference holds (F10b; 0 when it isn't shown). */
+    readonly referenceSamples: number;
+    /**
+     * Render a timeline offline (F10d): every frame at its frame rate path-traced
+     * through the timeline's film camera, handed to `onFrame` in order. Resolves
+     * to the frames rendered; null on every tier but AAA, before a frame has
+     * drawn, or for a timeline without camera keys.
+     */
+    renderSequence(options: SequenceOptions): Promise<number> | null;
     /**
      * Hand the running scene streamed textures, keyed by the `ref` of the
      * placeholder each fills (an asset-backed texture's content hash). Safe to
@@ -4174,6 +4596,99 @@ interface RegisteredAchievement {
 declare function resolveUnlockedAchievements(unlockHashes: number[], registered: RegisteredAchievement[]): RegisteredAchievement[];
 
 /**
+ * Screen-space global illumination on the AAA tier (AAA_FIDELITY_ROADMAP.md
+ * F3e-2): the near-field bounce the probe volume (F3d-3, F3e-1) is too coarse
+ * to hold — a red wall's light on the floor beside it, the glow of a lit
+ * panel on the crate in front of it.
+ *
+ * From the depth prepass, its G-buffer normals and the last frame's resolved
+ * HDR image (the TAA history, linear light before any tone map), at half
+ * resolution:
+ *
+ * - **Trace.** Each pixel casts {@link SSGI_RAYS} rays over the cosine-weighted
+ *   hemisphere about its normal, turned per pixel and per frame, and marches
+ *   each across the screen against the depths, out to {@link SSGI_RADIUS}
+ *   metres, as the reflections and contact shadows march theirs.
+ * - **Hits.** A ray that passes behind a surface by no more than a thickness
+ *   has hit it. It takes the light that surface sent the camera last frame
+ *   (found by the velocity buffer), so what it sees includes last frame's
+ *   bounce: light bounces once more each frame. A hit on a surface's back is
+ *   dark. Rays that leave the screen or the radius miss.
+ * - **What it returns.** rgb: the mean radiance the rays brought back (misses
+ *   count as none), which for cosine-weighted rays is the irradiance over π
+ *   from what they hit — the convention the scene shader lights its diffuse
+ *   by. a: the share of rays that hit.
+ *
+ * The scene shader then takes, for an opaque or cut-out surface, its far-field
+ * irradiance (the sky's, the light map's or the probe volume's) only from the
+ * share of directions the rays left open, and the rays' own light from the
+ * rest: `irr × (1 − a) + rgb`. Since that share already holds the near-field
+ * occlusion GTAO measures, GTAO then darkens only the specular.
+ *
+ * The accumulation pass blends each frame into a history reprojected through
+ * the velocity buffer, held to the current frame's neighbourhood (its mean
+ * and spread, generously, as two rays a pixel are noisy). The resolve pass
+ * brings it to full resolution with a joint bilateral filter over the 3×3
+ * half-resolution texels round each pixel, weighted by depth and normal, into
+ * the screen-shading target's second layer.
+ */
+
+/** What a frame's SSGI is set to (`SceneLighting.screenSpaceGi`, resolved). */
+interface SsgiFrame {
+    /** World units a ray reaches. */
+    readonly radius: number;
+    /** Scales the light the rays bring back. */
+    readonly intensity: number;
+}
+
+/** What a frame's camera does (SceneDraw.camera). */
+interface CameraEffects {
+    /** Depth of field: the circle of confusion's scale (a share of the frame's width), the distance in focus, and the aperture's blades (0 round). */
+    readonly dof?: {
+        readonly scale: number;
+        readonly focus: number;
+        readonly blades: number;
+    } | null;
+    /** Motion blur: the share of each frame's motion the shutter takes in (times any strength). */
+    readonly motionBlur?: {
+        readonly fraction: number;
+    } | null;
+}
+
+/**
+ * Water on the AAA tier (AAA_FIDELITY_ROADMAP.md F5d): the frame's water body
+ * and its grids, packed into the frame's uniforms, and the WGSL the
+ * linear-light scene shader reads them with, mirroring water.ts in
+ * @cartbox/editor.
+ *
+ * The scene shader already binds every sampled texture a stage gets, so the
+ * FFT ocean's slopes (64², two halves a point) and the ripples' heights (64²)
+ * ride in the frame's uniform buffer as half floats, filtered by hand, as the
+ * aerial perspective's froxels do (F5a-2).
+ */
+/** The water body a frame lights by (its first water surface's), or none. */
+interface WaterFrame {
+    /** Its surface's height, and its extent in x and z (min x, min z, max x, max z). */
+    readonly plane: number;
+    readonly bounds: readonly [number, number, number, number];
+    /** Its absorption and scattering per metre. */
+    readonly absorption: readonly [number, number, number];
+    readonly scattering: readonly [number, number, number];
+    /** The light that reaches into it (sun and sky), for its in-scattering and its fog under water. */
+    readonly light: readonly [number, number, number];
+    /** Whether the eye is under it. */
+    readonly underwater: boolean;
+    /** The FFT ocean's slopes ({@link Ocean.slopes}), or null without an ocean surface. */
+    readonly ocean: Float32Array | null;
+    /** The ripples' heights and their grid's corner cell, or null while the water is still. */
+    readonly ripples: {
+        readonly heights: Float32Array;
+        readonly origin: readonly [number, number];
+    } | null;
+    readonly time: number;
+}
+
+/**
  * HDR reflection probes on the AAA tier (AAA_FIDELITY_ROADMAP.md F3b): each
  * probe captured on the GPU as a cube of the scene in linear light, and
  * prefiltered into the GGX lobes of rising roughness, as the sky's own cube is
@@ -4201,6 +4716,48 @@ interface ReflectionCapture {
     readonly probes: readonly ReflectionProbe[];
     readonly instances: readonly MeshSceneInstance[];
     readonly key: string;
+}
+
+/**
+ * Terrain at scale (AAA_FIDELITY_ROADMAP.md F6c): a heightfield of any size up
+ * to 4097² drawn with no CPU meshing, shaded from a runtime virtual texture.
+ *
+ * **CDLOD.** One grid patch ({@link TERRAIN_PATCH} cells a side) is the only
+ * mesh. Each frame a quadtree over the terrain (its nodes' height ranges known
+ * once, from a min/max pyramid of the cells) picks the nodes the eye needs: a
+ * node splits while the eye is within {@link TERRAIN_RANGE} of its children's
+ * size (distances in the ground plane). Each chosen node is a copy of the
+ * patch, its model scaling the patch to the node's square and height range,
+ * so the GPU culls the copies as it culls any others. The vertex shader reads
+ * the heights (`heightTex`, 16 bits a sample in red and green) at each vertex,
+ * and morphs a vertex onto its node's coarser grid as it nears the end of the
+ * node's range, so neighbouring nodes a level apart meet without cracks.
+ *
+ * **The virtual texture.** The blended layers (rules, painted weights, the
+ * blend's noise, triplanar projection, each layer's maps and factors) are
+ * baked on the GPU into pages: a square window round the eye a level, each
+ * twice the last's size, and one of the whole terrain, side by side in one
+ * atlas of albedo, normal, roughness/metal and occlusion (whose G carries a
+ * relief height for parallax, and whose alpha is 0 over cut cells). A node shades from the page of its own level,
+ * which its window is sized to hold, so terrain shading is one sample a map
+ * however many layers it blends. A window moves (and re-bakes) when the eye
+ * has moved an eighth of it.
+ *
+ * **Relief.** The nearest nodes are displaced by the page's relief (fading out
+ * with their morph, so they still meet their neighbours); the rest take it as
+ * parallax occlusion.
+ */
+
+/** The maps a layer bakes from: its base colour, normal and metallic-roughness maps (null: flat). */
+interface TerrainLayerMaps {
+    readonly base: DecodedTexture | null;
+    readonly normal: DecodedTexture | null;
+    readonly mr: DecodedTexture | null;
+}
+/** A terrain the GPU draws (F6c): its heightfield and the decoded maps of its layers, in order. */
+interface GpuTerrainSource {
+    readonly terrain: Terrain;
+    readonly layers: readonly TerrainLayerMaps[];
 }
 
 /**
@@ -4249,6 +4806,8 @@ interface SunShadow {
 /** One frame's worth of drawing parameters — mirrors `renderMeshScene`'s options. */
 interface SceneDraw {
     readonly width: number;
+    /** Seconds the GPU particles (F8a) step this frame (default a 60th). */
+    readonly particleDt?: number;
     readonly height: number;
     /** The framebuffer to composite into, RGBA8, `width * height * 4`. */
     readonly out: Uint8ClampedArray;
@@ -4263,6 +4822,11 @@ interface SceneDraw {
     readonly depth: Float32Array;
     readonly view: Mat4;
     readonly projection: Mat4;
+    /** The path-traced reference's thin lens (F10d): aperture radius and focus distance (m); the raster ignores it. */
+    readonly lens?: {
+        readonly aperture: number;
+        readonly focus: number;
+    } | null;
     /**
      * Clear colour, or null to composite over whatever `out` already holds (the
      * cart's own frame). Null is what makes these surfaces overlays.
@@ -4306,6 +4870,12 @@ interface SceneDraw {
      * false turns it off.
      */
     readonly ambientOcclusion?: boolean;
+    /**
+     * Screen-space GI from the prepass (AAA_FIDELITY_ROADMAP.md F3e-2; ssgi.ts):
+     * the near field's bounce, lit by last frame's image, on the linear-light
+     * renderer's temporal frames with a prepass. Absent = none.
+     */
+    readonly screenSpaceGi?: SsgiFrame | null;
     /**
      * Key light direction, or omitted for the rasteriser's default. The world
      * overlay publishes a cart-driven sun here, so it changes per frame.
@@ -4377,6 +4947,13 @@ interface SceneDraw {
         readonly tiles: DecalTiles;
     } | null;
     /**
+     * Terrains drawn from their heightfields on the GPU (AAA_FIDELITY_ROADMAP.md
+     * F6c; the linear-light WebGPU renderer alone): each frame's nodes join the
+     * draws (and, for a terrain that casts, the sun's and local lights' casters).
+     * A terrain's model must be its origin alone (no parent's turn or scale).
+     */
+    readonly terrains?: readonly GpuTerrainSource[];
+    /**
      * The sun's shadow rendered on the GPU in cascades (AAA_FIDELITY_ROADMAP.md
      * F2a), in place of the CPU-rasterised {@link shadow}: what casts (the whole
      * scene's casters, not just what the camera sees), the direction toward the
@@ -4386,6 +4963,59 @@ interface SceneDraw {
      */
     readonly sunShadow?: SunShadow | null;
     /**
+     * Real-time GI (AAA_FIDELITY_ROADMAP.md F3e) on the linear-light (AAA)
+     * WebGPU renderer: the still scene its probes trace (a key that changes
+     * with it), and the settings. The volume it relights is the environment's
+     * probe volume, which every surface then takes its diffuse light from, the
+     * light-mapped ones too. The others ignore it.
+     */
+    readonly dynamicGi?: {
+        readonly occluders: readonly Occluder[];
+        readonly key: string;
+        readonly settings: DynamicGi;
+    } | null;
+    /**
+     * On the AAA tier at Epic (AAA_FIDELITY_ROADMAP.md F3f), the still scene
+     * whose BVH the reflections trace where the screen has nothing to show,
+     * keyed as `dynamicGi`'s (the two share one tracer when both are given).
+     */
+    /**
+     * Virtual shadow maps for the sun (AAA_FIDELITY_ROADMAP.md F2b;
+     * virtualShadows.ts) on the linear-light renderer with a prepass and its
+     * cascades, at High and Epic: the physical pool's edge in texels. Absent =
+     * the cascades alone.
+     */
+    readonly virtualShadows?: {
+        readonly poolSize: number;
+    } | null;
+    /**
+     * Temporal upscaling (AAA_FIDELITY_ROADMAP.md F4b; upscaler.ts): on the
+     * linear-light renderer's temporal frames with a prepass, the size the frame
+     * is shown at, when larger than it renders. The frame then returns a texture
+     * of that size, reconstructed over the frames. Absent = shown as rendered.
+     */
+    readonly upscale?: {
+        readonly width: number;
+        readonly height: number;
+    } | null;
+    /**
+     * The physical camera's depth of field and motion blur (AAA_FIDELITY_ROADMAP.md
+     * F4c; cameraEffects.ts), on the linear-light renderer's frames with a
+     * prepass. Absent = neither.
+     */
+    readonly camera?: CameraEffects | null;
+    readonly reflectionTrace?: {
+        readonly occluders: readonly Occluder[];
+        readonly key: string;
+    } | null;
+    /**
+     * A physical sky's air (AAA_FIDELITY_ROADMAP.md F5a-2): the medium and its
+     * sun above the air, whose aerial perspective the linear-light (AAA) WebGPU
+     * renderer lays over every surface, built for this draw's camera. The others
+     * ignore it.
+     */
+    readonly atmosphere?: AtmosphereSky | null;
+    /**
      * Distance fog for PBR (Modern-tier) materials, applied after tone mapping, or
      * omitted for none. Both backends fade by the fragment's eye depth. See
      * {@link SceneFog}.
@@ -4393,8 +5023,28 @@ interface SceneDraw {
     readonly fog?: SceneFog | null;
     /** Seconds since the scene started, for animated emissive (scroll and pulse). */
     readonly time?: number;
+    /**
+     * What the viewport shows (AAA_FIDELITY_ROADMAP.md F10a; viewModes.ts): the lit frame (the default), or a
+     * diagnostic of it, on the linear-light renderer. Every other renderer draws the lit frame.
+     */
+    readonly viewMode?: ViewMode;
+    /** The texel density the texel-density view takes as on target, per metre (512 when omitted). */
+    readonly texelDensity?: number;
+    /**
+     * Texture streaming (AAA_FIDELITY_ROADMAP.md F1b) on the linear-light renderer with mips: the
+     * texture budget in MB a preset allows. Absent, every map is resident whole.
+     */
+    readonly textureBudget?: number;
     /** The scene's wind (B6): it sways primitives that carry per-vertex sway. Omitted is still air. */
     readonly wind?: SceneWind | null;
+    /**
+     * The weather (AAA_FIDELITY_ROADMAP.md F5e): the linear-light renderer lays
+     * wetness, puddles (rippled by the rain) and snow over every surface the sky
+     * reaches. Absent or all zero, surfaces are as authored.
+     */
+    readonly weather?: Weather | null;
+    /** The water body the frame lights by (F5d; waterLook.ts): its depth, ocean, ripples, caustics and whether the eye is under it. */
+    readonly water?: WaterFrame | null;
     /**
      * Skip instances whose world AABB is entirely outside the camera frustum. A
      * correct cull is output-identical, so it is a pure perf win; default off.
@@ -4407,6 +5057,13 @@ interface SceneDraw {
      * it is opt-in; conservative, so it never removes visible geometry.
      */
     readonly occlude?: boolean;
+    /**
+     * Cull on the GPU (F0e): with a prepass on the linear-light renderer, the
+     * frustum and a Hi-Z pyramid of the prepass's depths decide which copies the
+     * frame draws, through indirect draws. Conservative, like `occlude`, with no
+     * CPU pass; ignored elsewhere.
+     */
+    readonly gpuCull?: boolean;
 }
 /**
  * A frame drawn to stay on the GPU (AAA_FIDELITY_ROADMAP.md F0a): a
@@ -4444,17 +5101,49 @@ interface SceneRenderer {
     renderToTexture?(instances: readonly MeshSceneInstance[], draw: GpuSceneDraw): unknown;
     /**
      * Render at a new size from the next frame on (AAA_FIDELITY_ROADMAP.md F0d):
-     * the frame's own targets are remade, its meshes and pipelines kept. Only the
-     * renderers whose frames stay on the GPU have it.
+     * the frame's own targets are remade, its meshes and pipelines kept. The GPU
+     * renderers have it: the AAA tier's frame follows its display, and a renderer
+     * that reads its frames back renders smaller when it can't keep up (gpuPacing.ts).
      */
     resize?(width: number, height: number): void;
+    /**
+     * How many frames have come back from the GPU so far, on a renderer that
+     * reads its frames back (gpuPacing.ts paces by it). Absent elsewhere.
+     */
+    readonly framesLanded?: number;
     /** The GPU device a {@link renderToTexture} texture belongs to, so a compositor can share it. */
     readonly gpuDevice?: unknown;
+    /**
+     * The linear-light WebGPU renderer only (AAA_FIDELITY_ROADMAP.md F10b): the
+     * path-traced reference of a frame at any size up to 8K, and the samples its
+     * viewport reference holds.
+     */
+    captureReference?(instances: readonly MeshSceneInstance[], draw: GpuSceneDraw, options: CaptureOptions): Promise<ReferenceCapture>;
+    /**
+     * The WebGPU renderer only (AAA_FIDELITY_ROADMAP.md F1e): compile the shader
+     * permutations these materials' graphs need in the background, drawing them
+     * as plain materials until each is ready.
+     */
+    prepareMaterials?(materials: Iterable<MeshMaterial>, options?: {
+        readonly samples?: number;
+        readonly reflect?: boolean;
+        readonly prepass?: boolean;
+    }): Promise<void>;
+    readonly referenceSamples?: number;
+    /** True when it skins and morphs live meshes itself, in a compute pass (AAA_FIDELITY_ROADMAP.md F7a). */
+    readonly gpuSkinning?: boolean;
+    /** GPU particles (AAA_FIDELITY_ROADMAP.md F8a): its emitters, and a burst of one. */
+    setParticles?(specs: readonly EmitterSpec[]): void;
+    particleBurst?(index: number, at: readonly number[], dir?: readonly number[], scale?: number): void;
+    /** Move where an emitter's rate spawns (F5e: rain and snow over the eye). */
+    particleOrigin?(index: number, at: readonly number[]): void;
     /**
      * True when it draws the sun's shadow itself from {@link SceneDraw.sunShadow}
      * (F2a: the AAA tier's GPU cascades) and ignores a CPU {@link SceneDraw.shadow}.
      */
     readonly sunCascades?: boolean;
+    /** Give back the GPU geometry of meshes nothing will draw for now (F6d: an unloaded world partition cell's); drawn again, they upload again. */
+    releaseMeshes?(meshes: readonly MeshAsset[]): void;
     /**
      * The block-compressed formats this renderer uploads a texture's
      * {@link DecodedTexture.gpu} chain in, preferred first (AAA_FIDELITY_ROADMAP.md
@@ -4505,8 +5194,17 @@ declare class CappedSceneRenderer implements SceneRenderer {
     get gpuDevice(): unknown;
     get textureFormats(): readonly string[] | undefined;
     get sunCascades(): boolean | undefined;
+    releaseMeshes(meshes: readonly MeshAsset[]): void;
+    get gpuSkinning(): boolean | undefined;
+    setParticles(specs: readonly EmitterSpec[]): void;
+    particleBurst(index: number, at: readonly number[], dir?: readonly number[], scale?: number): void;
+    particleOrigin(index: number, at: readonly number[]): void;
+    get referenceSamples(): number | undefined;
+    get prepareMaterials(): SceneRenderer["prepareMaterials"];
+    get captureReference(): SceneRenderer["captureReference"];
     get renderToTexture(): SceneRenderer["renderToTexture"];
     get resize(): SceneRenderer["resize"];
+    get framesLanded(): number | undefined;
     dispose(): void;
 }
 /** True when a model's caps constrain the scene, so wrapping would do something. */
@@ -4610,6 +5308,199 @@ declare function rasterStyleFor(caps: RenderCaps): RasterStyle;
 declare function webgpuCanHonour(style: RasterStyle): boolean;
 
 /**
+ * The look-dev stage (AAA_FIDELITY_ROADMAP.md F10c): a neutral scene where an
+ * asset is checked under standard lighting before it ships.
+ *
+ * - **The asset** stands on the stage's origin at its own scale, its feet on
+ *   the floor, and turns on a turntable; the stage's props are sized to it.
+ * - **A calibrated grey ball** (18% reflectance, fully rough: a grey card
+ *   made round) and **a chrome ball** (a mirror metal), the pair a VFX plate
+ *   is shot with: the grey shows the light's level and direction, the chrome
+ *   what the surroundings reflect.
+ * - **A colour checker**: the 24 patches of the ColorChecker Classic in sRGB,
+ *   on a black card, so a rig's colour and exposure read against known
+ *   reflectances.
+ * - **A neutral floor** (18% grey) to catch the asset's shadow and bounce.
+ * - **Light rigs**, each a standard look in the renderer's units: a studio
+ *   with a key, a fill and a rim (area lights, F2e-2) under a dim cyclorama;
+ *   noon sun and sky; overcast; golden hour; moonlit night; and the cart's own
+ *   HDRI, which the turntable turns about the asset (the panorama's columns
+ *   shifted, so the asset and camera stay still). A rig suggests the exposure
+ *   that puts the grey ball at middle grey.
+ *
+ * Pure: it builds instances, lights and an environment a renderer draws, the
+ * linear-light one or the path-traced reference (F10b) alike.
+ */
+
+/** The grey card's reflectance, in linear light: middle grey. */
+declare const GREY_CARD = 0.18;
+/**
+ * The ColorChecker Classic's 24 patches, row by row from dark skin to black, as
+ * sRGB bytes (X-Rite's published values for the post-2014 chart).
+ */
+declare const COLOR_CHECKER: readonly {
+    readonly name: string;
+    readonly srgb: readonly [number, number, number];
+}[];
+type LookDevRig = "studio" | "noon" | "overcast" | "goldenHour" | "night" | "hdri";
+/** The rigs, in menu order, with what each is for. */
+declare const LOOK_DEV_RIGS: readonly {
+    readonly id: LookDevRig;
+    readonly label: string;
+    readonly hint: string;
+}[];
+interface LookDevOptions {
+    readonly rig: LookDevRig;
+    /** The turntable's angle in radians: the asset turns, or with the HDRI rig the light turns about it. */
+    readonly turntable?: number;
+    /** The HDRI rig's environment (the cart's sky); without one it falls back to the studio. */
+    readonly environment?: EnvironmentLight | null;
+    /** Which props stand on the stage (all by default). */
+    readonly balls?: boolean;
+    readonly chart?: boolean;
+    readonly floor?: boolean;
+    /** The camera's height above the asset's middle, as an angle (radians, default 0.25), and its vertical field of view (default π / 4). */
+    readonly elevation?: number;
+    readonly fov?: number;
+}
+/** An asset's decoded maps per primitive, as an instance carries them. */
+type LookDevMaps = Partial<Pick<MeshSceneInstance, "textures" | "mrTextures" | "emissiveTextures" | "normalTextures" | "occlusionTextures">>;
+/** A stage ready to draw: what stands on it, how it is lit and seen, and where its props are. */
+interface LookDevStage {
+    readonly instances: MeshSceneInstance[];
+    readonly lights: SceneLight[];
+    readonly environment: EnvironmentLight | null;
+    /** The flat ambient for a frame without an environment (0: the environment lights it). */
+    readonly ambient: number;
+    readonly view: Mat4;
+    readonly projection: Mat4;
+    /** The exposure that puts a level grey card, lit by the rig, at middle grey (about; each rig's estimate of its light). */
+    readonly exposure: number;
+    /** The props' centres and radii, so a check can find them on screen (absent props are null). */
+    readonly greyBall: {
+        readonly centre: readonly [number, number, number];
+        readonly radius: number;
+    } | null;
+    readonly chromeBall: {
+        readonly centre: readonly [number, number, number];
+        readonly radius: number;
+    } | null;
+    readonly chart: {
+        readonly centre: readonly [number, number, number];
+        readonly patch: number;
+    } | null;
+}
+/**
+ * An environment turned about the vertical by `angle` (radians): its panorama's
+ * columns shifted (u runs around from −x, as the IBL reads it). A gradient sky
+ * is the same turned, and comes back as it is.
+ */
+declare function turnEnvironment(env: EnvironmentLight, angle: number): EnvironmentLight;
+/**
+ * The stage for `asset` (or the props alone, with its decoded `maps`) seen in
+ * a frame of `aspect` (width over height), lit by `options.rig`; see the module comment.
+ */
+declare function lookDevStage(asset: MeshAsset | null, options: LookDevOptions, aspect?: number, maps?: LookDevMaps): LookDevStage;
+
+/**
+ * The look-dev stage's check (AAA_FIDELITY_ROADMAP.md F10c): the stage drawn by
+ * the linear-light renderer and by the path-traced reference (F10b) at the same
+ * size, and what each makes of the props whose answers are known.
+ *
+ * - **The grey ball** is an 18% card made round: its mean light, raster and
+ *   reference, says whether the rig's level reads as it should.
+ * - **The chrome ball** shows what the surroundings reflect.
+ * - **The frame**: the mean relative difference in luminance between the two
+ *   images, where both drew something, and the share of those pixels more
+ *   than 10% apart. An asset that passes under every rig is lit by the
+ *   renderer as the reference lights it.
+ */
+
+/** A frame's pixels as linear RGBA floats, top row first. */
+interface LinearImage {
+    readonly width: number;
+    readonly height: number;
+    readonly data: Float32Array;
+}
+/** What the check found; light in linear units, before exposure. */
+interface LookDevCheck {
+    readonly greyBall: {
+        readonly raster: number;
+        readonly reference: number;
+    } | null;
+    readonly chromeBall: {
+        readonly raster: number;
+        readonly reference: number;
+    } | null;
+    /** The mean of |raster − reference| / reference in luminance over the pixels both drew. */
+    readonly frameError: number;
+    /** The share of those pixels more than 10% apart. */
+    readonly outliers: number;
+    readonly raster: LinearImage;
+    readonly reference: LinearImage;
+}
+/** The draw a stage is seen through at `width × height`: its lights, sky and camera, the sun's cascades and the local lights' shadows. */
+declare function lookDevDraw(stage: LookDevStage, width: number, height: number): GpuSceneDraw;
+/**
+ * Draw `stage` both ways at `width × height` (the reference with `samples` a
+ * pixel) and compare them; see the module comment.
+ */
+declare function checkLookDev(device: any, stage: LookDevStage, width: number, height: number, samples?: number, wait?: <T>(p: Promise<T>) => Promise<T>): Promise<LookDevCheck>;
+
+/**
+ * The look-dev stage on a canvas (AAA_FIDELITY_ROADMAP.md F10c): the stage
+ * (lookDev.ts) drawn by the linear-light renderer, or by the path-traced
+ * reference (F10b), and presented through the AAA tier's presenter with the
+ * rig's exposure and a tone map, so an asset is seen as the game would show it.
+ * The turntable turns while the raster is shown; the reference holds still to
+ * converge.
+ */
+
+interface LookDevViewOptions extends LookDevOptions {
+    /** The raster (as the game draws it) or the path-traced reference. */
+    readonly mode?: "raster" | "pathTraced";
+    /** Stops over or under the rig's exposure. */
+    readonly stops?: number;
+    /** The turntable's speed, radians a second (0 holds it). */
+    readonly spin?: number;
+    readonly toneMapper?: ToneMapper;
+}
+declare class LookDevView {
+    private readonly canvas;
+    private readonly device;
+    private readonly context;
+    private readonly format;
+    private readonly renderer;
+    private readonly presenter;
+    private options;
+    private asset;
+    private maps;
+    private stage;
+    private angle;
+    private last;
+    private raf;
+    private destroyed;
+    private size;
+    private constructor();
+    /** A view on `canvas`, or null without WebGPU (the stage needs the AAA tier's renderer). */
+    static create(canvas: HTMLCanvasElement): Promise<LookDevView | null>;
+    /** The asset on the stage, with its decoded maps per primitive (or none: the props alone). */
+    setAsset(asset: MeshAsset | null, maps?: LookDevMaps): void;
+    setOptions(options: Partial<LookDevViewOptions>): void;
+    /** The turntable's angle, radians. */
+    get turntable(): number;
+    /** Samples each pixel of the reference holds (0 while the raster is shown). */
+    get samples(): number;
+    private stageNow;
+    private frame;
+    /** Draw the stage as it stands both ways at a small size and compare them (lookDevCheck.ts). */
+    check(width?: number, height?: number, samples?: number): Promise<LookDevCheck>;
+    /** The reference of the stage as it stands, `width` across at the canvas's aspect (up to 8K). */
+    capture(width: number, samples?: number, progress?: (done: number) => void): Promise<ReferenceCapture>;
+    destroy(): void;
+}
+
+/**
  * The player's WebGL2 triangle path (ENGINE_ROADMAP.md, Phase 4): the GPU
  * renderer for browsers without WebGPU, so they no longer drop to the software
  * rasteriser — Safari before 26, Firefox on most platforms, older Android.
@@ -4648,8 +5539,8 @@ declare const WEBGL_MAX_LIGHTS = 128;
 type GlContextProvider = () => any | null;
 declare class WebglSceneRenderer implements SceneRenderer {
     private readonly gl;
-    private readonly width;
-    private readonly height;
+    private width;
+    private height;
     private readonly program;
     private readonly framebuffer;
     private readonly attachments;
@@ -4711,6 +5602,19 @@ declare class WebglSceneRenderer implements SceneRenderer {
     render(instances: readonly MeshSceneInstance[], draw: SceneDraw): void;
     /** Take the newest finished readback, if any (never waits). */
     private collect;
+    /** Readbacks that have landed (gpuPacing.ts paces the render size by them). */
+    framesLanded: number;
+    /**
+     * Render at `width × height` from the next frame on (gpuPacing.ts: a GPU that
+     * can't keep up renders smaller). The colour and depth are re-stored in place,
+     * so the framebuffer keeps them; the targets made on first use (multisampled,
+     * reflection, temporal, scene copies, SSAO) are released and made again at the
+     * new size when next used. Readbacks in flight are dropped; the newest frame
+     * keeps showing, resampled, until one at the new size lands.
+     */
+    resize(width: number, height: number): void;
+    /** Delete the targets sized to the frame that are made on first use, so the next use makes them at the current size. */
+    private releaseSized;
     /** Whether a finished GPU frame exists to show (false until the first readback lands). */
     get ready(): boolean;
     settle(draw: SceneDraw): FrameState;
@@ -4868,6 +5772,192 @@ options?: {
 }): Promise<SceneRenderer>;
 
 /**
+ * GPU particles (AAA_FIDELITY_ROADMAP.md F8a) on the linear-light renderer:
+ * the emitters of particleGraph.ts (@cartbox/editor) simulated in compute and
+ * drawn in the scene, after the see-through pass, against its depths.
+ *
+ * - **spawn** writes a frame's new particles into their emitter's ring (each
+ *   request — a burst or the rate's spawns — a run of slots), from the same
+ *   hash the CPU's reference uses;
+ * - **update** integrates every slot: gravity, drag, curl noise, the
+ *   attractor and vortex, the distance shapes, and the depth buffer (a
+ *   particle that passes behind the prepass's surface, within a thickness,
+ *   steps back and bounces off the G-buffer's normal);
+ * - **sort** (blended emitters): each slot's view depth as a key, then a
+ *   bitonic sort of (key, slot) pairs, back to front;
+ * - **draw**: sprites (camera-facing, stretched along their velocity, a
+ *   flipbook over their life with motion-vector blending between frames, a
+ *   procedural soft disc without an atlas), meshes (instanced, oriented along
+ *   their velocity) or ribbons (a strip through the ring in birth order).
+ *   Lit by the key light and the frame's global lights plus the ambient, or
+ *   emissive; faded softly where they meet the scene.
+ */
+
+/** A mesh for mesh particles: positions and normals, and its triangles. */
+interface ParticleMesh {
+    readonly positions: Float32Array;
+    readonly normals: Float32Array;
+    readonly indices: Uint32Array;
+}
+/** What the renderer hands a frame's simulation and draw. */
+interface ParticleFrame {
+    readonly dt: number;
+    readonly time: number;
+    readonly viewProj: ArrayLike<number>;
+    readonly width: number;
+    readonly height: number;
+    readonly depthTerms: readonly [number, number];
+    readonly eye: readonly number[];
+    readonly right: readonly number[];
+    readonly up: readonly number[];
+    readonly light: {
+        readonly direction: readonly number[];
+        readonly color: readonly number[];
+        readonly ambient: number;
+        readonly lights: number;
+    };
+}
+/** The GPU particle system: emitters, their rings, and the passes over them. */
+declare class GpuParticles {
+    private readonly device;
+    private readonly colourFormat;
+    private readonly emitters;
+    private pipes;
+    private stages;
+    private time;
+    constructor(device: any, colourFormat: string, specs: readonly EmitterSpec[], looks?: readonly ({
+        atlas?: {
+            width: number;
+            height: number;
+            data: Uint8ClampedArray;
+        };
+        motion?: {
+            width: number;
+            height: number;
+            data: Uint8ClampedArray;
+        };
+        mesh?: ParticleMesh;
+    } | undefined)[]);
+    /** An emitter's index by name, or −1. */
+    indexOf(name: string): number;
+    /** Move where an emitter's rate spawns (F5e: rain and snow over the eye). */
+    setOrigin(index: number, at: readonly number[]): void;
+    /** Fire an emitter's burst at `at` toward `dir`, `scale` times its count. */
+    burst(index: number, at: readonly number[], dir?: readonly number[], scale?: number): void;
+    /** Spawn `count` from an emitter (as its rate does), at `at`. */
+    emit(index: number, count: number, at: readonly number[], dir?: readonly number[]): void;
+    /** Each emitter's ring: its particles buffer and capacity (for tests and the profiler). */
+    ring(index: number): {
+        buffer: any;
+        capacity: number;
+        born: number;
+    } | null;
+    /** Whether any emitter has particles or spawns to run. */
+    get active(): boolean;
+    private pipelines;
+    /** The draw pipeline for a blend and a kind (sprite and ribbon, or mesh). */
+    private drawPipeline;
+    /** The bitonic stages' uniforms, one 256-byte slot each, for rings up to `n`. */
+    private stageBuffer;
+    /**
+     * Simulate a frame (spawn, update, sort keys and sort) into `encoder`'s compute pass. `depth` and `gbuffer`
+     * are the prepass's (for the depth collision).
+     */
+    simulate(encoder: any, frame: ParticleFrame, depth: any, gbuffer: any): void;
+    /** Draw every emitter into an open render pass (colour and the scene's depths, read-only). */
+    draw(pass: any, frame: ParticleFrame, lights: any, depth: any): void;
+    private sampler;
+    dispose(): void;
+}
+
+/**
+ * Volumetric effects on the linear-light renderer (AAA_FIDELITY_ROADMAP.md
+ * F8b; volumetricEffects.ts in @cartbox/editor): each live volume's fluid
+ * solved in compute, then every volume raymarched over the scene.
+ *
+ * - **The solver** runs on storage buffers, cell for cell as the CPU's: forces
+ *   (the sources, buoyancy), semi-Lagrangian advection (trilinear by hand, so
+ *   the two agree), the divergence, Jacobi iterations for the pressure, and
+ *   the gradient taken away with dissipation. A baked volume uploads its
+ *   frame instead. Either way the density and temperature land in a 3D
+ *   texture the march filters.
+ * - **The march** (a full-screen pass after the opaque scene): each pixel's
+ *   ray clipped to each volume's box and to the scene's depth, 48 steps
+ *   through it. A step's smoke scatters the sun (its light through the smoke
+ *   toward the sun, six steps) and the ambient; its fire emits a blackbody's
+ *   light by its temperature. The colour becomes colour × T + L.
+ * - **The fog** takes their light: a burning volume adds a point light to the
+ *   frame's lights (`volumeLight`), which the scene and the froxel fog (F5b)
+ *   both shade by.
+ */
+
+/** The march's uniform (vec4s): the inverse view-projection, the eye, the sun, the ambient, then per volume four vec4s. */
+declare function packMarch(frame: {
+    invViewProj: ArrayLike<number>;
+    eye: readonly number[];
+    sun: readonly number[];
+    sunColor: readonly number[];
+    ambient: number;
+    depthTerms: readonly [number, number];
+    width: number;
+    height: number;
+}, volumes: readonly {
+    at: readonly number[];
+    effect: VolumeEffect;
+    burn: number;
+    tempScale: number;
+}[]): Float32Array;
+/** The volumes: triggered, simulated each frame, marched over the scene. */
+declare class GpuVolumes {
+    private readonly device;
+    private readonly colourFormat;
+    readonly effects: readonly VolumeEffect[];
+    private readonly live;
+    private pipes;
+    private readonly baked;
+    private dummy;
+    private sampler;
+    private readonly uniform;
+    private readonly marchUniform;
+    constructor(device: any, colourFormat: string, effects: readonly VolumeEffect[]);
+    get active(): boolean;
+    /** The volumes alive, for the lights they cast and the tests. */
+    get volumes(): readonly {
+        readonly effect: VolumeEffect;
+        readonly at: readonly number[];
+        readonly age: number;
+        readonly texture: any;
+    }[];
+    /** Start effect `index` at `at` (its base's centre); the oldest goes when four are alive. */
+    trigger(index: number, at: readonly number[]): void;
+    private bake;
+    private pipelines;
+    /** Advance every live volume by `dt`: the solver's passes (one volume's uniform at a time, a submit each) or its baked frame. */
+    simulate(dt: number): void;
+    /** The solver's buffers of a live volume (velocity, density/heat), for the tests. */
+    state(k: number): {
+        velocity: any;
+        fields: any;
+        n: number;
+    } | null;
+    /** March every volume over the scene: into an open render pass whose colour is the scene and that reads its depths. */
+    march(pass: any, frame: Parameters<typeof packMarch>[0], depth: any): void;
+    private dispose1;
+    dispose(): void;
+}
+
+/** What residency looks like (for the profiler). */
+interface StreamingStats {
+    readonly budgetMB: number;
+    readonly residentMB: number;
+    /** What every map at the level it wants would take. */
+    readonly wantedMB: number;
+    readonly maps: number;
+    /** Maps held coarser than they want (by the budget). */
+    readonly limited: number;
+}
+
+/**
  * The player's WebGPU triangle path.
  *
  * The runtime had no GPU renderer for 3D: both overlays rasterised meshes on the
@@ -4964,6 +6054,8 @@ declare class WebgpuSceneRenderer implements SceneRenderer {
     private readonly textures;
     /** With mips (F1a), colour maps upload apart: their chain is averaged in linear light. */
     private readonly colourTextures;
+    /** HDR directional light maps (F3d), uploaded once each as two rgba16float layers. */
+    private readonly hdrLightmaps;
     /** Draws a texture's mip chain on the GPU (F1a). */
     private readonly mipmaps;
     /** The block-compressed formats this renderer uploads a texture's `gpu` chain in, preferred first (F1a). */
@@ -4973,6 +6065,10 @@ declare class WebgpuSceneRenderer implements SceneRenderer {
     private cutGroups;
     /** Most recent completed readback, or null before the first one lands. */
     private latest;
+    /** Readbacks that have landed (gpuPacing.ts paces the render size by them). */
+    framesLanded: number;
+    /** Whether the frame being drawn has a prepass, whose velocity needs a re-uploaded mesh's last vertices (F0c). */
+    private keepsPrevious;
     /** Frames submitted, the one `latest` holds, and the newest that got a readback (see settle). */
     private submitted;
     private latestSeq;
@@ -4983,7 +6079,34 @@ declare class WebgpuSceneRenderer implements SceneRenderer {
     private uniformCapacity;
     private uniformBuffer;
     private uniformData;
+    /** What each uniform slot was last written from (F0e): its draw's inputs and first model; reset when the staging array is remade. */
+    private uniformKeys;
+    private uniformModels;
+    private uniformKeysFor;
     private destroyed;
+    /** The path-traced reference (F10b), made the first time it is shown. */
+    private pathTracer;
+    /** GPU culling (F0e), made on first use. */
+    private culling;
+    /** The clustered lights built on the GPU (F0e), made on first use; set for a frame that builds them there. */
+    private lightClusterer;
+    /** The scene passes' recorded draws (F0e), on the GPU-culled path. */
+    private bundles;
+    /** The sun's casters culled per cascade on the GPU (F0e). */
+    private casterCulling;
+    /** Cluster hierarchies cut and culled on the GPU (F6a), made on first use. */
+    private clusterRendering;
+    /** Terrains drawn from their heightfields (F6c), by terrain, and by their patch's primitive. */
+    private readonly gpuTerrains;
+    private readonly terrainPatches;
+    private terrainList;
+    /** Each copy's transforms made on the GPU (F0e), on the AAA tier. */
+    private transforms;
+    /** The LOD chains whose levels the GPU picks this frame (F0e). */
+    private frameGpuLods;
+    private frameLightClusters;
+    /** This frame's GPU cull, while it encodes: the draws index the culling's arguments. */
+    private frameCull;
     /**
      * The bound shadow map — the 1x1 blank when no shadow this frame, else an
      * r32float sized to the shadow input and uploaded from the CPU-generated map.
@@ -5043,7 +6166,11 @@ declare class WebgpuSceneRenderer implements SceneRenderer {
      * bind groups (binding 8 moved).
      */
     private bindSsao;
-    /** The screen-space shading target (F2c, F3c): rgba16float at the frame's size, AO in r, the sun's contact in g, the bent normal in ba. */
+    /**
+     * The screen-space shading target (F2c, F3c): rgba16float at the frame's size, AO in r, the sun's contact
+     * in g, the bent normal in ba; in its second layer, SSGI (F3e-2): the near field's light in rgb, its share in a;
+     * and in its third, the sun's light through the virtual shadow maps (F2b) in r, −1 where no page is resident.
+     */
     private contactTexture;
     private ensureContact;
     /** The resolve's uniforms and pipelines (one per depth sample count), made on first use. */
@@ -5054,6 +6181,26 @@ declare class WebgpuSceneRenderer implements SceneRenderer {
     private frameDepthView;
     /** Whether this frame's ambient light takes GTAO (F3c), for the frame uniform. */
     private frameGtao;
+    /** This frame's SSGI (F3e-2), when it has one, for the frame uniform and the screen-space shading. */
+    private frameSsgi;
+    /**
+     * SSGI's resources (F3e-2): its uniforms, the half-resolution history (two, one read and one written,
+     * swapping each frame), and its pipelines.
+     */
+    private ssgi;
+    /** This frame's real-time GI (F3e), its tracer for the still scene it was made for, and the sky it traces. */
+    private frameGi;
+    private probeGi;
+    private giSky;
+    /** This frame's volumetric fog (F5b), its volumes (made when a frame first has some) and the shader's terms. */
+    private frameFog;
+    private volumetricFog;
+    private readonly fogTerms;
+    private readonly weatherTerms;
+    private readonly waterTerms;
+    /** The physical sky's LUTs (F5a-2), made when a draw first brings one, and the frame's aerial terms. */
+    private atmosphere;
+    private readonly aerialTerms;
     /**
      * GTAO's resources (F3c): its uniforms, the half-resolution history (two,
      * one read and one written, swapping each frame), and its pipelines.
@@ -5066,8 +6213,42 @@ declare class WebgpuSceneRenderer implements SceneRenderer {
      * scene shader reads in its SSAO slot.
      */
     private addScreenShading;
+    /** The IES profiles in the LTC buffer's slots (F9d), by identity. */
+    private readonly iesHeld;
+    /**
+     * Each distinct IES profile among the frame's lights a slot (F9d), uploaded when it first takes it; the
+     * light's slot, or −1 (no profile, or more profiles than slots).
+     */
+    private iesSlots;
     /** A 1×1 stand-in for GTAO's history when the frame has none (F3c). */
     private gtaoBlank;
+    /** This frame's virtual shadow maps (F2b): the pages it draws, when it has them. */
+    private frameVsm;
+    /**
+     * The virtual shadow maps' resources (F2b): the physical pool and its bookkeeping, the marks and the
+     * buffers they are read back through (each with the windows it was marked under), the page table, the
+     * passes' uniforms, a view uniform a page drawn a frame, and the pipelines.
+     */
+    private vsm;
+    /** Plan the frame's virtual shadow maps (F2b): see virtualShadows.ts. */
+    private planVsm;
+    /** Draw the frame's pages (F2b): each cleared, then the casters whose shadow can reach it, through its own view. */
+    private addVsmPages;
+    /** Mark the pages the frame's pixels want (F2b), and copy the marks out to be read back. */
+    private addVsmMarks;
+    /** The sun's light through the virtual map at each pixel (F2b), into the screen-shading target's third layer. */
+    private addVsmResolve;
+    /** Read back the marks the frame just copied out (F2b); they reach a later frame's plan. */
+    private readVsmMarks;
+    private disposeVsm;
+    /** Clears a rect of a depth32float map to the far plane (F2d-2's, shared with F2b's pages). */
+    private localClearPipeline;
+    /**
+     * SSGI (F3e-2): at half resolution its trace against the prepass's depths, lit by last frame's resolved
+     * image (the TAA history), accumulated over frames through the velocity buffer, then filtered up to full
+     * resolution into the screen-shading target's second layer.
+     */
+    private addSsgi;
     /**
      * Upload the packed light list, growing the storage buffer when it needs more
      * room (a grow changes identity, so invalidate cached bind groups). The buffer
@@ -5133,7 +6314,17 @@ declare class WebgpuSceneRenderer implements SceneRenderer {
      * texture is premultiplied RGBA8 with alpha 0 where nothing drew, and holds
      * this frame until the next render.
      */
-    renderToTexture(instances: readonly MeshSceneInstance[], draw: GpuSceneDraw): any | null;
+    renderToTexture(instances: readonly MeshSceneInstance[], given: GpuSceneDraw): any | null;
+    /** This frame's nodes of each GPU terrain (F6c), drawn and (for a terrain that casts) casting. */
+    private terrainNodes;
+    /** Give back meshes' GPU geometry (F6d): their buffers go once the queued frames are done with them, and a later draw uploads them again. */
+    releaseMeshes(meshes: readonly MeshAsset[]): void;
+    /** The heights a draw's primitive binds (F6c): a GPU terrain's patch's, else the blank. */
+    private terrainHeightsOf;
+    /** Samples each pixel of the path-traced reference holds (F10b); 0 when it isn't shown. */
+    get referenceSamples(): number;
+    /** Render the path-traced reference of `instances` through `draw` at any size up to 8K (F10b; {@link captureReference}). */
+    captureReference(instances: readonly MeshSceneInstance[], draw: GpuSceneDraw, options: CaptureOptions): Promise<ReferenceCapture>;
     settle(draw: SceneDraw): FrameState;
     /** Encode and submit one frame, and start a readback if a buffer is free (or, with `readback` false, leave it in the colour texture). */
     private submit;
@@ -5182,6 +6373,14 @@ declare class WebgpuSceneRenderer implements SceneRenderer {
      * the reflected frame, which is copied back over the colour.
      */
     private addReflections;
+    /**
+     * The AAA tier's reflections (F3f): the Hi-Z chain (sized to the frame), the accumulation's history (two,
+     * swapping), the Epic trace's half-resolution target, the uniforms and the pipelines. Made on first use.
+     */
+    private hiz;
+    private addHizReflections;
+    /** The still scene's BVH tracer for `key` (F3e's, shared with the reflections' Epic trace, F3f). */
+    private tracerFor;
     private readonly temporalState;
     /**
      * The temporal resolve's resources (I2): two history images (one read, one
@@ -5190,6 +6389,30 @@ declare class WebgpuSceneRenderer implements SceneRenderer {
      */
     private taa;
     private reactivePipeline;
+    /** This frame's output when it isn't the colour texture: the upscaled frame (F4b). */
+    private frameOutput;
+    /** The upscaler's display-sized output and pipelines (F4b); its history is the TAA's, made at the display's size. */
+    private upscaler;
+    /**
+     * Temporal upscaling (F4b): the render-sized frame resolved into the TAA history at the display's size (see
+     * upscaler.ts), then sharpened into the upscaled output the frame returns.
+     */
+    private addUpscale;
+    /** The view modes' resolve (F10a): its pipeline and uniforms, made on first use. */
+    private viewResolve;
+    /** Colour motion vectors (from the velocity buffer) or overdraw (from the count in the colour's red) over the frame (F10a). */
+    private addViewResolve;
+    /** Whether this frame's scattering surfaces split their diffuse for the SSS blur (F1d-2), for the frame uniform. */
+    private frameSss;
+    /** The SSS profiles by material ID (F1d-2), and the blur's pipeline and two uniform buffers (across, down). */
+    private sssProfiles;
+    private sss;
+    /** The separable SSS blur (F1d-2; subsurface.ts): across into one target, down into another, copied back over `colour`. */
+    private addSubsurface;
+    /** The physical camera's passes (F4c) and what they keep between frames: their uniforms, sampler and pipelines. */
+    private camera;
+    /** Depth of field, then motion blur (F4c; see cameraEffects.ts), on `target` (`size`), written back into it. */
+    private addCameraEffects;
     /**
      * The reactive mask (F4a): how much the see-through pass changed each pixel,
      * from the opaque scene copied before it against the frame after it.
@@ -5216,14 +6439,45 @@ declare class WebgpuSceneRenderer implements SceneRenderer {
      * variant; multisampled for an anti-aliased frame (I1); writing the
      * reflection targets for a frame with reflections (I3). Built on first use.
      */
+    /** Permutations compiling in the background (F1e), by their keys. */
+    private readonly compiling;
+    /**
+     * Compile the shader permutations `materials` need (F1e), off the frame: each
+     * material graph's (with its static switches) for the sample count, reflections
+     * and prepass given, asynchronously where the device can. A material whose
+     * permutation is still compiling draws as a plain one, so a new graph never
+     * stalls a frame. Resolves when all are ready.
+     */
+    prepareMaterials(materials: Iterable<MeshPrimitive["material"]>, options?: {
+        readonly samples?: number;
+        readonly reflect?: boolean;
+        readonly prepass?: boolean;
+    }): Promise<void>;
     private pipelinesOf;
     /**
      * Order the frame's lights (global first), build the clustered cells, and
      * write both and their params. An orthographic view (no cells) loops every light.
      */
     private clusterLights;
-    /** Upload a probe grid (EP9) as a 3D texture, once per grid, rebuilding group 1 to point at it. */
-    private uploadProbeGrid;
+    /**
+     * This draw's volumetric fog (F5b), on the linear-light renderer, for a
+     * perspective camera under a rig whose fog is volumetric: the grid for the
+     * frame's size, the sun (shadowed by its cascades when it casts) and the
+     * sky's mean radiance, and the camera, uniforms written. Null (and the
+     * history dropped) otherwise.
+     */
+    private prepareFog;
+    /**
+     * The physical sky's aerial perspective for this draw's camera (F5a-2): its
+     * froxels built in compute ahead of the frame, and the terms the shader
+     * finds a fragment's with; all zero (off) without one.
+     */
+    private aerialFrame;
+    /**
+     * Upload a probe grid (EP9) or volume (F3d-3) as a 3D texture, `slots` texels
+     * a probe along x, once per grid, rebuilding group 1 to point at it.
+     */
+    private uploadProbeTexture;
     /** This frame's GPU spot/point tiles (F2d), or null when it draws none. */
     private frameLocalTiles;
     /** The GPU tiles' records (F2d), and the atlas they're drawn into, made the first time a light casts. */
@@ -5247,6 +6501,53 @@ declare class WebgpuSceneRenderer implements SceneRenderer {
      * buffer whenever its revision moves on.
      */
     private uploadMesh;
+    /** The skinning pass's pipeline (F7a), made the first time a primitive skins on the GPU. */
+    private skinPipeline;
+    /**
+     * Skin one primitive on the GPU (F7a; gpuSkinning.ts): its last vertices copied for the motion vectors,
+     * then the compute pass morphs and skins its bind shape into its vertex buffer.
+     */
+    private skinOnGpu;
+    /** GPU cloth's pipelines (F7d; clothGpu.ts), made the first time a cloth simulates. */
+    private clothPipelines;
+    /** One step of a primitive's cloth on the GPU (F7d): predict, the Jacobi sweeps, then positions and normals into its vertices. */
+    private clothOnGpu;
+    /** Where each blended hair primitive's triangles were last sorted from (F7c), in its mesh's space. */
+    private readonly hairSorted;
+    /**
+     * Blended hair cards (F7c) draw their triangles back to front from the eye, sorted on the CPU (in the first
+     * copy's space) and written over the primitive's indices when the eye has moved a centimetre.
+     */
+    private sortHairCards;
+    /** The volumetric effects (F8b; volumetricEffects.ts), when the scene has any. */
+    private volumes;
+    /** Give the renderer its volumetric effects (F8b), replacing any it had. */
+    setVolumes(effects: readonly VolumeEffect[]): void;
+    /** Start a volumetric effect at a point (its base's centre) (F8b). */
+    volumeTrigger(index: number, at: readonly number[]): void;
+    /** The live volumes (F8b), for tests and the profiler. */
+    get liveVolumes(): GpuVolumes | null;
+    /** The volumes' march over the scene (F8b): a full-screen pass reading the depths, blending colour × T + L. */
+    private addVolumes;
+    /** The GPU particle system (F8a; gpuParticles.ts), when the scene has emitters. */
+    private particles;
+    private particleTime;
+    /** Give the renderer its particle emitters (F8a), replacing any it had; none clears them. */
+    setParticles(specs: readonly EmitterSpec[], looks?: ConstructorParameters<typeof GpuParticles>[3]): void;
+    /** Move where an emitter's rate spawns (F5e: rain and snow over the eye). */
+    particleOrigin(index: number, at: readonly number[]): void;
+    /** Fire an emitter's burst (F8a). */
+    particleBurst(index: number, at: readonly number[], dir?: readonly number[], scale?: number): void;
+    /** An emitter's ring (F8a): its particles' buffer, for tests and the profiler. */
+    particleRing(index: number): {
+        buffer: any;
+        capacity: number;
+        born: number;
+    } | null;
+    /** The particles' frame: simulated after the prepass, drawn after the see-through scene (F8a). */
+    private addParticles;
+    /** Whether this renderer skins live meshes on the GPU (F7a): the linear-light one, whose frames no CPU reference has to match. */
+    get gpuSkinning(): boolean;
     /** A cut-out caster's group 0 (F2a-2): the casters' uniforms and transforms, and its base map. */
     private cutGroupFor;
     /** The bind group for one primitive, rebuilt if any of its textures changed. */
@@ -5264,6 +6565,41 @@ declare class WebgpuSceneRenderer implements SceneRenderer {
      * its mips the encoder's. A cut-out keeps the RGBA path for its coverage.
      */
     private uploadTexture;
+    /** Texture streaming (F1b): the residency plan, and the feedback pass's pipeline, buffers and state. */
+    private streamer;
+    private feedback;
+    /** Each feedback slot's streamed maps, for the round in flight. */
+    private feedbackMaps;
+    /** Start streaming (F1b) under `budgetMB`, making the feedback pass the first time. */
+    private ensureStreaming;
+    /** What streaming holds (F1b), for the profiler; null when the frame doesn't stream. */
+    get textureResidency(): StreamingStats | null;
+    /** A map at a resident level (F1b): its size over 2^level, that level's texels (box-filtered on the CPU) and the mips below. */
+    private streamedTexture;
+    /**
+     * The feedback pass (F1b; textureStreaming.ts): every {@link FEEDBACK_INTERVAL} frames the opaque batches
+     * drawn a quarter size, each pixel's footprint kept per material, read back without waiting, and the
+     * residency planned again from it.
+     */
+    private addFeedback;
+    /** A round of feedback into the plan; maps whose level changed are made again as their groups rebuild. */
+    private applyFeedback;
+    /** Textures a residency change replaced, destroyed once the next frame no longer uses them. */
+    private retired;
+    /** Layer stacks uploaded once (F1e), by their layers' identities. */
+    private readonly layerStacks;
+    /**
+     * Upload (once) maps as the layers of one array (F1e): each resampled to the
+     * largest's size (at most 1024), a missing one white, with mips.
+     */
+    private uploadLayers;
+    /**
+     * Upload (once) an HDR directional light map (F3d, hdrLightmap.ts) as a
+     * two-layer rgba16float array: the irradiance (and 1), then the dominant
+     * direction and the sky's visibility. One level: a light map's texels are
+     * already a few centimetres to metres apart.
+     */
+    private uploadHdrLightmap;
     /** The size frames render at now. */
     get size(): {
         readonly width: number;
@@ -5281,6 +6617,138 @@ declare class WebgpuSceneRenderer implements SceneRenderer {
     resize(width: number, height: number): void;
     dispose(): void;
 }
+
+/**
+ * The GPU lightmapper (AAA_FIDELITY_ROADMAP.md F3d): a path tracer in compute
+ * that bakes a laid-out mesh's light map in linear light, in seconds in the
+ * browser where the CPU bake (lightmap.ts) takes minutes.
+ *
+ * - **The scene** is the CPU bake's own triangle BVH (`buildBvh`), flattened
+ *   into storage buffers: two words per node, three vec4s per triangle (a
+ *   corner and two edges) and its material in linear light (the albedo a
+ *   diffuse bounce takes, its lighting channels, and an emissive colour that
+ *   lights what sees it).
+ * - **The texels** are the ones the CPU bake shades (`lightmapTexels`): each
+ *   one's surface point and normal.
+ * - **Each path** leaves the texel along a cosine-weighted direction (the
+ *   first stratified over the bake, rotated per texel) and bounces diffusely
+ *   up to `bounces` times. Open sky gives the sky's radiance (the IBL's own
+ *   panorama, F3a); a surface gives its emission, and each surface it bounces
+ *   off is lit by the directional lights (a shadow ray each) and by one of the
+ *   point, spot and area lights (F3d-4, below). The texel's own direct light
+ *   is left out: the live cascades (F2a) and local lights draw it.
+ * - **The mean** of what the paths bring back is the irradiance over π: what
+ *   a white Lambertian surface there reflects, as the sky's SH irradiance is.
+ *   The paths also give the light's dominant direction (luminance-weighted)
+ *   and the share of the sky's light that came through unblocked.
+ *
+ * The result is an HDR directional light map (hdrLightmap.ts) for the AAA
+ * tier, and, from the same paths, the 8-bit ambient scale every other tier
+ * reads (the irradiance over the open sky's, per channel). Each dispatch is a
+ * bounded number of paths, so no submit nears a GPU's watchdog.
+ *
+ * Then it is finished (F3d-2):
+ * - **Invalid texels.** A texel whose first rays mostly hit the backs of
+ *   surfaces (by their authored normals) lies inside something, a floor
+ *   texel under a wall's foot, say. It is dropped and filled from its valid
+ *   neighbours, so it neither darkens the floor beside the wall nor lets the
+ *   light inside it out.
+ * - **Denoising** on the GPU: an edge-avoiding à-trous wavelet (Dammertz et
+ *   al. 2010) of four passes, 1 to 8 texels apart, stopped by the texels'
+ *   normals and planes (so neither a corner nor a neighbouring chart blurs
+ *   in) and by luminance against each texel's own variance, prefiltered over
+ *   its 3×3 (Schied et al.'s SVGF), so a well-converged texel is left nearly
+ *   as it is.
+ * - **Seams** stitched: where one edge in the world sits on two charts, the
+ *   texels along both are nudged (least squares) until the two lookups agree.
+ *
+ * And it bakes what the renderer lights (F3d-4):
+ * - **Local lights' bounce.** At each surface a path bounces off, one point,
+ *   spot or area light is picked by what it would give there unshadowed (with
+ *   a tenth of the choice spread evenly, so none is ever unpickable), and its
+ *   light, over the chance of picking it, comes through a shadow ray. With
+ *   many lights that is one ray where each light's would be many, and the
+ *   estimate stays unbiased.
+ *   - A point or spot light falls off and narrows to its cone as the
+ *     renderers' `distanceFalloff` and the shader's cone do.
+ *   - An area light (F2e-2) is sampled on its surface: a point uniformly on
+ *     its rectangle or disk, or on the rectangle a tube shows the point (as
+ *     the LTC shader takes it, ltc.ts), as its luminance × the two cosines ×
+ *     its area over π d², the renderer's units for its diffuse.
+ *   - A light lights only what shares one of its lighting channels (F2e).
+ * - **Metalness.** A surface bounces its albedo × (1 − metalness), as the
+ *   renderer's diffuse is, plus a metal's own colour as far as it is rough: a
+ *   rough metal's reflection is spread as a diffuser's is, a mirror's goes
+ *   one way and is the reflection probes' (F3b) to carry.
+ * - **Textured albedo** comes in with the occluders (`Occluder.surfaces`;
+ *   bakeSurface.ts in @cartbox/editor), per triangle from its map.
+ */
+
+/** The most bounces a bake takes, the most directional lights, and the most point, spot and area lights (F3d-4). */
+declare const LIGHTMAP_MAX_BOUNCES = 8;
+declare const LIGHTMAP_MAX_LIGHTS = 4;
+declare const LIGHTMAP_MAX_LOCAL_LIGHTS = 256;
+/**
+ * A light the bounces are lit by: its radiance in linear light (colour ×
+ * intensity; an area light's luminance) and, as a {@link SceneLight} reads
+ * them, where it is and how it falls off. Without a kind it is directional,
+ * `direction` toward it.
+ */
+interface BakeLight extends Partial<Pick<SceneLight, "kind" | "direction" | "position" | "range" | "falloff" | "innerAngle" | "outerAngle" | "shape" | "size" | "tangent" | "channels">> {
+    readonly radiance: readonly [number, number, number];
+}
+/** A rig's lights as the bake lights bounces with them: each one's linear colour (its temperature laid over it) × intensity. */
+declare function bakeLights(lights: readonly SceneLight[]): BakeLight[];
+interface GpuLightBakeOptions {
+    /** Paths per texel (default 256). */
+    readonly samples?: number;
+    /** Diffuse bounces after the first surface a path meets (0..8, default 3): 0 is sky and emission seen directly. */
+    readonly bounces?: number;
+    /** The sky's radiance in linear light (`environmentPanorama`); none is a black sky. */
+    readonly sky?: LinearPanorama | null;
+    /** The lights that light the surfaces paths bounce off: at most four directional ones, and point, spot and area ones (F3d-4; {@link bakeLights}). */
+    readonly lights?: readonly BakeLight[];
+    /** Denoise on the GPU (default true; F3d-2). */
+    readonly denoise?: boolean;
+    /** Stitch the seams between charts (default true; F3d-2). */
+    readonly stitch?: boolean;
+    /** The share of a texel's first rays that may hit backs of surfaces before it counts as inside one (default 0.6; F3d-2). */
+    readonly backfaceLimit?: number;
+}
+/** A finished bake: the HDR directional light map and the 8-bit ambient scale, both `size × size`. */
+interface GpuLightmapBake {
+    readonly hdr: HdrLightmap;
+    /** RGBA bytes in lightmap.ts's format (× 1/{@link LIGHTMAP_RANGE}). */
+    readonly ambient: Uint8ClampedArray;
+    /** Texels dropped as inside geometry, and seam points stitched (F3d-2). */
+    readonly invalid: number;
+    readonly seams: number;
+}
+/**
+ * A mesh's surfaces as the bake reads them (F3d-4; `Occluder.surfaces`): each
+ * primitive's base-colour and metal/roughness maps, decoded by `decode` (null
+ * where it can't; `data` asks for the pixels as stored, a data map's), and its
+ * metalness and roughness as the renderer resolves them (no metalness on a
+ * material the renderer doesn't shade as PBR).
+ */
+declare function bakeSurfaces(mesh: MeshAsset, decode: (image: EncodedImage, data: boolean) => Promise<DecodedTexture | null>): Promise<OccluderSurface[]>;
+/**
+ * Bake a laid-out mesh's light map on `device` against `occluders` (which
+ * should include the mesh itself); see the module comment. `progress` hears
+ * the share done after each submit.
+ */
+declare function bakeLightmapGpu(device: any, layout: LightmapLayout, occluders: readonly Occluder[], options?: GpuLightBakeOptions, progress?: (done: number) => void): Promise<GpuLightmapBake>;
+interface ProbeVolumeBakeOptions extends Pick<GpuLightBakeOptions, "bounces" | "sky" | "lights" | "backfaceLimit"> {
+    /** Rays per probe (default 1024). */
+    readonly rays?: number;
+}
+/**
+ * Bake a probe volume over `counts` probes spanning `min`–`max` against
+ * `occluders` on `device` (see probeVolume.ts): each probe's rays over the
+ * whole sphere, through the same paths as a light map's texels. A probe's
+ * depths are capped at 1.5 times the probe spacing, as DDGI's are.
+ */
+declare function bakeProbeVolumeGpu(device: any, min: readonly [number, number, number], max: readonly [number, number, number], counts: readonly [number, number, number], occluders: readonly Occluder[], options?: ProbeVolumeBakeOptions, progress?: (done: number) => void): Promise<ProbeVolume>;
 
 /**
  * The pure half of the WebGPU scene renderer: memory layout and buffer packing.
@@ -5361,10 +6829,36 @@ declare class WebgpuSceneRenderer implements SceneRenderer {
  *                                    w = the material's ID in the thin G-buffer (F0c)
  * 912  wind1      vec4<f32>    16   the previous frame's wind0, for motion vectors (F0c)
  * 928  motion0    vec4<f32>    16   x = where the frame's motion transforms start in the
- *                                    instance buffer (F0c)
+ *                                    instance buffer (F0c), w = the LOD level drawn (−1 without a chain; F10a)
+ * 944  sheen0     vec4<f32>    16   rgb = sheen colour (linear), w = sheen roughness (F1d;
+ *                                    materialExtensions.ts in @cartbox/editor)
+ * 960  spec0      vec4<f32>    16   rgb = a dielectric's f0 (IOR and specular applied), w = specular factor
+ * 976  trans0     vec4<f32>    16   x = transmission, y = thickness (m), z = attenuation distance
+ *                                    (0 = none), w = IOR
+ * 992  trans1     vec4<f32>    16   rgb = attenuation colour, w = iridescence
+ * 1008 irid0      vec4<f32>    16   x = the film's IOR, y = its thickness (nm), z = emissive strength,
+ *                                    w = 1 with a UV transform
+ * 1024 uvx0       vec4<f32>    16   xy = the UV transform's scale, zw = its rotation's cos and sin
+ * 1040 uvx1       vec4<f32>    16   xy = its offset, z = the share of the diffuse that scatters (F1d-2)
+ * 1056 sss0       vec4<f32>    16   rgb = how far each channel scatters, as a colour, w = its radius (m)
+ * 1072 dt0        vec4<f32>    16   rgb = the thin-surface transmission's colour, w = its share
+ * 1088 char0      vec4<f32>    16   character shading (F7c; characterShading.ts): x = its kind
+ *                                    (0 none, 1 skin, 2 eye, 3 hair, 4 mouth), yzw = its terms
+ * 1104 char1      vec4<f32>    16   its other terms (a hair's dither and frame, a mouth's opening)
+ * 1120 cull0      vec4<f32>    16   x = where a GPU-culled draw's copies start in the instance buffer (F0e;
+ *                                    gpuCulling.ts), added to `instance_index`; 0 otherwise;
+ *                                    y = an octahedral impostor's frames a side (F6b; 0: none), z = its half-size
+ * 1136 terrain1   vec4<f32>    16   a GPU terrain's patch (F6c; gpuTerrain.ts): its size (x, z), the heights' min and
+ *                                    range (> 0: a GPU terrain; 0 otherwise)
+ * 1152 terrain2   vec4<f32>    16   cells a side, 1 with cut cells, the nearest page's side, pages following the eye
+ * 1168 terrain3   vec4<f32>    16   the terrain's origin, the leaf node's side
+ * 1184 terrain4   vec4<f32>    16   the eye in the ground plane (x, z), the split range, the morph's start
+ * 1200 pages      vec4<f32> ×4 64   each eye-following page's corner, two a vec4
+ * 1264 wlook0     vec4<f32>    16   a water surface's F5d terms (water.ts): x = shore foam, y = Gerstner waves'
+ *                                    height (m), z = the FFT ocean's share, w = 1 when it has them
  * ```
  *
- * 944 bytes used, padded to a 1024-byte stride (a 256-byte multiple a dynamic
+ * 1280 bytes used, filling the 1280-byte stride (a 256-byte multiple a dynamic
  * uniform offset can address), so one buffer still holds every draw in a
  * frame — uniforms are written per batch, not per copy, so the stride costs
  * little. The metallic-roughness inputs and the environment carry the Modern
@@ -5373,13 +6867,13 @@ declare class WebgpuSceneRenderer implements SceneRenderer {
  * `envMeta.w` at 0 uses the analytic gradient instead of a panorama, and
  * `shadow.x` at 0 skips the shadow test.
  */
-declare const UNIFORM_STRIDE = 1024;
+declare const UNIFORM_STRIDE = 1280;
 /**
  * Bytes the struct actually occupies, before the stride padding. This is what a
  * bind group layout's `minBindingSize` must be: it makes a WGSL struct that
  * grows past what this module writes fail at pipeline creation.
  */
-declare const UNIFORM_BYTES_USED = 944;
+declare const UNIFORM_BYTES_USED = 1280;
 /** The same stride counted in float32s, which is how `writeBuffer` sizes it. */
 declare const UNIFORM_FLOATS: number;
 /**
@@ -5415,6 +6909,8 @@ interface PackableLight {
     readonly shadowTile?: number;
     readonly temperature?: number;
     readonly channels?: number;
+    /** An IES profile (F9d): the renderer gives each distinct one a slot. */
+    readonly ies?: object | null;
 }
 /**
  * Pack a light list into the storage-buffer layout the WGSL loop reads. Always
@@ -5423,7 +6919,7 @@ interface PackableLight {
  * false (every shader but the linear-light one), an area light (F2e-2) packs
  * as the punctual light it is from far off.
  */
-declare function packLights(lights: readonly PackableLight[], area?: boolean): Float32Array;
+declare function packLights(lights: readonly PackableLight[], area?: boolean, iesIndex?: ((light: PackableLight) => number) | null): Float32Array;
 /** The rasteriser's defaults, restated so an unlit draw shades identically. */
 declare const DEFAULT_LIGHT: readonly [number, number, number];
 declare const DEFAULT_AMBIENT = 0.35;
@@ -5565,6 +7061,8 @@ interface InstanceUniform {
     readonly hasSsao: boolean;
     /** A baked light map is bound (it scales the ambient/IBL term, PBR draws only). */
     readonly hasLightmap?: boolean;
+    /** The bound light map is an HDR directional one (F3d), which the linear-light shader lights by in place of the sky's irradiance. */
+    readonly hdrLightmap?: boolean;
     /** This draw's world matrix, for point-light world position in the shader. */
     readonly model: Mat4 | null;
     /** Number of lights in the shared storage buffer, or 0 for the single key light. */
@@ -5573,6 +7071,10 @@ interface InstanceUniform {
     readonly surface?: ResolvedSurface;
     /** This draw's clearcoat, anisotropy and relief (I4; see materialLayers.ts in @cartbox/editor), or omitted for none. */
     readonly layers?: ResolvedLayers;
+    /** This draw's full material set (F1d; materialExtensions.ts in @cartbox/editor), or omitted for the defaults. */
+    readonly extensions?: ResolvedExtensions;
+    /** The frame's count, which moves a hair's dither (F7c). */
+    readonly frame?: number;
     /** How this draw bends what's behind it (I5; refraction.ts in @cartbox/editor), or null/omitted when it doesn't. */
     readonly refraction?: ResolvedRefraction | null;
     /** The camera's right and up and the frame's height, which a refraction's offset is measured by. */
@@ -5604,6 +7106,8 @@ interface InstanceUniform {
     };
     /** Moving water (B5): the material's waterUniform this frame, or null/omitted for none. */
     readonly water?: readonly [number, number, number, number] | null;
+    /** A water surface's F5d terms (waterLookUniform), or null. */
+    readonly waterLook?: readonly [number, number, number, number] | null;
     /** The water's ripples flow along the UVs (EDITOR_PRO_ROADMAP.md P3), not the world's X and Z. */
     readonly waterAlong?: boolean;
     /** Triplanar mapping and height blending (B6), from {@link resolveMapping}, or null/omitted for neither. */
@@ -5618,12 +7122,23 @@ interface InstanceUniform {
     readonly windBefore?: readonly [number, number, number, number] | null;
     /** Where the frame's motion transforms start in the instance buffer (F0c). */
     readonly motionBase?: number;
+    /** Where a GPU-culled draw's copies start in the instance buffer (F0e): its indirect draws start at instance 0. */
+    readonly instanceBase?: number;
     /** The lighting channels the draw's copies are on (F2e), absent the first. */
     readonly lightChannels?: number;
     /** How many probes the shader loops over, where not `environment.probes`' (the linear variant's GPU-captured ones, F3b). */
     readonly probeCount?: number;
     /** The draw takes the frame's projected decals (F1f): an opaque or cut-out surface that doesn't refract. */
     readonly receivesDecals?: boolean;
+    /** The LOD level its copies draw (F10a's LOD view), or −1 (the default) without a chain. */
+    readonly lodLevel?: number;
+    /** An octahedral impostor's frames a side and half-size (F6b; MeshMaterial.octahedral), or null/omitted. */
+    readonly octahedral?: {
+        readonly frames: number;
+        readonly radius: number;
+    } | null;
+    /** A GPU terrain's patch (F6c; GpuTerrain.values): its 32 floats, or null/omitted. */
+    readonly terrain?: Float32Array | null;
 }
 /**
  * A draw's triplanar repeat (0 = UV mapping) and height-blend sharpness (0 = an
@@ -6847,9 +8362,10 @@ interface GpuPresentTarget {
  * `gpuFormats`, the decoder also transcodes into the first of them it can
  * (F1a; see DecodedTexture.gpu).
  */
+/** A KTX2 decoder: it may answer at once, or later (one that transcodes on a worker, F0e). */
 type Ktx2DecoderLoader = () => Promise<(bytes: Uint8Array, options?: {
     readonly gpuFormats?: readonly string[];
-}) => DecodedTexture | null>;
+}) => DecodedTexture | null | Promise<DecodedTexture | null>>;
 declare class MeshOverlaySurface implements DisplaySurface {
     private readonly inner;
     private readonly width;
@@ -6896,6 +8412,26 @@ declare class MeshOverlaySurface implements DisplaySurface {
     private frameMs;
     private framesAtStep;
     private low;
+    /** A GPU that reads its frames back: paced by how often they land (gpuPacing.ts), made with the first frame. */
+    private gpuPacer;
+    /** The scene's water body (F5d), found once; its FFT ocean, and the ripples round the eye. */
+    private waterBodyCache;
+    private ocean;
+    private oceanSlopes;
+    private readonly ripples;
+    private waded;
+    /** Disturb the water at world (x, z) (F5d): a ring `strength` metres deep spreads from it. */
+    splash(x: number, z: number, strength?: number): void;
+    /** The first water surface in the scene (a refracting material with ripples): its top, its extent and its material. */
+    private waterBody;
+    /**
+     * This frame's water (F5d): the body's plane and look, the light reaching into it, whether the eye is under it,
+     * the FFT ocean's slopes (when a water surface asks for an ocean) and the ripples round the eye (a wading eye
+     * makes them as it moves).
+     */
+    private frameWater;
+    /** The upper sky's mean light for F5c's clouds, and the sun it was found for. */
+    private cloudAmbient;
     /** The last sky backdrop and the view it was painted for (it depends only on
      *  where the camera points, so walking without turning reuses it). */
     private skyCache;
@@ -6907,8 +8443,29 @@ declare class MeshOverlaySurface implements DisplaySurface {
      * moves the sun the metals reflect too.
      */
     private skyReflections;
+    /**
+     * A physical sky's time of day (F5a-2): the sun its light was last rendered
+     * for (null until the first frame takes the bake's), and the re-render under
+     * way for where the sun is now, a few rows a frame.
+     */
+    private skyLitFor;
+    private skyRelight;
     /** The scene's distant vistas, textured: re-drawn into the sky whenever it is re-baked. */
     private vistas;
+    /**
+     * Terrains the AAA tier draws from their heightfields (F6c), vistas among
+     * them, with their layers' maps; and the meshes of the blocks (and their
+     * coarser frames) they replace, which aren't drawn or cast.
+     */
+    private ground;
+    private groundIds;
+    private readonly groundMeshes;
+    /** The world partition's loaded objects' meshes (F6d), and how many loaded objects use each. */
+    private readonly cellMeshes;
+    /** Each loaded object as it was before its maps were decoded, to go back to on unload. */
+    private readonly bare;
+    /** Images the cells share, decoded once while any cell holds them. */
+    private cellImages;
     /**
      * Told each frame where the sky dome's sun is on screen and how much of it is
      * unblocked, for the post-FX glare and lens flare (H8); null without a sky dome.
@@ -6976,6 +8533,10 @@ declare class MeshOverlaySurface implements DisplaySurface {
     private spawned;
     /** Graphics quality (see quality.ts): shadows on/off and their map size, the first-person scale cap. */
     private quality;
+    /** What the viewport shows (F10a): the lit frame, or a diagnostic of it on the AAA tier. */
+    private viewMode;
+    /** The last frame handed to the GPU renderer, for a reference capture of it (F10b). */
+    private lastFrame;
     /** Skinned instances' live meshes (their buffers are rewritten for each pose). */
     private readonly live;
     /** The skinning matrices each live mesh was last posed with (skip re-skinning the same pose). */
@@ -7042,7 +8603,12 @@ declare class MeshOverlaySurface implements DisplaySurface {
      * AnimationSession). Each listed object's live mesh is re-skinned when its
      * matrices changed, and it counts as moving this frame for the shadow cache.
      */
-    setSkinning(skinning: ReadonlyMap<number, Float32Array>): void;
+    setSkinning(skinning: ReadonlyMap<number, Float32Array>, morphs?: ReadonlyMap<number, Float32Array>): void;
+    /**
+     * Set faces' morph weights (F7b; object → weights, from a FaceDriver or a clip): each listed object's live
+     * copy re-morphed, a skinned one at its last pose. Objects `skinned` already re-skinned this frame are skipped.
+     */
+    setFaces(faces: ReadonlyMap<number, Float32Array>, skinned?: ReadonlyMap<number, Float32Array>): void;
     /**
      * Apply an editor's edits to the running scene (ENGINE_PARITY_ROADMAP.md EP5):
      * objects' placements, their meshes and materials, and the lighting rig, shown
@@ -7054,8 +8620,47 @@ declare class MeshOverlaySurface implements DisplaySurface {
     applySceneEdits(next: MeshScene): Promise<boolean>;
     /** Draw holo UI documents over every frame with `draw` (null: none). */
     setHolo(draw: ((out: Uint8ClampedArray, width: number, height: number, time: number, premultiplied?: boolean) => boolean | void) | null): void;
+    /**
+     * The path-traced reference of the last frame drawn (F10b), `width` across at
+     * the frame's aspect (up to 8K a side), or null where the renderer has none
+     * (every tier but AAA) or nothing has drawn yet.
+     */
+    captureReference(options: Omit<CaptureOptions, "height"> & {
+        readonly height?: number;
+    }): Promise<ReferenceCapture> | null;
+    /**
+     * Render a timeline offline (F10d): each frame at `fps` path-traced through
+     * its shot (the camera track's eye, rail, shake, roll, focal length and thin
+     * lens), the scene as last drawn, each handed to `onFrame` as it finishes.
+     * Resolves to the frames rendered (fewer when aborted); null where the
+     * renderer has no reference (every tier but AAA), nothing has drawn yet, or
+     * the timeline has no camera keys.
+     */
+    renderSequence(options: SequenceOptions): Promise<number> | null;
+    /** Meshes whose material graphs have been sent to compile (F1e). */
+    private readonly prepared;
+    /** Compile a newly seen mesh's material-graph permutations in the background (F1e), as this frame draws them. */
+    private prepareGraphs;
+    /** Samples each pixel of the viewport's path-traced reference holds (F10b); 0 when it isn't shown. */
+    get referenceSamples(): number;
+    /** Show the lit frame or a diagnostic of it (F10a; the AAA tier alone draws the diagnostics). */
+    setViewMode(mode: ViewMode): void;
     /** Apply a graphics quality preset (takes effect on the next frame). */
     setQuality(quality: QualitySettings): void;
+    /**
+     * Load a world partition cell's objects (F6d): their maps decoded (in the
+     * decode workers, where the page has them) and swapped in. They show once
+     * the caller marks them active.
+     */
+    loadCell(members: readonly number[]): Promise<void>;
+    /**
+     * Unload a cell's objects (F6d): back to bare, and the GPU geometry of the
+     * meshes no loaded object uses any more given back (it uploads again if
+     * they return). Decoded images go once no cell holds an object.
+     */
+    unloadCell(members: readonly number[]): void;
+    /** Whether an object of a world partition cell has its maps (F6d). */
+    cellLoaded(index: number): boolean;
     /**
      * The objects of levels that aren't loaded (see levels.ts in @cartbox/editor):
      * they're hidden, and left out of the shadow, until the set changes again.
@@ -7112,14 +8717,26 @@ declare class MeshOverlaySurface implements DisplaySurface {
      * top of the authored rig's lights.
      */
     setCartLights(lights: readonly WorldLight[]): void;
-    /** The rig as this frame lights with it: with the cart's sun as its key, if it set one (I17). */
+    /** The rig as this frame lights with it: with the cart's sun as its key, if it set one (I17), tinted by a physical sky's air (F5a). */
     private frameLighting;
+    /** The rig with the cart's sun as its key, if it set one (I17): above the air, before a physical sky tints it. */
+    private sunLighting;
     /**
      * Keep the sun the metals reflect where the frame's sun is: when it has
      * moved (or changed colour) past what {@link sunKey} rounds away, redraw the
      * reflections copy's glow — a small map, a few milliseconds.
      */
     private followSun;
+    /**
+     * A physical sky's time of day (F5a-2): when its sun (above the air) has
+     * turned past what {@link physicalSunKey} rounds away, or changed, render
+     * the atmosphere's light again for where it is, {@link SKY_RELIGHT_ROWS} a
+     * frame, then swap it in whole: the AAA tier's IBL is rebuilt from it and
+     * its reflection probes re-captured (their key follows the environment), and
+     * the other tiers' reflections copy is made from it. The backdrop already
+     * follows the sun each frame on the AAA tier.
+     */
+    private followPhysicalSun;
     /** Start finding the probes' bounce transfer (I17), when they were baked with their light recorded. */
     private startBounce;
     /**
@@ -7149,6 +8766,22 @@ declare class MeshOverlaySurface implements DisplaySurface {
      * presenter measured a frame or two ago, as the byte path measures the bytes.
      */
     private presentOnGpu;
+    /**
+     * Real-time GI (F3e), on the AAA tier under a rig that asks for it: the
+     * still scene the probes trace (with a key that changes with it), and the
+     * environment with the volume they relight — the rig's baked one, else an
+     * empty one over the scene's bounds, the same object frame after frame so
+     * the renderer keeps relighting it.
+     */
+    private liveGi;
+    /** What stands still in the scene, as the BVH tracers take it (F3e's live GI, F3f's Epic reflections), gathered once a scene. */
+    private stillOccluders;
+    private still;
+    private giState;
+    /** A physical sky as the presenter draws it (F5a): the medium, its sun above the air, and the disc as the eye sees it; null for a painted one. */
+    private presentAtmosphere;
+    /** The upper sky's mean radiance under this sun (F5c's clouds take their sky light from it), kept while the sun holds still. */
+    private cloudAmbientFor;
     /** The presenter's newest measurements into the lens flare and eye adaptation (the byte path's reportSun and frameLuminance). */
     private takeGpuMeasurements;
     /** Ask for the GPU front renderer once (see MeshOverlayOptions.createFrontRenderer). */
@@ -7157,6 +8790,13 @@ declare class MeshOverlaySurface implements DisplaySurface {
     private withoutRefraction;
     /** The rig's tone map with the volumes' and the eye's stops applied (null without tone mapping). */
     private frameTonemap;
+    /**
+     * The eye adaptation a rig asks for: its own, or (with a physical camera in auto mode, F4c) the default's,
+     * the camera's compensation shifting the key; none when the camera's exposure is manual.
+     */
+    private eyeAdaptation;
+    /** The physical camera's depth of field and motion blur for the AAA renderer (F4c), with the post volumes' pull. */
+    private cameraEffects;
     /** Report the volumes' grade, bloom and fog to {@link onPost} when they change. */
     private reportPost;
     /** Report the sun to {@link onSun}: its place on screen and its eased visibility. */
@@ -7167,8 +8807,22 @@ declare class MeshOverlaySurface implements DisplaySurface {
      * direction nor the sun has changed.
      */
     private paintSky;
-    /** The 3D render scale this frame: 1, unless the software governor has stepped down. */
+    /** The 3D render scale this frame: 1, unless the software governor or the GPU's pacing has stepped down. */
     private renderScale;
+    /** Whether this frame's 3D is on a GPU that reads its frames back (not presented on the GPU): one gpuPacing.ts measures. */
+    private gpuReadback;
+    /**
+     * Whether the GPU's pacing sets the render size: a large first-person view (as the software governor's) on a GPU
+     * that reads its frames back and can render at another size.
+     */
+    private gpuPaced;
+    /** Time the frames landing from the GPU, and choose the next frame's render size from them. */
+    private paceGpu;
+    /**
+     * When the GPU is what holds the 3D back (its frames land well behind the run loop), how long each takes to come
+     * back (ms); else null. The quality governor steps the preset down on it, as it does on slow frames.
+     */
+    gpuBoundMs(): number | null;
     /** Whether the resolution governor applies: a large first-person view on the CPU rasteriser. */
     private governed;
     /** Step the software render scale by how long frames are taking. */
@@ -7231,6 +8885,23 @@ declare class MeshOverlaySurface implements DisplaySurface {
     eyePosition(): readonly [number, number, number] | null;
     /** Foliage blocks by mesh (EP11): their cull distance and bounds. */
     private readonly foliage;
+    /** Whether foliage is drawn a copy at a time (F6b): on the AAA tier, which culls copies on the GPU. */
+    private get gpuFoliage();
+    /** Each block's copies as instances (F6b), made once a block, model and LOD chain. */
+    private readonly blockCopies;
+    /**
+     * Each impostor layer's chain with an octahedral impostor for its far level
+     * (F6b; bakeOctahedralImpostor), baked once, off the frame that first needs
+     * it; until it's ready, the crossed cards the layer stores serve.
+     */
+    private readonly octahedral;
+    private octahedralChain;
+    /**
+     * What an instance draws as on the GPU-culled path (F6b): itself, unless it is
+     * a foliage block, which is its copies while it is in reach (its full copies'
+     * block, the impostors taken by their LOD chain), and nothing otherwise.
+     */
+    private foliageCopies;
     /** Whether an instance is in reach of the eye: anything but a foliage block is; a block is within its cull distance. */
     private foliageInReach;
     /**
@@ -7318,12 +8989,40 @@ declare class MeshOverlaySurface implements DisplaySurface {
     private debris;
     private debrisBoxes;
     private readonly debrisLooks;
+    /** The objects broken (F8c): their chunks, and each piece as the mesh a chunk draws. */
+    private readonly broken;
+    /** The levels' hidden objects, before the broken ones join them (F8c). */
+    private levelInactive;
+    /**
+     * Break a fractured object (cartbox.shatter, F8c): it's hidden, its pieces fly from the impact as chunks, a
+     * mark is laid and dust thrown where it was hit (the scene's effects named for it), and the still scene the
+     * live GI traces loses it.
+     */
+    shatter(object: number, at: readonly [number, number, number], strength: number): void;
+    /** Step every broken object's chunks; their instances to draw. */
+    private stepBroken;
     /** Throw a copy of debris `debris` (see cartbox.debris). */
     throwDebris(debris: number, at: readonly [number, number, number], velocity: readonly [number, number, number], scale: number): void;
     /** Lay decal `decal` on a surface (see cartbox.decal). */
     decal(decal: number, at: readonly [number, number, number], normal: readonly [number, number, number], scale: number): void;
     /** Fire particle effect `effect` (see cartbox.burst). */
     burst(effect: number, at: readonly [number, number, number], dir: readonly [number, number, number], scale: number): void;
+    /** Whether the scene's particle effects run on the GPU (F8a). */
+    private gpuParticles;
+    /** The scene's own GPU emitters (F8a); the weather's (F5e) follow them, rain and snow as they fall. */
+    private effectEmitters;
+    private weatherFalling;
+    /** The weather a cart or the editor set at run time (F5e), over the rig's; null keeps the rig's. */
+    private weatherOverride;
+    /** Set the weather at run time (F5e): wetness, puddles, snow, rain and snowfall, over the rig's; null goes back to the rig's. */
+    setWeather(settings: WeatherSettings | null): void;
+    /** This frame's weather, or null when it changes nothing. */
+    private frameWeather;
+    /**
+     * Keep the renderer's rain and snow emitters (F5e) with the weather: remade with the scene's own when what falls
+     * changes, and their origin over the eye every frame. On a renderer that runs GPU particles only (the AAA tier).
+     */
+    private syncWeatherEmitters;
     /** Settles once the scene's reflection probes are baked and in use (tests await it). */
     probesReady: Promise<void>;
     /** Every decal's tiles, drawn the first time the AAA tier projects them (F1f). */
@@ -7342,6 +9041,16 @@ declare class MeshOverlaySurface implements DisplaySurface {
     private reflectionCapture;
     private envCounter;
 }
+/**
+ * The environment a scene is lit by, as the player draws it: the rig's
+ * gradient, or, where it authors a sky, that sky baked (its imported or HDR
+ * panorama, objects, clouds and distant vistas, I6 and I7) as the surface
+ * bakes it. The light bake reads it (AAA_FIDELITY_ROADMAP.md F3d-4), so what
+ * is baked is lit by the sky the frame shows. Null without a rig. Textures go
+ * through the browser's decoder (none in node, where the vistas draw flat);
+ * KTX2-only ones draw flat.
+ */
+declare function sceneSkyEnvironment(scene: MeshScene): Promise<EnvironmentLight | null>;
 /**
  * The 15 armour colours a pose's `tint` picks from (index 0 = no tint). Applied
  * to a mesh's `tintable` materials only, replacing their base colour's RGB.
@@ -8284,6 +9993,8 @@ declare class AnimationSession {
     private readonly scene;
     private readonly playback;
     private tick;
+    /** The last step's length, which the spring bones (F7d) advance by. */
+    private lastDt;
     private cache;
     /** Each object's final pose (after any adjustment, e.g. IK) as last skinned. */
     private readonly lastPose;
@@ -8301,6 +10012,23 @@ declare class AnimationSession {
     reset(object: number): void;
     /** Take any transition that's ready, then advance every playback one tick (firing clip events). */
     step(dt: number): void;
+    /**
+     * Ask an object's motion matcher (F7e) for this tick: moving at `velocity` (m/s; x sideways, z forward, in its
+     * own frame) and turning to face `facing` (radians from its heading). Ask every tick it should keep matching.
+     */
+    matchMotion(object: number, velocity: readonly [number, number], facing: number): void;
+    /** The clip an object shows now (−1 for none). */
+    currentClip(object: number): number;
+    /** How far an object's root went over the last step (F7e): forward, sideways and the turn, or null. */
+    rootMotion(object: number): {
+        readonly dx: number;
+        readonly dz: number;
+        readonly turn: number;
+    } | null;
+    /** A playback's matcher, its database built from its clips (all looping), or null without two named feet. */
+    private matcherFor;
+    /** The root's travel between two moments of the same clip (wrapping once), or null. */
+    private rootStep;
     /** How far through its cycle a track is (0..1 per pass of its clip; loops keep counting). */
     private progress;
     private transition;
@@ -8326,6 +10054,11 @@ declare class AnimationSession {
      * before it's skinned (inverse kinematics).
      */
     matrices(visible?: (object: number) => boolean, adjust?: (object: number, mesh: MeshAsset, pose: Float32Array) => void): Map<number, Float32Array>;
+    /**
+     * The morph weights each animated object's clip gives now (F7b; object → weights), for the clips that carry
+     * them: the clip the current track shows, at its time. Objects whose clips have none are left out.
+     */
+    morphs(visible?: (object: number) => boolean): Map<number, Float32Array>;
     /** Recompute the matrices on the next request (something that shapes the pose changed). */
     invalidate(): void;
     /** An object's final pose as last skinned (null before its first). */
@@ -8521,6 +10254,8 @@ declare class RuntimeChannel {
     private decals;
     /** Debris the cart threw since the renderer last took it. */
     private debris;
+    /** Objects the cart broke this tick (F8c). */
+    private shatters;
     private sounds;
     /** Standing shield effects (cartbox.shield): object → flare, shimmer, camo. */
     private readonly shieldStates;
@@ -8588,6 +10323,12 @@ declare class RuntimeChannel {
     /** The decals laid since the last call (the renderer draws them). */
     takeDecals(): DecalLaid[];
     /** The debris thrown since the last call (the renderer simulates and draws it). */
+    /** The objects the cart broke since the last call (F8c). */
+    takeShatters(): {
+        object: number;
+        at: [number, number, number];
+        strength: number;
+    }[];
     takeDebris(): DebrisThrown[];
     /** The sound commands since the last call (the sound system plays them). */
     takeSounds(): SoundCommand[];
@@ -8605,6 +10346,8 @@ declare class RuntimeChannel {
      * placement or authored placement).
      */
     skinning(worldOf?: (object: number) => Mat4 | null): ReadonlyMap<number, Float32Array>;
+    /** The morph weights the animated objects' clips give now (F7b; object → weights), for those being drawn. */
+    morphs(): ReadonlyMap<number, Float32Array>;
     /** Start a timeline cue on an object: a state of its state machine by that name, else a clip. */
     private cue;
     /**
@@ -8631,6 +10374,38 @@ declare class RuntimeChannel {
     private spawn;
     private despawn;
     destroy(): void;
+}
+
+/**
+ * A face at runtime (AAA_FIDELITY_ROADMAP.md F7b; faces.ts in @cartbox/editor):
+ * the weights an object's morph targets take each frame, from what it says
+ * (a viseme track, from phonemes or audio), where it looks (saccades and
+ * blinks), an expression and a recorded face clip, layered in ARKit's terms
+ * and handed to the mesh's targets through its rig.
+ */
+
+declare class FaceDriver {
+    private readonly mesh;
+    readonly rig: FaceRig;
+    private readonly gaze;
+    private time;
+    private speech;
+    private looking;
+    private expression;
+    private clip;
+    private readonly mouth;
+    private readonly recorded;
+    constructor(mesh: MeshAsset, seed?: number);
+    /** Say a viseme track, starting `delay` seconds from now. */
+    speak(track: readonly VisemeSpan[], delay?: number): void;
+    /** Look along a direction in the head's space (+z ahead, +y up, +x its left), or ahead with null. */
+    lookAt(direction: readonly number[] | null): void;
+    /** Hold an expression (52 ARKit weights), or none. */
+    setExpression(weights: ArrayLike<number> | null): void;
+    /** Play a recorded face clip (Live Link Face, say) from now, or stop one. */
+    play(clip: FaceClip | null, loop?: boolean): void;
+    /** Advance `dt` seconds: the mesh's morph weights now (its own weights for targets ARKit doesn't name). */
+    update(dt: number): Float32Array;
 }
 
 /**
@@ -8751,4 +10526,4 @@ declare function directCoreBeside(engineUrl: string | undefined): string;
  */
 declare function mount(container: HTMLElement, options: PlayerOptions): PlayerHandle;
 
-export { AIM_ASSISTS, AgentCrowd, type AimAssist, type AnimClip, type AnimMode, type AnimPlacement, type AnimSpec, type AnimState, type AnimTarget, type AnimTrack, AnimatedForegroundSurface, AnimationSession, type AtmosphereParams, BLOOM_KNEE, BloomPyramid, BroadcastChannelTransport, type BuiltLightingRenderer, CAMERA_BASE, CAMERA_SCALE, CARTBOX_SDK_LUA, CELL_WORLD, CMD_RING_BYTES, CMD_RING_MAX, COMPOSE_UNIFORM_FLOATS, CappedSceneRenderer, type CapturedFrame, type CartSpriteSource, CartridgeLoadError, type CastHit, type CastShape, type ClipSample, type ClipTableEntry, type CollisionField, ConsoleButton, type ConsoleInstance, type ConsoleModel, type ControlScheme, type ControlSettings, type ControlTarget, DEFAULT_AMBIENT, DEFAULT_ATMOSPHERE, DEFAULT_CONTROL_SETTINGS, DEFAULT_KEY_BINDINGS, DEFAULT_LIGHT, DEFAULT_MODEL_ID, DEFAULT_MOUSE_LOOK, DEFAULT_PAD_BINDINGS, DEFAULT_STICK_DEAD_ZONES, DEFAULT_TRIGGER_THRESHOLD, DIRECT_CORE_URL, DebugCommand, type DebugStep, type DeviceHints, type DeviceProvider, type DirectConsole, DirectTransport, type DirectTransportOptions, type DriftStats, EVENT_CAPACITY, type Ease, EngineLoadError, type ErrorFrame, FLARE_GHOSTS, FLARE_GHOST_GAIN, FLARE_SPIKE_POWER, type FlagsField, type FlareGhost, type FlareParams, type FrameState, GYRO_AIMS, GamepadInput, type GeneratedTrack, type GlContextProvider, GpuCanvasSurface, GpuPresenter, type GpuSceneDraw, type GradingLut, type GyroAim, HEIGHT_WORLD, IMPORTED_LOOK, INPUT_BLOCK_BYTES, INPUT_MAGIC, INPUT_SETTINGS, INSTANCE_FLOATS, type InnerSurfaceFactory, type InputChange, type InspectedObject, type InstanceTransform, type Keyframe, LIGHTS_BASE, LIGHTS_CAPACITY, LIGHT_FLOATS, LIGHT_STRIDE, LOOP_SLOTS, LUT_LOOKS, LUT_SIZE, type LabCart, type LabProbe, type LayerChannel, type Light, type LightingBackend, type LightingFrameContext, LightingLayer, type LightingOptions, type LightingRenderer, type LightingScene, type LinkConditions, LitCanvasSurface, type LookDevice, type LookProfile, MAILBOX_TYPE_ACHIEVEMENT, MAILBOX_TYPE_PROGRESS, MAILBOX_TYPE_SCORE, MAILBOX_WORDS, MAX_EMITTERS, MAX_LUT_SIZE, MAX_PARTICLES_PER_EMITTER, MAX_PYRAMID_LEVELS, MAX_VOICES, MESH_CAM_ANGLE_SCALE, MESH_CAM_BASE, MESH_CAM_DIST_SCALE, MESH_CAM_STRIDE, MESH_POSE_BASE, MESH_POSE_CAPACITY, MESH_POSE_HIDDEN, MESH_POSE_STRIDE, MIN_LUT_SIZE, MIN_PYRAMID_DIMENSION, MODELS, MOUSE_FULL_LEAN_PX, type MailboxCamera, type MailboxEvent, type MailboxEventKind, type MailboxMeshCamera, type MailboxMeshPose, type MailboxRead, type MaterialBuffer, MemoryNetHub, type MeshInstance, MeshOverlaySurface, type MeshScene, type SceneCamera$1 as MeshSceneCamera, type ModelId, NET_MODE_CLIENT, NET_MODE_HOST, NET_MODE_OFFLINE, NET_SLOTS, NET_WORDS, NORMAL_DIRECTION_COUNT, NORMAL_VECTORS, type NetEvent, type NetInbox, type NetLabOptions, type NetLabReport, type NetMessage, type NetOutbox, type NetPeer, type NetRoomStatus, NetSession, type NetSignal, type NetState, type NetTransport, type ObjectLook, PAD_BUTTONS, PARTICLE_KINDS, PHYSICS_DT, PHYS_BLOCK_BYTES, PHYS_MAGIC, POINTER_AT, POINTER_MAGIC, POST_FX_EFFECTS, PROFILE_SECTIONS, PROFILE_WINDOW, type PackableLight, type PadButton, type PadSnapshot, type Particle, type ParticleEmitter, type ParticleKind, ParticleOverlaySurface, type ParticleSpec, type PauseInfo, type PbrMaterial, type PhysicsBackend, type PhysicsBodyDesc, type PhysicsJointDesc, type Quat as PhysicsQuat, PhysicsSession, type PhysicsShape, type Vec3$3 as PhysicsVec3, type PlacementChannel, type PlayerHandle, type PlayerOptions, PointerInput, type PointerState, type PostFxColorDef, type PostFxEffectDef, type PostFxEffectId, type PostFxParamDef, PostFxPass, type PostFxSettings, type PostFxSource, PostFxSurface, type PostFxUniforms, type PresentBase, type PresentFrame, type PresentSky, type PresentStats, type ProfileSection, type ProfileSnapshot, Profiler, QUALITY_LEVELS, QUALITY_PRESETS, type QualityChoice, QualityGovernor, type QualityLevel, type QualitySettings, RAM_LAYOUTS, REPLAY_VERSION, RESPONSE_CURVES, type RamLayout, type RegionImage, type RegisteredAchievement, type RenderCanvas, type RenderCaps, type RenderStats, type Replay, ReplayError, ReplayRecorder, ReplaySource, type ResolvedMapping, type ResolvedPbr, type ResolvedPlacement, type ResponseCurve, type Rgb, type RtcDataChannelLike, type RtcPeerConnectionFactory, type RtcPeerConnectionLike, type RumbleEffect, RuntimeChannel, SAVE_MAGIC, SKY_UNIFORM_FLOATS, SOFTWARE_RASTER_CAPS, START_KEYS, STICK_LAYOUTS, type ScaleMode, SceneBackdropSurface, type SceneBounds, type SceneCamera, type SceneDraw, type SceneLayer, type SceneMemory, type SceneRenderer, type SceneSpec, type SceneVista, type ScreenSun, type SectionStats, SimulatedNetHub, SoftwareSceneRenderer, type SoundContext, SoundSystem, type Speaker, type SpriteRegion, type SpriteRegionSource, type StickDeadZones, type StickLayout, type SunShadow, SwitchableTransport, TANGENT_VERTEX_FLOATS, TILT_SHIFT_FEATHER, TINT_PALETTE, TOUCH_CONTROL_IDS, TOUCH_LOOK_MODES, type TextureLookup, type TouchControlId, type TouchLayout, type TouchLookMode, type TouchPlacement, type TraceLine, type TrackMode, UNIFORM_BYTES_USED, UNIFORM_FLOATS, UNIFORM_STRIDE, VERTEX_FLOATS, type Vec3$2 as Vec3, type VerificationResult, WEBGL_INSTANCES_PER_DRAW, WEBGL_MAX_LIGHTS, WebglSceneRenderer, WebgpuLightingLayer, WebgpuSceneRenderer, type WorldBillboard, type WorldBillboardPose, type WorldCamera, type WorldCameraSpec, type WorldLight, WorldOverlaySurface, type WorldProp, type WorldScene, type WorldTileCell, acesFilmic, acesFilmicChannel, actionsSdkLua, aimAssistLevel, alignBytesPerRow, animClipsSdkLua, animatedObjects, anyPostFxEnabled, appendLuaCode, applyActionToggles, applyLookSettings, applyLut, applyQualityToPostFx, applyRenderCaps, armDebugBlock, armSaveBlock, askMotionPermission, breakableLine, browserDeviceHints, browserRtc, browserSpeaker, buildBillboardInstance, buildClipTable, buildOrbitCamera, buildShadowInstance, buildTerrainInstances, buildWorldCamera, cameraAt, capTextures, capTriangles, capsConstrainScene, cellAt, clipFrameIndex, codeChunks, codeLineOffset, collisionSdkLua, commandRingAddress, commandRingBytes, commandRingMax, commandsPerTick, compileAnimator, componentsSdkLua, composeParallax, composeWorldMatrix, compositeOverBackdrop, createCartSpriteSource, createConsole, createDirectConsole, createFlatMaterial, createLightingLayer, createSceneRenderer, createTextureBudgetCache, deadZoned, debugBlockAddress, debugPostlude, debugSdkLua, decodeCamera, decodeLights, decodeLut, decodeMailbox, decodeMeshCamera, decodeMeshPoses, decodeNetMessage, decodeWorldLights, defaultPostFxSettings, detectQuality, deterministicBackend, directCoreBeside, directCoreModel, dragLean, drift, effectiveBreakpoints, emitterPreset, encodeLut, encodeNetMessage, errorStack, estimateSceneBytes, estimateSceneMemory, evaluate, extractScore, extractUnlocks, fillSky, fitShape, fitTextureToBudget, flagsSdkLua, flicker, frameDurationMs, framePixels, framebufferBytes, getModel, getWebgpuDevice, gyroLean, hasCommandRing, hashCart, hashEventId, hexToRgb01, identityLut, injectSdk, inputBlockAddress, instrumentLua, interleaveVertices, interleaveVerticesWithTangents, interpolateNormal, isMobileAgent, jointFrames, layoutSticks, lensFlareAt, loadEngineModule, lookAccelerationBoost, lookGains, lookLut, lookProfileFor, lutStrip, makeShadowTexture, mount, mouseLean, nearestDirection, netSendInterval, normalBasis3x3, normalVector, orbitPitchAboveTerrain, packComposeUniforms, packLights, packMeasureUniforms, packShaftUniforms, packSkyUniforms, paramKey, parseAnim, parseCollisionField, parseControlSettings, parseCubeLut, parseFlagsField, parseMeshScene, parseParticles, parsePauseInfo, parsePostFxSettings, parseReplay, parseScene, parseTouchLayout, parseWorldScene, physicsBlockAddress, physicsSdkLua, physicsSlots, physicsStateHash, placeWithin, playLanguage, prehazeLayers, prependLuaCode, pulse, pyramidLevelCount, pyramidLevelSize, randomSeed, rasterStyleFor, readCartCode, readPad, readPause, readSidecarActions, readSidecarUi, reflectionFade, reflectionSampleY, remapErrorLines, renderSceneBackdrop, resolveButton, resolveLight, resolveMapping, resolvePbr, resolveQuality, resolveSceneLayers, resolveSupersample, resolveUnlockedAchievements, responseCurve, rewriteLuaCode, rumbleEffect, runNetLab, runReplayEvents, runsOnDirectCore, runtimeSdkLua, sampleClipFrame, sampleNormalBilinear, sampleScalarBilinear, sampleTrack, saveBlockAddress, saveBlockBytes, saveCapacity, saveSdkLua, sceneHasAnimation, sceneHasPhysics, sceneNeedsRuntime, sceneObjectsSdkLua, seedCartridge, sendDebugCommand, serializeReplay, shade, shaftGrid, shapeStick, simulateEmitter, smoothFrontEdges, softKneePrefilter, splitWorldMatrix, standardizePad, stepLookAcceleration, streamGroups, stringsSdkLua, sway, takeNetOutbox, takePhysicsCommands, takeRingCommands, takeSave, tiltShiftBlur, toConsolePixel, toggleMask, tokenizeLua, uiSdkLua, uniformsFromSettings, unpadRows, validSave, verifyReplayScore, viewDirection, webgpuCanHonour, worldCenter, writeBreakpoints, writeInputBlock, writeInputSettings, writeInstanceTransform, writeInstanceUniform, writeNetInbox, writePhysicsState, writePointer, writeWatches };
+export { AIM_ASSISTS, AgentCrowd, type AimAssist, type AnimClip, type AnimMode, type AnimPlacement, type AnimSpec, type AnimState, type AnimTarget, type AnimTrack, AnimatedForegroundSurface, AnimationSession, type AtmosphereParams, BLOOM_KNEE, type BakeLight, BloomPyramid, BroadcastChannelTransport, type BuiltLightingRenderer, CAMERA_BASE, CAMERA_SCALE, CARTBOX_SDK_LUA, CELL_WORLD, CMD_RING_BYTES, CMD_RING_MAX, COLOR_CHECKER, COMPOSE_UNIFORM_FLOATS, CappedSceneRenderer, type CaptureOptions, type CapturedFrame, type CartSpriteSource, CartridgeLoadError, type CastHit, type CastShape, type ClipSample, type ClipTableEntry, type CollisionField, ConsoleButton, type ConsoleInstance, type ConsoleModel, type ControlScheme, type ControlSettings, type ControlTarget, DEFAULT_AMBIENT, DEFAULT_ATMOSPHERE, DEFAULT_CONTROL_SETTINGS, DEFAULT_KEY_BINDINGS, DEFAULT_LIGHT, DEFAULT_MODEL_ID, DEFAULT_MOUSE_LOOK, DEFAULT_PAD_BINDINGS, DEFAULT_STICK_DEAD_ZONES, DEFAULT_TEXEL_DENSITY, DEFAULT_TRIGGER_THRESHOLD, DIRECT_CORE_URL, DebugCommand, type DebugStep, type DeviceHints, type DeviceProvider, type DirectConsole, DirectTransport, type DirectTransportOptions, type DriftStats, EVENT_CAPACITY, type Ease, EngineLoadError, type ErrorFrame, FLARE_GHOSTS, FLARE_GHOST_GAIN, FLARE_SPIKE_POWER, FaceDriver, type FlagsField, type FlareGhost, type FlareParams, type FrameState, GREY_CARD, GYRO_AIMS, GamepadInput, type GeneratedTrack, type GlContextProvider, GpuCanvasSurface, type GpuLightBakeOptions, type GpuLightmapBake, GpuPresenter, type GpuSceneDraw, type GradingLut, type GyroAim, HEIGHT_WORLD, IMPORTED_LOOK, INPUT_BLOCK_BYTES, INPUT_MAGIC, INPUT_SETTINGS, INSTANCE_FLOATS, type InnerSurfaceFactory, type InputChange, type InspectedObject, type InstanceTransform, type Keyframe, LIGHTMAP_MAX_BOUNCES, LIGHTMAP_MAX_LIGHTS, LIGHTMAP_MAX_LOCAL_LIGHTS, LIGHTS_BASE, LIGHTS_CAPACITY, LIGHT_FLOATS, LIGHT_STRIDE, LOOK_DEV_RIGS, LOOP_SLOTS, LUT_LOOKS, LUT_SIZE, type LabCart, type LabProbe, type LayerChannel, type Light, type LightingBackend, type LightingFrameContext, LightingLayer, type LightingOptions, type LightingRenderer, type LightingScene, type LinearPanorama, type LinkConditions, LitCanvasSurface, type LookDevCheck, type LookDevMaps, type LookDevOptions, type LookDevRig, type LookDevStage, LookDevView, type LookDevViewOptions, type LookDevice, type LookProfile, MAILBOX_TYPE_ACHIEVEMENT, MAILBOX_TYPE_PROGRESS, MAILBOX_TYPE_SCORE, MAILBOX_WORDS, MAX_CAPTURE_SIDE, MAX_EMITTERS, MAX_LUT_SIZE, MAX_PARTICLES_PER_EMITTER, MAX_PYRAMID_LEVELS, MAX_VOICES, MESH_CAM_ANGLE_SCALE, MESH_CAM_BASE, MESH_CAM_DIST_SCALE, MESH_CAM_STRIDE, MESH_POSE_BASE, MESH_POSE_CAPACITY, MESH_POSE_HIDDEN, MESH_POSE_STRIDE, MIN_LUT_SIZE, MIN_PYRAMID_DIMENSION, MODELS, MOUSE_FULL_LEAN_PX, type MailboxCamera, type MailboxEvent, type MailboxEventKind, type MailboxMeshCamera, type MailboxMeshPose, type MailboxRead, type MaterialBuffer, MemoryNetHub, type MeshInstance, MeshOverlaySurface, type MeshScene, type SceneCamera$1 as MeshSceneCamera, type ModelId, NET_MODE_CLIENT, NET_MODE_HOST, NET_MODE_OFFLINE, NET_SLOTS, NET_WORDS, NORMAL_DIRECTION_COUNT, NORMAL_VECTORS, type NetEvent, type NetInbox, type NetLabOptions, type NetLabReport, type NetMessage, type NetOutbox, type NetPeer, type NetRoomStatus, NetSession, type NetSignal, type NetState, type NetTransport, type ObjectLook, PAD_BUTTONS, PARTICLE_KINDS, PHYSICS_DT, PHYS_BLOCK_BYTES, PHYS_MAGIC, POINTER_AT, POINTER_MAGIC, POST_FX_EFFECTS, PROFILE_SECTIONS, PROFILE_WINDOW, type PackableLight, type PadButton, type PadSnapshot, type Particle, type ParticleEmitter, type ParticleKind, ParticleOverlaySurface, type ParticleSpec, PathTracer, type PauseInfo, type PbrMaterial, type PhysicsBackend, type PhysicsBodyDesc, type PhysicsJointDesc, type Quat as PhysicsQuat, PhysicsSession, type PhysicsShape, type Vec3$3 as PhysicsVec3, type PlacementChannel, type PlayerHandle, type PlayerOptions, PointerInput, type PointerState, type PostFxColorDef, type PostFxEffectDef, type PostFxEffectId, type PostFxParamDef, PostFxPass, type PostFxSettings, type PostFxSource, PostFxSurface, type PostFxUniforms, type PresentBase, type PresentFrame, type PresentSky, type PresentStats, type ProfileSection, type ProfileSnapshot, Profiler, QUALITY_LEVELS, QUALITY_PRESETS, type QualityChoice, QualityGovernor, type QualityLevel, type QualitySettings, RAM_LAYOUTS, REFERENCE_BOUNCES, REPLAY_VERSION, RESPONSE_CURVES, type RamLayout, type ReferenceCapture, type ReferenceDraw, type ReferenceScene, type ReferenceSettings, type RegionImage, type RegisteredAchievement, type RenderCanvas, type RenderCaps, type RenderStats, type Replay, ReplayError, ReplayRecorder, ReplaySource, type ResolvedMapping, type ResolvedPbr, type ResolvedPlacement, type ResponseCurve, type Rgb, type RtcDataChannelLike, type RtcPeerConnectionFactory, type RtcPeerConnectionLike, type RumbleEffect, RuntimeChannel, SAVE_MAGIC, SKY_UNIFORM_FLOATS, SOFTWARE_RASTER_CAPS, START_KEYS, STICK_LAYOUTS, type ScaleMode, SceneBackdropSurface, type SceneBounds, type SceneCamera, type SceneDraw, type SceneLayer, type SceneMemory, type SceneRenderer, type SceneSpec, type SceneVista, type ScreenSun, type SectionStats, type SequenceOptions, SimulatedNetHub, SoftwareSceneRenderer, type SoundContext, SoundSystem, type Speaker, type SpriteRegion, type SpriteRegionSource, type StickDeadZones, type StickLayout, type SunShadow, SwitchableTransport, TANGENT_VERTEX_FLOATS, TILT_SHIFT_FEATHER, TINT_PALETTE, TOUCH_CONTROL_IDS, TOUCH_LOOK_MODES, type TextureLookup, type TouchControlId, type TouchLayout, type TouchLookMode, type TouchPlacement, type TraceLine, type TrackMode, UNIFORM_BYTES_USED, UNIFORM_FLOATS, UNIFORM_STRIDE, VERTEX_FLOATS, VIEW_MODES, type Vec3$2 as Vec3, type VerificationResult, type ViewMode, WEBGL_INSTANCES_PER_DRAW, WEBGL_MAX_LIGHTS, WebglSceneRenderer, WebgpuLightingLayer, WebgpuSceneRenderer, type WorldBillboard, type WorldBillboardPose, type WorldCamera, type WorldCameraSpec, type WorldLight, WorldOverlaySurface, type WorldProp, type WorldScene, type WorldTileCell, acesFilmic, acesFilmicChannel, actionsSdkLua, aimAssistLevel, alignBytesPerRow, animClipsSdkLua, animatedObjects, anyPostFxEnabled, appendLuaCode, applyActionToggles, applyLookSettings, applyLut, applyQualityToPostFx, applyRenderCaps, armDebugBlock, armSaveBlock, askMotionPermission, bakeLightmapGpu, bakeLights, bakeProbeVolumeGpu, bakeSurfaces, breakableLine, browserDeviceHints, browserRtc, browserSpeaker, buildBillboardInstance, buildClipTable, buildOrbitCamera, buildShadowInstance, buildTerrainInstances, buildWorldCamera, cameraAt, capTextures, capTriangles, capsConstrainScene, captureReference, cellAt, checkLookDev, clipFrameIndex, codeChunks, codeLineOffset, collisionSdkLua, commandRingAddress, commandRingBytes, commandRingMax, commandsPerTick, compileAnimator, componentsSdkLua, composeParallax, composeWorldMatrix, compositeOverBackdrop, createCartSpriteSource, createConsole, createDirectConsole, createFlatMaterial, createLightingLayer, createSceneRenderer, createTextureBudgetCache, deadZoned, debugBlockAddress, debugPostlude, debugSdkLua, decodeCamera, decodeLights, decodeLut, decodeMailbox, decodeMeshCamera, decodeMeshPoses, decodeNetMessage, decodeWorldLights, defaultPostFxSettings, detectQuality, deterministicBackend, directCoreBeside, directCoreModel, dragLean, drift, effectiveBreakpoints, emitterPreset, encodeLut, encodeNetMessage, environmentPanorama, environmentSh, errorStack, estimateSceneBytes, estimateSceneMemory, evaluate, extractScore, extractUnlocks, fillSky, fitShape, fitTextureToBudget, flagsSdkLua, flicker, frameDurationMs, framePixels, framebufferBytes, getModel, getWebgpuDevice, gyroLean, hasCommandRing, hashCart, hashEventId, heat, hexToRgb01, identityLut, injectSdk, inputBlockAddress, instrumentLua, interleaveVertices, interleaveVerticesWithTangents, interpolateNormal, isDiagnosticView, isMobileAgent, jointFrames, layoutSticks, lensFlareAt, loadEngineModule, lookAccelerationBoost, lookDevDraw, lookDevStage, lookGains, lookLut, lookProfileFor, lutStrip, makeShadowTexture, mount, mouseLean, nearestDirection, netSendInterval, normalBasis3x3, normalVector, orbitPitchAboveTerrain, packComposeUniforms, packLights, packMeasureUniforms, packReferenceScene, packShaftUniforms, packSkyUniforms, paramKey, parseAnim, parseCollisionField, parseControlSettings, parseCubeLut, parseFlagsField, parseMeshScene, parseParticles, parsePauseInfo, parsePostFxSettings, parseReplay, parseScene, parseTouchLayout, parseWorldScene, physicsBlockAddress, physicsSdkLua, physicsSlots, physicsStateHash, placeWithin, playLanguage, prehazeLayers, prependLuaCode, pulse, pyramidLevelCount, pyramidLevelSize, randomSeed, rasterStyleFor, readCartCode, readPad, readPause, readSidecarActions, readSidecarUi, readViewMode, reflectionFade, reflectionSampleY, remapErrorLines, renderSceneBackdrop, resolveButton, resolveLight, resolveMapping, resolvePbr, resolveQuality, resolveSceneLayers, resolveSupersample, resolveUnlockedAchievements, responseCurve, rewriteLuaCode, rumbleEffect, runNetLab, runReplayEvents, runsOnDirectCore, runtimeSdkLua, sampleClipFrame, sampleNormalBilinear, sampleScalarBilinear, sampleTrack, saveBlockAddress, saveBlockBytes, saveCapacity, saveSdkLua, sceneHasAnimation, sceneHasPhysics, sceneNeedsRuntime, sceneObjectsSdkLua, sceneSkyEnvironment, seedCartridge, sendDebugCommand, serializeReplay, shIrradiance, shade, shaftGrid, shapeStick, simulateEmitter, smoothFrontEdges, softKneePrefilter, splitWorldMatrix, standardizePad, stepLookAcceleration, streamGroups, stringsSdkLua, sway, takeNetOutbox, takePhysicsCommands, takeRingCommands, takeSave, tiltShiftBlur, toConsolePixel, toggleMask, tokenizeLua, turnEnvironment, uiSdkLua, uniformsFromSettings, unpadRows, validSave, verifyReplayScore, viewDirection, viewModeCode, webgpuCanHonour, worldCenter, writeBreakpoints, writeInputBlock, writeInputSettings, writeInstanceTransform, writeInstanceUniform, writeNetInbox, writePhysicsState, writePointer, writeWatches };

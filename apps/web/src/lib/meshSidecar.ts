@@ -148,6 +148,12 @@ export interface MeshSidecarEntry {
   readonly alwaysLoaded?: true;
   /** The lighting channels it is lit on (F2e; see SceneLight.channels in @cartbox/editor); absent, the first. */
   readonly lightChannels?: number;
+  /**
+   * Its light map's texel density against the bake's own (AAA_FIDELITY_ROADMAP.md
+   * F3d-2), {@link LIGHTMAP_SCALES} from a quarter to four times; absent, 1. A
+   * hero piece takes more texels, a far wall fewer.
+   */
+  readonly lightmapScale?: number;
   /** Components attached to this object, with its field values (see components.ts in @cartbox/editor). */
   readonly components?: readonly AttachedComponent[];
   /** A parametric shape (P5; see shapeGenerators.ts in @cartbox/editor): its mesh is built from these parameters, and rebuilt when they change. */
@@ -233,6 +239,8 @@ export interface MeshSidecar {
   readonly ragdollColliders?: readonly RagdollBox[];
   /** Cosmetic debris the cart throws with cartbox.debris (see debris.ts in @cartbox/editor). */
   readonly debris?: readonly DebrisDef[];
+  /** Credits for the assets imported from CC0 libraries (F9f), one line each, kept with the cart. */
+  readonly credits?: readonly string[];
   /** Meshes scattered over the terrains (see foliage.ts in @cartbox/editor), each layer's mesh stored whole. */
   readonly foliage?: readonly SerializedFoliage[];
   /** The scene's sounds, mixer buses and emitters (see sound.ts in @cartbox/editor). */
@@ -277,7 +285,7 @@ export function newMeshId(): string {
  */
 export function encodeMeshSidecar(sidecar: MeshSidecar): string | null {
   const prefabs = sidecar.prefabs ?? [];
-  if (sidecar.meshes.length === 0 && !sidecar.lighting && prefabs.length === 0 && (sidecar.timelines?.length ?? 0) === 0 && (sidecar.levels?.length ?? 0) === 0 && (sidecar.terrains?.length ?? 0) === 0 && (sidecar.audio?.sounds.length ?? 0) === 0 && (sidecar.ui?.length ?? 0) === 0 && (sidecar.components?.length ?? 0) === 0 && (sidecar.actions?.length ?? 0) === 0 && !sidecar.strings && (sidecar.materials?.length ?? 0) === 0 && (sidecar.splines?.length ?? 0) === 0 && !sidecar.arena && !sidecar.assetTags) return null;
+  if (sidecar.meshes.length === 0 && !sidecar.lighting && prefabs.length === 0 && (sidecar.timelines?.length ?? 0) === 0 && (sidecar.levels?.length ?? 0) === 0 && (sidecar.terrains?.length ?? 0) === 0 && (sidecar.audio?.sounds.length ?? 0) === 0 && (sidecar.ui?.length ?? 0) === 0 && (sidecar.components?.length ?? 0) === 0 && (sidecar.actions?.length ?? 0) === 0 && !sidecar.strings && (sidecar.materials?.length ?? 0) === 0 && (sidecar.splines?.length ?? 0) === 0 && !sidecar.arena && !sidecar.assetTags && (sidecar.credits?.length ?? 0) === 0) return null;
   // Repeated meshes (and animation frames) are stored once in a shared library,
   // shared between placed entries and prefab nodes (a prefab's copies repeat its meshes).
   const nodes = prefabs.flatMap((prefab) => prefab.nodes);
@@ -309,6 +317,7 @@ export function encodeMeshSidecar(sidecar: MeshSidecar): string | null {
     ...(sidecar.decalMarks && sidecar.decalMarks.length > 0 ? { decalMarks: sidecar.decalMarks } : {}),
     ...(sidecar.ragdollColliders && sidecar.ragdollColliders.length > 0 ? { ragdollColliders: sidecar.ragdollColliders } : {}),
     ...(sidecar.debris && sidecar.debris.length > 0 ? { debris: sidecar.debris } : {}),
+    ...(sidecar.credits && sidecar.credits.length > 0 ? { credits: sidecar.credits } : {}),
     ...(packedFoliage.length > 0 ? { foliage: packedFoliage } : {}),
     ...(sidecar.audio && sidecar.audio.sounds.length > 0 ? { audio: sidecar.audio } : {}),
     ...(sidecar.ui && sidecar.ui.length > 0 ? { ui: sidecar.ui } : {}),
@@ -420,6 +429,7 @@ export function decodeMeshSidecar(raw: string | null | undefined): MeshSidecar {
       ...(typeof record.level === "string" && record.level ? { level: record.level } : {}),
       ...(record.alwaysLoaded === true ? { alwaysLoaded: true as const } : {}),
       ...(record.lightChannels !== undefined && lightChannelMask(record.lightChannels) !== 1 ? { lightChannels: lightChannelMask(record.lightChannels) } : {}),
+      ...(lightmapScaleOf(record.lightmapScale) !== 1 ? { lightmapScale: lightmapScaleOf(record.lightmapScale) } : {}),
       ...(attached(record.components).length > 0 ? { components: attached(record.components) } : {}),
       ...(readParametric((record as { shape?: unknown }).shape) ? { shape: readParametric((record as { shape?: unknown }).shape)! } : {}),
     });
@@ -445,6 +455,8 @@ export function decodeMeshSidecar(raw: string | null | undefined): MeshSidecar {
   const decalMarks = parseDecalMarks((parsed as { decalMarks?: unknown }).decalMarks, decals);
   const ragdollColliders = parseRagdollColliders((parsed as { ragdollColliders?: unknown }).ragdollColliders);
   const debris = parseDebrisDefs((parsed as { debris?: unknown }).debris);
+  const creditsRaw = (parsed as { credits?: unknown }).credits;
+  const credits = Array.isArray(creditsRaw) ? creditsRaw.filter((c): c is string => typeof c === "string").slice(0, MAX_CREDITS).map((c) => c.slice(0, 400)) : [];
   const foliage = readFoliageLayers((parsed as { foliage?: unknown }).foliage, terrains, library, isValid);
   const audio = parseSceneAudio((parsed as { audio?: unknown }).audio);
   const ui = parseUiDocuments((parsed as { ui?: unknown }).ui);
@@ -473,6 +485,7 @@ export function decodeMeshSidecar(raw: string | null | undefined): MeshSidecar {
     ...(decalMarks.length > 0 ? { decalMarks } : {}),
     ...(ragdollColliders.length > 0 ? { ragdollColliders } : {}),
     ...(debris.length > 0 ? { debris } : {}),
+    ...(credits.length > 0 ? { credits } : {}),
     ...(foliage.length > 0 ? { foliage } : {}),
     ...(audio ? { audio } : {}),
     ...(ui.length > 0 ? { ui } : {}),
@@ -842,6 +855,29 @@ export function setMeshAlwaysLoaded(sidecar: MeshSidecar, id: string, always: bo
   };
 }
 
+/** The light-map densities an object can take against the bake's (F3d-2): powers of two. */
+export const LIGHTMAP_SCALES = [0.25, 0.5, 1, 2, 4] as const;
+
+/** A stored light-map scale, snapped to the nearest of {@link LIGHTMAP_SCALES} (1 for anything else). */
+export function lightmapScaleOf(value: unknown): number {
+  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) return 1;
+  const log = Math.min(2, Math.max(-2, Math.round(Math.log2(value))));
+  return 2 ** log;
+}
+
+/** Bake an object's light map at `scale` times the bake's texel density (F3d-2); 1 is the default, and stored as nothing. */
+export function setMeshLightmapScale(sidecar: MeshSidecar, id: string, scale: number): MeshSidecar {
+  const snapped = lightmapScaleOf(scale);
+  return {
+    ...sidecar,
+    meshes: sidecar.meshes.map((m) => {
+      if (m.id !== id) return m;
+      const { lightmapScale: _drop, ...rest } = m;
+      return snapped === 1 ? rest : { ...rest, lightmapScale: snapped };
+    }),
+  };
+}
+
 /** Light an object on these lighting channels (F2e); the first alone is the default, and stored as nothing. */
 export function setMeshLightChannels(sidecar: MeshSidecar, id: string, channels: number): MeshSidecar {
   const mask = lightChannelMask(channels);
@@ -1066,6 +1102,16 @@ export function hierarchyRows(sidecar: MeshSidecar): HierarchyRow[] {
     if (p < 0) visit(i, 0);
   });
   return rows;
+}
+
+/** The most credits a cart keeps. */
+export const MAX_CREDITS = 256;
+
+/** Keep an imported asset's credit with the cart (F9f), once. */
+export function addCredit(sidecar: MeshSidecar, line: string): MeshSidecar {
+  const credits = sidecar.credits ?? [];
+  if (credits.includes(line) || credits.length >= MAX_CREDITS) return sidecar;
+  return { ...sidecar, credits: [...credits, line] };
 }
 
 /** Replace the scene's debris definitions (an empty list removes them). */

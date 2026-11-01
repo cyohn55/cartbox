@@ -8,7 +8,7 @@
  * what a frame actually draws. Pure; meshes are decoded once per string.
  */
 
-import { readTerrain, terrainChunks, textureGpuBytes, imageSize, type EncodedImage, type MeshAsset, type SceneLoad } from "@cartbox/editor";
+import { meshableTerrain, readTerrain, terrainChunks, textureGpuBytes, imageSize, type EncodedImage, type MeshAsset, type SceneLoad } from "@cartbox/editor";
 
 import { encodeMeshSidecar, readMeshEntry, type MeshSidecar, type MeshSidecarEntry } from "./meshSidecar";
 
@@ -93,7 +93,7 @@ export function sceneLoadOf(sidecar: MeshSidecar): Required<Pick<SceneLoad, "tri
     if (!terrain) continue;
     const cells = (terrain.samples - 1) * (terrain.samples - 1);
     triangles += cells * 2;
-    drawCalls += terrainChunks(terrain).length;
+    drawCalls += terrainChunks(meshableTerrain(terrain)).length;
     meshBytes += terrain.samples * terrain.samples * 32 + cells * 6 * 4;
   }
   return { triangles, drawCalls, meshBytes, textureBytes, downloadBytes: encodeMeshSidecar(sidecar)?.length ?? 0 };

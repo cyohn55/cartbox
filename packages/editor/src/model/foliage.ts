@@ -264,6 +264,8 @@ export interface FoliageBlock {
   readonly center: readonly [number, number, number];
   readonly radius: number;
   readonly copies: number;
+  /** Each copy's matrix (F6b: the AAA tier draws the layer's mesh once per copy, culled each on the GPU). */
+  readonly matrices: readonly Float32Array[];
 }
 
 /**
@@ -324,6 +326,7 @@ export function foliageBlocks(t: Terrain, layer: FoliageLayer, mesh: MeshAsset, 
       center: [(x0 + x1) / 2, (y0 + y1) / 2, (z0 + z1) / 2],
       radius: Math.hypot(x1 - x0, y1 - y0, z1 - z0) / 2,
       copies: matrices.length,
+      matrices,
     });
   }
   return out;
@@ -487,5 +490,31 @@ export function readFoliage(value: unknown, terrains: readonly Pick<Terrain, "id
       ...(finite(r.wind) && r.wind > 0 ? { wind: Math.min(4, r.wind) } : {}),
       ...(readImpostor(r.impostor) ? { impostor: readImpostor(r.impostor)! } : {}),
     },
+  };
+}
+
+/** How much of the light on a leaf or a blade of grass passes through it to the other side (F6b; F1d's diffuse transmission). */
+export const FOLIAGE_TRANSMISSION = 0.35;
+
+/**
+ * A layer's mesh as the AAA tier draws it, once per copy (F6b): its wind left
+ * to the shader, which bends each vertex by its height above its copy's root
+ * in the world (the sway each vertex stores is the layer's flexibility,
+ * negated, telling it so), and its cut-out leaves and blades letting light
+ * through (F1d's thin-surface transmission) unless their material already
+ * says how much.
+ */
+export function foliageInstanceMesh(layer: Pick<FoliageLayer, "wind">, mesh: MeshAsset): MeshAsset {
+  const flex = layer.wind && layer.wind > 0 ? layer.wind : 0;
+  return {
+    ...mesh,
+    primitives: mesh.primitives.map((p) => {
+      const leaf = p.material.alphaMode === "mask" && p.material.diffuseTransmission === undefined;
+      return {
+        ...p,
+        ...(flex > 0 ? { sway: new Float32Array(p.positions.length / 3).fill(-flex) } : {}),
+        ...(leaf ? { material: { ...p.material, diffuseTransmission: FOLIAGE_TRANSMISSION } } : {}),
+      };
+    }),
   };
 }

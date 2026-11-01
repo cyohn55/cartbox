@@ -24,6 +24,10 @@
 
 import type { MeshAsset, MeshPrimitive } from "./MeshAsset";
 import type { EaseCurve, TimelineEase } from "./timeline";
+import { applyMorphs, correctiveWeights, dualQuaternions, skinVerticesDq } from "./morphTargets";
+import { bodyCapsules, clothState, clothTopology, stepCloth, type Capsule, type ClothState, type ClothTopology } from "./cloth";
+import { ragdollRadii } from "./ragdoll";
+import { computeSmoothNormals } from "./MeshAsset";
 
 /** One joint of a skeleton. */
 export interface SkinJoint {
@@ -74,6 +78,30 @@ export interface AnimationClip {
    * own keys, as an imported clip does.
    */
   readonly keys?: readonly ClipKey[];
+  /** The mesh's morph weights over the clip (F7b; glTF's `weights` channel): a face's animation. */
+  readonly morphs?: MorphChannel;
+}
+
+/** Morph weights over time: `targets` weights a key. */
+export interface MorphChannel {
+  readonly interpolation: "linear" | "step";
+  readonly targets: number;
+  readonly times: Float32Array;
+  readonly values: Float32Array;
+}
+
+/** A clip's morph weights at `time` seconds (looped or held as {@link clipTime} does), or an empty array when it has none. */
+export function sampleMorphs(clip: AnimationClip, time: number, loop = true): Float32Array {
+  const m = clip.morphs;
+  if (!m || m.times.length === 0 || m.targets <= 0) return new Float32Array(0);
+  const out = new Float32Array(m.targets);
+  const t = clipTime(clip, time, loop);
+  const k = keyBefore(m.times, t);
+  const next = Math.min(k + 1, m.times.length - 1);
+  const span = m.times[next]! - m.times[k]!;
+  const f = m.interpolation === "step" || span <= 0 ? 0 : Math.max(0, Math.min(1, (t - m.times[k]!) / span));
+  for (let i = 0; i < m.targets; i += 1) out[i] = m.values[k * m.targets + i]! * (1 - f) + m.values[next * m.targets + i]! * f;
+  return out;
 }
 
 /** A key of the dope sheet: one joint's pose at a moment, easing into its next key. */
@@ -327,11 +355,24 @@ export function skinVertices(
  */
 export interface LiveSkinnedMesh {
   readonly mesh: MeshAsset;
-  /** Skin every primitive for a pose (see {@link skinMatrices}). */
-  update(matrices: Float32Array): void;
+  /**
+   * Skin every primitive for a pose (see {@link skinMatrices}), its morph targets blended first (F7a): the
+   * mesh's weights, or `morphWeights`, with a corrective target's weight from `pose`.
+   */
+  update(matrices: Float32Array, options?: { readonly pose?: Float32Array; readonly morphWeights?: ArrayLike<number>; readonly dt?: number; readonly wind?: readonly [number, number, number] }): void;
 }
 
-export function createLiveSkinnedMesh(source: MeshAsset): LiveSkinnedMesh {
+/** Whether a mesh has morph targets (F7a), so its draws need a live copy as a skinned one does. */
+export function hasMorphTargets(mesh: MeshAsset): boolean {
+  return mesh.primitives.some((p) => (p.morphTargets?.length ?? 0) > 0);
+}
+
+/**
+ * A mesh's live copy. With `gpu` (F7a), the renderer skins it in a compute pass: an update only hands it the
+ * pose's matrices and morph weights; the CPU's positions stay in the bind pose.
+ */
+export function createLiveSkinnedMesh(source: MeshAsset, mode: { readonly gpu?: boolean } = {}): LiveSkinnedMesh {
+  const liveGpu = mode.gpu === true;
   const primitives: MeshPrimitive[] = source.primitives.map((p) => ({
     ...p,
     positions: p.positions.slice(),
@@ -339,13 +380,64 @@ export function createLiveSkinnedMesh(source: MeshAsset): LiveSkinnedMesh {
     dynamic: { revision: 0 },
   }));
   const mesh: MeshAsset = { ...source, primitives };
+  const morphed = source.primitives.map((p) => (p.morphTargets?.length ? { positions: new Float32Array(p.positions.length), normals: p.normals ? new Float32Array(p.normals.length) : null } : null));
+  const quats = { matrices: null as Float32Array | null, out: null as Float32Array | null };
+  // Cloth (F7d): each cloth primitive's topology and state, from its bind shape; the body's capsules sized
+  // by the ragdoll's radii, measured without the cloth.
+  const cloths = source.primitives.map((p): { topology: ClothTopology; state: ClothState } | null => (p.cloth ? { topology: clothTopology(p.positions, p.indices, p.cloth), state: clothState(p.positions) } : null));
+  const radii = cloths.some(Boolean) ? (ragdollRadii({ ...source, primitives: source.primitives.filter((p) => !p.cloth) }) ?? []) : [];
+  const capsules = { matrices: null as Float32Array | null, list: [] as Capsule[] };
+  const capsulesFor = (matrices: Float32Array): Capsule[] => {
+    if (capsules.matrices !== matrices) {
+      capsules.matrices = matrices;
+      capsules.list = source.skin && matrices.length > 0 ? bodyCapsules(source.skin, matrices, radii) : [];
+    }
+    return capsules.list;
+  };
   return {
     mesh,
-    update(matrices) {
+    update(matrices, options = {}) {
       source.primitives.forEach((src, i) => {
         const live = primitives[i]!;
-        if (!src.joints || !src.weights) return;
-        skinVertices(src.joints, src.weights, matrices, src.positions, src.normals, live.positions, live.normals);
+        const targets = src.morphTargets ?? [];
+        if ((!src.joints || !src.weights) && targets.length === 0) return;
+        const base = options.morphWeights ?? source.morphWeights ?? [];
+        // Corrective targets from the pose, or (without one) from the joints' matrices.
+        const weights = targets.length > 0 ? (source.skin && src.joints ? correctiveWeights(source.skin, options.pose ?? null, targets, base, matrices) : Float32Array.from({ length: targets.length }, (_, t) => base[t] ?? 0)) : null;
+        if (liveGpu) {
+          const cloth = src.cloth ? { capsules: capsulesFor(matrices), dt: options.dt ?? 1 / 60, wind: options.wind ?? ([0, 0, 0] as const) } : undefined;
+          live.dynamic!.gpu = { matrices: src.joints ? matrices : new Float32Array(0), morphWeights: weights, dualQuaternion: source.dualQuaternion === true, ...(cloth ? { cloth } : {}) };
+          live.dynamic!.revision += 1;
+          return;
+        }
+        // On the CPU: the morphs blended, then skinned (by dual quaternions if the mesh asks).
+        let positions = src.positions;
+        let normals = src.normals;
+        const m = morphed[i];
+        if (m && weights) {
+          applyMorphs(src.positions, src.normals, targets, weights, m.positions, m.normals);
+          positions = m.positions;
+          normals = m.normals;
+        }
+        if (src.joints && src.weights) {
+          if (source.dualQuaternion) {
+            if (quats.matrices !== matrices) {
+              quats.matrices = matrices;
+              quats.out = dualQuaternions(matrices);
+            }
+            skinVerticesDq(src.joints, src.weights, quats.out!, positions, normals, live.positions, live.normals);
+          } else skinVertices(src.joints, src.weights, matrices, positions, normals, live.positions, live.normals);
+        } else {
+          live.positions.set(positions);
+          if (normals && live.normals) live.normals.set(normals);
+        }
+        // Cloth (F7d): the skinned shape is its anchor; the step writes the simulated one over it.
+        const cloth = cloths[i];
+        if (cloth && src.cloth) {
+          stepCloth(cloth.topology, src.cloth, cloth.state, { skinned: live.positions, normals: live.normals, capsules: capsulesFor(matrices), wind: options.wind ?? [0, 0, 0], dt: options.dt ?? 1 / 60 });
+          live.positions.set(cloth.state.position);
+          if (live.normals) live.normals.set(computeSmoothNormals(live.positions, src.indices));
+        }
         live.dynamic!.revision += 1;
       });
     },

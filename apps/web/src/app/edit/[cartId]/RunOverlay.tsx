@@ -9,7 +9,7 @@
  */
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { frameDurationMs, getModel, mount, readCartCode, runsOnDirectCore, type DebugStep, type InspectedObject, type PauseInfo, type ProfileSnapshot, type AnimSpec, type CollisionField, type FlagsField, type MeshScene, type ModelId, type ParticleSpec, type PlayerHandle, type PostFxSettings, type QualityChoice, type SceneSpec, type WorldScene } from "@cartbox/player";
+import { frameDurationMs, getModel, mount, readCartCode, runsOnDirectCore, type DebugStep, type InspectedObject, type PauseInfo, type ProfileSnapshot, type AnimSpec, type CollisionField, type FlagsField, type MeshScene, type ModelId, type ParticleSpec, type PlayerHandle, type PostFxSettings, type QualityChoice, type SceneSpec, type ViewMode, VIEW_MODES, type WorldScene } from "@cartbox/player";
 import { COLOR_FILTERS, COLOR_FILTER_LABELS, languageName, type ColorFilter, type InputAction, type StringTable, type UiDocument } from "@cartbox/editor";
 import { preferredLanguages, readPlayerPrefs } from "@/lib/accessibilityPrefs";
 import { DIRECT_CORE_URL } from "@/lib/consoleModel";
@@ -21,8 +21,9 @@ import { appendConsole, traceColor, type ConsoleEntry } from "./consoleLog";
 import { ProfilerPanel } from "./ProfilerPanel";
 import { DebuggerPanel } from "./DebuggerPanel";
 import { toggleBreakpoint } from "./debuggerView";
-import { loadKtx2Decoder } from "@/lib/ktx2Decoder";
+import { loadKtx2DecoderOffThread } from "@/lib/ktx2Decoder";
 import { rapierPhysics } from "@/lib/physicsRapier";
+import { WebmRecorder, canEncodeVideo } from "@/lib/videoEncode";
 
 interface RunOverlayProps {
   bytes: Uint8Array;
@@ -107,6 +108,21 @@ export function RunOverlay({
   const stageRef = useRef<HTMLDivElement>(null);
   const handleRef = useRef<PlayerHandle | null>(null);
   const [quality, setQuality] = useState<QualityChoice>("auto");
+  // What the 3D viewport shows (F10a): the lit frame, or a diagnostic of it on the AAA tier.
+  const [viewMode, setViewMode] = useState<ViewMode>("lit");
+  // The path-traced reference (F10b): the samples it holds, and a capture's progress (null when none runs).
+  const [referenceSamples, setReferenceSamples] = useState(0);
+  const [capturing, setCapturing] = useState<number | null>(null);
+  // An offline timeline render (F10d): its progress, and how to stop it.
+  const [sequencing, setSequencing] = useState<number | null>(null);
+  const sequenceStop = useRef<AbortController | null>(null);
+  const filmTimelines = useMemo(() => (mesh?.timelines ?? []).filter((t) => t.tracks.some((k) => k.kind === "camera" && k.keys.length > 0)).map((t) => t.name), [mesh]);
+  const [filmTimeline, setFilmTimeline] = useState<string | null>(null);
+  useEffect(() => {
+    if (viewMode !== "pathTraced") return;
+    const timer = setInterval(() => setReferenceSamples(handleRef.current?.referenceSamples ?? 0), 500);
+    return () => clearInterval(timer);
+  }, [viewMode]);
   // Localisation and accessibility (EP19b): the playtest's language (switching restarts it) and a colour preview.
   const [language, setLanguage] = useState<string | null>(null);
   const languageRef = useRef(language);
@@ -234,7 +250,7 @@ export function RunOverlay({
         : {}),
       physics: rapierPhysics(),
       // KTX2 textures: the transcoder is fetched only if the scene has one.
-      ktx2: loadKtx2Decoder,
+      ktx2: loadKtx2DecoderOffThread,
       // Playtest the cart's HD-2D world: 3D terrain with the cart's 2D character
       // sprites standing in it as depth-composited billboards.
       world,
@@ -405,7 +421,108 @@ export function RunOverlay({
                 <option value="low">Quality: low</option>
                 <option value="medium">Quality: medium</option>
                 <option value="high">Quality: high</option>
+                <option value="epic">Quality: epic</option>
               </select>
+            )}
+            {mesh && (
+              <select
+                aria-label="View mode"
+                title="What the viewport shows: the lit frame, or a diagnostic of it (on the AAA tier)"
+                value={viewMode}
+                disabled={status !== "ready"}
+                onChange={(e) => {
+                  const next = e.target.value as ViewMode;
+                  setViewMode(next);
+                  handleRef.current?.setViewMode(next);
+                }}
+                style={{ font: "inherit", padding: "4px 8px", borderRadius: 6 }}
+              >
+                {(["Lighting", "Buffers", "Complexity", "Geometry"] as const).map((group) => (
+                  <optgroup key={group} label={group}>
+                    {VIEW_MODES.filter((m) => m.group === group).map((m) => (
+                      <option key={m.id} value={m.id} title={m.hint}>
+                        View: {m.label}
+                      </option>
+                    ))}
+                  </optgroup>
+                ))}
+              </select>
+            )}
+            {mesh && viewMode === "pathTraced" && (
+              <>
+                <span title="Samples each pixel of the reference holds; it starts again when the view moves" style={{ alignSelf: "center", opacity: 0.8 }}>
+                  {referenceSamples} spp
+                </span>
+                <button
+                  type="button"
+                  className="cbx-btn"
+                  title="Render the path-traced reference at 4K (256 samples a pixel) and download it as a PNG"
+                  disabled={status !== "ready" || capturing !== null}
+                  onClick={() => {
+                    const job = handleRef.current?.captureReference({ width: 3840, samples: 256, progress: (done) => setCapturing(done) });
+                    if (!job) return;
+                    setCapturing(0);
+                    void job
+                      .then((shot) => downloadRgba(shot.rgba, shot.width, shot.height, "reference.png"))
+                      .finally(() => setCapturing(null));
+                  }}
+                >
+                  {capturing === null ? "Capture 4K" : `Capturing ${Math.round(capturing * 100)}%`}
+                </button>
+                {filmTimelines.length > 0 && canEncodeVideo() && (
+                  <>
+                    <select aria-label="Timeline to render" value={filmTimeline ?? filmTimelines[0]} onChange={(e) => setFilmTimeline(e.target.value)} style={{ font: "inherit", padding: "4px 8px", borderRadius: 6 }} disabled={sequencing !== null}>
+                      {filmTimelines.map((name) => (
+                        <option key={name} value={name}>
+                          {name}
+                        </option>
+                      ))}
+                    </select>
+                    <button
+                      type="button"
+                      className="cbx-btn"
+                      title="Render the timeline through its film camera, path-traced at 1080p, 24 frames a second, and download it as a WebM"
+                      disabled={status !== "ready" || capturing !== null}
+                      onClick={() => {
+                        if (sequencing !== null) {
+                          sequenceStop.current?.abort();
+                          return;
+                        }
+                        const handle = handleRef.current;
+                        if (!handle) return;
+                        const stop = new AbortController();
+                        sequenceStop.current = stop;
+                        const fps = 24;
+                        let recorder: Promise<WebmRecorder> | null = null;
+                        const job = handle.renderSequence({
+                          timeline: filmTimeline ?? filmTimelines[0]!,
+                          width: 1920,
+                          fps,
+                          samples: 64,
+                          signal: stop.signal,
+                          progress: (done) => setSequencing(done),
+                          onFrame: async (frame) => {
+                            recorder ??= WebmRecorder.create(frame.width, frame.height, fps);
+                            (await recorder).add(frame.rgba, frame.width, frame.height);
+                          },
+                        });
+                        if (!job) return;
+                        setSequencing(0);
+                        void job
+                          .then(async (frames) => {
+                            if (frames > 0 && recorder) downloadBlob(await (await recorder).finish(), `${filmTimeline ?? filmTimelines[0]}.webm`);
+                          })
+                          .finally(() => {
+                            sequenceStop.current = null;
+                            setSequencing(null);
+                          });
+                      }}
+                    >
+                      {sequencing === null ? "Render timeline" : `Stop (${Math.round(sequencing * 100)}%)`}
+                    </button>
+                  </>
+                )}
+              </>
             )}
             {mesh && (
               <button type="button" className="cbx-btn" aria-pressed={inspecting} onClick={() => setInspecting((v) => !v)} disabled={status !== "ready"}>
@@ -732,4 +849,32 @@ function ObjectsPanel({ objects, filter, onFilter }: { objects: InspectedObject[
       {shown.length === 0 && <span style={{ opacity: 0.7 }}>No objects match.</span>}
     </aside>
   );
+}
+
+/** Save RGBA bytes as a PNG download (the path-traced reference's capture, F10b). */
+function downloadBlob(blob: Blob, name: string): void {
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = name;
+  link.click();
+  URL.revokeObjectURL(url);
+}
+
+function downloadRgba(rgba: Uint8ClampedArray, width: number, height: number, name: string): void {
+  const canvas = document.createElement("canvas");
+  canvas.width = width;
+  canvas.height = height;
+  const context = canvas.getContext("2d");
+  if (!context) return;
+  context.putImageData(new ImageData(new Uint8ClampedArray(rgba), width, height), 0, 0);
+  canvas.toBlob((blob) => {
+    if (!blob) return;
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = name;
+    link.click();
+    URL.revokeObjectURL(url);
+  }, "image/png");
 }

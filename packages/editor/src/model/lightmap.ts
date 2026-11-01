@@ -24,6 +24,7 @@
  * sun's direct light is left to the live shadow map). Pure and DOM-free.
  */
 
+import { footprintMean, linearToAuthored, type OccluderSurface } from "./bakeSurface";
 import { PROBE_FACES, probePosition, quantizeLightProbes, type LightProbeGrid } from "./lightProbes";
 import { encodeRgbaPng } from "./png";
 import type { EncodedImage, MeshAsset, MeshPrimitive } from "./MeshAsset";
@@ -228,6 +229,15 @@ export interface Occluder {
   readonly model: Mat4;
   /** Diffuse colour per primitive (0..1) for bounce light; default its base colour. */
   readonly albedo?: readonly (readonly [number, number, number])[];
+  /**
+   * Per primitive, its decoded maps and resolved metalness (F3d-4; bakeSurface.ts):
+   * the albedo is then read per triangle from its base-colour map, in place of
+   * the factor × 0.55, and the GPU bake takes the metalness. Absent, the bake is
+   * as before (the CPU bake ignores the metalness).
+   */
+  readonly surfaces?: readonly (OccluderSurface | null | undefined)[];
+  /** The lighting channels it is on (F2e), which the GPU bake's lights must share; default the first. */
+  readonly lightChannels?: number;
 }
 
 /** A triangle BVH over occluders (shared with the texture baker, textureBake.ts). */
@@ -235,24 +245,60 @@ export interface Bvh {
   tri: Float32Array; // 9 floats per triangle
   nrm: Float32Array; // face normal per triangle
   col: Float32Array; // albedo per triangle
+  emi: Float32Array; // emissive colour per triangle, as authored (the GPU bake's lights, F3d)
+  front: Float32Array; // the side each triangle faces by its authored normals (mean of its corners'; else its winding's), F3d-2
+  mr: Float32Array; // metalness and perceptual roughness per triangle (0 and 1 unless the occluder's surfaces say), F3d-4
+  channels: Uint8Array; // the lighting channels per triangle, F3d-4
   nodes: Float32Array; // min xyz, max xyz per node
   meta: Int32Array; // per node: left child (or -1 leaf), right/first, count
   order: Int32Array;
 }
 
 export function buildBvh(occluders: readonly Occluder[]): Bvh {
-  const tris: number[] = [], cols: number[] = [];
+  const tris: number[] = [], cols: number[] = [], emis: number[] = [], fronts: number[] = [], mrs: number[] = [], channels: number[] = [];
   for (const o of occluders) {
+    const m = o.model;
     o.mesh.primitives.forEach((p, pi) => {
       const f = p.material.baseColorFactor;
       const textured = p.material.baseColorImage ? 0.55 : 1;
       const col = o.albedo?.[pi] ?? [f[0] * textured, f[1] * textured, f[2] * textured];
+      const emi = p.material.emissiveFactor ?? [0, 0, 0];
+      const surface = o.surfaces?.[pi];
+      const uvs = p.uvs;
+      // A decoded base-colour map gives each triangle its own albedo (F3d-4), the factor over the map's mean.
+      const base = !o.albedo?.[pi] && surface?.base && uvs ? surface.base : null;
+      const mrMap = surface?.metallicRoughness && uvs ? surface.metallicRoughness : null;
+      const uv = (v: number): [number, number] => [uvs![v * 2]!, uvs![v * 2 + 1]!];
       for (let t = 0; t < p.indices.length; t += 3) {
         for (let k = 0; k < 3; k += 1) {
           const v = p.indices[t + k]!;
           tris.push(...transform(o.model, p.positions[v * 3]!, p.positions[v * 3 + 1]!, p.positions[v * 3 + 2]!));
         }
-        cols.push(col[0], col[1], col[2]);
+        if (base) {
+          const mean = footprintMean(base, true, uv(p.indices[t]!), uv(p.indices[t + 1]!), uv(p.indices[t + 2]!));
+          cols.push(...[0, 1, 2].map((c) => linearToAuthored(srgbToLinear(f[c]!) * mean[c]!)));
+        } else cols.push(col[0], col[1], col[2]);
+        let metal = surface?.metallic ?? 0;
+        let rough = surface?.roughness ?? 1;
+        if (mrMap) {
+          const mean = footprintMean(mrMap, false, uv(p.indices[t]!), uv(p.indices[t + 1]!), uv(p.indices[t + 2]!));
+          rough *= mean[1];
+          metal *= mean[2];
+        }
+        mrs.push(metal, rough);
+        channels.push(o.lightChannels ?? 1);
+        emis.push(emi[0], emi[1], emi[2]);
+        if (p.normals) {
+          let x = 0, y = 0, z = 0;
+          for (let k = 0; k < 3; k += 1) {
+            const v = p.indices[t + k]!;
+            x += p.normals[v * 3]!;
+            y += p.normals[v * 3 + 1]!;
+            z += p.normals[v * 3 + 2]!;
+          }
+          // Through the model's rotation (uniform scale assumed for baking, as the texels' normals are).
+          fronts.push(...normalize([m[0]! * x + m[4]! * y + m[8]! * z, m[1]! * x + m[5]! * y + m[9]! * z, m[2]! * x + m[6]! * y + m[10]! * z]));
+        } else fronts.push(NaN, NaN, NaN);
       }
     });
   }
@@ -264,6 +310,7 @@ export function buildBvh(occluders: readonly Occluder[]): Bvh {
     const o = i * 9;
     const n = normalize(cross([tri[o + 3]! - tri[o]!, tri[o + 4]! - tri[o + 1]!, tri[o + 5]! - tri[o + 2]!], [tri[o + 6]! - tri[o]!, tri[o + 7]! - tri[o + 1]!, tri[o + 8]! - tri[o + 2]!]));
     nrm.set(n, i * 3);
+    if (Number.isNaN(fronts[i * 3]!)) fronts.splice(i * 3, 3, n[0], n[1], n[2]);
     for (let a = 0; a < 3; a += 1) centre[i * 3 + a] = (tri[o + a]! + tri[o + 3 + a]! + tri[o + 6 + a]!) / 3;
   }
   const order = new Int32Array(count).map((_, i) => i);
@@ -312,7 +359,13 @@ export function buildBvh(occluders: readonly Occluder[]): Bvh {
     return node;
   };
   if (count > 0) build(0, count);
-  return { tri, nrm, col: new Float32Array(cols), nodes: new Float32Array(nodes), meta: new Int32Array(meta), order };
+  return { tri, nrm, col: new Float32Array(cols), emi: new Float32Array(emis), front: new Float32Array(fronts), mr: new Float32Array(mrs), channels: Uint8Array.from(channels), nodes: new Float32Array(nodes), meta: new Int32Array(meta), order };
+}
+
+/** Authored colour into linear light (the renderers' toLinear). */
+function srgbToLinear(c: number): number {
+  const v = Math.max(0, c);
+  return v <= 0.04045 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4;
 }
 
 /** Closest hit along a ray within tMax: the triangle index, or -1. `out[0]` = distance. */
@@ -437,22 +490,68 @@ export function bakeLightmap(layout: LightmapLayout, occluders: readonly Occlude
   const sun = options.sun ? normalize([...options.sun] as V3) : null;
   const extra = bouncesOf(options);
   const bvh = buildBvh(occluders);
-  const { size, model } = layout;
+  const { size } = layout;
+  const texels = lightmapTexels(layout);
   const value = new Float32Array(size * size * 3);
-  const chartId = new Int32Array(size * size).fill(-1);
   const hit = new Float64Array(2);
   const shade = new Float64Array(4);
   const sq = Math.ceil(Math.sqrt(rays));
+  const count = texels.index.length;
+  for (let j = 0; j < count; j += 1) {
+    const i = texels.index[j]!;
+    const pos: V3 = [texels.position[j * 3]!, texels.position[j * 3 + 1]!, texels.position[j * 3 + 2]!];
+    const n: V3 = [texels.normal[j * 3]!, texels.normal[j * 3 + 1]!, texels.normal[j * 3 + 2]!];
+    shadeTexel(bvh, pos, n, rays, sq, reach, sun, bounce, hit, i, shade, extra);
+    const vis = Math.pow(shade[0]!, contrast);
+    value[i * 3] = vis + shade[1]!;
+    value[i * 3 + 1] = vis + shade[2]!;
+    value[i * 3 + 2] = vis + shade[3]!;
+    if (progress && j % 1024 === 0) progress(j / count);
+  }
+  finishLightmapValues(value, texels.chart, size);
+  const out = new Uint8ClampedArray(size * size * 4);
+  for (let i = 0; i < size * size; i += 1) {
+    // Quantised to steps of 2: invisible in soft lighting, and the PNG compresses far better.
+    const q = (x: number) => Math.min(255, Math.round((x / LIGHTMAP_RANGE) * 127.5) * 2);
+    out[i * 4] = q(value[i * 3]!);
+    out[i * 4 + 1] = q(value[i * 3 + 1]!);
+    out[i * 4 + 2] = q(value[i * 3 + 2]!);
+    out[i * 4 + 3] = 255;
+  }
+  progress?.(1);
+  return out;
+}
+
+/**
+ * The texels a laid-out mesh covers, each with the surface point and normal it
+ * stands for (shared by the CPU bake and the GPU one, F3d). A texel centre up
+ * to half a texel outside a triangle is taken, clamped onto it, so chart edges
+ * have no gaps; a texel inside a triangle wins over one claimed from outside.
+ */
+export interface LightmapTexels {
+  readonly size: number;
+  /** Covered texels (y · size + x), in atlas order. */
+  readonly index: Int32Array;
+  /** World position per covered texel (xyz). */
+  readonly position: Float64Array;
+  /** Unit normal per covered texel (xyz): the authored normals, interpolated. */
+  readonly normal: Float64Array;
+  /** Per atlas texel: the chart (triangle) it belongs to, or −1. */
+  readonly chart: Int32Array;
+}
+
+export function lightmapTexels(layout: LightmapLayout): LightmapTexels {
+  const { size, model } = layout;
+  const chartId = new Int32Array(size * size).fill(-1);
+  const position = new Float64Array(size * size * 3);
+  const normal = new Float64Array(size * size * 3);
   // Normal matrix ≈ the model's rotation (uniform scale assumed for baking).
   const rot = (x: number, y: number, z: number): V3 => normalize([model[0]! * x + model[4]! * y + model[8]! * z, model[1]! * x + model[5]! * y + model[9]! * z, model[2]! * x + model[6]! * y + model[10]! * z]);
   let chart = 0;
-  const totalTris = layout.mesh.primitives.reduce((n, p) => n + p.indices.length / 3, 0);
-  let doneTris = 0;
   for (const p of layout.mesh.primitives) {
     const uv2 = p.uvs2!;
     for (let t = 0; t < p.indices.length; t += 3) {
       chart += 1;
-      doneTris += 1;
       const ia = p.indices[t]!, ib = p.indices[t + 1]!, ic = p.indices[t + 2]!;
       const P = [ia, ib, ic].map((i) => transform(model, p.positions[i * 3]!, p.positions[i * 3 + 1]!, p.positions[i * 3 + 2]!));
       const T = [ia, ib, ic].map((i) => [uv2[i * 2]! * size, (1 - uv2[i * 2 + 1]!) * size] as const);
@@ -484,36 +583,40 @@ export function bakeLightmap(layout: LightmapLayout, occluders: readonly Occlude
           w0 /= ws;
           w1 /= ws;
           w2 /= ws;
-          const pos: V3 = [0, 1, 2].map((a) => P[0]![a]! * w0 + P[1]![a]! * w1 + P[2]![a]! * w2) as V3;
+          for (let a = 0; a < 3; a += 1) position[i * 3 + a] = P[0]![a]! * w0 + P[1]![a]! * w1 + P[2]![a]! * w2;
           // Trust the authored normals (renderers draw both faces, so winding
           // says nothing about which way a surface faces).
           const n = normalize([0, 1, 2].map((a) => N[0]![a]! * w0 + N[1]![a]! * w1 + N[2]![a]! * w2) as V3);
-          shadeTexel(bvh, pos, n, rays, sq, reach, sun, bounce, hit, i, shade, extra);
-          const vis = Math.pow(shade[0]!, contrast);
-          value[i * 3] = vis + shade[1]!;
-          value[i * 3 + 1] = vis + shade[2]!;
-          value[i * 3 + 2] = vis + shade[3]!;
+          normal.set(n, i * 3);
           chartId[i] = chart;
         }
       }
-      if (progress && doneTris % 64 === 0) progress(doneTris / totalTris);
     }
   }
-  // Two blur passes (a 5×5 footprint) within each chart: ray noise gone, edges kept.
-  blurWithinCharts(value, chartId, size);
-  blurWithinCharts(value, chartId, size);
-  dilate(value, chartId, size, PAD + 1);
-  const out = new Uint8ClampedArray(size * size * 4);
-  for (let i = 0; i < size * size; i += 1) {
-    // Quantised to steps of 2: invisible in soft lighting, and the PNG compresses far better.
-    const q = (x: number) => Math.min(255, Math.round((x / LIGHTMAP_RANGE) * 127.5) * 2);
-    out[i * 4] = q(value[i * 3]!);
-    out[i * 4 + 1] = q(value[i * 3 + 1]!);
-    out[i * 4 + 2] = q(value[i * 3 + 2]!);
-    out[i * 4 + 3] = 255;
+  let count = 0;
+  for (let i = 0; i < size * size; i += 1) if (chartId[i]! >= 0) count += 1;
+  const index = new Int32Array(count);
+  const pos = new Float64Array(count * 3);
+  const nrm = new Float64Array(count * 3);
+  for (let i = 0, j = 0; i < size * size; i += 1) {
+    if (chartId[i]! < 0) continue;
+    index[j] = i;
+    pos.set(position.subarray(i * 3, i * 3 + 3), j * 3);
+    nrm.set(normal.subarray(i * 3, i * 3 + 3), j * 3);
+    j += 1;
   }
-  progress?.(1);
-  return out;
+  return { size, index, position: pos, normal: nrm, chart: chartId };
+}
+
+/**
+ * Finish baked texel values (RGB per atlas texel) in place: two blur passes (a
+ * 5×5 footprint) within each chart hide the ray noise and keep edges, then
+ * each chart's colours grow past its edge so filtering never pulls in black.
+ */
+export function finishLightmapValues(value: Float32Array, chart: Int32Array, size: number): void {
+  blurWithinCharts(value, chart, size);
+  blurWithinCharts(value, chart, size);
+  dilate(value, chart, size, PAD + 1);
 }
 
 /**
@@ -739,15 +842,177 @@ function dilate(value: Float32Array, chartId: Int32Array, size: number, steps: n
   }
 }
 
+/**
+ * Grow baked values (`stride` floats per atlas texel) out from the texels
+ * `filled` marks (≥ 0) into the rest, `steps` texels deep (the charts' padding
+ * by default), so bilinear filtering never pulls in an unbaked texel. Texels
+ * never reached read 1, as open sky.
+ */
+export function dilateLightmapValues(value: Float32Array, filled: Int32Array, size: number, stride = 3, steps = PAD + 1): void {
+  if (stride === 3) {
+    dilate(value, filled, size, steps);
+    return;
+  }
+  // One channel triple at a time: dilate's own layout.
+  const triple = new Float32Array(size * size * 3);
+  for (let c = 0; c < stride; c += 3) {
+    const n = Math.min(3, stride - c);
+    for (let i = 0; i < size * size; i += 1) for (let k = 0; k < n; k += 1) triple[i * 3 + k] = value[i * stride + c + k]!;
+    dilate(triple, filled, size, steps);
+    for (let i = 0; i < size * size; i += 1) for (let k = 0; k < n; k += 1) value[i * stride + c + k] = triple[i * 3 + k]!;
+  }
+}
+
+// --- Seam stitching (F3d-2) -----------------------------------------------------
+
+/** One point on a seam: the four bilinear taps either side (texel indices and weights; B's weights negated). */
+export interface SeamSample {
+  readonly taps: Int32Array;
+  readonly weights: Float32Array;
+}
+
+/** The bilinear taps of a light-map lookup at atlas texel coordinates (x, y), as a GPU's linear filter takes them. */
+function bilinearTaps(x: number, y: number, size: number, sign: number, taps: Int32Array, weights: Float32Array, at: number): void {
+  const fx = x - 0.5, fy = y - 0.5;
+  const x0 = Math.floor(fx), y0 = Math.floor(fy);
+  const tx = fx - x0, ty = fy - y0;
+  const clampX = (v: number) => Math.min(size - 1, Math.max(0, v));
+  let k = at;
+  for (const [dx, dy, w] of [[0, 0, (1 - tx) * (1 - ty)], [1, 0, tx * (1 - ty)], [0, 1, (1 - tx) * ty], [1, 1, tx * ty]] as const) {
+    taps[k] = clampX(y0 + dy) * size + clampX(x0 + dx);
+    weights[k] = w * sign;
+    k += 1;
+  }
+}
+
+/**
+ * Where a laid-out mesh's light map has seams: an edge two triangles share in
+ * the world that sits in two places in the atlas (two charts' borders, or a
+ * curved patch's triangles, each its own chart). Each seam is sampled about
+ * every half texel along its longer side.
+ */
+export function lightmapSeams(layout: LightmapLayout): SeamSample[] {
+  const { size, model } = layout;
+  const key = (p: V3) => p.map((v) => Math.round(v * 1e4)).join(",");
+  const edges = new Map<string, { a: readonly [number, number]; b: readonly [number, number] }[]>();
+  const samples: SeamSample[] = [];
+  for (const p of layout.mesh.primitives) {
+    const uv2 = p.uvs2;
+    if (!uv2) continue;
+    const texel = (i: number) => [uv2[i * 2]! * size, (1 - uv2[i * 2 + 1]!) * size] as const;
+    const world = (i: number) => transform(model, p.positions[i * 3]!, p.positions[i * 3 + 1]!, p.positions[i * 3 + 2]!);
+    for (let t = 0; t < p.indices.length; t += 3) {
+      for (let e = 0; e < 3; e += 1) {
+        const i = p.indices[t + e]!, j = p.indices[t + ((e + 1) % 3)]!;
+        let ka = key(world(i)), kb = key(world(j));
+        let a = texel(i), b = texel(j);
+        // The same edge either way round: its ends in a fixed order.
+        if (ka > kb) [ka, kb, a, b] = [kb, ka, b, a];
+        const k = `${ka}|${kb}`;
+        if (ka === kb) continue;
+        const list = edges.get(k) ?? [];
+        for (const other of list) {
+          const apart = Math.max(Math.abs(other.a[0] - a[0]), Math.abs(other.a[1] - a[1]), Math.abs(other.b[0] - b[0]), Math.abs(other.b[1] - b[1]));
+          if (apart < 1e-3) continue; // the same place in the atlas: no seam
+          const n = Math.max(2, Math.ceil(Math.max(Math.hypot(a[0] - b[0], a[1] - b[1]), Math.hypot(other.a[0] - other.b[0], other.a[1] - other.b[1])) * 2));
+          for (let s = 0; s < n; s += 1) {
+            const f = (s + 0.5) / n;
+            const taps = new Int32Array(8);
+            const weights = new Float32Array(8);
+            bilinearTaps(a[0] + (b[0] - a[0]) * f, a[1] + (b[1] - a[1]) * f, size, 1, taps, weights, 0);
+            bilinearTaps(other.a[0] + (other.b[0] - other.a[0]) * f, other.a[1] + (other.b[1] - other.a[1]) * f, size, -1, taps, weights, 4);
+            samples.push({ taps, weights });
+          }
+        }
+        list.push({ a, b });
+        edges.set(k, list);
+      }
+    }
+  }
+  return samples;
+}
+
+/**
+ * Stitch a light map's seams (F3d-2): nudge the texels along them, least
+ * squares, so a lookup either side of each seam reads alike while every texel
+ * stays near its baked value (`stiffness` weighs that: lower closes seams
+ * harder). Solved by conjugate gradients, for each of the `stride` channels
+ * of `value` in place. Returns the seam points it stitched.
+ */
+export function stitchLightmapSeams(layout: LightmapLayout, value: Float32Array, stride = 3, options: { readonly stiffness?: number; readonly iterations?: number; readonly seams?: readonly SeamSample[] } = {}): number {
+  const samples = options.seams ?? lightmapSeams(layout);
+  if (samples.length === 0) return 0;
+  const lambda = options.stiffness ?? 0.01;
+  const iterations = options.iterations ?? 128;
+  // The texels the seams touch are the unknowns; the rest stay as baked.
+  const index = new Map<number, number>();
+  for (const s of samples) for (const t of s.taps) if (!index.has(t)) index.set(t, index.size);
+  const texels = [...index.keys()];
+  const rows = samples.map((s) => ({ cols: Int32Array.from(s.taps, (t) => index.get(t)!), weights: s.weights }));
+  const n = texels.length;
+  // A · x = λx + Cᵀ(C x).
+  const apply = (x: Float64Array, out: Float64Array) => {
+    for (let i = 0; i < n; i += 1) out[i] = lambda * x[i]!;
+    for (const r of rows) {
+      let c = 0;
+      for (let k = 0; k < 8; k += 1) c += r.weights[k]! * x[r.cols[k]!]!;
+      for (let k = 0; k < 8; k += 1) out[r.cols[k]!] = out[r.cols[k]!]! + r.weights[k]! * c;
+    }
+  };
+  const x = new Float64Array(n), b = new Float64Array(n), r = new Float64Array(n), p = new Float64Array(n), ap = new Float64Array(n);
+  for (let ch = 0; ch < stride; ch += 1) {
+    for (let i = 0; i < n; i += 1) {
+      x[i] = value[texels[i]! * stride + ch]!;
+      b[i] = lambda * x[i]!;
+    }
+    apply(x, ap);
+    let rr = 0;
+    for (let i = 0; i < n; i += 1) {
+      r[i] = b[i]! - ap[i]!;
+      p[i] = r[i]!;
+      rr += r[i]! * r[i]!;
+    }
+    for (let it = 0; it < iterations && rr > 1e-14; it += 1) {
+      apply(p, ap);
+      let pap = 0;
+      for (let i = 0; i < n; i += 1) pap += p[i]! * ap[i]!;
+      if (pap <= 0) break;
+      const alpha = rr / pap;
+      let next = 0;
+      for (let i = 0; i < n; i += 1) {
+        x[i] = x[i]! + alpha * p[i]!;
+        r[i] = r[i]! - alpha * ap[i]!;
+        next += r[i]! * r[i]!;
+      }
+      const beta = next / rr;
+      rr = next;
+      for (let i = 0; i < n; i += 1) p[i] = r[i]! + beta * p[i]!;
+    }
+    for (let i = 0; i < n; i += 1) value[texels[i]! * stride + ch] = x[i]!;
+  }
+  return samples.length;
+}
+
 /** The light map as a PNG, and the laid-out mesh with it on every material. */
 export function withLightmap(layout: LightmapLayout, rgba: Uint8ClampedArray): MeshAsset {
   const image: EncodedImage = { mime: "image/png", bytes: encodeRgbaPng(rgba, layout.size, layout.size, { compress: true }) };
   return applyLightmapImage(layout.mesh, image);
 }
 
-/** Put an (already encoded) light map on every primitive of a laid-out mesh. */
-export function applyLightmapImage(mesh: MeshAsset, image: EncodedImage): MeshAsset {
-  return { ...mesh, primitives: mesh.primitives.map((p) => (p.uvs2 ? { ...p, material: { ...p.material, lightmapImage: image } } : p)) };
+/**
+ * Put an (already encoded) light map on every primitive of a laid-out mesh,
+ * with the same bake's HDR directional map when there is one (F3d, the GPU
+ * bake); without one, any earlier HDR map goes, as it no longer matches.
+ */
+export function applyLightmapImage(mesh: MeshAsset, image: EncodedImage, hdr?: EncodedImage): MeshAsset {
+  return {
+    ...mesh,
+    primitives: mesh.primitives.map((p) => {
+      if (!p.uvs2) return p;
+      const { lightmapHdrImage: _stale, ...material } = p.material;
+      return { ...p, material: { ...material, lightmapImage: image, ...(hdr ? { lightmapHdrImage: hdr } : {}) } };
+    }),
+  };
 }
 
 /** A stable fingerprint of a layout (geometry + light-map UVs), to tell when a stored bake is stale. */

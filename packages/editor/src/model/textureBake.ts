@@ -79,7 +79,7 @@ const IDENTITY = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1];
 const vertex = (p: MeshPrimitive, i: number): V3 => [p.positions[i * 3]!, p.positions[i * 3 + 1]!, p.positions[i * 3 + 2]!];
 
 /** The mesh's edges between two faces, with their signed bend, bucketed in a grid for nearby lookup. */
-class EdgeField {
+export class EdgeField {
   private readonly cells = new Map<string, number[]>();
   private readonly seg: number[] = [];
   private readonly bend: number[] = [];
@@ -154,7 +154,7 @@ class EdgeField {
 }
 
 /** `n` cosine-weighted hemisphere directions about `axis`, stratified, rotated per texel by `seed`. */
-function hemisphere(axis: V3, n: number, seed: number, out: V3[]): void {
+export function hemisphere(axis: V3, n: number, seed: number, out: V3[]): void {
   const t = Math.abs(axis[0]) < 0.9 ? normalize(cross(axis, [1, 0, 0])) : normalize(cross(axis, [0, 1, 0]));
   const b = cross(axis, t);
   const sq = Math.max(1, Math.round(Math.sqrt(n)));
@@ -332,7 +332,7 @@ export function bakeLayout(mesh: MeshAsset, size: number): { mesh: MeshAsset; at
     bare.map((i, k) => {
       const p = layout.mesh.primitives[k]!;
       // Its light map no longer fits the new layout.
-      const { lightmapImage: _lightmap, ...material } = p.material;
+      const { lightmapImage: _lightmap, lightmapHdrImage: _hdr, ...material } = p.material;
       return [i, { ...p, uvs: p.uvs2!, uvs2: null, material }];
     }),
   );

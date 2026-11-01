@@ -493,7 +493,8 @@ export function riverWaterMaterial(): MeshMaterial {
     reflectivity: 1.3,
     refraction: 0.3,
     softDepth: 0.35,
-    water: { strength: 0.35, scale: 1.2, speed: 0.7, flow: Math.PI / 2, along: true },
+    // F5d (AAA tier): river water absorbing red over its depth, a little green murk, foam at its banks.
+    water: { strength: 0.35, scale: 1.2, speed: 0.7, flow: Math.PI / 2, along: true, absorption: [0.5, 0.1, 0.07], scattering: [0.008, 0.022, 0.02], foam: 0.45 },
   };
 }
 

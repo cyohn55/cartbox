@@ -22,6 +22,7 @@
  * rasteriser stay pure and testable. DOM-free.
  */
 
+import type { IesProfile } from "../model/iesProfile";
 import { boxProject, pickProbe, sampleProbe, type ReflectionProbeSet } from "./probeSampling";
 import { applyFog, type SceneFog } from "./skyDome";
 import { cameraPositionFromView } from "./lod";
@@ -38,8 +39,11 @@ import { windOffset, windUniform, type SceneWind } from "../model/wind";
 import { DEFAULT_DETAIL_SCALE, DEFAULT_DETAIL_STRENGTH, FAR_TILE_SCALE, blendHeightOf, detailFade, emissiveAnimation, farTileBlend, heightBlend, macroGain, macroUniform, materialHasWater, triplanarUvs, triplanarWeights, waterAlong, waterTilt, waterTiltAlong, waterUniform } from "../model/materialEffects";
 import { compiledGraphOf, evaluateGraph, graphRegisters, type CompiledGraph, type GraphContext } from "../model/materialGraph";
 import { EFFECT_DISTORT_POWER, materialRefracts, refractionOffset, refracts, resolveRefraction, type ResolvedRefraction } from "./refraction";
+import { materialHasExtensions } from "../model/materialExtensions";
 import { CLEARCOAT_F0, anisotropicD, curvatureOf, materialHasLayers, parallaxRate, parallaxUv, resolveLayers, uvGradients, type ResolvedLayers } from "../model/materialLayers";
 import { type MeshAsset, type MeshBounds, computeSmoothNormals, meshBounds } from "../model/MeshAsset";
+import type { HdrLightmap } from "../model/hdrLightmap";
+import type { ProbeVolume } from "../model/probeVolume";
 
 /** A decoded texture: tightly-packed RGBA rows, `width × height`. */
 export interface DecodedTexture {
@@ -310,6 +314,12 @@ export interface EnvironmentLight {
    * map scales its ambient and sky fill by the grid at its position and normal.
    */
   readonly lightProbes?: LightProbeGrid | null;
+  /**
+   * The GPU bake's probe volume (F3d-3; see probeVolume.ts): on the AAA tier,
+   * a surface without a light map takes its diffuse light from it in place of
+   * the sky's. Every other path reads {@link lightProbes}.
+   */
+  readonly probeVolume?: ProbeVolume | null;
 }
 
 /**
@@ -462,6 +472,13 @@ export interface SceneLight {
    * one. Absent, the first, which every instance is on unless it says otherwise.
    */
   readonly channels?: number;
+  /**
+   * A point or spot light's IES profile (AAA_FIDELITY_ROADMAP.md F9d;
+   * iesProfile.ts): its measured distribution about its axis (a spot's
+   * direction, else straight down, or `direction` when given). The AAA tier
+   * shapes the light by it.
+   */
+  readonly ies?: IesProfile | null;
 }
 
 /** A rig of one dark light: what lights an instance on none of the rig's channels (a list, so it stays on the rig's path). */
@@ -585,6 +602,7 @@ function buildPbrFrag(
     material.graph !== undefined ||
     relief !== null ||
     materialHasLayers(material) ||
+    materialHasExtensions(material) ||
     materialRefracts(material) ||
     materialHasWater(material);
   if (!isPbr) return null;
@@ -1110,6 +1128,12 @@ export function renderMesh(mesh: MeshAsset, options: RenderMeshOptions): void {
 export interface LodChain {
   readonly meshes: readonly MeshAsset[];
   readonly distances: readonly number[];
+  /**
+   * A level's own base-colour maps, primitive by primitive, where they aren't
+   * the first level's (an impostor's atlas, F6b); a level without an entry
+   * draws with the textures its copies carry.
+   */
+  readonly textures?: readonly (readonly (DecodedTexture | null)[] | undefined)[];
 }
 
 export interface MeshSceneInstance {
@@ -1150,10 +1174,18 @@ export interface MeshSceneInstance {
    * (see lightBake.ts). Null entries (or no `uvs2`) leave it unscaled.
    */
   readonly lightmapTextures?: readonly (DecodedTexture | null)[];
+  /**
+   * Decoded HDR directional light maps per primitive
+   * ({@link MeshMaterial.lightmapHdrImage}, AAA_FIDELITY_ROADMAP.md F3d), or
+   * null entries. Only the AAA tier reads them; the rest read {@link lightmapTextures}.
+   */
+  readonly lightmapHdrTextures?: readonly (HdrLightmap | null)[];
   /** Decoded detail maps per primitive ({@link MeshMaterial.detailImage}), or null entries. */
   readonly detailTextures?: readonly (DecodedTexture | null)[];
   /** Decoded blend-surface maps per primitive ({@link MeshMaterial.blendImage}), or null entries. */
   readonly blendTextures?: readonly (DecodedTexture | null)[];
+  /** A material graph's own images per primitive (F1e; MeshMaterial.graphImages), decoded. */
+  readonly graphTextures?: readonly (readonly (DecodedTexture | null)[] | null)[];
   /** Decoded relief maps per primitive ({@link MeshMaterial.reliefImage}: height, curvature), or null entries. */
   readonly reliefTextures?: readonly (DecodedTexture | null)[];
   /**

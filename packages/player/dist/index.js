@@ -438,6 +438,7 @@ var PHYS_OP_UI_NUM = 37;
 var PHYS_OP_UI_TEXT = 38;
 var PHYS_OP_UI_LIST = 39;
 var PHYS_OP_LOOK = 40;
+var PHYS_OP_SHATTER = 41;
 function physicsBlockAddress(layout) {
   return layout.ramSize - PHYS_BLOCK_BYTES;
 }
@@ -1986,9 +1987,9 @@ function shade(albedo, normal, toLight, ambient) {
 
 // src/lighting/LightingRenderer.ts
 function createFlatMaterial(width, height) {
-  const material = new Uint8Array(width * height * 4);
-  for (let i = 0; i < width * height; i += 1) material[i * 4 + 3] = 255;
-  return material;
+  const material2 = new Uint8Array(width * height * 4);
+  for (let i = 0; i < width * height; i += 1) material2[i * 4 + 3] = 255;
+  return material2;
 }
 
 // src/lighting/LightingLayer.ts
@@ -2248,9 +2249,9 @@ var LightingLayer = class {
    *                 null, pixels are lit flat.
    * @param scene    The lights and ambient for this frame.
    */
-  render(albedo, material, scene) {
+  render(albedo, material2, scene) {
     const gl = this.gl;
-    const material0 = material ?? this.flatMaterialBuffer();
+    const material0 = material2 ?? this.flatMaterialBuffer();
     gl.activeTexture(gl.TEXTURE0);
     gl.bindTexture(gl.TEXTURE_2D, this.albedoTex);
     gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, this.width, this.height, 0, gl.RGBA, gl.UNSIGNED_BYTE, albedo);
@@ -2290,7 +2291,7 @@ var LightingLayer = class {
     gl.uniform1i(this.uni(this.pLight, "uLightCount"), count);
     gl.uniform1f(this.uni(this.pLight, "uAmbient"), scene.ambient);
     gl.uniform3f(this.uni(this.pLight, "uAmbientColor"), scene.ambientColor[0], scene.ambientColor[1], scene.ambientColor[2]);
-    gl.uniform1f(this.uni(this.pLight, "uEnableShadows"), scene.shadows && material ? 1 : 0);
+    gl.uniform1f(this.uni(this.pLight, "uEnableShadows"), scene.shadows && material2 ? 1 : 0);
     gl.uniform1f(this.uni(this.pLight, "uSmoothNormals"), scene.smoothNormals ? 1 : 0);
     gl.uniform1i(this.uni(this.pLight, "uUnlit"), scene.unlit ? 1 : 0);
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
@@ -2725,9 +2726,9 @@ var WebgpuLightingLayer = class _WebgpuLightingLayer {
       return null;
     }
   }
-  render(albedo, material, scene) {
+  render(albedo, material2, scene) {
     const q = this.device.queue;
-    const mat = material ?? this.flatMaterialBuffer();
+    const mat = material2 ?? this.flatMaterialBuffer();
     const layout = { bytesPerRow: this.width * 4, rowsPerImage: this.height };
     const size = { width: this.width, height: this.height };
     q.writeTexture({ texture: this.textures.albedo }, albedo, layout, size);
@@ -2742,7 +2743,7 @@ var WebgpuLightingLayer = class _WebgpuLightingLayer {
     u[5] = scene.ambientColor[1];
     u[6] = scene.ambientColor[2];
     u[7] = count;
-    u[8] = scene.shadows && material ? 1 : 0;
+    u[8] = scene.shadows && material2 ? 1 : 0;
     u[9] = scene.smoothNormals ? 1 : 0;
     u[10] = 0;
     u[11] = 0;
@@ -2925,8 +2926,8 @@ var LitCanvasSurface = class _LitCanvasSurface {
    * sprites (RGBA: normal index, height, specular, roughness). Copied into a
    * stable buffer on {@link blit}; an empty buffer falls back to host material.
    */
-  setCartMaterial(material) {
-    this.cartMaterial = material.length ? material : null;
+  setCartMaterial(material2) {
+    this.cartMaterial = material2.length ? material2 : null;
   }
   /**
    * Sets the per-pixel emissive plane (one byte each) the engine emitted this
@@ -2950,7 +2951,7 @@ var LitCanvasSurface = class _LitCanvasSurface {
     };
     const hostLights = this.options.lights?.(context) ?? [];
     const lights = this.cartLights.length ? [...this.cartLights, ...hostLights] : hostLights;
-    const material = this.resolveMaterial(context);
+    const material2 = this.resolveMaterial(context);
     const unlit = (this.options.autoDetect ?? false) && lights.length === 0;
     if (!this.albedoCopy || this.albedoCopy.length !== albedo.length) {
       this.albedoCopy = new Uint8Array(albedo.length);
@@ -2961,7 +2962,7 @@ var LitCanvasSurface = class _LitCanvasSurface {
         this.albedoCopy[i * 4 + 3] = this.cartEmissive[i] ?? 0;
       }
     }
-    this.renderer.render(this.albedoCopy, material, {
+    this.renderer.render(this.albedoCopy, material2, {
       lights,
       ambient: this.options.ambient ?? DEFAULT_AMBIENT,
       ambientColor: this.options.ambientColor ?? DEFAULT_AMBIENT_COLOR,
@@ -3433,21 +3434,21 @@ function parseCubeLut(text) {
     const line = raw.trim();
     if (line === "" || line.startsWith("#")) continue;
     const parts = line.split(/\s+/);
-    const key = parts[0].toUpperCase();
-    if (key === "TITLE") continue;
-    if (key === "LUT_1D_SIZE") return null;
-    if (key === "LUT_3D_SIZE") {
+    const key2 = parts[0].toUpperCase();
+    if (key2 === "TITLE") continue;
+    if (key2 === "LUT_1D_SIZE") return null;
+    if (key2 === "LUT_3D_SIZE") {
       size = Number(parts[1]);
       continue;
     }
-    if (key === "DOMAIN_MIN" || key === "DOMAIN_MAX") {
+    if (key2 === "DOMAIN_MIN" || key2 === "DOMAIN_MAX") {
       const v = parts.slice(1, 4).map(Number);
       if (v.length !== 3 || !v.every(Number.isFinite)) return null;
-      if (key === "DOMAIN_MIN") min = v;
+      if (key2 === "DOMAIN_MIN") min = v;
       else max = v;
       continue;
     }
-    if (/^[A-Z_]/.test(key)) continue;
+    if (/^[A-Z_]/.test(key2)) continue;
     if (parts.length !== 3) return null;
     for (const p of parts) {
       const v = Number(p);
@@ -4327,16 +4328,16 @@ function parsePostFxSettings(value) {
     const enabled = rawEnabled[effect.id];
     if (typeof enabled === "boolean") settings.enabled[effect.id] = enabled;
     for (const param of effect.params) {
-      const key = paramKey(effect.id, param.id);
-      const raw = rawValues[key];
+      const key2 = paramKey(effect.id, param.id);
+      const raw = rawValues[key2];
       if (typeof raw === "number" && Number.isFinite(raw)) {
-        settings.values[key] = Math.min(param.max, Math.max(param.min, raw));
+        settings.values[key2] = Math.min(param.max, Math.max(param.min, raw));
       }
     }
     for (const color of effect.colors ?? []) {
-      const key = paramKey(effect.id, color.id);
-      const raw = rawColors[key];
-      if (typeof raw === "string" && HEX_COLOR.test(raw)) settings.colors[key] = raw;
+      const key2 = paramKey(effect.id, color.id);
+      const raw = rawColors[key2];
+      if (typeof raw === "string" && HEX_COLOR.test(raw)) settings.colors[key2] = raw;
     }
   }
   if (decodeLut(record.lut)) {
@@ -4531,10 +4532,10 @@ function applyPostVolumes(base, post) {
   const values = { ...base.values };
   const enabled = { ...base.enabled };
   let changed = false;
-  for (const key of ["brightness", "contrast", "saturation"]) {
-    const v = post[key];
+  for (const key2 of ["brightness", "contrast", "saturation"]) {
+    const v = post[key2];
     if (v === void 0 || v === 1) continue;
-    const k = paramKey("grade", key);
+    const k = paramKey("grade", key2);
     values[k] = (enabled.grade ? values[k] ?? 1 : 1) * v;
     enabled.grade = true;
     changed = true;
@@ -4552,12 +4553,111 @@ function applyPostVolumes(base, post) {
   return changed ? { ...base, enabled, values } : base;
 }
 
+// src/render/viewModes.ts
+var VIEW_MODES = [
+  { id: "lit", code: 0, label: "Lit", group: "Lighting", hint: "The frame as the game renders it." },
+  { id: "unlit", code: 1, label: "Unlit", group: "Lighting", hint: "Base colour and emission, with no light." },
+  { id: "pathTraced", code: 16, label: "Path traced", group: "Lighting", hint: "The path-traced reference (F10b): the same scene, materials and lights, converging while the view holds." },
+  { id: "lightingOnly", code: 7, label: "Lighting only", group: "Lighting", hint: "The light on a white, non-metal surface: direct, sky, bakes and GI." },
+  { id: "baseColor", code: 2, label: "Base colour", group: "Buffers", hint: "The albedo the surface shades with (maps, blends, detail and decals applied)." },
+  { id: "roughness", code: 3, label: "Roughness", group: "Buffers", hint: "Black is mirror-smooth, white fully rough." },
+  { id: "metallic", code: 4, label: "Metallic", group: "Buffers", hint: "Black is a dielectric, white a metal." },
+  { id: "normals", code: 5, label: "Normals", group: "Buffers", hint: "The shading normal in world space, normal maps applied (x red, y green, z blue)." },
+  { id: "ambientOcclusion", code: 6, label: "Ambient occlusion", group: "Buffers", hint: "The material's occlusion times GTAO's." },
+  { id: "motion", code: 8, label: "Motion vectors", group: "Buffers", hint: "Screen motion since last frame: hue is the direction, brightness the speed." },
+  { id: "shaderComplexity", code: 9, label: "Shader complexity", group: "Complexity", hint: "An estimate of the shading work each pixel runs, green to red to white." },
+  { id: "lightComplexity", code: 10, label: "Light complexity", group: "Complexity", hint: "How many lights each pixel loops over." },
+  { id: "overdraw", code: 11, label: "Overdraw", group: "Complexity", hint: "How many fragments shaded each pixel, depth ignored." },
+  { id: "lod", code: 12, label: "LOD", group: "Geometry", hint: "The level of detail drawn: white without a chain, then red, green, blue, yellow, magenta, cyan." },
+  { id: "texelDensity", code: 13, label: "Texel density", group: "Geometry", hint: "Base-colour texels per metre against the target: blue under, green on, red over." },
+  { id: "mipLevel", code: 14, label: "Mip level", group: "Geometry", hint: "The base colour's mip each pixel samples: 0 green, then yellow, red, magenta." },
+  { id: "cascades", code: 15, label: "Shadow cascades", group: "Geometry", hint: "The sun's cascade each pixel is shadowed from: red, green, blue, yellow." }
+];
+function isDiagnosticView(mode) {
+  return mode !== void 0 && mode !== null && mode !== "lit" && mode !== "pathTraced";
+}
+function viewModeCode(mode) {
+  return VIEW_MODES.find((m) => m.id === mode)?.code ?? 0;
+}
+function readViewMode(raw) {
+  return VIEW_MODES.some((m) => m.id === raw) ? raw : "lit";
+}
+var DEFAULT_TEXEL_DENSITY = 512;
+var SHADER_COMPLEXITY_FULL = 24;
+var LIGHT_COMPLEXITY_FULL = 16;
+var OVERDRAW_FULL = 12;
+function heat(t) {
+  const stops = [[0, 0, 0], [0, 0.25, 1], [0, 0.85, 0.2], [1, 0.9, 0], [1, 0.1, 0], [1, 1, 1]];
+  const x = Math.min(1, Math.max(0, t)) * (stops.length - 1);
+  const i = Math.min(stops.length - 2, Math.floor(x));
+  const f3 = x - i;
+  const a = stops[i], b = stops[i + 1];
+  return [a[0] + (b[0] - a[0]) * f3, a[1] + (b[1] - a[1]) * f3, a[2] + (b[2] - a[2]) * f3];
+}
+var VIEW_MODE_WGSL = (
+  /* wgsl */
+  `
+fn vmHeat(t: f32) -> vec3<f32> {
+  var stops = array<vec3<f32>, 6>(vec3<f32>(0.0), vec3<f32>(0.0, 0.25, 1.0), vec3<f32>(0.0, 0.85, 0.2), vec3<f32>(1.0, 0.9, 0.0), vec3<f32>(1.0, 0.1, 0.0), vec3<f32>(1.0));
+  let x = clamp(t, 0.0, 1.0) * 5.0;
+  let i = min(4, i32(floor(x)));
+  return mix(stops[i], stops[i + 1], x - f32(i));
+}
+// A display colour as light the frame encodes back to it (sRGB's inverse).
+fn vmLight(c: vec3<f32>) -> vec3<f32> {
+  let x = clamp(c, vec3<f32>(0.0), vec3<f32>(1.0));
+  return select(pow((x + vec3<f32>(0.055)) / 1.055, vec3<f32>(2.4)), x / 12.92, x <= vec3<f32>(0.04045));
+}
+fn vmPalette(i: i32) -> vec3<f32> {
+  var p = array<vec3<f32>, 7>(vec3<f32>(1.0, 0.2, 0.2), vec3<f32>(0.2, 0.9, 0.2), vec3<f32>(0.25, 0.4, 1.0), vec3<f32>(1.0, 0.9, 0.1), vec3<f32>(1.0, 0.2, 1.0), vec3<f32>(0.1, 0.9, 0.9), vec3<f32>(1.0, 0.6, 0.2));
+  return p[clamp(i, 0, 6)];
+}
+`
+);
+var VIEW_RESOLVE_WGSL = (
+  /* wgsl */
+  `
+@group(0) @binding(0) var<uniform> params: vec4<f32>;
+@group(0) @binding(1) var colourTex: texture_2d<f32>;
+@group(0) @binding(2) var velocityTex: texture_2d<f32>;
+@group(0) @binding(3) var gbufferTex: texture_2d<f32>;
+${VIEW_MODE_WGSL}
+@vertex
+fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4<f32> {
+  let p = vec2<f32>(f32((i << 1u) & 2u), f32(i & 2u));
+  return vec4<f32>(p * 2.0 - 1.0, 0.0, 1.0);
+}
+fn hue(h: f32) -> vec3<f32> {
+  let k = vec3<f32>(5.0, 3.0, 1.0);
+  return clamp(vec3<f32>(1.0) - clamp(min(fract(vec3<f32>(h) + k / 6.0) * 6.0, 4.0 - fract(vec3<f32>(h) + k / 6.0) * 6.0), vec3<f32>(0.0), vec3<f32>(1.0)), vec3<f32>(0.0), vec3<f32>(1.0));
+}
+@fragment
+fn resolve(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
+  let p = vec2<i32>(pos.xy);
+  if (params.x > 10.5) {
+    let n = textureLoad(colourTex, p, 0).r;
+    if (n <= 0.0) { return vec4<f32>(0.0); }
+    return vec4<f32>(vmLight(vmHeat(n / params.y)), 1.0);
+  }
+  if (textureLoad(gbufferTex, p, 0).w <= 0.0) { return vec4<f32>(0.0); }
+  // Screen motion in pixels: its direction as hue, its speed (to 32 px) as brightness.
+  let dims = vec2<f32>(textureDimensions(velocityTex));
+  let v = textureLoad(velocityTex, p, 0).xy * dims;
+  let speed = length(v);
+  let angle = atan2(-v.y, v.x) / 6.2831853 + 0.5;
+  let c = mix(vec3<f32>(0.08), hue(angle), clamp(speed / 32.0, 0.0, 1.0));
+  return vec4<f32>(vmLight(c), 1.0);
+}
+`
+);
+
 // src/quality.ts
-var QUALITY_LEVELS = ["low", "medium", "high"];
+var QUALITY_LEVELS = ["low", "medium", "high", "epic"];
 var QUALITY_PRESETS = {
-  high: { level: "high", shadows: true, shadowMapSize: 1024, shadowCascades: true, cascadeMapSize: 4096, maxRenderScale: 1, disabledEffects: [], terrainDetail: 1, antialias: true, temporal: true, reflections: true, skyScale: 3 },
-  medium: { level: "medium", shadows: true, shadowMapSize: 512, cascadeMapSize: 2048, maxRenderScale: 0.75, disabledEffects: [], terrainDetail: 0.6, antialias: true, temporal: true, reflections: true, skyScale: 3 },
-  low: { level: "low", shadows: false, shadowMapSize: 512, maxRenderScale: 0.5, disabledEffects: ["bloom", "chroma"], terrainDetail: 0.3, antialias: false, temporal: false, reflections: false, skyScale: 4 }
+  epic: { level: "epic", shadows: true, shadowMapSize: 1024, shadowCascades: true, cascadeMapSize: 4096, maxRenderScale: 1, disabledEffects: [], terrainDetail: 1, antialias: true, temporal: true, reflections: true, skyScale: 3, tracedReflections: true, virtualShadows: true, textureBudgetMB: 1024 },
+  high: { level: "high", shadows: true, shadowMapSize: 1024, shadowCascades: true, cascadeMapSize: 4096, maxRenderScale: 1, disabledEffects: [], terrainDetail: 1, antialias: true, temporal: true, reflections: true, skyScale: 3, virtualShadows: true, textureBudgetMB: 512 },
+  medium: { level: "medium", shadows: true, shadowMapSize: 512, cascadeMapSize: 2048, maxRenderScale: 0.75, disabledEffects: [], terrainDetail: 0.6, antialias: true, temporal: true, reflections: true, skyScale: 3, renderScale: 2 / 3, textureBudgetMB: 256 },
+  low: { level: "low", shadows: false, shadowMapSize: 512, maxRenderScale: 0.5, disabledEffects: ["bloom", "chroma"], terrainDetail: 0.3, antialias: false, temporal: false, reflections: false, skyScale: 4, textureBudgetMB: 128 }
 };
 function detectQuality(hints) {
   if (hints.cores !== void 0 && hints.cores <= 2 || hints.memoryGB !== void 0 && hints.memoryGB <= 2) return "low";
@@ -4579,6 +4679,7 @@ function browserDeviceHints(webgpu) {
     ...webgpu === void 0 ? {} : { webgpu }
   };
 }
+var PAUSE_MS = 3e3;
 var QualityGovernor = class {
   constructor(slowMs = 25, windowMs = 1500, settleMs = 3e3, busyShare = 0.6) {
     this.slowMs = slowMs;
@@ -4606,7 +4707,7 @@ var QualityGovernor = class {
    * `level`, or null to stay.
    */
   feed(ms, busyMs, now, level) {
-    if (now < this.holdUntil || !(ms > 0) || ms > 500) return null;
+    if (now < this.holdUntil || !(ms > 0) || ms > PAUSE_MS) return null;
     const k = 1 / Math.min(this.frames + 1, 30);
     this.average += (ms - this.average) * k;
     this.busy += (Math.min(busyMs, ms) - this.busy) * k;
@@ -5470,7 +5571,7 @@ function createDirectConsole(module, model, layout = RAM_LAYOUTS[model.id], samp
   };
   const pmem = () => core.ram().subarray(layout.pmemAddress, layout.pmemAddress + 1024);
   const pixels = model.width * model.height;
-  let material = null;
+  let material2 = null;
   let emissive = null;
   return {
     direct: true,
@@ -5508,7 +5609,7 @@ function createDirectConsole(module, model, layout = RAM_LAYOUTS[model.id], samp
     },
     setMaterialCapture() {
     },
-    readMaterial: () => material ?? (material = new Uint8Array(pixels * 4)),
+    readMaterial: () => material2 ?? (material2 = new Uint8Array(pixels * 4)),
     readEmissive: () => emissive ?? (emissive = new Uint8Array(pixels)),
     readError: () => ({ seq: errorSeq, message: errorMessage }),
     memoryBytes: () => core.memoryBytes(),
@@ -5595,8 +5696,8 @@ function parseTouchLayout(value) {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return {};
   const raw = value;
   const out = {};
-  const ids = [...TOUCH_CONTROL_IDS, ...Object.keys(raw).filter((k) => ACTION_CONTROL.test(k))];
-  for (const id of ids) {
+  const ids2 = [...TOUCH_CONTROL_IDS, ...Object.keys(raw).filter((k) => ACTION_CONTROL.test(k))];
+  for (const id of ids2) {
     const p = raw[id];
     if (typeof p !== "object" || p === null) continue;
     const { x, y, size } = p;
@@ -5610,7 +5711,7 @@ function parseTouchLayout(value) {
   return out;
 }
 function placeWithin(x, y, halfW, halfH) {
-  const keep = (v, half) => half >= 0.5 ? 0.5 : clamp(v, half, 1 - half);
+  const keep = (v, half2) => half2 >= 0.5 ? 0.5 : clamp(v, half2, 1 - half2);
   return [keep(x, halfW), keep(y, halfH)];
 }
 var TOUCH_LOOK_MODES = ["stick", "drag"];
@@ -7682,6 +7783,7 @@ import {
   readLevels,
   readNavMesh,
   readTerrains,
+  meshableTerrain,
   readStreaming,
   TERRAIN_CHUNK,
   terrainChunks,
@@ -7697,6 +7799,7 @@ import {
   decodeLods,
   applyMeshVariant,
   foliageBlocks,
+  foliageInstanceMesh,
   layerCopies,
   readSplines,
   readFoliage,
@@ -7797,12 +7900,12 @@ function parseMeshScene(raw) {
     if (!stored) return null;
     let byBase = levelCache.get(mesh);
     if (!byBase) levelCache.set(mesh, byBase = /* @__PURE__ */ new Map());
-    const key = JSON.stringify(stored);
-    if (!byBase.has(key)) {
+    const key2 = JSON.stringify(stored);
+    if (!byBase.has(key2)) {
       const chain = decodeLods(mesh, stored, (level) => resolveMeshRef(level, library));
-      byBase.set(key, chain ? { meshes: [mesh, ...chain.meshes], distances: chain.distances } : null);
+      byBase.set(key2, chain ? { meshes: [mesh, ...chain.meshes], distances: chain.distances } : null);
     }
-    return byBase.get(key) ?? null;
+    return byBase.get(key2) ?? null;
   };
   const readEntry = (record, id, parentId, identity2 = false) => {
     if (typeof record.mesh !== "string") return null;
@@ -7854,7 +7957,7 @@ function parseMeshScene(raw) {
       const root = nodes.find((n) => typeof n.parent !== "string" || !n.parent);
       if (!root || size === 0) continue;
       for (let copy = 0; copy < size; copy += 1) {
-        const idOf = (key) => `${prefab.id}#${copy}:${String(key)}`;
+        const idOf = (key2) => `${prefab.id}#${copy}:${String(key2)}`;
         const rootId = idOf(root.key);
         const made = [];
         for (const node of nodes) {
@@ -7892,22 +7995,25 @@ function parseMeshScene(raw) {
   const terrains = allTerrains.filter((t) => !t.vista);
   const identity = composeModelMatrix([0, 0, 0], [0, 0, 0], [1, 1, 1]);
   const vistas = /* @__PURE__ */ new Map();
+  const terrainModels = /* @__PURE__ */ new Map();
   for (const t of allTerrains) {
     const parent = t.parent !== void 0 ? indexOf.get(t.parent) ?? -1 : -1;
     const model = parent >= 0 ? instances[parent].model : identity;
+    terrainModels.set(t.id, model);
+    const meshed = meshableTerrain(t);
     if (t.vista) {
       const parts = [];
-      const cells = t.samples - 1;
+      const cells = meshed.samples - 1;
       for (let z0 = 0; z0 < cells; z0 += TERRAIN_CHUNK) {
         for (let x0 = 0; x0 < cells; x0 += TERRAIN_CHUNK) {
-          const mesh = terrainMesh(t, 1, [x0, z0, Math.min(cells, x0 + TERRAIN_CHUNK), Math.min(cells, z0 + TERRAIN_CHUNK)]);
+          const mesh = terrainMesh(meshed, 1, [x0, z0, Math.min(cells, x0 + TERRAIN_CHUNK), Math.min(cells, z0 + TERRAIN_CHUNK)]);
           if (mesh.primitives.length > 0) parts.push({ mesh, model });
         }
       }
-      vistas.set(t.id, { id: t.id, haze: t.vista.haze, parts });
+      vistas.set(t.id, { id: t.id, haze: t.vista.haze, parts, terrain: t, model });
       continue;
     }
-    for (const chunk of terrainChunks(t)) {
+    for (const chunk of terrainChunks(meshed)) {
       instances.push({
         mesh: chunk.mesh,
         ...chunk.lods.length > 0 ? { frames: chunk.lods } : {},
@@ -7920,6 +8026,7 @@ function parseMeshScene(raw) {
         props: {},
         physics: null,
         terrain: true,
+        ground: t.id,
         ...t.castShadows ? { casts: true } : {},
         detail: chunk.detail
       });
@@ -7949,6 +8056,8 @@ function parseMeshScene(raw) {
         cards = text2 ? load(text2) : null;
       }
       const swap = cards ? read.layer.impostor.distance : 0;
+      const single = foliageInstanceMesh(read.layer, mesh);
+      const chain = cards ? { meshes: [single, foliageInstanceMesh({ wind: 0 }, cards)], distances: [swap] } : null;
       if (cards) {
         foliageBlocks(t, { ...read.layer, wind: 0 }, cards, copies).forEach((block, k) => {
           instances.push({
@@ -7980,7 +8089,7 @@ function parseMeshScene(raw) {
           terrain: true,
           // On a terrain that casts, its foliage casts too (boulders shade the snow).
           ...t.castShadows ? { casts: true } : {},
-          foliage: { cull: read.layer.cull, center: block.center, radius: block.radius, ...cards ? { swap: { distance: swap, far: false } } : {} }
+          foliage: { cull: read.layer.cull, center: block.center, radius: block.radius, ...cards ? { swap: { distance: swap, far: false } } : {}, copies: { mesh: single, matrices: block.matrices, lod: chain } }
         });
       });
     }
@@ -7988,7 +8097,7 @@ function parseMeshScene(raw) {
   if (instances.length === 0) return null;
   const audio = parseSceneAudio(parsed.audio);
   const lighting = parseSceneLighting(parsed.lighting);
-  const pools = [...poolRoots.entries()].map(([prefab, ids]) => ({ prefab, roots: ids.map((id) => indexOf.get(id)) }));
+  const pools = [...poolRoots.entries()].map(([prefab, ids2]) => ({ prefab, roots: ids2.map((id) => indexOf.get(id)) }));
   const placed = instances.filter((instance) => !instance.pooled && !instance.terrain && (instance.level === void 0 || instance.level === 0));
   const physicsWorld = readPhysicsWorld(parsed.physicsWorld);
   const core = parsed.core === "direct" ? "direct" : void 0;
@@ -8027,7 +8136,7 @@ function parseMeshScene(raw) {
   return {
     instances,
     bounds: sceneBounds(placed.length > 0 ? placed : instances),
-    ...terrains.length > 0 ? { terrains, extent: sceneBounds(instances.filter((instance) => !instance.pooled)) } : {},
+    ...terrains.length > 0 ? { terrains, terrainModels, extent: sceneBounds(instances.filter((instance) => !instance.pooled)) } : {},
     ...vistas.size > 0 ? { vistas: [...vistas.values()] } : {},
     ...readStreaming(parsed.streaming) ? { streaming: readStreaming(parsed.streaming) } : {},
     ...effects.length > 0 ? { effects } : {},
@@ -8054,7 +8163,7 @@ function streamGroups(scene) {
   });
   const groups = [];
   instances.forEach((root, r) => {
-    if (root.parent >= 0 || root.pooled || root.terrain || root.alwaysLoaded || root.level !== void 0) return;
+    if (root.parent >= 0 || root.pooled || root.terrain && !(scene.streaming?.cell && root.foliage) || root.alwaysLoaded || root.level !== void 0) return;
     const members = [];
     const walk = (i) => {
       members.push(i);
@@ -8320,7 +8429,7 @@ function jointFrames(spec, self, target) {
 }
 function fitShape(spec, mesh, scale) {
   const b = meshBounds2(mesh) ?? { min: [-0.5, -0.5, -0.5], max: [0.5, 0.5, 0.5] };
-  const half = [
+  const half2 = [
     Math.max(5e-3, (b.max[0] - b.min[0]) / 2 * scale[0]),
     Math.max(5e-3, (b.max[1] - b.min[1]) / 2 * scale[1]),
     Math.max(5e-3, (b.max[2] - b.min[2]) / 2 * scale[2])
@@ -8332,10 +8441,10 @@ function fitShape(spec, mesh, scale) {
   ];
   switch (spec.shape) {
     case "sphere":
-      return { kind: "sphere", radius: Math.max(half[0], half[1], half[2]), offset };
+      return { kind: "sphere", radius: Math.max(half2[0], half2[1], half2[2]), offset };
     case "capsule": {
-      const radius = Math.max(0.01, Math.min(half[0], half[2]));
-      return { kind: "capsule", radius, halfHeight: Math.max(0, half[1] - radius), offset };
+      const radius = Math.max(0.01, Math.min(half2[0], half2[2]));
+      return { kind: "capsule", radius, halfHeight: Math.max(0, half2[1] - radius), offset };
     }
     case "mesh": {
       const positions = [];
@@ -8350,7 +8459,7 @@ function fitShape(spec, mesh, scale) {
       return { kind: "mesh", vertices: Float32Array.from(positions), indices: Uint32Array.from(indices) };
     }
     default:
-      return { kind: "box", halfExtents: half, offset };
+      return { kind: "box", halfExtents: half2, offset };
   }
 }
 function castShape(kind, a, b, c) {
@@ -8626,8 +8735,17 @@ import {
   isSkinned,
   restPose,
   sampleClip,
+  MotionMatcher,
+  buildMatchDatabase,
+  desiredTrajectory,
+  matchSetupFor,
+  rootMotion,
+  stepSpringBones,
+  sampleMorphs,
   skinMatrices
 } from "@cartbox/editor";
+var MATCH_FADE = 0.2;
+var MATCH_HALF_LIFE = 0.2;
 function animatedObjects(scene) {
   const out = [];
   scene?.instances.forEach((inst, i) => {
@@ -8688,6 +8806,8 @@ var AnimationSession = class {
     this.scene = scene;
     this.playback = /* @__PURE__ */ new Map();
     this.tick = 0;
+    /** The last step's length, which the spring bones (F7d) advance by. */
+    this.lastDt = 1 / 60;
     this.cache = null;
     /** Each object's final pose (after any adjustment, e.g. IK) as last skinned. */
     this.lastPose = /* @__PURE__ */ new Map();
@@ -8699,7 +8819,7 @@ var AnimationSession = class {
     const params = new Float64Array(machine?.params.length ?? 0);
     machine?.params.forEach((p, i) => params[i] = p.kind === "trigger" ? 0 : p.initial);
     const current = machine ? stateTrack(machine, 0) : clipTrack((inst.mesh.clips?.length ?? 0) > 0 ? 0 : -1);
-    return { mesh: inst.mesh, machine, params, current, from: null, fade: 0, fadeElapsed: 0, fired: [] };
+    return { mesh: inst.mesh, machine, params, current, from: null, fade: 0, fadeElapsed: 0, fired: [], springs: { tails: [], previous: [] }, matcher: null, request: null, moving: [0, 0], rootDelta: null };
   }
   /** Crossfade `p` into `next` over `fade` seconds. */
   switchTo(p, next, fade) {
@@ -8740,11 +8860,22 @@ var AnimationSession = class {
   }
   /** Take any transition that's ready, then advance every playback one tick (firing clip events). */
   step(dt) {
-    for (const p of this.playback.values()) {
+    this.lastDt = dt;
+    for (const [object, p] of this.playback) {
       p.fired = [];
+      if (p.request) {
+        const m = p.matcher ?? (p.matcher = this.matcherFor(p));
+        const keep = Math.exp(-Math.LN2 * dt / MATCH_HALF_LIFE);
+        const goal = p.request.velocity;
+        p.moving = [goal[0] + (p.moving[0] - goal[0]) * keep, goal[1] + (p.moving[1] - goal[1]) * keep];
+        if (m && m.update(dt, desiredTrajectory(goal, p.request.facing, void 0, p.moving, MATCH_HALF_LIFE))) this.play(object, m.clip, MATCH_FADE, 1, true, m.time);
+        p.request = null;
+      }
       if (p.machine && p.current.state >= 0) this.transition(p);
       const before = this.cursor(p, p.current);
+      const shownBefore = this.shownClip(p, p.current);
       this.advance(p, p.current, dt);
+      p.rootDelta = this.rootStep(p, shownBefore, this.shownClip(p, p.current));
       if (p.machine) this.fireEvents(p, before, this.cursor(p, p.current));
       p.current.fresh = false;
       if (p.from) {
@@ -8754,6 +8885,45 @@ var AnimationSession = class {
       }
     }
     this.tick += 1;
+  }
+  /**
+   * Ask an object's motion matcher (F7e) for this tick: moving at `velocity` (m/s; x sideways, z forward, in its
+   * own frame) and turning to face `facing` (radians from its heading). Ask every tick it should keep matching.
+   */
+  matchMotion(object, velocity, facing) {
+    const p = this.playback.get(object);
+    if (p) p.request = { velocity, facing };
+  }
+  /** The clip an object shows now (−1 for none). */
+  currentClip(object) {
+    const p = this.playback.get(object);
+    return p ? this.shownClip(p, p.current).clip : -1;
+  }
+  /** How far an object's root went over the last step (F7e): forward, sideways and the turn, or null. */
+  rootMotion(object) {
+    return this.playback.get(object)?.rootDelta ?? null;
+  }
+  /** A playback's matcher, its database built from its clips (all looping), or null without two named feet. */
+  matcherFor(p) {
+    const skin = p.mesh.skin;
+    const clips = p.mesh.clips ?? [];
+    const setup = skin ? matchSetupFor(skin) : null;
+    if (!skin || !setup || clips.length === 0) return null;
+    const loops = clips.map(() => true);
+    return new MotionMatcher(skin, clips, buildMatchDatabase(skin, clips, setup, loops), loops);
+  }
+  /** The root's travel between two moments of the same clip (wrapping once), or null. */
+  rootStep(p, a, b) {
+    const skin = p.mesh.skin;
+    const clip = a.clip >= 0 && a.clip === b.clip ? p.mesh.clips?.[a.clip] : void 0;
+    if (!skin || !clip) return null;
+    const root = Math.max(0, skin.joints.findIndex((j) => j.parent < 0));
+    if (b.time >= a.time) return rootMotion(skin, clip, a.time, b.time, root);
+    const x = rootMotion(skin, clip, a.time, clip.duration, root);
+    const y = rootMotion(skin, clip, 0, b.time, root);
+    const c = Math.cos(x.turn);
+    const s = Math.sin(x.turn);
+    return { dx: x.dx + c * y.dx + s * y.dz, dz: x.dz - s * y.dx + c * y.dz, turn: x.turn + y.turn };
   }
   /** How far through its cycle a track is (0..1 per pass of its clip; loops keep counting). */
   progress(p, track) {
@@ -8858,10 +9028,25 @@ var AnimationSession = class {
       const pose = this.pose(p, p.current);
       const faded = p.from && p.fade > 0 ? blendPoses(this.pose(p, p.from), pose, Math.min(1, p.fadeElapsed / p.fade)) : pose;
       adjust?.(object, p.mesh, faded);
+      if (p.mesh.springs?.length) stepSpringBones(p.mesh.skin, faded, p.mesh.springs, p.springs, this.lastDt);
       this.lastPose.set(object, faded);
       out.set(object, skinMatrices(p.mesh.skin, faded));
     }
     this.cache = { tick: this.tick, matrices: out };
+    return out;
+  }
+  /**
+   * The morph weights each animated object's clip gives now (F7b; object → weights), for the clips that carry
+   * them: the clip the current track shows, at its time. Objects whose clips have none are left out.
+   */
+  morphs(visible = () => true) {
+    const out = /* @__PURE__ */ new Map();
+    for (const [object, p] of this.playback) {
+      if (!visible(object)) continue;
+      const shown = this.shownClip(p, p.current);
+      const clip = shown.clip >= 0 ? p.mesh.clips?.[shown.clip] : void 0;
+      if (clip?.morphs) out.set(object, sampleMorphs(clip, shown.time, false));
+    }
     return out;
   }
   /** Recompute the matrices on the next request (something that shapes the pose changed). */
@@ -9030,7 +9215,7 @@ var TimelineSession = class {
 import { timelineValueNames as timelineValueNames2 } from "@cartbox/editor";
 function sceneNeedsRuntime(scene, { physics = true } = {}) {
   return Boolean(
-    scene && (physics && sceneHasPhysics(scene) || (scene.pools?.length ?? 0) > 0 || animatedObjects(scene).length > 0 || (scene.timelines?.length ?? 0) > 0 || (scene.levels?.length ?? 0) > 0 || Boolean(scene.navmesh) || Boolean(scene.streaming) || (scene.effects?.length ?? 0) > 0 || (scene.decals?.length ?? 0) > 0 || (scene.debris?.length ?? 0) > 0 || (scene.audio?.sounds.length ?? 0) > 0 || (scene.components?.length ?? 0) > 0)
+    scene && (physics && sceneHasPhysics(scene) || (scene.pools?.length ?? 0) > 0 || animatedObjects(scene).length > 0 || (scene.timelines?.length ?? 0) > 0 || (scene.levels?.length ?? 0) > 0 || Boolean(scene.navmesh) || Boolean(scene.streaming) || (scene.effects?.length ?? 0) > 0 || (scene.decals?.length ?? 0) > 0 || (scene.debris?.length ?? 0) > 0 || scene.instances.some((i) => i.mesh.fracture) || (scene.audio?.sounds.length ?? 0) > 0 || (scene.components?.length ?? 0) > 0)
   );
 }
 var luaString = (s) => JSON.stringify(s);
@@ -9091,7 +9276,7 @@ function runtimeSdkLua(scene, layout, { physics: engine = true } = {}) {
 ${physics ? PHYSICS_CALLS() : ""}
 ${pools.length > 0 ? SPAWN_CALLS(pools) : ""}
 ${ANIM_CALLS(scene)}
-${TIMELINE_CALLS(scene)}${LEVEL_CALLS(scene)}${scene.navmesh ? NAV_CALLS() : ""}${scene.streaming ? STREAM_CALLS() : ""}${BURST_CALLS(scene)}${DECAL_CALLS(scene)}${DEBRIS_CALLS(scene)}${SOUND_CALLS(scene)}${SHIELD_CALLS()}${PLACE_CALLS()}end`;
+${TIMELINE_CALLS(scene)}${LEVEL_CALLS(scene)}${scene.navmesh ? NAV_CALLS() : ""}${scene.streaming ? STREAM_CALLS() : ""}${BURST_CALLS(scene)}${DECAL_CALLS(scene)}${DEBRIS_CALLS(scene)}${SOUND_CALLS(scene)}${SHIELD_CALLS()}${PLACE_CALLS()}${SHATTER_CALLS(scene)}end`;
 }
 function PHYSICS_CALLS() {
   return `  cartbox.physics = function() return _live() end
@@ -9325,6 +9510,15 @@ function PLACE_CALLS() {
     local key = (math.floor(tint or 0) & 15) | (((front and front ~= 0) and 1 or 0) << 4)
     if _look[i] == key then return end -- it stands: send changes only
     if _cmd(${PHYS_OP_LOOK}, i | (key << 16)) then _look[i] = key end
+  end
+`;
+}
+function SHATTER_CALLS(scene) {
+  if (!scene.instances.some((i) => i.mesh.fracture)) return "";
+  return `  cartbox.shatter = function(o, x, y, z, strength)
+    local i = _obj(o)
+    if i == nil then return end
+    _cmd(${PHYS_OP_SHATTER}, i, x or 0, y or 0, z or 0, strength or 6)
   end
 `;
 }
@@ -9688,10 +9882,10 @@ var AgentCrowd = class {
     this.graph = new NavGraph(mesh);
   }
   /** Place an agent (creating it): a walker, or an obstacle the cart moves. */
-  place(key, pos, speed, radius, obstacle) {
-    const existing = this.agents.get(key);
+  place(key2, pos, speed, radius, obstacle) {
+    const existing = this.agents.get(key2);
     const a = existing ?? {
-      key,
+      key: key2,
       pos: [0, 0, 0],
       radius,
       speed,
@@ -9718,11 +9912,11 @@ var AgentCrowd = class {
       a.path = [];
       a.repath = 0;
     }
-    this.agents.set(key, a);
+    this.agents.set(key2, a);
   }
   /** Send an agent toward a point (speed > 0 changes its speed). */
-  goto(key, goal, speed = 0) {
-    const a = this.agents.get(key);
+  goto(key2, goal, speed = 0) {
+    const a = this.agents.get(key2);
     if (!a || a.obstacle) return;
     if (speed > 0) a.speed = speed;
     const moved = !a.goal || Math.hypot(goal[0] - a.goal[0], goal[1] - a.goal[1], goal[2] - a.goal[2]) > 0.75;
@@ -9732,15 +9926,15 @@ var AgentCrowd = class {
       a.path = [];
     }
   }
-  stop(key) {
-    const a = this.agents.get(key);
+  stop(key2) {
+    const a = this.agents.get(key2);
     if (!a) return;
     a.goal = null;
     a.path = [];
     a.noPath = false;
   }
-  remove(key) {
-    this.agents.delete(key);
+  remove(key2) {
+    this.agents.delete(key2);
   }
   /** Stand a point on the floor beneath it (or the nearest floor), unchanged when there's none. */
   settle(pos) {
@@ -9900,8 +10094,8 @@ var AgentCrowd = class {
     }));
   }
   /** One agent's current path corners (for inspection and tests). */
-  path(key) {
-    return this.agents.get(key)?.path ?? [];
+  path(key2) {
+    return this.agents.get(key2)?.path ?? [];
   }
 };
 function distanceToSegment(p, a, b) {
@@ -9978,6 +10172,8 @@ var RuntimeChannel = class {
     this.decals = [];
     /** Debris the cart threw since the renderer last took it. */
     this.debris = [];
+    /** Objects the cart broke this tick (F8c). */
+    this.shatters = [];
     this.sounds = [];
     /** Standing shield effects (cartbox.shield): object → flare, shimmer, camo. */
     this.shieldStates = /* @__PURE__ */ new Map();
@@ -10087,9 +10283,11 @@ var RuntimeChannel = class {
       } else if (cmd.op === PHYS_OP_UNPLACE) this.placed.delete(cmd.a);
       else if (cmd.op === PHYS_OP_LOOK) {
         const object = cmd.a & 65535;
-        const key = cmd.a >>> 16 & 31;
-        if (key === 0) this.lookStates.delete(object);
-        else if (object < this.scene.instances.length) this.lookStates.set(object, { tint: key & 15, front: (key & 16) !== 0 });
+        const key2 = cmd.a >>> 16 & 31;
+        if (key2 === 0) this.lookStates.delete(object);
+        else if (object < this.scene.instances.length) this.lookStates.set(object, { tint: key2 & 15, front: (key2 & 16) !== 0 });
+      } else if (cmd.op === PHYS_OP_SHATTER) {
+        if (this.shatters.length < MAX_BURSTS_QUEUED && cmd.a >= 0 && cmd.a < this.scene.instances.length) this.shatters.push({ object: cmd.a, at: [cmd.v[0], cmd.v[1], cmd.v[2]], strength: cmd.v[3] });
       } else if (cmd.op === PHYS_OP_DEBRIS) {
         if (this.debris.length < MAX_BURSTS_QUEUED)
           this.debris.push({ debris: cmd.a & 255, at: [cmd.v[0], cmd.v[1], cmd.v[2]], velocity: [cmd.v[3], cmd.v[4], cmd.v[5]], scale: (cmd.a >>> 8 & 65535) / 16 });
@@ -10121,20 +10319,20 @@ var RuntimeChannel = class {
       this.holo.values.set(cmd.a, cmd.v[0]);
       return;
     }
-    const key = cmd.a & 65535;
+    const key2 = cmd.a & 65535;
     const chunk = cmd.a >>> 16;
     const kind = cmd.op === PHYS_OP_UI_TEXT ? "text" : "list";
-    let part = this.holoParts.get(key);
+    let part = this.holoParts.get(key2);
     if (chunk === 0) {
       part = { kind, length: Math.max(0, Math.round(cmd.v[0])), items: [...cmd.v.slice(1)] };
-      this.holoParts.set(key, part);
+      this.holoParts.set(key2, part);
     } else if (part && part.kind === kind) part.items.push(...cmd.v);
     else return;
     const have = kind === "text" ? part.items.length * 2 : part.items.length;
     if (have < part.length) return;
-    this.holoParts.delete(key);
+    this.holoParts.delete(key2);
     if (kind === "list") {
-      this.holo.values.set(key, part.items.slice(0, part.length));
+      this.holo.values.set(key2, part.items.slice(0, part.length));
       return;
     }
     const chars = [];
@@ -10142,7 +10340,7 @@ var RuntimeChannel = class {
       const c = Math.round(code);
       chars.push(c >> 8 & 255, c & 255);
     }
-    this.holo.values.set(key, String.fromCharCode(...chars.slice(0, part.length)));
+    this.holo.values.set(key2, String.fromCharCode(...chars.slice(0, part.length)));
   }
   /** Go limp (v0 = 1) with a shove, or take the animation back (v0 = 0). */
   ragdollCommand(object, v) {
@@ -10178,16 +10376,16 @@ var RuntimeChannel = class {
     return this.ragdollBoxes;
   }
   /** A navigation agent command (see PHYS_OP_AGENT). */
-  agentCommand(op, key, v) {
+  agentCommand(op, key2, v) {
     const crowd = this.crowd;
-    if (!crowd || key < 0 || key > 1023) return;
+    if (!crowd || key2 < 0 || key2 > 1023) return;
     const at = [v[0], v[1], v[2]];
     if (op === PHYS_OP_AGENT) {
-      if (crowd.state().length >= PHYS_MAX_AGENTS && !crowd.state().some((a) => a.key === key)) return;
-      crowd.place(key, at, v[3] > 0 ? v[3] : 3, v[4] > 0 ? v[4] : crowd.graph.mesh.agent.radius, v[5] >= 0.5);
-    } else if (op === PHYS_OP_AGENT_GOTO) crowd.goto(key, at, v[3]);
-    else if (op === PHYS_OP_AGENT_STOP) crowd.stop(key);
-    else crowd.remove(key);
+      if (crowd.state().length >= PHYS_MAX_AGENTS && !crowd.state().some((a) => a.key === key2)) return;
+      crowd.place(key2, at, v[3] > 0 ? v[3] : 3, v[4] > 0 ? v[4] : crowd.graph.mesh.agent.radius, v[5] >= 0.5);
+    } else if (op === PHYS_OP_AGENT_GOTO) crowd.goto(key2, at, v[3]);
+    else if (op === PHYS_OP_AGENT_STOP) crowd.stop(key2);
+    else crowd.remove(key2);
   }
   /** A level switch the cart asked for since the last call (-1 for none); the player loads and activates it. */
   takeLevelRequest() {
@@ -10210,6 +10408,12 @@ var RuntimeChannel = class {
     return out;
   }
   /** The debris thrown since the last call (the renderer simulates and draws it). */
+  /** The objects the cart broke since the last call (F8c). */
+  takeShatters() {
+    const out = this.shatters;
+    this.shatters = [];
+    return out;
+  }
   takeDebris() {
     const out = this.debris;
     this.debris = [];
@@ -10258,6 +10462,14 @@ var RuntimeChannel = class {
       if (pose && mesh?.skin && world) w.position = transform2(world, jointPosition(mesh.skin, pose, w.joint));
     }
     return matrices;
+  }
+  /** The morph weights the animated objects' clips give now (F7b; object → weights), for those being drawn. */
+  morphs() {
+    if (!this.animation) return /* @__PURE__ */ new Map();
+    return this.animation.morphs((object) => {
+      const pooled = this.scene.instances[object]?.pooled;
+      return !pooled || this.active.has(pooled.root);
+    });
   }
   /** Start a timeline cue on an object: a state of its state machine by that name, else a clip. */
   cue(object, name, fade, loop) {
@@ -10346,10 +10558,10 @@ var RuntimeChannel = class {
     this.animation?.invalidate();
   }
   watch(object, joint) {
-    const key = `${object}:${joint}`;
+    const key2 = `${object}:${joint}`;
     const joints = this.scene.instances[object]?.mesh.skin?.joints.length ?? 0;
-    if (this.watched.has(key) || joint < 0 || joint >= joints || this.watched.size >= PHYS_MAX_JOINTS) return;
-    this.watched.set(key, { object, joint, position: null });
+    if (this.watched.has(key2) || joint < 0 || joint >= joints || this.watched.size >= PHYS_MAX_JOINTS) return;
+    this.watched.set(key2, { object, joint, position: null });
   }
   /** Apply an object's standing IK (first) and look-at requests to its pose, then a ragdoll over it all. */
   solve(object, mesh, pose, worldOf) {
@@ -10901,8 +11113,8 @@ function renderSceneBackdrop(out, width, height, layers, spec, frame, base) {
 }
 
 // src/scene/sceneComposite.ts
-function matchesKey(r, g, b, key, tolerance) {
-  return Math.abs(r - key[0]) <= tolerance && Math.abs(g - key[1]) <= tolerance && Math.abs(b - key[2]) <= tolerance;
+function matchesKey(r, g, b, key2, tolerance) {
+  return Math.abs(r - key2[0]) <= tolerance && Math.abs(g - key2[1]) <= tolerance && Math.abs(b - key2[2]) <= tolerance;
 }
 function compositeOverBackdrop(cartFrame, backdrop, width, height, keyRgb, tolerance = 0, out) {
   const target = out ?? new Uint8ClampedArray(width * height * 4);
@@ -11017,11 +11229,11 @@ var AnimatedForegroundSurface = class {
   }
   region(placement) {
     const { page, tile, tilesW, tilesH } = placement.region;
-    const key = `${page}:${tile}:${tilesW}:${tilesH}`;
-    let image = this.regionCache.get(key);
+    const key2 = `${page}:${tile}:${tilesW}:${tilesH}`;
+    let image = this.regionCache.get(key2);
     if (!image) {
       image = this.source.readRegion(page, tile, tilesW, tilesH);
-      this.regionCache.set(key, image);
+      this.regionCache.set(key2, image);
     }
     return image;
   }
@@ -11263,21 +11475,21 @@ var ParticleOverlaySurface = class {
   /** Straight-alpha composite one particle: a vertical streak, or a square dot. */
   draw(particle) {
     if (particle.alpha <= 0) return;
-    const half = Math.max(0, Math.floor(particle.size / 2));
+    const half2 = Math.max(0, Math.floor(particle.size / 2));
     const originX = Math.round(particle.x);
     if (particle.streak > 0) {
       const top = Math.round(particle.y);
       const bottom = top + Math.round(particle.streak);
       for (let y = top; y <= bottom; y += 1) {
-        for (let dx = -half; dx <= half; dx += 1) {
+        for (let dx = -half2; dx <= half2; dx += 1) {
           this.blend(originX + dx, y, particle);
         }
       }
       return;
     }
     const originY = Math.round(particle.y);
-    for (let dy = -half; dy <= half; dy += 1) {
-      for (let dx = -half; dx <= half; dx += 1) {
+    for (let dy = -half2; dy <= half2; dy += 1) {
+      for (let dx = -half2; dx <= half2; dx += 1) {
         this.blend(originX + dx, originY + dy, particle);
       }
     }
@@ -11345,8 +11557,206 @@ var DynamicResolution = class {
   }
 };
 
+// src/render/gpuPacing.ts
+var GPU_RENDER_SCALES = [1, 0.85, 0.7, 0.6, 0.5, 0.42, 0.35];
+var GPU_SLOW_MS = 45;
+var GPU_FAST_MS = 22;
+var GPU_CLIMB_MS = 3e3;
+var GPU_TARGET_MS = 30;
+var SETTLE_MS = 600;
+var SETTLE_LANDINGS = 2;
+var STALL_MS = 1200;
+var BEHIND_RATIO = 1.4;
+var BEHIND_SLACK_MS = 4;
+var SMOOTHING2 = 0.3;
+function stepFor(scale, ms, targetMs) {
+  const wanted = scale * Math.sqrt(targetMs / Math.max(ms, 1e-3));
+  const index = GPU_RENDER_SCALES.findIndex((s) => s <= wanted + 1e-6);
+  return index < 0 ? GPU_RENDER_SCALES.length - 1 : index;
+}
+var GpuPacer = class {
+  constructor() {
+    /** The current step of {@link GPU_RENDER_SCALES}. */
+    this.step = 0;
+    /** Smoothed time between landed frames (ms), and between presented ones. */
+    this.landMs = null;
+    this.presentMs = null;
+    this.lastLanded = -1;
+    this.lastLandAt = 0;
+    this.lastPresentAt = 0;
+    this.changedAt = 0;
+    this.landingsSinceChange = 0;
+    this.fastSince = null;
+  }
+  get scale() {
+    return GPU_RENDER_SCALES[this.step];
+  }
+  /**
+   * How slow the GPU is (ms per frame) when it's what holds the 3D back, else
+   * null: the smoothed landed interval, or the current stall if longer.
+   */
+  gpuBoundMs(now) {
+    if (this.landMs === null || this.presentMs === null) return null;
+    const ms = Math.max(this.landMs, now - this.lastLandAt);
+    return ms > this.presentMs * BEHIND_RATIO + BEHIND_SLACK_MS ? ms : null;
+  }
+  /** Start afresh (a new scene, a resume after a pause): the scale stays, the timings go. */
+  reset(now) {
+    this.landMs = null;
+    this.presentMs = null;
+    this.lastLanded = -1;
+    this.lastPresentAt = 0;
+    this.lastLandAt = now;
+    this.changedAt = now;
+    this.landingsSinceChange = 0;
+    this.fastSince = null;
+  }
+  /**
+   * One presented frame at `now`, `landed` GPU frames having come back so far:
+   * the step to render the next at.
+   */
+  update(now, landed) {
+    if (this.lastPresentAt > 0) {
+      const ms = now - this.lastPresentAt;
+      if (ms > 1e3) {
+        this.reset(now);
+        this.lastPresentAt = now;
+        this.lastLanded = landed;
+        return this.step;
+      }
+      this.presentMs = this.presentMs === null ? ms : this.presentMs + (ms - this.presentMs) * SMOOTHING2;
+    }
+    this.lastPresentAt = now;
+    if (this.lastLanded < 0) {
+      this.lastLanded = landed;
+      this.lastLandAt = now;
+      return this.step;
+    }
+    if (landed > this.lastLanded) {
+      const ms = (now - this.lastLandAt) / (landed - this.lastLanded);
+      this.landMs = this.landMs === null ? ms : this.landMs + (ms - this.landMs) * SMOOTHING2;
+      this.landingsSinceChange += landed - this.lastLanded;
+      this.lastLanded = landed;
+      this.lastLandAt = now;
+    }
+    const sinceChange = now - this.changedAt;
+    const stalled = now - this.lastLandAt;
+    const bound = this.gpuBoundMs(now) ?? (this.presentMs !== null && stalled > STALL_MS ? stalled : null);
+    if (bound !== null && bound > GPU_SLOW_MS && this.step < GPU_RENDER_SCALES.length - 1) {
+      const settled = sinceChange >= SETTLE_MS && (this.landingsSinceChange >= SETTLE_LANDINGS || stalled > STALL_MS);
+      if (settled) this.change(Math.max(this.step + 1, stepFor(this.scale, bound, GPU_TARGET_MS)), now);
+      return this.step;
+    }
+    const fast = this.step > 0 && this.landMs !== null && this.landMs < GPU_FAST_MS && stalled < GPU_FAST_MS * 3;
+    if (!fast) this.fastSince = null;
+    else if (this.fastSince === null) this.fastSince = now;
+    else if (now - this.fastSince >= GPU_CLIMB_MS && sinceChange >= GPU_CLIMB_MS) this.change(this.step - 1, now);
+    return this.step;
+  }
+  change(step, now) {
+    step = Math.min(GPU_RENDER_SCALES.length - 1, Math.max(0, step));
+    if (step === this.step) return;
+    this.step = step;
+    this.changedAt = now;
+    this.landingsSinceChange = 0;
+    this.fastSince = null;
+    this.landMs = null;
+  }
+};
+function expandBilinear(src, sw, sh, dst, dw, dh) {
+  const from = new Uint32Array(src.buffer, src.byteOffset, sw * sh);
+  const to = new Uint32Array(dst.buffer, dst.byteOffset, dw * dh);
+  const x0 = new Int32Array(dw);
+  const x1 = new Int32Array(dw);
+  const wx = new Int32Array(dw);
+  for (let x = 0; x < dw; x += 1) {
+    const sx = Math.min(sw - 1, Math.max(0, (x + 0.5) * sw / dw - 0.5));
+    const i = Math.floor(sx);
+    x0[x] = i;
+    x1[x] = Math.min(sw - 1, i + 1);
+    wx[x] = Math.round((sx - i) * 256);
+  }
+  const rows = [new Uint32Array(dw), new Uint32Array(dw)];
+  const ids2 = [-1, -1];
+  const across = (sy, row) => {
+    const base = sy * sw;
+    for (let x = 0; x < dw; x += 1) {
+      const a = from[base + x0[x]];
+      const b = from[base + x1[x]];
+      const w = wx[x];
+      if (w === 0 || a === b) {
+        row[x] = a;
+        continue;
+      }
+      const iw = 256 - w;
+      const rb = (a & 16711935) * iw + (b & 16711935) * w >>> 8 & 16711935;
+      const ga = (a >>> 8 & 16711935) * iw + (b >>> 8 & 16711935) * w >>> 8 & 16711935;
+      row[x] = (rb | ga << 8) >>> 0;
+    }
+  };
+  const rowFor = (sy) => {
+    if (ids2[0] === sy) return rows[0];
+    if (ids2[1] === sy) return rows[1];
+    const slot = ids2[0] === sy - 1 ? 1 : 0;
+    across(sy, rows[slot]);
+    ids2[slot] = sy;
+    return rows[slot];
+  };
+  for (let y = 0; y < dh; y += 1) {
+    const sy = Math.min(sh - 1, Math.max(0, (y + 0.5) * sh / dh - 0.5));
+    const i = Math.floor(sy);
+    const j = Math.min(sh - 1, i + 1);
+    const w = Math.round((sy - i) * 256);
+    const out = y * dw;
+    const top = rowFor(i);
+    if (w === 0 || i === j) {
+      to.set(top, out);
+      continue;
+    }
+    const bottom = rowFor(j);
+    const iw = 256 - w;
+    for (let x = 0; x < dw; x += 1) {
+      const a = top[x];
+      const b = bottom[x];
+      if (a === b) {
+        to[out + x] = a;
+        continue;
+      }
+      const rb = (a & 16711935) * iw + (b & 16711935) * w >>> 8 & 16711935;
+      const ga = (a >>> 8 & 16711935) * iw + (b >>> 8 & 16711935) * w >>> 8 & 16711935;
+      to[out + x] = (rb | ga << 8) >>> 0;
+    }
+  }
+}
+function resampleNearest(src, sw, sh, dw, dh) {
+  const out = new Uint8Array(dw * dh * 4);
+  const from = new Uint32Array(src.buffer, src.byteOffset, sw * sh);
+  const to = new Uint32Array(out.buffer);
+  for (let y = 0; y < dh; y += 1) {
+    const sy = Math.min(sh - 1, Math.floor(y * sh / dh));
+    for (let x = 0; x < dw; x += 1) to[y * dw + x] = from[sy * sw + Math.min(sw - 1, Math.floor(x * sw / dw))];
+  }
+  return out;
+}
+
 // src/mesh/MeshOverlaySurface.ts
 import {
+  atmosphereLighting,
+  atmosphereLuts,
+  atmosphereKey,
+  cloudShadedLighting,
+  resolveClouds,
+  skyRadiance,
+  atmospherePanorama,
+  atmospherePanoramaRows,
+  dynamicGiGrid,
+  emptyProbeVolume,
+  resolveDynamicGi,
+  resolveScreenSpaceGi,
+  MOON_ALBEDO,
+  sunTransmittance,
+  atmosphereSun,
+  sunDiscRadiance,
   bakeReflectionProbesAsync,
   ParticleSystem,
   DecalSystem,
@@ -11368,6 +11778,7 @@ import {
   childIndices,
   computeEnvironmentAverage,
   createLiveSkinnedMesh,
+  hasMorphTargets,
   downsamplePanorama,
   isSkinned as isSkinned2,
   renderSkyBackground,
@@ -11375,15 +11786,22 @@ import {
   tintMaskTexture,
   composeModelMatrix as composeModelMatrix4,
   multiplyMat4 as multiplyMat43,
+  bakeOctahedralImpostor,
   sceneLightingEnvironment,
   sceneLightingKeyDirection,
   vistaBounds,
   sceneLightingTonemap,
   adaptExposure,
   blendPostVolumes,
+  cameraExposure,
+  cocTerms,
+  resolvePhysicalCamera,
+  shutterFraction,
+  DEFAULT_AUTO_EXPOSURE,
   frameLuminance,
   postVolumeReach,
   withDescendants,
+  decodeHdrLightmap,
   bakeCloudLayer,
   base64ToBytes as base64ToBytes2,
   decodeRadianceHdr,
@@ -11397,7 +11815,19 @@ import {
   probeBounce,
   readProbeBake,
   relightProbes,
-  surfelLight
+  surfelLight,
+  breakApart,
+  chunkMatrix,
+  stepChunks,
+  emitterFromEffect,
+  precipitationOrigin,
+  lightColor as lightColor2,
+  Ocean,
+  RippleField,
+  resolveWaterLook,
+  resolveWeather,
+  weatherActive,
+  weatherEmitters
 } from "@cartbox/editor";
 
 // src/mesh/dynamicLights.ts
@@ -11405,14 +11835,14 @@ import { areaAsPunctual, lightColor } from "@cartbox/editor";
 function withCartSun(lighting, sun) {
   const l = Math.hypot(...sun.direction) || 1;
   const direction = [sun.direction[0] / l, sun.direction[1] / l, sun.direction[2] / l];
-  const key = { kind: "directional", direction, color: [...sun.color], intensity: 1 };
+  const key2 = { kind: "directional", direction, color: [...sun.color], intensity: 1 };
   const at = lighting.lights.findIndex((x) => x.kind === "directional");
   const authored = at < 0 ? null : lighting.lights[at];
   const sky = lighting.sky;
   return {
     ...lighting,
     // The cart's sun is the colour it says: the key's temperature (F2e) goes with the key.
-    lights: at < 0 ? [key, ...lighting.lights] : lighting.lights.map((x, i) => i === at ? { ...withoutTemperature(x), ...key } : x),
+    lights: at < 0 ? [key2, ...lighting.lights] : lighting.lights.map((x, i) => i === at ? { ...withoutTemperature(x), ...key2 } : x),
     ...sky ? {
       sky: {
         ...sky,
@@ -11433,8 +11863,8 @@ function bounceLightsFor(authored, frame, cart) {
   const authoredKey = authored.lights.find((x) => x.kind === "directional");
   const reference = authoredKey ? lightColor(authoredKey).map((c) => c * authoredKey.intensity) : [1, 1, 1];
   const brightness = 0.2126 * reference[0] + 0.7152 * reference[1] + 0.0722 * reference[2] || 1;
-  const key = frame.lights.find((x) => x.kind === "directional");
-  const sun = key?.direction ? { direction: key.direction, color: [0, 1, 2].map((k) => reference[k] > 1e-6 ? lightColor(key)[k] * key.intensity / reference[k] : 0) } : null;
+  const key2 = frame.lights.find((x) => x.kind === "directional");
+  const sun = key2?.direction ? { direction: key2.direction, color: [0, 1, 2].map((k) => reference[k] > 1e-6 ? lightColor(key2)[k] * key2.intensity / reference[k] : 0) } : null;
   const points = [...frame.lights, ...cart].map(areaAsPunctual).filter((x) => (x.kind === "point" || x.kind === "spot") && x.position).map((x) => ({ position: x.position, color: lightColor(x).map((c) => c * x.intensity / brightness), range: x.range && x.range > 0 ? x.range : 8, ...x.falloff ? { falloff: x.falloff } : {} }));
   return { sun, points };
 }
@@ -11665,6 +12095,32 @@ var CappedSceneRenderer = class {
   get sunCascades() {
     return this.inner.sunCascades;
   }
+  releaseMeshes(meshes) {
+    this.inner.releaseMeshes?.(meshes);
+  }
+  get gpuSkinning() {
+    return this.inner.gpuSkinning;
+  }
+  setParticles(specs) {
+    this.inner.setParticles?.(specs);
+  }
+  particleBurst(index, at, dir, scale) {
+    this.inner.particleBurst?.(index, at, dir, scale);
+  }
+  particleOrigin(index, at) {
+    this.inner.particleOrigin?.(index, at);
+  }
+  get referenceSamples() {
+    return this.inner.referenceSamples;
+  }
+  get prepareMaterials() {
+    const inner = this.inner;
+    return inner.prepareMaterials ? (materials, options) => inner.prepareMaterials(materials, options) : void 0;
+  }
+  get captureReference() {
+    const inner = this.inner;
+    return inner.captureReference ? (instances, draw, options) => inner.captureReference(instances, draw, options) : void 0;
+  }
   get renderToTexture() {
     const inner = this.inner;
     if (!inner.renderToTexture) return void 0;
@@ -11674,6 +12130,9 @@ var CappedSceneRenderer = class {
     const inner = this.inner;
     return inner.resize ? (width, height) => inner.resize(width, height) : void 0;
   }
+  get framesLanded() {
+    return this.inner.framesLanded;
+  }
   dispose() {
     this.inner.dispose();
   }
@@ -11681,6 +12140,80 @@ var CappedSceneRenderer = class {
 function capsConstrainScene(caps) {
   return caps.polyBudget > 0 || caps.textureCacheBytes > 0;
 }
+
+// src/render/decodeWorkers.ts
+var DECODE_WORKER_SOURCE = `
+self.onmessage = async (event) => {
+  const { id, mime, bytes } = event.data;
+  try {
+    const bitmap = await createImageBitmap(new Blob([bytes], { type: mime }));
+    const canvas = new OffscreenCanvas(bitmap.width, bitmap.height);
+    const context = canvas.getContext("2d");
+    if (!context) throw new Error("no 2d context");
+    context.drawImage(bitmap, 0, 0);
+    const image = context.getImageData(0, 0, bitmap.width, bitmap.height);
+    bitmap.close();
+    self.postMessage({ id, width: image.width, height: image.height, data: image.data.buffer }, [image.data.buffer]);
+  } catch (error) {
+    self.postMessage({ id, error: String(error) });
+  }
+};
+`;
+var DecodePool = class {
+  constructor(workers) {
+    this.workers = workers;
+    this.pending = /* @__PURE__ */ new Map();
+    this.nextId = 1;
+    this.busy = workers.map(() => 0);
+    workers.forEach((worker, w) => {
+      worker.onmessage = (event) => {
+        const { id, width, height, data, error } = event.data ?? {};
+        const job = this.pending.get(id);
+        if (!job) return;
+        this.pending.delete(id);
+        this.busy[w] -= 1;
+        job.resolve(error || !data ? null : { width, height, data: new Uint8ClampedArray(data) });
+      };
+    });
+  }
+  /** Images in flight. */
+  get inFlight() {
+    return this.pending.size;
+  }
+  /** Decode encoded image bytes to RGBA (null when the image can't be decoded). The bytes are copied, so the caller keeps its own. */
+  decode(mime, bytes) {
+    const w = this.busy.indexOf(Math.min(...this.busy));
+    const id = this.nextId++;
+    this.busy[w] += 1;
+    const copy = bytes.slice();
+    return new Promise((resolve) => {
+      this.pending.set(id, { resolve, worker: w });
+      this.workers[w].postMessage({ id, mime, bytes: copy }, [copy.buffer]);
+    });
+  }
+  terminate() {
+    for (const worker of this.workers) worker.terminate();
+    for (const job of this.pending.values()) job.resolve(null);
+    this.pending.clear();
+  }
+};
+var shared;
+function decodePool() {
+  if (shared !== void 0) return shared;
+  const g = globalThis;
+  if (typeof g.Worker !== "function" || typeof g.OffscreenCanvas !== "function" || typeof g.Blob !== "function" || typeof g.URL?.createObjectURL !== "function") return shared = null;
+  try {
+    const url = g.URL.createObjectURL(new g.Blob([DECODE_WORKER_SOURCE], { type: "text/javascript" }));
+    const count = Math.max(1, Math.min(4, Math.floor((g.navigator?.hardwareConcurrency ?? 2) / 2)));
+    shared = new DecodePool(Array.from({ length: count }, () => new g.Worker(url)));
+  } catch {
+    shared = null;
+  }
+  return shared;
+}
+
+// src/mesh/MeshOverlaySurface.ts
+import { sampleShot, sequenceTimes, shotMatrices } from "@cartbox/editor";
 
 // src/render/cascades.ts
 import { viewMatrix as viewMatrix2 } from "@cartbox/editor";
@@ -11840,6 +12373,7 @@ var BOUNCE_FACES_PER_FRAME = 150;
 var BOUNCE_EVERY = 4;
 var FIRST_PERSON_NEAR = 0.05;
 var SHADOW_MAP_SIZE = 1024;
+var VSM_POOL_SIZE = 4096;
 var CASCADE_MAP_SIZE = 2048;
 var SOFT_SUN = 4;
 var CASCADE_DISTANCE_MIN = 30;
@@ -11878,6 +12412,9 @@ var SKY_PANORAMA_WIDTH = 1536;
 var SKY_PANORAMA_HEIGHT = 768;
 var SKY_IBL_DOWNSAMPLE = 8;
 var SKY_IBL_SUN_SAMPLES = 4;
+var SKY_RELIGHT_WIDTH = 96;
+var SKY_RELIGHT_HEIGHT = 48;
+var SKY_RELIGHT_ROWS = 1;
 function poseLocalMatrix(pose) {
   return composeModelMatrix4(
     pose.position,
@@ -11891,6 +12428,7 @@ var NEAR_CASCADE_SHARE = 0.3;
 var NEAR_CASCADE_MIN = 4;
 var NEAR_CASCADE_MAX = 24;
 var AUTO_ORBIT_PITCH = 0.35;
+var NO_MORPHS = /* @__PURE__ */ new Map();
 var MeshOverlaySurface = class _MeshOverlaySurface {
   constructor(inner, width, height, scene, instances, frames, renderer, skyMap, environment, options = {}) {
     this.inner = inner;
@@ -11926,6 +12464,16 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
     this.frameMs = 0;
     this.framesAtStep = 0;
     this.low = null;
+    /** A GPU that reads its frames back: paced by how often they land (gpuPacing.ts), made with the first frame. */
+    this.gpuPacer = null;
+    /** The scene's water body (F5d), found once; its FFT ocean, and the ripples round the eye. */
+    this.waterBodyCache = void 0;
+    this.ocean = null;
+    this.oceanSlopes = null;
+    this.ripples = new RippleField();
+    this.waded = null;
+    /** The upper sky's mean light for F5c's clouds, and the sun it was found for. */
+    this.cloudAmbient = null;
     /** The last sky backdrop and the view it was painted for (it depends only on
      *  where the camera points, so walking without turning reuses it). */
     this.skyCache = null;
@@ -11937,8 +12485,29 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
      * moves the sun the metals reflect too.
      */
     this.skyReflections = null;
+    /**
+     * A physical sky's time of day (F5a-2): the sun its light was last rendered
+     * for (null until the first frame takes the bake's), and the re-render under
+     * way for where the sun is now, a few rows a frame.
+     */
+    this.skyLitFor = null;
+    this.skyRelight = null;
     /** The scene's distant vistas, textured: re-drawn into the sky whenever it is re-baked. */
     this.vistas = [];
+    /**
+     * Terrains the AAA tier draws from their heightfields (F6c), vistas among
+     * them, with their layers' maps; and the meshes of the blocks (and their
+     * coarser frames) they replace, which aren't drawn or cast.
+     */
+    this.ground = [];
+    this.groundIds = /* @__PURE__ */ new Set();
+    this.groundMeshes = /* @__PURE__ */ new WeakSet();
+    /** The world partition's loaded objects' meshes (F6d), and how many loaded objects use each. */
+    this.cellMeshes = /* @__PURE__ */ new Map();
+    /** Each loaded object as it was before its maps were decoded, to go back to on unload. */
+    this.bare = /* @__PURE__ */ new Map();
+    /** Images the cells share, decoded once while any cell holds them. */
+    this.cellImages = /* @__PURE__ */ new Map();
     /**
      * Told each frame where the sky dome's sun is on screen and how much of it is
      * unblocked, for the post-FX glare and lens flare (H8); null without a sky dome.
@@ -12000,6 +12569,10 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
     this.spawned = /* @__PURE__ */ new Map();
     /** Graphics quality (see quality.ts): shadows on/off and their map size, the first-person scale cap. */
     this.quality = QUALITY_PRESETS.high;
+    /** What the viewport shows (F10a): the lit frame, or a diagnostic of it on the AAA tier. */
+    this.viewMode = "lit";
+    /** The last frame handed to the GPU renderer, for a reference capture of it (F10b). */
+    this.lastFrame = null;
     /** Skinned instances' live meshes (their buffers are rewritten for each pose). */
     this.live = /* @__PURE__ */ new Map();
     /** The skinning matrices each live mesh was last posed with (skip re-skinning the same pose). */
@@ -12026,10 +12599,14 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
     this.hudFrame = null;
     /** The playtest profiler, when it's on: shadow, sky and scene time go to it. */
     this.profiler = null;
+    /** Meshes whose material graphs have been sent to compile (F1e). */
+    this.prepared = /* @__PURE__ */ new WeakSet();
     /** Decodes a KTX2 texture (loading the decoder on first use); set by create. */
     this.decodeKtx2 = async () => null;
     /** The renderer samples compressed formats, so baked KTX2 images decode in place of their PNGs (F1a). */
     this.compressedTextures = false;
+    this.still = null;
+    this.giState = null;
     this.maskCache = /* @__PURE__ */ new WeakMap();
     /** The camera's eye this frame (terrain blocks pick their detail by distance from it). */
     this.eye = null;
@@ -12037,6 +12614,14 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
     this.lastView = null;
     /** Foliage blocks by mesh (EP11): their cull distance and bounds. */
     this.foliage = /* @__PURE__ */ new Map();
+    /** Each block's copies as instances (F6b), made once a block, model and LOD chain. */
+    this.blockCopies = /* @__PURE__ */ new WeakMap();
+    /**
+     * Each impostor layer's chain with an octahedral impostor for its far level
+     * (F6b; bakeOctahedralImpostor), baked once, off the frame that first needs
+     * it; until it's ready, the crossed cards the layer stores serve.
+     */
+    this.octahedral = /* @__PURE__ */ new WeakMap();
     /** Each terrain block's world bounds, measured on first use. */
     this.blockBounds = /* @__PURE__ */ new Map();
     /** The still casters' key and this frame's movers, from the last castersNow (F2d-2). */
@@ -12050,6 +12635,17 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
     this.debris = null;
     this.debrisBoxes = [];
     this.debrisLooks = /* @__PURE__ */ new Map();
+    /** The objects broken (F8c): their chunks, and each piece as the mesh a chunk draws. */
+    this.broken = /* @__PURE__ */ new Map();
+    /** The levels' hidden objects, before the broken ones join them (F8c). */
+    this.levelInactive = /* @__PURE__ */ new Set();
+    /** Whether the scene's particle effects run on the GPU (F8a). */
+    this.gpuParticles = false;
+    /** The scene's own GPU emitters (F8a); the weather's (F5e) follow them, rain and snow as they fall. */
+    this.effectEmitters = [];
+    this.weatherFalling = "";
+    /** The weather a cart or the editor set at run time (F5e), over the rig's; null keeps the rig's. */
+    this.weatherOverride = null;
     /** Settles once the scene's reflection probes are baked and in use (tests await it). */
     this.probesReady = Promise.resolve();
     /** Every decal's tiles, drawn the first time the AAA tier projects them (F1f). */
@@ -12071,6 +12667,83 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
       children: childIndices(parents),
       locals: scene.instances.map((instance) => instance.local ?? instance.model)
     } : null;
+  }
+  /** Disturb the water at world (x, z) (F5d): a ring `strength` metres deep spreads from it. */
+  splash(x, z, strength = 0.05) {
+    this.ripples.impulse(x, z, strength);
+  }
+  /** The first water surface in the scene (a refracting material with ripples): its top, its extent and its material. */
+  waterBody() {
+    if (this.waterBodyCache !== void 0) return this.waterBodyCache;
+    this.waterBodyCache = null;
+    for (const instance of this.scene.instances) {
+      const primitive = instance.mesh.primitives.find((p) => (p.material.water?.strength ?? 0) > 0);
+      if (!primitive) continue;
+      const m = instance.model;
+      let top = -Infinity, x0 = Infinity, z0 = Infinity, x1 = -Infinity, z1 = -Infinity;
+      for (const p of instance.mesh.primitives) {
+        for (let i = 0; i < p.positions.length; i += 3) {
+          const x = p.positions[i], y = p.positions[i + 1], z = p.positions[i + 2];
+          const wx = m[0] * x + m[4] * y + m[8] * z + m[12];
+          const wy = m[1] * x + m[5] * y + m[9] * z + m[13];
+          const wz = m[2] * x + m[6] * y + m[10] * z + m[14];
+          top = Math.max(top, wy);
+          x0 = Math.min(x0, wx);
+          z0 = Math.min(z0, wz);
+          x1 = Math.max(x1, wx);
+          z1 = Math.max(z1, wz);
+        }
+      }
+      this.waterBodyCache = { plane: top, bounds: [x0, z0, x1, z1], material: primitive.material };
+      break;
+    }
+    return this.waterBodyCache;
+  }
+  /**
+   * This frame's water (F5d): the body's plane and look, the light reaching into it, whether the eye is under it,
+   * the FFT ocean's slopes (when a water surface asks for an ocean) and the ripples round the eye (a wading eye
+   * makes them as it moves).
+   */
+  frameWater(lighting, time) {
+    const body = this.waterBody();
+    if (!body) return null;
+    const look = resolveWaterLook(body.material.water ?? null);
+    const eye = this.eye;
+    const [x0, z0, x1, z1] = body.bounds;
+    const inside = eye !== null && eye[0] >= x0 && eye[0] <= x1 && eye[2] >= z0 && eye[2] <= z1;
+    const key2 = lighting?.lights.find((l) => l.kind === "directional" && l.direction) ?? null;
+    const kd = key2?.direction ?? [0, 1, 0];
+    const kl = Math.hypot(kd[0], kd[1], kd[2]) || 1;
+    const kc = key2 ? lightColor2(key2) : [1, 1, 1];
+    const ambient = lighting?.ambient ?? 0.3;
+    const light = [0, 1, 2].map((c) => (key2 ? kc[c] * key2.intensity * Math.max(0, kd[1] / kl) : 0) + ambient);
+    if ((body.material.water?.ocean ?? 0) > 0) {
+      const wind = lighting?.wind ? [Math.cos(lighting.wind.direction) * 6 * (1 + lighting.wind.strength), Math.sin(lighting.wind.direction) * 6 * (1 + lighting.wind.strength)] : [8, 3];
+      if (!this.ocean || this.ocean.wind[0] !== wind[0] || this.ocean.wind[1] !== wind[1]) this.ocean = new Ocean(wind);
+      if (!this.oceanSlopes || this.frame % 2 === 0) this.oceanSlopes = this.ocean.slopes(time, this.oceanSlopes ?? void 0);
+    }
+    if (eye) {
+      this.ripples.follow(eye[0], eye[2]);
+      if (inside && Math.abs(eye[1] - body.plane) < 2) {
+        if (!this.waded || Math.hypot(eye[0] - this.waded[0], eye[2] - this.waded[1]) > 0.4) {
+          if (this.waded) this.ripples.impulse(eye[0], eye[2], 0.03, 0.5);
+          this.waded = [eye[0], eye[2]];
+        }
+      } else this.waded = null;
+    }
+    this.ripples.step(1 / 60);
+    const moving = this.ripples.active;
+    return {
+      plane: body.plane,
+      bounds: body.bounds,
+      absorption: look.absorption,
+      scattering: look.scattering,
+      light,
+      underwater: inside && eye !== null && eye[1] < body.plane,
+      ocean: this.oceanSlopes,
+      ripples: moving ? { heights: this.ripples.heights, origin: this.ripples.origin } : null,
+      time
+    };
   }
   /**
    * Set the world matrices of the objects physics moves (object index → matrix),
@@ -12119,14 +12792,28 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
    * AnimationSession). Each listed object's live mesh is re-skinned when its
    * matrices changed, and it counts as moving this frame for the shadow cache.
    */
-  setSkinning(skinning) {
+  setSkinning(skinning, morphs = NO_MORPHS) {
     for (const [i, matrices] of skinning) {
       const live = this.live.get(i);
-      if (!live || this.lastSkin.get(i) === matrices) continue;
-      live.update(matrices);
+      const weights = morphs.get(i);
+      if (!live || this.lastSkin.get(i) === matrices && !weights) continue;
+      live.update(matrices, weights ? { morphWeights: weights } : {});
       this.lastSkin.set(i, matrices);
     }
+    this.setFaces(morphs, skinning);
     this.animated = new Set([...skinning.keys()].filter((i) => this.live.has(i)));
+  }
+  /**
+   * Set faces' morph weights (F7b; object → weights, from a FaceDriver or a clip): each listed object's live
+   * copy re-morphed, a skinned one at its last pose. Objects `skinned` already re-skinned this frame are skipped.
+   */
+  setFaces(faces, skinned = NO_MORPHS) {
+    for (const [i, weights] of faces) {
+      if (skinned.has(i)) continue;
+      const live = this.live.get(i);
+      if (!live) continue;
+      live.update(this.lastSkin.get(i) ?? new Float32Array(0), { morphWeights: weights });
+    }
   }
   /**
    * Apply an editor's edits to the running scene (ENGINE_PARITY_ROADMAP.md EP5):
@@ -12157,12 +12844,13 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
       }
       if (meshSignature(a.mesh) !== meshSignature(b.mesh)) {
         const textured = await decodeMeshTextures(b.mesh, this.decodeKtx2 ?? void 0, void 0, this.compressedTextures);
-        const skinned = isSkinned2(b.mesh) ? createLiveSkinnedMesh(b.mesh) : null;
+        const skinned = liveCopy(b.mesh, this.renderer.gpuSkinning === true);
         if (skinned) this.live.set(i, skinned);
         else this.live.delete(i);
         this.lastSkin.delete(i);
         const lod = liveLod(b.lod, skinned);
         this.instances[i] = { ...textured, ...skinned ? { mesh: skinned.mesh } : {}, ...lod ? { lod } : {}, model: this.instances[i].model };
+        if (b.ground !== void 0 && this.groundIds.has(b.ground)) this.groundMeshes.add(this.instances[i].mesh);
         moved = true;
       } else if (lodSignature(a.lod) !== lodSignature(b.lod)) {
         const { lod: _old, ...rest } = this.instances[i];
@@ -12173,7 +12861,12 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
       }
     }
     const vistasChanged = vistaSignature(before.vistas) !== vistaSignature(next.vistas);
-    if (vistasChanged) this.vistas = await texturedVistas(next.vistas, (mesh) => decodeMeshTextures(mesh, this.decodeKtx2 ?? (() => Promise.resolve(null))));
+    if (this.groundIds.size > 0) {
+      const ground = await groundSources(next, (mesh) => decodeMeshTextures(mesh, this.decodeKtx2 ?? (() => Promise.resolve(null)), void 0, this.compressedTextures));
+      this.ground = ground.sources;
+      this.groundIds = ground.ids;
+    }
+    if (vistasChanged) this.vistas = await texturedVistas(next.vistas?.filter((v) => !this.groundIds.has(v.id)), (mesh) => decodeMeshTextures(mesh, this.decodeKtx2 ?? (() => Promise.resolve(null))));
     if (vistasChanged || JSON.stringify(before.lighting ?? null) !== JSON.stringify(next.lighting ?? null)) {
       const lighting = next.lighting;
       let environment = lighting ? sceneLightingEnvironment(lighting) : null;
@@ -12183,11 +12876,13 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
         const baked = await bakeSceneSky(lighting.sky, lighting, environment, this.vistas, next.bounds.center);
         skyMap = baked.map;
         clouds = baked.clouds;
-        environment = { ...environment, map: baked.reflections, average: computeEnvironmentAverage(baked.reflections), ...baked.hdr ? { hdr: baked.hdr } : {} };
+        environment = litBySky(environment, baked);
         this.skyReflections = { small: baked.small, sun: sunKey(skySun(lighting.sky)) };
       } else {
         this.skyReflections = null;
       }
+      this.skyLitFor = null;
+      this.skyRelight = null;
       this.environment = environment;
       this.skyMap = skyMap;
       this.startBounce();
@@ -12213,6 +12908,76 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
   setHolo(draw) {
     this.holo = draw;
   }
+  /**
+   * The path-traced reference of the last frame drawn (F10b), `width` across at
+   * the frame's aspect (up to 8K a side), or null where the renderer has none
+   * (every tier but AAA) or nothing has drawn yet.
+   */
+  captureReference(options) {
+    const last = this.lastFrame;
+    if (!last || !this.renderer.captureReference) return null;
+    const height = options.height ?? Math.max(1, Math.round(options.width * last.draw.height / Math.max(1, last.draw.width)));
+    return this.renderer.captureReference(last.instances, last.draw, { ...options, height });
+  }
+  /**
+   * Render a timeline offline (F10d): each frame at `fps` path-traced through
+   * its shot (the camera track's eye, rail, shake, roll, focal length and thin
+   * lens), the scene as last drawn, each handed to `onFrame` as it finishes.
+   * Resolves to the frames rendered (fewer when aborted); null where the
+   * renderer has no reference (every tier but AAA), nothing has drawn yet, or
+   * the timeline has no camera keys.
+   */
+  renderSequence(options) {
+    const last = this.lastFrame;
+    const timeline = this.scene.timelines?.find((t) => t.name === options.timeline);
+    if (!last || !timeline || !this.renderer.captureReference || !sampleShot(timeline, 0)) return null;
+    const capture = this.renderer.captureReference.bind(this.renderer);
+    const width = Math.max(1, Math.round(options.width));
+    const height = options.height ?? Math.max(1, Math.round(width * last.draw.height / Math.max(1, last.draw.width)));
+    const times = sequenceTimes(timeline, Math.max(1, Math.min(120, options.fps ?? 24)));
+    const objectAt = (id) => {
+      const inst = this.scene.instances.find((i) => i.id === id);
+      return inst ? [inst.model[12], inst.model[13], inst.model[14]] : null;
+    };
+    const run = async () => {
+      let done = 0;
+      for (const [index, t] of times.entries()) {
+        if (options.signal?.aborted) break;
+        const shot = sampleShot(timeline, t, objectAt);
+        const { view, projection } = shotMatrices(shot, width / height);
+        const frame = await capture(last.instances, { ...last.draw, view, projection, lens: shot.lens }, {
+          width,
+          height,
+          samples: options.samples ?? 64,
+          progress: (share) => options.progress?.((index + share) / times.length)
+        });
+        await options.onFrame(frame, index, times.length);
+        done += 1;
+      }
+      return done;
+    };
+    return run();
+  }
+  /** Compile a newly seen mesh's material-graph permutations in the background (F1e), as this frame draws them. */
+  prepareGraphs(instances, draw) {
+    const renderer = this.renderer;
+    if (!renderer.prepareMaterials) return;
+    const materials = [];
+    for (const instance of instances) {
+      if (this.prepared.has(instance.mesh)) continue;
+      this.prepared.add(instance.mesh);
+      for (const p of instance.mesh.primitives) if (p.material.graph) materials.push(p.material);
+    }
+    if (materials.length > 0) void renderer.prepareMaterials(materials, { samples: draw.antialias === true ? 4 : 1, reflect: draw.reflections === true, prepass: draw.prepass === true });
+  }
+  /** Samples each pixel of the viewport's path-traced reference holds (F10b); 0 when it isn't shown. */
+  get referenceSamples() {
+    return this.viewMode === "pathTraced" ? this.renderer.referenceSamples ?? 0 : 0;
+  }
+  /** Show the lit frame or a diagnostic of it (F10a; the AAA tier alone draws the diagnostics). */
+  setViewMode(mode) {
+    this.viewMode = mode;
+  }
   /** Apply a graphics quality preset (takes effect on the next frame). */
   setQuality(quality) {
     if (quality.shadowMapSize !== this.quality.shadowMapSize) {
@@ -12223,10 +12988,58 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
     this.quality = quality;
   }
   /**
+   * Load a world partition cell's objects (F6d): their maps decoded (in the
+   * decode workers, where the page has them) and swapped in. They show once
+   * the caller marks them active.
+   */
+  async loadCell(members) {
+    await Promise.all(
+      members.map(async (i) => {
+        const authored = this.scene.instances[i];
+        if (!authored || !this.instances[i] || this.bare.has(i)) return;
+        const { mesh: _mesh, ...maps } = await decodeMeshTextures(authored.mesh, this.decodeKtx2 ?? (() => Promise.resolve(null)), this.cellImages, this.compressedTextures);
+        void _mesh;
+        if (this.bare.has(i)) return;
+        this.bare.set(i, this.instances[i]);
+        this.instances[i] = { ...this.instances[i], ...maps };
+        this.cellMeshes.set(authored.mesh, (this.cellMeshes.get(authored.mesh) ?? 0) + 1);
+      })
+    );
+  }
+  /**
+   * Unload a cell's objects (F6d): back to bare, and the GPU geometry of the
+   * meshes no loaded object uses any more given back (it uploads again if
+   * they return). Decoded images go once no cell holds an object.
+   */
+  unloadCell(members) {
+    const released = [];
+    for (const i of members) {
+      const bare = this.bare.get(i);
+      const authored = this.scene.instances[i];
+      if (!bare || !authored) continue;
+      this.bare.delete(i);
+      this.instances[i] = { ...bare, model: this.instances[i].model };
+      const left = (this.cellMeshes.get(authored.mesh) ?? 1) - 1;
+      if (left > 0) this.cellMeshes.set(authored.mesh, left);
+      else {
+        this.cellMeshes.delete(authored.mesh);
+        released.push(authored.mesh);
+      }
+    }
+    if (released.length > 0) this.renderer.releaseMeshes?.(released);
+    if (this.cellMeshes.size === 0) this.cellImages = /* @__PURE__ */ new Map();
+  }
+  /** Whether an object of a world partition cell has its maps (F6d). */
+  cellLoaded(index) {
+    return this.bare.has(index);
+  }
+  /**
    * The objects of levels that aren't loaded (see levels.ts in @cartbox/editor):
    * they're hidden, and left out of the shadow, until the set changes again.
    */
   setInactive(objects) {
+    this.levelInactive = objects;
+    if (this.broken.size > 0) objects = /* @__PURE__ */ new Set([...objects, ...this.broken.keys()]);
     this.inactive = objects;
     this.inactiveKey = [...objects].sort((a, b) => a - b).join(",");
     this.unpooled = objects.size === 0 && !this.pooledRoot.some((r) => r >= 0) ? this.instances : this.instances.filter((_, i) => this.pooledRoot[i] < 0 && !objects.has(i));
@@ -12261,9 +13074,10 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
     const instances = [];
     const frames = [];
     const live = /* @__PURE__ */ new Map();
+    const streamed = scene.streaming?.cell ? new Set(streamGroups(scene).flatMap((g) => g.members)) : null;
     for (const [i, instance] of scene.instances.entries()) {
-      const textured = await texture(instance.mesh);
-      const skinned = isSkinned2(instance.mesh) ? createLiveSkinnedMesh(instance.mesh) : null;
+      const textured = streamed?.has(i) ? { mesh: instance.mesh } : await texture(instance.mesh);
+      const skinned = liveCopy(instance.mesh, renderer.gpuSkinning === true);
       if (skinned) live.set(i, skinned);
       const lod = liveLod(instance.lod, skinned);
       instances.push({
@@ -12279,13 +13093,14 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
     let skyMap = null;
     let clouds = [];
     let environment = lighting ? sceneLightingEnvironment(lighting) : null;
-    const vistas = await texturedVistas(scene.vistas, texture);
+    const ground = options.prepass === true && renderer.sunCascades === true ? await groundSources(scene, texture) : null;
+    const vistas = await texturedVistas(scene.vistas?.filter((v) => !ground?.ids.has(v.id)), texture);
     let reflections = null;
     if (lighting?.sky && environment) {
       const baked = await bakeSceneSky(lighting.sky, lighting, environment, vistas, scene.bounds.center);
       skyMap = baked.map;
       clouds = baked.clouds;
-      environment = { ...environment, map: baked.reflections, average: computeEnvironmentAverage(baked.reflections), ...baked.hdr ? { hdr: baked.hdr } : {} };
+      environment = litBySky(environment, baked);
       reflections = { small: baked.small, sun: sunKey(skySun(lighting.sky)) };
     }
     const surface = new _MeshOverlaySurface(inner, width, height, scene, instances, frames, renderer, skyMap, environment, options);
@@ -12293,6 +13108,15 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
     surface.skyReflections = reflections;
     surface.startBounce();
     surface.vistas = vistas;
+    if (ground) {
+      surface.ground = ground.sources;
+      surface.groundIds = ground.ids;
+      scene.instances.forEach((instance, i) => {
+        if (instance.ground === void 0 || !ground.ids.has(instance.ground)) return;
+        surface.groundMeshes.add(instances[i].mesh);
+        for (const frame of frames[i] ?? []) surface.groundMeshes.add(frame.mesh);
+      });
+    }
     surface.trailed = scene.instances.flatMap((instance, i) => instance.mesh.trails && instance.mesh.trails.length > 0 ? [i] : []);
     if (surface.trailed.length > 0) surface.trails = new TrailSystem();
     for (const [i, mesh] of live) surface.live.set(i, mesh);
@@ -12301,7 +13125,13 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
     });
     surface.decodeKtx2 = decodeKtx2;
     surface.compressedTextures = gpuFormats.length > 0;
-    if (scene.effects && scene.effects.length > 0) surface.particles = new ParticleSystem(scene.effects);
+    if (scene.effects && scene.effects.length > 0) {
+      if (renderer.gpuSkinning === true && renderer.setParticles) {
+        surface.effectEmitters = scene.effects.map(emitterFromEffect);
+        renderer.setParticles(surface.effectEmitters);
+        surface.gpuParticles = true;
+      } else surface.particles = new ParticleSystem(scene.effects);
+    }
     if (scene.decals && scene.decals.length > 0) surface.decals = new DecalSystem(scene.decals, scene.decalMarks ?? []);
     if (scene.debris && scene.debrisMeshes && scene.debris.length > 0) {
       surface.debris = new DebrisSystem(scene.debris, scene.debrisMeshes);
@@ -12423,8 +13253,15 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
     const sun = lights.find((light) => light.sun);
     this.cartSun = sun ? { direction: sun.position, color: sun.color } : null;
   }
-  /** The rig as this frame lights with it: with the cart's sun as its key, if it set one (I17). */
+  /** The rig as this frame lights with it: with the cart's sun as its key, if it set one (I17), tinted by a physical sky's air (F5a). */
   frameLighting() {
+    const lighting = this.sunLighting();
+    if (!lighting) return null;
+    const lit = atmosphereLighting(lighting);
+    return this.eye ? cloudShadedLighting(lit, this.eye[0], this.eye[2], this.frame / 60) : lit;
+  }
+  /** The rig with the cart's sun as its key, if it set one (I17): above the air, before a physical sky tints it. */
+  sunLighting() {
     const lighting = this.scene.lighting ?? null;
     if (!lighting || !this.cartSun) return lighting;
     const sun = `${this.cartSun.direction.map((v) => v.toFixed(3)).join(",")}|${this.cartSun.color.map((v) => v.toFixed(3)).join(",")}`;
@@ -12439,12 +13276,50 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
   followSun(lighting) {
     const reflections = this.skyReflections;
     if (!reflections || !lighting?.sky || !this.environment) return;
+    if (lighting.sky.atmosphere) return this.followPhysicalSun();
     const sun = skySun(lighting.sky);
-    const key = sunKey(sun);
-    if (key === reflections.sun) return;
+    const key2 = sunKey(sun);
+    if (key2 === reflections.sun) return;
     const map = skyReflectionsWith(reflections.small, sun, this.skyClouds);
     this.environment = { ...this.environment, map, average: computeEnvironmentAverage(map) };
-    this.skyReflections = { small: reflections.small, sun: key };
+    this.skyReflections = { small: reflections.small, sun: key2 };
+  }
+  /**
+   * A physical sky's time of day (F5a-2): when its sun (above the air) has
+   * turned past what {@link physicalSunKey} rounds away, or changed, render
+   * the atmosphere's light again for where it is, {@link SKY_RELIGHT_ROWS} a
+   * frame, then swap it in whole: the AAA tier's IBL is rebuilt from it and
+   * its reflection probes re-captured (their key follows the environment), and
+   * the other tiers' reflections copy is made from it. The backdrop already
+   * follows the sun each frame on the AAA tier.
+   */
+  followPhysicalSun() {
+    const authored = this.scene.lighting;
+    const lighting = this.sunLighting();
+    const sun = lighting ? atmosphereSun(lighting) : null;
+    if (!sun || !authored?.sky || !this.environment) return;
+    if (this.skyLitFor === null) {
+      const baked = atmosphereSun(authored);
+      this.skyLitFor = baked ? physicalSunKey(baked) : "";
+    }
+    if (!this.skyRelight) {
+      const key2 = physicalSunKey(sun);
+      if (key2 === this.skyLitFor) return;
+      this.skyRelight = { key: key2, sun, hdr: { width: SKY_RELIGHT_WIDTH, height: SKY_RELIGHT_HEIGHT, data: new Float32Array(SKY_RELIGHT_WIDTH * SKY_RELIGHT_HEIGHT * 3) }, row: 0 };
+    }
+    const job = this.skyRelight;
+    atmospherePanoramaRows(atmosphereLuts(job.sun.atmosphere), job.sun.direction, job.sun.radiance, job.hdr, job.row, job.row + SKY_RELIGHT_ROWS, job.sun.moon);
+    job.row += SKY_RELIGHT_ROWS;
+    if (job.row < SKY_RELIGHT_HEIGHT) return;
+    const hdr = resampleHdr(job.hdr, SKY_PANORAMA_WIDTH / SKY_IBL_DOWNSAMPLE, SKY_PANORAMA_HEIGHT / SKY_IBL_DOWNSAMPLE, 0, 1);
+    const sky = authored.sky;
+    const small = bakeSkyPanorama({ ...sky, panorama: null }, hdr.width, hdr.height, hdrToTexture(hdr, authored.exposure), { sunLayer: true });
+    const glow = skySun(lighting.sky);
+    const map = skyReflectionsWith(small, glow, this.skyClouds);
+    this.environment = { ...this.environment, hdr, map, average: computeEnvironmentAverage(map) };
+    this.skyReflections = { small, sun: sunKey(glow) };
+    this.skyLitFor = job.key;
+    this.skyRelight = null;
   }
   /** Start finding the probes' bounce transfer (I17), when they were baked with their light recorded. */
   startBounce() {
@@ -12495,8 +13370,10 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
   }
   /** What the renderer drew last frame. */
   renderStats() {
-    const raw = this.renderer.lastFrameStats ?? null;
-    const rendered = this.rendered && this.gpuTarget() && (this.rendered.width !== this.width || this.rendered.height !== this.height) ? this.rendered : null;
+    const base = this.renderer.lastFrameStats ?? null;
+    const raw = base && this.gpuPacer?.landMs != null ? { ...base, frameMs: this.gpuPacer.landMs } : base;
+    const paced = this.low && this.gpuPaced() && this.gpuPacer && this.gpuPacer.scale < 1 ? { width: this.low.width, height: this.low.height, scale: this.low.width / this.width } : null;
+    const rendered = this.rendered && this.gpuTarget() && (this.rendered.width !== this.width || this.rendered.height !== this.height) ? this.rendered : paced;
     const stats2 = raw && rendered ? { ...raw, resolution: rendered } : raw;
     const present = this.gpuTarget()?.stats;
     if (!stats2 || !present?.passes) return stats2;
@@ -12548,9 +13425,10 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
     const lighting = this.frameLighting();
     this.stepBounce(lighting);
     this.followSun(lighting);
-    const post = lighting?.postVolumes && this.eye ? blendPostVolumes(lighting.postVolumes, this.eye) : NO_POST;
+    const lens = lighting?.camera ? resolvePhysicalCamera(lighting.camera) : null;
+    const post = lighting?.postVolumes && this.eye ? blendPostVolumes(lighting.postVolumes, this.eye, lens ? { aperture: lens.aperture, focusDistance: lens.focusDistance, motionBlur: 1 } : void 0) : NO_POST;
     if (this.onPost) this.reportPost(lighting, post);
-    if (!lighting?.autoExposure) this.adapted = 0;
+    if (!(lighting && this.eyeAdaptation(lighting))) this.adapted = 0;
     const tonemap = lighting ? this.frameTonemap(lighting, post) : null;
     let mark = profiler ? performance.now() : 0;
     const cascaded = gpu !== null && this.renderer.sunCascades === true;
@@ -12573,7 +13451,8 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
       profiler.add("sky", now - mark);
       mark = now;
     }
-    let drawn = this.foliage.size > 0 ? instances.filter((i) => this.foliageInReach(i)) : instances;
+    let drawn = this.foliage.size === 0 ? instances : this.gpuFoliage ? instances.flatMap((i) => this.foliageCopies(i)) : instances.filter((i) => this.foliageInReach(i));
+    if (this.ground.length > 0) drawn = drawn.filter((i) => !this.groundMeshes.has(i.mesh));
     let frontDrawn = front;
     if (this.trails) {
       const placed = this.placements();
@@ -12597,6 +13476,10 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
         const marks = this.decals.sceneInstance();
         if (marks) drawn = [...drawn, marks];
       }
+    }
+    if (this.broken.size > 0) {
+      const chunks2 = this.stepBroken();
+      if (chunks2.length > 0) drawn = [...drawn, ...chunks2];
     }
     if (this.debris) {
       this.debris.step(1 / 60, this.debrisBoxes);
@@ -12623,8 +13506,9 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
         shadow,
         sunShadow,
         localShadowCasters,
-        localShadowKey: localShadowCasters ? this.castersFrame?.key ?? null : null,
-        localShadowMoved: localShadowCasters ? this.castersFrame?.moved ?? null : null,
+        // The still casters' key and the movers serve the local tiles' cache (F2d-2) and the sun's virtual pages (F2b).
+        localShadowKey: localShadowCasters || sunShadow ? this.castersFrame?.key ?? null : null,
+        localShadowMoved: localShadowCasters || sunShadow ? this.castersFrame?.moved ?? null : null,
         antialias,
         reflectionCapture: cascaded && lighting ? this.reflectionCapture(lighting) : null,
         decals
@@ -12633,6 +13517,7 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
       this.frame += 1;
       return;
     }
+    if (this.gpuPaced()) this.renderer.resize?.(width, height);
     this.renderer.render(drawn, {
       width,
       height,
@@ -12657,16 +13542,18 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
         localShadows: local?.shadows ?? null,
         shadow,
         fog: lighting.fog ?? null,
-        wind: lighting.wind ?? null
+        wind: lighting.wind ?? null,
+        // A physical sky's air (F5a-2), which only the AAA renderer lays over the scene.
+        atmosphere: this.presentAtmosphere()
       } : {},
       // Animated emissive runs on the frame clock (60 per second), so it
       // steps with the game rather than the wall clock.
       time: this.frame / 60
     });
     if (this.onSun) this.reportSun(out, width, height, camera.view, camera.projection, skyBackdrop ? lighting?.sky ?? null : null);
-    if (lighting?.autoExposure && tonemap && this.frame % ADAPT_EVERY === 0) {
+    if (lighting && this.eyeAdaptation(lighting) && tonemap && this.frame % ADAPT_EVERY === 0) {
       const measured = frameLuminance(out, width, height) / 2 ** post.exposure;
-      this.adapted = adaptExposure(this.adapted, measured, lighting.autoExposure, ADAPT_EVERY / 60);
+      this.adapted = adaptExposure(this.adapted, measured, this.eyeAdaptation(lighting), ADAPT_EVERY / 60);
     }
     if (skyBackdrop && lighting?.shafts && lighting.sky && this.skyCache) {
       const sun = sunScreenPosition(lighting.sky.sunDirection, camera.view, camera.projection, width, height);
@@ -12678,6 +13565,7 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
     if (frontDrawn.length > 0) {
       this.requestFrontRenderer();
       const onGpu = this.frontRenderer.backend !== "software";
+      if (onGpu) this.frontRenderer.resize?.(width, height);
       this.frontRenderer.render(onGpu ? frontDrawn.map((i) => this.withoutRefraction(i)) : frontDrawn, {
         width,
         height,
@@ -12701,12 +13589,13 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
       }
     }
     if (profiler) profiler.add("scene", performance.now() - mark);
-    if (target) expandNearest(target.out, target.width, target.height, this.output, this.width, this.height);
+    if (target) (this.gpuPaced() ? expandBilinear : expandNearest)(target.out, target.width, target.height, this.output, this.width, this.height);
     if (this.hud && this.hudFrame) compositeHudOverScene(this.output, this.hudFrame, this.width * this.height);
     if (this.holo) this.holo(this.output, this.width, this.height, this.frame / 60);
     this.frame += 1;
     this.inner.blit(this.presented);
     this.pace(performance.now() - started);
+    this.paceGpu();
   }
   /** The GPU presenter this frame goes to, when there is one and the renderer can keep its frame on the GPU (F0a). */
   gpuTarget() {
@@ -12722,20 +13611,28 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
    */
   presentOnGpu(gpu, rgba, job) {
     const { camera, lighting } = job;
+    const weather = this.frameWeather(lighting);
+    this.syncWeatherEmitters(weather);
     const output = gpu.outputSize ?? { width: this.width, height: this.height };
     if (this.options.dynamicResolution === true) this.resolution ?? (this.resolution = new DynamicResolution(1e3 / 60));
-    const scale = this.resolution ? this.resolution.update(this.gpuFrameMs(gpu)) : 1;
+    const diagnostic = isDiagnosticView(this.viewMode) && this.renderer.sunCascades === true;
+    const temporal = this.options.temporal === true && this.quality.temporal === true;
+    const upscaling = this.renderer.sunCascades === true && temporal && this.options.prepass === true;
+    const dynamic = this.resolution ? this.resolution.update(this.gpuFrameMs(gpu)) : 1;
+    const scale = upscaling ? Math.min(dynamic, this.quality.renderScale ?? 1) : dynamic;
     const { width, height } = scaledSize(output.width, output.height, scale);
     this.renderer.resize?.(width, height);
     this.rendered = { width, height, scale: output.width > 0 ? width / output.width : 1 };
     const time = this.frame / 60;
+    const gi = lighting ? this.liveGi(lighting) : null;
     const lit = lighting ? {
       ambient: lighting.ambient,
       lightDirection: sceneLightingKeyDirection(lighting),
-      environment: this.environment,
+      environment: gi ? gi.environment : this.environment,
       tonemap: job.tonemap,
       lights: job.lights
     } : {};
+    const atmosphere = this.presentAtmosphere();
     const draw = {
       width,
       height,
@@ -12743,14 +13640,36 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
       projection: camera.projection,
       lod: true,
       antialias: job.antialias,
-      temporal: this.options.temporal === true && this.quality.temporal === true,
+      temporal,
+      ...upscaling && (width < output.width || height < output.height) ? { upscale: { width: output.width, height: output.height } } : {},
       reflections: this.options.reflections === true && this.quality.reflections === true,
-      ...this.options.prepass === true ? { prepass: true } : {},
+      // With a prepass the AAA scene culls on the GPU (F0e): the frustum, then a Hi-Z pyramid of the prepass's depths.
+      ...this.options.prepass === true ? { prepass: true, gpuCull: true } : {},
       ...lighting ? { ...lit, localShadows: job.local, shadow: job.shadow, sunShadow: job.sunShadow, localShadowCasters: job.localShadowCasters, localShadowKey: job.localShadowKey, localShadowMoved: job.localShadowMoved, fog: lighting.fog ?? null, wind: lighting.wind ?? null } : {},
+      // The weather (F5e): its layers over every surface.
+      weather,
+      // The water body (F5d): its depth, waves, ripples and caustics, and the water round an eye under it.
+      water: this.frameWater(lighting, time),
       ...job.reflectionCapture ? { reflectionCapture: job.reflectionCapture } : {},
       ...job.decals ? { decals: job.decals } : {},
-      time
+      ...this.ground.length > 0 ? { terrains: this.ground } : {},
+      ...atmosphere ? { atmosphere } : {},
+      ...gi ? { dynamicGi: gi.draw } : {},
+      // The physical camera's depth of field and motion blur (F4c).
+      ...lighting && this.renderer.sunCascades === true && lighting.camera ? { camera: this.cameraEffects(lighting, job.post) } : {},
+      // The sun's virtual shadow maps (F2b) at High and Epic, over the cascades.
+      ...this.renderer.sunCascades === true && this.quality.virtualShadows === true && this.options.prepass === true && job.sunShadow ? { virtualShadows: { poolSize: VSM_POOL_SIZE } } : {},
+      // Epic's reflections through the still scene's BVH (F3f), on the AAA tier with reflections.
+      ...this.renderer.sunCascades === true && this.quality.tracedReflections === true && this.options.reflections === true && this.quality.reflections === true ? { reflectionTrace: { occluders: this.stillOccluders(), key: this.staticShadowKey() } } : {},
+      // Screen-space GI on the AAA tier (F3e-2): on unless the rig turns it off.
+      ...lighting && this.renderer.sunCascades === true ? { screenSpaceGi: resolveScreenSpaceGi(lighting.screenSpaceGi) } : {},
+      // Texture streaming on the AAA tier (F1b), under the preset's budget.
+      ...this.renderer.sunCascades === true ? { textureBudget: this.quality.textureBudgetMB ?? 512 } : {},
+      time,
+      ...this.viewMode !== "lit" && this.renderer.sunCascades === true ? { viewMode: this.viewMode } : {}
     };
+    this.prepareGraphs(job.drawn, draw);
+    this.lastFrame = { instances: job.drawn, draw };
     const scene = this.renderer.renderToTexture(job.drawn, draw) ?? null;
     let front = null;
     if (job.frontDrawn.length > 0) {
@@ -12763,7 +13682,7 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
         ) ?? null;
       }
     }
-    const sky = job.skyBackdrop && this.skyMap ? { map: this.skyMap, view: camera.view, projection: camera.projection, sun: lighting?.sky ? skySun(lighting.sky) : null, clouds: this.skyClouds, time } : null;
+    const sky = job.skyBackdrop && this.skyMap ? { map: this.skyMap, view: camera.view, projection: camera.projection, sun: lighting?.sky ? skySun(lighting.sky) : null, clouds: this.skyClouds, time, atmosphere } : null;
     const sun = sky && lighting?.sky ? sunScreenPosition(lighting.sky.sunDirection, camera.view, camera.projection, output.width, output.height) : null;
     let holo = null;
     if (this.holo) {
@@ -12771,21 +13690,87 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
       this.holoLayer.fill(0);
       if (this.holo(this.holoLayer, this.width, this.height, time, true) !== false) holo = this.holoLayer;
     }
-    const adapting = Boolean(lighting?.autoExposure && job.tonemap);
+    const adapting = Boolean(lighting && this.eyeAdaptation(lighting) && job.tonemap);
+    const metering = lighting?.camera && this.renderer.sunCascades === true ? resolvePhysicalCamera(lighting.camera).metering : null;
     const flare = this.onSun !== null && sky !== null;
     gpu.present({
-      base: sky ? { kind: "sky", sky } : this.hud ? { kind: "colour", rgba: HUD_SKY } : { kind: "frame", rgba },
+      base: diagnostic ? { kind: "colour", rgba: [0, 0, 0, 255] } : sky ? { kind: "sky", sky } : this.hud ? { kind: "colour", rgba: HUD_SKY } : { kind: "frame", rgba },
       scene,
-      shafts: sky && sun && lighting?.shafts && lighting.sky ? { sun, color: lighting.sky.sunColor, shafts: lighting.shafts } : null,
+      // On the AAA tier a volumetric fog's shadowed light is the shafts (F5b): the screen-space ones retire.
+      shafts: !diagnostic && sky && sun && lighting?.shafts && lighting.sky && !(this.renderer.sunCascades === true && lighting.fog?.volumetric) ? { sun, color: lighting.sky.sunColor, shafts: lighting.shafts } : null,
       front,
       hud: this.hud ? rgba : null,
       hudKey: HUD_TRANSPARENT_SUM,
       holo,
       // A linear frame is tone-mapped as it is presented (F0b); a byte-space one already was.
-      tonemap: job.tonemap,
-      measure: adapting || flare ? { luminance: adapting, sun: flare ? sun : null } : null
+      tonemap: diagnostic ? null : job.tonemap,
+      measure: !diagnostic && (adapting || flare) ? { luminance: adapting, sun: flare ? sun : null, ...metering ? { metering } : {} } : null
     });
     this.takeGpuMeasurements(gpu.stats, lighting, job.post, adapting, sky !== null, sun && { x: sun.x / output.width, y: sun.y / output.height });
+  }
+  /**
+   * Real-time GI (F3e), on the AAA tier under a rig that asks for it: the
+   * still scene the probes trace (with a key that changes with it), and the
+   * environment with the volume they relight — the rig's baked one, else an
+   * empty one over the scene's bounds, the same object frame after frame so
+   * the renderer keeps relighting it.
+   */
+  liveGi(lighting) {
+    const settings = this.renderer.sunCascades === true ? resolveDynamicGi(lighting.dynamicGi) : null;
+    const env = this.environment;
+    if (!settings || !env) return null;
+    if (!this.giState || this.giState.scene !== this.scene) {
+      const b = this.scene.bounds;
+      const grid = dynamicGiGrid(b.min, b.max, settings.spacing);
+      const spacing = [0, 1, 2].map((a) => (grid.max[a] - grid.min[a]) / Math.max(1, grid.counts[a] - 1));
+      this.giState = {
+        scene: this.scene,
+        occluders: this.stillOccluders(),
+        empty: emptyProbeVolume(grid.min, grid.max, grid.counts, 1.5 * Math.max(...spacing)),
+        env: null
+      };
+    }
+    const state = this.giState;
+    if (state.env?.source !== env) state.env = { source: env, value: { ...env, probeVolume: env.probeVolume ?? state.empty } };
+    return { draw: { occluders: state.occluders, key: this.staticShadowKey(), settings }, environment: state.env.value };
+  }
+  /** What stands still in the scene, as the BVH tracers take it (F3e's live GI, F3f's Epic reflections), gathered once a scene. */
+  stillOccluders() {
+    if (this.still?.scene !== this.scene) {
+      const occluders = this.scene.instances.filter((inst, i) => {
+        const body = inst.physics?.body;
+        return !(inst.pooled || isSkinned2(inst.mesh) || body === "dynamic" || body === "kinematic" || body === "character" || this.broken.has(i));
+      }).map((inst) => ({ mesh: inst.mesh, model: inst.model }));
+      this.still = { scene: this.scene, occluders };
+    }
+    return this.still.occluders;
+  }
+  /** A physical sky as the presenter draws it (F5a): the medium, its sun above the air, and the disc as the eye sees it; null for a painted one. */
+  presentAtmosphere() {
+    const lighting = this.sunLighting();
+    const sun = lighting ? atmosphereSun(lighting) : null;
+    if (!sun) return null;
+    const luts = atmosphereLuts(sun.atmosphere);
+    const disc = sunDiscRadiance(luts, sun.direction, sun.radiance);
+    const scale = lighting.sky?.atmosphere?.moon ?? 1;
+    const t = sun.moon ? sunTransmittance(luts, sun.moon.direction) : null;
+    const moonDisc = t ? [0, 1, 2].map((c) => MOON_ALBEDO * scale * sun.radiance[c] * t[c]) : null;
+    const cloudSettings = lighting.sky?.atmosphere?.clouds;
+    const clouds = cloudSettings ? { clouds: resolveClouds(cloudSettings), ambient: this.cloudAmbientFor(luts, sun.direction, sun.radiance), time: this.frame / 60 } : null;
+    return { atmosphere: sun.atmosphere, sun: sun.direction, sunRadiance: sun.radiance, disc, moon: sun.moon, stars: sun.stars, moonDisc, clouds };
+  }
+  /** The upper sky's mean radiance under this sun (F5c's clouds take their sky light from it), kept while the sun holds still. */
+  cloudAmbientFor(luts, sun, radiance) {
+    const key2 = `${atmosphereKey(luts.atmosphere)}|${sun.map((v) => v.toFixed(3)).join(",")}|${radiance.map((v) => v.toFixed(3)).join(",")}`;
+    if (this.cloudAmbient?.key === key2) return this.cloudAmbient.value;
+    const dirs = [[0, 1, 0], [1, 0.5, 0], [-1, 0.5, 0], [0, 0.5, 1], [0, 0.5, -1]].map((d) => {
+      const l = Math.hypot(d[0], d[1], d[2]);
+      return d.map((v) => v / l);
+    });
+    const value = [0, 0, 0];
+    for (const d of dirs) skyRadiance(luts, d, sun, radiance).forEach((v, c) => value[c] += v / dirs.length);
+    this.cloudAmbient = { key: key2, value };
+    return value;
   }
   /** The presenter's newest measurements into the lens flare and eye adaptation (the byte path's reportSun and frameLuminance). */
   takeGpuMeasurements(stats2, lighting, post, adapting, sky, sun) {
@@ -12801,9 +13786,10 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
         this.onSun({ x: this.sunAt.x, y: this.sunAt.y, visible: this.sunSeen });
       }
     }
-    if (adapting && lighting?.autoExposure && stats2.luminance !== null && stats2.luminanceSeq !== this.gpuSeen.luminanceSeq) {
+    const eye = lighting ? this.eyeAdaptation(lighting) : null;
+    if (adapting && eye && stats2.luminance !== null && stats2.luminanceSeq !== this.gpuSeen.luminanceSeq) {
       const frames = Math.max(1, this.frame - this.gpuSeen.adaptedAt);
-      this.adapted = adaptExposure(this.adapted, stats2.luminance / 2 ** post.exposure, lighting.autoExposure, frames / 60);
+      this.adapted = adaptExposure(this.adapted, stats2.luminance / 2 ** post.exposure, eye, frames / 60);
       this.gpuSeen = { luminanceSeq: stats2.luminanceSeq, adaptedAt: this.frame };
     }
   }
@@ -12820,11 +13806,11 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
   /** A front-layer instance as a GPU front renderer draws it: its mesh without refraction (the same instance when it has none). */
   withoutRefraction(instance) {
     const mesh = instance.mesh;
-    const bends = (material) => Boolean(material.refraction || material.distortion);
+    const bends = (material2) => Boolean(material2.refraction || material2.distortion);
     if (!mesh.primitives.some((p) => bends(p.material))) return instance;
     let plain = this.unrefracted.get(mesh);
     if (!plain) {
-      const straight = ({ refraction: _r, distortion: _d, ...material }) => material;
+      const straight = ({ refraction: _r, distortion: _d, ...material2 }) => material2;
       plain = { ...mesh, primitives: mesh.primitives.map((p) => bends(p.material) ? { ...p, material: straight(p.material) } : p) };
       this.unrefracted.set(mesh, plain);
     }
@@ -12833,8 +13819,32 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
   /** The rig's tone map with the volumes' and the eye's stops applied (null without tone mapping). */
   frameTonemap(lighting, post) {
     const base = sceneLightingTonemap(lighting);
+    const lens = lighting.camera ? resolvePhysicalCamera(lighting.camera) : null;
+    if (base && lens?.exposure === "manual") return { ...base, exposure: cameraExposure(lens) * 2 ** (post.exposure + lens.compensation) };
     const stops = post.exposure + this.adapted;
     return base && stops !== 0 ? { ...base, exposure: base.exposure * 2 ** stops } : base;
+  }
+  /**
+   * The eye adaptation a rig asks for: its own, or (with a physical camera in auto mode, F4c) the default's,
+   * the camera's compensation shifting the key; none when the camera's exposure is manual.
+   */
+  eyeAdaptation(lighting) {
+    const lens = lighting.camera ? resolvePhysicalCamera(lighting.camera) : null;
+    if (lens?.exposure === "manual") return null;
+    const base = lighting.autoExposure ?? (lens ? DEFAULT_AUTO_EXPOSURE : null);
+    return base && lens && lens.compensation !== 0 ? { ...base, key: base.key * 2 ** lens.compensation } : base;
+  }
+  /** The physical camera's depth of field and motion blur for the AAA renderer (F4c), with the post volumes' pull. */
+  cameraEffects(lighting, post) {
+    const lens = lighting.camera ? resolvePhysicalCamera(lighting.camera) : null;
+    if (!lens || !lens.depthOfField && !lens.motionBlur) return null;
+    const aperture = post.aperture ?? lens.aperture;
+    const focusDistance = post.focusDistance ?? lens.focusDistance;
+    const terms = cocTerms({ ...lens, aperture, focusDistance });
+    return {
+      ...lens.depthOfField ? { dof: { scale: terms.scale, focus: terms.focus, blades: lens.blades } } : {},
+      ...lens.motionBlur ? { motionBlur: { fraction: shutterFraction(lens.shutter) * (post.motionBlur ?? 1) } } : {}
+    };
   }
   /** Report the volumes' grade, bloom and fog to {@link onPost} when they change. */
   reportPost(lighting, post) {
@@ -12850,9 +13860,9 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
       fogReach: postVolumeReach(volumes, eye, "fog")
     } : null;
     const live = fx && (fx.brightness !== void 0 || fx.contrast !== void 0 || fx.saturation !== void 0 || fx.bloomReach > 0 || fx.fogReach > 0) ? fx : null;
-    const key = live ? JSON.stringify(live, (_k, v) => typeof v === "number" ? Math.round(v * 200) / 200 : v) : "";
-    if (key === this.postKey) return;
-    this.postKey = key;
+    const key2 = live ? JSON.stringify(live, (_k, v) => typeof v === "number" ? Math.round(v * 200) / 200 : v) : "";
+    if (key2 === this.postKey) return;
+    this.postKey = key2;
     this.onPost?.(live);
   }
   /** Report the sun to {@link onSun}: its place on screen and its eased visibility. */
@@ -12876,22 +13886,48 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
    * direction nor the sun has changed.
    */
   paintSky(out, width, height, view, projection, scale, sun) {
-    const key = [width, height, scale, view[0], view[1], view[2], view[4], view[5], view[6], view[8], view[9], view[10], projection[0], projection[5]].map((n) => Math.round(n * 1e5)).join(",") + (sun ? `|${sunKey(sun)}` : "");
+    const key2 = [width, height, scale, view[0], view[1], view[2], view[4], view[5], view[6], view[8], view[9], view[10], projection[0], projection[5]].map((n) => Math.round(n * 1e5)).join(",") + (sun ? `|${sunKey(sun)}` : "");
     const cache = this.skyCache;
     const drifting = this.skyClouds.length > 0;
-    if (!drifting && cache && cache.key === key && cache.pixels.length === width * height * 4) {
+    if (!drifting && cache && cache.key === key2 && cache.pixels.length === width * height * 4) {
       out.set(cache.pixels);
       return;
     }
     renderSkyBackground(out, width, height, view, projection, this.skyMap, 8, scale, drifting ? { layers: this.skyClouds, time: this.frame / 60 } : null, sun);
     const pixels = cache && cache.pixels.length === width * height * 4 ? cache.pixels : new Uint8ClampedArray(width * height * 4);
     pixels.set(out.subarray(0, width * height * 4));
-    this.skyCache = { key, pixels };
+    this.skyCache = { key: key2, pixels };
   }
-  /** The 3D render scale this frame: 1, unless the software governor has stepped down. */
+  /** The 3D render scale this frame: 1, unless the software governor or the GPU's pacing has stepped down. */
   renderScale() {
+    if (this.gpuPaced()) return this.gpuPacer?.scale ?? 1;
     if (!this.governed()) return 1;
     return Math.min(SOFTWARE_SCALES[this.scaleStep], this.quality.maxRenderScale);
+  }
+  /** Whether this frame's 3D is on a GPU that reads its frames back (not presented on the GPU): one gpuPacing.ts measures. */
+  gpuReadback() {
+    return this.renderer.backend !== "software" && this.renderer.framesLanded !== void 0 && this.gpuTarget() === null;
+  }
+  /**
+   * Whether the GPU's pacing sets the render size: a large first-person view (as the software governor's) on a GPU
+   * that reads its frames back and can render at another size.
+   */
+  gpuPaced() {
+    return this.options.adaptiveResolution !== false && this.hud && this.gpuReadback() && this.renderer.resize !== void 0 && this.width * this.height >= 640 * 360;
+  }
+  /** Time the frames landing from the GPU, and choose the next frame's render size from them. */
+  paceGpu() {
+    if (!this.gpuReadback()) return;
+    this.gpuPacer ?? (this.gpuPacer = new GpuPacer());
+    const step = this.gpuPacer.update(performance.now(), this.renderer.framesLanded ?? 0);
+    if (!this.gpuPaced() && step !== 0) this.gpuPacer.step = 0;
+  }
+  /**
+   * When the GPU is what holds the 3D back (its frames land well behind the run loop), how long each takes to come
+   * back (ms); else null. The quality governor steps the preset down on it, as it does on slow frames.
+   */
+  gpuBoundMs() {
+    return this.gpuReadback() ? this.gpuPacer?.gpuBoundMs(performance.now()) ?? null : null;
   }
   /** Whether the resolution governor applies: a large first-person view on the CPU rasteriser. */
   governed() {
@@ -13094,16 +14130,16 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
       byTint = /* @__PURE__ */ new Map();
       this.tintCache.set(mesh, byTint);
     }
-    const key = masked ? `${tint}m` : tint;
-    let out = byTint.get(key);
+    const key2 = masked ? `${tint}m` : tint;
+    let out = byTint.get(key2);
     if (!out) {
       out = tintMesh(mesh, tint, this.scene.lighting?.tints, masked);
-      byTint.set(key, out);
+      byTint.set(key2, out);
     }
     return out;
   }
   /** A part's base colour map with the tint painted through its mask, cached per mask, map and tint (stable identity for GPU uploads). */
-  maskedTexture(base, mask, material, color, tint) {
+  maskedTexture(base, mask, material2, color, tint) {
     let byBase = this.maskCache.get(mask);
     if (!byBase) {
       byBase = /* @__PURE__ */ new Map();
@@ -13116,8 +14152,8 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
     }
     let out = byTint.get(tint);
     if (!out) {
-      const [r, g, b] = material.baseColorFactor;
-      out = tintMaskTexture(base, mask, [r, g, b], color, material.tintMix ?? 1);
+      const [r, g, b] = material2.baseColorFactor;
+      out = tintMaskTexture(base, mask, [r, g, b], color, material2.tintMix ?? 1);
       byTint.set(tint, out);
     }
     return out;
@@ -13131,6 +14167,46 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
   /** Where the camera was last drawn from (null before the first frame). */
   eyePosition() {
     return this.eye;
+  }
+  /** Whether foliage is drawn a copy at a time (F6b): on the AAA tier, which culls copies on the GPU. */
+  get gpuFoliage() {
+    return this.options.prepass === true && this.renderer.sunCascades === true;
+  }
+  octahedralChain(chain, near) {
+    const known = this.octahedral.get(chain);
+    if (known && known !== "baking") return known;
+    if (!known) {
+      this.octahedral.set(chain, "baking");
+      setTimeout(() => {
+        const baked = bakeOctahedralImpostor(chain.meshes[0], near.textures ?? []);
+        this.octahedral.set(chain, baked ? { meshes: [chain.meshes[0], baked.mesh], distances: chain.distances, textures: [void 0, [baked.atlas]] } : chain);
+      }, 0);
+    }
+    return chain;
+  }
+  /**
+   * What an instance draws as on the GPU-culled path (F6b): itself, unless it is
+   * a foliage block, which is its copies while it is in reach (its full copies'
+   * block, the impostors taken by their LOD chain), and nothing otherwise.
+   */
+  foliageCopies(instance) {
+    const f3 = this.foliage.get(instance.mesh);
+    if (!f3) return [instance];
+    if (!f3.copies) return this.foliageInReach(instance) ? [instance] : [];
+    if (f3.swap?.far || !this.eye) return [];
+    const m = instance.model;
+    const [x, y, z] = f3.center;
+    const d = Math.hypot(m[0] * x + m[4] * y + m[8] * z + m[12] - this.eye[0], m[1] * x + m[5] * y + m[9] * z + m[13] - this.eye[1], m[2] * x + m[6] * y + m[10] * z + m[14] - this.eye[2]);
+    if (d - f3.radius >= f3.cull * this.quality.terrainDetail) return [];
+    const lod = f3.copies.lod ? this.octahedralChain(f3.copies.lod, instance) : null;
+    let made = this.blockCopies.get(instance.mesh);
+    if (!made || made.model !== instance.model || made.lod !== lod) {
+      const { mesh, matrices } = f3.copies;
+      const copies = matrices.map((c) => ({ ...instance, mesh, model: multiplyMat43(instance.model, c), ...lod ? { lod } : {} }));
+      made = { model: instance.model, lod, copies };
+      this.blockCopies.set(instance.mesh, made);
+    }
+    return made.copies;
   }
   /** Whether an instance is in reach of the eye: anything but a foliage block is; a block is within its cull distance. */
   foliageInReach(instance) {
@@ -13216,18 +14292,18 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
     if (!lighting.shadows || !this.quality.shadows) return null;
     const size = this.quality.shadowMapSize || SHADOW_MAP_SIZE;
     const { center, radius } = this.scene.bounds;
-    const key = this.staticShadowKey();
+    const key2 = this.staticShadowKey();
     const still = () => this.stillCasters();
     const extent = this.scene.extent;
     const reach = extent && this.scene.instances.some((inst) => inst.casts) ? Math.max(0, extent.radius * 2 - radius * 2) : 0;
-    const far = this.renderShadowLayer(this.farShadow, key, still, moved, lighting, center, radius, size, reach);
+    const far = this.renderShadowLayer(this.farShadow, key2, still, moved, lighting, center, radius, size, reach);
     if (!far) return null;
     let near = null;
     const nearRadius = Math.min(NEAR_CASCADE_MAX, Math.max(NEAR_CASCADE_MIN, radius * NEAR_CASCADE_SHARE));
     if (this.quality.shadowCascades && this.eye && nearRadius < radius * 0.7) {
       const step = nearRadius / 2;
       const c = [Math.round(this.eye[0] / step) * step, Math.round(this.eye[1] / step) * step, Math.round(this.eye[2] / step) * step];
-      const built = this.renderShadowLayer(this.nearShadow, `${key}|${c.join(",")}`, still, moved, lighting, c, nearRadius, size, Math.max(reach, radius * 2));
+      const built = this.renderShadowLayer(this.nearShadow, `${key2}|${c.join(",")}`, still, moved, lighting, c, nearRadius, size, Math.max(reach, radius * 2));
       if (built) near = { lightViewProj: built.lightViewProj, depth: built.depth, bias: built.bias ?? 3e-3, slopeBias: built.slopeBias ?? 0, dirty: built.dirty };
     }
     return { ...far, near };
@@ -13250,12 +14326,12 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
    * copies.
    */
   castersNow(moved) {
-    const key = this.staticShadowKey();
-    if (this.sunCasters?.key !== key) this.sunCasters = { key, still: this.stillCasters() };
+    const key2 = this.staticShadowKey();
+    if (this.sunCasters?.key !== key2) this.sunCasters = { key: key2, still: this.stillCasters() };
     const inReach = (list) => this.foliage.size > 0 ? list.filter((i) => this.foliageCasts(i)) : list;
     const still = inReach(this.sunCasters.still);
     const movers = inReach(moved);
-    this.castersFrame = { key: `${key}|${still.length}`, moved: movers };
+    this.castersFrame = { key: `${key2}|${still.length}`, moved: movers };
     return movers.length > 0 ? [...still, ...movers] : still;
   }
   buildSunShadow(moved, lighting) {
@@ -13290,7 +14366,7 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
       if (root >= 0) posed.add(i);
     });
     const casts = (i) => !this.scene.instances[i]?.terrain || this.scene.instances[i]?.casts === true;
-    return this.instances.filter((_, i) => !posed.has(i) && !this.everFront.has(i) && !this.inactive.has(i) && casts(i));
+    return this.instances.filter((instance, i) => !posed.has(i) && !this.everFront.has(i) && !this.inactive.has(i) && casts(i) && !this.groundMeshes.has(instance.mesh));
   }
   /**
    * Shadows from the spot and point lights that cast (EP8c): each light's
@@ -13306,11 +14382,11 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
     let slot = 0;
     for (const light of assigned.lights) {
       if (light.shadowTile === void 0) continue;
-      const key = `${JSON.stringify([light.kind, light.position, light.direction, light.range, light.innerAngle, light.outerAngle])}|${statics}`;
+      const key2 = `${JSON.stringify([light.kind, light.position, light.direction, light.range, light.innerAngle, light.outerAngle])}|${statics}`;
       let cache = this.localShadowCache[slot];
-      if (!cache || cache.key !== key) {
+      if (!cache || cache.key !== key2) {
         const built = renderLocalShadow(light, this.stillCasters());
-        cache = { key, statics: built.map((t) => t.depth), frames: built.map((t) => new Float32Array(t.depth.length)) };
+        cache = { key: key2, statics: built.map((t) => t.depth), frames: built.map((t) => new Float32Array(t.depth.length)) };
         this.localShadowCache[slot] = cache;
       }
       cache.frames.forEach((frame, i) => frame.set(cache.statics[i]));
@@ -13325,14 +14401,14 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
    * when `key` or the rig changes), copied, with this frame's movers drawn over
    * it — and the texels that changed since last frame, for a GPU's partial upload.
    */
-  renderShadowLayer(layer, key, still, moved, lighting, center, radius, size, reach) {
+  renderShadowLayer(layer, key2, still, moved, lighting, center, radius, size, reach) {
     let full = false;
-    if (!layer.staticDepth || layer.key !== key || layer.lighting !== lighting) {
+    if (!layer.staticDepth || layer.key !== key2 || layer.lighting !== lighting) {
       layer.staticDepth ?? (layer.staticDepth = new Float32Array(size * size));
       const built = buildSceneShadow(still(), lighting, center, radius, { size, depth: layer.staticDepth, reach });
       if (!built) return null;
       layer.matrix = built.lightViewProj;
-      layer.key = key;
+      layer.key = key2;
       layer.lighting = lighting;
       full = true;
     }
@@ -13416,6 +14492,43 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
     this.inner.destroy();
     if (this.frontRenderer.backend !== "software") this.frontRenderer.dispose();
   }
+  /**
+   * Break a fractured object (cartbox.shatter, F8c): it's hidden, its pieces fly from the impact as chunks, a
+   * mark is laid and dust thrown where it was hit (the scene's effects named for it), and the still scene the
+   * live GI traces loses it.
+   */
+  shatter(object, at, strength) {
+    const inst = this.scene.instances[object];
+    const pieces = inst?.mesh.fracture?.pieces;
+    if (!inst || !pieces || this.broken.has(object)) return;
+    const model = this.lastPlacement?.[object] ?? this.instances[object].model;
+    const scale = Math.hypot(model[0], model[1], model[2]) || 1;
+    const chunks2 = breakApart(pieces, model, at, strength, object + 1);
+    const meshes = pieces.map((p, k) => ({ name: `${inst.mesh.name}:piece${k}`, primitives: p.primitives }));
+    const textures = this.instances[object].textures ?? [];
+    this.broken.set(object, { chunks: chunks2, meshes, sources: pieces.map((p) => p.sources), scale, textures });
+    this.debrisBoxes = this.debrisBoxes.length > 0 ? this.debrisBoxes : sceneColliders(this.scene);
+    this.setInactive(this.levelInactive);
+    const named = (list, pattern) => (list ?? []).findIndex((e) => pattern.test(e.name));
+    const crack = named(this.scene.decals, /crack|break|scorch|impact/i);
+    if (crack >= 0) this.decal(crack, at, [0, 1, 0], 1);
+    const dust = named(this.scene.effects, /dust|debris|smoke/i);
+    if (dust >= 0) this.burst(dust, at, [0, 0, 0], 1.5);
+    this.still = null;
+    this.giState = null;
+  }
+  /** Step every broken object's chunks; their instances to draw. */
+  stepBroken() {
+    const out = [];
+    for (const b of this.broken.values()) {
+      stepChunks(b.chunks, 1 / 60, this.debrisBoxes);
+      for (const c of b.chunks) {
+        const textures = b.sources[c.piece].map((s) => s >= 0 ? b.textures[s] ?? null : null);
+        out.push({ mesh: b.meshes[c.piece], model: chunkMatrix(c, b.scale), textures });
+      }
+    }
+    return out;
+  }
   /** Throw a copy of debris `debris` (see cartbox.debris). */
   throwDebris(debris, at, velocity, scale) {
     this.debris?.throw(debris, at, velocity, scale);
@@ -13426,7 +14539,37 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
   }
   /** Fire particle effect `effect` (see cartbox.burst). */
   burst(effect, at, dir, scale) {
-    this.particles?.burst(effect, at, dir, scale);
+    if (this.gpuParticles) this.renderer.particleBurst?.(effect, at, dir, scale);
+    else this.particles?.burst(effect, at, dir, scale);
+  }
+  /** Set the weather at run time (F5e): wetness, puddles, snow, rain and snowfall, over the rig's; null goes back to the rig's. */
+  setWeather(settings) {
+    this.weatherOverride = settings;
+  }
+  /** This frame's weather, or null when it changes nothing. */
+  frameWeather(lighting) {
+    const settings = this.weatherOverride ?? lighting?.weather ?? null;
+    if (!settings) return null;
+    const weather = resolveWeather(settings);
+    return weatherActive(weather) ? weather : null;
+  }
+  /**
+   * Keep the renderer's rain and snow emitters (F5e) with the weather: remade with the scene's own when what falls
+   * changes, and their origin over the eye every frame. On a renderer that runs GPU particles only (the AAA tier).
+   */
+  syncWeatherEmitters(weather) {
+    if (this.renderer.gpuSkinning !== true || !this.renderer.setParticles) return;
+    const falling = weather ? weatherEmitters(weather) : [];
+    const key2 = falling.map((e) => `${e.name}:${JSON.stringify(e.modules[0])}`).join("|");
+    if (key2 !== this.weatherFalling) {
+      this.weatherFalling = key2;
+      this.renderer.setParticles([...this.effectEmitters, ...falling]);
+      this.gpuParticles = this.effectEmitters.length > 0 || falling.length > 0;
+    }
+    if (falling.length > 0 && this.eye) {
+      const origin = precipitationOrigin(this.eye);
+      falling.forEach((_, k) => this.renderer.particleOrigin?.(this.effectEmitters.length + k, origin));
+    }
   }
   /**
    * What the AAA tier's renderer captures its probes from this frame (F3b):
@@ -13447,31 +14590,61 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
       if (!token) this.envTokens.set(map, token = ++this.envCounter);
     }
     const sky = env ? map ? `${token}:${env.intensity}` : [...env.sky, ...env.horizon, ...env.ground, env.intensity].map((v) => Math.round(v * 1e3)).join(",") : "-";
-    const key = lighting.lights.find((l) => l.kind === "directional");
+    const key2 = lighting.lights.find((l) => l.kind === "directional");
     const r = (v) => Math.round(v * 100);
-    const sun = key ? [...(key.direction ?? [0, 1, 0]).map(r), ...key.color.map(r), r(key.intensity), key.temperature ?? 0].join(",") : "-";
+    const sun = key2 ? [...(key2.direction ?? [0, 1, 0]).map(r), ...key2.color.map(r), r(key2.intensity), key2.temperature ?? 0].join(",") : "-";
     return { probes, instances: this.probeScene, key: `${rig}|${sky}|${sun}|${this.staticShadowKey()}` };
   }
 };
 function fillPlaceholders(mesh, images) {
-  const slots = ["baseColorImage", "normalImage", "materialImage", "metallicRoughnessImage", "occlusionImage", "emissiveImage", "lightmapImage", "detailImage", "blendImage", "reliefImage", "tintMaskImage"];
+  const slots = ["baseColorImage", "normalImage", "materialImage", "metallicRoughnessImage", "occlusionImage", "emissiveImage", "lightmapImage", "lightmapHdrImage", "detailImage", "blendImage", "reliefImage", "tintMaskImage"];
   let touched = false;
   const primitives = mesh.primitives.map((primitive) => {
-    let material = primitive.material;
+    let material2 = primitive.material;
     for (const slot of slots) {
-      const image = material[slot];
+      const image = material2[slot];
       const supplied = image?.ref ? images.get(image.ref) : void 0;
       if (supplied) {
-        material = { ...material, [slot]: supplied };
+        material2 = { ...material2, [slot]: supplied };
         touched = true;
       }
     }
-    return material === primitive.material ? primitive : { ...primitive, material };
+    return material2 === primitive.material ? primitive : { ...primitive, material: material2 };
   });
   return touched ? { ...mesh, primitives } : mesh;
 }
 var VISTA_SHADOW_SIZE = 2048;
 var VISTA_AIR_WIDTH = 192;
+function litBySky(environment, baked) {
+  return { ...environment, map: baked.reflections, average: computeEnvironmentAverage(baked.reflections), ...baked.hdr ? { hdr: baked.hdr } : {} };
+}
+async function sceneSkyEnvironment(scene) {
+  const lighting = scene.lighting;
+  if (!lighting) return null;
+  const environment = sceneLightingEnvironment(lighting);
+  if (!lighting.sky) return environment;
+  const vistas = await texturedVistas(scene.vistas, (mesh) => decodeMeshTextures(mesh, () => Promise.resolve(null)));
+  return litBySky(environment, await bakeSceneSky(lighting.sky, lighting, environment, vistas, scene.bounds.center));
+}
+async function groundSources(scene, texture) {
+  const placed = [
+    ...(scene.terrains ?? []).map((terrain) => ({ terrain, model: scene.terrainModels?.get(terrain.id) ?? null })),
+    ...(scene.vistas ?? []).flatMap((v) => v.terrain ? [{ terrain: v.terrain, model: v.model ?? null }] : [])
+  ];
+  const sources = [];
+  const ids2 = /* @__PURE__ */ new Set();
+  for (const { terrain, model } of placed) {
+    const m = model ?? [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1];
+    const translation = m[0] === 1 && m[1] === 0 && m[2] === 0 && m[4] === 0 && m[5] === 1 && m[6] === 0 && m[8] === 0 && m[9] === 0 && m[10] === 1;
+    if (!translation) continue;
+    const moved = m[12] !== 0 || m[13] !== 0 || m[14] !== 0;
+    const t = moved ? { ...terrain, origin: [terrain.origin[0] + m[12], terrain.origin[1] + m[13], terrain.origin[2] + m[14]] } : terrain;
+    const maps = await texture({ name: terrain.name, primitives: terrain.layers.map((l) => ({ positions: new Float32Array(0), normals: null, uvs: null, indices: new Uint32Array(0), material: l.material })) });
+    sources.push({ terrain: t, layers: terrain.layers.map((_, k) => ({ base: maps.textures?.[k] ?? null, normal: maps.normalTextures?.[k] ?? null, mr: maps.mrTextures?.[k] ?? null })) });
+    ids2.add(terrain.id);
+  }
+  return { sources, ids: ids2 };
+}
 async function texturedVistas(vistas, texture) {
   return Promise.all(
     (vistas ?? []).map(async (v) => ({ haze: v.haze, instances: await Promise.all(v.parts.map(async (p) => ({ ...await texture(p.mesh), model: p.model }))) }))
@@ -13483,7 +14656,13 @@ function vistaSignature(vistas) {
 async function bakeSceneSky(sky, lighting, environment, vistas, eye) {
   let imported = null;
   let hdrLight = null;
-  if (sky.panorama) {
+  const physical = sky.atmosphere ? atmosphereSun(lighting) : null;
+  if (physical) {
+    const hdr = atmospherePanorama(atmosphereLuts(physical.atmosphere), physical.direction, physical.radiance, 256, 128, physical.moon);
+    imported = hdrToTexture(hdr, lighting.exposure);
+    hdrLight = resampleHdr(hdr, SKY_PANORAMA_WIDTH / SKY_IBL_DOWNSAMPLE, SKY_PANORAMA_HEIGHT / SKY_IBL_DOWNSAMPLE, 0, 1);
+    sky = { ...sky, panorama: null };
+  } else if (sky.panorama) {
     try {
       const bytes = base64ToBytes2(sky.panorama.data);
       if (isRadiance(sky.panorama.mime)) {
@@ -13528,9 +14707,21 @@ async function bakeSceneSky(sky, lighting, environment, vistas, eye) {
 function skyReflectionsWith(small, sun, clouds) {
   return panoramaWithClouds(panoramaWithSun(small, sun, SKY_IBL_SUN_SAMPLES), clouds, 0);
 }
+function physicalSunKey(sun) {
+  return `${sun.direction.map((v) => Math.round(v * 100)).join(",")}:${sun.radiance.map((v) => v.toPrecision(2)).join(",")}`;
+}
 function sunKey(sun) {
   const l = Math.hypot(sun.direction[0], sun.direction[1], sun.direction[2]) || 1;
   return `${sun.direction.map((v) => Math.round(v / l * 100)).join(",")}:${sun.color.map((v) => Math.round(v * 50)).join(",")}`;
+}
+var hdrLightmapDecodes = /* @__PURE__ */ new WeakMap();
+function decodeHdrLightmapOnce(image) {
+  let entry = hdrLightmapDecodes.get(image);
+  if (!entry) {
+    entry = decodeHdrLightmap(image.bytes).catch(() => null);
+    hdrLightmapDecodes.set(image, entry);
+  }
+  return entry;
 }
 async function decodeMeshTextures(mesh, decodeKtx2, cache = /* @__PURE__ */ new Map(), compressed = false) {
   const plain = (image) => image.mime === "image/ktx2" ? decodeKtx2(image.bytes) : decodeTexture(image.mime, image.bytes);
@@ -13570,6 +14761,29 @@ async function decodeMeshTextures(mesh, decodeKtx2, cache = /* @__PURE__ */ new 
     // A painted team-colour mask (L17): applied when the copy is tinted.
     each((m) => m.tintMaskImage)
   ]);
+  const graphTextures = await Promise.all(
+    mesh.primitives.map(async (primitive) => {
+      const images = primitive.material.graphImages;
+      if (!images?.length) return null;
+      return Promise.all(
+        images.map((image) => {
+          if (!image || image.bytes.length === 0) return Promise.resolve(null);
+          let entry = cache.get(image);
+          if (!entry) {
+            entry = decode(image);
+            cache.set(image, entry);
+          }
+          return entry;
+        })
+      );
+    })
+  );
+  const lightmapHdrTextures = await Promise.all(
+    mesh.primitives.map((primitive) => {
+      const image = primitive.material.lightmapHdrImage;
+      return image && image.bytes.length > 0 ? decodeHdrLightmapOnce(image) : Promise.resolve(null);
+    })
+  );
   return {
     mesh,
     textures,
@@ -13579,10 +14793,12 @@ async function decodeMeshTextures(mesh, decodeKtx2, cache = /* @__PURE__ */ new 
     occlusionTextures,
     emissiveTextures,
     ...lightmapTextures.some((t) => t !== null) ? { lightmapTextures } : {},
+    ...lightmapHdrTextures.some((t) => t !== null) ? { lightmapHdrTextures } : {},
     ...detailTextures.some((t) => t !== null) ? { detailTextures } : {},
     ...blendTextures.some((t) => t !== null) ? { blendTextures } : {},
     ...reliefTextures.some((t) => t !== null) ? { reliefTextures } : {},
-    ...tintMaskTextures.some((t) => t !== null) ? { tintMaskTextures } : {}
+    ...tintMaskTextures.some((t) => t !== null) ? { tintMaskTextures } : {},
+    ...graphTextures.some((t) => t !== null) ? { graphTextures } : {}
   };
 }
 var TINT_PALETTE = [
@@ -13644,6 +14860,11 @@ function tintMesh(mesh, tint, overrides, masked) {
   };
 }
 async function decodeTexture(mime, bytes) {
+  const pool = decodePool();
+  if (pool) {
+    const decoded = await pool.decode(mime, bytes);
+    if (decoded) return decoded;
+  }
   if (typeof createImageBitmap !== "function" || typeof OffscreenCanvas !== "function") return null;
   try {
     const bitmap = await createImageBitmap(new Blob([bytes], { type: mime }));
@@ -13704,12 +14925,18 @@ function meshSignature(mesh) {
   return mesh.primitives.map((p) => {
     const scalars = {};
     const images = [];
-    for (const [key, value] of Object.entries(p.material)) {
-      if (key.endsWith("Image")) images.push(value ? value.bytes?.length ?? 0 : 0);
-      else scalars[key] = value;
+    for (const [key2, value] of Object.entries(p.material)) {
+      if (key2.endsWith("Image")) images.push(value ? value.bytes?.length ?? 0 : 0);
+      else scalars[key2] = value;
     }
     return `${p.positions.length}:${p.indices.length}:${JSON.stringify(scalars)}:${images.join(",")}`;
   }).join("|");
+}
+function liveCopy(mesh, gpu) {
+  if (!isSkinned2(mesh) && !hasMorphTargets(mesh)) return null;
+  const live = createLiveSkinnedMesh(mesh, { gpu });
+  if (!isSkinned2(mesh)) live.update(new Float32Array(0));
+  return live;
 }
 
 // src/world/worldScene.ts
@@ -14151,6 +15378,162 @@ import {
 // src/render/gpuFrame.ts
 import { depthLinearTerms, effectActive as effectActive2, refracts, resolveRefraction } from "@cartbox/editor";
 
+// src/render/characterShading.ts
+import { characterKindCode } from "@cartbox/editor";
+function packCharacter(c, dither, frame) {
+  if (!c) return [[0, 0, 0, 0], [0, 0, 0, 0]];
+  const code = characterKindCode(c.kind);
+  switch (c.kind) {
+    case "skin":
+      return [[code, c.lobeMix, c.lobeRoughness[0], c.lobeRoughness[1]], [c.microScale, c.microStrength, c.cavity, 0]];
+    case "eye":
+      return [[code, c.irisRadius, c.irisDepth, c.corneaIor], [c.limbus, c.caustic, 0, 0]];
+    case "hair":
+      return [[code, c.shift, c.secondaryShift, c.scatter], [dither ? 1 : 0, frame % 64, 0, 0]];
+    case "mouth":
+      return [[code, c.occlusion, c.open, c.depth], [c.opening[0], c.opening[1], c.opening[2], 0]];
+  }
+}
+var CHARACTER_WGSL = (
+  /* wgsl */
+  `
+var<private> charT: vec3<f32>;
+var<private> charB: vec3<f32>;
+var<private> charMask: f32 = 0.0;
+var<private> charR: f32 = 0.0;
+var<private> charFwd: vec3<f32>;
+var<private> charOff: vec3<f32>;
+var<private> charSpec: f32 = 1.0;
+var<private> charLit: f32 = 1.0;
+
+fn charKind() -> i32 { return i32(u.char0.x + 0.5); }
+
+fn charHash(p: vec2<f32>) -> f32 { return fract(sin(p.x * 127.1 + p.y * 311.7) * 43758.5453); }
+fn charNoise(p: vec2<f32>) -> f32 {
+  let i = floor(p);
+  let f = p - i;
+  let s = f * f * (vec2<f32>(3.0) - 2.0 * f);
+  let a = charHash(i);
+  let b = charHash(i + vec2<f32>(1.0, 0.0));
+  let c = charHash(i + vec2<f32>(0.0, 1.0));
+  let d = charHash(i + vec2<f32>(1.0, 1.0));
+  return a + (b - a) * s.x + (c - a) * s.y + (a - b - c + d) * s.x * s.y;
+}
+// A skin's pores: the noise's slope in tangent space (microTilt).
+fn charMicroTilt(uv: vec2<f32>) -> vec2<f32> {
+  let p = uv * u.char1.x;
+  let e = 0.25;
+  let du = charNoise(p + vec2<f32>(e, 0.0)) - charNoise(p - vec2<f32>(e, 0.0));
+  let dv = charNoise(p + vec2<f32>(0.0, e)) - charNoise(p - vec2<f32>(0.0, e));
+  return -vec2<f32>(du, dv) * u.char1.y;
+}
+
+fn charGgx(ndh: f32, rough: f32) -> f32 {
+  let a2 = rough * rough * rough * rough;
+  let d = ndh * ndh * (a2 - 1.0) + 1.0;
+  return a2 / (3.14159265 * d * d + 1e-7);
+}
+// Skin's two lobes (dualLobeD).
+fn charDualLobe(ndh: f32, rough: f32) -> f32 {
+  let r0 = clamp(rough * u.char0.z, 0.045, 1.0);
+  let r1 = clamp(rough * u.char0.w, 0.045, 1.0);
+  return mix(charGgx(ndh, r0), charGgx(ndh, r1), u.char0.y);
+}
+
+// The eye (irisMask, limbusShade).
+fn charIrisMask(r: f32) -> f32 {
+  let w = max(u.char1.x, 1e-4);
+  let t = clamp((u.char0.y - r) / w + 0.5, 0.0, 1.0);
+  return t * t * (3.0 - 2.0 * t);
+}
+fn charLimbus(r: f32) -> f32 {
+  if (u.char1.x <= 0.0) { return 1.0; }
+  let t = clamp(1.0 - abs(r - u.char0.y) / u.char1.x, 0.0, 1.0);
+  return 1.0 - 0.65 * t * t;
+}
+// Where the iris is seen through the cornea (irisParallax): the offset in UV.
+fn charIrisParallax(V: vec3<f32>, N: vec3<f32>) -> vec2<f32> {
+  var into = refract(-V, N, 1.0 / u.char0.w);
+  if (dot(into, into) < 1e-8) { into = -charFwd; }
+  let down = max(0.2, -dot(into, charFwd));
+  let t = u.char0.z / down;
+  return vec2<f32>(t * dot(into, charT), t * dot(into, charB));
+}
+// The iris's light (irisLight): refracted onto its plane, gathered on the far side.
+fn charIrisLight(Ld: vec3<f32>, N: vec3<f32>) -> f32 {
+  let into = refract(-Ld, N, 1.0 / u.char0.w);
+  if (dot(into, into) < 1e-8) { return 0.0; }
+  let ndl = max(0.0, -dot(into, charFwd));
+  let side = dot(into, charOff);
+  return ndl * (1.0 + u.char1.y * max(0.0, side) * 4.0);
+}
+
+// Hair (kajiyaKay, shiftTangent, hairExponent, hairScatter).
+fn charKajiya(tdh: f32, e: f32) -> f32 {
+  let s = sqrt(max(0.0, 1.0 - tdh * tdh));
+  return (e + 2.0) / 6.28318531 * pow(s, e);
+}
+fn charHairExponent(rough: f32) -> f32 {
+  let a = max(0.045, rough) * max(0.045, rough);
+  return max(2.0, 2.0 / (a * a) - 2.0);
+}
+// Whether a hair texel survives the frame's dither (ditherKeeps): TAA averages the frames into its alpha.
+fn charDitherKeeps(alpha: f32, pixel: vec2<f32>) -> bool {
+  let shift = u.char1.y * 5.588238;
+  let threshold = fract(52.9829189 * fract((pixel.x + shift) * 0.06711056 + (pixel.y + shift) * 0.00583715));
+  return alpha > threshold;
+}
+
+// The mouth (mouthOcclusion): darker deeper behind the opening, less so the wider it opens.
+fn charMouth(objPos: vec3<f32>) -> f32 {
+  let t = clamp(length(objPos - u.char1.xyz) / max(u.char0.w, 1e-4), 0.0, 1.0);
+  let s = t * t * (3.0 - 2.0 * t);
+  return 1.0 - u.char0.y * (1.0 - 0.6 * u.char0.z) * s;
+}
+
+/**
+ * One light on a character surface, for unit radiance (the caller scales it
+ * by the light's colour, intensity, falloff and shadow): the reflection and
+ * the diffuse, cosine included. \`kdm\` is the diffuse's share; the diffuse
+ * it adds goes to \`diffuseLit\` for the scattering pass.
+ */
+fn charLight(Ld: vec3<f32>, N: vec3<f32>, V: vec3<f32>, ndv: f32, rough: f32, f0: vec3<f32>, kdm: f32, albedo: vec3<f32>) -> vec3<f32> {
+  let kind = charKind();
+  let ndl = dot(N, Ld);
+  let H = normalize(Ld + V);
+  let vdh = max(0.0, dot(V, H));
+  let F = f0 + (vec3<f32>(1.0) - f0) * pow(1.0 - vdh, 5.0);
+  if (kind == 3) {
+    // Hair: a wrapped diffuse, Kajiya-Kay's two shifted lobes (R white toward the tip, TRT coloured and
+    // broader toward the root), faded as the light goes behind, and the light through it from behind (TT).
+    let wrap = max(0.0, 0.25 + 0.75 * ndl);
+    let e = charHairExponent(rough);
+    let t1 = normalize(charT + u.char0.y * N);
+    let t2 = normalize(charT + u.char0.z * N);
+    let r = charKajiya(dot(t1, H), e);
+    let trt = charKajiya(dot(t2, H), e * 0.25);
+    let facing = smoothstep(-0.1, 0.25, ndl);
+    let tt = u.char0.w * pow(max(0.0, -dot(Ld, V)), 4.0);
+    let diffuse = kdm * albedo * wrap;
+    diffuseLit = diffuseLit + diffuse;
+    return diffuse + (F * r + F * trt * albedo) * facing * charSpec + albedo * tt;
+  }
+  if (ndl <= 0.0) { return vec3<f32>(0.0); }
+  let ndh = max(0.0, dot(N, H));
+  let a2 = rough * rough * rough * rough;
+  var D = charGgx(ndh, rough);
+  if (kind == 1) { D = charDualLobe(ndh, rough); }
+  let spec = F * D * smithVisibility(ndl, ndv, a2) * 3.14159265 * eComp * charSpec;
+  var diffuse = kdm * (vec3<f32>(1.0) - F) * albedo;
+  var cosine = ndl;
+  // The iris takes its light through the cornea.
+  if (kind == 2) { cosine = mix(ndl, charIrisLight(Ld, N), charMask); }
+  diffuseLit = diffuseLit + diffuse * cosine * charLit;
+  return (diffuse * cosine + spec * ndl) * charLit;
+}
+`
+);
+
 // src/render/scenePacking.ts
 import {
   DEFAULT_DETAIL_SCALE,
@@ -14161,12 +15544,14 @@ import {
   NO_LAYERS,
   effectActive,
   emissiveAnimation,
+  materialHasExtensions,
+  resolveExtensions,
   materialHasLayers,
   macroUniform,
   materialHasWater,
   materialRefracts,
   spotCone,
-  lightColor as lightColor2,
+  lightColor as lightColor3,
   lightChannelMask as lightChannelMask2,
   areaAsPunctual as areaAsPunctual2,
   areaFrame as areaFrame2,
@@ -14199,6 +15584,9 @@ function decodeHalves(text) {
   for (let i = 0; i < out.length; i += 1) out[i] = halfToFloat(bytes.charCodeAt(2 * i) | bytes.charCodeAt(2 * i + 1) << 8);
   return out;
 }
+var IES_MAX_PROFILES = 16;
+var IES_VEC4S = 128;
+var IES_BASE = 2 * LTC_SIZE * LTC_SIZE;
 var tables = null;
 function ltcTables() {
   if (tables) return tables;
@@ -14228,6 +15616,27 @@ fn ltcAt(which: u32, ndv: f32, rough: f32) -> vec4<f32> {
   let top = mix(ltcLut[b + y0 * ${n}u + x0], ltcLut[b + y0 * ${n}u + x1], fx);
   let bottom = mix(ltcLut[b + y1 * ${n}u + x0], ltcLut[b + y1 * ${n}u + x1], fx);
   return mix(top, bottom, fy);
+}
+// An IES profile's intensity (F9d) for light leaving along out from a light whose axis is axis:
+// the vertical angle from the axis, the horizontal one round it from a fixed reference, bilinear.
+fn iesValue(index: u32, v: u32, h: u32) -> f32 {
+  let i = v + h * 32u;
+  return ltcLut[${IES_BASE}u + index * ${IES_VEC4S}u + i / 4u][i % 4u];
+}
+fn iesFactor(index: u32, axis: vec3<f32>, out: vec3<f32>) -> f32 {
+  let a = normalize(axis);
+  let basis = normalize(cross(a, select(vec3<f32>(1.0, 0.0, 0.0), vec3<f32>(0.0, 0.0, 1.0), abs(a.x) > 0.9)));
+  let theta = acos(clamp(dot(out, a), -1.0, 1.0));
+  let phi = atan2(dot(out, cross(a, basis)), dot(out, basis));
+  let v = theta / 3.14159265 * 31.0;
+  let h = fract(phi / 6.2831853 + 1.0) * 16.0;
+  let v0 = u32(floor(v));
+  let v1 = min(v0 + 1u, 31u);
+  let h0 = u32(floor(h)) % 16u;
+  let h1 = (h0 + 1u) % 16u;
+  let fv = v - floor(v);
+  let fh = h - floor(h);
+  return mix(mix(iesValue(index, v0, h0), iesValue(index, v1, h0), fv), mix(iesValue(index, v0, h1), iesValue(index, v1, h1), fv), fh);
 }
 fn ltcEdge(v1: vec3<f32>, v2: vec3<f32>) -> vec3<f32> {
   let x = dot(v1, v2);
@@ -14309,8 +15718,8 @@ fn areaTerm(lgt: Light, P: vec3<f32>, N: vec3<f32>, V: vec3<f32>, ndv: f32, roug
 }
 
 // src/render/scenePacking.ts
-var UNIFORM_STRIDE = 1024;
-var UNIFORM_BYTES_USED = 944;
+var UNIFORM_STRIDE = 1280;
+var UNIFORM_BYTES_USED = 1280;
 var UNIFORM_FLOATS = UNIFORM_STRIDE / 4;
 var LIGHT_FLOATS = 20;
 var PROBE_FLOATS = 16;
@@ -14326,7 +15735,7 @@ function packProbes(set) {
   });
   return out;
 }
-function packLights(lights, area = false) {
+function packLights(lights, area = false, iesIndex = null) {
   const out = new Float32Array(Math.max(1, lights.length) * LIGHT_FLOATS);
   lights.forEach((authored, i) => {
     const light = area ? authored : areaAsPunctual2(authored);
@@ -14337,7 +15746,7 @@ function packLights(lights, area = false) {
     out[base + 1] = v[1];
     out[base + 2] = v[2];
     out[base + 3] = light.kind === "area" ? AREA_KIND[light.shape ?? "rect"] : light.kind === "spot" ? 2 : placed ? 1 : 0;
-    const color = lightColor2(light);
+    const color = lightColor3(light);
     out[base + 4] = color[0];
     out[base + 5] = color[1];
     out[base + 6] = color[2];
@@ -14345,6 +15754,14 @@ function packLights(lights, area = false) {
     out[base + 8] = light.range ?? 0;
     out[base + 11] = light.shadowTile ?? -1;
     out[base + 15] = (placed && light.falloff === "inverseSquare" ? 1 : 0) + 2 * lightChannelMask2(light.channels ?? 1);
+    out[base + 19] = -1;
+    const profile = iesIndex && (light.kind === "point" || light.kind === "spot") ? iesIndex(authored) : -1;
+    if (profile >= 0) {
+      out[base + 19] = profile;
+      const axis = light.direction ?? [0, -1, 0];
+      const len = Math.hypot(axis[0], axis[1], axis[2]) || 1;
+      out.set([axis[0] / len, axis[1] / len, axis[2] / len], base + 12);
+    }
     if (light.kind === "area") {
       const [w, h] = areaSize2(light);
       const frame = areaFrame2(light);
@@ -14409,6 +15826,20 @@ var OFFSET_WIND0 = 220;
 var OFFSET_MAPS0 = 224;
 var OFFSET_WIND1 = 228;
 var OFFSET_MOTION0 = 232;
+var OFFSET_SHEEN0 = 236;
+var OFFSET_SPEC0 = 240;
+var OFFSET_TRANS0 = 244;
+var OFFSET_TRANS1 = 248;
+var OFFSET_IRID0 = 252;
+var OFFSET_UVX0 = 256;
+var OFFSET_UVX1 = 260;
+var OFFSET_SSS0 = 264;
+var OFFSET_DT0 = 268;
+var OFFSET_CHAR0 = 272;
+var OFFSET_CHAR1 = 276;
+var OFFSET_CULL0 = 280;
+var OFFSET_TERRAIN = 284;
+var OFFSET_WATER_LOOK = 316;
 var DEFAULT_LIGHT = [0.4, 0.8, 0.6];
 var DEFAULT_AMBIENT2 = 0.35;
 function resolveLight(direction, ambient) {
@@ -14425,13 +15856,13 @@ function alignBytesPerRow(width) {
 function normalBasis3x3(model) {
   return [model[0], model[1], model[2], model[4], model[5], model[6], model[8], model[9], model[10]];
 }
-function resolvePbr(material, hasMr, hasOcc, hasEmis) {
-  const emissiveFactor = material.emissiveFactor;
-  const isPbr = hasMr || hasOcc || hasEmis || material.metallicFactor !== void 0 || material.roughnessFactor !== void 0 || emissiveFactor !== void 0 && (emissiveFactor[0] > 0 || emissiveFactor[1] > 0 || emissiveFactor[2] > 0) || material.graph !== void 0 || materialHasLayers(material) || materialRefracts(material) || materialHasWater(material);
+function resolvePbr(material2, hasMr, hasOcc, hasEmis) {
+  const emissiveFactor = material2.emissiveFactor;
+  const isPbr = hasMr || hasOcc || hasEmis || material2.metallicFactor !== void 0 || material2.roughnessFactor !== void 0 || emissiveFactor !== void 0 && (emissiveFactor[0] > 0 || emissiveFactor[1] > 0 || emissiveFactor[2] > 0) || material2.graph !== void 0 || materialHasLayers(material2) || materialHasExtensions(material2) || materialRefracts(material2) || materialHasWater(material2);
   return {
     isPbr,
-    metallic: material.metallicFactor ?? 1,
-    roughness: material.roughnessFactor ?? 1,
+    metallic: material2.metallicFactor ?? 1,
+    roughness: material2.roughnessFactor ?? 1,
     emissive: emissiveFactor ?? [0, 0, 0]
   };
 }
@@ -14443,26 +15874,26 @@ function viewDirection(view) {
   return length < 1e-8 ? [0, 0, 1] : [x / length, y / length, z / length];
 }
 var NO_SURFACE = { detailScale: DEFAULT_DETAIL_SCALE, detailStrength: 0, reflect: 1, reflectMask: false, emisOffset: [0, 0], emisGain: 1, rim: [0, 0, 0], rimPower: 1, blend: null };
-function resolveSurface(material, time, hasDetail, hasMr, blend = { weights: false, textured: false }) {
-  const { offset, gain } = emissiveAnimation(material, time);
-  const rim = material.rim && material.rim.strength > 0 ? material.rim : null;
+function resolveSurface(material2, time, hasDetail, hasMr, blend = { weights: false, textured: false }) {
+  const { offset, gain } = emissiveAnimation(material2, time);
+  const rim = material2.rim && material2.rim.strength > 0 ? material2.rim : null;
   return {
-    detailScale: material.detailScale ?? DEFAULT_DETAIL_SCALE,
-    detailStrength: hasDetail ? material.detailStrength ?? DEFAULT_DETAIL_STRENGTH : 0,
-    reflect: material.reflectivity ?? 1,
-    reflectMask: material.reflectionMask === true && hasMr,
+    detailScale: material2.detailScale ?? DEFAULT_DETAIL_SCALE,
+    detailStrength: hasDetail ? material2.detailStrength ?? DEFAULT_DETAIL_STRENGTH : 0,
+    reflect: material2.reflectivity ?? 1,
+    reflectMask: material2.reflectionMask === true && hasMr,
     emisOffset: offset,
     emisGain: gain,
     rim: rim ? [rim.color[0] * rim.strength, rim.color[1] * rim.strength, rim.color[2] * rim.strength] : [0, 0, 0],
     rimPower: rim?.power ?? 1,
-    blend: blend.weights ? { color: material.blendColor ?? [1, 1, 1], roughness: material.blendRoughness ?? null, textured: blend.textured } : null
+    blend: blend.weights ? { color: material2.blendColor ?? [1, 1, 1], roughness: material2.blendRoughness ?? null, textured: blend.textured } : null
   };
 }
-function resolveMapping(material) {
-  const triplanar = material.triplanar && material.triplanar > 0 ? material.triplanar : 0;
-  const blendSharpness = material.blendSharpness && material.blendSharpness > 0 ? Math.min(1, material.blendSharpness) : 0;
-  const macro = macroUniform(material);
-  const farTile = material.farTile && material.farTile > 0 ? material.farTile : 0;
+function resolveMapping(material2) {
+  const triplanar = material2.triplanar && material2.triplanar > 0 ? material2.triplanar : 0;
+  const blendSharpness = material2.blendSharpness && material2.blendSharpness > 0 ? Math.min(1, material2.blendSharpness) : 0;
+  const macro = macroUniform(material2);
+  const farTile = material2.farTile && material2.farTile > 0 ? material2.farTile : 0;
   return triplanar > 0 || blendSharpness > 0 || macro[0] > 0 || farTile > 0 ? { triplanar, blendSharpness, macro, farTile } : null;
 }
 var INSTANCE_FLOATS = 60;
@@ -14476,6 +15907,26 @@ function writeInstanceTransform(target, index, transform3, base = index * INSTAN
     for (let row = 0; row < 3; row += 1) target[base + 48 + column * 4 + row] = transform3.normalBasis[column * 3 + row];
     target[base + 48 + column * 4 + 3] = 0;
   }
+}
+function writeExtensions(target, base, e, alphaMode, frame) {
+  const sheen2 = e?.sheenColor ?? [0, 0, 0];
+  target.set([sheen2[0], sheen2[1], sheen2[2], e?.sheenRoughness ?? 0], base + OFFSET_SHEEN0);
+  const f0 = e?.dielectricF0 ?? [0.04, 0.04, 0.04];
+  target.set([f0[0], f0[1], f0[2], e?.specularFactor ?? 1], base + OFFSET_SPEC0);
+  target.set([e?.transmission ?? 0, e?.thickness ?? 0, e?.attenuationDistance ?? 0, e?.ior ?? 1.5], base + OFFSET_TRANS0);
+  const att = e?.attenuationColor ?? [1, 1, 1];
+  target.set([att[0], att[1], att[2], e?.iridescence ?? 0], base + OFFSET_TRANS1);
+  const t = e?.uvTransform ?? null;
+  target.set([e?.iridescenceIor ?? 1.3, e?.iridescenceThickness ?? 400, e?.emissiveStrength ?? 1, t ? 1 : 0], base + OFFSET_IRID0);
+  target.set(t ? [t.scale[0], t.scale[1], Math.cos(t.rotation), Math.sin(t.rotation)] : [1, 1, 1, 0], base + OFFSET_UVX0);
+  target.set([t ? t.offset[0] : 0, t ? t.offset[1] : 0, e?.subsurface ?? 0, 0], base + OFFSET_UVX1);
+  const sss = e?.subsurfaceColor ?? [0, 0, 0];
+  target.set([sss[0], sss[1], sss[2], e?.subsurfaceRadius ?? 0], base + OFFSET_SSS0);
+  const dt = e?.diffuseTransmissionColor ?? [1, 1, 1];
+  target.set([dt[0], dt[1], dt[2], e?.diffuseTransmission ?? 0], base + OFFSET_DT0);
+  const [char0, char1] = packCharacter(e?.character ?? null, alphaMode === 1, frame);
+  target.set(char0, base + OFFSET_CHAR0);
+  target.set(char1, base + OFFSET_CHAR1);
 }
 function writeInstanceUniform(target, index, uniform) {
   const base = index * UNIFORM_FLOATS;
@@ -14543,7 +15994,7 @@ function writeInstanceUniform(target, index, uniform) {
   target[base + OFFSET_TONEMAP + 3] = tonemap?.authored ? 1 : 0;
   target[base + OFFSET_SSAO] = uniform.hasSsao ? 1 : 0;
   target[base + OFFSET_SSAO + 1] = uniform.lightCount;
-  target[base + OFFSET_SSAO + 2] = uniform.hasLightmap ? 1 : 0;
+  target[base + OFFSET_SSAO + 2] = uniform.hdrLightmap ? 2 : uniform.hasLightmap ? 1 : 0;
   target[base + OFFSET_SSAO + 3] = uniform.probeCount ?? (env?.probes ? Math.min(env.probes.probes.length, MAX_REFLECTION_PROBES) : 0);
   const model = uniform.model;
   for (let i = 0; i < 16; i += 1) target[base + OFFSET_MODEL + i] = model ? model[i] : i % 5 === 0 ? 1 : 0;
@@ -14625,6 +16076,7 @@ function writeInstanceUniform(target, index, uniform) {
   target[base + OFFSET_LAYER1 + 1] = layers.anisotropySin;
   target[base + OFFSET_LAYER1 + 2] = layers.relief ? 1 : 0;
   target[base + OFFSET_LAYER1 + 3] = 0;
+  writeExtensions(target, base, uniform.extensions ?? null, uniform.alpha?.mode ?? 0, uniform.frame ?? 0);
   const refraction = uniform.refraction ?? null;
   target[base + OFFSET_REFRACT0] = refraction ? refraction.bend : 0;
   target[base + OFFSET_REFRACT0 + 1] = refraction ? refraction.warp : 0;
@@ -14644,6 +16096,7 @@ function writeInstanceUniform(target, index, uniform) {
   target[base + OFFSET_WATER0 + 1] = water ? water[1] : 0;
   target[base + OFFSET_WATER0 + 2] = water ? water[2] : 0;
   target[base + OFFSET_WATER0 + 3] = water ? water[3] : 0;
+  target.set(uniform.waterLook ?? [0, 0, 0, 0], base + OFFSET_WATER_LOOK);
   const mapping = uniform.mapping ?? null;
   target[base + OFFSET_TERRAIN0] = mapping ? mapping.triplanar : 0;
   target[base + OFFSET_TERRAIN0 + 1] = mapping ? mapping.blendSharpness : 0;
@@ -14663,7 +16116,58 @@ function writeInstanceUniform(target, index, uniform) {
   target[base + OFFSET_MOTION0] = uniform.motionBase ?? 0;
   target[base + OFFSET_MOTION0 + 1] = uniform.lightChannels ?? 1;
   target[base + OFFSET_MOTION0 + 2] = uniform.receivesDecals ? 1 : 0;
-  target[base + OFFSET_MOTION0 + 3] = 0;
+  target[base + OFFSET_MOTION0 + 3] = uniform.lodLevel ?? -1;
+  target[base + OFFSET_CULL0] = uniform.instanceBase ?? 0;
+  target[base + OFFSET_CULL0 + 1] = uniform.octahedral?.frames ?? 0;
+  target[base + OFFSET_CULL0 + 2] = uniform.octahedral?.radius ?? 0;
+  if (uniform.terrain) target.set(uniform.terrain, base + OFFSET_TERRAIN);
+  else target.fill(0, base + OFFSET_TERRAIN, base + OFFSET_TERRAIN + 32);
+}
+var FRAME_UNIFORM_RANGES = [
+  [OFFSET_LIGHT, 4],
+  [OFFSET_VIEW, 3],
+  // w is the draw's alpha cutoff
+  [OFFSET_ENV_SKY, 12],
+  // sky, horizon, ground
+  [OFFSET_SHADOW, 4],
+  [OFFSET_ENV_META, 4],
+  [OFFSET_TONEMAP, 2],
+  // z is the draw's soft-edge distance
+  [OFFSET_TONEMAP + 3, 1],
+  [OFFSET_SSAO, 2],
+  // z is the draw's light-map flag
+  [OFFSET_SSAO + 3, 1],
+  [OFFSET_FOG, 8],
+  // the fog and its params
+  [OFFSET_SHADOW2, 2],
+  // zw are a soft-edged draw's depth terms
+  [OFFSET_FOG_CAM, OFFSET_EFFECT0 - OFFSET_FOG_CAM],
+  // the eye, height fog, glow and volumes
+  [OFFSET_EFFECT1 + 3, 1],
+  // the time
+  [OFFSET_REFRACT1, 8]
+  // the camera's right, up and height
+];
+var FRAME_FLOATS = Uint16Array.from(FRAME_UNIFORM_RANGES.flatMap(([offset, count]) => Array.from({ length: count }, (_, k) => offset + k)));
+function copyFrameUniform(target, index, from) {
+  const to = index * UNIFORM_FLOATS;
+  const at = from * UNIFORM_FLOATS;
+  for (let i = 0; i < FRAME_FLOATS.length; i += 1) {
+    const f3 = FRAME_FLOATS[i];
+    target[to + f3] = target[at + f3];
+  }
+}
+function uniformAnimates(material2, alpha, sway2, refract, effect) {
+  return sway2 || refract || effectActive(effect ?? null) || alpha >= 2 && (material2.softDepth ?? 0) > 0 || materialAnimates(material2);
+}
+var animating = /* @__PURE__ */ new WeakMap();
+function materialAnimates(material2) {
+  let out = animating.get(material2);
+  if (out === void 0) {
+    out = materialHasWater(material2) || material2.emissiveScroll !== void 0 || material2.emissivePulse !== void 0 || resolveExtensions(material2).character !== null;
+    animating.set(material2, out);
+  }
+  return out;
 }
 function refractionCamera(view, height) {
   return { right: [view[0], view[4], view[8]], up: [view[1], view[5], view[9]], height };
@@ -14709,6 +16213,11 @@ function unpadRows(padded, width, height, bytesPerRow, reuse = null) {
   }
   return out;
 }
+function waterLookUniform(material2) {
+  const w = material2.water;
+  if (!w || !(w.strength > 0)) return null;
+  return [w.foam ?? 0.5, w.waves ?? 0, w.ocean ?? 0, 1];
+}
 
 // src/render/gpuFrame.ts
 var SOFTWARE_WARMUP_TRIANGLES = 2e4;
@@ -14727,7 +16236,7 @@ function trianglesIn(instances) {
   return total;
 }
 function presentFrame(latest, visible, draw, software) {
-  if (latest) {
+  if (latest && latest.length === draw.width * draw.height * 4) {
     compositeFrame(latest, draw);
   } else if (draw.width * draw.height <= SOFTWARE_WARMUP_PIXELS && trianglesIn(visible) <= SOFTWARE_WARMUP_TRIANGLES) {
     software.render(visible, draw);
@@ -14759,7 +16268,7 @@ function packRgba([r, g, b, a]) {
   return (a << 24 | b << 16 | g << 8 | r) >>> 0;
 }
 function sameTextures(a, b) {
-  return a.base === b.base && a.mr === b.mr && a.occ === b.occ && a.emis === b.emis && a.lm === b.lm && a.detail === b.detail && a.blend === b.blend && a.relief === b.relief;
+  return a.base === b.base && a.mr === b.mr && a.occ === b.occ && a.emis === b.emis && a.lm === b.lm && a.lmHdr === b.lmHdr && a.detail === b.detail && a.blend === b.blend && a.relief === b.relief && (a.graph ?? null) === (b.graph ?? null);
 }
 var NO_OCCLUSION = {};
 var withRelief = /* @__PURE__ */ new WeakMap();
@@ -14767,8 +16276,8 @@ function occlusionWithRelief(occ, relief) {
   if (!relief || occ?.packedWithRelief) return occ;
   let byOcc = withRelief.get(relief);
   if (!byOcc) withRelief.set(relief, byOcc = /* @__PURE__ */ new WeakMap());
-  const key = occ ?? NO_OCCLUSION;
-  const known = byOcc.get(key);
+  const key2 = occ ?? NO_OCCLUSION;
+  const known = byOcc.get(key2);
   if (known) return known;
   const bigger = occ && occ.width * occ.height > relief.width * relief.height ? occ : relief;
   const { width, height } = bigger;
@@ -14789,18 +16298,19 @@ function occlusionWithRelief(occ, relief) {
     }
   }
   const out = { width, height, data };
-  byOcc.set(key, out);
+  byOcc.set(key2, out);
   return out;
 }
 function batchRefracts(primitive, textures, effect) {
-  const material = primitive.material;
-  if (!resolvePbr(material, textures.mr !== null, textures.occ !== null, textures.emis !== null).isPbr) return false;
-  return refracts(resolveRefraction(material, effectActive2(effect) ? effect : null));
+  const material2 = primitive.material;
+  if (!resolvePbr(material2, textures.mr !== null, textures.occ !== null, textures.emis !== null).isPbr) return false;
+  return refracts(resolveRefraction(material2, effectActive2(effect) ? effect : null)) || (material2.transmission ?? 0) > 0;
 }
-function batchInstances(instances, geometryOf, eye = [0, 0, 0]) {
+function batchInstances(instances, geometryOf, eye = [0, 0, 0], lodSiblings = null, clusters = false) {
   const batches = [];
   const seeThrough = [];
   const byPrimitive = /* @__PURE__ */ new Map();
+  const chained = [];
   let instanceCount = 0;
   for (const instance of instances) {
     const geometries = geometryOf(instance.mesh);
@@ -14813,35 +16323,53 @@ function batchInstances(instances, geometryOf, eye = [0, 0, 0]) {
         occ: occlusionWithRelief(instance.occlusionTextures?.[index] ?? null, instance.reliefTextures?.[index] ?? null),
         emis: instance.emissiveTextures?.[index] ?? null,
         lm: primitive.uvs2 ? instance.lightmapTextures?.[index] ?? null : null,
+        lmHdr: primitive.uvs2 ? instance.lightmapHdrTextures?.[index] ?? null : null,
         detail: instance.detailTextures?.[index] ?? null,
         blend: primitive.blend ? instance.blendTextures?.[index] ?? null : null,
         relief: instance.reliefTextures?.[index] ?? null,
-        normal: primitive.uvs ? instance.normalTextures?.[index] ?? null : null
+        normal: primitive.uvs ? instance.normalTextures?.[index] ?? null : null,
+        graph: instance.graphTextures?.[index] ?? null
       };
       const effect = instance.effect ?? null;
       const channels = instance.lightChannels ?? 1;
       const alpha = alphaCode(primitive.material.alphaMode);
       const refract = batchRefracts(primitive, textures, effect);
+      const lod = instance.lod ? instance.lod.meshes.indexOf(instance.mesh) : -1;
       if (alpha >= 2 || refract) {
         const c = primitiveCentre(primitive);
         const m = instance.model;
         const x = m[0] * c[0] + m[4] * c[1] + m[8] * c[2] + m[12] - eye[0];
         const y = m[1] * c[0] + m[5] * c[1] + m[9] * c[2] + m[13] - eye[1];
         const z = m[2] * c[0] + m[6] * c[1] + m[10] * c[2] + m[14] - eye[2];
-        seeThrough.push({ batch: { primitive, geometry, textures, models: [instance.model], effect, channels, alpha, refract, first: 0 }, distance: x * x + y * y + z * z });
+        seeThrough.push({ batch: { primitive, geometry, textures, models: [instance.model], effect, channels, alpha, refract, first: 0, lod }, distance: x * x + y * y + z * z });
         instanceCount += 1;
         return;
       }
       let list = byPrimitive.get(primitive);
       if (!list) byPrimitive.set(primitive, list = []);
-      let batch = list.find((b) => b.effect === effect && b.channels === channels && sameTextures(b.textures, textures));
+      const chain = lodSiblings && instance.lod && lodSiblings.has(instance.lod) && lod >= 0 ? instance.lod : null;
+      const alone = clusters && primitive.clusterLod !== void 0;
+      let batch = alone ? void 0 : list.find((b) => b.effect === effect && b.channels === channels && sameTextures(b.textures, textures) && (b.lodChain ?? null) === chain);
       if (!batch) {
-        batch = { primitive, geometry, textures, models: [], effect, channels, alpha, refract, first: 0 };
+        batch = { primitive, geometry, textures, models: [], effect, channels, alpha, refract, first: 0, lod, ...chain ? { lodChain: chain } : {} };
         list.push(batch);
         batches.push(batch);
+        if (chain) chained.push({ batch, mesh: instance.mesh, index });
       }
       batch.models.push(instance.model);
       instanceCount += 1;
+    });
+  }
+  for (const { batch, mesh, index } of chained) {
+    const chain = batch.lodChain;
+    chain.meshes.forEach((level, k) => {
+      if (level === mesh) return;
+      const primitive = level.primitives[index];
+      const geometry = geometryOf(level)[index];
+      if (!primitive || !geometry || geometry.indexCount === 0) return;
+      if (alphaCode(primitive.material.alphaMode) !== batch.alpha) return;
+      const own = chain.textures?.[k]?.[index];
+      batches.push({ ...batch, primitive, geometry, lod: k, source: batch, ...own ? { textures: { ...batch.textures, base: own } } : {} });
     });
   }
   seeThrough.sort((a, b) => b.distance - a.distance);
@@ -14851,8 +16379,8 @@ function batchInstances(instances, geometryOf, eye = [0, 0, 0]) {
 function alphaCode(mode) {
   return mode === "mask" ? 1 : mode === "blend" ? 2 : mode === "additive" ? 3 : 0;
 }
-function softEdges(material, alpha, projection) {
-  const distance = alpha >= 2 ? material.softDepth ?? 0 : 0;
+function softEdges(material2, alpha, projection) {
+  const distance = alpha >= 2 ? material2.softDepth ?? 0 : 0;
   if (!(distance > 0) || projection[15] !== 0) return void 0;
   return { distance, linear: depthLinearTerms(projection) };
 }
@@ -14892,8 +16420,8 @@ function halton(index, base) {
   }
   return result;
 }
-function temporalJitter(frame) {
-  const i = (frame % TEMPORAL_SAMPLES + TEMPORAL_SAMPLES) % TEMPORAL_SAMPLES + 1;
+function temporalJitter(frame, phases = TEMPORAL_SAMPLES) {
+  const i = (frame % phases + phases) % phases + 1;
   return [halton(i, 2) - 0.5, halton(i, 3) - 0.5];
 }
 function jitterProjection(projection, jitter, width, height) {
@@ -14951,16 +16479,17 @@ var TemporalState = class {
     this.uniforms = new Float32Array(TEMPORAL_UNIFORM_FLOATS);
   }
   /** Start a temporal frame of `width × height` seen through `view` and `projection`. */
-  begin(view, projection, width, height) {
+  begin(view, projection, width, height, phases = TEMPORAL_SAMPLES) {
     const viewProj = multiplyMat44(projection, view);
     const inverse = invertMat4(viewProj);
     const reprojection = this.previous && inverse ? multiplyMat44(this.previous, inverse) : null;
     this.uniforms.set(reprojection ?? IDENTITY, 0);
     this.uniforms.set([TEMPORAL_BLEND, TEMPORAL_SHARPEN, reprojection ? 1 : 0, this.depth === "unit" ? 1 : 0], 16);
-    const jittered = jitterProjection(projection, temporalJitter(this.frame), width, height);
+    const jitter = temporalJitter(this.frame, phases);
+    const jittered = jitterProjection(projection, jitter, width, height);
     this.frame += 1;
     this.previous = viewProj;
-    return { projection: jittered, uniforms: this.uniforms };
+    return { projection: jittered, uniforms: this.uniforms, jitter };
   }
   /** Forget the history: the next temporal frame starts fresh. */
   reset() {
@@ -16590,6 +18119,8 @@ var WebglSceneRenderer = class _WebglSceneRenderer {
     this.readSeq = 0;
     /** What the last submitted frame drew (for the profiler and tests); GPU time when the browser can time it. */
     this.lastFrameStats = { drawCalls: 0, instances: 0, triangles: 0, gpuMs: null };
+    /** Readbacks that have landed (gpuPacing.ts paces the render size by them). */
+    this.framesLanded = 0;
     /** The clustered lights' params and info this frame (EP8; see the shader's clusterParams/clusterInfo). */
     this.clusterParams = new Float32Array(4);
     this.clusterInfo = new Float32Array(4);
@@ -16739,6 +18270,98 @@ var WebglSceneRenderer = class _WebglSceneRenderer {
       gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null);
       this.latest = bytes;
       this.latestSeq = slot.seq;
+      this.framesLanded += 1;
+    }
+  }
+  /**
+   * Render at `width × height` from the next frame on (gpuPacing.ts: a GPU that
+   * can't keep up renders smaller). The colour and depth are re-stored in place,
+   * so the framebuffer keeps them; the targets made on first use (multisampled,
+   * reflection, temporal, scene copies, SSAO) are released and made again at the
+   * new size when next used. Readbacks in flight are dropped; the newest frame
+   * keeps showing, resampled, until one at the new size lands.
+   */
+  resize(width, height) {
+    width = Math.max(1, Math.round(width));
+    height = Math.max(1, Math.round(height));
+    if (this.destroyed || this.lost || width === this.width && height === this.height) return;
+    const gl = this.gl;
+    try {
+      this.latest = this.latest && this.latest.length === this.width * this.height * 4 ? resampleNearest(this.latest, this.width, this.height, width, height) : null;
+      this.width = width;
+      this.height = height;
+      gl.bindRenderbuffer(gl.RENDERBUFFER, this.attachments[0]);
+      gl.renderbufferStorage(gl.RENDERBUFFER, gl.RGBA8, width, height);
+      gl.bindRenderbuffer(gl.RENDERBUFFER, this.attachments[1]);
+      gl.renderbufferStorage(gl.RENDERBUFFER, gl.DEPTH_COMPONENT24, width, height);
+      gl.bindRenderbuffer(gl.RENDERBUFFER, null);
+      this.releaseSized();
+      this.temporalState.reset();
+      for (const slot of this.pending) {
+        if (slot.fence) gl.deleteSync(slot.fence);
+        slot.fence = null;
+      }
+      this.pending.length = 0;
+      for (const slot of this.readback) {
+        gl.bindBuffer(gl.PIXEL_PACK_BUFFER, slot.buffer);
+        gl.bufferData(gl.PIXEL_PACK_BUFFER, width * height * 4, gl.STREAM_READ);
+      }
+      gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null);
+      this.latestSeq = this.submitted;
+      this.readSeq = this.submitted;
+    } catch {
+      this.latest = null;
+      if (gl.isContextLost?.()) this.lost = true;
+    }
+  }
+  /** Delete the targets sized to the frame that are made on first use, so the next use makes them at the current size. */
+  releaseSized() {
+    const gl = this.gl;
+    if (this.msaa) {
+      gl.deleteFramebuffer(this.msaa.framebuffer);
+      for (const rb of this.msaa.attachments) gl.deleteRenderbuffer(rb);
+      this.msaa = null;
+    }
+    if (this.reflections) {
+      for (const t of this.reflections.textures) gl.deleteTexture(t);
+      gl.deleteFramebuffer(this.reflections.framebuffer);
+      if (this.reflections.msaa) {
+        gl.deleteFramebuffer(this.reflections.msaa.framebuffer);
+        for (const b of this.reflections.msaa.buffers) gl.deleteRenderbuffer(b);
+      }
+      gl.deleteTexture(this.reflections.copy.texture);
+      gl.deleteFramebuffer(this.reflections.copy.framebuffer);
+      gl.deleteProgram(this.reflections.program.handle);
+      gl.deleteSampler(this.reflections.nearest);
+      this.reflections = null;
+    }
+    if (this.taa) {
+      for (const t of [this.taa.current, ...this.taa.history]) {
+        gl.deleteTexture(t.texture);
+        gl.deleteFramebuffer(t.framebuffer);
+      }
+      gl.deleteProgram(this.taa.resolve.program);
+      gl.deleteProgram(this.taa.sharpen.program);
+      gl.deleteSampler(this.taa.linear);
+      gl.deleteSampler(this.taa.nearest);
+      this.taa = null;
+    }
+    if (this.sceneDepth) {
+      gl.deleteTexture(this.sceneDepth.texture);
+      gl.deleteFramebuffer(this.sceneDepth.framebuffer);
+      this.sceneDepth = null;
+    }
+    if (this.sceneCopy) {
+      for (const t of [this.sceneCopy.colour, this.sceneCopy.packed]) {
+        gl.deleteTexture(t.texture);
+        gl.deleteFramebuffer(t.framebuffer);
+      }
+      gl.deleteProgram(this.sceneCopy.program);
+      this.sceneCopy = null;
+    }
+    if (this.ssaoTexture) {
+      gl.deleteTexture(this.ssaoTexture);
+      this.ssaoTexture = null;
     }
   }
   /** Whether a finished GPU frame exists to show (false until the first readback lands). */
@@ -16748,7 +18371,7 @@ var WebglSceneRenderer = class _WebglSceneRenderer {
   settle(draw) {
     if (this.destroyed || this.lost) return "current";
     this.collect();
-    if (this.latest) compositeFrame(this.latest, draw);
+    if (this.latest && this.latest.length === draw.width * draw.height * 4) compositeFrame(this.latest, draw);
     if (this.latestSeq >= this.submitted) return "current";
     return this.readSeq >= this.submitted ? "pending" : "stale";
   }
@@ -17077,18 +18700,18 @@ var WebglSceneRenderer = class _WebglSceneRenderer {
     gl.bindSampler(UNIT_CLUSTER, null);
   }
   /** The program a material draws with: the plain one, or its graph's variant. */
-  programOf(material, reflect = false) {
-    const graph = compiledGraphOf(material);
+  programOf(material2, reflect = false) {
+    const graph = compiledGraphOf(material2);
     if (!graph && !reflect) return this.program;
-    const key = `${graph?.key ?? ""}|${reflect ? 1 : 0}`;
-    let program = this.graphPrograms.get(key);
+    const key2 = `${graph?.key ?? ""}|${reflect ? 1 : 0}`;
+    let program = this.graphPrograms.get(key2);
     if (!program) {
       try {
         program = buildProgram2(this.gl, this.nearest, graph, reflect);
       } catch {
-        program = graph && reflect ? this.programOf({ ...material, graph: void 0 }, true) : this.program;
+        program = graph && reflect ? this.programOf({ ...material2, graph: void 0 }, true) : this.program;
       }
-      this.graphPrograms.set(key, program);
+      this.graphPrograms.set(key2, program);
     }
     return program;
   }
@@ -17571,50 +19194,14 @@ var WebglSceneRenderer = class _WebglSceneRenderer {
       gl.deleteBuffer(this.uniformBuffer);
       gl.deleteBuffer(this.instanceBuffer);
       gl.deleteBuffer(this.lightBuffer);
-      for (const t of [this.blankTexture, this.blankFloat, this.shadowTexture, this.envTexture, this.probeTexture, this.ssaoTexture]) if (t) gl.deleteTexture(t);
+      for (const t of [this.blankTexture, this.blankFloat, this.shadowTexture, this.envTexture, this.probeTexture]) if (t) gl.deleteTexture(t);
       gl.deleteFramebuffer(this.framebuffer);
-      if (this.msaa) {
-        gl.deleteFramebuffer(this.msaa.framebuffer);
-        for (const rb of this.msaa.attachments) gl.deleteRenderbuffer(rb);
-      }
+      this.releaseSized();
       if (this.localAtlas) gl.deleteTexture(this.localAtlas);
       if (this.gridTexture) gl.deleteTexture(this.gridTexture);
       if (this.gridBlank) gl.deleteTexture(this.gridBlank);
       if (this.clusterTexture) {
         gl.deleteTexture(this.clusterTexture);
-      }
-      if (this.reflections) {
-        for (const t of this.reflections.textures) gl.deleteTexture(t);
-        gl.deleteFramebuffer(this.reflections.framebuffer);
-        if (this.reflections.msaa) {
-          gl.deleteFramebuffer(this.reflections.msaa.framebuffer);
-          for (const b of this.reflections.msaa.buffers) gl.deleteRenderbuffer(b);
-        }
-        gl.deleteTexture(this.reflections.copy.texture);
-        gl.deleteFramebuffer(this.reflections.copy.framebuffer);
-        gl.deleteProgram(this.reflections.program.handle);
-        gl.deleteSampler(this.reflections.nearest);
-      }
-      if (this.taa) {
-        for (const t of [this.taa.current, ...this.taa.history]) {
-          gl.deleteTexture(t.texture);
-          gl.deleteFramebuffer(t.framebuffer);
-        }
-        gl.deleteProgram(this.taa.resolve.program);
-        gl.deleteProgram(this.taa.sharpen.program);
-        gl.deleteSampler(this.taa.linear);
-        gl.deleteSampler(this.taa.nearest);
-      }
-      if (this.sceneDepth) {
-        gl.deleteTexture(this.sceneDepth.texture);
-        gl.deleteFramebuffer(this.sceneDepth.framebuffer);
-      }
-      if (this.sceneCopy) {
-        for (const t of [this.sceneCopy.colour, this.sceneCopy.packed]) {
-          gl.deleteTexture(t.texture);
-          gl.deleteFramebuffer(t.framebuffer);
-        }
-        gl.deleteProgram(this.sceneCopy.program);
       }
       this.timer?.destroy();
       for (const rb of this.attachments) gl.deleteRenderbuffer(rb);
@@ -17651,6 +19238,9 @@ import {
   CLEARCOAT_F0 as CLEARCOAT_F02,
   PARALLAX_MIN_NDV as PARALLAX_MIN_NDV2,
   PARALLAX_STEPS as PARALLAX_STEPS2,
+  resolveExtensions as resolveExtensions3,
+  morphCsr,
+  dualQuaternions,
   resolveLayers as resolveLayers2,
   DISTORTION_FREQUENCY as DISTORTION_FREQUENCY2,
   DISTORTION_SPEED as DISTORTION_SPEED2,
@@ -17658,7 +19248,17 @@ import {
   REFRACTION_SCALE as REFRACTION_SCALE2,
   effectActive as effectActive4,
   resolveRefraction as resolveRefraction3,
-  LIGHTMAP_RANGE as LIGHTMAP_RANGE2,
+  LIGHTMAP_DIRECTION_FLOOR,
+  LIGHTMAP_RANGE as LIGHTMAP_RANGE3,
+  PROBE_DEPTH_SIDE as PROBE_DEPTH_SIDE2,
+  PROBE_NORMAL_BIAS as PROBE_NORMAL_BIAS2,
+  PROBE_SH as PROBE_SH3,
+  PROBE_VOLUME_SLOTS as PROBE_VOLUME_SLOTS2,
+  probeVolumeTexels,
+  aerialCamera as aerialCamera3,
+  fogGrid,
+  fogSun,
+  resolveVolumetricFog,
   MAX_REFLECTION_PROBES as MAX_REFLECTION_PROBES4,
   PROBE_FADE as PROBE_FADE2,
   FOG_GLOW_POWER as FOG_GLOW_POWER2,
@@ -17667,7 +19267,7 @@ import {
   EFFECT_BAND_POWER as EFFECT_BAND_POWER2,
   EFFECT_BAND_SPEED as EFFECT_BAND_SPEED2,
   EFFECT_CAMO_CRAWL as EFFECT_CAMO_CRAWL2,
-  cameraPositionFromView as cameraPositionFromView3,
+  cameraPositionFromView as cameraPositionFromView4,
   compiledGraphOf as compiledGraphOf2,
   computeSmoothNormals as computeSmoothNormals2,
   lightProbeTexels as lightProbeTexels2,
@@ -17678,12 +19278,14 @@ import {
   MAX_LOCAL_SHADOW_TILES as MAX_LOCAL_SHADOW_TILES2,
   NEAR_CASCADE_BLEND as NEAR_CASCADE_BLEND2,
   NEAR_CASCADE_EDGE as NEAR_CASCADE_EDGE2,
-  CLUSTER_CELLS,
-  CLUSTER_INDEX_CAP as CLUSTER_INDEX_CAP2,
-  CLUSTER_X as CLUSTER_X2,
-  CLUSTER_Y as CLUSTER_Y2,
-  CLUSTER_Z as CLUSTER_Z2,
+  CLUSTER_CELLS as CLUSTER_CELLS3,
+  CLUSTER_INDEX_CAP as CLUSTER_INDEX_CAP3,
+  CLUSTER_X as CLUSTER_X4,
+  CLUSTER_Y as CLUSTER_Y4,
+  CLUSTER_Z as CLUSTER_Z3,
   buildLightClusters as buildLightClusters2,
+  clusterGrid,
+  resolveLodMesh,
   orderLights as orderLights2,
   graphNoiseSource as graphNoiseSource2,
   WATER_PERIOD as WATER_PERIOD2,
@@ -17693,7 +19295,15 @@ import {
   waterAlong as waterAlong2,
   windUniform as windUniform2,
   graphShaderCode as graphShaderCode2,
-  multiplyMat4 as multiplyMat47
+  multiplyMat4 as multiplyMat48,
+  CLOTH_GRAVITY,
+  volumeLight,
+  CLOTH_ITERATIONS,
+  CLOTH_RELAX,
+  CORNEA_ROUGHNESS,
+  MAX_CLOTH_CAPSULES,
+  clothTopology,
+  sortTrianglesBackToFront
 } from "@cartbox/editor";
 
 // src/render/frameGraph.ts
@@ -17801,22 +19411,22 @@ var FrameGraph = class {
       for (const id of byFirst) {
         if (first.get(id) !== order) continue;
         const node = this.resources[id];
-        const key = slotKey(node.desc, node.usage);
-        const pool = free.get(key);
+        const key2 = slotKey(node.desc, node.usage);
+        const pool = free.get(key2);
         let slot = pool?.pop();
         if (slot === void 0) {
           slot = slots.length;
-          slots.push({ key, desc: node.desc, usage: node.usage });
+          slots.push({ key: key2, desc: node.desc, usage: node.usage });
         }
         slotOf.set(id, slot);
         allocations.push({ resource: node.name, slot, first: order, last: last.get(id) });
       }
       for (const id of byFirst) {
         if (last.get(id) !== order) continue;
-        const key = slots[slotOf.get(id)].key;
-        const pool = free.get(key) ?? [];
+        const key2 = slots[slotOf.get(id)].key;
+        const pool = free.get(key2) ?? [];
         pool.push(slotOf.get(id));
-        free.set(key, pool);
+        free.set(key2, pool);
       }
     }
     this.keptPasses = keptPasses;
@@ -17884,9 +19494,9 @@ var TransientPool = class {
       list[n].usedFrame = this.frame;
       return list[n].texture;
     });
-    for (const [key, list] of this.textures) {
+    for (const [key2, list] of this.textures) {
       while (list.length > 0 && this.frame - list[list.length - 1].usedFrame > this.idleFrames) list.pop().texture.destroy?.();
-      if (list.length === 0) this.textures.delete(key);
+      if (list.length === 0) this.textures.delete(key2);
     }
     return out;
   }
@@ -18172,6 +19782,7 @@ function uploadCompressed(device, width, height, chain) {
 }
 
 // src/render/brdf.ts
+import { sheenAlbedo } from "@cartbox/editor";
 var DFG_SIZE = 32;
 var DFG_SAMPLES = 512;
 var MIN_ROUGHNESS = 0.045;
@@ -18221,12 +19832,28 @@ function dfgTable() {
   const out = new Float32Array(DFG_SIZE * DFG_SIZE * 2);
   for (let r = 0; r < DFG_SIZE; r += 1) {
     for (let v = 0; v < DFG_SIZE; v += 1) {
-      const [a, b] = integrateDfg((v + 0.5) / DFG_SIZE, (r + 0.5) / DFG_SIZE);
+      const [a, b] = integrateDfg(Math.max(1e-3, v / (DFG_SIZE - 1)), r / (DFG_SIZE - 1));
       out[(r * DFG_SIZE + v) * 2] = a;
       out[(r * DFG_SIZE + v) * 2 + 1] = b;
     }
   }
   table = out;
+  return out;
+}
+var sheen = null;
+function sheenTable() {
+  if (sheen) return sheen;
+  const out = new Float32Array(DFG_SIZE * DFG_SIZE * 2);
+  for (let r = 0; r < DFG_SIZE; r += 1) {
+    for (let v = 0; v < DFG_SIZE; v += 1) out[(r * DFG_SIZE + v) * 2] = sheenAlbedo(Math.max(1e-3, v / (DFG_SIZE - 1)), r / (DFG_SIZE - 1), 1024);
+  }
+  sheen = out;
+  return out;
+}
+function brdfLut() {
+  const out = new Float32Array(DFG_SIZE * DFG_SIZE * 4);
+  out.set(dfgTable(), 0);
+  out.set(sheenTable(), DFG_SIZE * DFG_SIZE * 2);
   return out;
 }
 function brdfWgsl(group, binding) {
@@ -18237,8 +19864,8 @@ function brdfWgsl(group, binding) {
 // The split-sum DFG table (F1c, brdf.ts): (A, B) by roughness row and N\xB7V column.
 @group(${group}) @binding(${binding}) var<storage, read> dfgLut: array<vec2<f32>>;
 fn dfgAt(ndv: f32, rough: f32) -> vec2<f32> {
-  let x = clamp(ndv * ${n}.0 - 0.5, 0.0, ${n - 1}.0);
-  let y = clamp(rough * ${n}.0 - 0.5, 0.0, ${n - 1}.0);
+  let x = clamp(ndv * ${n - 1}.0, 0.0, ${n - 1}.0);
+  let y = clamp(rough * ${n - 1}.0, 0.0, ${n - 1}.0);
   let x0 = u32(x);
   let y0 = u32(y);
   let x1 = min(x0 + 1u, ${n - 1}u);
@@ -18248,6 +19875,19 @@ fn dfgAt(ndv: f32, rough: f32) -> vec2<f32> {
   let top = mix(dfgLut[y0 * ${n}u + x0], dfgLut[y0 * ${n}u + x1], fx);
   let bottom = mix(dfgLut[y1 * ${n}u + x0], dfgLut[y1 * ${n}u + x1], fx);
   return mix(top, bottom, fy);
+}
+// The sheen's directional albedo (F1d), from the table after the DFG's.
+fn sheenE(ndv: f32, rough: f32) -> f32 {
+  let x = clamp(ndv * ${n - 1}.0, 0.0, ${n - 1}.0);
+  let y = clamp(rough * ${n - 1}.0, 0.0, ${n - 1}.0);
+  let x0 = u32(x);
+  let y0 = u32(y);
+  let x1 = min(x0 + 1u, ${n - 1}u);
+  let y1 = min(y0 + 1u, ${n - 1}u);
+  let o = ${n * n}u;
+  let top = mix(dfgLut[o + y0 * ${n}u + x0].x, dfgLut[o + y0 * ${n}u + x1].x, x - f32(x0));
+  let bottom = mix(dfgLut[o + y1 * ${n}u + x0].x, dfgLut[o + y1 * ${n}u + x1].x, x - f32(x0));
+  return mix(top, bottom, y - f32(y0));
 }
 // The height-correlated Smith visibility, G2 / (4 N\xB7L N\xB7V), for alpha\xB2 = a2.
 fn smithVisibility(ndl: f32, ndv: f32, a2: f32) -> f32 {
@@ -18272,12 +19912,4582 @@ fn energyCompensation(f0: vec3<f32>, dfg: vec2<f32>) -> vec3<f32> {
 fn specularOcclusion(ndv: f32, ao: f32, alpha: f32) -> f32 {
   return clamp(pow(ndv + ao, exp2(-16.0 * alpha - 1.0)) - 1.0 + ao, 0.0, 1.0);
 }
+// The share of cone A (cosine cosA) that cone B covers, their axes cosD apart (Oat and Sander; mirrors capCoverage).
+fn capCoverage(cosA: f32, cosB: f32, cosD: f32) -> f32 {
+  let a = acos(clamp(cosA, -1.0, 1.0));
+  let b = acos(clamp(cosB, -1.0, 1.0));
+  let d = acos(clamp(cosD, -1.0, 1.0));
+  let areaA = 6.28318531 * (1.0 - cosA);
+  if (areaA <= 1e-6) { return select(0.0, 1.0, d <= b); }
+  let full = 6.28318531 * (1.0 - max(cosA, cosB));
+  var area = 0.0;
+  if (d <= abs(a - b)) { area = full; }
+  else if (d < a + b) {
+    let diff = abs(a - b);
+    let x = 1.0 - clamp((d - diff) / max(1e-6, a + b - diff), 0.0, 1.0);
+    area = x * x * (3.0 - 2.0 * x) * full;
+  }
+  return clamp(area / areaA, 0.0, 1.0);
+}
+// Specular occlusion from a bent normal (Jimenez et al. 2016; mirrors bentSpecularOcclusion): the lobe's cone about R
+// against the open sky's cone about the bent normal, whose aperture its visibility gives.
+fn bentSpecularOcclusion(bent: vec3<f32>, visibility: f32, R: vec3<f32>, alpha: f32) -> f32 {
+  return capCoverage(exp2(-3.32193 * alpha), sqrt(max(0.0, 1.0 - visibility)), dot(normalize(bent), normalize(R)));
+}
 `
   );
 }
 
-// src/render/probeCapture.ts
-import { MAX_REFLECTION_PROBES as MAX_REFLECTION_PROBES3, PANORAMA_FACES, probeOrder, projectionMatrix as projectionMatrix3, viewMatrix as viewMatrix4 } from "@cartbox/editor";
+// src/render/materialSet.ts
+var MATERIAL_SET_FUNCTIONS_WGSL = (
+  /* wgsl */
+  `
+// KHR_texture_transform (F1d): into glTF's V-down space, offset + rotation \xB7 (scale \xD7 uv), and back.
+// xf = (scale u, scale v, cos, sin), offset = its offset.
+fn khrTransform(uv: vec2<f32>, xf: vec4<f32>, offset: vec2<f32>) -> vec2<f32> {
+  let g = vec2<f32>(uv.x, 1.0 - uv.y) * xf.xy;
+  let t = vec2<f32>(xf.z * g.x + xf.w * g.y, -xf.w * g.x + xf.z * g.y) + offset;
+  return vec2<f32>(t.x, 1.0 - t.y);
+}
+// The sheen's BRDF (Charlie, Neubelt) for colour c and roughness r, without the cosine.
+fn sheenBrdf(c: vec3<f32>, r: f32, ndl: f32, ndv: f32, ndh: f32) -> vec3<f32> {
+  if (max(c.r, max(c.g, c.b)) <= 0.0) { return vec3<f32>(0.0); }
+  let alpha = max(1e-3, r * r);
+  let inv = 1.0 / alpha;
+  let sin2 = max(0.0, 1.0 - ndh * ndh);
+  let d = (2.0 + inv) * pow(sin2, inv * 0.5) / 6.2831853;
+  let v = 1.0 / (4.0 * (ndl + ndv - ndl * ndv) + 1e-6);
+  return c * d * v;
+}
+fn ifFresnelSchlick(f0: f32, c: f32) -> f32 {
+  return f0 + (1.0 - f0) * pow(1.0 - c, 5.0);
+}
+fn ifIorToF0(n2: f32, n1: f32) -> f32 {
+  let r = (n2 - n1) / (n2 + n1);
+  return r * r;
+}
+fn ifSensitivity(opd: f32, shift: vec3<f32>) -> vec3<f32> {
+  let phase = 2.0 * 3.14159265 * opd * 1.0e-9;
+  let val = vec3<f32>(5.4856e-13, 4.4201e-13, 5.2481e-13);
+  let pos = vec3<f32>(1.6810e6, 1.7953e6, 2.2084e6);
+  let vr = vec3<f32>(4.3278e9, 9.3046e9, 6.6121e9);
+  var xyz = val * sqrt(2.0 * 3.14159265 * vr) * cos(pos * phase + shift) * exp(-phase * phase * vr);
+  xyz.x = xyz.x + 9.7470e-14 * sqrt(2.0 * 3.14159265 * 4.5282e9) * cos(2.2399e6 * phase + shift.x) * exp(-4.5282e9 * phase * phase);
+  xyz = xyz / 1.0685e-7;
+  let m = mat3x3<f32>(vec3<f32>(3.2404542, -0.9692660, 0.0556434), vec3<f32>(-1.5371385, 1.8760108, -0.2040259), vec3<f32>(-0.4985314, 0.0415560, 1.0572252));
+  return m * xyz;
+}
+// A thin film of index filmIor and thickness (nm) over a base of reflectance baseF0: its Fresnel at cos1 (Belcour & Barla).
+fn iridescenceFresnel(cos1: f32, baseF0: vec3<f32>, filmIor: f32, thickness: f32) -> vec3<f32> {
+  let t = clamp(thickness / 0.03, 0.0, 1.0);
+  let film = mix(1.0, filmIor, t * t * (3.0 - 2.0 * t));
+  let sin2Sq = (1.0 / film) * (1.0 / film) * (1.0 - cos1 * cos1);
+  let cos2Sq = 1.0 - sin2Sq;
+  if (cos2Sq < 0.0) { return vec3<f32>(1.0); }
+  let cos2 = sqrt(cos2Sq);
+  let r12 = ifFresnelSchlick(ifIorToF0(film, 1.0), cos1);
+  let t121 = 1.0 - r12;
+  let phi12 = select(0.0, 3.14159265, film < 1.0);
+  let phi21 = 3.14159265 - phi12;
+  let sf = sqrt(clamp(baseF0, vec3<f32>(0.0), vec3<f32>(0.9999)));
+  let baseIor = (vec3<f32>(1.0) + sf) / (vec3<f32>(1.0) - sf);
+  let rr = (baseIor - vec3<f32>(film)) / (baseIor + vec3<f32>(film));
+  let r1 = rr * rr;
+  let r23 = r1 + (vec3<f32>(1.0) - r1) * pow(1.0 - cos2, 5.0);
+  let phi23 = select(vec3<f32>(0.0), vec3<f32>(3.14159265), baseIor < vec3<f32>(film));
+  let opd = 2.0 * film * thickness * cos2;
+  let phi = vec3<f32>(phi21) + phi23;
+  let r123 = clamp(r12 * r23, vec3<f32>(1e-5), vec3<f32>(0.9999));
+  let root = sqrt(r123);
+  let rs = t121 * t121 * r23 / (vec3<f32>(1.0) - r123);
+  var total = r12 + rs;
+  var cm = (rs - vec3<f32>(t121)) * root;
+  total = total + cm * 2.0 * ifSensitivity(opd, phi);
+  cm = cm * root;
+  total = total + cm * 2.0 * ifSensitivity(2.0 * opd, 2.0 * phi);
+  return max(total, vec3<f32>(0.0));
+}
+`
+);
+var MATERIAL_SET_WGSL = (
+  /* wgsl */
+  `${MATERIAL_SET_FUNCTIONS_WGSL}
+fn khrUv(uv: vec2<f32>) -> vec2<f32> {
+  if (u.irid0.w < 0.5) { return uv; }
+  return khrTransform(uv, u.uvx0, u.uvx1.xy);
+}
+// The sheen's light from a light at N\xB7L, N\xB7V, N\xB7H, in the renderer's units (\xD7 \u03C0).
+fn sheenLobe(ndl: f32, ndv: f32, ndh: f32) -> vec3<f32> {
+  return sheenBrdf(u.sheen0.rgb, u.sheen0.w, ndl, ndv, ndh) * 3.14159265;
+}
+fn iridescenceF0(cos1: f32, baseF0: vec3<f32>) -> vec3<f32> {
+  return iridescenceFresnel(cos1, baseF0, u.irid0.x, u.irid0.y);
+}
+`
+);
+
+// src/render/gpuParticles.ts
+import { PARTICLE_FLOATS, compileEmitter } from "@cartbox/editor";
+var PARTICLE_WORKGROUP = 64;
+var MAX_SPAWN_REQUESTS = 64;
+var EMITTER_VEC4S = 32;
+function packEmitter(e, frame) {
+  const buffer = new ArrayBuffer(EMITTER_VEC4S * 16);
+  const f3 = new Float32Array(buffer);
+  const u = new Uint32Array(buffer);
+  u[0] = e.capacity;
+  u[1] = frame.requests;
+  u[2] = frame.spawnTotal;
+  u[3] = e.shapes.length;
+  f3.set([e.shape, e.radius, e.angle, e.speed], 4);
+  f3.set([...e.extents, e.speedJitter], 8);
+  f3.set([e.life, e.lifeJitter, e.drag, frame.dt], 12);
+  f3.set([...e.gravity, e.curl], 16);
+  f3.set([e.curlScale, frame.time * e.curlSpeed, e.depthCollide ? 1 : 0, e.restitution], 20);
+  f3.set([...e.attractor, e.attract], 24);
+  f3.set([...e.vortexAxis, e.vortex], 28);
+  f3.set([e.friction, frame.width, frame.height, 0.25], 32);
+  f3.set([frame.depthTerms[0], frame.depthTerms[1], 0, 0], 36);
+  for (let i = 0; i < 16; i += 1) f3[40 + i] = frame.viewProj[i];
+  e.shapes.forEach((s, k) => {
+    const o = 56 + k * 8;
+    if (s.kind === "sphere") f3.set([0, ...s.center, s.radius, 0, 0, 0], o);
+    else if (s.kind === "box") f3.set([1, ...s.center, 0, ...s.half], o);
+    else f3.set([2, ...s.normal, s.offset, 0, 0, 0], o);
+  });
+  return buffer;
+}
+var EMITTER_WGSL = (
+  /* wgsl */
+  `
+struct Emitter {
+  counts: vec4<u32>,      // capacity, requests, spawns this frame, shapes
+  shape: vec4<f32>,       // kind, radius, cone angle, speed
+  extents: vec4<f32>,     // box half extents, speed jitter
+  life: vec4<f32>,        // life, its jitter, drag, dt
+  gravity: vec4<f32>,     // gravity, curl strength
+  curl: vec4<f32>,        // curl scale, curl time, depth collision, restitution
+  attractor: vec4<f32>,   // position, strength
+  vortex: vec4<f32>,      // axis, strength
+  frame: vec4<f32>,       // friction, width, height, thickness
+  depth: vec4<f32>,       // the projection's depth terms
+  viewProj: mat4x4<f32>,
+  shapes: array<vec4<f32>, 16>, // kind + centre/normal + radius/offset; half extents
+};
+struct Particle {
+  p: vec4<f32>, // position, age
+  v: vec4<f32>, // velocity, life
+  b: vec4<u32>, // birth, spare
+};
+fn pcg(v: u32) -> u32 {
+  let state = v * 747796405u + 2891336453u;
+  let word = ((state >> ((state >> 28u) + 4u)) ^ state) * 277803737u;
+  return (word >> 22u) ^ word;
+}
+fn rand(birth: u32, k: u32) -> f32 { return f32(pcg(birth * 16u + k)) / 4294967296.0; }
+`
+);
+var PARTICLE_SPAWN_WGSL = (
+  /* wgsl */
+  `${EMITTER_WGSL}
+@group(0) @binding(0) var<uniform> e: Emitter;
+@group(0) @binding(1) var<storage, read_write> particles: array<Particle>;
+@group(0) @binding(2) var<storage, read> requests: array<vec4<f32>>;
+
+@compute @workgroup_size(${PARTICLE_WORKGROUP})
+fn main(@builtin(global_invocation_id) id: vec3<u32>) {
+  var i = id.x;
+  if (i >= e.counts.z) { return; }
+  // Which request: the runs are in order.
+  var r = 0u;
+  loop {
+    let count = u32(requests[r * 3u].w + 0.5);
+    if (i < count || r + 1u >= e.counts.y) { break; }
+    i = i - count;
+    r = r + 1u;
+  }
+  let at = requests[r * 3u].xyz;
+  let dir = requests[r * 3u + 1u].xyz;
+  let first = u32(requests[r * 3u + 1u].w + 0.5);
+  let birth = bitcast<u32>(requests[r * 3u + 2u].x) + i;
+  let slot = (first + i) % e.counts.x;
+  // A direction: on the sphere, or within the cone about dir.
+  let len = length(dir);
+  var axis = vec3<f32>(0.0, 1.0, 0.0);
+  if (len > 1e-6) { axis = dir / len; }
+  var cosMax = -1.0;
+  if (e.shape.x > 1.5 && e.shape.x < 2.5) { cosMax = cos(e.shape.z); }
+  let cosT = 1.0 - rand(birth, 0u) * (1.0 - cosMax);
+  let sinT = sqrt(max(0.0, 1.0 - cosT * cosT));
+  let phi = 6.28318530718 * rand(birth, 1u);
+  var helper = vec3<f32>(0.0, 1.0, 0.0);
+  if (abs(axis.y) >= 0.99) { helper = vec3<f32>(1.0, 0.0, 0.0); }
+  let t = normalize(cross(helper, axis));
+  let b = cross(axis, t);
+  let d = axis * cosT + (t * cos(phi) + b * sin(phi)) * sinT;
+  var p = at;
+  if (e.shape.x > 0.5 && e.shape.x < 2.5) { p = p + d * (e.shape.y * pow(rand(birth, 2u), 1.0 / 3.0)); }
+  else if (e.shape.x > 2.5) { p = p + (vec3<f32>(rand(birth, 2u), rand(birth, 3u), rand(birth, 4u)) * 2.0 - vec3<f32>(1.0)) * e.extents.xyz; }
+  let speed = e.shape.w * (1.0 + e.extents.w * (rand(birth, 5u) * 2.0 - 1.0));
+  let life = max(0.01, e.life.x * (1.0 + e.life.y * (rand(birth, 6u) * 2.0 - 1.0)));
+  particles[slot] = Particle(vec4<f32>(p, 0.0), vec4<f32>(d * speed, life), vec4<u32>(birth, 0u, 0u, 0u));
+}
+`
+);
+var PARTICLE_UPDATE_WGSL = (
+  /* wgsl */
+  `${EMITTER_WGSL}
+@group(0) @binding(0) var<uniform> e: Emitter;
+@group(0) @binding(1) var<storage, read_write> particles: array<Particle>;
+@group(0) @binding(2) var sceneDepth: texture_depth_2d;
+@group(0) @binding(3) var gbuffer: texture_2d<f32>;
+
+fn curlNoise(q: vec3<f32>, s: f32, t: f32) -> vec3<f32> {
+  let dpzdy = s * cos(2.0 * s * q.y + 1.1 * t);
+  let dpydz = s * cos(s * q.z + 1.3 * t);
+  let dpxdz = s * cos(2.0 * s * q.z + 1.7 * t);
+  let dpzdx = s * cos(s * q.x + 0.7 * t);
+  let dpydx = s * cos(2.0 * s * q.x + 0.9 * t);
+  let dpxdy = s * cos(s * q.y + t);
+  return vec3<f32>(dpzdy - dpydz, dpxdz - dpzdx, dpydx - dpxdy);
+}
+fn octDecode(o: vec2<f32>) -> vec3<f32> {
+  var n = vec3<f32>(o.x, o.y, 1.0 - abs(o.x) - abs(o.y));
+  let t = max(-n.z, 0.0);
+  n.x = n.x + select(t, -t, n.x >= 0.0);
+  n.y = n.y + select(t, -t, n.y >= 0.0);
+  return normalize(n);
+}
+// Where a point falls on screen: its pixel (x < 0 off screen or behind the eye), its eye depth, and the
+// prepass surface's eye depth there (far away where nothing was drawn).
+fn screenAt(p: vec3<f32>) -> vec4<f32> {
+  let clip = e.viewProj * vec4<f32>(p, 1.0);
+  if (clip.w <= 0.0) { return vec4<f32>(-1.0, 0.0, 0.0, 0.0); }
+  let ndc = clip.xyz / clip.w;
+  if (abs(ndc.x) >= 1.0 || abs(ndc.y) >= 1.0 || ndc.z <= 0.0 || ndc.z >= 1.0) { return vec4<f32>(-1.0, 0.0, 0.0, 0.0); }
+  let px = vec2<f32>(floor((ndc.x * 0.5 + 0.5) * e.frame.y), floor((0.5 - ndc.y * 0.5) * e.frame.z));
+  let surface = textureLoad(sceneDepth, vec2<i32>(px), 0);
+  var eyeS = 1e9;
+  if (surface < 1.0) { eyeS = e.depth.y / (surface + e.depth.x); }
+  return vec4<f32>(px, e.depth.y / (ndc.z + e.depth.x), eyeS);
+}
+fn bounce(v: vec3<f32>, n: vec3<f32>) -> vec3<f32> {
+  let vn = dot(v, n);
+  if (vn >= 0.0) { return v; }
+  return (v - vn * n) * (1.0 - e.frame.x) - vn * e.curl.w * n;
+}
+
+@compute @workgroup_size(${PARTICLE_WORKGROUP})
+fn main(@builtin(global_invocation_id) id: vec3<u32>) {
+  let i = id.x;
+  if (i >= e.counts.x) { return; }
+  var q = particles[i];
+  if (q.p.w >= q.v.w) { return; }
+  let dt = e.life.w;
+  var a = e.gravity.xyz;
+  if (e.gravity.w > 0.0) { a = a + curlNoise(q.p.xyz, e.curl.x, e.curl.y) * e.gravity.w; }
+  if (e.attractor.w != 0.0) {
+    let d = e.attractor.xyz - q.p.xyz;
+    a = a + d / max(0.1, length(d)) * e.attractor.w;
+  }
+  if (e.vortex.w != 0.0) { a = a + cross(e.vortex.xyz, q.p.xyz - e.attractor.xyz) * e.vortex.w; }
+  var v = (q.v.xyz + a * dt) * exp(-e.life.z * dt);
+  let before = q.p.xyz;
+  var p = before + v * dt;
+  for (var k = 0u; k < e.counts.w; k = k + 1u) {
+    let s = e.shapes[k * 2u];
+    let h = e.shapes[k * 2u + 1u];
+    var d = 0.0;
+    var n = vec3<f32>(0.0, 1.0, 0.0);
+    if (s.x < 0.5) {
+      let r = p - s.yzw;
+      let l = max(length(r), 1e-9);
+      d = l - h.x;
+      n = r / l;
+    } else if (s.x < 1.5) {
+      let c = p - s.yzw;
+      let o = abs(c) - h.yzw;
+      d = length(max(o, vec3<f32>(0.0))) + min(max(o.x, max(o.y, o.z)), 0.0);
+      n = vec3<f32>(0.0);
+      if (o.x > o.y && o.x > o.z) { n.x = select(-1.0, 1.0, c.x >= 0.0); }
+      else if (o.y > o.z) { n.y = select(-1.0, 1.0, c.y >= 0.0); }
+      else { n.z = select(-1.0, 1.0, c.z >= 0.0); }
+    } else {
+      n = normalize(s.yzw);
+      d = dot(p, n) - h.x;
+    }
+    if (d < 0.0) {
+      p = p - n * d;
+      v = bounce(v, n);
+    }
+  }
+  // The depth buffer: a particle in front of the prepass's surface a step ago and behind it now (or just behind
+  // it, within the thickness) steps back and bounces off the G-buffer's normal.
+  if (e.curl.z > 0.5) {
+    let now = screenAt(p);
+    let then = screenAt(before);
+    if (now.x >= 0.0 && now.z > now.w) {
+      let crossed = then.x >= 0.0 && then.z <= then.w + 1e-3;
+      if (crossed || now.z - now.w < e.frame.w) {
+        let n = octDecode(textureLoad(gbuffer, vec2<i32>(now.xy), 0).xy);
+        p = before;
+        v = bounce(v, n);
+      }
+    }
+  }
+  particles[i] = Particle(vec4<f32>(p, q.p.w + dt), vec4<f32>(v, q.v.w), q.b);
+}
+`
+);
+var PARTICLE_KEYS_WGSL = (
+  /* wgsl */
+  `${EMITTER_WGSL}
+@group(0) @binding(0) var<uniform> e: Emitter;
+@group(0) @binding(1) var<storage, read> particles: array<Particle>;
+@group(0) @binding(2) var<storage, read_write> pairs: array<vec2<u32>>;
+
+@compute @workgroup_size(${PARTICLE_WORKGROUP})
+fn main(@builtin(global_invocation_id) id: vec3<u32>) {
+  let i = id.x;
+  if (i >= e.counts.x) { return; }
+  let q = particles[i];
+  var key = 0xffffffffu;
+  if (q.p.w < q.v.w) {
+    // Back to front: the farthest (largest clip w) first, as ascending keys of its negation's bits.
+    let w = (e.viewProj * vec4<f32>(q.p.xyz, 1.0)).w;
+    key = 0x7fffffffu - min(bitcast<u32>(max(w, 0.0)), 0x7ffffffeu);
+  }
+  pairs[i] = vec2<u32>(key, i);
+}
+`
+);
+var PARTICLE_SORT_WGSL = (
+  /* wgsl */
+  `
+struct Stage { k: u32, j: u32, pad0: u32, pad1: u32 };
+@group(0) @binding(0) var<uniform> stage: Stage;
+@group(0) @binding(1) var<storage, read_write> pairs: array<vec2<u32>>;
+
+@compute @workgroup_size(${PARTICLE_WORKGROUP})
+fn main(@builtin(global_invocation_id) id: vec3<u32>) {
+  let i = id.x;
+  if (i >= arrayLength(&pairs)) { return; }
+  let l = i ^ stage.j;
+  if (l <= i) { return; }
+  let a = pairs[i];
+  let b = pairs[l];
+  let up = (i & stage.k) == 0u;
+  if ((a.x > b.x) == up) {
+    pairs[i] = b;
+    pairs[l] = a;
+  }
+}
+`
+);
+function bitonicStages(n) {
+  const out = [];
+  for (let k = 2; k <= n; k <<= 1) for (let j = k >> 1; j > 0; j >>= 1) out.push([k, j]);
+  return out;
+}
+function packLook(e, camera, light, atlas, motion) {
+  return Float32Array.from([
+    ...e.colorStart,
+    ...e.colorEnd,
+    e.sizeStart,
+    e.sizeEnd,
+    e.glow,
+    e.stretch,
+    e.frames,
+    atlas ? 1 : 0,
+    motion && e.motionVectors ? 1 : 0,
+    e.additive ? 1 : 0,
+    camera.right[0],
+    camera.right[1],
+    camera.right[2],
+    e.render,
+    camera.up[0],
+    camera.up[1],
+    camera.up[2],
+    e.capacity,
+    camera.eye[0],
+    camera.eye[1],
+    camera.eye[2],
+    light.ambient,
+    light.direction[0],
+    light.direction[1],
+    light.direction[2],
+    light.lights,
+    light.color[0],
+    light.color[1],
+    light.color[2],
+    0
+  ]);
+}
+var PARTICLE_DRAW_WGSL = (
+  /* wgsl */
+  `${EMITTER_WGSL}
+struct Look {
+  colorStart: vec4<f32>,
+  colorEnd: vec4<f32>,
+  size: vec4<f32>,      // start, end, glow, stretch
+  flip: vec4<f32>,      // frames, atlas, motion vectors, additive
+  right: vec4<f32>,     // camera right, render mode
+  up: vec4<f32>,        // camera up, capacity
+  eye: vec4<f32>,       // eye, ambient
+  sun: vec4<f32>,       // key light direction (toward it), global lights
+  sunColor: vec4<f32>,
+};
+struct Light {
+  d0: vec4<f32>,
+  d1: vec4<f32>,
+  d2: vec4<f32>,
+  d3: vec4<f32>,
+  d4: vec4<f32>,
+};
+@group(0) @binding(0) var<uniform> e: Emitter;
+@group(0) @binding(1) var<uniform> look: Look;
+@group(0) @binding(2) var<storage, read> particles: array<Particle>;
+@group(0) @binding(3) var<storage, read> order: array<vec2<u32>>;
+@group(0) @binding(4) var<storage, read> lights: array<Light>;
+@group(0) @binding(5) var atlas: texture_2d<f32>;
+@group(0) @binding(6) var motion: texture_2d<f32>;
+@group(0) @binding(7) var samp: sampler;
+@group(0) @binding(8) var sceneDepth: texture_depth_2d;
+
+struct Out {
+  @builtin(position) pos: vec4<f32>,
+  @location(0) uv: vec2<f32>,
+  @location(1) colour: vec4<f32>,
+  @location(2) life: f32,
+  @location(3) world: vec3<f32>,
+  @location(4) normal: vec3<f32>,
+};
+
+fn lit(world: vec3<f32>, n: vec3<f32>) -> vec3<f32> {
+  // The key light (half-Lambert: a particle is lit through), the global lights, the ambient.
+  var l = look.sunColor.rgb * (0.5 + 0.5 * dot(n, look.sun.xyz)) + vec3<f32>(look.eye.w);
+  let count = u32(look.sun.w + 0.5);
+  for (var k = 0u; k < count; k = k + 1u) {
+    let g = lights[k];
+    var dir = normalize(g.d0.xyz);
+    var atten = 1.0;
+    if (g.d0.w > 0.5) {
+      let to = g.d0.xyz - world;
+      let dist = max(length(to), 0.01);
+      dir = to / dist;
+      if (g.d2.x > 0.0) { let q = clamp(1.0 - pow(dist / g.d2.x, 4.0), 0.0, 1.0); atten = q * q / (dist * dist); } else { atten = 1.0 / (dist * dist); }
+    }
+    l = l + g.d1.rgb * g.d1.w * atten * (0.5 + 0.5 * dot(n, dir));
+  }
+  return l;
+}
+
+@vertex
+fn vs(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> Out {
+  var out: Out;
+  let corner = array<vec2<f32>, 6>(vec2<f32>(-1.0, -1.0), vec2<f32>(1.0, -1.0), vec2<f32>(1.0, 1.0), vec2<f32>(-1.0, -1.0), vec2<f32>(1.0, 1.0), vec2<f32>(-1.0, 1.0))[vi];
+  let cap = e.counts.x;
+  let mode = u32(look.right.w + 0.5);
+  var slot = ii;
+  if (look.flip.w < 0.5 && mode == 0u) { slot = order[ii].y; }
+  let q = particles[slot];
+  out.pos = vec4<f32>(0.0, 0.0, 2.0, 1.0); // off screen, for the dead
+  if (q.p.w >= q.v.w) { return out; }
+  let t = q.p.w / q.v.w;
+  let size = mix(look.size.x, look.size.y, t);
+  out.colour = mix(look.colorStart, look.colorEnd, t);
+  out.life = t;
+  var world = q.p.xyz;
+  if (mode == 2u) {
+    // A ribbon: the segment to the next one born, unless the ring wrapped there or it is dead.
+    let next = particles[(slot + 1u) % cap];
+    if (next.p.w >= next.v.w || next.b.x != q.b.x + 1u) { return out; }
+    let a = q.p.xyz;
+    let b = next.p.xyz;
+    let along = b - a;
+    let toEye = normalize(look.eye.xyz - a);
+    var side = cross(along, toEye);
+    side = side / max(length(side), 1e-6) * size * 0.5;
+    let end = select(a, b, corner.x > 0.0);
+    world = end + side * corner.y;
+    out.uv = vec2<f32>(corner.x * 0.5 + 0.5, corner.y * 0.5 + 0.5);
+    out.normal = toEye;
+  } else {
+    // A sprite facing the camera, stretched along its velocity on screen.
+    var right = look.right.xyz;
+    var up = look.up.xyz;
+    let v = q.v.xyz;
+    let onScreen = v - dot(v, normalize(look.eye.xyz - world)) * normalize(look.eye.xyz - world);
+    if (look.size.w > 0.0 && length(onScreen) > 1e-4) {
+      up = normalize(onScreen);
+      right = normalize(cross(up, normalize(look.eye.xyz - world)));
+      up = up * (1.0 + look.size.w * length(onScreen) * 0.1 / max(size, 1e-4));
+    }
+    world = world + (right * corner.x + up * corner.y) * size * 0.5;
+    out.uv = corner * 0.5 + vec2<f32>(0.5);
+    out.normal = normalize(look.eye.xyz - q.p.xyz);
+  }
+  out.world = world;
+  out.pos = e.viewProj * vec4<f32>(world, 1.0);
+  return out;
+}
+
+@fragment
+fn fs(in: Out) -> @location(0) vec4<f32> {
+  var tex = vec4<f32>(1.0);
+  if (look.flip.y > 0.5) {
+    // The flipbook: this frame and the next, blended, each pushed along its motion vectors toward the in-between.
+    let frames = max(1.0, look.flip.x);
+    let f = clamp(in.life, 0.0, 0.9999) * frames;
+    let frame = floor(f);
+    let next = min(frames - 1.0, frame + 1.0);
+    let w = f - frame;
+    var uvA = vec2<f32>((frame + in.uv.x) / frames, 1.0 - in.uv.y);
+    var uvB = vec2<f32>((next + in.uv.x) / frames, 1.0 - in.uv.y);
+    if (look.flip.z > 0.5) {
+      let mA = (textureSampleLevel(motion, samp, uvA, 0.0).xy * 2.0 - vec2<f32>(1.0)) / frames;
+      let mB = (textureSampleLevel(motion, samp, uvB, 0.0).xy * 2.0 - vec2<f32>(1.0)) / frames;
+      uvA = uvA - mA * w;
+      uvB = uvB + mB * (1.0 - w);
+    }
+    tex = mix(textureSampleLevel(atlas, samp, uvA, 0.0), textureSampleLevel(atlas, samp, uvB, 0.0), w);
+  } else if (u32(look.right.w + 0.5) != 2u) {
+    // A soft disc.
+    let d = length(in.uv * 2.0 - vec2<f32>(1.0));
+    tex = vec4<f32>(vec3<f32>(1.0 - 0.45 * d * d), clamp((1.0 - d) * 1.6, 0.0, 1.0));
+  }
+  var c = in.colour * tex;
+  // Soft where it meets the scene: faded over its last 20 cm in front of the surface.
+  let px = vec2<i32>(in.pos.xy);
+  let surface = textureLoad(sceneDepth, px, 0);
+  let eyeS = e.depth.y / (surface + e.depth.x);
+  let eyeP = e.depth.y / (in.pos.z + e.depth.x);
+  c.a = c.a * clamp((eyeS - eyeP) / 0.2, 0.0, 1.0);
+  var rgb = c.rgb * look.size.z;
+  if (look.size.z <= 0.0) { rgb = c.rgb * lit(in.world, normalize(in.normal)); }
+  if (look.flip.w > 0.5) { return vec4<f32>(rgb * c.a, 0.0); }
+  return vec4<f32>(rgb * c.a, c.a);
+}
+
+// A mesh particle: the mesh's vertex, scaled by the size and turned along the velocity.
+struct MeshIn {
+  @location(0) position: vec3<f32>,
+  @location(1) normal: vec3<f32>,
+};
+@vertex
+fn vsMesh(v: MeshIn, @builtin(instance_index) ii: u32) -> Out {
+  var out: Out;
+  out.pos = vec4<f32>(0.0, 0.0, 2.0, 1.0);
+  var slot = ii;
+  if (look.flip.w < 0.5) { slot = order[ii].y; }
+  let q = particles[slot];
+  if (q.p.w >= q.v.w) { return out; }
+  let t = q.p.w / q.v.w;
+  let size = mix(look.size.x, look.size.y, t);
+  // A frame whose +Y follows the velocity.
+  var y = vec3<f32>(0.0, 1.0, 0.0);
+  if (length(q.v.xyz) > 1e-4) { y = normalize(q.v.xyz); }
+  var x = cross(y, vec3<f32>(0.0, 0.0, 1.0));
+  if (length(x) < 1e-4) { x = cross(y, vec3<f32>(1.0, 0.0, 0.0)); }
+  x = normalize(x);
+  let z = cross(x, y);
+  let world = q.p.xyz + (x * v.position.x + y * v.position.y + z * v.position.z) * size;
+  out.world = world;
+  out.normal = normalize(x * v.normal.x + y * v.normal.y + z * v.normal.z);
+  out.colour = mix(look.colorStart, look.colorEnd, t);
+  out.life = t;
+  out.uv = vec2<f32>(0.5);
+  out.pos = e.viewProj * vec4<f32>(world, 1.0);
+  return out;
+}
+@fragment
+fn fsMesh(in: Out) -> @location(0) vec4<f32> {
+  var rgb = in.colour.rgb * look.size.z;
+  if (look.size.z <= 0.0) { rgb = in.colour.rgb * lit(in.world, normalize(in.normal)); }
+  return vec4<f32>(rgb * in.colour.a, select(in.colour.a, 0.0, look.flip.w > 0.5));
+}
+`
+);
+var GpuParticles = class {
+  constructor(device, colourFormat, specs, looks = []) {
+    this.device = device;
+    this.colourFormat = colourFormat;
+    this.pipes = null;
+    this.stages = null;
+    this.time = 0;
+    this.sampler = null;
+    const texture = (image, fallback) => {
+      const w = image?.width ?? 1;
+      const h = image?.height ?? 1;
+      const t = device.createTexture({ size: { width: w, height: h }, format: "rgba8unorm", usage: 4 | 2 });
+      const data = image ? new Uint8Array(image.data.buffer, image.data.byteOffset, image.data.byteLength) : Uint8Array.from(fallback);
+      device.queue.writeTexture({ texture: t }, data, { bytesPerRow: w * 4, rowsPerImage: h }, { width: w, height: h });
+      return t;
+    };
+    this.emitters = specs.map((spec, i) => {
+      const params = compileEmitter(spec);
+      const look = looks[i];
+      const sorted = !params.additive && params.render !== 2;
+      let mesh = null;
+      if (look?.mesh && params.render === 1) {
+        const m = look.mesh;
+        const interleaved = new Float32Array(m.positions.length / 3 * 6);
+        for (let v = 0; v < m.positions.length / 3; v += 1) interleaved.set([...m.positions.subarray(v * 3, v * 3 + 3), ...m.normals.subarray(v * 3, v * 3 + 3)], v * 6);
+        const vertices = device.createBuffer({ size: interleaved.byteLength, usage: 32 | 8 });
+        device.queue.writeBuffer(vertices, 0, interleaved);
+        const indices = device.createBuffer({ size: Math.max(4, m.indices.byteLength), usage: 16 | 8 });
+        device.queue.writeBuffer(indices, 0, m.indices);
+        mesh = { vertices, indices, count: m.indices.length };
+      }
+      const initial = new Float32Array(params.capacity * PARTICLE_FLOATS);
+      for (let s = 0; s < params.capacity; s += 1) initial[s * PARTICLE_FLOATS + 3] = 1;
+      const particles = device.createBuffer({ size: initial.byteLength, usage: 128 | 8 | 4 });
+      device.queue.writeBuffer(particles, 0, initial);
+      return {
+        spec,
+        params,
+        particles,
+        requests: device.createBuffer({ size: MAX_SPAWN_REQUESTS * 48, usage: 128 | 8 }),
+        uniform: device.createBuffer({ size: EMITTER_VEC4S * 16, usage: 64 | 8 }),
+        look: device.createBuffer({ size: 144, usage: 64 | 8 }),
+        pairs: sorted ? device.createBuffer({ size: params.capacity * 8, usage: 128 | 8 | 4 }) : null,
+        atlas: texture(look?.atlas, [255, 255, 255, 255]),
+        motion: texture(look?.motion, [128, 128, 0, 255]),
+        head: 0,
+        born: 0,
+        carry: 0,
+        origin: [0, 0, 0],
+        pending: [],
+        mesh
+      };
+    });
+  }
+  /** An emitter's index by name, or −1. */
+  indexOf(name) {
+    return this.emitters.findIndex((e) => e.spec.name === name);
+  }
+  /** Move where an emitter's rate spawns (F5e: rain and snow over the eye). */
+  setOrigin(index, at) {
+    const e = this.emitters[index];
+    if (e) e.origin = [at[0], at[1], at[2]];
+  }
+  /** Fire an emitter's burst at `at` toward `dir`, `scale` times its count. */
+  burst(index, at, dir = [0, 0, 0], scale = 1) {
+    const e = this.emitters[index];
+    if (!e) return;
+    const count = Math.max(1, Math.round(e.params.burst * Math.max(0, scale)));
+    if (e.pending.length < MAX_SPAWN_REQUESTS - 1) e.pending.push({ at, dir, count: Math.min(count, e.params.capacity) });
+  }
+  /** Spawn `count` from an emitter (as its rate does), at `at`. */
+  emit(index, count, at, dir = [0, 0, 0]) {
+    const e = this.emitters[index];
+    if (e && count > 0 && e.pending.length < MAX_SPAWN_REQUESTS - 1) e.pending.push({ at, dir, count: Math.min(count, e.params.capacity) });
+  }
+  /** Each emitter's ring: its particles buffer and capacity (for tests and the profiler). */
+  ring(index) {
+    const e = this.emitters[index];
+    return e ? { buffer: e.particles, capacity: e.params.capacity, born: e.born } : null;
+  }
+  /** Whether any emitter has particles or spawns to run. */
+  get active() {
+    return this.emitters.some((e) => e.born > 0 || e.pending.length > 0 || e.params.rate > 0);
+  }
+  pipelines() {
+    if (this.pipes) return this.pipes;
+    const device = this.device;
+    const compute = (code) => device.createComputePipeline({ layout: "auto", compute: { module: device.createShaderModule({ code }), entryPoint: "main" } });
+    this.pipes = { spawn: compute(PARTICLE_SPAWN_WGSL), update: compute(PARTICLE_UPDATE_WGSL), keys: compute(PARTICLE_KEYS_WGSL), sort: compute(PARTICLE_SORT_WGSL), draw: /* @__PURE__ */ new Map(), layout: null };
+    return this.pipes;
+  }
+  /** The draw pipeline for a blend and a kind (sprite and ribbon, or mesh). */
+  drawPipeline(additive, mesh) {
+    const pipes = this.pipelines();
+    const key2 = `${additive}:${mesh}`;
+    let pipe = pipes.draw.get(key2);
+    if (pipe) return pipe;
+    const device = this.device;
+    const module = device.createShaderModule({ code: PARTICLE_DRAW_WGSL });
+    const blend = additive ? { color: { srcFactor: "one", dstFactor: "one", operation: "add" }, alpha: { srcFactor: "zero", dstFactor: "one", operation: "add" } } : { color: { srcFactor: "one", dstFactor: "one-minus-src-alpha", operation: "add" }, alpha: { srcFactor: "one", dstFactor: "one-minus-src-alpha", operation: "add" } };
+    pipes.layout ?? (pipes.layout = device.createBindGroupLayout({
+      entries: [
+        { binding: 0, visibility: 3, buffer: { type: "uniform" } },
+        { binding: 1, visibility: 3, buffer: { type: "uniform" } },
+        { binding: 2, visibility: 3, buffer: { type: "read-only-storage" } },
+        { binding: 3, visibility: 3, buffer: { type: "read-only-storage" } },
+        { binding: 4, visibility: 3, buffer: { type: "read-only-storage" } },
+        { binding: 5, visibility: 3, texture: { sampleType: "float" } },
+        { binding: 6, visibility: 3, texture: { sampleType: "float" } },
+        { binding: 7, visibility: 3, sampler: { type: "filtering" } },
+        { binding: 8, visibility: 3, texture: { sampleType: "depth" } }
+      ]
+    }));
+    pipe = device.createRenderPipeline({
+      layout: device.createPipelineLayout({ bindGroupLayouts: [pipes.layout] }),
+      vertex: mesh ? { module, entryPoint: "vsMesh", buffers: [{ arrayStride: 24, attributes: [{ shaderLocation: 0, offset: 0, format: "float32x3" }, { shaderLocation: 1, offset: 12, format: "float32x3" }] }] } : { module, entryPoint: "vs" },
+      fragment: { module, entryPoint: mesh ? "fsMesh" : "fs", targets: [{ format: this.colourFormat, ...mesh ? {} : { blend } }] },
+      primitive: { topology: "triangle-list", cullMode: "none" },
+      depthStencil: { format: "depth24plus", depthWriteEnabled: false, depthCompare: "less-equal" }
+    });
+    pipes.draw.set(key2, pipe);
+    return pipe;
+  }
+  /** The bitonic stages' uniforms, one 256-byte slot each, for rings up to `n`. */
+  stageBuffer(n) {
+    if (this.stages && this.stages.offsets.size >= bitonicStages(n).length) return this.stages;
+    const all = bitonicStages(n);
+    const data = new Uint32Array(all.length * 64);
+    const offsets = /* @__PURE__ */ new Map();
+    all.forEach(([k, j], s) => {
+      data.set([k, j, 0, 0], s * 64);
+      offsets.set(k * 65536 + j, s * 256);
+    });
+    const buffer = this.device.createBuffer({ size: data.byteLength, usage: 64 | 8 });
+    this.device.queue.writeBuffer(buffer, 0, data);
+    this.stages = { buffer, offsets };
+    return this.stages;
+  }
+  /**
+   * Simulate a frame (spawn, update, sort keys and sort) into `encoder`'s compute pass. `depth` and `gbuffer`
+   * are the prepass's (for the depth collision).
+   */
+  simulate(encoder, frame, depth, gbuffer) {
+    const device = this.device;
+    const pipes = this.pipelines();
+    this.time += frame.dt;
+    const pass = encoder.beginComputePass();
+    for (const e of this.emitters) {
+      e.carry += e.params.rate * frame.dt;
+      const rated = Math.floor(e.carry);
+      e.carry -= rated;
+      if (rated > 0) e.pending.push({ at: e.origin, dir: [0, 0, 0], count: Math.min(rated, e.params.capacity) });
+      const requests = e.pending.splice(0, MAX_SPAWN_REQUESTS);
+      const data = new Float32Array(Math.max(1, requests.length) * 12);
+      const bits = new Uint32Array(data.buffer);
+      let total = 0;
+      requests.forEach((r, k) => {
+        data.set([r.at[0], r.at[1], r.at[2], r.count, r.dir[0], r.dir[1], r.dir[2], (e.head + total) % e.params.capacity], k * 12);
+        bits[k * 12 + 8] = e.born + total >>> 0;
+        total += r.count;
+      });
+      device.queue.writeBuffer(e.requests, 0, data);
+      device.queue.writeBuffer(e.uniform, 0, packEmitter(e.params, { ...frame, requests: requests.length, spawnTotal: total }));
+      const group = (pipe, entries) => device.createBindGroup({ layout: pipe.getBindGroupLayout(0), entries: entries.map((resource, binding) => ({ binding, resource })) });
+      if (total > 0) {
+        pass.setPipeline(pipes.spawn);
+        pass.setBindGroup(0, group(pipes.spawn, [{ buffer: e.uniform }, { buffer: e.particles }, { buffer: e.requests }]));
+        pass.dispatchWorkgroups(Math.ceil(total / PARTICLE_WORKGROUP));
+        e.head = (e.head + total) % e.params.capacity;
+        e.born += total;
+      }
+      const groups = Math.ceil(e.params.capacity / PARTICLE_WORKGROUP);
+      pass.setPipeline(pipes.update);
+      pass.setBindGroup(0, group(pipes.update, [{ buffer: e.uniform }, { buffer: e.particles }, depth.createView(), gbuffer.createView()]));
+      pass.dispatchWorkgroups(groups);
+      if (e.pairs) {
+        pass.setPipeline(pipes.keys);
+        pass.setBindGroup(0, group(pipes.keys, [{ buffer: e.uniform }, { buffer: e.particles }, { buffer: e.pairs }]));
+        pass.dispatchWorkgroups(groups);
+        const stages = this.stageBuffer(e.params.capacity);
+        pass.setPipeline(pipes.sort);
+        for (const [k, j] of bitonicStages(e.params.capacity)) {
+          const offset = stages.offsets.get(k * 65536 + j);
+          pass.setBindGroup(0, group(pipes.sort, [{ buffer: stages.buffer, offset, size: 16 }, { buffer: e.pairs }]));
+          pass.dispatchWorkgroups(groups);
+        }
+      }
+    }
+    pass.end();
+  }
+  /** Draw every emitter into an open render pass (colour and the scene's depths, read-only). */
+  draw(pass, frame, lights, depth) {
+    const device = this.device;
+    const sampler = this.sampler ?? (this.sampler = device.createSampler({ magFilter: "linear", minFilter: "linear" }));
+    for (const e of this.emitters) {
+      if (e.born === 0) continue;
+      const mesh = e.params.render === 1 && e.mesh !== null;
+      const pipe = this.drawPipeline(e.params.additive, mesh);
+      device.queue.writeBuffer(e.look, 0, packLook(e.params, frame, frame.light, e.params.frames > 1, true));
+      const entries = [{ buffer: e.uniform }, { buffer: e.look }, { buffer: e.particles }, { buffer: e.pairs ?? e.requests }, { buffer: lights }, e.atlas.createView(), e.motion.createView(), sampler, depth.createView()];
+      pass.setPipeline(pipe);
+      pass.setBindGroup(0, device.createBindGroup({ layout: this.pipelines().layout, entries: entries.map((resource, binding) => ({ binding, resource })) }));
+      if (mesh) {
+        pass.setVertexBuffer(0, e.mesh.vertices);
+        pass.setIndexBuffer(e.mesh.indices, "uint32");
+        pass.drawIndexed(e.mesh.count, e.params.capacity);
+      } else pass.draw(6, e.params.capacity);
+    }
+  }
+  dispose() {
+    for (const e of this.emitters) for (const b of [e.particles, e.requests, e.uniform, e.look, e.pairs, e.atlas, e.motion, e.mesh?.vertices, e.mesh?.indices]) b?.destroy?.();
+    this.stages?.buffer.destroy?.();
+  }
+};
+
+// src/render/volumetricEffects.ts
+import { PRESSURE_ITERATIONS, bakeVolume, burn, effectSources } from "@cartbox/editor";
+var MAX_LIVE_VOLUMES = 4;
+var MARCH_STEPS = 48;
+function packSolver(n, effect, sources, dt) {
+  const buffer = new ArrayBuffer(16 * 10);
+  const u = new Uint32Array(buffer);
+  const f3 = new Float32Array(buffer);
+  u[0] = n;
+  u[1] = Math.min(4, sources.length);
+  f3.set([dt, effect.buoyancy, Math.exp(-effect.dissipation * dt), Math.exp(-effect.cooling * dt)], 4);
+  sources.slice(0, 4).forEach((s, k) => {
+    f3.set([s.center[0], s.center[1], s.center[2], s.radius], 8 + k * 8);
+    f3.set([s.density, s.temperature, s.velocity[1], 0], 12 + k * 8);
+  });
+  return buffer;
+}
+var SOLVER_COMMON = (
+  /* wgsl */
+  `
+struct Solver {
+  info: vec4<u32>,  // n, sources
+  terms: vec4<f32>, // dt, buoyancy, what density and heat keep a step
+  sources: array<vec4<f32>, 8>, // centre + radius; density, heat, rise
+};
+@group(0) @binding(0) var<uniform> s: Solver;
+fn idx(x: i32, y: i32, z: i32) -> u32 {
+  let n = i32(s.info.x);
+  return u32((clamp(z, 0, n - 1) * n + clamp(y, 0, n - 1)) * n + clamp(x, 0, n - 1));
+}
+fn cellOf(i: u32) -> vec3<i32> {
+  let n = s.info.x;
+  return vec3<i32>(i32(i % n), i32((i / n) % n), i32(i / (n * n)));
+}
+`
+);
+var SOLVER_FORCES_WGSL = (
+  /* wgsl */
+  `${SOLVER_COMMON}
+@group(0) @binding(1) var<storage, read_write> vel: array<vec4<f32>>;
+@group(0) @binding(2) var<storage, read_write> dt2: array<vec2<f32>>;
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) id: vec3<u32>) {
+  let n = s.info.x;
+  let i = id.x;
+  if (i >= n * n * n) { return; }
+  let c = vec3<f32>(cellOf(i)) + vec3<f32>(0.5);
+  var v = vel[i].xyz;
+  var q = dt2[i];
+  let dt = s.terms.x;
+  for (var k = 0u; k < s.info.y; k = k + 1u) {
+    let a = s.sources[k * 2u];
+    let b = s.sources[k * 2u + 1u];
+    let d = length(c - a.xyz);
+    if (d >= a.w) { continue; }
+    let w = 1.0 - d / a.w;
+    q = q + vec2<f32>(b.x, b.y) * w * dt;
+    v.y = v.y + b.z * w * dt;
+  }
+  v.y = v.y + s.terms.y * q.y * dt;
+  vel[i] = vec4<f32>(v, 0.0);
+  dt2[i] = q;
+}
+`
+);
+var SOLVER_ADVECT_WGSL = (
+  /* wgsl */
+  `${SOLVER_COMMON}
+@group(0) @binding(1) var<storage, read> vel: array<vec4<f32>>;
+@group(0) @binding(2) var<storage, read> dt2: array<vec2<f32>>;
+@group(0) @binding(3) var<storage, read_write> velOut: array<vec4<f32>>;
+@group(0) @binding(4) var<storage, read_write> dt2Out: array<vec2<f32>>;
+fn tri(p: vec3<f32>) -> mat2x4<f32> {
+  let n = f32(s.info.x);
+  let cp = clamp(p - vec3<f32>(0.5), vec3<f32>(0.0), vec3<f32>(n - 1.0));
+  let b = vec3<i32>(min(floor(cp), vec3<f32>(n - 2.0)));
+  let f = cp - vec3<f32>(b);
+  var v = vec4<f32>(0.0);
+  var q = vec4<f32>(0.0);
+  for (var k = 0; k < 8; k = k + 1) {
+    let o = vec3<i32>(k & 1, (k >> 1) & 1, (k >> 2) & 1);
+    let w = select(1.0 - f.x, f.x, o.x == 1) * select(1.0 - f.y, f.y, o.y == 1) * select(1.0 - f.z, f.z, o.z == 1);
+    let j = idx(b.x + o.x, b.y + o.y, b.z + o.z);
+    v = v + vel[j] * w;
+    q = q + vec4<f32>(dt2[j], 0.0, 0.0) * w;
+  }
+  return mat2x4<f32>(v, q);
+}
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) id: vec3<u32>) {
+  let n = s.info.x;
+  let i = id.x;
+  if (i >= n * n * n) { return; }
+  let c = vec3<f32>(cellOf(i)) + vec3<f32>(0.5);
+  let p = c - vel[i].xyz * s.terms.x;
+  let m = tri(p);
+  velOut[i] = vec4<f32>(m[0].xyz, 0.0);
+  dt2Out[i] = m[1].xy;
+}
+`
+);
+var SOLVER_DIVERGENCE_WGSL = (
+  /* wgsl */
+  `${SOLVER_COMMON}
+@group(0) @binding(1) var<storage, read> vel: array<vec4<f32>>;
+@group(0) @binding(2) var<storage, read_write> div: array<f32>;
+fn comp(x: i32, y: i32, z: i32, c: i32) -> f32 {
+  let n = i32(s.info.x);
+  var sign = 1.0;
+  if ((x < 0 || x >= n) && c == 0) { sign = -1.0; }
+  if ((y < 0 || y >= n) && c == 1) { sign = -1.0; }
+  if ((z < 0 || z >= n) && c == 2) { sign = -1.0; }
+  return sign * vel[idx(x, y, z)][c];
+}
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) id: vec3<u32>) {
+  let n = s.info.x;
+  let i = id.x;
+  if (i >= n * n * n) { return; }
+  let c = cellOf(i);
+  div[i] = 0.5 * (comp(c.x + 1, c.y, c.z, 0) - comp(c.x - 1, c.y, c.z, 0) + comp(c.x, c.y + 1, c.z, 1) - comp(c.x, c.y - 1, c.z, 1) + comp(c.x, c.y, c.z + 1, 2) - comp(c.x, c.y, c.z - 1, 2));
+}
+`
+);
+var SOLVER_JACOBI_WGSL = (
+  /* wgsl */
+  `${SOLVER_COMMON}
+@group(0) @binding(1) var<storage, read> pIn: array<f32>;
+@group(0) @binding(2) var<storage, read_write> pOut: array<f32>;
+@group(0) @binding(3) var<storage, read> div: array<f32>;
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) id: vec3<u32>) {
+  let n = s.info.x;
+  let i = id.x;
+  if (i >= n * n * n) { return; }
+  let c = cellOf(i);
+  let sum = pIn[idx(c.x - 1, c.y, c.z)] + pIn[idx(c.x + 1, c.y, c.z)] + pIn[idx(c.x, c.y - 1, c.z)] + pIn[idx(c.x, c.y + 1, c.z)] + pIn[idx(c.x, c.y, c.z - 1)] + pIn[idx(c.x, c.y, c.z + 1)];
+  pOut[i] = (sum - div[i]) / 6.0;
+}
+`
+);
+var SOLVER_PROJECT_WGSL = (
+  /* wgsl */
+  `${SOLVER_COMMON}
+@group(0) @binding(1) var<storage, read> p: array<f32>;
+@group(0) @binding(2) var<storage, read> vel: array<vec4<f32>>;
+@group(0) @binding(3) var<storage, read> dt2: array<vec2<f32>>;
+@group(0) @binding(4) var<storage, read_write> velOut: array<vec4<f32>>;
+@group(0) @binding(5) var<storage, read_write> dt2Out: array<vec2<f32>>;
+@group(0) @binding(6) var volume: texture_storage_3d<rgba16float, write>;
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) id: vec3<u32>) {
+  let n = s.info.x;
+  let i = id.x;
+  if (i >= n * n * n) { return; }
+  let c = cellOf(i);
+  let grad = 0.5 * vec3<f32>(p[idx(c.x + 1, c.y, c.z)] - p[idx(c.x - 1, c.y, c.z)], p[idx(c.x, c.y + 1, c.z)] - p[idx(c.x, c.y - 1, c.z)], p[idx(c.x, c.y, c.z + 1)] - p[idx(c.x, c.y, c.z - 1)]);
+  velOut[i] = vec4<f32>(vel[i].xyz - grad, 0.0);
+  let q = dt2[i] * vec2<f32>(s.terms.z, s.terms.w);
+  dt2Out[i] = q;
+  textureStore(volume, c, vec4<f32>(q, 0.0, 1.0));
+}
+`
+);
+function packMarch(frame, volumes) {
+  const out = new Float32Array(16 + 4 * 4 + MAX_LIVE_VOLUMES * 16);
+  for (let i = 0; i < 16; i += 1) out[i] = frame.invViewProj[i];
+  out.set([frame.eye[0], frame.eye[1], frame.eye[2], volumes.length], 16);
+  out.set([frame.sun[0], frame.sun[1], frame.sun[2], frame.ambient], 20);
+  out.set([frame.sunColor[0], frame.sunColor[1], frame.sunColor[2], 0], 24);
+  out.set([frame.depthTerms[0], frame.depthTerms[1], frame.width, frame.height], 28);
+  volumes.slice(0, MAX_LIVE_VOLUMES).forEach((v, k) => {
+    const o = 32 + k * 16;
+    const h = v.effect.size / 2;
+    out.set([v.at[0] - h, v.at[1], v.at[2] - h, v.effect.size], o);
+    out.set([...v.effect.color, v.effect.absorption], o + 4);
+    out.set([v.effect.temperature, v.effect.emission, v.burn, v.tempScale], o + 8);
+  });
+  return out;
+}
+var VOLUME_MARCH_WGSL = (
+  /* wgsl */
+  `
+struct March {
+  invViewProj: mat4x4<f32>,
+  eye: vec4<f32>,      // eye, volume count
+  sun: vec4<f32>,      // toward the sun, ambient
+  sunColor: vec4<f32>,
+  screen: vec4<f32>,   // depth terms, width, height
+  volumes: array<vec4<f32>, ${MAX_LIVE_VOLUMES * 4}>,
+};
+@group(0) @binding(0) var<uniform> m: March;
+@group(0) @binding(1) var sceneDepth: texture_depth_2d;
+@group(0) @binding(2) var samp: sampler;
+@group(0) @binding(3) var vol0: texture_3d<f32>;
+@group(0) @binding(4) var vol1: texture_3d<f32>;
+@group(0) @binding(5) var vol2: texture_3d<f32>;
+@group(0) @binding(6) var vol3: texture_3d<f32>;
+
+fn density(k: u32, uvw: vec3<f32>) -> vec2<f32> {
+  switch (k) {
+    case 0u: { return textureSampleLevel(vol0, samp, uvw, 0.0).xy; }
+    case 1u: { return textureSampleLevel(vol1, samp, uvw, 0.0).xy; }
+    case 2u: { return textureSampleLevel(vol2, samp, uvw, 0.0).xy; }
+    default: { return textureSampleLevel(vol3, samp, uvw, 0.0).xy; }
+  }
+}
+// The blackbody fit (blackbody in the editor), linear, brightening as T\u2074 about 1500 K.
+fn blackbody(kelvin: f32) -> vec3<f32> {
+  if (kelvin < 500.0) { return vec3<f32>(0.0); }
+  let t = kelvin / 100.0;
+  var r = 255.0;
+  var g = 99.4708025861 * log(t) - 161.1195681661;
+  var b = 255.0;
+  if (t > 66.0) { r = 329.698727446 * pow(t - 60.0, -0.1332047592); g = 288.1221695283 * pow(t - 60.0, -0.0755148492); }
+  if (t < 66.0) { b = select(138.5177312231 * log(t - 10.0) - 305.0447927307, 0.0, t <= 19.0); }
+  let c = clamp(vec3<f32>(r, g, b), vec3<f32>(0.0), vec3<f32>(255.0)) / 255.0;
+  let lin = select(pow((c + vec3<f32>(0.055)) / 1.055, vec3<f32>(2.4)), c / 12.92, c <= vec3<f32>(0.04045));
+  return lin * pow(kelvin / 1500.0, 4.0);
+}
+
+struct VsOut { @builtin(position) pos: vec4<f32>, @location(0) ndc: vec2<f32> };
+@vertex
+fn vs(@builtin(vertex_index) i: u32) -> VsOut {
+  let p = vec2<f32>(f32((i << 1u) & 2u), f32(i & 2u)) * 2.0 - vec2<f32>(1.0);
+  return VsOut(vec4<f32>(p, 0.0, 1.0), p);
+}
+
+@fragment
+fn fs(in: VsOut) -> @location(0) vec4<f32> {
+  let far = m.invViewProj * vec4<f32>(in.ndc, 1.0, 1.0);
+  let dir = normalize(far.xyz / far.w - m.eye.xyz);
+  // The scene's surface along the ray: the march stops there.
+  let surface = textureLoad(sceneDepth, vec2<i32>(in.pos.xy), 0);
+  var limit = 1e9;
+  if (surface < 1.0) {
+    let wp = m.invViewProj * vec4<f32>(in.ndc, surface, 1.0);
+    limit = length(wp.xyz / wp.w - m.eye.xyz);
+  }
+  var T = 1.0;
+  var L = vec3<f32>(0.0);
+  let count = u32(m.eye.w + 0.5);
+  for (var k = 0u; k < count; k = k + 1u) {
+    let box = m.volumes[k * 4u];
+    let look = m.volumes[k * 4u + 1u];
+    let fire = m.volumes[k * 4u + 2u];
+    let lo = box.xyz;
+    let hi = box.xyz + vec3<f32>(box.w);
+    let inv = 1.0 / dir;
+    let t0 = (lo - m.eye.xyz) * inv;
+    let t1 = (hi - m.eye.xyz) * inv;
+    let tn = max(max(min(t0.x, t1.x), min(t0.y, t1.y)), max(min(t0.z, t1.z), 0.0));
+    let tf = min(min(max(t0.x, t1.x), max(t0.y, t1.y)), min(max(t0.z, t1.z), limit));
+    if (tf <= tn) { continue; }
+    let step = (tf - tn) / ${MARCH_STEPS}.0;
+    for (var s = 0; s < ${MARCH_STEPS}; s = s + 1) {
+      let p = m.eye.xyz + dir * (tn + (f32(s) + 0.5) * step);
+      let uvw = (p - lo) / box.w;
+      let q = density(k, uvw);
+      let sigma = q.x * look.w;
+      if (sigma <= 1e-5 && q.y <= 1e-4) { continue; }
+      // Toward the sun through the smoke: six steps to the box's edge.
+      var shadow = 1.0;
+      if (sigma > 1e-5) {
+        var od = 0.0;
+        for (var j = 1; j <= 6; j = j + 1) {
+          let sp = (p + m.sun.xyz * (f32(j) * box.w / 12.0) - lo) / box.w;
+          if (any(sp < vec3<f32>(0.0)) || any(sp > vec3<f32>(1.0))) { break; }
+          od = od + density(k, sp).x * look.w * box.w / 12.0;
+        }
+        shadow = exp(-od);
+      }
+      let scatter = look.rgb * (m.sunColor.rgb * shadow * 0.25 + vec3<f32>(m.sun.w));
+      let kelvin = fire.x * clamp(q.y / max(fire.w, 1e-4), 0.0, 1.0);
+      let glow = blackbody(kelvin) * fire.y * fire.z;
+      let a = exp(-sigma * step);
+      L = L + T * (scatter * (1.0 - a) + glow * step);
+      T = T * a;
+    }
+  }
+  return vec4<f32>(L, T);
+}
+`
+);
+var GpuVolumes = class {
+  constructor(device, colourFormat, effects) {
+    this.device = device;
+    this.colourFormat = colourFormat;
+    this.effects = effects;
+    this.live = [];
+    this.pipes = null;
+    this.baked = /* @__PURE__ */ new Map();
+    this.dummy = null;
+    this.sampler = null;
+    this.uniform = device.createBuffer({ size: 160, usage: 64 | 8 });
+    this.marchUniform = device.createBuffer({ size: (16 + 16 + MAX_LIVE_VOLUMES * 16) * 4, usage: 64 | 8 });
+  }
+  get active() {
+    return this.live.length > 0;
+  }
+  /** The volumes alive, for the lights they cast and the tests. */
+  get volumes() {
+    return this.live;
+  }
+  /** Start effect `index` at `at` (its base's centre); the oldest goes when four are alive. */
+  trigger(index, at) {
+    const effect = this.effects[index];
+    if (!effect) return;
+    if (this.live.length >= MAX_LIVE_VOLUMES) this.dispose1(this.live.shift());
+    const baked = effect.source === "baked" ? this.baked.get(effect) ?? this.bake(effect) : null;
+    const n = baked ? baked.n : effect.resolution;
+    const texture = this.device.createTexture({ size: { width: n, height: n, depthOrArrayLayers: n }, dimension: "3d", format: "rgba16float", usage: 4 | 8 | 2 });
+    const cells = n * n * n;
+    const buffer = (bytes) => this.device.createBuffer({ size: bytes, usage: 128 | 8 | 4 });
+    const buffers = baked ? null : [buffer(cells * 16), buffer(cells * 8), buffer(cells * 16), buffer(cells * 8), buffer(cells * 4), buffer(cells * 4), buffer(cells * 4)];
+    this.live.push({ effect, at, age: 0, n, texture, buffers, baked, heat: 1 });
+  }
+  bake(effect) {
+    const baked = bakeVolume(effect);
+    this.baked.set(effect, baked);
+    return baked;
+  }
+  pipelines() {
+    if (this.pipes) return this.pipes;
+    const device = this.device;
+    const compute = (code) => device.createComputePipeline({ layout: "auto", compute: { module: device.createShaderModule({ code }), entryPoint: "main" } });
+    const module = device.createShaderModule({ code: VOLUME_MARCH_WGSL });
+    this.pipes = {
+      forces: compute(SOLVER_FORCES_WGSL),
+      advect: compute(SOLVER_ADVECT_WGSL),
+      divergence: compute(SOLVER_DIVERGENCE_WGSL),
+      jacobi: compute(SOLVER_JACOBI_WGSL),
+      project: compute(SOLVER_PROJECT_WGSL),
+      march: device.createRenderPipeline({
+        layout: "auto",
+        vertex: { module, entryPoint: "vs" },
+        // colour × T + L: the march returns L with T in alpha.
+        fragment: { module, entryPoint: "fs", targets: [{ format: this.colourFormat, blend: { color: { srcFactor: "one", dstFactor: "src-alpha", operation: "add" }, alpha: { srcFactor: "zero", dstFactor: "one", operation: "add" } } }] },
+        primitive: { topology: "triangle-list" }
+      })
+    };
+    return this.pipes;
+  }
+  /** Advance every live volume by `dt`: the solver's passes (one volume's uniform at a time, a submit each) or its baked frame. */
+  simulate(dt) {
+    const device = this.device;
+    const pipes = this.pipelines();
+    for (const v of [...this.live]) {
+      v.age += dt;
+      if (v.age > v.effect.duration) {
+        this.dispose1(v);
+        this.live.splice(this.live.indexOf(v), 1);
+        continue;
+      }
+      const n = v.n;
+      if (v.baked) {
+        const frame = v.baked.frames[Math.min(v.baked.frames.length - 1, Math.floor(v.age * v.baked.rate))];
+        const data = new Uint16Array(n * n * n * 4);
+        for (let i = 0; i < n * n * n; i += 1) {
+          data[i * 4] = toHalf(frame.density[i] / 255 * 4);
+          data[i * 4 + 1] = toHalf(frame.temperature[i] / 255 * 8);
+          data[i * 4 + 3] = toHalf(1);
+        }
+        device.queue.writeTexture({ texture: v.texture }, data, { bytesPerRow: n * 8, rowsPerImage: n }, { width: n, height: n, depthOrArrayLayers: n });
+        continue;
+      }
+      const [vel, q, velB, qB, div, pA, pB] = v.buffers;
+      device.queue.writeBuffer(this.uniform, 0, packSolver(n, v.effect, effectSources(v.effect, n, v.age - dt), dt));
+      const encoder = device.createCommandEncoder();
+      const pass = encoder.beginComputePass();
+      const groups = Math.ceil(n * n * n / 64);
+      const run = (pipe, buffers) => {
+        pass.setPipeline(pipe);
+        pass.setBindGroup(0, device.createBindGroup({ layout: pipe.getBindGroupLayout(0), entries: [this.uniform, ...buffers].map((buffer, binding) => ({ binding, resource: { buffer } })) }));
+        pass.dispatchWorkgroups(groups);
+      };
+      run(pipes.forces, [vel, q]);
+      run(pipes.advect, [vel, q, velB, qB]);
+      run(pipes.divergence, [velB, div]);
+      pass.end();
+      encoder.clearBuffer(pA);
+      const pass2 = encoder.beginComputePass();
+      for (let it = 0; it < PRESSURE_ITERATIONS; it += 1) {
+        const [from, to] = it % 2 === 0 ? [pA, pB] : [pB, pA];
+        pass2.setPipeline(pipes.jacobi);
+        pass2.setBindGroup(0, device.createBindGroup({ layout: pipes.jacobi.getBindGroupLayout(0), entries: [this.uniform, from, to, div].map((buffer, binding) => ({ binding, resource: { buffer } })) }));
+        pass2.dispatchWorkgroups(groups);
+      }
+      pass2.setPipeline(pipes.project);
+      pass2.setBindGroup(0, device.createBindGroup({
+        layout: pipes.project.getBindGroupLayout(0),
+        entries: [{ buffer: this.uniform }, { buffer: PRESSURE_ITERATIONS % 2 === 0 ? pA : pB }, { buffer: velB }, { buffer: qB }, { buffer: vel }, { buffer: q }, v.texture.createView()].map((resource, binding) => ({ binding, resource }))
+      }));
+      pass2.dispatchWorkgroups(groups);
+      pass2.end();
+      device.queue.submit([encoder.finish()]);
+    }
+  }
+  /** The solver's buffers of a live volume (velocity, density/heat), for the tests. */
+  state(k) {
+    const v = this.live[k];
+    return v?.buffers ? { velocity: v.buffers[0], fields: v.buffers[1], n: v.n } : null;
+  }
+  /** March every volume over the scene: into an open render pass whose colour is the scene and that reads its depths. */
+  march(pass, frame, depth) {
+    if (this.live.length === 0) return;
+    const device = this.device;
+    const pipes = this.pipelines();
+    this.dummy ?? (this.dummy = device.createTexture({ size: { width: 1, height: 1, depthOrArrayLayers: 1 }, dimension: "3d", format: "rgba16float", usage: 4 }));
+    this.sampler ?? (this.sampler = device.createSampler({ magFilter: "linear", minFilter: "linear", addressModeU: "clamp-to-edge", addressModeV: "clamp-to-edge", addressModeW: "clamp-to-edge" }));
+    const uniform = packMarch(frame, this.live.map((v) => ({ at: v.at, effect: v.effect, burn: burn(v.effect, v.age), tempScale: 8 })));
+    device.queue.writeBuffer(this.marchUniform, 0, uniform);
+    const textures = [0, 1, 2, 3].map((k) => (this.live[k]?.texture ?? this.dummy).createView());
+    pass.setPipeline(pipes.march);
+    pass.setBindGroup(0, device.createBindGroup({ layout: pipes.march.getBindGroupLayout(0), entries: [{ buffer: this.marchUniform }, depth.createView(), this.sampler, ...textures].map((resource, binding) => ({ binding, resource })) }));
+    pass.draw(3);
+  }
+  dispose1(v) {
+    v.texture.destroy?.();
+    for (const b of v.buffers ?? []) b.destroy?.();
+  }
+  dispose() {
+    for (const v of this.live) this.dispose1(v);
+    this.live.length = 0;
+    this.uniform.destroy?.();
+    this.marchUniform.destroy?.();
+    this.dummy?.destroy?.();
+  }
+};
+function toHalf(v) {
+  const f3 = new Float32Array([v]);
+  const x = new Uint32Array(f3.buffer)[0];
+  const sign = x >>> 16 & 32768;
+  const exp = (x >>> 23 & 255) - 127 + 15;
+  const mant = x & 8388607;
+  if (exp <= 0) return sign;
+  if (exp >= 31) return sign | 31744;
+  return sign | exp << 10 | mant >>> 13;
+}
+
+// src/render/clothGpu.ts
+var CLOTH_WORKGROUP = 64;
+function clothParams(count, capsules, dt, damping, stretch, bend, windResponse, margin, relax, wind, gravity) {
+  const buffer = new ArrayBuffer(64);
+  const u = new Uint32Array(buffer);
+  const f3 = new Float32Array(buffer);
+  u[0] = count;
+  u[1] = capsules;
+  f3[2] = dt;
+  f3[3] = damping;
+  f3[4] = stretch;
+  f3[5] = bend;
+  f3[6] = windResponse;
+  f3[7] = margin;
+  f3[8] = wind[0];
+  f3[9] = wind[1];
+  f3[10] = wind[2];
+  f3[11] = relax;
+  f3[12] = gravity[0];
+  f3[13] = gravity[1];
+  f3[14] = gravity[2];
+  return buffer;
+}
+var PARAMS = (
+  /* wgsl */
+  `
+struct Params {
+  count: u32,
+  capsules: u32,
+  dt: f32,
+  damping: f32,
+  stretch: f32,
+  bend: f32,
+  windResponse: f32,
+  margin: f32,
+  wind: vec3<f32>,
+  relax: f32,
+  gravity: vec3<f32>,
+};
+@group(0) @binding(0) var<uniform> params: Params;
+`
+);
+var CLOTH_PREDICT_WGSL = (
+  /* wgsl */
+  `${PARAMS}
+@group(0) @binding(1) var<storage, read> vertices: array<f32>;
+@group(0) @binding(2) var<storage, read_write> position: array<vec4<f32>>;
+@group(0) @binding(3) var<storage, read_write> previous: array<vec4<f32>>;
+@group(0) @binding(4) var<storage, read> particle: array<vec2<f32>>;
+
+@compute @workgroup_size(${CLOTH_WORKGROUP})
+fn main(@builtin(global_invocation_id) id: vec3<u32>) {
+  let i = id.x;
+  if (i >= params.count) { return; }
+  let skinned = vec3<f32>(vertices[i * 16u], vertices[i * 16u + 1u], vertices[i * 16u + 2u]);
+  if (particle[i].x == 0.0) {
+    position[i] = vec4<f32>(skinned, 0.0);
+    previous[i] = vec4<f32>(skinned, 0.0);
+    return;
+  }
+  let p = position[i].xyz;
+  let v = (p - previous[i].xyz) * (1.0 - params.damping);
+  let rel = params.wind - v / params.dt;
+  let n = vec3<f32>(vertices[i * 16u + 3u], vertices[i * 16u + 4u], vertices[i * 16u + 5u]);
+  let facing = abs(dot(n, rel)) / max(length(rel), 1e-9);
+  previous[i] = vec4<f32>(p, 0.0);
+  position[i] = vec4<f32>(p + v + (params.gravity + rel * params.windResponse * facing) * params.dt * params.dt, 0.0);
+}
+`
+);
+var CLOTH_SOLVE_WGSL = (
+  /* wgsl */
+  `${PARAMS}
+@group(0) @binding(1) var<storage, read> source: array<vec4<f32>>;
+@group(0) @binding(2) var<storage, read_write> dest: array<vec4<f32>>;
+@group(0) @binding(3) var<storage, read> starts: array<u32>;
+@group(0) @binding(4) var<storage, read> entries: array<vec4<f32>>;
+@group(0) @binding(5) var<storage, read> particle: array<vec2<f32>>;
+@group(0) @binding(6) var<storage, read> vertices: array<f32>;
+@group(0) @binding(7) var<storage, read> capsules: array<vec4<f32>>;
+
+@compute @workgroup_size(${CLOTH_WORKGROUP})
+fn main(@builtin(global_invocation_id) id: vec3<u32>) {
+  let i = id.x;
+  if (i >= params.count) { return; }
+  let p = source[i].xyz;
+  let wi = particle[i].x;
+  if (wi == 0.0) { dest[i] = vec4<f32>(p, 0.0); return; }
+  var c = vec3<f32>(0.0);
+  let first = starts[i];
+  let last = starts[i + 1u];
+  for (var e = first; e < last; e = e + 1u) {
+    let entry = entries[e];
+    let j = u32(entry.x + 0.5);
+    let d = source[j].xyz - p;
+    let len = length(d);
+    if (len < 1e-9) { continue; }
+    let k = select(params.stretch, params.bend, entry.z > 0.5);
+    let w = wi / (wi + particle[j].x);
+    c = c + d * (k * w * (len - entry.y) / len);
+  }
+  let n = last - first;
+  var q = p;
+  if (n > 0u) { q = p + c * (params.relax / f32(n)); }
+  // Within its distance of the skin.
+  let s = vec3<f32>(vertices[i * 16u], vertices[i * 16u + 1u], vertices[i * 16u + 2u]);
+  let f = q - s;
+  let fl = length(f);
+  let m = particle[i].y;
+  if (fl > m) { q = s + f * (m / fl); }
+  // Out of the body's capsules.
+  for (var k = 0u; k < params.capsules; k = k + 1u) {
+    let a = capsules[k * 2u].xyz;
+    let b = capsules[k * 2u + 1u].xyz;
+    let r = capsules[k * 2u + 1u].w + params.margin;
+    let ab = b - a;
+    let len2 = dot(ab, ab);
+    var t = 0.0;
+    if (len2 > 1e-12) { t = clamp(dot(q - a, ab) / len2, 0.0, 1.0); }
+    let near = a + ab * t;
+    let dq = q - near;
+    let dist = length(dq);
+    if (dist < r) {
+      var dir = vec3<f32>(0.0, 1.0, 0.0);
+      if (dist > 1e-9) { dir = dq / dist; }
+      q = near + dir * r;
+    }
+  }
+  dest[i] = vec4<f32>(q, 0.0);
+}
+`
+);
+var CLOTH_FINISH_WGSL = (
+  /* wgsl */
+  `${PARAMS}
+@group(0) @binding(1) var<storage, read_write> vertices: array<f32>;
+@group(0) @binding(2) var<storage, read> position: array<vec4<f32>>;
+@group(0) @binding(3) var<storage, read> triStarts: array<u32>;
+@group(0) @binding(4) var<storage, read> tris: array<u32>;
+@group(0) @binding(5) var<storage, read> indices: array<u32>;
+
+@compute @workgroup_size(${CLOTH_WORKGROUP})
+fn main(@builtin(global_invocation_id) id: vec3<u32>) {
+  let i = id.x;
+  if (i >= params.count) { return; }
+  let p = position[i].xyz;
+  var n = vec3<f32>(0.0);
+  for (var e = triStarts[i]; e < triStarts[i + 1u]; e = e + 1u) {
+    let t = tris[e] * 3u;
+    let a = position[indices[t]].xyz;
+    let b = position[indices[t + 1u]].xyz;
+    let c = position[indices[t + 2u]].xyz;
+    n = n + cross(b - a, c - a);
+  }
+  let len = length(n);
+  if (len > 1e-12) { n = n / len; } else { n = vec3<f32>(vertices[i * 16u + 3u], vertices[i * 16u + 4u], vertices[i * 16u + 5u]); }
+  vertices[i * 16u] = p.x;
+  vertices[i * 16u + 1u] = p.y;
+  vertices[i * 16u + 2u] = p.z;
+  vertices[i * 16u + 3u] = n.x;
+  vertices[i * 16u + 4u] = n.y;
+  vertices[i * 16u + 5u] = n.z;
+}
+`
+);
+function vertexTriangles(indices, count) {
+  const lists = Array.from({ length: count }, () => []);
+  for (let t = 0; t + 2 < indices.length; t += 3) for (let k = 0; k < 3; k += 1) lists[indices[t + k]]?.push(t / 3);
+  const starts = new Uint32Array(count + 1);
+  const tris = [];
+  lists.forEach((l, v) => {
+    starts[v] = tris.length;
+    tris.push(...l);
+  });
+  starts[count] = tris.length;
+  return { starts, tris: Uint32Array.from(tris.length > 0 ? tris : [0]) };
+}
+function packCapsules(capsules) {
+  const out = new Float32Array(Math.max(1, capsules.length) * 8);
+  capsules.forEach((c, k) => out.set([c.a[0], c.a[1], c.a[2], 0, c.b[0], c.b[1], c.b[2], c.radius], k * 8));
+  return out;
+}
+
+// src/render/gpuSkinning.ts
+var SKIN_WORKGROUP = 64;
+function skinParams(vertices, joints, dualQuaternion, targets) {
+  return Uint32Array.from([vertices, joints, dualQuaternion ? 1 : 0, targets]);
+}
+var SKIN_WGSL = (
+  /* wgsl */
+  `
+struct Params {
+  vertices: u32,
+  joints: u32,
+  dualQuaternion: u32,
+  targets: u32,
+};
+@group(0) @binding(0) var<uniform> params: Params;
+@group(0) @binding(1) var<storage, read> bind: array<vec4<f32>>;
+@group(0) @binding(2) var<storage, read> influences: array<vec4<u32>>;
+@group(0) @binding(3) var<storage, read> joints: array<vec4<f32>>;
+@group(0) @binding(4) var<storage, read> morphStarts: array<u32>;
+@group(0) @binding(5) var<storage, read> morphEntries: array<vec4<f32>>;
+@group(0) @binding(6) var<storage, read> morphWeights: array<f32>;
+@group(0) @binding(7) var<storage, read_write> vertices: array<f32>;
+
+fn rotateByQuat(q: vec4<f32>, v: vec3<f32>) -> vec3<f32> {
+  let c = cross(q.xyz, v) + q.w * v;
+  return v + 2.0 * cross(q.xyz, c);
+}
+
+@compute @workgroup_size(${SKIN_WORKGROUP})
+fn main(@builtin(global_invocation_id) id: vec3<u32>) {
+  let v = id.x;
+  if (v >= params.vertices) { return; }
+  var p = bind[v * 2u].xyz;
+  var n = bind[v * 2u + 1u].xyz;
+  // Morph targets: the deltas that move this vertex, by their targets' weights.
+  if (params.targets > 0u) {
+    for (var e = morphStarts[v]; e < morphStarts[v + 1u]; e = e + 1u) {
+      let a = morphEntries[e * 2u];
+      let b = morphEntries[e * 2u + 1u];
+      let w = morphWeights[u32(a.x + 0.5)];
+      p = p + w * a.yzw;
+      n = n + w * b.xyz;
+    }
+    n = normalize(n + vec3<f32>(1e-12, 0.0, 0.0));
+  }
+  let js = influences[v * 2u];
+  let ws = bitcast<vec4<f32>>(influences[v * 2u + 1u]);
+  var outP = p;
+  var outN = n;
+  var total = 0.0;
+  if (params.dualQuaternion == 0u) {
+    var m0 = vec4<f32>(0.0);
+    var m1 = vec4<f32>(0.0);
+    var m2 = vec4<f32>(0.0);
+    var m3 = vec4<f32>(0.0);
+    for (var k = 0u; k < 4u; k = k + 1u) {
+      let w = ws[k];
+      let j = js[k];
+      if (w <= 0.0 || j >= params.joints) { continue; }
+      total = total + w;
+      m0 = m0 + joints[j * 4u] * w;
+      m1 = m1 + joints[j * 4u + 1u] * w;
+      m2 = m2 + joints[j * 4u + 2u] * w;
+      m3 = m3 + joints[j * 4u + 3u] * w;
+    }
+    if (total > 0.0) {
+      let m = mat4x4<f32>(m0, m1, m2, m3) * (1.0 / total);
+      outP = (m * vec4<f32>(p, 1.0)).xyz;
+      outN = normalize((m * vec4<f32>(n, 0.0)).xyz + vec3<f32>(1e-12, 0.0, 0.0));
+    }
+  } else {
+    var r = vec4<f32>(0.0);
+    var d = vec4<f32>(0.0);
+    var first = 0xffffffffu;
+    for (var k = 0u; k < 4u; k = k + 1u) {
+      let w = ws[k];
+      let j = js[k];
+      if (w <= 0.0 || j >= params.joints) { continue; }
+      if (first == 0xffffffffu) { first = j; }
+      let qr = joints[j * 2u];
+      let s = select(1.0, -1.0, dot(joints[first * 2u], qr) < 0.0);
+      r = r + qr * (w * s);
+      d = d + joints[j * 2u + 1u] * (w * s);
+      total = total + w;
+    }
+    if (total > 0.0) {
+      let len = max(length(r), 1e-12);
+      r = r / len;
+      d = d / len;
+      let t = 2.0 * (r.w * d.xyz - d.w * r.xyz + cross(r.xyz, d.xyz));
+      outP = rotateByQuat(r, p) + t;
+      outN = rotateByQuat(r, n);
+    }
+  }
+  let o = v * 16u;
+  vertices[o] = outP.x;
+  vertices[o + 1u] = outP.y;
+  vertices[o + 2u] = outP.z;
+  vertices[o + 3u] = outN.x;
+  vertices[o + 4u] = outN.y;
+  vertices[o + 5u] = outN.z;
+}
+`
+);
+function packBindShape(positions, normals) {
+  const n = positions.length / 3;
+  const out = new Float32Array(n * 8);
+  for (let v = 0; v < n; v += 1) {
+    out.set(positions.subarray(v * 3, v * 3 + 3), v * 8);
+    if (normals) out.set(normals.subarray(v * 3, v * 3 + 3), v * 8 + 4);
+    else out[v * 8 + 5] = 1;
+  }
+  return out;
+}
+function packInfluences(joints, weights) {
+  const n = joints.length / 4;
+  const out = new Uint32Array(n * 8);
+  const bits = new Float32Array(out.buffer);
+  for (let v = 0; v < n; v += 1) {
+    for (let k = 0; k < 4; k += 1) {
+      out[v * 8 + k] = joints[v * 4 + k];
+      bits[v * 8 + 4 + k] = weights[v * 4 + k];
+    }
+  }
+  return out;
+}
+
+// src/render/subsurface.ts
+var SSS_MAX_PROFILES = 256;
+var SSS_TAPS = 8;
+var SSS_REACH = 3;
+function packSssProfiles(profiles) {
+  const out = new Float32Array(SSS_MAX_PROFILES * 4);
+  for (const p of profiles) {
+    if (p.id <= 0 || p.id >= SSS_MAX_PROFILES || !(p.radius > 0)) continue;
+    out.set([p.color[0] * p.radius, p.color[1] * p.radius, p.color[2] * p.radius, 1], p.id * 4);
+  }
+  return out;
+}
+var SSS_WGSL = (
+  /* wgsl */
+  `
+struct Params {
+  dir: vec4<f32>,   // xy = the step's direction, z = 1 on the second pass, w = pixels a metre spans at distance 1
+  terms: vec4<f32>, // xy = depth \u2192 distance terms (d = y / (z + x))
+};
+@group(0) @binding(0) var<uniform> params: Params;
+@group(0) @binding(1) var frameTex: texture_2d<f32>;
+@group(0) @binding(2) var blurTex: texture_2d<f32>;
+@group(0) @binding(3) var depthTex: texture_depth_2d;
+@group(0) @binding(4) var gbufferTex: texture_2d<f32>;
+@group(0) @binding(5) var<storage, read> profiles: array<vec4<f32>>;
+@vertex
+fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4<f32> {
+  let p = vec2<f32>(f32((i << 1u) & 2u), f32(i & 2u));
+  return vec4<f32>(p * 2.0 - 1.0, 0.0, 1.0);
+}
+fn idAt(p: vec2<i32>) -> u32 {
+  return u32(textureLoad(gbufferTex, p, 0).w + 0.5);
+}
+fn distanceAt(p: vec2<i32>) -> f32 {
+  return params.terms.y / (textureLoad(depthTex, p, 0) + params.terms.x);
+}
+fn profileOf(id: u32) -> vec4<f32> {
+  if (id == 0u || id >= ${SSS_MAX_PROFILES}u) { return vec4<f32>(0.0); }
+  return profiles[id];
+}
+fn evenAt(p: vec2<i32>) -> bool {
+  return ((p.x + p.y) & 1) == 0;
+}
+// The diffuse half at p: its own on an even pixel, its even neighbour's along the row otherwise.
+fn diffuseAt(p: vec2<i32>, dims: vec2<i32>) -> vec3<f32> {
+  if (evenAt(p)) { return textureLoad(frameTex, p, 0).rgb; }
+  let q = vec2<i32>(select(p.x - 1, p.x + 1, p.x == 0), p.y);
+  return textureLoad(frameTex, clamp(q, vec2<i32>(0), dims - vec2<i32>(1)), 0).rgb;
+}
+// The remainder at p: its own on an odd pixel, the mean of its odd neighbours' (on the same material) otherwise.
+fn restAt(p: vec2<i32>, dims: vec2<i32>, id: u32) -> vec3<f32> {
+  if (!evenAt(p)) { return textureLoad(frameTex, p, 0).rgb; }
+  var sum = vec3<f32>(0.0);
+  var n = 0.0;
+  let offsets = array<vec2<i32>, 4>(vec2<i32>(1, 0), vec2<i32>(-1, 0), vec2<i32>(0, 1), vec2<i32>(0, -1));
+  for (var k = 0; k < 4; k = k + 1) {
+    let q = p + offsets[k];
+    if (any(q < vec2<i32>(0)) || any(q >= dims) || idAt(q) != id) { continue; }
+    sum = sum + textureLoad(frameTex, q, 0).rgb;
+    n = n + 1.0;
+  }
+  return select(vec3<f32>(0.0), sum / max(n, 1.0), n > 0.0);
+}
+@fragment
+fn blur(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
+  let p = vec2<i32>(pos.xy);
+  let dims = vec2<i32>(textureDimensions(frameTex));
+  let own = textureLoad(frameTex, p, 0);
+  let id = idAt(p);
+  let profile = profileOf(id);
+  if (profile.w < 0.5) { return own; }
+  let second = params.dir.z > 0.5;
+  let dist = max(distanceAt(p), 1e-3);
+  // How many pixels the widest channel's reach spans here, and a step that covers it in the taps.
+  let reach = ${SSS_REACH}.0 * max(profile.r, max(profile.g, profile.b));
+  let pixels = reach * params.dir.w / dist;
+  let step = max(1.0, pixels / ${SSS_TAPS}.0);
+  var sum = vec3<f32>(0.0);
+  var weights = vec3<f32>(0.0);
+  for (var i = -${SSS_TAPS}; i <= ${SSS_TAPS}; i = i + 1) {
+    let q = p + vec2<i32>(round(params.dir.xy * f32(i) * step));
+    if (any(q < vec2<i32>(0)) || any(q >= dims) || idAt(q) != id) { continue; }
+    // The sample's distance along the surface in metres, and in depth.
+    let r = abs(f32(i)) * step * dist / params.dir.w;
+    if (abs(distanceAt(q) - dist) > reach) { continue; }
+    let w = exp(-r / profile.rgb) + exp(-r / (3.0 * profile.rgb));
+    var c: vec3<f32>;
+    if (second) { c = textureLoad(blurTex, q, 0).rgb; } else { c = diffuseAt(q, dims); }
+    sum = sum + c * w;
+    weights = weights + w;
+  }
+  let scattered = sum / max(weights, vec3<f32>(1e-6));
+  if (!second) { return vec4<f32>(scattered, own.a); }
+  return vec4<f32>(scattered + restAt(p, dims, id), own.a);
+}
+`
+);
+
+// src/render/textureStreaming.ts
+var FEEDBACK_SLOTS = 4096;
+var FOOTPRINT_BIAS = 24;
+var FOOTPRINT_STEPS = 8;
+var FEEDBACK_NONE = 4294967295;
+var UNSEEN_ROUNDS = 8;
+var FLOOR_TEXELS = 64;
+function residentBytes(width, height, level) {
+  let w = Math.max(1, width >> level);
+  let h = Math.max(1, height >> level);
+  let total = 0;
+  for (; ; ) {
+    total += w * h * 4;
+    if (w === 1 && h === 1) break;
+    w = Math.max(1, w >> 1);
+    h = Math.max(1, h >> 1);
+  }
+  return total;
+}
+function topLevel(width, height) {
+  return Math.floor(Math.log2(Math.max(1, width, height)));
+}
+function floorLevel(width, height) {
+  return Math.max(0, topLevel(width, height) - Math.floor(Math.log2(FLOOR_TEXELS)));
+}
+function footprintLog2(fixed) {
+  return fixed === FEEDBACK_NONE ? null : fixed / FOOTPRINT_STEPS - FOOTPRINT_BIAS;
+}
+function wantedLevel(width, height, footprint) {
+  const level = Math.floor(footprint + Math.log2(Math.max(1, width, height)));
+  return Math.max(0, Math.min(topLevel(width, height), level));
+}
+var TextureStreamer = class {
+  constructor(budgetBytes) {
+    this.budgetBytes = budgetBytes;
+    this.entries = /* @__PURE__ */ new Map();
+  }
+  /** Start streaming a map: resident at its floor until feedback asks for more. */
+  register(key2, width, height) {
+    let entry = this.entries.get(key2);
+    if (!entry) {
+      entry = { width, height, level: floorLevel(width, height), wanted: null, unseen: 0 };
+      this.entries.set(key2, entry);
+    }
+    return entry.level;
+  }
+  /** The level a map is resident at (0 for one not streamed). */
+  levelOf(key2) {
+    return this.entries.get(key2)?.level ?? 0;
+  }
+  /** A round of feedback: the footprint (log₂) each map's material was sampled at, absent for none seen. */
+  observe(footprints) {
+    for (const [key2, entry] of this.entries) {
+      const footprint = footprints.get(key2);
+      if (footprint === void 0) {
+        entry.unseen += 1;
+        if (entry.unseen > UNSEEN_ROUNDS) entry.wanted = Math.max(entry.wanted ?? entry.level, floorLevel(entry.width, entry.height));
+      } else {
+        entry.unseen = 0;
+        entry.wanted = wantedLevel(entry.width, entry.height, footprint);
+      }
+    }
+  }
+  /**
+   * Fit the residency to the budget: each map at the level it wants (or holds,
+   * unseen), then the costliest stepped down until the total fits. Returns the
+   * maps whose level changed, with the new level.
+   */
+  plan() {
+    const target = /* @__PURE__ */ new Map();
+    let total = 0;
+    for (const [key2, e] of this.entries) {
+      const level = e.wanted ?? e.level;
+      target.set(key2, level);
+      total += residentBytes(e.width, e.height, level);
+    }
+    while (total > this.budgetBytes) {
+      let worst = null;
+      let worstBytes = 0;
+      for (const [key2, level2] of target) {
+        const e2 = this.entries.get(key2);
+        if (level2 >= topLevel(e2.width, e2.height)) continue;
+        const bytes = residentBytes(e2.width, e2.height, level2);
+        if (bytes > worstBytes) {
+          worstBytes = bytes;
+          worst = key2;
+        }
+      }
+      if (!worst) break;
+      const e = this.entries.get(worst);
+      const level = target.get(worst) + 1;
+      total += residentBytes(e.width, e.height, level) - worstBytes;
+      target.set(worst, level);
+    }
+    const changed = /* @__PURE__ */ new Map();
+    for (const [key2, level] of target) {
+      const e = this.entries.get(key2);
+      if (level !== e.level) {
+        e.level = level;
+        changed.set(key2, level);
+      }
+    }
+    return changed;
+  }
+  /** Stop streaming a map. */
+  forget(key2) {
+    this.entries.delete(key2);
+  }
+  stats() {
+    let resident = 0;
+    let wanted = 0;
+    let limited = 0;
+    for (const e of this.entries.values()) {
+      resident += residentBytes(e.width, e.height, e.level);
+      const want = e.wanted ?? e.level;
+      wanted += residentBytes(e.width, e.height, want);
+      if (e.level > want) limited += 1;
+    }
+    const mb = (b) => b / (1024 * 1024);
+    return { budgetMB: mb(this.budgetBytes), residentMB: mb(resident), wantedMB: mb(wanted), maps: this.entries.size, limited };
+  }
+};
+function feedbackWgsl(scale) {
+  return (
+    /* wgsl */
+    `
+struct Draw {
+  info: vec4<u32>, // x = the material's slot
+};
+struct InstanceXf {
+  mvp: mat4x4<f32>,
+  lightMvp: mat4x4<f32>,
+  model: mat4x4<f32>,
+  nrm: mat3x3<f32>,
+};
+@group(0) @binding(0) var<uniform> draw: Draw;
+@group(0) @binding(1) var<storage, read> xf: array<InstanceXf>;
+@group(0) @binding(2) var<storage, read_write> wanted: array<atomic<u32>>;
+struct Out {
+  @builtin(position) pos: vec4<f32>,
+  @location(0) uv: vec2<f32>,
+};
+@vertex
+fn vs(@location(0) position: vec3<f32>, @location(2) uv: vec2<f32>, @builtin(instance_index) instance: u32) -> Out {
+  var out: Out;
+  out.pos = xf[instance].mvp * vec4<f32>(position, 1.0);
+  out.uv = uv;
+  return out;
+}
+@fragment
+fn fs(in: Out) {
+  // The footprint in a 1\xD71 map's texels: the larger derivative's length, as the hardware picks a mip, at the
+  // frame's own size (the pass renders ${scale}\xD7 smaller, so its derivatives are ${scale}\xD7 longer).
+  let d = max(dot(dpdx(in.uv), dpdx(in.uv)), dot(dpdy(in.uv), dpdy(in.uv)));
+  let footprint = 0.5 * log2(max(d, 1e-20)) - log2(${scale.toFixed(1)});
+  let fixed = u32(clamp((footprint + ${FOOTPRINT_BIAS}.0) * ${FOOTPRINT_STEPS}.0, 0.0, 4294967040.0));
+  atomicMin(&wanted[min(draw.info.x, ${FEEDBACK_SLOTS - 1}u)], fixed);
+}
+`
+  );
+}
+
+// src/render/gpuCulling.ts
+var SOURCE_BYTES = 32;
+var ENTRY_BYTES = 64;
+var CROSSFADE = 0.1;
+var MAX_CASTER_CASCADES = 4;
+var INDIRECT_WORDS = 5;
+var UNIFORM_BYTES = 6 * 16 + 64 + 64;
+var ROUNDS = 3;
+var UNIFORM_STRIDE2 = 256;
+var WORKGROUP = 64;
+var STORAGE = 128;
+var COPY_DST = 8;
+var INDIRECT = 256;
+var COPY_SRC = 4;
+var UNIFORM2 = 64;
+var TEXTURE_BINDING2 = 4;
+var STORAGE_BINDING = 8;
+var COMPUTE = 4;
+var CULL_WGSL = (
+  /* wgsl */
+  `
+/** A run of copies with their instance records (a batch, and every LOD sibling sharing it). */
+struct Source { first: u32, count: u32, eligible: u32, pad: u32, sphere: vec4<f32> };
+/** A draw: its copies (a source's), where it packs the ones it keeps, and, with a LOD chain, the level it draws and the switch distances. */
+struct Entry { src: u32, count: u32, dst: u32, indexCount: u32, level: i32, levels: u32, switches: u32, pad: u32, d0: vec4<f32>, d1: vec4<f32> };
+struct Cull {
+  planes: array<vec4<f32>, 6>,
+  viewProj: mat4x4<f32>,
+  size: vec4<f32>,     // x, y = the depth's size; z = the pyramid's levels; w = 1 to test against it
+  counts: vec4<u32>,   // x = draws, y = copies, z = where the region starts, w = which round (0, 1)
+  more: vec4<u32>,     // x = sources, y = the region's copies (its motion records follow them), z = 1 for the two-phase cull
+  eye: vec4<f32>,
+};
+@group(0) @binding(0) var<uniform> cull: Cull;
+@group(0) @binding(1) var<storage, read> sources: array<Source>;
+@group(0) @binding(2) var<storage, read_write> xf: array<f32>;
+@group(0) @binding(3) var<storage, read_write> flags: array<u32>;
+@group(0) @binding(4) var<storage, read_write> args: array<u32>;
+@group(0) @binding(5) var hiz: texture_2d<f32>;
+@group(0) @binding(6) var<storage, read> entries: array<Entry>;
+// Which copies the last frame's shading drew (the two-phase cull's first guess).
+@group(0) @binding(7) var<storage, read_write> last: array<u32>;
+
+const RECORD = ${INSTANCE_FLOATS}u;
+
+/** The source a copy belongs to (sources are in order of their first copy). */
+fn owner(i: u32) -> u32 {
+  var lo = 0u;
+  var hi = cull.more.x;
+  loop {
+    if (hi - lo <= 1u) { break; }
+    let mid = (lo + hi) / 2u;
+    if (sources[mid].first <= i) { lo = mid; } else { hi = mid; }
+  }
+  return lo;
+}
+
+fn hidden(c: vec3<f32>, r: f32) -> bool {
+  var lo = vec2<f32>(1e9);
+  var hi = vec2<f32>(-1e9);
+  var nearest = 1.0;
+  for (var k = 0u; k < 8u; k = k + 1u) {
+    let corner = c + r * vec3<f32>(select(-1.0, 1.0, (k & 1u) != 0u), select(-1.0, 1.0, (k & 2u) != 0u), select(-1.0, 1.0, (k & 4u) != 0u));
+    let clip = cull.viewProj * vec4<f32>(corner, 1.0);
+    // Reaching the eye's plane: no rectangle to test, so seen.
+    if (clip.w <= 1e-4) { return false; }
+    let ndc = clip.xyz / clip.w;
+    let px = vec2<f32>((ndc.x * 0.5 + 0.5) * cull.size.x, (0.5 - ndc.y * 0.5) * cull.size.y);
+    lo = min(lo, px);
+    hi = max(hi, px);
+    nearest = min(nearest, ndc.z);
+  }
+  if (nearest <= 0.0) { return false; }
+  lo = clamp(lo, vec2<f32>(0.0), cull.size.xy - 1.0);
+  hi = clamp(hi, vec2<f32>(0.0), cull.size.xy - 1.0);
+  // The level where the rectangle spans at most two texels each way.
+  let extent = max(hi.x - lo.x, hi.y - lo.y);
+  let level = min(u32(ceil(log2(max(extent, 1.0)))), u32(cull.size.z) - 1u);
+  // The level's size from the first's (asking for the level's own reads 1 on Dawn).
+  let dims = max(vec2<i32>(textureDimensions(hiz)) >> vec2<u32>(level), vec2<i32>(1));
+  // Clamped both ways, and at most the two texels a side the level holds it to: a rectangle a NaN reached
+  // (a corner on the eye's plane, say) reads nothing out of bounds and loops no further.
+  let a = clamp(vec2<i32>(lo) >> vec2<u32>(level), vec2<i32>(0), dims - 1);
+  let b = clamp(vec2<i32>(hi) >> vec2<u32>(level), a, min(a + 1, dims - 1));
+  var farthest = 0.0;
+  for (var y = a.y; y <= b.y; y = y + 1) {
+    for (var x = a.x; x <= b.x; x = x + 1) {
+      farthest = max(farthest, textureLoad(hiz, vec2<i32>(x, y), level).r);
+    }
+  }
+  return nearest > farthest;
+}
+
+fn modelOf(i: u32) -> mat4x4<f32> {
+  let b = i * RECORD + 32u;
+  return mat4x4<f32>(
+    vec4<f32>(xf[b], xf[b + 1u], xf[b + 2u], xf[b + 3u]),
+    vec4<f32>(xf[b + 4u], xf[b + 5u], xf[b + 6u], xf[b + 7u]),
+    vec4<f32>(xf[b + 8u], xf[b + 9u], xf[b + 10u], xf[b + 11u]),
+    vec4<f32>(xf[b + 12u], xf[b + 13u], xf[b + 14u], xf[b + 15u]),
+  );
+}
+
+fn scaleOf(m: mat4x4<f32>) -> f32 {
+  return max(length(m[0].xyz), max(length(m[1].xyz), length(m[2].xyz)));
+}
+
+@compute @workgroup_size(${WORKGROUP})
+fn test(@builtin(global_invocation_id) id: vec3<u32>) {
+  let i = id.x;
+  if (i >= cull.counts.y) { return; }
+  let s = sources[owner(i)];
+  var seen = 1u;
+  if (s.eligible != 0u) {
+    let model = modelOf(i);
+    let c = (model * vec4<f32>(s.sphere.xyz, 1.0)).xyz;
+    let r = s.sphere.w * scaleOf(model);
+    for (var p = 0u; p < 6u; p = p + 1u) {
+      let plane = cull.planes[p];
+      if (dot(plane.xyz, c) + plane.w < -r) { seen = 0u; }
+    }
+    if (seen == 1u && cull.size.w > 0.5 && hidden(c, r)) { seen = 0u; }
+  }
+  // The two-phase cull: the prepass first draws what the last frame showed (round 0), then what a pyramid of that
+  // can't rule out among the rest (round 1); the shading's round (2) tests the whole prepass, and is next frame's guess.
+  // A batch drawn whole is drawn by the first round alone.
+  if (cull.more.z != 0u) {
+    let round = cull.counts.w;
+    if (round == 0u) {
+      if (s.eligible != 0u && last[i] == 0u) { seen = 0u; }
+    } else if (round == 1u) {
+      if (s.eligible == 0u || last[i] != 0u) { seen = 0u; }
+    } else {
+      last[i] = seen;
+    }
+  }
+  flags[i] = seen;
+}
+
+/**
+ * Whether a copy draws in this draw's level (x, 1 or 0) and its crossfade there
+ * (y; F6b): the level its distance picks (as lod.ts's selectLodIndex, clamped
+ * to the chain, its distance in the mesh's units), except within
+ * ${CROSSFADE * 100}% of a switch, where both levels draw it, dithered: the
+ * coarser coming in (y > 0) as the finer goes out (y < 0), each pixel once.
+ */
+fn levelKeep(e: Entry, i: u32) -> vec2<f32> {
+  let m = modelOf(i);
+  let d = length(m[3].xyz - cull.eye.xyz) / max(scaleOf(m), 1e-12);
+  var k = 0u;
+  for (var j = 0u; j < e.switches; j = j + 1u) {
+    let at = select(e.d1[max(j, 4u) - 4u], e.d0[min(j, 3u)], j < 4u);
+    let lo = at * ${1 - CROSSFADE};
+    let hi = at * ${1 + CROSSFADE};
+    if (d > lo && d < hi && j + 1u < e.levels) {
+      let t = clamp((d - lo) / (hi - lo), 1e-4, 1.0 - 1e-4);
+      if (e.level == i32(j)) { return vec2<f32>(1.0, -t); }
+      if (e.level == i32(j + 1u)) { return vec2<f32>(1.0, t); }
+      return vec2<f32>(0.0);
+    }
+    if (d >= at) { k = j + 1u; }
+  }
+  return vec2<f32>(select(0.0, 1.0, i32(min(k, e.levels - 1u)) == e.level), 0.0);
+}
+
+var<workgroup> scan: array<u32, ${WORKGROUP}>;
+
+/** One draw a workgroup: its kept copies' records (and their motion records) packed at its place in the region, in order. */
+@compute @workgroup_size(${WORKGROUP})
+fn compact(@builtin(workgroup_id) group: vec3<u32>, @builtin(local_invocation_id) local: vec3<u32>) {
+  let index = group.x + group.y * 65535u;
+  if (index >= cull.counts.x) { return; }
+  let e = entries[index];
+  let n = cull.counts.y;
+  let total = cull.more.y;
+  let region = cull.counts.z;
+  var kept = 0u;
+  for (var start = 0u; start < e.count; start = start + ${WORKGROUP}u) {
+    let j = start + local.x;
+    var seen = 0u;
+    var fade = 0.0;
+    if (j < e.count) {
+      seen = flags[e.src + j];
+      if (seen == 1u && e.level >= 0) {
+        let keep = levelKeep(e, e.src + j);
+        if (keep.x == 0.0) { seen = 0u; }
+        fade = keep.y;
+      }
+    }
+    scan[local.x] = seen;
+    workgroupBarrier();
+    for (var step = 1u; step < ${WORKGROUP}u; step = step * 2u) {
+      let add = select(0u, scan[max(local.x, step) - step], local.x >= step);
+      workgroupBarrier();
+      scan[local.x] = scan[local.x] + add;
+      workgroupBarrier();
+    }
+    let to = region + e.dst + kept + scan[local.x] - 1u;
+    let src = e.src + j;
+    // Every write in the instance buffer, or none (a record past its end would corrupt what follows it).
+    if (seen == 1u && (to + total + 1u) * RECORD <= arrayLength(&xf) && (src + n + 1u) * RECORD <= arrayLength(&xf)) {
+      for (var f = 0u; f < RECORD; f = f + 1u) {
+        xf[to * RECORD + f] = xf[src * RECORD + f];
+        xf[(to + total) * RECORD + f] = xf[(src + n) * RECORD + f];
+      }
+      // Its crossfade (F6b) where the shader finds it: the model's first column's w (0 in an affine model).
+      if (e.level >= 0) { xf[to * RECORD + 35u] = fade; }
+    }
+    kept = kept + workgroupUniformLoad(&scan[${WORKGROUP - 1}u]);
+  }
+  if (local.x == 0u) {
+    let a = (cull.counts.w * cull.counts.x + index) * ${INDIRECT_WORDS}u;
+    args[a] = e.indexCount;
+    args[a + 1u] = kept;
+    args[a + 2u] = 0u;
+    args[a + 3u] = 0u;
+    // Indirect draws start at instance 0 (a later one needs an optional feature): the draw's uniform adds where its copies start.
+    args[a + 4u] = 0u;
+  }
+}
+`
+);
+var HIZ_MAX_WGSL = (
+  /* wgsl */
+  `
+@group(0) @binding(0) var depth: texture_depth_2d;
+@group(0) @binding(1) var level0: texture_storage_2d<r32float, write>;
+@compute @workgroup_size(8, 8)
+fn first(@builtin(global_invocation_id) id: vec3<u32>) {
+  let size = textureDimensions(depth);
+  if (id.x >= size.x || id.y >= size.y) { return; }
+  textureStore(level0, vec2<i32>(id.xy), vec4<f32>(textureLoad(depth, vec2<i32>(id.xy), 0), 0.0, 0.0, 1.0));
+}
+`
+);
+var HIZ_MAX_MS_WGSL = (
+  /* wgsl */
+  `
+@group(0) @binding(0) var depth: texture_depth_multisampled_2d;
+@group(0) @binding(1) var level0: texture_storage_2d<r32float, write>;
+@compute @workgroup_size(8, 8)
+fn first(@builtin(global_invocation_id) id: vec3<u32>) {
+  let size = textureDimensions(depth);
+  if (id.x >= size.x || id.y >= size.y) { return; }
+  var z = 0.0;
+  for (var s = 0u; s < textureNumSamples(depth); s = s + 1u) { z = max(z, textureLoad(depth, vec2<i32>(id.xy), i32(s))); }
+  textureStore(level0, vec2<i32>(id.xy), vec4<f32>(z, 0.0, 0.0, 1.0));
+}
+`
+);
+var HIZ_DOWN_WGSL = (
+  /* wgsl */
+  `
+@group(0) @binding(0) var above: texture_2d<f32>;
+@group(0) @binding(1) var below: texture_storage_2d<r32float, write>;
+@compute @workgroup_size(8, 8)
+fn down(@builtin(global_invocation_id) id: vec3<u32>) {
+  let out = textureDimensions(below);
+  if (id.x >= out.x || id.y >= out.y) { return; }
+  let size = vec2<i32>(textureDimensions(above));
+  let p = vec2<i32>(id.xy) * 2;
+  // An odd row or column at the edge folds into the last texel, so nothing falls between the cells.
+  let ex = select(1, 2, i32(id.x) == i32(out.x) - 1 && p.x + 3 == size.x);
+  let ey = select(1, 2, i32(id.y) == i32(out.y) - 1 && p.y + 3 == size.y);
+  var z = 0.0;
+  for (var y = 0; y <= ey; y += 1) {
+    for (var x = 0; x <= ex; x += 1) {
+      z = max(z, textureLoad(above, min(p + vec2<i32>(x, y), size - 1), 0).r);
+    }
+  }
+  textureStore(below, vec2<i32>(id.xy), vec4<f32>(z, 0.0, 0.0, 1.0));
+}
+`
+);
+function frustumPlanesOf(m) {
+  const row = (r) => [m[r], m[4 + r], m[8 + r], m[12 + r]];
+  const [r0, r1, r2, r3] = [row(0), row(1), row(2), row(3)];
+  const planes = [r3.map((v, i) => v + r0[i]), r3.map((v, i) => v - r0[i]), r3.map((v, i) => v + r1[i]), r3.map((v, i) => v - r1[i]), r2, r3.map((v, i) => v - r2[i])];
+  const out = new Float32Array(24);
+  planes.forEach((p, k) => {
+    const l = Math.hypot(p[0], p[1], p[2]) || 1;
+    out.set(p.map((v) => v / l), k * 4);
+  });
+  return out;
+}
+var spheres = /* @__PURE__ */ new WeakMap();
+function primitiveSphere(primitive) {
+  let s = spheres.get(primitive);
+  if (s) return s;
+  const p = primitive.positions;
+  const lo = [Infinity, Infinity, Infinity];
+  const hi = [-Infinity, -Infinity, -Infinity];
+  for (let i = 0; i + 2 < p.length; i += 3)
+    for (let a = 0; a < 3; a += 1) {
+      lo[a] = Math.min(lo[a], p[i + a]);
+      hi[a] = Math.max(hi[a], p[i + a]);
+    }
+  if (!(lo[0] <= hi[0])) s = [0, 0, 0, 0, 0];
+  else {
+    let sway2 = 0;
+    let flex = 0;
+    if (primitive.sway)
+      for (const v of primitive.sway) {
+        if (v >= 0) sway2 = Math.max(sway2, v);
+        else flex = Math.max(flex, -v);
+      }
+    if (flex > 0) sway2 = Math.max(sway2, 2 * flex * (0.25 * hi[1] + 0.13 * Math.max(Math.abs(lo[0]), Math.abs(hi[0]), Math.abs(lo[2]), Math.abs(hi[2])) + 0.02));
+    s = [(lo[0] + hi[0]) / 2, (lo[1] + hi[1]) / 2, (lo[2] + hi[2]) / 2, Math.hypot(hi[0] - lo[0], hi[1] - lo[1], hi[2] - lo[2]) / 2, sway2];
+  }
+  spheres.set(primitive, s);
+  return s;
+}
+var MAX_LOD_SWITCHES = 8;
+var GpuCulling = class {
+  constructor(device) {
+    this.device = device;
+    this.sources = null;
+    this.sourceCapacity = 0;
+    this.entries = null;
+    this.entryCapacity = 0;
+    this.flags = null;
+    this.flagCapacity = 0;
+    this.last = null;
+    this.lastCapacity = 0;
+    /** Every round's indirect arguments: the frustum's draws (the prepass), the two-phase cull's second prepass, then the shading's. */
+    this.args = null;
+    this.argCapacity = 0;
+    this.hiz = null;
+    this.blank = null;
+    this.frame = null;
+    this.msFirst = null;
+    /** The pyramid the shading's round last built (for the cluster pass, F6a), or null. */
+    this.pyramid = null;
+    this.uniforms = device.createBuffer({ size: UNIFORM_STRIDE2 * ROUNDS, usage: UNIFORM2 | COPY_DST });
+    const storage = (binding, type) => ({ binding, visibility: COMPUTE, buffer: { type } });
+    this.cullLayout = device.createBindGroupLayout({
+      entries: [
+        { binding: 0, visibility: COMPUTE, buffer: { type: "uniform" } },
+        storage(1, "read-only-storage"),
+        storage(2, "storage"),
+        storage(3, "storage"),
+        storage(4, "storage"),
+        { binding: 5, visibility: COMPUTE, texture: { sampleType: "unfilterable-float" } },
+        storage(6, "read-only-storage"),
+        storage(7, "storage")
+      ]
+    });
+    this.firstLayout = device.createBindGroupLayout({
+      entries: [
+        { binding: 0, visibility: COMPUTE, texture: { sampleType: "depth" } },
+        { binding: 1, visibility: COMPUTE, storageTexture: { access: "write-only", format: "r32float" } }
+      ]
+    });
+    this.downLayout = device.createBindGroupLayout({
+      entries: [
+        { binding: 0, visibility: COMPUTE, texture: { sampleType: "unfilterable-float" } },
+        { binding: 1, visibility: COMPUTE, storageTexture: { access: "write-only", format: "r32float" } }
+      ]
+    });
+    const cull = device.createShaderModule({ code: CULL_WGSL });
+    const layout = device.createPipelineLayout({ bindGroupLayouts: [this.cullLayout] });
+    this.testPipeline = device.createComputePipeline({ layout, compute: { module: cull, entryPoint: "test" } });
+    this.compactPipeline = device.createComputePipeline({ layout, compute: { module: cull, entryPoint: "compact" } });
+    this.firstPipeline = device.createComputePipeline({ layout: device.createPipelineLayout({ bindGroupLayouts: [this.firstLayout] }), compute: { module: device.createShaderModule({ code: HIZ_MAX_WGSL }), entryPoint: "first" } });
+    this.downPipeline = device.createComputePipeline({ layout: device.createPipelineLayout({ bindGroupLayouts: [this.downLayout] }), compute: { module: device.createShaderModule({ code: HIZ_DOWN_WGSL }), entryPoint: "down" } });
+  }
+  /**
+   * The frame's sources (in order of their first copy), draws and camera. The
+   * instance buffer holds `copies` records from 0 and their motion records
+   * from `copies`; both rounds pack each draw's kept copies at
+   * `region + dst`, their motion records `total` on (the draws' copies
+   * counted together), so the instance buffer needs `region + 2 × total`.
+   * The second round packs over the first's once the prepass has drawn it.
+   */
+  plan(sources, batches, copies, region, total, viewProj, eye, twoPhase = false) {
+    const grow = (buffer, capacity, need, bytes, usage) => {
+      if (need <= capacity && buffer) return [buffer, capacity];
+      buffer?.destroy();
+      const next = Math.max(need, capacity * 2, 16);
+      return [this.device.createBuffer({ size: next * bytes, usage }), next];
+    };
+    [this.sources, this.sourceCapacity] = grow(this.sources, this.sourceCapacity, sources.length, SOURCE_BYTES, STORAGE | COPY_DST);
+    [this.entries, this.entryCapacity] = grow(this.entries, this.entryCapacity, batches.length, ENTRY_BYTES, STORAGE | COPY_DST);
+    [this.flags, this.flagCapacity] = grow(this.flags, this.flagCapacity, Math.max(copies, 64), 4, STORAGE | COPY_SRC);
+    [this.args, this.argCapacity] = grow(this.args, this.argCapacity, Math.max(batches.length * ROUNDS, 32), INDIRECT_WORDS * 4, STORAGE | INDIRECT | COPY_DST | COPY_SRC);
+    if (!this.last || copies > this.lastCapacity) {
+      this.last?.destroy();
+      this.lastCapacity = Math.max(copies, this.lastCapacity * 2, 64);
+      this.last = this.device.createBuffer({ size: this.lastCapacity * 4, usage: STORAGE });
+    }
+    const s = new ArrayBuffer(Math.max(1, sources.length) * SOURCE_BYTES);
+    const su = new Uint32Array(s);
+    const sf = new Float32Array(s);
+    sources.forEach((b, k) => {
+      su.set([b.first, b.count, b.sphere ? 1 : 0, 0], k * 8);
+      if (b.sphere) sf.set(b.sphere, k * 8 + 4);
+    });
+    this.device.queue.writeBuffer(this.sources, 0, s);
+    const e = new ArrayBuffer(Math.max(1, batches.length) * ENTRY_BYTES);
+    const eu = new Uint32Array(e);
+    const ei = new Int32Array(e);
+    const ef = new Float32Array(e);
+    batches.forEach((b, k) => {
+      const o = k * (ENTRY_BYTES / 4);
+      eu.set([b.first, b.count, b.dst, b.indexCount], o);
+      const switches = b.lod ? Math.min(MAX_LOD_SWITCHES, b.lod.distances.length) : 0;
+      ei[o + 4] = b.lod ? b.lod.level : -1;
+      eu.set([b.lod ? b.lod.levels : 1, switches, 0], o + 5);
+      if (b.lod) ef.set(b.lod.distances.slice(0, switches), o + 8);
+    });
+    this.device.queue.writeBuffer(this.entries, 0, e);
+    this.frame = { batches: batches.length, sources: sources.length, copies, region, total, planes: frustumPlanesOf(viewProj), viewProj, eye, twoPhase };
+  }
+  /** Where a draw's arguments sit for a round (0: the prepass's, 1: the two-phase cull's second prepass, 2: the shading's), in bytes. */
+  argsOffset(round2, batch) {
+    return (round2 * (this.frame?.batches ?? 0) + batch) * INDIRECT_WORDS * 4;
+  }
+  writeUniforms(round2, size, levels, occlusion) {
+    const f3 = this.frame;
+    const data = new ArrayBuffer(UNIFORM_BYTES);
+    const floats = new Float32Array(data);
+    const words = new Uint32Array(data);
+    floats.set(f3.planes, 0);
+    floats.set(Array.from({ length: 16 }, (_, i) => f3.viewProj[i]), 24);
+    floats.set([size[0], size[1], levels, occlusion ? 1 : 0], 40);
+    words.set([f3.batches, f3.copies, f3.region, round2], 44);
+    words.set([f3.sources, f3.total, f3.twoPhase ? 1 : 0, 0], 48);
+    floats.set([f3.eye[0], f3.eye[1], f3.eye[2], 0], 52);
+    this.device.queue.writeBuffer(this.uniforms, round2 * UNIFORM_STRIDE2, data);
+  }
+  blankHiz() {
+    this.blank ?? (this.blank = this.device.createTexture({ size: { width: 1, height: 1 }, format: "r32float", usage: TEXTURE_BINDING2 }));
+    return this.blank;
+  }
+  /** The pyramid for a depth of `width × height`. */
+  ensureHiz(width, height) {
+    if (this.hiz && this.hiz.width === width && this.hiz.height === height) return this.hiz;
+    this.hiz?.texture.destroy();
+    const levels = Math.floor(Math.log2(Math.max(width, height))) + 1;
+    const texture = this.device.createTexture({
+      size: { width, height },
+      format: "r32float",
+      mipLevelCount: levels,
+      usage: TEXTURE_BINDING2 | STORAGE_BINDING | 1
+      /* COPY_SRC, for reading it back */
+    });
+    const views = Array.from({ length: levels }, (_, level) => texture.createView({ baseMipLevel: level, mipLevelCount: 1 }));
+    this.hiz = { texture, width, height, levels, views };
+    return this.hiz;
+  }
+  round(encoder, round2, instances, hiz, timing = {}) {
+    const f3 = this.frame;
+    if (f3.batches === 0) return;
+    const group = this.device.createBindGroup({
+      layout: this.cullLayout,
+      entries: [
+        { binding: 0, resource: { buffer: this.uniforms, offset: round2 * UNIFORM_STRIDE2, size: UNIFORM_BYTES } },
+        { binding: 1, resource: { buffer: this.sources } },
+        { binding: 2, resource: { buffer: instances } },
+        { binding: 3, resource: { buffer: this.flags } },
+        { binding: 4, resource: { buffer: this.args } },
+        { binding: 5, resource: hiz },
+        { binding: 6, resource: { buffer: this.entries } },
+        { binding: 7, resource: { buffer: this.last } }
+      ]
+    });
+    const pass = encoder.beginComputePass(timing);
+    pass.setBindGroup(0, group);
+    if (f3.copies > 0 && f3.sources > 0) {
+      pass.setPipeline(this.testPipeline);
+      pass.dispatchWorkgroups(Math.ceil(f3.copies / WORKGROUP));
+    }
+    pass.setPipeline(this.compactPipeline);
+    pass.dispatchWorkgroups(Math.min(f3.batches, 65535), Math.ceil(f3.batches / 65535));
+    pass.end();
+  }
+  /** The first round: the frustum, into the region and the first arguments. */
+  encodeFrustum(encoder, instances, timing) {
+    this.writeUniforms(0, [1, 1], 1, false);
+    this.round(encoder, 0, instances, this.blankHiz().createView(), timing);
+  }
+  /** The first level's pipeline (and its layout) for multisampled depths, made on first use. */
+  multisampledFirst() {
+    if (!this.msFirst) {
+      const layout = this.device.createBindGroupLayout({
+        entries: [
+          { binding: 0, visibility: COMPUTE, texture: { sampleType: "depth", multisampled: true } },
+          { binding: 1, visibility: COMPUTE, storageTexture: { access: "write-only", format: "r32float" } }
+        ]
+      });
+      const pipeline = this.device.createComputePipeline({
+        layout: this.device.createPipelineLayout({ bindGroupLayouts: [layout] }),
+        compute: { module: this.device.createShaderModule({ code: HIZ_MAX_MS_WGSL }), entryPoint: "first" }
+      });
+      this.msFirst = [pipeline, layout];
+    }
+    return this.msFirst;
+  }
+  /** Whether this frame culls in two phases (see {@link plan}). */
+  get twoPhase() {
+    return this.frame?.twoPhase ?? false;
+  }
+  /** The two-phase cull's second round: a pyramid of the first prepass's `depth`, and the copies last frame didn't show tested against it. */
+  encodeSecond(encoder, instances, depth, size, timing) {
+    const levels = this.encodePyramid(encoder, depth, size);
+    this.writeUniforms(1, size, levels, true);
+    this.round(encoder, 1, instances, this.hiz.texture.createView(), timing);
+  }
+  /**
+   * The shading's round: the pyramid of `depth` (single-sampled; null tests
+   * the frustum alone), then the frustum's survivors against it, into the
+   * region (over the prepass's) and the shading's arguments.
+   */
+  encodeOcclusion(encoder, instances, depth, size, timing, multisampled = false) {
+    const levels = depth ? this.encodePyramid(encoder, depth, size, multisampled) : 1;
+    this.pyramid = depth ? { view: this.hiz.texture.createView(), levels } : null;
+    this.writeUniforms(2, size, levels, depth !== null);
+    this.round(encoder, 2, instances, depth ? this.hiz.texture.createView() : this.blankHiz().createView(), timing);
+  }
+  /** Build the pyramid of `depth` (an anti-aliased frame's: the farthest of each pixel's samples); its levels. */
+  encodePyramid(encoder, depth, size, multisampled = false) {
+    const hiz = this.ensureHiz(size[0], size[1]);
+    const pass = encoder.beginComputePass();
+    const [first, layout] = multisampled ? this.multisampledFirst() : [this.firstPipeline, this.firstLayout];
+    pass.setPipeline(first);
+    pass.setBindGroup(0, this.device.createBindGroup({ layout, entries: [{ binding: 0, resource: depth.createView() }, { binding: 1, resource: hiz.views[0] }] }));
+    pass.dispatchWorkgroups(Math.ceil(size[0] / 8), Math.ceil(size[1] / 8));
+    pass.setPipeline(this.downPipeline);
+    for (let level = 1; level < hiz.levels; level += 1) {
+      const w = Math.max(1, size[0] >> level);
+      const h = Math.max(1, size[1] >> level);
+      pass.setBindGroup(0, this.device.createBindGroup({ layout: this.downLayout, entries: [{ binding: 0, resource: hiz.views[level - 1] }, { binding: 1, resource: hiz.views[level] }] }));
+      pass.dispatchWorkgroups(Math.ceil(w / 8), Math.ceil(h / 8));
+    }
+    pass.end();
+    return hiz.levels;
+  }
+  destroy() {
+    for (const b of [this.uniforms, this.entries, this.flags, this.args, this.last, this.sources]) b?.destroy();
+    this.hiz?.texture.destroy();
+    this.blank?.destroy();
+  }
+};
+var CASTER_CULL_WGSL = (
+  /* wgsl */
+  `
+struct Entry { first: u32, count: u32, dst: u32, indexCount: u32, sphere: vec4<f32>, eligible: vec4<u32> };
+struct Cull {
+  planes: array<vec4<f32>, ${MAX_CASTER_CASCADES * 6}>,
+  counts: vec4<u32>,   // x = batches, y = cascades, z = where the regions start, w = each region's copies
+};
+@group(0) @binding(0) var<uniform> cull: Cull;
+@group(0) @binding(1) var<storage, read> entries: array<Entry>;
+@group(0) @binding(2) var<storage, read_write> xf: array<f32>;
+@group(0) @binding(3) var<storage, read_write> args: array<u32>;
+
+const RECORD = ${INSTANCE_FLOATS}u;
+
+fn seen(e: Entry, cascade: u32, i: u32) -> bool {
+  if (e.eligible.x == 0u) { return true; }
+  let b = i * RECORD + 32u;
+  let model = mat4x4<f32>(
+    vec4<f32>(xf[b], xf[b + 1u], xf[b + 2u], xf[b + 3u]),
+    vec4<f32>(xf[b + 4u], xf[b + 5u], xf[b + 6u], xf[b + 7u]),
+    vec4<f32>(xf[b + 8u], xf[b + 9u], xf[b + 10u], xf[b + 11u]),
+    vec4<f32>(xf[b + 12u], xf[b + 13u], xf[b + 14u], xf[b + 15u]),
+  );
+  let c = (model * vec4<f32>(e.sphere.xyz, 1.0)).xyz;
+  let r = e.sphere.w * max(length(model[0].xyz), max(length(model[1].xyz), length(model[2].xyz)));
+  for (var p = 0u; p < 6u; p = p + 1u) {
+    if (p == 4u) { continue; } // the near plane, toward the sun
+    let plane = cull.planes[cascade * 6u + p];
+    if (dot(plane.xyz, c) + plane.w < -r) { return false; }
+  }
+  return true;
+}
+
+var<workgroup> scan: array<u32, ${WORKGROUP}>;
+
+@compute @workgroup_size(${WORKGROUP})
+fn main(@builtin(workgroup_id) group: vec3<u32>, @builtin(local_invocation_id) local: vec3<u32>) {
+  let index = group.x;
+  let cascade = group.y;
+  if (index >= cull.counts.x || cascade >= cull.counts.y) { return; }
+  let e = entries[index];
+  let region = cull.counts.z + cascade * cull.counts.w + e.dst;
+  var kept = 0u;
+  for (var start = 0u; start < e.count; start = start + ${WORKGROUP}u) {
+    let j = start + local.x;
+    var keep = 0u;
+    if (j < e.count && seen(e, cascade, e.first + j)) { keep = 1u; }
+    scan[local.x] = keep;
+    workgroupBarrier();
+    for (var step = 1u; step < ${WORKGROUP}u; step = step * 2u) {
+      var add = 0u;
+      if (local.x >= step) { add = scan[local.x - step]; }
+      workgroupBarrier();
+      scan[local.x] = scan[local.x] + add;
+      workgroupBarrier();
+    }
+    if (keep == 1u) {
+      // A caster reads only its model.
+      let to = (region + kept + scan[local.x] - 1u) * RECORD + 32u;
+      let src = (e.first + j) * RECORD + 32u;
+      for (var f = 0u; f < 16u; f = f + 1u) { xf[to + f] = xf[src + f]; }
+    }
+    kept = kept + workgroupUniformLoad(&scan[${WORKGROUP - 1}u]);
+  }
+  if (local.x == 0u) {
+    let a = (cascade * cull.counts.x + index) * ${INDIRECT_WORDS}u;
+    args[a] = e.indexCount;
+    args[a + 1u] = kept;
+    args[a + 2u] = 0u;
+    args[a + 3u] = 0u;
+    args[a + 4u] = 0u;
+  }
+}
+`
+);
+var CasterCulling = class {
+  constructor(device) {
+    this.device = device;
+    this.entries = null;
+    this.entryCapacity = 0;
+    /** Every cascade's arguments, cascade by cascade, a caster batch each. */
+    this.args = null;
+    this.argCapacity = 0;
+    this.frame = null;
+    this.uniforms = device.createBuffer({ size: MAX_CASTER_CASCADES * 6 * 16 + 16, usage: UNIFORM2 | COPY_DST });
+    const storage = (binding, type) => ({ binding, visibility: COMPUTE, buffer: { type } });
+    this.layout = device.createBindGroupLayout({ entries: [{ binding: 0, visibility: COMPUTE, buffer: { type: "uniform" } }, storage(1, "read-only-storage"), storage(2, "storage"), storage(3, "storage")] });
+    this.pipeline = device.createComputePipeline({
+      layout: device.createPipelineLayout({ bindGroupLayouts: [this.layout] }),
+      compute: { module: device.createShaderModule({ code: CASTER_CULL_WGSL }), entryPoint: "main" }
+    });
+  }
+  /** The frame's caster batches and the cascades' view-projections; each cascade's region holds `regionCopies` from `region` on. */
+  plan(batches, cascades, region, regionCopies) {
+    const count = Math.min(cascades.length, MAX_CASTER_CASCADES);
+    if (batches.length > this.entryCapacity) {
+      this.entries?.destroy();
+      this.entryCapacity = Math.max(batches.length, this.entryCapacity * 2, 16);
+      this.entries = this.device.createBuffer({ size: this.entryCapacity * 48, usage: STORAGE | COPY_DST });
+    }
+    if (batches.length * count > this.argCapacity || !this.args) {
+      this.args?.destroy();
+      this.argCapacity = Math.max(batches.length * count, this.argCapacity * 2, 16);
+      this.args = this.device.createBuffer({ size: this.argCapacity * INDIRECT_WORDS * 4, usage: STORAGE | INDIRECT | COPY_SRC });
+    }
+    const e = new ArrayBuffer(Math.max(1, batches.length) * 48);
+    const eu = new Uint32Array(e);
+    const ef = new Float32Array(e);
+    batches.forEach((b, k) => {
+      eu.set([b.first, b.count, b.dst, b.indexCount], k * 12);
+      if (b.sphere) ef.set(b.sphere, k * 12 + 4);
+      eu[k * 12 + 8] = b.sphere ? 1 : 0;
+    });
+    this.device.queue.writeBuffer(this.entries, 0, e);
+    const u = new ArrayBuffer(MAX_CASTER_CASCADES * 6 * 16 + 16);
+    const uf = new Float32Array(u);
+    for (let c = 0; c < count; c += 1) uf.set(frustumPlanesOf(cascades[c]), c * 24);
+    new Uint32Array(u).set([batches.length, count, region, regionCopies], MAX_CASTER_CASCADES * 24);
+    this.device.queue.writeBuffer(this.uniforms, 0, u);
+    this.frame = { batches: batches.length, cascades: count };
+  }
+  /** Where a caster batch's arguments sit for a cascade, in bytes. */
+  argsOffset(cascade, batch) {
+    return (cascade * (this.frame?.batches ?? 0) + batch) * INDIRECT_WORDS * 4;
+  }
+  encode(encoder, instances, timing = {}) {
+    const f3 = this.frame;
+    if (!f3 || f3.batches === 0 || f3.cascades === 0) return;
+    const pass = encoder.beginComputePass(timing);
+    pass.setPipeline(this.pipeline);
+    pass.setBindGroup(0, this.device.createBindGroup({
+      layout: this.layout,
+      entries: [
+        { binding: 0, resource: { buffer: this.uniforms } },
+        { binding: 1, resource: { buffer: this.entries } },
+        { binding: 2, resource: { buffer: instances } },
+        { binding: 3, resource: { buffer: this.args } }
+      ]
+    }));
+    pass.dispatchWorkgroups(f3.batches, f3.cascades);
+    pass.end();
+  }
+  destroy() {
+    for (const b of [this.uniforms, this.entries, this.args]) b?.destroy();
+  }
+};
+
+// src/render/gpuLightClusters.ts
+import { CLUSTER_CELLS, CLUSTER_INDEX_CAP as CLUSTER_INDEX_CAP2, CLUSTER_MAX_PER_CELL, CLUSTER_X as CLUSTER_X2, CLUSTER_Y as CLUSTER_Y2 } from "@cartbox/editor";
+var STORAGE2 = 128;
+var COPY_DST2 = 8;
+var UNIFORM3 = 64;
+var SCAN = 256;
+var LIGHT_CLUSTER_WGSL = (
+  /* wgsl */
+  `
+struct Grid {
+  view: mat4x4<f32>,
+  a: vec4<f32>,       // near, far, sx, sy
+  b: vec4<f32>,       // tile width, tile height, slice scale, unused
+  size: vec4<f32>,    // width, height
+  lights: vec4<u32>,  // first clustered light, lights
+};
+@group(0) @binding(0) var<uniform> grid: Grid;
+@group(0) @binding(1) var<storage, read> lights: array<f32>;
+@group(0) @binding(2) var<storage, read_write> rows: array<u32>;
+@group(0) @binding(3) var<storage, read_write> counts: array<u32>;
+@group(0) @binding(4) var<storage, read_write> data: array<u32>;
+
+const CELLS = ${CLUSTER_CELLS}u;
+const MAX = ${CLUSTER_MAX_PER_CELL}u;
+const CAP = ${CLUSTER_INDEX_CAP2}u;
+
+fn ndcX(x: f32) -> f32 { return min(grid.size.x, x) / grid.size.x * 2.0 - 1.0; }
+fn ndcY(y: f32) -> f32 { return 1.0 - min(grid.size.y, y) / grid.size.y * 2.0; }
+
+@compute @workgroup_size(64)
+fn list(@builtin(global_invocation_id) id: vec3<u32>) {
+  let cell = id.x;
+  if (cell >= CELLS) { return; }
+  let tx = cell % ${CLUSTER_X2}u;
+  let ty = (cell / ${CLUSTER_X2}u) % ${CLUSTER_Y2}u;
+  let k = cell / ${CLUSTER_X2 * CLUSTER_Y2}u;
+  let near = grid.a.x;
+  let far = grid.a.y;
+  let d0 = near * exp(f32(k) / grid.b.z);
+  let d1 = near * exp(f32(k + 1u) / grid.b.z);
+  let ya = ndcY(f32(ty) * grid.b.y);
+  let yb = ndcY(f32(ty + 1u) * grid.b.y);
+  let yMin = min(min(ya * d0, ya * d1), min(yb * d0, yb * d1)) / grid.a.w;
+  let yMax = max(max(ya * d0, ya * d1), max(yb * d0, yb * d1)) / grid.a.w;
+  let xa = ndcX(f32(tx) * grid.b.x);
+  let xb = ndcX(f32(tx + 1u) * grid.b.x);
+  let xMin = min(min(xa * d0, xa * d1), min(xb * d0, xb * d1)) / grid.a.z;
+  let xMax = max(max(xa * d0, xa * d1), max(xb * d0, xb * d1)) / grid.a.z;
+  var n = 0u;
+  for (var li = grid.lights.x; li < grid.lights.y; li = li + 1u) {
+    let b = li * ${LIGHT_FLOATS}u;
+    let p = vec4<f32>(lights[b], lights[b + 1u], lights[b + 2u], 1.0);
+    let v = grid.view * p;
+    let cd = -v.z;
+    let r = lights[b + 8u] * 1.002 + 2e-3;
+    if (cd + r < near || cd - r > far) { continue; }
+    let dd = select(select(0.0, cd - d1, cd > d1), d0 - cd, cd < d0);
+    let dy = select(select(0.0, v.y - yMax, v.y > yMax), yMin - v.y, v.y < yMin);
+    let dx = select(select(0.0, v.x - xMax, v.x > xMax), xMin - v.x, v.x < xMin);
+    if (dx * dx + dy * dy + dd * dd > r * r) { continue; }
+    if (n < MAX) {
+      rows[cell * MAX + n] = li;
+      n = n + 1u;
+    }
+  }
+  counts[cell] = n;
+}
+
+var<workgroup> sums: array<u32, ${SCAN}>;
+
+/** One workgroup: each thread a run of cells; the runs' sums scanned; each cell's start written to the table. */
+@compute @workgroup_size(${SCAN})
+fn scan(@builtin(local_invocation_id) local: vec3<u32>) {
+  let per = (CELLS + ${SCAN - 1}u) / ${SCAN}u;
+  let run = local.x * per;
+  var total = 0u;
+  for (var c = run; c < min(run + per, CELLS); c = c + 1u) { total = total + counts[c]; }
+  sums[local.x] = total;
+  workgroupBarrier();
+  for (var step = 1u; step < ${SCAN}u; step = step * 2u) {
+    let add = select(0u, sums[local.x - step], local.x >= step);
+    workgroupBarrier();
+    sums[local.x] = sums[local.x] + add;
+    workgroupBarrier();
+  }
+  var at = sums[local.x] - total;
+  for (var c = run; c < min(run + per, CELLS); c = c + 1u) {
+    let start = min(at, CAP);
+    data[c * 2u] = start;
+    data[c * 2u + 1u] = min(counts[c], CAP - start);
+    at = at + counts[c];
+  }
+}
+
+@compute @workgroup_size(64)
+fn fill(@builtin(global_invocation_id) id: vec3<u32>) {
+  let cell = id.x;
+  if (cell >= CELLS) { return; }
+  let start = data[cell * 2u];
+  let n = data[cell * 2u + 1u];
+  for (var i = 0u; i < n; i = i + 1u) { data[CELLS * 2u + start + i] = rows[cell * MAX + i]; }
+}
+`
+);
+var GpuLightClusters = class {
+  constructor(device) {
+    this.device = device;
+    this.uniforms = device.createBuffer({ size: 128, usage: UNIFORM3 | COPY_DST2 });
+    this.rows = device.createBuffer({ size: CLUSTER_CELLS * CLUSTER_MAX_PER_CELL * 4, usage: STORAGE2 });
+    this.counts = device.createBuffer({ size: CLUSTER_CELLS * 4, usage: STORAGE2 });
+    const storage = (binding, type) => ({ binding, visibility: 4, buffer: { type } });
+    this.layout = device.createBindGroupLayout({
+      entries: [{ binding: 0, visibility: 4, buffer: { type: "uniform" } }, storage(1, "read-only-storage"), storage(2, "storage"), storage(3, "storage"), storage(4, "storage")]
+    });
+    const module = device.createShaderModule({ code: LIGHT_CLUSTER_WGSL });
+    const layout = device.createPipelineLayout({ bindGroupLayouts: [this.layout] });
+    const make = (entryPoint) => device.createComputePipeline({ layout, compute: { module, entryPoint } });
+    this.pipelines = { list: make("list"), scan: make("scan"), fill: make("fill") };
+  }
+  /** The params the shaders take (a tile's size, the near plane, the slice scale), as the CPU build gives them. */
+  static params(grid) {
+    return [grid.tileW, grid.tileH, grid.near, grid.scale];
+  }
+  /** Write the frame's camera and lights; {@link encode} then builds the cells into `data` (the table, then the index list). */
+  prepare(grid, view, width, height, globalCount, lightCount) {
+    const bytes = new ArrayBuffer(128);
+    const f3 = new Float32Array(bytes);
+    f3.set(Array.from({ length: 16 }, (_, i) => view[i]), 0);
+    f3.set([grid.near, grid.far, grid.sx, grid.sy], 16);
+    f3.set([grid.tileW, grid.tileH, grid.scale, 0], 20);
+    f3.set([width, height, 0, 0], 24);
+    new Uint32Array(bytes).set([globalCount, lightCount, 0, 0], 28);
+    this.device.queue.writeBuffer(this.uniforms, 0, bytes);
+  }
+  encode(encoder, lights, data, timing = {}) {
+    const group = this.device.createBindGroup({
+      layout: this.layout,
+      entries: [
+        { binding: 0, resource: { buffer: this.uniforms } },
+        { binding: 1, resource: { buffer: lights } },
+        { binding: 2, resource: { buffer: this.rows } },
+        { binding: 3, resource: { buffer: this.counts } },
+        { binding: 4, resource: { buffer: data } }
+      ]
+    });
+    const pass = encoder.beginComputePass(timing);
+    pass.setBindGroup(0, group);
+    pass.setPipeline(this.pipelines.list);
+    pass.dispatchWorkgroups(Math.ceil(CLUSTER_CELLS / 64));
+    pass.setPipeline(this.pipelines.scan);
+    pass.dispatchWorkgroups(1);
+    pass.setPipeline(this.pipelines.fill);
+    pass.dispatchWorkgroups(Math.ceil(CLUSTER_CELLS / 64));
+    pass.end();
+  }
+  destroy() {
+    for (const b of [this.uniforms, this.rows, this.counts]) b.destroy();
+  }
+};
+
+// src/render/renderBundles.ts
+var BundleCache = class {
+  constructor(device) {
+    this.device = device;
+    this.slots = /* @__PURE__ */ new Map();
+    /** Bundles recorded since made (for tests and stats). */
+    this.recorded = 0;
+  }
+  /** The bundle for `slot`, recorded with `record` when `key` (or the target) differs from the last one's. */
+  get(slot, target, key2, record) {
+    const targetKey = `${target.colorFormats.join(",")}|${target.depthStencilFormat}|${target.sampleCount}|${target.depthReadOnly ? 1 : 0}`;
+    const cached = this.slots.get(slot);
+    if (cached && cached.target === targetKey && sameKey(cached.key, key2)) return cached.bundle;
+    const encoder = this.device.createRenderBundleEncoder({
+      colorFormats: [...target.colorFormats],
+      depthStencilFormat: target.depthStencilFormat,
+      sampleCount: target.sampleCount,
+      depthReadOnly: target.depthReadOnly,
+      stencilReadOnly: true
+    });
+    record(encoder);
+    const bundle = encoder.finish();
+    this.slots.set(slot, { key: [...key2], target: targetKey, bundle });
+    this.recorded += 1;
+    return bundle;
+  }
+  /** Forget every bundle (a resource they name went away). */
+  clear() {
+    this.slots.clear();
+  }
+};
+function sameKey(a, b) {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i += 1) if (a[i] !== b[i]) return false;
+  return true;
+}
+
+// src/render/gpuTransforms.ts
+var COPY_DST3 = 8;
+var UNIFORM4 = 64;
+var WORKGROUP2 = 64;
+var UNIFORM_BYTES2 = 4 * 64 + 16;
+var TRANSFORM_WGSL = (
+  /* wgsl */
+  `
+struct Frame {
+  viewProj: mat4x4<f32>,
+  lightViewProj: mat4x4<f32>,
+  viewProjNow: mat4x4<f32>,
+  viewProjThen: mat4x4<f32>,
+  counts: vec4<u32>,   // x = copies, y = 1 with a shadow (else its matrix is zero), z = 1 with motion records (after the copies')
+};
+@group(0) @binding(0) var<uniform> frame: Frame;
+@group(0) @binding(1) var<storage, read_write> xf: array<f32>;
+
+const RECORD = ${INSTANCE_FLOATS}u;
+
+fn modelAt(i: u32) -> mat4x4<f32> {
+  let b = i * RECORD + 32u;
+  return mat4x4<f32>(
+    vec4<f32>(xf[b], xf[b + 1u], xf[b + 2u], xf[b + 3u]),
+    vec4<f32>(xf[b + 4u], xf[b + 5u], xf[b + 6u], xf[b + 7u]),
+    vec4<f32>(xf[b + 8u], xf[b + 9u], xf[b + 10u], xf[b + 11u]),
+    vec4<f32>(xf[b + 12u], xf[b + 13u], xf[b + 14u], xf[b + 15u]),
+  );
+}
+
+fn put(i: u32, at: u32, m: mat4x4<f32>) {
+  let b = i * RECORD + at;
+  for (var c = 0u; c < 4u; c = c + 1u) {
+    for (var r = 0u; r < 4u; r = r + 1u) { xf[b + c * 4u + r] = m[c][r]; }
+  }
+}
+
+@compute @workgroup_size(${WORKGROUP2})
+fn fill(@builtin(global_invocation_id) id: vec3<u32>) {
+  let i = id.x;
+  let n = frame.counts.x;
+  if (i < n) {
+    let model = modelAt(i);
+    put(i, 0u, frame.viewProj * model);
+    // With no shadow the light's matrix is zero, and so is the product.
+    put(i, 16u, frame.lightViewProj * model);
+    // The normal basis: the model's own 3\xD73, a column a vec4.
+    let b = i * RECORD + 48u;
+    for (var c = 0u; c < 3u; c = c + 1u) {
+      for (var r = 0u; r < 3u; r = r + 1u) { xf[b + c * 4u + r] = model[c][r]; }
+      xf[b + c * 4u + 3u] = 0.0;
+    }
+  } else if (frame.counts.z != 0u && i < 2u * n) {
+    // A motion record: its model slot holds last frame's model; the copy's own is its record's.
+    put(i, 0u, frame.viewProjNow * modelAt(i - n));
+    put(i, 16u, frame.viewProjThen * modelAt(i));
+  }
+}
+`
+);
+function writeInstanceModel(target, index, model) {
+  const base = index * INSTANCE_FLOATS + 32;
+  for (let i = 0; i < 16; i += 1) target[base + i] = model[i];
+}
+var GpuTransforms = class {
+  constructor(device) {
+    this.device = device;
+    this.data = new ArrayBuffer(UNIFORM_BYTES2);
+    this.copies = 0;
+    this.motion = false;
+    this.uniforms = device.createBuffer({ size: UNIFORM_BYTES2, usage: UNIFORM4 | COPY_DST3 });
+    this.layout = device.createBindGroupLayout({
+      entries: [
+        { binding: 0, visibility: 4, buffer: { type: "uniform" } },
+        { binding: 1, visibility: 4, buffer: { type: "storage" } }
+      ]
+    });
+    this.pipeline = device.createComputePipeline({
+      layout: device.createPipelineLayout({ bindGroupLayouts: [this.layout] }),
+      compute: { module: device.createShaderModule({ code: TRANSFORM_WGSL }), entryPoint: "fill" }
+    });
+  }
+  /** The frame's `copies` and matrices; their records (and motion records, `copies` on) start at 0. */
+  prepare(copies, frame) {
+    const f3 = new Float32Array(this.data);
+    const mat = (m, at) => {
+      for (let i = 0; i < 16; i += 1) f3[at + i] = m ? m[i] : 0;
+    };
+    mat(frame.viewProj, 0);
+    mat(frame.lightViewProj, 16);
+    mat(frame.motion?.now ?? null, 32);
+    mat(frame.motion?.then ?? null, 48);
+    new Uint32Array(this.data).set([copies, frame.lightViewProj ? 1 : 0, frame.motion ? 1 : 0, 0], 64);
+    this.device.queue.writeBuffer(this.uniforms, 0, this.data);
+    this.copies = copies;
+    this.motion = frame.motion !== null;
+  }
+  encode(encoder, instances) {
+    const records = this.copies * (this.motion ? 2 : 1);
+    if (records === 0) return;
+    const group = this.device.createBindGroup({
+      layout: this.layout,
+      entries: [
+        { binding: 0, resource: { buffer: this.uniforms } },
+        { binding: 1, resource: { buffer: instances } }
+      ]
+    });
+    const pass = encoder.beginComputePass();
+    pass.setPipeline(this.pipeline);
+    pass.setBindGroup(0, group);
+    pass.dispatchWorkgroups(Math.ceil(records / WORKGROUP2));
+    pass.end();
+  }
+  destroy() {
+    this.uniforms.destroy();
+  }
+};
+
+// src/render/clusterRendering.ts
+import { LOD_CLUSTER_FLOATS, packClusterLod } from "@cartbox/editor";
+var STORAGE3 = 128;
+var COPY_DST4 = 8;
+var COPY_SRC2 = 4;
+var INDEX = 16;
+var INDIRECT2 = 256;
+var UNIFORM5 = 64;
+var COMPUTE2 = 4;
+var THREADS = 128;
+var JOB_STRIDE = 256;
+var FRAME_BYTES = 6 * 16 + 64 + 16 * 3;
+var CLUSTER_ERROR_PIXELS = 1;
+var CLUSTER_WGSL = (
+  /* wgsl */
+  `
+struct Frame {
+  planes: array<vec4<f32>, 6>,
+  viewProj: mat4x4<f32>,
+  eye: vec4<f32>,      // xyz; w = pixels a radian (the projection's y scale \xD7 half the height)
+  size: vec4<f32>,     // x, y = the depth's size; z = the pyramid's levels; w = 1 to test against it
+  error: vec4<f32>,    // x = the pixels an error may cover unseen
+};
+struct Job {
+  record: u32,         // the copy's instance record
+  clusters: u32,
+  region: u32,         // where its indices go in the output (in indices)
+  args: u32,           // its arguments' first word in the range bound (0: each job and round binds its own)
+  twoSided: u32,
+};
+@group(0) @binding(0) var<uniform> frame: Frame;
+@group(0) @binding(1) var<uniform> job: Job;
+@group(0) @binding(2) var<storage, read> clusters: array<vec4<f32>>;
+@group(0) @binding(3) var<storage, read> source: array<u32>;
+@group(0) @binding(4) var<storage, read> xf: array<f32>;
+@group(0) @binding(5) var<storage, read_write> out: array<u32>;
+@group(0) @binding(6) var<storage, read_write> args: array<atomic<u32>>;
+@group(0) @binding(7) var hiz: texture_2d<f32>;
+
+const RECORD = ${INSTANCE_FLOATS}u;
+const FLOATS = ${LOD_CLUSTER_FLOATS / 4}u; // vec4s a cluster
+
+fn projected(error: f32, centre: vec3<f32>, radius: f32) -> f32 {
+  let d = max(length(centre - frame.eye.xyz) - radius, 1e-3);
+  return error * frame.eye.w / d;
+}
+
+/** As gpuCulling's: the sphere's box on screen behind the pyramid's farthest depths there. */
+fn hidden(c: vec3<f32>, r: f32) -> bool {
+  var lo = vec2<f32>(1e9);
+  var hi = vec2<f32>(-1e9);
+  var nearest = 1.0;
+  for (var k = 0u; k < 8u; k = k + 1u) {
+    let corner = c + r * vec3<f32>(select(-1.0, 1.0, (k & 1u) != 0u), select(-1.0, 1.0, (k & 2u) != 0u), select(-1.0, 1.0, (k & 4u) != 0u));
+    let clip = frame.viewProj * vec4<f32>(corner, 1.0);
+    if (clip.w <= 1e-4) { return false; }
+    let ndc = clip.xyz / clip.w;
+    let px = vec2<f32>((ndc.x * 0.5 + 0.5) * frame.size.x, (0.5 - ndc.y * 0.5) * frame.size.y);
+    lo = min(lo, px);
+    hi = max(hi, px);
+    nearest = min(nearest, ndc.z);
+  }
+  if (nearest <= 0.0) { return false; }
+  lo = clamp(lo, vec2<f32>(0.0), frame.size.xy - 1.0);
+  hi = clamp(hi, vec2<f32>(0.0), frame.size.xy - 1.0);
+  let extent = max(hi.x - lo.x, hi.y - lo.y);
+  let level = min(u32(ceil(log2(max(extent, 1.0)))), u32(frame.size.z) - 1u);
+  let dims = max(vec2<i32>(textureDimensions(hiz)) >> vec2<u32>(level), vec2<i32>(1));
+  // Clamped both ways, and at most the two texels a side the level holds it to: a rectangle a NaN reached
+  // (a corner on the eye's plane, say) reads nothing out of bounds and loops no further.
+  let a = clamp(vec2<i32>(lo) >> vec2<u32>(level), vec2<i32>(0), dims - 1);
+  let b = clamp(vec2<i32>(hi) >> vec2<u32>(level), a, min(a + 1, dims - 1));
+  var farthest = 0.0;
+  for (var y = a.y; y <= b.y; y = y + 1) {
+    for (var x = a.x; x <= b.x; x = x + 1) {
+      farthest = max(farthest, textureLoad(hiz, vec2<i32>(x, y), level).r);
+    }
+  }
+  return nearest > farthest;
+}
+
+var<workgroup> base: u32;
+var<workgroup> count: u32;
+var<workgroup> first: u32;
+
+@compute @workgroup_size(${THREADS})
+fn main(@builtin(workgroup_id) group: vec3<u32>, @builtin(local_invocation_id) local: vec3<u32>) {
+  let index = group.x + group.y * 65535u;
+  if (index >= job.clusters) { return; }
+  if (local.x == 0u) {
+    let at = index * FLOATS;
+    let head = bitcast<vec4<u32>>(clusters[at]);
+    let errors = clusters[at];
+    let bounds = clusters[at + 1u];
+    let cone = clusters[at + 2u];
+    let own = clusters[at + 3u];
+    let parent = clusters[at + 4u];
+    let b = job.record * RECORD + 32u;
+    let model = mat4x4<f32>(
+      vec4<f32>(xf[b], xf[b + 1u], xf[b + 2u], xf[b + 3u]),
+      vec4<f32>(xf[b + 4u], xf[b + 5u], xf[b + 6u], xf[b + 7u]),
+      vec4<f32>(xf[b + 8u], xf[b + 9u], xf[b + 10u], xf[b + 11u]),
+      vec4<f32>(xf[b + 12u], xf[b + 13u], xf[b + 14u], xf[b + 15u]),
+    );
+    let scale = max(length(model[0].xyz), max(length(model[1].xyz), length(model[2].xyz)));
+    // The cut: its own error unseen, its parent's seen.
+    var drawn = projected(errors.z * scale, (model * vec4<f32>(own.xyz, 1.0)).xyz, own.w * scale) <= frame.error.x
+      && projected(errors.w * scale, (model * vec4<f32>(parent.xyz, 1.0)).xyz, parent.w * scale) > frame.error.x;
+    // The frustum.
+    let c = (model * vec4<f32>(bounds.xyz, 1.0)).xyz;
+    let r = bounds.w * scale;
+    for (var p = 0u; p < 6u; p = p + 1u) {
+      let plane = frame.planes[p];
+      if (dot(plane.xyz, c) + plane.w < -r) { drawn = false; }
+    }
+    // The cone: every normal facing away (a rotation and uniform scale keep the cone; a squash is let through).
+    if (drawn && job.twoSided == 0u && cone.w > 0.0) {
+      let axis = normalize((model * vec4<f32>(cone.xyz, 0.0)).xyz);
+      let v = c - frame.eye.xyz;
+      let d = length(v);
+      if (d > r && dot(v, axis) >= sqrt(1.0 - cone.w * cone.w) * d + r) { drawn = false; }
+    }
+    if (drawn && frame.size.w > 0.5 && hidden(c, r)) { drawn = false; }
+    var taken = 0u;
+    if (drawn) { taken = atomicAdd(&args[job.args], head.y * 3u); }
+    base = taken;
+    count = select(0u, head.y, drawn);
+    first = head.x;
+  }
+  workgroupBarrier();
+  let n = workgroupUniformLoad(&count);
+  if (local.x < n) {
+    let to = job.region + base + local.x * 3u;
+    let src = (first + local.x) * 3u;
+    out[to] = source[src];
+    out[to + 1u] = source[src + 1u];
+    out[to + 2u] = source[src + 2u];
+  }
+}
+`
+);
+var ClusterRendering = class {
+  constructor(device) {
+    this.device = device;
+    this.uploaded = /* @__PURE__ */ new WeakMap();
+    this.jobUniforms = null;
+    this.jobCapacity = 0;
+    /** The cut's indices: each job's region. */
+    this.output = null;
+    this.outputCapacity = 0;
+    /** Each job's arguments, round by round. */
+    this.args = null;
+    this.argCapacity = 0;
+    this.blank = null;
+    this.jobs = [];
+    this.frameUniforms = device.createBuffer({ size: JOB_STRIDE * 2, usage: UNIFORM5 | COPY_DST4 });
+    const storage = (binding, type) => ({ binding, visibility: COMPUTE2, buffer: { type } });
+    this.layout = device.createBindGroupLayout({
+      entries: [
+        { binding: 0, visibility: COMPUTE2, buffer: { type: "uniform" } },
+        { binding: 1, visibility: COMPUTE2, buffer: { type: "uniform" } },
+        storage(2, "read-only-storage"),
+        storage(3, "read-only-storage"),
+        storage(4, "read-only-storage"),
+        storage(5, "storage"),
+        storage(6, "storage"),
+        { binding: 7, visibility: COMPUTE2, texture: { sampleType: "unfilterable-float" } }
+      ]
+    });
+    this.pipeline = device.createComputePipeline({
+      layout: device.createPipelineLayout({ bindGroupLayouts: [this.layout] }),
+      compute: { module: device.createShaderModule({ code: CLUSTER_WGSL }), entryPoint: "main" }
+    });
+  }
+  upload(lod) {
+    let gpu = this.uploaded.get(lod);
+    if (!gpu) {
+      const packed = packClusterLod(lod);
+      const clusters = this.device.createBuffer({ size: Math.max(16, packed.byteLength), usage: STORAGE3 | COPY_DST4 });
+      this.device.queue.writeBuffer(clusters, 0, packed);
+      const source = this.device.createBuffer({ size: Math.max(16, lod.indices.byteLength), usage: STORAGE3 | COPY_DST4 });
+      this.device.queue.writeBuffer(source, 0, lod.indices);
+      const maxTriangles = lod.clusters.filter((c) => c.error === 0).reduce((n, c) => n + c.triangles, 0);
+      gpu = { clusters, source, count: lod.clusters.length, maxTriangles };
+      this.uploaded.set(lod, gpu);
+    }
+    return gpu;
+  }
+  /** The frame's jobs: each gets a region of the output (as many indices as its mesh's own triangles) and its rounds' arguments, reset. */
+  plan(jobs) {
+    let at = 0;
+    this.jobs = jobs.map((job) => {
+      const gpu = this.upload(job.lod);
+      const region = at;
+      at += gpu.maxTriangles * 3;
+      return { job, gpu, region };
+    });
+    if (at > this.outputCapacity || !this.output) {
+      this.output?.destroy();
+      this.outputCapacity = Math.max(at, this.outputCapacity * 2, 3 * 1024);
+      this.output = this.device.createBuffer({ size: this.outputCapacity * 4, usage: INDEX | STORAGE3 });
+    }
+    if (jobs.length * 2 > this.argCapacity || !this.args) {
+      this.args?.destroy();
+      this.argCapacity = Math.max(jobs.length * 2, this.argCapacity * 2, 8);
+      this.args = this.device.createBuffer({ size: this.argCapacity * JOB_STRIDE, usage: STORAGE3 | INDIRECT2 | COPY_DST4 | COPY_SRC2 });
+    }
+    if (jobs.length > this.jobCapacity || !this.jobUniforms) {
+      this.jobUniforms?.destroy();
+      this.jobCapacity = Math.max(jobs.length, this.jobCapacity * 2, 8);
+      this.jobUniforms = this.device.createBuffer({ size: this.jobCapacity * JOB_STRIDE, usage: UNIFORM5 | COPY_DST4 });
+    }
+    if (jobs.length === 0) return;
+    const args = new Uint32Array(jobs.length * 2 * JOB_STRIDE / 4);
+    for (let k = 0; k < jobs.length * 2; k += 1) args[k * JOB_STRIDE / 4 + 1] = 1;
+    this.device.queue.writeBuffer(this.args, 0, args);
+    const uniforms = new Uint32Array(jobs.length * JOB_STRIDE / 4);
+    this.jobs.forEach(({ job, gpu, region }, k) => uniforms.set([job.record, gpu.count, region, 0, job.twoSided ? 1 : 0], k * JOB_STRIDE / 4));
+    this.device.queue.writeBuffer(this.jobUniforms, 0, uniforms);
+  }
+  /** Where a job's region starts in the output, in bytes. */
+  regionOffset(job) {
+    return this.jobs[job].region * 4;
+  }
+  /** How many bytes a job's region holds. */
+  regionBytes(job) {
+    return this.jobs[job].gpu.maxTriangles * 3 * 4;
+  }
+  /** Where a job's arguments sit for a round, in bytes. */
+  argsOffset(job, round2) {
+    return (job * 2 + round2) * JOB_STRIDE;
+  }
+  /**
+   * Encode a round: the cut and culls for every job, round 0 (before the
+   * prepass) against the frustum and cone, round 1 also against `hiz` (the
+   * prepass's pyramid, `levels` deep; null tests no occlusion).
+   */
+  encode(encoder, round2, instances, view, hiz, timing = {}) {
+    if (this.jobs.length === 0) return;
+    const data = new ArrayBuffer(FRAME_BYTES);
+    const f3 = new Float32Array(data);
+    f3.set(frustumPlanesOf(view.viewProj), 0);
+    f3.set(Array.from({ length: 16 }, (_, i) => view.viewProj[i]), 24);
+    f3.set([view.eye[0], view.eye[1], view.eye[2], view.pixelsPerRadian], 40);
+    f3.set([view.size[0], view.size[1], hiz ? hiz.levels : 1, hiz ? 1 : 0], 44);
+    f3.set([CLUSTER_ERROR_PIXELS, 0, 0, 0], 48);
+    this.device.queue.writeBuffer(this.frameUniforms, round2 * JOB_STRIDE, data);
+    this.blank ?? (this.blank = this.device.createTexture({ size: { width: 1, height: 1 }, format: "r32float", usage: 4 }));
+    const pyramid = hiz ? hiz.view : this.blank.createView();
+    const pass = encoder.beginComputePass(timing);
+    pass.setPipeline(this.pipeline);
+    this.jobs.forEach(({ gpu }, k) => {
+      pass.setBindGroup(0, this.device.createBindGroup({
+        layout: this.layout,
+        entries: [
+          { binding: 0, resource: { buffer: this.frameUniforms, offset: round2 * JOB_STRIDE, size: FRAME_BYTES } },
+          { binding: 1, resource: { buffer: this.jobUniforms, offset: k * JOB_STRIDE, size: 32 } },
+          { binding: 2, resource: { buffer: gpu.clusters } },
+          { binding: 3, resource: { buffer: gpu.source } },
+          { binding: 4, resource: { buffer: instances } },
+          { binding: 5, resource: { buffer: this.output } },
+          { binding: 6, resource: { buffer: this.args, offset: this.argsOffset(k, round2), size: INDIRECT_WORDS * 4 } },
+          { binding: 7, resource: pyramid }
+        ]
+      }));
+      pass.dispatchWorkgroups(Math.min(gpu.count, 65535), Math.ceil(gpu.count / 65535));
+    });
+    pass.end();
+  }
+  destroy() {
+    for (const b of [this.frameUniforms, this.jobUniforms, this.output, this.args, this.blank]) b?.destroy();
+  }
+};
+
+// src/render/gpuTerrain.ts
+import { composeModelMatrix as composeModelMatrix5 } from "@cartbox/editor";
+var TERRAIN_PATCH = 16;
+var TERRAIN_RANGE = 5;
+var TERRAIN_MORPH = 0.8;
+var TERRAIN_PAGE_TEXELS = 512;
+var TERRAIN_TEXEL = 0.025;
+var NODES_PER_PAGE = 22;
+var MAX_TERRAIN_PAGES = 8;
+var PAGE_SNAP = 8;
+var MAX_TERRAIN_RELIEF = 0.5;
+function terrainPlan(t, texels = TERRAIN_PAGE_TEXELS) {
+  const page = texels * TERRAIN_TEXEL;
+  const leaf = page / NODES_PER_PAGE;
+  const extent = Math.max(t.size[0], t.size[1]);
+  const levels = Math.max(0, Math.ceil(Math.log2(extent / leaf)));
+  let eyePages = 0;
+  while (eyePages < MAX_TERRAIN_PAGES && eyePages < levels && page * 2 ** eyePages < 2 * extent) eyePages += 1;
+  return { size: [t.size[0], t.size[1]], cells: t.samples - 1, leaf, levels, page, eyePages, texels };
+}
+function encodeTerrainHeights(t) {
+  const n = t.samples;
+  let min = Infinity;
+  let max = -Infinity;
+  for (const h of t.heights) {
+    if (h < min) min = h;
+    if (h > max) max = h;
+  }
+  const range = Math.max(max - min, 0.01);
+  const data = new Uint8Array(n * n * 4);
+  const floor = t.floor ?? -Infinity;
+  for (let j = 0; j < n; j += 1) {
+    for (let i = 0; i < n; i += 1) {
+      const k = j * n + i;
+      const q = Math.max(0, Math.min(65535, Math.round((t.heights[k] - min) / range * 65535)));
+      data[k * 4] = q >> 8;
+      data[k * 4 + 1] = q & 255;
+      let cut = false;
+      if (i < n - 1 && j < n - 1) {
+        if (t.holes && t.holes[j * (n - 1) + i]) cut = true;
+        else if (floor > -Infinity) {
+          const top = Math.max(t.heights[k], t.heights[k + 1], t.heights[k + n], t.heights[k + n + 1]);
+          cut = t.origin[1] + top < floor;
+        }
+      }
+      data[k * 4 + 2] = cut ? 255 : 0;
+      data[k * 4 + 3] = 255;
+    }
+  }
+  return { data, min, range };
+}
+var TerrainTree = class {
+  constructor(t, plan, relief = 0) {
+    this.t = t;
+    this.plan = plan;
+    this.relief = relief;
+    this.mins = [];
+    this.maxs = [];
+    this.sides = [];
+    const n = t.samples;
+    const c = n - 1;
+    let side = c;
+    let mins = new Float32Array(c * c);
+    let maxs = new Float32Array(c * c);
+    for (let j = 0; j < c; j += 1) {
+      for (let i = 0; i < c; i += 1) {
+        const k = j * n + i;
+        const a = t.heights[k], b = t.heights[k + 1], d = t.heights[k + n], e = t.heights[k + n + 1];
+        mins[j * c + i] = Math.min(a, b, d, e);
+        maxs[j * c + i] = Math.max(a, b, d, e);
+      }
+    }
+    for (; ; ) {
+      this.mins.push(mins);
+      this.maxs.push(maxs);
+      this.sides.push(side);
+      if (side <= 1) break;
+      const next = Math.ceil(side / 2);
+      const nm = new Float32Array(next * next).fill(Infinity);
+      const nx = new Float32Array(next * next).fill(-Infinity);
+      for (let j = 0; j < side; j += 1) {
+        for (let i = 0; i < side; i += 1) {
+          const to = (j >> 1) * next + (i >> 1);
+          nm[to] = Math.min(nm[to], mins[j * side + i]);
+          nx[to] = Math.max(nx[to], maxs[j * side + i]);
+        }
+      }
+      mins = nm;
+      maxs = nx;
+      side = next;
+    }
+  }
+  /** The heights' range over cells [i0, i1) × [j0, j1). */
+  range(i0, j0, i1, j1) {
+    const span = Math.max(i1 - i0, j1 - j0, 1);
+    const p = Math.min(this.sides.length - 1, Math.max(0, Math.ceil(Math.log2(span)) - 1));
+    const side = this.sides[p];
+    let lo = Infinity;
+    let hi = -Infinity;
+    for (let b = j0 >> p; b <= j1 - 1 >> p && b < side; b += 1) {
+      for (let a = i0 >> p; a <= i1 - 1 >> p && a < side; a += 1) {
+        lo = Math.min(lo, this.mins[p][b * side + a]);
+        hi = Math.max(hi, this.maxs[p][b * side + a]);
+      }
+    }
+    return [lo, hi];
+  }
+  /** The nodes to draw for an eye at (x, z), metres from the terrain's corner. */
+  select(eye) {
+    const { leaf, levels, size, cells } = this.plan;
+    const dx = size[0] / cells;
+    const dz = size[1] / cells;
+    const out = [];
+    const visit = (x, z, level) => {
+      if (x >= size[0] || z >= size[1]) return;
+      const s = leaf * 2 ** level;
+      const away = Math.hypot(Math.max(x - eye[0], 0, eye[0] - (x + s)), Math.max(z - eye[1], 0, eye[1] - (z + s)));
+      if (level > 0 && away <= TERRAIN_RANGE * s / 2) {
+        const h = s / 2;
+        visit(x, z, level - 1);
+        visit(x + h, z, level - 1);
+        visit(x, z + h, level - 1);
+        visit(x + h, z + h, level - 1);
+        return;
+      }
+      const i0 = Math.max(0, Math.floor(x / dx));
+      const j0 = Math.max(0, Math.floor(z / dz));
+      const i1 = Math.min(cells, Math.max(i0 + 1, Math.ceil((x + s) / dx)));
+      const j1 = Math.min(cells, Math.max(j0 + 1, Math.ceil((z + s) / dz)));
+      const [lo, hi] = this.range(Math.min(i0, cells - 1), Math.min(j0, cells - 1), i1, j1);
+      out.push({ x, z, size: s, level, min: lo - this.relief, max: hi });
+    };
+    visit(0, 0, levels);
+    return out;
+  }
+  /** The terrain this tree was built over. */
+  get terrain() {
+    return this.t;
+  }
+};
+function pageCorners(plan, eye) {
+  return Array.from({ length: plan.eyePages }, (_, k) => {
+    const side = plan.page * 2 ** k;
+    const snap2 = side / PAGE_SNAP;
+    return [Math.round((eye[0] - side / 2) / snap2) * snap2, Math.round((eye[1] - side / 2) / snap2) * snap2];
+  });
+}
+function terrainNodeModel(t, node) {
+  return composeModelMatrix5([t.origin[0] + node.x, t.origin[1] + node.min, t.origin[2] + node.z], [0, 0, 0], [node.size, Math.max(node.max - node.min, 0.01), node.size]);
+}
+function terrainPatchMesh(name, material2) {
+  const n = TERRAIN_PATCH;
+  const positions = [];
+  const uvs = [];
+  for (let j = 0; j <= n; j += 1) {
+    for (let i = 0; i <= n; i += 1) {
+      positions.push(i / n, 0, j / n);
+      uvs.push(i / n, j / n);
+    }
+  }
+  positions.push(0, 1, 0, 1, 1, 1);
+  uvs.push(0, 0, 1, 1);
+  const indices = [];
+  for (let j = 0; j < n; j += 1) {
+    for (let i = 0; i < n; i += 1) {
+      const a = j * (n + 1) + i;
+      indices.push(a, a + n + 1, a + n + 2, a, a + n + 2, a + 1);
+    }
+  }
+  const count = positions.length / 3;
+  const normals = new Float32Array(count * 3);
+  for (let v = 0; v < count; v += 1) normals[v * 3 + 1] = 1;
+  return {
+    name,
+    primitives: [{ positions: Float32Array.from(positions), normals, uvs: Float32Array.from(uvs), indices: Uint32Array.from(indices), material: material2 }]
+  };
+}
+var TERRAIN_UNIFORM_FLOATS = 32;
+var LAYER_VEC4S = 5;
+var BAKE_BYTES = (6 + 4 * LAYER_VEC4S) * 16;
+var TERRAIN_BAKE_WGSL = (
+  /* wgsl */
+  `
+struct Layer {
+  up: vec4<f32>,      // lo, hi, 1 when set, 1 when painted only
+  height: vec4<f32>,  // lo, hi, 1 when set
+  curve: vec4<f32>,   // lo, hi, 1 when set
+  colour: vec4<f32>,  // the base colour factor (rgb), 1 with a base map
+  pbr: vec4<f32>,     // roughness, metallic, 1 with a metallic-roughness map, 1 with a normal map
+};
+struct Bake {
+  page: vec4<f32>,    // the page's corner (x, z, metres from the terrain's), side, slot in the atlas
+  size: vec4<f32>,    // the terrain's size (x, z), cells a side, texels a page side
+  height: vec4<f32>,  // the heights' min and range, the terrain's origin y, 1 when painted
+  world: vec4<f32>,   // the terrain's origin x and z, the maps' tile, 1 when triplanar
+  blend: vec4<f32>,   // the blend's up and height widths and noise (x < 0: hard edges), its sharpness
+  count: vec4<f32>,   // layers
+  layers: array<Layer, 4>,
+};
+@group(0) @binding(0) var<uniform> b: Bake;
+@group(0) @binding(1) var samp: sampler;
+@group(0) @binding(2) var heights: texture_2d<f32>;
+@group(0) @binding(3) var paint: texture_2d<f32>;
+@group(0) @binding(4) var base0: texture_2d<f32>;
+@group(0) @binding(5) var base1: texture_2d<f32>;
+@group(0) @binding(6) var base2: texture_2d<f32>;
+@group(0) @binding(7) var base3: texture_2d<f32>;
+@group(0) @binding(8) var nrm0: texture_2d<f32>;
+@group(0) @binding(9) var nrm1: texture_2d<f32>;
+@group(0) @binding(10) var nrm2: texture_2d<f32>;
+@group(0) @binding(11) var nrm3: texture_2d<f32>;
+@group(0) @binding(12) var mr0: texture_2d<f32>;
+@group(0) @binding(13) var mr1: texture_2d<f32>;
+@group(0) @binding(14) var mr2: texture_2d<f32>;
+@group(0) @binding(15) var mr3: texture_2d<f32>;
+@group(0) @binding(16) var albedoOut: texture_storage_2d<rgba8unorm, write>;
+@group(0) @binding(17) var normalOut: texture_storage_2d<rgba8unorm, write>;
+@group(0) @binding(18) var mrOut: texture_storage_2d<rgba8unorm, write>;
+@group(0) @binding(19) var occOut: texture_storage_2d<rgba8unorm, write>;
+
+// A sample's height (local), its four corners' bilinear blend, as the scene's vertex reads it.
+fn heightAt(p: vec2<f32>) -> f32 {
+  let cells = b.size.z;
+  let q = clamp(p / b.size.xy, vec2<f32>(0.0), vec2<f32>(1.0)) * cells;
+  let i = min(vec2<i32>(floor(q)), vec2<i32>(i32(cells) - 1));
+  let f = q - vec2<f32>(i);
+  let h00 = textureLoad(heights, i, 0);
+  let h10 = textureLoad(heights, i + vec2<i32>(1, 0), 0);
+  let h01 = textureLoad(heights, i + vec2<i32>(0, 1), 0);
+  let h11 = textureLoad(heights, i + vec2<i32>(1, 1), 0);
+  let d = vec4<f32>(h00.r * 65280.0 + h00.g * 255.0, h10.r * 65280.0 + h10.g * 255.0, h01.r * 65280.0 + h01.g * 255.0, h11.r * 65280.0 + h11.g * 255.0) / 65535.0;
+  return b.height.x + mix(mix(d.x, d.y, f.x), mix(d.z, d.w, f.x), f.y) * b.height.y;
+}
+fn paintAt(p: vec2<f32>) -> vec4<f32> {
+  let cells = b.size.z;
+  let q = clamp(p / b.size.xy, vec2<f32>(0.0), vec2<f32>(1.0)) * cells;
+  let i = min(vec2<i32>(floor(q)), vec2<i32>(i32(cells) - 1));
+  let f = q - vec2<f32>(i);
+  return mix(mix(textureLoad(paint, i, 0), textureLoad(paint, i + vec2<i32>(1, 0), 0), f.x), mix(textureLoad(paint, i + vec2<i32>(0, 1), 0), textureLoad(paint, i + vec2<i32>(1, 1), 0), f.x), f.y);
+}
+
+// terrain.ts's ramp, within and edgeNoise, term for term.
+fn ramp(v: f32, edge: f32, w: f32) -> f32 {
+  if (w <= 0.0) { return select(0.0, 1.0, v >= edge); }
+  let t = clamp((v - edge + w / 2.0) / w, 0.0, 1.0);
+  return t * t * (3.0 - 2.0 * t);
+}
+fn within(v: f32, range: vec4<f32>, w: f32, lo: f32, hi: f32) -> f32 {
+  if (range.z < 0.5) { return 1.0; }
+  let low = select(ramp(v, range.x, w), 1.0, range.x <= lo);
+  let high = select(1.0 - ramp(v, range.y, w), 1.0, range.y >= hi);
+  return low * high;
+}
+fn inside(v: f32, range: vec4<f32>) -> bool {
+  return range.z < 0.5 || (v >= range.x && v <= range.y);
+}
+fn cellHash(i: i32, j: i32) -> f32 {
+  var h = bitcast<u32>(i) * 374761393u + bitcast<u32>(j) * 668265263u;
+  h = (h ^ (h >> 13u)) * 1274126177u;
+  return f32(h ^ (h >> 16u)) / 4294967295.0;
+}
+fn octave(x: f32, z: f32, scale: f32) -> f32 {
+  let g = vec2<f32>(x, z) / scale;
+  let c = floor(g);
+  let f = g - c;
+  let s = f * f * (3.0 - 2.0 * f);
+  let i = i32(c.x);
+  let j = i32(c.y);
+  let top = cellHash(i, j) + (cellHash(i + 1, j) - cellHash(i, j)) * s.x;
+  let bottom = cellHash(i, j + 1) + (cellHash(i + 1, j + 1) - cellHash(i, j + 1)) * s.x;
+  return top + (bottom - top) * s.y;
+}
+fn edgeNoise(x: f32, z: f32) -> f32 {
+  return (octave(x, z, 9.0) * 0.65 + octave(x, z, 3.5) * 0.35) * 2.0 - 1.0;
+}
+
+// A layer's map at a point: by the terrain's planar UVs, or projected from three axes (triMap, term for term).
+fn mapAt(t: texture_2d<f32>, p: vec3<f32>, n: vec3<f32>, lod: f32) -> vec4<f32> {
+  if (b.world.w < 0.5) { return textureSampleLevel(t, samp, vec2<f32>(p.x, 1.0 - p.z), lod); }
+  let a = n * n;
+  var w = a * a;
+  w = w / max(w.x + w.y + w.z, 1e-30);
+  return textureSampleLevel(t, samp, vec2<f32>(p.z, 1.0 - p.y), lod) * w.x + textureSampleLevel(t, samp, vec2<f32>(p.x, 1.0 - p.z), lod) * w.y + textureSampleLevel(t, samp, vec2<f32>(p.x, 1.0 - p.y), lod) * w.z;
+}
+fn lodOf(t: texture_2d<f32>) -> f32 {
+  let texel = b.page.z / b.size.w / b.world.z;
+  return max(log2(texel * f32(textureDimensions(t).x)), 0.0);
+}
+struct Surface { colour: vec4<f32>, normal: vec3<f32>, rough: f32, metal: f32 };
+fn layerSurface(k: i32, p: vec3<f32>, n: vec3<f32>) -> Surface {
+  let l = b.layers[k];
+  var s: Surface;
+  var colour = vec4<f32>(1.0);
+  var tn = vec4<f32>(0.5, 0.5, 1.0, 1.0);
+  var mr = vec4<f32>(1.0);
+  switch k {
+    case 0: { colour = mapAt(base0, p, n, lodOf(base0)); tn = mapAt(nrm0, p, n, lodOf(nrm0)); mr = mapAt(mr0, p, n, lodOf(mr0)); }
+    case 1: { colour = mapAt(base1, p, n, lodOf(base1)); tn = mapAt(nrm1, p, n, lodOf(nrm1)); mr = mapAt(mr1, p, n, lodOf(mr1)); }
+    case 2: { colour = mapAt(base2, p, n, lodOf(base2)); tn = mapAt(nrm2, p, n, lodOf(nrm2)); mr = mapAt(mr2, p, n, lodOf(mr2)); }
+    default: { colour = mapAt(base3, p, n, lodOf(base3)); tn = mapAt(nrm3, p, n, lodOf(nrm3)); mr = mapAt(mr3, p, n, lodOf(mr3)); }
+  }
+  s.colour = vec4<f32>(l.colour.rgb, 1.0) * select(vec4<f32>(1.0), colour, l.colour.w > 0.5);
+  s.normal = select(vec3<f32>(0.0, 0.0, 1.0), tn.rgb * 2.0 - 1.0, l.pbr.w > 0.5);
+  s.rough = l.pbr.x * select(1.0, mr.g, l.pbr.z > 0.5);
+  s.metal = l.pbr.y * select(1.0, mr.b, l.pbr.z > 0.5);
+  return s;
+}
+
+@compute @workgroup_size(8, 8)
+fn main(@builtin(global_invocation_id) id: vec3<u32>) {
+  let texels = u32(b.size.w);
+  if (id.x >= texels || id.y >= texels) { return; }
+  let local = b.page.xy + (vec2<f32>(id.xy) + 0.5) / b.size.w * b.page.z;
+  let cell = b.size.xy / b.size.z;
+  let h = heightAt(local);
+  // The slope at the grid's own spacing (terrainMesh's vertex normal), and the curvature (terrainCurvature).
+  let hl = heightAt(local - vec2<f32>(cell.x, 0.0));
+  let hr = heightAt(local + vec2<f32>(cell.x, 0.0));
+  let hd = heightAt(local - vec2<f32>(0.0, cell.y));
+  let hu = heightAt(local + vec2<f32>(0.0, cell.y));
+  let n = normalize(vec3<f32>(-(hr - hl) / (2.0 * cell.x), 1.0, -(hu - hd) / (2.0 * cell.y)));
+  let curvature = (hl + hr + hd + hu) / 4.0 - h;
+  let world = vec3<f32>(b.world.x + local.x, b.height.z + h, b.world.y + local.y);
+  let count = i32(b.count.x);
+  // Each layer's weight: painted, else the rules (softly, first match winning, with the blend; else the first match).
+  var w = array<f32, 4>(0.0, 0.0, 0.0, 0.0);
+  var painted = false;
+  if (b.height.w > 0.5) {
+    let p = paintAt(local);
+    let sum = p.x + p.y + p.z + p.w;
+    if (sum > 1e-4) {
+      painted = true;
+      w = array<f32, 4>(p.x / sum, p.y / sum, p.z / sum, p.w / sum);
+    }
+  }
+  if (!painted && b.blend.x >= 0.0) {
+    let jitter = b.blend.z * edgeNoise(world.x, world.z);
+    let uu = n.y + jitter * b.blend.x;
+    let hh = world.y + jitter * b.blend.y;
+    var rest = 1.0;
+    for (var k = 0; k < count; k = k + 1) {
+      if (k == count - 1) { w[k] = rest; break; }
+      let l = b.layers[k];
+      var m = 0.0;
+      if (l.up.w < 0.5) { m = rest * within(uu, l.up, b.blend.x, 0.0, 1.0) * within(hh, l.height, b.blend.y, -1e30, 1e30) * within(curvature, l.curve, ${0.05}, -1e30, 1e30); }
+      w[k] = m;
+      rest = rest - m;
+    }
+  } else if (!painted) {
+    var chosen = count - 1;
+    for (var k = 0; k < count - 1; k = k + 1) {
+      let l = b.layers[k];
+      if (l.up.w > 0.5) { continue; }
+      if (inside(n.y, l.up) && inside(world.y, l.height) && inside(curvature, l.curve)) { chosen = k; break; }
+    }
+    w[chosen] = 1.0;
+  }
+  let p = world / b.world.z;
+  var colour = vec4<f32>(0.0);
+  var tn = vec3<f32>(0.0);
+  var rough = 0.0;
+  var metal = 0.0;
+  var relief = 0.0;
+  // The blend's sharpness lets the brighter (higher) surface through first.
+  var weights = w;
+  var total = 0.0;
+  var surfaces: array<Surface, 4>;
+  for (var k = 0; k < count; k = k + 1) {
+    if (w[k] <= 0.0) { continue; }
+    surfaces[k] = layerSurface(k, p, n);
+    let lum = dot(surfaces[k].colour.rgb, vec3<f32>(0.299, 0.587, 0.114));
+    weights[k] = w[k] * exp(4.0 * b.blend.w * (lum - 0.5));
+    total = total + weights[k];
+  }
+  for (var k = 0; k < count; k = k + 1) {
+    if (w[k] <= 0.0) { continue; }
+    let s = surfaces[k];
+    let share = weights[k] / max(total, 1e-6);
+    colour = colour + s.colour * share;
+    tn = tn + s.normal * share;
+    rough = rough + s.rough * share;
+    metal = metal + s.metal * share;
+    relief = relief + dot(s.colour.rgb, vec3<f32>(0.299, 0.587, 0.114)) * share;
+  }
+  let at = vec2<i32>(i32(b.page.w) * i32(texels) + i32(id.x), i32(id.y));
+  textureStore(albedoOut, at, vec4<f32>(colour.rgb, 1.0));
+  textureStore(normalOut, at, vec4<f32>(normalize(tn + vec3<f32>(0.0, 0.0, 1e-6)) * 0.5 + 0.5, 1.0));
+  textureStore(mrOut, at, vec4<f32>(1.0, clamp(rough, 0.0, 1.0), clamp(metal, 0.0, 1.0), 1.0));
+  // A cut cell (B of its corner's sample) leaves the occlusion's alpha at 0: the draw discards it.
+  let cells = b.size.z;
+  let ci = clamp(vec2<i32>(floor(local / b.size.xy * cells)), vec2<i32>(0), vec2<i32>(i32(cells) - 1));
+  let cut = textureLoad(heights, ci, 0).b > 0.5;
+  textureStore(occOut, at, vec4<f32>(1.0, clamp(relief, 0.0, 1.0), 0.5, select(1.0, 0.0, cut)));
+}
+`
+);
+var STORAGE_BINDING2 = 8;
+var TEXTURE_BINDING3 = 4;
+var COPY_DST5 = 2;
+var RENDER_ATTACHMENT2 = 16;
+function key(width, height, packedWithRelief = false) {
+  return { width, height, data: new Uint8ClampedArray(0), ...packedWithRelief ? { packedWithRelief: true } : {} };
+}
+var GpuTerrain = class {
+  constructor(host, terrain, texels = TERRAIN_PAGE_TEXELS) {
+    this.host = host;
+    this.terrain = terrain;
+    this.layerKey = [];
+    this.values = new Float32Array(TERRAIN_UNIFORM_FLOATS);
+    /** Bake uniforms in flight, released once their bakes are submitted. */
+    this.spent = [];
+    this.repeat = null;
+    const device = host.device;
+    const t = terrain;
+    this.plan = terrainPlan(t, texels);
+    this.relief = Math.min(MAX_TERRAIN_RELIEF, Math.max(0, t.relief ?? 0));
+    this.tree = new TerrainTree(t, this.plan, this.relief);
+    const encoded = encodeTerrainHeights(t);
+    this.min = encoded.min;
+    this.range = encoded.range;
+    const n = t.samples;
+    this.heights = device.createTexture({ size: { width: n, height: n }, format: "rgba8unorm", usage: TEXTURE_BINDING3 | COPY_DST5 });
+    device.queue.writeTexture({ texture: this.heights }, encoded.data, { bytesPerRow: n * 4, rowsPerImage: n }, { width: n, height: n });
+    this.heightView = this.heights.createView();
+    if (t.paint && t.paint.length === n * n * t.layers.length) {
+      const L = t.layers.length;
+      const data = new Uint8Array(n * n * 4);
+      for (let k = 0; k < n * n; k += 1) for (let l = 0; l < L; l += 1) data[k * 4 + l] = t.paint[k * L + l];
+      this.paint = device.createTexture({ size: { width: n, height: n }, format: "rgba8unorm", usage: TEXTURE_BINDING3 | COPY_DST5 });
+      device.queue.writeTexture({ texture: this.paint }, data, { bytesPerRow: n * 4, rowsPerImage: n }, { width: n, height: n });
+    } else this.paint = null;
+    const width = texels * (this.plan.eyePages + 1);
+    this.levels = Math.max(1, Math.log2(texels) - 1);
+    const atlas = () => device.createTexture({ size: { width, height: texels }, format: "rgba8unorm", usage: STORAGE_BINDING2 | TEXTURE_BINDING3 | COPY_DST5 | RENDER_ATTACHMENT2, mipLevelCount: this.levels });
+    this.atlases = { albedo: atlas(), normal: atlas(), mr: atlas(), occ: atlas() };
+    this.maps = { albedo: key(width, texels), normal: key(width, texels), mr: key(width, texels), occ: key(width, texels, true), relief: key(1, 1) };
+    host.adopt(this.maps.albedo, this.atlases.albedo, true);
+    host.adopt(this.maps.normal, this.atlases.normal, false);
+    host.adopt(this.maps.mr, this.atlases.mr, false);
+    host.adopt(this.maps.occ, this.atlases.occ, false);
+    const material2 = {
+      name: `${t.name} (virtual texture)`,
+      baseColorFactor: [1, 1, 1, 1],
+      baseColorImage: null,
+      metallicFactor: 1,
+      roughnessFactor: 1,
+      ...this.relief > 0 ? { parallaxDepth: this.relief } : {}
+    };
+    this.mesh = terrainPatchMesh(t.name, material2);
+    this.pipeline = device.createComputePipeline({ layout: "auto", compute: { module: device.createShaderModule({ code: TERRAIN_BAKE_WGSL }), entryPoint: "main" } });
+    this.baked = new Array(this.plan.eyePages + 1).fill(null);
+  }
+  /** The eye (world) in the terrain's ground plane, metres from its corner. */
+  eyeOf(eye) {
+    return [eye[0] - this.terrain.origin[0], eye[2] - this.terrain.origin[2]];
+  }
+  /**
+   * This frame's nodes as copies of the patch (each its own model), with the
+   * pages they shade from baked (and submitted) first. `layers` are the
+   * layers' decoded maps; a new set re-bakes every page.
+   */
+  frame(eyeWorld, layers) {
+    const eye = this.eyeOf(eyeWorld);
+    const flat = layers.flatMap((l) => [l.base, l.normal, l.mr]);
+    if (flat.length !== this.layerKey.length || flat.some((m, i) => m !== this.layerKey[i])) {
+      this.layerKey = flat;
+      this.baked.fill(null);
+    }
+    const corners = pageCorners(this.plan, eye);
+    const whole = [0, 0];
+    const wanted = [...corners, whole];
+    const changed = [];
+    wanted.forEach((c, k) => {
+      const was = this.baked[k];
+      if (!was || was[0] !== c[0] || was[1] !== c[1]) changed.push(k);
+    });
+    if (changed.length > 0) {
+      const encoder = this.host.device.createCommandEncoder();
+      for (const k of changed) this.bake(encoder, k, wanted[k], layers);
+      this.host.device.queue.submit([encoder.finish()]);
+      this.release();
+      this.host.mips(this.atlases.albedo, this.levels, "rgba8unorm");
+      this.host.mips(this.atlases.normal, this.levels, "rgba8unorm");
+      this.host.mips(this.atlases.mr, this.levels, "rgba8unorm");
+      this.host.mips(this.atlases.occ, this.levels, "rgba8unorm");
+    }
+    this.writeUniform(eye, corners);
+    const textures = [this.maps.albedo];
+    return this.tree.select(eye).map((node) => ({
+      mesh: this.mesh,
+      model: terrainNodeModel(this.terrain, node),
+      textures,
+      mrTextures: [this.maps.mr],
+      normalTextures: [this.maps.normal],
+      occlusionTextures: [this.maps.occ],
+      reliefTextures: [this.maps.relief]
+    }));
+  }
+  writeUniform(eye, corners) {
+    const t = this.terrain;
+    const v = this.values;
+    v.fill(0);
+    v.set([t.size[0], t.size[1], this.min, this.range], 0);
+    const cut = Boolean(t.holes?.some((h) => h !== 0)) || t.floor !== void 0;
+    v.set([this.plan.cells, cut ? 1 : 0, this.plan.page, this.plan.eyePages], 4);
+    v.set([t.origin[0], t.origin[1], t.origin[2], this.plan.leaf], 8);
+    v.set([eye[0], eye[1], TERRAIN_RANGE, TERRAIN_MORPH], 12);
+    corners.forEach((c, k) => v.set(c, 16 + k * 2));
+  }
+  bake(encoder, slot, corner, layers) {
+    const t = this.terrain;
+    const plan = this.plan;
+    const side = slot < plan.eyePages ? plan.page * 2 ** slot : Math.max(t.size[0], t.size[1]);
+    const data = new Float32Array(BAKE_BYTES / 4);
+    data.set([corner[0], corner[1], side, slot], 0);
+    data.set([t.size[0], t.size[1], plan.cells, plan.texels], 4);
+    data.set([this.min, this.range, t.origin[1], this.paint ? 1 : 0], 8);
+    data.set([t.origin[0], t.origin[2], t.tile && t.tile > 0 ? t.tile : 8, t.triplanar ? 1 : 0], 12);
+    data.set(t.blend ? [t.blend.up, t.blend.height, t.blend.noise ?? 0, t.blend.sharpness ?? 0] : [-1, 0, 0, 0], 16);
+    data.set([Math.min(4, t.layers.length), 0, 0, 0], 20);
+    t.layers.slice(0, 4).forEach((l, k) => {
+      const o = 24 + k * LAYER_VEC4S * 4;
+      const maps = layers[k];
+      data.set([l.up?.[0] ?? 0, l.up?.[1] ?? 0, l.up ? 1 : 0, l.paintOnly ? 1 : 0], o);
+      data.set([l.height?.[0] ?? 0, l.height?.[1] ?? 0, l.height ? 1 : 0, 0], o + 4);
+      data.set([l.curvature?.[0] ?? 0, l.curvature?.[1] ?? 0, l.curvature ? 1 : 0, 0], o + 8);
+      const c = l.material.baseColorFactor;
+      data.set([c[0], c[1], c[2], maps?.base ? 1 : 0], o + 12);
+      data.set([l.material.roughnessFactor ?? 1, l.material.metallicFactor ?? 0, maps?.mr ? 1 : 0, maps?.normal ? 1 : 0], o + 16);
+    });
+    const device = this.host.device;
+    const uniform = device.createBuffer({ size: BAKE_BYTES, usage: 64 | 8 });
+    device.queue.writeBuffer(uniform, 0, data);
+    const view = (m, colour) => (m ? this.host.upload(m, colour) : this.host.blank).createView();
+    const level0 = (texture) => texture.createView({ baseMipLevel: 0, mipLevelCount: 1 });
+    const group = device.createBindGroup({
+      layout: this.pipeline.getBindGroupLayout(0),
+      entries: [
+        { binding: 0, resource: { buffer: uniform } },
+        { binding: 1, resource: this.sampler() },
+        { binding: 2, resource: this.heightView },
+        { binding: 3, resource: (this.paint ?? this.host.blank).createView() },
+        ...[0, 1, 2, 3].map((k) => ({ binding: 4 + k, resource: view(layers[k]?.base, true) })),
+        ...[0, 1, 2, 3].map((k) => ({ binding: 8 + k, resource: view(layers[k]?.normal, false) })),
+        ...[0, 1, 2, 3].map((k) => ({ binding: 12 + k, resource: view(layers[k]?.mr, false) })),
+        { binding: 16, resource: level0(this.atlases.albedo) },
+        { binding: 17, resource: level0(this.atlases.normal) },
+        { binding: 18, resource: level0(this.atlases.mr) },
+        { binding: 19, resource: level0(this.atlases.occ) }
+      ]
+    });
+    const pass = encoder.beginComputePass();
+    pass.setPipeline(this.pipeline);
+    pass.setBindGroup(0, group);
+    const groups = Math.ceil(plan.texels / 8);
+    pass.dispatchWorkgroups(groups, groups);
+    pass.end();
+    this.baked[slot] = [corner[0], corner[1]];
+    this.spent.push(uniform);
+  }
+  release() {
+    for (const b of this.spent) b.destroy?.();
+    this.spent = [];
+  }
+  sampler() {
+    this.repeat ?? (this.repeat = this.host.device.createSampler({ magFilter: "linear", minFilter: "linear", mipmapFilter: "linear", addressModeU: "repeat", addressModeV: "repeat" }));
+    return this.repeat;
+  }
+  dispose() {
+    this.release();
+    for (const t of [this.heights, this.paint, this.atlases.albedo, this.atlases.normal, this.atlases.mr, this.atlases.occ]) t?.destroy?.();
+  }
+};
+
+// src/render/pathTracer.ts
+import { buildBvh as buildBvh2, cameraPositionFromView as cameraPositionFromView3, resolveExtensions as resolveExtensions2, multiplyMat4 as multiplyMat46 } from "@cartbox/editor";
+
+// src/render/gpuLightmapper.ts
+import {
+  LIGHTMAP_RANGE as LIGHTMAP_RANGE2,
+  PROBE_DEPTH_SIDE,
+  PROBE_SH,
+  areaFrame as areaFrame3,
+  areaSize as areaSize3,
+  buildBvh,
+  dilateLightmapValues,
+  lightChannelMask as lightChannelMask3,
+  lightColor as lightColor4,
+  lightmapTexels,
+  spotCone as spotCone2,
+  stitchLightmapSeams
+} from "@cartbox/editor";
+var LIGHTMAP_MAX_BOUNCES = 8;
+var LIGHTMAP_MAX_LIGHTS = 4;
+var LIGHTMAP_MAX_LOCAL_LIGHTS = 256;
+var WORKGROUP3 = 64;
+var CHUNK_TEXELS = 65536;
+var PATHS_PER_SUBMIT = 1 << 19;
+function pathBudget(local) {
+  return Math.max(4096, Math.floor(PATHS_PER_SUBMIT / (1 + local / 16)));
+}
+var PARAMS_BYTES = 64;
+var LIGHT_VEC4S = 5;
+var PROBE_ACC_VEC4S = 10 + PROBE_DEPTH_SIDE * PROBE_DEPTH_SIDE;
+var ACC_FLOATS = 16;
+var STORAGE4 = 128;
+var COPY_DST6 = 8;
+var COPY_SRC3 = 4;
+var MAP_READ = 1;
+var UNIFORM6 = 64;
+function toLinear(c) {
+  const v = Math.max(0, c);
+  return v <= 0.04045 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4;
+}
+function bakeLights(lights) {
+  return lights.map((l) => {
+    const c = lightColor4(l);
+    return { ...l, radiance: [toLinear(c[0]) * l.intensity, toLinear(c[1]) * l.intensity, toLinear(c[2]) * l.intensity] };
+  });
+}
+var BAKE_LIGHT_KIND = { directional: 0, point: 1, spot: 2, rect: 3, disk: 4, tube: 5 };
+function packBakeLights(lights) {
+  const directional = lights.filter((l) => (l.kind ?? "directional") === "directional" && l.direction).slice(0, LIGHTMAP_MAX_LIGHTS);
+  const local = lights.filter((l) => l.kind !== void 0 && l.kind !== "directional").slice(0, LIGHTMAP_MAX_LOCAL_LIGHTS);
+  const data = new Float32Array(Math.max(1, directional.length + local.length) * LIGHT_VEC4S * 4);
+  [...directional, ...local].forEach((light, i) => {
+    const o = i * LIGHT_VEC4S * 4;
+    const kind = light.kind ?? "directional";
+    const channels = lightChannelMask3(light.channels ?? 1);
+    data.set([...light.radiance, channels], o + 4);
+    if (kind === "directional") {
+      const [x, y, z] = light.direction;
+      const len = Math.hypot(x, y, z) || 1;
+      data.set([x / len, y / len, z / len, BAKE_LIGHT_KIND.directional], o);
+      return;
+    }
+    data.set([...light.position ?? [0, 0, 0], kind === "area" ? BAKE_LIGHT_KIND[light.shape ?? "rect"] : BAKE_LIGHT_KIND[kind]], o);
+    if (kind === "area") {
+      const [w, h] = areaSize3(light);
+      const frame = areaFrame3(light);
+      data.set([0, w / 2, h / 2, 1], o + 8);
+      data.set([...frame.normal, 0], o + 12);
+      data.set([...frame.tangent, 0], o + 16);
+      return;
+    }
+    data[o + 8] = light.range ?? 0;
+    data[o + 11] = light.falloff === "inverseSquare" ? 1 : 0;
+    if (kind === "spot") {
+      const [cosOuter, cosInner] = spotCone2(light);
+      const axis = light.direction ?? [0, -1, 0];
+      const len = Math.hypot(axis[0], axis[1], axis[2]) || 1;
+      data.set([cosOuter, cosInner], o + 9);
+      data.set([axis[0] / len, axis[1] / len, axis[2] / len, 0], o + 12);
+    }
+  });
+  return { data, directional: directional.length, local: local.length };
+}
+async function bakeSurfaces(mesh, decode) {
+  const read = (image, data) => image && image.bytes.length > 0 ? decode(image, data).catch(() => null) : Promise.resolve(null);
+  return Promise.all(
+    mesh.primitives.map(async ({ material: m }) => {
+      const [base, metallicRoughness] = await Promise.all([read(m.baseColorImage, false), read(m.metallicRoughnessImage, true)]);
+      const pbr = resolvePbr(m, metallicRoughness !== null, !!m.occlusionImage, !!m.emissiveImage);
+      return { base, metallicRoughness, metallic: pbr.isPbr ? pbr.metallic : 0, roughness: pbr.roughness };
+    })
+  );
+}
+function packBvhNodes(bvh) {
+  const nodeCount = bvh.meta.length / 3;
+  const nodes = new Uint32Array(Math.max(1, nodeCount) * 8);
+  const bits = new Float32Array(nodes.buffer);
+  if (nodeCount === 0) {
+    bits.set([1, 1, 1], 0);
+    bits.set([-1, -1, -1], 4);
+    nodes[3] = 4294967295;
+  }
+  for (let n = 0; n < nodeCount; n += 1) {
+    for (let a = 0; a < 3; a += 1) {
+      bits[n * 8 + a] = bvh.nodes[n * 6 + a];
+      bits[n * 8 + 4 + a] = bvh.nodes[n * 6 + 3 + a];
+    }
+    const left = bvh.meta[n * 3];
+    nodes[n * 8 + 3] = (left >= 0 ? left : -1 - bvh.meta[n * 3 + 2]) >>> 0;
+    nodes[n * 8 + 7] = bvh.meta[n * 3 + 1] >>> 0;
+  }
+  return nodes;
+}
+function packLightmapScene(occluders) {
+  const bvh = buildBvh(occluders);
+  const triangles = bvh.order.length;
+  const nodes = packBvhNodes(bvh);
+  const tris = new Float32Array(Math.max(1, triangles) * 12);
+  const mats = new Float32Array(Math.max(1, triangles) * 8);
+  const matBits = new Uint32Array(mats.buffer);
+  for (let i = 0; i < triangles; i += 1) {
+    const t = bvh.order[i];
+    const k = t * 9;
+    const metal = Math.min(1, Math.max(0, bvh.mr[t * 2]));
+    const bounce = 1 - metal + metal * Math.min(1, Math.max(0, bvh.mr[t * 2 + 1]));
+    for (let a = 0; a < 3; a += 1) {
+      tris[i * 12 + a * 4 + 3] = bvh.front[t * 3 + a];
+      tris[i * 12 + a] = bvh.tri[k + a];
+      tris[i * 12 + 4 + a] = bvh.tri[k + 3 + a] - bvh.tri[k + a];
+      tris[i * 12 + 8 + a] = bvh.tri[k + 6 + a] - bvh.tri[k + a];
+      mats[i * 8 + a] = toLinear(bvh.col[t * 3 + a]) * bounce;
+      mats[i * 8 + 4 + a] = toLinear(bvh.emi[t * 3 + a]);
+    }
+    matBits[i * 8 + 3] = bvh.channels[t];
+  }
+  return { nodes, tris, mats, triangles };
+}
+var BAKE_SAMPLING_WGSL = (
+  /* wgsl */
+  `
+fn pcg(v: u32) -> u32 {
+  let s = v * 747796405u + 2891336453u;
+  let w = ((s >> ((s >> 28u) + 4u)) ^ s) * 277803737u;
+  return (w >> 22u) ^ w;
+}
+var<private> rng: u32;
+fn rand() -> f32 {
+  rng = pcg(rng);
+  return f32(rng >> 8u) / 16777216.0;
+}
+fn radicalInverse(i: u32) -> f32 {
+  return f32(reverseBits(i)) * 2.3283064365386963e-10;
+}
+
+// A cosine-weighted direction about n (Duff et al.'s branchless frame).
+fn cosineDir(n: vec3<f32>, xi: vec2<f32>) -> vec3<f32> {
+  let r = sqrt(xi.x);
+  let phi = 2.0 * PI * xi.y;
+  let sg = select(-1.0, 1.0, n.z >= 0.0);
+  let a = -1.0 / (sg + n.z);
+  let b = n.x * n.y * a;
+  let t = vec3<f32>(1.0 + sg * n.x * n.x * a, sg * b, -sg * n.x);
+  let bt = vec3<f32>(b, sg + n.y * n.y * a, -n.y);
+  return normalize(t * (r * cos(phi)) + bt * (r * sin(phi)) + n * sqrt(max(0.0, 1.0 - xi.x)));
+}
+
+// The sky along d: the panorama's texel (u around from \u2212x, v down from the zenith, as the IBL reads it).
+fn skyAt(d: vec3<f32>) -> vec3<f32> {
+  let w = params.info.z;
+  let h = params.info.w;
+  if (w == 0u) { return vec3<f32>(0.0); }
+  let u = atan2(d.z, d.x) / (2.0 * PI) + 0.5;
+  let v = acos(clamp(d.y, -1.0, 1.0)) / PI;
+  let x = min(u32(max(u, 0.0) * f32(w)), w - 1u);
+  let y = min(u32(max(v, 0.0) * f32(h)), h - 1u);
+  return sky[y * w + x].rgb;
+}
+
+fn lum(c: vec3<f32>) -> f32 {
+  return dot(c, vec3<f32>(0.2126, 0.7152, 0.0722));
+}
+
+// A unit direction's octahedral texel (probeVolume.ts's octTexel).
+fn octTexel(d: vec3<f32>) -> u32 {
+  var e = d.xz / (abs(d.x) + abs(d.y) + abs(d.z));
+  if (d.y < 0.0) { e = (vec2<f32>(1.0) - abs(e.yx)) * select(vec2<f32>(-1.0), vec2<f32>(1.0), e >= vec2<f32>(0.0)); }
+  let uv = e * 0.5 + vec2<f32>(0.5);
+  let x = min(u32(uv.x * ${PROBE_DEPTH_SIDE}.0), ${PROBE_DEPTH_SIDE - 1}u);
+  let y = min(u32(uv.y * ${PROBE_DEPTH_SIDE}.0), ${PROBE_DEPTH_SIDE - 1}u);
+  return y * ${PROBE_DEPTH_SIDE}u + x;
+}
+
+// A light's record (packBakeLights): five vec4s from its first.
+fn lightAt(l: u32, k: u32) -> vec4<f32> {
+  return lights[l * ${LIGHT_VEC4S}u + k];
+}
+
+// Whether light l lights a surface on the channels \`mask\` (F2e).
+fn lightsMask(l: u32, mask: u32) -> bool {
+  return (u32(lightAt(l, 1u).w + 0.5) & mask) != 0u;
+}
+
+// A point or spot light's falloff toward a point d away along Ld (the renderers' distanceFalloff, and the shader's cone).
+fn punctualAtten(l: u32, d: f32, Ld: vec3<f32>) -> f32 {
+  let r = lightAt(l, 2u);
+  var atten = 1.0;
+  if (r.w > 0.5) {
+    var win = 1.0;
+    if (r.x > 0.0) { let q = d / r.x; let t = clamp(1.0 - q * q * q * q, 0.0, 1.0); win = t * t; }
+    let dm = max(d, 0.01);
+    atten = win / (dm * dm);
+  } else if (r.x > 0.0) {
+    let t = max(0.0, 1.0 - d / r.x);
+    atten = t * t;
+  }
+  if (lightAt(l, 0u).w > 1.5) {
+    let ct = clamp((-dot(Ld, lightAt(l, 3u).xyz) - r.y) / (r.z - r.y), 0.0, 1.0);
+    atten = atten * ct * ct * (3.0 - 2.0 * ct);
+  }
+  return atten;
+}
+
+// What local light l would give a surface at p facing n, unshadowed, by luminance: how likely it is to be picked.
+// An area light is taken as the point at its centre it is from far off.
+fn localWeight(l: u32, p: vec3<f32>, n: vec3<f32>, mask: u32) -> f32 {
+  if (!lightsMask(l, mask)) { return 0.0; }
+  let a = lightAt(l, 0u);
+  let toL = a.xyz - p;
+  let d = max(length(toL), 1e-4);
+  let Ld = toL / d;
+  let ndl = max(dot(n, Ld), 0.0);
+  let power = lum(lightAt(l, 1u).rgb);
+  if (a.w < 2.5) { return power * punctualAtten(l, d, Ld) * ndl; }
+  let r = lightAt(l, 2u);
+  var area = 4.0 * r.y * r.z;
+  var facing = 1.0;
+  if (a.w > 4.5) { area = 2.0 * r.y * 2.0 * r.z + PI * r.z * r.z; }
+  else {
+    facing = max(-dot(Ld, lightAt(l, 3u).xyz), 0.0);
+    if (a.w > 3.5) { area = PI * r.y * r.y; }
+  }
+  let dm = max(d, 0.1);
+  return power * area * facing * max(ndl, 0.05) / (PI * dm * dm);
+}
+
+struct LightSample {
+  c: vec3<f32>,  // what it gives the surface, unshadowed
+  dir: vec3<f32>,
+  dist: f32,
+};
+
+// Local light l's light on a surface at p facing n: a point or spot light's, or an area light's through one point
+// on it (uniform on its rectangle or disk, or on the rectangle a tube shows p, as the LTC shader takes it).
+fn localSample(l: u32, p: vec3<f32>, n: vec3<f32>) -> LightSample {
+  var out = LightSample(vec3<f32>(0.0), vec3<f32>(0.0, 1.0, 0.0), 0.0);
+  let a = lightAt(l, 0u);
+  let rad = lightAt(l, 1u).rgb;
+  if (a.w < 2.5) {
+    let toL = a.xyz - p;
+    let d = max(length(toL), 1e-4);
+    out.dir = toL / d;
+    out.dist = d;
+    out.c = rad * punctualAtten(l, d, out.dir) * max(dot(n, out.dir), 0.0);
+    return out;
+  }
+  let r = lightAt(l, 2u);
+  let tan = lightAt(l, 4u).xyz;
+  var nrm = lightAt(l, 3u).xyz;
+  var hw = r.y;
+  let hh = r.z;
+  let toP = p - a.xyz;
+  if (a.w > 4.5) {
+    let off = toP - tan * dot(toP, tan);
+    nrm = select(normalize(cross(tan, select(vec3<f32>(1.0, 0.0, 0.0), vec3<f32>(0.0, 1.0, 0.0), abs(tan.y) < 0.9))), normalize(off), length(off) > 1e-5);
+    hw = hw + 0.78539816 * hh;
+  } else if (dot(toP, nrm) <= 0.0) {
+    return out;
+  }
+  let bt = cross(nrm, tan);
+  let xi = vec2<f32>(rand(), rand());
+  var s: vec3<f32>;
+  var area: f32;
+  if (a.w > 3.5 && a.w < 4.5) {
+    let rr = hw * sqrt(xi.x);
+    let phi = 2.0 * PI * xi.y;
+    s = a.xyz + tan * (rr * cos(phi)) + bt * (rr * sin(phi));
+    area = PI * hw * hw;
+  } else {
+    s = a.xyz + tan * (hw * (2.0 * xi.x - 1.0)) + bt * (hh * (2.0 * xi.y - 1.0));
+    area = 4.0 * hw * hh;
+  }
+  let toS = s - p;
+  let d = max(length(toS), 1e-4);
+  out.dir = toS / d;
+  out.dist = d;
+  let cosS = dot(n, out.dir);
+  let cosL = -dot(out.dir, nrm);
+  if (cosS > 0.0 && cosL > 0.0) { out.c = rad * (cosS * cosL * area / (PI * max(d * d, 1e-4))); }
+  return out;
+}
+`
+);
+var LIGHTMAP_TRACE_WGSL = (
+  /* wgsl */
+  `
+struct Params {
+  run: vec4<u32>,   // x = first texel, y = texels, z = first sample, w = samples this pass
+  info: vec4<u32>,  // x = bounces, y = directional lights, z = sky width, w = sky height
+  total: vec4<u32>, // x = samples in all, y = point, spot and area lights (F3d-4)
+  extra: vec4<f32>, // x = a probe's depth cap (F3d-3)
+};
+@group(0) @binding(0) var<storage, read> nodes: array<vec4<u32>>;
+@group(0) @binding(1) var<storage, read> tris: array<vec4<f32>>;
+@group(0) @binding(2) var<storage, read> mats: array<vec4<f32>>;
+@group(0) @binding(3) var<storage, read> texels: array<vec4<f32>>;
+@group(0) @binding(4) var<storage, read_write> accum: array<vec4<f32>>;
+@group(0) @binding(5) var<storage, read> sky: array<vec4<f32>>;
+@group(0) @binding(6) var<uniform> params: Params;
+@group(0) @binding(7) var<storage, read> lights: array<vec4<f32>>;
+
+const PI = 3.14159265;
+// How far a ray starts off its surface, and the nearest hit it takes (metres).
+const EPS = 0.005;
+const T_MIN = 1e-4;
+const FAR = 1e30;
+
+struct Hit {
+  t: f32,
+  tri: i32,
+};
+
+// The closest hit along o + t\xB7d within tMax (or, with anyHit, the first found).
+fn trace(o: vec3<f32>, d: vec3<f32>, tMax: f32, anyHit: bool) -> Hit {
+  var best = Hit(tMax, -1);
+  let tiny = abs(d) < vec3<f32>(1e-9);
+  let inv = 1.0 / select(d, select(vec3<f32>(-1e-9), vec3<f32>(1e-9), d >= vec3<f32>(0.0)), tiny);
+  var stack: array<u32, 64>;
+  var sp = 1u;
+  stack[0] = 0u;
+  loop {
+    if (sp == 0u) { break; }
+    sp = sp - 1u;
+    let n = stack[sp];
+    let a = nodes[n * 2u];
+    let b = nodes[n * 2u + 1u];
+    let t0 = (bitcast<vec3<f32>>(a.xyz) - o) * inv;
+    let t1 = (bitcast<vec3<f32>>(b.xyz) - o) * inv;
+    let lo = min(t0, t1);
+    let hi = max(t0, t1);
+    let tn = max(max(lo.x, lo.y), max(lo.z, 0.0));
+    let tf = min(min(hi.x, hi.y), min(hi.z, best.t));
+    if (tn > tf) { continue; }
+    let left = bitcast<i32>(a.w);
+    if (left >= 0) {
+      if (sp + 2u <= 64u) {
+        stack[sp] = u32(left);
+        stack[sp + 1u] = b.w;
+        sp = sp + 2u;
+      }
+      continue;
+    }
+    let first = b.w;
+    let count = u32(-1 - left);
+    for (var i = first; i < first + count; i = i + 1u) {
+      // M\xF6ller\u2013Trumbore.
+      let v0 = tris[i * 3u].xyz;
+      let e1 = tris[i * 3u + 1u].xyz;
+      let e2 = tris[i * 3u + 2u].xyz;
+      let p = cross(d, e2);
+      let det = dot(e1, p);
+      if (abs(det) < 1e-12) { continue; }
+      let id = 1.0 / det;
+      let s = o - v0;
+      let u = dot(s, p) * id;
+      if (u < 0.0 || u > 1.0) { continue; }
+      let q = cross(s, e1);
+      let v = dot(d, q) * id;
+      if (v < 0.0 || u + v > 1.0) { continue; }
+      let t = dot(e2, q) * id;
+      if (t > T_MIN && t < best.t) {
+        best = Hit(t, i32(i));
+        if (anyHit) { return best; }
+      }
+    }
+  }
+  return best;
+}
+
+${BAKE_SAMPLING_WGSL}
+// The lights on a surface a path bounced off at p, facing n, on the channels \`mask\`: every directional light, and one
+// local light picked by localWeight (a tenth of the choice spread evenly), over the chance of picking it.
+fn lightsOn(p: vec3<f32>, n: vec3<f32>, mask: u32) -> vec3<f32> {
+  var L = vec3<f32>(0.0);
+  let directional = params.info.y;
+  for (var l = 0u; l < directional; l = l + 1u) {
+    if (!lightsMask(l, mask)) { continue; }
+    let Ld = lightAt(l, 0u).xyz;
+    let ndl = dot(n, Ld);
+    if (ndl > 0.0 && trace(p, Ld, FAR, true).tri < 0) {
+      L = L + lightAt(l, 1u).rgb * ndl;
+    }
+  }
+  let local = params.total.y;
+  if (local == 0u) { return L; }
+  var total = 0.0;
+  for (var k = 0u; k < local; k = k + 1u) { total = total + localWeight(directional + k, p, n, mask); }
+  let even = select(1.0, 0.1, total > 0.0) / f32(local);
+  let spread = select(0.0, 0.9 / total, total > 0.0);
+  let u = rand();
+  var pick = local - 1u;
+  var pdf = 0.0;
+  var cdf = 0.0;
+  for (var k = 0u; k < local; k = k + 1u) {
+    pdf = localWeight(directional + k, p, n, mask) * spread + even;
+    cdf = cdf + pdf;
+    if (u < cdf) { pick = k; break; }
+  }
+  if (pick == local - 1u) { pdf = localWeight(directional + pick, p, n, mask) * spread + even; }
+  let l = directional + pick;
+  if (!lightsMask(l, mask)) { return L; }
+  let ls = localSample(l, p, n);
+  if (max(ls.c.r, max(ls.c.g, ls.c.b)) > 0.0 && trace(p, ls.dir, ls.dist - EPS, true).tri < 0) {
+    L = L + ls.c / pdf;
+  }
+  return L;
+}
+
+struct Path {
+  L: vec3<f32>,
+  // The first segment's hit distance (FAR when it reached the sky), and whether it met the back of a surface (F3d-2).
+  t: f32,
+  back: bool,
+};
+
+// What a path from o along d brings back: the sky on a miss; on a hit, the surface's emission, and (while
+// bounces remain) the lights on it and what a cosine-weighted bounce off it gathers.
+fn pathFrom(origin: vec3<f32>, dir: vec3<f32>) -> Path {
+  let bounces = params.info.x;
+  var out = Path(vec3<f32>(0.0), FAR, false);
+  var tp = vec3<f32>(1.0);
+  var o = origin;
+  var d = dir;
+  for (var b = 0u; b <= bounces; b = b + 1u) {
+    let h = trace(o, d, FAR, false);
+    if (h.tri < 0) {
+      out.L = out.L + tp * skyAt(d);
+      break;
+    }
+    let i = u32(h.tri);
+    if (b == 0u) {
+      out.t = h.t;
+      out.back = dot(d, vec3<f32>(tris[i * 3u].w, tris[i * 3u + 1u].w, tris[i * 3u + 2u].w)) > 0.0;
+    }
+    out.L = out.L + tp * mats[i * 2u + 1u].rgb;
+    if (b == bounces) { break; }
+    var n = normalize(cross(tris[i * 3u + 1u].xyz, tris[i * 3u + 2u].xyz));
+    if (dot(n, d) > 0.0) { n = -n; } // the side the path arrived on (surfaces are two-sided)
+    let hp = o + d * h.t + n * EPS;
+    tp = tp * mats[i * 2u].rgb;
+    out.L = out.L + tp * lightsOn(hp, n, bitcast<u32>(mats[i * 2u].w));
+    if (max(tp.r, max(tp.g, tp.b)) < 1e-4) { break; }
+    o = hp;
+    d = cosineDir(n, vec2<f32>(rand(), rand()));
+  }
+  return out;
+}
+
+@compute @workgroup_size(${WORKGROUP3})
+fn main(@builtin(global_invocation_id) id: vec3<u32>) {
+  if (id.x >= params.run.y) { return; }
+  let j = params.run.x + id.x;
+  let P = texels[j * 2u].xyz;
+  let Ng = normalize(texels[j * 2u + 1u].xyz);
+  // The first bounce's directions: one stratified set for the bake, turned per texel (Cranley\u2013Patterson).
+  let turn = vec2<f32>(f32(pcg(j * 2u + 1u) >> 8u), f32(pcg(j * 2u + 2u) >> 8u)) / 16777216.0;
+  var e = vec3<f32>(0.0);
+  var dirSum = vec3<f32>(0.0);
+  var lumSum = 0.0;
+  var skyRef = vec3<f32>(0.0);
+  var skyOpen = 0.0;
+  var lumSq = 0.0;
+  var backs = 0.0;
+  for (var k = 0u; k < params.run.w; k = k + 1u) {
+    let s = params.run.z + k;
+    rng = pcg(j ^ pcg(s + 0x9e3779b9u));
+    let xi = fract(vec2<f32>(f32(s) / f32(params.total.x), radicalInverse(s)) + turn);
+    let d0 = cosineDir(Ng, xi);
+    let sky0 = skyAt(d0);
+    skyRef = skyRef + sky0;
+    let path = pathFrom(P + Ng * EPS, d0);
+    if (path.t >= FAR) { skyOpen = skyOpen + lum(sky0); }
+    if (path.back) { backs = backs + 1.0; }
+    e = e + path.L;
+    let y = lum(path.L);
+    dirSum = dirSum + d0 * y;
+    lumSum = lumSum + y;
+    lumSq = lumSq + y * y;
+  }
+  accum[j * 4u] = accum[j * 4u] + vec4<f32>(e, 0.0);
+  accum[j * 4u + 1u] = accum[j * 4u + 1u] + vec4<f32>(dirSum, lumSum);
+  accum[j * 4u + 2u] = accum[j * 4u + 2u] + vec4<f32>(skyRef, skyOpen);
+  accum[j * 4u + 3u] = accum[j * 4u + 3u] + vec4<f32>(lumSq, backs, 0.0, 0.0);
+}
+
+// A probe (F3d-3): rays over the whole sphere (a Fibonacci set for the bake, turned per probe about the
+// vertical), projected onto L2 SH; the sky's share; backs met; and per octahedral texel the distance the
+// first segment travelled (capped), with its square.
+@compute @workgroup_size(${WORKGROUP3})
+fn probeMain(@builtin(global_invocation_id) id: vec3<u32>) {
+  if (id.x >= params.run.y) { return; }
+  let p = params.run.x + id.x;
+  let P = texels[p].xyz;
+  let total = params.total.x;
+  let reach = params.extra.x;
+  let turn = f32(pcg(p * 2u + 11u) >> 8u) / 16777216.0 * 2.0 * PI;
+  var sh = array<vec3<f32>, 9>();
+  var skyRef = 0.0;
+  var skyOpen = 0.0;
+  var backs = 0.0;
+  let base = p * ${PROBE_ACC_VEC4S}u;
+  for (var k = 0u; k < params.run.w; k = k + 1u) {
+    let s = params.run.z + k;
+    rng = pcg(p ^ pcg(s + 0x85ebca6bu));
+    let y = 1.0 - (2.0 * f32(s) + 1.0) / f32(total);
+    let r = sqrt(max(0.0, 1.0 - y * y));
+    let phi = f32(s) * 2.39996323 + turn;
+    let d = vec3<f32>(r * cos(phi), y, r * sin(phi));
+    let path = pathFrom(P, d);
+    let L = path.L;
+    sh[0] = sh[0] + L * 0.282095;
+    sh[1] = sh[1] + L * (0.488603 * d.y);
+    sh[2] = sh[2] + L * (0.488603 * d.z);
+    sh[3] = sh[3] + L * (0.488603 * d.x);
+    sh[4] = sh[4] + L * (1.092548 * d.x * d.y);
+    sh[5] = sh[5] + L * (1.092548 * d.y * d.z);
+    sh[6] = sh[6] + L * (0.315392 * (3.0 * d.z * d.z - 1.0));
+    sh[7] = sh[7] + L * (1.092548 * d.x * d.z);
+    sh[8] = sh[8] + L * (0.546274 * (d.x * d.x - d.y * d.y));
+    let sl = lum(skyAt(d));
+    skyRef = skyRef + sl;
+    if (path.t >= FAR) { skyOpen = skyOpen + sl; }
+    if (path.back) { backs = backs + 1.0; }
+    let t = min(path.t, reach);
+    let texel = octTexel(d);
+    accum[base + 10u + texel] = accum[base + 10u + texel] + vec4<f32>(t, t * t, 1.0, 0.0);
+  }
+  for (var c = 0u; c < 9u; c = c + 1u) { accum[base + c] = accum[base + c] + vec4<f32>(sh[c], 0.0); }
+  accum[base + 9u] = accum[base + 9u] + vec4<f32>(skyRef, skyOpen, backs, f32(params.run.w));
+}
+`
+);
+var luminance = (r, g, b) => 0.2126 * r + 0.7152 * g + 0.0722 * b;
+function lightmapParams(first, texels, firstSample, samples, total, bounces, sky, lights, reach = 0) {
+  const buffer = new ArrayBuffer(PARAMS_BYTES);
+  new Uint32Array(buffer).set([first, texels, firstSample, samples, bounces, lights.directional, sky?.width ?? 0, sky?.height ?? 0, total, lights.local], 0);
+  new Float32Array(buffer)[12] = reach;
+  return buffer;
+}
+async function bakeLightmapGpu(device, layout, occluders, options = {}, progress) {
+  const samples = Math.max(1, Math.round(options.samples ?? 256));
+  const bounces = Math.max(0, Math.min(LIGHTMAP_MAX_BOUNCES, Math.round(options.bounces ?? 3)));
+  const sky = options.sky ?? null;
+  const lights = packBakeLights(options.lights ?? []);
+  const texels = lightmapTexels(layout);
+  const count = texels.index.length;
+  const acc = new Float32Array(count * ACC_FLOATS);
+  if (count > 0) {
+    const scene = packLightmapScene(occluders);
+    const points = new Float32Array(count * 8);
+    for (let j = 0; j < count; j += 1) {
+      for (let a = 0; a < 3; a += 1) {
+        points[j * 8 + a] = texels.position[j * 3 + a];
+        points[j * 8 + 4 + a] = texels.normal[j * 3 + a];
+      }
+    }
+    const upload = (data) => {
+      const buffer = device.createBuffer({ size: Math.max(16, data.byteLength), usage: STORAGE4 | COPY_DST6 });
+      device.queue.writeBuffer(buffer, 0, data.buffer, data.byteOffset, data.byteLength);
+      return buffer;
+    };
+    const skyData = sky ? sky.data : new Float32Array(4);
+    const buffers = [upload(scene.nodes), upload(scene.tris), upload(scene.mats), upload(points)];
+    const accum = device.createBuffer({ size: acc.byteLength, usage: STORAGE4 | COPY_SRC3 });
+    const skyBuffer = upload(skyData);
+    const lightBuffer = upload(lights.data);
+    const params = device.createBuffer({ size: PARAMS_BYTES, usage: UNIFORM6 | COPY_DST6 });
+    const readback = device.createBuffer({ size: acc.byteLength, usage: MAP_READ | COPY_DST6 });
+    try {
+      const pipeline = device.createComputePipeline({ layout: "auto", compute: { module: device.createShaderModule({ code: LIGHTMAP_TRACE_WGSL }), entryPoint: "main" } });
+      const group = device.createBindGroup({
+        layout: pipeline.getBindGroupLayout(0),
+        entries: [...buffers, accum, skyBuffer].map((buffer, binding) => ({ binding, resource: { buffer } })).concat([{ binding: 6, resource: { buffer: params } }, { binding: 7, resource: { buffer: lightBuffer } }])
+      });
+      const budget = pathBudget(lights.local);
+      const chunk = Math.min(count, CHUNK_TEXELS, budget);
+      const perPass = Math.max(1, Math.min(samples, Math.floor(budget / chunk)));
+      const submits = Math.ceil(samples / perPass) * Math.ceil(count / chunk);
+      let done = 0;
+      for (let s = 0; s < samples; s += perPass) {
+        const n = Math.min(perPass, samples - s);
+        for (let first = 0; first < count; first += chunk) {
+          const texelsHere = Math.min(chunk, count - first);
+          device.queue.writeBuffer(params, 0, lightmapParams(first, texelsHere, s, n, samples, bounces, sky, lights));
+          const encoder2 = device.createCommandEncoder();
+          const pass = encoder2.beginComputePass();
+          pass.setPipeline(pipeline);
+          pass.setBindGroup(0, group);
+          pass.dispatchWorkgroups(Math.ceil(texelsHere / WORKGROUP3));
+          pass.end();
+          device.queue.submit([encoder2.finish()]);
+          await device.queue.onSubmittedWorkDone();
+          done += 1;
+          progress?.(done / submits);
+        }
+      }
+      const encoder = device.createCommandEncoder();
+      encoder.copyBufferToBuffer(accum, 0, readback, 0, acc.byteLength);
+      device.queue.submit([encoder.finish()]);
+      await readback.mapAsync(MAP_READ);
+      acc.set(new Float32Array(readback.getMappedRange()));
+      readback.unmap();
+    } finally {
+      for (const buffer of [...buffers, accum, skyBuffer, lightBuffer, params, readback]) buffer.destroy();
+    }
+  }
+  const atlas = resolveLightmap(texels, acc, samples, options.backfaceLimit ?? 0.6);
+  if (count > 0 && options.denoise !== false) await denoiseLightmap(device, atlas, 1 / layout.density);
+  progress?.(1);
+  return finishLightmap(layout, atlas, options.stitch !== false);
+}
+function resolveLightmap(texels, acc, samples, backfaceLimit) {
+  const { size, index } = texels;
+  const values = new Float32Array(size * size * 12);
+  const guide = new Float32Array(size * size * 8);
+  const valid = new Int32Array(size * size).fill(-1);
+  let invalid = 0;
+  for (let j = 0; j < index.length; j += 1) {
+    const i = index[j];
+    const o = j * ACC_FLOATS;
+    if (acc[o + 13] > backfaceLimit * samples) {
+      invalid += 1;
+      continue;
+    }
+    valid[i] = texels.chart[i];
+    const v = i * 12;
+    for (let c = 0; c < 3; c += 1) values[v + c] = acc[o + c] / samples;
+    const mean = acc[o + 7] / samples;
+    values[v + 3] = Math.max(0, acc[o + 12] / samples - mean * mean) / samples;
+    const w = acc[o + 7];
+    for (let c = 0; c < 3; c += 1) values[v + 4 + c] = w > 1e-12 ? acc[o + 4 + c] / w : 0;
+    const ref = luminance(acc[o + 8], acc[o + 9], acc[o + 10]);
+    values[v + 7] = ref > 1e-12 ? Math.min(1, acc[o + 11] / ref) : 1;
+    for (let c = 0; c < 3; c += 1) {
+      const open = acc[o + 8 + c] / samples;
+      values[v + 8 + c] = open > 1e-6 ? Math.min(LIGHTMAP_RANGE2, values[v + c] / open) : 1;
+    }
+    for (let c = 0; c < 3; c += 1) {
+      guide[i * 8 + c] = texels.position[j * 3 + c];
+      guide[i * 8 + 4 + c] = texels.normal[j * 3 + c];
+    }
+    guide[i * 8 + 3] = 1;
+  }
+  return { size, values, valid, guide, invalid };
+}
+var DENOISE_PASSES = 4;
+var DENOISE_SIGMA = 1.5;
+var LIGHTMAP_DENOISE_WGSL = (
+  /* wgsl */
+  `
+struct Params {
+  size: u32,
+  step: u32,
+  texel: f32, // world units per texel
+  sigma: f32,
+};
+@group(0) @binding(0) var<storage, read> guide: array<vec4<f32>>;
+@group(0) @binding(1) var<storage, read> src: array<vec4<f32>>;
+@group(0) @binding(2) var<storage, read_write> dst: array<vec4<f32>>;
+@group(0) @binding(3) var<uniform> params: Params;
+
+fn lum(c: vec3<f32>) -> f32 {
+  return dot(c, vec3<f32>(0.2126, 0.7152, 0.0722));
+}
+
+@compute @workgroup_size(8, 8, 1)
+fn main(@builtin(global_invocation_id) id: vec3<u32>) {
+  let size = params.size;
+  if (id.x >= size || id.y >= size) { return; }
+  let i = id.y * size + id.x;
+  let a0 = src[i * 3u];
+  let a1 = src[i * 3u + 1u];
+  let a2 = src[i * 3u + 2u];
+  let g = guide[i * 2u];
+  if (g.w < 0.5) {
+    dst[i * 3u] = a0;
+    dst[i * 3u + 1u] = a1;
+    dst[i * 3u + 2u] = a2;
+    return;
+  }
+  let p = g.xyz;
+  let n = guide[i * 2u + 1u].xyz;
+  let l = lum(a0.rgb);
+  // The variance the luminance stop is scaled by, prefiltered over the texel's 3\xD73 (SVGF): a few paths' estimate is noisy itself.
+  var vsum = 0.0;
+  var vw = 0.0;
+  for (var vy = -1; vy <= 1; vy = vy + 1) {
+    for (var vx = -1; vx <= 1; vx = vx + 1) {
+      let qx = i32(id.x) + vx;
+      let qy = i32(id.y) + vy;
+      if (qx < 0 || qy < 0 || qx >= i32(size) || qy >= i32(size)) { continue; }
+      let j = u32(qy) * size + u32(qx);
+      if (guide[j * 2u].w < 0.5) { continue; }
+      let k = select(0.5, 1.0, vx == 0) * select(0.5, 1.0, vy == 0);
+      vsum = vsum + src[j * 3u].w * k;
+      vw = vw + k;
+    }
+  }
+  let sigma = params.sigma * sqrt(max(vsum / vw, 0.0)) + 1e-4;
+  // Farther than this in the world, a texel the kernel reaches is on another chart that merely sits beside this one in the atlas.
+  let reach = (2.83 * f32(params.step) + 1.5) * params.texel;
+  var kernel = array<f32, 5>(0.0625, 0.25, 0.375, 0.25, 0.0625);
+  var s0 = vec3<f32>(0.0);
+  var sv = 0.0;
+  var s1 = vec4<f32>(0.0);
+  var s2 = vec4<f32>(0.0);
+  var ws = 0.0;
+  for (var dy = -2; dy <= 2; dy = dy + 1) {
+    for (var dx = -2; dx <= 2; dx = dx + 1) {
+      let qx = i32(id.x) + dx * i32(params.step);
+      let qy = i32(id.y) + dy * i32(params.step);
+      if (qx < 0 || qy < 0 || qx >= i32(size) || qy >= i32(size)) { continue; }
+      let j = u32(qy) * size + u32(qx);
+      let gq = guide[j * 2u];
+      if (gq.w < 0.5) { continue; }
+      let dp = gq.xyz - p;
+      if (length(dp) > reach) { continue; }
+      let b0 = src[j * 3u];
+      let wn = pow(max(0.0, dot(n, guide[j * 2u + 1u].xyz)), 32.0);
+      let wp = exp(-abs(dot(dp, n)) / params.texel);
+      let wl = exp(-abs(lum(b0.rgb) - l) / sigma);
+      let w = kernel[dx + 2] * kernel[dy + 2] * wn * wp * wl;
+      s0 = s0 + b0.rgb * w;
+      sv = sv + b0.w * w * w;
+      s1 = s1 + src[j * 3u + 1u] * w;
+      s2 = s2 + src[j * 3u + 2u] * w;
+      ws = ws + w;
+    }
+  }
+  // The texel itself always weighs in, so ws > 0.
+  dst[i * 3u] = vec4<f32>(s0 / ws, sv / (ws * ws));
+  dst[i * 3u + 1u] = s1 / ws;
+  dst[i * 3u + 2u] = s2 / ws;
+}
+`
+);
+async function denoiseLightmap(device, atlas, texel, passes = DENOISE_PASSES, sigma = DENOISE_SIGMA) {
+  const { size, values, guide } = atlas;
+  const guideBuffer = device.createBuffer({ size: guide.byteLength, usage: STORAGE4 | COPY_DST6 });
+  device.queue.writeBuffer(guideBuffer, 0, guide.buffer, guide.byteOffset, guide.byteLength);
+  const ping = [0, 1].map(() => device.createBuffer({ size: values.byteLength, usage: STORAGE4 | COPY_DST6 | COPY_SRC3 }));
+  device.queue.writeBuffer(ping[0], 0, values.buffer, values.byteOffset, values.byteLength);
+  const params = device.createBuffer({ size: 16, usage: UNIFORM6 | COPY_DST6 });
+  const readback = device.createBuffer({ size: values.byteLength, usage: MAP_READ | COPY_DST6 });
+  try {
+    const pipeline = device.createComputePipeline({ layout: "auto", compute: { module: device.createShaderModule({ code: LIGHTMAP_DENOISE_WGSL }), entryPoint: "main" } });
+    const groups = [0, 1].map(
+      (k) => device.createBindGroup({
+        layout: pipeline.getBindGroupLayout(0),
+        entries: [
+          { binding: 0, resource: { buffer: guideBuffer } },
+          { binding: 1, resource: { buffer: ping[k] } },
+          { binding: 2, resource: { buffer: ping[1 - k] } },
+          { binding: 3, resource: { buffer: params } }
+        ]
+      })
+    );
+    for (let pass = 0; pass < passes; pass += 1) {
+      const p = new ArrayBuffer(16);
+      new Uint32Array(p).set([size, 1 << pass]);
+      new Float32Array(p).set([texel, sigma], 2);
+      device.queue.writeBuffer(params, 0, p);
+      const encoder2 = device.createCommandEncoder();
+      const compute = encoder2.beginComputePass();
+      compute.setPipeline(pipeline);
+      compute.setBindGroup(0, groups[pass % 2]);
+      compute.dispatchWorkgroups(Math.ceil(size / 8), Math.ceil(size / 8));
+      compute.end();
+      device.queue.submit([encoder2.finish()]);
+      await device.queue.onSubmittedWorkDone();
+    }
+    const encoder = device.createCommandEncoder();
+    encoder.copyBufferToBuffer(ping[passes % 2], 0, readback, 0, values.byteLength);
+    device.queue.submit([encoder.finish()]);
+    await readback.mapAsync(MAP_READ);
+    values.set(new Float32Array(readback.getMappedRange()));
+    readback.unmap();
+  } finally {
+    for (const buffer of [guideBuffer, ...ping, params, readback]) buffer.destroy();
+  }
+}
+function finishLightmap(layout, atlas, stitch = true) {
+  const { size, values, valid } = atlas;
+  dilateLightmapValues(values, valid, size, 12);
+  const seams = stitch ? stitchLightmapSeams(layout, values, 12) : 0;
+  const texels = size * size;
+  const irradiance = new Float32Array(texels * 3);
+  const direction = new Float32Array(texels * 4);
+  const ambient = new Uint8ClampedArray(texels * 4);
+  const q = (x) => Math.min(255, Math.round(Math.max(0, x) / LIGHTMAP_RANGE2 * 127.5) * 2);
+  for (let i = 0; i < texels; i += 1) {
+    const v = i * 12;
+    for (let c = 0; c < 3; c += 1) irradiance[i * 3 + c] = Math.max(0, values[v + c]);
+    const length = Math.hypot(values[v + 4], values[v + 5], values[v + 6]);
+    const k = length > 1 ? 1 / length : 1;
+    direction.set([values[v + 4] * k, values[v + 5] * k, values[v + 6] * k, Math.min(1, Math.max(0, values[v + 7]))], i * 4);
+    ambient.set([q(values[v + 8]), q(values[v + 9]), q(values[v + 10]), 255], i * 4);
+  }
+  return { hdr: { width: size, height: size, irradiance, direction }, ambient, invalid: atlas.invalid, seams };
+}
+var COSINE_BANDS = [1, 2 / 3, 2 / 3, 2 / 3, 1 / 4, 1 / 4, 1 / 4, 1 / 4, 1 / 4];
+async function bakeProbeVolumeGpu(device, min, max, counts, occluders, options = {}, progress) {
+  const rays = Math.max(16, Math.round(options.rays ?? 1024));
+  const bounces = Math.max(0, Math.min(LIGHTMAP_MAX_BOUNCES, Math.round(options.bounces ?? 3)));
+  const sky = options.sky ?? null;
+  const lights = packBakeLights(options.lights ?? []);
+  const [cx, cy, cz] = counts;
+  const count = cx * cy * cz;
+  const spacing = [0, 1, 2].map((a) => (max[a] - min[a]) / Math.max(1, counts[a] - 1));
+  const reach = 1.5 * Math.max(...spacing, 1e-3);
+  const positions = new Float32Array(count * 4);
+  for (let z = 0; z < cz; z += 1) for (let y = 0; y < cy; y += 1) for (let x = 0; x < cx; x += 1) {
+    const p = (z * cy + y) * cx + x;
+    positions.set([min[0] + x * spacing[0], min[1] + y * spacing[1], min[2] + z * spacing[2], 1], p * 4);
+  }
+  const acc = new Float32Array(count * PROBE_ACC_VEC4S * 4);
+  const scene = packLightmapScene(occluders);
+  const upload = (data) => {
+    const buffer = device.createBuffer({ size: Math.max(16, data.byteLength), usage: STORAGE4 | COPY_DST6 });
+    device.queue.writeBuffer(buffer, 0, data.buffer, data.byteOffset, data.byteLength);
+    return buffer;
+  };
+  const buffers = [upload(scene.nodes), upload(scene.tris), upload(scene.mats), upload(positions)];
+  const accum = device.createBuffer({ size: acc.byteLength, usage: STORAGE4 | COPY_SRC3 });
+  const skyBuffer = upload(sky ? sky.data : new Float32Array(4));
+  const lightBuffer = upload(lights.data);
+  const params = device.createBuffer({ size: PARAMS_BYTES, usage: UNIFORM6 | COPY_DST6 });
+  const readback = device.createBuffer({ size: acc.byteLength, usage: MAP_READ | COPY_DST6 });
+  try {
+    const pipeline = device.createComputePipeline({ layout: "auto", compute: { module: device.createShaderModule({ code: LIGHTMAP_TRACE_WGSL }), entryPoint: "probeMain" } });
+    const group = device.createBindGroup({
+      layout: pipeline.getBindGroupLayout(0),
+      entries: [...buffers, accum, skyBuffer].map((buffer, binding) => ({ binding, resource: { buffer } })).concat([{ binding: 6, resource: { buffer: params } }, { binding: 7, resource: { buffer: lightBuffer } }])
+    });
+    const perPass = Math.max(1, Math.min(rays, Math.floor(pathBudget(lights.local) / count)));
+    const submits = Math.ceil(rays / perPass);
+    for (let s = 0, done = 0; s < rays; s += perPass) {
+      device.queue.writeBuffer(params, 0, lightmapParams(0, count, s, Math.min(perPass, rays - s), rays, bounces, sky, lights, reach));
+      const encoder2 = device.createCommandEncoder();
+      const pass = encoder2.beginComputePass();
+      pass.setPipeline(pipeline);
+      pass.setBindGroup(0, group);
+      pass.dispatchWorkgroups(Math.ceil(count / WORKGROUP3));
+      pass.end();
+      device.queue.submit([encoder2.finish()]);
+      await device.queue.onSubmittedWorkDone();
+      done += 1;
+      progress?.(done / submits);
+    }
+    const encoder = device.createCommandEncoder();
+    encoder.copyBufferToBuffer(accum, 0, readback, 0, acc.byteLength);
+    device.queue.submit([encoder.finish()]);
+    await readback.mapAsync(MAP_READ);
+    acc.set(new Float32Array(readback.getMappedRange()));
+    readback.unmap();
+  } finally {
+    for (const buffer of [...buffers, accum, skyBuffer, lightBuffer, params, readback]) buffer.destroy();
+  }
+  return finishProbeVolume(min, max, counts, acc, reach, options.backfaceLimit ?? 0.6);
+}
+function finishProbeVolume(min, max, counts, acc, reach, backfaceLimit) {
+  const count = counts[0] * counts[1] * counts[2];
+  const depthTexels = PROBE_DEPTH_SIDE * PROBE_DEPTH_SIDE;
+  const sh = new Float32Array(count * PROBE_SH * 3);
+  const visibility = new Float32Array(count);
+  const valid = new Uint8Array(count);
+  const depth = new Float32Array(count * depthTexels * 2);
+  for (let p = 0; p < count; p += 1) {
+    const o = p * PROBE_ACC_VEC4S * 4;
+    const rays = acc[o + 39];
+    valid[p] = rays > 0 && acc[o + 38] <= backfaceLimit * rays ? 1 : 0;
+    visibility[p] = acc[o + 36] > 1e-12 ? Math.min(1, acc[o + 37] / acc[o + 36]) : 1;
+    if (valid[p]) for (let k = 0; k < PROBE_SH; k += 1) for (let c = 0; c < 3; c += 1) sh[(p * PROBE_SH + k) * 3 + c] = acc[o + k * 4 + c] * 4 * Math.PI / rays * COSINE_BANDS[k];
+    for (let t = 0; t < depthTexels; t += 1) {
+      const d = o + (10 + t) * 4;
+      const n = acc[d + 2];
+      depth[(p * depthTexels + t) * 2] = n > 0 ? acc[d] / n : reach;
+      depth[(p * depthTexels + t) * 2 + 1] = n > 0 ? acc[d + 1] / n : reach * reach;
+    }
+  }
+  return { min, max, counts, sh, visibility, valid, depth };
+}
 
 // src/render/ibl.ts
 var IBL_FACE = 128;
@@ -18325,7 +24535,7 @@ function texelDirection(pano, x, y) {
 function shBasis(x, y, z) {
   return [0.282095, 0.488603 * y, 0.488603 * z, 0.488603 * x, 1.092548 * x * y, 1.092548 * y * z, 0.315392 * (3 * z * z - 1), 1.092548 * x * z, 0.546274 * (x * x - y * y)];
 }
-var COSINE_BANDS = [1, 2 / 3, 2 / 3, 2 / 3, 1 / 4, 1 / 4, 1 / 4, 1 / 4, 1 / 4];
+var COSINE_BANDS2 = [1, 2 / 3, 2 / 3, 2 / 3, 1 / 4, 1 / 4, 1 / 4, 1 / 4, 1 / 4];
 function environmentSh(pano) {
   const sums = new Float64Array(27);
   for (let y = 0; y < pano.height; y += 1) {
@@ -18341,8 +24551,14 @@ function environmentSh(pano) {
     }
   }
   const out = new Float32Array(36);
-  for (let k = 0; k < 9; k += 1) for (let c = 0; c < 3; c += 1) out[k * 4 + c] = sums[k * 3 + c] * COSINE_BANDS[k];
+  for (let k = 0; k < 9; k += 1) for (let c = 0; c < 3; c += 1) out[k * 4 + c] = sums[k * 3 + c] * COSINE_BANDS2[k];
   return out;
+}
+function shIrradiance(sh, n) {
+  const basis = shBasis(n[0], n[1], n[2]);
+  const out = [0, 0, 0];
+  for (let k = 0; k < 9; k += 1) for (let c = 0; c < 3; c += 1) out[c] = out[c] + sh[k * 4 + c] * basis[k];
+  return [Math.max(0, out[0]), Math.max(0, out[1]), Math.max(0, out[2])];
 }
 var SH_IRRADIANCE_WGSL = (
   /* wgsl */
@@ -18433,7 +24649,7 @@ fn main(@builtin(global_invocation_id) id: vec3<u32>) {
 }
 `
 );
-function toHalf(value) {
+function toHalf2(value) {
   const f3 = new Float32Array([value]);
   const bits = new Uint32Array(f3.buffer)[0];
   const sign = bits >>> 16 & 32768;
@@ -18461,7 +24677,7 @@ var IblBuilder = class {
       // TEXTURE_BINDING | COPY_DST | RENDER_ATTACHMENT (its mips)
     });
     const halves = new Uint16Array(pano.data.length);
-    for (let i = 0; i < halves.length; i += 1) halves[i] = toHalf(pano.data[i]);
+    for (let i = 0; i < halves.length; i += 1) halves[i] = toHalf2(pano.data[i]);
     device.queue.writeTexture({ texture: source }, halves, { bytesPerRow: pano.width * 8, rowsPerImage: pano.height }, { width: pano.width, height: pano.height });
     this.mips.generate(source, levels, "rgba16float");
     const cube = device.createTexture({
@@ -18505,7 +24721,1106 @@ var IblBuilder = class {
   }
 };
 
+// src/render/toneMappers.ts
+var TONE_MAPPERS = ["filmic", "aces", "agx", "neutral"];
+function mul(m, c) {
+  return [m[0] * c[0] + m[1] * c[1] + m[2] * c[2], m[3] * c[0] + m[4] * c[1] + m[5] * c[2], m[6] * c[0] + m[7] * c[1] + m[8] * c[2]];
+}
+var clamp013 = (x) => Math.min(1, Math.max(0, x));
+function filmic(c) {
+  return c.map((x) => {
+    const v = Math.max(0, x);
+    return clamp013(v * (2.51 * v + 0.03) / (v * (2.43 * v + 0.59) + 0.14));
+  });
+}
+var ACES_IN = [0.59719, 0.35458, 0.04823, 0.076, 0.90834, 0.01566, 0.0284, 0.13383, 0.83777];
+var ACES_OUT = [1.60475, -0.53108, -0.07367, -0.10208, 1.10813, -605e-5, -327e-5, -0.07276, 1.07602];
+function aces(c) {
+  const v = mul(ACES_IN, c.map((x) => Math.max(0, x)));
+  const fit = v.map((x) => (x * (x + 0.0245786) - 90537e-9) / (x * (0.983729 * x + 0.432951) + 0.238081));
+  return mul(ACES_OUT, fit).map(clamp013);
+}
+var AGX_IN = [0.842479062253094, 0.0784335999999992, 0.0792237451477643, 0.0423282422610123, 0.878468636469772, 0.0791661274605434, 0.0423756549057051, 0.0784336, 0.879142973793104];
+var AGX_OUT = [1.19687900512017, -0.0980208811401368, -0.0990297440797205, -0.0528968517574562, 1.15190312990417, -0.0989611768448433, -0.0529716355144438, -0.0980434501171241, 1.15107367264116];
+var AGX_MIN_EV = -12.47393;
+var AGX_MAX_EV = 4.026069;
+function agx(c) {
+  const v = mul(AGX_IN, c.map((x) => Math.max(1e-10, x)));
+  const curve = v.map((x) => {
+    const t = (Math.min(AGX_MAX_EV, Math.max(AGX_MIN_EV, Math.log2(x))) - AGX_MIN_EV) / (AGX_MAX_EV - AGX_MIN_EV);
+    const t2 = t * t;
+    const t4 = t2 * t2;
+    return 15.5 * t4 * t2 - 40.14 * t4 * t + 31.96 * t4 - 6.868 * t2 * t + 0.4298 * t2 + 0.1191 * t - 232e-5;
+  });
+  return mul(AGX_OUT, curve).map((x) => clamp013(Math.max(0, x) ** 2.2));
+}
+var NEUTRAL_START = 0.8 - 0.04;
+var NEUTRAL_DESATURATION = 0.15;
+function neutral(c) {
+  let rgb = c.map((x) => Math.max(0, x));
+  const low = Math.min(...rgb);
+  const offset = low < 0.08 ? low - 6.25 * low * low : 0.04;
+  rgb = rgb.map((x) => x - offset);
+  const peak = Math.max(...rgb);
+  if (peak < NEUTRAL_START) return rgb.map(clamp013);
+  const d = 1 - NEUTRAL_START;
+  const newPeak = 1 - d * d / (peak + d - NEUTRAL_START);
+  rgb = rgb.map((x) => x * newPeak / peak);
+  const g = 1 - 1 / (NEUTRAL_DESATURATION * (peak - newPeak) + 1);
+  return rgb.map((x) => clamp013(x + (newPeak - x) * g));
+}
+function toneMap(mapper, c) {
+  switch (mapper) {
+    case "aces":
+      return aces(c);
+    case "agx":
+      return agx(c);
+    case "neutral":
+      return neutral(c);
+    default:
+      return filmic(c);
+  }
+}
+var srgbEncode = (v) => v <= 31308e-7 ? Math.max(0, v) * 12.92 : 1.055 * v ** (1 / 2.4) - 0.055;
+function toneMapperIndex(mapper) {
+  const i = mapper ? TONE_MAPPERS.indexOf(mapper) : 0;
+  return i < 0 ? 0 : i;
+}
+var wgslMat = (m) => `mat3x3f(${[0, 1, 2].map((col) => [0, 1, 2].map((row) => m[row * 3 + col].toString()).join(", ")).join(", ")})`;
+var TONE_MAPPERS_WGSL = (
+  /* wgsl */
+  `
+fn toneFilmic(x: vec3f) -> vec3f {
+  let v = max(x, vec3f(0.0));
+  return clamp((v * (2.51 * v + 0.03)) / (v * (2.43 * v + 0.59) + 0.14), vec3f(0.0), vec3f(1.0));
+}
+fn toneAces(x: vec3f) -> vec3f {
+  let v = ${wgslMat(ACES_IN)} * max(x, vec3f(0.0));
+  let fit = (v * (v + 0.0245786) - 0.000090537) / (v * (0.983729 * v + 0.432951) + 0.238081);
+  return clamp(${wgslMat(ACES_OUT)} * fit, vec3f(0.0), vec3f(1.0));
+}
+fn toneAgx(x: vec3f) -> vec3f {
+  let v = ${wgslMat(AGX_IN)} * max(x, vec3f(1e-10));
+  let t = (clamp(log2(v), vec3f(${AGX_MIN_EV}), vec3f(${AGX_MAX_EV})) - ${AGX_MIN_EV}) / (${AGX_MAX_EV} - ${AGX_MIN_EV});
+  let t2 = t * t;
+  let t4 = t2 * t2;
+  let curve = 15.5 * t4 * t2 - 40.14 * t4 * t + 31.96 * t4 - 6.868 * t2 * t + 0.4298 * t2 + 0.1191 * t - 0.00232;
+  return clamp(pow(max(${wgslMat(AGX_OUT)} * curve, vec3f(0.0)), vec3f(2.2)), vec3f(0.0), vec3f(1.0));
+}
+fn toneNeutral(x: vec3f) -> vec3f {
+  var c = max(x, vec3f(0.0));
+  let low = min(c.r, min(c.g, c.b));
+  let offset = select(0.04, low - 6.25 * low * low, low < 0.08);
+  c = c - offset;
+  let peak = max(c.r, max(c.g, c.b));
+  if (peak < ${NEUTRAL_START}) { return clamp(c, vec3f(0.0), vec3f(1.0)); }
+  let d = 1.0 - ${NEUTRAL_START};
+  let newPeak = 1.0 - d * d / (peak + d - ${NEUTRAL_START});
+  c = c * (newPeak / peak);
+  let g = 1.0 - 1.0 / (${NEUTRAL_DESATURATION} * (peak - newPeak) + 1.0);
+  return clamp(mix(c, vec3f(newPeak), g), vec3f(0.0), vec3f(1.0));
+}
+fn toneMapWith(index: f32, c: vec3f) -> vec3f {
+  if (index > 2.5) { return toneNeutral(c); }
+  if (index > 1.5) { return toneAgx(c); }
+  if (index > 0.5) { return toneAces(c); }
+  return toneFilmic(c);
+}
+// The sRGB curve, carried past 1.
+fn srgbOf(x: vec3f) -> vec3f {
+  let v = max(x, vec3f(0.0));
+  return select(1.055 * pow(v, vec3f(1.0 / 2.4)) - vec3f(0.055), v * 12.92, v <= vec3f(0.0031308));
+}
+// Light x as the display shows it under exposure e, sRGB-encoded (F11a-5): physically, the curve on
+// the light then the encode; as authored, the curve on the encoded light, as the byte path's shader maps.
+fn shownWith(index: f32, x: vec3f, e: f32, authored: bool) -> vec3f {
+  if (authored) { return toneMapWith(index, srgbOf(x) * e); }
+  return srgbOf(toneMapWith(index, x * e));
+}
+// \u2026as an HDR display shows it, encoded: the curve's white at headroom h (its encoding, as authored)
+// and grey where SDR shows it (s, extendedExposure's).
+fn shownWideWith(index: f32, x: vec3f, e: f32, s: f32, h: f32, authored: bool) -> vec3f {
+  if (authored) {
+    let top = srgbOf(vec3f(h)).x;
+    return toneMapWith(index, srgbOf(x) * (e * s / top)) * top;
+  }
+  return srgbOf(toneMapWith(index, x * (e * s / h)) * h);
+}
+`
+);
+
+// src/render/pathTracer.ts
+var REFERENCE_BOUNCES = 4;
+var REFERENCE_TEXTURE_SIDE = 1024;
+var MAX_CAPTURE_SIDE = 8192;
+var MAT_VEC4S = 11;
+var PRIM_VEC4S = 7;
+var ATTR_VEC4S = 4;
+var WORKGROUP4 = 8;
+var PARAMS_BYTES2 = 176;
+var CAPTURE_PATHS_PER_SUBMIT = 1 << 20;
+var STORAGE5 = 128;
+var COPY_DST7 = 8;
+var COPY_SRC4 = 4;
+var MAP_READ2 = 1;
+var UNIFORM7 = 64;
+var TEXTURE_BINDING4 = 4;
+var STORAGE_BINDING3 = 8;
+var TEXTURE_COPY_SRC = 1;
+var ALPHA_MODE = { opaque: 0, mask: 1, blend: 2, additive: 3 };
+function referenceSceneKey(instances) {
+  let h = 2166136261 >>> 0;
+  const mix = (v) => {
+    h = Math.imul(h ^ (v | 0), 16777619) >>> 0;
+  };
+  const f3 = new Float32Array(1);
+  const u = new Uint32Array(f3.buffer);
+  for (const instance of instances) {
+    mix(objectId(instance.mesh));
+    for (const p of instance.mesh.primitives) mix(objectId(p.positions));
+    for (const list of [instance.textures, instance.mrTextures, instance.emissiveTextures]) for (const t of list ?? []) mix(t ? objectId(t) : 0);
+    for (const v of instance.model) {
+      f3[0] = v;
+      mix(u[0]);
+    }
+    mix(instance.lightChannels ?? 1);
+  }
+  return `${instances.length}:${h.toString(36)}`;
+}
+var ids = /* @__PURE__ */ new WeakMap();
+var nextId = 1;
+function objectId(o) {
+  let id = ids.get(o);
+  if (id === void 0) {
+    id = nextId++;
+    ids.set(o, id);
+  }
+  return id;
+}
+function storedTexels(texture) {
+  let { width, height, data } = texture;
+  while (width > REFERENCE_TEXTURE_SIDE || height > REFERENCE_TEXTURE_SIDE) {
+    const w = Math.max(1, width >> 1);
+    const h = Math.max(1, height >> 1);
+    const out = new Uint8ClampedArray(w * h * 4);
+    for (let y = 0; y < h; y += 1) {
+      for (let x = 0; x < w; x += 1) {
+        for (let c = 0; c < 4; c += 1) {
+          let sum = 0;
+          let n = 0;
+          for (let dy = 0; dy < 2; dy += 1) {
+            for (let dx = 0; dx < 2; dx += 1) {
+              const sx = Math.min(width - 1, x * 2 + dx);
+              const sy = Math.min(height - 1, y * 2 + dy);
+              sum += data[(sy * width + sx) * 4 + c] ?? 255;
+              n += 1;
+            }
+          }
+          out[(y * w + x) * 4 + c] = sum / n;
+        }
+      }
+    }
+    width = w;
+    height = h;
+    data = out;
+  }
+  return { width, height, data };
+}
+function normalMatrix(m) {
+  const a = m[0], b = m[1], c = m[2], d = m[4], e = m[5], f3 = m[6], g = m[8], h = m[9], i = m[10];
+  const co = [e * i - f3 * h, f3 * g - d * i, d * h - e * g, c * h - b * i, a * i - c * g, b * g - a * h, b * f3 - c * e, c * d - a * f3, a * e - b * d];
+  const det = a * co[0] + b * co[1] + c * co[2];
+  const s = det < 0 ? -1 : 1;
+  return co.map((v) => v * s);
+}
+function extensionRows(m, pbr) {
+  const e = resolveExtensions2(pbr ? m : { name: m.name, baseColorFactor: m.baseColorFactor, baseColorImage: null });
+  const t = e.uvTransform;
+  return [
+    ...e.sheenColor,
+    e.sheenRoughness,
+    ...e.dielectricF0,
+    e.transmission,
+    e.thickness,
+    e.attenuationDistance,
+    e.iridescence,
+    e.iridescenceIor,
+    ...e.attenuationColor,
+    e.iridescenceThickness,
+    ...t ? [t.scale[0], t.scale[1], Math.cos(t.rotation), Math.sin(t.rotation)] : [1, 1, 1, 0],
+    ...t ? [t.offset[0], t.offset[1]] : [0, 0],
+    // The emissive strength applies with or without the PBR path (an emissive factor puts a material on it anyway).
+    resolveExtensions2(m).emissiveStrength,
+    t ? 1 : 0,
+    ...e.diffuseTransmissionColor,
+    e.diffuseTransmission
+  ];
+}
+function packReferenceScene(instances) {
+  const occluders = instances.map((i) => ({ mesh: i.mesh, model: i.model, lightChannels: i.lightChannels ?? 1 }));
+  const bvh = buildBvh2(occluders);
+  const triangles = bvh.order.length;
+  const textureIndex = /* @__PURE__ */ new Map();
+  const textureList = [];
+  const texture = (t2) => {
+    if (!t2 || t2.width <= 0 || t2.height <= 0 || t2.data.length < t2.width * t2.height * 4) return -1;
+    let index = textureIndex.get(t2);
+    if (index === void 0) {
+      index = textureList.length;
+      textureIndex.set(t2, index);
+      textureList.push(storedTexels(t2));
+    }
+    return index;
+  };
+  const materialIndex = /* @__PURE__ */ new Map();
+  const materialRows = [];
+  const attrsIn = new Float32Array(Math.max(1, triangles) * ATTR_VEC4S * 4);
+  const matOf = new Uint32Array(Math.max(1, triangles));
+  let t = 0;
+  for (const instance of instances) {
+    const nm = normalMatrix(instance.model);
+    instance.mesh.primitives.forEach((p, pi) => {
+      const m = p.material;
+      const base = texture(instance.textures?.[pi]);
+      const mr = texture(instance.mrTextures?.[pi]);
+      const emis = texture(instance.emissiveTextures?.[pi]);
+      const pbr = resolvePbr(m, mr >= 0, Boolean(instance.occlusionTextures?.[pi]), emis >= 0);
+      const mode = ALPHA_MODE[m.alphaMode ?? "opaque"] ?? 0;
+      const row = [
+        ...m.baseColorFactor,
+        ...pbr.emissive,
+        mode,
+        pbr.isPbr ? pbr.metallic : 0,
+        pbr.isPbr ? pbr.roughness : 1,
+        base,
+        pbr.isPbr ? mr : -1,
+        emis,
+        pbr.isPbr ? 1 : 0,
+        m.alphaCutoff ?? 0.5,
+        instance.lightChannels ?? 1,
+        ...extensionRows(m, pbr.isPbr)
+      ];
+      const key2 = row.join(",");
+      let mat = materialIndex.get(key2);
+      if (mat === void 0) {
+        mat = materialRows.length;
+        materialIndex.set(key2, mat);
+        materialRows.push(row);
+      }
+      const { normals, uvs, indices } = p;
+      for (let k = 0; k < indices.length; k += 3) {
+        const o = t * ATTR_VEC4S * 4;
+        for (let c = 0; c < 3; c += 1) {
+          const v = indices[k + c];
+          if (normals) {
+            const x = normals[v * 3], y = normals[v * 3 + 1], z = normals[v * 3 + 2];
+            const nx = nm[0] * x + nm[3] * y + nm[6] * z;
+            const ny = nm[1] * x + nm[4] * y + nm[7] * z;
+            const nz = nm[2] * x + nm[5] * y + nm[8] * z;
+            const len = Math.hypot(nx, ny, nz) || 1;
+            attrsIn.set([nx / len, ny / len, nz / len], o + c * 4);
+          }
+        }
+        const uv = (v, a) => uvs ? uvs[v * 2 + a] : 0;
+        const [i0, i1, i2] = [indices[k], indices[k + 1], indices[k + 2]];
+        attrsIn[o + 3] = uv(i0, 0);
+        attrsIn[o + 7] = uv(i0, 1);
+        attrsIn[o + 11] = uv(i1, 0);
+        attrsIn.set([uv(i1, 1), uv(i2, 0), uv(i2, 1)], o + 12);
+        matOf[t] = mat;
+        t += 1;
+      }
+    });
+  }
+  const stride = PRIM_VEC4S * 4;
+  const prims = new Float32Array(Math.max(1, triangles) * stride);
+  const primBits = new Uint32Array(prims.buffer);
+  for (let i = 0; i < triangles; i += 1) {
+    const src = bvh.order[i];
+    const k = src * 9;
+    const o = i * stride;
+    for (let a = 0; a < 3; a += 1) {
+      prims[o + a] = bvh.tri[k + a];
+      prims[o + 4 + a] = bvh.tri[k + 3 + a] - bvh.tri[k + a];
+      prims[o + 8 + a] = bvh.tri[k + 6 + a] - bvh.tri[k + a];
+    }
+    prims.set(attrsIn.subarray(src * 16, src * 16 + 15), o + 12);
+    primBits[o + 27] = matOf[src];
+  }
+  const mapTable = materialRows.length * MAT_VEC4S;
+  const mats = new Float32Array(Math.max(1, mapTable + textureList.length) * 4);
+  const matBits = new Uint32Array(mats.buffer);
+  materialRows.forEach((row, i) => mats.set(row, i * MAT_VEC4S * 4));
+  let total = 0;
+  textureList.forEach((tex, i) => {
+    matBits.set([total, tex.width, tex.height, 0], (mapTable + i) * 4);
+    total += tex.width * tex.height;
+  });
+  const texels = new Uint32Array(Math.max(1, total));
+  textureList.forEach((tex, i) => {
+    const words = new Uint32Array(tex.data.buffer.slice(tex.data.byteOffset, tex.data.byteOffset + tex.width * tex.height * 4));
+    texels.set(words, matBits[(mapTable + i) * 4]);
+  });
+  return { nodes: packBvhNodes(bvh), prims, mats, mapTable, texels, triangles, materials: materialRows.length };
+}
+var PATH_TRACE_WGSL = (
+  /* wgsl */
+  `
+struct Params {
+  invViewProj: mat4x4<f32>,
+  eye: vec4<f32>,      // xyz = the camera, w = the clamp on what a bounce brings back (0 = none)
+  info: vec4<u32>,     // x = bounces, y = directional lights, z = sky width, w = sky height
+  image: vec4<u32>,    // x, y = the whole image's size; z, w = this tile's corner in it
+  run: vec4<u32>,      // x, y = the tile's size; z = first sample; w = samples this pass
+  extra: vec4<u32>,    // x = point, spot and area lights; y = 1 where a miss from the eye shows the sky; z = the map table's first vec4 in mats
+  ambient: vec4<f32>,  // rgb = the uniform sky without a panorama (the flat ambient)
+  lens: vec4<f32>,     // x = the thin lens's aperture radius (0 = a pinhole), y = the focus distance along the view (F10d)
+};
+@group(0) @binding(0) var<storage, read> nodes: array<vec4<u32>>;
+@group(0) @binding(1) var<storage, read> prims: array<vec4<f32>>;
+@group(0) @binding(2) var<storage, read> mats: array<vec4<f32>>;
+@group(0) @binding(3) var<storage, read> texels: array<u32>;
+@group(0) @binding(4) var<storage, read> lights: array<vec4<f32>>;
+@group(0) @binding(5) var<storage, read> sky: array<vec4<f32>>;
+@group(0) @binding(6) var<storage, read_write> accum: array<vec4<f32>>;
+@group(0) @binding(7) var<uniform> params: Params;
+${brdfWgsl(0, 8)}
+
+const PI = 3.14159265;
+const EPS = 0.002;
+const T_MIN = 1e-4;
+const FAR = 1e30;
+
+${BAKE_SAMPLING_WGSL}
+${MATERIAL_SET_FUNCTIONS_WGSL}
+
+// A map's texel, wrapped.
+fn texFetch(m: vec4<u32>, x: i32, y: i32) -> vec4<f32> {
+  let w = i32(m.y);
+  let h = i32(m.z);
+  let xi = ((x % w) + w) % w;
+  let yi = ((y % h) + h) % h;
+  return unpack4x8unorm(texels[m.x + u32(yi * w + xi)]);
+}
+// Map \`tex\` at uv, bilinearly and wrapping, at the renderer's (u, 1 \u2212 v); white without one.
+fn texSample(tex: f32, uv: vec2<f32>) -> vec4<f32> {
+  if (tex < 0.0) { return vec4<f32>(1.0); }
+  let m = bitcast<vec4<u32>>(mats[params.extra.z + u32(tex + 0.5)]);
+  let p = fract(vec2<f32>(uv.x, 1.0 - uv.y)) * vec2<f32>(f32(m.y), f32(m.z)) - vec2<f32>(0.5);
+  let f = floor(p);
+  let t = p - f;
+  let i = vec2<i32>(f);
+  let top = mix(texFetch(m, i.x, i.y), texFetch(m, i.x + 1, i.y), t.x);
+  let bottom = mix(texFetch(m, i.x, i.y + 1), texFetch(m, i.x + 1, i.y + 1), t.x);
+  return mix(top, bottom, t.y);
+}
+
+fn tri(i: u32, k: u32) -> vec4<f32> {
+  return prims[i * ${PRIM_VEC4S}u + k];
+}
+fn attr(i: u32, k: u32) -> vec4<f32> {
+  return prims[i * ${PRIM_VEC4S}u + 3u + k];
+}
+fn matOf(i: u32) -> u32 {
+  return bitcast<u32>(attr(i, 3u).w);
+}
+fn mat(m: u32, k: u32) -> vec4<f32> {
+  return mats[m * ${MAT_VEC4S}u + k];
+}
+fn uvAt(i: u32, b: vec2<f32>) -> vec2<f32> {
+  let uv0 = vec2<f32>(attr(i, 0u).w, attr(i, 1u).w);
+  let uv1 = vec2<f32>(attr(i, 2u).w, attr(i, 3u).x);
+  let uv2 = attr(i, 3u).yz;
+  let uv = uv0 * (1.0 - b.x - b.y) + uv1 * b.x + uv2 * b.y;
+  // The material's UV transform (F1d).
+  let m = matOf(i);
+  if (mat(m, 9u).w < 0.5) { return uv; }
+  return khrTransform(uv, mat(m, 8u), mat(m, 9u).xy);
+}
+
+// Whether a ray stops at triangle i at barycentrics b: an opaque surface always; a cut-out where its
+// alpha reaches the cutoff; a blended one as often as its alpha; an additive one never. A shadow ray
+// passes a transmitting surface (F1d) as often as it lets light through.
+fn stops(i: u32, b: vec2<f32>, shadow: bool) -> bool {
+  let m = matOf(i);
+  let mode = mat(m, 1u).w;
+  if (shadow && mat(m, 5u).w > 0.0 && rand() < mat(m, 5u).w * (1.0 - mat(m, 2u).x)) { return false; }
+  if (mode < 0.5) { return true; }
+  if (mode > 2.5) { return false; }
+  let a = mat(m, 0u).a * texSample(mat(m, 2u).z, uvAt(i, b)).a;
+  if (mode < 1.5) { return a >= mat(m, 3u).z; }
+  return rand() < a;
+}
+
+struct Hit {
+  t: f32,
+  tri: i32,
+  b: vec2<f32>,
+};
+
+// The closest surface along o + t\xB7d within tMax that stops it (or, with anyHit, the first found).
+fn trace(o: vec3<f32>, d: vec3<f32>, tMax: f32, anyHit: bool) -> Hit {
+  var best = Hit(tMax, -1, vec2<f32>(0.0));
+  let tiny = abs(d) < vec3<f32>(1e-9);
+  let inv = 1.0 / select(d, select(vec3<f32>(-1e-9), vec3<f32>(1e-9), d >= vec3<f32>(0.0)), tiny);
+  var stack: array<u32, 64>;
+  var sp = 1u;
+  stack[0] = 0u;
+  loop {
+    if (sp == 0u) { break; }
+    sp = sp - 1u;
+    let n = stack[sp];
+    let a = nodes[n * 2u];
+    let bb = nodes[n * 2u + 1u];
+    let t0 = (bitcast<vec3<f32>>(a.xyz) - o) * inv;
+    let t1 = (bitcast<vec3<f32>>(bb.xyz) - o) * inv;
+    let lo = min(t0, t1);
+    let hi = max(t0, t1);
+    let tn = max(max(lo.x, lo.y), max(lo.z, 0.0));
+    let tf = min(min(hi.x, hi.y), min(hi.z, best.t));
+    if (tn > tf) { continue; }
+    let left = bitcast<i32>(a.w);
+    if (left >= 0) {
+      if (sp + 2u <= 64u) {
+        stack[sp] = u32(left);
+        stack[sp + 1u] = bb.w;
+        sp = sp + 2u;
+      }
+      continue;
+    }
+    let first = bb.w;
+    let count = u32(-1 - left);
+    for (var i = first; i < first + count; i = i + 1u) {
+      // M\xF6ller\u2013Trumbore.
+      let v0 = tri(i, 0u).xyz;
+      let e1 = tri(i, 1u).xyz;
+      let e2 = tri(i, 2u).xyz;
+      let p = cross(d, e2);
+      let det = dot(e1, p);
+      if (abs(det) < 1e-12) { continue; }
+      let id = 1.0 / det;
+      let s = o - v0;
+      let u = dot(s, p) * id;
+      if (u < 0.0 || u > 1.0) { continue; }
+      let q = cross(s, e1);
+      let v = dot(d, q) * id;
+      if (v < 0.0 || u + v > 1.0) { continue; }
+      let t = dot(e2, q) * id;
+      if (t > T_MIN && t < best.t && stops(i, vec2<f32>(u, v), anyHit)) {
+        best = Hit(t, i32(i), vec2<f32>(u, v));
+        if (anyHit) { return best; }
+      }
+    }
+  }
+  return best;
+}
+
+fn visible(p: vec3<f32>, d: vec3<f32>, tMax: f32) -> bool {
+  return trace(p, d, tMax, true).tri < 0;
+}
+
+// The sky along d: the panorama, or the flat ambient as a uniform sky.
+fn skyRadiance(d: vec3<f32>) -> vec3<f32> {
+  if (params.info.z == 0u) { return params.ambient.rgb; }
+  return skyAt(d);
+}
+
+fn toLinear(c: vec3<f32>) -> vec3<f32> {
+  let v = max(c, vec3<f32>(0.0));
+  return select(pow((v + vec3<f32>(0.055)) / 1.055, vec3<f32>(2.4)), v / 12.92, v <= vec3<f32>(0.04045));
+}
+
+struct Surface {
+  albedo: vec3<f32>,
+  metal: f32,
+  rough: f32,
+  emission: vec3<f32>,
+  pbr: bool,
+  channels: u32,
+  // The full material set (F1d): a dielectric's f0, sheen, transmission and what the volume lets through,
+  // the film, and (set once N\xB7V is known) the reflectance and what the sheen leaves the base.
+  f0: vec3<f32>,
+  sheen: vec3<f32>,
+  sheenRough: f32,
+  transmission: f32,
+  absorb: vec3<f32>,
+  irid: f32,
+  iridIor: f32,
+  iridThickness: f32,
+  sheenScale: f32,
+  // A thin surface's transmission (F1d-2): its share and colour.
+  dt: f32,
+  dtColor: vec3<f32>,
+};
+
+fn surfaceAt(i: u32, b: vec2<f32>) -> Surface {
+  let m = matOf(i);
+  let uv = uvAt(i, b);
+  let m2 = mat(m, 2u);
+  let m3 = mat(m, 3u);
+  let base = mat(m, 0u).rgb * texSample(m2.z, uv).rgb;
+  let mr = texSample(m2.w, uv);
+  var s: Surface;
+  s.albedo = toLinear(base);
+  s.metal = clamp(m2.x * mr.b, 0.0, 1.0);
+  s.rough = clamp(m2.y * mr.g, 0.045, 1.0);
+  s.emission = toLinear(mat(m, 1u).rgb * texSample(m3.x, uv).rgb) * mat(m, 9u).z;
+  s.pbr = m3.y > 0.5;
+  s.channels = u32(m3.w + 0.5);
+  let m4 = mat(m, 4u);
+  let m5 = mat(m, 5u);
+  let m6 = mat(m, 6u);
+  let m7 = mat(m, 7u);
+  s.f0 = mix(m5.rgb, s.albedo, s.metal);
+  s.sheen = m4.rgb;
+  s.sheenRough = m4.w;
+  s.transmission = m5.w;
+  s.absorb = vec3<f32>(1.0);
+  if (m6.x > 0.0 && m6.y > 0.0) { s.absorb = pow(max(m7.rgb, vec3<f32>(1e-4)), vec3<f32>(m6.x / m6.y)); }
+  s.irid = m6.z;
+  s.iridIor = m6.w;
+  s.iridThickness = m7.w;
+  s.sheenScale = 1.0;
+  let m10 = mat(m, 10u);
+  s.dt = select(0.0, m10.w, s.pbr);
+  s.dtColor = m10.rgb;
+  return s;
+}
+
+// The BRDF toward L from V about N, without the cosine: the AAA shader's terms over \u03C0 for the diffuse
+// (its lights' units), and its specular with the Kulla-Conty scale.
+fn brdf(s: Surface, N: vec3<f32>, V: vec3<f32>, L: vec3<f32>) -> vec3<f32> {
+  let ndl = dot(N, L);
+  // From behind, a thin surface's transmission (F1d-2): a diffuse of its own.
+  if (ndl < 0.0 && s.dt > 0.0) { return s.dt * s.dtColor * s.albedo * (1.0 - s.metal) * (1.0 - s.transmission) / PI; }
+  if (ndl <= 0.0) { return vec3<f32>(0.0); }
+  if (!s.pbr) { return s.albedo / PI; }
+  let ndv = max(1e-4, dot(N, V));
+  let H = normalize(L + V);
+  let ndh = max(0.0, dot(N, H));
+  let vdh = max(0.0, dot(V, H));
+  let a2 = s.rough * s.rough * s.rough * s.rough;
+  let dd = ndh * ndh * (a2 - 1.0) + 1.0;
+  let D = a2 / (PI * dd * dd + 1e-7);
+  let f0 = s.f0;
+  let F = f0 + (vec3<f32>(1.0) - f0) * pow(1.0 - vdh, 5.0);
+  let eComp = energyCompensation(f0, dfgAt(ndv, s.rough));
+  let diffuse = (1.0 - s.metal) * (1.0 - s.transmission) * (1.0 - s.dt) * (vec3<f32>(1.0) - F) * s.albedo / PI;
+  return (diffuse + F * D * smithVisibility(ndl, ndv, a2) * eComp) * s.sheenScale + sheenBrdf(s.sheen, s.sheenRough, ndl, ndv, ndh);
+}
+
+// An orthonormal frame about n (Duff et al.): tangent, bitangent, n.
+fn frameOf(n: vec3<f32>) -> mat3x3<f32> {
+  let sg = select(-1.0, 1.0, n.z >= 0.0);
+  let a = -1.0 / (sg + n.z);
+  let b = n.x * n.y * a;
+  return mat3x3<f32>(vec3<f32>(1.0 + sg * n.x * n.x * a, sg * b, -sg * n.x), vec3<f32>(b, sg + n.y * n.y * a, -n.y), n);
+}
+
+// A GGX normal visible from Ve (in the frame), for alpha = roughness\xB2 (Heitz 2018).
+fn sampleVndf(Ve: vec3<f32>, alpha: f32, xi: vec2<f32>) -> vec3<f32> {
+  let Vh = normalize(vec3<f32>(alpha * Ve.x, alpha * Ve.y, Ve.z));
+  let lensq = Vh.x * Vh.x + Vh.y * Vh.y;
+  let T1 = select(vec3<f32>(1.0, 0.0, 0.0), vec3<f32>(-Vh.y, Vh.x, 0.0) / sqrt(lensq), lensq > 1e-12);
+  let T2 = cross(Vh, T1);
+  let r = sqrt(xi.x);
+  let phi = 2.0 * PI * xi.y;
+  let t1 = r * cos(phi);
+  let sv = 0.5 * (1.0 + Vh.z);
+  let t2 = (1.0 - sv) * sqrt(max(0.0, 1.0 - t1 * t1)) + sv * r * sin(phi);
+  let Nh = t1 * T1 + t2 * T2 + sqrt(max(0.0, 1.0 - t1 * t1 - t2 * t2)) * Vh;
+  return normalize(vec3<f32>(alpha * Nh.x, alpha * Nh.y, max(0.0, Nh.z)));
+}
+
+// How likely a bounce takes the specular lobe: by the two lobes' share of what the surface reflects.
+fn specularChance(s: Surface, ndv: f32) -> f32 {
+  if (!s.pbr) { return 0.0; }
+  let e = specularEnergy(s.f0, dfgAt(ndv, s.rough));
+  let ls = lum(e);
+  let ld = lum(s.albedo * (1.0 - s.metal) * (1.0 - s.transmission) * (vec3<f32>(1.0) - e) + s.sheen);
+  return clamp(ls / max(ls + ld, 1e-6), 0.1, 0.9);
+}
+
+// The density of bouncing toward L: the two lobes' mixed.
+fn bouncePdf(s: Surface, N: vec3<f32>, V: vec3<f32>, L: vec3<f32>, ps: f32) -> f32 {
+  let ndl = dot(N, L);
+  if (ndl <= 0.0) { return 0.0; }
+  var pdf = (1.0 - ps) * ndl / PI;
+  if (ps > 0.0) {
+    let ndv = max(1e-4, dot(N, V));
+    let H = normalize(L + V);
+    let ndh = max(0.0, dot(N, H));
+    let alpha = s.rough * s.rough;
+    let a2 = alpha * alpha;
+    let dd = ndh * ndh * (a2 - 1.0) + 1.0;
+    let D = a2 / (PI * dd * dd + 1e-7);
+    let g1 = 2.0 * ndv / (ndv + sqrt(a2 + (1.0 - a2) * ndv * ndv));
+    pdf = pdf + ps * g1 * D / (4.0 * ndv);
+  }
+  return pdf;
+}
+
+// The direct light on a surface at p facing N, seen from V: every directional light, and one point, spot or
+// area light picked by what it would give there (a tenth spread evenly), over the chance of picking it.
+fn directLight(s: Surface, p: vec3<f32>, N: vec3<f32>, V: vec3<f32>, pBack: vec3<f32>) -> vec3<f32> {
+  var L = vec3<f32>(0.0);
+  let directional = params.info.y;
+  for (var l = 0u; l < directional; l = l + 1u) {
+    if (!lightsMask(l, s.channels)) { continue; }
+    let Ld = lightAt(l, 0u).xyz;
+    let ndl = dot(N, Ld);
+    // A light behind a thin surface (F1d-2) shines through from its far side.
+    if (ndl <= 0.0 && !(s.dt > 0.0 && ndl < 0.0)) { continue; }
+    let f = brdf(s, N, V, Ld);
+    if (max(f.r, max(f.g, f.b)) > 0.0 && visible(select(pBack, p, ndl > 0.0), Ld, FAR)) {
+      L = L + f * PI * lightAt(l, 1u).rgb * abs(ndl);
+    }
+  }
+  let local = params.extra.x;
+  if (local == 0u) { return L; }
+  var total = 0.0;
+  for (var k = 0u; k < local; k = k + 1u) { total = total + localWeight(directional + k, p, N, s.channels); }
+  let even = select(1.0, 0.1, total > 0.0) / f32(local);
+  let spread = select(0.0, 0.9 / total, total > 0.0);
+  let u = rand();
+  var pick = local - 1u;
+  var pdf = 0.0;
+  var cdf = 0.0;
+  for (var k = 0u; k < local; k = k + 1u) {
+    pdf = localWeight(directional + k, p, N, s.channels) * spread + even;
+    cdf = cdf + pdf;
+    if (u < cdf) { pick = k; break; }
+  }
+  if (pick == local - 1u) { pdf = localWeight(directional + pick, p, N, s.channels) * spread + even; }
+  let l = directional + pick;
+  if (!lightsMask(l, s.channels)) { return L; }
+  // From behind a thin surface (F1d-2): the same light through its far side.
+  if (s.dt > 0.0) {
+    let lb = localSample(l, pBack, -N);
+    let fb = brdf(s, N, V, lb.dir);
+    if (max(lb.c.r, max(lb.c.g, lb.c.b)) > 0.0 && max(fb.r, max(fb.g, fb.b)) > 0.0 && visible(pBack, lb.dir, lb.dist - EPS)) {
+      L = L + fb * PI * lb.c / pdf;
+    }
+  }
+  let ls = localSample(l, p, N);
+  if (max(ls.c.r, max(ls.c.g, ls.c.b)) <= 0.0) { return L; }
+  let f = brdf(s, N, V, ls.dir);
+  if (max(f.r, max(f.g, f.b)) > 0.0 && visible(p, ls.dir, ls.dist - EPS)) {
+    L = L + f * PI * ls.c / pdf;
+  }
+  return L;
+}
+
+// What a path from the eye along d brings back (rgb), and whether the eye saw anything (a).
+fn radiance(origin: vec3<f32>, dir: vec3<f32>) -> vec4<f32> {
+  var L = vec3<f32>(0.0);
+  var seen = 0.0;
+  var tp = vec3<f32>(1.0);
+  var o = origin;
+  var d = dir;
+  let clampTo = params.eye.w;
+  for (var b = 0u; b <= params.info.x; b = b + 1u) {
+    let h = trace(o, d, FAR, false);
+    var add = vec3<f32>(0.0);
+    if (h.tri < 0) {
+      if (b > 0u) { add = tp * skyRadiance(d); }
+      else if (params.extra.y > 0u) { add = skyRadiance(d); seen = 1.0; }
+    } else {
+      if (b == 0u) { seen = 1.0; }
+    }
+    if (h.tri < 0) {
+      if (clampTo > 0.0 && b > 0u) { add = add * min(1.0, clampTo / max(lum(add), 1e-6)); }
+      L = L + add;
+      break;
+    }
+    let i = u32(h.tri);
+    var s = surfaceAt(i, h.b);
+    let V = -d;
+    var ng = normalize(cross(tri(i, 1u).xyz, tri(i, 2u).xyz));
+    if (dot(ng, V) < 0.0) { ng = -ng; } // two-sided, as the renderer's surfaces are
+    let w = vec3<f32>(1.0 - h.b.x - h.b.y, h.b.x, h.b.y);
+    var N = attr(i, 0u).xyz * w.x + attr(i, 1u).xyz * w.y + attr(i, 2u).xyz * w.z;
+    if (dot(N, N) < 1e-8) { N = ng; } else { N = normalize(N); }
+    if (dot(N, ng) < 0.0) { N = -N; }
+    if (dot(N, V) <= 0.0) { N = ng; }
+    let p = o + d * h.t + ng * EPS;
+    // What depends on N\xB7V (F1d): the film's reflectance, and what the sheen leaves the base.
+    let ndv0 = max(1e-4, dot(N, V));
+    if (s.pbr && s.irid > 0.0) { s.f0 = mix(s.f0, iridescenceFresnel(ndv0, s.f0, s.iridIor, s.iridThickness), s.irid); }
+    if (s.pbr) { s.sheenScale = 1.0 - max(s.sheen.r, max(s.sheen.g, s.sheen.b)) * sheenE(ndv0, s.sheenRough); }
+    let pBack = o + d * h.t - ng * EPS;
+    add = s.emission + directLight(s, p, N, V, pBack);
+    add = tp * add;
+    if (clampTo > 0.0 && b > 0u) { add = add * min(1.0, clampTo / max(lum(add), 1e-6)); }
+    L = L + add;
+    if (b == params.info.x) { break; }
+    let ndv = ndv0;
+    // Transmission (F1d): as often as the surface lets light through, the path goes on through it, unbent
+    // (as the renderer shows what's behind), tinted by the base colour and the volume.
+    let pt = select(0.0, min(0.9, s.transmission * (1.0 - s.metal)), s.pbr);
+    if (pt > 0.0 && rand() < pt) {
+      let e = specularEnergy(s.f0, dfgAt(ndv, s.rough));
+      tp = tp * s.transmission * (1.0 - s.metal) * (vec3<f32>(1.0) - e) * s.albedo * s.absorb * s.sheenScale / pt;
+      o = o + d * h.t - ng * EPS;
+      continue;
+    }
+    tp = tp / (1.0 - pt);
+    // A thin surface's transmission (F1d-2): as often as it lets light through, the bounce goes out its far side.
+    let pd = select(0.0, min(0.5, s.dt), s.dt > 0.0);
+    if (pd > 0.0 && rand() < pd) {
+      let back = cosineDir(-N, vec2<f32>(rand(), rand()));
+      // f \xB7 |cos| over (pd \xB7 |cos| / \u03C0).
+      tp = tp * brdf(s, N, V, back) * PI / pd;
+      o = pBack;
+      d = back;
+      continue;
+    }
+    tp = tp / (1.0 - pd);
+    // A bounce: the specular by its visible normals, or the diffuse by the cosine.
+    let ps = specularChance(s, ndv);
+    var next: vec3<f32>;
+    if (rand() < ps) {
+      let fr = frameOf(N);
+      let Ve = transpose(fr) * V;
+      let He = sampleVndf(Ve, s.rough * s.rough, vec2<f32>(rand(), rand()));
+      next = reflect(-V, fr * He);
+    } else {
+      next = cosineDir(N, vec2<f32>(rand(), rand()));
+    }
+    let pdf = bouncePdf(s, N, V, next, ps);
+    if (pdf <= 0.0 || dot(next, ng) <= 0.0) { break; }
+    tp = tp * brdf(s, N, V, next) * dot(N, next) / pdf;
+    if (b >= 2u) {
+      let survive = clamp(max(tp.r, max(tp.g, tp.b)), 0.05, 0.95);
+      if (rand() > survive) { break; }
+      tp = tp / survive;
+    }
+    if (max(tp.r, max(tp.g, tp.b)) <= 0.0) { break; }
+    o = p;
+    d = next;
+  }
+  return vec4<f32>(L, seen);
+}
+
+fn unproject(ndc: vec2<f32>) -> vec3<f32> {
+  let p = params.invViewProj * vec4<f32>(ndc, 0.5, 1.0);
+  return p.xyz / p.w;
+}
+
+@compute @workgroup_size(${WORKGROUP4}, ${WORKGROUP4})
+fn main(@builtin(global_invocation_id) id: vec3<u32>) {
+  if (id.x >= params.run.x || id.y >= params.run.y) { return; }
+  let px = params.image.z + id.x;
+  let py = params.image.w + id.y;
+  let size = vec2<f32>(f32(params.image.x), f32(params.image.y));
+  let pixel = py * params.image.x + px;
+  var sum = vec4<f32>(0.0);
+  for (var k = 0u; k < params.run.w; k = k + 1u) {
+    let sIndex = params.run.z + k;
+    rng = pcg(pixel ^ pcg(sIndex * 0x9e3779b9u + 0x632be5abu));
+    let jitter = vec2<f32>(rand(), rand());
+    let ndc = vec2<f32>((f32(px) + jitter.x) / size.x * 2.0 - 1.0, 1.0 - (f32(py) + jitter.y) / size.y * 2.0);
+    let far = params.invViewProj * vec4<f32>(ndc, 0.5, 1.0);
+    var d = normalize(far.xyz / far.w - params.eye.xyz);
+    var o = params.eye.xyz;
+    if (params.lens.x > 0.0) {
+      // A thin lens: rays through a disc of the aperture meet again on the focus plane.
+      let forward = normalize(unproject(vec2<f32>(0.0, 0.0)) - o);
+      let right = normalize(unproject(vec2<f32>(1.0, 0.0)) - unproject(vec2<f32>(-1.0, 0.0)));
+      let up = cross(right, forward);
+      let focal = o + d * (params.lens.y / max(1e-4, dot(d, forward)));
+      let r = sqrt(rand()) * params.lens.x;
+      let a = 6.2831853 * rand();
+      o = o + (right * cos(a) + up * sin(a)) * r;
+      d = normalize(focal - o);
+    }
+    sum = sum + radiance(o, d);
+  }
+  let j = id.y * params.run.x + id.x;
+  accum[j] = accum[j] + sum;
+}
+`
+);
+var PATH_RESOLVE_WGSL = (
+  /* wgsl */
+  `
+@group(0) @binding(0) var<storage, read> accum: array<vec4<f32>>;
+@group(0) @binding(1) var frame: texture_storage_2d<rgba16float, write>;
+@group(0) @binding(2) var<uniform> info: vec4<u32>; // x, y = size, z = samples
+@compute @workgroup_size(${WORKGROUP4}, ${WORKGROUP4})
+fn resolve(@builtin(global_invocation_id) id: vec3<u32>) {
+  if (id.x >= info.x || id.y >= info.y) { return; }
+  let n = max(1.0, f32(info.z));
+  let v = accum[id.y * info.x + id.x] / n;
+  textureStore(frame, vec2<i32>(id.xy), vec4<f32>(min(v.rgb, vec3<f32>(60000.0)), v.a));
+}
+`
+);
+function referenceLights(draw) {
+  if (draw.lights && draw.lights.length > 0) return packBakeLights(bakeLights(draw.lights));
+  const light = resolveLight(draw.lightDirection, draw.ambient);
+  return packBakeLights([{ direction: light.direction, radiance: [1, 1, 1] }]);
+}
+function referenceAmbient(draw) {
+  const a = resolveLight(draw.lightDirection, draw.ambient).ambient;
+  return a <= 0.04045 ? a / 12.92 : ((a + 0.055) / 1.055) ** 2.4;
+}
+function pathTraceParams(camera, image, firstSample, samples, setup) {
+  const buffer = new ArrayBuffer(PARAMS_BYTES2);
+  const f3 = new Float32Array(buffer);
+  const u = new Uint32Array(buffer);
+  f3.set(camera.inv, 0);
+  f3.set([...camera.eye, setup.clamp], 16);
+  u.set([Math.min(LIGHTMAP_MAX_BOUNCES, Math.max(0, Math.round(setup.bounces))), setup.lights.directional, setup.sky?.width ?? 0, setup.sky?.height ?? 0], 20);
+  u.set([image.width, image.height, image.x, image.y], 24);
+  u.set([image.tileWidth, image.tileHeight, firstSample, samples], 28);
+  u.set([setup.lights.local, setup.background ? 1 : 0, setup.mapTable, 0], 32);
+  f3.set([setup.ambient, setup.ambient, setup.ambient, 0], 36);
+  if (camera.lens && camera.lens.aperture > 0) f3.set([camera.lens.aperture, Math.max(0.01, camera.lens.focus), 0, 0], 40);
+  return buffer;
+}
+var TracerCore = class {
+  constructor(device) {
+    this.device = device;
+    this.pipeline = null;
+    this.resolvePipeline = null;
+    this.scene = null;
+    this.skyFor = { key: null, buffer: null, panorama: null };
+    this.lightBuffer = null;
+    const table2 = brdfLut();
+    this.dfg = device.createBuffer({ size: table2.byteLength, usage: STORAGE5 | COPY_DST7 });
+    device.queue.writeBuffer(this.dfg, 0, table2);
+  }
+  get tracePipeline() {
+    this.pipeline ?? (this.pipeline = this.device.createComputePipeline({ layout: "auto", compute: { module: this.device.createShaderModule({ code: PATH_TRACE_WGSL }), entryPoint: "main" } }));
+    return this.pipeline;
+  }
+  get resolver() {
+    this.resolvePipeline ?? (this.resolvePipeline = this.device.createComputePipeline({ layout: "auto", compute: { module: this.device.createShaderModule({ code: PATH_RESOLVE_WGSL }), entryPoint: "resolve" } }));
+    return this.resolvePipeline;
+  }
+  storage(data) {
+    const buffer = this.device.createBuffer({ size: Math.max(16, Math.ceil(data.byteLength / 16) * 16), usage: STORAGE5 | COPY_DST7 });
+    this.device.queue.writeBuffer(buffer, 0, data.buffer, data.byteOffset, data.byteLength);
+    return buffer;
+  }
+  /** The scene's buffers for `instances`, packed again only when its key changes. Returns whether it did. */
+  setScene(instances, key2 = referenceSceneKey(instances)) {
+    if (this.scene?.key === key2) return false;
+    for (const b of this.scene?.buffers ?? []) b.destroy();
+    const packed = packReferenceScene(instances);
+    this.scene = { key: key2, buffers: [packed.nodes, packed.prims, packed.mats, packed.texels].map((d) => this.storage(d)), mapTable: packed.mapTable };
+    return true;
+  }
+  get mapTable() {
+    return this.scene?.mapTable ?? 0;
+  }
+  /** The sky's panorama for `environment` (null: the flat ambient), uploaded once per environment. */
+  setSky(environment) {
+    const key2 = environment ? environmentKey(environment) : null;
+    const same = (a, b) => a === null || b === null ? a === b : a.length === b.length && a.every((v, i) => v === b[i]);
+    if (this.skyFor.buffer && same(this.skyFor.key, key2)) return this.skyFor.panorama;
+    this.skyFor.buffer?.destroy();
+    const panorama = environment ? environmentPanorama(environment) : null;
+    this.skyFor = { key: key2, panorama, buffer: this.storage(panorama?.data ?? new Float32Array(4)) };
+    return panorama;
+  }
+  setLights(data) {
+    this.lightBuffer?.destroy();
+    this.lightBuffer = this.storage(data);
+  }
+  /** The trace's bind group against `accum` and `params`. */
+  traceGroup(accum, params) {
+    const [nodes, prims, mats, texels] = this.scene.buffers;
+    const buffers = [nodes, prims, mats, texels, this.lightBuffer, this.skyFor.buffer, accum, params, this.dfg];
+    return this.device.createBindGroup({ layout: this.tracePipeline.getBindGroupLayout(0), entries: buffers.map((buffer, binding) => ({ binding, resource: { buffer } })) });
+  }
+  destroy() {
+    for (const b of this.scene?.buffers ?? []) b.destroy();
+    this.skyFor.buffer?.destroy();
+    this.lightBuffer?.destroy();
+    this.dfg.destroy();
+    this.scene = null;
+  }
+};
+function cameraOf(draw) {
+  const inv = invertMat4(multiplyMat46(draw.projection, draw.view)) ?? new Array(16).fill(0);
+  return { inv, eye: cameraPositionFromView3(draw.view), lens: draw.lens ?? null };
+}
+function drawKey(draw, width, height, settings) {
+  const env = draw.environment ? environmentKey(draw.environment).map((v) => typeof v === "object" && v !== null ? objectId(v) : v) : null;
+  return JSON.stringify([width, height, draw.view, draw.projection, draw.lightDirection ?? null, draw.ambient ?? null, draw.lights ?? null, draw.lens ?? null, env, settings.bounces ?? REFERENCE_BOUNCES, settings.clamp ?? 0, settings.background ?? false]);
+}
+var PathTracer = class _PathTracer {
+  constructor(device) {
+    this.device = device;
+    this.accum = null;
+    this.frame = null;
+    this.size = { width: 0, height: 0 };
+    this.key = "";
+    /** Samples each pixel holds. */
+    this.samples = 0;
+    this.core = new TracerCore(device);
+    this.params = device.createBuffer({ size: PARAMS_BYTES2, usage: UNIFORM7 | COPY_DST7 });
+    this.resolveInfo = device.createBuffer({ size: 16, usage: UNIFORM7 | COPY_DST7 });
+  }
+  static create(device) {
+    return new _PathTracer(device);
+  }
+  /** Start accumulating again. */
+  reset() {
+    this.samples = 0;
+    this.key = "";
+  }
+  ensureTargets(width, height) {
+    if (this.size.width === width && this.size.height === height && this.accum) return;
+    this.accum?.destroy();
+    this.frame?.destroy();
+    this.accum = this.device.createBuffer({ size: width * height * 16, usage: STORAGE5 | COPY_DST7 | COPY_SRC4 });
+    this.frame = this.device.createTexture({ size: { width, height }, format: "rgba16float", usage: TEXTURE_BINDING4 | STORAGE_BINDING3 | TEXTURE_COPY_SRC });
+    this.size = { width, height };
+    this.samples = 0;
+  }
+  /**
+   * Add a frame's samples of `instances` seen through `draw` at `width × height`,
+   * and return the mean so far: an rgba16float texture, premultiplied, alpha
+   * 0 where the eye saw nothing (unless `background`).
+   */
+  render(instances, draw, width, height, settings = {}) {
+    this.ensureTargets(width, height);
+    const sceneChanged = this.core.setScene(instances);
+    const key2 = drawKey(draw, width, height, settings);
+    if (sceneChanged || key2 !== this.key) {
+      this.key = key2;
+      this.samples = 0;
+      this.core.setLights(referenceLights(draw).data);
+    }
+    const maxSamples = settings.maxSamples ?? 4096;
+    const encoder = this.device.createCommandEncoder();
+    if (this.samples === 0) encoder.clearBuffer(this.accum);
+    const take = Math.max(0, Math.min(settings.samplesPerFrame ?? 1, maxSamples - this.samples));
+    if (take > 0) {
+      const camera = cameraOf(draw);
+      const lights = referenceLights(draw);
+      const sky = this.core.setSky(draw.environment);
+      const setup = { bounces: settings.bounces ?? REFERENCE_BOUNCES, sky, lights, ambient: referenceAmbient(draw), clamp: settings.clamp ?? 0, background: settings.background ?? false, mapTable: this.core.mapTable };
+      const params = pathTraceParams(camera, { width, height, x: 0, y: 0, tileWidth: width, tileHeight: height }, this.samples, take, setup);
+      this.device.queue.writeBuffer(this.params, 0, params);
+      const pass = encoder.beginComputePass();
+      pass.setPipeline(this.core.tracePipeline);
+      pass.setBindGroup(0, this.core.traceGroup(this.accum, this.params));
+      pass.dispatchWorkgroups(Math.ceil(width / WORKGROUP4), Math.ceil(height / WORKGROUP4));
+      pass.end();
+      this.samples += take;
+    }
+    this.device.queue.writeBuffer(this.resolveInfo, 0, new Uint32Array([width, height, this.samples, 0]));
+    const resolve = encoder.beginComputePass();
+    resolve.setPipeline(this.core.resolver);
+    resolve.setBindGroup(
+      0,
+      this.device.createBindGroup({
+        layout: this.core.resolver.getBindGroupLayout(0),
+        entries: [
+          { binding: 0, resource: { buffer: this.accum } },
+          { binding: 1, resource: this.frame.createView() },
+          { binding: 2, resource: { buffer: this.resolveInfo } }
+        ]
+      })
+    );
+    resolve.dispatchWorkgroups(Math.ceil(width / WORKGROUP4), Math.ceil(height / WORKGROUP4));
+    resolve.end();
+    this.device.queue.submit([encoder.finish()]);
+    return this.frame;
+  }
+  destroy() {
+    this.core.destroy();
+    this.accum?.destroy();
+    this.frame?.destroy();
+    this.params.destroy();
+    this.resolveInfo.destroy();
+  }
+};
+async function captureReference(device, instances, draw, options) {
+  const width = Math.max(1, Math.min(MAX_CAPTURE_SIDE, Math.round(options.width)));
+  const height = Math.max(1, Math.min(MAX_CAPTURE_SIDE, Math.round(options.height)));
+  const samples = Math.max(1, Math.round(options.samples ?? 256));
+  const tile = Math.max(WORKGROUP4, Math.min(2048, Math.round(options.tile ?? 512)));
+  const core = new TracerCore(device);
+  core.setScene(instances);
+  const sky = core.setSky(draw.environment);
+  const lights = referenceLights(draw);
+  core.setLights(lights.data);
+  const camera = cameraOf(draw);
+  const setup = { bounces: options.bounces ?? REFERENCE_BOUNCES, sky, lights, ambient: referenceAmbient(draw), clamp: options.clamp ?? 0, background: options.background ?? true, mapTable: core.mapTable };
+  const accum = device.createBuffer({ size: tile * tile * 16, usage: STORAGE5 | COPY_DST7 | COPY_SRC4 });
+  const params = device.createBuffer({ size: PARAMS_BYTES2, usage: UNIFORM7 | COPY_DST7 });
+  const readback = device.createBuffer({ size: tile * tile * 16, usage: MAP_READ2 | COPY_DST7 });
+  const rgba = new Uint8ClampedArray(width * height * 4);
+  const hdr = options.hdr ? new Float32Array(width * height * 4) : null;
+  const exposure = options.exposure ?? 1;
+  const mapper = options.toneMapper ?? "aces";
+  const tilesX = Math.ceil(width / tile);
+  const tilesY = Math.ceil(height / tile);
+  let done = 0;
+  try {
+    for (let ty = 0; ty < tilesY; ty += 1) {
+      for (let tx = 0; tx < tilesX; tx += 1) {
+        const x = tx * tile;
+        const y = ty * tile;
+        const tw = Math.min(tile, width - x);
+        const th = Math.min(tile, height - y);
+        const perSubmit = Math.max(1, Math.floor(CAPTURE_PATHS_PER_SUBMIT / (tw * th)));
+        const clear = device.createCommandEncoder();
+        clear.clearBuffer(accum);
+        device.queue.submit([clear.finish()]);
+        const group = core.traceGroup(accum, params);
+        for (let first = 0; first < samples; first += perSubmit) {
+          const take = Math.min(perSubmit, samples - first);
+          device.queue.writeBuffer(params, 0, pathTraceParams(camera, { width, height, x, y, tileWidth: tw, tileHeight: th }, first, take, setup));
+          const encoder = device.createCommandEncoder();
+          const pass = encoder.beginComputePass();
+          pass.setPipeline(core.tracePipeline);
+          pass.setBindGroup(0, group);
+          pass.dispatchWorkgroups(Math.ceil(tw / WORKGROUP4), Math.ceil(th / WORKGROUP4));
+          pass.end();
+          device.queue.submit([encoder.finish()]);
+          await device.queue.onSubmittedWorkDone();
+          done += take * tw * th;
+          options.progress?.(done / (samples * width * height));
+        }
+        const copy = device.createCommandEncoder();
+        copy.copyBufferToBuffer(accum, 0, readback, 0, tw * th * 16);
+        device.queue.submit([copy.finish()]);
+        await readback.mapAsync(MAP_READ2, 0, tw * th * 16);
+        const sums = new Float32Array(readback.getMappedRange(0, tw * th * 16).slice(0));
+        readback.unmap();
+        for (let j = 0; j < th; j += 1) {
+          for (let i = 0; i < tw; i += 1) {
+            const s = (j * tw + i) * 4;
+            const o = ((y + j) * width + (x + i)) * 4;
+            const c = [sums[s] / samples, sums[s + 1] / samples, sums[s + 2] / samples];
+            const a = sums[s + 3] / samples;
+            if (hdr) hdr.set([c[0], c[1], c[2], a], o);
+            const shown = toneMap(mapper, [c[0] * exposure, c[1] * exposure, c[2] * exposure]);
+            rgba[o] = Math.round(srgbEncode(shown[0]) * 255);
+            rgba[o + 1] = Math.round(srgbEncode(shown[1]) * 255);
+            rgba[o + 2] = Math.round(srgbEncode(shown[2]) * 255);
+            rgba[o + 3] = Math.round(Math.min(1, a) * 255);
+          }
+        }
+      }
+    }
+  } finally {
+    core.destroy();
+    accum.destroy();
+    params.destroy();
+    readback.destroy();
+  }
+  return { width, height, rgba, hdr };
+}
+
 // src/render/probeCapture.ts
+import { MAX_REFLECTION_PROBES as MAX_REFLECTION_PROBES3, PANORAMA_FACES, probeOrder, projectionMatrix as projectionMatrix3, viewMatrix as viewMatrix4 } from "@cartbox/editor";
 var PROBE_FACE = 128;
 var PROBE_SAMPLES = 96;
 var PROBE_NEAR = 0.05;
@@ -18708,6 +26023,8 @@ var ProbeCapture = class {
         prepass: false,
         tonemap: null,
         reflectionCapture: null,
+        // The live GI's volume is the main renderer's; a capture takes the probes' light as they were given.
+        dynamicGi: null,
         environment: draw.environment ? { ...draw.environment, probes: null } : null,
         ...draw.sunShadow ? { sunShadow: { ...draw.sunShadow, casters: instances } } : {},
         ...draw.localShadowCasters ? { localShadowCasters: instances, localShadowKey: `probe:${this.key}`, localShadowMoved: [] } : {}
@@ -19194,8 +26511,2440 @@ fn accumulate(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
   );
 }
 
+// src/render/hizReflections.ts
+var HIZ_MAX_DISTANCE = 120;
+var HIZ_THICKNESS = 0.3;
+var HIZ_MAX_ROUGHNESS = 0.8;
+var HIZ_MAX_ITERATIONS = 96;
+var HIZ_MAX_LEVELS = 10;
+var HIZ_UNIFORM_FLOATS = 56;
+function hizLevels(width, height) {
+  return Math.min(HIZ_MAX_LEVELS, Math.floor(Math.log2(Math.max(1, width, height))) + 1);
+}
+function hizUniforms(view, projection, frame, levels, traced, history, out = new Float32Array(HIZ_UNIFORM_FLOATS)) {
+  out.set(projection, 0);
+  out.set(invertMat4(projection) ?? projection, 16);
+  out.set(view, 32);
+  out.set([HIZ_MAX_DISTANCE, HIZ_THICKNESS, HIZ_MAX_ROUGHNESS, frame % 1024], 48);
+  out.set([levels, traced ? 1 : 0, history ? 1 : 0, HIZ_MAX_ITERATIONS], 52);
+  return out;
+}
+var VS2 = (
+  /* wgsl */
+  `
+@vertex
+fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4<f32> {
+  let p = vec2<f32>(f32((i << 1u) & 2u), f32(i & 2u));
+  return vec4<f32>(p * 2.0 - 1.0, 0.0, 1.0);
+}
+`
+);
+function hizCopyWgsl(multisampled) {
+  return (
+    /* wgsl */
+    `${VS2}
+@group(0) @binding(0) var depth: ${multisampled ? "texture_depth_multisampled_2d" : "texture_depth_2d"};
+@fragment
+fn copyDepth(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
+  return vec4<f32>(textureLoad(depth, vec2<i32>(frag.xy), 0), 0.0, 0.0, 1.0);
+}
+`
+  );
+}
+var HIZ_REDUCE_WGSL = (
+  /* wgsl */
+  `${VS2}
+@group(0) @binding(0) var above: texture_2d<f32>;
+@fragment
+fn reduce(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
+  let size = vec2<i32>(textureDimensions(above));
+  let p = vec2<i32>(frag.xy) * 2;
+  // An odd row or column at the edge belongs to the last texel, so nothing falls between the cells.
+  let ex = select(1, 2, p.x + 3 == size.x);
+  let ey = select(1, 2, p.y + 3 == size.y);
+  var z = 1.0;
+  for (var y = 0; y <= ey; y += 1) {
+    for (var x = 0; x <= ex; x += 1) {
+      z = min(z, textureLoad(above, min(p + vec2<i32>(x, y), size - 1), 0).r);
+    }
+  }
+  return vec4<f32>(z, 0.0, 0.0, 1.0);
+}
+`
+);
+var SHARED2 = (
+  /* wgsl */
+  `
+struct Hiz { proj: mat4x4<f32>, invProj: mat4x4<f32>, view: mat4x4<f32>, params: vec4<f32>, params2: vec4<f32> };
+@group(0) @binding(0) var<uniform> hz: Hiz;
+${VS2}
+fn octDecode(e: vec2<f32>) -> vec3<f32> {
+  var n = vec3<f32>(e.x, e.y, 1.0 - abs(e.x) - abs(e.y));
+  let t = max(-n.z, 0.0);
+  n.x = n.x + select(t, -t, n.x >= 0.0);
+  n.y = n.y + select(t, -t, n.y >= 0.0);
+  return normalize(n);
+}
+// A pixel's position in view space, from a screen point (pixels) and its NDC depth.
+fn unproject(s: vec2<f32>, z: f32, size: vec2<f32>) -> vec3<f32> {
+  let ndc = vec2<f32>(s.x / size.x * 2.0 - 1.0, 1.0 - s.y / size.y * 2.0);
+  let v = hz.invProj * vec4<f32>(ndc, z, 1.0);
+  return v.xyz / v.w;
+}
+`
+);
+var HIZ_TRACE_WGSL = (
+  /* wgsl */
+  `${SHARED2}
+@group(0) @binding(1) var colour: texture_2d<f32>;
+@group(0) @binding(2) var hiz: texture_2d<f32>;
+@group(0) @binding(3) var gbuffer: texture_2d<f32>;
+@group(0) @binding(4) var reflectMap: texture_2d<f32>;
+@group(0) @binding(5) var traced: texture_2d<f32>;
+
+// Where a view-space point lands: pixels (x, y) and NDC depth, w < 0 behind the camera.
+fn screenOf(q: vec3<f32>, size: vec2<f32>) -> vec4<f32> {
+  let c = hz.proj * vec4<f32>(q, 1.0);
+  if (c.w <= 1e-5) { return vec4<f32>(0.0, 0.0, 0.0, -1.0); }
+  return vec4<f32>((c.x / c.w * 0.5 + 0.5) * size.x, (0.5 - c.y / c.w * 0.5) * size.y, c.z / c.w, 1.0);
+}
+
+// A microfacet normal from GGX's visible normals (Heitz 2018), in the frame where the normal is +z.
+fn sampleVndf(Ve: vec3<f32>, alpha: f32, u1: f32, u2: f32) -> vec3<f32> {
+  let Vh = normalize(vec3<f32>(alpha * Ve.x, alpha * Ve.y, Ve.z));
+  let lensq = Vh.x * Vh.x + Vh.y * Vh.y;
+  let T1 = select(vec3<f32>(1.0, 0.0, 0.0), vec3<f32>(-Vh.y, Vh.x, 0.0) / sqrt(max(lensq, 1e-12)), lensq > 1e-12);
+  let T2 = cross(Vh, T1);
+  let r = sqrt(u1);
+  let phi = 6.2831853 * u2;
+  let t1 = r * cos(phi);
+  let s = 0.5 * (1.0 + Vh.z);
+  let t2 = (1.0 - s) * sqrt(max(0.0, 1.0 - t1 * t1)) + s * (r * sin(phi));
+  let Nh = t1 * T1 + t2 * T2 + sqrt(max(0.0, 1.0 - t1 * t1 - t2 * t2)) * Vh;
+  return normalize(vec3<f32>(alpha * Nh.x, alpha * Nh.y, max(0.0, Nh.z)));
+}
+
+@fragment
+fn trace(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
+  let isize = vec2<i32>(textureDimensions(colour));
+  let size = vec2<f32>(isize);
+  let p = vec2<i32>(frag.xy);
+  let refl = textureLoad(reflectMap, p, 0);
+  let rough = refl.a;
+  let maxRough = hz.params.z;
+  var fallback = vec4<f32>(0.0);
+  if (hz.params2.y > 0.5) { fallback = vec4<f32>(textureLoad(traced, p / 2, 0).rgb, 1.0); }
+  if (max(refl.r, max(refl.g, refl.b)) < 0.002 || rough > maxRough) { return vec4<f32>(0.0); }
+  let z0 = textureLoad(hiz, p, 0).r;
+  if (z0 >= 1.0) { return vec4<f32>(0.0); }
+  let P = unproject(frag.xy, z0, size);
+  let rot = mat3x3<f32>(hz.view[0].xyz, hz.view[1].xyz, hz.view[2].xyz);
+  var N = normalize(rot * octDecode(textureLoad(gbuffer, p, 0).xy));
+  let V = normalize(-P);
+  if (dot(N, V) < 0.0) { N = -N; }
+  // The ray: the view reflected about a visible microfacet normal for the roughness.
+  var H = N;
+  let alpha = rough * rough;
+  if (alpha > 0.0025) {
+    let shift = hz.params.w * 5.588238;
+    let u1 = fract(52.9829189 * fract(dot(frag.xy + shift, vec2<f32>(0.06711056, 0.00583715))));
+    let u2 = fract(52.9829189 * fract(dot(frag.xy + vec2<f32>(23.0, 71.0) + shift * 1.3, vec2<f32>(0.06711056, 0.00583715))));
+    let up = select(vec3<f32>(0.0, 1.0, 0.0), vec3<f32>(1.0, 0.0, 0.0), abs(N.y) > 0.9);
+    let T = normalize(cross(up, N));
+    let B = cross(N, T);
+    let Ve = vec3<f32>(dot(V, T), dot(V, B), dot(V, N));
+    let h = sampleVndf(Ve, alpha, u1, u2);
+    H = normalize(T * h.x + B * h.y + N * h.z);
+  }
+  let R = reflect(-V, H);
+  if (dot(R, N) <= 0.0) { return fallback; }
+  // The ray's end: its reach, or short of the near plane (the camera looks down \u2212z).
+  let near = -unproject(size * 0.5, 0.0, size).z;
+  var reach = hz.params.x;
+  if (R.z > 1e-4) { reach = min(reach, (-near * 1.001 - P.z) / R.z); }
+  let s0 = vec4<f32>(frag.xy, z0, 1.0);
+  let s1 = screenOf(P + R * reach, size);
+  if (s1.w < 0.0) { return fallback; }
+  // In screen space NDC depth runs linear along the ray; clip it to the screen.
+  var d = s1.xyz - s0.xyz;
+  var tEnd = 1.0;
+  if (d.x > 1e-4) { tEnd = min(tEnd, (size.x - 0.5 - s0.x) / d.x); }
+  if (d.x < -1e-4) { tEnd = min(tEnd, (0.5 - s0.x) / d.x); }
+  if (d.y > 1e-4) { tEnd = min(tEnd, (size.y - 0.5 - s0.y) / d.y); }
+  if (d.y < -1e-4) { tEnd = min(tEnd, (0.5 - s0.y) / d.y); }
+  let span = length(d.xy);
+  if (span < 1.0) { return fallback; }
+  let levels = i32(hz.params2.x);
+  // Off its own pixel before testing.
+  var t = 1.5 / span;
+  var level = 0;
+  var hitT = -1.0;
+  let iterations = i32(hz.params2.w);
+  for (var i = 0; i < iterations; i += 1) {
+    if (t > tEnd) { break; }
+    let pos = s0.xyz + d * t;
+    let cell = f32(1 << u32(level));
+    let c = floor(pos.xy / cell);
+    // The ray's leaving this cell: the nearer of its x and y walls.
+    var tx = 1e9;
+    var ty = 1e9;
+    if (abs(d.x) > 1e-6) { tx = ((c.x + select(0.0, 1.0, d.x > 0.0)) * cell - s0.x) / d.x; }
+    if (abs(d.y) > 1e-6) { ty = ((c.y + select(0.0, 1.0, d.y > 0.0)) * cell - s0.y) / d.y; }
+    let tExit = min(min(tx, ty) + 1e-4 / span, tEnd);
+    let mip = vec2<i32>(textureDimensions(hiz, level));
+    let zMin = textureLoad(hiz, clamp(vec2<i32>(c), vec2<i32>(0), mip - 1), level).r;
+    let zOut = s0.z + d.z * tExit;
+    if (max(pos.z, zOut) < zMin) {
+      // Wholly in front of everything in the cell: past it, and coarser.
+      t = tExit;
+      level = min(level + 1, levels - 1);
+      continue;
+    }
+    if (level > 0) { level -= 1; continue; }
+    // At the finest level the ray reaches the surface's depth here: in front of it by no more than a thickness?
+    let tz = select(t, clamp((zMin - s0.z) / d.z, t, tExit), d.z > 1e-9);
+    let at = s0.xyz + d * tz;
+    let surface = unproject(at.xy, zMin, size);
+    let ray = unproject(at.xy, at.z, size);
+    let behind = surface.z - ray.z;
+    if (behind > -1e-3 && behind < hz.params.y + 0.01 * length(ray)) { hitT = tz; break; }
+    t = tExit;
+  }
+  if (hitT < 0.0) { return fallback; }
+  let hitAt = s0.xyz + d * hitT;
+  let hit = clamp(vec2<i32>(hitAt.xy), vec2<i32>(0), isize - 1);
+  // A hit on a surface's back shows nothing true.
+  let hitN = normalize(rot * octDecode(textureLoad(gbuffer, hit, 0).xy));
+  if (dot(hitN, R) > 0.2) { return fallback; }
+  let edge = clamp(min(min(hitAt.x, size.x - hitAt.x) / (0.1 * size.x), min(hitAt.y, size.y - hitAt.y) / (0.1 * size.y)), 0.0, 1.0);
+  let travelled = length(unproject(hitAt.xy, hitAt.z, size) - P) / hz.params.x;
+  let confidence = edge
+    * (1.0 - smoothstep(0.7, 1.0, travelled))
+    * (1.0 - smoothstep(0.4, 0.9, R.z));
+  let seen = textureLoad(colour, hit, 0).rgb;
+  if (hz.params2.y > 0.5) { return vec4<f32>(mix(fallback.rgb, seen, confidence), 1.0); }
+  return vec4<f32>(seen, confidence);
+}
+`
+);
+var HIZ_TEMPORAL_WGSL = (
+  /* wgsl */
+  `${SHARED2}
+@group(0) @binding(1) var current: texture_2d<f32>;
+@group(0) @binding(2) var history: texture_2d<f32>;
+@group(0) @binding(3) var velocity: texture_2d<f32>;
+@group(0) @binding(4) var reflectMap: texture_2d<f32>;
+@group(0) @binding(5) var linearSamp: sampler;
+
+fn toneMap(c: vec4<f32>) -> vec4<f32> { return vec4<f32>(c.rgb / (1.0 + max(c.r, max(c.g, c.b))), c.a); }
+fn untoneMap(c: vec4<f32>) -> vec4<f32> { return vec4<f32>(c.rgb / max(1e-5, 1.0 - max(c.r, max(c.g, c.b))), c.a); }
+
+@fragment
+fn accumulate(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
+  let size = vec2<i32>(textureDimensions(current));
+  let p = vec2<i32>(frag.xy);
+  // Tone mapped (Karis), so one bright hit neither rules the average nor flickers.
+  let now = toneMap(textureLoad(current, p, 0));
+  var m1 = vec4<f32>(0.0);
+  var m2 = vec4<f32>(0.0);
+  for (var y = -1; y <= 1; y += 1) {
+    for (var x = -1; x <= 1; x += 1) {
+      let s = toneMap(textureLoad(current, clamp(p + vec2<i32>(x, y), vec2<i32>(0), size - 1), 0));
+      m1 = m1 + s;
+      m2 = m2 + s * s;
+    }
+  }
+  let mean = m1 / 9.0;
+  let spread = sqrt(max(m2 / 9.0 - mean * mean, vec4<f32>(0.0)));
+  let uv = (vec2<f32>(p) + 0.5) / vec2<f32>(size) - textureLoad(velocity, p, 0).xy;
+  if (hz.params2.z < 0.5 || any(uv < vec2<f32>(0.0)) || any(uv > vec2<f32>(1.0))) { return untoneMap(now); }
+  let then = toneMap(textureSampleLevel(history, linearSamp, uv, 0.0));
+  let rough = textureLoad(reflectMap, p, 0).a;
+  // Rougher surfaces are noisier and change less with the view: they keep more frames, and a wider box.
+  let gamma = mix(1.0, 2.5, smoothstep(0.05, 0.5, rough));
+  let held = clamp(then, min(mean - gamma * spread, now), max(mean + gamma * spread, now));
+  let blend = mix(0.3, 0.06, smoothstep(0.05, 0.5, rough));
+  return untoneMap(mix(held, now, blend));
+}
+`
+);
+var HIZ_RESOLVE_WGSL = (
+  /* wgsl */
+  `${SHARED2}
+@group(0) @binding(1) var colour: texture_2d<f32>;
+@group(0) @binding(2) var accumulated: texture_2d<f32>;
+@group(0) @binding(3) var hiz: texture_2d<f32>;
+@group(0) @binding(4) var gbuffer: texture_2d<f32>;
+@group(0) @binding(5) var reflectMap: texture_2d<f32>;
+@group(0) @binding(6) var envMap: texture_2d<f32>;
+
+const TAPS = array<vec2<f32>, 8>(
+  vec2<f32>(-0.326, -0.406), vec2<f32>(-0.840, -0.074), vec2<f32>(-0.696, 0.457), vec2<f32>(-0.203, 0.621),
+  vec2<f32>(0.962, -0.195), vec2<f32>(0.473, -0.480), vec2<f32>(0.519, 0.767), vec2<f32>(0.185, -0.893),
+);
+
+@fragment
+fn resolve(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
+  let isize = vec2<i32>(textureDimensions(colour));
+  let size = vec2<f32>(isize);
+  let p = vec2<i32>(frag.xy);
+  let c = textureLoad(colour, p, 0);
+  let refl = textureLoad(reflectMap, p, 0);
+  let w = refl.rgb;
+  let rough = refl.a;
+  if (max(w.r, max(w.g, w.b)) < 0.002 || rough > hz.params.z) { return c; }
+  let z = textureLoad(hiz, p, 0).r;
+  let P = unproject(frag.xy, z, size);
+  let N = octDecode(textureLoad(gbuffer, p, 0).xy);
+  var sum = textureLoad(accumulated, p, 0);
+  var rgb = sum.rgb * sum.a;
+  var conf = sum.a;
+  var total = 1.0;
+  // A disc that grows with the roughness, turned per pixel.
+  let radius = min(rough * 14.0, 7.0);
+  if (radius >= 0.75) {
+    let spin = 6.2831853 * fract(52.9829189 * fract(dot(frag.xy, vec2<f32>(0.06711056, 0.00583715))));
+    let cs = vec2<f32>(cos(spin), sin(spin));
+    for (var k = 0; k < 8; k += 1) {
+      let o = TAPS[k];
+      let q = clamp(vec2<i32>(frag.xy + vec2<f32>(o.x * cs.x - o.y * cs.y, o.x * cs.y + o.y * cs.x) * radius), vec2<i32>(0), isize - 1);
+      let qz = textureLoad(hiz, q, 0).r;
+      if (qz >= 1.0) { continue; }
+      let Q = unproject(vec2<f32>(q) + 0.5, qz, size);
+      let near = exp(-abs(Q.z - P.z) / (0.02 * abs(P.z) + 0.02));
+      let facing = pow(max(dot(octDecode(textureLoad(gbuffer, q, 0).xy), N), 0.0), 16.0);
+      let alike = exp(-abs(textureLoad(reflectMap, q, 0).a - rough) * 8.0);
+      let s = textureLoad(accumulated, q, 0);
+      let wt = near * facing * alike;
+      rgb = rgb + s.rgb * s.a * wt;
+      conf = conf + s.a * wt;
+      total = total + wt;
+    }
+  }
+  let L = rgb / max(conf, 1e-4);
+  let confidence = clamp(conf / total, 0.0, 1.0) * (1.0 - smoothstep(hz.params.z * 0.7, hz.params.z, rough));
+  let env = textureLoad(envMap, p, 0).rgb;
+  return vec4<f32>(max(c.rgb + confidence * (w * L - env), vec3<f32>(0.0)), c.a);
+}
+`
+);
+
+// src/render/virtualShadows.ts
+var VSM_LEVELS = 6;
+var VSM_PAGES = 128;
+var VSM_PAGE = 128;
+var VSM_TEXEL0 = 2e-3;
+var VSM_DEPTH_REACH = 1e3;
+var VSM_PAGES_PER_FRAME = 48;
+var VSM_FILTER_TEXELS = 12;
+var VSM_UNIFORM_FLOATS = 64;
+var VSM_MARK_WORDS = VSM_LEVELS * VSM_PAGES * VSM_PAGES / 32;
+function vsmTexel(level) {
+  return VSM_TEXEL0 * 2 ** level;
+}
+function vsmPageSize(level) {
+  return vsmTexel(level) * VSM_PAGE;
+}
+function vsmLightBasis(toLight) {
+  const lz = Math.hypot(toLight[0], toLight[1], toLight[2]) || 1;
+  const z = [toLight[0] / lz, toLight[1] / lz, toLight[2] / lz];
+  const up = Math.abs(z[1]) > 0.99 ? [0, 0, 1] : [0, 1, 0];
+  let x = [up[1] * z[2] - up[2] * z[1], up[2] * z[0] - up[0] * z[2], up[0] * z[1] - up[1] * z[0]];
+  const lx = Math.hypot(x[0], x[1], x[2]) || 1;
+  x = [x[0] / lx, x[1] / lx, x[2] / lx];
+  const y = [z[1] * x[2] - z[2] * x[1], z[2] * x[0] - z[0] * x[2], z[0] * x[1] - z[1] * x[0]];
+  return { x, y, z };
+}
+function vsmDepthCentre(eye, basis) {
+  const step = VSM_DEPTH_REACH / 4;
+  return Math.round((eye[0] * basis.z[0] + eye[1] * basis.z[1] + eye[2] * basis.z[2]) / step) * step;
+}
+function vsmWindows(eye, basis) {
+  const lx = eye[0] * basis.x[0] + eye[1] * basis.x[1] + eye[2] * basis.x[2];
+  const ly = eye[0] * basis.y[0] + eye[1] * basis.y[1] + eye[2] * basis.y[2];
+  return Array.from({ length: VSM_LEVELS }, (_, k) => {
+    const size = vsmPageSize(k);
+    return [Math.floor(lx / size) - VSM_PAGES / 2, Math.floor(ly / size) - VSM_PAGES / 2];
+  });
+}
+function vsmPageViewProj(level, gx, gy, basis, centre) {
+  const size = vsmPageSize(level);
+  const cx = (gx + 0.5) * size;
+  const cy = (gy + 0.5) * size;
+  const s = 2 / size;
+  const d = 1 / (2 * VSM_DEPTH_REACH);
+  const { x, y, z } = basis;
+  return Float32Array.from([
+    x[0] * s,
+    y[0] * s,
+    -z[0] * d,
+    0,
+    x[1] * s,
+    y[1] * s,
+    -z[1] * d,
+    0,
+    x[2] * s,
+    y[2] * s,
+    -z[2] * d,
+    0,
+    -cx * s,
+    -cy * s,
+    (centre + VSM_DEPTH_REACH) * d,
+    1
+  ]);
+}
+var keyOf = (level, gx, gy) => `${level}:${gx}:${gy}`;
+var VirtualPagePool = class {
+  constructor(capacity) {
+    this.capacity = capacity;
+    this.entries = /* @__PURE__ */ new Map();
+    this.free = [];
+    this.frame = 0;
+    this.key = null;
+    /** Whether the table needs building again (a page was given out, dropped or drawn, or a window moved). */
+    this.changed = true;
+    for (let i = capacity - 1; i >= 0; i -= 1) this.free.push(i);
+  }
+  /** Physical pages in use. */
+  get used() {
+    return this.entries.size;
+  }
+  /**
+   * A frame: `needed` the pages the marks asked for, `key` what the maps were
+   * drawn for (the light, the depth range, the still scene; a change makes
+   * every page draw again), `moving(page)` whether something that moves stands
+   * in a page now. Returns the pages to draw, at most `budget`, finest first.
+   */
+  update(needed, key2, moving, budget = VSM_PAGES_PER_FRAME) {
+    this.frame += 1;
+    if (key2 !== this.key) {
+      for (const e of this.entries.values()) e.valid = false;
+      this.key = key2;
+      this.changed = true;
+    }
+    const want = [];
+    for (const page of needed) {
+      const e = this.entries.get(keyOf(page.level, page.gx, page.gy)) ?? null;
+      if (e) e.needed = this.frame;
+      want.push({ e, page });
+    }
+    const draws = [];
+    for (const { e, page } of want) {
+      const now = moving(page);
+      if (!e || !e.valid || now || e.mover) draws.push({ page, e, moving: now });
+    }
+    draws.sort((a, b) => Number(a.e !== null && a.e.valid) - Number(b.e !== null && b.e.valid) || a.page.level - b.page.level);
+    const out = [];
+    for (const d of draws) {
+      if (out.length >= budget) break;
+      let e = d.e;
+      if (!e) {
+        const physical = this.take();
+        if (physical === null) continue;
+        e = { page: d.page, physical, needed: this.frame, valid: false, mover: false };
+        this.entries.set(keyOf(d.page.level, d.page.gx, d.page.gy), e);
+      }
+      e.valid = true;
+      e.mover = d.moving;
+      out.push({ ...d.page, physical: e.physical });
+      this.changed = true;
+    }
+    return out;
+  }
+  /** A free physical page, or the least recently needed one not needed this frame (null: the pool is full of this frame's). */
+  take() {
+    const free = this.free.pop();
+    if (free !== void 0) return free;
+    let oldest = null;
+    let at = Infinity;
+    for (const [k, e2] of this.entries) {
+      if (e2.needed < this.frame && e2.needed < at) {
+        at = e2.needed;
+        oldest = k;
+      }
+    }
+    if (oldest === null) return null;
+    const e = this.entries.get(oldest);
+    this.entries.delete(oldest);
+    this.changed = true;
+    return e.physical;
+  }
+  /** The physical page holding a good map of `page`, or null. */
+  resident(page) {
+    const e = this.entries.get(keyOf(page.level, page.gx, page.gy));
+    return e && e.valid ? e.physical : null;
+  }
+  /**
+   * The page table for the levels' `windows`: per level, VSM_PAGES² words at
+   * the page's place in its window wrapped (x mod VSM_PAGES, y mod VSM_PAGES),
+   * each the physical page + 1 holding it, or 0.
+   */
+  table(windows, out = new Uint32Array(VSM_LEVELS * VSM_PAGES * VSM_PAGES)) {
+    out.fill(0);
+    for (const e of this.entries.values()) {
+      if (!e.valid) continue;
+      const { level, gx, gy } = e.page;
+      const w = windows[level];
+      if (!w || gx < w[0] || gy < w[1] || gx >= w[0] + VSM_PAGES || gy >= w[1] + VSM_PAGES) continue;
+      out[level * VSM_PAGES * VSM_PAGES + wrap2(gy) * VSM_PAGES + wrap2(gx)] = e.physical + 1;
+    }
+    this.changed = false;
+    return out;
+  }
+  /** Forget every page (the pool was remade). */
+  clear() {
+    this.entries.clear();
+    this.free.length = 0;
+    for (let i = this.capacity - 1; i >= 0; i -= 1) this.free.push(i);
+    this.key = null;
+    this.changed = true;
+  }
+};
+function wrap2(g) {
+  return (g % VSM_PAGES + VSM_PAGES) % VSM_PAGES;
+}
+function markedPages(marks, windows) {
+  const out = [];
+  const perLevel = VSM_PAGES * VSM_PAGES;
+  for (let word = 0; word < marks.length; word += 1) {
+    let bits = marks[word];
+    while (bits !== 0) {
+      const b = 31 - Math.clz32(bits);
+      bits &= ~(1 << b);
+      const index = word * 32 + b;
+      const level = Math.floor(index / perLevel);
+      const slot = index % perLevel;
+      const sx = slot % VSM_PAGES;
+      const sy = Math.floor(slot / VSM_PAGES);
+      const w = windows[level];
+      out.push({ level, gx: w[0] + wrap2(sx - w[0]), gy: w[1] + wrap2(sy - w[1]) });
+    }
+  }
+  return out;
+}
+function physicalCorner(physical, poolSize) {
+  const across = Math.floor(poolSize / VSM_PAGE);
+  return [physical % across * VSM_PAGE, Math.floor(physical / across) * VSM_PAGE];
+}
+function vsmUniforms(options, out = new Float32Array(VSM_UNIFORM_FLOATS)) {
+  out.set(options.invViewProj, 0);
+  out.set([...options.eye, options.pixelAngle], 16);
+  out.set([...options.basis.x, options.centre], 20);
+  out.set([...options.basis.y, VSM_DEPTH_REACH], 24);
+  out.set([...options.basis.z, VSM_TEXEL0], 28);
+  options.windows.forEach((w, k) => out.set(w, 32 + k * 2));
+  out.set([options.width, options.height, options.poolSize, options.softness], 44);
+  out.set([options.strength, VSM_LEVELS, 0, 0], 48);
+  out.set([options.view[2], options.view[6], options.view[10], options.view[14]], 52);
+  return out;
+}
+var SHARED3 = (multisampled) => (
+  /* wgsl */
+  `
+struct Vsm {
+  invViewProj: mat4x4<f32>,
+  eye: vec4<f32>,      // w: a pixel's size at unit depth
+  axisX: vec4<f32>,    // w: the depth range's middle along the sun
+  axisY: vec4<f32>,    // w: the depth range's reach either way
+  axisZ: vec4<f32>,    // toward the sun; w: a level-0 texel
+  windows: array<vec4<f32>, 3>, // each level's first page, two levels a vec4
+  screen: vec4<f32>,   // width, height, the pool's size, the sun's softness
+  info: vec4<f32>,     // strength, levels
+  viewRow: vec4<f32>,  // the view's third row
+};
+@group(0) @binding(0) var<uniform> vsm: Vsm;
+@group(0) @binding(1) var depth: ${multisampled ? "texture_depth_multisampled_2d" : "texture_depth_2d"};
+
+fn vsmWindow(k: i32) -> vec2<f32> {
+  let w = vsm.windows[k / 2];
+  return select(w.xy, w.zw, (k & 1) == 1);
+}
+fn vsmTexel(k: i32) -> f32 { return vsm.axisZ.w * exp2(f32(k)); }
+fn vsmLight(p: vec3<f32>) -> vec3<f32> { return vec3<f32>(dot(p, vsm.axisX.xyz), dot(p, vsm.axisY.xyz), dot(p, vsm.axisZ.xyz)); }
+// A light-space point's page at level k (x, y), and whether the level's window holds it.
+fn vsmPageOf(l: vec2<f32>, k: i32) -> vec3<f32> {
+  let g = floor(l / (vsmTexel(k) * ${VSM_PAGE}.0));
+  let w = vsmWindow(k);
+  let inside = all(g >= w) && all(g < w + vec2<f32>(${VSM_PAGES}.0));
+  return vec3<f32>(g, select(0.0, 1.0, inside));
+}
+// The finest level whose texels are no larger than the pixel at view depth d.
+fn vsmLevel(d: f32) -> i32 {
+  let footprint = d * vsm.eye.w;
+  return clamp(i32(ceil(log2(max(footprint / vsm.axisZ.w, 1e-6)))), 0, i32(vsm.info.y) - 1);
+}
+// The world point at a pixel, and its view depth (w).
+fn vsmWorldAt(p: vec2<i32>) -> vec4<f32> {
+  let z = textureLoad(depth, p, 0);
+  let ndc = vec2<f32>((f32(p.x) + 0.5) / vsm.screen.x * 2.0 - 1.0, 1.0 - (f32(p.y) + 0.5) / vsm.screen.y * 2.0);
+  let w = vsm.invViewProj * vec4<f32>(ndc, z, 1.0);
+  let world = w.xyz / w.w;
+  return vec4<f32>(world, -(dot(vsm.viewRow.xyz, world) + vsm.viewRow.w));
+}
+`
+);
+function vsmMarkWgsl(multisampled) {
+  return (
+    /* wgsl */
+    `${SHARED3(multisampled)}
+@group(0) @binding(2) var<storage, read_write> marks: array<atomic<u32>>;
+
+fn mark(l: vec2<f32>, k: i32) {
+  let g = vsmPageOf(l, k);
+  if (g.z < 0.5) { return; }
+  let sx = u32((i32(g.x) % ${VSM_PAGES} + ${VSM_PAGES}) % ${VSM_PAGES});
+  let sy = u32((i32(g.y) % ${VSM_PAGES} + ${VSM_PAGES}) % ${VSM_PAGES});
+  let bit = u32(k) * ${VSM_PAGES * VSM_PAGES}u + sy * ${VSM_PAGES}u + sx;
+  atomicOr(&marks[bit / 32u], 1u << (bit % 32u));
+}
+fn markAround(l: vec2<f32>, k: i32) {
+  let r = vsmTexel(k) * ${VSM_FILTER_TEXELS + 2}.0;
+  mark(l + vec2<f32>(-r, -r), k);
+  mark(l + vec2<f32>(r, -r), k);
+  mark(l + vec2<f32>(-r, r), k);
+  mark(l + vec2<f32>(r, r), k);
+}
+
+@compute @workgroup_size(8, 8)
+fn markPages(@builtin(global_invocation_id) id: vec3<u32>) {
+  let p = vec2<i32>(id.xy);
+  if (f32(p.x) >= vsm.screen.x || f32(p.y) >= vsm.screen.y) { return; }
+  if (textureLoad(depth, p, 0) >= 1.0) { return; }
+  let at = vsmWorldAt(p);
+  let l = vsmLight(at.xyz).xy;
+  let levels = i32(vsm.info.y);
+  var k = vsmLevel(at.w);
+  // Up to the first level whose window holds the point.
+  loop {
+    if (k >= levels - 1 || vsmPageOf(l, k).z > 0.5) { break; }
+    k += 1;
+  }
+  markAround(l, k);
+  if (k + 2 < levels) { markAround(l, k + 2); }
+}
+`
+  );
+}
+function vsmResolveWgsl(multisampled) {
+  return (
+    /* wgsl */
+    `${SHARED3(multisampled)}
+@group(0) @binding(2) var<storage, read> pageTable: array<u32>;
+@group(0) @binding(3) var pool: texture_depth_2d;
+@group(0) @binding(4) var poolSamp: sampler_comparison;
+@group(0) @binding(5) var gbuffer: texture_2d<f32>;
+
+const DISK = array<vec2<f32>, 12>(
+  vec2<f32>(-0.326, -0.406), vec2<f32>(-0.840, -0.074), vec2<f32>(-0.696, 0.457), vec2<f32>(-0.203, 0.621),
+  vec2<f32>(0.962, -0.195), vec2<f32>(0.473, -0.480), vec2<f32>(0.519, 0.767), vec2<f32>(0.185, -0.893),
+  vec2<f32>(0.507, 0.064), vec2<f32>(0.896, 0.412), vec2<f32>(-0.322, -0.933), vec2<f32>(-0.792, -0.598));
+
+@vertex
+fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4<f32> {
+  let p = vec2<f32>(f32((i << 1u) & 2u), f32(i & 2u));
+  return vec4<f32>(p * 2.0 - 1.0, 0.0, 1.0);
+}
+
+fn octDecode(e: vec2<f32>) -> vec3<f32> {
+  var n = vec3<f32>(e.x, e.y, 1.0 - abs(e.x) - abs(e.y));
+  let t = max(-n.z, 0.0);
+  n.x = n.x + select(t, -t, n.x >= 0.0);
+  n.y = n.y + select(t, -t, n.y >= 0.0);
+  return normalize(n);
+}
+
+// The physical page holding a light-space point's page at level k (+1), or 0.
+fn vsmPhysical(l: vec2<f32>, k: i32) -> u32 {
+  let g = vsmPageOf(l, k);
+  if (g.z < 0.5) { return 0u; }
+  let sx = u32((i32(g.x) % ${VSM_PAGES} + ${VSM_PAGES}) % ${VSM_PAGES});
+  let sy = u32((i32(g.y) % ${VSM_PAGES} + ${VSM_PAGES}) % ${VSM_PAGES});
+  return pageTable[u32(k) * ${VSM_PAGES * VSM_PAGES}u + sy * ${VSM_PAGES}u + sx];
+}
+
+// Where a light-space point lies in the pool at level k (texels), or x < 0 where its page isn't resident.
+fn vsmPoolAt(l: vec2<f32>, k: i32) -> vec2<f32> {
+  let phys = vsmPhysical(l, k);
+  if (phys == 0u) { return vec2<f32>(-1.0); }
+  let size = vsmTexel(k) * ${VSM_PAGE}.0;
+  let g = floor(l / size);
+  // Within the page: x across, y down (row 0 is the page's top, as it was drawn).
+  let f = (l - g * size) / size;
+  let inPage = clamp(vec2<f32>(f.x, 1.0 - f.y) * ${VSM_PAGE}.0, vec2<f32>(0.5), vec2<f32>(${VSM_PAGE}.0 - 0.5));
+  let across = u32(vsm.screen.z) / ${VSM_PAGE}u;
+  let corner = vec2<f32>(f32((phys - 1u) % across), f32((phys - 1u) / across)) * ${VSM_PAGE}.0;
+  return corner + inPage;
+}
+
+// The depth a light-space point (with its depth along the sun) has in a page's map.
+fn vsmDepth(lz: f32) -> f32 { return (vsm.axisX.w + vsm.axisY.w - lz) / (2.0 * vsm.axisY.w); }
+
+// PCSS at level k round light-space point l of depth z: \u22121 where a tap's page isn't resident; else the light,
+// and in .y the penumbra's width in metres the blockers ask for.
+fn vsmPcss(l: vec2<f32>, z: f32, k: i32, spin: vec2<f32>) -> vec2<f32> {
+  let texel = vsmTexel(k);
+  let inv = 1.0 / vsm.screen.z;
+  let reach = ${VSM_FILTER_TEXELS}.0;
+  var blockers = 0.0;
+  var count = 0.0;
+  for (var i = 0; i < 12; i += 1) {
+    let d = DISK[i];
+    let o = vec2<f32>(d.x * spin.x - d.y * spin.y, d.x * spin.y + d.y * spin.x) * reach * texel;
+    let at = vsmPoolAt(l + o, k);
+    if (at.x < 0.0) { return vec2<f32>(-1.0, 0.0); }
+    let b = textureLoad(pool, vec2<i32>(at), 0);
+    if (b < z) { blockers = blockers + b; count = count + 1.0; }
+  }
+  if (count < 0.5) { return vec2<f32>(1.0, 0.0); }
+  // How far above the point the blockers stand, metres, times the sun's size: the penumbra.
+  let above = (z - blockers / count) * 2.0 * vsm.axisY.w;
+  let penumbra = above * vsm.screen.w;
+  let width = clamp(penumbra / texel, 1.0, reach);
+  var lit = 0.0;
+  for (var i = 0; i < 12; i += 1) {
+    let d = DISK[i];
+    let o = vec2<f32>(d.x * spin.x - d.y * spin.y, d.x * spin.y + d.y * spin.x) * width * texel;
+    let at = vsmPoolAt(l + o, k);
+    if (at.x < 0.0) { return vec2<f32>(-1.0, 0.0); }
+    lit = lit + textureSampleCompareLevel(pool, poolSamp, at * inv, z);
+  }
+  return vec2<f32>(lit / 12.0, penumbra);
+}
+
+@fragment
+fn resolve(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
+  let p = vec2<i32>(frag.xy);
+  if (textureLoad(depth, p, 0) >= 1.0) { return vec4<f32>(1.0, 0.0, 0.0, 1.0); }
+  let at = vsmWorldAt(p);
+  let N = octDecode(textureLoad(gbuffer, p, 0).xy);
+  let L = vsm.axisZ.xyz;
+  let levels = i32(vsm.info.y);
+  let a = 6.2831853 * fract(52.9829189 * fract(dot(frag.xy, vec2<f32>(0.06711056, 0.00583715))));
+  let spin = vec2<f32>(cos(a), sin(a));
+  let cosL = clamp(abs(dot(N, L)), 0.05, 1.0);
+  // Facing away from the sun: in its own shadow.
+  if (dot(N, L) <= 0.0) { return vec4<f32>(1.0 - vsm.info.x, 0.0, 0.0, 1.0); }
+  var k = vsmLevel(at.w);
+  loop {
+    if (k >= levels - 1 || vsmPageOf(vsmLight(at.xyz).xy, k).z > 0.5) { break; }
+    k += 1;
+  }
+  // From the level the pixel wants up to the first with resident pages round it.
+  for (; k < levels; k += 1) {
+    let texel = vsmTexel(k);
+    // Off the surface toward the sun and along its normal, by a texel or more as the light grazes.
+    let push = texel * (1.5 + 2.0 * min(4.0, sqrt(1.0 - cosL * cosL) / cosL));
+    let q = vsmLight(at.xyz + L * push + N * texel);
+    let z = vsmDepth(q.z);
+    var s = vsmPcss(q.xy, z, k, spin);
+    if (s.x < 0.0) { continue; }
+    // A penumbra wider than this level's filter reaches: filter it two levels up, where it fits.
+    if (s.y > vsmTexel(k) * ${VSM_FILTER_TEXELS}.0 && k + 2 < levels) {
+      let wide = vsmPcss(q.xy, z, k + 2, spin);
+      if (wide.x >= 0.0) { s = wide; }
+    }
+    return vec4<f32>(1.0 - vsm.info.x * (1.0 - s.x), 0.0, 0.0, 1.0);
+  }
+  return vec4<f32>(-1.0, 0.0, 0.0, 1.0);
+}
+`
+  );
+}
+var spheres2 = /* @__PURE__ */ new WeakMap();
+function localSphere(owner) {
+  let s = spheres2.get(owner);
+  if (s) return s;
+  const lists = "primitives" in owner ? owner.primitives.map((p) => p.positions) : [owner.positions];
+  const lo = [Infinity, Infinity, Infinity];
+  const hi = [-Infinity, -Infinity, -Infinity];
+  for (const positions of lists) {
+    for (let i = 0; i + 2 < positions.length; i += 3) {
+      for (let a = 0; a < 3; a += 1) {
+        lo[a] = Math.min(lo[a], positions[i + a]);
+        hi[a] = Math.max(hi[a], positions[i + a]);
+      }
+    }
+  }
+  if (!Number.isFinite(lo[0])) s = [0, 0, 0, 0];
+  else {
+    const c = [0, 1, 2].map((a) => (lo[a] + hi[a]) / 2);
+    s = [c[0], c[1], c[2], Math.hypot(hi[0] - c[0], hi[1] - c[1], hi[2] - c[2])];
+  }
+  spheres2.set(owner, s);
+  return s;
+}
+function worldSphere(local, m) {
+  const [x, y, z, r] = local;
+  const scale = Math.max(Math.hypot(m[0], m[1], m[2]), Math.hypot(m[4], m[5], m[6]), Math.hypot(m[8], m[9], m[10]));
+  return [m[0] * x + m[4] * y + m[8] * z + m[12], m[1] * x + m[5] * y + m[9] * z + m[13], m[2] * x + m[6] * y + m[10] * z + m[14], r * scale];
+}
+function pageTouches(page, basis, sphere) {
+  const size = vsmPageSize(page.level);
+  const lx = sphere[0] * basis.x[0] + sphere[1] * basis.x[1] + sphere[2] * basis.x[2];
+  const ly = sphere[0] * basis.y[0] + sphere[1] * basis.y[1] + sphere[2] * basis.y[2];
+  const r = sphere[3];
+  return lx + r >= page.gx * size && lx - r <= (page.gx + 1) * size && ly + r >= page.gy * size && ly - r <= (page.gy + 1) * size;
+}
+
+// src/render/cameraEffects.ts
+var DOF_MAX_COC = 0.025;
+var MOTION_TILE = 16;
+var MOTION_MAX_PIXELS = 48;
+var CAMERA_UNIFORM_FLOATS = 16;
+function cameraUniforms(effects, depthTerms, frame, render, index, out = new Float32Array(CAMERA_UNIFORM_FLOATS)) {
+  const dof = effects.dof ?? null;
+  out.set([dof?.scale ?? 0, dof?.focus ?? 1, Math.max(1, DOF_MAX_COC * frame.width), dof?.blades ?? 0], 0);
+  out.set([depthTerms[0], depthTerms[1], frame.width, frame.height], 4);
+  out.set([effects.motionBlur?.fraction ?? 0, MOTION_TILE, MOTION_MAX_PIXELS, index % 1024], 8);
+  out.set([render.width, render.height, 0, 0], 12);
+  return out;
+}
+var SHARED4 = (multisampled) => (
+  /* wgsl */
+  `
+struct Camera { dof: vec4<f32>, frame: vec4<f32>, motion: vec4<f32>, render: vec4<f32> };
+@group(0) @binding(0) var<uniform> cam: Camera;
+@group(0) @binding(1) var depth: ${multisampled ? "texture_depth_multisampled_2d" : "texture_depth_2d"};
+
+@vertex
+fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4<f32> {
+  let p = vec2<f32>(f32((i << 1u) & 2u), f32(i & 2u));
+  return vec4<f32>(p * 2.0 - 1.0, 0.0, 1.0);
+}
+
+// The render's pixel under a point of the frame (in the frame's pixels).
+fn renderPixel(q: vec2<f32>) -> vec2<i32> {
+  let r = vec2<i32>(cam.render.xy);
+  return clamp(vec2<i32>(q / cam.frame.zw * cam.render.xy), vec2<i32>(0), r - 1);
+}
+// The distance to what the frame shows at a point (in the frame's pixels); far for nothing drawn.
+fn distanceAt(q: vec2<f32>) -> f32 {
+  let z = textureLoad(depth, renderPixel(q), 0);
+  if (z >= 1.0) { return 1e6; }
+  return cam.frame.y / (z + cam.frame.x);
+}
+// The circle of confusion there, in the frame's pixels: negative in front of the focus.
+fn cocAt(q: vec2<f32>) -> f32 {
+  let coc = cam.dof.x * (1.0 - cam.dof.y / max(distanceAt(q), 1e-4)) * cam.frame.z;
+  return clamp(coc, -cam.dof.z, cam.dof.z);
+}
+`
+);
+function dofPrefilterWgsl(multisampled) {
+  return (
+    /* wgsl */
+    `${SHARED4(multisampled)}
+@group(0) @binding(2) var colour: texture_2d<f32>;
+struct Out { @location(0) colour: vec4<f32>, @location(1) coc: vec4<f32> };
+@fragment
+fn prefilter(@builtin(position) frag: vec4<f32>) -> Out {
+  let size = vec2<i32>(textureDimensions(colour));
+  let p = vec2<i32>(frag.xy) * 2;
+  var c = vec4<f32>(0.0);
+  var total = 0.0;
+  var coc = 0.0;
+  for (var k = 0; k < 4; k += 1) {
+    let q = min(p + vec2<i32>(k & 1, k >> 1), size - 1);
+    // Each by its own blur: what is in focus stays out of the blurred frame, so it can't bleed back round itself.
+    let qc = cocAt(vec2<f32>(q) + 0.5);
+    let w = abs(qc) + 1e-3;
+    c = c + textureLoad(colour, q, 0) * w;
+    total = total + w;
+    // The most blurred of the four's, sign and all.
+    if (abs(qc) > abs(coc)) { coc = qc; }
+  }
+  return Out(c / total, vec4<f32>(coc * 0.5, 0.0, 0.0, 1.0));
+}
+`
+  );
+}
+var DOF_GATHER_WGSL = (
+  /* wgsl */
+  `
+struct Camera { dof: vec4<f32>, frame: vec4<f32>, motion: vec4<f32>, render: vec4<f32> };
+@group(0) @binding(0) var<uniform> cam: Camera;
+@group(0) @binding(1) var halfColour: texture_2d<f32>;
+@group(0) @binding(2) var halfCoc: texture_2d<f32>;
+
+@vertex
+fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4<f32> {
+  let p = vec2<f32>(f32((i << 1u) & 2u), f32(i & 2u));
+  return vec4<f32>(p * 2.0 - 1.0, 0.0, 1.0);
+}
+
+// The aperture's polygon (n blades): how far its edge stands, at angle a, from a unit circle's.
+fn blade(a: f32, n: f32) -> f32 {
+  if (n < 2.5) { return 1.0; }
+  let seg = 6.2831853 / n;
+  let t = a - seg * floor(a / seg) - seg * 0.5;
+  return cos(seg * 0.5) / cos(t);
+}
+
+struct Out { @location(0) colour: vec4<f32>, @location(1) near: vec4<f32> };
+@fragment
+fn gather(@builtin(position) frag: vec4<f32>) -> Out {
+  let size = vec2<i32>(textureDimensions(halfColour));
+  let p = vec2<i32>(frag.xy);
+  let c0 = textureLoad(halfCoc, p, 0).r;
+  let reach = cam.dof.z * 0.5;
+  // The centre counts as one tap of its own blur.
+  let own = max(abs(c0), 0.5);
+  var sum = textureLoad(halfColour, p, 0) / (own * own);
+  var weight = 1.0 / (own * own);
+  var near = 0.0;
+  var nearTaps = 0.0;
+  // Three rings of 8, 16 and 24 taps out to the frame's largest blur.
+  for (var ring = 1; ring <= 3; ring += 1) {
+    let count = ring * 8;
+    let r = f32(ring) / 3.0 * reach;
+    for (var k = 0; k < count; k += 1) {
+      let a = (f32(k) + 0.5 * f32(ring & 1)) / f32(count) * 6.2831853;
+      let o = vec2<i32>(round(vec2<f32>(cos(a), sin(a)) * r * blade(a, cam.dof.w)));
+      // Where the tap really landed: a whole texel off, or none.
+      let dist = length(vec2<f32>(o));
+      let q = clamp(p + o, vec2<i32>(0), size - 1);
+      let s = textureLoad(halfColour, q, 0);
+      let cs = textureLoad(halfCoc, q, 0).r;
+      // How far this tap's blur reaches: no further than this pixel's own, from behind it.
+      var spread = abs(cs);
+      if (cs > c0) { spread = min(spread, max(abs(c0), 0.0)); }
+      let w = clamp(spread - dist + 1.0, 0.0, 1.0) / max(spread * spread, 0.25);
+      sum = sum + s * w;
+      weight = weight + w;
+      // The near field: taps in front of the focus whose blur reaches here.
+      if (cs < -0.5) {
+        near = near + clamp(-cs - dist + 1.0, 0.0, 1.0);
+        nearTaps = nearTaps + 1.0;
+      }
+    }
+  }
+  let cover = select(0.0, clamp(near / max(nearTaps, 1.0) * 2.0, 0.0, 1.0), nearTaps > 0.0);
+  return Out(sum / weight, vec4<f32>(cover, 0.0, 0.0, 1.0));
+}
+`
+);
+function dofCompositeWgsl(multisampled) {
+  return (
+    /* wgsl */
+    `${SHARED4(multisampled)}
+@group(0) @binding(2) var colour: texture_2d<f32>;
+@group(0) @binding(3) var blurred: texture_2d<f32>;
+@group(0) @binding(4) var nearCover: texture_2d<f32>;
+@group(0) @binding(5) var linearSamp: sampler;
+@group(0) @binding(6) var halfCoc: texture_2d<f32>;
+@fragment
+fn composite(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
+  let p = vec2<i32>(frag.xy);
+  let sharp = textureLoad(colour, p, 0);
+  let uv = frag.xy / cam.frame.zw;
+  let signed = cocAt(frag.xy);
+  let coc = abs(signed);
+  // The four nearest half-resolution texels, bilinear, each by how alike its blur is to this pixel's: an
+  // in-focus neighbour's texel doesn't bleed into the blurred pixel beside it.
+  let half = vec2<i32>(textureDimensions(blurred));
+  let f = frag.xy * 0.5 - 0.5;
+  let base = vec2<i32>(floor(f));
+  let t = f - floor(f);
+  var soft = vec4<f32>(0.0);
+  var total = 0.0;
+  for (var k = 0; k < 4; k += 1) {
+    let o = vec2<i32>(k & 1, k >> 1);
+    let h = clamp(base + o, vec2<i32>(0), half - 1);
+    let bil = select(1.0 - t.x, t.x, o.x == 1) * select(1.0 - t.y, t.y, o.y == 1);
+    let alike = exp(-abs(textureLoad(halfCoc, h, 0).r * 2.0 - signed));
+    let w = bil * alike + 1e-4 * bil;
+    soft = soft + textureLoad(blurred, h, 0) * w;
+    total = total + w;
+  }
+  soft = soft / total;
+  let cover = textureSampleLevel(nearCover, linearSamp, uv, 0.0).r;
+  let amount = max(smoothstep(0.5, 2.0, coc), cover);
+  return mix(sharp, soft, amount);
+}
+`
+  );
+}
+var MOTION_TILES_WGSL = (
+  /* wgsl */
+  `
+struct Camera { dof: vec4<f32>, frame: vec4<f32>, motion: vec4<f32>, render: vec4<f32> };
+@group(0) @binding(0) var<uniform> cam: Camera;
+@group(0) @binding(1) var velocity: texture_2d<f32>;
+@vertex
+fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4<f32> {
+  let p = vec2<f32>(f32((i << 1u) & 2u), f32(i & 2u));
+  return vec4<f32>(p * 2.0 - 1.0, 0.0, 1.0);
+}
+@fragment
+fn tiles(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
+  let tile = cam.motion.y;
+  let rsize = vec2<i32>(cam.render.xy);
+  // The tile's corners in the render's pixels; a stride keeps a large tile's reads in hand.
+  let lo = vec2<i32>(floor(frag.xy - 0.5) * tile / cam.frame.zw * cam.render.xy);
+  let hi = min(vec2<i32>(ceil((floor(frag.xy - 0.5) + 1.0) * tile / cam.frame.zw * cam.render.xy)), rsize);
+  let stride = max(1, (hi.x - lo.x) / 8);
+  var best = vec2<f32>(0.0);
+  for (var y = lo.y; y < hi.y; y += stride) {
+    for (var x = lo.x; x < hi.x; x += stride) {
+      let v = textureLoad(velocity, vec2<i32>(x, y), 0).xy * cam.frame.zw * cam.motion.x;
+      if (dot(v, v) > dot(best, best)) { best = v; }
+    }
+  }
+  return vec4<f32>(best, 0.0, 1.0);
+}
+`
+);
+var MOTION_NEIGHBOURS_WGSL = (
+  /* wgsl */
+  `
+@group(0) @binding(0) var tiles: texture_2d<f32>;
+@vertex
+fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4<f32> {
+  let p = vec2<f32>(f32((i << 1u) & 2u), f32(i & 2u));
+  return vec4<f32>(p * 2.0 - 1.0, 0.0, 1.0);
+}
+@fragment
+fn neighbours(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
+  let size = vec2<i32>(textureDimensions(tiles));
+  let p = vec2<i32>(frag.xy);
+  var best = vec2<f32>(0.0);
+  for (var y = -1; y <= 1; y += 1) {
+    for (var x = -1; x <= 1; x += 1) {
+      let v = textureLoad(tiles, clamp(p + vec2<i32>(x, y), vec2<i32>(0), size - 1), 0).xy;
+      if (dot(v, v) > dot(best, best)) { best = v; }
+    }
+  }
+  return vec4<f32>(best, 0.0, 1.0);
+}
+`
+);
+function motionGatherWgsl(multisampled) {
+  return (
+    /* wgsl */
+    `${SHARED4(multisampled)}
+@group(0) @binding(2) var colour: texture_2d<f32>;
+@group(0) @binding(3) var velocity: texture_2d<f32>;
+@group(0) @binding(4) var neighbourMax: texture_2d<f32>;
+
+fn motionAt(q: vec2<f32>) -> vec2<f32> {
+  let v = textureLoad(velocity, renderPixel(q), 0).xy * cam.frame.zw * cam.motion.x;
+  let l = length(v);
+  return select(v, v * (cam.motion.z / l), l > cam.motion.z);
+}
+// McGuire's cone: how much a sample whose motion reaches |v| pixels covers a point dist pixels off.
+fn cone(dist: f32, v: f32) -> f32 { return clamp(1.0 - dist / max(v, 1e-3), 0.0, 1.0); }
+fn cylinder(dist: f32, v: f32) -> f32 { return 1.0 - smoothstep(0.95 * v, 1.05 * v, dist); }
+fn softDepth(a: f32, b: f32) -> f32 { return clamp(1.0 - (b - a) / max(0.01 * min(a, b), 0.05), 0.0, 1.0); }
+
+@fragment
+fn gather(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
+  let size = vec2<i32>(textureDimensions(colour));
+  let p = vec2<i32>(frag.xy);
+  let c = textureLoad(colour, p, 0);
+  let tiles = vec2<i32>(textureDimensions(neighbourMax));
+  var vmax = textureLoad(neighbourMax, min(p / i32(cam.motion.y), tiles - 1), 0).xy;
+  let lmax = length(vmax);
+  if (lmax < 0.5) { return c; }
+  if (lmax > cam.motion.z) { vmax = vmax * (cam.motion.z / lmax); }
+  let vc = length(motionAt(frag.xy));
+  let zc = distanceAt(frag.xy);
+  // The centre's own weight: as if it were a sample of its own motion.
+  let own = 1.0 / max(vc, 1.0);
+  var sum = c * own;
+  var weight = own;
+  let jitter = fract(52.9829189 * fract(dot(frag.xy + cam.motion.w * 5.588238, vec2<f32>(0.06711056, 0.00583715)))) - 0.5;
+  for (var k = 0; k < 12; k += 1) {
+    if (k == 6) { continue; }
+    let t = mix(-0.5, 0.5, (f32(k) + jitter + 0.5) / 12.0);
+    let q = clamp(frag.xy + vmax * t, vec2<f32>(0.5), vec2<f32>(size) - 0.5);
+    let dist = length(vmax * t);
+    let zs = distanceAt(q);
+    let vs = length(motionAt(q));
+    // In front of the centre: it smears by its own motion. Behind: the centre's motion reveals it.
+    let front = softDepth(zc, zs);
+    let back = softDepth(zs, zc);
+    let w = front * cone(dist, vs) + back * cone(dist, vc) + cylinder(dist, vs) * cylinder(dist, vc) * 2.0;
+    sum = sum + textureLoad(colour, vec2<i32>(q), 0) * w;
+    weight = weight + w;
+  }
+  return sum / weight;
+}
+`
+  );
+}
+
+// src/render/upscaler.ts
+var UPSCALE_MODES = { quality: 1 / 1.5, balanced: 1 / 1.7, performance: 0.5 };
+var UPSCALE_UNIFORM_FLOATS = 12;
+var UPSCALE_BLEND = 0.1;
+var UPSCALE_SHARPEN = 0.3;
+function upscaleJitterPhases(renderWidth, displayWidth) {
+  const ratio = Math.max(1, displayWidth / Math.max(1, renderWidth));
+  return Math.ceil(TEMPORAL_SAMPLES * ratio * ratio);
+}
+function upscaleUniforms(jitter, render, display, history, out = new Float32Array(UPSCALE_UNIFORM_FLOATS)) {
+  out.set([UPSCALE_BLEND, UPSCALE_SHARPEN, history ? 1 : 0, 0], 0);
+  out.set([jitter[0], -jitter[1], render.width, render.height], 4);
+  out.set([display.width, display.height, 0, 0], 8);
+  return out;
+}
+function upscaleShaderWgsl(multisampled) {
+  return (
+    /* wgsl */
+    `
+struct Upscale { params: vec4<f32>, jitter: vec4<f32>, display: vec4<f32> };
+@group(0) @binding(0) var<uniform> up: Upscale;
+@group(0) @binding(1) var current: texture_2d<f32>;
+@group(0) @binding(2) var history: texture_2d<f32>;
+@group(0) @binding(3) var historySampler: sampler;
+@group(0) @binding(4) var depth: ${multisampled ? "texture_depth_multisampled_2d" : "texture_depth_2d"};
+@group(0) @binding(5) var velocity: texture_2d<f32>;
+@group(0) @binding(6) var reactive: texture_2d<f32>;
+
+@vertex
+fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4<f32> {
+  let p = vec2<f32>(f32((i << 1u) & 2u), f32(i & 2u));
+  return vec4<f32>(p * 2.0 - 1.0, 0.0, 1.0);
+}
+
+fn toneMap(c: vec3<f32>) -> vec3<f32> { return c / (1.0 + max(c.r, max(c.g, c.b))); }
+fn untoneMap(c: vec3<f32>) -> vec3<f32> { return c / max(1e-5, 1.0 - max(c.r, max(c.g, c.b))); }
+fn toYCoCg(c: vec3<f32>) -> vec3<f32> { return vec3<f32>(0.25 * c.r + 0.5 * c.g + 0.25 * c.b, 0.5 * c.r - 0.5 * c.b, -0.25 * c.r + 0.5 * c.g - 0.25 * c.b); }
+fn fromYCoCg(c: vec3<f32>) -> vec3<f32> { let t = c.x - c.z; return vec3<f32>(t + c.y, c.x + c.z, t - c.y); }
+
+// The history at uv by Catmull-Rom, in five bilinear taps (as F4a's).
+fn historyAt(uv: vec2<f32>, size: vec2<f32>) -> vec4<f32> {
+  let pos = uv * size;
+  let centre = floor(pos - 0.5) + 0.5;
+  let f = pos - centre;
+  let w0 = f * (-0.5 + f * (1.0 - 0.5 * f));
+  let w1 = 1.0 + f * f * (-2.5 + 1.5 * f);
+  let w2 = f * (0.5 + f * (2.0 - 1.5 * f));
+  let w3 = f * f * (-0.5 + 0.5 * f);
+  let w12 = w1 + w2;
+  let t0 = (centre - 1.0) / size;
+  let t3 = (centre + 2.0) / size;
+  let t12 = (centre + w2 / w12) / size;
+  let a = textureSampleLevel(history, historySampler, vec2<f32>(t12.x, t0.y), 0.0) * (w12.x * w0.y);
+  let b = textureSampleLevel(history, historySampler, vec2<f32>(t0.x, t12.y), 0.0) * (w0.x * w12.y);
+  let c = textureSampleLevel(history, historySampler, t12, 0.0) * (w12.x * w12.y);
+  let d = textureSampleLevel(history, historySampler, vec2<f32>(t3.x, t12.y), 0.0) * (w3.x * w12.y);
+  let e = textureSampleLevel(history, historySampler, vec2<f32>(t12.x, t3.y), 0.0) * (w12.x * w3.y);
+  let weight = w12.x * w0.y + w0.x * w12.y + w12.x * w12.y + w3.x * w12.y + w12.x * w3.y;
+  return max((a + b + c + d + e) / weight, vec4<f32>(0.0));
+}
+
+@fragment
+fn resolve(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
+  let rsize = vec2<i32>(textureDimensions(current));
+  let dsize = up.display.xy;
+  let uv = frag.xy / dsize;
+  // This display pixel's centre in the unjittered render frame, and the render pixel the jittered frame put nearest it.
+  let pr = uv * vec2<f32>(rsize);
+  let base = vec2<i32>(floor(pr + up.jitter.xy));
+  var sum = vec3<f32>(0.0);
+  var wsum = 0.0;
+  var wmax = 0.0;
+  var m1 = vec3<f32>(0.0);
+  var m2 = vec3<f32>(0.0);
+  var nearest = 2.0;
+  var at = clamp(base, vec2<i32>(0), rsize - 1);
+  var alpha = 0.0;
+  for (var dy = -1; dy <= 1; dy += 1) {
+    for (var dx = -1; dx <= 1; dx += 1) {
+      let q = clamp(base + vec2<i32>(dx, dy), vec2<i32>(0), rsize - 1);
+      let s = textureLoad(current, q, 0);
+      // Where this sample really stands, and how far from the display pixel's centre (render pixels).
+      let d = vec2<f32>(q) + 0.5 - up.jitter.xy - pr;
+      let w = exp(-2.0 * dot(d, d));
+      sum = sum + s.rgb * w;
+      alpha = alpha + s.a * w;
+      wsum = wsum + w;
+      wmax = max(wmax, w);
+      let y = toYCoCg(toneMap(s.rgb));
+      m1 = m1 + y;
+      m2 = m2 + y * y;
+      let z = textureLoad(depth, q, 0);
+      if (z < nearest) { nearest = z; at = q; }
+    }
+  }
+  let gathered = sum / max(wsum, 1e-6);
+  let coverage = alpha / max(wsum, 1e-6);
+  let mean = m1 / 9.0;
+  let sigma = sqrt(max(m2 / 9.0 - mean * mean, vec3<f32>(0.0)));
+  let now = toYCoCg(toneMap(gathered));
+  let prevUv = uv - textureLoad(velocity, at, 0).xy;
+  if (up.params.z < 0.5 || any(prevUv < vec2<f32>(0.0)) || any(prevUv > vec2<f32>(1.0))) {
+    return vec4<f32>(gathered, coverage);
+  }
+  let past = historyAt(prevUv, dsize);
+  // Clip the history toward the box's centre (Salvi's variance box), grown to hold the gathered colour.
+  let lo = min(mean - 1.25 * sigma, now);
+  let hi = max(mean + 1.25 * sigma, now);
+  let centre = (lo + hi) * 0.5;
+  let extent = (hi - lo) * 0.5 + vec3<f32>(1e-5);
+  var h = toYCoCg(toneMap(past.rgb));
+  let offset = h - centre;
+  let units = abs(offset / extent);
+  let reach = max(units.x, max(units.y, units.z));
+  if (reach > 1.0) { h = centre + offset / reach; }
+  // The new frame counts as much as its nearest sample is near this display pixel.
+  var blend = up.params.x * wmax;
+  if (all(vec2<i32>(textureDimensions(reactive)) == rsize)) { blend = max(blend, textureLoad(reactive, at, 0).r); }
+  // Blended in linear light: a display pixel's samples come and go over the sequence, and a mean taken on
+  // the tone map would lose the light of the bright ones.
+  let rgb = mix(untoneMap(fromYCoCg(h)), gathered, blend);
+  return vec4<f32>(max(rgb, vec3<f32>(0.0)), mix(past.a, coverage, max(blend, 0.5)));
+}
+`
+  );
+}
+var UPSCALE_SHARPEN_WGSL = (
+  /* wgsl */
+  `
+struct Upscale { params: vec4<f32>, jitter: vec4<f32>, display: vec4<f32> };
+@group(0) @binding(0) var<uniform> up: Upscale;
+@group(0) @binding(1) var resolved: texture_2d<f32>;
+
+@vertex
+fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4<f32> {
+  let p = vec2<f32>(f32((i << 1u) & 2u), f32(i & 2u));
+  return vec4<f32>(p * 2.0 - 1.0, 0.0, 1.0);
+}
+
+@fragment
+fn sharpen(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
+  let size = vec2<i32>(textureDimensions(resolved));
+  let p = vec2<i32>(frag.xy);
+  let top = size - 1;
+  let c = textureLoad(resolved, p, 0);
+  let n = textureLoad(resolved, clamp(p + vec2<i32>(0, -1), vec2<i32>(0, 0), top), 0);
+  let s = textureLoad(resolved, clamp(p + vec2<i32>(0, 1), vec2<i32>(0, 0), top), 0);
+  let w = textureLoad(resolved, clamp(p + vec2<i32>(-1, 0), vec2<i32>(0, 0), top), 0);
+  let e = textureLoad(resolved, clamp(p + vec2<i32>(1, 0), vec2<i32>(0, 0), top), 0);
+  let lo = min(c, min(min(n, s), min(w, e)));
+  let hi = max(c, max(max(n, s), max(w, e)));
+  return clamp(c + (4.0 * c - n - s - w - e) * up.params.y, lo, hi);
+}
+`
+);
+
+// src/render/ssgi.ts
+var SSGI_RAYS = 2;
+var SSGI_STEPS = 12;
+var SSGI_THICKNESS = 0.35;
+var SSGI_BLEND = 0.1;
+var SSGI_MAX_RADIANCE = 32;
+var SSGI_UNIFORM_FLOATS = 56;
+function ssgiUniforms(view, projection, frame, history, settings, out = new Float32Array(SSGI_UNIFORM_FLOATS)) {
+  out.set(projection, 0);
+  out.set(invertMat4(projection) ?? projection, 16);
+  out.set(view, 32);
+  out.set([settings.radius, SSGI_RAYS, SSGI_STEPS, frame % 1024], 48);
+  out.set([SSGI_THICKNESS, SSGI_BLEND, history ? 1 : 0, settings.intensity], 52);
+  return out;
+}
+var SHARED5 = (multisampled) => (
+  /* wgsl */
+  `
+struct Ssgi { proj: mat4x4<f32>, invProj: mat4x4<f32>, view: mat4x4<f32>, params: vec4<f32>, params2: vec4<f32> };
+@group(0) @binding(0) var<uniform> gi: Ssgi;
+@group(0) @binding(1) var depth: ${multisampled ? "texture_depth_multisampled_2d" : "texture_depth_2d"};
+@group(0) @binding(2) var gbuffer: texture_2d<f32>;
+
+@vertex
+fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4<f32> {
+  let p = vec2<f32>(f32((i << 1u) & 2u), f32(i & 2u));
+  return vec4<f32>(p * 2.0 - 1.0, 0.0, 1.0);
+}
+
+// A full-resolution pixel's position in view space, from its depth (as drawn).
+fn viewAt(p: vec2<i32>, size: vec2<i32>) -> vec3<f32> {
+  let q = clamp(p, vec2<i32>(0, 0), size - 1);
+  let z = textureLoad(depth, q, 0);
+  let ndc = vec2<f32>((f32(q.x) + 0.5) / f32(size.x) * 2.0 - 1.0, 1.0 - (f32(q.y) + 0.5) / f32(size.y) * 2.0);
+  let v = gi.invProj * vec4<f32>(ndc, z, 1.0);
+  return v.xyz / v.w;
+}
+
+fn octDecode(e: vec2<f32>) -> vec3<f32> {
+  var n = vec3<f32>(e.x, e.y, 1.0 - abs(e.x) - abs(e.y));
+  let t = max(-n.z, 0.0);
+  n.x = n.x + select(t, -t, n.x >= 0.0);
+  n.y = n.y + select(t, -t, n.y >= 0.0);
+  return normalize(n);
+}
+
+// A full-resolution pixel's world normal, from the prepass's G-buffer.
+fn normalAt(p: vec2<i32>, size: vec2<i32>) -> vec3<f32> {
+  return octDecode(textureLoad(gbuffer, clamp(p, vec2<i32>(0, 0), size - 1), 0).xy);
+}
+`
+);
+function ssgiTraceWgsl(multisampled) {
+  return (
+    /* wgsl */
+    `${SHARED5(multisampled)}
+@group(0) @binding(3) var velocity: texture_2d<f32>;
+@group(0) @binding(4) var radiance: texture_2d<f32>;
+@group(0) @binding(5) var linearSamp: sampler;
+
+// Where a view-space point lands on screen, in pixels (x, y), or w < 0 behind the camera.
+fn screenOf(q: vec3<f32>, size: vec2<i32>) -> vec3<f32> {
+  let c = gi.proj * vec4<f32>(q, 1.0);
+  if (c.w <= 1e-4) { return vec3<f32>(0.0, 0.0, -1.0); }
+  return vec3<f32>((c.x / c.w * 0.5 + 0.5) * f32(size.x), (0.5 - c.y / c.w * 0.5) * f32(size.y), 1.0);
+}
+
+@fragment
+fn ssgiTrace(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
+  let full = vec2<i32>(textureDimensions(depth));
+  let p = min(vec2<i32>(frag.xy) * 2, full - 1);
+  if (textureLoad(depth, p, 0) >= 1.0) { return vec4<f32>(0.0); }
+  let P = viewAt(p, full);
+  let V = normalize(-P);
+  let rot = mat3x3<f32>(gi.view[0].xyz, gi.view[1].xyz, gi.view[2].xyz);
+  var N = normalize(rot * normalAt(p, full));
+  if (dot(N, V) < 0.0) { N = -N; }
+  // A frame about the normal.
+  let up = select(vec3<f32>(0.0, 1.0, 0.0), vec3<f32>(1.0, 0.0, 0.0), abs(N.y) > 0.9);
+  let T = normalize(cross(up, N));
+  let B = cross(N, T);
+  let radius = gi.params.x;
+  let rays = i32(gi.params.y);
+  let steps = i32(gi.params.z);
+  let thickness = gi.params2.x;
+  // Interleaved gradient noise, shifted each frame, picks the rays and staggers their steps.
+  let shift = gi.params.w * 5.588238;
+  let n1 = fract(52.9829189 * fract(dot(frag.xy + shift, vec2<f32>(0.06711056, 0.00583715))));
+  let n2 = fract(52.9829189 * fract(dot(frag.xy + vec2<f32>(17.0, 59.0) + shift * 1.7, vec2<f32>(0.06711056, 0.00583715))));
+  let away = length(P);
+  let start = 0.02 + away * 0.002;
+  var sum = vec3<f32>(0.0);
+  var hits = 0.0;
+  for (var r = 0; r < rays; r += 1) {
+    // Cosine-weighted over the hemisphere: the rays' mean radiance is the irradiance over \u03C0.
+    let u1 = fract(n1 + f32(r) * 0.6180340);
+    let u2 = fract(n2 + f32(r) * 0.7548777);
+    let phi = 6.2831853 * u1;
+    let s2 = sqrt(u2);
+    let dir = T * (s2 * cos(phi)) + B * (s2 * sin(phi)) + N * sqrt(max(0.0, 1.0 - u2));
+    let jitter = fract(n2 * 3.7 + f32(r) * 0.381966);
+    var last = 0.0;
+    for (var i = 0; i < steps; i += 1) {
+      let f = (f32(i) + jitter) / f32(steps);
+      let t = start + radius * f * f;
+      let q = P + dir * t;
+      let s = screenOf(q, full);
+      if (s.z < 0.0 || s.x < 0.0 || s.y < 0.0 || s.x >= f32(full.x) || s.y >= f32(full.y)) { break; }
+      // Within a couple of pixels of where it started the ray is still over its own surface.
+      if (distance(s.xy, vec2<f32>(p)) < 2.0) { last = t; continue; }
+      let at = vec2<i32>(s.xy);
+      let surface = viewAt(at, full).z;
+      // Behind a surface on screen (nearer the camera, which looks down \u2212z), by no more than its thickness.
+      let gap = surface - q.z;
+      if (gap > 0.0 && gap < thickness + (t - last) + away * 0.01) {
+        // The light it sent the camera last frame, where it stood then: unless the ray met its back.
+        let hitN = normalize(rot * normalAt(at, full));
+        if (dot(hitN, dir) < 0.0) {
+          let uv = (vec2<f32>(at) + 0.5) / vec2<f32>(full) - textureLoad(velocity, at, 0).xy;
+          if (all(uv >= vec2<f32>(0.0)) && all(uv <= vec2<f32>(1.0))) {
+            var L = textureSampleLevel(radiance, linearSamp, uv, 0.0).rgb;
+            let peak = max(L.r, max(L.g, L.b));
+            if (peak > ${SSGI_MAX_RADIANCE.toFixed(1)}) { L = L * (${SSGI_MAX_RADIANCE.toFixed(1)} / peak); }
+            // The screen's edge, where the image runs out, and the radius's end soften the hit.
+            let edge = clamp(min(min(s.x, f32(full.x) - s.x), min(s.y, f32(full.y) - s.y)) / (0.05 * f32(full.x)), 0.0, 1.0);
+            let w = edge * (1.0 - smoothstep(0.75, 1.0, t / (start + radius)));
+            sum = sum + L * w;
+            hits = hits + w;
+          }
+        } else {
+          hits = hits + 1.0;
+        }
+        break;
+      }
+      last = t;
+    }
+  }
+  return vec4<f32>(sum / f32(rays), hits / f32(rays));
+}
+`
+  );
+}
+function ssgiTemporalWgsl() {
+  return (
+    /* wgsl */
+    `
+struct Ssgi { proj: mat4x4<f32>, invProj: mat4x4<f32>, view: mat4x4<f32>, params: vec4<f32>, params2: vec4<f32> };
+@group(0) @binding(0) var<uniform> gi: Ssgi;
+@group(0) @binding(1) var current: texture_2d<f32>;
+@group(0) @binding(2) var history: texture_2d<f32>;
+@group(0) @binding(3) var velocity: texture_2d<f32>;
+@group(0) @binding(4) var linearSamp: sampler;
+
+@vertex
+fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4<f32> {
+  let p = vec2<f32>(f32((i << 1u) & 2u), f32(i & 2u));
+  return vec4<f32>(p * 2.0 - 1.0, 0.0, 1.0);
+}
+
+@fragment
+fn accumulate(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
+  let size = vec2<i32>(textureDimensions(current));
+  let p = vec2<i32>(frag.xy);
+  let now = textureLoad(current, p, 0);
+  // The neighbourhood's mean and spread: the history is held within two spreads of the mean.
+  var m1 = vec4<f32>(0.0);
+  var m2 = vec4<f32>(0.0);
+  for (var y = -1; y <= 1; y += 1) {
+    for (var x = -1; x <= 1; x += 1) {
+      let s = textureLoad(current, clamp(p + vec2<i32>(x, y), vec2<i32>(0), size - 1), 0);
+      m1 = m1 + s;
+      m2 = m2 + s * s;
+    }
+  }
+  let mean = m1 / 9.0;
+  let spread = sqrt(max(m2 / 9.0 - mean * mean, vec4<f32>(0.0)));
+  let full = vec2<i32>(textureDimensions(velocity));
+  let motion = textureLoad(velocity, min(p * 2, full - 1), 0).xy;
+  let uv = (vec2<f32>(p) + 0.5) / vec2<f32>(size) - motion;
+  if (gi.params2.z < 0.5 || any(uv < vec2<f32>(0.0)) || any(uv > vec2<f32>(1.0))) { return now; }
+  let then = textureSampleLevel(history, linearSamp, uv, 0.0);
+  let held = clamp(then, mean - 2.0 * spread - 0.02, mean + 2.0 * spread + 0.02);
+  return max(mix(held, now, gi.params2.y), vec4<f32>(0.0));
+}
+`
+  );
+}
+function ssgiResolveWgsl(multisampled) {
+  return (
+    /* wgsl */
+    `${SHARED5(multisampled)}
+@group(0) @binding(3) var accumulated: texture_2d<f32>;
+
+@fragment
+fn resolve(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
+  let size = vec2<i32>(textureDimensions(depth));
+  let p = vec2<i32>(frag.xy);
+  if (textureLoad(depth, p, 0) >= 1.0) { return vec4<f32>(0.0); }
+  let P = viewAt(p, size);
+  let N = normalAt(p, size);
+  let half = vec2<i32>(textureDimensions(accumulated));
+  let f = (vec2<f32>(p) + 0.5) * 0.5 - 0.5;
+  let centre = vec2<i32>(round(f));
+  var sum = vec4<f32>(0.0);
+  var total = 0.0;
+  for (var y = -1; y <= 1; y += 1) {
+    for (var x = -1; x <= 1; x += 1) {
+      let h = clamp(centre + vec2<i32>(x, y), vec2<i32>(0), half - 1);
+      let d = vec2<f32>(h) - f;
+      let spatial = exp(-dot(d, d) * 0.5);
+      let zh = viewAt(h * 2, size).z;
+      let near = exp(-abs(zh - P.z) / (0.02 * abs(P.z) + 0.02));
+      let facing = pow(max(dot(normalAt(h * 2, size), N), 0.0), 8.0);
+      let w = spatial * near * facing + 1e-5 * spatial;
+      sum = sum + textureLoad(accumulated, h, 0) * w;
+      total = total + w;
+    }
+  }
+  let g = sum / max(total, 1e-6);
+  return vec4<f32>(g.rgb * gi.params2.w, clamp(g.a, 0.0, 1.0));
+}
+`
+  );
+}
+
+// src/render/atmosphere.ts
+import {
+  AERIAL_RANGE,
+  AERIAL_SIZE,
+  AERIAL_SLICES,
+  AERIAL_SUBSTEPS,
+  MULTISCATTER_DIRECTIONS,
+  MULTISCATTER_SIZE,
+  MULTISCATTER_STEPS,
+  SKY_STEPS,
+  TRANSMITTANCE_HEIGHT,
+  TRANSMITTANCE_STEPS,
+  TRANSMITTANCE_WIDTH,
+  aerialCamera,
+  atmosphereKey as atmosphereKey2,
+  moonLightsSky
+} from "@cartbox/editor";
+var SKY_VIEW_WIDTH = 192;
+var SKY_VIEW_HEIGHT = 108;
+var ATMOSPHERE_UNIFORM_FLOATS = 28;
+function packAtmosphereUniforms(sky, out = new Float32Array(ATMOSPHERE_UNIFORM_FLOATS)) {
+  const a = sky.atmosphere;
+  out.set([a.bottom, a.top, a.rayleighScale, a.mieScale], 0);
+  out.set([...a.rayleighScattering, 0], 4);
+  out.set([...a.ozoneAbsorption, a.ozoneCenter], 8);
+  out.set([a.mieScattering, a.mieExtinction, a.mieG, a.groundAlbedo], 12);
+  out.set([a.viewHeight, a.ozoneWidth, 0, 0], 16);
+  const l = Math.hypot(sky.sun[0], sky.sun[1], sky.sun[2]) || 1;
+  out.set([sky.sun[0] / l, sky.sun[1] / l, sky.sun[2] / l, 0], 20);
+  out.set([Math.PI * sky.sunRadiance[0], Math.PI * sky.sunRadiance[1], Math.PI * sky.sunRadiance[2], 0], 24);
+  return out;
+}
+var ATMOSPHERE_COMMON_WGSL = (
+  /* wgsl */
+  `
+struct Atm {
+  radii: vec4f,    // bottom, top, Rayleigh and Mie scale heights (km)
+  rayleigh: vec4f, // scattering per km
+  ozone: vec4f,    // absorption per km, centre (km)
+  mie: vec4f,      // scattering, extinction, g, ground albedo
+  view: vec4f,     // height above the ground (km), ozone half width
+  sun: vec4f,      // toward the sun
+  sunE: vec4f,     // its illuminance, \u03C0 \xD7 its radiance above the air
+};
+const PI = 3.14159265;
+
+struct Medium { rayleigh: vec3f, mie: f32, extinction: vec3f };
+
+fn mediumAt(h: f32) -> Medium {
+  let dr = exp(-max(0.0, h) / atm.radii.z);
+  let dm = exp(-max(0.0, h) / atm.radii.w);
+  let dozone = max(0.0, 1.0 - abs(h - atm.ozone.w) / atm.view.y);
+  let rayleigh = atm.rayleigh.rgb * dr;
+  return Medium(rayleigh, atm.mie.x * dm, rayleigh + vec3f(atm.mie.y * dm) + atm.ozone.rgb * dozone);
+}
+
+fn raySphere(r: f32, mu: f32, radius: f32) -> f32 {
+  let b = r * mu;
+  let disc = b * b - (r * r - radius * radius);
+  if (disc < 0.0) { return -1.0; }
+  let s = sqrt(disc);
+  if (-b - s > 0.0) { return -b - s; }
+  if (-b + s > 0.0) { return -b + s; }
+  return -1.0;
+}
+
+fn hitsGround(r: f32, mu: f32) -> bool {
+  return mu < 0.0 && r * r * (mu * mu - 1.0) + atm.radii.x * atm.radii.x >= 0.0;
+}
+
+fn transmittanceUv(r: f32, mu: f32) -> vec2f {
+  let bottom = atm.radii.x;
+  let top = atm.radii.y;
+  let H = sqrt(top * top - bottom * bottom);
+  let rho = sqrt(max(0.0, r * r - bottom * bottom));
+  let d = max(0.0, -r * mu + sqrt(max(0.0, r * r * (mu * mu - 1.0) + top * top)));
+  let dMin = top - r;
+  let dMax = rho + H;
+  return vec2f(select(0.0, (d - dMin) / (dMax - dMin), dMax > dMin), rho / H);
+}
+
+fn rayleighPhase(c: f32) -> f32 { return 3.0 / (16.0 * PI) * (1.0 + c * c); }
+fn miePhase(c: f32, g: f32) -> f32 {
+  let g2 = g * g;
+  return 3.0 / (8.0 * PI) * ((1.0 - g2) * (1.0 + c * c)) / ((2.0 + g2) * pow(max(1e-6, 1.0 + g2 - 2.0 * g * c), 1.5));
+}
+`
+);
+var LUT_BINDINGS_WGSL = (
+  /* wgsl */
+  `
+@group(0) @binding(0) var<uniform> atm: Atm;
+@group(0) @binding(1) var lutSampler: sampler;
+@group(0) @binding(2) var transmittanceLut: texture_2d<f32>;
+@group(0) @binding(3) var multiScatterLut: texture_2d<f32>;
+`
+);
+var LOOKUPS_WGSL = (
+  /* wgsl */
+  `
+fn transmittanceTo(r: f32, mu: f32) -> vec3f {
+  if (hitsGround(r, mu)) { return vec3f(0.0); }
+  return textureSampleLevel(transmittanceLut, lutSampler, transmittanceUv(r, mu), 0.0).rgb;
+}
+fn multiScatteringAt(h: f32, muS: f32) -> vec3f {
+  return textureSampleLevel(multiScatterLut, lutSampler, vec2f(muS * 0.5 + 0.5, max(0.0, h) / (atm.radii.y - atm.radii.x)), 0.0).rgb;
+}
+`
+);
+var TRANSMITTANCE_WGSL = (
+  /* wgsl */
+  `
+${ATMOSPHERE_COMMON_WGSL}
+@group(0) @binding(0) var<uniform> atm: Atm;
+@group(0) @binding(1) var outLut: texture_storage_2d<rgba16float, write>;
+
+@compute @workgroup_size(8, 8, 1)
+fn main(@builtin(global_invocation_id) id: vec3u) {
+  if (id.x >= ${TRANSMITTANCE_WIDTH}u || id.y >= ${TRANSMITTANCE_HEIGHT}u) { return; }
+  let u = (f32(id.x) + 0.5) / ${TRANSMITTANCE_WIDTH}.0;
+  let v = (f32(id.y) + 0.5) / ${TRANSMITTANCE_HEIGHT}.0;
+  let bottom = atm.radii.x;
+  let top = atm.radii.y;
+  let H = sqrt(top * top - bottom * bottom);
+  let rho = H * v;
+  let r = sqrt(rho * rho + bottom * bottom);
+  let dMin = top - r;
+  let dMax = rho + H;
+  let dd = dMin + u * (dMax - dMin);
+  var mu = 1.0;
+  if (dd != 0.0) { mu = clamp((H * H - rho * rho - dd * dd) / (2.0 * r * dd), -1.0, 1.0); }
+  let t = max(0.0, raySphere(r, mu, top));
+  let dt = t / ${TRANSMITTANCE_STEPS}.0;
+  var depth = vec3f(0.0);
+  for (var i = 0; i < ${TRANSMITTANCE_STEPS}; i = i + 1) {
+    let s = (f32(i) + 0.5) * dt;
+    let h = sqrt(r * r + s * s + 2.0 * r * mu * s) - bottom;
+    depth = depth + mediumAt(h).extinction * dt;
+  }
+  textureStore(outLut, vec2i(id.xy), vec4f(exp(-depth), 1.0));
+}
+`
+);
+var MULTISCATTER_WGSL = (
+  /* wgsl */
+  `
+${ATMOSPHERE_COMMON_WGSL}
+@group(0) @binding(0) var<uniform> atm: Atm;
+@group(0) @binding(1) var lutSampler: sampler;
+@group(0) @binding(2) var transmittanceLut: texture_2d<f32>;
+@group(0) @binding(3) var outLut: texture_storage_2d<rgba16float, write>;
+
+fn transmittanceTo(r: f32, mu: f32) -> vec3f {
+  if (hitsGround(r, mu)) { return vec3f(0.0); }
+  return textureSampleLevel(transmittanceLut, lutSampler, transmittanceUv(r, mu), 0.0).rgb;
+}
+
+@compute @workgroup_size(8, 8, 1)
+fn main(@builtin(global_invocation_id) id: vec3u) {
+  if (id.x >= ${MULTISCATTER_SIZE}u || id.y >= ${MULTISCATTER_SIZE}u) { return; }
+  let muS = (f32(id.x) + 0.5) / ${MULTISCATTER_SIZE}.0 * 2.0 - 1.0;
+  let h = (f32(id.y) + 0.5) / ${MULTISCATTER_SIZE}.0 * (atm.radii.y - atm.radii.x);
+  let r = atm.radii.x + max(1e-3, h);
+  let sun = vec3f(sqrt(max(0.0, 1.0 - muS * muS)), muS, 0.0);
+  let iso = 1.0 / (4.0 * PI);
+  var L = vec3f(0.0);
+  var f = vec3f(0.0);
+  for (var k = 0; k < ${MULTISCATTER_DIRECTIONS}; k = k + 1) {
+    let y = 1.0 - (2.0 * f32(k) + 1.0) / ${MULTISCATTER_DIRECTIONS}.0;
+    let rr = sqrt(max(0.0, 1.0 - y * y));
+    let phi = f32(k) * 2.399963229728653;
+    let d = vec3f(rr * cos(phi), y, rr * sin(phi));
+    let mu = d.y;
+    var ground = -1.0;
+    if (hitsGround(r, mu)) { ground = raySphere(r, mu, atm.radii.x); }
+    let tMax = select(max(0.0, raySphere(r, mu, atm.radii.y)), ground, ground > 0.0);
+    let dt = tMax / ${MULTISCATTER_STEPS}.0;
+    var throughput = vec3f(1.0);
+    for (var i = 0; i < ${MULTISCATTER_STEPS}; i = i + 1) {
+      let t = (f32(i) + 0.3) * dt;
+      let p = vec3f(d.x * t, r + d.y * t, d.z * t);
+      let pr = length(p);
+      let m = mediumAt(pr - atm.radii.x);
+      let ts = transmittanceTo(pr, dot(p, sun) / pr);
+      let scattering = m.rayleigh + vec3f(m.mie);
+      let ext = max(vec3f(1e-9), m.extinction);
+      let stepT = exp(-ext * dt);
+      let S = scattering * ts * iso;
+      L = L + throughput * ((S - S * stepT) / ext);
+      f = f + throughput * ((scattering - scattering * stepT) / ext);
+      throughput = throughput * stepT;
+    }
+    if (ground > 0.0) {
+      let p = vec3f(d.x * ground, r + d.y * ground, d.z * ground);
+      let pr = length(p);
+      let muSun = dot(p, sun) / pr;
+      L = L + throughput * transmittanceTo(pr, muSun) * max(0.0, muSun) * (atm.mie.w / PI);
+    }
+  }
+  let fms = min(vec3f(0.999), f * iso * 4.0 * PI / ${MULTISCATTER_DIRECTIONS}.0);
+  textureStore(outLut, vec2i(id.xy), vec4f(L / ${MULTISCATTER_DIRECTIONS}.0 / (vec3f(1.0) - fms), 1.0));
+}
+`
+);
+var SKY_RADIANCE_WGSL = (
+  /* wgsl */
+  `
+fn skyRadiance(d: vec3f, sun: vec3f) -> vec3f {
+  let r = atm.radii.x + atm.view.x;
+  let mu = d.y;
+  var ground = -1.0;
+  if (hitsGround(r, mu)) { ground = raySphere(r, mu, atm.radii.x); }
+  let tMax = select(max(0.0, raySphere(r, mu, atm.radii.y)), ground, ground > 0.0);
+  let c = dot(d, sun);
+  let pr = rayleighPhase(c);
+  let pm = miePhase(c, atm.mie.z);
+  let E = atm.sunE.rgb;
+  var L = vec3f(0.0);
+  var throughput = vec3f(1.0);
+  for (var i = 0; i < ${SKY_STEPS}; i = i + 1) {
+    let a0 = f32(i) / ${SKY_STEPS}.0;
+    let a1 = f32(i + 1) / ${SKY_STEPS}.0;
+    let t0 = tMax * a0 * a0;
+    let t1 = tMax * a1 * a1;
+    let t = t0 + 0.3 * (t1 - t0);
+    let dt = t1 - t0;
+    let p = vec3f(d.x * t, r + d.y * t, d.z * t);
+    let pR = length(p);
+    let m = mediumAt(pR - atm.radii.x);
+    let muSun = dot(p, sun) / pR;
+    let ts = transmittanceTo(pR, muSun);
+    let ms = multiScatteringAt(pR - atm.radii.x, muSun);
+    let ext = max(vec3f(1e-9), m.extinction);
+    let stepT = exp(-ext * dt);
+    let S = E * ((m.rayleigh * pr + vec3f(m.mie * pm)) * ts + ms * (m.rayleigh + vec3f(m.mie)));
+    L = L + throughput * ((S - S * stepT) / ext);
+    throughput = throughput * stepT;
+  }
+  if (ground > 0.0) {
+    let p = vec3f(d.x * ground, r + d.y * ground, d.z * ground);
+    let pR = length(p);
+    let muSun = dot(p, sun) / pR;
+    L = L + throughput * transmittanceTo(pR, muSun) * max(0.0, muSun) * (atm.mie.w / PI) * E;
+  }
+  return L;
+}
+`
+);
+var SKY_VIEW_WGSL = (
+  /* wgsl */
+  `
+${ATMOSPHERE_COMMON_WGSL}
+${LUT_BINDINGS_WGSL}
+@group(0) @binding(4) var outLut: texture_storage_2d<rgba16float, write>;
+${LOOKUPS_WGSL}
+${SKY_RADIANCE_WGSL}
+
+@compute @workgroup_size(8, 8, 1)
+fn main(@builtin(global_invocation_id) id: vec3u) {
+  if (id.x >= ${SKY_VIEW_WIDTH}u || id.y >= ${SKY_VIEW_HEIGHT}u) { return; }
+  let u = (f32(id.x) + 0.5) / ${SKY_VIEW_WIDTH}.0;
+  let v = (f32(id.y) + 0.5) / ${SKY_VIEW_HEIGHT}.0;
+  let r = atm.radii.x + atm.view.x;
+  let beta = acos(min(1.0, sqrt(max(0.0, r * r - atm.radii.x * atm.radii.x)) / r));
+  let horizon = PI - beta;
+  var zenith: f32;
+  if (v < 0.5) {
+    let k = 1.0 - 2.0 * v;
+    zenith = horizon * (1.0 - k * k);
+  } else {
+    let k = 2.0 * v - 1.0;
+    zenith = horizon + beta * k * k;
+  }
+  let cosAz = 1.0 - 2.0 * u * u;
+  let sinAz = sqrt(max(0.0, 1.0 - cosAz * cosAz));
+  let d = vec3f(sin(zenith) * cosAz, cos(zenith), sin(zenith) * sinAz);
+  let muS = atm.sun.y;
+  let sun = vec3f(sqrt(max(0.0, 1.0 - muS * muS)), muS, 0.0);
+  textureStore(outLut, vec2i(id.xy), vec4f(skyRadiance(d, sun), 1.0));
+}
+`
+);
+var SKY_VIEW_UV_WGSL = (
+  /* wgsl */
+  `
+// The sky view's (u, v) for a world view direction d under a sun toward s, a viewer at radius r over a ground of radius bottom.
+fn skyViewUv(d: vec3f, s: vec3f, r: f32, bottom: f32) -> vec2f {
+  let beta = acos(min(1.0, sqrt(max(0.0, r * r - bottom * bottom)) / r));
+  let horizon = 3.14159265 - beta;
+  let zenith = acos(clamp(d.y, -1.0, 1.0));
+  var v: f32;
+  if (zenith < horizon) { v = (1.0 - sqrt(max(0.0, 1.0 - zenith / horizon))) * 0.5; }
+  else { v = (sqrt(min(1.0, (zenith - horizon) / beta)) + 1.0) * 0.5; }
+  let dh = length(d.xz);
+  let sh = length(s.xz);
+  var cosAz = 1.0;
+  if (dh > 1e-6 && sh > 1e-6) { cosAz = dot(d.xz, s.xz) / (dh * sh); }
+  return vec2f(sqrt(max(0.0, (1.0 - clamp(cosAz, -1.0, 1.0)) * 0.5)), v);
+}
+`
+);
+var AERIAL_LUT_BYTES = AERIAL_SIZE * AERIAL_SIZE * AERIAL_SLICES * 8;
+var AERIAL_CAMERA_FLOATS = 12;
+function packAerialCamera(camera, out = new Float32Array(AERIAL_CAMERA_FLOATS)) {
+  out.set([...camera.right, 1 / camera.focalX], 0);
+  out.set([...camera.up, 1 / camera.focalY], 4);
+  out.set([...camera.back, 0], 8);
+  return out;
+}
+var AERIAL_WGSL = (
+  /* wgsl */
+  `
+${ATMOSPHERE_COMMON_WGSL}
+${LUT_BINDINGS_WGSL}
+struct AerialCam { right: vec4f, up: vec4f, back: vec4f };
+@group(0) @binding(4) var<storage, read_write> outLut: array<vec2<u32>>;
+@group(0) @binding(5) var<uniform> cam: AerialCam;
+${LOOKUPS_WGSL}
+
+@compute @workgroup_size(8, 8, 1)
+fn main(@builtin(global_invocation_id) id: vec3u) {
+  if (id.x >= ${AERIAL_SIZE}u || id.y >= ${AERIAL_SIZE}u) { return; }
+  let u = (f32(id.x) + 0.5) / ${AERIAL_SIZE}.0;
+  let v = (f32(id.y) + 0.5) / ${AERIAL_SIZE}.0;
+  let d = normalize(cam.right.xyz * ((u * 2.0 - 1.0) * cam.right.w) + cam.up.xyz * ((1.0 - v * 2.0) * cam.up.w) - cam.back.xyz);
+  let bottom = atm.radii.x;
+  let r = bottom + atm.view.x;
+  let tTop = max(0.0, raySphere(r, d.y, atm.radii.y));
+  let sun = atm.sun.xyz;
+  let c = dot(d, sun);
+  let pr = rayleighPhase(c);
+  let pm = miePhase(c, atm.mie.z);
+  let E = atm.sunE.rgb;
+  var L = vec3f(0.0);
+  var throughput = vec3f(1.0);
+  var t = 0.0;
+  for (var z = 0u; z < ${AERIAL_SLICES}u; z = z + 1u) {
+    let w = (f32(z) + 0.5) / ${AERIAL_SLICES}.0;
+    let end = min(tTop, w * w * ${AERIAL_RANGE.toFixed(1)});
+    let dt = max(0.0, end - t) / ${AERIAL_SUBSTEPS}.0;
+    if (dt > 0.0) {
+      for (var i = 0; i < ${AERIAL_SUBSTEPS}; i = i + 1) {
+        let s = t + (f32(i) + 0.5) * dt;
+        let p = vec3f(d.x * s, r + d.y * s, d.z * s);
+        let pR = max(bottom + 1e-3, length(p));
+        let m = mediumAt(pR - bottom);
+        let muSun = dot(p, sun) / pR;
+        let ts = transmittanceTo(pR, muSun);
+        let ms = multiScatteringAt(pR - bottom, muSun);
+        let ext = max(vec3f(1e-9), m.extinction);
+        let stepT = exp(-ext * dt);
+        let S = E * ((m.rayleigh * pr + vec3f(m.mie * pm)) * ts + ms * (m.rayleigh + vec3f(m.mie)));
+        L = L + throughput * ((S - S * stepT) / ext);
+        throughput = throughput * stepT;
+      }
+    }
+    t = max(t, end);
+    let held = min(L, vec3f(65000.0));
+    outLut[(z * ${AERIAL_SIZE}u + id.y) * ${AERIAL_SIZE}u + id.x] = vec2<u32>(pack2x16float(held.rg), pack2x16float(vec2f(held.b, (throughput.r + throughput.g + throughput.b) / 3.0)));
+  }
+}
+`
+);
+var AERIAL_FRAME_FLOATS = 16;
+function packAerialFrame(sky, view, projection, out = new Float32Array(AERIAL_FRAME_FLOATS)) {
+  out.fill(0);
+  if (!sky || sky.atmosphere.aerialScale <= 0 || projection[15] !== 0) return out;
+  const c = aerialCamera(view, projection);
+  const v = view;
+  const eye = [-(v[0] * v[12] + v[1] * v[13] + v[2] * v[14]), -(v[4] * v[12] + v[5] * v[13] + v[6] * v[14]), -(v[8] * v[12] + v[9] * v[13] + v[10] * v[14])];
+  out.set([...eye, 1], 0);
+  out.set([...c.right, c.focalX], 4);
+  out.set([...c.up, c.focalY], 8);
+  out.set([...c.back, 1e-3 * sky.atmosphere.aerialScale], 12);
+  return out;
+}
+var AERIAL_SAMPLE_WGSL = (
+  /* wgsl */
+  `
+fn aerialTexel(x: u32, y: u32, z: u32) -> vec4<f32> {
+  let i = (z * ${AERIAL_SIZE}u + y) * ${AERIAL_SIZE}u + x;
+  let q = aerialLut[i >> 1u];
+  let pair = select(q.xy, q.zw, (i & 1u) == 1u);
+  return vec4<f32>(unpack2x16float(pair.x), unpack2x16float(pair.y));
+}
+fn aerialAt(P: vec3<f32>) -> vec4<f32> {
+  let ray = P - frame.aerialEye.xyz;
+  let ahead = -dot(ray, frame.aerialBack.xyz);
+  if (ahead <= 1e-4) { return vec4<f32>(0.0, 0.0, 0.0, 1.0); }
+  let u = (dot(ray, frame.aerialRight.xyz) / ahead * frame.aerialRight.w + 1.0) * 0.5;
+  let v = (1.0 - dot(ray, frame.aerialUp.xyz) / ahead * frame.aerialUp.w) * 0.5;
+  let t = length(ray) * frame.aerialBack.w;
+  let top = vec3<f32>(${AERIAL_SIZE - 1}.0, ${AERIAL_SIZE - 1}.0, ${AERIAL_SLICES - 1}.0);
+  let f = clamp(vec3<f32>(u * ${AERIAL_SIZE}.0 - 0.5, v * ${AERIAL_SIZE}.0 - 0.5, sqrt(min(1.0, t / ${AERIAL_RANGE.toFixed(1)})) * ${AERIAL_SLICES}.0 - 0.5), vec3<f32>(0.0), top);
+  let a = vec3<u32>(floor(f));
+  let b = min(a + vec3<u32>(1u), vec3<u32>(top));
+  let w = f - floor(f);
+  let y0 = mix(mix(aerialTexel(a.x, a.y, a.z), aerialTexel(b.x, a.y, a.z), w.x), mix(aerialTexel(a.x, b.y, a.z), aerialTexel(b.x, b.y, a.z), w.x), w.y);
+  let y1 = mix(mix(aerialTexel(a.x, a.y, b.z), aerialTexel(b.x, a.y, b.z), w.x), mix(aerialTexel(a.x, b.y, b.z), aerialTexel(b.x, b.y, b.z), w.x), w.y);
+  let s = mix(y0, y1, w.z);
+  // Nearer than the first slice's centre, the air fades toward none.
+  let fade = clamp(t / ${((0.5 / AERIAL_SLICES) ** 2 * AERIAL_RANGE).toPrecision(6)}, 0.0, 1.0);
+  return vec4<f32>(s.rgb * fade, 1.0 - (1.0 - s.a) * fade);
+}
+`
+);
+var USAGE2 = { textureBinding: 4, storage: 8, copySrc: 1, uniform: 64, copyDst: 8 };
+var GpuAtmosphere = class {
+  constructor(device) {
+    this.device = device;
+    this.moonData = new Float32Array(ATMOSPHERE_UNIFORM_FLOATS);
+    this.data = new Float32Array(ATMOSPHERE_UNIFORM_FLOATS);
+    this.cameraData = new Float32Array(AERIAL_CAMERA_FLOATS);
+    this.mediumKey = "";
+    this.uniformKey = "";
+    this.viewKey = "";
+    const texture = (width, height) => device.createTexture({ size: { width, height }, format: "rgba16float", usage: USAGE2.textureBinding | USAGE2.storage | USAGE2.copySrc });
+    this.transmittance = texture(TRANSMITTANCE_WIDTH, TRANSMITTANCE_HEIGHT);
+    this.multiScattering = texture(MULTISCATTER_SIZE, MULTISCATTER_SIZE);
+    this.skyView = texture(SKY_VIEW_WIDTH, SKY_VIEW_HEIGHT);
+    this.moonView = texture(SKY_VIEW_WIDTH, SKY_VIEW_HEIGHT);
+    this.moonUniforms = device.createBuffer({ size: ATMOSPHERE_UNIFORM_FLOATS * 4, usage: USAGE2.uniform | USAGE2.copyDst });
+    this.sampler = device.createSampler({ magFilter: "linear", minFilter: "linear", addressModeU: "clamp-to-edge", addressModeV: "clamp-to-edge" });
+    this.uniforms = device.createBuffer({ size: ATMOSPHERE_UNIFORM_FLOATS * 4, usage: USAGE2.uniform | USAGE2.copyDst });
+    this.camera = device.createBuffer({ size: AERIAL_CAMERA_FLOATS * 4, usage: USAGE2.uniform | USAGE2.copyDst });
+    const pipeline = (code) => device.createComputePipeline({ layout: "auto", compute: { module: device.createShaderModule({ code }), entryPoint: "main" } });
+    this.pipelines = { transmittance: pipeline(TRANSMITTANCE_WGSL), multiScattering: pipeline(MULTISCATTER_WGSL), skyView: pipeline(SKY_VIEW_WGSL), aerial: null };
+  }
+  /** Bring the LUTs up to `sky` (a submit of its own when anything changed); true when the sky view was rebuilt. */
+  update(sky) {
+    const moon = moonLightsSky(sky.sun, sky.moon ?? null) ? sky.moon : null;
+    const view = [this.prepare(sky), ...moon ? [...moon.direction, ...moon.radiance].map((v) => v.toPrecision(5)) : []].join("|");
+    if (view === this.viewKey) return false;
+    const encoder = this.device.createCommandEncoder();
+    this.medium(encoder, sky);
+    const skyView = (uniforms, target) => this.run(
+      encoder,
+      this.pipelines.skyView,
+      [
+        { binding: 0, resource: { buffer: uniforms } },
+        { binding: 1, resource: this.sampler },
+        { binding: 2, resource: this.transmittance.createView() },
+        { binding: 3, resource: this.multiScattering.createView() },
+        { binding: 4, resource: target.createView() }
+      ],
+      SKY_VIEW_WIDTH,
+      SKY_VIEW_HEIGHT
+    );
+    skyView(this.uniforms, this.skyView);
+    if (moon) {
+      const m = moon.direction;
+      this.device.queue.writeBuffer(this.moonUniforms, 0, packAtmosphereUniforms({ ...sky, sun: [m[0], m[1], m[2]], sunRadiance: [moon.radiance[0], moon.radiance[1], moon.radiance[2]] }, this.moonData));
+      skyView(this.moonUniforms, this.moonView);
+    }
+    this.device.queue.submit([encoder.finish()]);
+    this.viewKey = view;
+    return true;
+  }
+  /**
+   * The aerial perspective of `sky` for a camera into `target` (a buffer of
+   * {@link AERIAL_LUT_BYTES} with storage usage), with the medium's LUTs built
+   * first where they are new: a submit of its own, ahead of the frame that
+   * reads it.
+   */
+  aerial(sky, camera, target) {
+    var _a;
+    this.prepare(sky);
+    this.device.queue.writeBuffer(this.camera, 0, packAerialCamera(camera, this.cameraData));
+    const encoder = this.device.createCommandEncoder();
+    this.medium(encoder, sky);
+    (_a = this.pipelines).aerial ?? (_a.aerial = this.device.createComputePipeline({ layout: "auto", compute: { module: this.device.createShaderModule({ code: AERIAL_WGSL }), entryPoint: "main" } }));
+    this.run(
+      encoder,
+      this.pipelines.aerial,
+      [
+        this.uniformEntry(),
+        { binding: 1, resource: this.sampler },
+        { binding: 2, resource: this.transmittance.createView() },
+        { binding: 3, resource: this.multiScattering.createView() },
+        { binding: 4, resource: { buffer: target } },
+        { binding: 5, resource: { buffer: this.camera } }
+      ],
+      AERIAL_SIZE,
+      AERIAL_SIZE
+    );
+    this.device.queue.submit([encoder.finish()]);
+  }
+  dispose() {
+    for (const t of [this.transmittance, this.multiScattering, this.skyView, this.moonView]) t.destroy?.();
+    this.uniforms.destroy?.();
+    this.moonUniforms.destroy?.();
+    this.camera.destroy?.();
+  }
+  /** The uniforms written for `sky` where they changed; its key. */
+  prepare(sky) {
+    const medium = atmosphereKey2(sky.atmosphere);
+    const key2 = [medium, sky.atmosphere.viewHeight, ...sky.sun.map((v) => v.toFixed(5)), ...sky.sunRadiance.map((v) => v.toPrecision(5))].join("|");
+    if (key2 !== this.uniformKey) {
+      this.device.queue.writeBuffer(this.uniforms, 0, packAtmosphereUniforms(sky, this.data));
+      this.uniformKey = key2;
+    }
+    return key2;
+  }
+  /** The transmittance and multiple-scattering passes, when the medium is new. */
+  medium(encoder, sky) {
+    const medium = atmosphereKey2(sky.atmosphere);
+    if (medium === this.mediumKey) return;
+    this.run(encoder, this.pipelines.transmittance, [this.uniformEntry(), { binding: 1, resource: this.transmittance.createView() }], TRANSMITTANCE_WIDTH, TRANSMITTANCE_HEIGHT);
+    this.run(
+      encoder,
+      this.pipelines.multiScattering,
+      [this.uniformEntry(), { binding: 1, resource: this.sampler }, { binding: 2, resource: this.transmittance.createView() }, { binding: 3, resource: this.multiScattering.createView() }],
+      MULTISCATTER_SIZE,
+      MULTISCATTER_SIZE
+    );
+    this.mediumKey = medium;
+  }
+  uniformEntry() {
+    return { binding: 0, resource: { buffer: this.uniforms } };
+  }
+  run(encoder, pipeline, entries, width, height) {
+    const pass = encoder.beginComputePass();
+    pass.setPipeline(pipeline);
+    pass.setBindGroup(0, this.device.createBindGroup({ layout: pipeline.getBindGroupLayout(0), entries }));
+    pass.dispatchWorkgroups(Math.ceil(width / 8), Math.ceil(height / 8));
+    pass.end();
+  }
+};
+
+// src/render/dynamicGi.ts
+import { PROBE_NORMAL_BIAS, PROBE_SH as PROBE_SH2, PROBE_VOLUME_SLOTS } from "@cartbox/editor";
+var GI_UNIFORM_FLOATS = 32;
+var GI_REACH = 1.5;
+var GI_BACKFACE_LIMIT = 0.6;
+var STORAGE6 = 128;
+var COPY_DST8 = 8;
+var UNIFORM8 = 64;
+function randomRotation(u1, u2, u3) {
+  const a = Math.sqrt(1 - u1), b = Math.sqrt(u1);
+  const [x, y, z, w] = [a * Math.sin(2 * Math.PI * u2), a * Math.cos(2 * Math.PI * u2), b * Math.sin(2 * Math.PI * u3), b * Math.cos(2 * Math.PI * u3)];
+  return [
+    [1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w)],
+    [2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w)],
+    [2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)]
+  ];
+}
+function giSpacing(volume) {
+  const spacing = [0, 1, 2].map((a) => (volume.max[a] - volume.min[a]) / Math.max(1, volume.counts[a] - 1) || 1);
+  return { spacing, reach: GI_REACH * Math.max(...spacing) };
+}
+function packGiUniforms(volume, gi, rotation, seed, bounce, out = new Float32Array(GI_UNIFORM_FLOATS)) {
+  const { spacing, reach } = giSpacing(volume);
+  out.set([...volume.min, gi.rays], 0);
+  out.set([...spacing.map((s) => 1 / s), gi.hysteresis], 4);
+  out.set([...volume.counts, PROBE_VOLUME_SLOTS], 8);
+  out.set([...rotation[0], seed], 12);
+  out.set([...rotation[1], 0], 16);
+  out.set([...rotation[2], 0], 20);
+  out.set([reach, GI_BACKFACE_LIMIT, bounce ? 1 : 0, PROBE_NORMAL_BIAS * Math.min(...spacing)], 24);
+  return out;
+}
+var GI_WGSL = (
+  /* wgsl */
+  `
+${LIGHTMAP_TRACE_WGSL}
+struct Gi {
+  min: vec4<f32>,    // w: rays a probe
+  scale: vec4<f32>,  // grid units per metre, w: hysteresis
+  counts: vec4<f32>, // w: slots a probe
+  rot0: vec4<f32>,   // this frame's rotation, row by row; rot0.w its seed
+  rot1: vec4<f32>,
+  rot2: vec4<f32>,
+  info: vec4<f32>,   // the depth cap, the backface limit, 1 when the volume lights hits, the normal bias
+};
+@group(0) @binding(8) var<storage, read_write> probeData: array<vec4<f32>>;
+@group(0) @binding(9) var<uniform> gi: Gi;
+@group(0) @binding(10) var<storage, read_write> giRays: array<vec4<f32>>;
+
+fn giCount() -> vec3<u32> { return vec3<u32>(gi.counts.xyz + vec3<f32>(0.5)); }
+fn giSlot(slot: u32, i: vec3<u32>) -> u32 {
+  let n = giCount();
+  return (i.z * n.y + i.y) * (${PROBE_VOLUME_SLOTS}u * n.x) + slot * n.x + i.x;
+}
+fn giProbe(p: u32) -> vec3<u32> {
+  let n = giCount();
+  return vec3<u32>(p % n.x, (p / n.x) % n.y, p / (n.x * n.y));
+}
+fn giAt(i: vec3<u32>) -> vec3<f32> { return gi.min.xyz + vec3<f32>(i) / gi.scale.xyz; }
+
+// The volume's irradiance (over \u03C0) at P with normal N (the scene shader's probeVolumeAt): the eight probes
+// round it, trilinear, by a wrapped cosine toward each and Chebyshev's bound on each seeing P.
+fn giIrradiance(P: vec3<f32>, N: vec3<f32>) -> vec3<f32> {
+  let n = vec3<f32>(giCount());
+  let Pb = P + N * gi.info.w;
+  let g = clamp((Pb - gi.min.xyz) * gi.scale.xyz, vec3<f32>(0.0), n - vec3<f32>(1.0));
+  let i0 = min(vec3<u32>(floor(g)), vec3<u32>(n) - vec3<u32>(2u));
+  let f = g - vec3<f32>(i0);
+  var sum = vec3<f32>(0.0);
+  var wsum = 0.0;
+  for (var c = 0u; c < 8u; c = c + 1u) {
+    let o = vec3<u32>(c & 1u, (c >> 1u) & 1u, (c >> 2u) & 1u);
+    let i = i0 + o;
+    let s0 = probeData[giSlot(0u, i)];
+    if (s0.w < 0.5) { continue; }
+    let tri = select(vec3<f32>(1.0) - f, f, o == vec3<u32>(1u));
+    let at = giAt(i);
+    let to = at - P;
+    let wrap = (dot(to, N) / max(length(to), 1e-6) + 1.0) * 0.5;
+    var w = wrap * wrap + 0.2;
+    let off = Pb - at;
+    let dist = length(off);
+    if (dist > 1e-4) {
+      let k = octTexel(off / dist);
+      let pair = probeData[giSlot(${PROBE_SH2}u + k / 2u, i)];
+      let m = select(pair.xy, pair.zw, (k & 1u) == 1u);
+      if (dist > m.x) {
+        let variance = max(m.y - m.x * m.x, 1e-4);
+        let cheb = variance / (variance + (dist - m.x) * (dist - m.x));
+        w = w * cheb * cheb * cheb;
+      }
+    }
+    w = w * tri.x * tri.y * tri.z;
+    if (w <= 1e-6) { continue; }
+    let e = s0.xyz * 0.282095
+      + (probeData[giSlot(1u, i)].xyz * N.y + probeData[giSlot(2u, i)].xyz * N.z + probeData[giSlot(3u, i)].xyz * N.x) * 0.488603
+      + (probeData[giSlot(4u, i)].xyz * (N.x * N.y) + probeData[giSlot(5u, i)].xyz * (N.y * N.z) + probeData[giSlot(7u, i)].xyz * (N.x * N.z)) * 1.092548
+      + probeData[giSlot(6u, i)].xyz * (0.315392 * (3.0 * N.z * N.z - 1.0))
+      + probeData[giSlot(8u, i)].xyz * (0.546274 * (N.x * N.x - N.y * N.y));
+    sum = sum + max(e, vec3<f32>(0.0)) * w;
+    wsum = wsum + w;
+  }
+  return select(vec3<f32>(0.0), sum / wsum, wsum > 0.0);
+}
+
+fn giRay(r: u32, rays: u32) -> vec3<f32> {
+  let y = 1.0 - (2.0 * f32(r) + 1.0) / f32(rays);
+  let rr = sqrt(max(0.0, 1.0 - y * y));
+  let phi = f32(r) * 2.39996323;
+  let d = vec3<f32>(rr * cos(phi), y, rr * sin(phi));
+  return vec3<f32>(dot(gi.rot0.xyz, d), dot(gi.rot1.xyz, d), dot(gi.rot2.xyz, d));
+}
+
+@compute @workgroup_size(64)
+fn giTrace(@builtin(global_invocation_id) id: vec3<u32>) {
+  let n = giCount();
+  let rays = u32(gi.min.w + 0.5);
+  let p = id.x / rays;
+  if (p >= n.x * n.y * n.z) { return; }
+  let r = id.x % rays;
+  rng = pcg(id.x ^ pcg(u32(gi.rot0.w)));
+  let P = giAt(giProbe(p));
+  let d = giRay(r, rays);
+  let h = trace(P, d, FAR, false);
+  var L = vec3<f32>(0.0);
+  var t = FAR;
+  var back = 0.0;
+  if (h.tri < 0) {
+    L = skyAt(d);
+  } else {
+    let i = u32(h.tri);
+    t = h.t;
+    if (dot(d, vec3<f32>(tris[i * 3u].w, tris[i * 3u + 1u].w, tris[i * 3u + 2u].w)) > 0.0) {
+      // Inside something: dark, and nearer than it is, so the probe's visibility keeps the light out.
+      back = 1.0;
+      t = t * 0.2;
+    } else {
+      var nrm = normalize(cross(tris[i * 3u + 1u].xyz, tris[i * 3u + 2u].xyz));
+      if (dot(nrm, d) > 0.0) { nrm = -nrm; }
+      let hp = P + d * h.t + nrm * EPS;
+      var light = lightsOn(hp, nrm, bitcast<u32>(mats[i * 2u].w));
+      if (gi.info.z > 0.5) { light = light + giIrradiance(hp, nrm); }
+      L = mats[i * 2u + 1u].rgb + mats[i * 2u].rgb * light;
+    }
+  }
+  giRays[id.x * 2u] = vec4<f32>(L, t);
+  giRays[id.x * 2u + 1u] = vec4<f32>(d, back);
+}
+
+// --- Reflections the screen can't show (F3f, Epic), traced at half resolution ---
+struct ReflectFrame {
+  invViewProj: mat4x4<f32>, // clip \u2192 world, as drawn
+  eye: vec4<f32>,           // w: this frame's seed
+  info: vec4<f32>,          // the frame's full width and height, 1 when the volume lights hits, the roughness limit
+};
+@group(0) @binding(11) var<uniform> rf: ReflectFrame;
+@group(0) @binding(12) var reflectDepth: texture_2d<f32>;
+@group(0) @binding(13) var reflectGbuffer: texture_2d<f32>;
+@group(0) @binding(14) var reflectOut: texture_storage_2d<rgba16float, write>;
+
+fn reflectOct(e: vec2<f32>) -> vec3<f32> {
+  var n = vec3<f32>(e.x, e.y, 1.0 - abs(e.x) - abs(e.y));
+  let t = max(-n.z, 0.0);
+  n.x = n.x + select(t, -t, n.x >= 0.0);
+  n.y = n.y + select(t, -t, n.y >= 0.0);
+  return normalize(n);
+}
+
+// GGX's visible normals (Heitz 2018), in the frame where the normal is +z.
+fn reflectVndf(Ve: vec3<f32>, alpha: f32, u1: f32, u2: f32) -> vec3<f32> {
+  let Vh = normalize(vec3<f32>(alpha * Ve.x, alpha * Ve.y, Ve.z));
+  let lensq = Vh.x * Vh.x + Vh.y * Vh.y;
+  let T1 = select(vec3<f32>(1.0, 0.0, 0.0), vec3<f32>(-Vh.y, Vh.x, 0.0) / sqrt(max(lensq, 1e-12)), lensq > 1e-12);
+  let T2 = cross(Vh, T1);
+  let r = sqrt(u1);
+  let phi = 6.2831853 * u2;
+  let t1 = r * cos(phi);
+  let s = 0.5 * (1.0 + Vh.z);
+  let t2 = (1.0 - s) * sqrt(max(0.0, 1.0 - t1 * t1)) + s * (r * sin(phi));
+  let Nh = t1 * T1 + t2 * T2 + sqrt(max(0.0, 1.0 - t1 * t1 - t2 * t2)) * Vh;
+  return normalize(vec3<f32>(alpha * Nh.x, alpha * Nh.y, max(0.0, Nh.z)));
+}
+
+@compute @workgroup_size(8, 8)
+fn giReflect(@builtin(global_invocation_id) id: vec3<u32>) {
+  let out = vec2<i32>(textureDimensions(reflectOut));
+  if (i32(id.x) >= out.x || i32(id.y) >= out.y) { return; }
+  let full = vec2<i32>(i32(rf.info.x), i32(rf.info.y));
+  let p = min(vec2<i32>(id.xy) * 2, full - 1);
+  let z = textureLoad(reflectDepth, p, 0).r;
+  let g = textureLoad(reflectGbuffer, p, 0);
+  if (z >= 1.0 || g.z > rf.info.w) { textureStore(reflectOut, vec2<i32>(id.xy), vec4<f32>(0.0)); return; }
+  rng = pcg((id.y * 4096u + id.x) ^ pcg(u32(rf.eye.w)));
+  let ndc = vec2<f32>((f32(p.x) + 0.5) / f32(full.x) * 2.0 - 1.0, 1.0 - (f32(p.y) + 0.5) / f32(full.y) * 2.0);
+  let w = rf.invViewProj * vec4<f32>(ndc, z, 1.0);
+  let P = w.xyz / w.w;
+  let V = normalize(rf.eye.xyz - P);
+  var N = reflectOct(g.xy);
+  if (dot(N, V) < 0.0) { N = -N; }
+  let alpha = g.z * g.z;
+  var H = N;
+  if (alpha > 0.0025) {
+    let up = select(vec3<f32>(0.0, 1.0, 0.0), vec3<f32>(1.0, 0.0, 0.0), abs(N.y) > 0.9);
+    let T = normalize(cross(up, N));
+    let B = cross(N, T);
+    let h = reflectVndf(vec3<f32>(dot(V, T), dot(V, B), dot(V, N)), alpha, rand(), rand());
+    H = normalize(T * h.x + B * h.y + N * h.z);
+  }
+  let d = reflect(-V, H);
+  let o = P + N * (EPS * 4.0 + 0.002 * length(rf.eye.xyz - P));
+  let h = trace(o, d, FAR, false);
+  var L = vec3<f32>(0.0);
+  if (h.tri < 0) {
+    L = skyAt(d);
+  } else {
+    let i = u32(h.tri);
+    // A surface's back shows nothing (it is inside something).
+    if (dot(d, vec3<f32>(tris[i * 3u].w, tris[i * 3u + 1u].w, tris[i * 3u + 2u].w)) <= 0.0) {
+      var nrm = normalize(cross(tris[i * 3u + 1u].xyz, tris[i * 3u + 2u].xyz));
+      if (dot(nrm, d) > 0.0) { nrm = -nrm; }
+      let hp = o + d * h.t + nrm * EPS;
+      var light = lightsOn(hp, nrm, bitcast<u32>(mats[i * 2u].w));
+      if (rf.info.z > 0.5) { light = light + giIrradiance(hp, nrm); }
+      L = mats[i * 2u + 1u].rgb + mats[i * 2u].rgb * light;
+    }
+  }
+  textureStore(reflectOut, vec2<i32>(id.xy), vec4<f32>(L, 1.0));
+}
+
+@compute @workgroup_size(64)
+fn giUpdate(@builtin(global_invocation_id) id: vec3<u32>) {
+  let n = giCount();
+  let p = id.x / ${PROBE_VOLUME_SLOTS}u;
+  if (p >= n.x * n.y * n.z) { return; }
+  let slot = id.x % ${PROBE_VOLUME_SLOTS}u;
+  let rays = u32(gi.min.w + 0.5);
+  let base = p * rays;
+  let at = giSlot(slot, giProbe(p));
+  let old = probeData[at];
+  let h = gi.scale.w;
+  if (slot < ${PROBE_SH2}u) {
+    let band = select(select(0.25, 2.0 / 3.0, slot < 4u), 1.0, slot == 0u);
+    var e = vec3<f32>(0.0);
+    var backs = 0.0;
+    var skyAll = 0.0;
+    var skyOpen = 0.0;
+    for (var r = 0u; r < rays; r = r + 1u) {
+      let a = giRays[(base + r) * 2u];
+      let b = giRays[(base + r) * 2u + 1u];
+      let d = b.xyz;
+      let y = array<f32, 9>(0.282095, 0.488603 * d.y, 0.488603 * d.z, 0.488603 * d.x, 1.092548 * d.x * d.y, 1.092548 * d.y * d.z, 0.315392 * (3.0 * d.z * d.z - 1.0), 1.092548 * d.x * d.z, 0.546274 * (d.x * d.x - d.y * d.y));
+      e = e + a.rgb * y[slot];
+      backs = backs + b.w;
+      let s = lum(skyAt(d));
+      skyAll = skyAll + s;
+      if (a.w >= FAR) { skyOpen = skyOpen + s; }
+    }
+    let estimate = e * (4.0 * PI / f32(rays)) * band;
+    var w = 0.0;
+    if (slot == 0u) { w = mix(select(0.0, 1.0, backs <= gi.info.y * f32(rays)), old.w, h); }
+    if (slot == 1u) { w = mix(select(1.0, min(1.0, skyOpen / skyAll), skyAll > 1e-12), old.w, h); }
+    probeData[at] = vec4<f32>(mix(estimate, old.rgb, h), w);
+    return;
+  }
+  // Two octahedral depth texels a slot: their mean distance and its square, where this frame's rays fell.
+  let first = (slot - ${PROBE_SH2}u) * 2u;
+  var acc = vec4<f32>(0.0);
+  var hits = vec2<f32>(0.0);
+  for (var r = 0u; r < rays; r = r + 1u) {
+    let a = giRays[(base + r) * 2u];
+    let k = octTexel(giRays[(base + r) * 2u + 1u].xyz);
+    let t = min(a.w, gi.info.x);
+    if (k == first) { acc = acc + vec4<f32>(t, t * t, 0.0, 0.0); hits.x = hits.x + 1.0; }
+    if (k == first + 1u) { acc = acc + vec4<f32>(0.0, 0.0, t, t * t); hits.y = hits.y + 1.0; }
+  }
+  var out = old;
+  if (hits.x > 0.0) { out = vec4<f32>(mix(acc.xy / hits.x, old.xy, h), out.zw); }
+  if (hits.y > 0.0) { out = vec4<f32>(out.xy, mix(acc.zw / hits.y, old.zw, h)); }
+  probeData[at] = out;
+}
+`
+);
+function mulberry(seed) {
+  let a = seed >>> 0;
+  return () => {
+    a = a + 1831565813 >>> 0;
+    let t = a;
+    t = Math.imul(t ^ t >>> 15, t | 1);
+    t ^= t + Math.imul(t ^ t >>> 7, t | 61);
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+}
+var GpuProbeGi = class {
+  constructor(device, occluders) {
+    this.device = device;
+    this.data = new Float32Array(GI_UNIFORM_FLOATS);
+    this.rays = null;
+    this.lights = null;
+    this.lightsSize = 0;
+    this.sky = null;
+    this.skySource = void 0;
+    this.skySize = [0, 0];
+    this.pipelines = null;
+    this.reflectPipeline = null;
+    this.reflectUniforms = null;
+    this.reflectGi = null;
+    this.blankProbes = null;
+    this.reflectData = new Float32Array(24);
+    this.random = mulberry(24301);
+    this.frames = 0;
+    /** The probe buffer the passes last wrote into, so a new one (a re-uploaded volume) starts its bounce afresh. */
+    this.target = null;
+    const packed = packLightmapScene(occluders);
+    const upload = (view) => {
+      const buffer = device.createBuffer({ size: Math.max(16, view.byteLength), usage: STORAGE6 | COPY_DST8 });
+      device.queue.writeBuffer(buffer, 0, view.buffer, view.byteOffset, view.byteLength);
+      return buffer;
+    };
+    this.scene = [upload(packed.nodes), upload(packed.tris), upload(packed.mats)];
+    this.uniforms = device.createBuffer({ size: GI_UNIFORM_FLOATS * 4, usage: UNIFORM8 | COPY_DST8 });
+    this.params = device.createBuffer({ size: 64, usage: UNIFORM8 | COPY_DST8 });
+  }
+  /**
+   * Write this frame's uniforms and encode its passes into `encoder`: the
+   * volume `layout` (the probe buffer `probes` holds it as the scene reads
+   * it), lit by `lights` and `sky`.
+   */
+  update(encoder, probes, layout, settings, lights, sky, timing = {}) {
+    const device = this.device;
+    const count = layout.counts[0] * layout.counts[1] * layout.counts[2];
+    const rays = settings.rays;
+    const raysBytes = count * rays * 32;
+    if (!this.rays || this.rays.size < raysBytes) {
+      this.rays?.destroy();
+      this.rays = device.createBuffer({ size: raysBytes, usage: STORAGE6 });
+    }
+    const packedLights = this.prepare(lights, sky);
+    const { reach } = giSpacing(layout);
+    device.queue.writeBuffer(this.params, 0, lightmapParams(0, count, 0, rays, rays, 1, sky, packedLights, reach));
+    const bounce = this.target === probes;
+    this.target = probes;
+    const rotation = randomRotation(this.random(), this.random(), this.random());
+    device.queue.writeBuffer(this.uniforms, 0, packGiUniforms(layout, settings, rotation, this.frames % 16777216, bounce, this.data));
+    this.frames += 1;
+    const pipeline = (entryPoint) => device.createComputePipeline({ layout: "auto", compute: { module: device.createShaderModule({ code: GI_WGSL }), entryPoint } });
+    this.pipelines ?? (this.pipelines = { trace: pipeline("giTrace"), update: pipeline("giUpdate") });
+    const pass = encoder.beginComputePass(timing);
+    pass.setPipeline(this.pipelines.trace);
+    pass.setBindGroup(
+      0,
+      device.createBindGroup({
+        layout: this.pipelines.trace.getBindGroupLayout(0),
+        entries: [
+          { binding: 0, resource: { buffer: this.scene[0] } },
+          { binding: 1, resource: { buffer: this.scene[1] } },
+          { binding: 2, resource: { buffer: this.scene[2] } },
+          { binding: 5, resource: { buffer: this.sky } },
+          { binding: 6, resource: { buffer: this.params } },
+          { binding: 7, resource: { buffer: this.lights } },
+          { binding: 8, resource: { buffer: probes } },
+          { binding: 9, resource: { buffer: this.uniforms } },
+          { binding: 10, resource: { buffer: this.rays } }
+        ]
+      })
+    );
+    pass.dispatchWorkgroups(Math.ceil(count * rays / 64));
+    pass.setPipeline(this.pipelines.update);
+    pass.setBindGroup(
+      0,
+      device.createBindGroup({
+        layout: this.pipelines.update.getBindGroupLayout(0),
+        entries: [
+          { binding: 5, resource: { buffer: this.sky } },
+          { binding: 6, resource: { buffer: this.params } },
+          { binding: 8, resource: { buffer: probes } },
+          { binding: 9, resource: { buffer: this.uniforms } },
+          { binding: 10, resource: { buffer: this.rays } }
+        ]
+      })
+    );
+    pass.dispatchWorkgroups(Math.ceil(count * PROBE_VOLUME_SLOTS / 64));
+    pass.end();
+  }
+  /** Upload the frame's lights and (when it changed) the sky the tracer lights its hits by. */
+  prepare(lights, sky) {
+    const device = this.device;
+    const packedLights = packBakeLights(bakeLights(lights));
+    if (!this.lights || this.lightsSize < packedLights.data.byteLength) {
+      this.lights?.destroy();
+      this.lightsSize = Math.max(16, packedLights.data.byteLength);
+      this.lights = device.createBuffer({ size: this.lightsSize, usage: STORAGE6 | COPY_DST8 });
+    }
+    device.queue.writeBuffer(this.lights, 0, packedLights.data);
+    if (sky !== this.skySource) {
+      this.sky?.destroy();
+      const data = sky ? sky.data : new Float32Array(4);
+      this.sky = device.createBuffer({ size: Math.max(16, data.byteLength), usage: STORAGE6 | COPY_DST8 });
+      device.queue.writeBuffer(this.sky, 0, data);
+      this.skySource = sky;
+      this.skySize = sky ? [sky.width, sky.height] : [0, 0];
+    }
+    return packedLights;
+  }
+  /**
+   * Reflections the screen can't show (F3f, Epic): encode, into `encoder`, a
+   * ray a half-resolution pixel of the frame — from its depth (`depth`, the
+   * Hi-Z chain's first level) and G-buffer, reflected about a microfacet
+   * normal for its roughness — through the still scene, each hit lit as the
+   * live volume lights its own (by `lights`, and by `volume`'s irradiance when
+   * there is one), a miss by the sky; into `out` (rgba16float storage, half the
+   * frame's size). `lit` says whether update() already prepared this frame's
+   * lights and sky.
+   */
+  traceReflections(encoder, frame, lights, sky, volume, lit, timing = {}) {
+    const device = this.device;
+    const packedLights = lit ? null : this.prepare(lights, sky);
+    if (packedLights) device.queue.writeBuffer(this.params, 0, lightmapParams(0, 0, 0, 1, 1, 1, sky, packedLights, 0));
+    this.reflectUniforms ?? (this.reflectUniforms = device.createBuffer({ size: this.reflectData.byteLength, usage: UNIFORM8 | COPY_DST8 }));
+    this.reflectGi ?? (this.reflectGi = device.createBuffer({ size: GI_UNIFORM_FLOATS * 4, usage: UNIFORM8 | COPY_DST8 }));
+    this.blankProbes ?? (this.blankProbes = device.createBuffer({ size: 16, usage: STORAGE6 }));
+    this.reflectData.set(frame.invViewProj, 0);
+    this.reflectData.set([frame.eye[0], frame.eye[1], frame.eye[2], this.frames % 16777216], 16);
+    this.reflectData.set([frame.width, frame.height, volume ? 1 : 0, frame.maxRoughness], 20);
+    device.queue.writeBuffer(this.reflectUniforms, 0, this.reflectData);
+    if (volume) device.queue.writeBuffer(this.reflectGi, 0, packGiUniforms(volume.layout, { rays: 1, hysteresis: 0, spacing: 1 }, [[1, 0, 0], [0, 1, 0], [0, 0, 1]], 0, true));
+    if (!lit) this.frames += 1;
+    this.reflectPipeline ?? (this.reflectPipeline = device.createComputePipeline({ layout: "auto", compute: { module: device.createShaderModule({ code: GI_WGSL }), entryPoint: "giReflect" } }));
+    const pass = encoder.beginComputePass(timing);
+    pass.setPipeline(this.reflectPipeline);
+    pass.setBindGroup(
+      0,
+      device.createBindGroup({
+        layout: this.reflectPipeline.getBindGroupLayout(0),
+        entries: [
+          { binding: 0, resource: { buffer: this.scene[0] } },
+          { binding: 1, resource: { buffer: this.scene[1] } },
+          { binding: 2, resource: { buffer: this.scene[2] } },
+          { binding: 5, resource: { buffer: this.sky } },
+          { binding: 6, resource: { buffer: this.params } },
+          { binding: 7, resource: { buffer: this.lights } },
+          { binding: 8, resource: { buffer: volume ? volume.buffer : this.blankProbes } },
+          { binding: 9, resource: { buffer: this.reflectGi } },
+          { binding: 11, resource: { buffer: this.reflectUniforms } },
+          { binding: 12, resource: frame.depth },
+          { binding: 13, resource: frame.gbuffer },
+          { binding: 14, resource: frame.out }
+        ]
+      })
+    );
+    pass.dispatchWorkgroups(Math.ceil(Math.ceil(frame.width / 2) / 8), Math.ceil(Math.ceil(frame.height / 2) / 8));
+    pass.end();
+  }
+  dispose() {
+    for (const b of [...this.scene, this.uniforms, this.params, this.rays, this.lights, this.sky, this.reflectUniforms, this.reflectGi, this.blankProbes]) b?.destroy?.();
+  }
+};
+
+// src/render/volumetricFog.ts
+import { CLUSTER_CELLS as CLUSTER_CELLS2, CLUSTER_X as CLUSTER_X3, CLUSTER_Y as CLUSTER_Y3, CLUSTER_Z as CLUSTER_Z2, FOG_SLICES, aerialCamera as aerialCamera2 } from "@cartbox/editor";
+
 // src/render/localAtlas.ts
-import { localShadowTileCount, localShadowViews, multiplyMat4 as multiplyMat46 } from "@cartbox/editor";
+import { localShadowTileCount, localShadowViews, multiplyMat4 as multiplyMat47 } from "@cartbox/editor";
 var LOCAL_ATLAS_SIZE = 4096;
 var MAX_GPU_LOCAL_TILES = 64;
 var LOCAL_TILE_SIZES = [1024, 512, 256];
@@ -19273,8 +29022,8 @@ function planLocalTiles(lights, eye, tanHalfFov) {
     first.set(c.index, tiles.length);
     localShadowViews(c.light).forEach(({ view, projection }, face) => {
       const [x, y] = atlas.alloc(size);
-      const viewProj = multiplyMat46(projection, view);
-      tiles.push({ light: c.index, face, x, y, size, viewProj, drawViewProj: multiplyMat46(TO_WEBGPU_DEPTH, viewProj), linear: [projection[10], projection[14]] });
+      const viewProj = multiplyMat47(projection, view);
+      tiles.push({ light: c.index, face, x, y, size, viewProj, drawViewProj: multiplyMat47(TO_WEBGPU_DEPTH, viewProj), linear: [projection[10], projection[14]] });
     });
   }
   const out = lights.map((light, i) => {
@@ -19323,14 +29072,14 @@ var LocalTileCache = class {
     this.entries = [];
   }
   /** Whether the tile at this rect must be drawn for `key`, `moving` saying whether a mover reaches its light now. */
-  dirty(tile, key, moving) {
+  dirty(tile, key2, moving) {
     const e = this.entries.find((c) => c.x === tile.x && c.y === tile.y && c.size === tile.size);
-    return !e || e.key !== key || moving || e.moving;
+    return !e || e.key !== key2 || moving || e.moving;
   }
   /** Record a tile drawn this frame. */
-  drawn(tile, key, moving) {
+  drawn(tile, key2, moving) {
     this.entries = this.entries.filter((c) => c.x + c.size <= tile.x || tile.x + tile.size <= c.x || c.y + c.size <= tile.y || tile.y + tile.size <= c.y);
-    this.entries.push({ x: tile.x, y: tile.y, size: tile.size, key, moving });
+    this.entries.push({ x: tile.x, y: tile.y, size: tile.size, key: key2, moving });
   }
   /** Forget everything (the atlas was remade). */
   clear() {
@@ -19424,18 +29173,795 @@ fn localContact(P: vec3<f32>, lp: vec3<f32>) -> f32 {
 `
 );
 
+// src/render/volumetricFog.ts
+var FOG_FORMAT = "rgba16float";
+var FOG_HISTORY = 0.9;
+var FOG_LIGHTS_AT = 100 + CASCADE_COUNT * 16;
+var FOG_UNIFORM_FLOATS = FOG_LIGHTS_AT + 12;
+function packFogLights(lights, out = new Float32Array(12)) {
+  out.set(lights.clusterParams.slice(0, 4), 0);
+  out.set([lights.globalCount, lights.clustered ? 1 : 0, 0, lights.shadowBias === null ? 0 : 1], 4);
+  out.set([lights.shadowBias ?? 0, lights.width, lights.height, 0], 8);
+  return out;
+}
+function fogCamera(view, projection) {
+  const v = view;
+  const eye = [-(v[0] * v[12] + v[1] * v[13] + v[2] * v[14]), -(v[4] * v[12] + v[5] * v[13] + v[6] * v[14]), -(v[8] * v[12] + v[9] * v[13] + v[10] * v[14])];
+  return { camera: aerialCamera2(view, projection), eye };
+}
+function packFogUniforms(frame, out = new Float32Array(FOG_UNIFORM_FLOATS)) {
+  out.fill(0);
+  const v = frame.fog;
+  const { camera, eye } = frame.camera;
+  const history = frame.previous !== null;
+  out.set([...frame.grid, v.distance], 0);
+  out.set([...eye, history ? FOG_HISTORY : 0], 4);
+  out.set([...camera.right, 1 / camera.focalX], 8);
+  out.set([...camera.up, 1 / camera.focalY], 12);
+  out.set([...camera.back, 0], 16);
+  out.set([...frame.jitter, 0], 20);
+  if (frame.previous) {
+    const p = frame.previous;
+    out.set([...p.eye, 1], 24);
+    out.set([...p.camera.right, p.camera.focalX], 28);
+    out.set([...p.camera.up, p.camera.focalY], 32);
+    out.set([...p.camera.back, 0], 36);
+  }
+  const sun = frame.light.sun;
+  if (sun) {
+    out.set([...sun.direction, v.anisotropy], 40);
+    out.set([...sun.radiance.map((r) => Math.PI * r), frame.cascades ? 1 : 0], 44);
+  }
+  out.set([...frame.light.sky.map((s) => s * v.ambient), 0], 48);
+  out.set([...v.albedo, Math.max(0, v.fog.density)], 52);
+  const h = v.fog.height;
+  const boxes = (v.fog.volumes ?? []).slice(0, 4);
+  out.set([h?.density ?? 0, h?.base ?? 0, h?.falloff ?? 0, boxes.length], 56);
+  boxes.forEach((b, i) => {
+    out.set([...b.min, b.density], 60 + i * 8);
+    out.set([...b.max, b.falloff], 64 + i * 8);
+  });
+  const c = frame.cascades;
+  if (c) {
+    out.set([c.strength, 0, 0, 0], 92);
+    out.set(c.cascades.slice(0, CASCADE_COUNT).map((k) => k.texel), 96);
+    c.cascades.slice(0, CASCADE_COUNT).forEach((k, i) => out.set(k.viewProj, 100 + i * 16));
+  }
+  return out;
+}
+var FOG_STRUCT_WGSL = (
+  /* wgsl */
+  `
+struct Fog {
+  grid: vec4f,      // columns, rows, slices, reach
+  eye: vec4f,       // w: the history's weight
+  right: vec4f,     // w: 1 / P[0]
+  up: vec4f,        // w: 1 / P[5]
+  back: vec4f,
+  jitter: vec4f,
+  prevEye: vec4f,   // w: 1 with a history
+  prevRight: vec4f, // w: P[0]
+  prevUp: vec4f,    // w: P[5]
+  prevBack: vec4f,
+  sun: vec4f,       // toward it, w: anisotropy
+  sunE: vec4f,      // \u03C0 \xD7 its radiance, w: 1 when shadowed
+  sky: vec4f,       // the sky's mean radiance \xD7 the ambient setting
+  albedo: vec4f,    // w: the distance fog's density
+  height: vec4f,    // density, base, falloff, box count
+  boxes: array<vec4f, 8>,
+  cascade: vec4f,   // x: strength
+  cascadeTexel: vec4f,
+  cascadeVp: array<mat4x4f, ${CASCADE_COUNT}>,
+  clusterParams: vec4f, // F5b-2: tile size (px), near, slice scale
+  clusterInfo: vec4f,   // global lights, 1 with cells, -, 1 with spot/point shadow tiles
+  local: vec4f,         // the tiles' bias, the frame's width and height
+};
+@group(0) @binding(0) var<uniform> fog: Fog;
+`
+);
+var FOG_INJECT_WGSL = (
+  /* wgsl */
+  `
+${FOG_STRUCT_WGSL}
+@group(0) @binding(1) var history: texture_3d<f32>;
+@group(0) @binding(2) var linearSamp: sampler;
+@group(0) @binding(3) var cascadeMap: texture_depth_2d_array;
+@group(0) @binding(4) var cascadeSamp: sampler_comparison;
+@group(0) @binding(5) var outLight: texture_storage_3d<rgba16float, write>;
+// The scene's lights, their clustered cells, and the spot/point shadow tiles (F5b-2).
+struct Light { d0: vec4f, d1: vec4f, d2: vec4f, d3: vec4f, d4: vec4f };
+struct ShadowTile { mvp: mat4x4f, params: vec4f, rect: vec4f };
+@group(0) @binding(6) var<storage, read> lights: array<Light>;
+@group(0) @binding(7) var<storage, read> clusterData: array<u32>;
+@group(0) @binding(8) var<storage, read> shadowTiles: array<ShadowTile>;
+@group(0) @binding(9) var localDepth: texture_depth_2d;
+
+fn fogToLinear(c: vec3f) -> vec3f {
+  return select(pow((c + vec3f(0.055)) / 1.055, vec3f(2.4)), c / 12.92, c <= vec3f(0.04045));
+}
+// A spot/point light's shadow at P: one comparison tap of its tile (a point light's face by dominant axis).
+fn localShadowAt(first: i32, lgt: Light, P: vec3f) -> f32 {
+  var tile = first;
+  if (lgt.d0.w < 1.5) {
+    let d = P - lgt.d0.xyz;
+    let m = abs(d);
+    if (m.x >= m.y && m.x >= m.z) { tile = tile + select(1, 0, d.x >= 0.0); }
+    else if (m.y >= m.z) { tile = tile + select(3, 2, d.y >= 0.0); }
+    else { tile = tile + select(5, 4, d.z >= 0.0); }
+  }
+  let t = shadowTiles[tile];
+  let c = t.mvp * vec4f(P, 1.0);
+  if (c.w <= 0.0) { return 1.0; }
+  let n = c.xyz / c.w;
+  if (any(abs(n) > vec3f(1.0))) { return 1.0; }
+  let own = t.params.y / (n.z + t.params.x) - fog.local.x;
+  let depthRef = (t.params.y / max(own, 1e-4) - t.params.x) * 0.5 + 0.5;
+  let px = clamp(vec2f((n.x * 0.5 + 0.5) * t.rect.z, (0.5 - n.y * 0.5) * t.rect.z), vec2f(1.0), vec2f(t.rect.z - 1.0));
+  return textureSampleCompareLevel(localDepth, cascadeSamp, (t.rect.xy + px) / ${LOCAL_ATLAS_SIZE}.0, depthRef);
+}
+// What a spot or point light in the default channel brings fog at P seen along d (fogLocalLight).
+fn localFog(lgt: Light, P: vec3f, d: vec3f) -> vec3f {
+  let bits = u32(lgt.d3.w + 0.5);
+  if (((bits >> 1u) & 1u) == 0u || lgt.d0.w < 0.5 || lgt.d0.w > 2.5) { return vec3f(0.0); }
+  let toL = lgt.d0.xyz - P;
+  let dist = max(length(toL), 1e-4);
+  let Ld = toL / dist;
+  let range = lgt.d2.x;
+  var atten = 1.0;
+  if ((bits & 1u) != 0u) {
+    var win = 1.0;
+    if (range > 0.0) { let q = dist / range; let w = clamp(1.0 - q * q * q * q, 0.0, 1.0); win = w * w; }
+    let dd = max(dist, 0.01);
+    atten = win / (dd * dd);
+  } else if (range > 0.0) { let w = max(0.0, 1.0 - dist / range); atten = w * w; }
+  if (lgt.d0.w > 1.5) {
+    let ct = clamp((-dot(Ld, lgt.d3.xyz) - lgt.d2.y) / (lgt.d2.z - lgt.d2.y), 0.0, 1.0);
+    atten = atten * ct * ct * (3.0 - 2.0 * ct);
+  }
+  if (atten <= 0.0) { return vec3f(0.0); }
+  var occl = 1.0;
+  if (lgt.d2.w >= 0.0 && fog.clusterInfo.w > 0.5) { occl = localShadowAt(i32(lgt.d2.w + 0.5), lgt, P); }
+  return fogToLinear(lgt.d1.rgb) * (3.14159265 * lgt.d1.w * atten * occl * phase(dot(Ld, d), fog.sun.w));
+}
+// Every local light that reaches P: the global ones, then those of its cluster cell.
+fn localLights(P: vec3f, d: vec3f) -> vec3f {
+  var sum = vec3f(0.0);
+  let ng = i32(fog.clusterInfo.x + 0.5);
+  for (var i = 0; i < ng; i = i + 1) { sum = sum + localFog(lights[i], P, d); }
+  let depth = -dot(P - fog.eye.xyz, fog.back.xyz);
+  if (fog.clusterInfo.y > 0.5 && depth >= fog.clusterParams.z) {
+    let r = P - fog.eye.xyz;
+    let pixel = vec2f((dot(r, fog.right.xyz) / depth / fog.right.w + 1.0) * 0.5 * fog.local.y, (1.0 - dot(r, fog.up.xyz) / depth / fog.up.w) * 0.5 * fog.local.z);
+    let tile = min(vec2u(max(pixel, vec2f(0.0)) / fog.clusterParams.xy), vec2u(${CLUSTER_X3 - 1}u, ${CLUSTER_Y3 - 1}u));
+    let slice = min(u32(log(depth / fog.clusterParams.z) * fog.clusterParams.w), ${CLUSTER_Z2 - 1}u);
+    let i = (slice * ${CLUSTER_Y3}u + tile.y) * ${CLUSTER_X3}u + tile.x;
+    let offset = clusterData[i * 2u];
+    let count = clusterData[i * 2u + 1u];
+    for (var j = 0u; j < count; j = j + 1u) { sum = sum + localFog(lights[clusterData[${CLUSTER_CELLS2 * 2}u + offset + j]], P, d); }
+  }
+  return sum;
+}
+
+fn extinction(p: vec3f) -> f32 {
+  var sigma = fog.albedo.w;
+  if (fog.height.x > 0.0) { sigma = sigma + fog.height.x * exp(-fog.height.z * max(0.0, p.y - fog.height.y)); }
+  let n = i32(fog.height.w + 0.5);
+  for (var i = 0; i < n; i = i + 1) {
+    let a = fog.boxes[i * 2];
+    let b = fog.boxes[i * 2 + 1];
+    if (a.w > 0.0 && all(p >= a.xyz) && all(p <= b.xyz)) { sigma = sigma + a.w * exp(-b.w * max(0.0, p.y - a.y)); }
+  }
+  return sigma;
+}
+fn phase(c: f32, g: f32) -> f32 {
+  let g2 = g * g;
+  return (1.0 - g2) / (4.0 * 3.14159265 * pow(max(1e-6, 1.0 + g2 - 2.0 * g * c), 1.5));
+}
+// The sun's shadow at p: one comparison tap of the first cascade that holds it, a texel and a half toward the sun.
+fn sunShadow(p: vec3f) -> f32 {
+  if (fog.sunE.w < 0.5) { return 1.0; }
+  for (var i = 0; i < ${CASCADE_COUNT}; i = i + 1) {
+    let q = fog.cascadeVp[i] * vec4f(p + fog.sun.xyz * (1.5 * fog.cascadeTexel[i]), 1.0);
+    if (max(abs(q.x), abs(q.y)) < 1.0 && q.z > 0.0 && q.z < 1.0) {
+      let lit = textureSampleCompareLevel(cascadeMap, cascadeSamp, vec2f(q.x * 0.5 + 0.5, 0.5 - q.y * 0.5), i, q.z);
+      return 1.0 - fog.cascade.x * (1.0 - lit);
+    }
+  }
+  return 1.0;
+}
+fn froxelRay(u: f32, v: f32) -> vec3f {
+  return normalize(fog.right.xyz * ((u * 2.0 - 1.0) * fog.right.w) + fog.up.xyz * ((1.0 - v * 2.0) * fog.up.w) - fog.back.xyz);
+}
+
+@compute @workgroup_size(4, 4, 4)
+fn main(@builtin(global_invocation_id) id: vec3u) {
+  let n = vec3u(fog.grid.xyz + vec3f(0.5));
+  if (any(id >= n)) { return; }
+  let size = vec3f(n);
+  let reach = fog.grid.w;
+  let at = (vec3f(id) + vec3f(0.5) + fog.jitter.xyz) / size;
+  let d = froxelRay(at.x, at.y);
+  let p = fog.eye.xyz + d * (at.z * at.z * reach);
+  let sigma = extinction(p);
+  let sun = fog.sunE.rgb * phase(dot(d, fog.sun.xyz), fog.sun.w) * sunShadow(p) + localLights(p, d);
+  var current = vec4f(fog.albedo.rgb * (sun + fog.sky.rgb) * sigma, sigma);
+  if (fog.prevEye.w > 0.5) {
+    // The froxel's centre, as last frame's camera saw it.
+    let c = (vec3f(id) + vec3f(0.5)) / size;
+    let pc = fog.eye.xyz + froxelRay(c.x, c.y) * (c.z * c.z * reach);
+    let r = pc - fog.prevEye.xyz;
+    let ahead = -dot(r, fog.prevBack.xyz);
+    if (ahead > 1e-4) {
+      let was = vec3f((dot(r, fog.prevRight.xyz) / ahead * fog.prevRight.w + 1.0) * 0.5, (1.0 - dot(r, fog.prevUp.xyz) / ahead * fog.prevUp.w) * 0.5, sqrt(length(r) / reach));
+      if (all(was >= vec3f(0.0)) && all(was <= vec3f(1.0))) {
+        current = mix(current, textureSampleLevel(history, linearSamp, was, 0.0), fog.eye.w);
+      }
+    }
+  }
+  textureStore(outLight, vec3i(id), current);
+}
+`
+);
+var FOG_INTEGRATE_WGSL = (
+  /* wgsl */
+  `
+${FOG_STRUCT_WGSL}
+@group(0) @binding(1) var lightVolume: texture_3d<f32>;
+@group(0) @binding(2) var outVolume: texture_storage_3d<rgba16float, write>;
+
+@compute @workgroup_size(8, 8, 1)
+fn main(@builtin(global_invocation_id) id: vec3u) {
+  let n = vec3u(fog.grid.xyz + vec3f(0.5));
+  if (id.x >= n.x || id.y >= n.y) { return; }
+  let reach = fog.grid.w;
+  var L = vec3f(0.0);
+  var T = 1.0;
+  var t = 0.0;
+  for (var z = 0u; z < n.z; z = z + 1u) {
+    let w = (f32(z) + 0.5) / f32(n.z);
+    let end = w * w * reach;
+    let s = textureLoad(lightVolume, vec3i(vec3u(id.xy, z)), 0);
+    let dt = end - t;
+    let step = exp(-s.a * dt);
+    if (s.a > 1e-9) { L = L + T * (s.rgb - s.rgb * step) / s.a; } else { L = L + T * s.rgb * dt; }
+    T = T * step;
+    t = end;
+    textureStore(outVolume, vec3i(vec3u(id.xy, z)), vec4f(L, T));
+  }
+}
+`
+);
+var FOG_FRAME_FLOATS = 16;
+function packFogFrame(frame, out = new Float32Array(FOG_FRAME_FLOATS)) {
+  out.fill(0);
+  if (!frame) return out;
+  const { camera, eye } = frame.camera;
+  out.set([...eye, 1], 0);
+  out.set([...camera.right, camera.focalX], 4);
+  out.set([...camera.up, camera.focalY], 8);
+  out.set([...camera.back, frame.fog.distance], 12);
+  return out;
+}
+var FOG_SAMPLE_WGSL = (
+  /* wgsl */
+  `
+fn fogAt(P: vec3<f32>) -> vec4<f32> {
+  let ray = P - frame.fogEye.xyz;
+  let ahead = -dot(ray, frame.fogBack.xyz);
+  if (ahead <= 1e-4) { return vec4<f32>(0.0, 0.0, 0.0, 1.0); }
+  let reach = frame.fogBack.w;
+  let t = length(ray);
+  let at = vec3<f32>((dot(ray, frame.fogRight.xyz) / ahead * frame.fogRight.w + 1.0) * 0.5, (1.0 - dot(ray, frame.fogUp.xyz) / ahead * frame.fogUp.w) * 0.5, sqrt(min(1.0, t / reach)));
+  let s = textureSampleLevel(fogVolume, envSamp, at, 0.0);
+  // Nearer than the first slice's centre, the fog fades toward none.
+  let fade = clamp(t / (reach * ${((0.5 / FOG_SLICES) ** 2).toPrecision(6)}), 0.0, 1.0);
+  return vec4<f32>(s.rgb * fade, 1.0 - (1.0 - s.a) * fade);
+}
+`
+);
+function halton2(i, b) {
+  let f3 = 1;
+  let r = 0;
+  for (let k = i; k > 0; k = Math.floor(k / b)) {
+    f3 /= b;
+    r += f3 * (k % b);
+  }
+  return r;
+}
+function fogJitter(n) {
+  const i = n % 64 + 1;
+  return [halton2(i, 2) - 0.5, halton2(i, 3) - 0.5, halton2(i, 5) - 0.5];
+}
+var USAGE3 = { copySrc: 1, textureBinding: 4, storage: 8 };
+var BUFFER = { uniform: 64, copyDst: 8 };
+var GpuVolumetricFog = class {
+  constructor(device) {
+    this.device = device;
+    this.light = null;
+    this.index = 0;
+    this.grid = "";
+    this.data = new Float32Array(FOG_UNIFORM_FLOATS);
+    this.pipelines = null;
+    /** Last frame's camera, while its history is valid. */
+    this.previous = null;
+    this.frames = 0;
+    this.volume = this.texture([1, 1, 1]);
+    this.uniforms = device.createBuffer({ size: FOG_UNIFORM_FLOATS * 4, usage: BUFFER.uniform | BUFFER.copyDst });
+    this.sampler = device.createSampler({ magFilter: "linear", minFilter: "linear", addressModeU: "clamp-to-edge", addressModeV: "clamp-to-edge", addressModeW: "clamp-to-edge" });
+  }
+  /**
+   * Bring the volumes up to the grid, and write the frame's uniforms: with
+   * `temporal`, a jittered sample blended into the last frame's history;
+   * without, the froxels' centres alone. Returns the frame as packed, and
+   * whether the volume was remade (the scene's groups must point at it).
+   */
+  prepare(frame, temporal) {
+    const key2 = frame.grid.join("x");
+    let remade = false;
+    if (key2 !== this.grid) {
+      for (const t of [this.volume, ...this.light ?? []]) t.destroy?.();
+      this.light = [this.texture(frame.grid), this.texture(frame.grid)];
+      this.volume = this.texture(frame.grid);
+      this.grid = key2;
+      this.previous = null;
+      remade = true;
+    }
+    const full = { ...frame, previous: temporal ? this.previous : null, jitter: temporal ? fogJitter(this.frames) : [0, 0, 0] };
+    this.device.queue.writeBuffer(this.uniforms, 0, packFogUniforms(full, this.data));
+    this.previous = temporal ? frame.camera : null;
+    this.frames += 1;
+    return { frame: full, remade };
+  }
+  /** The frame's local lights' terms (F5b-2), once its lights are clustered (after {@link prepare}). */
+  lights(lights) {
+    this.device.queue.writeBuffer(this.uniforms, FOG_LIGHTS_AT * 4, packFogLights(lights));
+  }
+  /**
+   * Encode the inject and integrate passes (after {@link prepare}): shadowed
+   * by the sun's cascades and their comparison sampler, and lit by the scene's
+   * lights, their cells and their shadow tiles and atlas.
+   */
+  encode(encoder, scene, timing = {}) {
+    const device = this.device;
+    const [nx, ny, nz] = this.grid.split("x").map(Number);
+    const pipeline = (code) => device.createComputePipeline({ layout: "auto", compute: { module: device.createShaderModule({ code }), entryPoint: "main" } });
+    this.pipelines ?? (this.pipelines = { inject: pipeline(FOG_INJECT_WGSL), integrate: pipeline(FOG_INTEGRATE_WGSL) });
+    const history = this.light[this.index];
+    const current = this.light[1 - this.index];
+    const pass = encoder.beginComputePass(timing);
+    pass.setPipeline(this.pipelines.inject);
+    pass.setBindGroup(
+      0,
+      device.createBindGroup({
+        layout: this.pipelines.inject.getBindGroupLayout(0),
+        entries: [
+          { binding: 0, resource: { buffer: this.uniforms } },
+          { binding: 1, resource: history.createView() },
+          { binding: 2, resource: this.sampler },
+          { binding: 3, resource: scene.cascades.createView({ dimension: "2d-array" }) },
+          { binding: 4, resource: scene.sampler },
+          { binding: 5, resource: current.createView() },
+          { binding: 6, resource: { buffer: scene.lights } },
+          { binding: 7, resource: { buffer: scene.clusters } },
+          { binding: 8, resource: { buffer: scene.tiles } },
+          { binding: 9, resource: scene.atlas.createView() }
+        ]
+      })
+    );
+    pass.dispatchWorkgroups(Math.ceil(nx / 4), Math.ceil(ny / 4), Math.ceil(nz / 4));
+    pass.setPipeline(this.pipelines.integrate);
+    pass.setBindGroup(
+      0,
+      device.createBindGroup({
+        layout: this.pipelines.integrate.getBindGroupLayout(0),
+        entries: [
+          { binding: 0, resource: { buffer: this.uniforms } },
+          { binding: 1, resource: current.createView() },
+          { binding: 2, resource: this.volume.createView() }
+        ]
+      })
+    );
+    pass.dispatchWorkgroups(Math.ceil(nx / 8), Math.ceil(ny / 8));
+    pass.end();
+    this.index = 1 - this.index;
+  }
+  /** Forget the history (a cut, or a frame without fog). */
+  reset() {
+    this.previous = null;
+  }
+  dispose() {
+    for (const t of [this.volume, ...this.light ?? []]) t.destroy?.();
+    this.uniforms.destroy?.();
+  }
+  texture(size) {
+    return this.device.createTexture({
+      size: { width: size[0], height: size[1], depthOrArrayLayers: size[2] },
+      dimension: "3d",
+      format: FOG_FORMAT,
+      usage: USAGE3.textureBinding | USAGE3.storage | USAGE3.copySrc
+    });
+  }
+};
+
+// src/render/weather.ts
+import { PUDDLE_ROUGHNESS, SNOW_ALBEDO, SNOW_ROUGHNESS, WATER_F0, weatherActive as weatherActive2 } from "@cartbox/editor";
+var WEATHER_FRAME_FLOATS = 8;
+function packWeatherFrame(weather, time, out = new Float32Array(WEATHER_FRAME_FLOATS)) {
+  out.fill(0);
+  if (!weather || !weatherActive2(weather)) return out;
+  out.set([weather.wetness, weather.puddles, weather.snow, weather.rain], 0);
+  out.set([weather.snowLine, time % 600, weather.scale, 1], 4);
+  return out;
+}
+var WEATHER_WGSL = (
+  /* wgsl */
+  `
+fn wHash2(x: f32, y: f32) -> f32 {
+  var h = (bitcast<u32>(i32(x)) * 0x8da6b343u) ^ (bitcast<u32>(i32(y)) * 0xd8163841u);
+  h = (h ^ (h >> 16u)) * 0x7feb352du;
+  h = (h ^ (h >> 15u)) * 0x846ca68bu;
+  return f32(h ^ (h >> 16u)) / 4294967296.0;
+}
+fn wNoise2(x: f32, y: f32) -> f32 {
+  let ix = floor(x);
+  let iy = floor(y);
+  let fx = x - ix;
+  let fy = y - iy;
+  let sx = fx * fx * (3.0 - 2.0 * fx);
+  let sy = fy * fy * (3.0 - 2.0 * fy);
+  let a = wHash2(ix, iy);
+  let b = wHash2(ix + 1.0, iy);
+  let c = wHash2(ix, iy + 1.0);
+  let d = wHash2(ix + 1.0, iy + 1.0);
+  return (a + (b - a) * sx) * (1.0 - sy) + (c + (d - c) * sx) * sy;
+}
+fn wPatch(x: f32, z: f32, scale: f32) -> f32 {
+  return (wNoise2(x / scale, z / scale) * 2.0 + wNoise2(x / scale * 2.7 + 13.1, z / scale * 2.7 + 7.7)) / 3.0;
+}
+fn wExposure(sky: f32) -> f32 { return smoothstep(0.35, 0.85, sky); }
+fn wPuddle(x: f32, z: f32, ny: f32, sky: f32) -> f32 {
+  let puddles = frame.weather0.y;
+  if (puddles <= 0.0) { return 0.0; }
+  let flat = smoothstep(0.92, 0.985, ny);
+  if (flat <= 0.0) { return 0.0; }
+  let hollow = 1.0 - wPatch(x, z, frame.weather1.z);
+  return flat * wExposure(sky) * smoothstep(1.0 - puddles, 1.0 - puddles + 0.12, hollow);
+}
+fn wSnow(x: f32, y: f32, z: f32, ny: f32, sky: f32) -> f32 {
+  let snow = frame.weather0.z;
+  if (snow <= 0.0 || y < frame.weather1.x) { return 0.0; }
+  let facing = smoothstep(0.55 - 0.35 * snow, 0.8 - 0.3 * snow, ny);
+  if (facing <= 0.0) { return 0.0; }
+  let cover = wPatch(x + 101.0, z + 37.0, frame.weather1.z);
+  return facing * wExposure(sky) * smoothstep(1.0 - snow * 1.15, 1.0 - snow * 1.15 + 0.15, cover);
+}
+// Rain's rings in a puddle: the slope they add (dh/dx, dh/dz); mirrors rainRipples.
+fn wRipples(x: f32, z: f32, time: f32, rain: f32) -> vec2<f32> {
+  if (rain <= 0.0) { return vec2<f32>(0.0); }
+  var g = vec2<f32>(0.0);
+  for (var layer = 0; layer < 2; layer = layer + 1) {
+    let size = 0.4;
+    let ox = f32(layer) * 0.21;
+    let oz = f32(layer) * 0.13;
+    let cx = floor((x + ox) / size);
+    let cz = floor((z + oz) / size);
+    for (var j = -1; j <= 1; j = j + 1) {
+      for (var i = -1; i <= 1; i = i + 1) {
+        let ix = cx + f32(i);
+        let iz = cz + f32(j);
+        let seed = wHash2(ix + f32(layer) * 1013.0, iz);
+        let px = (ix + 0.2 + 0.6 * wHash2(ix, iz + 77.0)) * size - ox;
+        let pz = (iz + 0.2 + 0.6 * wHash2(ix + 31.0, iz)) * size - oz;
+        let phase = time / 0.6 + seed * 10.0;
+        let age = phase - floor(phase);
+        if (wHash2(ix + floor(phase) * 7.0, iz + f32(layer)) > rain) { continue; }
+        let dx = x - px;
+        let dz = z - pz;
+        let d = sqrt(dx * dx + dz * dz);
+        let ring = d - age * 0.25;
+        if (abs(ring) > 0.04 || d < 1e-5) { continue; }
+        let amplitude = (1.0 - age) * cos(ring / 0.04 * 3.14159265 * 0.5);
+        let slope = amplitude * sin(ring / 0.04 * 3.14159265) * 0.6;
+        g = g + vec2<f32>(slope * dx / d, slope * dz / d);
+      }
+    }
+  }
+  return g;
+}
+struct WeatherOut { albedo: vec3<f32>, rough: f32, metallic: f32, N: vec3<f32>, puddle: f32, snow: f32 };
+// The weather over a surface point (mirrors weatherSurface, f0 aside: the caller mixes it toward water's and snow's).
+fn weatherSurface(p: vec3<f32>, n: vec3<f32>, sky: f32, albedo0: vec3<f32>, rough0: f32, metallic0: f32) -> WeatherOut {
+  let open = wExposure(sky);
+  let wet = frame.weather0.x * open;
+  let porosity = clamp((rough0 - 0.1) / 0.6, 0.0, 1.0) * (1.0 - metallic0);
+  let k = wet * porosity;
+  var albedo = pow(max(albedo0, vec3<f32>(0.0)), vec3<f32>(1.0 + k)) * (1.0 - 0.25 * k);
+  var rough = rough0 + (min(rough0, 0.3) - rough0) * wet;
+  var metallic = metallic0;
+  var N = n;
+  let puddle = wPuddle(p.x, p.z, n.y, sky);
+  if (puddle > 0.0) {
+    let g = wRipples(p.x, p.z, frame.weather1.y, frame.weather0.w);
+    let flat = normalize(vec3<f32>(-g.x, 1.0, -g.y));
+    N = normalize(N + (flat - N) * puddle);
+    albedo = albedo * (1.0 - 0.35 * puddle);
+    rough = rough + (${PUDDLE_ROUGHNESS} - rough) * puddle;
+    metallic = metallic * (1.0 - puddle);
+  }
+  let snow = wSnow(p.x, p.y, p.z, n.y, sky);
+  if (snow > 0.0) {
+    albedo = albedo + (vec3<f32>(${SNOW_ALBEDO.join(", ")}) - albedo) * snow;
+    rough = rough + (${SNOW_ROUGHNESS} - rough) * snow;
+    metallic = metallic * (1.0 - snow);
+    N = normalize(N * (1.0 - snow) + vec3<f32>(0.0, snow, 0.0));
+  }
+  return WeatherOut(albedo, rough, metallic, N, puddle, snow);
+}
+const WATER_F0 = ${WATER_F0};
+`
+);
+
+// src/render/waterLook.ts
+import { OCEAN_PATCH, OCEAN_SIZE, RIPPLE_CELL, RIPPLE_SIZE } from "@cartbox/editor";
+var TERMS = 6;
+var OCEAN_WORDS = OCEAN_SIZE * OCEAN_SIZE;
+var RIPPLE_WORDS = RIPPLE_SIZE * RIPPLE_SIZE / 2;
+var WATER_FRAME_FLOATS = TERMS * 4 + OCEAN_WORDS + RIPPLE_WORDS;
+var f322 = new Float32Array(1);
+var u322 = new Uint32Array(f322.buffer);
+function toHalf3(v) {
+  f322[0] = v;
+  const x = u322[0];
+  const sign = x >>> 16 & 32768;
+  const e = (x >>> 23 & 255) - 127 + 15;
+  const m = x & 8388607;
+  if (e <= 0) return sign;
+  if (e >= 31) return sign | 31743;
+  const half2 = sign | e << 10 | m >>> 13;
+  return (m & 4096) !== 0 ? half2 + 1 : half2;
+}
+function packWaterFrame(water, out = new Float32Array(WATER_FRAME_FLOATS)) {
+  out.fill(0);
+  if (!water) return out;
+  const words = new Uint32Array(out.buffer, out.byteOffset, out.length);
+  out.set([water.plane, water.underwater ? 1 : 0, water.time % 600, 1], 0);
+  out.set(water.bounds, 4);
+  out.set([...water.absorption, water.ocean ? 1 : 0], 8);
+  out.set([...water.scattering, water.ripples ? 1 : 0], 12);
+  out.set([...water.light, OCEAN_PATCH], 16);
+  out.set([water.ripples ? water.ripples.origin[0] : 0, water.ripples ? water.ripples.origin[1] : 0, RIPPLE_CELL, 0], 20);
+  const base = TERMS * 4;
+  if (water.ocean) {
+    for (let p = 0; p < OCEAN_SIZE * OCEAN_SIZE; p += 1) words[base + p] = (toHalf3(water.ocean[p * 2]) | toHalf3(water.ocean[p * 2 + 1]) << 16) >>> 0;
+  }
+  if (water.ripples) {
+    const h = water.ripples.heights;
+    for (let p = 0; p < RIPPLE_WORDS; p += 1) words[base + OCEAN_WORDS + p] = (toHalf3(h[p * 2]) | toHalf3(h[p * 2 + 1]) << 16) >>> 0;
+  }
+  return out;
+}
+var WATER_FRAME_WGSL_FIELDS = (
+  /* wgsl */
+  `
+  water0: vec4<f32>,          // F5d: the water plane's height, 1 under water, the seconds, 1 with a water body
+  waterBounds: vec4<f32>,     // F5d: its extent: min x, min z, max x, max z
+  water1: vec4<f32>,          // F5d: absorption per metre, w = 1 with an ocean
+  water2: vec4<f32>,          // F5d: scattering per metre, w = 1 with ripples
+  water3: vec4<f32>,          // F5d: the light reaching into it, w = the ocean's patch (m)
+  water4: vec4<f32>,          // F5d: the ripples' corner cell (x, z), the cell (m)
+  waterGrid: array<vec4<u32>, ${(OCEAN_WORDS + RIPPLE_WORDS) / 4}>, // F5d: the ocean's slopes, then the ripples' heights, half floats`
+);
+var WATER_WGSL = (
+  /* wgsl */
+  `
+fn waterWord(i: u32) -> u32 { return frame.waterGrid[i / 4u][i % 4u]; }
+fn oceanAt(i: i32, j: i32) -> vec2<f32> {
+  let n = ${OCEAN_SIZE};
+  let ii = ((i % n) + n) % n;
+  let jj = ((j % n) + n) % n;
+  return unpack2x16float(waterWord(u32(jj * n + ii)));
+}
+// The FFT ocean's slope at world (x, z), bilinear and tiled (mirrors sampleSlopes).
+fn oceanSlope(x: f32, z: f32) -> vec2<f32> {
+  let gx = x / frame.water3.w * ${OCEAN_SIZE}.0 - 0.5;
+  let gz = z / frame.water3.w * ${OCEAN_SIZE}.0 - 0.5;
+  let ix = i32(floor(gx));
+  let iz = i32(floor(gz));
+  let fx = gx - floor(gx);
+  let fz = gz - floor(gz);
+  return mix(mix(oceanAt(ix, iz), oceanAt(ix + 1, iz), fx), mix(oceanAt(ix, iz + 1), oceanAt(ix + 1, iz + 1), fx), fz);
+}
+fn rippleAt(i: i32, j: i32) -> f32 {
+  if (i < 0 || j < 0 || i >= ${RIPPLE_SIZE} || j >= ${RIPPLE_SIZE}) { return 0.0; }
+  let k = u32(j * ${RIPPLE_SIZE} + i);
+  let w = unpack2x16float(waterWord(${OCEAN_WORDS}u + k / 2u));
+  return select(w.x, w.y, (k & 1u) == 1u);
+}
+fn rippleCellSlope(i: i32, j: i32) -> vec2<f32> {
+  let c = frame.water4.z;
+  return vec2<f32>((rippleAt(i + 1, j) - rippleAt(i - 1, j)) / (2.0 * c), (rippleAt(i, j + 1) - rippleAt(i, j - 1)) / (2.0 * c));
+}
+// The ripples' slope at world (x, z) (mirrors RippleField.slope); flat outside the grid.
+fn rippleSlope(x: f32, z: f32) -> vec2<f32> {
+  if (frame.water2.w < 0.5) { return vec2<f32>(0.0); }
+  let gx = x / frame.water4.z - frame.water4.x - 0.5;
+  let gz = z / frame.water4.z - frame.water4.y - 0.5;
+  let ix = i32(floor(gx));
+  let iz = i32(floor(gz));
+  let fx = gx - floor(gx);
+  let fz = gz - floor(gz);
+  return mix(mix(rippleCellSlope(ix, iz), rippleCellSlope(ix + 1, iz), fx), mix(rippleCellSlope(ix, iz + 1), rippleCellSlope(ix + 1, iz + 1), fx), fz);
+}
+// The four Gerstner waves along the flow (mirrors gerstnerSlope).
+fn gerstnerSlope(x: f32, z: f32, time: f32, height: f32, flow: f32) -> vec2<f32> {
+  if (height <= 0.0) { return vec2<f32>(0.0); }
+  var s = vec2<f32>(0.0);
+  let waves = array<vec3<f32>, 4>(vec3<f32>(0.45, 6.0, 0.0), vec3<f32>(0.25, 3.1, 0.6), vec3<f32>(0.18, 1.7, -0.9), vec3<f32>(0.12, 0.9, 1.7));
+  for (var i = 0; i < 4; i = i + 1) {
+    let w = waves[i];
+    let k = 6.28318531 / w.y;
+    let omega = sqrt(9.81 * k);
+    let d = vec2<f32>(cos(flow + w.z), sin(flow + w.z));
+    let a = height * w.x / 2.0;
+    let phase = k * (d.x * x + d.y * z) - omega * time;
+    s = s + a * k * cos(phase) * d;
+  }
+  return s;
+}
+fn waterHash(x: f32, y: f32) -> f32 {
+  var h = (bitcast<u32>(i32(x)) * 0x8da6b343u) ^ (bitcast<u32>(i32(y)) * 0xd8163841u) ^ 0x5bd1e995u;
+  h = (h ^ (h >> 16u)) * 0x7feb352du;
+  h = (h ^ (h >> 15u)) * 0x846ca68bu;
+  return f32(h ^ (h >> 16u)) / 4294967296.0;
+}
+fn waterNoise(x: f32, y: f32) -> f32 {
+  let ix = floor(x);
+  let iy = floor(y);
+  let fx = x - ix;
+  let fy = y - iy;
+  let sx = fx * fx * (3.0 - 2.0 * fx);
+  let sy = fy * fy * (3.0 - 2.0 * fy);
+  return mix(mix(waterHash(ix, iy), waterHash(ix + 1.0, iy), sx), mix(waterHash(ix, iy + 1.0), waterHash(ix + 1.0, iy + 1.0), sx), sy);
+}
+// Foam over this much water (mirrors shoreFoam).
+fn shoreFoam(metres: f32, x: f32, z: f32, time: f32, foam: f32) -> f32 {
+  if (foam <= 0.0) { return 0.0; }
+  let edge = 1.0 - smoothstep(0.0, 0.5 * foam + 0.05, metres);
+  if (edge <= 0.0) { return 0.0; }
+  let n = waterNoise(x * 3.0 + time * 0.3, z * 3.0 - time * 0.2) * 0.6 + waterNoise(x * 7.0 - time * 0.5, z * 7.0) * 0.4;
+  return clamp(edge * smoothstep(0.35, 0.65, n + edge * 0.4) * foam, 0.0, 1.0);
+}
+// What is seen through this much water (mirrors throughWater).
+fn throughWater(behind: vec3<f32>, metres: f32) -> vec3<f32> {
+  let ext = max(frame.water1.rgb + frame.water2.rgb, vec3<f32>(1e-6));
+  let t = exp(-ext * max(0.0, metres));
+  return behind * t + frame.water2.rgb / ext * (vec3<f32>(1.0) - t) * frame.water3.rgb;
+}
+// The sun focused through the waves onto a point this deep (mirrors caustics).
+fn caustics(x: f32, z: f32, time: f32, depth: f32) -> f32 {
+  if (depth <= 0.0) { return 1.0; }
+  let a = 1.0 - abs(waterNoise(x * 1.7 + time * 0.35, z * 1.7 - time * 0.35 * 0.7) * 2.0 - 1.0);
+  let b = 1.0 - abs(waterNoise(x * 2.3 + 5.3 - time * 0.28, z * 2.3 + 1.9 + time * 0.28 * 0.7) * 2.0 - 1.0);
+  let sharp = pow(a * b, 4.0) * 4.5;
+  return 1.0 + (sharp - 0.55) * exp(-depth * 0.35);
+}
+// Whether world point p lies in the water body's extent, and how deep under its plane (0 above it).
+fn underPlane(p: vec3<f32>) -> f32 {
+  if (frame.water0.w < 0.5) { return 0.0; }
+  let b = frame.waterBounds;
+  if (p.x < b.x || p.z < b.y || p.x > b.z || p.z > b.w) { return 0.0; }
+  return max(0.0, frame.water0.x - p.y);
+}
+`
+);
+
 // src/render/WebgpuSceneRenderer.ts
 var GBUFFER_FORMAT = "rgba16float";
 var VELOCITY_FORMAT = "rg16float";
-var FRAME_BYTES = 752;
+var VIEW_MODE_SHADE = (
+  /* wgsl */
+  `    let vm = i32(frame.debug.x + 0.5);
+    if (vm > 0) {
+      // Palettes and ramps are display colours, shaded a little by the sun so the forms still read.
+      let form = 0.55 + 0.45 * max(0.0, dot(N, L));
+      let texels = vec2<f32>(textureDimensions(tex));
+      var d = vec3<f32>(0.0);
+      if (vm == 1) { d = vmAlbedo + emis; }
+      else if (vm == 2) { d = vmAlbedo; }
+      else if (vm == 3) { d = vmLight(vec3<f32>(rough)); }
+      else if (vm == 4) { d = vmLight(vec3<f32>(vmMetallic)); }
+      else if (vm == 5) { d = vmLight(N * 0.5 + vec3<f32>(0.5)); }
+      else if (vm == 6) { d = vmLight(vec3<f32>(ao)); }
+      else if (vm == 7) { d = lit; }
+      else if (vm == 9) {
+        // An estimate of the pixel's shading work: its maps, its layers and features, and its lights.
+        var cost = 4.0 + u.texflags.x + u.texflags.y + u.texflags.z + u.texflags.w;
+        if (u.maps0.x > 0.5) { cost = cost + 2.0; }
+        if (u.layer0.w > 0.0) { cost = cost + 8.0; }
+        if (u.layer0.x > 0.0) { cost = cost + 3.0; }
+        if (u.layer0.z != 0.0) { cost = cost + 2.0; }
+        if (u.refract0.w > 0.5) { cost = cost + 4.0; }
+        if (u.surface1.z > 0.5) { cost = cost + 2.0; }
+        if (u.surface0.y > 0.0) { cost = cost + 1.0; }
+        if (u.terrain0.x > 0.0) { cost = cost + 4.0; }
+        if (u.motion0.z > 0.5) { cost = cost + 2.0; }
+        if (u.envSky.w > 0.5) { cost = cost + 2.0; }
+        cost = cost + 1.5 * f32(vmLights);
+        d = vmLight(vmHeat(cost / ${SHADER_COMPLEXITY_FULL.toFixed(1)}));
+      }
+      else if (vm == 10) { d = vmLight(vmHeat(f32(vmLights) / ${LIGHT_COMPLEXITY_FULL.toFixed(1)}) * form); }
+      else if (vm == 12) { d = vmLight(select(vec3<f32>(1.0), vmPalette(i32(u.motion0.w + 0.5)), u.motion0.w > -0.5) * form); }
+      else if (vm == 13) {
+        // Base-colour texels per metre: the UV footprint's texels over the surface's.
+        if (u.texflags.x > 0.5) {
+          let uvArea = abs(duv1.x * duv2.y - duv1.y * duv2.x) * texels.x * texels.y;
+          let density = sqrt(uvArea / max(length(cross(dp1, dp2)), 1e-12));
+          let t = clamp(log2(density / frame.debug.y) * 0.25 + 0.5, 0.0, 1.0);
+          d = vmLight(select(mix(vec3<f32>(0.0, 0.85, 0.2), vec3<f32>(1.0, 0.1, 0.0), t * 2.0 - 1.0), mix(vec3<f32>(0.1, 0.3, 1.0), vec3<f32>(0.0, 0.85, 0.2), t * 2.0), t < 0.5) * form);
+        } else { d = vmLight(vec3<f32>(0.3) * form); }
+      }
+      else if (vm == 14) {
+        // The mip the base colour samples: green at 0, then yellow, red and magenta.
+        let fx = duv1 * texels;
+        let fy = duv2 * texels;
+        let mip = max(0.0, 0.5 * log2(max(max(dot(fx, fx), dot(fy, fy)), 1e-8)));
+        var ramp = array<vec3<f32>, 4>(vec3<f32>(0.1, 0.85, 0.2), vec3<f32>(1.0, 0.9, 0.1), vec3<f32>(1.0, 0.15, 0.1), vec3<f32>(0.9, 0.2, 1.0));
+        let m = min(mip, 3.0);
+        let i = min(2, i32(floor(m)));
+        d = select(vmLight(vec3<f32>(0.3) * form), vmLight(mix(ramp[i], ramp[i + 1], m - f32(i)) * form), u.texflags.x > 0.5);
+      }
+      else if (vm == 15) {
+        var ci = 0;
+        for (var c = 0; c < ${CASCADE_COUNT}; c = c + 1) { if (in.eyeDepth > frame.cascadeFar[c]) { ci = ci + 1; } }
+        d = vmLight(select(vec3<f32>(0.3), vmPalette(ci), frame.cascadeInfo.x > 0.5 && ci < ${CASCADE_COUNT}) * form);
+      }
+      shaded = d;
+    }
+`
+);
+var FRAME_BYTES2 = 928 + WATER_FRAME_FLOATS * 4;
+var FRAME_WATER = 232;
+var FRAME_WEATHER = 224;
+var FRAME_DEBUG = 220;
 var FRAME_CASCADES = 84;
+var FRAME_AERIAL = FRAME_CASCADES + 104;
+var FRAME_FOG = FRAME_AERIAL + 16;
 var FALLBACK_CASCADE_DISTANCE = 80;
 var FALLBACK_CASCADE_SIZE = 2048;
 var READBACK_BUFFERS2 = 3;
 var SHADER_STAGE_VERTEX = 1;
 var SHADER_STAGE_FRAGMENT = 2;
-function graphSites2(graph) {
-  if (!graph) return { fns: "", base: "", pbr: "", emis: "" };
+function graphSites2(graph, vertex = null, hdr = false) {
+  let vertexSite = "";
+  if (vertex && vertex.outputs.worldPositionOffset !== void 0) {
+    const vcode = graphShaderCode2(vertex, "wgsl", {
+      uv: "uv",
+      position: "wpWorld",
+      normal: "normalize(t.nrm * normal)",
+      view: "u.view.xyz",
+      time: "u.effect1.w",
+      curvature: "0.0",
+      occlusion: "1.0",
+      thickness: "1.0",
+      baseColor: "u.base.rgb",
+      baseAlpha: "u.base.a",
+      // No map in the vertex stage: its bindings are the fragment's.
+      sample: () => "vec4<f32>(1.0)",
+      metallic: "u.pbr.x",
+      roughness: "u.pbr.y",
+      emissive: "u.emissive.xyz"
+    });
+    vertexSite = `  // The material graph's world-position offset (F1e), taken into the mesh's own space.
+  {
+    let wpWorld = (t.model * vec4<f32>(pos, 1.0)).xyz;
+${vcode.split("\n").map((l) => `    ${l}`).join("\n")}
+    let m3 = mat3x3<f32>(t.model[0].xyz, t.model[1].xyz, t.model[2].xyz);
+    wpoObj = inverse3(m3) * g${vertex.outputs.worldPositionOffset};
+    pos = pos + wpoObj;
+  }
+`;
+  }
+  if (!graph) return { fns: "", base: "", pbr: "", emis: "", vertex: vertexSite, pdo: false };
   const out = graph.outputs;
   const code = graphShaderCode2(graph, "wgsl", {
     uv: "puv",
@@ -19448,22 +29974,35 @@ function graphSites2(graph) {
     thickness: "gThick",
     baseColor: "colour.rgb",
     baseAlpha: "colour.a",
-    sample: (p) => `textureSample(tex, samp, vec2<f32>((${p}).x, 1.0 - (${p}).y))`
+    sample: (p) => `textureSample(tex, samp, vec2<f32>((${p}).x, 1.0 - (${p}).y))`,
+    // The graph's own images (F1e), layers of the blend surface's array after its own.
+    sampleSlot: (slot, p) => `textureSample(blendTex, samp, vec2<f32>((${p}).x, 1.0 - (${p}).y), ${slot})`,
+    metallic: "u.pbr.x",
+    roughness: "u.pbr.y",
+    emissive: "u.emissive.xyz"
   });
   const set = [
     out.baseColor !== void 0 ? `colour = vec4<f32>(g${out.baseColor}, colour.a);` : "",
     out.alpha !== void 0 ? `colour.a = clamp(g${out.alpha}.x, 0.0, 1.0);` : "",
     out.metallic !== void 0 ? `gMetal = clamp(g${out.metallic}.x, 0.0, 1.0);` : "",
     out.roughness !== void 0 ? `gRough = g${out.roughness}.x;` : "",
-    out.emissive !== void 0 ? `gEmis = max(g${out.emissive}, vec3<f32>(0.0));` : ""
+    out.emissive !== void 0 ? `gEmis = max(g${out.emissive}, vec3<f32>(0.0));` : "",
+    // F1e: a tangent-space normal (−1..1) in the vertex's frame, the depth pushed away, the bend, and what scatters.
+    out.normal !== void 0 ? `sNrm = mappedNormal(in.normal, ${hdr ? "in.tangent, in.frameNormal" : "vec4<f32>(0.0), in.normal"}, g${out.normal}, dp1, dp2, duv1, duv2);` : "",
+    out.pixelDepthOffset !== void 0 ? `gPdo = max(g${out.pixelDepthOffset}.x, 0.0);` : "",
+    out.refraction !== void 0 ? `refractBend = max(g${out.refraction}.x, 0.0);` : "",
+    out.subsurfaceColor !== void 0 ? `sssTint = clamp(g${out.subsurfaceColor}, vec3<f32>(0.0), vec3<f32>(1.0));` : ""
   ].filter(Boolean);
   return {
     // The noise functions are always in the shader (refraction's warp uses them, I5).
     fns: "",
+    vertex: vertexSite,
+    pdo: hdr && out.pixelDepthOffset !== void 0,
     base: `  // The material graph (EP7).
   var gMetal = -1.0;
   var gRough = -1.0;
   var gEmis = vec3<f32>(-1.0);
+  var gPdo = 0.0;
   {
     var gN = normalize(sNrm);
     if (dot(gN, u.view.xyz) < 0.0) { gN = -gN; }
@@ -19513,7 +30052,20 @@ function wgslDisplay(v, hdr = false) {
         }
       }
       ${v} = mixAsShown(${v}, fc, f);
-    }`
+    }
+    // The volumetric fog between the surface and the eye (F5b), as the air below: dimmed, and its light added.
+    if (frame.fogEye.w > 0.5) {
+      let mist = fogAt(in.worldPos);
+      ${v} = ${v} * mist.a + select(mist.rgb, vec3<f32>(0.0), u.pbr.w > 2.5);
+    }
+    // The physical sky's air between the surface and the eye (F5a-2): what lies beyond it dimmed, the light it
+    // scatters toward the eye added (by coverage, as the colour is premultiplied after; an additive surface only dims).
+    if (frame.aerialEye.w > 0.5) {
+      let air = aerialAt(in.worldPos);
+      ${v} = ${v} * air.a + select(air.rgb, vec3<f32>(0.0), u.pbr.w > 2.5);
+    }
+    // Under water (F5d): the water between the surface and the eye, in place of air.
+    if (frame.water0.y > 0.5) { ${v} = throughWater(${v}, in.eyeDepth); }`
     );
   }
   return (
@@ -19551,8 +30103,8 @@ function wgslDisplay(v, hdr = false) {
     }`
   );
 }
-function sceneShader(graph = null, reflect = false, hdr = false) {
-  const g = graphSites2(graph);
+function sceneShader(graph = null, reflect = false, hdr = false, vertex = null) {
+  const g = graphSites2(graph, vertex, hdr);
   const code = (
     /* wgsl */
     `
@@ -19572,7 +30124,7 @@ struct Uniforms {
   shadow: vec4<f32>,    // x = 1 when shadowed, y = map size, z = bias, w = strength
   envMeta: vec4<f32>,   // xyz = env-map mean radiance, w = 1 when an env map is bound
   tonemap: vec4<f32>,   // x = 1 when tone-mapping, y = exposure, z = soft edge, w = 1 for the curve as authored (F11a-5)
-  ssaoMeta: vec4<f32>,  // x = 1 when an SSAO buffer is bound, y = light count, z = 1 when a light map is bound
+  ssaoMeta: vec4<f32>,  // x = 1 when an SSAO buffer is bound, y = light count, z = 1 when a light map is bound (2: an HDR directional one, F3d)
   model: mat4x4<f32>,   // this draw's world matrix (point-light world position)
   fog: vec4<f32>,       // rgb = fog colour, w = density
   fogParams: vec4<f32>, // x = 1 when fogged, y = start distance, z = max amount
@@ -19598,6 +30150,30 @@ struct Uniforms {
   maps0: vec4<f32>,     // x = 1 when a normal map is bound (P1a)
   wind1: vec4<f32>,     // the previous frame's wind0, for motion vectors (F0c)
   motion0: vec4<f32>,   // x = where this frame's motion transforms start in xf (F0c), y = the draw's lighting channels (F2e)
+  // The full material set (F1d; scenePacking.ts): sheen, a dielectric's f0, transmission and volume, the film, the UV transform.
+  sheen0: vec4<f32>,
+  spec0: vec4<f32>,
+  trans0: vec4<f32>,
+  trans1: vec4<f32>,
+  irid0: vec4<f32>,
+  uvx0: vec4<f32>,
+  uvx1: vec4<f32>,
+  // Subsurface scattering and thin-surface transmission (F1d-2).
+  sss0: vec4<f32>,
+  dt0: vec4<f32>,
+  // Character shading (F7c; characterShading.ts).
+  char0: vec4<f32>,
+  char1: vec4<f32>,
+  cull0: vec4<f32>,
+  // A GPU terrain's patch (F6c; gpuTerrain.ts): its size, the heights' min and range (> 0: a terrain), its cells,
+  // cut cells, nearest page's side and eye pages, its origin and leaf size, the eye and the split and morph, the pages.
+  terrain1: vec4<f32>,
+  terrain2: vec4<f32>,
+  terrain3: vec4<f32>,
+  terrain4: vec4<f32>,
+  terrainPages: array<vec4<f32>, 4>,
+  // A water surface's F5d terms (waterLook.ts): foam, Gerstner waves' height, the ocean's share, 1 with them.
+  wlook0: vec4<f32>,
 };
 
 // A Modern-tier light (see packLights): d0 = dir/pos + kind, d1 = colour +
@@ -19621,7 +30197,7 @@ struct Frame {
   localShadow: vec4<f32>, // EP8c: x = 1 when spot/point shadows are on, y = bias, z = slope bias (world units)
   probeMin: vec4<f32>,    // EP9: the probe grid's corner, w = 1 when a grid is bound
   probeScale: vec4<f32>,  // world \u2192 grid units per axis: (count \u2212 1) / (max \u2212 min)
-  probeCount: vec4<f32>,  // probes per axis
+  probeCount: vec4<f32>,  // probes per axis; w = the slots a probe takes along x (F5b-0)
   envSh: array<vec4<f32>, 9>, // F3a: the environment's L2 SH irradiance over \u03C0 (linear variant)
   envInfo: vec4<f32>,         // F3a: x = the prefiltered cube's top mip
   cascadeVp: array<mat4x4<f32>, ${CASCADE_COUNT}>, // F2a: the sun's cascades, world \u2192 light clip (depth 0..1)
@@ -19629,9 +30205,21 @@ struct Frame {
   cascadeInfo: vec4<f32>,     // F2a: x = 1 with GPU cascades, y = map size, z = strength, w = the last cascade's far depth
   cascadeTexel: vec4<f32>,    // F2a: each cascade's texel in world units
   cascadeDepth: vec4<f32>,    // F2a-2: the world distance each cascade's depth 0..1 spans
-  cascadeSoft: vec4<f32>,     // F2a-2: x = the sun's size (its angular diameter's tangent), for the penumbrae; F2c: y = 1 with contact shadows; F3c: z = 1 with GTAO
+  cascadeSoft: vec4<f32>,     // F2a-2: x = the sun's size (its angular diameter's tangent), for the penumbrae; F2c: y = 1 with contact shadows; F3c: z = 1 with GTAO; F3e-2: w = 1 with SSGI
   viewProj: mat4x4<f32>,      // F2d-3: world \u2192 clip as drawn (jittered with TAA), for marching the prepass's depths
-  depthTerms: vec4<f32>,      // F2d-3: xy = view distance from depth (d = y / (z + x)); z = 1 when the depths are readable as the scene shades
+  depthTerms: vec4<f32>,      // F2d-3: xy = view distance from depth (d = y / (z + x)); z = 1 when the depths are readable as the scene shades; F2b: w = 1 with virtual shadow maps
+  aerialEye: vec4<f32>,       // F5a-2: the eye the aerial perspective was built from, w = 1 when it is on
+  aerialRight: vec4<f32>,     // F5a-2: its camera's right axis, w = P[0]
+  aerialUp: vec4<f32>,        // F5a-2: its up axis, w = P[5]
+  aerialBack: vec4<f32>,      // F5a-2: its back axis, w = km of air per world unit
+  fogEye: vec4<f32>,          // F5b: the eye the volumetric fog was built from, w = 1 when it is on
+  fogRight: vec4<f32>,        // F5b: its camera's right axis, w = P[0]
+  fogUp: vec4<f32>,           // F5b: its up axis, w = P[5]
+  fogBack: vec4<f32>,         // F5b: its back axis, w = the volume's reach
+  debug: vec4<f32>,           // F10a: x = the view mode's code (0 lit), y = the texel density on target (per metre); F1d-2: z = 1 when scattering surfaces split
+  weather0: vec4<f32>,        // F5e: wetness, puddles, snow, rain
+  weather1: vec4<f32>,        // F5e: the snow line, the rain's seconds, the patches' size, 1 when there is weather
+${WATER_FRAME_WGSL_FIELDS}
 };
 // One spot/point shadow tile (EP8c): world\u2192clip, and params.xy = depth\u2192distance terms.
 struct ShadowTile {
@@ -19640,6 +30228,22 @@ struct ShadowTile {
   rect: vec4<f32>, // F2d: the tile's x, y and size in the atlas (texels), on the linear-light renderer
 };
 @group(0) @binding(0) var<uniform> u: Uniforms;
+// What a material graph sets beyond its sites (F1e): the vertex's offset in its own space, the refraction's bend
+// (\u22121: the material's), and what of the diffuse scatters.
+var<private> wpoObj: vec3<f32>;
+var<private> refractBend: f32 = -1.0;
+var<private> sssTint: vec3<f32> = vec3<f32>(1.0);
+// A 3\xD73's inverse, by its adjugate.
+fn inverse3(m: mat3x3<f32>) -> mat3x3<f32> {
+  let a = m[0];
+  let b = m[1];
+  let c = m[2];
+  let r0 = cross(b, c);
+  let r1 = cross(c, a);
+  let r2 = cross(a, b);
+  let det = dot(a, r0);
+  return transpose(mat3x3<f32>(r0, r1, r2)) * (1.0 / select(det, 1e-12, abs(det) < 1e-12));
+}
 @group(0) @binding(1) var samp: sampler;
 @group(0) @binding(2) var tex: texture_2d<f32>;
 @group(0) @binding(3) var mrTex: texture_2d<f32>;
@@ -19659,7 +30263,10 @@ ${hdr ? `// The environment as a GGX-prefiltered cube (F3a, ibl.ts): mip = rough
 // The screen-space AO buffer (CPU-generated by computeSsao, uploaded r32float),
 // sampled per fragment by its framebuffer pixel \u2014 the same buffer the software
 // path multiplies its ambient by. Bound to a 1x1 blank when unused.
-@group(0) @binding(8) var ssaoMap: texture_2d<f32>;
+// The linear variant binds an array: the screen-space shading target's two layers (F2c, F3c; F3e-2's SSGI in
+// the second), or the AO buffer as one layer.
+@group(0) @binding(8) var ssaoMap: ${hdr ? "texture_2d_array<f32>" : "texture_2d<f32>"};
+fn ssaoTexel(p: vec2<i32>) -> vec4<f32> { return textureLoad(ssaoMap, p, ${hdr ? "0, " : ""}0); }
 // The Modern-tier light list (packLights); the uniform's ssaoMeta.y bounds the
 // loop, so a spare 1-light buffer is bound when there are none.
 @group(0) @binding(9) var<storage, read> lights: array<Light>;
@@ -19672,8 +30279,9 @@ struct InstanceXf {
   nrm: mat3x3<f32>,
 };
 @group(0) @binding(10) var<storage, read> xf: array<InstanceXf>;
-// A baked light map, sampled with the second UV set (1x1 white when none).
-@group(0) @binding(11) var lmTex: texture_2d<f32>;
+// A baked light map, sampled with the second UV set (1x1 white when none). The linear variant binds an
+// array: an HDR directional map's two layers (F3d: irradiance; direction and sky visibility), or an 8-bit map's one.
+@group(0) @binding(11) var lmTex: ${hdr ? "texture_2d_array<f32>" : "texture_2d<f32>"};
 // Reflection probes (probeSampling.ts in @cartbox/editor): every probe's
 // panorama stacked in one atlas, and each one's box, capture point and mean
 // colour; the uniform's ssaoMeta.w counts them (a zeroed slot when none).
@@ -19689,31 +30297,71 @@ ${hdr ? "// The linear variant's probes (F3b, probeCapture.ts): each one's prefi
 // uniform's surface0.y gates it).
 @group(0) @binding(14) var detailTex: texture_2d<f32>;
 // The blend surface's map (terrain snow over rock), mixed by the vertex weight.
-@group(0) @binding(15) var blendTex: texture_2d<f32>;
+// The blend surface's map in layer 0, and a material graph's own images after it (F1e).
+@group(0) @binding(15) var blendTex: texture_2d_array<f32>;
 @group(0) @binding(16) var nrmTex: texture_2d<f32>;
-// The opaque pass's depth (EP6b), read by the see-through pass for soft edges;
+${hdr ? "// A GPU terrain's heights (F6c): RG = 16 bits of the height (B, its cut cells, the page bake reads).\n@group(0) @binding(17) var heightTex: texture_2d<f32>;\n" : ""}// The opaque pass's depth (EP6b), read by the see-through pass for soft edges;
 // the opaque pass binds a blank in its place.
 @group(1) @binding(0) var sceneDepth: texture_depth_2d;
-// Clustered lights (EP8): per cell (offset, count) into the index list.
-@group(1) @binding(1) var<storage, read> clusterTable: array<vec2<u32>>;
-@group(1) @binding(2) var<storage, read> clusterIndex: array<u32>;
+// Clustered lights (EP8): per cell (offset, count) into the index list, then the list, in one buffer
+// (F5b-0: the stage's eight storage buffers are all in use, so the two share one).
+@group(1) @binding(1) var<storage, read> clusterData: array<u32>;
+fn clusterCell(i: u32) -> vec2<u32> { return vec2<u32>(clusterData[i * 2u], clusterData[i * 2u + 1u]); }
+fn clusterLight(j: u32) -> u32 { return clusterData[${CLUSTER_CELLS3 * 2}u + j]; }
+// Light probes (EP9) and the probe volume (F3d-3): slot f's probes at x = f \xB7 nx + probe x, in a buffer
+// (F5b-0: it was a 3D texture read texel by texel, and the stage's sixteen sampled textures are all in use).
+@group(1) @binding(2) var<storage, read> probeData: array<vec4<f32>>;
+fn probeTexel(p: vec3<i32>) -> vec4<f32> {
+  let w = i32(frame.probeCount.x * frame.probeCount.w + 0.5);
+  return probeData[(p.z * i32(frame.probeCount.y + 0.5) + p.y) * w + p.x];
+}
 @group(1) @binding(3) var<uniform> frame: Frame;
 // Spot and point light shadows (EP8c): the tile atlas and each tile's view.
 ${hdr ? "// The spot/point lights' depth atlas, drawn on the GPU (F2d).\n@group(1) @binding(4) var localDepth: texture_depth_2d;" : "@group(1) @binding(4) var localAtlas: texture_2d<f32>;"}
 @group(1) @binding(5) var<storage, read> shadowTiles: array<ShadowTile>;
-// Light probes (EP9): the grid as a 3D texture, face f's probes at x = f \xB7 nx + probe x.
-@group(1) @binding(6) var probeGrid: texture_3d<f32>;
 // The opaque scene's colour (I5), copied as the see-through pass begins \u2014 what a
 // refracting surface bends (a 1\xD71 blank in the opaque pass, which never reads it).
 @group(1) @binding(7) var sceneColour: texture_2d<f32>;
-${hdr ? `${brdfWgsl(1, 8)}// The prefiltered cube's sampler: trilinear, so a roughness between levels blends them (F3a).
+${hdr ? `${brdfWgsl(1, 8)}${MATERIAL_SET_WGSL}${CHARACTER_WGSL}// The prefiltered cube's sampler: trilinear, so a roughness between levels blends them (F3a).
 @group(1) @binding(9) var envSamp: sampler;
 ${ltcWgsl(1, 10)}
 ${decalWgsl(1, 13)}
 ${SH_IRRADIANCE_WGSL}
 // The comparison sampler that filters the cascades' tests (F2a).
 @group(1) @binding(11) var cascadeSamp: sampler_comparison;
-${CASCADE_SHADOW_WGSL}` : ""}
+${CASCADE_SHADOW_WGSL}
+// The physical sky's aerial perspective (F5a-2, atmosphere.ts): its froxels as half floats, two a vec4.
+@group(1) @binding(14) var<uniform> aerialLut: array<vec4<u32>, ${AERIAL_LUT_BYTES / 16}>;
+${AERIAL_SAMPLE_WGSL}
+// The volumetric fog (F5b, volumetricFog.ts): its light and transmittance, integrated over the froxels.
+@group(1) @binding(6) var fogVolume: texture_3d<f32>;
+${FOG_SAMPLE_WGSL}
+// The weather (F5e, weather.ts).
+${WEATHER_WGSL}
+// Water (F5d, waterLook.ts).
+${WATER_WGSL}
+// A water surface's waves (F5d): Gerstner along its flow, the FFT ocean's share and the ripples, tilting n.
+fn waterWaves(n: vec3<f32>, p: vec3<f32>) -> vec3<f32> {
+  if (u.water0.x <= 0.0 || frame.water0.w < 0.5) { return n; }
+  let s = gerstnerSlope(p.x, p.z, frame.water0.z, u.wlook0.y, u.water0.w) + oceanSlope(p.x, p.z) * u.wlook0.z * frame.water1.w + rippleSlope(p.x, p.z);
+  return normalize(n + vec3<f32>(-s.x, 0.0, -s.y));
+}
+// The depth behind a refracting fragment, at the pixel behindColour reads.
+fn behindDepth(frag: vec2<f32>, z: f32, off: vec2<f32>) -> f32 {
+  let dims = vec2<f32>(textureDimensions(sceneColour, 0));
+  let s = vec2<i32>(clamp(floor(frag + off), vec2<f32>(0.0), dims - vec2<f32>(1.0)));
+  if (textureLoad(sceneColour, s, 0).a > 0.5 && textureLoad(sceneDepth, s, 0) >= z) { return textureLoad(sceneDepth, s, 0); }
+  return textureLoad(sceneDepth, vec2<i32>(floor(frag)), 0);
+}
+// The sun under a water plane (F5d): through the water above, and focused by the waves into caustics.
+fn underwaterSun(p: vec3<f32>) -> f32 {
+  if (u.water0.x > 0.0) { return 1.0; }
+  let depth = underPlane(p);
+  if (depth <= 0.0) { return 1.0; }
+  let ext = frame.water1.rgb + frame.water2.rgb;
+  let through = exp(-dot(ext, vec3<f32>(0.2126, 0.7152, 0.0722)) * depth / max(0.2, u.light.y));
+  return through * caustics(p.x, p.z, frame.water0.z, depth);
+}` : ""}
 // Optical depth of a fog layer thinning above base, along the ray from the eye
 // (height cy, rise dy, length len) over t in [t0, t1] \u2014 fogLayerDepth in skyDome.ts.
 fn fogLayer(d: f32, k: f32, base: f32, cy: f32, dy: f32, len: f32, t0: f32, t1: f32) -> f32 {
@@ -19767,7 +30415,7 @@ struct VSOut {
   @location(4) eyeDepth: f32,
   @location(5) @interpolate(perspective, centroid) uv2: vec2<f32>,
   @location(6) bw: f32,
-  @location(7) objPos: vec3<f32>,${hdr ? "\n  // The vertex's MikkTSpace frame in world space (F1c), each unit at the vertex: its tangent (w = 0 without one) and normal.\n  @location(8) tangent: vec4<f32>,\n  @location(9) frameNormal: vec3<f32>," : ""}
+  @location(7) objPos: vec3<f32>,${hdr ? "\n  // The vertex's MikkTSpace frame in world space (F1c), each unit at the vertex: its tangent (w = 0 without one) and normal.\n  @location(8) tangent: vec4<f32>,\n  @location(9) frameNormal: vec3<f32>,\n  // Its copy's LOD crossfade (F6b; fadeHides), or 0.\n  @location(10) @interpolate(flat) fade: f32," : ""}
 };
 
 ${hdr ? `// The sun's shadow on the linear-light renderer: its GPU cascades (F2a), or none.
@@ -19775,13 +30423,18 @@ ${hdr ? `// The sun's shadow on the linear-light renderer: its GPU cascades (F2a
 var<private> shadowPixel: vec2<f32>;
 fn shadowFactor(lightClip: vec4<f32>, worldPos: vec3<f32>, cosL: f32) -> f32 {
   if (frame.cascadeInfo.x < 0.5) { return 1.0; }
+  // The virtual shadow maps (F2b) for what the prepass holds, where a page is resident; the cascades elsewhere.
+  if (frame.depthTerms.w > 0.5 && u.pbr.w < 1.5) {
+    let v = textureLoad(ssaoMap, vec2<i32>(shadowPixel), 2, 0).r;
+    if (v >= 0.0) { return v * contactAt(shadowPixel); }
+  }
   return cascadeShadow(worldPos, cosL, shadowPixel) * contactAt(shadowPixel);
 }
 // The sun's contact shadow at this pixel (F2c), from the pass after the prepass: an opaque or
 // cut-out surface's alone, as only they are in its depths.
 fn contactAt(pixel: vec2<f32>) -> f32 {
   if (frame.cascadeSoft.y < 0.5 || u.pbr.w > 1.5) { return 1.0; }
-  return textureLoad(ssaoMap, vec2<i32>(pixel), 0).g;
+  return ssaoTexel(vec2<i32>(pixel)).g;
 }
 fn screenOctDecode(e: vec2<f32>) -> vec3<f32> {
   var n = vec3<f32>(e.x, e.y, 1.0 - abs(e.x) - abs(e.y));
@@ -19794,8 +30447,14 @@ fn screenOctDecode(e: vec2<f32>) -> vec3<f32> {
 // cut-out surface (the only ones in the prepass it reads).
 fn gtaoAt(pixel: vec2<f32>) -> vec4<f32> {
   if (frame.cascadeSoft.z < 0.5 || u.pbr.w > 1.5) { return vec4<f32>(0.0, 0.0, 0.0, 1.0); }
-  let t = textureLoad(ssaoMap, vec2<i32>(pixel), 0);
+  let t = ssaoTexel(vec2<i32>(pixel));
   return vec4<f32>(screenOctDecode(t.zw), t.x);
+}
+// SSGI at this pixel (F3e-2), from the screen-shading target's second layer: rgb the near field's light
+// (irradiance over \u03C0), a the share of directions it fills; none for what isn't in the prepass.
+fn ssgiAt(pixel: vec2<f32>) -> vec4<f32> {
+  if (frame.cascadeSoft.w < 0.5 || u.pbr.w > 1.5) { return vec4<f32>(0.0); }
+  return textureLoad(ssaoMap, vec2<i32>(pixel), 1, 0);
 }
 // Light bouncing between the occluders brings some back (Jimenez's fit), the more the brighter the albedo.
 fn gtaoBounce(v: f32, albedo: f32) -> f32 {
@@ -19922,6 +30581,7 @@ fn camoThreshold(p: vec2<f32>, time: f32) -> f32 {
 // pixel (alpha 1); a blended one leaves premultiplied colour and its coverage
 // (the pipeline blends it over what's there); an added one leaves its light
 // and no coverage (the pipeline adds it). compositeFrame reads the same codes.
+${hdr ? VIEW_MODE_WGSL : ""}
 fn finishAlpha(rgb: vec3<f32>, a: f32) -> vec4<f32> {
   // Linear light (F0b) keeps what is over 1 \u2014 a highlight, the sun on water \u2014 for the presenter's tone map.
   let c = ${hdr ? "max(rgb, vec3<f32>(0.0))" : "clamp(rgb, vec3<f32>(0.0), vec3<f32>(1.0))"};
@@ -19969,10 +30629,10 @@ fn localShadow(first: i32, lgt: Light, P: vec3<f32>, cosL: f32) -> f32 {
 // One ambient-cube face of the probe grid at grid cell i + fraction f (trilinear).
 fn probeFace(face: i32, i: vec3<i32>, f: vec3<f32>) -> vec3<f32> {
   let o = i + vec3<i32>(face * i32(frame.probeCount.x + 0.5), 0, 0);
-  let x00 = mix(textureLoad(probeGrid, o, 0).rgb, textureLoad(probeGrid, o + vec3<i32>(1, 0, 0), 0).rgb, f.x);
-  let x10 = mix(textureLoad(probeGrid, o + vec3<i32>(0, 1, 0), 0).rgb, textureLoad(probeGrid, o + vec3<i32>(1, 1, 0), 0).rgb, f.x);
-  let x01 = mix(textureLoad(probeGrid, o + vec3<i32>(0, 0, 1), 0).rgb, textureLoad(probeGrid, o + vec3<i32>(1, 0, 1), 0).rgb, f.x);
-  let x11 = mix(textureLoad(probeGrid, o + vec3<i32>(0, 1, 1), 0).rgb, textureLoad(probeGrid, o + vec3<i32>(1, 1, 1), 0).rgb, f.x);
+  let x00 = mix(probeTexel(o).rgb, probeTexel(o + vec3<i32>(1, 0, 0)).rgb, f.x);
+  let x10 = mix(probeTexel(o + vec3<i32>(0, 1, 0)).rgb, probeTexel(o + vec3<i32>(1, 1, 0)).rgb, f.x);
+  let x01 = mix(probeTexel(o + vec3<i32>(0, 0, 1)).rgb, probeTexel(o + vec3<i32>(1, 0, 1)).rgb, f.x);
+  let x11 = mix(probeTexel(o + vec3<i32>(0, 1, 1)).rgb, probeTexel(o + vec3<i32>(1, 1, 1)).rgb, f.x);
   return mix(mix(x00, x10, f.y), mix(x01, x11, f.y), f.z);
 }
 // The ambient scale from the probe grid at P for normal N (mirrors sampleLightProbes).
@@ -19987,6 +30647,75 @@ fn probeLight(P: vec3<f32>, N: vec3<f32>) -> vec3<f32> {
        + w.y * probeFace(select(3, 2, nn.y >= 0.0), i, f)
        + w.z * probeFace(select(5, 4, nn.z >= 0.0), i, f);
 }
+${hdr ? (
+      /* wgsl */
+      `
+// --- The probe volume (F3d-3; probeVolume.ts, whose sampleProbeVolume this mirrors) ---
+// One probe's slot of the volume texture: slots 0\u20138 its SH (slot 0's alpha its validity, slot 1's its sky
+// visibility), slots 9\u201340 its octahedral depths, two texels each.
+fn volumeSlot(slot: i32, i: vec3<i32>) -> vec4<f32> {
+  return probeTexel(i + vec3<i32>(slot * i32(frame.probeCount.x + 0.5), 0, 0));
+}
+fn volumeOctTexel(d: vec3<f32>) -> i32 {
+  var e = d.xz / (abs(d.x) + abs(d.y) + abs(d.z));
+  if (d.y < 0.0) { e = (vec2<f32>(1.0) - abs(e.yx)) * select(vec2<f32>(-1.0), vec2<f32>(1.0), e >= vec2<f32>(0.0)); }
+  let uv = e * 0.5 + vec2<f32>(0.5);
+  let x = min(i32(uv.x * ${PROBE_DEPTH_SIDE2}.0), ${PROBE_DEPTH_SIDE2 - 1});
+  let y = min(i32(uv.y * ${PROBE_DEPTH_SIDE2}.0), ${PROBE_DEPTH_SIDE2 - 1});
+  return y * ${PROBE_DEPTH_SIDE2} + x;
+}
+// The irradiance (over \u03C0) and sky visibility the volume gives P with normal N: the eight probes round it,
+// weighed trilinearly, by a wrapped cosine toward each, and by Chebyshev's bound on each seeing P (DDGI).
+// w < 0 when no probe is valid or sees it.
+fn probeVolumeAt(P: vec3<f32>, N: vec3<f32>) -> vec4<f32> {
+  let n = frame.probeCount.xyz;
+  let spacing = 1.0 / max(frame.probeScale.xyz, vec3<f32>(1e-6));
+  let Pb = P + N * (${PROBE_NORMAL_BIAS2} * min(spacing.x, min(spacing.y, spacing.z)));
+  let g = clamp((Pb - frame.probeMin.xyz) * frame.probeScale.xyz, vec3<f32>(0.0), n - vec3<f32>(1.0));
+  let i0 = min(vec3<i32>(floor(g)), vec3<i32>(n + vec3<f32>(0.5)) - vec3<i32>(2));
+  let f = g - vec3<f32>(i0);
+  var sum = vec3<f32>(0.0);
+  var vis = 0.0;
+  var wsum = 0.0;
+  for (var c = 0; c < 8; c = c + 1) {
+    let o = vec3<i32>(c & 1, (c >> 1) & 1, (c >> 2) & 1);
+    let i = i0 + o;
+    let s0 = volumeSlot(0, i);
+    if (s0.w < 0.5) { continue; }
+    let tri = select(vec3<f32>(1.0) - f, f, o == vec3<i32>(1));
+    let at = frame.probeMin.xyz + vec3<f32>(i) * spacing;
+    let to = at - P;
+    let wrap = (dot(to, N) / max(length(to), 1e-6) + 1.0) * 0.5;
+    var w = wrap * wrap + 0.2;
+    let off = Pb - at;
+    let dist = length(off);
+    if (dist > 1e-4) {
+      let k = volumeOctTexel(off / dist);
+      let pair = volumeSlot(${PROBE_SH3} + k / 2, i);
+      let m = select(pair.xy, pair.zw, (k & 1) == 1);
+      if (dist > m.x) {
+        let variance = max(m.y - m.x * m.x, 1e-4);
+        let cheb = variance / (variance + (dist - m.x) * (dist - m.x));
+        w = w * cheb * cheb * cheb;
+      }
+    }
+    w = w * tri.x * tri.y * tri.z;
+    if (w <= 1e-6) { continue; }
+    let s1 = volumeSlot(1, i);
+    let e = s0.xyz * 0.282095
+      + (s1.xyz * N.y + volumeSlot(2, i).xyz * N.z + volumeSlot(3, i).xyz * N.x) * 0.488603
+      + (volumeSlot(4, i).xyz * (N.x * N.y) + volumeSlot(5, i).xyz * (N.y * N.z) + volumeSlot(7, i).xyz * (N.x * N.z)) * 1.092548
+      + volumeSlot(6, i).xyz * (0.315392 * (3.0 * N.z * N.z - 1.0))
+      + volumeSlot(8, i).xyz * (0.546274 * (N.x * N.x - N.y * N.y));
+    sum = sum + max(e, vec3<f32>(0.0)) * w;
+    vis = vis + s1.w * w;
+    wsum = wsum + w;
+  }
+  if (wsum <= 1e-6) { return vec4<f32>(0.0, 0.0, 0.0, -1.0); }
+  return vec4<f32>(sum / wsum, vis / wsum);
+}
+`
+    ) : ""}
 
 
 // --- Layers and relief (HALO_INFINITE_STYLE_ROADMAP.md I4; materialLayers.ts) ---
@@ -20058,7 +30787,7 @@ fn anisoD(rough: f32, aniso: f32, toh: f32, boh: f32, ndh: f32) -> f32 {
   return a2 * b2 * b2 / 3.14159265;
 }
 // This fragment's anisotropy frame (set in fs, read by lightTerm).
-var<private> aniso: f32;${hdr ? "\n// The multiple scattering a light's specular adds back (F1c; set in fs, read by lightTerm).\nvar<private> eComp: vec3<f32>;" : ""}
+var<private> aniso: f32;${hdr ? "\n// The multiple scattering a light's specular adds back (F1c; set in fs, read by lightTerm).\nvar<private> eComp: vec3<f32>;\n// What the sheen leaves the base beneath (F1d; set in fs, read by lightTerm).\nvar<private> sheenScale: f32 = 1.0;\n// The diffuse light the lights gave (F1d-2; set by lightTerm, read where the frame splits it for scattering).\nvar<private> diffuseLit: vec3<f32>;\n// The diffuse's whole share, before a thin surface's transmission takes its part (F1d-2).\nvar<private> kdmFull: f32;" : ""}
 var<private> aT: vec3<f32>;
 var<private> aB: vec3<f32>;
 // The clearcoat's normal and N\xB7V (P1a): the geometric normal, which the coat lies over the bumps with.
@@ -20075,7 +30804,9 @@ fn coatTerm(N: vec3<f32>, ndv: f32, Ld: vec3<f32>, H: vec3<f32>, vdh: f32) -> ve
   let D = ac2 / (3.14159265 * dd * dd + 1e-7);
   let G = (ndv / (ndv * (1.0 - kc) + kc)) * (ndl / (ndl * (1.0 - kc) + kc));
   let fc = ${CLEARCOAT_F02} + (1.0 - ${CLEARCOAT_F02}) * pow(1.0 - vdh, 5.0);
-  return vec2<f32>(u.layer0.x * fc * (D * G) / (4.0 * ndl * ndv + 1e-4) * ndl${hdr ? " * 3.14159265" : ""}, u.layer0.x * fc);
+  // The AAA tier's coat takes Kelemen's visibility, 1/(4\xB7(V\xB7H)\xB2), as Filament's does (F1c): cheap, and right for a
+  // smooth layer; the other tiers keep the Schlick-Smith term the software path mirrors.
+  return vec2<f32>(u.layer0.x * fc * ${hdr ? "D * 0.25 / max(vdh * vdh, 1e-4)" : "(D * G) / (4.0 * ndl * ndv + 1e-4)"} * ndl${hdr ? " * 3.14159265" : ""}, u.layer0.x * fc);
 }
 // The environment's reflection along R from P, blurred toward its average by
 // roughness: inside a reflection probe's box (the smallest first), the room
@@ -20160,11 +30891,29 @@ ${hdr ? "  // An area light (F2e-2): its rectangle, disk or tube integrated with
     if (lgt.d0.w > 1.5) {
       let ct = clamp((-dot(Ld, lgt.d3.xyz) - lgt.d2.y) / (lgt.d2.z - lgt.d2.y), 0.0, 1.0);
       atten = atten * ct * ct * (3.0 - 2.0 * ct);
-    }
+    }${hdr ? "\n    // An IES profile (F9d): the fixture's measured distribution about its axis.\n    if (lgt.d4.w > -0.5) { atten = atten * iesFactor(u32(lgt.d4.w + 0.5), lgt.d3.xyz, -Ld); }" : ""}
   } else {
     Ld = normalize(lgt.d0.xyz);
   }
-  let ndlL = max(0.0, dot(N, Ld));
+  let ndlL = max(0.0, dot(N, Ld));${hdr ? `
+  // Character shading (F7c): its own lobes, under the light's falloff and shadow as any surface's.
+  if (charKind() > 0) {
+    if (atten <= 0.0) { return vec3<f32>(0.0); }
+    var occlC = 1.0;
+    if (lgt.d0.w < 0.5) { occlC = sf; }
+    else if (lgt.d2.w >= 0.0 && frame.localShadow.x > 0.5) { occlC = localShadow(i32(lgt.d2.w + 0.5), lgt, P, abs(dot(N, Ld))); }
+    return charLight(Ld, N, V, ndv, sqrt(sqrt(a2)), f0, kdm, albedo) * toLinear(lgt.d1.rgb) * (lgt.d1.w * atten * occlC);
+  }
+  // A thin surface lit from behind (F1d-2): what comes through, a diffuse of its own.
+  if (u.dt0.w > 0.0 && atten > 0.0 && dot(N, Ld) < 0.0) {
+    let back = -dot(N, Ld);
+    var occlB = 1.0;
+    if (lgt.d0.w < 0.5) { occlB = sf; }
+    else if (lgt.d2.w >= 0.0 && frame.localShadow.x > 0.5) { occlB = localShadow(i32(lgt.d2.w + 0.5), lgt, P, back); }
+    let through = u.dt0.w * u.dt0.rgb * albedo * kdmFull * toLinear(lgt.d1.rgb) * (lgt.d1.w * atten * back * occlB);
+    diffuseLit = diffuseLit + through;
+    return through;
+  }` : ""}
   if (ndlL <= 0.0 || atten <= 0.0) { return vec3<f32>(0.0); }
   let Hl = normalize(Ld + V);
   let ndhL = max(0.0, dot(N, Hl));
@@ -20179,7 +30928,7 @@ ${hdr ? "  // F1c: the height-correlated visibility, and \u03C0, as the diffuse 
   if (lgt.d0.w < 0.5) { occl = sf; }
   else if (lgt.d2.w >= 0.0 && frame.localShadow.x > 0.5) { occl = localShadow(i32(lgt.d2.w + 0.5), lgt, P, ndlL); }
   let w = lgt.d1.w * atten * ndlL * occl;
-  let lit = (kdm * (vec3<f32>(1.0) - FL) * albedo + FL * specL${hdr ? " * eComp" : ""}) * toLinear(lgt.d1.rgb) * w;
+  let lit = (kdm * (vec3<f32>(1.0) - FL) * albedo + FL * specL${hdr ? " * eComp" : ""}) * toLinear(lgt.d1.rgb) * w${hdr ? " * sheenScale + sheenLobe(ndlL, ndv, ndhL) * toLinear(lgt.d1.rgb) * w" : ""};${hdr ? "\n  diffuseLit = diffuseLit + kdm * (vec3<f32>(1.0) - FL) * albedo * toLinear(lgt.d1.rgb) * w * sheenScale;" : ""}
   if (u.layer0.x > 0.0) {
     // The clearcoat's own highlight, over a base its Fresnel dims (I4).
     let c = coatTerm(coatN, coatNdv, Ld, Hl, vdhL);
@@ -20197,7 +30946,15 @@ fn envAverage() -> vec3<f32> {
 // stays in the space it was authored in.
 fn toLinear(c: vec3<f32>) -> vec3<f32> {
 ${hdr ? "  let v = max(c, vec3<f32>(0.0));\n  return select(pow((v + vec3<f32>(0.055)) / 1.055, vec3<f32>(2.4)), v / 12.92, v <= vec3<f32>(0.04045));" : "  return c;"}
-}
+}${hdr ? `
+// An HDR directional light map's irradiance at the shading normal N (F3d; mirrors directionalIrradiance in
+// hdrLightmap.ts): the baked irradiance e rebalanced by a half-Lambert about its dominant direction d, exact at
+// the normal it was baked for (the interpolated vertex normal, on the side N faces).
+fn lightmapIrradiance(e: vec3<f32>, d: vec3<f32>, N: vec3<f32>, vn: vec3<f32>) -> vec3<f32> {
+  var ng = normalize(vn);
+  if (dot(ng, N) < 0.0) { ng = -ng; }
+  return e * (0.5 + 0.5 * dot(N, d)) / max(${LIGHTMAP_DIRECTION_FLOOR}, 0.5 + 0.5 * dot(ng, d));
+}` : ""}
 // ACES filmic tone map (Narkowicz), per channel, mirroring acesFilmic in
 // meshRasterizer.ts. Applied only to the Modern-tier PBR radiance.
 fn aces(x: f32) -> f32 {
@@ -20250,7 +31007,125 @@ fn windOffsetIn(w: vec4<f32>, p: vec2<f32>, sway: f32) -> vec2<f32> {
   return w.xy * (sway * s * g);
 }
 fn windOffset(p: vec2<f32>, sway: f32) -> vec2<f32> { return windOffsetIn(u.wind0, p, sway); }
-@vertex
+${hdr ? `// A plant drawn a copy at a time (F6b; foliageInstanceMesh) stores its flexibility, negated, as its sway: it bends
+// in the world, by its height above its copy's root (foliageSway), with three motions about pivots taken from the
+// copy's own frame: the trunk about its root, a branch about the trunk by how far out it reaches (each in its own
+// phase), and a leaf's quick flutter. Anything else bends as it always has. The result is in the mesh's space.
+fn foliageSwayOf(h: f32, flex: f32) -> f32 {
+  if (flex <= 0.0 || h <= 0.0) { return 0.0; }
+  return flex * 0.25 * h * h / (h + 1.0);
+}
+fn bendIn(w: vec4<f32>, p: vec3<f32>, sway: f32, m: mat4x4<f32>) -> vec3<f32> {
+  if (sway >= 0.0) {
+    let b = windOffsetIn(w, p.xz, sway);
+    return vec3<f32>(b.x, 0.0, b.y);
+  }
+  if (w.x == 0.0 && w.y == 0.0) { return vec3<f32>(0.0); }
+  let flex = -sway;
+  let world = (m * vec4<f32>(p, 1.0)).xyz;
+  let root = m[3].xyz;
+  let trunk = windOffsetIn(w, root.xz, foliageSwayOf(world.y - root.y, flex));
+  let reach = length(world.xz - root.xz);
+  let branch = w.xy * (0.12 * flex * reach * sin(6.283185307179586 * 5.0 * w.z + dot(p, vec3<f32>(1.7, 0.9, 1.3))));
+  let leaf = 0.02 * flex * length(w.xy) * min(reach, 1.0) * sin(6.283185307179586 * 31.0 * w.z + dot(world, vec3<f32>(13.1, 7.3, 11.7)));
+  let wb = vec3<f32>(trunk.x + branch.x, leaf, trunk.y + branch.y);
+  // Into the copy's space: a placed copy's model is a rotation and a uniform scale.
+  return vec3<f32>(dot(m[0].xyz, wb), dot(m[1].xyz, wb), dot(m[2].xyz, wb)) / max(dot(m[0].xyz, m[0].xyz), 1e-12);
+}
+// A copy fading between LOD levels (F6b): the dither it keeps, by interleaved gradient noise. A fade above 0 keeps the
+// pixels under it (the level coming in), below 0 those at or over its size (the level going out): between them, each
+// pixel once.
+fn fadeHides(fade: f32, p: vec2<f32>) -> bool {
+  let d = fract(52.9829189 * fract(0.06711056 * p.x + 0.00583715 * p.y));
+  return select((d < -fade), (d >= fade), fade > 0.0);
+}
+// An octahedral impostor (F6b; bakeOctahedralImpostor): its quad, around the bake's centre, turned to face the eye
+// (keeping the world's up), showing the view taken from the eye's side of the copy: the cell of the octahedral map
+// (octahedralUv) its direction, in the copy's own space, falls in. Lit as a canopy: from above, leaning to the eye.
+struct Impostor { pos: vec3<f32>, uv: vec2<f32>, normal: vec3<f32> };
+fn impostorOf(position: vec3<f32>, uv: vec2<f32>, m: mat4x4<f32>) -> Impostor {
+  let r = u.cull0.z;
+  let n = u.cull0.y;
+  let offset = vec2<f32>((uv.x - 0.5) * 2.0 * r, (0.5 - uv.y) * 2.0 * r);
+  let centre = position - vec3<f32>(offset, 0.0);
+  let s2 = max(dot(m[0].xyz, m[0].xyz), 1e-12);
+  let c = (m * vec4<f32>(centre, 1.0)).xyz;
+  let v = u.fogCam.xyz - c;
+  let toEye = normalize(v);
+  var right = cross(vec3<f32>(0.0, 1.0, 0.0), toEye);
+  if (dot(right, right) < 1e-8) { right = vec3<f32>(1.0, 0.0, 0.0); }
+  right = normalize(right);
+  let up = cross(toEye, right);
+  let w = c + (right * offset.x + up * offset.y) * sqrt(s2) - m[3].xyz;
+  var out: Impostor;
+  out.pos = vec3<f32>(dot(m[0].xyz, w), dot(m[1].xyz, w), dot(m[2].xyz, w)) / s2;
+  // The eye's direction in the copy's space, on the octahedral map (+y its top).
+  let d = normalize(vec3<f32>(dot(m[0].xyz, v), dot(m[1].xyz, v), dot(m[2].xyz, v)));
+  var p = d.xz / (abs(d.x) + abs(d.y) + abs(d.z));
+  if (d.y < 0.0) { p = (vec2<f32>(1.0) - abs(p.yx)) * select(vec2<f32>(-1.0), vec2<f32>(1.0), p >= vec2<f32>(0.0)); }
+  let cell = clamp(floor((p * 0.5 + 0.5) * n), vec2<f32>(0.0), vec2<f32>(n - 1.0));
+  out.uv = (cell + uv) / n;
+  out.normal = normalize(vec3<f32>(0.0, 1.0, 0.0) + 0.4 * toEye);
+  return out;
+}
+// --- Terrain at scale (AAA_FIDELITY_ROADMAP.md F6c; gpuTerrain.ts) ---
+// A height sample, and the heights' bilinear blend at a point (metres from the terrain's corner): the local height.
+fn terrainSample(i: vec2<i32>) -> f32 {
+  let t = textureLoad(heightTex, i, 0);
+  return (t.r * 65280.0 + t.g * 255.0) / 65535.0;
+}
+fn terrainHeight(p: vec2<f32>) -> f32 {
+  let cells = u.terrain2.x;
+  let q = clamp(p / u.terrain1.xy, vec2<f32>(0.0), vec2<f32>(1.0)) * cells;
+  let i = min(vec2<i32>(floor(q)), vec2<i32>(i32(cells) - 1));
+  let f = q - vec2<f32>(i);
+  let a = mix(terrainSample(i), terrainSample(i + vec2<i32>(1, 0)), f.x);
+  let b = mix(terrainSample(i + vec2<i32>(0, 1)), terrainSample(i + vec2<i32>(1, 1)), f.x);
+  return u.terrain1.z + mix(a, b, f.y) * u.terrain1.w;
+}
+// A patch vertex of a node (its model scales the unit patch to the node's square and height range, the terrain's
+// model being its origin alone): CDLOD's morph onto the coarser grid by the vertex's distance from the eye in the
+// ground plane, the height read there, the normal from the heights at the node's spacing, and the page the node
+// shades from (its level's, which its window holds; past the eye's pages, the whole terrain's) in the atlas.
+struct TerrainVertex { pos: vec3<f32>, normal: vec3<f32>, uv: vec2<f32>, morph: f32, level: f32 };
+fn terrainOf(position: vec3<f32>, m: mat4x4<f32>) -> TerrainVertex {
+  var out: TerrainVertex;
+  let s = max(m[0].x, 1e-6);
+  let r = max(m[1].y, 1e-6);
+  let corner = m[3].xyz - u.terrain3.xyz;
+  let n = ${TERRAIN_PATCH}.0;
+  let g = round(position.xz * n);
+  let d = length(corner.xz + g / n * s - u.terrain4.xy);
+  let range = u.terrain4.z * s;
+  let morph = clamp((d - u.terrain4.w * range) / ((1.0 - u.terrain4.w) * range), 0.0, 1.0);
+  let gm = g - fract(g * 0.5) * 2.0 * morph;
+  let local = clamp(corner.xz + gm / n * s, vec2<f32>(0.0), u.terrain1.xy);
+  let h = terrainHeight(local);
+  let e = s / n;
+  let hl = terrainHeight(local - vec2<f32>(e, 0.0));
+  let hr = terrainHeight(local + vec2<f32>(e, 0.0));
+  let hd = terrainHeight(local - vec2<f32>(0.0, e));
+  let hu = terrainHeight(local + vec2<f32>(0.0, e));
+  out.normal = normalize(vec3<f32>(hl - hr, 2.0 * e, hd - hu));
+  out.pos = vec3<f32>((local.x - corner.x) / s, (h - corner.y) / r, (local.y - corner.z) / s);
+  let level = clamp(round(log2(max(s / u.terrain3.w, 1.0))), 0.0, 30.0);
+  var slot = u.terrain2.w;
+  var page = vec2<f32>(0.0);
+  var side = max(u.terrain1.x, u.terrain1.y);
+  if (level < u.terrain2.w) {
+    slot = level;
+    let k = min(u32(level), 7u);
+    let pv = u.terrainPages[k / 2u];
+    page = select(pv.xy, pv.zw, (k & 1u) == 1u);
+    side = u.terrain2.z * exp2(level);
+  }
+  let pu = clamp((local - page) / side, vec2<f32>(0.0), vec2<f32>(1.0));
+  out.uv = vec2<f32>((slot + pu.x) / (u.terrain2.w + 1.0), 1.0 - pu.y);
+  out.morph = morph;
+  out.level = level;
+  return out;
+}
+` : ""}@vertex
 fn vs(
   @location(0) position: vec3<f32>,
   @location(1) normal: vec3<f32>,
@@ -20265,11 +31140,10 @@ fn vs(
 }
 fn vertexOf(position: vec3<f32>, normal: vec3<f32>, uv: vec2<f32>, uv2: vec2<f32>, bw: f32, sway: f32, tangent: vec4<f32>, instance: u32) -> VSOut {
   var out: VSOut;
-  let t = xf[instance];
+  let t = xf[u32(u.cull0.x) + instance];
   var pos = position;
-  let bend = windOffset(position.xz, sway);
-  pos = vec3<f32>(pos.x + bend.x, pos.y, pos.z + bend.y);
-  out.pos = t.mvp * vec4<f32>(pos, 1.0);
+${hdr ? "  pos = pos + bendIn(u.wind0, position, sway, t.model);\n  // Its LOD crossfade (F6b): the cull leaves it in the model's first column's w, 0 in an affine model.\n  out.fade = t.model[0].w;\n  // An octahedral impostor's quad, turned to the eye (F6b).\n  var imp: Impostor;\n  if (u.cull0.y > 0.5) {\n    imp = impostorOf(position, uv, t.model);\n    pos = imp.pos;\n  }\n  // A GPU terrain's node (F6c): the heights at its morphed vertex; the nearest nodes displaced by the relief, gone\n  // by the end of their morph so they still meet their neighbours.\n  var ter: TerrainVertex;\n  if (u.terrain1.w > 0.0) {\n    ter = terrainOf(position, t.model);\n    pos = ter.pos;\n    if (ter.level < 0.5 && u.layer0.w > 0.0) {\n      let dims = vec2<f32>(textureDimensions(occTex));\n      let texel = vec2<i32>(clamp(vec2<f32>(ter.uv.x, 1.0 - ter.uv.y) * dims, vec2<f32>(0.0), dims - 1.0));\n      pos.y = pos.y - (1.0 - textureLoad(occTex, texel, 0).g) * u.layer0.w * (1.0 - ter.morph) / max(t.model[1].y, 1e-6);\n    }\n  }" : "  let bend = windOffset(position.xz, sway);\n  pos = vec3<f32>(pos.x + bend.x, pos.y, pos.z + bend.y);"}
+${g.vertex}  out.pos = t.mvp * vec4<f32>(pos, 1.0);
   out.normal = t.nrm * normal;
   out.uv = uv;
   out.uv2 = uv2;
@@ -20281,7 +31155,21 @@ fn vertexOf(position: vec3<f32>, normal: vec3<f32>, uv: vec2<f32>, uv2: vec2<f32
 ${hdr ? `  // A tangent lies in the surface, so it moves with the model's own 3\xD73; a mirroring one flips the bitangent.
   let m3 = mat3x3<f32>(t.model[0].xyz, t.model[1].xyz, t.model[2].xyz);
   out.tangent = vec4<f32>(normalize(m3 * tangent.xyz + vec3<f32>(1e-12, 0.0, 0.0)), tangent.w * select(1.0, -1.0, determinant(m3) < 0.0));
+  if (u.cull0.y > 0.5) {
+    out.uv = imp.uv;
+    out.normal = imp.normal;
+    out.tangent = vec4<f32>(0.0);
+  }
   out.frameNormal = normalize(out.normal);
+  // The terrain's normal (its model is its origin alone), its page, and how much relief parallax adds (none where
+  // the vertex displaced it). Its tangent is the ground's +x, as a planar terrain's derivative frame has it.
+  if (u.terrain1.w > 0.0) {
+    out.normal = ter.normal;
+    out.frameNormal = ter.normal;
+    out.uv = ter.uv;
+    out.bw = select(1.0, ter.morph, ter.level < 0.5);
+    out.tangent = vec4<f32>(normalize(vec3<f32>(1.0, 0.0, 0.0) - ter.normal * ter.normal.x), 1.0);
+  }
 ` : ""}  return out;
 }
 
@@ -20296,6 +31184,16 @@ fn triMap(t: texture_2d<f32>, uv: vec2<f32>, normal: vec3<f32>, objPos: vec3<f32
   w = w / max(w.x + w.y + w.z, 1e-30);
   let p = objPos * (1.0 / u.terrain0.x);
   return textureSample(t, samp, vec2<f32>(p.z, 1.0 - p.y)) * w.x + textureSample(t, samp, vec2<f32>(p.x, 1.0 - p.z)) * w.y + textureSample(t, samp, vec2<f32>(p.x, 1.0 - p.y)) * w.z;
+}
+// triMap on one layer of an array (the blend surface's, F1e).
+fn triMapLayer(t: texture_2d_array<f32>, layer: i32, uv: vec2<f32>, normal: vec3<f32>, objPos: vec3<f32>) -> vec4<f32> {
+  if (u.terrain0.x <= 0.0) { return textureSample(t, samp, uv, layer); }
+  let n = normalize(normal);
+  let a = n * n;
+  var w = a * a;
+  w = w / max(w.x + w.y + w.z, 1e-30);
+  let p = objPos * (1.0 / u.terrain0.x);
+  return textureSample(t, samp, vec2<f32>(p.z, 1.0 - p.y), layer) * w.x + textureSample(t, samp, vec2<f32>(p.x, 1.0 - p.z), layer) * w.y + textureSample(t, samp, vec2<f32>(p.x, 1.0 - p.y), layer) * w.z;
 }
 // --- Landscape materials (EDITOR_PRO_ROADMAP.md P2b): farTileBlend and macroGain, term for term ---
 // The base map tiled ${1 / FAR_TILE_SCALE2}\xD7 larger, by the raw UVs or triplanar projection.
@@ -20366,7 +31264,8 @@ fn refractOffset(N: vec3<f32>, P: vec3<f32>) -> vec2<f32> {
     w = vec2<f32>(2.0 * gNoise1(vec3<f32>(P.x * f, qy, P.z * f)) - 1.0, 2.0 * gNoise1(vec3<f32>(P.x * f + 17.0, qy + 31.0, P.z * f + 47.0)) - 1.0) * warp;
   }
   let k = ${REFRACTION_SCALE2.toFixed(4)} * u.refract1.w;
-  return vec2<f32>(u.refract0.x * dot(N, u.refract1.xyz) + w.x, -u.refract0.x * dot(N, u.refract2.xyz) + w.y) * k;
+  let bend = select(u.refract0.x, refractBend, refractBend >= 0.0);
+  return vec2<f32>(bend * dot(N, u.refract1.xyz) + w.x, -bend * dot(N, u.refract2.xyz) + w.y) * k;
 }
 // What a refracting fragment at screen point frag, depth z, sees (rgb, a = 1
 // when it sees anything) \u2014 refractedPixel: the pushed pixel when the opaque
@@ -20400,7 +31299,7 @@ ${hdr ? `  // A tint authored for the display (F11a): linear light mixes it as t
 
 @fragment
 fn fs(in: VSOut) -> @location(0) vec4<f32> {
-${hdr ? "  shadowPixel = in.pos.xy;\n" : ""}  // The surface's screen derivatives, for the UV gradients parallax and
+${hdr ? "  // A copy fading between its LOD levels (F6b) leaves the other level's pixels.\n  if (in.fade != 0.0 && fadeHides(in.fade, in.pos.xy)) { discard; }\n  // A GPU terrain's cut cells (F6c): its page's occlusion alpha.\n  if (u.terrain1.w > 0.0 && u.terrain2.y > 0.5 && textureSample(occTex, samp, vec2<f32>(in.uv.x, 1.0 - in.uv.y)).a < 0.5) { discard; }\n  shadowPixel = in.pos.xy;\n  // Overdraw (F10a): every fragment shaded counts one, added up in red.\n  if (frame.debug.x > 10.5 && frame.debug.x < 11.5) { return vec4<f32>(1.0, 0.0, 0.0, 0.0); }\n" : ""}  // The surface's screen derivatives, for the UV gradients parallax and
   // anisotropy need (I4) \u2014 taken here, in uniform control flow.
   let dp1 = dpdx(in.worldPos);
   let dp2 = dpdy(in.worldPos);
@@ -20408,14 +31307,28 @@ ${hdr ? "  shadowPixel = in.pos.xy;\n" : ""}  // The surface's screen derivative
   let duv2 = dpdy(in.uv);
   // Every map is sampled at puv: the interpolated UVs, or where the view ray
   // meets the relief (parallax occlusion, I4).
-  var puv = in.uv;
+  var puv = ${hdr ? "khrUv(in.uv)" : "in.uv"};
   if (u.pbr.z > 0.5 && u.layer0.w > 0.0) {
     var pn = normalize(in.normal);
     if (dot(pn, u.view.xyz) < 0.0) { pn = -pn; }
     let pg = uvGrads(pn, dp1, dp2, duv1, duv2);
     let pv = max(${PARALLAX_MIN_NDV2}, dot(pn, u.view.xyz));
-    puv = parallaxUv(in.uv, -vec2<f32>(dot(pg.gu, u.view.xyz), dot(pg.gv, u.view.xyz)) / pv, u.layer0.w);
-  }
+    puv = parallaxUv(in.uv, -vec2<f32>(dot(pg.gu, u.view.xyz), dot(pg.gv, u.view.xyz)) / pv, u.layer0.w${hdr ? " * select(1.0, in.bw, u.terrain1.w > 0.0)" : ""});
+  }${hdr ? `
+  // An eye (F7c): its UVs centred on the pupil; inside the iris the view refracts through the cornea and
+  // lands on the iris behind it, which is where the iris is sampled.
+  if (u.pbr.z > 0.5 && charKind() == 2) {
+    var en = normalize(in.normal);
+    if (dot(en, u.view.xyz) < 0.0) { en = -en; }
+    let eg = uvGrads(en, dp1, dp2, duv1, duv2);
+    charT = eg.gu / max(length(eg.gu), 1e-12);
+    charB = eg.gv / max(length(eg.gv), 1e-12);
+    charFwd = normalize((u.model * vec4<f32>(0.0, 0.0, 1.0, 0.0)).xyz);
+    charR = length(puv - vec2<f32>(0.5));
+    charMask = charIrisMask(charR);
+    puv = puv + charIrisParallax(u.view.xyz, en) * charMask;
+    charOff = (puv.x - 0.5) * charT + (puv.y - 0.5) * charB;
+  }` : ""}
   // glTF's V origin is top-left, so flip; the sampler wraps and (per era) filters.
   let uv = vec2<f32>(puv.x, 1.0 - puv.y);
   wUv = puv;
@@ -20442,8 +31355,17 @@ ${hdr ? "  shadowPixel = in.pos.xy;\n" : ""}  // The surface's screen derivative
     colour = colour * texel;
   }
   // Macro variation (P2b): broad lighter and darker patches over the whole surface.
-  if (u.terrain0.z > 0.0) { colour = vec4<f32>(colour.rgb * macroGain(in.objPos), colour.a); }
-${g.base}
+  if (u.terrain0.z > 0.0) { colour = vec4<f32>(colour.rgb * macroGain(in.objPos), colour.a); }${hdr ? `
+  // The limbus's dark ring round the iris (F7c).
+  if (u.pbr.z > 0.5 && charKind() == 2) { colour = vec4<f32>(colour.rgb * charLimbus(charR), colour.a); }` : ""}
+${g.base}${g.pdo ? `
+  // A pixel depth offset (F1e): the prepass wrote the pushed depth; here the surface keeps only the pixels
+  // where that is what the prepass left, so what it went behind shows.
+  if (gPdo > 0.0 && frame.depthTerms.z > 0.5) {
+    let dEye = frame.depthTerms.y / (in.pos.z + frame.depthTerms.x);
+    let pushed = clamp(frame.depthTerms.y / (dEye + gPdo) - frame.depthTerms.x, 0.0, 1.0);
+    if (pushed > textureLoad(sceneDepth, vec2<i32>(in.pos.xy), 0) + 1e-6) { discard; }
+  }` : ""}
   // The CPU path skips a texel whose combined alpha is below 1/255 rather than
   // blending it, so this is a discard and not an alpha-blend state.
   // Soft edges (EP6b): a see-through surface fades out as it meets the opaque
@@ -20454,7 +31376,7 @@ ${g.base}
   }
   if (colour.a * 255.0 < 1.0) { discard; }
   // A cut-out surface (EP6) drops what's below its threshold.
-  if (u.pbr.w > 0.5 && u.pbr.w < 1.5 && colour.a < u.view.w) { discard; }
+  if (u.pbr.w > 0.5 && u.pbr.w < 1.5 && ${hdr ? "select((colour.a < u.view.w), !charDitherKeeps(colour.a, in.pos.xy), u.char1.x > 0.5 && charKind() == 3)" : "colour.a < u.view.w"}) { discard; }
 
   if (u.pbr.z > 0.5) {
     // Active Camo (H11): screen-door transparency, as the rasteriser drops pixels.
@@ -20473,7 +31395,21 @@ ${g.base}
     // variant (the AAA tier) departs from it for the AAA BRDF (F1c, brdf.ts).
     var N = normalize(sNrm);
     if (dot(N, u.view.xyz) < 0.0) { N = -N; } // two-sided: flip toward the viewer
-    N = waterNormal(N, in.worldPos);
+    N = waterNormal(N, in.worldPos);${hdr ? `
+    N = waterWaves(N, in.worldPos);
+    // Character shading (F7c): skin's pores tilt the normal; a hair card's strands run along V; a mouth
+    // darkens behind its opening.
+    if (charKind() == 1 && u.char1.y > 0.0) {
+      let mg = uvGrads(N, dp1, dp2, duv1, duv2);
+      let tilt = charMicroTilt(puv);
+      N = normalize(N + tilt.x * mg.gu / max(length(mg.gu), 1e-12) + tilt.y * mg.gv / max(length(mg.gv), 1e-12));
+    }
+    if (charKind() == 3) {
+      let hg = uvGrads(N, dp1, dp2, duv1, duv2);
+      let t0 = hg.gv - N * dot(hg.gv, N);
+      charT = select(normalize(cross(N, vec3<f32>(1.0, 0.0, 0.0)) + vec3<f32>(1e-6)), t0 / max(length(t0), 1e-12), length(t0) > 1e-12);
+    }
+    if (charKind() == 4) { charLit = charMouth(in.objPos); }` : ""}
     coatN = waterNormal(facingNormal(in.normal), in.worldPos);
     coatNdv = max(1e-4, dot(coatN, u.view.xyz));
     var metallic = u.pbr.x;
@@ -20487,7 +31423,7 @@ ${g.base}
     }
     // The blend surface's roughness, by the vertex weight (surface3.w < 0 keeps).
     // The blend surface (H4), its weight moved by the two surfaces' heights (B6).
-    let blendTexel = triMap(blendTex, uv, in.normal, in.objPos).rgb;
+    let blendTexel = triMapLayer(blendTex, 0, uv, in.normal, in.objPos).rgb;
     var bwt = in.bw;
     var bc = u.surface3.rgb;
     if (u.surface1.z > 0.5) {
@@ -20498,7 +31434,11 @@ ${g.base}
 ${g.pbr}
     rough = clamp(rough, 0.045, 1.0); // a perfectly-smooth NDF blows up
     var ao = 1.0;
-    if (u.texflags.z > 0.5) { ao = textureSample(occTex, samp, uv).r; }
+    if (u.texflags.z > 0.5) { ao = textureSample(occTex, samp, uv).r; }${hdr ? `
+    // The cornea's tear film is smooth (F7c); skin's cavities keep the specular out; a mouth's depth dims all.
+    if (charKind() == 2) { rough = mix(rough, ${CORNEA_ROUGHNESS}, charMask); }
+    if (charKind() == 1) { charSpec = 1.0 - u.char1.z * (1.0 - ao); }
+    ao = ao * charLit;` : ""}
     // Anisotropy (I4): the grain's tangent, U's gradient laid in the surface and
     // turned about N, and the bitangent across it (round without a gradient).
     aniso = 0.0;
@@ -20533,6 +31473,27 @@ ${hdr ? `    // Projected decals (F1f): the boxes round this point, laid over th
       N = dc.N;
       decalGlow = dc.glow;
     }
+    // Weather (F5e, weather.ts): wet, puddled and snowy where the sky reaches it (the HDR light map's sky
+    // visibility; open without one), on opaque and cut-out surfaces. Sampled whatever is bound (uniform control flow).
+    var wPuddle = 0.0;
+    var wSnowCover = 0.0;
+    let wSky = select(1.0, textureSample(lmTex, samp, vec2<f32>(in.uv2.x, 1.0 - in.uv2.y), 1).w, u.ssaoMeta.z > 1.5);
+    if (frame.weather1.w > 0.5 && u.pbr.w < 1.5) {
+      let ws = weatherSurface(in.worldPos, N, wSky, albedo, rough, metallic);
+      albedo = ws.albedo;
+      rough = max(ws.rough, 0.045);
+      metallic = ws.metallic;
+      N = ws.N;
+      wPuddle = ws.puddle;
+      wSnowCover = ws.snow;
+    }
+    // View modes (F10a): the albedo as it shades, and lighting only's white dielectric in its place.
+    let vmAlbedo = albedo;
+    let vmMetallic = metallic;
+    if (frame.debug.x > 6.5 && frame.debug.x < 7.5) {
+      albedo = vec3<f32>(1.0);
+      metallic = 0.0;
+    }
 ` : ""}
     let L = u.light.xyz;
     let V = u.view.xyz;
@@ -20552,21 +31513,58 @@ ${hdr ? `    // The AAA BRDF (F1c, brdf.ts): the height-correlated Smith visibil
     // DFG for the environment, multiple scattering and specular occlusion.
     let specD = D * smithVisibility(ndl, ndv, a2) * 3.14159265;` : `    let G = (ndv / (ndv * (1.0 - k) + k)) * (ndl / (ndl * (1.0 - k) + k));
     let specD = (D * G) / (4.0 * ndl * ndv + 1e-4);`}
-    let f0 = vec3<f32>(0.04) + (albedo - vec3<f32>(0.04)) * metallic;
+${hdr ? `    // A dielectric's reflectance from its IOR and specular (F1d), and a thin film's over it.
+    var f0 = mix(u.spec0.rgb, albedo, metallic);
+    if (u.trans1.w > 0.0) { f0 = mix(f0, iridescenceF0(ndv, f0), u.trans1.w); }
+    // Water's reflectance where a puddle lies, a dielectric's where snow does (F5e).
+    f0 = mix(mix(f0, vec3<f32>(WATER_F0), wPuddle), vec3<f32>(0.04), wSnowCover);` : "    let f0 = vec3<f32>(0.04) + (albedo - vec3<f32>(0.04)) * metallic;"}
     let F = f0 + (vec3<f32>(1.0) - f0) * fp;
 ${hdr ? `    // GTAO (F3c): its visibility joins the material's occlusion (diffuse and specular alike), and its
     // bent normal is where the sky's irradiance comes from.
     let gt = gtaoAt(in.pos.xy);
+    let matAo = ao;
     ao = ao * gtaoBounce(gt.w, dot(albedo, vec3<f32>(0.2126, 0.7152, 0.0722)));
+    // SSGI (F3e-2): the near field's own light where its rays met something, the far field's where they
+    // didn't. The rays' hits already hold the occlusion GTAO measures, so the diffuse then takes only the material's.
+    let ssgi = ssgiAt(in.pos.xy);
+    let aoD = select(ao, matAo, frame.cascadeSoft.w > 0.5 && u.pbr.w < 1.5);
     let skyN = select(N, gt.xyz, dot(gt.xyz, gt.xyz) > 0.25);
     let dfg = dfgAt(ndv, rough);
     eComp = energyCompensation(f0, dfg);
     let specE = specularEnergy(f0, dfg);
-    let specAo = specularOcclusion(ndv, ao, rough * rough);
+    // Specular occlusion (F3c, F1c): with GTAO's bent normal, the reflection's lobe against the open sky's cone
+    // (Jimenez), the material's own occlusion still taken by Lagarde's fit; without one, Lagarde's from the AO alone.
+    let hasBent = dot(gt.xyz, gt.xyz) > 0.25;
+    let soBent = min(specularOcclusion(ndv, matAo, rough * rough), bentSpecularOcclusion(gt.xyz, gt.w, reflect(-V, N), rough * rough));
+    var specAo = select(specularOcclusion(ndv, ao, rough * rough), soBent, hasBent) * charSpec;
+    // The sheen (F1d) takes what it reflects from the layer beneath.
+    sheenScale = 1.0 - max(u.sheen0.r, max(u.sheen0.g, u.sheen0.b)) * sheenE(ndv, u.sheen0.w);
+    // An HDR directional light map (F3d) lights the diffuse in place of the sky's irradiance, and its sky
+    // visibility occludes the environment's reflection. Both layers are sampled whatever is bound (uniform
+    // control flow); an 8-bit map's single layer stands in for the second.
+    let lmUv = vec2<f32>(in.uv2.x, 1.0 - in.uv2.y);
+    let lm0 = textureSample(lmTex, samp, lmUv, 0);
+    let lm1 = textureSample(lmTex, samp, lmUv, 1);
+    let lmHdr = u.ssaoMeta.z > 1.5;
+    // Baked diffuse light in place of the sky's: the HDR light map's, or, for a surface without a light map,
+    // the probe volume's (F3d-3), with its sky visibility.
+    var baked = lmHdr;
+    var bakedIrr = vec3<f32>(0.0);
+    if (lmHdr) {
+      bakedIrr = lightmapIrradiance(lm0.rgb, lm1.xyz, N, in.normal);
+      specAo = specAo * lm1.w;
+    } else if (u.ssaoMeta.z < 0.5 && frame.probeMin.w > 1.5) {
+      let pv = probeVolumeAt(in.worldPos, N);
+      if (pv.w >= 0.0) {
+        baked = true;
+        bakedIrr = pv.rgb;
+        specAo = specAo * pv.w;
+      }
+    }
     // What the environment's reflection takes, the material's reflectivity scaling it but never past all
     // the light (F11a): reflectivity over 1 (Beaver Creek's water is 1.3) mirrored more than came in at grazing.
     let specK = min(specE * reflectK, vec3<f32>(1.0));
-` : ""}    let kdm = 1.0 - metallic;                  // metals have no diffuse
+` : ""}    let kdm = (1.0 - metallic)${hdr ? " * (1.0 - u.trans0.x)" : ""};                  // metals have no diffuse${hdr ? "; what is transmitted (F1d) neither" : ""}${hdr ? "\n    // What a thin surface lets through (F1d-2) it doesn't reflect diffusely.\n    let kdf = kdm * (1.0 - u.dt0.w);\n    kdmFull = kdm;\n    var ambDiffuse = vec3<f32>(0.0);" : ""}
     var emis = vec3<f32>(0.0);
     let ef = u.emissive.xyz;
     if (ef.r > 0.0 || ef.g > 0.0 || ef.b > 0.0) {
@@ -20575,15 +31573,15 @@ ${hdr ? `    // GTAO (F3c): its visibility joins the material's occlusion (diffu
       emis = ef * es;
     }
 ${g.emis}
-    emis = toLinear(emis);${hdr ? "\n    emis = emis + decalGlow;" : ""}
+    emis = toLinear(emis)${hdr ? " * u.irid0.z" : ""};${hdr ? "\n    emis = emis + decalGlow;" : ""}
     // Ambient / image-based lighting, mirroring the software rasteriser: with an
     // environment, a diffuse irradiance along N + a specular reflection along R
     // blurred toward the average by roughness; without one, the flat ambient.
 ${reflect ? "    var envSpec = vec3<f32>(0.0);\n    var envSeen = vec3<f32>(0.0);\n" : ""}    var amb: vec3<f32>;
     var coatV = 0.0;
     if (u.envSky.w > 0.5) {
-      ${hdr ? `// The irradiance over the hemisphere (F3a), not the radiance along N.
-      let irr = shIrradiance(skyN);` : "let irr = envColorDir(N);"}
+      ${hdr ? `// The irradiance over the hemisphere (F3a), not the radiance along N; or the light map's (F3d).
+      let irr = select(shIrradiance(skyN), bakedIrr, baked);` : "let irr = envColorDir(N);"}
       // Brushed metal (I4) reflects about a normal bent across its grain.
       var Rn = N;
       if (aniso != 0.0) {
@@ -20594,7 +31592,7 @@ ${reflect ? "    var envSpec = vec3<f32>(0.0);\n    var envSeen = vec3<f32>(0.0)
       var rdv = ndv;
       if (aniso != 0.0) { rdv = dot(Rn, V); }
       let pref = envReflect(in.worldPos, 2.0 * rdv * Rn - V, rough);
-${hdr ? "      // What the environment's reflection takes, the diffuse beneath it no longer receives.\n      amb = irr * albedo * kdm * (vec3<f32>(1.0) - specE) * ao + pref * specK * specAo;\n" : "      amb = (irr * albedo * kdm + pref * f0 * reflectK) * ao;\n"}${reflect ? `      envSpec = pref * ${hdr ? "specK * specAo" : "f0 * reflectK * ao"};
+${hdr ? "      // What the environment's reflection takes, the diffuse beneath it no longer receives.\n      amb = (irr * (1.0 - ssgi.a) + ssgi.rgb) * albedo * kdf * (vec3<f32>(1.0) - specE) * aoD + pref * specK * specAo;\n      // The sheen over it (F1d), lit by the sky's irradiance.\n      amb = amb * sheenScale + irr * u.sheen0.rgb * sheenE(ndv, u.sheen0.w) * aoD;\n      // Its diffuse half (F1d-2), and the sky from behind through a thin surface.\n      ambDiffuse = (irr * (1.0 - ssgi.a) + ssgi.rgb) * albedo * kdf * (vec3<f32>(1.0) - specE) * aoD * sheenScale;\n      if (u.dt0.w > 0.0) {\n        let behindSky = shIrradiance(-skyN) * u.dt0.w * u.dt0.rgb * albedo * kdm * aoD;\n        amb = amb + behindSky;\n        ambDiffuse = ambDiffuse + behindSky;\n      }\n" : "      amb = (irr * albedo * kdm + pref * f0 * reflectK) * ao;\n"}${reflect ? `      envSpec = pref * ${hdr ? "specK * specAo" : "f0 * reflectK * ao"};
       envSeen = pref;
 ` : ""}      // The clearcoat (I4) reflects the room sharply about its own normal, and
       // what it reflects the base beneath no longer receives.
@@ -20604,25 +31602,27 @@ ${hdr ? "      // What the environment's reflection takes, the diffuse beneath i
         amb = amb * (1.0 - coatV) + coatV * prefC * reflectK * ao;
 ${reflect ? "        envSpec = envSpec * (1.0 - coatV) + coatV * prefC * reflectK * ao;\n" : ""}      }
     } else {
-      amb = toLinear(vec3<f32>(u.light.w)) * albedo * ao;
+      amb = ${hdr ? "(select(toLinear(vec3<f32>(u.light.w)), bakedIrr * kdm, baked) * (1.0 - ssgi.a) + ssgi.rgb * kdm) * albedo * aoD" : "toLinear(vec3<f32>(u.light.w)) * albedo * ao"};${hdr ? "\n      ambDiffuse = amb;" : ""}
     }
 ${reflect ? "    let ambRaw = amb;\n" : ""}    // A baked light map (the second UV set) scales the sky/ambient fill by how
     // much of it reaches this point, bounce included \u2014 mirroring the CPU path.
     // Sampled unconditionally (uniform control flow), applied when bound.
-    let lmUv = vec2<f32>(in.uv2.x, 1.0 - in.uv2.y);
-    let lm = textureSample(lmTex, samp, lmUv).rgb * ${LIGHTMAP_RANGE2};
-    if (u.ssaoMeta.z > 0.5) { amb = amb * lm; }
-    else if (frame.probeMin.w > 0.5) { amb = amb * probeLight(in.worldPos, N); } // EP9: no light map, the probes light it
+${hdr ? `    // (An HDR one, F3d, lit the fill above.)
+    if (u.ssaoMeta.z > 0.5) { if (!lmHdr) { amb = amb * lm0.rgb * ${LIGHTMAP_RANGE3}; } }` : `    let lmUv = vec2<f32>(in.uv2.x, 1.0 - in.uv2.y);
+    let lm = textureSample(lmTex, samp, lmUv).rgb * ${LIGHTMAP_RANGE3};
+    if (u.ssaoMeta.z > 0.5) { amb = amb * lm; }`}
+    else if (frame.probeMin.w > 0.5 && frame.probeMin.w < 1.5) { amb = amb * probeLight(in.worldPos, N); } // EP9: no light map, the probes light it
     // Screen-space AO darkens only the ambient fill, sampled at this fragment's
     // framebuffer pixel (matching the software path's ssao[di]).
     // (With GTAO, F3c, the slot holds its visibility instead, already in the occlusion above.)
     if (u.ssaoMeta.x > 0.5 && frame.cascadeSoft.z < 0.5) {
-      amb = amb * textureLoad(ssaoMap, vec2<i32>(in.pos.xy), 0).r;
+      amb = amb * ssaoTexel(vec2<i32>(in.pos.xy)).r;
     }
 ${reflect ? "    // What the light map, probes and SSAO did to the fill, they do to its reflection.\n    let occl = select(vec3<f32>(1.0), amb / max(ambRaw, vec3<f32>(1e-6)), ambRaw > vec3<f32>(1e-6));\n    envSpec = envSpec * occl;\n" : ""}    // The direct light is what a shadow occludes; ambient/IBL still fills it.
-    let sf = shadowFactor(in.lightClip, in.worldPos, abs(dot(normalize(in.normal), u.light.xyz)));
+    let sf = shadowFactor(in.lightClip, in.worldPos, abs(dot(normalize(in.normal), u.light.xyz)))${hdr ? " * underwaterSun(in.worldPos)" : ""};
     let lc = i32(u.ssaoMeta.y + 0.5);
     var lit: vec3<f32>;
+    var vmLights = 0;
     if (lc > 0) {
       // --- Multi-light forward accumulation (Modern tier) ---
       // Mirrors meshRasterizer.ts: each light re-evaluates the direct term with
@@ -20631,24 +31631,26 @@ ${reflect ? "    // What the light map, probes and SSAO did to the fill, they do
       // The global lights (the sun, unranged lights) reach every fragment\u2026
       let ng = i32(frame.clusterInfo.x + 0.5);
       for (var i = 0; i < ng; i = i + 1) {
-        direct = direct + lightTerm(lights[i], in.worldPos, N, V, ndv, a2, k, f0, kdm, albedo, sf);
+        direct = direct + lightTerm(lights[i], in.worldPos, N, V, ndv, a2, k, f0, ${hdr ? "kdf" : "kdm"}, albedo, sf);
       }
+      vmLights = ng;
       // \u2026the rest only the cells they touch (EP8): this fragment's cell, by pixel and depth.
       if (frame.clusterInfo.y > 0.5 && in.eyeDepth >= frame.clusterParams.z) {
-        let tile = min(vec2<u32>(in.pos.xy / frame.clusterParams.xy), vec2<u32>(${CLUSTER_X2 - 1}u, ${CLUSTER_Y2 - 1}u));
-        let slice = min(u32(log(in.eyeDepth / frame.clusterParams.z) * frame.clusterParams.w), ${CLUSTER_Z2 - 1}u);
-        let cell = clusterTable[(slice * ${CLUSTER_Y2}u + tile.y) * ${CLUSTER_X2}u + tile.x];
+        let tile = min(vec2<u32>(in.pos.xy / frame.clusterParams.xy), vec2<u32>(${CLUSTER_X4 - 1}u, ${CLUSTER_Y4 - 1}u));
+        let slice = min(u32(log(in.eyeDepth / frame.clusterParams.z) * frame.clusterParams.w), ${CLUSTER_Z3 - 1}u);
+        let cell = clusterCell((slice * ${CLUSTER_Y4}u + tile.y) * ${CLUSTER_X4}u + tile.x);
+        vmLights = vmLights + i32(cell.y);
         for (var j = 0u; j < cell.y; j = j + 1u) {
-          direct = direct + lightTerm(lights[clusterIndex[cell.x + j]], in.worldPos, N, V, ndv, a2, k, f0, kdm, albedo, sf);
+          direct = direct + lightTerm(lights[clusterLight(cell.x + j)], in.worldPos, N, V, ndv, a2, k, f0, ${hdr ? "kdf" : "kdm"}, albedo, sf);
         }
       }
       lit = direct + amb + emis;
-    } else if (u.layer0.x > 0.0) {
+    }${hdr ? " else if (charKind() > 0) {\n      // Character shading (F7c) under the key light.\n      lit = charLight(L, N, V, ndv, rough, f0, kdf, albedo) * sf + amb + emis;\n    }" : ""} else if (u.layer0.x > 0.0) {
       // The clearcoat's own highlight, over a base its Fresnel dims (I4).
       let c = coatTerm(coatN, coatNdv, L, H, vdh);
-      lit = ((kdm * (vec3<f32>(1.0) - F) * albedo + F * specD${hdr ? " * eComp" : ""}) * ndl * (1.0 - c.y) + vec3<f32>(c.x)) * sf + amb + emis;
+      lit = (((${hdr ? "kdf" : "kdm"} * (vec3<f32>(1.0) - F) * albedo + F * specD${hdr ? " * eComp" : ""})${hdr ? " * sheenScale + sheenLobe(ndl, ndv, ndh)" : ""}) * ndl * (1.0 - c.y) + vec3<f32>(c.x)) * sf + amb + emis;
     } else {
-      lit = (kdm * (vec3<f32>(1.0) - F) * albedo + F * specD${hdr ? " * eComp" : ""}) * ndl * sf + amb + emis;
+      lit = ((${hdr ? "kdf" : "kdm"} * (vec3<f32>(1.0) - F) * albedo + F * specD${hdr ? " * eComp" : ""})${hdr ? " * sheenScale + sheenLobe(ndl, ndv, ndh)" : ""}) * ndl * sf + amb + emis;${hdr ? "\n      diffuseLit = diffuseLit + kdf * (vec3<f32>(1.0) - F) * albedo * ndl * sf * sheenScale;\n      // A thin surface lit from behind (F1d-2).\n      if (u.dt0.w > 0.0 && dot(N, L) < 0.0) {\n        let through = u.dt0.w * u.dt0.rgb * albedo * kdm * (-dot(N, L)) * sf;\n        lit = lit + through;\n        diffuseLit = diffuseLit + through;\n      }" : ""}
     }
     // A fresnel rim, light at grazing angles (zero when the material has none).
     lit = lit + toLinear(u.surface2.rgb) * pow(1.0 - ndv, u.surface2.w);
@@ -20657,7 +31659,7 @@ ${reflect ? "    // What the light map, probes and SSAO did to the fill, they do
     lit = lit + toLinear(u.effect0.rgb) + toLinear(u.effect1.rgb) * band;
     // HDR: expose + ACES roll-off, or write the linear colour straight through.
     var shaded = lit;
-${wgslDisplay("shaded", hdr)}${reflect ? (
+${wgslDisplay("shaded", hdr)}${hdr ? VIEW_MODE_SHADE : ""}${reflect ? (
       /* wgsl */
       `
     // Reflections (I3): the same without the environment's reflection, so the pass can take it away.
@@ -20674,12 +31676,41 @@ ${hdr ? `    // Linear light (F0b): what the reflection adds, and what it sees, 
     envOut = vec4<f32>(contribution, 1.0);`
     ) : ""}
     // Refraction (I5): what's behind is the opaque scene, bent.
-    if (camoSeen.a > 0.5) { return vec4<f32>(camoSeen.rgb, 1.0); }
+    if (camoSeen.a > 0.5) { return vec4<f32>(camoSeen.rgb, 1.0); }${hdr ? `
+    // Transmission (F1d): the light behind let through what the reflection leaves, tinted by the
+    // base colour and by the volume's absorption over its thickness (Beer\u2013Lambert).
+    if (u.trans0.x > 0.0 && u.refract0.w > 0.5) {
+      let tb = behindColour(in.pos.xy, in.pos.z, refractOffset(facingNormal(in.normal), in.worldPos));
+      if (tb.a > 0.5) {
+        var absorb = vec3<f32>(1.0);
+        if (u.trans0.y > 0.0 && u.trans0.z > 0.0) { absorb = pow(max(u.trans1.rgb, vec3<f32>(1e-4)), vec3<f32>(u.trans0.y / u.trans0.z)); }
+        let through = u.trans0.x * (1.0 - metallic) * (vec3<f32>(1.0) - specE) * albedo * absorb * tb.rgb;
+        return vec4<f32>(shaded + through, 1.0);
+      }
+    }` : ""}
     if (u.refract0.w > 0.5) {
-      let rn = waterNormal(facingNormal(in.normal), in.worldPos);
-      let b = behindColour(in.pos.xy, in.pos.z, refractOffset(rn, in.worldPos));
+      let rn = ${hdr ? "waterWaves(waterNormal(facingNormal(in.normal), in.worldPos), in.worldPos)" : "waterNormal(facingNormal(in.normal), in.worldPos)"};
+      let roff = refractOffset(rn, in.worldPos);
+      var b = behindColour(in.pos.xy, in.pos.z, roff);${hdr ? `
+      // A water surface's depth (F5d): what is seen through it loses light to the water between and gathers its
+      // colour; where the water is shallow over something, foam.
+      if (b.a > 0.5 && u.water0.x > 0.0 && frame.water0.w > 0.5 && frame.depthTerms.y != 0.0) {
+        let dz = behindDepth(in.pos.xy, in.pos.z, roff);
+        let thick = max(0.0, frame.depthTerms.y / (dz + frame.depthTerms.x) - frame.depthTerms.y / (in.pos.z + frame.depthTerms.x));
+        let foam = shoreFoam(thick * max(0.05, dot(facingNormal(in.normal), u.view.xyz)), in.worldPos.x, in.worldPos.z, frame.water0.z, u.wlook0.x);
+        let foamLit = frame.water3.rgb * 0.8;
+        b = vec4<f32>(mix(throughWater(b.rgb, thick), foamLit, foam), 1.0);
+        shaded = mix(shaded, foamLit, foam);
+      }` : ""}
       if (b.a > 0.5) { return finishRefracted(shaded, colour.a, b.rgb, rn); }
-    }
+    }${hdr ? `
+    // Subsurface scattering (F1d-2; subsurface.ts): in a checkerboard, the diffuse that scatters on the even
+    // pixels and the rest on the odd, for the blur after the opaque pass to rebuild.
+    if (frame.debug.z > 0.5 && u.uvx1.z > 0.0 && u.pbr.w < 1.5 && frame.debug.x < 0.5) {
+      let scatter = (diffuseLit + ambDiffuse) * u.uvx1.z * sssTint;
+      let even = ((u32(in.pos.x) + u32(in.pos.y)) & 1u) == 0u;
+      shaded = select(shaded - scatter, scatter, even);
+    }` : ""}
     return finishAlpha(shaded, colour.a);
   }
 
@@ -20696,10 +31727,15 @@ ${hdr ? `    // Linear light (F0b): what the reflection adds, and what it sees, 
 ${hdr ? `// --- The sun's cascades (AAA_FIDELITY_ROADMAP.md F2a) ---
 // A caster's depth as the sun sees it, through the cascade being drawn: the scene's
 // own vertex (its copy's transform, bent by the wind) and nothing else.
-@group(1) @binding(12) var<uniform> cascadeView: mat4x4<f32>;
+// The view a caster is drawn through (a cascade, a spot/point tile or a virtual page). A cascade whose casters
+// the GPU culled (F0e) draws each batch's survivors from its region: base.x is where the region starts, the
+// caster's cull0.x where its batch's copies sit in it, and base.y is 1.
+struct CasterView { viewProj: mat4x4<f32>, base: vec4<u32> };
+@group(1) @binding(12) var<uniform> cascadeView: CasterView;
 fn casterClip(position: vec3<f32>, sway: f32, instance: u32) -> vec4<f32> {
-  let bend = windOffset(position.xz, sway);
-  return cascadeView * xf[instance].model * vec4<f32>(position.x + bend.x, position.y, position.z + bend.y, 1.0);
+  let at = select(instance, cascadeView.base.x + u32(u.cull0.x) + instance, cascadeView.base.y != 0u);
+  let model = xf[at].model;
+  return cascadeView.viewProj * model * vec4<f32>(position + bendIn(u.wind0, position, sway, model), 1.0);
 }
 @vertex
 fn vs_shadow(@location(0) position: vec3<f32>, @location(5) sway: f32, @builtin(instance_index) instance: u32) -> @builtin(position) vec4<f32> {
@@ -20710,10 +31746,18 @@ struct CutOut {
   @builtin(position) pos: vec4<f32>,
   @location(0) uv: vec2<f32>,
 };
+// A cut-out caster's clip position: casterClip's, or a GPU terrain's node (F6c), whose casters draw through this
+// pipeline as it binds their heights.
+fn casterClipCut(position: vec3<f32>, sway: f32, instance: u32) -> vec4<f32> {
+  if (u.terrain1.w <= 0.0) { return casterClip(position, sway, instance); }
+  let at = select(instance, cascadeView.base.x + u32(u.cull0.x) + instance, cascadeView.base.y != 0u);
+  let model = xf[at].model;
+  return cascadeView.viewProj * model * vec4<f32>(terrainOf(position, model).pos, 1.0);
+}
 @vertex
 fn vs_shadow_cut(@location(0) position: vec3<f32>, @location(2) uv: vec2<f32>, @location(5) sway: f32, @builtin(instance_index) instance: u32) -> CutOut {
   var out: CutOut;
-  out.pos = casterClip(position, sway, instance);
+  out.pos = casterClipCut(position, sway, instance);
   out.uv = uv;
   return out;
 }
@@ -20735,7 +31779,8 @@ fn octEncode(n: vec3<f32>) -> vec2<f32> {
 // The prepass's vertex stage: the scene's own (vertexOf, so the depth is the
 // same), plus where the vertex is on screen now and was last frame, from this
 // frame's motion transforms (xf from u.motion0.x: mvp = now, lightMvp = then,
-// both unjittered) and the vertex's previous position (a skinned mesh's last
+// both unjittered; on the AAA tier made on the GPU from the copy's model and
+// its last one, which the motion record's model holds) and the vertex's previous position (a skinned mesh's last
 // vertices; its current ones otherwise) bent by the previous frame's wind.
 struct PrepassIn {
   @builtin(position) @invariant pos: vec4<f32>,
@@ -20748,7 +31793,7 @@ struct PrepassIn {
   @location(6) bw: f32,
   @location(7) objPos: vec3<f32>,
   @location(8) clipNow: vec4<f32>,
-  @location(9) clipThen: vec4<f32>,${hdr ? "\n  @location(10) tangent: vec4<f32>,\n  @location(11) frameNormal: vec3<f32>," : ""}
+  @location(9) clipThen: vec4<f32>,${hdr ? "\n  @location(10) tangent: vec4<f32>,\n  @location(11) frameNormal: vec3<f32>,\n  @location(12) @interpolate(flat) fade: f32," : ""}
 };
 @vertex
 fn vs_prepass(
@@ -20773,15 +31818,16 @@ fn vs_prepass(
   out.uv2 = v.uv2;
   out.bw = v.bw;
   out.objPos = v.objPos;
-${hdr ? "  out.tangent = v.tangent;\n  out.frameNormal = v.frameNormal;\n" : ""}  let m = xf[u32(u.motion0.x) + instance];
-  let then = windOffsetIn(u.wind1, before.xz, sway);
+${hdr ? "  out.tangent = v.tangent;\n  out.frameNormal = v.frameNormal;\n  out.fade = v.fade;\n" : ""}  let m = xf[u32(u.motion0.x) + u32(u.cull0.x) + instance];
+${hdr ? "  // Last frame's bend: its wind, about where the copy stood (the motion record's model is last frame's).\n  let thenPos = before + bendIn(u.wind1, before, sway, m.model);" : "  let then = windOffsetIn(u.wind1, before.xz, sway);\n  let thenPos = vec3<f32>(before.x + then.x, before.y, before.z + then.y);"}
   out.clipNow = m.mvp * vec4<f32>(v.objPos, 1.0);
-  out.clipThen = m.lightMvp * vec4<f32>(before.x + then.x, before.y, before.z + then.y, 1.0);
+${hdr ? "  // A terrain stands still: its vertex where it is now (F6c).\n  let thenAt = select(thenPos, v.objPos, u.terrain1.w > 0.0);" : "  let thenAt = thenPos;"}
+  out.clipThen = m.lightMvp * vec4<f32>(thenAt${g.vertex ? " + wpoObj" : ""}, 1.0);
   return out;
 }
 struct PrepassTargets {
   @location(0) gbuffer: vec4<f32>,
-  @location(1) velocity: vec2<f32>,
+  @location(1) velocity: vec2<f32>,${g.pdo ? "\n  // A material graph's pixel depth offset (F1e): the depth pushed away from the eye.\n  @builtin(frag_depth) depth: f32," : ""}
 };
 // The prepass draws what the opaque pipeline draws, and drops exactly the
 // pixels fs drops (the cut-out, the near-transparent, Active Camo's screen
@@ -20792,17 +31838,17 @@ struct PrepassTargets {
 // in UV units (x right, y down), so a pixel's last position is uv \u2212 velocity.
 @fragment
 fn fs_prepass(in: PrepassIn) -> PrepassTargets {
-  let dp1 = dpdx(in.worldPos);
+${hdr ? "  if (in.fade != 0.0 && fadeHides(in.fade, in.pos.xy)) { discard; }\n  if (u.terrain1.w > 0.0 && u.terrain2.y > 0.5 && textureSample(occTex, samp, vec2<f32>(in.uv.x, 1.0 - in.uv.y)).a < 0.5) { discard; }\n" : ""}  let dp1 = dpdx(in.worldPos);
   let dp2 = dpdy(in.worldPos);
   let duv1 = dpdx(in.uv);
   let duv2 = dpdy(in.uv);
-  var puv = in.uv;
+  var puv = ${hdr ? "khrUv(in.uv)" : "in.uv"};
   if (u.pbr.z > 0.5 && u.layer0.w > 0.0) {
     var pn = normalize(in.normal);
     if (dot(pn, u.view.xyz) < 0.0) { pn = -pn; }
     let pg = uvGrads(pn, dp1, dp2, duv1, duv2);
     let pv = max(${PARALLAX_MIN_NDV2}, dot(pn, u.view.xyz));
-    puv = parallaxUv(in.uv, -vec2<f32>(dot(pg.gu, u.view.xyz), dot(pg.gv, u.view.xyz)) / pv, u.layer0.w);
+    puv = parallaxUv(in.uv, -vec2<f32>(dot(pg.gu, u.view.xyz), dot(pg.gv, u.view.xyz)) / pv, u.layer0.w${hdr ? " * select(1.0, in.bw, u.terrain1.w > 0.0)" : ""});
   }
   let uv = vec2<f32>(puv.x, 1.0 - puv.y);
   var sNrm = in.normal;
@@ -20817,7 +31863,7 @@ fn fs_prepass(in: PrepassIn) -> PrepassTargets {
   let mr = textureSample(mrTex, samp, uv);
 ${g.base}
   if (colour.a * 255.0 < 1.0) { discard; }
-  if (u.pbr.w > 0.5 && u.pbr.w < 1.5 && colour.a < u.view.w) { discard; }
+  if (u.pbr.w > 0.5 && u.pbr.w < 1.5 && ${hdr ? "select((colour.a < u.view.w), !charDitherKeeps(colour.a, in.pos.xy), u.char1.x > 0.5 && charKind() == 3)" : "colour.a < u.view.w"}) { discard; }
   if (u.pbr.z > 0.5 && u.effect0.w > 0.0 && camoThreshold(in.pos.xy, u.effect1.w) < u.effect0.w) { discard; }
   var n = normalize(sNrm);
   if (dot(n, u.view.xyz) < 0.0) { n = -n; }
@@ -20827,7 +31873,12 @@ ${graph ? "  if (gRough >= 0.0) { rough = gRough; }\n" : ""}  var velocity = vec
   if (in.clipNow.w > 0.0 && in.clipThen.w > 0.0) {
     velocity = (in.clipNow.xy / in.clipNow.w - in.clipThen.xy / in.clipThen.w) * vec2<f32>(0.5, -0.5);
   }
-  return PrepassTargets(vec4<f32>(octEncode(n), clamp(rough, 0.0, 1.0), u.maps0.w), velocity);
+${g.pdo ? `  var depthOut = in.pos.z;
+  if (gPdo > 0.0 && frame.depthTerms.z > 0.5) {
+    let d = frame.depthTerms.y / (in.pos.z + frame.depthTerms.x);
+    depthOut = clamp(frame.depthTerms.y / (d + gPdo) - frame.depthTerms.x, 0.0, 1.0);
+  }
+  return PrepassTargets(vec4<f32>(octEncode(n), clamp(rough, 0.0, 1.0), u.maps0.w), velocity, depthOut);` : "  return PrepassTargets(vec4<f32>(octEncode(n), clamp(rough, 0.0, 1.0), u.maps0.w), velocity);"}
 }
 `
   );
@@ -20879,6 +31930,8 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     this.textures = /* @__PURE__ */ new WeakMap();
     /** With mips (F1a), colour maps upload apart: their chain is averaged in linear light. */
     this.colourTextures = /* @__PURE__ */ new WeakMap();
+    /** HDR directional light maps (F3d), uploaded once each as two rgba16float layers. */
+    this.hdrLightmaps = /* @__PURE__ */ new WeakMap();
     // Not readonly: a resized uniform buffer invalidates every cached group at
     // once, and WeakMap has no clear(), so the map itself is replaced.
     this.bindGroups = /* @__PURE__ */ new WeakMap();
@@ -20886,6 +31939,10 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     this.cutGroups = /* @__PURE__ */ new WeakMap();
     /** Most recent completed readback, or null before the first one lands. */
     this.latest = null;
+    /** Readbacks that have landed (gpuPacing.ts paces the render size by them). */
+    this.framesLanded = 0;
+    /** Whether the frame being drawn has a prepass, whose velocity needs a re-uploaded mesh's last vertices (F0c). */
+    this.keepsPrevious = false;
     /** Frames submitted, the one `latest` holds, and the newest that got a readback (see settle). */
     this.submitted = 0;
     this.latestSeq = 0;
@@ -20896,7 +31953,34 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     this.uniformCapacity = 0;
     this.uniformBuffer = null;
     this.uniformData = new Float32Array(0);
+    /** What each uniform slot was last written from (F0e): its draw's inputs and first model; reset when the staging array is remade. */
+    this.uniformKeys = [];
+    this.uniformModels = new Float32Array(0);
+    this.uniformKeysFor = null;
     this.destroyed = false;
+    /** The path-traced reference (F10b), made the first time it is shown. */
+    this.pathTracer = null;
+    /** GPU culling (F0e), made on first use. */
+    this.culling = null;
+    /** The clustered lights built on the GPU (F0e), made on first use; set for a frame that builds them there. */
+    this.lightClusterer = null;
+    /** The scene passes' recorded draws (F0e), on the GPU-culled path. */
+    this.bundles = null;
+    /** The sun's casters culled per cascade on the GPU (F0e). */
+    this.casterCulling = null;
+    /** Cluster hierarchies cut and culled on the GPU (F6a), made on first use. */
+    this.clusterRendering = null;
+    /** Terrains drawn from their heightfields (F6c), by terrain, and by their patch's primitive. */
+    this.gpuTerrains = /* @__PURE__ */ new WeakMap();
+    this.terrainPatches = /* @__PURE__ */ new WeakMap();
+    this.terrainList = [];
+    /** Each copy's transforms made on the GPU (F0e), on the AAA tier. */
+    this.transforms = null;
+    /** The LOD chains whose levels the GPU picks this frame (F0e). */
+    this.frameGpuLods = null;
+    this.frameLightClusters = false;
+    /** This frame's GPU cull, while it encodes: the draws index the culling's arguments. */
+    this.frameCull = null;
     this.shadowMapSize = 0;
     /** Maps side by side in the shadow texture: 1, or 2 with a near cascade (EP8b). */
     this.shadowCascades = 1;
@@ -20930,7 +32014,11 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     this.instanceData = new Float32Array(0);
     /** What the last submitted frame drew (for the profiler and tests); GPU time when the device can time it. */
     this.lastFrameStats = { drawCalls: 0, instances: 0, triangles: 0, gpuMs: null };
-    /** The screen-space shading target (F2c, F3c): rgba16float at the frame's size, AO in r, the sun's contact in g, the bent normal in ba. */
+    /**
+     * The screen-space shading target (F2c, F3c): rgba16float at the frame's size, AO in r, the sun's contact
+     * in g, the bent normal in ba; in its second layer, SSGI (F3e-2): the near field's light in rgb, its share in a;
+     * and in its third, the sun's light through the virtual shadow maps (F2b) in r, −1 where no page is resident.
+     */
     this.contactTexture = null;
     /** The resolve's uniforms and pipelines (one per depth sample count), made on first use. */
     this.contact = null;
@@ -20940,13 +32028,43 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     this.frameDepthView = null;
     /** Whether this frame's ambient light takes GTAO (F3c), for the frame uniform. */
     this.frameGtao = false;
+    /** This frame's SSGI (F3e-2), when it has one, for the frame uniform and the screen-space shading. */
+    this.frameSsgi = null;
+    /**
+     * SSGI's resources (F3e-2): its uniforms, the half-resolution history (two, one read and one written,
+     * swapping each frame), and its pipelines.
+     */
+    this.ssgi = null;
+    /** This frame's real-time GI (F3e), its tracer for the still scene it was made for, and the sky it traces. */
+    this.frameGi = null;
+    this.probeGi = null;
+    this.giSky = null;
+    /** This frame's volumetric fog (F5b), its volumes (made when a frame first has some) and the shader's terms. */
+    this.frameFog = null;
+    this.volumetricFog = null;
+    this.fogTerms = new Float32Array(FOG_FRAME_FLOATS);
+    this.weatherTerms = new Float32Array(WEATHER_FRAME_FLOATS);
+    this.waterTerms = new Float32Array(WATER_FRAME_FLOATS);
+    /** The physical sky's LUTs (F5a-2), made when a draw first brings one, and the frame's aerial terms. */
+    this.atmosphere = null;
+    this.aerialTerms = new Float32Array(AERIAL_FRAME_FLOATS);
     /**
      * GTAO's resources (F3c): its uniforms, the half-resolution history (two,
      * one read and one written, swapping each frame), and its pipelines.
      */
     this.gtao = null;
+    /** The IES profiles in the LTC buffer's slots (F9d), by identity. */
+    this.iesHeld = Array.from({ length: IES_MAX_PROFILES }, () => null);
     /** A 1×1 stand-in for GTAO's history when the frame has none (F3c). */
     this.gtaoBlank = null;
+    /** This frame's virtual shadow maps (F2b): the pages it draws, when it has them. */
+    this.frameVsm = null;
+    /**
+     * The virtual shadow maps' resources (F2b): the physical pool and its bookkeeping, the marks and the
+     * buffers they are read back through (each with the windows it was marked under), the page table, the
+     * passes' uniforms, a view uniform a page drawn a frame, and the pipelines.
+     */
+    this.vsm = null;
     this.decalTiles = null;
     this.decalCount = 0;
     /** The thin G-buffer (F0c), made on the first frame with a prepass. */
@@ -20965,6 +32083,11 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     this.motion = /* @__PURE__ */ new Map();
     /** The reflection pass's uniforms and pipelines (I3), made on first use; its targets are the frame graph's. */
     this.reflections = null;
+    /**
+     * The AAA tier's reflections (F3f): the Hi-Z chain (sized to the frame), the accumulation's history (two,
+     * swapping), the Epic trace's half-resolution target, the uniforms and the pipelines. Made on first use.
+     */
+    this.hiz = null;
     this.temporalState = new TemporalState("ndc");
     /**
      * The temporal resolve's resources (I2): two history images (one read, one
@@ -20973,6 +32096,19 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
      */
     this.taa = null;
     this.reactivePipeline = null;
+    /** This frame's output when it isn't the colour texture: the upscaled frame (F4b). */
+    this.frameOutput = null;
+    /** The upscaler's display-sized output and pipelines (F4b); its history is the TAA's, made at the display's size. */
+    this.upscaler = null;
+    /** The view modes' resolve (F10a): its pipeline and uniforms, made on first use. */
+    this.viewResolve = null;
+    /** Whether this frame's scattering surfaces split their diffuse for the SSS blur (F1d-2), for the frame uniform. */
+    this.frameSss = false;
+    /** The SSS profiles by material ID (F1d-2), and the blur's pipeline and two uniform buffers (across, down). */
+    this.sssProfiles = null;
+    this.sss = null;
+    /** The physical camera's passes (F4c) and what they keep between frames: their uniforms, sampler and pipelines. */
+    this.camera = null;
     /** Pipeline variants (material graph, sample count, reflection targets), built on first use. */
     this.variants = /* @__PURE__ */ new Map();
     /**
@@ -20982,12 +32118,39 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
      * them. Its colour is a frame-graph transient.
      */
     this.msaa = null;
+    /**
+     * The pipelines a material draws with: the plain shader's, or its graph's
+     * variant; multisampled for an anti-aliased frame (I1); writing the
+     * reflection targets for a frame with reflections (I3). Built on first use.
+     */
+    /** Permutations compiling in the background (F1e), by their keys. */
+    this.compiling = /* @__PURE__ */ new Set();
     /** This frame's GPU spot/point tiles (F2d), or null when it draws none. */
     this.frameLocalTiles = null;
     /** Which atlas rects hold whose map (F2d-2). */
     this.localCache = new LocalTileCache();
     /** Clears a tile's rect to the far plane (F2d-2), made on first use. */
     this.localClear = null;
+    /** The skinning pass's pipeline (F7a), made the first time a primitive skins on the GPU. */
+    this.skinPipeline = null;
+    /** GPU cloth's pipelines (F7d; clothGpu.ts), made the first time a cloth simulates. */
+    this.clothPipelines = null;
+    /** Where each blended hair primitive's triangles were last sorted from (F7c), in its mesh's space. */
+    this.hairSorted = /* @__PURE__ */ new WeakMap();
+    /** The volumetric effects (F8b; volumetricEffects.ts), when the scene has any. */
+    this.volumes = null;
+    /** The GPU particle system (F8a; gpuParticles.ts), when the scene has emitters. */
+    this.particles = null;
+    this.particleTime = 0;
+    /** Texture streaming (F1b): the residency plan, and the feedback pass's pipeline, buffers and state. */
+    this.streamer = null;
+    this.feedback = null;
+    /** Each feedback slot's streamed maps, for the round in flight. */
+    this.feedbackMaps = [];
+    /** Textures a residency change replaced, destroyed once the next frame no longer uses them. */
+    this.retired = [];
+    /** Layer stacks uploaded once (F1e), by their layers' identities. */
+    this.layerStacks = /* @__PURE__ */ new Map();
     this.software = new SoftwareSceneRenderer(style);
     this.shadowTexture = blankShadow;
     this.envTexture = hdr ? blankCube(device) : blankTexture;
@@ -21028,7 +32191,7 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     }
   }
   ensureContact() {
-    this.contactTexture ?? (this.contactTexture = this.device.createTexture({ size: { width: this.width, height: this.height }, format: SCREEN_SHADING_FORMAT, usage: 16 | 4 | 1 }));
+    this.contactTexture ?? (this.contactTexture = this.device.createTexture({ size: { width: this.width, height: this.height, depthOrArrayLayers: 3 }, format: SCREEN_SHADING_FORMAT, usage: 16 | 4 | 1 }));
     return this.contactTexture;
   }
   /**
@@ -21043,8 +32206,8 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     const k = multisampled ? 1 : 0;
     let resolvedAo = null;
     if (this.frameGtao && gbuffer && velocity) {
-      const half = { width: Math.max(1, Math.ceil(this.width / 2)), height: Math.max(1, Math.ceil(this.height / 2)) };
-      const made = () => device.createTexture({ size: half, format: SCREEN_SHADING_FORMAT, usage: 16 | 4 | 1 });
+      const half2 = { width: Math.max(1, Math.ceil(this.width / 2)), height: Math.max(1, Math.ceil(this.height / 2)) };
+      const made = () => device.createTexture({ size: half2, format: SCREEN_SHADING_FORMAT, usage: 16 | 4 | 1 });
       if (!this.gtao) {
         this.gtao = {
           uniforms: device.createBuffer({ size: GTAO_UNIFORM_FLOATS * 4, usage: 64 | 8 }),
@@ -21061,7 +32224,7 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
       const g = this.gtao;
       (_a = g.pipelines)[k] ?? (_a[k] = fullScreenPipeline(device, gtaoShaderWgsl(multisampled), "gtaoPass", SCREEN_SHADING_FORMAT));
       const pipeline2 = g.pipelines[k];
-      const current = graph.createTexture("gtao", { format: SCREEN_SHADING_FORMAT, ...half });
+      const current = graph.createTexture("gtao", { format: SCREEN_SHADING_FORMAT, ...half2 });
       const then = graph.importTexture("gtao.then", g.history[g.index]);
       const now = graph.importTexture("gtao.now", g.history[1 - g.index]);
       const history = g.valid;
@@ -21121,6 +32284,9 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     } else if (this.gtao) {
       this.gtao.valid = false;
     }
+    if (this.frameVsm && gbuffer) this.addVsmResolve(graph, depth, gbuffer, multisampled);
+    if (this.frameSsgi && gbuffer && velocity && this.taa) this.addSsgi(graph, depth, gbuffer, velocity, view, projection, this.frameSsgi, multisampled);
+    else if (this.ssgi) this.ssgi.valid = false;
     this.contact ?? (this.contact = { uniforms: device.createBuffer({ size: CONTACT_UNIFORM_FLOATS * 4, usage: 64 | 8 }), data: new Float32Array(CONTACT_UNIFORM_FLOATS), pipelines: [null, null] });
     const contact = this.contact;
     (_b = contact.pipelines)[k] ?? (_b[k] = fullScreenPipeline(device, contactShaderWgsl(multisampled), "contactPass", SCREEN_SHADING_FORMAT));
@@ -21136,7 +32302,7 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
       pass.keep();
       return (ctx) => {
         const encoded = ctx.encoder.beginRenderPass({
-          colorAttachments: [{ view: ctx.texture(target).createView(), clearValue: { r: 1, g: 1, b: 0, a: 1 }, loadOp: "clear", storeOp: "store" }],
+          colorAttachments: [{ view: ctx.texture(target).createView({ dimension: "2d", baseArrayLayer: 0, arrayLayerCount: 1 }), clearValue: { r: 1, g: 1, b: 0, a: 1 }, loadOp: "clear", storeOp: "store" }],
           ...ctx.timing
         });
         encoded.setPipeline(pipeline);
@@ -21153,6 +32319,325 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
         encoded.end();
       };
     });
+  }
+  /**
+   * Each distinct IES profile among the frame's lights a slot (F9d), uploaded when it first takes it; the
+   * light's slot, or −1 (no profile, or more profiles than slots).
+   */
+  iesSlots(lights) {
+    const wanted = new Set(lights.map((l) => l.ies).filter((p) => Boolean(p)));
+    this.iesHeld.forEach((p, i) => {
+      if (p && !wanted.has(p)) this.iesHeld[i] = null;
+    });
+    for (const profile of wanted) {
+      if (this.iesHeld.includes(profile)) continue;
+      const slot = this.iesHeld.indexOf(null);
+      if (slot < 0) break;
+      this.iesHeld[slot] = profile;
+      const samples = profile.samples ?? [];
+      this.device.queue.writeBuffer(this.depthGroups.ltc, (IES_BASE + slot * IES_VEC4S) * 16, Float32Array.from(samples.slice(0, IES_VEC4S * 4)));
+    }
+    return (light) => light.ies ? this.iesHeld.indexOf(light.ies) : -1;
+  }
+  /** Plan the frame's virtual shadow maps (F2b): see virtualShadows.ts. */
+  planVsm(draw, toLight, strength, softness, projection) {
+    const device = this.device;
+    const poolSize = Math.max(VSM_PAGES, Math.floor((draw.virtualShadows?.poolSize ?? 4096) / VSM_PAGES) * VSM_PAGES);
+    if (this.vsm && this.vsm.poolSize !== poolSize) this.disposeVsm();
+    if (!this.vsm) {
+      const capacity = (poolSize / VSM_PAGES) ** 2;
+      const layout = this.depthGroups.cascades.localPipeline.getBindGroupLayout(1);
+      this.vsm = {
+        pool: device.createTexture({ size: { width: poolSize, height: poolSize }, format: "depth32float", usage: 16 | 4 }),
+        poolSize,
+        pages: new VirtualPagePool(capacity),
+        marks: device.createBuffer({ size: VSM_MARK_WORDS * 4, usage: 128 | 4 | 8 }),
+        // STORAGE | COPY_SRC | COPY_DST
+        staging: Array.from({ length: 3 }, () => ({ buffer: device.createBuffer({ size: VSM_MARK_WORDS * 4, usage: 1 | 8 }), busy: false, windows: [] })),
+        pending: null,
+        needed: [],
+        table: device.createBuffer({ size: VSM_LEVELS * VSM_PAGES * VSM_PAGES * 4, usage: 128 | 8 }),
+        tableData: new Uint32Array(VSM_LEVELS * VSM_PAGES * VSM_PAGES),
+        windowsKey: "",
+        windows: [],
+        uniforms: device.createBuffer({ size: VSM_UNIFORM_FLOATS * 4, usage: 64 | 8 }),
+        data: new Float32Array(VSM_UNIFORM_FLOATS),
+        views: [],
+        sampler: device.createSampler({ compare: "less-equal", magFilter: "linear", minFilter: "linear", addressModeU: "clamp-to-edge", addressModeV: "clamp-to-edge" }),
+        mark: [null, null],
+        resolve: [null, null],
+        marking: null
+      };
+      for (let i = 0; i < 48; i += 1) {
+        const buffer = device.createBuffer({ size: 80, usage: 64 | 8 });
+        this.vsm.views.push({ buffer, group: device.createBindGroup({ layout, entries: [{ binding: 12, resource: { buffer } }] }) });
+      }
+    }
+    const v = this.vsm;
+    const eyeM = invertMat4(draw.view) ?? draw.view;
+    const eye = [eyeM[12], eyeM[13], eyeM[14]];
+    const basis = vsmLightBasis(toLight);
+    const centre = vsmDepthCentre(eye, basis);
+    const windows = vsmWindows(eye, basis);
+    if (v.pending) {
+      v.needed = markedPages(v.pending.marks, v.pending.windows);
+      v.pending = null;
+    }
+    const key2 = `${toLight.map((c) => c.toFixed(4)).join(",")}|${centre}|${draw.localShadowKey ?? `frame ${this.frameIndex}`}`;
+    const movers = (draw.localShadowMoved ?? []).map((m) => worldSphere(localSphere(m.mesh), m.model));
+    const draws = v.pages.update(v.needed, key2, (page) => movers.some((sphere) => pageTouches(page, basis, sphere)), v.views.length);
+    const windowsKey = windows.map((w) => w.join(",")).join(";");
+    if (v.pages.changed || windowsKey !== v.windowsKey) {
+      device.queue.writeBuffer(v.table, 0, v.pages.table(windows, v.tableData));
+      v.windowsKey = windowsKey;
+    }
+    v.windows = windows;
+    draws.forEach((d, i) => device.queue.writeBuffer(v.views[i].buffer, 0, vsmPageViewProj(d.level, d.gx, d.gy, basis, centre)));
+    const viewProj = multiplyMat48(projection, draw.view);
+    device.queue.writeBuffer(
+      v.uniforms,
+      0,
+      vsmUniforms({ invViewProj: invertMat4(viewProj) ?? viewProj, eye, basis, centre, windows, pixelAngle: 2 / ((projection[5] || 1) * this.height), width: this.width, height: this.height, poolSize: v.poolSize, softness, strength, view: draw.view }, v.data)
+    );
+    return { draws, basis, centre };
+  }
+  /** Draw the frame's pages (F2b): each cleared, then the casters whose shadow can reach it, through its own view. */
+  addVsmPages(graph, pages, casters, first) {
+    const v = this.vsm;
+    const res = this.depthGroups.cascades;
+    const basis = this.frameVsm.basis;
+    const pool = graph.importTexture("vsm.pool", v.pool);
+    const clearPipeline = this.localClearPipeline();
+    graph.addPass("virtual shadows", "render", (pass) => {
+      pass.read(pool, "attachment");
+      pass.write(pool);
+      pass.keep();
+      return (ctx) => {
+        const group = this.device.createBindGroup({
+          layout: res.casterLayout,
+          entries: [
+            { binding: 0, resource: { buffer: this.uniformBuffer, offset: 0, size: UNIFORM_STRIDE } },
+            { binding: 10, resource: { buffer: this.instanceBuffer } }
+          ]
+        });
+        const encoded = ctx.encoder.beginRenderPass({ colorAttachments: [], depthStencilAttachment: { view: ctx.texture(pool).createView(), depthLoadOp: "load", depthStoreOp: "store" }, ...ctx.timing });
+        pages.forEach((page, i) => {
+          const [x, y] = physicalCorner(page.physical, v.poolSize);
+          encoded.setViewport(x, y, VSM_PAGES, VSM_PAGES, 0, 1);
+          encoded.setScissorRect(x, y, VSM_PAGES, VSM_PAGES);
+          encoded.setPipeline(clearPipeline);
+          encoded.draw(3);
+          encoded.setBindGroup(1, v.views[i].group);
+          for (const cut of [false, true]) {
+            encoded.setPipeline(cut ? res.localCutPipeline : res.localPipeline);
+            casters.forEach((entry, k) => {
+              if ((entry.alpha === 1 || this.terrainPatches.has(entry.primitive)) !== cut) return;
+              const sphere = localSphere(entry.primitive);
+              if (!entry.models.some((m) => pageTouches(page, basis, worldSphere(sphere, m)))) return;
+              encoded.setBindGroup(0, cut ? this.cutGroupFor(entry.primitive, entry.textures) : group, [(first + k) * UNIFORM_STRIDE]);
+              encoded.setVertexBuffer(0, entry.geometry.vertexBuffer);
+              encoded.setIndexBuffer(entry.geometry.indexBuffer, "uint32");
+              encoded.drawIndexed(entry.geometry.indexCount, entry.models.length, 0, 0, entry.first);
+            });
+          }
+        });
+        encoded.end();
+      };
+    });
+  }
+  /** Mark the pages the frame's pixels want (F2b), and copy the marks out to be read back. */
+  addVsmMarks(graph, depth, multisampled) {
+    var _a;
+    const v = this.vsm;
+    const k = multisampled ? 1 : 0;
+    (_a = v.mark)[k] ?? (_a[k] = this.device.createComputePipeline({ layout: "auto", compute: { module: this.device.createShaderModule({ code: vsmMarkWgsl(multisampled) }), entryPoint: "markPages" } }));
+    const pipeline = v.mark[k];
+    const slot = v.staging.find((s) => !s.busy) ?? null;
+    if (slot) {
+      slot.busy = true;
+      slot.windows = v.windows;
+    }
+    v.marking = slot;
+    graph.addPass("vsm.mark", "compute", (pass) => {
+      pass.read(depth);
+      pass.keep();
+      return (ctx) => {
+        ctx.encoder.clearBuffer(v.marks);
+        const encoded = ctx.encoder.beginComputePass(ctx.timing);
+        encoded.setPipeline(pipeline);
+        encoded.setBindGroup(0, this.device.createBindGroup({
+          layout: pipeline.getBindGroupLayout(0),
+          entries: [
+            { binding: 0, resource: { buffer: v.uniforms } },
+            { binding: 1, resource: ctx.texture(depth).createView() },
+            { binding: 2, resource: { buffer: v.marks } }
+          ]
+        }));
+        encoded.dispatchWorkgroups(Math.ceil(this.width / 8), Math.ceil(this.height / 8));
+        encoded.end();
+        if (slot) ctx.encoder.copyBufferToBuffer(v.marks, 0, slot.buffer, 0, VSM_MARK_WORDS * 4);
+      };
+    });
+  }
+  /** The sun's light through the virtual map at each pixel (F2b), into the screen-shading target's third layer. */
+  addVsmResolve(graph, depth, gbuffer, multisampled) {
+    var _a;
+    const v = this.vsm;
+    const k = multisampled ? 1 : 0;
+    (_a = v.resolve)[k] ?? (_a[k] = fullScreenPipeline(this.device, vsmResolveWgsl(multisampled), "resolve", SCREEN_SHADING_FORMAT));
+    const pipeline = v.resolve[k];
+    const target = graph.importTexture("vsm.target", this.ensureContact());
+    const pool = graph.importTexture("vsm.sampled", v.pool);
+    graph.addPass("vsm.resolve", "render", (pass) => {
+      pass.read(depth);
+      pass.read(gbuffer);
+      pass.read(pool);
+      pass.write(target);
+      pass.keep();
+      return (ctx) => {
+        const encoded = ctx.encoder.beginRenderPass({
+          colorAttachments: [{ view: ctx.texture(target).createView({ dimension: "2d", baseArrayLayer: 2, arrayLayerCount: 1 }), clearValue: { r: -1, g: 0, b: 0, a: 1 }, loadOp: "clear", storeOp: "store" }],
+          ...ctx.timing
+        });
+        encoded.setPipeline(pipeline);
+        encoded.setBindGroup(0, this.device.createBindGroup({
+          layout: pipeline.getBindGroupLayout(0),
+          entries: [
+            { binding: 0, resource: { buffer: v.uniforms } },
+            { binding: 1, resource: ctx.texture(depth).createView() },
+            { binding: 2, resource: { buffer: v.table } },
+            { binding: 3, resource: v.pool.createView() },
+            { binding: 4, resource: v.sampler },
+            { binding: 5, resource: ctx.texture(gbuffer).createView() }
+          ]
+        }));
+        encoded.draw(3);
+        encoded.end();
+      };
+    });
+  }
+  /** Read back the marks the frame just copied out (F2b); they reach a later frame's plan. */
+  readVsmMarks() {
+    const v = this.vsm;
+    const slot = v?.marking ?? null;
+    if (!v || !slot) return;
+    v.marking = null;
+    void slot.buffer.mapAsync(1).then(
+      () => {
+        if (this.vsm === v) v.pending = { marks: new Uint32Array(slot.buffer.getMappedRange().slice(0)), windows: slot.windows };
+        slot.buffer.unmap();
+        slot.busy = false;
+      },
+      () => {
+        slot.busy = false;
+      }
+    );
+  }
+  disposeVsm() {
+    const v = this.vsm;
+    if (!v) return;
+    for (const b of [v.pool, v.marks, v.table, v.uniforms, ...v.staging.map((s) => s.buffer), ...v.views.map((w) => w.buffer)]) destroySafely(b);
+    this.vsm = null;
+  }
+  /** Clears a rect of a depth32float map to the far plane (F2d-2's, shared with F2b's pages). */
+  localClearPipeline() {
+    this.localClear ?? (this.localClear = this.device.createRenderPipeline({
+      layout: "auto",
+      vertex: { module: this.device.createShaderModule({ code: LOCAL_CLEAR_WGSL }), entryPoint: "vs" },
+      fragment: { module: this.device.createShaderModule({ code: LOCAL_CLEAR_WGSL }), entryPoint: "clear", targets: [] },
+      primitive: { topology: "triangle-list" },
+      depthStencil: { format: "depth32float", depthWriteEnabled: true, depthCompare: "always" }
+    }));
+    return this.localClear;
+  }
+  /**
+   * SSGI (F3e-2): at half resolution its trace against the prepass's depths, lit by last frame's resolved
+   * image (the TAA history), accumulated over frames through the velocity buffer, then filtered up to full
+   * resolution into the screen-shading target's second layer.
+   */
+  addSsgi(graph, depth, gbuffer, velocity, view, projection, settings, multisampled) {
+    var _a, _b;
+    const device = this.device;
+    const k = multisampled ? 1 : 0;
+    const half2 = { width: Math.max(1, Math.ceil(this.width / 2)), height: Math.max(1, Math.ceil(this.height / 2)) };
+    if (!this.ssgi) {
+      const made = () => device.createTexture({ size: half2, format: SCREEN_SHADING_FORMAT, usage: 16 | 4 | 1 });
+      this.ssgi = {
+        uniforms: device.createBuffer({ size: SSGI_UNIFORM_FLOATS * 4, usage: 64 | 8 }),
+        data: new Float32Array(SSGI_UNIFORM_FLOATS),
+        history: [made(), made()],
+        index: 0,
+        valid: false,
+        frame: 0,
+        sampler: device.createSampler({ magFilter: "linear", minFilter: "linear", addressModeU: "clamp-to-edge", addressModeV: "clamp-to-edge" }),
+        trace: [null, null],
+        resolve: [null, null],
+        accumulate: fullScreenPipeline(device, ssgiTemporalWgsl(), "accumulate", SCREEN_SHADING_FORMAT)
+      };
+    }
+    const gi = this.ssgi;
+    (_a = gi.trace)[k] ?? (_a[k] = fullScreenPipeline(device, ssgiTraceWgsl(multisampled), "ssgiTrace", SCREEN_SHADING_FORMAT));
+    (_b = gi.resolve)[k] ?? (_b[k] = fullScreenPipeline(device, ssgiResolveWgsl(multisampled), "resolve", SCREEN_SHADING_FORMAT));
+    const trace = gi.trace[k];
+    const resolve = gi.resolve[k];
+    const current = graph.createTexture("ssgi", { format: SCREEN_SHADING_FORMAT, ...half2 });
+    const then = graph.importTexture("ssgi.then", gi.history[gi.index]);
+    const now = graph.importTexture("ssgi.now", gi.history[1 - gi.index]);
+    const radiance = graph.importTexture("ssgi.radiance", this.taa.history[this.taa.index]);
+    const target = graph.importTexture("ssgi.target", this.ensureContact());
+    device.queue.writeBuffer(gi.uniforms, 0, ssgiUniforms(view, projection, gi.frame, gi.valid, settings, gi.data));
+    gi.frame += 1;
+    const draw = (ctx, pipeline, into, entries) => {
+      const encoded = ctx.encoder.beginRenderPass({
+        colorAttachments: [{ view: into, clearValue: { r: 0, g: 0, b: 0, a: 0 }, loadOp: "clear", storeOp: "store" }],
+        ...ctx.timing
+      });
+      encoded.setPipeline(pipeline);
+      encoded.setBindGroup(0, device.createBindGroup({ layout: pipeline.getBindGroupLayout(0), entries: [{ binding: 0, resource: { buffer: gi.uniforms } }, ...entries] }));
+      encoded.draw(3);
+      encoded.end();
+    };
+    graph.addPass("ssgi", "render", (pass) => {
+      pass.read(depth);
+      pass.read(gbuffer);
+      pass.read(velocity);
+      pass.read(radiance);
+      pass.write(current);
+      return (ctx) => draw(ctx, trace, ctx.texture(current).createView(), [
+        { binding: 1, resource: ctx.texture(depth).createView() },
+        { binding: 2, resource: ctx.texture(gbuffer).createView() },
+        { binding: 3, resource: ctx.texture(velocity).createView() },
+        { binding: 4, resource: ctx.texture(radiance).createView() },
+        { binding: 5, resource: gi.sampler }
+      ]);
+    });
+    graph.addPass("ssgi.accumulate", "render", (pass) => {
+      pass.read(current);
+      pass.read(then);
+      pass.read(velocity);
+      pass.write(now);
+      pass.keep();
+      return (ctx) => draw(ctx, gi.accumulate, ctx.texture(now).createView(), [
+        { binding: 1, resource: ctx.texture(current).createView() },
+        { binding: 2, resource: ctx.texture(then).createView() },
+        { binding: 3, resource: ctx.texture(velocity).createView() },
+        { binding: 4, resource: gi.sampler }
+      ]);
+    });
+    graph.addPass("ssgi.resolve", "render", (pass) => {
+      pass.read(depth);
+      pass.read(gbuffer);
+      pass.read(now);
+      pass.write(target);
+      pass.keep();
+      return (ctx) => draw(ctx, resolve, ctx.texture(target).createView({ dimension: "2d", baseArrayLayer: 1, arrayLayerCount: 1 }), [
+        { binding: 1, resource: ctx.texture(depth).createView() },
+        { binding: 2, resource: ctx.texture(gbuffer).createView() },
+        { binding: 3, resource: ctx.texture(now).createView() }
+      ]);
+    });
+    gi.index = 1 - gi.index;
+    gi.valid = true;
   }
   /**
    * Upload the packed light list, growing the storage buffer when it needs more
@@ -21196,7 +32681,8 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
           // blank for all three and the shader ignores them (pbr.z = 0), so the
           // layout is one shape for every draw.
           { binding: 3, visibility: SHADER_STAGE_FRAGMENT, texture: { sampleType: "float" } },
-          { binding: 4, visibility: SHADER_STAGE_FRAGMENT, texture: { sampleType: "float" } },
+          // The occlusion map; a GPU terrain's vertices read its relief from it (F6c).
+          { binding: 4, visibility: SHADER_STAGE_VERTEX | SHADER_STAGE_FRAGMENT, texture: { sampleType: "float" } },
           { binding: 5, visibility: SHADER_STAGE_FRAGMENT, texture: { sampleType: "float" } },
           // The shadow map is r32float — not filterable — and read via textureLoad,
           // so it declares unfilterable-float and needs no sampler. The linear-light
@@ -21206,31 +32692,35 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
           // The environment: its panorama, or (linear variant, F3a) its prefiltered cube.
           { binding: 7, visibility: SHADER_STAGE_FRAGMENT, texture: hdr ? { sampleType: "float", viewDimension: "cube" } : { sampleType: "float" } },
           // The SSAO buffer (r32float), read per fragment via textureLoad.
-          { binding: 8, visibility: SHADER_STAGE_FRAGMENT, texture: { sampleType: "unfilterable-float" } },
+          // The linear variant's is an array: the screen-space shading target's two layers (F3e-2).
+          { binding: 8, visibility: SHADER_STAGE_FRAGMENT, texture: hdr ? { sampleType: "unfilterable-float", viewDimension: "2d-array" } : { sampleType: "unfilterable-float" } },
           // The Modern-tier light list, read-only storage.
           { binding: 9, visibility: SHADER_STAGE_FRAGMENT, buffer: { type: "read-only-storage" } },
           // Per-instance transforms, read by the vertex stage.
           { binding: 10, visibility: SHADER_STAGE_VERTEX, buffer: { type: "read-only-storage" } },
-          { binding: 11, visibility: SHADER_STAGE_FRAGMENT, texture: { sampleType: "float" } },
+          // The baked light map: an array in the linear variant, for an HDR directional map's two layers (F3d).
+          { binding: 11, visibility: SHADER_STAGE_FRAGMENT, texture: hdr ? { sampleType: "float", viewDimension: "2d-array" } : { sampleType: "float" } },
           // Reflection probes: the panorama atlas (read via textureLoad), or the linear variant's cube array (F3b); and their boxes.
           { binding: 12, visibility: SHADER_STAGE_FRAGMENT, texture: hdr ? { sampleType: "float", viewDimension: "cube-array" } : { sampleType: "float" } },
           { binding: 13, visibility: SHADER_STAGE_FRAGMENT, buffer: { type: "read-only-storage" } },
           // The detail map, and the blend surface's map.
           { binding: 14, visibility: SHADER_STAGE_FRAGMENT, texture: { sampleType: "float" } },
-          { binding: 15, visibility: SHADER_STAGE_FRAGMENT, texture: { sampleType: "float" } },
+          { binding: 15, visibility: SHADER_STAGE_FRAGMENT, texture: { sampleType: "float", viewDimension: "2d-array" } },
           // The tangent-space normal map (P1a).
-          { binding: 16, visibility: SHADER_STAGE_FRAGMENT, texture: { sampleType: "float" } }
+          { binding: 16, visibility: SHADER_STAGE_FRAGMENT, texture: { sampleType: "float" } },
+          // A GPU terrain's heights (F6c), read by the vertex stage.
+          ...hdr ? [{ binding: 17, visibility: SHADER_STAGE_VERTEX, texture: { sampleType: "float" } }] : []
         ]
       });
       const depthEntries = (multisampled) => [
         { binding: 0, visibility: SHADER_STAGE_FRAGMENT, texture: multisampled ? { sampleType: "depth", multisampled: true } : { sampleType: "depth" } },
+        // The clustered lights' table and index list (EP8), then the probes (EP9, F3d-3), both in storage (F5b-0).
         { binding: 1, visibility: SHADER_STAGE_FRAGMENT, buffer: { type: "read-only-storage" } },
         { binding: 2, visibility: SHADER_STAGE_FRAGMENT, buffer: { type: "read-only-storage" } },
         { binding: 3, visibility: SHADER_STAGE_FRAGMENT, buffer: { type: "uniform" } },
         // The spot/point shadow atlas: the CPU's r32float distances, or the linear-light renderer's GPU depths (F2d).
         { binding: 4, visibility: SHADER_STAGE_FRAGMENT, texture: hdr ? { sampleType: "depth" } : { sampleType: "unfilterable-float" } },
         { binding: 5, visibility: SHADER_STAGE_FRAGMENT, buffer: { type: "read-only-storage" } },
-        { binding: 6, visibility: SHADER_STAGE_FRAGMENT, texture: { sampleType: "unfilterable-float", viewDimension: "3d" } },
         // The opaque scene's colour, for refraction (I5).
         { binding: 7, visibility: SHADER_STAGE_FRAGMENT, texture: { sampleType: "unfilterable-float" } },
         // The split-sum DFG table (F1c), read by the linear-light shader.
@@ -21242,16 +32732,18 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
         // The projected decals' boxes and tiles (F1f), read by the linear-light shader.
         { binding: 13, visibility: SHADER_STAGE_FRAGMENT, buffer: { type: "read-only-storage" } },
         // The comparison sampler that filters the sun's GPU cascades (F2a; group 0 binds the cascades).
-        { binding: 11, visibility: SHADER_STAGE_FRAGMENT, sampler: { type: "comparison" } }
+        { binding: 11, visibility: SHADER_STAGE_FRAGMENT, sampler: { type: "comparison" } },
+        // The physical sky's aerial perspective (F5a-2), and the volumetric fog (F5b), read by the linear-light shader.
+        ...hdr ? [{ binding: 14, visibility: SHADER_STAGE_FRAGMENT, buffer: { type: "uniform" } }, { binding: 6, visibility: SHADER_STAGE_FRAGMENT, texture: { sampleType: "float", viewDimension: "3d" } }] : []
       ];
       const depthLayout = device.createBindGroupLayout({ entries: depthEntries(false) });
       const depthLayoutMs = device.createBindGroupLayout({ entries: depthEntries(true) });
       const layout = device.createPipelineLayout({ bindGroupLayouts: [bindGroupLayout, depthLayout] });
       const layoutMs = device.createPipelineLayout({ bindGroupLayouts: [bindGroupLayout, depthLayoutMs] });
-      const pipelinesFor = (code, samples = 1, reflect = false, prepass = false) => {
+      const pipelinesFor = (code, samples = 1, reflect = false, prepass = false, make = (d) => device.createRenderPipeline(d)) => {
         const multisampled = samples > 1;
-        const module = device.createShaderModule({ code: multisampled ? multisampledDepthShader(code) : code });
-        const pipelineFor = (blend, depthWrite, depthCompare = "less", gbuffer = false) => device.createRenderPipeline({
+        const module = cachedShaderModule(device, multisampled ? multisampledDepthShader(code) : code);
+        const pipelineFor = (blend, depthWrite, depthCompare = "less", gbuffer = false) => make({
           layout: multisampled ? layoutMs : layout,
           ...multisampled ? { multisample: { count: samples } } : {},
           vertex: {
@@ -21324,29 +32816,31 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
         // RENDER_ATTACHMENT | TEXTURE_BINDING
       });
       const clusterBuffers = {
-        table: device.createBuffer({ size: CLUSTER_CELLS * 8, usage: 128 | 8 }),
+        // The cells' table, then the index list after it (F5b-0).
+        data: device.createBuffer({ size: CLUSTER_CELLS3 * 8 + CLUSTER_INDEX_CAP3 * 4, usage: 128 | 8 }),
         // STORAGE | COPY_DST
-        index: device.createBuffer({ size: CLUSTER_INDEX_CAP2 * 4, usage: 128 | 8 }),
-        params: device.createBuffer({ size: FRAME_BYTES, usage: 64 | 8 })
+        params: device.createBuffer({ size: FRAME_BYTES2, usage: 64 | 8 })
         // UNIFORM | COPY_DST
       };
       const shadowTiles = device.createBuffer({ size: Math.max(MAX_LOCAL_SHADOW_TILES2, MAX_GPU_LOCAL_TILES) * LOCAL_TILE_FLOATS * 4, usage: 128 | 8 });
-      const dfg = dfgTable();
+      const dfg = brdfLut();
       const dfgBuffer = device.createBuffer({ size: dfg.byteLength, usage: 128 | 8 });
       device.queue.writeBuffer(dfgBuffer, 0, dfg);
       const ltc = ltcTables();
-      const ltcBuffer = device.createBuffer({ size: ltc.byteLength, usage: 128 | 8 });
+      const ltcBuffer = device.createBuffer({ size: ltc.byteLength + IES_MAX_PROFILES * IES_VEC4S * 16, usage: 128 | 8 });
       device.queue.writeBuffer(ltcBuffer, 0, ltc);
       const decalBuffer = device.createBuffer({ size: DECAL_BUFFER_WORDS * 4, usage: 128 | 8 });
+      const aerialBuffer = device.createBuffer({ size: AERIAL_LUT_BYTES, usage: 64 | 128 | 4 });
+      const fogVolume = { texture: device.createTexture({ size: { width: 1, height: 1, depthOrArrayLayers: 1 }, dimension: "3d", format: FOG_FORMAT, usage: 4 }) };
       const iblSampler = device.createSampler({ magFilter: "linear", minFilter: "linear", mipmapFilter: "linear", addressModeU: "clamp-to-edge", addressModeV: "clamp-to-edge", addressModeW: "clamp-to-edge" });
       const atlasBlank = hdr ? device.createTexture({ size: { width: 1, height: 1 }, format: "depth32float", usage: 4 | 16 }) : device.createTexture({ size: { width: 1, height: 1 }, format: "r32float", usage: 4 | 2 });
-      const probesBlank = device.createTexture({ size: { width: 1, height: 1, depthOrArrayLayers: 1 }, dimension: "3d", format: "rgba32float", usage: 4 | 2 });
+      const probesBlank = device.createBuffer({ size: 16, usage: 128 | 8 });
       const behind = device.createTexture({ size: { width, height }, format: colourFormat, usage: 4 | 2 | 16 });
       const behindBlank = device.createTexture({ size: { width: 1, height: 1 }, format: colourFormat, usage: 4 | 2 });
       const sized = { depth: depthTexture, behind };
       const cascadeLayout = device.createBindGroupLayout({ entries: [{ binding: 12, visibility: SHADER_STAGE_VERTEX, buffer: { type: "uniform" } }] });
       const cascadeViews = Array.from({ length: CASCADE_COUNT }, () => {
-        const buffer = device.createBuffer({ size: 64, usage: 64 | 8 });
+        const buffer = device.createBuffer({ size: 80, usage: 64 | 8 });
         return { buffer, group: device.createBindGroup({ layout: cascadeLayout, entries: [{ binding: 12, resource: { buffer } }] }) };
       });
       const casterLayout = device.createBindGroupLayout({
@@ -21360,7 +32854,9 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
           { binding: 0, visibility: SHADER_STAGE_VERTEX | SHADER_STAGE_FRAGMENT, buffer: { type: "uniform", hasDynamicOffset: true, minBindingSize: UNIFORM_BYTES_USED } },
           { binding: 1, visibility: SHADER_STAGE_FRAGMENT, sampler: { type: "filtering" } },
           { binding: 2, visibility: SHADER_STAGE_FRAGMENT, texture: { sampleType: "float" } },
-          { binding: 10, visibility: SHADER_STAGE_VERTEX, buffer: { type: "read-only-storage" } }
+          { binding: 10, visibility: SHADER_STAGE_VERTEX, buffer: { type: "read-only-storage" } },
+          // A GPU terrain's heights (F6c): its casters draw through the cut-out pipeline.
+          ...hdr ? [{ binding: 17, visibility: SHADER_STAGE_VERTEX, texture: { sampleType: "float" } }] : []
         ]
       });
       const casterModule = hdr ? device.createShaderModule({ code: sceneShader(null, false, hdr) }) : null;
@@ -21381,7 +32877,7 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
         ]
       });
       const localViews = hdr ? Array.from({ length: MAX_GPU_LOCAL_TILES }, () => {
-        const buffer = device.createBuffer({ size: 64, usage: 64 | 8 });
+        const buffer = device.createBuffer({ size: 80, usage: 64 | 8 });
         return { buffer, group: device.createBindGroup({ layout: cascadeLayout, entries: [{ binding: 12, resource: { buffer } }] }) };
       }) : [];
       const cascades = {
@@ -21437,44 +32933,44 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
         }) : null
       };
       const makeGroups = (atlas, probes) => {
-        const shared = [
-          { binding: 1, resource: { buffer: clusterBuffers.table } },
-          { binding: 2, resource: { buffer: clusterBuffers.index } },
+        const shared2 = [
+          { binding: 1, resource: { buffer: clusterBuffers.data } },
+          { binding: 2, resource: { buffer: probes } },
           { binding: 3, resource: { buffer: clusterBuffers.params } },
           { binding: 4, resource: atlas.createView() },
           { binding: 5, resource: { buffer: shadowTiles } },
-          { binding: 6, resource: probes.createView({ dimension: "3d" }) },
           { binding: 8, resource: { buffer: dfgBuffer } },
           { binding: 9, resource: iblSampler },
           { binding: 10, resource: { buffer: ltcBuffer } },
           { binding: 13, resource: { buffer: decalBuffer } },
-          { binding: 11, resource: cascades.sampler }
+          { binding: 11, resource: cascades.sampler },
+          ...hdr ? [{ binding: 14, resource: { buffer: aerialBuffer } }, { binding: 6, resource: fogVolume.texture.createView({ dimension: "3d" }) }] : []
         ];
         return {
-          blank: device.createBindGroup({ layout: depthLayout, entries: [{ binding: 0, resource: blankDepth.createView() }, ...shared, { binding: 7, resource: behindBlank.createView() }] }),
-          scene: device.createBindGroup({ layout: depthLayout, entries: [{ binding: 0, resource: sized.depth.createView() }, ...shared, { binding: 7, resource: sized.behind.createView() }] }),
+          blank: device.createBindGroup({ layout: depthLayout, entries: [{ binding: 0, resource: blankDepth.createView() }, ...shared2, { binding: 7, resource: behindBlank.createView() }] }),
+          scene: device.createBindGroup({ layout: depthLayout, entries: [{ binding: 0, resource: sized.depth.createView() }, ...shared2, { binding: 7, resource: sized.behind.createView() }] }),
           // The opaque pass after a prepass (F2d-3): the depths, but not the scene it is still drawing (and may resolve into).
-          opaque: device.createBindGroup({ layout: depthLayout, entries: [{ binding: 0, resource: sized.depth.createView() }, ...shared, { binding: 7, resource: behindBlank.createView() }] })
+          opaque: device.createBindGroup({ layout: depthLayout, entries: [{ binding: 0, resource: sized.depth.createView() }, ...shared2, { binding: 7, resource: behindBlank.createView() }] })
         };
       };
       const makeGroupsMs = (atlas, probes, blank, depth) => {
-        const shared = [
-          { binding: 1, resource: { buffer: clusterBuffers.table } },
-          { binding: 2, resource: { buffer: clusterBuffers.index } },
+        const shared2 = [
+          { binding: 1, resource: { buffer: clusterBuffers.data } },
+          { binding: 2, resource: { buffer: probes } },
           { binding: 3, resource: { buffer: clusterBuffers.params } },
           { binding: 4, resource: atlas.createView() },
           { binding: 5, resource: { buffer: shadowTiles } },
-          { binding: 6, resource: probes.createView({ dimension: "3d" }) },
           { binding: 8, resource: { buffer: dfgBuffer } },
           { binding: 9, resource: iblSampler },
           { binding: 10, resource: { buffer: ltcBuffer } },
           { binding: 13, resource: { buffer: decalBuffer } },
-          { binding: 11, resource: cascades.sampler }
+          { binding: 11, resource: cascades.sampler },
+          ...hdr ? [{ binding: 14, resource: { buffer: aerialBuffer } }, { binding: 6, resource: fogVolume.texture.createView({ dimension: "3d" }) }] : []
         ];
         return {
-          blank: device.createBindGroup({ layout: depthLayoutMs, entries: [{ binding: 0, resource: blank.createView() }, ...shared, { binding: 7, resource: behindBlank.createView() }] }),
-          scene: device.createBindGroup({ layout: depthLayoutMs, entries: [{ binding: 0, resource: depth.createView() }, ...shared, { binding: 7, resource: sized.behind.createView() }] }),
-          opaque: device.createBindGroup({ layout: depthLayoutMs, entries: [{ binding: 0, resource: depth.createView() }, ...shared, { binding: 7, resource: behindBlank.createView() }] })
+          blank: device.createBindGroup({ layout: depthLayoutMs, entries: [{ binding: 0, resource: blank.createView() }, ...shared2, { binding: 7, resource: behindBlank.createView() }] }),
+          scene: device.createBindGroup({ layout: depthLayoutMs, entries: [{ binding: 0, resource: depth.createView() }, ...shared2, { binding: 7, resource: sized.behind.createView() }] }),
+          opaque: device.createBindGroup({ layout: depthLayoutMs, entries: [{ binding: 0, resource: depth.createView() }, ...shared2, { binding: 7, resource: behindBlank.createView() }] })
         };
       };
       const depthGroups = {
@@ -21487,6 +32983,8 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
         dfg: dfgBuffer,
         ltc: ltcBuffer,
         decals: decalBuffer,
+        aerial: aerialBuffer,
+        fogVolume,
         atlas: atlasBlank,
         atlasBlank: true,
         probes: probesBlank,
@@ -21618,8 +33116,8 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
    * SH the frame carries, rebuilt only when what it's made of changes.
    */
   ensureIbl(environment) {
-    const key = environment ? environmentKey(environment) : null;
-    const same = key && this.iblKey ? key.length === this.iblKey.length && key.every((v, i) => v === this.iblKey[i]) : key === this.iblKey;
+    const key2 = environment ? environmentKey(environment) : null;
+    const same = key2 && this.iblKey ? key2.length === this.iblKey.length && key2.every((v, i) => v === this.iblKey[i]) : key2 === this.iblKey;
     if (same) return;
     destroySafely(this.envTexture);
     if (environment) {
@@ -21630,7 +33128,7 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
       this.envTexture = blankCube(this.device);
       this.iblSh = new Float32Array(36);
     }
-    this.iblKey = key;
+    this.iblKey = key2;
     this.bindGroups = /* @__PURE__ */ new WeakMap();
   }
   /** The frame's projected decals (F1f) into their buffer: the boxes each frame they change, the tiles when they do. */
@@ -21744,31 +33242,121 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
    * texture is premultiplied RGBA8 with alpha 0 where nothing drew, and holds
    * this frame until the next render.
    */
-  renderToTexture(instances, draw) {
+  renderToTexture(instances, given) {
     if (this.destroyed) return null;
+    if (this.hdr && given.viewMode === "pathTraced") {
+      this.pathTracer ?? (this.pathTracer = PathTracer.create(this.device));
+      return this.pathTracer.render(applyScenePasses(instances, given), given, this.width, this.height);
+    }
+    let draw = this.hdr ? viewModeDraw(given) : given;
+    if (this.volumes?.active) {
+      this.volumes.simulate(draw.particleDt ?? 1 / 60);
+      const burning = this.volumes.volumes.flatMap((v) => {
+        const light = volumeLight(v.effect, v.at, v.age);
+        return light ? [{ kind: "point", position: light.position, color: light.color, intensity: light.intensity, range: light.range, falloff: "inverseSquare" }] : [];
+      });
+      if (burning.length > 0) draw = { ...draw, lights: [...draw.lights ?? [], ...burning] };
+    }
+    if (this.hdr && draw.terrains && draw.terrains.length > 0) {
+      const ground = this.terrainNodes(draw);
+      instances = [...instances, ...ground.drawn];
+      if (ground.casting.length > 0) {
+        if (draw.sunShadow) draw = { ...draw, sunShadow: { ...draw.sunShadow, casters: [...draw.sunShadow.casters, ...ground.casting] } };
+        if (draw.localShadowCasters) draw = { ...draw, localShadowCasters: [...draw.localShadowCasters, ...ground.casting] };
+      }
+    }
     if (draw.prepass === true) this.matchMotion(instances);
-    const visible = applyScenePasses(instances, draw);
+    const gpuLod = this.hdr && draw.prepass === true && draw.gpuCull === true && draw.lod === true;
+    this.frameGpuLods = gpuLod ? manyCopyChains(instances) : null;
+    const visible = gpuLod ? applyScenePasses(lodsBesides(instances, this.frameGpuLods, cameraPositionFromView4(draw.view)), { ...draw, lod: false }) : applyScenePasses(instances, draw);
     try {
       this.submit(visible, draw, false);
     } catch {
       return null;
     }
-    return this.colourTexture;
+    return this.frameOutput ?? this.colourTexture;
+  }
+  /** This frame's nodes of each GPU terrain (F6c), drawn and (for a terrain that casts) casting. */
+  terrainNodes(draw) {
+    const eye = cameraPositionFromView4(draw.view);
+    const drawn = [];
+    const casting = [];
+    for (const source of draw.terrains ?? []) {
+      let terrain = this.gpuTerrains.get(source.terrain);
+      if (!terrain) {
+        terrain = new GpuTerrain(
+          {
+            device: this.device,
+            upload: (texture, colour) => this.uploadTexture(texture, colour),
+            mips: (texture, levels, format) => this.mipmaps.generate(texture, levels, format),
+            adopt: (key2, texture, colour) => (this.mips && colour ? this.colourTextures : this.textures).set(key2, texture),
+            blank: this.blankTexture
+          },
+          source.terrain
+        );
+        this.gpuTerrains.set(source.terrain, terrain);
+        this.terrainPatches.set(terrain.mesh.primitives[0], terrain);
+        this.terrainList.push(terrain);
+      }
+      const nodes = terrain.frame(eye, source.layers);
+      drawn.push(...nodes);
+      if (source.terrain.castShadows) casting.push(...nodes);
+    }
+    return { drawn, casting };
+  }
+  /** Give back meshes' GPU geometry (F6d): their buffers go once the queued frames are done with them, and a later draw uploads them again. */
+  releaseMeshes(meshes) {
+    for (const mesh of meshes) {
+      const primitives = this.meshes.get(mesh);
+      if (!primitives || primitives.some((p) => p.skin || p.cloth)) continue;
+      this.meshes.delete(mesh);
+      for (const p of primitives) {
+        destroySafely(p.vertexBuffer);
+        destroySafely(p.indexBuffer);
+        if (p.previousBuffer) destroySafely(p.previousBuffer);
+      }
+    }
+  }
+  /** The heights a draw's primitive binds (F6c): a GPU terrain's patch's, else the blank. */
+  terrainHeightsOf(primitive) {
+    return this.terrainPatches.get(primitive)?.heightView ?? this.blankTexture.createView();
+  }
+  /** Samples each pixel of the path-traced reference holds (F10b); 0 when it isn't shown. */
+  get referenceSamples() {
+    return this.pathTracer?.samples ?? 0;
+  }
+  /** Render the path-traced reference of `instances` through `draw` at any size up to 8K (F10b; {@link captureReference}). */
+  captureReference(instances, draw, options) {
+    return captureReference(this.device, applyScenePasses(instances, draw), draw, options);
   }
   settle(draw) {
     if (this.destroyed) return "current";
-    if (this.latest) compositeFrame(this.latest, draw);
+    if (this.latest && this.latest.length === draw.width * draw.height * 4) compositeFrame(this.latest, draw);
     if (this.latestSeq >= this.submitted) return "current";
     return this.readSeq >= this.submitted ? "pending" : "stale";
   }
   /** Encode and submit one frame, and start a readback if a buffer is free (or, with `readback` false, leave it in the colour texture). */
   submit(instances, draw, readback = true) {
-    const temporal = draw.temporal === true ? this.temporalState.begin(draw.view, draw.projection, this.width, this.height) : null;
+    for (const t of this.retired) destroySafely(t);
+    this.retired = [];
+    if (this.hdr && this.mips && draw.textureBudget) this.ensureStreaming(draw.textureBudget);
+    const display = this.hdr && draw.temporal === true && draw.prepass === true && draw.upscale && (draw.upscale.width > this.width || draw.upscale.height > this.height) ? { width: draw.upscale.width, height: draw.upscale.height } : null;
+    const temporal = draw.temporal === true ? this.temporalState.begin(draw.view, draw.projection, this.width, this.height, display ? upscaleJitterPhases(this.width, display.width) : void 0) : null;
     if (!temporal) this.temporalState.reset();
-    const viewProj = multiplyMat47(temporal ? temporal.projection : draw.projection, draw.view);
+    this.frameOutput = null;
+    const viewProj = multiplyMat48(temporal ? temporal.projection : draw.projection, draw.view);
     this.frameIndex += 1;
     const prepass = draw.prepass === true;
-    const { batches: draws, instanceCount } = batchInstances(instances, (mesh) => this.uploadMesh(mesh), cameraPositionFromView3(draw.view));
+    this.keepsPrevious = prepass;
+    const gpuCull = this.hdr && prepass && draw.gpuCull === true;
+    const { batches: draws, instanceCount } = batchInstances(instances, (mesh) => this.uploadMesh(mesh), cameraPositionFromView4(draw.view), gpuCull ? this.frameGpuLods : null, gpuCull);
+    const clusterJob = /* @__PURE__ */ new Map();
+    if (gpuCull) {
+      draws.forEach((entry, index) => {
+        if (!entry.primitive.clusterLod || entry.source || entry.alpha >= 2 || entry.refract || entry.models.length !== 1) return;
+        clusterJob.set(index, clusterJob.size);
+      });
+    }
     if (draws.length === 0) {
       this.prepassed = null;
       if (!readback) this.clearColour();
@@ -21776,20 +33364,27 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     }
     const sun = this.hdr && this.depthGroups.cascades.pipeline ? draw.sunShadow ?? (draw.shadow && draw.lightDirection ? { casters: instances, toLight: draw.lightDirection, distance: FALLBACK_CASCADE_DISTANCE, size: FALLBACK_CASCADE_SIZE, reach: FALLBACK_CASCADE_DISTANCE, strength: draw.shadow.strength ?? 1 } : null) : null;
     const localSource = this.hdr && this.depthGroups.cascades.localPipeline ? draw.localShadowCasters ?? (draw.localShadows ? instances : null) : null;
-    const localPlan = localSource && draw.lights?.length ? planLocalTiles(draw.lights, cameraPositionFromView3(draw.view), 1 / (draw.projection[5] || 1)) : null;
+    const localPlan = localSource && draw.lights?.length ? planLocalTiles(draw.lights, cameraPositionFromView4(draw.view), 1 / (draw.projection[5] || 1)) : null;
     const casterSource = sun?.casters ?? (localPlan && localPlan.tiles.length > 0 ? localSource : null);
-    const casting = casterSource ? batchInstances(casterSource, (mesh) => this.uploadMesh(mesh), cameraPositionFromView3(draw.view)) : null;
+    const casting = casterSource ? batchInstances(casterSource, (mesh) => this.uploadMesh(mesh), cameraPositionFromView4(draw.view)) : null;
     const casters = casting ? casting.batches.filter((entry) => entry.alpha < 2 && !entry.refract) : [];
     this.frameLocalTiles = localPlan && casters.length > 0 ? localPlan.tiles : null;
     const cascadeFit = sun && casters.length > 0 ? fitCascades({ view: draw.view, projection: draw.projection, toLight: sun.toLight, distance: sun.distance, size: sun.size, reach: sun.reach }) : null;
     this.frameCascades = cascadeFit && sun ? { cascades: cascadeFit, size: sun.size, strength: sun.strength ?? 1, softness: sun.softness ?? SUN_SOFTNESS } : null;
     if (cascadeFit && sun) this.ensureCascadeTexture(sun.size);
+    this.frameVsm = this.hdr && prepass && sun !== null && cascadeFit !== null && draw.virtualShadows ? this.planVsm(draw, sun.toLight, sun.strength ?? 1, sun.softness ?? SUN_SOFTNESS, temporal ? temporal.projection : draw.projection) : null;
     this.ensureUniformCapacity(draws.length + casters.length);
     const casterBase = prepass ? instanceCount * 2 : instanceCount;
-    this.ensureInstanceCapacity(casterBase + (casting?.instanceCount ?? 0));
+    const cullRegion = casterBase + (casting?.instanceCount ?? 0);
+    let cullTotal = 0;
+    const cullDst = gpuCull ? draws.map((entry) => (cullTotal += entry.models.length, cullTotal - entry.models.length)) : [];
+    const casterCull = gpuCull && cascadeFit !== null && casters.length > 0;
+    const casterRegion = cullRegion + (gpuCull ? cullTotal * 2 : 0);
+    const casterCopies = casting?.instanceCount ?? 0;
+    this.ensureInstanceCapacity(casterRegion + (casterCull ? cascadeFit.length * casterCopies : 0));
     const light = resolveLight(draw.lightDirection, draw.ambient);
     const viewDir = viewDirection(draw.view);
-    const eye = cameraPositionFromView3(draw.view);
+    const eye = cameraPositionFromView4(draw.view);
     const shadow = this.hdr ? null : draw.shadow ?? null;
     this.ensureShadowTexture(shadow ? shadow.size : 0, shadow?.near ? 2 : 1);
     if (shadow?.near) {
@@ -21840,20 +33435,37 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     const ssao = draw.ssao ?? null;
     this.frameContact = this.hdr && prepass && this.frameCascades !== null && Boolean(draw.lightDirection);
     this.frameGtao = this.hdr && prepass && draw.ambientOcclusion !== false;
-    this.bindSsao(ssao, this.frameContact || this.frameGtao);
+    this.frameSsgi = this.hdr && prepass && temporal !== null && temporal.uniforms[18] === 1 && this.taa !== null && draw.screenSpaceGi ? draw.screenSpaceGi : null;
+    this.bindSsao(ssao, this.frameContact || this.frameGtao || this.frameSsgi !== null);
     const drawnProjection = temporal ? temporal.projection : draw.projection;
     this.frameDepthView = this.hdr && prepass ? { viewProj, terms: [drawnProjection[10], drawnProjection[14]] } : null;
-    const { ordered } = this.clusterLights(localPlan ? { ...draw, lights: localPlan.lights, localShadows: null } : draw);
-    this.uploadLights(packLights(ordered, this.hdr));
+    this.frameFog = this.prepareFog(draw);
+    this.frameGi = this.hdr && draw.dynamicGi && draw.environment?.probeVolume ? draw.dynamicGi : null;
+    this.frameSss = this.hdr && prepass && draw.antialias !== true && viewModeCode(draw.viewMode) === 0 && draws.some((entry) => (entry.primitive.material.subsurface ?? 0) > 0);
+    if (this.hdr) this.sortHairCards(draws, eye);
+    const { ordered, globalCount, clusters: cells } = this.clusterLights(localPlan ? { ...draw, lights: localPlan.lights, localShadows: null } : draw);
+    this.uploadLights(packLights(ordered, this.hdr, this.hdr ? this.iesSlots(ordered) : null));
+    if (this.frameFog) {
+      const tiles = this.frameLocalTiles !== null && this.frameLocalTiles.length > 0;
+      this.volumetricFog.lights({ clusterParams: cells?.params ?? [1, 1, 1, 1], globalCount: cells ? globalCount : ordered.length, clustered: cells !== null, width: this.width, height: this.height, shadowBias: tiles ? LOCAL_SHADOW_BIAS2 : null });
+    }
     const lightCount = ordered.length;
     const camera = refractionCamera(draw.view, this.height);
     const materialIds = /* @__PURE__ */ new Map();
-    const materialId = (material) => {
-      let id = materialIds.get(material);
-      if (id === void 0) materialIds.set(material, id = materialIds.size + 1);
+    const sssProfiles = [];
+    const materialId = (material2) => {
+      let id = materialIds.get(material2);
+      if (id === void 0) {
+        materialIds.set(material2, id = materialIds.size + 1);
+        const m = material2;
+        if (this.frameSss && (m.subsurface ?? 0) > 0) {
+          const e = resolveExtensions3(m);
+          sssProfiles.push({ id, color: e.subsurfaceColor, radius: e.subsurfaceRadius });
+        }
+      }
       return id;
     };
-    const viewProjNow = multiplyMat47(draw.projection, draw.view);
+    const viewProjNow = multiplyMat48(draw.projection, draw.view);
     const viewProjThen = this.lastViewProj ?? viewProjNow;
     const windNow = windUniform2(draw.wind, draw.time ?? 0);
     const windThen = this.lastWind ?? windNow;
@@ -21866,7 +33478,8 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
         entry.textures.emis !== null
       );
       return {
-        mvp: multiplyMat47(viewProj, model),
+        // The uniform's clip and light transforms are never read: each copy's own come from the instance buffer (F0e).
+        mvp: model,
         normalBasis: normalBasis3x3(model),
         baseColor: entry.primitive.material.baseColorFactor,
         hasTexture: entry.textures.base !== null,
@@ -21877,14 +33490,17 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
         hasOcclusionMap: entry.textures.occ !== null,
         hasEmissiveMap: entry.textures.emis !== null,
         environment: draw.environment ?? null,
-        lightMvp: shadow ? multiplyMat47(shadow.lightViewProj, model) : null,
+        lightMvp: null,
         shadow: shadowParams,
         tonemap: draw.tonemap ?? null,
         hasSsao: ssao !== null,
-        hasLightmap: entry.textures.lm !== null,
+        // With real-time GI (F3e) every surface takes the live volume's light, a light-mapped one too.
+        hasLightmap: !this.frameGi && (entry.textures.lm !== null || this.hdr && entry.textures.lmHdr !== null),
+        hdrLightmap: !this.frameGi && this.hdr && entry.textures.lmHdr !== null,
         model,
         lightCount,
-        fog: draw.fog ?? null,
+        // A volumetric fog (F5b) takes the place of the painted fade.
+        fog: this.frameFog ? null : draw.fog ?? null,
         eye,
         effect: entry.effect ?? null,
         time: draw.time ?? 0,
@@ -21895,9 +33511,12 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
           textured: entry.textures.blend !== null
         }),
         layers: resolveLayers2(entry.primitive.material, entry.textures.relief !== null),
+        extensions: resolveExtensions3(entry.primitive.material),
+        frame: this.frameIndex,
         refraction: entry.refract ? resolveRefraction3(entry.primitive.material, effectActive4(entry.effect) ? entry.effect : null) : null,
         camera,
         water: waterUniform2(entry.primitive.material, draw.time ?? 0),
+        waterLook: this.hdr ? waterLookUniform(entry.primitive.material) : null,
         waterAlong: waterAlong2(entry.primitive.material),
         mapping: resolveMapping(entry.primitive.material),
         hasNormalMap: entry.textures.normal !== null,
@@ -21905,31 +33524,72 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
         materialId: materialId(entry.primitive.material),
         windBefore: entry.primitive.sway ? windThen : null,
         motionBase: prepass ? instanceCount : 0,
+        lodLevel: entry.lod ?? -1,
+        octahedral: entry.primitive.material.octahedral ?? null,
+        terrain: this.terrainPatches.get(entry.primitive)?.values ?? null,
         lightChannels: entry.channels,
         ...this.hdr ? { probeCount: this.capturedProbes, receivesDecals: entry.alpha < 2 && !entry.refract } : {}
       };
     };
+    if (this.uniformKeysFor !== this.uniformData) {
+      this.uniformKeys = [];
+      this.uniformModels = new Float32Array(this.uniformCapacity * 16);
+      this.uniformKeysFor = this.uniformData;
+    }
+    const keys = this.uniformKeys;
+    const lastModels = this.uniformModels;
+    const motionBase = prepass ? instanceCount : 0;
+    let frameSlot = -1;
+    const writeUniform = (index, entry, bases) => {
+      const model = entry.models[0];
+      const t = entry.textures;
+      const maps = (t.base !== null ? 1 : 0) | (t.mr !== null ? 2 : 0) | (t.occ !== null ? 4 : 0) | (t.emis !== null ? 8 : 0) | (t.normal !== null ? 16 : 0) | (t.lm !== null ? 32 : 0) | (t.lmHdr !== null ? 64 : 0) | (t.detail !== null ? 128 : 0) | (t.blend !== null ? 256 : 0) | (t.relief !== null ? 512 : 0);
+      const key2 = [entry.primitive, entry.primitive.material, maps, entry.alpha, entry.refract, entry.effect ?? null, entry.lod ?? -1, entry.channels, materialId(entry.primitive.material), bases?.instanceBase ?? 0, bases?.motionBase ?? motionBase, this.frameGi !== null];
+      const last = keys[index];
+      let same = !!last && frameSlot >= 0 && !uniformAnimates(entry.primitive.material, entry.alpha, entry.primitive.sway !== void 0, entry.refract, entry.effect) && !this.terrainPatches.has(entry.primitive);
+      for (let i = 0; same && i < key2.length; i += 1) same = last[i] === key2[i];
+      for (let i = 0; same && i < 16; i += 1) same = lastModels[index * 16 + i] === Math.fround(model[i]);
+      if (same) {
+        copyFrameUniform(this.uniformData, index, frameSlot);
+        return;
+      }
+      writeInstanceUniform(this.uniformData, index, bases ? { ...uniformOf(entry), ...bases } : uniformOf(entry));
+      keys[index] = key2;
+      lastModels.set(model, index * 16);
+      if (frameSlot < 0) frameSlot = index;
+    };
     let next = 0;
     draws.forEach((entry, index) => {
+      if (entry.source) {
+        entry.first = entry.source.first;
+        writeUniform(index, entry, { instanceBase: cullRegion + cullDst[index], motionBase: cullTotal });
+        return;
+      }
       entry.first = next;
-      for (const model of entry.models) {
+      if (this.hdr) {
+        for (const model of entry.models) {
+          writeInstanceModel(this.instanceData, next, model);
+          if (prepass) writeInstanceModel(this.instanceData, instanceCount + next, this.motion.get(model) ?? model);
+          next += 1;
+        }
+      } else for (const model of entry.models) {
         writeInstanceTransform(this.instanceData, next, {
-          mvp: multiplyMat47(viewProj, model),
-          lightMvp: shadow ? multiplyMat47(shadow.lightViewProj, model) : null,
+          mvp: multiplyMat48(viewProj, model),
+          lightMvp: shadow ? multiplyMat48(shadow.lightViewProj, model) : null,
           model,
           normalBasis: normalBasis3x3(model)
         });
         if (prepass) {
           writeInstanceTransform(this.instanceData, instanceCount + next, {
-            mvp: multiplyMat47(viewProjNow, model),
-            lightMvp: multiplyMat47(viewProjThen, this.motion.get(model) ?? model),
+            mvp: multiplyMat48(viewProjNow, model),
+            lightMvp: multiplyMat48(viewProjThen, this.motion.get(model) ?? model),
             model,
             normalBasis: IDENTITY_BASIS
           });
         }
         next += 1;
       }
-      writeInstanceUniform(this.uniformData, index, uniformOf(entry));
+      writeUniform(index, entry, gpuCull ? { instanceBase: cullRegion + cullDst[index], motionBase: cullTotal } : null);
     });
     let nextCaster = casterBase;
     casters.forEach((entry, k) => {
@@ -21938,20 +33598,71 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
         writeInstanceTransform(this.instanceData, nextCaster, { mvp: model, lightMvp: null, model, normalBasis: IDENTITY_BASIS });
         nextCaster += 1;
       }
-      writeInstanceUniform(this.uniformData, draws.length + k, uniformOf(entry));
+      writeInstanceUniform(this.uniformData, draws.length + k, casterCull ? { ...uniformOf(entry), instanceBase: entry.first - casterBase } : uniformOf(entry));
+      this.uniformKeys[draws.length + k] = void 0;
     });
     this.device.queue.writeBuffer(this.uniformBuffer, 0, this.uniformData, 0, (draws.length + casters.length) * UNIFORM_FLOATS);
+    if (this.frameSss) {
+      this.sssProfiles ?? (this.sssProfiles = this.device.createBuffer({ size: SSS_MAX_PROFILES * 16, usage: 128 | 8 }));
+      this.device.queue.writeBuffer(this.sssProfiles, 0, packSssProfiles(sssProfiles));
+    }
     this.device.queue.writeBuffer(this.instanceBuffer, 0, this.instanceData, 0, nextCaster * INSTANCE_FLOATS);
+    if (this.hdr && instanceCount > 0) {
+      const transforms = this.transforms ?? (this.transforms = new GpuTransforms(this.device));
+      transforms.prepare(instanceCount, { viewProj, lightViewProj: shadow ? shadow.lightViewProj : null, motion: prepass ? { now: viewProjNow, then: viewProjThen } : null });
+      const encoder2 = this.device.createCommandEncoder();
+      transforms.encode(encoder2, this.instanceBuffer);
+      this.device.queue.submit([encoder2.finish()]);
+    }
+    if (gpuCull) {
+      this.culling ?? (this.culling = new GpuCulling(this.device));
+      const gust = Math.hypot(windNow[0], windNow[1]) * (1 + windNow[3]);
+      const sources = draws.map((entry, index) => ({ entry, index })).filter(({ entry }) => !entry.source).map(({ entry, index }) => {
+        const p = entry.primitive;
+        const moves = p.dynamic !== void 0 || entry.alpha >= 2 || entry.refract || clusterJob.has(index) || compiledGraphOf2(p.material)?.outputs.worldPositionOffset !== void 0;
+        const s = moves ? null : primitiveSphere(p);
+        return { first: entry.first, count: entry.models.length, sphere: s ? [s[0], s[1], s[2], s[3] + s[4] * gust] : null };
+      });
+      const batches = draws.map((entry, index) => ({
+        first: entry.first,
+        count: entry.models.length,
+        indexCount: entry.geometry.indexCount,
+        dst: cullDst[index],
+        lod: entry.lodChain ? { level: entry.lod ?? 0, levels: entry.lodChain.meshes.length, distances: entry.lodChain.distances } : null
+      }));
+      this.culling.plan(sources, batches, instanceCount, cullRegion, cullTotal, viewProj, eye, draw.antialias !== true);
+      if (clusterJob.size > 0) {
+        this.clusterRendering ?? (this.clusterRendering = new ClusterRendering(this.device));
+        const jobs = [];
+        for (const [index] of clusterJob) {
+          const entry = draws[index];
+          jobs.push({ record: entry.first, lod: entry.primitive.clusterLod, twoSided: !entry.primitive.clusterLod.closed });
+        }
+        this.clusterRendering.plan(jobs);
+      }
+      if (casterCull) {
+        this.casterCulling ?? (this.casterCulling = new CasterCulling(this.device));
+        const casterBatches = casters.map((entry) => {
+          const p = entry.primitive;
+          const moves = p.dynamic !== void 0 || compiledGraphOf2(p.material)?.outputs.worldPositionOffset !== void 0;
+          const sphere = moves ? null : primitiveSphere(p);
+          return { first: entry.first, count: entry.models.length, dst: entry.first - casterBase, indexCount: entry.geometry.indexCount, sphere: sphere ? [sphere[0], sphere[1], sphere[2], sphere[3] + sphere[4] * gust] : null };
+        });
+        this.casterCulling.plan(casterBatches, cascadeFit.map((c) => c.viewProj), casterRegion, casterCopies);
+      }
+    }
+    this.frameCull = gpuCull ? this.culling : null;
     this.lastViewProj = viewProjNow;
     this.lastWind = windNow;
     let triangles = 0;
-    for (const entry of draws) triangles += entry.geometry.indexCount / 3 * entry.models.length;
+    for (const entry of draws) if (!entry.source) triangles += entry.geometry.indexCount / 3 * entry.models.length;
     this.lastFrameStats = {
       drawCalls: draws.length,
       instances: instanceCount,
       triangles,
       gpuMs: this.timer?.lastMs ?? null,
-      ...this.timer && this.timer.lastPasses.length > 0 ? { passes: this.timer.lastPasses } : {}
+      ...this.timer && this.timer.lastPasses.length > 0 ? { passes: this.timer.lastPasses } : {},
+      ...this.streamer ? { textures: this.streamer.stats() } : {}
     };
     const refract = draws.some((entry) => entry.refract);
     const hdrTaa = this.hdr && temporal !== null && prepass;
@@ -21960,24 +33671,66 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     const seeThrough = firstSeeThrough >= 0;
     const msaa = draw.antialias === true ? this.ensureMsaa() : null;
     const reflections = draw.reflections === true ? this.ensureReflections() : null;
-    const drawRange = (pass, from, to, depthGroup) => {
+    const overdraw = this.hdr && viewModeCode(draw.viewMode) === 11;
+    const cull = this.frameCull;
+    const bundles = cull ? this.bundles ?? (this.bundles = new BundleCache(this.device)) : null;
+    const clusters = cull && clusterJob.size > 0 ? this.clusterRendering : null;
+    const clusterView = { viewProj, eye, pixelsPerRadian: draw.projection[5] * this.height / 2, size: [this.width, this.height] };
+    const replay = (pass, slot2, target2, key2, record) => {
+      if (!bundles) return record(pass);
+      pass.executeBundles([bundles.get(slot2, target2, key2, record)]);
+    };
+    const drawRange = (pass, from, to, depthGroup, slot2 = "", target2 = null) => {
+      if (bundles && target2) {
+        const key2 = [depthGroup, from, to, cull.args, draws.length, this.uniformBuffer, this.instanceBuffer, clusters?.output ?? null, clusters?.args ?? null, clusterJob.size];
+        for (let index = from; index < to; index += 1) {
+          const entry = draws[index];
+          const set = this.pipelinesOf(entry.primitive.material, msaa ? MSAA_SAMPLES : 1, reflections !== null, prepass);
+          key2.push(overdraw ? set.add : entry.refract ? set.blend : entry.alpha === 3 ? set.add : entry.alpha === 2 ? set.blend : set.opaque, this.bindGroupFor(entry.primitive, entry.textures), entry.geometry.vertexBuffer, entry.geometry.indexBuffer);
+        }
+        replay(pass, slot2, target2, key2, (encoder2) => drawRangeDirect(encoder2, from, to, depthGroup));
+        return;
+      }
+      drawRangeDirect(pass, from, to, depthGroup);
+    };
+    const drawRangeDirect = (pass, from, to, depthGroup) => {
       pass.setBindGroup(1, depthGroup);
       let bound = null;
       for (let index = from; index < to; index += 1) {
         const entry = draws[index];
         const set = this.pipelinesOf(entry.primitive.material, msaa ? MSAA_SAMPLES : 1, reflections !== null, prepass);
-        const wanted = entry.refract ? set.blend : entry.alpha === 3 ? set.add : entry.alpha === 2 ? set.blend : set.opaque;
+        const wanted = overdraw ? set.add : entry.refract ? set.blend : entry.alpha === 3 ? set.add : entry.alpha === 2 ? set.blend : set.opaque;
         if (wanted !== bound) {
           pass.setPipeline(wanted);
           bound = wanted;
         }
         pass.setBindGroup(0, this.bindGroupFor(entry.primitive, entry.textures), [index * UNIFORM_STRIDE]);
         pass.setVertexBuffer(0, entry.geometry.vertexBuffer);
+        const job = clusterJob.get(index);
+        if (job !== void 0 && clusters) {
+          pass.setIndexBuffer(clusters.output, "uint32", clusters.regionOffset(job), clusters.regionBytes(job));
+          pass.drawIndexedIndirect(clusters.args, clusters.argsOffset(job, 1));
+          continue;
+        }
         pass.setIndexBuffer(entry.geometry.indexBuffer, "uint32");
-        pass.drawIndexed(entry.geometry.indexCount, entry.models.length, 0, 0, entry.first);
+        if (cull) pass.drawIndexedIndirect(cull.args, cull.argsOffset(2, index));
+        else pass.drawIndexed(entry.geometry.indexCount, entry.models.length, 0, 0, entry.first);
       }
     };
-    const prepassRange = (pass) => {
+    const prepassRange = (pass, target2 = null, round2 = 0) => {
+      if (bundles && target2) {
+        const key2 = [(msaa ? msaa.groups : this.depthGroups).blank, cull.args, draws.length, this.uniformBuffer, this.instanceBuffer, round2, clusters?.output ?? null, clusters?.args ?? null, clusterJob.size];
+        for (const entry of draws) {
+          if (entry.refract || entry.alpha >= 2) continue;
+          const moved = entry.geometry.previousBuffer && entry.geometry.movedFrame === this.frameIndex;
+          key2.push(this.pipelinesOf(entry.primitive.material, msaa ? MSAA_SAMPLES : 1, reflections !== null, true).prepass, this.bindGroupFor(entry.primitive, entry.textures), entry.geometry.vertexBuffer, moved ? entry.geometry.previousBuffer : entry.geometry.vertexBuffer, entry.geometry.indexBuffer);
+        }
+        replay(pass, `prepass${round2}`, target2, key2, (encoder2) => prepassDirect(encoder2, round2));
+        return;
+      }
+      prepassDirect(pass, round2);
+    };
+    const prepassDirect = (pass, round2 = 0) => {
       pass.setBindGroup(1, (msaa ? msaa.groups : this.depthGroups).blank);
       let bound = null;
       for (let index = 0; index < draws.length; index += 1) {
@@ -21992,12 +33745,28 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
         pass.setVertexBuffer(0, entry.geometry.vertexBuffer);
         const moved = entry.geometry.previousBuffer && entry.geometry.movedFrame === this.frameIndex;
         pass.setVertexBuffer(1, moved ? entry.geometry.previousBuffer : entry.geometry.vertexBuffer);
+        const job = clusterJob.get(index);
+        if (job !== void 0 && clusters) {
+          if (round2 === 1) continue;
+          pass.setIndexBuffer(clusters.output, "uint32", clusters.regionOffset(job), clusters.regionBytes(job));
+          pass.drawIndexedIndirect(clusters.args, clusters.argsOffset(job, 0));
+          continue;
+        }
         pass.setIndexBuffer(entry.geometry.indexBuffer, "uint32");
-        pass.drawIndexed(entry.geometry.indexCount, entry.models.length, 0, 0, entry.first);
+        if (cull) pass.drawIndexedIndirect(cull.args, cull.argsOffset(round2, index));
+        else pass.drawIndexed(entry.geometry.indexCount, entry.models.length, 0, 0, entry.first);
       }
     };
     const graph = new FrameGraph();
     const size = { width: this.width, height: this.height };
+    if (this.frameLightClusters) {
+      const clusterer = this.lightClusterer;
+      const data = this.depthGroups.clusters.data;
+      graph.addPass("lights.cluster", "compute", (pass) => {
+        pass.keep();
+        return (ctx) => clusterer.encode(ctx.encoder, this.lightBuffer, data, ctx.timing);
+      });
+    }
     const colour = graph.importTexture("colour", this.colourTexture);
     const depth = graph.importTexture("depth", msaa ? msaa.depth : this.depthTexture);
     const msColour = msaa ? graph.createTexture("colour.msaa", { format: this.colourFormat, ...size, sampleCount: MSAA_SAMPLES }) : null;
@@ -22010,7 +33779,19 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     const opaqueEnd = seeThrough ? firstSeeThrough : draws.length;
     if (cascadeFit) {
       const res = this.depthGroups.cascades;
-      cascadeFit.forEach((c, i) => this.device.queue.writeBuffer(res.views[i].buffer, 0, new Float32Array(c.viewProj)));
+      const casterCuller = casterCull ? this.casterCulling : null;
+      cascadeFit.forEach((c, i) => {
+        const view = new ArrayBuffer(80);
+        new Float32Array(view).set(c.viewProj);
+        new Uint32Array(view).set(casterCuller ? [casterRegion + i * casterCopies, 1, 0, 0] : [0, 0, 0, 0], 16);
+        this.device.queue.writeBuffer(res.views[i].buffer, 0, view);
+      });
+      if (casterCuller) {
+        graph.addPass("cull.casters", "compute", (pass) => {
+          pass.keep();
+          return (ctx) => casterCuller.encode(ctx.encoder, this.instanceBuffer, ctx.timing);
+        });
+      }
       const map = graph.importTexture("cascades", res.texture);
       graph.addPass("shadow cascades", "render", (pass) => {
         pass.write(map);
@@ -22038,11 +33819,12 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
             for (const cut of [false, true]) {
               encoded.setPipeline(cut ? res.cutPipeline : res.pipeline);
               casters.forEach((entry, k) => {
-                if (entry.alpha === 1 !== cut) return;
+                if ((entry.alpha === 1 || this.terrainPatches.has(entry.primitive)) !== cut) return;
                 encoded.setBindGroup(0, cut ? this.cutGroupFor(entry.primitive, entry.textures) : group, [(draws.length + k) * UNIFORM_STRIDE]);
                 encoded.setVertexBuffer(0, entry.geometry.vertexBuffer);
                 encoded.setIndexBuffer(entry.geometry.indexBuffer, "uint32");
-                encoded.drawIndexed(entry.geometry.indexCount, entry.models.length, 0, 0, entry.first);
+                if (casterCuller) encoded.drawIndexedIndirect(casterCuller.args, casterCuller.argsOffset(i, k));
+                else encoded.drawIndexed(entry.geometry.indexCount, entry.models.length, 0, 0, entry.first);
               });
             }
             encoded.end();
@@ -22050,30 +33832,24 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
         };
       });
     }
+    if (this.frameVsm && this.frameVsm.draws.length > 0) this.addVsmPages(graph, this.frameVsm.draws, casters, draws.length);
     const localTiles = this.frameLocalTiles;
     const atlasTexture = localTiles && localTiles.length > 0 ? this.ensureLocalAtlas() : null;
     const statics = draw.localShadowKey ?? null;
     const movers = draw.localShadowMoved ?? [];
     const redraw = localTiles && localPlan ? localTiles.flatMap((t, i) => {
       const light2 = localPlan.lights[t.light];
-      const key = statics === null ? null : localTileKey(t, light2, statics);
+      const key2 = statics === null ? null : localTileKey(t, light2, statics);
       const moving = movers.some((m) => reachesLight(m, light2));
-      if (key !== null && !this.localCache.dirty(t, key, moving)) return [];
-      this.localCache.drawn(t, key ?? "uncached", moving || key === null);
+      if (key2 !== null && !this.localCache.dirty(t, key2, moving)) return [];
+      this.localCache.drawn(t, key2 ?? "uncached", moving || key2 === null);
       return [i];
     }) : [];
     if (localTiles && atlasTexture && redraw.length > 0) {
       const res = this.depthGroups.cascades;
       redraw.forEach((i) => this.device.queue.writeBuffer(res.localViews[i].buffer, 0, new Float32Array(localTiles[i].drawViewProj)));
       const map = graph.importTexture("local shadows", atlasTexture);
-      this.localClear ?? (this.localClear = this.device.createRenderPipeline({
-        layout: "auto",
-        vertex: { module: this.device.createShaderModule({ code: LOCAL_CLEAR_WGSL }), entryPoint: "vs" },
-        fragment: { module: this.device.createShaderModule({ code: LOCAL_CLEAR_WGSL }), entryPoint: "clear", targets: [] },
-        primitive: { topology: "triangle-list" },
-        depthStencil: { format: "depth32float", depthWriteEnabled: true, depthCompare: "always" }
-      }));
-      const clearPipeline = this.localClear;
+      const clearPipeline = this.localClearPipeline();
       graph.addPass("local shadows", "render", (pass) => {
         pass.read(map, "attachment");
         pass.write(map);
@@ -22101,7 +33877,7 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
             for (const cut of [false, true]) {
               encoded.setPipeline(cut ? res.localCutPipeline : res.localPipeline);
               casters.forEach((entry, k) => {
-                if (entry.alpha === 1 !== cut) return;
+                if ((entry.alpha === 1 || this.terrainPatches.has(entry.primitive)) !== cut) return;
                 encoded.setBindGroup(0, cut ? this.cutGroupFor(entry.primitive, entry.textures) : group, [(draws.length + k) * UNIFORM_STRIDE]);
                 encoded.setVertexBuffer(0, entry.geometry.vertexBuffer);
                 encoded.setIndexBuffer(entry.geometry.indexBuffer, "uint32");
@@ -22113,11 +33889,44 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
         };
       });
     }
+    const fog = this.frameFog ? this.volumetricFog : null;
+    if (fog) {
+      const groups2 = this.depthGroups;
+      graph.addPass("volumetric fog", "compute", (pass) => {
+        pass.keep();
+        return (ctx) => fog.encode(ctx.encoder, { cascades: groups2.cascades.texture, sampler: groups2.cascades.sampler, lights: this.lightBuffer, clusters: groups2.clusters.data, tiles: groups2.shadowTiles, atlas: groups2.atlas }, ctx.timing);
+      });
+    }
+    const liveGi = this.frameGi;
+    const volume = draw.environment?.probeVolume ?? null;
+    if (liveGi && volume) {
+      const gi = this.tracerFor(liveGi.key, liveGi.occluders);
+      const env = draw.environment;
+      if (this.giSky?.source !== env) this.giSky = { source: env, sky: environmentPanorama(env) };
+      const sky = this.giSky.sky;
+      const groups2 = this.depthGroups;
+      graph.addPass("dynamic gi", "compute", (pass) => {
+        pass.keep();
+        return (ctx) => gi.update(ctx.encoder, groups2.probes, volume, liveGi.settings, draw.lights ?? [], sky, ctx.timing);
+      });
+    }
     const gbuffer = prepass ? graph.importTexture("gbuffer", this.ensureGbuffer()) : null;
     const velocity = prepass ? graph.importTexture("velocity", this.ensureVelocity()) : null;
     const gbufferMs = gbuffer && msaa ? graph.createTexture("gbuffer.msaa", { format: GBUFFER_FORMAT, ...size, sampleCount: MSAA_SAMPLES }) : null;
     const velocityMs = velocity && msaa ? graph.createTexture("velocity.msaa", { format: VELOCITY_FORMAT, ...size, sampleCount: MSAA_SAMPLES }) : null;
     if (gbuffer && velocity) {
+      if (cull) {
+        graph.addPass("cull.frustum", "compute", (pass) => {
+          pass.keep();
+          return (ctx) => cull.encodeFrustum(ctx.encoder, this.instanceBuffer, ctx.timing);
+        });
+        if (clusters) {
+          graph.addPass("cull.clusters", "compute", (pass) => {
+            pass.keep();
+            return (ctx) => clusters.encode(ctx.encoder, 0, this.instanceBuffer, clusterView, null, ctx.timing);
+          });
+        }
+      }
       graph.addPass("prepass", "render", (pass) => {
         pass.write(depth);
         for (const [drawn, resolved] of [[gbufferMs, gbuffer], [velocityMs, velocity]]) {
@@ -22136,13 +33945,56 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
             depthStencilAttachment: { view: ctx.texture(depth).createView(), depthClearValue: 1, depthLoadOp: "clear", depthStoreOp: "store" },
             ...ctx.timing
           });
-          prepassRange(encoded);
+          prepassRange(encoded, {
+            colorFormats: [ctx.texture(gbufferMs ?? gbuffer).format, ctx.texture(velocityMs ?? velocity).format],
+            depthStencilFormat: ctx.texture(depth).format,
+            sampleCount: msaa ? MSAA_SAMPLES : 1,
+            depthReadOnly: false
+          });
           encoded.end();
         };
       });
     }
+    if (cull && gbuffer && velocity && cull.twoPhase) {
+      graph.addPass("cull.second", "compute", (pass) => {
+        pass.read(depth);
+        pass.keep();
+        return (ctx) => cull.encodeSecond(ctx.encoder, this.instanceBuffer, ctx.texture(depth), [this.width, this.height], ctx.timing);
+      });
+      graph.addPass("prepass.second", "render", (pass) => {
+        for (const t of [depth, gbuffer, velocity]) {
+          pass.read(t, "attachment");
+          pass.write(t);
+        }
+        return (ctx) => {
+          const kept = (t) => ({ view: ctx.texture(t).createView(), loadOp: "load", storeOp: "store" });
+          const encoded = ctx.encoder.beginRenderPass({
+            colorAttachments: [kept(gbuffer), kept(velocity)],
+            depthStencilAttachment: { view: ctx.texture(depth).createView(), depthLoadOp: "load", depthStoreOp: "store" },
+            ...ctx.timing
+          });
+          prepassRange(encoded, { colorFormats: [ctx.texture(gbuffer).format, ctx.texture(velocity).format], depthStencilFormat: ctx.texture(depth).format, sampleCount: 1, depthReadOnly: false }, 1);
+          encoded.end();
+        };
+      });
+    }
+    if (cull && gbuffer) {
+      graph.addPass("cull.occlusion", "compute", (pass) => {
+        pass.read(depth);
+        pass.keep();
+        return (ctx) => cull.encodeOcclusion(ctx.encoder, this.instanceBuffer, ctx.texture(depth), [this.width, this.height], ctx.timing, msaa !== null);
+      });
+      if (clusters) {
+        graph.addPass("cull.clusters.occlusion", "compute", (pass) => {
+          pass.read(depth);
+          pass.keep();
+          return (ctx) => clusters.encode(ctx.encoder, 1, this.instanceBuffer, clusterView, cull.pyramid, ctx.timing);
+        });
+      }
+    }
     this.prepassed = prepass ? { depth: msaa ? msaa.depth : this.depthTexture, gbuffer: this.gbuffer, velocity: this.velocity, multisampled: msaa !== null } : null;
-    if (this.frameContact || this.frameGtao) {
+    if (this.frameVsm) this.addVsmMarks(graph, depth, msaa !== null);
+    if (this.frameContact || this.frameGtao || this.frameSsgi || this.frameVsm) {
       this.addScreenShading(graph, depth, gbuffer, velocity, draw.view, temporal ? temporal.projection : draw.projection, this.frameContact ? draw.lightDirection ?? null : null, ssao !== null, msaa !== null);
     }
     const readDepths = prepass && this.hdr;
@@ -22173,11 +34025,18 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
           depthStencilAttachment: load || readDepths ? { view: ctx.texture(depth).createView(), depthReadOnly: true } : prepass ? { view: ctx.texture(depth).createView(), depthLoadOp: "load", depthStoreOp: "store" } : { view: ctx.texture(depth).createView(), depthClearValue: 1, depthLoadOp: "clear", depthStoreOp: "store" },
           ...ctx.timing
         });
-        drawRange(encoded, from, to, load ? groups.scene : readDepths ? groups.opaque : groups.blank);
+        drawRange(encoded, from, to, load ? groups.scene : readDepths ? groups.opaque : groups.blank, name, {
+          colorFormats: [target, ...rayTargets].map((t) => ctx.texture(t).format),
+          depthStencilFormat: ctx.texture(depth).format,
+          sampleCount: msaa ? MSAA_SAMPLES : 1,
+          depthReadOnly: load || readDepths
+        });
         encoded.end();
       };
     });
     scenePass("opaque", 0, opaqueEnd, false, !seeThrough);
+    if (this.streamer) this.addFeedback(graph, draws);
+    if (this.frameSss && gbuffer && !msaa && this.frameDepthView) this.addSubsurface(graph, colour, depth, gbuffer, temporal ? temporal.projection : draw.projection, this.frameDepthView.terms);
     if (behind && !msaa) {
       graph.addPass("behind", "transfer", (pass) => {
         pass.read(colour, "copySrc");
@@ -22186,9 +34045,21 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
       });
     }
     if (seeThrough) scenePass("see-through", firstSeeThrough, draws.length, true, true);
+    if (this.volumes?.active && this.hdr && prepass && !msaa) this.addVolumes(graph, colour, depth, draw, eye);
+    if (this.particles && this.hdr && prepass && gbuffer && !msaa && this.frameDepthView) {
+      this.addParticles(graph, colour, depth, gbuffer, { draw, viewProj, eye, globalCount: cells ? globalCount : ordered.length });
+    }
     const reactive = hdrTaa && seeThrough && behind ? this.addReactiveMask(graph, behind, colour) : null;
-    if (reflections) this.addReflections(graph, reflections, colour, depth, rays, temporal ? temporal.projection : draw.projection, msaa !== null);
-    if (temporal) this.addTemporal(graph, temporal.uniforms, colour, depth, msaa !== null, hdrTaa ? velocity : null, reactive);
+    if (reflections && this.hdr && gbuffer && velocity) this.addHizReflections(graph, colour, depth, gbuffer, velocity, rays, draw, temporal ? temporal.projection : draw.projection, msaa !== null);
+    else if (reflections) this.addReflections(graph, reflections, colour, depth, rays, temporal ? temporal.projection : draw.projection, msaa !== null);
+    const viewCode = this.hdr ? viewModeCode(draw.viewMode) : 0;
+    if (viewCode === 8 && velocity && gbuffer || viewCode === 11) this.addViewResolve(graph, colour, velocity, gbuffer, viewCode);
+    let shown = colour;
+    if (temporal && display && velocity) shown = this.addUpscale(graph, temporal, colour, depth, velocity, reactive, display, msaa !== null);
+    else if (temporal) this.addTemporal(graph, temporal.uniforms, colour, depth, msaa !== null, hdrTaa ? velocity : null, reactive);
+    if (this.hdr && draw.camera && this.frameDepthView && velocity && (draw.camera.dof || draw.camera.motionBlur)) {
+      this.addCameraEffects(graph, shown, display ?? { width: this.width, height: this.height }, depth, velocity, draw.camera, this.frameDepthView.terms, msaa !== null);
+    }
     const slot = readback ? this.readback.find((entry) => !entry.busy) : void 0;
     if (slot) {
       graph.addPass("readback", "transfer", (pass) => {
@@ -22205,6 +34076,7 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     graph.run(encoder, this.transients, this.timer);
     this.device.queue.submit([encoder.finish()]);
     this.timer?.read();
+    this.readVsmMarks();
     if (!readback) return;
     this.submitted += 1;
     if (slot) {
@@ -22241,10 +34113,10 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     const models = /* @__PURE__ */ new Map();
     const motion = /* @__PURE__ */ new Map();
     for (const instance of instances) {
-      const key = instance.lod?.meshes[0] ?? instance.mesh;
-      let list = models.get(key);
-      if (!list) models.set(key, list = []);
-      const previous = instance.previousModel ?? this.lastModels.get(key)?.[list.length];
+      const key2 = instance.lod?.meshes[0] ?? instance.mesh;
+      let list = models.get(key2);
+      if (!list) models.set(key2, list = []);
+      const previous = instance.previousModel ?? this.lastModels.get(key2)?.[list.length];
       if (previous) motion.set(instance.model, previous);
       list.push(instance.model);
     }
@@ -22317,6 +34189,446 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
       return (ctx) => ctx.encoder.copyTextureToTexture({ texture: ctx.texture(out) }, { texture: ctx.texture(colour) }, { width: this.width, height: this.height });
     });
   }
+  addHizReflections(graph, colour, depth, gbuffer, velocity, rays, draw, projection, multisampled) {
+    var _a;
+    const device = this.device;
+    const k = multisampled ? 1 : 0;
+    const format = this.colourFormat;
+    if (!this.hiz) {
+      const levels = hizLevels(this.width, this.height);
+      const full = { width: this.width, height: this.height };
+      const history = () => device.createTexture({ size: full, format: "rgba16float", usage: 16 | 4 });
+      this.hiz = {
+        chain: device.createTexture({ size: full, format: "r32float", mipLevelCount: levels, usage: 16 | 4 | 1 }),
+        // RENDER_ATTACHMENT | TEXTURE_BINDING | COPY_SRC (for captures)
+        levels,
+        history: [history(), history()],
+        index: 0,
+        valid: false,
+        frame: 0,
+        traced: null,
+        blank: device.createTexture({ size: { width: 1, height: 1 }, format: "rgba16float", usage: 4 }),
+        uniforms: device.createBuffer({ size: HIZ_UNIFORM_FLOATS * 4, usage: 64 | 8 }),
+        data: new Float32Array(HIZ_UNIFORM_FLOATS),
+        sampler: device.createSampler({ magFilter: "linear", minFilter: "linear", addressModeU: "clamp-to-edge", addressModeV: "clamp-to-edge" }),
+        copy: [null, null],
+        reduce: fullScreenPipeline(device, HIZ_REDUCE_WGSL, "reduce", "r32float"),
+        trace: fullScreenPipeline(device, HIZ_TRACE_WGSL, "trace", "rgba16float"),
+        accumulate: fullScreenPipeline(device, HIZ_TEMPORAL_WGSL, "accumulate", "rgba16float"),
+        resolve: fullScreenPipeline(device, HIZ_RESOLVE_WGSL, "resolve", format)
+      };
+    }
+    const hz = this.hiz;
+    (_a = hz.copy)[k] ?? (_a[k] = fullScreenPipeline(device, hizCopyWgsl(multisampled), "copyDepth", "r32float"));
+    const copy = hz.copy[k];
+    const tracer = draw.reflectionTrace ? this.tracerFor(draw.reflectionTrace.key, draw.reflectionTrace.occluders) : null;
+    if (tracer && !hz.traced) hz.traced = device.createTexture({ size: { width: Math.max(1, Math.ceil(this.width / 2)), height: Math.max(1, Math.ceil(this.height / 2)) }, format: "rgba16float", usage: 8 | 4 });
+    const chain = graph.importTexture("hiz", hz.chain);
+    const then = graph.importTexture("hiz.then", hz.history[hz.index]);
+    const now = graph.importTexture("hiz.now", hz.history[1 - hz.index]);
+    const traced = tracer ? graph.importTexture("hiz.traced", hz.traced) : null;
+    const traceOut = graph.createTexture("hiz.trace", { format: "rgba16float", width: this.width, height: this.height });
+    const out = graph.createTexture("reflect.out", { format, width: this.width, height: this.height });
+    device.queue.writeBuffer(hz.uniforms, 0, hizUniforms(draw.view, projection, hz.frame, hz.levels, tracer !== null, hz.valid, hz.data));
+    hz.frame += 1;
+    const fullScreen = (ctx, pipeline, into, entries, uniforms = true) => {
+      const encoded = ctx.encoder.beginRenderPass({ colorAttachments: [{ view: into, clearValue: { r: 0, g: 0, b: 0, a: 0 }, loadOp: "clear", storeOp: "store" }], ...ctx.timing });
+      encoded.setPipeline(pipeline);
+      encoded.setBindGroup(0, device.createBindGroup({ layout: pipeline.getBindGroupLayout(0), entries: uniforms ? [{ binding: 0, resource: { buffer: hz.uniforms } }, ...entries] : entries }));
+      encoded.draw(3);
+      encoded.end();
+    };
+    const mip = (level) => hz.chain.createView({ baseMipLevel: level, mipLevelCount: 1 });
+    graph.addPass("hiz", "render", (pass) => {
+      pass.read(depth);
+      pass.write(chain);
+      return (ctx) => {
+        fullScreen(ctx, copy, mip(0), [{ binding: 0, resource: ctx.texture(depth).createView() }], false);
+        for (let level = 1; level < hz.levels; level += 1) fullScreen(ctx, hz.reduce, mip(level), [{ binding: 0, resource: mip(level - 1) }], false);
+      };
+    });
+    if (tracer && traced) {
+      const env = draw.environment ?? null;
+      if (env && this.giSky?.source !== env) this.giSky = { source: env, sky: environmentPanorama(env) };
+      const sky = env ? this.giSky.sky : null;
+      const volume = draw.environment?.probeVolume ?? null;
+      const viewProj = multiplyMat48(projection, draw.view);
+      const inverse = invertMat4(viewProj) ?? viewProj;
+      const eye = invertMat4(draw.view) ?? draw.view;
+      const lit = this.frameGi !== null && this.probeGi?.gi === tracer;
+      const groups = this.depthGroups;
+      graph.addPass("reflections.bvh", "compute", (pass) => {
+        pass.read(chain);
+        pass.read(gbuffer);
+        pass.write(traced, "storage");
+        return (ctx) => tracer.traceReflections(
+          ctx.encoder,
+          { depth: mip(0), gbuffer: ctx.texture(gbuffer).createView(), out: hz.traced.createView(), invViewProj: inverse, eye: [eye[12], eye[13], eye[14]], width: this.width, height: this.height, maxRoughness: HIZ_MAX_ROUGHNESS },
+          draw.lights ?? [],
+          sky,
+          volume ? { buffer: groups.probes, layout: volume } : null,
+          lit,
+          ctx.timing
+        );
+      });
+    }
+    graph.addPass("reflections.trace", "render", (pass) => {
+      pass.read(colour);
+      pass.read(chain);
+      pass.read(gbuffer);
+      pass.read(rays[0]);
+      if (traced) pass.read(traced);
+      pass.write(traceOut);
+      return (ctx) => fullScreen(ctx, hz.trace, ctx.texture(traceOut).createView(), [
+        { binding: 1, resource: ctx.texture(colour).createView() },
+        { binding: 2, resource: hz.chain.createView() },
+        { binding: 3, resource: ctx.texture(gbuffer).createView() },
+        { binding: 4, resource: ctx.texture(rays[0]).createView() },
+        { binding: 5, resource: (traced ? hz.traced : hz.blank).createView() }
+      ]);
+    });
+    graph.addPass("reflections.accumulate", "render", (pass) => {
+      pass.read(traceOut);
+      pass.read(then);
+      pass.read(velocity);
+      pass.read(rays[0]);
+      pass.write(now);
+      pass.keep();
+      return (ctx) => fullScreen(ctx, hz.accumulate, ctx.texture(now).createView(), [
+        { binding: 1, resource: ctx.texture(traceOut).createView() },
+        { binding: 2, resource: ctx.texture(then).createView() },
+        { binding: 3, resource: ctx.texture(velocity).createView() },
+        { binding: 4, resource: ctx.texture(rays[0]).createView() },
+        { binding: 5, resource: hz.sampler }
+      ]);
+    });
+    graph.addPass("reflections", "render", (pass) => {
+      pass.read(colour);
+      pass.read(now);
+      pass.read(chain);
+      pass.read(gbuffer);
+      for (const ray of rays) pass.read(ray);
+      pass.write(out);
+      return (ctx) => fullScreen(ctx, hz.resolve, ctx.texture(out).createView(), [
+        { binding: 1, resource: ctx.texture(colour).createView() },
+        { binding: 2, resource: ctx.texture(now).createView() },
+        { binding: 3, resource: hz.chain.createView() },
+        { binding: 4, resource: ctx.texture(gbuffer).createView() },
+        { binding: 5, resource: ctx.texture(rays[0]).createView() },
+        { binding: 6, resource: ctx.texture(rays[1]).createView() }
+      ]);
+    });
+    graph.addPass("reflections.copy", "transfer", (pass) => {
+      pass.read(out, "copySrc");
+      pass.write(colour, "copyDst");
+      return (ctx) => ctx.encoder.copyTextureToTexture({ texture: ctx.texture(out) }, { texture: ctx.texture(colour) }, { width: this.width, height: this.height });
+    });
+    hz.index = 1 - hz.index;
+    hz.valid = true;
+  }
+  /** The still scene's BVH tracer for `key` (F3e's, shared with the reflections' Epic trace, F3f). */
+  tracerFor(key2, occluders) {
+    if (!this.probeGi || this.probeGi.key !== key2) {
+      this.probeGi?.gi.dispose();
+      this.probeGi = { key: key2, gi: new GpuProbeGi(this.device, occluders) };
+    }
+    return this.probeGi.gi;
+  }
+  /**
+   * Temporal upscaling (F4b): the render-sized frame resolved into the TAA history at the display's size (see
+   * upscaler.ts), then sharpened into the upscaled output the frame returns.
+   */
+  addUpscale(graph, temporal, colour, depth, velocity, reactive, display, multisampled) {
+    var _a;
+    const device = this.device;
+    const size = { width: display.width, height: display.height };
+    if (this.taa && (this.taa.history[0].width !== size.width || this.taa.history[0].height !== size.height)) {
+      destroySafely(this.taa.history[0]);
+      destroySafely(this.taa.history[1]);
+      destroySafely(this.taa.uniforms);
+      this.taa = null;
+    }
+    const fresh = !this.taa;
+    if (!this.taa) {
+      const history = () => device.createTexture({ size, format: "rgba16float", usage: 16 | 4 });
+      this.taa = {
+        history: [history(), history()],
+        index: 0,
+        uniforms: device.createBuffer({ size: temporal.uniforms.byteLength, usage: 64 | 8 }),
+        sampler: device.createSampler({ magFilter: "linear", minFilter: "linear", addressModeU: "clamp-to-edge", addressModeV: "clamp-to-edge" }),
+        resolve: [null, null],
+        hdrResolve: [null, null],
+        sharpen: fullScreenPipeline(device, TEMPORAL_SHARPEN_WGSL, "sharpen", this.colourFormat)
+      };
+    }
+    if (this.upscaler && (this.upscaler.width !== size.width || this.upscaler.height !== size.height)) {
+      destroySafely(this.upscaler.output);
+      this.upscaler.output = device.createTexture({ size, format: this.colourFormat, usage: 16 | 4 | 1 | 2 });
+      this.upscaler.width = size.width;
+      this.upscaler.height = size.height;
+    }
+    this.upscaler ?? (this.upscaler = {
+      output: device.createTexture({ size, format: this.colourFormat, usage: 16 | 4 | 1 | 2 }),
+      // RENDER_ATTACHMENT | TEXTURE_BINDING | COPY_SRC | COPY_DST (F4c lands in it)
+      width: size.width,
+      height: size.height,
+      uniforms: device.createBuffer({ size: UPSCALE_UNIFORM_FLOATS * 4, usage: 64 | 8 }),
+      data: new Float32Array(UPSCALE_UNIFORM_FLOATS),
+      resolve: [null, null],
+      sharpen: fullScreenPipeline(device, UPSCALE_SHARPEN_WGSL, "sharpen", this.colourFormat)
+    });
+    const taa = this.taa;
+    const ups = this.upscaler;
+    const k = multisampled ? 1 : 0;
+    (_a = ups.resolve)[k] ?? (_a[k] = fullScreenPipeline(device, upscaleShaderWgsl(multisampled), "resolve", "rgba16float"));
+    const resolve = ups.resolve[k];
+    const read = graph.importTexture("taa.history", taa.history[taa.index]);
+    const write = graph.importTexture("taa.next", taa.history[1 - taa.index]);
+    const output = graph.importTexture("upscaled", ups.output);
+    taa.index = 1 - taa.index;
+    device.queue.writeBuffer(ups.uniforms, 0, upscaleUniforms(temporal.jitter, { width: this.width, height: this.height }, display, !fresh && temporal.uniforms[18] === 1, ups.data));
+    const fullScreen = (ctx, pipeline, target, entries) => {
+      const encoded = ctx.encoder.beginRenderPass({
+        colorAttachments: [{ view: ctx.texture(target).createView(), clearValue: { r: 0, g: 0, b: 0, a: 0 }, loadOp: "clear", storeOp: "store" }],
+        ...ctx.timing
+      });
+      encoded.setPipeline(pipeline);
+      encoded.setBindGroup(0, device.createBindGroup({ layout: pipeline.getBindGroupLayout(0), entries }));
+      encoded.draw(3);
+      encoded.end();
+    };
+    graph.addPass("upscale.resolve", "render", (pass) => {
+      pass.read(colour);
+      pass.read(read);
+      pass.read(depth);
+      pass.read(velocity);
+      if (reactive) pass.read(reactive);
+      pass.write(write);
+      return (ctx) => fullScreen(ctx, resolve, write, [
+        { binding: 0, resource: { buffer: ups.uniforms } },
+        { binding: 1, resource: ctx.texture(colour).createView() },
+        { binding: 2, resource: ctx.texture(read).createView() },
+        { binding: 3, resource: taa.sampler },
+        { binding: 4, resource: ctx.texture(depth).createView() },
+        { binding: 5, resource: ctx.texture(velocity).createView() },
+        { binding: 6, resource: reactive ? ctx.texture(reactive).createView() : this.blankTexture.createView() }
+      ]);
+    });
+    graph.addPass("upscale.sharpen", "render", (pass) => {
+      pass.read(write);
+      pass.write(output);
+      pass.keep();
+      return (ctx) => fullScreen(ctx, ups.sharpen, output, [
+        { binding: 0, resource: { buffer: ups.uniforms } },
+        { binding: 1, resource: ctx.texture(write).createView() }
+      ]);
+    });
+    this.frameOutput = ups.output;
+    return output;
+  }
+  /** Colour motion vectors (from the velocity buffer) or overdraw (from the count in the colour's red) over the frame (F10a). */
+  addViewResolve(graph, colour, velocity, gbuffer, code) {
+    const device = this.device;
+    this.viewResolve ?? (this.viewResolve = { pipeline: fullScreenPipeline(device, VIEW_RESOLVE_WGSL, "resolve", this.colourFormat), uniforms: device.createBuffer({ size: 16, usage: 64 | 8 }) });
+    const vr = this.viewResolve;
+    device.queue.writeBuffer(vr.uniforms, 0, new Float32Array([code, OVERDRAW_FULL, 0, 0]));
+    const size = { width: this.width, height: this.height };
+    const out = graph.createTexture("view mode", { format: this.colourFormat, ...size });
+    graph.addPass("view mode", "render", (pass) => {
+      pass.read(colour);
+      if (velocity) pass.read(velocity);
+      if (gbuffer) pass.read(gbuffer);
+      pass.write(out);
+      return (ctx) => {
+        const encoded = ctx.encoder.beginRenderPass({
+          colorAttachments: [{ view: ctx.texture(out).createView(), clearValue: { r: 0, g: 0, b: 0, a: 0 }, loadOp: "clear", storeOp: "store" }],
+          ...ctx.timing
+        });
+        encoded.setPipeline(vr.pipeline);
+        encoded.setBindGroup(0, device.createBindGroup({
+          layout: vr.pipeline.getBindGroupLayout(0),
+          entries: [
+            { binding: 0, resource: { buffer: vr.uniforms } },
+            { binding: 1, resource: ctx.texture(colour).createView() },
+            { binding: 2, resource: velocity ? ctx.texture(velocity).createView() : this.blankTexture.createView() },
+            { binding: 3, resource: gbuffer ? ctx.texture(gbuffer).createView() : this.blankTexture.createView() }
+          ]
+        }));
+        encoded.draw(3);
+        encoded.end();
+      };
+    });
+    graph.addPass("view mode.copy", "transfer", (pass) => {
+      pass.read(out, "copySrc");
+      pass.write(colour, "copyDst");
+      pass.keep();
+      return (ctx) => ctx.encoder.copyTextureToTexture({ texture: ctx.texture(out) }, { texture: ctx.texture(colour) }, size);
+    });
+  }
+  /** The separable SSS blur (F1d-2; subsurface.ts): across into one target, down into another, copied back over `colour`. */
+  addSubsurface(graph, colour, depth, gbuffer, projection, terms) {
+    const device = this.device;
+    this.sss ?? (this.sss = { pipeline: fullScreenPipeline(device, SSS_WGSL, "blur", this.colourFormat), uniforms: [device.createBuffer({ size: 32, usage: 64 | 8 }), device.createBuffer({ size: 32, usage: 64 | 8 })] });
+    const sss = this.sss;
+    const perMetre = projection[5] * this.height / 2;
+    device.queue.writeBuffer(sss.uniforms[0], 0, new Float32Array([1, 0, 0, perMetre, terms[0], terms[1], 0, 0]));
+    device.queue.writeBuffer(sss.uniforms[1], 0, new Float32Array([0, 1, 1, perMetre, terms[0], terms[1], 0, 0]));
+    const size = { width: this.width, height: this.height };
+    const across = graph.createTexture("sss.across", { format: this.colourFormat, ...size });
+    const down = graph.createTexture("sss.down", { format: this.colourFormat, ...size });
+    const blurPass = (name, out, blurred, uniforms) => graph.addPass(name, "render", (pass) => {
+      pass.read(colour);
+      if (blurred) pass.read(blurred);
+      pass.read(depth);
+      pass.read(gbuffer);
+      pass.write(out);
+      return (ctx) => {
+        const encoded = ctx.encoder.beginRenderPass({ colorAttachments: [{ view: ctx.texture(out).createView(), clearValue: { r: 0, g: 0, b: 0, a: 0 }, loadOp: "clear", storeOp: "store" }], ...ctx.timing });
+        encoded.setPipeline(sss.pipeline);
+        encoded.setBindGroup(0, device.createBindGroup({
+          layout: sss.pipeline.getBindGroupLayout(0),
+          entries: [
+            { binding: 0, resource: { buffer: uniforms } },
+            { binding: 1, resource: ctx.texture(colour).createView() },
+            { binding: 2, resource: ctx.texture(blurred ?? colour).createView() },
+            { binding: 3, resource: ctx.texture(depth).createView() },
+            { binding: 4, resource: ctx.texture(gbuffer).createView() },
+            { binding: 5, resource: { buffer: this.sssProfiles } }
+          ]
+        }));
+        encoded.draw(3);
+        encoded.end();
+      };
+    });
+    blurPass("sss.across", across, null, sss.uniforms[0]);
+    blurPass("sss.down", down, across, sss.uniforms[1]);
+    graph.addPass("sss.copy", "transfer", (pass) => {
+      pass.read(down, "copySrc");
+      pass.write(colour, "copyDst");
+      pass.keep();
+      return (ctx) => ctx.encoder.copyTextureToTexture({ texture: ctx.texture(down) }, { texture: ctx.texture(colour) }, size);
+    });
+  }
+  /** Depth of field, then motion blur (F4c; see cameraEffects.ts), on `target` (`size`), written back into it. */
+  addCameraEffects(graph, target, size, depth, velocity, effects, terms, multisampled) {
+    const device = this.device;
+    this.camera ?? (this.camera = {
+      uniforms: device.createBuffer({ size: CAMERA_UNIFORM_FLOATS * 4, usage: 64 | 8 }),
+      data: new Float32Array(CAMERA_UNIFORM_FLOATS),
+      sampler: device.createSampler({ magFilter: "linear", minFilter: "linear", addressModeU: "clamp-to-edge", addressModeV: "clamp-to-edge" }),
+      frame: 0,
+      pipelines: /* @__PURE__ */ new Map()
+    });
+    const cam = this.camera;
+    const k = multisampled ? "ms" : "";
+    const pipeline = (name, code, entry, formats) => {
+      let made = cam.pipelines.get(name + k);
+      if (!made) {
+        const module = device.createShaderModule({ code: code() });
+        made = device.createRenderPipeline({ layout: "auto", vertex: { module, entryPoint: "vs" }, fragment: { module, entryPoint: entry, targets: formats.map((format) => ({ format })) }, primitive: { topology: "triangle-list" } });
+        cam.pipelines.set(name + k, made);
+      }
+      return made;
+    };
+    device.queue.writeBuffer(cam.uniforms, 0, cameraUniforms(effects, terms, size, { width: this.width, height: this.height }, cam.frame, cam.data));
+    cam.frame += 1;
+    const draw = (ctx, pipe, targets, entries) => {
+      const encoded = ctx.encoder.beginRenderPass({
+        colorAttachments: targets.map((t) => ({ view: ctx.texture(t).createView(), clearValue: { r: 0, g: 0, b: 0, a: 0 }, loadOp: "clear", storeOp: "store" })),
+        ...ctx.timing
+      });
+      encoded.setPipeline(pipe);
+      encoded.setBindGroup(0, device.createBindGroup({ layout: pipe.getBindGroupLayout(0), entries: [{ binding: 0, resource: { buffer: cam.uniforms } }, ...entries] }));
+      encoded.draw(3);
+      encoded.end();
+    };
+    const copyBack = (from) => graph.addPass(`${from.name}.copy`, "transfer", (pass) => {
+      pass.read(from, "copySrc");
+      pass.write(target, "copyDst");
+      return (ctx) => ctx.encoder.copyTextureToTexture({ texture: ctx.texture(from) }, { texture: ctx.texture(target) }, size);
+    });
+    const half2 = { width: Math.max(1, Math.ceil(size.width / 2)), height: Math.max(1, Math.ceil(size.height / 2)) };
+    if (effects.dof) {
+      const halfColour = graph.createTexture("dof.colour", { format: "rgba16float", ...half2 });
+      const halfCoc = graph.createTexture("dof.coc", { format: "r16float", ...half2 });
+      const blurred = graph.createTexture("dof.blurred", { format: "rgba16float", ...half2 });
+      const near = graph.createTexture("dof.near", { format: "r16float", ...half2 });
+      const out = graph.createTexture("dof.out", { format: this.colourFormat, ...size });
+      const prefilter = pipeline("dof.prefilter", () => dofPrefilterWgsl(multisampled), "prefilter", ["rgba16float", "r16float"]);
+      const gather = pipeline("dof.gather", () => DOF_GATHER_WGSL, "gather", ["rgba16float", "r16float"]);
+      const composite = pipeline("dof.composite", () => dofCompositeWgsl(multisampled), "composite", [this.colourFormat]);
+      graph.addPass("dof.prefilter", "render", (pass) => {
+        pass.read(target);
+        pass.read(depth);
+        pass.write(halfColour);
+        pass.write(halfCoc);
+        return (ctx) => draw(ctx, prefilter, [halfColour, halfCoc], [{ binding: 1, resource: ctx.texture(depth).createView() }, { binding: 2, resource: ctx.texture(target).createView() }]);
+      });
+      graph.addPass("dof.gather", "render", (pass) => {
+        pass.read(halfColour);
+        pass.read(halfCoc);
+        pass.write(blurred);
+        pass.write(near);
+        return (ctx) => draw(ctx, gather, [blurred, near], [{ binding: 1, resource: ctx.texture(halfColour).createView() }, { binding: 2, resource: ctx.texture(halfCoc).createView() }]);
+      });
+      graph.addPass("dof.composite", "render", (pass) => {
+        pass.read(target);
+        pass.read(depth);
+        pass.read(blurred);
+        pass.read(near);
+        pass.read(halfCoc);
+        pass.write(out);
+        return (ctx) => draw(ctx, composite, [out], [
+          { binding: 1, resource: ctx.texture(depth).createView() },
+          { binding: 2, resource: ctx.texture(target).createView() },
+          { binding: 3, resource: ctx.texture(blurred).createView() },
+          { binding: 4, resource: ctx.texture(near).createView() },
+          { binding: 5, resource: cam.sampler },
+          { binding: 6, resource: ctx.texture(halfCoc).createView() }
+        ]);
+      });
+      copyBack(out);
+    }
+    if (effects.motionBlur && effects.motionBlur.fraction > 0) {
+      const tileSize = { width: Math.max(1, Math.ceil(size.width / MOTION_TILE)), height: Math.max(1, Math.ceil(size.height / MOTION_TILE)) };
+      const tiles = graph.createTexture("motion.tiles", { format: "rg16float", ...tileSize });
+      const neighbours = graph.createTexture("motion.neighbours", { format: "rg16float", ...tileSize });
+      const out = graph.createTexture("motion.out", { format: this.colourFormat, ...size });
+      const tilePipe = pipeline("motion.tiles", () => MOTION_TILES_WGSL, "tiles", ["rg16float"]);
+      const neighbourPipe = pipeline("motion.neighbours", () => MOTION_NEIGHBOURS_WGSL, "neighbours", ["rg16float"]);
+      const gatherPipe = pipeline("motion.gather", () => motionGatherWgsl(multisampled), "gather", [this.colourFormat]);
+      graph.addPass("motion.tiles", "render", (pass) => {
+        pass.read(velocity);
+        pass.write(tiles);
+        return (ctx) => draw(ctx, tilePipe, [tiles], [{ binding: 1, resource: ctx.texture(velocity).createView() }]);
+      });
+      graph.addPass("motion.neighbours", "render", (pass) => {
+        pass.read(tiles);
+        pass.write(neighbours);
+        return (ctx) => {
+          const encoded = ctx.encoder.beginRenderPass({ colorAttachments: [{ view: ctx.texture(neighbours).createView(), clearValue: { r: 0, g: 0, b: 0, a: 0 }, loadOp: "clear", storeOp: "store" }], ...ctx.timing });
+          encoded.setPipeline(neighbourPipe);
+          encoded.setBindGroup(0, device.createBindGroup({ layout: neighbourPipe.getBindGroupLayout(0), entries: [{ binding: 0, resource: ctx.texture(tiles).createView() }] }));
+          encoded.draw(3);
+          encoded.end();
+        };
+      });
+      graph.addPass("motion.gather", "render", (pass) => {
+        pass.read(target);
+        pass.read(depth);
+        pass.read(velocity);
+        pass.read(neighbours);
+        pass.write(out);
+        return (ctx) => draw(ctx, gatherPipe, [out], [
+          { binding: 1, resource: ctx.texture(depth).createView() },
+          { binding: 2, resource: ctx.texture(target).createView() },
+          { binding: 3, resource: ctx.texture(velocity).createView() },
+          { binding: 4, resource: ctx.texture(neighbours).createView() }
+        ]);
+      });
+      copyBack(out);
+    }
+  }
   /**
    * The reactive mask (F4a): how much the see-through pass changed each pixel,
    * from the opaque scene copied before it against the frame after it.
@@ -22359,6 +34671,12 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
   addTemporal(graph, uniforms, colour, depth, multisampled, velocity = null, reactive = null) {
     var _a, _b;
     const device = this.device;
+    if (this.taa && (this.taa.history[0].width !== this.width || this.taa.history[0].height !== this.height)) {
+      destroySafely(this.taa.history[0]);
+      destroySafely(this.taa.history[1]);
+      destroySafely(this.taa.uniforms);
+      this.taa = null;
+    }
     if (!this.taa) {
       const size = { width: this.width, height: this.height };
       const history = () => device.createTexture({ size, format: "rgba16float", usage: 16 | 4 });
@@ -22432,18 +34750,47 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     return this.msaa;
   }
   /**
-   * The pipelines a material draws with: the plain shader's, or its graph's
-   * variant; multisampled for an anti-aliased frame (I1); writing the
-   * reflection targets for a frame with reflections (I3). Built on first use.
+   * Compile the shader permutations `materials` need (F1e), off the frame: each
+   * material graph's (with its static switches) for the sample count, reflections
+   * and prepass given, asynchronously where the device can. A material whose
+   * permutation is still compiling draws as a plain one, so a new graph never
+   * stalls a frame. Resolves when all are ready.
    */
-  pipelinesOf(material, samples = 1, reflect = false, prepass = false) {
-    const graph = compiledGraphOf2(material);
+  prepareMaterials(materials, options = {}) {
+    const samples = options.samples ?? 1;
+    const reflect = options.reflect === true;
+    const prepass = options.prepass === true;
+    const jobs = [];
+    for (const material2 of materials) {
+      const graph = compiledGraphOf2(material2);
+      if (!graph) continue;
+      const vertex = graph.outputs.worldPositionOffset !== void 0 ? compiledGraphOf2(material2, ["worldPositionOffset"]) : null;
+      const key2 = `${graph.key}|${vertex?.key ?? ""}|${samples}|${reflect ? 1 : 0}|${prepass ? 1 : 0}`;
+      if (this.variants.has(key2) || this.compiling.has(key2)) continue;
+      if (typeof this.device.createRenderPipelineAsync !== "function") {
+        this.variants.set(key2, this.pipelinesFor(sceneShader(graph, reflect, this.hdr, vertex), samples, reflect, prepass));
+        continue;
+      }
+      this.compiling.add(key2);
+      const pending = this.pipelinesFor(sceneShader(graph, reflect, this.hdr, vertex), samples, reflect, prepass, (d) => this.device.createRenderPipelineAsync(d));
+      jobs.push(
+        Promise.all(Object.entries(pending).map(async ([k, v]) => [k, await v])).then((entries) => {
+          if (!this.destroyed) this.variants.set(key2, Object.fromEntries(entries));
+        }).finally(() => this.compiling.delete(key2))
+      );
+    }
+    return Promise.all(jobs).then(() => void 0);
+  }
+  pipelinesOf(material2, samples = 1, reflect = false, prepass = false) {
+    const graph = compiledGraphOf2(material2);
+    const vertex = graph && graph.outputs.worldPositionOffset !== void 0 ? compiledGraphOf2(material2, ["worldPositionOffset"]) : null;
     if (!graph && samples === 1 && !reflect && !prepass) return this.pipeline;
-    const key = `${graph?.key ?? ""}|${samples}|${reflect ? 1 : 0}|${prepass ? 1 : 0}`;
-    let set = this.variants.get(key);
+    const key2 = `${graph?.key ?? ""}|${vertex?.key ?? ""}|${samples}|${reflect ? 1 : 0}|${prepass ? 1 : 0}`;
+    let set = this.variants.get(key2);
+    if (!set && this.compiling.has(key2)) return this.pipelinesOf({ name: "", baseColorFactor: [1, 1, 1, 1], baseColorImage: null }, samples, reflect, prepass);
     if (!set) {
-      set = this.pipelinesFor(sceneShader(graph, reflect, this.hdr), samples, reflect, prepass);
-      this.variants.set(key, set);
+      set = this.pipelinesFor(sceneShader(graph, reflect, this.hdr, vertex), samples, reflect, prepass);
+      this.variants.set(key2, set);
     }
     return set;
   }
@@ -22453,14 +34800,21 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
    */
   clusterLights(draw) {
     const { ordered, globalCount } = orderLights2(draw.lights ?? []);
-    const clusters = ordered.length > globalCount ? buildLightClusters2(ordered, globalCount, draw.view, draw.projection, this.width, this.height) : null;
+    const onGpu = this.hdr && draw.gpuCull === true;
+    const cellGrid = onGpu && ordered.length > globalCount ? clusterGrid(draw.projection, this.width, this.height) : null;
+    this.frameLightClusters = cellGrid !== null;
+    if (cellGrid) {
+      this.lightClusterer ?? (this.lightClusterer = new GpuLightClusters(this.device));
+      this.lightClusterer.prepare(cellGrid, draw.view, this.width, this.height, globalCount, ordered.length);
+    }
+    const clusters = cellGrid ? { params: GpuLightClusters.params(cellGrid), table: null } : !onGpu && ordered.length > globalCount ? buildLightClusters2(ordered, globalCount, draw.view, draw.projection, this.width, this.height) : null;
     const buffers = this.depthGroups.clusters;
-    if (clusters) {
-      this.device.queue.writeBuffer(buffers.table, 0, clusters.table);
-      this.device.queue.writeBuffer(buffers.index, 0, clusters.indices, 0, Math.max(4, Math.ceil(clusters.used / 4) * 4));
+    if (clusters?.table) {
+      this.device.queue.writeBuffer(buffers.data, 0, clusters.table);
+      this.device.queue.writeBuffer(buffers.data, CLUSTER_CELLS3 * 8, clusters.indices, 0, Math.max(4, Math.ceil(clusters.used / 4) * 4));
     }
     const near = draw.shadow?.near ?? null;
-    const frame = new Float32Array(FRAME_BYTES / 4);
+    const frame = new Float32Array(FRAME_BYTES2 / 4);
     frame.set(clusters?.params ?? [1, 1, 1, 1], 0);
     frame.set([clusters ? globalCount : ordered.length, clusters ? 1 : 0], 4);
     if (near) {
@@ -22472,12 +34826,14 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
       this.uploadLocalTiles(this.frameLocalTiles);
       frame.set([1, LOCAL_SHADOW_BIAS2, LOCAL_SHADOW_SLOPE_BIAS2], 28);
     } else if (local && local.tiles.length > 0) frame.set([1, local.bias, local.slopeBias], 28);
-    const grid = draw.environment?.lightProbes ?? null;
+    const volume = this.hdr ? draw.environment?.probeVolume ?? null : null;
+    const grid = volume ?? draw.environment?.lightProbes ?? null;
     if (grid) {
-      this.uploadProbeGrid(grid);
-      frame.set([...grid.min, 1], 32);
+      if (volume) this.uploadProbeTexture(volume, probeVolumeTexels(volume), PROBE_VOLUME_SLOTS2);
+      else this.uploadProbeTexture(grid, lightProbeTexels2(grid), 6);
+      frame.set([...grid.min, volume ? 2 : 1], 32);
       frame.set([0, 1, 2].map((a) => (grid.counts[a] - 1) / (grid.max[a] - grid.min[a] || 1)), 36);
-      frame.set(grid.counts, 40);
+      frame.set([...grid.counts, volume ? PROBE_VOLUME_SLOTS2 : 6], 40);
     }
     if (this.hdr) {
       frame.set(this.iblSh, 44);
@@ -22491,25 +34847,72 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
       frame.set(sun.cascades.map((c) => c.texel), FRAME_CASCADES + 72);
       frame.set(sun.cascades.map((c) => c.depth), FRAME_CASCADES + 76);
     }
-    frame.set([sun?.softness ?? 0, this.frameContact ? 1 : 0, this.frameGtao ? 1 : 0, 0], FRAME_CASCADES + 80);
+    frame.set([sun?.softness ?? 0, this.frameContact ? 1 : 0, this.frameGtao ? 1 : 0, this.frameSsgi ? 1 : 0], FRAME_CASCADES + 80);
     if (this.frameDepthView) {
       frame.set(this.frameDepthView.viewProj, FRAME_CASCADES + 84);
-      frame.set([this.frameDepthView.terms[0], this.frameDepthView.terms[1], 1, 0], FRAME_CASCADES + 100);
+      frame.set([this.frameDepthView.terms[0], this.frameDepthView.terms[1], 1, this.frameVsm ? 1 : 0], FRAME_CASCADES + 100);
     }
+    if (this.hdr) frame.set(this.aerialFrame(draw), FRAME_AERIAL);
+    if (this.hdr) frame.set(packFogFrame(this.frameFog, this.fogTerms), FRAME_FOG);
+    if (this.hdr) frame.set([viewModeCode(draw.viewMode), draw.texelDensity ?? DEFAULT_TEXEL_DENSITY, this.frameSss ? 1 : 0], FRAME_DEBUG);
+    if (this.hdr) frame.set(packWeatherFrame(draw.weather, draw.time ?? 0, this.weatherTerms), FRAME_WEATHER);
+    if (this.hdr) frame.set(packWaterFrame(draw.water ?? null, this.waterTerms), FRAME_WATER);
     this.device.queue.writeBuffer(buffers.params, 0, frame);
     this.uploadLocalShadows(local);
     return { ordered, globalCount, clusters };
   }
-  /** Upload a probe grid (EP9) as a 3D texture, once per grid, rebuilding group 1 to point at it. */
-  uploadProbeGrid(grid) {
+  /**
+   * This draw's volumetric fog (F5b), on the linear-light renderer, for a
+   * perspective camera under a rig whose fog is volumetric: the grid for the
+   * frame's size, the sun (shadowed by its cascades when it casts) and the
+   * sky's mean radiance, and the camera, uniforms written. Null (and the
+   * history dropped) otherwise.
+   */
+  prepareFog(draw) {
+    const settings = this.hdr && draw.projection[15] === 0 ? resolveVolumetricFog(draw.fog) : null;
+    if (!settings) {
+      this.volumetricFog?.reset();
+      return null;
+    }
+    const fog = this.volumetricFog ?? (this.volumetricFog = new GpuVolumetricFog(this.device));
+    const sky = [0, 1, 2].map((c) => Math.max(0, this.iblSh[c] * 0.282095));
+    const cascades = this.frameCascades ? { cascades: this.frameCascades.cascades, strength: this.frameCascades.strength } : null;
+    const { frame, remade } = fog.prepare(
+      { fog: settings, light: { sun: fogSun(draw.lights), sky }, grid: fogGrid(this.width, this.height), camera: fogCamera(draw.view, draw.projection), cascades },
+      draw.temporal === true
+    );
+    if (remade) {
+      const groups = this.depthGroups;
+      groups.fogVolume.texture = fog.volume;
+      Object.assign(groups, groups.makeGroups(groups.atlas, groups.probes));
+      if (this.msaa) this.msaa.groups = groups.makeGroupsMs(groups.atlas, groups.probes, this.msaa.blank, this.msaa.depth);
+    }
+    return frame;
+  }
+  /**
+   * The physical sky's aerial perspective for this draw's camera (F5a-2): its
+   * froxels built in compute ahead of the frame, and the terms the shader
+   * finds a fragment's with; all zero (off) without one.
+   */
+  aerialFrame(draw) {
+    const sky = draw.atmosphere ?? null;
+    const terms = packAerialFrame(sky, draw.view, draw.projection, this.aerialTerms);
+    if (sky && terms[3] === 1) (this.atmosphere ?? (this.atmosphere = new GpuAtmosphere(this.device))).aerial(sky, aerialCamera3(draw.view, draw.projection), this.depthGroups.aerial);
+    return terms;
+  }
+  /**
+   * Upload a probe grid (EP9) or volume (F3d-3) as a 3D texture, `slots` texels
+   * a probe along x, once per grid, rebuilding group 1 to point at it.
+   */
+  uploadProbeTexture(grid, texels, slots) {
     const groups = this.depthGroups;
     if (groups.probeSource === grid) return;
     const [nx, ny, nz] = grid.counts;
     if (!groups.probesBlank) destroySafely(groups.probes);
-    groups.probes = this.device.createTexture({ size: { width: nx * 6, height: ny, depthOrArrayLayers: nz }, dimension: "3d", format: "rgba32float", usage: 4 | 2 });
+    groups.probes = this.device.createBuffer({ size: nx * slots * ny * nz * 16, usage: 128 | 8 });
     groups.probesBlank = false;
     groups.probeSource = grid;
-    this.device.queue.writeTexture({ texture: groups.probes }, lightProbeTexels2(grid), { bytesPerRow: nx * 6 * 16, rowsPerImage: ny }, { width: nx * 6, height: ny, depthOrArrayLayers: nz });
+    this.device.queue.writeBuffer(groups.probes, 0, texels, 0, nx * slots * ny * nz * 4);
     Object.assign(groups, groups.makeGroups(groups.atlas, groups.probes));
     if (this.msaa) this.msaa.groups = groups.makeGroupsMs(groups.atlas, groups.probes, this.msaa.blank, this.msaa.depth);
   }
@@ -22560,13 +34963,15 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
       if (this.destroyed) return;
       if ((slot.seq ?? 0) >= this.latestSeq && slot.buffer.size === this.bytesPerRow * this.height) {
         const padded = new Uint8Array(slot.buffer.getMappedRange());
-        this.latest = unpadRows(padded, this.width, this.height, this.bytesPerRow, this.latest);
+        this.latest = unpadRows(padded, this.width, this.height, this.bytesPerRow, this.latest && this.latest.length === this.width * this.height * 4 ? this.latest : null);
         this.latestSeq = slot.seq ?? 0;
       }
       slot.buffer.unmap();
+      this.framesLanded += 1;
     } catch {
     } finally {
       slot.busy = false;
+      if (!this.readback.includes(slot)) destroySafely(slot.buffer);
     }
   }
   /** Grow the per-draw uniform buffer to hold at least `count` draws. */
@@ -22606,12 +35011,23 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
       mesh.primitives.forEach((primitive, i) => {
         const gpu = cached[i];
         if (!primitive.dynamic || !gpu || gpu.revision === primitive.dynamic.revision) return;
+        if (primitive.dynamic.gpu) {
+          this.skinOnGpu(primitive, gpu, primitive.dynamic.gpu);
+          gpu.revision = primitive.dynamic.revision;
+          gpu.movedFrame = this.frameIndex;
+          return;
+        }
         const normals = primitive.normals ?? computeSmoothNormals2(primitive.positions, primitive.indices);
         const vertices = interleaveVerticesWithTangents(primitive.positions, normals, primitive.uvs, primitive.uvs2 ?? null, primitive.blend ?? null, primitive.sway ?? null, null);
-        gpu.previousBuffer ?? (gpu.previousBuffer = this.device.createBuffer({ size: Math.max(40, vertices.byteLength), usage: 32 | 8 }));
-        const encoder = this.device.createCommandEncoder();
-        encoder.copyBufferToBuffer(gpu.vertexBuffer, 0, gpu.previousBuffer, 0, Math.max(40, vertices.byteLength));
-        this.device.queue.submit([encoder.finish()]);
+        if (this.keepsPrevious) {
+          gpu.previousBuffer ?? (gpu.previousBuffer = this.device.createBuffer({ size: Math.max(40, vertices.byteLength), usage: 32 | 8 }));
+          const encoder = this.device.createCommandEncoder();
+          encoder.copyBufferToBuffer(gpu.vertexBuffer, 0, gpu.previousBuffer, 0, Math.max(40, vertices.byteLength));
+          this.device.queue.submit([encoder.finish()]);
+        } else if (gpu.previousBuffer) {
+          destroySafely(gpu.previousBuffer);
+          gpu.previousBuffer = void 0;
+        }
         this.device.queue.writeBuffer(gpu.vertexBuffer, 0, vertices);
         gpu.revision = primitive.dynamic.revision;
         gpu.movedFrame = this.frameIndex;
@@ -22623,9 +35039,9 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
       const vertices = interleaveVerticesWithTangents(primitive.positions, normals, primitive.uvs, primitive.uvs2 ?? null, primitive.blend ?? null, primitive.sway ?? null, primitive.dynamic ? null : primitive.tangents ?? null);
       const vertexBuffer = this.device.createBuffer({
         size: Math.max(40, vertices.byteLength),
-        // A dynamic one is also copied from, to keep its last vertices (F0c).
-        usage: 32 | 8 | (primitive.dynamic ? 4 : 0)
-        // VERTEX | COPY_DST (| COPY_SRC)
+        // A dynamic one is also copied from, to keep its last vertices (F0c), and written by GPU skinning (F7a).
+        usage: 32 | 8 | (primitive.dynamic ? 4 | 128 : 0)
+        // VERTEX | COPY_DST (| COPY_SRC | STORAGE)
       });
       this.device.queue.writeBuffer(vertexBuffer, 0, vertices);
       const indexBuffer = this.device.createBuffer({
@@ -22644,6 +35060,227 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     this.meshes.set(mesh, uploaded);
     return uploaded;
   }
+  /**
+   * Skin one primitive on the GPU (F7a; gpuSkinning.ts): its last vertices copied for the motion vectors,
+   * then the compute pass morphs and skins its bind shape into its vertex buffer.
+   */
+  skinOnGpu(primitive, gpu, pose) {
+    const device = this.device;
+    const vertices = primitive.positions.length / 3;
+    const byteLength = vertices * 64;
+    if (!gpu.skin) {
+      this.skinPipeline ?? (this.skinPipeline = device.createComputePipeline({ layout: "auto", compute: { module: cachedShaderModule(device, SKIN_WGSL), entryPoint: "main" } }));
+      const storage = (data) => {
+        const buffer = device.createBuffer({ size: Math.max(16, Math.ceil(data.byteLength / 16) * 16), usage: 128 | 8 });
+        device.queue.writeBuffer(buffer, 0, data.buffer, data.byteOffset, data.byteLength);
+        return buffer;
+      };
+      const targets = primitive.morphTargets ?? [];
+      const csr = morphCsr(targets, vertices);
+      const influences = primitive.joints && primitive.weights ? packInfluences(primitive.joints, primitive.weights) : new Uint32Array(vertices * 8);
+      const buffers = [storage(packBindShape(primitive.positions, primitive.normals)), storage(influences), storage(csr.starts), storage(csr.entries)];
+      const jointBytes = Math.max(64, pose.matrices.length * 4);
+      const joints = device.createBuffer({ size: jointBytes, usage: 128 | 8 });
+      const weights = device.createBuffer({ size: Math.max(16, targets.length * 4), usage: 128 | 8 });
+      const params = device.createBuffer({ size: 16, usage: 64 | 8 });
+      const group = device.createBindGroup({
+        layout: this.skinPipeline.getBindGroupLayout(0),
+        entries: [
+          { binding: 0, resource: { buffer: params } },
+          { binding: 1, resource: { buffer: buffers[0] } },
+          { binding: 2, resource: { buffer: buffers[1] } },
+          { binding: 3, resource: { buffer: joints } },
+          { binding: 4, resource: { buffer: buffers[2] } },
+          { binding: 5, resource: { buffer: buffers[3] } },
+          { binding: 6, resource: { buffer: weights } },
+          { binding: 7, resource: { buffer: gpu.vertexBuffer } }
+        ]
+      });
+      gpu.skin = { buffers, joints, weights, params, group, vertices, jointBytes };
+    }
+    const skin = gpu.skin;
+    const jointData = pose.dualQuaternion ? dualQuaternions(pose.matrices) : pose.matrices;
+    if (jointData.byteLength > 0) device.queue.writeBuffer(skin.joints, 0, jointData.buffer, jointData.byteOffset, Math.min(jointData.byteLength, skin.jointBytes));
+    if (pose.morphWeights && pose.morphWeights.length > 0) device.queue.writeBuffer(skin.weights, 0, pose.morphWeights.buffer, pose.morphWeights.byteOffset, pose.morphWeights.byteLength);
+    device.queue.writeBuffer(skin.params, 0, skinParams(vertices, pose.matrices.length / 16, pose.dualQuaternion, primitive.morphTargets?.length ?? 0));
+    gpu.previousBuffer ?? (gpu.previousBuffer = device.createBuffer({ size: Math.max(40, byteLength), usage: 32 | 8 | 4 }));
+    const encoder = device.createCommandEncoder();
+    encoder.copyBufferToBuffer(gpu.vertexBuffer, 0, gpu.previousBuffer, 0, Math.max(40, byteLength));
+    const pass = encoder.beginComputePass();
+    pass.setPipeline(this.skinPipeline);
+    pass.setBindGroup(0, skin.group);
+    pass.dispatchWorkgroups(Math.ceil(vertices / SKIN_WORKGROUP));
+    if (pose.cloth && primitive.cloth) this.clothOnGpu(pass, primitive, gpu, pose.cloth);
+    pass.end();
+    device.queue.submit([encoder.finish()]);
+  }
+  /** One step of a primitive's cloth on the GPU (F7d): predict, the Jacobi sweeps, then positions and normals into its vertices. */
+  clothOnGpu(pass, primitive, gpu, step) {
+    const device = this.device;
+    const settings = primitive.cloth;
+    const count = primitive.positions.length / 3;
+    const pipeline = (code) => device.createComputePipeline({ layout: "auto", compute: { module: cachedShaderModule(device, code), entryPoint: "main" } });
+    this.clothPipelines ?? (this.clothPipelines = { predict: pipeline(CLOTH_PREDICT_WGSL), solve: pipeline(CLOTH_SOLVE_WGSL), finish: pipeline(CLOTH_FINISH_WGSL) });
+    const pipes = this.clothPipelines;
+    if (!gpu.cloth) {
+      const storage = (data) => {
+        const buffer = device.createBuffer({ size: Math.max(16, Math.ceil(data.byteLength / 16) * 16), usage: 128 | 8 });
+        device.queue.writeBuffer(buffer, 0, data.buffer, data.byteOffset, data.byteLength);
+        return buffer;
+      };
+      const topology = clothTopology(primitive.positions, primitive.indices, settings);
+      const rest = new Float32Array(count * 4);
+      for (let v = 0; v < count; v += 1) rest.set(primitive.positions.subarray(v * 3, v * 3 + 3), v * 4);
+      const particles = new Float32Array(count * 2);
+      for (let v = 0; v < count; v += 1) particles.set([topology.invMass[v], topology.maxDistance[v]], v * 2);
+      const triangles = vertexTriangles(primitive.indices, count);
+      const [posA, posB, previous, particle, starts, entries, triStarts, tris, indices] = [rest, rest, rest, particles, topology.starts, topology.entries, triangles.starts, triangles.tris, primitive.indices].map(storage);
+      const params = device.createBuffer({ size: 64, usage: 64 | 8 });
+      const capsules2 = device.createBuffer({ size: MAX_CLOTH_CAPSULES * 32, usage: 128 | 8 });
+      const group = (pipe, buffers) => device.createBindGroup({ layout: pipe.getBindGroupLayout(0), entries: [params, ...buffers].map((buffer, binding) => ({ binding, resource: { buffer } })) });
+      gpu.cloth = {
+        params,
+        capsules: capsules2,
+        groups: [
+          group(pipes.predict, [gpu.vertexBuffer, posA, previous, particle]),
+          group(pipes.solve, [posA, posB, starts, entries, particle, gpu.vertexBuffer, capsules2]),
+          group(pipes.solve, [posB, posA, starts, entries, particle, gpu.vertexBuffer, capsules2]),
+          group(pipes.finish, [gpu.vertexBuffer, posA, triStarts, tris, indices])
+        ],
+        buffers: [posA, posB, previous, particle, starts, entries, triStarts, tris, indices]
+      };
+    }
+    const cloth = gpu.cloth;
+    const capsules = step.capsules.slice(0, MAX_CLOTH_CAPSULES);
+    device.queue.writeBuffer(cloth.params, 0, clothParams(count, capsules.length, step.dt, settings.damping ?? 0.02, settings.stretch ?? 1, settings.bend ?? 0.3, settings.windResponse ?? 1, settings.thickness ?? 0.01, CLOTH_RELAX, step.wind, CLOTH_GRAVITY));
+    if (capsules.length > 0) {
+      const packed = packCapsules(capsules);
+      device.queue.writeBuffer(cloth.capsules, 0, packed.buffer, packed.byteOffset, packed.byteLength);
+    }
+    const groups = Math.ceil(count / CLOTH_WORKGROUP);
+    pass.setPipeline(pipes.predict);
+    pass.setBindGroup(0, cloth.groups[0]);
+    pass.dispatchWorkgroups(groups);
+    pass.setPipeline(pipes.solve);
+    for (let it = 0; it < CLOTH_ITERATIONS; it += 1) {
+      pass.setBindGroup(0, cloth.groups[1 + (it & 1)]);
+      pass.dispatchWorkgroups(groups);
+    }
+    pass.setPipeline(pipes.finish);
+    pass.setBindGroup(0, cloth.groups[3]);
+    pass.dispatchWorkgroups(groups);
+  }
+  /**
+   * Blended hair cards (F7c) draw their triangles back to front from the eye, sorted on the CPU (in the first
+   * copy's space) and written over the primitive's indices when the eye has moved a centimetre.
+   */
+  sortHairCards(draws, eye) {
+    for (const entry of draws) {
+      if (entry.alpha !== 2 || entry.primitive.material.character?.kind !== "hair") continue;
+      const inverse = invertMat4(entry.models[0]);
+      if (!inverse) continue;
+      const local = [0, 1, 2].map((r) => inverse[r] * eye[0] + inverse[4 + r] * eye[1] + inverse[8 + r] * eye[2] + inverse[12 + r]);
+      const key2 = local.map((c) => Math.round(c * 100)).join(",");
+      if (this.hairSorted.get(entry.geometry) === key2) continue;
+      this.hairSorted.set(entry.geometry, key2);
+      const sorted = sortTrianglesBackToFront(entry.primitive.positions, entry.primitive.indices, local);
+      this.device.queue.writeBuffer(entry.geometry.indexBuffer, 0, sorted.buffer, sorted.byteOffset, sorted.byteLength);
+    }
+  }
+  /** Give the renderer its volumetric effects (F8b), replacing any it had. */
+  setVolumes(effects) {
+    this.volumes?.dispose();
+    this.volumes = effects.length > 0 && this.hdr ? new GpuVolumes(this.device, this.colourFormat, effects) : null;
+  }
+  /** Start a volumetric effect at a point (its base's centre) (F8b). */
+  volumeTrigger(index, at) {
+    this.volumes?.trigger(index, at);
+  }
+  /** The live volumes (F8b), for tests and the profiler. */
+  get liveVolumes() {
+    return this.volumes;
+  }
+  /** The volumes' march over the scene (F8b): a full-screen pass reading the depths, blending colour × T + L. */
+  addVolumes(graph, colour, depth, draw, eye) {
+    const volumes = this.volumes;
+    const projection = this.frameDepthView ? this.frameDepthView.viewProj : multiplyMat48(draw.projection, draw.view);
+    const inverse = invertMat4(projection) ?? projection;
+    const sun = draw.lightDirection ?? [0, 1, 0];
+    const sl = Math.hypot(sun[0], sun[1], sun[2]) || 1;
+    const frame = { invViewProj: inverse, eye, sun: [sun[0] / sl, sun[1] / sl, sun[2] / sl], sunColor: [1, 1, 1], ambient: draw.ambient ?? 0.3, depthTerms: this.frameDepthView?.terms ?? [0, 1], width: this.width, height: this.height };
+    graph.addPass("volumes", "render", (pass) => {
+      pass.read(colour, "attachment");
+      pass.write(colour);
+      pass.read(depth);
+      return (ctx) => {
+        const encoded = ctx.encoder.beginRenderPass({ colorAttachments: [{ view: ctx.texture(colour).createView(), loadOp: "load", storeOp: "store" }], ...ctx.timing });
+        volumes.march(encoded, frame, ctx.texture(depth));
+        encoded.end();
+      };
+    });
+  }
+  /** Give the renderer its particle emitters (F8a), replacing any it had; none clears them. */
+  setParticles(specs, looks = []) {
+    this.particles?.dispose();
+    this.particles = specs.length > 0 && this.hdr ? new GpuParticles(this.device, this.colourFormat, specs, looks) : null;
+  }
+  /** Move where an emitter's rate spawns (F5e: rain and snow over the eye). */
+  particleOrigin(index, at) {
+    this.particles?.setOrigin(index, at);
+  }
+  /** Fire an emitter's burst (F8a). */
+  particleBurst(index, at, dir = [0, 0, 0], scale = 1) {
+    this.particles?.burst(index, at, dir, scale);
+  }
+  /** An emitter's ring (F8a): its particles' buffer, for tests and the profiler. */
+  particleRing(index) {
+    return this.particles?.ring(index) ?? null;
+  }
+  /** The particles' frame: simulated after the prepass, drawn after the see-through scene (F8a). */
+  addParticles(graph, colour, depth, gbuffer, f3) {
+    const particles = this.particles;
+    const view = f3.draw.view;
+    const dt = f3.draw.particleDt ?? 1 / 60;
+    this.particleTime += dt;
+    const sun = f3.draw.lightDirection ?? [0, 1, 0];
+    const sl = Math.hypot(sun[0], sun[1], sun[2]) || 1;
+    const frame = {
+      dt,
+      time: this.particleTime,
+      viewProj: f3.viewProj,
+      width: this.width,
+      height: this.height,
+      depthTerms: this.frameDepthView.terms,
+      eye: f3.eye,
+      right: [view[0], view[4], view[8]],
+      up: [view[1], view[5], view[9]],
+      light: { direction: [sun[0] / sl, sun[1] / sl, sun[2] / sl], color: [1, 1, 1], ambient: f3.draw.ambient ?? 0.3, lights: f3.globalCount }
+    };
+    graph.addPass("particles.simulate", "compute", (pass) => {
+      pass.read(depth);
+      pass.read(gbuffer);
+      pass.keep();
+      return (ctx) => particles.simulate(ctx.encoder, frame, ctx.texture(depth), ctx.texture(gbuffer));
+    });
+    graph.addPass("particles", "render", (pass) => {
+      pass.read(colour, "attachment");
+      pass.write(colour);
+      pass.read(depth, "attachment");
+      return (ctx) => {
+        const encoded = ctx.encoder.beginRenderPass({
+          colorAttachments: [{ view: ctx.texture(colour).createView(), loadOp: "load", storeOp: "store" }],
+          depthStencilAttachment: { view: ctx.texture(depth).createView(), depthReadOnly: true },
+          ...ctx.timing
+        });
+        particles.draw(encoded, frame, this.lightBuffer, ctx.texture(depth));
+        encoded.end();
+      };
+    });
+  }
+  /** Whether this renderer skins live meshes on the GPU (F7a): the linear-light one, whose frames no CPU reference has to match. */
+  get gpuSkinning() {
+    return this.hdr;
+  }
   /** A cut-out caster's group 0 (F2a-2): the casters' uniforms and transforms, and its base map. */
   cutGroupFor(primitive, textures) {
     const cached = this.cutGroups.get(primitive);
@@ -22654,7 +35291,8 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
         { binding: 0, resource: { buffer: this.uniformBuffer, offset: 0, size: UNIFORM_STRIDE } },
         { binding: 1, resource: this.sampler },
         { binding: 2, resource: (textures.base ? this.uploadTexture(textures.base, true) : this.blankTexture).createView() },
-        { binding: 10, resource: { buffer: this.instanceBuffer } }
+        { binding: 10, resource: { buffer: this.instanceBuffer } },
+        ...this.hdr ? [{ binding: 17, resource: this.terrainHeightsOf(primitive) }] : []
       ]
     });
     this.cutGroups.set(primitive, { uniform: this.uniformBuffer, instances: this.instanceBuffer, base: textures.base, group });
@@ -22663,7 +35301,7 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
   /** The bind group for one primitive, rebuilt if any of its textures changed. */
   bindGroupFor(primitive, textures) {
     const cached = this.bindGroups.get(primitive);
-    if (cached && cached.source.base === textures.base && cached.source.mr === textures.mr && cached.source.occ === textures.occ && cached.source.emis === textures.emis && cached.source.lm === textures.lm && cached.source.detail === textures.detail && cached.source.blend === textures.blend && cached.source.normal === textures.normal) {
+    if (cached && cached.source.base === textures.base && cached.source.mr === textures.mr && cached.source.occ === textures.occ && cached.source.emis === textures.emis && cached.source.lm === textures.lm && cached.source.lmHdr === textures.lmHdr && cached.source.detail === textures.detail && cached.source.blend === textures.blend && cached.source.normal === textures.normal && cached.source.graph === textures.graph) {
       return cached.group;
     }
     const view = (texture, colour = false) => (texture ? this.uploadTexture(texture, colour) : this.blankTexture).createView();
@@ -22683,20 +35321,26 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
         // The active env map (or the 1x1 white blank); likewise cache-invalidated.
         { binding: 7, resource: this.hdr ? this.envTexture.createView({ dimension: "cube" }) : this.envTexture.createView() },
         // The active SSAO buffer (or the 1x1 blank); likewise cache-invalidated.
-        { binding: 8, resource: this.ssaoBound.createView() },
+        { binding: 8, resource: this.hdr ? this.ssaoBound.createView({ dimension: "2d-array" }) : this.ssaoBound.createView() },
         // The light storage buffer; a grow changes identity and invalidates the cache.
         { binding: 9, resource: { buffer: this.lightBuffer } },
         // The instance transforms; a grow changes identity and invalidates the cache.
         { binding: 10, resource: { buffer: this.instanceBuffer } },
-        // The baked light map (or the 1x1 white blank; the uniform flag gates it).
-        { binding: 11, resource: view(textures.lm) },
+        // The baked light map (or the 1x1 white blank; the uniform flag gates it). The linear variant binds an
+        // array: an HDR directional map (F3d) where there is one, else the 8-bit map as one layer.
+        {
+          binding: 11,
+          resource: !this.hdr ? view(textures.lm) : textures.lmHdr ? this.uploadHdrLightmap(textures.lmHdr).createView({ dimension: "2d-array" }) : (textures.lm ? this.uploadTexture(textures.lm) : this.blankTexture).createView({ dimension: "2d-array" })
+        },
         // The probe atlas (or the blank) and boxes; a change invalidates the cache.
         { binding: 12, resource: this.hdr ? (this.probeCapture?.cubes ?? this.blankProbeCubes).createView({ dimension: "cube-array" }) : this.probeTexture.createView() },
         { binding: 13, resource: { buffer: this.probeBuffer } },
         // The detail map (or the 1x1 white blank; the uniform gates it).
         { binding: 14, resource: view(textures.detail) },
-        { binding: 15, resource: view(textures.blend, true) },
-        { binding: 16, resource: view(textures.normal) }
+        // The blend surface's map, and a material graph's images as the array's later layers (F1e).
+        { binding: 15, resource: textures.graph && textures.graph.some((t) => t !== null) ? this.uploadLayers([textures.blend, ...textures.graph]).createView({ dimension: "2d-array" }) : (textures.blend ? this.uploadTexture(textures.blend, true) : this.blankTexture).createView({ dimension: "2d-array" }) },
+        { binding: 16, resource: view(textures.normal) },
+        ...this.hdr ? [{ binding: 17, resource: this.terrainHeightsOf(primitive) }] : []
       ]
     });
     this.bindGroups.set(primitive, { group, source: { ...textures } });
@@ -22724,6 +35368,11 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
       cache.set(source, texture2);
       return texture2;
     }
+    if (this.streamer && Math.max(source.width, source.height) > STREAM_MIN_SIDE) {
+      const texture2 = this.streamedTexture(source, colour, this.streamer.register(source, source.width, source.height));
+      cache.set(source, texture2);
+      return texture2;
+    }
     const levels = this.mips ? mipLevelCount(source.width, source.height) : 1;
     const texture = this.device.createTexture({
       size: { width: source.width, height: source.height },
@@ -22748,6 +35397,208 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     cache.set(source, texture);
     return texture;
   }
+  /** Start streaming (F1b) under `budgetMB`, making the feedback pass the first time. */
+  ensureStreaming(budgetMB) {
+    const bytes = budgetMB * 1024 * 1024;
+    if (this.streamer) {
+      this.streamer.budgetBytes = bytes;
+      return;
+    }
+    this.streamer = new TextureStreamer(bytes);
+    const device = this.device;
+    const module = device.createShaderModule({ code: feedbackWgsl(4) });
+    const layout = device.createBindGroupLayout({
+      entries: [
+        { binding: 0, visibility: SHADER_STAGE_VERTEX | SHADER_STAGE_FRAGMENT, buffer: { type: "uniform", hasDynamicOffset: true } },
+        { binding: 1, visibility: SHADER_STAGE_VERTEX, buffer: { type: "read-only-storage" } },
+        { binding: 2, visibility: SHADER_STAGE_FRAGMENT, buffer: { type: "storage" } }
+      ]
+    });
+    const pipeline = device.createRenderPipeline({
+      layout: device.createPipelineLayout({ bindGroupLayouts: [layout] }),
+      vertex: { module, entryPoint: "vs", buffers: [{ arrayStride: 64, attributes: [{ shaderLocation: 0, offset: 0, format: "float32x3" }, { shaderLocation: 2, offset: 24, format: "float32x2" }] }] },
+      fragment: { module, entryPoint: "fs", targets: [] },
+      primitive: { topology: "triangle-list", cullMode: "none" },
+      depthStencil: { format: "depth24plus", depthWriteEnabled: true, depthCompare: "less" }
+    });
+    this.feedback = {
+      pipeline,
+      draws: device.createBuffer({ size: 64 * 256, usage: 64 | 8 }),
+      drawCapacity: 64,
+      wanted: device.createBuffer({ size: FEEDBACK_SLOTS * 4, usage: 128 | 8 | 4 }),
+      readback: device.createBuffer({ size: FEEDBACK_SLOTS * 4, usage: 1 | 8 }),
+      depth: null,
+      size: { width: 0, height: 0 },
+      busy: false,
+      frame: 0
+    };
+    this.bindGroups = /* @__PURE__ */ new WeakMap();
+    this.cutGroups = /* @__PURE__ */ new WeakMap();
+  }
+  /** What streaming holds (F1b), for the profiler; null when the frame doesn't stream. */
+  get textureResidency() {
+    return this.streamer?.stats() ?? null;
+  }
+  /** A map at a resident level (F1b): its size over 2^level, that level's texels (box-filtered on the CPU) and the mips below. */
+  streamedTexture(source, colour, level) {
+    const top = streamedLevel(source, level);
+    const levels = mipLevelCount(top.width, top.height);
+    const texture = this.device.createTexture({
+      size: { width: top.width, height: top.height },
+      format: "rgba8unorm",
+      usage: 4 | 2 | (levels > 1 ? 16 : 0),
+      ...levels > 1 ? { mipLevelCount: levels, ...colour ? { viewFormats: ["rgba8unorm-srgb"] } : {} } : {}
+    });
+    this.device.queue.writeTexture({ texture }, top.data, { bytesPerRow: top.width * 4, rowsPerImage: top.height }, { width: top.width, height: top.height });
+    if (levels > 1) this.mipmaps.generate(texture, levels, colour ? "rgba8unorm-srgb" : "rgba8unorm");
+    return texture;
+  }
+  /**
+   * The feedback pass (F1b; textureStreaming.ts): every {@link FEEDBACK_INTERVAL} frames the opaque batches
+   * drawn a quarter size, each pixel's footprint kept per material, read back without waiting, and the
+   * residency planned again from it.
+   */
+  addFeedback(graph, draws) {
+    const fb = this.feedback;
+    if (!fb || fb.busy || this.frameIndex % FEEDBACK_INTERVAL !== 0) return;
+    const slots = /* @__PURE__ */ new Map();
+    const maps = [];
+    const drawn = [];
+    for (const entry of draws) {
+      if (entry.refract || entry.alpha >= 2) continue;
+      const t = entry.textures;
+      const streamed = [t.base, t.mr, t.occ, t.emis, t.normal, t.detail].filter((m) => m !== null && Math.max(m.width, m.height) > STREAM_MIN_SIDE);
+      if (streamed.length === 0) continue;
+      const key2 = streamed[0];
+      let slot = slots.get(key2);
+      if (slot === void 0) {
+        if (maps.length >= FEEDBACK_SLOTS) continue;
+        slot = maps.length;
+        slots.set(key2, slot);
+        maps.push(streamed);
+      }
+      drawn.push({ entry, slot });
+    }
+    if (drawn.length === 0) return;
+    const device = this.device;
+    if (fb.drawCapacity < drawn.length) {
+      fb.draws.destroy();
+      fb.drawCapacity = Math.max(drawn.length, fb.drawCapacity * 2);
+      fb.draws = device.createBuffer({ size: fb.drawCapacity * 256, usage: 64 | 8 });
+    }
+    const params = new Uint32Array(drawn.length * 64);
+    drawn.forEach((d, i) => params[i * 64] = d.slot);
+    device.queue.writeBuffer(fb.draws, 0, params);
+    device.queue.writeBuffer(fb.wanted, 0, new Uint32Array(FEEDBACK_SLOTS).fill(FEEDBACK_NONE));
+    const width = Math.max(1, this.width >> 2);
+    const height = Math.max(1, this.height >> 2);
+    if (fb.size.width !== width || fb.size.height !== height) {
+      fb.depth?.destroy();
+      fb.depth = device.createTexture({ size: { width, height }, format: "depth24plus", usage: 16 });
+      fb.size = { width, height };
+    }
+    this.feedbackMaps = maps;
+    fb.busy = true;
+    graph.addPass("texture feedback", "render", (pass) => {
+      pass.keep();
+      return (ctx) => {
+        const encoded = ctx.encoder.beginRenderPass({ colorAttachments: [], depthStencilAttachment: { view: fb.depth.createView(), depthClearValue: 1, depthLoadOp: "clear", depthStoreOp: "discard" }, ...ctx.timing });
+        encoded.setPipeline(fb.pipeline);
+        drawn.forEach(({ entry }, i) => {
+          encoded.setBindGroup(0, device.createBindGroup({
+            layout: fb.pipeline.getBindGroupLayout(0),
+            entries: [
+              { binding: 0, resource: { buffer: fb.draws, offset: 0, size: 16 } },
+              { binding: 1, resource: { buffer: this.instanceBuffer } },
+              { binding: 2, resource: { buffer: fb.wanted } }
+            ]
+          }), [i * 256]);
+          encoded.setVertexBuffer(0, entry.geometry.vertexBuffer);
+          encoded.setIndexBuffer(entry.geometry.indexBuffer, "uint32");
+          encoded.drawIndexed(entry.geometry.indexCount, entry.models.length, 0, 0, entry.first);
+        });
+        encoded.end();
+        ctx.encoder.copyBufferToBuffer(fb.wanted, 0, fb.readback, 0, maps.length * 4);
+      };
+    });
+    const count = maps.length;
+    queueMicrotask(() => {
+      void fb.readback.mapAsync(1, 0, count * 4).then(() => {
+        const fixed = new Uint32Array(fb.readback.getMappedRange(0, count * 4).slice(0));
+        fb.readback.unmap();
+        this.applyFeedback(fixed);
+      }).catch(() => {
+      }).finally(() => fb.busy = false);
+    });
+  }
+  /** A round of feedback into the plan; maps whose level changed are made again as their groups rebuild. */
+  applyFeedback(fixed) {
+    const streamer = this.streamer;
+    if (!streamer || this.destroyed) return;
+    const footprints = /* @__PURE__ */ new Map();
+    this.feedbackMaps.forEach((maps, slot) => {
+      const f3 = footprintLog2(fixed[slot] ?? FEEDBACK_NONE);
+      if (f3 === null) return;
+      for (const m of maps) footprints.set(m, Math.min(footprints.get(m) ?? Infinity, f3));
+    });
+    streamer.observe(footprints);
+    const changed = streamer.plan();
+    if (changed.size === 0) return;
+    for (const source of changed.keys()) {
+      for (const cache of [this.textures, this.colourTextures]) {
+        const old = cache.get(source);
+        if (old) {
+          this.retired.push(old);
+          cache.delete(source);
+        }
+      }
+    }
+    this.bindGroups = /* @__PURE__ */ new WeakMap();
+    this.cutGroups = /* @__PURE__ */ new WeakMap();
+  }
+  /**
+   * Upload (once) maps as the layers of one array (F1e): each resampled to the
+   * largest's size (at most 1024), a missing one white, with mips.
+   */
+  uploadLayers(layers) {
+    const key2 = layers.map((l) => l ? textureId(l) : 0).join(",");
+    const cached = this.layerStacks.get(key2);
+    if (cached) return cached;
+    const width = Math.min(1024, Math.max(1, ...layers.map((l) => l?.width ?? 1)));
+    const height = Math.min(1024, Math.max(1, ...layers.map((l) => l?.height ?? 1)));
+    const levels = this.mips ? mipLevelCount(width, height) : 1;
+    const texture = this.device.createTexture({ size: { width, height, depthOrArrayLayers: layers.length }, format: "rgba8unorm", usage: 4 | 2 | (levels > 1 ? 16 : 0), ...levels > 1 ? { mipLevelCount: levels } : {} });
+    layers.forEach((layer, z) => {
+      const data = resampleRgba(layer, width, height);
+      this.device.queue.writeTexture({ texture, origin: { x: 0, y: 0, z } }, data, { bytesPerRow: width * 4, rowsPerImage: height }, { width, height });
+    });
+    if (levels > 1) this.mipmaps.generate(texture, levels, "rgba8unorm", layers.length);
+    this.layerStacks.set(key2, texture);
+    return texture;
+  }
+  /**
+   * Upload (once) an HDR directional light map (F3d, hdrLightmap.ts) as a
+   * two-layer rgba16float array: the irradiance (and 1), then the dominant
+   * direction and the sky's visibility. One level: a light map's texels are
+   * already a few centimetres to metres apart.
+   */
+  uploadHdrLightmap(map) {
+    const cached = this.hdrLightmaps.get(map);
+    if (cached) return cached;
+    const { width, height } = map;
+    const texels = width * height;
+    const halves = new Uint16Array(texels * 8);
+    const one = toHalf2(1);
+    for (let i = 0; i < texels; i += 1) {
+      for (let c = 0; c < 3; c += 1) halves[i * 4 + c] = toHalf2(map.irradiance[i * 3 + c]);
+      halves[i * 4 + 3] = one;
+      for (let c = 0; c < 4; c += 1) halves[(texels + i) * 4 + c] = toHalf2(map.direction[i * 4 + c]);
+    }
+    const texture = this.device.createTexture({ size: { width, height, depthOrArrayLayers: 2 }, format: "rgba16float", usage: 4 | 2 });
+    this.device.queue.writeTexture({ texture }, halves, { bytesPerRow: width * 8, rowsPerImage: height }, { width, height, depthOrArrayLayers: 2 });
+    this.hdrLightmaps.set(map, texture);
+    return texture;
+  }
   /** The size frames render at now. */
   get size() {
     return { width: this.width, height: this.height };
@@ -22766,6 +35617,7 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     height = Math.max(1, Math.round(height));
     if (this.destroyed || width === this.width && height === this.height) return;
     const device = this.device;
+    const previous = this.latest && this.latest.length === this.width * this.height * 4 ? { width: this.width, height: this.height } : null;
     this.width = width;
     this.height = height;
     const size = { width, height };
@@ -22804,6 +35656,16 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
       destroySafely(this.gtao.uniforms);
       this.gtao = null;
     }
+    if (this.hiz) {
+      for (const t of [this.hiz.chain, this.hiz.history[0], this.hiz.history[1], this.hiz.traced, this.hiz.blank, this.hiz.uniforms]) destroySafely(t);
+      this.hiz = null;
+    }
+    if (this.ssgi) {
+      destroySafely(this.ssgi.history[0]);
+      destroySafely(this.ssgi.history[1]);
+      destroySafely(this.ssgi.uniforms);
+      this.ssgi = null;
+    }
     if (this.taa) {
       destroySafely(this.taa.history[0]);
       destroySafely(this.taa.history[1]);
@@ -22817,12 +35679,29 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
       buffer: device.createBuffer({ size: this.bytesPerRow * height, usage: 8 | 1 }),
       busy: false
     }));
-    this.latest = null;
+    this.latest = this.latest && !this.hdr && previous ? resampleNearest(this.latest, previous.width, previous.height, width, height) : null;
     this.bindGroups = /* @__PURE__ */ new WeakMap();
   }
   dispose() {
+    this.volumes?.dispose();
+    this.volumes = null;
+    this.particles?.dispose();
+    this.particles = null;
     if (this.destroyed) return;
     this.destroyed = true;
+    this.pathTracer?.destroy();
+    this.culling?.destroy();
+    this.lightClusterer?.destroy();
+    this.transforms?.destroy();
+    this.casterCulling?.destroy();
+    this.clusterRendering?.destroy();
+    for (const t of this.terrainList) t.dispose();
+    this.terrainList = [];
+    this.pathTracer = null;
+    destroySafely(this.sssProfiles);
+    if (this.feedback) for (const b of [this.feedback.draws, this.feedback.wanted, this.feedback.readback, this.feedback.depth]) destroySafely(b);
+    for (const t of this.retired) destroySafely(t);
+    if (this.sss) for (const b of this.sss.uniforms) destroySafely(b);
     this.latest = null;
     this.software.dispose();
     destroySafely(this.colourTexture);
@@ -22845,13 +35724,13 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     destroySafely(this.depthGroups.blankTexture);
     destroySafely(this.depthGroups.sized.behind);
     destroySafely(this.depthGroups.behindBlank);
-    destroySafely(this.depthGroups.clusters.table);
-    destroySafely(this.depthGroups.clusters.index);
+    destroySafely(this.depthGroups.clusters.data);
     destroySafely(this.depthGroups.clusters.params);
     destroySafely(this.depthGroups.shadowTiles);
     destroySafely(this.depthGroups.dfg);
     destroySafely(this.depthGroups.ltc);
     destroySafely(this.depthGroups.decals);
+    destroySafely(this.depthGroups.aerial);
     destroySafely(this.depthGroups.atlas);
     destroySafely(this.depthGroups.probes);
     destroySafely(this.blankTexture);
@@ -22860,6 +35739,16 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     if (this.envTexture !== this.blankTexture) destroySafely(this.envTexture);
     if (this.probeTexture !== this.blankTexture) destroySafely(this.probeTexture);
     this.probeCapture?.dispose();
+    this.atmosphere?.dispose();
+    this.volumetricFog?.dispose();
+    this.probeGi?.gi.dispose();
+    this.disposeVsm();
+    if (this.upscaler) {
+      destroySafely(this.upscaler.output);
+      destroySafely(this.upscaler.uniforms);
+      this.upscaler = null;
+    }
+    destroySafely(this.depthGroups.fogVolume.texture);
     destroySafely(this.blankProbeCubes);
     destroySafely(this.probeBuffer);
     destroySafely(this.ssaoTexture);
@@ -22884,11 +35773,102 @@ function fullScreenPipeline(device, code, entryPoint, format) {
     primitive: { topology: "triangle-list" }
   });
 }
+function viewModeDraw(draw) {
+  const code = viewModeCode(draw.viewMode);
+  if (code === 0) return draw;
+  const out = { ...draw };
+  for (const key2 of ["temporal", "upscale", "reflections", "camera", "reflectionTrace"]) delete out[key2];
+  if (code === 8) out.prepass = true;
+  if (code === 11) for (const key2 of ["prepass", "virtualShadows", "ambientOcclusion", "screenSpaceGi"]) delete out[key2];
+  return out;
+}
 function destroySafely(resource) {
   try {
     resource?.destroy?.();
   } catch {
   }
+}
+var textureIds = /* @__PURE__ */ new WeakMap();
+var nextTextureId = 1;
+function textureId(t) {
+  let id = textureIds.get(t);
+  if (id === void 0) textureIds.set(t, id = nextTextureId++);
+  return id;
+}
+function resampleRgba(source, width, height) {
+  const out = new Uint8Array(width * height * 4);
+  if (!source || source.width <= 0 || source.height <= 0) return out.fill(255);
+  if (source.width === width && source.height === height) {
+    out.set(source.data.subarray(0, width * height * 4));
+    return out;
+  }
+  const at = (x, y, c) => source.data[(Math.min(source.height - 1, Math.max(0, y)) * source.width + Math.min(source.width - 1, Math.max(0, x))) * 4 + c];
+  for (let y = 0; y < height; y += 1) {
+    const fy = (y + 0.5) * source.height / height - 0.5;
+    const y0 = Math.floor(fy);
+    const ty = fy - y0;
+    for (let x = 0; x < width; x += 1) {
+      const fx = (x + 0.5) * source.width / width - 0.5;
+      const x0 = Math.floor(fx);
+      const tx = fx - x0;
+      for (let c = 0; c < 4; c += 1) {
+        const top = at(x0, y0, c) * (1 - tx) + at(x0 + 1, y0, c) * tx;
+        const bottom = at(x0, y0 + 1, c) * (1 - tx) + at(x0 + 1, y0 + 1, c) * tx;
+        out[(y * width + x) * 4 + c] = Math.round(top * (1 - ty) + bottom * ty);
+      }
+    }
+  }
+  return out;
+}
+var shaderModules = /* @__PURE__ */ new WeakMap();
+function cachedShaderModule(device, code) {
+  let modules = shaderModules.get(device);
+  if (!modules) shaderModules.set(device, modules = /* @__PURE__ */ new Map());
+  let module = modules.get(code);
+  if (!module) modules.set(code, module = device.createShaderModule({ code }));
+  return module;
+}
+var STREAM_MIN_SIDE = 256;
+var FEEDBACK_INTERVAL = 8;
+var cpuLevels = /* @__PURE__ */ new WeakMap();
+function streamedLevel(source, level) {
+  if (level <= 0) return { width: source.width, height: source.height, data: new Uint8Array(source.data.buffer, source.data.byteOffset, source.width * source.height * 4) };
+  let levels = cpuLevels.get(source);
+  if (!levels) cpuLevels.set(source, levels = /* @__PURE__ */ new Map());
+  const hit = levels.get(level);
+  if (hit) return hit;
+  const above = streamedLevel(source, level - 1);
+  const width = Math.max(1, above.width >> 1);
+  const height = Math.max(1, above.height >> 1);
+  const data = new Uint8Array(width * height * 4);
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      const x0 = Math.min(above.width - 1, x * 2), x1 = Math.min(above.width - 1, x * 2 + 1);
+      const y0 = Math.min(above.height - 1, y * 2), y1 = Math.min(above.height - 1, y * 2 + 1);
+      for (let c = 0; c < 4; c += 1) {
+        const at = (px, py) => above.data[(py * above.width + px) * 4 + c];
+        data[(y * width + x) * 4 + c] = at(x0, y0) + at(x1, y0) + at(x0, y1) + at(x1, y1) + 2 >> 2;
+      }
+    }
+  }
+  const out = { width, height, data };
+  levels.set(level, out);
+  return out;
+}
+var GPU_LOD_MIN_COPIES = 32;
+function manyCopyChains(instances) {
+  const counts = /* @__PURE__ */ new Map();
+  for (const instance of instances) if (instance.lod && instance.lod.meshes.length > 1) counts.set(instance.lod, (counts.get(instance.lod) ?? 0) + 1);
+  return new Set([...counts].filter(([, n]) => n >= GPU_LOD_MIN_COPIES).map(([chain]) => chain));
+}
+function lodsBesides(instances, gpu, eye) {
+  return instances.map((instance) => {
+    if (!instance.lod || gpu.has(instance.lod)) return instance;
+    const m = instance.model;
+    const scale = Math.max(Math.hypot(m[0], m[1], m[2]), Math.hypot(m[4], m[5], m[6]), Math.hypot(m[8], m[9], m[10])) || 1;
+    const mesh = resolveLodMesh(instance, Math.hypot(m[12] - eye[0], m[13] - eye[1], m[14] - eye[2]) / scale);
+    return mesh === instance.mesh ? instance : { ...instance, mesh };
+  });
 }
 
 // src/render/createSceneRenderer.ts
@@ -22901,134 +35881,6 @@ async function createSceneRenderer(width, height, caps, deviceProvider = getWebg
   renderer ?? (renderer = new SoftwareSceneRenderer(style));
   return capsConstrainScene(caps) ? new CappedSceneRenderer(renderer, caps) : renderer;
 }
-
-// src/render/toneMappers.ts
-var TONE_MAPPERS = ["filmic", "aces", "agx", "neutral"];
-function mul(m, c) {
-  return [m[0] * c[0] + m[1] * c[1] + m[2] * c[2], m[3] * c[0] + m[4] * c[1] + m[5] * c[2], m[6] * c[0] + m[7] * c[1] + m[8] * c[2]];
-}
-var clamp013 = (x) => Math.min(1, Math.max(0, x));
-function filmic(c) {
-  return c.map((x) => {
-    const v = Math.max(0, x);
-    return clamp013(v * (2.51 * v + 0.03) / (v * (2.43 * v + 0.59) + 0.14));
-  });
-}
-var ACES_IN = [0.59719, 0.35458, 0.04823, 0.076, 0.90834, 0.01566, 0.0284, 0.13383, 0.83777];
-var ACES_OUT = [1.60475, -0.53108, -0.07367, -0.10208, 1.10813, -605e-5, -327e-5, -0.07276, 1.07602];
-function aces(c) {
-  const v = mul(ACES_IN, c.map((x) => Math.max(0, x)));
-  const fit = v.map((x) => (x * (x + 0.0245786) - 90537e-9) / (x * (0.983729 * x + 0.432951) + 0.238081));
-  return mul(ACES_OUT, fit).map(clamp013);
-}
-var AGX_IN = [0.842479062253094, 0.0784335999999992, 0.0792237451477643, 0.0423282422610123, 0.878468636469772, 0.0791661274605434, 0.0423756549057051, 0.0784336, 0.879142973793104];
-var AGX_OUT = [1.19687900512017, -0.0980208811401368, -0.0990297440797205, -0.0528968517574562, 1.15190312990417, -0.0989611768448433, -0.0529716355144438, -0.0980434501171241, 1.15107367264116];
-var AGX_MIN_EV = -12.47393;
-var AGX_MAX_EV = 4.026069;
-function agx(c) {
-  const v = mul(AGX_IN, c.map((x) => Math.max(1e-10, x)));
-  const curve = v.map((x) => {
-    const t = (Math.min(AGX_MAX_EV, Math.max(AGX_MIN_EV, Math.log2(x))) - AGX_MIN_EV) / (AGX_MAX_EV - AGX_MIN_EV);
-    const t2 = t * t;
-    const t4 = t2 * t2;
-    return 15.5 * t4 * t2 - 40.14 * t4 * t + 31.96 * t4 - 6.868 * t2 * t + 0.4298 * t2 + 0.1191 * t - 232e-5;
-  });
-  return mul(AGX_OUT, curve).map((x) => clamp013(Math.max(0, x) ** 2.2));
-}
-var NEUTRAL_START = 0.8 - 0.04;
-var NEUTRAL_DESATURATION = 0.15;
-function neutral(c) {
-  let rgb = c.map((x) => Math.max(0, x));
-  const low = Math.min(...rgb);
-  const offset = low < 0.08 ? low - 6.25 * low * low : 0.04;
-  rgb = rgb.map((x) => x - offset);
-  const peak = Math.max(...rgb);
-  if (peak < NEUTRAL_START) return rgb.map(clamp013);
-  const d = 1 - NEUTRAL_START;
-  const newPeak = 1 - d * d / (peak + d - NEUTRAL_START);
-  rgb = rgb.map((x) => x * newPeak / peak);
-  const g = 1 - 1 / (NEUTRAL_DESATURATION * (peak - newPeak) + 1);
-  return rgb.map((x) => clamp013(x + (newPeak - x) * g));
-}
-function toneMap(mapper, c) {
-  switch (mapper) {
-    case "aces":
-      return aces(c);
-    case "agx":
-      return agx(c);
-    case "neutral":
-      return neutral(c);
-    default:
-      return filmic(c);
-  }
-}
-var srgbEncode = (v) => v <= 31308e-7 ? Math.max(0, v) * 12.92 : 1.055 * v ** (1 / 2.4) - 0.055;
-function toneMapperIndex(mapper) {
-  const i = mapper ? TONE_MAPPERS.indexOf(mapper) : 0;
-  return i < 0 ? 0 : i;
-}
-var wgslMat = (m) => `mat3x3f(${[0, 1, 2].map((col) => [0, 1, 2].map((row) => m[row * 3 + col].toString()).join(", ")).join(", ")})`;
-var TONE_MAPPERS_WGSL = (
-  /* wgsl */
-  `
-fn toneFilmic(x: vec3f) -> vec3f {
-  let v = max(x, vec3f(0.0));
-  return clamp((v * (2.51 * v + 0.03)) / (v * (2.43 * v + 0.59) + 0.14), vec3f(0.0), vec3f(1.0));
-}
-fn toneAces(x: vec3f) -> vec3f {
-  let v = ${wgslMat(ACES_IN)} * max(x, vec3f(0.0));
-  let fit = (v * (v + 0.0245786) - 0.000090537) / (v * (0.983729 * v + 0.432951) + 0.238081);
-  return clamp(${wgslMat(ACES_OUT)} * fit, vec3f(0.0), vec3f(1.0));
-}
-fn toneAgx(x: vec3f) -> vec3f {
-  let v = ${wgslMat(AGX_IN)} * max(x, vec3f(1e-10));
-  let t = (clamp(log2(v), vec3f(${AGX_MIN_EV}), vec3f(${AGX_MAX_EV})) - ${AGX_MIN_EV}) / (${AGX_MAX_EV} - ${AGX_MIN_EV});
-  let t2 = t * t;
-  let t4 = t2 * t2;
-  let curve = 15.5 * t4 * t2 - 40.14 * t4 * t + 31.96 * t4 - 6.868 * t2 * t + 0.4298 * t2 + 0.1191 * t - 0.00232;
-  return clamp(pow(max(${wgslMat(AGX_OUT)} * curve, vec3f(0.0)), vec3f(2.2)), vec3f(0.0), vec3f(1.0));
-}
-fn toneNeutral(x: vec3f) -> vec3f {
-  var c = max(x, vec3f(0.0));
-  let low = min(c.r, min(c.g, c.b));
-  let offset = select(0.04, low - 6.25 * low * low, low < 0.08);
-  c = c - offset;
-  let peak = max(c.r, max(c.g, c.b));
-  if (peak < ${NEUTRAL_START}) { return clamp(c, vec3f(0.0), vec3f(1.0)); }
-  let d = 1.0 - ${NEUTRAL_START};
-  let newPeak = 1.0 - d * d / (peak + d - ${NEUTRAL_START});
-  c = c * (newPeak / peak);
-  let g = 1.0 - 1.0 / (${NEUTRAL_DESATURATION} * (peak - newPeak) + 1.0);
-  return clamp(mix(c, vec3f(newPeak), g), vec3f(0.0), vec3f(1.0));
-}
-fn toneMapWith(index: f32, c: vec3f) -> vec3f {
-  if (index > 2.5) { return toneNeutral(c); }
-  if (index > 1.5) { return toneAgx(c); }
-  if (index > 0.5) { return toneAces(c); }
-  return toneFilmic(c);
-}
-// The sRGB curve, carried past 1.
-fn srgbOf(x: vec3f) -> vec3f {
-  let v = max(x, vec3f(0.0));
-  return select(1.055 * pow(v, vec3f(1.0 / 2.4)) - vec3f(0.055), v * 12.92, v <= vec3f(0.0031308));
-}
-// Light x as the display shows it under exposure e, sRGB-encoded (F11a-5): physically, the curve on
-// the light then the encode; as authored, the curve on the encoded light, as the byte path's shader maps.
-fn shownWith(index: f32, x: vec3f, e: f32, authored: bool) -> vec3f {
-  if (authored) { return toneMapWith(index, srgbOf(x) * e); }
-  return srgbOf(toneMapWith(index, x * e));
-}
-// \u2026as an HDR display shows it, encoded: the curve's white at headroom h (its encoding, as authored)
-// and grey where SDR shows it (s, extendedExposure's).
-fn shownWideWith(index: f32, x: vec3f, e: f32, s: f32, h: f32, authored: bool) -> vec3f {
-  if (authored) {
-    let top = srgbOf(vec3f(h)).x;
-    return toneMapWith(index, srgbOf(x) * (e * s / top)) * top;
-  }
-  return srgbOf(toneMapWith(index, x * (e * s / h)) * h);
-}
-`
-);
 
 // src/render/grading.ts
 var HDR_HEADROOM = 3;
@@ -23497,7 +36349,7 @@ ${BLOOM_HEAD}
 }
 `
 );
-var USAGE2 = { copyDst: 2, textureBinding: 4, renderAttachment: 16, uniform: 64, bufferCopyDst: 8 };
+var USAGE4 = { copyDst: 2, textureBinding: 4, renderAttachment: 16, uniform: 64, bufferCopyDst: 8 };
 var STAGE_FRAGMENT = 2;
 var GpuPostFx = class {
   constructor(device, width, height) {
@@ -23519,8 +36371,8 @@ var GpuPostFx = class {
     };
     const sampler = (filter) => device.createSampler({ magFilter: filter, minFilter: filter, addressModeU: "clamp-to-edge", addressModeV: "clamp-to-edge" });
     this.samplers = { nearest: sampler("nearest"), linear: sampler("linear") };
-    this.uniformBuffer = device.createBuffer({ size: POST_UNIFORM_FLOATS * 4, usage: USAGE2.uniform | USAGE2.bufferCopyDst });
-    this.blank = device.createTexture({ size: { width: 1, height: 1 }, format: "rgba8unorm", usage: USAGE2.textureBinding | USAGE2.copyDst });
+    this.uniformBuffer = device.createBuffer({ size: POST_UNIFORM_FLOATS * 4, usage: USAGE4.uniform | USAGE4.bufferCopyDst });
+    this.blank = device.createTexture({ size: { width: 1, height: 1 }, format: "rgba8unorm", usage: USAGE4.textureBinding | USAGE4.copyDst });
     device.queue.writeTexture({ texture: this.blank }, new Uint8Array([0, 0, 0, 255]), { bytesPerRow: 4 }, { width: 1, height: 1 });
   }
   /**
@@ -23578,10 +36430,10 @@ var GpuPostFx = class {
       for (let i = 0; i < count; i += 1) {
         const { width, height } = pyramidLevelSize(this.width, this.height, i);
         this.levels.push({
-          texture: this.device.createTexture({ size: { width, height }, format: "rgba16float", usage: USAGE2.renderAttachment | USAGE2.textureBinding }),
+          texture: this.device.createTexture({ size: { width, height }, format: "rgba16float", usage: USAGE4.renderAttachment | USAGE4.textureBinding }),
           width,
           height,
-          uniforms: this.device.createBuffer({ size: 32, usage: USAGE2.uniform | USAGE2.bufferCopyDst })
+          uniforms: this.device.createBuffer({ size: 32, usage: USAGE4.uniform | USAGE4.bufferCopyDst })
         });
       }
     }
@@ -23622,7 +36474,7 @@ var GpuPostFx = class {
     const coarser = this.levels[index + 1];
     let buffer = this.upUniforms.get(index);
     if (!buffer) {
-      buffer = this.device.createBuffer({ size: 32, usage: USAGE2.uniform | USAGE2.bufferCopyDst });
+      buffer = this.device.createBuffer({ size: 32, usage: USAGE4.uniform | USAGE4.bufferCopyDst });
       this.upUniforms.set(index, buffer);
     }
     this.device.queue.writeBuffer(buffer, 0, new Float32Array([1 / coarser.width, 1 / coarser.height, 1 / target.width, 1 / target.height, 0, 0, radius, 0]));
@@ -23647,14 +36499,14 @@ var GpuPostFx = class {
     if (this.lut?.source === lut) return this.lut.texture;
     this.lut?.texture.destroy?.();
     const strip = lutStrip(lut);
-    const texture = this.device.createTexture({ size: { width: strip.width, height: strip.height }, format: "rgba8unorm", usage: USAGE2.textureBinding | USAGE2.copyDst });
+    const texture = this.device.createTexture({ size: { width: strip.width, height: strip.height }, format: "rgba8unorm", usage: USAGE4.textureBinding | USAGE4.copyDst });
     this.device.queue.writeTexture({ texture }, strip.data, { bytesPerRow: strip.width * 4, rowsPerImage: strip.height }, { width: strip.width, height: strip.height });
     this.lut = { source: lut, texture };
     return texture;
   }
   pipeline(name, format, code, entry, additive) {
-    const key = `${name}|${format}|${additive}`;
-    let pipeline = this.pipelines.get(key);
+    const key2 = `${name}|${format}|${additive}`;
+    let pipeline = this.pipelines.get(key2);
     if (!pipeline) {
       const module = this.device.createShaderModule({ code });
       pipeline = this.device.createRenderPipeline({
@@ -23669,7 +36521,7 @@ var GpuPostFx = class {
         },
         primitive: { topology: "triangle-list" }
       });
-      this.pipelines.set(key, pipeline);
+      this.pipelines.set(key2, pipeline);
     }
     return pipeline;
   }
@@ -23771,7 +36623,7 @@ function bloomLevels(width, height, radius) {
   }
   return out;
 }
-var VS2 = (
+var VS3 = (
   /* wgsl */
   `
 @vertex fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f {
@@ -23784,7 +36636,7 @@ var VS2 = (
 var DOWN_WGSL = (
   /* wgsl */
   `
-${VS2}
+${VS3}
 @group(0) @binding(0) var src: texture_2d<f32>;
 @group(0) @binding(1) var samp: sampler;
 // xy = the source's texel, zw = the target's; first level when params2.x = 1.
@@ -23816,7 +36668,7 @@ fn karis(c: vec3f) -> f32 { return 1.0 / (1.0 + max(c.r, max(c.g, c.b))); }
 var UP_WGSL = (
   /* wgsl */
   `
-${VS2}
+${VS3}
 @group(0) @binding(0) var src: texture_2d<f32>;
 @group(0) @binding(1) var samp: sampler;
 // xy = the (smaller) source's texel, zw = the target's.
@@ -23850,11 +36702,11 @@ var HdrBloom = class {
   prepare(width, height, radius) {
     const sizes = bloomLevels(width, height, radius);
     if (sizes.length === 0) return null;
-    const key = sizes.map((s) => `${s.width}x${s.height}`).join(",");
-    if (key !== this.key) {
+    const key2 = sizes.map((s) => `${s.width}x${s.height}`).join(",");
+    if (key2 !== this.key) {
       for (const level of this.levels) level.texture.destroy?.();
       this.levels = sizes.map((s) => ({ ...s, texture: this.device.createTexture({ size: s, format: "rgba16float", usage: 16 | 4 | 1 }) }));
-      this.key = key;
+      this.key = key2;
     }
     return { texture: this.levels[0].texture, count: this.levels.length };
   }
@@ -23926,14 +36778,332 @@ var HdrBloom = class {
   }
 };
 
+// src/render/clouds.ts
+import {
+  CLOUD_RANGE,
+  DETAIL_SIZE,
+  DETAIL_TILES,
+  DIFFUSION_G,
+  LIGHT_STEPS,
+  SCATTER_OCTAVES,
+  SHAPE_SIZE,
+  VIEW_STEPS,
+  WEATHER_SIZE,
+  WEATHER_TILES,
+  cloudNoise
+} from "@cartbox/editor";
+var TILE = 8;
+var CLOUD_BLEND = 0.15;
+var CLOUD_UNIFORM_FLOATS = 52;
+function packCloudUniforms(frame, view, projection, previous, index, width, height, out = new Float32Array(CLOUD_UNIFORM_FLOATS)) {
+  const rows = (v, p, at) => {
+    out.set([v[0], v[4], v[8], 1 / p[0]], at);
+    out.set([v[1], v[5], v[9], 1 / p[5]], at + 4);
+    out.set([v[2], v[6], v[10], 0], at + 8);
+  };
+  rows(view, projection, 0);
+  rows(previous?.view ?? view, previous?.projection ?? projection, 12);
+  const c = frame.clouds;
+  out.set([c.base, c.thickness, c.density, c.type], 24);
+  out.set([c.scale, c.coverage, c.wind[0], c.wind[1]], 28);
+  out.set([...frame.ambient, frame.time], 32);
+  out.set([index % 64, previous ? 1 : 0, -1, 0], 36);
+  out.set([width, height, 0, 0], 40);
+  out.set([0, 0, 0, 0], 44);
+  out.set([0, 0, 0, 0], 48);
+  return out;
+}
+var CLOUDS_WGSL = (
+  /* wgsl */
+  `
+${ATMOSPHERE_COMMON_WGSL}
+struct CloudU {
+  right: vec4f, up: vec4f, back: vec4f,
+  prevRight: vec4f, prevUp: vec4f, prevBack: vec4f,
+  layer0: vec4f,  // base, thickness, density, type
+  layer1: vec4f,  // scale, coverage, wind x, wind z (km a second)
+  ambient: vec4f, // the upper sky's mean radiance, the seconds blown
+  frame: vec4f,   // jitter frame, history good, fixed jitter (\u2265 0)
+  size: vec4f,    // the target's width and height
+  pad0: vec4f, pad1: vec4f,
+};
+@group(0) @binding(0) var<uniform> atm: Atm;
+@group(0) @binding(1) var<uniform> cu: CloudU;
+@group(0) @binding(2) var shapeTex: texture_3d<f32>;
+@group(0) @binding(3) var detailTex: texture_3d<f32>;
+@group(0) @binding(4) var weatherTex: texture_2d<f32>;
+@group(0) @binding(5) var repeatSampler: sampler;
+@group(0) @binding(6) var transmittanceLut: texture_2d<f32>;
+@group(0) @binding(7) var clampSampler: sampler;
+@group(0) @binding(8) var history: texture_2d<f32>;
+@group(0) @binding(9) var outTex: texture_storage_2d<rgba16float, write>;
+
+fn transmittanceTo(r: f32, mu: f32) -> vec3f {
+  if (hitsGround(r, mu)) { return vec3f(0.0); }
+  return textureSampleLevel(transmittanceLut, clampSampler, transmittanceUv(r, mu), 0.0).rgb;
+}
+fn remap(v: f32, lo0: f32, hi0: f32, lo1: f32, hi1: f32) -> f32 { return lo1 + (v - lo0) / max(1e-6, hi0 - lo0) * (hi1 - lo1); }
+fn heightGradient(h: f32, kind: f32) -> f32 {
+  let rise = clamp(remap(h, 0.0, 0.08, 0.0, 1.0), 0.0, 1.0);
+  let stratus = clamp(remap(h, 0.18, 0.3, 1.0, 0.0), 0.0, 1.0);
+  let cumulus = clamp(remap(h, 0.55, 1.0, 1.0, 0.0), 0.0, 1.0);
+  return rise * (stratus + (cumulus - stratus) * kind);
+}
+// The cloud's extinction per km at p (the planet's frame, the ground under the scene at the origin); mirrors cloudDensity.
+fn cloudDensity(p: vec3f, cheap: bool) -> f32 {
+  let bottom = atm.radii.x;
+  let base = cu.layer0.x;
+  let thickness = cu.layer0.y;
+  let r = length(vec3f(p.x, p.y + bottom, p.z));
+  let h = (r - bottom - base) / thickness;
+  if (h <= 0.0 || h >= 1.0) { return 0.0; }
+  let time = cu.ambient.w;
+  let x = p.x - cu.layer1.z * time * (1.0 + 0.5 * h);
+  let z = p.z - cu.layer1.w * time * (1.0 + 0.5 * h);
+  let tile = cu.layer1.x;
+  let coverage = cu.layer1.y;
+  let weather = textureSampleLevel(weatherTex, repeatSampler, vec2f(x, z) / (tile * ${WEATHER_TILES}.0), 0.0).r;
+  let local = clamp(coverage + (weather - 0.5) * 0.9 * (1.0 - 0.6 * coverage), 0.0, 1.0) * min(1.0, coverage * 4.0);
+  if (local <= 0.0) { return 0.0; }
+  let uvw = vec3f(x / tile, h * thickness / tile, z / tile);
+  let s = textureSampleLevel(shapeTex, repeatSampler, uvw, 0.0);
+  let fbm = 0.625 * s.g + 0.25 * s.b + 0.125 * s.a;
+  let shaped = remap(s.r, fbm - 1.0, 1.0, 0.0, 1.0) * heightGradient(h, cu.layer0.w);
+  var d = clamp(remap(shaped, 1.0 - local, 1.0, 0.0, 1.0), 0.0, 1.0) * local;
+  if (d <= 0.0) { return 0.0; }
+  if (!cheap) {
+    let e = textureSampleLevel(detailTex, repeatSampler, uvw * ${DETAIL_TILES}.0, 0.0);
+    let detail = 0.625 * e.r + 0.25 * e.g + 0.125 * e.b;
+    let modifier = detail + (1.0 - 2.0 * detail) * clamp(h * 10.0, 0.0, 1.0);
+    d = clamp(remap(d, modifier * 0.35, 1.0, 0.0, 1.0), 0.0, 1.0);
+  }
+  return d * cu.layer0.z;
+}
+fn hgPhase(c: f32, g: f32) -> f32 {
+  let g2 = g * g;
+  return (1.0 - g2) / (4.0 * PI * pow(max(1e-6, 1.0 + g2 - 2.0 * g * c), 1.5));
+}
+fn cloudPhase(c: f32, octave: f32) -> f32 {
+  let k = pow(0.5, octave);
+  return 0.75 * hgPhase(c, 0.8 * k) + 0.25 * hgPhase(c, -0.3 * k);
+}
+// Mirrors sunBeam: Wrenninge's octaves, and the two-stream slab's diffused light.
+fn sunBeam(c: f32, od: f32) -> f32 {
+  var beam = 0.0;
+  for (var o = 0; o < ${SCATTER_OCTAVES}; o = o + 1) {
+    let k = pow(0.5, f32(o));
+    beam = beam + k * cloudPhase(c, f32(o)) * exp(-od * k);
+  }
+  let diffused = max(0.0, 1.0 / (1.0 + 0.75 * (1.0 - ${DIFFUSION_G}) * od) - exp(-od));
+  return beam + diffused / (4.0 * PI);
+}
+const LIGHT_STEPS = array<f32, ${LIGHT_STEPS.length}>(${LIGHT_STEPS.map((s) => s.toFixed(4)).join(", ")});
+
+struct CloudSample { light: vec3f, transmittance: f32, distance: f32 };
+
+// Mirrors cloudRadiance.
+fn march(d: vec3f, jitter: f32) -> CloudSample {
+  let bottom = atm.radii.x;
+  let viewHeight = atm.view.x;
+  let r = bottom + viewHeight;
+  let mu = d.y;
+  var none = CloudSample(vec3f(0.0), 1.0, -1.0);
+  if (hitsGround(r, mu)) { return none; }
+  let lo = bottom + cu.layer0.x;
+  let hi = lo + cu.layer0.y;
+  var t0 = -1.0;
+  var t1 = -1.0;
+  if (r < lo) {
+    t0 = raySphere(r, mu, lo);
+    t1 = raySphere(r, mu, hi);
+  } else if (r < hi) {
+    t0 = 0.0;
+    let down = mu < 0.0 && r * r * (mu * mu - 1.0) + lo * lo >= 0.0;
+    t1 = select(raySphere(r, mu, hi), raySphere(r, mu, lo), down);
+  } else {
+    if (mu >= 0.0) { return none; }
+    t0 = raySphere(r, mu, hi);
+    t1 = select(t0, raySphere(r, mu, lo), r * r * (mu * mu - 1.0) + lo * lo >= 0.0);
+  }
+  if (t0 < 0.0 || t1 <= t0) { return none; }
+  t1 = min(t1, ${CLOUD_RANGE}.0);
+  if (t1 <= t0) { return none; }
+  let dt = (t1 - t0) / ${VIEW_STEPS}.0;
+  let sun = atm.sun.xyz;
+  let c = dot(d, sun);
+  let E = atm.sunE.rgb;
+  var L = vec3f(0.0);
+  var T = 1.0;
+  var weighted = 0.0;
+  var weight = 0.0;
+  for (var i = 0; i < ${VIEW_STEPS}; i = i + 1) {
+    let t = t0 + (f32(i) + jitter) * dt;
+    let p = vec3f(d.x * t, viewHeight + d.y * t, d.z * t);
+    let sigma = cloudDensity(p, false);
+    if (sigma <= 0.0) { continue; }
+    let pR = length(vec3f(p.x, p.y + bottom, p.z));
+    let h = (pR - bottom - cu.layer0.x) / cu.layer0.y;
+    var od = 0.0;
+    var along = 0.0;
+    for (var k = 0; k < ${LIGHT_STEPS.length}; k = k + 1) {
+      let step = LIGHT_STEPS[k] * cu.layer0.y;
+      let at = along + step * 0.5;
+      along = along + step;
+      od = od + cloudDensity(p + sun * at, true) * step;
+    }
+    let muSun = dot(vec3f(p.x, p.y + bottom, p.z), sun) / pR;
+    let ts = transmittanceTo(pR, muSun);
+    let beam = sunBeam(c, od);
+    let powder = 1.0 - 0.6 * exp(-2.0 * sigma * dt);
+    let tau = sigma * (1.0 - clamp(h, 0.0, 1.0)) * cu.layer0.y;
+    let amb = cu.ambient.rgb * (0.5 / (1.0 + 0.75 * (1.0 - ${DIFFUSION_G}) * tau));
+    let stepT = exp(-sigma * dt);
+    let S = sigma * (E * ts * beam * powder + amb);
+    L = L + T * ((S - S * stepT) / sigma);
+    weighted = weighted + t * T * (1.0 - stepT);
+    weight = weight + T * (1.0 - stepT);
+    T = T * stepT;
+    if (T < 0.01) { break; }
+  }
+  return CloudSample(L, T, select(-1.0, weighted / max(weight, 1e-9), weight > 0.0));
+}
+
+// The air between the eye and a point t along d: the ratio of their transmittances to the top (mirrors airTransmittance).
+fn airTransmittance(d: vec3f, t: f32) -> vec3f {
+  let r = atm.radii.x + atm.view.x;
+  let p = vec3f(d.x * t, r + d.y * t, d.z * t);
+  let pR = length(p);
+  let fromEye = transmittanceTo(r, d.y);
+  let toCloud = transmittanceTo(pR, dot(p, d) / pR);
+  return clamp(fromEye / max(toCloud, vec3f(1e-6)), vec3f(0.0), vec3f(1.0));
+}
+
+fn ign(p: vec2f) -> f32 { return fract(52.9829189 * fract(dot(p, vec2f(0.06711056, 0.00583715)))); }
+
+@compute @workgroup_size(${TILE}, ${TILE})
+fn main(@builtin(global_invocation_id) id: vec3u) {
+  if (f32(id.x) >= cu.size.x || f32(id.y) >= cu.size.y) { return; }
+  let pixel = vec2f(id.xy) + 0.5;
+  let ndc = vec2f(pixel.x / cu.size.x * 2.0 - 1.0, 1.0 - pixel.y / cu.size.y * 2.0);
+  let d = normalize(cu.right.xyz * (ndc.x * cu.right.w) + cu.up.xyz * (ndc.y * cu.up.w) - cu.back.xyz);
+  let jitter = select(fract(ign(pixel + vec2f(5.588238 * cu.frame.x, 5.588238 * cu.frame.x))), cu.frame.z, cu.frame.z >= 0.0);
+  let m = march(d, jitter);
+  var now = vec4f(0.0, 0.0, 0.0, 1.0);
+  if (m.distance > 0.0) { now = vec4f(m.light * airTransmittance(d, m.distance), m.transmittance); }
+  else if (m.transmittance < 1.0) { now = vec4f(m.light, m.transmittance); }
+  var out = now;
+  // The last frame's result where this direction was on screen then.
+  if (cu.frame.y > 0.5) {
+    let z = -dot(d, cu.prevBack.xyz);
+    if (z > 1e-4) {
+      let pn = vec2f(dot(d, cu.prevRight.xyz) / (z * cu.prevRight.w), dot(d, cu.prevUp.xyz) / (z * cu.prevUp.w));
+      let uv = vec2f(pn.x * 0.5 + 0.5, 0.5 - pn.y * 0.5);
+      if (all(uv >= vec2f(0.0)) && all(uv <= vec2f(1.0))) {
+        let past = textureSampleLevel(history, clampSampler, uv, 0.0);
+        out = mix(past, now, ${CLOUD_BLEND});
+      }
+    }
+  }
+  textureStore(outTex, vec2i(id.xy), out);
+}
+`
+);
+var TEX = { copySrc: 1, copyDst: 2, textureBinding: 4, storage: 8 };
+var BUF = { copyDst: 8, uniform: 64 };
+var GpuClouds = class _GpuClouds {
+  constructor(device) {
+    this.device = device;
+    this.atmData = new Float32Array(ATMOSPHERE_UNIFORM_FLOATS);
+    this.data = new Float32Array(CLOUD_UNIFORM_FLOATS);
+    this.targets = null;
+    this.size = { width: 0, height: 0 };
+    this.index = 0;
+    this.previous = null;
+    /** The target the last {@link march} wrote: what the presenter lays over the sky. */
+    this.current = null;
+    const noise = cloudNoise();
+    const volume = (n, data) => {
+      const texture = device.createTexture({ size: { width: n, height: n, depthOrArrayLayers: n }, dimension: "3d", format: "rgba8unorm", usage: TEX.textureBinding | TEX.copyDst });
+      device.queue.writeTexture({ texture }, data, { bytesPerRow: n * 4, rowsPerImage: n }, { width: n, height: n, depthOrArrayLayers: n });
+      return texture;
+    };
+    this.shape = volume(SHAPE_SIZE, noise.shape);
+    this.detail = volume(DETAIL_SIZE, noise.detail);
+    this.weather = device.createTexture({ size: { width: WEATHER_SIZE, height: WEATHER_SIZE }, format: "rgba8unorm", usage: TEX.textureBinding | TEX.copyDst });
+    device.queue.writeTexture({ texture: this.weather }, noise.weather, { bytesPerRow: WEATHER_SIZE * 4, rowsPerImage: WEATHER_SIZE }, { width: WEATHER_SIZE, height: WEATHER_SIZE });
+    this.repeat = device.createSampler({ magFilter: "linear", minFilter: "linear", addressModeU: "repeat", addressModeV: "repeat", addressModeW: "repeat" });
+    this.clamp = device.createSampler({ magFilter: "linear", minFilter: "linear", addressModeU: "clamp-to-edge", addressModeV: "clamp-to-edge" });
+    this.atm = device.createBuffer({ size: ATMOSPHERE_UNIFORM_FLOATS * 4, usage: BUF.uniform | BUF.copyDst });
+    this.uniforms = device.createBuffer({ size: CLOUD_UNIFORM_FLOATS * 4, usage: BUF.uniform | BUF.copyDst });
+    this.pipeline = device.createComputePipeline({ layout: "auto", compute: { module: device.createShaderModule({ code: CLOUDS_WGSL }), entryPoint: "main" } });
+  }
+  /** The half-size target's size for a frame of `width × height`. */
+  static targetSize(width, height) {
+    return { width: Math.max(1, Math.ceil(width / 2)), height: Math.max(1, Math.ceil(height / 2)) };
+  }
+  /**
+   * March this frame's clouds into the next target, blending the last (`fixedJitter` ≥ 0 marches every texel at
+   * that jitter with no history, for tests). Encoded on `encoder`; {@link current} is the result.
+   */
+  march(encoder, sky, frame, view, projection, transmittance, width, height, fixedJitter = -1) {
+    const device = this.device;
+    const size = _GpuClouds.targetSize(width, height);
+    if (!this.targets || size.width !== this.size.width || size.height !== this.size.height) {
+      for (const t of this.targets ?? []) t.destroy?.();
+      const make = () => device.createTexture({ size, format: "rgba16float", usage: TEX.textureBinding | TEX.storage | TEX.copySrc });
+      this.targets = [make(), make()];
+      this.size = size;
+      this.previous = null;
+    }
+    const write = this.targets[this.index % 2];
+    const read = this.targets[(this.index + 1) % 2];
+    device.queue.writeBuffer(this.atm, 0, packAtmosphereUniforms(sky, this.atmData));
+    const data = packCloudUniforms(frame, view, projection, fixedJitter >= 0 ? null : this.previous, this.index, size.width, size.height, this.data);
+    if (fixedJitter >= 0) data[38] = fixedJitter;
+    device.queue.writeBuffer(this.uniforms, 0, data);
+    const pass = encoder.beginComputePass();
+    pass.setPipeline(this.pipeline);
+    pass.setBindGroup(
+      0,
+      device.createBindGroup({
+        layout: this.pipeline.getBindGroupLayout(0),
+        entries: [
+          { binding: 0, resource: { buffer: this.atm } },
+          { binding: 1, resource: { buffer: this.uniforms } },
+          { binding: 2, resource: this.shape.createView({ dimension: "3d" }) },
+          { binding: 3, resource: this.detail.createView({ dimension: "3d" }) },
+          { binding: 4, resource: this.weather.createView() },
+          { binding: 5, resource: this.repeat },
+          { binding: 6, resource: transmittance.createView() },
+          { binding: 7, resource: this.clamp },
+          { binding: 8, resource: read.createView() },
+          { binding: 9, resource: write.createView() }
+        ]
+      })
+    );
+    pass.dispatchWorkgroups(Math.ceil(size.width / TILE), Math.ceil(size.height / TILE));
+    pass.end();
+    this.index += 1;
+    this.previous = { view: [...view], projection: [...projection] };
+    this.current = write;
+    return write;
+  }
+  dispose() {
+    for (const t of [this.shape, this.detail, this.weather, this.atm, this.uniforms, ...this.targets ?? []]) t?.destroy?.();
+    this.targets = null;
+    this.current = null;
+  }
+};
+
 // src/render/gpuPresent.ts
+import { MOON_RADIUS, NIGHT_SKY_RADIANCE, moonLightsSky as moonLightsSky2 } from "@cartbox/editor";
 import { CLOUD_TILE, MAX_CLOUD_LAYERS } from "@cartbox/editor";
 var CLOUD_TILE_SIZE = CLOUD_TILE;
 var SHAFT_CELLS_ACROSS = 160;
 var SHAFT_SKY_SHARE = 0.35;
 var BLOOM_MIX = 1 / 6;
 var AUTO_KEY_FALLBACK = 0.18;
-var USAGE3 = {
+var USAGE5 = {
   copySrc: 1,
   copyDst: 2,
   textureBinding: 4,
@@ -23965,6 +37135,33 @@ function packSkyUniforms(sky, width, height, out = new Float32Array(SKY_UNIFORM_
     out.set(layer ? [layer.scale, layer.wind[0], layer.wind[1], layer.opacity] : [0, 0, 0, 0], 24 + i * 4);
     out.set(layer ? [layer.color[0], layer.color[1], layer.color[2], 0] : [0, 0, 0, 0], 24 + MAX_CLOUD_LAYERS * 4 + i * 4);
   }
+  return out;
+}
+var ATMOSPHERE_SKY_UNIFORM_FLOATS = 40;
+var STAR_CELLS = 512;
+var STAR_DENSITY = 9e3 / (6 * STAR_CELLS * STAR_CELLS);
+var SUN_DISC_MAX = 3e4;
+function packAtmosphereSkyUniforms(sky, width, height, out = new Float32Array(ATMOSPHERE_SKY_UNIFORM_FLOATS)) {
+  const v = sky.view;
+  const p = sky.projection;
+  const atm = sky.atmosphere;
+  const a = atm.atmosphere;
+  out.set([v[0], v[4], v[8], 1 / p[0]], 0);
+  out.set([v[1], v[5], v[9], 1 / p[5]], 4);
+  out.set([v[2], v[6], v[10], 0], 8);
+  const l = Math.hypot(atm.sun[0], atm.sun[1], atm.sun[2]) || 1;
+  out.set([atm.sun[0] / l, atm.sun[1] / l, atm.sun[2] / l, Math.cos(a.sunRadius)], 12);
+  out.set([...atm.disc.map((c) => Math.min(SUN_DISC_MAX, Math.max(0, c))), 0], 16);
+  out.set([width, height, a.bottom + a.viewHeight, a.bottom], 20);
+  const moon = atm.moon ?? null;
+  const night = moonLightsSky2([atm.sun[0] / l, atm.sun[1] / l, atm.sun[2] / l], moon);
+  if (moon && atm.moonDisc) {
+    out.set([moon.direction[0], moon.direction[1], moon.direction[2], Math.cos(MOON_RADIUS)], 24);
+    out.set([...atm.moonDisc, night ? 1 : 0], 28);
+  }
+  const stars = atm.stars ?? 1;
+  out.set([stars, 2 / (height * Math.abs(p[5])), NIGHT_SKY_RADIANCE * stars, a.top], 32);
+  out.set([Math.sin(MOON_RADIUS), moon && atm.moonDisc ? 1 : 0, 0, 0], 36);
   return out;
 }
 function shaftGrid(width, height) {
@@ -24008,7 +37205,8 @@ function packMeasureUniforms(frame, width, height, out = new Float32Array(MEASUR
   out.set([bg[0] / 255, bg[1] / 255, bg[2] / 255, bg[3] / 255], 4);
   const sun = m?.sun ?? null;
   out.set([sun?.x ?? 0, sun?.y ?? 0, Math.max(1.5, height * 0.012), sun ? 1 : 0], 8);
-  out.set([hdr ? 1 : 0, hdr ? frame.tonemap?.exposure ?? 1 : 1, 0, 0], 12);
+  const metering = hdr && m?.metering ? 1 + ["average", "centre", "spot"].indexOf(m.metering) : 0;
+  out.set([hdr ? 1 : 0, hdr ? frame.tonemap?.exposure ?? 1 : 1, metering, 0], 12);
   return out;
 }
 var SRGB_WGSL = (
@@ -24132,6 +37330,115 @@ fn coreGlow(c: f32) -> f32 {
     rgb = toLinear(rgb);
     if (s.size.w > 0.0) { rgb = filmicInverse(rgb) / s.size.w; }
   }
+  return vec4f(rgb, 1.0);
+}
+`
+);
+var ATMOSPHERE_SKY_WGSL = (
+  /* wgsl */
+  `
+struct AtmSky {
+  right: vec4f,
+  up: vec4f,
+  back: vec4f,
+  sun: vec4f,
+  disc: vec4f,
+  size: vec4f,
+  moon: vec4f,    // F5a-3: toward it, w the cosine of its radius
+  moonLit: vec4f, // its disc's light per unit of the sun on it; w = 1 while its sky view is lit
+  stars: vec4f,   // their scale, a pixel's angle, the night sky's glow, the atmosphere's top (km)
+  moonInfo: vec4f, // the sine of its radius, 1 with a moon
+};
+@group(0) @binding(0) var<uniform> s: AtmSky;
+@group(0) @binding(1) var skyView: texture_2d<f32>;
+@group(0) @binding(2) var viewSampler: sampler;
+@group(0) @binding(3) var moonView: texture_2d<f32>;
+@group(0) @binding(4) var transmittanceLut: texture_2d<f32>;
+// The volumetric clouds (F5c), at half size: their light through the air in rgb, what of the sky gets through in a.
+@group(0) @binding(5) var cloudTex: texture_2d<f32>;
+${FULLSCREEN_VS2}
+${SKY_VIEW_UV_WGSL}
+// The transmittance from the viewer along d to the top of the air (Bruneton's mapping); 0 into the ground.
+fn viewTransmittance(d: vec3f) -> vec3f {
+  let r = s.size.z;
+  let bottom = s.size.w;
+  let top = s.stars.w;
+  let mu = d.y;
+  if (mu < 0.0 && r * r * (mu * mu - 1.0) + bottom * bottom >= 0.0) { return vec3f(0.0); }
+  let H = sqrt(top * top - bottom * bottom);
+  let rho = sqrt(max(0.0, r * r - bottom * bottom));
+  let dd = max(0.0, -r * mu + sqrt(max(0.0, r * r * (mu * mu - 1.0) + top * top)));
+  let dMin = top - r;
+  let dMax = rho + H;
+  return textureSampleLevel(transmittanceLut, viewSampler, vec2f((dd - dMin) / (dMax - dMin), rho / H), 0.0).rgb;
+}
+fn pcg(v: u32) -> u32 {
+  let st = v * 747796405u + 2891336453u;
+  let w = ((st >> ((st >> 28u) + 4u)) ^ st) * 277803737u;
+  return (w >> 22u) ^ w;
+}
+// A direction's cube face (axis \xD7 2, + 1 for the negative side) and place on it (\u22121..1).
+fn cubeFace(n: vec3f) -> vec3f {
+  let a = abs(n);
+  if (a.x >= a.y && a.x >= a.z) { return vec3f(select(1.0, 0.0, n.x > 0.0), n.y / a.x, n.z / a.x); }
+  if (a.y >= a.z) { return vec3f(2.0 + select(1.0, 0.0, n.y > 0.0), n.x / a.y, n.z / a.y); }
+  return vec3f(4.0 + select(1.0, 0.0, n.z > 0.0), n.x / a.z, n.y / a.z);
+}
+fn cubeDir(face: u32, uv: vec2f) -> vec3f {
+  let sgn = select(-1.0, 1.0, (face & 1u) == 0u);
+  let axis = face >> 1u;
+  if (axis == 0u) { return normalize(vec3f(sgn, uv.x, uv.y)); }
+  if (axis == 1u) { return normalize(vec3f(uv.x, sgn, uv.y)); }
+  return normalize(vec3f(uv.x, uv.y, sgn));
+}
+// The stars round n (F5a-3): each cell of a cube over the sky holds one at random, its magnitude drawn so the
+// count brighter than m grows threefold a magnitude, its light spread over a Gaussian a pixel wide, so it keeps
+// its illuminance at any resolution. Lux into the renderer's units of irradiance: \u03C0 / 123500.
+fn starlight(n: vec3f) -> f32 {
+  let f = cubeFace(n);
+  let face = u32(f.x + 0.5);
+  let cells = ${STAR_CELLS}.0;
+  let at = floor((f.yz * 0.5 + 0.5) * cells);
+  let sigma = 0.75 * s.stars.y;
+  var sum = 0.0;
+  for (var j = -1; j <= 1; j = j + 1) {
+    for (var i = -1; i <= 1; i = i + 1) {
+      let c = clamp(at + vec2f(f32(i), f32(j)), vec2f(0.0), vec2f(cells - 1.0));
+      let h = pcg(face * 1000003u + u32(c.y) * ${STAR_CELLS}u + u32(c.x));
+      if (f32(h & 0xffffu) / 65536.0 >= ${STAR_DENSITY.toPrecision(6)}) { continue; }
+      let h2 = pcg(h);
+      let jitter = vec2f(f32(h2 & 0xffffu), f32(h2 >> 16u)) / 65536.0;
+      let dir = cubeDir(face, (c + jitter) / cells * 2.0 - 1.0);
+      let u = max(1e-6, f32(pcg(h2) & 0xffffffu) / 16777216.0);
+      let magnitude = 6.5 + 2.0 * log(u) / log(10.0);
+      let lux = 2.54e-6 * pow(10.0, -0.4 * magnitude);
+      let cosT = clamp(dot(n, dir), -1.0, 1.0);
+      let theta2 = 2.0 * (1.0 - cosT);
+      sum = sum + lux * ${(Math.PI / 123500).toPrecision(8)} * exp(-theta2 / (2.0 * sigma * sigma)) / (6.2831853 * sigma * sigma);
+    }
+  }
+  return sum;
+}
+@fragment fn atmosphere(@builtin(position) pos: vec4f) -> @location(0) vec4f {
+  let ndc = vec2f(pos.x / s.size.x * 2.0 - 1.0, 1.0 - pos.y / s.size.y * 2.0);
+  let n = normalize(s.right.xyz * (ndc.x * s.right.w) + s.up.xyz * (ndc.y * s.up.w) - s.back.xyz);
+  var rgb = textureSampleLevel(skyView, viewSampler, skyViewUv(n, s.sun.xyz, s.size.z, s.size.w), 0.0).rgb;
+  if (dot(n, s.sun.xyz) > s.sun.w) { rgb = rgb + s.disc.rgb; }
+  // The night (F5a-3): the moon's light in the air, then beyond the air the moon's disc, or the stars and the sky's glow.
+  if (s.moonLit.w > 0.5) { rgb = rgb + textureSampleLevel(moonView, viewSampler, skyViewUv(n, s.moon.xyz, s.size.z, s.size.w), 0.0).rgb; }
+  let T = viewTransmittance(n);
+  var onMoon = false;
+  if (s.moonInfo.y > 0.5 && dot(n, s.moon.xyz) > s.moon.w) {
+    // The point on the moon's near face this pixel sees, lit by the sun as a Lambertian sphere.
+    let x = (n - s.moon.xyz * dot(n, s.moon.xyz)) / s.moonInfo.x;
+    let N = x - s.moon.xyz * sqrt(max(0.0, 1.0 - dot(x, x)));
+    rgb = rgb + s.moonLit.rgb * max(0.0, dot(N, s.sun.xyz));
+    onMoon = true;
+  }
+  if (!onMoon && s.stars.x > 0.0) { rgb = rgb + T * (starlight(n) * s.stars.x + s.stars.z); }
+  // The clouds over all of it (F5c): the sun, the moon and the stars go behind them. None bound: (0, 0, 0, 1).
+  let cloud = textureSampleLevel(cloudTex, viewSampler, pos.xy / s.size.xy, 0.0);
+  rgb = rgb * cloud.a + cloud.rgb;
   return vec4f(rgb, 1.0);
 }
 `
@@ -24376,6 +37683,10 @@ struct Measure {
 @group(0) @binding(3) var<storage, read_write> result: array<f32, 4>;
 var<workgroup> sums: array<f32, 256>;
 var<workgroup> counts: array<f32, 256>;
+// The histogram (F4c): 64 bins of log2 luminance from \u221212 to +8, each a weighted count (16ths).
+var<workgroup> bins: array<atomic<u32>, 64>;
+const HIST_LO = -12.0;
+const HIST_SPAN = 20.0;
 ${SRGB_WGSL}
 fn linear(c: f32) -> f32 {
   let b = round(c * 255.0) / 255.0;
@@ -24412,6 +37723,9 @@ fn openSky(x: f32, y: f32) -> f32 {
   let gh = u32(ceil((u.size.y - first) / step));
   var sum = 0.0;
   var count = 0.0;
+  let metering = i32(u.hdr.z + 0.5);
+  if (tid < 64u) { atomicStore(&bins[tid], 0u); }
+  workgroupBarrier();
   if (wantLuminance) {
     for (var i = tid; i < gw * gh; i = i + 256u) {
       let x = first + f32(i % gw) * step;
@@ -24421,6 +37735,17 @@ fn openSky(x: f32, y: f32) -> f32 {
       var l = 0.2126 * linear(c.r) + 0.7152 * linear(c.g) + 0.0722 * linear(c.b);
       // Linear light (F0b): its luminance as exposed, before the tone map.
       if (u.hdr.x > 0.5) { l = dot(c.rgb, vec3f(0.2126, 0.7152, 0.0722)) * u.hdr.y; }
+      if (metering > 0) {
+        // Weighted by the metering mode: everywhere alike, toward the centre, or a spot there.
+        let off = (vec2f(x, y) - u.size.xy * 0.5) / (0.5 * min(u.size.x, u.size.y));
+        let r2 = dot(off, off);
+        var w = 1.0;
+        if (metering == 2) { w = 1.0 + 3.0 * exp(-r2 / 0.18); }
+        if (metering == 3) { w = select(0.0, 1.0, r2 < 0.04); }
+        let bin = u32(clamp((log2(max(l, 1e-6)) - HIST_LO) / HIST_SPAN * 64.0, 0.0, 63.0));
+        atomicAdd(&bins[bin], u32(round(w * 16.0)));
+        continue;
+      }
       sum = sum + log(max(1e-4, l));
       count = count + 1.0;
     }
@@ -24438,6 +37763,26 @@ fn openSky(x: f32, y: f32) -> f32 {
   if (tid == 0u) {
     result[0] = sums[0];
     result[1] = counts[0];
+    if (metering > 0) {
+      // The histogram's mean log2 luminance between its darkest and brightest tenth, as a natural log over one.
+      var total = 0.0;
+      for (var b = 0u; b < 64u; b = b + 1u) { total = total + f32(atomicLoad(&bins[b])); }
+      let lo = total * 0.1;
+      let hi = total * 0.9;
+      var seen = 0.0;
+      var acc = 0.0;
+      var kept = 0.0;
+      for (var b = 0u; b < 64u; b = b + 1u) {
+        let n = f32(atomicLoad(&bins[b]));
+        // The share of this bin between the two cuts.
+        let take = max(0.0, min(seen + n, hi) - max(seen, lo));
+        acc = acc + take * (HIST_LO + (f32(b) + 0.5) / 64.0 * HIST_SPAN);
+        kept = kept + take;
+        seen = seen + n;
+      }
+      result[0] = select(0.0, acc / kept * 0.69314718, kept > 0.0);
+      result[1] = select(0.0, 1.0, kept > 0.0);
+    }
     var open = 0.0;
     var taps = 0.0;
     if (u.sun.w > 0.5) {
@@ -24471,6 +37816,7 @@ var GpuPresenter = class {
     this.pipelines = /* @__PURE__ */ new Map();
     this.data = {
       sky: new Float32Array(SKY_UNIFORM_FLOATS),
+      atmosphere: new Float32Array(ATMOSPHERE_SKY_UNIFORM_FLOATS),
       shaft: new Float32Array(SHAFT_UNIFORM_FLOATS),
       compose: new Float32Array(COMPOSE_UNIFORM_FLOATS),
       lens: new Float32Array(POST_UNIFORM_FLOATS),
@@ -24478,6 +37824,11 @@ var GpuPresenter = class {
       measure: new Float32Array(MEASURE_UNIFORM_FLOATS)
     };
     this.postFx = null;
+    /** The physical sky's LUTs (F5a), made when a linear frame first draws one. */
+    this.atmosphereLuts = null;
+    /** The volumetric clouds' pass (F5c), made with the first frame that has a layer; and the clear sky's stand-in. */
+    this.cloudPass = null;
+    this.clearClouds = null;
     /** The HDR bloom's chain (F4d), made when a linear frame first blooms. */
     this.bloom = null;
     this.uploads = /* @__PURE__ */ new Map();
@@ -24490,7 +37841,7 @@ var GpuPresenter = class {
     this.outputHeight = layerHeight;
     this.hdr = options.hdr === true;
     this.extended = this.hdr && options.extended === true;
-    this.blank = device.createTexture({ size: { width: 1, height: 1 }, format: "rgba8unorm", usage: USAGE3.textureBinding | USAGE3.copyDst });
+    this.blank = device.createTexture({ size: { width: 1, height: 1 }, format: "rgba8unorm", usage: USAGE5.textureBinding | USAGE5.copyDst });
     device.queue.writeTexture({ texture: this.blank }, new Uint8Array(4), { bytesPerRow: 4 }, { width: 1, height: 1 });
     const sampler = (u, v) => device.createSampler({ magFilter: "linear", minFilter: "linear", addressModeU: u, addressModeV: v });
     this.linear = { clamp: sampler("clamp-to-edge", "clamp-to-edge"), wrapU: sampler("repeat", "clamp-to-edge"), repeat: sampler("repeat", "repeat") };
@@ -24502,6 +37853,7 @@ var GpuPresenter = class {
     const compose = layout([uni(), tex(1), tex(2), tex(3), samp(4), tex(5), tex(6), tex(7), tex(8)]);
     this.layouts = {
       sky: layout([uni(), tex(1), samp(2), tex(3, STAGE_FRAGMENT2, "2d-array"), samp(4)]),
+      atmosphere: layout([uni(), tex(1), samp(2), tex(3), tex(4), tex(5)]),
       mask: layout([uni(), tex(1), tex(2)]),
       gather: layout([uni(), tex(1)]),
       compose,
@@ -24510,9 +37862,10 @@ var GpuPresenter = class {
       lens: layout([uni(), tex(1), samp(2), { binding: 3, visibility: STAGE_FRAGMENT2, buffer: { type: "uniform" } }]),
       measure: layout([uni(STAGE_COMPUTE), tex(1, STAGE_COMPUTE), tex(2, STAGE_COMPUTE), { binding: 3, visibility: STAGE_COMPUTE, buffer: { type: "storage" } }])
     };
-    const ubuf = (floats) => device.createBuffer({ size: floats * 4, usage: USAGE3.uniform | USAGE3.bufferCopyDst });
+    const ubuf = (floats) => device.createBuffer({ size: floats * 4, usage: USAGE5.uniform | USAGE5.bufferCopyDst });
     this.uniforms = {
       sky: ubuf(SKY_UNIFORM_FLOATS),
+      atmosphere: ubuf(ATMOSPHERE_SKY_UNIFORM_FLOATS),
       shaft: ubuf(SHAFT_UNIFORM_FLOATS),
       compose: ubuf(COMPOSE_UNIFORM_FLOATS),
       finish: ubuf(COMPOSE_UNIFORM_FLOATS),
@@ -24523,10 +37876,18 @@ var GpuPresenter = class {
     this.transients = new TransientPool(device);
     this.timer = GraphTimer.create(device);
     this.measured = {
-      result: device.createBuffer({ size: 16, usage: USAGE3.bufferStorage | USAGE3.bufferCopySrc }),
-      staging: device.createBuffer({ size: 16, usage: USAGE3.mapRead | USAGE3.bufferCopyDst }),
+      result: device.createBuffer({ size: 16, usage: USAGE5.bufferStorage | USAGE5.bufferCopySrc }),
+      staging: device.createBuffer({ size: 16, usage: USAGE5.mapRead | USAGE5.bufferCopyDst }),
       busy: false
     };
+  }
+  /** A 1×1 cloud target that lets the whole sky through. */
+  noClouds() {
+    if (!this.clearClouds) {
+      this.clearClouds = this.device.createTexture({ size: { width: 1, height: 1 }, format: "rgba16float", usage: 4 | 2 });
+      this.device.queue.writeTexture({ texture: this.clearClouds }, new Uint16Array([0, 0, 0, 15360]), { bytesPerRow: 8 }, { width: 1, height: 1 });
+    }
+    return this.clearClouds;
   }
   /** The frame's width (its target's). */
   get width() {
@@ -24578,6 +37939,29 @@ var GpuPresenter = class {
       graph.addPass("sky", "render", (pass) => {
         pass.write(skyTexture);
         return (ctx) => {
+          const atmosphere = this.hdr && sky.atmosphere ? sky.atmosphere : null;
+          if (atmosphere) {
+            (this.atmosphereLuts ?? (this.atmosphereLuts = new GpuAtmosphere(device))).update(atmosphere);
+            device.queue.writeBuffer(this.uniforms.atmosphere, 0, packAtmosphereSkyUniforms({ ...sky, atmosphere }, width, height, this.data.atmosphere));
+            const cloudView = atmosphere.clouds ? (this.cloudPass ?? (this.cloudPass = new GpuClouds(device))).march(ctx.encoder, atmosphere, atmosphere.clouds, sky.view, sky.projection, this.atmosphereLuts.transmittance, width, height).createView() : this.noClouds().createView();
+            this.fullScreen(
+              ctx.encoder,
+              "atmosphere",
+              skyFormat,
+              ATMOSPHERE_SKY_WGSL,
+              ctx.texture(skyTexture),
+              [
+                { binding: 0, resource: { buffer: this.uniforms.atmosphere } },
+                { binding: 1, resource: this.atmosphereLuts.skyView.createView() },
+                { binding: 2, resource: this.linear.clamp },
+                { binding: 3, resource: this.atmosphereLuts.moonView.createView() },
+                { binding: 4, resource: this.atmosphereLuts.transmittance.createView() },
+                { binding: 5, resource: cloudView }
+              ],
+              ctx.timing
+            );
+            return;
+          }
           device.queue.writeBuffer(this.uniforms.sky, 0, packSkyUniforms(sky, width, height, this.data.sky, this.hdr, frame.tonemap ? frame.tonemap.exposure : null, frame.tonemap?.authored ?? false));
           this.fullScreen(
             ctx.encoder,
@@ -24811,11 +38195,11 @@ var GpuPresenter = class {
   }
   /** The exposure that keeps grey where SDR shows it on an HDR display, per curve and domain (found once). */
   extendedExposure(mapper, authored = false) {
-    const key = `${mapper}|${authored}`;
-    let s = this.exposures.get(key);
+    const key2 = `${mapper}|${authored}`;
+    let s = this.exposures.get(key2);
     if (s === void 0) {
       s = extendedExposure(mapper, HDR_HEADROOM, authored);
-      this.exposures.set(key, s);
+      this.exposures.set(key2, s);
     }
     return s;
   }
@@ -24828,6 +38212,9 @@ var GpuPresenter = class {
     this.timer?.destroy();
     this.bloom?.dispose();
     this.postFx?.dispose();
+    this.atmosphereLuts?.dispose();
+    this.cloudPass?.dispose();
+    this.clearClouds?.destroy?.();
     destroy(this.panorama?.texture);
     destroy(this.cloudTexture?.texture);
     for (const u of this.uploads.values()) destroy(u.texture);
@@ -24835,18 +38222,18 @@ var GpuPresenter = class {
     destroy(this.measured.result);
     destroy(this.measured.staging);
   }
-  async readMeasurements(luminance, sun) {
+  async readMeasurements(luminance3, sun) {
     const m = this.measured;
     m.busy = true;
     try {
-      await m.staging.mapAsync(USAGE3.mapRead);
+      await m.staging.mapAsync(USAGE5.mapRead);
       if (this.destroyed) return;
       const [sum, count, open, taps] = Array.from(new Float32Array(m.staging.getMappedRange().slice(0)));
       m.staging.unmap();
       const prev = this.latestStats;
       this.latestStats = {
-        luminance: luminance ? count > 0 ? Math.exp(sum / count) : AUTO_KEY_FALLBACK : prev.luminance,
-        luminanceSeq: prev.luminanceSeq + (luminance ? 1 : 0),
+        luminance: luminance3 ? count > 0 ? Math.exp(sum / count) : AUTO_KEY_FALLBACK : prev.luminance,
+        luminanceSeq: prev.luminanceSeq + (luminance3 ? 1 : 0),
         sunVisible: sun ? taps > 0 ? open / taps : 0 : prev.sunVisible,
         seq: prev.seq + 1
       };
@@ -24862,7 +38249,7 @@ var GpuPresenter = class {
     let entry = this.uploads.get(slot);
     if (!entry) {
       entry = {
-        texture: this.device.createTexture({ size: { width, height }, format: "rgba8unorm", usage: USAGE3.textureBinding | USAGE3.copyDst }),
+        texture: this.device.createTexture({ size: { width, height }, format: "rgba8unorm", usage: USAGE5.textureBinding | USAGE5.copyDst }),
         width,
         height
       };
@@ -24876,7 +38263,7 @@ var GpuPresenter = class {
   panoramaFor(map) {
     if (this.panorama?.source === map) return this.panorama.texture;
     this.panorama?.texture.destroy?.();
-    const texture = this.device.createTexture({ size: { width: map.width, height: map.height }, format: "rgba8unorm", usage: USAGE3.textureBinding | USAGE3.copyDst });
+    const texture = this.device.createTexture({ size: { width: map.width, height: map.height }, format: "rgba8unorm", usage: USAGE5.textureBinding | USAGE5.copyDst });
     this.device.queue.writeTexture({ texture }, map.data, { bytesPerRow: map.width * 4, rowsPerImage: map.height }, { width: map.width, height: map.height });
     this.panorama = { source: map, texture };
     return texture;
@@ -24889,7 +38276,7 @@ var GpuPresenter = class {
     cached?.texture.destroy?.();
     const size = CLOUD_TILE_SIZE;
     const count = Math.max(1, shown.length);
-    const texture = this.device.createTexture({ size: { width: size, height: size, depthOrArrayLayers: count }, format: "r8unorm", usage: USAGE3.textureBinding | USAGE3.copyDst });
+    const texture = this.device.createTexture({ size: { width: size, height: size, depthOrArrayLayers: count }, format: "r8unorm", usage: USAGE5.textureBinding | USAGE5.copyDst });
     shown.forEach((layer, i) => {
       const bytes = new Uint8Array(size * size);
       for (let k = 0; k < bytes.length; k += 1) bytes[k] = Math.round(Math.max(0, Math.min(1, layer.density[k] ?? 0)) * 255);
@@ -24899,8 +38286,8 @@ var GpuPresenter = class {
     return texture;
   }
   pipeline(name, format, code) {
-    const key = `${name}|${format}`;
-    let pipeline = this.pipelines.get(key);
+    const key2 = `${name}|${format}`;
+    let pipeline = this.pipelines.get(key2);
     if (!pipeline) {
       const module = this.device.createShaderModule({ code });
       const layout = this.device.createPipelineLayout({ bindGroupLayouts: [this.layouts[name]] });
@@ -24911,7 +38298,7 @@ var GpuPresenter = class {
         fragment: { module, entryPoint: name, targets: name === "lens" || name === "composeBloom" ? [{ format }, { format }] : [{ format }] },
         primitive: { topology: "triangle-list" }
       });
-      this.pipelines.set(key, pipeline);
+      this.pipelines.set(key2, pipeline);
     }
     return pipeline;
   }
@@ -25043,8 +38430,8 @@ var GpuCanvasSurface = class _GpuCanvasSurface {
     this.captures = [];
     const width = texture.width;
     const height = texture.height;
-    const half = this.format === "rgba16float";
-    const bytesPerRow = Math.ceil(width * (half ? 8 : 4) / 256) * 256;
+    const half2 = this.format === "rgba16float";
+    const bytesPerRow = Math.ceil(width * (half2 ? 8 : 4) / 256) * 256;
     let buffer = null;
     try {
       buffer = this.device.createBuffer({ size: bytesPerRow * height, usage: 1 | 8 });
@@ -25144,7 +38531,7 @@ function halfToFloat2(h) {
 }
 
 // src/player.ts
-import { SpatialLoader, actionMask, createHoloCache, holoBindingKeys as holoBindingKeys2, holoDocuments as holoDocuments2, renderHoloDocument, translate, reboundActions, colorFilterSvg, DEFAULT_ACCESSIBILITY } from "@cartbox/editor";
+import { SpatialLoader, WorldPartition, partitionWorld, actionMask, createHoloCache, holoBindingKeys as holoBindingKeys2, holoDocuments as holoDocuments2, renderHoloDocument, translate, reboundActions, colorFilterSvg, DEFAULT_ACCESSIBILITY } from "@cartbox/editor";
 var DIRECT_CORE_URL = "/engine/modern-core/modern-core.js";
 function directCoreBeside(engineUrl) {
   const at = engineUrl?.lastIndexOf("/engine/") ?? -1;
@@ -25168,6 +38555,7 @@ var Player = class {
     this.sounds = null;
     /** The graphics preset in effect (resolved from the quality option once the renderer is known). */
     this.qualitySettings = QUALITY_PRESETS.high;
+    this.viewMode = "lit";
     this.qualityGovernor = new QualityGovernor();
     /** The animation's post-FX values this frame, and the post volumes' look (P6). */
     this.animPostFx = null;
@@ -25255,12 +38643,17 @@ var Player = class {
     /** Turn the profiler on (it starts empty) or off. */
     /** An editor's camera, looking at the 3D scene instead of the cart's (see PlayerHandle.setEditorCamera). */
     this.editorCamera = null;
+    /** What the 3D viewport shows (F10a): the lit frame, or a diagnostic of it on the AAA tier. */
+    /** The weather a cart or the editor set at run time (F5e), over the rig's. */
+    this.weather = null;
     /** Counts level loads, so a load overtaken by a newer switch doesn't activate. */
     this.levelLoads = 0;
     /** Objects out of the current level. */
     this.levelInactive = /* @__PURE__ */ new Set();
     /** Spatial loading, when the scene streams by distance: the loader and what it has unloaded. */
     this.spatial = null;
+    /** The world partition (F6d), when the scene streams by cells: the cells and what isn't loaded. */
+    this.partition = null;
     /** The player's settings now (EP19b): text size and colour filter, read by the cart each tick. */
     this.settings = DEFAULT_ACCESSIBILITY;
     /** The language to play in (1-based in the cart's table; 0 for none) and a revision bumped when it changes. */
@@ -25559,6 +38952,8 @@ var Player = class {
             }
           );
           this.meshSurface.setQuality(this.qualitySettings);
+          this.meshSurface.setViewMode(this.viewMode);
+          this.meshSurface.setWeather(this.weather);
           this.meshSurface.setProfiler(this.profiler);
           const holoDocs = holoDocuments2(this.options.ui ?? []);
           const runtime = this.runtime;
@@ -25566,7 +38961,7 @@ var Player = class {
             const keys = holoBindingKeys2(this.options.ui ?? []);
             const strings = this.options.strings ?? null;
             const language = playLanguage(strings, this.options.languages) ?? "";
-            const text = (key) => translate(strings, language, key);
+            const text = (key2) => translate(strings, language, key2);
             const cache = createHoloCache();
             this.meshSurface.setHolo((out, width, height, time, premultiplied) => {
               const state = runtime.channel.holo;
@@ -25586,7 +38981,11 @@ var Player = class {
           if ((mesh.levels?.length ?? 0) > 0) this.activateLevel(0);
           if (mesh.streaming) {
             const groups = streamGroups(mesh);
-            if (groups.length > 0) this.spatial = { loader: new SpatialLoader(groups, mesh.streaming), unloaded: /* @__PURE__ */ new Set() };
+            if (groups.length > 0 && mesh.streaming.cell) {
+              const world2 = new WorldPartition(partitionWorld(groups, mesh.streaming.cell), mesh.streaming);
+              this.partition = { world: world2, unloaded: world2.unloaded() };
+              this.applyInactive();
+            } else if (groups.length > 0) this.spatial = { loader: new SpatialLoader(groups, mesh.streaming), unloaded: /* @__PURE__ */ new Set() };
           }
         }
         if (world && this.cartSource) {
@@ -25846,6 +39245,7 @@ var Player = class {
       for (const b of this.runtime.channel.takeBursts()) this.meshSurface?.burst(b.effect, b.at, b.dir, b.scale);
       for (const d of this.runtime.channel.takeDecals()) this.meshSurface?.decal(d.decal, d.at, d.normal, d.scale);
       for (const d of this.runtime.channel.takeDebris()) this.meshSurface?.throwDebris(d.debris, d.at, d.velocity, d.scale);
+      for (const s of this.runtime.channel.takeShatters()) this.meshSurface?.shatter(s.object, s.at, s.strength);
       for (const c of this.runtime.channel.takeSounds()) {
         if (!this.sounds) continue;
         if (c.kind === "play") {
@@ -25901,6 +39301,30 @@ var Player = class {
     this.qualityGovernor.reset(this.view.performance.now());
     this.applyQuality(resolveQuality(choice, browserDeviceHints(this.sceneRenderer ? this.sceneRenderer.backend !== "software" : void 0)));
   }
+  splash(x, z, strength) {
+    this.meshSurface?.splash(x, z, strength);
+  }
+  setWeather(settings) {
+    this.weather = settings;
+    this.meshSurface?.setWeather(settings);
+  }
+  setViewMode(mode) {
+    this.viewMode = mode;
+    this.meshSurface?.setViewMode(mode);
+    this.showPostFx();
+  }
+  /** The path-traced reference of the 3D frame shown (F10b), `width` across at its aspect; null without one (every tier but AAA). */
+  captureReference(options) {
+    return this.meshSurface?.captureReference(options) ?? null;
+  }
+  /** Render a timeline offline, frame by frame through the path tracer (F10d). */
+  renderSequence(options) {
+    return this.meshSurface?.renderSequence(options) ?? null;
+  }
+  /** Samples each pixel of the viewport's path-traced reference holds (F10b). */
+  get referenceSamples() {
+    return this.meshSurface?.referenceSamples ?? 0;
+  }
   applyQuality(settings) {
     this.qualitySettings = settings;
     this.meshSurface?.setQuality(this.qualitySettings);
@@ -25911,17 +39335,21 @@ var Player = class {
     const fx = this.postFxSurface ?? this.gpuPostFx;
     if (!fx || !this.basePostFx) return;
     const base = this.animPostFx ? { ...this.basePostFx, values: { ...this.basePostFx.values, ...this.animPostFx } } : this.basePostFx;
-    fx.setSettings(applyQualityToPostFx(applyPostVolumes(base, this.volumePost), this.qualitySettings));
+    const settings = applyQualityToPostFx(applyPostVolumes(base, this.volumePost), this.qualitySettings);
+    fx.setSettings(!isDiagnosticView(this.viewMode) ? settings : { ...settings, enabled: Object.fromEntries(Object.keys(settings.enabled).map((id) => [id, false])) });
   }
   /**
    * "auto" by measurement: a 3D scene whose frames keep coming slower than
    * about 40 fps steps down a preset (high → medium → low; under 20 fps,
    * straight to low). The device hints "auto" starts from can't tell a strong
-   * GPU from a weak one.
+   * GPU from a weak one. A GPU that reads its frames back can fall behind
+   * while the run loop keeps time (it skips frames it can't read back), so
+   * when the GPU is what holds the 3D back its frames' time counts instead.
    */
   governQuality(sinceLast, busy, now) {
     if (this.qualityChoice !== void 0 && this.qualityChoice !== "auto" || !this.meshSurface) return;
-    const step = this.qualityGovernor.feed(sinceLast, busy, now, this.qualitySettings.level);
+    const gpuMs = this.meshSurface.gpuBoundMs();
+    const step = gpuMs !== null && gpuMs > sinceLast ? this.qualityGovernor.feed(gpuMs, gpuMs, now, this.qualitySettings.level) : this.qualityGovernor.feed(sinceLast, busy, now, this.qualitySettings.level);
     if (step) this.applyQuality(QUALITY_PRESETS[step]);
   }
   /**
@@ -25963,7 +39391,7 @@ var Player = class {
   }
   /** Hide (and take out of physics) everything a level or spatial loading has out. */
   applyInactive() {
-    const inactive = /* @__PURE__ */ new Set([...this.levelInactive, ...this.spatial?.unloaded ?? []]);
+    const inactive = /* @__PURE__ */ new Set([...this.levelInactive, ...this.spatial?.unloaded ?? [], ...this.partition?.unloaded ?? []]);
     this.meshSurface?.setInactive(inactive);
     this.runtime?.physics?.setInactive(inactive);
   }
@@ -25973,6 +39401,7 @@ var Player = class {
    * objects coming near.
    */
   updateSpatialLoading() {
+    this.updatePartition();
     const spatial = this.spatial;
     const scene = this.options.mesh;
     if (!spatial || !scene) return;
@@ -25993,6 +39422,40 @@ var Player = class {
     if (approached.length > 0 && this.options.streamAssets) {
       this.options.streamAssets(approached.map((g) => scene.instances[spatial.loader.groups[g].members[0]].id));
     }
+  }
+  /**
+   * The world partition (F6d): cells leaving range unload (their maps and GPU
+   * geometry given back); cells coming in, nearest first and a few at a time,
+   * have the host fetch their assets and the overlay decode their maps (in its
+   * decode workers), and show once that's done.
+   */
+  updatePartition() {
+    const partition = this.partition;
+    const scene = this.options.mesh;
+    if (!partition || !scene) return;
+    const focus = this.runtime?.channel.streamFocus() ?? this.meshSurface?.eyePosition() ?? scene.bounds.center;
+    const { world } = partition;
+    const { load, unload } = world.update(focus);
+    for (const k of unload) this.meshSurface?.unloadCell(world.cells[k].members);
+    if (unload.length > 0) {
+      partition.unloaded = world.unloaded();
+      this.applyInactive();
+    }
+    for (const k of load) {
+      const members = world.cells[k].members;
+      if (this.options.streamAssets) this.options.streamAssets(members.map((i) => scene.instances[i].id));
+      void (this.meshSurface?.loadCell(members) ?? Promise.resolve()).then(() => {
+        if (this.partition !== partition || !world.finished(k)) return;
+        partition.unloaded = world.unloaded();
+        this.applyInactive();
+      });
+    }
+  }
+  /** The world partition's cells and their states (F6d), for a view of what is loaded; null without one. */
+  worldPartition() {
+    const world = this.partition?.world;
+    if (!world) return null;
+    return { cells: world.cells.map((c, k) => ({ i: c.i, j: c.j, state: world.state(k), distance: world.distance(k), objects: c.members.length })) };
   }
   /** Make a level current: its objects (and the always-loaded ones) show and simulate; the rest are hidden. */
   activateLevel(level) {
@@ -26174,7 +39637,7 @@ var Player = class {
           this.meshSurface.setShields(this.runtime.channel.shields());
           this.meshSurface.setLooks(this.runtime.channel.looks());
           const placed = this.runtime.channel.needsWorld() ? this.meshSurface.currentPlacements() : null;
-          this.meshSurface.setSkinning(placed ? this.runtime.channel.skinning((o) => placed[o] ?? null) : this.runtime.channel.skinning());
+          this.meshSurface.setSkinning(placed ? this.runtime.channel.skinning((o) => placed[o] ?? null) : this.runtime.channel.skinning(), this.runtime.channel.morphs());
         }
         this.meshSurface.setCartLights(decodeWorldLights(mailbox));
         if (this.editorCamera) {
@@ -26363,13 +39826,13 @@ function extractScore(events) {
   return best;
 }
 function extractUnlocks(events) {
-  const ids = /* @__PURE__ */ new Set();
+  const ids2 = /* @__PURE__ */ new Set();
   for (const event of events) {
     if (event.kind === "achievement") {
-      ids.add(event.id);
+      ids2.add(event.id);
     }
   }
-  return [...ids];
+  return [...ids2];
 }
 function verifyReplayScore(console2, replay, claimedScore, options = {}) {
   const events = runReplayEvents(console2, replay, options);
@@ -26386,6 +39849,442 @@ function resolveUnlockedAchievements(unlockHashes, registered) {
   const unlocked = new Set(unlockHashes.map((hash) => hash >>> 0));
   return registered.filter((achievement) => unlocked.has(achievement.hash >>> 0));
 }
+
+// src/render/lookDev.ts
+import { composeModelMatrix as composeModelMatrix6, multiplyMat4 as multiplyMat49, projectionMatrix as projectionMatrix4, viewMatrix as viewMatrix5 } from "@cartbox/editor";
+var GREY_CARD = 0.18;
+function authoredFromLinear(v) {
+  const c = Math.min(1, Math.max(0, v));
+  return c <= 31308e-7 ? c * 12.92 : 1.055 * c ** (1 / 2.4) - 0.055;
+}
+var COLOR_CHECKER = [
+  { name: "dark skin", srgb: [115, 82, 68] },
+  { name: "light skin", srgb: [194, 150, 130] },
+  { name: "blue sky", srgb: [98, 122, 157] },
+  { name: "foliage", srgb: [87, 108, 67] },
+  { name: "blue flower", srgb: [133, 128, 177] },
+  { name: "bluish green", srgb: [103, 189, 170] },
+  { name: "orange", srgb: [214, 126, 44] },
+  { name: "purplish blue", srgb: [80, 91, 166] },
+  { name: "moderate red", srgb: [193, 90, 99] },
+  { name: "purple", srgb: [94, 60, 108] },
+  { name: "yellow green", srgb: [157, 188, 64] },
+  { name: "orange yellow", srgb: [224, 163, 46] },
+  { name: "blue", srgb: [56, 61, 150] },
+  { name: "green", srgb: [70, 148, 73] },
+  { name: "red", srgb: [175, 54, 60] },
+  { name: "yellow", srgb: [231, 199, 31] },
+  { name: "magenta", srgb: [187, 86, 149] },
+  { name: "cyan", srgb: [8, 133, 161] },
+  { name: "white 9.5", srgb: [243, 243, 242] },
+  { name: "neutral 8", srgb: [200, 200, 200] },
+  { name: "neutral 6.5", srgb: [160, 160, 160] },
+  { name: "neutral 5", srgb: [122, 122, 121] },
+  { name: "neutral 3.5", srgb: [85, 85, 85] },
+  { name: "black 2", srgb: [52, 52, 52] }
+];
+var LOOK_DEV_RIGS = [
+  { id: "studio", label: "Studio", hint: "A key, a fill and a rim (area lights) under a dim cyclorama: form and highlights." },
+  { id: "noon", label: "Noon", hint: "A high sun under a blue sky: hard shadows and saturated colour." },
+  { id: "overcast", label: "Overcast", hint: "A soft white sky and no sun: albedo and occlusion, with no direct light to hide behind." },
+  { id: "goldenHour", label: "Golden hour", hint: "A low, warm sun under a cooling sky: grazing light and long shadows." },
+  { id: "night", label: "Night", hint: "A cold moon over a dark sky: how the asset holds in the dark, and its emission." },
+  { id: "hdri", label: "HDRI", hint: "The cart's own environment, turned about the asset by the turntable." }
+];
+function material(name, linear, metallic, roughness) {
+  return { name, baseColorFactor: [authoredFromLinear(linear[0]), authoredFromLinear(linear[1]), authoredFromLinear(linear[2]), 1], baseColorImage: null, metallicFactor: metallic, roughnessFactor: roughness };
+}
+function lookDevSphere(name, mat, rings = 24, segments = 48) {
+  const positions = [];
+  const normals = [];
+  const uvs = [];
+  const indices = [];
+  for (let r = 0; r <= rings; r += 1) {
+    const theta = Math.PI * r / rings;
+    for (let s = 0; s <= segments; s += 1) {
+      const phi = 2 * Math.PI * s / segments;
+      const n = [Math.sin(theta) * Math.cos(phi), Math.cos(theta), Math.sin(theta) * Math.sin(phi)];
+      positions.push(...n);
+      normals.push(...n);
+      uvs.push(s / segments, 1 - r / rings);
+    }
+  }
+  for (let r = 0; r < rings; r += 1) {
+    for (let s = 0; s < segments; s += 1) {
+      const a = r * (segments + 1) + s;
+      const b = a + segments + 1;
+      indices.push(a, a + 1, b, a + 1, b + 1, b);
+    }
+  }
+  return { name, primitives: [{ positions: new Float32Array(positions), normals: new Float32Array(normals), uvs: new Float32Array(uvs), indices: new Uint32Array(indices), material: mat }] };
+}
+function quadPrimitive(mat, centre, w, h, up = false) {
+  const [x, y, z] = centre;
+  const positions = up ? [x - w / 2, y, z + h / 2, x + w / 2, y, z + h / 2, x + w / 2, y, z - h / 2, x - w / 2, y, z - h / 2] : [x - w / 2, y - h / 2, z, x + w / 2, y - h / 2, z, x + w / 2, y + h / 2, z, x - w / 2, y + h / 2, z];
+  const n = up ? [0, 1, 0] : [0, 0, 1];
+  return {
+    positions: new Float32Array(positions),
+    normals: new Float32Array([...n, ...n, ...n, ...n]),
+    uvs: new Float32Array([0, 0, 1, 0, 1, 1, 0, 1]),
+    indices: new Uint32Array([0, 1, 2, 0, 2, 3]),
+    material: mat
+  };
+}
+function lookDevChart(patch) {
+  const gap = patch / 6;
+  const pitch = patch + gap;
+  const width = 6 * pitch + gap;
+  const height = 4 * pitch + gap;
+  const primitives = [quadPrimitive(material("chart card", [0.02, 0.02, 0.02], 0, 0.9), [0, 0, -1e-3], width, height)];
+  COLOR_CHECKER.forEach((p, i) => {
+    const col = i % 6;
+    const row = Math.floor(i / 6);
+    const centre = [-width / 2 + gap + pitch * col + patch / 2, height / 2 - gap - pitch * row - patch / 2, 0];
+    const m = { name: p.name, baseColorFactor: [p.srgb[0] / 255, p.srgb[1] / 255, p.srgb[2] / 255, 1], baseColorImage: null, metallicFactor: 0, roughnessFactor: 0.9 };
+    primitives.push(quadPrimitive(m, centre, patch, patch));
+  });
+  return { name: "colour checker", primitives };
+}
+function meshBounds3(mesh) {
+  const min = [Infinity, Infinity, Infinity];
+  const max = [-Infinity, -Infinity, -Infinity];
+  for (const p of mesh?.primitives ?? []) {
+    for (let i = 0; i < p.positions.length; i += 3) {
+      for (let a = 0; a < 3; a += 1) {
+        min[a] = Math.min(min[a], p.positions[i + a]);
+        max[a] = Math.max(max[a], p.positions[i + a]);
+      }
+    }
+  }
+  if (!Number.isFinite(min[0])) return { min: [-0.5, 0, -0.5], max: [0.5, 1, 0.5] };
+  return { min, max };
+}
+function turn(v, angle) {
+  const c = Math.cos(angle);
+  const s = Math.sin(angle);
+  return [v[0] * c + v[2] * s, v[1], -v[0] * s + v[2] * c];
+}
+function turnEnvironment(env, angle) {
+  const shift = (width) => (Math.round(-angle / (2 * Math.PI) * width) % width + width) % width;
+  const rotate = (data, width, height, channels) => {
+    const k = shift(width);
+    if (k === 0) return data;
+    const out = new data.constructor(data.length);
+    for (let y = 0; y < height; y += 1) {
+      for (let x = 0; x < width; x += 1) {
+        const from = (y * width + x) * channels;
+        const to = (y * width + (x + k) % width) * channels;
+        for (let c = 0; c < channels; c += 1) out[to + c] = data[from + c];
+      }
+    }
+    return out;
+  };
+  if (env.hdr) return { ...env, hdr: { ...env.hdr, data: rotate(env.hdr.data, env.hdr.width, env.hdr.height, 3) } };
+  if (env.map) return { ...env, map: { ...env.map, data: rotate(env.map.data, env.map.width, env.map.height, 4) } };
+  return env;
+}
+var gradient = (sky, horizon, ground, intensity) => ({ sky: sky.map(authoredFromLinear), horizon: horizon.map(authoredFromLinear), ground: ground.map(authoredFromLinear), intensity });
+function sunAt(elevation, azimuth) {
+  return [Math.cos(elevation) * Math.sin(azimuth), Math.sin(elevation), Math.cos(elevation) * Math.cos(azimuth)];
+}
+function rigLights(rig, r, hdri) {
+  const dark = [{ kind: "directional", direction: [0, 1, 0], color: [0, 0, 0], intensity: 0 }];
+  switch (rig) {
+    case "noon": {
+      const sun = sunAt(1.05, 0.6);
+      return { lights: [{ kind: "directional", direction: sun, color: [1, 0.97, 0.92], intensity: 3 }], environment: gradient([0.12, 0.22, 0.5], [0.45, 0.55, 0.7], [0.12, 0.11, 0.1], 1), light: 3 * Math.sin(1.05) + 0.6 };
+    }
+    case "overcast":
+      return { lights: dark, environment: gradient([0.85, 0.87, 0.9], [0.75, 0.76, 0.78], [0.2, 0.2, 0.2], 1), light: 0.85 };
+    case "goldenHour": {
+      const sun = sunAt(0.14, -0.9);
+      return { lights: [{ kind: "directional", direction: sun, color: [1, 0.62, 0.32], intensity: 2.5 }], environment: gradient([0.08, 0.12, 0.28], [0.6, 0.38, 0.22], [0.06, 0.05, 0.04], 1), light: 2.5 * 0.6 + 0.3 };
+    }
+    case "night": {
+      const moon = sunAt(0.7, 2.4);
+      return { lights: [{ kind: "directional", direction: moon, color: [0.62, 0.72, 1], intensity: 0.02 }], environment: gradient([4e-3, 6e-3, 0.014], [8e-3, 0.01, 0.02], [2e-3, 2e-3, 3e-3], 1), light: 0.02 };
+    }
+    case "hdri":
+      if (hdri) return { lights: dark, environment: hdri, light: 1 };
+    // falls through: without an HDRI the studio stands in
+    case "studio":
+    default: {
+      const d = 3 * r;
+      const side = 1.5 * r;
+      const luminance3 = (k) => k * Math.PI * d * d / (side * side);
+      const panel = (at, k, color) => {
+        const len = Math.hypot(...at);
+        const toward = at.map((v) => -v / len);
+        return { kind: "area", shape: "rect", size: [side, side], position: at.map((v) => v / len * d), direction: toward, color, intensity: luminance3(k) };
+      };
+      return {
+        lights: [panel([-1, 1.1, 1.2], 1, [1, 0.97, 0.94]), panel([1.4, 0.4, 1], 0.3, [0.9, 0.95, 1]), panel([0.4, 1, -1.5], 0.6, [1, 1, 1])],
+        environment: gradient([0.05, 0.05, 0.05], [0.04, 0.04, 0.04], [0.03, 0.03, 0.03], 1),
+        light: 1
+      };
+    }
+  }
+}
+function lookDevStage(asset, options, aspect = 16 / 9, maps = {}) {
+  const angle = options.turntable ?? 0;
+  const { min, max } = meshBounds3(asset);
+  const centre = [(min[0] + max[0]) / 2, (min[1] + max[1]) / 2, (min[2] + max[2]) / 2];
+  const r = Math.max(0.05, Math.hypot(max[0] - min[0], max[1] - min[1], max[2] - min[2]) / 2);
+  const height = max[1] - min[1];
+  const instances = [];
+  const hdriRig = options.rig === "hdri" && Boolean(options.environment);
+  if (asset) {
+    const spin = hdriRig ? 0 : angle * 180 / Math.PI;
+    const model = composeModelMatrix6([0, 0, 0], [0, spin, 0], [1, 1, 1]);
+    const offset = composeModelMatrix6([-centre[0], -min[1], -centre[2]], [0, 0, 0], [1, 1, 1]);
+    instances.push({ ...maps, mesh: asset, model: multiplyMat49(model, offset) });
+  }
+  const ball = Math.max(0.05, 0.2 * r);
+  const greyBall = options.balls === false ? null : { centre: [r + 1.5 * ball, ball, 0.6 * r], radius: ball };
+  const chromeBall = options.balls === false ? null : { centre: [r + 4 * ball, ball, 0.6 * r], radius: ball };
+  if (greyBall && chromeBall) {
+    instances.push({ mesh: lookDevSphere("grey ball", material("grey ball", [GREY_CARD, GREY_CARD, GREY_CARD], 0, 1)), model: composeModelMatrix6(greyBall.centre, [0, 0, 0], [ball, ball, ball]) });
+    instances.push({ mesh: lookDevSphere("chrome ball", material("chrome ball", [0.95, 0.95, 0.95], 1, 0)), model: composeModelMatrix6(chromeBall.centre, [0, 0, 0], [ball, ball, ball]) });
+  }
+  const patch = Math.max(0.02, 0.14 * r);
+  const chartHeight = 4 * (patch * 7) / 6 + patch / 6;
+  const chart = options.chart === false ? null : { centre: [-(r + 3.6 * patch), chartHeight / 2 + 0.02 * r, -0.2 * r], patch };
+  if (chart) instances.push({ mesh: lookDevChart(patch), model: composeModelMatrix6(chart.centre, [0, 20, 0], [1, 1, 1]) });
+  if (options.floor !== false) {
+    const side = 30 * r;
+    instances.push({ mesh: { name: "floor", primitives: [quadPrimitive(material("floor", [GREY_CARD, GREY_CARD, GREY_CARD], 0, 0.85), [0, 0, 0], side, side, true)] }, model: composeModelMatrix6([0, 0, 0], [0, 0, 0], [1, 1, 1]) });
+  }
+  const rig = rigLights(options.rig, r, options.environment ?? null);
+  const lights = hdriRig ? rig.lights.map((l) => ({ ...l, ...l.direction ? { direction: turn(l.direction, angle) } : {}, ...l.position ? { position: turn(l.position, angle) } : {} })) : rig.lights;
+  const environment = rig.environment && hdriRig ? turnEnvironment(rig.environment, angle) : rig.environment;
+  const fov = options.fov ?? Math.PI / 4;
+  const elevation = options.elevation ?? 0.25;
+  const left = chart ? chart.centre[0] - 3.6 * patch : -r;
+  const right = chromeBall ? chromeBall.centre[0] + ball : r;
+  const span = Math.max(right - left, (height + 0.2 * r) * aspect);
+  const target = [(left + right) / 2, Math.max(height, 2 * ball) / 2, 0];
+  const distance = span / 2 / Math.tan(fov * Math.min(1, aspect) / 2) * 1.15 + r;
+  const eye = [target[0], target[1] + Math.sin(elevation) * distance, Math.cos(elevation) * distance];
+  return {
+    instances,
+    lights,
+    environment,
+    ambient: 0,
+    view: viewMatrix5(eye, target),
+    projection: projectionMatrix4(fov, aspect, Math.max(0.01, distance / 200), distance * 40),
+    // A level grey card reflects 0.18 × the light it takes: over that light, it shows at middle grey.
+    exposure: 1 / Math.max(1e-4, rig.light),
+    greyBall,
+    chromeBall,
+    chart
+  };
+}
+
+// src/render/lookDevCheck.ts
+import { multiplyMat4 as multiplyMat410 } from "@cartbox/editor";
+var luminance2 = (d, i) => 0.2126 * d[i] + 0.7152 * d[i + 1] + 0.0722 * d[i + 2];
+function half(h) {
+  const s = h & 32768 ? -1 : 1;
+  const e = h >> 10 & 31;
+  const m = h & 1023;
+  if (e === 0) return s * 2 ** -14 * (m / 1024);
+  if (e === 31) return m ? NaN : s * Infinity;
+  return s * 2 ** (e - 15) * (1 + m / 1024);
+}
+async function readLinearTexture(device, texture, width, height, wait = (p) => p) {
+  const bytesPerRow = Math.ceil(width * 8 / 256) * 256;
+  const buffer = device.createBuffer({ size: bytesPerRow * height, usage: 1 | 8 });
+  const encoder = device.createCommandEncoder();
+  encoder.copyTextureToBuffer({ texture }, { buffer, bytesPerRow, rowsPerImage: height }, { width, height });
+  device.queue.submit([encoder.finish()]);
+  await wait(buffer.mapAsync(1));
+  const halves = new Uint16Array(buffer.getMappedRange().slice(0));
+  buffer.unmap();
+  buffer.destroy();
+  const data = new Float32Array(width * height * 4);
+  for (let y = 0; y < height; y += 1) for (let x = 0; x < width * 4; x += 1) data[y * width * 4 + x] = half(halves[y * bytesPerRow / 2 + x]);
+  return { width, height, data };
+}
+function lookDevDraw(stage, width, height) {
+  const sun = stage.lights.find((l) => l.kind === "directional" && l.intensity > 0);
+  return {
+    width,
+    height,
+    view: stage.view,
+    projection: stage.projection,
+    ambient: stage.ambient,
+    lightDirection: sun?.direction ?? [0, 1, 0],
+    environment: stage.environment,
+    lights: stage.lights,
+    prepass: true,
+    localShadowCasters: stage.instances,
+    ...sun?.direction ? { sunShadow: { casters: stage.instances, toLight: sun.direction, distance: 60, size: 2048, reach: 60, strength: 1 } } : {}
+  };
+}
+function ballLight(image, viewProj, ball, view) {
+  const project = ([x, y, z]) => {
+    const m = viewProj;
+    const w = m[3] * x + m[7] * y + m[11] * z + m[15];
+    return [((m[0] * x + m[4] * y + m[8] * z + m[12]) / w + 1) * 0.5 * image.width, (1 - (m[1] * x + m[5] * y + m[9] * z + m[13]) / w) * 0.5 * image.height];
+  };
+  const [cx, cy] = project(ball.centre);
+  const up = [view[1], view[5], view[9]];
+  const [, ey] = project([ball.centre[0] + up[0] * ball.radius, ball.centre[1] + up[1] * ball.radius, ball.centre[2] + up[2] * ball.radius]);
+  const r = Math.abs(cy - ey) * 0.6;
+  let sum = 0;
+  let n = 0;
+  for (let y = Math.floor(cy - r); y <= Math.ceil(cy + r); y += 1) {
+    for (let x = Math.floor(cx - r); x <= Math.ceil(cx + r); x += 1) {
+      if (x < 0 || y < 0 || x >= image.width || y >= image.height || (x + 0.5 - cx) ** 2 + (y + 0.5 - cy) ** 2 > r * r) continue;
+      sum += luminance2(image.data, (y * image.width + x) * 4);
+      n += 1;
+    }
+  }
+  return n > 0 ? sum / n : null;
+}
+async function checkLookDev(device, stage, width, height, samples = 256, wait = (p) => p) {
+  const draw = lookDevDraw(stage, width, height);
+  const renderer = await WebgpuSceneRenderer.create(device, width, height, rasterStyleFor(MODELS.aaa.renderCaps), { hdr: true, mips: true });
+  if (!renderer) throw new Error("The look-dev check needs the linear-light WebGPU renderer.");
+  const tracer = PathTracer.create(device);
+  try {
+    let texture = null;
+    for (let i = 0; i < 3; i += 1) texture = renderer.renderToTexture(stage.instances, draw);
+    const raster = await readLinearTexture(device, texture, width, height, wait);
+    let traced = null;
+    const perFrame = Math.max(1, Math.min(samples, Math.floor((1 << 20) / (width * height))));
+    while (tracer.samples < samples) {
+      traced = tracer.render(stage.instances, draw, width, height, { samplesPerFrame: Math.min(perFrame, samples - tracer.samples) });
+      await wait(device.queue.onSubmittedWorkDone());
+    }
+    const reference = await readLinearTexture(device, traced, width, height, wait);
+    const viewProj = multiplyMat410(stage.projection, stage.view);
+    const balls = (ball) => {
+      if (!ball) return null;
+      const a = ballLight(raster, viewProj, ball, stage.view);
+      const b = ballLight(reference, viewProj, ball, stage.view);
+      return a === null || b === null ? null : { raster: a, reference: b };
+    };
+    let error = 0;
+    let outliers = 0;
+    let n = 0;
+    for (let i = 0; i < width * height * 4; i += 4) {
+      if (raster.data[i + 3] < 0.5 || reference.data[i + 3] < 0.5) continue;
+      const a = luminance2(raster.data, i);
+      const b = luminance2(reference.data, i);
+      const e = Math.abs(a - b) / Math.max(b, 1e-3);
+      error += e;
+      if (e > 0.1) outliers += 1;
+      n += 1;
+    }
+    return { greyBall: balls(stage.greyBall), chromeBall: balls(stage.chromeBall), frameError: n > 0 ? error / n : 0, outliers: n > 0 ? outliers / n : 0, raster, reference };
+  } finally {
+    tracer.destroy();
+    renderer.dispose();
+  }
+}
+
+// src/render/lookDevView.ts
+var LookDevView = class _LookDevView {
+  constructor(canvas, device, context, format, renderer, presenter) {
+    this.canvas = canvas;
+    this.device = device;
+    this.context = context;
+    this.format = format;
+    this.renderer = renderer;
+    this.presenter = presenter;
+    this.options = { rig: "studio", mode: "raster", spin: 0.4 };
+    this.asset = null;
+    this.maps = {};
+    this.stage = null;
+    this.angle = 0;
+    this.last = 0;
+    this.raf = 0;
+    this.destroyed = false;
+    this.size = { width: canvas.width, height: canvas.height };
+    this.raf = requestAnimationFrame((t) => this.frame(t));
+  }
+  /** A view on `canvas`, or null without WebGPU (the stage needs the AAA tier's renderer). */
+  static async create(canvas) {
+    const device = await getWebgpuDevice();
+    const gpu = navigator.gpu;
+    const context = device ? canvas.getContext("webgpu") : null;
+    if (!device || !gpu || !context) return null;
+    const format = gpu.getPreferredCanvasFormat?.() ?? "bgra8unorm";
+    context.configure({ device, format, alphaMode: "opaque" });
+    const width = Math.max(1, canvas.width);
+    const height = Math.max(1, canvas.height);
+    const renderer = await WebgpuSceneRenderer.create(device, width, height, rasterStyleFor(MODELS.aaa.renderCaps), { hdr: true, mips: true });
+    if (!renderer) return null;
+    return new _LookDevView(canvas, device, context, format, renderer, new GpuPresenter(device, width, height, { hdr: true }));
+  }
+  /** The asset on the stage, with its decoded maps per primitive (or none: the props alone). */
+  setAsset(asset, maps = {}) {
+    this.asset = asset;
+    this.maps = maps;
+    this.stage = null;
+  }
+  setOptions(options) {
+    this.options = { ...this.options, ...options };
+    this.stage = null;
+  }
+  /** The turntable's angle, radians. */
+  get turntable() {
+    return this.angle;
+  }
+  /** Samples each pixel of the reference holds (0 while the raster is shown). */
+  get samples() {
+    return this.options.mode === "pathTraced" ? this.renderer.referenceSamples : 0;
+  }
+  stageNow() {
+    const { width, height } = this.size;
+    this.stage ?? (this.stage = lookDevStage(this.asset, { ...this.options, turntable: this.options.turntable ?? this.angle }, width / Math.max(1, height), this.maps));
+    return this.stage;
+  }
+  frame(time) {
+    if (this.destroyed) return;
+    this.raf = requestAnimationFrame((t) => this.frame(t));
+    const dt = this.last ? Math.min(0.1, (time - this.last) / 1e3) : 0;
+    this.last = time;
+    const tracing = this.options.mode === "pathTraced";
+    if (!tracing && this.options.turntable === void 0 && (this.options.spin ?? 0) !== 0) {
+      this.angle = (this.angle + dt * (this.options.spin ?? 0)) % (2 * Math.PI);
+      this.stage = null;
+    }
+    const width = Math.max(1, this.canvas.width);
+    const height = Math.max(1, this.canvas.height);
+    if (width !== this.size.width || height !== this.size.height) {
+      this.size = { width, height };
+      this.renderer.resize(width, height);
+      this.presenter.resize(width, height);
+      this.stage = null;
+    }
+    const stage = this.stageNow();
+    const draw = { ...lookDevDraw(stage, width, height), ...tracing ? { viewMode: "pathTraced" } : { temporal: true } };
+    const scene = this.renderer.renderToTexture(stage.instances, draw);
+    const exposure = stage.exposure * 2 ** (this.options.stops ?? 0);
+    this.presenter.present({ base: { kind: "colour", rgba: [12, 12, 14, 255] }, scene, tonemap: { exposure, operator: this.options.toneMapper ?? "aces" } }, this.context.getCurrentTexture(), this.format);
+  }
+  /** Draw the stage as it stands both ways at a small size and compare them (lookDevCheck.ts). */
+  check(width = 192, height = 108, samples = 128) {
+    const stage = lookDevStage(this.asset, { ...this.options, turntable: this.options.turntable ?? this.angle }, width / height, this.maps);
+    return checkLookDev(this.device, stage, width, height, samples);
+  }
+  /** The reference of the stage as it stands, `width` across at the canvas's aspect (up to 8K). */
+  capture(width, samples = 256, progress) {
+    const height = Math.max(1, Math.round(width * this.size.height / Math.max(1, this.size.width)));
+    const stage = lookDevStage(this.asset, { ...this.options, turntable: this.options.turntable ?? this.angle }, width / height, this.maps);
+    const exposure = stage.exposure * 2 ** (this.options.stops ?? 0);
+    return captureReference(this.device, stage.instances, lookDevDraw(stage, width, height), { width, height, samples, exposure, ...this.options.toneMapper ? { toneMapper: this.options.toneMapper } : {}, ...progress ? { progress } : {} });
+  }
+  destroy() {
+    this.destroyed = true;
+    cancelAnimationFrame(this.raf);
+    this.renderer.dispose();
+    this.presenter.dispose();
+    this.context.unconfigure?.();
+  }
+};
 
 // src/fx/lensModel.ts
 var TILT_SHIFT_FEATHER = 0.35;
@@ -26556,8 +40455,8 @@ function parseTrack(raw, placementCount) {
   const keys = [];
   for (const entry of keysRaw) {
     if (keys.length >= MAX_KEYS) break;
-    const key = parseKeyframe(entry);
-    if (key) keys.push(key);
+    const key2 = parseKeyframe(entry);
+    if (key2) keys.push(key2);
   }
   if (keys.length === 0) return null;
   keys.sort((a, b) => a.t - b.t);
@@ -26620,21 +40519,21 @@ function seededRandom(seed) {
   };
 }
 function pulse(period, min, max) {
-  const half = Math.max(1, Math.round(period / 2));
+  const half2 = Math.max(1, Math.round(period / 2));
   return {
     keys: [
       { t: 0, value: min, ease: "smooth" },
-      { t: half, value: max, ease: "smooth" }
+      { t: half2, value: max, ease: "smooth" }
     ],
     mode: "pingpong"
   };
 }
 function sway(period, amplitude, center = 0) {
-  const half = Math.max(1, Math.round(period / 2));
+  const half2 = Math.max(1, Math.round(period / 2));
   return {
     keys: [
       { t: 0, value: center - amplitude, ease: "smooth" },
-      { t: half, value: center + amplitude, ease: "smooth" }
+      { t: half2, value: center + amplitude, ease: "smooth" }
     ],
     mode: "pingpong"
   };
@@ -26745,7 +40644,7 @@ function encodeNetMessage(message) {
   const view = new DataView(bytes.buffer);
   let at = 0;
   bytes[at++] = (states.length ? STATES : 0) | (events.length ? EVENTS : 0) | (hasMatch ? MATCH : 0) | (hasTime ? TIME : 0) | (hasPing ? PING : 0) | (pongs.length ? PONGS : 0) | (roster.length ? ROSTER : 0);
-  const u322 = (v) => {
+  const u323 = (v) => {
     view.setUint32(at, v >>> 0, true);
     at += 4;
   };
@@ -26754,10 +40653,10 @@ function encodeNetMessage(message) {
     bytes[at++] = states.length;
     for (const [slot, a, b, c, d] of states) {
       bytes[at++] = slot & 255;
-      u322(a);
-      u322(b);
-      u322(c);
-      u322(d);
+      u323(a);
+      u323(b);
+      u323(c);
+      u323(d);
     }
   }
   if (events.length) {
@@ -26765,21 +40664,21 @@ function encodeNetMessage(message) {
     view.setUint16(at, events.length, true);
     at += 2;
     for (const [a, b] of events) {
-      u322(a);
-      u322(b);
+      u323(a);
+      u323(b);
     }
   }
-  if (hasMatch) u322(message.m);
-  if (hasTime) u322(message.t);
-  if (hasPing) u322(message.pi);
+  if (hasMatch) u323(message.m);
+  if (hasTime) u323(message.t);
+  if (hasPing) u323(message.pi);
   if (pongs.length) {
     if (pongs.length > 255) throw new Error("too many pongs in one message");
     bytes[at++] = pongs.length;
     for (const [slot, t0, t1, t2] of pongs) {
       bytes[at++] = slot & 255;
-      u322(t0);
-      u322(t1);
-      u322(t2);
+      u323(t0);
+      u323(t1);
+      u323(t2);
     }
   }
   if (roster.length) {
@@ -26801,7 +40700,7 @@ function decodeNetMessage(bytes) {
   if (flags & ~(STATES | EVENTS | MATCH | TIME | PING | PONGS | ROSTER)) return null;
   let at = 1;
   const need = (n) => at + n <= bytes.length;
-  const u322 = () => {
+  const u323 = () => {
     const v = view.getUint32(at, true);
     at += 4;
     return v;
@@ -26814,7 +40713,7 @@ function decodeNetMessage(bytes) {
     message.s = [];
     for (let i = 0; i < count; i += 1) {
       const slot = bytes[at++];
-      message.s.push([slot, u322(), u322(), u322(), u322()]);
+      message.s.push([slot, u323(), u323(), u323(), u323()]);
     }
   }
   if (flags & EVENTS) {
@@ -26823,16 +40722,16 @@ function decodeNetMessage(bytes) {
     at += 2;
     if (!need(count * 8)) return null;
     message.e = [];
-    for (let i = 0; i < count; i += 1) message.e.push([u322(), u322()]);
+    for (let i = 0; i < count; i += 1) message.e.push([u323(), u323()]);
   }
-  for (const [flag, key] of [
+  for (const [flag, key2] of [
     [MATCH, "m"],
     [TIME, "t"],
     [PING, "pi"]
   ]) {
     if (!(flags & flag)) continue;
     if (!need(4)) return null;
-    message[key] = u322();
+    message[key2] = u323();
   }
   if (flags & PONGS) {
     if (!need(1)) return null;
@@ -26841,7 +40740,7 @@ function decodeNetMessage(bytes) {
     message.po = [];
     for (let i = 0; i < count; i += 1) {
       const slot = bytes[at++];
-      message.po.push([slot, u322(), u322(), u322()]);
+      message.po.push([slot, u323(), u323(), u323()]);
     }
   }
   if (flags & ROSTER) {
@@ -27124,13 +41023,13 @@ var NetSession = class {
     const quiet = this.outEvents.length === 0 && this.pongsDue.length === 0 && !ping && !roster;
     if (quiet && signature === this.lastSent && this.tick - this.lastSentTick < KEEPALIVE_TICKS) return;
     if (this.outEvents.length > 0) message.e = this.outEvents.splice(0);
-    const shared = Math.floor(this.sharedNow());
-    message.t = shared >>> 0;
+    const shared2 = Math.floor(this.sharedNow());
+    message.t = shared2 >>> 0;
     if (ping) {
       message.pi = Math.floor(this.now()) >>> 0;
       this.lastPingTick = this.tick;
     }
-    if (this.pongsDue.length > 0) message.po = this.pongsDue.splice(0).map(([slot, t0, t1]) => [slot, t0, t1, shared >>> 0]);
+    if (this.pongsDue.length > 0) message.po = this.pongsDue.splice(0).map(([slot, t0, t1]) => [slot, t0, t1, shared2 >>> 0]);
     if (message.s || message.e || message.m !== void 0 || message.pi !== void 0 || message.po || message.ro) {
       this.transport.send(message);
       this.sentBytes += encodeNetMessage(message).length;
@@ -27578,10 +41477,10 @@ async function runNetLab(options) {
         for (const [slot, { at, owner }] of owned) {
           if (owner === i || slot === mySlot) continue;
           const seen = options.probe.seen(mailbox, mySlot, slot);
-          const key = `${i}:${slot}`;
-          const before = lastSeen.get(key);
-          if (seen) lastSeen.set(key, seen);
-          else lastSeen.delete(key);
+          const key2 = `${i}:${slot}`;
+          const before = lastSeen.get(key2);
+          if (seen) lastSeen.set(key2, seen);
+          else lastSeen.delete(key2);
           if (!seen || !at) continue;
           const d = dist(seen, at);
           allDrift.push(d);
@@ -27823,6 +41722,69 @@ var DirectTransport = class {
   }
 };
 
+// src/anim/faceDriver.ts
+import {
+  ARKIT_SHAPES,
+  Gaze,
+  faceRig,
+  faceWeights,
+  gazeWeights,
+  layerFace,
+  lipSyncWeights,
+  sampleFace
+} from "@cartbox/editor";
+var AHEAD = [0, 0, 1];
+var FaceDriver = class {
+  constructor(mesh, seed = 1) {
+    this.mesh = mesh;
+    this.time = 0;
+    this.speech = null;
+    this.looking = null;
+    this.expression = null;
+    this.clip = null;
+    this.mouth = new Float32Array(ARKIT_SHAPES.length);
+    this.recorded = new Float32Array(ARKIT_SHAPES.length);
+    this.rig = faceRig(mesh);
+    this.gaze = new Gaze(seed);
+  }
+  /** Say a viseme track, starting `delay` seconds from now. */
+  speak(track, delay = 0) {
+    this.speech = { track, start: this.time + delay };
+  }
+  /** Look along a direction in the head's space (+z ahead, +y up, +x its left), or ahead with null. */
+  lookAt(direction) {
+    this.looking = direction;
+  }
+  /** Hold an expression (52 ARKit weights), or none. */
+  setExpression(weights) {
+    this.expression = weights ? Float32Array.from({ length: ARKIT_SHAPES.length }, (_, i) => weights[i] ?? 0) : null;
+  }
+  /** Play a recorded face clip (Live Link Face, say) from now, or stop one. */
+  play(clip, loop = false) {
+    this.clip = clip ? { clip, start: this.time, loop } : null;
+  }
+  /** Advance `dt` seconds: the mesh's morph weights now (its own weights for targets ARKit doesn't name). */
+  update(dt) {
+    this.time += Math.max(0, dt);
+    const layers = [];
+    if (this.expression) layers.push(this.expression);
+    if (this.clip) {
+      const { clip, start, loop } = this.clip;
+      let t = this.time - start;
+      if (loop && clip.duration > 0) t %= clip.duration;
+      layers.push(sampleFace(clip, t, this.recorded));
+    }
+    if (this.speech) {
+      const t = this.time - this.speech.start;
+      layers.push(lipSyncWeights(this.speech.track, t, this.mouth));
+      const end = this.speech.track.reduce((m, s) => Math.max(m, s.end), 0);
+      if (t > end + 1) this.speech = null;
+    }
+    layers.push(gazeWeights(this.gaze.update(dt, this.looking ?? AHEAD)));
+    return faceWeights(this.rig, layerFace(...layers), this.mesh.morphWeights ?? []);
+  }
+};
+
 // src/index.ts
 function mount(container, options) {
   const player = new Player(container, options);
@@ -27847,6 +41809,14 @@ function mount(container, options) {
     editTouchLayout: () => player.editTouchLayout(),
     inspect: () => player.inspect(),
     setQuality: (choice) => player.setQuality(choice),
+    setViewMode: (mode) => player.setViewMode(mode),
+    setWeather: (settings) => player.setWeather(settings),
+    splash: (x, z, strength) => player.splash(x, z, strength),
+    captureReference: (options2) => player.captureReference(options2),
+    renderSequence: (options2) => player.renderSequence(options2),
+    get referenceSamples() {
+      return player.referenceSamples;
+    },
     supplyTextures: (textures) => player.supplyTextures(textures),
     setTimeScale: (scale) => player.setTimeScale(scale),
     timeScale: () => player.timeScale(),
@@ -27879,6 +41849,7 @@ export {
   CELL_WORLD,
   CMD_RING_BYTES,
   CMD_RING_MAX,
+  COLOR_CHECKER,
   COMPOSE_UNIFORM_FLOATS,
   CappedSceneRenderer,
   CartridgeLoadError,
@@ -27892,6 +41863,7 @@ export {
   DEFAULT_MOUSE_LOOK,
   DEFAULT_PAD_BINDINGS,
   DEFAULT_STICK_DEAD_ZONES,
+  DEFAULT_TEXEL_DENSITY,
   DEFAULT_TRIGGER_THRESHOLD,
   DIRECT_CORE_URL,
   DebugCommand,
@@ -27901,6 +41873,8 @@ export {
   FLARE_GHOSTS,
   FLARE_GHOST_GAIN,
   FLARE_SPIKE_POWER,
+  FaceDriver,
+  GREY_CARD,
   GYRO_AIMS,
   GamepadInput,
   GpuCanvasSurface,
@@ -27911,19 +41885,25 @@ export {
   INPUT_MAGIC,
   INPUT_SETTINGS,
   INSTANCE_FLOATS,
+  LIGHTMAP_MAX_BOUNCES,
+  LIGHTMAP_MAX_LIGHTS,
+  LIGHTMAP_MAX_LOCAL_LIGHTS,
   LIGHTS_BASE,
   LIGHTS_CAPACITY,
   LIGHT_FLOATS,
   LIGHT_STRIDE,
+  LOOK_DEV_RIGS,
   LOOP_SLOTS,
   LUT_LOOKS,
   LUT_SIZE,
   LightingLayer,
   LitCanvasSurface,
+  LookDevView,
   MAILBOX_TYPE_ACHIEVEMENT,
   MAILBOX_TYPE_PROGRESS,
   MAILBOX_TYPE_SCORE,
   MAILBOX_WORDS,
+  MAX_CAPTURE_SIDE,
   MAX_EMITTERS,
   MAX_LUT_SIZE,
   MAX_PARTICLES_PER_EMITTER,
@@ -27962,6 +41942,7 @@ export {
   PROFILE_SECTIONS,
   PROFILE_WINDOW,
   ParticleOverlaySurface,
+  PathTracer,
   PhysicsSession,
   PointerInput,
   PostFxPass,
@@ -27971,6 +41952,7 @@ export {
   QUALITY_PRESETS,
   QualityGovernor,
   RAM_LAYOUTS,
+  REFERENCE_BOUNCES,
   REPLAY_VERSION,
   RESPONSE_CURVES,
   ReplayError,
@@ -27996,6 +41978,7 @@ export {
   UNIFORM_FLOATS,
   UNIFORM_STRIDE,
   VERTEX_FLOATS,
+  VIEW_MODES,
   WEBGL_INSTANCES_PER_DRAW,
   WEBGL_MAX_LIGHTS,
   WebglSceneRenderer,
@@ -28019,6 +42002,10 @@ export {
   armDebugBlock,
   armSaveBlock,
   askMotionPermission,
+  bakeLightmapGpu,
+  bakeLights,
+  bakeProbeVolumeGpu,
+  bakeSurfaces,
   breakableLine,
   browserDeviceHints,
   browserRtc,
@@ -28033,7 +42020,9 @@ export {
   capTextures,
   capTriangles,
   capsConstrainScene,
+  captureReference,
   cellAt,
+  checkLookDev,
   clipFrameIndex,
   codeChunks,
   codeLineOffset,
@@ -28077,6 +42066,8 @@ export {
   emitterPreset,
   encodeLut,
   encodeNetMessage,
+  environmentPanorama,
+  environmentSh,
   errorStack,
   estimateSceneBytes,
   estimateSceneMemory,
@@ -28097,6 +42088,7 @@ export {
   hasCommandRing,
   hashCart,
   hashEventId,
+  heat,
   hexToRgb01,
   identityLut,
   injectSdk,
@@ -28105,12 +42097,15 @@ export {
   interleaveVertices,
   interleaveVerticesWithTangents,
   interpolateNormal,
+  isDiagnosticView,
   isMobileAgent,
   jointFrames,
   layoutSticks,
   lensFlareAt,
   loadEngineModule,
   lookAccelerationBoost,
+  lookDevDraw,
+  lookDevStage,
   lookGains,
   lookLut,
   lookProfileFor,
@@ -28126,6 +42121,7 @@ export {
   packComposeUniforms,
   packLights,
   packMeasureUniforms,
+  packReferenceScene,
   packShaftUniforms,
   packSkyUniforms,
   paramKey,
@@ -28160,6 +42156,7 @@ export {
   readPause,
   readSidecarActions,
   readSidecarUi,
+  readViewMode,
   reflectionFade,
   reflectionSampleY,
   remapErrorLines,
@@ -28191,9 +42188,11 @@ export {
   sceneHasPhysics,
   sceneNeedsRuntime,
   sceneObjectsSdkLua,
+  sceneSkyEnvironment,
   seedCartridge,
   sendDebugCommand,
   serializeReplay,
+  shIrradiance,
   shade,
   shaftGrid,
   shapeStick,
@@ -28214,12 +42213,14 @@ export {
   toConsolePixel,
   toggleMask,
   tokenizeLua,
+  turnEnvironment,
   uiSdkLua,
   uniformsFromSettings,
   unpadRows,
   validSave,
   verifyReplayScore,
   viewDirection,
+  viewModeCode,
   webgpuCanHonour,
   worldCenter,
   writeBreakpoints,

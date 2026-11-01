@@ -23,7 +23,7 @@ import { browserStorage, readLocalSave, writeLocalSave } from "@/lib/saveData";
 import { preferredLanguages, readPlayerPrefs } from "@/lib/accessibilityPrefs";
 import { DIRECT_CORE_URL } from "@/lib/consoleModel";
 
-import { loadKtx2Decoder } from "@/lib/ktx2Decoder";
+import { loadKtx2DecoderOffThread } from "@/lib/ktx2Decoder";
 import { encodeMeshSidecar, type MeshSidecar } from "@/lib/meshSidecar";
 import { rapierPhysics } from "@/lib/physicsRapier";
 import { editorOrbit } from "@/lib/playCamera";
@@ -116,7 +116,7 @@ export function ScenePlayView({
           }
         : {}),
       physics: rapierPhysics(),
-      ktx2: loadKtx2Decoder,
+      ktx2: loadKtx2DecoderOffThread,
       world: config.world,
       onReady: () => setStatus("ready"),
       onError: (e) => {

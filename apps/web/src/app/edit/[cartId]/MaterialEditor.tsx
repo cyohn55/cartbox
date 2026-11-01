@@ -64,6 +64,7 @@ import {
   type MeshMaterial,
   nitsToUnits,
   unitsToNits,
+  WATER_LOOK_DEFAULTS,
 } from "@cartbox/editor";
 
 import { starterGraph, wornEdgesGraph } from "@/lib/materialGraphEdit";
@@ -239,6 +240,7 @@ export function MaterialEditor({ mesh, onChange, set = null, library = [], onLib
         </button>
         {material.graph && <span className={styles.hudLabel}>a graph drives {Object.keys(material.graph.outputs).length || "none"} of its inputs</span>}
       </div>
+      {material.graph && <GraphImages material={material} patch={patch} />}
       {graphOpen && material.graph && (
         <GraphEditor
           material={material}
@@ -395,6 +397,32 @@ export function MaterialEditor({ mesh, onChange, set = null, library = [], onLib
             display={`${Math.round((material.water.flow * 180) / Math.PI)}°`}
             onChange={(value) => patch({ water: { ...material.water!, flow: (value * Math.PI) / 180 } })}
           />
+          {/* F5d (AAA tier): depth absorption and murk against clear river water's, shore foam, waves and an FFT ocean. */}
+          <RangeControl
+            label="Depth tint"
+            nested
+            min={0}
+            max={4}
+            step={0.05}
+            value={(material.water.absorption?.[0] ?? WATER_LOOK_DEFAULTS.absorption[0]) / WATER_LOOK_DEFAULTS.absorption[0]}
+            ariaLabel="Water depth absorption"
+            display={`×${((material.water.absorption?.[0] ?? WATER_LOOK_DEFAULTS.absorption[0]) / WATER_LOOK_DEFAULTS.absorption[0]).toFixed(2)}`}
+            onChange={(value) => patch({ water: { ...material.water!, absorption: WATER_LOOK_DEFAULTS.absorption.map((c) => c * value) as [number, number, number] } })}
+          />
+          <RangeControl
+            label="Murk"
+            nested
+            min={0}
+            max={10}
+            step={0.1}
+            value={(material.water.scattering?.[1] ?? WATER_LOOK_DEFAULTS.scattering[1]) / WATER_LOOK_DEFAULTS.scattering[1]}
+            ariaLabel="Water turbidity"
+            display={`×${((material.water.scattering?.[1] ?? WATER_LOOK_DEFAULTS.scattering[1]) / WATER_LOOK_DEFAULTS.scattering[1]).toFixed(1)}`}
+            onChange={(value) => patch({ water: { ...material.water!, scattering: WATER_LOOK_DEFAULTS.scattering.map((c) => c * value) as [number, number, number] } })}
+          />
+          <RangeControl label="Foam" nested min={0} max={1} step={0.05} value={material.water.foam ?? WATER_LOOK_DEFAULTS.foam} ariaLabel="Shore foam" display={`${Math.round((material.water.foam ?? WATER_LOOK_DEFAULTS.foam) * 100)}%`} onChange={(value) => patch({ water: { ...material.water!, foam: value } })} />
+          <RangeControl label="Waves" nested min={0} max={2} step={0.02} value={material.water.waves ?? 0} ariaLabel="Gerstner wave height" display={material.water.waves ? `${material.water.waves.toFixed(2)} m` : "none"} onChange={(value) => patch({ water: { ...material.water!, waves: value } })} />
+          <RangeControl label="Ocean" nested min={0} max={1} step={0.05} value={material.water.ocean ?? 0} ariaLabel="FFT ocean share" display={material.water.ocean ? `${Math.round(material.water.ocean * 100)}%` : "none"} onChange={(value) => patch({ water: { ...material.water!, ocean: value } })} />
         </>
       )}
       <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
@@ -497,6 +525,7 @@ export function MaterialEditor({ mesh, onChange, set = null, library = [], onLib
 
       <SurfaceEffects material={material} patch={patch} />
       <MaterialLayers material={material} patch={patch} onWear={() => setGraphOpen(true)} />
+      <MaterialSet material={material} patch={patch} />
 
       <RailHint>Metallic-roughness PBR — used by the Modern render tier. Capped tiers ignore these and render unchanged.</RailHint>
     </RailGroup>
@@ -937,5 +966,138 @@ function MaterialLayers({ material, patch, onWear }: { material: MeshMaterial; p
       )}
       <RailHint>A relief map&apos;s height gives seams depth; its curvature feeds the graph&apos;s wear masks.</RailHint>
     </>
+  );
+}
+
+/** Linear light into its display (sRGB) value, and back: the colour inputs show a linear colour as it looks. */
+const shown = (v: number) => (v <= 0.0031308 ? v * 12.92 : 1.055 * v ** (1 / 2.4) - 0.055);
+const linear = (v: number) => (v <= 0.04045 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4);
+const shownRgb = (c: readonly [number, number, number]) => toHex([shown(c[0]), shown(c[1]), shown(c[2])]);
+const linearRgb = (hex: string): [number, number, number] => fromHex(hex).map(linear) as [number, number, number];
+
+/**
+ * The full material set (AAA_FIDELITY_ROADMAP.md F1d), each glTF's KHR extension:
+ * sheen, transmission and volume, IOR and specular, a thin film, the emission's
+ * strength and the UVs' transform. The AAA tier shades them; the others ignore them.
+ */
+function MaterialSet({ material, patch }: { material: MeshMaterial; patch: (change: Partial<MeshMaterial>) => void }) {
+  const sheen = material.sheenColor ?? [0, 0, 0];
+  const sheenOn = Math.max(...sheen) > 0;
+  const transmission = material.transmission ?? 0;
+  const iridescence = material.iridescence ?? 0;
+  const t = material.uvTransform ?? { offset: [0, 0] as const, rotation: 0, scale: [1, 1] as const };
+  const setTransform = (next: Partial<NonNullable<MeshMaterial["uvTransform"]>>) => {
+    const merged = { offset: t.offset, rotation: t.rotation, scale: t.scale, ...next };
+    const identity = merged.offset[0] === 0 && merged.offset[1] === 0 && merged.rotation === 0 && merged.scale[0] === 1 && merged.scale[1] === 1;
+    patch({ uvTransform: identity ? undefined : merged });
+  };
+  const swatch = { width: 28, height: 22, padding: 0, border: "none", background: "none" } as const;
+  return (
+    <>
+      <div className={`${styles.groupLabel} ${styles.railSubLabel}`}>Sheen</div>
+      <label style={{ display: "flex", gap: 6, alignItems: "center", fontSize: 12 }}>
+        Colour
+        <input type="color" aria-label="Sheen colour" value={shownRgb(sheen)} onChange={(e) => patch({ sheenColor: linearRgb(e.target.value) })} style={swatch} />
+        {sheenOn && (
+          <button type="button" className={styles.toolBtn} onClick={() => patch({ sheenColor: undefined, sheenRoughness: undefined })}>
+            None
+          </button>
+        )}
+      </label>
+      {sheenOn && <RangeControl label="Sheen roughness" nested min={0} max={1} step={0.01} value={material.sheenRoughness ?? 0} ariaLabel="Sheen roughness" display={(material.sheenRoughness ?? 0).toFixed(2)} onChange={(value) => patch({ sheenRoughness: value })} />}
+
+      <div className={`${styles.groupLabel} ${styles.railSubLabel}`}>Transmission</div>
+      <RangeControl label="Transmission" nested min={0} max={1} step={0.05} value={transmission} ariaLabel="Transmission" display={transmission > 0 ? transmission.toFixed(2) : "none"} onChange={(value) => patch({ transmission: value > 0 ? value : undefined })} />
+      {transmission > 0 && (
+        <>
+          <RangeControl label="Thickness" nested min={0} max={1} step={0.01} value={material.thickness ?? 0} ariaLabel="Thickness" display={(material.thickness ?? 0) > 0 ? `${(material.thickness ?? 0).toFixed(2)} m` : "thin"} onChange={(value) => patch({ thickness: value > 0 ? value : undefined })} />
+          <RangeControl label="Absorbs over" nested min={0} max={2} step={0.01} value={material.attenuationDistance ?? 0} ariaLabel="Attenuation distance" display={(material.attenuationDistance ?? 0) > 0 ? `${(material.attenuationDistance ?? 0).toFixed(2)} m` : "never"} onChange={(value) => patch({ attenuationDistance: value > 0 ? value : undefined })} />
+          <label style={{ display: "flex", gap: 6, alignItems: "center", fontSize: 12 }}>
+            Absorbed to
+            <input type="color" aria-label="Attenuation colour" value={shownRgb(material.attenuationColor ?? [1, 1, 1])} onChange={(e) => patch({ attenuationColor: linearRgb(e.target.value) })} style={swatch} />
+          </label>
+        </>
+      )}
+
+      <div className={`${styles.groupLabel} ${styles.railSubLabel}`}>Specular</div>
+      <RangeControl label="IOR" nested min={1} max={3} step={0.01} value={material.ior ?? 1.5} ariaLabel="Index of refraction" display={(material.ior ?? 1.5).toFixed(2)} onChange={(value) => patch({ ior: value !== 1.5 ? value : undefined })} />
+      <RangeControl label="Specular" nested min={0} max={1} step={0.05} value={material.specularFactor ?? 1} ariaLabel="Specular" display={(material.specularFactor ?? 1).toFixed(2)} onChange={(value) => patch({ specularFactor: value !== 1 ? value : undefined })} />
+      <label style={{ display: "flex", gap: 6, alignItems: "center", fontSize: 12 }}>
+        Specular tint
+        <input type="color" aria-label="Specular colour" value={shownRgb((material.specularColor ?? [1, 1, 1]).map((c) => Math.min(1, c)) as [number, number, number])} onChange={(e) => patch({ specularColor: linearRgb(e.target.value) })} style={swatch} />
+      </label>
+
+      <div className={`${styles.groupLabel} ${styles.railSubLabel}`}>Thin film</div>
+      <RangeControl label="Iridescence" nested min={0} max={1} step={0.05} value={iridescence} ariaLabel="Iridescence" display={iridescence > 0 ? iridescence.toFixed(2) : "none"} onChange={(value) => patch({ iridescence: value > 0 ? value : undefined })} />
+      {iridescence > 0 && (
+        <>
+          <RangeControl label="Film thickness" nested min={100} max={1200} step={10} value={material.iridescenceThickness ?? 400} ariaLabel="Film thickness" display={`${material.iridescenceThickness ?? 400} nm`} onChange={(value) => patch({ iridescenceThickness: value })} />
+          <RangeControl label="Film IOR" nested min={1} max={2.5} step={0.01} value={material.iridescenceIor ?? 1.3} ariaLabel="Film IOR" display={(material.iridescenceIor ?? 1.3).toFixed(2)} onChange={(value) => patch({ iridescenceIor: value })} />
+        </>
+      )}
+
+      <div className={`${styles.groupLabel} ${styles.railSubLabel}`}>Emission and UVs</div>
+      <RangeControl label="Emissive strength" nested min={0} max={50} step={0.5} value={material.emissiveStrength ?? 1} ariaLabel="Emissive strength" display={`×${(material.emissiveStrength ?? 1).toFixed(1)}`} onChange={(value) => patch({ emissiveStrength: value !== 1 ? value : undefined })} />
+      <RangeControl label="UV scale" nested min={0.1} max={16} step={0.1} value={t.scale[0]} ariaLabel="UV scale" display={`${t.scale[0].toFixed(1)} × ${t.scale[1].toFixed(1)}`} onChange={(value) => setTransform({ scale: [value, value] })} />
+      <RangeControl label="UV offset U" nested min={-1} max={1} step={0.01} value={t.offset[0]} ariaLabel="UV offset U" display={t.offset[0].toFixed(2)} onChange={(value) => setTransform({ offset: [value, t.offset[1]] })} />
+      <RangeControl label="UV offset V" nested min={-1} max={1} step={0.01} value={t.offset[1]} ariaLabel="UV offset V" display={t.offset[1].toFixed(2)} onChange={(value) => setTransform({ offset: [t.offset[0], value] })} />
+      <RangeControl label="UV rotation" nested min={-180} max={180} step={5} value={Math.round((t.rotation * 180) / Math.PI)} ariaLabel="UV rotation" display={`${Math.round((t.rotation * 180) / Math.PI)}°`} onChange={(deg) => setTransform({ rotation: (deg * Math.PI) / 180 })} />
+      <div className={`${styles.groupLabel} ${styles.railSubLabel}`}>Subsurface</div>
+      <RangeControl label="Scattering" nested min={0} max={1} step={0.05} value={material.subsurface ?? 0} ariaLabel="Subsurface scattering" display={(material.subsurface ?? 0) > 0 ? (material.subsurface ?? 0).toFixed(2) : "none"} onChange={(value) => patch({ subsurface: value > 0 ? value : undefined })} />
+      {(material.subsurface ?? 0) > 0 && (
+        <>
+          <RangeControl label="Radius" nested min={1} max={100} step={1} value={Math.round((material.subsurfaceRadius ?? 0.012) * 1000)} ariaLabel="Subsurface radius" display={`${Math.round((material.subsurfaceRadius ?? 0.012) * 1000)} mm`} onChange={(mm) => patch({ subsurfaceRadius: mm / 1000 })} />
+          <label style={{ display: "flex", gap: 6, alignItems: "center", fontSize: 12 }}>
+            Scatter colour
+            <input type="color" aria-label="Subsurface colour" value={shownRgb(material.subsurfaceColor ?? [1, 0.37, 0.18])} onChange={(e) => patch({ subsurfaceColor: linearRgb(e.target.value) })} style={swatch} />
+          </label>
+        </>
+      )}
+      <RangeControl label="Thin transmission" nested min={0} max={1} step={0.05} value={material.diffuseTransmission ?? 0} ariaLabel="Diffuse transmission" display={(material.diffuseTransmission ?? 0) > 0 ? (material.diffuseTransmission ?? 0).toFixed(2) : "none"} onChange={(value) => patch({ diffuseTransmission: value > 0 ? value : undefined })} />
+      {(material.diffuseTransmission ?? 0) > 0 && (
+        <label style={{ display: "flex", gap: 6, alignItems: "center", fontSize: 12 }}>
+          Through colour
+          <input type="color" aria-label="Diffuse transmission colour" value={shownRgb(material.diffuseTransmissionColor ?? [1, 1, 1])} onChange={(e) => patch({ diffuseTransmissionColor: linearRgb(e.target.value) })} style={swatch} />
+        </label>
+      )}
+      <RailHint>glTF&apos;s KHR material set: the AAA tier shades it, and the path-traced reference matches it.</RailHint>
+    </>
+  );
+}
+
+/** The images a material graph's texture nodes sample besides the base map (F1e): slot 1 up. */
+function GraphImages({ material, patch }: { material: MeshMaterial; patch: (change: Partial<MeshMaterial>) => void }) {
+  const images = material.graphImages ?? [];
+  const set = (i: number, image: EncodedImage | null) => {
+    const next = [...images];
+    while (next.length <= i) next.push(null);
+    next[i] = image;
+    while (next.length > 0 && !next[next.length - 1]) next.pop();
+    patch({ graphImages: next.length > 0 ? next : undefined });
+  };
+  return (
+    <details style={{ fontSize: 12, margin: "4px 0" }}>
+      <summary>Graph images ({images.filter(Boolean).length})</summary>
+      {Array.from({ length: Math.min(8, images.length + 1) }, (_, i) => (
+        <label key={i} style={{ display: "flex", gap: 6, alignItems: "center" }}>
+          Image {i + 1}
+          <input
+            type="file"
+            accept="image/png,image/jpeg"
+            aria-label={`Graph image ${i + 1}`}
+            onChange={async (e) => {
+              const file = e.target.files?.[0];
+              if (!file) return;
+              set(i, { mime: file.type || "image/png", bytes: new Uint8Array(await file.arrayBuffer()) });
+            }}
+          />
+          {images[i] && (
+            <button type="button" className={styles.toolBtn} onClick={() => set(i, null)}>
+              Clear
+            </button>
+          )}
+        </label>
+      ))}
+    </details>
   );
 }

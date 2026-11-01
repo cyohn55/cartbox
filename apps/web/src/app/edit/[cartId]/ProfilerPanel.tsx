@@ -87,6 +87,13 @@ export function ProfilerPanel({ profile, budgetMs }: { profile: ProfileSnapshot 
               hint="The AAA tier renders at the display's own resolution, and gives up pixels when the GPU can't keep up"
             />
           )}
+          {render.textures && (
+            <Stat
+              label="Texture residency"
+              value={`${render.textures.residentMB.toFixed(0)} / ${render.textures.budgetMB.toFixed(0)} MB (${render.textures.maps} maps${render.textures.limited > 0 ? `, ${render.textures.limited} held back` : ""})`}
+              hint={`Streamed maps resident on the GPU against the preset's budget; at the mips the frame wants they would take ${render.textures.wantedMB.toFixed(0)} MB`}
+            />
+          )}
           {render.passes?.map((pass) => <Stat key={pass.name} label={`· ${pass.name}`} value={`${ms(pass.ms)} ms`} />)}
         </Group>
       )}

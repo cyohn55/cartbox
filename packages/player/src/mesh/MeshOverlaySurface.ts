@@ -23,7 +23,26 @@
  */
 
 import { DynamicResolution, scaledSize } from "../render/dynamicResolution.js";
+import { GpuPacer, expandBilinear } from "../render/gpuPacing.js";
+import type { WaterFrame } from "../render/waterLook.js";
 import {
+  atmosphereLighting,
+  atmosphereLuts,
+  atmosphereKey,
+  cloudShadedLighting,
+  resolveClouds,
+  skyRadiance,
+  atmospherePanorama,
+  atmospherePanoramaRows,
+  dynamicGiGrid,
+  emptyProbeVolume,
+  resolveDynamicGi,
+  resolveScreenSpaceGi,
+  type ProbeVolume,
+  MOON_ALBEDO,
+  sunTransmittance,
+  atmosphereSun,
+  sunDiscRadiance,
   bakeReflectionProbesAsync,
   ParticleSystem,
   DecalSystem,
@@ -47,6 +66,7 @@ import {
   childIndices,
   computeEnvironmentAverage,
   createLiveSkinnedMesh,
+  hasMorphTargets,
   downsamplePanorama,
   isSkinned,
   renderSkyBackground,
@@ -54,17 +74,26 @@ import {
   tintMaskTexture,
   composeModelMatrix,
   multiplyMat4,
+  bakeOctahedralImpostor,
   sceneLightingEnvironment,
   sceneLightingKeyDirection,
   vistaBounds,
   sceneLightingTonemap,
   adaptExposure,
   blendPostVolumes,
+  cameraExposure,
+  cocTerms,
+  resolvePhysicalCamera,
+  shutterFraction,
+  DEFAULT_AUTO_EXPOSURE,
+  type AutoExposure,
   frameLuminance,
   postVolumeReach,
   withDescendants,
+  decodeHdrLightmap,
   type DecodedTexture,
   type EncodedImage,
+  type HdrLightmap,
   type EnvironmentLight,
   type HdrImage,
   type LiveSkinnedMesh,
@@ -94,6 +123,22 @@ import {
   surfelLight,
   type BounceTransfer,
   type ProbeBake,
+  breakApart,
+  chunkMatrix,
+  stepChunks,
+  type Chunk,
+  emitterFromEffect,
+  precipitationOrigin,
+  lightColor,
+  Ocean,
+  RippleField,
+  resolveWaterLook,
+  resolveWeather,
+  weatherActive,
+  weatherEmitters,
+  type EmitterSpec,
+  type Weather,
+  type WeatherSettings,
 } from "@cartbox/editor";
 import { bounceLightsFor, bounceSignature, withCartSun, type CartSun } from "./dynamicLights.js";
 import type { DisplaySurface } from "../display.js";
@@ -101,13 +146,19 @@ import type { ScreenSun } from "../fx/PostFxSurface.js";
 import type { PostVolumeFx } from "../fx/postVolumeFx.js";
 import { SoftwareSceneRenderer, type GpuSceneDraw, type SceneRenderer, type SunShadow } from "../render/sceneRenderer.js";
 import type { ReflectionCapture } from "../render/probeCapture.js";
+import type { GpuTerrainSource } from "../render/gpuTerrain.js";
+import { isDiagnosticView, type ViewMode } from "../render/viewModes.js";
+import type { CaptureOptions, ReferenceCapture } from "../render/pathTracer.js";
+import { decodePool } from "../render/decodeWorkers.js";
+import { sampleShot, sequenceTimes, shotMatrices } from "@cartbox/editor";
+import type { SequenceOptions } from "../types.js";
 import { SUN_SOFTNESS } from "../render/cascades.js";
 import type { PresentFrame, PresentSky, PresentStats } from "../render/gpuPresent.js";
 import type { MailboxMeshCamera, MailboxMeshPose, WorldLight } from "../mailbox.js";
 import type { LocalShadowTile, LocalShadows, PostBlend, ShadowCascade, ShadowInput, SceneLight, SceneLighting, ToneMap, VistaLayer } from "@cartbox/editor";
 import type { MeshInstance, MeshScene, SceneVista } from "./meshScene.js";
 import { QUALITY_PRESETS, type QualitySettings } from "../quality.js";
-import { buildOrbitCamera, orbitPitchAboveTerrain } from "./meshScene.js";
+import { buildOrbitCamera, orbitPitchAboveTerrain, streamGroups } from "./meshScene.js";
 import { sceneColliders } from "./sceneColliders.js";
 import { estimateSceneBytes, estimateSceneMemory, type Profiler, type RenderStats, type SceneMemory } from "../debug/profiler.js";
 
@@ -127,6 +178,8 @@ const FIRST_PERSON_NEAR = 0.05;
 
 /** Edge length of the directional shadow map — a fixed, self-contained cost. */
 const SHADOW_MAP_SIZE = 1024; // the high preset's; see setQuality
+/** The edge of the AAA tier's virtual shadow pool (F2b): 1024 pages of 128², 64 MB of depth. */
+const VSM_POOL_SIZE = 4096;
 /** Each of the AAA tier's sun cascades' maps (F2a) when the quality preset sets no size of its own (F2a-2). */
 const CASCADE_MAP_SIZE = 2048;
 /** How much wider the rig's soft shadows make the AAA tier's sun than the real one (F2a-2). */
@@ -219,7 +272,8 @@ export interface GpuPresentTarget {
  * `gpuFormats`, the decoder also transcodes into the first of them it can
  * (F1a; see DecodedTexture.gpu).
  */
-export type Ktx2DecoderLoader = () => Promise<(bytes: Uint8Array, options?: { readonly gpuFormats?: readonly string[] }) => DecodedTexture | null>;
+/** A KTX2 decoder: it may answer at once, or later (one that transcodes on a worker, F0e). */
+export type Ktx2DecoderLoader = () => Promise<(bytes: Uint8Array, options?: { readonly gpuFormats?: readonly string[] }) => DecodedTexture | null | Promise<DecodedTexture | null>>;
 
 /** A rectangle of shadow-map texels. */
 interface TexelRect {
@@ -288,6 +342,14 @@ const SKY_PANORAMA_HEIGHT = 768;
 const SKY_IBL_DOWNSAMPLE = 8;
 /** Points across each reflections texel the sun's glow is averaged over, so the small copy keeps the core's light. */
 const SKY_IBL_SUN_SAMPLES = 4;
+/**
+ * A physical sky's light re-rendered for a time of day (F5a-2): this size,
+ * upsampled to the IBL's, and this many rows a frame (each row about a
+ * millisecond and a half of CPU), so a sunset re-lights in under a second.
+ */
+const SKY_RELIGHT_WIDTH = 96;
+const SKY_RELIGHT_HEIGHT = 48;
+const SKY_RELIGHT_ROWS = 1;
 
 /**
  * A cart pose's local transform. The SDK's rotation is (yaw, pitch, roll): yaw
@@ -329,6 +391,9 @@ const NEAR_CASCADE_MAX = 24;
 /** Fixed downward tilt so the scene reads as a 3D object, not a flat silhouette. */
 const AUTO_ORBIT_PITCH = 0.35;
 
+/** No morph weights (F7b). */
+const NO_MORPHS: ReadonlyMap<number, Float32Array> = new Map();
+
 export class MeshOverlaySurface implements DisplaySurface {
   private frame = 0;
   private cartCamera: MailboxMeshCamera | null = null;
@@ -356,6 +421,102 @@ export class MeshOverlaySurface implements DisplaySurface {
   private frameMs = 0;
   private framesAtStep = 0;
   private low: { width: number; height: number; out: Uint8ClampedArray; depth: Float32Array } | null = null;
+  /** A GPU that reads its frames back: paced by how often they land (gpuPacing.ts), made with the first frame. */
+  private gpuPacer: GpuPacer | null = null;
+  /** The scene's water body (F5d), found once; its FFT ocean, and the ripples round the eye. */
+  private waterBodyCache: { plane: number; bounds: [number, number, number, number]; material: MeshMaterial } | null | undefined = undefined;
+  private ocean: Ocean | null = null;
+  private oceanSlopes: Float32Array<ArrayBuffer> | null = null;
+  private readonly ripples = new RippleField();
+  private waded: [number, number] | null = null;
+
+  /** Disturb the water at world (x, z) (F5d): a ring `strength` metres deep spreads from it. */
+  splash(x: number, z: number, strength = 0.05): void {
+    this.ripples.impulse(x, z, strength);
+  }
+
+  /** The first water surface in the scene (a refracting material with ripples): its top, its extent and its material. */
+  private waterBody(): { plane: number; bounds: [number, number, number, number]; material: MeshMaterial } | null {
+    if (this.waterBodyCache !== undefined) return this.waterBodyCache;
+    this.waterBodyCache = null;
+    for (const instance of this.scene.instances) {
+      const primitive = instance.mesh.primitives.find((p) => (p.material.water?.strength ?? 0) > 0);
+      if (!primitive) continue;
+      const m = instance.model;
+      let top = -Infinity, x0 = Infinity, z0 = Infinity, x1 = -Infinity, z1 = -Infinity;
+      for (const p of instance.mesh.primitives) {
+        for (let i = 0; i < p.positions.length; i += 3) {
+          const x = p.positions[i]!, y = p.positions[i + 1]!, z = p.positions[i + 2]!;
+          const wx = m[0]! * x + m[4]! * y + m[8]! * z + m[12]!;
+          const wy = m[1]! * x + m[5]! * y + m[9]! * z + m[13]!;
+          const wz = m[2]! * x + m[6]! * y + m[10]! * z + m[14]!;
+          top = Math.max(top, wy);
+          x0 = Math.min(x0, wx);
+          z0 = Math.min(z0, wz);
+          x1 = Math.max(x1, wx);
+          z1 = Math.max(z1, wz);
+        }
+      }
+      this.waterBodyCache = { plane: top, bounds: [x0, z0, x1, z1], material: primitive.material };
+      break;
+    }
+    return this.waterBodyCache;
+  }
+
+  /**
+   * This frame's water (F5d): the body's plane and look, the light reaching into it, whether the eye is under it,
+   * the FFT ocean's slopes (when a water surface asks for an ocean) and the ripples round the eye (a wading eye
+   * makes them as it moves).
+   */
+  private frameWater(lighting: SceneLighting | null, time: number): WaterFrame | null {
+    const body = this.waterBody();
+    if (!body) return null;
+    const look = resolveWaterLook(body.material.water ?? null);
+    const eye = this.eye;
+    const [x0, z0, x1, z1] = body.bounds;
+    const inside = eye !== null && eye[0] >= x0 && eye[0] <= x1 && eye[2] >= z0 && eye[2] <= z1;
+    // The light that reaches into it: the key light's on the surface, and the ambient fill.
+    const key = lighting?.lights.find((l) => l.kind === "directional" && l.direction) ?? null;
+    const kd = key?.direction ?? [0, 1, 0];
+    const kl = Math.hypot(kd[0], kd[1], kd[2]) || 1;
+    const kc = key ? lightColor(key) : ([1, 1, 1] as const);
+    const ambient = lighting?.ambient ?? 0.3;
+    const light: [number, number, number] = [0, 1, 2].map((c) => (key ? kc[c]! * key.intensity * Math.max(0, kd[1] / kl) : 0) + ambient) as [number, number, number];
+    // The ocean, when a water surface wants one.
+    if ((body.material.water?.ocean ?? 0) > 0) {
+      const wind = lighting?.wind ? ([Math.cos(lighting.wind.direction) * 6 * (1 + lighting.wind.strength), Math.sin(lighting.wind.direction) * 6 * (1 + lighting.wind.strength)] as [number, number]) : ([8, 3] as [number, number]);
+      if (!this.ocean || this.ocean.wind[0] !== wind[0] || this.ocean.wind[1] !== wind[1]) this.ocean = new Ocean(wind);
+      // Every other frame: the waves move slowly against the frame rate.
+      if (!this.oceanSlopes || this.frame % 2 === 0) this.oceanSlopes = this.ocean.slopes(time, this.oceanSlopes ?? undefined);
+    }
+    // The ripples follow the eye; a wading eye (inside the water's extent, within two metres of its surface) rings
+    // it every 40 cm it moves.
+    if (eye) {
+      this.ripples.follow(eye[0], eye[2]);
+      if (inside && Math.abs(eye[1] - body.plane) < 2) {
+        if (!this.waded || Math.hypot(eye[0] - this.waded[0], eye[2] - this.waded[1]) > 0.4) {
+          if (this.waded) this.ripples.impulse(eye[0], eye[2], 0.03, 0.5);
+          this.waded = [eye[0], eye[2]];
+        }
+      } else this.waded = null;
+    }
+    this.ripples.step(1 / 60);
+    const moving = this.ripples.active;
+    return {
+      plane: body.plane,
+      bounds: body.bounds,
+      absorption: look.absorption,
+      scattering: look.scattering,
+      light,
+      underwater: inside && eye !== null && eye[1] < body.plane,
+      ocean: this.oceanSlopes,
+      ripples: moving ? { heights: this.ripples.heights, origin: this.ripples.origin } : null,
+      time,
+    };
+  }
+
+  /** The upper sky's mean light for F5c's clouds, and the sun it was found for. */
+  private cloudAmbient: { key: string; value: [number, number, number] } | null = null;
   /** The last sky backdrop and the view it was painted for (it depends only on
    *  where the camera points, so walking without turning reuses it). */
   private skyCache: { key: string; pixels: Uint8ClampedArray } | null = null;
@@ -367,8 +528,29 @@ export class MeshOverlaySurface implements DisplaySurface {
    * moves the sun the metals reflect too.
    */
   private skyReflections: { small: DecodedTexture; sun: string } | null = null;
+  /**
+   * A physical sky's time of day (F5a-2): the sun its light was last rendered
+   * for (null until the first frame takes the bake's), and the re-render under
+   * way for where the sun is now, a few rows a frame.
+   */
+  private skyLitFor: string | null = null;
+  private skyRelight: { key: string; sun: NonNullable<ReturnType<typeof atmosphereSun>>; hdr: HdrImage; row: number } | null = null;
   /** The scene's distant vistas, textured: re-drawn into the sky whenever it is re-baked. */
   private vistas: VistaLayer[] = [];
+  /**
+   * Terrains the AAA tier draws from their heightfields (F6c), vistas among
+   * them, with their layers' maps; and the meshes of the blocks (and their
+   * coarser frames) they replace, which aren't drawn or cast.
+   */
+  private ground: readonly GpuTerrainSource[] = [];
+  private groundIds: ReadonlySet<string> = new Set();
+  private readonly groundMeshes = new WeakSet<MeshAsset>();
+  /** The world partition's loaded objects' meshes (F6d), and how many loaded objects use each. */
+  private readonly cellMeshes = new Map<MeshAsset, number>();
+  /** Each loaded object as it was before its maps were decoded, to go back to on unload. */
+  private readonly bare = new Map<number, MeshSceneInstance>();
+  /** Images the cells share, decoded once while any cell holds them. */
+  private cellImages = new Map<EncodedImage, Promise<DecodedTexture | null>>();
   /**
    * Told each frame where the sky dome's sun is on screen and how much of it is
    * unblocked, for the post-FX glare and lens flare (H8); null without a sky dome.
@@ -447,6 +629,10 @@ export class MeshOverlaySurface implements DisplaySurface {
   private spawned: ReadonlyMap<number, Mat4> = new Map();
   /** Graphics quality (see quality.ts): shadows on/off and their map size, the first-person scale cap. */
   private quality: QualitySettings = QUALITY_PRESETS.high;
+  /** What the viewport shows (F10a): the lit frame, or a diagnostic of it on the AAA tier. */
+  private viewMode: ViewMode = "lit";
+  /** The last frame handed to the GPU renderer, for a reference capture of it (F10b). */
+  private lastFrame: { readonly instances: readonly MeshSceneInstance[]; readonly draw: GpuSceneDraw } | null = null;
   /** Skinned instances' live meshes (their buffers are rewritten for each pose). */
   private readonly live = new Map<number, LiveSkinnedMesh>();
   /** The skinning matrices each live mesh was last posed with (skip re-skinning the same pose). */
@@ -566,14 +752,29 @@ export class MeshOverlaySurface implements DisplaySurface {
    * AnimationSession). Each listed object's live mesh is re-skinned when its
    * matrices changed, and it counts as moving this frame for the shadow cache.
    */
-  setSkinning(skinning: ReadonlyMap<number, Float32Array>): void {
+  setSkinning(skinning: ReadonlyMap<number, Float32Array>, morphs: ReadonlyMap<number, Float32Array> = NO_MORPHS): void {
     for (const [i, matrices] of skinning) {
       const live = this.live.get(i);
-      if (!live || this.lastSkin.get(i) === matrices) continue;
-      live.update(matrices);
+      const weights = morphs.get(i);
+      if (!live || (this.lastSkin.get(i) === matrices && !weights)) continue;
+      live.update(matrices, weights ? { morphWeights: weights } : {});
       this.lastSkin.set(i, matrices);
     }
+    this.setFaces(morphs, skinning);
     this.animated = new Set([...skinning.keys()].filter((i) => this.live.has(i)));
+  }
+
+  /**
+   * Set faces' morph weights (F7b; object → weights, from a FaceDriver or a clip): each listed object's live
+   * copy re-morphed, a skinned one at its last pose. Objects `skinned` already re-skinned this frame are skipped.
+   */
+  setFaces(faces: ReadonlyMap<number, Float32Array>, skinned: ReadonlyMap<number, Float32Array> = NO_MORPHS): void {
+    for (const [i, weights] of faces) {
+      if (skinned.has(i)) continue;
+      const live = this.live.get(i);
+      if (!live) continue;
+      live.update(this.lastSkin.get(i) ?? new Float32Array(0), { morphWeights: weights });
+    }
   }
 
   /**
@@ -606,12 +807,13 @@ export class MeshOverlaySurface implements DisplaySurface {
       if (meshSignature(a.mesh) !== meshSignature(b.mesh)) {
         // New geometry or materials: decode its textures and draw it from the next frame.
         const textured = await decodeMeshTextures(b.mesh, this.decodeKtx2 ?? undefined, undefined, this.compressedTextures);
-        const skinned = isSkinned(b.mesh) ? createLiveSkinnedMesh(b.mesh) : null;
+        const skinned = liveCopy(b.mesh, this.renderer.gpuSkinning === true);
         if (skinned) this.live.set(i, skinned);
         else this.live.delete(i);
         this.lastSkin.delete(i);
         const lod = liveLod(b.lod, skinned);
         this.instances[i] = { ...textured, ...(skinned ? { mesh: skinned.mesh } : {}), ...(lod ? { lod } : {}), model: this.instances[i]!.model };
+        if (b.ground !== undefined && this.groundIds.has(b.ground)) this.groundMeshes.add(this.instances[i]!.mesh);
         moved = true;
       } else if (lodSignature(a.lod) !== lodSignature(b.lod)) {
         // Same mesh, new levels (generated or cleared in the editor).
@@ -623,7 +825,13 @@ export class MeshOverlaySurface implements DisplaySurface {
       }
     }
     const vistasChanged = vistaSignature(before.vistas) !== vistaSignature(next.vistas);
-    if (vistasChanged) this.vistas = await texturedVistas(next.vistas, (mesh) => decodeMeshTextures(mesh, this.decodeKtx2 ?? (() => Promise.resolve(null))));
+    // Terrains the AAA tier draws from their heights (F6c) follow the edit: their new heights and layers.
+    if (this.groundIds.size > 0) {
+      const ground = await groundSources(next, (mesh) => decodeMeshTextures(mesh, this.decodeKtx2 ?? (() => Promise.resolve(null)), undefined, this.compressedTextures));
+      this.ground = ground.sources;
+      this.groundIds = ground.ids;
+    }
+    if (vistasChanged) this.vistas = await texturedVistas(next.vistas?.filter((v) => !this.groundIds.has(v.id)), (mesh) => decodeMeshTextures(mesh, this.decodeKtx2 ?? (() => Promise.resolve(null))));
     if (vistasChanged || JSON.stringify(before.lighting ?? null) !== JSON.stringify(next.lighting ?? null)) {
       // The rig (or a vista) changed: re-bake the sky dome and the light the PBR shading samples.
       const lighting = next.lighting;
@@ -634,11 +842,13 @@ export class MeshOverlaySurface implements DisplaySurface {
         const baked = await bakeSceneSky(lighting.sky, lighting, environment, this.vistas, next.bounds.center);
         skyMap = baked.map;
         clouds = baked.clouds;
-        environment = { ...environment, map: baked.reflections, average: computeEnvironmentAverage(baked.reflections), ...(baked.hdr ? { hdr: baked.hdr } : {}) };
+        environment = litBySky(environment, baked);
         this.skyReflections = { small: baked.small, sun: sunKey(skySun(lighting.sky)) };
       } else {
         this.skyReflections = null;
       }
+      this.skyLitFor = null;
+      this.skyRelight = null;
       this.environment = environment;
       this.skyMap = skyMap;
       this.startBounce();
@@ -668,6 +878,85 @@ export class MeshOverlaySurface implements DisplaySurface {
     this.holo = draw;
   }
 
+  /**
+   * The path-traced reference of the last frame drawn (F10b), `width` across at
+   * the frame's aspect (up to 8K a side), or null where the renderer has none
+   * (every tier but AAA) or nothing has drawn yet.
+   */
+  captureReference(options: Omit<CaptureOptions, "height"> & { readonly height?: number }): Promise<ReferenceCapture> | null {
+    const last = this.lastFrame;
+    if (!last || !this.renderer.captureReference) return null;
+    const height = options.height ?? Math.max(1, Math.round((options.width * last.draw.height) / Math.max(1, last.draw.width)));
+    return this.renderer.captureReference(last.instances, last.draw, { ...options, height });
+  }
+
+  /**
+   * Render a timeline offline (F10d): each frame at `fps` path-traced through
+   * its shot (the camera track's eye, rail, shake, roll, focal length and thin
+   * lens), the scene as last drawn, each handed to `onFrame` as it finishes.
+   * Resolves to the frames rendered (fewer when aborted); null where the
+   * renderer has no reference (every tier but AAA), nothing has drawn yet, or
+   * the timeline has no camera keys.
+   */
+  renderSequence(options: SequenceOptions): Promise<number> | null {
+    const last = this.lastFrame;
+    const timeline = this.scene.timelines?.find((t) => t.name === options.timeline);
+    if (!last || !timeline || !this.renderer.captureReference || !sampleShot(timeline, 0)) return null;
+    const capture = this.renderer.captureReference.bind(this.renderer);
+    const width = Math.max(1, Math.round(options.width));
+    const height = options.height ?? Math.max(1, Math.round((width * last.draw.height) / Math.max(1, last.draw.width)));
+    const times = sequenceTimes(timeline, Math.max(1, Math.min(120, options.fps ?? 24)));
+    const objectAt = (id: string) => {
+      const inst = this.scene.instances.find((i) => i.id === id);
+      return inst ? [inst.model[12]!, inst.model[13]!, inst.model[14]!] : null;
+    };
+    const run = async () => {
+      let done = 0;
+      for (const [index, t] of times.entries()) {
+        if (options.signal?.aborted) break;
+        const shot = sampleShot(timeline, t, objectAt)!;
+        const { view, projection } = shotMatrices(shot, width / height);
+        const frame = await capture(last.instances, { ...last.draw, view, projection, lens: shot.lens }, {
+          width,
+          height,
+          samples: options.samples ?? 64,
+          progress: (share) => options.progress?.((index + share) / times.length),
+        });
+        await options.onFrame(frame, index, times.length);
+        done += 1;
+      }
+      return done;
+    };
+    return run();
+  }
+
+  /** Meshes whose material graphs have been sent to compile (F1e). */
+  private readonly prepared = new WeakSet<object>();
+
+  /** Compile a newly seen mesh's material-graph permutations in the background (F1e), as this frame draws them. */
+  private prepareGraphs(instances: readonly MeshSceneInstance[], draw: GpuSceneDraw): void {
+    // Called on the renderer, not taken off it: a class's method loses its `this` when called bare.
+    const renderer = this.renderer;
+    if (!renderer.prepareMaterials) return;
+    const materials: MeshMaterial[] = [];
+    for (const instance of instances) {
+      if (this.prepared.has(instance.mesh)) continue;
+      this.prepared.add(instance.mesh);
+      for (const p of instance.mesh.primitives) if (p.material.graph) materials.push(p.material);
+    }
+    if (materials.length > 0) void renderer.prepareMaterials(materials, { samples: draw.antialias === true ? 4 /* MSAA_SAMPLES */ : 1, reflect: draw.reflections === true, prepass: draw.prepass === true });
+  }
+
+  /** Samples each pixel of the viewport's path-traced reference holds (F10b); 0 when it isn't shown. */
+  get referenceSamples(): number {
+    return this.viewMode === "pathTraced" ? (this.renderer.referenceSamples ?? 0) : 0;
+  }
+
+  /** Show the lit frame or a diagnostic of it (F10a; the AAA tier alone draws the diagnostics). */
+  setViewMode(mode: ViewMode): void {
+    this.viewMode = mode;
+  }
+
   /** Apply a graphics quality preset (takes effect on the next frame). */
   setQuality(quality: QualitySettings): void {
     if (quality.shadowMapSize !== this.quality.shadowMapSize) {
@@ -680,10 +969,62 @@ export class MeshOverlaySurface implements DisplaySurface {
   }
 
   /**
+   * Load a world partition cell's objects (F6d): their maps decoded (in the
+   * decode workers, where the page has them) and swapped in. They show once
+   * the caller marks them active.
+   */
+  async loadCell(members: readonly number[]): Promise<void> {
+    await Promise.all(
+      members.map(async (i) => {
+        const authored = this.scene.instances[i];
+        if (!authored || !this.instances[i] || this.bare.has(i)) return;
+        const { mesh: _mesh, ...maps } = await decodeMeshTextures(authored.mesh, this.decodeKtx2 ?? (() => Promise.resolve(null)), this.cellImages, this.compressedTextures);
+        void _mesh;
+        if (this.bare.has(i)) return;
+        this.bare.set(i, this.instances[i]!);
+        this.instances[i] = { ...this.instances[i]!, ...maps };
+        this.cellMeshes.set(authored.mesh, (this.cellMeshes.get(authored.mesh) ?? 0) + 1);
+      }),
+    );
+  }
+
+  /**
+   * Unload a cell's objects (F6d): back to bare, and the GPU geometry of the
+   * meshes no loaded object uses any more given back (it uploads again if
+   * they return). Decoded images go once no cell holds an object.
+   */
+  unloadCell(members: readonly number[]): void {
+    const released: MeshAsset[] = [];
+    for (const i of members) {
+      const bare = this.bare.get(i);
+      const authored = this.scene.instances[i];
+      if (!bare || !authored) continue;
+      this.bare.delete(i);
+      this.instances[i] = { ...bare, model: this.instances[i]!.model };
+      const left = (this.cellMeshes.get(authored.mesh) ?? 1) - 1;
+      if (left > 0) this.cellMeshes.set(authored.mesh, left);
+      else {
+        this.cellMeshes.delete(authored.mesh);
+        released.push(authored.mesh);
+      }
+    }
+    if (released.length > 0) this.renderer.releaseMeshes?.(released);
+    if (this.cellMeshes.size === 0) this.cellImages = new Map();
+  }
+
+  /** Whether an object of a world partition cell has its maps (F6d). */
+  cellLoaded(index: number): boolean {
+    return this.bare.has(index);
+  }
+
+  /**
    * The objects of levels that aren't loaded (see levels.ts in @cartbox/editor):
    * they're hidden, and left out of the shadow, until the set changes again.
    */
   setInactive(objects: ReadonlySet<number>): void {
+    this.levelInactive = objects;
+    // Broken objects (F8c) stay hidden whatever the levels do.
+    if (this.broken.size > 0) objects = new Set([...objects, ...this.broken.keys()]);
     this.inactive = objects;
     this.inactiveKey = [...objects].sort((a, b) => a - b).join(",");
     // Nothing hidden and nothing pooled keeps the fast path (the full list, by identity).
@@ -733,10 +1074,12 @@ export class MeshOverlaySurface implements DisplaySurface {
     const instances: MeshSceneInstance[] = [];
     const frames: (readonly TexturedMesh[] | null)[] = [];
     const live = new Map<number, LiveSkinnedMesh>();
+    // A world partition's cells (F6d) decode their maps as they load (loadCell): until then, bare.
+    const streamed = scene.streaming?.cell ? new Set(streamGroups(scene).flatMap((g) => g.members)) : null;
     for (const [i, instance] of scene.instances.entries()) {
-      const textured = await texture(instance.mesh);
+      const textured = streamed?.has(i) ? { mesh: instance.mesh } : await texture(instance.mesh);
       // A skinned object draws its own live copy of the mesh (same textures), posed each frame.
-      const skinned = isSkinned(instance.mesh) ? createLiveSkinnedMesh(instance.mesh) : null;
+      const skinned = liveCopy(instance.mesh, renderer.gpuSkinning === true);
       if (skinned) live.set(i, skinned);
       const lod = liveLod(instance.lod, skinned);
       instances.push({
@@ -754,14 +1097,16 @@ export class MeshOverlaySurface implements DisplaySurface {
     let skyMap: DecodedTexture | null = null;
     let clouds: BakedCloudLayer[] = [];
     let environment: EnvironmentLight | null = lighting ? sceneLightingEnvironment(lighting) : null;
+    // Terrains the AAA tier draws from their heightfields (F6c): there, a vista is ground in the frame, not the sky.
+    const ground = options.prepass === true && renderer.sunCascades === true ? await groundSources(scene, texture) : null;
     // Distant vistas (I7) are drawn into that panorama, textured as the frame would draw them.
-    const vistas = await texturedVistas(scene.vistas, texture);
+    const vistas = await texturedVistas(scene.vistas?.filter((v) => !ground?.ids.has(v.id)), texture);
     let reflections: { small: DecodedTexture; sun: string } | null = null;
     if (lighting?.sky && environment) {
       const baked = await bakeSceneSky(lighting.sky, lighting, environment, vistas, scene.bounds.center);
       skyMap = baked.map;
       clouds = baked.clouds;
-      environment = { ...environment, map: baked.reflections, average: computeEnvironmentAverage(baked.reflections), ...(baked.hdr ? { hdr: baked.hdr } : {}) };
+      environment = litBySky(environment, baked);
       reflections = { small: baked.small, sun: sunKey(skySun(lighting.sky)) };
     }
     const surface = new MeshOverlaySurface(inner, width, height, scene, instances, frames, renderer, skyMap, environment, options);
@@ -769,6 +1114,15 @@ export class MeshOverlaySurface implements DisplaySurface {
     surface.skyReflections = reflections;
     surface.startBounce();
     surface.vistas = vistas;
+    if (ground) {
+      surface.ground = ground.sources;
+      surface.groundIds = ground.ids;
+      scene.instances.forEach((instance, i) => {
+        if (instance.ground === undefined || !ground.ids.has(instance.ground)) return;
+        surface.groundMeshes.add(instances[i]!.mesh);
+        for (const frame of frames[i] ?? []) surface.groundMeshes.add(frame.mesh);
+      });
+    }
     surface.trailed = scene.instances.flatMap((instance, i) => (instance.mesh.trails && instance.mesh.trails.length > 0 ? [i] : []));
     if (surface.trailed.length > 0) surface.trails = new TrailSystem();
     for (const [i, mesh] of live) surface.live.set(i, mesh);
@@ -778,7 +1132,14 @@ export class MeshOverlaySurface implements DisplaySurface {
     surface.decodeKtx2 = decodeKtx2;
     surface.compressedTextures = gpuFormats.length > 0;
     // 3D particle effects the cart fires with cartbox.burst.
-    if (scene.effects && scene.effects.length > 0) surface.particles = new ParticleSystem(scene.effects);
+    // On the AAA tier they simulate and draw on the GPU (F8a); elsewhere as billboards.
+    if (scene.effects && scene.effects.length > 0) {
+      if (renderer.gpuSkinning === true && renderer.setParticles) {
+        surface.effectEmitters = scene.effects.map(emitterFromEffect);
+        renderer.setParticles(surface.effectEmitters);
+        surface.gpuParticles = true;
+      } else surface.particles = new ParticleSystem(scene.effects);
+    }
     // Decals: the cart's marks and the scene's permanent ones.
     if (scene.decals && scene.decals.length > 0) surface.decals = new DecalSystem(scene.decals, scene.decalMarks ?? []);
     // Debris the cart throws (casings, dropped weapons): simulated here, on the
@@ -925,8 +1286,17 @@ export class MeshOverlaySurface implements DisplaySurface {
     this.cartSun = sun ? { direction: sun.position, color: sun.color } : null;
   }
 
-  /** The rig as this frame lights with it: with the cart's sun as its key, if it set one (I17). */
+  /** The rig as this frame lights with it: with the cart's sun as its key, if it set one (I17), tinted by a physical sky's air (F5a). */
   private frameLighting(): SceneLighting | null {
+    const lighting = this.sunLighting();
+    if (!lighting) return null;
+    // A volumetric cloud layer's shadow where the eye stands dims the sun over the whole scene (F5c).
+    const lit = atmosphereLighting(lighting);
+    return this.eye ? cloudShadedLighting(lit, this.eye[0], this.eye[2], this.frame / 60) : lit;
+  }
+
+  /** The rig with the cart's sun as its key, if it set one (I17): above the air, before a physical sky tints it. */
+  private sunLighting(): SceneLighting | null {
     const lighting = this.scene.lighting ?? null;
     if (!lighting || !this.cartSun) return lighting;
     const sun = `${this.cartSun.direction.map((v) => v.toFixed(3)).join(",")}|${this.cartSun.color.map((v) => v.toFixed(3)).join(",")}`;
@@ -942,12 +1312,52 @@ export class MeshOverlaySurface implements DisplaySurface {
   private followSun(lighting: SceneLighting | null): void {
     const reflections = this.skyReflections;
     if (!reflections || !lighting?.sky || !this.environment) return;
+    if (lighting.sky.atmosphere) return this.followPhysicalSun();
     const sun = skySun(lighting.sky);
     const key = sunKey(sun);
     if (key === reflections.sun) return;
     const map = skyReflectionsWith(reflections.small, sun, this.skyClouds);
     this.environment = { ...this.environment, map, average: computeEnvironmentAverage(map) };
     this.skyReflections = { small: reflections.small, sun: key };
+  }
+
+  /**
+   * A physical sky's time of day (F5a-2): when its sun (above the air) has
+   * turned past what {@link physicalSunKey} rounds away, or changed, render
+   * the atmosphere's light again for where it is, {@link SKY_RELIGHT_ROWS} a
+   * frame, then swap it in whole: the AAA tier's IBL is rebuilt from it and
+   * its reflection probes re-captured (their key follows the environment), and
+   * the other tiers' reflections copy is made from it. The backdrop already
+   * follows the sun each frame on the AAA tier.
+   */
+  private followPhysicalSun(): void {
+    const authored = this.scene.lighting;
+    const lighting = this.sunLighting();
+    const sun = lighting ? atmosphereSun(lighting) : null;
+    if (!sun || !authored?.sky || !this.environment) return;
+    // The bake at load was for the rig's own sun.
+    if (this.skyLitFor === null) {
+      const baked = atmosphereSun(authored);
+      this.skyLitFor = baked ? physicalSunKey(baked) : "";
+    }
+    if (!this.skyRelight) {
+      const key = physicalSunKey(sun);
+      if (key === this.skyLitFor) return;
+      this.skyRelight = { key, sun, hdr: { width: SKY_RELIGHT_WIDTH, height: SKY_RELIGHT_HEIGHT, data: new Float32Array(SKY_RELIGHT_WIDTH * SKY_RELIGHT_HEIGHT * 3) }, row: 0 };
+    }
+    const job = this.skyRelight;
+    atmospherePanoramaRows(atmosphereLuts(job.sun.atmosphere), job.sun.direction, job.sun.radiance, job.hdr, job.row, job.row + SKY_RELIGHT_ROWS, job.sun.moon);
+    job.row += SKY_RELIGHT_ROWS;
+    if (job.row < SKY_RELIGHT_HEIGHT) return;
+    const hdr = resampleHdr(job.hdr, SKY_PANORAMA_WIDTH / SKY_IBL_DOWNSAMPLE, SKY_PANORAMA_HEIGHT / SKY_IBL_DOWNSAMPLE, 0, 1);
+    const sky = authored.sky;
+    const small = bakeSkyPanorama({ ...sky, panorama: null }, hdr.width, hdr.height, hdrToTexture(hdr, authored.exposure), { sunLayer: true });
+    const glow = skySun(lighting!.sky!);
+    const map = skyReflectionsWith(small, glow, this.skyClouds);
+    this.environment = { ...this.environment, hdr, map, average: computeEnvironmentAverage(map) };
+    this.skyReflections = { small, sun: sunKey(glow) };
+    this.skyLitFor = job.key;
+    this.skyRelight = null;
   }
 
   /** Start finding the probes' bounce transfer (I17), when they were baked with their light recorded. */
@@ -1004,9 +1414,12 @@ export class MeshOverlaySurface implements DisplaySurface {
 
   /** What the renderer drew last frame. */
   renderStats(): RenderStats | null {
-    const raw = this.renderer.lastFrameStats ?? null;
-    // A GPU-presented frame's 3D size, when it isn't the cart's own (F0d).
-    const rendered = this.rendered && this.gpuTarget() && (this.rendered.width !== this.width || this.rendered.height !== this.height) ? this.rendered : null;
+    const base = this.renderer.lastFrameStats ?? null;
+    // A GPU that reads its frames back: how often they come back (gpuPacing.ts).
+    const raw = base && this.gpuPacer?.landMs != null ? { ...base, frameMs: this.gpuPacer.landMs } : base;
+    // A GPU-presented frame's 3D size, when it isn't the cart's own (F0d); or a paced one's, when it renders smaller.
+    const paced = this.low && this.gpuPaced() && this.gpuPacer && this.gpuPacer.scale < 1 ? { width: this.low.width, height: this.low.height, scale: this.low.width / this.width } : null;
+    const rendered = this.rendered && this.gpuTarget() && (this.rendered.width !== this.width || this.rendered.height !== this.height) ? this.rendered : paced;
     const stats = raw && rendered ? { ...raw, resolution: rendered } : raw;
     // A GPU-presented frame's presenter passes follow the scene's (F4e).
     const present = this.gpuTarget()?.stats;
@@ -1078,9 +1491,10 @@ export class MeshOverlaySurface implements DisplaySurface {
     this.stepBounce(lighting);
     this.followSun(lighting);
     // Post volumes round the camera (P6): exposure goes to the tone map, the rest to the post stack.
-    const post = lighting?.postVolumes && this.eye ? blendPostVolumes(lighting.postVolumes, this.eye) : NO_POST;
+    const lens = lighting?.camera ? resolvePhysicalCamera(lighting.camera) : null;
+    const post = lighting?.postVolumes && this.eye ? blendPostVolumes(lighting.postVolumes, this.eye, lens ? { aperture: lens.aperture, focusDistance: lens.focusDistance, motionBlur: 1 } : undefined) : NO_POST;
     if (this.onPost) this.reportPost(lighting, post);
-    if (!lighting?.autoExposure) this.adapted = 0;
+    if (!(lighting && this.eyeAdaptation(lighting))) this.adapted = 0;
     const tonemap = lighting ? this.frameTonemap(lighting, post) : null;
     let mark = profiler ? performance.now() : 0;
     // The AAA tier draws the sun's shadow in GPU cascades from the casters (F2a); the others take a CPU map.
@@ -1111,7 +1525,11 @@ export class MeshOverlaySurface implements DisplaySurface {
     }
     // Particles: stepped on the frame clock and drawn as billboards facing this camera.
     // Foliage blocks past their layer's cull distance aren't drawn (EP11).
-    let drawn: readonly MeshSceneInstance[] = this.foliage.size > 0 ? instances.filter((i) => this.foliageInReach(i)) : instances;
+    // On the AAA tier with GPU culling (F6b) a block in reach is drawn a copy at a time, each culled (and its LOD
+    // chosen, its impostor crossfaded) on the GPU; elsewhere blocks are drawn whole.
+    let drawn: readonly MeshSceneInstance[] = this.foliage.size === 0 ? instances : this.gpuFoliage ? instances.flatMap((i) => this.foliageCopies(i)) : instances.filter((i) => this.foliageInReach(i));
+    // A terrain drawn from its heights (F6c) isn't drawn from its blocks too.
+    if (this.ground.length > 0) drawn = drawn.filter((i) => !this.groundMeshes.has(i.mesh));
     // Swing trails (I10): where each trailing object is now, then the ribbons it has swept.
     let frontDrawn: readonly MeshSceneInstance[] = front;
     if (this.trails) {
@@ -1137,6 +1555,11 @@ export class MeshOverlaySurface implements DisplaySurface {
         const marks = this.decals.sceneInstance();
         if (marks) drawn = [...drawn, marks];
       }
+    }
+    // Broken objects' chunks (F8c), stepped on the frame clock.
+    if (this.broken.size > 0) {
+      const chunks = this.stepBroken();
+      if (chunks.length > 0) drawn = [...drawn, ...chunks];
     }
     if (this.debris) {
       this.debris.step(1 / 60, this.debrisBoxes);
@@ -1164,8 +1587,9 @@ export class MeshOverlaySurface implements DisplaySurface {
         shadow,
         sunShadow,
         localShadowCasters,
-        localShadowKey: localShadowCasters ? (this.castersFrame?.key ?? null) : null,
-        localShadowMoved: localShadowCasters ? (this.castersFrame?.moved ?? null) : null,
+        // The still casters' key and the movers serve the local tiles' cache (F2d-2) and the sun's virtual pages (F2b).
+        localShadowKey: localShadowCasters || sunShadow ? (this.castersFrame?.key ?? null) : null,
+        localShadowMoved: localShadowCasters || sunShadow ? (this.castersFrame?.moved ?? null) : null,
         antialias,
         reflectionCapture: cascaded && lighting ? this.reflectionCapture(lighting) : null,
         decals,
@@ -1174,6 +1598,8 @@ export class MeshOverlaySurface implements DisplaySurface {
       this.frame += 1;
       return;
     }
+    // A GPU paced to a smaller frame renders at its size (and back at full size once it keeps up).
+    if (this.gpuPaced()) this.renderer.resize?.(width, height);
     this.renderer.render(drawn, {
       width,
       height,
@@ -1200,6 +1626,8 @@ export class MeshOverlaySurface implements DisplaySurface {
             shadow,
             fog: lighting.fog ?? null,
             wind: lighting.wind ?? null,
+            // A physical sky's air (F5a-2), which only the AAA renderer lays over the scene.
+            atmosphere: this.presentAtmosphere(),
           }
         : {}),
       // Animated emissive runs on the frame clock (60 per second), so it
@@ -1211,9 +1639,9 @@ export class MeshOverlaySurface implements DisplaySurface {
     if (this.onSun) this.reportSun(out, width, height, camera.view, camera.projection, skyBackdrop ? lighting?.sky ?? null : null);
     // Eye adaptation: every few frames, ease toward the exposure that brings
     // what the camera sees to mid-grey (the volumes' own stops taken back out).
-    if (lighting?.autoExposure && tonemap && this.frame % ADAPT_EVERY === 0) {
+    if (lighting && this.eyeAdaptation(lighting) && tonemap && this.frame % ADAPT_EVERY === 0) {
       const measured = frameLuminance(out, width, height) / 2 ** post.exposure;
-      this.adapted = adaptExposure(this.adapted, measured, lighting.autoExposure, ADAPT_EVERY / 60);
+      this.adapted = adaptExposure(this.adapted, measured, this.eyeAdaptation(lighting)!, ADAPT_EVERY / 60);
     }
     // Sun shafts: open sky near the sun streaks through the gaps in the scene.
     // Drawn before the held weapon, which sits in front of the light.
@@ -1230,6 +1658,7 @@ export class MeshOverlaySurface implements DisplaySurface {
     if (frontDrawn.length > 0) {
       this.requestFrontRenderer();
       const onGpu = this.frontRenderer.backend !== "software";
+      if (onGpu) this.frontRenderer.resize?.(width, height);
       this.frontRenderer.render(onGpu ? frontDrawn.map((i) => this.withoutRefraction(i)) : frontDrawn, {
         width,
         height,
@@ -1256,7 +1685,8 @@ export class MeshOverlaySurface implements DisplaySurface {
       }
     }
     if (profiler) profiler.add("scene", performance.now() - mark);
-    if (target) expandNearest(target.out, target.width, target.height, this.output, this.width, this.height);
+    // A paced GPU's smaller frame is filtered up (it may be most of the frame for a while); the software path's stays blocky and cheap.
+    if (target) (this.gpuPaced() ? expandBilinear : expandNearest)(target.out, target.width, target.height, this.output, this.width, this.height);
     // Lay the cart's 2D frame over the rendered scene as a HUD (first-person).
     if (this.hud && this.hudFrame) compositeHudOverScene(this.output, this.hudFrame, this.width * this.height);
     // Holo UI documents (I12): drawn over everything, in true colour.
@@ -1264,6 +1694,7 @@ export class MeshOverlaySurface implements DisplaySurface {
     this.frame += 1; // advance in lockstep with the run loop's present cadence
     this.inner.blit(this.presented);
     this.pace(performance.now() - started);
+    this.paceGpu();
   }
 
   /** The GPU presenter this frame goes to, when there is one and the renderer can keep its frame on the GPU (F0a). */
@@ -1303,23 +1734,36 @@ export class MeshOverlaySurface implements DisplaySurface {
     },
   ): void {
     const { camera, lighting } = job;
+    const weather = this.frameWeather(lighting);
+    this.syncWeatherEmitters(weather);
     // The 3D renders at the size the frame shows at (F0d), or the share of it the GPU keeps up with; the 2D layer stays the cart's.
     const output = gpu.outputSize ?? { width: this.width, height: this.height };
     if (this.options.dynamicResolution === true) this.resolution ??= new DynamicResolution(1000 / 60);
-    const scale = this.resolution ? this.resolution.update(this.gpuFrameMs(gpu)) : 1;
+    // On the AAA tier's temporal frames the upscaler (F4b) reconstructs the display's pixels, so a preset may
+    // render at a share of them too (Medium, FSR 2's quality mode).
+    // A diagnostic view (F10a) on the AAA tier: shown as written, without the presenter's exposure, tone map or shafts.
+    const diagnostic = isDiagnosticView(this.viewMode) && this.renderer.sunCascades === true;
+    const temporal = this.options.temporal === true && this.quality.temporal === true;
+    const upscaling = this.renderer.sunCascades === true && temporal && this.options.prepass === true;
+    const dynamic = this.resolution ? this.resolution.update(this.gpuFrameMs(gpu)) : 1;
+    const scale = upscaling ? Math.min(dynamic, this.quality.renderScale ?? 1) : dynamic;
     const { width, height } = scaledSize(output.width, output.height, scale);
     this.renderer.resize?.(width, height);
     this.rendered = { width, height, scale: output.width > 0 ? width / output.width : 1 };
     const time = this.frame / 60;
+    // Real-time GI on the AAA tier (F3e): the still scene its probes trace, and the volume they relight.
+    const gi = lighting ? this.liveGi(lighting) : null;
     const lit = lighting
       ? {
           ambient: lighting.ambient,
           lightDirection: sceneLightingKeyDirection(lighting),
-          environment: this.environment,
+          environment: gi ? gi.environment : this.environment,
           tonemap: job.tonemap,
           lights: job.lights,
         }
       : {};
+    // A physical sky (F5a): the presenter's backdrop, and the air the AAA scene lays over its surfaces (F5a-2).
+    const atmosphere = this.presentAtmosphere();
     const draw: GpuSceneDraw = {
       width,
       height,
@@ -1327,14 +1771,36 @@ export class MeshOverlaySurface implements DisplaySurface {
       projection: camera.projection,
       lod: true,
       antialias: job.antialias,
-      temporal: this.options.temporal === true && this.quality.temporal === true,
+      temporal,
+      ...(upscaling && (width < output.width || height < output.height) ? { upscale: { width: output.width, height: output.height } } : {}),
       reflections: this.options.reflections === true && this.quality.reflections === true,
-      ...(this.options.prepass === true ? { prepass: true } : {}),
+      // With a prepass the AAA scene culls on the GPU (F0e): the frustum, then a Hi-Z pyramid of the prepass's depths.
+      ...(this.options.prepass === true ? { prepass: true, gpuCull: true } : {}),
       ...(lighting ? { ...lit, localShadows: job.local, shadow: job.shadow, sunShadow: job.sunShadow, localShadowCasters: job.localShadowCasters, localShadowKey: job.localShadowKey, localShadowMoved: job.localShadowMoved, fog: lighting.fog ?? null, wind: lighting.wind ?? null } : {}),
+      // The weather (F5e): its layers over every surface.
+      weather,
+      // The water body (F5d): its depth, waves, ripples and caustics, and the water round an eye under it.
+      water: this.frameWater(lighting, time),
       ...(job.reflectionCapture ? { reflectionCapture: job.reflectionCapture } : {}),
       ...(job.decals ? { decals: job.decals } : {}),
+      ...(this.ground.length > 0 ? { terrains: this.ground } : {}),
+      ...(atmosphere ? { atmosphere } : {}),
+      ...(gi ? { dynamicGi: gi.draw } : {}),
+      // The physical camera's depth of field and motion blur (F4c).
+      ...(lighting && this.renderer.sunCascades === true && lighting.camera ? { camera: this.cameraEffects(lighting, job.post) } : {}),
+      // The sun's virtual shadow maps (F2b) at High and Epic, over the cascades.
+      ...(this.renderer.sunCascades === true && this.quality.virtualShadows === true && this.options.prepass === true && job.sunShadow ? { virtualShadows: { poolSize: VSM_POOL_SIZE } } : {}),
+      // Epic's reflections through the still scene's BVH (F3f), on the AAA tier with reflections.
+      ...(this.renderer.sunCascades === true && this.quality.tracedReflections === true && this.options.reflections === true && this.quality.reflections === true ? { reflectionTrace: { occluders: this.stillOccluders(), key: this.staticShadowKey() } } : {}),
+      // Screen-space GI on the AAA tier (F3e-2): on unless the rig turns it off.
+      ...(lighting && this.renderer.sunCascades === true ? { screenSpaceGi: resolveScreenSpaceGi(lighting.screenSpaceGi) } : {}),
+      // Texture streaming on the AAA tier (F1b), under the preset's budget.
+      ...(this.renderer.sunCascades === true ? { textureBudget: this.quality.textureBudgetMB ?? 512 } : {}),
       time,
+      ...(this.viewMode !== "lit" && this.renderer.sunCascades === true ? { viewMode: this.viewMode } : {}),
     };
+    this.prepareGraphs(job.drawn, draw);
+    this.lastFrame = { instances: job.drawn, draw };
     const scene = this.renderer.renderToTexture!(job.drawn, draw) ?? null;
     // The held weapon on its own GPU renderer, made the first time it shows (until then it isn't drawn).
     let front: unknown = null;
@@ -1350,7 +1816,7 @@ export class MeshOverlaySurface implements DisplaySurface {
     }
     const sky: PresentSky | null =
       job.skyBackdrop && this.skyMap
-        ? { map: this.skyMap, view: camera.view, projection: camera.projection, sun: lighting?.sky ? skySun(lighting.sky) : null, clouds: this.skyClouds, time }
+        ? { map: this.skyMap, view: camera.view, projection: camera.projection, sun: lighting?.sky ? skySun(lighting.sky) : null, clouds: this.skyClouds, time, atmosphere }
         : null;
     // The sun in the frame's pixels: the shafts and the measurements work at the frame's size.
     const sun = sky && lighting?.sky ? sunScreenPosition(lighting.sky.sunDirection, camera.view, camera.projection, output.width, output.height) : null;
@@ -1362,21 +1828,99 @@ export class MeshOverlaySurface implements DisplaySurface {
       // A draw that says it showed nothing (false) leaves the layer out.
       if (this.holo(this.holoLayer, this.width, this.height, time, true) !== false) holo = this.holoLayer;
     }
-    const adapting = Boolean(lighting?.autoExposure && job.tonemap);
+    const adapting = Boolean(lighting && this.eyeAdaptation(lighting) && job.tonemap);
+    // The physical camera's metering (F4c), on the AAA tier's linear frame.
+    const metering = lighting?.camera && this.renderer.sunCascades === true ? resolvePhysicalCamera(lighting.camera).metering : null;
     const flare = this.onSun !== null && sky !== null;
     gpu.present({
-      base: sky ? { kind: "sky", sky } : this.hud ? { kind: "colour", rgba: HUD_SKY } : { kind: "frame", rgba },
+      base: diagnostic ? { kind: "colour", rgba: [0, 0, 0, 255] } : sky ? { kind: "sky", sky } : this.hud ? { kind: "colour", rgba: HUD_SKY } : { kind: "frame", rgba },
       scene,
-      shafts: sky && sun && lighting?.shafts && lighting.sky ? { sun, color: lighting.sky.sunColor, shafts: lighting.shafts } : null,
+      // On the AAA tier a volumetric fog's shadowed light is the shafts (F5b): the screen-space ones retire.
+      shafts: !diagnostic && sky && sun && lighting?.shafts && lighting.sky && !(this.renderer.sunCascades === true && lighting.fog?.volumetric) ? { sun, color: lighting.sky.sunColor, shafts: lighting.shafts } : null,
       front,
       hud: this.hud ? rgba : null,
       hudKey: HUD_TRANSPARENT_SUM,
       holo,
       // A linear frame is tone-mapped as it is presented (F0b); a byte-space one already was.
-      tonemap: job.tonemap,
-      measure: adapting || flare ? { luminance: adapting, sun: flare ? sun : null } : null,
+      tonemap: diagnostic ? null : job.tonemap,
+      measure: !diagnostic && (adapting || flare) ? { luminance: adapting, sun: flare ? sun : null, ...(metering ? { metering } : {}) } : null,
     });
     this.takeGpuMeasurements(gpu.stats, lighting, job.post, adapting, sky !== null, sun && { x: sun.x / output.width, y: sun.y / output.height });
+  }
+
+  /**
+   * Real-time GI (F3e), on the AAA tier under a rig that asks for it: the
+   * still scene the probes trace (with a key that changes with it), and the
+   * environment with the volume they relight — the rig's baked one, else an
+   * empty one over the scene's bounds, the same object frame after frame so
+   * the renderer keeps relighting it.
+   */
+  private liveGi(lighting: SceneLighting): { draw: NonNullable<GpuSceneDraw["dynamicGi"]>; environment: EnvironmentLight } | null {
+    const settings = this.renderer.sunCascades === true ? resolveDynamicGi(lighting.dynamicGi) : null;
+    const env = this.environment;
+    if (!settings || !env) return null;
+    if (!this.giState || this.giState.scene !== this.scene) {
+      const b = this.scene.bounds;
+      const grid = dynamicGiGrid(b.min, b.max, settings.spacing);
+      const spacing = [0, 1, 2].map((a) => (grid.max[a]! - grid.min[a]!) / Math.max(1, grid.counts[a]! - 1));
+      this.giState = {
+        scene: this.scene,
+        occluders: this.stillOccluders(),
+        empty: emptyProbeVolume(grid.min, grid.max, grid.counts, 1.5 * Math.max(...spacing)),
+        env: null,
+      };
+    }
+    const state = this.giState;
+    if (state.env?.source !== env) state.env = { source: env, value: { ...env, probeVolume: env.probeVolume ?? state.empty } };
+    return { draw: { occluders: state.occluders, key: this.staticShadowKey(), settings }, environment: state.env.value };
+  }
+  /** What stands still in the scene, as the BVH tracers take it (F3e's live GI, F3f's Epic reflections), gathered once a scene. */
+  private stillOccluders(): { mesh: MeshAsset; model: Mat4 }[] {
+    if (this.still?.scene !== this.scene) {
+      const occluders = this.scene.instances
+        .filter((inst, i) => {
+          const body = inst.physics?.body;
+          // A broken object (F8c) no longer stands there.
+          return !(inst.pooled || isSkinned(inst.mesh) || body === "dynamic" || body === "kinematic" || body === "character" || this.broken.has(i));
+        })
+        .map((inst) => ({ mesh: inst.mesh, model: inst.model }));
+      this.still = { scene: this.scene, occluders };
+    }
+    return this.still.occluders;
+  }
+  private still: { scene: MeshScene; occluders: { mesh: MeshAsset; model: Mat4 }[] } | null = null;
+
+  private giState: { scene: MeshScene; occluders: { mesh: MeshAsset; model: Mat4 }[]; empty: ProbeVolume; env: { source: EnvironmentLight; value: EnvironmentLight } | null } | null = null;
+
+  /** A physical sky as the presenter draws it (F5a): the medium, its sun above the air, and the disc as the eye sees it; null for a painted one. */
+  private presentAtmosphere(): PresentSky["atmosphere"] {
+    const lighting = this.sunLighting();
+    const sun = lighting ? atmosphereSun(lighting) : null;
+    if (!sun) return null;
+    const luts = atmosphereLuts(sun.atmosphere);
+    const disc = sunDiscRadiance(luts, sun.direction, sun.radiance);
+    // The moon's disc (F5a-3): its albedo × the sun's light on it, through the air toward it.
+    const scale = lighting!.sky?.atmosphere?.moon ?? 1;
+    const t = sun.moon ? sunTransmittance(luts, sun.moon.direction) : null;
+    const moonDisc = t ? ([0, 1, 2].map((c) => MOON_ALBEDO * scale * sun.radiance[c]! * t[c]!) as [number, number, number]) : null;
+    // A volumetric cloud layer (F5c): its settings, the upper sky's mean light it takes in, and the wind's seconds.
+    const cloudSettings = lighting!.sky?.atmosphere?.clouds;
+    const clouds = cloudSettings ? { clouds: resolveClouds(cloudSettings), ambient: this.cloudAmbientFor(luts, sun.direction, sun.radiance), time: this.frame / 60 } : null;
+    return { atmosphere: sun.atmosphere, sun: sun.direction, sunRadiance: sun.radiance, disc, moon: sun.moon, stars: sun.stars, moonDisc, clouds };
+  }
+
+  /** The upper sky's mean radiance under this sun (F5c's clouds take their sky light from it), kept while the sun holds still. */
+  private cloudAmbientFor(luts: ReturnType<typeof atmosphereLuts>, sun: readonly number[], radiance: readonly number[]): [number, number, number] {
+    const key = `${atmosphereKey(luts.atmosphere)}|${sun.map((v) => v.toFixed(3)).join(",")}|${radiance.map((v) => v.toFixed(3)).join(",")}`;
+    if (this.cloudAmbient?.key === key) return this.cloudAmbient.value;
+    const dirs = [[0, 1, 0], [1, 0.5, 0], [-1, 0.5, 0], [0, 0.5, 1], [0, 0.5, -1]].map((d) => {
+      const l = Math.hypot(d[0]!, d[1]!, d[2]!);
+      return d.map((v) => v / l);
+    });
+    const value: [number, number, number] = [0, 0, 0];
+    for (const d of dirs) skyRadiance(luts, d, sun, radiance).forEach((v, c) => (value[c]! += v / dirs.length));
+    this.cloudAmbient = { key, value };
+    return value;
   }
 
   /** The presenter's newest measurements into the lens flare and eye adaptation (the byte path's reportSun and frameLuminance). */
@@ -1393,10 +1937,11 @@ export class MeshOverlaySurface implements DisplaySurface {
         this.onSun({ x: this.sunAt.x, y: this.sunAt.y, visible: this.sunSeen });
       }
     }
-    if (adapting && lighting?.autoExposure && stats.luminance !== null && stats.luminanceSeq !== this.gpuSeen.luminanceSeq) {
+    const eye = lighting ? this.eyeAdaptation(lighting) : null;
+    if (adapting && eye && stats.luminance !== null && stats.luminanceSeq !== this.gpuSeen.luminanceSeq) {
       // Each new reading steps the adaptation by the frames since the last.
       const frames = Math.max(1, this.frame - this.gpuSeen.adaptedAt);
-      this.adapted = adaptExposure(this.adapted, stats.luminance / 2 ** post.exposure, lighting.autoExposure, frames / 60);
+      this.adapted = adaptExposure(this.adapted, stats.luminance / 2 ** post.exposure, eye, frames / 60);
       this.gpuSeen = { luminanceSeq: stats.luminanceSeq, adaptedAt: this.frame };
     }
   }
@@ -1432,8 +1977,35 @@ export class MeshOverlaySurface implements DisplaySurface {
   /** The rig's tone map with the volumes' and the eye's stops applied (null without tone mapping). */
   private frameTonemap(lighting: SceneLighting, post: PostBlend): ToneMap | null {
     const base = sceneLightingTonemap(lighting);
+    // A physical camera in manual mode (F4c) sets the exposure from its aperture, shutter and ISO.
+    const lens = lighting.camera ? resolvePhysicalCamera(lighting.camera) : null;
+    if (base && lens?.exposure === "manual") return { ...base, exposure: cameraExposure(lens) * 2 ** (post.exposure + lens.compensation) };
     const stops = post.exposure + this.adapted;
     return base && stops !== 0 ? { ...base, exposure: base.exposure * 2 ** stops } : base;
+  }
+
+  /**
+   * The eye adaptation a rig asks for: its own, or (with a physical camera in auto mode, F4c) the default's,
+   * the camera's compensation shifting the key; none when the camera's exposure is manual.
+   */
+  private eyeAdaptation(lighting: SceneLighting): AutoExposure | null {
+    const lens = lighting.camera ? resolvePhysicalCamera(lighting.camera) : null;
+    if (lens?.exposure === "manual") return null;
+    const base = lighting.autoExposure ?? (lens ? DEFAULT_AUTO_EXPOSURE : null);
+    return base && lens && lens.compensation !== 0 ? { ...base, key: base.key * 2 ** lens.compensation } : base;
+  }
+
+  /** The physical camera's depth of field and motion blur for the AAA renderer (F4c), with the post volumes' pull. */
+  private cameraEffects(lighting: SceneLighting, post: PostBlend): GpuSceneDraw["camera"] {
+    const lens = lighting.camera ? resolvePhysicalCamera(lighting.camera) : null;
+    if (!lens || (!lens.depthOfField && !lens.motionBlur)) return null;
+    const aperture = post.aperture ?? lens.aperture;
+    const focusDistance = post.focusDistance ?? lens.focusDistance;
+    const terms = cocTerms({ ...lens, aperture, focusDistance });
+    return {
+      ...(lens.depthOfField ? { dof: { scale: terms.scale, focus: terms.focus, blades: lens.blades } } : {}),
+      ...(lens.motionBlur ? { motionBlur: { fraction: shutterFraction(lens.shutter) * (post.motionBlur ?? 1) } } : {}),
+    };
   }
 
   /** Report the volumes' grade, bloom and fog to {@link onPost} when they change. */
@@ -1500,10 +2072,41 @@ export class MeshOverlaySurface implements DisplaySurface {
     this.skyCache = { key, pixels };
   }
 
-  /** The 3D render scale this frame: 1, unless the software governor has stepped down. */
+  /** The 3D render scale this frame: 1, unless the software governor or the GPU's pacing has stepped down. */
   private renderScale(): number {
+    if (this.gpuPaced()) return this.gpuPacer?.scale ?? 1;
     if (!this.governed()) return 1;
     return Math.min(SOFTWARE_SCALES[this.scaleStep]!, this.quality.maxRenderScale);
+  }
+
+  /** Whether this frame's 3D is on a GPU that reads its frames back (not presented on the GPU): one gpuPacing.ts measures. */
+  private gpuReadback(): boolean {
+    return this.renderer.backend !== "software" && this.renderer.framesLanded !== undefined && this.gpuTarget() === null;
+  }
+
+  /**
+   * Whether the GPU's pacing sets the render size: a large first-person view (as the software governor's) on a GPU
+   * that reads its frames back and can render at another size.
+   */
+  private gpuPaced(): boolean {
+    return this.options.adaptiveResolution !== false && this.hud && this.gpuReadback() && this.renderer.resize !== undefined && this.width * this.height >= 640 * 360;
+  }
+
+  /** Time the frames landing from the GPU, and choose the next frame's render size from them. */
+  private paceGpu(): void {
+    if (!this.gpuReadback()) return;
+    this.gpuPacer ??= new GpuPacer();
+    const step = this.gpuPacer.update(performance.now(), this.renderer.framesLanded ?? 0);
+    // Measured always (the quality governor reads it), applied only where the size can change.
+    if (!this.gpuPaced() && step !== 0) this.gpuPacer.step = 0;
+  }
+
+  /**
+   * When the GPU is what holds the 3D back (its frames land well behind the run loop), how long each takes to come
+   * back (ms); else null. The quality governor steps the preset down on it, as it does on slow frames.
+   */
+  gpuBoundMs(): number | null {
+    return this.gpuReadback() ? (this.gpuPacer?.gpuBoundMs(performance.now()) ?? null) : null;
   }
 
   /** Whether the resolution governor applies: a large first-person view on the CPU rasteriser. */
@@ -1787,6 +2390,59 @@ export class MeshOverlaySurface implements DisplaySurface {
   /** Foliage blocks by mesh (EP11): their cull distance and bounds. */
   private readonly foliage = new Map<MeshAsset, NonNullable<MeshInstance["foliage"]>>();
 
+  /** Whether foliage is drawn a copy at a time (F6b): on the AAA tier, which culls copies on the GPU. */
+  private get gpuFoliage(): boolean {
+    return this.options.prepass === true && this.renderer.sunCascades === true;
+  }
+
+  /** Each block's copies as instances (F6b), made once a block, model and LOD chain. */
+  private readonly blockCopies = new WeakMap<MeshAsset, { model: Mat4; lod: LodChain | null; copies: MeshSceneInstance[] }>();
+  /**
+   * Each impostor layer's chain with an octahedral impostor for its far level
+   * (F6b; bakeOctahedralImpostor), baked once, off the frame that first needs
+   * it; until it's ready, the crossed cards the layer stores serve.
+   */
+  private readonly octahedral = new WeakMap<LodChain, LodChain | "baking">();
+
+  private octahedralChain(chain: LodChain, near: MeshSceneInstance): LodChain {
+    const known = this.octahedral.get(chain);
+    if (known && known !== "baking") return known;
+    if (!known) {
+      this.octahedral.set(chain, "baking");
+      setTimeout(() => {
+        const baked = bakeOctahedralImpostor(chain.meshes[0]!, near.textures ?? []);
+        this.octahedral.set(chain, baked ? { meshes: [chain.meshes[0]!, baked.mesh], distances: chain.distances, textures: [undefined, [baked.atlas]] } : chain);
+      }, 0);
+    }
+    return chain;
+  }
+
+  /**
+   * What an instance draws as on the GPU-culled path (F6b): itself, unless it is
+   * a foliage block, which is its copies while it is in reach (its full copies'
+   * block, the impostors taken by their LOD chain), and nothing otherwise.
+   */
+  private foliageCopies(instance: MeshSceneInstance): readonly MeshSceneInstance[] {
+    const f = this.foliage.get(instance.mesh);
+    if (!f) return [instance];
+    if (!f.copies) return this.foliageInReach(instance) ? [instance] : [];
+    // The cards' blocks: their copies are the full copies' far level.
+    if (f.swap?.far || !this.eye) return [];
+    const m = instance.model;
+    const [x, y, z] = f.center;
+    const d = Math.hypot(m[0]! * x + m[4]! * y + m[8]! * z + m[12]! - this.eye[0], m[1]! * x + m[5]! * y + m[9]! * z + m[13]! - this.eye[1], m[2]! * x + m[6]! * y + m[10]! * z + m[14]! - this.eye[2]);
+    if (d - f.radius >= f.cull * this.quality.terrainDetail) return [];
+    const lod = f.copies.lod ? this.octahedralChain(f.copies.lod, instance) : null;
+    let made = this.blockCopies.get(instance.mesh);
+    if (!made || made.model !== instance.model || made.lod !== lod) {
+      const { mesh, matrices } = f.copies;
+      const copies = matrices.map((c) => ({ ...instance, mesh, model: multiplyMat4(instance.model, c as unknown as Mat4), ...(lod ? { lod } : {}) }) as MeshSceneInstance);
+      made = { model: instance.model, lod, copies };
+      this.blockCopies.set(instance.mesh, made);
+    }
+    return made.copies;
+  }
+
   /** Whether an instance is in reach of the eye: anything but a foliage block is; a block is within its cull distance. */
   private foliageInReach(instance: MeshSceneInstance): boolean {
     const f = this.foliage.get(instance.mesh);
@@ -1977,7 +2633,7 @@ export class MeshOverlaySurface implements DisplaySurface {
     // Terrain frames nothing (the map is sized to the play space) and casts
     // only when its terrain says so — its cliffs shading the deck at a low sun.
     const casts = (i: number) => !this.scene.instances[i]?.terrain || this.scene.instances[i]?.casts === true;
-    return this.instances.filter((_, i) => !posed.has(i) && !this.everFront.has(i) && !this.inactive.has(i) && casts(i));
+    return this.instances.filter((instance, i) => !posed.has(i) && !this.everFront.has(i) && !this.inactive.has(i) && casts(i) && !this.groundMeshes.has(instance.mesh));
   }
 
   /**
@@ -2126,6 +2782,53 @@ export class MeshOverlaySurface implements DisplaySurface {
   private debrisBoxes: RagdollBox[] = [];
   private readonly debrisLooks = new Map<MeshAsset, TexturedMesh & { readonly lod?: LodChain | null }>();
 
+  /** The objects broken (F8c): their chunks, and each piece as the mesh a chunk draws. */
+  private readonly broken = new Map<number, { chunks: Chunk[]; meshes: MeshAsset[]; sources: readonly (readonly number[])[]; scale: number; textures: readonly (DecodedTexture | null)[] }>();
+  /** The levels' hidden objects, before the broken ones join them (F8c). */
+  private levelInactive: ReadonlySet<number> = new Set();
+
+  /**
+   * Break a fractured object (cartbox.shatter, F8c): it's hidden, its pieces fly from the impact as chunks, a
+   * mark is laid and dust thrown where it was hit (the scene's effects named for it), and the still scene the
+   * live GI traces loses it.
+   */
+  shatter(object: number, at: readonly [number, number, number], strength: number): void {
+    const inst = this.scene.instances[object];
+    const pieces = inst?.mesh.fracture?.pieces;
+    if (!inst || !pieces || this.broken.has(object)) return;
+    const model = this.lastPlacement?.[object] ?? this.instances[object]!.model;
+    const scale = Math.hypot(model[0]!, model[1]!, model[2]!) || 1;
+    const chunks = breakApart(pieces, model, at, strength, object + 1);
+    const meshes = pieces.map((p, k) => ({ name: `${inst.mesh.name}:piece${k}`, primitives: p.primitives }) as MeshAsset);
+    const textures = this.instances[object]!.textures ?? [];
+    this.broken.set(object, { chunks, meshes, sources: pieces.map((p) => p.sources), scale, textures });
+    this.debrisBoxes = this.debrisBoxes.length > 0 ? this.debrisBoxes : sceneColliders(this.scene);
+    this.setInactive(this.levelInactive);
+    // The mark and the dust, when the scene has them by name.
+    const named = (list: readonly { readonly name: string }[] | undefined, pattern: RegExp) => (list ?? []).findIndex((e) => pattern.test(e.name));
+    const crack = named(this.scene.decals, /crack|break|scorch|impact/i);
+    if (crack >= 0) this.decal(crack, at, [0, 1, 0], 1);
+    const dust = named(this.scene.effects, /dust|debris|smoke/i);
+    if (dust >= 0) this.burst(dust, at, [0, 0, 0], 1.5);
+    // The live GI's still scene, again without it.
+    this.still = null;
+    this.giState = null;
+  }
+
+  /** Step every broken object's chunks; their instances to draw. */
+  private stepBroken(): MeshSceneInstance[] {
+    const out: MeshSceneInstance[] = [];
+    for (const b of this.broken.values()) {
+      stepChunks(b.chunks, 1 / 60, this.debrisBoxes);
+      for (const c of b.chunks) {
+        // Each piece's outer faces wear their source's maps; its cap, none.
+        const textures = b.sources[c.piece]!.map((s) => (s >= 0 ? (b.textures[s] ?? null) : null));
+        out.push({ mesh: b.meshes[c.piece]!, model: chunkMatrix(c, b.scale), textures } as unknown as MeshSceneInstance);
+      }
+    }
+    return out;
+  }
+
   /** Throw a copy of debris `debris` (see cartbox.debris). */
   throwDebris(debris: number, at: readonly [number, number, number], velocity: readonly [number, number, number], scale: number): void {
     this.debris?.throw(debris, at, velocity, scale);
@@ -2138,7 +2841,47 @@ export class MeshOverlaySurface implements DisplaySurface {
 
   /** Fire particle effect `effect` (see cartbox.burst). */
   burst(effect: number, at: readonly [number, number, number], dir: readonly [number, number, number], scale: number): void {
-    this.particles?.burst(effect, at, dir, scale);
+    if (this.gpuParticles) this.renderer.particleBurst?.(effect, at, dir, scale);
+    else this.particles?.burst(effect, at, dir, scale);
+  }
+  /** Whether the scene's particle effects run on the GPU (F8a). */
+  private gpuParticles = false;
+  /** The scene's own GPU emitters (F8a); the weather's (F5e) follow them, rain and snow as they fall. */
+  private effectEmitters: EmitterSpec[] = [];
+  private weatherFalling = "";
+  /** The weather a cart or the editor set at run time (F5e), over the rig's; null keeps the rig's. */
+  private weatherOverride: WeatherSettings | null = null;
+
+  /** Set the weather at run time (F5e): wetness, puddles, snow, rain and snowfall, over the rig's; null goes back to the rig's. */
+  setWeather(settings: WeatherSettings | null): void {
+    this.weatherOverride = settings;
+  }
+
+  /** This frame's weather, or null when it changes nothing. */
+  private frameWeather(lighting: SceneLighting | null): Weather | null {
+    const settings = this.weatherOverride ?? lighting?.weather ?? null;
+    if (!settings) return null;
+    const weather = resolveWeather(settings);
+    return weatherActive(weather) ? weather : null;
+  }
+
+  /**
+   * Keep the renderer's rain and snow emitters (F5e) with the weather: remade with the scene's own when what falls
+   * changes, and their origin over the eye every frame. On a renderer that runs GPU particles only (the AAA tier).
+   */
+  private syncWeatherEmitters(weather: Weather | null): void {
+    if (this.renderer.gpuSkinning !== true || !this.renderer.setParticles) return;
+    const falling = weather ? weatherEmitters(weather) : [];
+    const key = falling.map((e) => `${e.name}:${JSON.stringify(e.modules[0])}`).join("|");
+    if (key !== this.weatherFalling) {
+      this.weatherFalling = key;
+      this.renderer.setParticles([...this.effectEmitters, ...falling]);
+      this.gpuParticles = this.effectEmitters.length > 0 || falling.length > 0;
+    }
+    if (falling.length > 0 && this.eye) {
+      const origin = precipitationOrigin(this.eye);
+      falling.forEach((_, k) => this.renderer.particleOrigin?.(this.effectEmitters.length + k, origin));
+    }
   }
   /** Settles once the scene's reflection probes are baked and in use (tests await it). */
   probesReady: Promise<void> = Promise.resolve();
@@ -2180,7 +2923,7 @@ export class MeshOverlaySurface implements DisplaySurface {
 
 /** The mesh with each placeholder image whose ref is in `images` filled in (the same mesh when none is). */
 function fillPlaceholders(mesh: MeshAsset, images: ReadonlyMap<string, EncodedImage>): MeshAsset {
-  const slots = ["baseColorImage", "normalImage", "materialImage", "metallicRoughnessImage", "occlusionImage", "emissiveImage", "lightmapImage", "detailImage", "blendImage", "reliefImage", "tintMaskImage"] as const;
+  const slots = ["baseColorImage", "normalImage", "materialImage", "metallicRoughnessImage", "occlusionImage", "emissiveImage", "lightmapImage", "lightmapHdrImage", "detailImage", "blendImage", "reliefImage", "tintMaskImage"] as const;
   let touched = false;
   const primitives = mesh.primitives.map((primitive) => {
     let material = primitive.material;
@@ -2203,6 +2946,54 @@ const VISTA_SHADOW_SIZE = 2048;
 const VISTA_AIR_WIDTH = 192;
 
 /** A scene's vistas with their meshes' maps decoded (the frame's own decode, so shared images decode once). */
+/** The rig's environment lit by its baked sky: the reflections' panorama, its mean, and an imported HDR sky's own light. */
+function litBySky(environment: EnvironmentLight, baked: { reflections: DecodedTexture; hdr: HdrImage | null }): EnvironmentLight {
+  return { ...environment, map: baked.reflections, average: computeEnvironmentAverage(baked.reflections), ...(baked.hdr ? { hdr: baked.hdr } : {}) };
+}
+
+/**
+ * The environment a scene is lit by, as the player draws it: the rig's
+ * gradient, or, where it authors a sky, that sky baked (its imported or HDR
+ * panorama, objects, clouds and distant vistas, I6 and I7) as the surface
+ * bakes it. The light bake reads it (AAA_FIDELITY_ROADMAP.md F3d-4), so what
+ * is baked is lit by the sky the frame shows. Null without a rig. Textures go
+ * through the browser's decoder (none in node, where the vistas draw flat);
+ * KTX2-only ones draw flat.
+ */
+export async function sceneSkyEnvironment(scene: MeshScene): Promise<EnvironmentLight | null> {
+  const lighting = scene.lighting;
+  if (!lighting) return null;
+  const environment = sceneLightingEnvironment(lighting);
+  if (!lighting.sky) return environment;
+  const vistas = await texturedVistas(scene.vistas, (mesh) => decodeMeshTextures(mesh, () => Promise.resolve(null)));
+  return litBySky(environment, await bakeSceneSky(lighting.sky, lighting, environment, vistas, scene.bounds.center));
+}
+
+/**
+ * The terrains (vistas among them) the AAA tier draws from their heightfields
+ * (F6c): those whose model is a translation alone, which moves their origin;
+ * each layer's base colour, normal and metallic-roughness maps decoded.
+ */
+async function groundSources(scene: MeshScene, texture: (mesh: MeshAsset) => Promise<TexturedMesh>): Promise<{ sources: GpuTerrainSource[]; ids: Set<string> }> {
+  const placed = [
+    ...(scene.terrains ?? []).map((terrain) => ({ terrain, model: scene.terrainModels?.get(terrain.id) ?? null })),
+    ...(scene.vistas ?? []).flatMap((v) => (v.terrain ? [{ terrain: v.terrain, model: v.model ?? null }] : [])),
+  ];
+  const sources: GpuTerrainSource[] = [];
+  const ids = new Set<string>();
+  for (const { terrain, model } of placed) {
+    const m = model ?? [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1];
+    const translation = m[0] === 1 && m[1] === 0 && m[2] === 0 && m[4] === 0 && m[5] === 1 && m[6] === 0 && m[8] === 0 && m[9] === 0 && m[10] === 1;
+    if (!translation) continue;
+    const moved = m[12] !== 0 || m[13] !== 0 || m[14] !== 0;
+    const t = moved ? { ...terrain, origin: [terrain.origin[0] + m[12]!, terrain.origin[1] + m[13]!, terrain.origin[2] + m[14]!] as const } : terrain;
+    const maps = await texture({ name: terrain.name, primitives: terrain.layers.map((l) => ({ positions: new Float32Array(0), normals: null, uvs: null, indices: new Uint32Array(0), material: l.material })) } as unknown as MeshAsset);
+    sources.push({ terrain: t, layers: terrain.layers.map((_, k) => ({ base: maps.textures?.[k] ?? null, normal: maps.normalTextures?.[k] ?? null, mr: maps.mrTextures?.[k] ?? null })) });
+    ids.add(terrain.id);
+  }
+  return { sources, ids };
+}
+
 async function texturedVistas(vistas: readonly SceneVista[] | undefined, texture: (mesh: MeshAsset) => Promise<TexturedMesh>): Promise<VistaLayer[]> {
   return Promise.all(
     (vistas ?? []).map(async (v) => ({ haze: v.haze, instances: await Promise.all(v.parts.map(async (p) => ({ ...(await texture(p.mesh)), model: p.model }))) })),
@@ -2233,7 +3024,15 @@ async function bakeSceneSky(
   let imported: DecodedTexture | null = null;
   // An imported HDR sky's own light, beyond 8 bits, at the reflections' size: the AAA tier's IBL (F3a).
   let hdrLight: HdrImage | null = null;
-  if (sky.panorama) {
+  const physical = sky.atmosphere ? atmosphereSun(lighting) : null;
+  if (physical) {
+    // A physical sky (F5a) is an HDR panorama the atmosphere makes under the key light: exposed into the
+    // painted copy at the rig's exposure, as the frame shows it, and its own light for the IBL and the bake.
+    const hdr = atmospherePanorama(atmosphereLuts(physical.atmosphere), physical.direction, physical.radiance, 256, 128, physical.moon);
+    imported = hdrToTexture(hdr, lighting.exposure);
+    hdrLight = resampleHdr(hdr, SKY_PANORAMA_WIDTH / SKY_IBL_DOWNSAMPLE, SKY_PANORAMA_HEIGHT / SKY_IBL_DOWNSAMPLE, 0, 1);
+    sky = { ...sky, panorama: null };
+  } else if (sky.panorama) {
     try {
       const bytes = base64ToBytes(sky.panorama.data);
       if (isRadiance(sky.panorama.mime)) {
@@ -2286,6 +3085,11 @@ function skyReflectionsWith(small: DecodedTexture, sun: SkySun, clouds: readonly
   return panoramaWithClouds(panoramaWithSun(small, sun, SKY_IBL_SUN_SAMPLES), clouds, 0);
 }
 
+/** A physical sky's sun (above the air) rounded to what's worth re-lighting for: turned about half a degree, or a step brighter or redder (F5a-2). */
+function physicalSunKey(sun: { readonly direction: readonly number[]; readonly radiance: readonly number[] }): string {
+  return `${sun.direction.map((v) => Math.round(v * 100)).join(",")}:${sun.radiance.map((v) => v.toPrecision(2)).join(",")}`;
+}
+
 /** A sun rounded to what's worth redrawing its glow for: turned about half a degree, or recoloured a step. */
 function sunKey(sun: SkySun): string {
   const l = Math.hypot(sun.direction[0], sun.direction[1], sun.direction[2]) || 1;
@@ -2294,6 +3098,20 @@ function sunKey(sun: SkySun): string {
 
 /** A mesh with every material map decoded — what an instance (or a frame) draws with. */
 type TexturedMesh = Omit<MeshSceneInstance, "model">;
+
+/**
+ * HDR directional light maps (F3d) decoded once each, by our own PNG decoder:
+ * a browser's would premultiply the alpha that holds their exponent.
+ */
+const hdrLightmapDecodes = new WeakMap<EncodedImage, Promise<HdrLightmap | null>>();
+function decodeHdrLightmapOnce(image: EncodedImage): Promise<HdrLightmap | null> {
+  let entry = hdrLightmapDecodes.get(image);
+  if (!entry) {
+    entry = decodeHdrLightmap(image.bytes).catch(() => null);
+    hdrLightmapDecodes.set(image, entry);
+  }
+  return entry;
+}
 
 /** Decode all of one mesh's material maps; a failed decode falls back to null (flat). */
 async function decodeMeshTextures(
@@ -2344,6 +3162,31 @@ async function decodeMeshTextures(
     // A painted team-colour mask (L17): applied when the copy is tinted.
     each((m) => m.tintMaskImage),
   ]);
+  // A material graph's own images (F1e), each primitive's list.
+  const graphTextures = await Promise.all(
+    mesh.primitives.map(async (primitive) => {
+      const images = primitive.material.graphImages;
+      if (!images?.length) return null;
+      return Promise.all(
+        images.map((image) => {
+          if (!image || image.bytes.length === 0) return Promise.resolve(null);
+          let entry = cache.get(image);
+          if (!entry) {
+            entry = decode(image);
+            cache.set(image, entry);
+          }
+          return entry;
+        }),
+      );
+    }),
+  );
+  // The GPU bake's HDR directional light map (F3d), which the AAA tier lights by.
+  const lightmapHdrTextures = await Promise.all(
+    mesh.primitives.map((primitive) => {
+      const image = primitive.material.lightmapHdrImage;
+      return image && image.bytes.length > 0 ? decodeHdrLightmapOnce(image) : Promise.resolve(null);
+    }),
+  );
   return {
     mesh,
     textures,
@@ -2353,10 +3196,12 @@ async function decodeMeshTextures(
     occlusionTextures,
     emissiveTextures,
     ...(lightmapTextures.some((t) => t !== null) ? { lightmapTextures } : {}),
+    ...(lightmapHdrTextures.some((t) => t !== null) ? { lightmapHdrTextures } : {}),
     ...(detailTextures.some((t) => t !== null) ? { detailTextures } : {}),
     ...(blendTextures.some((t) => t !== null) ? { blendTextures } : {}),
     ...(reliefTextures.some((t) => t !== null) ? { reliefTextures } : {}),
     ...(tintMaskTextures.some((t) => t !== null) ? { tintMaskTextures } : {}),
+    ...(graphTextures.some((t) => t !== null) ? { graphTextures } : {}),
   };
 }
 
@@ -2426,6 +3271,12 @@ export function tintMesh(mesh: MeshAsset, tint: number, overrides?: SceneLightin
  * then renders with its flat base colour.
  */
 async function decodeTexture(mime: string, bytes: Uint8Array): Promise<DecodedTexture | null> {
+  // Off the main thread where workers can (F0e); here otherwise.
+  const pool = decodePool();
+  if (pool) {
+    const decoded = await pool.decode(mime, bytes);
+    if (decoded) return decoded;
+  }
   if (typeof createImageBitmap !== "function" || typeof OffscreenCanvas !== "function") return null;
   try {
     // The cast is safe: these are ordinary image bytes; TS only flags the
@@ -2510,4 +3361,15 @@ function meshSignature(mesh: MeshAsset): string {
       return `${p.positions.length}:${p.indices.length}:${JSON.stringify(scalars)}:${images.join(",")}`;
     })
     .join("|");
+}
+
+/**
+ * A skinned or morphing mesh's live copy (F7a): skinned and morphed by the renderer's compute pass where it
+ * has one (`gpu`), else on the CPU. A mesh that only morphs takes its default weights at once.
+ */
+function liveCopy(mesh: MeshAsset, gpu: boolean): LiveSkinnedMesh | null {
+  if (!isSkinned(mesh) && !hasMorphTargets(mesh)) return null;
+  const live = createLiveSkinnedMesh(mesh, { gpu });
+  if (!isSkinned(mesh)) live.update(new Float32Array(0));
+  return live;
 }
