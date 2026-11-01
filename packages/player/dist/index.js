@@ -11743,6 +11743,10 @@ function resampleNearest(src, sw, sh, dw, dh) {
 import {
   atmosphereLighting,
   atmosphereLuts,
+  atmosphereKey,
+  cloudShadedLighting,
+  resolveClouds,
+  skyRadiance,
   atmospherePanorama,
   atmospherePanoramaRows,
   dynamicGiGrid,
@@ -11815,7 +11819,11 @@ import {
   breakApart,
   chunkMatrix,
   stepChunks,
-  emitterFromEffect
+  emitterFromEffect,
+  precipitationOrigin,
+  resolveWeather,
+  weatherActive,
+  weatherEmitters
 } from "@cartbox/editor";
 
 // src/mesh/dynamicLights.ts
@@ -12094,6 +12102,9 @@ var CappedSceneRenderer = class {
   }
   particleBurst(index, at, dir, scale) {
     this.inner.particleBurst?.(index, at, dir, scale);
+  }
+  particleOrigin(index, at) {
+    this.inner.particleOrigin?.(index, at);
   }
   get referenceSamples() {
     return this.inner.referenceSamples;
@@ -12451,6 +12462,8 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
     this.low = null;
     /** A GPU that reads its frames back: paced by how often they land (gpuPacing.ts), made with the first frame. */
     this.gpuPacer = null;
+    /** The upper sky's mean light for F5c's clouds, and the sun it was found for. */
+    this.cloudAmbient = null;
     /** The last sky backdrop and the view it was painted for (it depends only on
      *  where the camera points, so walking without turning reuses it). */
     this.skyCache = null;
@@ -12618,6 +12631,11 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
     this.levelInactive = /* @__PURE__ */ new Set();
     /** Whether the scene's particle effects run on the GPU (F8a). */
     this.gpuParticles = false;
+    /** The scene's own GPU emitters (F8a); the weather's (F5e) follow them, rain and snow as they fall. */
+    this.effectEmitters = [];
+    this.weatherFalling = "";
+    /** The weather a cart or the editor set at run time (F5e), over the rig's; null keeps the rig's. */
+    this.weatherOverride = null;
     /** Settles once the scene's reflection probes are baked and in use (tests await it). */
     this.probesReady = Promise.resolve();
     /** Every decal's tiles, drawn the first time the AAA tier projects them (F1f). */
@@ -13022,7 +13040,8 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
     surface.compressedTextures = gpuFormats.length > 0;
     if (scene.effects && scene.effects.length > 0) {
       if (renderer.gpuSkinning === true && renderer.setParticles) {
-        renderer.setParticles(scene.effects.map(emitterFromEffect));
+        surface.effectEmitters = scene.effects.map(emitterFromEffect);
+        renderer.setParticles(surface.effectEmitters);
         surface.gpuParticles = true;
       } else surface.particles = new ParticleSystem(scene.effects);
     }
@@ -13150,7 +13169,9 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
   /** The rig as this frame lights with it: with the cart's sun as its key, if it set one (I17), tinted by a physical sky's air (F5a). */
   frameLighting() {
     const lighting = this.sunLighting();
-    return lighting ? atmosphereLighting(lighting) : null;
+    if (!lighting) return null;
+    const lit = atmosphereLighting(lighting);
+    return this.eye ? cloudShadedLighting(lit, this.eye[0], this.eye[2], this.frame / 60) : lit;
   }
   /** The rig with the cart's sun as its key, if it set one (I17): above the air, before a physical sky tints it. */
   sunLighting() {
@@ -13503,6 +13524,8 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
    */
   presentOnGpu(gpu, rgba, job) {
     const { camera, lighting } = job;
+    const weather = this.frameWeather(lighting);
+    this.syncWeatherEmitters(weather);
     const output = gpu.outputSize ?? { width: this.width, height: this.height };
     if (this.options.dynamicResolution === true) this.resolution ?? (this.resolution = new DynamicResolution(1e3 / 60));
     const diagnostic = isDiagnosticView(this.viewMode) && this.renderer.sunCascades === true;
@@ -13536,6 +13559,8 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
       // With a prepass the AAA scene culls on the GPU (F0e): the frustum, then a Hi-Z pyramid of the prepass's depths.
       ...this.options.prepass === true ? { prepass: true, gpuCull: true } : {},
       ...lighting ? { ...lit, localShadows: job.local, shadow: job.shadow, sunShadow: job.sunShadow, localShadowCasters: job.localShadowCasters, localShadowKey: job.localShadowKey, localShadowMoved: job.localShadowMoved, fog: lighting.fog ?? null, wind: lighting.wind ?? null } : {},
+      // The weather (F5e): its layers over every surface.
+      weather,
       ...job.reflectionCapture ? { reflectionCapture: job.reflectionCapture } : {},
       ...job.decals ? { decals: job.decals } : {},
       ...this.ground.length > 0 ? { terrains: this.ground } : {},
@@ -13641,7 +13666,22 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
     const scale = lighting.sky?.atmosphere?.moon ?? 1;
     const t = sun.moon ? sunTransmittance(luts, sun.moon.direction) : null;
     const moonDisc = t ? [0, 1, 2].map((c) => MOON_ALBEDO * scale * sun.radiance[c] * t[c]) : null;
-    return { atmosphere: sun.atmosphere, sun: sun.direction, sunRadiance: sun.radiance, disc, moon: sun.moon, stars: sun.stars, moonDisc };
+    const cloudSettings = lighting.sky?.atmosphere?.clouds;
+    const clouds = cloudSettings ? { clouds: resolveClouds(cloudSettings), ambient: this.cloudAmbientFor(luts, sun.direction, sun.radiance), time: this.frame / 60 } : null;
+    return { atmosphere: sun.atmosphere, sun: sun.direction, sunRadiance: sun.radiance, disc, moon: sun.moon, stars: sun.stars, moonDisc, clouds };
+  }
+  /** The upper sky's mean radiance under this sun (F5c's clouds take their sky light from it), kept while the sun holds still. */
+  cloudAmbientFor(luts, sun, radiance) {
+    const key2 = `${atmosphereKey(luts.atmosphere)}|${sun.map((v) => v.toFixed(3)).join(",")}|${radiance.map((v) => v.toFixed(3)).join(",")}`;
+    if (this.cloudAmbient?.key === key2) return this.cloudAmbient.value;
+    const dirs = [[0, 1, 0], [1, 0.5, 0], [-1, 0.5, 0], [0, 0.5, 1], [0, 0.5, -1]].map((d) => {
+      const l = Math.hypot(d[0], d[1], d[2]);
+      return d.map((v) => v / l);
+    });
+    const value = [0, 0, 0];
+    for (const d of dirs) skyRadiance(luts, d, sun, radiance).forEach((v, c) => value[c] += v / dirs.length);
+    this.cloudAmbient = { key: key2, value };
+    return value;
   }
   /** The presenter's newest measurements into the lens flare and eye adaptation (the byte path's reportSun and frameLuminance). */
   takeGpuMeasurements(stats2, lighting, post, adapting, sky, sun) {
@@ -14412,6 +14452,35 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
   burst(effect, at, dir, scale) {
     if (this.gpuParticles) this.renderer.particleBurst?.(effect, at, dir, scale);
     else this.particles?.burst(effect, at, dir, scale);
+  }
+  /** Set the weather at run time (F5e): wetness, puddles, snow, rain and snowfall, over the rig's; null goes back to the rig's. */
+  setWeather(settings) {
+    this.weatherOverride = settings;
+  }
+  /** This frame's weather, or null when it changes nothing. */
+  frameWeather(lighting) {
+    const settings = this.weatherOverride ?? lighting?.weather ?? null;
+    if (!settings) return null;
+    const weather = resolveWeather(settings);
+    return weatherActive(weather) ? weather : null;
+  }
+  /**
+   * Keep the renderer's rain and snow emitters (F5e) with the weather: remade with the scene's own when what falls
+   * changes, and their origin over the eye every frame. On a renderer that runs GPU particles only (the AAA tier).
+   */
+  syncWeatherEmitters(weather) {
+    if (this.renderer.gpuSkinning !== true || !this.renderer.setParticles) return;
+    const falling = weather ? weatherEmitters(weather) : [];
+    const key2 = falling.map((e) => `${e.name}:${JSON.stringify(e.modules[0])}`).join("|");
+    if (key2 !== this.weatherFalling) {
+      this.weatherFalling = key2;
+      this.renderer.setParticles([...this.effectEmitters, ...falling]);
+      this.gpuParticles = this.effectEmitters.length > 0 || falling.length > 0;
+    }
+    if (falling.length > 0 && this.eye) {
+      const origin = precipitationOrigin(this.eye);
+      falling.forEach((_, k) => this.renderer.particleOrigin?.(this.effectEmitters.length + k, origin));
+    }
   }
   /**
    * What the AAA tier's renderer captures its probes from this frame (F3b):
@@ -19747,6 +19816,28 @@ fn energyCompensation(f0: vec3<f32>, dfg: vec2<f32>) -> vec3<f32> {
 fn specularOcclusion(ndv: f32, ao: f32, alpha: f32) -> f32 {
   return clamp(pow(ndv + ao, exp2(-16.0 * alpha - 1.0)) - 1.0 + ao, 0.0, 1.0);
 }
+// The share of cone A (cosine cosA) that cone B covers, their axes cosD apart (Oat and Sander; mirrors capCoverage).
+fn capCoverage(cosA: f32, cosB: f32, cosD: f32) -> f32 {
+  let a = acos(clamp(cosA, -1.0, 1.0));
+  let b = acos(clamp(cosB, -1.0, 1.0));
+  let d = acos(clamp(cosD, -1.0, 1.0));
+  let areaA = 6.28318531 * (1.0 - cosA);
+  if (areaA <= 1e-6) { return select(0.0, 1.0, d <= b); }
+  let full = 6.28318531 * (1.0 - max(cosA, cosB));
+  var area = 0.0;
+  if (d <= abs(a - b)) { area = full; }
+  else if (d < a + b) {
+    let diff = abs(a - b);
+    let x = 1.0 - clamp((d - diff) / max(1e-6, a + b - diff), 0.0, 1.0);
+    area = x * x * (3.0 - 2.0 * x) * full;
+  }
+  return clamp(area / areaA, 0.0, 1.0);
+}
+// Specular occlusion from a bent normal (Jimenez et al. 2016; mirrors bentSpecularOcclusion): the lobe's cone about R
+// against the open sky's cone about the bent normal, whose aperture its visibility gives.
+fn bentSpecularOcclusion(bent: vec3<f32>, visibility: f32, R: vec3<f32>, alpha: f32) -> f32 {
+  return capCoverage(exp2(-3.32193 * alpha), sqrt(max(0.0, 1.0 - visibility)), dot(normalize(bent), normalize(R)));
+}
 `
   );
 }
@@ -20369,6 +20460,7 @@ var GpuParticles = class {
         head: 0,
         born: 0,
         carry: 0,
+        origin: [0, 0, 0],
         pending: [],
         mesh
       };
@@ -20377,6 +20469,11 @@ var GpuParticles = class {
   /** An emitter's index by name, or −1. */
   indexOf(name) {
     return this.emitters.findIndex((e) => e.spec.name === name);
+  }
+  /** Move where an emitter's rate spawns (F5e: rain and snow over the eye). */
+  setOrigin(index, at) {
+    const e = this.emitters[index];
+    if (e) e.origin = [at[0], at[1], at[2]];
   }
   /** Fire an emitter's burst at `at` toward `dir`, `scale` times its count. */
   burst(index, at, dir = [0, 0, 0], scale = 1) {
@@ -20466,7 +20563,7 @@ var GpuParticles = class {
       e.carry += e.params.rate * frame.dt;
       const rated = Math.floor(e.carry);
       e.carry -= rated;
-      if (rated > 0) e.pending.push({ at: [0, 0, 0], dir: [0, 0, 0], count: Math.min(rated, e.params.capacity) });
+      if (rated > 0) e.pending.push({ at: e.origin, dir: [0, 0, 0], count: Math.min(rated, e.params.capacity) });
       const requests = e.pending.splice(0, MAX_SPAWN_REQUESTS);
       const data = new Float32Array(Math.max(1, requests.length) * 12);
       const bits = new Uint32Array(data.buffer);
@@ -27775,7 +27872,7 @@ import {
   TRANSMITTANCE_STEPS,
   TRANSMITTANCE_WIDTH,
   aerialCamera,
-  atmosphereKey,
+  atmosphereKey as atmosphereKey2,
   moonLightsSky
 } from "@cartbox/editor";
 var SKY_VIEW_WIDTH = 192;
@@ -28256,7 +28353,7 @@ var GpuAtmosphere = class {
   }
   /** The uniforms written for `sky` where they changed; its key. */
   prepare(sky) {
-    const medium = atmosphereKey(sky.atmosphere);
+    const medium = atmosphereKey2(sky.atmosphere);
     const key2 = [medium, sky.atmosphere.viewHeight, ...sky.sun.map((v) => v.toFixed(5)), ...sky.sunRadiance.map((v) => v.toPrecision(5))].join("|");
     if (key2 !== this.uniformKey) {
       this.device.queue.writeBuffer(this.uniforms, 0, packAtmosphereUniforms(sky, this.data));
@@ -28266,7 +28363,7 @@ var GpuAtmosphere = class {
   }
   /** The transmittance and multiple-scattering passes, when the medium is new. */
   medium(encoder, sky) {
-    const medium = atmosphereKey(sky.atmosphere);
+    const medium = atmosphereKey2(sky.atmosphere);
     if (medium === this.mediumKey) return;
     this.run(encoder, this.pipelines.transmittance, [this.uniformEntry(), { binding: 1, resource: this.transmittance.createView() }], TRANSMITTANCE_WIDTH, TRANSMITTANCE_HEIGHT);
     this.run(
@@ -29390,6 +29487,124 @@ var GpuVolumetricFog = class {
   }
 };
 
+// src/render/weather.ts
+import { PUDDLE_ROUGHNESS, SNOW_ALBEDO, SNOW_ROUGHNESS, WATER_F0, weatherActive as weatherActive2 } from "@cartbox/editor";
+var WEATHER_FRAME_FLOATS = 8;
+function packWeatherFrame(weather, time, out = new Float32Array(WEATHER_FRAME_FLOATS)) {
+  out.fill(0);
+  if (!weather || !weatherActive2(weather)) return out;
+  out.set([weather.wetness, weather.puddles, weather.snow, weather.rain], 0);
+  out.set([weather.snowLine, time % 600, weather.scale, 1], 4);
+  return out;
+}
+var WEATHER_WGSL = (
+  /* wgsl */
+  `
+fn wHash2(x: f32, y: f32) -> f32 {
+  var h = (bitcast<u32>(i32(x)) * 0x8da6b343u) ^ (bitcast<u32>(i32(y)) * 0xd8163841u);
+  h = (h ^ (h >> 16u)) * 0x7feb352du;
+  h = (h ^ (h >> 15u)) * 0x846ca68bu;
+  return f32(h ^ (h >> 16u)) / 4294967296.0;
+}
+fn wNoise2(x: f32, y: f32) -> f32 {
+  let ix = floor(x);
+  let iy = floor(y);
+  let fx = x - ix;
+  let fy = y - iy;
+  let sx = fx * fx * (3.0 - 2.0 * fx);
+  let sy = fy * fy * (3.0 - 2.0 * fy);
+  let a = wHash2(ix, iy);
+  let b = wHash2(ix + 1.0, iy);
+  let c = wHash2(ix, iy + 1.0);
+  let d = wHash2(ix + 1.0, iy + 1.0);
+  return (a + (b - a) * sx) * (1.0 - sy) + (c + (d - c) * sx) * sy;
+}
+fn wPatch(x: f32, z: f32, scale: f32) -> f32 {
+  return (wNoise2(x / scale, z / scale) * 2.0 + wNoise2(x / scale * 2.7 + 13.1, z / scale * 2.7 + 7.7)) / 3.0;
+}
+fn wExposure(sky: f32) -> f32 { return smoothstep(0.35, 0.85, sky); }
+fn wPuddle(x: f32, z: f32, ny: f32, sky: f32) -> f32 {
+  let puddles = frame.weather0.y;
+  if (puddles <= 0.0) { return 0.0; }
+  let flat = smoothstep(0.92, 0.985, ny);
+  if (flat <= 0.0) { return 0.0; }
+  let hollow = 1.0 - wPatch(x, z, frame.weather1.z);
+  return flat * wExposure(sky) * smoothstep(1.0 - puddles, 1.0 - puddles + 0.12, hollow);
+}
+fn wSnow(x: f32, y: f32, z: f32, ny: f32, sky: f32) -> f32 {
+  let snow = frame.weather0.z;
+  if (snow <= 0.0 || y < frame.weather1.x) { return 0.0; }
+  let facing = smoothstep(0.55 - 0.35 * snow, 0.8 - 0.3 * snow, ny);
+  if (facing <= 0.0) { return 0.0; }
+  let cover = wPatch(x + 101.0, z + 37.0, frame.weather1.z);
+  return facing * wExposure(sky) * smoothstep(1.0 - snow * 1.15, 1.0 - snow * 1.15 + 0.15, cover);
+}
+// Rain's rings in a puddle: the slope they add (dh/dx, dh/dz); mirrors rainRipples.
+fn wRipples(x: f32, z: f32, time: f32, rain: f32) -> vec2<f32> {
+  if (rain <= 0.0) { return vec2<f32>(0.0); }
+  var g = vec2<f32>(0.0);
+  for (var layer = 0; layer < 2; layer = layer + 1) {
+    let size = 0.4;
+    let ox = f32(layer) * 0.21;
+    let oz = f32(layer) * 0.13;
+    let cx = floor((x + ox) / size);
+    let cz = floor((z + oz) / size);
+    for (var j = -1; j <= 1; j = j + 1) {
+      for (var i = -1; i <= 1; i = i + 1) {
+        let ix = cx + f32(i);
+        let iz = cz + f32(j);
+        let seed = wHash2(ix + f32(layer) * 1013.0, iz);
+        let px = (ix + 0.2 + 0.6 * wHash2(ix, iz + 77.0)) * size - ox;
+        let pz = (iz + 0.2 + 0.6 * wHash2(ix + 31.0, iz)) * size - oz;
+        let phase = time / 0.6 + seed * 10.0;
+        let age = phase - floor(phase);
+        if (wHash2(ix + floor(phase) * 7.0, iz + f32(layer)) > rain) { continue; }
+        let dx = x - px;
+        let dz = z - pz;
+        let d = sqrt(dx * dx + dz * dz);
+        let ring = d - age * 0.25;
+        if (abs(ring) > 0.04 || d < 1e-5) { continue; }
+        let amplitude = (1.0 - age) * cos(ring / 0.04 * 3.14159265 * 0.5);
+        let slope = amplitude * sin(ring / 0.04 * 3.14159265) * 0.6;
+        g = g + vec2<f32>(slope * dx / d, slope * dz / d);
+      }
+    }
+  }
+  return g;
+}
+struct WeatherOut { albedo: vec3<f32>, rough: f32, metallic: f32, N: vec3<f32>, puddle: f32, snow: f32 };
+// The weather over a surface point (mirrors weatherSurface, f0 aside: the caller mixes it toward water's and snow's).
+fn weatherSurface(p: vec3<f32>, n: vec3<f32>, sky: f32, albedo0: vec3<f32>, rough0: f32, metallic0: f32) -> WeatherOut {
+  let open = wExposure(sky);
+  let wet = frame.weather0.x * open;
+  let porosity = clamp((rough0 - 0.1) / 0.6, 0.0, 1.0) * (1.0 - metallic0);
+  let k = wet * porosity;
+  var albedo = pow(max(albedo0, vec3<f32>(0.0)), vec3<f32>(1.0 + k)) * (1.0 - 0.25 * k);
+  var rough = rough0 + (min(rough0, 0.3) - rough0) * wet;
+  var metallic = metallic0;
+  var N = n;
+  let puddle = wPuddle(p.x, p.z, n.y, sky);
+  if (puddle > 0.0) {
+    let g = wRipples(p.x, p.z, frame.weather1.y, frame.weather0.w);
+    let flat = normalize(vec3<f32>(-g.x, 1.0, -g.y));
+    N = normalize(N + (flat - N) * puddle);
+    albedo = albedo * (1.0 - 0.35 * puddle);
+    rough = rough + (${PUDDLE_ROUGHNESS} - rough) * puddle;
+    metallic = metallic * (1.0 - puddle);
+  }
+  let snow = wSnow(p.x, p.y, p.z, n.y, sky);
+  if (snow > 0.0) {
+    albedo = albedo + (vec3<f32>(${SNOW_ALBEDO.join(", ")}) - albedo) * snow;
+    rough = rough + (${SNOW_ROUGHNESS} - rough) * snow;
+    metallic = metallic * (1.0 - snow);
+    N = normalize(N * (1.0 - snow) + vec3<f32>(0.0, snow, 0.0));
+  }
+  return WeatherOut(albedo, rough, metallic, N, puddle, snow);
+}
+const WATER_F0 = ${WATER_F0};
+`
+);
+
 // src/render/WebgpuSceneRenderer.ts
 var GBUFFER_FORMAT = "rgba16float";
 var VELOCITY_FORMAT = "rg16float";
@@ -29454,7 +29669,8 @@ var VIEW_MODE_SHADE = (
     }
 `
 );
-var FRAME_BYTES2 = 896;
+var FRAME_BYTES2 = 928;
+var FRAME_WEATHER = 224;
 var FRAME_DEBUG = 220;
 var FRAME_CASCADES = 84;
 var FRAME_AERIAL = FRAME_CASCADES + 104;
@@ -29746,6 +29962,8 @@ struct Frame {
   fogUp: vec4<f32>,           // F5b: its up axis, w = P[5]
   fogBack: vec4<f32>,         // F5b: its back axis, w = the volume's reach
   debug: vec4<f32>,           // F10a: x = the view mode's code (0 lit), y = the texel density on target (per metre); F1d-2: z = 1 when scattering surfaces split
+  weather0: vec4<f32>,        // F5e: wetness, puddles, snow, rain
+  weather1: vec4<f32>,        // F5e: the snow line, the rain's seconds, the patches' size, 1 when there is weather
 };
 // One spot/point shadow tile (EP8c): world\u2192clip, and params.xy = depth\u2192distance terms.
 struct ShadowTile {
@@ -29861,7 +30079,9 @@ ${CASCADE_SHADOW_WGSL}
 ${AERIAL_SAMPLE_WGSL}
 // The volumetric fog (F5b, volumetricFog.ts): its light and transmittance, integrated over the froxels.
 @group(1) @binding(6) var fogVolume: texture_3d<f32>;
-${FOG_SAMPLE_WGSL}` : ""}
+${FOG_SAMPLE_WGSL}
+// The weather (F5e, weather.ts).
+${WEATHER_WGSL}` : ""}
 // Optical depth of a fog layer thinning above base, along the ray from the eye
 // (height cy, rise dy, length len) over t in [t0, t1] \u2014 fogLayerDepth in skyDome.ts.
 fn fogLayer(d: f32, k: f32, base: f32, cy: f32, dy: f32, len: f32, t0: f32, t1: f32) -> f32 {
@@ -30304,7 +30524,9 @@ fn coatTerm(N: vec3<f32>, ndv: f32, Ld: vec3<f32>, H: vec3<f32>, vdh: f32) -> ve
   let D = ac2 / (3.14159265 * dd * dd + 1e-7);
   let G = (ndv / (ndv * (1.0 - kc) + kc)) * (ndl / (ndl * (1.0 - kc) + kc));
   let fc = ${CLEARCOAT_F02} + (1.0 - ${CLEARCOAT_F02}) * pow(1.0 - vdh, 5.0);
-  return vec2<f32>(u.layer0.x * fc * (D * G) / (4.0 * ndl * ndv + 1e-4) * ndl${hdr ? " * 3.14159265" : ""}, u.layer0.x * fc);
+  // The AAA tier's coat takes Kelemen's visibility, 1/(4\xB7(V\xB7H)\xB2), as Filament's does (F1c): cheap, and right for a
+  // smooth layer; the other tiers keep the Schlick-Smith term the software path mirrors.
+  return vec2<f32>(u.layer0.x * fc * ${hdr ? "D * 0.25 / max(vdh * vdh, 1e-4)" : "(D * G) / (4.0 * ndl * ndv + 1e-4)"} * ndl${hdr ? " * 3.14159265" : ""}, u.layer0.x * fc);
 }
 // The environment's reflection along R from P, blurred toward its average by
 // roughness: inside a reflection probe's box (the smallest first), the room
@@ -30970,6 +31192,20 @@ ${hdr ? `    // Projected decals (F1f): the boxes round this point, laid over th
       N = dc.N;
       decalGlow = dc.glow;
     }
+    // Weather (F5e, weather.ts): wet, puddled and snowy where the sky reaches it (the HDR light map's sky
+    // visibility; open without one), on opaque and cut-out surfaces. Sampled whatever is bound (uniform control flow).
+    var wPuddle = 0.0;
+    var wSnowCover = 0.0;
+    let wSky = select(1.0, textureSample(lmTex, samp, vec2<f32>(in.uv2.x, 1.0 - in.uv2.y), 1).w, u.ssaoMeta.z > 1.5);
+    if (frame.weather1.w > 0.5 && u.pbr.w < 1.5) {
+      let ws = weatherSurface(in.worldPos, N, wSky, albedo, rough, metallic);
+      albedo = ws.albedo;
+      rough = max(ws.rough, 0.045);
+      metallic = ws.metallic;
+      N = ws.N;
+      wPuddle = ws.puddle;
+      wSnowCover = ws.snow;
+    }
     // View modes (F10a): the albedo as it shades, and lighting only's white dielectric in its place.
     let vmAlbedo = albedo;
     let vmMetallic = metallic;
@@ -30998,7 +31234,9 @@ ${hdr ? `    // The AAA BRDF (F1c, brdf.ts): the height-correlated Smith visibil
     let specD = (D * G) / (4.0 * ndl * ndv + 1e-4);`}
 ${hdr ? `    // A dielectric's reflectance from its IOR and specular (F1d), and a thin film's over it.
     var f0 = mix(u.spec0.rgb, albedo, metallic);
-    if (u.trans1.w > 0.0) { f0 = mix(f0, iridescenceF0(ndv, f0), u.trans1.w); }` : "    let f0 = vec3<f32>(0.04) + (albedo - vec3<f32>(0.04)) * metallic;"}
+    if (u.trans1.w > 0.0) { f0 = mix(f0, iridescenceF0(ndv, f0), u.trans1.w); }
+    // Water's reflectance where a puddle lies, a dielectric's where snow does (F5e).
+    f0 = mix(mix(f0, vec3<f32>(WATER_F0), wPuddle), vec3<f32>(0.04), wSnowCover);` : "    let f0 = vec3<f32>(0.04) + (albedo - vec3<f32>(0.04)) * metallic;"}
     let F = f0 + (vec3<f32>(1.0) - f0) * fp;
 ${hdr ? `    // GTAO (F3c): its visibility joins the material's occlusion (diffuse and specular alike), and its
     // bent normal is where the sky's irradiance comes from.
@@ -31013,7 +31251,11 @@ ${hdr ? `    // GTAO (F3c): its visibility joins the material's occlusion (diffu
     let dfg = dfgAt(ndv, rough);
     eComp = energyCompensation(f0, dfg);
     let specE = specularEnergy(f0, dfg);
-    var specAo = specularOcclusion(ndv, ao, rough * rough) * charSpec;
+    // Specular occlusion (F3c, F1c): with GTAO's bent normal, the reflection's lobe against the open sky's cone
+    // (Jimenez), the material's own occlusion still taken by Lagarde's fit; without one, Lagarde's from the AO alone.
+    let hasBent = dot(gt.xyz, gt.xyz) > 0.25;
+    let soBent = min(specularOcclusion(ndv, matAo, rough * rough), bentSpecularOcclusion(gt.xyz, gt.w, reflect(-V, N), rough * rough));
+    var specAo = select(specularOcclusion(ndv, ao, rough * rough), soBent, hasBent) * charSpec;
     // The sheen (F1d) takes what it reflects from the layer beneath.
     sheenScale = 1.0 - max(u.sheen0.r, max(u.sheen0.g, u.sheen0.b)) * sheenE(ndv, u.sheen0.w);
     // An HDR directional light map (F3d) lights the diffuse in place of the sky's irradiance, and its sky
@@ -31509,6 +31751,7 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     this.frameFog = null;
     this.volumetricFog = null;
     this.fogTerms = new Float32Array(FOG_FRAME_FLOATS);
+    this.weatherTerms = new Float32Array(WEATHER_FRAME_FLOATS);
     /** The physical sky's LUTs (F5a-2), made when a draw first brings one, and the frame's aerial terms. */
     this.atmosphere = null;
     this.aerialTerms = new Float32Array(AERIAL_FRAME_FLOATS);
@@ -34318,6 +34561,7 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     if (this.hdr) frame.set(this.aerialFrame(draw), FRAME_AERIAL);
     if (this.hdr) frame.set(packFogFrame(this.frameFog, this.fogTerms), FRAME_FOG);
     if (this.hdr) frame.set([viewModeCode(draw.viewMode), draw.texelDensity ?? DEFAULT_TEXEL_DENSITY, this.frameSss ? 1 : 0], FRAME_DEBUG);
+    if (this.hdr) frame.set(packWeatherFrame(draw.weather, draw.time ?? 0, this.weatherTerms), FRAME_WEATHER);
     this.device.queue.writeBuffer(buffers.params, 0, frame);
     this.uploadLocalShadows(local);
     return { ordered, globalCount, clusters };
@@ -34684,6 +34928,10 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
   setParticles(specs, looks = []) {
     this.particles?.dispose();
     this.particles = specs.length > 0 && this.hdr ? new GpuParticles(this.device, this.colourFormat, specs, looks) : null;
+  }
+  /** Move where an emitter's rate spawns (F5e: rain and snow over the eye). */
+  particleOrigin(index, at) {
+    this.particles?.setOrigin(index, at);
   }
   /** Fire an emitter's burst (F8a). */
   particleBurst(index, at, dir = [0, 0, 0], scale = 1) {
@@ -36235,6 +36483,323 @@ var HdrBloom = class {
   }
 };
 
+// src/render/clouds.ts
+import {
+  CLOUD_RANGE,
+  DETAIL_SIZE,
+  DETAIL_TILES,
+  DIFFUSION_G,
+  LIGHT_STEPS,
+  SCATTER_OCTAVES,
+  SHAPE_SIZE,
+  VIEW_STEPS,
+  WEATHER_SIZE,
+  WEATHER_TILES,
+  cloudNoise
+} from "@cartbox/editor";
+var TILE = 8;
+var CLOUD_BLEND = 0.15;
+var CLOUD_UNIFORM_FLOATS = 52;
+function packCloudUniforms(frame, view, projection, previous, index, width, height, out = new Float32Array(CLOUD_UNIFORM_FLOATS)) {
+  const rows = (v, p, at) => {
+    out.set([v[0], v[4], v[8], 1 / p[0]], at);
+    out.set([v[1], v[5], v[9], 1 / p[5]], at + 4);
+    out.set([v[2], v[6], v[10], 0], at + 8);
+  };
+  rows(view, projection, 0);
+  rows(previous?.view ?? view, previous?.projection ?? projection, 12);
+  const c = frame.clouds;
+  out.set([c.base, c.thickness, c.density, c.type], 24);
+  out.set([c.scale, c.coverage, c.wind[0], c.wind[1]], 28);
+  out.set([...frame.ambient, frame.time], 32);
+  out.set([index % 64, previous ? 1 : 0, -1, 0], 36);
+  out.set([width, height, 0, 0], 40);
+  out.set([0, 0, 0, 0], 44);
+  out.set([0, 0, 0, 0], 48);
+  return out;
+}
+var CLOUDS_WGSL = (
+  /* wgsl */
+  `
+${ATMOSPHERE_COMMON_WGSL}
+struct CloudU {
+  right: vec4f, up: vec4f, back: vec4f,
+  prevRight: vec4f, prevUp: vec4f, prevBack: vec4f,
+  layer0: vec4f,  // base, thickness, density, type
+  layer1: vec4f,  // scale, coverage, wind x, wind z (km a second)
+  ambient: vec4f, // the upper sky's mean radiance, the seconds blown
+  frame: vec4f,   // jitter frame, history good, fixed jitter (\u2265 0)
+  size: vec4f,    // the target's width and height
+  pad0: vec4f, pad1: vec4f,
+};
+@group(0) @binding(0) var<uniform> atm: Atm;
+@group(0) @binding(1) var<uniform> cu: CloudU;
+@group(0) @binding(2) var shapeTex: texture_3d<f32>;
+@group(0) @binding(3) var detailTex: texture_3d<f32>;
+@group(0) @binding(4) var weatherTex: texture_2d<f32>;
+@group(0) @binding(5) var repeatSampler: sampler;
+@group(0) @binding(6) var transmittanceLut: texture_2d<f32>;
+@group(0) @binding(7) var clampSampler: sampler;
+@group(0) @binding(8) var history: texture_2d<f32>;
+@group(0) @binding(9) var outTex: texture_storage_2d<rgba16float, write>;
+
+fn transmittanceTo(r: f32, mu: f32) -> vec3f {
+  if (hitsGround(r, mu)) { return vec3f(0.0); }
+  return textureSampleLevel(transmittanceLut, clampSampler, transmittanceUv(r, mu), 0.0).rgb;
+}
+fn remap(v: f32, lo0: f32, hi0: f32, lo1: f32, hi1: f32) -> f32 { return lo1 + (v - lo0) / max(1e-6, hi0 - lo0) * (hi1 - lo1); }
+fn heightGradient(h: f32, kind: f32) -> f32 {
+  let rise = clamp(remap(h, 0.0, 0.08, 0.0, 1.0), 0.0, 1.0);
+  let stratus = clamp(remap(h, 0.18, 0.3, 1.0, 0.0), 0.0, 1.0);
+  let cumulus = clamp(remap(h, 0.55, 1.0, 1.0, 0.0), 0.0, 1.0);
+  return rise * (stratus + (cumulus - stratus) * kind);
+}
+// The cloud's extinction per km at p (the planet's frame, the ground under the scene at the origin); mirrors cloudDensity.
+fn cloudDensity(p: vec3f, cheap: bool) -> f32 {
+  let bottom = atm.radii.x;
+  let base = cu.layer0.x;
+  let thickness = cu.layer0.y;
+  let r = length(vec3f(p.x, p.y + bottom, p.z));
+  let h = (r - bottom - base) / thickness;
+  if (h <= 0.0 || h >= 1.0) { return 0.0; }
+  let time = cu.ambient.w;
+  let x = p.x - cu.layer1.z * time * (1.0 + 0.5 * h);
+  let z = p.z - cu.layer1.w * time * (1.0 + 0.5 * h);
+  let tile = cu.layer1.x;
+  let coverage = cu.layer1.y;
+  let weather = textureSampleLevel(weatherTex, repeatSampler, vec2f(x, z) / (tile * ${WEATHER_TILES}.0), 0.0).r;
+  let local = clamp(coverage + (weather - 0.5) * 0.9 * (1.0 - 0.6 * coverage), 0.0, 1.0) * min(1.0, coverage * 4.0);
+  if (local <= 0.0) { return 0.0; }
+  let uvw = vec3f(x / tile, h * thickness / tile, z / tile);
+  let s = textureSampleLevel(shapeTex, repeatSampler, uvw, 0.0);
+  let fbm = 0.625 * s.g + 0.25 * s.b + 0.125 * s.a;
+  let shaped = remap(s.r, fbm - 1.0, 1.0, 0.0, 1.0) * heightGradient(h, cu.layer0.w);
+  var d = clamp(remap(shaped, 1.0 - local, 1.0, 0.0, 1.0), 0.0, 1.0) * local;
+  if (d <= 0.0) { return 0.0; }
+  if (!cheap) {
+    let e = textureSampleLevel(detailTex, repeatSampler, uvw * ${DETAIL_TILES}.0, 0.0);
+    let detail = 0.625 * e.r + 0.25 * e.g + 0.125 * e.b;
+    let modifier = detail + (1.0 - 2.0 * detail) * clamp(h * 10.0, 0.0, 1.0);
+    d = clamp(remap(d, modifier * 0.35, 1.0, 0.0, 1.0), 0.0, 1.0);
+  }
+  return d * cu.layer0.z;
+}
+fn hgPhase(c: f32, g: f32) -> f32 {
+  let g2 = g * g;
+  return (1.0 - g2) / (4.0 * PI * pow(max(1e-6, 1.0 + g2 - 2.0 * g * c), 1.5));
+}
+fn cloudPhase(c: f32, octave: f32) -> f32 {
+  let k = pow(0.5, octave);
+  return 0.75 * hgPhase(c, 0.8 * k) + 0.25 * hgPhase(c, -0.3 * k);
+}
+// Mirrors sunBeam: Wrenninge's octaves, and the two-stream slab's diffused light.
+fn sunBeam(c: f32, od: f32) -> f32 {
+  var beam = 0.0;
+  for (var o = 0; o < ${SCATTER_OCTAVES}; o = o + 1) {
+    let k = pow(0.5, f32(o));
+    beam = beam + k * cloudPhase(c, f32(o)) * exp(-od * k);
+  }
+  let diffused = max(0.0, 1.0 / (1.0 + 0.75 * (1.0 - ${DIFFUSION_G}) * od) - exp(-od));
+  return beam + diffused / (4.0 * PI);
+}
+const LIGHT_STEPS = array<f32, ${LIGHT_STEPS.length}>(${LIGHT_STEPS.map((s) => s.toFixed(4)).join(", ")});
+
+struct CloudSample { light: vec3f, transmittance: f32, distance: f32 };
+
+// Mirrors cloudRadiance.
+fn march(d: vec3f, jitter: f32) -> CloudSample {
+  let bottom = atm.radii.x;
+  let viewHeight = atm.view.x;
+  let r = bottom + viewHeight;
+  let mu = d.y;
+  var none = CloudSample(vec3f(0.0), 1.0, -1.0);
+  if (hitsGround(r, mu)) { return none; }
+  let lo = bottom + cu.layer0.x;
+  let hi = lo + cu.layer0.y;
+  var t0 = -1.0;
+  var t1 = -1.0;
+  if (r < lo) {
+    t0 = raySphere(r, mu, lo);
+    t1 = raySphere(r, mu, hi);
+  } else if (r < hi) {
+    t0 = 0.0;
+    let down = mu < 0.0 && r * r * (mu * mu - 1.0) + lo * lo >= 0.0;
+    t1 = select(raySphere(r, mu, hi), raySphere(r, mu, lo), down);
+  } else {
+    if (mu >= 0.0) { return none; }
+    t0 = raySphere(r, mu, hi);
+    t1 = select(t0, raySphere(r, mu, lo), r * r * (mu * mu - 1.0) + lo * lo >= 0.0);
+  }
+  if (t0 < 0.0 || t1 <= t0) { return none; }
+  t1 = min(t1, ${CLOUD_RANGE}.0);
+  if (t1 <= t0) { return none; }
+  let dt = (t1 - t0) / ${VIEW_STEPS}.0;
+  let sun = atm.sun.xyz;
+  let c = dot(d, sun);
+  let E = atm.sunE.rgb;
+  var L = vec3f(0.0);
+  var T = 1.0;
+  var weighted = 0.0;
+  var weight = 0.0;
+  for (var i = 0; i < ${VIEW_STEPS}; i = i + 1) {
+    let t = t0 + (f32(i) + jitter) * dt;
+    let p = vec3f(d.x * t, viewHeight + d.y * t, d.z * t);
+    let sigma = cloudDensity(p, false);
+    if (sigma <= 0.0) { continue; }
+    let pR = length(vec3f(p.x, p.y + bottom, p.z));
+    let h = (pR - bottom - cu.layer0.x) / cu.layer0.y;
+    var od = 0.0;
+    var along = 0.0;
+    for (var k = 0; k < ${LIGHT_STEPS.length}; k = k + 1) {
+      let step = LIGHT_STEPS[k] * cu.layer0.y;
+      let at = along + step * 0.5;
+      along = along + step;
+      od = od + cloudDensity(p + sun * at, true) * step;
+    }
+    let muSun = dot(vec3f(p.x, p.y + bottom, p.z), sun) / pR;
+    let ts = transmittanceTo(pR, muSun);
+    let beam = sunBeam(c, od);
+    let powder = 1.0 - 0.6 * exp(-2.0 * sigma * dt);
+    let tau = sigma * (1.0 - clamp(h, 0.0, 1.0)) * cu.layer0.y;
+    let amb = cu.ambient.rgb * (0.5 / (1.0 + 0.75 * (1.0 - ${DIFFUSION_G}) * tau));
+    let stepT = exp(-sigma * dt);
+    let S = sigma * (E * ts * beam * powder + amb);
+    L = L + T * ((S - S * stepT) / sigma);
+    weighted = weighted + t * T * (1.0 - stepT);
+    weight = weight + T * (1.0 - stepT);
+    T = T * stepT;
+    if (T < 0.01) { break; }
+  }
+  return CloudSample(L, T, select(-1.0, weighted / max(weight, 1e-9), weight > 0.0));
+}
+
+// The air between the eye and a point t along d: the ratio of their transmittances to the top (mirrors airTransmittance).
+fn airTransmittance(d: vec3f, t: f32) -> vec3f {
+  let r = atm.radii.x + atm.view.x;
+  let p = vec3f(d.x * t, r + d.y * t, d.z * t);
+  let pR = length(p);
+  let fromEye = transmittanceTo(r, d.y);
+  let toCloud = transmittanceTo(pR, dot(p, d) / pR);
+  return clamp(fromEye / max(toCloud, vec3f(1e-6)), vec3f(0.0), vec3f(1.0));
+}
+
+fn ign(p: vec2f) -> f32 { return fract(52.9829189 * fract(dot(p, vec2f(0.06711056, 0.00583715)))); }
+
+@compute @workgroup_size(${TILE}, ${TILE})
+fn main(@builtin(global_invocation_id) id: vec3u) {
+  if (f32(id.x) >= cu.size.x || f32(id.y) >= cu.size.y) { return; }
+  let pixel = vec2f(id.xy) + 0.5;
+  let ndc = vec2f(pixel.x / cu.size.x * 2.0 - 1.0, 1.0 - pixel.y / cu.size.y * 2.0);
+  let d = normalize(cu.right.xyz * (ndc.x * cu.right.w) + cu.up.xyz * (ndc.y * cu.up.w) - cu.back.xyz);
+  let jitter = select(fract(ign(pixel + vec2f(5.588238 * cu.frame.x, 5.588238 * cu.frame.x))), cu.frame.z, cu.frame.z >= 0.0);
+  let m = march(d, jitter);
+  var now = vec4f(0.0, 0.0, 0.0, 1.0);
+  if (m.distance > 0.0) { now = vec4f(m.light * airTransmittance(d, m.distance), m.transmittance); }
+  else if (m.transmittance < 1.0) { now = vec4f(m.light, m.transmittance); }
+  var out = now;
+  // The last frame's result where this direction was on screen then.
+  if (cu.frame.y > 0.5) {
+    let z = -dot(d, cu.prevBack.xyz);
+    if (z > 1e-4) {
+      let pn = vec2f(dot(d, cu.prevRight.xyz) / (z * cu.prevRight.w), dot(d, cu.prevUp.xyz) / (z * cu.prevUp.w));
+      let uv = vec2f(pn.x * 0.5 + 0.5, 0.5 - pn.y * 0.5);
+      if (all(uv >= vec2f(0.0)) && all(uv <= vec2f(1.0))) {
+        let past = textureSampleLevel(history, clampSampler, uv, 0.0);
+        out = mix(past, now, ${CLOUD_BLEND});
+      }
+    }
+  }
+  textureStore(outTex, vec2i(id.xy), out);
+}
+`
+);
+var TEX = { copySrc: 1, copyDst: 2, textureBinding: 4, storage: 8 };
+var BUF = { copyDst: 8, uniform: 64 };
+var GpuClouds = class _GpuClouds {
+  constructor(device) {
+    this.device = device;
+    this.atmData = new Float32Array(ATMOSPHERE_UNIFORM_FLOATS);
+    this.data = new Float32Array(CLOUD_UNIFORM_FLOATS);
+    this.targets = null;
+    this.size = { width: 0, height: 0 };
+    this.index = 0;
+    this.previous = null;
+    /** The target the last {@link march} wrote: what the presenter lays over the sky. */
+    this.current = null;
+    const noise = cloudNoise();
+    const volume = (n, data) => {
+      const texture = device.createTexture({ size: { width: n, height: n, depthOrArrayLayers: n }, dimension: "3d", format: "rgba8unorm", usage: TEX.textureBinding | TEX.copyDst });
+      device.queue.writeTexture({ texture }, data, { bytesPerRow: n * 4, rowsPerImage: n }, { width: n, height: n, depthOrArrayLayers: n });
+      return texture;
+    };
+    this.shape = volume(SHAPE_SIZE, noise.shape);
+    this.detail = volume(DETAIL_SIZE, noise.detail);
+    this.weather = device.createTexture({ size: { width: WEATHER_SIZE, height: WEATHER_SIZE }, format: "rgba8unorm", usage: TEX.textureBinding | TEX.copyDst });
+    device.queue.writeTexture({ texture: this.weather }, noise.weather, { bytesPerRow: WEATHER_SIZE * 4, rowsPerImage: WEATHER_SIZE }, { width: WEATHER_SIZE, height: WEATHER_SIZE });
+    this.repeat = device.createSampler({ magFilter: "linear", minFilter: "linear", addressModeU: "repeat", addressModeV: "repeat", addressModeW: "repeat" });
+    this.clamp = device.createSampler({ magFilter: "linear", minFilter: "linear", addressModeU: "clamp-to-edge", addressModeV: "clamp-to-edge" });
+    this.atm = device.createBuffer({ size: ATMOSPHERE_UNIFORM_FLOATS * 4, usage: BUF.uniform | BUF.copyDst });
+    this.uniforms = device.createBuffer({ size: CLOUD_UNIFORM_FLOATS * 4, usage: BUF.uniform | BUF.copyDst });
+    this.pipeline = device.createComputePipeline({ layout: "auto", compute: { module: device.createShaderModule({ code: CLOUDS_WGSL }), entryPoint: "main" } });
+  }
+  /** The half-size target's size for a frame of `width × height`. */
+  static targetSize(width, height) {
+    return { width: Math.max(1, Math.ceil(width / 2)), height: Math.max(1, Math.ceil(height / 2)) };
+  }
+  /**
+   * March this frame's clouds into the next target, blending the last (`fixedJitter` ≥ 0 marches every texel at
+   * that jitter with no history, for tests). Encoded on `encoder`; {@link current} is the result.
+   */
+  march(encoder, sky, frame, view, projection, transmittance, width, height, fixedJitter = -1) {
+    const device = this.device;
+    const size = _GpuClouds.targetSize(width, height);
+    if (!this.targets || size.width !== this.size.width || size.height !== this.size.height) {
+      for (const t of this.targets ?? []) t.destroy?.();
+      const make = () => device.createTexture({ size, format: "rgba16float", usage: TEX.textureBinding | TEX.storage | TEX.copySrc });
+      this.targets = [make(), make()];
+      this.size = size;
+      this.previous = null;
+    }
+    const write = this.targets[this.index % 2];
+    const read = this.targets[(this.index + 1) % 2];
+    device.queue.writeBuffer(this.atm, 0, packAtmosphereUniforms(sky, this.atmData));
+    const data = packCloudUniforms(frame, view, projection, fixedJitter >= 0 ? null : this.previous, this.index, size.width, size.height, this.data);
+    if (fixedJitter >= 0) data[38] = fixedJitter;
+    device.queue.writeBuffer(this.uniforms, 0, data);
+    const pass = encoder.beginComputePass();
+    pass.setPipeline(this.pipeline);
+    pass.setBindGroup(
+      0,
+      device.createBindGroup({
+        layout: this.pipeline.getBindGroupLayout(0),
+        entries: [
+          { binding: 0, resource: { buffer: this.atm } },
+          { binding: 1, resource: { buffer: this.uniforms } },
+          { binding: 2, resource: this.shape.createView({ dimension: "3d" }) },
+          { binding: 3, resource: this.detail.createView({ dimension: "3d" }) },
+          { binding: 4, resource: this.weather.createView() },
+          { binding: 5, resource: this.repeat },
+          { binding: 6, resource: transmittance.createView() },
+          { binding: 7, resource: this.clamp },
+          { binding: 8, resource: read.createView() },
+          { binding: 9, resource: write.createView() }
+        ]
+      })
+    );
+    pass.dispatchWorkgroups(Math.ceil(size.width / TILE), Math.ceil(size.height / TILE));
+    pass.end();
+    this.index += 1;
+    this.previous = { view: [...view], projection: [...projection] };
+    this.current = write;
+    return write;
+  }
+  dispose() {
+    for (const t of [this.shape, this.detail, this.weather, this.atm, this.uniforms, ...this.targets ?? []]) t?.destroy?.();
+    this.targets = null;
+    this.current = null;
+  }
+};
+
 // src/render/gpuPresent.ts
 import { MOON_RADIUS, NIGHT_SKY_RADIANCE, moonLightsSky as moonLightsSky2 } from "@cartbox/editor";
 import { CLOUD_TILE, MAX_CLOUD_LAYERS } from "@cartbox/editor";
@@ -36494,6 +37059,8 @@ struct AtmSky {
 @group(0) @binding(2) var viewSampler: sampler;
 @group(0) @binding(3) var moonView: texture_2d<f32>;
 @group(0) @binding(4) var transmittanceLut: texture_2d<f32>;
+// The volumetric clouds (F5c), at half size: their light through the air in rgb, what of the sky gets through in a.
+@group(0) @binding(5) var cloudTex: texture_2d<f32>;
 ${FULLSCREEN_VS2}
 ${SKY_VIEW_UV_WGSL}
 // The transmittance from the viewer along d to the top of the air (Bruneton's mapping); 0 into the ground.
@@ -36574,6 +37141,9 @@ fn starlight(n: vec3f) -> f32 {
     onMoon = true;
   }
   if (!onMoon && s.stars.x > 0.0) { rgb = rgb + T * (starlight(n) * s.stars.x + s.stars.z); }
+  // The clouds over all of it (F5c): the sun, the moon and the stars go behind them. None bound: (0, 0, 0, 1).
+  let cloud = textureSampleLevel(cloudTex, viewSampler, pos.xy / s.size.xy, 0.0);
+  rgb = rgb * cloud.a + cloud.rgb;
   return vec4f(rgb, 1.0);
 }
 `
@@ -36961,6 +37531,9 @@ var GpuPresenter = class {
     this.postFx = null;
     /** The physical sky's LUTs (F5a), made when a linear frame first draws one. */
     this.atmosphereLuts = null;
+    /** The volumetric clouds' pass (F5c), made with the first frame that has a layer; and the clear sky's stand-in. */
+    this.cloudPass = null;
+    this.clearClouds = null;
     /** The HDR bloom's chain (F4d), made when a linear frame first blooms. */
     this.bloom = null;
     this.uploads = /* @__PURE__ */ new Map();
@@ -36985,7 +37558,7 @@ var GpuPresenter = class {
     const compose = layout([uni(), tex(1), tex(2), tex(3), samp(4), tex(5), tex(6), tex(7), tex(8)]);
     this.layouts = {
       sky: layout([uni(), tex(1), samp(2), tex(3, STAGE_FRAGMENT2, "2d-array"), samp(4)]),
-      atmosphere: layout([uni(), tex(1), samp(2), tex(3), tex(4)]),
+      atmosphere: layout([uni(), tex(1), samp(2), tex(3), tex(4), tex(5)]),
       mask: layout([uni(), tex(1), tex(2)]),
       gather: layout([uni(), tex(1)]),
       compose,
@@ -37012,6 +37585,14 @@ var GpuPresenter = class {
       staging: device.createBuffer({ size: 16, usage: USAGE5.mapRead | USAGE5.bufferCopyDst }),
       busy: false
     };
+  }
+  /** A 1×1 cloud target that lets the whole sky through. */
+  noClouds() {
+    if (!this.clearClouds) {
+      this.clearClouds = this.device.createTexture({ size: { width: 1, height: 1 }, format: "rgba16float", usage: 4 | 2 });
+      this.device.queue.writeTexture({ texture: this.clearClouds }, new Uint16Array([0, 0, 0, 15360]), { bytesPerRow: 8 }, { width: 1, height: 1 });
+    }
+    return this.clearClouds;
   }
   /** The frame's width (its target's). */
   get width() {
@@ -37067,6 +37648,7 @@ var GpuPresenter = class {
           if (atmosphere) {
             (this.atmosphereLuts ?? (this.atmosphereLuts = new GpuAtmosphere(device))).update(atmosphere);
             device.queue.writeBuffer(this.uniforms.atmosphere, 0, packAtmosphereSkyUniforms({ ...sky, atmosphere }, width, height, this.data.atmosphere));
+            const cloudView = atmosphere.clouds ? (this.cloudPass ?? (this.cloudPass = new GpuClouds(device))).march(ctx.encoder, atmosphere, atmosphere.clouds, sky.view, sky.projection, this.atmosphereLuts.transmittance, width, height).createView() : this.noClouds().createView();
             this.fullScreen(
               ctx.encoder,
               "atmosphere",
@@ -37078,7 +37660,8 @@ var GpuPresenter = class {
                 { binding: 1, resource: this.atmosphereLuts.skyView.createView() },
                 { binding: 2, resource: this.linear.clamp },
                 { binding: 3, resource: this.atmosphereLuts.moonView.createView() },
-                { binding: 4, resource: this.atmosphereLuts.transmittance.createView() }
+                { binding: 4, resource: this.atmosphereLuts.transmittance.createView() },
+                { binding: 5, resource: cloudView }
               ],
               ctx.timing
             );
@@ -37335,6 +37918,8 @@ var GpuPresenter = class {
     this.bloom?.dispose();
     this.postFx?.dispose();
     this.atmosphereLuts?.dispose();
+    this.cloudPass?.dispose();
+    this.clearClouds?.destroy?.();
     destroy(this.panorama?.texture);
     destroy(this.cloudTexture?.texture);
     for (const u of this.uploads.values()) destroy(u.texture);
@@ -37763,6 +38348,9 @@ var Player = class {
     /** Turn the profiler on (it starts empty) or off. */
     /** An editor's camera, looking at the 3D scene instead of the cart's (see PlayerHandle.setEditorCamera). */
     this.editorCamera = null;
+    /** What the 3D viewport shows (F10a): the lit frame, or a diagnostic of it on the AAA tier. */
+    /** The weather a cart or the editor set at run time (F5e), over the rig's. */
+    this.weather = null;
     /** Counts level loads, so a load overtaken by a newer switch doesn't activate. */
     this.levelLoads = 0;
     /** Objects out of the current level. */
@@ -38070,6 +38658,7 @@ var Player = class {
           );
           this.meshSurface.setQuality(this.qualitySettings);
           this.meshSurface.setViewMode(this.viewMode);
+          this.meshSurface.setWeather(this.weather);
           this.meshSurface.setProfiler(this.profiler);
           const holoDocs = holoDocuments2(this.options.ui ?? []);
           const runtime = this.runtime;
@@ -38417,7 +39006,10 @@ var Player = class {
     this.qualityGovernor.reset(this.view.performance.now());
     this.applyQuality(resolveQuality(choice, browserDeviceHints(this.sceneRenderer ? this.sceneRenderer.backend !== "software" : void 0)));
   }
-  /** What the 3D viewport shows (F10a): the lit frame, or a diagnostic of it on the AAA tier. */
+  setWeather(settings) {
+    this.weather = settings;
+    this.meshSurface?.setWeather(settings);
+  }
   setViewMode(mode) {
     this.viewMode = mode;
     this.meshSurface?.setViewMode(mode);
@@ -40920,6 +41512,7 @@ function mount(container, options) {
     inspect: () => player.inspect(),
     setQuality: (choice) => player.setQuality(choice),
     setViewMode: (mode) => player.setViewMode(mode),
+    setWeather: (settings) => player.setWeather(settings),
     captureReference: (options2) => player.captureReference(options2),
     renderSequence: (options2) => player.renderSequence(options2),
     get referenceSamples() {

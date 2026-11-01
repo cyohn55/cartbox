@@ -105,7 +105,7 @@ import { createSceneRenderer } from "./render/createSceneRenderer.js";
 import { GpuCanvasSurface, type CapturedFrame } from "./render/GpuCanvasSurface.js";
 import type { SceneRenderer } from "./render/sceneRenderer.js";
 import type { TextureLookup } from "./world/worldScene.js";
-import { SpatialLoader, WorldPartition, partitionWorld, actionMask, createHoloCache, holoBindingKeys, holoDocuments, renderHoloDocument, translate, reboundActions, type DecodedTexture, type EncodedImage, type InputAction, type Mat4, colorFilterSvg, DEFAULT_ACCESSIBILITY, type AccessibilitySettings, type ColorFilter } from "@cartbox/editor";
+import { SpatialLoader, WorldPartition, partitionWorld, actionMask, createHoloCache, holoBindingKeys, holoDocuments, renderHoloDocument, translate, reboundActions, type DecodedTexture, type EncodedImage, type InputAction, type Mat4, colorFilterSvg, DEFAULT_ACCESSIBILITY, type AccessibilitySettings, type ColorFilter, type WeatherSettings } from "@cartbox/editor";
 import type { ControlScheme, InspectedObject, PlayerOptions, SequenceOptions } from "./types.js";
 
 /**
@@ -647,6 +647,7 @@ export class Player {
           );
           this.meshSurface.setQuality(this.qualitySettings);
           this.meshSurface.setViewMode(this.viewMode);
+          this.meshSurface.setWeather(this.weather);
           this.meshSurface.setProfiler(this.profiler);
           // Holo UI documents (I12): the host draws them from what the cart sends.
           const holoDocs = holoDocuments(this.options.ui ?? []);
@@ -1092,6 +1093,14 @@ export class Player {
   }
 
   /** What the 3D viewport shows (F10a): the lit frame, or a diagnostic of it on the AAA tier. */
+  /** The weather a cart or the editor set at run time (F5e), over the rig's. */
+  private weather: WeatherSettings | null = null;
+
+  setWeather(settings: WeatherSettings | null): void {
+    this.weather = settings;
+    this.meshSurface?.setWeather(settings);
+  }
+
   setViewMode(mode: ViewMode): void {
     this.viewMode = mode;
     this.meshSurface?.setViewMode(mode);

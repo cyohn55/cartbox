@@ -189,5 +189,5 @@ describe("preparing a scan", () => {
     }
     expect(red).toBeGreaterThan(tex.width * tex.height * 0.05);
     expect(blue).toBeGreaterThan(tex.width * tex.height * 0.05);
-  });
+  }, 30_000); // A dense scan simplified, unwrapped and baked: several seconds of work, past vitest's 5 s default on a loaded runner.
 });

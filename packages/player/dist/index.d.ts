@@ -1,4 +1,4 @@
-import { MeshSceneInstance, MeshAsset, Mat4, ScenePropValue, PhysicsSpec, AnimatorSpec, LodChain, AttachedComponent, SceneLighting, PhysicsWorldSettings, SceneTimeline, SceneLevel, NavMesh, Terrain, SceneStreaming, ParticleEffect, DecalDef, DecalMark, RagdollBox, DebrisDef, SceneAudio, ComponentDef, StreamGroup, JointKind, JointSpec, EnvironmentLight, SceneLight, ActionRebind, Atmosphere, SkyMoon, DecodedTexture, SkySun, BakedCloudLayer, SunShafts, ColorFilter, AccessibilitySettings, EncodedImage, UiDocument, InputAction, StringTable, ReflectionProbe, ShadowInput, ToneMap, LocalShadows, ProjectedDecal, DecalTiles, Occluder, DynamicGi, SceneFog, SceneWind, MeshMaterial, EmitterSpec, RasterStyle, VolumeEffect, MeshPrimitive, HdrLightmap, LightmapLayout, ProbeVolume, OccluderSurface, ResolvedLayers, ResolvedExtensions, ResolvedRefraction, SurfaceEffect, AnimatorOp, NavGraph, AnimationCue, FaceRig, VisemeSpan, FaceClip } from '@cartbox/editor';
+import { MeshSceneInstance, MeshAsset, Mat4, ScenePropValue, PhysicsSpec, AnimatorSpec, LodChain, AttachedComponent, SceneLighting, PhysicsWorldSettings, SceneTimeline, SceneLevel, NavMesh, Terrain, SceneStreaming, ParticleEffect, DecalDef, DecalMark, RagdollBox, DebrisDef, SceneAudio, ComponentDef, StreamGroup, JointKind, JointSpec, EnvironmentLight, SceneLight, ActionRebind, Atmosphere, SkyMoon, Clouds, DecodedTexture, SkySun, BakedCloudLayer, SunShafts, ColorFilter, AccessibilitySettings, WeatherSettings, EncodedImage, UiDocument, InputAction, StringTable, ReflectionProbe, ShadowInput, ToneMap, LocalShadows, ProjectedDecal, DecalTiles, Occluder, DynamicGi, SceneFog, SceneWind, Weather, MeshMaterial, EmitterSpec, RasterStyle, VolumeEffect, MeshPrimitive, HdrLightmap, LightmapLayout, ProbeVolume, OccluderSurface, ResolvedLayers, ResolvedExtensions, ResolvedRefraction, SurfaceEffect, AnimatorOp, NavGraph, AnimationCue, FaceRig, VisemeSpan, FaceClip } from '@cartbox/editor';
 
 /**
  * The runtime mesh scene: the cart's mesh sidecar resolved into placed instances
@@ -2686,6 +2686,33 @@ interface AtmosphereSky {
 }
 
 /**
+ * Volumetric clouds on the AAA tier (AAA_FIDELITY_ROADMAP.md F5c): the cloud
+ * layer of a physical sky, raymarched on the GPU, mirroring the CPU reference
+ * in @cartbox/editor (clouds.ts) step for step.
+ *
+ * - **Half resolution, amortised.** A compute pass marches a ray a texel of a
+ *   half-size target, its first step jittered per pixel and per frame, and
+ *   blends it into the last frame's result reprojected by direction (the
+ *   clouds are kilometres off, so the camera's turn is all that moves them on
+ *   screen). The history converges on the jittered march's mean, so 48 steps
+ *   read as many more.
+ * - **What it holds**: the light the layer sends toward the eye, already
+ *   through the air between them (the transmittance LUT's ratio from the eye
+ *   and from the cloud), in rgb, and the share of the sky behind that gets
+ *   through, in a.
+ * - **The presenter** lays it over the physical sky (`rgb × a + cloud`), the
+ *   sun's disc, the moon and the stars included, so the sun goes behind a
+ *   cloud.
+ */
+
+/** A frame's clouds: the layer, the upper sky's mean radiance it takes light from, and the seconds the wind has blown. */
+interface CloudFrame {
+    readonly clouds: Clouds;
+    readonly ambient: readonly [number, number, number];
+    readonly time: number;
+}
+
+/**
  * Presenting a 3D frame from the GPU (AAA_FIDELITY_ROADMAP.md F0a).
  *
  * The byte path renders the scene on the GPU, reads it back, then does the rest
@@ -2747,6 +2774,7 @@ interface PresentSky {
     readonly atmosphere?: (AtmosphereSky & {
         readonly disc: Rgb$2;
         readonly moonDisc?: Rgb$2 | null;
+        readonly clouds?: CloudFrame | null;
     }) | null;
 }
 /** What a frame's scene draws over. */
@@ -2883,6 +2911,11 @@ declare class GpuPresenter {
     private postFx;
     /** The physical sky's LUTs (F5a), made when a linear frame first draws one. */
     private atmosphereLuts;
+    /** The volumetric clouds' pass (F5c), made with the first frame that has a layer; and the clear sky's stand-in. */
+    private cloudPass;
+    private clearClouds;
+    /** A 1×1 cloud target that lets the whole sky through. */
+    private noClouds;
     /** The HDR bloom's chain (F4d), made when a linear frame first blooms. */
     private bloom;
     /** The frame graph's transients (the sky, the shafts, the composites), kept from frame to frame. */
@@ -4062,6 +4095,8 @@ interface PlayerHandle {
     setQuality(choice: QualityChoice): void;
     /** Show the 3D scene lit (the default) or as a diagnostic view (F10a; the AAA tier alone draws them). */
     setViewMode(mode: ViewMode): void;
+    /** Set the weather at run time (AAA_FIDELITY_ROADMAP.md F5e): wetness, puddles, snow, rain and snowfall over the rig's; null goes back to the rig's. */
+    setWeather(settings: WeatherSettings | null): void;
     /**
      * Render the path-traced reference of the 3D frame shown (F10b), `width`
      * across at its aspect (up to 8K a side), accumulated over `samples` a pixel
@@ -4968,6 +5003,12 @@ interface SceneDraw {
     /** The scene's wind (B6): it sways primitives that carry per-vertex sway. Omitted is still air. */
     readonly wind?: SceneWind | null;
     /**
+     * The weather (AAA_FIDELITY_ROADMAP.md F5e): the linear-light renderer lays
+     * wetness, puddles (rippled by the rain) and snow over every surface the sky
+     * reaches. Absent or all zero, surfaces are as authored.
+     */
+    readonly weather?: Weather | null;
+    /**
      * Skip instances whose world AABB is entirely outside the camera frustum. A
      * correct cull is output-identical, so it is a pure perf win; default off.
      */
@@ -5057,6 +5098,8 @@ interface SceneRenderer {
     /** GPU particles (AAA_FIDELITY_ROADMAP.md F8a): its emitters, and a burst of one. */
     setParticles?(specs: readonly EmitterSpec[]): void;
     particleBurst?(index: number, at: readonly number[], dir?: readonly number[], scale?: number): void;
+    /** Move where an emitter's rate spawns (F5e: rain and snow over the eye). */
+    particleOrigin?(index: number, at: readonly number[]): void;
     /**
      * True when it draws the sun's shadow itself from {@link SceneDraw.sunShadow}
      * (F2a: the AAA tier's GPU cascades) and ignores a CPU {@link SceneDraw.shadow}.
@@ -5118,6 +5161,7 @@ declare class CappedSceneRenderer implements SceneRenderer {
     get gpuSkinning(): boolean | undefined;
     setParticles(specs: readonly EmitterSpec[]): void;
     particleBurst(index: number, at: readonly number[], dir?: readonly number[], scale?: number): void;
+    particleOrigin(index: number, at: readonly number[]): void;
     get referenceSamples(): number | undefined;
     get prepareMaterials(): SceneRenderer["prepareMaterials"];
     get captureReference(): SceneRenderer["captureReference"];
@@ -5759,6 +5803,8 @@ declare class GpuParticles {
     } | undefined)[]);
     /** An emitter's index by name, or −1. */
     indexOf(name: string): number;
+    /** Move where an emitter's rate spawns (F5e: rain and snow over the eye). */
+    setOrigin(index: number, at: readonly number[]): void;
     /** Fire an emitter's burst at `at` toward `dir`, `scale` times its count. */
     burst(index: number, at: readonly number[], dir?: readonly number[], scale?: number): void;
     /** Spawn `count` from an emitter (as its rate does), at `at`. */
@@ -6113,6 +6159,7 @@ declare class WebgpuSceneRenderer implements SceneRenderer {
     private frameFog;
     private volumetricFog;
     private readonly fogTerms;
+    private readonly weatherTerms;
     /** The physical sky's LUTs (F5a-2), made when a draw first brings one, and the frame's aerial terms. */
     private atmosphere;
     private readonly aerialTerms;
@@ -6449,6 +6496,8 @@ declare class WebgpuSceneRenderer implements SceneRenderer {
     private particleTime;
     /** Give the renderer its particle emitters (F8a), replacing any it had; none clears them. */
     setParticles(specs: readonly EmitterSpec[], looks?: ConstructorParameters<typeof GpuParticles>[3]): void;
+    /** Move where an emitter's rate spawns (F5e: rain and snow over the eye). */
+    particleOrigin(index: number, at: readonly number[]): void;
     /** Fire an emitter's burst (F8a). */
     particleBurst(index: number, at: readonly number[], dir?: readonly number[], scale?: number): void;
     /** An emitter's ring (F8a): its particles' buffer, for tests and the profiler. */
@@ -8323,6 +8372,8 @@ declare class MeshOverlaySurface implements DisplaySurface {
     private low;
     /** A GPU that reads its frames back: paced by how often they land (gpuPacing.ts), made with the first frame. */
     private gpuPacer;
+    /** The upper sky's mean light for F5c's clouds, and the sun it was found for. */
+    private cloudAmbient;
     /** The last sky backdrop and the view it was painted for (it depends only on
      *  where the camera points, so walking without turning reuses it). */
     private skyCache;
@@ -8671,6 +8722,8 @@ declare class MeshOverlaySurface implements DisplaySurface {
     private giState;
     /** A physical sky as the presenter draws it (F5a): the medium, its sun above the air, and the disc as the eye sees it; null for a painted one. */
     private presentAtmosphere;
+    /** The upper sky's mean radiance under this sun (F5c's clouds take their sky light from it), kept while the sun holds still. */
+    private cloudAmbientFor;
     /** The presenter's newest measurements into the lens flare and eye adaptation (the byte path's reportSun and frameLuminance). */
     private takeGpuMeasurements;
     /** Ask for the GPU front renderer once (see MeshOverlayOptions.createFrontRenderer). */
@@ -8898,6 +8951,20 @@ declare class MeshOverlaySurface implements DisplaySurface {
     burst(effect: number, at: readonly [number, number, number], dir: readonly [number, number, number], scale: number): void;
     /** Whether the scene's particle effects run on the GPU (F8a). */
     private gpuParticles;
+    /** The scene's own GPU emitters (F8a); the weather's (F5e) follow them, rain and snow as they fall. */
+    private effectEmitters;
+    private weatherFalling;
+    /** The weather a cart or the editor set at run time (F5e), over the rig's; null keeps the rig's. */
+    private weatherOverride;
+    /** Set the weather at run time (F5e): wetness, puddles, snow, rain and snowfall, over the rig's; null goes back to the rig's. */
+    setWeather(settings: WeatherSettings | null): void;
+    /** This frame's weather, or null when it changes nothing. */
+    private frameWeather;
+    /**
+     * Keep the renderer's rain and snow emitters (F5e) with the weather: remade with the scene's own when what falls
+     * changes, and their origin over the eye every frame. On a renderer that runs GPU particles only (the AAA tier).
+     */
+    private syncWeatherEmitters;
     /** Settles once the scene's reflection probes are baked and in use (tests await it). */
     probesReady: Promise<void>;
     /** Every decal's tiles, drawn the first time the AAA tier projects them (F1f). */

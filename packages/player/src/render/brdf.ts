@@ -174,6 +174,48 @@ export function specularOcclusion(ndv: number, ao: number, alpha: number): numbe
 }
 
 /**
+ * The share of a cone of half-angle acos(`cosA`) that a cone of half-angle
+ * acos(`cosB`) covers when their axes are acos(`cosD`) apart, as a solid angle
+ * over the first's (Oat and Sander's spherical-cap intersection, with their
+ * smoothstep for the partly overlapping case).
+ */
+export function capCoverage(cosA: number, cosB: number, cosD: number): number {
+  const a = Math.acos(Math.min(1, Math.max(-1, cosA)));
+  const b = Math.acos(Math.min(1, Math.max(-1, cosB)));
+  const d = Math.acos(Math.min(1, Math.max(-1, cosD)));
+  const areaA = 2 * Math.PI * (1 - cosA);
+  if (areaA <= 1e-9) return d <= b ? 1 : 0;
+  let area: number;
+  if (d <= Math.abs(a - b)) area = 2 * Math.PI * (1 - Math.max(cosA, cosB));
+  else if (d >= a + b) area = 0;
+  else {
+    const diff = Math.abs(a - b);
+    const x = 1 - Math.min(1, Math.max(0, (d - diff) / Math.max(1e-6, a + b - diff)));
+    area = x * x * (3 - 2 * x) * 2 * Math.PI * (1 - Math.max(cosA, cosB));
+  }
+  return Math.min(1, Math.max(0, area / areaA));
+}
+
+/** The cosine of the specular lobe's cone (UE4's fit to GGX, for α = roughness²). */
+export function specularConeCos(alpha: number): number {
+  return 2 ** (-3.32193 * alpha);
+}
+
+/**
+ * Specular occlusion from a bent normal (Jimenez et al. 2016, "Practical
+ * realtime strategies for accurate indirect occlusion"): the open sky is a cone
+ * about the bent normal whose cosine-weighted visibility is `visibility`
+ * (cos = √(1 − visibility)), and the reflection takes the share of its lobe's
+ * cone about R that falls inside it.
+ */
+export function bentSpecularOcclusion(bent: readonly [number, number, number], visibility: number, r: readonly [number, number, number], alpha: number): number {
+  const lb = Math.hypot(bent[0], bent[1], bent[2]) || 1;
+  const lr = Math.hypot(r[0], r[1], r[2]) || 1;
+  const cosD = (bent[0] * r[0] + bent[1] * r[1] + bent[2] * r[2]) / (lb * lr);
+  return capCoverage(specularConeCos(alpha), Math.sqrt(Math.max(0, 1 - visibility)), cosD);
+}
+
+/**
  * The WGSL the linear-light shader declares: the DFG table's binding and the
  * functions mirroring the ones above.
  */
@@ -230,6 +272,28 @@ fn energyCompensation(f0: vec3<f32>, dfg: vec2<f32>) -> vec3<f32> {
 // Specular occlusion from ambient occlusion (Lagarde), for alpha = roughness².
 fn specularOcclusion(ndv: f32, ao: f32, alpha: f32) -> f32 {
   return clamp(pow(ndv + ao, exp2(-16.0 * alpha - 1.0)) - 1.0 + ao, 0.0, 1.0);
+}
+// The share of cone A (cosine cosA) that cone B covers, their axes cosD apart (Oat and Sander; mirrors capCoverage).
+fn capCoverage(cosA: f32, cosB: f32, cosD: f32) -> f32 {
+  let a = acos(clamp(cosA, -1.0, 1.0));
+  let b = acos(clamp(cosB, -1.0, 1.0));
+  let d = acos(clamp(cosD, -1.0, 1.0));
+  let areaA = 6.28318531 * (1.0 - cosA);
+  if (areaA <= 1e-6) { return select(0.0, 1.0, d <= b); }
+  let full = 6.28318531 * (1.0 - max(cosA, cosB));
+  var area = 0.0;
+  if (d <= abs(a - b)) { area = full; }
+  else if (d < a + b) {
+    let diff = abs(a - b);
+    let x = 1.0 - clamp((d - diff) / max(1e-6, a + b - diff), 0.0, 1.0);
+    area = x * x * (3.0 - 2.0 * x) * full;
+  }
+  return clamp(area / areaA, 0.0, 1.0);
+}
+// Specular occlusion from a bent normal (Jimenez et al. 2016; mirrors bentSpecularOcclusion): the lobe's cone about R
+// against the open sky's cone about the bent normal, whose aperture its visibility gives.
+fn bentSpecularOcclusion(bent: vec3<f32>, visibility: f32, R: vec3<f32>, alpha: f32) -> f32 {
+  return capCoverage(exp2(-3.32193 * alpha), sqrt(max(0.0, 1.0 - visibility)), dot(normalize(bent), normalize(R)));
 }
 `;
 }

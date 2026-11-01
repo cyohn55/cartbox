@@ -216,6 +216,7 @@ import { SSGI_UNIFORM_FLOATS, ssgiResolveWgsl, ssgiTemporalWgsl, ssgiTraceWgsl, 
 import { AERIAL_FRAME_FLOATS, AERIAL_LUT_BYTES, AERIAL_SAMPLE_WGSL, GpuAtmosphere, packAerialFrame } from "./atmosphere.js";
 import { GpuProbeGi } from "./dynamicGi.js";
 import { FOG_FORMAT, FOG_FRAME_FLOATS, FOG_SAMPLE_WGSL, GpuVolumetricFog, fogCamera, packFogFrame, type FogFrame } from "./volumetricFog.js";
+import { WEATHER_FRAME_FLOATS, WEATHER_WGSL, packWeatherFrame } from "./weather.js";
 import {
   LOCAL_ATLAS_SIZE,
   LOCAL_CLEAR_WGSL,
@@ -354,7 +355,10 @@ const VIEW_MODE_SHADE = /* wgsl */ `    let vm = i32(frame.debug.x + 0.5);
 `;
 
 /** The per-frame globals' bytes (WGSL `Frame`): cluster params and info, the near cascade's matrix and params, the sun's GPU cascades (F2a), the aerial perspective's camera (F5a-2) and the fog's (F5b). */
-const FRAME_BYTES = 896;
+const FRAME_BYTES = 928;
+
+/** Floats into `Frame` where the weather's terms sit (F5e). */
+const FRAME_WEATHER = 224;
 
 /** Floats into `Frame` where the view mode (F10a) sits. */
 const FRAME_DEBUG = 220;
@@ -676,6 +680,8 @@ struct Frame {
   fogUp: vec4<f32>,           // F5b: its up axis, w = P[5]
   fogBack: vec4<f32>,         // F5b: its back axis, w = the volume's reach
   debug: vec4<f32>,           // F10a: x = the view mode's code (0 lit), y = the texel density on target (per metre); F1d-2: z = 1 when scattering surfaces split
+  weather0: vec4<f32>,        // F5e: wetness, puddles, snow, rain
+  weather1: vec4<f32>,        // F5e: the snow line, the rain's seconds, the patches' size, 1 when there is weather
 };
 // One spot/point shadow tile (EP8c): world→clip, and params.xy = depth→distance terms.
 struct ShadowTile {
@@ -795,7 +801,9 @@ ${CASCADE_SHADOW_WGSL}
 ${AERIAL_SAMPLE_WGSL}
 // The volumetric fog (F5b, volumetricFog.ts): its light and transmittance, integrated over the froxels.
 @group(1) @binding(6) var fogVolume: texture_3d<f32>;
-${FOG_SAMPLE_WGSL}` : ""}
+${FOG_SAMPLE_WGSL}
+// The weather (F5e, weather.ts).
+${WEATHER_WGSL}` : ""}
 // Optical depth of a fog layer thinning above base, along the ray from the eye
 // (height cy, rise dy, length len) over t in [t0, t1] — fogLayerDepth in skyDome.ts.
 fn fogLayer(d: f32, k: f32, base: f32, cy: f32, dy: f32, len: f32, t0: f32, t1: f32) -> f32 {
@@ -1241,7 +1249,9 @@ fn coatTerm(N: vec3<f32>, ndv: f32, Ld: vec3<f32>, H: vec3<f32>, vdh: f32) -> ve
   let D = ac2 / (3.14159265 * dd * dd + 1e-7);
   let G = (ndv / (ndv * (1.0 - kc) + kc)) * (ndl / (ndl * (1.0 - kc) + kc));
   let fc = ${CLEARCOAT_F0} + (1.0 - ${CLEARCOAT_F0}) * pow(1.0 - vdh, 5.0);
-  return vec2<f32>(u.layer0.x * fc * (D * G) / (4.0 * ndl * ndv + 1e-4) * ndl${hdr ? " * 3.14159265" : ""}, u.layer0.x * fc);
+  // The AAA tier's coat takes Kelemen's visibility, 1/(4·(V·H)²), as Filament's does (F1c): cheap, and right for a
+  // smooth layer; the other tiers keep the Schlick-Smith term the software path mirrors.
+  return vec2<f32>(u.layer0.x * fc * ${hdr ? "D * 0.25 / max(vdh * vdh, 1e-4)" : "(D * G) / (4.0 * ndl * ndv + 1e-4)"} * ndl${hdr ? " * 3.14159265" : ""}, u.layer0.x * fc);
 }
 // The environment's reflection along R from P, blurred toward its average by
 // roughness: inside a reflection probe's box (the smallest first), the room
@@ -1911,6 +1921,20 @@ ${hdr ? `    // Projected decals (F1f): the boxes round this point, laid over th
       N = dc.N;
       decalGlow = dc.glow;
     }
+    // Weather (F5e, weather.ts): wet, puddled and snowy where the sky reaches it (the HDR light map's sky
+    // visibility; open without one), on opaque and cut-out surfaces. Sampled whatever is bound (uniform control flow).
+    var wPuddle = 0.0;
+    var wSnowCover = 0.0;
+    let wSky = select(1.0, textureSample(lmTex, samp, vec2<f32>(in.uv2.x, 1.0 - in.uv2.y), 1).w, u.ssaoMeta.z > 1.5);
+    if (frame.weather1.w > 0.5 && u.pbr.w < 1.5) {
+      let ws = weatherSurface(in.worldPos, N, wSky, albedo, rough, metallic);
+      albedo = ws.albedo;
+      rough = max(ws.rough, 0.045);
+      metallic = ws.metallic;
+      N = ws.N;
+      wPuddle = ws.puddle;
+      wSnowCover = ws.snow;
+    }
     // View modes (F10a): the albedo as it shades, and lighting only's white dielectric in its place.
     let vmAlbedo = albedo;
     let vmMetallic = metallic;
@@ -1942,7 +1966,9 @@ ${hdr
 ${hdr
   ? `    // A dielectric's reflectance from its IOR and specular (F1d), and a thin film's over it.
     var f0 = mix(u.spec0.rgb, albedo, metallic);
-    if (u.trans1.w > 0.0) { f0 = mix(f0, iridescenceF0(ndv, f0), u.trans1.w); }`
+    if (u.trans1.w > 0.0) { f0 = mix(f0, iridescenceF0(ndv, f0), u.trans1.w); }
+    // Water's reflectance where a puddle lies, a dielectric's where snow does (F5e).
+    f0 = mix(mix(f0, vec3<f32>(WATER_F0), wPuddle), vec3<f32>(0.04), wSnowCover);`
   : "    let f0 = vec3<f32>(0.04) + (albedo - vec3<f32>(0.04)) * metallic;"}
     let F = f0 + (vec3<f32>(1.0) - f0) * fp;
 ${hdr
@@ -1959,7 +1985,11 @@ ${hdr
     let dfg = dfgAt(ndv, rough);
     eComp = energyCompensation(f0, dfg);
     let specE = specularEnergy(f0, dfg);
-    var specAo = specularOcclusion(ndv, ao, rough * rough) * charSpec;
+    // Specular occlusion (F3c, F1c): with GTAO's bent normal, the reflection's lobe against the open sky's cone
+    // (Jimenez), the material's own occlusion still taken by Lagarde's fit; without one, Lagarde's from the AO alone.
+    let hasBent = dot(gt.xyz, gt.xyz) > 0.25;
+    let soBent = min(specularOcclusion(ndv, matAo, rough * rough), bentSpecularOcclusion(gt.xyz, gt.w, reflect(-V, N), rough * rough));
+    var specAo = select(specularOcclusion(ndv, ao, rough * rough), soBent, hasBent) * charSpec;
     // The sheen (F1d) takes what it reflects from the layer beneath.
     sheenScale = 1.0 - max(u.sheen0.r, max(u.sheen0.g, u.sheen0.b)) * sheenE(ndv, u.sheen0.w);
     // An HDR directional light map (F3d) lights the diffuse in place of the sky's irradiance, and its sky
@@ -2629,6 +2659,7 @@ export class WebgpuSceneRenderer implements SceneRenderer {
   private frameFog: FogFrame | null = null;
   private volumetricFog: GpuVolumetricFog | null = null;
   private readonly fogTerms = new Float32Array(FOG_FRAME_FLOATS);
+  private readonly weatherTerms = new Float32Array(WEATHER_FRAME_FLOATS);
   /** The physical sky's LUTs (F5a-2), made when a draw first brings one, and the frame's aerial terms. */
   private atmosphere: GpuAtmosphere | null = null;
   private readonly aerialTerms = new Float32Array(AERIAL_FRAME_FLOATS);
@@ -5749,6 +5780,7 @@ export class WebgpuSceneRenderer implements SceneRenderer {
     if (this.hdr) frame.set(this.aerialFrame(draw), FRAME_AERIAL);
     if (this.hdr) frame.set(packFogFrame(this.frameFog, this.fogTerms), FRAME_FOG);
     if (this.hdr) frame.set([viewModeCode(draw.viewMode), draw.texelDensity ?? DEFAULT_TEXEL_DENSITY, this.frameSss ? 1 : 0], FRAME_DEBUG);
+    if (this.hdr) frame.set(packWeatherFrame(draw.weather, draw.time ?? 0, this.weatherTerms), FRAME_WEATHER);
     this.device.queue.writeBuffer(buffers.params, 0, frame);
     this.uploadLocalShadows(local);
     return { ordered, globalCount, clusters };
@@ -6172,6 +6204,11 @@ export class WebgpuSceneRenderer implements SceneRenderer {
   setParticles(specs: readonly EmitterSpec[], looks: ConstructorParameters<typeof GpuParticles>[3] = []): void {
     this.particles?.dispose();
     this.particles = specs.length > 0 && this.hdr ? new GpuParticles(this.device, this.colourFormat, specs, looks) : null;
+  }
+
+  /** Move where an emitter's rate spawns (F5e: rain and snow over the eye). */
+  particleOrigin(index: number, at: readonly number[]): void {
+    this.particles?.setOrigin(index, at);
   }
 
   /** Fire an emitter's burst (F8a). */

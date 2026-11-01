@@ -58,6 +58,10 @@ import {
   updateSceneLight,
   type ProceduralSky,
   type AtmosphereSettings,
+  type CloudSettings,
+  CLOUD_DEFAULTS,
+  type WeatherSettings,
+  WEATHER_DEFAULTS,
   type VolumetricFogSettings,
   type DynamicGiSettings,
   type ScreenSpaceGiSettings,
@@ -270,6 +274,7 @@ export function LightingEditor({ lighting, onChange }: LightingEditorProps) {
       <DynamicGiControls lighting={lighting} onChange={onChange} />
       <CameraControls lighting={lighting} onChange={onChange} />
       <WindControls lighting={lighting} onChange={onChange} />
+      <WeatherControls lighting={lighting} onChange={onChange} />
       <ShaftControls lighting={lighting} onChange={onChange} />
       <ProbeControls lighting={lighting} onChange={onChange} />
       <PostVolumeControls lighting={lighting} onChange={onChange} />
@@ -844,6 +849,42 @@ function AtmosphereControls({ settings, patch }: { settings: AtmosphereSettings;
       <RangeControl label="Stars" nested min={0} max={1000} step={1} value={settings.stars ?? 1} ariaLabel="Star brightness" display={(settings.stars ?? 1) === 0 ? "None" : `×${Math.round(settings.stars ?? 1)}`} onChange={(v) => set("stars", v)} />
       <RailHint>The moon stands opposite the sun (full) and lights the scene once the sun has set; ×1 is the real moon and stars, which want eye adaptation (or a raised exposure) to be seen.</RailHint>
       <RailHint>Aerial distance hazes the scene by the air between it and the eye (AAA tier). At ×1 a metre is a metre, so only kilometres haze over; more lays a landscape&apos;s haze over a small map.</RailHint>
+      <VolumetricCloudControls clouds={settings.clouds ?? null} patch={(clouds) => patch({ ...settings, clouds: clouds ?? undefined })} />
+    </>
+  );
+}
+
+/** A physical sky's volumetric cloud layer (F5c): off, or its cover, height, depth, density, kind, size, wind and shadows. */
+function VolumetricCloudControls({ clouds, patch }: { clouds: CloudSettings | null; patch: (next: CloudSettings | null) => void }) {
+  const on = clouds !== null;
+  const c = { ...CLOUD_DEFAULTS, ...(clouds ?? {}) };
+  const set = (key: keyof CloudSettings, value: number) => patch({ ...(clouds ?? {}), [key]: value });
+  return (
+    <>
+      <SegmentedControl
+        label="Clouds"
+        ariaLabel="Volumetric clouds"
+        selected={on ? "on" : "off"}
+        onSelect={(v) => patch(v === "on" ? (clouds ?? {}) : null)}
+        options={[
+          { id: "off", label: "Clear", hint: "No cloud layer in the air" },
+          { id: "on", label: "Volumetric", hint: "A raymarched cloud layer in the physical sky, with its shadows" },
+        ]}
+      />
+      {on && (
+        <>
+          <RangeControl label="Cover" nested min={0} max={1} step={0.01} value={c.coverage} ariaLabel="Cloud cover" display={`${Math.round(c.coverage * 100)}%`} onChange={(v) => set("coverage", v)} />
+          <RangeControl label="Base" nested min={0.1} max={8} step={0.1} value={c.base} ariaLabel="Cloud base height" display={`${c.base.toFixed(1)} km`} onChange={(v) => set("base", v)} />
+          <RangeControl label="Depth" nested min={0.1} max={6} step={0.1} value={c.thickness} ariaLabel="Cloud layer depth" display={`${c.thickness.toFixed(1)} km`} onChange={(v) => set("thickness", v)} />
+          <RangeControl label="Density" nested min={1} max={200} step={1} value={c.density} ariaLabel="Cloud density" display={`${Math.round(c.density)}/km`} onChange={(v) => set("density", v)} />
+          <RangeControl label="Kind" nested min={0} max={1} step={0.01} value={c.type} ariaLabel="Cloud kind, stratus to cumulus" display={c.type < 0.3 ? "Stratus" : c.type < 0.7 ? "Mixed" : "Cumulus"} onChange={(v) => set("type", v)} />
+          <RangeControl label="Size" nested min={2} max={60} step={1} value={c.scale} ariaLabel="Cloud feature size" display={`${Math.round(c.scale)} km`} onChange={(v) => set("scale", v)} />
+          <RangeControl label="Wind" nested min={0} max={60} step={1} value={c.windSpeed} ariaLabel="Cloud wind speed" display={`${Math.round(c.windSpeed)} m/s`} onChange={(v) => set("windSpeed", v)} />
+          <RangeControl label="Wind toward" nested min={0} max={359} step={1} value={((c.windDirection % 360) + 360) % 360} ariaLabel="Cloud wind direction" display={`${Math.round(((c.windDirection % 360) + 360) % 360)}°`} onChange={(v) => set("windDirection", v)} />
+          <RangeControl label="Shadows" nested min={0} max={1} step={0.01} value={c.shadows} ariaLabel="Cloud shadow strength" display={`${Math.round(c.shadows * 100)}%`} onChange={(v) => set("shadows", v)} />
+          <RailHint>Raymarched through the air on the AAA tier, at half resolution and refined over a few frames. Their shadow dims the sun on every tier as they pass over.</RailHint>
+        </>
+      )}
     </>
   );
 }
@@ -1016,6 +1057,40 @@ function WindControls({ lighting, onChange }: LightingEditorProps & { lighting: 
           <RangeControl label="Strength" nested min={0} max={2} step={0.05} value={wind.strength} ariaLabel="Wind strength" display={wind.strength.toFixed(2)} onChange={(strength) => patch({ strength })} />
           <RangeControl label="Gusts" nested min={0} max={1} step={0.05} value={wind.gust} ariaLabel="Wind gusts" display={`${Math.round(wind.gust * 100)}%`} onChange={(gust) => patch({ gust })} />
           <RangeControl label="Direction" nested min={-180} max={180} step={5} value={degrees} ariaLabel="Wind direction" display={`${degrees}°`} onChange={(deg) => patch({ direction: (deg * Math.PI) / 180 })} />
+        </>
+      )}
+    </>
+  );
+}
+
+/** The weather (F5e): wet, puddled and snowy surfaces where the sky reaches, and rain and snow falling (AAA tier). */
+function WeatherControls({ lighting, onChange }: LightingEditorProps & { lighting: SceneLighting }) {
+  const weather = lighting.weather ?? null;
+  const w = { ...WEATHER_DEFAULTS, ...(weather ?? {}) };
+  const set = (key: keyof WeatherSettings, value: number) => onChange(patchSceneLighting(lighting, { weather: { ...(weather ?? {}), [key]: value } }));
+  const pct = (v: number) => `${Math.round(v * 100)}%`;
+  return (
+    <>
+      <SegmentedControl
+        label="Weather"
+        ariaLabel="Weather"
+        selected={weather ? "on" : "off"}
+        onSelect={(id) => onChange(patchSceneLighting(lighting, { weather: id === "on" ? (weather ?? { wetness: 0.6, puddles: 0.35, rain: 0.6 }) : null }))}
+        options={[
+          { id: "off", label: "Dry" },
+          { id: "on", label: "Weather" },
+        ]}
+      />
+      {weather && (
+        <>
+          <RangeControl label="Wetness" nested min={0} max={1} step={0.01} value={w.wetness} ariaLabel="Surface wetness" display={pct(w.wetness)} onChange={(v) => set("wetness", v)} />
+          <RangeControl label="Puddles" nested min={0} max={1} step={0.01} value={w.puddles} ariaLabel="Puddles" display={pct(w.puddles)} onChange={(v) => set("puddles", v)} />
+          <RangeControl label="Rain" nested min={0} max={1} step={0.01} value={w.rain} ariaLabel="Rain" display={pct(w.rain)} onChange={(v) => set("rain", v)} />
+          <RangeControl label="Snow cover" nested min={0} max={1} step={0.01} value={w.snow} ariaLabel="Snow cover" display={pct(w.snow)} onChange={(v) => set("snow", v)} />
+          <RangeControl label="Snowfall" nested min={0} max={1} step={0.01} value={w.snowfall} ariaLabel="Snowfall" display={pct(w.snowfall)} onChange={(v) => set("snowfall", v)} />
+          <RangeControl label="Snow line" nested min={-50} max={200} step={1} value={Math.max(-50, w.snowLine)} ariaLabel="Snow line height" display={w.snowLine <= -50 ? "Everywhere" : `${Math.round(w.snowLine)} m`} onChange={(v) => set("snowLine", v <= -50 ? -1000 : v)} />
+          <RangeControl label="Patch size" nested min={0.5} max={20} step={0.5} value={w.scale} ariaLabel="Puddle and snow patch size" display={`${w.scale.toFixed(1)} m`} onChange={(v) => set("scale", v)} />
+          <RailHint>Surfaces the sky can&apos;t see (under a roof, in the light map&apos;s shelter) stay dry and bare. Shown on the AAA tier; rain and snow fall as GPU particles round the camera.</RailHint>
         </>
       )}
     </>

@@ -1,4 +1,4 @@
-import type { AccessibilitySettings, ColorFilter, DecodedTexture, EncodedImage, InputAction, SceneLevel, StringTable, UiDocument } from "@cartbox/editor";
+import type { AccessibilitySettings, ColorFilter, DecodedTexture, EncodedImage, InputAction, SceneLevel, StringTable, UiDocument, WeatherSettings } from "@cartbox/editor";
 import type { PhysicsBackend } from "./physics/physicsSession.js";
 import type { QualityChoice, QualityLevel } from "./quality.js";
 import type { ViewMode } from "./render/viewModes.js";
@@ -414,6 +414,8 @@ export interface PlayerHandle {
   setQuality(choice: QualityChoice): void;
   /** Show the 3D scene lit (the default) or as a diagnostic view (F10a; the AAA tier alone draws them). */
   setViewMode(mode: ViewMode): void;
+  /** Set the weather at run time (AAA_FIDELITY_ROADMAP.md F5e): wetness, puddles, snow, rain and snowfall over the rig's; null goes back to the rig's. */
+  setWeather(settings: WeatherSettings | null): void;
   /**
    * Render the path-traced reference of the 3D frame shown (F10b), `width`
    * across at its aspect (up to 8K a side), accumulated over `samples` a pixel

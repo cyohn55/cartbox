@@ -483,6 +483,7 @@ export function mount(container: HTMLElement, options: PlayerOptions): PlayerHan
     inspect: () => player.inspect(),
     setQuality: (choice) => player.setQuality(choice),
     setViewMode: (mode) => player.setViewMode(mode),
+    setWeather: (settings) => player.setWeather(settings),
     captureReference: (options) => player.captureReference(options),
     renderSequence: (options) => player.renderSequence(options),
     get referenceSamples(): number {

@@ -509,6 +509,8 @@ interface GpuEmitter {
   head: number;
   born: number;
   carry: number;
+  /** Where its rate spawns (F5e: rain and snow follow the eye); the origin unless set. */
+  origin: readonly number[];
   pending: { at: readonly number[]; dir: readonly number[]; count: number }[];
   mesh: { vertices: any; indices: any; count: number } | null;
 }
@@ -581,6 +583,7 @@ export class GpuParticles {
         head: 0,
         born: 0,
         carry: 0,
+        origin: [0, 0, 0],
         pending: [],
         mesh,
       };
@@ -590,6 +593,12 @@ export class GpuParticles {
   /** An emitter's index by name, or −1. */
   indexOf(name: string): number {
     return this.emitters.findIndex((e) => e.spec.name === name);
+  }
+
+  /** Move where an emitter's rate spawns (F5e: rain and snow over the eye). */
+  setOrigin(index: number, at: readonly number[]): void {
+    const e = this.emitters[index];
+    if (e) e.origin = [at[0]!, at[1]!, at[2]!];
   }
 
   /** Fire an emitter's burst at `at` toward `dir`, `scale` times its count. */
@@ -693,7 +702,7 @@ export class GpuParticles {
       e.carry += e.params.rate * frame.dt;
       const rated = Math.floor(e.carry);
       e.carry -= rated;
-      if (rated > 0) e.pending.push({ at: [0, 0, 0], dir: [0, 0, 0], count: Math.min(rated, e.params.capacity) });
+      if (rated > 0) e.pending.push({ at: e.origin, dir: [0, 0, 0], count: Math.min(rated, e.params.capacity) });
       const requests = e.pending.splice(0, MAX_SPAWN_REQUESTS);
       const data = new Float32Array(Math.max(1, requests.length) * 12);
       const bits = new Uint32Array(data.buffer);

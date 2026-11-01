@@ -49,6 +49,7 @@ import { GRADING_WGSL, HDR_HEADROOM, HDR_PEAK, extendedExposure } from "./gradin
 import { FrameGraph, GraphTimer, TransientPool, type FrameResource, type PassBuilder, type PassContext, type PassTime } from "./frameGraph.js";
 import type { PostFxUniforms } from "../fx/postfx.js";
 import { GpuAtmosphere, SKY_VIEW_UV_WGSL, type AtmosphereSky } from "./atmosphere.js";
+import { GpuClouds, type CloudFrame } from "./clouds.js";
 import { MOON_RADIUS, NIGHT_SKY_RADIANCE, moonLightsSky } from "@cartbox/editor";
 import { CLOUD_TILE, MAX_CLOUD_LAYERS, type BakedCloudLayer, type DecodedTexture, type Mat4, type SkySun, type SunShafts } from "@cartbox/editor";
 
@@ -78,7 +79,7 @@ export interface PresentSky {
    * the medium and its sun, and the sun disc's radiance as the eye sees it
    * (sunDiscRadiance). A byte-space frame draws the panorama regardless.
    */
-  readonly atmosphere?: (AtmosphereSky & { readonly disc: Rgb; readonly moonDisc?: Rgb | null }) | null;
+  readonly atmosphere?: (AtmosphereSky & { readonly disc: Rgb; readonly moonDisc?: Rgb | null; readonly clouds?: CloudFrame | null }) | null;
 }
 
 /** What a frame's scene draws over. */
@@ -481,6 +482,8 @@ struct AtmSky {
 @group(0) @binding(2) var viewSampler: sampler;
 @group(0) @binding(3) var moonView: texture_2d<f32>;
 @group(0) @binding(4) var transmittanceLut: texture_2d<f32>;
+// The volumetric clouds (F5c), at half size: their light through the air in rgb, what of the sky gets through in a.
+@group(0) @binding(5) var cloudTex: texture_2d<f32>;
 ${FULLSCREEN_VS}
 ${SKY_VIEW_UV_WGSL}
 // The transmittance from the viewer along d to the top of the air (Bruneton's mapping); 0 into the ground.
@@ -561,6 +564,9 @@ fn starlight(n: vec3f) -> f32 {
     onMoon = true;
   }
   if (!onMoon && s.stars.x > 0.0) { rgb = rgb + T * (starlight(n) * s.stars.x + s.stars.z); }
+  // The clouds over all of it (F5c): the sun, the moon and the stars go behind them. None bound: (0, 0, 0, 1).
+  let cloud = textureSampleLevel(cloudTex, viewSampler, pos.xy / s.size.xy, 0.0);
+  rgb = rgb * cloud.a + cloud.rgb;
   return vec4f(rgb, 1.0);
 }
 `;
@@ -952,6 +958,19 @@ export class GpuPresenter {
   private postFx: GpuPostFx | null = null;
   /** The physical sky's LUTs (F5a), made when a linear frame first draws one. */
   private atmosphereLuts: GpuAtmosphere | null = null;
+  /** The volumetric clouds' pass (F5c), made with the first frame that has a layer; and the clear sky's stand-in. */
+  private cloudPass: GpuClouds | null = null;
+  private clearClouds: any = null;
+
+  /** A 1×1 cloud target that lets the whole sky through. */
+  private noClouds(): any {
+    if (!this.clearClouds) {
+      this.clearClouds = this.device.createTexture({ size: { width: 1, height: 1 }, format: "rgba16float", usage: 0x04 | 0x02 });
+      // (0, 0, 0, 1) in half floats.
+      this.device.queue.writeTexture({ texture: this.clearClouds }, new Uint16Array([0, 0, 0, 0x3c00]), { bytesPerRow: 8 }, { width: 1, height: 1 });
+    }
+    return this.clearClouds;
+  }
   /** The HDR bloom's chain (F4d), made when a linear frame first blooms. */
   private bloom: HdrBloom | null = null;
   /** The frame graph's transients (the sky, the shafts, the composites), kept from frame to frame. */
@@ -1001,7 +1020,7 @@ export class GpuPresenter {
     const compose = layout([uni(), tex(1), tex(2), tex(3), samp(4), tex(5), tex(6), tex(7), tex(8)]);
     this.layouts = {
       sky: layout([uni(), tex(1), samp(2), tex(3, STAGE_FRAGMENT, "2d-array"), samp(4)]),
-      atmosphere: layout([uni(), tex(1), samp(2), tex(3), tex(4)]),
+      atmosphere: layout([uni(), tex(1), samp(2), tex(3), tex(4), tex(5)]),
       mask: layout([uni(), tex(1), tex(2)]),
       gather: layout([uni(), tex(1)]),
       compose,
@@ -1091,6 +1110,10 @@ export class GpuPresenter {
             // The physical sky (F5a): its LUTs brought up to this sun (their own submit, ahead of the frame's), then the sky view per pixel.
             (this.atmosphereLuts ??= new GpuAtmosphere(device)).update(atmosphere);
             device.queue.writeBuffer(this.uniforms.atmosphere, 0, packAtmosphereSkyUniforms({ ...sky, atmosphere }, width, height, this.data.atmosphere));
+            // The clouds (F5c): marched at half size ahead of the sky, which lays them over itself.
+            const cloudView = atmosphere.clouds
+              ? (this.cloudPass ??= new GpuClouds(device)).march(ctx.encoder, atmosphere, atmosphere.clouds, sky.view, sky.projection, this.atmosphereLuts.transmittance, width, height).createView()
+              : this.noClouds().createView();
             this.fullScreen(
               ctx.encoder,
               "atmosphere",
@@ -1103,6 +1126,7 @@ export class GpuPresenter {
                 { binding: 2, resource: this.linear.clamp },
                 { binding: 3, resource: this.atmosphereLuts.moonView.createView() },
                 { binding: 4, resource: this.atmosphereLuts.transmittance.createView() },
+                { binding: 5, resource: cloudView },
               ],
               ctx.timing,
             );
@@ -1389,6 +1413,8 @@ export class GpuPresenter {
     this.bloom?.dispose();
     this.postFx?.dispose();
     this.atmosphereLuts?.dispose();
+    this.cloudPass?.dispose();
+    this.clearClouds?.destroy?.();
     destroy(this.panorama?.texture);
     destroy(this.cloudTexture?.texture);
     for (const u of this.uploads.values()) destroy(u.texture);

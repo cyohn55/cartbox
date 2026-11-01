@@ -21,6 +21,7 @@ import { readIesProfile } from "./iesProfile";
 import { parseVolumetricFog } from "./volumetricFog";
 import { parseDynamicGi, parseScreenSpaceGi, type DynamicGiSettings, type ScreenSpaceGiSettings } from "./dynamicGi";
 import { parseAtmosphere } from "./atmosphere";
+import { parseWeather, type WeatherSettings } from "./weather";
 import { parseWind, type SceneWind } from "./wind";
 import { decodeLightProbes, type LightProbeGrid, type StoredLightProbes } from "./lightProbes";
 import { decodeProbeVolume, type ProbeVolume, type StoredProbeVolume } from "./probeVolume";
@@ -97,6 +98,8 @@ export interface SceneLighting {
   readonly fog?: SceneFog | null;
   /** The scene's wind (B6; see wind.ts): it sways foliage. Absent = still air. */
   readonly wind?: SceneWind | null;
+  /** The weather (AAA_FIDELITY_ROADMAP.md F5e; see weather.ts): wet, puddled and snowy surfaces, and rain and snow falling. Absent = dry and clear. */
+  readonly weather?: WeatherSettings | null;
   /** Soft sun shadows (B7): 4×4-filtered penumbrae instead of 2×2. Absent = 2×2. */
   readonly softShadows?: boolean;
   /**
@@ -254,6 +257,7 @@ export function parseSceneLighting(raw: unknown): SceneLighting | null {
   const sky = parseSky(record.sky);
   const fog = parseFog(record.fog);
   const wind = parseWind(record.wind);
+  const weather = parseWeather(record.weather);
   const probes = parseReflectionProbes(record.probes);
   const shafts = parseShafts(record.shafts);
   // Kept only when it decodes: a bad grid is dropped, never half-used.
@@ -290,6 +294,7 @@ export function parseSceneLighting(raw: unknown): SceneLighting | null {
     ...(sky ? { sky } : {}),
     ...(fog ? { fog } : {}),
     ...(wind ? { wind } : {}),
+    ...(weather && Object.keys(weather).length > 0 ? { weather } : {}),
     ...(record.softShadows === true ? { softShadows: true } : {}),
     ...(probes.length > 0 ? { probes } : {}),
     ...(shafts ? { shafts } : {}),
@@ -559,7 +564,7 @@ export function defaultSunShafts(): SunShafts {
 /** Patch the top-level scalar/flag fields (ambient, exposure, tonemap, shadows). */
 export function patchSceneLighting(
   lighting: SceneLighting,
-  patch: Partial<Pick<SceneLighting, "ambient" | "exposure" | "tonemap" | "tonemapper" | "authoredCurve" | "shadows" | "shadowDistance" | "wind" | "softShadows">>,
+  patch: Partial<Pick<SceneLighting, "ambient" | "exposure" | "tonemap" | "tonemapper" | "authoredCurve" | "shadows" | "shadowDistance" | "wind" | "softShadows" | "weather">>,
 ): SceneLighting {
   const next = { ...lighting, ...patch };
   // A cleared distance goes back to fitting the scene, rather than staying as undefined.

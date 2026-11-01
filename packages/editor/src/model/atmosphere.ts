@@ -32,6 +32,7 @@ import { lightColor, type SceneLight } from "../render/meshRasterizer";
 import type { HdrImage } from "../render/skyLayers";
 import { linearToAuthored } from "./bakeSurface";
 import type { SceneLighting } from "./SceneLighting";
+import { parseClouds, type CloudSettings } from "./clouds";
 
 type V3 = [number, number, number];
 
@@ -61,6 +62,8 @@ export interface AtmosphereSettings {
   readonly moonDirection?: readonly [number, number, number];
   /** The stars' and night sky's brightness against the real ones' (F5a-3): 1 is true, 0 is none. */
   readonly stars?: number;
+  /** A volumetric cloud layer in the air (F5c; see clouds.ts), or none. */
+  readonly clouds?: CloudSettings;
 }
 
 /** An atmosphere resolved into its medium, in kilometres. */
@@ -126,6 +129,8 @@ export function parseAtmosphere(value: unknown): AtmosphereSettings | null {
   if (Array.isArray(md) && md.length === 3 && md.every((v) => typeof v === "number" && Number.isFinite(v)) && Math.hypot(md[0], md[1], md[2]) > 1e-6) {
     (out as Record<string, unknown>).moonDirection = [md[0], md[1], md[2]];
   }
+  const clouds = parseClouds(raw.clouds);
+  if (clouds) (out as Record<string, unknown>).clouds = clouds;
   return out as AtmosphereSettings;
 }
 

@@ -35,7 +35,7 @@ import {
   type MeshSceneInstance,
   type SceneWind,
 } from "@cartbox/editor";
-import type { DynamicGi, EmitterSpec, MeshAsset, MeshMaterial, Occluder, DecalTiles, EnvironmentLight, LocalShadows, Mat4, ProjectedDecal, RasterStyle, SceneFog, SceneLight, ShadowInput, ToneMap } from "@cartbox/editor";
+import type { DynamicGi, EmitterSpec, MeshAsset, MeshMaterial, Occluder, DecalTiles, EnvironmentLight, LocalShadows, Mat4, ProjectedDecal, RasterStyle, SceneFog, SceneLight, ShadowInput, ToneMap, Weather } from "@cartbox/editor";
 
 import type { RenderCaps } from "../models.js";
 import type { ReflectionCapture } from "./probeCapture.js";
@@ -283,6 +283,12 @@ export interface SceneDraw {
   /** The scene's wind (B6): it sways primitives that carry per-vertex sway. Omitted is still air. */
   readonly wind?: SceneWind | null;
   /**
+   * The weather (AAA_FIDELITY_ROADMAP.md F5e): the linear-light renderer lays
+   * wetness, puddles (rippled by the rain) and snow over every surface the sky
+   * reaches. Absent or all zero, surfaces are as authored.
+   */
+  readonly weather?: Weather | null;
+  /**
    * Skip instances whose world AABB is entirely outside the camera frustum. A
    * correct cull is output-identical, so it is a pure perf win; default off.
    */
@@ -400,6 +406,8 @@ export interface SceneRenderer {
   /** GPU particles (AAA_FIDELITY_ROADMAP.md F8a): its emitters, and a burst of one. */
   setParticles?(specs: readonly EmitterSpec[]): void;
   particleBurst?(index: number, at: readonly number[], dir?: readonly number[], scale?: number): void;
+  /** Move where an emitter's rate spawns (F5e: rain and snow over the eye). */
+  particleOrigin?(index: number, at: readonly number[]): void;
   /**
    * True when it draws the sun's shadow itself from {@link SceneDraw.sunShadow}
    * (F2a: the AAA tier's GPU cascades) and ignores a CPU {@link SceneDraw.shadow}.
@@ -535,6 +543,10 @@ export class CappedSceneRenderer implements SceneRenderer {
 
   particleBurst(index: number, at: readonly number[], dir?: readonly number[], scale?: number): void {
     this.inner.particleBurst?.(index, at, dir, scale);
+  }
+
+  particleOrigin(index: number, at: readonly number[]): void {
+    this.inner.particleOrigin?.(index, at);
   }
 
   get referenceSamples(): number | undefined {

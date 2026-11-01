@@ -27,6 +27,10 @@ import { GpuPacer, expandBilinear } from "../render/gpuPacing.js";
 import {
   atmosphereLighting,
   atmosphereLuts,
+  atmosphereKey,
+  cloudShadedLighting,
+  resolveClouds,
+  skyRadiance,
   atmospherePanorama,
   atmospherePanoramaRows,
   dynamicGiGrid,
@@ -123,6 +127,13 @@ import {
   stepChunks,
   type Chunk,
   emitterFromEffect,
+  precipitationOrigin,
+  resolveWeather,
+  weatherActive,
+  weatherEmitters,
+  type EmitterSpec,
+  type Weather,
+  type WeatherSettings,
 } from "@cartbox/editor";
 import { bounceLightsFor, bounceSignature, withCartSun, type CartSun } from "./dynamicLights.js";
 import type { DisplaySurface } from "../display.js";
@@ -407,6 +418,8 @@ export class MeshOverlaySurface implements DisplaySurface {
   private low: { width: number; height: number; out: Uint8ClampedArray; depth: Float32Array } | null = null;
   /** A GPU that reads its frames back: paced by how often they land (gpuPacing.ts), made with the first frame. */
   private gpuPacer: GpuPacer | null = null;
+  /** The upper sky's mean light for F5c's clouds, and the sun it was found for. */
+  private cloudAmbient: { key: string; value: [number, number, number] } | null = null;
   /** The last sky backdrop and the view it was painted for (it depends only on
    *  where the camera points, so walking without turning reuses it). */
   private skyCache: { key: string; pixels: Uint8ClampedArray } | null = null;
@@ -1025,7 +1038,8 @@ export class MeshOverlaySurface implements DisplaySurface {
     // On the AAA tier they simulate and draw on the GPU (F8a); elsewhere as billboards.
     if (scene.effects && scene.effects.length > 0) {
       if (renderer.gpuSkinning === true && renderer.setParticles) {
-        renderer.setParticles(scene.effects.map(emitterFromEffect));
+        surface.effectEmitters = scene.effects.map(emitterFromEffect);
+        renderer.setParticles(surface.effectEmitters);
         surface.gpuParticles = true;
       } else surface.particles = new ParticleSystem(scene.effects);
     }
@@ -1178,7 +1192,10 @@ export class MeshOverlaySurface implements DisplaySurface {
   /** The rig as this frame lights with it: with the cart's sun as its key, if it set one (I17), tinted by a physical sky's air (F5a). */
   private frameLighting(): SceneLighting | null {
     const lighting = this.sunLighting();
-    return lighting ? atmosphereLighting(lighting) : null;
+    if (!lighting) return null;
+    // A volumetric cloud layer's shadow where the eye stands dims the sun over the whole scene (F5c).
+    const lit = atmosphereLighting(lighting);
+    return this.eye ? cloudShadedLighting(lit, this.eye[0], this.eye[2], this.frame / 60) : lit;
   }
 
   /** The rig with the cart's sun as its key, if it set one (I17): above the air, before a physical sky tints it. */
@@ -1620,6 +1637,8 @@ export class MeshOverlaySurface implements DisplaySurface {
     },
   ): void {
     const { camera, lighting } = job;
+    const weather = this.frameWeather(lighting);
+    this.syncWeatherEmitters(weather);
     // The 3D renders at the size the frame shows at (F0d), or the share of it the GPU keeps up with; the 2D layer stays the cart's.
     const output = gpu.outputSize ?? { width: this.width, height: this.height };
     if (this.options.dynamicResolution === true) this.resolution ??= new DynamicResolution(1000 / 60);
@@ -1661,6 +1680,8 @@ export class MeshOverlaySurface implements DisplaySurface {
       // With a prepass the AAA scene culls on the GPU (F0e): the frustum, then a Hi-Z pyramid of the prepass's depths.
       ...(this.options.prepass === true ? { prepass: true, gpuCull: true } : {}),
       ...(lighting ? { ...lit, localShadows: job.local, shadow: job.shadow, sunShadow: job.sunShadow, localShadowCasters: job.localShadowCasters, localShadowKey: job.localShadowKey, localShadowMoved: job.localShadowMoved, fog: lighting.fog ?? null, wind: lighting.wind ?? null } : {}),
+      // The weather (F5e): its layers over every surface.
+      weather,
       ...(job.reflectionCapture ? { reflectionCapture: job.reflectionCapture } : {}),
       ...(job.decals ? { decals: job.decals } : {}),
       ...(this.ground.length > 0 ? { terrains: this.ground } : {}),
@@ -1783,7 +1804,24 @@ export class MeshOverlaySurface implements DisplaySurface {
     const scale = lighting!.sky?.atmosphere?.moon ?? 1;
     const t = sun.moon ? sunTransmittance(luts, sun.moon.direction) : null;
     const moonDisc = t ? ([0, 1, 2].map((c) => MOON_ALBEDO * scale * sun.radiance[c]! * t[c]!) as [number, number, number]) : null;
-    return { atmosphere: sun.atmosphere, sun: sun.direction, sunRadiance: sun.radiance, disc, moon: sun.moon, stars: sun.stars, moonDisc };
+    // A volumetric cloud layer (F5c): its settings, the upper sky's mean light it takes in, and the wind's seconds.
+    const cloudSettings = lighting!.sky?.atmosphere?.clouds;
+    const clouds = cloudSettings ? { clouds: resolveClouds(cloudSettings), ambient: this.cloudAmbientFor(luts, sun.direction, sun.radiance), time: this.frame / 60 } : null;
+    return { atmosphere: sun.atmosphere, sun: sun.direction, sunRadiance: sun.radiance, disc, moon: sun.moon, stars: sun.stars, moonDisc, clouds };
+  }
+
+  /** The upper sky's mean radiance under this sun (F5c's clouds take their sky light from it), kept while the sun holds still. */
+  private cloudAmbientFor(luts: ReturnType<typeof atmosphereLuts>, sun: readonly number[], radiance: readonly number[]): [number, number, number] {
+    const key = `${atmosphereKey(luts.atmosphere)}|${sun.map((v) => v.toFixed(3)).join(",")}|${radiance.map((v) => v.toFixed(3)).join(",")}`;
+    if (this.cloudAmbient?.key === key) return this.cloudAmbient.value;
+    const dirs = [[0, 1, 0], [1, 0.5, 0], [-1, 0.5, 0], [0, 0.5, 1], [0, 0.5, -1]].map((d) => {
+      const l = Math.hypot(d[0]!, d[1]!, d[2]!);
+      return d.map((v) => v / l);
+    });
+    const value: [number, number, number] = [0, 0, 0];
+    for (const d of dirs) skyRadiance(luts, d, sun, radiance).forEach((v, c) => (value[c]! += v / dirs.length));
+    this.cloudAmbient = { key, value };
+    return value;
   }
 
   /** The presenter's newest measurements into the lens flare and eye adaptation (the byte path's reportSun and frameLuminance). */
@@ -2709,6 +2747,43 @@ export class MeshOverlaySurface implements DisplaySurface {
   }
   /** Whether the scene's particle effects run on the GPU (F8a). */
   private gpuParticles = false;
+  /** The scene's own GPU emitters (F8a); the weather's (F5e) follow them, rain and snow as they fall. */
+  private effectEmitters: EmitterSpec[] = [];
+  private weatherFalling = "";
+  /** The weather a cart or the editor set at run time (F5e), over the rig's; null keeps the rig's. */
+  private weatherOverride: WeatherSettings | null = null;
+
+  /** Set the weather at run time (F5e): wetness, puddles, snow, rain and snowfall, over the rig's; null goes back to the rig's. */
+  setWeather(settings: WeatherSettings | null): void {
+    this.weatherOverride = settings;
+  }
+
+  /** This frame's weather, or null when it changes nothing. */
+  private frameWeather(lighting: SceneLighting | null): Weather | null {
+    const settings = this.weatherOverride ?? lighting?.weather ?? null;
+    if (!settings) return null;
+    const weather = resolveWeather(settings);
+    return weatherActive(weather) ? weather : null;
+  }
+
+  /**
+   * Keep the renderer's rain and snow emitters (F5e) with the weather: remade with the scene's own when what falls
+   * changes, and their origin over the eye every frame. On a renderer that runs GPU particles only (the AAA tier).
+   */
+  private syncWeatherEmitters(weather: Weather | null): void {
+    if (this.renderer.gpuSkinning !== true || !this.renderer.setParticles) return;
+    const falling = weather ? weatherEmitters(weather) : [];
+    const key = falling.map((e) => `${e.name}:${JSON.stringify(e.modules[0])}`).join("|");
+    if (key !== this.weatherFalling) {
+      this.weatherFalling = key;
+      this.renderer.setParticles([...this.effectEmitters, ...falling]);
+      this.gpuParticles = this.effectEmitters.length > 0 || falling.length > 0;
+    }
+    if (falling.length > 0 && this.eye) {
+      const origin = precipitationOrigin(this.eye);
+      falling.forEach((_, k) => this.renderer.particleOrigin?.(this.effectEmitters.length + k, origin));
+    }
+  }
   /** Settles once the scene's reflection probes are baked and in use (tests await it). */
   probesReady: Promise<void> = Promise.resolve();
   /** Every decal's tiles, drawn the first time the AAA tier projects them (F1f). */
