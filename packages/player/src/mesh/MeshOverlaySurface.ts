@@ -141,7 +141,7 @@ import type { MailboxMeshCamera, MailboxMeshPose, WorldLight } from "../mailbox.
 import type { LocalShadowTile, LocalShadows, PostBlend, ShadowCascade, ShadowInput, SceneLight, SceneLighting, ToneMap, VistaLayer } from "@cartbox/editor";
 import type { MeshInstance, MeshScene, SceneVista } from "./meshScene.js";
 import { QUALITY_PRESETS, type QualitySettings } from "../quality.js";
-import { buildOrbitCamera, orbitPitchAboveTerrain } from "./meshScene.js";
+import { buildOrbitCamera, orbitPitchAboveTerrain, streamGroups } from "./meshScene.js";
 import { sceneColliders } from "./sceneColliders.js";
 import { estimateSceneBytes, estimateSceneMemory, type Profiler, type RenderStats, type SceneMemory } from "../debug/profiler.js";
 
@@ -432,6 +432,12 @@ export class MeshOverlaySurface implements DisplaySurface {
   private ground: readonly GpuTerrainSource[] = [];
   private groundIds: ReadonlySet<string> = new Set();
   private readonly groundMeshes = new WeakSet<MeshAsset>();
+  /** The world partition's loaded objects' meshes (F6d), and how many loaded objects use each. */
+  private readonly cellMeshes = new Map<MeshAsset, number>();
+  /** Each loaded object as it was before its maps were decoded, to go back to on unload. */
+  private readonly bare = new Map<number, MeshSceneInstance>();
+  /** Images the cells share, decoded once while any cell holds them. */
+  private cellImages = new Map<EncodedImage, Promise<DecodedTexture | null>>();
   /**
    * Told each frame where the sky dome's sun is on screen and how much of it is
    * unblocked, for the post-FX glare and lens flare (H8); null without a sky dome.
@@ -850,6 +856,55 @@ export class MeshOverlaySurface implements DisplaySurface {
   }
 
   /**
+   * Load a world partition cell's objects (F6d): their maps decoded (in the
+   * decode workers, where the page has them) and swapped in. They show once
+   * the caller marks them active.
+   */
+  async loadCell(members: readonly number[]): Promise<void> {
+    await Promise.all(
+      members.map(async (i) => {
+        const authored = this.scene.instances[i];
+        if (!authored || !this.instances[i] || this.bare.has(i)) return;
+        const { mesh: _mesh, ...maps } = await decodeMeshTextures(authored.mesh, this.decodeKtx2 ?? (() => Promise.resolve(null)), this.cellImages, this.compressedTextures);
+        void _mesh;
+        if (this.bare.has(i)) return;
+        this.bare.set(i, this.instances[i]!);
+        this.instances[i] = { ...this.instances[i]!, ...maps };
+        this.cellMeshes.set(authored.mesh, (this.cellMeshes.get(authored.mesh) ?? 0) + 1);
+      }),
+    );
+  }
+
+  /**
+   * Unload a cell's objects (F6d): back to bare, and the GPU geometry of the
+   * meshes no loaded object uses any more given back (it uploads again if
+   * they return). Decoded images go once no cell holds an object.
+   */
+  unloadCell(members: readonly number[]): void {
+    const released: MeshAsset[] = [];
+    for (const i of members) {
+      const bare = this.bare.get(i);
+      const authored = this.scene.instances[i];
+      if (!bare || !authored) continue;
+      this.bare.delete(i);
+      this.instances[i] = { ...bare, model: this.instances[i]!.model };
+      const left = (this.cellMeshes.get(authored.mesh) ?? 1) - 1;
+      if (left > 0) this.cellMeshes.set(authored.mesh, left);
+      else {
+        this.cellMeshes.delete(authored.mesh);
+        released.push(authored.mesh);
+      }
+    }
+    if (released.length > 0) this.renderer.releaseMeshes?.(released);
+    if (this.cellMeshes.size === 0) this.cellImages = new Map();
+  }
+
+  /** Whether an object of a world partition cell has its maps (F6d). */
+  cellLoaded(index: number): boolean {
+    return this.bare.has(index);
+  }
+
+  /**
    * The objects of levels that aren't loaded (see levels.ts in @cartbox/editor):
    * they're hidden, and left out of the shadow, until the set changes again.
    */
@@ -906,8 +961,10 @@ export class MeshOverlaySurface implements DisplaySurface {
     const instances: MeshSceneInstance[] = [];
     const frames: (readonly TexturedMesh[] | null)[] = [];
     const live = new Map<number, LiveSkinnedMesh>();
+    // A world partition's cells (F6d) decode their maps as they load (loadCell): until then, bare.
+    const streamed = scene.streaming?.cell ? new Set(streamGroups(scene).flatMap((g) => g.members)) : null;
     for (const [i, instance] of scene.instances.entries()) {
-      const textured = await texture(instance.mesh);
+      const textured = streamed?.has(i) ? { mesh: instance.mesh } : await texture(instance.mesh);
       // A skinned object draws its own live copy of the mesh (same textures), posed each frame.
       const skinned = liveCopy(instance.mesh, renderer.gpuSkinning === true);
       if (skinned) live.set(i, skinned);

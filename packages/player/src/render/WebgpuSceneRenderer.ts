@@ -3907,6 +3907,21 @@ export class WebgpuSceneRenderer implements SceneRenderer {
     return { drawn, casting };
   }
 
+  /** Give back meshes' GPU geometry (F6d): their buffers go once the queued frames are done with them, and a later draw uploads them again. */
+  releaseMeshes(meshes: readonly MeshAsset[]): void {
+    for (const mesh of meshes) {
+      const primitives = this.meshes.get(mesh);
+      // A skinned or cloth mesh is live: it stays.
+      if (!primitives || primitives.some((p) => p.skin || p.cloth)) continue;
+      this.meshes.delete(mesh);
+      for (const p of primitives) {
+        destroySafely(p.vertexBuffer);
+        destroySafely(p.indexBuffer);
+        if (p.previousBuffer) destroySafely(p.previousBuffer);
+      }
+    }
+  }
+
   /** The heights a draw's primitive binds (F6c): a GPU terrain's patch's, else the blank. */
   private terrainHeightsOf(primitive: MeshPrimitive): any {
     return this.terrainPatches.get(primitive)?.heightView ?? this.blankTexture.createView();

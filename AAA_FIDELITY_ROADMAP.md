@@ -1405,10 +1405,31 @@ Everything else depends on this track. It contains no visible "feature", but its
       - A terrain on a turned or scaled parent stays on its CPU blocks.
       - Holes still cast shadows.
       - A fault, already on the branch before F6c: Dawn's software rasteriser (SwiftShader) dereferences a null descriptor in its compiled GPU-cull code on some frames (two plain boxes at the frustum's edge reproduce it). The terrain's Dawn tests therefore draw with the prepass but without the GPU cull; the fault hasn't been seen on hardware.
-- [ ] **F6d. World streaming.**
+- [x] **F6d. World streaming.**
   - The world is divided into a grid of cells, each streamed in by distance in a worker (geometry clusters, textures by mip, foliage, probes).
   - A world-partition editor shows what is loaded.
   - It builds on the distance-group streaming of `streaming.ts`.
+  - *Done (worldPartition.ts):*
+    - **Cells.** A streaming scene with a cell size (`streaming.cell`, 8–1024 units) puts each stream group (an object and its children, as before) in the grid cell its box's centre falls in. A cell's box is the union of its groups', so a tower in range by its top is in range.
+    - **Loading by cell.**
+      - A cell coming within range is requested: the host fetches its objects' assets (`streamAssets`, as for spatial loading), and the overlay decodes their maps in its decode workers (`loadCell`). Only then is the cell loaded and its objects shown and simulated.
+      - At most two cells prepare at once, nearest first, so a fast focus fills in round itself.
+      - A cell past range by the unload margin unloads, cancelling a preparation in flight (one that finishes later shows nothing).
+      - Unloading puts its objects back to bare (no maps) and gives back the GPU geometry of every mesh no loaded object still uses (`releaseMeshes`; a skinned or cloth mesh stays). It uploads again if the cell returns, cluster hierarchies (F6a) included. The images the cells shared go when no cell holds an object.
+      - Until its cell loads, a streamed object isn't decoded at all, so a world's start-up cost is its loaded cells', not its whole map's.
+    - **Foliage** blocks stream with their cells, where before terrain-borne objects never streamed.
+    - **The editor.** The Streaming panel turns on loading by grid cells, sets the cell size, and draws the partition from above: each cell with its object count, shaded loaded, held (past range, inside the margin) or out for a focus you click on the map, with the range's circle. `Player.worldPartition()` reports the running cells' states and distances.
+    - *Tests (`world-partition.test.ts`):*
+      - Groups land in the cell their centre falls in, the cell's box the union of theirs.
+      - Cells load nearest first, two at a time; a cell shows only once prepared; one leaving range mid-preparation unloads, and its late finish shows nothing; a loaded cell holds within the margin.
+      - The cell size reads, clamps and round-trips through the sidecar.
+      - A streamed object stays bare until its cell loads; unloading one of two objects that share a mesh keeps it, and unloading the second gives it back.
+      - Foliage streams with cells only when there are cells.
+      - The editor's cells and their loaded, held and out states for a focus.
+    - *Left:*
+      - Textures by mip per cell (the AAA tier's feedback streamer, F1b, already loads mips by what the frame samples, cells or not).
+      - Reflection probes by cell (they capture once and stay).
+      - Fetching each cell's geometry from its own file (the sidecar is still one file; the cell decodes and uploads it lazily).
 
 ### F7. Characters and animation
 

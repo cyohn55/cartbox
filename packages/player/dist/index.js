@@ -8162,7 +8162,7 @@ function streamGroups(scene) {
   });
   const groups = [];
   instances.forEach((root, r) => {
-    if (root.parent >= 0 || root.pooled || root.terrain || root.alwaysLoaded || root.level !== void 0) return;
+    if (root.parent >= 0 || root.pooled || root.terrain && !(scene.streaming?.cell && root.foliage) || root.alwaysLoaded || root.level !== void 0) return;
     const members = [];
     const walk = (i) => {
       members.push(i);
@@ -11900,6 +11900,9 @@ var CappedSceneRenderer = class {
   get sunCascades() {
     return this.inner.sunCascades;
   }
+  releaseMeshes(meshes) {
+    this.inner.releaseMeshes?.(meshes);
+  }
   get gpuSkinning() {
     return this.inner.gpuSkinning;
   }
@@ -12288,6 +12291,12 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
     this.ground = [];
     this.groundIds = /* @__PURE__ */ new Set();
     this.groundMeshes = /* @__PURE__ */ new WeakSet();
+    /** The world partition's loaded objects' meshes (F6d), and how many loaded objects use each. */
+    this.cellMeshes = /* @__PURE__ */ new Map();
+    /** Each loaded object as it was before its maps were decoded, to go back to on unload. */
+    this.bare = /* @__PURE__ */ new Map();
+    /** Images the cells share, decoded once while any cell holds them. */
+    this.cellImages = /* @__PURE__ */ new Map();
     /**
      * Told each frame where the sky dome's sun is on screen and how much of it is
      * unblocked, for the post-FX glare and lens flare (H8); null without a sky dome.
@@ -12686,6 +12695,52 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
     this.quality = quality;
   }
   /**
+   * Load a world partition cell's objects (F6d): their maps decoded (in the
+   * decode workers, where the page has them) and swapped in. They show once
+   * the caller marks them active.
+   */
+  async loadCell(members) {
+    await Promise.all(
+      members.map(async (i) => {
+        const authored = this.scene.instances[i];
+        if (!authored || !this.instances[i] || this.bare.has(i)) return;
+        const { mesh: _mesh, ...maps } = await decodeMeshTextures(authored.mesh, this.decodeKtx2 ?? (() => Promise.resolve(null)), this.cellImages, this.compressedTextures);
+        void _mesh;
+        if (this.bare.has(i)) return;
+        this.bare.set(i, this.instances[i]);
+        this.instances[i] = { ...this.instances[i], ...maps };
+        this.cellMeshes.set(authored.mesh, (this.cellMeshes.get(authored.mesh) ?? 0) + 1);
+      })
+    );
+  }
+  /**
+   * Unload a cell's objects (F6d): back to bare, and the GPU geometry of the
+   * meshes no loaded object uses any more given back (it uploads again if
+   * they return). Decoded images go once no cell holds an object.
+   */
+  unloadCell(members) {
+    const released = [];
+    for (const i of members) {
+      const bare = this.bare.get(i);
+      const authored = this.scene.instances[i];
+      if (!bare || !authored) continue;
+      this.bare.delete(i);
+      this.instances[i] = { ...bare, model: this.instances[i].model };
+      const left = (this.cellMeshes.get(authored.mesh) ?? 1) - 1;
+      if (left > 0) this.cellMeshes.set(authored.mesh, left);
+      else {
+        this.cellMeshes.delete(authored.mesh);
+        released.push(authored.mesh);
+      }
+    }
+    if (released.length > 0) this.renderer.releaseMeshes?.(released);
+    if (this.cellMeshes.size === 0) this.cellImages = /* @__PURE__ */ new Map();
+  }
+  /** Whether an object of a world partition cell has its maps (F6d). */
+  cellLoaded(index) {
+    return this.bare.has(index);
+  }
+  /**
    * The objects of levels that aren't loaded (see levels.ts in @cartbox/editor):
    * they're hidden, and left out of the shadow, until the set changes again.
    */
@@ -12726,8 +12781,9 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
     const instances = [];
     const frames = [];
     const live = /* @__PURE__ */ new Map();
+    const streamed = scene.streaming?.cell ? new Set(streamGroups(scene).flatMap((g) => g.members)) : null;
     for (const [i, instance] of scene.instances.entries()) {
-      const textured = await texture(instance.mesh);
+      const textured = streamed?.has(i) ? { mesh: instance.mesh } : await texture(instance.mesh);
       const skinned = liveCopy(instance.mesh, renderer.gpuSkinning === true);
       if (skinned) live.set(i, skinned);
       const lod = liveLod(instance.lod, skinned);
@@ -32431,6 +32487,19 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     }
     return { drawn, casting };
   }
+  /** Give back meshes' GPU geometry (F6d): their buffers go once the queued frames are done with them, and a later draw uploads them again. */
+  releaseMeshes(meshes) {
+    for (const mesh of meshes) {
+      const primitives = this.meshes.get(mesh);
+      if (!primitives || primitives.some((p) => p.skin || p.cloth)) continue;
+      this.meshes.delete(mesh);
+      for (const p of primitives) {
+        destroySafely(p.vertexBuffer);
+        destroySafely(p.indexBuffer);
+        if (p.previousBuffer) destroySafely(p.previousBuffer);
+      }
+    }
+  }
   /** The heights a draw's primitive binds (F6c): a GPU terrain's patch's, else the blank. */
   terrainHeightsOf(primitive) {
     return this.terrainPatches.get(primitive)?.heightView ?? this.blankTexture.createView();
@@ -37292,7 +37361,7 @@ function halfToFloat2(h) {
 }
 
 // src/player.ts
-import { SpatialLoader, actionMask, createHoloCache, holoBindingKeys as holoBindingKeys2, holoDocuments as holoDocuments2, renderHoloDocument, translate, reboundActions, colorFilterSvg, DEFAULT_ACCESSIBILITY } from "@cartbox/editor";
+import { SpatialLoader, WorldPartition, partitionWorld, actionMask, createHoloCache, holoBindingKeys as holoBindingKeys2, holoDocuments as holoDocuments2, renderHoloDocument, translate, reboundActions, colorFilterSvg, DEFAULT_ACCESSIBILITY } from "@cartbox/editor";
 var DIRECT_CORE_URL = "/engine/modern-core/modern-core.js";
 function directCoreBeside(engineUrl) {
   const at = engineUrl?.lastIndexOf("/engine/") ?? -1;
@@ -37410,6 +37479,8 @@ var Player = class {
     this.levelInactive = /* @__PURE__ */ new Set();
     /** Spatial loading, when the scene streams by distance: the loader and what it has unloaded. */
     this.spatial = null;
+    /** The world partition (F6d), when the scene streams by cells: the cells and what isn't loaded. */
+    this.partition = null;
     /** The player's settings now (EP19b): text size and colour filter, read by the cart each tick. */
     this.settings = DEFAULT_ACCESSIBILITY;
     /** The language to play in (1-based in the cart's table; 0 for none) and a revision bumped when it changes. */
@@ -37736,7 +37807,11 @@ var Player = class {
           if ((mesh.levels?.length ?? 0) > 0) this.activateLevel(0);
           if (mesh.streaming) {
             const groups = streamGroups(mesh);
-            if (groups.length > 0) this.spatial = { loader: new SpatialLoader(groups, mesh.streaming), unloaded: /* @__PURE__ */ new Set() };
+            if (groups.length > 0 && mesh.streaming.cell) {
+              const world2 = new WorldPartition(partitionWorld(groups, mesh.streaming.cell), mesh.streaming);
+              this.partition = { world: world2, unloaded: world2.unloaded() };
+              this.applyInactive();
+            } else if (groups.length > 0) this.spatial = { loader: new SpatialLoader(groups, mesh.streaming), unloaded: /* @__PURE__ */ new Set() };
           }
         }
         if (world && this.cartSource) {
@@ -38133,7 +38208,7 @@ var Player = class {
   }
   /** Hide (and take out of physics) everything a level or spatial loading has out. */
   applyInactive() {
-    const inactive = /* @__PURE__ */ new Set([...this.levelInactive, ...this.spatial?.unloaded ?? []]);
+    const inactive = /* @__PURE__ */ new Set([...this.levelInactive, ...this.spatial?.unloaded ?? [], ...this.partition?.unloaded ?? []]);
     this.meshSurface?.setInactive(inactive);
     this.runtime?.physics?.setInactive(inactive);
   }
@@ -38143,6 +38218,7 @@ var Player = class {
    * objects coming near.
    */
   updateSpatialLoading() {
+    this.updatePartition();
     const spatial = this.spatial;
     const scene = this.options.mesh;
     if (!spatial || !scene) return;
@@ -38163,6 +38239,40 @@ var Player = class {
     if (approached.length > 0 && this.options.streamAssets) {
       this.options.streamAssets(approached.map((g) => scene.instances[spatial.loader.groups[g].members[0]].id));
     }
+  }
+  /**
+   * The world partition (F6d): cells leaving range unload (their maps and GPU
+   * geometry given back); cells coming in, nearest first and a few at a time,
+   * have the host fetch their assets and the overlay decode their maps (in its
+   * decode workers), and show once that's done.
+   */
+  updatePartition() {
+    const partition = this.partition;
+    const scene = this.options.mesh;
+    if (!partition || !scene) return;
+    const focus = this.runtime?.channel.streamFocus() ?? this.meshSurface?.eyePosition() ?? scene.bounds.center;
+    const { world } = partition;
+    const { load, unload } = world.update(focus);
+    for (const k of unload) this.meshSurface?.unloadCell(world.cells[k].members);
+    if (unload.length > 0) {
+      partition.unloaded = world.unloaded();
+      this.applyInactive();
+    }
+    for (const k of load) {
+      const members = world.cells[k].members;
+      if (this.options.streamAssets) this.options.streamAssets(members.map((i) => scene.instances[i].id));
+      void (this.meshSurface?.loadCell(members) ?? Promise.resolve()).then(() => {
+        if (this.partition !== partition || !world.finished(k)) return;
+        partition.unloaded = world.unloaded();
+        this.applyInactive();
+      });
+    }
+  }
+  /** The world partition's cells and their states (F6d), for a view of what is loaded; null without one. */
+  worldPartition() {
+    const world = this.partition?.world;
+    if (!world) return null;
+    return { cells: world.cells.map((c, k) => ({ i: c.i, j: c.j, state: world.state(k), distance: world.distance(k), objects: c.members.length })) };
   }
   /** Make a level current: its objects (and the always-loaded ones) show and simulate; the rest are hidden. */
   activateLevel(level) {

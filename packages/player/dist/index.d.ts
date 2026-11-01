@@ -5063,6 +5063,8 @@ interface SceneRenderer {
      * (F2a: the AAA tier's GPU cascades) and ignores a CPU {@link SceneDraw.shadow}.
      */
     readonly sunCascades?: boolean;
+    /** Give back the GPU geometry of meshes nothing will draw for now (F6d: an unloaded world partition cell's); drawn again, they upload again. */
+    releaseMeshes?(meshes: readonly MeshAsset[]): void;
     /**
      * The block-compressed formats this renderer uploads a texture's
      * {@link DecodedTexture.gpu} chain in, preferred first (AAA_FIDELITY_ROADMAP.md
@@ -5113,6 +5115,7 @@ declare class CappedSceneRenderer implements SceneRenderer {
     get gpuDevice(): unknown;
     get textureFormats(): readonly string[] | undefined;
     get sunCascades(): boolean | undefined;
+    releaseMeshes(meshes: readonly MeshAsset[]): void;
     get gpuSkinning(): boolean | undefined;
     setParticles(specs: readonly EmitterSpec[]): void;
     particleBurst(index: number, at: readonly number[], dir?: readonly number[], scale?: number): void;
@@ -6212,6 +6215,8 @@ declare class WebgpuSceneRenderer implements SceneRenderer {
     renderToTexture(instances: readonly MeshSceneInstance[], given: GpuSceneDraw): any | null;
     /** This frame's nodes of each GPU terrain (F6c), drawn and (for a terrain that casts) casting. */
     private terrainNodes;
+    /** Give back meshes' GPU geometry (F6d): their buffers go once the queued frames are done with them, and a later draw uploads them again. */
+    releaseMeshes(meshes: readonly MeshAsset[]): void;
     /** The heights a draw's primitive binds (F6c): a GPU terrain's patch's, else the blank. */
     private terrainHeightsOf;
     /** Samples each pixel of the path-traced reference holds (F10b); 0 when it isn't shown. */
@@ -8327,6 +8332,12 @@ declare class MeshOverlaySurface implements DisplaySurface {
     private ground;
     private groundIds;
     private readonly groundMeshes;
+    /** The world partition's loaded objects' meshes (F6d), and how many loaded objects use each. */
+    private readonly cellMeshes;
+    /** Each loaded object as it was before its maps were decoded, to go back to on unload. */
+    private readonly bare;
+    /** Images the cells share, decoded once while any cell holds them. */
+    private cellImages;
     /**
      * Told each frame where the sky dome's sun is on screen and how much of it is
      * unblocked, for the post-FX glare and lens flare (H8); null without a sky dome.
@@ -8508,6 +8519,20 @@ declare class MeshOverlaySurface implements DisplaySurface {
     setViewMode(mode: ViewMode): void;
     /** Apply a graphics quality preset (takes effect on the next frame). */
     setQuality(quality: QualitySettings): void;
+    /**
+     * Load a world partition cell's objects (F6d): their maps decoded (in the
+     * decode workers, where the page has them) and swapped in. They show once
+     * the caller marks them active.
+     */
+    loadCell(members: readonly number[]): Promise<void>;
+    /**
+     * Unload a cell's objects (F6d): back to bare, and the GPU geometry of the
+     * meshes no loaded object uses any more given back (it uploads again if
+     * they return). Decoded images go once no cell holds an object.
+     */
+    unloadCell(members: readonly number[]): void;
+    /** Whether an object of a world partition cell has its maps (F6d). */
+    cellLoaded(index: number): boolean;
     /**
      * The objects of levels that aren't loaded (see levels.ts in @cartbox/editor):
      * they're hidden, and left out of the shadow, until the set changes again.

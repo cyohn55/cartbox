@@ -662,7 +662,8 @@ export function streamGroups(scene: MeshScene): StreamGroup[] {
   });
   const groups: StreamGroup[] = [];
   instances.forEach((root, r) => {
-    if (root.parent >= 0 || root.pooled || root.terrain || root.alwaysLoaded || root.level !== undefined) return;
+    // With a world partition (F6d) foliage blocks stream with their cells too.
+    if (root.parent >= 0 || root.pooled || (root.terrain && !(scene.streaming?.cell && root.foliage)) || root.alwaysLoaded || root.level !== undefined) return;
     const members: number[] = [];
     const walk = (i: number) => {
       members.push(i);

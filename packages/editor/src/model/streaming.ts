@@ -23,6 +23,12 @@
 export interface SceneStreaming {
   /** Loading distance, world units. */
   readonly range: number;
+  /**
+   * The world partition's cell size (AAA_FIDELITY_ROADMAP.md F6d; see
+   * worldPartition.ts), world units: set, the scene loads a grid cell at a
+   * time, its assets prepared off the main thread first. Absent = object by object.
+   */
+  readonly cell?: number;
 }
 
 export const DEFAULT_STREAM_RANGE = 60;
@@ -38,7 +44,8 @@ export function readStreaming(value: unknown): SceneStreaming | null {
   if (!value || typeof value !== "object") return null;
   const range = (value as { range?: unknown }).range;
   if (typeof range !== "number" || !Number.isFinite(range)) return null;
-  return { range: Math.max(MIN_STREAM_RANGE, Math.min(MAX_STREAM_RANGE, range)) };
+  const cell = (value as { cell?: unknown }).cell;
+  return { range: Math.max(MIN_STREAM_RANGE, Math.min(MAX_STREAM_RANGE, range)), ...(typeof cell === "number" && Number.isFinite(cell) ? { cell: Math.max(8, Math.min(1024, cell)) } : {}) };
 }
 
 /** A spatially loaded object and its children, and the box they fill. */

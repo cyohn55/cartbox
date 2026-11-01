@@ -311,6 +311,7 @@ export {
   type SceneStreaming,
   type StreamGroup,
 } from "./model/streaming";
+export { DEFAULT_CELL_SIZE, MAX_CELLS_LOADING, MAX_CELL_SIZE, MIN_CELL_SIZE, WorldPartition, partitionWorld, type CellState, type WorldCell } from "./model/worldPartition";
 export {
   LIGHTMAP_RANGE,
   applyLightmapImage,

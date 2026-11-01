@@ -35,7 +35,7 @@ import {
   type MeshSceneInstance,
   type SceneWind,
 } from "@cartbox/editor";
-import type { DynamicGi, EmitterSpec, MeshMaterial, Occluder, DecalTiles, EnvironmentLight, LocalShadows, Mat4, ProjectedDecal, RasterStyle, SceneFog, SceneLight, ShadowInput, ToneMap } from "@cartbox/editor";
+import type { DynamicGi, EmitterSpec, MeshAsset, MeshMaterial, Occluder, DecalTiles, EnvironmentLight, LocalShadows, Mat4, ProjectedDecal, RasterStyle, SceneFog, SceneLight, ShadowInput, ToneMap } from "@cartbox/editor";
 
 import type { RenderCaps } from "../models.js";
 import type { ReflectionCapture } from "./probeCapture.js";
@@ -399,6 +399,8 @@ export interface SceneRenderer {
    * (F2a: the AAA tier's GPU cascades) and ignores a CPU {@link SceneDraw.shadow}.
    */
   readonly sunCascades?: boolean;
+  /** Give back the GPU geometry of meshes nothing will draw for now (F6d: an unloaded world partition cell's); drawn again, they upload again. */
+  releaseMeshes?(meshes: readonly MeshAsset[]): void;
   /**
    * The block-compressed formats this renderer uploads a texture's
    * {@link DecodedTexture.gpu} chain in, preferred first (AAA_FIDELITY_ROADMAP.md
@@ -511,6 +513,10 @@ export class CappedSceneRenderer implements SceneRenderer {
 
   get sunCascades(): boolean | undefined {
     return this.inner.sunCascades;
+  }
+
+  releaseMeshes(meshes: readonly MeshAsset[]): void {
+    this.inner.releaseMeshes?.(meshes);
   }
 
   get gpuSkinning(): boolean | undefined {

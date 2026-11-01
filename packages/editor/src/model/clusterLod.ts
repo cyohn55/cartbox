@@ -67,8 +67,12 @@ export interface ClusterLod {
 
 /** Clusters a group, at most. */
 export const CLUSTER_GROUP = 8;
-/** A group grows until it holds about this many triangles (four full clusters): small clusters group more to a group. */
-const GROUP_TRIANGLES = 4 * CLUSTER_TRIANGLES;
+/**
+ * A group grows until it holds about this many triangles (four full clusters): small clusters group more to a group.
+ * Read when called, not when this module loads: scanImport (where CLUSTER_TRIANGLES lives) imports this module, so
+ * whichever loads first would otherwise read the other's constant before it is initialised (a bundler's TDZ error).
+ */
+const groupTriangles = (): number => 4 * CLUSTER_TRIANGLES;
 /** A group that keeps more than this share of its triangles when simplified has nothing more to give: its clusters stay at the top. */
 const STUCK = 0.85;
 /** How much more an edge between clusters of different origins counts towards grouping them. */
@@ -148,7 +152,7 @@ function groupClusters(clusters: readonly Working[]): number[][] {
     if (grouped[seed]! >= 0) continue;
     const group = [seed];
     grouped[seed] = groups.length;
-    while (group.length < CLUSTER_GROUP && size(group) < GROUP_TRIANGLES) {
+    while (group.length < CLUSTER_GROUP && size(group) < groupTriangles()) {
       let best = -1;
       let most = 0;
       for (const member of group) {

@@ -105,7 +105,7 @@ import { createSceneRenderer } from "./render/createSceneRenderer.js";
 import { GpuCanvasSurface, type CapturedFrame } from "./render/GpuCanvasSurface.js";
 import type { SceneRenderer } from "./render/sceneRenderer.js";
 import type { TextureLookup } from "./world/worldScene.js";
-import { SpatialLoader, actionMask, createHoloCache, holoBindingKeys, holoDocuments, renderHoloDocument, translate, reboundActions, type DecodedTexture, type EncodedImage, type InputAction, type Mat4, colorFilterSvg, DEFAULT_ACCESSIBILITY, type AccessibilitySettings, type ColorFilter } from "@cartbox/editor";
+import { SpatialLoader, WorldPartition, partitionWorld, actionMask, createHoloCache, holoBindingKeys, holoDocuments, renderHoloDocument, translate, reboundActions, type DecodedTexture, type EncodedImage, type InputAction, type Mat4, colorFilterSvg, DEFAULT_ACCESSIBILITY, type AccessibilitySettings, type ColorFilter } from "@cartbox/editor";
 import type { ControlScheme, InspectedObject, PlayerOptions, SequenceOptions } from "./types.js";
 
 /**
@@ -676,9 +676,14 @@ export class Player {
           // A scene with levels starts in its first; the others wait, hidden.
           if ((mesh.levels?.length ?? 0) > 0) this.activateLevel(0);
           // A scene that streams by distance loads what's near the focus each tick.
+          // With a cell size, a world partition (F6d): a grid cell at a time, each prepared before it shows.
           if (mesh.streaming) {
             const groups = streamGroups(mesh);
-            if (groups.length > 0) this.spatial = { loader: new SpatialLoader(groups, mesh.streaming), unloaded: new Set() };
+            if (groups.length > 0 && mesh.streaming.cell) {
+              const world = new WorldPartition(partitionWorld(groups, mesh.streaming.cell), mesh.streaming);
+              this.partition = { world, unloaded: world.unloaded() };
+              this.applyInactive();
+            } else if (groups.length > 0) this.spatial = { loader: new SpatialLoader(groups, mesh.streaming), unloaded: new Set() };
           }
         }
         // The HD-2D world composites a 3D tile terrain plus the cart's 2D character
@@ -1182,10 +1187,12 @@ export class Player {
   private levelInactive: ReadonlySet<number> = new Set();
   /** Spatial loading, when the scene streams by distance: the loader and what it has unloaded. */
   private spatial: { loader: SpatialLoader; unloaded: ReadonlySet<number> } | null = null;
+  /** The world partition (F6d), when the scene streams by cells: the cells and what isn't loaded. */
+  private partition: { world: WorldPartition; unloaded: ReadonlySet<number> } | null = null;
 
   /** Hide (and take out of physics) everything a level or spatial loading has out. */
   private applyInactive(): void {
-    const inactive = new Set([...this.levelInactive, ...(this.spatial?.unloaded ?? [])]);
+    const inactive = new Set([...this.levelInactive, ...(this.spatial?.unloaded ?? []), ...(this.partition?.unloaded ?? [])]);
     this.meshSurface?.setInactive(inactive);
     this.runtime?.physics?.setInactive(inactive);
   }
@@ -1196,6 +1203,7 @@ export class Player {
    * objects coming near.
    */
   private updateSpatialLoading(): void {
+    this.updatePartition();
     const spatial = this.spatial;
     const scene = this.options.mesh;
     if (!spatial || !scene) return;
@@ -1217,6 +1225,42 @@ export class Player {
     if (approached.length > 0 && this.options.streamAssets) {
       this.options.streamAssets(approached.map((g) => scene.instances[spatial.loader.groups[g]!.members[0]!]!.id));
     }
+  }
+
+  /**
+   * The world partition (F6d): cells leaving range unload (their maps and GPU
+   * geometry given back); cells coming in, nearest first and a few at a time,
+   * have the host fetch their assets and the overlay decode their maps (in its
+   * decode workers), and show once that's done.
+   */
+  private updatePartition(): void {
+    const partition = this.partition;
+    const scene = this.options.mesh;
+    if (!partition || !scene) return;
+    const focus = this.runtime?.channel.streamFocus() ?? this.meshSurface?.eyePosition() ?? scene.bounds.center;
+    const { world } = partition;
+    const { load, unload } = world.update(focus);
+    for (const k of unload) this.meshSurface?.unloadCell(world.cells[k]!.members);
+    if (unload.length > 0) {
+      partition.unloaded = world.unloaded();
+      this.applyInactive();
+    }
+    for (const k of load) {
+      const members = world.cells[k]!.members;
+      if (this.options.streamAssets) this.options.streamAssets(members.map((i) => scene.instances[i]!.id));
+      void (this.meshSurface?.loadCell(members) ?? Promise.resolve()).then(() => {
+        if (this.partition !== partition || !world.finished(k)) return;
+        partition.unloaded = world.unloaded();
+        this.applyInactive();
+      });
+    }
+  }
+
+  /** The world partition's cells and their states (F6d), for a view of what is loaded; null without one. */
+  worldPartition(): { cells: readonly { i: number; j: number; state: string; distance: number; objects: number }[] } | null {
+    const world = this.partition?.world;
+    if (!world) return null;
+    return { cells: world.cells.map((c, k) => ({ i: c.i, j: c.j, state: world.state(k), distance: world.distance(k), objects: c.members.length })) };
   }
 
   /** Make a level current: its objects (and the always-loaded ones) show and simulate; the rest are hidden. */
