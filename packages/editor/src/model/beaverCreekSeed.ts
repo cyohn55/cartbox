@@ -46,7 +46,7 @@ import { foliagePreset } from "./foliagePresets";
 import { serializeMeshAsset, type EncodedImage } from "./MeshAsset";
 import { arenaNavMesh } from "./arenaValidate";
 import type { NavMesh } from "./navmesh";
-import type { SceneLighting } from "./SceneLighting";
+import type { SceneLighting, SceneLightingOverride } from "./SceneLighting";
 import { terrainMesh, type Terrain } from "./terrain";
 import { boxSolid, csg, solidFromFaces } from "./csg";
 import { buildParametric, kitMaterial } from "./shapeGenerators";
@@ -727,6 +727,20 @@ export const BEAVER_LIGHTING: SceneLighting = {
   autoExposure: { min: -0.5, max: 1.5, up: 1.4, down: 3, key: 0.2 },
 };
 
+/**
+ * Beaver Creek re-lit in physical units on the AAA tier (AAA_FIDELITY_ROADMAP.md
+ * F11a-11; see physicalRelight.ts): the same noon sun, a fair-weather cumulus
+ * deck whose shadows cross the canyon, and the canyon's haze a medium the sun lights.
+ */
+export function beaverRelight(): SceneLightingOverride {
+  return {
+    physical: {
+      atmosphere: { altitude: 600, clouds: { coverage: 0.45, base: 1.4, thickness: 1.6, density: 50, type: 0.75, scale: 8, windSpeed: 6, windDirection: 90, shadows: 0.7 } },
+      volumetric: { albedo: [0.94, 0.95, 0.97], anisotropy: 0.6, distance: 100, ambient: 1 },
+    },
+  };
+}
+
 /** The intro: down the creek from the north ledge, over the arch, to blue's base. */
 export const BEAVER_INTRO: SceneTimeline = {
   name: "Intro",
@@ -777,7 +791,8 @@ export const BEAVER_SCENE: ArenaScene = {
   map: BEAVER_MAP,
   parts: () => ({
     mesh: litBeaverMesh(),
-    lighting: { ...BEAVER_LIGHTING, ...(beaverProbes() ? { lightProbes: beaverProbes() } : {}) },
+    // On the AAA tier, re-lit in physical units (F11a-11).
+    lighting: { ...BEAVER_LIGHTING, ...(beaverProbes() ? { lightProbes: beaverProbes() } : {}), aaa: beaverRelight() },
     navmesh: beaverNavMesh(),
     terrains: [beaverTerrain()],
     timelines: [BEAVER_INTRO],

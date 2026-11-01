@@ -24,6 +24,8 @@ import {
   addSceneLight,
   defaultProceduralSky,
   defaultSceneFog,
+  aaaRelightKeys,
+  clearAaaRelight,
   defaultSceneLighting,
   DEFAULT_WIND,
   defaultSunShafts,
@@ -237,8 +239,24 @@ export function LightingEditor({ lighting, onChange }: LightingEditorProps) {
   const env = lighting.environment;
   const physical = lighting.units === "physical";
 
+  const relit = aaaRelightKeys(lighting);
+
   return (
     <RailGroup label="Lighting" advanced defaultOpen>
+      {relit.length > 0 && (
+        <>
+          <div className={`${styles.groupLabel} ${styles.railSubLabel}`}>AAA re-light</div>
+          <RailHint>
+            {`On the AAA tier this rig is re-lit in physical units, which replaces its ${relit.join(", ")} there. Edits to those show on every other tier; the AAA tier keeps the re-light.`}
+          </RailHint>
+          <button type="button" className={styles.toolBtn} onClick={() => onChange(clearAaaRelight(lighting))} title="Remove the physical re-light, so the AAA tier lights by this rig as the other tiers do">
+            <span className={styles.toolGlyph} aria-hidden>
+              ☀
+            </span>
+            Light AAA as tuned
+          </button>
+        </>
+      )}
       <div className={`${styles.groupLabel} ${styles.railSubLabel}`}>Skybox gradient</div>
       <ColorRow label="Sky" value={env.sky} onChange={(sky) => onChange(updateSceneEnvironment(lighting, { sky }))} />
       <ColorRow label="Horizon" value={env.horizon} onChange={(horizon) => onChange(updateSceneEnvironment(lighting, { horizon }))} />
@@ -849,6 +867,21 @@ function AtmosphereControls({ settings, patch }: { settings: AtmosphereSettings;
       <RangeControl label="Stars" nested min={0} max={1000} step={1} value={settings.stars ?? 1} ariaLabel="Star brightness" display={(settings.stars ?? 1) === 0 ? "None" : `×${Math.round(settings.stars ?? 1)}`} onChange={(v) => set("stars", v)} />
       <RailHint>The moon stands opposite the sun (full) and lights the scene once the sun has set; ×1 is the real moon and stars, which want eye adaptation (or a raised exposure) to be seen.</RailHint>
       <RailHint>Aerial distance hazes the scene by the air between it and the eye (AAA tier). At ×1 a metre is a metre, so only kilometres haze over; more lays a landscape&apos;s haze over a small map.</RailHint>
+      <SegmentedControl
+        label="Landscape"
+        ariaLabel="Painted landscape in front of the physical sky"
+        selected={settings.landscape ? "kept" : "air"}
+        onSelect={(v) => {
+          const next = { ...settings };
+          if (v === "kept") next.landscape = true;
+          else delete (next as { landscape?: boolean }).landscape;
+          patch(next);
+        }}
+        options={[
+          { id: "air", label: "Air only", hint: "The physical sky replaces the painted mountains and valley mist" },
+          { id: "kept", label: "Painted", hint: "The painted mountain ranges and valley mist stand in front of the physical sky (their settings are kept below Gradient/Mountains)" },
+        ]}
+      />
       <VolumetricCloudControls clouds={settings.clouds ?? null} patch={(clouds) => patch({ ...settings, clouds: clouds ?? undefined })} />
     </>
   );
@@ -1193,6 +1226,18 @@ function DynamicGiControls({ lighting, onChange }: LightingEditorProps & { light
           <RangeControl label="Rays per probe" nested min={16} max={256} step={16} value={gi.rays ?? 64} ariaLabel="GI rays per probe" display={`${gi.rays ?? 64}`} onChange={(rays) => set({ rays })} />
           <RangeControl label="Steadiness" nested min={0.5} max={0.99} step={0.01} value={gi.hysteresis ?? 0.97} ariaLabel="GI hysteresis" display={(gi.hysteresis ?? 0.97).toFixed(2)} onChange={(hysteresis) => set({ hysteresis })} />
           <RangeControl label="Probe spacing" nested min={1} max={10} step={0.5} value={gi.spacing ?? 3} ariaLabel="GI probe spacing" display={`${(gi.spacing ?? 3).toFixed(1)} m`} onChange={(spacing) => set({ spacing })} />
+          <RangeControl
+            label="Probes a frame"
+            nested
+            min={0}
+            max={2048}
+            step={32}
+            value={gi.probesPerFrame ?? 0}
+            ariaLabel="GI probes traced a frame"
+            display={gi.probesPerFrame ? `${gi.probesPerFrame}` : "All"}
+            onChange={(n) => set({ probesPerFrame: n > 0 ? n : undefined })}
+          />
+          <RailHint>Probes a frame bounds the GI&apos;s cost: the volume is traced that many probes at a time, round-robin, and lower quality presets trace a share of it. All traces every probe every frame.</RailHint>
         </>
       )}
       <SegmentedControl

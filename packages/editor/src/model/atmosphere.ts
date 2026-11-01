@@ -64,6 +64,12 @@ export interface AtmosphereSettings {
   readonly stars?: number;
   /** A volumetric cloud layer in the air (F5c; see clouds.ts), or none. */
   readonly clouds?: CloudSettings;
+  /**
+   * Keep the painted landscape (the valley mist below the horizon and the
+   * mountain ranges) in front of the physical sky (F11a-9), on every tier.
+   * Absent: the physical sky replaces it, as before.
+   */
+  readonly landscape?: boolean;
 }
 
 /** An atmosphere resolved into its medium, in kilometres. */
@@ -131,6 +137,7 @@ export function parseAtmosphere(value: unknown): AtmosphereSettings | null {
   }
   const clouds = parseClouds(raw.clouds);
   if (clouds) (out as Record<string, unknown>).clouds = clouds;
+  if (raw.landscape === true) (out as Record<string, unknown>).landscape = true;
   return out as AtmosphereSettings;
 }
 
@@ -387,7 +394,12 @@ export interface AtmosphereLuts {
 
 const lutCache = new Map<string, AtmosphereLuts>();
 
-/** The LUTs for a medium, kept for the last few. */
+/**
+ * The LUTs for a medium, kept for the last few. The tables depend only on the
+ * medium, so two atmospheres that differ in the viewer's altitude, the sun's
+ * size or the aerial scale share them; each gets its own `atmosphere` back,
+ * which everything reading through the LUTs takes those from.
+ */
 export function atmosphereLuts(a: Atmosphere): AtmosphereLuts {
   const key = atmosphereKey(a);
   let luts = lutCache.get(key);
@@ -397,7 +409,12 @@ export function atmosphereLuts(a: Atmosphere): AtmosphereLuts {
     if (lutCache.size >= 4) lutCache.delete(lutCache.keys().next().value!);
     lutCache.set(key, luts);
   }
-  return luts;
+  return luts.atmosphere === a || sameView(luts.atmosphere, a) ? luts : { ...luts, atmosphere: a };
+}
+
+/** Whether two atmospheres of one medium are seen alike: the same altitude, sun and aerial scale. */
+function sameView(a: Atmosphere, b: Atmosphere): boolean {
+  return a.viewHeight === b.viewHeight && a.sunRadius === b.sunRadius && a.aerialScale === b.aerialScale;
 }
 
 /**

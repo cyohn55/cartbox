@@ -19,13 +19,15 @@ import {
   probeVolumeTexels,
   projectionMatrix,
   resolveDynamicGi,
+  giFramesToRefresh,
+  giWindow,
   sceneLightingEnvironment,
   viewMatrix,
   type MeshAsset,
   type Occluder,
   type SceneLight,
 } from "@cartbox/editor";
-import { MeshOverlaySurface, WebgpuSceneRenderer, environmentPanorama, type GpuSceneDraw, type PresentFrame, type SceneRenderer } from "@cartbox/player";
+import { MeshOverlaySurface, QUALITY_PRESETS, WebgpuSceneRenderer, environmentPanorama, type GpuSceneDraw, type PresentFrame, type SceneRenderer } from "@cartbox/player";
 import { bakeLights, bakeProbeVolumeGpu } from "../packages/player/src/render/gpuLightmapper";
 import { GpuProbeGi, giSpacing, randomRotation } from "../packages/player/src/render/dynamicGi";
 
@@ -33,9 +35,34 @@ describe("the live volume's settings", () => {
   it("reads them in range, keeps them through a save, and resolves the defaults", () => {
     expect(parseDynamicGi({ rays: 1000, hysteresis: 2, spacing: 0.1 })).toEqual({ rays: 256, hysteresis: 0.995, spacing: 0.5 });
     expect(parseDynamicGi(null)).toBeNull();
-    expect(resolveDynamicGi({})).toEqual({ rays: 64, hysteresis: 0.97, spacing: 3 });
+    expect(resolveDynamicGi({})).toEqual({ rays: 64, hysteresis: 0.97, spacing: 3, probesPerFrame: 0 });
     const rig = parseSceneLighting(JSON.parse(JSON.stringify({ ...defaultSceneLighting(), dynamicGi: { rays: 32 } })))!;
     expect(rig.dynamicGi).toEqual({ rays: 32 });
+  });
+
+  it("bounds the probes a frame traces (F11a-12): a window round the volume, every probe in turn", () => {
+    expect(parseDynamicGi({ probesPerFrame: 3 })).toEqual({ probesPerFrame: 8 });
+    expect(parseDynamicGi({ probesPerFrame: 300.4 })).toEqual({ probesPerFrame: 300 });
+    expect(parseDynamicGi({ probesPerFrame: 0 })).toEqual({});
+    expect(resolveDynamicGi({ probesPerFrame: 256 })!.probesPerFrame).toBe(256);
+    // All of them without a budget, or with one past the count.
+    expect(giWindow(100, 0, 37)).toEqual({ first: 0, size: 100 });
+    expect(giWindow(100, 500, 37)).toEqual({ first: 0, size: 100 });
+    // A window from the cursor; consecutive windows cover every probe once a sweep.
+    expect(giWindow(100, 30, 90)).toEqual({ first: 90, size: 30 });
+    const seen = new Array(100).fill(0);
+    let cursor = 0;
+    for (let f = 0; f < giFramesToRefresh(100, 30); f += 1) {
+      const w = giWindow(100, 30, cursor);
+      for (let j = 0; j < w.size; j += 1) seen[(w.first + j) % 100] += 1;
+      cursor = (w.first + w.size) % 100;
+    }
+    expect(giFramesToRefresh(100, 30)).toBe(4);
+    expect(seen.every((n) => n >= 1)).toBe(true);
+    // The low presets trace a share of it.
+    expect(QUALITY_PRESETS.low.giShare).toBe(0.25);
+    expect(QUALITY_PRESETS.medium.giShare).toBe(0.5);
+    expect(QUALITY_PRESETS.epic.giShare ?? 1).toBe(1);
   });
 
   it("lays its grid a little past the scene's bounds, within the probe limits", () => {
@@ -125,7 +152,7 @@ describe("the player under real-time GI", () => {
     surface.blit(new Uint8Array(32 * 24 * 4));
     surface.blit(new Uint8Array(32 * 24 * 4));
     const [a, b] = draws.slice(-2) as [GpuSceneDraw, GpuSceneDraw];
-    expect(a.dynamicGi?.settings).toEqual({ rays: 64, hysteresis: 0.97, spacing: 4 });
+    expect(a.dynamicGi?.settings).toEqual({ rays: 64, hysteresis: 0.97, spacing: 4, probesPerFrame: 0 });
     expect(a.dynamicGi?.occluders).toHaveLength(1);
     const volume = a.environment!.probeVolume!;
     expect(volume.min[0]).toBeLessThan(-6);
@@ -158,7 +185,7 @@ describe.skipIf(!device)("the live volume on a real device", { timeout: 600_000 
   const sky = environmentPanorama(sceneLightingEnvironment(defaultSceneLighting()));
 
   /** A frame of the live volume per entry of `lights` (that frame's lights), from nothing, over `occluders`: the probes' slots as the scene reads them. */
-  async function live(occluders: Occluder[], lights: SceneLight[][], hysteresis: number, rays = 128): Promise<Float32Array> {
+  async function live(occluders: Occluder[], lights: SceneLight[][], hysteresis: number, rays = 128, probesPerFrame = 0): Promise<Float32Array> {
     const { reach } = giSpacing({ min, max, counts });
     const texels = probeVolumeTexels(emptyProbeVolume(min, max, counts, reach));
     const probes = device.createBuffer({ size: texels.byteLength, usage: 0x80 | 0x08 | 0x04 });
@@ -167,7 +194,7 @@ describe.skipIf(!device)("the live volume on a real device", { timeout: 600_000 
     device.pushErrorScope("validation");
     for (const frameLights of lights) {
       const encoder = device.createCommandEncoder();
-      gi.update(encoder, probes, { min, max, counts }, { rays, hysteresis, spacing: 3 }, frameLights, sky);
+      gi.update(encoder, probes, { min, max, counts }, { rays, hysteresis, spacing: 3, probesPerFrame }, frameLights, sky);
       device.queue.submit([encoder.finish()]);
     }
     const error = await settled(device.popErrorScope());
@@ -207,6 +234,26 @@ describe.skipIf(!device)("the live volume on a real device", { timeout: 600_000 
     expect(worst).toBeLessThan(0.08);
   });
 
+  it("traces only its window of probes a frame, and still converges on the bake a sweep at a time (F11a-12)", async () => {
+    const occluders: Occluder[] = [{ mesh: room(false), model: IDENTITY as never }];
+    // One frame of 5 of the 18 probes: those five lit, the rest as the empty volume left them.
+    const one = await live(occluders, [[sun]], 0.8, 256, 5);
+    for (let p = 0; p < count; p += 1) {
+      if (p < 5) expect(l0(one, p)[0]!).toBeGreaterThan(0);
+      else expect(l0(one, p)[0]!).toBe(0);
+    }
+    // Forty sweeps of four frames each: within the full update's tolerance of the bake.
+    const frames = 40 * giFramesToRefresh(count, 5);
+    const data = await live(occluders, Array.from({ length: frames }, () => [sun]), 0.8, 256, 5);
+    const baked = await bakeProbeVolumeGpu(device, min, max, counts, occluders, { rays: 4096, bounces: 4, sky, lights: bakeLights([sun]) });
+    let worst = 0;
+    for (let p = 0; p < count; p += 1) {
+      const got = l0(data, p);
+      for (let c = 0; c < 3; c += 1) worst = Math.max(worst, Math.abs(got[c]! - baked.sh[p * PROBE_SH * 3 + c]!) / baked.sh[p * PROBE_SH * 3 + c]!);
+    }
+    expect(worst).toBeLessThan(0.08);
+  });
+
   it("follows a light that comes on in a closed room, and falls back when it goes off", async () => {
     const occluders: Occluder[] = [{ mesh: room(true), model: IDENTITY as never }];
     const lamp: SceneLight = { kind: "point", position: [3, 2, 3], color: [1, 0.8, 0.6], intensity: 20, range: 20, falloff: "inverseSquare" };
@@ -237,7 +284,7 @@ describe.skipIf(!device)("the live volume on a real device", { timeout: 600_000 
         texture = renderer.renderToTexture!([{ mesh: room(true), model: IDENTITY as never }], {
           width: W, height: H, view: viewMatrix([0, 2, 2], [0, 2, -6]), projection: projectionMatrix(Math.PI / 3, W / H, 0.1, 50),
           ambient: 0, lightDirection: sun.direction, environment, lights: [sun, lamp],
-          ...(gi ? { dynamicGi: { occluders, key: "room", settings: { rays: 64, hysteresis: 0.6, spacing: 3 } } } : {}),
+          ...(gi ? { dynamicGi: { occluders, key: "room", settings: { rays: 64, hysteresis: 0.6, spacing: 3, probesPerFrame: 0 } } } : {}),
         } as any);
       }
       const error = await settled(device.popErrorScope());

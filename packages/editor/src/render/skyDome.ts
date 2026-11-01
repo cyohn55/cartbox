@@ -405,60 +405,12 @@ export function skySun(sky: ProceduralSky): SkySun {
   return { direction: sky.sunDirection, color: sky.sunColor };
 }
 
-/**
- * Bake a {@link ProceduralSky} into an equirectangular panorama (`width × height`,
- * longitude = atan2(z, x) across, latitude top→bottom), matching the projection
- * `sampleEnvironmentDir` reads. Deterministic for a given sky and size.
- *
- * With `sunLayer`, the sun's glow is left out and its alpha holds how much of
- * the glow each texel lets through — less under cloud, none on a mountain or
- * the valley mist — so the glow can be drawn toward any sun later
- * ({@link panoramaWithSun}, or {@link renderSkyBackground}'s `sun`): a time of
- * day. An imported panorama paints its own sun, so its alpha is 0.
- */
-export function bakeSkyPanorama(
-  sky: ProceduralSky,
-  width: number,
-  height: number,
-  imported: DecodedTexture | null = null,
-  options: { readonly sunLayer?: boolean } = {},
-): DecodedTexture {
-  const sunLayer = options.sunLayer === true;
-  // Sky objects (I6), framed once; shaded per texel in front of the sky.
-  const objects = prepareSkyObjects(sky.objects ?? [], sky.sunDirection);
-  const pixel = Math.PI / height;
-  if (imported) {
-    // An imported panorama (I6) stands in for the procedural sky: resampled, then the objects laid over it.
-    const map = resamplePanorama(imported, width, height, sky.panorama?.yaw ?? 0, sky.panorama && !isRadiance(sky.panorama.mime) ? sky.panorama.exposure : 1);
-    if (objects.length > 0) {
-      const sl = Math.hypot(sky.sunDirection[0], sky.sunDirection[1], sky.sunDirection[2]) || 1;
-      const sun = [sky.sunDirection[0] / sl, sky.sunDirection[1] / sl, sky.sunDirection[2] / sl] as const;
-      for (let y = 0; y < height; y += 1) {
-        const theta = ((y + 0.5) / height) * Math.PI;
-        const st = Math.sin(theta);
-        for (let x = 0; x < width; x += 1) {
-          const phi = ((x + 0.5) / width - 0.5) * 2 * Math.PI;
-          const [or, og, ob, oa] = skyObjectsAt(objects, [st * Math.cos(phi), Math.cos(theta), st * Math.sin(phi)], sun, sky.horizon, pixel);
-          if (oa <= 0) continue;
-          const o = (y * width + x) * 4;
-          map.data[o] = map.data[o]! + (or * 255 - map.data[o]!) * oa;
-          map.data[o + 1] = map.data[o + 1]! + (og * 255 - map.data[o + 1]!) * oa;
-          map.data[o + 2] = map.data[o + 2]! + (ob * 255 - map.data[o + 2]!) * oa;
-        }
-      }
-    }
-    if (sunLayer) for (let i = 3; i < map.data.length; i += 4) map.data[i] = 0;
-    return map;
-  }
-  const data = new Uint8ClampedArray(width * height * 4);
-  const sl = Math.hypot(sky.sunDirection[0], sky.sunDirection[1], sky.sunDirection[2]) || 1;
-  const sun = [sky.sunDirection[0] / sl, sky.sunDirection[1] / sl, sky.sunDirection[2] / sl] as const;
-  const sunAzimuth = Math.atan2(sun[2], sun[0]);
+/** A sky's mountain ranges across a panorama `width` texels wide: each column's ridge height (radians of elevation) and slope. */
+function skyRidges(sky: ProceduralSky, width: number): Ridge[] {
   const DEG = Math.PI / 180;
-
   // Per-column ridge heights (radians of elevation) and slopes, one row per
   // range. Longitude is sampled on a circle so the silhouette wraps seamlessly.
-  const ridges = sky.mountains.map((range) => {
+  return sky.mountains.map((range) => {
     const heights = new Float32Array(width);
     const radius = Math.max(1, range.peaks) / (2 * Math.PI);
     for (let x = 0; x < width; x += 1) {
@@ -491,6 +443,188 @@ export function bakeSkyPanorama(
     }
     return { range, heights, slopes };
   });
+}
+
+interface Ridge {
+  readonly range: ProceduralSky["mountains"][number];
+  readonly heights: Float32Array;
+  readonly slopes: Float32Array;
+}
+
+/**
+ * The painted landscape over one texel (the misty valley below the horizon and
+ * the mountain ranges, far to near), laid over `rgb` in place. `horizon` is the
+ * colour the ranges' aerial perspective fades toward. Returns how much of the
+ * texel the landscape covers (0..1).
+ */
+function paintLandscape(
+  sky: ProceduralSky,
+  ridges: readonly Ridge[],
+  rgb: [number, number, number],
+  x: number,
+  height: number,
+  phi: number,
+  elevation: number,
+  dir: readonly [number, number, number],
+  sunAzimuth: number,
+  horizon: Rgb,
+): number {
+  const [dx, dy, dz] = dir;
+  let [r, gg, b] = rgb;
+  let clear = 1;
+  // Below the horizon: a misty valley / cloud sea.
+  if (elevation < 0) {
+    const depth = smoothstep(0, 0.35, -elevation);
+    const k = 1 / (-dy + 0.05);
+    const mist = fbm(dx * k * 0.8 + 5, dz * k * 0.8 - 9, sky.seed + 51, 4);
+    const tone = 0.85 + 0.3 * mist;
+    const br = sky.below[0] * tone;
+    const bg = sky.below[1] * tone;
+    const bb = sky.below[2] * tone;
+    const m = smoothstep(0, 0.06, -elevation);
+    r += (br * (1 - depth * 0.25) - r) * m;
+    gg += (bg * (1 - depth * 0.25) - gg) * m;
+    b += (bb * (1 - depth * 0.2) - b) * m;
+    clear *= 1 - m;
+  }
+
+  // Mountains, far to near: each covers the band from a little below the
+  // horizon (where the valley mist swallows its base) up to its ridge line.
+  for (const { range, heights, slopes } of ridges) {
+    const ridge = heights[x]!;
+    if (elevation > ridge || elevation < -MOUNTAIN_BASE) continue;
+    // Height up the face, 0 at the horizon .. 1 at the crest.
+    const along = Math.max(0, elevation) / ridge;
+    // Isotropic noise in angle space (one unit ≈ 2.4°), so the faces break up
+    // into snowfields and rock bands rather than vertical barcode stripes.
+    // Octaves stop well above the bake's texel size, or the pattern aliases
+    // into blocks once the panorama is magnified onto a 720p screen.
+    const ax = phi * 24;
+    const ay = elevation * 24;
+    const patch = fbm(ax + range.seed, ay * 1.3, range.seed + 5, 3);
+    const ribs = ridged(ax * 1.2, ay * 0.45, range.seed + 9, 3);
+    // Snow on the upper faces, broken by rock ribs running down the slope.
+    const snowEdge = range.snowLine + (patch - 0.5) * 0.6;
+    let snow = smoothstep(snowEdge - 0.18, snowEdge + 0.18, along);
+    snow *= 1 - smoothstep(0.5, 0.9, ribs) * 0.8;
+    snow = Math.max(snow, smoothstep(0.85, 1, along) * 0.7); // wind-packed crests
+    // Faces turned toward the sun's azimuth are lit, the others in cold shadow.
+    const slope = slopes[x]!;
+    const facing = Math.tanh(-Math.sin(phi - sunAzimuth) * slope * 3);
+    const light = 0.66 + 0.34 * Math.max(-0.5, Math.min(1, facing + 0.25));
+    const grain = 0.9 + 0.2 * patch;
+    let mr = (range.rock[0] + (range.snow[0] - range.rock[0]) * snow) * light * grain;
+    let mg = (range.rock[1] + (range.snow[1] - range.rock[1]) * snow) * light * grain;
+    let mb = (range.rock[2] + (range.snow[2] - range.rock[2]) * snow) * light * grain;
+    // Aerial perspective, heavier toward the base where the valley mist rises.
+    const base = 1 - smoothstep(0, 0.45, along);
+    const haze = Math.min(1, range.haze + base * 0.45);
+    mr += (horizon[0] - mr) * haze;
+    mg += (horizon[1] - mg) * haze;
+    mb += (horizon[2] - mb) * haze;
+    // Soft anti-aliased crest, and the base dissolving into the mist below.
+    const edge =
+      smoothstep(0, (0.35 * Math.PI) / height, ridge - elevation) *
+      smoothstep(-MOUNTAIN_BASE, 0, elevation);
+    r += (mr - r) * edge;
+    gg += (mg - gg) * edge;
+    b += (mb - b) * edge;
+    clear *= 1 - edge;
+  }
+
+  rgb[0] = r;
+  rgb[1] = gg;
+  rgb[2] = b;
+  return 1 - clear;
+}
+
+/**
+ * Bake a {@link ProceduralSky} into an equirectangular panorama (`width × height`,
+ * longitude = atan2(z, x) across, latitude top→bottom), matching the projection
+ * `sampleEnvironmentDir` reads. Deterministic for a given sky and size.
+ *
+ * With `sunLayer`, the sun's glow is left out and its alpha holds how much of
+ * the glow each texel lets through — less under cloud, none on a mountain or
+ * the valley mist — so the glow can be drawn toward any sun later
+ * ({@link panoramaWithSun}, or {@link renderSkyBackground}'s `sun`): a time of
+ * day. An imported panorama paints its own sun, so its alpha is 0.
+ */
+export function bakeSkyPanorama(
+  sky: ProceduralSky,
+  width: number,
+  height: number,
+  imported: DecodedTexture | null = null,
+  options: {
+    readonly sunLayer?: boolean;
+    /**
+     * Over an imported panorama only: alpha is how much of each texel the painted sky covers (its objects
+     * and, for a physical sky with its landscape, the mist and the ranges), so they can be laid over the
+     * AAA tier's per-pixel sky (F11a-9).
+     */
+    readonly coverage?: boolean;
+  } = {},
+): DecodedTexture {
+  const sunLayer = options.sunLayer === true;
+  // Sky objects (I6), framed once; shaded per texel in front of the sky.
+  const objects = prepareSkyObjects(sky.objects ?? [], sky.sunDirection);
+  const pixel = Math.PI / height;
+  if (imported) {
+    // An imported panorama (I6) stands in for the procedural sky: resampled, then the objects laid over it.
+    const map = resamplePanorama(imported, width, height, sky.panorama?.yaw ?? 0, sky.panorama && !isRadiance(sky.panorama.mime) ? sky.panorama.exposure : 1);
+    // A physical sky (F5a) can keep the painted landscape in front of it (F11a-9): the valley mist and the ranges.
+    const ridges = sky.atmosphere?.landscape === true ? skyRidges(sky, width) : null;
+    const coverage = options.coverage === true;
+    if (objects.length > 0 || ridges || coverage) {
+      const sl = Math.hypot(sky.sunDirection[0], sky.sunDirection[1], sky.sunDirection[2]) || 1;
+      const sun = [sky.sunDirection[0] / sl, sky.sunDirection[1] / sl, sky.sunDirection[2] / sl] as const;
+      const sunAzimuth = Math.atan2(sun[2], sun[0]);
+      // The ranges fade into the sky behind them: the panorama's own horizon, column by column.
+      const horizonRow = Math.min(height - 1, Math.floor(height / 2));
+      const horizonSky = map.data.slice(horizonRow * width * 4, (horizonRow + 1) * width * 4);
+      const shade: [number, number, number] = [0, 0, 0];
+      for (let y = 0; y < height; y += 1) {
+        const theta = ((y + 0.5) / height) * Math.PI;
+        const elevation = Math.PI / 2 - theta;
+        const st = Math.sin(theta);
+        for (let x = 0; x < width; x += 1) {
+          const phi = ((x + 0.5) / width - 0.5) * 2 * Math.PI;
+          const dir = [st * Math.cos(phi), Math.cos(theta), st * Math.sin(phi)] as const;
+          const o = (y * width + x) * 4;
+          let clear = 1;
+          if (objects.length > 0) {
+            const [or, og, ob, oa] = skyObjectsAt(objects, dir, sun, sky.horizon, pixel);
+            if (oa > 0) {
+              map.data[o] = map.data[o]! + (or * 255 - map.data[o]!) * oa;
+              map.data[o + 1] = map.data[o + 1]! + (og * 255 - map.data[o + 1]!) * oa;
+              map.data[o + 2] = map.data[o + 2]! + (ob * 255 - map.data[o + 2]!) * oa;
+              clear *= 1 - oa;
+            }
+          }
+          if (ridges && elevation < Math.PI / 2 - 0.01) {
+            const h = x * 4;
+            shade[0] = map.data[o]! / 255;
+            shade[1] = map.data[o + 1]! / 255;
+            shade[2] = map.data[o + 2]! / 255;
+            const covered = paintLandscape(sky, ridges, shade, x, height, phi, elevation, dir, sunAzimuth, [horizonSky[h]! / 255, horizonSky[h + 1]! / 255, horizonSky[h + 2]! / 255]);
+            if (covered > 0) {
+              map.data[o] = shade[0] * 255;
+              map.data[o + 1] = shade[1] * 255;
+              map.data[o + 2] = shade[2] * 255;
+              clear *= 1 - covered;
+            }
+          }
+          if (coverage) map.data[o + 3] = (1 - clear) * 255;
+        }
+      }
+    }
+    if (sunLayer && !coverage) for (let i = 3; i < map.data.length; i += 4) map.data[i] = 0;
+    return map;
+  }
+  const data = new Uint8ClampedArray(width * height * 4);
+  const sl = Math.hypot(sky.sunDirection[0], sky.sunDirection[1], sky.sunDirection[2]) || 1;
+  const sun = [sky.sunDirection[0] / sl, sky.sunDirection[1] / sl, sky.sunDirection[2] / sl] as const;
+  const sunAzimuth = Math.atan2(sun[2], sun[0]);
+  const ridges = skyRidges(sky, width);
 
   for (let y = 0; y < height; y += 1) {
     const theta = ((y + 0.5) / height) * Math.PI; // 0 = straight up
@@ -552,65 +686,10 @@ export function bakeSkyPanorama(
         b += sky.sunColor[2] * glow * sunVis;
       }
 
-      // Below the horizon: a misty valley / cloud sea.
-      if (elevation < 0) {
-        const depth = smoothstep(0, 0.35, -elevation);
-        const k = 1 / (-dy + 0.05);
-        const mist = fbm(dx * k * 0.8 + 5, dz * k * 0.8 - 9, sky.seed + 51, 4);
-        const tone = 0.85 + 0.3 * mist;
-        const br = sky.below[0] * tone;
-        const bg = sky.below[1] * tone;
-        const bb = sky.below[2] * tone;
-        const m = smoothstep(0, 0.06, -elevation);
-        r += (br * (1 - depth * 0.25) - r) * m;
-        gg += (bg * (1 - depth * 0.25) - gg) * m;
-        b += (bb * (1 - depth * 0.2) - b) * m;
-        sunVis *= 1 - m;
-      }
-
-      // Mountains, far to near: each covers the band from a little below the
-      // horizon (where the valley mist swallows its base) up to its ridge line.
-      for (const { range, heights, slopes } of ridges) {
-        const ridge = heights[x]!;
-        if (elevation > ridge || elevation < -MOUNTAIN_BASE) continue;
-        // Height up the face, 0 at the horizon .. 1 at the crest.
-        const along = Math.max(0, elevation) / ridge;
-        // Isotropic noise in angle space (one unit ≈ 2.4°), so the faces break up
-        // into snowfields and rock bands rather than vertical barcode stripes.
-        // Octaves stop well above the bake's texel size, or the pattern aliases
-        // into blocks once the panorama is magnified onto a 720p screen.
-        const ax = phi * 24;
-        const ay = elevation * 24;
-        const patch = fbm(ax + range.seed, ay * 1.3, range.seed + 5, 3);
-        const ribs = ridged(ax * 1.2, ay * 0.45, range.seed + 9, 3);
-        // Snow on the upper faces, broken by rock ribs running down the slope.
-        const snowEdge = range.snowLine + (patch - 0.5) * 0.6;
-        let snow = smoothstep(snowEdge - 0.18, snowEdge + 0.18, along);
-        snow *= 1 - smoothstep(0.5, 0.9, ribs) * 0.8;
-        snow = Math.max(snow, smoothstep(0.85, 1, along) * 0.7); // wind-packed crests
-        // Faces turned toward the sun's azimuth are lit, the others in cold shadow.
-        const slope = slopes[x]!;
-        const facing = Math.tanh(-Math.sin(phi - sunAzimuth) * slope * 3);
-        const light = 0.66 + 0.34 * Math.max(-0.5, Math.min(1, facing + 0.25));
-        const grain = 0.9 + 0.2 * patch;
-        let mr = (range.rock[0] + (range.snow[0] - range.rock[0]) * snow) * light * grain;
-        let mg = (range.rock[1] + (range.snow[1] - range.rock[1]) * snow) * light * grain;
-        let mb = (range.rock[2] + (range.snow[2] - range.rock[2]) * snow) * light * grain;
-        // Aerial perspective, heavier toward the base where the valley mist rises.
-        const base = 1 - smoothstep(0, 0.45, along);
-        const haze = Math.min(1, range.haze + base * 0.45);
-        mr += (sky.horizon[0] - mr) * haze;
-        mg += (sky.horizon[1] - mg) * haze;
-        mb += (sky.horizon[2] - mb) * haze;
-        // Soft anti-aliased crest, and the base dissolving into the mist below.
-        const edge =
-          smoothstep(0, (0.35 * Math.PI) / height, ridge - elevation) *
-          smoothstep(-MOUNTAIN_BASE, 0, elevation);
-        r += (mr - r) * edge;
-        gg += (mg - gg) * edge;
-        b += (mb - b) * edge;
-        sunVis *= 1 - edge;
-      }
+      // The painted landscape: the misty valley and the mountains, over the sky and its glow.
+      const shade: [number, number, number] = [r, gg, b];
+      sunVis *= 1 - paintLandscape(sky, ridges, shade, x, height, phi, elevation, [dx, dy, dz], sunAzimuth, sky.horizon);
+      [r, gg, b] = shade;
 
       const o = (y * width + x) * 4;
       data[o] = r * 255;

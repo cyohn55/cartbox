@@ -19,6 +19,8 @@
 import { parsePhysicalCamera, type PhysicalCameraSettings } from "./physicalCamera";
 import { readIesProfile } from "./iesProfile";
 import { parseVolumetricFog } from "./volumetricFog";
+import { canRelight, parsePhysicalRelight, physicalRelight, type PhysicalRelightSettings } from "./physicalRelight";
+import { parseAlbedoCalibration, type AlbedoCalibration } from "./albedoCalibration";
 import { parseDynamicGi, parseScreenSpaceGi, type DynamicGiSettings, type ScreenSpaceGiSettings } from "./dynamicGi";
 import { parseAtmosphere } from "./atmosphere";
 import { parseWeather, type WeatherSettings } from "./weather";
@@ -164,7 +166,31 @@ export interface SceneLighting {
    * how the scene looks are the same either way.
    */
   readonly units?: "physical";
+  /**
+   * The rig's physical re-light on the AAA tier (AAA_FIDELITY_ROADMAP.md
+   * F11a-10): what it changes there, merged over the rig wherever the frame is
+   * linear light (`aaaLighting`). Each key replaces the rig's; null removes an
+   * optional part (a probe grid baked under the other tiers' light, say).
+   * Every other tier lights by the rig as authored. Absent: the same rig everywhere.
+   */
+  readonly aaa?: SceneLightingOverride | null;
+  /**
+   * Calibrate the materials' albedos at load (AAA_FIDELITY_ROADMAP.md
+   * F11a-13; albedoCalibration.ts): each opaque material's base colour scaled
+   * into the physical range, or onto a measured target by name. A physical
+   * re-light sets it, so only the AAA tier takes it. Absent: as authored.
+   */
+  readonly materialAlbedo?: AlbedoCalibration | null;
 }
+
+/**
+ * A rig's AAA re-light: the keys it changes (null removes an optional one), and
+ * optionally a physical re-light derived from the rig at load (F11a-11; see
+ * physicalRelight.ts), which the other keys then patch.
+ */
+export type SceneLightingOverride = { readonly [K in Exclude<keyof SceneLighting, "aaa">]?: SceneLighting[K] | null } & {
+  readonly physical?: PhysicalRelightSettings;
+};
 
 /** Entries a rig's tint list may hold: the palette's 15 colours after the unused 0. */
 export const MAX_SCENE_TINTS = 16;
@@ -273,6 +299,8 @@ export function parseSceneLighting(raw: unknown): SceneLighting | null {
   const postVolumes = readPostVolumes(record.postVolumes);
   const autoExposure = readAutoExposure(record.autoExposure);
   const camera = parsePhysicalCamera(record.camera);
+  const aaa = parseLightingOverride(record, record.aaa);
+  const materialAlbedo = parseAlbedoCalibration(record.materialAlbedo);
 
   return {
     environment: {
@@ -307,7 +335,61 @@ export function parseSceneLighting(raw: unknown): SceneLighting | null {
     ...(autoExposure ? { autoExposure } : {}),
     ...(camera ? { camera } : {}),
     ...(record.units === "physical" ? { units: "physical" as const } : {}),
+    ...(aaa ? { aaa } : {}),
+    ...(materialAlbedo ? { materialAlbedo } : {}),
   };
+}
+
+/**
+ * A rig's AAA re-light, read as the rig would read it merged over `base` (so a
+ * key is clamped and defaulted as the rig's own), keeping only the keys it names.
+ */
+function parseLightingOverride(base: Record<string, unknown>, value: unknown): SceneLightingOverride | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const patch = value as Record<string, unknown>;
+  const merged = parseSceneLighting({ ...base, ...patch, physical: undefined, aaa: null }) as unknown as Record<string, unknown> | null;
+  if (!merged) return null;
+  const out: Record<string, unknown> = {};
+  for (const key of Object.keys(patch)) {
+    if (key === "aaa") continue;
+    if (key === "physical") {
+      const physical = parsePhysicalRelight(patch.physical);
+      if (physical) out.physical = physical;
+      continue;
+    }
+    // Only an optional part can be removed; a rig always has its environment, exposure and lights.
+    if (patch[key] === null) {
+      if (!REQUIRED_LIGHTING_KEYS.has(key)) out[key] = null;
+      continue;
+    }
+    if (merged[key] !== undefined) out[key] = merged[key];
+  }
+  return Object.keys(out).length > 0 ? (out as SceneLightingOverride) : null;
+}
+
+const REQUIRED_LIGHTING_KEYS = new Set(["environment", "ambient", "exposure", "tonemap", "shadows", "lights"]);
+
+const relit = new WeakMap<SceneLighting, SceneLighting>();
+
+/**
+ * The rig as the AAA tier lights by it (F11a-10): its re-light merged over it,
+ * the keys set to null removed. The same object for the same rig, so a renderer
+ * that keys its caches by the rig keeps them. A rig without one is returned as it is.
+ */
+export function aaaLighting(lighting: SceneLighting): SceneLighting {
+  const patch = lighting.aaa;
+  if (!patch) return lighting;
+  const cached = relit.get(lighting);
+  if (cached) return cached;
+  // A physical re-light is derived from the rig as it stands, so it follows edits to its lights and sky.
+  const { physical, ...keys } = patch;
+  const derived = physical && canRelight(lighting) ? physicalRelight(lighting, physical.atmosphere, physical.volumetric, physical.albedo) : {};
+  const out: Record<string, unknown> = { ...lighting, ...derived, ...keys };
+  delete out.aaa;
+  for (const [key, value] of Object.entries({ ...derived, ...keys })) if (value === null) delete out[key];
+  const value = out as unknown as SceneLighting;
+  relit.set(lighting, value);
+  return value;
 }
 
 /** A rig's tint overrides: colours (clamped) or nulls, at most {@link MAX_SCENE_TINTS}; null when none are set. */
@@ -570,6 +652,22 @@ export function patchSceneLighting(
   // A cleared distance goes back to fitting the scene, rather than staying as undefined.
   if ("shadowDistance" in patch && patch.shadowDistance === undefined) delete (next as { shadowDistance?: number }).shadowDistance;
   return next;
+}
+
+/** The rig without its AAA re-light (F11a-10): the AAA tier lights by it as authored, like every other tier. */
+export function clearAaaRelight(lighting: SceneLighting): SceneLighting {
+  const next = { ...lighting };
+  delete (next as { aaa?: unknown }).aaa;
+  return next;
+}
+
+/** What a rig's AAA re-light replaces there (F11a-10), a physical re-light's keys first; empty without one. */
+export function aaaRelightKeys(lighting: SceneLighting): string[] {
+  const patch = lighting.aaa;
+  if (!patch) return [];
+  const { physical, ...keys } = patch;
+  const derived = physical && canRelight(lighting) ? Object.keys(physicalRelight(lighting, physical.atmosphere, physical.volumetric, physical.albedo)) : [];
+  return [...new Set([...derived, ...Object.keys(keys)])];
 }
 
 /** Show the rig in physical units (lux, candela, nits, EV100) or the renderer's own. Nothing it renders changes. */

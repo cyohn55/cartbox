@@ -869,12 +869,76 @@ function clipNear(tri: [Vertex, Vertex, Vertex]): Vertex[] {
   return triangles;
 }
 
+/**
+ * The UV derivatives of the pixel being shaded (du/dx, dv/dx, du/dy, dv/dy in
+ * UV units per pixel), set by the triangle loop: what trilinear filtering
+ * picks its level by. Zero, it reads the top level.
+ */
+const pixelUvDerivs = new Float64Array(4);
+
+const mipChains = new WeakMap<DecodedTexture, DecodedTexture[]>();
+
+/**
+ * A texture's mip chain (F1a's trilinear for the fantasy tiers): the texture,
+ * then each level a 2×2 box average of the one above (rounded bytes; an odd
+ * edge's last texel averages with itself), down to 1×1. Every renderer that
+ * filters trilinearly uploads exactly these levels, so the three agree.
+ */
+export function textureMips(texture: DecodedTexture): readonly DecodedTexture[] {
+  const known = mipChains.get(texture);
+  if (known) return known;
+  const chain: DecodedTexture[] = [texture];
+  let level = texture;
+  while (level.width > 1 || level.height > 1) {
+    const w = Math.max(1, level.width >> 1);
+    const h = Math.max(1, level.height >> 1);
+    const data = new Uint8ClampedArray(w * h * 4);
+    for (let y = 0; y < h; y += 1) {
+      for (let x = 0; x < w; x += 1) {
+        const x0 = Math.min(level.width - 1, x * 2), x1 = Math.min(level.width - 1, x * 2 + 1);
+        const y0 = Math.min(level.height - 1, y * 2), y1 = Math.min(level.height - 1, y * 2 + 1);
+        for (let c = 0; c < 4; c += 1) {
+          const sum = level.data[(y0 * level.width + x0) * 4 + c]! + level.data[(y0 * level.width + x1) * 4 + c]! + level.data[(y1 * level.width + x0) * 4 + c]! + level.data[(y1 * level.width + x1) * 4 + c]!;
+          data[(y * w + x) * 4 + c] = (sum + 2) >> 2;
+        }
+      }
+    }
+    level = { width: w, height: h, data };
+    chain.push(level);
+  }
+  mipChains.set(texture, chain);
+  return chain;
+}
+
+/** The mip level a pixel reads a `width × height` map at, from its UV derivatives scaled by `scale` (log₂ of its footprint in texels). */
+export function mipLevelOf(width: number, height: number, derivs: ArrayLike<number>, scale = 1): number {
+  const x = Math.hypot(derivs[0]! * width, derivs[1]! * height);
+  const y = Math.hypot(derivs[2]! * width, derivs[3]! * height);
+  const footprint = Math.max(x, y) * scale;
+  return footprint > 0 ? Math.log2(footprint) : -Infinity;
+}
+
 function sampleTexture(
   texture: DecodedTexture,
   u: number,
   v: number,
   filtering: RasterStyle["textureFiltering"] = "none",
+  /** How many times the UVs are scaled at this site (a detail or far-tile map), which scales the footprint. */
+  scale = 1,
 ): [number, number, number, number] {
+  if (filtering === "trilinear") {
+    // Magnified or at the top: the top level, bilinear (as a GPU's magnification filter).
+    const lod = mipLevelOf(texture.width, texture.height, pixelUvDerivs, scale);
+    if (!(lod > 0)) return sampleTexture(texture, u, v, "bilinear");
+    const chain = textureMips(texture);
+    const top = chain.length - 1;
+    const l0 = Math.min(top, Math.floor(lod));
+    if (l0 >= top) return sampleTexture(chain[top]!, u, v, "bilinear");
+    const f = lod - l0;
+    const a = sampleTexture(chain[l0]!, u, v, "bilinear");
+    const b = sampleTexture(chain[l0 + 1]!, u, v, "bilinear");
+    return [a[0] + (b[0] - a[0]) * f, a[1] + (b[1] - a[1]) * f, a[2] + (b[2] - a[2]) * f, a[3] + (b[3] - a[3]) * f];
+  }
   // Wrap, then sample. glTF's V origin is top-left, so flip.
   const wrap = (x: number): number => x - Math.floor(x);
   const fx = wrap(u) * texture.width;
@@ -1244,10 +1308,13 @@ export interface RasterStyle {
    */
   readonly vertexPrecision: "integer" | "float";
   /**
-   * Texture magnification filter. "none" is nearest — crunchy, aliased texels.
+   * Texture filtering. "none" is nearest — crunchy, aliased texels.
    * "bilinear" is the softness of the generation that could afford to filter.
+   * "trilinear" (the N64 onward, F1a) adds a mip chain ({@link textureMips}):
+   * each pixel reads the two levels its UV footprint falls between and blends
+   * them, so a distant texture is its average rather than a flicker.
    */
-  readonly textureFiltering: "none" | "bilinear";
+  readonly textureFiltering: "none" | "bilinear" | "trilinear";
 }
 
 /** What this rasteriser has always done: depth-buffered, correct, crisp. */
@@ -2055,7 +2122,8 @@ function sampleTriplanar(texture: DecodedTexture, ox: number, oy: number, oz: nu
   for (let k = 0; k < 3; k += 1) {
     const w = weights[k]!;
     if (w <= 0) continue;
-    const s = sampleTexture(texture, uvs[k]![0], uvs[k]![1], filtering);
+    // Trilinear reads the top level here, as the shaders' triMap does: a projection's footprint isn't the UVs' (F1a).
+    const s = sampleTexture(texture, uvs[k]![0], uvs[k]![1], filtering === "trilinear" ? "bilinear" : filtering);
     out[0] += s[0] * w;
     out[1] += s[1] * w;
     out[2] += s[2] * w;
@@ -2448,6 +2516,10 @@ function rasterizeTriangle(
   // A map's texel here: by the UVs, or by triplanar projection off the geometric normal.
   const sampleMapAt = (tex: DecodedTexture, u: number, v: number, ox: number, oy: number, oz: number, nx: number, ny: number, nz: number): readonly [number, number, number, number] =>
     triplanar > 0 ? sampleTriplanar(tex, ox, oy, oz, nx, ny, nz, triplanar, style.textureFiltering) : sampleTexture(tex, u, v, style.textureFiltering);
+  // The blend surface's map at its top level (F1a): the GPUs keep it in a one-level layer stack.
+  const topFiltering = style.textureFiltering === "trilinear" ? "bilinear" : style.textureFiltering;
+  const sampleMapTop = (tex: DecodedTexture, u: number, v: number, ox: number, oy: number, oz: number, nx: number, ny: number, nz: number): readonly [number, number, number, number] =>
+    triplanar > 0 ? sampleTriplanar(tex, ox, oy, oz, nx, ny, nz, triplanar, topFiltering) : sampleTexture(tex, u, v, topFiltering);
   const refraction = behind && pbr?.refracting ? pbr.refraction : null;
   // Where a refracting fragment looks (I5), by its geometric normal facing the camera.
   const seen = (x: number, y: number, z: number, nx: number, ny: number, nz: number, wx: number, wy: number, wz: number): number => {
@@ -2529,6 +2601,18 @@ function rasterizeTriangle(
   const minY = Math.max(0, Math.floor(Math.min(sa.y, sb.y, sc.y)));
   const maxY = Math.min(height - 1, Math.ceil(Math.max(sa.y, sb.y, sc.y)));
 
+  // Trilinear filtering (F1a) reads each pixel's UV derivatives. The barycentric weights are linear in the pixel,
+  // with these steps per pixel in x and y; with perspective, u = N/D (both linear), so du = (dN·D − N·dD)/D².
+  const trilinear = style.textureFiltering === "trilinear";
+  const dw0x = (sb.y - sc.y) * invArea, dw0y = (sc.x - sb.x) * invArea;
+  const dw1x = (sc.y - sa.y) * invArea, dw1y = (sa.x - sc.x) * invArea;
+  const dw2x = (sa.y - sb.y) * invArea, dw2y = (sb.x - sa.x) * invArea;
+  const ka = style.perspectiveCorrect ? sa.invW : 1, kb = style.perspectiveCorrect ? sb.invW : 1, kc = style.perspectiveCorrect ? sc.invW : 1;
+  const dDx = dw0x * ka + dw1x * kb + dw2x * kc, dDy = dw0y * ka + dw1y * kb + dw2y * kc;
+  const dNux = dw0x * ka * a.u + dw1x * kb * b.u + dw2x * kc * c.u, dNuy = dw0y * ka * a.u + dw1y * kb * b.u + dw2y * kc * c.u;
+  const dNvx = dw0x * ka * a.v + dw1x * kb * b.v + dw2x * kc * c.v, dNvy = dw0y * ka * a.v + dw1y * kb * b.v + dw2y * kc * c.v;
+  if (!trilinear) pixelUvDerivs.fill(0);
+
   for (let y = minY; y <= maxY; y += 1) {
     for (let x = minX; x <= maxX; x += 1) {
       const px = x + 0.5;
@@ -2570,6 +2654,16 @@ function rasterizeTriangle(
       // view ray meets the relief (parallax occlusion, I4).
       let tu = pw0 * a.u + pw1 * b.u + pw2 * c.u;
       let tv = pw0 * a.v + pw1 * b.v + pw2 * c.v;
+      if (trilinear) {
+        const D = w0 * ka + w1 * kb + w2 * kc;
+        const Nu = w0 * ka * a.u + w1 * kb * b.u + w2 * kc * c.u;
+        const Nv = w0 * ka * a.v + w1 * kb * b.v + w2 * kc * c.v;
+        const inv2 = 1 / (D * D);
+        pixelUvDerivs[0] = (dNux * D - Nu * dDx) * inv2;
+        pixelUvDerivs[1] = (dNvx * D - Nv * dDx) * inv2;
+        pixelUvDerivs[2] = (dNuy * D - Nu * dDy) * inv2;
+        pixelUvDerivs[3] = (dNvy * D - Nv * dDy) * inv2;
+      }
       if (parallax > 0) {
         const glen = Math.hypot(nx, ny, nz) || 1;
         const flip = nx * viewDir[0] + ny * viewDir[1] + nz * viewDir[2] < 0 ? -glen : glen;
@@ -2659,7 +2753,7 @@ function rasterizeTriangle(
           const [fr, fg, fb, fa] =
             triplanar > 0
               ? sampleTriplanar(texture, ox, oy, oz, gnx, gny, gnz, triplanar / FAR_TILE_SCALE, style.textureFiltering)
-              : sampleTexture(texture, u * FAR_TILE_SCALE, v * FAR_TILE_SCALE, style.textureFiltering);
+              : sampleTexture(texture, u * FAR_TILE_SCALE, v * FAR_TILE_SCALE, style.textureFiltering, FAR_TILE_SCALE);
           tr += (fr - tr) * far;
           tg += (fg - tg) * far;
           tb += (fb - tb) * far;
@@ -2799,7 +2893,7 @@ function rasterizeTriangle(
         let blendB = 0;
         if (pbr.blend) {
           const [tr, tg, tb] = pbr.blend.tex
-            ? sampleMapAt(pbr.blend.tex, u, v, pw0 * a.ox + pw1 * b.ox + pw2 * c.ox, pw0 * a.oy + pw1 * b.oy + pw2 * c.oy, pw0 * a.oz + pw1 * b.oz + pw2 * c.oz, gnx, gny, gnz)
+            ? sampleMapTop(pbr.blend.tex, u, v, pw0 * a.ox + pw1 * b.ox + pw2 * c.ox, pw0 * a.oy + pw1 * b.oy + pw2 * c.oy, pw0 * a.oz + pw1 * b.oz + pw2 * c.oz, gnx, gny, gnz)
             : [255, 255, 255];
           blendR = pbr.blend.color[0] * (tr / 255);
           blendG = pbr.blend.color[1] * (tg / 255);
@@ -2884,7 +2978,7 @@ function rasterizeTriangle(
         if (pbr.detail) {
           const k = pbr.detailStrength * detailFade(pw0 * a.clip[3] + pw1 * b.clip[3] + pw2 * c.clip[3]);
           if (k > 0) {
-            const [dr, dg, db] = sampleTexture(pbr.detail, u * pbr.detailScale, v * pbr.detailScale, style.textureFiltering);
+            const [dr, dg, db] = sampleTexture(pbr.detail, u * pbr.detailScale, v * pbr.detailScale, style.textureFiltering, pbr.detailScale);
             ar *= 1 + k * ((2 * dr) / 255 - 1);
             ag *= 1 + k * ((2 * dg) / 255 - 1);
             ab *= 1 + k * ((2 * db) / 255 - 1);

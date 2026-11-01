@@ -154,6 +154,7 @@ import {
   clothTopology,
   type Capsule,
   sortTrianglesBackToFront,
+  textureMips,
 } from "@cartbox/editor";
 
 import { SoftwareSceneRenderer, applyScenePasses, type FrameState, type GpuSceneDraw, type SceneDraw, type SceneRenderer, type SunShadow } from "./sceneRenderer.js";
@@ -814,6 +815,19 @@ ${AERIAL_SAMPLE_WGSL}
 ${FOG_SAMPLE_WGSL}
 // The weather (F5e, weather.ts).
 ${WEATHER_WGSL}
+// A compressed cut-out (F1a; alpha mode 1.25): the encoder's mips average its alpha, which would thin it with
+// distance against a fixed threshold, so as its sampled level passes the top one the test turns hashed: a texel is
+// kept where its alpha beats a per-pixel threshold (interleaved gradient noise, which TAA's jitter averages), so the
+// share covered is the mean alpha a level holds: the cut-out's coverage, at any distance. Other cut-outs keep theirs.
+fn cutoutLod(duvx: vec2<f32>, duvy: vec2<f32>) -> f32 {
+  let dims = vec2<f32>(textureDimensions(tex, 0));
+  return log2(max(max(length(duvx * dims), length(duvy * dims)), 1e-8));
+}
+fn cutoutDrops(alpha: f32, lod: f32, pixel: vec2<f32>) -> bool {
+  if (u.pbr.w < 1.2) { return alpha < u.view.w; }
+  let hashed = fract(52.9829189 * fract(pixel.x * 0.06711056 + pixel.y * 0.00583715));
+  return alpha < mix(u.view.w, hashed, clamp(lod, 0.0, 1.0));
+}
 // Water (F5d, waterLook.ts).
 ${WATER_WGSL}
 // A water surface's waves (F5d): Gerstner along its flow, the FFT ocean's share and the ripples, tilting n.
@@ -1657,6 +1671,9 @@ ${hdr ? `  // A tangent lies in the surface, so it moves with the model's own 3�
 ${graphNoiseSource("wgsl")}
 // --- Living terrain (BEAVER_CREEK_ROADMAP.md B6): sampleTriplanar and heightBlend, term for term ---
 // A map by the UVs, or by triplanar projection in the mesh's space off the geometric normal.
+// One projected tap of a triplanar map: mipped on the AAA tier; at the top level on the fantasy tiers, as the software
+// rasteriser reads it (a projection's footprint isn't the UVs', so their trilinear filtering keeps to the UVs: F1a).
+fn triTap(t: texture_2d<f32>, uv: vec2<f32>) -> vec4<f32> { return ${hdr ? "textureSample(t, samp, uv)" : "textureSampleLevel(t, samp, uv, 0.0)"}; }
 fn triMap(t: texture_2d<f32>, uv: vec2<f32>, normal: vec3<f32>, objPos: vec3<f32>) -> vec4<f32> {
   if (u.terrain0.x <= 0.0) { return textureSample(t, samp, uv); }
   let n = normalize(normal);
@@ -1664,7 +1681,7 @@ fn triMap(t: texture_2d<f32>, uv: vec2<f32>, normal: vec3<f32>, objPos: vec3<f32
   var w = a * a;
   w = w / max(w.x + w.y + w.z, 1e-30);
   let p = objPos * (1.0 / u.terrain0.x);
-  return textureSample(t, samp, vec2<f32>(p.z, 1.0 - p.y)) * w.x + textureSample(t, samp, vec2<f32>(p.x, 1.0 - p.z)) * w.y + textureSample(t, samp, vec2<f32>(p.x, 1.0 - p.y)) * w.z;
+  return triTap(t, vec2<f32>(p.z, 1.0 - p.y)) * w.x + triTap(t, vec2<f32>(p.x, 1.0 - p.z)) * w.y + triTap(t, vec2<f32>(p.x, 1.0 - p.y)) * w.z;
 }
 // triMap on one layer of an array (the blend surface's, F1e).
 fn triMapLayer(t: texture_2d_array<f32>, layer: i32, uv: vec2<f32>, normal: vec3<f32>, objPos: vec3<f32>) -> vec4<f32> {
@@ -1685,7 +1702,7 @@ fn triMapFar(t: texture_2d<f32>, p0: vec2<f32>, normal: vec3<f32>, objPos: vec3<
   var w = a * a;
   w = w / max(w.x + w.y + w.z, 1e-30);
   let p = objPos * (1.0 / (u.terrain0.x / ${FAR_TILE_SCALE.toFixed(4)}));
-  return textureSample(t, samp, vec2<f32>(p.z, 1.0 - p.y)) * w.x + textureSample(t, samp, vec2<f32>(p.x, 1.0 - p.z)) * w.y + textureSample(t, samp, vec2<f32>(p.x, 1.0 - p.y)) * w.z;
+  return triTap(t, vec2<f32>(p.z, 1.0 - p.y)) * w.x + triTap(t, vec2<f32>(p.x, 1.0 - p.z)) * w.y + triTap(t, vec2<f32>(p.x, 1.0 - p.y)) * w.z;
 }
 fn farTileBlend(depth: f32, distance: f32) -> f32 {
   let t = clamp((depth - distance * 0.25) / (distance * 0.75), 0.0, 1.0);
@@ -1859,7 +1876,7 @@ ${g.base}${g.pdo ? `
   }
   if (colour.a * 255.0 < 1.0) { discard; }
   // A cut-out surface (EP6) drops what's below its threshold.
-  if (u.pbr.w > 0.5 && u.pbr.w < 1.5 && ${hdr ? "select((colour.a < u.view.w), !charDitherKeeps(colour.a, in.pos.xy), u.char1.x > 0.5 && charKind() == 3)" : "colour.a < u.view.w"}) { discard; }
+  if (u.pbr.w > 0.5 && u.pbr.w < 1.5 && ${hdr ? "select(cutoutDrops(colour.a, cutoutLod(duv1, duv2), in.pos.xy), !charDitherKeeps(colour.a, in.pos.xy), u.char1.x > 0.5 && charKind() == 3)" : "colour.a < u.view.w"}) { discard; }
 
   if (u.pbr.z > 0.5) {
     // Active Camo (H11): screen-door transparency, as the rasteriser drops pixels.
@@ -2100,7 +2117,7 @@ ${hdr
   ? `    // (An HDR one, F3d, lit the fill above.)
     if (u.ssaoMeta.z > 0.5) { if (!lmHdr) { amb = amb * lm0.rgb * ${LIGHTMAP_RANGE}; } }`
   : `    let lmUv = vec2<f32>(in.uv2.x, 1.0 - in.uv2.y);
-    let lm = textureSample(lmTex, samp, lmUv).rgb * ${LIGHTMAP_RANGE};
+    let lm = textureSampleLevel(lmTex, samp, lmUv, 0.0).rgb * ${LIGHTMAP_RANGE}; // the top level, as the software path reads it
     if (u.ssaoMeta.z > 0.5) { amb = amb * lm; }`}
     else if (frame.probeMin.w > 0.5 && frame.probeMin.w < 1.5) { amb = amb * probeLight(in.worldPos, N); } // EP9: no light map, the probes light it
     // Screen-space AO darkens only the ambient fill, sampled at this fragment's
@@ -2251,12 +2268,14 @@ fn vs_shadow_cut(@location(0) position: vec3<f32>, @location(2) uv: vec2<f32>, @
   out.uv = uv;
   return out;
 }
-// The scene's own cut-out test: the base colour's alpha, times its map's, against the material's threshold.
+// The scene's own cut-out test: the base colour's alpha, times its map's, against the material's threshold
+// (hashed past a compressed cut-out's top level, as the scene's is: F1a).
 @fragment
 fn fs_shadow_cut(in: CutOut) {
+  let lod = cutoutLod(dpdx(in.uv), dpdy(in.uv));
   var a = u.base.a;
   if (u.texflags.x > 0.5) { a = a * textureSample(tex, samp, vec2<f32>(in.uv.x, 1.0 - in.uv.y)).a; }
-  if (a < u.view.w) { discard; }
+  if (cutoutDrops(a, lod, in.pos.xy)) { discard; }
 }
 ` : ""}
 // --- The depth prepass and thin G-buffer (AAA_FIDELITY_ROADMAP.md F0c) ---
@@ -2353,7 +2372,7 @@ ${hdr ? "  if (in.fade != 0.0 && fadeHides(in.fade, in.pos.xy)) { discard; }\n  
   let mr = textureSample(mrTex, samp, uv);
 ${g.base}
   if (colour.a * 255.0 < 1.0) { discard; }
-  if (u.pbr.w > 0.5 && u.pbr.w < 1.5 && ${hdr ? "select((colour.a < u.view.w), !charDitherKeeps(colour.a, in.pos.xy), u.char1.x > 0.5 && charKind() == 3)" : "colour.a < u.view.w"}) { discard; }
+  if (u.pbr.w > 0.5 && u.pbr.w < 1.5 && ${hdr ? "select(cutoutDrops(colour.a, cutoutLod(duv1, duv2), in.pos.xy), !charDitherKeeps(colour.a, in.pos.xy), u.char1.x > 0.5 && charKind() == 3)" : "colour.a < u.view.w"}) { discard; }
   if (u.pbr.z > 0.5 && u.effect0.w > 0.0 && camoThreshold(in.pos.xy, u.effect1.w) < u.effect0.w) { discard; }
   var n = normalize(sNrm);
   if (dot(n, u.view.xyz) < 0.0) { n = -n; }
@@ -2629,6 +2648,9 @@ export class WebgpuSceneRenderer implements SceneRenderer {
     /** Mipmapped textures (F1a): a full chain each, made on the GPU, sampled trilinearly at 16× anisotropy. */
     readonly mips = false,
   ) {
+    // A fantasy era that filters trilinearly (the N64 onward, F1a): every map takes the software rasteriser's own
+    // chain (textureMips), so the two agree.
+    this.trilinear = !mips && style.textureFiltering === "trilinear";
     // The warm-up rasteriser must draw the same era as the GPU it stands in for.
     this.software = new SoftwareSceneRenderer(style);
     this.shadowTexture = blankShadow;
@@ -3643,8 +3665,9 @@ export class WebgpuSceneRenderer implements SceneRenderer {
         minFilter: filter,
         addressModeU: "repeat",
         addressModeV: "repeat",
-        // With mip chains (F1a): trilinear, and 16× anisotropic for surfaces seen at a glancing angle.
-        ...(mips ? { mipmapFilter: "linear", maxAnisotropy: MAX_ANISOTROPY } : {}),
+        // With mip chains (F1a): trilinear, and 16× anisotropic for surfaces seen at a glancing angle. A fantasy era
+        // that filters trilinearly takes its levels isotropically, as the software rasteriser does.
+        ...(mips ? { mipmapFilter: "linear", maxAnisotropy: MAX_ANISOTROPY } : style.textureFiltering === "trilinear" ? { mipmapFilter: "linear" } : {}),
       });
 
       // A 1x1 opaque white stands in for "no texture", so the bind group layout
@@ -4259,7 +4282,8 @@ export class WebgpuSceneRenderer implements SceneRenderer {
         eye,
         effect: entry.effect ?? null,
         time: draw.time ?? 0,
-        alpha: { mode: entry.alpha, cutoff: entry.primitive.material.alphaCutoff ?? 0.5 },
+        // A cut-out whose map uploads compressed takes the hashed test (mode 1.25, still a cut-out to every other test: F1a).
+        alpha: { mode: entry.alpha === 1 && this.compressedCutout(entry.textures.base) ? 1.25 : entry.alpha, cutoff: entry.primitive.material.alphaCutoff ?? 0.5 },
         soft: softEdges(entry.primitive.material, entry.alpha, draw.projection),
         surface: resolveSurface(entry.primitive.material, draw.time ?? 0, entry.textures.detail !== null, entry.textures.mr !== null, {
           weights: entry.primitive.blend !== undefined,
@@ -6415,12 +6439,23 @@ export class WebgpuSceneRenderer implements SceneRenderer {
    * samples (a KTX2 one, F1a) uploads that instead: a quarter of the memory,
    * its mips the encoder's. A cut-out keeps the RGBA path for its coverage.
    */
+  /** A fantasy era's trilinear filtering (F1a): maps upload with {@link textureMips}'s chain. */
+  private readonly trilinear: boolean;
+
+  /** Whether a colour map is a cut-out that uploads block-compressed (F1a): its draws take the hashed cut-out test. */
+  private compressedCutout(source: DecodedTexture | null): boolean {
+    return source !== null && this.hdr && this.mips && source.gpu !== undefined && source.gpu !== null && this.textureFormats.includes(source.gpu.format) && hasTransparency(source);
+  }
+
   private uploadTexture(source: DecodedTexture, colour = false): any {
     const cache = this.mips && colour ? this.colourTextures : this.textures;
     const cached = cache.get(source);
     if (cached) return cached;
 
-    const compressed = this.mips && source.gpu && this.textureFormats.includes(source.gpu.format) && !(colour && hasTransparency(source)) ? source.gpu : null;
+    // A cut-out's colour map uploads compressed too (F1a): its draws take the hashed test past the top level, which
+    // keeps its coverage where the encoder's averaged mips alone would thin it.
+    // (Only the linear-light renderer has the hashed test; elsewhere a cut-out keeps its coverage mips, uncompressed.)
+    const compressed = this.mips && source.gpu && this.textureFormats.includes(source.gpu.format) && (this.hdr || !(colour && hasTransparency(source))) ? source.gpu : null;
     if (compressed) {
       const texture = uploadCompressed(this.device, source.width, source.height, compressed);
       cache.set(source, texture);
@@ -6429,6 +6464,14 @@ export class WebgpuSceneRenderer implements SceneRenderer {
     // Streamed (F1b): resident at the level the feedback and the budget allow.
     if (this.streamer && Math.max(source.width, source.height) > STREAM_MIN_SIDE) {
       const texture = this.streamedTexture(source, colour, this.streamer.register(source, source.width, source.height));
+      cache.set(source, texture);
+      return texture;
+    }
+    if (this.trilinear) {
+      // The software rasteriser's chain, level for level (F1a).
+      const chain = textureMips(source);
+      const texture = this.device.createTexture({ size: { width: source.width, height: source.height }, format: "rgba8unorm", usage: 0x04 | 0x02, mipLevelCount: chain.length });
+      chain.forEach((level, i) => this.device.queue.writeTexture({ texture, mipLevel: i }, level.data, { bytesPerRow: level.width * 4, rowsPerImage: level.height }, { width: level.width, height: level.height }));
       cache.set(source, texture);
       return texture;
     }

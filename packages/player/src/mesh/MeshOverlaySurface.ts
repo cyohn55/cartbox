@@ -26,7 +26,10 @@ import { DynamicResolution, scaledSize } from "../render/dynamicResolution.js";
 import { GpuPacer, expandBilinear } from "../render/gpuPacing.js";
 import type { WaterFrame } from "../render/waterLook.js";
 import {
+  aaaLighting,
   atmosphereLighting,
+  calibratedBaseFactor,
+  type AlbedoCalibration,
   atmosphereLuts,
   atmosphereKey,
   cloudShadedLighting,
@@ -528,6 +531,8 @@ export class MeshOverlaySurface implements DisplaySurface {
    * moves the sun the metals reflect too.
    */
   private skyReflections: { small: DecodedTexture; sun: string } | null = null;
+  /** A physical sky's painted objects and landscape with their coverage (F11a-9), which the AAA backdrop lays over the air. */
+  private skyFeatures: DecodedTexture | null = null;
   /**
    * A physical sky's time of day (F5a-2): the sun its light was last rendered
    * for (null until the first frame takes the bake's), and the re-render under
@@ -786,6 +791,7 @@ export class MeshOverlaySurface implements DisplaySurface {
    * change applies on the next run). Physics bodies keep simulating where they are.
    */
   async applySceneEdits(next: MeshScene): Promise<boolean> {
+    next = relitFor(next, this.renderer);
     const before = this.scene;
     if (next.instances.length !== before.instances.length) return false;
     for (let i = 0; i < next.instances.length; i += 1) {
@@ -838,10 +844,12 @@ export class MeshOverlaySurface implements DisplaySurface {
       let environment: EnvironmentLight | null = lighting ? sceneLightingEnvironment(lighting) : null;
       let skyMap: DecodedTexture | null = null;
       let clouds: BakedCloudLayer[] = [];
+      let skyFeatures: DecodedTexture | null = null;
       if (lighting?.sky && environment) {
         const baked = await bakeSceneSky(lighting.sky, lighting, environment, this.vistas, next.bounds.center);
         skyMap = baked.map;
         clouds = baked.clouds;
+        skyFeatures = baked.features;
         environment = litBySky(environment, baked);
         this.skyReflections = { small: baked.small, sun: sunKey(skySun(lighting.sky)) };
       } else {
@@ -851,6 +859,7 @@ export class MeshOverlaySurface implements DisplaySurface {
       this.skyRelight = null;
       this.environment = environment;
       this.skyMap = skyMap;
+      this.skyFeatures = skyFeatures;
       this.startBounce();
       this.skyClouds = clouds;
       this.skyCache = null;
@@ -1051,6 +1060,8 @@ export class MeshOverlaySurface implements DisplaySurface {
     renderer: SceneRenderer = new SoftwareSceneRenderer(),
     options: MeshOverlayOptions = {},
   ): Promise<MeshOverlaySurface> {
+    // The AAA tier lights by the rig's physical re-light, where it has one (F11a-10).
+    scene = relitFor(scene, renderer);
     // Decode each distinct mesh's textures once: instances (and animation
     // frames) that share a model share its MeshAsset, so they share its maps.
     const decoded = new Map<MeshAsset, Promise<TexturedMesh>>();
@@ -1063,10 +1074,13 @@ export class MeshOverlaySurface implements DisplaySurface {
       return ktx2.then((decode) => (decode ? decode(bytes, gpuFormats.length > 0 ? { gpuFormats } : undefined) : null));
     };
     const images = new Map<EncodedImage, Promise<DecodedTexture | null>>();
+    // The AAA re-light's albedos re-measured for linear light (F11a-13), once each mesh's maps are decoded.
+    const calibration = scene.lighting?.materialAlbedo ?? null;
     const texture = (mesh: MeshAsset): Promise<TexturedMesh> => {
       let entry = decoded.get(mesh);
       if (!entry) {
-        entry = decodeMeshTextures(mesh, decodeKtx2, images, gpuFormats.length > 0);
+        const raw = decodeMeshTextures(mesh, decodeKtx2, images, gpuFormats.length > 0);
+        entry = calibration ? raw.then((t) => calibrateTextured(t, calibration)) : raw;
         decoded.set(mesh, entry);
       }
       return entry;
@@ -1079,7 +1093,7 @@ export class MeshOverlaySurface implements DisplaySurface {
     for (const [i, instance] of scene.instances.entries()) {
       const textured = streamed?.has(i) ? { mesh: instance.mesh } : await texture(instance.mesh);
       // A skinned object draws its own live copy of the mesh (same textures), posed each frame.
-      const skinned = liveCopy(instance.mesh, renderer.gpuSkinning === true);
+      const skinned = liveCopy(textured.mesh ?? instance.mesh, renderer.gpuSkinning === true);
       if (skinned) live.set(i, skinned);
       const lod = liveLod(instance.lod, skinned);
       instances.push({
@@ -1095,6 +1109,7 @@ export class MeshOverlaySurface implements DisplaySurface {
     // the backdrop, a small copy is the image-based light metals reflect.
     const lighting = scene.lighting;
     let skyMap: DecodedTexture | null = null;
+    let skyFeatures: DecodedTexture | null = null;
     let clouds: BakedCloudLayer[] = [];
     let environment: EnvironmentLight | null = lighting ? sceneLightingEnvironment(lighting) : null;
     // Terrains the AAA tier draws from their heightfields (F6c): there, a vista is ground in the frame, not the sky.
@@ -1106,11 +1121,13 @@ export class MeshOverlaySurface implements DisplaySurface {
       const baked = await bakeSceneSky(lighting.sky, lighting, environment, vistas, scene.bounds.center);
       skyMap = baked.map;
       clouds = baked.clouds;
+      skyFeatures = baked.features;
       environment = litBySky(environment, baked);
       reflections = { small: baked.small, sun: sunKey(skySun(lighting.sky)) };
     }
     const surface = new MeshOverlaySurface(inner, width, height, scene, instances, frames, renderer, skyMap, environment, options);
     surface.skyClouds = clouds;
+    surface.skyFeatures = skyFeatures;
     surface.skyReflections = reflections;
     surface.startBounce();
     surface.vistas = vistas;
@@ -1872,7 +1889,12 @@ export class MeshOverlaySurface implements DisplaySurface {
     }
     const state = this.giState;
     if (state.env?.source !== env) state.env = { source: env, value: { ...env, probeVolume: env.probeVolume ?? state.empty } };
-    return { draw: { occluders: state.occluders, key: this.staticShadowKey(), settings }, environment: state.env.value };
+    // The probes a frame traces (F11a-12): the rig's budget (or the whole volume), times the quality's share.
+    const counts = state.env.value.probeVolume!.counts;
+    const share = this.quality.giShare ?? 1;
+    const budget = share >= 1 ? settings.probesPerFrame : Math.max(8, Math.round((settings.probesPerFrame || counts[0] * counts[1] * counts[2]) * share));
+    const traced = budget === settings.probesPerFrame ? settings : { ...settings, probesPerFrame: budget };
+    return { draw: { occluders: state.occluders, key: this.staticShadowKey(), settings: traced }, environment: state.env.value };
   }
   /** What stands still in the scene, as the BVH tracers take it (F3e's live GI, F3f's Epic reflections), gathered once a scene. */
   private stillOccluders(): { mesh: MeshAsset; model: Mat4 }[] {
@@ -1906,7 +1928,7 @@ export class MeshOverlaySurface implements DisplaySurface {
     // A volumetric cloud layer (F5c): its settings, the upper sky's mean light it takes in, and the wind's seconds.
     const cloudSettings = lighting!.sky?.atmosphere?.clouds;
     const clouds = cloudSettings ? { clouds: resolveClouds(cloudSettings), ambient: this.cloudAmbientFor(luts, sun.direction, sun.radiance), time: this.frame / 60 } : null;
-    return { atmosphere: sun.atmosphere, sun: sun.direction, sunRadiance: sun.radiance, disc, moon: sun.moon, stars: sun.stars, moonDisc, clouds };
+    return { atmosphere: sun.atmosphere, sun: sun.direction, sunRadiance: sun.radiance, disc, moon: sun.moon, stars: sun.stars, moonDisc, clouds, features: this.skyFeatures };
   }
 
   /** The upper sky's mean radiance under this sun (F5c's clouds take their sky light from it), kept while the sun holds still. */
@@ -3020,7 +3042,7 @@ async function bakeSceneSky(
   environment: EnvironmentLight,
   vistas: readonly VistaLayer[],
   eye: readonly [number, number, number],
-): Promise<{ map: DecodedTexture; small: DecodedTexture; reflections: DecodedTexture; clouds: BakedCloudLayer[]; hdr: HdrImage | null }> {
+): Promise<{ map: DecodedTexture; small: DecodedTexture; reflections: DecodedTexture; clouds: BakedCloudLayer[]; hdr: HdrImage | null; features: DecodedTexture | null }> {
   let imported: DecodedTexture | null = null;
   // An imported HDR sky's own light, beyond 8 bits, at the reflections' size: the AAA tier's IBL (F3a).
   let hdrLight: HdrImage | null = null;
@@ -3048,7 +3070,11 @@ async function bakeSceneSky(
   }
   // A sun layer: the sky without its sun's glow, which the backdrop and the
   // reflections draw toward wherever the sun is now (cartbox.sun3d moves it).
-  let map = bakeSkyPanorama(sky, SKY_PANORAMA_WIDTH, SKY_PANORAMA_HEIGHT, imported, { sunLayer: true });
+  // Over a physical sky, its painted objects and landscape are also kept with their coverage (F11a-9),
+  // for the AAA tier's per-pixel sky to lay over itself; the painted copy takes them as they are.
+  const painted = physical && ((sky.objects?.length ?? 0) > 0 || sky.atmosphere?.landscape === true);
+  const features = painted ? bakeSkyPanorama(sky, SKY_PANORAMA_WIDTH, SKY_PANORAMA_HEIGHT, imported, { sunLayer: true, coverage: true }) : null;
+  let map = features ? { ...features, data: features.data.map((v, i) => ((i & 3) === 3 ? 0 : v)) } : bakeSkyPanorama(sky, SKY_PANORAMA_WIDTH, SKY_PANORAMA_HEIGHT, imported, { sunLayer: true });
   const bounds = vistas.length > 0 ? vistaBounds(vistas) : null;
   if (bounds) {
     // The vistas are lit as the frame lights the near ground: the rig, the
@@ -3077,7 +3103,7 @@ async function bakeSceneSky(
   }
   const clouds = (sky.cloudLayers ?? []).map(bakeCloudLayer);
   const small = downsamplePanorama(map, SKY_IBL_DOWNSAMPLE);
-  return { map, small, reflections: skyReflectionsWith(small, skySun(sky), clouds), clouds, hdr: hdrLight };
+  return { map, small, reflections: skyReflectionsWith(small, skySun(sky), clouds), clouds, hdr: hdrLight, features };
 }
 
 /** The reflections' copy of the sky: its small sun layer with `sun`'s glow drawn in, and the clouds laid over it at rest. */
@@ -3094,6 +3120,28 @@ function physicalSunKey(sun: { readonly direction: readonly number[]; readonly r
 function sunKey(sun: SkySun): string {
   const l = Math.hypot(sun.direction[0], sun.direction[1], sun.direction[2]) || 1;
   return `${sun.direction.map((v) => Math.round((v / l) * 100)).join(",")}:${sun.color.map((v) => Math.round(v * 50)).join(",")}`;
+}
+
+/** The scene as `renderer` lights it: the AAA tier takes the rig's physical re-light (F11a-10), every other its rig as authored. */
+function relitFor(scene: MeshScene, renderer: SceneRenderer): MeshScene {
+  return renderer.sunCascades === true && scene.lighting?.aaa ? { ...scene, lighting: aaaLighting(scene.lighting) } : scene;
+}
+
+/**
+ * A decoded mesh with its materials' albedos calibrated (F11a-13): each opaque
+ * material's base colour factor scaled into the calibration's range by its
+ * map's mean. The same object when nothing changes.
+ */
+function calibrateTextured(textured: TexturedMesh, calibration: AlbedoCalibration): TexturedMesh {
+  const mesh = textured.mesh;
+  let changed = false;
+  const primitives = mesh.primitives.map((primitive, i) => {
+    const factor = calibratedBaseFactor(primitive.material, textured.textures?.[i], textured.mrTextures?.[i], calibration);
+    if (!factor) return primitive;
+    changed = true;
+    return { ...primitive, material: { ...primitive.material, baseColorFactor: factor } };
+  });
+  return changed ? { ...textured, mesh: { ...mesh, primitives } } : textured;
 }
 
 /** A mesh with every material map decoded — what an instance (or a frame) draws with. */

@@ -273,8 +273,9 @@ This lands well rather than awkwardly: a console with no depth buffer and intege
 vertices is a low-polygon, low-resolution machine, which is exactly the workload
 the software rasteriser already handles. An N64-era model — depth-buffered,
 perspective-correct, filtered — is the tier that actually needs GPU throughput,
-and it keeps it. `trilinear` maps to bilinear on *both* backends until a mip
-chain exists, so parity holds and both gain real trilinear at once.
+and it keeps it. `trilinear` is real trilinear on every backend: the software
+rasteriser, WebGL2 and WebGPU build the same mip chain and pick each pixel's level
+from its UV footprint, so parity holds (AAA_FIDELITY_ROADMAP.md F1a-4).
 
 **Enforcement choices worth knowing**, since both are visible to creators:
 

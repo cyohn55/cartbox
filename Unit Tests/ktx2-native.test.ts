@@ -217,3 +217,110 @@ describe.skipIf(!device)("on a real device", { timeout: 60_000 }, () => {
     expect(max).toBeLessThan(32);
   });
 });
+
+// --- A compressed cut-out (F1a): the encoder's mips, and the hashed test that keeps its coverage ---
+
+async function settled<T>(promise: Promise<T>): Promise<T> {
+  let done = false;
+  void promise.then(
+    () => (done = true),
+    () => (done = true),
+  );
+  await until(() => done, 800);
+  return promise;
+}
+
+function half16(h: number): number {
+  const e = (h >> 10) & 0x1f;
+  const m = h & 0x3ff;
+  const s = h & 0x8000 ? -1 : 1;
+  return e === 0 ? s * 2 ** -14 * (m / 1024) : s * 2 ** (e - 15) * (1 + m / 1024);
+}
+
+describe("a cut-out's colour map, compressed", () => {
+  // Grass-card-like alpha: a solid disc covering about half the texture, its rim at the cutoff.
+  const n = 64;
+  const card: DecodedTexture = (() => {
+    const data = new Uint8ClampedArray(n * n * 4);
+    for (let y = 0; y < n; y += 1) {
+      for (let x = 0; x < n; x += 1) {
+        const r = Math.hypot(x + 0.5 - n / 2, y + 0.5 - n / 2) / (n / 2);
+        data.set([80, 200, 60, r < 0.8 ? 255 : 0], (y * n + x) * 4);
+      }
+    }
+    return { width: n, height: n, data };
+  })();
+  const decoded = transcodeKtx2(transcoder, encodeKtx2(encoder, card, "color")!, { gpuFormats: ["bc7-rgba-unorm"] })!;
+
+  it("keeps its alpha in BC7, and the encoder's mips average it: against a fixed cutoff they thin away", () => {
+    expect(decoded.gpu?.format).toBe("bc7-rgba-unorm");
+    // Box-averaged alpha over the disc's rim: the share passing 0.5 at a coarse level, from the top level's alpha.
+    const at = (size: number) => {
+      const step = n / size;
+      let kept = 0;
+      for (let y = 0; y < size; y += 1) {
+        for (let x = 0; x < size; x += 1) {
+          let sum = 0;
+          for (let j = 0; j < step; j += 1) for (let i = 0; i < step; i += 1) sum += card.data[((y * step + j) * n + x * step + i) * 4 + 3]!;
+          if (sum / (step * step) >= 128) kept += 1;
+        }
+      }
+      return kept / (size * size);
+    };
+    // Half covered at the top; a 2×2 level averages each quarter to under the cutoff, and nothing passes.
+    expect(Math.abs(at(64) - 0.5)).toBeLessThan(0.05);
+    expect(at(2)).toBe(0);
+  });
+
+  it.skipIf(!device)("is drawn with the hashed test far off, so a field of cards stays about half covered", { timeout: 60_000 }, async () => {
+    const W = 96;
+    const H = 64;
+    const quad = {
+      name: "cards",
+      primitives: [
+        {
+          positions: Float32Array.from([-1, 0, -1, 1, 0, -1, 1, 0, 1, -1, 0, 1]),
+          normals: Float32Array.from([0, 1, 0, 0, 1, 0, 0, 1, 0, 0, 1, 0]),
+          uvs: Float32Array.from([0, 0, 24, 0, 24, 24, 0, 24]),
+          indices: Uint32Array.from([0, 1, 2, 0, 2, 3]),
+          material: { name: "card", baseColorFactor: [1, 1, 1, 1], baseColorImage: null, metallicFactor: 0, roughnessFactor: 1, alphaMode: "mask", alphaCutoff: 0.5 },
+        },
+      ],
+    } as unknown as MeshAsset;
+    const field: MeshSceneInstance[] = [{ mesh: quad, model: composeModelMatrix([0, 0, -34], [0, 0, 0], [40, 1, 40]), textures: [decoded] }];
+    const renderer = (await WebgpuSceneRenderer.create(device, W, H, { ...DEFAULT_RASTER_STYLE, textureFiltering: "bilinear" }, { hdr: true, mips: true }))!;
+    expect(renderer.textureFormats).toContain("bc7-rgba-unorm");
+    device.pushErrorScope("validation");
+    const texture = renderer.renderToTexture!(field, {
+      width: W,
+      height: H,
+      view: viewMatrix([0, 1.2, 6], [0, 0, -20]),
+      projection: projectionMatrix(Math.PI / 3, W / H, 0.1, 200),
+      lightDirection: [0, -1, 0],
+      ambient: 0.6,
+      lights: [],
+    } as any);
+    const error = await settled(device.popErrorScope());
+    expect(error ? String((error as any).message ?? error) : null).toBeNull();
+    const bytesPerRow = Math.ceil((W * 8) / 256) * 256;
+    const buffer = device.createBuffer({ size: bytesPerRow * H, usage: 0x01 | 0x08 });
+    const encoder2 = device.createCommandEncoder();
+    encoder2.copyTextureToBuffer({ texture }, { buffer, bytesPerRow, rowsPerImage: H }, { width: W, height: H });
+    device.queue.submit([encoder2.finish()]);
+    await settled(buffer.mapAsync(0x01));
+    const halves = new Uint16Array(buffer.getMappedRange().slice(0));
+    buffer.unmap();
+    renderer.dispose();
+    // Far, but not the farthest: the rows just below the horizon, where each card is a fraction of a pixel.
+    let drawn = 0;
+    let total = 0;
+    for (let y = 32; y < 41; y += 1) {
+      for (let x = 8; x < W - 8; x += 1) {
+        total += 1;
+        if (half16(halves[(y * bytesPerRow) / 2 + x * 4 + 3]!) > 0.5) drawn += 1;
+      }
+    }
+    // The disc covers π·0.8²/4 ≈ 50% of each tile; with averaged mips against the cutoff, these rows would be bare.
+    expect(Math.abs(drawn / total - 0.5)).toBeLessThan(0.12);
+  });
+});

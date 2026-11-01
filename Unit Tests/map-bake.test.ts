@@ -53,7 +53,7 @@ describe.skipIf(!id)(`baking map "${id}"`, () => {
 /**
  * The texture bake (AAA_FIDELITY_ROADMAP.md F1a): every image of the map's
  * sidecar encoded to KTX2 with its mip chain — or left as it is ("") when it
- * is a cut-out's colour map, one of an occlusion and relief pair, or not a PNG.
+ * is one of an occlusion and relief pair, or not a PNG.
  */
 async function bakeTexturesSource(id: string): Promise<string | null> {
   const map = MAP_BAKES[id]!;
@@ -68,9 +68,8 @@ async function bakeTexturesSource(id: string): Promise<string | null> {
     if (image.packed || image.mime !== "image/png") continue;
     const png = PNG.sync.read(Buffer.from(base64ToBytes(image.base64)));
     const texture = { width: png.width, height: png.height, data: new Uint8ClampedArray(png.data.buffer, png.data.byteOffset, png.data.byteLength) };
-    let seeThrough = false;
-    for (let i = 3; i < texture.data.length; i += 4) if (texture.data[i]! < 255) seeThrough = true;
-    if (seeThrough && image.kind === "color") continue;
+    // A cut-out's colour map too (F1a): the AAA renderer tests it hashed past its top level, which keeps the
+    // coverage the encoder's averaged mips would thin.
     const ktx2 = encodeKtx2(encoder, texture, image.kind);
     if (!ktx2) continue;
     table[image.key] = bytesToBase64(ktx2);
