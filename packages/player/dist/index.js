@@ -12560,6 +12560,11 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
     this.unrefracted = /* @__PURE__ */ new WeakMap();
     /** First-person mode: draw the meshes first, then the cart's 2D frame as a HUD on top. */
     this.hud = false;
+    /**
+     * Draw the sky dome behind the scene without the HUD: an editor's own camera
+     * looking round a first-person cart's world, which drops the HUD but not the sky.
+     */
+    this.backdrop = false;
     /** The same shape for a flat scene, built on first use when physics bodies move it. */
     this.flat = null;
     /** World matrices of the objects physics moved this frame (see setBodyOverrides). */
@@ -13233,6 +13238,14 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
     this.hud = on;
   }
   /**
+   * Keep the sky dome behind the scene with the HUD off. The player sets it while
+   * an editor's camera looks round a first-person cart's world: the cart's 2D
+   * frame (its HUD, and whatever it painted for a sky) is left out, the sky isn't.
+   */
+  setSkyBackdrop(on) {
+    this.backdrop = on;
+  }
+  /**
    * Set the per-instance poses a cart published this frame (empty to leave every
    * instance at its authored transform). The player calls this each frame from the
    * decoded mesh-pose mailbox; a pose composes on top of the instance's authored
@@ -13458,7 +13471,7 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
     const local = casting && !cascaded ? this.buildLocalShadows(rig, moved) : null;
     const localShadowCasters = casting && cascaded && rig.some(castsLocalShadow) ? sunShadow?.casters ?? this.castersNow(moved) : null;
     const lights = local ? local.lights : rig;
-    const skyBackdrop = this.hud && this.skyMap !== null;
+    const skyBackdrop = (this.hud || this.backdrop) && this.skyMap !== null;
     if (skyBackdrop && !gpu) this.paintSky(out, width, height, camera.view, camera.projection, target ? 1 : this.quality.skyScale ?? SKY_BACKDROP_SCALE, lighting?.sky ? skySun(lighting.sky) : null);
     if (profiler) {
       const now = performance.now();
@@ -39733,6 +39746,7 @@ var Player = class {
         const meshCamera = decodeMeshCamera(mailbox);
         this.meshSurface.setCameraOverride(meshCamera);
         this.meshSurface.setHudMode(meshCamera?.hud ?? false);
+        this.meshSurface.setSkyBackdrop(false);
         this.meshSurface.setPoseOverrides(decodeMeshPoses(mailbox));
         if (this.runtime) {
           const cutscene = this.runtime.channel.timelineCamera(meshCamera?.hud ?? false);
@@ -39751,6 +39765,7 @@ var Player = class {
         if (this.editorCamera) {
           this.meshSurface.setCameraOverride(this.editorCamera);
           this.meshSurface.setHudMode(false);
+          this.meshSurface.setSkyBackdrop(meshCamera?.hud ?? false);
         }
       }
       if (this.worldSurface && this.console) {

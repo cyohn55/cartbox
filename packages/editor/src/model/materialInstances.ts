@@ -90,7 +90,8 @@ export function resolveInstance(material: MeshMaterial, parent: MeshMaterial): M
   if (own.has("generator") && resolved.generator) {
     const fresh: Record<string, EncodedImage | null> = {};
     for (const slot of GENERATED_SLOTS) if (!own.has(slot) && isGeneratedImage(resolved[slot])) fresh[slot] = null;
-    resolved = withGeneratedMaps({ ...resolved, ...fresh });
+    // Made again from the recipe, so uncompressed: never stored, only decoded (DEMO_QUALITY_ROADMAP.md R2).
+    resolved = withGeneratedMaps({ ...resolved, ...fresh }, false, { compress: false });
   }
   return resolved;
 }

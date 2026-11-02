@@ -87,10 +87,17 @@ describe("a material with a generator", () => {
     expect(stored.length).toBeLessThan(2000); // four 256² maps would be tens of kilobytes
     const loaded = deserializeMeshAsset(stored).primitives[0]!.material;
     expect(loaded.generator).toEqual(generator);
-    expect(loaded.baseColorImage).toBe(maps.albedo);
-    expect(loaded.normalImage).toBe(maps.normal);
-    expect(loaded.metallicRoughnessImage).toBe(maps.metallicRoughness);
-    expect(loaded.reliefImage).toBe(maps.relief);
+    // Loading makes them again uncompressed (DEMO_QUALITY_ROADMAP.md R2): never stored, only decoded,
+    // so deflating them was wasted work. The same pixels, the same maps on every load.
+    const raw = generateTextures(generator, { compress: false });
+    expect(loaded.baseColorImage).toBe(raw.albedo);
+    expect(loaded.normalImage).toBe(raw.normal);
+    expect(loaded.metallicRoughnessImage).toBe(raw.metallicRoughness);
+    expect(loaded.reliefImage).toBe(raw.relief);
+    for (const k of ["albedo", "normal", "metallicRoughness", "relief"] as const) expect(Buffer.from(decode(raw[k].bytes).data), k).toEqual(Buffer.from(decode(maps[k].bytes).data));
+    expect(raw.albedo.bytes.length).toBeGreaterThan(maps.albedo.bytes.length);
+    // And saved again, they are still left out: the recipe stands in for them.
+    expect(serializeMeshAsset(deserializeMeshAsset(stored)).length).toBeLessThan(2000);
   });
 
   it("keeps maps of its own (painted over, or detached) as images", () => {
@@ -99,7 +106,8 @@ describe("a material with a generator", () => {
     const stored = serializeMeshAsset(quad({ generator: recipe("grass"), baseColorImage: painted, normalImage: maps.normal }));
     const loaded = deserializeMeshAsset(stored).primitives[0]!.material;
     expect(Buffer.compare(Buffer.from(loaded.baseColorImage!.bytes), Buffer.from(painted.bytes))).toBe(0);
-    expect(loaded.normalImage).toBe(maps.normal);
+    // The generated normal was left out on save and is made again on load, uncompressed (R2).
+    expect(loaded.normalImage).toBe(generateTextures(recipe("grass"), { compress: false }).normal);
     // Detached ("Keep the maps"): no recipe, so every map is stored.
     const detached = serializeMeshAsset(quad({ baseColorImage: maps.albedo }));
     expect(deserializeMeshAsset(detached).primitives[0]!.material.baseColorImage).not.toBeNull();

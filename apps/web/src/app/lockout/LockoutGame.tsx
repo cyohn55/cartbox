@@ -52,6 +52,7 @@ import { lockoutSidecarWithAssets, type LockoutAssetOverlay } from "@/lib/lockou
 import { perfLine } from "@/lib/perfReadout";
 import { playableArena } from "@/lib/savedArena";
 import { loadKtx2DecoderOffThread } from "@/lib/ktx2Decoder";
+import { createSidecarLoader, type SidecarLoader, type SidecarWorker } from "@/lib/sidecarLoader";
 
 /** Where Lockout keeps its career record (it has no cart row, so it stays in this browser). */
 const LOCKOUT_SAVE_KEY = saveKey("lockout");
@@ -60,6 +61,21 @@ const LOCKOUT_SAVE_KEY = saveKey("lockout");
 const REQ_MATCHMAKE = 1;
 const REQ_CANCEL = 2;
 const REQ_MAP = 3;
+
+let sidecarLoader: SidecarLoader | null = null;
+
+/**
+ * The shipped maps' sidecars, built on a worker (DEMO_QUALITY_ROADMAP.md R2):
+ * the lobby starts the chosen map's, and Play waits for the same build, so the
+ * page doesn't freeze for the seconds a map takes to generate.
+ */
+function sidecars(): SidecarLoader {
+  sidecarLoader ??= createSidecarLoader({
+    makeWorker: typeof Worker === "undefined" ? null : () => new Worker(new URL("./sidecar.worker.ts", import.meta.url), { type: "module" }) as unknown as SidecarWorker,
+    buildHere: (mapId) => ({ json: arenaMap(mapId).sidecar(), center: arenaMap(mapId).center() }),
+  });
+  return sidecarLoader;
+}
 
 /** A saved arena's map id (`cart:<cart id>`, P7), or null for one of the shipped maps. */
 function savedCartId(mapId: string): string | null {
@@ -84,13 +100,13 @@ function savedGame(cartId: string): { json: string; cart: (boot: string) => Uint
 }
 
 /** A map's cartridge, with `boot` appended (a shipped map's, or a saved arena's). */
-function mapCartridge(mapId: string, boot: string): Uint8Array {
+function mapCartridge(mapId: string, boot: string, center?: readonly [number, number, number]): Uint8Array {
   const saved = savedCartId(mapId);
-  return saved ? savedGame(saved).cart(boot) : arenaMapCartridge(mapId, boot);
+  return saved ? savedGame(saved).cart(boot) : arenaMapCartridge(mapId, boot, center ? [center[0], center[1], center[2]] : undefined);
 }
 
 /** A map as a standalone export (EP18): plays against bots with no server. */
-function lockoutStandalone(mapId: string): StandaloneGame {
+async function lockoutStandalone(mapId: string): Promise<StandaloneGame> {
   const saved = savedCartId(mapId);
   if (saved) {
     const game = savedGame(saved);
@@ -98,7 +114,9 @@ function lockoutStandalone(mapId: string): StandaloneGame {
   }
   const map = arenaMap(mapId);
   const title = map.id === "lockout" ? "Lockout" : `Lockout: ${map.name}`;
-  return { title, cartId: map.id === "lockout" ? "lockout" : `lockout-${map.id}`, modelId: "xbox360", cart: arenaMapCartridge(map.id), postFx: map.fx, mesh: map.sidecar() };
+  const built = await sidecars().get(map.id);
+  const center: [number, number, number] = [built.center[0], built.center[1], built.center[2]];
+  return { title, cartId: map.id === "lockout" ? "lockout" : `lockout-${map.id}`, modelId: "xbox360", cart: arenaMapCartridge(map.id, "", center), postFx: map.fx, mesh: built.json };
 }
 
 /** The map `?map=` names (Lockout when none, or one it doesn't know; a saved arena as `cart:<id>`). */
@@ -117,11 +135,12 @@ function assetsCartId(): string | null {
 }
 
 /** A map's scene, with the `?assets=` cart's saved Spartans, viewmodels and pickups laid in. */
-function lockoutScene(mapId: string): { json: string; overlay: LockoutAssetOverlay | null } {
+async function lockoutScene(mapId: string): Promise<{ json: string; overlay: LockoutAssetOverlay | null; center?: readonly [number, number, number] }> {
   const saved = savedCartId(mapId);
   if (saved) return { json: savedGame(saved).json, overlay: null };
   const id = assetsCartId();
-  return lockoutSidecarWithAssets(arenaMap(mapId).sidecar(), id ? (loadCartDraft(id)?.sidecars.mesh ?? null) : null);
+  const built = await sidecars().get(arenaMap(mapId).id);
+  return { ...lockoutSidecarWithAssets(built.json, id ? (loadCartDraft(id)?.sidecars.mesh ?? null) : null), center: built.center };
 }
 
 export function LockoutGame() {
@@ -166,7 +185,9 @@ export function LockoutGame() {
     const assetsCart = assetsCartId();
     const map = urlMapId();
     setMapId(map);
-    if (assetsCart && !savedCartId(map)) setAssets({ cart: assetsCart, overlay: lockoutScene(map).overlay });
+    // While the lobby is open, build the map's sidecar on a worker (R2), so Play doesn't wait for it.
+    if (!savedCartId(map)) sidecars().prefetch(arenaMap(map).id);
+    if (assetsCart && !savedCartId(map)) void lockoutScene(map).then((scene) => setAssets({ cart: assetsCart, overlay: scene.overlay }), () => {});
     const onFs = () => setIsFullscreen(Boolean(fullscreenElement()));
     document.addEventListener("fullscreenchange", onFs);
     document.addEventListener("webkitfullscreenchange", onFs);
@@ -293,8 +314,11 @@ export function LockoutGame() {
     async (session: NetSession, map: string, boot: string) => {
       const stage = stageRef.current;
       if (!stage) return;
-      const bytes = mapCartridge(map, boot);
-      const scene = lockoutScene(map).json;
+      const { json: scene, center } = await lockoutScene(map);
+      // Waiting for the map's sidecar, the page may have been left or moved to another map: that mount is the one to keep.
+      if (stageRef.current !== stage || mapRef.current !== map) return;
+      // (The centre came with the sidecar, so the cart's code doesn't build the map's mesh again here.)
+      const bytes = mapCartridge(map, boot, center);
       const cartUrl = URL.createObjectURL(new Blob([bytes.buffer as ArrayBuffer], { type: "application/octet-stream" }));
       const current = settingsRef.current;
       handleRef.current = mount(stage, {
@@ -449,7 +473,7 @@ export function LockoutGame() {
   const downloadOffline = async (format: "html" | "zip") => {
     setExporting(format);
     try {
-      const game = lockoutStandalone(mapRef.current);
+      const game = await lockoutStandalone(mapRef.current);
       const parts = await fetchStandaloneParts(game, { engineUrl: ENGINE_URL_BY_MODEL.xbox360, basePath });
       const file =
         format === "html"
@@ -494,6 +518,7 @@ export function LockoutGame() {
                   className={m.id === mapId ? "cbx-btn cbx-btn-accent" : "cbx-btn"}
                   onClick={() => {
                     setMapId(m.id);
+                    sidecars().prefetch(m.id);
                     const url = new URL(window.location.href);
                     url.searchParams.set("map", m.id);
                     window.history.replaceState(null, "", url);

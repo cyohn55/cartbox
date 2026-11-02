@@ -128,7 +128,7 @@ export {
   type StoredArenaMap,
 } from "./model/arenaMarkup";
 export { arenaNavMesh, validateArenaMap, type ArenaIssue, type ArenaIssueKind, type ArenaValidateOptions } from "./model/arenaValidate";
-export { BEAVER_CREEK_SPLINE, BEAVER_GROUND, BEAVER_LIGHTING, BEAVER_MAP, BEAVER_SCENE, beaverRelight, beaverCenter, beaverFoliage, beaverMapLayout, beaverNavMesh, beaverTerrain } from "./model/beaverCreekSeed";
+export { BEAVER_CREEK_SPLINE, BEAVER_GROUND, BEAVER_LIGHTING, BEAVER_MAP, BEAVER_SCENE, beaverRelight, beaverCenter, beaverFoliage, beaverMapLayout, beaverNavMesh, beaverTerrain, BEAVER_SKY, beaverHills, beaverHillsFoliage, beaverVista } from "./model/beaverCreekSeed";
 export { ARENA_MAPS, arenaMap, arenaMapCartridge, arenaMapCode, type ArenaMapEntry } from "./model/arenaMaps";
 export { MAP_BAKES, MAP_BAKE_PARTS, bakeMapKitSource, bakeMapLightmapSource, bakeMapProbesSource, bakeMapTexturesSource, mapBakeStatus, type MapBakeFile, type MapBakePart, type MapBakes } from "./model/mapBakes";
 export { compressedImagesCurrent, imageKey, pairKey, sidecarImages, sidecarPairs, withCompressedImages, type CompressedImageKind, type CompressedImageTable, type SidecarImage, type SidecarPair } from "./model/compressedImages";

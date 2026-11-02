@@ -43,6 +43,8 @@ const VIEWS = {
     { name: "overview", yaw: 0.5, pitch: 0.55, distance: 55, target: [0, 0, 0], fov: 1.0 },
     { name: "creek", yaw: 1.57, pitch: 0.15, distance: 12, target: [0, 1, 0], fov: 1.0 },
     { name: "base", yaw: -0.4, pitch: 0.2, distance: 14, target: [-25, 1.5, 0], fov: 1.0 },
+    // Low, looking along the creek out through its gorge: the one view with open sky, the hills and the vista in it.
+    { name: "gorge", yaw: 0, pitch: -0.08, distance: 14, target: [0, 3, 0], fov: 1.1 },
   ],
 };
 

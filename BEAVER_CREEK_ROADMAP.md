@@ -323,12 +323,12 @@ Each item lands in all three renderers (WebGL2, WebGPU, and the software referen
     - None of the plants collide; anything tall stands only where play doesn't go.
     - The sidecar grows to about 2.1 MB, of its 2.8 MB budget.
     - *Tests:* `beaver-creek.test.ts` (the textures are triplanar; no grass or reed stands in the water, a base or on a pad; trees only on the rims; the sidecar stores the five layers within budget).
+  - **B9b, the sky and what lies past the rims: done** (`DEMO_QUALITY_ROADMAP.md` V1 and V2). A valley sky of its own in place of Lockout's alpine one; hills as real ground round the canyon to 192 m, wooded; a vista baked into the sky beyond. The sidecar is 2,797,265 characters of its 2.8 MB budget.
   - **Left:**
     - the bases rebuilt from the Forerunner kit;
     - the cave;
-    - the vista beyond the rim;
     - mud and wet stone at the creek's edge;
-    - the midday grade (B7);
+    - the midday grade (B7), past the sky;
     - the B9 report.
 
 ## Phase D: Spartans

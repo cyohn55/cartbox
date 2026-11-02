@@ -89,8 +89,9 @@ describe("material instances", () => {
     const parent = { ...ROCK, baseColorImage: generateTextures(ROCK.generator!).albedo };
     const reseeded = { ...ROCK.generator!, seed: 9 };
     const inst = resolveInstance({ ...instanceOf(ROCK, "rock", parent), generator: reseeded, instance: { of: "rock", overrides: ["generator"] } }, parent);
-    expect(inst.baseColorImage).toBe(generateTextures(reseeded).albedo);
-    expect(inst.normalImage).toBe(generateTextures(reseeded).normal);
+    // (Made again from the recipe, so uncompressed: DEMO_QUALITY_ROADMAP.md R2.)
+    expect(inst.baseColorImage).toBe(generateTextures(reseeded, { compress: false }).albedo);
+    expect(inst.normalImage).toBe(generateTextures(reseeded, { compress: false }).normal);
   });
 
   it("push overrides up to the parent, and cut an instance loose keeping its values", () => {
@@ -135,7 +136,8 @@ describe("the sidecar's material library", () => {
     expect(back.materials?.map((m) => m.id)).toEqual(["canyon-stone"]);
     expect(back.materials![0]!.material.roughnessFactor).toBe(0.9);
     // The generator's maps are baked again on load, not stored.
-    expect(back.materials![0]!.material.baseColorImage).toBe(generateTextures(ROCK.generator!).albedo);
+    // (Uncompressed: they are only ever decoded, DEMO_QUALITY_ROADMAP.md R2.)
+    expect(back.materials![0]!.material.baseColorImage).toBe(generateTextures(ROCK.generator!, { compress: false }).albedo);
     expect(decodeMeshSidecar(JSON.stringify({ meshes: [], materials: [{ id: "a", material: {} }, { id: "a", material: {} }, { id: 3 }] })).materials?.length).toBe(1);
   });
 

@@ -40,18 +40,25 @@ function adler32(bytes: Uint8Array): number {
 
 /** Wrap raw bytes in a zlib stream made of stored (uncompressed) DEFLATE blocks. */
 function zlibStored(data: Uint8Array): Uint8Array {
-  const chunks: number[] = [0x78, 0x01]; // zlib header: no compression
+  // Written into one buffer sized up front: generated maps go through here as a scene
+  // loads (DEMO_QUALITY_ROADMAP.md R2), a quarter of a megabyte a map, byte by byte before.
+  const blocks = Math.max(1, Math.ceil(data.length / 0xffff));
+  const out = new Uint8Array(2 + blocks * 5 + data.length + 4);
+  out[0] = 0x78; // zlib header: no compression
+  out[1] = 0x01;
+  let at = 2;
   let offset = 0;
   do {
     const len = Math.min(0xffff, data.length - offset);
     const last = offset + len >= data.length ? 1 : 0;
-    chunks.push(last, len & 0xff, (len >> 8) & 0xff, ~len & 0xff, (~len >> 8) & 0xff);
-    for (let i = 0; i < len; i += 1) chunks.push(data[offset + i]!);
+    out.set([last, len & 0xff, (len >> 8) & 0xff, ~len & 0xff, (~len >> 8) & 0xff], at);
+    out.set(data.subarray(offset, offset + len), at + 5);
+    at += 5 + len;
     offset += len;
   } while (offset < data.length);
   const adler = adler32(data);
-  chunks.push((adler >>> 24) & 0xff, (adler >>> 16) & 0xff, (adler >>> 8) & 0xff, adler & 0xff);
-  return Uint8Array.from(chunks);
+  out.set([(adler >>> 24) & 0xff, (adler >>> 16) & 0xff, (adler >>> 8) & 0xff, adler & 0xff], at);
+  return out;
 }
 
 // --- A small DEFLATE compressor (RFC 1951, fixed Huffman + LZ77) -------------

@@ -1119,6 +1119,7 @@ export function deserializeMaterial(value: unknown, table?: ImageTable): MeshMat
   const material = (value && typeof value === "object" ? value : { name: "default", baseColorFactor: [1, 1, 1, 1], image: null }) as SerializedMaterial;
   const generator = readGenerator(material.generator);
   const instance = readInstanceLink(material.instance);
+  // A generator's maps are made again here, uncompressed: they are never stored, only decoded (R2).
   return withGeneratedMaps({
     ...(generator ? { generator } : {}),
     ...(instance ? { instance } : {}),
@@ -1147,7 +1148,7 @@ export function deserializeMaterial(value: unknown, table?: ImageTable): MeshMat
     ...readMaterialLayers(material),
     ...readMaterialExtensions(material),
     ...(readSmartStack((material as { smartStack?: unknown }).smartStack) ? { smartStack: readSmartStack((material as { smartStack?: unknown }).smartStack)! } : {}),
-  });
+  }, false, { compress: false });
 }
 
 /**
@@ -1155,10 +1156,10 @@ export function deserializeMaterial(value: unknown, table?: ImageTable): MeshMat
  * every slot it fills that holds nothing else — or, with `replace`, into every
  * one of them (the editor, when a creator picks a new recipe).
  */
-export function withGeneratedMaps(material: MeshMaterial, replace = false): MeshMaterial {
+export function withGeneratedMaps(material: MeshMaterial, replace = false, options: { readonly compress?: boolean } = {}): MeshMaterial {
   const g = material.generator;
   if (!g) return material;
-  const maps = generateTextures(g);
+  const maps = generateTextures(g, options);
   const pick = (current: EncodedImage | null | undefined, made: EncodedImage) => (replace || !current ? made : current);
   return {
     ...material,

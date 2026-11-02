@@ -8548,6 +8548,11 @@ declare class MeshOverlaySurface implements DisplaySurface {
     /** First-person mode: draw the meshes first, then the cart's 2D frame as a HUD on top. */
     private hud;
     /**
+     * Draw the sky dome behind the scene without the HUD: an editor's own camera
+     * looking round a first-person cart's world, which drops the HUD but not the sky.
+     */
+    private backdrop;
+    /**
      * The scene-object hierarchy: each instance's parent index (-1 for a root), its
      * children, and its authored local transform. Null when no instance has a parent,
      * which keeps the flat scene on its original code path.
@@ -8730,6 +8735,12 @@ declare class MeshOverlaySurface implements DisplaySurface {
      * each frame from the decoded mesh-camera HUD flag.
      */
     setHudMode(on: boolean): void;
+    /**
+     * Keep the sky dome behind the scene with the HUD off. The player sets it while
+     * an editor's camera looks round a first-person cart's world: the cart's 2D
+     * frame (its HUD, and whatever it painted for a sky) is left out, the sky isn't.
+     */
+    setSkyBackdrop(on: boolean): void;
     /**
      * Set the per-instance poses a cart published this frame (empty to leave every
      * instance at its authored transform). The player calls this each frame from the
