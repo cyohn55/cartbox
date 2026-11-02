@@ -612,6 +612,11 @@ export class MeshOverlaySurface implements DisplaySurface {
   /** First-person mode: draw the meshes first, then the cart's 2D frame as a HUD on top. */
   private hud = false;
   /**
+   * Draw the sky dome behind the scene without the HUD: an editor's own camera
+   * looking round a first-person cart's world, which drops the HUD but not the sky.
+   */
+  private backdrop = false;
+  /**
    * The scene-object hierarchy: each instance's parent index (-1 for a root), its
    * children, and its authored local transform. Null when no instance has a parent,
    * which keeps the flat scene on its original code path.
@@ -1265,6 +1270,15 @@ export class MeshOverlaySurface implements DisplaySurface {
   }
 
   /**
+   * Keep the sky dome behind the scene with the HUD off. The player sets it while
+   * an editor's camera looks round a first-person cart's world: the cart's 2D
+   * frame (its HUD, and whatever it painted for a sky) is left out, the sky isn't.
+   */
+  setSkyBackdrop(on: boolean): void {
+    this.backdrop = on;
+  }
+
+  /**
    * Set the per-instance poses a cart published this frame (empty to leave every
    * instance at its authored transform). The player calls this each frame from the
    * decoded mesh-pose mailbox; a pose composes on top of the instance's authored
@@ -1533,7 +1547,7 @@ export class MeshOverlaySurface implements DisplaySurface {
     // First-person with a sky dome: paint the panorama through the camera, then
     // composite the meshes over it (background null) — backend-agnostic, since
     // both renderers leave untouched pixels alone.
-    const skyBackdrop = this.hud && this.skyMap !== null;
+    const skyBackdrop = (this.hud || this.backdrop) && this.skyMap !== null;
     if (skyBackdrop && !gpu) this.paintSky(out, width, height, camera.view, camera.projection, target ? 1 : (this.quality.skyScale ?? SKY_BACKDROP_SCALE), lighting?.sky ? skySun(lighting.sky) : null);
     if (profiler) {
       const now = performance.now();

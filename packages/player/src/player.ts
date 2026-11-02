@@ -1475,6 +1475,7 @@ export class Player {
         // First-person carts ask (via cartbox.hud) for their 2D frame to composite
         // over the meshes instead of behind them.
         this.meshSurface.setHudMode(meshCamera?.hud ?? false);
+        this.meshSurface.setSkyBackdrop(false);
         this.meshSurface.setPoseOverrides(decodeMeshPoses(mailbox));
         if (this.runtime) {
           // A playing timeline takes the camera, and places the objects it animates (over physics).
@@ -1497,6 +1498,9 @@ export class Player {
         if (this.editorCamera) {
           this.meshSurface.setCameraOverride(this.editorCamera);
           this.meshSurface.setHudMode(false);
+          // A first-person cart's world keeps its sky: without it, the cart's 2D frame
+          // (whatever it painted behind its HUD) would show where the sky dome should.
+          this.meshSurface.setSkyBackdrop(meshCamera?.hud ?? false);
         }
       }
       // The HD-2D world reuses the same channels: cartbox.worldcam drives its
