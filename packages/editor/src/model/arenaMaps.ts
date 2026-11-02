@@ -69,13 +69,17 @@ export function arenaMap(id: string | null | undefined): ArenaMapEntry {
 
 const codes = new Map<string, string>();
 
-/** A map's cart code: the arena code on its map, knowing every map's name and its own place among them. */
-export function arenaMapCode(id: string): string {
+/**
+ * A map's cart code: the arena code on its map, knowing every map's name and its own place among them.
+ * `center` is the map's scene centre when the caller already has it (a worker that built the sidecar
+ * worked it out on the way: DEMO_QUALITY_ROADMAP.md R2), sparing the map's mesh being built again here.
+ */
+export function arenaMapCode(id: string, center?: ArenaPoint): string {
   const entry = arenaMap(id);
   if (!codes.has(entry.id)) {
     codes.set(
       entry.id,
-      lockoutCode(entry.scene.map, entry.center(), { maps: ARENA_MAPS.map((m) => m.name), mapIndex: ARENA_MAPS.indexOf(entry), title: entry.title }),
+      lockoutCode(entry.scene.map, center ?? entry.center(), { maps: ARENA_MAPS.map((m) => m.name), mapIndex: ARENA_MAPS.indexOf(entry), title: entry.title }),
     );
   }
   return codes.get(entry.id)!;
@@ -85,6 +89,7 @@ export function arenaMapCode(id: string): string {
  * A map's cartridge, with `boot` -- Lua the page appends for this load (say,
  * `MAP_SWITCHED = true` when the menu's map choice brought it here).
  */
-export function arenaMapCartridge(id: string, boot = ""): Uint8Array {
-  return lockoutCartridge(boot ? `${arenaMapCode(id)}\n${boot}` : arenaMapCode(id));
+export function arenaMapCartridge(id: string, boot = "", center?: ArenaPoint): Uint8Array {
+  const code = arenaMapCode(id, center);
+  return lockoutCartridge(boot ? `${code}\n${boot}` : code);
 }

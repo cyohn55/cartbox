@@ -246,9 +246,18 @@ export function generatorKey(g: TextureGenerator): string {
 
 const byte = (v: number) => Math.max(0, Math.min(255, Math.round(v * 255)));
 
-/** Bake (or fetch the memoised) maps of a recipe. */
-export function generateTextures(g: TextureGenerator): GeneratedMaps {
-  const key = generatorKey(g);
+/**
+ * Bake (or fetch the memoised) maps of a recipe.
+ *
+ * `compress: false` writes its PNGs uncompressed: for maps made again as a
+ * scene loads (DEMO_QUALITY_ROADMAP.md R2), which are never stored (saving
+ * leaves them out, see isGeneratedImage) and are decoded straight back to
+ * pixels. Choosing filters and deflating them was most of a load's cost (about
+ * 0.5 s of Beaver Creek's 0.8 s here), for bytes no one keeps.
+ */
+export function generateTextures(g: TextureGenerator, options: { readonly compress?: boolean } = {}): GeneratedMaps {
+  const compress = options.compress !== false;
+  const key = compress ? generatorKey(g) : `${generatorKey(g)}|raw`;
   const hit = cache.get(key);
   if (hit) return hit;
   const n = g.size;
@@ -284,7 +293,7 @@ export function generateTextures(g: TextureGenerator): GeneratedMaps {
     }
   }
   const relief = reliefFromHeight(samples.map((s) => s.h), n, n, 8);
-  const png = (rgba: Uint8ClampedArray): EncodedImage => ({ mime: "image/png", bytes: encodeRgbaPng(rgba, n, n, { compress: true }) });
+  const png = (rgba: Uint8ClampedArray): EncodedImage => ({ mime: "image/png", bytes: encodeRgbaPng(rgba, n, n, { compress }) });
   const maps: GeneratedMaps = { albedo: png(albedo), normal: png(normal), metallicRoughness: png(mr), relief: png(relief) };
   cache.set(key, maps);
   return maps;
