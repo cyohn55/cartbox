@@ -548,6 +548,181 @@ export function beaverTerrain(): Terrain {
   return terrain;
 }
 
+// --- Beyond the rim (DEMO_QUALITY_ROADMAP.md V2) ---------------------------------
+// The canyon's grid stops 48 m out, a few metres past its rims, and the sky
+// showed straight past it. Round it, as round Lockout: real ground near enough
+// for its parallax to matter (the hills), and a vista baked into the sky beyond.
+
+/** The hills round the canyon: 384 m square, a sample every 6 m, a grid line on the canyon's edge (±48 m). */
+const HILLS = { x0: -192, z0: -192, size: 384, samples: 65 };
+/** Hill cells wholly inside this (half a side) are left out: the canyon's own ground is there. */
+const HILLS_HOLE = 42;
+/** The hills' textures (texels a side): seen from 50 m and more, a quarter of the canyon's do. */
+const HILLS_TEXTURE = 64;
+/** Under the canyon's outer band the hills sit this far below its ground, so the canyon covers them. */
+const HILLS_TUCK = 0.4;
+
+const smoothstep = (e0: number, e1: number, v: number): number => {
+  const t = Math.max(0, Math.min(1, (v - e0) / (e1 - e0)));
+  return t * t * (3 - 2 * t);
+};
+
+/** The canyon terrain's height at (x, z), bilinear between its samples (clamped to its grid). */
+function canyonHeightAt(x: number, z: number): number {
+  const t = beaverTerrain();
+  const { x0, z0, size, samples } = CANYON;
+  const step = size / (samples - 1);
+  const fi = Math.max(0, Math.min(samples - 1, (x - x0) / step));
+  const fj = Math.max(0, Math.min(samples - 1, (z - z0) / step));
+  const i = Math.min(samples - 2, Math.floor(fi)), j = Math.min(samples - 2, Math.floor(fj));
+  const u = fi - i, v = fj - j;
+  const h = (a: number, b: number) => t.heights[(j + b) * samples + i + a]!;
+  return (h(0, 0) * (1 - u) + h(1, 0) * u) * (1 - v) + (h(0, 1) * (1 - u) + h(1, 1) * u) * v;
+}
+
+/**
+ * The ground round the canyon at (x, z): its rims carried on into rolling,
+ * wooded hills, the creek's valley running on north and south, rising to
+ * ridges at the edge of the grid. Under the canyon it follows the canyon's own
+ * ground, a little below it, meeting it exactly along the canyon's edge.
+ */
+function hillsGround(x: number, z: number): number {
+  const edge = CANYON.x0 + CANYON.size; // 48
+  const inside = Math.max(Math.abs(x), Math.abs(z));
+  if (inside < edge) return canyonHeightAt(x, z) - HILLS_TUCK;
+  const rim = canyonHeightAt(x, z);
+  if (inside === edge) return rim;
+  const d = inside - edge;
+  // Rolling hills, and the creek's valley on through them north and south.
+  const roll = 16 + fbm(x * 0.018, z * 0.018, 401) * 26 + (fbm(x * 0.06, z * 0.06, 409) - 0.5) * 6;
+  const valley = Math.exp(-((x / (14 + d * 0.25)) ** 2)) * smoothstep(0, 40, Math.abs(z) - edge);
+  const hills = roll * (1 - 0.75 * valley);
+  // Ridges toward the grid's edge, so it ends on a skyline the vista continues.
+  const ridge = smoothstep(90, 185, inside) * (30 + fbm(x * 0.01, z * 0.01, 419) * 45);
+  return rim + (hills + ridge - rim) * smoothstep(0, 28, d);
+}
+
+let hills: Terrain | null = null;
+let hillsTextures: { grass: EncodedImage; rock: EncodedImage } | null = null;
+
+/** The hills round the canyon (V2): real ground out to 192 m, grass on the flats and rock on the steeps. */
+export function beaverHills(): Terrain {
+  if (hills) return hills;
+  const { x0, z0, size, samples } = HILLS;
+  const step = size / (samples - 1);
+  const heights = new Float32Array(samples * samples);
+  for (let j = 0; j < samples; j += 1) for (let i = 0; i < samples; i += 1) heights[j * samples + i] = hillsGround(x0 + i * step, z0 + j * step);
+  const holes = new Uint8Array((samples - 1) * (samples - 1));
+  for (let j = 0; j < samples - 1; j += 1) {
+    for (let i = 0; i < samples - 1; i += 1) {
+      const ax = x0 + i * step, az = z0 + j * step;
+      if (ax >= -HILLS_HOLE && ax + step <= HILLS_HOLE && az >= -HILLS_HOLE && az + step <= HILLS_HOLE) holes[j * (samples - 1) + i] = 1;
+    }
+  }
+  hillsTextures ??= { grass: bakeLandscape(grassSurface, 1, HILLS_TEXTURE).albedo, rock: bakeLandscape(sandstoneSurface, 1, HILLS_TEXTURE).albedo };
+  const t = hillsTextures;
+  hills = {
+    id: "beaver-hills",
+    name: "Hills",
+    origin: [x0, 0, z0],
+    size: [size, size],
+    samples,
+    heights,
+    holes,
+    layers: [
+      { material: { ...material("terrain-grass", [0.92, 0.95, 0.88], 0.9), baseColorImage: t.grass }, up: [0.78, 1] },
+      { material: { ...material("terrain-rock", [1, 1, 1], 0.92), baseColorImage: t.rock } },
+    ],
+    // Coarser than the canyon's: seen from inside it, the hills are 50 m off and more.
+    tile: 12,
+    parent: "beaver-map",
+    blend: { up: 0.14, height: 2, noise: 0.6 },
+    triplanar: true,
+    // Out of play and below the sun, they shade nothing that matters: spared the shadow passes.
+    castShadows: false,
+  };
+  return hills;
+}
+
+/** A broadleaf canopy seen from a kilometre off: crowns in clumps, shade between them. */
+function canopySurface(x: number, y: number): Surf {
+  const crowns = tfbm(x, y, 24, 431, 3);
+  const clumps = tfbm(x, y, 6, 433, 2);
+  const gap = crowns < 0.4 ? 1 : 0;
+  const v = 78 + (crowns - 0.5) * 60 + (clumps - 0.5) * 34 - gap * 34;
+  return { r: clampByte(v * 0.58), g: clampByte(v * 0.86), b: clampByte(v * 0.5), h: crowns - gap * 0.3, rough: 0.95, metal: 0, emis: 0 };
+}
+
+/** The vista's extent, and the square round the hills it leaves out (half a side). */
+const VISTA = { size: 3200, samples: 65, hole: 180, texture: 48 };
+
+/** The far country at (x, z): wooded hills round the canyon's, rising to a range of blue mountains. */
+function vistaGround(x: number, z: number): number {
+  const r = Math.hypot(x, z);
+  const woods = 30 + fbm(x * 0.006, z * 0.006, 441) * 70;
+  const range = 120 + 520 * fbm(x * 0.0022, z * 0.0022, 443, 5) ** 1.6;
+  return woods + (range - woods) * smoothstep(500, 1300, r);
+}
+
+let vista: Terrain | null = null;
+let canopyTexture: EncodedImage | null = null;
+let farRock: EncodedImage | null = null;
+
+/**
+ * Beaver Creek's vista (V2; HALO_INFINITE_STYLE_ROADMAP.md I7): wooded country
+ * past the hills and a range of mountains on the horizon, baked into the sky
+ * at load, so it costs nothing a frame.
+ */
+export function beaverVista(): Terrain {
+  if (vista) return vista;
+  const { size, samples: n, hole, texture } = VISTA;
+  const origin: [number, number, number] = [-size / 2, 0, -size / 2];
+  const heights = new Float32Array(n * n);
+  for (let j = 0; j < n; j += 1) for (let i = 0; i < n; i += 1) heights[j * n + i] = vistaGround(origin[0] + (i / (n - 1)) * size, origin[2] + (j / (n - 1)) * size);
+  const holes = new Uint8Array((n - 1) * (n - 1));
+  const cell = size / (n - 1);
+  for (let j = 0; j < n - 1; j += 1) {
+    for (let i = 0; i < n - 1; i += 1) {
+      const x = origin[0] + (i + 0.5) * cell, z = origin[2] + (j + 0.5) * cell;
+      if (Math.max(Math.abs(x), Math.abs(z)) < hole) holes[j * (n - 1) + i] = 1;
+    }
+  }
+  // Small maps, and no normal maps: from a kilometre off a finer grain only shimmers,
+  // and the vista is drawn once, into the sky, so its relief is its own shading.
+  canopyTexture ??= bakeLandscape(canopySurface, 2, texture).albedo;
+  farRock ??= bakeLandscape(sandstoneFarSurface, 2, texture).albedo;
+  const woods: MeshPrimitive["material"] = { ...material("vista-woods", [0.42, 0.52, 0.4], 0.95), baseColorImage: canopyTexture };
+  const rock: MeshPrimitive["material"] = { ...material("vista-rock", [0.48, 0.5, 0.54], 0.9), baseColorImage: farRock };
+  const snow = material("vista-snow", [0.84, 0.87, 0.92], 0.85);
+  vista = {
+    id: "beaver-vista",
+    name: "Far country",
+    origin,
+    size: [size, size],
+    samples: n,
+    heights,
+    holes,
+    layers: [
+      { material: snow, up: [0.65, 1], height: [520, 5000] },
+      { material: woods, up: [0.6, 1], height: [-200, 420] },
+      { material: rock },
+    ],
+    tile: 160,
+    blend: { up: 0.14, height: 40, noise: 0.7 },
+    // Hazier than Lockout's: a valley's air at noon, not a summit's.
+    vista: { haze: 0.55 },
+  };
+  return vista;
+}
+
+/** Bare mountain rock far off: grey, faintly banded, without the canyon's warm strata. */
+function sandstoneFarSurface(x: number, y: number): Surf {
+  const grain = tfbm(x, y, 16, 451, 3);
+  const bands = Math.sin(((y + tfbm(x, y, 4, 453, 2) * 30) / 256) * Math.PI * 2 * 5) * 0.5 + 0.5;
+  const v = 0.72 + (grain - 0.5) * 0.4 + (bands - 0.5) * 0.12;
+  return { r: clampByte(150 * v), g: clampByte(150 * v), b: clampByte(156 * v), h: grain, rough: 0.92, metal: 0, emis: 0 };
+}
+
 // --- The art pass (BEAVER_CREEK_ROADMAP.md B9) --------------------------------
 
 /** Meadow grass: greens, mottled, with worn patches of earth showing through. */
@@ -653,7 +828,28 @@ function impostorOf(mesh: MeshAsset): { impostor?: { distance: number; mesh: str
 /** The plants as the sidecar stores them. */
 function beaverFoliageStored(): SerializedFoliage[] {
   const t = beaverTerrain();
-  return beaverFoliage().map(({ layer, mesh }) => serializeFoliage(t, layer, serializeMeshAsset(mesh)));
+  const h = beaverHills();
+  return [
+    ...beaverFoliage().map(({ layer, mesh }) => serializeFoliage(t, layer, serializeMeshAsset(mesh))),
+    ...beaverHillsFoliage().map(({ layer, mesh }) => serializeFoliage(h, layer, serializeMeshAsset(mesh))),
+  ];
+}
+
+/**
+ * Woods on the hills (V2): broadleaf trees and pines in patches over the gentle
+ * ground, filled by rules (nothing stored per copy), kept off the canyon
+ * itself, and drawn as impostors past 32 m, which is nearly all of them.
+ */
+export function beaverHillsFoliage(): { layer: FoliageLayer; mesh: MeshAsset }[] {
+  const broadleaf = foliagePreset("broadleaf");
+  const pine = foliagePreset("pine");
+  const centre = HILLS.size / 2;
+  // The canyon's square, corners and all (its half-diagonal is 68 m), stays clear: its rims have their own trees.
+  const clear: [number, number, number] = [centre, centre, 70];
+  return [
+    { mesh: broadleaf.mesh, layer: { id: "beaver-hill-trees", name: "Hill woods", terrain: "beaver-hills", ...broadleaf.settings, density: 0.35, scale: [1.2, 2], cull: 320, copies: [], fill: { seed: 461, up: [0.86, 1], clear, patches: { scale: 60, cover: 0.55 } }, ...impostorOf(broadleaf.mesh) } },
+    { mesh: pine.mesh, layer: { id: "beaver-hill-pines", name: "Hill pines", terrain: "beaver-hills", ...pine.settings, density: 0.3, scale: [1.4, 2.4], cull: 320, copies: [], fill: { seed: 463, up: [0.8, 1], height: [22, 200], clear, patches: { scale: 45, cover: 0.5 } }, ...impostorOf(pine.mesh) } },
+  ];
 }
 
 let layout: LightmapLayout | null = null;
@@ -696,20 +892,59 @@ function litBeaverMesh(): MeshAsset {
 }
 
 /** The scene's centre, which the mesh camera orbits (as the player bounds the scene). */
+let center: ArenaPoint | null = null;
 export function beaverCenter(): ArenaPoint {
-  return arenaSceneCenter(BEAVER_MAP, beaverMesh());
+  // Memoised: it builds the map's whole mesh, its CSG included (about 0.8 s).
+  center ??= arenaSceneCenter(BEAVER_MAP, beaverMesh());
+  return center;
 }
 
-/** Daylight down a green canyon: Lockout's sun and sky, its own probes, no arena lamps. */
+/**
+ * Beaver Creek's own sky (DEMO_QUALITY_ROADMAP.md V1). It had Lockout's: an
+ * alpine dome 3 km up, with snow peaks, a glacier's mist and the ring. A green
+ * valley at noon is under a softer blue, hazier toward a horizon of wooded
+ * ridges and far blue mountains, with fair-weather cumulus drifting over and
+ * a pale moon in the east. The sun is Lockout's, as the canyon's bakes are.
+ */
+export const BEAVER_SKY: NonNullable<SceneLighting["sky"]> = {
+  zenith: [0.24, 0.46, 0.8],
+  horizon: [0.78, 0.86, 0.94],
+  // Below the horizon (seen only past the vista's edge): the valley's haze over green country.
+  below: [0.56, 0.64, 0.6],
+  sunDirection: [...LOCKOUT_KEY_DIRECTION],
+  sunColor: [1, 0.94, 0.82],
+  clouds: 0.3,
+  cloudColor: [0.95, 0.96, 0.98],
+  mountains: [
+    // Near: wooded ridges, green-grey in the haze, no snow.
+    { height: 5, peaks: 13, rock: [0.36, 0.44, 0.4], snow: [0.36, 0.44, 0.4], snowLine: 1, haze: 0.55, seed: 17 },
+    // Far: a blue range, snow on its highest tips.
+    { height: 10, peaks: 7, rock: [0.42, 0.48, 0.56], snow: [0.9, 0.92, 0.96], snowLine: 0.8, haze: 0.35, seed: 23 },
+  ],
+  seed: 19,
+  objects: [{ kind: "planet", direction: [-0.72, 0.3, 0.62], radius: 3.2, color: [0.84, 0.85, 0.88], atmosphere: [0.7, 0.8, 0.95], seed: 5 }],
+  cloudLayers: [
+    // Fair-weather cumulus: bright, puffy, with gaps of blue between.
+    { cover: 0.42, scale: 0.42, wind: [0.022, 0.009], color: [0.98, 0.98, 0.99], opacity: 0.85, seed: 47 },
+    // A high, thin veil above them.
+    { cover: 0.22, scale: 0.16, wind: [0.01, 0.004], color: [0.94, 0.96, 0.99], opacity: 0.4, seed: 53 },
+  ],
+};
+
+/** Daylight down a green canyon: Lockout's sun, its own valley sky, its own probes, no arena lamps. */
 export const BEAVER_LIGHTING: SceneLighting = {
   ...LOCKOUT_LIGHTING,
+  // The shade's fill: the same open blue sky as Lockout's, with grass, not snow, below it.
+  environment: { ...LOCKOUT_LIGHTING.environment, ground: [0.36, 0.4, 0.32] },
+  sky: BEAVER_SKY,
   lights: [
     ...LOCKOUT_LIGHTING.lights.filter((l) => l.kind === "directional"),
     // A warm lamp under each base's roof, so the ground floor reads in the shade (P9).
     { kind: "point", position: [-25, 2.9, 0], color: [1, 0.88, 0.72], intensity: 3.2, range: 10 },
     { kind: "point", position: [25, 2.9, 0], color: [1, 0.88, 0.72], intensity: 3.2, range: 10 },
   ],
-  fog: { color: [0.72, 0.82, 0.92], density: 0.008, start: 24, max: 0.28, glow: { color: [1, 0.92, 0.78], strength: 0.25 } },
+  // The haze takes the valley sky's horizon, so the hills fade into it.
+  fog: { color: [0.74, 0.83, 0.92], density: 0.008, start: 24, max: 0.28, glow: { color: [1, 0.92, 0.78], strength: 0.25 } },
   // Daylight in a canyon (B7): soft sun shadows, and a breeze down the creek for its plants (B6).
   softShadows: true,
   wind: { direction: Math.PI / 2, strength: 0.45, gust: 0.5 },
@@ -794,7 +1029,8 @@ export const BEAVER_SCENE: ArenaScene = {
     // On the AAA tier, re-lit in physical units (F11a-11).
     lighting: { ...BEAVER_LIGHTING, ...(beaverProbes() ? { lightProbes: beaverProbes() } : {}), aaa: beaverRelight() },
     navmesh: beaverNavMesh(),
-    terrains: [beaverTerrain()],
+    // The canyon, the hills round it (real ground) and the far country (baked into the sky): V2.
+    terrains: [beaverTerrain(), beaverHills(), beaverVista()],
     timelines: [BEAVER_INTRO],
     ragdollColliders: beaverRagdollColliders(),
     decalMarks: [],

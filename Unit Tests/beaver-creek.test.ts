@@ -13,7 +13,9 @@ import { describe, expect, it } from "vitest";
 
 import {
   ARENA_MAPS,
+  BEAVER_LIGHTING,
   BEAVER_MAP,
+  BEAVER_SKY,
   DEFAULT_ACCESSIBILITY,
   LOCKOUT_STRINGS,
   LOCKOUT_VIEWMODELS,
@@ -23,8 +25,13 @@ import {
   arenaPads,
   beaverCenter,
   beaverFoliage,
+  beaverHills,
+  beaverHillsFoliage,
   beaverNavMesh,
   beaverTerrain,
+  beaverVista,
+  fillCopies,
+  LOCKOUT_LIGHTING,
   validateArenaMap,
 } from "@cartbox/editor";
 import {
@@ -190,8 +197,87 @@ describe("Beaver Creek, dressed (B9)", () => {
 
   it("stores them in its sidecar, still within budget", () => {
     const stored = JSON.parse(arenaMap("beaver").sidecar()) as { foliage?: unknown[] };
-    expect(stored.foliage?.length).toBe(6);
+    // The canyon's six layers, and the hills' woods and pines (V2).
+    expect(stored.foliage?.length).toBe(8);
     expect(arenaMap("beaver").sidecar().length).toBeLessThan(2_800_000);
+  });
+});
+
+describe("Beaver Creek's sky and what lies past its rims (DEMO_QUALITY_ROADMAP.md V1, V2)", () => {
+  const edge = 48;
+  /** A terrain's height at one of its samples, by world position (which must be on its grid). */
+  const sampleAt = (t: ReturnType<typeof beaverHills>, x: number, z: number): number => {
+    const step = t.size[0] / (t.samples - 1);
+    const i = Math.round((x - t.origin[0]) / step), j = Math.round((z - t.origin[2]) / step);
+    expect(t.origin[0] + i * step).toBeCloseTo(x, 6);
+    return t.heights[j * t.samples + i]!;
+  };
+
+  it("has a valley sky of its own, under Lockout's sun", () => {
+    expect(BEAVER_LIGHTING.sky).toBe(BEAVER_SKY);
+    expect(BEAVER_SKY).not.toBe(LOCKOUT_LIGHTING.sky);
+    // No ring and no snowfields on the near ridges; the sun is the key light the bakes were made under.
+    expect(BEAVER_SKY.objects?.some((o) => o.kind === "ring") ?? false).toBe(false);
+    expect(BEAVER_SKY.mountains[0]!.snowLine).toBe(1);
+    expect(BEAVER_SKY.sunDirection).toEqual(LOCKOUT_LIGHTING.sky!.sunDirection);
+    expect(BEAVER_SKY.cloudLayers?.length).toBeGreaterThan(0);
+    // And it is what the shipped scene carries.
+    const stored = JSON.parse(arenaMap("beaver").sidecar()) as { lighting: { sky: { zenith: number[] } } };
+    expect(stored.lighting.sky.zenith).toEqual([...BEAVER_SKY.zenith]);
+  });
+
+  it("rings the canyon with hills that meet its edge exactly and tuck under its outer band", () => {
+    const hills = beaverHills();
+    const canyon = beaverTerrain();
+    const canyonAt = (x: number, z: number) => canyon.heights[(z + 48) * canyon.samples + (x + 48)]!;
+    expect(hills.origin[0] + hills.size[0]).toBeGreaterThan(150);
+    for (let k = -edge; k <= edge; k += 6) {
+      for (const [x, z] of [[edge, k], [-edge, k], [k, edge], [k, -edge]] as const) expect(sampleAt(hills, x, z)).toBeCloseTo(canyonAt(x, z), 4);
+    }
+    // Inside the edge, where both grids have a sample, the hills lie under the canyon's ground.
+    for (const [x, z] of [[42, 0], [-42, 12], [0, 42], [30, -42]] as const) expect(sampleAt(hills, x, z)).toBeLessThan(canyonAt(x, z));
+    // Its hole is wholly inside the canyon's grid, so no gap opens between the two.
+    const step = hills.size[0] / (hills.samples - 1);
+    const n = hills.samples - 1;
+    for (let j = 0; j < n; j += 1) {
+      for (let i = 0; i < n; i += 1) {
+        if (!hills.holes![j * n + i]) continue;
+        const x = hills.origin[0] + i * step, z = hills.origin[2] + j * step;
+        expect(Math.max(Math.abs(x), Math.abs(x + step), Math.abs(z), Math.abs(z + step))).toBeLessThanOrEqual(edge);
+      }
+    }
+    expect(hills.holes!.some((h) => h === 1)).toBe(true);
+  });
+
+  it("grows its woods on the hills only, clear of the canyon", () => {
+    const hills = beaverHills();
+    for (const { layer } of beaverHillsFoliage()) {
+      expect(layer.terrain).toBe("beaver-hills");
+      expect(layer.impostor).toBeDefined();
+      const copies = fillCopies(hills, layer, layer.fill!);
+      expect(copies.length, layer.id).toBeGreaterThan(40);
+      for (const c of copies) expect(Math.max(Math.abs(c.x + hills.origin[0]), Math.abs(c.z + hills.origin[2])), layer.id).toBeGreaterThan(edge);
+    }
+  });
+
+  it("bakes a vista past the hills into the sky, its hole inside the hills", () => {
+    const vista = beaverVista();
+    const hills = beaverHills();
+    expect(vista.vista).toBeDefined();
+    const n = vista.samples - 1;
+    const cell = vista.size[0] / n;
+    // Every cell the vista leaves out is within the hills' square, and every cell it draws reaches past them.
+    for (let j = 0; j < n; j += 1) {
+      for (let i = 0; i < n; i += 1) {
+        const x = vista.origin[0] + (i + 0.5) * cell, z = vista.origin[2] + (j + 0.5) * cell;
+        if (vista.holes![j * n + i]) expect(Math.max(Math.abs(x), Math.abs(z))).toBeLessThan(hills.size[0] / 2);
+      }
+    }
+    // Mountains on the horizon: the far ground rises well above the hills.
+    expect(Math.max(...vista.heights)).toBeGreaterThan(400);
+    // The shipped scene draws all three.
+    const stored = JSON.parse(arenaMap("beaver").sidecar()) as { terrains: { id: string }[] };
+    expect(stored.terrains.map((t) => t.id)).toEqual(["beaver-canyon", "beaver-hills", "beaver-vista"]);
   });
 });
 
