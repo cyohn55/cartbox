@@ -26,9 +26,11 @@ Most of the renderer work these demos need has already shipped through `AAA_FIDE
 
 ### Visual fidelity
 
-**Beaver Creek has Lockout's sky.** `BEAVER_LIGHTING` spreads `LOCKOUT_LIGHTING` (`beaverCreekSeed.ts:704`), so a midday canyon at 600 m sits under the painted sky of an arena 3 km up. In every Beaver capture, the band above the canyon rim is near-black navy. B7's "midday grade and sky for the valley" was left open in B9.
+**The captures have no sky.** *(Found after the first version of this review, which misread it.)* In every capture in `captures/f11a`, the sky is the cart's own 2D frame: flat navy palette bands, black, and the title text. The capture script looks through the editor's camera, and taking the editor's camera turned the HUD off (`player.ts`), and the sky dome with it (`skyBackdrop` was tied to the HUD flag in `MeshOverlaySurface`). In play the sky was always drawn. The first version of this review read Beaver's black band as its sky content; it was this artefact. It still matters twice over: every before-and-after comparison in F11a-1 was made without the sky, and anyone who ejects from a match in the editor loses the sky. V0 fixes it.
 
-**Beaver Creek has no vista.** The canyon rim meets the sky directly, with the rim's trees silhouetted against it. Lockout has a far terrain and a far forest (`lockoutVista`, `LOCKOUT_VISTA_FOREST`), and Beaver has neither. This is also left in B9.
+**Beaver Creek has Lockout's sky.** `BEAVER_LIGHTING` spreads `LOCKOUT_LIGHTING`, so a midday canyon at 600 m sits under the painted sky of an arena 3 km up: its snow peaks, its glacier mist and the ring. B7's "midday grade and sky for the valley" was left open in B9.
+
+**Beaver Creek has no vista.** The canyon's terrain stops 48 m out, a few metres past its rims, and the sky shows straight past it from any raised view (the intro, the overview). Lockout has real ground out to 160 m and a vista beyond (`lockoutTerrain`, `lockoutVista`), and Beaver had neither. This is also left in B9.
 
 **The canyon's terrain is under-resolved.** Beaver's grass, sandstone and mud are **128² albedo-only** textures (`beaverTextures`), with no normal or roughness maps, over a 66 m × 32 m floor and walls up to 24 m. Lockout's surfaces are 256² with normal maps. In the captures, the sandstone strata smear into streaks across the slopes, and the grass tiles visibly. Lockout's chasm walls show the same **UV stretching**, vertically. B6's triplanar mapping fixed it on Beaver's cliffs but was never applied to Lockout's terrain.
 
@@ -45,6 +47,8 @@ Most of the renderer work these demos need has already shipped through `AAA_FIDE
 **Each map's sidecar is synthesised in the browser on the main thread.** `arenaMap(id).sidecar()` generates the geometry, bakes the procedural textures, encodes PNGs, and serialises a ~2.7 MB JSON string with base64 images, all before the player decodes any of it. That took **2.0–2.4 s per map** here, which projects to several seconds on a phone. The page then holds the string, the parsed scene, the decoded images and their GPU copies at once.
 
 **Both maps ship in one bundle.** `arenaMaps.ts` statically imports both seeds, Beaver's textures and both maps' generated light maps, probes and kit maps (about 600 KB of base64 in TypeScript). Every visitor downloads and evaluates the generators and bakes for both maps, whichever map they play. B2 ("a shared asset pack and a sidecar per map") is still open.
+
+**Generated maps were deflated at load.** *(Found while measuring R2a.)* Profiling the main thread from Play to mount on Beaver Creek put 780 ms in `withGeneratedMaps` under the scene's parse: materials with a generator (P1c) remake their maps at load, as designed, but also PNG-compressed them, for bytes nobody stores. R2a fixes it.
 
 These two together are the most likely cause of the open iOS question in `BEAVER_CREEK_ROADMAP.md`, where pressing Play does nothing on an iPhone or iPad. A memory-pressure reload in iOS Safari matches this peak-memory profile.
 
@@ -104,13 +108,30 @@ This has four consequences:
   - *Closes:* F11a's captures and per-device frame times, and F0e's browser reading.
   - *Acceptance:* both maps captured from F11a's seven views on all four classes, with scene, presenter and main-thread times, and a frame-time histogram from a 2-minute bot match.
 
-- [ ] **R2. Prebuilt map packages, loaded on demand** (completes B2).
+- [ ] **R2. Prebuilt map packages, loaded on demand** (completes B2). **R2a done; the packages themselves are left.**
   - Each map's sidecar is built **at build time**, not in the browser, into F9e's binary package format: KTX2 textures (F1a), meshopt geometry and a content-hashed URL.
   - The shared pack (Spartans, viewmodels, pickups, kit, sounds, effects, UI) is built once.
   - `arenaMaps.ts` registers each map by a dynamic `import()`, and the seeds, texture generators and generated bakes move out of the play bundle into the editor's.
   - The page fetches the shared pack and the chosen map's package while the lobby is open. It caches both (Cache Storage) and decodes on workers (F0e-2).
   - *Acceptance:* the `/lockout` play bundle contains no seed or generator code, and the time from Play to the first frame is measured on R1's iPhone.
   - *Tests:* the package round-trips to the same scene as the runtime build, byte for byte after decode; the play bundle has no import of `lockoutSeed` or `beaverCreekSeed`; the stale-bake check (B1) covers the packages.
+  - **R2a, the freeze after Play: done.** Measured with `scripts/measure-play.mjs` in Chromium (software GPU, dev build): `PerformanceObserver` long tasks from the Play click until the game mounts, the lobby left open 8 s first. On R1's hardware, `CBX_GPU=1` runs it the same way.
+
+    | Map | Play to mount, before | after | Longest main-thread task, before | after |
+    | --- | --- | --- | --- | --- |
+    | Beaver Creek | 2.95–3.33 s | 0.90–1.06 s | 2.80–3.16 s | 0.73–0.86 s |
+    | Lockout | 1.94 s | 0.54–0.56 s | 1.76 s | 0.37–0.39 s |
+
+    Three changes:
+    - **The sidecar is built on a worker while the lobby is open** (`lib/sidecarLoader.ts`, `lockout/sidecar.worker.ts`). The page starts the build as it reads the map from the URL and at each lobby pick. Play waits for that same build (usually done). The worker is then ended, taking the generators' working memory with it. Where a worker can't run, or fails, the main thread builds it as before. The page holds one map's sidecar at a time.
+    - **The cart's code takes the scene's centre from the worker.** `beaverCenter()` built the whole map mesh, CSG and all, on the main thread to find it (0.8 s). `arenaMapCode`/`arenaMapCartridge` now take a centre the caller already has, and `beaverCenter()` is memoised for everyone else.
+    - **Generated maps are no longer deflated as a scene loads.** A material with a generator (P1c) stores its recipe, and loading made its four maps again *and PNG-compressed them*: choosing filters and deflating took about 0.5 s of the 0.8 s Beaver's parse spent there, for bytes never stored and decoded straight back. Loading (`deserializeMaterial`) and resolving an instance (`resolveInstance`) now make them uncompressed (`generateTextures(g, { compress: false })`). Everything that stores a generated image (Beaver's mud, say) still compresses it. `zlibStored` writes into one buffer instead of a JS array a byte at a time.
+    - Also: waiting for the sidecar, the page may be left or moved to another map; the mount that started first then gives way.
+  - *Tests:*
+    - `sidecar-loader.test.ts`: builds in a worker and never on the main thread; ends the worker on its answer; Play shares the lobby's build; one map held at a time; falls back to the main thread when the worker errors, crashes or can't be made; a worker still building is ended with the page;
+    - `texture-generators.test.ts`, `material-instances.test.ts`: maps made again on load are the uncompressed ones and decode to the same pixels as the compressed; saved again, they are still left out.
+  - *Left of R2:* the packages built ahead (no generation in the browser at all, and no generator code in the play bundle), and Cache Storage.
+  - *Left of the freeze:* Beaver's remaining 0.7–0.9 s is the player's own parse of the scene, the rest of the generated maps (made, not deflated), and the terrains' meshes (`terrainMesh`). Moving the scene's parse onto a worker is the next step.
 
 - [ ] **R3. A peak-memory budget for phones.**
   - Measure the page's peak JS heap and GPU memory on R1's iPhone and iPad through a match on each map.
@@ -136,14 +157,43 @@ This has four consequences:
 
 ## Track V: visual fidelity
 
-- [ ] **V1. Beaver Creek's own sky and grade** (B7, left in B9).
-  - A midday valley sky of its own: painted for the fantasy tiers, and F5a's physical sky at 600 m with fair-weather cumulus (F5c) on the AAA tier.
-  - A grade tuned for a green canyon at noon.
-  - *Tests:* `BEAVER_LIGHTING` no longer spreads Lockout's sky; the bakes are current.
+- [x] **V0. The sky behind an editor's camera.**
+  - The overlay draws the sky dome behind the scene whenever a first-person cart's world is shown, not only with its HUD: `setSkyBackdrop`, which the player sets while an editor's camera looks round a first-person cart. The HUD, the cart's lights and the first-person near plane still go with the editor's camera, as before.
+  - A third-person cart (no HUD) keeps its own 2D frame behind its meshes, as before.
+  - *Tests (`editor-camera-sky.test.ts`):*
+    - a third-person cart's frame still shows behind its scene;
+    - an editor's camera shows neither the cart's frame behind nor its HUD on top;
+    - the sky it shows is, pixel for pixel, the sky the first-person view draws under a see-through HUD.
 
-- [ ] **V2. Beaver Creek's vista** (left in B9).
-  - Far terrain beyond the rim (`Terrain` with a hole over the canyon, as `lockoutVista` does), a far forest layer, and distant ridges that hide the horizon line.
-  - *Acceptance:* no view from inside the playable volume shows the sky below the rim's height.
+    The last two fail without the fix.
+  - **Every capture in `captures/f11a` predates it** and shows the cart's frame where the sky should be. They need re-taking (R1) before V6, or any other judgement of the maps' look, is made from them.
+
+- [x] **V1. Beaver Creek's own sky** (B7, left in B9). **Done on the painted sky; the grade is left.**
+  - `BEAVER_SKY`: a softer noon blue, hazier toward the horizon; wooded green-grey ridges with no snow, and a far blue range with snow on its tips; fair-weather cumulus under a thin high veil; a pale moon in the east. No ring, no glacier mist. The sun is Lockout's, which the canyon's bakes were made under, so they stay current.
+  - The shade's fill takes grass, not snow, from below (`environment.ground`), and the haze takes the new horizon's colour.
+  - The AAA tier's physical re-light (F11a-11) derives from the rig, so it picks up the new sky's painted features in front of its air.
+  - *Left:* a grade of its own (post) tuned for a green canyon at noon. That wants R1's captures on hardware.
+  - *Tests (`beaver-creek.test.ts`):* the rig carries its own sky, not Lockout's; no ring and no snow on the near ridges; the sun is the key light's; it has cloud layers; the shipped sidecar carries it.
+
+- [x] **V2. What lies past Beaver Creek's rims** (left in B9). **Done.**
+  - **Hills, as real ground** (`beaverHills`): 384 m square, a sample every 6 m, round the canyon's 96 m grid, so views from the rims, the intro and the overview carry on into country instead of stopping at the grid's edge.
+    - **No seam:** a grid line falls on the canyon's edge (±48 m), where the hills take the canyon's own heights exactly; inside it, under the canyon's outer 6 m band, they lie 0.4 m below its ground; inward of that they are cut away.
+    - Rolling ground, the creek's valley running on north and south, and ridges toward the grid's edge.
+    - Grass and rock at 64² (a quarter of the canyon's texels, seen from 50 m and more), triplanar. They cast no shadows: out of play, and below the sun.
+    - **Woods** (`beaverHillsFoliage`): broadleaf trees and pines in patches over the gentle ground, by fill rules (nothing stored per copy), kept off the canyon's square, drawn as impostors past 32 m.
+  - **A vista beyond** (`beaverVista`): wooded country rising to a range of mountains 500 m and more high, baked into the sky at load (I7), hazier than Lockout's. Its textures are 48² with no normal maps.
+  - **Costs, measured:**
+    - Sidecar: **2,797,265 characters of its 2,800,000 budget** (from 2.68 MB). That leaves about 3 KB: the next thing Beaver adds needs R2's packages, or a budget raised with a reason.
+    - Load, in Node with the software renderer: creating the overlay takes about 2.2 s without the vista and 2.8 s with it. **The vista costs about 0.6 s on the main thread at load**; the hills about 0.3 s. This is the one regression in this pass. If R1's phones show it hurts, the vista can go (one line in `BEAVER_SCENE`), leaving the hills and the painted ridges.
+  - *Tests (`beaver-creek.test.ts`):*
+    - the hills meet the canyon's edge exactly at every shared sample and lie under it inside;
+    - their hole is wholly inside the canyon's grid, so no gap opens;
+    - the woods stand only on the hills, outside the canyon, with impostors;
+    - the vista's hole is inside the hills, and it rises above 400 m;
+    - the shipped scene draws all three terrains, with eight foliage layers, within budget.
+  - **Captures:** `captures/demo-quality/` has the overview, creek and base views before and after, and a new `gorge` view (in `scripts/capture-aaa.mjs`) with open sky in it. Two things are left from them:
+    - the shade reads darker and greener (the grade's question);
+    - a thin, flat-topped dark strip shows on the horizon at the end of the creek's valley, where the hills' grid ends and the vista shows through.
 
 - [ ] **V3. Terrain surfaces at resolution.**
   - Beaver's grass, sandstone and mud go from 128² albedo-only to 512² (Medium) and 1024² (High and up), with normal, roughness and height maps for height-based layer blending.
