@@ -138,10 +138,22 @@ This has four consequences:
   - Then set an iOS row in `deviceBudgets.ts` and enforce it at load: texture mip bias, foliage density and shadow resolution step down to fit.
   - *Acceptance:* Play starts a match on R1's iPhone and iPad on both maps, which closes the open iOS question in `BEAVER_CREEK_ROADMAP.md`.
 
-- [ ] **R4. GPU presentation by default.**
-  - On WebGPU, the 360 tier presents from the GPU (F0a) without `?present=gpu`. The readback path remains for WebGL2 and for captures.
-  - *Acceptance:* input-to-photon latency measured on R1's desktop classes (a high-speed camera or a flash-on-click test), before and after.
-  - *Tests:* the default chooses GPU presentation on WebGPU and readback on WebGL2; F0a's parity test holds.
+- [x] **R4. GPU presentation by default.** **Done; brought forward by an iPad report.**
+  - **The report:** on an iPad Air, both demos looked low-resolution and heavily artefacted.
+  - **The cause:** the byte path. The 360 tier drew each frame on the GPU, read it back to the CPU, composited it there and uploaded it again for post. The 1 fps fix's pacing (`gpuPacing.ts`) and "auto" quality judge the GPU by how fast those readbacks land, and nothing in that measure tells a slow GPU from a slow readback.
+    - In simulation, a GPU taking 2 ms a frame whose readbacks take 200 ms (Safari's are slow) is cut to 0.35 of the frame (448×252, stretched to the screen) and stepped to Low (no anti-aliasing, no shadows, no bloom) for good.
+    - That is worse than a GPU thirty times slower with quick readbacks, because fewer pixels can't shorten a readback.
+  - **The fix:**
+    - The 360 tier now presents from the GPU wherever WebGPU is (`XBOX360_RASTER_CAPS.gpuPresent`). No readback, so no pacing to misjudge. Without a WebGPU canvas (WebGL2, the software rasteriser) the player keeps the byte path, as before. `?present=bytes` keeps it on purpose, for comparison.
+    - **HD frames scale smoothly** (`upscaleRendering`). Every canvas was scaled nearest-neighbour; a 1280×720 frame stretched 1.8× across an iPad doubles some pixels and not others. The pixel-art tiers (640 wide and under) keep hard edges.
+    - **A safety net** (`presentFallback.ts`), since no Safari was at hand to test on. WebGPU reports a rejected pipeline asynchronously, never by throwing, so a failure would show a blank game. For its first 8 s a GPU-presented frame watches its device. An uncaptured error is remembered in this browser, and the next load takes the byte path. An explicit `gpuPresent` option still wins.
+  - *Verified:* in Chromium at an iPad Air's 1180×820 at 2×, `/lockout?map=beaver` with no options presents from the GPU (a 1280×720 GPU frame, scaled smoothly).
+  - *Not verified:* Safari itself, and input-to-photon latency (R1).
+  - *Tests (`hd-presentation.test.ts`):*
+    - the byte path's pacing and "auto" against a fast GPU behind slow readbacks;
+    - the 360 tier presents from the GPU, and the pixel-art tiers don't;
+    - smooth scaling for HD and hard pixels below;
+    - a failure remembered, watched only at the start, and harmless without a device or storage.
 
 - [ ] **R5. Pipeline warm-up.**
   - Every pipeline either map can use (its material permutations, effects, equipment, explosions, GI and fog passes) is created with `createRenderPipelineAsync`/`createComputePipelineAsync` while the lobby and intro play.

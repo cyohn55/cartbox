@@ -327,9 +327,10 @@ export function LockoutGame() {
         // ?core=direct tries Lockout on the dedicated Modern core (EP20b).
         ...(new URLSearchParams(window.location.search).get("core") === "direct" ? { core: "direct" as const, directCoreUrl: DIRECT_CORE_URL } : {}),
         modelId: "xbox360",
-        // ?present=gpu presents the frame from the GPU, as the AAA tier does (AAA_FIDELITY_ROADMAP.md F0a);
+        // The frame is presented from the GPU wherever WebGPU is (the tier's default, F0a; DEMO_QUALITY_ROADMAP.md R4).
+        // ?present=bytes keeps the old byte path (each frame read back and composited on the CPU), for comparison;
         // ?hdr=1 shades it in linear light too (F0b), at the display's resolution, scaled to the GPU's time unless ?dynres=0 (F0d).
-        ...(new URLSearchParams(window.location.search).get("present") === "gpu" ? { gpuPresent: true } : {}),
+        ...(new URLSearchParams(window.location.search).get("present") === "bytes" ? { gpuPresent: false } : {}),
         ...(new URLSearchParams(window.location.search).get("hdr") === "1" ? { gpuPresent: true, linearHdr: true, prepass: true, mipmaps: true, nativeResolution: true, dynamicResolution: new URLSearchParams(window.location.search).get("dynres") !== "0" } : {}),
         // KTX2: the transcoder loads only if a texture needs it — Beaver Creek's baked images, on a renderer that samples compressed formats (F1a).
         ktx2: loadKtx2DecoderOffThread,

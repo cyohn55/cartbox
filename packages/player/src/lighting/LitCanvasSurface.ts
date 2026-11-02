@@ -11,7 +11,7 @@
  * lighting can never stop a cart from playing.
  */
 
-import { CanvasSurface, computeScaledSize, type DisplaySurface } from "../display.js";
+import { CanvasSurface, computeScaledSize, upscaleRendering, type DisplaySurface } from "../display.js";
 import type { ConsoleModel } from "../models.js";
 import type { ScaleMode } from "../types.js";
 import { createLightingLayer, type BuiltLightingRenderer } from "./createLightingLayer.js";
@@ -61,7 +61,7 @@ export class LitCanvasSurface implements DisplaySurface {
 
     this.renderer = built.renderer;
     this.canvas = built.canvas;
-    this.canvas.style.imageRendering = "pixelated";
+    this.canvas.style.imageRendering = upscaleRendering(model);
     this.canvas.style.display = "block";
     this.canvas.style.margin = "auto";
     container.appendChild(this.canvas);

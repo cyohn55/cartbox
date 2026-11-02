@@ -77,7 +77,8 @@ describe("Beaver Creek, the map", () => {
     expect(arenaMapCode("beaver")).toContain('MAPS = { "Lockout", "Beaver Creek" }');
     expect(arenaMapCode("beaver")).toContain("MAP_INDEX = 2");
     expect(arenaMapCode("lockout")).toContain("MAP_INDEX = 1");
-  });
+    // The first to build the map's sidecar (its hills and vista included) and navmesh: about 3.5 s alone, more in a busy run.
+  }, 60_000);
 
   it("puts the camera's centre where the player bounds its scene", () => {
     const bounds = parseMeshScene(arenaMap("beaver").sidecar())!.bounds;
