@@ -43,8 +43,9 @@ jobs:
 
       # The suite skips anything whose optional fixture is absent: the cart
       # harness that lives beside the repository, engine builds that need emsdk,
-      # and the WebGPU parity check that needs a real adapter. Those skips are
-      # deliberate — see each file's header for how to run it locally.
+      # and the WebGPU suites that need a real adapter. Those skips are
+      # deliberate — see each file's header for how to run it locally. The
+      # WebGPU suites are run, with no skips allowed, by the `gpu` job below.
       - name: Test
         run: npm test
 
@@ -53,3 +54,38 @@ jobs:
       # if the result differs from what was committed.
       - name: Check player dist is current
         run: npm run check:dist
+
+  # The WebGPU suites on a real device (AAA_PRODUCTION_ROADMAP.md Q1).
+  #
+  # Every test that loads Dawn (`@kmamal/gpu`) skips without an adapter, so in
+  # the job above the AAA tier's shaders were never run: correct for a laptop
+  # without a GPU, and a hole in the gate. Here Mesa's software Vulkan
+  # (lavapipe) is the adapter, and `test:gpu` fails on any skip, so a driver
+  # rejecting a pipeline, or a picture drifting from the software reference,
+  # fails the pull request. It proves correctness, not speed: frame times come
+  # from hardware (DEMO_QUALITY_ROADMAP.md R1).
+  gpu:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install lavapipe (Mesa's software Vulkan)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends mesa-vulkan-drivers libvulkan1
+
+      - run: npm ci
+
+      # Not a devDependency: a ~100 MB native binary only this job needs.
+      # Pinned to 0.2.0; see the header of Unit Tests/webgpu-parity.test.ts.
+      - name: Install Dawn for Node
+        run: npm i --no-save @kmamal/gpu@0.2.0
+
+      - name: WebGPU suites
+        run: npm run test:gpu

@@ -26,6 +26,10 @@
  * (`mesa-vulkan-drivers`, which provides the lavapipe ICD) and Dawn will find
  * it. That is how this was first verified.
  *
+ * `npm run test:gpu` runs this and every other suite that loads Dawn, and fails
+ * on a skip; CI's `gpu` job runs it on lavapipe for every pull request
+ * (AAA_PRODUCTION_ROADMAP.md Q1).
+ *
  * ## What passing means
  *
  * Byte-identical output is the contract (see `WebgpuSceneRenderer`): a cart

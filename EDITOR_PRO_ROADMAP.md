@@ -12,7 +12,7 @@ The user chose all eight tracks below (P1–P8). P9 is the rebuild.
 ## Ground rules
 
 - Every renderer feature lands in all three renderers: WebGL2, WebGPU and the software reference.
-- Each feature has a parity scene. **WebGPU parity runs on a real device** (Dawn via `@kmamal/gpu` over lavapipe; see `webgpu-parity.test.ts`) before a PR goes up, not just WebGL2. CI has no adapter, so this is a local step (lesson of #216).
+- Each feature has a parity scene. **WebGPU parity runs on a real device** (Dawn via `@kmamal/gpu` over lavapipe; see `webgpu-parity.test.ts`) before a PR goes up, not just WebGL2. CI's `gpu` job runs every such suite on lavapipe and fails on any skip (`npm run test:gpu`; AAA_PRODUCTION_ROADMAP.md Q1), so it is no longer only a local step (lesson of #216).
 - Each feature has editor controls, a test, and a note in this file.
 - The iPhone and iPad quality tiers keep their frame and memory budgets. P8's profiler makes those budgets visible.
 - One PR per item, or per part of an item. Each is merged when CI is green.
