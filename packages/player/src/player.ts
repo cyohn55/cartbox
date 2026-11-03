@@ -103,6 +103,7 @@ import { MeshOverlaySurface } from "./mesh/MeshOverlaySurface.js";
 import { WorldOverlaySurface } from "./world/WorldOverlaySurface.js";
 import { createSceneRenderer } from "./render/createSceneRenderer.js";
 import { GpuCanvasSurface, type CapturedFrame } from "./render/GpuCanvasSurface.js";
+import { browserStorage, gpuPresentFailed, watchGpuPresent, type WatchedDevice } from "./render/presentFallback.js";
 import type { SceneRenderer } from "./render/sceneRenderer.js";
 import type { TextureLookup } from "./world/worldScene.js";
 import { SpatialLoader, WorldPartition, partitionWorld, actionMask, createHoloCache, holoBindingKeys, holoDocuments, renderHoloDocument, translate, reboundActions, type DecodedTexture, type EncodedImage, type InputAction, type Mat4, colorFilterSvg, DEFAULT_ACCESSIBILITY, type AccessibilitySettings, type ColorFilter, type WeatherSettings } from "@cartbox/editor";
@@ -576,8 +577,9 @@ export class Player {
       // run on the renderer's device, into a WebGPU canvas. Only with nothing
       // CPU-drawn between the scene and the screen; otherwise, or without a
       // WebGPU canvas, the byte path as before.
+      // (The tier's default gives way where presenting from the GPU failed in this browser before: presentFallback.ts.)
       const wantsGpuPresent =
-        (this.options.gpuPresent ?? this.model.renderCaps.gpuPresent === true) &&
+        (this.options.gpuPresent ?? (this.model.renderCaps.gpuPresent === true && !gpuPresentFailed(browserStorage()))) &&
         Boolean(mesh) &&
         !this.options.lighting &&
         !(particles && particles.emitters.length > 0) &&
@@ -592,6 +594,8 @@ export class Player {
       // The AAA tier's 3D at the display's own resolution (F0d), its 2D layer scaled to it.
       const native = this.options.nativeResolution ?? this.model.renderCaps.nativeResolution === true;
       const gpuCanvas = presentFromGpu ? GpuCanvasSurface.create(this.container, scale, this.model, this.sceneRenderer!.gpuDevice, { hdr, native }) : null;
+      // Its first seconds watched: a WebGPU error there sends this browser to the byte path from the next load.
+      if (gpuCanvas) watchGpuPresent(this.sceneRenderer!.gpuDevice as WatchedDevice, browserStorage());
       // No WebGPU canvas after all: the byte path, whose renderer reads its frames back in 8 bits.
       if (hdr && !gpuCanvas && this.sceneRenderer) {
         this.sceneRenderer.dispose();

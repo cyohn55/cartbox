@@ -1844,7 +1844,7 @@ var CanvasSurface = class {
     this.canvas = container.ownerDocument.createElement("canvas");
     this.canvas.width = model.width;
     this.canvas.height = model.height;
-    this.canvas.style.imageRendering = "pixelated";
+    this.canvas.style.imageRendering = upscaleRendering(model);
     this.canvas.style.display = "block";
     this.canvas.style.margin = "auto";
     const context = this.canvas.getContext("2d", { alpha: false });
@@ -1885,6 +1885,9 @@ var CanvasSurface = class {
     this.canvas.remove();
   }
 };
+function upscaleRendering(model) {
+  return model.width >= 1280 ? "auto" : "pixelated";
+}
 
 // src/lighting/lightingModel.ts
 var NORMAL_DIRECTION_COUNT = 16;
@@ -2887,7 +2890,7 @@ var LitCanvasSurface = class _LitCanvasSurface {
     }
     this.renderer = built.renderer;
     this.canvas = built.canvas;
-    this.canvas.style.imageRendering = "pixelated";
+    this.canvas.style.imageRendering = upscaleRendering(model);
     this.canvas.style.display = "block";
     this.canvas.style.margin = "auto";
     container.appendChild(this.canvas);
@@ -4454,7 +4457,7 @@ var PostFxSurface = class _PostFxSurface {
     /** The sun a 3D scene reports this frame; the lens flare follows it. Null = use the source point. */
     this.sun = null;
     this.uniforms = uniformsFromSettings(settings);
-    this.canvas.style.imageRendering = "pixelated";
+    this.canvas.style.imageRendering = upscaleRendering(model);
     this.canvas.style.display = "block";
     this.canvas.style.margin = "auto";
     container.appendChild(this.canvas);
@@ -4831,6 +4834,11 @@ var N64_RASTER_CAPS = {
   programmableShaders: false
 };
 var XBOX360_RASTER_CAPS = {
+  // Presented from the GPU wherever WebGPU is (AAA_FIDELITY_ROADMAP.md F0a; DEMO_QUALITY_ROADMAP.md R4).
+  // The byte path read every frame back to the CPU; where readbacks come back slowly (iPad Safari), its
+  // pacing took the delay for a slow GPU and cut the 3D to a third of the frame, and "auto" quality to Low.
+  // Without a WebGPU canvas (WebGL2, the software rasteriser) the player keeps the byte path.
+  gpuPresent: true,
   zBuffer: true,
   perspectiveCorrect: true,
   vertexPrecision: "float",
@@ -38488,7 +38496,7 @@ var GpuCanvasSurface = class _GpuCanvasSurface {
       const canvas = container.ownerDocument.createElement("canvas");
       canvas.width = model.width;
       canvas.height = model.height;
-      if (options.native !== true) canvas.style.imageRendering = "pixelated";
+      if (options.native !== true) canvas.style.imageRendering = upscaleRendering(model);
       canvas.style.display = "block";
       canvas.style.margin = "auto";
       const context = canvas.getContext("webgpu");
@@ -38649,6 +38657,46 @@ function halfToFloat2(h) {
   const sign = h & 32768 ? -1 : 1;
   if (e === 31) return m ? Number.NaN : sign * Infinity;
   return e === 0 ? sign * 2 ** -14 * (m / 1024) : sign * 2 ** (e - 15) * (1 + m / 1024);
+}
+
+// src/render/presentFallback.ts
+var PRESENT_FALLBACK_KEY = "cartbox.gpuPresent";
+var PRESENT_WATCH_MS = 8e3;
+function browserStorage() {
+  try {
+    return globalThis.localStorage ?? null;
+  } catch {
+    return null;
+  }
+}
+function gpuPresentFailed(storage) {
+  try {
+    return storage?.getItem(PRESENT_FALLBACK_KEY) === "failed";
+  } catch {
+    return false;
+  }
+}
+function watchGpuPresent(device, storage, ms = PRESENT_WATCH_MS, schedule = (fn, wait) => setTimeout(fn, wait)) {
+  if (!device?.addEventListener) return () => {
+  };
+  let watching = true;
+  const listener = (event) => {
+    if (!watching) return;
+    stop2();
+    try {
+      storage?.setItem(PRESENT_FALLBACK_KEY, "failed");
+    } catch {
+    }
+    console.warn(`[cartbox] Presenting from the GPU failed (${event.error?.message ?? "a WebGPU error"}); this browser will use the byte path from the next load.`);
+  };
+  const stop2 = () => {
+    if (!watching) return;
+    watching = false;
+    device.removeEventListener?.("uncapturederror", listener);
+  };
+  device.addEventListener("uncapturederror", listener);
+  schedule(stop2, ms);
+  return stop2;
 }
 
 // src/player.ts
@@ -39033,13 +39081,14 @@ var Player = class {
         };
       }
       const particles = this.options.particles;
-      const wantsGpuPresent = (this.options.gpuPresent ?? this.model.renderCaps.gpuPresent === true) && Boolean(mesh) && !this.options.lighting && !(particles && particles.emitters.length > 0) && !(world && this.cartSource) && !(wantsForeground && this.cartSource) && !(scene && backdrop);
+      const wantsGpuPresent = (this.options.gpuPresent ?? (this.model.renderCaps.gpuPresent === true && !gpuPresentFailed(browserStorage()))) && Boolean(mesh) && !this.options.lighting && !(particles && particles.emitters.length > 0) && !(world && this.cartSource) && !(wantsForeground && this.cartSource) && !(scene && backdrop);
       let hdr = wantsGpuPresent && (this.options.linearHdr ?? this.model.renderCaps.linearHdr === true);
       const makeRenderer = () => createSceneRenderer(this.model.width, this.model.height, this.model.renderCaps, void 0, void 0, { hdr, mips: this.options.mipmaps ?? this.model.renderCaps.mipmaps === true });
       if (mesh || world && this.cartSource) this.sceneRenderer = await makeRenderer();
       const presentFromGpu = wantsGpuPresent && this.sceneRenderer?.backend === "webgpu" && Boolean(this.sceneRenderer.renderToTexture);
       const native = this.options.nativeResolution ?? this.model.renderCaps.nativeResolution === true;
       const gpuCanvas = presentFromGpu ? GpuCanvasSurface.create(this.container, scale, this.model, this.sceneRenderer.gpuDevice, { hdr, native }) : null;
+      if (gpuCanvas) watchGpuPresent(this.sceneRenderer.gpuDevice, browserStorage());
       if (hdr && !gpuCanvas && this.sceneRenderer) {
         this.sceneRenderer.dispose();
         hdr = false;

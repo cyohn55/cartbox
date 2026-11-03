@@ -11,7 +11,7 @@
  * stop a cart from playing.
  */
 
-import { computeScaledSize, type DisplaySurface } from "../display.js";
+import { computeScaledSize, upscaleRendering, type DisplaySurface } from "../display.js";
 import type { ConsoleModel } from "../models.js";
 import type { ScaleMode } from "../types.js";
 import { PostFxPass } from "./PostFxPass.js";
@@ -54,7 +54,7 @@ export class PostFxSurface implements DisplaySurface {
     settings: PostFxSettings,
   ) {
     this.uniforms = uniformsFromSettings(settings);
-    this.canvas.style.imageRendering = "pixelated";
+    this.canvas.style.imageRendering = upscaleRendering(model);
     this.canvas.style.display = "block";
     this.canvas.style.margin = "auto";
     container.appendChild(this.canvas);

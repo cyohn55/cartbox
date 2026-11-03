@@ -201,6 +201,11 @@ export const N64_RASTER_CAPS: RenderCaps = {
  * ERA_MODELS.md rather than pretended here.
  */
 export const XBOX360_RASTER_CAPS: RenderCaps = {
+  // Presented from the GPU wherever WebGPU is (AAA_FIDELITY_ROADMAP.md F0a; DEMO_QUALITY_ROADMAP.md R4).
+  // The byte path read every frame back to the CPU; where readbacks come back slowly (iPad Safari), its
+  // pacing took the delay for a slow GPU and cut the 3D to a third of the frame, and "auto" quality to Low.
+  // Without a WebGPU canvas (WebGL2, the software rasteriser) the player keeps the byte path.
+  gpuPresent: true,
   zBuffer: true,
   perspectiveCorrect: true,
   vertexPrecision: "float",

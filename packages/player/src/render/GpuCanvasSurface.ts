@@ -14,7 +14,7 @@
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
-import { computeScaledSize, type DisplaySurface } from "../display.js";
+import { computeScaledSize, upscaleRendering, type DisplaySurface } from "../display.js";
 import type { ConsoleModel } from "../models.js";
 import type { ScaleMode } from "../types.js";
 import { anyPostFxEnabled, uniformsFromSettings, type PostFxSettings, type PostFxUniforms } from "../fx/postfx.js";
@@ -99,8 +99,9 @@ export class GpuCanvasSurface implements DisplaySurface {
       const canvas = container.ownerDocument.createElement("canvas");
       canvas.width = model.width;
       canvas.height = model.height;
-      // A frame at the model's size is scaled up crisply; a native one is shown pixel for pixel.
-      if (options.native !== true) canvas.style.imageRendering = "pixelated";
+      // A frame at the model's size is scaled up (crisply for pixel art, smoothly for HD: upscaleRendering);
+      // a native one is shown pixel for pixel.
+      if (options.native !== true) canvas.style.imageRendering = upscaleRendering(model);
       canvas.style.display = "block";
       canvas.style.margin = "auto";
       const context = canvas.getContext("webgpu" as any) as any;

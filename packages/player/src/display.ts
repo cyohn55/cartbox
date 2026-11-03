@@ -84,8 +84,8 @@ export class CanvasSurface implements DisplaySurface {
     this.canvas = container.ownerDocument.createElement("canvas");
     this.canvas.width = model.width;
     this.canvas.height = model.height;
-    // Preserve hard pixel edges when the browser upscales the canvas.
-    this.canvas.style.imageRendering = "pixelated";
+    // Hard pixel edges for the pixel-art tiers; an HD frame scales smoothly (see upscaleRendering).
+    this.canvas.style.imageRendering = upscaleRendering(model);
     this.canvas.style.display = "block";
     this.canvas.style.margin = "auto";
 
@@ -131,4 +131,16 @@ export class CanvasSurface implements DisplaySurface {
     this.resizeObserver.disconnect();
     this.canvas.remove();
   }
+}
+
+/**
+ * How the browser should scale a model's canvas up to the screen. The
+ * pixel-art tiers (640 wide and under) keep hard pixel edges. An HD frame
+ * (720p and up: the Xbox 360, Modern and AAA tiers) is scaled smoothly: it is
+ * a rendered image, not pixel art, and on a high-density screen (an iPad's
+ * 2360 px across) a nearest-neighbour stretch by a non-integer factor doubles
+ * some pixels and not others, which shows as uneven, shimmering edges.
+ */
+export function upscaleRendering(model: { readonly width: number }): "pixelated" | "auto" {
+  return model.width >= 1280 ? "auto" : "pixelated";
 }
