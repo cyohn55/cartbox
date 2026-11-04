@@ -7,7 +7,7 @@
 The editor still cannot make an AAA game. The captures in `captures/f11a` and `captures/demo-quality` show block-built characters, cone trees and stretched 128² textures under that renderer. The limits now sit **outside the renderer**:
 
 - nothing the renderer does has been verified on a GPU in CI, or measured on hardware;
-- the main thread's frame budget is spent before gameplay runs;
+- the main thread's frame budget has not been measured on hardware, and physics, navigation and Lua all share it;
 - the editor can neither author nor import AAA-density content;
 - the gameplay runtime is built on fixed-size shared-memory protocols from a fantasy console;
 - there is no gameplay framework (AI, combat, projectiles), and the script tooling does not scale;
@@ -22,7 +22,7 @@ This roadmap closes those gaps. It does not repeat the open items of other roadm
 | --- | --- | --- | --- |
 | Verification | 67 test files that need a WebGPU adapter all skip in CI (`ci.yml`, `describe.skipIf(!device)`); run by hand on lavapipe | Every shader validated per change on a GPU device; frame times from hardware | Q |
 | Budgets | `deviceBudgets.ts` has iPhone, iPad and desktop rows; no `aaa` row, no integrated-GPU class, no GPU ms per pass | Per-tier, per-device budgets enforced in the editor | Q |
-| Main thread | ~14.5 ms of renderer JS per frame on Beaver Creek (F0e); physics, navigation and Lua on the same thread; two workers, both decoders | Simulation, render submission and streaming on separate threads; < 4 ms render JS | M |
+| Main thread | Renderer JS 4.2–5.5 ms a frame on Beaver Creek in Node after F0e-3 and F0e-4 (from 14.5 ms), against F0e's 4 ms exit; never measured in a browser on hardware; physics, navigation and Lua on the same thread by design (F0e-5) | Measured on hardware; simulation that scales without stalling the frame | M |
 | Pipelines | 43 synchronous `create*Pipeline` sites | Async compilation, a warm-up, no first-use hitches | M (with R5) |
 | Modelling | Box modelling: loop cut, subdivide, mirror, extrude/inset/bevel; sculpting only on voxel and hexel lattices | DCC round-trip; sculpt and retopo stay in DCC tools | D |
 | UVs | `uvUnwrap.ts` projects each face on its dominant axis | Angle-preserving unwrap (LSCM/ABF) with user seams | D |
@@ -122,8 +122,14 @@ This roadmap closes those gaps. It does not repeat the open items of other roadm
 
 ### M. The main thread
 
-- [ ] **M1. Transforms and uniforms on the GPU.** The ~3.7 ms of per-copy `mvp`/`lightMvp` multiplication and the ~5 ms of uniform packing F0e measured move into a compute pass over the instance buffer (`gpuTransforms.ts` is the start). *Exit:* F0e's < 4 ms on Beaver Creek, measured on R1.
-- [ ] **M2. Physics and navigation on a worker.** Rapier and the crowd step on a worker one tick ahead, through a transferable state block, with the host keeping the deterministic order. The cart sees the same state on the same tick as today.
+- [ ] **M1. F0e's exit, measured.** *(Corrected: this item first asked for the transforms and uniforms on the GPU, which F0e-3 and F0e-4 had already done.)*
+  - F0e-3 moved each copy's transforms to a compute pass and F0e-4 kept per-draw uniforms between frames. Together they took the renderer's JS on Beaver Creek from about 14.5 ms to **4.2–5.5 ms** a frame in Node, against F0e's 4 ms exit.
+  - What remains is spread thin (batching, planning the cull, bind groups, encoding, each under about 0.6 ms). It has never been measured in a browser on hardware: the first `aaa` frame on SwiftShader didn't finish in five minutes.
+  - *Exit:* `scripts/measure-main-thread.mjs` with `CBX_GPU=1` on R1's four classes, and the largest remaining cost cut if the exit isn't met there.
+- [ ] **M2. Physics that scales without stalling the frame.** *(Corrected: this item first asked to move physics and navigation onto a worker.)*
+  - F0e-5 kept both on the main thread on purpose. They are steps of the deterministic tick that netplay replays, and a worker's answer can't be promised by a fixed tick without blocking for it. Neither shipped map has physics bodies, and navigation runs only when a cart sends agents. That reasoning stands.
+  - The question returns with S1: once a cart can have hundreds of bodies, measure the step's cost on R1's phones first.
+  - Only if it threatens the frame, choose between a worker stepped in lockstep (the main thread waiting at the tick's edge) and a cheaper step on the main thread (sleeping islands, a lower solver iteration count per tier), keeping replays exact either way.
 - [ ] **M3. Async pipelines and a warm-up.** Every `createRenderPipeline`/`createComputePipeline` goes through one cache with `create*PipelineAsync`, and a scene's pipelines are compiled behind the loading screen. Completes R5.
 - [ ] **M4. The scene's parse on a worker.** R2a's remaining 0.7–0.9 s on Beaver Creek.
 
@@ -180,7 +186,7 @@ This roadmap closes those gaps. It does not repeat the open items of other roadm
 ## Order
 
 1. **Q1, then Q2.** Nothing else can be judged until the shaders run in CI and the budgets exist.
-2. **M1, M3, M2.** The frame has room for gameplay.
+2. **M3, then M1 on R1's hardware.** No first-use hitches, and the frame's cost known. M2 waits for S1.
 3. **S1, S2, S3.** The runtime's structural limits go, before frameworks are built on them.
 4. **D1, D2, D3, D4.** Content can come in.
 5. **K1, K2, K3**, then **K6, S4, K4, K5.** Scripts scale, then the framework.
