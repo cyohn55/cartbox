@@ -35,6 +35,7 @@ import {
   type MailboxEvent,
   type NetRoomStatus,
   type PlayerHandle,
+  type MeshScene,
 } from "@cartbox/player";
 import { ARENA_MAPS, LOCKOUT_INPUT_ACTIONS, LOCKOUT_STRINGS, arenaMap, arenaMapCartridge, lockoutCartridge } from "@cartbox/editor";
 import { preferredLanguages, readPlayerPrefs, writePlayerPrefs, type PlayerPrefs } from "@/lib/accessibilityPrefs";
@@ -135,12 +136,16 @@ function assetsCartId(): string | null {
 }
 
 /** A map's scene, with the `?assets=` cart's saved Spartans, viewmodels and pickups laid in. */
-async function lockoutScene(mapId: string): Promise<{ json: string; overlay: LockoutAssetOverlay | null; center?: readonly [number, number, number] }> {
+async function lockoutScene(
+  mapId: string,
+): Promise<{ json: string; overlay: LockoutAssetOverlay | null; center?: readonly [number, number, number]; parsed?: MeshScene | null }> {
   const saved = savedCartId(mapId);
   if (saved) return { json: savedGame(saved).json, overlay: null };
   const id = assetsCartId();
   const built = await sidecars().get(arenaMap(mapId).id);
-  return { ...lockoutSidecarWithAssets(built.json, id ? (loadCartDraft(id)?.sidecars.mesh ?? null) : null), center: built.center };
+  const withAssets = lockoutSidecarWithAssets(built.json, id ? (loadCartDraft(id)?.sidecars.mesh ?? null) : null);
+  // The worker's parse holds while the saved assets didn't rewrite the sidecar (M4).
+  return { ...withAssets, center: built.center, ...(withAssets.json === built.json && built.scene ? { parsed: built.scene } : {}) };
 }
 
 export function LockoutGame() {
@@ -314,7 +319,7 @@ export function LockoutGame() {
     async (session: NetSession, map: string, boot: string) => {
       const stage = stageRef.current;
       if (!stage) return;
-      const { json: scene, center } = await lockoutScene(map);
+      const { json: scene, center, parsed } = await lockoutScene(map);
       // Waiting for the map's sidecar, the page may have been left or moved to another map: that mount is the one to keep.
       if (stageRef.current !== stage || mapRef.current !== map) return;
       // (The centre came with the sidecar, so the cart's code doesn't build the map's mesh again here.)
@@ -342,7 +347,8 @@ export function LockoutGame() {
         // through cartbox.light3d), and skipping the 2D lighting layer spares
         // every frame a material capture and a full-screen relight pass.
         postFx: parsePostFxSettings(savedCartId(map) ? ARENA_MAPS[0]!.fx : arenaMap(map).fx) ?? undefined,
-        mesh: parseMeshScene(scene) ?? undefined,
+        // Parsed on the sidecar's worker when it could be (M4); else here.
+        mesh: parsed ?? parseMeshScene(scene) ?? undefined,
         ui: readSidecarUi(scene),
         actions: readSidecarActions(scene),
         // Its string table in the player's language, and their accessibility settings (EP19b).

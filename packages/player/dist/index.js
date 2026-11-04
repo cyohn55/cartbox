@@ -8559,6 +8559,21 @@ function buildOrbitCamera(bounds, yaw, pitch, aspect, options = {}) {
     projection: projectionMatrix(fovY, aspect, options.near && options.near > 0 ? options.near : Math.max(0.01, radius * 0.05), far)
   };
 }
+function meshSceneTransferables(scene) {
+  const buffers = /* @__PURE__ */ new Set();
+  const seen = /* @__PURE__ */ new Set();
+  const walk = (value) => {
+    if (value === null || typeof value !== "object" || seen.has(value)) return;
+    seen.add(value);
+    if (ArrayBuffer.isView(value)) {
+      if (value.buffer instanceof ArrayBuffer) buffers.add(value.buffer);
+      return;
+    }
+    for (const child of Object.values(value)) walk(child);
+  };
+  walk(scene);
+  return [...buffers];
+}
 
 // src/physics/physicsSession.ts
 import { DEFAULT_SPRING_DAMPING, DEFAULT_SPRING_STIFFNESS, meshBounds as meshBounds2 } from "@cartbox/editor";
@@ -43012,6 +43027,7 @@ export {
   lookProfileFor,
   lutStrip,
   makeShadowTexture,
+  meshSceneTransferables,
   mount,
   mouseLean,
   movingBodies,

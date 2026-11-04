@@ -18,9 +18,17 @@
  * code needs and which costs a second build of the map's mesh to work out
  * anywhere else.
  */
+import type { MeshScene } from "@cartbox/player";
+
 export interface BuiltSidecar {
   readonly json: string;
   readonly center: readonly [number, number, number];
+  /**
+   * The sidecar already parsed (AAA_PRODUCTION_ROADMAP.md M4), when a worker
+   * built it: the page then skips the parse on its own thread. Absent from a
+   * build on this thread, which parses as before.
+   */
+  readonly scene?: MeshScene | null;
 }
 
 /** What a sidecar worker answers with. */
@@ -89,7 +97,7 @@ export function createSidecarLoader(options: SidecarLoaderOptions): SidecarLoade
         const reply = event.data;
         if (reply.mapId !== mapId) return;
         done();
-        resolve("json" in reply ? { json: reply.json, center: reply.center } : here(mapId));
+        resolve("json" in reply ? { json: reply.json, center: reply.center, ...(reply.scene ? { scene: reply.scene } : {}) } : here(mapId));
       };
       worker.onerror = () => {
         done();

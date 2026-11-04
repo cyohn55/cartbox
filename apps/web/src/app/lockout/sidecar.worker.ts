@@ -6,17 +6,22 @@
  */
 
 import { arenaMap } from "@cartbox/editor";
+import { meshSceneTransferables, parseMeshScene } from "@cartbox/player";
 
 import type { SidecarReply } from "../../lib/sidecarLoader";
 
-const scope = self as unknown as { onmessage: ((event: { data: { mapId: string } }) => void) | null; postMessage(reply: SidecarReply): void };
+const scope = self as unknown as { onmessage: ((event: { data: { mapId: string } }) => void) | null; postMessage(reply: SidecarReply, transfer?: Transferable[]): void };
 
 scope.onmessage = (event) => {
   const { mapId } = event.data;
   try {
     const map = arenaMap(mapId);
+    const json = map.sidecar();
+    // Parsed here too (AAA_PRODUCTION_ROADMAP.md M4), its buffers handed over rather than copied:
+    // about a second of Beaver Creek's load that no longer holds the page.
+    const scene = parseMeshScene(json);
     // The centre too: it builds the map's mesh again, which is better done here than on the page.
-    scope.postMessage({ mapId, json: map.sidecar(), center: map.center() });
+    scope.postMessage({ mapId, json, center: map.center(), scene }, scene ? meshSceneTransferables(scene) : []);
   } catch (error) {
     scope.postMessage({ mapId, error: error instanceof Error ? error.message : String(error) });
   }

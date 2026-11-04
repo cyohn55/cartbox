@@ -6,6 +6,6 @@
  */
 
 export { MeshOverlaySurface, TINT_PALETTE, sceneSkyEnvironment, smoothFrontEdges } from "./MeshOverlaySurface.js";
-export { MAX_PREFAB_POOL, MAX_PREFAB_POOL_DIRECT, parseMeshScene, buildOrbitCamera, orbitPitchAboveTerrain, streamGroups } from "./meshScene.js";
+export { MAX_PREFAB_POOL, MAX_PREFAB_POOL_DIRECT, meshSceneTransferables, parseMeshScene, buildOrbitCamera, orbitPitchAboveTerrain, streamGroups } from "./meshScene.js";
 export { sceneObjectsSdkLua, luaQuote } from "./sceneObjectsSdk.js";
 export type { MeshScene, MeshInstance, PrefabPool, SceneBounds, SceneVista, SceneCamera as MeshSceneCamera } from "./meshScene.js";

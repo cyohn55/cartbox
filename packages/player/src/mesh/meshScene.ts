@@ -772,3 +772,26 @@ export function buildOrbitCamera(
     projection: projectionMatrix(fovY, aspect, options.near && options.near > 0 ? options.near : Math.max(0.01, radius * 0.05), far),
   };
 }
+
+/**
+ * Every distinct buffer under a parsed scene's typed arrays (AAA_PRODUCTION_ROADMAP.md
+ * M4): what a worker that parsed the scene transfers with it, so the page
+ * receives the geometry and images without copying them. A buffer several
+ * views share is listed once. The scene is plain data (objects, arrays, typed
+ * arrays), so it survives a structured clone whole.
+ */
+export function meshSceneTransferables(scene: MeshScene): ArrayBuffer[] {
+  const buffers = new Set<ArrayBuffer>();
+  const seen = new Set<object>();
+  const walk = (value: unknown): void => {
+    if (value === null || typeof value !== "object" || seen.has(value)) return;
+    seen.add(value);
+    if (ArrayBuffer.isView(value)) {
+      if (value.buffer instanceof ArrayBuffer) buffers.add(value.buffer);
+      return;
+    }
+    for (const child of Object.values(value)) walk(child);
+  };
+  walk(scene);
+  return [...buffers];
+}
