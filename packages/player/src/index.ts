@@ -389,7 +389,7 @@ export type {
 // geometry with placement transforms); the player rasterises it over each frame
 // with a pure software rasteriser — the runtime has no GPU triangle path — no cart
 // code needed. Phase 2 of the mesh asset feature.
-export { MeshOverlaySurface, TINT_PALETTE, sceneSkyEnvironment, smoothFrontEdges, parseMeshScene, buildOrbitCamera, orbitPitchAboveTerrain, streamGroups, sceneObjectsSdkLua } from "./mesh/index.js";
+export { MeshOverlaySurface, MAX_PREFAB_POOL, MAX_PREFAB_POOL_DIRECT, TINT_PALETTE, sceneSkyEnvironment, smoothFrontEdges, parseMeshScene, buildOrbitCamera, orbitPitchAboveTerrain, streamGroups, sceneObjectsSdkLua } from "./mesh/index.js";
 export { readSidecarUi, uiSdkLua } from "./uiSdk.js";
 export { INPUT_SETTINGS, playLanguage, stringsSdkLua, writeInputSettings } from "./stringsSdk.js";
 export { componentsSdkLua } from "./componentsSdk.js";
@@ -573,6 +573,7 @@ export {
   type PhysicsBodyDesc,
   type PhysicsJointDesc,
   type PhysicsShape,
+  type ProjectileImpact,
   type Quat as PhysicsQuat,
   type Vec3 as PhysicsVec3,
 } from "./physics/physicsSession.js";
@@ -607,6 +608,19 @@ export {
   PHYS_Q_HASH,
   PHYS_Q_INSIDE,
   PHYS_Q_RAY,
+  PHYS_Q_AGENT,
+  PHYS_Q_ANIM,
+  PHYS_Q_ANIM_EVENTS,
+  PHYS_Q_JOINT,
+  DIRECT_MAX_AGENTS,
+  DIRECT_MAX_JOINTS,
+  DIRECT_MAX_PROJECTILES,
+  PHYS_Q_FIRE,
+  PHYS_Q_FIRE_OPTIONS,
+  PHYS_Q_IMPACTS,
+  PHYS_Q_PROJECTILE,
+  PHYS_Q_STOP,
+  PROJECTILE_GRAVITY,
   RAM_LAYOUTS,
   physicsBlockAddress,
   takePhysicsCommands,

@@ -18,6 +18,13 @@
  *   cartbox.hit(slot)                 -> hit, obj, x, y, z, nx, ny, nz, distance
  *   cartbox.layers(l1, l2, ...)       -> a mask of those collision layers (0-15) for a ray's or a
  *                                     sweep's mask: it hits only bodies on them (S3; nil = all)
+ *   cartbox.fire(x, y, z, vx, vy, vz, {radius, gravity, drag, life, owner, mask, push})
+ *                                     -> a projectile's id (S4, the dedicated core; nil elsewhere):
+ *                                     swept each tick, so it can't pass through a thin wall
+ *   cartbox.projectile(id)            -> x, y, z, vx, vy, vz while it flies (draw it with cartbox.place)
+ *   cartbox.impacts()                 -> the last step's { {id=, hit=, obj=, x=, y=, z=, nx=, ny=, nz=,
+ *                                     speed=}, ... }: hit false when its life ran out
+ *   cartbox.stop(id)                  remove a projectile without an impact
  *   cartbox.contacts()                -> this tick's contacts { {a=, b=, started=, trigger=}, ... }
  *   cartbox.entered(trigger)          -> objects that came into a trigger zone this tick
  *   cartbox.exited(trigger)           -> objects that left it this tick
@@ -96,7 +103,7 @@
  */
 
 import { commandRingAddress, commandRingMax } from "../runtime/commandRing.js";
-import type { MeshScene } from "../mesh/meshScene.js";
+import { MAX_PREFAB_POOL, type MeshScene } from "../mesh/meshScene.js";
 import {
   PHYS_BODIES,
   PHYS_BODY_BYTES,
@@ -184,6 +191,17 @@ import {
   PHYS_Q_INSIDE,
   PHYS_Q_INSIDE_PAGE,
   PHYS_Q_RAY,
+  PHYS_Q_AGENT,
+  PHYS_Q_ANIM,
+  PHYS_Q_ANIM_EVENTS,
+  PHYS_Q_JOINT,
+  PHYS_Q_FIRE,
+  PHYS_Q_FIRE_OPTIONS,
+  PHYS_Q_IMPACTS,
+  PHYS_Q_IMPACTS_PAGE,
+  PHYS_Q_PROJECTILE,
+  PHYS_Q_STOP,
+  IMPACT_HIT,
   physicsBlockAddress,
   type RamLayout,
 } from "./protocol.js";
@@ -224,14 +242,19 @@ const luaString = (s: string) => JSON.stringify(s);
 export function runtimeSdkLua(
   scene: MeshScene | null | undefined,
   layout: RamLayout,
-  { physics: engine = true, maxBodies = PHYS_MAX_BODIES }: { physics?: boolean; maxBodies?: number } = {},
+  {
+    physics: engine = true,
+    maxBodies = PHYS_MAX_BODIES,
+    maxPool = MAX_PREFAB_POOL,
+  }: { physics?: boolean; maxBodies?: number; maxPool?: number } = {},
 ): string {
   if (!scene || !sceneNeedsRuntime(scene, { physics: engine })) return "";
   // Without an engine to run them, bodies keep the SDK's no-op physics calls.
   const physics = engine && sceneHasPhysics(scene);
   // The same bodies the session makes (physicsSlots): the block's 64, or more on the dedicated core (S1).
   const slots = physicsSlots(scene, maxBodies).map((object, slot) => `[${object}]=${slot}`);
-  const pools = (scene.pools ?? []).map((pool) => `[${luaString(pool.prefab)}]={${pool.roots.join(",")}}`);
+  // The copies a cart may spawn: 32 a prefab on a TIC-80–derived core, all a scene keeps on the dedicated one (S1b).
+  const pools = (scene.pools ?? []).map((pool) => `[${luaString(pool.prefab)}]={${pool.roots.slice(0, Math.max(0, maxPool)).join(",")}}`);
   const B = physicsBlockAddress(layout);
   // Commands past the block's 64 continue into the overflow ring where the core has one (EP20).
   const R = commandRingAddress(layout);
@@ -262,6 +285,9 @@ export function runtimeSdkLua(
   end
   -- The dedicated Modern core (EP20b) takes commands as calls: no slots, no cap.
   local _direct = _cbx_cmd
+  -- And answers reads as calls (S1, S2): past every cap of the block below.
+  local _q = _cbx_query
+  local _int = function(v) return math.tointeger(v) or v end
   local function _cmd(op, a, v1, v2, v3, v4, v5, v6)
     if not _live() then return end
     if _direct then return _direct(op, a, v1 or 0, v2 or 0, v3 or 0, v4 or 0, v5 or 0, v6 or 0) end
@@ -291,10 +317,8 @@ ${TIMELINE_CALLS(scene)}${LEVEL_CALLS(scene)}${scene.navmesh ? NAV_CALLS() : ""}
 /** The physics calls (inside the runtime block's do … end, after its helpers). */
 function PHYSICS_CALLS(): string {
   return `  cartbox.physics = function() return _live() end
-  -- The dedicated Modern core answers reads as calls (S1, S2): no 64-body,
-  -- 16-ray or 48-contact block, and a ray's hit comes back in the call.
-  local _q = _cbx_query
-  local _int = function(v) return math.tointeger(v) or v end
+  -- On the dedicated core (_q) there is no 64-body, 16-ray or 48-contact
+  -- block to read, and a ray's hit comes back in the call.
   local _hits = {}
   cartbox.physicshash = function()
     if not _live() then return 0 end
@@ -399,6 +423,43 @@ function PHYSICS_CALLS(): string {
     if w >= 2 then obj = w - 2 end
     return true, obj, _rd(at + 4) / ${PHYS_FIX}, _rd(at + 8) / ${PHYS_FIX}, _rd(at + 12) / ${PHYS_FIX},
       _rd(at + 16) / ${PHYS_FIX}, _rd(at + 20) / ${PHYS_FIX}, _rd(at + 24) / ${PHYS_FIX}, _rd(at + 28) / ${PHYS_FIX}
+  end
+  -- Projectiles (S4, the dedicated core): swept every tick, so nothing is
+  -- tunnelled through; gravity, drag, a life, an owner to pass through, a mask.
+  cartbox.fire = function(x, y, z, vx, vy, vz, o)
+    if not _q or not _live() then return nil end
+    o = o or {}
+    local owner = 0
+    if o.owner ~= nil then owner = (_obj(o.owner) or -1) + 1 end
+    _q(${PHYS_Q_FIRE_OPTIONS}, owner, o.radius or 0.05, o.gravity or 1, o.drag or 0, o.life or 10, math.floor(o.mask or 0) & ${PHYSICS_MASK_ALL}, o.push or 0)
+    local id = _q(${PHYS_Q_FIRE}, 0, x or 0, y or 0, z or 0, vx or 0, vy or 0, vz or 0)
+    if id == nil then return nil end
+    return _int(id)
+  end
+  cartbox.projectile = function(id)
+    if not _q or not _live() or id == nil then return nil end
+    return _q(${PHYS_Q_PROJECTILE}, id)
+  end
+  cartbox.impacts = function()
+    local out = {}
+    if not _q or not _live() then return out end
+    local from = 0
+    repeat
+      local r = table.pack(_q(${PHYS_Q_IMPACTS}, from))
+      local total = r[1] or 0
+      for k = 2, r.n - 9, 10 do
+        local w = _int(r[k + 2])
+        local obj = nil
+        if w >= 2 then obj = w - 2 end
+        out[#out + 1] = { id = _int(r[k]), hit = _int(r[k + 1]) == ${IMPACT_HIT}, obj = obj,
+          x = r[k + 3], y = r[k + 4], z = r[k + 5], nx = r[k + 6], ny = r[k + 7], nz = r[k + 8], speed = r[k + 9] }
+      end
+      from = from + ${PHYS_Q_IMPACTS_PAGE}
+    until from >= total
+    return out
+  end
+  cartbox.stop = function(id)
+    if _q and id ~= nil then _q(${PHYS_Q_STOP}, id) end
   end
   cartbox.contacts = function()
     local out = {}
@@ -749,6 +810,12 @@ function NAV_CALLS(): string {
   cartbox.agentpos = function(k)
     local key = _akey(k)
     if key == nil or not _live() then return nil end
+    if _q then
+      local x, y, z, fa, fl = _q(${PHYS_Q_AGENT}, key)
+      if x == nil then return nil end
+      fl = _int(fl)
+      return x, y, z, fa, (fl & ${NAV_FLAG_MOVING}) ~= 0, (fl & ${NAV_FLAG_AIR}) ~= 0, (fl & ${NAV_FLAG_ARRIVED}) ~= 0, (fl & ${NAV_FLAG_NO_PATH}) ~= 0
+    end
     local n = _rd(_B + ${PHYS_AGENTS})
     for i = 0, math.min(n, ${PHYS_MAX_AGENTS}) - 1 do
       local at = _B + ${PHYS_AGENTS + 4} + i * ${PHYS_AGENT_BYTES}
@@ -897,6 +964,13 @@ function ANIM_CALLS(scene: MeshScene): string {
   cartbox.anim = function(o)
     local i = _obj(o)
     if i == nil or _clips[i] == nil or not _live() then return nil, 0, false end
+    if _q then
+      local c, t = _q(${PHYS_Q_ANIM}, i)
+      if c == nil or c < 0 then return nil, 0, false end
+      c = _int(c)
+      local done = _loops[i] == false and t >= (_dur[i][c + 1] or 0) - 0.0005
+      return _clips[i][c + 1], t, done
+    end
     local n = _rd(_B + ${PHYS_ANIMS})
     for k = 0, n - 1 do
       local at = _B + ${PHYS_ANIMS + 4} + k * ${PHYS_ANIM_BYTES}
@@ -966,6 +1040,7 @@ function ANIM_CALLS(scene: MeshScene): string {
       _watching[key] = true
       _cmd(${PHYS_OP_WATCH}, i, j)
     end
+    if _q then return _q(${PHYS_Q_JOINT}, i, j) end
     local n = _rd(_B + ${PHYS_JOINTS})
     for k = 0, n - 1 do
       local at = _B + ${PHYS_JOINTS + 4} + k * ${PHYS_JOINT_BYTES}
@@ -1006,6 +1081,11 @@ function ANIM_CALLS(scene: MeshScene): string {
     local i = _obj(o)
     local m = i and _sm[i]
     if m == nil or not _live() then return nil end
+    if _q then
+      local _, _, st = _q(${PHYS_Q_ANIM}, i)
+      if st == nil or st < 0 then return nil end
+      return m.s[_int(st) + 1]
+    end
     local n = _rd(_B + ${PHYS_ANIMS})
     for k = 0, n - 1 do
       local at = _B + ${PHYS_ANIMS + 4} + k * ${PHYS_ANIM_BYTES}
@@ -1022,6 +1102,16 @@ function ANIM_CALLS(scene: MeshScene): string {
     local m = i and _sm[i]
     local out = {}
     if m == nil or not _live() then return out end
+    if _q then
+      local from = 0
+      repeat
+        local r = table.pack(_q(${PHYS_Q_ANIM_EVENTS}, i, from))
+        local total = r[1] or 0
+        for k = 2, r.n do out[#out + 1] = m.e[_int(r[k]) + 1] end
+        from = from + ${PHYS_Q_INSIDE_PAGE}
+      until from >= total
+      return out
+    end
     local n = _rd(_B + ${PHYS_ANIM_EVENTS})
     for k = 0, n - 1 do
       local at = _B + ${PHYS_ANIM_EVENTS + 4} + k * ${PHYS_ANIM_EVENT_BYTES}

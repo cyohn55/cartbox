@@ -345,6 +345,50 @@ export const PHYS_Q_RAY = 102;
 export const PHYS_Q_CONTACTS = 103;
 export const PHYS_Q_INSIDE = 104;
 export const PHYS_Q_HASH = 105;
+/**
+ * S1b, the rest of the runtime past the block:
+ * ANIM: a = object → clip (-1 at rest), seconds into it, state (-1 none); nil when not animated.
+ * ANIM_EVENTS: a = object, v1 = first index → the count, then up to
+ *   {@link PHYS_Q_INSIDE_PAGE} event indices it fired on the last step.
+ * JOINT: a = object, v1 = joint → x, y, z where it was last skinned; nil until
+ *   watched (PHYS_OP_WATCH) and skinned once.
+ * AGENT: a = key → x, y, z, facing, flags (NAV_FLAG_*); nil without that agent.
+ */
+export const PHYS_Q_ANIM = 106;
+export const PHYS_Q_ANIM_EVENTS = 107;
+export const PHYS_Q_JOINT = 108;
+export const PHYS_Q_AGENT = 109;
+/**
+ * Projectiles (S4), on the dedicated core only:
+ * FIRE_OPTIONS: a = owner object + 1 (0 none; its body is passed through),
+ *   v1 = radius (0 a ray), v2 = gravity scale, v3 = drag (per second), v4 =
+ *   life (seconds), v5 = layer mask (0 all), v6 = push (impulse per m/s on a
+ *   dynamic body hit) → nil. For the next FIRE.
+ * FIRE: v1..v3 = from, v4..v6 = velocity → the projectile's id; nil past
+ *   {@link DIRECT_MAX_PROJECTILES}.
+ * PROJECTILE: a = id → x, y, z, vx, vy, vz while it flies; nil once it hit or expired.
+ * IMPACTS: a = first index → the count, then (id, kind 1 hit / 2 expired,
+ *   object + 2 or 1 for a non-object or 0 none, x, y, z, nx, ny, nz, speed) for
+ *   up to {@link PHYS_Q_IMPACTS_PAGE} of the last step's.
+ * STOP: a = id → nil; the projectile is gone without an impact.
+ */
+export const PHYS_Q_FIRE_OPTIONS = 110;
+export const PHYS_Q_FIRE = 111;
+export const PHYS_Q_PROJECTILE = 112;
+export const PHYS_Q_IMPACTS = 113;
+export const PHYS_Q_STOP = 114;
+export const PHYS_Q_IMPACTS_PAGE = 3;
+/** Projectiles in flight at once. */
+export const DIRECT_MAX_PROJECTILES = 1024;
+/** Gravity a projectile falls by at scale 1, m/s² (the physics world's). */
+export const PROJECTILE_GRAVITY = 9.81;
+export const IMPACT_HIT = 1;
+export const IMPACT_EXPIRED = 2;
+
+/** Agents on the dedicated core: every key (0..1023), past the block's 16. */
+export const DIRECT_MAX_AGENTS = 1024;
+/** Joints a cart can watch on the dedicated core, past the block's 16. */
+export const DIRECT_MAX_JOINTS = 1024;
 /** Contact events a CONTACTS answer holds (3 numbers each, after the count, within the core's 32). */
 export const PHYS_Q_CONTACTS_PAGE = 10;
 /** Objects an INSIDE answer holds (after the count). */

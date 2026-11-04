@@ -493,10 +493,13 @@ export function PrefabLibrary({
   sidecar,
   onChange,
   onPlaced,
+  maxPool = 32,
 }: {
   sidecar: MeshSidecar;
   onChange: (next: MeshSidecar) => void;
   onPlaced: (rootId: string) => void;
+  /** Copies a prefab may keep on the cart's core: 32, or 256 on the dedicated core (S1b). */
+  maxPool?: number;
 }) {
   const prefabs = sidecar.prefabs ?? [];
   return (
@@ -546,11 +549,11 @@ export function PrefabLibrary({
               <input
                 type="number"
                 min={0}
-                max={32}
+                max={maxPool}
                 aria-label={`Copies of ${prefab.name} code can spawn`}
-                title="Copies code can spawn at run time (cartbox.spawn)"
+                title={`Copies code can spawn at run time (cartbox.spawn), up to ${maxPool} on this core`}
                 value={prefab.pool ?? 8}
-                onChange={(event) => onChange(setPrefabPool(sidecar, prefab.id, Number(event.target.value)))}
+                onChange={(event) => onChange(setPrefabPool(sidecar, prefab.id, Number(event.target.value), maxPool))}
                 style={{ ...inputStyle, width: 48 }}
               />
               <button

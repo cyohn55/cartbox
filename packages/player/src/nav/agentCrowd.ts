@@ -286,19 +286,18 @@ export class AgentCrowd {
 
   /** Every agent as the cart reads it, in key order. */
   state(): AgentState[] {
-    return [...this.agents.values()]
-      .sort((a, b) => a.key - b.key)
-      .map((a) => ({
-        key: a.key,
-        position: a.pos,
-        facing: a.facing,
-        flags:
-          (a.moving ? NAV_FLAG_MOVING : 0) |
-          (a.air ? NAV_FLAG_AIR : 0) |
-          (!a.goal ? NAV_FLAG_ARRIVED : 0) |
-          (a.noPath ? NAV_FLAG_NO_PATH : 0) |
-          (a.obstacle ? NAV_FLAG_OBSTACLE : 0),
-      }));
+    return [...this.agents.values()].sort((a, b) => a.key - b.key).map(agentReading);
+  }
+
+  /** One agent as the cart reads it, or null (S1b: a query reads one at a time). */
+  agentState(key: number): AgentState | null {
+    const a = this.agents.get(key);
+    return a ? agentReading(a) : null;
+  }
+
+  /** How many agents there are. */
+  get size(): number {
+    return this.agents.size;
   }
 
   /** One agent's current path corners (for inspection and tests). */
@@ -313,4 +312,19 @@ function distanceToSegment(p: Vec3, a: Vec3, b: Vec3): number {
   const l2 = dx * dx + dz * dz;
   const t = l2 > 0 ? Math.max(0, Math.min(1, ((p[0] - a[0]) * dx + (p[2] - a[2]) * dz) / l2)) : 0;
   return Math.hypot(p[0] - (a[0] + dx * t), p[2] - (a[2] + dz * t));
+}
+
+/** An agent as the cart reads it: key, position, facing and flags. */
+function agentReading(a: Agent): AgentState {
+  return {
+    key: a.key,
+    position: a.pos,
+    facing: a.facing,
+    flags:
+      (a.moving ? NAV_FLAG_MOVING : 0) |
+      (a.air ? NAV_FLAG_AIR : 0) |
+      (!a.goal ? NAV_FLAG_ARRIVED : 0) |
+      (a.noPath ? NAV_FLAG_NO_PATH : 0) |
+      (a.obstacle ? NAV_FLAG_OBSTACLE : 0),
+  };
 }

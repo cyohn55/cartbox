@@ -99,6 +99,7 @@ import {
   type SceneLevel,
   type ScenePropValue,
 } from "@cartbox/editor";
+import { MAX_PREFAB_POOL_DIRECT } from "@cartbox/player";
 
 /** The envelope version; bumped on any schema change (2 added the lighting rig). */
 export const MESH_SIDECAR_VERSION = 2;
@@ -724,7 +725,7 @@ function readPrefabs(value: unknown, library: ReturnType<typeof readMeshLibrary>
     const kept = nodes.filter((n) => !n.parent || keys.has(n.parent));
     if (kept.filter((n) => !n.parent).length !== 1) continue;
     const poolRaw = (item as { pool?: unknown }).pool;
-    const pool = typeof poolRaw === "number" && Number.isFinite(poolRaw) ? Math.max(0, Math.min(32, Math.floor(poolRaw))) : undefined;
+    const pool = typeof poolRaw === "number" && Number.isFinite(poolRaw) ? Math.max(0, Math.min(MAX_PREFAB_POOL_DIRECT, Math.floor(poolRaw))) : undefined;
     const base = (item as { base?: unknown }).base;
     out.push({ id: raw.id, name: typeof raw.name === "string" ? raw.name : "Prefab", nodes: kept, ...(pool !== undefined ? { pool } : {}), ...(typeof base === "string" && base ? { base } : {}) });
   }

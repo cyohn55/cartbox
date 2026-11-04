@@ -407,6 +407,19 @@ export class AnimationSession {
     return out;
   }
 
+  /** One object's playback, or null when it isn't animated (S1b: a query reads one at a time). */
+  playbackOf(object: number): AnimationPlayback | null {
+    const p = this.playback.get(object);
+    if (!p) return null;
+    const shown = this.shownClip(p, p.current);
+    return { object, clip: shown.clip, time: shown.time, state: p.current.state };
+  }
+
+  /** The events one object fired on the last step (indices in its state machine). */
+  eventsOf(object: number): readonly number[] {
+    return this.playback.get(object)?.fired ?? [];
+  }
+
   /** Events that fired on the last step: object and the event's index in its state machine. */
   events(): { object: number; event: number }[] {
     const out: { object: number; event: number }[] = [];

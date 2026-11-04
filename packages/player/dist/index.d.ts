@@ -105,6 +105,13 @@ interface PrefabPool {
     readonly prefab: string;
     readonly roots: readonly number[];
 }
+declare const MAX_PREFAB_POOL = 32;
+/**
+ * Copies a prefab may keep (S1b). A scene may store up to this many; a cart on
+ * a TIC-80–derived core spawns at most {@link MAX_PREFAB_POOL} of them (the rest
+ * stay in reserve), and one on the dedicated core all of them.
+ */
+declare const MAX_PREFAB_POOL_DIRECT = 256;
 /** A world-space axis-aligned bounding box with a framing centre + radius. */
 interface SceneBounds {
     readonly min: readonly [number, number, number];
@@ -465,6 +472,46 @@ declare const PHYS_Q_CONTACTS = 103;
 declare const PHYS_Q_INSIDE = 104;
 declare const PHYS_Q_HASH = 105;
 /**
+ * S1b, the rest of the runtime past the block:
+ * ANIM: a = object → clip (-1 at rest), seconds into it, state (-1 none); nil when not animated.
+ * ANIM_EVENTS: a = object, v1 = first index → the count, then up to
+ *   {@link PHYS_Q_INSIDE_PAGE} event indices it fired on the last step.
+ * JOINT: a = object, v1 = joint → x, y, z where it was last skinned; nil until
+ *   watched (PHYS_OP_WATCH) and skinned once.
+ * AGENT: a = key → x, y, z, facing, flags (NAV_FLAG_*); nil without that agent.
+ */
+declare const PHYS_Q_ANIM = 106;
+declare const PHYS_Q_ANIM_EVENTS = 107;
+declare const PHYS_Q_JOINT = 108;
+declare const PHYS_Q_AGENT = 109;
+/**
+ * Projectiles (S4), on the dedicated core only:
+ * FIRE_OPTIONS: a = owner object + 1 (0 none; its body is passed through),
+ *   v1 = radius (0 a ray), v2 = gravity scale, v3 = drag (per second), v4 =
+ *   life (seconds), v5 = layer mask (0 all), v6 = push (impulse per m/s on a
+ *   dynamic body hit) → nil. For the next FIRE.
+ * FIRE: v1..v3 = from, v4..v6 = velocity → the projectile's id; nil past
+ *   {@link DIRECT_MAX_PROJECTILES}.
+ * PROJECTILE: a = id → x, y, z, vx, vy, vz while it flies; nil once it hit or expired.
+ * IMPACTS: a = first index → the count, then (id, kind 1 hit / 2 expired,
+ *   object + 2 or 1 for a non-object or 0 none, x, y, z, nx, ny, nz, speed) for
+ *   up to {@link PHYS_Q_IMPACTS_PAGE} of the last step's.
+ * STOP: a = id → nil; the projectile is gone without an impact.
+ */
+declare const PHYS_Q_FIRE_OPTIONS = 110;
+declare const PHYS_Q_FIRE = 111;
+declare const PHYS_Q_PROJECTILE = 112;
+declare const PHYS_Q_IMPACTS = 113;
+declare const PHYS_Q_STOP = 114;
+/** Projectiles in flight at once. */
+declare const DIRECT_MAX_PROJECTILES = 1024;
+/** Gravity a projectile falls by at scale 1, m/s² (the physics world's). */
+declare const PROJECTILE_GRAVITY = 9.81;
+/** Agents on the dedicated core: every key (0..1023), past the block's 16. */
+declare const DIRECT_MAX_AGENTS = 1024;
+/** Joints a cart can watch on the dedicated core, past the block's 16. */
+declare const DIRECT_MAX_JOINTS = 1024;
+/**
  * Moving bodies the cart can read and drive: the block's 64 on the TIC-80–derived
  * cores; on the dedicated Modern core, where reads are queries, far more (S1).
  * A body past its core's cap is left out of the world, and the editor says so.
@@ -678,6 +725,16 @@ declare function composeWorldMatrix(p: Vec3$3, q: Quat, s: Vec3$3): Mat4;
 declare function jointFrames(spec: JointSpec, self: Mat4, target: Mat4 | null): Omit<PhysicsJointDesc, "body" | "target">;
 /** Fit a collider of `spec.shape` to a mesh's bounds (or triangles), scaled. */
 declare function fitShape(spec: PhysicsSpec, mesh: MeshAsset, scale: Vec3$3): PhysicsShape;
+/** A projectile's end in the last step: it hit something, or outlived its life. */
+interface ProjectileImpact {
+    readonly id: number;
+    readonly kind: number;
+    /** The object hit (-1 not a scene object), or null for an expiry. */
+    readonly object: number | null;
+    readonly point: Vec3$3;
+    readonly normal: Vec3$3;
+    readonly speed: number;
+}
 /**
  * The scene objects with bodies the cart can read and drive (everything but
  * static), in slot order: the first `max` of them (the block's 64 unless the
@@ -724,6 +781,13 @@ declare class PhysicsSession {
     private queryCast;
     /** Whether rays can see the world yet: after a step, or once refreshed for a query before one. */
     private queriesReady;
+    /** Projectiles in flight (S4), in the order they were fired. */
+    private readonly projectiles;
+    private nextProjectile;
+    /** Options for the next FIRE (PHYS_Q_FIRE_OPTIONS). */
+    private fireOptions;
+    /** Impacts and expiries during the last step. */
+    private impacts;
     constructor(scene: MeshScene, backend: PhysicsBackend, { deterministic, maxBodies }?: {
         deterministic?: boolean;
         maxBodies?: number;
@@ -741,6 +805,19 @@ declare class PhysicsSession {
      * holds, without its caps, and rays cast in the call. Null for no answer.
      */
     query(op: number, a: number, v: readonly number[]): number[] | null;
+    /**
+     * Move every projectile one tick (S4): gravity and drag change its velocity,
+     * then its sphere is swept from where it was to where it goes, so nothing
+     * thinner than a tick's travel is missed (continuous collision). A hit ends
+     * it, pushing a dynamic body it hit; outliving its life ends it too. Only
+     * + − × ÷ and sqrt, so every browser computes the same flight.
+     */
+    private flyProjectiles;
+    /** Projectiles in flight (S4): id → position and velocity (inspection and tests). */
+    projectilesInFlight(): ReadonlyMap<number, {
+        readonly position: Vec3$3;
+        readonly velocity: Vec3$3;
+    }>;
     /** Apply the cart's commands, step the world, and cast the rays it asked for. */
     afterTick(block: DataView): void;
     /**
@@ -9917,6 +9994,13 @@ declare function askMotionPermission(view?: Window): Promise<boolean>;
  *   cartbox.hit(slot)                 -> hit, obj, x, y, z, nx, ny, nz, distance
  *   cartbox.layers(l1, l2, ...)       -> a mask of those collision layers (0-15) for a ray's or a
  *                                     sweep's mask: it hits only bodies on them (S3; nil = all)
+ *   cartbox.fire(x, y, z, vx, vy, vz, {radius, gravity, drag, life, owner, mask, push})
+ *                                     -> a projectile's id (S4, the dedicated core; nil elsewhere):
+ *                                     swept each tick, so it can't pass through a thin wall
+ *   cartbox.projectile(id)            -> x, y, z, vx, vy, vz while it flies (draw it with cartbox.place)
+ *   cartbox.impacts()                 -> the last step's { {id=, hit=, obj=, x=, y=, z=, nx=, ny=, nz=,
+ *                                     speed=}, ... }: hit false when its life ran out
+ *   cartbox.stop(id)                  remove a projectile without an impact
  *   cartbox.contacts()                -> this tick's contacts { {a=, b=, started=, trigger=}, ... }
  *   cartbox.entered(trigger)          -> objects that came into a trigger zone this tick
  *   cartbox.exited(trigger)           -> objects that left it this tick
@@ -10005,9 +10089,10 @@ declare function sceneNeedsRuntime(scene: MeshScene | null | undefined, { physic
  * The Lua for a cart's runtime calls — physics (when it has bodies) and spawning
  * (when it has prefabs) — or "" when it needs neither.
  */
-declare function runtimeSdkLua(scene: MeshScene | null | undefined, layout: RamLayout, { physics: engine, maxBodies }?: {
+declare function runtimeSdkLua(scene: MeshScene | null | undefined, layout: RamLayout, { physics: engine, maxBodies, maxPool, }?: {
     physics?: boolean;
     maxBodies?: number;
+    maxPool?: number;
 }): string;
 /** @deprecated Kept for callers of the physics-only name: the same as runtimeSdkLua. */
 declare const physicsSdkLua: typeof runtimeSdkLua;
@@ -10166,6 +10251,10 @@ declare class AnimationSession {
     private fireEvents;
     /** Each animated object's clip, time and state, as the cart reads them. */
     state(): AnimationPlayback[];
+    /** One object's playback, or null when it isn't animated (S1b: a query reads one at a time). */
+    playbackOf(object: number): AnimationPlayback | null;
+    /** The events one object fired on the last step (indices in its state machine). */
+    eventsOf(object: number): readonly number[];
     /** Events that fired on the last step: object and the event's index in its state machine. */
     events(): {
         object: number;
@@ -10227,6 +10316,10 @@ declare class AgentCrowd {
     private move;
     /** Every agent as the cart reads it, in key order. */
     state(): AgentState[];
+    /** One agent as the cart reads it, or null (S1b: a query reads one at a time). */
+    agentState(key: number): AgentState | null;
+    /** How many agents there are. */
+    get size(): number;
     /** One agent's current path corners (for inspection and tests). */
     path(key: number): readonly Vec3[];
 }
@@ -10408,7 +10501,14 @@ declare class RuntimeChannel {
     private readonly holoParts;
     /** Joints whose world position the cart asked for, and where they were when last skinned. */
     private readonly watched;
-    constructor(scene: MeshScene, physics: PhysicsSession | null);
+    /** Agents and watched joints this channel keeps: the block's 16 each, or more on the dedicated core (S1b). */
+    readonly limits: {
+        readonly agents: number;
+        readonly joints: number;
+    };
+    constructor(scene: MeshScene, physics: PhysicsSession | null, { direct }?: {
+        direct?: boolean;
+    });
     /** Write what the cart reads this tick (and the handshake word). */
     beforeTick(block: DataView): void;
     /**
@@ -10665,4 +10765,4 @@ declare function directCoreBeside(engineUrl: string | undefined): string;
  */
 declare function mount(container: HTMLElement, options: PlayerOptions): PlayerHandle;
 
-export { AIM_ASSISTS, AgentCrowd, type AimAssist, type AnimClip, type AnimMode, type AnimPlacement, type AnimSpec, type AnimState, type AnimTarget, type AnimTrack, AnimatedForegroundSurface, AnimationSession, type AtmosphereParams, BLOOM_KNEE, type BakeLight, BloomPyramid, BroadcastChannelTransport, type BuiltLightingRenderer, CAMERA_BASE, CAMERA_SCALE, CARTBOX_SDK_LUA, CELL_WORLD, CMD_RING_BYTES, CMD_RING_MAX, COLOR_CHECKER, COMPOSE_UNIFORM_FLOATS, CappedSceneRenderer, type CaptureOptions, type CapturedFrame, type CartSpriteSource, CartridgeLoadError, type CastHit, type CastShape, type ClipSample, type ClipTableEntry, type CollisionField, ConsoleButton, type ConsoleInstance, type ConsoleModel, type ControlScheme, type ControlSettings, type ControlTarget, DEFAULT_AMBIENT, DEFAULT_ATMOSPHERE, DEFAULT_CONTROL_SETTINGS, DEFAULT_KEY_BINDINGS, DEFAULT_LIGHT, DEFAULT_MODEL_ID, DEFAULT_MOUSE_LOOK, DEFAULT_PAD_BINDINGS, DEFAULT_STICK_DEAD_ZONES, DEFAULT_TEXEL_DENSITY, DEFAULT_TRIGGER_THRESHOLD, DIRECT_CORE_URL, DIRECT_MAX_BODIES, DebugCommand, type DebugStep, type DeviceHints, type DeviceProvider, type DirectConsole, DirectTransport, type DirectTransportOptions, type DriftStats, EVENT_CAPACITY, type Ease, EngineLoadError, type ErrorFrame, FLARE_GHOSTS, FLARE_GHOST_GAIN, FLARE_SPIKE_POWER, FaceDriver, type FlagsField, type FlareGhost, type FlareParams, type FrameState, GREY_CARD, GYRO_AIMS, GamepadInput, type GeneratedTrack, type GlContextProvider, GpuCanvasSurface, type GpuLightBakeOptions, type GpuLightmapBake, GpuPresenter, type GpuSceneDraw, type GradingLut, type GyroAim, HEIGHT_WORLD, IMPORTED_LOOK, INPUT_BLOCK_BYTES, INPUT_MAGIC, INPUT_SETTINGS, INSTANCE_FLOATS, type InnerSurfaceFactory, type InputChange, type InspectedObject, type InstanceTransform, type Keyframe, LIGHTMAP_MAX_BOUNCES, LIGHTMAP_MAX_LIGHTS, LIGHTMAP_MAX_LOCAL_LIGHTS, LIGHTS_BASE, LIGHTS_CAPACITY, LIGHT_FLOATS, LIGHT_STRIDE, LOOK_DEV_RIGS, LOOP_SLOTS, LUT_LOOKS, LUT_SIZE, type LabCart, type LabProbe, type LayerChannel, type Light, type LightingBackend, type LightingFrameContext, LightingLayer, type LightingOptions, type LightingRenderer, type LightingScene, type LinearPanorama, type LinkConditions, LitCanvasSurface, type LookDevCheck, type LookDevMaps, type LookDevOptions, type LookDevRig, type LookDevStage, LookDevView, type LookDevViewOptions, type LookDevice, type LookProfile, MAILBOX_TYPE_ACHIEVEMENT, MAILBOX_TYPE_PROGRESS, MAILBOX_TYPE_SCORE, MAILBOX_WORDS, MAX_CAPTURE_SIDE, MAX_EMITTERS, MAX_LUT_SIZE, MAX_PARTICLES_PER_EMITTER, MAX_PYRAMID_LEVELS, MAX_VOICES, MESH_CAM_ANGLE_SCALE, MESH_CAM_BASE, MESH_CAM_DIST_SCALE, MESH_CAM_STRIDE, MESH_POSE_BASE, MESH_POSE_CAPACITY, MESH_POSE_HIDDEN, MESH_POSE_STRIDE, MIN_LUT_SIZE, MIN_PYRAMID_DIMENSION, MODELS, MOUSE_FULL_LEAN_PX, type MailboxCamera, type MailboxEvent, type MailboxEventKind, type MailboxMeshCamera, type MailboxMeshPose, type MailboxRead, type MaterialBuffer, MemoryNetHub, type MeshInstance, MeshOverlaySurface, type MeshScene, type SceneCamera$1 as MeshSceneCamera, type ModelId, NET_MODE_CLIENT, NET_MODE_HOST, NET_MODE_OFFLINE, NET_SLOTS, NET_WORDS, NORMAL_DIRECTION_COUNT, NORMAL_VECTORS, type NetEvent, type NetInbox, type NetLabOptions, type NetLabReport, type NetMessage, type NetOutbox, type NetPeer, type NetRoomStatus, NetSession, type NetSignal, type NetState, type NetTransport, type ObjectLook, PAD_BUTTONS, PARTICLE_KINDS, PHYSICS_DT, PHYS_BLOCK_BYTES, PHYS_MAGIC, PHYS_MAX_BODIES, PHYS_Q_BODY, PHYS_Q_CAST, PHYS_Q_CONTACTS, PHYS_Q_HASH, PHYS_Q_INSIDE, PHYS_Q_RAY, POINTER_AT, POINTER_MAGIC, POST_FX_EFFECTS, PROFILE_SECTIONS, PROFILE_WINDOW, type PackableLight, type PadButton, type PadSnapshot, type Particle, type ParticleEmitter, type ParticleKind, ParticleOverlaySurface, type ParticleSpec, PathTracer, type PauseInfo, type PbrMaterial, type PhysicsBackend, type PhysicsBodyDesc, type PhysicsJointDesc, type Quat as PhysicsQuat, PhysicsSession, type PhysicsShape, type Vec3$3 as PhysicsVec3, type PlacementChannel, type PlayerHandle, type PlayerOptions, PointerInput, type PointerState, type PostFxColorDef, type PostFxEffectDef, type PostFxEffectId, type PostFxParamDef, PostFxPass, type PostFxSettings, type PostFxSource, PostFxSurface, type PostFxUniforms, type PresentBase, type PresentFrame, type PresentSky, type PresentStats, type ProfileSection, type ProfileSnapshot, Profiler, QUALITY_LEVELS, QUALITY_PRESETS, type QualityChoice, QualityGovernor, type QualityLevel, type QualitySettings, type QueryHandler, RAM_LAYOUTS, REFERENCE_BOUNCES, REPLAY_VERSION, RESPONSE_CURVES, type RamLayout, type ReferenceCapture, type ReferenceDraw, type ReferenceScene, type ReferenceSettings, type RegionImage, type RegisteredAchievement, type RenderCanvas, type RenderCaps, type RenderStats, type Replay, ReplayError, ReplayRecorder, ReplaySource, type ResolvedMapping, type ResolvedPbr, type ResolvedPlacement, type ResponseCurve, type Rgb, type RtcDataChannelLike, type RtcPeerConnectionFactory, type RtcPeerConnectionLike, type RumbleEffect, RuntimeChannel, SAVE_MAGIC, SKY_UNIFORM_FLOATS, SOFTWARE_RASTER_CAPS, START_KEYS, STICK_LAYOUTS, type ScaleMode, SceneBackdropSurface, type SceneBounds, type SceneCamera, type SceneDraw, type SceneLayer, type SceneMemory, type SceneRenderer, type SceneSpec, type SceneVista, type ScreenSun, type SectionStats, type SequenceOptions, SimulatedNetHub, SoftwareSceneRenderer, type SoundContext, SoundSystem, type Speaker, type SpriteRegion, type SpriteRegionSource, type StickDeadZones, type StickLayout, type SunShadow, SwitchableTransport, TANGENT_VERTEX_FLOATS, TILT_SHIFT_FEATHER, TINT_PALETTE, TOUCH_CONTROL_IDS, TOUCH_LOOK_MODES, type TextureLookup, type TouchControlId, type TouchLayout, type TouchLookMode, type TouchPlacement, type TraceLine, type TrackMode, UNIFORM_BYTES_USED, UNIFORM_FLOATS, UNIFORM_STRIDE, VERTEX_FLOATS, VIEW_MODES, type Vec3$2 as Vec3, type VerificationResult, type ViewMode, WEBGL_INSTANCES_PER_DRAW, WEBGL_MAX_LIGHTS, WebglSceneRenderer, WebgpuLightingLayer, WebgpuSceneRenderer, type WorldBillboard, type WorldBillboardPose, type WorldCamera, type WorldCameraSpec, type WorldLight, WorldOverlaySurface, type WorldProp, type WorldScene, type WorldTileCell, acesFilmic, acesFilmicChannel, actionsSdkLua, aimAssistLevel, alignBytesPerRow, animClipsSdkLua, animatedObjects, anyPostFxEnabled, appendLuaCode, applyActionToggles, applyLookSettings, applyLut, applyQualityToPostFx, applyRenderCaps, armDebugBlock, armSaveBlock, askMotionPermission, bakeLightmapGpu, bakeLights, bakeProbeVolumeGpu, bakeSurfaces, bodyCapacity, breakableLine, browserDeviceHints, browserRtc, browserSpeaker, buildBillboardInstance, buildClipTable, buildOrbitCamera, buildShadowInstance, buildTerrainInstances, buildWorldCamera, cameraAt, capTextures, capTriangles, capsConstrainScene, captureReference, cellAt, checkLookDev, clipFrameIndex, codeChunks, codeLineOffset, collisionSdkLua, commandRingAddress, commandRingBytes, commandRingMax, commandsPerTick, compileAnimator, componentsSdkLua, composeParallax, composeWorldMatrix, compositeOverBackdrop, createCartSpriteSource, createConsole, createDirectConsole, createFlatMaterial, createLightingLayer, createSceneRenderer, createTextureBudgetCache, deadZoned, debugBlockAddress, debugPostlude, debugSdkLua, decodeCamera, decodeLights, decodeLut, decodeMailbox, decodeMeshCamera, decodeMeshPoses, decodeNetMessage, decodeWorldLights, defaultPostFxSettings, detectQuality, deterministicBackend, directCoreBeside, directCoreModel, dragLean, drift, effectiveBreakpoints, emitterPreset, encodeLut, encodeNetMessage, environmentPanorama, environmentSh, errorStack, estimateSceneBytes, estimateSceneMemory, evaluate, extractScore, extractUnlocks, fillSky, fitShape, fitTextureToBudget, flagsSdkLua, flicker, frameDurationMs, framePixels, framebufferBytes, getModel, getWebgpuDevice, gyroLean, hasCommandRing, hashCart, hashEventId, heat, hexToRgb01, identityLut, injectSdk, inputBlockAddress, instrumentLua, interleaveVertices, interleaveVerticesWithTangents, interpolateNormal, isDiagnosticView, isMobileAgent, jointFrames, layoutSticks, lensFlareAt, loadEngineModule, lookAccelerationBoost, lookDevDraw, lookDevStage, lookGains, lookLut, lookProfileFor, lutStrip, makeShadowTexture, mount, mouseLean, movingBodies, nearestDirection, netSendInterval, normalBasis3x3, normalVector, orbitPitchAboveTerrain, packAtmosphereSkyUniforms, packComposeUniforms, packLights, packMeasureUniforms, packReferenceScene, packShaftUniforms, packSkyUniforms, paramKey, parseAnim, parseCollisionField, parseControlSettings, parseCubeLut, parseFlagsField, parseMeshScene, parseParticles, parsePauseInfo, parsePostFxSettings, parseReplay, parseScene, parseTouchLayout, parseWorldScene, physicsBlockAddress, physicsSdkLua, physicsSlots, physicsStateHash, placeWithin, playLanguage, prehazeLayers, prependLuaCode, pulse, pyramidLevelCount, pyramidLevelSize, randomSeed, rasterStyleFor, readCartCode, readPad, readPause, readSidecarActions, readSidecarUi, readViewMode, reflectionFade, reflectionSampleY, remapErrorLines, renderSceneBackdrop, resolveButton, resolveLight, resolveMapping, resolvePbr, resolveQuality, resolveSceneLayers, resolveSupersample, resolveUnlockedAchievements, responseCurve, rewriteLuaCode, rumbleEffect, runNetLab, runReplayEvents, runsOnDirectCore, runtimeSdkLua, sampleClipFrame, sampleNormalBilinear, sampleScalarBilinear, sampleTrack, saveBlockAddress, saveBlockBytes, saveCapacity, saveSdkLua, sceneHasAnimation, sceneHasPhysics, sceneNeedsRuntime, sceneObjectsSdkLua, sceneSkyEnvironment, seedCartridge, sendDebugCommand, serializeReplay, shIrradiance, shade, shaftGrid, shapeStick, simulateEmitter, smoothFrontEdges, softKneePrefilter, splitWorldMatrix, standardizePad, stepLookAcceleration, streamGroups, stringsSdkLua, sway, takeNetOutbox, takePhysicsCommands, takeRingCommands, takeSave, tiltShiftBlur, toConsolePixel, toggleMask, tokenizeLua, turnEnvironment, uiSdkLua, uniformsFromSettings, unpadRows, validSave, verifyReplayScore, viewDirection, viewModeCode, webgpuCanHonour, worldCenter, writeBreakpoints, writeInputBlock, writeInputSettings, writeInstanceTransform, writeInstanceUniform, writeNetInbox, writePhysicsState, writePointer, writeWatches };
+export { AIM_ASSISTS, AgentCrowd, type AimAssist, type AnimClip, type AnimMode, type AnimPlacement, type AnimSpec, type AnimState, type AnimTarget, type AnimTrack, AnimatedForegroundSurface, AnimationSession, type AtmosphereParams, BLOOM_KNEE, type BakeLight, BloomPyramid, BroadcastChannelTransport, type BuiltLightingRenderer, CAMERA_BASE, CAMERA_SCALE, CARTBOX_SDK_LUA, CELL_WORLD, CMD_RING_BYTES, CMD_RING_MAX, COLOR_CHECKER, COMPOSE_UNIFORM_FLOATS, CappedSceneRenderer, type CaptureOptions, type CapturedFrame, type CartSpriteSource, CartridgeLoadError, type CastHit, type CastShape, type ClipSample, type ClipTableEntry, type CollisionField, ConsoleButton, type ConsoleInstance, type ConsoleModel, type ControlScheme, type ControlSettings, type ControlTarget, DEFAULT_AMBIENT, DEFAULT_ATMOSPHERE, DEFAULT_CONTROL_SETTINGS, DEFAULT_KEY_BINDINGS, DEFAULT_LIGHT, DEFAULT_MODEL_ID, DEFAULT_MOUSE_LOOK, DEFAULT_PAD_BINDINGS, DEFAULT_STICK_DEAD_ZONES, DEFAULT_TEXEL_DENSITY, DEFAULT_TRIGGER_THRESHOLD, DIRECT_CORE_URL, DIRECT_MAX_AGENTS, DIRECT_MAX_BODIES, DIRECT_MAX_JOINTS, DIRECT_MAX_PROJECTILES, DebugCommand, type DebugStep, type DeviceHints, type DeviceProvider, type DirectConsole, DirectTransport, type DirectTransportOptions, type DriftStats, EVENT_CAPACITY, type Ease, EngineLoadError, type ErrorFrame, FLARE_GHOSTS, FLARE_GHOST_GAIN, FLARE_SPIKE_POWER, FaceDriver, type FlagsField, type FlareGhost, type FlareParams, type FrameState, GREY_CARD, GYRO_AIMS, GamepadInput, type GeneratedTrack, type GlContextProvider, GpuCanvasSurface, type GpuLightBakeOptions, type GpuLightmapBake, GpuPresenter, type GpuSceneDraw, type GradingLut, type GyroAim, HEIGHT_WORLD, IMPORTED_LOOK, INPUT_BLOCK_BYTES, INPUT_MAGIC, INPUT_SETTINGS, INSTANCE_FLOATS, type InnerSurfaceFactory, type InputChange, type InspectedObject, type InstanceTransform, type Keyframe, LIGHTMAP_MAX_BOUNCES, LIGHTMAP_MAX_LIGHTS, LIGHTMAP_MAX_LOCAL_LIGHTS, LIGHTS_BASE, LIGHTS_CAPACITY, LIGHT_FLOATS, LIGHT_STRIDE, LOOK_DEV_RIGS, LOOP_SLOTS, LUT_LOOKS, LUT_SIZE, type LabCart, type LabProbe, type LayerChannel, type Light, type LightingBackend, type LightingFrameContext, LightingLayer, type LightingOptions, type LightingRenderer, type LightingScene, type LinearPanorama, type LinkConditions, LitCanvasSurface, type LookDevCheck, type LookDevMaps, type LookDevOptions, type LookDevRig, type LookDevStage, LookDevView, type LookDevViewOptions, type LookDevice, type LookProfile, MAILBOX_TYPE_ACHIEVEMENT, MAILBOX_TYPE_PROGRESS, MAILBOX_TYPE_SCORE, MAILBOX_WORDS, MAX_CAPTURE_SIDE, MAX_EMITTERS, MAX_LUT_SIZE, MAX_PARTICLES_PER_EMITTER, MAX_PREFAB_POOL, MAX_PREFAB_POOL_DIRECT, MAX_PYRAMID_LEVELS, MAX_VOICES, MESH_CAM_ANGLE_SCALE, MESH_CAM_BASE, MESH_CAM_DIST_SCALE, MESH_CAM_STRIDE, MESH_POSE_BASE, MESH_POSE_CAPACITY, MESH_POSE_HIDDEN, MESH_POSE_STRIDE, MIN_LUT_SIZE, MIN_PYRAMID_DIMENSION, MODELS, MOUSE_FULL_LEAN_PX, type MailboxCamera, type MailboxEvent, type MailboxEventKind, type MailboxMeshCamera, type MailboxMeshPose, type MailboxRead, type MaterialBuffer, MemoryNetHub, type MeshInstance, MeshOverlaySurface, type MeshScene, type SceneCamera$1 as MeshSceneCamera, type ModelId, NET_MODE_CLIENT, NET_MODE_HOST, NET_MODE_OFFLINE, NET_SLOTS, NET_WORDS, NORMAL_DIRECTION_COUNT, NORMAL_VECTORS, type NetEvent, type NetInbox, type NetLabOptions, type NetLabReport, type NetMessage, type NetOutbox, type NetPeer, type NetRoomStatus, NetSession, type NetSignal, type NetState, type NetTransport, type ObjectLook, PAD_BUTTONS, PARTICLE_KINDS, PHYSICS_DT, PHYS_BLOCK_BYTES, PHYS_MAGIC, PHYS_MAX_BODIES, PHYS_Q_AGENT, PHYS_Q_ANIM, PHYS_Q_ANIM_EVENTS, PHYS_Q_BODY, PHYS_Q_CAST, PHYS_Q_CONTACTS, PHYS_Q_FIRE, PHYS_Q_FIRE_OPTIONS, PHYS_Q_HASH, PHYS_Q_IMPACTS, PHYS_Q_INSIDE, PHYS_Q_JOINT, PHYS_Q_PROJECTILE, PHYS_Q_RAY, PHYS_Q_STOP, POINTER_AT, POINTER_MAGIC, POST_FX_EFFECTS, PROFILE_SECTIONS, PROFILE_WINDOW, PROJECTILE_GRAVITY, type PackableLight, type PadButton, type PadSnapshot, type Particle, type ParticleEmitter, type ParticleKind, ParticleOverlaySurface, type ParticleSpec, PathTracer, type PauseInfo, type PbrMaterial, type PhysicsBackend, type PhysicsBodyDesc, type PhysicsJointDesc, type Quat as PhysicsQuat, PhysicsSession, type PhysicsShape, type Vec3$3 as PhysicsVec3, type PlacementChannel, type PlayerHandle, type PlayerOptions, PointerInput, type PointerState, type PostFxColorDef, type PostFxEffectDef, type PostFxEffectId, type PostFxParamDef, PostFxPass, type PostFxSettings, type PostFxSource, PostFxSurface, type PostFxUniforms, type PresentBase, type PresentFrame, type PresentSky, type PresentStats, type ProfileSection, type ProfileSnapshot, Profiler, type ProjectileImpact, QUALITY_LEVELS, QUALITY_PRESETS, type QualityChoice, QualityGovernor, type QualityLevel, type QualitySettings, type QueryHandler, RAM_LAYOUTS, REFERENCE_BOUNCES, REPLAY_VERSION, RESPONSE_CURVES, type RamLayout, type ReferenceCapture, type ReferenceDraw, type ReferenceScene, type ReferenceSettings, type RegionImage, type RegisteredAchievement, type RenderCanvas, type RenderCaps, type RenderStats, type Replay, ReplayError, ReplayRecorder, ReplaySource, type ResolvedMapping, type ResolvedPbr, type ResolvedPlacement, type ResponseCurve, type Rgb, type RtcDataChannelLike, type RtcPeerConnectionFactory, type RtcPeerConnectionLike, type RumbleEffect, RuntimeChannel, SAVE_MAGIC, SKY_UNIFORM_FLOATS, SOFTWARE_RASTER_CAPS, START_KEYS, STICK_LAYOUTS, type ScaleMode, SceneBackdropSurface, type SceneBounds, type SceneCamera, type SceneDraw, type SceneLayer, type SceneMemory, type SceneRenderer, type SceneSpec, type SceneVista, type ScreenSun, type SectionStats, type SequenceOptions, SimulatedNetHub, SoftwareSceneRenderer, type SoundContext, SoundSystem, type Speaker, type SpriteRegion, type SpriteRegionSource, type StickDeadZones, type StickLayout, type SunShadow, SwitchableTransport, TANGENT_VERTEX_FLOATS, TILT_SHIFT_FEATHER, TINT_PALETTE, TOUCH_CONTROL_IDS, TOUCH_LOOK_MODES, type TextureLookup, type TouchControlId, type TouchLayout, type TouchLookMode, type TouchPlacement, type TraceLine, type TrackMode, UNIFORM_BYTES_USED, UNIFORM_FLOATS, UNIFORM_STRIDE, VERTEX_FLOATS, VIEW_MODES, type Vec3$2 as Vec3, type VerificationResult, type ViewMode, WEBGL_INSTANCES_PER_DRAW, WEBGL_MAX_LIGHTS, WebglSceneRenderer, WebgpuLightingLayer, WebgpuSceneRenderer, type WorldBillboard, type WorldBillboardPose, type WorldCamera, type WorldCameraSpec, type WorldLight, WorldOverlaySurface, type WorldProp, type WorldScene, type WorldTileCell, acesFilmic, acesFilmicChannel, actionsSdkLua, aimAssistLevel, alignBytesPerRow, animClipsSdkLua, animatedObjects, anyPostFxEnabled, appendLuaCode, applyActionToggles, applyLookSettings, applyLut, applyQualityToPostFx, applyRenderCaps, armDebugBlock, armSaveBlock, askMotionPermission, bakeLightmapGpu, bakeLights, bakeProbeVolumeGpu, bakeSurfaces, bodyCapacity, breakableLine, browserDeviceHints, browserRtc, browserSpeaker, buildBillboardInstance, buildClipTable, buildOrbitCamera, buildShadowInstance, buildTerrainInstances, buildWorldCamera, cameraAt, capTextures, capTriangles, capsConstrainScene, captureReference, cellAt, checkLookDev, clipFrameIndex, codeChunks, codeLineOffset, collisionSdkLua, commandRingAddress, commandRingBytes, commandRingMax, commandsPerTick, compileAnimator, componentsSdkLua, composeParallax, composeWorldMatrix, compositeOverBackdrop, createCartSpriteSource, createConsole, createDirectConsole, createFlatMaterial, createLightingLayer, createSceneRenderer, createTextureBudgetCache, deadZoned, debugBlockAddress, debugPostlude, debugSdkLua, decodeCamera, decodeLights, decodeLut, decodeMailbox, decodeMeshCamera, decodeMeshPoses, decodeNetMessage, decodeWorldLights, defaultPostFxSettings, detectQuality, deterministicBackend, directCoreBeside, directCoreModel, dragLean, drift, effectiveBreakpoints, emitterPreset, encodeLut, encodeNetMessage, environmentPanorama, environmentSh, errorStack, estimateSceneBytes, estimateSceneMemory, evaluate, extractScore, extractUnlocks, fillSky, fitShape, fitTextureToBudget, flagsSdkLua, flicker, frameDurationMs, framePixels, framebufferBytes, getModel, getWebgpuDevice, gyroLean, hasCommandRing, hashCart, hashEventId, heat, hexToRgb01, identityLut, injectSdk, inputBlockAddress, instrumentLua, interleaveVertices, interleaveVerticesWithTangents, interpolateNormal, isDiagnosticView, isMobileAgent, jointFrames, layoutSticks, lensFlareAt, loadEngineModule, lookAccelerationBoost, lookDevDraw, lookDevStage, lookGains, lookLut, lookProfileFor, lutStrip, makeShadowTexture, mount, mouseLean, movingBodies, nearestDirection, netSendInterval, normalBasis3x3, normalVector, orbitPitchAboveTerrain, packAtmosphereSkyUniforms, packComposeUniforms, packLights, packMeasureUniforms, packReferenceScene, packShaftUniforms, packSkyUniforms, paramKey, parseAnim, parseCollisionField, parseControlSettings, parseCubeLut, parseFlagsField, parseMeshScene, parseParticles, parsePauseInfo, parsePostFxSettings, parseReplay, parseScene, parseTouchLayout, parseWorldScene, physicsBlockAddress, physicsSdkLua, physicsSlots, physicsStateHash, placeWithin, playLanguage, prehazeLayers, prependLuaCode, pulse, pyramidLevelCount, pyramidLevelSize, randomSeed, rasterStyleFor, readCartCode, readPad, readPause, readSidecarActions, readSidecarUi, readViewMode, reflectionFade, reflectionSampleY, remapErrorLines, renderSceneBackdrop, resolveButton, resolveLight, resolveMapping, resolvePbr, resolveQuality, resolveSceneLayers, resolveSupersample, resolveUnlockedAchievements, responseCurve, rewriteLuaCode, rumbleEffect, runNetLab, runReplayEvents, runsOnDirectCore, runtimeSdkLua, sampleClipFrame, sampleNormalBilinear, sampleScalarBilinear, sampleTrack, saveBlockAddress, saveBlockBytes, saveCapacity, saveSdkLua, sceneHasAnimation, sceneHasPhysics, sceneNeedsRuntime, sceneObjectsSdkLua, sceneSkyEnvironment, seedCartridge, sendDebugCommand, serializeReplay, shIrradiance, shade, shaftGrid, shapeStick, simulateEmitter, smoothFrontEdges, softKneePrefilter, splitWorldMatrix, standardizePad, stepLookAcceleration, streamGroups, stringsSdkLua, sway, takeNetOutbox, takePhysicsCommands, takeRingCommands, takeSave, tiltShiftBlur, toConsolePixel, toggleMask, tokenizeLua, turnEnvironment, uiSdkLua, uniformsFromSettings, unpadRows, validSave, verifyReplayScore, viewDirection, viewModeCode, webgpuCanHonour, worldCenter, writeBreakpoints, writeInputBlock, writeInputSettings, writeInstanceTransform, writeInstanceUniform, writeNetInbox, writePhysicsState, writePointer, writeWatches };

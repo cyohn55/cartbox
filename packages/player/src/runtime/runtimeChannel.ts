@@ -37,6 +37,13 @@ import {
   PHYS_OP_ANIM_SET,
   PHYS_OP_ANIM_TRIGGER,
   PHYS_MAX_JOINTS,
+  DIRECT_MAX_AGENTS,
+  DIRECT_MAX_JOINTS,
+  PHYS_Q_AGENT,
+  PHYS_Q_ANIM,
+  PHYS_Q_ANIM_EVENTS,
+  PHYS_Q_INSIDE_PAGE,
+  PHYS_Q_JOINT,
   PHYS_OP_DESPAWN,
   PHYS_OP_IK,
   PHYS_OP_IK_POLE,
@@ -200,10 +207,15 @@ export class RuntimeChannel {
   /** Joints whose world position the cart asked for, and where they were when last skinned. */
   private readonly watched = new Map<string, { object: number; joint: number; position: [number, number, number] | null }>();
 
+  /** Agents and watched joints this channel keeps: the block's 16 each, or more on the dedicated core (S1b). */
+  readonly limits: { readonly agents: number; readonly joints: number };
+
   constructor(
     private readonly scene: MeshScene,
     private readonly physics: PhysicsSession | null,
+    { direct = false }: { direct?: boolean } = {},
   ) {
+    this.limits = direct ? { agents: DIRECT_MAX_AGENTS, joints: DIRECT_MAX_JOINTS } : { agents: PHYS_MAX_AGENTS, joints: PHYS_MAX_JOINTS };
     this.animation = sceneHasAnimation(scene) ? new AnimationSession(scene) : null;
     this.timeline = (scene.timelines?.length ?? 0) > 0 ? new TimelineSession(scene) : null;
     this.crowd = scene.navmesh ? new AgentCrowd(scene.navmesh) : null;
@@ -238,6 +250,23 @@ export class RuntimeChannel {
    * physics running, or an op nobody serves).
    */
   query(op: number, a: number, v: readonly number[]): number[] | null {
+    if (op === PHYS_Q_ANIM) {
+      const p = this.animation?.playbackOf(a);
+      return p ? [p.clip, p.time, p.state ?? -1] : null;
+    }
+    if (op === PHYS_Q_ANIM_EVENTS) {
+      const fired = this.animation?.eventsOf(a) ?? [];
+      const from = Math.max(0, Math.round(v[0] ?? 0));
+      return [fired.length, ...fired.slice(from, from + PHYS_Q_INSIDE_PAGE)];
+    }
+    if (op === PHYS_Q_JOINT) {
+      const position = this.watched.get(`${a}:${Math.round(v[0] ?? -1)}`)?.position;
+      return position ? [...position] : null;
+    }
+    if (op === PHYS_Q_AGENT) {
+      const agent = this.crowd?.agentState(a);
+      return agent ? [...agent.position, agent.facing, agent.flags] : null;
+    }
     return this.physics?.query(op, a, v) ?? null;
   }
 
@@ -417,7 +446,7 @@ export class RuntimeChannel {
     if (!crowd || key < 0 || key > 1023) return;
     const at: [number, number, number] = [v[0]!, v[1]!, v[2]!];
     if (op === PHYS_OP_AGENT) {
-      if (crowd.state().length >= PHYS_MAX_AGENTS && !crowd.state().some((a) => a.key === key)) return;
+      if (crowd.size >= this.limits.agents && !crowd.agentState(key)) return;
       crowd.place(key, at, v[3]! > 0 ? v[3]! : 3, v[4]! > 0 ? v[4]! : crowd.graph.mesh.agent.radius, v[5]! >= 0.5);
     } else if (op === PHYS_OP_AGENT_GOTO) crowd.goto(key, at, v[3]!);
     else if (op === PHYS_OP_AGENT_STOP) crowd.stop(key);
@@ -618,7 +647,7 @@ export class RuntimeChannel {
   private watch(object: number, joint: number): void {
     const key = `${object}:${joint}`;
     const joints = this.scene.instances[object]?.mesh.skin?.joints.length ?? 0;
-    if (this.watched.has(key) || joint < 0 || joint >= joints || this.watched.size >= PHYS_MAX_JOINTS) return;
+    if (this.watched.has(key) || joint < 0 || joint >= joints || this.watched.size >= this.limits.joints) return;
     this.watched.set(key, { object, joint, position: null });
   }
 

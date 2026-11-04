@@ -283,6 +283,30 @@ export const SDK_REFERENCE: readonly SdkGroup[] = [
         snippet: 'local hit, obj, hx, hy, hz = cartbox.ray(0, x, y, z, 0, -1, 0, 50, "player", cartbox.layers(0))',
       },
       {
+        name: "cartbox.fire",
+        signature: "cartbox.fire(x, y, z, vx, vy, vz, {radius, gravity, drag, life, owner, mask, push}) -> id",
+        doc: "Fire a projectile from (x,y,z) at velocity (vx,vy,vz) m/s. Each tick its sphere (radius, default 0.05; 0 a ray) is swept along its path, so a fast one can't pass through a thin wall. gravity scales the fall (1 default, 0 straight), drag slows it per second, life ends it after seconds (default 10), owner is passed through, mask limits the layers it hits, push shoves a dynamic body it hits. AAA tier (the dedicated core) only; nil elsewhere.",
+        snippet: 'local id = cartbox.fire(x, y, z, dx * 80, dy * 80, dz * 80, { radius = 0.2, gravity = 0.2, owner = "player", push = 0.5 })',
+      },
+      {
+        name: "cartbox.projectile",
+        signature: "cartbox.projectile(id) -> x, y, z, vx, vy, vz",
+        doc: "Where a projectile is and how fast it goes, while it flies (nil once it hit something or its life ran out). Draw it there with cartbox.place.",
+        snippet: "local px, py, pz = cartbox.projectile(id)\nif px then cartbox.place(\"rocket\", px, py, pz) end",
+      },
+      {
+        name: "cartbox.impacts",
+        signature: "cartbox.impacts() -> { {id, hit, obj, x, y, z, nx, ny, nz, speed}, ... }",
+        doc: "The projectiles that ended on the last step: hit true with the object hit (nil if not a scene object), the point and surface normal; hit false where one's life ran out.",
+        snippet: "for _, e in ipairs(cartbox.impacts()) do\n  if e.hit then cartbox.burst(\"explosion\", e.x, e.y, e.z) end\nend",
+      },
+      {
+        name: "cartbox.stop",
+        signature: "cartbox.stop(id)",
+        doc: "Remove a projectile at once, without an impact.",
+        snippet: "cartbox.stop(id)",
+      },
+      {
         name: "cartbox.layers",
         signature: "cartbox.layers(layer, ...) -> mask",
         doc: "A mask of collision layers (0-15) for a ray's or a sweep's mask: it then hits only bodies on those layers. Set each body's layer, and the layers it collides with, under Physics in the Inspector.",

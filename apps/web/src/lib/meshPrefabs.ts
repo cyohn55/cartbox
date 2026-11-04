@@ -32,6 +32,7 @@ import {
   type PrefabNode,
 } from "./meshSidecar";
 import { parentIndices } from "@cartbox/editor";
+import { MAX_PREFAB_POOL, MAX_PREFAB_POOL_DIRECT } from "@cartbox/player";
 
 const VERSION_FIELDS = ["name", "mesh", "variant", "frames", "lods", "tags", "props", "physics", "animator", "components", "transform"] as const;
 type Field = (typeof VERSION_FIELDS)[number];
@@ -410,8 +411,9 @@ export function deletePrefab(sidecar: MeshSidecar, id: string): MeshSidecar {
 }
 
 /** Set how many copies of prefab `id` code can spawn at run time (0..32). */
-export function setPrefabPool(sidecar: MeshSidecar, id: string, pool: number): MeshSidecar {
-  const n = Number.isFinite(pool) ? Math.max(0, Math.min(32, Math.floor(pool))) : 8;
+export function setPrefabPool(sidecar: MeshSidecar, id: string, pool: number, max: number = MAX_PREFAB_POOL): MeshSidecar {
+  // 32 copies on a TIC-80–derived core; up to MAX_PREFAB_POOL_DIRECT on the dedicated one (S1b).
+  const n = Number.isFinite(pool) ? Math.max(0, Math.min(Math.min(max, MAX_PREFAB_POOL_DIRECT), Math.floor(pool))) : 8;
   return { ...sidecar, prefabs: (sidecar.prefabs ?? []).map((p) => (p.id === id ? { ...p, pool: n } : p)) };
 }
 

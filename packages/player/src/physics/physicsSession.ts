@@ -32,6 +32,16 @@ import {
   PHYS_OP_UNJOIN,
   PHYS_OP_VELOCITY,
   DIRECT_MAX_BODIES,
+  DIRECT_MAX_PROJECTILES,
+  IMPACT_EXPIRED,
+  IMPACT_HIT,
+  PHYS_Q_FIRE,
+  PHYS_Q_FIRE_OPTIONS,
+  PHYS_Q_IMPACTS,
+  PHYS_Q_IMPACTS_PAGE,
+  PHYS_Q_PROJECTILE,
+  PHYS_Q_STOP,
+  PROJECTILE_GRAVITY,
   PHYS_EVENT_STARTED,
   PHYS_EVENT_TRIGGER,
   PHYS_Q_BODY,
@@ -322,6 +332,37 @@ function castShape(kind: number, a: number, b: number, c: number): CastShape | n
   }
 }
 
+/** How a projectile flies (S4; PHYS_Q_FIRE_OPTIONS). */
+interface FireOptions {
+  readonly radius: number;
+  readonly gravity: number;
+  readonly drag: number;
+  readonly life: number;
+  readonly push: number;
+  readonly owner?: number;
+  readonly mask?: number;
+}
+
+const DEFAULT_FIRE: FireOptions = { radius: 0.05, gravity: 1, drag: 0, life: 10, push: 0 };
+
+interface Projectile extends FireOptions {
+  readonly id: number;
+  position: Vec3;
+  velocity: Vec3;
+  age: number;
+}
+
+/** A projectile's end in the last step: it hit something, or outlived its life. */
+export interface ProjectileImpact {
+  readonly id: number;
+  readonly kind: number;
+  /** The object hit (-1 not a scene object), or null for an expiry. */
+  readonly object: number | null;
+  readonly point: Vec3;
+  readonly normal: Vec3;
+  readonly speed: number;
+}
+
 /** What a PHYS_OP_CAST sets for the next ray in its slot: the shape swept, an object to pass through, the layers to hit. */
 interface CastOptions {
   readonly shape: CastShape | null;
@@ -419,6 +460,13 @@ export class PhysicsSession {
   private queryCast: CastOptions | null = null;
   /** Whether rays can see the world yet: after a step, or once refreshed for a query before one. */
   private queriesReady = false;
+  /** Projectiles in flight (S4), in the order they were fired. */
+  private readonly projectiles = new Map<number, Projectile>();
+  private nextProjectile = 1;
+  /** Options for the next FIRE (PHYS_Q_FIRE_OPTIONS). */
+  private fireOptions: FireOptions | null = null;
+  /** Impacts and expiries during the last step. */
+  private impacts: ProjectileImpact[] = [];
 
   constructor(
     scene: MeshScene,
@@ -558,7 +606,94 @@ export class PhysicsSession {
       return [inside.length, ...inside.slice(from, from + PHYS_Q_INSIDE_PAGE)];
     }
     if (op === PHYS_Q_HASH) return [this.stateHash];
+    if (op === PHYS_Q_FIRE_OPTIONS) {
+      const [radius = 0.05, gravity = 1, drag = 0, life = 10, mask = 0, push = 0] = v;
+      const owner = Math.round(a) - 1;
+      const m = Math.round(mask) & 0xffff;
+      this.fireOptions = {
+        radius: Math.max(0, Math.min(10, radius)),
+        gravity: Math.max(-10, Math.min(10, gravity)),
+        drag: Math.max(0, Math.min(60, drag)),
+        life: Math.max(PHYSICS_DT, Math.min(600, life)),
+        push: Math.max(0, push),
+        ...(owner >= 0 ? { owner } : {}),
+        ...(m > 0 ? { mask: m } : {}),
+      };
+      return null;
+    }
+    if (op === PHYS_Q_FIRE) {
+      const options = this.fireOptions ?? DEFAULT_FIRE;
+      this.fireOptions = null;
+      const [x = 0, y = 0, z = 0, vx = 0, vy = 0, vz = 0] = v;
+      if (this.projectiles.size >= DIRECT_MAX_PROJECTILES || ![x, y, z, vx, vy, vz].every(Number.isFinite)) return null;
+      const id = this.nextProjectile++;
+      this.projectiles.set(id, { ...options, id, position: [x, y, z], velocity: [vx, vy, vz], age: 0 });
+      return [id];
+    }
+    if (op === PHYS_Q_PROJECTILE) {
+      const p = this.projectiles.get(a);
+      return p ? [...p.position, ...p.velocity] : null;
+    }
+    if (op === PHYS_Q_IMPACTS) {
+      const out = [this.impacts.length];
+      for (const e of this.impacts.slice(Math.max(0, a), Math.max(0, a) + PHYS_Q_IMPACTS_PAGE)) {
+        out.push(e.id, e.kind, e.object === null ? 0 : e.object >= 0 ? e.object + 2 : 1, ...e.point, ...e.normal, e.speed);
+      }
+      return out;
+    }
+    if (op === PHYS_Q_STOP) {
+      this.projectiles.delete(a);
+      return null;
+    }
     return null;
+  }
+
+  /**
+   * Move every projectile one tick (S4): gravity and drag change its velocity,
+   * then its sphere is swept from where it was to where it goes, so nothing
+   * thinner than a tick's travel is missed (continuous collision). A hit ends
+   * it, pushing a dynamic body it hit; outliving its life ends it too. Only
+   * + − × ÷ and sqrt, so every browser computes the same flight.
+   */
+  private flyProjectiles(dt: number): ProjectileImpact[] {
+    const out: ProjectileImpact[] = [];
+    for (const p of this.projectiles.values()) {
+      const [vx, vy, vz] = p.velocity;
+      const keep = Math.max(0, 1 - p.drag * dt);
+      const velocity: Vec3 = [vx * keep, (vy - PROJECTILE_GRAVITY * p.gravity * dt) * keep, vz * keep];
+      const step: Vec3 = [velocity[0] * dt, velocity[1] * dt, velocity[2] * dt];
+      const length = Math.sqrt(step[0] * step[0] + step[1] * step[1] + step[2] * step[2]);
+      const speed = length / dt;
+      if (length > 1e-9) {
+        const direction: Vec3 = [step[0] / length, step[1] / length, step[2] / length];
+        const hit: CastHit | null =
+          p.radius > 0.001 && this.backend.shapecast
+            ? this.backend.shapecast({ kind: "sphere", radius: p.radius }, p.position, direction, length, p.owner, p.mask)
+            : this.backend.raycast(p.position, direction, length, p.owner, p.mask);
+        if (hit) {
+          out.push({ id: p.id, kind: IMPACT_HIT, object: hit.object, point: hit.point, normal: hit.normal, speed });
+          const target = this.byObject.get(hit.object);
+          if (p.push > 0 && target && target.enabled && target.kind === "dynamic") {
+            this.backend.applyImpulse(target.handle, [velocity[0] * p.push, velocity[1] * p.push, velocity[2] * p.push]);
+          }
+          this.projectiles.delete(p.id);
+          continue;
+        }
+      }
+      p.position = [p.position[0] + step[0], p.position[1] + step[1], p.position[2] + step[2]];
+      p.velocity = velocity;
+      p.age += dt;
+      if (p.age >= p.life - 1e-9) {
+        out.push({ id: p.id, kind: IMPACT_EXPIRED, object: null, point: p.position, normal: [0, 0, 0], speed });
+        this.projectiles.delete(p.id);
+      }
+    }
+    return out;
+  }
+
+  /** Projectiles in flight (S4): id → position and velocity (inspection and tests). */
+  projectilesInFlight(): ReadonlyMap<number, { readonly position: Vec3; readonly velocity: Vec3 }> {
+    return this.projectiles;
   }
 
   /** Apply the cart's commands, step the world, and cast the rays it asked for. */
@@ -665,6 +800,7 @@ export class PhysicsSession {
     this.queriesReady = true;
     this.events = this.backend.drainContacts();
     this.overlapPairs = this.backend.overlaps();
+    this.impacts = this.flyProjectiles(PHYSICS_DT);
     this.tick += 1;
     this.stateHash = this.hash();
     this.rayResults = [];

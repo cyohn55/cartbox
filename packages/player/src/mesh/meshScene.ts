@@ -166,6 +166,12 @@ export interface PrefabPool {
 /** Copies of each prefab held in reserve for cartbox.spawn when the sidecar doesn't say. */
 export const DEFAULT_PREFAB_POOL = 8;
 export const MAX_PREFAB_POOL = 32;
+/**
+ * Copies a prefab may keep (S1b). A scene may store up to this many; a cart on
+ * a TIC-80–derived core spawns at most {@link MAX_PREFAB_POOL} of them (the rest
+ * stay in reserve), and one on the dedicated core all of them.
+ */
+export const MAX_PREFAB_POOL_DIRECT = 256;
 
 /** A world-space axis-aligned bounding box with a framing centre + radius. */
 export interface SceneBounds {
@@ -420,7 +426,7 @@ export function parseMeshScene(raw: string | null | undefined): MeshScene | null
       const name = typeof prefab.name === "string" ? prefab.name : "Prefab";
       const size =
         typeof prefab.pool === "number" && Number.isFinite(prefab.pool)
-          ? Math.max(0, Math.min(MAX_PREFAB_POOL, Math.floor(prefab.pool)))
+          ? Math.max(0, Math.min(MAX_PREFAB_POOL_DIRECT, Math.floor(prefab.pool)))
           : DEFAULT_PREFAB_POOL;
       const nodes = (prefab.nodes as (Record_ & { key?: unknown })[]).filter((n) => typeof n.key === "string");
       const root = nodes.find((n) => typeof n.parent !== "string" || !n.parent);

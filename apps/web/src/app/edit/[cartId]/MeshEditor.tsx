@@ -106,6 +106,7 @@ import { ArenaPanel, INITIAL_ARENA_EDIT, type ArenaEditState } from "./ArenaPane
 import { BudgetPanel, storedBudgetDevice } from "./BudgetPanel";
 import { sceneLoadOf } from "@/lib/sceneBudget";
 import type { AaaBudgetDevice, BudgetTier } from "@cartbox/editor";
+import { MAX_PREFAB_POOL, MAX_PREFAB_POOL_DIRECT } from "@cartbox/player";
 import { addMarkup, markupOverlays, placeMarkup } from "@cartbox/editor";
 import { setSidecarArena, sidecarArena } from "@/lib/arenaEdit";
 import { SoundsPanel } from "./SoundsPanel";
@@ -1331,7 +1332,7 @@ export function MeshEditor({ sidecar, onSidecarChange, code, onStartPlay, modern
           onKey={onSceneKey}
         />
 
-        <PrefabLibrary sidecar={sidecar} onChange={onSidecarChange} onPlaced={setSelectedId} />
+        <PrefabLibrary sidecar={sidecar} onChange={onSidecarChange} onPlaced={setSelectedId} maxPool={directCore || (modernTier && sidecar.core === "direct") ? MAX_PREFAB_POOL_DIRECT : MAX_PREFAB_POOL} />
 
         <TerrainPanel sidecar={sidecar} onChange={onSidecarChange} edit={terrainEdit} onEdit={onTerrainEdit} />
         <KitPanel sidecar={sidecar} onChange={onSidecarChange} selectedId={selectedId} onSelect={setSelectedId} />

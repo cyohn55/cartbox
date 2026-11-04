@@ -445,6 +445,22 @@ var PHYS_Q_RAY = 102;
 var PHYS_Q_CONTACTS = 103;
 var PHYS_Q_INSIDE = 104;
 var PHYS_Q_HASH = 105;
+var PHYS_Q_ANIM = 106;
+var PHYS_Q_ANIM_EVENTS = 107;
+var PHYS_Q_JOINT = 108;
+var PHYS_Q_AGENT = 109;
+var PHYS_Q_FIRE_OPTIONS = 110;
+var PHYS_Q_FIRE = 111;
+var PHYS_Q_PROJECTILE = 112;
+var PHYS_Q_IMPACTS = 113;
+var PHYS_Q_STOP = 114;
+var PHYS_Q_IMPACTS_PAGE = 3;
+var DIRECT_MAX_PROJECTILES = 1024;
+var PROJECTILE_GRAVITY = 9.81;
+var IMPACT_HIT = 1;
+var IMPACT_EXPIRED = 2;
+var DIRECT_MAX_AGENTS = 1024;
+var DIRECT_MAX_JOINTS = 1024;
 var PHYS_Q_CONTACTS_PAGE = 10;
 var PHYS_Q_INSIDE_PAGE = 30;
 var DIRECT_MAX_BODIES = 4096;
@@ -7837,6 +7853,7 @@ import {
 } from "@cartbox/editor";
 var DEFAULT_PREFAB_POOL = 8;
 var MAX_PREFAB_POOL = 32;
+var MAX_PREFAB_POOL_DIRECT = 256;
 function isFiniteTriple(value) {
   return Array.isArray(value) && value.length === 3 && value.every((n) => typeof n === "number" && Number.isFinite(n));
 }
@@ -7974,7 +7991,7 @@ function parseMeshScene(raw) {
       const prefab = item;
       if (typeof prefab.id !== "string" || !Array.isArray(prefab.nodes)) continue;
       const name = typeof prefab.name === "string" ? prefab.name : "Prefab";
-      const size = typeof prefab.pool === "number" && Number.isFinite(prefab.pool) ? Math.max(0, Math.min(MAX_PREFAB_POOL, Math.floor(prefab.pool))) : DEFAULT_PREFAB_POOL;
+      const size = typeof prefab.pool === "number" && Number.isFinite(prefab.pool) ? Math.max(0, Math.min(MAX_PREFAB_POOL_DIRECT, Math.floor(prefab.pool))) : DEFAULT_PREFAB_POOL;
       const nodes = prefab.nodes.filter((n) => typeof n.key === "string");
       const root = nodes.find((n) => typeof n.parent !== "string" || !n.parent);
       if (!root || size === 0) continue;
@@ -8498,6 +8515,7 @@ function castShape(kind, a, b, c) {
       return null;
   }
 }
+var DEFAULT_FIRE = { radius: 0.05, gravity: 1, drag: 0, life: 10, push: 0 };
 function castOptionsOf(kind, a, b, c, ignorePlusOne, mask) {
   const ignore = Math.round(ignorePlusOne) - 1;
   const m = Math.round(mask) & 65535;
@@ -8541,6 +8559,13 @@ var PhysicsSession = class {
     this.queryCast = null;
     /** Whether rays can see the world yet: after a step, or once refreshed for a query before one. */
     this.queriesReady = false;
+    /** Projectiles in flight (S4), in the order they were fired. */
+    this.projectiles = /* @__PURE__ */ new Map();
+    this.nextProjectile = 1;
+    /** Options for the next FIRE (PHYS_Q_FIRE_OPTIONS). */
+    this.fireOptions = null;
+    /** Impacts and expiries during the last step. */
+    this.impacts = [];
     this.deterministic = deterministic ?? scene.physicsWorld?.deterministic === true;
     this.backend = this.deterministic ? deterministicBackend(backend) : backend;
     this.maxBodies = maxBodies;
@@ -8666,7 +8691,89 @@ var PhysicsSession = class {
       return [inside.length, ...inside.slice(from, from + PHYS_Q_INSIDE_PAGE)];
     }
     if (op === PHYS_Q_HASH) return [this.stateHash];
+    if (op === PHYS_Q_FIRE_OPTIONS) {
+      const [radius = 0.05, gravity = 1, drag = 0, life = 10, mask = 0, push = 0] = v;
+      const owner = Math.round(a) - 1;
+      const m = Math.round(mask) & 65535;
+      this.fireOptions = {
+        radius: Math.max(0, Math.min(10, radius)),
+        gravity: Math.max(-10, Math.min(10, gravity)),
+        drag: Math.max(0, Math.min(60, drag)),
+        life: Math.max(PHYSICS_DT, Math.min(600, life)),
+        push: Math.max(0, push),
+        ...owner >= 0 ? { owner } : {},
+        ...m > 0 ? { mask: m } : {}
+      };
+      return null;
+    }
+    if (op === PHYS_Q_FIRE) {
+      const options = this.fireOptions ?? DEFAULT_FIRE;
+      this.fireOptions = null;
+      const [x = 0, y = 0, z = 0, vx = 0, vy = 0, vz = 0] = v;
+      if (this.projectiles.size >= DIRECT_MAX_PROJECTILES || ![x, y, z, vx, vy, vz].every(Number.isFinite)) return null;
+      const id = this.nextProjectile++;
+      this.projectiles.set(id, { ...options, id, position: [x, y, z], velocity: [vx, vy, vz], age: 0 });
+      return [id];
+    }
+    if (op === PHYS_Q_PROJECTILE) {
+      const p = this.projectiles.get(a);
+      return p ? [...p.position, ...p.velocity] : null;
+    }
+    if (op === PHYS_Q_IMPACTS) {
+      const out = [this.impacts.length];
+      for (const e of this.impacts.slice(Math.max(0, a), Math.max(0, a) + PHYS_Q_IMPACTS_PAGE)) {
+        out.push(e.id, e.kind, e.object === null ? 0 : e.object >= 0 ? e.object + 2 : 1, ...e.point, ...e.normal, e.speed);
+      }
+      return out;
+    }
+    if (op === PHYS_Q_STOP) {
+      this.projectiles.delete(a);
+      return null;
+    }
     return null;
+  }
+  /**
+   * Move every projectile one tick (S4): gravity and drag change its velocity,
+   * then its sphere is swept from where it was to where it goes, so nothing
+   * thinner than a tick's travel is missed (continuous collision). A hit ends
+   * it, pushing a dynamic body it hit; outliving its life ends it too. Only
+   * + − × ÷ and sqrt, so every browser computes the same flight.
+   */
+  flyProjectiles(dt) {
+    const out = [];
+    for (const p of this.projectiles.values()) {
+      const [vx, vy, vz] = p.velocity;
+      const keep = Math.max(0, 1 - p.drag * dt);
+      const velocity = [vx * keep, (vy - PROJECTILE_GRAVITY * p.gravity * dt) * keep, vz * keep];
+      const step = [velocity[0] * dt, velocity[1] * dt, velocity[2] * dt];
+      const length = Math.sqrt(step[0] * step[0] + step[1] * step[1] + step[2] * step[2]);
+      const speed = length / dt;
+      if (length > 1e-9) {
+        const direction = [step[0] / length, step[1] / length, step[2] / length];
+        const hit = p.radius > 1e-3 && this.backend.shapecast ? this.backend.shapecast({ kind: "sphere", radius: p.radius }, p.position, direction, length, p.owner, p.mask) : this.backend.raycast(p.position, direction, length, p.owner, p.mask);
+        if (hit) {
+          out.push({ id: p.id, kind: IMPACT_HIT, object: hit.object, point: hit.point, normal: hit.normal, speed });
+          const target = this.byObject.get(hit.object);
+          if (p.push > 0 && target && target.enabled && target.kind === "dynamic") {
+            this.backend.applyImpulse(target.handle, [velocity[0] * p.push, velocity[1] * p.push, velocity[2] * p.push]);
+          }
+          this.projectiles.delete(p.id);
+          continue;
+        }
+      }
+      p.position = [p.position[0] + step[0], p.position[1] + step[1], p.position[2] + step[2]];
+      p.velocity = velocity;
+      p.age += dt;
+      if (p.age >= p.life - 1e-9) {
+        out.push({ id: p.id, kind: IMPACT_EXPIRED, object: null, point: p.position, normal: [0, 0, 0], speed });
+        this.projectiles.delete(p.id);
+      }
+    }
+    return out;
+  }
+  /** Projectiles in flight (S4): id → position and velocity (inspection and tests). */
+  projectilesInFlight() {
+    return this.projectiles;
   }
   /** Apply the cart's commands, step the world, and cast the rays it asked for. */
   afterTick(block) {
@@ -8765,6 +8872,7 @@ var PhysicsSession = class {
     this.queriesReady = true;
     this.events = this.backend.drainContacts();
     this.overlapPairs = this.backend.overlaps();
+    this.impacts = this.flyProjectiles(PHYSICS_DT);
     this.tick += 1;
     this.stateHash = this.hash();
     this.rayResults = [];
@@ -9087,6 +9195,17 @@ var AnimationSession = class {
     }
     return out;
   }
+  /** One object's playback, or null when it isn't animated (S1b: a query reads one at a time). */
+  playbackOf(object) {
+    const p = this.playback.get(object);
+    if (!p) return null;
+    const shown = this.shownClip(p, p.current);
+    return { object, clip: shown.clip, time: shown.time, state: p.current.state };
+  }
+  /** The events one object fired on the last step (indices in its state machine). */
+  eventsOf(object) {
+    return this.playback.get(object)?.fired ?? [];
+  }
   /** Events that fired on the last step: object and the event's index in its state machine. */
   events() {
     const out = [];
@@ -9310,11 +9429,15 @@ function sceneNeedsRuntime(scene, { physics = true } = {}) {
   );
 }
 var luaString = (s) => JSON.stringify(s);
-function runtimeSdkLua(scene, layout, { physics: engine = true, maxBodies = PHYS_MAX_BODIES } = {}) {
+function runtimeSdkLua(scene, layout, {
+  physics: engine = true,
+  maxBodies = PHYS_MAX_BODIES,
+  maxPool = MAX_PREFAB_POOL
+} = {}) {
   if (!scene || !sceneNeedsRuntime(scene, { physics: engine })) return "";
   const physics = engine && sceneHasPhysics(scene);
   const slots = physicsSlots(scene, maxBodies).map((object, slot) => `[${object}]=${slot}`);
-  const pools = (scene.pools ?? []).map((pool) => `[${luaString(pool.prefab)}]={${pool.roots.join(",")}}`);
+  const pools = (scene.pools ?? []).map((pool) => `[${luaString(pool.prefab)}]={${pool.roots.slice(0, Math.max(0, maxPool)).join(",")}}`);
   const B = physicsBlockAddress(layout);
   const R = commandRingAddress(layout);
   return `do
@@ -9344,6 +9467,9 @@ function runtimeSdkLua(scene, layout, { physics: engine = true, maxBodies = PHYS
   end
   -- The dedicated Modern core (EP20b) takes commands as calls: no slots, no cap.
   local _direct = _cbx_cmd
+  -- And answers reads as calls (S1, S2): past every cap of the block below.
+  local _q = _cbx_query
+  local _int = function(v) return math.tointeger(v) or v end
   local function _cmd(op, a, v1, v2, v3, v4, v5, v6)
     if not _live() then return end
     if _direct then return _direct(op, a, v1 or 0, v2 or 0, v3 or 0, v4 or 0, v5 or 0, v6 or 0) end
@@ -9371,10 +9497,8 @@ ${TIMELINE_CALLS(scene)}${LEVEL_CALLS(scene)}${scene.navmesh ? NAV_CALLS() : ""}
 }
 function PHYSICS_CALLS() {
   return `  cartbox.physics = function() return _live() end
-  -- The dedicated Modern core answers reads as calls (S1, S2): no 64-body,
-  -- 16-ray or 48-contact block, and a ray's hit comes back in the call.
-  local _q = _cbx_query
-  local _int = function(v) return math.tointeger(v) or v end
+  -- On the dedicated core (_q) there is no 64-body, 16-ray or 48-contact
+  -- block to read, and a ray's hit comes back in the call.
   local _hits = {}
   cartbox.physicshash = function()
     if not _live() then return 0 end
@@ -9479,6 +9603,43 @@ function PHYSICS_CALLS() {
     if w >= 2 then obj = w - 2 end
     return true, obj, _rd(at + 4) / ${PHYS_FIX}, _rd(at + 8) / ${PHYS_FIX}, _rd(at + 12) / ${PHYS_FIX},
       _rd(at + 16) / ${PHYS_FIX}, _rd(at + 20) / ${PHYS_FIX}, _rd(at + 24) / ${PHYS_FIX}, _rd(at + 28) / ${PHYS_FIX}
+  end
+  -- Projectiles (S4, the dedicated core): swept every tick, so nothing is
+  -- tunnelled through; gravity, drag, a life, an owner to pass through, a mask.
+  cartbox.fire = function(x, y, z, vx, vy, vz, o)
+    if not _q or not _live() then return nil end
+    o = o or {}
+    local owner = 0
+    if o.owner ~= nil then owner = (_obj(o.owner) or -1) + 1 end
+    _q(${PHYS_Q_FIRE_OPTIONS}, owner, o.radius or 0.05, o.gravity or 1, o.drag or 0, o.life or 10, math.floor(o.mask or 0) & ${PHYSICS_MASK_ALL}, o.push or 0)
+    local id = _q(${PHYS_Q_FIRE}, 0, x or 0, y or 0, z or 0, vx or 0, vy or 0, vz or 0)
+    if id == nil then return nil end
+    return _int(id)
+  end
+  cartbox.projectile = function(id)
+    if not _q or not _live() or id == nil then return nil end
+    return _q(${PHYS_Q_PROJECTILE}, id)
+  end
+  cartbox.impacts = function()
+    local out = {}
+    if not _q or not _live() then return out end
+    local from = 0
+    repeat
+      local r = table.pack(_q(${PHYS_Q_IMPACTS}, from))
+      local total = r[1] or 0
+      for k = 2, r.n - 9, 10 do
+        local w = _int(r[k + 2])
+        local obj = nil
+        if w >= 2 then obj = w - 2 end
+        out[#out + 1] = { id = _int(r[k]), hit = _int(r[k + 1]) == ${IMPACT_HIT}, obj = obj,
+          x = r[k + 3], y = r[k + 4], z = r[k + 5], nx = r[k + 6], ny = r[k + 7], nz = r[k + 8], speed = r[k + 9] }
+      end
+      from = from + ${PHYS_Q_IMPACTS_PAGE}
+    until from >= total
+    return out
+  end
+  cartbox.stop = function(id)
+    if _q and id ~= nil then _q(${PHYS_Q_STOP}, id) end
   end
   cartbox.contacts = function()
     local out = {}
@@ -9743,6 +9904,12 @@ function NAV_CALLS() {
   cartbox.agentpos = function(k)
     local key = _akey(k)
     if key == nil or not _live() then return nil end
+    if _q then
+      local x, y, z, fa, fl = _q(${PHYS_Q_AGENT}, key)
+      if x == nil then return nil end
+      fl = _int(fl)
+      return x, y, z, fa, (fl & ${NAV_FLAG_MOVING}) ~= 0, (fl & ${NAV_FLAG_AIR}) ~= 0, (fl & ${NAV_FLAG_ARRIVED}) ~= 0, (fl & ${NAV_FLAG_NO_PATH}) ~= 0
+    end
     local n = _rd(_B + ${PHYS_AGENTS})
     for i = 0, math.min(n, ${PHYS_MAX_AGENTS}) - 1 do
       local at = _B + ${PHYS_AGENTS + 4} + i * ${PHYS_AGENT_BYTES}
@@ -9878,6 +10045,13 @@ function ANIM_CALLS(scene) {
   cartbox.anim = function(o)
     local i = _obj(o)
     if i == nil or _clips[i] == nil or not _live() then return nil, 0, false end
+    if _q then
+      local c, t = _q(${PHYS_Q_ANIM}, i)
+      if c == nil or c < 0 then return nil, 0, false end
+      c = _int(c)
+      local done = _loops[i] == false and t >= (_dur[i][c + 1] or 0) - 0.0005
+      return _clips[i][c + 1], t, done
+    end
     local n = _rd(_B + ${PHYS_ANIMS})
     for k = 0, n - 1 do
       local at = _B + ${PHYS_ANIMS + 4} + k * ${PHYS_ANIM_BYTES}
@@ -9947,6 +10121,7 @@ function ANIM_CALLS(scene) {
       _watching[key] = true
       _cmd(${PHYS_OP_WATCH}, i, j)
     end
+    if _q then return _q(${PHYS_Q_JOINT}, i, j) end
     local n = _rd(_B + ${PHYS_JOINTS})
     for k = 0, n - 1 do
       local at = _B + ${PHYS_JOINTS + 4} + k * ${PHYS_JOINT_BYTES}
@@ -9987,6 +10162,11 @@ function ANIM_CALLS(scene) {
     local i = _obj(o)
     local m = i and _sm[i]
     if m == nil or not _live() then return nil end
+    if _q then
+      local _, _, st = _q(${PHYS_Q_ANIM}, i)
+      if st == nil or st < 0 then return nil end
+      return m.s[_int(st) + 1]
+    end
     local n = _rd(_B + ${PHYS_ANIMS})
     for k = 0, n - 1 do
       local at = _B + ${PHYS_ANIMS + 4} + k * ${PHYS_ANIM_BYTES}
@@ -10003,6 +10183,16 @@ function ANIM_CALLS(scene) {
     local m = i and _sm[i]
     local out = {}
     if m == nil or not _live() then return out end
+    if _q then
+      local from = 0
+      repeat
+        local r = table.pack(_q(${PHYS_Q_ANIM_EVENTS}, i, from))
+        local total = r[1] or 0
+        for k = 2, r.n do out[#out + 1] = m.e[_int(r[k]) + 1] end
+        from = from + ${PHYS_Q_INSIDE_PAGE}
+      until from >= total
+      return out
+    end
     local n = _rd(_B + ${PHYS_ANIM_EVENTS})
     for k = 0, n - 1 do
       local at = _B + ${PHYS_ANIM_EVENTS + 4} + k * ${PHYS_ANIM_EVENT_BYTES}
@@ -10242,12 +10432,16 @@ var AgentCrowd = class {
   }
   /** Every agent as the cart reads it, in key order. */
   state() {
-    return [...this.agents.values()].sort((a, b) => a.key - b.key).map((a) => ({
-      key: a.key,
-      position: a.pos,
-      facing: a.facing,
-      flags: (a.moving ? NAV_FLAG_MOVING : 0) | (a.air ? NAV_FLAG_AIR : 0) | (!a.goal ? NAV_FLAG_ARRIVED : 0) | (a.noPath ? NAV_FLAG_NO_PATH : 0) | (a.obstacle ? NAV_FLAG_OBSTACLE : 0)
-    }));
+    return [...this.agents.values()].sort((a, b) => a.key - b.key).map(agentReading);
+  }
+  /** One agent as the cart reads it, or null (S1b: a query reads one at a time). */
+  agentState(key2) {
+    const a = this.agents.get(key2);
+    return a ? agentReading(a) : null;
+  }
+  /** How many agents there are. */
+  get size() {
+    return this.agents.size;
   }
   /** One agent's current path corners (for inspection and tests). */
   path(key2) {
@@ -10260,6 +10454,14 @@ function distanceToSegment(p, a, b) {
   const l2 = dx * dx + dz * dz;
   const t = l2 > 0 ? Math.max(0, Math.min(1, ((p[0] - a[0]) * dx + (p[2] - a[2]) * dz) / l2)) : 0;
   return Math.hypot(p[0] - (a[0] + dx * t), p[2] - (a[2] + dz * t));
+}
+function agentReading(a) {
+  return {
+    key: a.key,
+    position: a.pos,
+    facing: a.facing,
+    flags: (a.moving ? NAV_FLAG_MOVING : 0) | (a.air ? NAV_FLAG_AIR : 0) | (!a.goal ? NAV_FLAG_ARRIVED : 0) | (a.noPath ? NAV_FLAG_NO_PATH : 0) | (a.obstacle ? NAV_FLAG_OBSTACLE : 0)
+  };
 }
 
 // src/mesh/sceneColliders.ts
@@ -10304,7 +10506,7 @@ var transform2 = (m, p) => [
   m[2] * p[0] + m[6] * p[1] + m[10] * p[2] + m[14]
 ];
 var RuntimeChannel = class {
-  constructor(scene, physics) {
+  constructor(scene, physics, { direct = false } = {}) {
     this.scene = scene;
     this.physics = physics;
     /** Spawned copies: root object index → the root's world matrix. */
@@ -10353,6 +10555,7 @@ var RuntimeChannel = class {
     this.holoParts = /* @__PURE__ */ new Map();
     /** Joints whose world position the cart asked for, and where they were when last skinned. */
     this.watched = /* @__PURE__ */ new Map();
+    this.limits = direct ? { agents: DIRECT_MAX_AGENTS, joints: DIRECT_MAX_JOINTS } : { agents: PHYS_MAX_AGENTS, joints: PHYS_MAX_JOINTS };
     this.animation = sceneHasAnimation(scene) ? new AnimationSession(scene) : null;
     this.timeline = (scene.timelines?.length ?? 0) > 0 ? new TimelineSession(scene) : null;
     this.crowd = scene.navmesh ? new AgentCrowd(scene.navmesh) : null;
@@ -10385,6 +10588,23 @@ var RuntimeChannel = class {
    * physics running, or an op nobody serves).
    */
   query(op, a, v) {
+    if (op === PHYS_Q_ANIM) {
+      const p = this.animation?.playbackOf(a);
+      return p ? [p.clip, p.time, p.state ?? -1] : null;
+    }
+    if (op === PHYS_Q_ANIM_EVENTS) {
+      const fired = this.animation?.eventsOf(a) ?? [];
+      const from = Math.max(0, Math.round(v[0] ?? 0));
+      return [fired.length, ...fired.slice(from, from + PHYS_Q_INSIDE_PAGE)];
+    }
+    if (op === PHYS_Q_JOINT) {
+      const position = this.watched.get(`${a}:${Math.round(v[0] ?? -1)}`)?.position;
+      return position ? [...position] : null;
+    }
+    if (op === PHYS_Q_AGENT) {
+      const agent = this.crowd?.agentState(a);
+      return agent ? [...agent.position, agent.facing, agent.flags] : null;
+    }
     return this.physics?.query(op, a, v) ?? null;
   }
   /**
@@ -10545,7 +10765,7 @@ var RuntimeChannel = class {
     if (!crowd || key2 < 0 || key2 > 1023) return;
     const at = [v[0], v[1], v[2]];
     if (op === PHYS_OP_AGENT) {
-      if (crowd.state().length >= PHYS_MAX_AGENTS && !crowd.state().some((a) => a.key === key2)) return;
+      if (crowd.size >= this.limits.agents && !crowd.agentState(key2)) return;
       crowd.place(key2, at, v[3] > 0 ? v[3] : 3, v[4] > 0 ? v[4] : crowd.graph.mesh.agent.radius, v[5] >= 0.5);
     } else if (op === PHYS_OP_AGENT_GOTO) crowd.goto(key2, at, v[3]);
     else if (op === PHYS_OP_AGENT_STOP) crowd.stop(key2);
@@ -10724,7 +10944,7 @@ var RuntimeChannel = class {
   watch(object, joint) {
     const key2 = `${object}:${joint}`;
     const joints = this.scene.instances[object]?.mesh.skin?.joints.length ?? 0;
-    if (this.watched.has(key2) || joint < 0 || joint >= joints || this.watched.size >= PHYS_MAX_JOINTS) return;
+    if (this.watched.has(key2) || joint < 0 || joint >= joints || this.watched.size >= this.limits.joints) return;
     this.watched.set(key2, { object, joint, position: null });
   }
   /** Apply an object's standing IK (first) and look-at requests to its pose, then a ragdoll over it all. */
@@ -39187,7 +39407,8 @@ var Player = class {
       if (sceneLua) prepared = prependLuaCode(prepared, sceneLua);
       const mesh = this.options.mesh;
       const maxBodies = direct ? DIRECT_MAX_BODIES : PHYS_MAX_BODIES;
-      const runtimeLua = layout && mesh ? runtimeSdkLua(mesh, layout, { physics: Boolean(this.options.physics), maxBodies }) : "";
+      const maxPool = direct ? MAX_PREFAB_POOL_DIRECT : MAX_PREFAB_POOL;
+      const runtimeLua = layout && mesh ? runtimeSdkLua(mesh, layout, { physics: Boolean(this.options.physics), maxBodies, maxPool }) : "";
       if (runtimeLua && mesh && layout) {
         prepared = prependLuaCode(prepared, runtimeLua);
         let physics = null;
@@ -39204,7 +39425,7 @@ var Player = class {
           }
         }
         this.runtime = {
-          channel: new RuntimeChannel(mesh, physics),
+          channel: new RuntimeChannel(mesh, physics, { direct }),
           physics,
           offset: physicsBlockAddress(layout) - layout.pmemAddress,
           // The overflow command ring (EP20), where the core's RAM affords one.
@@ -42200,7 +42421,10 @@ export {
   DEFAULT_TEXEL_DENSITY,
   DEFAULT_TRIGGER_THRESHOLD,
   DIRECT_CORE_URL,
+  DIRECT_MAX_AGENTS,
   DIRECT_MAX_BODIES,
+  DIRECT_MAX_JOINTS,
+  DIRECT_MAX_PROJECTILES,
   DebugCommand,
   DirectTransport,
   EVENT_CAPACITY,
@@ -42242,6 +42466,8 @@ export {
   MAX_EMITTERS,
   MAX_LUT_SIZE,
   MAX_PARTICLES_PER_EMITTER,
+  MAX_PREFAB_POOL,
+  MAX_PREFAB_POOL_DIRECT,
   MAX_PYRAMID_LEVELS,
   MAX_VOICES,
   MESH_CAM_ANGLE_SCALE,
@@ -42272,17 +42498,27 @@ export {
   PHYS_BLOCK_BYTES,
   PHYS_MAGIC,
   PHYS_MAX_BODIES,
+  PHYS_Q_AGENT,
+  PHYS_Q_ANIM,
+  PHYS_Q_ANIM_EVENTS,
   PHYS_Q_BODY,
   PHYS_Q_CAST,
   PHYS_Q_CONTACTS,
+  PHYS_Q_FIRE,
+  PHYS_Q_FIRE_OPTIONS,
   PHYS_Q_HASH,
+  PHYS_Q_IMPACTS,
   PHYS_Q_INSIDE,
+  PHYS_Q_JOINT,
+  PHYS_Q_PROJECTILE,
   PHYS_Q_RAY,
+  PHYS_Q_STOP,
   POINTER_AT,
   POINTER_MAGIC,
   POST_FX_EFFECTS,
   PROFILE_SECTIONS,
   PROFILE_WINDOW,
+  PROJECTILE_GRAVITY,
   ParticleOverlaySurface,
   PathTracer,
   PhysicsSession,

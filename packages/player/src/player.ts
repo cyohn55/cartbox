@@ -64,7 +64,7 @@ import {
 import { injectSdk } from "./sdk.js";
 import { componentsSdkLua } from "./componentsSdk.js";
 import { sceneObjectsSdkLua } from "./mesh/sceneObjectsSdk.js";
-import { streamGroups, type MeshScene } from "./mesh/meshScene.js";
+import { MAX_PREFAB_POOL, MAX_PREFAB_POOL_DIRECT, streamGroups, type MeshScene } from "./mesh/meshScene.js";
 import { runtimeSdkLua } from "./physics/physicsSdk.js";
 import { PhysicsSession, sceneHasPhysics } from "./physics/physicsSession.js";
 import { RuntimeChannel } from "./runtime/runtimeChannel.js";
@@ -503,7 +503,8 @@ export class Player {
       const mesh = this.options.mesh;
       // On the dedicated core the cart reads physics by query, past the block's 64 bodies (S1).
       const maxBodies = direct ? DIRECT_MAX_BODIES : PHYS_MAX_BODIES;
-      const runtimeLua = layout && mesh ? runtimeSdkLua(mesh, layout, { physics: Boolean(this.options.physics), maxBodies }) : "";
+      const maxPool = direct ? MAX_PREFAB_POOL_DIRECT : MAX_PREFAB_POOL;
+      const runtimeLua = layout && mesh ? runtimeSdkLua(mesh, layout, { physics: Boolean(this.options.physics), maxBodies, maxPool }) : "";
       if (runtimeLua && mesh && layout) {
         prepared = prependLuaCode(prepared, runtimeLua);
         let physics: PhysicsSession | null = null;
@@ -520,7 +521,7 @@ export class Player {
           }
         }
         this.runtime = {
-          channel: new RuntimeChannel(mesh, physics),
+          channel: new RuntimeChannel(mesh, physics, { direct }),
           physics,
           offset: physicsBlockAddress(layout) - layout.pmemAddress,
           // The overflow command ring (EP20), where the core's RAM affords one.
