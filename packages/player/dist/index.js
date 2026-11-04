@@ -464,6 +464,14 @@ var DIRECT_MAX_JOINTS = 1024;
 var PHYS_Q_CONTACTS_PAGE = 10;
 var PHYS_Q_INSIDE_PAGE = 30;
 var DIRECT_MAX_BODIES = 4096;
+var asBlock = (v) => fromFix(toFix(v));
+function facingAsBlock(f3) {
+  let a = f3;
+  while (a > Math.PI) a -= 2 * Math.PI;
+  while (a < -Math.PI) a += 2 * Math.PI;
+  const word = Math.round(a * 1e4) & 65535;
+  return (word >= 32768 ? word - 65536 : word) / 1e4;
+}
 function physicsBlockAddress(layout) {
   return layout.ramSize - PHYS_BLOCK_BYTES;
 }
@@ -8659,7 +8667,7 @@ var PhysicsSession = class {
       const t = this.byObject.get(a);
       if (!t || !t.enabled) return null;
       const r = this.reading(t);
-      return [...r.position, ...r.velocity, r.grounded ? 1 : 0];
+      return [...r.position.map(asBlock), ...r.velocity.map(asBlock), r.grounded ? 1 : 0];
     }
     if (op === PHYS_Q_CAST) {
       this.queryCast = castOptionsOf(a, v[0] ?? 0, v[1] ?? 0, v[2] ?? 0, v[3] ?? 0, v[4] ?? 0);
@@ -8676,7 +8684,7 @@ var PhysicsSession = class {
       const len = Math.hypot(dx, dy, dz);
       if (!(len > 1e-9) || ![x, y, z].every(Number.isFinite)) return [0];
       const hit = this.cast({ origin: [x, y, z], direction: [dx / len, dy / len, dz / len], max: len, ...options });
-      return hit ? [hit.object >= 0 ? hit.object + 2 : 1, ...hit.point, ...hit.normal, hit.distance] : [0];
+      return hit ? [hit.object >= 0 ? hit.object + 2 : 1, ...hit.point.map(asBlock), ...hit.normal.map(asBlock), asBlock(hit.distance)] : [0];
     }
     if (op === PHYS_Q_CONTACTS) {
       const out = [this.events.length];
@@ -10590,7 +10598,7 @@ var RuntimeChannel = class {
   query(op, a, v) {
     if (op === PHYS_Q_ANIM) {
       const p = this.animation?.playbackOf(a);
-      return p ? [p.clip, p.time, p.state ?? -1] : null;
+      return p ? [p.clip, asBlock(p.time), p.state ?? -1] : null;
     }
     if (op === PHYS_Q_ANIM_EVENTS) {
       const fired = this.animation?.eventsOf(a) ?? [];
@@ -10599,11 +10607,11 @@ var RuntimeChannel = class {
     }
     if (op === PHYS_Q_JOINT) {
       const position = this.watched.get(`${a}:${Math.round(v[0] ?? -1)}`)?.position;
-      return position ? [...position] : null;
+      return position ? position.map(asBlock) : null;
     }
     if (op === PHYS_Q_AGENT) {
       const agent = this.crowd?.agentState(a);
-      return agent ? [...agent.position, agent.facing, agent.flags] : null;
+      return agent ? [...agent.position.map(asBlock), facingAsBlock(agent.facing), agent.flags] : null;
     }
     return this.physics?.query(op, a, v) ?? null;
   }

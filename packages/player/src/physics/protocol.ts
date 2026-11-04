@@ -401,6 +401,22 @@ export const PHYS_Q_INSIDE_PAGE = 30;
  */
 export const DIRECT_MAX_BODIES = 4096;
 
+/**
+ * A value as the block would carry it (1/1024): what a query answers with, so a
+ * cart reads the same number on the dedicated core as on a TIC-80–derived one
+ * and the two run it identically (modern-core-parity).
+ */
+export const asBlock = (v: number): number => fromFix(toFix(v));
+
+/** A facing as the agents' block word carries it: wrapped to ±π, at 1/10000 rad. */
+export function facingAsBlock(f: number): number {
+  let a = f;
+  while (a > Math.PI) a -= 2 * Math.PI;
+  while (a < -Math.PI) a += 2 * Math.PI;
+  const word = Math.round(a * 10000) & 0xffff;
+  return (word >= 32768 ? word - 65536 : word) / 10000;
+}
+
 /** Where the physics block starts in Lua's RAM space for a model. */
 export function physicsBlockAddress(layout: RamLayout): number {
   return layout.ramSize - PHYS_BLOCK_BYTES;

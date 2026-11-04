@@ -42,6 +42,7 @@ import {
   PHYS_Q_PROJECTILE,
   PHYS_Q_STOP,
   PROJECTILE_GRAVITY,
+  asBlock,
   PHYS_EVENT_STARTED,
   PHYS_EVENT_TRIGGER,
   PHYS_Q_BODY,
@@ -573,7 +574,8 @@ export class PhysicsSession {
       const t = this.byObject.get(a);
       if (!t || !t.enabled) return null;
       const r = this.reading(t);
-      return [...r.position, ...r.velocity, r.grounded ? 1 : 0];
+      // At the block's precision, so both kinds of core read the same numbers.
+      return [...r.position.map(asBlock), ...r.velocity.map(asBlock), r.grounded ? 1 : 0];
     }
     if (op === PHYS_Q_CAST) {
       this.queryCast = castOptionsOf(a, v[0] ?? 0, v[1] ?? 0, v[2] ?? 0, v[3] ?? 0, v[4] ?? 0);
@@ -591,7 +593,7 @@ export class PhysicsSession {
       const len = Math.hypot(dx, dy, dz);
       if (!(len > 1e-9) || ![x, y, z].every(Number.isFinite)) return [0];
       const hit = this.cast({ origin: [x, y, z], direction: [dx / len, dy / len, dz / len], max: len, ...options });
-      return hit ? [hit.object >= 0 ? hit.object + 2 : 1, ...hit.point, ...hit.normal, hit.distance] : [0];
+      return hit ? [hit.object >= 0 ? hit.object + 2 : 1, ...hit.point.map(asBlock), ...hit.normal.map(asBlock), asBlock(hit.distance)] : [0];
     }
     if (op === PHYS_Q_CONTACTS) {
       const out = [this.events.length];

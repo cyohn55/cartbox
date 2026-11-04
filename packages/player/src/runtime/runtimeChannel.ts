@@ -37,6 +37,8 @@ import {
   PHYS_OP_ANIM_SET,
   PHYS_OP_ANIM_TRIGGER,
   PHYS_MAX_JOINTS,
+  asBlock,
+  facingAsBlock,
   DIRECT_MAX_AGENTS,
   DIRECT_MAX_JOINTS,
   PHYS_Q_AGENT,
@@ -252,7 +254,7 @@ export class RuntimeChannel {
   query(op: number, a: number, v: readonly number[]): number[] | null {
     if (op === PHYS_Q_ANIM) {
       const p = this.animation?.playbackOf(a);
-      return p ? [p.clip, p.time, p.state ?? -1] : null;
+      return p ? [p.clip, asBlock(p.time), p.state ?? -1] : null;
     }
     if (op === PHYS_Q_ANIM_EVENTS) {
       const fired = this.animation?.eventsOf(a) ?? [];
@@ -261,11 +263,11 @@ export class RuntimeChannel {
     }
     if (op === PHYS_Q_JOINT) {
       const position = this.watched.get(`${a}:${Math.round(v[0] ?? -1)}`)?.position;
-      return position ? [...position] : null;
+      return position ? position.map(asBlock) : null;
     }
     if (op === PHYS_Q_AGENT) {
       const agent = this.crowd?.agentState(a);
-      return agent ? [...agent.position, agent.facing, agent.flags] : null;
+      return agent ? [...agent.position.map(asBlock), facingAsBlock(agent.facing), agent.flags] : null;
     }
     return this.physics?.query(op, a, v) ?? null;
   }

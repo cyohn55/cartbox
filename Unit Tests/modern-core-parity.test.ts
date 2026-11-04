@@ -430,7 +430,11 @@ end`,
       const ring = hasCommandRing(LAYOUT) ? () => view(commandRingAddress(LAYOUT)!, commandRingBytes(LAYOUT)) : () => null;
       const r = ring();
       if (r) resetCommandRing(r);
-      return { console, view, ring, channel: new RuntimeChannel(mesh, null), last: 0 };
+      // As the player does (player.ts): the dedicated core's channel answers its queries (S1).
+      const isDirect = "direct" in console;
+      const channel = new RuntimeChannel(mesh, null, { direct: isDirect });
+      if (isDirect) (console as DirectConsole).setQuery((op, a, v) => channel.query(op, a, v));
+      return { console, view, ring, channel, last: 0 };
     });
     // Idle on the menu, then A (start the first game type), then move, turn and fire through the intro and the match.
     const input = (f: number) => (f >= 60 && f < 66 ? 16 : f >= 120 ? (f % 40 < 20 ? 8 : 4) | (f % 12 < 6 ? 16 : 0) | (f % 90 < 30 ? 1 : 0) : 0);
