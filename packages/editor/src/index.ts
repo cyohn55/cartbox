@@ -2007,7 +2007,7 @@ export { PACKAGE_MAGIC, PACKAGE_VERSION, packMeshAsset, readPackageManifest, sha
 export { imageSize as encodedImageSize, texelDensity, validateMeshAsset, type ValidationIssue, type ValidationOptions, type ValidationSeverity } from "./model/assetValidation";
 export { IES_HORIZONTAL_SAMPLES, IES_VERTICAL_SAMPLES, iesProfile, parseIes, readIesProfile, sampleIes, type IesProfile } from "./model/iesProfile";
 export { decodeExr, decodeKtx2Hdr, encodeRadianceHdr, halfToFloat, type FloatImage } from "./model/exrCodec";
-export { fbxToMesh, isBinaryFbx, parseFbx, parseFbxAscii, parseFbxBinary, type FbxNode, type FbxValue } from "./model/fbxCodec";
+export { FBX_TICKS_PER_SECOND, fbxReferencedFiles, fbxToMesh, isBinaryFbx, parseFbx, parseFbxAscii, parseFbxBinary, type FbxImportOptions, type FbxNode, type FbxValue } from "./model/fbxCodec";
 export { parseUsd, parseUsda, readStoredZip, usdaToMesh } from "./model/usdCodec";
 export {
   MAX_MORPH_TARGETS,

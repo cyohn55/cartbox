@@ -74,7 +74,10 @@ async function parseMeshFile(file: File, companions: readonly File[]): Promise<M
   }
   // F9d: FBX (binary or ASCII), USD (USDA, or a USDZ holding one), and the binary package (F9e).
   if (extension === "fbx") {
-    return parseFbx(new Uint8Array(await file.arrayBuffer()), name);
+    // Image files picked with it stand in for the textures it names but doesn't embed (D1).
+    const files = new Map<string, Uint8Array>();
+    for (const companion of companions) files.set(companion.name, new Uint8Array(await companion.arrayBuffer()));
+    return parseFbx(new Uint8Array(await file.arrayBuffer()), name, { files });
   }
   if (extension === "usda" || extension === "usdz" || extension === "usd") {
     return parseUsd(new Uint8Array(await file.arrayBuffer()), name);
