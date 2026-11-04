@@ -24,6 +24,7 @@ import { deleteMeshObject, parseMeshReference, resolveMeshSidecar, storeMeshSide
 import { hashAsset, parseCartAssets, EMPTY_CART_ASSETS } from "./cartAssetStore";
 import { readCartAsset, storeCartAsset } from "./cartAssetStorage";
 import { extractMeshTextures, inlineMeshTextures, manifestUpdate } from "./meshTextureAssets";
+import { extractMeshPackages, inlineMeshPackages, loadMeshoptCodec } from "./meshPackages";
 import {
   OPTIONAL_SIDECAR_KEYS,
   SIDECARS,
@@ -77,7 +78,8 @@ export async function loadSidecars(cartId: string): Promise<Sidecars> {
         // A large mesh lives in object storage with only a reference on the row,
         // and its textures live in the cart asset store — put both back before
         // parsing, so every consumer downstream sees the payload as authored.
-        const resolved = key === "mesh" ? await resolveMeshTextures(await resolveMeshSidecar(toStored(raw))) : raw;
+        // Its meshes may be packages in the asset store too (D4; meshPackages.ts).
+        const resolved = key === "mesh" ? await resolveMeshTextures(await resolveMeshPackages(await resolveMeshSidecar(toStored(raw)))) : raw;
         assignSidecar(sidecars, key, SIDECARS[key].parse(resolved));
       } catch {
         // Leaves this sidecar null.
@@ -174,7 +176,7 @@ async function writeOptionalColumn(
   let manifest: string | null = null;
   let payload = value;
   if (key === "mesh") {
-    const offloaded = await offloadMeshTextures(cartId, toStored(value));
+    const offloaded = await offloadMeshAssets(cartId, toStored(value));
     payload = offloaded.encoded;
     manifest = offloaded.manifest;
   }
@@ -212,14 +214,15 @@ async function writeOptionalColumn(
 
 
 /**
- * Lift a mesh payload's textures into the cart asset store.
+ * Lift a mesh payload's textures, then its meshes as packages, into the cart
+ * asset store.
  *
  * Best-effort on purpose. If hashing, uploading or the manifest read fails, the
  * payload is returned exactly as it arrived and stored inline as it always was:
  * a save must not fail because an optimisation could not be applied. The cost
  * of the fallback is a fatter row, which is the situation before this existed.
  */
-async function offloadMeshTextures(
+async function offloadMeshAssets(
   cartId: string,
   encoded: string | null,
 ): Promise<{ encoded: string | null; manifest: string | null }> {
@@ -227,7 +230,10 @@ async function offloadMeshTextures(
 
   try {
     const extracted = await extractMeshTextures(encoded, hashAsset);
-    if (extracted.textures.length === 0) return { encoded, manifest: null };
+    // Then the meshes themselves, as binary packages (D4), their images now refs.
+    const packaged = await extractMeshPackages(extracted.encoded, hashAsset, await loadMeshoptCodec());
+    const assets = [...extracted.textures, ...packaged.packages];
+    if (assets.length === 0) return { encoded, manifest: null };
 
     // The manifest is read before anything is stored, because a cart must never
     // reference an asset it cannot also record: an unrecorded reference is
@@ -244,13 +250,24 @@ async function offloadMeshTextures(
 
     // Blobs next: a stored asset nothing references is a bill, where a
     // reference to an asset that was never stored is a missing texture.
-    for (const texture of extracted.textures) {
-      await storeCartAsset(texture.hash, texture.bytes, texture.mime);
+    for (const asset of assets) {
+      await storeCartAsset(asset.hash, asset.bytes, asset.mime);
     }
 
-    return { encoded: extracted.encoded, manifest: manifestUpdate(current, extracted.textures) };
+    return { encoded: packaged.encoded, manifest: manifestUpdate(current, assets) };
   } catch {
     return { encoded, manifest: null };
+  }
+}
+
+/** Put packaged meshes back into a mesh sidecar on the way out, as JSON. */
+async function resolveMeshPackages(encoded: string | null): Promise<string | null> {
+  if (!encoded) return encoded;
+  try {
+    return await inlineMeshPackages(encoded, readCartAsset, await loadMeshoptCodec());
+  } catch {
+    // A package that can't be read costs its objects, not the cart.
+    return encoded;
   }
 }
 

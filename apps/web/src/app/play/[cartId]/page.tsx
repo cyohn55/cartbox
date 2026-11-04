@@ -18,6 +18,7 @@ import { publicUrl } from "@/lib/storage";
 import { resolveMeshSidecar } from "@/lib/meshStorage";
 import { cartAssetUrl, readCartAsset } from "@/lib/cartAssetStorage";
 import { parseCartAssets } from "@/lib/cartAssetStore";
+import { inlineMeshPackages, loadMeshoptCodec } from "@/lib/meshPackages";
 import { inlineMeshTextures, meshTextureLevels, meshTextureName, meshTextureObjects, meshTextureRefs } from "@/lib/meshTextureAssets";
 import type { StreamedTexture } from "@/lib/textureStream";
 import { getServerUserId } from "@/lib/supabase-server";
@@ -248,6 +249,8 @@ export default async function CartridgePage({ params }: PageProps) {
     // A large sidecar is stored as a reference to object storage; resolve it back
     // to the full payload the client parses (inline sidecars pass through).
     if (!error) meshRaw = await resolveMeshSidecar((extra?.mesh as string | null) ?? null);
+    // Meshes stored as binary packages (D4) go back to the JSON the client parses.
+    if (meshRaw) meshRaw = await inlineMeshPackages(meshRaw, readCartAsset, await loadMeshoptCodec()).catch(() => meshRaw);
   } catch {
     meshRaw = null;
   }

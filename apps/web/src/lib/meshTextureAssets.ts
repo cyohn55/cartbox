@@ -88,9 +88,9 @@ const IMAGE_FIELDS = ["image", "normalImage", "materialImage", "metallicRoughnes
 type Payload = { primitives?: { material?: Record<string, unknown> }[] };
 
 type SidecarRoot = {
-  meshes?: { mesh?: unknown; frames?: unknown }[];
+  meshes?: { mesh?: unknown; frames?: unknown; lods?: unknown }[];
   library?: Record<string, unknown>;
-  prefabs?: { nodes?: { mesh?: unknown; frames?: unknown }[] }[];
+  prefabs?: { nodes?: { mesh?: unknown; frames?: unknown; lods?: unknown }[] }[];
 };
 
 /** One image in place: the object itself and where it sits, so it can be rewritten or dropped. */
@@ -152,11 +152,17 @@ function imagesIn(encoded: string): Walked | null {
       // An unreadable mesh is left exactly as it is.
     }
   };
-  const holder = (h: { mesh?: unknown; frames?: unknown }) => {
+  const holder = (h: { mesh?: unknown; frames?: unknown; lods?: unknown }) => {
     visit(h.mesh, (v) => (h.mesh = v));
     if (Array.isArray(h.frames)) {
       const frames = h.frames as unknown[];
       frames.forEach((f, i) => visit(f, (v) => (frames[i] = v)));
+    }
+    // Its LOD levels too: each a whole mesh with its own copy of the images.
+    const lods = h.lods as { levels?: unknown } | undefined;
+    if (lods && Array.isArray(lods.levels)) {
+      const levels = lods.levels as unknown[];
+      levels.forEach((l, i) => visit(l, (v) => (levels[i] = v)));
     }
   };
   for (const entry of root.meshes) holder(entry);

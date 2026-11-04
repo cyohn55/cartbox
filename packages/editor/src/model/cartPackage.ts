@@ -16,15 +16,18 @@
  * (positions, normals, UVs, tangents, indices…), stored raw or squeezed with
  * meshoptimizer's vertex and index codecs (the caller hands the encoder in, as
  * the glTF decoders are, so this stays DOM-free). Images are stored as they are
- * encoded (PNG, KTX2 — already compressed). The materials, without their
- * images, travel in the manifest as JSON.
+ * encoded (PNG, KTX2 — already compressed), a map's KTX2 twin as a chunk of
+ * its own; an image whose bytes live elsewhere (an asset-store texture) keeps
+ * only its ref, and an image two slots share is stored once. The materials,
+ * without their images, travel in the manifest as JSON, as does whatever of a
+ * primitive isn't a stream (morph targets, cloth, the cluster hierarchy).
  *
  * Reading checks the magic, the version, every chunk's bounds and (when asked)
  * its hash, so a truncated or tampered package fails loudly.
  */
 
 import type { EncodedImage, MeshAsset, MeshMaterial, MeshPrimitive } from "./MeshAsset";
-import { deserializeMaterial, deserializeMeshAsset, serializeMaterial, serializeMeshAsset } from "./MeshAsset";
+import { MESH_ASSET_VERSION, deserializeMaterial, deserializeMeshAsset, serializeMaterial, serializeMeshAsset } from "./MeshAsset";
 
 /** The file's first four bytes. */
 export const PACKAGE_MAGIC = 0x4b504243; // "CBPK"
@@ -65,9 +68,19 @@ export interface PackageManifest {
   readonly name: string;
   readonly kind: "mesh";
   readonly chunks: readonly PackageChunk[];
-  /** Per primitive: which streams it has, and its material's index. */
-  readonly primitives: readonly { readonly streams: readonly string[]; readonly material: number }[];
-  /** The materials, serialised without their images (those are chunks). */
+  /**
+   * Per primitive: which streams it has, and its material's index; `extra` is
+   * what the JSON codec stores beside the streams (morph targets, cloth, the
+   * cluster hierarchy), in that codec's form, when the primitive has any.
+   */
+  readonly primitives: readonly { readonly streams: readonly string[]; readonly material: number; readonly extra?: Record<string, unknown> }[];
+  /**
+   * The materials, serialised without their images (those are chunks). Under
+   * `$img`, per slot, what a chunk can't say: the image's MIME and asset ref
+   * when its bytes live elsewhere (a streamed or asset-store texture), that
+   * its KTX2 twin is packed with the relief map, or that it is the same image
+   * as an earlier chunk (`same`).
+   */
   readonly materials: readonly unknown[];
   /** The rest of the mesh (its skin, clips, trails and variants), as the JSON codec stores it, or absent. */
   readonly rest?: string;
@@ -146,29 +159,111 @@ export function sha256(bytes: Uint8Array): string {
 
 const bytesOf = (a: ArrayBufferView) => new Uint8Array(a.buffer, a.byteOffset, a.byteLength);
 
+/** What the manifest says of an image beyond its chunk (see PackageManifest.materials). */
+interface ImageMeta {
+  readonly mime: string;
+  readonly ref?: string;
+  readonly ktx2Relief?: boolean;
+  readonly same?: string;
+}
+
+/** The JSON codec's fields of a primitive that aren't streams: morph targets, cloth, clusters. */
+const EXTRA_FIELDS = ["morphTargets", "cloth", "clusters"] as const;
+const BLANK_MATERIAL = { name: "", baseColorFactor: [1, 1, 1, 1] as [number, number, number, number], baseColorImage: null };
+
+/**
+ * Where an extra's large arrays sit in the JSON codec's form (base64 there),
+ * with their element size and codec: these go to chunks, and the extra keeps
+ * `{ $chunk: name }` in their place.
+ */
+type ExtraArray = { readonly get: (e: Record<string, unknown>) => { holder: Record<string, unknown>; key: string }[]; readonly stride: number; readonly codec: "vertex" | "index" | "raw" };
+const EXTRA_ARRAYS: Record<string, ExtraArray> = {
+  // The vertex codec, byte-exact: the index codec may rotate a triangle's corners, which the cluster table's checks would see.
+  clusterIndices: { get: (e) => (e.clusters ? [{ holder: e.clusters as Record<string, unknown>, key: "indices" }] : []), stride: 4, codec: "vertex" },
+  clusterTable: { get: (e) => (e.clusters ? [{ holder: e.clusters as Record<string, unknown>, key: "clusters" }] : []), stride: 4, codec: "raw" },
+  morphPositions: { get: (e) => ((e.morphTargets as Record<string, unknown>[] | undefined) ?? []).map((holder) => ({ holder, key: "positions" })), stride: 12, codec: "vertex" },
+  morphNormals: { get: (e) => ((e.morphTargets as Record<string, unknown>[] | undefined) ?? []).map((holder) => ({ holder, key: "normals" })), stride: 12, codec: "vertex" },
+};
+
+/** A primitive's non-stream data in the JSON codec's form, its large arrays moved to chunks; null when it has none. */
+function primitiveExtra(p: MeshPrimitive, pi: number, chunk: (name: string, raw: Uint8Array, stride: number, type: string, codec: "vertex" | "index" | "raw") => void): Record<string, unknown> | null {
+  if (!p.morphTargets?.length && !p.cloth && !p.clusterLod) return null;
+  const json = JSON.parse(serializeMeshAsset({ name: "", primitives: [{ ...p, joints: undefined, weights: undefined, material: BLANK_MATERIAL } as MeshPrimitive] })) as { primitives: Record<string, unknown>[] };
+  const entry = json.primitives[0]!;
+  const out: Record<string, unknown> = {};
+  for (const field of EXTRA_FIELDS) if (entry[field] !== undefined) out[field] = entry[field];
+  if (Object.keys(out).length === 0) return null;
+  for (const [kind, spec] of Object.entries(EXTRA_ARRAYS)) {
+    spec.get(out).forEach(({ holder, key }, k) => {
+      const value = holder[key];
+      if (typeof value !== "string" || value.length === 0) return;
+      const name = `p${pi}.${kind}${k}`;
+      chunk(name, fromBase64(value), spec.stride, "bytes", spec.codec);
+      holder[key] = { $chunk: name };
+    });
+  }
+  return out;
+}
+
+function fromBase64(value: string): Uint8Array {
+  const binary = atob(value);
+  const out = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i += 1) out[i] = binary.charCodeAt(i);
+  return out;
+}
+
+function toBase64(bytes: Uint8Array): string {
+  let binary = "";
+  for (let i = 0; i < bytes.length; i += 0x8000) binary += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+  return btoa(binary);
+}
+
+/** Read a primitive's extras back through the JSON codec, which validates them against its streams. */
+function readExtra(stored: Record<string, unknown>, chunk: (name: string) => Uint8Array, positions: Float32Array, normals: Float32Array | null, indices: Uint32Array): Pick<MeshPrimitive, "morphTargets" | "cloth" | "clusterLod"> {
+  const view = (a: ArrayBufferView) => toBase64(new Uint8Array(a.buffer, a.byteOffset, a.byteLength));
+  // Put the chunked arrays back as the base64 the JSON codec reads.
+  const extra = JSON.parse(JSON.stringify(stored)) as Record<string, unknown>;
+  for (const spec of Object.values(EXTRA_ARRAYS)) {
+    for (const { holder, key } of spec.get(extra)) {
+      const ref = holder[key] as { $chunk?: unknown } | null | undefined;
+      if (ref && typeof ref === "object" && typeof ref.$chunk === "string") holder[key] = toBase64(chunk(ref.$chunk));
+    }
+  }
+  const entry: Record<string, unknown> = { positions: view(positions), normals: normals ? view(normals) : null, uvs: null, indices: view(indices), material: { name: "", baseColorFactor: [1, 1, 1, 1], image: null } };
+  for (const field of EXTRA_FIELDS) if (extra[field] !== undefined) entry[field] = extra[field];
+  const p = deserializeMeshAsset(JSON.stringify({ version: MESH_ASSET_VERSION, name: "", primitives: [entry] })).primitives[0]!;
+  return { ...(p.morphTargets ? { morphTargets: p.morphTargets } : {}), ...(p.cloth ? { cloth: p.cloth } : {}), ...(p.clusterLod ? { clusterLod: p.clusterLod } : {}) };
+}
+
+/** The one-triangle primitive the rest of a mesh is serialized over. */
+const STAND_IN: MeshPrimitive = { positions: new Float32Array([0, 0, 0, 1, 0, 0, 0, 1, 0]), normals: null, uvs: null, indices: new Uint32Array([0, 1, 2]), material: BLANK_MATERIAL };
+
 /** Pack a mesh and its images (see the module comment); `meshopt` squeezes the geometry. */
 export function packMeshAsset(mesh: MeshAsset, meshopt: MeshoptCodec | null = null): Uint8Array {
   const chunks: { meta: Omit<PackageChunk, "offset" | "hash">; data: Uint8Array }[] = [];
   const materials: MeshMaterial[] = [];
   const materialIndex = new Map<MeshMaterial, number>();
+  /** A stream as a chunk, squeezed by meshopt's codec when that helps. */
+  const streamChunk = (name: string, raw: Uint8Array, stride: number, type: string, codec: "vertex" | "index" | "raw") => {
+    const count = raw.byteLength / stride;
+    let data = raw;
+    let encoding: ChunkEncoding = "raw";
+    if (meshopt && codec !== "raw" && Number.isInteger(count)) {
+      // The index codec takes triangles (a count divisible by three); the vertex codec any stride divisible by four.
+      const squeezed = codec === "index" ? (count % 3 === 0 ? meshopt.encodeIndexBuffer(raw, count, stride) : null) : meshopt.encodeVertexBuffer(raw, count, stride);
+      if (squeezed && squeezed.byteLength < raw.byteLength) {
+        data = squeezed;
+        encoding = codec === "index" ? "meshopt-index" : "meshopt-vertex";
+      }
+    }
+    chunks.push({ meta: { name, role: "stream", encoding, length: data.byteLength, rawLength: raw.byteLength, count, stride, type }, data });
+  };
   const primitives = mesh.primitives.map((p, pi) => {
     const streams: string[] = [];
     for (const [stream, stride, type] of STREAMS) {
       const value = (p as unknown as Record<string, ArrayBufferView | null | undefined>)[stream];
       if (!value || value.byteLength === 0) continue;
-      const raw = bytesOf(value);
-      const count = raw.byteLength / stride;
-      let data = raw;
-      let encoding: ChunkEncoding = "raw";
-      if (meshopt && Number.isInteger(count)) {
-        // The index codec takes triangles (a count divisible by three); the vertex codec any stride divisible by four.
-        const squeezed = stream === "indices" ? (count % 3 === 0 ? meshopt.encodeIndexBuffer(raw, count, stride) : null) : meshopt.encodeVertexBuffer(raw, count, stride);
-        if (squeezed && squeezed.byteLength < raw.byteLength) {
-          data = squeezed;
-          encoding = stream === "indices" ? "meshopt-index" : "meshopt-vertex";
-        }
-      }
-      chunks.push({ meta: { name: `p${pi}.${stream}`, role: "stream", encoding, length: data.byteLength, rawLength: raw.byteLength, count, stride, type }, data });
+      streamChunk(`p${pi}.${stream}`, bytesOf(value), stride, type, stream === "indices" ? "index" : "vertex");
       streams.push(stream);
     }
     let m = materialIndex.get(p.material);
@@ -177,17 +272,32 @@ export function packMeshAsset(mesh: MeshAsset, meshopt: MeshoptCodec | null = nu
       materialIndex.set(p.material, m);
       materials.push(p.material);
     }
-    return { streams, material: m };
+    const extra = primitiveExtra(p, pi, streamChunk);
+    return { streams, material: m, ...(extra ? { extra } : {}) };
   });
+  const written = new Map<EncodedImage, string>();
+  const imageChunk = (name: string, mime: string, data: Uint8Array) => chunks.push({ meta: { name, role: "image", encoding: "raw", length: data.length, rawLength: data.length, count: 1, stride: 1, type: mime }, data });
   const serialized = materials.map((material, mi) => {
     const s = serializeMaterial(material) as unknown as Record<string, unknown>;
-    // Images go in chunks; the manifest keeps only which slots have one.
+    // Images go in chunks; the manifest keeps only which slots have one, and what a chunk can't carry.
+    const meta: Record<string, ImageMeta> = {};
     for (const slot of IMAGE_SLOTS) {
       const image = material[slot] as EncodedImage | null | undefined;
       const stored = slot === "baseColorImage" ? "image" : slot;
       delete s[stored];
-      if (image && image.bytes.length > 0) chunks.push({ meta: { name: `m${mi}.${slot}`, role: "image", encoding: "raw", length: image.bytes.length, rawLength: image.bytes.length, count: 1, stride: 1, type: image.mime }, data: image.bytes });
+      if (!image) continue;
+      const name = `m${mi}.${slot}`;
+      const same = written.get(image);
+      if (same) {
+        meta[slot] = { mime: image.mime, same };
+        continue;
+      }
+      written.set(image, name);
+      if (image.bytes.length > 0) imageChunk(name, image.mime, image.bytes);
+      if (image.ktx2 && image.ktx2.length > 0) imageChunk(`${name}~ktx2`, "image/ktx2", image.ktx2);
+      if (image.ref || image.ktx2Relief || image.bytes.length === 0) meta[slot] = { mime: image.mime, ...(image.ref ? { ref: image.ref } : {}), ...(image.ktx2Relief ? { ktx2Relief: true } : {}) };
     }
+    if (Object.keys(meta).length > 0) s.$img = meta;
     return s;
   });
   // Lay the chunks out, then the manifest that points at them.
@@ -198,8 +308,9 @@ export function packMeshAsset(mesh: MeshAsset, meshopt: MeshoptCodec | null = nu
     at += c.data.byteLength;
     return chunk;
   });
-  const hasRest = Boolean(mesh.skin || mesh.clips?.length || mesh.trails?.length || mesh.variants?.length);
-  const manifest: PackageManifest = { name: mesh.name, kind: "mesh", chunks: placed, primitives, materials: serialized, ...(hasRest ? { rest: serializeMeshAsset({ ...mesh, primitives: [] }) } : {}) };
+  const hasRest = Boolean(mesh.skin || mesh.clips?.length || mesh.trails?.length || mesh.variants?.length || mesh.morphWeights?.length || mesh.springs?.length || mesh.fracture?.pieces.length || mesh.dualQuaternion);
+  // The rest goes through the JSON codec over a stand-in per primitive (a mesh needs one, and variants one per primitive).
+  const manifest: PackageManifest = { name: mesh.name, kind: "mesh", chunks: placed, primitives, materials: serialized, ...(hasRest ? { rest: serializeMeshAsset({ ...mesh, primitives: mesh.primitives.map(() => STAND_IN) }) } : {}) };
   const json = new TextEncoder().encode(JSON.stringify(manifest));
   const head = Math.ceil((12 + json.byteLength) / ALIGN) * ALIGN;
   const out = new Uint8Array(head + at);
@@ -243,12 +354,30 @@ export function unpackMeshAsset(bytes: Uint8Array, meshopt: MeshoptCodec | null 
     else meshopt.decodeVertexBuffer(out, c.count, c.stride, stored);
     return out;
   };
-  const materials = manifest.materials.map((s, mi) => {
+  const seen = new Map<string, EncodedImage>();
+  const materials = manifest.materials.map((stored, mi) => {
+    const { $img, ...s } = stored as Record<string, unknown> & { $img?: Record<string, ImageMeta> };
     const material = deserializeMaterial(s);
     const images: Record<string, EncodedImage> = {};
     for (const slot of IMAGE_SLOTS) {
-      const c = byName.get(`m${mi}.${slot}`);
-      if (c) images[slot] = { mime: c.type, bytes: read(c) };
+      const name = `m${mi}.${slot}`;
+      const meta = $img?.[slot];
+      if (meta?.same !== undefined) {
+        const earlier = seen.get(meta.same);
+        if (earlier) images[slot] = earlier;
+        continue;
+      }
+      const c = byName.get(name);
+      const k = byName.get(`${name}~ktx2`);
+      if (!c && !k && !meta) continue;
+      const image: EncodedImage = {
+        mime: c?.type ?? meta?.mime ?? "image/png",
+        bytes: c ? read(c) : new Uint8Array(0),
+        ...(meta?.ref ? { ref: meta.ref } : {}),
+        ...(k ? { ktx2: read(k), ...(meta?.ktx2Relief ? { ktx2Relief: true } : {}) } : {}),
+      };
+      images[slot] = image;
+      seen.set(name, image);
     }
     return { ...material, ...images } as MeshMaterial;
   });
@@ -263,6 +392,7 @@ export function unpackMeshAsset(bytes: Uint8Array, meshopt: MeshoptCodec | null 
       const raw = read(c);
       out[stream] = type === "u32" ? new Uint32Array(raw.buffer, raw.byteOffset, raw.byteLength / 4) : type === "u16" ? new Uint16Array(raw.buffer, raw.byteOffset, raw.byteLength / 2) : new Float32Array(raw.buffer, raw.byteOffset, raw.byteLength / 4);
     }
+    if (p.extra && out.positions && out.indices) Object.assign(out, readExtra(p.extra, (name) => { const c = byName.get(name); if (!c) throw new Error(`Cartbox package is missing chunk ${name}.`); return read(c); }, out.positions as Float32Array, (out.normals as Float32Array | null) ?? null, out.indices as Uint32Array));
     return out as unknown as MeshPrimitive;
   });
   const rest = manifest.rest ? deserializeMeshAsset(manifest.rest) : null;
