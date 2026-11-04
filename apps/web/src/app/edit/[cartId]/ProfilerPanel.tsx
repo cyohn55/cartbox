@@ -9,7 +9,7 @@
 
 import { useState } from "react";
 
-import { BUDGET_DEVICES, DEVICE_BUDGETS, checkBudget, type BudgetDevice } from "@cartbox/editor";
+import { AAA_BUDGETS_PROVISIONAL, budgetDevices, checkBudget, checkPassBudget, deviceBudget, tierDevice, type AaaBudgetDevice, type BudgetTier } from "@cartbox/editor";
 import type { ProfileSection, ProfileSnapshot } from "@cartbox/player";
 
 import { storeBudgetDevice, storedBudgetDevice } from "./BudgetPanel";
@@ -26,8 +26,10 @@ const RENDER_PASSES: { section: ProfileSection; label: string }[] = [
 const ms = (v: number) => (v < 0.05 ? "0" : v < 10 ? v.toFixed(2) : v.toFixed(1));
 const count = (v: number) => (v >= 10_000 ? `${(v / 1000).toFixed(v >= 100_000 ? 0 : 1)}k` : String(Math.round(v)));
 
-export function ProfilerPanel({ profile, budgetMs }: { profile: ProfileSnapshot | null; budgetMs: number }) {
-  const [device, setDevice] = useState<BudgetDevice>(() => (typeof window === "undefined" ? "iphone" : storedBudgetDevice()));
+export function ProfilerPanel({ profile, budgetMs, tier = "fantasy" }: { profile: ProfileSnapshot | null; budgetMs: number; tier?: BudgetTier }) {
+  const [stored, setDevice] = useState<AaaBudgetDevice>(() => (typeof window === "undefined" ? "iphone" : storedBudgetDevice()));
+  const device = tierDevice(stored, tier);
+  const budget = deviceBudget(device, tier);
   if (!profile || profile.frames === 0) {
     return (
       <aside aria-label="Profiler" style={panelStyle}>
@@ -104,14 +106,14 @@ export function ProfilerPanel({ profile, budgetMs }: { profile: ProfileSnapshot 
             aria-label="Budget device"
             value={device}
             onChange={(e) => {
-              const d = e.target.value as BudgetDevice;
+              const d = e.target.value as AaaBudgetDevice;
               storeBudgetDevice(d);
               setDevice(d);
             }}
           >
-            {BUDGET_DEVICES.map((d) => (
+            {budgetDevices(tier).map((d) => (
               <option key={d} value={d}>
-                {DEVICE_BUDGETS[d].label}
+                {deviceBudget(d, tier).label}
               </option>
             ))}
           </select>
@@ -122,10 +124,25 @@ export function ProfilerPanel({ profile, budgetMs }: { profile: ProfileSnapshot 
               ...(profile.memory.sceneParts ? { textureBytes: profile.memory.sceneParts.textures, meshBytes: profile.memory.sceneParts.meshes } : {}),
             },
             device,
+            tier,
           ).map((line) => (
-            <Stat key={line.key} label={line.label} value={line.text} hint={line.over ? `Over the ${DEVICE_BUDGETS[device].label}'s budget` : undefined} warn={line.over} />
+            <Stat key={line.key} label={line.label} value={line.text} hint={line.over ? `Over the ${budget.label}'s budget` : undefined} warn={line.over} />
           ))}
-          <span style={{ opacity: 0.6 }}>Frame time is this machine&apos;s; the budget there is {ms(DEVICE_BUDGETS[device].frameMs)} ms.</span>
+          {tier === "aaa" &&
+            render.passes &&
+            checkPassBudget(render.passes, device).map((line) => (
+              <Stat
+                key={line.group}
+                label={`GPU · ${line.label}`}
+                value={line.text}
+                hint={`${line.passes.join(", ")}${line.over ? ` — over the ${budget.label}'s share for this group` : ""}`}
+                warn={line.over}
+              />
+            ))}
+          <span style={{ opacity: 0.6 }}>
+            Frame time is this machine&apos;s; the budget there is {ms(budget.frameMs)} ms.
+            {tier === "aaa" && AAA_BUDGETS_PROVISIONAL ? " The AAA budgets are provisional until measured on hardware." : ""}
+          </span>
         </Group>
       )}
 

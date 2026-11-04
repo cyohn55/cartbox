@@ -8,11 +8,15 @@
  * it fits. The viewport's readout checks what each frame actually draws
  * against the same budget. See deviceBudgets.ts in @cartbox/editor and
  * sceneBudget.ts.
+ *
+ * An `aaa` cart checks the AAA tier's table instead (AAA_PRODUCTION_ROADMAP.md
+ * Q2): four devices, a desktop's integrated GPU among them, with the quality
+ * level and resolution each targets, marked provisional until measured.
  */
 
 import { useMemo } from "react";
 
-import { BUDGET_DEVICES, DEVICE_BUDGETS, checkBudget, smallestFit, type BudgetDevice } from "@cartbox/editor";
+import { AAA_BUDGETS_PROVISIONAL, AAA_DEVICE_BUDGETS, budgetDevices, checkBudget, deviceBudget, fitSummary, smallestFit, tierDevice, type AaaBudgetDevice, type BudgetTier } from "@cartbox/editor";
 
 import { type MeshSidecar } from "@/lib/meshSidecar";
 import { sceneLoadOf } from "@/lib/sceneBudget";
@@ -21,16 +25,16 @@ import { RailGroup, RailHint, SegmentedControl } from "./railControls";
 const KEY = "cartbox.budgetDevice";
 
 /** The device the budgets are checked against, remembered in this browser. */
-export function storedBudgetDevice(): BudgetDevice {
+export function storedBudgetDevice(): AaaBudgetDevice {
   try {
     const v = window.localStorage.getItem(KEY);
-    return v === "iphone" || v === "ipad" || v === "desktop" ? v : "iphone";
+    return v === "iphone" || v === "ipad" || v === "integrated" || v === "desktop" ? v : "iphone";
   } catch {
     return "iphone";
   }
 }
 
-export function storeBudgetDevice(device: BudgetDevice): void {
+export function storeBudgetDevice(device: AaaBudgetDevice): void {
   try {
     window.localStorage.setItem(KEY, device);
   } catch {
@@ -38,22 +42,40 @@ export function storeBudgetDevice(device: BudgetDevice): void {
   }
 }
 
-export function BudgetPanel({ sidecar, device, onDevice }: { sidecar: MeshSidecar; device: BudgetDevice; onDevice: (d: BudgetDevice) => void }) {
+export function BudgetPanel({
+  sidecar,
+  device,
+  tier = "fantasy",
+  onDevice,
+}: {
+  sidecar: MeshSidecar;
+  device: AaaBudgetDevice;
+  tier?: BudgetTier;
+  onDevice: (d: AaaBudgetDevice) => void;
+}) {
   const load = useMemo(() => sceneLoadOf(sidecar), [sidecar]);
-  const lines = checkBudget(load, device);
-  const fits = smallestFit(load);
+  const selected = tierDevice(device, tier);
+  const lines = checkBudget(load, selected, tier);
+  const fits = smallestFit(load, tier);
+  const aaa = tier === "aaa" ? AAA_DEVICE_BUDGETS[selected] : null;
   return (
     <RailGroup label="Budgets" advanced>
       <SegmentedControl
         label="Device"
         ariaLabel="Budget device"
-        selected={device}
+        selected={selected}
         onSelect={(id) => {
           storeBudgetDevice(id);
           onDevice(id);
         }}
-        options={BUDGET_DEVICES.map((d) => ({ id: d, label: DEVICE_BUDGETS[d].label }))}
+        options={budgetDevices(tier).map((d) => ({ id: d, label: deviceBudget(d, tier).label }))}
       />
+      {aaa && (
+        <RailHint>
+          AAA {aaa.level} at {aaa.resolution}, {Math.round(1000 / aaa.frameMs)} fps.
+          {AAA_BUDGETS_PROVISIONAL ? " Provisional: set from the tier's targets until measured on this class of hardware." : ""}
+        </RailHint>
+      )}
       {lines.map((line) => (
         <div key={line.key} style={{ margin: "4px 0" }}>
           <div style={{ display: "flex", justifyContent: "space-between", fontSize: 12, color: line.over ? "#ff6b6b" : undefined }}>
@@ -66,7 +88,7 @@ export function BudgetPanel({ sidecar, device, onDevice }: { sidecar: MeshSideca
         </div>
       ))}
       <RailHint>
-        {fits ? `Fits ${DEVICE_BUDGETS[fits].label === "Desktop" ? "a desktop" : `an ${DEVICE_BUDGETS[fits].label}`} and up.` : "Over even a desktop's budget."} Counted at full detail; the viewport&apos;s readout checks what each
+        {fitSummary(fits, tier)} Counted at full detail; the viewport&apos;s readout checks what each
         frame draws (with levels of detail, culling and foliage) and its frame time.
       </RailHint>
     </RailGroup>

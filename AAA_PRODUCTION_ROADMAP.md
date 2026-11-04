@@ -73,9 +73,50 @@ This roadmap closes those gaps. It does not repeat the open items of other roadm
   - *Verified by hand:* with no Vulkan driver (`VK_ICD_FILENAMES` pointed nowhere) the run stops at the probe, exit 1; with every test filtered out (`-t` matching none) it fails listing each skipped test, exit 1; a clean shard exits 0.
   - *Tests (`gpu-test-runner.test.ts`, 13):* the import detection (dynamic with and without vite's comment, template strings, static and multi-line imports; not comments, plain strings, similar package names or other paths); discovery (nested, sorted, relative, `.test.ts` only, and this repository's 60-odd suites with the parity suite); the report check (a clean run; skip, todo and failure named; a file that died before its tests; no tests; an unreported file, and not under a shard; no report at all); the shard flag in both spellings; the probe naming its adapter and destroying the device, and saying what to install for a missing package or adapter.
   - *Left:* frame times, which lavapipe can't give (Q4/R1); Q3's reference images will run in this job.
-- [ ] **Q2. An `aaa` budget row, and an integrated-GPU class.**
+- [x] **Q2. An `aaa` budget row, and an integrated-GPU class.** **Done, with provisional numbers.**
   - `deviceBudgets.ts` gains an `aaa` tier per device (desktop discrete, desktop integrated, iPad, iPhone) with triangles, draw calls, texture and mesh bytes, download bytes and GPU milliseconds per pass, as `AAA_FIDELITY_ROADMAP.md`'s ground rules require.
   - The Budget panel reads it for `aaa` carts.
+  - **What landed** (`editor model/deviceBudgets.ts`).
+    - **A second table, by tier.** `AAA_DEVICE_BUDGETS` covers four classes, smallest first: iPhone, iPad, an integrated GPU and a discrete GPU. Each class carries its quality level and output resolution. Every call takes an optional `BudgetTier`, `fantasy` by default, so the fantasy tiers' table and every existing caller are unchanged. An integrated GPU on a fantasy cart checks as the desktop, which those tiers don't split.
+    - **The numbers are provisional** (`AAA_BUDGETS_PROVISIONAL`, which the editor shows), set from `AAA_FIDELITY_ROADMAP.md`'s targets until R1 measures them:
+
+      | Class | Level | Output | Frame | Triangles | Draws | Textures | Meshes | Download |
+      | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+      | iPhone | Medium | the screen's, upscaled | 33.3 ms | 600k | 700 | 256 MB | 96 MB | 48 MB |
+      | iPad | Medium | the screen's, upscaled | 33.3 ms | 1.2M | 1,200 | 512 MB | 160 MB | 64 MB |
+      | Integrated GPU | High | 1080p, upscaled | 16.7 ms | 3M | 2,500 | 1 GB | 384 MB | 160 MB |
+      | Discrete GPU | Epic | 1440p | 16.7 ms | 8M | 5,000 | 2 GB | 768 MB | 256 MB |
+
+      Each is above the fantasy tiers' figure for the same device. Triangles and draws count what reaches the raster after GPU culling and cluster LOD. Textures are counted, as everywhere in this file, decoded to RGBA8 with mips; the tier stores them in BC7 or ASTC at a quarter of that or less. Downloads stop at F9e's 256 MB direct-upload ceiling.
+    - **GPU milliseconds per group of passes.** `passGroup` sorts every frame-graph pass by name into seven groups. The presenter's `present: ` prefix is dropped, and a dotted sub-pass goes with its root. Each group gets a fixed share of the class's frame time, 0.9 in all, leaving a tenth for the browser's compositing and for spikes:
+
+      | Group | Passes | Share |
+      | --- | --- | --- |
+      | Culling and depth | `cull.*`, `hiz`, `prepass`, `texture feedback`, `lights.cluster` | 8% |
+      | Shadows | cascades, virtual shadows (`vsm.*`), local and contact shadows | 14% |
+      | Scene shading | `opaque`, `see-through`, `behind`, particles, `sss.*` | 27% |
+      | GI, AO and reflections | `gtao`, `ssgi`, `dynamic gi`, `reflections` | 18% |
+      | Sky, fog and volumes | `sky`, `volumetric fog`, `volumes`, shafts | 8% |
+      | Temporal and post | `taa`, `upscale`, `motion`, `dof`, bloom, lens, tone map, compose, `measure`, view modes | 13% |
+      | Other | `readback`, and anything unsorted | 2% |
+
+      `checkPassBudget` sums a frame's pass times (the profiler's `passes`) by group against those budgets.
+  - **The editor.**
+    - On an `aaa` cart, the Mesh tab's **Budgets** panel offers the four classes and names the level, resolution and frame rate of the one chosen, marked provisional. Its fit line reads "Fits an integrated GPU and up." (`fitSummary`, with the right article for each device).
+    - The viewport's readout checks draws, triangles and textures against the same table.
+    - The playtest **Profiler** lists one GPU line per group that ran: its time against its budget, the passes in it, and a warning when it is over. Its device list follows the tier too.
+    - The device choice is still remembered per browser, and now includes the integrated GPU.
+  - *Tests (`aaa-budgets.test.ts`, 13):*
+    - the fantasy table is the default, and its checks, smallest fit and budgets are unchanged; an integrated GPU on it checks as the desktop;
+    - the AAA classes grow monotonically in every scene line and exceed the fantasy figure on each shared device;
+    - the targets hold (Epic 1440p60, High 1080p60 upscaled, Medium at 30 fps on both iOS classes, downloads within the upload ceiling), and the table is marked provisional;
+    - the shares sum to 0.9, and each class's pass budgets are its frame time times those shares;
+    - a scene's check and smallest fit on each tier;
+    - the fit sentences;
+    - `passGroup` on sub-passes, the presenter's prefix and unknown names;
+    - `checkPassBudget`'s sums, order and over flags, with NaN left out and a negative time counted as none, and a phone allowed twice a desktop's milliseconds;
+    - **a scan of the renderer's source**: every pass name `addPass`, `scenePass` or `blurPass` declares (comments skipped, 60-odd names) sorts into a group other than Other, except the readback. Removing `dof` from the table fails the test, naming `dof.prefilter`, `dof.gather` and `dof.composite`. So a new pass can't hide in Other.
+  - *Left:* the numbers themselves, which R1 measures and Q4 confirms (then clear `AAA_BUDGETS_PROVISIONAL`); enforcing the budgets at load (R3 does this for phones).
 - [ ] **Q3. Reference-image regression.** Fixed views of Lockout, Beaver Creek, the look-dev stage and the ruin scene, rendered on Q1's device and compared against stored references with a perceptual metric (FLIP or SSIM), so a change that alters the AAA image is seen in review.
 - [ ] **Q4. Hardware numbers.** R1's lab. Listed for order only.
 

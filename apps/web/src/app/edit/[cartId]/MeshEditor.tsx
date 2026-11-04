@@ -105,7 +105,7 @@ import { KitPanel } from "./KitPanel";
 import { ArenaPanel, INITIAL_ARENA_EDIT, type ArenaEditState } from "./ArenaPanel";
 import { BudgetPanel, storedBudgetDevice } from "./BudgetPanel";
 import { sceneLoadOf } from "@/lib/sceneBudget";
-import type { BudgetDevice } from "@cartbox/editor";
+import type { AaaBudgetDevice, BudgetTier } from "@cartbox/editor";
 import { addMarkup, markupOverlays, placeMarkup } from "@cartbox/editor";
 import { setSidecarArena, sidecarArena } from "@/lib/arenaEdit";
 import { SoundsPanel } from "./SoundsPanel";
@@ -190,6 +190,8 @@ interface MeshEditorProps {
   modernTier?: boolean;
   /** The cart is on the AAA tier, which always runs on the dedicated core (F0d). */
   directCore?: boolean;
+  /** Which budgets the Budgets panel and the viewport's readout check: the fantasy tiers' or the AAA tier's (Q2). */
+  budgetTier?: BudgetTier;
   /** The cart's id: a Lockout cart links to the demo playing its saved assets (L13). */
   cartId?: string;
 }
@@ -215,7 +217,7 @@ function fitDistance(mesh: MeshAsset): number {
   return radius / Math.sin(fov / 2) + radius;
 }
 
-export function MeshEditor({ sidecar, onSidecarChange, code, onStartPlay, modernTier = false, directCore = false, cartId }: MeshEditorProps) {
+export function MeshEditor({ sidecar, onSidecarChange, code, onStartPlay, modernTier = false, directCore = false, budgetTier = "fantasy", cartId }: MeshEditorProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const fileRef = useRef<HTMLInputElement>(null);
   /**
@@ -305,7 +307,7 @@ export function MeshEditor({ sidecar, onSidecarChange, code, onStartPlay, modern
   // The level editor (P7): what a click places, the selected marker, and the markup drawn over the scene.
   const [arenaEdit, setArenaEdit] = useState<ArenaEditState>(INITIAL_ARENA_EDIT);
   // Per-device budgets (P8): the device checked against, and the scene's texture memory for the readout.
-  const [budgetDevice, setBudgetDevice] = useState<BudgetDevice>("iphone");
+  const [budgetDevice, setBudgetDevice] = useState<AaaBudgetDevice>("iphone");
   useEffect(() => setBudgetDevice(storedBudgetDevice()), []);
   const sceneTextureBytes = useMemo(() => sceneLoadOf(sidecar).textureBytes, [sidecar]);
   const arena = useMemo(() => sidecarArena(sidecar), [sidecar]);
@@ -1332,7 +1334,7 @@ export function MeshEditor({ sidecar, onSidecarChange, code, onStartPlay, modern
         <TerrainPanel sidecar={sidecar} onChange={onSidecarChange} edit={terrainEdit} onEdit={onTerrainEdit} />
         <KitPanel sidecar={sidecar} onChange={onSidecarChange} selectedId={selectedId} onSelect={setSelectedId} />
         <ArenaPanel sidecar={sidecar} onChange={onSidecarChange} edit={arenaEdit} onEdit={setArenaEdit} selectedIds={selection} cartId={cartId} />
-        <BudgetPanel sidecar={sidecar} device={budgetDevice} onDevice={setBudgetDevice} />
+        <BudgetPanel sidecar={sidecar} device={budgetDevice} tier={budgetTier} onDevice={setBudgetDevice} />
       </aside>
 
       {/* Centre: preview — the selected mesh alone, or the whole composed scene — over the content browser */}
@@ -1356,6 +1358,7 @@ export function MeshEditor({ sidecar, onSidecarChange, code, onStartPlay, modern
           splines={splineLines}
           markup={arenaMarkup}
           budget={budgetDevice}
+          budgetTier={budgetTier}
           textureBytes={sceneTextureBytes}
           selectedMarkup={arenaEdit.selected}
           onPlace={arena && arenaEdit.placing ? onArenaPlace : null}

@@ -62,7 +62,7 @@ import { MODELS, createSceneRenderer, type SceneDraw, type SceneRenderer } from 
 import { readMeshEntry, setMeshTransform, type MeshSidecar } from "@/lib/meshSidecar";
 import { brushRing, terrainRayHit } from "@/lib/terrainEdit";
 import type { SplineOverlay } from "@/lib/splineEdit";
-import { DEVICE_BUDGETS, formatBudgetValue, type BudgetDevice, type MarkupOverlay, type MarkupRef } from "@cartbox/editor";
+import { deviceBudget, formatBudgetValue, type AaaBudgetDevice, type BudgetTier, type MarkupOverlay, type MarkupRef } from "@cartbox/editor";
 import { decodeMeshTextures } from "@/lib/meshImport";
 import { type Vec3 } from "@/lib/scenePick";
 import {
@@ -182,7 +182,9 @@ interface SceneViewportProps {
   /** A click on a marker selects it. */
   onPickMarkup?: (ref: MarkupRef) => void;
   /** The device whose budget the readout checks each frame against (P8), and the scene's texture memory. */
-  budget?: BudgetDevice | null;
+  budget?: AaaBudgetDevice | null;
+  /** Which table that budget comes from: the fantasy tiers' or the AAA tier's (AAA_PRODUCTION_ROADMAP.md Q2). */
+  budgetTier?: BudgetTier;
   textureBytes?: number | null;
 }
 
@@ -258,7 +260,8 @@ const NO_MARKUP: readonly MarkupOverlay[] = [];
 const OVER: React.CSSProperties = { color: "#ff6b6b", fontWeight: 650 };
 const sameRef = (a: MarkupRef | null | undefined, b: MarkupRef) => Boolean(a && a.kind === b.kind && a.index === b.index);
 
-export function SceneViewport({ sidecar, onSidecarChange, selectedIds, onSelectIds, hidden = NO_IDS, locked = NO_IDS, onKey, previewCamera, previewLocals, onView, onDropAsset, terrainBrush = null, onTerrainStroke, splines = NO_SPLINES, markup = NO_MARKUP, selectedMarkup = null, onPlace = null, onPickMarkup, budget = null, textureBytes = null }: SceneViewportProps) {
+export function SceneViewport({ sidecar, onSidecarChange, selectedIds, onSelectIds, hidden = NO_IDS, locked = NO_IDS, onKey, previewCamera, previewLocals, onView, onDropAsset, terrainBrush = null, onTerrainStroke, splines = NO_SPLINES, markup = NO_MARKUP, selectedMarkup = null, onPlace = null, onPickMarkup, budget = null, budgetTier = "fantasy", textureBytes = null }: SceneViewportProps) {
+  const budgetSpec = budget ? deviceBudget(budget, budgetTier) : null;
   const selectedId = selectedIds.at(-1) ?? null;
   const containerRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -1370,15 +1373,15 @@ export function SceneViewport({ sidecar, onSidecarChange, selectedIds, onSelectI
             <span className={styles.hudLabel}>{stats.backend === "webgpu" ? "WebGPU" : stats.backend === "webgl2" ? "WebGL2" : "Software"}</span>
             <span className={`${styles.hudValue} data`}>
               {stats.width}×{stats.height} · {stats.ms.toFixed(1)} ms ·{" "}
-              <span style={budget && stats.drawCalls > DEVICE_BUDGETS[budget].drawCalls ? OVER : undefined}>{stats.drawCalls} draws</span> ·{" "}
-              <span style={budget && stats.triangles > DEVICE_BUDGETS[budget].triangles ? OVER : undefined}>{Math.round(stats.triangles).toLocaleString()} tris</span>
+              <span style={budgetSpec && stats.drawCalls > budgetSpec.drawCalls ? OVER : undefined}>{stats.drawCalls} draws</span> ·{" "}
+              <span style={budgetSpec && stats.triangles > budgetSpec.triangles ? OVER : undefined}>{Math.round(stats.triangles).toLocaleString()} tris</span>
               {textureBytes !== null && (
                 <>
                   {" "}
-                  · <span style={budget && textureBytes > DEVICE_BUDGETS[budget].textureBytes ? OVER : undefined}>{formatBudgetValue("textureBytes", textureBytes)} textures</span>
+                  · <span style={budgetSpec && textureBytes > budgetSpec.textureBytes ? OVER : undefined}>{formatBudgetValue("textureBytes", textureBytes)} textures</span>
                 </>
               )}
-              {budget && <> · vs {DEVICE_BUDGETS[budget].label}</>}
+              {budgetSpec && <> · vs {budgetSpec.label}</>}
             </span>
           </span>
         )}

@@ -647,7 +647,7 @@ export function RunOverlay({
         <div style={{ display: "flex", gap: 12, alignItems: "stretch", minHeight: 0 }}>
           <div ref={stageRef} className={styles.runStage} style={{ flex: 1, minWidth: 0 }} />
           {inspecting && <ObjectsPanel objects={objects} filter={filter} onFilter={setFilter} />}
-          {profiling && <ProfilerPanel profile={profile} budgetMs={frameDurationMs(getModel(modelId))} />}
+          {profiling && <ProfilerPanel profile={profile} budgetMs={frameDurationMs(getModel(modelId))} tier={modelId === "aaa" ? "aaa" : "fantasy"} />}
           {debugOn && (
             <DebuggerPanel
               pause={pause}
