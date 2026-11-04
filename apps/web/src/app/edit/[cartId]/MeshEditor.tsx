@@ -105,7 +105,7 @@ import { KitPanel } from "./KitPanel";
 import { ArenaPanel, INITIAL_ARENA_EDIT, type ArenaEditState } from "./ArenaPanel";
 import { BudgetPanel, storedBudgetDevice } from "./BudgetPanel";
 import { sceneLoadOf } from "@/lib/sceneBudget";
-import type { AaaBudgetDevice, BudgetTier } from "@cartbox/editor";
+import type { AaaBudgetDevice, BudgetTier, EncodedImage } from "@cartbox/editor";
 import { MAX_PREFAB_POOL, MAX_PREFAB_POOL_DIRECT } from "@cartbox/player";
 import { addMarkup, markupOverlays, placeMarkup } from "@cartbox/editor";
 import { setSidecarArena, sidecarArena } from "@/lib/arenaEdit";
@@ -119,7 +119,7 @@ import { importMeshFile, importSummary, decodeImage, decodeMeshTextures } from "
 import { loadKtx2Encoder } from "@/lib/ktx2Encoder";
 import { loadMikkTSpace } from "@/lib/mikktspace";
 import { loadKtx2Decoder } from "@/lib/ktx2Decoder";
-import { KTX2_TRANSCODER_TRANSFER_BYTES, encodePngInBrowser, hasKtx2, sceneHasKtx2, settleKtx2Textures, compressMeshTextures, type TexturePlatform } from "@/lib/ktx2Policy";
+import { KTX2_TRANSCODER_TRANSFER_BYTES, encodePngInBrowser, hasKtx2, sceneHasKtx2, settleKtx2Textures, compressMaterialTextures, compressMeshTextures, type TexturePlatform } from "@/lib/ktx2Policy";
 import { fetchLibraryMesh } from "@/lib/libraryClient";
 import type { LibraryAsset } from "@/lib/libraryManifest";
 import styles from "./editor.module.css";
@@ -1174,15 +1174,20 @@ export function MeshEditor({ sidecar, onSidecarChange, code, onStartPlay, modern
   /** Import from a CC0 library (F9f): a model as a new object, a material onto the selected one, an HDRI as the sky; its credit kept. */
   const importExternal = async (asset: ExternalAsset, resolution: ExternalResolution) => {
     const fetchImpl = (url: string) => fetch(url);
+    // The libraries' maps are compressed on import too (D3), as a file's are in prepareImport.
+    const sceneKtx2 = sceneHasKtx2([...sidecar.meshes.map((m) => m.mesh), ...(sidecar.prefabs ?? []).flatMap((p) => p.nodes.map((n) => n.mesh))]);
+    const compression = { sceneHasKtx2: sceneKtx2, decode: (image: EncodedImage, raw: boolean) => decodeImage(image.bytes, image.mime, raw), encoder: loadKtx2Encoder, platform: texturePlatform };
     let next: typeof sidecar;
     if (asset.kind === "mesh") {
-      const mesh = await importExternalMesh(asset, fetchImpl, resolution);
+      setNote("Compressing textures…");
+      const mesh = (await compressMeshTextures(await importExternalMesh(asset, fetchImpl, resolution), compression)).mesh;
       const added = addMesh(sidecar, mesh, asset.name);
       next = withAutoLods(added.sidecar, added.id);
       setSelectedId(added.id);
     } else if (asset.kind === "material") {
       if (!selectedEntry || !meshAsset) return;
-      const material = await importExternalMaterial(asset, fetchImpl, resolution);
+      setNote("Compressing textures…");
+      const { material } = await compressMaterialTextures(await importExternalMaterial(asset, fetchImpl, resolution), compression);
       next = setMeshAsset(sidecar, selectedEntry.id, { ...meshAsset, primitives: meshAsset.primitives.map((p) => ({ ...p, material })) });
     } else {
       const { mime, bytes } = await importExternalHdri(asset, fetchImpl, resolution);

@@ -232,6 +232,20 @@ export async function compressMeshTextures(
   return { mesh: swapImages(mesh, replacements), outcome: "compressed", ktx2Bytes, sourceBytes };
 }
 
+/**
+ * A single material's maps compressed by the same rule (AAA_PRODUCTION_ROADMAP.md
+ * D3): what the CC0 libraries' materials go through on import, as models and
+ * files do, so no map waits for the cart's save to become KTX2.
+ */
+export async function compressMaterialTextures(
+  material: MeshMaterial,
+  options: Parameters<typeof compressMeshTextures>[1],
+): Promise<{ readonly material: MeshMaterial; readonly outcome: Ktx2Compression["outcome"] }> {
+  const holder = { name: "material", primitives: [{ positions: new Float32Array(0), normals: null, uvs: null, indices: new Uint32Array(0), material }] } as unknown as MeshAsset;
+  const result = await compressMeshTextures(holder, options);
+  return { material: result.mesh.primitives[0]!.material, outcome: result.outcome };
+}
+
 /** Encode RGBA as PNG with the browser's canvas encoder. */
 export async function encodePngInBrowser(texture: DecodedTexture): Promise<Uint8Array> {
   const canvas = new OffscreenCanvas(texture.width, texture.height);
