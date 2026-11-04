@@ -97,6 +97,14 @@ export function ProfilerPanel({ profile, budgetMs, tier = "fantasy" }: { profile
             />
           )}
           {render.passes?.map((pass) => <Stat key={pass.name} label={`· ${pass.name}`} value={`${ms(pass.ms)} ms`} />)}
+          {render.pipelines && (
+            <Stat
+              label="Pipelines"
+              value={`${render.pipelines.compiled + render.pipelines.compiledAsync} compiled · ${render.pipelines.late} late`}
+              hint={`${render.pipelines.compiledAsync} compiled off the frame (the warm-up and material graphs), ${render.pipelines.reused} requests reused. A late one was compiled while playing: a likely hitch, warmed from the next load on.`}
+              warn={render.pipelines.late > 0}
+            />
+          )}
         </Group>
       )}
 

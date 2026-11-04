@@ -32,6 +32,7 @@
 import type { MeshPrimitive } from "@cartbox/editor";
 
 import { INSTANCE_FLOATS } from "./scenePacking.js";
+import { bindGroupLayout, pipelineCache, pipelineLayout, shaderModule } from "./pipelineCache.js";
 
 /* eslint-disable @typescript-eslint/no-explicit-any -- WebGPU handles aren't typed in this build */
 
@@ -407,7 +408,7 @@ export class GpuCulling {
   constructor(private readonly device: any) {
     this.uniforms = device.createBuffer({ size: UNIFORM_STRIDE * ROUNDS, usage: UNIFORM | COPY_DST });
     const storage = (binding: number, type: string) => ({ binding, visibility: COMPUTE, buffer: { type } });
-    this.cullLayout = device.createBindGroupLayout({
+    this.cullLayout = bindGroupLayout(device, {
       entries: [
         { binding: 0, visibility: COMPUTE, buffer: { type: "uniform" } },
         storage(1, "read-only-storage"),
@@ -419,24 +420,24 @@ export class GpuCulling {
         storage(7, "storage"),
       ],
     });
-    this.firstLayout = device.createBindGroupLayout({
+    this.firstLayout = bindGroupLayout(device, {
       entries: [
         { binding: 0, visibility: COMPUTE, texture: { sampleType: "depth" } },
         { binding: 1, visibility: COMPUTE, storageTexture: { access: "write-only", format: "r32float" } },
       ],
     });
-    this.downLayout = device.createBindGroupLayout({
+    this.downLayout = bindGroupLayout(device, {
       entries: [
         { binding: 0, visibility: COMPUTE, texture: { sampleType: "unfilterable-float" } },
         { binding: 1, visibility: COMPUTE, storageTexture: { access: "write-only", format: "r32float" } },
       ],
     });
-    const cull = device.createShaderModule({ code: CULL_WGSL });
-    const layout = device.createPipelineLayout({ bindGroupLayouts: [this.cullLayout] });
-    this.testPipeline = device.createComputePipeline({ layout, compute: { module: cull, entryPoint: "test" } });
-    this.compactPipeline = device.createComputePipeline({ layout, compute: { module: cull, entryPoint: "compact" } });
-    this.firstPipeline = device.createComputePipeline({ layout: device.createPipelineLayout({ bindGroupLayouts: [this.firstLayout] }), compute: { module: device.createShaderModule({ code: HIZ_MAX_WGSL }), entryPoint: "first" } });
-    this.downPipeline = device.createComputePipeline({ layout: device.createPipelineLayout({ bindGroupLayouts: [this.downLayout] }), compute: { module: device.createShaderModule({ code: HIZ_DOWN_WGSL }), entryPoint: "down" } });
+    const cull = shaderModule(device, { code: CULL_WGSL });
+    const layout = pipelineLayout(device, { bindGroupLayouts: [this.cullLayout] });
+    this.testPipeline = pipelineCache(device).compute({ layout, compute: { module: cull, entryPoint: "test" } });
+    this.compactPipeline = pipelineCache(device).compute({ layout, compute: { module: cull, entryPoint: "compact" } });
+    this.firstPipeline = pipelineCache(device).compute({ layout: pipelineLayout(device, { bindGroupLayouts: [this.firstLayout] }), compute: { module: shaderModule(device, { code: HIZ_MAX_WGSL }), entryPoint: "first" } });
+    this.downPipeline = pipelineCache(device).compute({ layout: pipelineLayout(device, { bindGroupLayouts: [this.downLayout] }), compute: { module: shaderModule(device, { code: HIZ_DOWN_WGSL }), entryPoint: "down" } });
   }
 
   /**
@@ -561,15 +562,15 @@ export class GpuCulling {
   /** The first level's pipeline (and its layout) for multisampled depths, made on first use. */
   private multisampledFirst(): [any, any] {
     if (!this.msFirst) {
-      const layout = this.device.createBindGroupLayout({
+      const layout = bindGroupLayout(this.device, {
         entries: [
           { binding: 0, visibility: COMPUTE, texture: { sampleType: "depth", multisampled: true } },
           { binding: 1, visibility: COMPUTE, storageTexture: { access: "write-only", format: "r32float" } },
         ],
       });
-      const pipeline = this.device.createComputePipeline({
-        layout: this.device.createPipelineLayout({ bindGroupLayouts: [layout] }),
-        compute: { module: this.device.createShaderModule({ code: HIZ_MAX_MS_WGSL }), entryPoint: "first" },
+      const pipeline = pipelineCache(this.device).compute({
+        layout: pipelineLayout(this.device, { bindGroupLayouts: [layout] }),
+        compute: { module: shaderModule(this.device, { code: HIZ_MAX_MS_WGSL }), entryPoint: "first" },
       });
       this.msFirst = [pipeline, layout];
     }
@@ -738,10 +739,10 @@ export class CasterCulling {
   constructor(private readonly device: any) {
     this.uniforms = device.createBuffer({ size: MAX_CASTER_CASCADES * 6 * 16 + 16, usage: UNIFORM | COPY_DST });
     const storage = (binding: number, type: string) => ({ binding, visibility: COMPUTE, buffer: { type } });
-    this.layout = device.createBindGroupLayout({ entries: [{ binding: 0, visibility: COMPUTE, buffer: { type: "uniform" } }, storage(1, "read-only-storage"), storage(2, "storage"), storage(3, "storage")] });
-    this.pipeline = device.createComputePipeline({
-      layout: device.createPipelineLayout({ bindGroupLayouts: [this.layout] }),
-      compute: { module: device.createShaderModule({ code: CASTER_CULL_WGSL }), entryPoint: "main" },
+    this.layout = bindGroupLayout(device, { entries: [{ binding: 0, visibility: COMPUTE, buffer: { type: "uniform" } }, storage(1, "read-only-storage"), storage(2, "storage"), storage(3, "storage")] });
+    this.pipeline = pipelineCache(device).compute({
+      layout: pipelineLayout(device, { bindGroupLayouts: [this.layout] }),
+      compute: { module: shaderModule(device, { code: CASTER_CULL_WGSL }), entryPoint: "main" },
     });
   }
 

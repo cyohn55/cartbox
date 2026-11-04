@@ -22,6 +22,7 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
 import { PRESSURE_ITERATIONS, bakeVolume, burn, effectSources, type BakedVolume, type FluidSource, type VolumeEffect } from "@cartbox/editor";
+import { pipelineCache, shaderModule } from "./pipelineCache.js";
 
 /** The most volumes alive at once. */
 export const MAX_LIVE_VOLUMES = 4;
@@ -364,15 +365,15 @@ export class GpuVolumes {
   private pipelines(): NonNullable<GpuVolumes["pipes"]> {
     if (this.pipes) return this.pipes;
     const device = this.device;
-    const compute = (code: string) => device.createComputePipeline({ layout: "auto", compute: { module: device.createShaderModule({ code }), entryPoint: "main" } });
-    const module = device.createShaderModule({ code: VOLUME_MARCH_WGSL });
+    const compute = (code: string) => pipelineCache(device).compute({ layout: "auto", compute: { module: shaderModule(device, { code }), entryPoint: "main" } });
+    const module = shaderModule(device, { code: VOLUME_MARCH_WGSL });
     this.pipes = {
       forces: compute(SOLVER_FORCES_WGSL),
       advect: compute(SOLVER_ADVECT_WGSL),
       divergence: compute(SOLVER_DIVERGENCE_WGSL),
       jacobi: compute(SOLVER_JACOBI_WGSL),
       project: compute(SOLVER_PROJECT_WGSL),
-      march: device.createRenderPipeline({
+      march: pipelineCache(device).render({
         layout: "auto",
         vertex: { module, entryPoint: "vs" },
         // colour × T + L: the march returns L with T in alpha.

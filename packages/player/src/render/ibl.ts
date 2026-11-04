@@ -28,6 +28,7 @@
 import type { EnvironmentLight } from "@cartbox/editor";
 
 import { MipmapGenerator, mipLevelCount } from "./mipmaps.js";
+import { pipelineCache, shaderModule } from "./pipelineCache.js";
 
 /** The cube's face size, and its levels: 128 down to 4, roughness 0 to 1. */
 export const IBL_FACE = 128;
@@ -281,7 +282,7 @@ export class IblBuilder {
       mipLevelCount: IBL_LEVELS,
       usage: 0x04 | 0x08 | 0x01, // TEXTURE_BINDING | STORAGE_BINDING | COPY_SRC (read back by its tests)
     });
-    this.pipeline ??= device.createComputePipeline({ layout: "auto", compute: { module: device.createShaderModule({ code: PREFILTER_WGSL }), entryPoint: "main" } });
+    this.pipeline ??= pipelineCache(device).compute({ layout: "auto", compute: { module: shaderModule(device, { code: PREFILTER_WGSL }), entryPoint: "main" } });
     const sampler = device.createSampler({ magFilter: "linear", minFilter: "linear", mipmapFilter: "linear", addressModeU: "repeat", addressModeV: "clamp-to-edge" });
     const texelSolidAngle = (4 * Math.PI) / (pano.width * pano.height);
     const encoder = device.createCommandEncoder();

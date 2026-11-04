@@ -21,6 +21,7 @@ import {
 import { createFlatMaterial, type LightingBackend, type LightingRenderer } from "./LightingRenderer.js";
 import type { LightingScene, MaterialBuffer } from "./types.js";
 import type { RenderCanvas } from "./LightingLayer.js";
+import { pipelineCache, shaderModule } from "../render/pipelineCache.js";
 
 const MAX_LIGHTS = 6;
 const HEIGHT_MAX = 8.0;
@@ -300,8 +301,8 @@ export class WebgpuLightingLayer implements LightingRenderer {
       const linear = device.createSampler({ magFilter: "linear", minFilter: "linear" });
 
       const pipe = (code: string, targetFormat: string) => {
-        const module = device.createShaderModule({ code });
-        return device.createRenderPipeline({
+        const module = shaderModule(device, { code });
+        return pipelineCache(device).render({
           layout: "auto",
           vertex: { module, entryPoint: "vs" },
           fragment: { module, entryPoint: "fs", targets: [{ format: targetFormat }] },

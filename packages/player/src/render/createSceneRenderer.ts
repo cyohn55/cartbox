@@ -24,6 +24,7 @@ import {
 } from "./sceneRenderer.js";
 import { WebglSceneRenderer, type GlContextProvider } from "./WebglSceneRenderer.js";
 import { WebgpuSceneRenderer } from "./WebgpuSceneRenderer.js";
+import { warmPipelines } from "./pipelineCache.js";
 
 /** Resolves a shared WebGPU device, or null. Injectable for tests. */
 export type DeviceProvider = () => Promise<any | null>;
@@ -62,6 +63,8 @@ export async function createSceneRenderer(
 
   const device = await deviceProvider();
   let renderer: SceneRenderer | null = null;
+  // Compile last session's pipelines off the frame first (M3), while the page still shows its loading screen.
+  if (device) await warmPipelines(device);
   if (device) renderer = await WebgpuSceneRenderer.create(device, width, height, style, options);
   renderer ??= WebglSceneRenderer.create(width, height, style, glProvider);
   renderer ??= new SoftwareSceneRenderer(style);

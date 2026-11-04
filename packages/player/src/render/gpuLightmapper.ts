@@ -94,6 +94,7 @@ import {
 
 import type { LinearPanorama } from "./ibl.js";
 import { resolvePbr } from "./scenePacking.js";
+import { pipelineCache, shaderModule } from "./pipelineCache.js";
 
 /** The most bounces a bake takes, the most directional lights, and the most point, spot and area lights (F3d-4). */
 export const LIGHTMAP_MAX_BOUNCES = 8;
@@ -766,7 +767,7 @@ export async function bakeLightmapGpu(device: any, layout: LightmapLayout, occlu
     const params = device.createBuffer({ size: PARAMS_BYTES, usage: UNIFORM | COPY_DST });
     const readback = device.createBuffer({ size: acc.byteLength, usage: MAP_READ | COPY_DST });
     try {
-      const pipeline = device.createComputePipeline({ layout: "auto", compute: { module: device.createShaderModule({ code: LIGHTMAP_TRACE_WGSL }), entryPoint: "main" } });
+      const pipeline = pipelineCache(device).compute({ layout: "auto", compute: { module: shaderModule(device, { code: LIGHTMAP_TRACE_WGSL }), entryPoint: "main" } });
       const group = device.createBindGroup({
         layout: pipeline.getBindGroupLayout(0),
         entries: [...buffers, accum, skyBuffer].map((buffer, binding) => ({ binding, resource: { buffer } })).concat([{ binding: 6, resource: { buffer: params } }, { binding: 7, resource: { buffer: lightBuffer } }]),
@@ -971,7 +972,7 @@ export async function denoiseLightmap(device: any, atlas: LightmapAtlas, texel: 
   const params = device.createBuffer({ size: 16, usage: UNIFORM | COPY_DST });
   const readback = device.createBuffer({ size: values.byteLength, usage: MAP_READ | COPY_DST });
   try {
-    const pipeline = device.createComputePipeline({ layout: "auto", compute: { module: device.createShaderModule({ code: LIGHTMAP_DENOISE_WGSL }), entryPoint: "main" } });
+    const pipeline = pipelineCache(device).compute({ layout: "auto", compute: { module: shaderModule(device, { code: LIGHTMAP_DENOISE_WGSL }), entryPoint: "main" } });
     const groups = [0, 1].map((k) =>
       device.createBindGroup({
         layout: pipeline.getBindGroupLayout(0),
@@ -1086,7 +1087,7 @@ export async function bakeProbeVolumeGpu(
   const params = device.createBuffer({ size: PARAMS_BYTES, usage: UNIFORM | COPY_DST });
   const readback = device.createBuffer({ size: acc.byteLength, usage: MAP_READ | COPY_DST });
   try {
-    const pipeline = device.createComputePipeline({ layout: "auto", compute: { module: device.createShaderModule({ code: LIGHTMAP_TRACE_WGSL }), entryPoint: "probeMain" } });
+    const pipeline = pipelineCache(device).compute({ layout: "auto", compute: { module: shaderModule(device, { code: LIGHTMAP_TRACE_WGSL }), entryPoint: "probeMain" } });
     const group = device.createBindGroup({
       layout: pipeline.getBindGroupLayout(0),
       entries: [...buffers, accum, skyBuffer].map((buffer, binding) => ({ binding, resource: { buffer } })).concat([{ binding: 6, resource: { buffer: params } }, { binding: 7, resource: { buffer: lightBuffer } }]),

@@ -29,6 +29,7 @@
  */
 
 import { composeModelMatrix, type DecodedTexture, type Mat4, type MeshAsset, type MeshMaterial, type MeshSceneInstance, type Terrain } from "@cartbox/editor";
+import { pipelineCache, shaderModule } from "./pipelineCache.js";
 
 /* eslint-disable @typescript-eslint/no-explicit-any -- WebGPU handles aren't typed in this build */
 
@@ -596,7 +597,7 @@ export class GpuTerrain {
       ...(this.relief > 0 ? { parallaxDepth: this.relief } : {}),
     } as MeshMaterial;
     this.mesh = terrainPatchMesh(t.name, material);
-    this.pipeline = device.createComputePipeline({ layout: "auto", compute: { module: device.createShaderModule({ code: TERRAIN_BAKE_WGSL }), entryPoint: "main" } });
+    this.pipeline = pipelineCache(device).compute({ layout: "auto", compute: { module: shaderModule(device, { code: TERRAIN_BAKE_WGSL }), entryPoint: "main" } });
     this.baked = new Array(this.plan.eyePages + 1).fill(null);
   }
 

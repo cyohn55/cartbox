@@ -2621,6 +2621,14 @@ interface RenderStats {
         readonly maps: number;
         readonly limited: number;
     };
+    /** The device's pipeline cache (AAA_PRODUCTION_ROADMAP.md M3): compiles, reuse, and late compiles (likely hitches). */
+    readonly pipelines?: {
+        readonly compiled: number;
+        readonly compiledAsync: number;
+        readonly reused: number;
+        readonly late: number;
+        readonly pending: number;
+    };
 }
 interface SectionStats {
     /** Average milliseconds per frame over the window. */
@@ -6508,6 +6516,17 @@ declare class WebgpuSceneRenderer implements SceneRenderer {
     captureReference(instances: readonly MeshSceneInstance[], draw: GpuSceneDraw, options: CaptureOptions): Promise<ReferenceCapture>;
     settle(draw: SceneDraw): FrameState;
     /** Encode and submit one frame, and start a readback if a buffer is free (or, with `readback` false, leave it in the colour texture). */
+    /** Frames submitted, and the late compiles last saved (M3; pipelineCache.ts). */
+    private framesSubmitted;
+    private savedLate;
+    private readonly manifestStore;
+    /**
+     * The pipeline cache's bookkeeping, as a frame starts (M3): once a frame has
+     * been drawn, compiles count as late, and the manifest of what this renderer
+     * asked for is saved for the next load to warm, then saved again whenever a
+     * late compile adds to it.
+     */
+    private pipelineBookkeeping;
     private submit;
     /** Clear the colour texture to transparent black (a GPU-kept frame with nothing in it). */
     private clearColour;
@@ -10738,6 +10757,154 @@ declare const DIRECT_CORE_URL = "/engine/modern-core/modern-core.js";
 declare function directCoreBeside(engineUrl: string | undefined): string;
 
 /**
+ * One pipeline cache per GPU device (AAA_PRODUCTION_ROADMAP.md M3, completing
+ * DEMO_QUALITY_ROADMAP.md R5).
+ *
+ * Every render and compute pipeline the player makes goes through here:
+ *
+ * - **Memoized by descriptor.** Two requests for the same pipeline (the same
+ *   shader modules and layout objects, the same entry points, formats, blend,
+ *   depth and constants) get the same pipeline, so a renderer made again (a
+ *   resize, a quality change, the editor's viewport and a play view on one
+ *   device) compiles nothing it compiled before.
+ * - **Async where it can be.** `renderAsync` / `computeAsync` compile with the
+ *   device's `create*PipelineAsync`, off the frame, and put the result where a
+ *   later synchronous request finds it. A warm-up uses them behind the loading
+ *   screen.
+ * - **Counted.** Synchronous compiles after {@link PipelineCache.markReady}
+ *   (the first frame is up) are `late`: each is a likely hitch, and the
+ *   profiler shows the count.
+ *
+ * The key treats the two places a descriptor holds GPU objects (`module` and a
+ * non-"auto" `layout`) by identity, and everything else by value. Labels are
+ * left out, so a pipeline is shared whatever it was called. Shader modules go
+ * through {@link shaderModule}, one per WGSL source per device, so the same
+ * pipeline asked for twice has the same modules and so the same key.
+ *
+ * **A recorded warm-up** (as engines keep a recorded pipeline-state cache):
+ * each pipeline with an "auto" layout whose modules came from
+ * {@link shaderModule} is also a *recipe*, its descriptor with each module
+ * written as its WGSL. The recipes a session's renderer asked for are saved
+ * ({@link PipelineManifestStore}); the next load compiles them asynchronously
+ * before its first frame ({@link warmPipelines}), so a pass that was first
+ * switched on mid-game last time is already compiled this time. Recipes that
+ * no renderer asks for again drop out at the next save.
+ */
+interface PipelineStats {
+    /** Pipelines compiled synchronously (create*Pipeline). */
+    readonly compiled: number;
+    /** Pipelines compiled asynchronously (create*PipelineAsync). */
+    readonly compiledAsync: number;
+    /** Requests answered from the cache. */
+    readonly reused: number;
+    /** Synchronous compiles after markReady: the frame waited for each. */
+    readonly late: number;
+    /** Asynchronous compiles still running. */
+    readonly pending: number;
+}
+type Kind = "render" | "compute";
+/** The cache's key for a descriptor: GPU objects by identity, the rest by value, labels left out. */
+declare function pipelineKey(kind: Kind, descriptor: object): string;
+/**
+ * A shader module for `descriptor` on `device`: one per WGSL source (labels
+ * aside), remembered with its source so pipelines using it can be recorded.
+ * A descriptor with more than code and a label is made as asked, uncached.
+ */
+declare function shaderModule(device: any, descriptor: {
+    readonly code: string;
+    readonly label?: string;
+    readonly [key: string]: unknown;
+}): any;
+/**
+ * A pipeline's recipe: `kind:` then its descriptor as JSON, each module written
+ * as `{"$wgsl": source}` and an explicit layout as its bind group layouts'
+ * descriptors; null when it can't be written down (a module or layout not
+ * made through these caches).
+ */
+declare function pipelineRecipe(kind: Kind, descriptor: any): string | null;
+/** A recipe as a descriptor on `device` again (its modules through {@link shaderModule}), or null for a malformed one. */
+declare function recipeDescriptor(device: any, recipe: string): {
+    kind: Kind;
+    descriptor: any;
+} | null;
+/** Recipes a manifest keeps at most (the most recently used). */
+declare const MANIFEST_MAX = 512;
+declare class PipelineCache {
+    private readonly device;
+    private readonly made;
+    /** Recipes this session's renderers asked for (synchronously), by key, in first-asked order. */
+    private readonly used;
+    private readonly compiling;
+    private ready;
+    private counts;
+    constructor(device: any);
+    /** A render pipeline: the cached one, or compiled now. */
+    render(descriptor: object): any;
+    /** A compute pipeline: the cached one, or compiled now. */
+    compute(descriptor: object): any;
+    /** A render pipeline compiled off the frame where the device can (else now), cached for later requests. */
+    renderAsync(descriptor: object): Promise<any>;
+    /** A compute pipeline compiled off the frame where the device can, cached for later requests. */
+    computeAsync(descriptor: object): Promise<any>;
+    /** From now on a synchronous compile counts as late (call when the first frame is shown). */
+    markReady(): void;
+    /** Whether {@link markReady} has been called. */
+    get isReady(): boolean;
+    /** The recipes this session's renderers asked for: what the next load should warm. */
+    manifest(): string[];
+    /**
+     * Compile `recipes` off the frame (a recorded warm-up), each into the cache.
+     * Resolves with how many compiled; a recipe that no longer compiles (an older
+     * build's shader) is skipped.
+     */
+    warm(recipes: readonly string[]): Promise<{
+        compiled: number;
+        failed: number;
+    }>;
+    /** Resolves when every asynchronous compile started so far has finished (failures included). */
+    settled(): Promise<void>;
+    stats(): PipelineStats;
+    private sync;
+    private async;
+}
+/** Where a manifest is kept between loads: a page's localStorage, or a stand-in. */
+interface ManifestStorage {
+    getItem(key: string): string | null;
+    setItem(key: string, value: string): void;
+}
+declare const MANIFEST_KEY = "cartbox.pipelineManifest.v1";
+/** Reads and writes the recorded manifest, never throwing (private mode, a full quota, no storage). */
+declare class PipelineManifestStore {
+    private readonly storage;
+    private readonly key;
+    constructor(storage?: ManifestStorage | null, key?: string);
+    /** The recorded recipes, or none (a missing, unreadable or older-format manifest). */
+    load(): string[];
+    /**
+     * Keep `recipes`, each WGSL source once (pipelines share their scene shader,
+     * so whole recipes would repeat it many times over a page's storage quota).
+     */
+    save(recipes: readonly string[]): void;
+}
+/**
+ * The warm-up a load runs before its renderer's first frame: the recorded
+ * manifest compiled asynchronously on `device`, waited for at most `budgetMs`
+ * (what isn't done by then keeps compiling, and a frame that needs it first
+ * compiles it then). Resolves with what was started and finished.
+ */
+declare function warmPipelines(device: any, { store, budgetMs }?: {
+    store?: PipelineManifestStore;
+    budgetMs?: number;
+}): Promise<{
+    recipes: number;
+    compiled: number;
+    failed: number;
+    timedOut: boolean;
+}>;
+/** The pipeline cache of `device` (one per device, made on first use). */
+declare function pipelineCache(device: any): PipelineCache;
+
+/**
  * @cartbox/player — public entry point.
  *
  * Usage:
@@ -10765,4 +10932,4 @@ declare function directCoreBeside(engineUrl: string | undefined): string;
  */
 declare function mount(container: HTMLElement, options: PlayerOptions): PlayerHandle;
 
-export { AIM_ASSISTS, AgentCrowd, type AimAssist, type AnimClip, type AnimMode, type AnimPlacement, type AnimSpec, type AnimState, type AnimTarget, type AnimTrack, AnimatedForegroundSurface, AnimationSession, type AtmosphereParams, BLOOM_KNEE, type BakeLight, BloomPyramid, BroadcastChannelTransport, type BuiltLightingRenderer, CAMERA_BASE, CAMERA_SCALE, CARTBOX_SDK_LUA, CELL_WORLD, CMD_RING_BYTES, CMD_RING_MAX, COLOR_CHECKER, COMPOSE_UNIFORM_FLOATS, CappedSceneRenderer, type CaptureOptions, type CapturedFrame, type CartSpriteSource, CartridgeLoadError, type CastHit, type CastShape, type ClipSample, type ClipTableEntry, type CollisionField, ConsoleButton, type ConsoleInstance, type ConsoleModel, type ControlScheme, type ControlSettings, type ControlTarget, DEFAULT_AMBIENT, DEFAULT_ATMOSPHERE, DEFAULT_CONTROL_SETTINGS, DEFAULT_KEY_BINDINGS, DEFAULT_LIGHT, DEFAULT_MODEL_ID, DEFAULT_MOUSE_LOOK, DEFAULT_PAD_BINDINGS, DEFAULT_STICK_DEAD_ZONES, DEFAULT_TEXEL_DENSITY, DEFAULT_TRIGGER_THRESHOLD, DIRECT_CORE_URL, DIRECT_MAX_AGENTS, DIRECT_MAX_BODIES, DIRECT_MAX_JOINTS, DIRECT_MAX_PROJECTILES, DebugCommand, type DebugStep, type DeviceHints, type DeviceProvider, type DirectConsole, DirectTransport, type DirectTransportOptions, type DriftStats, EVENT_CAPACITY, type Ease, EngineLoadError, type ErrorFrame, FLARE_GHOSTS, FLARE_GHOST_GAIN, FLARE_SPIKE_POWER, FaceDriver, type FlagsField, type FlareGhost, type FlareParams, type FrameState, GREY_CARD, GYRO_AIMS, GamepadInput, type GeneratedTrack, type GlContextProvider, GpuCanvasSurface, type GpuLightBakeOptions, type GpuLightmapBake, GpuPresenter, type GpuSceneDraw, type GradingLut, type GyroAim, HEIGHT_WORLD, IMPORTED_LOOK, INPUT_BLOCK_BYTES, INPUT_MAGIC, INPUT_SETTINGS, INSTANCE_FLOATS, type InnerSurfaceFactory, type InputChange, type InspectedObject, type InstanceTransform, type Keyframe, LIGHTMAP_MAX_BOUNCES, LIGHTMAP_MAX_LIGHTS, LIGHTMAP_MAX_LOCAL_LIGHTS, LIGHTS_BASE, LIGHTS_CAPACITY, LIGHT_FLOATS, LIGHT_STRIDE, LOOK_DEV_RIGS, LOOP_SLOTS, LUT_LOOKS, LUT_SIZE, type LabCart, type LabProbe, type LayerChannel, type Light, type LightingBackend, type LightingFrameContext, LightingLayer, type LightingOptions, type LightingRenderer, type LightingScene, type LinearPanorama, type LinkConditions, LitCanvasSurface, type LookDevCheck, type LookDevMaps, type LookDevOptions, type LookDevRig, type LookDevStage, LookDevView, type LookDevViewOptions, type LookDevice, type LookProfile, MAILBOX_TYPE_ACHIEVEMENT, MAILBOX_TYPE_PROGRESS, MAILBOX_TYPE_SCORE, MAILBOX_WORDS, MAX_CAPTURE_SIDE, MAX_EMITTERS, MAX_LUT_SIZE, MAX_PARTICLES_PER_EMITTER, MAX_PREFAB_POOL, MAX_PREFAB_POOL_DIRECT, MAX_PYRAMID_LEVELS, MAX_VOICES, MESH_CAM_ANGLE_SCALE, MESH_CAM_BASE, MESH_CAM_DIST_SCALE, MESH_CAM_STRIDE, MESH_POSE_BASE, MESH_POSE_CAPACITY, MESH_POSE_HIDDEN, MESH_POSE_STRIDE, MIN_LUT_SIZE, MIN_PYRAMID_DIMENSION, MODELS, MOUSE_FULL_LEAN_PX, type MailboxCamera, type MailboxEvent, type MailboxEventKind, type MailboxMeshCamera, type MailboxMeshPose, type MailboxRead, type MaterialBuffer, MemoryNetHub, type MeshInstance, MeshOverlaySurface, type MeshScene, type SceneCamera$1 as MeshSceneCamera, type ModelId, NET_MODE_CLIENT, NET_MODE_HOST, NET_MODE_OFFLINE, NET_SLOTS, NET_WORDS, NORMAL_DIRECTION_COUNT, NORMAL_VECTORS, type NetEvent, type NetInbox, type NetLabOptions, type NetLabReport, type NetMessage, type NetOutbox, type NetPeer, type NetRoomStatus, NetSession, type NetSignal, type NetState, type NetTransport, type ObjectLook, PAD_BUTTONS, PARTICLE_KINDS, PHYSICS_DT, PHYS_BLOCK_BYTES, PHYS_MAGIC, PHYS_MAX_BODIES, PHYS_Q_AGENT, PHYS_Q_ANIM, PHYS_Q_ANIM_EVENTS, PHYS_Q_BODY, PHYS_Q_CAST, PHYS_Q_CONTACTS, PHYS_Q_FIRE, PHYS_Q_FIRE_OPTIONS, PHYS_Q_HASH, PHYS_Q_IMPACTS, PHYS_Q_INSIDE, PHYS_Q_JOINT, PHYS_Q_PROJECTILE, PHYS_Q_RAY, PHYS_Q_STOP, POINTER_AT, POINTER_MAGIC, POST_FX_EFFECTS, PROFILE_SECTIONS, PROFILE_WINDOW, PROJECTILE_GRAVITY, type PackableLight, type PadButton, type PadSnapshot, type Particle, type ParticleEmitter, type ParticleKind, ParticleOverlaySurface, type ParticleSpec, PathTracer, type PauseInfo, type PbrMaterial, type PhysicsBackend, type PhysicsBodyDesc, type PhysicsJointDesc, type Quat as PhysicsQuat, PhysicsSession, type PhysicsShape, type Vec3$3 as PhysicsVec3, type PlacementChannel, type PlayerHandle, type PlayerOptions, PointerInput, type PointerState, type PostFxColorDef, type PostFxEffectDef, type PostFxEffectId, type PostFxParamDef, PostFxPass, type PostFxSettings, type PostFxSource, PostFxSurface, type PostFxUniforms, type PresentBase, type PresentFrame, type PresentSky, type PresentStats, type ProfileSection, type ProfileSnapshot, Profiler, type ProjectileImpact, QUALITY_LEVELS, QUALITY_PRESETS, type QualityChoice, QualityGovernor, type QualityLevel, type QualitySettings, type QueryHandler, RAM_LAYOUTS, REFERENCE_BOUNCES, REPLAY_VERSION, RESPONSE_CURVES, type RamLayout, type ReferenceCapture, type ReferenceDraw, type ReferenceScene, type ReferenceSettings, type RegionImage, type RegisteredAchievement, type RenderCanvas, type RenderCaps, type RenderStats, type Replay, ReplayError, ReplayRecorder, ReplaySource, type ResolvedMapping, type ResolvedPbr, type ResolvedPlacement, type ResponseCurve, type Rgb, type RtcDataChannelLike, type RtcPeerConnectionFactory, type RtcPeerConnectionLike, type RumbleEffect, RuntimeChannel, SAVE_MAGIC, SKY_UNIFORM_FLOATS, SOFTWARE_RASTER_CAPS, START_KEYS, STICK_LAYOUTS, type ScaleMode, SceneBackdropSurface, type SceneBounds, type SceneCamera, type SceneDraw, type SceneLayer, type SceneMemory, type SceneRenderer, type SceneSpec, type SceneVista, type ScreenSun, type SectionStats, type SequenceOptions, SimulatedNetHub, SoftwareSceneRenderer, type SoundContext, SoundSystem, type Speaker, type SpriteRegion, type SpriteRegionSource, type StickDeadZones, type StickLayout, type SunShadow, SwitchableTransport, TANGENT_VERTEX_FLOATS, TILT_SHIFT_FEATHER, TINT_PALETTE, TOUCH_CONTROL_IDS, TOUCH_LOOK_MODES, type TextureLookup, type TouchControlId, type TouchLayout, type TouchLookMode, type TouchPlacement, type TraceLine, type TrackMode, UNIFORM_BYTES_USED, UNIFORM_FLOATS, UNIFORM_STRIDE, VERTEX_FLOATS, VIEW_MODES, type Vec3$2 as Vec3, type VerificationResult, type ViewMode, WEBGL_INSTANCES_PER_DRAW, WEBGL_MAX_LIGHTS, WebglSceneRenderer, WebgpuLightingLayer, WebgpuSceneRenderer, type WorldBillboard, type WorldBillboardPose, type WorldCamera, type WorldCameraSpec, type WorldLight, WorldOverlaySurface, type WorldProp, type WorldScene, type WorldTileCell, acesFilmic, acesFilmicChannel, actionsSdkLua, aimAssistLevel, alignBytesPerRow, animClipsSdkLua, animatedObjects, anyPostFxEnabled, appendLuaCode, applyActionToggles, applyLookSettings, applyLut, applyQualityToPostFx, applyRenderCaps, armDebugBlock, armSaveBlock, askMotionPermission, bakeLightmapGpu, bakeLights, bakeProbeVolumeGpu, bakeSurfaces, bodyCapacity, breakableLine, browserDeviceHints, browserRtc, browserSpeaker, buildBillboardInstance, buildClipTable, buildOrbitCamera, buildShadowInstance, buildTerrainInstances, buildWorldCamera, cameraAt, capTextures, capTriangles, capsConstrainScene, captureReference, cellAt, checkLookDev, clipFrameIndex, codeChunks, codeLineOffset, collisionSdkLua, commandRingAddress, commandRingBytes, commandRingMax, commandsPerTick, compileAnimator, componentsSdkLua, composeParallax, composeWorldMatrix, compositeOverBackdrop, createCartSpriteSource, createConsole, createDirectConsole, createFlatMaterial, createLightingLayer, createSceneRenderer, createTextureBudgetCache, deadZoned, debugBlockAddress, debugPostlude, debugSdkLua, decodeCamera, decodeLights, decodeLut, decodeMailbox, decodeMeshCamera, decodeMeshPoses, decodeNetMessage, decodeWorldLights, defaultPostFxSettings, detectQuality, deterministicBackend, directCoreBeside, directCoreModel, dragLean, drift, effectiveBreakpoints, emitterPreset, encodeLut, encodeNetMessage, environmentPanorama, environmentSh, errorStack, estimateSceneBytes, estimateSceneMemory, evaluate, extractScore, extractUnlocks, fillSky, fitShape, fitTextureToBudget, flagsSdkLua, flicker, frameDurationMs, framePixels, framebufferBytes, getModel, getWebgpuDevice, gyroLean, hasCommandRing, hashCart, hashEventId, heat, hexToRgb01, identityLut, injectSdk, inputBlockAddress, instrumentLua, interleaveVertices, interleaveVerticesWithTangents, interpolateNormal, isDiagnosticView, isMobileAgent, jointFrames, layoutSticks, lensFlareAt, loadEngineModule, lookAccelerationBoost, lookDevDraw, lookDevStage, lookGains, lookLut, lookProfileFor, lutStrip, makeShadowTexture, mount, mouseLean, movingBodies, nearestDirection, netSendInterval, normalBasis3x3, normalVector, orbitPitchAboveTerrain, packAtmosphereSkyUniforms, packComposeUniforms, packLights, packMeasureUniforms, packReferenceScene, packShaftUniforms, packSkyUniforms, paramKey, parseAnim, parseCollisionField, parseControlSettings, parseCubeLut, parseFlagsField, parseMeshScene, parseParticles, parsePauseInfo, parsePostFxSettings, parseReplay, parseScene, parseTouchLayout, parseWorldScene, physicsBlockAddress, physicsSdkLua, physicsSlots, physicsStateHash, placeWithin, playLanguage, prehazeLayers, prependLuaCode, pulse, pyramidLevelCount, pyramidLevelSize, randomSeed, rasterStyleFor, readCartCode, readPad, readPause, readSidecarActions, readSidecarUi, readViewMode, reflectionFade, reflectionSampleY, remapErrorLines, renderSceneBackdrop, resolveButton, resolveLight, resolveMapping, resolvePbr, resolveQuality, resolveSceneLayers, resolveSupersample, resolveUnlockedAchievements, responseCurve, rewriteLuaCode, rumbleEffect, runNetLab, runReplayEvents, runsOnDirectCore, runtimeSdkLua, sampleClipFrame, sampleNormalBilinear, sampleScalarBilinear, sampleTrack, saveBlockAddress, saveBlockBytes, saveCapacity, saveSdkLua, sceneHasAnimation, sceneHasPhysics, sceneNeedsRuntime, sceneObjectsSdkLua, sceneSkyEnvironment, seedCartridge, sendDebugCommand, serializeReplay, shIrradiance, shade, shaftGrid, shapeStick, simulateEmitter, smoothFrontEdges, softKneePrefilter, splitWorldMatrix, standardizePad, stepLookAcceleration, streamGroups, stringsSdkLua, sway, takeNetOutbox, takePhysicsCommands, takeRingCommands, takeSave, tiltShiftBlur, toConsolePixel, toggleMask, tokenizeLua, turnEnvironment, uiSdkLua, uniformsFromSettings, unpadRows, validSave, verifyReplayScore, viewDirection, viewModeCode, webgpuCanHonour, worldCenter, writeBreakpoints, writeInputBlock, writeInputSettings, writeInstanceTransform, writeInstanceUniform, writeNetInbox, writePhysicsState, writePointer, writeWatches };
+export { AIM_ASSISTS, AgentCrowd, type AimAssist, type AnimClip, type AnimMode, type AnimPlacement, type AnimSpec, type AnimState, type AnimTarget, type AnimTrack, AnimatedForegroundSurface, AnimationSession, type AtmosphereParams, BLOOM_KNEE, type BakeLight, BloomPyramid, BroadcastChannelTransport, type BuiltLightingRenderer, CAMERA_BASE, CAMERA_SCALE, CARTBOX_SDK_LUA, CELL_WORLD, CMD_RING_BYTES, CMD_RING_MAX, COLOR_CHECKER, COMPOSE_UNIFORM_FLOATS, CappedSceneRenderer, type CaptureOptions, type CapturedFrame, type CartSpriteSource, CartridgeLoadError, type CastHit, type CastShape, type ClipSample, type ClipTableEntry, type CollisionField, ConsoleButton, type ConsoleInstance, type ConsoleModel, type ControlScheme, type ControlSettings, type ControlTarget, DEFAULT_AMBIENT, DEFAULT_ATMOSPHERE, DEFAULT_CONTROL_SETTINGS, DEFAULT_KEY_BINDINGS, DEFAULT_LIGHT, DEFAULT_MODEL_ID, DEFAULT_MOUSE_LOOK, DEFAULT_PAD_BINDINGS, DEFAULT_STICK_DEAD_ZONES, DEFAULT_TEXEL_DENSITY, DEFAULT_TRIGGER_THRESHOLD, DIRECT_CORE_URL, DIRECT_MAX_AGENTS, DIRECT_MAX_BODIES, DIRECT_MAX_JOINTS, DIRECT_MAX_PROJECTILES, DebugCommand, type DebugStep, type DeviceHints, type DeviceProvider, type DirectConsole, DirectTransport, type DirectTransportOptions, type DriftStats, EVENT_CAPACITY, type Ease, EngineLoadError, type ErrorFrame, FLARE_GHOSTS, FLARE_GHOST_GAIN, FLARE_SPIKE_POWER, FaceDriver, type FlagsField, type FlareGhost, type FlareParams, type FrameState, GREY_CARD, GYRO_AIMS, GamepadInput, type GeneratedTrack, type GlContextProvider, GpuCanvasSurface, type GpuLightBakeOptions, type GpuLightmapBake, GpuPresenter, type GpuSceneDraw, type GradingLut, type GyroAim, HEIGHT_WORLD, IMPORTED_LOOK, INPUT_BLOCK_BYTES, INPUT_MAGIC, INPUT_SETTINGS, INSTANCE_FLOATS, type InnerSurfaceFactory, type InputChange, type InspectedObject, type InstanceTransform, type Keyframe, LIGHTMAP_MAX_BOUNCES, LIGHTMAP_MAX_LIGHTS, LIGHTMAP_MAX_LOCAL_LIGHTS, LIGHTS_BASE, LIGHTS_CAPACITY, LIGHT_FLOATS, LIGHT_STRIDE, LOOK_DEV_RIGS, LOOP_SLOTS, LUT_LOOKS, LUT_SIZE, type LabCart, type LabProbe, type LayerChannel, type Light, type LightingBackend, type LightingFrameContext, LightingLayer, type LightingOptions, type LightingRenderer, type LightingScene, type LinearPanorama, type LinkConditions, LitCanvasSurface, type LookDevCheck, type LookDevMaps, type LookDevOptions, type LookDevRig, type LookDevStage, LookDevView, type LookDevViewOptions, type LookDevice, type LookProfile, MAILBOX_TYPE_ACHIEVEMENT, MAILBOX_TYPE_PROGRESS, MAILBOX_TYPE_SCORE, MAILBOX_WORDS, MANIFEST_KEY, MANIFEST_MAX, MAX_CAPTURE_SIDE, MAX_EMITTERS, MAX_LUT_SIZE, MAX_PARTICLES_PER_EMITTER, MAX_PREFAB_POOL, MAX_PREFAB_POOL_DIRECT, MAX_PYRAMID_LEVELS, MAX_VOICES, MESH_CAM_ANGLE_SCALE, MESH_CAM_BASE, MESH_CAM_DIST_SCALE, MESH_CAM_STRIDE, MESH_POSE_BASE, MESH_POSE_CAPACITY, MESH_POSE_HIDDEN, MESH_POSE_STRIDE, MIN_LUT_SIZE, MIN_PYRAMID_DIMENSION, MODELS, MOUSE_FULL_LEAN_PX, type MailboxCamera, type MailboxEvent, type MailboxEventKind, type MailboxMeshCamera, type MailboxMeshPose, type MailboxRead, type ManifestStorage, type MaterialBuffer, MemoryNetHub, type MeshInstance, MeshOverlaySurface, type MeshScene, type SceneCamera$1 as MeshSceneCamera, type ModelId, NET_MODE_CLIENT, NET_MODE_HOST, NET_MODE_OFFLINE, NET_SLOTS, NET_WORDS, NORMAL_DIRECTION_COUNT, NORMAL_VECTORS, type NetEvent, type NetInbox, type NetLabOptions, type NetLabReport, type NetMessage, type NetOutbox, type NetPeer, type NetRoomStatus, NetSession, type NetSignal, type NetState, type NetTransport, type ObjectLook, PAD_BUTTONS, PARTICLE_KINDS, PHYSICS_DT, PHYS_BLOCK_BYTES, PHYS_MAGIC, PHYS_MAX_BODIES, PHYS_Q_AGENT, PHYS_Q_ANIM, PHYS_Q_ANIM_EVENTS, PHYS_Q_BODY, PHYS_Q_CAST, PHYS_Q_CONTACTS, PHYS_Q_FIRE, PHYS_Q_FIRE_OPTIONS, PHYS_Q_HASH, PHYS_Q_IMPACTS, PHYS_Q_INSIDE, PHYS_Q_JOINT, PHYS_Q_PROJECTILE, PHYS_Q_RAY, PHYS_Q_STOP, POINTER_AT, POINTER_MAGIC, POST_FX_EFFECTS, PROFILE_SECTIONS, PROFILE_WINDOW, PROJECTILE_GRAVITY, type PackableLight, type PadButton, type PadSnapshot, type Particle, type ParticleEmitter, type ParticleKind, ParticleOverlaySurface, type ParticleSpec, PathTracer, type PauseInfo, type PbrMaterial, type PhysicsBackend, type PhysicsBodyDesc, type PhysicsJointDesc, type Quat as PhysicsQuat, PhysicsSession, type PhysicsShape, type Vec3$3 as PhysicsVec3, PipelineCache, PipelineManifestStore, type PipelineStats, type PlacementChannel, type PlayerHandle, type PlayerOptions, PointerInput, type PointerState, type PostFxColorDef, type PostFxEffectDef, type PostFxEffectId, type PostFxParamDef, PostFxPass, type PostFxSettings, type PostFxSource, PostFxSurface, type PostFxUniforms, type PresentBase, type PresentFrame, type PresentSky, type PresentStats, type ProfileSection, type ProfileSnapshot, Profiler, type ProjectileImpact, QUALITY_LEVELS, QUALITY_PRESETS, type QualityChoice, QualityGovernor, type QualityLevel, type QualitySettings, type QueryHandler, RAM_LAYOUTS, REFERENCE_BOUNCES, REPLAY_VERSION, RESPONSE_CURVES, type RamLayout, type ReferenceCapture, type ReferenceDraw, type ReferenceScene, type ReferenceSettings, type RegionImage, type RegisteredAchievement, type RenderCanvas, type RenderCaps, type RenderStats, type Replay, ReplayError, ReplayRecorder, ReplaySource, type ResolvedMapping, type ResolvedPbr, type ResolvedPlacement, type ResponseCurve, type Rgb, type RtcDataChannelLike, type RtcPeerConnectionFactory, type RtcPeerConnectionLike, type RumbleEffect, RuntimeChannel, SAVE_MAGIC, SKY_UNIFORM_FLOATS, SOFTWARE_RASTER_CAPS, START_KEYS, STICK_LAYOUTS, type ScaleMode, SceneBackdropSurface, type SceneBounds, type SceneCamera, type SceneDraw, type SceneLayer, type SceneMemory, type SceneRenderer, type SceneSpec, type SceneVista, type ScreenSun, type SectionStats, type SequenceOptions, SimulatedNetHub, SoftwareSceneRenderer, type SoundContext, SoundSystem, type Speaker, type SpriteRegion, type SpriteRegionSource, type StickDeadZones, type StickLayout, type SunShadow, SwitchableTransport, TANGENT_VERTEX_FLOATS, TILT_SHIFT_FEATHER, TINT_PALETTE, TOUCH_CONTROL_IDS, TOUCH_LOOK_MODES, type TextureLookup, type TouchControlId, type TouchLayout, type TouchLookMode, type TouchPlacement, type TraceLine, type TrackMode, UNIFORM_BYTES_USED, UNIFORM_FLOATS, UNIFORM_STRIDE, VERTEX_FLOATS, VIEW_MODES, type Vec3$2 as Vec3, type VerificationResult, type ViewMode, WEBGL_INSTANCES_PER_DRAW, WEBGL_MAX_LIGHTS, WebglSceneRenderer, WebgpuLightingLayer, WebgpuSceneRenderer, type WorldBillboard, type WorldBillboardPose, type WorldCamera, type WorldCameraSpec, type WorldLight, WorldOverlaySurface, type WorldProp, type WorldScene, type WorldTileCell, acesFilmic, acesFilmicChannel, actionsSdkLua, aimAssistLevel, alignBytesPerRow, animClipsSdkLua, animatedObjects, anyPostFxEnabled, appendLuaCode, applyActionToggles, applyLookSettings, applyLut, applyQualityToPostFx, applyRenderCaps, armDebugBlock, armSaveBlock, askMotionPermission, bakeLightmapGpu, bakeLights, bakeProbeVolumeGpu, bakeSurfaces, bodyCapacity, breakableLine, browserDeviceHints, browserRtc, browserSpeaker, buildBillboardInstance, buildClipTable, buildOrbitCamera, buildShadowInstance, buildTerrainInstances, buildWorldCamera, cameraAt, capTextures, capTriangles, capsConstrainScene, captureReference, cellAt, checkLookDev, clipFrameIndex, codeChunks, codeLineOffset, collisionSdkLua, commandRingAddress, commandRingBytes, commandRingMax, commandsPerTick, compileAnimator, componentsSdkLua, composeParallax, composeWorldMatrix, compositeOverBackdrop, createCartSpriteSource, createConsole, createDirectConsole, createFlatMaterial, createLightingLayer, createSceneRenderer, createTextureBudgetCache, deadZoned, debugBlockAddress, debugPostlude, debugSdkLua, decodeCamera, decodeLights, decodeLut, decodeMailbox, decodeMeshCamera, decodeMeshPoses, decodeNetMessage, decodeWorldLights, defaultPostFxSettings, detectQuality, deterministicBackend, directCoreBeside, directCoreModel, dragLean, drift, effectiveBreakpoints, emitterPreset, encodeLut, encodeNetMessage, environmentPanorama, environmentSh, errorStack, estimateSceneBytes, estimateSceneMemory, evaluate, extractScore, extractUnlocks, fillSky, fitShape, fitTextureToBudget, flagsSdkLua, flicker, frameDurationMs, framePixels, framebufferBytes, getModel, getWebgpuDevice, gyroLean, hasCommandRing, hashCart, hashEventId, heat, hexToRgb01, identityLut, injectSdk, inputBlockAddress, instrumentLua, interleaveVertices, interleaveVerticesWithTangents, interpolateNormal, isDiagnosticView, isMobileAgent, jointFrames, layoutSticks, lensFlareAt, loadEngineModule, lookAccelerationBoost, lookDevDraw, lookDevStage, lookGains, lookLut, lookProfileFor, lutStrip, makeShadowTexture, mount, mouseLean, movingBodies, nearestDirection, netSendInterval, normalBasis3x3, normalVector, orbitPitchAboveTerrain, packAtmosphereSkyUniforms, packComposeUniforms, packLights, packMeasureUniforms, packReferenceScene, packShaftUniforms, packSkyUniforms, paramKey, parseAnim, parseCollisionField, parseControlSettings, parseCubeLut, parseFlagsField, parseMeshScene, parseParticles, parsePauseInfo, parsePostFxSettings, parseReplay, parseScene, parseTouchLayout, parseWorldScene, physicsBlockAddress, physicsSdkLua, physicsSlots, physicsStateHash, pipelineCache, pipelineKey, pipelineRecipe, placeWithin, playLanguage, prehazeLayers, prependLuaCode, pulse, pyramidLevelCount, pyramidLevelSize, randomSeed, rasterStyleFor, readCartCode, readPad, readPause, readSidecarActions, readSidecarUi, readViewMode, recipeDescriptor, reflectionFade, reflectionSampleY, remapErrorLines, renderSceneBackdrop, resolveButton, resolveLight, resolveMapping, resolvePbr, resolveQuality, resolveSceneLayers, resolveSupersample, resolveUnlockedAchievements, responseCurve, rewriteLuaCode, rumbleEffect, runNetLab, runReplayEvents, runsOnDirectCore, runtimeSdkLua, sampleClipFrame, sampleNormalBilinear, sampleScalarBilinear, sampleTrack, saveBlockAddress, saveBlockBytes, saveCapacity, saveSdkLua, sceneHasAnimation, sceneHasPhysics, sceneNeedsRuntime, sceneObjectsSdkLua, sceneSkyEnvironment, seedCartridge, sendDebugCommand, serializeReplay, shIrradiance, shade, shaderModule, shaftGrid, shapeStick, simulateEmitter, smoothFrontEdges, softKneePrefilter, splitWorldMatrix, standardizePad, stepLookAcceleration, streamGroups, stringsSdkLua, sway, takeNetOutbox, takePhysicsCommands, takeRingCommands, takeSave, tiltShiftBlur, toConsolePixel, toggleMask, tokenizeLua, turnEnvironment, uiSdkLua, uniformsFromSettings, unpadRows, validSave, verifyReplayScore, viewDirection, viewModeCode, warmPipelines, webgpuCanHonour, worldCenter, writeBreakpoints, writeInputBlock, writeInputSettings, writeInstanceTransform, writeInstanceUniform, writeNetInbox, writePhysicsState, writePointer, writeWatches };

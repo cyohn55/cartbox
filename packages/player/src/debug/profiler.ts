@@ -40,6 +40,8 @@ export interface RenderStats {
   readonly resolution?: { readonly width: number; readonly height: number; readonly scale: number };
   /** Texture streaming's residency (AAA_FIDELITY_ROADMAP.md F1b), on a renderer that streams. */
   readonly textures?: { readonly budgetMB: number; readonly residentMB: number; readonly wantedMB: number; readonly maps: number; readonly limited: number };
+  /** The device's pipeline cache (AAA_PRODUCTION_ROADMAP.md M3): compiles, reuse, and late compiles (likely hitches). */
+  readonly pipelines?: { readonly compiled: number; readonly compiledAsync: number; readonly reused: number; readonly late: number; readonly pending: number };
 }
 
 export interface SectionStats {

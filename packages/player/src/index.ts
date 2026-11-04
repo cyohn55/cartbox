@@ -630,3 +630,17 @@ export {
 export { CMD_RING_BYTES, CMD_RING_MAX, commandRingAddress, commandRingBytes, commandRingMax, commandsPerTick, hasCommandRing, takeRingCommands } from "./runtime/commandRing.js";
 export { createDirectConsole, directCoreModel, runsOnDirectCore, type DirectConsole, type QueryHandler } from "./directConsole.js";
 export { DIRECT_CORE_URL, directCoreBeside } from "./player.js";
+export {
+  MANIFEST_KEY,
+  MANIFEST_MAX,
+  PipelineCache,
+  PipelineManifestStore,
+  pipelineCache,
+  pipelineKey,
+  pipelineRecipe,
+  recipeDescriptor,
+  shaderModule,
+  warmPipelines,
+  type ManifestStorage,
+  type PipelineStats,
+} from "./render/pipelineCache.js";

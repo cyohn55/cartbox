@@ -24,6 +24,7 @@ import { BLOOM_KNEE, pyramidLevelCount, pyramidLevelSize } from "./bloomModel.js
 import { FLARE_GHOSTS, FLARE_GHOST_GAIN, FLARE_SPIKE_POWER } from "./flareModel.js";
 import { lutStrip, type GradingLut } from "./lutModel.js";
 import type { PostFxUniforms } from "./postfx.js";
+import { bindGroupLayout, pipelineCache, pipelineLayout, shaderModule } from "../render/pipelineCache.js";
 
 const f = (n: number) => n.toFixed(4);
 
@@ -453,8 +454,8 @@ export class GpuPostFx {
     const samp = (binding: number) => ({ binding, visibility: STAGE_FRAGMENT, sampler: { type: "filtering" } });
     const uni = { binding: 0, visibility: STAGE_FRAGMENT, buffer: { type: "uniform" } };
     this.layouts = {
-      post: device.createBindGroupLayout({ entries: [uni, tex(1), samp(2), tex(3), samp(4), tex(5)] }),
-      bloom: device.createBindGroupLayout({ entries: [uni, tex(1), samp(2)] }),
+      post: bindGroupLayout(device, { entries: [uni, tex(1), samp(2), tex(3), samp(4), tex(5)] }),
+      bloom: bindGroupLayout(device, { entries: [uni, tex(1), samp(2)] }),
     };
     const sampler = (filter: string) => device.createSampler({ magFilter: filter, minFilter: filter, addressModeU: "clamp-to-edge", addressModeV: "clamp-to-edge" });
     this.samplers = { nearest: sampler("nearest"), linear: sampler("linear") };
@@ -622,9 +623,9 @@ export class GpuPostFx {
     const key = `${name}|${format}|${additive}`;
     let pipeline = this.pipelines.get(key);
     if (!pipeline) {
-      const module = this.device.createShaderModule({ code });
-      pipeline = this.device.createRenderPipeline({
-        layout: this.device.createPipelineLayout({ bindGroupLayouts: [name === "post" ? this.layouts.post : this.layouts.bloom] }),
+      const module = shaderModule(this.device, { code });
+      pipeline = pipelineCache(this.device).render({
+        layout: pipelineLayout(this.device, { bindGroupLayouts: [name === "post" ? this.layouts.post : this.layouts.bloom] }),
         vertex: { module, entryPoint: "vs" },
         fragment: {
           module,

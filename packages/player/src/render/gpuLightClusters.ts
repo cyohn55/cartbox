@@ -16,6 +16,7 @@
 import { CLUSTER_CELLS, CLUSTER_INDEX_CAP, CLUSTER_MAX_PER_CELL, CLUSTER_X, CLUSTER_Y, type ClusterGrid, type Mat4 } from "@cartbox/editor";
 
 import { LIGHT_FLOATS } from "./scenePacking.js";
+import { bindGroupLayout, pipelineCache, pipelineLayout, shaderModule } from "./pipelineCache.js";
 
 /* eslint-disable @typescript-eslint/no-explicit-any -- WebGPU handles aren't typed in this build */
 
@@ -133,12 +134,12 @@ export class GpuLightClusters {
     this.rows = device.createBuffer({ size: CLUSTER_CELLS * CLUSTER_MAX_PER_CELL * 4, usage: STORAGE });
     this.counts = device.createBuffer({ size: CLUSTER_CELLS * 4, usage: STORAGE });
     const storage = (binding: number, type: string) => ({ binding, visibility: 0x4, buffer: { type } });
-    this.layout = device.createBindGroupLayout({
+    this.layout = bindGroupLayout(device, {
       entries: [{ binding: 0, visibility: 0x4, buffer: { type: "uniform" } }, storage(1, "read-only-storage"), storage(2, "storage"), storage(3, "storage"), storage(4, "storage")],
     });
-    const module = device.createShaderModule({ code: LIGHT_CLUSTER_WGSL });
-    const layout = device.createPipelineLayout({ bindGroupLayouts: [this.layout] });
-    const make = (entryPoint: string) => device.createComputePipeline({ layout, compute: { module, entryPoint } });
+    const module = shaderModule(device, { code: LIGHT_CLUSTER_WGSL });
+    const layout = pipelineLayout(device, { bindGroupLayouts: [this.layout] });
+    const make = (entryPoint: string) => pipelineCache(device).compute({ layout, compute: { module, entryPoint } });
     this.pipelines = { list: make("list"), scan: make("scan"), fill: make("fill") };
   }
 

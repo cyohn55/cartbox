@@ -23,6 +23,7 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
 import { PARTICLE_FLOATS, compileEmitter, type EmitterParams, type EmitterSpec } from "@cartbox/editor";
+import { bindGroupLayout, pipelineCache, pipelineLayout, shaderModule } from "./pipelineCache.js";
 
 export const PARTICLE_WORKGROUP = 64;
 /** Spawn requests an emitter takes a frame. */
@@ -629,7 +630,7 @@ export class GpuParticles {
   private pipelines(): NonNullable<GpuParticles["pipes"]> {
     if (this.pipes) return this.pipes;
     const device = this.device;
-    const compute = (code: string) => device.createComputePipeline({ layout: "auto", compute: { module: device.createShaderModule({ code }), entryPoint: "main" } });
+    const compute = (code: string) => pipelineCache(device).compute({ layout: "auto", compute: { module: shaderModule(device, { code }), entryPoint: "main" } });
     this.pipes = { spawn: compute(PARTICLE_SPAWN_WGSL), update: compute(PARTICLE_UPDATE_WGSL), keys: compute(PARTICLE_KEYS_WGSL), sort: compute(PARTICLE_SORT_WGSL), draw: new Map(), layout: null };
     return this.pipes;
   }
@@ -641,12 +642,12 @@ export class GpuParticles {
     let pipe = pipes.draw.get(key);
     if (pipe) return pipe;
     const device = this.device;
-    const module = device.createShaderModule({ code: PARTICLE_DRAW_WGSL });
+    const module = shaderModule(device, { code: PARTICLE_DRAW_WGSL });
     const blend = additive
       ? { color: { srcFactor: "one", dstFactor: "one", operation: "add" }, alpha: { srcFactor: "zero", dstFactor: "one", operation: "add" } }
       : { color: { srcFactor: "one", dstFactor: "one-minus-src-alpha", operation: "add" }, alpha: { srcFactor: "one", dstFactor: "one-minus-src-alpha", operation: "add" } };
     // One layout for sprites, ribbons and meshes: a mesh's shaders leave some bindings unused, which "auto" would drop.
-    pipes.layout ??= device.createBindGroupLayout({
+    pipes.layout ??= bindGroupLayout(device, {
       entries: [
         { binding: 0, visibility: 3, buffer: { type: "uniform" } },
         { binding: 1, visibility: 3, buffer: { type: "uniform" } },
@@ -659,8 +660,8 @@ export class GpuParticles {
         { binding: 8, visibility: 3, texture: { sampleType: "depth" } },
       ],
     });
-    pipe = device.createRenderPipeline({
-      layout: device.createPipelineLayout({ bindGroupLayouts: [pipes.layout] }),
+    pipe = pipelineCache(device).render({
+      layout: pipelineLayout(device, { bindGroupLayouts: [pipes.layout] }),
       vertex: mesh
         ? { module, entryPoint: "vsMesh", buffers: [{ arrayStride: 24, attributes: [{ shaderLocation: 0, offset: 0, format: "float32x3" }, { shaderLocation: 1, offset: 12, format: "float32x3" }] }] }
         : { module, entryPoint: "vs" },

@@ -2444,6 +2444,290 @@ function linkProgram(gl, vsSrc, fsSrc) {
   return program;
 }
 
+// src/render/pipelineCache.ts
+var ids = /* @__PURE__ */ new WeakMap();
+var nextId = 1;
+var idOf = (o) => {
+  let id = ids.get(o);
+  if (id === void 0) {
+    id = nextId++;
+    ids.set(o, id);
+  }
+  return id;
+};
+function pipelineKey(kind, descriptor) {
+  return `${kind}:${JSON.stringify(descriptor, (key2, value) => {
+    if (key2 === "label") return void 0;
+    if ((key2 === "module" || key2 === "layout") && value !== null && typeof value === "object") return `#${idOf(value)}`;
+    return value;
+  })}`;
+}
+var moduleCode = /* @__PURE__ */ new WeakMap();
+var moduleCaches = /* @__PURE__ */ new WeakMap();
+function shaderModule(device, descriptor) {
+  if (Object.keys(descriptor).some((k) => k !== "code" && k !== "label")) return device.createShaderModule(descriptor);
+  let modules = moduleCaches.get(device);
+  if (!modules) moduleCaches.set(device, modules = /* @__PURE__ */ new Map());
+  let module = modules.get(descriptor.code);
+  if (!module) {
+    module = device.createShaderModule({ code: descriptor.code });
+    modules.set(descriptor.code, module);
+    if (module !== null && typeof module === "object") moduleCode.set(module, descriptor.code);
+  }
+  return module;
+}
+var layoutRecipes = /* @__PURE__ */ new WeakMap();
+var bindGroupLayoutCaches = /* @__PURE__ */ new WeakMap();
+var pipelineLayoutCaches = /* @__PURE__ */ new WeakMap();
+var withoutLabel = (descriptor) => JSON.parse(JSON.stringify(descriptor, (key2, value) => key2 === "label" ? void 0 : value));
+function bindGroupLayout(device, descriptor) {
+  let layouts = bindGroupLayoutCaches.get(device);
+  if (!layouts) bindGroupLayoutCaches.set(device, layouts = /* @__PURE__ */ new Map());
+  const plain = withoutLabel(descriptor);
+  const key2 = JSON.stringify(plain);
+  let layout = layouts.get(key2);
+  if (!layout) {
+    layout = device.createBindGroupLayout(descriptor);
+    layouts.set(key2, layout);
+    if (layout !== null && typeof layout === "object") layoutRecipes.set(layout, plain);
+  }
+  return layout;
+}
+function pipelineLayout(device, descriptor) {
+  let layouts = pipelineLayoutCaches.get(device);
+  if (!layouts) pipelineLayoutCaches.set(device, layouts = /* @__PURE__ */ new Map());
+  const groups = [...descriptor.bindGroupLayouts];
+  const key2 = groups.map((g) => g !== null && typeof g === "object" ? idOf(g) : String(g)).join(",");
+  let layout = layouts.get(key2);
+  if (!layout) {
+    layout = device.createPipelineLayout(descriptor);
+    layouts.set(key2, layout);
+    const recipes = groups.map((g) => g !== null && typeof g === "object" ? layoutRecipes.get(g) : void 0);
+    if (layout !== null && typeof layout === "object" && recipes.every((r) => r !== void 0)) layoutRecipes.set(layout, { $groups: recipes });
+  }
+  return layout;
+}
+function pipelineRecipe(kind, descriptor) {
+  const layout = descriptor?.layout;
+  if (layout !== "auto" && !(layout !== null && typeof layout === "object" && layoutRecipes.has(layout))) return null;
+  let ok = true;
+  const json = JSON.stringify(descriptor, (key2, value) => {
+    if (key2 === "label") return void 0;
+    if (key2 === "module") {
+      const code = value !== null && typeof value === "object" ? moduleCode.get(value) : void 0;
+      if (code === void 0) ok = false;
+      return { $wgsl: code ?? "" };
+    }
+    if (key2 === "layout" && value !== null && typeof value === "object") return { $layout: layoutRecipes.get(value) };
+    return value;
+  });
+  return ok ? `${kind}:${json}` : null;
+}
+function recipeDescriptor(device, recipe) {
+  const colon = recipe.indexOf(":");
+  const kind = recipe.slice(0, colon);
+  if (kind !== "render" && kind !== "compute") return null;
+  try {
+    const descriptor = JSON.parse(recipe.slice(colon + 1), (key2, value) => {
+      if (key2 === "module" && value && typeof value.$wgsl === "string") return shaderModule(device, { code: value.$wgsl });
+      if (key2 === "layout" && value && value.$layout && Array.isArray(value.$layout.$groups)) {
+        return pipelineLayout(device, { bindGroupLayouts: value.$layout.$groups.map((g) => bindGroupLayout(device, g)) });
+      }
+      return value;
+    });
+    return { kind, descriptor };
+  } catch {
+    return null;
+  }
+}
+var MANIFEST_MAX = 512;
+var PipelineCache = class {
+  constructor(device) {
+    this.device = device;
+    this.made = /* @__PURE__ */ new Map();
+    /** Recipes this session's renderers asked for (synchronously), by key, in first-asked order. */
+    this.used = /* @__PURE__ */ new Map();
+    this.compiling = /* @__PURE__ */ new Map();
+    this.ready = false;
+    this.counts = { compiled: 0, compiledAsync: 0, reused: 0, late: 0 };
+  }
+  /** A render pipeline: the cached one, or compiled now. */
+  render(descriptor) {
+    return this.sync("render", descriptor);
+  }
+  /** A compute pipeline: the cached one, or compiled now. */
+  compute(descriptor) {
+    return this.sync("compute", descriptor);
+  }
+  /** A render pipeline compiled off the frame where the device can (else now), cached for later requests. */
+  renderAsync(descriptor) {
+    return this.async("render", descriptor);
+  }
+  /** A compute pipeline compiled off the frame where the device can, cached for later requests. */
+  computeAsync(descriptor) {
+    return this.async("compute", descriptor);
+  }
+  /** From now on a synchronous compile counts as late (call when the first frame is shown). */
+  markReady() {
+    this.ready = true;
+  }
+  /** Whether {@link markReady} has been called. */
+  get isReady() {
+    return this.ready;
+  }
+  /** The recipes this session's renderers asked for: what the next load should warm. */
+  manifest() {
+    return [...this.used.values()].slice(-MANIFEST_MAX);
+  }
+  /**
+   * Compile `recipes` off the frame (a recorded warm-up), each into the cache.
+   * Resolves with how many compiled; a recipe that no longer compiles (an older
+   * build's shader) is skipped.
+   */
+  async warm(recipes) {
+    let compiled = 0;
+    let failed = 0;
+    await Promise.all(
+      recipes.slice(0, MANIFEST_MAX).map(async (recipe) => {
+        const made = recipeDescriptor(this.device, recipe);
+        if (!made) {
+          failed += 1;
+          return;
+        }
+        try {
+          await (made.kind === "render" ? this.renderAsync(made.descriptor) : this.computeAsync(made.descriptor));
+          compiled += 1;
+        } catch {
+          failed += 1;
+        }
+      })
+    );
+    return { compiled, failed };
+  }
+  /** Resolves when every asynchronous compile started so far has finished (failures included). */
+  async settled() {
+    await Promise.allSettled([...this.compiling.values()]);
+  }
+  stats() {
+    return { ...this.counts, pending: this.compiling.size };
+  }
+  sync(kind, descriptor) {
+    const key2 = pipelineKey(kind, descriptor);
+    if (!this.used.has(key2)) {
+      const recipe = pipelineRecipe(kind, descriptor);
+      if (recipe) this.used.set(key2, recipe);
+    }
+    const cached = this.made.get(key2);
+    if (cached !== void 0) {
+      this.counts.reused += 1;
+      return cached;
+    }
+    const pipeline = kind === "render" ? this.device.createRenderPipeline(descriptor) : this.device.createComputePipeline(descriptor);
+    this.counts.compiled += 1;
+    if (this.ready) this.counts.late += 1;
+    this.made.set(key2, pipeline);
+    return pipeline;
+  }
+  async(kind, descriptor) {
+    const key2 = pipelineKey(kind, descriptor);
+    const cached = this.made.get(key2);
+    if (cached !== void 0) {
+      this.counts.reused += 1;
+      return Promise.resolve(cached);
+    }
+    const running = this.compiling.get(key2);
+    if (running) return running;
+    const make = kind === "render" ? this.device.createRenderPipelineAsync : this.device.createComputePipelineAsync;
+    if (typeof make !== "function") return Promise.resolve(this.sync(kind, descriptor));
+    const promise = make.call(this.device, descriptor).then(
+      (pipeline) => {
+        this.compiling.delete(key2);
+        this.counts.compiledAsync += 1;
+        if (!this.made.has(key2)) this.made.set(key2, pipeline);
+        return this.made.get(key2);
+      },
+      (error) => {
+        this.compiling.delete(key2);
+        throw error;
+      }
+    );
+    this.compiling.set(key2, promise);
+    return promise;
+  }
+};
+var MANIFEST_KEY = "cartbox.pipelineManifest.v1";
+var PipelineManifestStore = class {
+  constructor(storage = defaultStorage(), key2 = MANIFEST_KEY) {
+    this.storage = storage;
+    this.key = key2;
+  }
+  /** The recorded recipes, or none (a missing, unreadable or older-format manifest). */
+  load() {
+    try {
+      const raw = this.storage?.getItem(this.key);
+      if (!raw) return [];
+      const stored = JSON.parse(raw);
+      if (stored.v !== 1 || !Array.isArray(stored.wgsl) || !Array.isArray(stored.recipes)) return [];
+      const wgsl = stored.wgsl;
+      return stored.recipes.filter((r) => typeof r === "string").slice(-MANIFEST_MAX).map((r) => r.replace(/\{"\$wgsl":(\d+)\}/g, (_, i) => JSON.stringify({ $wgsl: typeof wgsl[Number(i)] === "string" ? wgsl[Number(i)] : "" })));
+    } catch {
+      return [];
+    }
+  }
+  /**
+   * Keep `recipes`, each WGSL source once (pipelines share their scene shader,
+   * so whole recipes would repeat it many times over a page's storage quota).
+   */
+  save(recipes) {
+    try {
+      const wgsl = [];
+      const index = /* @__PURE__ */ new Map();
+      const packed = recipes.slice(-MANIFEST_MAX).map(
+        (recipe) => recipe.replace(/\{"\$wgsl":("(?:[^"\\]|\\.)*")\}/g, (_, quoted) => {
+          const code = JSON.parse(quoted);
+          let i = index.get(code);
+          if (i === void 0) {
+            i = wgsl.length;
+            wgsl.push(code);
+            index.set(code, i);
+          }
+          return `{"$wgsl":${i}}`;
+        })
+      );
+      this.storage?.setItem(this.key, JSON.stringify({ v: 1, wgsl, recipes: packed }));
+    } catch {
+    }
+  }
+};
+function defaultStorage() {
+  try {
+    const storage = globalThis.localStorage;
+    return storage ?? null;
+  } catch {
+    return null;
+  }
+}
+async function warmPipelines(device, { store = new PipelineManifestStore(), budgetMs = 3e3 } = {}) {
+  const recipes = store.load();
+  if (recipes.length === 0) return { recipes: 0, compiled: 0, failed: 0, timedOut: false };
+  let timer;
+  const timeout = new Promise((resolve) => {
+    timer = setTimeout(() => resolve(null), budgetMs);
+  });
+  const result = await Promise.race([pipelineCache(device).warm(recipes), timeout]);
+  if (timer !== void 0) clearTimeout(timer);
+  return result ? { recipes: recipes.length, ...result, timedOut: false } : { recipes: recipes.length, compiled: 0, failed: 0, timedOut: true };
+}
+var caches = /* @__PURE__ */ new WeakMap();
+function pipelineCache(device) {
+  let cache = caches.get(device);
+  if (!cache) {
+    cache = new PipelineCache(device);
+    caches.set(device, cache);
+  }
+  return cache;
+}
+
 // src/lighting/WebgpuLightingLayer.ts
 var MAX_LIGHTS2 = 6;
 var HEIGHT_MAX2 = 8;
@@ -2693,8 +2977,8 @@ var WebgpuLightingLayer = class _WebgpuLightingLayer {
       const nearest = device.createSampler({ magFilter: "nearest", minFilter: "nearest" });
       const linear = device.createSampler({ magFilter: "linear", minFilter: "linear" });
       const pipe = (code, targetFormat) => {
-        const module = device.createShaderModule({ code });
-        return device.createRenderPipeline({
+        const module = shaderModule(device, { code });
+        return pipelineCache(device).render({
           layout: "auto",
           vertex: { module, entryPoint: "vs" },
           fragment: { module, entryPoint: "fs", targets: [{ format: targetFormat }] },
@@ -5742,8 +6026,8 @@ function parseTouchLayout(value) {
   if (typeof value !== "object" || value === null || Array.isArray(value)) return {};
   const raw = value;
   const out = {};
-  const ids2 = [...TOUCH_CONTROL_IDS, ...Object.keys(raw).filter((k) => ACTION_CONTROL.test(k))];
-  for (const id of ids2) {
+  const ids3 = [...TOUCH_CONTROL_IDS, ...Object.keys(raw).filter((k) => ACTION_CONTROL.test(k))];
+  for (const id of ids3) {
     const p = raw[id];
     if (typeof p !== "object" || p === null) continue;
     const { x, y, size } = p;
@@ -8004,12 +8288,12 @@ function parseMeshScene(raw) {
       const root = nodes.find((n) => typeof n.parent !== "string" || !n.parent);
       if (!root || size === 0) continue;
       for (let copy = 0; copy < size; copy += 1) {
-        const idOf = (key2) => `${prefab.id}#${copy}:${String(key2)}`;
-        const rootId = idOf(root.key);
+        const idOf2 = (key2) => `${prefab.id}#${copy}:${String(key2)}`;
+        const rootId = idOf2(root.key);
         const made = [];
         for (const node of nodes) {
           const isRoot = node === root;
-          const entry = readEntry(node, idOf(node.key), isRoot ? null : idOf(node.parent), isRoot);
+          const entry = readEntry(node, idOf2(node.key), isRoot ? null : idOf2(node.parent), isRoot);
           if (!entry) continue;
           made.push({ ...entry, ...isRoot ? { name: `${name} ${copy + 1}` } : {}, pool: { prefab: name, copy, rootId } });
         }
@@ -8144,7 +8428,7 @@ function parseMeshScene(raw) {
   if (instances.length === 0) return null;
   const audio = parseSceneAudio(parsed.audio);
   const lighting = parseSceneLighting(parsed.lighting);
-  const pools = [...poolRoots.entries()].map(([prefab, ids2]) => ({ prefab, roots: ids2.map((id) => indexOf.get(id)) }));
+  const pools = [...poolRoots.entries()].map(([prefab, ids3]) => ({ prefab, roots: ids3.map((id) => indexOf.get(id)) }));
   const placed = instances.filter((instance) => !instance.pooled && !instance.terrain && (instance.level === void 0 || instance.level === 0));
   const physicsWorld = readPhysicsWorld(parsed.physicsWorld);
   const core = parsed.core === "direct" ? "direct" : void 0;
@@ -12069,7 +12353,7 @@ function expandBilinear(src, sw, sh, dst, dw, dh) {
     wx[x] = Math.round((sx - i) * 256);
   }
   const rows = [new Uint32Array(dw), new Uint32Array(dw)];
-  const ids2 = [-1, -1];
+  const ids3 = [-1, -1];
   const across = (sy, row) => {
     const base = sy * sw;
     for (let x = 0; x < dw; x += 1) {
@@ -12087,11 +12371,11 @@ function expandBilinear(src, sw, sh, dst, dw, dh) {
     }
   };
   const rowFor = (sy) => {
-    if (ids2[0] === sy) return rows[0];
-    if (ids2[1] === sy) return rows[1];
-    const slot = ids2[0] === sy - 1 ? 1 : 0;
+    if (ids3[0] === sy) return rows[0];
+    if (ids3[1] === sy) return rows[1];
+    const slot = ids3[0] === sy - 1 ? 1 : 0;
     across(sy, rows[slot]);
-    ids2[slot] = sy;
+    ids3[slot] = sy;
     return rows[slot];
   };
   for (let y = 0; y < dh; y += 1) {
@@ -15055,7 +15339,7 @@ async function groundSources(scene, texture) {
     ...(scene.vistas ?? []).flatMap((v) => v.terrain ? [{ terrain: v.terrain, model: v.model ?? null }] : [])
   ];
   const sources = [];
-  const ids2 = /* @__PURE__ */ new Set();
+  const ids3 = /* @__PURE__ */ new Set();
   for (const { terrain, model } of placed) {
     const m = model ?? [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1];
     const translation = m[0] === 1 && m[1] === 0 && m[2] === 0 && m[4] === 0 && m[5] === 1 && m[6] === 0 && m[8] === 0 && m[9] === 0 && m[10] === 1;
@@ -15064,9 +15348,9 @@ async function groundSources(scene, texture) {
     const t = moved ? { ...terrain, origin: [terrain.origin[0] + m[12], terrain.origin[1] + m[13], terrain.origin[2] + m[14]] } : terrain;
     const maps = await texture({ name: terrain.name, primitives: terrain.layers.map((l) => ({ positions: new Float32Array(0), normals: null, uvs: null, indices: new Uint32Array(0), material: l.material })) });
     sources.push({ terrain: t, layers: terrain.layers.map((_, k) => ({ base: maps.textures?.[k] ?? null, normal: maps.normalTextures?.[k] ?? null, mr: maps.mrTextures?.[k] ?? null })) });
-    ids2.add(terrain.id);
+    ids3.add(terrain.id);
   }
-  return { sources, ids: ids2 };
+  return { sources, ids: ids3 };
 }
 async function texturedVistas(vistas, texture) {
   return Promise.all(
@@ -20093,11 +20377,11 @@ var MipmapGenerator = class {
   generate(texture, levels, format, layers = 1) {
     if (levels < 2) return;
     const device = this.device;
-    this.module ?? (this.module = device.createShaderModule({ code: MIP_WGSL }));
+    this.module ?? (this.module = shaderModule(device, { code: MIP_WGSL }));
     this.sampler ?? (this.sampler = device.createSampler({ magFilter: "linear", minFilter: "linear", addressModeU: "clamp-to-edge", addressModeV: "clamp-to-edge" }));
     let pipeline = this.pipelines.get(format);
     if (!pipeline) {
-      pipeline = device.createRenderPipeline({
+      pipeline = pipelineCache(device).render({
         layout: "auto",
         vertex: { module: this.module, entryPoint: "vs" },
         fragment: { module: this.module, entryPoint: "fs", targets: [{ format }] },
@@ -21053,7 +21337,7 @@ var GpuParticles = class {
   pipelines() {
     if (this.pipes) return this.pipes;
     const device = this.device;
-    const compute = (code) => device.createComputePipeline({ layout: "auto", compute: { module: device.createShaderModule({ code }), entryPoint: "main" } });
+    const compute = (code) => pipelineCache(device).compute({ layout: "auto", compute: { module: shaderModule(device, { code }), entryPoint: "main" } });
     this.pipes = { spawn: compute(PARTICLE_SPAWN_WGSL), update: compute(PARTICLE_UPDATE_WGSL), keys: compute(PARTICLE_KEYS_WGSL), sort: compute(PARTICLE_SORT_WGSL), draw: /* @__PURE__ */ new Map(), layout: null };
     return this.pipes;
   }
@@ -21064,9 +21348,9 @@ var GpuParticles = class {
     let pipe = pipes.draw.get(key2);
     if (pipe) return pipe;
     const device = this.device;
-    const module = device.createShaderModule({ code: PARTICLE_DRAW_WGSL });
+    const module = shaderModule(device, { code: PARTICLE_DRAW_WGSL });
     const blend = additive ? { color: { srcFactor: "one", dstFactor: "one", operation: "add" }, alpha: { srcFactor: "zero", dstFactor: "one", operation: "add" } } : { color: { srcFactor: "one", dstFactor: "one-minus-src-alpha", operation: "add" }, alpha: { srcFactor: "one", dstFactor: "one-minus-src-alpha", operation: "add" } };
-    pipes.layout ?? (pipes.layout = device.createBindGroupLayout({
+    pipes.layout ?? (pipes.layout = bindGroupLayout(device, {
       entries: [
         { binding: 0, visibility: 3, buffer: { type: "uniform" } },
         { binding: 1, visibility: 3, buffer: { type: "uniform" } },
@@ -21079,8 +21363,8 @@ var GpuParticles = class {
         { binding: 8, visibility: 3, texture: { sampleType: "depth" } }
       ]
     }));
-    pipe = device.createRenderPipeline({
-      layout: device.createPipelineLayout({ bindGroupLayouts: [pipes.layout] }),
+    pipe = pipelineCache(device).render({
+      layout: pipelineLayout(device, { bindGroupLayouts: [pipes.layout] }),
       vertex: mesh ? { module, entryPoint: "vsMesh", buffers: [{ arrayStride: 24, attributes: [{ shaderLocation: 0, offset: 0, format: "float32x3" }, { shaderLocation: 1, offset: 12, format: "float32x3" }] }] } : { module, entryPoint: "vs" },
       fragment: { module, entryPoint: mesh ? "fsMesh" : "fs", targets: [{ format: this.colourFormat, ...mesh ? {} : { blend } }] },
       primitive: { topology: "triangle-list", cullMode: "none" },
@@ -21506,15 +21790,15 @@ var GpuVolumes = class {
   pipelines() {
     if (this.pipes) return this.pipes;
     const device = this.device;
-    const compute = (code) => device.createComputePipeline({ layout: "auto", compute: { module: device.createShaderModule({ code }), entryPoint: "main" } });
-    const module = device.createShaderModule({ code: VOLUME_MARCH_WGSL });
+    const compute = (code) => pipelineCache(device).compute({ layout: "auto", compute: { module: shaderModule(device, { code }), entryPoint: "main" } });
+    const module = shaderModule(device, { code: VOLUME_MARCH_WGSL });
     this.pipes = {
       forces: compute(SOLVER_FORCES_WGSL),
       advect: compute(SOLVER_ADVECT_WGSL),
       divergence: compute(SOLVER_DIVERGENCE_WGSL),
       jacobi: compute(SOLVER_JACOBI_WGSL),
       project: compute(SOLVER_PROJECT_WGSL),
-      march: device.createRenderPipeline({
+      march: pipelineCache(device).render({
         layout: "auto",
         vertex: { module, entryPoint: "vs" },
         // colour × T + L: the march returns L with T in alpha.
@@ -22526,7 +22810,7 @@ var GpuCulling = class {
     this.pyramid = null;
     this.uniforms = device.createBuffer({ size: UNIFORM_STRIDE2 * ROUNDS, usage: UNIFORM2 | COPY_DST });
     const storage = (binding, type) => ({ binding, visibility: COMPUTE, buffer: { type } });
-    this.cullLayout = device.createBindGroupLayout({
+    this.cullLayout = bindGroupLayout(device, {
       entries: [
         { binding: 0, visibility: COMPUTE, buffer: { type: "uniform" } },
         storage(1, "read-only-storage"),
@@ -22538,24 +22822,24 @@ var GpuCulling = class {
         storage(7, "storage")
       ]
     });
-    this.firstLayout = device.createBindGroupLayout({
+    this.firstLayout = bindGroupLayout(device, {
       entries: [
         { binding: 0, visibility: COMPUTE, texture: { sampleType: "depth" } },
         { binding: 1, visibility: COMPUTE, storageTexture: { access: "write-only", format: "r32float" } }
       ]
     });
-    this.downLayout = device.createBindGroupLayout({
+    this.downLayout = bindGroupLayout(device, {
       entries: [
         { binding: 0, visibility: COMPUTE, texture: { sampleType: "unfilterable-float" } },
         { binding: 1, visibility: COMPUTE, storageTexture: { access: "write-only", format: "r32float" } }
       ]
     });
-    const cull = device.createShaderModule({ code: CULL_WGSL });
-    const layout = device.createPipelineLayout({ bindGroupLayouts: [this.cullLayout] });
-    this.testPipeline = device.createComputePipeline({ layout, compute: { module: cull, entryPoint: "test" } });
-    this.compactPipeline = device.createComputePipeline({ layout, compute: { module: cull, entryPoint: "compact" } });
-    this.firstPipeline = device.createComputePipeline({ layout: device.createPipelineLayout({ bindGroupLayouts: [this.firstLayout] }), compute: { module: device.createShaderModule({ code: HIZ_MAX_WGSL }), entryPoint: "first" } });
-    this.downPipeline = device.createComputePipeline({ layout: device.createPipelineLayout({ bindGroupLayouts: [this.downLayout] }), compute: { module: device.createShaderModule({ code: HIZ_DOWN_WGSL }), entryPoint: "down" } });
+    const cull = shaderModule(device, { code: CULL_WGSL });
+    const layout = pipelineLayout(device, { bindGroupLayouts: [this.cullLayout] });
+    this.testPipeline = pipelineCache(device).compute({ layout, compute: { module: cull, entryPoint: "test" } });
+    this.compactPipeline = pipelineCache(device).compute({ layout, compute: { module: cull, entryPoint: "compact" } });
+    this.firstPipeline = pipelineCache(device).compute({ layout: pipelineLayout(device, { bindGroupLayouts: [this.firstLayout] }), compute: { module: shaderModule(device, { code: HIZ_MAX_WGSL }), entryPoint: "first" } });
+    this.downPipeline = pipelineCache(device).compute({ layout: pipelineLayout(device, { bindGroupLayouts: [this.downLayout] }), compute: { module: shaderModule(device, { code: HIZ_DOWN_WGSL }), entryPoint: "down" } });
   }
   /**
    * The frame's sources (in order of their first copy), draws and camera. The
@@ -22675,15 +22959,15 @@ var GpuCulling = class {
   /** The first level's pipeline (and its layout) for multisampled depths, made on first use. */
   multisampledFirst() {
     if (!this.msFirst) {
-      const layout = this.device.createBindGroupLayout({
+      const layout = bindGroupLayout(this.device, {
         entries: [
           { binding: 0, visibility: COMPUTE, texture: { sampleType: "depth", multisampled: true } },
           { binding: 1, visibility: COMPUTE, storageTexture: { access: "write-only", format: "r32float" } }
         ]
       });
-      const pipeline = this.device.createComputePipeline({
-        layout: this.device.createPipelineLayout({ bindGroupLayouts: [layout] }),
-        compute: { module: this.device.createShaderModule({ code: HIZ_MAX_MS_WGSL }), entryPoint: "first" }
+      const pipeline = pipelineCache(this.device).compute({
+        layout: pipelineLayout(this.device, { bindGroupLayouts: [layout] }),
+        compute: { module: shaderModule(this.device, { code: HIZ_MAX_MS_WGSL }), entryPoint: "first" }
       });
       this.msFirst = [pipeline, layout];
     }
@@ -22821,10 +23105,10 @@ var CasterCulling = class {
     this.frame = null;
     this.uniforms = device.createBuffer({ size: MAX_CASTER_CASCADES * 6 * 16 + 16, usage: UNIFORM2 | COPY_DST });
     const storage = (binding, type) => ({ binding, visibility: COMPUTE, buffer: { type } });
-    this.layout = device.createBindGroupLayout({ entries: [{ binding: 0, visibility: COMPUTE, buffer: { type: "uniform" } }, storage(1, "read-only-storage"), storage(2, "storage"), storage(3, "storage")] });
-    this.pipeline = device.createComputePipeline({
-      layout: device.createPipelineLayout({ bindGroupLayouts: [this.layout] }),
-      compute: { module: device.createShaderModule({ code: CASTER_CULL_WGSL }), entryPoint: "main" }
+    this.layout = bindGroupLayout(device, { entries: [{ binding: 0, visibility: COMPUTE, buffer: { type: "uniform" } }, storage(1, "read-only-storage"), storage(2, "storage"), storage(3, "storage")] });
+    this.pipeline = pipelineCache(device).compute({
+      layout: pipelineLayout(device, { bindGroupLayouts: [this.layout] }),
+      compute: { module: shaderModule(device, { code: CASTER_CULL_WGSL }), entryPoint: "main" }
     });
   }
   /** The frame's caster batches and the cascades' view-projections; each cascade's region holds `regionCopies` from `region` on. */
@@ -22993,12 +23277,12 @@ var GpuLightClusters = class {
     this.rows = device.createBuffer({ size: CLUSTER_CELLS * CLUSTER_MAX_PER_CELL * 4, usage: STORAGE2 });
     this.counts = device.createBuffer({ size: CLUSTER_CELLS * 4, usage: STORAGE2 });
     const storage = (binding, type) => ({ binding, visibility: 4, buffer: { type } });
-    this.layout = device.createBindGroupLayout({
+    this.layout = bindGroupLayout(device, {
       entries: [{ binding: 0, visibility: 4, buffer: { type: "uniform" } }, storage(1, "read-only-storage"), storage(2, "storage"), storage(3, "storage"), storage(4, "storage")]
     });
-    const module = device.createShaderModule({ code: LIGHT_CLUSTER_WGSL });
-    const layout = device.createPipelineLayout({ bindGroupLayouts: [this.layout] });
-    const make = (entryPoint) => device.createComputePipeline({ layout, compute: { module, entryPoint } });
+    const module = shaderModule(device, { code: LIGHT_CLUSTER_WGSL });
+    const layout = pipelineLayout(device, { bindGroupLayouts: [this.layout] });
+    const make = (entryPoint) => pipelineCache(device).compute({ layout, compute: { module, entryPoint } });
     this.pipelines = { list: make("list"), scan: make("scan"), fill: make("fill") };
   }
   /** The params the shaders take (a tile's size, the near plane, the slice scale), as the CPU build gives them. */
@@ -23150,15 +23434,15 @@ var GpuTransforms = class {
     this.copies = 0;
     this.motion = false;
     this.uniforms = device.createBuffer({ size: UNIFORM_BYTES2, usage: UNIFORM4 | COPY_DST3 });
-    this.layout = device.createBindGroupLayout({
+    this.layout = bindGroupLayout(device, {
       entries: [
         { binding: 0, visibility: 4, buffer: { type: "uniform" } },
         { binding: 1, visibility: 4, buffer: { type: "storage" } }
       ]
     });
-    this.pipeline = device.createComputePipeline({
-      layout: device.createPipelineLayout({ bindGroupLayouts: [this.layout] }),
-      compute: { module: device.createShaderModule({ code: TRANSFORM_WGSL }), entryPoint: "fill" }
+    this.pipeline = pipelineCache(device).compute({
+      layout: pipelineLayout(device, { bindGroupLayouts: [this.layout] }),
+      compute: { module: shaderModule(device, { code: TRANSFORM_WGSL }), entryPoint: "fill" }
     });
   }
   /** The frame's `copies` and matrices; their records (and motion records, `copies` on) start at 0. */
@@ -23354,7 +23638,7 @@ var ClusterRendering = class {
     this.jobs = [];
     this.frameUniforms = device.createBuffer({ size: JOB_STRIDE * 2, usage: UNIFORM5 | COPY_DST4 });
     const storage = (binding, type) => ({ binding, visibility: COMPUTE2, buffer: { type } });
-    this.layout = device.createBindGroupLayout({
+    this.layout = bindGroupLayout(device, {
       entries: [
         { binding: 0, visibility: COMPUTE2, buffer: { type: "uniform" } },
         { binding: 1, visibility: COMPUTE2, buffer: { type: "uniform" } },
@@ -23366,9 +23650,9 @@ var ClusterRendering = class {
         { binding: 7, visibility: COMPUTE2, texture: { sampleType: "unfilterable-float" } }
       ]
     });
-    this.pipeline = device.createComputePipeline({
-      layout: device.createPipelineLayout({ bindGroupLayouts: [this.layout] }),
-      compute: { module: device.createShaderModule({ code: CLUSTER_WGSL }), entryPoint: "main" }
+    this.pipeline = pipelineCache(device).compute({
+      layout: pipelineLayout(device, { bindGroupLayouts: [this.layout] }),
+      compute: { module: shaderModule(device, { code: CLUSTER_WGSL }), entryPoint: "main" }
     });
   }
   upload(lod) {
@@ -23920,7 +24204,7 @@ var GpuTerrain = class {
       ...this.relief > 0 ? { parallaxDepth: this.relief } : {}
     };
     this.mesh = terrainPatchMesh(t.name, material2);
-    this.pipeline = device.createComputePipeline({ layout: "auto", compute: { module: device.createShaderModule({ code: TERRAIN_BAKE_WGSL }), entryPoint: "main" } });
+    this.pipeline = pipelineCache(device).compute({ layout: "auto", compute: { module: shaderModule(device, { code: TERRAIN_BAKE_WGSL }), entryPoint: "main" } });
     this.baked = new Array(this.plan.eyePages + 1).fill(null);
   }
   /** The eye (world) in the terrain's ground plane, metres from its corner. */
@@ -24633,7 +24917,7 @@ async function bakeLightmapGpu(device, layout, occluders, options = {}, progress
     const params = device.createBuffer({ size: PARAMS_BYTES, usage: UNIFORM6 | COPY_DST6 });
     const readback = device.createBuffer({ size: acc.byteLength, usage: MAP_READ | COPY_DST6 });
     try {
-      const pipeline = device.createComputePipeline({ layout: "auto", compute: { module: device.createShaderModule({ code: LIGHTMAP_TRACE_WGSL }), entryPoint: "main" } });
+      const pipeline = pipelineCache(device).compute({ layout: "auto", compute: { module: shaderModule(device, { code: LIGHTMAP_TRACE_WGSL }), entryPoint: "main" } });
       const group = device.createBindGroup({
         layout: pipeline.getBindGroupLayout(0),
         entries: [...buffers, accum, skyBuffer].map((buffer, binding) => ({ binding, resource: { buffer } })).concat([{ binding: 6, resource: { buffer: params } }, { binding: 7, resource: { buffer: lightBuffer } }])
@@ -24809,7 +25093,7 @@ async function denoiseLightmap(device, atlas, texel, passes = DENOISE_PASSES, si
   const params = device.createBuffer({ size: 16, usage: UNIFORM6 | COPY_DST6 });
   const readback = device.createBuffer({ size: values.byteLength, usage: MAP_READ | COPY_DST6 });
   try {
-    const pipeline = device.createComputePipeline({ layout: "auto", compute: { module: device.createShaderModule({ code: LIGHTMAP_DENOISE_WGSL }), entryPoint: "main" } });
+    const pipeline = pipelineCache(device).compute({ layout: "auto", compute: { module: shaderModule(device, { code: LIGHTMAP_DENOISE_WGSL }), entryPoint: "main" } });
     const groups = [0, 1].map(
       (k) => device.createBindGroup({
         layout: pipeline.getBindGroupLayout(0),
@@ -24893,7 +25177,7 @@ async function bakeProbeVolumeGpu(device, min, max, counts, occluders, options =
   const params = device.createBuffer({ size: PARAMS_BYTES, usage: UNIFORM6 | COPY_DST6 });
   const readback = device.createBuffer({ size: acc.byteLength, usage: MAP_READ | COPY_DST6 });
   try {
-    const pipeline = device.createComputePipeline({ layout: "auto", compute: { module: device.createShaderModule({ code: LIGHTMAP_TRACE_WGSL }), entryPoint: "probeMain" } });
+    const pipeline = pipelineCache(device).compute({ layout: "auto", compute: { module: shaderModule(device, { code: LIGHTMAP_TRACE_WGSL }), entryPoint: "probeMain" } });
     const group = device.createBindGroup({
       layout: pipeline.getBindGroupLayout(0),
       entries: [...buffers, accum, skyBuffer].map((buffer, binding) => ({ binding, resource: { buffer } })).concat([{ binding: 6, resource: { buffer: params } }, { binding: 7, resource: { buffer: lightBuffer } }])
@@ -25145,7 +25429,7 @@ var IblBuilder = class {
       usage: 4 | 8 | 1
       // TEXTURE_BINDING | STORAGE_BINDING | COPY_SRC (read back by its tests)
     });
-    this.pipeline ?? (this.pipeline = device.createComputePipeline({ layout: "auto", compute: { module: device.createShaderModule({ code: PREFILTER_WGSL }), entryPoint: "main" } }));
+    this.pipeline ?? (this.pipeline = pipelineCache(device).compute({ layout: "auto", compute: { module: shaderModule(device, { code: PREFILTER_WGSL }), entryPoint: "main" } }));
     const sampler = device.createSampler({ magFilter: "linear", minFilter: "linear", mipmapFilter: "linear", addressModeU: "repeat", addressModeV: "clamp-to-edge" });
     const texelSolidAngle = 4 * Math.PI / (pano.width * pano.height);
     const encoder = device.createCommandEncoder();
@@ -25345,13 +25629,13 @@ function referenceSceneKey(instances) {
   }
   return `${instances.length}:${h.toString(36)}`;
 }
-var ids = /* @__PURE__ */ new WeakMap();
-var nextId = 1;
+var ids2 = /* @__PURE__ */ new WeakMap();
+var nextId2 = 1;
 function objectId(o) {
-  let id = ids.get(o);
+  let id = ids2.get(o);
   if (id === void 0) {
-    id = nextId++;
-    ids.set(o, id);
+    id = nextId2++;
+    ids2.set(o, id);
   }
   return id;
 }
@@ -26050,11 +26334,11 @@ var TracerCore = class {
     device.queue.writeBuffer(this.dfg, 0, table2);
   }
   get tracePipeline() {
-    this.pipeline ?? (this.pipeline = this.device.createComputePipeline({ layout: "auto", compute: { module: this.device.createShaderModule({ code: PATH_TRACE_WGSL }), entryPoint: "main" } }));
+    this.pipeline ?? (this.pipeline = pipelineCache(this.device).compute({ layout: "auto", compute: { module: shaderModule(this.device, { code: PATH_TRACE_WGSL }), entryPoint: "main" } }));
     return this.pipeline;
   }
   get resolver() {
-    this.resolvePipeline ?? (this.resolvePipeline = this.device.createComputePipeline({ layout: "auto", compute: { module: this.device.createShaderModule({ code: PATH_RESOLVE_WGSL }), entryPoint: "resolve" } }));
+    this.resolvePipeline ?? (this.resolvePipeline = pipelineCache(this.device).compute({ layout: "auto", compute: { module: shaderModule(this.device, { code: PATH_RESOLVE_WGSL }), entryPoint: "resolve" } }));
     return this.resolvePipeline;
   }
   storage(data) {
@@ -26497,7 +26781,7 @@ var ProbeCapture = class {
   }
   prefilter(slot, levels, sky) {
     const device = this.device;
-    this.pipeline ?? (this.pipeline = device.createComputePipeline({ layout: "auto", compute: { module: device.createShaderModule({ code: PREFILTER_WGSL2 }), entryPoint: "main" } }));
+    this.pipeline ?? (this.pipeline = pipelineCache(device).compute({ layout: "auto", compute: { module: shaderModule(device, { code: PREFILTER_WGSL2 }), entryPoint: "main" } }));
     this.sampler ?? (this.sampler = device.createSampler({ magFilter: "linear", minFilter: "linear", mipmapFilter: "linear", addressModeU: "clamp-to-edge", addressModeV: "clamp-to-edge" }));
     if (!this.framesBuffer) {
       const frames = new Float32Array(18 * 4);
@@ -28837,7 +29121,7 @@ var GpuAtmosphere = class {
     this.sampler = device.createSampler({ magFilter: "linear", minFilter: "linear", addressModeU: "clamp-to-edge", addressModeV: "clamp-to-edge" });
     this.uniforms = device.createBuffer({ size: ATMOSPHERE_UNIFORM_FLOATS * 4, usage: USAGE2.uniform | USAGE2.copyDst });
     this.camera = device.createBuffer({ size: AERIAL_CAMERA_FLOATS * 4, usage: USAGE2.uniform | USAGE2.copyDst });
-    const pipeline = (code) => device.createComputePipeline({ layout: "auto", compute: { module: device.createShaderModule({ code }), entryPoint: "main" } });
+    const pipeline = (code) => pipelineCache(device).compute({ layout: "auto", compute: { module: shaderModule(device, { code }), entryPoint: "main" } });
     this.pipelines = { transmittance: pipeline(TRANSMITTANCE_WGSL), multiScattering: pipeline(MULTISCATTER_WGSL), skyView: pipeline(SKY_VIEW_WGSL), aerial: null };
   }
   /** Bring the LUTs up to `sky` (a submit of its own when anything changed); true when the sky view was rebuilt. */
@@ -28882,7 +29166,7 @@ var GpuAtmosphere = class {
     this.device.queue.writeBuffer(this.camera, 0, packAerialCamera(camera, this.cameraData));
     const encoder = this.device.createCommandEncoder();
     this.medium(encoder, sky);
-    (_a = this.pipelines).aerial ?? (_a.aerial = this.device.createComputePipeline({ layout: "auto", compute: { module: this.device.createShaderModule({ code: AERIAL_WGSL }), entryPoint: "main" } }));
+    (_a = this.pipelines).aerial ?? (_a.aerial = pipelineCache(this.device).compute({ layout: "auto", compute: { module: shaderModule(this.device, { code: AERIAL_WGSL }), entryPoint: "main" } }));
     this.run(
       encoder,
       this.pipelines.aerial,
@@ -29293,7 +29577,7 @@ var GpuProbeGi = class {
     const rotation = randomRotation(this.random(), this.random(), this.random());
     device.queue.writeBuffer(this.uniforms, 0, packGiUniforms(layout, settings, rotation, this.frames % 16777216, bounce, this.data, window2));
     this.frames += 1;
-    const pipeline = (entryPoint) => device.createComputePipeline({ layout: "auto", compute: { module: device.createShaderModule({ code: GI_WGSL }), entryPoint } });
+    const pipeline = (entryPoint) => pipelineCache(device).compute({ layout: "auto", compute: { module: shaderModule(device, { code: GI_WGSL }), entryPoint } });
     this.pipelines ?? (this.pipelines = { trace: pipeline("giTrace"), update: pipeline("giUpdate") });
     const pass = encoder.beginComputePass(timing);
     pass.setPipeline(this.pipelines.trace);
@@ -29375,7 +29659,7 @@ var GpuProbeGi = class {
     device.queue.writeBuffer(this.reflectUniforms, 0, this.reflectData);
     if (volume) device.queue.writeBuffer(this.reflectGi, 0, packGiUniforms(volume.layout, { rays: 1, hysteresis: 0, spacing: 1, probesPerFrame: 0 }, [[1, 0, 0], [0, 1, 0], [0, 0, 1]], 0, true));
     if (!lit) this.frames += 1;
-    this.reflectPipeline ?? (this.reflectPipeline = device.createComputePipeline({ layout: "auto", compute: { module: device.createShaderModule({ code: GI_WGSL }), entryPoint: "giReflect" } }));
+    this.reflectPipeline ?? (this.reflectPipeline = pipelineCache(device).compute({ layout: "auto", compute: { module: shaderModule(device, { code: GI_WGSL }), entryPoint: "giReflect" } }));
     const pass = encoder.beginComputePass(timing);
     pass.setPipeline(this.reflectPipeline);
     pass.setBindGroup(
@@ -29990,7 +30274,7 @@ var GpuVolumetricFog = class {
   encode(encoder, scene, timing = {}) {
     const device = this.device;
     const [nx, ny, nz] = this.grid.split("x").map(Number);
-    const pipeline = (code) => device.createComputePipeline({ layout: "auto", compute: { module: device.createShaderModule({ code }), entryPoint: "main" } });
+    const pipeline = (code) => pipelineCache(device).compute({ layout: "auto", compute: { module: shaderModule(device, { code }), entryPoint: "main" } });
     this.pipelines ?? (this.pipelines = { inject: pipeline(FOG_INJECT_WGSL), integrate: pipeline(FOG_INTEGRATE_WGSL) });
     const history = this.light[this.index];
     const current = this.light[1 - this.index];
@@ -32392,13 +32676,13 @@ fn fs(in: VSOut) -> SceneOut {
 }
 var IDENTITY_BASIS = [1, 0, 0, 0, 1, 0, 0, 0, 1];
 var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
-  constructor(device, width, height, pipeline, pipelinesFor, bindGroupLayout, colourTexture, depthTexture, depthGroups, sampler, blankTexture, blankShadow, readback, bytesPerRow, style, hdr = false, mips = false) {
+  constructor(device, width, height, pipeline, pipelinesFor, bindGroupLayout2, colourTexture, depthTexture, depthGroups, sampler, blankTexture, blankShadow, readback, bytesPerRow, style, hdr = false, mips = false) {
     this.device = device;
     this.width = width;
     this.height = height;
     this.pipeline = pipeline;
     this.pipelinesFor = pipelinesFor;
-    this.bindGroupLayout = bindGroupLayout;
+    this.bindGroupLayout = bindGroupLayout2;
     this.colourTexture = colourTexture;
     this.depthTexture = depthTexture;
     this.depthGroups = depthGroups;
@@ -32551,6 +32835,11 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     this.vsm = null;
     this.decalTiles = null;
     this.decalCount = 0;
+    /** Encode and submit one frame, and start a readback if a buffer is free (or, with `readback` false, leave it in the colour texture). */
+    /** Frames submitted, and the late compiles last saved (M3; pipelineCache.ts). */
+    this.framesSubmitted = 0;
+    this.savedLate = 0;
+    this.manifestStore = new PipelineManifestStore();
     /** The thin G-buffer (F0c), made on the first frame with a prepass. */
     this.gbuffer = null;
     /** The velocity buffer (F0c), made with the G-buffer. */
@@ -32935,7 +33224,7 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     var _a;
     const v = this.vsm;
     const k = multisampled ? 1 : 0;
-    (_a = v.mark)[k] ?? (_a[k] = this.device.createComputePipeline({ layout: "auto", compute: { module: this.device.createShaderModule({ code: vsmMarkWgsl(multisampled) }), entryPoint: "markPages" } }));
+    (_a = v.mark)[k] ?? (_a[k] = pipelineCache(this.device).compute({ layout: "auto", compute: { module: shaderModule(this.device, { code: vsmMarkWgsl(multisampled) }), entryPoint: "markPages" } }));
     const pipeline = v.mark[k];
     const slot = v.staging.find((s) => !s.busy) ?? null;
     if (slot) {
@@ -33026,10 +33315,10 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
   }
   /** Clears a rect of a depth32float map to the far plane (F2d-2's, shared with F2b's pages). */
   localClearPipeline() {
-    this.localClear ?? (this.localClear = this.device.createRenderPipeline({
+    this.localClear ?? (this.localClear = pipelineCache(this.device).render({
       layout: "auto",
-      vertex: { module: this.device.createShaderModule({ code: LOCAL_CLEAR_WGSL }), entryPoint: "vs" },
-      fragment: { module: this.device.createShaderModule({ code: LOCAL_CLEAR_WGSL }), entryPoint: "clear", targets: [] },
+      vertex: { module: shaderModule(this.device, { code: LOCAL_CLEAR_WGSL }), entryPoint: "vs" },
+      fragment: { module: shaderModule(this.device, { code: LOCAL_CLEAR_WGSL }), entryPoint: "clear", targets: [] },
       primitive: { topology: "triangle-list" },
       depthStencil: { format: "depth32float", depthWriteEnabled: true, depthCompare: "always" }
     }));
@@ -33153,7 +33442,7 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     const colourFormat = hdr ? "rgba16float" : "rgba8unorm";
     if (!webgpuCanHonour(style)) return null;
     try {
-      const bindGroupLayout = device.createBindGroupLayout({
+      const bindGroupLayout2 = bindGroupLayout(device, {
         entries: [
           {
             binding: 0,
@@ -33221,11 +33510,11 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
         // The physical sky's aerial perspective (F5a-2), and the volumetric fog (F5b), read by the linear-light shader.
         ...hdr ? [{ binding: 14, visibility: SHADER_STAGE_FRAGMENT, buffer: { type: "uniform" } }, { binding: 6, visibility: SHADER_STAGE_FRAGMENT, texture: { sampleType: "float", viewDimension: "3d" } }] : []
       ];
-      const depthLayout = device.createBindGroupLayout({ entries: depthEntries(false) });
-      const depthLayoutMs = device.createBindGroupLayout({ entries: depthEntries(true) });
-      const layout = device.createPipelineLayout({ bindGroupLayouts: [bindGroupLayout, depthLayout] });
-      const layoutMs = device.createPipelineLayout({ bindGroupLayouts: [bindGroupLayout, depthLayoutMs] });
-      const pipelinesFor = (code, samples = 1, reflect = false, prepass = false, make = (d) => device.createRenderPipeline(d)) => {
+      const depthLayout = bindGroupLayout(device, { entries: depthEntries(false) });
+      const depthLayoutMs = bindGroupLayout(device, { entries: depthEntries(true) });
+      const layout = pipelineLayout(device, { bindGroupLayouts: [bindGroupLayout2, depthLayout] });
+      const layoutMs = pipelineLayout(device, { bindGroupLayouts: [bindGroupLayout2, depthLayoutMs] });
+      const pipelinesFor = (code, samples = 1, reflect = false, prepass = false, make = (d) => pipelineCache(device).render(d)) => {
         const multisampled = samples > 1;
         const module = cachedShaderModule(device, multisampled ? multisampledDepthShader(code) : code);
         const pipelineFor = (blend, depthWrite, depthCompare = "less", gbuffer = false) => make({
@@ -33280,7 +33569,7 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
         };
       };
       const pipeline = pipelinesFor(sceneShader(null, false, hdr));
-      const compiled = await device.createShaderModule({ code: sceneShader(null, false, hdr) }).getCompilationInfo?.();
+      const compiled = await shaderModule(device, { code: sceneShader(null, false, hdr) }).getCompilationInfo?.();
       if (compiled?.messages?.some((m) => m.type === "error")) return null;
       const colourTexture = device.createTexture({
         size: { width, height },
@@ -33323,18 +33612,18 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
       const behind = device.createTexture({ size: { width, height }, format: colourFormat, usage: 4 | 2 | 16 });
       const behindBlank = device.createTexture({ size: { width: 1, height: 1 }, format: colourFormat, usage: 4 | 2 });
       const sized = { depth: depthTexture, behind };
-      const cascadeLayout = device.createBindGroupLayout({ entries: [{ binding: 12, visibility: SHADER_STAGE_VERTEX, buffer: { type: "uniform" } }] });
+      const cascadeLayout = bindGroupLayout(device, { entries: [{ binding: 12, visibility: SHADER_STAGE_VERTEX, buffer: { type: "uniform" } }] });
       const cascadeViews = Array.from({ length: CASCADE_COUNT }, () => {
         const buffer = device.createBuffer({ size: 80, usage: 64 | 8 });
         return { buffer, group: device.createBindGroup({ layout: cascadeLayout, entries: [{ binding: 12, resource: { buffer } }] }) };
       });
-      const casterLayout = device.createBindGroupLayout({
+      const casterLayout = bindGroupLayout(device, {
         entries: [
           { binding: 0, visibility: SHADER_STAGE_VERTEX, buffer: { type: "uniform", hasDynamicOffset: true, minBindingSize: UNIFORM_BYTES_USED } },
           { binding: 10, visibility: SHADER_STAGE_VERTEX, buffer: { type: "read-only-storage" } }
         ]
       });
-      const cutLayout = device.createBindGroupLayout({
+      const cutLayout = bindGroupLayout(device, {
         entries: [
           { binding: 0, visibility: SHADER_STAGE_VERTEX | SHADER_STAGE_FRAGMENT, buffer: { type: "uniform", hasDynamicOffset: true, minBindingSize: UNIFORM_BYTES_USED } },
           { binding: 1, visibility: SHADER_STAGE_FRAGMENT, sampler: { type: "filtering" } },
@@ -33344,7 +33633,7 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
           ...hdr ? [{ binding: 17, visibility: SHADER_STAGE_VERTEX, texture: { sampleType: "float" } }] : []
         ]
       });
-      const casterModule = hdr ? device.createShaderModule({ code: sceneShader(null, false, hdr) }) : null;
+      const casterModule = hdr ? shaderModule(device, { code: sceneShader(null, false, hdr) }) : null;
       const casterDepth = { format: CASCADE_FORMAT, depthWriteEnabled: true, depthCompare: "less", depthBias: 2, depthBiasSlopeScale: 1.5 };
       const localDepth = { format: "depth32float", depthWriteEnabled: true, depthCompare: "less" };
       const casterVertex = (entryPoint, uv) => ({
@@ -33372,8 +33661,8 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
         views: cascadeViews,
         casterLayout,
         cutLayout,
-        pipeline: casterModule ? device.createRenderPipeline({
-          layout: device.createPipelineLayout({ bindGroupLayouts: [casterLayout, cascadeLayout] }),
+        pipeline: casterModule ? pipelineCache(device).render({
+          layout: pipelineLayout(device, { bindGroupLayouts: [casterLayout, cascadeLayout] }),
           vertex: {
             module: casterModule,
             entryPoint: "vs_shadow",
@@ -33382,8 +33671,8 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
           primitive: { topology: "triangle-list", cullMode: "none" },
           depthStencil: casterDepth
         }) : null,
-        cutPipeline: casterModule ? device.createRenderPipeline({
-          layout: device.createPipelineLayout({ bindGroupLayouts: [cutLayout, cascadeLayout] }),
+        cutPipeline: casterModule ? pipelineCache(device).render({
+          layout: pipelineLayout(device, { bindGroupLayouts: [cutLayout, cascadeLayout] }),
           vertex: {
             module: casterModule,
             entryPoint: "vs_shadow_cut",
@@ -33403,14 +33692,14 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
           depthStencil: casterDepth
         }) : null,
         localViews,
-        localPipeline: casterModule ? device.createRenderPipeline({
-          layout: device.createPipelineLayout({ bindGroupLayouts: [casterLayout, cascadeLayout] }),
+        localPipeline: casterModule ? pipelineCache(device).render({
+          layout: pipelineLayout(device, { bindGroupLayouts: [casterLayout, cascadeLayout] }),
           vertex: casterVertex("vs_shadow", false),
           primitive: { topology: "triangle-list", cullMode: "none" },
           depthStencil: localDepth
         }) : null,
-        localCutPipeline: casterModule ? device.createRenderPipeline({
-          layout: device.createPipelineLayout({ bindGroupLayouts: [cutLayout, cascadeLayout] }),
+        localCutPipeline: casterModule ? pipelineCache(device).render({
+          layout: pipelineLayout(device, { bindGroupLayouts: [cutLayout, cascadeLayout] }),
           vertex: casterVertex("vs_shadow_cut", true),
           fragment: { module: casterModule, entryPoint: "fs_shadow_cut", targets: [] },
           primitive: { topology: "triangle-list", cullMode: "none" },
@@ -33528,7 +33817,7 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
         height,
         pipeline,
         pipelinesFor,
-        bindGroupLayout,
+        bindGroupLayout2,
         colourTexture,
         depthTexture,
         depthGroups,
@@ -33821,8 +34110,27 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     if (this.latestSeq >= this.submitted) return "current";
     return this.readSeq >= this.submitted ? "pending" : "stale";
   }
-  /** Encode and submit one frame, and start a readback if a buffer is free (or, with `readback` false, leave it in the colour texture). */
+  /**
+   * The pipeline cache's bookkeeping, as a frame starts (M3): once a frame has
+   * been drawn, compiles count as late, and the manifest of what this renderer
+   * asked for is saved for the next load to warm, then saved again whenever a
+   * late compile adds to it.
+   */
+  pipelineBookkeeping() {
+    const cache = pipelineCache(this.device);
+    if (this.framesSubmitted > 0) {
+      if (!cache.isReady) {
+        cache.markReady();
+        this.manifestStore.save(cache.manifest());
+      } else if (cache.stats().late > this.savedLate) {
+        this.savedLate = cache.stats().late;
+        this.manifestStore.save(cache.manifest());
+      }
+    }
+    this.framesSubmitted += 1;
+  }
   submit(instances, draw, readback = true) {
+    this.pipelineBookkeeping();
     for (const t of this.retired) destroySafely(t);
     this.retired = [];
     if (this.hdr && this.mips && draw.textureBudget) this.ensureStreaming(draw.textureBudget);
@@ -34149,7 +34457,8 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
       triangles,
       gpuMs: this.timer?.lastMs ?? null,
       ...this.timer && this.timer.lastPasses.length > 0 ? { passes: this.timer.lastPasses } : {},
-      ...this.streamer ? { textures: this.streamer.stats() } : {}
+      ...this.streamer ? { textures: this.streamer.stats() } : {},
+      pipelines: pipelineCache(this.device).stats()
     };
     const refract = draws.some((entry) => entry.refract);
     const hdrTaa = this.hdr && temporal !== null && prepass;
@@ -35011,8 +35320,8 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     const pipeline = (name, code, entry, formats) => {
       let made = cam.pipelines.get(name + k);
       if (!made) {
-        const module = device.createShaderModule({ code: code() });
-        made = device.createRenderPipeline({ layout: "auto", vertex: { module, entryPoint: "vs" }, fragment: { module, entryPoint: entry, targets: formats.map((format) => ({ format })) }, primitive: { topology: "triangle-list" } });
+        const module = shaderModule(device, { code: code() });
+        made = pipelineCache(device).render({ layout: "auto", vertex: { module, entryPoint: "vs" }, fragment: { module, entryPoint: entry, targets: formats.map((format) => ({ format })) }, primitive: { topology: "triangle-list" } });
         cam.pipelines.set(name + k, made);
       }
       return made;
@@ -35259,7 +35568,7 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
         continue;
       }
       this.compiling.add(key2);
-      const pending = this.pipelinesFor(sceneShader(graph, reflect, this.hdr, vertex), samples, reflect, prepass, (d) => this.device.createRenderPipelineAsync(d));
+      const pending = this.pipelinesFor(sceneShader(graph, reflect, this.hdr, vertex), samples, reflect, prepass, (d) => pipelineCache(this.device).renderAsync(d));
       jobs.push(
         Promise.all(Object.entries(pending).map(async ([k, v]) => [k, await v])).then((entries) => {
           if (!this.destroyed) this.variants.set(key2, Object.fromEntries(entries));
@@ -35556,7 +35865,7 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     const vertices = primitive.positions.length / 3;
     const byteLength = vertices * 64;
     if (!gpu.skin) {
-      this.skinPipeline ?? (this.skinPipeline = device.createComputePipeline({ layout: "auto", compute: { module: cachedShaderModule(device, SKIN_WGSL), entryPoint: "main" } }));
+      this.skinPipeline ?? (this.skinPipeline = pipelineCache(device).compute({ layout: "auto", compute: { module: cachedShaderModule(device, SKIN_WGSL), entryPoint: "main" } }));
       const storage = (data) => {
         const buffer = device.createBuffer({ size: Math.max(16, Math.ceil(data.byteLength / 16) * 16), usage: 128 | 8 });
         device.queue.writeBuffer(buffer, 0, data.buffer, data.byteOffset, data.byteLength);
@@ -35606,7 +35915,7 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     const device = this.device;
     const settings = primitive.cloth;
     const count = primitive.positions.length / 3;
-    const pipeline = (code) => device.createComputePipeline({ layout: "auto", compute: { module: cachedShaderModule(device, code), entryPoint: "main" } });
+    const pipeline = (code) => pipelineCache(device).compute({ layout: "auto", compute: { module: cachedShaderModule(device, code), entryPoint: "main" } });
     this.clothPipelines ?? (this.clothPipelines = { predict: pipeline(CLOTH_PREDICT_WGSL), solve: pipeline(CLOTH_SOLVE_WGSL), finish: pipeline(CLOTH_FINISH_WGSL) });
     const pipes = this.clothPipelines;
     if (!gpu.cloth) {
@@ -35892,16 +36201,16 @@ var WebgpuSceneRenderer = class _WebgpuSceneRenderer {
     }
     this.streamer = new TextureStreamer(bytes);
     const device = this.device;
-    const module = device.createShaderModule({ code: feedbackWgsl(4) });
-    const layout = device.createBindGroupLayout({
+    const module = shaderModule(device, { code: feedbackWgsl(4) });
+    const layout = bindGroupLayout(device, {
       entries: [
         { binding: 0, visibility: SHADER_STAGE_VERTEX | SHADER_STAGE_FRAGMENT, buffer: { type: "uniform", hasDynamicOffset: true } },
         { binding: 1, visibility: SHADER_STAGE_VERTEX, buffer: { type: "read-only-storage" } },
         { binding: 2, visibility: SHADER_STAGE_FRAGMENT, buffer: { type: "storage" } }
       ]
     });
-    const pipeline = device.createRenderPipeline({
-      layout: device.createPipelineLayout({ bindGroupLayouts: [layout] }),
+    const pipeline = pipelineCache(device).render({
+      layout: pipelineLayout(device, { bindGroupLayouts: [layout] }),
       vertex: { module, entryPoint: "vs", buffers: [{ arrayStride: 64, attributes: [{ shaderLocation: 0, offset: 0, format: "float32x3" }, { shaderLocation: 2, offset: 24, format: "float32x2" }] }] },
       fragment: { module, entryPoint: "fs", targets: [] },
       primitive: { topology: "triangle-list", cullMode: "none" },
@@ -36251,8 +36560,8 @@ function blankCube(device) {
   return cube;
 }
 function fullScreenPipeline(device, code, entryPoint, format) {
-  const module = device.createShaderModule({ code });
-  return device.createRenderPipeline({
+  const module = shaderModule(device, { code });
+  return pipelineCache(device).render({
     layout: "auto",
     vertex: { module, entryPoint: "vs" },
     fragment: { module, entryPoint, targets: [{ format }] },
@@ -36311,7 +36620,7 @@ function cachedShaderModule(device, code) {
   let modules = shaderModules.get(device);
   if (!modules) shaderModules.set(device, modules = /* @__PURE__ */ new Map());
   let module = modules.get(code);
-  if (!module) modules.set(code, module = device.createShaderModule({ code }));
+  if (!module) modules.set(code, module = shaderModule(device, { code }));
   return module;
 }
 var STREAM_MIN_SIDE = 256;
@@ -36362,6 +36671,7 @@ async function createSceneRenderer(width, height, caps, deviceProvider = getWebg
   const style = rasterStyleFor(caps);
   const device = await deviceProvider();
   let renderer = null;
+  if (device) await warmPipelines(device);
   if (device) renderer = await WebgpuSceneRenderer.create(device, width, height, style, options);
   renderer ?? (renderer = WebglSceneRenderer.create(width, height, style, glProvider));
   renderer ?? (renderer = new SoftwareSceneRenderer(style));
@@ -36852,8 +37162,8 @@ var GpuPostFx = class {
     const samp = (binding) => ({ binding, visibility: STAGE_FRAGMENT, sampler: { type: "filtering" } });
     const uni = { binding: 0, visibility: STAGE_FRAGMENT, buffer: { type: "uniform" } };
     this.layouts = {
-      post: device.createBindGroupLayout({ entries: [uni, tex(1), samp(2), tex(3), samp(4), tex(5)] }),
-      bloom: device.createBindGroupLayout({ entries: [uni, tex(1), samp(2)] })
+      post: bindGroupLayout(device, { entries: [uni, tex(1), samp(2), tex(3), samp(4), tex(5)] }),
+      bloom: bindGroupLayout(device, { entries: [uni, tex(1), samp(2)] })
     };
     const sampler = (filter) => device.createSampler({ magFilter: filter, minFilter: filter, addressModeU: "clamp-to-edge", addressModeV: "clamp-to-edge" });
     this.samplers = { nearest: sampler("nearest"), linear: sampler("linear") };
@@ -36994,9 +37304,9 @@ var GpuPostFx = class {
     const key2 = `${name}|${format}|${additive}`;
     let pipeline = this.pipelines.get(key2);
     if (!pipeline) {
-      const module = this.device.createShaderModule({ code });
-      pipeline = this.device.createRenderPipeline({
-        layout: this.device.createPipelineLayout({ bindGroupLayouts: [name === "post" ? this.layouts.post : this.layouts.bloom] }),
+      const module = shaderModule(this.device, { code });
+      pipeline = pipelineCache(this.device).render({
+        layout: pipelineLayout(this.device, { bindGroupLayouts: [name === "post" ? this.layouts.post : this.layouts.bloom] }),
         vertex: { module, entryPoint: "vs" },
         fragment: {
           module,
@@ -37206,8 +37516,8 @@ var HdrBloom = class {
     const glow = this.prepare(width, height, radius);
     if (!glow) return null;
     const pipeline = (code, entryPoint, additive) => {
-      const module = device.createShaderModule({ code });
-      return device.createRenderPipeline({
+      const module = shaderModule(device, { code });
+      return pipelineCache(device).render({
         layout: "auto",
         vertex: { module, entryPoint: "vs" },
         fragment: {
@@ -37521,7 +37831,7 @@ var GpuClouds = class _GpuClouds {
     this.clamp = device.createSampler({ magFilter: "linear", minFilter: "linear", addressModeU: "clamp-to-edge", addressModeV: "clamp-to-edge" });
     this.atm = device.createBuffer({ size: ATMOSPHERE_UNIFORM_FLOATS * 4, usage: BUF.uniform | BUF.copyDst });
     this.uniforms = device.createBuffer({ size: CLOUD_UNIFORM_FLOATS * 4, usage: BUF.uniform | BUF.copyDst });
-    this.pipeline = device.createComputePipeline({ layout: "auto", compute: { module: device.createShaderModule({ code: CLOUDS_WGSL }), entryPoint: "main" } });
+    this.pipeline = pipelineCache(device).compute({ layout: "auto", compute: { module: shaderModule(device, { code: CLOUDS_WGSL }), entryPoint: "main" } });
   }
   /** The half-size target's size for a frame of `width × height`. */
   static targetSize(width, height) {
@@ -38356,7 +38666,7 @@ var GpuPresenter = class {
     const tex = (binding, visibility = STAGE_FRAGMENT2, viewDimension = "2d") => ({ binding, visibility, texture: { sampleType: "float", viewDimension } });
     const uni = (visibility = STAGE_FRAGMENT2) => ({ binding: 0, visibility, buffer: { type: "uniform" } });
     const samp = (binding) => ({ binding, visibility: STAGE_FRAGMENT2, sampler: { type: "filtering" } });
-    const layout = (entries) => device.createBindGroupLayout({ entries });
+    const layout = (entries) => bindGroupLayout(device, { entries });
     const compose = layout([uni(), tex(1), tex(2), tex(3), samp(4), tex(5), tex(6), tex(7), tex(8)]);
     this.layouts = {
       sky: layout([uni(), tex(1), samp(2), tex(3, STAGE_FRAGMENT2, "2d-array"), samp(4)]),
@@ -38802,9 +39112,9 @@ var GpuPresenter = class {
     const key2 = `${name}|${format}`;
     let pipeline = this.pipelines.get(key2);
     if (!pipeline) {
-      const module = this.device.createShaderModule({ code });
-      const layout = this.device.createPipelineLayout({ bindGroupLayouts: [this.layouts[name]] });
-      pipeline = name === "measure" ? this.device.createComputePipeline({ layout, compute: { module, entryPoint: "measure" } }) : this.device.createRenderPipeline({
+      const module = shaderModule(this.device, { code });
+      const layout = pipelineLayout(this.device, { bindGroupLayouts: [this.layouts[name]] });
+      pipeline = name === "measure" ? pipelineCache(this.device).compute({ layout, compute: { module, entryPoint: "measure" } }) : pipelineCache(this.device).render({
         layout,
         vertex: { module, entryPoint: "vs" },
         // The lens pass writes its light and its glare (F4e-2); the bloom's finish, the frame and its bloom's gather (F11a-4).
@@ -40389,13 +40699,13 @@ function extractScore(events) {
   return best;
 }
 function extractUnlocks(events) {
-  const ids2 = /* @__PURE__ */ new Set();
+  const ids3 = /* @__PURE__ */ new Set();
   for (const event of events) {
     if (event.kind === "achievement") {
-      ids2.add(event.id);
+      ids3.add(event.id);
     }
   }
-  return [...ids2];
+  return [...ids3];
 }
 function verifyReplayScore(console2, replay, claimedScore, options = {}) {
   const events = runReplayEvents(console2, replay, options);
@@ -42470,6 +42780,8 @@ export {
   MAILBOX_TYPE_PROGRESS,
   MAILBOX_TYPE_SCORE,
   MAILBOX_WORDS,
+  MANIFEST_KEY,
+  MANIFEST_MAX,
   MAX_CAPTURE_SIDE,
   MAX_EMITTERS,
   MAX_LUT_SIZE,
@@ -42530,6 +42842,8 @@ export {
   ParticleOverlaySurface,
   PathTracer,
   PhysicsSession,
+  PipelineCache,
+  PipelineManifestStore,
   PointerInput,
   PostFxPass,
   PostFxSurface,
@@ -42731,6 +43045,9 @@ export {
   physicsSdkLua,
   physicsSlots,
   physicsStateHash,
+  pipelineCache,
+  pipelineKey,
+  pipelineRecipe,
   placeWithin,
   playLanguage,
   prehazeLayers,
@@ -42746,6 +43063,7 @@ export {
   readSidecarActions,
   readSidecarUi,
   readViewMode,
+  recipeDescriptor,
   reflectionFade,
   reflectionSampleY,
   remapErrorLines,
@@ -42783,6 +43101,7 @@ export {
   serializeReplay,
   shIrradiance,
   shade,
+  shaderModule,
   shaftGrid,
   shapeStick,
   simulateEmitter,
@@ -42810,6 +43129,7 @@ export {
   verifyReplayScore,
   viewDirection,
   viewModeCode,
+  warmPipelines,
   webgpuCanHonour,
   worldCenter,
   writeBreakpoints,

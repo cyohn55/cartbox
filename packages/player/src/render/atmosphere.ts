@@ -50,6 +50,7 @@ import {
   type Atmosphere,
   type Mat4,
 } from "@cartbox/editor";
+import { pipelineCache, shaderModule } from "./pipelineCache.js";
 
 type V3 = [number, number, number];
 
@@ -542,7 +543,7 @@ export class GpuAtmosphere {
     this.sampler = device.createSampler({ magFilter: "linear", minFilter: "linear", addressModeU: "clamp-to-edge", addressModeV: "clamp-to-edge" });
     this.uniforms = device.createBuffer({ size: ATMOSPHERE_UNIFORM_FLOATS * 4, usage: USAGE.uniform | USAGE.copyDst });
     this.camera = device.createBuffer({ size: AERIAL_CAMERA_FLOATS * 4, usage: USAGE.uniform | USAGE.copyDst });
-    const pipeline = (code: string) => device.createComputePipeline({ layout: "auto", compute: { module: device.createShaderModule({ code }), entryPoint: "main" } });
+    const pipeline = (code: string) => pipelineCache(device).compute({ layout: "auto", compute: { module: shaderModule(device, { code }), entryPoint: "main" } });
     this.pipelines = { transmittance: pipeline(TRANSMITTANCE_WGSL), multiScattering: pipeline(MULTISCATTER_WGSL), skyView: pipeline(SKY_VIEW_WGSL), aerial: null };
   }
 
@@ -590,7 +591,7 @@ export class GpuAtmosphere {
     this.device.queue.writeBuffer(this.camera, 0, packAerialCamera(camera, this.cameraData));
     const encoder = this.device.createCommandEncoder();
     this.medium(encoder, sky);
-    this.pipelines.aerial ??= this.device.createComputePipeline({ layout: "auto", compute: { module: this.device.createShaderModule({ code: AERIAL_WGSL }), entryPoint: "main" } });
+    this.pipelines.aerial ??= pipelineCache(this.device).compute({ layout: "auto", compute: { module: shaderModule(this.device, { code: AERIAL_WGSL }), entryPoint: "main" } });
     this.run(
       encoder,
       this.pipelines.aerial,

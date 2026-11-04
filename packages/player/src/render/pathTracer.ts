@@ -51,6 +51,7 @@ import { environmentKey, environmentPanorama, type LinearPanorama } from "./ibl.
 import { resolveLight, resolvePbr } from "./scenePacking.js";
 import { invertMat4 } from "./temporal.js";
 import { srgbEncode, toneMap, type ToneMapper } from "./toneMappers.js";
+import { pipelineCache, shaderModule } from "./pipelineCache.js";
 
 /** Bounces after the surface the eye sees, by default. */
 export const REFERENCE_BOUNCES = 4;
@@ -905,12 +906,12 @@ class TracerCore {
   }
 
   get tracePipeline(): any {
-    this.pipeline ??= this.device.createComputePipeline({ layout: "auto", compute: { module: this.device.createShaderModule({ code: PATH_TRACE_WGSL }), entryPoint: "main" } });
+    this.pipeline ??= pipelineCache(this.device).compute({ layout: "auto", compute: { module: shaderModule(this.device, { code: PATH_TRACE_WGSL }), entryPoint: "main" } });
     return this.pipeline;
   }
 
   get resolver(): any {
-    this.resolvePipeline ??= this.device.createComputePipeline({ layout: "auto", compute: { module: this.device.createShaderModule({ code: PATH_RESOLVE_WGSL }), entryPoint: "resolve" } });
+    this.resolvePipeline ??= pipelineCache(this.device).compute({ layout: "auto", compute: { module: shaderModule(this.device, { code: PATH_RESOLVE_WGSL }), entryPoint: "resolve" } });
     return this.resolvePipeline;
   }
 

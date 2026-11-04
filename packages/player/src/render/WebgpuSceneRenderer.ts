@@ -257,6 +257,7 @@ import {
   refractionCamera,
   waterLookUniform,
 } from "./scenePacking.js";
+import { bindGroupLayout as cachedBindGroupLayout, pipelineCache, pipelineLayout, PipelineManifestStore, shaderModule } from "./pipelineCache.js";
 
 /** The sun's GPU cascades (F2a): their depth array, its comparison sampler, each cascade's light view, and the depth-only pipeline. */
 interface CascadeResources {
@@ -3044,7 +3045,7 @@ export class WebgpuSceneRenderer implements SceneRenderer {
   private addVsmMarks(graph: FrameGraph, depth: FrameResource, multisampled: boolean): void {
     const v = this.vsm!;
     const k = multisampled ? 1 : 0;
-    v.mark[k] ??= this.device.createComputePipeline({ layout: "auto", compute: { module: this.device.createShaderModule({ code: vsmMarkWgsl(multisampled) }), entryPoint: "markPages" } });
+    v.mark[k] ??= pipelineCache(this.device).compute({ layout: "auto", compute: { module: shaderModule(this.device, { code: vsmMarkWgsl(multisampled) }), entryPoint: "markPages" } });
     const pipeline = v.mark[k];
     const slot = v.staging.find((s) => !s.busy) ?? null;
     if (slot) {
@@ -3138,10 +3139,10 @@ export class WebgpuSceneRenderer implements SceneRenderer {
 
   /** Clears a rect of a depth32float map to the far plane (F2d-2's, shared with F2b's pages). */
   private localClearPipeline(): any {
-    this.localClear ??= this.device.createRenderPipeline({
+    this.localClear ??= pipelineCache(this.device).render({
       layout: "auto",
-      vertex: { module: this.device.createShaderModule({ code: LOCAL_CLEAR_WGSL }), entryPoint: "vs" },
-      fragment: { module: this.device.createShaderModule({ code: LOCAL_CLEAR_WGSL }), entryPoint: "clear", targets: [] },
+      vertex: { module: shaderModule(this.device, { code: LOCAL_CLEAR_WGSL }), entryPoint: "vs" },
+      fragment: { module: shaderModule(this.device, { code: LOCAL_CLEAR_WGSL }), entryPoint: "clear", targets: [] },
       primitive: { topology: "triangle-list" },
       depthStencil: { format: "depth32float", depthWriteEnabled: true, depthCompare: "always" },
     });
@@ -3290,7 +3291,7 @@ export class WebgpuSceneRenderer implements SceneRenderer {
       // minBindingSize pins the struct size, so a change to the WGSL that does
       // not reach scenePacking.ts fails at pipeline creation rather than
       // rendering silent garbage.
-      const bindGroupLayout = device.createBindGroupLayout({
+      const bindGroupLayout = cachedBindGroupLayout(device, {
         entries: [
           {
             binding: 0,
@@ -3368,12 +3369,12 @@ export class WebgpuSceneRenderer implements SceneRenderer {
         // The physical sky's aerial perspective (F5a-2), and the volumetric fog (F5b), read by the linear-light shader.
         ...(hdr ? [{ binding: 14, visibility: SHADER_STAGE_FRAGMENT, buffer: { type: "uniform" } }, { binding: 6, visibility: SHADER_STAGE_FRAGMENT, texture: { sampleType: "float", viewDimension: "3d" } }] : []),
       ];
-      const depthLayout = device.createBindGroupLayout({ entries: depthEntries(false) });
-      const depthLayoutMs = device.createBindGroupLayout({ entries: depthEntries(true) });
-      const layout = device.createPipelineLayout({ bindGroupLayouts: [bindGroupLayout, depthLayout] });
-      const layoutMs = device.createPipelineLayout({ bindGroupLayouts: [bindGroupLayout, depthLayoutMs] });
+      const depthLayout = cachedBindGroupLayout(device, { entries: depthEntries(false) });
+      const depthLayoutMs = cachedBindGroupLayout(device, { entries: depthEntries(true) });
+      const layout = pipelineLayout(device, { bindGroupLayouts: [bindGroupLayout, depthLayout] });
+      const layoutMs = pipelineLayout(device, { bindGroupLayouts: [bindGroupLayout, depthLayoutMs] });
       // `make` creates each pipeline: at once, or (F1e) asynchronously, its set then a set of promises.
-      const pipelinesFor = (code: string, samples = 1, reflect = false, prepass = false, make: (descriptor: object) => any = (d) => device.createRenderPipeline(d)): PipelineSet => {
+      const pipelinesFor = (code: string, samples = 1, reflect = false, prepass = false, make: (descriptor: object) => any = (d) => pipelineCache(device).render(d)): PipelineSet => {
         const multisampled = samples > 1;
         // One module per distinct source on the device (F1e), whichever renderer asks.
         const module = cachedShaderModule(device, multisampled ? multisampledDepthShader(code) : code);
@@ -3434,7 +3435,7 @@ export class WebgpuSceneRenderer implements SceneRenderer {
       // A shader the device rejects doesn't throw: its pipelines draw nothing
       // and only the sky (drawn apart from them) shows. So ask, and decline the
       // device when it reports an error — the factory then falls back to WebGL2.
-      const compiled = await device.createShaderModule({ code: sceneShader(null, false, hdr) }).getCompilationInfo?.();
+      const compiled = await shaderModule(device, { code: sceneShader(null, false, hdr) }).getCompilationInfo?.();
       if (compiled?.messages?.some((m: { type?: string }) => m.type === "error")) return null;
 
       const colourTexture = device.createTexture({
@@ -3487,19 +3488,19 @@ export class WebgpuSceneRenderer implements SceneRenderer {
       const sized = { depth: depthTexture, behind };
       // The sun's cascades (F2a): a 1×1 stand-in until a frame casts, each cascade's light view, and the
       // depth-only pipeline that draws them (the linear-light renderer's alone).
-      const cascadeLayout = device.createBindGroupLayout({ entries: [{ binding: 12, visibility: SHADER_STAGE_VERTEX, buffer: { type: "uniform" } }] });
+      const cascadeLayout = cachedBindGroupLayout(device, { entries: [{ binding: 12, visibility: SHADER_STAGE_VERTEX, buffer: { type: "uniform" } }] });
       const cascadeViews = Array.from({ length: CASCADE_COUNT }, () => {
         const buffer = device.createBuffer({ size: 80, usage: 0x40 | 0x08 }); // UNIFORM | COPY_DST: a CasterView
         return { buffer, group: device.createBindGroup({ layout: cascadeLayout, entries: [{ binding: 12, resource: { buffer } }] }) };
       });
-      const casterLayout = device.createBindGroupLayout({
+      const casterLayout = cachedBindGroupLayout(device, {
         entries: [
           { binding: 0, visibility: SHADER_STAGE_VERTEX, buffer: { type: "uniform", hasDynamicOffset: true, minBindingSize: UNIFORM_BYTES_USED } },
           { binding: 10, visibility: SHADER_STAGE_VERTEX, buffer: { type: "read-only-storage" } },
         ],
       });
       // Cut-out casters also read their material and base map (F2a-2).
-      const cutLayout = device.createBindGroupLayout({
+      const cutLayout = cachedBindGroupLayout(device, {
         entries: [
           { binding: 0, visibility: SHADER_STAGE_VERTEX | SHADER_STAGE_FRAGMENT, buffer: { type: "uniform", hasDynamicOffset: true, minBindingSize: UNIFORM_BYTES_USED } },
           { binding: 1, visibility: SHADER_STAGE_FRAGMENT, sampler: { type: "filtering" } },
@@ -3509,7 +3510,7 @@ export class WebgpuSceneRenderer implements SceneRenderer {
           ...(hdr ? [{ binding: 17, visibility: SHADER_STAGE_VERTEX, texture: { sampleType: "float" } }] : []),
         ],
       });
-      const casterModule = hdr ? device.createShaderModule({ code: sceneShader(null, false, hdr) }) : null;
+      const casterModule = hdr ? shaderModule(device, { code: sceneShader(null, false, hdr) }) : null;
       // Slope-scaled bias as it rasterises, against acne on faces the sun grazes.
       const casterDepth = { format: CASCADE_FORMAT, depthWriteEnabled: true, depthCompare: "less", depthBias: 2, depthBiasSlopeScale: 1.5 };
       // The spot/point tiles (F2d) keep the full float depth a perspective map needs; their bias is the shader's, in world units.
@@ -3542,8 +3543,8 @@ export class WebgpuSceneRenderer implements SceneRenderer {
         casterLayout,
         cutLayout,
         pipeline: casterModule
-          ? device.createRenderPipeline({
-              layout: device.createPipelineLayout({ bindGroupLayouts: [casterLayout, cascadeLayout] }),
+          ? pipelineCache(device).render({
+              layout: pipelineLayout(device, { bindGroupLayouts: [casterLayout, cascadeLayout] }),
               vertex: {
                 module: casterModule,
                 entryPoint: "vs_shadow",
@@ -3554,8 +3555,8 @@ export class WebgpuSceneRenderer implements SceneRenderer {
             })
           : null,
         cutPipeline: casterModule
-          ? device.createRenderPipeline({
-              layout: device.createPipelineLayout({ bindGroupLayouts: [cutLayout, cascadeLayout] }),
+          ? pipelineCache(device).render({
+              layout: pipelineLayout(device, { bindGroupLayouts: [cutLayout, cascadeLayout] }),
               vertex: {
                 module: casterModule,
                 entryPoint: "vs_shadow_cut",
@@ -3577,16 +3578,16 @@ export class WebgpuSceneRenderer implements SceneRenderer {
           : null,
         localViews,
         localPipeline: casterModule
-          ? device.createRenderPipeline({
-              layout: device.createPipelineLayout({ bindGroupLayouts: [casterLayout, cascadeLayout] }),
+          ? pipelineCache(device).render({
+              layout: pipelineLayout(device, { bindGroupLayouts: [casterLayout, cascadeLayout] }),
               vertex: casterVertex("vs_shadow", false),
               primitive: { topology: "triangle-list", cullMode: "none" },
               depthStencil: localDepth,
             })
           : null,
         localCutPipeline: casterModule
-          ? device.createRenderPipeline({
-              layout: device.createPipelineLayout({ bindGroupLayouts: [cutLayout, cascadeLayout] }),
+          ? pipelineCache(device).render({
+              layout: pipelineLayout(device, { bindGroupLayouts: [cutLayout, cascadeLayout] }),
               vertex: casterVertex("vs_shadow_cut", true),
               fragment: { module: casterModule, entryPoint: "fs_shadow_cut", targets: [] },
               primitive: { topology: "triangle-list", cullMode: "none" },
@@ -4051,7 +4052,33 @@ export class WebgpuSceneRenderer implements SceneRenderer {
   }
 
   /** Encode and submit one frame, and start a readback if a buffer is free (or, with `readback` false, leave it in the colour texture). */
+  /** Frames submitted, and the late compiles last saved (M3; pipelineCache.ts). */
+  private framesSubmitted = 0;
+  private savedLate = 0;
+  private readonly manifestStore = new PipelineManifestStore();
+
+  /**
+   * The pipeline cache's bookkeeping, as a frame starts (M3): once a frame has
+   * been drawn, compiles count as late, and the manifest of what this renderer
+   * asked for is saved for the next load to warm, then saved again whenever a
+   * late compile adds to it.
+   */
+  private pipelineBookkeeping(): void {
+    const cache = pipelineCache(this.device);
+    if (this.framesSubmitted > 0) {
+      if (!cache.isReady) {
+        cache.markReady();
+        this.manifestStore.save(cache.manifest());
+      } else if (cache.stats().late > this.savedLate) {
+        this.savedLate = cache.stats().late;
+        this.manifestStore.save(cache.manifest());
+      }
+    }
+    this.framesSubmitted += 1;
+  }
+
   private submit(instances: readonly MeshSceneInstance[], draw: GpuSceneDraw, readback = true): void {
+    this.pipelineBookkeeping();
     // Texture streaming (F1b) on the AAA tier with mips, under the draw's budget; what the last round replaced goes now.
     for (const t of this.retired) destroySafely(t);
     this.retired = [];
@@ -4457,6 +4484,7 @@ export class WebgpuSceneRenderer implements SceneRenderer {
       gpuMs: this.timer?.lastMs ?? null,
       ...(this.timer && this.timer.lastPasses.length > 0 ? { passes: this.timer.lastPasses } : {}),
       ...(this.streamer ? { textures: this.streamer.stats() } : {}),
+      pipelines: pipelineCache(this.device).stats(),
     };
 
     // Soft edges (EP6b) need the opaque depth readable, so a frame that has
@@ -5478,8 +5506,8 @@ export class WebgpuSceneRenderer implements SceneRenderer {
     const pipeline = (name: string, code: () => string, entry: string, formats: string[]) => {
       let made = cam.pipelines.get(name + k);
       if (!made) {
-        const module = device.createShaderModule({ code: code() });
-        made = device.createRenderPipeline({ layout: "auto", vertex: { module, entryPoint: "vs" }, fragment: { module, entryPoint: entry, targets: formats.map((format) => ({ format })) }, primitive: { topology: "triangle-list" } });
+        const module = shaderModule(device, { code: code() });
+        made = pipelineCache(device).render({ layout: "auto", vertex: { module, entryPoint: "vs" }, fragment: { module, entryPoint: entry, targets: formats.map((format) => ({ format })) }, primitive: { topology: "triangle-list" } });
         cam.pipelines.set(name + k, made);
       }
       return made;
@@ -5758,7 +5786,7 @@ export class WebgpuSceneRenderer implements SceneRenderer {
         continue;
       }
       this.compiling.add(key);
-      const pending = this.pipelinesFor(sceneShader(graph, reflect, this.hdr, vertex), samples, reflect, prepass, (d) => this.device.createRenderPipelineAsync(d)) as unknown as Record<string, Promise<any>>;
+      const pending = this.pipelinesFor(sceneShader(graph, reflect, this.hdr, vertex), samples, reflect, prepass, (d) => pipelineCache(this.device).renderAsync(d)) as unknown as Record<string, Promise<any>>;
       jobs.push(
         Promise.all(Object.entries(pending).map(async ([k, v]) => [k, await v] as const))
           .then((entries) => {
@@ -6099,7 +6127,7 @@ export class WebgpuSceneRenderer implements SceneRenderer {
     const vertices = primitive.positions.length / 3;
     const byteLength = vertices * 64;
     if (!gpu.skin) {
-      this.skinPipeline ??= device.createComputePipeline({ layout: "auto", compute: { module: cachedShaderModule(device, SKIN_WGSL), entryPoint: "main" } });
+      this.skinPipeline ??= pipelineCache(device).compute({ layout: "auto", compute: { module: cachedShaderModule(device, SKIN_WGSL), entryPoint: "main" } });
       const storage = (data: ArrayBufferView) => {
         const buffer = device.createBuffer({ size: Math.max(16, Math.ceil(data.byteLength / 16) * 16), usage: 0x80 | 0x08 });
         device.queue.writeBuffer(buffer, 0, data.buffer, data.byteOffset, data.byteLength);
@@ -6155,7 +6183,7 @@ export class WebgpuSceneRenderer implements SceneRenderer {
     const device = this.device;
     const settings = primitive.cloth!;
     const count = primitive.positions.length / 3;
-    const pipeline = (code: string) => device.createComputePipeline({ layout: "auto", compute: { module: cachedShaderModule(device, code), entryPoint: "main" } });
+    const pipeline = (code: string) => pipelineCache(device).compute({ layout: "auto", compute: { module: cachedShaderModule(device, code), entryPoint: "main" } });
     this.clothPipelines ??= { predict: pipeline(CLOTH_PREDICT_WGSL), solve: pipeline(CLOTH_SOLVE_WGSL), finish: pipeline(CLOTH_FINISH_WGSL) };
     const pipes = this.clothPipelines;
     if (!gpu.cloth) {
@@ -6515,16 +6543,16 @@ export class WebgpuSceneRenderer implements SceneRenderer {
     }
     this.streamer = new TextureStreamer(bytes);
     const device = this.device;
-    const module = device.createShaderModule({ code: feedbackWgsl(4) });
-    const layout = device.createBindGroupLayout({
+    const module = shaderModule(device, { code: feedbackWgsl(4) });
+    const layout = cachedBindGroupLayout(device, {
       entries: [
         { binding: 0, visibility: SHADER_STAGE_VERTEX | SHADER_STAGE_FRAGMENT, buffer: { type: "uniform", hasDynamicOffset: true } },
         { binding: 1, visibility: SHADER_STAGE_VERTEX, buffer: { type: "read-only-storage" } },
         { binding: 2, visibility: SHADER_STAGE_FRAGMENT, buffer: { type: "storage" } },
       ],
     });
-    const pipeline = device.createRenderPipeline({
-      layout: device.createPipelineLayout({ bindGroupLayouts: [layout] }),
+    const pipeline = pipelineCache(device).render({
+      layout: pipelineLayout(device, { bindGroupLayouts: [layout] }),
       vertex: { module, entryPoint: "vs", buffers: [{ arrayStride: 64, attributes: [{ shaderLocation: 0, offset: 0, format: "float32x3" }, { shaderLocation: 2, offset: 24, format: "float32x2" }] }] },
       fragment: { module, entryPoint: "fs", targets: [] },
       primitive: { topology: "triangle-list", cullMode: "none" },
@@ -6900,8 +6928,8 @@ function blankCube(device: any): any {
 
 /** A pipeline drawing one full-screen triangle (no vertex buffers) into a `format` target. */
 function fullScreenPipeline(device: any, code: string, entryPoint: string, format: string): any {
-  const module = device.createShaderModule({ code });
-  return device.createRenderPipeline({
+  const module = shaderModule(device, { code });
+  return pipelineCache(device).render({
     layout: "auto",
     vertex: { module, entryPoint: "vs" },
     fragment: { module, entryPoint, targets: [{ format }] },
@@ -6975,7 +7003,8 @@ function cachedShaderModule(device: any, code: string): any {
   let modules = shaderModules.get(device);
   if (!modules) shaderModules.set(device, (modules = new Map()));
   let module = modules.get(code);
-  if (!module) modules.set(code, (module = device.createShaderModule({ code })));
+  // One module per source for the whole player (pipelineCache.ts, M3), so pipelines key and record alike.
+  if (!module) modules.set(code, (module = shaderModule(device, { code })));
   return module;
 }
 

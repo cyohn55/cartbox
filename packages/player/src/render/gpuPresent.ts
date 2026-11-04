@@ -52,6 +52,7 @@ import { GpuAtmosphere, SKY_VIEW_UV_WGSL, type AtmosphereSky } from "./atmospher
 import { GpuClouds, type CloudFrame } from "./clouds.js";
 import { MOON_RADIUS, NIGHT_SKY_RADIANCE, moonLightsSky } from "@cartbox/editor";
 import { CLOUD_TILE, MAX_CLOUD_LAYERS, type BakedCloudLayer, type DecodedTexture, type Mat4, type SkySun, type SunShafts } from "@cartbox/editor";
+import { bindGroupLayout, pipelineCache, pipelineLayout, shaderModule } from "./pipelineCache.js";
 
 /** Edge of a baked cloud layer's density tile. */
 const CLOUD_TILE_SIZE = CLOUD_TILE;
@@ -1059,7 +1060,7 @@ export class GpuPresenter {
     const tex = (binding: number, visibility = STAGE_FRAGMENT, viewDimension = "2d") => ({ binding, visibility, texture: { sampleType: "float", viewDimension } });
     const uni = (visibility = STAGE_FRAGMENT) => ({ binding: 0, visibility, buffer: { type: "uniform" } });
     const samp = (binding: number) => ({ binding, visibility: STAGE_FRAGMENT, sampler: { type: "filtering" } });
-    const layout = (entries: object[]) => device.createBindGroupLayout({ entries });
+    const layout = (entries: object[]) => bindGroupLayout(device, { entries });
     const compose = layout([uni(), tex(1), tex(2), tex(3), samp(4), tex(5), tex(6), tex(7), tex(8)]);
     this.layouts = {
       sky: layout([uni(), tex(1), samp(2), tex(3, STAGE_FRAGMENT, "2d-array"), samp(4)]),
@@ -1544,12 +1545,12 @@ export class GpuPresenter {
     const key = `${name}|${format}`;
     let pipeline = this.pipelines.get(key);
     if (!pipeline) {
-      const module = this.device.createShaderModule({ code });
-      const layout = this.device.createPipelineLayout({ bindGroupLayouts: [this.layouts[name]] });
+      const module = shaderModule(this.device, { code });
+      const layout = pipelineLayout(this.device, { bindGroupLayouts: [this.layouts[name]] });
       pipeline =
         name === "measure"
-          ? this.device.createComputePipeline({ layout, compute: { module, entryPoint: "measure" } })
-          : this.device.createRenderPipeline({
+          ? pipelineCache(this.device).compute({ layout, compute: { module, entryPoint: "measure" } })
+          : pipelineCache(this.device).render({
               layout,
               vertex: { module, entryPoint: "vs" },
               // The lens pass writes its light and its glare (F4e-2); the bloom's finish, the frame and its bloom's gather (F11a-4).

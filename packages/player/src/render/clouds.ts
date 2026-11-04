@@ -37,6 +37,7 @@ import {
 } from "@cartbox/editor";
 
 import { ATMOSPHERE_COMMON_WGSL, packAtmosphereUniforms, ATMOSPHERE_UNIFORM_FLOATS, type AtmosphereSky } from "./atmosphere.js";
+import { pipelineCache, shaderModule } from "./pipelineCache.js";
 
 /** The march's workgroup edge. */
 const TILE = 8;
@@ -322,7 +323,7 @@ export class GpuClouds {
     this.clamp = device.createSampler({ magFilter: "linear", minFilter: "linear", addressModeU: "clamp-to-edge", addressModeV: "clamp-to-edge" });
     this.atm = device.createBuffer({ size: ATMOSPHERE_UNIFORM_FLOATS * 4, usage: BUF.uniform | BUF.copyDst });
     this.uniforms = device.createBuffer({ size: CLOUD_UNIFORM_FLOATS * 4, usage: BUF.uniform | BUF.copyDst });
-    this.pipeline = device.createComputePipeline({ layout: "auto", compute: { module: device.createShaderModule({ code: CLOUDS_WGSL }), entryPoint: "main" } });
+    this.pipeline = pipelineCache(device).compute({ layout: "auto", compute: { module: shaderModule(device, { code: CLOUDS_WGSL }), entryPoint: "main" } });
   }
 
   /** The half-size target's size for a frame of `width × height`. */

@@ -19,6 +19,7 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
 import type { DecodedTexture } from "@cartbox/editor";
+import { pipelineCache, shaderModule } from "./pipelineCache.js";
 
 /** The anisotropy mipmapped textures are sampled at: the most WebGPU allows. */
 export const MAX_ANISOTROPY = 16;
@@ -69,11 +70,11 @@ export class MipmapGenerator {
   generate(texture: any, levels: number, format: string, layers = 1): void {
     if (levels < 2) return;
     const device = this.device;
-    this.module ??= device.createShaderModule({ code: MIP_WGSL });
+    this.module ??= shaderModule(device, { code: MIP_WGSL });
     this.sampler ??= device.createSampler({ magFilter: "linear", minFilter: "linear", addressModeU: "clamp-to-edge", addressModeV: "clamp-to-edge" });
     let pipeline = this.pipelines.get(format);
     if (!pipeline) {
-      pipeline = device.createRenderPipeline({
+      pipeline = pipelineCache(device).render({
         layout: "auto",
         vertex: { module: this.module, entryPoint: "vs" },
         fragment: { module: this.module, entryPoint: "fs", targets: [{ format }] },

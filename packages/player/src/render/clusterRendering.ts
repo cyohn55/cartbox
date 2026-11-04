@@ -28,6 +28,7 @@ import { LOD_CLUSTER_FLOATS, packClusterLod, type ClusterLod } from "@cartbox/ed
 
 import { INSTANCE_FLOATS } from "./scenePacking.js";
 import { INDIRECT_WORDS, frustumPlanesOf } from "./gpuCulling.js";
+import { bindGroupLayout, pipelineCache, pipelineLayout, shaderModule } from "./pipelineCache.js";
 
 /* eslint-disable @typescript-eslint/no-explicit-any -- WebGPU handles aren't typed in this build */
 
@@ -211,7 +212,7 @@ export class ClusterRendering {
   constructor(private readonly device: any) {
     this.frameUniforms = device.createBuffer({ size: JOB_STRIDE * 2, usage: UNIFORM | COPY_DST });
     const storage = (binding: number, type: string) => ({ binding, visibility: COMPUTE, buffer: { type } });
-    this.layout = device.createBindGroupLayout({
+    this.layout = bindGroupLayout(device, {
       entries: [
         { binding: 0, visibility: COMPUTE, buffer: { type: "uniform" } },
         { binding: 1, visibility: COMPUTE, buffer: { type: "uniform" } },
@@ -223,9 +224,9 @@ export class ClusterRendering {
         { binding: 7, visibility: COMPUTE, texture: { sampleType: "unfilterable-float" } },
       ],
     });
-    this.pipeline = device.createComputePipeline({
-      layout: device.createPipelineLayout({ bindGroupLayouts: [this.layout] }),
-      compute: { module: device.createShaderModule({ code: CLUSTER_WGSL }), entryPoint: "main" },
+    this.pipeline = pipelineCache(device).compute({
+      layout: pipelineLayout(device, { bindGroupLayouts: [this.layout] }),
+      compute: { module: shaderModule(device, { code: CLUSTER_WGSL }), entryPoint: "main" },
     });
   }
 

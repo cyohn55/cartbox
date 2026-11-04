@@ -28,6 +28,7 @@ import { CLUSTER_CELLS, CLUSTER_X, CLUSTER_Y, CLUSTER_Z, FOG_SLICES, aerialCamer
 
 import { CASCADE_COUNT, type Cascade } from "./cascades.js";
 import { LOCAL_ATLAS_SIZE } from "./localAtlas.js";
+import { pipelineCache, shaderModule } from "./pipelineCache.js";
 
 /** The fog volumes' format: in-scattered RGB and extinction (inject), or transmittance (integrate). */
 export const FOG_FORMAT = "rgba16float";
@@ -450,7 +451,7 @@ export class GpuVolumetricFog {
   encode(encoder: any, scene: { readonly cascades: any; readonly sampler: any; readonly lights: any; readonly clusters: any; readonly tiles: any; readonly atlas: any }, timing: { readonly timestampWrites?: object } = {}): void {
     const device = this.device;
     const [nx, ny, nz] = this.grid.split("x").map(Number) as [number, number, number];
-    const pipeline = (code: string) => device.createComputePipeline({ layout: "auto", compute: { module: device.createShaderModule({ code }), entryPoint: "main" } });
+    const pipeline = (code: string) => pipelineCache(device).compute({ layout: "auto", compute: { module: shaderModule(device, { code }), entryPoint: "main" } });
     this.pipelines ??= { inject: pipeline(FOG_INJECT_WGSL), integrate: pipeline(FOG_INTEGRATE_WGSL) };
     const history = this.light![this.index]!;
     const current = this.light![1 - this.index]!;

@@ -14,6 +14,7 @@
 import type { Mat4 } from "@cartbox/editor";
 
 import { INSTANCE_FLOATS } from "./scenePacking.js";
+import { bindGroupLayout, pipelineCache, pipelineLayout, shaderModule } from "./pipelineCache.js";
 
 /* eslint-disable @typescript-eslint/no-explicit-any -- WebGPU handles aren't typed in this build */
 
@@ -103,15 +104,15 @@ export class GpuTransforms {
 
   constructor(private readonly device: any) {
     this.uniforms = device.createBuffer({ size: UNIFORM_BYTES, usage: UNIFORM | COPY_DST });
-    this.layout = device.createBindGroupLayout({
+    this.layout = bindGroupLayout(device, {
       entries: [
         { binding: 0, visibility: 0x4, buffer: { type: "uniform" } },
         { binding: 1, visibility: 0x4, buffer: { type: "storage" } },
       ],
     });
-    this.pipeline = device.createComputePipeline({
-      layout: device.createPipelineLayout({ bindGroupLayouts: [this.layout] }),
-      compute: { module: device.createShaderModule({ code: TRANSFORM_WGSL }), entryPoint: "fill" },
+    this.pipeline = pipelineCache(device).compute({
+      layout: pipelineLayout(device, { bindGroupLayouts: [this.layout] }),
+      compute: { module: shaderModule(device, { code: TRANSFORM_WGSL }), entryPoint: "fill" },
     });
   }
 

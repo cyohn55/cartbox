@@ -155,7 +155,9 @@ This has four consequences:
     - smooth scaling for HD and hard pixels below;
     - a failure remembered, watched only at the start, and harmless without a device or storage.
 
-- [ ] **R5. Pipeline warm-up.**
+- [ ] **R5. Pipeline warm-up.** **The mechanism is done (AAA_PRODUCTION_ROADMAP.md M3); a manifest shipped with each map and the hardware acceptance are left.**
+  - M3 put every pipeline through one cache per device, records what each session compiles as recipes, and warms the stored manifest off the frame before the renderer's first frame (up to 3 s). On Dawn, a session warmed that way compiles nothing late and draws identical frames.
+  - Left: the first load on a browser has no stored manifest. Record one from a scripted match on each map and ship it in the map's package (R2), so the first match is warm too; then this item's acceptance on R1's hardware.
   - Every pipeline either map can use (its material permutations, effects, equipment, explosions, GI and fog passes) is created with `createRenderPipelineAsync`/`createComputePipelineAsync` while the lobby and intro play.
   - The match starts when the warm-up is done, or after a timeout, past which the rest compile in the background.
   - *Acceptance:* no frame over 50 ms in R1's 2-minute match after the intro, on every device class.

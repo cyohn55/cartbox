@@ -27,6 +27,7 @@ import { PROBE_NORMAL_BIAS, PROBE_SH, PROBE_VOLUME_SLOTS, giWindow, type Dynamic
 
 import { LIGHTMAP_TRACE_WGSL, bakeLights, lightmapParams, packBakeLights, packLightmapScene } from "./gpuLightmapper.js";
 import type { LinearPanorama } from "./ibl.js";
+import { pipelineCache, shaderModule } from "./pipelineCache.js";
 
 /** Floats in the GI passes' uniform block. */
 export const GI_UNIFORM_FLOATS = 32;
@@ -419,7 +420,7 @@ export class GpuProbeGi {
     // The frame's seed, a whole number a float holds exactly.
     device.queue.writeBuffer(this.uniforms, 0, packGiUniforms(layout, settings, rotation, this.frames % 16777216, bounce, this.data, window));
     this.frames += 1;
-    const pipeline = (entryPoint: string) => device.createComputePipeline({ layout: "auto", compute: { module: device.createShaderModule({ code: GI_WGSL }), entryPoint } });
+    const pipeline = (entryPoint: string) => pipelineCache(device).compute({ layout: "auto", compute: { module: shaderModule(device, { code: GI_WGSL }), entryPoint } });
     this.pipelines ??= { trace: pipeline("giTrace"), update: pipeline("giUpdate") };
     const pass = encoder.beginComputePass(timing);
     pass.setPipeline(this.pipelines.trace);
@@ -511,7 +512,7 @@ export class GpuProbeGi {
     device.queue.writeBuffer(this.reflectUniforms, 0, this.reflectData);
     if (volume) device.queue.writeBuffer(this.reflectGi, 0, packGiUniforms(volume.layout, { rays: 1, hysteresis: 0, spacing: 1, probesPerFrame: 0 }, [[1, 0, 0], [0, 1, 0], [0, 0, 1]], 0, true));
     if (!lit) this.frames += 1;
-    this.reflectPipeline ??= device.createComputePipeline({ layout: "auto", compute: { module: device.createShaderModule({ code: GI_WGSL }), entryPoint: "giReflect" } });
+    this.reflectPipeline ??= pipelineCache(device).compute({ layout: "auto", compute: { module: shaderModule(device, { code: GI_WGSL }), entryPoint: "giReflect" } });
     const pass = encoder.beginComputePass(timing);
     pass.setPipeline(this.reflectPipeline);
     pass.setBindGroup(

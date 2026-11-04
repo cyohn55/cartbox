@@ -27,6 +27,7 @@ import { MAX_REFLECTION_PROBES, PANORAMA_FACES, probeOrder, projectionMatrix, vi
 
 import { IBL_LEVELS } from "./ibl.js";
 import { MipmapGenerator, mipLevelCount } from "./mipmaps.js";
+import { pipelineCache, shaderModule } from "./pipelineCache.js";
 
 /** A probe face's size: the sky cube's, so a roughness reads the same level in both. */
 export const PROBE_FACE = 128;
@@ -282,7 +283,7 @@ export class ProbeCapture {
 
   private prefilter(slot: number, levels: number, sky: any): void {
     const device = this.device;
-    this.pipeline ??= device.createComputePipeline({ layout: "auto", compute: { module: device.createShaderModule({ code: PREFILTER_WGSL }), entryPoint: "main" } });
+    this.pipeline ??= pipelineCache(device).compute({ layout: "auto", compute: { module: shaderModule(device, { code: PREFILTER_WGSL }), entryPoint: "main" } });
     this.sampler ??= device.createSampler({ magFilter: "linear", minFilter: "linear", mipmapFilter: "linear", addressModeU: "clamp-to-edge", addressModeV: "clamp-to-edge" });
     if (!this.framesBuffer) {
       // Each face camera's forward, right (forward × up) and up.

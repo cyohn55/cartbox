@@ -22,6 +22,7 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 
 import { timingSpan, type PassContext } from "./frameGraph.js";
+import { pipelineCache, shaderModule } from "./pipelineCache.js";
 
 /** The fewest and most levels the chain blurs over, by the bloom's radius (0..1). */
 const MIN_LEVELS = 3;
@@ -137,8 +138,8 @@ export class HdrBloom {
     const glow = this.prepare(width, height, radius);
     if (!glow) return null;
     const pipeline = (code: string, entryPoint: string, additive: boolean) => {
-      const module = device.createShaderModule({ code });
-      return device.createRenderPipeline({
+      const module = shaderModule(device, { code });
+      return pipelineCache(device).render({
         layout: "auto",
         vertex: { module, entryPoint: "vs" },
         fragment: {
