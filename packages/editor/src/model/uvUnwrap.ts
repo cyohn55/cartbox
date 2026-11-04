@@ -26,7 +26,7 @@ import { primitiveTopology } from "./meshModel";
 type Vec2 = [number, number];
 
 /** A primitive rebuilt with new vertices, each a copy of a source vertex with its own UV. */
-function rebuild(p: MeshPrimitive, sources: readonly number[], uvs: readonly number[], indices: Uint32Array): MeshPrimitive {
+export function rebuild(p: MeshPrimitive, sources: readonly number[], uvs: readonly number[], indices: Uint32Array): MeshPrimitive {
   const n = sources.length;
   const copy = <T extends Float32Array | Uint16Array>(stream: T | null | undefined, width: number, make: (n: number) => T): T | null => {
     if (!stream) return null;
@@ -52,7 +52,7 @@ function rebuild(p: MeshPrimitive, sources: readonly number[], uvs: readonly num
 }
 
 /** A rectangle to pack, and where it went. */
-interface Box {
+export interface Box {
   readonly w: number;
   readonly h: number;
   x: number;
@@ -63,7 +63,7 @@ interface Box {
  * Shelf-pack boxes (tallest first) into a square, `gap` apart and from its
  * edges; returns the square's side. Boxes' `x`, `y` are set.
  */
-function packBoxes(boxes: Box[], gap: number): number {
+export function packBoxes(boxes: Box[], gap: number): number {
   const area = boxes.reduce((s, b) => s + (b.w + gap) * (b.h + gap), 0);
   const widest = Math.max(0, ...boxes.map((b) => b.w + 2 * gap));
   const order = [...boxes].sort((a, b) => b.h - a.h || b.w - a.w);

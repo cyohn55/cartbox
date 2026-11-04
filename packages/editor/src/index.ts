@@ -1918,6 +1918,7 @@ export {
   type UnwrapOptions,
   type UvIsland,
 } from "./model/uvUnwrap";
+export { angleDistortion, unwrapConformal, type ConformalUnwrapOptions } from "./model/uvLscm";
 export {
   PAINT_LAYERS,
   blankLayer,

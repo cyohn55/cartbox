@@ -30,6 +30,8 @@ import {
   texelOf,
   transformIsland,
   unwrapPrimitive,
+  unwrapConformal,
+  angleDistortion,
   uvIslands,
   type EncodedImage,
   type MeshAsset,
@@ -362,11 +364,34 @@ const withPrimitive = (mesh: MeshAsset, index: number, next: MeshAsset["primitiv
 export function TexturePaintPanel({ mesh, set, paint, onEdit }: { mesh: MeshAsset; set: string | null; paint: TexturePaint; onEdit: (next: MeshAsset) => void }) {
   const [tool, setTool] = useState<"paint" | "islands">("paint");
   const [island, setIsland] = useState(-1);
+  // How to lay a part out (D2): flat faces by the way they face, or angle-preserving charts cut at creases.
+  const [method, setMethod] = useState<"box" | "conformal">("box");
+  const [crease, setCrease] = useState(60);
+  const unwrap = (q: MeshAsset["primitives"][number]) => (method === "conformal" ? unwrapConformal(q, { seamAngle: crease }) : unwrapPrimitive(q));
   const p = mesh.primitives[paint.primitive];
   const scalar = paint.layer === "roughness" || paint.layer === "metal" || paint.layer === "teamMask";
   const islands = p?.uvs ? uvIslands(p) : [];
   const picked = islands[island];
-  const unwrapAll = () => onEdit({ ...mesh, primitives: mesh.primitives.map((q) => (q.uvs ? q : unwrapPrimitive(q))) });
+  const unwrapAll = () => onEdit({ ...mesh, primitives: mesh.primitives.map((q) => (q.uvs ? q : unwrap(q))) });
+  const methodControls = (
+    <>
+      <SegmentedControl
+        ariaLabel="Unwrap method"
+        selected={method}
+        onSelect={setMethod}
+        options={[
+          { id: "box", label: "Box" },
+          { id: "conformal", label: "Conformal" },
+        ]}
+      />
+      {method === "conformal" && (
+        <label style={{ display: "grid", gridTemplateColumns: "1fr 56px", gap: 6, alignItems: "center", fontSize: 12 }}>
+          Cut at creases sharper than (°)
+          <input type="number" min={1} max={180} step={5} aria-label="Seam crease angle" value={crease} onChange={(e) => setCrease(Math.max(1, Math.min(180, Number(e.target.value) || 60)))} />
+        </label>
+      )}
+    </>
+  );
   useEffect(() => setIsland(-1), [paint.primitive]);
   if (!p) return null;
   return (
@@ -383,9 +408,13 @@ export function TexturePaintPanel({ mesh, set, paint, onEdit }: { mesh: MeshAsse
       {set && <RailHint>Painting the “{set}” material set, which this copy wears.</RailHint>}
       {!p.uvs ? (
         <>
-          <RailHint>This part has no UVs to paint through. Unwrap it first: each face is laid flat along the way it faces, and packed at one texel density.</RailHint>
+          <RailHint>
+            This part has no UVs to paint through. Unwrap it first. Box lays each face flat along the way it faces (crates, walls); Conformal cuts it at creases and
+            flattens each piece keeping its angles (characters, creatures, curved panels). Both pack at one texel density.
+          </RailHint>
+          {methodControls}
           <div className={styles.toolGroup}>
-            <button type="button" className={styles.toolBtn} onClick={() => onEdit(withPrimitive(mesh, paint.primitive, unwrapPrimitive(p)))}>
+            <button type="button" className={styles.toolBtn} onClick={() => onEdit(withPrimitive(mesh, paint.primitive, unwrap(p)))}>
               Unwrap this part
             </button>
             <button type="button" className={styles.toolBtn} onClick={unwrapAll}>
@@ -463,10 +492,16 @@ export function TexturePaintPanel({ mesh, set, paint, onEdit }: { mesh: MeshAsse
               <button type="button" className={styles.toolBtn} onClick={() => onEdit(withPrimitive(mesh, paint.primitive, packIslands(p)))}>
                 Pack
               </button>
-              <button type="button" className={styles.toolBtn} title="Lay the part out afresh (maps painted on the old layout won't line up)" onClick={() => onEdit(withPrimitive(mesh, paint.primitive, unwrapPrimitive(p)))}>
+              <button type="button" className={styles.toolBtn} title="Lay the part out afresh (maps painted on the old layout won't line up)" onClick={() => onEdit(withPrimitive(mesh, paint.primitive, unwrap(p)))}>
                 Re-unwrap
               </button>
             </div>
+          )}
+          {tool === "islands" && (
+            <>
+              {methodControls}
+              <RailHint>Re-unwrap uses this. Distortion now: {(angleDistortion(p) * (180 / Math.PI)).toFixed(1)}° average.</RailHint>
+            </>
           )}
           <RailHint>
             {islands.length} island{islands.length === 1 ? "" : "s"}. Paint on the model in the preview or on the UV view; each stroke is saved into the
