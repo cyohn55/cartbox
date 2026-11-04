@@ -75,6 +75,37 @@ export interface PhysicsSpec {
   readonly damping?: number;
   /** Dynamic bodies: a joint to the nearest ancestor with a body, or the world. */
   readonly joint?: JointSpec;
+  /**
+   * The collision layer the body is on, 0..15 (AAA_PRODUCTION_ROADMAP.md S3).
+   * Absent = 0.
+   */
+  readonly layer?: number;
+  /**
+   * The layers it collides with (and, for a trigger, detects): a bit per layer.
+   * Two bodies touch only when each one's mask holds the other's layer. Absent
+   * = every layer ({@link PHYSICS_MASK_ALL}).
+   */
+  readonly mask?: number;
+}
+
+/** Collision layers a scene has (AAA_PRODUCTION_ROADMAP.md S3). */
+export const PHYSICS_LAYERS = 16;
+/** A mask of every layer: the default. */
+export const PHYSICS_MASK_ALL = 0xffff;
+
+/**
+ * A body's layer and mask as Rapier's interaction groups (32 bits: the
+ * memberships in the high half, the filter in the low), with the defaults
+ * filled in.
+ */
+export function physicsGroups(layer = 0, mask = PHYSICS_MASK_ALL): number {
+  const l = Math.max(0, Math.min(PHYSICS_LAYERS - 1, Math.round(layer)));
+  return ((((1 << l) & 0xffff) << 16) | (mask & 0xffff)) >>> 0;
+}
+
+/** A ray's or a sweep's groups: it belongs to every layer and hits those in `mask`. */
+export function queryGroups(mask = PHYSICS_MASK_ALL): number {
+  return ((0xffff << 16) | (mask & 0xffff)) >>> 0;
 }
 
 export const PHYSICS_BODY_KINDS: readonly PhysicsBodyKind[] = ["static", "dynamic", "kinematic", "character"];
@@ -133,6 +164,8 @@ export function readPhysicsSpec(value: unknown): PhysicsSpec | null {
   const damping = num(raw.damping, 0, 10, 0);
   // Only a simulated body hangs, swings or springs.
   const joint = body === "dynamic" ? readJointSpec(raw.joint) : null;
+  const layer = Math.round(num(raw.layer, 0, PHYSICS_LAYERS - 1, 0));
+  const mask = Math.round(num(raw.mask, 0, PHYSICS_MASK_ALL, PHYSICS_MASK_ALL));
   return {
     body,
     shape,
@@ -144,6 +177,8 @@ export function readPhysicsSpec(value: unknown): PhysicsSpec | null {
     ...(gravity !== 1 ? { gravity } : {}),
     ...(damping !== 0 ? { damping } : {}),
     ...(joint ? { joint } : {}),
+    ...(layer !== 0 ? { layer } : {}),
+    ...(mask !== PHYSICS_MASK_ALL ? { mask } : {}),
   };
 }
 

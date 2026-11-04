@@ -27,7 +27,15 @@ export interface DirectConsole extends ConsoleInstance {
   readonly direct: true;
   /** The commands the cart sent through the direct API since the last take, in order. */
   takeCommands(): PhysicsCommand[];
+  /**
+   * Who answers the cart's `_cbx_query` calls (S1, S2): the runtime, once it
+   * is built. Until then (and with null) every query answers nil.
+   */
+  setQuery(answer: QueryHandler | null): void;
 }
+
+/** Answers a cart's query: op, a, and v1..v6, to numbers or null. */
+export type QueryHandler = (op: number, a: number, v: readonly number[]) => readonly number[] | null;
 
 /** The models the dedicated core runs (the HD core's tier). */
 export function directCoreModel(model: ConsoleModel): boolean {
@@ -52,6 +60,7 @@ export function createDirectConsole(
   sampleRate: number = model.sampleRate,
 ): DirectConsole {
   let commands: PhysicsCommand[] = [];
+  let answer: QueryHandler | null = null;
   let errorSeq = 0;
   let errorMessage = "";
   const core: ModernCore = wrapModernCore(module, {
@@ -63,8 +72,8 @@ export function createDirectConsole(
       command: (op, a, v1, v2, v3, v4, v5, v6) => {
         commands.push({ op, a, v: [v1, v2, v3, v4, v5, v6] });
       },
-      // Queries arrive with the direct SDK; until then the cart reads state from the RAM blocks.
-      query: () => null,
+      // Physics reads past the RAM block's caps, and rays answered in the call (S1, S2).
+      query: (op, a, v1, v2, v3, v4, v5, v6) => (answer ? answer(op, a, [v1, v2, v3, v4, v5, v6]) : null),
     },
   });
   const fail = () => {
@@ -81,6 +90,9 @@ export function createDirectConsole(
       const taken = commands;
       commands = [];
       return taken;
+    },
+    setQuery(handler) {
+      answer = handler;
     },
     loadCartridge(bytes) {
       const code = readCartCode(bytes);
@@ -118,6 +130,7 @@ export function createDirectConsole(
     memoryBytes: () => core.memoryBytes(),
     dispose() {
       commands = [];
+      answer = null;
     },
   };
 }

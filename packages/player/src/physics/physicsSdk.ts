@@ -9,11 +9,15 @@
  *   cartbox.velocity(obj, x, y, z)    set a dynamic or kinematic body's velocity
  *   cartbox.teleport(obj, x, y, z)    move a body there at once
  *   cartbox.move(obj, dx, dy, dz)     walk a character this tick (slides, climbs, steps)
- *   cartbox.ray(slot, x, y, z, dx, dy, dz, max, ignore)   cast a ray (slot 0-15); read next tick
- *   cartbox.sweep(slot, shape, x, y, z, dx, dy, dz, max, ignore)   sweep a shape instead:
+ *   cartbox.ray(slot, x, y, z, dx, dy, dz, max, ignore, mask)   cast a ray (slot 0-15); read next
+ *                                     tick -- on the dedicated Modern core it is cast in the call and
+ *                                     returns what cartbox.hit would (any slot; S2)
+ *   cartbox.sweep(slot, shape, x, y, z, dx, dy, dz, max, ignore, mask)   sweep a shape instead:
  *                                     shape = radius (sphere), {hx, hy, hz} (box half-extents)
  *                                     or {radius, halfheight} (upright capsule)
  *   cartbox.hit(slot)                 -> hit, obj, x, y, z, nx, ny, nz, distance
+ *   cartbox.layers(l1, l2, ...)       -> a mask of those collision layers (0-15) for a ray's or a
+ *                                     sweep's mask: it hits only bodies on them (S3; nil = all)
  *   cartbox.contacts()                -> this tick's contacts { {a=, b=, started=, trigger=}, ... }
  *   cartbox.entered(trigger)          -> objects that came into a trigger zone this tick
  *   cartbox.exited(trigger)           -> objects that left it this tick
@@ -171,13 +175,22 @@ import {
   PHYS_OP_VELOCITY,
   PHYS_RAY_BYTES,
   PHYS_RAYS,
+  PHYS_MAX_BODIES,
+  PHYS_Q_BODY,
+  PHYS_Q_CAST,
+  PHYS_Q_CONTACTS,
+  PHYS_Q_CONTACTS_PAGE,
+  PHYS_Q_HASH,
+  PHYS_Q_INSIDE,
+  PHYS_Q_INSIDE_PAGE,
+  PHYS_Q_RAY,
   physicsBlockAddress,
   type RamLayout,
 } from "./protocol.js";
 import { physicsSlots, sceneHasPhysics } from "./physicsSession.js";
 import { animatedObjects } from "../anim/animationSession.js";
 import { timelineEventNames } from "../anim/timelineSession.js";
-import { timelineValueNames } from "@cartbox/editor";
+import { PHYSICS_LAYERS, PHYSICS_MASK_ALL, timelineValueNames } from "@cartbox/editor";
 
 /**
  * Whether a scene needs the runtime block at all: bodies (when a physics engine
@@ -211,12 +224,13 @@ const luaString = (s: string) => JSON.stringify(s);
 export function runtimeSdkLua(
   scene: MeshScene | null | undefined,
   layout: RamLayout,
-  { physics: engine = true }: { physics?: boolean } = {},
+  { physics: engine = true, maxBodies = PHYS_MAX_BODIES }: { physics?: boolean; maxBodies?: number } = {},
 ): string {
   if (!scene || !sceneNeedsRuntime(scene, { physics: engine })) return "";
   // Without an engine to run them, bodies keep the SDK's no-op physics calls.
   const physics = engine && sceneHasPhysics(scene);
-  const slots = physicsSlots(scene).map((object, slot) => `[${object}]=${slot}`);
+  // The same bodies the session makes (physicsSlots): the block's 64, or more on the dedicated core (S1).
+  const slots = physicsSlots(scene, maxBodies).map((object, slot) => `[${object}]=${slot}`);
   const pools = (scene.pools ?? []).map((pool) => `[${luaString(pool.prefab)}]={${pool.roots.join(",")}}`);
   const B = physicsBlockAddress(layout);
   // Commands past the block's 64 continue into the overflow ring where the core has one (EP20).
@@ -277,14 +291,25 @@ ${TIMELINE_CALLS(scene)}${LEVEL_CALLS(scene)}${scene.navmesh ? NAV_CALLS() : ""}
 /** The physics calls (inside the runtime block's do … end, after its helpers). */
 function PHYSICS_CALLS(): string {
   return `  cartbox.physics = function() return _live() end
+  -- The dedicated Modern core answers reads as calls (S1, S2): no 64-body,
+  -- 16-ray or 48-contact block, and a ray's hit comes back in the call.
+  local _q = _cbx_query
+  local _int = function(v) return math.tointeger(v) or v end
+  local _hits = {}
   cartbox.physicshash = function()
     if not _live() then return 0 end
+    if _q then return _int(_q(${PHYS_Q_HASH}) or 0) end
     return _rd(_B + ${PHYS_HDR_HASH})
   end
   cartbox.body = function(o)
     local i = _obj(o)
     local s = i and _slot[i]
     if s == nil or not _live() then return nil end
+    if _q then
+      local x, y, z, vx, vy, vz, g = _q(${PHYS_Q_BODY}, i)
+      if x == nil then return nil end
+      return x, y, z, vx, vy, vz, g == 1
+    end
     local at = _B + ${PHYS_BODIES} + s * ${PHYS_BODY_BYTES}
     return _rd(at + 4) / ${PHYS_FIX}, _rd(at + 8) / ${PHYS_FIX}, _rd(at + 12) / ${PHYS_FIX},
       _rd(at + 16) / ${PHYS_FIX}, _rd(at + 20) / ${PHYS_FIX}, _rd(at + 24) / ${PHYS_FIX},
@@ -309,32 +334,63 @@ function PHYSICS_CALLS(): string {
     local i = _obj(o)
     if i and _slot[i] then _cmd(${PHYS_OP_UNJOIN}, i) end
   end
+  -- A layer mask from layer numbers (S3): cartbox.layers(0, 2) hits layers 0 and 2.
+  cartbox.layers = function(...)
+    local m = 0
+    for _, l in ipairs({...}) do
+      l = math.floor(l)
+      if l >= 0 and l < ${PHYSICS_LAYERS} then m = m | (1 << l) end
+    end
+    return m
+  end
   -- A ray, or (kind > 0) a swept shape, from a slot: options first, then the ray.
-  local function _cast(slot, kind, a, b, c, x, y, z, dx, dy, dz, max, ignore)
+  -- mask (S3) limits it to some layers; nil or 0 hits every layer.
+  -- On the dedicated core (S2) the cast happens in the call, against the world
+  -- as last stepped: it returns what cartbox.hit would, and any slot number works.
+  local function _cast(slot, kind, a, b, c, x, y, z, dx, dy, dz, max, ignore, mask)
     slot = math.floor(slot or 0)
-    if slot < 0 or slot >= ${PHYS_MAX_RAYS} then return end
+    if not _q and (slot < 0 or slot >= ${PHYS_MAX_RAYS}) then return end
     local m = math.sqrt((dx or 0)^2 + (dy or 0)^2 + (dz or 0)^2)
     if m < 1e-9 then return end
     local skip = 0
     if ignore ~= nil then skip = (_obj(ignore) or -1) + 1 end
-    if kind ~= ${PHYS_CAST_RAY} or skip > 0 then _cmd(${PHYS_OP_CAST}, slot, kind, a, b, c, skip) end
+    mask = math.floor(mask or 0) & ${PHYSICS_MASK_ALL}
     local k = (max or 100) / m
+    if _q then
+      if not _live() then return false end
+      if kind ~= ${PHYS_CAST_RAY} or skip > 0 or mask > 0 then _q(${PHYS_Q_CAST}, kind, a, b, c, skip, mask) end
+      local w, hx, hy, hz, nx, ny, nz, d = _q(${PHYS_Q_RAY}, 0, x, y, z, dx * k, dy * k, dz * k)
+      if w == nil or w == 0 then
+        _hits[slot] = false
+        return false
+      end
+      local obj = nil
+      if w >= 2 then obj = _int(w - 2) end
+      _hits[slot] = { obj, hx, hy, hz, nx, ny, nz, d }
+      return true, obj, hx, hy, hz, nx, ny, nz, d
+    end
+    if kind ~= ${PHYS_CAST_RAY} or skip > 0 or mask > 0 then _cmd(${PHYS_OP_CAST}, slot, kind, a, b, c, skip, mask) end
     _cmd(${PHYS_OP_RAY}, slot, x, y, z, dx * k, dy * k, dz * k)
   end
-  cartbox.ray = function(slot, x, y, z, dx, dy, dz, max, ignore)
-    _cast(slot, ${PHYS_CAST_RAY}, 0, 0, 0, x, y, z, dx, dy, dz, max, ignore)
+  cartbox.ray = function(slot, x, y, z, dx, dy, dz, max, ignore, mask)
+    return _cast(slot, ${PHYS_CAST_RAY}, 0, 0, 0, x, y, z, dx, dy, dz, max, ignore, mask)
   end
-  cartbox.sweep = function(slot, shape, x, y, z, dx, dy, dz, max, ignore)
+  cartbox.sweep = function(slot, shape, x, y, z, dx, dy, dz, max, ignore, mask)
     if type(shape) == "number" then
-      _cast(slot, ${PHYS_CAST_SPHERE}, shape, 0, 0, x, y, z, dx, dy, dz, max, ignore)
+      return _cast(slot, ${PHYS_CAST_SPHERE}, shape, 0, 0, x, y, z, dx, dy, dz, max, ignore, mask)
     elseif type(shape) == "table" and #shape >= 3 then
-      _cast(slot, ${PHYS_CAST_BOX}, shape[1], shape[2], shape[3], x, y, z, dx, dy, dz, max, ignore)
+      return _cast(slot, ${PHYS_CAST_BOX}, shape[1], shape[2], shape[3], x, y, z, dx, dy, dz, max, ignore, mask)
     elseif type(shape) == "table" and #shape == 2 then
-      _cast(slot, ${PHYS_CAST_CAPSULE}, shape[1], shape[2], 0, x, y, z, dx, dy, dz, max, ignore)
+      return _cast(slot, ${PHYS_CAST_CAPSULE}, shape[1], shape[2], 0, x, y, z, dx, dy, dz, max, ignore, mask)
     end
   end
   cartbox.hit = function(slot)
     slot = math.floor(slot or 0)
+    if _q then
+      local h = _hits[slot]
+      if not h or not _live() then return false end
+      return true, h[1], h[2], h[3], h[4], h[5], h[6], h[7], h[8]
+    end
     if slot < 0 or slot >= ${PHYS_MAX_RAYS} or not _live() then return false end
     local at = _B + ${PHYS_RAYS} + slot * ${PHYS_RAY_BYTES}
     local w = _rd(at)
@@ -347,6 +403,19 @@ function PHYSICS_CALLS(): string {
   cartbox.contacts = function()
     local out = {}
     if not _live() then return out end
+    if _q then
+      local from = 0
+      repeat
+        local r = table.pack(_q(${PHYS_Q_CONTACTS}, from))
+        local total = r[1] or 0
+        for k = 2, r.n - 2, 3 do
+          local f = _int(r[k + 2])
+          out[#out + 1] = { a = _int(r[k]), b = _int(r[k + 1]), started = (f & 1) == 1, trigger = (f & 2) == 2 }
+        end
+        from = from + ${PHYS_Q_CONTACTS_PAGE}
+      until from >= total
+      return out
+    end
     local n = _rd(_B + ${PHYS_EVENTS})
     for k = 0, n - 1 do
       local at = _B + ${PHYS_EVENTS + 4} + k * ${PHYS_EVENT_BYTES}
@@ -372,6 +441,16 @@ function PHYSICS_CALLS(): string {
     local t = _obj(o)
     local out = {}
     if t == nil or not _live() then return out end
+    if _q then
+      local from = 0
+      repeat
+        local r = table.pack(_q(${PHYS_Q_INSIDE}, t, from))
+        local total = r[1] or 0
+        for k = 2, r.n do out[#out + 1] = _int(r[k]) end
+        from = from + ${PHYS_Q_INSIDE_PAGE}
+      until from >= total
+      return out
+    end
     local n = _rd(_B + ${PHYS_OVERLAPS})
     for k = 0, n - 1 do
       local at = _B + ${PHYS_OVERLAPS + 4} + k * ${PHYS_OVERLAP_BYTES}

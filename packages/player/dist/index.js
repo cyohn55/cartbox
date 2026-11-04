@@ -439,6 +439,15 @@ var PHYS_OP_UI_TEXT = 38;
 var PHYS_OP_UI_LIST = 39;
 var PHYS_OP_LOOK = 40;
 var PHYS_OP_SHATTER = 41;
+var PHYS_Q_BODY = 100;
+var PHYS_Q_CAST = 101;
+var PHYS_Q_RAY = 102;
+var PHYS_Q_CONTACTS = 103;
+var PHYS_Q_INSIDE = 104;
+var PHYS_Q_HASH = 105;
+var PHYS_Q_CONTACTS_PAGE = 10;
+var PHYS_Q_INSIDE_PAGE = 30;
+var DIRECT_MAX_BODIES = 4096;
 function physicsBlockAddress(layout) {
   return layout.ramSize - PHYS_BLOCK_BYTES;
 }
@@ -5558,6 +5567,7 @@ function runsOnDirectCore(modelId, requested) {
 }
 function createDirectConsole(module, model, layout = RAM_LAYOUTS[model.id], sampleRate = model.sampleRate) {
   let commands = [];
+  let answer = null;
   let errorSeq = 0;
   let errorMessage = "";
   const core = wrapModernCore(module, {
@@ -5569,8 +5579,8 @@ function createDirectConsole(module, model, layout = RAM_LAYOUTS[model.id], samp
       command: (op, a, v1, v2, v3, v4, v5, v6) => {
         commands.push({ op, a, v: [v1, v2, v3, v4, v5, v6] });
       },
-      // Queries arrive with the direct SDK; until then the cart reads state from the RAM blocks.
-      query: () => null
+      // Physics reads past the RAM block's caps, and rays answered in the call (S1, S2).
+      query: (op, a, v1, v2, v3, v4, v5, v6) => answer ? answer(op, a, [v1, v2, v3, v4, v5, v6]) : null
     }
   });
   const fail = () => {
@@ -5587,6 +5597,9 @@ function createDirectConsole(module, model, layout = RAM_LAYOUTS[model.id], samp
       const taken = commands;
       commands = [];
       return taken;
+    },
+    setQuery(handler) {
+      answer = handler;
     },
     loadCartridge(bytes) {
       const code = readCartCode(bytes);
@@ -5623,6 +5636,7 @@ function createDirectConsole(module, model, layout = RAM_LAYOUTS[model.id], samp
     memoryBytes: () => core.memoryBytes(),
     dispose() {
       commands = [];
+      answer = null;
     }
   };
 }
@@ -8284,12 +8298,13 @@ function deterministicBackend(inner) {
       ...desc.damping !== void 0 ? { damping: snap(desc.damping) } : {}
     }),
     step: (dt) => inner.step(dt),
+    ...inner.refreshQueries ? { refreshQueries: () => inner.refreshQueries() } : {},
     bodyState: (handle) => inner.bodyState(handle),
     applyImpulse: (handle, v) => inner.applyImpulse(handle, snap3(v)),
     setVelocity: (handle, v) => inner.setVelocity(handle, snap3(v)),
     teleport: (handle, p) => inner.teleport(handle, snap3(p)),
     moveCharacter: (handle, d) => inner.moveCharacter(handle, snap3(d)),
-    raycast: (origin, direction, max, ignore) => inner.raycast(snap3(origin), fine3(direction), snap(max), ignore),
+    raycast: (origin, direction, max, ignore, mask) => inner.raycast(snap3(origin), fine3(direction), snap(max), ignore, mask),
     setEnabled: (handle, enabled) => inner.setEnabled(handle, enabled),
     setPose: (handle, p, q) => inner.setPose(handle, snap3(p), fineQ(q)),
     drainContacts: () => inner.drainContacts(),
@@ -8298,7 +8313,7 @@ function deterministicBackend(inner) {
   };
   if (inner.shapecast) {
     const cast = inner.shapecast.bind(inner);
-    out.shapecast = (shape, origin, direction, max, ignore) => cast(snapCastShape(shape), snap3(origin), fine3(direction), snap(max), ignore);
+    out.shapecast = (shape, origin, direction, max, ignore, mask) => cast(snapCastShape(shape), snap3(origin), fine3(direction), snap(max), ignore, mask);
   }
   if (inner.addJoint) {
     const add = inner.addJoint.bind(inner);
@@ -8483,10 +8498,23 @@ function castShape(kind, a, b, c) {
       return null;
   }
 }
-function physicsSlots(scene) {
+function castOptionsOf(kind, a, b, c, ignorePlusOne, mask) {
+  const ignore = Math.round(ignorePlusOne) - 1;
+  const m = Math.round(mask) & 65535;
+  return { shape: castShape(kind, a, b, c), ...ignore >= 0 ? { ignore } : {}, ...m > 0 ? { mask: m } : {} };
+}
+function physicsSlots(scene, max = PHYS_MAX_BODIES) {
+  return movingBodies(scene).slice(0, Math.max(0, max));
+}
+function bodyCapacity(scene, direct) {
+  const bodies = movingBodies(scene).length;
+  const cap = direct ? DIRECT_MAX_BODIES : PHYS_MAX_BODIES;
+  return { bodies, cap, over: Math.max(0, bodies - cap) };
+}
+function movingBodies(scene) {
   const out = [];
   scene.instances.forEach((inst, i) => {
-    if (inst.physics && inst.physics.body !== "static" && out.length < PHYS_MAX_BODIES) out.push(i);
+    if (inst.physics && inst.physics.body !== "static") out.push(i);
   });
   return out;
 }
@@ -8494,7 +8522,7 @@ function sceneHasPhysics(scene) {
   return Boolean(scene?.instances.some((inst) => inst.physics));
 }
 var PhysicsSession = class {
-  constructor(scene, backend, { deterministic } = {}) {
+  constructor(scene, backend, { deterministic, maxBodies = PHYS_MAX_BODIES } = {}) {
     this.tracked = [];
     this.byObject = /* @__PURE__ */ new Map();
     /** Bodies of reserve prefab copies (static ones too), by object index. */
@@ -8509,9 +8537,15 @@ var PhysicsSession = class {
     this.overlapPairs = [];
     this.tick = 0;
     this.stateHash = 0;
+    /** Options for the next RAY query this tick (PHYS_Q_CAST). */
+    this.queryCast = null;
+    /** Whether rays can see the world yet: after a step, or once refreshed for a query before one. */
+    this.queriesReady = false;
     this.deterministic = deterministic ?? scene.physicsWorld?.deterministic === true;
     this.backend = this.deterministic ? deterministicBackend(backend) : backend;
-    const slots = new Set(physicsSlots(scene));
+    this.maxBodies = maxBodies;
+    const slots = new Set(physicsSlots(scene, maxBodies));
+    this.dropped = movingBodies(scene).filter((i) => !slots.has(i));
     scene.instances.forEach((inst, i) => {
       const spec = inst.physics;
       if (!spec || spec.body !== "static" && !slots.has(i)) return;
@@ -8528,6 +8562,8 @@ var PhysicsSession = class {
         ...spec.trigger ? { trigger: true } : {},
         ...spec.gravity !== void 0 ? { gravity: spec.gravity } : {},
         ...spec.damping !== void 0 ? { damping: spec.damping } : {},
+        ...spec.layer !== void 0 ? { layer: spec.layer } : {},
+        ...spec.mask !== void 0 ? { mask: spec.mask } : {},
         object: i
       });
       this.handleOf.set(i, handle);
@@ -8578,12 +8614,59 @@ var PhysicsSession = class {
   }
   /** Write body state and last tick's ray results for the cart to read. */
   beforeTick(block) {
-    const bodies = this.tracked.map((t) => {
-      const s = this.backend.bodyState(t.handle);
-      const velocity = t.kind === "character" ? t.lastMove.map((v) => v / PHYSICS_DT) : s.velocity;
-      return { object: t.object, position: s.position, velocity, grounded: t.grounded, sleeping: s.sleeping };
-    });
+    const bodies = this.tracked.map((t) => this.reading(t));
     writePhysicsState(block, this.tick, bodies, this.rayResults, this.events, this.overlapPairs, this.stateHash);
+    this.queryCast = null;
+  }
+  /** A body as the cart reads it (a character's velocity is its last move over the tick). */
+  reading(t) {
+    const s = this.backend.bodyState(t.handle);
+    const velocity = t.kind === "character" ? t.lastMove.map((v) => v / PHYSICS_DT) : s.velocity;
+    return { object: t.object, position: s.position, velocity, grounded: t.grounded, sleeping: s.sleeping };
+  }
+  /**
+   * Answer a cart's query on the dedicated core (S1, S2; see PHYS_Q_* in
+   * protocol.ts), from the world as last stepped: the same state the block
+   * holds, without its caps, and rays cast in the call. Null for no answer.
+   */
+  query(op, a, v) {
+    if (op === PHYS_Q_BODY) {
+      const t = this.byObject.get(a);
+      if (!t || !t.enabled) return null;
+      const r = this.reading(t);
+      return [...r.position, ...r.velocity, r.grounded ? 1 : 0];
+    }
+    if (op === PHYS_Q_CAST) {
+      this.queryCast = castOptionsOf(a, v[0] ?? 0, v[1] ?? 0, v[2] ?? 0, v[3] ?? 0, v[4] ?? 0);
+      return null;
+    }
+    if (op === PHYS_Q_RAY) {
+      if (!this.queriesReady) {
+        this.backend.refreshQueries?.();
+        this.queriesReady = true;
+      }
+      const options = this.queryCast ?? { shape: null };
+      this.queryCast = null;
+      const [x = 0, y = 0, z = 0, dx = 0, dy = 0, dz = 0] = v;
+      const len = Math.hypot(dx, dy, dz);
+      if (!(len > 1e-9) || ![x, y, z].every(Number.isFinite)) return [0];
+      const hit = this.cast({ origin: [x, y, z], direction: [dx / len, dy / len, dz / len], max: len, ...options });
+      return hit ? [hit.object >= 0 ? hit.object + 2 : 1, ...hit.point, ...hit.normal, hit.distance] : [0];
+    }
+    if (op === PHYS_Q_CONTACTS) {
+      const out = [this.events.length];
+      for (const e of this.events.slice(Math.max(0, a), Math.max(0, a) + PHYS_Q_CONTACTS_PAGE)) {
+        out.push(e.a, e.b, (e.started ? PHYS_EVENT_STARTED : 0) | (e.trigger ? PHYS_EVENT_TRIGGER : 0));
+      }
+      return out;
+    }
+    if (op === PHYS_Q_INSIDE) {
+      const inside = this.overlapPairs.filter(([trigger]) => trigger === a).map(([, other]) => other);
+      const from = Math.max(0, Math.round(v[0] ?? 0));
+      return [inside.length, ...inside.slice(from, from + PHYS_Q_INSIDE_PAGE)];
+    }
+    if (op === PHYS_Q_HASH) return [this.stateHash];
+    return null;
   }
   /** Apply the cart's commands, step the world, and cast the rays it asked for. */
   afterTick(block) {
@@ -8647,10 +8730,7 @@ var PhysicsSession = class {
     for (const cmd of commands) {
       const [a, b, c, d, e, f3] = cmd.v;
       if (cmd.op === PHYS_OP_CAST) {
-        if (cmd.a >= 0 && cmd.a < PHYS_MAX_RAYS) {
-          const ignore = Math.round(e) - 1;
-          castOptions.set(cmd.a, { shape: castShape(a, b, c, d), ...ignore >= 0 ? { ignore } : {} });
-        }
+        if (cmd.a >= 0 && cmd.a < PHYS_MAX_RAYS) castOptions.set(cmd.a, castOptionsOf(a, b, c, d, e, f3));
         continue;
       }
       if (cmd.op === PHYS_OP_RAY) {
@@ -8682,6 +8762,7 @@ var PhysicsSession = class {
       }
     }
     this.backend.step(PHYSICS_DT);
+    this.queriesReady = true;
     this.events = this.backend.drainContacts();
     this.overlapPairs = this.backend.overlaps();
     this.tick += 1;
@@ -8689,10 +8770,12 @@ var PhysicsSession = class {
     this.rayResults = [];
     for (let slot = 0; slot < PHYS_MAX_RAYS; slot += 1) {
       const req = this.rayRequests[slot];
-      if (!req) this.rayResults[slot] = null;
-      else if (req.shape) this.rayResults[slot] = this.backend.shapecast?.(req.shape, req.origin, req.direction, req.max, req.ignore) ?? null;
-      else this.rayResults[slot] = this.backend.raycast(req.origin, req.direction, req.max, req.ignore);
+      this.rayResults[slot] = req ? this.cast(req) : null;
     }
+  }
+  /** One ray or sweep against the world as last stepped. */
+  cast(req) {
+    return req.shape ? this.backend.shapecast?.(req.shape, req.origin, req.direction, req.max, req.ignore, req.mask) ?? null : this.backend.raycast(req.origin, req.direction, req.max, req.ignore, req.mask);
   }
   /**
    * A digest of every moving body's exact state (reserve copies count as absent),
@@ -9220,17 +9303,17 @@ var TimelineSession = class {
 };
 
 // src/physics/physicsSdk.ts
-import { timelineValueNames as timelineValueNames2 } from "@cartbox/editor";
+import { PHYSICS_LAYERS, PHYSICS_MASK_ALL, timelineValueNames as timelineValueNames2 } from "@cartbox/editor";
 function sceneNeedsRuntime(scene, { physics = true } = {}) {
   return Boolean(
     scene && (physics && sceneHasPhysics(scene) || (scene.pools?.length ?? 0) > 0 || animatedObjects(scene).length > 0 || (scene.timelines?.length ?? 0) > 0 || (scene.levels?.length ?? 0) > 0 || Boolean(scene.navmesh) || Boolean(scene.streaming) || (scene.effects?.length ?? 0) > 0 || (scene.decals?.length ?? 0) > 0 || (scene.debris?.length ?? 0) > 0 || scene.instances.some((i) => i.mesh.fracture) || (scene.audio?.sounds.length ?? 0) > 0 || (scene.components?.length ?? 0) > 0)
   );
 }
 var luaString = (s) => JSON.stringify(s);
-function runtimeSdkLua(scene, layout, { physics: engine = true } = {}) {
+function runtimeSdkLua(scene, layout, { physics: engine = true, maxBodies = PHYS_MAX_BODIES } = {}) {
   if (!scene || !sceneNeedsRuntime(scene, { physics: engine })) return "";
   const physics = engine && sceneHasPhysics(scene);
-  const slots = physicsSlots(scene).map((object, slot) => `[${object}]=${slot}`);
+  const slots = physicsSlots(scene, maxBodies).map((object, slot) => `[${object}]=${slot}`);
   const pools = (scene.pools ?? []).map((pool) => `[${luaString(pool.prefab)}]={${pool.roots.join(",")}}`);
   const B = physicsBlockAddress(layout);
   const R = commandRingAddress(layout);
@@ -9288,14 +9371,25 @@ ${TIMELINE_CALLS(scene)}${LEVEL_CALLS(scene)}${scene.navmesh ? NAV_CALLS() : ""}
 }
 function PHYSICS_CALLS() {
   return `  cartbox.physics = function() return _live() end
+  -- The dedicated Modern core answers reads as calls (S1, S2): no 64-body,
+  -- 16-ray or 48-contact block, and a ray's hit comes back in the call.
+  local _q = _cbx_query
+  local _int = function(v) return math.tointeger(v) or v end
+  local _hits = {}
   cartbox.physicshash = function()
     if not _live() then return 0 end
+    if _q then return _int(_q(${PHYS_Q_HASH}) or 0) end
     return _rd(_B + ${PHYS_HDR_HASH})
   end
   cartbox.body = function(o)
     local i = _obj(o)
     local s = i and _slot[i]
     if s == nil or not _live() then return nil end
+    if _q then
+      local x, y, z, vx, vy, vz, g = _q(${PHYS_Q_BODY}, i)
+      if x == nil then return nil end
+      return x, y, z, vx, vy, vz, g == 1
+    end
     local at = _B + ${PHYS_BODIES} + s * ${PHYS_BODY_BYTES}
     return _rd(at + 4) / ${PHYS_FIX}, _rd(at + 8) / ${PHYS_FIX}, _rd(at + 12) / ${PHYS_FIX},
       _rd(at + 16) / ${PHYS_FIX}, _rd(at + 20) / ${PHYS_FIX}, _rd(at + 24) / ${PHYS_FIX},
@@ -9320,32 +9414,63 @@ function PHYSICS_CALLS() {
     local i = _obj(o)
     if i and _slot[i] then _cmd(${PHYS_OP_UNJOIN}, i) end
   end
+  -- A layer mask from layer numbers (S3): cartbox.layers(0, 2) hits layers 0 and 2.
+  cartbox.layers = function(...)
+    local m = 0
+    for _, l in ipairs({...}) do
+      l = math.floor(l)
+      if l >= 0 and l < ${PHYSICS_LAYERS} then m = m | (1 << l) end
+    end
+    return m
+  end
   -- A ray, or (kind > 0) a swept shape, from a slot: options first, then the ray.
-  local function _cast(slot, kind, a, b, c, x, y, z, dx, dy, dz, max, ignore)
+  -- mask (S3) limits it to some layers; nil or 0 hits every layer.
+  -- On the dedicated core (S2) the cast happens in the call, against the world
+  -- as last stepped: it returns what cartbox.hit would, and any slot number works.
+  local function _cast(slot, kind, a, b, c, x, y, z, dx, dy, dz, max, ignore, mask)
     slot = math.floor(slot or 0)
-    if slot < 0 or slot >= ${PHYS_MAX_RAYS} then return end
+    if not _q and (slot < 0 or slot >= ${PHYS_MAX_RAYS}) then return end
     local m = math.sqrt((dx or 0)^2 + (dy or 0)^2 + (dz or 0)^2)
     if m < 1e-9 then return end
     local skip = 0
     if ignore ~= nil then skip = (_obj(ignore) or -1) + 1 end
-    if kind ~= ${PHYS_CAST_RAY} or skip > 0 then _cmd(${PHYS_OP_CAST}, slot, kind, a, b, c, skip) end
+    mask = math.floor(mask or 0) & ${PHYSICS_MASK_ALL}
     local k = (max or 100) / m
+    if _q then
+      if not _live() then return false end
+      if kind ~= ${PHYS_CAST_RAY} or skip > 0 or mask > 0 then _q(${PHYS_Q_CAST}, kind, a, b, c, skip, mask) end
+      local w, hx, hy, hz, nx, ny, nz, d = _q(${PHYS_Q_RAY}, 0, x, y, z, dx * k, dy * k, dz * k)
+      if w == nil or w == 0 then
+        _hits[slot] = false
+        return false
+      end
+      local obj = nil
+      if w >= 2 then obj = _int(w - 2) end
+      _hits[slot] = { obj, hx, hy, hz, nx, ny, nz, d }
+      return true, obj, hx, hy, hz, nx, ny, nz, d
+    end
+    if kind ~= ${PHYS_CAST_RAY} or skip > 0 or mask > 0 then _cmd(${PHYS_OP_CAST}, slot, kind, a, b, c, skip, mask) end
     _cmd(${PHYS_OP_RAY}, slot, x, y, z, dx * k, dy * k, dz * k)
   end
-  cartbox.ray = function(slot, x, y, z, dx, dy, dz, max, ignore)
-    _cast(slot, ${PHYS_CAST_RAY}, 0, 0, 0, x, y, z, dx, dy, dz, max, ignore)
+  cartbox.ray = function(slot, x, y, z, dx, dy, dz, max, ignore, mask)
+    return _cast(slot, ${PHYS_CAST_RAY}, 0, 0, 0, x, y, z, dx, dy, dz, max, ignore, mask)
   end
-  cartbox.sweep = function(slot, shape, x, y, z, dx, dy, dz, max, ignore)
+  cartbox.sweep = function(slot, shape, x, y, z, dx, dy, dz, max, ignore, mask)
     if type(shape) == "number" then
-      _cast(slot, ${PHYS_CAST_SPHERE}, shape, 0, 0, x, y, z, dx, dy, dz, max, ignore)
+      return _cast(slot, ${PHYS_CAST_SPHERE}, shape, 0, 0, x, y, z, dx, dy, dz, max, ignore, mask)
     elseif type(shape) == "table" and #shape >= 3 then
-      _cast(slot, ${PHYS_CAST_BOX}, shape[1], shape[2], shape[3], x, y, z, dx, dy, dz, max, ignore)
+      return _cast(slot, ${PHYS_CAST_BOX}, shape[1], shape[2], shape[3], x, y, z, dx, dy, dz, max, ignore, mask)
     elseif type(shape) == "table" and #shape == 2 then
-      _cast(slot, ${PHYS_CAST_CAPSULE}, shape[1], shape[2], 0, x, y, z, dx, dy, dz, max, ignore)
+      return _cast(slot, ${PHYS_CAST_CAPSULE}, shape[1], shape[2], 0, x, y, z, dx, dy, dz, max, ignore, mask)
     end
   end
   cartbox.hit = function(slot)
     slot = math.floor(slot or 0)
+    if _q then
+      local h = _hits[slot]
+      if not h or not _live() then return false end
+      return true, h[1], h[2], h[3], h[4], h[5], h[6], h[7], h[8]
+    end
     if slot < 0 or slot >= ${PHYS_MAX_RAYS} or not _live() then return false end
     local at = _B + ${PHYS_RAYS} + slot * ${PHYS_RAY_BYTES}
     local w = _rd(at)
@@ -9358,6 +9483,19 @@ function PHYSICS_CALLS() {
   cartbox.contacts = function()
     local out = {}
     if not _live() then return out end
+    if _q then
+      local from = 0
+      repeat
+        local r = table.pack(_q(${PHYS_Q_CONTACTS}, from))
+        local total = r[1] or 0
+        for k = 2, r.n - 2, 3 do
+          local f = _int(r[k + 2])
+          out[#out + 1] = { a = _int(r[k]), b = _int(r[k + 1]), started = (f & 1) == 1, trigger = (f & 2) == 2 }
+        end
+        from = from + ${PHYS_Q_CONTACTS_PAGE}
+      until from >= total
+      return out
+    end
     local n = _rd(_B + ${PHYS_EVENTS})
     for k = 0, n - 1 do
       local at = _B + ${PHYS_EVENTS + 4} + k * ${PHYS_EVENT_BYTES}
@@ -9383,6 +9521,16 @@ function PHYSICS_CALLS() {
     local t = _obj(o)
     local out = {}
     if t == nil or not _live() then return out end
+    if _q then
+      local from = 0
+      repeat
+        local r = table.pack(_q(${PHYS_Q_INSIDE}, t, from))
+        local total = r[1] or 0
+        for k = 2, r.n do out[#out + 1] = _int(r[k]) end
+        from = from + ${PHYS_Q_INSIDE_PAGE}
+      until from >= total
+      return out
+    end
     local n = _rd(_B + ${PHYS_OVERLAPS})
     for k = 0, n - 1 do
       local at = _B + ${PHYS_OVERLAPS + 4} + k * ${PHYS_OVERLAP_BYTES}
@@ -10230,6 +10378,14 @@ var RuntimeChannel = class {
       block,
       [...this.watched.values()].flatMap((w) => w.position ? [{ object: w.object, joint: w.joint, position: w.position }] : [])
     );
+  }
+  /**
+   * Answer a query the cart made on the dedicated core (S1, S2): physics reads
+   * past the block's caps, and rays cast in the call. Null for no answer (no
+   * physics running, or an op nobody serves).
+   */
+  query(op, a, v) {
+    return this.physics?.query(op, a, v) ?? null;
   }
   /**
    * Take the cart's commands: scene ops here, the rest to physics (which then
@@ -39030,7 +39186,8 @@ var Player = class {
       const sceneLua = sceneObjectsSdkLua(this.options.mesh);
       if (sceneLua) prepared = prependLuaCode(prepared, sceneLua);
       const mesh = this.options.mesh;
-      const runtimeLua = layout && mesh ? runtimeSdkLua(mesh, layout, { physics: Boolean(this.options.physics) }) : "";
+      const maxBodies = direct ? DIRECT_MAX_BODIES : PHYS_MAX_BODIES;
+      const runtimeLua = layout && mesh ? runtimeSdkLua(mesh, layout, { physics: Boolean(this.options.physics), maxBodies }) : "";
       if (runtimeLua && mesh && layout) {
         prepared = prependLuaCode(prepared, runtimeLua);
         let physics = null;
@@ -39041,7 +39198,10 @@ var Player = class {
             backend.destroy();
             return;
           }
-          physics = new PhysicsSession(mesh, backend, { deterministic });
+          physics = new PhysicsSession(mesh, backend, { deterministic, maxBodies });
+          if (physics.dropped.length > 0) {
+            console.warn(`cartbox: ${physics.dropped.length} moving bodies past this core's ${maxBodies} were left out of the physics world`);
+          }
         }
         this.runtime = {
           channel: new RuntimeChannel(mesh, physics),
@@ -39056,6 +39216,8 @@ var Player = class {
       this.lineOffset = codeLineOffset(ownCode, readCartCode(preparedBytes));
       this.lineCount = cartCode === null ? 0 : cartCode.split("\n").length;
       this.console = direct ? createDirectConsole(module, this.model, void 0, sampleRate) : createConsole(module, this.model, sampleRate);
+      const runtime = this.runtime;
+      if (direct && runtime) this.console.setQuery((op, a, v) => runtime.channel.query(op, a, v));
       if (!this.console.loadCartridge(preparedBytes)) {
         const why = direct ? this.console.readError?.()?.message : "";
         throw new Error(why ? `Engine rejected the cartridge: ${why}` : "Engine rejected the cartridge");
@@ -39126,15 +39288,15 @@ var Player = class {
           this.meshSurface.setWeather(this.weather);
           this.meshSurface.setProfiler(this.profiler);
           const holoDocs = holoDocuments2(this.options.ui ?? []);
-          const runtime = this.runtime;
-          if (holoDocs.length > 0 && runtime) {
+          const runtime2 = this.runtime;
+          if (holoDocs.length > 0 && runtime2) {
             const keys = holoBindingKeys2(this.options.ui ?? []);
             const strings = this.options.strings ?? null;
             const language = playLanguage(strings, this.options.languages) ?? "";
             const text = (key2) => translate(strings, language, key2);
             const cache = createHoloCache();
             this.meshSurface.setHolo((out, width, height, time, premultiplied) => {
-              const state = runtime.channel.holo;
+              const state = runtime2.channel.holo;
               if (state.shown.size === 0) return false;
               const bindings = {};
               keys.forEach((k, i) => {
@@ -42038,6 +42200,7 @@ export {
   DEFAULT_TEXEL_DENSITY,
   DEFAULT_TRIGGER_THRESHOLD,
   DIRECT_CORE_URL,
+  DIRECT_MAX_BODIES,
   DebugCommand,
   DirectTransport,
   EVENT_CAPACITY,
@@ -42108,6 +42271,13 @@ export {
   PHYSICS_DT,
   PHYS_BLOCK_BYTES,
   PHYS_MAGIC,
+  PHYS_MAX_BODIES,
+  PHYS_Q_BODY,
+  PHYS_Q_CAST,
+  PHYS_Q_CONTACTS,
+  PHYS_Q_HASH,
+  PHYS_Q_INSIDE,
+  PHYS_Q_RAY,
   POINTER_AT,
   POINTER_MAGIC,
   POST_FX_EFFECTS,
@@ -42178,6 +42348,7 @@ export {
   bakeLights,
   bakeProbeVolumeGpu,
   bakeSurfaces,
+  bodyCapacity,
   breakableLine,
   browserDeviceHints,
   browserRtc,
@@ -42285,6 +42456,7 @@ export {
   makeShadowTexture,
   mount,
   mouseLean,
+  movingBodies,
   nearestDirection,
   netSendInterval,
   normalBasis3x3,

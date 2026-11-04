@@ -192,6 +192,8 @@ interface MeshEditorProps {
   directCore?: boolean;
   /** Which budgets the Budgets panel and the viewport's readout check: the fantasy tiers' or the AAA tier's (Q2). */
   budgetTier?: BudgetTier;
+  /** The scene's moving bodies against its core's cap (S1), for the Physics panel's warning. */
+  physicsCapacity?: { readonly bodies: number; readonly cap: number; readonly over: number } | null;
   /** The cart's id: a Lockout cart links to the demo playing its saved assets (L13). */
   cartId?: string;
 }
@@ -217,7 +219,7 @@ function fitDistance(mesh: MeshAsset): number {
   return radius / Math.sin(fov / 2) + radius;
 }
 
-export function MeshEditor({ sidecar, onSidecarChange, code, onStartPlay, modernTier = false, directCore = false, budgetTier = "fantasy", cartId }: MeshEditorProps) {
+export function MeshEditor({ sidecar, onSidecarChange, code, onStartPlay, modernTier = false, directCore = false, budgetTier = "fantasy", physicsCapacity = null, cartId }: MeshEditorProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const fileRef = useRef<HTMLInputElement>(null);
   /**
@@ -1520,7 +1522,7 @@ export function MeshEditor({ sidecar, onSidecarChange, code, onStartPlay, modern
 
             <LodPanel sidecar={sidecar} entry={selectedEntry} onChange={onSidecarChange} />
 
-            <PhysicsPanel sidecar={sidecar} entry={selectedEntry} onChange={onSidecarChange} />
+            <PhysicsPanel sidecar={sidecar} entry={selectedEntry} onChange={onSidecarChange} capacity={physicsCapacity} />
 
             <ComponentsInspector sidecar={sidecar} entry={selectedEntry} onChange={onSidecarChange} />
 

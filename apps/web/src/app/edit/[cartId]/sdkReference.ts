@@ -278,20 +278,26 @@ export const SDK_REFERENCE: readonly SdkGroup[] = [
       },
       {
         name: "cartbox.ray",
-        signature: "cartbox.ray(slot, x, y, z, dx, dy, dz, max, ignore)",
-        doc: "Cast a ray from (x,y,z) along (dx,dy,dz) up to max units in slot 0-15. The result is ready next tick via cartbox.hit(slot). ignore (optional) is an object the ray passes through, such as the player casting it.",
-        snippet: 'cartbox.ray(0, x, y, z, 0, -1, 0, 50, "player")',
+        signature: "cartbox.ray(slot, x, y, z, dx, dy, dz, max, ignore, mask)",
+        doc: "Cast a ray from (x,y,z) along (dx,dy,dz) up to max units in slot 0-15. The result is ready next tick via cartbox.hit(slot). ignore (optional) is an object the ray passes through, such as the player casting it; mask (optional, from cartbox.layers) limits it to some collision layers. On the AAA tier's dedicated core it is cast at once and returns what cartbox.hit would, against the world as last stepped, and any slot number works.",
+        snippet: 'local hit, obj, hx, hy, hz = cartbox.ray(0, x, y, z, 0, -1, 0, 50, "player", cartbox.layers(0))',
+      },
+      {
+        name: "cartbox.layers",
+        signature: "cartbox.layers(layer, ...) -> mask",
+        doc: "A mask of collision layers (0-15) for a ray's or a sweep's mask: it then hits only bodies on those layers. Set each body's layer, and the layers it collides with, under Physics in the Inspector.",
+        snippet: "local walls = cartbox.layers(0, 2)",
       },
       {
         name: "cartbox.sweep",
-        signature: "cartbox.sweep(slot, shape, x, y, z, dx, dy, dz, max, ignore)",
+        signature: "cartbox.sweep(slot, shape, x, y, z, dx, dy, dz, max, ignore, mask)",
         doc: "Like cartbox.ray, but sweeps a solid shape: a number is a sphere's radius, {hx, hy, hz} a box's half-extents, {radius, halfheight} an upright capsule. cartbox.hit(slot) then gives the surface point touched, its normal, and how far the shape's centre travelled first. Use it for thick bullets, ledge and landing checks, or whether a body fits somewhere.",
         snippet: 'cartbox.sweep(0, 0.4, x, y, z, 0, -1, 0, 5, "player")\nlocal hit, obj, hx, hy, hz, nx, ny, nz, d = cartbox.hit(0)',
       },
       {
         name: "cartbox.hit",
         signature: "cartbox.hit(slot) -> hit, obj, x, y, z, nx, ny, nz, distance",
-        doc: "Last tick's result for a ray slot: whether it hit, the object it hit (nil if not a scene object), the point, the surface normal and the distance.",
+        doc: "Last tick's result for a ray slot (on the dedicated core, the slot's latest cast): whether it hit, the object it hit (nil if not a scene object), the point, the surface normal and the distance.",
         snippet: "local hit, obj, hx, hy, hz = cartbox.hit(0)",
       },
       {

@@ -31,6 +31,17 @@ import {
   PHYS_OP_TELEPORT,
   PHYS_OP_UNJOIN,
   PHYS_OP_VELOCITY,
+  DIRECT_MAX_BODIES,
+  PHYS_EVENT_STARTED,
+  PHYS_EVENT_TRIGGER,
+  PHYS_Q_BODY,
+  PHYS_Q_CAST,
+  PHYS_Q_CONTACTS,
+  PHYS_Q_CONTACTS_PAGE,
+  PHYS_Q_HASH,
+  PHYS_Q_INSIDE,
+  PHYS_Q_INSIDE_PAGE,
+  PHYS_Q_RAY,
   takePhysicsCommands,
   writePhysicsState,
   type PhysicsBodyState,
@@ -79,6 +90,10 @@ export interface PhysicsBodyDesc {
   readonly damping?: number;
   /** The scene object this body belongs to (reported back by raycasts). */
   readonly object: number;
+  /** Its collision layer, 0..15 (S3); absent = 0. */
+  readonly layer?: number;
+  /** The layers it collides with, a bit each (S3); absent = all. */
+  readonly mask?: number;
 }
 
 /**
@@ -107,6 +122,11 @@ export interface PhysicsBackend {
   addBody(desc: PhysicsBodyDesc): number;
   /** Advance the world by `dt` seconds. */
   step(dt: number): void;
+  /**
+   * Make rays and sweeps see the bodies as they are now, without stepping
+   * (optional): needed for a query before the first step (S2).
+   */
+  refreshQueries?(): void;
   bodyState(handle: number): { position: Vec3; rotation: Quat; velocity: Vec3; sleeping: boolean };
   applyImpulse(handle: number, impulse: Vec3): void;
   setVelocity(handle: number, velocity: Vec3): void;
@@ -117,13 +137,13 @@ export interface PhysicsBackend {
    * The nearest hit along a unit `direction` within `maxDistance`, or null.
    * `ignore` is a scene object whose body the ray passes through.
    */
-  raycast(origin: Vec3, direction: Vec3, maxDistance: number, ignore?: number): CastHit | null;
+  raycast(origin: Vec3, direction: Vec3, maxDistance: number, ignore?: number, mask?: number): CastHit | null;
   /**
    * Sweep `shape` from `origin` along a unit `direction`: the first hit within
    * `maxDistance` (distance = how far the shape's centre travelled before touching;
    * point and normal are on the surface hit), or null.
    */
-  shapecast?(shape: CastShape, origin: Vec3, direction: Vec3, maxDistance: number, ignore?: number): CastHit | null;
+  shapecast?(shape: CastShape, origin: Vec3, direction: Vec3, maxDistance: number, ignore?: number, mask?: number): CastHit | null;
   /** Take a body out of (or back into) the world — a spawnable copy waiting in reserve. */
   setEnabled(handle: number, enabled: boolean): void;
   /** Place a body at a position and rotation at once, at rest. */
@@ -302,11 +322,56 @@ function castShape(kind: number, a: number, b: number, c: number): CastShape | n
   }
 }
 
-/** The scene objects with bodies the cart can read and drive (everything but static), in slot order. */
-export function physicsSlots(scene: MeshScene): number[] {
+/** What a PHYS_OP_CAST sets for the next ray in its slot: the shape swept, an object to pass through, the layers to hit. */
+interface CastOptions {
+  readonly shape: CastShape | null;
+  readonly ignore?: number;
+  readonly mask?: number;
+}
+
+/** A ray or sweep to cast: from where, which way (unit), how far, and its options. */
+interface RayRequest extends CastOptions {
+  readonly origin: Vec3;
+  readonly direction: Vec3;
+  readonly max: number;
+}
+
+/**
+ * A PHYS_OP_CAST's values as options: v0 the shape (PHYS_CAST_*), v1..v3 its
+ * size, v4 the object to ignore + 1 (0 none), v5 the layer mask (0 = every
+ * layer, the default, S3).
+ */
+function castOptionsOf(kind: number, a: number, b: number, c: number, ignorePlusOne: number, mask: number): CastOptions {
+  const ignore = Math.round(ignorePlusOne) - 1;
+  const m = Math.round(mask) & 0xffff;
+  return { shape: castShape(kind, a, b, c), ...(ignore >= 0 ? { ignore } : {}), ...(m > 0 ? { mask: m } : {}) };
+}
+
+/**
+ * The scene objects with bodies the cart can read and drive (everything but
+ * static), in slot order: the first `max` of them (the block's 64 unless the
+ * core reads by query, S1).
+ */
+export function physicsSlots(scene: MeshScene, max: number = PHYS_MAX_BODIES): number[] {
+  return movingBodies(scene).slice(0, Math.max(0, max));
+}
+
+/**
+ * How a scene's moving bodies (spawnable copies included) fit the core it runs
+ * on (S1): the block's 64 on a TIC-80–derived core, {@link DIRECT_MAX_BODIES}
+ * on the dedicated one. `over` bodies, the last in scene order, are left out.
+ */
+export function bodyCapacity(scene: MeshScene, direct: boolean): { bodies: number; cap: number; over: number } {
+  const bodies = movingBodies(scene).length;
+  const cap = direct ? DIRECT_MAX_BODIES : PHYS_MAX_BODIES;
+  return { bodies, cap, over: Math.max(0, bodies - cap) };
+}
+
+/** Every scene object with a moving body (not static), in scene order, however many. */
+export function movingBodies(scene: MeshScene): number[] {
   const out: number[] = [];
   scene.instances.forEach((inst, i) => {
-    if (inst.physics && inst.physics.body !== "static" && out.length < PHYS_MAX_BODIES) out.push(i);
+    if (inst.physics && inst.physics.body !== "static") out.push(i);
   });
   return out;
 }
@@ -337,7 +402,7 @@ export class PhysicsSession {
   private readonly handleOf = new Map<number, number>();
   /** Jointed objects: what they're tied to (object, or null for the world) and the live joint. */
   private readonly joints = new Map<number, { spec: JointSpec; target: number | null; handle: number | null; pooled: boolean }>();
-  private rayRequests: ({ origin: Vec3; direction: Vec3; max: number; shape: CastShape | null; ignore?: number } | null)[] = [];
+  private rayRequests: (RayRequest | null)[] = [];
   private rayResults: (PhysicsRayHit | null)[] = [];
   private events: PhysicsContactEvent[] = [];
   private overlapPairs: [number, number][] = [];
@@ -346,11 +411,25 @@ export class PhysicsSession {
   private readonly backend: PhysicsBackend;
   /** Whether inputs are rounded for cross-browser determinism (the scene's setting unless overridden). */
   readonly deterministic: boolean;
+  /** Moving bodies the cart can drive here: {@link PHYS_MAX_BODIES}, or more on the dedicated core (S1). */
+  readonly maxBodies: number;
+  /** Objects whose moving body is past {@link maxBodies}, left out of the world (the editor warns of them). */
+  readonly dropped: readonly number[];
+  /** Options for the next RAY query this tick (PHYS_Q_CAST). */
+  private queryCast: CastOptions | null = null;
+  /** Whether rays can see the world yet: after a step, or once refreshed for a query before one. */
+  private queriesReady = false;
 
-  constructor(scene: MeshScene, backend: PhysicsBackend, { deterministic }: { deterministic?: boolean } = {}) {
+  constructor(
+    scene: MeshScene,
+    backend: PhysicsBackend,
+    { deterministic, maxBodies = PHYS_MAX_BODIES }: { deterministic?: boolean; maxBodies?: number } = {},
+  ) {
     this.deterministic = deterministic ?? scene.physicsWorld?.deterministic === true;
     this.backend = this.deterministic ? deterministicBackend(backend) : backend;
-    const slots = new Set(physicsSlots(scene));
+    this.maxBodies = maxBodies;
+    const slots = new Set(physicsSlots(scene, maxBodies));
+    this.dropped = movingBodies(scene).filter((i) => !slots.has(i));
     scene.instances.forEach((inst, i) => {
       const spec = inst.physics;
       if (!spec || (spec.body !== "static" && !slots.has(i))) return;
@@ -367,6 +446,8 @@ export class PhysicsSession {
         ...(spec.trigger ? { trigger: true } : {}),
         ...(spec.gravity !== undefined ? { gravity: spec.gravity } : {}),
         ...(spec.damping !== undefined ? { damping: spec.damping } : {}),
+        ...(spec.layer !== undefined ? { layer: spec.layer } : {}),
+        ...(spec.mask !== undefined ? { mask: spec.mask } : {}),
         object: i,
       });
       this.handleOf.set(i, handle);
@@ -422,12 +503,62 @@ export class PhysicsSession {
 
   /** Write body state and last tick's ray results for the cart to read. */
   beforeTick(block: DataView): void {
-    const bodies: PhysicsBodyState[] = this.tracked.map((t) => {
-      const s = this.backend.bodyState(t.handle);
-      const velocity: Vec3 = t.kind === "character" ? (t.lastMove.map((v) => v / PHYSICS_DT) as unknown as Vec3) : s.velocity;
-      return { object: t.object, position: s.position, velocity, grounded: t.grounded, sleeping: s.sleeping };
-    });
+    const bodies: PhysicsBodyState[] = this.tracked.map((t) => this.reading(t));
     writePhysicsState(block, this.tick, bodies, this.rayResults, this.events, this.overlapPairs, this.stateHash);
+    this.queryCast = null;
+  }
+
+  /** A body as the cart reads it (a character's velocity is its last move over the tick). */
+  private reading(t: Tracked): PhysicsBodyState {
+    const s = this.backend.bodyState(t.handle);
+    const velocity: Vec3 = t.kind === "character" ? (t.lastMove.map((v) => v / PHYSICS_DT) as unknown as Vec3) : s.velocity;
+    return { object: t.object, position: s.position, velocity, grounded: t.grounded, sleeping: s.sleeping };
+  }
+
+  /**
+   * Answer a cart's query on the dedicated core (S1, S2; see PHYS_Q_* in
+   * protocol.ts), from the world as last stepped: the same state the block
+   * holds, without its caps, and rays cast in the call. Null for no answer.
+   */
+  query(op: number, a: number, v: readonly number[]): number[] | null {
+    if (op === PHYS_Q_BODY) {
+      const t = this.byObject.get(a);
+      if (!t || !t.enabled) return null;
+      const r = this.reading(t);
+      return [...r.position, ...r.velocity, r.grounded ? 1 : 0];
+    }
+    if (op === PHYS_Q_CAST) {
+      this.queryCast = castOptionsOf(a, v[0] ?? 0, v[1] ?? 0, v[2] ?? 0, v[3] ?? 0, v[4] ?? 0);
+      return null;
+    }
+    if (op === PHYS_Q_RAY) {
+      // A cart that casts before the world has ever stepped (its first tick) sees it as placed.
+      if (!this.queriesReady) {
+        this.backend.refreshQueries?.();
+        this.queriesReady = true;
+      }
+      const options = this.queryCast ?? { shape: null };
+      this.queryCast = null;
+      const [x = 0, y = 0, z = 0, dx = 0, dy = 0, dz = 0] = v;
+      const len = Math.hypot(dx, dy, dz);
+      if (!(len > 1e-9) || ![x, y, z].every(Number.isFinite)) return [0];
+      const hit = this.cast({ origin: [x, y, z], direction: [dx / len, dy / len, dz / len], max: len, ...options });
+      return hit ? [hit.object >= 0 ? hit.object + 2 : 1, ...hit.point, ...hit.normal, hit.distance] : [0];
+    }
+    if (op === PHYS_Q_CONTACTS) {
+      const out = [this.events.length];
+      for (const e of this.events.slice(Math.max(0, a), Math.max(0, a) + PHYS_Q_CONTACTS_PAGE)) {
+        out.push(e.a, e.b, (e.started ? PHYS_EVENT_STARTED : 0) | (e.trigger ? PHYS_EVENT_TRIGGER : 0));
+      }
+      return out;
+    }
+    if (op === PHYS_Q_INSIDE) {
+      const inside = this.overlapPairs.filter(([trigger]) => trigger === a).map(([, other]) => other);
+      const from = Math.max(0, Math.round(v[0] ?? 0));
+      return [inside.length, ...inside.slice(from, from + PHYS_Q_INSIDE_PAGE)];
+    }
+    if (op === PHYS_Q_HASH) return [this.stateHash];
+    return null;
   }
 
   /** Apply the cart's commands, step the world, and cast the rays it asked for. */
@@ -493,16 +624,13 @@ export class PhysicsSession {
   /** Apply a tick's commands (already taken from the block), step, and cast rays. */
   run(commands: readonly PhysicsCommand[]): void {
     this.rayRequests = [];
-    // Shape and ignore options for the next ray in each slot (see PHYS_OP_CAST).
-    const castOptions = new Map<number, { shape: CastShape | null; ignore?: number }>();
+    // Shape, ignore and mask options for the next ray in each slot (see PHYS_OP_CAST).
+    const castOptions = new Map<number, CastOptions>();
     for (const t of this.tracked) if (t.kind === "character") t.lastMove = [0, 0, 0];
     for (const cmd of commands) {
       const [a, b, c, d, e, f] = cmd.v;
       if (cmd.op === PHYS_OP_CAST) {
-        if (cmd.a >= 0 && cmd.a < PHYS_MAX_RAYS) {
-          const ignore = Math.round(e) - 1;
-          castOptions.set(cmd.a, { shape: castShape(a, b, c, d), ...(ignore >= 0 ? { ignore } : {}) });
-        }
+        if (cmd.a >= 0 && cmd.a < PHYS_MAX_RAYS) castOptions.set(cmd.a, castOptionsOf(a, b, c, d, e, f));
         continue;
       }
       if (cmd.op === PHYS_OP_RAY) {
@@ -534,6 +662,7 @@ export class PhysicsSession {
       }
     }
     this.backend.step(PHYSICS_DT);
+    this.queriesReady = true;
     this.events = this.backend.drainContacts();
     this.overlapPairs = this.backend.overlaps();
     this.tick += 1;
@@ -541,10 +670,15 @@ export class PhysicsSession {
     this.rayResults = [];
     for (let slot = 0; slot < PHYS_MAX_RAYS; slot += 1) {
       const req = this.rayRequests[slot];
-      if (!req) this.rayResults[slot] = null;
-      else if (req.shape) this.rayResults[slot] = this.backend.shapecast?.(req.shape, req.origin, req.direction, req.max, req.ignore) ?? null;
-      else this.rayResults[slot] = this.backend.raycast(req.origin, req.direction, req.max, req.ignore);
+      this.rayResults[slot] = req ? this.cast(req) : null;
     }
+  }
+
+  /** One ray or sweep against the world as last stepped. */
+  private cast(req: RayRequest): PhysicsRayHit | null {
+    return req.shape
+      ? (this.backend.shapecast?.(req.shape, req.origin, req.direction, req.max, req.ignore, req.mask) ?? null)
+      : this.backend.raycast(req.origin, req.direction, req.max, req.ignore, req.mask);
   }
 
   /**

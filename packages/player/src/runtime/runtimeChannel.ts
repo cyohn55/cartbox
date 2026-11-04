@@ -233,6 +233,15 @@ export class RuntimeChannel {
   }
 
   /**
+   * Answer a query the cart made on the dedicated core (S1, S2): physics reads
+   * past the block's caps, and rays cast in the call. Null for no answer (no
+   * physics running, or an op nobody serves).
+   */
+  query(op: number, a: number, v: readonly number[]): number[] | null {
+    return this.physics?.query(op, a, v) ?? null;
+  }
+
+  /**
    * Take the cart's commands: scene ops here, the rest to physics (which then
    * steps). `ring` is the overflow command ring on cores that have one (EP20):
    * its commands came after the block's.

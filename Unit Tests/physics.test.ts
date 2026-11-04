@@ -404,6 +404,60 @@ end`;
     session.destroy();
   }, 120_000);
 
+  it("masks rays and sweeps by collision layer from Lua, through the block, and lets layers pass through each other (S3)", async () => {
+    const layout = RAM_LAYOUTS.xbox360;
+    const mesh = cube();
+    const entry = (id: string, position: number[], scale: number[], physics: object) => ({ id, name: id, mesh, transform: { position, rotation: [0, 0, 0], scale }, physics });
+    const sc = parseMeshScene(
+      JSON.stringify({
+        version: 2,
+        meshes: [
+          entry("floor", [0, -0.5, 0], [40, 1, 40], { body: "static", shape: "box" }),
+          entry("glass", [0, 3, 0], [4, 0.2, 4], { body: "static", shape: "box", layer: 5 }), // its top at 3.1
+          entry("ghost", [8, 3, 0], [1, 1, 1], { body: "dynamic", shape: "box", layer: 6, mask: 1 << 6 }), // collides only with its own layer
+        ],
+      }),
+    )!;
+    const code = `
+t = 0
+function TIC()
+  t = t + 1
+  for s = 0, 3 do
+    local hit, obj, px, py, pz, nx, ny, nz, d = cartbox.hit(s)
+    pmem(60 + s * 3, hit and 1 or 0) pmem(61 + s * 3, (obj or -1) + 1) pmem(62 + s * 3, math.floor((d or 0) * 1000 + 0.5) & 0xffffffff)
+  end
+  cartbox.ray(0, 0, 10, 0, 0, -1, 0, 20)                            -- every layer: the glass
+  cartbox.ray(1, 0, 10, 0, 0, -1, 0, 20, nil, cartbox.layers(0))    -- the floor's layer only: through the glass
+  cartbox.ray(2, 0, 10, 0, 0, -1, 0, 20, nil, cartbox.layers(9))    -- nothing on layer 9
+  cartbox.sweep(3, 0.5, 0, 10, 0, 0, -1, 0, 20, nil, cartbox.layers(5)) -- a ball onto the glass
+  if t == 90 then local _, y = cartbox.body("ghost") pmem(80, math.floor(-y)) end
+end`;
+    let tic = codeChunks(new TextEncoder().encode(code));
+    tic = prependLuaCode(tic, sceneObjectsSdkLua(sc));
+    tic = prependLuaCode(tic, physicsSdkLua(sc, layout));
+    tic = injectSdk(tic);
+    const e = await bootBytes("xbox360/engine.js", tic);
+    const session = new PhysicsSession(sc, createRapierBackend(RAPIER));
+    for (let i = 0; i < 90; i += 1) {
+      session.beforeTick(block(e, layout));
+      e.mod._cbx_tick(e.h, 0);
+      session.afterTick(block(e, layout));
+    }
+    const slot = (s: number) => {
+      const w = (k: number) => pmem(e)[60 + s * 3 + k]! | 0;
+      return { hit: w(0), object: w(1) - 1, distance: w(2) / 1000 };
+    };
+    expect(slot(0)).toMatchObject({ hit: 1, object: 1 });
+    expect(slot(0).distance).toBeCloseTo(6.9, 2);
+    expect(slot(1)).toMatchObject({ hit: 1, object: 0 });
+    expect(slot(1).distance).toBeCloseTo(10, 2);
+    expect(slot(2).hit).toBe(0);
+    expect(slot(3)).toMatchObject({ hit: 1, object: 1 });
+    expect(slot(3).distance).toBeCloseTo(10 - 3.1 - 0.5, 2);
+    expect(pmem(e)[80]! | 0).toBeGreaterThan(5); // the ghost fell through the floor
+    session.destroy();
+  }, 120_000);
+
   it("hangs, hinges, welds and springs bodies with joints, driven and broken from Lua", async () => {
     const layout = RAM_LAYOUTS.xbox360;
     const mesh = cube();

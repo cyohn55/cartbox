@@ -559,9 +559,11 @@ export { GamepadInput } from "./input.js";
 export {
   PHYSICS_DT,
   PhysicsSession,
+  bodyCapacity,
   composeWorldMatrix,
   fitShape,
   jointFrames,
+  movingBodies,
   physicsSlots,
   sceneHasPhysics,
   splitWorldMatrix,
@@ -595,8 +597,16 @@ export {
 export { AnimationSession, animatedObjects, compileAnimator, sceneHasAnimation } from "./anim/animationSession.js";
 export { FaceDriver } from "./anim/faceDriver.js";
 export {
+  DIRECT_MAX_BODIES,
   PHYS_BLOCK_BYTES,
   PHYS_MAGIC,
+  PHYS_MAX_BODIES,
+  PHYS_Q_BODY,
+  PHYS_Q_CAST,
+  PHYS_Q_CONTACTS,
+  PHYS_Q_HASH,
+  PHYS_Q_INSIDE,
+  PHYS_Q_RAY,
   RAM_LAYOUTS,
   physicsBlockAddress,
   takePhysicsCommands,
@@ -604,5 +614,5 @@ export {
   type RamLayout,
 } from "./physics/protocol.js";
 export { CMD_RING_BYTES, CMD_RING_MAX, commandRingAddress, commandRingBytes, commandRingMax, commandsPerTick, hasCommandRing, takeRingCommands } from "./runtime/commandRing.js";
-export { createDirectConsole, directCoreModel, runsOnDirectCore, type DirectConsole } from "./directConsole.js";
+export { createDirectConsole, directCoreModel, runsOnDirectCore, type DirectConsole, type QueryHandler } from "./directConsole.js";
 export { DIRECT_CORE_URL, directCoreBeside } from "./player.js";

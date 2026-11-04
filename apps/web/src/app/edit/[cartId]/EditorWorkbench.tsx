@@ -22,7 +22,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
-import { defaultPostFxSettings, getModel, parsePostFxSettings, parseMeshScene, parseWorldScene, readSidecarUi, readSidecarActions, type AnimSpec, type MeshScene, type ParticleSpec, type PostFxSettings, type SceneSpec, type WorldScene } from "@cartbox/player";
+import { bodyCapacity, defaultPostFxSettings, getModel, parsePostFxSettings, parseMeshScene, parseWorldScene, readSidecarUi, readSidecarActions, runsOnDirectCore, type AnimSpec, type MeshScene, type ParticleSpec, type PostFxSettings, type SceneSpec, type WorldScene } from "@cartbox/player";
 import {
   BANK_COUNT,
   CartEngine,
@@ -416,6 +416,8 @@ function WorkbenchBody({
     [sidecars.mesh, setSidecar],
   );
   const meshScene = useMemo<MeshScene | null>(() => parseMeshScene(sidecars.mesh), [sidecars.mesh]);
+  // Moving bodies against what the cart's core can run (S1): the RAM block's 64, or the dedicated core's 4,096.
+  const physicsCapacity = useMemo(() => (meshScene ? bodyCapacity(meshScene, runsOnDirectCore(modelId, meshScene.core)) : null), [meshScene, modelId]);
   const meshUi = useMemo(() => readSidecarUi(sidecars.mesh), [sidecars.mesh]);
   const meshActions = useMemo(() => readSidecarActions(sidecars.mesh), [sidecars.mesh]);
   const meshStrings = useMemo(() => readSidecarStrings(sidecars.mesh), [sidecars.mesh]);
@@ -1430,7 +1432,7 @@ function WorkbenchBody({
           revision={revision}
         />
       )}
-      {activeTab === "Mesh" && <MeshEditor key="mesh" sidecar={mesh} onSidecarChange={setMesh} code={doc} onStartPlay={startPlaytest} modernTier={modelId === "modern" || modelId === "aaa" || modelId === "xbox360"} directCore={modelId === "aaa"} budgetTier={modelId === "aaa" ? "aaa" : "fantasy"} cartId={cartId} />}
+      {activeTab === "Mesh" && <MeshEditor key="mesh" sidecar={mesh} onSidecarChange={setMesh} code={doc} onStartPlay={startPlaytest} modernTier={modelId === "modern" || modelId === "aaa" || modelId === "xbox360"} directCore={modelId === "aaa"} budgetTier={modelId === "aaa" ? "aaa" : "fantasy"} physicsCapacity={physicsCapacity} cartId={cartId} />}
       {activeTab === "Input" && <InputEditor key="input" sidecar={mesh} onSidecarChange={setMesh} />}
       {activeTab === "Text" && <StringsEditor key="text" sidecar={mesh} ui={mesh.ui ?? []} onSidecarChange={setMesh} />}
       {activeTab === "UI" && <UiEditor key="ui" sidecar={mesh} onSidecarChange={setMesh} width={activeModel.width} height={activeModel.height} palette={uiPalette} />}

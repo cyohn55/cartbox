@@ -9,6 +9,7 @@
  * body keeps the scene object index it was built for, which raycasts report.
  */
 
+import { physicsGroups, queryGroups } from "@cartbox/editor";
 import type { CastShape, PhysicsBackend, PhysicsBodyDesc, PhysicsJointDesc, PhysicsQuat, PhysicsVec3 } from "@cartbox/player";
 
 type Rapier = typeof import("@dimforge/rapier3d-compat");
@@ -95,6 +96,9 @@ export function createRapierBackend(R: Rapier): PhysicsBackend {
       colliderDesc.setFriction(desc.friction).setRestitution(desc.bounce);
       if (desc.kind === "dynamic") colliderDesc.setMass(desc.mass);
       colliderDesc.setActiveEvents(R.ActiveEvents.COLLISION_EVENTS);
+      // Collision layers (S3): two colliders touch only when each one's mask holds the other's layer.
+      // Always set: Rapier's own default puts a collider on every layer, so a masked ray would still hit it.
+      colliderDesc.setCollisionGroups(physicsGroups(desc.layer, desc.mask));
       if (desc.trigger) {
         // A trigger overlaps everything (static, kinematic and character bodies
         // included), blocks nothing, and reports who's inside.
@@ -112,6 +116,13 @@ export function createRapierBackend(R: Rapier): PhysicsBackend {
 
     step(dt: number): void {
       world.timestep = dt;
+      world.step(events);
+    },
+
+    refreshQueries(): void {
+      // Rapier builds the structure rays search during a step; a step of no time
+      // builds it without moving anything (checked in both builds).
+      world.timestep = 0;
       world.step(events);
     },
 
@@ -182,7 +193,8 @@ export function createRapierBackend(R: Rapier): PhysicsBackend {
       const collider = colliders[handle];
       if (!body || !collider) return { grounded: false };
       // Trigger zones don't block a character (it walks into them).
-      controller.computeColliderMovement(collider, v3(delta), R.QueryFilterFlags.EXCLUDE_SENSORS);
+      // It walks through what its layers don't collide with (S3).
+      controller.computeColliderMovement(collider, v3(delta), R.QueryFilterFlags.EXCLUDE_SENSORS, collider.collisionGroups());
       const m = controller.computedMovement();
       const t = body.translation();
       const next = { x: t.x + m.x, y: t.y + m.y, z: t.z + m.z };
@@ -193,11 +205,12 @@ export function createRapierBackend(R: Rapier): PhysicsBackend {
       return { grounded: controller.computedGrounded() };
     },
 
-    raycast(origin: PhysicsVec3, direction: PhysicsVec3, maxDistance: number, ignore?: number) {
+    raycast(origin: PhysicsVec3, direction: PhysicsVec3, maxDistance: number, ignore?: number, mask?: number) {
       const ray = new R.Ray(v3(origin), v3(direction));
       // Rays pass through trigger zones (and the body they were told to ignore).
       const skip = ignore === undefined ? undefined : bodyOfObject.get(ignore);
-      const hit = world.castRayAndGetNormal(ray, maxDistance, true, R.QueryFilterFlags.EXCLUDE_SENSORS, undefined, undefined, skip);
+      // A mask (S3) limits it to the layers it names.
+      const hit = world.castRayAndGetNormal(ray, maxDistance, true, R.QueryFilterFlags.EXCLUDE_SENSORS, mask === undefined ? undefined : queryGroups(mask), undefined, skip);
       if (!hit) return null;
       const toi = (hit as unknown as { timeOfImpact?: number; toi?: number }).timeOfImpact ?? (hit as unknown as { toi: number }).toi;
       const point = ray.pointAt(toi);
@@ -209,7 +222,7 @@ export function createRapierBackend(R: Rapier): PhysicsBackend {
       };
     },
 
-    shapecast(shape: CastShape, origin: PhysicsVec3, direction: PhysicsVec3, maxDistance: number, ignore?: number) {
+    shapecast(shape: CastShape, origin: PhysicsVec3, direction: PhysicsVec3, maxDistance: number, ignore?: number, mask?: number) {
       const swept =
         shape.kind === "sphere"
           ? new R.Ball(shape.radius)
@@ -227,7 +240,7 @@ export function createRapierBackend(R: Rapier): PhysicsBackend {
         maxDistance,
         true,
         R.QueryFilterFlags.EXCLUDE_SENSORS,
-        undefined,
+        mask === undefined ? undefined : queryGroups(mask),
         undefined,
         skip,
       );

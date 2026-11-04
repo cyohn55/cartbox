@@ -17,6 +17,8 @@ import {
   JOINT_KINDS,
   PHYSICS_BODY_KINDS,
   PHYSICS_SHAPE_KINDS,
+  PHYSICS_LAYERS,
+  PHYSICS_MASK_ALL,
   SCENE_PROP_MAX,
   SCENE_TAG_MAX,
   isSceneKey,
@@ -29,6 +31,7 @@ import {
   type PhysicsSpec,
   type ScenePropValue,
 } from "@cartbox/editor";
+import { DIRECT_MAX_BODIES } from "@cartbox/player";
 
 import {
   hierarchyRows,
@@ -1022,10 +1025,13 @@ export function PhysicsPanel({
   sidecar,
   entry,
   onChange,
+  capacity = null,
 }: {
   sidecar: MeshSidecar;
   entry: MeshSidecarEntry;
   onChange: (next: MeshSidecar) => void;
+  /** The scene's moving bodies against its core's cap (S1). */
+  capacity?: { readonly bodies: number; readonly cap: number; readonly over: number } | null;
 }) {
   const spec = entry.physics ?? null;
   const set = (patch: Partial<PhysicsSpec> | null) =>
@@ -1087,6 +1093,16 @@ export function PhysicsPanel({
           {spec.body === "dynamic" && number("Damping", "damping", 0.1, 0, 10)}
           {!spec.trigger && number("Friction", "friction", 0.1, 0, 2)}
           {!spec.trigger && number("Bounce", "bounce", 0.05, 0, 1)}
+          <LayerEditor
+            layer={spec.layer ?? 0}
+            mask={spec.mask ?? PHYSICS_MASK_ALL}
+            trigger={spec.trigger === true}
+            onChange={(layer, mask) => {
+              // Replace the spec outright, so the defaults drop out as readPhysicsSpec would drop them.
+              const { layer: _l, mask: _m, ...rest } = spec;
+              onChange(setMeshPhysics(sidecar, entry.id, { ...rest, ...(layer !== 0 ? { layer } : {}), ...(mask !== PHYSICS_MASK_ALL ? { mask } : {}) }));
+            }}
+          />
           {spec.body === "dynamic" && (
             <JointEditor
               sidecar={sidecar}
@@ -1101,6 +1117,15 @@ export function PhysicsPanel({
           )}
         </div>
       )}
+      {capacity && capacity.over > 0 && (
+        <RailHint>
+          <span style={{ color: "#ff6b6b" }}>
+            {capacity.bodies.toLocaleString()} moving bodies (spawnable copies included); this core runs the first {capacity.cap.toLocaleString()} and leaves{" "}
+            {capacity.over.toLocaleString()} out.
+            {capacity.cap < DIRECT_MAX_BODIES ? ` The AAA tier, or a Modern scene on the dedicated core, runs up to ${DIRECT_MAX_BODIES.toLocaleString()}.` : ""}
+          </span>
+        </RailHint>
+      )}
       <RailHint>
         {spec
           ? spec.trigger
@@ -1111,6 +1136,47 @@ export function PhysicsPanel({
           : "Give the object a body to have it collide, fall or be pushed when the cart runs."}
       </RailHint>
     </RailGroup>
+  );
+}
+
+/**
+ * A body's collision layer and the layers it collides with (AAA_PRODUCTION_ROADMAP.md
+ * S3): two bodies touch only when each one's mask holds the other's layer; a
+ * trigger detects only the layers in its mask.
+ */
+function LayerEditor({ layer, mask, trigger, onChange }: { layer: number; mask: number; trigger: boolean; onChange: (layer: number, mask: number) => void }) {
+  const layers = Array.from({ length: PHYSICS_LAYERS }, (_, i) => i);
+  return (
+    <div style={{ display: "grid", gap: 4 }}>
+      <label style={{ display: "grid", gridTemplateColumns: "70px 1fr", gap: 6, alignItems: "center", fontSize: 12 }}>
+        Layer
+        <select aria-label="Physics layer" value={layer} onChange={(event) => onChange(Number(event.target.value), mask)} style={inputStyle}>
+          {layers.map((l) => (
+            <option key={l} value={l}>
+              {l}
+            </option>
+          ))}
+        </select>
+      </label>
+      <div style={{ fontSize: 12 }}>{trigger ? "Detects layers" : "Collides with layers"}</div>
+      <div role="group" aria-label="Collides with layers" style={{ display: "grid", gridTemplateColumns: "repeat(8, 1fr)", gap: 2 }}>
+        {layers.map((l) => {
+          const on = (mask & (1 << l)) !== 0;
+          return (
+            <button
+              key={l}
+              type="button"
+              aria-pressed={on}
+              aria-label={`Layer ${l}`}
+              onClick={() => onChange(layer, (mask ^ (1 << l)) & PHYSICS_MASK_ALL)}
+              style={{ ...inputStyle, padding: "2px 0", fontSize: 11, textAlign: "center", opacity: on ? 1 : 0.4, fontWeight: on ? 600 : 400 }}
+            >
+              {l}
+            </button>
+          );
+        })}
+      </div>
+    </div>
   );
 }
 

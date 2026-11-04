@@ -74,12 +74,13 @@ export function deterministicBackend(inner: PhysicsBackend): PhysicsBackend {
         ...(desc.damping !== undefined ? { damping: snap(desc.damping) } : {}),
       }),
     step: (dt) => inner.step(dt),
+    ...(inner.refreshQueries ? { refreshQueries: () => inner.refreshQueries!() } : {}),
     bodyState: (handle) => inner.bodyState(handle),
     applyImpulse: (handle, v) => inner.applyImpulse(handle, snap3(v)),
     setVelocity: (handle, v) => inner.setVelocity(handle, snap3(v)),
     teleport: (handle, p) => inner.teleport(handle, snap3(p)),
     moveCharacter: (handle, d) => inner.moveCharacter(handle, snap3(d)),
-    raycast: (origin, direction, max, ignore) => inner.raycast(snap3(origin), fine3(direction), snap(max), ignore),
+    raycast: (origin, direction, max, ignore, mask) => inner.raycast(snap3(origin), fine3(direction), snap(max), ignore, mask),
     setEnabled: (handle, enabled) => inner.setEnabled(handle, enabled),
     setPose: (handle, p, q) => inner.setPose(handle, snap3(p), fineQ(q)),
     drainContacts: () => inner.drainContacts(),
@@ -88,7 +89,7 @@ export function deterministicBackend(inner: PhysicsBackend): PhysicsBackend {
   };
   if (inner.shapecast) {
     const cast = inner.shapecast.bind(inner);
-    out.shapecast = (shape, origin, direction, max, ignore) => cast(snapCastShape(shape), snap3(origin), fine3(direction), snap(max), ignore);
+    out.shapecast = (shape, origin, direction, max, ignore, mask) => cast(snapCastShape(shape), snap3(origin), fine3(direction), snap(max), ignore, mask);
   }
   if (inner.addJoint) {
     const add = inner.addJoint.bind(inner);

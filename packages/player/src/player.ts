@@ -68,7 +68,7 @@ import { streamGroups, type MeshScene } from "./mesh/meshScene.js";
 import { runtimeSdkLua } from "./physics/physicsSdk.js";
 import { PhysicsSession, sceneHasPhysics } from "./physics/physicsSession.js";
 import { RuntimeChannel } from "./runtime/runtimeChannel.js";
-import { PHYS_BLOCK_BYTES, RAM_LAYOUTS, physicsBlockAddress } from "./physics/protocol.js";
+import { DIRECT_MAX_BODIES, PHYS_BLOCK_BYTES, PHYS_MAX_BODIES, RAM_LAYOUTS, physicsBlockAddress } from "./physics/protocol.js";
 import { collisionSdkLua } from "./collisionSdk.js";
 import { Profiler, type ProfileSnapshot } from "./debug/profiler.js";
 import {
@@ -501,7 +501,9 @@ export class Player {
       // simulated by the host's engine, and spawnable prefab copies
       // (cartbox.spawn), both through a block at the end of RAM.
       const mesh = this.options.mesh;
-      const runtimeLua = layout && mesh ? runtimeSdkLua(mesh, layout, { physics: Boolean(this.options.physics) }) : "";
+      // On the dedicated core the cart reads physics by query, past the block's 64 bodies (S1).
+      const maxBodies = direct ? DIRECT_MAX_BODIES : PHYS_MAX_BODIES;
+      const runtimeLua = layout && mesh ? runtimeSdkLua(mesh, layout, { physics: Boolean(this.options.physics), maxBodies }) : "";
       if (runtimeLua && mesh && layout) {
         prepared = prependLuaCode(prepared, runtimeLua);
         let physics: PhysicsSession | null = null;
@@ -512,7 +514,10 @@ export class Player {
             backend.destroy();
             return;
           }
-          physics = new PhysicsSession(mesh, backend, { deterministic });
+          physics = new PhysicsSession(mesh, backend, { deterministic, maxBodies });
+          if (physics.dropped.length > 0) {
+            console.warn(`cartbox: ${physics.dropped.length} moving bodies past this core's ${maxBodies} were left out of the physics world`);
+          }
         }
         this.runtime = {
           channel: new RuntimeChannel(mesh, physics),
@@ -528,6 +533,9 @@ export class Player {
       this.lineCount = cartCode === null ? 0 : cartCode.split("\n").length;
 
       this.console = direct ? createDirectConsole(module, this.model, undefined, sampleRate) : createConsole(module as Parameters<typeof createConsole>[0], this.model, sampleRate);
+      // The dedicated core's queries go to the runtime: physics reads and rays answered in the call (S1, S2).
+      const runtime = this.runtime;
+      if (direct && runtime) (this.console as DirectConsole).setQuery((op, a, v) => runtime.channel.query(op, a, v));
       if (!this.console.loadCartridge(preparedBytes)) {
         // The dedicated core runs the cart's top level as it loads: say what stopped it.
         const why = direct ? this.console.readError?.()?.message : "";

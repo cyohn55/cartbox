@@ -319,6 +319,44 @@ export const PHYS_OP_LOOK = 40;
 /** Break a fractured object (cartbox.shatter, F8c): a = the object; v0..v2 = the impact, v3 = how hard (m/s at the impact). */
 export const PHYS_OP_SHATTER = 41;
 
+/**
+ * Queries (AAA_PRODUCTION_ROADMAP.md S1, S2): on the dedicated Modern core a
+ * cart asks the host through `_cbx_query(op, a, v1..v6)` and has the answer in
+ * the same call, as plain numbers (no fixed point), at most 32 of them. The
+ * block above still carries the same state for the TIC-80–derived cores, and
+ * is still written on this one; queries only read past its caps.
+ *
+ * BODY: a = object → x, y, z, vx, vy, vz, grounded (1/0); nil without a body.
+ * CAST: options for the next RAY in this tick, as PHYS_OP_CAST's: a = shape
+ *   (PHYS_CAST_*), v1..v3 = size, v4 = object to ignore + 1, v5 = layer mask
+ *   (0 = all) → nil.
+ * RAY: v1..v3 = origin, v4..v6 = direction scaled to the reach → 0 for a miss,
+ *   else (object + 2, or 1 for something not an object), x, y, z, nx, ny, nz,
+ *   distance. Against the world as last stepped.
+ * CONTACTS: a = first index → the count, then (a, b, flags) for up to
+ *   {@link PHYS_Q_CONTACTS_PAGE} of last step's contact events from there.
+ * INSIDE: a = trigger object, v1 = first index → the count, then up to
+ *   {@link PHYS_Q_INSIDE_PAGE} objects in it.
+ * HASH: → the state digest (PHYS_HDR_HASH's).
+ */
+export const PHYS_Q_BODY = 100;
+export const PHYS_Q_CAST = 101;
+export const PHYS_Q_RAY = 102;
+export const PHYS_Q_CONTACTS = 103;
+export const PHYS_Q_INSIDE = 104;
+export const PHYS_Q_HASH = 105;
+/** Contact events a CONTACTS answer holds (3 numbers each, after the count, within the core's 32). */
+export const PHYS_Q_CONTACTS_PAGE = 10;
+/** Objects an INSIDE answer holds (after the count). */
+export const PHYS_Q_INSIDE_PAGE = 30;
+
+/**
+ * Moving bodies the cart can read and drive: the block's 64 on the TIC-80–derived
+ * cores; on the dedicated Modern core, where reads are queries, far more (S1).
+ * A body past its core's cap is left out of the world, and the editor says so.
+ */
+export const DIRECT_MAX_BODIES = 4096;
+
 /** Where the physics block starts in Lua's RAM space for a model. */
 export function physicsBlockAddress(layout: RamLayout): number {
   return layout.ramSize - PHYS_BLOCK_BYTES;
