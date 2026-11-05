@@ -740,8 +740,8 @@ export const SDK_REFERENCE: readonly SdkGroup[] = [
     entries: [
       {
         name: "cartbox.net",
-        signature: "cartbox.net() -> mode, slot, humans, match",
-        doc: "Online multiplayer (a page opened with netplay relays it; uses pmem 0..118). mode 0 offline / 1 guest / 2 host, your slot 0-7, a bitmask of slots held by people, and the host's match word.",
+        signature: "cartbox.net() -> mode, slot, humans, match, status, hostslot, dedicated",
+        doc: "Online multiplayer (a page opened with netplay relays it; uses pmem 0..118). mode 0 offline / 1 guest / 2 host, your slot 0-7, a bitmask of slots held by people, the host's match word, the page's status code, the host's slot, and whether the host is a dedicated (headless) one: it holds a slot but isn't among the people, so it plays no soldier of its own.",
         snippet: "local mode, slot, humans, match = cartbox.net()",
       },
       {

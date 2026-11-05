@@ -3,9 +3,12 @@
  * side: a peer announcing itself as dedicated is the room's host wherever it
  * joins, holds a slot but isn't counted a player, and the cart is told.
  */
+import { existsSync } from "node:fs";
+import path from "node:path";
+import { pathToFileURL } from "node:url";
 import { describe, expect, it } from "vitest";
-import { DEDICATED_HOST_NAME, MemoryNetHub, NetSession } from "@cartbox/player";
-import { NET_IN_HEADER, NET_IN_HOST } from "../packages/player/src/net/netplay";
+import { DEDICATED_HOST_NAME, MemoryNetHub, NetSession, codeChunks, createDirectConsole, getModel, injectSdk } from "@cartbox/player";
+import { NET_IN_HEADER, NET_IN_HOST, writeNetInbox } from "../packages/player/src/net/netplay";
 
 async function join(hub: MemoryNetHub, id: string, name?: string, clock = () => 0) {
   const s = new NetSession(hub.transport(id), clock);
@@ -46,5 +49,27 @@ describe("a dedicated host (N2)", () => {
     const words = new Uint32Array(256);
     ben.beforeTick(words);
     expect(words[NET_IN_HOST]! & 8).toBe(0);
+  });
+});
+
+const MODERN_CORE = path.resolve(__dirname, "../packages/modern-core/dist/modern-core.js");
+
+describe.skipIf(!existsSync(MODERN_CORE))("the cart's view of a dedicated host (N2)", () => {
+  it("cartbox.net() says the host is dedicated, and which slot it holds", async () => {
+    const code = `function TIC()
+  local mode, slot, humans, _, _, hostslot, dedicated = cartbox.net()
+  pmem(100, mode) pmem(101, hostslot) pmem(102, dedicated and 1 or 0) pmem(103, humans)
+end`;
+    const mod = await (await import(pathToFileURL(MODERN_CORE).href)).default();
+    const console = createDirectConsole(mod, getModel("xbox360"));
+    expect(console.loadCartridge(injectSdk(codeChunks(new TextEncoder().encode(code))))).toBe(true);
+    const run = (dedicatedHost: boolean) => {
+      writeNetInbox(console.netWords()!, { mode: 1, mySlot: 1, humans: 0b110, live: 0b111, match: 0, clock: 0, hostSlot: 0, dedicatedHost, slots: [], events: [] });
+      console.tick(0);
+      expect(console.readError().message).toBe("");
+      return [...console.netWords()!.slice(100, 104)];
+    };
+    expect(run(true)).toEqual([1, 0, 1, 0b110]); // a guest; the host in slot 0 is dedicated, and not among the people
+    expect(run(false)).toEqual([1, 0, 0, 0b110]);
   });
 });

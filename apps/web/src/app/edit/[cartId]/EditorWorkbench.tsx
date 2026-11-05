@@ -86,6 +86,8 @@ import { ShortcutHelp } from "./ShortcutHelp";
 import { DownloadBudget } from "./DownloadBudget";
 import { ExportDialog } from "./ExportDialog";
 import { SnapshotsPanel } from "./SnapshotsPanel";
+import { CoEditPanel } from "./CoEditPanel";
+import { useCoEdit } from "./useCoEdit";
 import { useShortcuts, WORKBENCH_SHORTCUTS, type Shortcut } from "./shortcuts";
 import { decodeMeshSidecar, encodeMeshSidecar, addMesh, type MeshSidecar } from "@/lib/meshSidecar";
 import { rebakeMeshSidecar } from "@/lib/meshTextureBake";
@@ -509,6 +511,10 @@ function WorkbenchBody({
   /** The snapshots dialog (EP19). */
   const [showSnapshots, setShowSnapshots] = useState(false);
   const closeSnapshots = useCallback(() => setShowSnapshots(false), []);
+  // Edit together (W2): the session lives here, so it keeps running with its dialog closed.
+  const coEdit = useCoEdit({ cartId, sidecars, setSidecar });
+  const [showCoEdit, setShowCoEdit] = useState(false);
+  const closeCoEdit = useCallback(() => setShowCoEdit(false), []);
   // First-run guidance: a dismissible card naming the handful of tabs that
   // matter, for a 12-tab tool that otherwise opens on a demo seed with no "start
   // here". Persisted per-browser so a returning creator never sees it again;
@@ -1281,6 +1287,17 @@ function WorkbenchBody({
                 role="menuitem"
                 className={styles.fileMenuItem}
                 onMouseDown={() => {
+                  setShowCoEdit(true);
+                  setFileOpen(false);
+                }}
+              >
+                {coEdit.status === "on" ? `Edit together… (${coEdit.others.length + 1} here)` : "Edit together…"}
+              </button>
+              <button
+                type="button"
+                role="menuitem"
+                className={styles.fileMenuItem}
+                onMouseDown={() => {
                   setBudgetCart(runnable ? runnable.saveTic() : null);
                   setFileOpen(false);
                 }}
@@ -1490,6 +1507,7 @@ function WorkbenchBody({
       )}
 
       {showHelp && <ShortcutHelp tabs={tabs.order.slice(0, 9)} onClose={() => setShowHelp(false)} />}
+      {showCoEdit && <CoEditPanel coEdit={coEdit} onClose={closeCoEdit} />}
       {showSnapshots && <SnapshotsPanel cartId={cartId} current={snapshotContent} onRestore={restoreSnapshot} onClose={closeSnapshots} />}
       {showExport && <ExportDialog title={details.title || cartName} engineUrl={engineUrl} game={exportGame} onClose={closeExport} />}
       {budgetCart !== undefined && (
