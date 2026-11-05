@@ -438,7 +438,20 @@ This roadmap closes those gaps. It does not repeat the open items of other roadm
     - a 10 KB budget forgets the oldest steps and still undoes what it holds;
     - a sidecar edit costs that sidecar only.
   - `cart-snapshot.test.ts` passes unchanged.
-- [ ] **W2. Co-editing.** Presence and live edits of the scene and sidecars between editors of one cart (a CRDT over the existing realtime channel), with locks for binary assets.
+- [ ] **W2. Co-editing.** Presence and live edits of the scene and sidecars between editors of one cart (a CRDT over the existing realtime channel), with locks for binary assets. **The engine side is done (`coEdit.ts`); wiring it into the editor over the hosted realtime channel is left.**
+  - **The data:** the sidecars are split into objects as W3 splits them: each sidecar, each placed scene object, the scene's settings and its object order. Each object is a last-writer-wins register stamped with a Lamport clock and the writer's id, so every editor settles on the same cart whatever order edits arrive in. Edits to different objects all survive; for the same object, the later edit wins everywhere.
+  - **Joining:** a newcomer's hello is answered with every register, and merging is idempotent.
+  - **Presence:** a name and a selection, gone after a silence.
+  - **Locks** for binary assets are registers too, so two who grab one at once agree on the holder.
+  - **Transports:** any broadcast channel, with a BroadcastChannel transport for tabs of one browser.
+  - *Tests (`co-edit.test.ts`, 6):*
+    - sidecars round-trip through the object split, order kept;
+    - three editors' concurrent edits to different objects all survive, a contested object settles identically everywhere, and the result is the same with delivery reversed;
+    - additions, deletions and other sidecars travel, and the editor hears of others' edits;
+    - a newcomer is brought up to date;
+    - presence shows a selection and expires;
+    - a lock grabbed by two at once ends with one agreed holder, and frees on unlock.
+  - *Blocked here:* the hosted realtime channel (a service to configure), and the editor's own sidecar flow driving `edit` and taking `apply` (with presence drawn in the viewport).
 - [x] **W3. Branches.** Snapshots become branches that can be compared and merged per object. **Done.**
   - **Objects** (`cartBranches.ts`):
     - each .tic chunk (code, sprites, map… per bank);
