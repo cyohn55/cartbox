@@ -5313,7 +5313,7 @@ function writeNetInbox(words, inbox) {
   words[NET_IN_HEADER] = (inbox.mode & 3 | (inbox.mySlot & 7) << 2 | ((inbox.status ?? 0) & 7) << 5 | (inbox.humans & 255) << 8 | (inbox.live & 255) << 16 | netLagUnits(inbox.lag ?? 0) << 24) >>> 0;
   words[NET_IN_MATCH] = inbox.match >>> 0;
   words[NET_IN_CLOCK] = inbox.clock >>> 0;
-  words[NET_IN_HOST] = Math.max(0, inbox.hostSlot ?? 0) & 7;
+  words[NET_IN_HOST] = Math.max(0, inbox.hostSlot ?? 0) & 7 | (inbox.dedicatedHost ? 8 : 0);
   for (let slot = 0; slot < NET_SLOTS; slot += 1) {
     const state = inbox.slots[slot] ?? null;
     for (let k = 0; k < NET_STATE_WORDS; k += 1) {
@@ -42365,6 +42365,8 @@ var ReplicationClient = class {
 };
 
 // src/net/NetSession.ts
+var DEDICATED_HOST_NAME = "dedicated:";
+var isDedicated = (peer) => typeof peer.name === "string" && peer.name.startsWith(DEDICATED_HOST_NAME);
 var toB64 = (b) => {
   let s = "";
   for (let i = 0; i < b.length; i += 32768) s += String.fromCharCode(...b.subarray(i, i + 32768));
@@ -42517,8 +42519,16 @@ var NetSession = class {
   get mySlot() {
     return this.slotOf(this.transport.selfId);
   }
-  /** The host's slot: the lowest held by anyone present (-1 in an empty room). */
+  /**
+   * The host's slot: a dedicated host's when one is present (N2: a headless
+   * host, so no player is the authority), else the lowest held by anyone
+   * present (-1 in an empty room).
+   */
   get hostSlot() {
+    for (const peer of this.peers) {
+      const slot = this.roster.get(peer.id);
+      if (slot !== void 0 && isDedicated(peer)) return slot;
+    }
     let lowest = -1;
     for (const peer of this.peers) {
       const slot = this.roster.get(peer.id);
@@ -42545,7 +42555,8 @@ var NetSession = class {
    */
   reslot() {
     if (this.roster.size === 0) {
-      this.peers.slice(0, NET_SLOTS).forEach((peer, slot) => this.roster.set(peer.id, slot));
+      const order = [...this.peers.filter(isDedicated), ...this.peers.filter((p) => !isDedicated(p))];
+      order.slice(0, NET_SLOTS).forEach((peer, slot) => this.roster.set(peer.id, slot));
       this.rosterDirty = true;
       return;
     }
@@ -42596,7 +42607,7 @@ var NetSession = class {
     let humans = 0;
     for (const peer of this.peers) {
       const slot = this.slotOf(peer.id);
-      if (slot >= 0) humans |= 1 << slot;
+      if (slot >= 0 && !isDedicated(peer)) humans |= 1 << slot;
     }
     let live = 0;
     const slots = [];
@@ -42622,6 +42633,7 @@ var NetSession = class {
       live,
       match: this.hostMatch,
       hostSlot: this.hostSlot,
+      dedicatedHost: this.peers.some((p) => isDedicated(p) && this.roster.get(p.id) === this.hostSlot),
       clock: Math.floor(this.sharedNow()),
       lag: this.viewLag,
       slots,
@@ -43502,6 +43514,7 @@ export {
   CappedSceneRenderer,
   CartridgeLoadError,
   ConsoleButton,
+  DEDICATED_HOST_NAME,
   DEFAULT_AMBIENT2 as DEFAULT_AMBIENT,
   DEFAULT_ATMOSPHERE,
   DEFAULT_CONTROL_SETTINGS,

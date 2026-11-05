@@ -34,6 +34,10 @@ import {
 import { encodeNetMessage } from "./netCodec.js";
 import { ReplicationClient, ReplicationHost, type EntityPose, type ReplicationOptions, type Vec3 as RVec3 } from "./replication.js";
 
+/** A dedicated (headless) host announces itself by this prefix on its presence name (N2). */
+export const DEDICATED_HOST_NAME = "dedicated:";
+const isDedicated = (peer: NetPeer) => typeof peer.name === "string" && peer.name.startsWith(DEDICATED_HOST_NAME);
+
 /** A room member as the transport's presence reports it. */
 export interface NetPeer {
   readonly id: string;
@@ -288,8 +292,16 @@ export class NetSession {
     return this.slotOf(this.transport.selfId);
   }
 
-  /** The host's slot: the lowest held by anyone present (-1 in an empty room). */
+  /**
+   * The host's slot: a dedicated host's when one is present (N2: a headless
+   * host, so no player is the authority), else the lowest held by anyone
+   * present (-1 in an empty room).
+   */
   get hostSlot(): number {
+    for (const peer of this.peers) {
+      const slot = this.roster.get(peer.id);
+      if (slot !== undefined && isDedicated(peer)) return slot;
+    }
     let lowest = -1;
     for (const peer of this.peers) {
       const slot = this.roster.get(peer.id);
@@ -320,7 +332,9 @@ export class NetSession {
    */
   private reslot(): void {
     if (this.roster.size === 0) {
-      this.peers.slice(0, NET_SLOTS).forEach((peer, slot) => this.roster.set(peer.id, slot));
+      // A dedicated host takes slot 0 in a new room, ahead of join order.
+      const order = [...this.peers.filter(isDedicated), ...this.peers.filter((p) => !isDedicated(p))];
+      order.slice(0, NET_SLOTS).forEach((peer, slot) => this.roster.set(peer.id, slot));
       this.rosterDirty = true;
       return;
     }
@@ -374,7 +388,8 @@ export class NetSession {
     let humans = 0;
     for (const peer of this.peers) {
       const slot = this.slotOf(peer.id);
-      if (slot >= 0) humans |= 1 << slot;
+      // A dedicated host holds a slot but isn't a player (N2).
+      if (slot >= 0 && !isDedicated(peer)) humans |= 1 << slot;
     }
     let live = 0;
     const slots: (NetState | null)[] = [];
@@ -402,6 +417,7 @@ export class NetSession {
       live,
       match: this.hostMatch,
       hostSlot: this.hostSlot,
+      dedicatedHost: this.peers.some((p) => isDedicated(p) && this.roster.get(p.id) === this.hostSlot),
       clock: Math.floor(this.sharedNow()),
       lag: this.viewLag,
       slots,

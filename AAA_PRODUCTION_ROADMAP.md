@@ -417,7 +417,14 @@ This roadmap closes those gaps. It does not repeat the open items of other roadm
     - it rides two real sessions over the memory hub, and the codec round-trips it;
     - the flag survives the sidecar and the player's scene.
   - *Left:* interpolation between replicated poses on guests (they snap to each packet, which is smooth at 30 Hz over direct links but not over the relay); replicating values other than poses.
-- [ ] **N2. A headless authoritative host.** The cart runs headless (the verification worker already does) as a room's host, so no player is the authority.
+- [ ] **N2. A headless authoritative host.** The cart runs headless (the verification worker already does) as a room's host, so no player is the authority. **The session side is done; running it on a server is left.**
+  - A peer whose presence name starts `dedicated:` (`DEDICATED_HOST_NAME`) is the room's host wherever it joins, and takes slot 0 in a room it opens.
+  - It holds a slot but isn't counted among the players (the inbox's humans mask).
+  - The cart is told: bit 3 of the host word, so the cart can leave it out of the match.
+  - *Tests (`dedicated-host.test.ts`, 2):*
+    - a dedicated host joining after two players is host for all three once their rosters settle; the cart sees it flagged and not counted;
+    - without one, the lowest slot hosts as before.
+  - *Blocked here:* a server process to run the cart headless on the relay's realtime channel (a hosted service, and its credentials); Lockout's code reading the flag.
 - [x] **N3. Lag compensation.** The host rewinds hitboxes to the shooter's view time for hit tests, bounded by a maximum. **Done, as part of K6's runtime.**
   - `cartbox.rewind.new{max}` keeps each target's joint positions as the host records them each tick (`record`).
   - `cartbox.rewind.ray(history, targets, t, now, shot)` places each target's K6 hitboxes where they were at the shooter's view time t, interpolated between ticks and clamped to `max` seconds back, and returns the nearest target, zone, distance and multiplier.

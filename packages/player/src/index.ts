@@ -439,7 +439,7 @@ export {
   takeNetOutbox,
 } from "./net/netplay.js";
 export type { NetInbox, NetOutbox, NetState, NetEvent } from "./net/netplay.js";
-export { NetSession, MemoryNetHub, BroadcastChannelTransport, SwitchableTransport, netSendInterval } from "./net/NetSession.js";
+export { DEDICATED_HOST_NAME, NetSession, MemoryNetHub, BroadcastChannelTransport, SwitchableTransport, netSendInterval } from "./net/NetSession.js";
 export type { NetMessage, NetPeer, NetRoomStatus, NetSignal, NetTransport } from "./net/NetSession.js";
 export { SimulatedNetHub, runNetLab } from "./net/netLab.js";
 export { encodeNetMessage, decodeNetMessage } from "./net/netCodec.js";

@@ -97,6 +97,8 @@ export interface NetInbox {
   readonly clock: number;
   /** The host's slot (absent or -1 counts as 0). */
   readonly hostSlot?: number;
+  /** The host is a dedicated (headless) host, not a player (N2): bit 3 of the host word. */
+  readonly dedicatedHost?: boolean;
   /** How old the others' snapshots are when they arrive (ms; carried in 4 ms units, up to 1020). */
   readonly lag?: number;
   /** Remote state per slot (null when there is none). */
@@ -133,7 +135,7 @@ export function writeNetInbox(words: Uint32Array, inbox: NetInbox): number {
     0;
   words[NET_IN_MATCH] = inbox.match >>> 0;
   words[NET_IN_CLOCK] = inbox.clock >>> 0;
-  words[NET_IN_HOST] = Math.max(0, inbox.hostSlot ?? 0) & 7;
+  words[NET_IN_HOST] = (Math.max(0, inbox.hostSlot ?? 0) & 7) | (inbox.dedicatedHost ? 8 : 0);
   for (let slot = 0; slot < NET_SLOTS; slot += 1) {
     const state = inbox.slots[slot] ?? null;
     for (let k = 0; k < NET_STATE_WORDS; k += 1) {
