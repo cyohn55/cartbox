@@ -102,6 +102,7 @@ import { ParticleOverlaySurface } from "./particles/ParticleOverlaySurface.js";
 import { MeshOverlaySurface } from "./mesh/MeshOverlaySurface.js";
 import { WorldOverlaySurface } from "./world/WorldOverlaySurface.js";
 import { createSceneRenderer } from "./render/createSceneRenderer.js";
+import { unpackPipelineManifest } from "./render/pipelineCache.js";
 import { GpuCanvasSurface, type CapturedFrame } from "./render/GpuCanvasSurface.js";
 import { browserStorage, gpuPresentFailed, watchGpuPresent, type WatchedDevice } from "./render/presentFallback.js";
 import type { SceneRenderer } from "./render/sceneRenderer.js";
@@ -615,7 +616,7 @@ export class Player {
         !(scene && backdrop);
       // …in linear light, tone-mapped once as it is presented (F0b), where the tier asks.
       let hdr = wantsGpuPresent && (this.options.linearHdr ?? this.model.renderCaps.linearHdr === true);
-      const makeRenderer = () => createSceneRenderer(this.model.width, this.model.height, this.model.renderCaps, undefined, undefined, { hdr, mips: this.options.mipmaps ?? this.model.renderCaps.mipmaps === true });
+      const makeRenderer = () => createSceneRenderer(this.model.width, this.model.height, this.model.renderCaps, undefined, undefined, { hdr, mips: this.options.mipmaps ?? this.model.renderCaps.mipmaps === true, pipelines: unpackPipelineManifest(this.options.pipelineManifest) });
       if (mesh || (world && this.cartSource)) this.sceneRenderer = await makeRenderer();
       const presentFromGpu = wantsGpuPresent && this.sceneRenderer?.backend === "webgpu" && Boolean(this.sceneRenderer.renderToTexture);
       // The AAA tier's 3D at the display's own resolution (F0d), its 2D layer scaled to it.

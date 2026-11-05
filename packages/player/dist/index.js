@@ -2888,6 +2888,34 @@ var PipelineCache = class {
   }
 };
 var MANIFEST_KEY = "cartbox.pipelineManifest.v1";
+function packPipelineManifest(recipes) {
+  const wgsl = [];
+  const index = /* @__PURE__ */ new Map();
+  const packed = recipes.slice(-MANIFEST_MAX).map(
+    (recipe) => recipe.replace(/\{"\$wgsl":("(?:[^"\\]|\\.)*")\}/g, (_, quoted) => {
+      const code = JSON.parse(quoted);
+      let i = index.get(code);
+      if (i === void 0) {
+        i = wgsl.length;
+        wgsl.push(code);
+        index.set(code, i);
+      }
+      return `{"$wgsl":${i}}`;
+    })
+  );
+  return JSON.stringify({ v: 1, wgsl, recipes: packed });
+}
+function unpackPipelineManifest(raw) {
+  try {
+    if (!raw) return [];
+    const stored = JSON.parse(raw);
+    if (stored.v !== 1 || !Array.isArray(stored.wgsl) || !Array.isArray(stored.recipes)) return [];
+    const wgsl = stored.wgsl;
+    return stored.recipes.filter((r) => typeof r === "string").slice(-MANIFEST_MAX).map((r) => r.replace(/\{"\$wgsl":(\d+)\}/g, (_, i) => JSON.stringify({ $wgsl: typeof wgsl[Number(i)] === "string" ? wgsl[Number(i)] : "" })));
+  } catch {
+    return [];
+  }
+}
 var PipelineManifestStore = class {
   constructor(storage = defaultStorage(), key2 = MANIFEST_KEY) {
     this.storage = storage;
@@ -2896,12 +2924,7 @@ var PipelineManifestStore = class {
   /** The recorded recipes, or none (a missing, unreadable or older-format manifest). */
   load() {
     try {
-      const raw = this.storage?.getItem(this.key);
-      if (!raw) return [];
-      const stored = JSON.parse(raw);
-      if (stored.v !== 1 || !Array.isArray(stored.wgsl) || !Array.isArray(stored.recipes)) return [];
-      const wgsl = stored.wgsl;
-      return stored.recipes.filter((r) => typeof r === "string").slice(-MANIFEST_MAX).map((r) => r.replace(/\{"\$wgsl":(\d+)\}/g, (_, i) => JSON.stringify({ $wgsl: typeof wgsl[Number(i)] === "string" ? wgsl[Number(i)] : "" })));
+      return unpackPipelineManifest(this.storage?.getItem(this.key) ?? null);
     } catch {
       return [];
     }
@@ -2912,21 +2935,7 @@ var PipelineManifestStore = class {
    */
   save(recipes) {
     try {
-      const wgsl = [];
-      const index = /* @__PURE__ */ new Map();
-      const packed = recipes.slice(-MANIFEST_MAX).map(
-        (recipe) => recipe.replace(/\{"\$wgsl":("(?:[^"\\]|\\.)*")\}/g, (_, quoted) => {
-          const code = JSON.parse(quoted);
-          let i = index.get(code);
-          if (i === void 0) {
-            i = wgsl.length;
-            wgsl.push(code);
-            index.set(code, i);
-          }
-          return `{"$wgsl":${i}}`;
-        })
-      );
-      this.storage?.setItem(this.key, JSON.stringify({ v: 1, wgsl, recipes: packed }));
+      this.storage?.setItem(this.key, packPipelineManifest(recipes));
     } catch {
     }
   }
@@ -2939,8 +2948,12 @@ function defaultStorage() {
     return null;
   }
 }
-async function warmPipelines(device, { store = new PipelineManifestStore(), budgetMs = 3e3 } = {}) {
-  const recipes = store.load();
+async function warmPipelines(device, {
+  store = new PipelineManifestStore(),
+  budgetMs = 3e3,
+  shipped = []
+} = {}) {
+  const recipes = mergeManifests(shipped, store.load());
   if (recipes.length === 0) return { recipes: 0, compiled: 0, failed: 0, timedOut: false };
   let timer;
   const timeout = new Promise((resolve) => {
@@ -2949,6 +2962,9 @@ async function warmPipelines(device, { store = new PipelineManifestStore(), budg
   const result = await Promise.race([pipelineCache(device).warm(recipes), timeout]);
   if (timer !== void 0) clearTimeout(timer);
   return result ? { recipes: recipes.length, ...result, timedOut: false } : { recipes: recipes.length, compiled: 0, failed: 0, timedOut: true };
+}
+function mergeManifests(...manifests) {
+  return [...new Set(manifests.flat())].slice(0, MANIFEST_MAX);
 }
 var caches = /* @__PURE__ */ new WeakMap();
 function pipelineCache(device) {
@@ -37080,7 +37096,7 @@ async function createSceneRenderer(width, height, caps, deviceProvider = getWebg
   const style = rasterStyleFor(caps);
   const device = await deviceProvider();
   let renderer = null;
-  if (device) await warmPipelines(device);
+  if (device) await warmPipelines(device, { shipped: options.pipelines ?? [] });
   if (device) renderer = await WebgpuSceneRenderer.create(device, width, height, style, options);
   renderer ?? (renderer = WebglSceneRenderer.create(width, height, style, glProvider));
   renderer ?? (renderer = new SoftwareSceneRenderer(style));
@@ -40205,7 +40221,7 @@ var Player = class {
       const particles = this.options.particles;
       const wantsGpuPresent = (this.options.gpuPresent ?? (this.model.renderCaps.gpuPresent === true && !gpuPresentFailed(browserStorage()))) && Boolean(mesh) && !this.options.lighting && !(particles && particles.emitters.length > 0) && !(world && this.cartSource) && !(wantsForeground && this.cartSource) && !(scene && backdrop);
       let hdr = wantsGpuPresent && (this.options.linearHdr ?? this.model.renderCaps.linearHdr === true);
-      const makeRenderer = () => createSceneRenderer(this.model.width, this.model.height, this.model.renderCaps, void 0, void 0, { hdr, mips: this.options.mipmaps ?? this.model.renderCaps.mipmaps === true });
+      const makeRenderer = () => createSceneRenderer(this.model.width, this.model.height, this.model.renderCaps, void 0, void 0, { hdr, mips: this.options.mipmaps ?? this.model.renderCaps.mipmaps === true, pipelines: unpackPipelineManifest(this.options.pipelineManifest) });
       if (mesh || world && this.cartSource) this.sceneRenderer = await makeRenderer();
       const presentFromGpu = wantsGpuPresent && this.sceneRenderer?.backend === "webgpu" && Boolean(this.sceneRenderer.renderToTexture);
       const native = this.options.nativeResolution ?? this.model.renderCaps.nativeResolution === true;
@@ -43808,6 +43824,7 @@ export {
   lookProfileFor,
   lutStrip,
   makeShadowTexture,
+  mergeManifests,
   meshSceneTransferables,
   mount,
   mouseLean,
@@ -43821,6 +43838,7 @@ export {
   packComposeUniforms,
   packLights,
   packMeasureUniforms,
+  packPipelineManifest,
   packReferenceScene,
   packShaftUniforms,
   packSkyUniforms,
@@ -43921,6 +43939,7 @@ export {
   turnEnvironment,
   uiSdkLua,
   uniformsFromSettings,
+  unpackPipelineManifest,
   unpadRows,
   validSave,
   verifyReplayScore,

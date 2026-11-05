@@ -38,7 +38,8 @@
     "verify:pro": "node packages/engine/examples/verify-pro-engine.mjs",
     "verify:pro:audio": "node packages/engine/examples/verify-pro-audio.mjs",
     "verify:pro:colors": "node packages/engine/examples/verify-pro-colors.mjs",
-    "verify:pro:sprites": "node packages/engine/examples/verify-pro-sprites.mjs"
+    "verify:pro:sprites": "node packages/engine/examples/verify-pro-sprites.mjs",
+    "record:pipelines": "node scripts/record-pipelines.mjs"
   },
   "engines": {
     "node": ">=20"

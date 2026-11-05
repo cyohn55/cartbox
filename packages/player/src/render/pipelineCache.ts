@@ -318,6 +318,45 @@ export interface ManifestStorage {
 
 export const MANIFEST_KEY = "cartbox.pipelineManifest.v1";
 
+/**
+ * A manifest as text (a page's storage, or a file shipped with a map): the
+ * recipes with each WGSL source once, since pipelines share their scene shader
+ * and whole recipes would repeat it many times over.
+ */
+export function packPipelineManifest(recipes: readonly string[]): string {
+  const wgsl: string[] = [];
+  const index = new Map<string, number>();
+  const packed = recipes.slice(-MANIFEST_MAX).map((recipe) =>
+    recipe.replace(/\{"\$wgsl":("(?:[^"\\]|\\.)*")\}/g, (_, quoted: string) => {
+      const code = JSON.parse(quoted) as string;
+      let i = index.get(code);
+      if (i === undefined) {
+        i = wgsl.length;
+        wgsl.push(code);
+        index.set(code, i);
+      }
+      return `{"$wgsl":${i}}`;
+    }),
+  );
+  return JSON.stringify({ v: 1, wgsl, recipes: packed });
+}
+
+/** The recipes of a packed manifest, or none (missing, unreadable or an older format). Never throws. */
+export function unpackPipelineManifest(raw: string | null | undefined): string[] {
+  try {
+    if (!raw) return [];
+    const stored = JSON.parse(raw) as { v?: unknown; wgsl?: unknown; recipes?: unknown };
+    if (stored.v !== 1 || !Array.isArray(stored.wgsl) || !Array.isArray(stored.recipes)) return [];
+    const wgsl = stored.wgsl as unknown[];
+    return (stored.recipes as unknown[])
+      .filter((r): r is string => typeof r === "string")
+      .slice(-MANIFEST_MAX)
+      .map((r) => r.replace(/\{"\$wgsl":(\d+)\}/g, (_, i: string) => JSON.stringify({ $wgsl: typeof wgsl[Number(i)] === "string" ? wgsl[Number(i)] : "" })));
+  } catch {
+    return [];
+  }
+}
+
 /** Reads and writes the recorded manifest, never throwing (private mode, a full quota, no storage). */
 export class PipelineManifestStore {
   constructor(
@@ -328,15 +367,7 @@ export class PipelineManifestStore {
   /** The recorded recipes, or none (a missing, unreadable or older-format manifest). */
   load(): string[] {
     try {
-      const raw = this.storage?.getItem(this.key);
-      if (!raw) return [];
-      const stored = JSON.parse(raw) as { v?: unknown; wgsl?: unknown; recipes?: unknown };
-      if (stored.v !== 1 || !Array.isArray(stored.wgsl) || !Array.isArray(stored.recipes)) return [];
-      const wgsl = stored.wgsl as unknown[];
-      return (stored.recipes as unknown[])
-        .filter((r): r is string => typeof r === "string")
-        .slice(-MANIFEST_MAX)
-        .map((r) => r.replace(/\{"\$wgsl":(\d+)\}/g, (_, i: string) => JSON.stringify({ $wgsl: typeof wgsl[Number(i)] === "string" ? wgsl[Number(i)] : "" })));
+      return unpackPipelineManifest(this.storage?.getItem(this.key) ?? null);
     } catch {
       return [];
     }
@@ -348,21 +379,7 @@ export class PipelineManifestStore {
    */
   save(recipes: readonly string[]): void {
     try {
-      const wgsl: string[] = [];
-      const index = new Map<string, number>();
-      const packed = recipes.slice(-MANIFEST_MAX).map((recipe) =>
-        recipe.replace(/\{"\$wgsl":("(?:[^"\\]|\\.)*")\}/g, (_, quoted: string) => {
-          const code = JSON.parse(quoted) as string;
-          let i = index.get(code);
-          if (i === undefined) {
-            i = wgsl.length;
-            wgsl.push(code);
-            index.set(code, i);
-          }
-          return `{"$wgsl":${i}}`;
-        }),
-      );
-      this.storage?.setItem(this.key, JSON.stringify({ v: 1, wgsl, recipes: packed }));
+      this.storage?.setItem(this.key, packPipelineManifest(recipes));
     } catch {
       // A full or blocked storage: the next load just warms less.
     }
@@ -386,9 +403,22 @@ function defaultStorage(): ManifestStorage | null {
  */
 export async function warmPipelines(
   device: any,
-  { store = new PipelineManifestStore(), budgetMs = 3000 }: { store?: PipelineManifestStore; budgetMs?: number } = {},
+  {
+    store = new PipelineManifestStore(),
+    budgetMs = 3000,
+    shipped = [],
+  }: {
+    store?: PipelineManifestStore;
+    budgetMs?: number;
+    /**
+     * A manifest shipped with what is being loaded (a map's, recorded from a
+     * scripted run of it), warmed with the stored one: so the very first load on
+     * a browser, which has no stored manifest, still compiles off the frame.
+     */
+    shipped?: readonly string[];
+  } = {},
 ): Promise<{ recipes: number; compiled: number; failed: number; timedOut: boolean }> {
-  const recipes = store.load();
+  const recipes = mergeManifests(shipped, store.load());
   if (recipes.length === 0) return { recipes: 0, compiled: 0, failed: 0, timedOut: false };
   let timer: ReturnType<typeof setTimeout> | undefined;
   const timeout = new Promise<null>((resolve) => {
@@ -397,6 +427,11 @@ export async function warmPipelines(
   const result = await Promise.race([pipelineCache(device).warm(recipes), timeout]);
   if (timer !== undefined) clearTimeout(timer);
   return result ? { recipes: recipes.length, ...result, timedOut: false } : { recipes: recipes.length, compiled: 0, failed: 0, timedOut: true };
+}
+
+/** Recipes of several manifests, each once, in first-seen order, at most MANIFEST_MAX. */
+export function mergeManifests(...manifests: readonly (readonly string[])[]): string[] {
+  return [...new Set(manifests.flat())].slice(0, MANIFEST_MAX);
 }
 
 const caches = new WeakMap<object, PipelineCache>();

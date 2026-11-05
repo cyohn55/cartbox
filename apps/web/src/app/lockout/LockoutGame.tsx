@@ -24,6 +24,7 @@
  * in this browser (EDITOR_PRO_ROADMAP.md P7; see savedArena.ts), against bots.
  */
 
+import { fetchMapPipelines } from "@/lib/mapPipelines";
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   mount,
@@ -319,7 +320,8 @@ export function LockoutGame() {
     async (session: NetSession, map: string, boot: string) => {
       const stage = stageRef.current;
       if (!stage) return;
-      const { json: scene, center, parsed } = await lockoutScene(map);
+      // The map's shipped pipeline manifest (M3), fetched alongside its sidecar; a map without one loads as before.
+      const [{ json: scene, center, parsed }, pipelineManifest] = await Promise.all([lockoutScene(map), savedCartId(map) ? Promise.resolve(null) : fetchMapPipelines(arenaMap(map).id)]);
       // Waiting for the map's sidecar, the page may have been left or moved to another map: that mount is the one to keep.
       if (stageRef.current !== stage || mapRef.current !== map) return;
       // (The centre came with the sidecar, so the cart's code doesn't build the map's mesh again here.)
@@ -347,6 +349,7 @@ export function LockoutGame() {
         // through cartbox.light3d), and skipping the 2D lighting layer spares
         // every frame a material capture and a full-screen relight pass.
         postFx: parsePostFxSettings(savedCartId(map) ? ARENA_MAPS[0]!.fx : arenaMap(map).fx) ?? undefined,
+        ...(pipelineManifest ? { pipelineManifest } : {}),
         // Parsed on the sidecar's worker when it could be (M4); else here.
         mesh: parsed ?? parseMeshScene(scene) ?? undefined,
         ui: readSidecarUi(scene),

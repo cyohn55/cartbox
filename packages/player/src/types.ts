@@ -183,6 +183,13 @@ export interface PlayerOptions {
    */
   mipmaps?: boolean;
   /**
+   * A pipeline manifest shipped with the cart or map (AAA_PRODUCTION_ROADMAP.md
+   * M3/R5), as `packPipelineManifest` writes it: compiled behind the loading
+   * screen with the browser's own recorded one, so even the first load on a
+   * browser draws without compiling as it meets things. WebGPU only.
+   */
+  pipelineManifest?: string;
+  /**
    * Render the 3D at the display's own resolution (its CSS size × the device's
    * pixel ratio) with the 2D layer scaled to it (AAA_FIDELITY_ROADMAP.md F0d),
    * or at the model's frame. Defaults to the model's `nativeResolution` render

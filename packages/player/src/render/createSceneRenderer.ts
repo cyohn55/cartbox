@@ -53,7 +53,12 @@ export async function createSceneRenderer(
    * `mips`: it gives every texture a full mip chain, filtered trilinearly at 16× anisotropy (F1a).
    * The other backends ignore both.
    */
-  options: { readonly hdr?: boolean; readonly mips?: boolean } = {},
+  options: {
+    readonly hdr?: boolean;
+    readonly mips?: boolean;
+    /** Pipeline recipes shipped with what is loading (a map's manifest, unpacked), warmed with the stored ones (M3). */
+    readonly pipelines?: readonly string[];
+  } = {},
 ): Promise<SceneRenderer> {
   // The model's era decides how to rasterise, and therefore which backends are
   // even eligible: WebGPU declines a style it cannot reproduce (see
@@ -64,7 +69,7 @@ export async function createSceneRenderer(
   const device = await deviceProvider();
   let renderer: SceneRenderer | null = null;
   // Compile last session's pipelines off the frame first (M3), while the page still shows its loading screen.
-  if (device) await warmPipelines(device);
+  if (device) await warmPipelines(device, { shipped: options.pipelines ?? [] });
   if (device) renderer = await WebgpuSceneRenderer.create(device, width, height, style, options);
   renderer ??= WebglSceneRenderer.create(width, height, style, glProvider);
   renderer ??= new SoftwareSceneRenderer(style);
