@@ -309,7 +309,19 @@ This roadmap closes those gaps. It does not repeat the open items of other roadm
     - a repeat counts its taps and a cooldown gates the fire to at most once each 0.5 s;
     - two runs decide identically, and the console shows `root > patrol > walk`, then `rest`, then `root > chase > run at it`.
   - *Left:* authoring on the graph editor's canvas; a live highlight of the running node in the panel (the console carries it today); G2's bots moved onto trees; K5's perception writing the blackboard.
-- [ ] **K5. Perception.** Sight cones with line of sight (S2's rays), hearing from sound events, memory with decay, feeding K4's blackboard.
+- [x] **K5. Perception.** Sight cones with line of sight (S2's rays), hearing from sound events, memory with decay, feeding K4's blackboard. **Done.**
+  - `perception.ts`: Lua the player puts in when a cart has behaviour trees or names `cartbox.sense`.
+    - `cartbox.sense.new{fov, range, hearing, memory}` makes a perceiver.
+    - `cartbox.sense.look(p, eye, facing, candidates)` sees what's inside the cone and in range with a line of sight. That is S2's same-frame ray on the dedicated core (visible when the ray reaches it or hits nothing), or a `los` function the cart gives.
+    - `cartbox.sense.noise(x, y, z, loudness, source)` makes a sound each perceiver hears once, within loudness × hearing metres.
+    - `cartbox.sense.update(p, dt, position, blackboard)` ages and forgets memories, and writes `target`, `target_x/y/z`, `target_seen`, `target_age` and `alert` (1 when sensed, fading over the memory) into a K4 blackboard.
+  - It is in order and uses only the cart's inputs, so a replay perceives the same.
+  - *Tests (`perception.test.ts`, 4, on the Modern core):*
+    - it is put in only when needed;
+    - of five candidates, only the one in the cone, in range and not behind a wall is seen;
+    - a noise within its loudness is heard (the far one isn't), its alert fades to half at half the memory, and it's forgotten after;
+    - a K4 guard idles, searches when it hears a noise behind it, and chases once it sees the intruder.
+  - *Left:* line of sight on the TIC-80–derived cores (their rays answer a tick late, so it defaults to clear there); sound events raised by the mixer's own playback (U3) rather than by the cart.
 - [ ] **K6. Damage, abilities and tags.** Health and shield components, damage events with type and hit zone, multi-shape hitboxes on skeletons, cooldown-and-cost abilities, and gameplay tags to gate them.
 
 ### U. Audio

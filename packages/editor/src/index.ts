@@ -2142,3 +2142,4 @@ export {
   type BtNodeType,
   type BtValue,
 } from "./model/behaviourTree";
+export { PERCEPTION_LUA, perceptionLua } from "./model/perception";

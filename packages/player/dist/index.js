@@ -39534,7 +39534,7 @@ function watchGpuPresent(device, storage, ms = PRESENT_WATCH_MS, schedule = (fn,
 }
 
 // src/player.ts
-import { behaviourTreesLua, bundleLuaModules, SpatialLoader, WorldPartition, partitionWorld, actionMask, createHoloCache, holoBindingKeys as holoBindingKeys2, holoDocuments as holoDocuments2, renderHoloDocument, translate, reboundActions, colorFilterSvg, DEFAULT_ACCESSIBILITY } from "@cartbox/editor";
+import { behaviourTreesLua, bundleLuaModules, perceptionLua, SpatialLoader, WorldPartition, partitionWorld, actionMask, createHoloCache, holoBindingKeys as holoBindingKeys2, holoDocuments as holoDocuments2, renderHoloDocument, translate, reboundActions, colorFilterSvg, DEFAULT_ACCESSIBILITY } from "@cartbox/editor";
 var DIRECT_CORE_URL = "/engine/modern-core/modern-core.js";
 function directCoreBeside(engineUrl) {
   const at = engineUrl?.lastIndexOf("/engine/") ?? -1;
@@ -39834,6 +39834,8 @@ var Player = class {
       if (modules) prepared = prependLuaCode(prepared, modules.prelude);
       const behavioursLua = behaviourTreesLua(this.options.mesh?.behaviours ?? []);
       if (behavioursLua) prepared = prependLuaCode(prepared, behavioursLua);
+      const senseLua = perceptionLua(cartCode, Boolean(behavioursLua));
+      if (senseLua) prepared = prependLuaCode(prepared, senseLua);
       const components = componentsSdkLua(this.options.mesh);
       if (components) prepared = appendLuaCode(prependLuaCode(prepared, components.prelude), components.postlude);
       const collisionLua = collisionSdkLua(this.options.collision);
