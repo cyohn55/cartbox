@@ -439,6 +439,7 @@ var PHYS_OP_UI_TEXT = 38;
 var PHYS_OP_UI_LIST = 39;
 var PHYS_OP_LOOK = 40;
 var PHYS_OP_SHATTER = 41;
+var PHYS_OP_DRIVE = 42;
 var PHYS_Q_BODY = 100;
 var PHYS_Q_CAST = 101;
 var PHYS_Q_RAY = 102;
@@ -454,6 +455,7 @@ var PHYS_Q_FIRE = 111;
 var PHYS_Q_PROJECTILE = 112;
 var PHYS_Q_IMPACTS = 113;
 var PHYS_Q_STOP = 114;
+var PHYS_Q_VEHICLE = 115;
 var PHYS_Q_IMPACTS_PAGE = 3;
 var DIRECT_MAX_PROJECTILES = 1024;
 var PROJECTILE_GRAVITY = 9.81;
@@ -8098,6 +8100,7 @@ end`;
 }
 
 // src/mesh/meshScene.ts
+import { readBehaviourTrees } from "@cartbox/editor";
 import {
   composeModelMatrix,
   deserializeMeshAsset,
@@ -8206,6 +8209,7 @@ function parseMeshScene(raw) {
   if (!Array.isArray(entries)) return null;
   const library = readMeshLibrary(parsed.library);
   const componentDefs = parseComponentDefs(parsed.components);
+  const behaviours = readBehaviourTrees(parsed.behaviours);
   const componentNames = new Set(componentDefs.map((d) => d.name));
   const cache = /* @__PURE__ */ new Map();
   const load = (serialized) => {
@@ -8477,6 +8481,7 @@ function parseMeshScene(raw) {
     ...debris.length > 0 ? { debris, debrisMeshes, ...debrisLods.some(Boolean) ? { debrisLods } : {} } : {},
     ...audio ? { audio } : {},
     ...componentDefs.length > 0 ? { components: componentDefs } : {},
+    ...behaviours.length > 0 ? { behaviours } : {},
     lighting,
     ...pools.length > 0 ? { pools } : {},
     ...physicsWorld ? { physicsWorld } : {},
@@ -8654,6 +8659,23 @@ function deterministicBackend(inner) {
     });
   }
   if (inner.removeJoint) out.removeJoint = inner.removeJoint.bind(inner);
+  if (inner.addVehicle) {
+    const add = inner.addVehicle.bind(inner);
+    out.addVehicle = (desc) => add({
+      ...desc,
+      wheels: desc.wheels.map((w) => ({ at: snap3(w.at), radius: snap(w.radius) })),
+      suspension: snap(desc.suspension),
+      stiffness: snap(desc.stiffness),
+      compression: snap(desc.compression),
+      relaxation: snap(desc.relaxation),
+      grip: snap(desc.grip)
+    });
+  }
+  if (inner.driveVehicle) {
+    const drive = inner.driveVehicle.bind(inner);
+    out.driveVehicle = (vehicle, wheels) => drive(vehicle, wheels.map((w) => ({ engine: snap(w.engine), steer: snap(w.steer), brake: snap(w.brake) })));
+  }
+  if (inner.vehicleState) out.vehicleState = inner.vehicleState.bind(inner);
   if (inner.setMotor) {
     const motor = inner.setMotor.bind(inner);
     out.setMotor = (joint, speed, force) => motor(joint, snap(speed), snap(force));
@@ -8750,6 +8772,15 @@ function qrot(q, v) {
   return [r[0], r[1], r[2]];
 }
 var S = Math.SQRT1_2;
+function axisAngle(axis, angle) {
+  const h = Math.sin(angle / 2);
+  return [axis[0] * h, axis[1] * h, axis[2] * h, Math.cos(angle / 2)];
+}
+var clampUnit = (v, lo) => Number.isFinite(v) ? Math.max(lo, Math.min(1, v)) : 0;
+function descendsFrom(scene, k, root) {
+  for (let p = scene.instances[k]?.parent ?? -1, guard = 0; p >= 0 && guard < scene.instances.length; p = scene.instances[p].parent, guard += 1) if (p === root) return true;
+  return false;
+}
 var HINGE_FRAME = { x: [0, 0, 0, 1], y: [0, 0, S, S], z: [0, -S, 0, S] };
 function jointFrames(spec, self, target) {
   const a = splitWorldMatrix(self);
@@ -8760,7 +8791,8 @@ function jointFrames(spec, self, target) {
   const inB = qconj(b.rotation);
   const anchor2 = qrot(inB, [world[0] - b.position[0], world[1] - b.position[1], world[2] - b.position[2]]);
   const pulls = spec.kind === "spring" || spec.kind === "rope";
-  const frame1 = spec.kind === "hinge" ? HINGE_FRAME[spec.axis ?? "y"] : [0, 0, 0, 1];
+  const axial = spec.kind === "hinge" || spec.kind === "slider";
+  const frame1 = axial ? HINGE_FRAME[spec.axis ?? "y"] : [0, 0, 0, 1];
   const deg = Math.PI / 180;
   return {
     kind: spec.kind,
@@ -8769,6 +8801,8 @@ function jointFrames(spec, self, target) {
     anchor2,
     frame2: qmul(qmul(inB, a.rotation), frame1),
     ...spec.kind === "hinge" && spec.limits ? { limits: [spec.limits[0] * deg, spec.limits[1] * deg] } : {},
+    // A slider's limits are metres along its axis: scaled with the object, as its anchor is.
+    ...spec.kind === "slider" && spec.limits ? { limits: [spec.limits[0], spec.limits[1]] } : {},
     length: spec.length ?? Math.hypot(local[0], local[1], local[2]),
     stiffness: spec.stiffness ?? DEFAULT_SPRING_STIFFNESS,
     damping: spec.damping ?? DEFAULT_SPRING_DAMPING
@@ -8873,6 +8907,8 @@ var PhysicsSession = class {
     this.fireOptions = null;
     /** Impacts and expiries during the last step. */
     this.impacts = [];
+    /** Vehicles (S5), by chassis object: the backend's handle, the cart's inputs, and each wheel's drawn object. */
+    this.vehicles = /* @__PURE__ */ new Map();
     this.deterministic = deterministic ?? scene.physicsWorld?.deterministic === true;
     this.backend = this.deterministic ? deterministicBackend(backend) : backend;
     this.maxBodies = maxBodies;
@@ -8922,6 +8958,29 @@ var PhysicsSession = class {
     });
     const model = (object) => scene.instances[object]?.model ?? null;
     for (const [object, joint] of this.joints) if (!joint.pooled) this.join(object, model);
+    scene.instances.forEach((inst, i) => {
+      const spec = inst.physics?.vehicle;
+      const t = this.byObject.get(i);
+      if (!spec || !t || t.kind !== "dynamic" || inst.pooled || !this.backend.addVehicle) return;
+      const chassis = splitWorldMatrix(inst.model);
+      const handle = this.backend.addVehicle({
+        chassis: t.handle,
+        wheels: spec.wheels.map((w) => ({ at: [w.at[0] * chassis.scale[0], w.at[1] * chassis.scale[1], w.at[2] * chassis.scale[2]], radius: w.radius })),
+        suspension: spec.suspension,
+        stiffness: spec.stiffness,
+        compression: spec.compression,
+        relaxation: spec.relaxation,
+        grip: spec.grip
+      });
+      const visuals = spec.wheels.map((w) => {
+        if (!w.visual) return null;
+        const v = scene.instances.findIndex((other, k) => other.name === w.visual && descendsFrom(scene, k, i));
+        if (v < 0 || this.byObject.has(v)) return null;
+        const pose = splitWorldMatrix(scene.instances[v].model);
+        return { object: v, rest: qmul(qconj(chassis.rotation), pose.rotation), scale: pose.scale };
+      });
+      this.vehicles.set(i, { spec, handle, tracked: t, input: [0, 0, 0], visuals });
+    });
   }
   /** Create `object`'s joint from where it and its target are now (`world` gives world matrices). */
   join(object, world) {
@@ -9037,7 +9096,36 @@ var PhysicsSession = class {
       this.projectiles.delete(a);
       return null;
     }
+    if (op === PHYS_Q_VEHICLE) {
+      const vehicle = this.vehicles.get(a);
+      const state = vehicle && vehicle.tracked.enabled ? this.backend.vehicleState?.(vehicle.handle) : void 0;
+      if (!state) return null;
+      return [asBlock(state.speed), state.wheels.filter((w) => w.contact).length, state.wheels.length];
+    }
     return null;
+  }
+  /** Hand each vehicle's inputs to its wheels: the engine to the driven ones (all, if none is marked), steering to the steered. */
+  driveVehicles() {
+    if (!this.backend.driveVehicle) return;
+    for (const vehicle of this.vehicles.values()) {
+      if (!vehicle.tracked.enabled) continue;
+      const { spec, input } = vehicle;
+      const [throttle, steer, brake] = input;
+      const anyDriven = spec.wheels.some((w) => w.driven);
+      this.backend.driveVehicle(
+        vehicle.handle,
+        spec.wheels.map((w) => ({
+          engine: w.driven || !anyDriven ? throttle * spec.engine : 0,
+          steer: w.steered ? steer * spec.steer * (Math.PI / 180) : 0,
+          brake: brake * spec.brake
+        }))
+      );
+    }
+  }
+  /** A vehicle's state after the last step (live inspection, tests), or null. */
+  vehicle(object) {
+    const vehicle = this.vehicles.get(object);
+    return vehicle ? this.backend.vehicleState?.(vehicle.handle) ?? null : null;
   }
   /**
    * Move every projectile one tick (S4): gravity and drag change its velocity,
@@ -9158,11 +9246,16 @@ var PhysicsSession = class {
       }
       const t = this.byObject.get(cmd.a);
       if (!t || !t.enabled) continue;
+      if (cmd.op === PHYS_OP_DRIVE) {
+        const vehicle = this.vehicles.get(cmd.a);
+        if (vehicle) vehicle.input = [clampUnit(a, -1), clampUnit(b, -1), clampUnit(c, 0)];
+        continue;
+      }
       if (cmd.op === PHYS_OP_MOTOR || cmd.op === PHYS_OP_UNJOIN) {
         const joint = this.joints.get(cmd.a);
         if (joint?.handle == null) continue;
         if (cmd.op === PHYS_OP_UNJOIN) this.unjoin(cmd.a);
-        else if (joint.spec.kind === "hinge") this.backend.setMotor?.(joint.handle, a, Math.max(0, b));
+        else if (joint.spec.kind === "hinge" || joint.spec.kind === "slider") this.backend.setMotor?.(joint.handle, a, Math.max(0, b));
         continue;
       }
       if (cmd.op === PHYS_OP_IMPULSE && t.kind === "dynamic") this.backend.applyImpulse(t.handle, [a, b, c]);
@@ -9175,6 +9268,7 @@ var PhysicsSession = class {
         t.lastMove = [after[0] - before[0], after[1] - before[1], after[2] - before[2]];
       }
     }
+    this.driveVehicles();
     this.backend.step(PHYSICS_DT);
     this.queriesReady = true;
     this.events = this.backend.drainContacts();
@@ -9223,6 +9317,24 @@ var PhysicsSession = class {
       if (!t.enabled) continue;
       const s = this.backend.bodyState(t.handle);
       out.set(t.object, composeWorldMatrix(s.position, s.rotation, t.scale));
+    }
+    for (const vehicle of this.vehicles.values()) {
+      if (!vehicle.tracked.enabled || !vehicle.visuals.some(Boolean)) continue;
+      const state = this.backend.vehicleState?.(vehicle.handle);
+      if (!state) continue;
+      const body = this.backend.bodyState(vehicle.tracked.handle);
+      const scale = vehicle.tracked.scale;
+      vehicle.visuals.forEach((visual, w) => {
+        const wheel = state.wheels[w];
+        if (!visual || !wheel) return;
+        const at = vehicle.spec.wheels[w].at;
+        const hard = qrot(body.rotation, [at[0] * scale[0], at[1] * scale[1], at[2] * scale[2]]);
+        const down = qrot(body.rotation, [0, -wheel.suspension, 0]);
+        const centre = [body.position[0] + hard[0] + down[0], body.position[1] + hard[1] + down[1], body.position[2] + hard[2] + down[2]];
+        const steer = axisAngle([0, 1, 0], wheel.steering);
+        const roll = axisAngle([1, 0, 0], wheel.rotation);
+        out.set(visual.object, composeWorldMatrix(centre, qmul(qmul(body.rotation, qmul(steer, roll)), visual.rest), visual.scale));
+      });
     }
     return out;
   }
@@ -9840,6 +9952,19 @@ function PHYSICS_CALLS() {
     local i = _obj(o)
     if i == nil or not _slot[i] then return end
     if speed == nil then _cmd(${PHYS_OP_MOTOR}, i, 0, 0) else _cmd(${PHYS_OP_MOTOR}, i, speed, force or 1000) end
+  end
+  cartbox.drive = function(o, throttle, steer, brake)
+    local i = _obj(o)
+    if i and _slot[i] then _cmd(${PHYS_OP_DRIVE}, i, throttle or 0, steer or 0, brake or 0) end
+  end
+  cartbox.vehicle = function(o)
+    local i = _obj(o)
+    if i == nil or not _slot[i] or not _live() then return nil end
+    if _q then return _q(${PHYS_Q_VEHICLE}, i) end
+    -- Off the dedicated core: the chassis's speed from its body (wheel contact isn't in the block).
+    local _, _, _, vx, vy, vz = cartbox.body(o)
+    if vx == nil then return nil end
+    return math.sqrt(vx * vx + vy * vy + vz * vz)
   end
   cartbox.unjoin = function(o)
     local i = _obj(o)
@@ -11685,13 +11810,13 @@ function createCartSpriteSource(module, bytes, paletteSize) {
 }
 
 // src/scene/parallaxScene.ts
-var clampUnit = (v) => v < 0 ? 0 : v > 1 ? 1 : v;
+var clampUnit2 = (v) => v < 0 ? 0 : v > 1 ? 1 : v;
 var lerp = (a, b, t) => a + (b - a) * t;
 function parallaxOf(layer) {
-  return layer.parallax ?? clampUnit(1 - layer.depth);
+  return layer.parallax ?? clampUnit2(1 - layer.depth);
 }
 function hazeColor(rgb, haze, atmosphere) {
-  const t = clampUnit(haze);
+  const t = clampUnit2(haze);
   const desat = atmosphere.desaturate * t;
   const lift = atmosphere.lift * t;
   const blend = atmosphere.density * t;
@@ -11708,7 +11833,7 @@ function hazeColor(rgb, haze, atmosphere) {
 }
 function prehazeLayers(layers, atmosphere) {
   return layers.map((layer) => {
-    const haze = clampUnit(layer.depth);
+    const haze = clampUnit2(layer.depth);
     if (haze <= 0) {
       return { ...layer, hazed: true };
     }
@@ -11731,7 +11856,7 @@ function composeParallax(out, outW, outH, layers, camera, atmosphere) {
     const shiftX = Math.round(-camera.x * factor + (layer.offsetX ?? 0));
     const shiftY = Math.round(-camera.y * factor + (layer.offsetY ?? 0));
     const wrapX = layer.wrapX ?? true;
-    const haze = layer.hazed ? 0 : clampUnit(layer.depth);
+    const haze = layer.hazed ? 0 : clampUnit2(layer.depth);
     const opacity = layer.opacity ?? 1;
     const emissive = layer.emissive ?? 1;
     for (let y = 0; y < outH; y += 1) {
@@ -39409,7 +39534,7 @@ function watchGpuPresent(device, storage, ms = PRESENT_WATCH_MS, schedule = (fn,
 }
 
 // src/player.ts
-import { SpatialLoader, WorldPartition, partitionWorld, actionMask, createHoloCache, holoBindingKeys as holoBindingKeys2, holoDocuments as holoDocuments2, renderHoloDocument, translate, reboundActions, colorFilterSvg, DEFAULT_ACCESSIBILITY } from "@cartbox/editor";
+import { behaviourTreesLua, bundleLuaModules, SpatialLoader, WorldPartition, partitionWorld, actionMask, createHoloCache, holoBindingKeys as holoBindingKeys2, holoDocuments as holoDocuments2, renderHoloDocument, translate, reboundActions, colorFilterSvg, DEFAULT_ACCESSIBILITY } from "@cartbox/editor";
 var DIRECT_CORE_URL = "/engine/modern-core/modern-core.js";
 function directCoreBeside(engineUrl) {
   const at = engineUrl?.lastIndexOf("/engine/") ?? -1;
@@ -39679,11 +39804,14 @@ var Player = class {
       if (this.destroyed) return;
       const sampleRate = this.options.sampleRate ?? this.model.sampleRate;
       const seed = this.options.replay ? this.options.replay.seed : randomSeed();
-      const seeded = seedCartridge(bytes, seed);
+      const sourceCode = readCartCode(bytes);
+      const modules = sourceCode !== null ? bundleLuaModules(sourceCode) : null;
+      const source = modules ? rewriteLuaCode(bytes, () => modules.main) : bytes;
+      const seeded = seedCartridge(source, seed);
       let prepared = seeded;
       const layout = RAM_LAYOUTS[this.model.id];
       const debug = this.options.debug;
-      const cartCode = readCartCode(bytes);
+      const cartCode = readCartCode(source);
       let ownCode = cartCode;
       if ((this.options.onTrace || debug) && layout) {
         if (debug && cartCode !== null && !direct) {
@@ -39703,6 +39831,9 @@ var Player = class {
         prepared = prependLuaCode(prepared, debugSdkLua(debugBlockAddress(layout), { debugger: this.debugState !== null }));
         this.debugOffset = debugBlockAddress(layout) - layout.pmemAddress;
       }
+      if (modules) prepared = prependLuaCode(prepared, modules.prelude);
+      const behavioursLua = behaviourTreesLua(this.options.mesh?.behaviours ?? []);
+      if (behavioursLua) prepared = prependLuaCode(prepared, behavioursLua);
       const components = componentsSdkLua(this.options.mesh);
       if (components) prepared = appendLuaCode(prependLuaCode(prepared, components.prelude), components.postlude);
       const collisionLua = collisionSdkLua(this.options.collision);
@@ -42833,6 +42964,7 @@ export {
   PHYS_BLOCK_BYTES,
   PHYS_MAGIC,
   PHYS_MAX_BODIES,
+  PHYS_OP_DRIVE,
   PHYS_Q_AGENT,
   PHYS_Q_ANIM,
   PHYS_Q_ANIM_EVENTS,
@@ -42848,6 +42980,7 @@ export {
   PHYS_Q_PROJECTILE,
   PHYS_Q_RAY,
   PHYS_Q_STOP,
+  PHYS_Q_VEHICLE,
   POINTER_AT,
   POINTER_MAGIC,
   POST_FX_EFFECTS,

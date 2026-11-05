@@ -15,21 +15,18 @@
  * - **Find and replace**, over a cart's whole source.
  * - **Auto-indent**, so a `function` opens a level and an `end` closes one.
  *
- * One thing deliberately *not* changed: the whole document is still tokenised
- * on every keystroke. Caching per line looks obvious and is wrong — Lua's
- * `--[[ … ]]` block comments and long strings span lines, so a line tokenised
- * on its own highlights the inside of a block comment as code. Making that
- * cache correct means teaching the tokenizer to carry a line-start state, which
- * is a change to a module the whole editor's colouring depends on; it is worth
- * doing if a cart's source ever gets big enough for this to be felt, and not
- * before.
+ * Highlighting is incremental (AAA_PRODUCTION_ROADMAP.md K3): the tokenizer
+ * carries a line-start state (inside a block comment or long string, or not),
+ * so a keystroke re-tokenises its own line, and an opened or closed block
+ * comment the lines it reaches, not the document (`LineTokenCache`).
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { CodeDocument, LANGUAGES, languageById, tokenize, type TokenType } from "@cartbox/editor";
+import { CodeDocument, LANGUAGES, LineTokenCache, addLuaModule, languageById, luaCompletions, luaDefinition, luaDiagnostics, luaFiles, readLuaFile, removeLuaModule, writeLuaFile, type TokenType } from "@cartbox/editor";
 
 import styles from "./editor.module.css";
 import { SdkPanel } from "./SdkPanel";
+import { SDK_REFERENCE } from "./sdkReference";
 import {
   errorLineFrom,
   findMatches,
@@ -41,6 +38,9 @@ import {
   replaceAll,
   replaceMatch,
 } from "./codeTools";
+
+/** The SDK reference's calls, for the language service (completion, arity). */
+const SDK_ENTRIES = SDK_REFERENCE.flatMap((group) => group.entries);
 
 const TOKEN_CLASS: Record<TokenType, string> = {
   keyword: styles.tokKeyword ?? "",
@@ -78,7 +78,12 @@ interface CodeEditorProps {
 }
 
 export function CodeEditor({ doc, revision, errorLine, onErrorLineHandled, breakpoints, onToggleBreakpoint }: CodeEditorProps) {
-  const [text, setText] = useState(() => doc.getText());
+  // The whole code, and the file shown (K1): null for all of it, else one Lua module's source.
+  const [full, setFull] = useState(() => doc.getText());
+  const [file, setFile] = useState<string | null>(null);
+  const modules = useMemo(() => luaFiles(full).slice(1), [full]);
+  const shown = file !== null && modules.includes(file) ? file : null;
+  const text = useMemo(() => (shown === null ? full : readLuaFile(full, shown)), [full, shown]);
   const [language, setLanguage] = useState(() => doc.language);
   const [cursor, setCursor] = useState({ line: 1, column: 1 });
 
@@ -96,9 +101,9 @@ export function CodeEditor({ doc, revision, errorLine, onErrorLineHandled, break
   const config = useMemo(() => languageById(language), [language]);
   const lines = useMemo(() => text.split("\n"), [text]);
 
-  // The whole document, so multi-line comments and long strings colour
-  // correctly (see the note at the top of this file).
-  const tokens = useMemo(() => tokenize(text, config), [text, config]);
+  // Line by line through a cache that carries each line's start state (see the note at the top of this file).
+  const tokenCache = useMemo(() => new LineTokenCache(config), [config]);
+  const lineTokens = useMemo(() => tokenCache.update(text), [tokenCache, text]);
 
   const matches = useMemo(
     () => (findOpen ? findMatches(text, query, { caseSensitive }) : []),
@@ -107,16 +112,61 @@ export function CodeEditor({ doc, revision, errorLine, onErrorLineHandled, break
 
   const syncCursor = useCallback(() => {
     const element = textareaRef.current;
-    if (element) setCursor(doc.positionAt(element.selectionStart));
-  }, [doc]);
+    if (!element) return;
+    if (shown === null) setCursor(doc.positionAt(element.selectionStart));
+    else {
+      const before = element.value.slice(0, element.selectionStart).split("\n");
+      setCursor({ line: before.length, column: before[before.length - 1]!.length + 1 });
+    }
+  }, [doc, shown]);
 
+  /** Store the shown file's new text: the whole code, or one module's section of it. */
   const commit = useCallback(
     (next: string) => {
-      setText(next);
-      doc.setText(next);
+      const nextFull = shown === null ? next : writeLuaFile(full, shown, next);
+      setFull(nextFull);
+      doc.setText(nextFull);
     },
-    [doc],
+    [doc, full, shown],
   );
+
+  // The language service (K2): problems, completion and go to definition, over the whole code.
+  const isLua = language === "lua";
+  const problems = useMemo(() => (isLua ? luaDiagnostics(full, SDK_ENTRIES) : []), [full, isLua]);
+  const [suggest, setSuggest] = useState<{ from: number; to: number; items: { label: string; detail?: string }[] } | null>(null);
+  /** The caret's offset in the whole code (the shown file may be one module). */
+  const fullOffset = useCallback(
+    (local: number) => {
+      if (shown === null) return local;
+      const marker = full.search(new RegExp(`^--#module[ \\t]+${shown.replace(/\./g, "\\.")}[ \\t]*$`, "m"));
+      const start = marker < 0 ? 0 : full.indexOf("\n", marker) + 1;
+      return start + local;
+    },
+    [full, shown],
+  );
+  const pendingJump = useRef<number | null>(null);
+  const jumpToLine = useCallback((line: number) => {
+    pendingJump.current = line;
+    setFile(null);
+  }, []);
+
+  const addModule = () => {
+    const name = window.prompt("New module name (letters, digits, _ and dots, like ai.patrol)")?.trim();
+    if (!name) return;
+    const next = addLuaModule(full, name);
+    if (next === full) return;
+    setFull(next);
+    doc.setText(next);
+    setFile(name);
+  };
+
+  const removeModule = (name: string) => {
+    if (!window.confirm(`Remove module ${name} and its code?`)) return;
+    const next = removeLuaModule(full, name);
+    setFull(next);
+    doc.setText(next);
+    setFile(null);
+  };
 
   /** Put the caret at `start`..`end` and scroll it into view. */
   const select = useCallback(
@@ -140,7 +190,7 @@ export function CodeEditor({ doc, revision, errorLine, onErrorLineHandled, break
   // position and an open find panel all survive.
   useEffect(() => {
     const fresh = doc.getText();
-    setText((current) => (current === fresh ? current : fresh));
+    setFull((current) => (current === fresh ? current : fresh));
     setLanguage(doc.language);
   }, [doc, revision]);
 
@@ -150,12 +200,26 @@ export function CodeEditor({ doc, revision, errorLine, onErrorLineHandled, break
   const jumpedToRef = useRef<number | null>(null);
   useEffect(() => {
     if (!errorLine || jumpedToRef.current === errorLine) return;
+    // A cart line: shown in the whole code.
+    if (shown !== null) {
+      setFile(null);
+      return;
+    }
     jumpedToRef.current = errorLine;
     const start = offsetOfLine(doc.getText(), errorLine);
     const range = lineRangeAt(doc.getText(), start);
     select(range.start, range.end);
     onErrorLineHandled?.();
-  }, [doc, errorLine, onErrorLineHandled, select]);
+  }, [doc, errorLine, onErrorLineHandled, select, shown]);
+
+  // A definition or a problem picked: shown in the whole code, its line selected.
+  useEffect(() => {
+    const line = pendingJump.current;
+    if (line === null || shown !== null) return;
+    pendingJump.current = null;
+    const range = lineRangeAt(full, offsetOfLine(full, line));
+    select(range.start, range.end);
+  });
 
   const handleChange = (event: React.ChangeEvent<HTMLTextAreaElement>) => {
     commit(event.target.value);
@@ -225,6 +289,24 @@ export function CodeEditor({ doc, revision, errorLine, onErrorLineHandled, break
       return;
     }
 
+    // Completion (Ctrl+Space) and go to definition (F12), for Lua.
+    if (isLua && mod && event.key === " ") {
+      event.preventDefault();
+      const caret = element.selectionStart;
+      const { from, items } = luaCompletions(full, fullOffset(caret), SDK_ENTRIES);
+      setSuggest(items.length > 0 ? { from: caret - (fullOffset(caret) - from), to: caret, items: items.slice(0, 12) } : null);
+      return;
+    }
+    if (isLua && event.key === "F12") {
+      event.preventDefault();
+      const line = luaDefinition(full, fullOffset(element.selectionStart));
+      if (line !== null) jumpToLine(line);
+      return;
+    }
+    if (event.key === "Escape" && suggest) {
+      setSuggest(null);
+      return;
+    }
     if (event.key === "Escape" && findOpen) {
       setFindOpen(false);
       return;
@@ -289,6 +371,50 @@ export function CodeEditor({ doc, revision, errorLine, onErrorLineHandled, break
   return (
     <div className={styles.body}>
       <aside className={styles.rail}>
+        {language === "lua" && (
+          <div>
+            <div className={styles.groupLabel}>Files</div>
+            <div style={{ display: "grid", gap: 4 }}>
+              <button type="button" className={styles.toolBtn} aria-pressed={shown === null} onClick={() => setFile(null)} title="The cart's whole code (its line numbers are the ones errors and breakpoints use)">
+                All code
+              </button>
+              {modules.map((name) => (
+                <span key={name} style={{ display: "flex", gap: 4 }}>
+                  <button type="button" className={styles.toolBtn} aria-pressed={shown === name} onClick={() => setFile(name)} style={{ flex: 1 }} title={`Edit module ${name}; load it with require("${name}")`}>
+                    {name}
+                  </button>
+                  {shown === name && (
+                    <button type="button" className={styles.toolBtn} onClick={() => removeModule(name)} aria-label={`Remove module ${name}`}>
+                      ×
+                    </button>
+                  )}
+                </span>
+              ))}
+              <button type="button" className={styles.toolBtn} onClick={addModule} title="A new Lua module: a file of the cart that require loads">
+                + Module
+              </button>
+            </div>
+          </div>
+        )}
+        {isLua && problems.length > 0 && (
+          <div>
+            <div className={styles.groupLabel}>Problems ({problems.length})</div>
+            <div style={{ display: "grid", gap: 2, maxHeight: 160, overflowY: "auto", fontSize: 11 }}>
+              {problems.slice(0, 50).map((p, i) => (
+                <button
+                  key={i}
+                  type="button"
+                  className={styles.toolBtn}
+                  onClick={() => jumpToLine(p.line)}
+                  style={{ textAlign: "left", color: p.severity === "error" ? "#ff6b6b" : "#e0b050" }}
+                  title={p.message}
+                >
+                  {p.line}: {p.message}
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
         <div>
           <div className={styles.groupLabel}>Language</div>
           <select className={styles.langSelect} value={language} onChange={changeLanguage} aria-label="Language">
@@ -309,6 +435,30 @@ export function CodeEditor({ doc, revision, errorLine, onErrorLineHandled, break
       </aside>
 
       <section className={styles.codeStage}>
+        {suggest && (
+          <div className={styles.findBar} role="listbox" aria-label="Suggestions">
+            {suggest.items.map((item) => (
+              <button
+                key={item.label}
+                type="button"
+                className="cbx-btn"
+                title={item.detail}
+                onClick={() => {
+                  const next = text.slice(0, suggest.from) + item.label + text.slice(suggest.to);
+                  commit(next);
+                  const caret = suggest.from + item.label.length;
+                  setSuggest(null);
+                  requestAnimationFrame(() => select(caret, caret));
+                }}
+              >
+                {item.label}
+              </button>
+            ))}
+            <button type="button" className={styles.bannerDismiss} onClick={() => setSuggest(null)}>
+              Close
+            </button>
+          </div>
+        )}
         {findOpen && (
           <div className={styles.findBar} role="search">
             <input
@@ -370,15 +520,15 @@ export function CodeEditor({ doc, revision, errorLine, onErrorLineHandled, break
           <div ref={gutterRef} className={`${styles.gutter} ${styles.codeMetrics}`} aria-hidden>
             {lines.map((_line, index) => {
               const line = index + 1;
-              const marked = breakpoints?.includes(line) ?? false;
+              const marked = shown === null && (breakpoints?.includes(line) ?? false);
               return (
                 <div
                   key={index}
                   data-line={line}
-                  className={[line === errorLine ? styles.gutterError : "", marked ? styles.gutterBreakpoint : ""].filter(Boolean).join(" ") || undefined}
-                  onClick={onToggleBreakpoint ? () => onToggleBreakpoint(line) : undefined}
-                  title={onToggleBreakpoint ? (marked ? "Remove breakpoint" : "Set a breakpoint: the playtest stops here") : undefined}
-                  style={onToggleBreakpoint ? { cursor: "pointer" } : undefined}
+                  className={[shown === null && line === errorLine ? styles.gutterError : "", marked ? styles.gutterBreakpoint : ""].filter(Boolean).join(" ") || undefined}
+                  onClick={onToggleBreakpoint && shown === null ? () => onToggleBreakpoint(line) : undefined}
+                  title={onToggleBreakpoint && shown === null ? (marked ? "Remove breakpoint" : "Set a breakpoint: the playtest stops here") : undefined}
+                  style={onToggleBreakpoint && shown === null ? { cursor: "pointer" } : undefined}
                 >
                   {line}
                 </div>
@@ -388,9 +538,14 @@ export function CodeEditor({ doc, revision, errorLine, onErrorLineHandled, break
           <div className={styles.codeScroll}>
             <pre ref={highlightRef} className={`${styles.codeLayer} ${styles.highlight} ${styles.codeMetrics}`} aria-hidden>
               <code>
-                {tokens.map((token, index) => (
-                  <span key={index} className={TOKEN_CLASS[token.type]}>
-                    {token.value}
+                {lineTokens.map((line, row) => (
+                  <span key={row}>
+                    {line.tokens.map((token, index) => (
+                      <span key={index} className={TOKEN_CLASS[token.type]}>
+                        {token.value}
+                      </span>
+                    ))}
+                    {row < lineTokens.length - 1 ? "\n" : null}
                   </span>
                 ))}
               </code>

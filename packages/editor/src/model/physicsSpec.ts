@@ -18,7 +18,7 @@
  * working inside prefabs, whose copies get fresh ids.
  */
 
-export type JointKind = "hinge" | "ball" | "fixed" | "spring" | "rope";
+export type JointKind = "hinge" | "slider" | "ball" | "fixed" | "spring" | "rope";
 export type JointAxis = "x" | "y" | "z";
 
 /**
@@ -26,6 +26,9 @@ export type JointAxis = "x" | "y" | "z";
  *
  * - `hinge`: turns about one of its own axes through `anchor` (doors, wheels,
  *   levers); optional angle `limits`, and a motor driven by cartbox.motor.
+ * - `slider`: slides along one of its own axes and turns not at all (lifts,
+ *   pistons, sliding doors; AAA_PRODUCTION_ROADMAP.md S5); optional `limits`
+ *   in metres either side of where it starts, and a motor (metres a second).
  * - `ball`: swivels freely about `anchor` (ragdoll joints, chains).
  * - `fixed`: welded where it starts (breakable with cartbox.unjoin).
  * - `spring`: its centre is pulled toward `anchor` (a point that moves with the
@@ -36,9 +39,12 @@ export interface JointSpec {
   readonly kind: JointKind;
   /** The attach point in the object's own coordinates (before its scale). Default: its origin. */
   readonly anchor: readonly [number, number, number];
-  /** Hinge: which of the object's own axes it turns about. Default y. */
+  /** Hinge: which of the object's own axes it turns about; slider: which it slides along. Default y. */
   readonly axis?: JointAxis;
-  /** Hinge: [min, max] degrees either side of where it starts (-180..180). Absent = free. */
+  /**
+   * Hinge: [min, max] degrees either side of where it starts (-180..180);
+   * slider: [min, max] metres (-1000..1000). Absent = free.
+   */
   readonly limits?: readonly [number, number];
   /** Spring rest length / rope's longest reach. Absent = the distance to `anchor` at the start. */
   readonly length?: number;
@@ -48,9 +54,99 @@ export interface JointSpec {
   readonly damping?: number;
 }
 
-export const JOINT_KINDS: readonly JointKind[] = ["hinge", "ball", "fixed", "spring", "rope"];
+export const JOINT_KINDS: readonly JointKind[] = ["hinge", "slider", "ball", "fixed", "spring", "rope"];
 export const DEFAULT_SPRING_STIFFNESS = 50;
 export const DEFAULT_SPRING_DAMPING = 1;
+
+/**
+ * A ray-cast vehicle (AAA_PRODUCTION_ROADMAP.md S5; Rapier's vehicle
+ * controller): a dynamic body as the chassis, held up by wheels that are rays
+ * on springs, not bodies. Its forward is its own +Z, its up +Y. A cart drives it
+ * with cartbox.drive(object, throttle, steer, brake).
+ */
+export interface VehicleSpec {
+  readonly wheels: readonly WheelSpec[];
+  /** Driving force at full throttle, per driven wheel, newtons (0..100000). */
+  readonly engine: number;
+  /** Braking force at full brake, per wheel (0..100000). */
+  readonly brake: number;
+  /** The steered wheels' angle at full lock, degrees (0..60). */
+  readonly steer: number;
+  /** The springs' length at rest, metres (0.01..5). */
+  readonly suspension: number;
+  /** Spring stiffness (1..1000; Rapier's units, scaled by the chassis mass). */
+  readonly stiffness: number;
+  /** Damping as the spring compresses and as it relaxes (0..100). */
+  readonly compression: number;
+  readonly relaxation: number;
+  /** Tyre grip: how much sideways and forward force before it slips (0..100). */
+  readonly grip: number;
+}
+
+/** A wheel: where its spring meets the chassis (its own coordinates), its size, and what it does. */
+export interface WheelSpec {
+  readonly at: readonly [number, number, number];
+  readonly radius: number;
+  /** Turned by the steering. */
+  readonly steered?: boolean;
+  /** Pushed by the engine. */
+  readonly driven?: boolean;
+  /** A child object (by name) drawn as this wheel: placed, turned and spun each frame. */
+  readonly visual?: string;
+}
+
+export const MAX_VEHICLE_WHEELS = 8;
+
+/** A four-wheeled car's settings, wheels at the corners of a 2 × 4 m chassis (the editor's preset). */
+export const DEFAULT_VEHICLE: VehicleSpec = {
+  wheels: [
+    { at: [-0.9, -0.3, 1.3], radius: 0.4, steered: true, visual: "wheel-fl" },
+    { at: [0.9, -0.3, 1.3], radius: 0.4, steered: true, visual: "wheel-fr" },
+    { at: [-0.9, -0.3, -1.3], radius: 0.4, driven: true, visual: "wheel-rl" },
+    { at: [0.9, -0.3, -1.3], radius: 0.4, driven: true, visual: "wheel-rr" },
+  ],
+  engine: 800,
+  brake: 30,
+  steer: 30,
+  suspension: 0.5,
+  stiffness: 30,
+  compression: 4,
+  relaxation: 5,
+  grip: 3,
+};
+
+/** Read a stored vehicle, or null when absent or without wheels. */
+export function readVehicleSpec(value: unknown): VehicleSpec | null {
+  if (typeof value !== "object" || value === null) return null;
+  const raw = value as Record<string, unknown>;
+  if (!Array.isArray(raw.wheels)) return null;
+  const wheels: WheelSpec[] = [];
+  for (const w of raw.wheels.slice(0, MAX_VEHICLE_WHEELS)) {
+    if (!w || typeof w !== "object") continue;
+    const r = w as Record<string, unknown>;
+    const a = Array.isArray(r.at) ? r.at : [];
+    wheels.push({
+      at: [0, 1, 2].map((i) => num(a[i], -100, 100, 0)) as unknown as WheelSpec["at"],
+      radius: num(r.radius, 0.01, 10, 0.4),
+      ...(r.steered === true ? { steered: true } : {}),
+      ...(r.driven === true ? { driven: true } : {}),
+      ...(typeof r.visual === "string" && r.visual ? { visual: r.visual.slice(0, 64) } : {}),
+    });
+  }
+  if (wheels.length === 0) return null;
+  const d = DEFAULT_VEHICLE;
+  return {
+    wheels,
+    engine: num(raw.engine, 0, 100000, d.engine),
+    brake: num(raw.brake, 0, 100000, d.brake),
+    steer: num(raw.steer, 0, 60, d.steer),
+    suspension: num(raw.suspension, 0.01, 5, d.suspension),
+    stiffness: num(raw.stiffness, 1, 1000, d.stiffness),
+    compression: num(raw.compression, 0, 100, d.compression),
+    relaxation: num(raw.relaxation, 0, 100, d.relaxation),
+    grip: num(raw.grip, 0, 100, d.grip),
+  };
+}
 
 export type PhysicsBodyKind = "static" | "dynamic" | "kinematic" | "character";
 export type PhysicsShapeKind = "box" | "sphere" | "capsule" | "mesh";
@@ -75,6 +171,8 @@ export interface PhysicsSpec {
   readonly damping?: number;
   /** Dynamic bodies: a joint to the nearest ancestor with a body, or the world. */
   readonly joint?: JointSpec;
+  /** Dynamic bodies: a ray-cast vehicle with this body as its chassis (S5). */
+  readonly vehicle?: VehicleSpec;
   /**
    * The collision layer the body is on, 0..15 (AAA_PRODUCTION_ROADMAP.md S3).
    * Absent = 0.
@@ -126,11 +224,12 @@ export function readJointSpec(value: unknown): JointSpec | null {
   const a = Array.isArray(raw.anchor) ? raw.anchor : [];
   const anchor = [0, 1, 2].map((i) => num(a[i], -1000, 1000, 0)) as unknown as JointSpec["anchor"];
   const out: { -readonly [K in keyof JointSpec]: JointSpec[K] } = { kind, anchor };
-  if (kind === "hinge") {
+  if (kind === "hinge" || kind === "slider") {
     if (raw.axis === "x" || raw.axis === "z") out.axis = raw.axis;
+    const reach = kind === "hinge" ? 180 : 1000;
     if (Array.isArray(raw.limits) && raw.limits.length === 2) {
-      const lo = num(raw.limits[0], -180, 180, NaN);
-      const hi = num(raw.limits[1], -180, 180, NaN);
+      const lo = num(raw.limits[0], -reach, reach, NaN);
+      const hi = num(raw.limits[1], -reach, reach, NaN);
       if (Number.isFinite(lo) && Number.isFinite(hi)) out.limits = [Math.min(lo, hi), Math.max(lo, hi)];
     }
   }
@@ -164,6 +263,7 @@ export function readPhysicsSpec(value: unknown): PhysicsSpec | null {
   const damping = num(raw.damping, 0, 10, 0);
   // Only a simulated body hangs, swings or springs.
   const joint = body === "dynamic" ? readJointSpec(raw.joint) : null;
+  const vehicle = body === "dynamic" ? readVehicleSpec(raw.vehicle) : null;
   const layer = Math.round(num(raw.layer, 0, PHYSICS_LAYERS - 1, 0));
   const mask = Math.round(num(raw.mask, 0, PHYSICS_MASK_ALL, PHYSICS_MASK_ALL));
   return {
@@ -177,6 +277,7 @@ export function readPhysicsSpec(value: unknown): PhysicsSpec | null {
     ...(gravity !== 1 ? { gravity } : {}),
     ...(damping !== 0 ? { damping } : {}),
     ...(joint ? { joint } : {}),
+    ...(vehicle ? { vehicle } : {}),
     ...(layer !== 0 ? { layer } : {}),
     ...(mask !== PHYSICS_MASK_ALL ? { mask } : {}),
   };

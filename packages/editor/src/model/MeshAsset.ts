@@ -26,7 +26,7 @@
 import { bytesToBase64, base64ToBytes } from "./base64";
 import type { ClusterLod } from "./clusterLod";
 import { readClusterLod, writeClusterLod, type SerializedClusterLod } from "./clusterLodCodec";
-import { generateTextures, isGeneratedImage, readGenerator, type TextureGenerator } from "./textureGenerators";
+import { adoptGeneratedImage, generateTextures, generatorKey, isCookedImage, isGeneratedImage, readGenerator, type GeneratedMaps, type TextureGenerator } from "./textureGenerators";
 import { readInstanceLink, type MaterialInstanceLink } from "./materialInstanceLink";
 import { readSurfaceEffects, writeSurfaceEffects } from "./materialEffects";
 import { readMaterialLayers, writeMaterialLayers } from "./materialLayers";
@@ -727,6 +727,12 @@ export interface SerializedMaterial {
   triplanar?: number;
   blendSharpness?: number;
   generator?: { kind: string; seed: number; scale: number; tint: [number, number, number]; size: number };
+  /**
+   * The generator's maps baked ahead (D5's cook): the recipe they were baked
+   * from, and the slots that hold them. A load whose recipe still matches
+   * uses them instead of baking the maps again.
+   */
+  cooked?: { key: string; slots: string[] };
   graph?: MaterialGraph;
   graphSwitches?: Readonly<Record<string, boolean>>;
   graphImages?: (SerializedImage | null)[];
@@ -947,7 +953,12 @@ function deserializeClips(raw: unknown, jointCount: number): AnimationClip[] {
 }
 
 /** Serialize a mesh to a compact JSON string for storage in a cart sidecar. */
-export function serializeMeshAsset(mesh: MeshAsset): string {
+/** How a mesh or material is written: `cook` keeps a generator's maps beside its recipe (D5). */
+export interface SerializeOptions {
+  readonly cook?: boolean;
+}
+
+export function serializeMeshAsset(mesh: MeshAsset, options: SerializeOptions = {}): string {
   const images = newImageTable();
   const payload: SerializedMesh = {
     version: MESH_ASSET_VERSION,
@@ -960,7 +971,7 @@ export function serializeMeshAsset(mesh: MeshAsset): string {
       ...(primitive.blend ? { blend: f32ToBase64(primitive.blend) } : {}),
       ...(primitive.tangents ? { tangents: f32ToBase64(primitive.tangents) } : {}),
       indices: u32ToBase64(primitive.indices),
-      material: serializeMaterial(primitive.material, Object.assign(images, { primitive: index })),
+      material: serializeMaterial(primitive.material, Object.assign(images, { primitive: index }), options),
       ...(primitive.joints && primitive.weights && mesh.skin ? serializeBinding(primitive.joints, primitive.weights) : {}),
       ...(primitive.morphTargets?.length
         ? {
@@ -995,7 +1006,7 @@ export function serializeMeshAsset(mesh: MeshAsset): string {
             name: v.name,
             materials: mesh.primitives.map((_, i) => {
               const m = v.materials[i];
-              return m ? serializeMaterial(m, Object.assign(images, { primitive: `v${k}.${i}` })) : null;
+              return m ? serializeMaterial(m, Object.assign(images, { primitive: `v${k}.${i}` }), options) : null;
             }),
           })),
         }
@@ -1080,7 +1091,8 @@ function toTextureSprite(value: unknown): SpriteTextureRef | null {
 }
 
 /** Encode a material (with its images) to the stored form — shared with the terrain codec. */
-export function serializeMaterial(material: MeshMaterial, table?: ImageTable): SerializedMaterial {
+export function serializeMaterial(material: MeshMaterial, table?: ImageTable, options: SerializeOptions = {}): SerializedMaterial {
+  if (options.cook && material.generator) return cookMaterial(material, table);
   // A generator's maps are baked again on load (P1c): store the recipe, not them.
   const own = (image: EncodedImage | null | undefined) => (material.generator && isGeneratedImage(image) ? null : image);
   return {
@@ -1105,7 +1117,7 @@ export function serializeMaterial(material: MeshMaterial, table?: ImageTable): S
     ...(material.blendImage ? { blendImage: serializeImage(material.blendImage, "blendImage", table) } : {}),
     ...(own(material.reliefImage) ? { reliefImage: serializeImage(material.reliefImage, "reliefImage", table) } : {}),
     ...(material.graphImages?.length ? { graphImages: material.graphImages.slice(0, 8).map((image, i) => serializeImage(image, `graphImage${i}`, table)) } : {}),
-    ...(material.generator ? { generator: { kind: material.generator.kind, seed: material.generator.seed, scale: material.generator.scale, tint: [material.generator.tint[0], material.generator.tint[1], material.generator.tint[2]], size: material.generator.size } } : {}),
+    ...(material.generator ? { generator: writeGenerator(material.generator) } : {}),
     ...(material.instance ? { instance: { of: material.instance.of, overrides: [...material.instance.overrides] } } : {}),
     ...writeSurfaceEffects(material),
     ...writeMaterialLayers(material),
@@ -1114,13 +1126,62 @@ export function serializeMaterial(material: MeshMaterial, table?: ImageTable): S
   };
 }
 
+function writeGenerator(g: TextureGenerator): NonNullable<SerializedMaterial["generator"]> {
+  return { kind: g.kind, seed: g.seed, scale: g.scale, tint: [g.tint[0], g.tint[1], g.tint[2]], size: g.size };
+}
+
+/** The slots a generator fills, and which of its maps goes in each. */
+export const GENERATED_SLOTS = [
+  ["baseColorImage", "albedo"],
+  ["normalImage", "normal"],
+  ["metallicRoughnessImage", "metallicRoughness"],
+  ["reliefImage", "relief"],
+] as const satisfies readonly (readonly [keyof MeshMaterial, keyof GeneratedMaps])[];
+
+/**
+ * A generator's material written with its maps (D5's cook): each slot the
+ * generator fills gets its map, compressed, and `cooked` records the recipe
+ * and slots, so a load uses them instead of baking again. A slot holding an
+ * image of the material's own keeps it.
+ */
+function cookMaterial(material: MeshMaterial, table?: ImageTable): SerializedMaterial {
+  const g = material.generator!;
+  const slots: string[] = [];
+  let baked: GeneratedMaps | null = null;
+  const bake = () => (baked ??= generateTextures(g));
+  const cooked: Record<string, EncodedImage> = {};
+  for (const [slot, map] of GENERATED_SLOTS) {
+    const current = material[slot] as EncodedImage | null | undefined;
+    if (current && !isGeneratedImage(current)) continue;
+    // A map that came cooked stays as it came (an asset ref, say); one baked here is baked compressed.
+    cooked[slot] = current && isCookedImage(current) ? current : bake()[map];
+    slots.push(slot);
+  }
+  // Written as a plain material holding those maps (without its recipe, nothing is left out), then given back its recipe.
+  return { ...serializeMaterial({ ...material, ...cooked, generator: undefined }, table), generator: writeGenerator(g), cooked: { key: generatorKey(g), slots } };
+}
+
 /** Decode a stored material defensively (anything missing falls back to the default). */
 export function deserializeMaterial(value: unknown, table?: ImageTable): MeshMaterial {
   const material = (value && typeof value === "object" ? value : { name: "default", baseColorFactor: [1, 1, 1, 1], image: null }) as SerializedMaterial;
   const generator = readGenerator(material.generator);
   const instance = readInstanceLink(material.instance);
+  const decoded = readMaterialFields(material, generator, instance, table);
+  // Cooked (D5): the maps came with it, baked from this very recipe; use them, and count them as the generator's.
+  const cooked = material.cooked;
+  if (generator && cooked && typeof cooked === "object" && cooked.key === generatorKey(generator) && Array.isArray(cooked.slots)) {
+    const slots = GENERATED_SLOTS.filter(([slot]) => cooked.slots.includes(slot));
+    if (slots.every(([slot]) => decoded[slot])) {
+      for (const [slot] of slots) adoptGeneratedImage(decoded[slot] as EncodedImage);
+      return decoded;
+    }
+  }
   // A generator's maps are made again here, uncompressed: they are never stored, only decoded (R2).
-  return withGeneratedMaps({
+  return withGeneratedMaps(decoded, false, { compress: false });
+}
+
+function readMaterialFields(material: SerializedMaterial, generator: TextureGenerator | undefined, instance: MeshMaterial["instance"] | undefined, table?: ImageTable): MeshMaterial {
+  return {
     ...(generator ? { generator } : {}),
     ...(instance ? { instance } : {}),
     name: typeof material.name === "string" ? material.name : "default",
@@ -1148,7 +1209,7 @@ export function deserializeMaterial(value: unknown, table?: ImageTable): MeshMat
     ...readMaterialLayers(material),
     ...readMaterialExtensions(material),
     ...(readSmartStack((material as { smartStack?: unknown }).smartStack) ? { smartStack: readSmartStack((material as { smartStack?: unknown }).smartStack)! } : {}),
-  }, false, { compress: false });
+  };
 }
 
 /**

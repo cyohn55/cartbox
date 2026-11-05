@@ -99,6 +99,7 @@ import {
   type SceneLevel,
   type ScenePropValue,
 } from "@cartbox/editor";
+import { readBehaviourTrees, type BehaviourTree } from "@cartbox/editor";
 import { MAX_PREFAB_POOL_DIRECT } from "@cartbox/player";
 
 /** The envelope version; bumped on any schema change (2 added the lighting rig). */
@@ -250,6 +251,8 @@ export interface MeshSidecar {
   readonly ui?: readonly UiDocument[];
   /** Component scripts objects attach in the inspector (see components.ts in @cartbox/editor). */
   readonly components?: readonly ComponentDef[];
+  /** Behaviour trees (K4) the cart runs per agent with cartbox.bt. */
+  readonly behaviours?: readonly BehaviourTree[];
   /** Named input actions the cart reads with cartbox.action (see inputActions.ts in @cartbox/editor). */
   readonly actions?: readonly InputAction[];
   /** The string table cartbox.text and UI `@key` texts read (see strings.ts in @cartbox/editor). */
@@ -286,7 +289,7 @@ export function newMeshId(): string {
  */
 export function encodeMeshSidecar(sidecar: MeshSidecar): string | null {
   const prefabs = sidecar.prefabs ?? [];
-  if (sidecar.meshes.length === 0 && !sidecar.lighting && prefabs.length === 0 && (sidecar.timelines?.length ?? 0) === 0 && (sidecar.levels?.length ?? 0) === 0 && (sidecar.terrains?.length ?? 0) === 0 && (sidecar.audio?.sounds.length ?? 0) === 0 && (sidecar.ui?.length ?? 0) === 0 && (sidecar.components?.length ?? 0) === 0 && (sidecar.actions?.length ?? 0) === 0 && !sidecar.strings && (sidecar.materials?.length ?? 0) === 0 && (sidecar.splines?.length ?? 0) === 0 && !sidecar.arena && !sidecar.assetTags && (sidecar.credits?.length ?? 0) === 0) return null;
+  if (sidecar.meshes.length === 0 && !sidecar.lighting && prefabs.length === 0 && (sidecar.timelines?.length ?? 0) === 0 && (sidecar.levels?.length ?? 0) === 0 && (sidecar.terrains?.length ?? 0) === 0 && (sidecar.audio?.sounds.length ?? 0) === 0 && (sidecar.ui?.length ?? 0) === 0 && (sidecar.components?.length ?? 0) === 0 && (sidecar.behaviours?.length ?? 0) === 0 && (sidecar.actions?.length ?? 0) === 0 && !sidecar.strings && (sidecar.materials?.length ?? 0) === 0 && (sidecar.splines?.length ?? 0) === 0 && !sidecar.arena && !sidecar.assetTags && (sidecar.credits?.length ?? 0) === 0) return null;
   // Repeated meshes (and animation frames) are stored once in a shared library,
   // shared between placed entries and prefab nodes (a prefab's copies repeat its meshes).
   const nodes = prefabs.flatMap((prefab) => prefab.nodes);
@@ -323,6 +326,7 @@ export function encodeMeshSidecar(sidecar: MeshSidecar): string | null {
     ...(sidecar.audio && sidecar.audio.sounds.length > 0 ? { audio: sidecar.audio } : {}),
     ...(sidecar.ui && sidecar.ui.length > 0 ? { ui: sidecar.ui } : {}),
     ...(sidecar.components && sidecar.components.length > 0 ? { components: sidecar.components } : {}),
+    ...(sidecar.behaviours && sidecar.behaviours.length > 0 ? { behaviours: sidecar.behaviours } : {}),
     ...(sidecar.actions && sidecar.actions.length > 0 ? { actions: sidecar.actions } : {}),
     ...(sidecar.strings ? { strings: sidecar.strings } : {}),
     ...(sidecar.materials && sidecar.materials.length > 0 ? { materials: sidecar.materials.map((m) => ({ id: m.id, material: serializeMaterial(m.material) })) } : {}),
@@ -491,6 +495,7 @@ export function decodeMeshSidecar(raw: string | null | undefined): MeshSidecar {
     ...(audio ? { audio } : {}),
     ...(ui.length > 0 ? { ui } : {}),
     ...(componentDefs.length > 0 ? { components: componentDefs } : {}),
+    ...(readBehaviourTrees((parsed as { behaviours?: unknown }).behaviours).length > 0 ? { behaviours: readBehaviourTrees((parsed as { behaviours?: unknown }).behaviours) } : {}),
     ...(actions.length > 0 ? { actions } : {}),
     ...(strings ? { strings } : {}),
     ...(materials.length > 0 ? { materials } : {}),
@@ -576,6 +581,14 @@ export function setMeshUi(sidecar: MeshSidecar, ui: readonly UiDocument[]): Mesh
   void _drop;
   const docs = parseUiDocuments(ui);
   return docs.length > 0 ? { ...rest, ui: docs } : rest;
+}
+
+/** Replace the cart's behaviour trees (K4); none removes them. */
+export function setMeshBehaviours(sidecar: MeshSidecar, trees: readonly BehaviourTree[]): MeshSidecar {
+  const { behaviours: _drop, ...rest } = sidecar;
+  void _drop;
+  const read = readBehaviourTrees(trees);
+  return { ...rest, version: MESH_SIDECAR_VERSION, ...(read.length > 0 ? { behaviours: read } : {}) };
 }
 
 /**

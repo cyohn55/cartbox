@@ -11,6 +11,7 @@
  * an empty or unparseable payload yields null (the cart plays without meshes).
  */
 
+import { readBehaviourTrees, type BehaviourTree } from "@cartbox/editor";
 import {
   composeModelMatrix,
   deserializeMeshAsset,
@@ -248,6 +249,8 @@ export interface MeshScene {
   readonly audio?: SceneAudio;
   /** The scene's component scripts (EP14), which objects' `components` name; absent when none. */
   readonly components?: readonly ComponentDef[];
+  /** The scene's behaviour trees (K4), run by the cart through cartbox.bt; absent when none. */
+  readonly behaviours?: readonly BehaviourTree[];
 }
 
 /** A view + projection pair ready to hand to `renderMeshScene`. */
@@ -333,6 +336,7 @@ export function parseMeshScene(raw: string | null | undefined): MeshScene | null
 
   const library = readMeshLibrary((parsed as { library?: unknown }).library);
   const componentDefs = parseComponentDefs((parsed as { components?: unknown }).components);
+  const behaviours = readBehaviourTrees((parsed as { behaviours?: unknown }).behaviours);
   const componentNames = new Set(componentDefs.map((d) => d.name));
   // Deserialize each distinct mesh string once: instances that share a model
   // share one MeshAsset (and so one texture decode and one GPU upload).
@@ -644,6 +648,7 @@ export function parseMeshScene(raw: string | null | undefined): MeshScene | null
     ...(debris.length > 0 ? { debris, debrisMeshes, ...(debrisLods.some(Boolean) ? { debrisLods } : {}) } : {}),
     ...(audio ? { audio } : {}),
     ...(componentDefs.length > 0 ? { components: componentDefs } : {}),
+    ...(behaviours.length > 0 ? { behaviours } : {}),
     lighting,
     ...(pools.length > 0 ? { pools } : {}),
     ...(physicsWorld ? { physicsWorld } : {}),

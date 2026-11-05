@@ -276,7 +276,9 @@ cartbox = {
   --   cartbox.entered(trigger)         -> objects that came into a trigger zone this tick
   --   cartbox.exited(trigger)          -> objects that left it this tick
   --   cartbox.inside(trigger)          -> objects in it now
-  --   cartbox.motor(obj, speed, force) drive a hinge joint (rad/s; no speed = off)
+  --   cartbox.motor(obj, speed, force) drive a hinge (rad/s) or slider (m/s) joint (no speed = off)
+  --   cartbox.drive(obj, throttle, steer, brake) drive a vehicle: -1..1, -1..1 (+ left), 0..1
+  --   cartbox.vehicle(obj)             -> speed (m/s), wheels on the ground, wheels
   --   cartbox.unjoin(obj)              break an object's joint
   --   cartbox.physicshash()            -> a digest of the bodies' exact state (desync checks)
   -- Prefabs. Each prefab keeps copies in reserve (set how many in the editor):

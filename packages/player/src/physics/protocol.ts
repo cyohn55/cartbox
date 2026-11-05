@@ -318,6 +318,9 @@ export const PHYS_OP_UI_LIST = 39;
 export const PHYS_OP_LOOK = 40;
 /** Break a fractured object (cartbox.shatter, F8c): a = the object; v0..v2 = the impact, v3 = how hard (m/s at the impact). */
 export const PHYS_OP_SHATTER = 41;
+/** Vehicles (S5): a = chassis object, v0 = throttle (-1..1), v1 = steering (-1..1, + turns left), v2 = brake (0..1). Held until changed. */
+export const PHYS_OP_DRIVE = 42;
+
 
 /**
  * Queries (AAA_PRODUCTION_ROADMAP.md S1, S2): on the dedicated Modern core a
@@ -377,6 +380,8 @@ export const PHYS_Q_FIRE = 111;
 export const PHYS_Q_PROJECTILE = 112;
 export const PHYS_Q_IMPACTS = 113;
 export const PHYS_Q_STOP = 114;
+/** A vehicle's state (S5): a = chassis object → speed forward (m/s), wheels touching the ground, wheels. */
+export const PHYS_Q_VEHICLE = 115;
 export const PHYS_Q_IMPACTS_PAGE = 3;
 /** Projectiles in flight at once. */
 export const DIRECT_MAX_PROJECTILES = 1024;

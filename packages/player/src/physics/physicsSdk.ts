@@ -29,7 +29,9 @@
  *   cartbox.entered(trigger)          -> objects that came into a trigger zone this tick
  *   cartbox.exited(trigger)           -> objects that left it this tick
  *   cartbox.inside(trigger)           -> objects in it now
- *   cartbox.motor(obj, speed, force)  drive a hinge joint (rad/s, max force; no speed = off)
+ *   cartbox.motor(obj, speed, force)  drive a hinge (rad/s) or slider (m/s) joint (max force; no speed = off)
+ *   cartbox.drive(obj, throttle, steer, brake)  drive a vehicle (S5): -1..1, -1..1 (+ left), 0..1; held until changed
+ *   cartbox.vehicle(obj)              -> forward speed (m/s), wheels on the ground (nil off the dedicated core), wheels
  *   cartbox.unjoin(obj)               break an object's joint (it's remade if the copy respawns)
  *   cartbox.physicshash()             -> a digest of every moving body's exact state (compare
  *                                     across players to catch a desync; see deterministic mode)
@@ -171,6 +173,7 @@ import {
   TIMELINE_VALUE_NONE,
   PHYS_OP_CAST,
   PHYS_OP_DESPAWN,
+  PHYS_OP_DRIVE,
   PHYS_OP_IMPULSE,
   PHYS_OP_MOTOR,
   PHYS_OP_MOVE,
@@ -195,6 +198,7 @@ import {
   PHYS_Q_ANIM,
   PHYS_Q_ANIM_EVENTS,
   PHYS_Q_JOINT,
+  PHYS_Q_VEHICLE,
   PHYS_Q_FIRE,
   PHYS_Q_FIRE_OPTIONS,
   PHYS_Q_IMPACTS,
@@ -353,6 +357,19 @@ function PHYSICS_CALLS(): string {
     local i = _obj(o)
     if i == nil or not _slot[i] then return end
     if speed == nil then _cmd(${PHYS_OP_MOTOR}, i, 0, 0) else _cmd(${PHYS_OP_MOTOR}, i, speed, force or 1000) end
+  end
+  cartbox.drive = function(o, throttle, steer, brake)
+    local i = _obj(o)
+    if i and _slot[i] then _cmd(${PHYS_OP_DRIVE}, i, throttle or 0, steer or 0, brake or 0) end
+  end
+  cartbox.vehicle = function(o)
+    local i = _obj(o)
+    if i == nil or not _slot[i] or not _live() then return nil end
+    if _q then return _q(${PHYS_Q_VEHICLE}, i) end
+    -- Off the dedicated core: the chassis's speed from its body (wheel contact isn't in the block).
+    local _, _, _, vx, vy, vz = cartbox.body(o)
+    if vx == nil then return nil end
+    return math.sqrt(vx * vx + vy * vy + vz * vz)
   end
   cartbox.unjoin = function(o)
     local i = _obj(o)

@@ -25,6 +25,7 @@ import { hashAsset, parseCartAssets, EMPTY_CART_ASSETS } from "./cartAssetStore"
 import { readCartAsset, storeCartAsset } from "./cartAssetStorage";
 import { extractMeshTextures, inlineMeshTextures, manifestUpdate } from "./meshTextureAssets";
 import { extractMeshPackages, inlineMeshPackages, loadMeshoptCodec } from "./meshPackages";
+import { cookMeshSidecar } from "./meshCook";
 import {
   OPTIONAL_SIDECAR_KEYS,
   SIDECARS,
@@ -229,7 +230,9 @@ async function offloadMeshAssets(
   if (!encoded) return { encoded, manifest: null };
 
   try {
-    const extracted = await extractMeshTextures(encoded, hashAsset);
+    // First the cook (D5): a generator's maps baked in, so they're stored (and streamed) as textures.
+    const cooked = cookMeshSidecar(encoded).encoded;
+    const extracted = await extractMeshTextures(cooked, hashAsset);
     // Then the meshes themselves, as binary packages (D4), their images now refs.
     const packaged = await extractMeshPackages(extracted.encoded, hashAsset, await loadMeshoptCodec());
     const assets = [...extracted.textures, ...packaged.packages];

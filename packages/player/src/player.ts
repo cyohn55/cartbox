@@ -106,7 +106,7 @@ import { GpuCanvasSurface, type CapturedFrame } from "./render/GpuCanvasSurface.
 import { browserStorage, gpuPresentFailed, watchGpuPresent, type WatchedDevice } from "./render/presentFallback.js";
 import type { SceneRenderer } from "./render/sceneRenderer.js";
 import type { TextureLookup } from "./world/worldScene.js";
-import { SpatialLoader, WorldPartition, partitionWorld, actionMask, createHoloCache, holoBindingKeys, holoDocuments, renderHoloDocument, translate, reboundActions, type DecodedTexture, type EncodedImage, type InputAction, type Mat4, colorFilterSvg, DEFAULT_ACCESSIBILITY, type AccessibilitySettings, type ColorFilter, type WeatherSettings } from "@cartbox/editor";
+import { behaviourTreesLua, bundleLuaModules, SpatialLoader, WorldPartition, partitionWorld, actionMask, createHoloCache, holoBindingKeys, holoDocuments, renderHoloDocument, translate, reboundActions, type DecodedTexture, type EncodedImage, type InputAction, type Mat4, colorFilterSvg, DEFAULT_ACCESSIBILITY, type AccessibilitySettings, type ColorFilter, type WeatherSettings } from "@cartbox/editor";
 import type { ControlScheme, InspectedObject, PlayerOptions, SequenceOptions } from "./types.js";
 
 /**
@@ -419,7 +419,12 @@ export class Player {
       // is prepended BEFORE the SDK — the SDK ends up above it and defines the
       // `cartbox` table first, then this overrides its solid/mapsize stubs with
       // the cart's real layer. A null/empty layer contributes nothing.
-      const seeded = seedCartridge(bytes, seed);
+      // Lua modules (K1): sections of the code lifted into a prelude that `require` loads,
+      // their lines blanked in place so the main file's line numbers stand.
+      const sourceCode = readCartCode(bytes);
+      const modules = sourceCode !== null ? bundleLuaModules(sourceCode) : null;
+      const source = modules ? rewriteLuaCode(bytes, () => modules.main) : bytes;
+      const seeded = seedCartridge(source, seed);
       // Static cart-data accessors (collision + flags) are prepended BEFORE the
       // SDK so the SDK sits above them and defines `cartbox` first; each then
       // overrides its no-op stub. Empty layers contribute nothing.
@@ -429,7 +434,7 @@ export class Player {
       // cart's statement lines (instrument.ts) with TIC run through them.
       const layout = RAM_LAYOUTS[this.model.id];
       const debug = this.options.debug;
-      const cartCode = readCartCode(bytes);
+      const cartCode = readCartCode(source);
       let ownCode = cartCode;
       if ((this.options.onTrace || debug) && layout) {
         // Breakpoints need Lua's debug library, which the dedicated core's sandbox leaves out.
@@ -450,8 +455,12 @@ export class Player {
         prepared = prependLuaCode(prepared, debugSdkLua(debugBlockAddress(layout), { debugger: this.debugState !== null }));
         this.debugOffset = debugBlockAddress(layout) - layout.pmemAddress;
       }
+      if (modules) prepared = prependLuaCode(prepared, modules.prelude);
       // Components (EP14): their scripts sit nearest the cart's code (after every
       // SDK they call), and their step runs ahead of the cart's TIC.
+      // Behaviour trees (K4): the runtime and the scene's trees, for cartbox.bt.
+      const behavioursLua = behaviourTreesLua(this.options.mesh?.behaviours ?? []);
+      if (behavioursLua) prepared = prependLuaCode(prepared, behavioursLua);
       const components = componentsSdkLua(this.options.mesh);
       if (components) prepared = appendLuaCode(prependLuaCode(prepared, components.prelude), components.postlude);
       const collisionLua = collisionSdkLua(this.options.collision);

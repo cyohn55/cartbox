@@ -264,6 +264,7 @@ export {
   deserializeMaterial,
   withGeneratedMaps,
   type SerializedMaterial,
+  type SerializeOptions,
   defaultMaterial,
   updateMeshMaterial,
   applyMeshVariant,
@@ -1354,7 +1355,7 @@ export {
   type SkyRing,
 } from "./render/skyLayers";
 export { MAX_SKY_PANORAMA_CHARS } from "./model/SceneLighting";
-export { GENERATOR_KINDS, generateTextures, generatorKey, isGeneratedImage, readGenerator, type GeneratedMaps, type GeneratorKind, type TextureGenerator } from "./model/textureGenerators";
+export { GENERATOR_KINDS, adoptGeneratedImage, generateTextures, generatorRequestCount, generatorKey, isCookedImage, isGeneratedImage, readGenerator, type GeneratedMaps, type GeneratorKind, type TextureGenerator } from "./model/textureGenerators";
 export {
   INSTANCE_FIELDS,
   MAX_LIBRARY_MATERIALS,
@@ -1581,7 +1582,9 @@ export {
   DEFAULT_PHYSICS_SPEC,
   DEFAULT_SPRING_DAMPING,
   DEFAULT_SPRING_STIFFNESS,
+  DEFAULT_VEHICLE,
   JOINT_KINDS,
+  MAX_VEHICLE_WHEELS,
   PHYSICS_BODY_KINDS,
   PHYSICS_LAYERS,
   PHYSICS_MASK_ALL,
@@ -1591,6 +1594,7 @@ export {
   readJointSpec,
   readPhysicsSpec,
   readPhysicsWorld,
+  readVehicleSpec,
   type JointAxis,
   type JointKind,
   type JointSpec,
@@ -1598,6 +1602,8 @@ export {
   type PhysicsShapeKind,
   type PhysicsSpec,
   type PhysicsWorldSettings,
+  type VehicleSpec,
+  type WheelSpec,
 } from "./model/physicsSpec";
 export {
   paintIndexedTexture,
@@ -1669,8 +1675,12 @@ export {
 export { CodeDocument, type CursorPosition } from "./model/CodeDocument";
 export {
   tokenize,
+  tokenizeLine,
+  LineTokenCache,
   LANGUAGES,
   languageById,
+  type LineState,
+  type LineTokens,
   type Token,
   type TokenType,
   type LanguageConfig,
@@ -2100,3 +2110,35 @@ export {
 } from "./model/water";
 export { RUIN_CODE, RUIN_CREEK, ruinFoliage, ruinLighting, ruinSidecar, ruinTerrain } from "./model/ruinScene";
 export { arenaSoldierForScene } from "./model/lockoutSeed";
+export {
+  LUA_MODULE_NAME,
+  MAIN_FILE,
+  MAX_LUA_MODULES,
+  addLuaModule,
+  bundleLuaModules,
+  luaFiles,
+  luaModulesPrelude,
+  readLuaFile,
+  removeLuaModule,
+  splitLuaModules,
+  writeLuaFile,
+  type LuaModule,
+  type LuaModuleSplit,
+} from "./model/luaModules";
+export { luaCompletions, luaDefinition, luaDiagnostics, type LuaCompletion, type LuaDiagnostic, type LuaSdkEntry } from "./model/luaLanguage";
+export {
+  BT_COMPARES,
+  BT_NODE_TYPES,
+  MAX_BEHAVIOUR_TREES,
+  behaviourTreesLua,
+  btChildren,
+  btIds,
+  newBtNode,
+  readBehaviourTrees,
+  replaceBtNode,
+  type BehaviourTree,
+  type BtCompare,
+  type BtNode,
+  type BtNodeType,
+  type BtValue,
+} from "./model/behaviourTree";

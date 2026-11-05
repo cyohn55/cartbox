@@ -180,7 +180,21 @@ This roadmap closes those gaps. It does not repeat the open items of other roadm
     - An old sidecar reads unchanged. A missing package, or failing storage, drops only the objects that used it.
     - Lockout's whole sidecar (skinned viewmodels and bots included) packs smaller in total and reads back with every entry identical.
   - *Left:* the client still receives JSON, rebuilt on the server. Fetching packages straight from the CDN and parsing them on M4's worker is D5's player half. A variant's images still ride inline in the manifest.
-- [ ] **D5. A build-time cook.** A cart's sidecars become content-hashed packages at publish, so a player never synthesises content. Generalises R2 from the two arena maps to every cart.
+- [ ] **D5. A build-time cook.** A cart's sidecars become content-hashed packages at publish, so a player never synthesises content. Generalises R2 from the two arena maps to every cart. **The cook of mesh materials is done (with D4's packages, on every save, since a published cart's play page reads what Save writes). Terrain layers, the player fetching packages itself, and terrain meshing are left.**
+  - **What a load made.** A material with a texture generator (P1c) stores only its recipe, and every load (the player's and the editor's) baked its four maps on the main thread: noise per texel, normals from slopes, a relief map.
+  - **The cook** (`cookMeshSidecar`, `meshCook.ts`) runs first in the mesh save path, before the texture offload and the packaging. Each mesh with a recipe is written with `serializeMeshAsset(mesh, { cook: true })`: its maps, compressed, sit beside the recipe, and `cooked: {key, slots}` names the recipe they came from and the slots they fill. A slot holding the material's own image keeps it. The offload then makes the maps content-addressed textures, shared by every cart with the same recipe and streamed like any texture.
+  - **Loading.** `deserializeMaterial` uses cooked maps when the recipe still matches its key, and bakes as before when it doesn't (a hand-edited recipe, or an old cart). It counts the cooked maps as the generator's (`adoptGeneratedImage`), so the editor's own saves still send only the recipe and the server cooks again; the cook is idempotent, keeping maps that came cooked (asset refs included) as they came.
+  - **Through packages.** The package carries the cooked state (`$cooked`), and reads the material without its recipe so nothing is baked. The load path re-serializes with `cook`, so cooked maps reach the client cooked.
+  - *Tests (`mesh-cook.test.ts`, 4):*
+    - The cook writes the four maps and their slots. A load of the cooked mesh asks the generator for nothing (`generatorRequestCount` unchanged), where a load of the uncooked one asks once. The maps are the compressed bake.
+    - A load then an editor save stores the recipe alone again, while a normal map of the material's own is kept and isn't counted as cooked.
+    - A recipe edited after cooking bakes again. A sidecar with no recipe passes through byte for byte.
+    - Through the whole save path (four textures offloaded, one package) and the load path, the mesh still loads asking for nothing, with the cooked maps' bytes.
+  - *Left:*
+    - **Terrain layers and library materials** still bake their recipes on load. Their materials sit inline in the sidecar, which the texture offload and the player's streaming don't yet reach, and cooking them inline would put megabytes of PNG in the row.
+    - **The player fetching packages itself.** The play page still rebuilds JSON on the server (D4); fetching `.cbpk` from the CDN and decoding on M4's worker remains.
+    - **Terrain meshing** (`terrainMesh`) at load.
+    - **The arena maps' prebuilt packages:** R2's remainder in `DEMO_QUALITY_ROADMAP.md`.
 - [ ] **D6. A DCC live link.** A Blender add-on that pushes the selected objects to an open editor tab over a local socket, extending `BLENDER_WORKFLOW.md`.
 
 ### S. Simulation runtime
@@ -219,14 +233,82 @@ This roadmap closes those gaps. It does not repeat the open items of other roadm
   - **From Lua** (dedicated core; the calls answer nil and an empty list on the block cores, whose block has no room): `cartbox.fire(x, y, z, vx, vy, vz, {radius, gravity, drag, life, owner, mask, push})` → id; `cartbox.projectile(id)` → position and velocity while it flies; `cartbox.impacts()` → the last step's hits and expiries (paged, 3 per answer); `cartbox.stop(id)`. Up to 1,024 in flight. A cart draws them with `cartbox.place`, uncapped there.
   - *Not here:* replication. The engine flies a shot the same on every machine given the same fire calls; which machine fires, and how a guest predicts it, is the cart's netcode (L5–L7), and G5 is where Lockout's rockets, plasma and Fuel Rod move onto it.
   - *Tests (`projectiles.test.ts`, 7):* a horizontal shot lands where its arc says (≈61 ticks, ≈20.2 m); a 600 m/s bullet hits a 5 cm wall a per-tick check would step over; the owner and a masked layer passed through, a crate shoved; drag, expiry at its life, a stop; the cap and a shot from NaN refused; identical impacts in two deterministic worlds; and from Lua on the real Modern core, 50 shots at 400 m/s all hit a 5 cm wall, followed and read.
-- [ ] **S5. Joints and vehicles.** A prismatic (slider) joint beside the hinge, ball, fixed, spring and rope joints `JointSpec` already has *(corrected: this item first listed joints that exist)*; a ray-cast vehicle (Rapier's controller) with an editor preset.
+- [x] **S5. Joints and vehicles.** A prismatic (slider) joint beside the hinge, ball, fixed, spring and rope joints `JointSpec` already has *(corrected: this item first listed joints that exist)*; a ray-cast vehicle (Rapier's controller) with an editor preset. **Done.**
+  - **The slider** (`JointKind` `"slider"`) slides along one of the object's own axes and doesn't turn: lifts, pistons, sliding doors. It has optional limits in metres either side of where it starts, and `cartbox.motor` drives it in metres a second. It is Rapier's prismatic joint on the hinge's frames. Rapier's coordinate runs from the body to what it's tied to, so the backend negates the limits and the motor's speed, and gives the motor enough gain to lift what it carries.
+  - **The vehicle** (`PhysicsSpec.vehicle`, `VehicleSpec`) makes a dynamic body the chassis of Rapier's ray-cast vehicle controller.
+    - Forward is the chassis's own +Z. Each wheel has a spring point, a radius, whether it steers and whether it's driven (all wheels, if none is marked). The vehicle has engine and brake forces, a steering lock, suspension length, stiffness, compression and relaxation damping, and grip.
+    - Each step, the session hands the cart's inputs to the wheels, and the backend updates every awake vehicle before the world moves. A chassis asleep on its springs stays asleep.
+    - Wheels are rays, not bodies. Objects under the chassis named in `visual` are drawn as them: placed at the end of their springs, steered, and rolled by the wheel's rotation, through the session's overrides.
+  - **Lua:**
+    - `cartbox.drive(obj, throttle, steer, brake)` (op 42) takes throttle −1..1, steer −1..1 (positive turns left) and brake 0..1, held until changed.
+    - `cartbox.vehicle(obj)` returns the forward speed, and on the dedicated core also the wheels on the ground and the wheel count (`PHYS_Q_VEHICLE`, 115). Elsewhere it returns the speed from the body.
+    - The deterministic build rounds the vehicle's settings and inputs like every other number.
+  - **The editor:** the joint menu has Slider (axis and limits in metres). A dynamic body has a Vehicle switch with the car preset (`DEFAULT_VEHICLE`: four wheels on a 2 × 4 m chassis, front steered, rear driven) and its settings. **Add wheel objects** (`vehicleKit.ts`) puts a tyre cylinder under the chassis for each named wheel, its scale undoing the chassis's so the wheels stay round.
+  - *Tests:*
+    - `vehicles.test.ts` (7):
+      - the slider is read with its axis and limits, holds a lift against gravity, slides it to its 3 m stop under a motor, and never turns it;
+      - the vehicle is read only on a dynamic body;
+      - the car rests on all four springs, at rest as its body reads too; under full throttle it sets off straight along +Z, steering left turns it toward +X, and braking stops it;
+      - its wheel objects sit at their corners a radius off the floor, the front ones steer and the driven ones roll;
+      - the Lua calls compile to the op and the query;
+      - the preset adds four round wheels under a stretched chassis, once.
+    - `physics.test.ts` adds a cart on the Xbox 360 core that drives a car and raises a sliding gate from Lua, reading the speed back.
+  - *Left:* a vehicle in a prefab's reserve copies (a spawned copy is a plain body); wheel contact on the TIC-80–derived cores (the block has no room); engine curves and gears; a vehicle camera preset.
 
 ### K. Gameplay framework and scripting
 
-- [ ] **K1. Lua modules.** A cart holds several script files, loaded by `require` from the cart (not the file system), on both cores, with the replay contract unchanged.
-- [ ] **K2. A language service.** Completion of `cartbox.*` from `sdkReference.ts`, locals and module members; diagnostics from a Lua parser (undefined globals, arity of SDK calls); go to definition across modules.
-- [ ] **K3. Incremental highlighting.** A tokeniser that carries line-start state, so long strings and block comments stay correct while only changed lines re-tokenise.
-- [ ] **K4. Behaviour trees and a blackboard.** Authored in the graph editor, run per agent from a component, deterministic, with a debugger view of the running node. G2's bots are its first user.
+- [x] **K1. Lua modules.** A cart holds several script files, loaded by `require` from the cart (not the file system), on both cores, with the replay contract unchanged. **Done.**
+  - **Where they live.** The files are sections of the cart's one code text (`--#module name` … `--#end`, `luaModules.ts`), so the .tic format, the code banks, saving, remixing and replays are unchanged. Names are Lua identifiers joined by dots (`ai.patrol`), up to 64 modules.
+  - **How they run.** Before the cart runs, the player (`bundleLuaModules`, first in its preparation) lifts each section into a prelude that registers it as a function and defines `require`: each module runs once, on its first `require`, with its own locals; a cycle gets `true`, as Lua's own gives; a module the cart doesn't hold is an error naming it. It is plain Lua with no `load` and no file system, so it runs the same on the TIC-80–derived cores and on the Modern core's sandbox. The sections' lines are blanked in place, so the main file's line numbers, which errors, tracebacks and breakpoints use, don't move.
+  - **The editor.** The code tab has a Files list for a Lua cart: All code (the line numbers errors and breakpoints use) and each module, edited on its own, with + Module and remove. An error jump switches back to All code.
+  - *Tests (`lua-modules.test.ts`, 7):*
+    - the split finds the modules and keeps the main file's line numbers; it reports an unclosed section, a repeated name and a bad one; code without modules runs as written;
+    - the editor's list, read, write, add and remove leave the rest of the code untouched;
+    - on the Modern core, each module loads once with its own locals (a module requiring another included); a missing module is named, and an error in the main file keeps its line below the prelude;
+    - on the Xbox 360 core the same cart gives the same answers.
+  - *Left:* an error inside a module reports a prelude line, not the module's own (K2's go-to-definition can map it back); a .tic exported for stock TIC-80 still carries the sections as plain code.
+- [x] **K2. A language service.** Completion of `cartbox.*` from `sdkReference.ts`, locals and module members; diagnostics from a Lua parser (undefined globals, arity of SDK calls); go to definition across modules. **Done, from tokens rather than a full parser.**
+  - `luaLanguage.ts` reads the code's tokens outside comments and strings (K3's line tokenizer).
+    - `local` and parameters declare names. A name assigned at a statement's start, or named by `function`, is a global the cart defines.
+    - `local m = require("x")` binds `m` to K1's module `x`, whose `function M.f` and `M.f =` (on the table it returns) are its members.
+    - Scopes are not tracked: a local anywhere in the code counts throughout it, which errs toward silence.
+  - **Diagnostics:**
+    - K1's module problems, and a `require` of a module the cart doesn't hold (errors);
+    - a name used but declared nowhere, and not a Lua or TIC-80 built-in (a warning, usually a typo); fields, table keys and strings are skipped;
+    - an SDK call given more arguments than its signature in `sdkReference.ts` takes.
+  - **Completion:** after `cartbox.`, the SDK with signatures; after a required module's name and a dot, its members; elsewhere the locals, globals, built-ins and keywords that match.
+  - **Go to definition:** a member through its module's name, a module from its `require`, a local or a global.
+  - **The code tab:** a Problems list (click to jump), Ctrl+Space for suggestions, and F12 to go to the definition, from a module's own view too.
+  - *Tests (`lua-language.test.ts`, 6):*
+    - an undefined global is flagged, but nothing declared, built in, a field or in a string;
+    - an SDK call with too many arguments is flagged with the right count, and so are a missing module and an unclosed module;
+    - the SDK completes after `cartbox.` with its signature; a required module's members and the matching names in scope complete;
+    - definitions are found for a member in another module, a module from its require, a local function and a global.
+  - *Left:* a real parser (scopes, shadowing, the type of a value), arity for calls to the cart's own functions, and an error in a module mapped to its own line.
+- [x] **K3. Incremental highlighting.** A tokeniser that carries line-start state, so long strings and block comments stay correct while only changed lines re-tokenise. **Done.**
+  - `tokenizeLine(line, state)` starts a line in a state: nothing, or a block comment, long string or quoted string still open with the text that closes it. It returns the tokens and the state the next line starts in.
+  - `LineTokenCache.update(source)` keeps the lines, their start states and their tokens. It re-tokenises from the first changed line, and stops at the first unchanged line past the edit whose start state is the one it had.
+  - The code tab renders from it: a keystroke costs its line, and opening or closing a block comment costs the lines it reaches.
+  - It also removes the whole-document tokenizer's slice of the rest of the text at every character, which was quadratic in the code's length.
+  - *Tests (`incremental-highlight.test.ts`, 5):*
+    - every character is coloured as the whole-document tokenizer colours it: a sample with block comments, long strings and escaped quotes, 300 random Lua fragments, and a C-style language;
+    - in a 2,000-line document, typing on a line re-tokenises 1 line;
+    - opening a block comment re-tokenises the 1,900 lines it swallows, typing inside it 1, and pasting an open-and-close pair 11;
+    - lines added and removed come out right.
+- [x] **K4. Behaviour trees and a blackboard.** Authored in the graph editor, run per agent from a component, deterministic, with a debugger view of the running node. G2's bots are its first user. **Done, authored in an outline rather than the graph editor; G2's bots aren't moved onto it.**
+  - **The model** (`behaviourTree.ts`), stored in the mesh sidecar's `behaviours` and read defensively (unknown types, repeated ids, oversized trees dropped):
+    - composites: `sequence`, which keeps its place while a child runs; `selector`, which is reactive (it tries its children in priority order every tick, so a branch whose condition comes true takes over and the one that was running is reset); `parallel` with a `need`;
+    - decorators: `inverter`, `succeeder`, `repeat` (a count, or forever), `cooldown`;
+    - leaves: `wait`, `condition` (a blackboard key against a value), `set`, and `action` (a function the cart registers).
+  - **The runtime** is Lua the player puts ahead of the cart's code. `cartbox.bt.new(tree, agent)` gives an instance with its own blackboard, `cartbox.bt.tick(instance, dt)` runs a step, and `cartbox.bt.action(name, fn)` registers an action. Time is the `dt` the cart passes, and there is no randomness, so a tree decides the same on every machine and in every replay. It runs from a component's `update` as from anywhere.
+  - **The debugger view:** `cartbox.bt.running(instance)` returns the running node's path, root to leaf. `cartbox.bt.watch(instance)` traces it to the editor's console each time it changes.
+  - **The editor:** a Behaviour trees panel in the Mesh tab edits each tree as an outline. You can add a child of any type, edit a node's label, key, test, value, seconds, count or need, remove it, and add or delete trees.
+  - *Tests (`behaviour-trees.test.ts`, 6, on the Modern core):*
+    - the reader keeps what's valid; trees round-trip through the sidecar and the player's scene; edits find nodes at any depth with fresh ids;
+    - a guard patrols (walk, a 0.5 s rest, a marked lap on tick 7) and takes over to chase the moment it sees a target, the patrol stopping;
+    - a repeat counts its taps and a cooldown gates the fire to at most once each 0.5 s;
+    - two runs decide identically, and the console shows `root > patrol > walk`, then `rest`, then `root > chase > run at it`.
+  - *Left:* authoring on the graph editor's canvas; a live highlight of the running node in the panel (the console carries it today); G2's bots moved onto trees; K5's perception writing the blackboard.
 - [ ] **K5. Perception.** Sight cones with line of sight (S2's rays), hearing from sound events, memory with decay, feeding K4's blackboard.
 - [ ] **K6. Damage, abilities and tags.** Health and shield components, damage events with type and hit zone, multi-shape hitboxes on skeletons, cooldown-and-cost abilities, and gameplay tags to gate them.
 

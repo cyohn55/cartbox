@@ -10,7 +10,7 @@
  */
 
 import { physicsGroups, queryGroups } from "@cartbox/editor";
-import type { CastShape, PhysicsBackend, PhysicsBodyDesc, PhysicsJointDesc, PhysicsQuat, PhysicsVec3 } from "@cartbox/player";
+import type { CastShape, PhysicsBackend, PhysicsBodyDesc, PhysicsJointDesc, PhysicsQuat, PhysicsVec3, PhysicsVehicleDesc, PhysicsVehicleState } from "@cartbox/player";
 
 type Rapier = typeof import("@dimforge/rapier3d-compat");
 
@@ -57,6 +57,8 @@ export function createRapierBackend(R: Rapier): PhysicsBackend {
   type Joint = InstanceType<Rapier["ImpulseJoint"]>;
   const joints = new Map<number, Joint>();
   let nextJoint = 0;
+  type VehicleController = InstanceType<Rapier["DynamicRayCastVehicleController"]>;
+  const vehicles: VehicleController[] = [];
   // Joints to "the world" hang from one fixed body at the origin.
   let ground: Body | null = null;
   const controller = world.createCharacterController(0.02);
@@ -116,6 +118,9 @@ export function createRapierBackend(R: Rapier): PhysicsBackend {
 
     step(dt: number): void {
       world.timestep = dt;
+      // Vehicles (S5) cast their wheels and push their chassis before the world moves.
+      // A chassis asleep on its springs is left asleep: updating it would write velocity into a body that doesn't move.
+      for (const vehicle of vehicles) if (!vehicle.chassis().isSleeping()) vehicle.updateVehicle(dt);
       world.step(events);
     },
 
@@ -263,6 +268,8 @@ export function createRapierBackend(R: Rapier): PhysicsBackend {
       const data =
         desc.kind === "hinge"
           ? R.JointData.revolute(a1, a2, { x: 1, y: 0, z: 0 })
+          : desc.kind === "slider"
+            ? R.JointData.prismatic(a1, a2, { x: 1, y: 0, z: 0 })
           : desc.kind === "ball"
             ? R.JointData.spherical(a1, a2)
             : desc.kind === "fixed"
@@ -271,11 +278,15 @@ export function createRapierBackend(R: Rapier): PhysicsBackend {
                 ? R.JointData.spring(desc.length, desc.stiffness, desc.damping, a1, a2)
                 : R.JointData.rope(desc.length, a1, a2);
       const joint = world.createImpulseJoint(data, body, other, true);
-      // The frames say which way the hinge turns and where its zero angle is.
-      if (desc.kind === "hinge") {
+      // The frames say which way the hinge turns (the slider slides) and where its zero is.
+      if (desc.kind === "hinge" || desc.kind === "slider") {
         joint.setLocalFrame1(a1, quat(desc.frame1));
         joint.setLocalFrame2(a2, quat(desc.frame2));
-        if (desc.limits) (joint as InstanceType<Rapier["RevoluteImpulseJoint"]>).setLimits(desc.limits[0], desc.limits[1]);
+        // A prismatic joint's coordinate runs from the body to what it's tied to: the slide, negated.
+        if (desc.limits) {
+          const [lo, hi] = desc.kind === "slider" ? [-desc.limits[1], -desc.limits[0]] : desc.limits;
+          (joint as InstanceType<Rapier["RevoluteImpulseJoint"]>).setLimits(lo, hi);
+        }
       }
       // Jointed bodies overlap where they meet (a door in its frame): don't collide them.
       joint.setContactsEnabled(false);
@@ -294,7 +305,10 @@ export function createRapierBackend(R: Rapier): PhysicsBackend {
     setMotor(id: number, speed: number, force: number): void {
       const joint = joints.get(id) as InstanceType<Rapier["RevoluteImpulseJoint"]> | undefined;
       if (!joint) return;
-      joint.configureMotorVelocity(speed, force > 0 ? 1 : 0);
+      // A slider's coordinate is its slide negated (see addJoint), and it must lift what it carries:
+      // the velocity motor's gain (an acceleration per m/s short of the speed) is set to hold it within a tenth.
+      const slider = joint.type() === R.JointType.Prismatic;
+      joint.configureMotorVelocity(slider ? -speed : speed, force > 0 ? (slider ? 100 : 1) : 0);
       joint.setMotorMaxForce(force);
       joint.body1().wakeUp();
       joint.body2().wakeUp();
@@ -317,7 +331,56 @@ export function createRapierBackend(R: Rapier): PhysicsBackend {
       }
     },
 
+    addVehicle(desc: PhysicsVehicleDesc): number {
+      const chassis = bodies[desc.chassis];
+      if (!chassis) return -1;
+      const vehicle = world.createVehicleController(chassis);
+      // The chassis's own +Z is forward, +Y up (Rapier's defaults are X forward, Y up).
+      vehicle.setIndexForwardAxis = 2;
+      desc.wheels.forEach((w, i) => {
+        vehicle.addWheel(v3(w.at), { x: 0, y: -1, z: 0 }, { x: -1, y: 0, z: 0 }, desc.suspension, w.radius);
+        vehicle.setWheelSuspensionStiffness(i, desc.stiffness);
+        vehicle.setWheelSuspensionCompression(i, desc.compression);
+        vehicle.setWheelSuspensionRelaxation(i, desc.relaxation);
+        vehicle.setWheelFrictionSlip(i, desc.grip);
+        vehicle.setWheelMaxSuspensionTravel(i, desc.suspension);
+      });
+      vehicles.push(vehicle);
+      return vehicles.length - 1;
+    },
+
+    driveVehicle(id: number, wheels: readonly { readonly engine: number; readonly steer: number; readonly brake: number }[]): void {
+      const vehicle = vehicles[id];
+      if (!vehicle) return;
+      wheels.forEach((w, i) => {
+        if (i >= vehicle.numWheels()) return;
+        vehicle.setWheelEngineForce(i, w.engine);
+        vehicle.setWheelSteering(i, w.steer);
+        vehicle.setWheelBrake(i, w.brake);
+      });
+      if (wheels.some((w) => w.engine !== 0 || w.steer !== 0)) vehicle.chassis().wakeUp();
+    },
+
+    vehicleState(id: number): PhysicsVehicleState {
+      const vehicle = vehicles[id];
+      if (!vehicle) return { speed: 0, wheels: [] };
+      const wheels = Array.from({ length: vehicle.numWheels() }, (_, i) => ({
+        contact: vehicle.wheelIsInContact(i),
+        suspension: vehicle.wheelSuspensionLength(i) ?? vehicle.wheelSuspensionRestLength(i) ?? 0,
+        rotation: vehicle.wheelRotation(i) ?? 0,
+        steering: vehicle.wheelSteering(i) ?? 0,
+      }));
+      // Its speed along its own +Z, from the chassis (asleep, it isn't moving, whatever the controller left in it).
+      const chassis = vehicle.chassis();
+      if (chassis.isSleeping()) return { speed: 0, wheels };
+      const v = chassis.linvel();
+      const q = chassis.rotation();
+      const forward = [2 * (q.x * q.z + q.w * q.y), 2 * (q.y * q.z - q.w * q.x), 1 - 2 * (q.x * q.x + q.y * q.y)];
+      return { speed: v.x * forward[0]! + v.y * forward[1]! + v.z * forward[2]!, wheels };
+    },
+
     destroy(): void {
+      for (const vehicle of vehicles) world.removeVehicleController(vehicle);
       events.free();
       world.removeCharacterController(controller);
       world.free();

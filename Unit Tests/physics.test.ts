@@ -14,7 +14,7 @@ import { pathToFileURL } from "node:url";
 import RAPIER from "@dimforge/rapier3d-compat";
 import { beforeAll, describe, expect, it } from "vitest";
 
-import { composeModelMatrix, readPhysicsSpec, serializeMeshAsset, type MeshAsset } from "@cartbox/editor";
+import { DEFAULT_VEHICLE, composeModelMatrix, readPhysicsSpec, serializeMeshAsset, type MeshAsset } from "@cartbox/editor";
 import {
   NET_WORDS,
   PHYS_BLOCK_BYTES,
@@ -529,6 +529,54 @@ end`;
     expect(word(106)).toBeCloseTo(0.25, 1);
     // The spring settles about mg/k = 9.81/50 ≈ 0.2 m below its rest length.
     expect(word(107)).toBeCloseTo(3 - 9.81 / 50, 1);
+    session.destroy();
+  }, 120_000);
+
+  it("drives a vehicle from Lua and slides a slider joint (S5)", async () => {
+    const layout = RAM_LAYOUTS.xbox360;
+    const mesh = cube();
+    const T = (position: number[], scale = [1, 1, 1]) => ({ position, rotation: [0, 0, 0], scale });
+    const wheels = DEFAULT_VEHICLE.wheels.map((w) => ({ ...w, at: [w.at[0] / 1.8, w.at[1] / 0.6, w.at[2] / 4] }));
+    const sc = parseMeshScene(
+      JSON.stringify({
+        version: 2,
+        meshes: [
+          { id: "floor", name: "floor", mesh, transform: T([0, -0.5, 0], [400, 1, 400]), physics: { body: "static", shape: "box" } },
+          { id: "car", name: "car", mesh, transform: T([0, 1.2, 0], [1.8, 0.6, 4]), physics: { body: "dynamic", shape: "box", mass: 800, vehicle: { ...DEFAULT_VEHICLE, wheels } } },
+          { id: "gate", name: "gate", mesh, transform: T([10, 1, 0], [0.2, 2, 4]), physics: { body: "dynamic", shape: "box", joint: { kind: "slider", anchor: [0, 0, 0], axis: "y", limits: [0, 2.5] } } },
+        ],
+      }),
+    )!;
+    const code = `
+t = 0
+function TIC()
+  t = t + 1
+  if t == 60 then cartbox.drive("car", 1, 0, 0) cartbox.motor("gate", 2) end
+  if t == 200 then cartbox.drive("car", 0, 0, 1) end
+  local speed = cartbox.vehicle("car")
+  pmem(100, math.max(pmem(100), math.floor((speed or 0) * 1000)))
+  local _, _, cz = cartbox.body("car")
+  pmem(101, math.floor(cz * 1000) & 0xffffffff)
+  local _, gy = cartbox.body("gate")
+  pmem(102, math.floor(gy * 1000) & 0xffffffff)
+  pmem(103, math.floor((speed or 0) * 1000) & 0xffffffff)
+end`;
+    let tic = codeChunks(new TextEncoder().encode(code));
+    tic = prependLuaCode(tic, sceneObjectsSdkLua(sc));
+    tic = prependLuaCode(tic, physicsSdkLua(sc, layout));
+    tic = injectSdk(tic);
+    const e = await bootBytes("xbox360/engine.js", tic);
+    const session = new PhysicsSession(sc, createRapierBackend(RAPIER));
+    const word = (i: number) => (pmem(e)[i]! | 0) / 1000;
+    for (let i = 0; i < 480; i += 1) {
+      session.beforeTick(block(e, layout));
+      e.mod._cbx_tick(e.h, 0);
+      session.afterTick(block(e, layout));
+    }
+    expect(word(100)).toBeGreaterThan(2); // driven: it got up to speed (read from its body off the dedicated core)
+    expect(word(101)).toBeGreaterThan(3); // along its own +Z
+    expect(Math.abs(word(103))).toBeLessThan(0.3); // then braked to a stop
+    expect(word(102)).toBeCloseTo(3.5, 1); // the gate slid up to its 2.5 m stop
     session.destroy();
   }, 120_000);
 

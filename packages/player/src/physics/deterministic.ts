@@ -107,6 +107,25 @@ export function deterministicBackend(inner: PhysicsBackend): PhysicsBackend {
       });
   }
   if (inner.removeJoint) out.removeJoint = inner.removeJoint.bind(inner);
+  // Vehicles (S5): their settings and the cart's inputs rounded like every other number.
+  if (inner.addVehicle) {
+    const add = inner.addVehicle.bind(inner);
+    out.addVehicle = (desc) =>
+      add({
+        ...desc,
+        wheels: desc.wheels.map((w) => ({ at: snap3(w.at), radius: snap(w.radius) })),
+        suspension: snap(desc.suspension),
+        stiffness: snap(desc.stiffness),
+        compression: snap(desc.compression),
+        relaxation: snap(desc.relaxation),
+        grip: snap(desc.grip),
+      });
+  }
+  if (inner.driveVehicle) {
+    const drive = inner.driveVehicle.bind(inner);
+    out.driveVehicle = (vehicle, wheels) => drive(vehicle, wheels.map((w) => ({ engine: snap(w.engine), steer: snap(w.steer), brake: snap(w.brake) })));
+  }
+  if (inner.vehicleState) out.vehicleState = inner.vehicleState.bind(inner);
   if (inner.setMotor) {
     const motor = inner.setMotor.bind(inner);
     out.setMotor = (joint, speed, force) => motor(joint, snap(speed), snap(force));

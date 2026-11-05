@@ -238,6 +238,12 @@ const SURFACES: Record<GeneratorKind, Surface> = {
 // --- Baking ---------------------------------------------------------------------------------
 
 const cache = new Map<string, GeneratedMaps>();
+let requests = 0;
+
+/** How many times this process has asked for a recipe's maps (memoised or not): what a cooked load leaves unchanged (D5). */
+export function generatorRequestCount(): number {
+  return requests;
+}
 
 /** The cache key of a recipe (its maps are shared by every material with the same key). */
 export function generatorKey(g: TextureGenerator): string {
@@ -256,6 +262,7 @@ const byte = (v: number) => Math.max(0, Math.min(255, Math.round(v * 255)));
  * 0.5 s of Beaver Creek's 0.8 s here), for bytes no one keeps.
  */
 export function generateTextures(g: TextureGenerator, options: { readonly compress?: boolean } = {}): GeneratedMaps {
+  requests += 1;
   const compress = options.compress !== false;
   const key = compress ? generatorKey(g) : `${generatorKey(g)}|raw`;
   const hit = cache.get(key);
@@ -299,9 +306,23 @@ export function generateTextures(g: TextureGenerator, options: { readonly compre
   return maps;
 }
 
+/** Images a cooked material brought with it, its recipe's maps baked ahead (AAA_PRODUCTION_ROADMAP.md D5). */
+const adopted = new WeakSet<EncodedImage>();
+
+/** Count a cooked map as its generator's (so saving leaves it out again, as it does a map baked here). */
+export function adoptGeneratedImage(image: EncodedImage): void {
+  adopted.add(image);
+}
+
+/** Whether an image came baked with a cooked material (rather than baked here). */
+export function isCookedImage(image: EncodedImage | null | undefined): boolean {
+  return Boolean(image && adopted.has(image));
+}
+
 /** Whether an image is one a generator baked (so saving a material leaves it out: the recipe stands in for it). */
 export function isGeneratedImage(image: EncodedImage | null | undefined): boolean {
   if (!image) return false;
+  if (adopted.has(image)) return true;
   for (const maps of cache.values()) if (maps.albedo === image || maps.normal === image || maps.metallicRoughness === image || maps.relief === image) return true;
   return false;
 }

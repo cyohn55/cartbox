@@ -15,6 +15,9 @@ import {
   DEFAULT_SPRING_DAMPING,
   DEFAULT_SPRING_STIFFNESS,
   JOINT_KINDS,
+  DEFAULT_VEHICLE,
+  readVehicleSpec,
+  type VehicleSpec,
   PHYSICS_BODY_KINDS,
   PHYSICS_SHAPE_KINDS,
   PHYSICS_LAYERS,
@@ -32,6 +35,7 @@ import {
   type ScenePropValue,
 } from "@cartbox/editor";
 import { DIRECT_MAX_BODIES } from "@cartbox/player";
+import { addVehicleWheels } from "@/lib/vehicleKit";
 
 import {
   hierarchyRows,
@@ -768,6 +772,7 @@ function ClipEditor({ mesh, clip: index, onEdit }: { mesh: MeshAsset; clip: numb
 
 const JOINT_LABELS: Record<JointKind, string> = {
   hinge: "Hinge — turns about one axis",
+  slider: "Slider — slides along one axis",
   ball: "Ball — swivels freely",
   fixed: "Weld — stays put until broken",
   spring: "Spring — pulled toward the point",
@@ -854,37 +859,43 @@ function JointEditor({
               ))}
             </span>
           </label>
-          {joint.kind === "hinge" && (
+          {(joint.kind === "hinge" || joint.kind === "slider") && (
             <>
               <label style={row}>
                 Axis
-                <select aria-label="Hinge axis" value={joint.axis ?? "y"} onChange={(event) => patch({ axis: event.target.value as JointAxis })} style={inputStyle}>
+                <select aria-label={joint.kind === "hinge" ? "Hinge axis" : "Slider axis"} value={joint.axis ?? "y"} onChange={(event) => patch({ axis: event.target.value as JointAxis })} style={inputStyle}>
                   <option value="x">Its X axis</option>
-                  <option value="y">Its Y axis (a door)</option>
+                  <option value="y">{joint.kind === "hinge" ? "Its Y axis (a door)" : "Its Y axis (a lift)"}</option>
                   <option value="z">Its Z axis</option>
                 </select>
               </label>
               <label style={{ display: "flex", gap: 6, alignItems: "center", fontSize: 12 }}>
                 <input
                   type="checkbox"
-                  aria-label="Hinge limits"
+                  aria-label={joint.kind === "hinge" ? "Hinge limits" : "Slider limits"}
                   checked={Boolean(joint.limits)}
                   onChange={(event) => {
-                    if (event.target.checked) patch({ limits: [-90, 90] });
+                    if (event.target.checked) patch({ limits: joint.kind === "hinge" ? [-90, 90] : [0, 2] });
                     else {
                       const { limits: _drop, ...rest } = joint;
                       onChange(rest);
                     }
                   }}
                 />
-                Limit how far it turns
+                {joint.kind === "hinge" ? "Limit how far it turns" : "Limit how far it slides"}
               </label>
-              {joint.limits && (
-                <>
-                  {field("Min °", joint.limits[0], "-90", (v) => patch({ limits: [v ?? 0, joint.limits![1]] }), 5)}
-                  {field("Max °", joint.limits[1], "90", (v) => patch({ limits: [joint.limits![0], v ?? 0] }), 5)}
-                </>
-              )}
+              {joint.limits &&
+                (joint.kind === "hinge" ? (
+                  <>
+                    {field("Min °", joint.limits[0], "-90", (v) => patch({ limits: [v ?? 0, joint.limits![1]] }), 5)}
+                    {field("Max °", joint.limits[1], "90", (v) => patch({ limits: [joint.limits![0], v ?? 0] }), 5)}
+                  </>
+                ) : (
+                  <>
+                    {field("Min m", joint.limits[0], "0", (v) => patch({ limits: [v ?? 0, joint.limits![1]] }))}
+                    {field("Max m", joint.limits[1], "2", (v) => patch({ limits: [joint.limits![0], v ?? 0] }))}
+                  </>
+                ))}
             </>
           )}
           {(joint.kind === "spring" || joint.kind === "rope") &&
@@ -902,9 +913,66 @@ function JointEditor({
             {joint.kind === "spring" || joint.kind === "rope"
               ? "The point is in the object's own coordinates; its centre hangs from it. "
               : "The pivot is in the object's own coordinates (0,0,0 = its centre). "}
-            {joint.kind === "hinge" ? `In code: cartbox.motor(${name}, speed) turns it; ` : "In code: "}
+            {joint.kind === "hinge" ? `In code: cartbox.motor(${name}, speed) turns it; ` : joint.kind === "slider" ? `In code: cartbox.motor(${name}, speed) slides it (metres a second); ` : "In code: "}
             {`cartbox.unjoin(${name}) breaks it. Parent the object to another body to tie it to that instead.`}
           </RailHint>
+        </>
+      )}
+    </div>
+  );
+}
+
+/** A dynamic body as a ray-cast vehicle's chassis (S5): its settings, and wheel objects to draw. */
+function VehicleEditor({
+  sidecar,
+  entry,
+  vehicle,
+  onVehicle,
+  onSidecar,
+}: {
+  sidecar: MeshSidecar;
+  entry: MeshSidecarEntry;
+  vehicle: VehicleSpec | null;
+  onVehicle: (vehicle: VehicleSpec | null) => void;
+  onSidecar: (next: MeshSidecar) => void;
+}) {
+  const row: React.CSSProperties = { display: "grid", gridTemplateColumns: "90px 1fr", gap: 6, alignItems: "center", fontSize: 12 };
+  const field = (label: string, key: "engine" | "brake" | "steer" | "suspension" | "stiffness" | "grip", step: number) =>
+    vehicle && (
+      <label style={row}>
+        {label}
+        <input
+          type="number"
+          step={step}
+          aria-label={`Vehicle ${label.toLowerCase()}`}
+          value={vehicle[key]}
+          onChange={(event) => onVehicle(readVehicleSpec({ ...vehicle, [key]: Number(event.target.value) }) ?? vehicle)}
+          style={inputStyle}
+        />
+      </label>
+    );
+  const name = JSON.stringify(entry.name);
+  return (
+    <div style={{ display: "grid", gap: 6, marginTop: 4 }}>
+      <label style={{ display: "flex", gap: 6, alignItems: "center", fontSize: 12 }}>
+        <input type="checkbox" aria-label="Vehicle" checked={Boolean(vehicle)} onChange={(event) => onVehicle(event.target.checked ? DEFAULT_VEHICLE : null)} />
+        Vehicle: drives on ray-cast wheels
+      </label>
+      {vehicle && (
+        <>
+          <div style={{ fontSize: 12 }}>
+            {vehicle.wheels.length} wheels ({vehicle.wheels.filter((w) => w.steered).length} steered, {vehicle.wheels.filter((w) => w.driven).length || vehicle.wheels.length} driven). Forward is its own +Z.
+          </div>
+          {field("Engine N", "engine", 50)}
+          {field("Brake N", "brake", 5)}
+          {field("Steer °", "steer", 1)}
+          {field("Suspension m", "suspension", 0.05)}
+          {field("Stiffness", "stiffness", 1)}
+          {field("Grip", "grip", 0.1)}
+          <button type="button" onClick={() => onSidecar(addVehicleWheels(sidecar, entry.id, vehicle))} style={inputStyle}>
+            Add wheel objects
+          </button>
+          <RailHint>{`Wheels are rays on springs, not bodies; objects named after them under this one are drawn as them. In code: cartbox.drive(${name}, throttle, steer, brake), and cartbox.vehicle(${name}) for its speed.`}</RailHint>
         </>
       )}
     </div>
@@ -1116,6 +1184,18 @@ export function PhysicsPanel({
                 const { joint: _drop, ...rest } = spec;
                 onChange(setMeshPhysics(sidecar, entry.id, joint ? { ...rest, joint } : rest));
               }}
+            />
+          )}
+          {spec.body === "dynamic" && (
+            <VehicleEditor
+              sidecar={sidecar}
+              entry={entry}
+              vehicle={spec.vehicle ?? null}
+              onVehicle={(vehicle) => {
+                const { vehicle: _drop, ...rest } = spec;
+                onChange(setMeshPhysics(sidecar, entry.id, vehicle ? { ...rest, vehicle } : rest));
+              }}
+              onSidecar={onChange}
             />
           )}
         </div>

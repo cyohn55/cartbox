@@ -13,7 +13,7 @@
  * step, and casts the requested rays (and shape sweeps) for the next tick to read.
  */
 
-import { DEFAULT_SPRING_DAMPING, DEFAULT_SPRING_STIFFNESS, meshBounds, type JointKind, type JointSpec, type Mat4, type MeshAsset, type PhysicsSpec } from "@cartbox/editor";
+import { DEFAULT_SPRING_DAMPING, DEFAULT_SPRING_STIFFNESS, meshBounds, type JointKind, type JointSpec, type Mat4, type MeshAsset, type PhysicsSpec, type VehicleSpec } from "@cartbox/editor";
 
 import type { MeshScene } from "../mesh/meshScene.js";
 import { deterministicBackend, physicsStateHash } from "./deterministic.js";
@@ -24,6 +24,7 @@ import {
   PHYS_CAST_SPHERE,
   PHYS_MAX_RAYS,
   PHYS_OP_CAST,
+  PHYS_OP_DRIVE,
   PHYS_OP_IMPULSE,
   PHYS_OP_MOTOR,
   PHYS_OP_MOVE,
@@ -41,6 +42,7 @@ import {
   PHYS_Q_IMPACTS_PAGE,
   PHYS_Q_PROJECTILE,
   PHYS_Q_STOP,
+  PHYS_Q_VEHICLE,
   PROJECTILE_GRAVITY,
   asBlock,
   PHYS_EVENT_STARTED,
@@ -166,9 +168,41 @@ export interface PhysicsBackend {
   /** Joints (optional: a backend without them leaves bodies unjointed). */
   addJoint?(desc: PhysicsJointDesc): number;
   removeJoint?(joint: number): void;
-  /** Drive a hinge at `speed` rad/s with at most `force` (0 turns the motor off). */
+  /** Drive a hinge at `speed` rad/s (a slider at `speed` m/s) with at most `force` (0 turns the motor off). */
   setMotor?(joint: number, speed: number, force: number): void;
+  /**
+   * Ray-cast vehicles (S5; optional: a backend without them leaves the chassis
+   * a plain body). Each step updates every vehicle before the world moves.
+   */
+  addVehicle?(desc: PhysicsVehicleDesc): number;
+  /** Per wheel, in the order added: engine force (N), steering angle (radians), brake force. */
+  driveVehicle?(vehicle: number, wheels: readonly { readonly engine: number; readonly steer: number; readonly brake: number }[]): void;
+  vehicleState?(vehicle: number): PhysicsVehicleState;
   destroy(): void;
+}
+
+/** A vehicle as the backend makes it: the chassis body, and wheels in its own (scaled) coordinates. */
+export interface PhysicsVehicleDesc {
+  readonly chassis: number;
+  readonly wheels: readonly { readonly at: Vec3; readonly radius: number }[];
+  readonly suspension: number;
+  readonly stiffness: number;
+  readonly compression: number;
+  readonly relaxation: number;
+  readonly grip: number;
+}
+
+/** A vehicle's state after a step: its speed along its forward axis (m/s), and each wheel's. */
+export interface PhysicsVehicleState {
+  readonly speed: number;
+  readonly wheels: readonly {
+    readonly contact: boolean;
+    /** The spring's length now (metres). */
+    readonly suspension: number;
+    /** How far it has rolled (radians) and is steered. */
+    readonly rotation: number;
+    readonly steering: number;
+  }[];
 }
 
 export const PHYSICS_DT = 1 / 60;
@@ -245,6 +279,29 @@ function qrot(q: Quat, v: Vec3): Vec3 {
   return [r[0], r[1], r[2]];
 }
 const S = Math.SQRT1_2;
+/** The rotation by `angle` radians about unit `axis`. */
+function axisAngle(axis: Vec3, angle: number): Quat {
+  const h = Math.sin(angle / 2);
+  return [axis[0] * h, axis[1] * h, axis[2] * h, Math.cos(angle / 2)];
+}
+const clampUnit = (v: number, lo: number) => (Number.isFinite(v) ? Math.max(lo, Math.min(1, v)) : 0);
+
+/** Whether scene object `k` sits under object `root` in the Hierarchy. */
+function descendsFrom(scene: MeshScene, k: number, root: number): boolean {
+  for (let p = scene.instances[k]?.parent ?? -1, guard = 0; p >= 0 && guard < scene.instances.length; p = scene.instances[p]!.parent, guard += 1) if (p === root) return true;
+  return false;
+}
+
+/** A live vehicle (S5). */
+interface Vehicle {
+  readonly spec: VehicleSpec;
+  readonly handle: number;
+  readonly tracked: Tracked;
+  /** Throttle, steering, brake, as the cart last set them. */
+  input: [number, number, number];
+  /** Per wheel, the object drawn as it: its rotation relative to the chassis's at the start, and its scale. */
+  readonly visuals: readonly ({ readonly object: number; readonly rest: Quat; readonly scale: Vec3 } | null)[];
+}
 /** Rotations taking a hinge frame's X axis onto the object's own x / y / z axis. */
 const HINGE_FRAME: Readonly<Record<string, Quat>> = { x: [0, 0, 0, 1], y: [0, 0, S, S], z: [0, -S, 0, S] };
 
@@ -266,7 +323,9 @@ export function jointFrames(
   const inB = qconj(b.rotation);
   const anchor2 = qrot(inB, [world[0] - b.position[0], world[1] - b.position[1], world[2] - b.position[2]]);
   const pulls = spec.kind === "spring" || spec.kind === "rope";
-  const frame1 = spec.kind === "hinge" ? HINGE_FRAME[spec.axis ?? "y"]! : ([0, 0, 0, 1] as Quat);
+  // A hinge turns about, and a slider slides along, its frame's X axis.
+  const axial = spec.kind === "hinge" || spec.kind === "slider";
+  const frame1 = axial ? HINGE_FRAME[spec.axis ?? "y"]! : ([0, 0, 0, 1] as Quat);
   const deg = Math.PI / 180;
   return {
     kind: spec.kind,
@@ -275,6 +334,8 @@ export function jointFrames(
     anchor2,
     frame2: qmul(qmul(inB, a.rotation), frame1),
     ...(spec.kind === "hinge" && spec.limits ? { limits: [spec.limits[0] * deg, spec.limits[1] * deg] as const } : {}),
+    // A slider's limits are metres along its axis: scaled with the object, as its anchor is.
+    ...(spec.kind === "slider" && spec.limits ? { limits: [spec.limits[0], spec.limits[1]] as const } : {}),
     length: spec.length ?? Math.hypot(local[0], local[1], local[2]),
     stiffness: spec.stiffness ?? DEFAULT_SPRING_STIFFNESS,
     damping: spec.damping ?? DEFAULT_SPRING_DAMPING,
@@ -468,6 +529,8 @@ export class PhysicsSession {
   private fireOptions: FireOptions | null = null;
   /** Impacts and expiries during the last step. */
   private impacts: ProjectileImpact[] = [];
+  /** Vehicles (S5), by chassis object: the backend's handle, the cart's inputs, and each wheel's drawn object. */
+  private readonly vehicles = new Map<number, Vehicle>();
 
   constructor(
     scene: MeshScene,
@@ -525,6 +588,31 @@ export class PhysicsSession {
     // A reserve copy's joints are made when it spawns, where it's placed.
     const model = (object: number) => scene.instances[object]?.model ?? null;
     for (const [object, joint] of this.joints) if (!joint.pooled) this.join(object, model);
+    // Vehicles (S5): a dynamic chassis on ray-cast wheels. A reserve copy stays a plain body.
+    scene.instances.forEach((inst, i) => {
+      const spec = inst.physics?.vehicle;
+      const t = this.byObject.get(i);
+      if (!spec || !t || t.kind !== "dynamic" || inst.pooled || !this.backend.addVehicle) return;
+      const chassis = splitWorldMatrix(inst.model);
+      const handle = this.backend.addVehicle({
+        chassis: t.handle,
+        wheels: spec.wheels.map((w) => ({ at: [w.at[0] * chassis.scale[0], w.at[1] * chassis.scale[1], w.at[2] * chassis.scale[2]] as Vec3, radius: w.radius })),
+        suspension: spec.suspension,
+        stiffness: spec.stiffness,
+        compression: spec.compression,
+        relaxation: spec.relaxation,
+        grip: spec.grip,
+      });
+      // Each wheel's drawn object: a descendant of the chassis by name, kept in its pose relative to the wheel.
+      const visuals = spec.wheels.map((w) => {
+        if (!w.visual) return null;
+        const v = scene.instances.findIndex((other, k) => other.name === w.visual && descendsFrom(scene, k, i));
+        if (v < 0 || this.byObject.has(v)) return null;
+        const pose = splitWorldMatrix(scene.instances[v]!.model);
+        return { object: v, rest: qmul(qconj(chassis.rotation), pose.rotation), scale: pose.scale };
+      });
+      this.vehicles.set(i, { spec, handle, tracked: t, input: [0, 0, 0], visuals });
+    });
   }
 
   /** Create `object`'s joint from where it and its target are now (`world` gives world matrices). */
@@ -647,7 +735,38 @@ export class PhysicsSession {
       this.projectiles.delete(a);
       return null;
     }
+    if (op === PHYS_Q_VEHICLE) {
+      const vehicle = this.vehicles.get(a);
+      const state = vehicle && vehicle.tracked.enabled ? this.backend.vehicleState?.(vehicle.handle) : undefined;
+      if (!state) return null;
+      return [asBlock(state.speed), state.wheels.filter((w) => w.contact).length, state.wheels.length];
+    }
     return null;
+  }
+
+  /** Hand each vehicle's inputs to its wheels: the engine to the driven ones (all, if none is marked), steering to the steered. */
+  private driveVehicles(): void {
+    if (!this.backend.driveVehicle) return;
+    for (const vehicle of this.vehicles.values()) {
+      if (!vehicle.tracked.enabled) continue;
+      const { spec, input } = vehicle;
+      const [throttle, steer, brake] = input;
+      const anyDriven = spec.wheels.some((w) => w.driven);
+      this.backend.driveVehicle(
+        vehicle.handle,
+        spec.wheels.map((w) => ({
+          engine: w.driven || !anyDriven ? throttle * spec.engine : 0,
+          steer: w.steered ? steer * spec.steer * (Math.PI / 180) : 0,
+          brake: brake * spec.brake,
+        })),
+      );
+    }
+  }
+
+  /** A vehicle's state after the last step (live inspection, tests), or null. */
+  vehicle(object: number): PhysicsVehicleState | null {
+    const vehicle = this.vehicles.get(object);
+    return vehicle ? (this.backend.vehicleState?.(vehicle.handle) ?? null) : null;
   }
 
   /**
@@ -781,11 +900,16 @@ export class PhysicsSession {
       }
       const t = this.byObject.get(cmd.a);
       if (!t || !t.enabled) continue;
+      if (cmd.op === PHYS_OP_DRIVE) {
+        const vehicle = this.vehicles.get(cmd.a);
+        if (vehicle) vehicle.input = [clampUnit(a, -1), clampUnit(b, -1), clampUnit(c, 0)];
+        continue;
+      }
       if (cmd.op === PHYS_OP_MOTOR || cmd.op === PHYS_OP_UNJOIN) {
         const joint = this.joints.get(cmd.a);
         if (joint?.handle == null) continue;
         if (cmd.op === PHYS_OP_UNJOIN) this.unjoin(cmd.a);
-        else if (joint.spec.kind === "hinge") this.backend.setMotor?.(joint.handle, a, Math.max(0, b));
+        else if (joint.spec.kind === "hinge" || joint.spec.kind === "slider") this.backend.setMotor?.(joint.handle, a, Math.max(0, b));
         continue;
       }
       if (cmd.op === PHYS_OP_IMPULSE && t.kind === "dynamic") this.backend.applyImpulse(t.handle, [a, b, c]);
@@ -798,6 +922,7 @@ export class PhysicsSession {
         t.lastMove = [after[0] - before[0], after[1] - before[1], after[2] - before[2]];
       }
     }
+    this.driveVehicles();
     this.backend.step(PHYSICS_DT);
     this.queriesReady = true;
     this.events = this.backend.drainContacts();
@@ -853,6 +978,25 @@ export class PhysicsSession {
       if (!t.enabled) continue;
       const s = this.backend.bodyState(t.handle);
       out.set(t.object, composeWorldMatrix(s.position, s.rotation, t.scale));
+    }
+    // Each vehicle's wheels: at the end of their springs, steered and rolled.
+    for (const vehicle of this.vehicles.values()) {
+      if (!vehicle.tracked.enabled || !vehicle.visuals.some(Boolean)) continue;
+      const state = this.backend.vehicleState?.(vehicle.handle);
+      if (!state) continue;
+      const body = this.backend.bodyState(vehicle.tracked.handle);
+      const scale = vehicle.tracked.scale;
+      vehicle.visuals.forEach((visual, w) => {
+        const wheel = state.wheels[w];
+        if (!visual || !wheel) return;
+        const at = vehicle.spec.wheels[w]!.at;
+        const hard = qrot(body.rotation, [at[0] * scale[0], at[1] * scale[1], at[2] * scale[2]]);
+        const down = qrot(body.rotation, [0, -wheel.suspension, 0]);
+        const centre: Vec3 = [body.position[0] + hard[0] + down[0], body.position[1] + hard[1] + down[1], body.position[2] + hard[2] + down[2]];
+        const steer = axisAngle([0, 1, 0], wheel.steering);
+        const roll = axisAngle([1, 0, 0], wheel.rotation);
+        out.set(visual.object, composeWorldMatrix(centre, qmul(qmul(body.rotation, qmul(steer, roll)), visual.rest), visual.scale));
+      });
     }
     return out;
   }

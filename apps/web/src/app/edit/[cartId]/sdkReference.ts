@@ -351,8 +351,20 @@ export const SDK_REFERENCE: readonly SdkGroup[] = [
       {
         name: "cartbox.motor",
         signature: "cartbox.motor(obj, speed, force)",
-        doc: "Drive an object's hinge joint (set on its Physics in the Inspector) at speed radians per second, pushing with at most force (default 1000). Speed 0 holds it still; cartbox.motor(obj) turns the motor off so it swings freely.",
+        doc: "Drive an object's hinge joint (set on its Physics in the Inspector) at speed radians per second, or its slider joint at speed metres per second, pushing with at most force (default 1000). Speed 0 holds it still; cartbox.motor(obj) turns the motor off so it moves freely.",
         snippet: 'cartbox.motor("wheel", 6)',
+      },
+      {
+        name: "cartbox.drive",
+        signature: "cartbox.drive(obj, throttle, steer, brake)",
+        doc: "Drive a vehicle (a dynamic body with Vehicle set on its Physics): throttle -1..1 (negative reverses), steer -1..1 (positive turns left), brake 0..1. The inputs hold until changed.",
+        snippet: 'cartbox.drive("car", 1, 0, 0)',
+      },
+      {
+        name: "cartbox.vehicle",
+        signature: "cartbox.vehicle(obj) -> speed, grounded, wheels",
+        doc: "A vehicle's forward speed in metres per second, and on the dedicated Modern core how many of its wheels touch the ground and how many it has. Elsewhere only the speed (from its body), or nil when it isn't a moving body.",
+        snippet: "local speed, grounded = cartbox.vehicle(\"car\")",
       },
       {
         name: "cartbox.unjoin",

@@ -27,7 +27,8 @@
  */
 
 import type { EncodedImage, MeshAsset, MeshMaterial, MeshPrimitive } from "./MeshAsset";
-import { MESH_ASSET_VERSION, deserializeMaterial, deserializeMeshAsset, serializeMaterial, serializeMeshAsset } from "./MeshAsset";
+import { GENERATED_SLOTS, MESH_ASSET_VERSION, deserializeMaterial, deserializeMeshAsset, serializeMaterial, serializeMeshAsset } from "./MeshAsset";
+import { adoptGeneratedImage, generatorKey, isGeneratedImage, readGenerator } from "./textureGenerators";
 
 /** The file's first four bytes. */
 export const PACKAGE_MAGIC = 0x4b504243; // "CBPK"
@@ -298,6 +299,11 @@ export function packMeshAsset(mesh: MeshAsset, meshopt: MeshoptCodec | null = nu
       if (image.ref || image.ktx2Relief || image.bytes.length === 0) meta[slot] = { mime: image.mime, ...(image.ref ? { ref: image.ref } : {}), ...(image.ktx2Relief ? { ktx2Relief: true } : {}) };
     }
     if (Object.keys(meta).length > 0) s.$img = meta;
+    // A generator's maps travel as chunks like any image; `$cooked` says which they are, so a load doesn't bake them again (D5).
+    if (material.generator) {
+      const slots = GENERATED_SLOTS.filter(([slot]) => isGeneratedImage(material[slot] as EncodedImage | null | undefined)).map(([slot]) => slot);
+      if (slots.length > 0) s.$cooked = { key: generatorKey(material.generator), slots };
+    }
     return s;
   });
   // Lay the chunks out, then the manifest that points at them.
@@ -356,8 +362,11 @@ export function unpackMeshAsset(bytes: Uint8Array, meshopt: MeshoptCodec | null 
   };
   const seen = new Map<string, EncodedImage>();
   const materials = manifest.materials.map((stored, mi) => {
-    const { $img, ...s } = stored as Record<string, unknown> & { $img?: Record<string, ImageMeta> };
-    const material = deserializeMaterial(s);
+    const { $img, $cooked, ...s } = stored as Record<string, unknown> & { $img?: Record<string, ImageMeta>; $cooked?: { key?: unknown; slots?: unknown } };
+    // Cooked maps (D5) come from the chunks: read the material without its recipe (so nothing is baked), then give it back.
+    const generator = readGenerator(s.generator);
+    const cooked = generator && $cooked && $cooked.key === generatorKey(generator) && Array.isArray($cooked.slots) ? ($cooked.slots as string[]) : null;
+    const material = cooked ? { ...deserializeMaterial({ ...s, generator: undefined }), generator } : deserializeMaterial(s);
     const images: Record<string, EncodedImage> = {};
     for (const slot of IMAGE_SLOTS) {
       const name = `m${mi}.${slot}`;
@@ -379,7 +388,12 @@ export function unpackMeshAsset(bytes: Uint8Array, meshopt: MeshoptCodec | null 
       images[slot] = image;
       seen.set(name, image);
     }
-    return { ...material, ...images } as MeshMaterial;
+    const out = { ...material, ...images } as MeshMaterial;
+    for (const slot of cooked ?? []) {
+      const image = (out as unknown as Record<string, EncodedImage | null | undefined>)[slot];
+      if (image) adoptGeneratedImage(image);
+    }
+    return out;
   });
   const primitives = manifest.primitives.map((p, pi) => {
     const out: Record<string, unknown> = { material: materials[p.material]! };

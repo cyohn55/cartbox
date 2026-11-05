@@ -61,10 +61,10 @@ export async function loadMeshoptCodec(): Promise<MeshoptCodec | null> {
 }
 
 type Holder = { mesh?: unknown; frames?: unknown; lods?: unknown };
-type SidecarRoot = { meshes?: Holder[]; library?: Record<string, unknown>; prefabs?: { nodes?: Holder[] }[] };
+export type SidecarRoot = { meshes?: Holder[]; library?: Record<string, unknown>; prefabs?: { nodes?: Holder[] }[] };
 
 /** Every mesh string slot of a sidecar: entries' meshes, frames and LOD levels, the library, prefab nodes. */
-function meshSlots(root: SidecarRoot): { value: unknown; write: (value: string) => void }[] {
+export function meshSlots(root: SidecarRoot): { value: unknown; write: (value: string) => void }[] {
   const slots: { value: unknown; write: (value: string) => void }[] = [];
   const holder = (h: Holder) => {
     slots.push({ value: h.mesh, write: (v) => (h.mesh = v) });
@@ -85,7 +85,7 @@ function meshSlots(root: SidecarRoot): { value: unknown; write: (value: string) 
   return slots;
 }
 
-function parseSidecar(encoded: string): SidecarRoot | null {
+export function parseSidecar(encoded: string): SidecarRoot | null {
   try {
     const root = JSON.parse(encoded) as SidecarRoot;
     return root && typeof root === "object" && Array.isArray(root.meshes) ? root : null;
@@ -184,7 +184,8 @@ export async function inlineMeshPackages(
       json = null;
       try {
         const bytes = await fetchAsset(ref);
-        if (bytes) json = refsToAssets(serializeMeshAsset(unpackMeshAsset(bytes, codec)));
+        // `cook` keeps a generator's cooked maps (D5) with their recipe, as they were stored.
+        if (bytes) json = refsToAssets(serializeMeshAsset(unpackMeshAsset(bytes, codec), { cook: true }));
       } catch {
         // Left as a reference.
       }
