@@ -1,4 +1,4 @@
-import { MeshSceneInstance, MeshAsset, Mat4, ScenePropValue, PhysicsSpec, AnimatorSpec, LodChain, AttachedComponent, SceneLighting, PhysicsWorldSettings, SceneTimeline, SceneLevel, NavMesh, Terrain, SceneStreaming, ParticleEffect, DecalDef, DecalMark, RagdollBox, DebrisDef, SceneAudio, ComponentDef, BehaviourTree, StreamGroup, JointKind, JointSpec, EnvironmentLight, SceneLight, ActionRebind, Atmosphere, SkyMoon, Clouds, DecodedTexture, SkySun, BakedCloudLayer, SunShafts, ColorFilter, AccessibilitySettings, WeatherSettings, EncodedImage, UiDocument, InputAction, StringTable, ReflectionProbe, ShadowInput, ToneMap, LocalShadows, ProjectedDecal, DecalTiles, Occluder, DynamicGi, SceneFog, SceneWind, Weather, MeshMaterial, EmitterSpec, RasterStyle, VolumeEffect, MeshPrimitive, HdrLightmap, LightmapLayout, ProbeVolume, OccluderSurface, ResolvedLayers, ResolvedExtensions, ResolvedRefraction, SurfaceEffect, AnimatorOp, NavGraph, AnimationCue, FaceRig, VisemeSpan, FaceClip } from '@cartbox/editor';
+import { MeshSceneInstance, MeshAsset, Mat4, ScenePropValue, PhysicsSpec, AnimatorSpec, LodChain, AttachedComponent, SceneLighting, PhysicsWorldSettings, SceneTimeline, SceneLevel, NavMesh, Terrain, SceneStreaming, ParticleEffect, DecalDef, DecalMark, RagdollBox, DebrisDef, SceneAudio, ComponentDef, BehaviourTree, StreamGroup, JointKind, JointSpec, EnvironmentLight, SceneLight, ActionRebind, Atmosphere, SkyMoon, Clouds, DecodedTexture, SkySun, BakedCloudLayer, SunShafts, ColorFilter, AccessibilitySettings, WeatherSettings, EncodedImage, UiDocument, InputAction, StringTable, ReflectionProbe, ShadowInput, ToneMap, LocalShadows, ProjectedDecal, DecalTiles, Occluder as Occluder$1, DynamicGi, SceneFog, SceneWind, Weather, MeshMaterial, EmitterSpec, RasterStyle, VolumeEffect, MeshPrimitive, HdrLightmap, LightmapLayout, ProbeVolume, OccluderSurface, ResolvedLayers, ResolvedExtensions, ResolvedRefraction, SurfaceEffect, AnimatorOp, NavGraph, AnimationCue, FaceRig, VisemeSpan, FaceClip } from '@cartbox/editor';
 
 /**
  * The runtime mesh scene: the cart's mesh sidecar resolved into placed instances
@@ -860,6 +860,8 @@ declare class PhysicsSession {
     query(op: number, a: number, v: readonly number[]): number[] | null;
     /** Hand each vehicle's inputs to its wheels: the engine to the driven ones (all, if none is marked), steering to the steered. */
     private driveVehicles;
+    /** Whether something solid stands between two points (U2's occlusion): a ray from one that stops short of the other. */
+    lineBlocked(from: readonly [number, number, number], to: readonly [number, number, number]): boolean;
     /** A vehicle's state after the last step (live inspection, tests), or null. */
     vehicle(object: number): PhysicsVehicleState | null;
     /**
@@ -5214,7 +5216,7 @@ interface SceneDraw {
      * light-mapped ones too. The others ignore it.
      */
     readonly dynamicGi?: {
-        readonly occluders: readonly Occluder[];
+        readonly occluders: readonly Occluder$1[];
         readonly key: string;
         readonly settings: DynamicGi;
     } | null;
@@ -5249,7 +5251,7 @@ interface SceneDraw {
      */
     readonly camera?: CameraEffects | null;
     readonly reflectionTrace?: {
-        readonly occluders: readonly Occluder[];
+        readonly occluders: readonly Occluder$1[];
         readonly key: string;
     } | null;
     /**
@@ -6998,7 +7000,7 @@ declare function bakeSurfaces(mesh: MeshAsset, decode: (image: EncodedImage, dat
  * should include the mesh itself); see the module comment. `progress` hears
  * the share done after each submit.
  */
-declare function bakeLightmapGpu(device: any, layout: LightmapLayout, occluders: readonly Occluder[], options?: GpuLightBakeOptions, progress?: (done: number) => void): Promise<GpuLightmapBake>;
+declare function bakeLightmapGpu(device: any, layout: LightmapLayout, occluders: readonly Occluder$1[], options?: GpuLightBakeOptions, progress?: (done: number) => void): Promise<GpuLightmapBake>;
 interface ProbeVolumeBakeOptions extends Pick<GpuLightBakeOptions, "bounces" | "sky" | "lights" | "backfaceLimit"> {
     /** Rays per probe (default 1024). */
     readonly rays?: number;
@@ -7009,7 +7011,7 @@ interface ProbeVolumeBakeOptions extends Pick<GpuLightBakeOptions, "bounces" | "
  * whole sphere, through the same paths as a light map's texels. A probe's
  * depths are capped at 1.5 times the probe spacing, as DDGI's are.
  */
-declare function bakeProbeVolumeGpu(device: any, min: readonly [number, number, number], max: readonly [number, number, number], counts: readonly [number, number, number], occluders: readonly Occluder[], options?: ProbeVolumeBakeOptions, progress?: (done: number) => void): Promise<ProbeVolume>;
+declare function bakeProbeVolumeGpu(device: any, min: readonly [number, number, number], max: readonly [number, number, number], counts: readonly [number, number, number], occluders: readonly Occluder$1[], options?: ProbeVolumeBakeOptions, progress?: (done: number) => void): Promise<ProbeVolume>;
 
 /**
  * The pure half of the WebGPU scene renderer: memory layout and buffer packing.
@@ -9628,7 +9630,14 @@ interface SoundContext {
     createPanner(): PannerNode;
     createBuffer(channels: number, length: number, sampleRate: number): AudioBuffer;
     decodeAudioData(data: ArrayBuffer): Promise<AudioBuffer>;
+    /** The audio track's nodes (U1–U4); a context without one leaves that feature out. */
+    createBiquadFilter?(): BiquadFilterNode;
+    createConvolver?(): ConvolverNode;
+    createDynamicsCompressor?(): DynamicsCompressorNode;
+    createMediaElementSource?(element: HTMLMediaElement): MediaElementAudioSourceNode;
 }
+/** How blocked the line from the listener to a sound is: 0 clear, 1 behind a wall (U2). */
+type Occluder = (from: Vec3$1, to: Vec3$1) => number;
 /** Reads a line aloud (the browser's speech), or null where there's none. */
 type Speaker = ((text: string, options: {
     volume: number;
@@ -9654,6 +9663,19 @@ declare class SoundSystem {
     /** Emitters: their voice, and the object (scene instance index) each follows, or -1. */
     private readonly emitters;
     private disposed;
+    /** Each bus's own level (what cartbox.mix and snapshots set) and its duck now (U3). */
+    private readonly levels;
+    private readonly ducks;
+    private snapshotBlend;
+    /** Reverb (U1): each zone's send. */
+    private readonly zoneSends;
+    private listener;
+    private occluder;
+    /** Variation (U5): seeded, so a replay varies the same. */
+    private readonly random;
+    private readonly variation;
+    private readonly music;
+    private readonly pending;
     private constructor();
     /**
      * Build the scene's sound: every sound decoded or synthesised (a file that
@@ -9664,11 +9686,38 @@ declare class SoundSystem {
     /** Start a sound (a buffer source through its gain, panner if positional, into its bus). */
     private start;
     /** Play a sound once (cartbox.sound). */
-    play(sound: number, volume?: number, pitch?: number, at?: Vec3$1 | null): void;
+    play(sound: number, volume?: number, pitch?: number, at?: Vec3$1 | null, when?: number): void;
     /** Start, move, fade or (sound < 0) stop a looping slot (cartbox.loop). */
     loop(slot: number, sound: number, volume?: number, at?: Vec3$1 | null): void;
     /** Set a mixer bus's volume (cartbox.mix). */
     mix(bus: number, volume: number): void;
+    /** Blend the buses to a snapshot over `seconds` (U3; cartbox.snapshot). */
+    snapshot(index: number, seconds: number): void;
+    private advanceSnapshot;
+    /** Set a switch's value (U5; cartbox.switch): what a switch container plays. */
+    setSwitch(name: string, value: string): void;
+    /** Where walls are, for occlusion (U2): the host's line test. */
+    setOccluder(occluder: Occluder | null): void;
+    /** Start or stop a music track (U4; cartbox.music): its layers in sync, the first one up. */
+    playMusic(track: number, on: boolean): void;
+    /**
+     * A long file played as it streams (U4), through a media element rather than
+     * decoded whole first: null where the context or the page can't (the sound
+     * is then decoded as usual).
+     */
+    private streamed;
+    /** Bring a layer in or out, on the next bar (U4; cartbox.layer). */
+    musicLayer(track: number, layer: number, on: boolean): void;
+    /** A stinger over the music, on its next beat (U4; cartbox.stinger); at once with no music playing. */
+    stinger(sound: number): void;
+    /**
+     * The audio track's frame (U1–U4): the listener's reverb zones, ducking,
+     * snapshot blends, occlusion eased toward the line tests, and music changes
+     * that have reached their bar.
+     */
+    update(dt: number): void;
+    /** A bus's duck now (1 = none), for tests and the mixer view. */
+    duckLevel(bus: number): number;
     /** A bus's index by name (-1 when the scene has none of that name). */
     busIndex(name: string): number;
     /** The level a bus is at. */
@@ -10509,6 +10558,11 @@ type SoundCommand = {
     readonly kind: "mix";
     readonly bus: number;
     readonly volume: number;
+} | {
+    readonly kind: "audio";
+    readonly what: number;
+    readonly index: number;
+    readonly v: readonly number[];
 };
 interface DebrisThrown {
     readonly debris: number;

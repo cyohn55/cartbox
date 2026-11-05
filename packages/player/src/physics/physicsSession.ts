@@ -763,6 +763,15 @@ export class PhysicsSession {
     }
   }
 
+  /** Whether something solid stands between two points (U2's occlusion): a ray from one that stops short of the other. */
+  lineBlocked(from: readonly [number, number, number], to: readonly [number, number, number]): boolean {
+    const d: Vec3 = [to[0] - from[0], to[1] - from[1], to[2] - from[2]];
+    const len = Math.hypot(d[0], d[1], d[2]);
+    if (len < 0.5 || !this.queriesReady) return false;
+    const hit = this.cast({ origin: [from[0], from[1], from[2]], direction: [d[0] / len, d[1] / len, d[2] / len], max: len, shape: null });
+    return hit !== null && hit.distance < len - 0.5;
+  }
+
   /** A vehicle's state after the last step (live inspection, tests), or null. */
   vehicle(object: number): PhysicsVehicleState | null {
     const vehicle = this.vehicles.get(object);

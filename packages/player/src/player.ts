@@ -68,7 +68,7 @@ import { MAX_PREFAB_POOL, MAX_PREFAB_POOL_DIRECT, streamGroups, type MeshScene }
 import { runtimeSdkLua } from "./physics/physicsSdk.js";
 import { PhysicsSession, sceneHasPhysics } from "./physics/physicsSession.js";
 import { RuntimeChannel } from "./runtime/runtimeChannel.js";
-import { DIRECT_MAX_BODIES, PHYS_BLOCK_BYTES, PHYS_MAX_BODIES, RAM_LAYOUTS, physicsBlockAddress } from "./physics/protocol.js";
+import { AUDIO_LAYER, AUDIO_MUSIC, AUDIO_SNAPSHOT, AUDIO_STINGER, AUDIO_SWITCH, DIRECT_MAX_BODIES, PHYS_BLOCK_BYTES, PHYS_MAX_BODIES, RAM_LAYOUTS, physicsBlockAddress } from "./physics/protocol.js";
 import { collisionSdkLua } from "./collisionSdk.js";
 import { Profiler, type ProfileSnapshot } from "./debug/profiler.js";
 import {
@@ -106,7 +106,7 @@ import { GpuCanvasSurface, type CapturedFrame } from "./render/GpuCanvasSurface.
 import { browserStorage, gpuPresentFailed, watchGpuPresent, type WatchedDevice } from "./render/presentFallback.js";
 import type { SceneRenderer } from "./render/sceneRenderer.js";
 import type { TextureLookup } from "./world/worldScene.js";
-import { behaviourTreesLua, bundleLuaModules, gameplayLua, perceptionLua, SpatialLoader, WorldPartition, partitionWorld, actionMask, createHoloCache, holoBindingKeys, holoDocuments, renderHoloDocument, translate, reboundActions, type DecodedTexture, type EncodedImage, type InputAction, type Mat4, colorFilterSvg, DEFAULT_ACCESSIBILITY, type AccessibilitySettings, type ColorFilter, type WeatherSettings } from "@cartbox/editor";
+import { audioSwitches, behaviourTreesLua, bundleLuaModules, gameplayLua, perceptionLua, SpatialLoader, WorldPartition, partitionWorld, actionMask, createHoloCache, holoBindingKeys, holoDocuments, renderHoloDocument, translate, reboundActions, type DecodedTexture, type EncodedImage, type InputAction, type Mat4, colorFilterSvg, DEFAULT_ACCESSIBILITY, type AccessibilitySettings, type ColorFilter, type WeatherSettings } from "@cartbox/editor";
 import type { ControlScheme, InspectedObject, PlayerOptions, SequenceOptions } from "./types.js";
 
 /**
@@ -795,7 +795,11 @@ export class Player {
         void SoundSystem.create(this.audio.audioContext, sceneAudio, this.audio.output, (id) => mesh.instances.findIndex((i) => i.id === id))
           .then((system) => {
             if (this.destroyed) system.dispose();
-            else this.sounds = system;
+            else {
+              this.sounds = system;
+              // Occlusion (U2): walls between the listener and a sound, from the physics world's rays.
+              if (sceneAudio.occlusion) system.setOccluder((from, to) => (this.runtime?.physics?.lineBlocked(from, to) ? 1 : 0));
+            }
           })
           .catch(() => {
             /* sound is optional: the game plays on silent */
@@ -1061,7 +1065,8 @@ export class Player {
         if (c.kind === "play") {
           if (withSound) this.sounds.play(c.sound, c.volume, c.pitch, c.at);
         } else if (c.kind === "loop") this.sounds.loop(c.slot, c.sound, c.volume, c.at);
-        else this.sounds.mix(c.bus, c.volume);
+        else if (c.kind === "mix") this.sounds.mix(c.bus, c.volume);
+        else this.audioCommand(c.what, c.index, c.v);
       }
     }
     // A playing timeline's `bus:<name>` value tracks set those mixer buses (EP17).
@@ -1078,6 +1083,8 @@ export class Player {
       if (pose) this.sounds.listen(pose.eye, pose.forward, pose.up);
       this.sounds.follow(this.meshSurface.placements());
     }
+    // The audio track's frame (U1–U4): reverb zones, ducking, snapshots, occlusion, music on the bar.
+    this.sounds?.update(1 / 60);
     this.updateSpatialLoading();
     lap("runtime");
     if (net && this.console) {
@@ -1206,6 +1213,22 @@ export class Player {
    * Start a level switch the cart asked for: load the level's assets through the
    * host (a published cart fetches its textures), then make it current.
    */
+  /** The audio track's commands from the cart (U1–U5): names were resolved to indices in Lua. */
+  private audioCommand(what: number, index: number, v: readonly number[]): void {
+    const sounds = this.sounds;
+    const audio = this.options.mesh?.audio;
+    if (!sounds || !audio) return;
+    if (what === AUDIO_SNAPSHOT) sounds.snapshot(index, v[0] ?? 0);
+    else if (what === AUDIO_MUSIC) sounds.playMusic(index, (v[0] ?? 0) >= 0.5);
+    else if (what === AUDIO_LAYER) sounds.musicLayer(index, Math.round(v[0] ?? 0), (v[1] ?? 0) >= 0.5);
+    else if (what === AUDIO_STINGER) sounds.stinger(index);
+    else if (what === AUDIO_SWITCH) {
+      const names = audioSwitches(audio);
+      const sw = names[index];
+      if (sw) sounds.setSwitch(sw.name, sw.values[Math.round(v[0] ?? 0)] ?? "");
+    }
+  }
+
   private pollLevelRequest(): void {
     const channel = this.runtime?.channel;
     const scene = this.options.mesh;

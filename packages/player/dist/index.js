@@ -65,7 +65,20 @@ var AudioController = class {
 };
 
 // src/soundSystem.ts
-import { base64ToBytes, synthesizeSound, resolveSynth } from "@cartbox/editor";
+import {
+  base64ToBytes,
+  blendSnapshot,
+  chooseVariant,
+  duckGain,
+  nextBeat,
+  occlusionFilter,
+  resolveSynth,
+  reverbImpulse,
+  reverbSends,
+  seededRandom,
+  smoothToward,
+  synthesizeSound
+} from "@cartbox/editor";
 function browserSpeaker() {
   const synth = typeof globalThis !== "undefined" ? globalThis.speechSynthesis : void 0;
   const Utterance = typeof globalThis !== "undefined" ? globalThis.SpeechSynthesisUtterance : void 0;
@@ -91,14 +104,62 @@ var SoundSystem = class _SoundSystem {
     /** Emitters: their voice, and the object (scene instance index) each follows, or -1. */
     this.emitters = [];
     this.disposed = false;
+    this.snapshotBlend = null;
+    /** Reverb (U1): each zone's send. */
+    this.zoneSends = [];
+    this.listener = [0, 0, 0];
+    this.occluder = null;
+    /** Variation (U5): seeded, so a replay varies the same. */
+    this.random = seededRandom(1);
+    this.variation = { last: /* @__PURE__ */ new Map(), switches: /* @__PURE__ */ new Map() };
+    this.music = /* @__PURE__ */ new Map();
+    this.pending = [];
     this.master = context.createGain();
-    this.master.connect(output);
+    const limiter = context.createDynamicsCompressor?.();
+    if (limiter) {
+      limiter.threshold.value = audio.limiter ?? -1;
+      limiter.knee.value = 0;
+      limiter.ratio.value = 20;
+      limiter.attack.value = 2e-3;
+      limiter.release.value = 0.1;
+      this.master.connect(limiter);
+      limiter.connect(output);
+    } else this.master.connect(output);
     this.buses = audio.buses.map((bus) => {
       const g = context.createGain();
       g.gain.value = bus.volume;
-      g.connect(this.master);
       return g;
     });
+    audio.buses.forEach((bus, i) => {
+      const parent = bus.parent ? audio.buses.findIndex((b) => b.name === bus.parent) : -1;
+      this.buses[i].connect(parent >= 0 ? this.buses[parent] : this.master);
+    });
+    this.levels = audio.buses.map((b) => b.volume);
+    this.ducks = audio.buses.map(() => 1);
+    const zones = audio.reverbZones ?? [];
+    if (zones.length > 0 && context.createConvolver) {
+      const send = context.createGain();
+      audio.buses.forEach((bus, i) => {
+        const amount = context.createGain();
+        amount.gain.value = bus.reverb ?? 1;
+        this.buses[i].connect(amount);
+        amount.connect(send);
+      });
+      zones.forEach((zone, z) => {
+        const level = context.createGain();
+        level.gain.value = 0;
+        const convolver = context.createConvolver();
+        const [left, right] = reverbImpulse(context.sampleRate, zone.decay, zone.damping, z + 1);
+        const ir = context.createBuffer(2, left.length, context.sampleRate);
+        ir.copyToChannel(left, 0);
+        ir.copyToChannel(right, 1);
+        convolver.buffer = ir;
+        send.connect(level);
+        level.connect(convolver);
+        convolver.connect(this.master);
+        this.zoneSends.push(level);
+      });
+    }
     this.buffers = audio.sounds.map(() => null);
   }
   /**
@@ -110,6 +171,7 @@ var SoundSystem = class _SoundSystem {
     const system = new _SoundSystem(context, audio, output, speak);
     await Promise.all(
       audio.sounds.map(async (sound, i) => {
+        if (sound.stream && context.createMediaElementSource && globalThis.Audio) return;
         system.buffers[i] = await bufferFor(context, sound);
       })
     );
@@ -123,7 +185,7 @@ var SoundSystem = class _SoundSystem {
     return system;
   }
   /** Start a sound (a buffer source through its gain, panner if positional, into its bus). */
-  start(sound, volume, pitch, at, loop, positional = at !== null) {
+  start(sound, volume, pitch, at, loop, positional = at !== null, when = 0) {
     const def = this.audio.sounds[sound];
     const buffer = this.buffers[sound];
     if (!def || this.disposed) return null;
@@ -142,6 +204,8 @@ var SoundSystem = class _SoundSystem {
     gain.gain.value = def.volume * volume;
     source.connect(gain);
     let panner = null;
+    let filter = null;
+    let occGain = null;
     if (positional && def.range) {
       panner = this.context.createPanner();
       panner.panningModel = "equalpower";
@@ -150,16 +214,32 @@ var SoundSystem = class _SoundSystem {
       panner.maxDistance = def.range[1];
       panner.rolloffFactor = 1;
       if (at) place(panner, at);
-      gain.connect(panner);
+      if (this.audio.occlusion && this.context.createBiquadFilter) {
+        filter = this.context.createBiquadFilter();
+        filter.type = "lowpass";
+        filter.frequency.value = 2e4;
+        occGain = this.context.createGain();
+        gain.connect(filter);
+        filter.connect(occGain);
+        occGain.connect(panner);
+      } else gain.connect(panner);
     }
     const bus = Math.max(0, this.audio.buses.findIndex((b) => b.name === def.bus));
     (panner ?? gain).connect(this.buses[bus] ?? this.master);
-    source.start(this.context.currentTime);
-    return { source, gain, panner };
+    source.start(Math.max(this.context.currentTime, when));
+    return { source, gain, panner, bus, filter, occGain, at, occ: 0 };
   }
   /** Play a sound once (cartbox.sound). */
-  play(sound, volume = 1, pitch = 1, at = null) {
-    const voice = this.start(sound, volume, pitch, at, false);
+  play(sound, volume = 1, pitch = 1, at = null, when = 0) {
+    const variation = this.audio.sounds[sound]?.variation;
+    if (variation) {
+      const pick = chooseVariant(this.audio.sounds[sound].name, variation, this.variation, this.random);
+      const k = this.audio.sounds.findIndex((s) => s.name === pick.sound);
+      if (k >= 0) sound = k;
+      pitch *= pick.pitch;
+      volume *= pick.volume;
+    }
+    const voice = this.start(sound, volume, pitch, at, false, at !== null, when);
     if (!voice) return;
     this.voices.push(voice);
     voice.source.onended = () => {
@@ -176,7 +256,10 @@ var SoundSystem = class _SoundSystem {
     const held = this.loops.get(slot);
     if (held && held.sound === sound && sound >= 0) {
       held.gain.gain.value = (this.audio.sounds[sound]?.volume ?? 1) * volume;
-      if (held.panner && at) place(held.panner, at);
+      if (held.panner && at) {
+        place(held.panner, at);
+        held.at = at;
+      }
       return;
     }
     if (held) {
@@ -189,8 +272,141 @@ var SoundSystem = class _SoundSystem {
   }
   /** Set a mixer bus's volume (cartbox.mix). */
   mix(bus, volume) {
-    const g = this.buses[bus];
-    if (g) g.gain.value = Math.max(0, Math.min(2, volume));
+    if (bus < 0 || bus >= this.buses.length) return;
+    this.levels[bus] = Math.max(0, Math.min(2, volume));
+    this.buses[bus].gain.value = this.levels[bus] * this.ducks[bus];
+  }
+  /** Blend the buses to a snapshot over `seconds` (U3; cartbox.snapshot). */
+  snapshot(index, seconds) {
+    const to = this.audio.snapshots?.[index];
+    if (!to) return;
+    const from = Object.fromEntries(this.audio.buses.map((b, i) => [b.name, this.levels[i]]));
+    this.snapshotBlend = { from, to, t: 0, seconds: Math.max(0, seconds) };
+    if (seconds <= 0) this.advanceSnapshot(0);
+  }
+  advanceSnapshot(dt) {
+    const s = this.snapshotBlend;
+    if (!s) return;
+    s.t = s.seconds > 0 ? Math.min(1, s.t + dt / s.seconds) : 1;
+    const levels = blendSnapshot(s.from, s.to, s.t);
+    this.audio.buses.forEach((b, i) => this.mix(i, levels[b.name] ?? this.levels[i]));
+    if (s.t >= 1) this.snapshotBlend = null;
+  }
+  /** Set a switch's value (U5; cartbox.switch): what a switch container plays. */
+  setSwitch(name, value) {
+    this.variation.switches.set(name, value);
+  }
+  /** Where walls are, for occlusion (U2): the host's line test. */
+  setOccluder(occluder) {
+    this.occluder = occluder;
+  }
+  /** Start or stop a music track (U4; cartbox.music): its layers in sync, the first one up. */
+  playMusic(track, on) {
+    const def = this.audio.music?.[track];
+    if (!def) return;
+    const playing = this.music.get(track);
+    if (!on) {
+      if (playing) {
+        for (const v of playing.layers) if (v) stop(v);
+      }
+      this.music.delete(track);
+      return;
+    }
+    if (playing) return;
+    const start = this.context.currentTime;
+    const layers = def.layers.map((name, i) => {
+      const sound = this.audio.sounds.findIndex((s) => s.name === name);
+      if (sound < 0) return null;
+      return this.streamed(sound, i === 0 ? 1 : 0) ?? this.start(sound, i === 0 ? 1 : 0, 1, null, true, false, start);
+    });
+    this.music.set(track, { start, layers });
+  }
+  /**
+   * A long file played as it streams (U4), through a media element rather than
+   * decoded whole first: null where the context or the page can't (the sound
+   * is then decoded as usual).
+   */
+  streamed(sound, volume) {
+    const def = this.audio.sounds[sound];
+    const Audio = globalThis.Audio;
+    if (!def?.stream || def.source.kind !== "file" || !this.context.createMediaElementSource || !Audio || typeof URL === "undefined" || !URL.createObjectURL) return null;
+    const bytes = base64ToBytes(def.source.data);
+    const url = URL.createObjectURL(new Blob([bytes], { type: def.source.mime }));
+    const element = new Audio(url);
+    element.loop = true;
+    const node = this.context.createMediaElementSource(element);
+    const gain = this.context.createGain();
+    gain.gain.value = def.volume * volume;
+    node.connect(gain);
+    const bus = Math.max(0, this.audio.buses.findIndex((b) => b.name === def.bus));
+    gain.connect(this.buses[bus] ?? this.master);
+    void element.play().catch(() => {
+    });
+    const source = { stop: () => {
+      element.pause();
+      URL.revokeObjectURL(url);
+    }, disconnect: () => node.disconnect() };
+    return { source, gain, panner: null, bus };
+  }
+  /** Bring a layer in or out, on the next bar (U4; cartbox.layer). */
+  musicLayer(track, layer, on) {
+    const def = this.audio.music?.[track];
+    const playing = this.music.get(track);
+    const voice = playing?.layers[layer];
+    if (!def || !playing || !voice) return;
+    const when = nextBeat(this.context.currentTime, playing.start, def.bpm, def.beats);
+    const level = (this.audio.sounds.find((s) => s.name === def.layers[layer])?.volume ?? 1) * (on ? 1 : 0);
+    this.pending.push({ when, apply: () => voice.gain.gain.value = level });
+  }
+  /** A stinger over the music, on its next beat (U4; cartbox.stinger); at once with no music playing. */
+  stinger(sound) {
+    let when = this.context.currentTime;
+    for (const [track, playing] of this.music) {
+      const def = this.audio.music[track];
+      when = nextBeat(this.context.currentTime, playing.start, def.bpm, 1);
+      break;
+    }
+    this.play(sound, 1, 1, null, when);
+  }
+  /**
+   * The audio track's frame (U1–U4): the listener's reverb zones, ducking,
+   * snapshot blends, occlusion eased toward the line tests, and music changes
+   * that have reached their bar.
+   */
+  update(dt) {
+    if (this.disposed) return;
+    const sends = reverbSends(this.audio.reverbZones ?? [], this.listener);
+    this.zoneSends.forEach((g, i) => g.gain.value = sends[i] ?? 0);
+    this.advanceSnapshot(dt);
+    const active = /* @__PURE__ */ new Set();
+    for (const v of [...this.voices, ...this.loops.values(), ...this.emitters]) if (v.bus !== void 0) active.add(v.bus);
+    this.audio.buses.forEach((bus, i) => {
+      if (!bus.duck) return;
+      const by = this.audio.buses.findIndex((b) => b.name === bus.duck.by);
+      this.ducks[i] = duckGain(this.ducks[i], bus.duck, active.has(by), dt);
+      this.buses[i].gain.value = this.levels[i] * this.ducks[i];
+    });
+    if (this.occluder && this.audio.occlusion) {
+      const { strength, smoothing } = this.audio.occlusion;
+      for (const v of [...this.voices, ...this.loops.values(), ...this.emitters]) {
+        if (!v.filter || !v.occGain || !v.at) continue;
+        v.occ = smoothToward(v.occ ?? 0, this.occluder(this.listener, v.at), dt, smoothing);
+        const f3 = occlusionFilter(v.occ, strength);
+        v.filter.frequency.value = f3.cutoff;
+        v.occGain.gain.value = f3.gain;
+      }
+    }
+    const now = this.context.currentTime;
+    for (let i = this.pending.length - 1; i >= 0; i -= 1) {
+      if (this.pending[i].when <= now + 1e-6) {
+        this.pending[i].apply();
+        this.pending.splice(i, 1);
+      }
+    }
+  }
+  /** A bus's duck now (1 = none), for tests and the mixer view. */
+  duckLevel(bus) {
+    return this.ducks[bus] ?? 1;
   }
   /** A bus's index by name (-1 when the scene has none of that name). */
   busIndex(name) {
@@ -202,6 +418,7 @@ var SoundSystem = class _SoundSystem {
   }
   /** Put the listener where the camera is, facing where it looks. */
   listen(eye, forward, up) {
+    this.listener = eye;
     const l = this.context.listener;
     if (l.positionX) {
       l.positionX.value = eye[0];
@@ -223,7 +440,10 @@ var SoundSystem = class _SoundSystem {
     for (const e of this.emitters) {
       if (e.object < 0 || !e.panner) continue;
       const m = placements[e.object];
-      if (m) place(e.panner, [m[12], m[13], m[14]]);
+      if (m) {
+        e.at = [m[12], m[13], m[14]];
+        place(e.panner, e.at);
+      }
     }
   }
   /** How many one-shots are playing (for tests and tooling). */
@@ -237,6 +457,8 @@ var SoundSystem = class _SoundSystem {
   dispose() {
     this.disposed = true;
     for (const v of [...this.voices, ...this.loops.values(), ...this.emitters]) stop(v);
+    for (const p of this.music.values()) for (const v of p.layers) if (v) stop(v);
+    this.music.clear();
     this.voices.length = 0;
     this.loops.clear();
     this.emitters.length = 0;
@@ -257,6 +479,8 @@ function stop(v) {
   }
   v.gain.disconnect();
   v.panner?.disconnect();
+  v.filter?.disconnect();
+  v.occGain?.disconnect();
 }
 async function bufferFor(context, sound) {
   if (sound.source.kind === "synth") {
@@ -440,6 +664,12 @@ var PHYS_OP_UI_LIST = 39;
 var PHYS_OP_LOOK = 40;
 var PHYS_OP_SHATTER = 41;
 var PHYS_OP_DRIVE = 42;
+var PHYS_OP_AUDIO = 43;
+var AUDIO_SNAPSHOT = 1;
+var AUDIO_MUSIC = 2;
+var AUDIO_LAYER = 3;
+var AUDIO_STINGER = 4;
+var AUDIO_SWITCH = 5;
 var PHYS_Q_BODY = 100;
 var PHYS_Q_CAST = 101;
 var PHYS_Q_RAY = 102;
@@ -9122,6 +9352,14 @@ var PhysicsSession = class {
       );
     }
   }
+  /** Whether something solid stands between two points (U2's occlusion): a ray from one that stops short of the other. */
+  lineBlocked(from, to) {
+    const d = [to[0] - from[0], to[1] - from[1], to[2] - from[2]];
+    const len = Math.hypot(d[0], d[1], d[2]);
+    if (len < 0.5 || !this.queriesReady) return false;
+    const hit = this.cast({ origin: [from[0], from[1], from[2]], direction: [d[0] / len, d[1] / len, d[2] / len], max: len, shape: null });
+    return hit !== null && hit.distance < len - 0.5;
+  }
   /** A vehicle's state after the last step (live inspection, tests), or null. */
   vehicle(object) {
     const vehicle = this.vehicles.get(object);
@@ -9841,7 +10079,7 @@ var TimelineSession = class {
 };
 
 // src/physics/physicsSdk.ts
-import { PHYSICS_LAYERS, PHYSICS_MASK_ALL, timelineValueNames as timelineValueNames2 } from "@cartbox/editor";
+import { PHYSICS_LAYERS, PHYSICS_MASK_ALL, audioSwitches, timelineValueNames as timelineValueNames2 } from "@cartbox/editor";
 function sceneNeedsRuntime(scene, { physics = true } = {}) {
   return Boolean(
     scene && (physics && sceneHasPhysics(scene) || (scene.pools?.length ?? 0) > 0 || animatedObjects(scene).length > 0 || (scene.timelines?.length ?? 0) > 0 || (scene.levels?.length ?? 0) > 0 || Boolean(scene.navmesh) || Boolean(scene.streaming) || (scene.effects?.length ?? 0) > 0 || (scene.decals?.length ?? 0) > 0 || (scene.debris?.length ?? 0) > 0 || scene.instances.some((i) => i.mesh.fracture) || (scene.audio?.sounds.length ?? 0) > 0 || (scene.components?.length ?? 0) > 0)
@@ -10239,6 +10477,32 @@ function SOUND_CALLS(scene) {
     local out = {}
     for k, n in ipairs(_sndn) do out[k] = n end
     return out
+  end
+  -- The audio track (U1\u2013U5): mixer snapshots, music layers and stingers, switches.
+  local _snap = {${(scene.audio?.snapshots ?? []).map((n, i) => `[${luaString(n.name)}]=${i}`).join(",")}}
+  local _track = {${(scene.audio?.music ?? []).map((t, i) => `[${luaString(t.name)}]=${i}`).join(",")}}
+  local _switch = {${audioSwitches(scene.audio).map((sw, i) => `[${luaString(sw.name)}]={${i},{${sw.values.map((v, k) => `[${luaString(v)}]=${k}`).join(",")}}}`).join(",")}}
+  local function _idx(t, v) if type(v) == "number" then return v - 1 end return t[v] end
+  cartbox.snapshot = function(name, seconds)
+    local i = _snap[name]
+    if i then _cmd(${PHYS_OP_AUDIO}, (${AUDIO_SNAPSHOT} << 16) | i, seconds or 0) end
+  end
+  cartbox.music = function(track, on)
+    local i = _idx(_track, track)
+    if i and i >= 0 then _cmd(${PHYS_OP_AUDIO}, (${AUDIO_MUSIC} << 16) | i, on == false and 0 or 1) end
+  end
+  cartbox.layer = function(track, layer, on)
+    local i = _idx(_track, track)
+    if i and i >= 0 then _cmd(${PHYS_OP_AUDIO}, (${AUDIO_LAYER} << 16) | i, math.floor(layer or 1) - 1, on == false and 0 or 1) end
+  end
+  cartbox.stinger = function(s)
+    local i = _sound(s)
+    if i then _cmd(${PHYS_OP_AUDIO}, (${AUDIO_STINGER} << 16) | i) end
+  end
+  cartbox.switch = function(name, value)
+    local sw = _switch[name]
+    local v = sw and sw[2][value]
+    if v then _cmd(${PHYS_OP_AUDIO}, (${AUDIO_SWITCH} << 16) | sw[1], v) end
   end
 `;
 }
@@ -11091,7 +11355,9 @@ var RuntimeChannel = class {
         const v = cmd.v;
         this.sounds.push({ kind: "loop", slot: cmd.a & 255, sound: (cmd.a >>> 8 & 65535) - 1, volume: v[0], at: v[4] >= 0.5 ? [v[1], v[2], v[3]] : null });
       } else if (cmd.op === PHYS_OP_MIX) this.sounds.push({ kind: "mix", bus: cmd.a, volume: cmd.v[0] });
-      else if (cmd.op === PHYS_OP_PLACE) {
+      else if (cmd.op === PHYS_OP_AUDIO) {
+        if (this.sounds.length < MAX_BURSTS_QUEUED) this.sounds.push({ kind: "audio", what: cmd.a >>> 16, index: cmd.a & 65535, v: cmd.v.slice(0, 2) });
+      } else if (cmd.op === PHYS_OP_PLACE) {
         const object = cmd.a & 65535;
         const s = (cmd.a >>> 16 & 32767) / 256 * (cmd.a >>> 31 & 1 ? -1 : 1);
         const [x, y, z, yaw, pitch, roll] = cmd.v;
@@ -39534,7 +39800,7 @@ function watchGpuPresent(device, storage, ms = PRESENT_WATCH_MS, schedule = (fn,
 }
 
 // src/player.ts
-import { behaviourTreesLua, bundleLuaModules, gameplayLua, perceptionLua, SpatialLoader, WorldPartition, partitionWorld, actionMask, createHoloCache, holoBindingKeys as holoBindingKeys2, holoDocuments as holoDocuments2, renderHoloDocument, translate, reboundActions, colorFilterSvg, DEFAULT_ACCESSIBILITY } from "@cartbox/editor";
+import { audioSwitches as audioSwitches2, behaviourTreesLua, bundleLuaModules, gameplayLua, perceptionLua, SpatialLoader, WorldPartition, partitionWorld, actionMask, createHoloCache, holoBindingKeys as holoBindingKeys2, holoDocuments as holoDocuments2, renderHoloDocument, translate, reboundActions, colorFilterSvg, DEFAULT_ACCESSIBILITY } from "@cartbox/editor";
 var DIRECT_CORE_URL = "/engine/modern-core/modern-core.js";
 function directCoreBeside(engineUrl) {
   const at = engineUrl?.lastIndexOf("/engine/") ?? -1;
@@ -40077,7 +40343,10 @@ var Player = class {
         const mesh2 = this.options.mesh;
         void SoundSystem.create(this.audio.audioContext, sceneAudio, this.audio.output, (id) => mesh2.instances.findIndex((i) => i.id === id)).then((system) => {
           if (this.destroyed) system.dispose();
-          else this.sounds = system;
+          else {
+            this.sounds = system;
+            if (sceneAudio.occlusion) system.setOccluder((from, to) => this.runtime?.physics?.lineBlocked(from, to) ? 1 : 0);
+          }
         }).catch(() => {
         });
       }
@@ -40272,7 +40541,8 @@ var Player = class {
         if (c.kind === "play") {
           if (withSound) this.sounds.play(c.sound, c.volume, c.pitch, c.at);
         } else if (c.kind === "loop") this.sounds.loop(c.slot, c.sound, c.volume, c.at);
-        else this.sounds.mix(c.bus, c.volume);
+        else if (c.kind === "mix") this.sounds.mix(c.bus, c.volume);
+        else this.audioCommand(c.what, c.index, c.v);
       }
     }
     if (this.sounds && this.runtime) {
@@ -40287,6 +40557,7 @@ var Player = class {
       if (pose) this.sounds.listen(pose.eye, pose.forward, pose.up);
       this.sounds.follow(this.meshSurface.placements());
     }
+    this.sounds?.update(1 / 60);
     this.updateSpatialLoading();
     lap("runtime");
     if (net && this.console) {
@@ -40387,6 +40658,21 @@ var Player = class {
    * Start a level switch the cart asked for: load the level's assets through the
    * host (a published cart fetches its textures), then make it current.
    */
+  /** The audio track's commands from the cart (U1–U5): names were resolved to indices in Lua. */
+  audioCommand(what, index, v) {
+    const sounds = this.sounds;
+    const audio = this.options.mesh?.audio;
+    if (!sounds || !audio) return;
+    if (what === AUDIO_SNAPSHOT) sounds.snapshot(index, v[0] ?? 0);
+    else if (what === AUDIO_MUSIC) sounds.playMusic(index, (v[0] ?? 0) >= 0.5);
+    else if (what === AUDIO_LAYER) sounds.musicLayer(index, Math.round(v[0] ?? 0), (v[1] ?? 0) >= 0.5);
+    else if (what === AUDIO_STINGER) sounds.stinger(index);
+    else if (what === AUDIO_SWITCH) {
+      const names = audioSwitches2(audio);
+      const sw = names[index];
+      if (sw) sounds.setSwitch(sw.name, sw.values[Math.round(v[0] ?? 0)] ?? "");
+    }
+  }
   pollLevelRequest() {
     const channel = this.runtime?.channel;
     const scene = this.options.mesh;
@@ -41534,7 +41820,7 @@ function parseAnim(raw) {
 }
 
 // src/anim/generators.ts
-function seededRandom(seed) {
+function seededRandom2(seed) {
   let state = seed >>> 0 || 1;
   return () => {
     state = Math.imul(state, 1664525) + 1013904223 >>> 0;
@@ -41575,7 +41861,7 @@ function drift(period, distance) {
 function flicker(period, min, max, steps = 8, seed = 1) {
   const length = Math.max(2, Math.round(period));
   const count = Math.max(2, Math.min(64, Math.min(Math.round(steps), length)));
-  const random2 = seededRandom(seed);
+  const random2 = seededRandom2(seed);
   const keys = [];
   let previousT = -1;
   for (let i = 0; i < count; i += 1) {

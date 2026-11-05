@@ -61,6 +61,7 @@ import {
   PHYS_OP_DEBRIS,
   PHYS_OP_SHATTER,
   PHYS_OP_MIX,
+  PHYS_OP_AUDIO,
   PHYS_OP_PLACE,
   PHYS_OP_UNPLACE,
   PHYS_OP_LOOK,
@@ -118,7 +119,8 @@ export interface ShieldState {
 export type SoundCommand =
   | { readonly kind: "play"; readonly sound: number; readonly volume: number; readonly pitch: number; readonly at: readonly [number, number, number] | null }
   | { readonly kind: "loop"; readonly slot: number; readonly sound: number; readonly volume: number; readonly at: readonly [number, number, number] | null }
-  | { readonly kind: "mix"; readonly bus: number; readonly volume: number };
+  | { readonly kind: "mix"; readonly bus: number; readonly volume: number }
+  | { readonly kind: "audio"; readonly what: number; readonly index: number; readonly v: readonly number[] };
 
 export interface DebrisThrown {
   readonly debris: number;
@@ -328,6 +330,9 @@ export class RuntimeChannel {
         const v = cmd.v;
         this.sounds.push({ kind: "loop", slot: cmd.a & 0xff, sound: ((cmd.a >>> 8) & 0xffff) - 1, volume: v[0]!, at: v[4]! >= 0.5 ? [v[1]!, v[2]!, v[3]!] : null });
       } else if (cmd.op === PHYS_OP_MIX) this.sounds.push({ kind: "mix", bus: cmd.a, volume: cmd.v[0]! });
+      else if (cmd.op === PHYS_OP_AUDIO) {
+        if (this.sounds.length < MAX_BURSTS_QUEUED) this.sounds.push({ kind: "audio", what: cmd.a >>> 16, index: cmd.a & 0xffff, v: cmd.v.slice(0, 2) });
+      }
       else if (cmd.op === PHYS_OP_PLACE) {
         const object = cmd.a & 0xffff;
         const s = (((cmd.a >>> 16) & 0x7fff) / 256) * ((cmd.a >>> 31) & 1 ? -1 : 1);

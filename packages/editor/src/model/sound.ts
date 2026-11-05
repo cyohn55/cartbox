@@ -20,6 +20,8 @@
  * checked sample by sample without a browser.
  */
 
+import type { Duck, MixSnapshot, MusicTrack, ReverbZone, SoundVariation, VariationChoice } from "./audioMix";
+
 /** One voice of a synth: a source (noise or a waveform), how its pitch and filter sweep, and its envelope. */
 export interface SynthVoice {
   readonly wave: "noise" | "sine" | "square" | "saw" | "triangle";
@@ -62,11 +64,21 @@ export interface SceneSound {
   readonly range?: readonly [number, number];
   /** Loops until stopped. */
   readonly loop?: boolean;
+  /** Variation (U5): other sounds it may play instead, how it picks, and its pitch and volume spread. */
+  readonly variation?: SoundVariation;
+  /** Streamed (U4): played from the file as it goes, not decoded whole first (long music). */
+  readonly stream?: boolean;
 }
 
 export interface SoundBus {
   readonly name: string;
   readonly volume: number;
+  /** Another bus it plays into (U3), rather than the master. */
+  readonly parent?: string;
+  /** Ducked while another bus plays (U3): dialogue over music. */
+  readonly duck?: Duck;
+  /** How much it sends to the reverb zones (U1), 0..1. Absent = 1 for a positional bus, as all are. */
+  readonly reverb?: number;
 }
 
 /** A sound playing from the start, looping: on an object (by id, following it) or everywhere. */
@@ -80,6 +92,16 @@ export interface SceneAudio {
   readonly sounds: readonly SceneSound[];
   readonly buses: readonly SoundBus[];
   readonly emitters: readonly SoundEmitter[];
+  /** Mixer snapshots (U3): bus volumes by name, blended to with cartbox.snapshot. */
+  readonly snapshots?: readonly MixSnapshot[];
+  /** Reverb zones (U1): boxes of space with their own reverb, blended at their edges. */
+  readonly reverbZones?: readonly ReverbZone[];
+  /** Occlusion (U2): how strongly walls between the listener and a positional sound muffle it (0..1), and how fast it eases (s). */
+  readonly occlusion?: { readonly strength: number; readonly smoothing: number };
+  /** Music tracks (U4): layers in sync, switched on the bar; stingers on the beat. */
+  readonly music?: readonly MusicTrack[];
+  /** A limiter on the master (U3): the most it lets through, in dB below full scale. Absent = -1 dB. */
+  readonly limiter?: number;
 }
 
 export const DEFAULT_BUSES: readonly SoundBus[] = [
@@ -356,8 +378,23 @@ export function parseSceneAudio(value: unknown): SceneAudio | null {
     const b = raw as Record<string, unknown> | null;
     if (!b || typeof b.name !== "string" || !b.name || busNames.has(b.name) || buses.length >= MAX_SOUND_BUSES) continue;
     busNames.add(b.name);
-    buses.push({ name: b.name, volume: finite(b.volume) ? clamp(b.volume, 0, 2) : 1 });
+    buses.push({ name: b.name, volume: finite(b.volume) ? clamp(b.volume, 0, 2) : 1, ...(finite(b.reverb) ? { reverb: clamp(b.reverb, 0, 1) } : {}) });
   }
+  // Routing and ducking, once every bus's name is known (a parent that would loop is dropped).
+  const rawBuses = Array.isArray(a.buses) ? (a.buses as Record<string, unknown>[]) : [];
+  buses.forEach((bus, i) => {
+    const raw = rawBuses.find((r) => r && r.name === bus.name);
+    if (!raw) return;
+    let parent = typeof raw.parent === "string" && busNames.has(raw.parent) && raw.parent !== bus.name ? raw.parent : undefined;
+    for (let p = parent, guard = 0; p && guard < MAX_SOUND_BUSES; guard += 1) {
+      const up = rawBuses.find((r) => r && r.name === p)?.parent;
+      if (up === bus.name) parent = undefined;
+      p = typeof up === "string" ? up : undefined;
+    }
+    const d = raw.duck as Record<string, unknown> | undefined;
+    const duck = d && typeof d.by === "string" && busNames.has(d.by) && d.by !== bus.name ? { by: d.by, amount: finite(d.amount) ? clamp(d.amount, 0, 1) : 0.35, attack: finite(d.attack) ? clamp(d.attack, 0, 5) : 0.08, release: finite(d.release) ? clamp(d.release, 0, 10) : 0.6 } : undefined;
+    buses[i] = { ...bus, ...(parent ? { parent } : {}), ...(duck ? { duck } : {}) };
+  });
   const sounds: SceneSound[] = [];
   const names = new Set<string>();
   for (const raw of Array.isArray(a.sounds) ? a.sounds : []) {
@@ -374,7 +411,17 @@ export function parseSceneAudio(value: unknown): SceneAudio | null {
       volume: finite(s.volume) ? clamp(s.volume, 0, 2) : 1,
       ...(range && range[1] > 0 ? { range: [Math.max(0.01, Math.min(range[0], range[1])), Math.max(range[0], range[1])] as [number, number] } : {}),
       ...(s.loop === true ? { loop: true } : {}),
+      ...(s.stream === true ? { stream: true } : {}),
+      ...(readVariation(s.variation) ? { variation: readVariation(s.variation)! } : {}),
     });
+  }
+  // Variants and cases must name sounds the scene has.
+  for (let i = 0; i < sounds.length; i += 1) {
+    const v = sounds[i]!.variation;
+    if (!v) continue;
+    const variants = v.variants.filter((n) => names.has(n) && n !== sounds[i]!.name);
+    const cases = v.cases ? Object.fromEntries(Object.entries(v.cases).filter(([, n]) => names.has(n))) : undefined;
+    sounds[i] = { ...sounds[i]!, variation: { ...v, variants, ...(cases ? { cases } : {}) } };
   }
   const emitters: SoundEmitter[] = [];
   for (const raw of Array.isArray(a.emitters) ? a.emitters : []) {
@@ -383,10 +430,81 @@ export function parseSceneAudio(value: unknown): SceneAudio | null {
     emitters.push({ sound: e.sound, ...(typeof e.object === "string" && e.object ? { object: e.object } : {}), volume: finite(e.volume) ? clamp(e.volume, 0, 2) : 1 });
   }
   if (sounds.length === 0) return null;
-  return { sounds, buses, emitters };
+  const snapshots: MixSnapshot[] = [];
+  for (const raw of Array.isArray(a.snapshots) ? a.snapshots.slice(0, 16) : []) {
+    const r = raw as Record<string, unknown> | null;
+    if (!r || typeof r.name !== "string" || !r.name || snapshots.some((x) => x.name === r.name) || !r.buses || typeof r.buses !== "object") continue;
+    const levels = Object.fromEntries(Object.entries(r.buses as Record<string, unknown>).filter(([k, v]) => busNames.has(k) && finite(v)).map(([k, v]) => [k, clamp(v as number, 0, 2)]));
+    snapshots.push({ name: r.name, buses: levels });
+  }
+  const reverbZones: ReverbZone[] = [];
+  for (const raw of Array.isArray(a.reverbZones) ? a.reverbZones.slice(0, 8) : []) {
+    const r = raw as Record<string, unknown> | null;
+    const min = vec3(r?.min);
+    const max = vec3(r?.max);
+    if (!r || typeof r.name !== "string" || !min || !max) continue;
+    reverbZones.push({ name: r.name, min, max, decay: finite(r.decay) ? clamp(r.decay, 0.05, 12) : 1.5, damping: finite(r.damping) ? clamp(r.damping, 0, 1) : 0.5, wet: finite(r.wet) ? clamp(r.wet, 0, 1) : 0.4, fade: finite(r.fade) ? clamp(r.fade, 0, 100) : 2 });
+  }
+  const o = a.occlusion as Record<string, unknown> | undefined;
+  const occlusion = o && typeof o === "object" ? { strength: finite(o.strength) ? clamp(o.strength, 0, 1) : 1, smoothing: finite(o.smoothing) ? clamp(o.smoothing, 0, 5) : 0.15 } : undefined;
+  const music: MusicTrack[] = [];
+  for (const raw of Array.isArray(a.music) ? a.music.slice(0, 16) : []) {
+    const r = raw as Record<string, unknown> | null;
+    if (!r || typeof r.name !== "string" || !r.name || !Array.isArray(r.layers)) continue;
+    const layers = r.layers.filter((n): n is string => typeof n === "string" && names.has(n)).slice(0, 8);
+    if (layers.length === 0) continue;
+    music.push({ name: r.name, bpm: finite(r.bpm) ? clamp(r.bpm, 20, 300) : 120, beats: finite(r.beats) ? Math.round(clamp(r.beats, 1, 16)) : 4, layers });
+  }
+  return {
+    sounds,
+    buses,
+    emitters,
+    ...(snapshots.length > 0 ? { snapshots } : {}),
+    ...(reverbZones.length > 0 ? { reverbZones } : {}),
+    ...(occlusion ? { occlusion } : {}),
+    ...(music.length > 0 ? { music } : {}),
+    ...(finite(a.limiter) ? { limiter: clamp(a.limiter, -24, 0) } : {}),
+  };
+}
+
+function vec3(v: unknown): [number, number, number] | null {
+  return Array.isArray(v) && v.length === 3 && v.every(finite) ? [v[0] as number, v[1] as number, v[2] as number] : null;
+}
+
+/** A stored variation (U5), or null. Its sound names are checked against the scene's after. */
+function readVariation(v: unknown): SoundVariation | null {
+  if (!v || typeof v !== "object") return null;
+  const r = v as Record<string, unknown>;
+  const choose: VariationChoice = r.choose === "sequence" || r.choose === "switch" ? r.choose : "random";
+  const variants = Array.isArray(r.variants) ? r.variants.filter((n): n is string => typeof n === "string").slice(0, 16) : [];
+  const cases = r.cases && typeof r.cases === "object" ? Object.fromEntries(Object.entries(r.cases as Record<string, unknown>).filter((e): e is [string, string] => typeof e[1] === "string").slice(0, 32)) : undefined;
+  return {
+    variants,
+    choose,
+    ...(choose === "switch" && typeof r.switchName === "string" && r.switchName ? { switchName: r.switchName.slice(0, 32) } : {}),
+    ...(cases && Object.keys(cases).length > 0 ? { cases } : {}),
+    pitch: finite(r.pitch) ? clamp(r.pitch, 0, 0.9) : 0,
+    volume: finite(r.volume) ? clamp(r.volume, 0, 0.9) : 0,
+  };
 }
 
 /** A sound's synth recipe, if it's a synth (preset resolved), else null. */
 export function soundRecipe(sound: SceneSound): SynthSound | null {
   return sound.source.kind === "synth" ? resolveSynth(sound.source.synth) : null;
+}
+
+/**
+ * The scene's switches (U5): each switch a variation names, with the values
+ * its cases cover, in a fixed order, so the cart and the host agree on indices.
+ */
+export function audioSwitches(audio: SceneAudio): { name: string; values: string[] }[] {
+  const out = new Map<string, Set<string>>();
+  for (const s of audio.sounds) {
+    const v = s.variation;
+    if (v?.choose !== "switch" || !v.switchName) continue;
+    const values = out.get(v.switchName) ?? new Set<string>();
+    for (const k of Object.keys(v.cases ?? {})) values.add(k);
+    out.set(v.switchName, values);
+  }
+  return [...out].sort((a, b) => a[0].localeCompare(b[0])).map(([name, values]) => ({ name, values: [...values].sort() }));
 }

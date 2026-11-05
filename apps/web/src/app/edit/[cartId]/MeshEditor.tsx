@@ -103,6 +103,7 @@ import { findFoliage, replaceFoliage } from "@/lib/foliageEdit";
 import { INITIAL_TERRAIN_EDIT, TerrainPanel, type TerrainEditState } from "./TerrainPanel";
 import { KitPanel } from "./KitPanel";
 import { BehaviourPanel } from "./BehaviourPanel";
+import { AudioTrackPanel } from "./AudioTrackPanel";
 import { ArenaPanel, INITIAL_ARENA_EDIT, type ArenaEditState } from "./ArenaPanel";
 import { BudgetPanel, storedBudgetDevice } from "./BudgetPanel";
 import { sceneLoadOf } from "@/lib/sceneBudget";
@@ -1716,6 +1717,7 @@ export function MeshEditor({ sidecar, onSidecarChange, code, onStartPlay, modern
         <DecalsPanel sidecar={sidecar} onChange={onSidecarChange} />
         <DebrisPanel sidecar={sidecar} onChange={onSidecarChange} />
         <SoundsPanel sidecar={sidecar} onChange={onSidecarChange} />
+        <AudioTrackPanel sidecar={sidecar} onChange={onSidecarChange} />
         <ComponentScriptsPanel sidecar={sidecar} onChange={onSidecarChange} />
         <TimelinePanel sidecar={sidecar} onChange={onSidecarChange} view={view === "scene" ? sceneView : null} onPreview={onTimelinePreview} />
       </aside>

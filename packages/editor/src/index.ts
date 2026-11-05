@@ -540,6 +540,7 @@ export {
   MAX_SOUND_FILE_BYTES,
   SYNTH_PRESETS,
   parseSceneAudio,
+  audioSwitches,
   resolveSynth,
   soundRecipe,
   synthesizeSound,
@@ -2144,3 +2145,22 @@ export {
 } from "./model/behaviourTree";
 export { PERCEPTION_LUA, perceptionLua } from "./model/perception";
 export { GAMEPLAY_LUA, gameplayLua } from "./model/gameplay";
+export {
+  blendSnapshot,
+  chooseVariant,
+  duckGain,
+  nextBeat,
+  occlusionFilter,
+  reverbImpulse,
+  reverbSends,
+  sabineDecay,
+  seededRandom,
+  smoothToward,
+  zoneWeight,
+  type Duck,
+  type MixSnapshot,
+  type MusicTrack,
+  type ReverbZone,
+  type SoundVariation,
+  type VariationChoice,
+} from "./model/audioMix";

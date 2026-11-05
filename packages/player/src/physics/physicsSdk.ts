@@ -171,6 +171,12 @@ import {
   PHYS_TIMELINE_VALUES,
   PHYS_MAX_TIMELINE_VALUES,
   TIMELINE_VALUE_NONE,
+  PHYS_OP_AUDIO,
+  AUDIO_LAYER,
+  AUDIO_MUSIC,
+  AUDIO_SNAPSHOT,
+  AUDIO_STINGER,
+  AUDIO_SWITCH,
   PHYS_OP_CAST,
   PHYS_OP_DESPAWN,
   PHYS_OP_DRIVE,
@@ -212,7 +218,7 @@ import {
 import { physicsSlots, sceneHasPhysics } from "./physicsSession.js";
 import { animatedObjects } from "../anim/animationSession.js";
 import { timelineEventNames } from "../anim/timelineSession.js";
-import { PHYSICS_LAYERS, PHYSICS_MASK_ALL, timelineValueNames } from "@cartbox/editor";
+import { PHYSICS_LAYERS, PHYSICS_MASK_ALL, audioSwitches, timelineValueNames } from "@cartbox/editor";
 
 /**
  * Whether a scene needs the runtime block at all: bodies (when a physics engine
@@ -663,6 +669,11 @@ function DEBRIS_CALLS(scene: MeshScene): string {
  *                                     only changes are sent
  *   cartbox.mix(bus, volume)          set a mixer bus's volume (by name or 1-based index)
  *   cartbox.sounds()                  -> { name, ... } the scene's sounds
+ *   cartbox.snapshot(name, seconds)   blend the mixer to a snapshot (U3)
+ *   cartbox.music(track, on)          start or stop a music track, its first layer up (U4)
+ *   cartbox.layer(track, n, on)       bring layer n in or out on the next bar (U4)
+ *   cartbox.stinger(s)                play a sound on the music's next beat (U4)
+ *   cartbox.switch(name, value)       set a switch: what its switch containers play (U5)
  */
 function SOUND_CALLS(scene: MeshScene): string {
   const sounds = scene.audio?.sounds ?? [];
@@ -704,6 +715,32 @@ function SOUND_CALLS(scene: MeshScene): string {
     local out = {}
     for k, n in ipairs(_sndn) do out[k] = n end
     return out
+  end
+  -- The audio track (U1–U5): mixer snapshots, music layers and stingers, switches.
+  local _snap = {${(scene.audio?.snapshots ?? []).map((n, i) => `[${luaString(n.name)}]=${i}`).join(",")}}
+  local _track = {${(scene.audio?.music ?? []).map((t, i) => `[${luaString(t.name)}]=${i}`).join(",")}}
+  local _switch = {${audioSwitches(scene.audio!).map((sw, i) => `[${luaString(sw.name)}]={${i},{${sw.values.map((v, k) => `[${luaString(v)}]=${k}`).join(",")}}}`).join(",")}}
+  local function _idx(t, v) if type(v) == "number" then return v - 1 end return t[v] end
+  cartbox.snapshot = function(name, seconds)
+    local i = _snap[name]
+    if i then _cmd(${PHYS_OP_AUDIO}, (${AUDIO_SNAPSHOT} << 16) | i, seconds or 0) end
+  end
+  cartbox.music = function(track, on)
+    local i = _idx(_track, track)
+    if i and i >= 0 then _cmd(${PHYS_OP_AUDIO}, (${AUDIO_MUSIC} << 16) | i, on == false and 0 or 1) end
+  end
+  cartbox.layer = function(track, layer, on)
+    local i = _idx(_track, track)
+    if i and i >= 0 then _cmd(${PHYS_OP_AUDIO}, (${AUDIO_LAYER} << 16) | i, math.floor(layer or 1) - 1, on == false and 0 or 1) end
+  end
+  cartbox.stinger = function(s)
+    local i = _sound(s)
+    if i then _cmd(${PHYS_OP_AUDIO}, (${AUDIO_STINGER} << 16) | i) end
+  end
+  cartbox.switch = function(name, value)
+    local sw = _switch[name]
+    local v = sw and sw[2][value]
+    if v then _cmd(${PHYS_OP_AUDIO}, (${AUDIO_SWITCH} << 16) | sw[1], v) end
   end
 `;
 }

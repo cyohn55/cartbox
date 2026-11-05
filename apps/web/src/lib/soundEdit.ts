@@ -6,7 +6,7 @@
  * what the runtime reads. See sound.ts in @cartbox/editor.
  */
 
-import { DEFAULT_BUSES, MAX_SOUND_FILE_BYTES, parseSceneAudio, type SceneAudio, type SceneSound, type SoundEmitter, type SynthPreset } from "@cartbox/editor";
+import { DEFAULT_BUSES, MAX_SOUND_FILE_BYTES, parseSceneAudio, type SceneAudio, type SceneSound, type SoundBus, type SoundEmitter, type SynthPreset } from "@cartbox/editor";
 
 import { setMeshAudio, type MeshSidecar } from "./meshSidecar";
 
@@ -99,4 +99,33 @@ export function updateEmitter(sidecar: MeshSidecar, index: number, patch: Partia
 export function removeEmitter(sidecar: MeshSidecar, index: number): MeshSidecar {
   const audio = audioOf(sidecar);
   return store(sidecar, { ...audio, emitters: audio.emitters.filter((_, i) => i !== index) });
+}
+
+/** Change the audio track's scene-wide parts (U1–U4): snapshots, zones, occlusion, music, limiter. */
+export function setAudioTrack(sidecar: MeshSidecar, patch: Partial<Pick<SceneAudio, "snapshots" | "reverbZones" | "occlusion" | "music" | "limiter">>): MeshSidecar {
+  const audio = audioOf(sidecar);
+  const next = { ...audio, ...patch } as Record<string, unknown>;
+  for (const [k, v] of Object.entries(patch)) if (v === undefined || (Array.isArray(v) && v.length === 0)) delete next[k];
+  return store(sidecar, next as unknown as SceneAudio);
+}
+
+/** Change one bus (U3): its parent, its duck, its reverb send. `undefined` in the patch clears a field. */
+export function updateBus(sidecar: MeshSidecar, name: string, patch: Partial<SoundBus>): MeshSidecar {
+  const audio = audioOf(sidecar);
+  return store(sidecar, {
+    ...audio,
+    buses: audio.buses.map((b) => {
+      if (b.name !== name) return b;
+      const next = { ...b, ...patch } as Record<string, unknown>;
+      for (const [k, v] of Object.entries(patch)) if (v === undefined) delete next[k];
+      return next as unknown as SoundBus;
+    }),
+  });
+}
+
+/** Save the buses' current volumes as a snapshot (U3), replacing one of the same name. */
+export function saveSnapshot(sidecar: MeshSidecar, name: string): MeshSidecar {
+  const audio = audioOf(sidecar);
+  const snap = { name, buses: Object.fromEntries(audio.buses.map((b) => [b.name, b.volume])) };
+  return setAudioTrack(sidecar, { snapshots: [...(audio.snapshots ?? []).filter((s) => s.name !== name), snap] });
 }

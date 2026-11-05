@@ -320,6 +320,17 @@ export const PHYS_OP_LOOK = 40;
 export const PHYS_OP_SHATTER = 41;
 /** Vehicles (S5): a = chassis object, v0 = throttle (-1..1), v1 = steering (-1..1, + turns left), v2 = brake (0..1). Held until changed. */
 export const PHYS_OP_DRIVE = 42;
+/**
+ * The audio track (U1–U5): a = (what << 16) | index. 1 snapshot (index, v0 =
+ * seconds), 2 music (track, v0 = on), 3 layer (track, v0 = layer, v1 = on),
+ * 4 stinger (sound), 5 switch (switch, v0 = value's index).
+ */
+export const PHYS_OP_AUDIO = 43;
+export const AUDIO_SNAPSHOT = 1;
+export const AUDIO_MUSIC = 2;
+export const AUDIO_LAYER = 3;
+export const AUDIO_STINGER = 4;
+export const AUDIO_SWITCH = 5;
 
 
 /**

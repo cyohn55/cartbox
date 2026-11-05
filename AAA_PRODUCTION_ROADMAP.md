@@ -342,11 +342,54 @@ This roadmap closes those gaps. It does not repeat the open items of other roadm
 
 ### U. Audio
 
-- [ ] **U1. Reverb zones.** Convolution reverb per volume, with impulse responses imported or generated from the volume's size and materials, blended at the edges.
-- [ ] **U2. Occlusion and obstruction.** Rays from listener to emitter set a low-pass and gain, smoothed over time.
-- [ ] **U3. A mixer.** Buses with sends, sidechain ducking (dialogue over music), snapshots blended by gameplay state, and a limiter on the master.
-- [ ] **U4. Streamed, adaptive music.** Long tracks stream rather than decode whole; layers and stingers switch on beat from cart calls.
-- [ ] **U5. Sound variation.** Containers with random, sequence and switch choices, pitch and volume randomisation, and per-surface footstep and impact sets from physics materials.
+- [x] **U1. Reverb zones.** Convolution reverb per volume, with impulse responses imported or generated from the volume's size and materials, blended at the edges. **Done for generated responses; importing one is left.**
+  - `SceneAudio.reverbZones` holds boxes, each with a decay, damping, wet level and edge fade. Each gets a ConvolverNode fed by every bus's send (`SoundBus.reverb`).
+  - Its stereo impulse response is generated (`reverbImpulse`): seeded noise decaying to −60 dB at the decay, with its highs damped faster as the tail ages.
+  - The editor's "from size" sets the decay by Sabine's formula from the box and its damping.
+  - Each frame the listener's place sets each zone's send (`reverbSends`): full inside, fading across the edge, and overlapping zones crossfading.
+- [x] **U2. Occlusion and obstruction.** Rays from listener to emitter set a low-pass and gain, smoothed over time. **Done (occlusion; obstruction, a partial path round the wall, is left).**
+  - With `SceneAudio.occlusion` on, each positional sound gets a low-pass and a gain before its panner.
+  - Each frame the player tests the line from the camera to the sound with the physics world's ray (`PhysicsSession.lineBlocked`), eases toward it (`smoothToward`), and maps it to a cutoff and gain (`occlusionFilter`, from open to 500 Hz and −12 dB behind a wall).
+- [x] **U3. A mixer.** Buses with sends, sidechain ducking (dialogue over music), snapshots blended by gameplay state, and a limiter on the master. **Done.**
+  - **Routing:** buses route into a parent (loops refused) and send to the reverb.
+  - **Ducking:** a bus can be ducked by another while anything plays on it, eased in over its attack and out over its release (`duckGain`).
+  - **Snapshots:** saved bus volumes, blended to with `cartbox.snapshot(name, seconds)`; buses a snapshot doesn't name keep their level.
+  - **Limiter:** a DynamicsCompressor at the master's end (−1 dB by default).
+- [x] **U4. Streamed, adaptive music.** Long tracks stream rather than decode whole; layers and stingers switch on beat from cart calls. **Done.**
+  - `SceneAudio.music` tracks have a tempo, beats to a bar, and layers (looping sounds started together).
+  - `cartbox.music(track)` starts one with its first layer up.
+  - `cartbox.layer(track, n, on)` brings a layer in or out on the next bar.
+  - `cartbox.stinger(sound)` plays on the next beat (`nextBeat`).
+  - A file sound marked `stream` plays through a media element as it loads, not decoded whole; it falls back to decoding where the page can't stream.
+- [x] **U5. Sound variation.** Containers with random, sequence and switch choices, pitch and volume randomisation, and per-surface footstep and impact sets from physics materials. **Done; surfaces come from a cart-set switch rather than from physics materials.**
+  - A sound's `variation` picks among it and its variants:
+    - `random`, never the same twice running;
+    - `sequence`;
+    - `switch`, which plays the case for a switch's value (`cartbox.switch("surface", "metal")`).
+  - Each play spreads pitch and volume by its ± amounts, from a seeded generator, so a replay sounds the same.
+- *U1–U5 together:*
+  - **The editor:** an Audio track panel beside Sounds covers each bus's parent and duck, saving snapshots, the limiter, reverb zones (with "from size"), occlusion, music tracks and their layers, and each sound's variation and streaming.
+  - **Lua:** `cartbox.snapshot`, `music`, `layer`, `stinger` and `switch` go out as op 43, names resolved in Lua.
+  - *Tests (`audio-track.test.ts`, 12):*
+    - **Reading:** the reader keeps routing, ducks, snapshots, zones, music and variation, and drops names that point at nothing and parent loops.
+    - **Pure parts:**
+      - Sabine's decay orders a hall over a room and stone over curtains;
+      - the impulse falls more than 40 dB by its decay, is seeded, and has a channel each;
+      - zones fade at their edges and crossfade where they overlap;
+      - a wall gives 500 Hz and −12 dB;
+      - a duck reaches 0.3 and releases slowly;
+      - a snapshot blends only its buses;
+      - changes land on the beat and on the bar;
+      - variants never repeat, run in sequence, and follow a switch.
+    - **The sound system** (on a stand-in context with filters, convolvers and a compressor):
+      - buses route into their parents and through the limiter;
+      - the hall's send follows the listener in and out;
+      - music ducks to 0.3 under a line, and a snapshot blends over its time;
+      - a sound behind a wall is muffled and one in the open isn't;
+      - variants don't repeat and the switch's case plays;
+      - a track's layers start together, a layer comes in on the bar, and a stinger lands on the beat.
+    - **The real engine:** a cart's five calls arrive as the right commands. The existing sound suites pass unchanged.
+  - *Left:* importing an impulse response; obstruction (sound bending round a corner); surfaces read from physics materials; the music's tempo map beyond one fixed tempo.
 
 ### N. Networking
 
