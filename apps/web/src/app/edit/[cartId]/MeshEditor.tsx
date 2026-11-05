@@ -103,6 +103,7 @@ import { findFoliage, replaceFoliage } from "@/lib/foliageEdit";
 import { INITIAL_TERRAIN_EDIT, TerrainPanel, type TerrainEditState } from "./TerrainPanel";
 import { KitPanel } from "./KitPanel";
 import { BehaviourPanel } from "./BehaviourPanel";
+import { LiveLinkPanel } from "./LiveLinkPanel";
 import { AudioTrackPanel } from "./AudioTrackPanel";
 import { ArenaPanel, INITIAL_ARENA_EDIT, type ArenaEditState } from "./ArenaPanel";
 import { BudgetPanel, storedBudgetDevice } from "./BudgetPanel";
@@ -1344,6 +1345,7 @@ export function MeshEditor({ sidecar, onSidecarChange, code, onStartPlay, modern
         <TerrainPanel sidecar={sidecar} onChange={onSidecarChange} edit={terrainEdit} onEdit={onTerrainEdit} />
         <KitPanel sidecar={sidecar} onChange={onSidecarChange} selectedId={selectedId} onSelect={setSelectedId} />
         <BehaviourPanel sidecar={sidecar} onChange={onSidecarChange} />
+        <LiveLinkPanel sidecar={sidecar} onChange={onSidecarChange} />
         <ArenaPanel sidecar={sidecar} onChange={onSidecarChange} edit={arenaEdit} onEdit={setArenaEdit} selectedIds={selection} cartId={cartId} />
         <BudgetPanel sidecar={sidecar} device={budgetDevice} tier={budgetTier} onDevice={setBudgetDevice} />
       </aside>

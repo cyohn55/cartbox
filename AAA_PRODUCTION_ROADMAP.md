@@ -195,7 +195,14 @@ This roadmap closes those gaps. It does not repeat the open items of other roadm
     - **The player fetching packages itself.** The play page still rebuilds JSON on the server (D4); fetching `.cbpk` from the CDN and decoding on M4's worker remains.
     - **Terrain meshing** (`terrainMesh`) at load.
     - **The arena maps' prebuilt packages:** R2's remainder in `DEMO_QUALITY_ROADMAP.md`.
-- [ ] **D6. A DCC live link.** A Blender add-on that pushes the selected objects to an open editor tab over a local socket, extending `BLENDER_WORKFLOW.md`.
+- [x] **D6. A DCC live link.** A Blender add-on that pushes the selected objects to an open editor tab over a local socket, extending `BLENDER_WORKFLOW.md`. **Done.**
+  - **The add-on** (`tools/blender/cartbox_live_link.py`) runs a minimal WebSocket server on 127.0.0.1:9877, in plain Python with no dependencies. Its sidebar has Start link, Push selection, and Push on save. Each selected object is exported as a GLB with its transforms applied and sent under its name.
+  - **The editor** connects with the Mesh tab's Live link panel (`liveLink.ts`), since a browser can connect out but not listen. Each model is imported as the Import button does it: in place of the object of its name (place, props, animator and copies kept, LODs remade), or added.
+  - `BLENDER_WORKFLOW.md` has a section on it.
+  - *Tests (`live-link.test.ts`, 2):*
+    - a pushed model replaces the object of its name, which keeps its place, or is added beside it;
+    - the add-on's server, run under Python without Blender, pushes a GLB over a real WebSocket to the editor's client, which decodes it intact.
+  - *Left:* untested inside Blender here (its export calls are the documented `export_scene.gltf`); pushing materials' edits without geometry; Maya and Houdini.
 
 ### S. Simulation runtime
 

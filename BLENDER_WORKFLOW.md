@@ -225,3 +225,21 @@ index, animator and variants.
       edited into the transitions the game needs
 - [ ] For a round trip: imported with Bone Dir set to Blender and Merge
       Vertices off, and joint and clip names kept
+
+## The live link: Blender straight into an open editor tab
+
+`tools/blender/cartbox_live_link.py` is a Blender add-on (Edit › Preferences ›
+Add-ons › Install…, then enable **Cartbox Live Link**). In the 3D view's
+sidebar (N), its **Cartbox** tab has **Start link**, **Push selection**, and
+**Push on save**.
+
+In the editor's Mesh tab, open **Live link (Blender)** and press **Connect**.
+Each selected object then goes over as a GLB under its Blender name. The editor
+puts it in place of the scene object with that name: its place, props, animator
+and copies are kept, and its LODs are remade. With no object of that name, it is
+added as a new one. Push again after an edit (or save, with Push on save) and the
+scene updates.
+
+The add-on serves on `127.0.0.1:9877` only, so nothing outside the machine can
+connect. Run without Blender, `python3 cartbox_live_link.py --serve file.glb`
+pushes one file.
