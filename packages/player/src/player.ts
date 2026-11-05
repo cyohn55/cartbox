@@ -106,7 +106,7 @@ import { GpuCanvasSurface, type CapturedFrame } from "./render/GpuCanvasSurface.
 import { browserStorage, gpuPresentFailed, watchGpuPresent, type WatchedDevice } from "./render/presentFallback.js";
 import type { SceneRenderer } from "./render/sceneRenderer.js";
 import type { TextureLookup } from "./world/worldScene.js";
-import { behaviourTreesLua, bundleLuaModules, perceptionLua, SpatialLoader, WorldPartition, partitionWorld, actionMask, createHoloCache, holoBindingKeys, holoDocuments, renderHoloDocument, translate, reboundActions, type DecodedTexture, type EncodedImage, type InputAction, type Mat4, colorFilterSvg, DEFAULT_ACCESSIBILITY, type AccessibilitySettings, type ColorFilter, type WeatherSettings } from "@cartbox/editor";
+import { behaviourTreesLua, bundleLuaModules, gameplayLua, perceptionLua, SpatialLoader, WorldPartition, partitionWorld, actionMask, createHoloCache, holoBindingKeys, holoDocuments, renderHoloDocument, translate, reboundActions, type DecodedTexture, type EncodedImage, type InputAction, type Mat4, colorFilterSvg, DEFAULT_ACCESSIBILITY, type AccessibilitySettings, type ColorFilter, type WeatherSettings } from "@cartbox/editor";
 import type { ControlScheme, InspectedObject, PlayerOptions, SequenceOptions } from "./types.js";
 
 /**
@@ -462,8 +462,11 @@ export class Player {
       const behavioursLua = behaviourTreesLua(this.options.mesh?.behaviours ?? []);
       if (behavioursLua) prepared = prependLuaCode(prepared, behavioursLua);
       // Perception (K5), for trees' blackboards: when the cart has trees or names cartbox.sense.
-      const senseLua = perceptionLua(cartCode, Boolean(behavioursLua));
+      const senseLua = perceptionLua(sourceCode, Boolean(behavioursLua));
       if (senseLua) prepared = prependLuaCode(prepared, senseLua);
+      // Damage, abilities and tags (K6): when the cart names them.
+      const gameplay = gameplayLua(sourceCode);
+      if (gameplay) prepared = prependLuaCode(prepared, gameplay);
       const components = componentsSdkLua(this.options.mesh);
       if (components) prepared = appendLuaCode(prependLuaCode(prepared, components.prelude), components.postlude);
       const collisionLua = collisionSdkLua(this.options.collision);

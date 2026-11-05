@@ -322,7 +322,23 @@ This roadmap closes those gaps. It does not repeat the open items of other roadm
     - a noise within its loudness is heard (the far one isn't), its alert fades to half at half the memory, and it's forgotten after;
     - a K4 guard idles, searches when it hears a noise behind it, and chases once it sees the intruder.
   - *Left:* line of sight on the TIC-80–derived cores (their rays answer a tick late, so it defaults to clear there); sound events raised by the mixer's own playback (U3) rather than by the cart.
-- [ ] **K6. Damage, abilities and tags.** Health and shield components, damage events with type and hit zone, multi-shape hitboxes on skeletons, cooldown-and-cost abilities, and gameplay tags to gate them.
+- [x] **K6. Damage, abilities and tags.** Health and shield components, damage events with type and hit zone, multi-shape hitboxes on skeletons, cooldown-and-cost abilities, and gameplay tags to gate them. **Done.**
+  - `gameplay.ts` is Lua the player puts in when the cart names any of it.
+  - **Tags** (`cartbox.tags`) are hierarchical by dots, so `state.stunned` counts as `state`, and reference-counted.
+  - **Health and damage:** `cartbox.health.new{max, shield, shieldDelay, shieldRate, resist, zones}` and `cartbox.damage(target, amount, {type, zone, source})`.
+    - Resistance applies by damage type, and a multiplier by hit zone.
+    - The shield takes damage first and recharges after a delay without hits; `true` damage skips it.
+    - Each hit queues `hit`, `shield_broken` and `death` events for `cartbox.damage.events()`. The dead take nothing.
+  - **Hitboxes:** spheres and capsules placed on a skeleton's joints, from the positions the cart reads with `cartbox.joint`. `cartbox.hitbox.ray` returns the nearest zone a shot hits, its distance and its multiplier; on a tie, the earlier shape (list the head first) wins.
+  - **Abilities:** `cartbox.ability.try` checks the cooldown, the owner's resources, all of `requires` and none of `blocked`. It then pays, starts the cooldown and grants its tags for its duration, and `update` runs the clocks.
+  - *Tests (`gameplay.test.ts`, 6, on the Modern core):*
+    - it is put in only when named;
+    - tags match by hierarchy;
+    - damage goes through the shield first and is scaled by type and zone; the target dies once and the five events come in order;
+    - the shield waits out its delay, then recharges;
+    - on a skeleton, a head-height shot hits the head at ×2, a chest shot the body capsule, and one overhead misses;
+    - a dash is gated by its cooldown, its energy cost and a stun tag, and grants `state.dashing` for 0.3 s.
+  - *Left:* hitbox shapes authored on the skeleton in the editor; replicating health over the netcode (N1); Lockout moved onto it.
 
 ### U. Audio
 

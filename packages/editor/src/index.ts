@@ -2143,3 +2143,4 @@ export {
   type BtValue,
 } from "./model/behaviourTree";
 export { PERCEPTION_LUA, perceptionLua } from "./model/perception";
+export { GAMEPLAY_LUA, gameplayLua } from "./model/gameplay";
