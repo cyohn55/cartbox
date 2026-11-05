@@ -36,6 +36,8 @@ interface MeshInstance extends MeshSceneInstance {
     readonly props: Readonly<Record<string, ScenePropValue>>;
     /** The object's physics body, or null (ENGINE_ROADMAP.md, Phase 2). */
     readonly physics: PhysicsSpec | null;
+    /** Replicated (N1): the host sends its pose to every other player, at this priority. Absent = not. */
+    readonly replicate?: number;
     /** A skinned object's animation state machine (ENGINE_ROADMAP.md, Phase 3), or absent. */
     readonly animator?: AnimatorSpec;
     /**
@@ -592,22 +594,22 @@ declare function takePhysicsCommands(block: DataView): PhysicsCommand[];
  * step, and casts the requested rays (and shape sweeps) for the next tick to read.
  */
 
-type Vec3$3 = readonly [number, number, number];
-type Quat = readonly [number, number, number, number];
+type Vec3$4 = readonly [number, number, number];
+type Quat$1 = readonly [number, number, number, number];
 /** A collider fitted to a scene object, in its body's local frame (scale applied). */
 type PhysicsShape = {
     readonly kind: "box";
-    readonly halfExtents: Vec3$3;
-    readonly offset: Vec3$3;
+    readonly halfExtents: Vec3$4;
+    readonly offset: Vec3$4;
 } | {
     readonly kind: "sphere";
     readonly radius: number;
-    readonly offset: Vec3$3;
+    readonly offset: Vec3$4;
 } | {
     readonly kind: "capsule";
     readonly halfHeight: number;
     readonly radius: number;
-    readonly offset: Vec3$3;
+    readonly offset: Vec3$4;
 } | {
     readonly kind: "mesh";
     readonly vertices: Float32Array;
@@ -619,7 +621,7 @@ type CastShape = {
     readonly radius: number;
 } | {
     readonly kind: "box";
-    readonly halfExtents: Vec3$3;
+    readonly halfExtents: Vec3$4;
 } | {
     readonly kind: "capsule";
     readonly radius: number;
@@ -628,15 +630,15 @@ type CastShape = {
 /** What a ray or shape cast hit. */
 interface CastHit {
     readonly object: number;
-    readonly point: Vec3$3;
-    readonly normal: Vec3$3;
+    readonly point: Vec3$4;
+    readonly normal: Vec3$4;
     readonly distance: number;
 }
 interface PhysicsBodyDesc {
     readonly kind: PhysicsSpec["body"];
     readonly shape: PhysicsShape;
-    readonly position: Vec3$3;
-    readonly rotation: Quat;
+    readonly position: Vec3$4;
+    readonly rotation: Quat$1;
     readonly mass: number;
     readonly friction: number;
     readonly bounce: number;
@@ -663,10 +665,10 @@ interface PhysicsJointDesc {
     readonly body: number;
     /** The other body's handle, or null for the world (frame2 is then in world space). */
     readonly target: number | null;
-    readonly anchor1: Vec3$3;
-    readonly frame1: Quat;
-    readonly anchor2: Vec3$3;
-    readonly frame2: Quat;
+    readonly anchor1: Vec3$4;
+    readonly frame1: Quat$1;
+    readonly anchor2: Vec3$4;
+    readonly frame2: Quat$1;
     readonly limits?: readonly [number, number];
     /** Spring rest length / rope's longest reach. */
     readonly length: number;
@@ -684,33 +686,33 @@ interface PhysicsBackend {
      */
     refreshQueries?(): void;
     bodyState(handle: number): {
-        position: Vec3$3;
-        rotation: Quat;
-        velocity: Vec3$3;
+        position: Vec3$4;
+        rotation: Quat$1;
+        velocity: Vec3$4;
         sleeping: boolean;
     };
-    applyImpulse(handle: number, impulse: Vec3$3): void;
-    setVelocity(handle: number, velocity: Vec3$3): void;
-    teleport(handle: number, position: Vec3$3): void;
+    applyImpulse(handle: number, impulse: Vec3$4): void;
+    setVelocity(handle: number, velocity: Vec3$4): void;
+    teleport(handle: number, position: Vec3$4): void;
     /** Move a character by `delta`, sliding along what it hits. Returns whether it ended on the ground. */
-    moveCharacter(handle: number, delta: Vec3$3): {
+    moveCharacter(handle: number, delta: Vec3$4): {
         grounded: boolean;
     };
     /**
      * The nearest hit along a unit `direction` within `maxDistance`, or null.
      * `ignore` is a scene object whose body the ray passes through.
      */
-    raycast(origin: Vec3$3, direction: Vec3$3, maxDistance: number, ignore?: number, mask?: number): CastHit | null;
+    raycast(origin: Vec3$4, direction: Vec3$4, maxDistance: number, ignore?: number, mask?: number): CastHit | null;
     /**
      * Sweep `shape` from `origin` along a unit `direction`: the first hit within
      * `maxDistance` (distance = how far the shape's centre travelled before touching;
      * point and normal are on the surface hit), or null.
      */
-    shapecast?(shape: CastShape, origin: Vec3$3, direction: Vec3$3, maxDistance: number, ignore?: number, mask?: number): CastHit | null;
+    shapecast?(shape: CastShape, origin: Vec3$4, direction: Vec3$4, maxDistance: number, ignore?: number, mask?: number): CastHit | null;
     /** Take a body out of (or back into) the world — a spawnable copy waiting in reserve. */
     setEnabled(handle: number, enabled: boolean): void;
     /** Place a body at a position and rotation at once, at rest. */
-    setPose(handle: number, position: Vec3$3, rotation: Quat): void;
+    setPose(handle: number, position: Vec3$4, rotation: Quat$1): void;
     /** Contacts that began or ended during the last step (scene object indices). */
     drainContacts(): PhysicsContactEvent[];
     /** What is inside each trigger now, as (trigger object, other object) pairs. */
@@ -738,7 +740,7 @@ interface PhysicsBackend {
 interface PhysicsVehicleDesc {
     readonly chassis: number;
     readonly wheels: readonly {
-        readonly at: Vec3$3;
+        readonly at: Vec3$4;
         readonly radius: number;
     }[];
     readonly suspension: number;
@@ -762,12 +764,12 @@ interface PhysicsVehicleState {
 declare const PHYSICS_DT: number;
 /** Position, rotation (unit quaternion) and scale of a world matrix without shear. */
 declare function splitWorldMatrix(m: Mat4): {
-    position: Vec3$3;
-    rotation: Quat;
-    scale: Vec3$3;
+    position: Vec3$4;
+    rotation: Quat$1;
+    scale: Vec3$4;
 };
 /** A world matrix from position, unit quaternion and scale. */
-declare function composeWorldMatrix(p: Vec3$3, q: Quat, s: Vec3$3): Mat4;
+declare function composeWorldMatrix(p: Vec3$4, q: Quat$1, s: Vec3$4): Mat4;
 /**
  * The joint frames for a body posed by world matrix `self`, tied to a target posed
  * by `target` (null: the world). The anchor is in the object's own coordinates, so
@@ -775,15 +777,15 @@ declare function composeWorldMatrix(p: Vec3$3, q: Quat, s: Vec3$3): Mat4;
  */
 declare function jointFrames(spec: JointSpec, self: Mat4, target: Mat4 | null): Omit<PhysicsJointDesc, "body" | "target">;
 /** Fit a collider of `spec.shape` to a mesh's bounds (or triangles), scaled. */
-declare function fitShape(spec: PhysicsSpec, mesh: MeshAsset, scale: Vec3$3): PhysicsShape;
+declare function fitShape(spec: PhysicsSpec, mesh: MeshAsset, scale: Vec3$4): PhysicsShape;
 /** A projectile's end in the last step: it hit something, or outlived its life. */
 interface ProjectileImpact {
     readonly id: number;
     readonly kind: number;
     /** The object hit (-1 not a scene object), or null for an expiry. */
     readonly object: number | null;
-    readonly point: Vec3$3;
-    readonly normal: Vec3$3;
+    readonly point: Vec3$4;
+    readonly normal: Vec3$4;
     readonly speed: number;
 }
 /**
@@ -874,8 +876,8 @@ declare class PhysicsSession {
     private flyProjectiles;
     /** Projectiles in flight (S4): id → position and velocity (inspection and tests). */
     projectilesInFlight(): ReadonlyMap<number, {
-        readonly position: Vec3$3;
-        readonly velocity: Vec3$3;
+        readonly position: Vec3$4;
+        readonly velocity: Vec3$4;
     }>;
     /** Apply the cart's commands, step the world, and cast the rays it asked for. */
     afterTick(block: DataView): void;
@@ -909,7 +911,7 @@ declare class PhysicsSession {
     /** Each moving body's live state, by object index (live inspection). */
     inspect(): Map<number, {
         kind: string;
-        velocity: Vec3$3;
+        velocity: Vec3$4;
         grounded: boolean;
         active: boolean;
     }>;
@@ -1657,6 +1659,80 @@ declare function writeNetInbox(words: Uint32Array, inbox: NetInbox): number;
 declare function takeNetOutbox(words: Uint32Array): NetOutbox;
 
 /**
+ * Entity replication (AAA_PRODUCTION_ROADMAP.md N1): any object marked
+ * replicated has its pose sent by the host to every other player, beyond the 4
+ * words a player publishes, with priority, relevancy by distance and delta
+ * compression. Pure and transport-free: the session carries its bytes.
+ *
+ * - **What's sent:** an entity's position (1/256 m) and rotation (a unit
+ *   quaternion, 1/16384), quantized, so both ends compare the same integers.
+ * - **Priority and relevancy:** each send, every entity's score grows by its
+ *   priority times how near it is to a viewer (any player's camera: 1 within
+ *   `near`, falling to 0 at `far`, never sent beyond). The highest scores go
+ *   first, until the packet's byte budget is spent; a sent entity's score
+ *   resets. So a busy scene sends what matters, and the rest catches up.
+ * - **Delta compression:** each client acks the packets it got (the newest and
+ *   a bit for each of the 32 before). For each entity the host finds the newest
+ *   packet that carried it and that every client got, and sends only the fields
+ *   that changed since, with how many packets back that was. An entity
+ *   unchanged since then isn't sent at all. With no such packet, it's sent
+ *   whole. Loss costs size, never correctness.
+ */
+type Vec3$3 = readonly [number, number, number];
+type Quat = readonly [number, number, number, number];
+interface EntityPose {
+    readonly id: number;
+    readonly position: Vec3$3;
+    readonly rotation: Quat;
+    /** How much it matters (default 1). */
+    readonly priority?: number;
+}
+interface ReplicationOptions {
+    /** Metres within which an entity is fully relevant, and beyond which it isn't sent. */
+    readonly near?: number;
+    readonly far?: number;
+    /** Bytes a host packet may hold. */
+    readonly budget?: number;
+}
+/** The host's half: what to send each tick. */
+declare class ReplicationHost {
+    private seq;
+    /** Each packet's entities and the values they were sent at. */
+    private readonly history;
+    /** Each client's acks: its newest packet and the 32 before it, as a set of seqs. */
+    private readonly acks;
+    private readonly score;
+    private readonly near;
+    private readonly far;
+    private readonly budget;
+    /** Entities sent in the last packet (tests and the profiler). */
+    lastSent: number;
+    constructor(options?: ReplicationOptions);
+    /** A client's ack packet (and where its camera is). */
+    receive(client: string, bytes: Uint8Array): Vec3$3 | null;
+    /** A client gone: its acks no longer hold baselines back. */
+    forget(client: string): void;
+    /** How relevant a position is to the nearest viewer, 0..1. */
+    private relevance;
+    /** The newest packet carrying `id` that every client got, and its value. */
+    private baseline;
+    /** This tick's packet: the entities that matter most, as deltas where it can, within the budget. */
+    send(entities: readonly EntityPose[], viewers: readonly Vec3$3[]): Uint8Array;
+}
+/** A client's half: the entities' poses as last heard, and the acks to send back. */
+declare class ReplicationClient {
+    private readonly history;
+    private newest;
+    private readonly current;
+    /** A host packet. Returns false when it can't be read (a delta whose baseline this client never got). */
+    receive(bytes: Uint8Array): boolean;
+    /** The ack to send: the newest packet and which of the 32 before it arrived, with this camera. */
+    ack(viewer: Vec3$3): Uint8Array;
+    /** Every entity's pose as last heard. */
+    poses(): Map<number, EntityPose>;
+}
+
+/**
  * The host-page side of netplay: joins a room over a {@link NetTransport},
  * assigns player slots, and relays the cart's published state and events to the
  * other players — and theirs into this cart. See netplay.ts for the pmem layout.
@@ -1707,6 +1783,10 @@ interface NetMessage {
     readonly ro?: readonly (readonly [number, string])[];
     /** Transport-level: a WebRTC handshake message for one peer (see DirectTransport). Never reaches a session. */
     readonly sig?: NetSignal;
+    /** Entity replication (N1): the host's packet of replicated objects' poses, base64. */
+    readonly x?: string;
+    /** Entity replication (N1): a guest's acks (and its camera), base64. */
+    readonly xa?: string;
 }
 /** A WebRTC handshake message, relayed to one peer. */
 interface NetSignal {
@@ -1784,7 +1864,19 @@ declare class NetSession {
     /** The roster changed (as host): send it in the next message. */
     private rosterDirty;
     private lastRosterTick;
+    /** Entity replication (N1): what to send (as host) and where this camera is, and each half. */
+    private replication;
+    private readonly viewers;
     constructor(transport: NetTransport, now?: () => number);
+    /**
+     * Replicate objects (N1): as host, `entities` gives the replicated objects'
+     * poses each send; as a guest, the session acks what it got and reports
+     * `viewer` (its camera) for relevancy. Guests read the result with
+     * {@link replicated}.
+     */
+    replicate(entities: () => readonly EntityPose[], viewer: () => Vec3$3, options?: ReplicationOptions): void;
+    /** The replicated objects' poses as last heard from the host (empty as host). */
+    replicated(): Map<number, EntityPose>;
     /** Bytes this session has sent and received, measured in the messages' binary form (netCodec.ts). */
     traffic(): {
         sent: number;
@@ -10255,9 +10347,9 @@ declare function deterministicBackend(inner: PhysicsBackend): PhysicsBackend;
  * exactly when their worlds match.
  */
 declare function physicsStateHash(states: Iterable<{
-    position: Vec3$3;
-    rotation: Quat;
-    velocity: Vec3$3;
+    position: Vec3$4;
+    rotation: Quat$1;
+    velocity: Vec3$4;
 }>): number;
 
 /**
@@ -11045,4 +11137,4 @@ declare function pipelineCache(device: any): PipelineCache;
  */
 declare function mount(container: HTMLElement, options: PlayerOptions): PlayerHandle;
 
-export { AIM_ASSISTS, AgentCrowd, type AimAssist, type AnimClip, type AnimMode, type AnimPlacement, type AnimSpec, type AnimState, type AnimTarget, type AnimTrack, AnimatedForegroundSurface, AnimationSession, type AtmosphereParams, BLOOM_KNEE, type BakeLight, BloomPyramid, BroadcastChannelTransport, type BuiltLightingRenderer, CAMERA_BASE, CAMERA_SCALE, CARTBOX_SDK_LUA, CELL_WORLD, CMD_RING_BYTES, CMD_RING_MAX, COLOR_CHECKER, COMPOSE_UNIFORM_FLOATS, CappedSceneRenderer, type CaptureOptions, type CapturedFrame, type CartSpriteSource, CartridgeLoadError, type CastHit, type CastShape, type ClipSample, type ClipTableEntry, type CollisionField, ConsoleButton, type ConsoleInstance, type ConsoleModel, type ControlScheme, type ControlSettings, type ControlTarget, DEFAULT_AMBIENT, DEFAULT_ATMOSPHERE, DEFAULT_CONTROL_SETTINGS, DEFAULT_KEY_BINDINGS, DEFAULT_LIGHT, DEFAULT_MODEL_ID, DEFAULT_MOUSE_LOOK, DEFAULT_PAD_BINDINGS, DEFAULT_STICK_DEAD_ZONES, DEFAULT_TEXEL_DENSITY, DEFAULT_TRIGGER_THRESHOLD, DIRECT_CORE_URL, DIRECT_MAX_AGENTS, DIRECT_MAX_BODIES, DIRECT_MAX_JOINTS, DIRECT_MAX_PROJECTILES, DebugCommand, type DebugStep, type DeviceHints, type DeviceProvider, type DirectConsole, DirectTransport, type DirectTransportOptions, type DriftStats, EVENT_CAPACITY, type Ease, EngineLoadError, type ErrorFrame, FLARE_GHOSTS, FLARE_GHOST_GAIN, FLARE_SPIKE_POWER, FaceDriver, type FlagsField, type FlareGhost, type FlareParams, type FrameState, GREY_CARD, GYRO_AIMS, GamepadInput, type GeneratedTrack, type GlContextProvider, GpuCanvasSurface, type GpuLightBakeOptions, type GpuLightmapBake, GpuPresenter, type GpuSceneDraw, type GradingLut, type GyroAim, HEIGHT_WORLD, IMPORTED_LOOK, INPUT_BLOCK_BYTES, INPUT_MAGIC, INPUT_SETTINGS, INSTANCE_FLOATS, type InnerSurfaceFactory, type InputChange, type InspectedObject, type InstanceTransform, type Keyframe, LIGHTMAP_MAX_BOUNCES, LIGHTMAP_MAX_LIGHTS, LIGHTMAP_MAX_LOCAL_LIGHTS, LIGHTS_BASE, LIGHTS_CAPACITY, LIGHT_FLOATS, LIGHT_STRIDE, LOOK_DEV_RIGS, LOOP_SLOTS, LUT_LOOKS, LUT_SIZE, type LabCart, type LabProbe, type LayerChannel, type Light, type LightingBackend, type LightingFrameContext, LightingLayer, type LightingOptions, type LightingRenderer, type LightingScene, type LinearPanorama, type LinkConditions, LitCanvasSurface, type LookDevCheck, type LookDevMaps, type LookDevOptions, type LookDevRig, type LookDevStage, LookDevView, type LookDevViewOptions, type LookDevice, type LookProfile, MAILBOX_TYPE_ACHIEVEMENT, MAILBOX_TYPE_PROGRESS, MAILBOX_TYPE_SCORE, MAILBOX_WORDS, MANIFEST_KEY, MANIFEST_MAX, MAX_CAPTURE_SIDE, MAX_EMITTERS, MAX_LUT_SIZE, MAX_PARTICLES_PER_EMITTER, MAX_PREFAB_POOL, MAX_PREFAB_POOL_DIRECT, MAX_PYRAMID_LEVELS, MAX_VOICES, MESH_CAM_ANGLE_SCALE, MESH_CAM_BASE, MESH_CAM_DIST_SCALE, MESH_CAM_STRIDE, MESH_POSE_BASE, MESH_POSE_CAPACITY, MESH_POSE_HIDDEN, MESH_POSE_STRIDE, MIN_LUT_SIZE, MIN_PYRAMID_DIMENSION, MODELS, MOUSE_FULL_LEAN_PX, type MailboxCamera, type MailboxEvent, type MailboxEventKind, type MailboxMeshCamera, type MailboxMeshPose, type MailboxRead, type ManifestStorage, type MaterialBuffer, MemoryNetHub, type MeshInstance, MeshOverlaySurface, type MeshScene, type SceneCamera$1 as MeshSceneCamera, type ModelId, NET_MODE_CLIENT, NET_MODE_HOST, NET_MODE_OFFLINE, NET_SLOTS, NET_WORDS, NORMAL_DIRECTION_COUNT, NORMAL_VECTORS, type NetEvent, type NetInbox, type NetLabOptions, type NetLabReport, type NetMessage, type NetOutbox, type NetPeer, type NetRoomStatus, NetSession, type NetSignal, type NetState, type NetTransport, type ObjectLook, PAD_BUTTONS, PARTICLE_KINDS, PHYSICS_DT, PHYS_BLOCK_BYTES, PHYS_MAGIC, PHYS_MAX_BODIES, PHYS_OP_DRIVE, PHYS_Q_AGENT, PHYS_Q_ANIM, PHYS_Q_ANIM_EVENTS, PHYS_Q_BODY, PHYS_Q_CAST, PHYS_Q_CONTACTS, PHYS_Q_FIRE, PHYS_Q_FIRE_OPTIONS, PHYS_Q_HASH, PHYS_Q_IMPACTS, PHYS_Q_INSIDE, PHYS_Q_JOINT, PHYS_Q_PROJECTILE, PHYS_Q_RAY, PHYS_Q_STOP, PHYS_Q_VEHICLE, POINTER_AT, POINTER_MAGIC, POST_FX_EFFECTS, PROFILE_SECTIONS, PROFILE_WINDOW, PROJECTILE_GRAVITY, type PackableLight, type PadButton, type PadSnapshot, type Particle, type ParticleEmitter, type ParticleKind, ParticleOverlaySurface, type ParticleSpec, PathTracer, type PauseInfo, type PbrMaterial, type PhysicsBackend, type PhysicsBodyDesc, type PhysicsJointDesc, type Quat as PhysicsQuat, PhysicsSession, type PhysicsShape, type Vec3$3 as PhysicsVec3, type PhysicsVehicleDesc, type PhysicsVehicleState, PipelineCache, PipelineManifestStore, type PipelineStats, type PlacementChannel, type PlayerHandle, type PlayerOptions, PointerInput, type PointerState, type PostFxColorDef, type PostFxEffectDef, type PostFxEffectId, type PostFxParamDef, PostFxPass, type PostFxSettings, type PostFxSource, PostFxSurface, type PostFxUniforms, type PresentBase, type PresentFrame, type PresentSky, type PresentStats, type ProfileSection, type ProfileSnapshot, Profiler, type ProjectileImpact, QUALITY_LEVELS, QUALITY_PRESETS, type QualityChoice, QualityGovernor, type QualityLevel, type QualitySettings, type QueryHandler, RAM_LAYOUTS, REFERENCE_BOUNCES, REPLAY_VERSION, RESPONSE_CURVES, type RamLayout, type ReferenceCapture, type ReferenceDraw, type ReferenceScene, type ReferenceSettings, type RegionImage, type RegisteredAchievement, type RenderCanvas, type RenderCaps, type RenderStats, type Replay, ReplayError, ReplayRecorder, ReplaySource, type ResolvedMapping, type ResolvedPbr, type ResolvedPlacement, type ResponseCurve, type Rgb, type RtcDataChannelLike, type RtcPeerConnectionFactory, type RtcPeerConnectionLike, type RumbleEffect, RuntimeChannel, SAVE_MAGIC, SKY_UNIFORM_FLOATS, SOFTWARE_RASTER_CAPS, START_KEYS, STICK_LAYOUTS, type ScaleMode, SceneBackdropSurface, type SceneBounds, type SceneCamera, type SceneDraw, type SceneLayer, type SceneMemory, type SceneRenderer, type SceneSpec, type SceneVista, type ScreenSun, type SectionStats, type SequenceOptions, SimulatedNetHub, SoftwareSceneRenderer, type SoundContext, SoundSystem, type Speaker, type SpriteRegion, type SpriteRegionSource, type StickDeadZones, type StickLayout, type SunShadow, SwitchableTransport, TANGENT_VERTEX_FLOATS, TILT_SHIFT_FEATHER, TINT_PALETTE, TOUCH_CONTROL_IDS, TOUCH_LOOK_MODES, type TextureLookup, type TouchControlId, type TouchLayout, type TouchLookMode, type TouchPlacement, type TraceLine, type TrackMode, UNIFORM_BYTES_USED, UNIFORM_FLOATS, UNIFORM_STRIDE, VERTEX_FLOATS, VIEW_MODES, type Vec3$2 as Vec3, type VerificationResult, type ViewMode, WEBGL_INSTANCES_PER_DRAW, WEBGL_MAX_LIGHTS, WebglSceneRenderer, WebgpuLightingLayer, WebgpuSceneRenderer, type WorldBillboard, type WorldBillboardPose, type WorldCamera, type WorldCameraSpec, type WorldLight, WorldOverlaySurface, type WorldProp, type WorldScene, type WorldTileCell, acesFilmic, acesFilmicChannel, actionsSdkLua, aimAssistLevel, alignBytesPerRow, animClipsSdkLua, animatedObjects, anyPostFxEnabled, appendLuaCode, applyActionToggles, applyLookSettings, applyLut, applyQualityToPostFx, applyRenderCaps, armDebugBlock, armSaveBlock, askMotionPermission, bakeLightmapGpu, bakeLights, bakeProbeVolumeGpu, bakeSurfaces, bodyCapacity, breakableLine, browserDeviceHints, browserRtc, browserSpeaker, buildBillboardInstance, buildClipTable, buildOrbitCamera, buildShadowInstance, buildTerrainInstances, buildWorldCamera, cameraAt, capTextures, capTriangles, capsConstrainScene, captureReference, cellAt, checkLookDev, clipFrameIndex, codeChunks, codeLineOffset, collisionSdkLua, commandRingAddress, commandRingBytes, commandRingMax, commandsPerTick, compileAnimator, componentsSdkLua, composeParallax, composeWorldMatrix, compositeOverBackdrop, createCartSpriteSource, createConsole, createDirectConsole, createFlatMaterial, createLightingLayer, createSceneRenderer, createTextureBudgetCache, deadZoned, debugBlockAddress, debugPostlude, debugSdkLua, decodeCamera, decodeLights, decodeLut, decodeMailbox, decodeMeshCamera, decodeMeshPoses, decodeNetMessage, decodeWorldLights, defaultPostFxSettings, detectQuality, deterministicBackend, directCoreBeside, directCoreModel, dragLean, drift, effectiveBreakpoints, emitterPreset, encodeLut, encodeNetMessage, environmentPanorama, environmentSh, errorStack, estimateSceneBytes, estimateSceneMemory, evaluate, extractScore, extractUnlocks, fillSky, fitShape, fitTextureToBudget, flagsSdkLua, flicker, frameDurationMs, framePixels, framebufferBytes, getModel, getWebgpuDevice, gyroLean, hasCommandRing, hashCart, hashEventId, heat, hexToRgb01, identityLut, injectSdk, inputBlockAddress, instrumentLua, interleaveVertices, interleaveVerticesWithTangents, interpolateNormal, isDiagnosticView, isMobileAgent, jointFrames, layoutSticks, lensFlareAt, loadEngineModule, lookAccelerationBoost, lookDevDraw, lookDevStage, lookGains, lookLut, lookProfileFor, lutStrip, makeShadowTexture, meshSceneTransferables, mount, mouseLean, movingBodies, nearestDirection, netSendInterval, normalBasis3x3, normalVector, orbitPitchAboveTerrain, packAtmosphereSkyUniforms, packComposeUniforms, packLights, packMeasureUniforms, packReferenceScene, packShaftUniforms, packSkyUniforms, paramKey, parseAnim, parseCollisionField, parseControlSettings, parseCubeLut, parseFlagsField, parseMeshScene, parseParticles, parsePauseInfo, parsePostFxSettings, parseReplay, parseScene, parseTouchLayout, parseWorldScene, physicsBlockAddress, physicsSdkLua, physicsSlots, physicsStateHash, pipelineCache, pipelineKey, pipelineRecipe, placeWithin, playLanguage, prehazeLayers, prependLuaCode, pulse, pyramidLevelCount, pyramidLevelSize, randomSeed, rasterStyleFor, readCartCode, readPad, readPause, readSidecarActions, readSidecarUi, readViewMode, recipeDescriptor, reflectionFade, reflectionSampleY, remapErrorLines, renderSceneBackdrop, resolveButton, resolveLight, resolveMapping, resolvePbr, resolveQuality, resolveSceneLayers, resolveSupersample, resolveUnlockedAchievements, responseCurve, rewriteLuaCode, rumbleEffect, runNetLab, runReplayEvents, runsOnDirectCore, runtimeSdkLua, sampleClipFrame, sampleNormalBilinear, sampleScalarBilinear, sampleTrack, saveBlockAddress, saveBlockBytes, saveCapacity, saveSdkLua, sceneHasAnimation, sceneHasPhysics, sceneNeedsRuntime, sceneObjectsSdkLua, sceneSkyEnvironment, seedCartridge, sendDebugCommand, serializeReplay, shIrradiance, shade, shaderModule, shaftGrid, shapeStick, simulateEmitter, smoothFrontEdges, softKneePrefilter, splitWorldMatrix, standardizePad, stepLookAcceleration, streamGroups, stringsSdkLua, sway, takeNetOutbox, takePhysicsCommands, takeRingCommands, takeSave, tiltShiftBlur, toConsolePixel, toggleMask, tokenizeLua, turnEnvironment, uiSdkLua, uniformsFromSettings, unpadRows, validSave, verifyReplayScore, viewDirection, viewModeCode, warmPipelines, webgpuCanHonour, worldCenter, writeBreakpoints, writeInputBlock, writeInputSettings, writeInstanceTransform, writeInstanceUniform, writeNetInbox, writePhysicsState, writePointer, writeWatches };
+export { AIM_ASSISTS, AgentCrowd, type AimAssist, type AnimClip, type AnimMode, type AnimPlacement, type AnimSpec, type AnimState, type AnimTarget, type AnimTrack, AnimatedForegroundSurface, AnimationSession, type AtmosphereParams, BLOOM_KNEE, type BakeLight, BloomPyramid, BroadcastChannelTransport, type BuiltLightingRenderer, CAMERA_BASE, CAMERA_SCALE, CARTBOX_SDK_LUA, CELL_WORLD, CMD_RING_BYTES, CMD_RING_MAX, COLOR_CHECKER, COMPOSE_UNIFORM_FLOATS, CappedSceneRenderer, type CaptureOptions, type CapturedFrame, type CartSpriteSource, CartridgeLoadError, type CastHit, type CastShape, type ClipSample, type ClipTableEntry, type CollisionField, ConsoleButton, type ConsoleInstance, type ConsoleModel, type ControlScheme, type ControlSettings, type ControlTarget, DEFAULT_AMBIENT, DEFAULT_ATMOSPHERE, DEFAULT_CONTROL_SETTINGS, DEFAULT_KEY_BINDINGS, DEFAULT_LIGHT, DEFAULT_MODEL_ID, DEFAULT_MOUSE_LOOK, DEFAULT_PAD_BINDINGS, DEFAULT_STICK_DEAD_ZONES, DEFAULT_TEXEL_DENSITY, DEFAULT_TRIGGER_THRESHOLD, DIRECT_CORE_URL, DIRECT_MAX_AGENTS, DIRECT_MAX_BODIES, DIRECT_MAX_JOINTS, DIRECT_MAX_PROJECTILES, DebugCommand, type DebugStep, type DeviceHints, type DeviceProvider, type DirectConsole, DirectTransport, type DirectTransportOptions, type DriftStats, EVENT_CAPACITY, type Ease, EngineLoadError, type EntityPose, type ErrorFrame, FLARE_GHOSTS, FLARE_GHOST_GAIN, FLARE_SPIKE_POWER, FaceDriver, type FlagsField, type FlareGhost, type FlareParams, type FrameState, GREY_CARD, GYRO_AIMS, GamepadInput, type GeneratedTrack, type GlContextProvider, GpuCanvasSurface, type GpuLightBakeOptions, type GpuLightmapBake, GpuPresenter, type GpuSceneDraw, type GradingLut, type GyroAim, HEIGHT_WORLD, IMPORTED_LOOK, INPUT_BLOCK_BYTES, INPUT_MAGIC, INPUT_SETTINGS, INSTANCE_FLOATS, type InnerSurfaceFactory, type InputChange, type InspectedObject, type InstanceTransform, type Keyframe, LIGHTMAP_MAX_BOUNCES, LIGHTMAP_MAX_LIGHTS, LIGHTMAP_MAX_LOCAL_LIGHTS, LIGHTS_BASE, LIGHTS_CAPACITY, LIGHT_FLOATS, LIGHT_STRIDE, LOOK_DEV_RIGS, LOOP_SLOTS, LUT_LOOKS, LUT_SIZE, type LabCart, type LabProbe, type LayerChannel, type Light, type LightingBackend, type LightingFrameContext, LightingLayer, type LightingOptions, type LightingRenderer, type LightingScene, type LinearPanorama, type LinkConditions, LitCanvasSurface, type LookDevCheck, type LookDevMaps, type LookDevOptions, type LookDevRig, type LookDevStage, LookDevView, type LookDevViewOptions, type LookDevice, type LookProfile, MAILBOX_TYPE_ACHIEVEMENT, MAILBOX_TYPE_PROGRESS, MAILBOX_TYPE_SCORE, MAILBOX_WORDS, MANIFEST_KEY, MANIFEST_MAX, MAX_CAPTURE_SIDE, MAX_EMITTERS, MAX_LUT_SIZE, MAX_PARTICLES_PER_EMITTER, MAX_PREFAB_POOL, MAX_PREFAB_POOL_DIRECT, MAX_PYRAMID_LEVELS, MAX_VOICES, MESH_CAM_ANGLE_SCALE, MESH_CAM_BASE, MESH_CAM_DIST_SCALE, MESH_CAM_STRIDE, MESH_POSE_BASE, MESH_POSE_CAPACITY, MESH_POSE_HIDDEN, MESH_POSE_STRIDE, MIN_LUT_SIZE, MIN_PYRAMID_DIMENSION, MODELS, MOUSE_FULL_LEAN_PX, type MailboxCamera, type MailboxEvent, type MailboxEventKind, type MailboxMeshCamera, type MailboxMeshPose, type MailboxRead, type ManifestStorage, type MaterialBuffer, MemoryNetHub, type MeshInstance, MeshOverlaySurface, type MeshScene, type SceneCamera$1 as MeshSceneCamera, type ModelId, NET_MODE_CLIENT, NET_MODE_HOST, NET_MODE_OFFLINE, NET_SLOTS, NET_WORDS, NORMAL_DIRECTION_COUNT, NORMAL_VECTORS, type NetEvent, type NetInbox, type NetLabOptions, type NetLabReport, type NetMessage, type NetOutbox, type NetPeer, type NetRoomStatus, NetSession, type NetSignal, type NetState, type NetTransport, type ObjectLook, PAD_BUTTONS, PARTICLE_KINDS, PHYSICS_DT, PHYS_BLOCK_BYTES, PHYS_MAGIC, PHYS_MAX_BODIES, PHYS_OP_DRIVE, PHYS_Q_AGENT, PHYS_Q_ANIM, PHYS_Q_ANIM_EVENTS, PHYS_Q_BODY, PHYS_Q_CAST, PHYS_Q_CONTACTS, PHYS_Q_FIRE, PHYS_Q_FIRE_OPTIONS, PHYS_Q_HASH, PHYS_Q_IMPACTS, PHYS_Q_INSIDE, PHYS_Q_JOINT, PHYS_Q_PROJECTILE, PHYS_Q_RAY, PHYS_Q_STOP, PHYS_Q_VEHICLE, POINTER_AT, POINTER_MAGIC, POST_FX_EFFECTS, PROFILE_SECTIONS, PROFILE_WINDOW, PROJECTILE_GRAVITY, type PackableLight, type PadButton, type PadSnapshot, type Particle, type ParticleEmitter, type ParticleKind, ParticleOverlaySurface, type ParticleSpec, PathTracer, type PauseInfo, type PbrMaterial, type PhysicsBackend, type PhysicsBodyDesc, type PhysicsJointDesc, type Quat$1 as PhysicsQuat, PhysicsSession, type PhysicsShape, type Vec3$4 as PhysicsVec3, type PhysicsVehicleDesc, type PhysicsVehicleState, PipelineCache, PipelineManifestStore, type PipelineStats, type PlacementChannel, type PlayerHandle, type PlayerOptions, PointerInput, type PointerState, type PostFxColorDef, type PostFxEffectDef, type PostFxEffectId, type PostFxParamDef, PostFxPass, type PostFxSettings, type PostFxSource, PostFxSurface, type PostFxUniforms, type PresentBase, type PresentFrame, type PresentSky, type PresentStats, type ProfileSection, type ProfileSnapshot, Profiler, type ProjectileImpact, QUALITY_LEVELS, QUALITY_PRESETS, type QualityChoice, QualityGovernor, type QualityLevel, type QualitySettings, type QueryHandler, RAM_LAYOUTS, REFERENCE_BOUNCES, REPLAY_VERSION, RESPONSE_CURVES, type RamLayout, type ReferenceCapture, type ReferenceDraw, type ReferenceScene, type ReferenceSettings, type RegionImage, type RegisteredAchievement, type RenderCanvas, type RenderCaps, type RenderStats, type Replay, ReplayError, ReplayRecorder, ReplaySource, ReplicationClient, ReplicationHost, type ReplicationOptions, type ResolvedMapping, type ResolvedPbr, type ResolvedPlacement, type ResponseCurve, type Rgb, type RtcDataChannelLike, type RtcPeerConnectionFactory, type RtcPeerConnectionLike, type RumbleEffect, RuntimeChannel, SAVE_MAGIC, SKY_UNIFORM_FLOATS, SOFTWARE_RASTER_CAPS, START_KEYS, STICK_LAYOUTS, type ScaleMode, SceneBackdropSurface, type SceneBounds, type SceneCamera, type SceneDraw, type SceneLayer, type SceneMemory, type SceneRenderer, type SceneSpec, type SceneVista, type ScreenSun, type SectionStats, type SequenceOptions, SimulatedNetHub, SoftwareSceneRenderer, type SoundContext, SoundSystem, type Speaker, type SpriteRegion, type SpriteRegionSource, type StickDeadZones, type StickLayout, type SunShadow, SwitchableTransport, TANGENT_VERTEX_FLOATS, TILT_SHIFT_FEATHER, TINT_PALETTE, TOUCH_CONTROL_IDS, TOUCH_LOOK_MODES, type TextureLookup, type TouchControlId, type TouchLayout, type TouchLookMode, type TouchPlacement, type TraceLine, type TrackMode, UNIFORM_BYTES_USED, UNIFORM_FLOATS, UNIFORM_STRIDE, VERTEX_FLOATS, VIEW_MODES, type Vec3$2 as Vec3, type VerificationResult, type ViewMode, WEBGL_INSTANCES_PER_DRAW, WEBGL_MAX_LIGHTS, WebglSceneRenderer, WebgpuLightingLayer, WebgpuSceneRenderer, type WorldBillboard, type WorldBillboardPose, type WorldCamera, type WorldCameraSpec, type WorldLight, WorldOverlaySurface, type WorldProp, type WorldScene, type WorldTileCell, acesFilmic, acesFilmicChannel, actionsSdkLua, aimAssistLevel, alignBytesPerRow, animClipsSdkLua, animatedObjects, anyPostFxEnabled, appendLuaCode, applyActionToggles, applyLookSettings, applyLut, applyQualityToPostFx, applyRenderCaps, armDebugBlock, armSaveBlock, askMotionPermission, bakeLightmapGpu, bakeLights, bakeProbeVolumeGpu, bakeSurfaces, bodyCapacity, breakableLine, browserDeviceHints, browserRtc, browserSpeaker, buildBillboardInstance, buildClipTable, buildOrbitCamera, buildShadowInstance, buildTerrainInstances, buildWorldCamera, cameraAt, capTextures, capTriangles, capsConstrainScene, captureReference, cellAt, checkLookDev, clipFrameIndex, codeChunks, codeLineOffset, collisionSdkLua, commandRingAddress, commandRingBytes, commandRingMax, commandsPerTick, compileAnimator, componentsSdkLua, composeParallax, composeWorldMatrix, compositeOverBackdrop, createCartSpriteSource, createConsole, createDirectConsole, createFlatMaterial, createLightingLayer, createSceneRenderer, createTextureBudgetCache, deadZoned, debugBlockAddress, debugPostlude, debugSdkLua, decodeCamera, decodeLights, decodeLut, decodeMailbox, decodeMeshCamera, decodeMeshPoses, decodeNetMessage, decodeWorldLights, defaultPostFxSettings, detectQuality, deterministicBackend, directCoreBeside, directCoreModel, dragLean, drift, effectiveBreakpoints, emitterPreset, encodeLut, encodeNetMessage, environmentPanorama, environmentSh, errorStack, estimateSceneBytes, estimateSceneMemory, evaluate, extractScore, extractUnlocks, fillSky, fitShape, fitTextureToBudget, flagsSdkLua, flicker, frameDurationMs, framePixels, framebufferBytes, getModel, getWebgpuDevice, gyroLean, hasCommandRing, hashCart, hashEventId, heat, hexToRgb01, identityLut, injectSdk, inputBlockAddress, instrumentLua, interleaveVertices, interleaveVerticesWithTangents, interpolateNormal, isDiagnosticView, isMobileAgent, jointFrames, layoutSticks, lensFlareAt, loadEngineModule, lookAccelerationBoost, lookDevDraw, lookDevStage, lookGains, lookLut, lookProfileFor, lutStrip, makeShadowTexture, meshSceneTransferables, mount, mouseLean, movingBodies, nearestDirection, netSendInterval, normalBasis3x3, normalVector, orbitPitchAboveTerrain, packAtmosphereSkyUniforms, packComposeUniforms, packLights, packMeasureUniforms, packReferenceScene, packShaftUniforms, packSkyUniforms, paramKey, parseAnim, parseCollisionField, parseControlSettings, parseCubeLut, parseFlagsField, parseMeshScene, parseParticles, parsePauseInfo, parsePostFxSettings, parseReplay, parseScene, parseTouchLayout, parseWorldScene, physicsBlockAddress, physicsSdkLua, physicsSlots, physicsStateHash, pipelineCache, pipelineKey, pipelineRecipe, placeWithin, playLanguage, prehazeLayers, prependLuaCode, pulse, pyramidLevelCount, pyramidLevelSize, randomSeed, rasterStyleFor, readCartCode, readPad, readPause, readSidecarActions, readSidecarUi, readViewMode, recipeDescriptor, reflectionFade, reflectionSampleY, remapErrorLines, renderSceneBackdrop, resolveButton, resolveLight, resolveMapping, resolvePbr, resolveQuality, resolveSceneLayers, resolveSupersample, resolveUnlockedAchievements, responseCurve, rewriteLuaCode, rumbleEffect, runNetLab, runReplayEvents, runsOnDirectCore, runtimeSdkLua, sampleClipFrame, sampleNormalBilinear, sampleScalarBilinear, sampleTrack, saveBlockAddress, saveBlockBytes, saveCapacity, saveSdkLua, sceneHasAnimation, sceneHasPhysics, sceneNeedsRuntime, sceneObjectsSdkLua, sceneSkyEnvironment, seedCartridge, sendDebugCommand, serializeReplay, shIrradiance, shade, shaderModule, shaftGrid, shapeStick, simulateEmitter, smoothFrontEdges, softKneePrefilter, splitWorldMatrix, standardizePad, stepLookAcceleration, streamGroups, stringsSdkLua, sway, takeNetOutbox, takePhysicsCommands, takeRingCommands, takeSave, tiltShiftBlur, toConsolePixel, toggleMask, tokenizeLua, turnEnvironment, uiSdkLua, uniformsFromSettings, unpadRows, validSave, verifyReplayScore, viewDirection, viewModeCode, warmPipelines, webgpuCanHonour, worldCenter, writeBreakpoints, writeInputBlock, writeInputSettings, writeInstanceTransform, writeInstanceUniform, writeNetInbox, writePhysicsState, writePointer, writeWatches };

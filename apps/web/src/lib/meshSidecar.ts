@@ -142,6 +142,8 @@ export interface MeshSidecarEntry {
   readonly prefab?: PrefabLink;
   /** Physics body (ENGINE_ROADMAP.md, Phase 2); absent = not simulated. */
   readonly physics?: PhysicsSpec;
+  /** Replicated over netplay (N1), at this priority: the host sends its pose to every other player. */
+  readonly replicate?: number;
   /** Animation state machine for a skinned mesh (ENGINE_ROADMAP.md, Phase 3); absent = plays its first clip. */
   readonly animator?: AnimatorSpec;
   /** The level this object belongs to (a level id); absent = always loaded (see levels.ts in @cartbox/editor). */
@@ -430,6 +432,7 @@ export function decodeMeshSidecar(raw: string | null | undefined): MeshSidecar {
       ...(Object.keys(props).length > 0 ? { props } : {}),
       ...(readPrefabLink(record.prefab) ? { prefab: readPrefabLink(record.prefab)! } : {}),
       ...(readPhysicsSpec(record.physics) ? { physics: readPhysicsSpec(record.physics)! } : {}),
+      ...(typeof record.replicate === "number" && Number.isFinite(record.replicate) && record.replicate > 0 ? { replicate: Math.min(100, record.replicate) } : {}),
       ...(readAnimatorSpec(record.animator) ? { animator: readAnimatorSpec(record.animator)! } : {}),
       ...(typeof record.level === "string" && record.level ? { level: record.level } : {}),
       ...(record.alwaysLoaded === true ? { alwaysLoaded: true as const } : {}),
@@ -1133,4 +1136,18 @@ export function setMeshDebris(sidecar: MeshSidecar, debris: readonly DebrisDef[]
   const { debris: _old, ...rest } = sidecar;
   const defs = parseDebrisDefs(debris);
   return defs.length > 0 ? { ...rest, debris: defs } : rest;
+}
+
+/** Mark an object replicated over netplay at a priority (N1), or (null) not. */
+export function setMeshReplicate(sidecar: MeshSidecar, id: string, priority: number | null): MeshSidecar {
+  return {
+    ...sidecar,
+    version: MESH_SIDECAR_VERSION,
+    meshes: sidecar.meshes.map((entry) => {
+      if (entry.id !== id) return entry;
+      const { replicate: _drop, ...rest } = entry;
+      void _drop;
+      return priority && priority > 0 ? { ...rest, replicate: Math.min(100, priority) } : rest;
+    }),
+  };
 }

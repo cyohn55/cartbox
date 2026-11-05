@@ -114,3 +114,25 @@ end`, 40);
 
   });
 });
+
+describe.skipIf(!existsSync(MODERN))("lag compensation (N3)", () => {
+  it("hits a moving target where the shooter saw it, interpolated between ticks, and never further back than the maximum", async () => {
+    const { rows, error } = await run(`
+local h = cartbox.rewind.new{ max = 0.2 }
+local hb = cartbox.hitbox.new{ { zone = "body", at = "chest", r = 0.4 } }
+-- A target running along x at 10 m/s, recorded each 1/20 s.
+for i = 0, 10 do cartbox.rewind.record(h, i * 0.05, "red", { chest = { i * 0.5, 1, 0 } }) end
+local now = 0.5
+local function shoot(t, x)
+  local id, zone, d = cartbox.rewind.ray(h, { red = hb }, t, now, x, 1, -5, 0, 0, 1, 50)
+  return id == "red" and 1 or 0
+end
+-- Where it is now (x = 5) the shot at x = 4.3 misses; seen 0.07 s ago (x = 4.3) it hits.
+cartbox.command(1, shoot(now, 4.3), shoot(now - 0.07, 4.3))
+-- A shooter claiming to have seen it 0.4 s ago (x = 1) gets the maximum's 0.2 s instead (x = 3).
+cartbox.command(1, shoot(now - 0.4, 1), shoot(now - 0.4, 3))`);
+    expect(error ?? "").toBe("");
+    expect(rows[0]!.slice(0, 2)).toEqual([0, 1]);
+    expect(rows[1]!.slice(0, 2)).toEqual([0, 1]);
+  });
+});

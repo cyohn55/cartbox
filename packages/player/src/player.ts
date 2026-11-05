@@ -66,7 +66,7 @@ import { componentsSdkLua } from "./componentsSdk.js";
 import { sceneObjectsSdkLua } from "./mesh/sceneObjectsSdk.js";
 import { MAX_PREFAB_POOL, MAX_PREFAB_POOL_DIRECT, streamGroups, type MeshScene } from "./mesh/meshScene.js";
 import { runtimeSdkLua } from "./physics/physicsSdk.js";
-import { PhysicsSession, sceneHasPhysics } from "./physics/physicsSession.js";
+import { composeWorldMatrix, splitWorldMatrix, PhysicsSession, sceneHasPhysics } from "./physics/physicsSession.js";
 import { RuntimeChannel } from "./runtime/runtimeChannel.js";
 import { AUDIO_LAYER, AUDIO_MUSIC, AUDIO_SNAPSHOT, AUDIO_STINGER, AUDIO_SWITCH, DIRECT_MAX_BODIES, PHYS_BLOCK_BYTES, PHYS_MAX_BODIES, RAM_LAYOUTS, physicsBlockAddress } from "./physics/protocol.js";
 import { collisionSdkLua } from "./collisionSdk.js";
@@ -807,6 +807,7 @@ export class Player {
       }
       if (this.options.volume !== undefined) this.volume = this.options.volume;
       this.setupReplay(bytes, seed);
+      this.startReplication();
 
       this.renderSingleFrame(); // show frame 0 immediately, even before play
       this.options.onReady?.();
@@ -1213,6 +1214,45 @@ export class Player {
    * Start a level switch the cart asked for: load the level's assets through the
    * host (a published cart fetches its textures), then make it current.
    */
+  /**
+   * Entity replication (N1): the scene's objects marked replicated, sent by the
+   * host to every other player each send (their poses from where they're drawn),
+   * with this camera for relevancy.
+   */
+  private startReplication(): void {
+    const net = this.options.netplay;
+    const mesh = this.options.mesh;
+    if (!net || !mesh) return;
+    const replicated = mesh.instances.flatMap((inst, i) => (inst.replicate ? [{ i, priority: inst.replicate }] : []));
+    if (replicated.length === 0) return;
+    net.replicate(
+      () => {
+        const placed = this.meshSurface?.currentPlacements() ?? [];
+        return replicated.flatMap(({ i, priority }) => {
+          const m = placed[i];
+          if (!m) return [];
+          const { position, rotation } = splitWorldMatrix(m);
+          return [{ id: i, position, rotation, priority }];
+        });
+      },
+      () => this.meshSurface?.listenerPose()?.eye ?? [0, 0, 0],
+    );
+  }
+
+  /** On a guest, each replicated object's world matrix from the host's pose (its own scale kept). */
+  private replicatedOverrides(): Map<number, Mat4> {
+    const net = this.options.netplay;
+    const mesh = this.options.mesh;
+    const out = new Map<number, Mat4>();
+    if (!net || !mesh) return out;
+    for (const [id, pose] of net.replicated()) {
+      const inst = mesh.instances[id];
+      if (!inst?.replicate) continue;
+      out.set(id, composeWorldMatrix(pose.position, pose.rotation, splitWorldMatrix(inst.model).scale));
+    }
+    return out;
+  }
+
   /** The audio track's commands from the cart (U1–U5): names were resolved to indices in Lua. */
   private audioCommand(what: number, index: number, v: readonly number[]): void {
     const sounds = this.sounds;
@@ -1536,7 +1576,9 @@ export class Player {
           const scripted = this.runtime.channel.timelinePlacements();
           const put = this.runtime.channel.placements();
           const bodies = this.runtime.physics?.overrides();
-          this.meshSurface.setBodyOverrides(scripted.size > 0 || put.size > 0 ? new Map([...(bodies ?? []), ...put, ...scripted]) : (bodies ?? NO_OVERRIDES));
+          // Over all of it, on a guest, the poses the host replicates (N1).
+          const replicated = this.replicatedOverrides();
+          this.meshSurface.setBodyOverrides(scripted.size > 0 || put.size > 0 || replicated.size > 0 ? new Map([...(bodies ?? []), ...put, ...scripted, ...replicated]) : (bodies ?? NO_OVERRIDES));
           this.meshSurface.setSpawned(this.runtime.channel.spawned());
           this.meshSurface.setShields(this.runtime.channel.shields());
           this.meshSurface.setLooks(this.runtime.channel.looks());

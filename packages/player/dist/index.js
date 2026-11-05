@@ -8492,6 +8492,7 @@ function parseMeshScene(raw) {
       tags: readSceneTags(record.tags),
       props: readSceneProps(record.props),
       physics: readPhysicsSpec(record.physics),
+      ...typeof record.replicate === "number" && Number.isFinite(record.replicate) && record.replicate > 0 ? { replicate: Math.min(100, record.replicate) } : {},
       ...readAnimatorSpec(record.animator) ? { animator: readAnimatorSpec(record.animator) } : {},
       ...typeof record.level === "string" && record.level ? { levelId: record.level } : {},
       ...record.alwaysLoaded === true ? { alwaysLoaded: true } : {},
@@ -40352,6 +40353,7 @@ var Player = class {
       }
       if (this.options.volume !== void 0) this.volume = this.options.volume;
       this.setupReplay(bytes, seed);
+      this.startReplication();
       this.renderSingleFrame();
       this.options.onReady?.();
       if (this.options.autostart ?? false) {
@@ -40658,6 +40660,43 @@ var Player = class {
    * Start a level switch the cart asked for: load the level's assets through the
    * host (a published cart fetches its textures), then make it current.
    */
+  /**
+   * Entity replication (N1): the scene's objects marked replicated, sent by the
+   * host to every other player each send (their poses from where they're drawn),
+   * with this camera for relevancy.
+   */
+  startReplication() {
+    const net = this.options.netplay;
+    const mesh = this.options.mesh;
+    if (!net || !mesh) return;
+    const replicated = mesh.instances.flatMap((inst, i) => inst.replicate ? [{ i, priority: inst.replicate }] : []);
+    if (replicated.length === 0) return;
+    net.replicate(
+      () => {
+        const placed = this.meshSurface?.currentPlacements() ?? [];
+        return replicated.flatMap(({ i, priority }) => {
+          const m = placed[i];
+          if (!m) return [];
+          const { position, rotation } = splitWorldMatrix(m);
+          return [{ id: i, position, rotation, priority }];
+        });
+      },
+      () => this.meshSurface?.listenerPose()?.eye ?? [0, 0, 0]
+    );
+  }
+  /** On a guest, each replicated object's world matrix from the host's pose (its own scale kept). */
+  replicatedOverrides() {
+    const net = this.options.netplay;
+    const mesh = this.options.mesh;
+    const out = /* @__PURE__ */ new Map();
+    if (!net || !mesh) return out;
+    for (const [id, pose] of net.replicated()) {
+      const inst = mesh.instances[id];
+      if (!inst?.replicate) continue;
+      out.set(id, composeWorldMatrix(pose.position, pose.rotation, splitWorldMatrix(inst.model).scale));
+    }
+    return out;
+  }
   /** The audio track's commands from the cart (U1–U5): names were resolved to indices in Lua. */
   audioCommand(what, index, v) {
     const sounds = this.sounds;
@@ -40940,7 +40979,8 @@ var Player = class {
           const scripted = this.runtime.channel.timelinePlacements();
           const put = this.runtime.channel.placements();
           const bodies = this.runtime.physics?.overrides();
-          this.meshSurface.setBodyOverrides(scripted.size > 0 || put.size > 0 ? new Map([...bodies ?? [], ...put, ...scripted]) : bodies ?? NO_OVERRIDES);
+          const replicated = this.replicatedOverrides();
+          this.meshSurface.setBodyOverrides(scripted.size > 0 || put.size > 0 || replicated.size > 0 ? new Map([...bodies ?? [], ...put, ...scripted, ...replicated]) : bodies ?? NO_OVERRIDES);
           this.meshSurface.setSpawned(this.runtime.channel.spawned());
           this.meshSurface.setShields(this.runtime.channel.shields());
           this.meshSurface.setLooks(this.runtime.channel.looks());
@@ -41936,6 +41976,13 @@ var TIME = 8;
 var PING = 16;
 var PONGS = 32;
 var ROSTER = 64;
+var REPLICATION = 128;
+var b64bytes = (v) => v ? Uint8Array.from(atob(v), (c) => c.charCodeAt(0)) : new Uint8Array(0);
+var bytesB64 = (b) => {
+  let s = "";
+  for (let i = 0; i < b.length; i += 32768) s += String.fromCharCode(...b.subarray(i, i + 32768));
+  return btoa(s);
+};
 var STATE_BYTES = 17;
 var PONG_BYTES = 13;
 var utf8 = new TextEncoder();
@@ -41948,11 +41995,14 @@ function encodeNetMessage(message) {
   const hasMatch = message.m !== void 0;
   const hasTime = message.t !== void 0;
   const hasPing = message.pi !== void 0;
-  const size = 1 + (states.length ? 1 + states.length * STATE_BYTES : 0) + (events.length ? 2 + events.length * 8 : 0) + (hasMatch ? 4 : 0) + (hasTime ? 4 : 0) + (hasPing ? 4 : 0) + (pongs.length ? 1 + pongs.length * PONG_BYTES : 0) + (roster.length ? 1 + roster.reduce((n, [, id]) => n + 2 + id.length, 0) : 0);
+  const x = b64bytes(message.x);
+  const xa = b64bytes(message.xa);
+  const hasReplication = x.length > 0 || xa.length > 0;
+  const size = (hasReplication ? 4 + x.length + xa.length : 0) + 1 + (states.length ? 1 + states.length * STATE_BYTES : 0) + (events.length ? 2 + events.length * 8 : 0) + (hasMatch ? 4 : 0) + (hasTime ? 4 : 0) + (hasPing ? 4 : 0) + (pongs.length ? 1 + pongs.length * PONG_BYTES : 0) + (roster.length ? 1 + roster.reduce((n, [, id]) => n + 2 + id.length, 0) : 0);
   const bytes = new Uint8Array(size);
   const view = new DataView(bytes.buffer);
   let at = 0;
-  bytes[at++] = (states.length ? STATES : 0) | (events.length ? EVENTS : 0) | (hasMatch ? MATCH : 0) | (hasTime ? TIME : 0) | (hasPing ? PING : 0) | (pongs.length ? PONGS : 0) | (roster.length ? ROSTER : 0);
+  bytes[at++] = (states.length ? STATES : 0) | (events.length ? EVENTS : 0) | (hasMatch ? MATCH : 0) | (hasTime ? TIME : 0) | (hasPing ? PING : 0) | (pongs.length ? PONGS : 0) | (roster.length ? ROSTER : 0) | (hasReplication ? REPLICATION : 0);
   const u323 = (v) => {
     view.setUint32(at, v >>> 0, true);
     at += 4;
@@ -42000,13 +42050,21 @@ function encodeNetMessage(message) {
       at += id.length;
     }
   }
+  if (hasReplication) {
+    for (const blob of [x, xa]) {
+      view.setUint16(at, blob.length, true);
+      at += 2;
+      bytes.set(blob, at);
+      at += blob.length;
+    }
+  }
   return bytes;
 }
 function decodeNetMessage(bytes) {
   if (bytes.length < 1) return null;
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
   const flags = bytes[0];
-  if (flags & ~(STATES | EVENTS | MATCH | TIME | PING | PONGS | ROSTER)) return null;
+  if (flags & ~(STATES | EVENTS | MATCH | TIME | PING | PONGS | ROSTER | REPLICATION)) return null;
   let at = 1;
   const need = (n) => at + n <= bytes.length;
   const u323 = () => {
@@ -42065,10 +42123,254 @@ function decodeNetMessage(bytes) {
       at += length;
     }
   }
+  if (flags & REPLICATION) {
+    for (const key2 of ["x", "xa"]) {
+      if (!need(2)) return null;
+      const length = view.getUint16(at, true);
+      at += 2;
+      if (!need(length)) return null;
+      if (length > 0) message[key2] = bytesB64(bytes.subarray(at, at + length));
+      at += length;
+    }
+  }
   return at === bytes.length ? message : null;
 }
 
+// src/net/replication.ts
+var POS = 256;
+var ROT = 16384;
+var HISTORY = 33;
+var FIELDS = 7;
+function quantize(p) {
+  const q = p.rotation;
+  const len = Math.hypot(q[0], q[1], q[2], q[3]) || 1;
+  const s = q[3] < 0 ? -1 / len : 1 / len;
+  return [...p.position.map((v) => Math.round(v * POS)), ...q.map((v) => Math.round(v * s * ROT))];
+}
+function dequantize(id, q) {
+  return { id, position: [q[0] / POS, q[1] / POS, q[2] / POS], rotation: [q[3] / ROT, q[4] / ROT, q[5] / ROT, q[6] / ROT] };
+}
+var Writer = class {
+  constructor() {
+    this.bytes = new Uint8Array(256);
+    this.view = new DataView(this.bytes.buffer);
+    this.at = 0;
+  }
+  grow(n) {
+    if (this.at + n <= this.bytes.length) return;
+    const next = new Uint8Array(Math.max(this.bytes.length * 2, this.at + n));
+    next.set(this.bytes);
+    this.bytes = next;
+    this.view = new DataView(next.buffer);
+  }
+  u8(v) {
+    this.grow(1);
+    this.bytes[this.at++] = v & 255;
+  }
+  u16(v) {
+    this.grow(2);
+    this.view.setUint16(this.at, v, true);
+    this.at += 2;
+  }
+  u32(v) {
+    this.grow(4);
+    this.view.setUint32(this.at, v >>> 0, true);
+    this.at += 4;
+  }
+  i32(v) {
+    this.grow(4);
+    this.view.setInt32(this.at, v | 0, true);
+    this.at += 4;
+  }
+  done() {
+    return this.bytes.slice(0, this.at);
+  }
+};
+var Reader = class {
+  constructor(bytes) {
+    this.bytes = bytes;
+    this.at = 0;
+    this.view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  }
+  get left() {
+    return this.bytes.length - this.at;
+  }
+  u8() {
+    return this.bytes[this.at++];
+  }
+  u16() {
+    const v = this.view.getUint16(this.at, true);
+    this.at += 2;
+    return v;
+  }
+  u32() {
+    const v = this.view.getUint32(this.at, true);
+    this.at += 4;
+    return v;
+  }
+  i32() {
+    const v = this.view.getInt32(this.at, true);
+    this.at += 4;
+    return v;
+  }
+};
+var HOST = 1;
+var CLIENT = 2;
+var ReplicationHost = class {
+  constructor(options = {}) {
+    this.seq = 0;
+    /** Each packet's entities and the values they were sent at. */
+    this.history = /* @__PURE__ */ new Map();
+    /** Each client's acks: its newest packet and the 32 before it, as a set of seqs. */
+    this.acks = /* @__PURE__ */ new Map();
+    this.score = /* @__PURE__ */ new Map();
+    /** Entities sent in the last packet (tests and the profiler). */
+    this.lastSent = 0;
+    this.near = options.near ?? 20;
+    this.far = Math.max(this.near + 1e-6, options.far ?? 120);
+    this.budget = options.budget ?? 1200;
+  }
+  /** A client's ack packet (and where its camera is). */
+  receive(client, bytes) {
+    const r = new Reader(bytes);
+    if (r.left < 21 || r.u8() !== CLIENT) return null;
+    const newest = r.u32();
+    const bits = r.u32();
+    const got = /* @__PURE__ */ new Set([newest]);
+    for (let k = 0; k < 32; k += 1) if (bits & 1 << k) got.add(newest - 1 - k);
+    this.acks.set(client, got);
+    return [r.i32() / POS, r.i32() / POS, r.i32() / POS];
+  }
+  /** A client gone: its acks no longer hold baselines back. */
+  forget(client) {
+    this.acks.delete(client);
+  }
+  /** How relevant a position is to the nearest viewer, 0..1. */
+  relevance(at, viewers) {
+    if (viewers.length === 0) return 1;
+    let best = 0;
+    for (const v of viewers) {
+      const d = Math.hypot(at[0] - v[0], at[1] - v[1], at[2] - v[2]);
+      best = Math.max(best, d <= this.near ? 1 : d >= this.far ? 0 : 1 - (d - this.near) / (this.far - this.near));
+    }
+    return best;
+  }
+  /** The newest packet carrying `id` that every client got, and its value. */
+  baseline(id) {
+    if (this.acks.size === 0) return null;
+    for (let s = this.seq - 1; s >= this.seq - HISTORY && s > 0; s -= 1) {
+      const value = this.history.get(s)?.get(id);
+      if (!value) continue;
+      let all = true;
+      for (const got of this.acks.values()) if (!got.has(s)) all = false;
+      if (all) return { seq: s, value };
+    }
+    return null;
+  }
+  /** This tick's packet: the entities that matter most, as deltas where it can, within the budget. */
+  send(entities, viewers) {
+    this.seq += 1;
+    const seq = this.seq;
+    const w = new Writer();
+    w.u8(HOST);
+    w.u32(seq);
+    const countAt = w.at;
+    w.u16(0);
+    const sent = /* @__PURE__ */ new Map();
+    const ranked = entities.map((e) => {
+      const relevance = this.relevance(e.position, viewers);
+      const score = relevance > 0 ? (this.score.get(e.id) ?? 0) + (e.priority ?? 1) * relevance : 0;
+      this.score.set(e.id, score);
+      return { e, score };
+    }).filter((x) => x.score > 0).sort((a, b) => b.score - a.score || a.e.id - b.e.id);
+    let count = 0;
+    for (const { e } of ranked) {
+      const q = quantize(e);
+      const base = this.baseline(e.id);
+      let mask = 0;
+      for (let f3 = 0; f3 < FIELDS; f3 += 1) if (!base || base.value[f3] !== q[f3]) mask |= 1 << f3;
+      if (base && mask === 0) {
+        this.score.set(e.id, 0);
+        continue;
+      }
+      const size = 2 + 1 + 1 + 4 * popcount(mask);
+      if (w.at + size > this.budget) continue;
+      w.u16(e.id);
+      w.u8(base ? Math.min(255, seq - base.seq) : 0);
+      w.u8(mask);
+      for (let f3 = 0; f3 < FIELDS; f3 += 1) if (mask & 1 << f3) w.i32(q[f3]);
+      sent.set(e.id, q);
+      this.score.set(e.id, 0);
+      count += 1;
+    }
+    this.history.set(seq, sent);
+    this.history.delete(seq - HISTORY - 1);
+    this.lastSent = count;
+    const out = w.done();
+    new DataView(out.buffer).setUint16(countAt, count, true);
+    return out;
+  }
+};
+function popcount(v) {
+  let n = 0;
+  for (let x = v; x; x &= x - 1) n += 1;
+  return n;
+}
+var ReplicationClient = class {
+  constructor() {
+    this.history = /* @__PURE__ */ new Map();
+    this.newest = 0;
+    this.current = /* @__PURE__ */ new Map();
+  }
+  /** A host packet. Returns false when it can't be read (a delta whose baseline this client never got). */
+  receive(bytes) {
+    const r = new Reader(bytes);
+    if (r.left < 7 || r.u8() !== HOST) return false;
+    const seq = r.u32();
+    const count = r.u16();
+    const got = /* @__PURE__ */ new Map();
+    for (let i = 0; i < count; i += 1) {
+      const id = r.u16();
+      const back = r.u8();
+      const mask = r.u8();
+      const base = back > 0 ? this.history.get(seq - back)?.get(id) : void 0;
+      if (back > 0 && !base) return false;
+      const q = base ? [...base] : new Array(FIELDS).fill(0);
+      for (let f3 = 0; f3 < FIELDS; f3 += 1) if (mask & 1 << f3) q[f3] = r.i32();
+      got.set(id, q);
+    }
+    this.history.set(seq, got);
+    for (const s of this.history.keys()) if (s < seq - HISTORY) this.history.delete(s);
+    if (seq > this.newest) {
+      for (const [id, q] of got) this.current.set(id, q);
+      this.newest = seq;
+    }
+    return true;
+  }
+  /** The ack to send: the newest packet and which of the 32 before it arrived, with this camera. */
+  ack(viewer) {
+    const w = new Writer();
+    w.u8(CLIENT);
+    w.u32(this.newest);
+    let bits = 0;
+    for (let k = 0; k < 32; k += 1) if (this.history.has(this.newest - 1 - k)) bits |= 1 << k;
+    w.u32(bits >>> 0);
+    for (const v of viewer) w.i32(Math.round(v * POS));
+    return w.done();
+  }
+  /** Every entity's pose as last heard. */
+  poses() {
+    return new Map([...this.current].map(([id, q]) => [id, dequantize(id, q)]));
+  }
+};
+
 // src/net/NetSession.ts
+var toB64 = (b) => {
+  let s = "";
+  for (let i = 0; i < b.length; i += 32768) s += String.fromCharCode(...b.subarray(i, i + 32768));
+  return btoa(s);
+};
+var fromB64 = (v) => Uint8Array.from(atob(v), (c) => c.charCodeAt(0));
 function netSendInterval(players) {
   return players <= 2 ? 4 : players <= 4 ? 6 : 8;
 }
@@ -42127,6 +42429,9 @@ var NetSession = class {
     /** The roster changed (as host): send it in the next message. */
     this.rosterDirty = false;
     this.lastRosterTick = -Infinity;
+    /** Entity replication (N1): what to send (as host) and where this camera is, and each half. */
+    this.replication = null;
+    this.viewers = /* @__PURE__ */ new Map();
     transport.onPeers((peers) => {
       this.peers = [...peers].sort((a, b) => a.joinedAt - b.joinedAt || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
       if (this.peers.length === 0) {
@@ -42134,9 +42439,29 @@ var NetSession = class {
         this.held.clear();
       }
       this.reslot();
+      if (this.replication) {
+        const present = new Set(this.peers.map((p) => p.id));
+        for (const id of [...this.viewers.keys()]) if (!present.has(id)) {
+          this.viewers.delete(id);
+          this.replication.host.forget(id);
+        }
+      }
       this.emit();
     });
     transport.onMessage((message, from) => this.receive(message, from));
+  }
+  /**
+   * Replicate objects (N1): as host, `entities` gives the replicated objects'
+   * poses each send; as a guest, the session acks what it got and reports
+   * `viewer` (its camera) for relevancy. Guests read the result with
+   * {@link replicated}.
+   */
+  replicate(entities, viewer, options) {
+    this.replication = { entities, viewer, host: new ReplicationHost(options), client: new ReplicationClient() };
+  }
+  /** The replicated objects' poses as last heard from the host (empty as host). */
+  replicated() {
+    return this.replication && !this.isHost ? this.replication.client.poses() : /* @__PURE__ */ new Map();
   }
   /** Bytes this session has sent and received, measured in the messages' binary form (netCodec.ts). */
   traffic() {
@@ -42339,7 +42664,11 @@ var NetSession = class {
       this.lastPingTick = this.tick;
     }
     if (this.pongsDue.length > 0) message.po = this.pongsDue.splice(0).map(([slot, t0, t1]) => [slot, t0, t1, shared2 >>> 0]);
-    if (message.s || message.e || message.m !== void 0 || message.pi !== void 0 || message.po || message.ro) {
+    if (this.replication && this.peers.length > 1) {
+      if (this.isHost) message.x = toB64(this.replication.host.send(this.replication.entities(), [...this.viewers.values(), this.replication.viewer()]));
+      else message.xa = toB64(this.replication.client.ack(this.replication.viewer()));
+    }
+    if (message.s || message.e || message.m !== void 0 || message.pi !== void 0 || message.po || message.ro || message.x || message.xa) {
       this.transport.send(message);
       this.sentBytes += encodeNetMessage(message).length;
       this.lastSent = signature;
@@ -42365,6 +42694,16 @@ var NetSession = class {
     const sender = from === void 0 ? -1 : this.slotOf(from);
     for (const event of message.e ?? []) if (this.pendingEvents.length < 200 && sender >= 0 && sender < NET_SLOTS) this.pendingEvents.push({ event, from: sender });
     if (message.m !== void 0 && !this.isHost) this.hostMatch = message.m;
+    if (this.replication && from !== void 0) {
+      try {
+        if (message.x && !this.isHost) this.replication.client.receive(fromB64(message.x));
+        if (message.xa && this.isHost) {
+          const viewer = this.replication.host.receive(from, fromB64(message.xa));
+          if (viewer) this.viewers.set(from, viewer);
+        }
+      } catch {
+      }
+    }
     if (message.pi !== void 0 && this.isHost) {
       const slot = from === void 0 ? -1 : this.slotOf(from);
       if (slot > 0 && slot < NET_SLOTS && this.pongsDue.length < NET_SLOTS) this.pongsDue.push([slot, message.pi, Math.floor(this.sharedNow()) >>> 0]);
@@ -42875,8 +43214,8 @@ var DirectTransport = class {
         relayed.push(peer.id);
         continue;
       }
-      if (message.s || message.m !== void 0 || message.pi !== void 0 || message.po) {
-        link.state.send(stateBytes ?? (stateBytes = encodeNetMessage({ s: message.s, m: message.m, t: message.t, pi: message.pi, po: message.po })));
+      if (message.s || message.m !== void 0 || message.pi !== void 0 || message.po || message.x || message.xa) {
+        link.state.send(stateBytes ?? (stateBytes = encodeNetMessage({ s: message.s, m: message.m, t: message.t, pi: message.pi, po: message.po, x: message.x, xa: message.xa })));
       }
       if (message.e || message.ro) link.events.send(eventBytes ?? (eventBytes = encodeNetMessage({ e: message.e, t: message.t, ro: message.ro })));
     }
@@ -43296,6 +43635,8 @@ export {
   ReplayError,
   ReplayRecorder,
   ReplaySource,
+  ReplicationClient,
+  ReplicationHost,
   RuntimeChannel,
   SAVE_MAGIC,
   SKY_UNIFORM_FLOATS,

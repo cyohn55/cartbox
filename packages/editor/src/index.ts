@@ -2164,3 +2164,4 @@ export {
   type SoundVariation,
   type VariationChoice,
 } from "./model/audioMix";
+export { DeltaHistory, applyBytes, bytesPatchSize, diffBytes, type BytesPatch, type DeltaCodec, type DeltaHistoryOptions } from "./model/DeltaHistory";

@@ -28,18 +28,23 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
-  EditHistory,
+  DeltaHistory,
   WasmCartEngine,
   observeEngine,
   type CartEngine,
 } from "@cartbox/editor";
 
 import { SIDECAR_KEYS, sidecarsEqual, type SidecarKey, type SidecarValue, type Sidecars } from "@/lib/sidecars";
+import { SNAPSHOT_DELTAS, type SnapshotPatch } from "@/lib/historyDelta";
 
 /** Idle gap after the last edit before a snapshot is committed as one undo step. */
 const COALESCE_MS = 400;
-/** Snapshots retained on the timeline, including the baseline. */
-const HISTORY_LIMIT = 60;
+/**
+ * Memory the undo and redo steps may hold (W1). Each step is a delta (the
+ * bytes and sidecars that changed), so this is hundreds of small edits, not a
+ * fixed count of whole carts.
+ */
+const HISTORY_BUDGET = 48 * 1024 * 1024;
 
 /** One point on the timeline: the whole cart plus its sidecars. */
 export interface CartSnapshot {
@@ -145,7 +150,7 @@ export function useEditorHistory({
   const onCommitRef = useRef(onCommit);
   const applyingRef = useRef(false);
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const historyRef = useRef<EditHistory<CartSnapshot> | null>(null);
+  const historyRef = useRef<DeltaHistory<CartSnapshot, SnapshotPatch> | null>(null);
   bankRef.current = bank;
   runnableRef.current = runnable;
   onCommitRef.current = onCommit;
@@ -182,7 +187,7 @@ export function useEditorHistory({
   useEffect(() => {
     const baseline = capture();
     if (baseline) {
-      historyRef.current = new EditHistory(baseline, { limit: HISTORY_LIMIT, equals: snapshotsEqual });
+      historyRef.current = new DeltaHistory(baseline, SNAPSHOT_DELTAS, { budget: HISTORY_BUDGET, equals: snapshotsEqual });
       setHistoryVersion((version) => version + 1);
     }
     return () => {
@@ -255,7 +260,7 @@ export function useEditorHistory({
   const resync = useCallback(() => {
     const snapshot = capture();
     if (snapshot) {
-      historyRef.current = new EditHistory(snapshot, { limit: HISTORY_LIMIT, equals: snapshotsEqual });
+      historyRef.current = new DeltaHistory(snapshot, SNAPSHOT_DELTAS, { budget: HISTORY_BUDGET, equals: snapshotsEqual });
       sidecarsRef.current = snapshot.sidecars;
       setHistoryVersion((version) => version + 1);
     }

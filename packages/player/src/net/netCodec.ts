@@ -22,7 +22,13 @@
 import type { NetMessage } from "./NetSession.js";
 import type { NetEvent } from "./netplay.js";
 
-const STATES = 1, EVENTS = 2, MATCH = 4, TIME = 8, PING = 16, PONGS = 32, ROSTER = 64;
+const STATES = 1, EVENTS = 2, MATCH = 4, TIME = 8, PING = 16, PONGS = 32, ROSTER = 64, REPLICATION = 128;
+const b64bytes = (v: string | undefined) => (v ? Uint8Array.from(atob(v), (c) => c.charCodeAt(0)) : new Uint8Array(0));
+const bytesB64 = (b: Uint8Array) => {
+  let s = "";
+  for (let i = 0; i < b.length; i += 0x8000) s += String.fromCharCode(...b.subarray(i, i + 0x8000));
+  return btoa(s);
+};
 const STATE_BYTES = 17, PONG_BYTES = 13;
 const utf8 = new TextEncoder();
 const utf8decode = new TextDecoder();
@@ -36,7 +42,12 @@ export function encodeNetMessage(message: NetMessage): Uint8Array {
   const hasMatch = message.m !== undefined;
   const hasTime = message.t !== undefined;
   const hasPing = message.pi !== undefined;
+  // Entity replication (N1): the host's packet and a guest's acks, each length-prefixed.
+  const x = b64bytes(message.x);
+  const xa = b64bytes(message.xa);
+  const hasReplication = x.length > 0 || xa.length > 0;
   const size =
+    (hasReplication ? 4 + x.length + xa.length : 0) +
     1 +
     (states.length ? 1 + states.length * STATE_BYTES : 0) +
     (events.length ? 2 + events.length * 8 : 0) +
@@ -55,7 +66,8 @@ export function encodeNetMessage(message: NetMessage): Uint8Array {
     (hasTime ? TIME : 0) |
     (hasPing ? PING : 0) |
     (pongs.length ? PONGS : 0) |
-    (roster.length ? ROSTER : 0);
+    (roster.length ? ROSTER : 0) |
+    (hasReplication ? REPLICATION : 0);
   const u32 = (v: number) => {
     view.setUint32(at, v >>> 0, true);
     at += 4;
@@ -103,6 +115,14 @@ export function encodeNetMessage(message: NetMessage): Uint8Array {
       at += id.length;
     }
   }
+  if (hasReplication) {
+    for (const blob of [x, xa]) {
+      view.setUint16(at, blob.length, true);
+      at += 2;
+      bytes.set(blob, at);
+      at += blob.length;
+    }
+  }
   return bytes;
 }
 
@@ -111,7 +131,7 @@ export function decodeNetMessage(bytes: Uint8Array): NetMessage | null {
   if (bytes.length < 1) return null;
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
   const flags = bytes[0]!;
-  if (flags & ~(STATES | EVENTS | MATCH | TIME | PING | PONGS | ROSTER)) return null;
+  if (flags & ~(STATES | EVENTS | MATCH | TIME | PING | PONGS | ROSTER | REPLICATION)) return null;
   let at = 1;
   const need = (n: number) => at + n <= bytes.length;
   const u32 = () => {
@@ -127,6 +147,8 @@ export function decodeNetMessage(bytes: Uint8Array): NetMessage | null {
     pi?: number;
     po?: [number, number, number, number][];
     ro?: [number, string][];
+    x?: string;
+    xa?: string;
   } = {};
   if (flags & STATES) {
     if (!need(1)) return null;
@@ -175,6 +197,16 @@ export function decodeNetMessage(bytes: Uint8Array): NetMessage | null {
       const length = bytes[at++]!;
       if (!need(length)) return null;
       message.ro.push([slot, utf8decode.decode(bytes.subarray(at, at + length))]);
+      at += length;
+    }
+  }
+  if (flags & REPLICATION) {
+    for (const key of ["x", "xa"] as const) {
+      if (!need(2)) return null;
+      const length = view.getUint16(at, true);
+      at += 2;
+      if (!need(length)) return null;
+      if (length > 0) message[key] = bytesB64(bytes.subarray(at, at + length));
       at += length;
     }
   }

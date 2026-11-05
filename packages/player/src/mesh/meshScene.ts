@@ -104,6 +104,8 @@ export interface MeshInstance extends MeshSceneInstance {
   readonly props: Readonly<Record<string, ScenePropValue>>;
   /** The object's physics body, or null (ENGINE_ROADMAP.md, Phase 2). */
   readonly physics: PhysicsSpec | null;
+  /** Replicated (N1): the host sends its pose to every other player, at this priority. Absent = not. */
+  readonly replicate?: number;
   /** A skinned object's animation state machine (ENGINE_ROADMAP.md, Phase 3), or absent. */
   readonly animator?: AnimatorSpec;
   /**
@@ -401,6 +403,7 @@ export function parseMeshScene(raw: string | null | undefined): MeshScene | null
       tags: readSceneTags(record.tags),
       props: readSceneProps(record.props),
       physics: readPhysicsSpec(record.physics),
+      ...(typeof (record as { replicate?: unknown }).replicate === "number" && Number.isFinite((record as { replicate: number }).replicate) && (record as { replicate: number }).replicate > 0 ? { replicate: Math.min(100, (record as { replicate: number }).replicate) } : {}),
       ...(readAnimatorSpec(record.animator) ? { animator: readAnimatorSpec(record.animator)! } : {}),
       ...(typeof record.level === "string" && record.level ? { levelId: record.level } : {}),
       ...(record.alwaysLoaded === true ? { alwaysLoaded: true as const } : {}),

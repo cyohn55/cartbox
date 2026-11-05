@@ -32,6 +32,7 @@ import {
   type NetState,
 } from "./netplay.js";
 import { encodeNetMessage } from "./netCodec.js";
+import { ReplicationClient, ReplicationHost, type EntityPose, type ReplicationOptions, type Vec3 as RVec3 } from "./replication.js";
 
 /** A room member as the transport's presence reports it. */
 export interface NetPeer {
@@ -63,7 +64,18 @@ export interface NetMessage {
   readonly ro?: readonly (readonly [number, string])[];
   /** Transport-level: a WebRTC handshake message for one peer (see DirectTransport). Never reaches a session. */
   readonly sig?: NetSignal;
+  /** Entity replication (N1): the host's packet of replicated objects' poses, base64. */
+  readonly x?: string;
+  /** Entity replication (N1): a guest's acks (and its camera), base64. */
+  readonly xa?: string;
 }
+
+const toB64 = (b: Uint8Array) => {
+  let s = "";
+  for (let i = 0; i < b.length; i += 0x8000) s += String.fromCharCode(...b.subarray(i, i + 0x8000));
+  return btoa(s);
+};
+const fromB64 = (v: string) => Uint8Array.from(atob(v), (c) => c.charCodeAt(0));
 
 /** A WebRTC handshake message, relayed to one peer. */
 export interface NetSignal {
@@ -170,6 +182,9 @@ export class NetSession {
   /** The roster changed (as host): send it in the next message. */
   private rosterDirty = false;
   private lastRosterTick = -Infinity;
+  /** Entity replication (N1): what to send (as host) and where this camera is, and each half. */
+  private replication: { entities: () => readonly EntityPose[]; viewer: () => RVec3; host: ReplicationHost; client: ReplicationClient } | null = null;
+  private readonly viewers = new Map<string, RVec3>();
 
   constructor(
     private readonly transport: NetTransport,
@@ -183,9 +198,31 @@ export class NetSession {
         this.held.clear();
       }
       this.reslot();
+      if (this.replication) {
+        const present = new Set(this.peers.map((p) => p.id));
+        for (const id of [...this.viewers.keys()]) if (!present.has(id)) {
+          this.viewers.delete(id);
+          this.replication.host.forget(id);
+        }
+      }
       this.emit();
     });
     transport.onMessage((message, from) => this.receive(message, from));
+  }
+
+  /**
+   * Replicate objects (N1): as host, `entities` gives the replicated objects'
+   * poses each send; as a guest, the session acks what it got and reports
+   * `viewer` (its camera) for relevancy. Guests read the result with
+   * {@link replicated}.
+   */
+  replicate(entities: () => readonly EntityPose[], viewer: () => RVec3, options?: ReplicationOptions): void {
+    this.replication = { entities, viewer, host: new ReplicationHost(options), client: new ReplicationClient() };
+  }
+
+  /** The replicated objects' poses as last heard from the host (empty as host). */
+  replicated(): Map<number, EntityPose> {
+    return this.replication && !this.isHost ? this.replication.client.poses() : new Map();
   }
 
   /** Bytes this session has sent and received, measured in the messages' binary form (netCodec.ts). */
@@ -393,6 +430,8 @@ export class NetSession {
       pi?: number;
       po?: [number, number, number, number][];
       ro?: [number, string][];
+      x?: string;
+      xa?: string;
     } = {};
     if (this.outStates.size > 0) message.s = [...this.outStates].map(([slot, w]) => [slot, w[0], w[1], w[2], w[3]]);
     if (this.isHost) message.m = this.hostMatch;
@@ -420,7 +459,12 @@ export class NetSession {
       this.lastPingTick = this.tick;
     }
     if (this.pongsDue.length > 0) message.po = this.pongsDue.splice(0).map(([slot, t0, t1]) => [slot, t0, t1, shared >>> 0]);
-    if (message.s || message.e || message.m !== undefined || message.pi !== undefined || message.po || message.ro) {
+    // Entity replication (N1): the host's poses, every guest's acks.
+    if (this.replication && this.peers.length > 1) {
+      if (this.isHost) message.x = toB64(this.replication.host.send(this.replication.entities(), [...this.viewers.values(), this.replication.viewer()]));
+      else message.xa = toB64(this.replication.client.ack(this.replication.viewer()));
+    }
+    if (message.s || message.e || message.m !== undefined || message.pi !== undefined || message.po || message.ro || message.x || message.xa) {
       this.transport.send(message);
       this.sentBytes += encodeNetMessage(message).length;
       this.lastSent = signature;
@@ -452,6 +496,17 @@ export class NetSession {
     const sender = from === undefined ? -1 : this.slotOf(from);
     for (const event of message.e ?? []) if (this.pendingEvents.length < 200 && sender >= 0 && sender < NET_SLOTS) this.pendingEvents.push({ event, from: sender });
     if (message.m !== undefined && !this.isHost) this.hostMatch = message.m;
+    if (this.replication && from !== undefined) {
+      try {
+        if (message.x && !this.isHost) this.replication.client.receive(fromB64(message.x));
+        if (message.xa && this.isHost) {
+          const viewer = this.replication.host.receive(from, fromB64(message.xa));
+          if (viewer) this.viewers.set(from, viewer);
+        }
+      } catch {
+        // A malformed packet is dropped.
+      }
+    }
     // The clock: answer a guest's ping (as host), or take the host's answer to ours.
     if (message.pi !== undefined && this.isHost) {
       const slot = from === undefined ? -1 : this.slotOf(from);

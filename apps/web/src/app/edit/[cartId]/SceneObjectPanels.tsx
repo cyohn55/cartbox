@@ -42,6 +42,7 @@ import {
   parentCandidates,
   setMeshParent,
   setMeshPhysics,
+  setMeshReplicate,
   setMeshCore,
   setMeshPhysicsWorld,
   setMeshProp,
@@ -1186,6 +1187,13 @@ export function PhysicsPanel({
               }}
             />
           )}
+          <label style={{ display: "flex", gap: 6, alignItems: "center", fontSize: 12 }} title="Netplay (N1): the host sends where this object is to every other player, nearest and most important first">
+            <input type="checkbox" aria-label="Replicated" checked={Boolean(entry.replicate)} onChange={(event) => onChange(setMeshReplicate(sidecar, entry.id, event.target.checked ? 1 : null))} />
+            Replicated over netplay
+            {entry.replicate ? (
+              <input type="number" aria-label="Replication priority" min={0.1} max={100} step={0.5} value={entry.replicate} onChange={(event) => onChange(setMeshReplicate(sidecar, entry.id, Number(event.target.value) || 1))} style={{ width: 50 }} />
+            ) : null}
+          </label>
           {spec.body === "dynamic" && (
             <VehicleEditor
               sidecar={sidecar}

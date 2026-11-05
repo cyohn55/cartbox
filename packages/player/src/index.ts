@@ -648,3 +648,4 @@ export {
   type ManifestStorage,
   type PipelineStats,
 } from "./render/pipelineCache.js";
+export { ReplicationClient, ReplicationHost, type EntityPose, type ReplicationOptions } from "./net/replication.js";

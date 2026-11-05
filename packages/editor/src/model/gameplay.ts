@@ -25,6 +25,11 @@
  *   grants its tags for `duration`; `cartbox.ability.update(owner, dt)` runs
  *   the clocks.
  *
+ * - **Lag compensation** (`cartbox.rewind`, N3): the host records each
+ *   target's joints every tick (`record`), and tests a shot against the
+ *   targets' hitboxes as they were at the shooter's view time (`ray`),
+ *   interpolated between ticks and never further back than `max` seconds.
+ *
  * Time is the `dt` the cart passes and there is no randomness, so a replay
  * plays out the same.
  */
@@ -193,9 +198,63 @@ function cartbox.ability.update(owner, dt)
   st.active = keep
 end
 function cartbox.ability.cooldown(owner, ab) return state(owner).ready[ab.name] or 0 end
+
+-- Lag compensation (N3) ---------------------------------------------------------------
+-- The host records where each target's joints were, tick by tick, and tests a
+-- shot against them as they were when the shooter saw them, never further back
+-- than the maximum.
+cartbox.rewind = {}
+function cartbox.rewind.new(o) o = o or {} return { max = o.max or 0.25, keep = o.keep or 1, frames = {} } end
+function cartbox.rewind.record(h, now, id, joints)
+  local list = h.frames[id]
+  if list == nil then list = {} h.frames[id] = list end
+  local copy = {}
+  for name, p in pairs(joints) do copy[name] = { p[1], p[2], p[3] } end
+  list[#list + 1] = { t = now, joints = copy }
+  while #list > 1 and list[1].t < now - h.keep do table.remove(list, 1) end
+end
+-- Joints as they were at time t (held within the maximum before now), between the two recorded frames around it.
+function cartbox.rewind.at(h, id, t, now)
+  local list = h.frames[id]
+  if list == nil or #list == 0 then return nil end
+  t = math.max(now - h.max, math.min(now, t))
+  if t <= list[1].t then return list[1].joints end
+  for i = #list, 1, -1 do
+    local a = list[i]
+    if a.t <= t then
+      local b = list[i + 1]
+      if b == nil or b.t <= a.t then return a.joints end
+      local k = (t - a.t) / (b.t - a.t)
+      local out = {}
+      for name, p in pairs(a.joints) do
+        local q = b.joints[name] or p
+        out[name] = { p[1] + (q[1] - p[1]) * k, p[2] + (q[2] - p[2]) * k, p[3] + (q[3] - p[3]) * k }
+      end
+      return out
+    end
+  end
+  return list[1].joints
+end
+-- A shot at the targets as the shooter saw them: each target's hitboxes placed at time t, the nearest hit.
+function cartbox.rewind.ray(h, targets, t, now, ox, oy, oz, dx, dy, dz, max)
+  local best, bestZone, bestD, bestM = nil, nil, max or math.huge, 1
+  local ids = {}
+  for id in pairs(targets) do ids[#ids + 1] = id end
+  table.sort(ids, function(a, b) return tostring(a) < tostring(b) end)
+  for _, id in ipairs(ids) do
+    local joints = cartbox.rewind.at(h, id, t, now)
+    if joints then
+      local hb = targets[id]
+      cartbox.hitbox.place(hb, joints)
+      local zone, d, m = cartbox.hitbox.ray(hb, ox, oy, oz, dx, dy, dz, bestD)
+      if zone and d < bestD then best, bestZone, bestD, bestM = id, zone, d, m end
+    end
+  end
+  return best, bestZone, best and bestD or nil, bestM
+end
 end`;
 
 /** The framework, when the cart's code names any of it. */
 export function gameplayLua(code: string | null): string {
-  return /cartbox\.(tags|health|damage|hitbox|ability)\b/.test(code ?? "") ? GAMEPLAY_LUA : "";
+  return /cartbox\.(tags|health|damage|hitbox|ability|rewind)\b/.test(code ?? "") ? GAMEPLAY_LUA : "";
 }

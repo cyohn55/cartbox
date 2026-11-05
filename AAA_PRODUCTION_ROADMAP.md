@@ -393,13 +393,44 @@ This roadmap closes those gaps. It does not repeat the open items of other roadm
 
 ### N. Networking
 
-- [ ] **N1. Entity replication.** Any object can be marked replicated, with priority, relevancy by distance and delta compression, beyond the 4 words per player.
+- [x] **N1. Entity replication.** Any object can be marked replicated, with priority, relevancy by distance and delta compression, beyond the 4 words per player. **Done.**
+  - **Marking:** an object marked replicated (the Physics panel's checkbox, with a priority) has its pose sent by the host to every other player. Guests draw it there over everything else.
+  - **What's sent** (`net/replication.ts`): position to 1/256 m and rotation as a quaternion to 1/16384, quantized so both ends compare integers.
+  - **Priority and relevancy:** each send, an entity's score grows by its priority times its relevance to the nearest player's camera (each guest reports its own; 1 within `near`, 0 beyond `far`, and never sent past it). The highest scores fill the packet's byte budget, so the rest catch up over the next sends.
+  - **Delta compression:**
+    - Guests ack the newest packet and a bit for each of the 32 before it.
+    - The host deltas each entity against the newest packet that carried it and that every guest got, sending only the changed fields. An entity unchanged since then costs nothing.
+    - Loss costs size, never correctness.
+  - **Transport:** it rides the session's messages (`x` and `xa`), the binary codec's spare flag, and the direct links' unreliable state channel.
+  - *Tests (`replication.test.ts`, 6):*
+    - two guests converge on the host's poses to the quantization's precision;
+    - a still scene of 40 sends nothing, and one moved crate sends one field, 40× smaller than the full packet;
+    - 200 ticks of 30% loss (different for each guest) and late packets end with both guests exact;
+    - priority and nearness order a tight budget, out-of-range entities are never sent, and the far ones get their turns;
+    - it rides two real sessions over the memory hub, and the codec round-trips it;
+    - the flag survives the sidecar and the player's scene.
+  - *Left:* interpolation between replicated poses on guests (they snap to each packet, which is smooth at 30 Hz over direct links but not over the relay); replicating values other than poses.
 - [ ] **N2. A headless authoritative host.** The cart runs headless (the verification worker already does) as a room's host, so no player is the authority.
-- [ ] **N3. Lag compensation.** The host rewinds hitboxes to the shooter's view time for hit tests, bounded by a maximum.
+- [x] **N3. Lag compensation.** The host rewinds hitboxes to the shooter's view time for hit tests, bounded by a maximum. **Done, as part of K6's runtime.**
+  - `cartbox.rewind.new{max}` keeps each target's joint positions as the host records them each tick (`record`).
+  - `cartbox.rewind.ray(history, targets, t, now, shot)` places each target's K6 hitboxes where they were at the shooter's view time t, interpolated between ticks and clamped to `max` seconds back, and returns the nearest target, zone, distance and multiplier.
+  - The shooter's view time is its shot's stamp less its view lag, both of which the net inbox already carries (L4).
+  - *Test (in `gameplay.test.ts`, on the Modern core):* a target running at 10 m/s is missed where it is now but hit where the shooter saw it 0.07 s ago, and a shooter claiming 0.4 s gets the 0.2 s maximum.
+  - *Left:* moving Lockout's own L6 compensation onto it.
 
 ### W. Team workflow
 
-- [ ] **W1. Delta undo.** Undo records the changed sidecars and engine banks, not the whole cart, with no fixed count but a memory budget.
+- [x] **W1. Delta undo.** Undo records the changed sidecars and engine banks, not the whole cart, with no fixed count but a memory budget. **Done.**
+  - `DeltaHistory` keeps the present whole and every other step as a patch, with the same interface as EditHistory: record, undo, redo, a fork dropping redo.
+  - The editor's codec (`historyDelta.ts`) makes a cart's patch from the runs of its .tic bytes that changed (runs closer than 16 bytes merged) and the sidecars that changed. Sidecar values are immutable, so an unchanged one is the same object and costs nothing. Each value's size is measured once.
+  - `useEditorHistory` holds a 48 MB budget instead of 60 whole snapshots. Steps are forgotten oldest first only past it, so there is no fixed count.
+  - *Tests (`delta-history.test.ts`, 4):*
+    - byte patches round-trip any change, a change of length included;
+    - a walk of undos and redos through 20 edits gives exactly what whole snapshots gave, and an edit after undoing forks the future;
+    - 200 small edits of a 300 KB cart keep all 201 steps in under 40 KB (whole snapshots: 60 MB), and undo all the way back exactly;
+    - a 10 KB budget forgets the oldest steps and still undoes what it holds;
+    - a sidecar edit costs that sidecar only.
+  - `cart-snapshot.test.ts` passes unchanged.
 - [ ] **W2. Co-editing.** Presence and live edits of the scene and sidecars between editors of one cart (a CRDT over the existing realtime channel), with locks for binary assets.
 - [ ] **W3. Branches.** Snapshots become branches that can be compared and merged per object.
 
