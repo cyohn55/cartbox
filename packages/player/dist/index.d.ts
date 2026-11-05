@@ -10217,7 +10217,7 @@ declare function askMotionPermission(view?: Window): Promise<boolean>;
  *                                     shape = radius (sphere), {hx, hy, hz} (box half-extents)
  *                                     or {radius, halfheight} (upright capsule)
  *   cartbox.hit(slot)                 -> hit, obj, x, y, z, nx, ny, nz, distance
- *   cartbox.layers(l1, l2, ...)       -> a mask of those collision layers (0-15) for a ray's or a
+ *   cartbox.layers(l1, l2, ...)       -> a mask of those collision layers (0-15, or the scene's names for them) for a ray's or a
  *                                     sweep's mask: it hits only bodies on them (S3; nil = all)
  *   cartbox.fire(x, y, z, vx, vy, vz, {radius, gravity, drag, life, owner, mask, push})
  *                                     -> a projectile's id (S4, the dedicated core; nil elsewhere):

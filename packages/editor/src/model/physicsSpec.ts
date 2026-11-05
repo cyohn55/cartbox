@@ -293,10 +293,50 @@ export function readPhysicsSpec(value: unknown): PhysicsSpec | null {
  */
 export interface PhysicsWorldSettings {
   readonly deterministic?: boolean;
+  /**
+   * Names for the collision layers (S3), by layer number: "Players" and "Glass"
+   * read better than 3 and 5. An empty name leaves the layer unnamed. Shown in
+   * the editor, and `cartbox.layers("Players", "Glass")` takes them.
+   */
+  readonly layerNames?: readonly string[];
 }
+
+/** The longest a layer's name may be. */
+export const PHYSICS_LAYER_NAME_MAX = 24;
 
 /** Read stored world settings, or null when none are set. */
 export function readPhysicsWorld(value: unknown): PhysicsWorldSettings | null {
   if (typeof value !== "object" || value === null) return null;
-  return (value as Record<string, unknown>).deterministic === true ? { deterministic: true } : null;
+  const raw = value as Record<string, unknown>;
+  const names = Array.isArray(raw.layerNames)
+    ? raw.layerNames.slice(0, PHYSICS_LAYERS).map((n) => (typeof n === "string" ? [...n].filter((ch) => ch >= " " && ch !== "\u007f").join("").trim().slice(0, PHYSICS_LAYER_NAME_MAX) : ""))
+    : [];
+  while (names.length > 0 && names[names.length - 1] === "") names.pop();
+  const out: { deterministic?: boolean; layerNames?: string[] } = {};
+  if (raw.deterministic === true) out.deterministic = true;
+  if (names.length > 0) out.layerNames = names;
+  return Object.keys(out).length > 0 ? out : null;
+}
+
+/** A layer's label: its name and number ("3 Players"), or the number alone. */
+export function physicsLayerLabel(world: PhysicsWorldSettings | null | undefined, layer: number): string {
+  const name = world?.layerNames?.[layer];
+  return name ? `${layer} ${name}` : String(layer);
+}
+
+/**
+ * The Lua that tells \`cartbox.layers\` the scene's layer names (S3), or "" when
+ * none are named. A name used twice means its first layer.
+ */
+export function physicsLayerNamesLua(world: PhysicsWorldSettings | null | undefined): string {
+  const names = world?.layerNames ?? [];
+  const entries: string[] = [];
+  const seen = new Set<string>();
+  names.forEach((name, layer) => {
+    if (!name || seen.has(name)) return;
+    seen.add(name);
+    entries.push(`[${JSON.stringify(name)}]=${layer}`);
+  });
+  if (entries.length === 0) return "";
+  return `cartbox = cartbox or {}\ncartbox._layernames = {${entries.join(",")}}\n`;
 }

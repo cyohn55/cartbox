@@ -106,7 +106,7 @@ import { GpuCanvasSurface, type CapturedFrame } from "./render/GpuCanvasSurface.
 import { browserStorage, gpuPresentFailed, watchGpuPresent, type WatchedDevice } from "./render/presentFallback.js";
 import type { SceneRenderer } from "./render/sceneRenderer.js";
 import type { TextureLookup } from "./world/worldScene.js";
-import { audioSwitches, behaviourTreesLua, bundleLuaModules, gameplayLua, perceptionLua, SpatialLoader, WorldPartition, partitionWorld, actionMask, createHoloCache, holoBindingKeys, holoDocuments, renderHoloDocument, translate, reboundActions, type DecodedTexture, type EncodedImage, type InputAction, type Mat4, colorFilterSvg, DEFAULT_ACCESSIBILITY, type AccessibilitySettings, type ColorFilter, type WeatherSettings } from "@cartbox/editor";
+import { audioSwitches, behaviourTreesLua, physicsLayerNamesLua, bundleLuaModules, gameplayLua, perceptionLua, SpatialLoader, WorldPartition, partitionWorld, actionMask, createHoloCache, holoBindingKeys, holoDocuments, renderHoloDocument, translate, reboundActions, type DecodedTexture, type EncodedImage, type InputAction, type Mat4, colorFilterSvg, DEFAULT_ACCESSIBILITY, type AccessibilitySettings, type ColorFilter, type WeatherSettings } from "@cartbox/editor";
 import type { ControlScheme, InspectedObject, PlayerOptions, SequenceOptions } from "./types.js";
 
 /**
@@ -467,6 +467,9 @@ export class Player {
       // Damage, abilities and tags (K6): when the cart names them.
       const gameplay = gameplayLua(sourceCode);
       if (gameplay) prepared = prependLuaCode(prepared, gameplay);
+      // The scene's names for its collision layers (S3), for cartbox.layers("Players").
+      const layerNames = physicsLayerNamesLua(this.options.mesh?.physicsWorld);
+      if (layerNames) prepared = prependLuaCode(prepared, layerNames);
       const components = componentsSdkLua(this.options.mesh);
       if (components) prepared = appendLuaCode(prependLuaCode(prepared, components.prelude), components.postlude);
       const collisionLua = collisionSdkLua(this.options.collision);

@@ -22,6 +22,9 @@ import {
   PHYSICS_SHAPE_KINDS,
   PHYSICS_LAYERS,
   PHYSICS_MASK_ALL,
+  PHYSICS_LAYER_NAME_MAX,
+  physicsLayerLabel,
+  type PhysicsWorldSettings,
   SCENE_PROP_MAX,
   SCENE_TAG_MAX,
   isSceneKey,
@@ -988,7 +991,10 @@ export function PhysicsWorldPanel({ sidecar, onChange }: { sidecar: MeshSidecar;
   const hasBodies =
     sidecar.meshes.some((m) => m.physics) || (sidecar.prefabs ?? []).some((p) => p.nodes.some((n) => n.physics));
   if (!hasBodies && !sidecar.physicsWorld) return null;
-  const deterministic = sidecar.physicsWorld?.deterministic === true;
+  const world = sidecar.physicsWorld;
+  const deterministic = world?.deterministic === true;
+  const names = world?.layerNames ?? [];
+  const setWorld = (patch: Partial<PhysicsWorldSettings>) => onChange(setMeshPhysicsWorld(sidecar, { ...(world ?? {}), ...patch }));
   return (
     <RailGroup label="Physics world">
       <label style={{ display: "flex", gap: 6, alignItems: "center", fontSize: 12 }}>
@@ -996,7 +1002,7 @@ export function PhysicsWorldPanel({ sidecar, onChange }: { sidecar: MeshSidecar;
           type="checkbox"
           aria-label="Deterministic physics"
           checked={deterministic}
-          onChange={(event) => onChange(setMeshPhysicsWorld(sidecar, event.target.checked ? { deterministic: true } : null))}
+          onChange={(event) => setWorld({ deterministic: event.target.checked })}
         />
         Deterministic — the same result in every browser
       </label>
@@ -1005,7 +1011,50 @@ export function PhysicsWorldPanel({ sidecar, onChange }: { sidecar: MeshSidecar;
           ? "Same scene + same inputs = the same simulation everywhere, for replays and for online games that each simulate shared objects. A little slower. cartbox.physicshash() lets players compare states."
           : "Turn on for replays or online games where every player simulates the same objects."}
       </RailHint>
+      <details>
+        <summary style={{ fontSize: 12, cursor: "pointer" }}>Layer names</summary>
+        <div role="group" aria-label="Layer names" style={{ display: "grid", gridTemplateColumns: "24px 1fr", gap: 2, alignItems: "center", fontSize: 11, marginTop: 4 }}>
+          {Array.from({ length: PHYSICS_LAYERS }, (_, l) => (
+            <LayerNameField
+              key={l}
+              layer={l}
+              name={names[l] ?? ""}
+              onCommit={(name) => {
+                const next = Array.from({ length: PHYSICS_LAYERS }, (_, i) => (i === l ? name : (names[i] ?? "")));
+                setWorld({ layerNames: next });
+              }}
+            />
+          ))}
+        </div>
+        <RailHint>Names show in each body's layer list, and cartbox.layers("Players", "Glass") takes them.</RailHint>
+      </details>
     </RailGroup>
+  );
+}
+
+/** One layer's name, saved when the field loses focus (or on Enter), so typing isn't an edit per key. */
+function LayerNameField({ layer, name, onCommit }: { layer: number; name: string; onCommit: (name: string) => void }) {
+  const [draft, setDraft] = useState(name);
+  useEffect(() => setDraft(name), [name]);
+  const commit = () => {
+    if (draft.trim() !== name) onCommit(draft.trim());
+  };
+  return (
+    <>
+      <span style={{ opacity: 0.7, textAlign: "right" }}>{layer}</span>
+      <input
+        aria-label={`Layer ${layer} name`}
+        value={draft}
+        maxLength={PHYSICS_LAYER_NAME_MAX}
+        placeholder="unnamed"
+        onChange={(event) => setDraft(event.target.value)}
+        onBlur={commit}
+        onKeyDown={(event) => {
+          if (event.key === "Enter") commit();
+        }}
+        style={{ ...inputStyle, fontSize: 11, padding: "1px 4px" }}
+      />
+    </>
   );
 }
 
@@ -1169,6 +1218,7 @@ export function PhysicsPanel({
             layer={spec.layer ?? 0}
             mask={spec.mask ?? PHYSICS_MASK_ALL}
             trigger={spec.trigger === true}
+            world={sidecar.physicsWorld}
             onChange={(layer, mask) => {
               // Replace the spec outright, so the defaults drop out as readPhysicsSpec would drop them.
               const { layer: _l, mask: _m, ...rest } = spec;
@@ -1235,7 +1285,19 @@ export function PhysicsPanel({
  * S3): two bodies touch only when each one's mask holds the other's layer; a
  * trigger detects only the layers in its mask.
  */
-function LayerEditor({ layer, mask, trigger, onChange }: { layer: number; mask: number; trigger: boolean; onChange: (layer: number, mask: number) => void }) {
+function LayerEditor({
+  layer,
+  mask,
+  trigger,
+  world,
+  onChange,
+}: {
+  layer: number;
+  mask: number;
+  trigger: boolean;
+  world?: PhysicsWorldSettings | null;
+  onChange: (layer: number, mask: number) => void;
+}) {
   const layers = Array.from({ length: PHYSICS_LAYERS }, (_, i) => i);
   return (
     <div style={{ display: "grid", gap: 4 }}>
@@ -1244,7 +1306,7 @@ function LayerEditor({ layer, mask, trigger, onChange }: { layer: number; mask: 
         <select aria-label="Physics layer" value={layer} onChange={(event) => onChange(Number(event.target.value), mask)} style={inputStyle}>
           {layers.map((l) => (
             <option key={l} value={l}>
-              {l}
+              {physicsLayerLabel(world, l)}
             </option>
           ))}
         </select>
@@ -1258,7 +1320,8 @@ function LayerEditor({ layer, mask, trigger, onChange }: { layer: number; mask: 
               key={l}
               type="button"
               aria-pressed={on}
-              aria-label={`Layer ${l}`}
+              aria-label={`Layer ${physicsLayerLabel(world, l)}`}
+              title={physicsLayerLabel(world, l)}
               onClick={() => onChange(layer, (mask ^ (1 << l)) & PHYSICS_MASK_ALL)}
               style={{ ...inputStyle, padding: "2px 0", fontSize: 11, textAlign: "center", opacity: on ? 1 : 0.4, fontWeight: on ? 600 : 400 }}
             >

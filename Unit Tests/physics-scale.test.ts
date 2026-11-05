@@ -16,7 +16,19 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 import RAPIER from "@dimforge/rapier3d-compat";
 import { beforeAll, describe, expect, it } from "vitest";
-import { PHYSICS_LAYERS, PHYSICS_MASK_ALL, physicsGroups, queryGroups, readPhysicsSpec, serializeMeshAsset, type MeshAsset } from "@cartbox/editor";
+import {
+  PHYSICS_LAYERS,
+  PHYSICS_LAYER_NAME_MAX,
+  PHYSICS_MASK_ALL,
+  physicsGroups,
+  physicsLayerLabel,
+  physicsLayerNamesLua,
+  queryGroups,
+  readPhysicsSpec,
+  readPhysicsWorld,
+  serializeMeshAsset,
+  type MeshAsset,
+} from "@cartbox/editor";
 import {
   DIRECT_MAX_BODIES,
   PHYS_BLOCK_BYTES,
@@ -78,6 +90,33 @@ const FLOOR: Entry = { id: "floor", position: [0, -0.5, 0], scale: [20, 1, 20], 
 function step(session: PhysicsSession, n: number): void {
   for (let i = 0; i < n; i += 1) session.run([]);
 }
+
+describe("layer names (S3)", () => {
+  it("keeps up to 16 names, trimmed and cut short, and drops trailing blanks", () => {
+    expect(readPhysicsWorld({ layerNames: [] })).toBeNull();
+    expect(readPhysicsWorld({ layerNames: ["", "  "] })).toBeNull();
+    const world = readPhysicsWorld({ deterministic: true, layerNames: ["World", 7, " Players ", "x".repeat(40), "", "Gl\u0001ass", ""] })!;
+    expect(world.deterministic).toBe(true);
+    expect(world.layerNames).toEqual(["World", "", "Players", "x".repeat(PHYSICS_LAYER_NAME_MAX), "", "Glass"]);
+    expect(readPhysicsWorld({ layerNames: Array.from({ length: 30 }, (_, i) => `L${i}`) })!.layerNames).toHaveLength(PHYSICS_LAYERS);
+  });
+
+  it("labels a layer by number and name", () => {
+    const world = readPhysicsWorld({ layerNames: ["", "", "", "Players"] });
+    expect(physicsLayerLabel(world, 3)).toBe("3 Players");
+    expect(physicsLayerLabel(world, 2)).toBe("2");
+    expect(physicsLayerLabel(null, 0)).toBe("0");
+  });
+
+  it("gives cartbox.layers the names, the first layer winning a repeated one", () => {
+    expect(physicsLayerNamesLua(null)).toBe("");
+    const lua = physicsLayerNamesLua(readPhysicsWorld({ layerNames: ["World", "Glass", "Glass", 'Odd "name"'] }));
+    expect(lua).toContain('["World"]=0');
+    expect(lua).toContain('["Glass"]=1');
+    expect(lua).not.toContain("=2");
+    expect(lua).toContain('["Odd \\"name\\""]=3');
+  });
+});
 
 describe("collision layers in the spec (S3)", () => {
   it("keeps a layer and a mask only when they aren't the defaults, clamped", () => {
@@ -276,6 +315,8 @@ function TIC()
     pmem(103, h2 and 1 or 0)
     pmem(104, cartbox.ray(1, 8, 10, 8, 0, -1, 0, 50, nil, cartbox.layers(3)) and 1 or 0)
     pmem(105, cartbox.ray(2, 8, 10, 8, 0, -1, 0, 50, nil, cartbox.layers(0, 3)) and 1 or 0)
+    pmem(112, cartbox.layers("Ghosts", "Crates", "Nope", 0))
+    pmem(113, cartbox.ray(3, 8, 10, 8, 0, -1, 0, 50, nil, cartbox.layers("Ghosts")) and 1 or 0)
     local s = cartbox.sweep(40, 0.5, 8, 10, 8, 0, -1, 0, 50)
     pmem(106, s and 1 or 0)
   end
@@ -292,6 +333,7 @@ function TIC()
 end`;
     const layout = RAM_LAYOUTS.xbox360;
     let tic = codeChunks(new TextEncoder().encode(code));
+    tic = prependLuaCode(tic, physicsLayerNamesLua(readPhysicsWorld({ layerNames: ["", "Crates", "", "Ghosts"] })));
     tic = prependLuaCode(tic, sceneObjectsSdkLua(sc));
     tic = prependLuaCode(tic, runtimeSdkLua(sc, layout, { maxBodies: DIRECT_MAX_BODIES }));
     tic = injectSdk(tic);
@@ -327,6 +369,8 @@ end`;
     expect(word(109)).toBeGreaterThan(5); // the ghost fell through the floor
     expect(word(110)).toBe(150); // every crate in the zone, past the block's 64 overlaps
     expect(word(111)).toBe(1);
+    expect(word(112)).toBe(0b1011); // named layers 3 and 1, an unknown name ignored, and 0
+    expect(word(113)).toBe(0); // the "Ghosts" layer only: nothing under the ray
     session.destroy();
   }, 120_000);
 });

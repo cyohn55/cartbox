@@ -309,7 +309,7 @@ export const SDK_REFERENCE: readonly SdkGroup[] = [
       {
         name: "cartbox.layers",
         signature: "cartbox.layers(layer, ...) -> mask",
-        doc: "A mask of collision layers (0-15) for a ray's or a sweep's mask: it then hits only bodies on those layers. Set each body's layer, and the layers it collides with, under Physics in the Inspector.",
+        doc: "A mask of collision layers (0-15, or the names the scene gives them under Physics world) for a ray's or a sweep's mask: it then hits only bodies on those layers. Set each body's layer, and the layers it collides with, under Physics in the Inspector.",
         snippet: "local walls = cartbox.layers(0, 2)",
       },
       {

@@ -16,7 +16,7 @@
  *                                     shape = radius (sphere), {hx, hy, hz} (box half-extents)
  *                                     or {radius, halfheight} (upright capsule)
  *   cartbox.hit(slot)                 -> hit, obj, x, y, z, nx, ny, nz, distance
- *   cartbox.layers(l1, l2, ...)       -> a mask of those collision layers (0-15) for a ray's or a
+ *   cartbox.layers(l1, l2, ...)       -> a mask of those collision layers (0-15, or the scene's names for them) for a ray's or a
  *                                     sweep's mask: it hits only bodies on them (S3; nil = all)
  *   cartbox.fire(x, y, z, vx, vy, vz, {radius, gravity, drag, life, owner, mask, push})
  *                                     -> a projectile's id (S4, the dedicated core; nil elsewhere):
@@ -381,10 +381,12 @@ function PHYSICS_CALLS(): string {
     local i = _obj(o)
     if i and _slot[i] then _cmd(${PHYS_OP_UNJOIN}, i) end
   end
-  -- A layer mask from layer numbers (S3): cartbox.layers(0, 2) hits layers 0 and 2.
+  -- A layer mask from layer numbers (S3): cartbox.layers(0, 2) hits layers 0 and 2;
+  -- or names, as the scene names its layers: cartbox.layers("Players", "Glass").
   cartbox.layers = function(...)
     local m = 0
     for _, l in ipairs({...}) do
+      if type(l) == "string" then l = (cartbox._layernames or {})[l] or -1 end
       l = math.floor(l)
       if l >= 0 and l < ${PHYSICS_LAYERS} then m = m | (1 << l) end
     end

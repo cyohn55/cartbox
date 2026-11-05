@@ -10209,10 +10209,12 @@ function PHYSICS_CALLS() {
     local i = _obj(o)
     if i and _slot[i] then _cmd(${PHYS_OP_UNJOIN}, i) end
   end
-  -- A layer mask from layer numbers (S3): cartbox.layers(0, 2) hits layers 0 and 2.
+  -- A layer mask from layer numbers (S3): cartbox.layers(0, 2) hits layers 0 and 2;
+  -- or names, as the scene names its layers: cartbox.layers("Players", "Glass").
   cartbox.layers = function(...)
     local m = 0
     for _, l in ipairs({...}) do
+      if type(l) == "string" then l = (cartbox._layernames or {})[l] or -1 end
       l = math.floor(l)
       if l >= 0 and l < ${PHYSICS_LAYERS} then m = m | (1 << l) end
     end
@@ -39801,7 +39803,7 @@ function watchGpuPresent(device, storage, ms = PRESENT_WATCH_MS, schedule = (fn,
 }
 
 // src/player.ts
-import { audioSwitches as audioSwitches2, behaviourTreesLua, bundleLuaModules, gameplayLua, perceptionLua, SpatialLoader, WorldPartition, partitionWorld, actionMask, createHoloCache, holoBindingKeys as holoBindingKeys2, holoDocuments as holoDocuments2, renderHoloDocument, translate, reboundActions, colorFilterSvg, DEFAULT_ACCESSIBILITY } from "@cartbox/editor";
+import { audioSwitches as audioSwitches2, behaviourTreesLua, physicsLayerNamesLua, bundleLuaModules, gameplayLua, perceptionLua, SpatialLoader, WorldPartition, partitionWorld, actionMask, createHoloCache, holoBindingKeys as holoBindingKeys2, holoDocuments as holoDocuments2, renderHoloDocument, translate, reboundActions, colorFilterSvg, DEFAULT_ACCESSIBILITY } from "@cartbox/editor";
 var DIRECT_CORE_URL = "/engine/modern-core/modern-core.js";
 function directCoreBeside(engineUrl) {
   const at = engineUrl?.lastIndexOf("/engine/") ?? -1;
@@ -40105,6 +40107,8 @@ var Player = class {
       if (senseLua) prepared = prependLuaCode(prepared, senseLua);
       const gameplay = gameplayLua(sourceCode);
       if (gameplay) prepared = prependLuaCode(prepared, gameplay);
+      const layerNames = physicsLayerNamesLua(this.options.mesh?.physicsWorld);
+      if (layerNames) prepared = prependLuaCode(prepared, layerNames);
       const components = componentsSdkLua(this.options.mesh);
       if (components) prepared = appendLuaCode(prependLuaCode(prepared, components.prelude), components.postlude);
       const collisionLua = collisionSdkLua(this.options.collision);
