@@ -432,7 +432,23 @@ This roadmap closes those gaps. It does not repeat the open items of other roadm
     - a sidecar edit costs that sidecar only.
   - `cart-snapshot.test.ts` passes unchanged.
 - [ ] **W2. Co-editing.** Presence and live edits of the scene and sidecars between editors of one cart (a CRDT over the existing realtime channel), with locks for binary assets.
-- [ ] **W3. Branches.** Snapshots become branches that can be compared and merged per object.
+- [x] **W3. Branches.** Snapshots become branches that can be compared and merged per object. **Done.**
+  - **Objects** (`cartBranches.ts`):
+    - each .tic chunk (code, sprites, map… per bank);
+    - each sidecar, with the mesh sidecar split into each placed object by its id plus the rest of the scene as one;
+    - the details and the console model.
+  - **Compare:** `compareBranches` lists each object added, removed or changed.
+  - **Merge:** `mergeBranches(base, ours, theirs, choose)` is three-way against a common ancestor.
+    - An object only one side changed takes that side; one both changed the same way takes it; one both changed differently is a conflict the caller resolves.
+    - Without an ancestor, every difference is the caller's.
+    - The .tic is rebuilt from the chosen chunks. The scene keeps ours' object order with theirs' additions, and the union of both mesh libraries, so a taken object finds its meshes.
+  - **The editor:** each snapshot has Merge…. It lists the differences with a tick for "take it from the snapshot". With a common ancestor picked, one-sided changes merge by themselves and only conflicts are left to tick. The cart is snapshotted first, so a merge can be undone.
+  - *Tests (`cart-branches.test.ts`, 3):*
+    - differences are listed per object (code, one moved crate, an added lamp);
+    - a three-way merge keeps our door and code and their crate, lamp, sprite and library;
+    - a crate both moved is one conflict, resolved either way;
+    - without an ancestor every difference is a choice, a deletion included.
+  - *Left:* named branch lines (a snapshot's parent recorded, so the ancestor is found rather than picked); merging inside one scene object (its transform from one side, its material from the other).
 
 ### Z. Reference content
 

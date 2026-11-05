@@ -10,6 +10,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { defaultSnapshotName, snapshotChanges, type SnapshotContent, type SnapshotInfo } from "@/lib/cartSnapshots";
+import { compareBranches, mergeBranches } from "@/lib/cartBranches";
 import { isStaticExport } from "@/lib/staticSite";
 import { accountSnapshots, browserSnapshots, indexedDbSnapshots, SnapshotError, type SnapshotStore } from "@/lib/snapshotStore";
 import { authHeaders } from "@/lib/supabase-browser";
@@ -112,6 +113,32 @@ export function SnapshotsPanel({
       setMessage({ text: `Restored “${p.info.name}”. Save to keep it.` });
     });
 
+  // Branches (W3): a snapshot merged into the cart object by object, against a common ancestor when one is picked.
+  const [merging, setMerging] = useState<{ info: SnapshotInfo; theirs: SnapshotContent; base: SnapshotContent | null; baseId: string; picks: Record<string, "ours" | "theirs"> } | null>(null);
+  const askMerge = (info: SnapshotInfo) =>
+    act(info.id, async () => {
+      if (!store) return;
+      const theirs = await store.open(info.id);
+      if (!theirs) throw new SnapshotError("That snapshot couldn't be read.");
+      setMerging({ info, theirs, base: null, baseId: "", picks: {} });
+    });
+  const setBase = (baseId: string) =>
+    act("base", async () => {
+      if (!merging || !store) return;
+      const base = baseId ? await store.open(baseId) : null;
+      setMerging({ ...merging, base, baseId });
+    });
+  const mergeNow = () =>
+    act("merge", async () => {
+      const ours = current();
+      if (!merging || !ours) return;
+      const result = mergeBranches(merging.base, ours, merging.theirs, (key) => merging.picks[key] ?? "theirs");
+      await take(`Before merging “${merging.info.name}”`.slice(0, 80), true);
+      onRestore(result.content);
+      setMessage({ text: `Merged “${merging.info.name}” (${result.conflicts.filter((c) => c.took === "theirs").length} of ${result.conflicts.length} choices from it). Save to keep it.` });
+      setMerging(null);
+    });
+
   const remove = (info: SnapshotInfo) =>
     act(info.id, async () => {
       if (!store || !window.confirm(`Delete the snapshot “${info.name}”? This can't be undone.`)) return;
@@ -178,6 +205,56 @@ export function SnapshotsPanel({
               </div>
             </div>
           )}
+          {merging && (() => {
+            const ours = current();
+            const diff = ours ? compareBranches(ours, merging.theirs) : [];
+            const auto = ours && merging.base ? new Set(mergeBranches(merging.base, ours, merging.theirs).conflicts.map((c) => c.key)) : null;
+            return (
+              <div role="alertdialog" aria-label="Merge snapshot" style={{ padding: 12, borderRadius: 8, border: "1px solid var(--border-strong)", display: "grid", gap: 8 }}>
+                <strong>Merge “{merging.info.name}” into the cart</strong>
+                <label style={{ fontSize: 13 }}>
+                  Common ancestor{" "}
+                  <select aria-label="Common ancestor" value={merging.baseId} onChange={(e) => void setBase(e.target.value)}>
+                    <option value="">none (choose every difference)</option>
+                    {(list ?? []).filter((i) => i.id !== merging.info.id).map((i) => (
+                      <option key={i.id} value={i.id}>
+                        {i.name}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                {diff.length === 0 ? (
+                  <span>It matches the cart as it is now.</span>
+                ) : (
+                  <div style={{ display: "grid", gap: 2, maxHeight: 200, overflowY: "auto", fontSize: 13 }}>
+                    {diff.map((d) => {
+                      const settled = auto !== null && !auto.has(d.key);
+                      return (
+                        <label key={d.key} style={{ display: "flex", gap: 6, alignItems: "center", opacity: settled ? 0.6 : 1 }}>
+                          <input
+                            type="checkbox"
+                            aria-label={`Take ${d.label} from the snapshot`}
+                            disabled={settled}
+                            checked={settled || (merging.picks[d.key] ?? "theirs") === "theirs"}
+                            onChange={(e) => setMerging({ ...merging, picks: { ...merging.picks, [d.key]: e.target.checked ? "theirs" : "ours" } })}
+                          />
+                          {d.label} <span style={{ opacity: 0.6 }}>({d.change}{settled ? ", changed on one side only: merged" : ""})</span>
+                        </label>
+                      );
+                    })}
+                  </div>
+                )}
+                <div style={{ display: "flex", gap: 8 }}>
+                  <button type="button" className="cbx-btn cbx-btn-accent" disabled={busy !== null || diff.length === 0} onClick={() => void mergeNow()}>
+                    {busy === "merge" ? "Merging…" : "Merge ticked"}
+                  </button>
+                  <button type="button" className="cbx-btn" onClick={() => setMerging(null)}>
+                    Cancel
+                  </button>
+                </div>
+              </div>
+            );
+          })()}
           <div aria-label="Snapshots" style={{ display: "grid", gap: 4, maxHeight: 320, overflowY: "auto" }}>
             {list === null ? (
               <span style={{ opacity: 0.7 }}>Loading…</span>
@@ -194,6 +271,9 @@ export function SnapshotsPanel({
                   </div>
                   <button type="button" className="cbx-btn" disabled={busy !== null} onClick={() => void askRestore(info)}>
                     Restore…
+                  </button>
+                  <button type="button" className="cbx-btn" disabled={busy !== null} onClick={() => void askMerge(info)} title="Compare it with the cart and take its changes object by object (a branch)">
+                    Merge…
                   </button>
                   <button type="button" className="cbx-btn" disabled={busy !== null} aria-label={`Delete ${info.name}`} onClick={() => void remove(info)}>
                     Delete
