@@ -184,7 +184,8 @@ describe.skipIf(!gpu)("map manifests on a real device", { timeout: 1_200_000 }, 
     return { stats: cache.stats(), manifest: cache.manifest() };
   }
 
-  it.skipIf(!RECORD)(`records ${RECORD || "a map"}'s manifest`, async () => {
+  // Defined only when recording, and the checks below only when not: the GPU job fails on a skipped test.
+  if (RECORD) it(`records ${RECORD}'s manifest`, async () => {
     expect(Object.keys(MAPS), `no map "${RECORD}"`).toContain(RECORD);
     const { manifest } = await drawMap(gpu!.device, RECORD);
     const text = packPipelineManifest(manifest);
@@ -193,7 +194,7 @@ describe.skipIf(!gpu)("map manifests on a real device", { timeout: 1_200_000 }, 
   });
 
   for (const id of Object.keys(MAPS)) {
-    it.skipIf(Boolean(RECORD))(`${id}: a fresh device warmed from the shipped manifest alone draws with nothing late`, async () => {
+    if (!RECORD) it(`${id}: a fresh device warmed from the shipped manifest alone draws with nothing late`, async () => {
       const device = await gpu!.adapter.requestDevice();
       const nothingStored = new PipelineManifestStore(null);
       const shipped = unpackPipelineManifest(readFileSync(path.join(DIR, `${id}.json`), "utf8"));
