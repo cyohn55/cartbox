@@ -35,6 +35,8 @@ import { DIRECT_CORE_URL } from "@/lib/consoleModel";
 import { loadKtx2DecoderOffThread } from "@/lib/ktx2Decoder";
 import { rapierPhysics } from "@/lib/physicsRapier";
 import { streamTextures, type StreamedTexture } from "@/lib/textureStream";
+import { fetchPackagedSidecar, loadPackagedSidecar, streamedMeshTextures, type LoadedSidecar, type MeshAssetLinks, type MeshPackageSource, type PackageWorker } from "@/lib/meshPackageLoader";
+import { loadMeshoptCodec } from "@/lib/meshPackages";
 import { readSidecarStrings, type EncodedImage } from "@cartbox/editor";
 import { parsePlayerPrefs, preferredLanguages, readPlayerPrefs, writePlayerPrefs, type PlayerPrefs } from "@/lib/accessibilityPrefs";
 import { PlayerPrefsControls } from "./PlayerPrefsControls";
@@ -69,15 +71,50 @@ interface CartridgePlayerProps {
    * cart starts (the scene itself carries only their placeholders).
    */
   meshTextures?: readonly StreamedTexture[];
+  /**
+   * The scene's meshes kept as packages in the cart asset store (D5): fetched
+   * here, checked, decoded and parsed on a worker before the cart starts.
+   */
+  meshPackages?: readonly MeshPackageSource[];
+  /** With packages: where the cart's assets are and their sizes, to stream the textures the packages reference. */
+  meshAssets?: MeshAssetLinks | null;
 }
 
 type SubmitState = "idle" | "working" | "submitted" | "error";
 
-export function CartridgePlayer({ cartId, cartUrl, engineUrl, modelId, postFx, scene, anim, particles, collision, flags, meshRaw, worldRaw, meshTextures }: CartridgePlayerProps) {
+export function CartridgePlayer({ cartId, cartUrl, engineUrl, modelId, postFx, scene, anim, particles, collision, flags, meshRaw, worldRaw, meshTextures, meshPackages, meshAssets }: CartridgePlayerProps) {
   const stageRef = useRef<HTMLDivElement>(null);
+  // Packaged meshes (D5): fetched from the CDN and decoded on a worker, which parses the scene too.
+  const needsPackages = meshRaw !== null && (meshPackages?.length ?? 0) > 0;
+  const [packaged, setPackaged] = useState<LoadedSidecar | null>(null);
+  useEffect(() => {
+    if (!needsPackages || !meshRaw || !meshPackages) return;
+    let live = true;
+    void loadPackagedSidecar({
+      meshRaw,
+      packages: meshPackages,
+      makeWorker: typeof Worker === "undefined" ? null : () => new Worker(new URL("./meshPackages.worker.ts", import.meta.url), { type: "module" }) as unknown as PackageWorker,
+      here: async (raw, packages) => fetchPackagedSidecar(raw, packages, { codec: await loadMeshoptCodec() }),
+    }).then((loaded) => {
+      if (live) setPackaged(loaded);
+    });
+    return () => {
+      live = false;
+    };
+  }, [needsPackages, meshRaw, meshPackages]);
   // Decode the mesh sidecar once per cart: parsing deserialises geometry, so it
   // must not rerun on every render (and a malformed payload yields null → no meshes).
-  const mesh = useMemo(() => parseMeshScene(meshRaw), [meshRaw]);
+  const mesh = useMemo(() => {
+    if (!needsPackages) return parseMeshScene(meshRaw);
+    if (!packaged) return null;
+    return packaged.scene !== undefined ? packaged.scene : parseMeshScene(packaged.json);
+  }, [needsPackages, meshRaw, packaged]);
+  // The textures to stream: listed by the server, or, with packages, here once they're in.
+  const textures = useMemo<readonly StreamedTexture[]>(() => {
+    if (!needsPackages) return meshTextures ?? [];
+    if (!packaged || !meshAssets) return [];
+    return streamedMeshTextures(packaged.json, (hash) => meshAssets.sizes[hash] ?? 0, (hash) => `${meshAssets.base}${hash}`);
+  }, [needsPackages, meshTextures, packaged, meshAssets]);
   // Its UI documents (EP13), from the same sidecar.
   const ui = useMemo(() => readSidecarUi(meshRaw), [meshRaw]);
   const actions = useMemo(() => readSidecarActions(meshRaw), [meshRaw]);
@@ -169,6 +206,8 @@ export function CartridgePlayer({ cartId, cartUrl, engineUrl, modelId, postFx, s
     };
 
     if (!saves || !prefsLoaded) return;
+    // Packaged meshes are fetched before the cart starts (the scene is part of its first frame).
+    if (needsPackages && !packaged) return;
     const handle = mount(stage, {
       cartUrl,
       engineUrl,
@@ -213,7 +252,7 @@ export function CartridgePlayer({ cartId, cartUrl, engineUrl, modelId, postFx, s
       ktx2: loadKtx2DecoderOffThread,
       // A level's textures load when code switches to it (cartbox.level).
       levelAssets: (level, onProgress) => {
-        const list = (meshTextures ?? []).filter((t) => t.levels?.includes(level.id));
+        const list = textures.filter((t) => t.levels?.includes(level.id));
         if (list.length === 0) return Promise.resolve();
         setTextureProgress({ loaded: 0, total: 1 });
         return stream(list, (loaded, total) => {
@@ -225,7 +264,7 @@ export function CartridgePlayer({ cartId, cartUrl, engineUrl, modelId, postFx, s
       },
       // Spatial loading: an object's textures load as the focus nears it.
       streamAssets: (objectIds) => {
-        const list = (meshTextures ?? []).filter((t) => t.objects?.some((id) => objectIds.includes(id)));
+        const list = textures.filter((t) => t.objects?.some((id) => objectIds.includes(id)));
         if (list.length > 0) void stream(list, () => {});
       },
       // The cart's authored HD-2D world: 3D terrain with the cart's 2D character
@@ -249,7 +288,7 @@ export function CartridgePlayer({ cartId, cartUrl, engineUrl, modelId, postFx, s
     });
     handleRef.current = handle;
 
-    const atStart = (meshTextures ?? []).filter((t) => !t.levels && !t.objects);
+    const atStart = textures.filter((t) => !t.levels && !t.objects);
     if (mesh && atStart.length > 0) {
       setTextureProgress({ loaded: 0, total: 1 });
       void stream(atStart, (loaded, total) => setTextureProgress({ loaded, total: Math.max(1, total) })).then(() => {
@@ -261,7 +300,7 @@ export function CartridgePlayer({ cartId, cartUrl, engineUrl, modelId, postFx, s
       streaming.abort();
       handle.destroy();
     };
-  }, [cartUrl, engineUrl, modelId, postFx, scene, anim, particles, collision, flags, mesh, ui, actions, strings, saves, prefsLoaded, world, meshTextures]);
+  }, [cartUrl, engineUrl, modelId, postFx, scene, anim, particles, collision, flags, mesh, ui, actions, strings, saves, prefsLoaded, world, textures, needsPackages, packaged]);
 
   const togglePlayback = () => {
     const handle = handleRef.current;

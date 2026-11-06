@@ -18,8 +18,9 @@ import { publicUrl } from "@/lib/storage";
 import { resolveMeshSidecar } from "@/lib/meshStorage";
 import { cartAssetUrl, readCartAsset } from "@/lib/cartAssetStorage";
 import { parseCartAssets } from "@/lib/cartAssetStore";
-import { inlineMeshPackages, loadMeshoptCodec } from "@/lib/meshPackages";
-import { inlineMeshTextures, meshTextureLevels, meshTextureName, meshTextureObjects, meshTextureRefs } from "@/lib/meshTextureAssets";
+import { inlineMeshPackages, loadMeshoptCodec, meshPackageRefs } from "@/lib/meshPackages";
+import { inlineMeshTextures, meshTextureName, meshTextureRefs } from "@/lib/meshTextureAssets";
+import { streamedMeshTextures, type MeshAssetLinks, type MeshPackageSource } from "@/lib/meshPackageLoader";
 import type { StreamedTexture } from "@/lib/textureStream";
 import { getServerUserId } from "@/lib/supabase-server";
 import { ENGINE_URL_BY_MODEL } from "@/lib/consoleModel";
@@ -249,32 +250,40 @@ export default async function CartridgePage({ params }: PageProps) {
     // A large sidecar is stored as a reference to object storage; resolve it back
     // to the full payload the client parses (inline sidecars pass through).
     if (!error) meshRaw = await resolveMeshSidecar((extra?.mesh as string | null) ?? null);
-    // Meshes stored as binary packages (D4) go back to the JSON the client parses.
-    if (meshRaw) meshRaw = await inlineMeshPackages(meshRaw, readCartAsset, await loadMeshoptCodec()).catch(() => meshRaw);
   } catch {
     meshRaw = null;
   }
-  // Textures kept in the cart asset store stream in after the cart starts: the
-  // client gets their URLs (immutable, CDN-cached) rather than their bytes. If
-  // the URLs can't be made (no public storage URL), they're inlined here instead.
+  // Meshes stored as binary packages (D4) and textures kept in the cart asset
+  // store are fetched by the client (D5): it gets their URLs (immutable,
+  // CDN-cached) rather than their bytes, so the page carries neither. The
+  // client puts the packages back, then streams the textures they reference.
+  // If the URLs can't be made (no public storage URL), both are inlined here instead.
   let meshTextures: StreamedTexture[] = [];
-  const textureRefs = meshTextureRefs(meshRaw);
-  if (textureRefs.length > 0) {
+  let meshPackages: MeshPackageSource[] = [];
+  let meshAssets: MeshAssetLinks | null = null;
+  const packageRefs = meshPackageRefs(meshRaw);
+  if (meshRaw && (packageRefs.length > 0 || meshTextureRefs(meshRaw).length > 0)) {
     try {
       const { data } = await db.from("carts").select("assets").eq("id", cart.id).maybeSingle();
       const manifest = parseCartAssets(data?.assets);
-      // Textures only later levels use wait for those levels (cartbox.level).
-      const needs = meshTextureLevels(meshRaw);
-      // …and textures only spatially loaded objects use wait for the focus to near them.
-      const near = meshTextureObjects(meshRaw);
-      meshTextures = textureRefs.map(({ hash, mime }) => {
-        const bytes = manifest?.entries[meshTextureName(hash)]?.bytes ?? 0;
-        const levels = needs.get(hash);
-        const objects = near.get(hash);
-        return { hash, mime, bytes, url: cartAssetUrl({ hash, bytes, contentType: mime }), ...(levels ? { levels } : {}), ...(objects ? { objects } : {}) };
-      });
+      const sizeOf = (hash: string) => manifest?.entries[meshTextureName(hash)]?.bytes ?? 0;
+      const urlOf = (hash: string) => cartAssetUrl({ hash, bytes: 0, contentType: "" });
+      if (packageRefs.length > 0) {
+        meshPackages = packageRefs.map((hash) => ({ hash, url: urlOf(hash), bytes: sizeOf(hash) }));
+        // The textures a package holds are only seen once it's in: the client lists them then.
+        const base = urlOf("");
+        const sizes: Record<string, number> = {};
+        for (const [name, ref] of Object.entries(manifest?.entries ?? {})) if (name.startsWith("mesh-")) sizes[ref.hash] = ref.bytes;
+        meshAssets = { base, sizes };
+      } else {
+        meshTextures = streamedMeshTextures(meshRaw, sizeOf, urlOf);
+      }
     } catch {
+      meshPackages = [];
+      meshAssets = null;
       meshTextures = [];
+      const codec = await loadMeshoptCodec().catch(() => null);
+      meshRaw = await inlineMeshPackages(meshRaw, readCartAsset, codec).catch(() => meshRaw);
       meshRaw = meshRaw ? await inlineMeshTextures(meshRaw, readCartAsset).catch(() => meshRaw) : meshRaw;
     }
   }
@@ -305,6 +314,8 @@ export default async function CartridgePage({ params }: PageProps) {
           flags={flags}
           meshRaw={meshRaw}
           meshTextures={meshTextures}
+          meshPackages={meshPackages}
+          meshAssets={meshAssets}
           worldRaw={worldRaw}
         />
       ) : (

@@ -195,9 +195,20 @@ This roadmap closes those gaps. It does not repeat the open items of other roadm
     - A load then an editor save stores the recipe alone again, while a normal map of the material's own is kept and isn't counted as cooked.
     - A recipe edited after cooking bakes again. A sidecar with no recipe passes through byte for byte.
     - Through the whole save path (four textures offloaded, one package) and the load path, the mesh still loads asking for nothing, with the cooked maps' bytes.
+  - **The player fetches packages itself** (`meshPackageLoader.ts`, `meshPackages.worker.ts`). The play page no longer fetches each package and rebuilds the scene's JSON on the server: it hands the client the packages' URLs (content-addressed, so the CDN caches them for good) and the manifest's sizes, so the page carries neither the geometry nor the images.
+    - The client fetches the packages in parallel (six at a time) and checks each against its hash, since bytes that don't hash to their name aren't the package. It decodes them with meshoptimizer and parses the scene on a worker (M4), which hands the parsed scene's buffers back rather than copying them. The cart starts once they're in.
+    - **Textures inside packages** are only visible once the packages are in, so the client lists the streamed textures then (`streamedMeshTextures`, the same function the server uses for a scene without packages), with their levels and objects as before.
+    - **Fallbacks:** a package that can't be fetched, doesn't match its hash or can't be decoded keeps its reference, which the scene's reader drops, so it costs its objects, never the cart. Without a worker, or when the worker fails or answers with an error, the same work runs on the page's thread. If the asset URLs can't be made (no public storage URL), the server inlines packages and textures as before.
+  - *Tests (`mesh-package-loader.test.ts`, 7):*
+    - the client's result is byte for byte the server's inlining, each package fetched once, and with textures back, the original scene;
+    - a tampered package (one byte flipped) is refused by its hash and costs only its objects, as do a 404 and a network failure;
+    - fetches run in parallel within the limit, and a package the sidecar doesn't use isn't fetched;
+    - textures inside packages are listed once they're in, with sizes and URLs;
+    - on a worker (ended after its answer), and on this thread with no workers, a crashed worker, an error answer, or a worker that can't be made;
+    - the worker module itself, fetching, decoding and answering with all four objects parsed.
   - *Left:*
     - **Terrain layers and library materials** still bake their recipes on load. Their materials sit inline in the sidecar, which the texture offload and the player's streaming don't yet reach, and cooking them inline would put megabytes of PNG in the row.
-    - **The player fetching packages itself.** The play page still rebuilds JSON on the server (D4); fetching `.cbpk` from the CDN and decoding on M4's worker remains.
+    - ~~The player fetching packages itself.~~ Done, below.
     - **Terrain meshing** (`terrainMesh`) at load.
     - **The arena maps' prebuilt packages:** R2's remainder in `DEMO_QUALITY_ROADMAP.md`.
 - [x] **D6. A DCC live link.** A Blender add-on that pushes the selected objects to an open editor tab over a local socket, extending `BLENDER_WORKFLOW.md`. **Done.**
