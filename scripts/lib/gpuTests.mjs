@@ -52,6 +52,22 @@ export function gpuTestFiles(root, testsDir = "Unit Tests") {
     .sort();
 }
 
+/**
+ * Workers the GPU suites run on unless the caller says otherwise. Dawn's Node
+ * binding (@kmamal/gpu 0.2.0) sometimes dies natively (a fatal N-API error in
+ * a callback scope) when many processes drive lavapipe at once: at vitest's
+ * default parallelism a run lost a worker four times in five, and the suite
+ * that worker held (most often webgpu-parity) never reported. Each suite
+ * passes on its own, and at two workers three runs in three passed whole.
+ * Not a fix of the binding: a load at which it holds.
+ */
+export const GPU_WORKERS = 2;
+
+/** vitest's extra arguments with the worker cap, unless they set their own. */
+export function withWorkerCap(args, workers = GPU_WORKERS) {
+  return args.some((arg) => /^--max-?workers(=|$)/i.test(arg)) ? [...args] : [`--maxWorkers=${workers}`, ...args];
+}
+
 /** Whether vitest's extra arguments split the run (`--shard`), so each run sees only some files. */
 export function isSharded(args) {
   return args.some((arg) => arg === "--shard" || arg.startsWith("--shard="));

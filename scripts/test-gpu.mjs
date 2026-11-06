@@ -7,6 +7,7 @@
  *   npm run test:gpu                      every suite
  *   npm run test:gpu -- --list            just name them
  *   npm run test:gpu -- --shard=1/3       pass anything else on to vitest
+ *   npm run test:gpu -- --maxWorkers=4    (two workers unless told; see GPU_WORKERS)
  *
  * Steps: ask Dawn for an adapter and print which (no adapter fails here, not
  * as 67 silent skips); find the suites by their import of @kmamal/gpu; run
@@ -20,7 +21,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { gpuTestFiles, isSharded, probeAdapter, reportProblems } from "./lib/gpuTests.mjs";
+import { gpuTestFiles, isSharded, probeAdapter, reportProblems, withWorkerCap } from "./lib/gpuTests.mjs";
 
 const root = fileURLToPath(new URL("..", import.meta.url));
 const args = process.argv.slice(2);
@@ -49,7 +50,8 @@ console.log(`test:gpu: ${files.length} files`);
 
 const run = spawnSync(
   "npx",
-  ["vitest", "run", "--reporter=default", "--reporter=json", `--outputFile.json=${reportPath}`, ...args, ...files],
+  // At most two workers (GPU_WORKERS): Dawn's binding can die natively when more drive lavapipe at once.
+  ["vitest", "run", "--reporter=default", "--reporter=json", `--outputFile.json=${reportPath}`, ...withWorkerCap(args), ...files],
   { cwd: root, stdio: "inherit" },
 );
 

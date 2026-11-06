@@ -12,7 +12,7 @@ import { fileURLToPath } from "node:url";
 
 import { afterAll, describe, expect, it } from "vitest";
 
-import { gpuTestFiles, isSharded, probeAdapter, reportProblems, usesGpu } from "../scripts/lib/gpuTests.mjs";
+import { GPU_WORKERS, gpuTestFiles, isSharded, probeAdapter, reportProblems, usesGpu, withWorkerCap } from "../scripts/lib/gpuTests.mjs";
 
 /** Split so this file's fixtures don't read as an import of the package. */
 const PKG = ["@kmamal", "gpu"].join("/");
@@ -105,6 +105,16 @@ describe("reportProblems", () => {
   it("fails a run with no report, or no tests", () => {
     expect(reportProblems(null, { root })).toEqual(["no tests ran"]);
     expect(reportProblems({ numTotalTests: 0, testResults: [] }, { root })).toEqual(["no tests ran"]);
+  });
+});
+
+describe("withWorkerCap", () => {
+  it("caps the workers unless the caller sets them", () => {
+    expect(GPU_WORKERS).toBe(2);
+    expect(withWorkerCap([])).toEqual(["--maxWorkers=2"]);
+    expect(withWorkerCap(["--shard=1/3"])).toEqual(["--maxWorkers=2", "--shard=1/3"]);
+    expect(withWorkerCap(["--maxWorkers=4"])).toEqual(["--maxWorkers=4"]);
+    expect(withWorkerCap(["--max-workers", "1"])).toEqual(["--max-workers", "1"]);
   });
 });
 
