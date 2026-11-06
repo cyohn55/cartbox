@@ -11,14 +11,20 @@
  * assets like any texture, shared by every cart with the same recipe, and
  * stream like any texture.
  *
+ * Terrain layers' materials and the library's parent materials sit in the
+ * sidecar as objects rather than mesh strings; they're cooked the same way, and
+ * the texture offload then lifts their maps into the asset store like any
+ * mesh's (a cooked map inline would put megabytes of PNG in the row).
+ *
  * The editor reads cooked meshes too, and counts the maps as the generator's,
  * so its own saves still send only the recipe; the server cooks again. A mesh
  * without a generator is left byte for byte as it was. Pure: no I/O.
  */
 
-import { deserializeMeshAsset, serializeMeshAsset } from "@cartbox/editor";
+import { deserializeMaterial, deserializeMeshAsset, serializeMaterial, serializeMeshAsset } from "@cartbox/editor";
 
 import { meshSlots, parseSidecar } from "./meshPackages";
+import { sidecarMaterialObjects } from "./meshTextureAssets";
 
 export interface CookResult {
   /** The sidecar with each generator's maps baked in. */
@@ -52,5 +58,26 @@ export function cookMeshSidecar(encoded: string): CookResult {
       changed = true;
     }
   }
-  return changed ? { encoded: JSON.stringify(root), cooked: [...done].filter(([a, b]) => a !== b).length } : { encoded, cooked: 0 };
+  // Materials kept as objects (terrain layers, library parents): each with a recipe cooked the same way.
+  const doneMaterials = new Map<string, unknown>();
+  for (const slot of sidecarMaterialObjects(root as { terrains?: unknown; materials?: unknown })) {
+    const value = slot.value as { generator?: unknown; cooked?: unknown } | null;
+    if (!value || typeof value !== "object" || !value.generator) continue;
+    const key = JSON.stringify(value);
+    let out = doneMaterials.get(key);
+    if (out === undefined) {
+      try {
+        out = serializeMaterial(deserializeMaterial(value), undefined, { cook: true });
+      } catch {
+        out = value;
+      }
+      doneMaterials.set(key, out);
+    }
+    if (JSON.stringify(out) !== key) {
+      slot.write(out);
+      changed = true;
+    }
+  }
+  const cookedMaterials = [...doneMaterials].filter(([a, b]) => JSON.stringify(b) !== a).length;
+  return changed ? { encoded: JSON.stringify(root), cooked: [...done].filter(([a, b]) => a !== b).length + cookedMaterials } : { encoded, cooked: 0 };
 }

@@ -96,6 +96,7 @@ import {
   decodeHdrLightmap,
   type DecodedTexture,
   type EncodedImage,
+  type Terrain,
   type HdrLightmap,
   type EnvironmentLight,
   type HdrImage,
@@ -838,7 +839,7 @@ export class MeshOverlaySurface implements DisplaySurface {
     const vistasChanged = vistaSignature(before.vistas) !== vistaSignature(next.vistas);
     // Terrains the AAA tier draws from their heights (F6c) follow the edit: their new heights and layers.
     if (this.groundIds.size > 0) {
-      const ground = await groundSources(next, (mesh) => decodeMeshTextures(mesh, this.decodeKtx2 ?? (() => Promise.resolve(null)), undefined, this.compressedTextures));
+      const ground = await groundSources(next, (mesh) => decodeMeshTextures(mesh, this.decodeKtx2 ?? (() => Promise.resolve(null)), undefined, this.compressedTextures), this.supplied);
       this.ground = ground.sources;
       this.groundIds = ground.ids;
     }
@@ -1215,6 +1216,7 @@ export class MeshOverlaySurface implements DisplaySurface {
    * many objects changed.
    */
   async supplyImages(images: ReadonlyMap<string, EncodedImage>): Promise<number> {
+    for (const [ref, image] of images) this.supplied.set(ref, image);
     const resolved = new Map<MeshAsset, MeshAsset>();
     const resolve = (mesh: MeshAsset): MeshAsset => {
       let hit = resolved.get(mesh);
@@ -1248,8 +1250,27 @@ export class MeshOverlaySurface implements DisplaySurface {
       if (frames && framesChanged) this.frames[i] = await Promise.all(frames.map(texture));
       changed += 1;
     }
+    // The terrains the AAA tier draws from their heightfields (F6c) read their layers' maps
+    // apart from the instances: those this batch fills are decoded again, with every image
+    // supplied so far, and the terrain (the same one) re-bakes its virtual texture for the new maps.
+    if (this.ground.length > 0) {
+      const ground: GpuTerrainSource[] = [];
+      for (const source of this.ground) {
+        const layers = terrainLayerMesh(source.terrain);
+        if (fillPlaceholders(layers, images) === layers) {
+          ground.push(source);
+          continue;
+        }
+        ground.push({ terrain: source.terrain, layers: groundLayerMaps(source.terrain, await texture(fillPlaceholders(layers, this.supplied))) });
+        changed += 1;
+      }
+      this.ground = ground;
+    }
     return changed;
   }
+
+  /** Every streamed texture supplied so far, by ref (see {@link supplyImages}). */
+  private readonly supplied = new Map<string, EncodedImage>();
 
   /**
    * Set the cart-driven camera for the next frame(s), or null to auto-orbit. The
@@ -3010,7 +3031,22 @@ export async function sceneSkyEnvironment(scene: MeshScene): Promise<Environment
  * (F6c): those whose model is a translation alone, which moves their origin;
  * each layer's base colour, normal and metallic-roughness maps decoded.
  */
-async function groundSources(scene: MeshScene, texture: (mesh: MeshAsset) => Promise<TexturedMesh>): Promise<{ sources: GpuTerrainSource[]; ids: Set<string> }> {
+/** A terrain's layers as one mesh, a primitive per layer, so their maps decode (and placeholders fill) as a mesh's do. */
+function terrainLayerMesh(terrain: Terrain): MeshAsset {
+  return { name: terrain.name, primitives: terrain.layers.map((l) => ({ positions: new Float32Array(0), normals: null, uvs: null, indices: new Uint32Array(0), material: l.material })) } as unknown as MeshAsset;
+}
+
+/** A terrain's layer maps from its layer mesh's decode. */
+function groundLayerMaps(terrain: Terrain, maps: TexturedMesh): GpuTerrainSource["layers"] {
+  return terrain.layers.map((_, k) => ({ base: maps.textures?.[k] ?? null, normal: maps.normalTextures?.[k] ?? null, mr: maps.mrTextures?.[k] ?? null }));
+}
+
+async function groundSources(
+  scene: MeshScene,
+  texture: (mesh: MeshAsset) => Promise<TexturedMesh>,
+  /** Streamed textures already supplied (D5): a terrain rebuilt after an edit keeps them. */
+  supplied: ReadonlyMap<string, EncodedImage> = new Map(),
+): Promise<{ sources: GpuTerrainSource[]; ids: Set<string> }> {
   const placed = [
     ...(scene.terrains ?? []).map((terrain) => ({ terrain, model: scene.terrainModels?.get(terrain.id) ?? null })),
     ...(scene.vistas ?? []).flatMap((v) => (v.terrain ? [{ terrain: v.terrain, model: v.model ?? null }] : [])),
@@ -3023,8 +3059,8 @@ async function groundSources(scene: MeshScene, texture: (mesh: MeshAsset) => Pro
     if (!translation) continue;
     const moved = m[12] !== 0 || m[13] !== 0 || m[14] !== 0;
     const t = moved ? { ...terrain, origin: [terrain.origin[0] + m[12]!, terrain.origin[1] + m[13]!, terrain.origin[2] + m[14]!] as const } : terrain;
-    const maps = await texture({ name: terrain.name, primitives: terrain.layers.map((l) => ({ positions: new Float32Array(0), normals: null, uvs: null, indices: new Uint32Array(0), material: l.material })) } as unknown as MeshAsset);
-    sources.push({ terrain: t, layers: terrain.layers.map((_, k) => ({ base: maps.textures?.[k] ?? null, normal: maps.normalTextures?.[k] ?? null, mr: maps.mrTextures?.[k] ?? null })) });
+    const maps = await texture(fillPlaceholders(terrainLayerMesh(terrain), supplied));
+    sources.push({ terrain: t, layers: groundLayerMaps(terrain, maps) });
     ids.add(terrain.id);
   }
   return { sources, ids };

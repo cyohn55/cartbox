@@ -91,6 +91,9 @@ type SidecarRoot = {
   meshes?: { mesh?: unknown; frames?: unknown; lods?: unknown }[];
   library?: Record<string, unknown>;
   prefabs?: { nodes?: { mesh?: unknown; frames?: unknown; lods?: unknown }[] }[];
+  /** Terrains' layer materials and the parent-material library sit in the sidecar as objects, not mesh strings (D5). */
+  terrains?: { layers?: { material?: unknown }[] }[];
+  materials?: { material?: unknown }[];
 };
 
 /** One image in place: the object itself and where it sits, so it can be rewritten or dropped. */
@@ -106,15 +109,32 @@ interface Walked {
   serialize(): string;
 }
 
+function imagesOfMaterial(material: unknown, into: ImageSlot[]): void {
+  if (!material || typeof material !== "object") return;
+  const m = material as Record<string, unknown>;
+  for (const field of IMAGE_FIELDS) {
+    const image = m[field];
+    if (image && typeof image === "object") into.push({ image: image as Record<string, unknown>, material: m, field });
+  }
+}
+
 function imagesOfMesh(payload: Payload, into: ImageSlot[]): void {
-  for (const primitive of payload.primitives ?? []) {
-    const material = primitive?.material;
-    if (!material || typeof material !== "object") continue;
-    for (const field of IMAGE_FIELDS) {
-      const image = material[field];
-      if (image && typeof image === "object") into.push({ image: image as Record<string, unknown>, material, field });
+  for (const primitive of payload.primitives ?? []) imagesOfMaterial(primitive?.material, into);
+}
+
+/** The materials a sidecar keeps as objects: each terrain layer's, and each library parent's. */
+export function sidecarMaterialObjects(root: { terrains?: unknown; materials?: unknown }): { value: unknown; write: (value: unknown) => void }[] {
+  const out: { value: unknown; write: (value: unknown) => void }[] = [];
+  if (Array.isArray(root.terrains)) {
+    for (const terrain of root.terrains as { layers?: unknown }[]) {
+      if (!terrain || !Array.isArray(terrain.layers)) continue;
+      for (const layer of terrain.layers as { material?: unknown }[]) if (layer && typeof layer === "object") out.push({ value: layer.material, write: (v) => (layer.material = v) });
     }
   }
+  if (Array.isArray(root.materials)) {
+    for (const entry of root.materials as { material?: unknown }[]) if (entry && typeof entry === "object") out.push({ value: entry.material, write: (v) => (entry.material = v) });
+  }
+  return out;
 }
 
 /**
@@ -169,6 +189,8 @@ function imagesIn(encoded: string): Walked | null {
   const library = root.library;
   if (library && typeof library === "object") for (const key of Object.keys(library)) visit(library[key], (v) => (library[key] = v));
   for (const prefab of root.prefabs ?? []) for (const node of prefab.nodes ?? []) holder(node);
+  // Terrain layers' and library parents' materials: objects in place, rewritten with the root.
+  for (const { value } of sidecarMaterialObjects(root)) imagesOfMaterial(value, images);
   return {
     images,
     serialize: () => {

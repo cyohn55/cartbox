@@ -13718,6 +13718,8 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
     this.decodeKtx2 = async () => null;
     /** The renderer samples compressed formats, so baked KTX2 images decode in place of their PNGs (F1a). */
     this.compressedTextures = false;
+    /** Every streamed texture supplied so far, by ref (see {@link supplyImages}). */
+    this.supplied = /* @__PURE__ */ new Map();
     this.still = null;
     this.giState = null;
     this.maskCache = /* @__PURE__ */ new WeakMap();
@@ -13976,7 +13978,7 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
     }
     const vistasChanged = vistaSignature(before.vistas) !== vistaSignature(next.vistas);
     if (this.groundIds.size > 0) {
-      const ground = await groundSources(next, (mesh) => decodeMeshTextures(mesh, this.decodeKtx2 ?? (() => Promise.resolve(null)), void 0, this.compressedTextures));
+      const ground = await groundSources(next, (mesh) => decodeMeshTextures(mesh, this.decodeKtx2 ?? (() => Promise.resolve(null)), void 0, this.compressedTextures), this.supplied);
       this.ground = ground.sources;
       this.groundIds = ground.ids;
     }
@@ -14291,6 +14293,7 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
    * many objects changed.
    */
   async supplyImages(images) {
+    for (const [ref, image] of images) this.supplied.set(ref, image);
     const resolved = /* @__PURE__ */ new Map();
     const resolve = (mesh) => {
       let hit = resolved.get(mesh);
@@ -14322,6 +14325,19 @@ var MeshOverlaySurface = class _MeshOverlaySurface {
       }
       if (frames && framesChanged) this.frames[i] = await Promise.all(frames.map(texture));
       changed += 1;
+    }
+    if (this.ground.length > 0) {
+      const ground = [];
+      for (const source of this.ground) {
+        const layers = terrainLayerMesh(source.terrain);
+        if (fillPlaceholders(layers, images) === layers) {
+          ground.push(source);
+          continue;
+        }
+        ground.push({ terrain: source.terrain, layers: groundLayerMaps(source.terrain, await texture(fillPlaceholders(layers, this.supplied))) });
+        changed += 1;
+      }
+      this.ground = ground;
     }
     return changed;
   }
@@ -15761,7 +15777,13 @@ async function sceneSkyEnvironment(scene) {
   const vistas = await texturedVistas(scene.vistas, (mesh) => decodeMeshTextures(mesh, () => Promise.resolve(null)));
   return litBySky(environment, await bakeSceneSky(lighting.sky, lighting, environment, vistas, scene.bounds.center));
 }
-async function groundSources(scene, texture) {
+function terrainLayerMesh(terrain) {
+  return { name: terrain.name, primitives: terrain.layers.map((l) => ({ positions: new Float32Array(0), normals: null, uvs: null, indices: new Uint32Array(0), material: l.material })) };
+}
+function groundLayerMaps(terrain, maps) {
+  return terrain.layers.map((_, k) => ({ base: maps.textures?.[k] ?? null, normal: maps.normalTextures?.[k] ?? null, mr: maps.mrTextures?.[k] ?? null }));
+}
+async function groundSources(scene, texture, supplied = /* @__PURE__ */ new Map()) {
   const placed = [
     ...(scene.terrains ?? []).map((terrain) => ({ terrain, model: scene.terrainModels?.get(terrain.id) ?? null })),
     ...(scene.vistas ?? []).flatMap((v) => v.terrain ? [{ terrain: v.terrain, model: v.model ?? null }] : [])
@@ -15774,8 +15796,8 @@ async function groundSources(scene, texture) {
     if (!translation) continue;
     const moved = m[12] !== 0 || m[13] !== 0 || m[14] !== 0;
     const t = moved ? { ...terrain, origin: [terrain.origin[0] + m[12], terrain.origin[1] + m[13], terrain.origin[2] + m[14]] } : terrain;
-    const maps = await texture({ name: terrain.name, primitives: terrain.layers.map((l) => ({ positions: new Float32Array(0), normals: null, uvs: null, indices: new Uint32Array(0), material: l.material })) });
-    sources.push({ terrain: t, layers: terrain.layers.map((_, k) => ({ base: maps.textures?.[k] ?? null, normal: maps.normalTextures?.[k] ?? null, mr: maps.mrTextures?.[k] ?? null })) });
+    const maps = await texture(fillPlaceholders(terrainLayerMesh(terrain), supplied));
+    sources.push({ terrain: t, layers: groundLayerMaps(terrain, maps) });
     ids3.add(terrain.id);
   }
   return { sources, ids: ids3 };

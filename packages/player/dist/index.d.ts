@@ -9064,6 +9064,8 @@ declare class MeshOverlaySurface implements DisplaySurface {
      * many objects changed.
      */
     supplyImages(images: ReadonlyMap<string, EncodedImage>): Promise<number>;
+    /** Every streamed texture supplied so far, by ref (see {@link supplyImages}). */
+    private readonly supplied;
     /**
      * Set the cart-driven camera for the next frame(s), or null to auto-orbit. The
      * player calls this each frame from the decoded mesh-camera mailbox, so a cart
