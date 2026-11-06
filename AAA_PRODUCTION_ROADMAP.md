@@ -186,7 +186,7 @@ This roadmap closes those gaps. It does not repeat the open items of other roadm
     - After the texture offload, the packages hold geometry only, and the images inline afterwards.
     - An old sidecar reads unchanged. A missing package, or failing storage, drops only the objects that used it.
     - Lockout's whole sidecar (skinned viewmodels and bots included) packs smaller in total and reads back with every entry identical.
-  - *Left:* the client still receives JSON, rebuilt on the server. Fetching packages straight from the CDN and parsing them on M4's worker is D5's player half. A variant's images still ride inline in the manifest.
+  - *Left:* a variant's images still ride inline in the manifest. (The client fetching packages itself, once left here, is done under D5.)
 - [x] **D5. A build-time cook.** A cart's sidecars become content-hashed packages at publish, so a player never synthesises content. Generalises R2 from the two arena maps to every cart. **Done for materials (meshes', terrain layers' and the library's) and for packages, which the player now fetches itself. Terrain meshing at load is left.**
   - **What a load made.** A material with a texture generator (P1c) stores only its recipe, and every load (the player's and the editor's) baked its four maps on the main thread: noise per texel, normals from slopes, a relief map.
   - **The cook** (`cookMeshSidecar`, `meshCook.ts`) runs first in the mesh save path, before the texture offload and the packaging. Each mesh with a recipe is written with `serializeMeshAsset(mesh, { cook: true })`: its maps, compressed, sit beside the recipe, and `cooked: {key, slots}` names the recipe they came from and the slots they fill. A slot holding the material's own image keeps it. The offload then makes the maps content-addressed textures, shared by every cart with the same recipe and streamed like any texture.
@@ -483,7 +483,7 @@ This roadmap closes those gaps. It does not repeat the open items of other roadm
     - a newcomer is brought up to date;
     - presence shows a selection and expires;
     - a lock grabbed by two at once ends with one agreed holder, and frees on unlock.
-  - *Blocked here:* the hosted realtime channel (a service to configure), and the editor's own sidecar flow driving `edit` and taking `apply` (with presence drawn in the viewport).
+  - *Left:* presence drawn in the viewport (others' selections outlined; the dialog lists them today); the .tic's banks; a run against the live Realtime service. (The editor's wiring, once blocked here, is done above.)
 - [x] **W3. Branches.** Snapshots become branches that can be compared and merged per object. **Done.**
   - **Objects** (`cartBranches.ts`):
     - each .tic chunk (code, sprites, map… per bank);
